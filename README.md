@@ -1,4 +1,4 @@
-# QuicSand: QUIC-based VPN with Advanced Stealth & Resilience Features
+# QuicSand: QUIC-based VPN - Stealth & Resilient
 
 <div align="center">
   <img src="logo.png" alt="QuicSand Logo" width="300">
@@ -22,18 +22,6 @@ QuicSand: All Features and Optimizations at a Glance
 - **NUMA Optimizations**: Memory access patterns for multi-socket servers
 - **Memory Pool**: Pre-allocated memory regions against fragmentation
 - **Burst Buffering**: Packet batching for higher throughput
-
-### SIMD Acceleration
-- **CPU Feature Detection**: Automatic detection of SSE/SSE2/SSE3/SSSE3/SSE4/AVX/AVX2/AES-NI on x86 and NEON/Crypto on ARM
-- **AES-NI/PCLMULQDQ**: Hardware-accelerated AES-GCM encryption (up to 5.7x on x86, 4.75x on ARM)
-- **Batch Processing**: 4-block batch processing for parallel cryptography
-- **NEON Support**: ARM-optimized crypto operations for Apple M1/M2
-- **SIMD FEC**: Vectorized Forward Error Correction with 4x loop unrolling and prefetching
-- **Ascon-SIMD**: Accelerated post-quantum cryptography
-- **Cross-Platform Optimizations**: Transparent abstraction with automatic feature selection
-- **GHASH Acceleration**: Karatsuba-optimized multiplication for GF(2^128) (8x faster)
-- **XOR Operations**: Highly optimized bitwise operations with chunk-based processing (2.65-3.06x faster)
-- **Galois Field Optimizations**: SIMD-accelerated operations for FEC (5-8x faster)
 
 ### Cryptographic Features
 - **AES-128-GCM**: Hardware-accelerated symmetric encryption
@@ -85,6 +73,18 @@ QuicSand: All Features and Optimizations at a Glance
 - **Path MTU Discovery**: Optimal packet size adjustment
 - **0-RTT Session Resumption**: Faster reconnections
 
+### SIMD Acceleration
+- **CPU Feature Detection**: Automatic detection of SSE/SSE2/SSE3/SSSE3/SSE4/AVX/AVX2/AES-NI on x86 and NEON/Crypto on ARM
+- **AES-NI/PCLMULQDQ**: Hardware-accelerated AES-GCM encryption (up to 5.7x on x86, 4.75x on ARM)
+- **Batch Processing**: 4-block batch processing for parallel cryptography
+- **NEON Support**: ARM-optimized crypto operations for Apple M1/M2
+- **SIMD FEC**: Vectorized Forward Error Correction with 4x loop unrolling and prefetching
+- **Ascon-SIMD**: Accelerated post-quantum cryptography
+- **Cross-Platform Optimizations**: Transparent abstraction with automatic feature selection
+- **GHASH Acceleration**: Karatsuba-optimized multiplication for GF(2^128) (8x faster)
+- **XOR Operations**: Highly optimized bitwise operations with chunk-based processing (2.65-3.06x faster)
+- **Galois Field Optimizations**: SIMD-accelerated operations for FEC (5-8x faster)
+
 ### Management & Configuration
 - **Stealth Manager**: Central stealth level configuration (0-3)
 - **CLI and GUI**: Command line and Flutter-based user interface
@@ -102,10 +102,6 @@ QuicSand: All Features and Optimizations at a Glance
   - libebpf (Linux only for XDP support)
   - libnuma (for NUMA optimizations)
   
-- **Optional**:
-  - Flutter SDK (for GUI)
-  - Google Test (for tests)
-  - Google Benchmark (for benchmarks)
 
 ## Project Structure
 
@@ -197,79 +193,6 @@ QuicSand integrates uTLS technology to disguise VPN traffic as regular browser t
 - **Opera Latest**: Emulates the Opera browser
 - **Legacy Browser**: Older versions of Chrome (v70) and Firefox (v63)
 
-### Usage
-
-#### Configuration in the GUI
-
-1. Start the QuicSand app
-2. Navigate to "Connection Settings" > "Stealth Settings"
-3. Under "Browser Fingerprint," select the desired browser
-4. Save the settings and establish the connection
-
-#### Using the CLI
-
-```bash
-# Display available CLI options
-./build/bin/quicsand-cli --help
-
-# Establish a connection with Chrome fingerprint
-./build/bin/quicsand-cli --server example.com --port 443 --fingerprint chrome
-
-# Establish a connection with Firefox fingerprint
-./build/bin/quicsand-cli --server example.com --port 443 --fingerprint firefox
-
-# Establish a connection without uTLS (standard TLS)
-./build/bin/quicsand-cli --server example.com --port 443 --no-utls
-
-# Enable peer verification with CA certificate
-./build/bin/quicsand-cli --server example.com --verify-peer --ca-file /path/to/ca.crt
-
-# List available browser fingerprints
-./build/bin/quicsand-cli --list-fingerprints
-```
-
-### Known Limitations
-
-The current uTLS integration has the following known limitations:
-
-1. **Quiche Compatibility**: The integration is sensitive to the used Quiche version. Tested and optimized for Quiche 0.24.2.
-
-2. **Address Issues**: With some Quiche versions, there may be issues with socket address structures. The implementation provides multiple fallback mechanisms to work around these.
-
-3. **SSL_CTX_set_quic_method**: This function must be available in the used OpenSSL library; otherwise, a fallback mechanism with limited uTLS functionality is used.
-
-4. **Error Messages**: Warnings like `SSL_CTX_set_quic_method not available` indicate that the integration is running in a degraded mode.
-
-### Troubleshooting
-
-#### Connection Issues
-
-1. **"SSL_CTX_set_quic_method not available"**:
-   - Check if OpenSSL was compiled with QUIC support
-   - Ensure the OpenSSL version is compatible with Quiche
-
-2. **"Failed to initialize UTLSClientConfigurator"**:
-   - Verify the specified browser fingerprints are correct
-   - Test with the standard fingerprint (Chrome_Latest)
-
-3. **"Cannot create SSL connection without context"**:
-   - The SSL initialization failed, but the program attempts to establish a connection
-   - Use the `--verbose` option for more detailed error information
-
-#### Compilation Issues
-
-1. Ensure all dependencies are installed:
-   ```bash
-   brew install boost openssl@3 cloudflare-quiche
-   ```
-
-2. Check the paths to libraries in the Makefiles
-
-3. For specific uTLS features, a patched version of Quiche might be required:
-   ```bash
-   git clone https://github.com/yourusername/quiche-patched.git
-   cd quiche-patched && make install
-   ```
 
 ### Development and Extension
 
