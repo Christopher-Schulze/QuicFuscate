@@ -1,0 +1,43 @@
+CC=g++
+CFLAGS=-std=c++17 -Wall -Wextra -I.
+LDFLAGS=
+OBJDIR=build
+TARGET=tetrys_fec_test
+
+# Quellverzeichnisse
+SRCDIRS=. fec core
+
+# Quelldateien
+SOURCES=tests/tetrys_fec_test.cpp \
+        fec/tetrys_fec.cpp \
+        core/quic_packet.cpp
+
+# Objektdateien
+OBJECTS=$(patsubst %.cpp,$(OBJDIR)/%.o,$(SOURCES))
+
+# Build-Verzeichnisse
+BUILDDIRS=$(addprefix $(OBJDIR)/,$(SRCDIRS) tests)
+
+.PHONY: all clean run
+
+all: $(TARGET)
+
+# Erstellt die Build-Verzeichnisse
+$(BUILDDIRS):
+	mkdir -p $@
+
+# Kompiliert .cpp zu .o
+$(OBJDIR)/%.o: %.cpp | $(BUILDDIRS)
+	$(CC) -c $(CFLAGS) $< -o $@
+
+# Linkt alle Objekte zum ausführbaren Programm
+$(TARGET): $(OBJECTS)
+	$(CC) $(OBJECTS) $(LDFLAGS) -o $@
+
+# Test ausführen
+run: $(TARGET)
+	./$(TARGET)
+
+# Aufräumen
+clean:
+	rm -rf $(OBJDIR) $(TARGET)

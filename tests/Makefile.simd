@@ -1,0 +1,30 @@
+CXX = g++
+# Apple Silicon (ARM) Optimierungsflags
+CXXFLAGS = -std=c++17 -O3 -mcpu=apple-m1 -Wall -Wextra
+
+# Zielverzeichnis
+BIN_DIR = ../bin
+
+# Quelldateien
+SRCS = simd_test.cpp \
+       ../core/simd_optimizations_cpu.cpp \
+       ../core/simd_optimizations_aes.cpp \
+       ../core/simd_optimizations_fec.cpp \
+       ../core/simd_optimizations_ascon.cpp
+
+# Zielname
+TARGET = $(BIN_DIR)/simd_test
+
+all: $(TARGET)
+
+$(TARGET): $(SRCS)
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) -o $@ $^
+
+run: $(TARGET)
+	$(TARGET)
+
+clean:
+	rm -f $(TARGET)
+
+.PHONY: all run clean

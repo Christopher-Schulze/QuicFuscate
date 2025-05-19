@@ -1,0 +1,46 @@
+CC=g++
+CFLAGS=-std=c++17 -Wall -Wextra -I.
+LDFLAGS=
+OBJDIR=build
+BINDIR=bin
+
+# Quellverzeichnisse
+SRCDIRS=. fec core
+
+# Quelldateien
+SOURCES=fec/tetrys_fec.cpp \
+        core/quic_packet.cpp
+
+# Objektdateien
+OBJECTS=$(patsubst %.cpp,$(OBJDIR)/%.o,$(SOURCES))
+
+# Build-Verzeichnisse
+BUILDDIRS=$(addprefix $(OBJDIR)/,$(SRCDIRS))
+
+# Library-Ausgabe
+LIBFEC=$(OBJDIR)/libfec.a
+
+.PHONY: all clean
+
+all: $(BUILDDIRS) $(LIBFEC)
+
+# Erstellt die Build-Verzeichnisse
+$(BUILDDIRS):
+	mkdir -p $@
+
+# Kompiliert .cpp zu .o
+$(OBJDIR)/%.o: %.cpp | $(BUILDDIRS)
+	$(CC) -c $(CFLAGS) $< -o $@
+
+# Erstellt die statische Bibliothek
+$(LIBFEC): $(OBJECTS)
+	ar rcs $@ $^
+
+# Test kompilieren
+test: $(LIBFEC)
+	$(CC) $(CFLAGS) tests/tetrys_fec_test.cpp $(LIBFEC) -o $(OBJDIR)/tetrys_fec_test
+	$(OBJDIR)/tetrys_fec_test
+
+# Aufräumen
+clean:
+	rm -rf $(OBJDIR)/fec $(OBJDIR)/core $(LIBFEC) $(OBJDIR)/tetrys_fec_test

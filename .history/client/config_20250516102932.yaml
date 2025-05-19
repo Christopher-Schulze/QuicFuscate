@@ -1,0 +1,15 @@
+# QuicSand-VPN Client Configuration
+
+server_addr: "vpn.example.com:443"  # Server-Adresse und Port
+mtu: 1500  # Maximale Übertragungsgröße
+
+# FEC-Konfiguration
+fec:
+  enabled: true  # FEC aktivieren/deaktivieren
+  codec: "tetrys"  # Verwendeter FEC-Codec ("raptorq" oder "tetrys")
+  max_redundancy: 0.2  # Maximale Redundanz (20%)
+
+# Keepalive-Konfiguration
+keepalive:
+  interval: "30s"  # Intervall für Keepalive-Pakete
+  timeout: "10s"  # Timeout für Keepalive-Antwort

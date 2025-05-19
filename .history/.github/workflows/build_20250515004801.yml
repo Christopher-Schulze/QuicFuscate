@@ -1,0 +1,28 @@
+name: Build QuicSand-VPN Server
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.20'
+
+      - name: Build QuicSand-VPN Server
+        run: |
+          bash build.sh
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v3
+        with:
+          name: quicsand-vpn
+          path: quicsand-vpn

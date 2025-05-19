@@ -1,0 +1,103 @@
+# Build-Verzeichnisse
+/build/
+/bin/
+*.dSYM/
+*.dylib
+*.so
+*.a
+*.o
+*.d
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.exe
+*.out
+
+# IDE spezifische Dateien
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# System Dateien
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# Ausführbare Dateien
+advanced_fec_test
+simple_fec_test
+tetrys_fec_test
+http3_simple_test
+test_utls_simple
+simple_performance_test
+xor_benchmark
+
+# Temporäre Dateien
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# Lokale Konfiguration
+.env
+.env.local
+
+# Kompilierte Bibliotheken
+*.dylib
+*.so
+*.a
+
+# CMake generierte Dateien
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+
+# Test-Binärdateien
+tests/*_test
+tests/*.o
+
+# Abhängigkeiten
+/deps/
+/third_party/
+
+# Lokale Entwicklungsumgebung
+.env.local
+.env.development.local
+
+# macOS spezifisch
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Backup Dateien
+*~
+*.bak
+*.swp
+*.swo
+
+# Lokale Entwicklungsumgebung
+.env
+
+# Vim swap files
+*.swp
+*.swo
+
+# Visual Studio Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# CLion
+.idea/
+cmake-build-*/

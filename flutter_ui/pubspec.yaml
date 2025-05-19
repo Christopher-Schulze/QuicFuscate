@@ -1,0 +1,9 @@
+name: quicsand_ui
+Description: Flutter UI for quicSand VPN
+version: 1.0.0
+environment:
+  sdk: '>=2.12.0 <3.0.0'
+dependencies:
+  flutter:
+    sdk: flutter
+  # Add dependencies as needed, e.g., flutter_secure_storage for config handling

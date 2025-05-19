@@ -1,0 +1,56 @@
+# Makefile für uTLS-Integration Tests
+# Diese Makefile ergänzt die bestehende Makefile im Hauptverzeichnis
+
+# Konfigurationsvariablen
+BUILD_DIR=build
+TEST_BUILD_DIR=$(BUILD_DIR)/tests
+TEST_BIN_DIR=$(BUILD_DIR)/bin
+
+# Standardziel
+.PHONY: all
+all: test
+
+# Build-Verzeichnis erstellen
+$(BUILD_DIR):
+	mkdir -p $(BUILD_DIR)
+
+# Build mit CMake konfigurieren
+.PHONY: configure
+configure: $(BUILD_DIR)
+	cd $(BUILD_DIR) && cmake ..
+
+# Tests kompilieren
+.PHONY: build-tests
+build-tests: configure
+	cd $(BUILD_DIR) && make utls_tests
+
+# Tests ausführen
+.PHONY: test
+test: build-tests
+	$(TEST_BIN_DIR)/utls_tests
+
+# Zusätzliches Ziel für Integrationstests (mit deaktiviertem Netzwerktest)
+.PHONY: test-integration
+test-integration: build-tests
+	$(TEST_BIN_DIR)/utls_tests --gtest_filter=-*DISABLED*
+
+# Alle Tests ausführen inklusive Netzwerktests
+.PHONY: test-all
+test-all: build-tests
+	$(TEST_BIN_DIR)/utls_tests --gtest_also_run_disabled_tests
+
+# Aufräumen
+.PHONY: clean
+clean:
+	rm -rf $(BUILD_DIR)
+
+# Hilfe anzeigen
+.PHONY: help
+help:
+	@echo "QuicSand uTLS-Tests"
+	@echo "------------------"
+	@echo "make configure   - CMake-Konfiguration erstellen"
+	@echo "make build-tests - Tests kompilieren"
+	@echo "make test        - Tests ausführen (ohne Netzwerktests)"
+	@echo "make test-all    - Alle Tests ausführen (inkl. Netzwerktests)"
+	@echo "make clean       - Build-Verzeichnisse aufräumen"

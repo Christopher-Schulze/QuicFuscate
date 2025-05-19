@@ -1,0 +1,41 @@
+CXX = clang++
+CXXFLAGS = -std=c++17 -Wall -Wextra -I. -I/opt/homebrew/opt/openssl@3/include -I/opt/homebrew/include -I/Users/christopher/CODE/libs/quiche-patched/include
+LDFLAGS = -L/opt/homebrew/lib -L/opt/homebrew/opt/openssl@3/lib -L/Users/christopher/CODE/libs/quiche-patched/build
+LDLIBS = -lssl -lcrypto -lquiche -ldl -lpthread
+
+# Ziel-Ausführbare
+HTTP3_TEST = http3_simple_test
+
+# Quellcode-Dateien
+CORE_SOURCES = core/quic_packet.cpp
+STEALTH_SOURCES = stealth/stealth.cpp stealth/http3_masquerading.cpp
+TEST_SOURCES = tests/http3_masquerading_simple_test.cpp
+
+# Object-Dateien
+CORE_OBJECTS = $(CORE_SOURCES:.cpp=.o)
+STEALTH_OBJECTS = $(STEALTH_SOURCES:.cpp=.o)
+
+# Standard-Ziel
+all: $(HTTP3_TEST)
+
+# Kompiliere zuerst die Core-Objekte
+$(CORE_OBJECTS): %.o: %.cpp
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# Dann die Stealth-Objekte kompilieren, die möglicherweise Core-Objekte benötigen
+$(STEALTH_OBJECTS): %.o: %.cpp $(CORE_OBJECTS)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# Haupttest-Ausführbare
+$(HTTP3_TEST): $(CORE_OBJECTS) $(STEALTH_OBJECTS) $(TEST_SOURCES)
+	$(CXX) $(CXXFLAGS) $(TEST_SOURCES) $(CORE_OBJECTS) $(STEALTH_OBJECTS) $(LDFLAGS) $(LDLIBS) -o $@
+
+# Test ausführen
+test: $(HTTP3_TEST)
+	./$(HTTP3_TEST)
+
+# Aufräumen
+clean:
+	rm -f $(CORE_OBJECTS) $(STEALTH_OBJECTS) $(HTTP3_TEST)
+
+.PHONY: all clean test
