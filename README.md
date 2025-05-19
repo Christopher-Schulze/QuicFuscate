@@ -13,7 +13,7 @@ QuicSand: All Features and Optimizations at a Glance
 ### Core Technology
 - **QUIC Protocol**: Modern UDP-based transport layer
 - **C++17 Implementation**: High-performance codebase
-- **Cross-Platform**: Runs on Linux, macOS (Intel/ARM), Windows
+- **Cross-Platform**: The server implementation runs on Linux, macOS (Intel/ARM), Windows
 
 ### Performance Optimizations
 - **Zero-Copy**: eBPF/XDP integration for direct packets without kernel copies
