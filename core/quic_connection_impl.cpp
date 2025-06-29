@@ -28,6 +28,32 @@
 
 namespace quicfuscate {
 
+namespace {
+bool sockaddr_to_endpoint(const struct sockaddr* addr, socklen_t len,
+                          boost::asio::ip::udp::endpoint& endpoint) {
+    if (!addr) {
+        return false;
+    }
+    if (addr->sa_family == AF_INET && len >= static_cast<socklen_t>(sizeof(sockaddr_in))) {
+        auto addr_in = reinterpret_cast<const sockaddr_in*>(addr);
+        endpoint = boost::asio::ip::udp::endpoint(
+            boost::asio::ip::address_v4(ntohl(addr_in->sin_addr.s_addr)),
+            ntohs(addr_in->sin_port));
+        return true;
+    }
+    if (addr->sa_family == AF_INET6 && len >= static_cast<socklen_t>(sizeof(sockaddr_in6))) {
+        auto addr_in6 = reinterpret_cast<const sockaddr_in6*>(addr);
+        boost::asio::ip::address_v6::bytes_type bytes{};
+        std::memcpy(bytes.data(), &addr_in6->sin6_addr, 16);
+        endpoint = boost::asio::ip::udp::endpoint(
+            boost::asio::ip::address_v6(bytes),
+            ntohs(addr_in6->sin6_port));
+        return true;
+    }
+    return false;
+}
+} // anonymous namespace
+
 // =============================================================================
 // Congestion Control Methods (from quic_connection_congestion.cpp)
 // =============================================================================
@@ -517,23 +543,8 @@ void QuicConnection::handle_xdp_packet(const void* data, size_t len,
         return;
     }
     
-    // Convert sockaddr to boost::asio::ip::udp::endpoint
     boost::asio::ip::udp::endpoint endpoint;
-    if (addr->sa_family == AF_INET) {
-        const struct sockaddr_in* addr_in = reinterpret_cast<const struct sockaddr_in*>(addr);
-        endpoint = boost::asio::ip::udp::endpoint(
-            boost::asio::ip::address_v4(ntohl(addr_in->sin_addr.s_addr)),
-            ntohs(addr_in->sin_port)
-        );
-    } else if (addr->sa_family == AF_INET6) {
-        const struct sockaddr_in6* addr_in6 = reinterpret_cast<const struct sockaddr_in6*>(addr);
-        boost::asio::ip::address_v6::bytes_type bytes;
-        std::memcpy(bytes.data(), &addr_in6->sin6_addr, 16);
-        endpoint = boost::asio::ip::udp::endpoint(
-            boost::asio::ip::address_v6(bytes),
-            ntohs(addr_in6->sin6_port)
-        );
-    } else {
+    if (!sockaddr_to_endpoint(addr, addrlen, endpoint)) {
         log_error("Unsupported address family in XDP packet");
         return;
     }
