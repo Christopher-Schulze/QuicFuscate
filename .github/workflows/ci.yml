@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          submodules: recursive
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+      - name: Build quiche
+        run: |
+          cd libs/quiche-patched
+          cargo build --release
+      - name: Configure
+        run: |
+          mkdir build && cd build
+          cmake ..
+      - name: Build
+        run: |
+          cd build
+          cmake --build .
+      - name: Test
+        run: |
+          cd build
+          ctest --output-on-failure

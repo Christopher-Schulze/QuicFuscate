@@ -84,16 +84,15 @@ This repository uses a Git submodule to include a patched QUIC library.
 After cloning the project, initialize the submodule with:
 
 ```bash
-git submodule update --init libs/quiche-patched
+git submodule update --init --recursive libs/quiche-patched
 ```
 
 If the fetch fails, verify that the URL in `.gitmodules` points to a
 repository that hosts the required commit.
 
-### Building with CMake
+### Building quiche
 
-After initializing the submodule you need to compile the patched **quiche**
-library using Cargo:
+Compile the patched **quiche** library using Cargo:
 
 ```bash
 cd libs/quiche-patched
@@ -101,16 +100,60 @@ cargo build --release
 cd ../..
 ```
 
-With the library built you can generate the project with CMake:
+### Building with CMake
+
+Generate the project and build all binaries:
 
 ```bash
 mkdir build && cd build
 cmake ..
-make
+cmake --build .
 ```
 
-All binaries will be placed inside the `build/` directory.
+### Running the tests
 
+After building, execute the unit tests with CTest:
+
+```bash
+cd build
+ctest --output-on-failure
+```
+
+## 🖥️ Command-Line Usage
+
+The project provides several binaries once built:
+
+- **quicfuscate_demo** – feature-rich demo tool with many options.
+- **quicfuscate_client** – minimal client accepting `<host> <port>` arguments.
+- **quicfuscate_server** – placeholder server without arguments.
+
+Run `quicfuscate_demo --help` to see all available options. Important flags include:
+
+```
+  -s, --server <host>        Server hostname (default: example.com)
+  -p, --port <port>          Server port (default: 443)
+  -f, --fingerprint <name>   Browser fingerprint (chrome, firefox, safari, ...)
+      --no-utls              Disable uTLS and use regular TLS
+      --verify-peer          Enable certificate validation
+      --ca-file <path>       CA file for peer verification
+  -v, --verbose              Verbose logging
+      --debug-tls            Show TLS debug information
+      --list-fingerprints    List available browser fingerprints
+```
+
+## 🔄 Continuous Integration
+
+The repository includes a GitHub Actions workflow that builds the project and
+runs the tests on every push or pull request. You can find the workflow in
+`.github/workflows/ci.yml`. To reproduce the CI steps locally run:
+
+```bash
+git submodule update --init --recursive
+cd libs/quiche-patched && cargo build --release && cd ../..
+mkdir -p build && cd build
+cmake .. && cmake --build .
+ctest --output-on-failure
+```
 
 ## 📜 License
 
