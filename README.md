@@ -3,19 +3,16 @@
 <div align="center">
   <img src="ui/logo/QuicFuscate.png" alt="QuicFuscate Logo" width="300">
   
-  [![QUIC Protocol](https://img.shields.io/badge/QUIC-Protocol-009DFF?style=for-the-badge&logo=internet-explorer)](https://datatracker.ietf.org/doc/html/rfc9000)
-  [![VPN Technology](https://img.shields.io/badge/VPN-Stealth-2D3748?style=for-the-badge&logo=cloudflare)](https://en.wikipedia.org/wiki/Virtual_private_network)
-  [![Privacy Focused](https://img.shields.io/badge/Privacy-First-4A5568?style=for-the-badge&logo=privacy)](https://en.wikipedia.org/wiki/Privacy)
+  [![QUIC](https://img.shields.io/badge/QUIC-Transport-009DFF?style=for-the-badge&logo=internet-explorer)](https://datatracker.ietf.org/doc/html/rfc9000)
+  [![VPN](https://img.shields.io/badge/VPN-Stealth-2D3748?style=for-the-badge&logo=cloudflare)](https://en.wikipedia.org/wiki/Virtual_private_network)
   [![HTTP/3](https://img.shields.io/badge/HTTP-3-FF6B6B?style=for-the-badge&logo=internet-explorer)](https://en.wikipedia.org/wiki/HTTP/3)
   [![Rust](https://img.shields.io/badge/Rust-1.70+-000000?style=for-the-badge&logo=rust)](https://www.rust-lang.org/)
   [![C++](https://img.shields.io/badge/C++-17+-00599C?style=for-the-badge&logo=c%2B%2B)](https://isocpp.org/)
-  [![SIMD Optimized](https://img.shields.io/badge/SIMD-Optimized-FFA500?style=for-the-badge&logo=cpu)](https://en.wikipedia.org/wiki/SIMD)
-  [![AEGIS-128](https://img.shields.io/badge/AEGIS--128-Encryption-2F855A?style=for-the-badge)](https://en.wikipedia.org/wiki/AEGIS)
-  [![MORUS-1280](https://img.shields.io/badge/MORUS--1280--128-Cipher-2B6CB0?style=for-the-badge)](https://en.wikipedia.org/wiki/MORUS_(cipher))
-  [![TETRYS FEC](https://img.shields.io/badge/TETRYS-FEC-9F7AEA?style=for-the-badge)](https://en.wikipedia.org/wiki/Forward_error_correction)
-  [![uTLS](https://img.shields.io/badge/uTLS-Fingerprinting-48BB78?style=for-the-badge)](https://github.com/refraction-networking/utls)
-  [![Stealth Mode](https://img.shields.io/badge/Stealth-Mode-718096?style=for-the-badge&logo=incognito)](https://en.wikipedia.org/wiki/Stealth_technology)
-  [![Obfuscation](https://img.shields.io/badge/Traffic-Obfuscation-805AD5?style=for-the-badge)](https://en.wikipedia.org/wiki/Obfuscation)
+  [![SIMD](https://img.shields.io/badge/SIMD-Optimized-FFA500?style=for-the-badge&logo=cpu)](https://en.wikipedia.org/wiki/SIMD)
+  [![AEGIS-128](https://img.shields.io/badge/Encryption-AEGIS--128-2F855A?style=for-the-badge)](https://en.wikipedia.org/wiki/AEGIS)
+  [![MORUS-1280](https://img.shields.io/badge/Encryption-MORUS--1280--128-2B6CB0?style=for-the-badge)](https://en.wikipedia.org/wiki/MORUS_(cipher))
+  [![FEC](https://img.shields.io/badge/FEC-Tetrys-9F7AEA?style=for-the-badge)](https://en.wikipedia.org/wiki/Forward_error_correction)
+  [![Fake TLS](https://img.shields.io/badge/Fake_TLS-Impersonation-8B5CF6?style=for-the-badge&logo=lock)](https://en.wikipedia.org/wiki/Server_Name_Indication)
   [![Cross-Platform](https://img.shields.io/badge/Cross--Platform-✓-38A169?style=for-the-badge&logo=windows&logoColor=white)](https://en.wikipedia.org/wiki/Cross-platform_software)
 </div>
 
@@ -29,6 +26,7 @@ QuicFuscate represents the pinnacle of privacy-focused networking, combining cut
 
 ### 🛡️ Advanced Stealth Technology
 - **uTLS Fingerprinting Protection**: Mimics browser TLS fingerprints to evade deep packet inspection
+- **Fake TLS Handshake**: Implements TLS handshakes that appear legitimate to network inspection while encapsulating the real traffic
 - **Domain Fronting**: Masks traffic by routing through trusted CDN providers
 - **HTTP/3 Masquerading**: Disguises traffic as standard HTTP/3 web traffic
 - **Traffic Obfuscation**: XOR-based packet transformation to defeat pattern recognition
@@ -77,7 +75,7 @@ This project is currently being refactored from C++ to Rust to leverage modern l
 | Encryption         | AEGIS-128L/X, MORUS-1280-128       |
 | Key Exchange       | X25519, X448                       |
 | Error Correction   | TETRYS FEC                         |
-| Obfuscation       | XOR-based, Traffic Shaping         |
+| Obfuscation       | XOR-based, Traffic Shaping, Fake TLS |
 | Platforms          | Linux, macOS, Windows (planned)     |
 | Architecture       | x86_64, ARM64                      |
 | Performance        | Multi-Gigabit capable              |

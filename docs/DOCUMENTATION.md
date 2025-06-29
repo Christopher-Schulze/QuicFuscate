@@ -1864,11 +1864,77 @@ conn.enable_zero_copy(true);
 - `quic_path_mtu_manager.hpp`: Path MTU discovery
 
 ### Stealth Module (`stealth/`)
-Implements traffic obfuscation and browser emulation:
-- **QPACK Compression**: Header compression with dynamic tables
-- **Zero-RTT Optimization**: Faster connection establishment
-- **Datagram Bundling**: Efficient UDP packet handling
-- **Browser Emulation**: Realistic traffic patterns using browser profiles
+Implements traffic obfuscation and anti-detection techniques:
+- **DNS over HTTPS (DoH)**: Secure DNS resolution
+- **Domain Fronting**: Traffic masking through CDN providers
+- **uTLS Fingerprinting**: Browser-like TLS fingerprinting
+- **FakeTLS**: Realistic TLS handshake emulation
+- **XOR Obfuscation**: Traffic pattern masking
+- **HTTP/3 Masquerading**: Disguise as standard web traffic
+
+#### FakeTLS Implementation
+
+FakeTLS emulates realistic TLS handshakes to bypass deep packet inspection while using custom encryption internally. The implementation is defined in `stealth/FakeTLS.hpp` and `stealth/FakeTLS.cpp`.
+
+**Key Features:**
+- Realistic TLS 1.2/1.3 handshake emulation
+- Browser-specific fingerprinting
+- Support for modern cipher suites (including custom AEGIS/MORUS suites)
+- Extension handling for SNI, ALPN, and other TLS features
+
+**Browser Profiles:**
+```cpp
+enum class BrowserProfile {
+    CHROME_WINDOWS,
+    CHROME_MACOS,
+    CHROME_LINUX,
+    CHROME_MOBILE,
+    FIREFOX_WINDOWS,
+    FIREFOX_MACOS,
+    FIREFOX_LINUX,
+    FIREFOX_MOBILE,
+    EDGE_WINDOWS,
+    EDGE_MACOS,
+    SAFARI_MACOS,
+    SAFARI_MOBILE,
+    DEFAULT = CHROME_WINDOWS
+};
+```
+
+**Custom Cipher Suites:**
+```cpp
+// TLS 1.3 Cipher Suites (RFC 8446) - Replaced with AEGIS/MORUS
+static constexpr uint16_t TLS_AEGIS_128X_SHA256 = 0x1301;
+static constexpr uint16_t TLS_AEGIS_128L_SHA384 = 0x1302;
+static constexpr uint16_t TLS_MORUS_1280_128_SHA256 = 0x1304;
+
+// TLS 1.2 ECDHE Cipher Suites
+static constexpr uint16_t TLS_ECDHE_ECDSA_WITH_AEGIS_128X_SHA256 = 0xC02B;
+static constexpr uint16_t TLS_ECDHE_RSA_WITH_AEGIS_128L_SHA256 = 0xC02F;
+static constexpr uint16_t TLS_ECDHE_ECDSA_WITH_MORUS_1280_128_SHA256 = 0xC030;
+```
+
+**Usage Example:**
+```cpp
+// Create FakeTLS instance with Chrome Windows profile
+FakeTLS fake_tls(BrowserProfile::CHROME_WINDOWS);
+
+// Generate client hello for the handshake
+auto client_hello = fake_tls.generate_client_hello();
+
+// Perform the fake handshake
+fake_tls.perform_fake_handshake();
+
+// Get HTTP/3 settings for browser emulation
+auto http3_settings = fake_tls.generate_http3_settings();
+```
+
+**Advanced Features:**
+- Dynamic TLS extension handling
+- SNI (Server Name Indication) support
+- ALPN (Application-Layer Protocol Negotiation)
+- Key share generation for (EC)DHE key exchange
+- Signature algorithm negotiation patterns using browser profiles
 - **Anti-Fingerprinting**: Techniques to avoid detection
 
 #### uTLS Implementation
