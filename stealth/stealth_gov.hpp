@@ -10,6 +10,7 @@
 #include "browser_profiles/tls_profiles/uTLS_fingerprints.hpp"
 #include "browser_profiles/headers/FakeHeaders.hpp"
 #include "DoH.hpp"
+#include "../core/quic_constants.hpp"
 // QUIC Path Migration definitions are now included directly in this file
 
 #include <memory>
@@ -126,7 +127,7 @@ struct XORConfig {
     size_t max_key_cache_size = 1024;
     bool enable_key_derivation = true;
     std::string key_derivation_salt = "QuicFuscateStealth2024";
-    size_t pbkdf2_iterations = 10000;
+    size_t pbkdf2_iterations = DEFAULT_PBKDF2_ITERATIONS;
     
     // Performance-Tuning
     size_t simd_chunk_size = 64;
@@ -211,12 +212,12 @@ struct DPIEvasionConfig {
     
     // Paketfragmentierung
     size_t min_fragment_size = 64;
-    size_t max_fragment_size = 1200;
+    size_t max_fragment_size = DEFAULT_MAX_FRAGMENT_SIZE;
     double fragmentation_probability = 0.3;
     
     // Timing-Randomisierung
-    std::chrono::microseconds min_delay{100};
-    std::chrono::microseconds max_delay{5000};
+    std::chrono::microseconds min_delay{DEFAULT_DPI_MIN_DELAY_US};
+    std::chrono::microseconds max_delay{DEFAULT_DPI_MAX_DELAY_US};
     double timing_randomization_probability = 0.5;
     
     // Payload-Randomisierung
@@ -313,9 +314,9 @@ struct PathMigrationConfig {
     PathMigrationStrategy strategy = PathMigrationStrategy::NONE;
     
     // Quality Thresholds
-    uint32_t max_rtt_threshold_ms = 200;
+    uint32_t max_rtt_threshold_ms = DEFAULT_MAX_RTT_THRESHOLD_MS;
     double max_loss_rate_threshold = 0.05;
-    uint32_t min_bandwidth_threshold_kbps = 1000;
+    uint32_t min_bandwidth_threshold_kbps = DEFAULT_MIN_BANDWIDTH_THRESHOLD_KBPS;
     
     // Migration Behavior
     bool auto_migrate = true;
@@ -329,8 +330,8 @@ struct PathMigrationConfig {
     
     // Stealth Features
     bool randomize_migration_timing = true;
-    std::chrono::milliseconds min_migration_delay{100};
-    std::chrono::milliseconds max_migration_delay{2000};
+    std::chrono::milliseconds min_migration_delay{DEFAULT_MIN_MIGRATION_DELAY_MS};
+    std::chrono::milliseconds max_migration_delay{DEFAULT_MAX_MIGRATION_DELAY_MS};
     bool obfuscate_path_probes = true;
 };
 
