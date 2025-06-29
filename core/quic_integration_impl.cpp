@@ -7,10 +7,10 @@
  */
 
 #include "quic_core_types.hpp"
+#include "error_handling.hpp"
 #include "../stealth/stealth_gov.hpp"
 #include "../optimize/unified_optimizations.hpp"
 #include <algorithm>
-#include <cassert>
 
 namespace quicfuscate {
 
@@ -150,10 +150,15 @@ bool QuicUnifiedManager::initialize(const std::map<std::string, std::string>& co
     return true;
 }
 
-QuicIntegration& QuicUnifiedManager::get_integration() {
+Result<QuicIntegration*> QuicUnifiedManager::get_integration() {
     std::lock_guard<std::mutex> lock(manager_mutex_);
-    assert(integration_ != nullptr);
-    return *integration_;
+    if (!integration_) {
+        auto err = MAKE_ERROR(ErrorCategory::INTERNAL, ErrorCode::INVALID_STATE,
+                              "QuicIntegration not initialized");
+        report_error(err);
+        return err;
+    }
+    return integration_.get();
 }
 
 void QuicUnifiedManager::shutdown() {

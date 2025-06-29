@@ -22,6 +22,7 @@
 #include <openssl/ssl.h>
 #include "quiche.h"
 #include "../optimize/unified_optimizations.hpp"  // For BurstConfig and related types
+#include "error_handling.hpp"
 
 namespace quicfuscate {
 
@@ -341,24 +342,19 @@ private:
  */
 class QuicUnifiedManager {
 public:
+    static QuicUnifiedManager& instance();
+
     QuicUnifiedManager();
     ~QuicUnifiedManager() = default;
-    
-    // Manager operations
-    bool initialize();
-    bool shutdown();
-    
-    // Connection management
-    std::shared_ptr<QuicConnection> create_connection(const QuicConfig& config);
-    bool close_connection(std::shared_ptr<QuicConnection> connection);
-    
-    // Statistics
-    size_t get_active_connections() const { return active_connections_; }
-    
+
+    Result<void> initialize(const std::map<std::string, std::string>& config);
+    Result<QuicIntegration*> get_integration();
+    void shutdown();
+
 private:
     std::mutex manager_mutex_;
-    std::atomic<size_t> active_connections_{0};
-    std::vector<std::shared_ptr<QuicConnection>> connections_;
+    bool is_initialized_{false};
+    std::unique_ptr<QuicIntegration> integration_;
 };
 
 } // namespace quicfuscate
