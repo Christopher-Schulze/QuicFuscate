@@ -3,8 +3,7 @@
 <div align="center">
   <img src="ui/logo/QuicFuscate.png" alt="QuicFuscate Logo" width="300">
   
-  [![QUIC](https://img.shields.io/badge/QUIC-Transport-009DFF?style=for-the-badge&logo=internet-explorer)](https://datatracker.ietf.org/doc/html/rfc9000)
-  [![VPN](https://img.shields.io/badge/VPN-Stealth-2D3748?style=for-the-badge&logo=cloudflare)](https://en.wikipedia.org/wiki/Virtual_private_network)
+  [![QUIC](https://img.shields.io/badge/QUIC-Protocol-009DFF?style=for-the-badge&logo=internet-explorer)](https://datatracker.ietf.org/doc/html/rfc9000)
   [![HTTP/3](https://img.shields.io/badge/HTTP-3-FF6B6B?style=for-the-badge&logo=internet-explorer)](https://en.wikipedia.org/wiki/HTTP/3)
   [![Rust](https://img.shields.io/badge/Rust-1.70+-000000?style=for-the-badge&logo=rust)](https://www.rust-lang.org/)
   [![C++](https://img.shields.io/badge/C++-17+-00599C?style=for-the-badge&logo=c%2B%2B)](https://isocpp.org/)
@@ -12,7 +11,6 @@
   [![AEGIS-128](https://img.shields.io/badge/Encryption-AEGIS--128-2F855A?style=for-the-badge)](https://en.wikipedia.org/wiki/AEGIS)
   [![MORUS-1280](https://img.shields.io/badge/Encryption-MORUS--1280--128-2B6CB0?style=for-the-badge)](https://en.wikipedia.org/wiki/MORUS_(cipher))
   [![FEC](https://img.shields.io/badge/FEC-Tetrys-9F7AEA?style=for-the-badge)](https://en.wikipedia.org/wiki/Forward_error_correction)
-  [![Fake TLS](https://img.shields.io/badge/Fake_TLS-Impersonation-8B5CF6?style=for-the-badge&logo=lock)](https://en.wikipedia.org/wiki/Server_Name_Indication)
   [![Cross-Platform](https://img.shields.io/badge/Cross--Platform-✓-38A169?style=for-the-badge&logo=windows&logoColor=white)](https://en.wikipedia.org/wiki/Cross-platform_software)
 </div>
 
