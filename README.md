@@ -90,6 +90,27 @@ git submodule update --init libs/quiche-patched
 If the fetch fails, verify that the URL in `.gitmodules` points to a
 repository that hosts the required commit.
 
+### Building with CMake
+
+After initializing the submodule you need to compile the patched **quiche**
+library using Cargo:
+
+```bash
+cd libs/quiche-patched
+cargo build --release
+cd ../..
+```
+
+With the library built you can generate the project with CMake:
+
+```bash
+mkdir build && cd build
+cmake ..
+make
+```
+
+All binaries will be placed inside the `build/` directory.
+
 
 ## 📜 License
 
