@@ -110,3 +110,8 @@ target_link_libraries(quicfuscate_demo PRIVATE
     quiche
 )
 
+enable_testing()
+add_executable(fec_module_test tests/fec_module_test.cpp)
+target_link_libraries(fec_module_test PRIVATE quicfuscate_fec)
+add_test(NAME fec_module_test COMMAND fec_module_test)
+
