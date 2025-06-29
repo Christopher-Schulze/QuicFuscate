@@ -383,6 +383,13 @@ void GaloisField::multiply_vector_scalar_avx2(uint8_t* dst, const uint8_t* src, 
 }
 #endif
 
+#ifdef QUICFUSCATE_HAS_SSE
+void GaloisField::multiply_vector_scalar_avx512(uint8_t* dst, const uint8_t* src, uint8_t scalar, size_t length) {
+    // Placeholder implementation using AVX2 path
+    multiply_vector_scalar_avx2(dst, src, scalar, length);
+}
+#endif
+
 void GaloisField::multiply_vector_scalar(uint8_t* dst, const uint8_t* src, uint8_t scalar, size_t length) {
     if (!initialized_) initialize();
     
@@ -718,18 +725,16 @@ extern "C" {
         if (!global_fec_module || !data || !encoded_data || !encoded_size) {
             return -1;
         }
-        
+
         try {
             std::vector<uint8_t> input(data, data + data_size);
             auto result = global_fec_module->encode(input);
-            
+
             *encoded_size = result.size();
-            *encoded_data = static_cast<uint8_t*>(malloc(result.size()));
-            if (*encoded_data) {
-                memcpy(*encoded_data, result.data(), result.size());
-                return 0;
-            }
-            return -1;
+            std::unique_ptr<uint8_t[]> buffer(new uint8_t[result.size()]);
+            std::memcpy(buffer.get(), result.data(), result.size());
+            *encoded_data = buffer.release();
+            return 0;
         } catch (...) {
             return -1;
         }
@@ -739,22 +744,24 @@ extern "C" {
         if (!global_fec_module || !encoded_data || !decoded_data || !decoded_size) {
             return -1;
         }
-        
+
         try {
             std::vector<uint8_t> input(encoded_data, encoded_data + encoded_size);
             std::vector<std::vector<uint8_t>> shards = {input};
             auto result = global_fec_module->decode(shards);
-            
+
             *decoded_size = result.size();
-            *decoded_data = static_cast<uint8_t*>(malloc(result.size()));
-            if (*decoded_data) {
-                memcpy(*decoded_data, result.data(), result.size());
-                return 0;
-            }
-            return -1;
+            std::unique_ptr<uint8_t[]> buffer(new uint8_t[result.size()]);
+            std::memcpy(buffer.get(), result.data(), result.size());
+            *decoded_data = buffer.release();
+            return 0;
         } catch (...) {
             return -1;
         }
+    }
+
+    void fec_module_free_buffer(uint8_t* buffer) {
+        delete[] buffer;
     }
     
     int fec_module_set_redundancy(double redundancy) {

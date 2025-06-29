@@ -340,6 +340,7 @@ extern "C" {
     void fec_module_cleanup();
     int fec_module_encode(const uint8_t* data, size_t data_size, uint8_t** encoded_data, size_t* encoded_size);
     int fec_module_decode(const uint8_t* encoded_data, size_t encoded_size, uint8_t** decoded_data, size_t* decoded_size);
+    void fec_module_free_buffer(uint8_t* buffer);
     int fec_module_set_redundancy(double redundancy);
     int fec_module_get_statistics(void* stats_buffer, size_t buffer_size);
 }
