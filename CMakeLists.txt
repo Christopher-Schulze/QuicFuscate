@@ -110,3 +110,14 @@ target_link_libraries(quicfuscate_demo PRIVATE
     quiche
 )
 
+add_executable(quic_unified_manager_test tests/quic_unified_manager_test.cpp)
+target_link_libraries(quic_unified_manager_test PRIVATE
+    quicfuscate_core
+    quicfuscate_crypto
+    quicfuscate_fec
+    quicfuscate_stealth
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    quiche
+)
+

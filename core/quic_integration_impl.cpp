@@ -134,20 +134,24 @@ QuicUnifiedManager& QuicUnifiedManager::instance() {
     return instance;
 }
 
-bool QuicUnifiedManager::initialize(const std::map<std::string, std::string>& config) {
+Result<void> QuicUnifiedManager::initialize(const std::map<std::string, std::string>& config) {
     std::lock_guard<std::mutex> lock(manager_mutex_);
-    
+
     if (is_initialized_) {
-        return true;
+        return success();
     }
-    
+
     integration_ = std::make_unique<QuicIntegration>();
     if (!integration_->initialize(config)) {
-        return false;
+        auto err = MAKE_ERROR(ErrorCategory::INTERNAL, ErrorCode::OPERATION_FAILED,
+                              "Failed to initialize QuicIntegration");
+        report_error(err);
+        integration_.reset();
+        return err;
     }
-    
+
     is_initialized_ = true;
-    return true;
+    return success();
 }
 
 Result<QuicIntegration*> QuicUnifiedManager::get_integration() {
