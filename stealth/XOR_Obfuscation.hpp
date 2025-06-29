@@ -7,6 +7,8 @@
 #include <memory>
 #include <random>
 #include <array>
+#include <map>
+#include <chrono>
 
 namespace quicfuscate::stealth {
 

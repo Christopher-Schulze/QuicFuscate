@@ -90,6 +90,17 @@ git submodule update --init libs/quiche-patched
 If the fetch fails, verify that the URL in `.gitmodules` points to a
 repository that hosts the required commit.
 
+### Rust Workspace
+
+The `rust/` directory contains a Cargo workspace with crates mirroring the C++ modules. Each crate builds C++ sources via the `cc` crate, enabling gradual migration.
+
+Build the Rust workspace with:
+
+```bash
+cd rust
+cargo build
+```
+
 
 ## 📜 License
 
