@@ -12,6 +12,7 @@
  */
 
 #include "quic_connection.hpp"
+#include "quic_constants.hpp"
 #include "../optimize/unified_optimizations.hpp"
 #include <iostream>
 #include <chrono>
@@ -420,7 +421,7 @@ void QuicConnection::send_pending_packets() {
         return;
     }
     
-    static uint8_t out[1350]; // Standard MTU size buffer
+    static uint8_t out[DEFAULT_INITIAL_MTU]; // Standard MTU size buffer
     
     while (true) {
         ssize_t written = quiche_conn_send(quiche_conn_, out, sizeof(out));

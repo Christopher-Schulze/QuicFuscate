@@ -35,6 +35,7 @@
 #include <cmath>
 
 #include "../core/quic_core_types.hpp"
+#include "../core/quic_constants.hpp"
 #include "stealth_gov.hpp"
 #include "uTLS.hpp"
 
@@ -163,7 +164,7 @@ struct QPACKConfig {
 
 struct ZeroRTTConfig {
     bool enable_zero_rtt = true;
-    size_t max_cached_sessions = 1000;
+    size_t max_cached_sessions = DEFAULT_MAX_CACHED_SESSIONS;
     std::chrono::hours session_timeout{24};
     bool enable_session_tickets = true;
     bool enable_psk = true;
@@ -172,14 +173,14 @@ struct ZeroRTTConfig {
 
 struct DatagramConfig {
     bool enable_bundling = true;
-    size_t max_bundle_size = 1200;
+    size_t max_bundle_size = DEFAULT_MAX_BUNDLE_SIZE;
     std::chrono::milliseconds bundle_timeout{10};
     bool enable_compression = true;
     uint8_t default_priority = 128;
 };
 
 struct StreamConfig {
-    size_t max_concurrent_streams = 1000;
+    size_t max_concurrent_streams = DEFAULT_MAX_CONCURRENT_STREAMS;
     size_t stream_buffer_size = 65536;
     bool enable_multiplexing = true;
     bool enable_flow_control = true;

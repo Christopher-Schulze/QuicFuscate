@@ -2,6 +2,7 @@
 #define QUIC_CONNECTION_HPP
 
 #include "quic_core_types.hpp"
+#include "quic_constants.hpp"
 #include "../optimize/unified_optimizations.hpp"    // Für alle Optimierungen (inkl. ZeroRttConfig)
 #include <boost/asio.hpp>
 #include <boost/asio/ip/udp.hpp>  // für UDP-Socket
@@ -440,7 +441,7 @@ private:
     BrowserFingerprint browser_fingerprint_{BrowserFingerprint::CHROME_LATEST}; // Aktueller Browser-Fingerprint
     
     // Puffer und Datenübertragung
-    std::array<uint8_t, 1500> recv_buffer_;     // Puffer für eingehende UDP-Pakete
+    std::array<uint8_t, DEFAULT_MAX_MTU> recv_buffer_; // Puffer für eingehende UDP-Pakete
     std::array<uint8_t, 2048> send_buf_;        // Puffer für ausgehende QUIC-Pakete
     mutable std::mutex socket_mutex_;           // Mutex für Thread-sichere Socket-Operationen
     
@@ -549,9 +550,9 @@ private:
     std::vector<std::string> available_interfaces_;     // Liste verfügbarer Netzwerkschnittstellen
     std::vector<boost::asio::ip::udp::endpoint> previous_endpoints_; // Liste früherer Endpunkte für Migration
     boost::asio::ip::udp::endpoint original_endpoint_;  // Ursprünglicher Endpunkt (für Zurückwechseln)
-    uint64_t path_challenge_timeout_ms_{500};           // Timeout für Path Challenge in Millisekunden
-    uint64_t max_migration_attempts_{5};                // Maximale Anzahl von Migrationsversuchen
-    uint64_t migration_cooldown_ms_{1000};              // Abkühlungszeit zwischen Migrationsversuchen
+    uint64_t path_challenge_timeout_ms_{DEFAULT_PATH_CHALLENGE_TIMEOUT_MS}; // Timeout für Path Challenge in Millisekunden
+    uint64_t max_migration_attempts_{DEFAULT_MAX_MIGRATION_ATTEMPTS}; // Maximale Anzahl von Migrationsversuchen
+    uint64_t migration_cooldown_ms_{DEFAULT_MIGRATION_COOLDOWN_MS}; // Abkühlungszeit zwischen Migrationsversuchen
     std::function<void(bool, const std::string&, const std::string&)> migration_callback_; // Benachrichtigungsfunktion
     
     // Private Migration-Methoden
@@ -566,16 +567,16 @@ private:
     
     // MTU Discovery bezogene private Variablen und Methoden
     bool mtu_discovery_enabled_{false};                // Flag, ob MTU Discovery aktiviert ist
-    uint16_t current_mtu_{1350};                       // Aktuelle MTU-Größe
-    uint16_t min_mtu_{1200};                           // Minimale MTU (RFC 8899 empfiehlt 1200 als Minimum)
-    uint16_t max_mtu_{1500};                           // Maximale MTU (typische Ethernet MTU)
-    uint16_t mtu_step_size_{10};                       // Schrittgröße für MTU-Probing
-    uint16_t target_mtu_{1500};                        // Ziel-MTU
-    uint16_t last_successful_mtu_{1350};               // Zuletzt erfolgreich verwendete MTU
+    uint16_t current_mtu_{DEFAULT_INITIAL_MTU};        // Aktuelle MTU-Größe
+    uint16_t min_mtu_{DEFAULT_MIN_MTU};                // Minimale MTU (RFC 8899 empfiehlt 1200 als Minimum)
+    uint16_t max_mtu_{DEFAULT_MAX_MTU};                // Maximale MTU (typische Ethernet MTU)
+    uint16_t mtu_step_size_{DEFAULT_MTU_STEP_SIZE};    // Schrittgröße für MTU-Probing
+    uint16_t target_mtu_{DEFAULT_MAX_MTU};             // Ziel-MTU
+    uint16_t last_successful_mtu_{DEFAULT_INITIAL_MTU}; // Zuletzt erfolgreich verwendete MTU
     uint16_t current_probe_mtu_{0};                    // Aktuell getestete MTU
     std::chrono::steady_clock::time_point last_probe_time_; // Zeitpunkt des letzten MTU-Probes
-    uint32_t probe_timeout_ms_{1000};                  // Timeout für MTU-Probes in Millisekunden
-    uint16_t blackhole_detection_threshold_{2};         // Schwellenwert für Blackhole-Erkennung
+    uint32_t probe_timeout_ms_{DEFAULT_MTU_PROBE_TIMEOUT_MS}; // Timeout für MTU-Probes in Millisekunden
+    uint16_t blackhole_detection_threshold_{DEFAULT_BLACKHOLE_DETECTION_THRESHOLD}; // Schwellenwert für Blackhole-Erkennung
     uint16_t consecutive_failures_{0};                 // Zähler für aufeinanderfolgende Fehlschläge
     bool in_search_phase_{false};                      // Flag, ob aktuell im Suchprozess
     bool mtu_validated_{false};                        // Flag, ob aktuelle MTU validiert ist

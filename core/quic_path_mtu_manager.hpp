@@ -10,6 +10,7 @@
  */
 
 #include "error_handling.hpp"
+#include "quic_constants.hpp"
 #include <chrono>
 #include <iostream>
 #include <algorithm>
@@ -62,11 +63,11 @@ public:
      * @param step_size Schrittgröße für MTU-Proben (Standard: 10 Bytes)
      * @param blackhole_threshold Schwellenwert für Blackhole-Erkennung (Standard: 3)
      */
-    PathMtuManager(QuicConnection& connection, 
-                  uint16_t min_mtu = 1200, 
-                  uint16_t max_mtu = 1500, 
-                  uint16_t step_size = 10,
-                  uint8_t blackhole_threshold = 3);
+    PathMtuManager(QuicConnection& connection,
+                  uint16_t min_mtu = DEFAULT_MIN_MTU,
+                  uint16_t max_mtu = DEFAULT_MAX_MTU,
+                  uint16_t step_size = DEFAULT_MTU_STEP_SIZE,
+                  uint8_t blackhole_threshold = DEFAULT_PATH_BLACKHOLE_THRESHOLD);
     
     /**
      * @brief Destruktor
@@ -213,14 +214,14 @@ private:
     std::function<void(const MtuChange&)> mtu_change_callback_; // Callback für MTU-Änderungen
     
     // Häufigkeit der MTU-Anpassung basierend auf Netzwerkbedingungen
-    std::chrono::milliseconds adaptive_check_interval_{10000}; // 10 Sekunden
+    std::chrono::milliseconds adaptive_check_interval_{DEFAULT_ADAPTIVE_CHECK_INTERVAL_MS}; // 10 Sekunden
     std::chrono::steady_clock::time_point last_adaptive_check_; // Letzter Check
     
     // Häufigkeit der periodischen Probes nach erfolgreicher Validierung
-    std::chrono::milliseconds periodic_probe_interval_{60000}; // 1 Minute
+    std::chrono::milliseconds periodic_probe_interval_{DEFAULT_PERIODIC_PROBE_INTERVAL_MS}; // 1 Minute
     
     // Timeout für ausstehende Proben
-    std::chrono::milliseconds probe_timeout_{2000}; // 2 Sekunden
+    std::chrono::milliseconds probe_timeout_{DEFAULT_PROBE_TIMEOUT_MS}; // 2 Sekunden
     
     // Private Hilfsmethoden
     
