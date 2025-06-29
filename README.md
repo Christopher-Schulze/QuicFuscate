@@ -111,6 +111,17 @@ make
 
 All binaries will be placed inside the `build/` directory.
 
+### Building Rust Components
+
+Rust-specific modules live under the `rust/` directory. The workspace is set up
+to produce FFI-friendly libraries so that Rust code can interoperate with the
+existing C++ implementation. To compile the workspace run:
+
+```bash
+cd rust
+cargo build --release
+```
+
 
 ## 📜 License
 
