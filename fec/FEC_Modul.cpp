@@ -393,9 +393,7 @@ void GaloisField::multiply_vector_scalar(uint8_t* dst, const uint8_t* src, uint8
         multiply_vector_scalar_neon(dst, src, scalar, length);
     }
 #elif defined(QUICFUSCATE_HAS_SSE)
-    if (__builtin_cpu_supports("avx512f")) {
-        multiply_vector_scalar_avx512(dst, src, scalar, length);
-    } else if (__builtin_cpu_supports("avx2")) {
+    if (__builtin_cpu_supports("avx2")) {
         multiply_vector_scalar_avx2(dst, src, scalar, length);
     } else {
         // Fallback to scalar implementation

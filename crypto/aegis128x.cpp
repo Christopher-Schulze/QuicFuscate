@@ -22,8 +22,9 @@ static const uint8_t AEGIS_C1[16] = {
 };
 
 AEGIS128X::AEGIS128X() {
+    using namespace optimize;
     auto& detector = simd::FeatureDetector::instance();
-    has_vaes_ = detector.has_feature(simd::CpuFeature::AVX512F) && 
+    has_vaes_ = detector.has_feature(simd::CpuFeature::AVX512F) &&
                 detector.has_feature(simd::CpuFeature::AVX512BW);
     has_aesni_ = detector.has_feature(simd::CpuFeature::AES_NI);
     has_arm_crypto_ = detector.has_feature(simd::CpuFeature::CRYPTO);

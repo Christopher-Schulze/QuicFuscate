@@ -22,6 +22,11 @@
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
+#include <cassert>
+#include <cstring>
+#include <future>
+#include <map>
+#include <sys/socket.h>
 
 #ifdef __ARM_NEON
 #include <arm_neon.h>
@@ -761,6 +766,8 @@ struct StreamOptimizationConfig {
     bool enable_multiplexing;
     double congestion_threshold;
 };
+
+class QuicStream; // forward declaration for optimizer
 
 /**
  * @brief QUIC stream optimizer

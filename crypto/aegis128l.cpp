@@ -18,11 +18,11 @@ static const uint8_t AEGIS_C1[16] = {
 };
 
 AEGIS128L::AEGIS128L() {
+    using namespace optimize;
     auto& detector = simd::FeatureDetector::instance();
     has_arm_crypto_ = detector.has_feature(simd::CpuFeature::CRYPTO);
     has_aesni_ = detector.has_feature(simd::CpuFeature::AES_NI);
     has_avx2_ = detector.has_feature(simd::CpuFeature::AVX2);
-    has_pclmulqdq_ = detector.has_feature(simd::CpuFeature::PCLMULQDQ);
 }
 
 void AEGIS128L::encrypt(const uint8_t* plaintext, size_t plaintext_len,
