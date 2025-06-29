@@ -721,48 +721,33 @@ extern "C" {
         global_fec_module = nullptr;
     }
     
-    int fec_module_encode(const uint8_t* data, size_t data_size, uint8_t** encoded_data, size_t* encoded_size) {
-        if (!global_fec_module || !data || !encoded_data || !encoded_size) {
-            return -1;
+    std::vector<uint8_t> fec_module_encode(const uint8_t* data, size_t data_size) {
+        if (!global_fec_module || !data) {
+            return {};
         }
 
         try {
             std::vector<uint8_t> input(data, data + data_size);
-            auto result = global_fec_module->encode(input);
-
-            *encoded_size = result.size();
-            std::unique_ptr<uint8_t[]> buffer(new uint8_t[result.size()]);
-            std::memcpy(buffer.get(), result.data(), result.size());
-            *encoded_data = buffer.release();
-            return 0;
+            return global_fec_module->encode(input);
         } catch (...) {
-            return -1;
+            return {};
         }
     }
     
-    int fec_module_decode(const uint8_t* encoded_data, size_t encoded_size, uint8_t** decoded_data, size_t* decoded_size) {
-        if (!global_fec_module || !encoded_data || !decoded_data || !decoded_size) {
-            return -1;
+    std::vector<uint8_t> fec_module_decode(const uint8_t* encoded_data, size_t encoded_size) {
+        if (!global_fec_module || !encoded_data) {
+            return {};
         }
 
         try {
             std::vector<uint8_t> input(encoded_data, encoded_data + encoded_size);
             std::vector<std::vector<uint8_t>> shards = {input};
-            auto result = global_fec_module->decode(shards);
-
-            *decoded_size = result.size();
-            std::unique_ptr<uint8_t[]> buffer(new uint8_t[result.size()]);
-            std::memcpy(buffer.get(), result.data(), result.size());
-            *decoded_data = buffer.release();
-            return 0;
+            return global_fec_module->decode(shards);
         } catch (...) {
-            return -1;
+            return {};
         }
     }
 
-    void fec_module_free_buffer(uint8_t* buffer) {
-        delete[] buffer;
-    }
     
     int fec_module_set_redundancy(double redundancy) {
         if (!global_fec_module) {
