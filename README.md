@@ -90,6 +90,31 @@ git submodule update --init libs/quiche-patched
 If the fetch fails, verify that the URL in `.gitmodules` points to a
 repository that hosts the required commit.
 
+## 🏁 Quick Start
+
+### Prerequisites
+- C++17 compiler (g++ or clang++)
+- Boost libraries (system, program_options)
+- OpenSSL development headers
+- git
+
+### Build
+Initialize the patched QUIC submodule:
+```bash
+git submodule update --init libs/quiche-patched
+```
+Compile the CLI tools (example using g++):
+```bash
+g++ -std=c++17 cli/*.cpp core/*.cpp crypto/*.cpp stealth/*.cpp fec/*.cpp optimize/*.cpp \
+    -I./ -lboost_system -lssl -lcrypto -pthread -o quicfuscate
+```
+
+### Run
+Launch the client or server:
+```bash
+./quicfuscate_client <host> <port>
+./quicfuscate_server <port>
+```
 
 ## 📜 License
 

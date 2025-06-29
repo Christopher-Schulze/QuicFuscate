@@ -8,21 +8,6 @@
 ## Introduction
 QuicFuscate is a high-performance VPN solution leveraging QUIC protocol with advanced obfuscation techniques. This document provides comprehensive technical documentation of the system architecture, modules, and implementation details.
 
-## Architecture Overview
-```mermaid
-graph TD
-    A[Client] -->|QUIC with uTLS| B(QuicFuscate Core)
-    B --> C[Stealth Module]
-    B --> D[Crypto Module]
-    B --> E[FEC Module]
-    B --> F[Optimization Module]
-    C --> G[Domain Fronting]
-    C --> H[uTLS Fingerprinting]
-    D --> I[AEGIS-128L/X]
-    D --> J[MORUS-1280-128 Lightweight]
-    E --> K[Adaptive FEC]
-    F --> L[CPU Optimization]
-```
 
 ### Project Structure
 ```
@@ -453,83 +438,6 @@ public:
    - Removal of headers on reception
    - QUIC-specific optimizations
 
-**Configuration Options:**
-```mermaid
-graph TB
-    A[FakeHeadersConfig] --> B[profile_type]
-    A --> C[base_url]
-    A --> D[http_method]
-### Stealth Governance
-Defined in `stealth/stealth_gov.cpp`:
-
-```cpp
-class StealthManager {
-public:
-    enum class StealthLevel { MINIMAL, STANDARD, ENHANCED, MAXIMUM };
-
-    explicit StealthManager(const StealthConfig& config);
-    
-    // Processes outgoing packets with stealth techniques
-    std::vector<std::vector<uint8_t>> process_outgoing_packet(const std::vector<uint8_t>& packet);
-    
-    // Processes incoming packets
-    std::vector<uint8_t> process_incoming_packet(const std::vector<uint8_t>& packet);
-    
-    // Handles TLS Client Hello packets
-    std::vector<uint8_t> process_client_hello(const std::vector<uint8_t>& client_hello);
-    
-    // Obfuscates payload using XOR patterns
-    std::vector<uint8_t> obfuscate_payload(const std::vector<uint8_t>& payload, uint64_t context_id);
-    
-    // Manages QUIC path migration
-    bool migrate_to_path(const std::string& path_id);
-};
-
-struct StealthConfig {
-    StealthLevel stealth_level = StealthLevel::ENHANCED;
-    bool enable_path_migration = true;
-    bool enable_xor_obfuscation = true;
-    bool enable_quic_masquerading = true;
-    // ... other configuration options
-};
-```
-
-**Key Components:**
-1. **Stealth Level System**:
-   - 4 levels from MINIMAL to MAXIMUM
-   - Automatic configuration of all components based on level
-2. **Packet Processing Pipeline**:
-   - Special handling of TLS Client Hello packets
-   - HTTP/3 masking for QUIC packets
-   - Fragmentation and timing randomization
-3. **XOR Obfuscation**:
-   - Payload obfuscation with context-specific keys
-   - Header value obfuscation
-   - FEC metadata obfuscation
-4. **Path Migration**:
-   - Dynamic switching between network paths
-   - Performance-based path selection
-   - Load distribution across multiple connections
-
-**Stealth Level Configuration:**
-```mermaid
-graph LR
-    A[Stealth Level] --> B[MINIMAL]
-    A --> C[STANDARD]
-    A --> D[ENHANCED]
-    A --> E[MAXIMUM]
-    
-    B --> F[Basic obfuscation]
-    C --> G[SNI padding]
-    D --> H[Domain fronting]
-    E --> I[All techniques]
-```
-
-**Usage Example:**
-```cpp
-// Configure maximum stealth
-StealthConfig config;
-config.stealth_level = StealthLevel::MAXIMUM;
 
 StealthManager manager(config);
 
@@ -588,19 +496,6 @@ std::vector<uint8_t> FakeHeaders::generate_qpack_headers() const {
 - Alt-Svc header for HTTP/3 upgrade simulation
 - QUIC Transport Parameter Integration
    - Custom user agent strings
-
-**Supported Browser Profiles:**
-```mermaid
-graph LR
-    A[BrowserType] --> B[CHROME]
-    A --> C[FIREFOX]
-    A --> D[SAFARI]
-    A --> E[EDGE]
-    A --> F[OPERA]
-    A --> G[BRAVE]
-    
-    H[OSType] --> I[WINDOWS]
-    H --> J[MACOS]
     H --> K[LINUX]
     H --> L[IOS]
     H --> M[ANDROID]
@@ -713,16 +608,6 @@ struct PerformanceMetrics {
 ```
 
 **Usage Example:**
-```mermaid
-graph TD
-    A[QUIC Stream] --> B[UnifiedOptimizationManager]
-    B --> C[Memory Pool]
-    B --> D[Thread Pool]
-    B --> E[Zero-Copy]
-    C --> F[Reduced Allocations]
-    D --> G[Parallel Processing]
-E --> H[Lower Latency]
-```
 
 **BBRv2 Congestion Control:**
 ```cpp
@@ -827,13 +712,6 @@ struct FECConfig {
   - Jitter
 
 **Usage Example:**
-```mermaid
-graph LR
-    A[Original Data] --> B[FEC-Encoding]
-    B --> C[QuicFuscate Core]
-    C --> D{Network}
-    D --> E[Packet Loss]
-```
 
 **Stealth Integration:**
 - Random timing variations for traffic patterns
@@ -905,15 +783,6 @@ struct Statistics {
 - RAII mutex locks for exception safety
 
 **Application Example:**
-```mermaid
-sequenceDiagram
-    Sender->>QuicStream: write_data(payload)
-    QuicStream->>Condition Variable: notify_one()
-    Receiver->>QuicStream: is_readable()?
-    QuicStream-->>Receiver: true
-    Receiver->>QuicStream: read_data()
-    QuicStream-->>Receiver: payload
-```
 
 **Performance Optimizations:**
 - Lock-Guards with minimal scope
@@ -984,15 +853,6 @@ struct SniConfig {
 ```
 
 **Application Example:**
-```mermaid
-sequenceDiagram
-    Client->>SniHiding: process_client_hello(tls_packet)
-    SniHiding->>SniHiding: modify_sni(front_domain)
-    SniHiding->>SniHiding: apply_sni_padding()
-    SniHiding-->>Client: Modified TLS packet
-    Client->>Front-Server: TLS handshake with disguised domain
-    Front-Server->>Real-Server: Forwarding to real service
-```
 
 **Security Features:**
 - Dynamic technique selection based on network conditions
@@ -1056,15 +916,6 @@ void apply_chrome_modifications(std::vector<uint8_t>& client_hello) {
 - Adaptation of extension order and EC point formats
 
 **Integration Example:**
-```mermaid
-sequenceDiagram
-    Client->>UTLSImplementation: generate_client_hello("example.com")
-    UTLSImplementation->>OpenSSL: Configure Cipher Suites
-    UTLSImplementation->>OpenSSL: Configure TLS Extensions
-    OpenSSL-->>UTLSImplementation: Raw ClientHello data
-    UTLSImplementation->>Client: Modified ClientHello
-    Client->>Server: TLS handshake with browser fingerprint
-```
 
 **Supported Browser Profiles:**
 ```cpp
@@ -1153,15 +1004,6 @@ while (stream.is_readable()) {
 ```
 
 **Integration into QUIC Connection:**
-```mermaid
-sequenceDiagram
-    Application->>QuicStream: write_data()
-    QuicStream->>QuicConnection: send_packet()
-    QuicConnection->>Network: Transmission
-    Network->>QuicConnection: Reception
-    QuicConnection->>QuicStream: read_data()
-    QuicStream->>Application: Data delivery
-```
 
 1. **Congestion Control (BBRv2)**:
    ```cpp
@@ -1226,17 +1068,6 @@ sequenceDiagram
   };
   ```
 
-**Connection Lifecycle:**
-```mermaid
-sequenceDiagram
-    Client->>QuicConnection: process_packet()
-    QuicConnection->>BBRv2: update_metrics()
-    BBRv2-->>QuicConnection: congestion_window
-    QuicConnection->>XdpSocket: send_packet()
-    XdpSocket->>Network: Zero-Copy Transmission
-    Network->>QuicConnection: handle_xdp_packet()
-    QuicConnection->>MemoryPool: allocate()
-```
 
 **Stealth Integration:**
 - MTU randomization for traffic obfuscation
@@ -1293,19 +1124,6 @@ sequenceDiagram
   ```
 
 **Usage in QUIC Stack:**
-```mermaid
-sequenceDiagram
-    participant Client
-    participant FECModule
-    participant Network
-    
-    Client->>FECModule: Raw data
-    FECModule->>FECModule: Generate FEC packets
-    FECModule->>Network: Send data + repair packets
-    Network-->>FECModule: Receive packets (possibly with losses)
-    FECModule->>FECModule: Decode and repair data
-    FECModule-->>Client: Recovered data
-```
 
 **Stealth Mode:**
 - Random variation of redundancy
