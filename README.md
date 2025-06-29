@@ -78,6 +78,18 @@ This project is currently being refactored from C++ to Rust to leverage modern l
 | Architecture       | x86_64, ARM64                      |
 | Performance        | Multi-Gigabit capable              |
 
+## 🔧 Build Instructions
+
+This repository uses a Git submodule to include a patched QUIC library.
+After cloning the project, initialize the submodule with:
+
+```bash
+git submodule update --init libs/quiche-patched
+```
+
+If the fetch fails, verify that the URL in `.gitmodules` points to a
+repository that hosts the required commit.
+
 
 ## 📜 License
 
