@@ -3,9 +3,9 @@
 #include <string>
 #include <vector>
 #include <iostream>
-#include "../tls/utls_client_configurator.hpp"
+#include "../stealth/uTLS.hpp"
 
-namespace quicsand {
+namespace quicfuscate {
 namespace cli {
 
 // Struktur für Kommandozeilenoptionen
@@ -53,4 +53,4 @@ struct CommandLineOptions {
 };
 
 } // namespace cli
-} // namespace quicsand
+} // namespace quicfuscate

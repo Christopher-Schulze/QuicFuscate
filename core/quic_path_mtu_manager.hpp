@@ -1,39 +1,48 @@
-#ifndef QUIC_PATH_MTU_MANAGER_HPP
-#define QUIC_PATH_MTU_MANAGER_HPP
+#pragma once
 
-#include <cstdint>
-#include <chrono>
-#include <memory>
-#include <vector>
-#include <mutex>
-#include <map>
-#include <set>
+/**
+ * @file quic_path_mtu_manager.hpp
+ * @brief Header-only implementation of the QUIC Path MTU Manager
+ * 
+ * This file provides a complete header-only implementation of the Path MTU Manager,
+ * consolidating what was previously split between quic_path_mtu_manager.hpp and
+ * quic_path_mtu_manager.cpp.
+ */
+
 #include "error_handling.hpp"
+#include <chrono>
+#include <iostream>
+#include <algorithm>
+#include <random>
+#include <cassert>
+#include <mutex>
+#include <vector>
+#include <memory>
 
-namespace quicsand {
+namespace quicfuscate {
 
-// Forward-Deklarationen
+// Forward declaration
 class QuicConnection;
 
 /**
- * @brief MTU-Status für einen Netzwerkpfad
+ * @brief MTU discovery status
  */
 enum class MtuStatus {
-    UNKNOWN,        // Noch keine Daten zur MTU vorhanden
-    SEARCHING,      // MTU Discovery läuft
-    VALIDATED,      // MTU wurde validiert
-    BLACKHOLE,      // MTU Blackhole wurde erkannt
-    UNSTABLE        // MTU ist instabil (mehrere Wechsel erkannt)
+    DISABLED,       // MTU discovery is disabled
+    SEARCHING,      // Actively searching for optimal MTU
+    VALIDATING,     // Validating a candidate MTU
+    BLACKHOLE,      // Detected a blackhole (packets being dropped)
+    COMPLETE        // MTU discovery completed successfully
 };
 
 /**
- * @brief Struktur für MTU-Änderungserkennung
+ * @brief MTU change notification
  */
 struct MtuChange {
-    uint16_t old_mtu;                     // Vorherige MTU
-    uint16_t new_mtu;                     // Neue MTU
-    std::chrono::steady_clock::time_point timestamp; // Zeitpunkt der Änderung
-    bool triggered_by_probe;              // Ob durch Probe oder Paketverlust ausgelöst
+    uint16_t old_mtu;
+    uint16_t new_mtu;
+    bool success;
+    std::string reason;
 };
 
 /**
@@ -284,6 +293,6 @@ private:
     std::vector<uint8_t> create_probe_packet(uint32_t probe_id, uint16_t size, bool is_request);
 };
 
-} // namespace quicsand
+} // namespace quicfuscate
 
 #endif // QUIC_PATH_MTU_MANAGER_HPP

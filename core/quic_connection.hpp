@@ -1,10 +1,8 @@
 #ifndef QUIC_CONNECTION_HPP
 #define QUIC_CONNECTION_HPP
 
-#include "quic.hpp"
-#include "common_configs.hpp"     // Für gemeinsame Konfigurationsstrukturen
-#include "zero_copy.hpp"         // Für Zero-Copy-Übertragung
-#include "burst_buffer.hpp"      // Für Burst-Buffering
+#include "quic_core_types.hpp"
+#include "../optimize/unified_optimizations.hpp"    // Für alle Optimierungen (inkl. ZeroRttConfig)
 #include <boost/asio.hpp>
 #include <boost/asio/ip/udp.hpp>  // für UDP-Socket
 #include <boost/enable_shared_from_this.hpp>
@@ -37,15 +35,14 @@
 #include <errno.h>       // For errno
 #endif
 
-#include "../tls/utls_client_configurator.hpp" // Für die uTLS-Integration
-#include "../fec/tetrys_fec.hpp"  // Für die Tetrys FEC-Integration
-#include "../fec/tetrys_fec_optimized.hpp"  // Für die SIMD-optimierte Tetrys FEC-Integration
-#include "../crypto/aes128gcm_optimized.hpp"  // Für die SIMD-optimierte AES-GCM
-#include "bbr_v2.hpp"     // Für die BBRv2 Congestion Control
-#include "ebpf_zero_copy.hpp"  // Für eBPF/XDP Zero-Copy-Optimierungen
-#include "simd_optimizations.hpp"  // Für SIMD-Feature-Detection und -Optimierungen
+#include "../stealth/uTLS.hpp" // Für die uTLS-Integration
+#include "../fec/FEC_Modul.hpp"  // Consolidated FEC module implementation
+#include "../crypto/aegis128x.hpp"  // Für die SIMD-optimierte AEGIS-128X
+#include "../crypto/aegis128l.hpp"  // Für die SIMD-optimierte AEGIS-128L
+#include "../crypto/morus.hpp"      // Für die MORUS-1280-128 Fallback-Implementierung
+// Alle Optimierungen sind jetzt in unified_optimizations.hpp konsolidiert
 
-namespace quicsand {
+namespace quicfuscate {
 
 /**
  * Erweiterter Congestion-Control-Algorithmus-Typ
@@ -170,7 +167,7 @@ public:
     
     // Methoden für SIMD-optimierte FEC
     bool enable_optimized_fec(bool enable = true);
-    bool is_optimized_fec_enabled() const { return use_optimized_fec_; }
+    bool is_optimized_fec_enabled() const { return fec_enabled_; }
     
     // Allgemeine SIMD-Feature-Detection
     bool has_simd_support() const;
@@ -447,11 +444,9 @@ private:
     std::array<uint8_t, 2048> send_buf_;        // Puffer für ausgehende QUIC-Pakete
     mutable std::mutex socket_mutex_;           // Mutex für Thread-sichere Socket-Operationen
     
-    // Tetrys FEC Support
-    std::unique_ptr<TetrysFEC> fec_;                 // Standard-FEC-Implementierung
-    std::unique_ptr<OptimizedTetrysFEC> fec_optimized_; // SIMD-optimierte FEC-Implementierung
+    // Consolidated FEC Support
+    std::unique_ptr<stealth::FECModule> fec_;           // Konsolidierte FEC-Implementierung
     bool fec_enabled_{false};                        // Flag, ob FEC aktiviert ist
-    bool use_optimized_fec_{false};                 // Flag, ob optimierte FEC verwendet werden soll
     double target_redundancy_rate_{0.3};             // Ziel-Redundanzrate
     size_t packet_loss_count_{0};                    // Anzahl der verlorenen Pakete
     size_t total_packets_{0};                        // Gesamtzahl der Pakete
@@ -469,7 +464,9 @@ private:
     std::unique_ptr<SSL> ssl_;
     std::unique_ptr<EVP_CIPHER_CTX> encrypt_ctx_;
     std::unique_ptr<EVP_CIPHER_CTX> decrypt_ctx_;
-    std::unique_ptr<crypto::Aes128GcmOptimized> aes_gcm_optimized_; // SIMD-optimierte AES-GCM-Implementierung
+    std::unique_ptr<crypto::AEGIS128X> aegis128x_optimized_;  // SIMD-optimierte AEGIS-128X-Implementierung
+    std::unique_ptr<crypto::AEGIS128L> aegis128l_optimized_;  // SIMD-optimierte AEGIS-128L-Implementierung
+    std::unique_ptr<crypto::MORUS> morus_fallback_;           // MORUS-1280-128 Fallback-Implementierung
     
     // eBPF/XDP Zero-Copy Unterstützung
     bool xdp_enabled_{false};                       // Flag, ob XDP Zero-Copy aktiviert ist
@@ -594,6 +591,6 @@ private:
     void schedule_next_probe();                        // Plant den nächsten MTU-Probe
 };
 
-} // namespace quicsand
+} // namespace quicfuscate
 
 #endif // QUIC_CONNECTION_HPP

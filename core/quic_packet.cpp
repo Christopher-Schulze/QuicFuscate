@@ -1,14 +1,14 @@
 /**
  * quic_packet.cpp
  * 
- * Implementierung der QuicPacket-Klasse für das QuicSand-Projekt.
+ * Implementierung der QuicPacket-Klasse für das QuicFuscate-Projekt.
  */
 
-#include "core/quic_packet.hpp"
+#include "quic_core_types.hpp"
 #include <sstream>
 #include <iomanip>
 
-namespace quicsand {
+namespace quicfuscate {
 
 // Standardkonstruktor
 QuicPacket::QuicPacket() : header_() {}
@@ -199,4 +199,4 @@ std::string QuicPacket::to_string() const {
     return ss.str();
 }
 
-} // namespace quicsand
+} // namespace quicfuscate

@@ -12,10 +12,10 @@
 
 #include "../core/quic_connection.hpp"
 #include "../core/quic_stream.hpp"
-#include "../tls/utls_client_configurator.hpp"
+#include "../stealth/uTLS.hpp"
 #include "options.hpp"
 
-using namespace quicsand;
+using namespace quicfuscate;
 namespace po = boost::program_options;
 
 // Hilfsfunktion zum Ausgeben der verfügbaren Browser-Fingerprints
@@ -48,7 +48,7 @@ cli::CommandLineOptions parse_arguments(int argc, char** argv) {
     
     try {
         // Definiere Kommandozeilenoptionen
-        po::options_description desc("QuicSand VPN - QUIC mit uTLS Integration\nOptionen");
+        po::options_description desc("QuicFuscate VPN - QUIC mit uTLS Integration\nOptionen");
         desc.add_options()
             ("help,h", "Zeigt diese Hilfe an")
             ("server,s", po::value<std::string>(&options.server_host)->default_value("example.com"), 
@@ -116,7 +116,7 @@ int main(int argc, char** argv) {
     cli::CommandLineOptions options = parse_arguments(argc, argv);
     
     // Ausgabe der gewählten Optionen
-    std::cout << "QuicSand VPN - QUIC mit uTLS Integration" << std::endl;
+    std::cout << "QuicFuscate VPN - QUIC mit uTLS Integration" << std::endl;
     std::cout << "=========================================" << std::endl;
     std::cout << "Verbinde zu " << options.server_host << ":" << options.server_port;
     

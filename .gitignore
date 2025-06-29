@@ -29,9 +29,7 @@
 .Trashes
 
 # Ausführbare Dateien
-advanced_fec_test
-simple_fec_test
-tetrys_fec_test
+tetrys_test
 http3_simple_test
 test_utls_simple
 simple_performance_test

@@ -12,10 +12,10 @@
 #include <mutex>
 #include <vector>
 
-namespace quicsand {
+namespace quicfuscate {
 
 /**
- * @brief Kategorie für Fehler in QuicSand
+ * @brief Kategorie für Fehler in QuicFuscate
  */
 enum class ErrorCategory {
     NONE,               // Kein Fehler
@@ -591,6 +591,6 @@ inline void report_error(const ErrorInfo& error) {
 #define REPORT_ERROR(category, code, message, ...) \
     report_error(MAKE_ERROR(category, code, message, ##__VA_ARGS__))
 
-} // namespace quicsand
+} // namespace quicfuscate
 
 #endif // ERROR_HANDLING_HPP
