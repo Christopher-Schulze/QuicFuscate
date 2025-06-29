@@ -22,6 +22,7 @@
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
+#include "../core/error_handling.hpp"
 
 #ifdef __ARM_NEON
 #include <arm_neon.h>
@@ -144,20 +145,32 @@ public:
     }
     
     // Daten zuweisen
-    void assign(const uint8_t* data, size_t size) {
-        assert(size <= header_.capacity);
+    Result<void> assign(const uint8_t* data, size_t size) {
+        if (size > header_.capacity) {
+            auto err = MAKE_ERROR(ErrorCategory::RUNTIME, ErrorCode::INVALID_ARGUMENT,
+                                  "MemoryBlock assign exceeds capacity");
+            report_error(err);
+            return err;
+        }
         header_.size = size;
         header_.in_use = true;
         if (data && size > 0) {
             memcpy(data_, data, size);
         }
+        return success();
     }
     
     // Daten auf eine bestimmte Größe setzen
-    void resize(size_t size) {
-        assert(size <= header_.capacity);
+    Result<void> resize(size_t size) {
+        if (size > header_.capacity) {
+            auto err = MAKE_ERROR(ErrorCategory::RUNTIME, ErrorCode::INVALID_ARGUMENT,
+                                  "MemoryBlock resize exceeds capacity");
+            report_error(err);
+            return err;
+        }
         header_.size = size;
         header_.in_use = true;
+        return success();
     }
     
     // Getter/Setter

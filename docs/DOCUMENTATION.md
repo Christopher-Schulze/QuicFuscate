@@ -107,6 +107,28 @@ QuicFuscate/
 6. **Browser Emulation**: Comprehensive browser fingerprint profiles and TLS configurations
 7. **Cross-Platform Support**: Support for multiple operating systems and architectures
 
+### Error Handling
+QuicFuscate uses a consistent error handling system defined in `core/error_handling.hpp`.
+Functions that may fail return `Result<T>` where `T` is the successful value type.
+Errors are created with the `MAKE_ERROR` macro and reported via `report_error` or the
+convenience macro `REPORT_ERROR`. Example pattern:
+
+```cpp
+Result<void> do_something() {
+    if (!precondition) {
+        auto err = MAKE_ERROR(ErrorCategory::RUNTIME,
+                              ErrorCode::INVALID_ARGUMENT,
+                              "precondition failed");
+        report_error(err);
+        return err;
+    }
+    return success();
+}
+```
+
+The `ErrorManager` singleton collects recent errors and prints them when logging is
+enabled. Call `report_error()` whenever a recoverable error occurs.
+
 ## Module Documentation
 
 ### Core Module (`core/`)
