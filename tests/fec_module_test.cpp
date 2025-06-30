@@ -1,13 +1,15 @@
 #include "../fec/FEC_Modul.hpp"
-#include <cassert>
-int main() {
-    using namespace quicfuscate::stealth;
-    assert(fec_module_init() == 0);
+#include <gtest/gtest.h>
+
+using namespace quicfuscate::stealth;
+
+TEST(FECModuleTest, EncodeDecode) {
+    ASSERT_EQ(0, fec_module_init());
     const char msg[] = "hello";
     auto enc = fec_module_encode(reinterpret_cast<const uint8_t*>(msg), sizeof(msg));
-    assert(!enc.empty());
-
+    ASSERT_FALSE(enc.empty());
     auto dec = fec_module_decode(enc.data(), enc.size());
     fec_module_cleanup();
-    return 0;
+    ASSERT_EQ(dec.size(), sizeof(msg));
+    EXPECT_EQ(std::string(dec.begin(), dec.end()), std::string(msg, sizeof(msg)));
 }

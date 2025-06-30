@@ -8,7 +8,11 @@
 #include <functional>
 #include <unordered_map>
 #include <chrono>
+#include <future>
+#include <cstring>
 #include <sys/uio.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 #include <mutex>
 #include <condition_variable>
 #include <thread>
@@ -30,6 +34,10 @@
 #include <immintrin.h>
 #include <wmmintrin.h>
 #endif
+
+namespace quicfuscate {
+class QuicStream;
+}
 
 namespace quicfuscate::optimize {
 

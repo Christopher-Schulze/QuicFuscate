@@ -6,9 +6,18 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(OpenSSL REQUIRED)
 
+include(FetchContent)
+FetchContent_Declare(
+    googletest
+    URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
+)
+set(gtest_force_shared_crt OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(googletest)
+
 # Build the patched quiche library with Cargo
 set(QUICHE_LIB "${PROJECT_SOURCE_DIR}/libs/quiche-patched/target/release/libquiche.a")
 
+if(EXISTS "${PROJECT_SOURCE_DIR}/libs/quiche-patched/Cargo.toml")
 add_custom_command(
     OUTPUT ${QUICHE_LIB}
     COMMAND cargo build --release
@@ -24,7 +33,9 @@ set_target_properties(quiche PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${PROJECT_SOURCE_DIR}/libs/quiche-patched/include"
 )
 add_dependencies(quiche quiche_build)
+endif()
 
+if(TARGET quiche AND EXISTS "${PROJECT_SOURCE_DIR}/libs/quiche-patched/include/quiche.h")
 add_library(quicfuscate_core
     core/quic_connection_impl.cpp
     core/quic_integration_impl.cpp
@@ -48,6 +59,7 @@ target_link_libraries(quicfuscate_core
         OpenSSL::Crypto
 )
 add_dependencies(quicfuscate_core quiche_build)
+endif()
 
 add_library(quicfuscate_crypto
     crypto/aegis128l.cpp
@@ -80,6 +92,12 @@ add_library(quicfuscate_stealth
 target_include_directories(quicfuscate_stealth PUBLIC ${PROJECT_SOURCE_DIR}/stealth)
 target_link_libraries(quicfuscate_stealth PUBLIC OpenSSL::SSL OpenSSL::Crypto)
 
+add_library(quicfuscate_optimize
+    optimize/quic_stream_optimizer.cpp
+)
+target_include_directories(quicfuscate_optimize PUBLIC ${PROJECT_SOURCE_DIR}/optimize ${PROJECT_SOURCE_DIR}/core)
+
+if(TARGET quicfuscate_core)
 add_executable(quicfuscate_cli cli/quicfuscate_cli.cpp)
 target_link_libraries(quicfuscate_cli PRIVATE
     quicfuscate_core
@@ -123,9 +141,26 @@ target_link_libraries(quicfuscate_demo PRIVATE
     OpenSSL::Crypto
     quiche
 )
+endif()
 
 enable_testing()
 add_executable(fec_module_test tests/fec_module_test.cpp)
-target_link_libraries(fec_module_test PRIVATE quicfuscate_fec)
+target_link_libraries(fec_module_test PRIVATE quicfuscate_fec gtest_main)
 add_test(NAME fec_module_test COMMAND fec_module_test)
+
+add_executable(aegis128l_test tests/aegis128l_test.cpp)
+target_link_libraries(aegis128l_test PRIVATE quicfuscate_crypto gtest_main)
+add_test(NAME aegis128l_test COMMAND aegis128l_test)
+
+add_executable(morus_test tests/morus_test.cpp)
+target_link_libraries(morus_test PRIVATE quicfuscate_crypto gtest_main)
+add_test(NAME morus_test COMMAND morus_test)
+
+add_executable(stream_handling_test tests/stream_handling_test.cpp)
+target_link_libraries(stream_handling_test PRIVATE quicfuscate_optimize gtest_main)
+add_test(NAME stream_handling_test COMMAND stream_handling_test)
+
+add_executable(path_mtu_manager_test tests/path_mtu_manager_test.cpp)
+target_link_libraries(path_mtu_manager_test PRIVATE gtest_main)
+add_test(NAME path_mtu_manager_test COMMAND path_mtu_manager_test)
 
