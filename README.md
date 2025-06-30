@@ -139,6 +139,15 @@ mkdir -p build && cd build
 cmake .. && cmake --build .
 ```
 
+### Rust Workspace
+
+Additional Rust code resides under the `rust/` directory. Build all crates with:
+
+```bash
+cd rust
+cargo build --workspace
+```
+
 
 ## 🖥️ Command-Line Usage
 
@@ -171,6 +180,7 @@ runs the tests on every push or pull request. You can find the workflow in
 ```bash
 git submodule update --init --recursive
 cd libs/quiche-patched && cargo build --release && cd ../..
+cd rust && cargo build --workspace && cd ..
 mkdir -p build && cd build
 cmake .. && cmake --build .
 ctest --output-on-failure
