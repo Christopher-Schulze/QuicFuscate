@@ -87,8 +87,15 @@ After cloning the project, initialize the submodule with:
 git submodule update --init --recursive libs/quiche-patched
 ```
 
-If the fetch fails, verify that the URL in `.gitmodules` points to a
-repository that hosts the required commit.
+If the command fails with a missing commit error, the upstream
+`quiche` repository might not contain the pinned revision
+`5700a7c74927d2c4912ac95e904c6ad3642b6868`. In that case, update the
+submodule URL to a mirror that includes this commit and retry:
+
+```bash
+git submodule set-url libs/quiche-patched <mirror-url>
+git submodule update --init libs/quiche-patched
+```
 
 ### Building quiche
 
