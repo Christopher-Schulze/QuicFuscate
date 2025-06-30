@@ -20,6 +20,9 @@ jobs:
         run: |
           cd libs/quiche-patched
           cargo build --release
+      - name: Build Rust workspace
+        run: |
+          cargo build --manifest-path rust/Cargo.toml --workspace --release
       - name: Configure
         run: |
           mkdir build && cd build
