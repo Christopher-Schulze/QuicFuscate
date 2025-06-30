@@ -97,6 +97,13 @@ git submodule set-url libs/quiche-patched <mirror-url>
 git submodule update --init libs/quiche-patched
 ```
 
+Alternatively, run the helper script to automatically fetch the
+submodule and build it in one step (optionally pass a mirror URL):
+
+```bash
+./scripts/fetch_quiche.sh [mirror-url]
+```
+
 ### Building quiche
 
 Compile the patched **quiche** library using Cargo:
