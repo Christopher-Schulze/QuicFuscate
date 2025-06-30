@@ -6,11 +6,24 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(OpenSSL REQUIRED)
 
-add_library(quiche STATIC IMPORTED)
+# Build the patched quiche library with Cargo
+set(QUICHE_LIB "${PROJECT_SOURCE_DIR}/libs/quiche-patched/target/release/libquiche.a")
+
+add_custom_command(
+    OUTPUT ${QUICHE_LIB}
+    COMMAND cargo build --release
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/libs/quiche-patched
+    COMMENT "Building quiche via cargo"
+)
+
+add_custom_target(quiche_build ALL DEPENDS ${QUICHE_LIB})
+
+add_library(quiche STATIC IMPORTED GLOBAL)
 set_target_properties(quiche PROPERTIES
-    IMPORTED_LOCATION "${PROJECT_SOURCE_DIR}/libs/quiche-patched/target/release/libquiche.a"
+    IMPORTED_LOCATION "${QUICHE_LIB}"
     INTERFACE_INCLUDE_DIRECTORIES "${PROJECT_SOURCE_DIR}/libs/quiche-patched/include"
 )
+add_dependencies(quiche quiche_build)
 
 add_library(quicfuscate_core
     core/quic_connection_impl.cpp
@@ -34,6 +47,7 @@ target_link_libraries(quicfuscate_core
         OpenSSL::SSL
         OpenSSL::Crypto
 )
+add_dependencies(quicfuscate_core quiche_build)
 
 add_library(quicfuscate_crypto
     crypto/aegis128l.cpp
