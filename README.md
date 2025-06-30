@@ -143,7 +143,9 @@ cmake .. && cmake --build .
 
 Additional Rust code resides under the `rust/` directory. It currently
 contains an empty `core` crate serving as the foundation for the upcoming
-Rust reimplementation. Build all crates with:
+Rust reimplementation. The workspace root `rust/Cargo.toml` opts into the
+edition 2021 resolver and is built as part of the CI pipeline. Build all
+crates locally with:
 
 ```bash
 cd rust
