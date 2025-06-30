@@ -119,6 +119,20 @@ cd build
 ctest --output-on-failure
 ```
 
+## 👷 Developer Notes
+
+The CMake build expects the patched **quiche** sources under
+`libs/quiche-patched` to be compiled with Cargo. When configuring the project
+manually run:
+
+```bash
+git submodule update --init --recursive libs/quiche-patched
+cd libs/quiche-patched && cargo build --release && cd ../..
+mkdir -p build && cd build
+cmake .. && cmake --build .
+```
+
+
 ## 🖥️ Command-Line Usage
 
 The project provides several binaries once built:
