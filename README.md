@@ -90,9 +90,13 @@ After cloning the project, initialize the submodule with:
 git submodule update --init --recursive libs/quiche-patched
 ```
 
-If the command fails with a missing commit error, the upstream
-`quiche` repository might not contain the pinned revision
-`5700a7c74927d2c4912ac95e904c6ad3642b6868`. In that case, update the
+If the command fails with a missing commit error (e.g.
+```
+fatal: remote error: upload-pack: not our ref 5700a7c74927d2c4912ac95e904c6ad3642b6868
+Fetched in submodule path 'libs/quiche-patched', but it did not contain 5700a7c74927d2c4912ac95e904c6ad3642b6868.
+```
+), the upstream `quiche` repository might not contain the pinned
+revision `5700a7c74927d2c4912ac95e904c6ad3642b6868`. Update the
 submodule URL to a mirror that includes this commit and retry:
 
 ```bash
@@ -100,8 +104,9 @@ git submodule set-url libs/quiche-patched <mirror-url>
 git submodule update --init libs/quiche-patched
 ```
 
-Alternatively, run the helper script to automatically fetch the
-submodule and build it in one step (optionally pass a mirror URL):
+Alternatively, run the helper script to automatically set the mirror,
+fetch the sources and build the library in one step (optionally pass a
+mirror URL):
 
 ```bash
 ./scripts/fetch_quiche.sh [mirror-url]

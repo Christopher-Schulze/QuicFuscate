@@ -2312,6 +2312,36 @@ int main() {
 ### Libraries
 - `libs/quiche-patched/`: Modified QUIC implementation from Google
 
+#### Fetching `libs/quiche-patched`
+The directory is left empty in the repository. Initialize the submodule
+after cloning:
+
+```bash
+git submodule update --init --recursive libs/quiche-patched
+```
+
+If you encounter an error like:
+
+```
+fatal: remote error: upload-pack: not our ref 5700a7c74927d2c4912ac95e904c6ad3642b6868
+Fetched in submodule path 'libs/quiche-patched', but it did not contain 5700a7c74927d2c4912ac95e904c6ad3642b6868.
+```
+
+the upstream repository lacks the pinned revision. Set the submodule URL
+to a mirror that contains the commit and fetch again:
+
+```bash
+git submodule set-url libs/quiche-patched <mirror-url>
+git submodule update --init libs/quiche-patched
+```
+
+Alternatively, run the helper script from the repository root, which
+automatically updates the URL and builds the library:
+
+```bash
+./scripts/fetch_quiche.sh [mirror-url]
+```
+
 ## Verification
 This documentation has been verified to cover all files in the QuicFuscate project:
 
