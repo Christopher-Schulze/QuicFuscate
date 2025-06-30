@@ -141,7 +141,9 @@ cmake .. && cmake --build .
 
 ### Rust Workspace
 
-Additional Rust code resides under the `rust/` directory. Build all crates with:
+Additional Rust code resides under the `rust/` directory. It currently
+contains an empty `core` crate serving as the foundation for the upcoming
+Rust reimplementation. Build all crates with:
 
 ```bash
 cd rust
