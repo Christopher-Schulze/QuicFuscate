@@ -54,3 +54,7 @@
 - Kompilierung funktioniert wieder ohne fehlende Header-Includes
 - Einheitliche SIMD-API für das gesamte Projekt
 - Reduzierte Code-Duplikation und verbesserte Wartbarkeit
+
+---
+
+*Ende des Changelogs*

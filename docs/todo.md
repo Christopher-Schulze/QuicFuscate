@@ -299,24 +299,10 @@ Scalar	2.0 cpb	3.8 cpb	5 cpb
 Fertig – du bekommst “geisteskrank resilient” FEC, das bei Top-Leitungen komplett wegklappt, auf Schrott-Netzen aber wie ein Berserker Parity nachlädt, ohne deine CPU zu grillen.
 
 Run it, break the net. 🫡
+## Noch zu erledigen
 
+- Kompletter Rebuild in Rust ohne Stubs, produktionsreifer Code
+- FEC-Modul überarbeiten (siehe FEC.rs)
+- Module konsolidieren: je eine Datei für main, crypto, fec, optimized und stealth
 
-
-NOCH ZU ERLEDIGEN
-
-Kompletter rebuild in RUST, vollständig und ohne stubs, kompletter produktion ready code only!
-
-!!!!!! WICHTIG !!!!!!
-
-
-FEC Modul ggf. überarbeiten siehe FEC.rs file
-Module alle konsulidieren
-
-Nur ein file je für: main, crypto, fec, optimized, stealth
-
-
-!!!!!! WICHTIG !!!!!!
-
-
----
-so sieht die umstellung dann aus aber erstmal nix machen, ich sage dir bescheid
+Weitere Änderungen werden hier dokumentiert.
