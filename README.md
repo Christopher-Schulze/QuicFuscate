@@ -81,6 +81,9 @@ This project is currently being refactored from C++ to Rust to leverage modern l
 ## 🔧 Build Instructions
 
 This repository uses a Git submodule to include a patched QUIC library.
+The `libs/quiche-patched` directory is intentionally left empty in the
+repository to avoid bloating the checkout size. Fetch the sources after
+cloning using one of the methods below.
 After cloning the project, initialize the submodule with:
 
 ```bash
