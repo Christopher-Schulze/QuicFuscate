@@ -156,11 +156,10 @@ cmake .. && cmake --build .
 
 ### Rust Workspace
 
-Additional Rust code resides under the `rust/` directory. It currently
-contains an empty `core` crate serving as the foundation for the upcoming
-Rust reimplementation. The workspace root `rust/Cargo.toml` opts into the
-edition 2021 resolver and is built as part of the CI pipeline. Build all
-crates locally with:
+The Rust implementation lives in the `rust/` directory. It contains the
+`core`, `crypto`, `fec`, `stealth` and `cli` crates along with integration
+tests. The workspace root `rust/Cargo.toml` uses the edition 2021 resolver.
+Build all crates locally with:
 
 ```bash
 cd rust

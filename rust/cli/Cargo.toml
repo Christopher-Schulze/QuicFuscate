@@ -24,5 +24,5 @@ path = "src/quicfuscate_server.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-core = { workspace = true }
-stealth = { workspace = true }
+core = { path = "../core" }
+stealth = { path = "../stealth" }

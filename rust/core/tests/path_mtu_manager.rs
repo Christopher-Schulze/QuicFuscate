@@ -1,4 +1,4 @@
-use quicfuscate_core::{PathMtuManager, DEFAULT_MIN_MTU, DEFAULT_MAX_MTU};
+use core::{PathMtuManager, DEFAULT_MIN_MTU, DEFAULT_MAX_MTU};
 
 #[test]
 fn constants_range() {
