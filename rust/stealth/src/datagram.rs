@@ -1,22 +1,29 @@
-use tokio::sync::mpsc::{unbounded_channel, UnboundedSender, UnboundedReceiver};
+use std::collections::VecDeque;
 
 pub struct DatagramEngine {
-    tx: UnboundedSender<Vec<u8>>,
-    rx: UnboundedReceiver<Vec<u8>>,
+    queue: VecDeque<(u8, Vec<u8>)>,
 }
 
 impl DatagramEngine {
     pub fn new() -> Self {
-        let (tx, rx) = unbounded_channel();
-        Self { tx, rx }
+        Self { queue: VecDeque::new() }
     }
 
-    pub fn send(&self, data: Vec<u8>) {
-        let _ = self.tx.send(data);
+    pub fn send(&mut self, data: Vec<u8>, priority: u8) {
+        self.queue.push_back((priority, data));
     }
 
     pub async fn recv(&mut self) -> Option<Vec<u8>> {
-        self.rx.recv().await
+        if self.queue.is_empty() {
+            return None;
+        }
+        let idx = self
+            .queue
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, (p, _))| *p)
+            .map(|(i, _)| i)?;
+        Some(self.queue.remove(idx).unwrap().1)
     }
 }
 
@@ -30,7 +37,7 @@ mod tests {
         let rt = Runtime::new().unwrap();
         rt.block_on(async {
             let mut eng = DatagramEngine::new();
-            eng.send(vec![1,2,3]);
+            eng.send(vec![1,2,3], 1);
             let data = eng.recv().await.unwrap();
             assert_eq!(data, vec![1,2,3]);
         });
