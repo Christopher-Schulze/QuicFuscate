@@ -7,6 +7,10 @@ edition = "2021"
 path = "src/lib.rs"
 
 [[bin]]
+name = "quicfuscate"
+path = "src/main.rs"
+
+[[bin]]
 name = "quicfuscate_demo"
 path = "src/main.rs"
 
@@ -18,18 +22,7 @@ path = "src/quicfuscate_client.rs"
 name = "quicfuscate_server"
 path = "src/quicfuscate_server.rs"
 
-dependencies = [
-    "clap",
-    "core",
-    "stealth"
-]
-
-[dependencies.clap]
-version = "4"
-features = ["derive"]
-
-[dependencies.core]
-workspace = true
-
-[dependencies.stealth]
-workspace = true
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+core = { workspace = true }
+stealth = { workspace = true }

@@ -1,20 +1,20 @@
 mod options;
 use clap::Parser;
 use options::{CommandLineOptions, Fingerprint};
-use core as quic_core; // dummy use
+use core as quic_core; // dummy use, kann entfernt werden, falls nicht gebraucht
 use stealth::QuicFuscateStealth;
 
 fn print_fingerprints() {
-    println!("Verfuegbare Browser-Fingerprints:");
-    println!("  chrome        - Google Chrome (neueste Version)");
-    println!("  firefox       - Mozilla Firefox (neueste Version)");
-    println!("  safari        - Apple Safari (neueste Version)");
-    println!("  edge          - Microsoft Edge (Chromium-basiert)");
-    println!("  brave         - Brave Browser");
-    println!("  opera         - Opera Browser");
+    println!("Verfügbare Browser-Fingerprints:");
+    println!("  chrome         - Google Chrome (neueste Version)");
+    println!("  firefox        - Mozilla Firefox (neueste Version)");
+    println!("  safari         - Apple Safari (neueste Version)");
+    println!("  edge           - Microsoft Edge (Chromium-basiert)");
+    println!("  brave          - Brave Browser");
+    println!("  opera          - Opera Browser");
     println!("  chrome_android - Chrome auf Android");
-    println!("  safari_ios    - Safari auf iOS");
-    println!("  random        - Zufalliger Fingerprint");
+    println!("  safari_ios     - Safari auf iOS");
+    println!("  random         - Zufälliger Fingerprint");
 }
 
 fn main() {
