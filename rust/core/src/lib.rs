@@ -36,6 +36,15 @@ pub struct QuicConnection {
     zero_copy: bool,
 }
 
+/// Configuration for zero-copy behaviour.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ZeroCopyConfig {
+    /// Enable zero-copy for sending operations.
+    pub enable_send: bool,
+    /// Enable zero-copy for receiving operations.
+    pub enable_recv: bool,
+}
+
 impl QuicConnection {
     /// Create a new connection instance from the given config.
     pub fn new(config: QuicConfig) -> Result<Self, CoreError> {
@@ -82,30 +91,154 @@ impl QuicConnection {
     pub fn enable_zero_copy(&mut self, enable: bool) {
         self.zero_copy = enable;
     }
+
+    /// Configure zero-copy behaviour using [`ZeroCopyConfig`].
+    pub fn configure_zero_copy(&mut self, cfg: ZeroCopyConfig) {
+        self.zero_copy = cfg.enable_send || cfg.enable_recv;
+    }
+
+    /// Retrieve the current zero-copy configuration.
+    pub fn zero_copy_config(&self) -> ZeroCopyConfig {
+        if self.zero_copy {
+            ZeroCopyConfig {
+                enable_send: true,
+                enable_recv: true,
+            }
+        } else {
+            ZeroCopyConfig::default()
+        }
+    }
+
+    /// Check whether zero-copy is enabled.
+    pub fn is_zero_copy_enabled(&self) -> bool {
+        self.zero_copy
+    }
+}
+
+/// Manager for sending and validating MTU probes.
+use std::collections::HashMap;
+
+/// Status of MTU discovery on a path.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum MtuStatus {
+    Disabled,
+    Searching,
+    Validating,
+    Blackhole,
+    Complete,
 }
 
 /// Manager for sending and validating MTU probes.
 pub struct PathMtuManager {
-    current: u16,
+    outgoing_mtu: u16,
+    incoming_mtu: u16,
+    min_mtu: u16,
+    max_mtu: u16,
     step: u16,
+    bidirectional: bool,
+    next_probe_id: u32,
+    probes: HashMap<u32, (bool, u16)>,
+    outgoing_status: MtuStatus,
+    incoming_status: MtuStatus,
 }
 
 impl PathMtuManager {
     pub fn new() -> Self {
         Self {
-            current: DEFAULT_INITIAL_MTU,
+            outgoing_mtu: DEFAULT_INITIAL_MTU,
+            incoming_mtu: DEFAULT_INITIAL_MTU,
+            min_mtu: DEFAULT_MIN_MTU,
+            max_mtu: DEFAULT_MAX_MTU,
             step: DEFAULT_MTU_STEP_SIZE,
+            bidirectional: false,
+            next_probe_id: 0,
+            probes: HashMap::new(),
+            outgoing_status: MtuStatus::Disabled,
+            incoming_status: MtuStatus::Disabled,
+        }
+    }
+
+    /// Enable or disable bidirectional MTU discovery.
+    pub fn enable_bidirectional_discovery(&mut self, enable: bool) {
+        self.bidirectional = enable;
+    }
+
+    /// Check if bidirectional MTU discovery is enabled.
+    pub fn is_bidirectional_discovery_enabled(&self) -> bool {
+        self.bidirectional
+    }
+
+    /// Manually set the MTU size used for probes.
+    pub fn set_mtu_size(&mut self, mtu: u16, apply_both: bool) {
+        self.outgoing_mtu = mtu;
+        if apply_both {
+            self.incoming_mtu = mtu;
+        }
+    }
+
+    /// Get the current outgoing MTU.
+    pub fn get_outgoing_mtu(&self) -> u16 {
+        self.outgoing_mtu
+    }
+
+    /// Get the current incoming MTU.
+    pub fn get_incoming_mtu(&self) -> u16 {
+        self.incoming_mtu
+    }
+
+    /// Update discovery parameters.
+    pub fn set_discovery_params(
+        &mut self,
+        min_mtu: u16,
+        max_mtu: u16,
+        step: u16,
+        apply_both: bool,
+    ) {
+        self.min_mtu = min_mtu;
+        self.max_mtu = max_mtu;
+        self.step = step;
+        if apply_both {
+            self.incoming_mtu = min_mtu;
+            self.outgoing_mtu = min_mtu;
         }
     }
 
     /// Send a probe of the given size. Returns a probe identifier.
-    pub fn send_probe(&self, _size: u16, _incoming: bool) -> u32 {
-        // For the purposes of the tests we simply return a dummy ID.
-        1
+    pub fn send_probe(&mut self, size: u16, incoming: bool) -> u32 {
+        self.next_probe_id += 1;
+        self.probes.insert(self.next_probe_id, (incoming, size));
+        self.next_probe_id
     }
 
     /// Handle the result of a previously sent probe.
-    pub fn handle_probe_response(&self, _id: u32, _success: bool, _incoming: bool) {}
+    pub fn handle_probe_response(&mut self, id: u32, success: bool, incoming: bool) {
+        if let Some((probe_incoming, size)) = self.probes.remove(&id) {
+            if probe_incoming == incoming && success {
+                if incoming {
+                    self.incoming_mtu = size.min(self.max_mtu);
+                    self.incoming_status = MtuStatus::Complete;
+                } else {
+                    self.outgoing_mtu = size.min(self.max_mtu);
+                    self.outgoing_status = MtuStatus::Complete;
+                }
+            }
+        }
+    }
+
+    /// Simple dynamic adjustment based on observed loss and RTT.
+    pub fn adapt_mtu_dynamically(&mut self, packet_loss_rate: f32, rtt_ms: u32) {
+        if packet_loss_rate > 0.1 {
+            let new_mtu = self.outgoing_mtu.saturating_sub(self.step);
+            self.outgoing_mtu = new_mtu.max(self.min_mtu);
+        } else if packet_loss_rate == 0.0 && rtt_ms < 100 {
+            let new_mtu = self.outgoing_mtu.saturating_add(self.step);
+            self.outgoing_mtu = new_mtu.min(self.max_mtu);
+        }
+
+        if self.bidirectional {
+            self.incoming_mtu = self.outgoing_mtu;
+        }
+    }
 }
 
 pub struct StreamOptimizationConfig;
@@ -144,14 +277,17 @@ mod tests {
 
     #[test]
     fn constructible() {
-        let cfg = QuicConfig { server_name: "localhost".into(), port: 443 };
+        let cfg = QuicConfig {
+            server_name: "localhost".into(),
+            port: 443,
+        };
         let conn = QuicConnection::new(cfg);
         assert!(conn.is_ok());
     }
 
     #[test]
     fn has_probe_methods() {
-        let mgr = PathMtuManager::new();
+        let mut mgr = PathMtuManager::new();
         let id = mgr.send_probe(1200, false);
         mgr.handle_probe_response(id, true, false);
     }
