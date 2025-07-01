@@ -22,14 +22,14 @@ impl Aegis128L {
         tag: &mut [u8; Self::TAG_SIZE],
     ) -> Result<(), CryptoError> {
         #[cfg(target_arch = "aarch64")]
-        if crate::features::neon_available() {
-            // SAFETY: we just checked that NEON is available
+        if std::arch::is_aarch64_feature_detected!("neon") {
+            // SAFETY: we just checked that NEON is available at runtime
             unsafe { return self.encrypt_neon(plaintext, key, nonce, _ad, ciphertext, tag); }
         }
 
         #[cfg(target_arch = "x86_64")]
-        if crate::features::aesni_available() {
-            // SAFETY: AES-NI availability was verified
+        if std::arch::is_x86_feature_detected!("aes") {
+            // SAFETY: AES-NI availability was verified at runtime
             unsafe { return self.encrypt_aesni(plaintext, key, nonce, _ad, ciphertext, tag); }
         }
 
@@ -46,13 +46,13 @@ impl Aegis128L {
         plaintext: &mut Vec<u8>,
     ) -> Result<(), CryptoError> {
         #[cfg(target_arch = "aarch64")]
-        if crate::features::neon_available() {
+        if std::arch::is_aarch64_feature_detected!("neon") {
             // SAFETY: NEON availability checked above
             unsafe { return self.decrypt_neon(ciphertext, key, nonce, _ad, tag, plaintext); }
         }
 
         #[cfg(target_arch = "x86_64")]
-        if crate::features::aesni_available() {
+        if std::arch::is_x86_feature_detected!("aes") {
             // SAFETY: AES-NI availability checked above
             unsafe { return self.decrypt_aesni(ciphertext, key, nonce, _ad, tag, plaintext); }
         }
@@ -61,7 +61,17 @@ impl Aegis128L {
     }
 
     pub fn is_hardware_accelerated(&self) -> bool {
-        crate::features::aesni_available() || crate::features::neon_available()
+        #[cfg(target_arch = "x86_64")]
+        if std::arch::is_x86_feature_detected!("aes") {
+            return true;
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        if std::arch::is_aarch64_feature_detected!("neon") {
+            return true;
+        }
+
+        false
     }
 
     fn encrypt_software(
