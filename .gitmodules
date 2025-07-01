@@ -1,3 +1,0 @@
-[submodule "libs/quiche-patched"]
-	path = libs/quiche-patched
-	url = https://github.com/cloudflare/quiche.git
