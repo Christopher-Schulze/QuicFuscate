@@ -11,12 +11,12 @@ const EXPECTED_TAG: [u8; 16] = [
 ];
 
 #[test]
-fn encrypt_decrypt_vectors() {
+fn encrypt_decrypt_vectors() -> Result<(), crypto::CryptoError> {
     std::env::set_var("FORCE_SOFTWARE", "1");
     let cipher = Morus1280::new();
     let mut ct = Vec::new();
     let mut tag = [0u8; 16];
-    cipher.encrypt(MSG, &KEY, &NONCE, b"", &mut ct, &mut tag).unwrap();
+    cipher.encrypt(MSG, &KEY, &NONCE, b"", &mut ct, &mut tag)?;
     assert_eq!(ct, EXPECTED_CT);
     assert_eq!(tag, EXPECTED_TAG);
 
@@ -24,4 +24,5 @@ fn encrypt_decrypt_vectors() {
     let res = cipher.decrypt(&ct, &KEY, &NONCE, b"", &tag, &mut pt);
     assert!(res.is_err());
     assert_eq!(pt, MSG);
+    Ok(())
 }

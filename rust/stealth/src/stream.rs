@@ -32,7 +32,7 @@ impl StreamEngine {
             .enumerate()
             .max_by_key(|(_, (id, _))| self.priorities.get(id).cloned().unwrap_or(0))
             .map(|(i, _)| i)?;
-        Some(self.queue.remove(idx).unwrap())
+        self.queue.remove(idx)
     }
 }
 
@@ -42,15 +42,17 @@ mod tests {
     use tokio::runtime::Runtime;
 
     #[test]
-    fn stream_roundtrip() {
-        let rt = Runtime::new().unwrap();
+    fn stream_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+        let rt = Runtime::new()?;
         rt.block_on(async {
             let mut eng = StreamEngine::new();
             let id = eng.create_stream(1);
             eng.send(id, vec![4,5,6]);
-            let (rid, data) = eng.recv().await.unwrap();
+            let (rid, data) = eng.recv().await.ok_or("no data")?;
             assert_eq!(rid, id);
             assert_eq!(data, vec![4,5,6]);
-        });
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })?;
+        Ok(())
     }
 }

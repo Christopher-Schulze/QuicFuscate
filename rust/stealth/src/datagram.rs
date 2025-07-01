@@ -23,7 +23,7 @@ impl DatagramEngine {
             .enumerate()
             .max_by_key(|(_, (p, _))| *p)
             .map(|(i, _)| i)?;
-        Some(self.queue.remove(idx).unwrap().1)
+        self.queue.remove(idx).map(|(_, data)| data)
     }
 }
 
@@ -33,13 +33,15 @@ mod tests {
     use tokio::runtime::Runtime;
 
     #[test]
-    fn send_receive() {
-        let rt = Runtime::new().unwrap();
+    fn send_receive() -> Result<(), Box<dyn std::error::Error>> {
+        let rt = Runtime::new()?;
         rt.block_on(async {
             let mut eng = DatagramEngine::new();
             eng.send(vec![1,2,3], 1);
-            let data = eng.recv().await.unwrap();
+            let data = eng.recv().await.ok_or("no data")?;
             assert_eq!(data, vec![1,2,3]);
-        });
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })?;
+        Ok(())
     }
 }

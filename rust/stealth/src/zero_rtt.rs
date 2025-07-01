@@ -28,11 +28,12 @@ mod tests {
     use tokio::runtime::Runtime;
 
     #[test]
-    fn send_fails_without_enable() {
-        let rt = Runtime::new().unwrap();
+    fn send_fails_without_enable() -> Result<(), Box<dyn std::error::Error>> {
+        let rt = Runtime::new()?;
         rt.block_on(async {
             let mut eng = ZeroRttEngine::new();
             assert!(eng.send_early_data(b"x").await.is_err());
         });
+        Ok(())
     }
 }

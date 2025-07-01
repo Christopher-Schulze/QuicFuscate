@@ -261,7 +261,8 @@ impl Morus1280 {
             state.copy_within(4..20, 0);
             state[16..20].copy_from_slice(&tmp_state);
 
-            let src_block: [u64;4] = state[0..4].try_into().unwrap();
+            let mut src_block = [0u64; 4];
+            src_block.copy_from_slice(&state[0..4]);
             Self::rotl_256(&mut state[0..4], &src_block, ((round + 1) * 7) as i32);
         }
     }
