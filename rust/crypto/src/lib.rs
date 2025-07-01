@@ -34,8 +34,6 @@ impl CipherSuiteSelector {
     fn select_best_cipher_suite_internal() -> CipherSuite {
         if features::vaes_available() {
             CipherSuite::Aegis128xVaes512
-        } else if features::aesni_available() {
-            CipherSuite::Aegis128xAesni
         } else if features::neon_available() {
             CipherSuite::Aegis128lNeon
         } else if features::aesni_available() {
