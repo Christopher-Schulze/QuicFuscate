@@ -1,4 +1,4 @@
-use quicfuscate_core::{QuicConfig, QuicConnection};
+use core::{QuicConfig, QuicConnection};
 
 #[test]
 fn constructible() {

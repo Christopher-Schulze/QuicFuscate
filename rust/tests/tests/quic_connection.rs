@@ -1,8 +1,8 @@
-use core::{IoContext, QuicConfig, QuicConnection};
+use core::{QuicConfig, QuicConnection};
 
 #[test]
 fn constructible() {
-    let ctx = IoContext;
-    let cfg = QuicConfig;
-    let _conn = QuicConnection::new(&ctx, cfg);
+    let cfg = QuicConfig { server_name: "localhost".into(), port: 443 };
+    let conn = QuicConnection::new(cfg);
+    assert!(conn.is_ok());
 }

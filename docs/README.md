@@ -1,7 +1,7 @@
-# Rust QuicFuscate Documentation
+# Rust Workspace Documentation
 
 This directory contains documentation for the Rust reimplementation of **QuicFuscate**. The
-original C++ code base is documented in [`docs/DOCUMENTATION.md`](../../docs/DOCUMENTATION.md).
+original C++ code base is documented in [`DOCUMENTATION.md`](DOCUMENTATION.md).
 The Rust modules mirror the same high level design while taking advantage of
 Rust's safety guarantees and build tooling.
 
