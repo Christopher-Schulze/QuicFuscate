@@ -27,6 +27,7 @@
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
 #include "../core/error_handling.hpp"
+#include "../core/quic_constants.hpp"
 
 #ifdef __ARM_NEON
 #include <arm_neon.h>
@@ -895,7 +896,7 @@ private:
 struct UnifiedOptimizationConfig {
     // Memory settings
     size_t memory_pool_size = 16 * 1024 * 1024;
-    size_t memory_block_size = 4096;
+    size_t memory_block_size = DEFAULT_MEMORY_BLOCK_SIZE;
     bool use_zero_copy = true;
     
     // Threading settings
@@ -912,7 +913,7 @@ struct UnifiedOptimizationConfig {
     bool enable_prefetching = true;
     
     // QPACK settings
-    size_t qpack_dynamic_table_size = 4096;
+    size_t qpack_dynamic_table_size = DEFAULT_QPACK_DYNAMIC_TABLE_SIZE;
     bool qpack_use_huffman = true;
     
     // Zero-RTT settings
@@ -1033,7 +1034,7 @@ namespace simd {
 namespace memory {
     struct MemoryPoolConfig {
         size_t pool_size = 1024 * 1024;
-        size_t block_size = 4096;
+        size_t block_size = DEFAULT_MEMORY_BLOCK_SIZE;
         bool numa_aware = true;
     };
     
@@ -1148,7 +1149,7 @@ struct BurstConfig {
     uint32_t max_burst_interval_ms = 200;
     
     size_t min_burst_size = 512;
-    size_t max_burst_size = 4096;
+    size_t max_burst_size = DEFAULT_MAX_BURST_SIZE;
     size_t optimal_burst_size = 1400;
     
     BurstFrameType frame_type = BurstFrameType::HTTP3_CHUNKED;
