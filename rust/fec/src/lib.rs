@@ -298,10 +298,28 @@ pub extern "C" fn fec_module_get_statistics(buf: *mut StatFFI) -> i32 {
     if let Some(mod_ref) = &*g {
         if buf.is_null() { return -1; }
         let stats = mod_ref.get_statistics();
-        unsafe { *buf = StatFFI { packets_encoded: stats.packets_encoded, packets_decoded: stats.packets_decoded, repair_packets_generated: stats.repair_packets_generated }; }
+        unsafe { *buf = StatFFI {
+            packets_encoded: stats.packets_encoded,
+            packets_decoded: stats.packets_decoded,
+            repair_packets_generated: stats.repair_packets_generated,
+        }; }
         return 0;
     }
     -1
+}
+
+pub fn fec_module_init_stub() -> i32 {
+    0
+}
+
+pub fn fec_module_cleanup_stub() {}
+
+pub fn fec_module_encode_stub(data: &[u8]) -> Vec<u8> {
+    data.to_vec()
+}
+
+pub fn fec_module_decode_stub(data: &[u8]) -> Vec<u8> {
+    data.to_vec()
 }
 
 #[cfg(test)]
@@ -323,4 +341,3 @@ mod tests {
         assert_eq!(dec, msg);
     }
 }
-

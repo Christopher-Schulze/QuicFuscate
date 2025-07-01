@@ -1,0 +1,10 @@
+[workspace]
+members = [
+    "core",
+    "cli",
+]
+resolver = "2"
+
+[workspace.dependencies]
+core = { path = "../rust/core" }
+stealth = { path = "../rust/stealth" }
