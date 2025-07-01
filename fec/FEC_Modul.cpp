@@ -703,12 +703,12 @@ std::string FECModule::get_hardware_report() {
 
 // C-style interface implementation
 extern "C" {
-    static FECModule* global_fec_module = nullptr;
+    static std::unique_ptr<FECModule> global_fec_module;
     
     int fec_module_init() {
         try {
             if (!global_fec_module) {
-                global_fec_module = new FECModule();
+                global_fec_module = std::make_unique<FECModule>();
             }
             return 0;
         } catch (...) {
@@ -717,8 +717,7 @@ extern "C" {
     }
     
     void fec_module_cleanup() {
-        delete global_fec_module;
-        global_fec_module = nullptr;
+        global_fec_module.reset();
     }
     
     std::vector<uint8_t> fec_module_encode(const uint8_t* data, size_t data_size) {
