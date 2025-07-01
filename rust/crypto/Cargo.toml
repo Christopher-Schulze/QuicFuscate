@@ -7,3 +7,4 @@ edition = "2021"
 path = "src/lib.rs"
 
 [dependencies]
+subtle = "2.4"
