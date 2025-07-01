@@ -209,6 +209,8 @@ This software is provided under a custom license that allows:
 
 Commercial use, distribution, or incorporation into commercial products is strictly prohibited without explicit permission.
 
+See [LICENSE](LICENSE) for details.
+
 ## ⚠️ Important Notice
 
 This software is provided "as is" without any warranties. The developers assume no responsibility for any damage caused by the use of this software. Use at your own risk.
