@@ -5,6 +5,9 @@ original C++ code base is documented in [`DOCUMENTATION.md`](DOCUMENTATION.md).
 The Rust modules mirror the same high level design while taking advantage of
 Rust's safety guarantees and build tooling.
 
+> **Note:** Only one Rust workspace exists. All crates reside under the `rust/`
+directory and there is no separate `Rust-QuicFuscate` folder.
+
 ## Module Overview
 
 ### Core Crate
