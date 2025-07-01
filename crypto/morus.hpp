@@ -5,6 +5,7 @@
 namespace quicfuscate {
 namespace crypto {
 
+[[deprecated("Use Rust implementation in rust/crypto")]]
 class MORUS {
 public:
     MORUS();

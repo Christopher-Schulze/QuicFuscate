@@ -29,6 +29,7 @@ namespace crypto {
  * - Primäre Wahl für ARM-Systeme mit Crypto Extensions
  * - Gute Wahl für x86-Systeme ohne VAES
  */
+[[deprecated("Use Rust implementation in rust/crypto")]]
 class AEGIS128L {
 public:
     static constexpr size_t KEY_SIZE = 16;    // 128-bit key
