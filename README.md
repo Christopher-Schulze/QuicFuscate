@@ -20,6 +20,10 @@ QuicFuscate represents the pinnacle of privacy-focused networking, combining cut
 
 > **Note:** This project is currently in active development, being refactored from C++ to Rust for enhanced performance and security.
 
+The repository contains a **single** Rust workspace located in the `rust/`
+directory. Historical references to a `Rust-QuicFuscate` directory are obsolete
+because all crates have been consolidated under `rust/`.
+
 ## ✨ Core Features
 
 ### 🛡️ Advanced Stealth Technology
