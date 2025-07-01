@@ -12,6 +12,8 @@ const AEGIS_C1: [u8; 16] = [
     0x20, 0x11, 0x31, 0x42, 0x73, 0xb5, 0x28, 0xdd,
 ];
 
+use crate::features;
+
 pub struct Aegis128X;
 
 impl Aegis128X {
@@ -80,7 +82,48 @@ impl Aegis128X {
     }
 }
 
+// ========== X86_64 AESNI/VAES ==========
+
 impl Aegis128X {
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "aes")]
+    unsafe fn aegis_update_vaes(state: &mut [__m128i; 8], msg0: __m128i, msg1: __m128i) {
+        use std::arch::x86_64::*;
+        let mut tmp: [__m128i; 8] = [_mm_setzero_si128(); 8];
+
+        tmp[0] = _mm_aesenc_si128(state[7], state[0]);
+        tmp[1] = _mm_aesenc_si128(state[0], state[1]);
+        tmp[2] = _mm_aesenc_si128(state[1], state[2]);
+        tmp[3] = _mm_aesenc_si128(state[2], state[3]);
+        tmp[4] = _mm_aesenc_si128(state[3], state[4]);
+        tmp[5] = _mm_aesenc_si128(state[4], state[5]);
+        tmp[6] = _mm_aesenc_si128(state[5], state[6]);
+        tmp[7] = _mm_aesenc_si128(state[6], state[7]);
+
+        state[0] = _mm_xor_si128(tmp[0], msg0);
+        state[1] = tmp[1];
+        state[2] = tmp[2];
+        state[3] = tmp[3];
+        state[4] = _mm_xor_si128(tmp[4], msg1);
+        state[5] = tmp[5];
+        state[6] = tmp[6];
+        state[7] = tmp[7];
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "aes")]
+    unsafe fn aegis_encrypt_block_vaes(state: &mut [__m128i; 8], plaintext: __m128i) -> __m128i {
+        use std::arch::x86_64::*;
+        let mut ct = _mm_xor_si128(plaintext, state[1]);
+        ct = _mm_xor_si128(ct, state[4]);
+        ct = _mm_xor_si128(ct, state[5]);
+        ct = _mm_xor_si128(ct, _mm_and_si128(state[2], state[3]));
+
+        Self::aegis_update_vaes(state, plaintext, _mm_setzero_si128());
+
+        ct
+    }
+
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "aes")]
     unsafe fn encrypt_vaes512(
@@ -94,9 +137,7 @@ impl Aegis128X {
     ) -> Result<(), CryptoError> {
         use std::arch::x86_64::*;
 
-        let mut state: [__m128i; 8] = [
-            _mm_setzero_si128(); 8
-        ];
+        let mut state: [__m128i; 8] = [_mm_setzero_si128(); 8];
 
         let key_block = _mm_loadu_si128(key.as_ptr() as *const __m128i);
         let nonce_block = _mm_loadu_si128(nonce.as_ptr() as *const __m128i);
@@ -177,7 +218,7 @@ impl Aegis128X {
         ciphertext: &mut Vec<u8>,
         tag: &mut [u8; Self::TAG_SIZE],
     ) -> Result<(), CryptoError> {
-        // AES-NI branch reuses the VAES logic on 128-bit registers
+        // Auf x86_64 ist die VAES512-Implementierung die einzige echte, AESNI routed hierhin!
         self.encrypt_vaes512(plaintext, key, nonce, ad, ciphertext, tag)
     }
 
@@ -192,9 +233,10 @@ impl Aegis128X {
         tag: &[u8; Self::TAG_SIZE],
         plaintext: &mut Vec<u8>,
     ) -> Result<(), CryptoError> {
-        // Simplified: reuse encryption logic for demonstration
-        self.encrypt_vaes512(ciphertext, key, nonce, ad, plaintext, &mut [0u8; 16])?;
-        if tag.ct_eq(key).unwrap_u8() == 1 {
+        // Zum Testen: Verschlüsselung als „Entschlüsselung“ – Demo, keine echte Auth.
+        let mut tag_calc = [0u8; Self::TAG_SIZE];
+        self.encrypt_vaes512(ciphertext, key, nonce, ad, plaintext, &mut tag_calc)?;
+        if tag.ct_eq(&tag_calc).unwrap_u8() == 1 {
             Ok(())
         } else {
             Err(CryptoError::InvalidTag)
@@ -214,7 +256,11 @@ impl Aegis128X {
     ) -> Result<(), CryptoError> {
         self.decrypt_vaes512(ciphertext, key, nonce, ad, tag, plaintext)
     }
+}
 
+// ========== SOFTWARE FALLBACK ==========
+
+impl Aegis128X {
     fn encrypt_software(
         &self,
         plaintext: &[u8],
@@ -256,44 +302,5 @@ impl Aegis128X {
         } else {
             Err(CryptoError::InvalidTag)
         }
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    #[target_feature(enable = "aes")]
-    unsafe fn aegis_update_vaes(state: &mut [__m128i; 8], msg0: __m128i, msg1: __m128i) {
-        use std::arch::x86_64::*;
-        let mut tmp: [__m128i; 8] = [_mm_setzero_si128(); 8];
-
-        tmp[0] = _mm_aesenc_si128(state[7], state[0]);
-        tmp[1] = _mm_aesenc_si128(state[0], state[1]);
-        tmp[2] = _mm_aesenc_si128(state[1], state[2]);
-        tmp[3] = _mm_aesenc_si128(state[2], state[3]);
-        tmp[4] = _mm_aesenc_si128(state[3], state[4]);
-        tmp[5] = _mm_aesenc_si128(state[4], state[5]);
-        tmp[6] = _mm_aesenc_si128(state[5], state[6]);
-        tmp[7] = _mm_aesenc_si128(state[6], state[7]);
-
-        state[0] = _mm_xor_si128(tmp[0], msg0);
-        state[1] = tmp[1];
-        state[2] = tmp[2];
-        state[3] = tmp[3];
-        state[4] = _mm_xor_si128(tmp[4], msg1);
-        state[5] = tmp[5];
-        state[6] = tmp[6];
-        state[7] = tmp[7];
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    #[target_feature(enable = "aes")]
-    unsafe fn aegis_encrypt_block_vaes(state: &mut [__m128i; 8], plaintext: __m128i) -> __m128i {
-        use std::arch::x86_64::*;
-        let mut ct = _mm_xor_si128(plaintext, state[1]);
-        ct = _mm_xor_si128(ct, state[4]);
-        ct = _mm_xor_si128(ct, state[5]);
-        ct = _mm_xor_si128(ct, _mm_and_si128(state[2], state[3]));
-
-        Self::aegis_update_vaes(state, plaintext, _mm_setzero_si128());
-
-        ct
     }
 }
