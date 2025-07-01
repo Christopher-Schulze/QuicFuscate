@@ -1,7 +1,7 @@
 use fec::{fec_module_create, fec_module_destroy, fec_module_encode, fec_module_decode};
 
 #[test]
-fn encode_decode() {
+fn ffi_encode_decode() {
     let handle = fec_module_create();
     assert!(!handle.is_null());
     let msg = b"hello";

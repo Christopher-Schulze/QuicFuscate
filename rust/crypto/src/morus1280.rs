@@ -4,6 +4,9 @@ use subtle::ConstantTimeEq;
 pub struct Morus1280;
 
 impl Morus1280 {
+    pub const KEY_SIZE: usize = 16;
+    pub const NONCE_SIZE: usize = 16;
+    pub const TAG_SIZE: usize = 16;
     pub fn new() -> Self {
         Self
     }

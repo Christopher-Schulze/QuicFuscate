@@ -5,6 +5,8 @@ use std::slice;
 #[derive(Clone, Copy)]
 pub struct FECConfig {
     pub redundancy_ratio: f64,
+    pub min_redundancy_ratio: f64,
+    pub max_redundancy_ratio: f64,
     pub enable_simd: bool,
     pub memory_pool_block_size: usize,
     pub memory_pool_initial_blocks: usize,
@@ -14,6 +16,8 @@ impl Default for FECConfig {
     fn default() -> Self {
         Self {
             redundancy_ratio: 0.1,
+            min_redundancy_ratio: 0.05,
+            max_redundancy_ratio: 0.45,
             enable_simd: true,
             memory_pool_block_size: 2048,
             memory_pool_initial_blocks: 32,
@@ -166,12 +170,18 @@ pub struct FECModule {
     config: FECConfig,
     pool: Arc<MemoryPool>,
     stats: Mutex<Statistics>,
+    metrics: Mutex<NetworkMetrics>,
 }
 
 impl FECModule {
     pub fn new(config: FECConfig) -> Self {
         let pool = Arc::new(MemoryPool::new(config.memory_pool_block_size, config.memory_pool_initial_blocks));
-        Self { config, pool, stats: Mutex::new(Statistics::default()) }
+        Self {
+            config,
+            pool,
+            stats: Mutex::new(Statistics::default()),
+            metrics: Mutex::new(NetworkMetrics::default()),
+        }
     }
 
     pub fn encode_packet(&self, data: &[u8], sequence_number: u32) -> Vec<FECPacket> {
@@ -185,10 +195,12 @@ impl FECModule {
         packets.push(FECPacket { sequence_number, is_repair: false, data: buf.clone() });
         self.pool.deallocate(buf);
 
-        if self.config.redundancy_ratio > 0.0 {
+        let redundancy = self.calculate_current_redundancy();
+        let repair_count = (redundancy * 10.0).ceil() as usize;
+        for _ in 0..repair_count {
             let mut parity = self.pool.allocate();
             parity.resize(data.len(), 0);
-            // simple XOR parity using optional SIMD acceleration
+            // basic parity using GF multiplication
             GaloisField::multiply_vector_scalar(&mut parity, data, 1);
             let byte = parity.iter().fold(0u8, |acc, b| acc ^ b);
             packets.push(FECPacket { sequence_number, is_repair: true, data: vec![byte] });
@@ -209,9 +221,13 @@ impl FECModule {
     }
 
     pub fn update_network_metrics(&mut self, metrics: NetworkMetrics) {
-        if metrics.packet_loss_rate > 0.3 {
-            self.config.redundancy_ratio = 0.4;
-        }
+        *self.metrics.lock().unwrap() = metrics;
+    }
+
+    fn calculate_current_redundancy(&self) -> f64 {
+        let metrics = self.metrics.lock().unwrap();
+        let base = self.config.redundancy_ratio + metrics.packet_loss_rate;
+        base.clamp(self.config.min_redundancy_ratio, self.config.max_redundancy_ratio)
     }
 
     pub fn get_statistics(&self) -> Statistics {
@@ -220,53 +236,27 @@ impl FECModule {
 }
 
 // --- FFI ---
-use once_cell::sync::Lazy;
-
-static GLOBAL: Lazy<Mutex<Option<FECModule>>> = Lazy::new(|| Mutex::new(None));
+#[no_mangle]
+pub extern "C" fn fec_module_create() -> *mut FECModule {
+    Box::into_raw(Box::new(FECModule::new(FECConfig::default())))
+}
 
 #[no_mangle]
-pub extern "C" fn fec_module_init() -> i32 {
-    let mut g = GLOBAL.lock().unwrap();
-    if g.is_none() {
-        *g = Some(FECModule::new(FECConfig::default()));
+pub extern "C" fn fec_module_destroy(handle: *mut FECModule) {
+    if !handle.is_null() {
+        unsafe { drop(Box::from_raw(handle)); }
     }
-    0
 }
 
 #[no_mangle]
-pub extern "C" fn fec_module_cleanup() {
-    let mut g = GLOBAL.lock().unwrap();
-    *g = None;
-}
-
-#[no_mangle]
-pub extern "C" fn fec_module_encode(data: *const u8, len: usize, out_len: *mut usize) -> *mut u8 {
-    let g = GLOBAL.lock().unwrap();
-    if let Some(mod_ref) = &*g {
-        if data.is_null() { return ptr::null_mut(); }
-        let slice = unsafe { slice::from_raw_parts(data, len) };
-        let packets = mod_ref.encode_packet(slice, 0);
-        if let Some(pkt) = packets.first() {
-            unsafe { *out_len = pkt.data.len(); }
-            let mut buf = pkt.data.clone();
-            let ptr = buf.as_mut_ptr();
-            std::mem::forget(buf);
-            return ptr;
-        }
-    }
-    ptr::null_mut()
-}
-
-#[no_mangle]
-pub extern "C" fn fec_module_decode(data: *const u8, len: usize, out_len: *mut usize) -> *mut u8 {
-    let g = GLOBAL.lock().unwrap();
-    if let Some(mod_ref) = &*g {
-        if data.is_null() { return ptr::null_mut(); }
-        let slice = unsafe { slice::from_raw_parts(data, len) };
-        let pkt = FECPacket { sequence_number:0, is_repair:false, data: slice.to_vec() };
-        let result = mod_ref.decode(&[pkt]);
-        unsafe { *out_len = result.len(); }
-        let mut buf = result.clone();
+pub extern "C" fn fec_module_encode(handle: *mut FECModule, data: *const u8, len: usize, out_len: *mut usize) -> *mut u8 {
+    if handle.is_null() || data.is_null() { return ptr::null_mut(); }
+    let m = unsafe { &mut *handle };
+    let slice = unsafe { slice::from_raw_parts(data, len) };
+    let packets = m.encode_packet(slice, 0);
+    if let Some(pkt) = packets.first() {
+        unsafe { *out_len = pkt.data.len(); }
+        let mut buf = pkt.data.clone();
         let ptr = buf.as_mut_ptr();
         std::mem::forget(buf);
         return ptr;
@@ -275,13 +265,25 @@ pub extern "C" fn fec_module_decode(data: *const u8, len: usize, out_len: *mut u
 }
 
 #[no_mangle]
-pub extern "C" fn fec_module_set_redundancy(r: f64) -> i32 {
-    let mut g = GLOBAL.lock().unwrap();
-    if let Some(mod_ref) = &mut *g {
-        mod_ref.config.redundancy_ratio = r;
-        return 0;
-    }
-    -1
+pub extern "C" fn fec_module_decode(handle: *mut FECModule, data: *const u8, len: usize, out_len: *mut usize) -> *mut u8 {
+    if handle.is_null() || data.is_null() { return ptr::null_mut(); }
+    let m = unsafe { &mut *handle };
+    let slice = unsafe { slice::from_raw_parts(data, len) };
+    let pkt = FECPacket { sequence_number:0, is_repair:false, data: slice.to_vec() };
+    let result = m.decode(&[pkt]);
+    unsafe { *out_len = result.len(); }
+    let mut buf = result.clone();
+    let ptr = buf.as_mut_ptr();
+    std::mem::forget(buf);
+    ptr
+}
+
+#[no_mangle]
+pub extern "C" fn fec_module_set_redundancy(handle: *mut FECModule, r: f64) -> i32 {
+    if handle.is_null() { return -1; }
+    let m = unsafe { &mut *handle };
+    m.config.redundancy_ratio = r;
+    0
 }
 
 #[repr(C)]
@@ -293,34 +295,24 @@ pub struct StatFFI {
 }
 
 #[no_mangle]
-pub extern "C" fn fec_module_get_statistics(buf: *mut StatFFI) -> i32 {
-    let g = GLOBAL.lock().unwrap();
-    if let Some(mod_ref) = &*g {
-        if buf.is_null() { return -1; }
-        let stats = mod_ref.get_statistics();
-        unsafe { *buf = StatFFI {
+pub extern "C" fn fec_module_get_statistics(handle: *const FECModule, buf: *mut StatFFI) -> i32 {
+    if handle.is_null() || buf.is_null() { return -1; }
+    let m = unsafe { &*handle };
+    let stats = m.get_statistics();
+    unsafe {
+        *buf = StatFFI {
             packets_encoded: stats.packets_encoded,
             packets_decoded: stats.packets_decoded,
             repair_packets_generated: stats.repair_packets_generated,
-        }; }
-        return 0;
+        };
     }
-    -1
-}
-
-pub fn fec_module_init_stub() -> i32 {
     0
 }
 
-pub fn fec_module_cleanup_stub() {}
-
-pub fn fec_module_encode_stub(data: &[u8]) -> Vec<u8> {
-    data.to_vec()
-}
-
-pub fn fec_module_decode_stub(data: &[u8]) -> Vec<u8> {
-    data.to_vec()
-}
+pub fn fec_module_create_stub() -> *mut FECModule { std::ptr::null_mut() }
+pub fn fec_module_destroy_stub(_h: *mut FECModule) {}
+pub fn fec_module_encode_stub(_h: *mut FECModule, data: &[u8]) -> Vec<u8> { data.to_vec() }
+pub fn fec_module_decode_stub(_h: *mut FECModule, data: &[u8]) -> Vec<u8> { data.to_vec() }
 
 #[cfg(test)]
 mod tests {
@@ -328,16 +320,17 @@ mod tests {
 
     #[test]
     fn encode_decode_via_ffi() {
-        assert_eq!(0, fec_module_init());
+        let handle = fec_module_create();
+        assert!(!handle.is_null());
         let msg = b"hello";
         let mut out_len = 0usize;
-        let enc_ptr = fec_module_encode(msg.as_ptr(), msg.len(), &mut out_len as *mut usize);
+        let enc_ptr = fec_module_encode(handle, msg.as_ptr(), msg.len(), &mut out_len as *mut usize);
         assert!(!enc_ptr.is_null());
         let enc_slice = unsafe { Vec::from_raw_parts(enc_ptr, out_len, out_len) };
         let mut dec_len = 0usize;
-        let dec_ptr = fec_module_decode(enc_slice.as_ptr(), enc_slice.len(), &mut dec_len as *mut usize);
+        let dec_ptr = fec_module_decode(handle, enc_slice.as_ptr(), enc_slice.len(), &mut dec_len as *mut usize);
         let dec = unsafe { Vec::from_raw_parts(dec_ptr, dec_len, dec_len) };
-        fec_module_cleanup();
+        fec_module_destroy(handle);
         assert_eq!(dec, msg);
     }
 }
