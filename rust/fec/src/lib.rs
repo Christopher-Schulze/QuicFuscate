@@ -2,6 +2,11 @@ use std::sync::{Arc, Mutex};
 use std::ptr;
 use std::slice;
 
+#[derive(Debug)]
+pub enum FECError {
+    LockPoisoned,
+}
+
 #[derive(Clone, Copy)]
 pub struct FECConfig {
     pub redundancy_ratio: f64,
@@ -51,15 +56,16 @@ impl MemoryPool {
         Self { block_size, free: Mutex::new(blocks) }
     }
 
-    pub fn allocate(&self) -> Vec<u8> {
-        let mut guard = self.free.lock().unwrap();
-        guard.pop().unwrap_or_else(|| vec![0u8; self.block_size])
+    pub fn allocate(&self) -> Result<Vec<u8>, FECError> {
+        let mut guard = self.free.lock().map_err(|_| FECError::LockPoisoned)?;
+        Ok(guard.pop().unwrap_or_else(|| vec![0u8; self.block_size]))
     }
 
-    pub fn deallocate(&self, mut block: Vec<u8>) {
+    pub fn deallocate(&self, mut block: Vec<u8>) -> Result<(), FECError> {
         block.clear();
-        let mut guard = self.free.lock().unwrap();
+        let mut guard = self.free.lock().map_err(|_| FECError::LockPoisoned)?;
         guard.push(block);
+        Ok(())
     }
 }
 
@@ -174,38 +180,38 @@ impl FECModule {
         Self { config, pool, stats: Mutex::new(Statistics::default()) }
     }
 
-    pub fn encode_packet(&self, data: &[u8], sequence_number: u32) -> Vec<FECPacket> {
-        let mut stats = self.stats.lock().unwrap();
+    pub fn encode_packet(&self, data: &[u8], sequence_number: u32) -> Result<Vec<FECPacket>, FECError> {
+        let mut stats = self.stats.lock().map_err(|_| FECError::LockPoisoned)?;
         stats.packets_encoded += 1;
         let mut packets = Vec::new();
         // allocate buffer from pool to hold the source data
-        let mut buf = self.pool.allocate();
+        let mut buf = self.pool.allocate()?;
         buf.resize(data.len(), 0);
         buf[..data.len()].copy_from_slice(data);
         packets.push(FECPacket { sequence_number, is_repair: false, data: buf.clone() });
-        self.pool.deallocate(buf);
+        self.pool.deallocate(buf)?;
 
         if self.config.redundancy_ratio > 0.0 {
-            let mut parity = self.pool.allocate();
+            let mut parity = self.pool.allocate()?;
             parity.resize(data.len(), 0);
             // simple XOR parity using optional SIMD acceleration
             GaloisField::multiply_vector_scalar(&mut parity, data, 1);
             let byte = parity.iter().fold(0u8, |acc, b| acc ^ b);
             packets.push(FECPacket { sequence_number, is_repair: true, data: vec![byte] });
-            self.pool.deallocate(parity);
+            self.pool.deallocate(parity)?;
             stats.repair_packets_generated += 1;
         }
-        packets
+        Ok(packets)
     }
 
-    pub fn decode(&self, packets: &[FECPacket]) -> Vec<u8> {
-        if packets.is_empty() { return Vec::new(); }
-        let mut stats = self.stats.lock().unwrap();
+    pub fn decode(&self, packets: &[FECPacket]) -> Result<Vec<u8>, FECError> {
+        if packets.is_empty() { return Ok(Vec::new()); }
+        let mut stats = self.stats.lock().map_err(|_| FECError::LockPoisoned)?;
         stats.packets_decoded += 1;
         if let Some(p) = packets.iter().find(|p| !p.is_repair) {
-            return p.data.clone();
+            return Ok(p.data.clone());
         }
-        Vec::new()
+        Ok(Vec::new())
     }
 
     pub fn update_network_metrics(&mut self, metrics: NetworkMetrics) {
@@ -214,8 +220,8 @@ impl FECModule {
         }
     }
 
-    pub fn get_statistics(&self) -> Statistics {
-        *self.stats.lock().unwrap()
+    pub fn get_statistics(&self) -> Result<Statistics, FECError> {
+        Ok(*self.stats.lock().map_err(|_| FECError::LockPoisoned)? )
     }
 }
 
@@ -226,7 +232,10 @@ static GLOBAL: Lazy<Mutex<Option<FECModule>>> = Lazy::new(|| Mutex::new(None));
 
 #[no_mangle]
 pub extern "C" fn fec_module_init() -> i32 {
-    let mut g = GLOBAL.lock().unwrap();
+    let mut g = match GLOBAL.lock() {
+        Ok(guard) => guard,
+        Err(e) => e.into_inner(),
+    };
     if g.is_none() {
         *g = Some(FECModule::new(FECConfig::default()));
     }
@@ -235,20 +244,48 @@ pub extern "C" fn fec_module_init() -> i32 {
 
 #[no_mangle]
 pub extern "C" fn fec_module_cleanup() {
-    let mut g = GLOBAL.lock().unwrap();
+    let mut g = match GLOBAL.lock() {
+        Ok(guard) => guard,
+        Err(e) => e.into_inner(),
+    };
     *g = None;
 }
 
 #[no_mangle]
 pub extern "C" fn fec_module_encode(data: *const u8, len: usize, out_len: *mut usize) -> *mut u8 {
-    let g = GLOBAL.lock().unwrap();
+    let g = match GLOBAL.lock() {
+        Ok(guard) => guard,
+        Err(e) => e.into_inner(),
+    };
     if let Some(mod_ref) = &*g {
         if data.is_null() { return ptr::null_mut(); }
         let slice = unsafe { slice::from_raw_parts(data, len) };
-        let packets = mod_ref.encode_packet(slice, 0);
-        if let Some(pkt) = packets.first() {
+        if let Ok(packets) = mod_ref.encode_packet(slice, 0) {
+            if let Some(pkt) = packets.first() {
             unsafe { *out_len = pkt.data.len(); }
             let mut buf = pkt.data.clone();
+            let ptr = buf.as_mut_ptr();
+            std::mem::forget(buf);
+            return ptr;
+            }
+        }
+    }
+    ptr::null_mut()
+}
+
+#[no_mangle]
+pub extern "C" fn fec_module_decode(data: *const u8, len: usize, out_len: *mut usize) -> *mut u8 {
+    let g = match GLOBAL.lock() {
+        Ok(guard) => guard,
+        Err(e) => e.into_inner(),
+    };
+    if let Some(mod_ref) = &*g {
+        if data.is_null() { return ptr::null_mut(); }
+        let slice = unsafe { slice::from_raw_parts(data, len) };
+        let pkt = FECPacket { sequence_number:0, is_repair:false, data: slice.to_vec() };
+        if let Ok(result) = mod_ref.decode(&[pkt]) {
+            unsafe { *out_len = result.len(); }
+            let mut buf = result.clone();
             let ptr = buf.as_mut_ptr();
             std::mem::forget(buf);
             return ptr;
@@ -258,25 +295,11 @@ pub extern "C" fn fec_module_encode(data: *const u8, len: usize, out_len: *mut u
 }
 
 #[no_mangle]
-pub extern "C" fn fec_module_decode(data: *const u8, len: usize, out_len: *mut usize) -> *mut u8 {
-    let g = GLOBAL.lock().unwrap();
-    if let Some(mod_ref) = &*g {
-        if data.is_null() { return ptr::null_mut(); }
-        let slice = unsafe { slice::from_raw_parts(data, len) };
-        let pkt = FECPacket { sequence_number:0, is_repair:false, data: slice.to_vec() };
-        let result = mod_ref.decode(&[pkt]);
-        unsafe { *out_len = result.len(); }
-        let mut buf = result.clone();
-        let ptr = buf.as_mut_ptr();
-        std::mem::forget(buf);
-        return ptr;
-    }
-    ptr::null_mut()
-}
-
-#[no_mangle]
 pub extern "C" fn fec_module_set_redundancy(r: f64) -> i32 {
-    let mut g = GLOBAL.lock().unwrap();
+    let mut g = match GLOBAL.lock() {
+        Ok(guard) => guard,
+        Err(e) => e.into_inner(),
+    };
     if let Some(mod_ref) = &mut *g {
         mod_ref.config.redundancy_ratio = r;
         return 0;
@@ -294,16 +317,20 @@ pub struct StatFFI {
 
 #[no_mangle]
 pub extern "C" fn fec_module_get_statistics(buf: *mut StatFFI) -> i32 {
-    let g = GLOBAL.lock().unwrap();
+    let g = match GLOBAL.lock() {
+        Ok(guard) => guard,
+        Err(e) => e.into_inner(),
+    };
     if let Some(mod_ref) = &*g {
         if buf.is_null() { return -1; }
-        let stats = mod_ref.get_statistics();
-        unsafe { *buf = StatFFI {
-            packets_encoded: stats.packets_encoded,
-            packets_decoded: stats.packets_decoded,
-            repair_packets_generated: stats.repair_packets_generated,
-        }; }
-        return 0;
+        if let Ok(stats) = mod_ref.get_statistics() {
+            unsafe { *buf = StatFFI {
+                packets_encoded: stats.packets_encoded,
+                packets_decoded: stats.packets_decoded,
+                repair_packets_generated: stats.repair_packets_generated,
+            }; }
+            return 0;
+        }
     }
     -1
 }
