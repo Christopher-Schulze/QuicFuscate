@@ -77,6 +77,15 @@ inline constexpr size_t DEFAULT_MAX_CONCURRENT_STREAMS = 1000;
 // Default number of iterations for PBKDF2 operations.
 inline constexpr size_t DEFAULT_PBKDF2_ITERATIONS = 10000;
 
+// Default block size used for memory pool allocations (bytes).
+inline constexpr size_t DEFAULT_MEMORY_BLOCK_SIZE = 4096;
+
+// Default QPACK dynamic table size for header compression (bytes).
+inline constexpr size_t DEFAULT_QPACK_DYNAMIC_TABLE_SIZE = 4096;
+
+// Default maximum burst size when using burst buffering (bytes).
+inline constexpr size_t DEFAULT_MAX_BURST_SIZE = 4096;
+
 } // namespace quicfuscate
 
 #endif // QUIC_CONSTANTS_HPP

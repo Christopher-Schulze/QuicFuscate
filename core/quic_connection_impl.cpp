@@ -328,7 +328,7 @@ void QuicConnection::init_memory_pool() {
         MemoryPoolConfig config;
         config.initial_pool_size = 1024 * 1024; // 1MB
         config.max_pool_size = 16 * 1024 * 1024; // 16MB
-        config.block_size = 4096; // 4KB blocks
+        config.block_size = DEFAULT_MEMORY_BLOCK_SIZE; // 4KB blocks
         config.alignment = 64; // Cache line alignment
         
         memory_pool_ = std::make_unique<MemoryPool>(config);

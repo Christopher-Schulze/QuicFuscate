@@ -197,7 +197,8 @@ public:
     void flush_burst_buffer();
     
     // Memory-Pool-Methoden
-    void init_memory_pool(size_t block_size = 4096, size_t initial_blocks = 16);
+    void init_memory_pool(size_t block_size = DEFAULT_MEMORY_BLOCK_SIZE,
+                          size_t initial_blocks = 16);
     void* allocate_from_pool();
     void deallocate_to_pool(void* block);
     
