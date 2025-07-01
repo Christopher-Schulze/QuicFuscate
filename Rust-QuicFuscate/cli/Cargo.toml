@@ -1,0 +1,35 @@
+[package]
+name = "quicfuscate-cli"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "quicfuscate_demo"
+path = "src/main.rs"
+
+[[bin]]
+name = "quicfuscate_client"
+path = "src/quicfuscate_client.rs"
+
+[[bin]]
+name = "quicfuscate_server"
+path = "src/quicfuscate_server.rs"
+
+dependencies = [
+    "clap",
+    "core",
+    "stealth"
+]
+
+[dependencies.clap]
+version = "4"
+features = ["derive"]
+
+[dependencies.core]
+workspace = true
+
+[dependencies.stealth]
+workspace = true
