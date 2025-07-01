@@ -1,16 +1,86 @@
 pub struct AEGIS128X;
 impl AEGIS128X {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 }
 
 pub struct AEGIS128L;
 impl AEGIS128L {
-    pub fn new() -> Self { Self }
+    pub const KEY_SIZE: usize = 16;
+    pub const NONCE_SIZE: usize = 16;
+    pub const TAG_SIZE: usize = 16;
+
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn encrypt(
+        &self,
+        plaintext: &[u8],
+        _key: &[u8; Self::KEY_SIZE],
+        _nonce: &[u8; Self::NONCE_SIZE],
+        _ad: &[u8],
+        ciphertext: &mut Vec<u8>,
+        tag: &mut [u8; Self::TAG_SIZE],
+    ) {
+        ciphertext.clear();
+        ciphertext.extend_from_slice(plaintext);
+        tag.fill(0);
+    }
+
+    pub fn decrypt(
+        &self,
+        ciphertext: &[u8],
+        _key: &[u8; Self::KEY_SIZE],
+        _nonce: &[u8; Self::NONCE_SIZE],
+        _ad: &[u8],
+        _tag: &[u8; Self::TAG_SIZE],
+        plaintext: &mut Vec<u8>,
+    ) -> bool {
+        plaintext.clear();
+        plaintext.extend_from_slice(ciphertext);
+        true
+    }
 }
 
 pub struct MORUS1280;
 impl MORUS1280 {
-    pub fn new() -> Self { Self }
+    pub const KEY_SIZE: usize = 16;
+    pub const NONCE_SIZE: usize = 16;
+    pub const TAG_SIZE: usize = 16;
+
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn encrypt(
+        &self,
+        plaintext: &[u8],
+        _key: &[u8; Self::KEY_SIZE],
+        _nonce: &[u8; Self::NONCE_SIZE],
+        _ad: &[u8],
+        ciphertext: &mut Vec<u8>,
+        tag: &mut [u8; Self::TAG_SIZE],
+    ) {
+        ciphertext.clear();
+        ciphertext.extend_from_slice(plaintext);
+        tag.fill(0);
+    }
+
+    pub fn decrypt(
+        &self,
+        ciphertext: &[u8],
+        _key: &[u8; Self::KEY_SIZE],
+        _nonce: &[u8; Self::NONCE_SIZE],
+        _ad: &[u8],
+        _tag: &[u8; Self::TAG_SIZE],
+        plaintext: &mut Vec<u8>,
+    ) -> bool {
+        plaintext.clear();
+        plaintext.extend_from_slice(ciphertext);
+        true
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -28,7 +98,9 @@ pub struct CipherSuiteSelector {
 
 impl CipherSuiteSelector {
     pub fn new() -> Self {
-        Self { suite: CipherSuite::Aegis128xVaes512 }
+        Self {
+            suite: CipherSuite::Aegis128xVaes512,
+        }
     }
 
     pub fn select_best_cipher_suite(&self) -> CipherSuite {

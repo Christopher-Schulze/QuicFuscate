@@ -1,5 +1,5 @@
 [package]
-name = "core"
+name = "quicfuscate_core"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,3 +7,9 @@ edition = "2021"
 path = "src/lib.rs"
 
 [dependencies]
+thiserror = "1"
+quiche = { path = "../../libs/quiche-patched/quiche", optional = true }
+
+[features]
+default = []
+quiche = ["dep:quiche"]

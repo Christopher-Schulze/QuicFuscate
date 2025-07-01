@@ -7,3 +7,7 @@ members = [
     "stealth",
     "cli",
 ]
+
+[workspace.dependencies]
+core = { path = "../rust/core" }
+stealth = { path = "../rust/stealth" }
