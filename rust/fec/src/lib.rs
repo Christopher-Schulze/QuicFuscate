@@ -178,10 +178,21 @@ impl FECModule {
         let mut stats = self.stats.lock().unwrap();
         stats.packets_encoded += 1;
         let mut packets = Vec::new();
-        packets.push(FECPacket { sequence_number, is_repair: false, data: data.to_vec() });
+        // allocate buffer from pool to hold the source data
+        let mut buf = self.pool.allocate();
+        buf.resize(data.len(), 0);
+        buf[..data.len()].copy_from_slice(data);
+        packets.push(FECPacket { sequence_number, is_repair: false, data: buf.clone() });
+        self.pool.deallocate(buf);
+
         if self.config.redundancy_ratio > 0.0 {
-            let parity = data.iter().fold(0u8, |acc, b| acc ^ b);
-            packets.push(FECPacket { sequence_number, is_repair: true, data: vec![parity] });
+            let mut parity = self.pool.allocate();
+            parity.resize(data.len(), 0);
+            // simple XOR parity using optional SIMD acceleration
+            GaloisField::multiply_vector_scalar(&mut parity, data, 1);
+            let byte = parity.iter().fold(0u8, |acc, b| acc ^ b);
+            packets.push(FECPacket { sequence_number, is_repair: true, data: vec![byte] });
+            self.pool.deallocate(parity);
             stats.repair_packets_generated += 1;
         }
         packets
@@ -209,7 +220,6 @@ impl FECModule {
 }
 
 // --- FFI ---
-use std::ffi::c_void;
 use once_cell::sync::Lazy;
 
 static GLOBAL: Lazy<Mutex<Option<FECModule>>> = Lazy::new(|| Mutex::new(None));
