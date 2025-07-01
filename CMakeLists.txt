@@ -164,3 +164,7 @@ add_test(NAME xor_obfuscation_test COMMAND xor_obfuscation_test)
 add_executable(path_mtu_probe_logic_test tests/path_mtu_probe_logic_test.cpp)
 target_link_libraries(path_mtu_probe_logic_test PRIVATE gtest_main)
 add_test(NAME path_mtu_probe_logic_test COMMAND path_mtu_probe_logic_test)
+
+add_executable(connection_features_test tests/connection_features_test.cpp)
+target_link_libraries(connection_features_test PRIVATE gtest_main)
+add_test(NAME connection_features_test COMMAND connection_features_test)

@@ -14,6 +14,7 @@
 #include "quic_connection.hpp"
 #include "quic_constants.hpp"
 #include "../optimize/unified_optimizations.hpp"
+#include "xdp_stub.hpp"
 #include <iostream>
 #include <chrono>
 #include <algorithm>
@@ -455,20 +456,19 @@ void QuicConnection::send_udp_packet(const uint8_t* data, size_t len) {
 }
 
 void QuicConnection::check_network_changes() {
-    // Implementation for network change detection
-    // This would typically involve checking for new network interfaces,
-    // changes in IP addresses, or network quality metrics
-    
-    // Placeholder implementation
     static auto last_check = std::chrono::steady_clock::now();
     auto now = std::chrono::steady_clock::now();
-    
-    if (std::chrono::duration_cast<std::chrono::seconds>(now - last_check).count() >= 30) {
-        // Check for network changes every 30 seconds
-        last_check = now;
-        
-        // Actual network change detection would go here
-        // For now, this is a placeholder
+
+    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_check).count() <
+        static_cast<int64_t>(migration_cooldown_ms_)) {
+        return;
+    }
+    last_check = now;
+
+    if (detect_network_change()) {
+        if (migration_callback_) {
+            migration_callback_(true, "", get_current_interface_name());
+        }
     }
 }
 
@@ -538,7 +538,7 @@ bool QuicConnection::is_xdp_enabled() const {
     return xdp_enabled_;
 }
 
-void QuicConnection::handle_xdp_packet(const void* data, size_t len, 
+void QuicConnection::handle_xdp_packet(const void* data, size_t len,
                                      const struct sockaddr* addr, socklen_t addrlen) {
     if (!xdp_enabled_ || !data || len == 0) {
         return;
@@ -552,6 +552,147 @@ void QuicConnection::handle_xdp_packet(const void* data, size_t len,
     
     // Process packet through normal QUIC processing
     process_packet(static_cast<const uint8_t*>(data), len, endpoint);
+}
+
+void QuicConnection::send_datagram_xdp(const uint8_t* data, size_t len) {
+    if (xdp_enabled_ && xdp_socket_) {
+        xdp_socket_->send(data, len);
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.xdp_packets_sent++;
+        stats_.bytes_sent += len;
+    } else {
+        send_udp_packet(data, len);
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.xdp_packets_sent++;
+        stats_.bytes_sent += len;
+    }
+}
+
+void QuicConnection::send_datagram_batch_xdp(const std::vector<std::pair<const uint8_t*, size_t>>& datagrams) {
+    if (xdp_enabled_ && xdp_socket_) {
+        xdp_socket_->send_batch(datagrams);
+    } else {
+        for (const auto& d : datagrams) {
+            send_udp_packet(d.first, d.second);
+        }
+    }
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    stats_.xdp_packets_sent += datagrams.size();
+    for (const auto& d : datagrams) {
+        stats_.bytes_sent += d.second;
+    }
+}
+
+void QuicConnection::set_xdp_batch_size(uint32_t size) {
+    xdp_batch_size_ = size > 0 ? size : 1;
+    if (xdp_socket_) {
+        xdp_socket_->set_batch_size(xdp_batch_size_);
+    }
+}
+
+XdpStats QuicConnection::get_xdp_stats() const {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    XdpStats xs;
+    xs.packets_sent = stats_.xdp_packets_sent;
+    xs.packets_received = stats_.xdp_packets_received;
+    xs.bytes_sent = stats_.bytes_sent;
+    xs.bytes_received = stats_.bytes_received;
+    xs.throughput_mbps = stats_.xdp_throughput_mbps;
+    return xs;
+}
+
+void QuicConnection::schedule_next_probe() {
+    if (!mtu_discovery_enabled_ || in_search_phase_) {
+        return;
+    }
+
+    current_probe_mtu_ = std::min<uint16_t>(current_mtu_ + mtu_step_size_, max_mtu_);
+    last_probe_time_ = std::chrono::steady_clock::now();
+    send_mtu_probe(current_probe_mtu_);
+}
+
+void QuicConnection::update_mtu(uint16_t new_mtu) {
+    current_mtu_ = new_mtu;
+    if (quiche_conn_) {
+        quiche_conn_set_max_send_udp_payload_size(quiche_conn_, new_mtu);
+    }
+}
+
+void QuicConnection::reset_mtu_discovery() {
+    in_search_phase_ = false;
+    mtu_validated_ = false;
+    consecutive_failures_ = 0;
+    current_probe_mtu_ = current_mtu_;
+    last_probe_time_ = std::chrono::steady_clock::now();
+}
+
+bool QuicConnection::is_blackhole_detected() {
+    return consecutive_failures_ >= blackhole_detection_threshold_;
+}
+
+bool QuicConnection::detect_network_change() {
+    auto interfaces = enumerate_network_interfaces();
+    if (available_interfaces_.empty()) {
+        available_interfaces_ = interfaces;
+        return false;
+    }
+    if (interfaces != available_interfaces_) {
+        available_interfaces_ = interfaces;
+        return true;
+    }
+    return false;
+}
+
+std::vector<std::string> QuicConnection::enumerate_network_interfaces() {
+    std::vector<std::string> result;
+#ifndef _WIN32
+    struct ifaddrs* ifaddr = nullptr;
+    if (getifaddrs(&ifaddr) == 0) {
+        for (auto* ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+            if (!ifa->ifa_name) continue;
+            if (!(ifa->ifa_flags & IFF_UP) || !(ifa->ifa_flags & IFF_RUNNING)) continue;
+            result.emplace_back(ifa->ifa_name);
+        }
+        freeifaddrs(ifaddr);
+        std::sort(result.begin(), result.end());
+        result.erase(std::unique(result.begin(), result.end()), result.end());
+    }
+#endif
+    return result;
+}
+
+std::string QuicConnection::get_current_interface_name() const {
+#ifndef _WIN32
+    struct ifaddrs* ifaddr = nullptr;
+    if (getifaddrs(&ifaddr) != 0) {
+        return {};
+    }
+    std::string name;
+    for (auto* ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_name || !ifa->ifa_addr) continue;
+        if (remote_endpoint_.address().is_v4() && ifa->ifa_addr->sa_family == AF_INET) {
+            auto addr_in = reinterpret_cast<sockaddr_in*>(ifa->ifa_addr);
+            auto ip = boost::asio::ip::address_v4(ntohl(addr_in->sin_addr.s_addr));
+            if (ip == remote_endpoint_.address()) {
+                name = ifa->ifa_name;
+                break;
+            }
+        } else if (remote_endpoint_.address().is_v6() && ifa->ifa_addr->sa_family == AF_INET6) {
+            auto addr_in6 = reinterpret_cast<sockaddr_in6*>(ifa->ifa_addr);
+            boost::asio::ip::address_v6::bytes_type bytes{};
+            std::memcpy(bytes.data(), &addr_in6->sin6_addr, 16);
+            auto ip = boost::asio::ip::address_v6(bytes);
+            if (ip == remote_endpoint_.address()) {
+                name = ifa->ifa_name;
+                break;
+            }
+        }
+    }
+    freeifaddrs(ifaddr);
+    return name;
+#else
+    return {};
+#endif
 }
 
 void QuicConnection::log_error(const std::string& message) {

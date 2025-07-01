@@ -41,6 +41,7 @@
 #include "../crypto/aegis128x.hpp"  // Für die SIMD-optimierte AEGIS-128X
 #include "../crypto/aegis128l.hpp"  // Für die SIMD-optimierte AEGIS-128L
 #include "../crypto/morus.hpp"      // Für die MORUS-1280-128 Fallback-Implementierung
+#include "xdp_stub.hpp"              // Stubbed XDP socket implementation
 // Alle Optimierungen sind jetzt in unified_optimizations.hpp konsolidiert
 
 namespace quicfuscate {
@@ -474,6 +475,7 @@ private:
     std::shared_ptr<XdpSocket> xdp_socket_;         // XDP-Socket für optimierte Datenübertragung
     mutable std::mutex xdp_mutex_;                   // Mutex für Thread-sichere XDP-Operationen
     std::chrono::steady_clock::time_point xdp_start_time_{std::chrono::steady_clock::now()}; // Startzeit für Durchsatzberechnung
+    uint32_t xdp_batch_size_{1};                     // Anzahl der Pakete pro XDP-Batch
     int cpu_core_id_{-1};                            // CPU-Kern für optimierte Verarbeitung
     
     // Burst-Buffering Support
