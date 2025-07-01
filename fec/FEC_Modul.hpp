@@ -314,8 +314,8 @@ public:
     std::string get_performance_report() const;
     
     // Memory management
-    void* allocate_from_pool(size_t size);
-    void deallocate_to_pool(void* ptr, size_t size);
+    using BufferPtr = std::unique_ptr<uint8_t[], std::function<void(uint8_t*)>>;
+    BufferPtr allocate_from_pool(size_t size);
     
     // Legacy compatibility
     std::vector<uint8_t> encode(const std::vector<uint8_t>& data);

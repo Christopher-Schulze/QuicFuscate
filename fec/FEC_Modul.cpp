@@ -26,6 +26,7 @@
 #include <cmath>
 #include <cassert>
 #include <thread>
+#include <functional>
 
 // OpenMP for parallel processing
 #ifdef _OPENMP
@@ -657,13 +658,14 @@ std::string FECModule::get_performance_report() const {
     return impl_->get_performance_report();
 }
 
-void* FECModule::allocate_from_pool(size_t size) {
-    // This would use the internal memory pool
-    return nullptr;
-}
-
-void FECModule::deallocate_to_pool(void* ptr, size_t size) {
-    // This would return memory to the internal pool
+FECModule::BufferPtr FECModule::allocate_from_pool(size_t size) {
+    uint8_t* ptr = static_cast<uint8_t*>(impl_->memory_pool_.allocate());
+    auto deleter = [this](uint8_t* p) {
+        if (p) {
+            impl_->memory_pool_.deallocate(p);
+        }
+    };
+    return BufferPtr(ptr, deleter);
 }
 
 std::vector<uint8_t> FECModule::encode(const std::vector<uint8_t>& data) {
