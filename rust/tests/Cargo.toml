@@ -1,0 +1,10 @@
+[package]
+name = "integration-tests"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+core = { path = "../core" }
+crypto = { path = "../crypto" }
+fec = { path = "../fec" }
+stealth = { path = "../stealth" }

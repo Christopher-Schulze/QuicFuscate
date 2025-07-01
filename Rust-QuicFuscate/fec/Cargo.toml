@@ -7,4 +7,3 @@ edition = "2021"
 path = "src/lib.rs"
 
 [dependencies]
-once_cell = "1"
