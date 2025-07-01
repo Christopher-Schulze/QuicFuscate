@@ -117,6 +117,7 @@ impl QuicConnection {
 
 /// Manager for sending and validating MTU probes.
 use std::collections::HashMap;
+use std::time::Instant;
 
 /// Status of MTU discovery on a path.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -126,6 +127,15 @@ pub enum MtuStatus {
     Validating,
     Blackhole,
     Complete,
+}
+
+/// Information about an MTU change event.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MtuChange {
+    pub old_mtu: u16,
+    pub new_mtu: u16,
+    pub success: bool,
+    pub reason: String,
 }
 
 /// Manager for sending and validating MTU probes.
@@ -140,6 +150,8 @@ pub struct PathMtuManager {
     probes: HashMap<u32, (bool, u16)>,
     outgoing_status: MtuStatus,
     incoming_status: MtuStatus,
+    last_probe: Option<Instant>,
+    callback: Option<Box<dyn Fn(MtuChange) + Send + Sync>>,
 }
 
 impl PathMtuManager {
@@ -155,6 +167,8 @@ impl PathMtuManager {
             probes: HashMap::new(),
             outgoing_status: MtuStatus::Disabled,
             incoming_status: MtuStatus::Disabled,
+            last_probe: None,
+            callback: None,
         }
     }
 
@@ -213,13 +227,35 @@ impl PathMtuManager {
     /// Handle the result of a previously sent probe.
     pub fn handle_probe_response(&mut self, id: u32, success: bool, incoming: bool) {
         if let Some((probe_incoming, size)) = self.probes.remove(&id) {
-            if probe_incoming == incoming && success {
-                if incoming {
-                    self.incoming_mtu = size.min(self.max_mtu);
-                    self.incoming_status = MtuStatus::Complete;
+            if probe_incoming == incoming {
+                let (old, status) = if incoming {
+                    (self.incoming_mtu, &mut self.incoming_status)
                 } else {
-                    self.outgoing_mtu = size.min(self.max_mtu);
-                    self.outgoing_status = MtuStatus::Complete;
+                    (self.outgoing_mtu, &mut self.outgoing_status)
+                };
+                if success {
+                    let new_mtu = size.min(self.max_mtu);
+                    if incoming {
+                        self.incoming_mtu = new_mtu;
+                    } else {
+                        self.outgoing_mtu = new_mtu;
+                    }
+                    *status = MtuStatus::Complete;
+                    if let Some(cb) = &self.callback {
+                        cb(MtuChange {
+                            old_mtu: old,
+                            new_mtu,
+                            success: true,
+                            reason: "probe-success".into(),
+                        });
+                    }
+                } else if let Some(cb) = &self.callback {
+                    cb(MtuChange {
+                        old_mtu: old,
+                        new_mtu: size,
+                        success: false,
+                        reason: "probe-fail".into(),
+                    });
                 }
             }
         }
@@ -238,6 +274,41 @@ impl PathMtuManager {
         if self.bidirectional {
             self.incoming_mtu = self.outgoing_mtu;
         }
+    }
+
+    /// Periodic update entry point used to integrate feedback.
+    pub fn update(&mut self, packet_loss_rate: f32, rtt_ms: u32) {
+        if self.outgoing_status == MtuStatus::Disabled {
+            self.outgoing_status = MtuStatus::Searching;
+        }
+        if self.bidirectional && self.incoming_status == MtuStatus::Disabled {
+            self.incoming_status = MtuStatus::Searching;
+        }
+        self.adapt_mtu_dynamically(packet_loss_rate, rtt_ms);
+        self.last_probe = Some(Instant::now());
+    }
+
+    /// Retrieve the current status for the specified direction.
+    pub fn get_mtu_status(&self, incoming: bool) -> MtuStatus {
+        if incoming {
+            self.incoming_status
+        } else {
+            self.outgoing_status
+        }
+    }
+
+    /// Check if MTU discovery has not yet converged.
+    pub fn is_mtu_unstable(&self) -> bool {
+        self.get_mtu_status(false) != MtuStatus::Complete
+            || (self.bidirectional && self.get_mtu_status(true) != MtuStatus::Complete)
+    }
+
+    /// Install a callback that is invoked whenever the MTU changes.
+    pub fn set_mtu_change_callback<F>(&mut self, cb: F)
+    where
+        F: Fn(MtuChange) + Send + Sync + 'static,
+    {
+        self.callback = Some(Box::new(cb));
     }
 }
 

@@ -18,9 +18,11 @@ fn zero_copy_configurable() {
     };
     let mut conn = QuicConnection::new(cfg).unwrap();
     assert!(!conn.is_zero_copy_enabled());
-    conn.configure_zero_copy(core::ZeroCopyConfig {
+    let cfg = core::ZeroCopyConfig {
         enable_send: true,
         enable_recv: false,
-    });
+    };
+    conn.configure_zero_copy(cfg);
     assert!(conn.is_zero_copy_enabled());
+    assert_eq!(conn.zero_copy_config(), cfg);
 }
