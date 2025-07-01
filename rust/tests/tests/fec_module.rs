@@ -1,4 +1,9 @@
-use fec::{fec_module_cleanup, fec_module_decode, fec_module_encode, fec_module_init};
+use fec::{
+    fec_module_cleanup_stub as fec_module_cleanup,
+    fec_module_decode_stub as fec_module_decode,
+    fec_module_encode_stub as fec_module_encode,
+    fec_module_init_stub as fec_module_init,
+};
 
 #[test]
 fn encode_decode() {
