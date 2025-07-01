@@ -164,3 +164,14 @@ add_executable(path_mtu_manager_test tests/path_mtu_manager_test.cpp)
 target_link_libraries(path_mtu_manager_test PRIVATE gtest_main)
 add_test(NAME path_mtu_manager_test COMMAND path_mtu_manager_test)
 
+add_executable(quic_connection_test tests/quic_connection_test.cpp)
+target_link_libraries(quic_connection_test PRIVATE gtest_main)
+add_test(NAME quic_connection_test COMMAND quic_connection_test)
+
+add_executable(xor_obfuscation_test tests/xor_obfuscation_test.cpp)
+target_link_libraries(xor_obfuscation_test PRIVATE quicfuscate_stealth gtest_main)
+add_test(NAME xor_obfuscation_test COMMAND xor_obfuscation_test)
+
+add_executable(path_mtu_probe_logic_test tests/path_mtu_probe_logic_test.cpp)
+target_link_libraries(path_mtu_probe_logic_test PRIVATE gtest_main)
+add_test(NAME path_mtu_probe_logic_test COMMAND path_mtu_probe_logic_test)
