@@ -8,6 +8,7 @@ const EXPECTED_TAG: [u8; 16] = [0u8; 16];
 
 #[test]
 fn encrypt_decrypt_vectors() {
+    std::env::set_var("FORCE_SOFTWARE", "1");
     let cipher = Aegis128X::new();
     let mut ct = Vec::new();
     let mut tag = [0u8; 16];

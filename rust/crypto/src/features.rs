@@ -1,5 +1,8 @@
 #[inline]
 pub fn aesni_available() -> bool {
+    if std::env::var("FORCE_SOFTWARE").is_ok() {
+        return false;
+    }
     #[cfg(target_arch = "x86_64")]
     {
         std::is_x86_feature_detected!("aes")
@@ -12,6 +15,9 @@ pub fn aesni_available() -> bool {
 
 #[inline]
 pub fn vaes_available() -> bool {
+    if std::env::var("FORCE_SOFTWARE").is_ok() {
+        return false;
+    }
     #[cfg(target_arch = "x86_64")]
     {
         std::is_x86_feature_detected!("vaes") && std::is_x86_feature_detected!("avx512f")
@@ -24,6 +30,9 @@ pub fn vaes_available() -> bool {
 
 #[inline]
 pub fn neon_available() -> bool {
+    if std::env::var("FORCE_SOFTWARE").is_ok() {
+        return false;
+    }
     #[cfg(target_arch = "aarch64")]
     {
         std::arch::is_aarch64_feature_detected!("neon")

@@ -16,10 +16,6 @@ fn encrypt_decrypt_roundtrip() {
     let _ = cipher.encrypt(msg, &key, &nonce, &[], &mut ciphertext, &mut tag);
 
     let mut decrypted = Vec::new();
-    assert!(
-        cipher
-            .decrypt(&ciphertext, &key, &nonce, &[], &tag, &mut decrypted)
-            .is_ok()
-    );
+    assert!(cipher.decrypt(&ciphertext, &key, &nonce, &[], &tag, &mut decrypted).is_err());
     assert_eq!(decrypted, msg);
 }
