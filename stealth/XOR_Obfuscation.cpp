@@ -350,7 +350,9 @@ private:
         
         // Derive key from current key and context
         std::vector<uint8_t> context_bytes(sizeof(context_id));
-        std::memcpy(context_bytes.data(), &context_id, sizeof(context_id));
+        std::copy(reinterpret_cast<const uint8_t*>(&context_id),
+                  reinterpret_cast<const uint8_t*>(&context_id) + sizeof(context_id),
+                  context_bytes.data());
         
         return XORKeyDerivation::derive_key(context_id, current_key_, 32);
     }

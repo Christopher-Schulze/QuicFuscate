@@ -316,7 +316,7 @@ void GaloisField::multiply_vector_scalar_neon(uint8_t* dst, const uint8_t* src, 
         return;
     }
     if (scalar == 1) {
-        memcpy(dst, src, length);
+        std::copy(src, src + length, dst);
         return;
     }
     
@@ -351,7 +351,7 @@ void GaloisField::multiply_vector_scalar_avx2(uint8_t* dst, const uint8_t* src, 
         return;
     }
     if (scalar == 1) {
-        memcpy(dst, src, length);
+        std::copy(src, src + length, dst);
         return;
     }
     
@@ -771,7 +771,9 @@ extern "C" {
         try {
             auto stats = global_fec_module->get_statistics();
             size_t copy_size = std::min(buffer_size, sizeof(stats));
-            memcpy(stats_buffer, &stats, copy_size);
+            std::copy_n(reinterpret_cast<const uint8_t*>(&stats),
+                       copy_size,
+                       reinterpret_cast<uint8_t*>(stats_buffer));
             return 0;
         } catch (...) {
             return -1;
