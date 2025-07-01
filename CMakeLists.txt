@@ -62,10 +62,6 @@ add_dependencies(quicfuscate_core quiche_build)
 endif()
 
 add_library(quicfuscate_crypto
-    crypto/aegis128l.cpp
-    crypto/aegis128x.cpp
-    crypto/morus.cpp
-    crypto/morus1280.cpp
     crypto/cipher_suite_selector.cpp
 )
 
@@ -148,13 +144,6 @@ add_executable(fec_module_test tests/fec_module_test.cpp)
 target_link_libraries(fec_module_test PRIVATE quicfuscate_fec gtest_main)
 add_test(NAME fec_module_test COMMAND fec_module_test)
 
-add_executable(aegis128l_test tests/aegis128l_test.cpp)
-target_link_libraries(aegis128l_test PRIVATE quicfuscate_crypto gtest_main)
-add_test(NAME aegis128l_test COMMAND aegis128l_test)
-
-add_executable(morus_test tests/morus_test.cpp)
-target_link_libraries(morus_test PRIVATE quicfuscate_crypto gtest_main)
-add_test(NAME morus_test COMMAND morus_test)
 
 add_executable(stream_handling_test tests/stream_handling_test.cpp)
 target_link_libraries(stream_handling_test PRIVATE quicfuscate_optimize gtest_main)
