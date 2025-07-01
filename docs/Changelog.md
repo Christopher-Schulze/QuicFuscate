@@ -1,5 +1,10 @@
 # QuicFuscate Changelog
 
+## [2024-12-22] - Deprecated C++ Removal
+
+### 🔥 Removed
+- `crypto/aegis128l.cpp`, `crypto/aegis128x.cpp`, `crypto/morus.cpp`, `crypto/morus1280.cpp` removed in favor of Rust implementations.
+
 ## [2024-12-20] - MORUS-1280-128 Implementierung
 
 ### ✅ Behoben

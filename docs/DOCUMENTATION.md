@@ -43,14 +43,12 @@ QuicFuscate/
 │   ├── quic_path_mtu_manager.hpp
 │   └── quic_stream_impl.cpp
 ├── crypto/
-│   ├── aegis128l.cpp
 │   ├── aegis128l.hpp
-│   ├── aegis128x.cpp
 │   ├── aegis128x.hpp
-│   ├── morus1280.cpp
 │   ├── morus1280.hpp
 │   ├── cipher_suite_selector.cpp
 │   └── cipher_suite_selector.hpp
+│   *(legacy C++ sources `aegis128l.cpp`, `aegis128x.cpp` and `morus*.cpp` were removed)*
 ├── docs/
 │   └── DOCUMENTATION.md
 ├── fec/
@@ -2231,12 +2229,10 @@ EnergyManager::getInstance().set_cpu_frequency_scaling(true);
 
 ### Cryptography Module
 - `crypto/aegis128l.hpp`: AEGIS-128L authenticated encryption
-- `crypto/aegis128l.cpp`: AEGIS-128L implementation
 - `crypto/aegis128x.hpp`: AEGIS-128X authenticated encryption
-- `crypto/aegis128x.cpp`: AEGIS-128X implementation
 - `crypto/aes_gcm.hpp`: AES-GCM encryption support
 - `crypto/morus1280.hpp`: MORUS-1280-128 lightweight cryptography
-- `crypto/morus1280.cpp`: MORUS-1280-128 implementation
+- *Legacy sources `aegis128l.cpp`, `aegis128x.cpp` and `morus1280.cpp` have been removed*
 - `crypto/cipher_suite_selector.hpp`: Automatic cipher selection
 - `crypto/cipher_suite_selector.cpp`: Cipher selection logic
 
