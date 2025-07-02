@@ -14,3 +14,20 @@ fn reports_status() {
     assert_eq!(mgr.get_mtu_status(false), MtuStatus::Searching);
     assert!(mgr.is_mtu_unstable());
 }
+
+#[test]
+fn mtu_probe_and_blackhole() {
+    let mut mgr = PathMtuManager::new();
+    // Successful probe increases MTU
+    let size = DEFAULT_INITIAL_MTU + DEFAULT_MTU_STEP_SIZE;
+    let id = mgr.send_probe(size, false);
+    mgr.handle_probe_response(id, true, false);
+    assert_eq!(mgr.get_outgoing_mtu(), size);
+
+    // Consecutive failures trigger blackhole detection
+    for _ in 0..DEFAULT_PATH_BLACKHOLE_THRESHOLD {
+        let id = mgr.send_probe(size, false);
+        mgr.handle_probe_response(id, false, false);
+    }
+    assert_eq!(mgr.get_mtu_status(false), MtuStatus::Blackhole);
+}
