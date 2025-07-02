@@ -68,11 +68,26 @@ add_library(quicfuscate_crypto
 target_include_directories(quicfuscate_crypto PUBLIC ${PROJECT_SOURCE_DIR}/crypto)
 target_link_libraries(quicfuscate_crypto PUBLIC OpenSSL::SSL OpenSSL::Crypto)
 
-add_library(quicfuscate_fec
-    fec/FEC_Modul.cpp
+
+set(RUST_FEC_LIB "${PROJECT_SOURCE_DIR}/rust/fec/target/release/libfec.a")
+
+if(EXISTS "${PROJECT_SOURCE_DIR}/rust/fec/Cargo.toml")
+add_custom_command(
+    OUTPUT ${RUST_FEC_LIB}
+    COMMAND cargo build --release
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/rust/fec
+    COMMENT "Building Rust FEC via cargo"
 )
 
-target_include_directories(quicfuscate_fec PUBLIC ${PROJECT_SOURCE_DIR}/fec)
+add_custom_target(rust_fec_build ALL DEPENDS ${RUST_FEC_LIB})
+
+add_library(quicfuscate_fec STATIC IMPORTED GLOBAL)
+set_target_properties(quicfuscate_fec PROPERTIES
+    IMPORTED_LOCATION "${RUST_FEC_LIB}"
+    INTERFACE_INCLUDE_DIRECTORIES "${PROJECT_SOURCE_DIR}/fec"
+)
+add_dependencies(quicfuscate_fec rust_fec_build)
+endif()
 
 add_library(quicfuscate_stealth
     stealth/DoH.cpp

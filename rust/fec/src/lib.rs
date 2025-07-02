@@ -191,14 +191,19 @@ impl FECModule {
         packets.push(FECPacket { sequence_number, is_repair: false, data: buf.clone() });
         self.pool.deallocate(buf)?;
 
-        if self.config.redundancy_ratio > 0.0 {
-            let mut parity = self.pool.allocate()?;
-            parity.resize(data.len(), 0);
-            // simple XOR parity using optional SIMD acceleration
-            GaloisField::multiply_vector_scalar(&mut parity, data, 1);
-            let byte = parity.iter().fold(0u8, |acc, b| acc ^ b);
-            packets.push(FECPacket { sequence_number, is_repair: true, data: vec![byte] });
-            self.pool.deallocate(parity)?;
+        let repair_count = if self.config.redundancy_ratio <= 0.0 {
+            0
+        } else {
+            self.config.redundancy_ratio.ceil() as usize
+        };
+
+        for i in 0..repair_count {
+            let coeff = (i + 1) as u8;
+            let mut repair = self.pool.allocate()?;
+            repair.resize(data.len(), 0);
+            GaloisField::multiply_vector_scalar(&mut repair, data, coeff);
+            packets.push(FECPacket { sequence_number, is_repair: true, data: repair.clone() });
+            self.pool.deallocate(repair)?;
             stats.repair_packets_generated += 1;
         }
         Ok(packets)
