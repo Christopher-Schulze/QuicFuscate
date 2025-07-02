@@ -20,6 +20,8 @@ fn print_fingerprints() {
 fn main() {
     let opts = CommandLineOptions::parse();
 
+    println!("QuicFuscate CLI gestartet. Optionen: --server/--host, --port, etc.");
+
     if opts.list_fingerprints {
         print_fingerprints();
         return;
