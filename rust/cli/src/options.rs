@@ -17,7 +17,7 @@ pub enum Fingerprint {
 #[command(author, version, about="QuicFuscate VPN - QUIC mit uTLS Integration", long_about=None)]
 pub struct CommandLineOptions {
     /// Server-Hostname oder IP-Adresse
-    #[arg(short, long, default_value = "example.com")]
+    #[arg(short, long, alias = "host", default_value = "example.com")]
     pub server: String,
 
     /// Server-Port

@@ -38,3 +38,14 @@ fn parse_custom_values() -> Result<(), clap::Error> {
     assert!(opts.debug_tls);
     Ok(())
 }
+
+#[test]
+fn host_alias() -> Result<(), clap::Error> {
+    let opts = CommandLineOptions::try_parse_from([
+        "prog",
+        "--host",
+        "example.org",
+    ])?;
+    assert_eq!(opts.server, "example.org");
+    Ok(())
+}

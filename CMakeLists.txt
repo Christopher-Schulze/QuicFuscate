@@ -94,16 +94,6 @@ add_library(quicfuscate_optimize
 target_include_directories(quicfuscate_optimize PUBLIC ${PROJECT_SOURCE_DIR}/optimize ${PROJECT_SOURCE_DIR}/core)
 
 if(TARGET quicfuscate_core)
-add_executable(quicfuscate_cli cli/quicfuscate_cli.cpp)
-target_link_libraries(quicfuscate_cli PRIVATE
-    quicfuscate_core
-    quicfuscate_crypto
-    quicfuscate_fec
-    quicfuscate_stealth
-    OpenSSL::SSL
-    OpenSSL::Crypto
-    quiche
-)
 
 add_executable(quicfuscate_client cli/quicfuscate_client.cpp)
 target_link_libraries(quicfuscate_client PRIVATE
