@@ -40,4 +40,12 @@ mod tests {
         let dec = obf.deobfuscate(&enc, XORPattern::Simple);
         assert_eq!(dec, data);
     }
+
+    #[test]
+    fn xor_obfuscation_changes_data() {
+        let mut obf = XORObfuscator::new();
+        let data = [0xFFu8];
+        let enc = obf.obfuscate(&data, XORPattern::Simple);
+        assert_eq!(enc, vec![0x55]);
+    }
 }
