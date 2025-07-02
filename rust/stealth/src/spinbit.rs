@@ -28,4 +28,12 @@ mod tests {
         let r = SpinBitRandomizer::new();
         let _ = r.randomize(true);
     }
+
+    #[test]
+    fn always_flip_when_probability_one() {
+        let mut r = SpinBitRandomizer::new();
+        r.set_probability(1.0);
+        assert!(!r.randomize(true));
+        assert!(r.randomize(false));
+    }
 }

@@ -1,38 +1,44 @@
 use std::collections::{HashMap, VecDeque};
 
+struct Stream {
+    priority: u8,
+    buffer: VecDeque<Vec<u8>>,
+}
+
 pub struct StreamEngine {
     next_id: u64,
-    priorities: HashMap<u64, u8>,
-    queue: VecDeque<(u64, Vec<u8>)>,
+    streams: HashMap<u64, Stream>,
 }
 
 impl StreamEngine {
     pub fn new() -> Self {
-        Self { next_id: 0, priorities: HashMap::new(), queue: VecDeque::new() }
+        Self { next_id: 0, streams: HashMap::new() }
     }
 
     pub fn create_stream(&mut self, priority: u8) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
-        self.priorities.insert(id, priority);
+        self.streams.insert(id, Stream { priority, buffer: VecDeque::new() });
         id
     }
 
     pub fn send(&mut self, id: u64, data: Vec<u8>) {
-        self.queue.push_back((id, data));
+        if let Some(stream) = self.streams.get_mut(&id) {
+            stream.buffer.push_back(data);
+        }
     }
 
     pub async fn recv(&mut self) -> Option<(u64, Vec<u8>)> {
-        if self.queue.is_empty() {
-            return None;
-        }
-        let idx = self
-            .queue
+        let id = self
+            .streams
             .iter()
-            .enumerate()
-            .max_by_key(|(_, (id, _))| self.priorities.get(id).cloned().unwrap_or(0))
-            .map(|(i, _)| i)?;
-        self.queue.remove(idx)
+            .filter(|(_, s)| !s.buffer.is_empty())
+            .max_by_key(|(_, s)| s.priority)
+            .map(|(id, _)| *id)?;
+
+        let stream = self.streams.get_mut(&id)?;
+        let data = stream.buffer.pop_front()?;
+        Some((id, data))
     }
 }
 
@@ -42,15 +48,20 @@ mod tests {
     use tokio::runtime::Runtime;
 
     #[test]
-    fn stream_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+    fn stream_roundtrip_priority() -> Result<(), Box<dyn std::error::Error>> {
         let rt = Runtime::new()?;
         rt.block_on(async {
             let mut eng = StreamEngine::new();
-            let id = eng.create_stream(1);
-            eng.send(id, vec![4,5,6]);
-            let (rid, data) = eng.recv().await.ok_or("no data")?;
-            assert_eq!(rid, id);
-            assert_eq!(data, vec![4,5,6]);
+            let id1 = eng.create_stream(1);
+            let id2 = eng.create_stream(10);
+            eng.send(id1, vec![1]);
+            eng.send(id2, vec![2]);
+            let (rid, data) = eng.recv().await.unwrap();
+            assert_eq!(rid, id2);
+            assert_eq!(data, vec![2]);
+            let (rid, data) = eng.recv().await.unwrap();
+            assert_eq!(rid, id1);
+            assert_eq!(data, vec![1]);
             Ok::<(), Box<dyn std::error::Error>>(())
         })?;
         Ok(())
