@@ -6,6 +6,7 @@ The Rust modules mirror the same high level design while taking advantage of
 Rust's safety guarantees and build tooling. The `core`, `crypto`, `fec` and
 `stealth` crates have reached feature parity with their original C++
 counterparts, and further work continues in Rust only.
+The legacy C++ modules are deprecated and kept only for reference.
 
 > **Note:** Only one Rust workspace exists. All crates reside under the `rust/`
 directory and there is no separate `Rust-QuicFuscate` folder.
@@ -39,16 +40,13 @@ DoH tunnelling and domain fronting are already functional.  uTLS
 fingerprinting and HTTP/3 masquerading are in active development as outlined in
 the *Stealth Module* section of the C++ documentation【F:docs/DOCUMENTATION.md†L1888-L1905】.
 
-## Building the Workspace
-Ensure the patched `quiche` submodule is built and then compile the Rust
-workspace:
+## Building & Testing the Rust Workspace
+First build the patched `quiche` submodule, then compile and test the Rust workspace:
 
 ```bash
 git submodule update --init --recursive libs/quiche-patched
 cd libs/quiche-patched && cargo build --release && cd ../..
 ```
-
-To build **only** the Rust workspace and execute its unit tests run:
 
 ```bash
 cd rust
