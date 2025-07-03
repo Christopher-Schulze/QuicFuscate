@@ -43,15 +43,17 @@ because all crates have been consolidated under `rust/`.
 ### ⚡ Performance Optimizations
 - **SIMD Acceleration**: ARM NEON and x86 AVX2/AVX-512 optimizations
 - **Zero-Copy Architecture**: Minimizes memory allocations for maximum throughput
-- **Adaptive FEC**: TETRYS-based Forward Error Correction with dynamic redundancy
+- **Experimental FEC**: Early TETRYS-based Forward Error Correction module
 - **Connection Multiplexing**: Multiple streams over a single connection
 - **0-RTT Handshake**: Reduced latency for subsequent connections
 
 ### 🔄 Adaptive Error Correction
-- **TETRYS FEC Implementation**: Advanced coding scheme for lossy networks
-- **Dynamic Redundancy**: Automatically adjusts to network conditions
-- **Packet Recovery**: Up to 30% packet loss tolerance
-- **Bandwidth-Efficient**: Minimal overhead compared to traditional FEC
+- **TETRYS FEC (experimental)**: Basic encoder/decoder implementation
+- **Dynamic Redundancy (planned)**: Automatic adjustments to network conditions
+- **Packet Recovery**: Initial support for lossy networks
+- **Bandwidth-Efficient**: Aims for minimal overhead compared to traditional FEC
+
+> **Note:** The FEC and Stealth modules are experimental and not yet production ready.
 
 ## 🏗️ Project Status
 
@@ -76,8 +78,8 @@ This project is currently being refactored from C++ to Rust to leverage modern l
 | Transport Protocol  | QUIC v1 / HTTP/3                   |
 | Encryption         | AEGIS-128L/X, MORUS-1280-128       |
 | Key Exchange       | X25519, X448                       |
-| Error Correction   | TETRYS FEC                         |
-| Obfuscation       | XOR-based, Traffic Shaping, Fake TLS |
+| Error Correction   | TETRYS FEC (experimental)           |
+| Obfuscation       | XOR-based, Traffic Shaping, Fake TLS (experimental) |
 | Platforms          | Linux, macOS, Windows (planned)     |
 | Architecture       | x86_64, ARM64                      |
 | Performance        | Multi-Gigabit capable              |
