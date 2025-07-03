@@ -8,3 +8,4 @@ core = { path = "../core" }
 crypto = { path = "../crypto" }
 fec = { path = "../fec" }
 stealth = { path = "../stealth" }
+tokio = { version = "1", features = ["rt", "macros"] }
