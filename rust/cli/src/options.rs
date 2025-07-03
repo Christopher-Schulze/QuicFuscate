@@ -110,6 +110,18 @@ pub struct CommandLineOptions {
     #[arg(long, default_value_t = false)]
     pub doh: bool,
 
+    /// TTL for cached DoH responses in seconds
+    #[arg(long, default_value_t = 300)]
+    pub doh_ttl: u64,
+
+    /// Enable QUIC connection migration
+    #[arg(long, default_value_t = false)]
+    pub migration: bool,
+
+    /// Enable BBRv2 congestion control
+    #[arg(long, default_value_t = false)]
+    pub bbr: bool,
+
     /// Enable spinbit randomization
     #[arg(long, default_value_t = false)]
     pub spin_random: bool,

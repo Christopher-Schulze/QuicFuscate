@@ -8,6 +8,9 @@ fn default_values() -> Result<(), clap::Error> {
     assert_eq!(opts.port, 443);
     assert_eq!(opts.fingerprint, Fingerprint::Chrome);
     assert!(!opts.no_utls);
+    assert_eq!(opts.doh_ttl, 300);
+    assert!(!opts.migration);
+    assert!(!opts.bbr);
     Ok(())
 }
 
@@ -27,6 +30,10 @@ fn parse_custom_values() -> Result<(), clap::Error> {
         "cafile",
         "--verbose",
         "--debug-tls",
+        "--doh-ttl",
+        "600",
+        "--migration",
+        "--bbr",
     ])?;
     assert_eq!(opts.server, "host");
     assert_eq!(opts.port, 123);
@@ -36,6 +43,9 @@ fn parse_custom_values() -> Result<(), clap::Error> {
     assert_eq!(opts.ca_file.as_deref(), Some("cafile"));
     assert!(opts.verbose);
     assert!(opts.debug_tls);
+    assert_eq!(opts.doh_ttl, 600);
+    assert!(opts.migration);
+    assert!(opts.bbr);
     Ok(())
 }
 

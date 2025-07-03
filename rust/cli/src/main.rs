@@ -74,8 +74,11 @@ fn main() {
     stealth.enable_domain_fronting(opts.domain_fronting);
     stealth.enable_http3_masq(opts.http3_masq);
     stealth.enable_doh(opts.doh);
+    stealth.set_doh_cache_ttl(opts.doh_ttl);
     stealth.enable_spinbit(opts.spin_random);
     stealth.enable_zero_rtt(opts.zero_rtt);
+    stealth.enable_migration(opts.migration);
+    stealth.enable_bbr(opts.bbr);
     if stealth.initialize() {
         info!("Stealth subsystem initialized.");
     } else {

@@ -503,8 +503,11 @@ pub struct FECModule {
     encoder: EncoderCore,
     decoder: DecoderCore,
     controller: StrategyController,
+    sampler: MetricsSampler,
+    adaptive_cb: Option<Box<dyn Fn(MetricsSample) -> f64 + Send + Sync>>,
     hw: HwPath,
     state: FecState,
+    stealth: bool,
 }
 
 impl FECModule {
@@ -522,9 +525,20 @@ impl FECModule {
             encoder: EncoderCore::new(algo),
             decoder: DecoderCore::new(algo),
             controller: StrategyController::new(),
+            sampler: MetricsSampler::new(),
+            adaptive_cb: None,
             hw,
             state: FecState::Off,
+            stealth: false,
         }
+    }
+
+    pub fn config(&self) -> &FECConfig {
+        &self.config
+    }
+
+    pub fn pool_ptr(&self) -> *const MemoryPool {
+        Arc::as_ptr(&self.pool)
     }
 
     fn algorithm_for_state(&self, state: FecState) -> FecAlgorithm {
@@ -556,7 +570,15 @@ impl FECModule {
         if self.state == FecState::Off {
             return Ok(vec![FECPacket { sequence_number, is_repair: false, data: data.to_vec() }]);
         }
-        self.encoder.encode(data, sequence_number)
+        let mut packets = self.encoder.encode(data, sequence_number)?;
+        if self.stealth {
+            for p in packets.iter_mut().filter(|p| p.is_repair) {
+                for b in p.data.iter_mut() {
+                    *b ^= rand::random::<u8>();
+                }
+            }
+        }
+        Ok(packets)
     }
 
     pub fn decode(&self, packets: &[FECPacket]) -> Result<Vec<u8>> {
@@ -569,12 +591,35 @@ impl FECModule {
     }
 
     pub fn update_network_metrics(&mut self, metrics: NetworkMetrics) {
-        let mut state = match self.config.mode {
+        self.sampler.push(metrics.packet_loss_rate as f32, 0.0);
+        let ratio = if let Some(cb) = &self.adaptive_cb {
+            cb(MetricsSample { loss: self.sampler.avg_loss(), rtt: 0.0 })
+        } else {
+            self.config.redundancy_ratio
+        };
+        let state = match self.config.mode {
             FecMode::Performance => FecState::Off,
             FecMode::AlwaysOn => FecState::LowLoss,
-            FecMode::Adaptive => self.controller.update(metrics.packet_loss_rate as f32),
+            FecMode::Adaptive => self.controller.update(self.sampler.avg_loss()),
         };
+        self.config.redundancy_ratio = ratio;
         self.set_state(state);
+    }
+
+    pub fn update_config(&mut self, cfg: FECConfig) {
+        self.config = cfg;
+        self.pool = Arc::new(MemoryPool::new(cfg.memory_pool_block_size, cfg.memory_pool_initial_blocks));
+    }
+
+    pub fn set_adaptive_callback<F>(&mut self, f: F)
+    where
+        F: Fn(MetricsSample) -> f64 + Send + Sync + 'static,
+    {
+        self.adaptive_cb = Some(Box::new(f));
+    }
+
+    pub fn enable_stealth_mode(&mut self, enable: bool) {
+        self.stealth = enable;
     }
 
     pub fn get_statistics(&self) -> Result<Statistics> {

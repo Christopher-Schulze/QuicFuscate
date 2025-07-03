@@ -181,6 +181,9 @@ Run `quicfuscate_demo --help` to see all available options. Important flags incl
   -v, --verbose              Verbose logging
       --debug-tls            Show TLS debug information
       --list-fingerprints    List available browser fingerprints
+      --doh-ttl <secs>       DNS cache TTL (default: 300)
+      --migration            Enable QUIC connection migration
+      --bbr                 Enable BBRv2 congestion control
 ```
 
 ## 🔄 Continuous Integration

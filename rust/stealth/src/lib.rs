@@ -32,6 +32,8 @@ pub struct QuicFuscateStealth {
     pub http3_masq: Masquerade,
     pub doh: DohClient,
     pub tls: FakeTls,
+    migration_enabled: bool,
+    bbr_enabled: bool,
 }
 
 impl QuicFuscateStealth {
@@ -46,6 +48,8 @@ impl QuicFuscateStealth {
             http3_masq: Masquerade::new(BrowserProfile::Chrome),
             doh: DohClient::new(DohConfig::default()),
             tls: FakeTls::new(BrowserProfile::Chrome),
+            migration_enabled: false,
+            bbr_enabled: false,
         }
     }
 
@@ -69,6 +73,11 @@ impl QuicFuscateStealth {
     pub fn enable_domain_fronting(&mut self, e: bool) { self.domain_fronting.enable(e); }
     pub fn enable_http3_masq(&mut self, e: bool) { self.http3_masq.enable(e); }
     pub fn enable_doh(&mut self, e: bool) { self.doh.enable(e); }
+    pub fn set_doh_cache_ttl(&mut self, ttl: u64) { self.doh.set_cache_ttl(ttl); }
+    pub fn enable_migration(&mut self, e: bool) { self.migration_enabled = e; }
+    pub fn enable_bbr(&mut self, e: bool) { self.bbr_enabled = e; }
+    pub fn is_migration_enabled(&self) -> bool { self.migration_enabled }
+    pub fn is_bbr_enabled(&self) -> bool { self.bbr_enabled }
     pub fn enable_zero_rtt(&mut self, e: bool) { self.zero_rtt.set_enabled(e); }
     pub fn set_zero_rtt_max_early_data(&mut self, max: usize) { self.zero_rtt.set_max_early_data(max); }
 
