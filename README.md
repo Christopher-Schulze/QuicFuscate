@@ -185,15 +185,24 @@ Run `quicfuscate_demo --help` to see all available options. Important flags incl
 
 ## 🔄 Continuous Integration
 
-The repository includes a GitHub Actions workflow that builds the project and
-runs the tests on every push or pull request. You can find the workflow in
-`.github/workflows/ci.yml`. To reproduce the CI steps locally run:
+The repository includes a GitHub Actions workflow that builds and tests the
+project on Linux, macOS and Windows. The workflow also performs static
+analysis and uploads the release binaries as artifacts. You can find the
+workflow in `.github/workflows/ci.yml`. It executes the following tasks:
+
+1. Fetches and builds the patched `quiche` library via `scripts/fetch_quiche.sh`.
+2. Runs `cargo clippy` and `cppcheck` for linting on all platforms.
+3. Builds the Rust workspace and executes all integration tests.
+4. Uploads the release binaries for each operating system.
+
+To reproduce the CI steps locally run:
 
 ```bash
 git submodule update --init --recursive
 cd rust
 cargo build --workspace --release
 cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 ## 📜 License

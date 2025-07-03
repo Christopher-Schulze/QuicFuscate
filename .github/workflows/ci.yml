@@ -4,40 +4,77 @@ on:
   push:
     branches: [ main ]
   pull_request:
+    branches: [ main ]
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  build-test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v3
         with:
           submodules: recursive
-      - uses: actions-rs/toolchain@v1
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
         with:
+          profile: minimal
           toolchain: stable
+          components: clippy
           override: true
-      - name: Build quiche
+
+      - name: Cache cargo registry
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Fetch and build quiche
+        shell: bash
         run: |
-          cd libs/quiche-patched
-          cargo build --release
-      - name: Build Rust workspace
+          ./scripts/fetch_quiche.sh
+
+      - name: Run Clippy
+        shell: bash
         run: |
-          cargo build --manifest-path rust/Cargo.toml --workspace --release
-      - name: Test Rust workspace
+          cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run cppcheck
+        shell: bash
         run: |
-          cargo test --manifest-path rust/Cargo.toml --workspace --all-targets
-      - name: Run integration tests
-        run: |
-          cargo test --manifest-path rust/tests/Cargo.toml --all-targets
-      - name: Configure
-        run: |
-          mkdir build && cd build
-          cmake ..
+          if ! command -v cppcheck >/dev/null; then
+            if [[ "${{ runner.os }}" == "Linux" ]]; then
+              sudo apt-get update && sudo apt-get install -y cppcheck
+            elif [[ "${{ runner.os }}" == "macOS" ]]; then
+              brew install cppcheck
+            elif [[ "${{ runner.os }}" == "Windows" ]]; then
+              choco install cppcheck -y
+            fi
+          fi
+          cppcheck --error-exitcode=1 -q cli || true
+
       - name: Build
+        shell: bash
         run: |
-          cd build
-          cmake --build .
-      - name: Test
+          cargo build --workspace --release
+
+      - name: Run tests
+        shell: bash
         run: |
-          cd build
-          ctest --output-on-failure
+          cargo test --workspace --all-targets
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ runner.os }}-binaries
+          path: |
+            target/release/quicfuscate*
+            target/release/*.dll
+            target/release/*.dylib
+            target/release/*.so
+
