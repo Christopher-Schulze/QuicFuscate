@@ -298,7 +298,7 @@ Run it, break the net. 🫡
 ## Rust Build & Test Instructions
 
 Die Rust-Umsetzung liegt im Verzeichnis `rust/`. Um ausschließlich die
-Arbeitsumgebung für Rust zu bauen und alle Tests auszuführen, genügen zwei
+Rust-Komponenten zu bauen und die zugehörigen Tests zu starten, genügen zwei
 Befehle:
 
 ```bash
@@ -312,7 +312,7 @@ Unit-Tests gestartet.
 ## Noch zu erledigen
 
 - Kompletter Rebuild in Rust ohne Stubs, produktionsreifer Code
-- FEC crate stabilisieren (siehe `rust/fec`)
+- FEC crate ist weitgehend stabil und ersetzt das alte `FEC_Modul.cpp`
 - Module konsolidieren: je eine Datei für main, crypto, fec, optimized und stealth
 
 Weitere Änderungen werden hier dokumentiert.

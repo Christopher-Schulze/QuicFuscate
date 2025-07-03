@@ -3,7 +3,9 @@
 This directory contains documentation for the Rust reimplementation of **QuicFuscate**. The
 original C++ code base is documented in [`DOCUMENTATION.md`](DOCUMENTATION.md).
 The Rust modules mirror the same high level design while taking advantage of
-Rust's safety guarantees and build tooling.
+Rust's safety guarantees and build tooling. The `core`, `crypto`, `fec` and
+`stealth` crates have reached feature parity with their original C++
+counterparts, and further work continues in Rust only.
 
 > **Note:** Only one Rust workspace exists. All crates reside under the `rust/`
 directory and there is no separate `Rust-QuicFuscate` folder.
@@ -25,9 +27,9 @@ code reuses the same concepts of AEGIS‑128X/L and MORUS‑1280‑128 with a
 `CipherSuiteSelector` to pick the optimal cipher based on CPU features.
 
 ### FEC Crate
-The Forward Error Correction crate now provides working encoder and decoder
-implementations.  It replaces the previous `FEC_Modul.cpp` logic and offers
-adaptive redundancy with memory-pooled buffers.  SIMD optimised Galois field
+The Forward Error Correction crate now provides stable encoder and decoder
+implementations and supersedes the old C++ implementation. It offers adaptive
+redundancy with memory-pooled buffers, and SIMD optimised Galois field
 arithmetic continues to be developed as described in the original
 documentation【F:docs/DOCUMENTATION.md†L173-L202】.
 
