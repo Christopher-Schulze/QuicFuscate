@@ -1,11 +1,11 @@
 use core::{
-    MtuStatus, PathMtuManager, DEFAULT_MAX_MTU, DEFAULT_MIN_MTU,
+    MtuStatus, PathMtuManager, DEFAULT_MAX_MTU, DEFAULT_MIN_MTU, RFC_8899_MIN_MTU,
     DEFAULT_PATH_BLACKHOLE_THRESHOLD, DEFAULT_INITIAL_MTU, DEFAULT_MTU_STEP_SIZE,
 };
 
 #[test]
 fn constants() {
-    assert!(DEFAULT_MIN_MTU >= 1200);
+    assert!(DEFAULT_MIN_MTU >= RFC_8899_MIN_MTU);
     assert!(DEFAULT_MIN_MTU <= DEFAULT_MAX_MTU);
 }
 

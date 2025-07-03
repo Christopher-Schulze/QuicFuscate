@@ -4,6 +4,14 @@ set -e
 MIRROR_URL=${1:-https://github.com/cloudflare/quiche.git}
 SUBMODULE_PATH="libs/quiche-patched"
 
+if [ -n "$QUICHE_PATH" ] && [ -d "$QUICHE_PATH" ]; then
+    echo "Using local quiche from $QUICHE_PATH"
+    cd "$QUICHE_PATH"
+    cargo build --release
+    cargo clippy --all-targets -- -D warnings
+    exit 0
+fi
+
 if [ ! -d "$SUBMODULE_PATH" ]; then
     mkdir -p "$SUBMODULE_PATH"
 fi
