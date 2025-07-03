@@ -9,3 +9,11 @@ fn encode_decode_roundtrip() {
     let decoded = obf.deobfuscate(&encoded, XORPattern::Simple);
     assert_eq!(decoded, data);
 }
+
+#[test]
+fn obfuscation_flips_bits() {
+    let mut obf = XORObfuscator::new();
+    let data = [0xFFu8];
+    let encoded = obf.obfuscate(&data, XORPattern::Simple);
+    assert_eq!(encoded, vec![0x55]);
+}

@@ -36,4 +36,12 @@ mod tests {
         assert!(!r.randomize(true));
         assert!(r.randomize(false));
     }
+
+    #[test]
+    fn never_flip_when_probability_zero() {
+        let mut r = SpinBitRandomizer::new();
+        r.set_probability(0.0);
+        assert!(r.randomize(true));
+        assert!(!r.randomize(false));
+    }
 }

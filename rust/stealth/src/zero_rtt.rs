@@ -16,9 +16,16 @@ impl ZeroRttEngine {
     pub async fn send_early_data(&mut self, data: &[u8]) -> Result<(), ()> {
         self.attempts += 1;
 
+        // Mirror the checks performed by the C++ implementation. Early data
+        // can only be sent when zero-RTT has been enabled and the payload size
+        // stays within the configured limit.
         if !self.enabled || data.len() > MAX_EARLY_DATA_SIZE {
             return Err(());
         }
+
+        // In the C++ version the data would be written to the network. Here we
+        // simply simulate a small asynchronous delay so the call truly awaits.
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 
         self.successes += 1;
         Ok(())
