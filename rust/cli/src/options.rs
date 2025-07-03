@@ -1,4 +1,24 @@
 use clap::{Parser, ValueEnum};
+use fec::{FecMode};
+
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum, Debug)]
+pub enum FecCliMode {
+    Off,
+    Performance,
+    Always,
+    Adaptive,
+}
+
+impl From<FecCliMode> for FecMode {
+    fn from(m: FecCliMode) -> Self {
+        match m {
+            FecCliMode::Off => FecMode::Performance,
+            FecCliMode::Performance => FecMode::Performance,
+            FecCliMode::Always => FecMode::AlwaysOn,
+            FecCliMode::Adaptive => FecMode::Adaptive,
+        }
+    }
+}
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
 pub enum Fingerprint {
@@ -43,6 +63,14 @@ pub struct CommandLineOptions {
     /// Ausführliche Protokollierung
     #[arg(short, long, default_value_t = false)]
     pub verbose: bool,
+
+    /// FEC Mode
+    #[arg(long, value_enum, default_value_t = FecCliMode::Adaptive)]
+    pub fec: FecCliMode,
+
+    /// Ratio used when --fec always <ratio>
+    #[arg(long, default_value_t = 5.0)]
+    pub fec_ratio: f32,
 
     /// TLS-Debug-Informationen anzeigen
     #[arg(long, default_value_t = false)]

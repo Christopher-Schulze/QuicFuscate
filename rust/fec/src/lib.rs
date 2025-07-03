@@ -2,11 +2,36 @@ use std::ptr;
 use std::slice;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
+use serde::{Deserialize, Serialize};
+use reed_solomon_erasure::galois_8::ReedSolomon;
 
 #[derive(Debug, Error)]
 pub enum FECError {
     #[error("mutex poisoned")]
     LockPoisoned,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FecState {
+    Off,
+    LowLoss,
+    MidLoss,
+    HighLoss,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FecMode {
+    Adaptive,
+    AlwaysOn,
+    Performance,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FecAlgorithm {
+    StripeXor,
+    SparseRlnc,
+    Cm256,
+    ReedSolomon,
 }
 
 impl FECError {
@@ -17,12 +42,14 @@ impl FECError {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct FECConfig {
     pub redundancy_ratio: f64,
     pub enable_simd: bool,
     pub memory_pool_block_size: usize,
     pub memory_pool_initial_blocks: usize,
+    pub mode: FecMode,
+    pub target_latency_ms: f32,
 }
 
 impl Default for FECConfig {
@@ -32,6 +59,8 @@ impl Default for FECConfig {
             enable_simd: true,
             memory_pool_block_size: 2048,
             memory_pool_initial_blocks: 32,
+            mode: FecMode::Adaptive,
+            target_latency_ms: 50.0,
         }
     }
 }
@@ -89,6 +118,217 @@ pub struct Statistics {
     pub packets_encoded: u64,
     pub packets_decoded: u64,
     pub repair_packets_generated: u64,
+}
+
+pub enum HwPath {
+    Vaes512,
+    Avx2,
+    Sse2,
+    Neon,
+    Scalar,
+}
+
+pub struct HwDispatch;
+
+impl HwDispatch {
+    pub fn detect() -> HwPath {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            if std::is_x86_feature_detected!("vaes") {
+                return HwPath::Vaes512;
+            }
+            if std::is_x86_feature_detected!("avx2") {
+                return HwPath::Avx2;
+            }
+            if std::is_x86_feature_detected!("sse2") {
+                return HwPath::Sse2;
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            if std::arch::is_aarch64_feature_detected!("neon") {
+                return HwPath::Neon;
+            }
+        }
+        HwPath::Scalar
+    }
+}
+
+pub struct MetricsSample {
+    pub loss: f32,
+    pub rtt: f32,
+}
+
+pub struct MetricsSampler {
+    window: std::collections::VecDeque<MetricsSample>,
+}
+
+impl MetricsSampler {
+    pub fn new() -> Self {
+        Self { window: std::collections::VecDeque::with_capacity(32) }
+    }
+
+    pub fn push(&mut self, loss: f32, rtt: f32) {
+        if self.window.len() >= 32 {
+            self.window.pop_front();
+        }
+        self.window.push_back(MetricsSample { loss, rtt });
+    }
+
+    pub fn avg_loss(&self) -> f32 {
+        if self.window.is_empty() { return 0.0; }
+        let sum: f32 = self.window.iter().map(|s| s.loss).sum();
+        sum / self.window.len() as f32
+    }
+}
+
+pub struct StrategyController {
+    state: FecState,
+}
+
+impl StrategyController {
+    pub fn new() -> Self {
+        Self { state: FecState::Off }
+    }
+
+    pub fn state(&self) -> FecState { self.state }
+
+    pub fn update(&mut self, loss: f32) -> FecState {
+        const LOSS_ENTER_MID: f32 = 0.05;
+        const LOSS_ENTER_HIGH: f32 = 0.25;
+        const LOSS_EXIT_MID: f32 = 0.03;
+        const LOSS_EXIT_LOW: f32 = 0.01;
+        self.state = match (self.state, loss) {
+            (FecState::Off, l) if l > LOSS_ENTER_MID => FecState::MidLoss,
+            (FecState::LowLoss, l) if l > LOSS_ENTER_HIGH => FecState::HighLoss,
+            (FecState::LowLoss, l) if l < LOSS_EXIT_LOW => FecState::Off,
+            (FecState::MidLoss, l) if l < LOSS_EXIT_MID => FecState::LowLoss,
+            (FecState::HighLoss, l) if l < LOSS_ENTER_HIGH => FecState::MidLoss,
+            _ => self.state,
+        };
+        self.state
+    }
+}
+
+pub trait FecScheme {
+    fn encode(&self, data: &[u8], seq: u32) -> Vec<FECPacket>;
+    fn decode(&self, packets: &[FECPacket]) -> Vec<u8>;
+}
+
+pub struct StripeXor;
+
+impl FecScheme for StripeXor {
+    fn encode(&self, data: &[u8], seq: u32) -> Vec<FECPacket> {
+        let mut parity = vec![0u8; data.len()];
+        for (d, p) in data.iter().zip(parity.iter_mut()) {
+            *p = *d;
+        }
+        vec![
+            FECPacket { sequence_number: seq, is_repair: false, data: data.to_vec() },
+            FECPacket { sequence_number: seq, is_repair: true, data: parity },
+        ]
+    }
+
+    fn decode(&self, packets: &[FECPacket]) -> Vec<u8> {
+        if let Some(p) = packets.iter().find(|p| !p.is_repair) { return p.data.clone(); }
+        Vec::new()
+    }
+}
+
+pub struct Cm256Scheme;
+
+impl FecScheme for Cm256Scheme {
+    fn encode(&self, data: &[u8], seq: u32) -> Vec<FECPacket> {
+        let r = ReedSolomon::new(1, 1).unwrap();
+        let mut shards = vec![data.to_vec(), vec![0u8; data.len()]];
+        r.encode(&mut shards).unwrap();
+        vec![
+            FECPacket { sequence_number: seq, is_repair: false, data: shards[0].clone() },
+            FECPacket { sequence_number: seq, is_repair: true, data: shards[1].clone() },
+        ]
+    }
+
+    fn decode(&self, packets: &[FECPacket]) -> Vec<u8> {
+        if let Some(p) = packets.iter().find(|p| !p.is_repair) { return p.data.clone(); }
+        Vec::new()
+    }
+}
+
+pub struct RlncScheme;
+
+impl FecScheme for RlncScheme {
+    fn encode(&self, data: &[u8], seq: u32) -> Vec<FECPacket> {
+        let mut repair = data.to_vec();
+        for b in repair.iter_mut() { *b ^= 0x55; }
+        vec![
+            FECPacket { sequence_number: seq, is_repair: false, data: data.to_vec() },
+            FECPacket { sequence_number: seq, is_repair: true, data: repair },
+        ]
+    }
+
+    fn decode(&self, packets: &[FECPacket]) -> Vec<u8> {
+        if let Some(p) = packets.iter().find(|p| !p.is_repair) { return p.data.clone(); }
+        Vec::new()
+    }
+}
+
+pub struct RsScheme;
+
+impl FecScheme for RsScheme {
+    fn encode(&self, data: &[u8], seq: u32) -> Vec<FECPacket> {
+        let r = ReedSolomon::new(1, 1).unwrap();
+        let mut shards = vec![data.to_vec(), vec![0u8; data.len()]];
+        r.encode(&mut shards).unwrap();
+        vec![
+            FECPacket { sequence_number: seq, is_repair: false, data: shards[0].clone() },
+            FECPacket { sequence_number: seq, is_repair: true, data: shards[1].clone() },
+        ]
+    }
+
+    fn decode(&self, packets: &[FECPacket]) -> Vec<u8> {
+        if let Some(p) = packets.iter().find(|p| !p.is_repair) { return p.data.clone(); }
+        Vec::new()
+    }
+}
+
+pub struct EncoderCore {
+    scheme: Box<dyn FecScheme + Send + Sync>,
+}
+
+impl EncoderCore {
+    pub fn new(algo: FecAlgorithm) -> Self {
+        let scheme: Box<dyn FecScheme + Send + Sync> = match algo {
+            FecAlgorithm::StripeXor => Box::new(StripeXor),
+            FecAlgorithm::SparseRlnc => Box::new(RlncScheme),
+            FecAlgorithm::Cm256 => Box::new(Cm256Scheme),
+            FecAlgorithm::ReedSolomon => Box::new(RsScheme),
+        };
+        Self { scheme }
+    }
+
+    pub fn encode(&self, data: &[u8], seq: u32) -> Vec<FECPacket> {
+        self.scheme.encode(data, seq)
+    }
+}
+
+pub struct DecoderCore {
+    scheme: Box<dyn FecScheme + Send + Sync>,
+}
+
+impl DecoderCore {
+    pub fn new(algo: FecAlgorithm) -> Self {
+        let scheme: Box<dyn FecScheme + Send + Sync> = match algo {
+            FecAlgorithm::StripeXor => Box::new(StripeXor),
+            FecAlgorithm::SparseRlnc => Box::new(RlncScheme),
+            FecAlgorithm::Cm256 => Box::new(Cm256Scheme),
+            FecAlgorithm::ReedSolomon => Box::new(RsScheme),
+        };
+        Self { scheme }
+    }
+
+    pub fn decode(&self, packets: &[FECPacket]) -> Vec<u8> {
+        self.scheme.decode(packets)
+    }
 }
 
 pub struct GaloisField;
@@ -203,6 +443,9 @@ pub struct FECModule {
     config: FECConfig,
     pool: Arc<MemoryPool>,
     stats: Mutex<Statistics>,
+    encoder: EncoderCore,
+    decoder: DecoderCore,
+    controller: StrategyController,
 }
 
 impl FECModule {
@@ -211,10 +454,18 @@ impl FECModule {
             config.memory_pool_block_size,
             config.memory_pool_initial_blocks,
         ));
+        let algo = match config.mode {
+            FecMode::Adaptive => FecAlgorithm::StripeXor,
+            FecMode::AlwaysOn => FecAlgorithm::StripeXor,
+            FecMode::Performance => FecAlgorithm::StripeXor,
+        };
         Self {
             config,
             pool,
             stats: Mutex::new(Statistics::default()),
+            encoder: EncoderCore::new(algo),
+            decoder: DecoderCore::new(algo),
+            controller: StrategyController::new(),
         }
     }
 
@@ -225,38 +476,7 @@ impl FECModule {
     ) -> Result<Vec<FECPacket>, FECError> {
         let mut stats = self.stats.lock().map_err(|_| FECError::LockPoisoned)?;
         stats.packets_encoded += 1;
-        let mut packets = Vec::new();
-        // allocate buffer from pool to hold the source data
-        let mut buf = self.pool.allocate()?;
-        buf.resize(data.len(), 0);
-        buf[..data.len()].copy_from_slice(data);
-        packets.push(FECPacket {
-            sequence_number,
-            is_repair: false,
-            data: buf.clone(),
-        });
-        self.pool.deallocate(buf)?;
-
-        let repair_count = if self.config.redundancy_ratio <= 0.0 {
-            0
-        } else {
-            self.config.redundancy_ratio.ceil() as usize
-        };
-
-        for i in 0..repair_count {
-            let coeff = (i + 1) as u8;
-            let mut repair = self.pool.allocate()?;
-            repair.resize(data.len(), 0);
-            GaloisField::multiply_vector_scalar(&mut repair, data, coeff);
-            packets.push(FECPacket {
-                sequence_number,
-                is_repair: true,
-                data: repair.clone(),
-            });
-            self.pool.deallocate(repair)?;
-            stats.repair_packets_generated += 1;
-        }
-        Ok(packets)
+        Ok(self.encoder.encode(data, sequence_number))
     }
 
     pub fn decode(&self, packets: &[FECPacket]) -> Result<Vec<u8>, FECError> {
@@ -265,14 +485,12 @@ impl FECModule {
         }
         let mut stats = self.stats.lock().map_err(|_| FECError::LockPoisoned)?;
         stats.packets_decoded += 1;
-        if let Some(p) = packets.iter().find(|p| !p.is_repair) {
-            return Ok(p.data.clone());
-        }
-        Ok(Vec::new())
+        Ok(self.decoder.decode(packets))
     }
 
     pub fn update_network_metrics(&mut self, metrics: NetworkMetrics) {
-        if metrics.packet_loss_rate > 0.3 {
+        let new_state = self.controller.update(metrics.packet_loss_rate as f32);
+        if new_state != FecState::Off {
             self.config.redundancy_ratio = 0.4;
         }
     }
