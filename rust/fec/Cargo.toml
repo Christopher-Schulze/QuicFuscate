@@ -7,7 +7,6 @@ edition = "2021"
 path = "src/lib.rs"
 
 [dependencies]
-once_cell = "1"
 thiserror = "1"
 rlnc = "0.3"
 leopard-codec = "0.1"
