@@ -164,7 +164,7 @@ public:
         header_.size = size;
         header_.in_use = true;
         if (data && size > 0) {
-            memcpy(data_, data, size);
+            std::copy(data, data + size, data_);
         }
         return success();
     }
