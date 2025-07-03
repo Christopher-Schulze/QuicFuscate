@@ -26,6 +26,9 @@ fn decode_returns_empty_without_source_packet() {
         is_repair: true,
         data: vec![1, 2, 3],
     };
-    let result = module.decode(&[repair]).unwrap();
+    let result = match module.decode(&[repair]) {
+        Ok(data) => data,
+        Err(e) => panic!("decode failed: {:?}", e),
+    };
     assert!(result.is_empty());
 }
