@@ -28,7 +28,7 @@ jobs:
           cargo test --manifest-path rust/Cargo.toml --workspace --all-targets
       - name: Run integration tests
         run: |
-          cargo test --manifest-path rust/tests/Cargo.toml
+          cargo test --manifest-path rust/tests/Cargo.toml --all-targets
       - name: Configure
         run: |
           mkdir build && cd build

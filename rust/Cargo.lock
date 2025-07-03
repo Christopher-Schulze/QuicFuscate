@@ -217,6 +217,7 @@ dependencies = [
  "crypto",
  "fec",
  "stealth",
+ "tokio",
 ]
 
 [[package]]
