@@ -60,10 +60,17 @@ impl QuicFuscateStealth {
     }
 
     pub fn enable_spinbit(&mut self, e: bool) { self.spin.enable(e); }
+    pub fn set_spinbit_probability(&mut self, p: f64) { self.spin.set_probability(p); }
+    pub fn enable_utls(&mut self, e: bool) { self.tls.enable(e); }
+    pub fn set_browser_profile(&mut self, profile: BrowserProfile) {
+        self.http3_masq.set_profile(profile);
+        self.tls.set_profile(profile);
+    }
     pub fn enable_domain_fronting(&mut self, e: bool) { self.domain_fronting.enable(e); }
     pub fn enable_http3_masq(&mut self, e: bool) { self.http3_masq.enable(e); }
     pub fn enable_doh(&mut self, e: bool) { self.doh.enable(e); }
     pub fn enable_zero_rtt(&mut self, e: bool) { self.zero_rtt.set_enabled(e); }
+    pub fn set_zero_rtt_max_early_data(&mut self, max: usize) { self.zero_rtt.set_max_early_data(max); }
 
     pub async fn resolve_domain(&mut self, domain: &str) -> std::net::IpAddr {
         self.doh.resolve(domain).await

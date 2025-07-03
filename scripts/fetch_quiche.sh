@@ -4,15 +4,23 @@ set -e
 MIRROR_URL=${1:-https://github.com/cloudflare/quiche.git}
 SUBMODULE_PATH="libs/quiche-patched"
 
-# Update submodule URL to provided mirror
 if [ ! -d "$SUBMODULE_PATH" ]; then
     mkdir -p "$SUBMODULE_PATH"
 fi
-git submodule set-url "$SUBMODULE_PATH" "$MIRROR_URL"
 
 echo "Fetching quiche from $MIRROR_URL ..."
 
-git submodule update --init "$SUBMODULE_PATH"
+if [ -f .gitmodules ] && grep -q "$SUBMODULE_PATH" .gitmodules; then
+    git submodule set-url "$SUBMODULE_PATH" "$MIRROR_URL"
+    git submodule update --init --recursive "$SUBMODULE_PATH"
+else
+    if [ ! -d "$SUBMODULE_PATH/.git" ]; then
+        git clone "$MIRROR_URL" "$SUBMODULE_PATH"
+    else
+        git -C "$SUBMODULE_PATH" pull
+    fi
+fi
 
-# Build the patched quiche library
-( cd "$SUBMODULE_PATH" && cargo build --release )
+cd "$SUBMODULE_PATH"
+cargo build --release
+cargo clippy --all-targets -- -D warnings

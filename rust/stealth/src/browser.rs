@@ -42,6 +42,37 @@ impl Default for TlsFingerprint {
     }
 }
 
+impl TlsFingerprint {
+    /// Create a fingerprint resembling a real browser profile. The values are
+    /// simplified and do not represent the full set of extensions a modern
+    /// browser would send, but they allow tests to validate profile specific
+    /// behaviour.
+    pub fn for_profile(profile: BrowserProfile) -> Self {
+        match profile {
+            BrowserProfile::Chrome => Self {
+                cipher_suites: vec![0x1301, 0x1302, 0x1303, 0x1304],
+                extensions: vec![0x000a, 0x000b, 0x002d],
+                alpn: vec!["h3".into(), "h2".into(), "http/1.1".into()],
+            },
+            BrowserProfile::Firefox => Self {
+                cipher_suites: vec![0x1301, 0x1302, 0x1303],
+                extensions: vec![0x000a, 0x0010, 0x002b],
+                alpn: vec!["h3".into(), "http/1.1".into()],
+            },
+            BrowserProfile::Safari => Self {
+                cipher_suites: vec![0x1301, 0x1302],
+                extensions: vec![0x000a, 0x0017],
+                alpn: vec!["h3".into(), "h2".into(), "http/1.1".into()],
+            },
+            BrowserProfile::Edge => Self {
+                cipher_suites: vec![0x1301, 0x1302, 0x1303],
+                extensions: vec![0x000a, 0x000b, 0x0010],
+                alpn: vec!["h3".into(), "http/1.1".into()],
+            },
+        }
+    }
+}
+
 /// Simplified representation of a browser fingerprint used for
 /// HTTP header generation and TLS emulation.
 pub struct BrowserFingerprint {
@@ -68,7 +99,7 @@ impl BrowserFingerprint {
             browser,
             os: OperatingSystem::Windows,
             user_agent: ua.into(),
-            tls: TlsFingerprint::default(),
+            tls: TlsFingerprint::for_profile(profile),
         }
     }
 

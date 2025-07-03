@@ -27,61 +27,18 @@ graph TD
 ### Project Structure
 ```
 QuicFuscate/
-├── cli/
-│   ├── main.cpp
-│   ├── options.hpp
-│   ├── quicfuscate_cli.cpp
-│   ├── quicfuscate_client.cpp
-│   └── quicfuscate_server.cpp
-├── core/
-│   ├── error_handling.hpp
-│   ├── quic_connection.hpp
-│   ├── quic_connection_impl.cpp
-│   ├── quic_core_types.hpp
-│   ├── quic_integration_impl.cpp
-│   ├── quic_packet.cpp
-│   ├── quic_path_mtu_manager.hpp
-│   └── quic_stream_impl.cpp
-├── crypto/
-│   ├── aegis128l.hpp
-│   ├── aegis128x.hpp
-│   ├── morus1280.hpp
-│   ├── cipher_suite_selector.cpp
-│   └── cipher_suite_selector.hpp
-│   *(legacy C++ sources `aegis128l.cpp`, `aegis128x.cpp` and `morus*.cpp` were removed)*
+├── rust/
+│   ├── core/
+│   ├── crypto/
+│   ├── fec/
+│   ├── stealth/
+│   └── cli/
 ├── docs/
 │   └── DOCUMENTATION.md
-├── fec/
-│   ├── FEC_Modul.cpp
-│   └── FEC_Modul.hpp
 ├── libs/
-│   └── quiche-patched/ (Patched QUIC implementation)
-├── optimize/
-│   ├── quic_stream_optimizer.cpp
-│   └── unified_optimizations.hpp
-├── stealth/
-│   ├── DoH.cpp
-│   ├── DoH.hpp
-│   ├── DomainFronting.cpp
-│   ├── DomainFronting.hpp
-│   ├── FakeTLS.cpp
-│   ├── FakeTLS.hpp
-│   ├── HTTP3_Masquerading.cpp
-│   ├── HTTP3_Masquerading.hpp
-│   ├── QuicFuscate_Stealth.cpp
-│   ├── QuicFuscate_Stealth.hpp
-│   ├── XOR_Obfuscation.cpp
-│   ├── XOR_Obfuscation.hpp
-│   ├── anti_fingerprinting.hpp
-│   ├── browser_profiles/
-│   ├── stealth_gov.cpp
-│   ├── stealth_gov.hpp
-│   ├── uTLS.cpp
-│   └── uTLS.hpp
+│   └── quiche-patched/
 └── ui/
     └── logo/
-        ├── QuicFuscate_a.png
-        └── QuicFuscate_b.png
 ```
 
 ### Key Features
@@ -350,35 +307,8 @@ class UnifiedOptimizationManager {
        uint32_t size_class = get_size_class(size);
        if (!free_blocks_[size_class].empty()) {
 ### Command Line Interface (CLI)
-Defined in `cli/quicfuscate_client.cpp`:
+The command-line client and server are implemented in the Rust crate `rust/cli`. It provides binaries `quicfuscate_client` and `quicfuscate_server` built with Cargo.
 
-```cpp
-int main(int argc, char *argv[]) {
-    std::string host = "localhost";
-    uint16_t port = 8080;
-
-    // Parameter processing
-    if (argc >= 3) {
-        host = argv[1];
-        port = static_cast<uint16_t>(std::stoi(argv[2]));
-    }
-
-    // uTLS initialization
-    UTLSClientConfigurator utls_configurator;
-    if (!utls_configurator.initialize("Chrome_Latest_Placeholder", host.c_str(), nullptr)) {
-        std::cerr << "Error initializing UTLSClientConfigurator." << std::endl;
-        return 1;
-    }
-
-    // Establish QUIC connection
-    auto conn = std::make_shared<quicfuscate::QuicConnection>(io_context, qc);
-    conn->async_connect(host, port, [conn](std::error_code ec) {
-        if (!ec) {
-            // Create and send data stream
-            auto stream = conn->create_stream();
-            const uint8_t data[] = "Hello uTLS!";
-            stream->send_data(data, sizeof(data) - 1);
-        }
 ### Browser Fingerprinting
 Defined in `stealth/browser_profiles/fingerprints/browser_fingerprint.hpp`:
 
@@ -2244,62 +2174,8 @@ EnergyManager::getInstance().set_cpu_frequency_scaling(true);
 - `optimize/quic_stream_optimizer.cpp`: QUIC stream optimization
 - `optimize/unified_optimizations.hpp`: Unified optimization framework
 
-### CLI Module (`cli/`)
-Provides command-line interface for QuicFuscate VPN client and server.
-
-#### Client Implementation (`quicfuscate_client.cpp`)
-Main entry point for the QuicFuscate client with uTLS integration:
-
-```cpp
-#include <iostream>
-#include <boost/asio.hpp>
-#include "../core/quic_core_types.hpp"
-#include "quic_connection.hpp"
-#include "../stealth/uTLS.hpp"
-
-int main(int argc, char *argv[]) {
-    std::string host = "localhost";
-    uint16_t port = 8080;
-
-    if (argc >= 3) {
-        host = argv[1];
-        port = static_cast<uint16_t>(std::stoi(argv[2]));
-    } else {
-        std::cout << "Usage: quicfuscate_client <host> <port>" << std::endl;
-        std::cout << "Using default: localhost 8080" << std::endl;
-    }
-    
-    // ... (uTLS configuration and connection setup)
-}
-```
-
-**Key Features:**
-- Command-line argument handling for host and port
-- uTLS configuration for browser fingerprint emulation
-- Asynchronous connection establishment
-- Stream creation and data transmission
-
-**Usage Example:**
-```bash
-./quicfuscate_client vpn.example.com 443
-```
-
-#### Server Implementation (`quicfuscate_server.cpp`)
-Current implementation is a placeholder with basic initialization:
-
-```cpp
-#include <iostream>
-#include "../core/quic.hpp"
-
-int main() {
-    std::cout << "QuicFuscate Server started. Waiting for connections..." << std::endl;
-    // Stub for server logic
-    return 0;
-}
-```
-
-**Current Status**: Placeholder implementation
-**Next Steps**: Full QUIC server implementation with stealth features
+### CLI Crate (`rust/cli`)
+The Rust workspace provides command-line binaries for client and server usage.
 
 ### Documentation
 - `docs/Architecture.md`: Main architecture documentation
@@ -2346,7 +2222,7 @@ This documentation has been verified to cover all files in the QuicFuscate proje
 - **Cryptography Module**: 9 files
 - **FEC Module**: 2 files
 - **Optimization Module**: 2 files
-- **CLI Module**: 5 files
+- **CLI Crate**: 5 files
 - **Documentation**: 1 files
 - **Libraries**: 1 directory
 
