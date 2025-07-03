@@ -440,12 +440,6 @@ pub extern "C" fn fec_module_get_statistics(buf: *mut StatFFI) -> i32 {
     -1
 }
 
-#[no_mangle]
-pub extern "C" fn fec_module_free(ptr: *mut u8, len: usize) {
-    if !ptr.is_null() && len > 0 {
-        unsafe { let _ = Vec::from_raw_parts(ptr, len, len); }
-    }
-}
 
 pub fn fec_module_init_stub() -> i32 {
     0
