@@ -66,3 +66,36 @@ fn strategy_switches_algorithm() -> Result<(), Box<dyn std::error::Error>> {
     assert!(pkts.len() > 1);
     Ok(())
 }
+#[test]
+fn adaptive_callback_overrides_ratio() {
+    let mut module = FECModule::new(FECConfig::default());
+    module.set_adaptive_callback(|m| if m.loss > 0.2 { 0.5 } else { 0.0 });
+    module.update_network_metrics(fec::NetworkMetrics { packet_loss_rate: 0.3 });
+    assert_eq!(module.config().redundancy_ratio, 0.5);
+}
+
+#[test]
+fn update_config_resets_pool() {
+    let mut module = FECModule::new(FECConfig::default());
+    let old_ptr = module.pool_ptr() as usize;
+    let mut cfg = FECConfig::default();
+    cfg.memory_pool_block_size = 4096;
+    module.update_config(cfg);
+    let new_ptr = module.pool_ptr() as usize;
+    assert_ne!(old_ptr, new_ptr);
+    assert_eq!(module.config().memory_pool_block_size, 4096);
+}
+
+#[test]
+fn stealth_mode_alters_repair() -> Result<(), Box<dyn std::error::Error>> {
+    let mut module = FECModule::new(FECConfig::default());
+    module.enable_stealth_mode(true);
+    module.update_network_metrics(fec::NetworkMetrics { packet_loss_rate: 0.1 });
+    let packets1 = module.encode_packet(b"abc", 1)?;
+    let repair1 = packets1.iter().find(|p| p.is_repair).unwrap().data.clone();
+    module.enable_stealth_mode(false);
+    let packets2 = module.encode_packet(b"abc", 1)?;
+    let repair2 = packets2.iter().find(|p| p.is_repair).unwrap().data.clone();
+    assert_ne!(repair1, repair2);
+    Ok(())
+}

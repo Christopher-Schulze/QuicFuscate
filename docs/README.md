@@ -30,18 +30,20 @@ code reuses the same concepts of AEGIS‑128X/L and MORUS‑1280‑128 with a
 `CipherSuiteSelector` to pick the optimal cipher based on CPU features.
 
 ### FEC Crate
-The Forward Error Correction crate currently offers a basic encoder and decoder
-and is intended to replace the old C++ implementation. Adaptive redundancy with
-memory-pooled buffers and SIMD optimised Galois field arithmetic are still in
-development as described in the original
-documentation【F:docs/DOCUMENTATION.md†L173-L202】. The module is experimental
-and not yet production ready.
+The Forward Error Correction crate offers a memory pooled encoder and decoder.
+An internal `MetricsSampler` now tracks loss history and optional adaptive
+callbacks can adjust the redundancy ratio dynamically. A simple stealth mode
+applies random padding to repair packets. SIMD optimised Galois field
+arithmetic remains under development as described in the original
+documentation【F:docs/DOCUMENTATION.md†L173-L202】. The module is still
+experimental.
 
 ### Stealth Crate
 Traffic obfuscation is handled by the `stealth` crate.  Basic XOR obfuscation,
-DoH tunnelling and domain fronting are already functional.  uTLS
-fingerprinting and HTTP/3 masquerading are in active development as outlined in
-the *Stealth Module* section of the C++ documentation【F:docs/DOCUMENTATION.md†L1888-L1905】.
+DoH tunnelling and domain fronting are already functional. The DoH client now
+supports cached lookups with a configurable TTL. uTLS fingerprinting and
+HTTP/3 masquerading remain in active development as outlined in the *Stealth
+Module* section of the C++ documentation【F:docs/DOCUMENTATION.md†L1888-L1905】.
 Like the FEC crate, this module is considered experimental and not production ready.
 
 ## Building & Testing the Rust Workspace
