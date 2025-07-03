@@ -1,5 +1,6 @@
 #![cfg_attr(target_arch = "x86_64", feature(stdarch_x86_avx512))]
 mod aegis128l;
+#[cfg(feature = "aegis128x")]
 mod aegis128x;
 mod error;
 mod features;
@@ -7,11 +8,12 @@ mod morus;
 mod morus1280;
 
 pub use aegis128l::Aegis128L;
+#[cfg(feature = "aegis128x")]
 pub use aegis128x::Aegis128X;
 pub use morus::Morus;
 pub use morus1280::Morus1280;
 
-use error::CryptoError;
+pub use error::CryptoError;
 
 #[derive(Clone, Copy)]
 pub enum CipherSuite {
@@ -63,7 +65,14 @@ impl CipherSuiteSelector {
     ) -> Result<(), CryptoError> {
         match self.suite {
             CipherSuite::Aegis128xVaes512 | CipherSuite::Aegis128xAesni => {
-                Aegis128X::new().encrypt(plaintext, key, nonce, ad, ciphertext, tag)
+                #[cfg(feature = "aegis128x")]
+                {
+                    Aegis128X::new().encrypt(plaintext, key, nonce, ad, ciphertext, tag)
+                }
+                #[cfg(not(feature = "aegis128x"))]
+                {
+                    Aegis128L::new().encrypt(plaintext, key, nonce, ad, ciphertext, tag)
+                }
             }
             CipherSuite::Aegis128lNeon | CipherSuite::Aegis128lAesni => {
                 Aegis128L::new().encrypt(plaintext, key, nonce, ad, ciphertext, tag)
@@ -85,7 +94,14 @@ impl CipherSuiteSelector {
     ) -> Result<(), CryptoError> {
         match self.suite {
             CipherSuite::Aegis128xVaes512 | CipherSuite::Aegis128xAesni => {
-                Aegis128X::new().decrypt(ciphertext, key, nonce, ad, tag, plaintext)
+                #[cfg(feature = "aegis128x")]
+                {
+                    Aegis128X::new().decrypt(ciphertext, key, nonce, ad, tag, plaintext)
+                }
+                #[cfg(not(feature = "aegis128x"))]
+                {
+                    Aegis128L::new().decrypt(ciphertext, key, nonce, ad, tag, plaintext)
+                }
             }
             CipherSuite::Aegis128lNeon | CipherSuite::Aegis128lAesni => {
                 Aegis128L::new().decrypt(ciphertext, key, nonce, ad, tag, plaintext)

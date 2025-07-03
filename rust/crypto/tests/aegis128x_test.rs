@@ -1,3 +1,4 @@
+#![cfg(feature = "aegis128x")]
 use crypto::Aegis128X;
 
 const MSG: &[u8] = b"hello aegis";
