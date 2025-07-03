@@ -3,9 +3,7 @@
 ## Kritische Sicherheitsprobleme
 
 ### Memory Management Issues
-- **FEC_Modul.cpp**: Verwendung von `malloc()` ohne entsprechende `free()` Aufrufe (Zeilen 727, 749)
-  - Potentielle Memory Leaks bei Fehlern
-  - Sollte durch RAII-Pattern (std::unique_ptr, std::vector) ersetzt werden
+Legacy modules still allocate memory manually and must be audited for leaks.
 
 ### Unsafe Code Patterns
 - **assert() Verwendung**: In `quic_integration_impl.cpp` (Zeile 155) wird `assert()` für kritische Validierung verwendet
@@ -29,7 +27,7 @@
 
 ### Buffer Operations
 - **memcpy() Verwendung**: Extensive Nutzung in mehreren Modulen ohne Bounds-Checking
-  - `XOR_Obfuscation.cpp`, `crypto/` Module, `fec/FEC_Modul.cpp`
+  - `XOR_Obfuscation.cpp` und Teile des `crypto/` Modules
   - Potentielle Buffer Overflow Vulnerabilities
   - Sollte durch sichere Alternativen (std::copy, std::memcpy_s) ersetzt werden
 
@@ -58,7 +56,6 @@
 
 ### Memory Allocation
 - **Frequent Allocations**: Häufige dynamische Speicherallokationen
-  - FEC-Modul allokiert bei jeder Encode/Decode-Operation
   - Sollte durch Memory Pooling optimiert werden
 
 ### String Operations
@@ -105,10 +102,9 @@
 
 ## Immediate Actions (Priorität 1)
 
-1. **Memory Leaks beheben**: FEC_Modul.cpp malloc/free Issues
-2. **Assert-Statements ersetzen**: Durch proper Exception Handling
-3. **Buffer Overflow Prevention**: memcpy durch sichere Alternativen ersetzen
-4. **Magic Numbers eliminieren**: Konstanten-Definitionen einführen
+1. **Assert-Statements ersetzen**: Durch proper Exception Handling
+2. **Buffer Overflow Prevention**: memcpy durch sichere Alternativen ersetzen
+3. **Magic Numbers eliminieren**: Konstanten-Definitionen einführen
 
 ## Short-term Improvements (Priorität 2)
 
@@ -299,10 +295,24 @@ Scalar	2.0 cpb	3.8 cpb	5 cpb
 Fertig – du bekommst “geisteskrank resilient” FEC, das bei Top-Leitungen komplett wegklappt, auf Schrott-Netzen aber wie ein Berserker Parity nachlädt, ohne deine CPU zu grillen.
 
 Run it, break the net. 🫡
+## Rust Build & Test Instructions
+
+Die Rust-Umsetzung liegt im Verzeichnis `rust/`. Um ausschließlich die
+Arbeitsumgebung für Rust zu bauen und alle Tests auszuführen, genügen zwei
+Befehle:
+
+```bash
+cd rust
+cargo build --workspace
+cargo test --workspace
+```
+
+Damit werden sämtliche Crates des Workspaces kompiliert und die zugehörigen
+Unit-Tests gestartet.
 ## Noch zu erledigen
 
 - Kompletter Rebuild in Rust ohne Stubs, produktionsreifer Code
-- FEC-Modul überarbeiten (siehe FEC.rs)
+- FEC crate stabilisieren (siehe `rust/fec`)
 - Module konsolidieren: je eine Datei für main, crypto, fec, optimized und stealth
 
 Weitere Änderungen werden hier dokumentiert.

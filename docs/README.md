@@ -25,16 +25,17 @@ code reuses the same concepts of AEGIS‑128X/L and MORUS‑1280‑128 with a
 `CipherSuiteSelector` to pick the optimal cipher based on CPU features.
 
 ### FEC Crate
-The Forward Error Correction crate implements adaptive FEC similar to the C++
-module described in the documentation【F:docs/DOCUMENTATION.md†L173-L202】. SIMD
-optimised Galois field arithmetic and zero‑copy memory pools are planned for the
-Rust version as well.
+The Forward Error Correction crate now provides working encoder and decoder
+implementations.  It replaces the previous `FEC_Modul.cpp` logic and offers
+adaptive redundancy with memory-pooled buffers.  SIMD optimised Galois field
+arithmetic continues to be developed as described in the original
+documentation【F:docs/DOCUMENTATION.md†L173-L202】.
 
 ### Stealth Crate
-Traffic obfuscation is handled by the `stealth` crate. It follows the design of
-DNS over HTTPS, Domain Fronting and FakeTLS in the *Stealth Module* section of
-the C++ docs【F:docs/DOCUMENTATION.md†L1888-L1905】. uTLS fingerprinting and
-HTTP/3 masquerading will also be ported.
+Traffic obfuscation is handled by the `stealth` crate.  Basic XOR obfuscation,
+DoH tunnelling and domain fronting are already functional.  uTLS
+fingerprinting and HTTP/3 masquerading are in active development as outlined in
+the *Stealth Module* section of the C++ documentation【F:docs/DOCUMENTATION.md†L1888-L1905】.
 
 ## Building the Workspace
 Ensure the patched `quiche` submodule is built and then compile the Rust
@@ -45,19 +46,19 @@ git submodule update --init --recursive libs/quiche-patched
 cd libs/quiche-patched && cargo build --release && cd ../..
 ```
 
-To build the Rust crates run:
+To build **only** the Rust workspace and execute its unit tests run:
 
 ```bash
 cd rust
 cargo build --workspace
+cargo test --workspace
 ```
 
 The same steps are listed in the repository README【F:README.md†L150-L168】.
 
 ## Examples
-At the current stage the Rust crates provide basic structures only. You can use
-`cargo test` within each crate as a starting point while the full
-implementation is in progress. For example:
+If you want to work on a single crate you can still run its tests individually.
+For example:
 
 ```bash
 cd rust/crypto
