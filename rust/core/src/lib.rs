@@ -34,6 +34,36 @@ pub const DEFAULT_PROBE_TIMEOUT_MS: u32 = 2_000;
 /// Number of consecutive probe failures before assuming a black hole.
 pub const DEFAULT_PATH_BLACKHOLE_THRESHOLD: u8 = 3;
 
+/// Limits controlling MTU discovery and related timeouts.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct QuicLimits {
+    /// Minimum allowed MTU for path discovery.
+    pub min_mtu: u16,
+    /// Maximum allowed MTU for path discovery.
+    pub max_mtu: u16,
+    /// Initial MTU value used before validation.
+    pub initial_mtu: u16,
+    /// Increment used when probing for a larger MTU.
+    pub mtu_step: u16,
+    /// Duration until an unanswered probe is considered lost (ms).
+    pub probe_timeout_ms: u32,
+    /// Interval for periodic probe attempts (ms).
+    pub periodic_probe_interval_ms: u32,
+}
+
+impl Default for QuicLimits {
+    fn default() -> Self {
+        Self {
+            min_mtu: DEFAULT_MIN_MTU,
+            max_mtu: DEFAULT_MAX_MTU,
+            initial_mtu: DEFAULT_INITIAL_MTU,
+            mtu_step: DEFAULT_MTU_STEP_SIZE,
+            probe_timeout_ms: DEFAULT_PROBE_TIMEOUT_MS,
+            periodic_probe_interval_ms: DEFAULT_PERIODIC_PROBE_INTERVAL_MS,
+        }
+    }
+}
+
 /// Basic configuration for a QUIC connection.
 #[derive(Clone, Debug)]
 pub struct QuicConfig {
@@ -156,9 +186,7 @@ pub struct MtuChange {
 pub struct PathMtuManager {
     outgoing_mtu: u16,
     incoming_mtu: u16,
-    min_mtu: u16,
-    max_mtu: u16,
-    step: u16,
+    limits: QuicLimits,
     bidirectional: bool,
     next_probe_id: u32,
     probes: HashMap<u32, (bool, u16, Instant)>,
@@ -169,19 +197,20 @@ pub struct PathMtuManager {
     outgoing_failures: u8,
     incoming_failures: u8,
     blackhole_threshold: u8,
-    probe_timeout_ms: u32,
-    periodic_probe_interval_ms: u32,
     callback: Option<Box<dyn Fn(MtuChange) + Send + Sync>>,
 }
 
 impl PathMtuManager {
     pub fn new() -> Self {
+        Self::with_limits(QuicLimits::default())
+    }
+
+    /// Create a manager with custom limits.
+    pub fn with_limits(limits: QuicLimits) -> Self {
         Self {
-            outgoing_mtu: DEFAULT_INITIAL_MTU,
-            incoming_mtu: DEFAULT_INITIAL_MTU,
-            min_mtu: DEFAULT_MIN_MTU,
-            max_mtu: DEFAULT_MAX_MTU,
-            step: DEFAULT_MTU_STEP_SIZE,
+            outgoing_mtu: limits.initial_mtu,
+            incoming_mtu: limits.initial_mtu,
+            limits,
             bidirectional: false,
             next_probe_id: 0,
             probes: HashMap::new(),
@@ -192,8 +221,6 @@ impl PathMtuManager {
             outgoing_failures: 0,
             incoming_failures: 0,
             blackhole_threshold: DEFAULT_PATH_BLACKHOLE_THRESHOLD,
-            probe_timeout_ms: DEFAULT_PROBE_TIMEOUT_MS,
-            periodic_probe_interval_ms: DEFAULT_PERIODIC_PROBE_INTERVAL_MS,
             callback: None,
         }
     }
@@ -234,9 +261,9 @@ impl PathMtuManager {
         step: u16,
         apply_both: bool,
     ) {
-        self.min_mtu = min_mtu;
-        self.max_mtu = max_mtu;
-        self.step = step;
+        self.limits.min_mtu = min_mtu;
+        self.limits.max_mtu = max_mtu;
+        self.limits.mtu_step = step;
         if apply_both {
             self.incoming_mtu = min_mtu;
             self.outgoing_mtu = min_mtu;
@@ -272,7 +299,7 @@ impl PathMtuManager {
                 };
                 *last_probe = Some(Instant::now());
                 if success {
-                    let new_mtu = size.min(self.max_mtu);
+                    let new_mtu = size.min(self.limits.max_mtu);
                     if incoming {
                         self.incoming_mtu = new_mtu;
                     } else {
@@ -309,11 +336,11 @@ impl PathMtuManager {
     /// Simple dynamic adjustment based on observed loss and RTT.
     pub fn adapt_mtu_dynamically(&mut self, packet_loss_rate: f32, rtt_ms: u32) {
         if packet_loss_rate > 0.1 {
-            let new_mtu = self.outgoing_mtu.saturating_sub(self.step);
-            self.outgoing_mtu = new_mtu.max(self.min_mtu);
+            let new_mtu = self.outgoing_mtu.saturating_sub(self.limits.mtu_step);
+            self.outgoing_mtu = new_mtu.max(self.limits.min_mtu);
         } else if packet_loss_rate == 0.0 && rtt_ms < 100 {
-            let new_mtu = self.outgoing_mtu.saturating_add(self.step);
-            self.outgoing_mtu = new_mtu.min(self.max_mtu);
+            let new_mtu = self.outgoing_mtu.saturating_add(self.limits.mtu_step);
+            self.outgoing_mtu = new_mtu.min(self.limits.max_mtu);
         }
 
         if self.bidirectional {
@@ -328,15 +355,15 @@ impl PathMtuManager {
             (self.last_outgoing_probe, self.outgoing_mtu)
         };
 
-        if mtu >= self.max_mtu {
+        if mtu >= self.limits.max_mtu {
             return;
         }
 
         let needs_probe = last_probe
-            .map(|t| now.duration_since(t).as_millis() as u32 >= self.periodic_probe_interval_ms)
+            .map(|t| now.duration_since(t).as_millis() as u32 >= self.limits.periodic_probe_interval_ms)
             .unwrap_or(true);
         if needs_probe {
-            let probe_size = (mtu + self.step).min(self.max_mtu);
+            let probe_size = (mtu + self.limits.mtu_step).min(self.limits.max_mtu);
             self.send_probe(probe_size, incoming);
             if incoming {
                 self.last_incoming_probe = Some(now);
@@ -349,7 +376,7 @@ impl PathMtuManager {
     }
 
     fn check_probe_timeouts(&mut self, now: Instant) {
-        let timeout = self.probe_timeout_ms;
+        let timeout = self.limits.probe_timeout_ms;
         let expired: Vec<u32> = self
             .probes
             .iter()
@@ -365,10 +392,10 @@ impl PathMtuManager {
 
     /// Handle an incoming probe request and update state.
     pub fn handle_incoming_probe(&mut self, probe_id: u32, size: u16) {
-        let success = size <= self.max_mtu;
+        let success = size <= self.limits.max_mtu;
         let old = self.incoming_mtu;
         if success {
-            self.incoming_mtu = size.min(self.max_mtu);
+            self.incoming_mtu = size.min(self.limits.max_mtu);
             self.incoming_status = MtuStatus::Complete;
             self.incoming_failures = 0;
         } else {

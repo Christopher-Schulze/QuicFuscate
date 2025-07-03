@@ -1,6 +1,11 @@
 use clap::{Parser, ValueEnum};
 use fec::FecMode;
 use stealth::BrowserProfile;
+use core as quic_core;
+use quic_core::{
+    QuicLimits, DEFAULT_MIN_MTU, DEFAULT_MAX_MTU, DEFAULT_PROBE_TIMEOUT_MS,
+    DEFAULT_PERIODIC_PROBE_INTERVAL_MS,
+};
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum, Debug)]
 pub enum FecCliMode {
@@ -120,4 +125,34 @@ pub struct CommandLineOptions {
     /// Maximum bytes allowed for Zero-RTT data
     #[arg(long, default_value_t = 1024)]
     pub zero_rtt_max: usize,
+
+    /// Minimum MTU for path discovery
+    #[arg(long, default_value_t = DEFAULT_MIN_MTU)]
+    pub min_mtu: u16,
+
+    /// Maximum MTU for path discovery
+    #[arg(long, default_value_t = DEFAULT_MAX_MTU)]
+    pub max_mtu: u16,
+
+    /// Timeout in milliseconds for outstanding probes
+    #[arg(long, default_value_t = DEFAULT_PROBE_TIMEOUT_MS)]
+    pub probe_timeout: u32,
+
+    /// Interval in milliseconds between periodic probes
+    #[arg(long, default_value_t = DEFAULT_PERIODIC_PROBE_INTERVAL_MS)]
+    pub probe_interval: u32,
+}
+
+impl CommandLineOptions {
+    /// Construct a [`QuicLimits`] instance from CLI options.
+    pub fn to_limits(&self) -> QuicLimits {
+        QuicLimits {
+            min_mtu: self.min_mtu,
+            max_mtu: self.max_mtu,
+            initial_mtu: quic_core::DEFAULT_INITIAL_MTU,
+            mtu_step: quic_core::DEFAULT_MTU_STEP_SIZE,
+            probe_timeout_ms: self.probe_timeout,
+            periodic_probe_interval_ms: self.probe_interval,
+        }
+    }
 }
