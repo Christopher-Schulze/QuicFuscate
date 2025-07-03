@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, VecDeque};
+use std::time::{Duration, Instant};
 
 #[derive(Eq)]
 struct Datagram {
@@ -28,12 +29,25 @@ impl PartialEq for Datagram {
 
 pub struct DatagramEngine {
     queue: BinaryHeap<Datagram>,
+    inbound: VecDeque<Vec<u8>>,
     next_seq: u32,
+    bundling: bool,
+    bundle_buffer: Vec<Datagram>,
+    last_bundle: Instant,
+    max_bundle: usize,
 }
 
 impl DatagramEngine {
     pub fn new() -> Self {
-        Self { queue: BinaryHeap::new(), next_seq: 0 }
+        Self {
+            queue: BinaryHeap::new(),
+            inbound: VecDeque::new(),
+            next_seq: 0,
+            bundling: false,
+            bundle_buffer: Vec::new(),
+            last_bundle: Instant::now(),
+            max_bundle: 10,
+        }
     }
 
     pub fn send(&mut self, data: Vec<u8>, priority: u8) {
@@ -42,8 +56,39 @@ impl DatagramEngine {
         self.queue.push(dg);
     }
 
+    pub fn enable_bundling(&mut self, enable: bool) {
+        self.bundling = enable;
+    }
+
+    fn process_outbound(&mut self) {
+        let now = Instant::now();
+
+        while let Some(dg) = self.queue.pop() {
+            if self.bundling {
+                self.bundle_buffer.push(dg);
+                if self.bundle_buffer.len() >= self.max_bundle {
+                    self.flush_bundle();
+                }
+            } else {
+                self.inbound.push_back(dg.data);
+            }
+        }
+
+        if self.bundling && now.duration_since(self.last_bundle) > Duration::from_millis(5) {
+            self.flush_bundle();
+        }
+    }
+
+    fn flush_bundle(&mut self) {
+        for dg in self.bundle_buffer.drain(..) {
+            self.inbound.push_back(dg.data);
+        }
+        self.last_bundle = Instant::now();
+    }
+
     pub async fn recv(&mut self) -> Option<Vec<u8>> {
-        self.queue.pop().map(|d| d.data)
+        self.process_outbound();
+        self.inbound.pop_front()
     }
 }
 

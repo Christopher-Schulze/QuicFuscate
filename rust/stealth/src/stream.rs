@@ -3,6 +3,7 @@ use std::collections::{HashMap, VecDeque};
 struct Stream {
     priority: u8,
     buffer: VecDeque<Vec<u8>>,
+    closed: bool,
 }
 
 pub struct StreamEngine {
@@ -18,13 +19,19 @@ impl StreamEngine {
     pub fn create_stream(&mut self, priority: u8) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
-        self.streams.insert(id, Stream { priority, buffer: VecDeque::new() });
+        self.streams.insert(id, Stream { priority, buffer: VecDeque::new(), closed: false });
         id
+    }
+
+    pub fn close_stream(&mut self, id: u64) -> bool {
+        self.streams.remove(&id).is_some()
     }
 
     pub fn send(&mut self, id: u64, data: Vec<u8>) {
         if let Some(stream) = self.streams.get_mut(&id) {
-            stream.buffer.push_back(data);
+            if !stream.closed {
+                stream.buffer.push_back(data);
+            }
         }
     }
 
@@ -37,8 +44,15 @@ impl StreamEngine {
             .map(|(id, _)| *id)?;
 
         let stream = self.streams.get_mut(&id)?;
+        if stream.closed {
+            return None;
+        }
         let data = stream.buffer.pop_front()?;
         Some((id, data))
+    }
+
+    pub fn active_streams(&self) -> usize {
+        self.streams.len()
     }
 }
 
