@@ -51,3 +51,16 @@ fn update_metrics_increases_redundancy() -> Result<(), Box<dyn std::error::Error
     assert!(packets_after.len() > 1);
     Ok(())
 }
+
+#[test]
+fn strategy_switches_algorithm() -> Result<(), Box<dyn std::error::Error>> {
+    let mut module = FECModule::new(FECConfig::default());
+    // Initially off
+    let pkts = module.encode_packet(b"abc", 1)?;
+    assert_eq!(1, pkts.len());
+    // Introduce moderate loss
+    module.update_network_metrics(fec::NetworkMetrics { packet_loss_rate: 0.1 });
+    let pkts = module.encode_packet(b"abc", 2)?;
+    assert!(pkts.len() > 1);
+    Ok(())
+}
