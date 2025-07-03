@@ -1,6 +1,6 @@
 use fec::{
     fec_module_cleanup, fec_module_decode, fec_module_encode, fec_module_free, fec_module_init,
-    FECConfig, FECModule, FECPacket,
+    FECConfig, FECModule,
 };
 
 #[test]
@@ -23,18 +23,17 @@ fn encode_decode() {
 }
 
 #[test]
-fn decode_returns_empty_without_source_packet() {
-    let module = FECModule::new(FECConfig::default());
-    let repair = FECPacket {
-        sequence_number: 1,
-        is_repair: true,
-        data: vec![1, 2, 3],
-    };
-    let result = match module.decode(&[repair]) {
-        Ok(data) => data,
-        Err(e) => panic!("decode failed: {:?}", e),
-    };
-    assert!(result.is_empty());
+fn decode_from_repair_packet() -> Result<(), Box<dyn std::error::Error>> {
+    let mut module = FECModule::new(FECConfig::default());
+    module.update_network_metrics(fec::NetworkMetrics {
+        packet_loss_rate: 0.1,
+    });
+    let packets = module.encode_packet(b"abc", 1)?;
+    assert_eq!(2, packets.len());
+    let repair = packets.into_iter().find(|p| p.is_repair).unwrap();
+    let result = module.decode(&[repair])?;
+    assert_eq!(result, b"abc");
+    Ok(())
 }
 
 #[test]
@@ -59,7 +58,9 @@ fn strategy_switches_algorithm() -> Result<(), Box<dyn std::error::Error>> {
     let pkts = module.encode_packet(b"abc", 1)?;
     assert_eq!(1, pkts.len());
     // Introduce moderate loss
-    module.update_network_metrics(fec::NetworkMetrics { packet_loss_rate: 0.1 });
+    module.update_network_metrics(fec::NetworkMetrics {
+        packet_loss_rate: 0.1,
+    });
     let pkts = module.encode_packet(b"abc", 2)?;
     assert!(pkts.len() > 1);
     Ok(())
