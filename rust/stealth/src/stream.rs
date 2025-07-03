@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use thiserror::Error;
 
 struct Stream {
     priority: u8,
@@ -9,6 +10,14 @@ struct Stream {
 pub struct StreamEngine {
     next_id: u64,
     streams: HashMap<u64, Stream>,
+}
+
+#[derive(Debug, Error)]
+pub enum StreamError {
+    #[error("no data available")]
+    NoData,
+    #[error("stream closed")]
+    Closed,
 }
 
 impl StreamEngine {
@@ -35,20 +44,21 @@ impl StreamEngine {
         }
     }
 
-    pub async fn recv(&mut self) -> Option<(u64, Vec<u8>)> {
+    pub async fn recv(&mut self) -> Result<(u64, Vec<u8>), StreamError> {
         let id = self
             .streams
             .iter()
             .filter(|(_, s)| !s.buffer.is_empty())
             .max_by_key(|(_, s)| s.priority)
-            .map(|(id, _)| *id)?;
+            .map(|(id, _)| *id)
+            .ok_or(StreamError::NoData)?;
 
-        let stream = self.streams.get_mut(&id)?;
+        let stream = self.streams.get_mut(&id).ok_or(StreamError::NoData)?;
         if stream.closed {
-            return None;
+            return Err(StreamError::Closed);
         }
-        let data = stream.buffer.pop_front()?;
-        Some((id, data))
+        let data = stream.buffer.pop_front().ok_or(StreamError::NoData)?;
+        Ok((id, data))
     }
 
     pub fn active_streams(&self) -> usize {
@@ -70,10 +80,10 @@ mod tests {
             let id2 = eng.create_stream(10);
             eng.send(id1, vec![1]);
             eng.send(id2, vec![2]);
-            let (rid, data) = eng.recv().await.unwrap();
+            let (rid, data) = eng.recv().await?;
             assert_eq!(rid, id2);
             assert_eq!(data, vec![2]);
-            let (rid, data) = eng.recv().await.unwrap();
+            let (rid, data) = eng.recv().await?;
             assert_eq!(rid, id1);
             assert_eq!(data, vec![1]);
             Ok::<(), Box<dyn std::error::Error>>(())

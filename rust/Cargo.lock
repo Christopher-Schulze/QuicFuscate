@@ -183,6 +183,7 @@ name = "fec"
 version = "0.1.0"
 dependencies = [
  "once_cell",
+ "thiserror",
 ]
 
 [[package]]
@@ -438,6 +439,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "rand",
+ "thiserror",
  "tokio",
 ]
 
