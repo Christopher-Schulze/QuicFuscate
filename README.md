@@ -6,7 +6,6 @@
   [![QUIC](https://img.shields.io/badge/QUIC-Protocol-009DFF?style=for-the-badge&logo=internet-explorer)](https://datatracker.ietf.org/doc/html/rfc9000)
   [![HTTP/3](https://img.shields.io/badge/HTTP-3-FF6B6B?style=for-the-badge&logo=internet-explorer)](https://en.wikipedia.org/wiki/HTTP/3)
   [![Rust](https://img.shields.io/badge/Rust-1.70+-000000?style=for-the-badge&logo=rust)](https://www.rust-lang.org/)
-  [![C++](https://img.shields.io/badge/C++-17+-00599C?style=for-the-badge&logo=c%2B%2B)](https://isocpp.org/)
   [![SIMD](https://img.shields.io/badge/SIMD-Optimized-FFA500?style=for-the-badge&logo=cpu)](https://en.wikipedia.org/wiki/SIMD)
   [![AEGIS-128](https://img.shields.io/badge/Encryption-AEGIS--128-2F855A?style=for-the-badge)](https://en.wikipedia.org/wiki/AEGIS)
   [![MORUS-1280](https://img.shields.io/badge/Encryption-MORUS--1280--128-2B6CB0?style=for-the-badge)](https://en.wikipedia.org/wiki/MORUS_(cipher))
@@ -18,7 +17,7 @@
 
 QuicFuscate represents the pinnacle of privacy-focused networking, combining cutting-edge encryption, adaptive error correction, and advanced traffic obfuscation to create an impenetrable communication channel. Built on the QUIC protocol with HTTP/3 support, it delivers both speed and security without compromise.
 
-> **Note:** This project is currently in active development, being refactored from C++ to Rust for enhanced performance and security.
+> **Note:** The project has been fully migrated to Rust for improved safety and performance.
 
 The repository contains a **single** Rust workspace located in the `rust/`
 directory. Historical references to a `Rust-QuicFuscate` directory are obsolete
@@ -57,19 +56,7 @@ because all crates have been consolidated under `rust/`.
 
 ## 🏗️ Project Status
 
-This project is currently being refactored from C++ to Rust to leverage modern language features and safety guarantees. The core functionality is being preserved while improving performance and security.
-
-### Current Implementation (C++)
-- QUIC protocol stack
-- Basic VPN functionality
-- Core encryption modules
-- Initial stealth features
-
-### In Progress (Rust)
-- Complete protocol rewrite
-- Enhanced security features
-- Performance optimizations
-- Expanded platform support
+The codebase is now entirely written in Rust. Development focuses on expanding features and improving stability.
 
 ## 🛠️ Technical Specifications
 
