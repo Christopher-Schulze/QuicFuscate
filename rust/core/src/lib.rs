@@ -86,6 +86,8 @@ pub struct QuicConnection {
     mtu_discovery: bool,
     migration: bool,
     bbr: bool,
+    current_path: Option<String>,
+    bbr_controller: Option<BbrCongestionController>,
     zero_copy: bool,
     state: ConnectionState,
     #[cfg(feature = "quiche")]
@@ -109,6 +111,8 @@ impl QuicConnection {
             mtu_discovery: false,
             migration: false,
             bbr: false,
+            current_path: None,
+            bbr_controller: None,
             zero_copy: false,
             state: ConnectionState::New,
             #[cfg(feature = "quiche")]
@@ -125,6 +129,8 @@ impl QuicConnection {
         let _sock_addr: std::net::SocketAddr = addr
             .parse()
             .map_err(|_| CoreError::Quic("invalid address".into()))?;
+
+        self.current_path = Some(addr.to_string());
 
         #[cfg(feature = "quiche")]
         {
@@ -155,9 +161,28 @@ impl QuicConnection {
         self.migration
     }
 
+    /// Migrate the connection to a new network path.
+    pub fn migrate(&mut self, new_addr: &str) -> Result<()> {
+        if !self.migration {
+            return Err(CoreError::Quic("migration disabled".into()));
+        }
+        let _sock_addr: std::net::SocketAddr = new_addr
+            .parse()
+            .map_err(|_| CoreError::Quic("invalid address".into()))?;
+        self.current_path = Some(new_addr.to_string());
+        Ok(())
+    }
+
     /// Enable or disable the BBRv2 congestion control algorithm.
     pub fn enable_bbr_congestion_control(&mut self, enable: bool) {
         self.bbr = enable;
+        if enable {
+            if self.bbr_controller.is_none() {
+                self.bbr_controller = Some(BbrCongestionController::new());
+            }
+        } else {
+            self.bbr_controller = None;
+        }
     }
 
     /// Enable or disable zero-copy transmission.
@@ -185,6 +210,16 @@ impl QuicConnection {
     /// Check whether zero-copy is enabled.
     pub fn is_zero_copy_enabled(&self) -> bool {
         self.zero_copy
+    }
+
+    /// Check if BBRv2 congestion control is enabled.
+    pub fn is_bbr_enabled(&self) -> bool {
+        self.bbr
+    }
+
+    /// Retrieve the currently connected path, if any.
+    pub fn current_path(&self) -> Option<&str> {
+        self.current_path.as_deref()
     }
 }
 
@@ -547,6 +582,23 @@ impl QuicStreamOptimizer {
                 info.window.min(chunk).max(1)
             })
             .unwrap_or(0)
+    }
+}
+
+/// Placeholder for a future BBRv2 congestion controller implementation.
+#[derive(Default)]
+pub struct BbrCongestionController {
+    cwnd: u64,
+}
+
+impl BbrCongestionController {
+    pub fn new() -> Self {
+        Self { cwnd: 10_000 }
+    }
+
+    pub fn on_packet_acknowledged(&mut self, _bytes: u64) {
+        // TODO: implement actual BBRv2 logic
+        self.cwnd += 1;
     }
 }
 

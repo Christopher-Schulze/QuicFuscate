@@ -19,6 +19,8 @@ version features connection migration, BBRv2 congestion control and XDP
 zero‑copy networking as outlined in the *Core Module* section of the original
 documentation【F:docs/DOCUMENTATION.md†L134-L139】. The Rust crate aims to
 replicate these features and expose a safe API for the rest of the workspace.
+Recent updates added stubbed support for connection migration and a
+placeholder BBRv2 controller so that higher layers can be exercised in tests.
 
 ### Crypto Crate
 `crypto` contains hardware accelerated cipher implementations with automatic

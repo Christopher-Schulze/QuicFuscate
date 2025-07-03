@@ -36,3 +36,17 @@ fn encrypt_decrypt_vectors() -> Result<(), crypto::CryptoError> {
     assert_eq!(pt2, MSG);
     Ok(())
 }
+
+#[test]
+fn reject_tampered_tag() {
+    let cipher = Aegis128L::new();
+    let mut ct = Vec::new();
+    let mut tag = [0u8; 16];
+    cipher
+        .encrypt(MSG, &KEY, &NONCE, b"", &mut ct, &mut tag)
+        .unwrap();
+    tag[0] ^= 0xff;
+    let mut pt = Vec::new();
+    let res = cipher.decrypt(&ct, &KEY, &NONCE, b"", &tag, &mut pt);
+    assert!(res.is_err());
+}
