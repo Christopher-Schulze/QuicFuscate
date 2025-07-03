@@ -79,4 +79,24 @@ pub struct CommandLineOptions {
     /// Zeigt verfügbare Browser-Fingerprints an
     #[arg(long)]
     pub list_fingerprints: bool,
+
+    /// Enable domain fronting
+    #[arg(long, default_value_t = false)]
+    pub domain_fronting: bool,
+
+    /// Enable HTTP/3 masquerading
+    #[arg(long, default_value_t = false)]
+    pub http3_masq: bool,
+
+    /// Enable DNS over HTTPS
+    #[arg(long, default_value_t = false)]
+    pub doh: bool,
+
+    /// Enable spinbit randomization
+    #[arg(long, default_value_t = false)]
+    pub spin_random: bool,
+
+    /// Enable Zero-RTT data
+    #[arg(long, default_value_t = false)]
+    pub zero_rtt: bool,
 }

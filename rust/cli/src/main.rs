@@ -59,7 +59,12 @@ fn main() {
         FecCliMode::Adaptive => println!("FEC adaptive with target latency {} ms", opts.fec_ratio),
     }
 
-    let stealth = QuicFuscateStealth::new();
+    let mut stealth = QuicFuscateStealth::new();
+    stealth.enable_domain_fronting(opts.domain_fronting);
+    stealth.enable_http3_masq(opts.http3_masq);
+    stealth.enable_doh(opts.doh);
+    stealth.enable_spinbit(opts.spin_random);
+    stealth.enable_zero_rtt(opts.zero_rtt);
     if stealth.initialize() {
         println!("Stealth subsystem initialized.");
     } else {
