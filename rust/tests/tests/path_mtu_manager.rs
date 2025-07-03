@@ -31,3 +31,12 @@ fn mtu_probe_and_blackhole() {
     }
     assert_eq!(mgr.get_mtu_status(false), MtuStatus::Blackhole);
 }
+
+#[test]
+fn high_loss_reduces_mtu() {
+    let mut mgr = PathMtuManager::new();
+    mgr.set_mtu_size(DEFAULT_MAX_MTU, false);
+    let before = mgr.get_outgoing_mtu();
+    mgr.update(0.5, 150);
+    assert!(mgr.get_outgoing_mtu() < before);
+}

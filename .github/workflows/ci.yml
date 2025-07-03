@@ -23,6 +23,9 @@ jobs:
       - name: Build Rust workspace
         run: |
           cargo build --manifest-path rust/Cargo.toml --workspace --release
+      - name: Test Rust workspace
+        run: |
+          cargo test --manifest-path rust/Cargo.toml --workspace --all-targets
       - name: Configure
         run: |
           mkdir build && cd build
