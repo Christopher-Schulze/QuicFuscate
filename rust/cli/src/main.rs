@@ -1,6 +1,6 @@
 mod options;
 use clap::Parser;
-use options::{CommandLineOptions, Fingerprint};
+use options::{CommandLineOptions, Fingerprint, FecCliMode};
 use core as quic_core; // dummy use, kann entfernt werden, falls nicht gebraucht
 use stealth::QuicFuscateStealth;
 
@@ -50,6 +50,13 @@ fn main() {
 
     if opts.debug_tls {
         println!("[debug] TLS debug enabled");
+    }
+
+    match opts.fec {
+        FecCliMode::Off => println!("FEC disabled"),
+        FecCliMode::Performance => println!("FEC performance mode"),
+        FecCliMode::Always => println!("FEC always-on ratio {}%", opts.fec_ratio),
+        FecCliMode::Adaptive => println!("FEC adaptive with target latency {} ms", opts.fec_ratio),
     }
 
     let stealth = QuicFuscateStealth::new();
