@@ -1,4 +1,4 @@
-use crate::error::CryptoError;
+use crate::error::{CryptoError, Result};
 use subtle::ConstantTimeEq;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::{__m128i, __m512i};
@@ -24,7 +24,7 @@ impl Aegis128X {
         ad: &[u8],
         ciphertext: &mut Vec<u8>,
         tag: &mut [u8; Self::TAG_SIZE],
-    ) -> Result<(), CryptoError> {
+    ) -> crate::error::Result<()> {
         #[cfg(target_arch = "x86_64")]
         {
             if crate::features::vaes_available() {
@@ -50,7 +50,7 @@ impl Aegis128X {
         ad: &[u8],
         tag: &[u8; Self::TAG_SIZE],
         plaintext: &mut Vec<u8>,
-    ) -> Result<(), CryptoError> {
+    ) -> crate::error::Result<()> {
         #[cfg(target_arch = "x86_64")]
         {
             if crate::features::vaes_available() {
@@ -86,7 +86,7 @@ impl Aegis128X {
         _ad: &[u8],
         ciphertext: &mut Vec<u8>,
         tag: &mut [u8; Self::TAG_SIZE],
-    ) -> Result<(), CryptoError> {
+    ) -> crate::error::Result<()> {
         use std::arch::x86_64::*;
 
         ciphertext.clear();
@@ -124,7 +124,7 @@ impl Aegis128X {
         _ad: &[u8],
         tag: &[u8; Self::TAG_SIZE],
         plaintext: &mut Vec<u8>,
-    ) -> Result<(), CryptoError> {
+    ) -> crate::error::Result<()> {
         use std::arch::x86_64::*;
 
         plaintext.clear();
@@ -165,7 +165,7 @@ impl Aegis128X {
         _ad: &[u8],
         ciphertext: &mut Vec<u8>,
         tag: &mut [u8; Self::TAG_SIZE],
-    ) -> Result<(), CryptoError> {
+    ) -> crate::error::Result<()> {
         use std::arch::x86_64::*;
 
         ciphertext.clear();
@@ -201,7 +201,7 @@ impl Aegis128X {
         _ad: &[u8],
         tag: &[u8; Self::TAG_SIZE],
         plaintext: &mut Vec<u8>,
-    ) -> Result<(), CryptoError> {
+    ) -> crate::error::Result<()> {
         use std::arch::x86_64::*;
 
         plaintext.clear();
@@ -242,7 +242,7 @@ impl Aegis128X {
         _ad: &[u8],
         ciphertext: &mut Vec<u8>,
         tag: &mut [u8; Self::TAG_SIZE],
-    ) -> Result<(), CryptoError> {
+    ) -> crate::error::Result<()> {
         ciphertext.clear();
         ciphertext.extend(
             plaintext
@@ -262,7 +262,7 @@ impl Aegis128X {
         _ad: &[u8],
         tag: &[u8; Self::TAG_SIZE],
         plaintext: &mut Vec<u8>,
-    ) -> Result<(), CryptoError> {
+    ) -> crate::error::Result<()> {
         plaintext.clear();
         plaintext.extend(
             ciphertext

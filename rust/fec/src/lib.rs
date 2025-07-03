@@ -9,7 +9,11 @@ use reed_solomon_erasure::galois_8::ReedSolomon;
 pub enum FECError {
     #[error("mutex poisoned")]
     LockPoisoned,
+    #[error("reed-solomon error: {0}")]
+    ReedSolomon(String),
 }
+
+pub type Result<T> = std::result::Result<T, FECError>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FecState {
@@ -38,6 +42,7 @@ impl FECError {
     fn code(&self) -> i32 {
         match self {
             FECError::LockPoisoned => -1,
+            FECError::ReedSolomon(_) => -2,
         }
     }
 }
@@ -100,12 +105,12 @@ impl MemoryPool {
         }
     }
 
-    pub fn allocate(&self) -> Result<Vec<u8>, FECError> {
+    pub fn allocate(&self) -> Result<Vec<u8>> {
         let mut guard = self.free.lock().map_err(|_| FECError::LockPoisoned)?;
         Ok(guard.pop().unwrap_or_else(|| vec![0u8; self.block_size]))
     }
 
-    pub fn deallocate(&self, mut block: Vec<u8>) -> Result<(), FECError> {
+    pub fn deallocate(&self, mut block: Vec<u8>) -> Result<()> {
         block.clear();
         let mut guard = self.free.lock().map_err(|_| FECError::LockPoisoned)?;
         guard.push(block);
@@ -211,83 +216,91 @@ impl StrategyController {
 }
 
 pub trait FecScheme {
-    fn encode(&self, data: &[u8], seq: u32) -> Vec<FECPacket>;
-    fn decode(&self, packets: &[FECPacket]) -> Vec<u8>;
+    fn encode(&self, data: &[u8], seq: u32) -> Result<Vec<FECPacket>>;
+    fn decode(&self, packets: &[FECPacket]) -> Result<Vec<u8>>;
 }
 
 pub struct StripeXor;
 
 impl FecScheme for StripeXor {
-    fn encode(&self, data: &[u8], seq: u32) -> Vec<FECPacket> {
+    fn encode(&self, data: &[u8], seq: u32) -> Result<Vec<FECPacket>> {
         let mut parity = vec![0u8; data.len()];
         for (d, p) in data.iter().zip(parity.iter_mut()) {
             *p = *d;
         }
-        vec![
+        Ok(vec![
             FECPacket { sequence_number: seq, is_repair: false, data: data.to_vec() },
             FECPacket { sequence_number: seq, is_repair: true, data: parity },
-        ]
+        ])
     }
 
-    fn decode(&self, packets: &[FECPacket]) -> Vec<u8> {
-        if let Some(p) = packets.iter().find(|p| !p.is_repair) { return p.data.clone(); }
-        Vec::new()
+    fn decode(&self, packets: &[FECPacket]) -> Result<Vec<u8>> {
+        if let Some(p) = packets.iter().find(|p| !p.is_repair) {
+            return Ok(p.data.clone());
+        }
+        Ok(Vec::new())
     }
 }
 
 pub struct Cm256Scheme;
 
 impl FecScheme for Cm256Scheme {
-    fn encode(&self, data: &[u8], seq: u32) -> Vec<FECPacket> {
-        let r = ReedSolomon::new(1, 1).unwrap();
+    fn encode(&self, data: &[u8], seq: u32) -> Result<Vec<FECPacket>> {
+        let r = ReedSolomon::new(1, 1).map_err(|e| FECError::ReedSolomon(e.to_string()))?;
         let mut shards = vec![data.to_vec(), vec![0u8; data.len()]];
-        r.encode(&mut shards).unwrap();
-        vec![
+        r.encode(&mut shards).map_err(|e| FECError::ReedSolomon(e.to_string()))?;
+        Ok(vec![
             FECPacket { sequence_number: seq, is_repair: false, data: shards[0].clone() },
             FECPacket { sequence_number: seq, is_repair: true, data: shards[1].clone() },
-        ]
+        ])
     }
 
-    fn decode(&self, packets: &[FECPacket]) -> Vec<u8> {
-        if let Some(p) = packets.iter().find(|p| !p.is_repair) { return p.data.clone(); }
-        Vec::new()
+    fn decode(&self, packets: &[FECPacket]) -> Result<Vec<u8>> {
+        if let Some(p) = packets.iter().find(|p| !p.is_repair) {
+            return Ok(p.data.clone());
+        }
+        Ok(Vec::new())
     }
 }
 
 pub struct RlncScheme;
 
 impl FecScheme for RlncScheme {
-    fn encode(&self, data: &[u8], seq: u32) -> Vec<FECPacket> {
+    fn encode(&self, data: &[u8], seq: u32) -> Result<Vec<FECPacket>> {
         let mut repair = data.to_vec();
         for b in repair.iter_mut() { *b ^= 0x55; }
-        vec![
+        Ok(vec![
             FECPacket { sequence_number: seq, is_repair: false, data: data.to_vec() },
             FECPacket { sequence_number: seq, is_repair: true, data: repair },
-        ]
+        ])
     }
 
-    fn decode(&self, packets: &[FECPacket]) -> Vec<u8> {
-        if let Some(p) = packets.iter().find(|p| !p.is_repair) { return p.data.clone(); }
-        Vec::new()
+    fn decode(&self, packets: &[FECPacket]) -> Result<Vec<u8>> {
+        if let Some(p) = packets.iter().find(|p| !p.is_repair) {
+            return Ok(p.data.clone());
+        }
+        Ok(Vec::new())
     }
 }
 
 pub struct RsScheme;
 
 impl FecScheme for RsScheme {
-    fn encode(&self, data: &[u8], seq: u32) -> Vec<FECPacket> {
-        let r = ReedSolomon::new(1, 1).unwrap();
+    fn encode(&self, data: &[u8], seq: u32) -> Result<Vec<FECPacket>> {
+        let r = ReedSolomon::new(1, 1).map_err(|e| FECError::ReedSolomon(e.to_string()))?;
         let mut shards = vec![data.to_vec(), vec![0u8; data.len()]];
-        r.encode(&mut shards).unwrap();
-        vec![
+        r.encode(&mut shards).map_err(|e| FECError::ReedSolomon(e.to_string()))?;
+        Ok(vec![
             FECPacket { sequence_number: seq, is_repair: false, data: shards[0].clone() },
             FECPacket { sequence_number: seq, is_repair: true, data: shards[1].clone() },
-        ]
+        ])
     }
 
-    fn decode(&self, packets: &[FECPacket]) -> Vec<u8> {
-        if let Some(p) = packets.iter().find(|p| !p.is_repair) { return p.data.clone(); }
-        Vec::new()
+    fn decode(&self, packets: &[FECPacket]) -> Result<Vec<u8>> {
+        if let Some(p) = packets.iter().find(|p| !p.is_repair) {
+            return Ok(p.data.clone());
+        }
+        Ok(Vec::new())
     }
 }
 
@@ -306,7 +319,7 @@ impl EncoderCore {
         Self { scheme }
     }
 
-    pub fn encode(&self, data: &[u8], seq: u32) -> Vec<FECPacket> {
+    pub fn encode(&self, data: &[u8], seq: u32) -> Result<Vec<FECPacket>> {
         self.scheme.encode(data, seq)
     }
 }
@@ -326,7 +339,7 @@ impl DecoderCore {
         Self { scheme }
     }
 
-    pub fn decode(&self, packets: &[FECPacket]) -> Vec<u8> {
+    pub fn decode(&self, packets: &[FECPacket]) -> Result<Vec<u8>> {
         self.scheme.decode(packets)
     }
 }
@@ -473,19 +486,19 @@ impl FECModule {
         &self,
         data: &[u8],
         sequence_number: u32,
-    ) -> Result<Vec<FECPacket>, FECError> {
+    ) -> Result<Vec<FECPacket>> {
         let mut stats = self.stats.lock().map_err(|_| FECError::LockPoisoned)?;
         stats.packets_encoded += 1;
-        Ok(self.encoder.encode(data, sequence_number))
+        self.encoder.encode(data, sequence_number)
     }
 
-    pub fn decode(&self, packets: &[FECPacket]) -> Result<Vec<u8>, FECError> {
+    pub fn decode(&self, packets: &[FECPacket]) -> Result<Vec<u8>> {
         if packets.is_empty() {
             return Ok(Vec::new());
         }
         let mut stats = self.stats.lock().map_err(|_| FECError::LockPoisoned)?;
         stats.packets_decoded += 1;
-        Ok(self.decoder.decode(packets))
+        self.decoder.decode(packets)
     }
 
     pub fn update_network_metrics(&mut self, metrics: NetworkMetrics) {
@@ -495,7 +508,7 @@ impl FECModule {
         }
     }
 
-    pub fn get_statistics(&self) -> Result<Statistics, FECError> {
+    pub fn get_statistics(&self) -> Result<Statistics> {
         Ok(*self.stats.lock().map_err(|_| FECError::LockPoisoned)?)
     }
 }

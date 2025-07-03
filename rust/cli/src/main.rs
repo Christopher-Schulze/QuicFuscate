@@ -3,6 +3,8 @@ use clap::Parser;
 use options::{CommandLineOptions, Fingerprint, FecCliMode};
 use core as quic_core; // dummy use, kann entfernt werden, falls nicht gebraucht
 use stealth::QuicFuscateStealth;
+use env_logger::Env;
+use log::info;
 
 fn print_fingerprints() {
     println!("Verfügbare Browser-Fingerprints:");
@@ -18,6 +20,7 @@ fn print_fingerprints() {
 }
 
 fn main() {
+    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
     let opts = CommandLineOptions::parse();
 
     println!("QuicFuscate CLI gestartet. Optionen: --server/--host, --port, etc.");
@@ -45,18 +48,18 @@ fn main() {
     }
 
     if opts.verbose {
-        println!("[verbose] Verbose logging enabled");
+        info!("[verbose] Verbose logging enabled");
     }
 
     if opts.debug_tls {
-        println!("[debug] TLS debug enabled");
+        info!("[debug] TLS debug enabled");
     }
 
     match opts.fec {
-        FecCliMode::Off => println!("FEC disabled"),
-        FecCliMode::Performance => println!("FEC performance mode"),
-        FecCliMode::Always => println!("FEC always-on ratio {}%", opts.fec_ratio),
-        FecCliMode::Adaptive => println!("FEC adaptive with target latency {} ms", opts.fec_ratio),
+        FecCliMode::Off => info!("FEC disabled"),
+        FecCliMode::Performance => info!("FEC performance mode"),
+        FecCliMode::Always => info!("FEC always-on ratio {}%", opts.fec_ratio),
+        FecCliMode::Adaptive => info!("FEC adaptive with target latency {} ms", opts.fec_ratio),
     }
 
     let mut stealth = QuicFuscateStealth::new();
@@ -66,9 +69,9 @@ fn main() {
     stealth.enable_spinbit(opts.spin_random);
     stealth.enable_zero_rtt(opts.zero_rtt);
     if stealth.initialize() {
-        println!("Stealth subsystem initialized.");
+        info!("Stealth subsystem initialized.");
     } else {
-        println!("Failed to initialize stealth subsystem.");
+        info!("Failed to initialize stealth subsystem.");
     }
     stealth.shutdown();
 }

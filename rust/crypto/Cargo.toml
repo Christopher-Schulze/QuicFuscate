@@ -8,6 +8,8 @@ path = "src/lib.rs"
 
 [dependencies]
 subtle = "2.4"
+thiserror = "1"
+openssl-sys = "0.9"
 
 [features]
 aegis128x = []

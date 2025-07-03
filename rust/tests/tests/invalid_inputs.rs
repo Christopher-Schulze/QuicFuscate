@@ -3,10 +3,11 @@ use stealth::stream::{StreamEngine, StreamError};
 use tokio::runtime::Runtime;
 
 #[test]
-fn fec_decode_empty_slice() {
+fn fec_decode_empty_slice() -> Result<(), Box<dyn std::error::Error>> {
     let module = FECModule::new(FECConfig::default());
-    let result = module.decode(&[]).expect("decode should succeed");
+    let result = module.decode(&[])?;
     assert!(result.is_empty());
+    Ok(())
 }
 
 #[test]

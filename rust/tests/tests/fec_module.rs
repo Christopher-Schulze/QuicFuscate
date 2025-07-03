@@ -38,15 +38,16 @@ fn decode_returns_empty_without_source_packet() {
 }
 
 #[test]
-fn update_metrics_increases_redundancy() {
+fn update_metrics_increases_redundancy() -> Result<(), Box<dyn std::error::Error>> {
     let mut cfg = FECConfig::default();
     cfg.redundancy_ratio = 0.0;
     let mut module = FECModule::new(cfg);
-    let packets_before = module.encode_packet(b"data", 1).unwrap();
+    let packets_before = module.encode_packet(b"data", 1)?;
     assert!(packets_before.len() >= 1);
     module.update_network_metrics(fec::NetworkMetrics {
         packet_loss_rate: 0.5,
     });
-    let packets_after = module.encode_packet(b"data", 1).unwrap();
+    let packets_after = module.encode_packet(b"data", 1)?;
     assert!(packets_after.len() > 1);
+    Ok(())
 }
