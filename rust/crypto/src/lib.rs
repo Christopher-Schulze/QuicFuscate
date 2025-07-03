@@ -1,4 +1,3 @@
-// AVX512 support is only used on nightly; disable on stable
 mod aegis128l;
 #[cfg(feature = "aegis128x")]
 mod aegis128x;

@@ -1,5 +1,8 @@
 use thiserror::Error;
 
+mod quic_packet;
+pub use quic_packet::{PacketType, QuicPacket, QuicPacketHeader};
+
 /// Errors that can occur within the QUIC core crate.
 #[derive(Debug, Error)]
 pub enum CoreError {
