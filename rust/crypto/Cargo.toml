@@ -8,3 +8,6 @@ path = "src/lib.rs"
 
 [dependencies]
 subtle = "2.4"
+
+[features]
+aegis128x = []

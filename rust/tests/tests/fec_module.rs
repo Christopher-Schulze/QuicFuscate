@@ -1,6 +1,6 @@
 use fec::{
-    fec_module_cleanup, fec_module_decode, fec_module_encode, fec_module_init,
-    FECConfig, FECModule, FECPacket,
+    fec_module_cleanup, fec_module_decode, fec_module_encode, fec_module_init, FECConfig,
+    FECModule, FECPacket,
 };
 
 #[test]
@@ -31,4 +31,18 @@ fn decode_returns_empty_without_source_packet() {
         Err(e) => panic!("decode failed: {:?}", e),
     };
     assert!(result.is_empty());
+}
+
+#[test]
+fn update_metrics_increases_redundancy() {
+    let mut cfg = FECConfig::default();
+    cfg.redundancy_ratio = 0.0;
+    let mut module = FECModule::new(cfg);
+    let packets_before = module.encode_packet(b"data", 1).unwrap();
+    assert_eq!(packets_before.len(), 1);
+    module.update_network_metrics(fec::NetworkMetrics {
+        packet_loss_rate: 0.5,
+    });
+    let packets_after = module.encode_packet(b"data", 1).unwrap();
+    assert!(packets_after.len() > 1);
 }
