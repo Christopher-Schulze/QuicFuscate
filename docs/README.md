@@ -4,9 +4,9 @@ This directory contains documentation for the Rust reimplementation of **QuicFus
 original C++ code base is documented in [`DOCUMENTATION.md`](DOCUMENTATION.md).
 The Rust modules mirror the same high level design while taking advantage of
 Rust's safety guarantees and build tooling. The `core`, `crypto`, `fec` and
-`stealth` crates have reached feature parity with their original C++
-counterparts, and further work continues in Rust only.
-The legacy C++ modules are deprecated and kept only for reference.
+`stealth` crates are being ported from C++ and have not yet reached full
+feature parity. Further work continues in Rust only. The legacy C++ modules are
+deprecated and kept only for reference.
 
 > **Note:** Only one Rust workspace exists. All crates reside under the `rust/`
 directory and there is no separate `Rust-QuicFuscate` folder.
@@ -28,17 +28,19 @@ code reuses the same concepts of AEGIS‑128X/L and MORUS‑1280‑128 with a
 `CipherSuiteSelector` to pick the optimal cipher based on CPU features.
 
 ### FEC Crate
-The Forward Error Correction crate now provides stable encoder and decoder
-implementations and supersedes the old C++ implementation. It offers adaptive
-redundancy with memory-pooled buffers, and SIMD optimised Galois field
-arithmetic continues to be developed as described in the original
-documentation【F:docs/DOCUMENTATION.md†L173-L202】.
+The Forward Error Correction crate currently offers a basic encoder and decoder
+and is intended to replace the old C++ implementation. Adaptive redundancy with
+memory-pooled buffers and SIMD optimised Galois field arithmetic are still in
+development as described in the original
+documentation【F:docs/DOCUMENTATION.md†L173-L202】. The module is experimental
+and not yet production ready.
 
 ### Stealth Crate
 Traffic obfuscation is handled by the `stealth` crate.  Basic XOR obfuscation,
 DoH tunnelling and domain fronting are already functional.  uTLS
 fingerprinting and HTTP/3 masquerading are in active development as outlined in
 the *Stealth Module* section of the C++ documentation【F:docs/DOCUMENTATION.md†L1888-L1905】.
+Like the FEC crate, this module is considered experimental and not production ready.
 
 ## Building & Testing the Rust Workspace
 First build the patched `quiche` submodule, then compile and test the Rust workspace:
