@@ -1,6 +1,11 @@
-use thiserror::Error;
+//! Core networking primitives for QuicFuscate.
+//!
+//! This crate provides a minimal QUIC connection wrapper, MTU discovery
+//! utilities and a placeholder congestion controller used in the tests.
+
 #[cfg(feature = "quiche")]
 use quiche;
+use thiserror::Error;
 
 mod quic_packet;
 pub use quic_packet::{PacketType, QuicPacket, QuicPacketHeader};
@@ -19,7 +24,10 @@ pub enum CoreError {
 pub type Result<T> = std::result::Result<T, CoreError>;
 
 /// Default minimum MTU recommended by RFC 8899.
-pub const DEFAULT_MIN_MTU: u16 = 1200;
+/// Reference minimum MTU defined by RFC 8899.
+pub const RFC_8899_MIN_MTU: u16 = 1200;
+/// Default minimum MTU recommended by RFC 8899.
+pub const DEFAULT_MIN_MTU: u16 = RFC_8899_MIN_MTU;
 /// Typical Ethernet MTU used as an upper bound for probing.
 pub const DEFAULT_MAX_MTU: u16 = 1500;
 /// Common starting MTU before the path has been validated.
@@ -424,7 +432,9 @@ impl PathMtuManager {
         }
 
         let needs_probe = last_probe
-            .map(|t| now.duration_since(t).as_millis() as u32 >= self.limits.periodic_probe_interval_ms)
+            .map(|t| {
+                now.duration_since(t).as_millis() as u32 >= self.limits.periodic_probe_interval_ms
+            })
             .unwrap_or(true);
         if needs_probe {
             let probe_size = (mtu + self.limits.mtu_step).min(self.limits.max_mtu);
@@ -585,20 +595,38 @@ impl QuicStreamOptimizer {
     }
 }
 
-/// Placeholder for a future BBRv2 congestion controller implementation.
+/// Very small BBRv2 inspired congestion controller used for tests.
 #[derive(Default)]
 pub struct BbrCongestionController {
     cwnd: u64,
+    min_cwnd: u64,
+    max_cwnd: u64,
 }
 
 impl BbrCongestionController {
+    /// Create a controller with sane default limits.
     pub fn new() -> Self {
-        Self { cwnd: 10_000 }
+        Self {
+            cwnd: 10_000,
+            min_cwnd: 4_000,
+            max_cwnd: 200_000,
+        }
     }
 
-    pub fn on_packet_acknowledged(&mut self, _bytes: u64) {
-        // TODO: implement actual BBRv2 logic
-        self.cwnd += 1;
+    /// Congestion window in bytes.
+    pub fn cwnd(&self) -> u64 {
+        self.cwnd
+    }
+
+    /// Update internal state when packets are acknowledged.
+    pub fn on_packet_acknowledged(&mut self, bytes: u64) {
+        let inc = bytes.min(self.cwnd / 2);
+        self.cwnd = (self.cwnd + inc).min(self.max_cwnd);
+    }
+
+    /// React to packet loss events.
+    pub fn on_packet_lost(&mut self) {
+        self.cwnd = (self.cwnd / 2).max(self.min_cwnd);
     }
 }
 

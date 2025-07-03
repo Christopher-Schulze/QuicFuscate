@@ -56,7 +56,7 @@ jobs:
               choco install cppcheck -y
             fi
           fi
-          cppcheck --error-exitcode=1 -q cli || true
+          cppcheck --error-exitcode=1 -q cli
 
       - name: Build
         shell: bash

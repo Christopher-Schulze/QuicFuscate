@@ -105,6 +105,9 @@ mirror URL):
 ./scripts/fetch_quiche.sh [mirror-url]
 ```
 
+If a local copy of quiche already exists, set the `QUICHE_PATH` environment
+variable to skip fetching and build from that path instead.
+
 ### Building quiche
 
 Compile the patched **quiche** library using Cargo:

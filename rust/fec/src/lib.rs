@@ -1,10 +1,12 @@
+//! Forward Error Correction utilities and FFI bindings.
+
+use rand::Rng;
+use reed_solomon_erasure::galois_8::ReedSolomon;
+use serde::{Deserialize, Serialize};
 use std::ptr;
 use std::slice;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
-use serde::{Deserialize, Serialize};
-use reed_solomon_erasure::galois_8::ReedSolomon;
-use rand::Rng;
 
 #[derive(Debug, Error)]
 pub enum FECError {
@@ -171,7 +173,9 @@ pub struct MetricsSampler {
 
 impl MetricsSampler {
     pub fn new() -> Self {
-        Self { window: std::collections::VecDeque::with_capacity(32) }
+        Self {
+            window: std::collections::VecDeque::with_capacity(32),
+        }
     }
 
     pub fn push(&mut self, loss: f32, rtt: f32) {
@@ -182,7 +186,9 @@ impl MetricsSampler {
     }
 
     pub fn avg_loss(&self) -> f32 {
-        if self.window.is_empty() { return 0.0; }
+        if self.window.is_empty() {
+            return 0.0;
+        }
         let sum: f32 = self.window.iter().map(|s| s.loss).sum();
         sum / self.window.len() as f32
     }
@@ -194,10 +200,14 @@ pub struct StrategyController {
 
 impl StrategyController {
     pub fn new() -> Self {
-        Self { state: FecState::Off }
+        Self {
+            state: FecState::Off,
+        }
     }
 
-    pub fn state(&self) -> FecState { self.state }
+    pub fn state(&self) -> FecState {
+        self.state
+    }
 
     pub fn update(&mut self, loss: f32) -> FecState {
         const LOSS_ENTER_MID: f32 = 0.05;
@@ -230,8 +240,16 @@ impl FecScheme for StripeXor {
             *p = *d;
         }
         Ok(vec![
-            FECPacket { sequence_number: seq, is_repair: false, data: data.to_vec() },
-            FECPacket { sequence_number: seq, is_repair: true, data: parity },
+            FECPacket {
+                sequence_number: seq,
+                is_repair: false,
+                data: data.to_vec(),
+            },
+            FECPacket {
+                sequence_number: seq,
+                is_repair: true,
+                data: parity,
+            },
         ])
     }
 
@@ -249,10 +267,19 @@ impl FecScheme for Cm256Scheme {
     fn encode(&self, data: &[u8], seq: u32) -> Result<Vec<FECPacket>> {
         let r = ReedSolomon::new(1, 1).map_err(|e| FECError::ReedSolomon(e.to_string()))?;
         let mut shards = vec![data.to_vec(), vec![0u8; data.len()]];
-        r.encode(&mut shards).map_err(|e| FECError::ReedSolomon(e.to_string()))?;
+        r.encode(&mut shards)
+            .map_err(|e| FECError::ReedSolomon(e.to_string()))?;
         Ok(vec![
-            FECPacket { sequence_number: seq, is_repair: false, data: shards[0].clone() },
-            FECPacket { sequence_number: seq, is_repair: true, data: shards[1].clone() },
+            FECPacket {
+                sequence_number: seq,
+                is_repair: false,
+                data: shards[0].clone(),
+            },
+            FECPacket {
+                sequence_number: seq,
+                is_repair: true,
+                data: shards[1].clone(),
+            },
         ])
     }
 
@@ -275,8 +302,16 @@ impl FecScheme for RlncScheme {
         repair_packet.push(coeff);
         repair_packet.extend_from_slice(&repair);
         Ok(vec![
-            FECPacket { sequence_number: seq, is_repair: false, data: data.to_vec() },
-            FECPacket { sequence_number: seq, is_repair: true, data: repair_packet },
+            FECPacket {
+                sequence_number: seq,
+                is_repair: false,
+                data: data.to_vec(),
+            },
+            FECPacket {
+                sequence_number: seq,
+                is_repair: true,
+                data: repair_packet,
+            },
         ])
     }
 
@@ -307,10 +342,19 @@ impl FecScheme for RsScheme {
     fn encode(&self, data: &[u8], seq: u32) -> Result<Vec<FECPacket>> {
         let r = ReedSolomon::new(1, 1).map_err(|e| FECError::ReedSolomon(e.to_string()))?;
         let mut shards = vec![data.to_vec(), vec![0u8; data.len()]];
-        r.encode(&mut shards).map_err(|e| FECError::ReedSolomon(e.to_string()))?;
+        r.encode(&mut shards)
+            .map_err(|e| FECError::ReedSolomon(e.to_string()))?;
         Ok(vec![
-            FECPacket { sequence_number: seq, is_repair: false, data: shards[0].clone() },
-            FECPacket { sequence_number: seq, is_repair: true, data: shards[1].clone() },
+            FECPacket {
+                sequence_number: seq,
+                is_repair: false,
+                data: shards[0].clone(),
+            },
+            FECPacket {
+                sequence_number: seq,
+                is_repair: true,
+                data: shards[1].clone(),
+            },
         ])
     }
 
@@ -546,15 +590,15 @@ impl FECModule {
         self.decoder.set_algorithm(algo);
     }
 
-    pub fn encode_packet(
-        &self,
-        data: &[u8],
-        sequence_number: u32,
-    ) -> Result<Vec<FECPacket>> {
+    pub fn encode_packet(&self, data: &[u8], sequence_number: u32) -> Result<Vec<FECPacket>> {
         let mut stats = self.stats.lock().map_err(|_| FECError::LockPoisoned)?;
         stats.packets_encoded += 1;
         if self.state == FecState::Off {
-            return Ok(vec![FECPacket { sequence_number, is_repair: false, data: data.to_vec() }]);
+            return Ok(vec![FECPacket {
+                sequence_number,
+                is_repair: false,
+                data: data.to_vec(),
+            }]);
         }
         self.encoder.encode(data, sequence_number)
     }
@@ -594,7 +638,9 @@ pub extern "C" fn fec_module_cleanup(handle: *mut FECModule) {
     if handle.is_null() {
         return;
     }
-    unsafe { drop(Box::from_raw(handle)); }
+    unsafe {
+        drop(Box::from_raw(handle));
+    }
 }
 
 #[no_mangle]
@@ -716,28 +762,83 @@ pub extern "C" fn fec_module_get_statistics(handle: *mut FECModule, buf: *mut St
     -1
 }
 
-
 pub fn fec_module_init_stub() -> *mut FECModule {
     std::ptr::null_mut()
 }
 
 pub fn fec_module_cleanup_stub(_handle: *mut FECModule) {}
 
-pub fn fec_module_encode_stub(
-    _handle: *mut FECModule,
-    data: &[u8],
-) -> Vec<u8> {
+pub fn fec_module_encode_stub(_handle: *mut FECModule, data: &[u8]) -> Vec<u8> {
     data.to_vec()
 }
 
-pub fn fec_module_decode_stub(
-    _handle: *mut FECModule,
-    data: &[u8],
-) -> Vec<u8> {
+pub fn fec_module_decode_stub(_handle: *mut FECModule, data: &[u8]) -> Vec<u8> {
     data.to_vec()
 }
 
 pub fn fec_module_free_stub(_handle: *mut FECModule, _ptr: *mut u8, _len: usize) {}
+
+/// Safe wrapper around the raw FECModule FFI handle.
+///
+/// Memory returned from `encode` and `decode` is automatically freed when the
+/// handle goes out of scope.
+pub struct FecHandle {
+    ptr: *mut FECModule,
+}
+
+impl FecHandle {
+    /// Create a new handle.
+    pub fn new() -> Self {
+        let ptr = unsafe { fec_module_init() };
+        Self { ptr }
+    }
+
+    /// Encode data using the underlying module.
+    pub fn encode(&mut self, data: &[u8]) -> Result<Vec<u8>> {
+        let mut out_len = 0usize;
+        let ptr = unsafe {
+            fec_module_encode(
+                self.ptr,
+                data.as_ptr(),
+                data.len(),
+                &mut out_len as *mut usize,
+            )
+        };
+        if ptr.is_null() {
+            return Ok(Vec::new());
+        }
+        let slice = unsafe { std::slice::from_raw_parts(ptr, out_len) };
+        let out = slice.to_vec();
+        unsafe { fec_module_free(self.ptr, ptr, out_len) };
+        Ok(out)
+    }
+
+    /// Decode data using the underlying module.
+    pub fn decode(&mut self, data: &[u8]) -> Result<Vec<u8>> {
+        let mut out_len = 0usize;
+        let ptr = unsafe {
+            fec_module_decode(
+                self.ptr,
+                data.as_ptr(),
+                data.len(),
+                &mut out_len as *mut usize,
+            )
+        };
+        if ptr.is_null() {
+            return Ok(Vec::new());
+        }
+        let slice = unsafe { std::slice::from_raw_parts(ptr, out_len) };
+        let out = slice.to_vec();
+        unsafe { fec_module_free(self.ptr, ptr, out_len) };
+        Ok(out)
+    }
+}
+
+impl Drop for FecHandle {
+    fn drop(&mut self) {
+        unsafe { fec_module_cleanup(self.ptr) };
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -749,17 +850,28 @@ mod tests {
         assert!(!handle.is_null());
         let msg = b"hello";
         let mut out_len = 0usize;
-        let enc_ptr = fec_module_encode(handle, msg.as_ptr(), msg.len(), &mut out_len as *mut usize);
+        let enc_ptr =
+            fec_module_encode(handle, msg.as_ptr(), msg.len(), &mut out_len as *mut usize);
         assert!(!enc_ptr.is_null());
         let enc_slice = unsafe { std::slice::from_raw_parts(enc_ptr, out_len) };
         let enc = enc_slice.to_vec();
         fec_module_free(handle, enc_ptr, out_len);
         let mut dec_len = 0usize;
-        let dec_ptr = fec_module_decode(handle, enc.as_ptr(), enc.len(), &mut dec_len as *mut usize);
+        let dec_ptr =
+            fec_module_decode(handle, enc.as_ptr(), enc.len(), &mut dec_len as *mut usize);
         let dec_slice = unsafe { std::slice::from_raw_parts(dec_ptr, dec_len) };
         let dec = dec_slice.to_vec();
         fec_module_free(handle, dec_ptr, dec_len);
         fec_module_cleanup(handle);
+        assert_eq!(dec, msg);
+    }
+
+    #[test]
+    fn handle_wrapper_roundtrip() {
+        let mut handle = FecHandle::new();
+        let msg = b"hello";
+        let enc = handle.encode(msg).unwrap();
+        let dec = handle.decode(&enc).unwrap();
         assert_eq!(dec, msg);
     }
 }
