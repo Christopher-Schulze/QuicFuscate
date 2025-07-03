@@ -128,36 +128,37 @@ cargo build --release
 cd ../..
 ```
 
-### Building with CMake
+### Building
 
-Generate the project and build all binaries:
+Build the entire workspace using Cargo:
 
 ```bash
-mkdir build && cd build
-cmake ..
-cmake --build .
+cd rust
+cargo build --workspace --release
 ```
 
 ### Running the tests
 
-After building, execute the unit tests with CTest:
+Execute the test suite with Cargo:
 
 ```bash
-cd build
-ctest --output-on-failure
+cargo test --workspace
 ```
 
 ## 👷 Developer Notes
 
-The CMake build expects the patched **quiche** sources under
-`libs/quiche-patched` to be compiled with Cargo. When configuring the project
-manually run:
+Ensure submodules are initialized:
 
 ```bash
-git submodule update --init --recursive libs/quiche-patched
-cd libs/quiche-patched && cargo build --release && cd ../..
-mkdir -p build && cd build
-cmake .. && cmake --build .
+git submodule update --init --recursive
+```
+
+Build and test using Cargo:
+
+```bash
+cd rust
+cargo build --workspace --release
+cargo test --workspace
 ```
 
 ### Rust Workspace
@@ -203,11 +204,9 @@ runs the tests on every push or pull request. You can find the workflow in
 
 ```bash
 git submodule update --init --recursive
-cd libs/quiche-patched && cargo build --release && cd ../..
-cd rust && cargo build --workspace && cd ..
-mkdir -p build && cd build
-cmake .. && cmake --build .
-ctest --output-on-failure
+cd rust
+cargo build --workspace --release
+cargo test --workspace
 ```
 
 ## 📜 License

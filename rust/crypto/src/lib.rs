@@ -1,4 +1,3 @@
-#![cfg_attr(target_arch = "x86_64", feature(stdarch_x86_avx512))]
 mod aegis128l;
 #[cfg(feature = "aegis128x")]
 mod aegis128x;
