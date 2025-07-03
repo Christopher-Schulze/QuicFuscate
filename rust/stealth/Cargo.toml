@@ -9,5 +9,5 @@ path = "src/lib.rs"
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
-rand = "0.8"
+rand = { version = "0.8", features = ["small_rng"] }
 thiserror = "1"
