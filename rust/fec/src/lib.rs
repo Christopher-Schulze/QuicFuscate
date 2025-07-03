@@ -322,6 +322,15 @@ impl EncoderCore {
     pub fn encode(&self, data: &[u8], seq: u32) -> Result<Vec<FECPacket>> {
         self.scheme.encode(data, seq)
     }
+
+    pub fn set_algorithm(&mut self, algo: FecAlgorithm) {
+        self.scheme = match algo {
+            FecAlgorithm::StripeXor => Box::new(StripeXor),
+            FecAlgorithm::SparseRlnc => Box::new(RlncScheme),
+            FecAlgorithm::Cm256 => Box::new(Cm256Scheme),
+            FecAlgorithm::ReedSolomon => Box::new(RsScheme),
+        };
+    }
 }
 
 pub struct DecoderCore {
@@ -341,6 +350,15 @@ impl DecoderCore {
 
     pub fn decode(&self, packets: &[FECPacket]) -> Result<Vec<u8>> {
         self.scheme.decode(packets)
+    }
+
+    pub fn set_algorithm(&mut self, algo: FecAlgorithm) {
+        self.scheme = match algo {
+            FecAlgorithm::StripeXor => Box::new(StripeXor),
+            FecAlgorithm::SparseRlnc => Box::new(RlncScheme),
+            FecAlgorithm::Cm256 => Box::new(Cm256Scheme),
+            FecAlgorithm::ReedSolomon => Box::new(RsScheme),
+        };
     }
 }
 
@@ -459,6 +477,8 @@ pub struct FECModule {
     encoder: EncoderCore,
     decoder: DecoderCore,
     controller: StrategyController,
+    hw: HwPath,
+    state: FecState,
 }
 
 impl FECModule {
@@ -467,11 +487,8 @@ impl FECModule {
             config.memory_pool_block_size,
             config.memory_pool_initial_blocks,
         ));
-        let algo = match config.mode {
-            FecMode::Adaptive => FecAlgorithm::StripeXor,
-            FecMode::AlwaysOn => FecAlgorithm::StripeXor,
-            FecMode::Performance => FecAlgorithm::StripeXor,
-        };
+        let hw = HwDispatch::detect();
+        let algo = FecAlgorithm::StripeXor;
         Self {
             config,
             pool,
@@ -479,7 +496,28 @@ impl FECModule {
             encoder: EncoderCore::new(algo),
             decoder: DecoderCore::new(algo),
             controller: StrategyController::new(),
+            hw,
+            state: FecState::Off,
         }
+    }
+
+    fn algorithm_for_state(&self, state: FecState) -> FecAlgorithm {
+        match state {
+            FecState::Off => FecAlgorithm::StripeXor,
+            FecState::LowLoss => FecAlgorithm::StripeXor,
+            FecState::MidLoss => FecAlgorithm::SparseRlnc,
+            FecState::HighLoss => match self.hw {
+                HwPath::Scalar => FecAlgorithm::ReedSolomon,
+                _ => FecAlgorithm::Cm256,
+            },
+        }
+    }
+
+    fn set_state(&mut self, state: FecState) {
+        self.state = state;
+        let algo = self.algorithm_for_state(state);
+        self.encoder.set_algorithm(algo);
+        self.decoder.set_algorithm(algo);
     }
 
     pub fn encode_packet(
@@ -489,6 +527,9 @@ impl FECModule {
     ) -> Result<Vec<FECPacket>> {
         let mut stats = self.stats.lock().map_err(|_| FECError::LockPoisoned)?;
         stats.packets_encoded += 1;
+        if self.state == FecState::Off {
+            return Ok(vec![FECPacket { sequence_number, is_repair: false, data: data.to_vec() }]);
+        }
         self.encoder.encode(data, sequence_number)
     }
 
@@ -502,10 +543,12 @@ impl FECModule {
     }
 
     pub fn update_network_metrics(&mut self, metrics: NetworkMetrics) {
-        let new_state = self.controller.update(metrics.packet_loss_rate as f32);
-        if new_state != FecState::Off {
-            self.config.redundancy_ratio = 0.4;
-        }
+        let mut state = match self.config.mode {
+            FecMode::Performance => FecState::Off,
+            FecMode::AlwaysOn => FecState::LowLoss,
+            FecMode::Adaptive => self.controller.update(metrics.packet_loss_rate as f32),
+        };
+        self.set_state(state);
     }
 
     pub fn get_statistics(&self) -> Result<Statistics> {

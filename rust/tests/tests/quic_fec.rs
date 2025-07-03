@@ -8,12 +8,20 @@ fn quic_fec_integration() -> Result<(), Box<dyn std::error::Error>> {
     rt.block_on(async {
         let cfg = QuicConfig { server_name: "localhost".into(), port: 443 };
         let _conn = QuicConnection::new(cfg)?;
-        let enc = EncoderCore::new(FecAlgorithm::StripeXor);
-        let dec = DecoderCore::new(FecAlgorithm::StripeXor);
-        let data = b"ping";
-        let pkts = enc.encode(data, 1)?;
-        let rec = dec.decode(&pkts)?;
-        assert_eq!(rec, data);
+        let algos = [
+            FecAlgorithm::StripeXor,
+            FecAlgorithm::SparseRlnc,
+            FecAlgorithm::Cm256,
+            FecAlgorithm::ReedSolomon,
+        ];
+        for algo in algos {
+            let enc = EncoderCore::new(algo);
+            let dec = DecoderCore::new(algo);
+            let data = b"ping";
+            let pkts = enc.encode(data, 1)?;
+            let rec = dec.decode(&pkts)?;
+            assert_eq!(rec, data);
+        }
         Ok::<(), Box<dyn std::error::Error>>(())
     })?;
     Ok(())

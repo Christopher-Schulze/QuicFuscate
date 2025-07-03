@@ -1,7 +1,8 @@
 mod options;
 use clap::Parser;
 use options::{CommandLineOptions, Fingerprint, FecCliMode};
-use core as quic_core; // dummy use
+use fec::FECConfig;
+use core as quic_core; // dummy use, kann entfernt werden, falls nicht gebraucht
 use stealth::{QuicFuscateStealth, BrowserProfile};
 use env_logger::Env;
 use log::info;
@@ -55,6 +56,9 @@ fn main() {
         info!("[debug] TLS debug enabled");
     }
 
+    let mut fec_cfg = FECConfig::default();
+    fec_cfg.mode = opts.fec.into();
+    fec_cfg.redundancy_ratio = (opts.fec_ratio as f64) / 100.0;
     match opts.fec {
         FecCliMode::Off => info!("FEC disabled"),
         FecCliMode::Performance => info!("FEC performance mode"),
