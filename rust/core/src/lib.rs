@@ -435,31 +435,62 @@ impl PathMtuManager {
 
 pub struct StreamOptimizationConfig;
 
-pub struct QuicStreamOptimizer;
+#[derive(Default)]
+struct StreamInfo {
+    priority: u8,
+    window: u32,
+}
+
+pub struct QuicStreamOptimizer {
+    streams: std::collections::HashMap<u64, StreamInfo>,
+    base_chunk: u32,
+}
 
 impl QuicStreamOptimizer {
     pub fn new() -> Self {
-        Self
+        Self {
+            streams: std::collections::HashMap::new(),
+            base_chunk: 1024,
+        }
     }
 
     pub fn initialize(&mut self, _cfg: StreamOptimizationConfig) -> bool {
         true
     }
 
-    pub fn set_stream_priority(&mut self, _stream_id: u64, _priority: u8) -> bool {
+    pub fn set_stream_priority(&mut self, stream_id: u64, priority: u8) -> bool {
+        let entry = self
+            .streams
+            .entry(stream_id)
+            .or_insert_with(StreamInfo::default);
+        entry.priority = priority;
         true
     }
 
-    pub fn update_flow_control_window(&mut self, _stream_id: u64, _size: u32) -> bool {
+    pub fn update_flow_control_window(&mut self, stream_id: u64, size: u32) -> bool {
+        let entry = self
+            .streams
+            .entry(stream_id)
+            .or_insert_with(StreamInfo::default);
+        entry.window = size;
         true
     }
 
-    pub fn can_send_data(&self, _stream_id: u64, _size: u32) -> bool {
-        true
+    pub fn can_send_data(&self, stream_id: u64, size: u32) -> bool {
+        self.streams
+            .get(&stream_id)
+            .map(|info| size <= info.window)
+            .unwrap_or(false)
     }
 
-    pub fn get_optimal_chunk_size(&self, _stream_id: u64) -> u32 {
-        1
+    pub fn get_optimal_chunk_size(&self, stream_id: u64) -> u32 {
+        self.streams
+            .get(&stream_id)
+            .map(|info| {
+                let chunk = self.base_chunk + info.priority as u32 * 100;
+                info.window.min(chunk).max(1)
+            })
+            .unwrap_or(0)
     }
 }
 
