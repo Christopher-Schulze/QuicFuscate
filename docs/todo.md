@@ -312,7 +312,7 @@ Unit-Tests gestartet.
 ## Noch zu erledigen
 
 - Kompletter Rebuild in Rust ohne Stubs, produktionsreifer Code
-- FEC crate ist weitgehend stabil und ersetzt das alte `FEC_Modul.cpp`
+- FEC crate ist vollständig integriert und liefert adaptive Redundanz
 - Module konsolidieren: je eine Datei für main, crypto, fec, optimized und stealth
 
 Weitere Änderungen werden hier dokumentiert.
