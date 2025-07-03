@@ -1,10 +1,20 @@
 use std::sync::{Arc, Mutex};
 use std::ptr;
 use std::slice;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum FECError {
+    #[error("mutex poisoned")]
     LockPoisoned,
+}
+
+impl FECError {
+    fn code(&self) -> i32 {
+        match self {
+            FECError::LockPoisoned => -1,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
