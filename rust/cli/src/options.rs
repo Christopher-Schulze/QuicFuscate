@@ -1,5 +1,6 @@
 use clap::{Parser, ValueEnum};
-use fec::{FecMode};
+use fec::FecMode;
+use stealth::BrowserProfile;
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum, Debug)]
 pub enum FecCliMode {
@@ -31,6 +32,18 @@ pub enum Fingerprint {
     ChromeAndroid,
     SafariIos,
     Random,
+}
+
+impl From<Fingerprint> for BrowserProfile {
+    fn from(fp: Fingerprint) -> Self {
+        match fp {
+            Fingerprint::Chrome | Fingerprint::Brave | Fingerprint::Opera | Fingerprint::ChromeAndroid => BrowserProfile::Chrome,
+            Fingerprint::Firefox => BrowserProfile::Firefox,
+            Fingerprint::Safari | Fingerprint::SafariIos => BrowserProfile::Safari,
+            Fingerprint::Edge => BrowserProfile::Edge,
+            Fingerprint::Random => BrowserProfile::Chrome,
+        }
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -96,7 +109,15 @@ pub struct CommandLineOptions {
     #[arg(long, default_value_t = false)]
     pub spin_random: bool,
 
+    /// Probability for spinbit flipping
+    #[arg(long, default_value_t = 0.5)]
+    pub spin_probability: f64,
+
     /// Enable Zero-RTT data
     #[arg(long, default_value_t = false)]
     pub zero_rtt: bool,
+
+    /// Maximum bytes allowed for Zero-RTT data
+    #[arg(long, default_value_t = 1024)]
+    pub zero_rtt_max: usize,
 }
