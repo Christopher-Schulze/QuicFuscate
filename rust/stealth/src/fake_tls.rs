@@ -3,20 +3,30 @@ use crate::browser::{BrowserProfile, TlsFingerprint};
 pub struct FakeTls {
     profile: BrowserProfile,
     fingerprint: TlsFingerprint,
+    enabled: bool,
 }
 
 impl FakeTls {
     pub fn new(profile: BrowserProfile) -> Self {
-        Self { profile, fingerprint: TlsFingerprint::default() }
+        Self {
+            profile,
+            fingerprint: TlsFingerprint::for_profile(profile),
+            enabled: true,
+        }
     }
 
     pub fn set_profile(&mut self, profile: BrowserProfile) {
         self.profile = profile;
-        self.fingerprint = TlsFingerprint::default();
+        self.fingerprint = TlsFingerprint::for_profile(profile);
     }
+
+    pub fn enable(&mut self, e: bool) { self.enabled = e; }
 
     /// Generate a minimal fake TLS ClientHello packet.
     pub fn generate_client_hello(&self) -> Vec<u8> {
+        if !self.enabled {
+            return Vec::new();
+        }
         // Build a fake handshake including cipher suite and extension count.
         let mut hello = vec![0x16, 0x03, 0x01];
         hello.push(self.fingerprint.cipher_suites.len() as u8);

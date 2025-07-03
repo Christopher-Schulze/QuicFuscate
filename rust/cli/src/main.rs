@@ -1,8 +1,8 @@
 mod options;
 use clap::Parser;
 use options::{CommandLineOptions, Fingerprint, FecCliMode};
-use core as quic_core; // dummy use, kann entfernt werden, falls nicht gebraucht
-use stealth::QuicFuscateStealth;
+use core as quic_core; // dummy use
+use stealth::{QuicFuscateStealth, BrowserProfile};
 use env_logger::Env;
 use log::info;
 
@@ -63,6 +63,10 @@ fn main() {
     }
 
     let mut stealth = QuicFuscateStealth::new();
+    stealth.set_browser_profile(BrowserProfile::from(opts.fingerprint));
+    stealth.enable_utls(!opts.no_utls);
+    stealth.set_spinbit_probability(opts.spin_probability);
+    stealth.set_zero_rtt_max_early_data(opts.zero_rtt_max);
     stealth.enable_domain_fronting(opts.domain_fronting);
     stealth.enable_http3_masq(opts.http3_masq);
     stealth.enable_doh(opts.doh);

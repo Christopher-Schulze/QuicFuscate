@@ -11,6 +11,10 @@ impl Masquerade {
 
     pub fn enable(&mut self, enable: bool) { self.enabled = enable; }
 
+    pub fn set_profile(&mut self, profile: BrowserProfile) {
+        self.profile = profile;
+    }
+
     pub fn headers(&self) -> HashMap<String, String> {
         if self.enabled {
             default_headers(self.profile)

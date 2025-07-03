@@ -25,6 +25,7 @@ impl ZeroRttEngine {
     }
 
     pub fn set_enabled(&mut self, e: bool) { self.cfg.enabled = e; }
+    pub fn set_max_early_data(&mut self, max: usize) { self.cfg.max_early_data = max; }
 
     pub async fn send_early_data(&mut self, data: &[u8]) -> Result<(), ()> {
         self.attempts += 1;
