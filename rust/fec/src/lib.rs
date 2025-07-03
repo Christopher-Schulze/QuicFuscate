@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use serde::{Deserialize, Serialize};
 use reed_solomon_erasure::galois_8::ReedSolomon;
+use rand::Rng;
 
 #[derive(Debug, Error)]
 pub enum FECError {
@@ -267,17 +268,34 @@ pub struct RlncScheme;
 
 impl FecScheme for RlncScheme {
     fn encode(&self, data: &[u8], seq: u32) -> Result<Vec<FECPacket>> {
-        let mut repair = data.to_vec();
-        for b in repair.iter_mut() { *b ^= 0x55; }
+        let coeff: u8 = rand::thread_rng().gen_range(1..=255);
+        let mut repair = vec![0u8; data.len()];
+        GaloisField::multiply_vector_scalar(&mut repair, data, coeff);
+        let mut repair_packet = Vec::with_capacity(data.len() + 1);
+        repair_packet.push(coeff);
+        repair_packet.extend_from_slice(&repair);
         Ok(vec![
             FECPacket { sequence_number: seq, is_repair: false, data: data.to_vec() },
-            FECPacket { sequence_number: seq, is_repair: true, data: repair },
+            FECPacket { sequence_number: seq, is_repair: true, data: repair_packet },
         ])
     }
 
     fn decode(&self, packets: &[FECPacket]) -> Result<Vec<u8>> {
         if let Some(p) = packets.iter().find(|p| !p.is_repair) {
             return Ok(p.data.clone());
+        }
+        if let Some(p) = packets.iter().find(|p| p.is_repair) {
+            if p.data.is_empty() {
+                return Ok(Vec::new());
+            }
+            let coeff = p.data[0];
+            if coeff == 0 {
+                return Ok(Vec::new());
+            }
+            let inv = GaloisField::inverse(coeff);
+            let mut out = vec![0u8; p.data.len() - 1];
+            GaloisField::multiply_vector_scalar(&mut out, &p.data[1..], inv);
+            return Ok(out);
         }
         Ok(Vec::new())
     }
@@ -402,6 +420,14 @@ impl GaloisField {
         }
         for (d, s) in dst.iter_mut().zip(src.iter()) {
             *d = Self::multiply(*s, scalar);
+        }
+    }
+
+    fn inverse(a: u8) -> u8 {
+        if a == 0 {
+            0
+        } else {
+            GF_LOG.with(|log| GF_EXP.with(|exp| exp[(255 - log[a as usize]) as usize]))
         }
     }
 }

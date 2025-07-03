@@ -13,6 +13,7 @@ rlnc = "0.3"
 leopard-codec = "0.1"
 reed-solomon-erasure = "6"
 serde = { version = "1", features = ["derive"] }
+rand = "0.8"
 
 [dev-dependencies]
 criterion = "0.5"
