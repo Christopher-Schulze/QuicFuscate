@@ -6,9 +6,9 @@
 Legacy modules still allocate memory manually and must be audited for leaks.
 
 ### Unsafe Code Patterns
-- **assert() Verwendung**: In `quic_integration_impl.cpp` (Zeile 155) wird `assert()` für kritische Validierung verwendet
-  - Assert wird in Release-Builds entfernt
-  - Sollte durch proper Exception Handling ersetzt werden
+- **assert() Verwendung**: Der frühere Hinweis auf `assert()` in `quic_integration_impl.cpp` (ehemals Zeile 155) ist veraltet.
+  - Die betreffende Assertion existiert nicht mehr und wurde bereits entfernt.
+  - Dokumentation entsprechend aktualisieren, keine Aktion erforderlich.
 
 - **Unsichere Typumwandlungen**: Extensive Nutzung von Casts ohne Validierung
   - `reinterpret_cast` in `quic_connection_impl.cpp` (Zeilen 523, 529) für Netzwerk-Adressstrukturen
@@ -26,10 +26,9 @@ Legacy modules still allocate memory manually and must be audited for leaks.
   - Sollte durch systematische Null-Checks oder Optional-Types ersetzt werden
 
 ### Buffer Operations
-- **memcpy() Verwendung**: Extensive Nutzung in mehreren Modulen ohne Bounds-Checking
-  - `XOR_Obfuscation.cpp` und Teile des `crypto/` Modules
-  - Potentielle Buffer Overflow Vulnerabilities
-  - Sollte durch sichere Alternativen (std::copy, std::memcpy_s) ersetzt werden
+- **memcpy() Verwendung**: Ursprünglich wurde eine weite Verbreitung von `memcpy()` ohne Bounds-Checking angenommen.
+  - Aktuell finden sich nur noch wenige Aufrufe, beispielsweise in `optimize/unified_optimizations.hpp` und `core/quic_connection_impl.cpp`.
+  - Diese Stellen prüfen die Größe vor dem Kopieren und gelten daher als sicher, können aber optional auf `std::copy` umgestellt werden.
 
 ## Code Quality Issues
 
