@@ -1,6 +1,6 @@
 use fec::{
-    fec_module_cleanup, fec_module_decode, fec_module_encode, fec_module_init, FECConfig,
-    FECModule, FECPacket,
+    fec_module_cleanup, fec_module_decode, fec_module_encode, fec_module_free, fec_module_init,
+    FECConfig, FECModule, FECPacket,
 };
 
 #[test]
@@ -10,10 +10,14 @@ fn encode_decode() {
     let mut enc_len = 0usize;
     let enc_ptr = fec_module_encode(msg.as_ptr(), msg.len(), &mut enc_len as *mut usize);
     assert!(!enc_ptr.is_null());
-    let enc = unsafe { Vec::from_raw_parts(enc_ptr, enc_len, enc_len) };
+    let enc_slice = unsafe { std::slice::from_raw_parts(enc_ptr, enc_len) };
+    let enc = enc_slice.to_vec();
+    fec_module_free(enc_ptr, enc_len);
     let mut dec_len = 0usize;
     let dec_ptr = fec_module_decode(enc.as_ptr(), enc.len(), &mut dec_len as *mut usize);
-    let dec = unsafe { Vec::from_raw_parts(dec_ptr, dec_len, dec_len) };
+    let dec_slice = unsafe { std::slice::from_raw_parts(dec_ptr, dec_len) };
+    let dec = dec_slice.to_vec();
+    fec_module_free(dec_ptr, dec_len);
     fec_module_cleanup();
     assert_eq!(dec, msg);
 }
