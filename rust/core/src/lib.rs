@@ -1,4 +1,6 @@
 use thiserror::Error;
+#[cfg(feature = "quiche")]
+use quiche;
 
 mod quic_packet;
 pub use quic_packet::{PacketType, QuicPacket, QuicPacketHeader};
@@ -42,12 +44,22 @@ pub struct QuicConfig {
 }
 
 /// Simple QUIC connection wrapper used for testing the Rust port.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ConnectionState {
+    New,
+    Connected,
+    Error,
+}
+
 pub struct QuicConnection {
     config: QuicConfig,
     mtu_discovery: bool,
     migration: bool,
     bbr: bool,
     zero_copy: bool,
+    state: ConnectionState,
+    #[cfg(feature = "quiche")]
+    conn: Option<quiche::Connection>,
 }
 
 /// Configuration for zero-copy behaviour.
@@ -68,11 +80,28 @@ impl QuicConnection {
             migration: false,
             bbr: false,
             zero_copy: false,
+            state: ConnectionState::New,
+            #[cfg(feature = "quiche")]
+            conn: None,
         })
     }
 
     /// Connect to the provided address. For the stub this always succeeds.
-    pub fn connect(&self, _addr: &str) -> Result<()> {
+    pub fn connect(&mut self, addr: &str) -> Result<()> {
+        if self.state != ConnectionState::New {
+            return Err(CoreError::Quic("already connected".into()));
+        }
+
+        let _sock_addr: std::net::SocketAddr = addr
+            .parse()
+            .map_err(|_| CoreError::Quic("invalid address".into()))?;
+
+        #[cfg(feature = "quiche")]
+        {
+            self.conn = Some(quiche::Connection);
+        }
+
+        self.state = ConnectionState::Connected;
         Ok(())
     }
 
