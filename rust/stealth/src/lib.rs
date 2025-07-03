@@ -1,22 +1,22 @@
-pub mod qpack;
-pub mod zero_rtt;
-pub mod datagram;
-pub mod stream;
-pub mod spinbit;
-pub mod xor;
 pub mod browser;
+pub mod datagram;
 pub mod doh;
 pub mod domain_fronting;
 pub mod fake_tls;
 pub mod http3_masq;
+pub mod qpack;
+pub mod spinbit;
+pub mod stream;
+pub mod xor;
+pub mod zero_rtt;
 
-pub use xor::{XORObfuscator, XORPattern};
-pub use browser::{BrowserFingerprint, BrowserType, OperatingSystem, BrowserProfile};
-use qpack::QpackEngine;
-use zero_rtt::ZeroRttEngine;
+pub use browser::{BrowserFingerprint, BrowserProfile, BrowserType, OperatingSystem};
 use datagram::DatagramEngine;
-use stream::StreamEngine;
+use qpack::QpackEngine;
 use spinbit::SpinBitRandomizer;
+use stream::StreamEngine;
+pub use xor::{XORConfig, XORObfuscator, XORPattern};
+use zero_rtt::ZeroRttEngine;
 
 pub struct QuicFuscateStealth {
     pub qpack: QpackEngine,
