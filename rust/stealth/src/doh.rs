@@ -15,15 +15,21 @@ impl Default for DohConfig {
 pub struct DohClient {
     config: DohConfig,
     cache: HashMap<String, IpAddr>,
+    enabled: bool,
 }
 
 impl DohClient {
     pub fn new(config: DohConfig) -> Self {
-        Self { config, cache: HashMap::new() }
+        Self { config, cache: HashMap::new(), enabled: false }
     }
+
+    pub fn enable(&mut self, enable: bool) { self.enabled = enable; }
 
     /// Simplified asynchronous resolver that returns a fixed IP address.
     pub async fn resolve(&mut self, domain: &str) -> IpAddr {
+        if !self.enabled {
+            return IpAddr::V4(Ipv4Addr::new(127,0,0,1));
+        }
         if self.config.enable_caching {
             if let Some(ip) = self.cache.get(domain) {
                 return *ip;

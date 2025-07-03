@@ -1,17 +1,30 @@
+pub struct ZeroRttConfig {
+    pub max_early_data: usize,
+    pub enabled: bool,
+}
+
+impl Default for ZeroRttConfig {
+    fn default() -> Self {
+        Self { max_early_data: 1024, enabled: false }
+    }
+}
+
 pub struct ZeroRttEngine {
-    enabled: bool,
+    cfg: ZeroRttConfig,
     pub attempts: usize,
     pub successes: usize,
 }
 
-const MAX_EARLY_DATA_SIZE: usize = 1024;
-
 impl ZeroRttEngine {
-    pub fn new() -> Self { Self { enabled: false, attempts: 0, successes: 0 } }
-
-    pub fn enable(&mut self) {
-        self.enabled = true;
+    pub fn new() -> Self {
+        Self { cfg: ZeroRttConfig::default(), attempts: 0, successes: 0 }
     }
+
+    pub fn with_config(cfg: ZeroRttConfig) -> Self {
+        Self { cfg, attempts: 0, successes: 0 }
+    }
+
+    pub fn set_enabled(&mut self, e: bool) { self.cfg.enabled = e; }
 
     pub async fn send_early_data(&mut self, data: &[u8]) -> Result<(), ()> {
         self.attempts += 1;
@@ -19,7 +32,7 @@ impl ZeroRttEngine {
         // Mirror the checks performed by the C++ implementation. Early data
         // can only be sent when zero-RTT has been enabled and the payload size
         // stays within the configured limit.
-        if !self.enabled || data.len() > MAX_EARLY_DATA_SIZE {
+        if !self.cfg.enabled || data.len() > self.cfg.max_early_data {
             return Err(());
         }
 
@@ -52,9 +65,10 @@ mod tests {
         let rt = Runtime::new()?;
         rt.block_on(async {
             let mut eng = ZeroRttEngine::new();
-            eng.enable();
-            assert!(eng.send_early_data(&vec![0u8; MAX_EARLY_DATA_SIZE]).await.is_ok());
-            assert!(eng.send_early_data(&vec![0u8; MAX_EARLY_DATA_SIZE + 1]).await.is_err());
+            eng.set_enabled(true);
+            let max = eng.cfg.max_early_data;
+            assert!(eng.send_early_data(&vec![0u8; max]).await.is_ok());
+            assert!(eng.send_early_data(&vec![0u8; max + 1]).await.is_err());
         });
         Ok(())
     }

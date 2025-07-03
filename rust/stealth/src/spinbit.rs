@@ -12,6 +12,8 @@ impl SpinBitRandomizer {
 
     pub fn set_probability(&mut self, p: f64) { self.probability = p; }
 
+    pub fn enable(&mut self, e: bool) { self.enabled = e; }
+
     pub fn randomize(&self, bit: bool) -> bool {
         if !self.enabled { return bit; }
         let flip = rand::thread_rng().gen_bool(self.probability);
