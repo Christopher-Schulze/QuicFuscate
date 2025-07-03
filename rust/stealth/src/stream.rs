@@ -20,6 +20,8 @@ pub enum StreamError {
     Closed,
 }
 
+pub type Result<T> = std::result::Result<T, StreamError>;
+
 impl StreamEngine {
     pub fn new() -> Self {
         Self { next_id: 0, streams: HashMap::new() }
@@ -44,7 +46,7 @@ impl StreamEngine {
         }
     }
 
-    pub async fn recv(&mut self) -> Result<(u64, Vec<u8>), StreamError> {
+    pub async fn recv(&mut self) -> Result<(u64, Vec<u8>)> {
         let id = self
             .streams
             .iter()
@@ -72,7 +74,7 @@ mod tests {
     use tokio::runtime::Runtime;
 
     #[test]
-    fn stream_roundtrip_priority() -> Result<(), Box<dyn std::error::Error>> {
+    fn stream_roundtrip_priority() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let rt = Runtime::new()?;
         rt.block_on(async {
             let mut eng = StreamEngine::new();

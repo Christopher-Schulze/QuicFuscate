@@ -9,6 +9,9 @@
 #include <boost/algorithm/string.hpp>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <spdlog/spdlog.h>
+
+#include "openssl_raii.hpp"
 
 #include "../core/quic_connection.hpp"
 #include "../core/quic_stream.hpp"
@@ -111,32 +114,35 @@ int main(int argc, char** argv) {
     // Initialisierung von OpenSSL
     SSL_library_init();
     SSL_load_error_strings();
+    spdlog::set_level(spdlog::level::info);
+    spdlog::info("QuicFuscate starting");
     
     // Parse Kommandozeilenargumente
     cli::CommandLineOptions options = parse_arguments(argc, argv);
     
     // Ausgabe der gewählten Optionen
-    std::cout << "QuicFuscate VPN - QUIC mit uTLS Integration" << std::endl;
-    std::cout << "=========================================" << std::endl;
-    std::cout << "Verbinde zu " << options.server_host << ":" << options.server_port;
+    spdlog::info("QuicFuscate VPN - QUIC mit uTLS Integration");
+    spdlog::info("Verbinde zu {}:{}", options.server_host, options.server_port);
     
     if (options.use_utls) {
-        std::cout << " mit Browser-Fingerprint: " 
-                  << cli::CommandLineOptions::fingerprint_to_string(options.browser_fingerprint) << std::endl;
+        spdlog::info("mit Browser-Fingerprint: {}",
+                     cli::CommandLineOptions::fingerprint_to_string(options.browser_fingerprint));
     } else {
-        std::cout << " mit Standard-TLS (uTLS deaktiviert)" << std::endl;
+        spdlog::info("mit Standard-TLS (uTLS deaktiviert)");
     }
     
     if (options.verify_peer) {
-        std::cout << "Server-Zertifikatsverifikation aktiviert";
+        spdlog::info("Server-Zertifikatsverifikation aktiviert");
         if (!options.ca_file.empty()) {
-            std::cout << " mit CA-Datei: " << options.ca_file;
+            spdlog::info("CA-Datei: {}", options.ca_file);
         }
-        std::cout << std::endl;
     }
     
     // IO-Context für asynchrone Operationen
     boost::asio::io_context io_context;
+
+    // RAII OpenSSL Kontext
+    SslCtx ssl_ctx(TLS_client_method());
     
     // QUIC-Konfiguration erstellen
     QuicConfig config;

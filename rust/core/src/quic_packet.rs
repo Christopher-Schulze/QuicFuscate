@@ -153,13 +153,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn round_trip() {
+    fn round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let mut pkt = QuicPacket::with_type(PacketType::Handshake, 0x11223344);
         pkt.header.connection_id = 0xdead_beef_dead_beef;
         pkt.header.packet_number = 42;
         pkt.payload = b"hello".to_vec();
         let bytes = pkt.serialize();
-        let dec = QuicPacket::deserialize(&bytes).unwrap();
+        let dec = QuicPacket::deserialize(&bytes).ok_or("deserialize failed")?;
         assert_eq!(pkt, dec);
+        Ok(())
     }
 }

@@ -1,4 +1,4 @@
-use crate::error::CryptoError;
+use crate::error::{CryptoError, Result};
 use subtle::ConstantTimeEq;
 
 pub struct Morus;
@@ -28,7 +28,7 @@ impl Morus {
         ad: &[u8],
         ciphertext: &mut Vec<u8>,
         tag: &mut [u8; Self::TAG_SIZE],
-    ) -> Result<(), CryptoError> {
+    ) -> Result<()> {
         let mut state = [0u64; 5];
         state[0] = Self::IV;
         state[1] = Self::bytes_to_u64(&key[0..8]);
@@ -110,7 +110,7 @@ impl Morus {
         ad: &[u8],
         tag: &[u8; Self::TAG_SIZE],
         plaintext: &mut Vec<u8>,
-    ) -> Result<(), CryptoError> {
+    ) -> Result<()> {
         let mut state = [0u64; 5];
         state[0] = Self::IV;
         state[1] = Self::bytes_to_u64(&key[0..8]);

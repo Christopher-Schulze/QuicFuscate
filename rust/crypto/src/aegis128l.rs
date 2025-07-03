@@ -1,4 +1,4 @@
-use crate::error::CryptoError;
+use crate::error::{CryptoError, Result};
 use subtle::ConstantTimeEq;
 
 pub struct Aegis128L;
@@ -20,7 +20,7 @@ impl Aegis128L {
         _ad: &[u8],
         ciphertext: &mut Vec<u8>,
         tag: &mut [u8; Self::TAG_SIZE],
-    ) -> Result<(), CryptoError> {
+    ) -> crate::error::Result<()> {
         #[cfg(target_arch = "aarch64")]
         if std::arch::is_aarch64_feature_detected!("neon") {
             // SAFETY: we just checked that NEON is available at runtime
@@ -44,7 +44,7 @@ impl Aegis128L {
         _ad: &[u8],
         tag: &[u8; Self::TAG_SIZE],
         plaintext: &mut Vec<u8>,
-    ) -> Result<(), CryptoError> {
+    ) -> crate::error::Result<()> {
         #[cfg(target_arch = "aarch64")]
         if std::arch::is_aarch64_feature_detected!("neon") {
             // SAFETY: NEON availability checked above
@@ -82,7 +82,7 @@ impl Aegis128L {
         _ad: &[u8],
         ciphertext: &mut Vec<u8>,
         tag: &mut [u8; Self::TAG_SIZE],
-    ) -> Result<(), CryptoError> {
+    ) -> crate::error::Result<()> {
         ciphertext.clear();
         ciphertext.extend(
             plaintext
@@ -102,7 +102,7 @@ impl Aegis128L {
         _ad: &[u8],
         tag: &[u8; Self::TAG_SIZE],
         plaintext: &mut Vec<u8>,
-    ) -> Result<(), CryptoError> {
+    ) -> crate::error::Result<()> {
         plaintext.clear();
         plaintext.extend(
             ciphertext
@@ -126,7 +126,7 @@ impl Aegis128L {
         _ad: &[u8],
         ciphertext: &mut Vec<u8>,
         tag: &mut [u8; Self::TAG_SIZE],
-    ) -> Result<(), CryptoError> {
+    ) -> crate::error::Result<()> {
         use std::arch::x86_64::*;
 
         ciphertext.clear();
@@ -161,7 +161,7 @@ impl Aegis128L {
         _ad: &[u8],
         tag: &[u8; Self::TAG_SIZE],
         plaintext: &mut Vec<u8>,
-    ) -> Result<(), CryptoError> {
+    ) -> crate::error::Result<()> {
         use std::arch::x86_64::*;
 
         plaintext.clear();
@@ -199,7 +199,7 @@ impl Aegis128L {
         _ad: &[u8],
         ciphertext: &mut Vec<u8>,
         tag: &mut [u8; Self::TAG_SIZE],
-    ) -> Result<(), CryptoError> {
+    ) -> crate::error::Result<()> {
         use std::arch::aarch64::*;
 
         ciphertext.clear();
@@ -234,7 +234,7 @@ impl Aegis128L {
         _ad: &[u8],
         tag: &[u8; Self::TAG_SIZE],
         plaintext: &mut Vec<u8>,
-    ) -> Result<(), CryptoError> {
+    ) -> crate::error::Result<()> {
         use std::arch::aarch64::*;
 
         plaintext.clear();

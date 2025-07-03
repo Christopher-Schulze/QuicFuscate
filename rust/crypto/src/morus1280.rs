@@ -1,4 +1,4 @@
-use crate::error::CryptoError;
+use crate::error::{CryptoError, Result};
 use subtle::ConstantTimeEq;
 
 pub struct Morus1280;
@@ -31,7 +31,7 @@ impl Morus1280 {
         ad: &[u8],
         ciphertext: &mut Vec<u8>,
         tag: &mut [u8; Self::TAG_SIZE],
-    ) -> Result<(), CryptoError> {
+    ) -> crate::error::Result<()> {
         let mut state = Self::init_state(key, nonce);
 
         if !ad.is_empty() {
@@ -51,7 +51,7 @@ impl Morus1280 {
         ad: &[u8],
         tag: &[u8; Self::TAG_SIZE],
         plaintext: &mut Vec<u8>,
-    ) -> Result<(), CryptoError> {
+    ) -> crate::error::Result<()> {
         let mut state = Self::init_state(key, nonce);
 
         if !ad.is_empty() {

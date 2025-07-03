@@ -14,6 +14,8 @@ pub enum CoreError {
     Quic(String),
 }
 
+pub type Result<T> = std::result::Result<T, CoreError>;
+
 /// Default minimum MTU recommended by RFC 8899.
 pub const DEFAULT_MIN_MTU: u16 = 1200;
 /// Typical Ethernet MTU used as an upper bound for probing.
@@ -59,7 +61,7 @@ pub struct ZeroCopyConfig {
 
 impl QuicConnection {
     /// Create a new connection instance from the given config.
-    pub fn new(config: QuicConfig) -> Result<Self, CoreError> {
+    pub fn new(config: QuicConfig) -> Result<Self> {
         Ok(Self {
             config,
             mtu_discovery: false,
@@ -70,7 +72,7 @@ impl QuicConnection {
     }
 
     /// Connect to the provided address. For the stub this always succeeds.
-    pub fn connect(&self, _addr: &str) -> Result<(), CoreError> {
+    pub fn connect(&self, _addr: &str) -> Result<()> {
         Ok(())
     }
 

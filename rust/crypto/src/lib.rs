@@ -5,6 +5,7 @@ mod error;
 mod features;
 mod morus;
 mod morus1280;
+mod openssl_raii;
 
 pub use aegis128l::Aegis128L;
 #[cfg(feature = "aegis128x")]
@@ -12,7 +13,8 @@ pub use aegis128x::Aegis128X;
 pub use morus::Morus;
 pub use morus1280::Morus1280;
 
-pub use error::CryptoError;
+pub use error::{CryptoError, Result as CryptoResult};
+pub use openssl_raii::{Ssl, SslCtx};
 
 #[derive(Clone, Copy)]
 pub enum CipherSuite {
@@ -61,7 +63,7 @@ impl CipherSuiteSelector {
         ad: &[u8],
         ciphertext: &mut Vec<u8>,
         tag: &mut [u8; 16],
-    ) -> Result<(), CryptoError> {
+    ) -> CryptoResult<()> {
         match self.suite {
             CipherSuite::Aegis128xVaes512 | CipherSuite::Aegis128xAesni => {
                 #[cfg(feature = "aegis128x")]
@@ -90,7 +92,7 @@ impl CipherSuiteSelector {
         ad: &[u8],
         tag: &[u8; 16],
         plaintext: &mut Vec<u8>,
-    ) -> Result<(), CryptoError> {
+    ) -> CryptoResult<()> {
         match self.suite {
             CipherSuite::Aegis128xVaes512 | CipherSuite::Aegis128xAesni => {
                 #[cfg(feature = "aegis128x")]
