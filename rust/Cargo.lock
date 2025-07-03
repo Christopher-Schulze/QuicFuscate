@@ -352,7 +352,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "leopard-codec",
- "once_cell",
+ "rand 0.8.5",
  "reed-solomon-erasure",
  "rlnc",
  "serde",
