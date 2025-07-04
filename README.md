@@ -74,27 +74,27 @@ The codebase is now entirely written in Rust. Development focuses on expanding f
 ## 🔧 Build Instructions
 
 This repository uses a Git submodule to include a patched QUIC library.
-The `libs/quiche-patched` directory is intentionally left empty in the
+The `libs/patched_quiche` directory is intentionally left empty in the
 repository to avoid bloating the checkout size. Fetch the sources after
 cloning using one of the methods below.
 After cloning the project, initialize the submodule with:
 
 ```bash
-git submodule update --init --recursive libs/quiche-patched
+git submodule update --init --recursive libs/patched_quiche/quiche
 ```
 
 If the command fails with a missing commit error (e.g.
 ```
 fatal: remote error: upload-pack: not our ref 5700a7c74927d2c4912ac95e904c6ad3642b6868
-Fetched in submodule path 'libs/quiche-patched', but it did not contain 5700a7c74927d2c4912ac95e904c6ad3642b6868.
+Fetched in submodule path 'libs/patched_quiche/quiche', but it did not contain 5700a7c74927d2c4912ac95e904c6ad3642b6868.
 ```
 ), the upstream `quiche` repository might not contain the pinned
 revision `5700a7c74927d2c4912ac95e904c6ad3642b6868`. Update the
 submodule URL to a mirror that includes this commit and retry:
 
 ```bash
-git submodule set-url libs/quiche-patched <mirror-url>
-git submodule update --init libs/quiche-patched
+git submodule set-url libs/patched_quiche/quiche <mirror-url>
+git submodule update --init libs/patched_quiche/quiche
 ```
 
 Alternatively, run the helper script to automatically set the mirror,
@@ -113,7 +113,7 @@ variable to skip fetching and build from that path instead.
 Compile the patched **quiche** library using Cargo:
 
 ```bash
-cd libs/quiche-patched
+cd libs/patched_quiche/quiche
 cargo build --release
 cd ../..
 ```
