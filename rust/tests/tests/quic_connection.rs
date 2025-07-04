@@ -27,3 +27,15 @@ fn zero_copy_configurable() -> Result<(), Box<dyn std::error::Error>> {
     assert!(conn.zero_copy_config().enable_send);
     Ok(())
 }
+
+#[test]
+fn connect_and_transfer() -> Result<(), Box<dyn std::error::Error>> {
+    let cfg = QuicConfig { server_name: "localhost".into(), port: 443 };
+    let mut client = QuicConnection::new(cfg.clone())?;
+    let mut server = QuicConnection::new(cfg)?;
+    client.connect("127.0.0.1:443")?;
+    server.connect("127.0.0.1:443")?;
+    client.send(b"hello")?;
+    assert_eq!(server.recv()?, Some(b"hello".to_vec()));
+    Ok(())
+}
