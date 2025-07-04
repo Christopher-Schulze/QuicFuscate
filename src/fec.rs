@@ -38,6 +38,7 @@
 //! optimizations for finite field arithmetic and memory management.
 
 use crate::optimize::{self, MemoryPool, OptimizationManager, SimdPolicy};
+use crate::telemetry::TELEMETRY;
 use aligned_box::AlignedBox;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -1025,6 +1026,7 @@ impl AdaptiveFec {
         self.encoder
             .add_source_packet(pkt.clone_for_encoder(&self.mem_pool));
         outgoing_queue.push_back(pkt);
+        TELEMETRY.inc_fec_sent(1);
 
         if self.transition_left > ModeManager::CROSS_FADE_LEN / 2 {
             if let Some(enc) = self.transition_encoder.as_mut() {
@@ -1052,6 +1054,7 @@ impl AdaptiveFec {
         for i in 0..num_repair {
             if let Some(repair_packet) = encoder.generate_repair_packet(i, mem_pool) {
                 outgoing_queue.push_back(repair_packet);
+                TELEMETRY.inc_fec_sent(1);
             }
         }
     }
@@ -1088,11 +1091,18 @@ impl AdaptiveFec {
             }
         }
 
+        let count = recovered.len();
+        if count > 0 {
+            TELEMETRY.inc_fec_recovered(count);
+        }
         Ok(recovered)
     }
 
     /// Reports packet loss statistics to update the adaptive logic.
     pub fn report_loss(&mut self, lost: usize, total: usize) {
+        if lost > 0 {
+            TELEMETRY.inc_fec_lost(lost);
+        }
         let mut estimator = self.estimator.lock().unwrap();
         estimator.report_loss(lost, total);
         let estimated_loss = estimator.get_estimated_loss();

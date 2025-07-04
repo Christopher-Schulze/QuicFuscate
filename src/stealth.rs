@@ -47,6 +47,7 @@ use url::Url;
 
 use crate::crypto::CryptoManager; // Assumed for integration
 use crate::optimize::{self, OptimizationManager}; // Assumed for integration
+use crate::telemetry::TELEMETRY;
 use std::os::raw::c_void;
 
 // --- Global Tokio Runtime for async DoH requests ---
@@ -659,6 +660,7 @@ fn map_iana_to_quiche_cipher(iana_id: u16) -> Option<quiche::Cipher> {
             debug!("Applying XOR obfuscation to outgoing packet.");
             self.xor_obfuscator.as_ref().unwrap().obfuscate(payload);
         }
+        TELEMETRY.inc_stealth_outgoing();
         
         // HTTP/3 Masquerading is applied at the stream level when sending data,
         // not on raw packets here.
@@ -670,6 +672,7 @@ fn map_iana_to_quiche_cipher(iana_id: u16) -> Option<quiche::Cipher> {
             debug!("Reversing XOR obfuscation on incoming packet.");
             self.xor_obfuscator.as_ref().unwrap().deobfuscate(payload);
         }
+        TELEMETRY.inc_stealth_incoming();
     }
 
     /// Generates HTTP/3 headers for masquerading a request.

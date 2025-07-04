@@ -1,5 +1,6 @@
 use crate::core::QuicFuscateConnection;
 use crate::stealth::StealthConfig;
+use crate::telemetry::{Telemetry, TELEMETRY};
 use clap::{Parser, Subcommand};
 use log::{error, info, warn};
 use std::collections::HashMap;
@@ -13,6 +14,9 @@ use std::time::Instant;
 struct Cli {
     #[clap(subcommand)]
     command: Commands,
+    /// Address to expose Prometheus metrics (e.g. 127.0.0.1:9898)
+    #[clap(long)]
+    metrics: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -55,6 +59,27 @@ enum Commands {
 async fn main() -> std::io::Result<()> {
     env_logger::init();
     let cli = Cli::parse();
+
+    let _exporter = if let Some(addr) = &cli.metrics {
+        match TELEMETRY.start_exporter(addr) {
+            Ok(exp) => {
+                info!("Telemetry exporter running on {}", addr);
+                tokio::spawn(async move {
+                    loop {
+                        TELEMETRY.update_cpu();
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
+                });
+                Some(exp)
+            }
+            Err(e) => {
+                warn!("Failed to start telemetry exporter: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     match &cli.command {
         Commands::Client {
@@ -125,6 +150,7 @@ async fn run_client(
     if let Some((len, _)) = conn.conn.send(&mut out) {
         socket.send(&out[..len])?;
         info!("Sent initial packet of size {}", len);
+        TELEMETRY.inc_throughput(len);
     }
 
     loop {
@@ -135,6 +161,7 @@ async fn run_client(
                     .conn
                     .recv(&mut buf[..len], quiche::RecvInfo { from: server_addr });
                 info!("Received packet of size {}", len);
+                TELEMETRY.inc_throughput(len);
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 // No packets to read, continue
@@ -162,6 +189,7 @@ async fn run_client(
         while let Some((len, _)) = conn.conn.send(&mut out) {
             socket.send(&out[..len])?;
             info!("Sent packet of size {}", len);
+            TELEMETRY.inc_throughput(len);
         }
 
         // Check for timeout
@@ -213,6 +241,7 @@ async fn run_server(
         match socket.recv_from(&mut buf) {
             Ok((len, from)) => {
                 info!("Received {} bytes from {}", len, from);
+                TELEMETRY.inc_throughput(len);
                 let client_conn = clients.entry(from).or_insert_with(|| {
                     info!("New client connected: {}", from);
                     let scid = quiche::ConnectionId::from_ref(&[0; quiche::MAX_CONN_ID_LEN]);
@@ -269,6 +298,7 @@ async fn run_server(
                     error!("Failed to send packet to {}: {}", addr, e);
                 } else {
                     info!("Sent {} bytes to {}", len, addr);
+                    TELEMETRY.inc_throughput(len);
                 }
             }
             conn.conn.on_timeout();

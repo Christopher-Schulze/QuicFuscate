@@ -24,4 +24,7 @@ cpufeatures = "0.2"
 clap = { version = "4.5.4", features = ["derive"] }
 crossbeam-queue = "0.3"
 libc = "0.2"
+prometheus = "0.13"
+prometheus_exporter = "0.8.5"
+sysinfo = { version = "0.30", default-features = false, features = ["refresh_cpu"] }
 
