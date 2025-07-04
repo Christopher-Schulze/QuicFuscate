@@ -37,9 +37,9 @@
 //! low latency, and high resilience against packet loss, leveraging hardware-specific
 //! optimizations for finite field arithmetic and memory management.
 
-use crate::optimize::{self, MemoryPool, SimdPolicy, OptimizationManager};
+use crate::optimize::{self, MemoryPool, OptimizationManager, SimdPolicy};
 use aligned_box::AlignedBox;
-use std::collections::{VecDeque, HashMap};
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -77,10 +77,12 @@ fn gf_mul(a: u8, b: u8) -> u8 {
                     let t = t ^ (t >> 1);
                     (t & 0xFF) as u8
                 }
-            },
+            }
             // Fallback to table-based multiplication if no specific SIMD is available.
             _ => {
-                if a == 0 || b == 0 { return 0; }
+                if a == 0 || b == 0 {
+                    return 0;
+                }
                 unsafe {
                     let log_a = LOG_TABLE[a as usize] as u16;
                     let log_b = LOG_TABLE[b as usize] as u16;
@@ -96,7 +98,9 @@ fn gf_mul(a: u8, b: u8) -> u8 {
 /// Computes the multiplicative inverse of a in GF(2^8)).
 #[inline(always)]
 fn gf_inv(a: u8) -> u8 {
-    if a == 0 { panic!("Inverse of 0 is undefined in GF(2^8))"); }
+    if a == 0 {
+        panic!("Inverse of 0 is undefined in GF(2^8))");
+    }
     unsafe { EXP_TABLE[255 - LOG_TABLE[a as usize] as usize] }
 }
 
@@ -160,7 +164,11 @@ impl Packet {
     /// Deserializes a packet from a raw byte buffer.
     /// This is a lightweight framing implementation.
     /// Frame format: <is_systematic_byte (1)> <coeff_len (2)> <coeffs (coeff_len)> <payload>
-    pub fn from_raw(id: u64, raw_data: &[u8], opt_manager: &OptimizationManager) -> Result<Self, String> {
+    pub fn from_raw(
+        id: u64,
+        raw_data: &[u8],
+        opt_manager: &OptimizationManager,
+    ) -> Result<Self, String> {
         if raw_data.is_empty() {
             return Err("Raw data is empty".to_string());
         }
@@ -172,7 +180,8 @@ impl Packet {
             if raw_data.len() < 3 {
                 return Err("Buffer too short for coefficient length".to_string());
             }
-            let coeff_len = u16::from_be_bytes(raw_data[offset..offset+2].try_into().unwrap()) as usize;
+            let coeff_len =
+                u16::from_be_bytes(raw_data[offset..offset + 2].try_into().unwrap()) as usize;
             offset += 2;
 
             if raw_data.len() < offset + coeff_len {
@@ -183,11 +192,11 @@ impl Packet {
         } else {
             (None, offset)
         };
-        
+
         let payload = &raw_data[payload_offset..];
         let mut data = opt_manager.alloc_block();
         if data.len() < payload.len() {
-             return Err("Buffer from pool is too small".to_string());
+            return Err("Buffer from pool is too small".to_string());
         }
         data[..payload.len()].copy_from_slice(payload);
 
@@ -216,7 +225,7 @@ impl Packet {
 
         if let Some(coeffs) = &self.coefficients {
             let coeff_len = coeffs.len() as u16;
-            buffer[offset..offset+2].copy_from_slice(&coeff_len.to_be_bytes());
+            buffer[offset..offset + 2].copy_from_slice(&coeff_len.to_be_bytes());
             offset += 2;
             buffer[offset..offset + coeffs.len()].copy_from_slice(coeffs);
             offset += coeffs.len();
@@ -227,7 +236,7 @@ impl Packet {
 
         Ok(offset)
     }
-    
+
     /// Clones the packet structure and its data for use in the encoder window.
     /// This is a deep copy of the data into a new buffer from the memory pool.
     pub fn clone_for_encoder(&self, mem_pool: &Arc<MemoryPool>) -> Self {
@@ -248,7 +257,7 @@ impl Packet {
 /// Estimates packet loss using an Exponential Moving Average and a burst detection window.
 pub struct LossEstimator {
     ema_loss_rate: f32,
-    lambda: f32, // Smoothing factor for EMA
+    lambda: f32,                  // Smoothing factor for EMA
     burst_window: VecDeque<bool>, // true for lost, false for received
     burst_capacity: usize,
 }
@@ -264,15 +273,24 @@ impl LossEstimator {
     }
 
     fn report_loss(&mut self, lost: usize, total: usize) {
-        let current_loss_rate = if total > 0 { lost as f32 / total as f32 } else { 0.0 };
-        self.ema_loss_rate = (self.lambda * current_loss_rate) + (1.0 - self.lambda) * self.ema_loss_rate;
+        let current_loss_rate = if total > 0 {
+            lost as f32 / total as f32
+        } else {
+            0.0
+        };
+        self.ema_loss_rate =
+            (self.lambda * current_loss_rate) + (1.0 - self.lambda) * self.ema_loss_rate;
 
         for _ in 0..lost {
-            if self.burst_window.len() == self.burst_capacity { self.burst_window.pop_front(); }
+            if self.burst_window.len() == self.burst_capacity {
+                self.burst_window.pop_front();
+            }
             self.burst_window.push_back(true);
         }
         for _ in 0..(total - lost) {
-            if self.burst_window.len() == self.burst_capacity { self.burst_window.pop_front(); }
+            if self.burst_window.len() == self.burst_capacity {
+                self.burst_window.pop_front();
+            }
             self.burst_window.push_back(false);
         }
     }
@@ -297,9 +315,51 @@ pub struct ModeManager {
     last_mode_change: Instant,
     min_dwell_time: Duration,
     hysteresis: f32,
+    current_window: usize,
 }
 
 impl ModeManager {
+    const CROSS_FADE_LEN: usize = 32;
+    const ALPHA_K: f32 = 0.5;
+
+    fn initial_window(mode: FecMode) -> usize {
+        match mode {
+            FecMode::Zero => 0,
+            FecMode::Light => 16,
+            FecMode::Normal => 64,
+            FecMode::Medium => 128,
+            FecMode::Strong => 512,
+            FecMode::Extreme => 1024,
+        }
+    }
+
+    fn window_range(mode: FecMode) -> (usize, usize) {
+        match mode {
+            FecMode::Zero => (0, 0),
+            FecMode::Light => (8, 32),
+            FecMode::Normal => (32, 128),
+            FecMode::Medium => (64, 256),
+            FecMode::Strong => (256, 1024),
+            FecMode::Extreme => (1024, 4096),
+        }
+    }
+
+    fn overhead_ratio(mode: FecMode) -> f32 {
+        match mode {
+            FecMode::Zero => 1.0,
+            FecMode::Light => 17.0 / 16.0,
+            FecMode::Normal => 74.0 / 64.0,
+            FecMode::Medium => 166.0 / 128.0,
+            FecMode::Strong => 384.0 / 256.0,
+            FecMode::Extreme => 2.0,
+        }
+    }
+
+    pub fn params_for(mode: FecMode, window: usize) -> (usize, usize) {
+        let ratio = Self::overhead_ratio(mode);
+        let n = ((window as f32) * ratio).ceil() as usize;
+        (window, n)
+    }
     fn new(pid_config: PidConfig, hysteresis: f32) -> Self {
         let mut mode_thresholds = HashMap::new();
         mode_thresholds.insert(FecMode::Zero, 0.01);
@@ -309,49 +369,81 @@ impl ModeManager {
         mode_thresholds.insert(FecMode::Strong, 0.50);
         mode_thresholds.insert(FecMode::Extreme, 1.0); // Effectively a catch-all
 
+        let current_mode = FecMode::Zero;
+        let current_window = Self::initial_window(current_mode);
+
         Self {
-            current_mode: FecMode::Zero,
+            current_mode,
             pid: PidController::new(pid_config),
             mode_thresholds,
             last_mode_change: Instant::now(),
             min_dwell_time: Duration::from_millis(500),
             hysteresis,
+            current_window,
         }
     }
 
-    /// Updates the FEC mode based on the current estimated loss rate.
-    fn update(&mut self, estimated_loss: f32) -> FecMode {
+    /// Updates the FEC mode and window based on the current estimated loss rate.
+    /// Returns the new mode, window and an optional previous (mode, window) if a
+    /// cross-fade should start.
+    fn update(&mut self, estimated_loss: f32) -> (FecMode, usize, Option<(FecMode, usize)>) {
         // Emergency override for sudden loss spikes
         if estimated_loss > self.mode_thresholds[&FecMode::Strong] + self.hysteresis {
+            let prev = (self.current_mode, self.current_window);
             self.current_mode = FecMode::Extreme;
+            self.current_window = Self::initial_window(self.current_mode);
             self.last_mode_change = Instant::now();
-            return self.current_mode;
+            return (self.current_mode, self.current_window, Some(prev));
         }
-        
+
         if self.last_mode_change.elapsed() < self.min_dwell_time {
-            return self.current_mode;
+            return (self.current_mode, self.current_window, None);
         }
-        
+
         let target_loss_for_current_mode = self.mode_thresholds[&self.current_mode];
-        let output = self.pid.update(estimated_loss, target_loss_for_current_mode);
-        
+        let output = self
+            .pid
+            .update(estimated_loss, target_loss_for_current_mode);
+
         let mut new_mode = self.current_mode;
 
         // Simplified logic: PID output suggests more (positive) or less (negative) redundancy
-        if output > 0.1 { // Needs more redundancy
+        if output > 0.1 {
+            // Needs more redundancy
             new_mode = self.next_mode(self.current_mode);
-        } else if output < -0.1 { // Needs less redundancy
+        } else if output < -0.1 {
+            // Needs less redundancy
             new_mode = self.prev_mode(self.current_mode);
         }
+
+        let prev_mode = self.current_mode;
+        let prev_window = self.current_window;
 
         if new_mode != self.current_mode {
             self.current_mode = new_mode;
             self.last_mode_change = Instant::now();
+            self.current_window = Self::initial_window(new_mode);
         }
-        
-        self.current_mode
+
+        // Dynamic window update according to PLAN
+        let target_loss_for_mode = self.mode_thresholds[&self.current_mode];
+        let alpha = 1.0 + Self::ALPHA_K * (estimated_loss - target_loss_for_mode);
+        let range = Self::window_range(self.current_mode);
+        let mut new_window = ((self.current_window as f32) * alpha).round() as usize;
+        new_window = new_window.clamp(range.0, range.1);
+        self.current_window = new_window;
+
+        if prev_mode != self.current_mode || prev_window != self.current_window {
+            return (
+                self.current_mode,
+                self.current_window,
+                Some((prev_mode, prev_window)),
+            );
+        }
+
+        (self.current_mode, self.current_window, None)
     }
-    
+
     fn next_mode(&self, mode: FecMode) -> FecMode {
         match mode {
             FecMode::Zero => FecMode::Light,
@@ -361,9 +453,9 @@ impl ModeManager {
             FecMode::Strong | FecMode::Extreme => FecMode::Extreme,
         }
     }
-    
+
     fn prev_mode(&self, mode: FecMode) -> FecMode {
-         match mode {
+        match mode {
             FecMode::Extreme => FecMode::Strong,
             FecMode::Strong => FecMode::Medium,
             FecMode::Medium => FecMode::Normal,
@@ -403,7 +495,9 @@ impl PidController {
         let dt = now.duration_since(self.last_time).as_secs_f32();
         self.last_time = now;
 
-        if dt <= 0.0 { return 0.0; }
+        if dt <= 0.0 {
+            return 0.0;
+        }
 
         let error = setpoint - current_value;
         self.integral += error * dt;
@@ -413,7 +507,6 @@ impl PidController {
         (self.config.kp * error) + (self.config.ki * self.integral) + (self.config.kd * derivative)
     }
 }
-
 
 // --- Encoder & Decoder ---
 
@@ -426,7 +519,11 @@ pub struct Encoder {
 
 impl Encoder {
     fn new(k: usize, n: usize) -> Self {
-        Self { k, n, source_window: VecDeque::with_capacity(k) }
+        Self {
+            k,
+            n,
+            source_window: VecDeque::with_capacity(k),
+        }
     }
 
     fn add_source_packet(&mut self, packet: Packet) {
@@ -437,9 +534,15 @@ impl Encoder {
     }
 
     /// Generates a repair packet for the current window.
-    fn generate_repair_packet(&self, repair_packet_index: usize, mem_pool: &Arc<MemoryPool>) -> Option<Packet> {
-        if self.source_window.len() < self.k { return None; }
-        
+    fn generate_repair_packet(
+        &self,
+        repair_packet_index: usize,
+        mem_pool: &Arc<MemoryPool>,
+    ) -> Option<Packet> {
+        if self.source_window.len() < self.k {
+            return None;
+        }
+
         let packet_len = self.source_window[0].len;
         let mut repair_data = mem_pool.alloc();
         repair_data.iter_mut().for_each(|b| *b = 0);
@@ -451,14 +554,16 @@ impl Encoder {
             // For example, processing 16 bytes at a time with AVX2/NEON.
             for (i, source_packet) in self.source_window.iter().enumerate() {
                 let coeff = coeffs[i];
-                if coeff == 0 { continue; }
+                if coeff == 0 {
+                    continue;
+                }
                 let source_data = &source_packet.data[..source_packet.len];
                 for j in 0..packet_len {
                     repair_data[j] = gf_mul_add(coeff, source_data[j], repair_data[j]);
                 }
             }
         });
-        
+
         Some(Packet {
             id: self.source_window.back().unwrap().id + 1 + repair_packet_index as u64,
             data: repair_data,
@@ -526,7 +631,7 @@ impl CsrMatrix {
         }
         0
     }
-    
+
     fn get_payload(&self, row: usize) -> &Option<AlignedBox<[u8]>> {
         &self.payloads[row]
     }
@@ -537,7 +642,7 @@ impl CsrMatrix {
         // A full swap involves manipulating `values`, `col_indices`, and `row_ptr`.
         // This is a known simplification for this context.
     }
-    
+
     fn scale_row(&mut self, row: usize, factor: u8) {
         let row_start = self.row_ptr[row];
         let row_end = self.row_ptr[row + 1];
@@ -550,7 +655,6 @@ impl CsrMatrix {
         // This is also highly complex in CSR and is simplified here.
     }
 }
-
 
 /// Represents the chosen decoding algorithm based on window size.
 enum DecodingStrategy {
@@ -615,8 +719,12 @@ impl Decoder {
 
     /// Attempts to decode once enough packets (K) have been received.
     fn try_decode(&mut self) -> bool {
-        if self.is_decoded { return true; }
-        if self.decoding_matrix.num_rows() < self.k { return false; }
+        if self.is_decoded {
+            return true;
+        }
+        if self.decoding_matrix.num_rows() < self.k {
+            return false;
+        }
 
         // --- High-performance decoding pipeline ---
         match self.strategy {
@@ -639,13 +747,15 @@ impl Decoder {
 
             if let Some(pivot_row) = pivot_row_opt {
                 self.decoding_matrix.swap_rows(i, pivot_row);
-                
+
                 let pivot_val = self.decoding_matrix.get_val(i, i);
                 let pivot_inv = gf_inv(pivot_val);
                 self.decoding_matrix.scale_row(i, pivot_inv);
 
                 for row_idx in 0..self.decoding_matrix.num_rows() {
-                    if i == row_idx { continue; }
+                    if i == row_idx {
+                        continue;
+                    }
                     let factor = self.decoding_matrix.get_val(row_idx, i);
                     if factor != 0 {
                         self.decoding_matrix.add_scaled_row(row_idx, i, factor);
@@ -658,7 +768,7 @@ impl Decoder {
                 }
             }
         }
-        
+
         if rank < k {
             return false; // Matrix is singular
         }
@@ -668,27 +778,30 @@ impl Decoder {
         // Reconstruct packets from this solved data.
         for i in 0..k {
             if self.systematic_packets[i].is_none() {
-                 if let Some(data_slice) = self.decoding_matrix.get_payload(i) {
-                     let data_len = data_slice.len();
-                     let mut packet_data = self.mem_pool.alloc();
-                     packet_data[..data_len].copy_from_slice(&data_slice);
-                     
-                      self.systematic_packets[i] = Some(Packet {
-                         id: i as u64, // NOTE: Assumes packet ID aligns with matrix index.
-                         data: packet_data,
-                         len: data_len,
-                         is_systematic: true,
-                         coefficients: None,
-                      });
-                 }
+                if let Some(data_slice) = self.decoding_matrix.get_payload(i) {
+                    let data_len = data_slice.len();
+                    let mut packet_data = self.mem_pool.alloc();
+                    packet_data[..data_len].copy_from_slice(&data_slice);
+
+                    self.systematic_packets[i] = Some(Packet {
+                        id: i as u64, // NOTE: Assumes packet ID aligns with matrix index.
+                        data: packet_data,
+                        len: data_len,
+                        is_systematic: true,
+                        coefficients: None,
+                    });
+                }
             }
         }
         true
     }
-    
+
     fn get_decoded_packets(&mut self) -> Vec<Packet> {
         // Drain the buffer to return the fully reconstructed set of packets
-        self.systematic_packets.iter_mut().filter_map(|p| p.take()).collect()
+        self.systematic_packets
+            .iter_mut()
+            .filter_map(|p| p.take())
+            .collect()
     }
 
     /// Solves the decoding problem using the Wiedemann algorithm.
@@ -697,7 +810,7 @@ impl Decoder {
         // A production-grade version would require more robust handling of edge cases.
         let k = self.k;
         let mut u = vec![0u8; k];
-        
+
         // 1. Choose a random vector `u`
         // In a real implementation, this should use a secure random source.
         for i in 0..k {
@@ -708,7 +821,7 @@ impl Decoder {
         // where b is the payload vector. This requires a transposed matrix-vector multiply.
         // For simplicity, we'll assume a placeholder for this sequence.
         let sequence = self.lanczos_iteration(&u);
-        
+
         // 3. Find the minimal polynomial of the sequence using Berlekamp-Massey.
         if let Some(_polynomial) = self.berlekamp_massey(&sequence) {
             // 4. Use the polynomial to solve for the original data.
@@ -761,7 +874,7 @@ impl Decoder {
                         c[j] ^= gf_mul(factor, *b_val);
                     }
                 }
-                
+
                 if 2 * l <= i {
                     l = i + 1 - l;
                     m = i as i32;
@@ -781,6 +894,9 @@ pub struct AdaptiveFec {
     mode_mgr: Arc<Mutex<ModeManager>>,
     encoder: Encoder,
     decoder: Decoder,
+    transition_encoder: Option<Encoder>,
+    transition_decoder: Option<Decoder>,
+    transition_left: usize,
     mem_pool: Arc<MemoryPool>,
     config: FecConfig,
 }
@@ -798,13 +914,19 @@ impl AdaptiveFec {
     pub fn new(config: FecConfig, mem_pool: Arc<MemoryPool>) -> Self {
         init_gf_tables();
         let mode_mgr = ModeManager::new(config.pid.clone(), config.hysteresis);
-        let (k, n) = Self::get_params_for_mode(mode_mgr.current_mode);
+        let (k, n) = ModeManager::params_for(mode_mgr.current_mode, mode_mgr.current_window);
 
         Self {
-            estimator: Arc::new(Mutex::new(LossEstimator::new(config.lambda, config.burst_window))),
+            estimator: Arc::new(Mutex::new(LossEstimator::new(
+                config.lambda,
+                config.burst_window,
+            ))),
             mode_mgr: Arc::new(Mutex::new(mode_mgr)),
             encoder: Encoder::new(k, n),
             decoder: Decoder::new(k, Arc::clone(&mem_pool)),
+            transition_encoder: None,
+            transition_decoder: None,
+            transition_left: 0,
             mem_pool,
             config,
         }
@@ -813,13 +935,39 @@ impl AdaptiveFec {
     /// Processes an outgoing packet, adding it to the FEC window and pushing
     /// resulting systematic and repair packets into the outgoing queue.
     pub fn on_send(&mut self, pkt: Packet, outgoing_queue: &mut VecDeque<Packet>) {
+        if let Some(enc) = self.transition_encoder.as_mut() {
+            enc.add_source_packet(pkt.clone_for_encoder(&self.mem_pool));
+        }
         // The original systematic packet is always sent.
-        self.encoder.add_source_packet(pkt.clone_for_encoder(&self.mem_pool));
+        self.encoder
+            .add_source_packet(pkt.clone_for_encoder(&self.mem_pool));
         outgoing_queue.push_back(pkt);
 
-        let num_repair = self.encoder.n.saturating_sub(self.encoder.k);
+        if self.transition_left > ModeManager::CROSS_FADE_LEN / 2 {
+            if let Some(enc) = self.transition_encoder.as_mut() {
+                Self::emit_repairs(enc, &self.mem_pool, outgoing_queue);
+            }
+        }
+
+        Self::emit_repairs(&mut self.encoder, &self.mem_pool, outgoing_queue);
+
+        if self.transition_left > 0 {
+            self.transition_left -= 1;
+            if self.transition_left == ModeManager::CROSS_FADE_LEN / 2 {
+                self.transition_encoder = None;
+                self.transition_decoder = None;
+            }
+        }
+    }
+
+    fn emit_repairs(
+        encoder: &mut Encoder,
+        mem_pool: &Arc<MemoryPool>,
+        outgoing_queue: &mut VecDeque<Packet>,
+    ) {
+        let num_repair = encoder.n.saturating_sub(encoder.k);
         for i in 0..num_repair {
-            if let Some(repair_packet) = self.encoder.generate_repair_packet(i, &self.mem_pool) {
+            if let Some(repair_packet) = encoder.generate_repair_packet(i, mem_pool) {
                 outgoing_queue.push_back(repair_packet);
             }
         }
@@ -828,17 +976,36 @@ impl AdaptiveFec {
     /// Processes an incoming packet, adding it to the decoder and attempting recovery.
     /// Returns a list of recovered packets if decoding is successful.
     pub fn on_receive(&mut self, pkt: Packet) -> Result<Vec<Packet>, &'static str> {
+        let mut recovered = Vec::new();
         let was_decoded = self.decoder.is_decoded;
+        let pkt_clone = if self.transition_left > ModeManager::CROSS_FADE_LEN / 2 {
+            Some(pkt.clone_for_encoder(&self.mem_pool))
+        } else {
+            None
+        };
+
         match self.decoder.add_packet(pkt) {
             Ok(is_now_decoded) => {
                 if !was_decoded && is_now_decoded {
-                    Ok(self.decoder.get_decoded_packets())
-                } else {
-                    Ok(Vec::new())
+                    recovered.extend(self.decoder.get_decoded_packets());
                 }
             }
-            Err(e) => Err(e),
+            Err(e) => return Err(e),
         }
+
+        if let (Some(trans_dec), Some(clone_pkt)) = (self.transition_decoder.as_mut(), pkt_clone) {
+            let was_dec = trans_dec.is_decoded;
+            match trans_dec.add_packet(clone_pkt) {
+                Ok(now) => {
+                    if !was_dec && now {
+                        recovered.extend(trans_dec.get_decoded_packets());
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Ok(recovered)
     }
 
     /// Reports packet loss statistics to update the adaptive logic.
@@ -849,23 +1016,21 @@ impl AdaptiveFec {
         drop(estimator);
 
         let mut mode_mgr = self.mode_mgr.lock().unwrap();
-        let new_mode = mode_mgr.update(estimated_loss);
-        
-        let (k, n) = Self::get_params_for_mode(new_mode);
-        if self.encoder.k != k {
+        let (new_mode, new_window, prev) = mode_mgr.update(estimated_loss);
+        let (k, n) = ModeManager::params_for(new_mode, new_window);
+
+        if let Some((old_mode, old_window)) = prev {
+            let (ok, on) = ModeManager::params_for(old_mode, old_window);
+            self.transition_encoder =
+                Some(std::mem::replace(&mut self.encoder, Encoder::new(k, n)));
+            self.transition_decoder = Some(std::mem::replace(
+                &mut self.decoder,
+                Decoder::new(ok, Arc::clone(&self.mem_pool)),
+            ));
+            self.transition_left = ModeManager::CROSS_FADE_LEN;
+        } else if self.encoder.k != k {
             self.encoder = Encoder::new(k, n);
             self.decoder = Decoder::new(k, Arc::clone(&self.mem_pool));
-        }
-    }
-
-    fn get_params_for_mode(mode: FecMode) -> (usize, usize) {
-        match mode {
-            FecMode::Zero => (0, 0),
-            FecMode::Light => (16, 17),    // ~6% overhead
-            FecMode::Normal => (64, 74),   // ~15% overhead
-            FecMode::Medium => (128, 166), // ~30% overhead
-            FecMode::Strong => (256, 384), // 50% overhead
-            FecMode::Extreme => (512, 1024),// 100% overhead, rateless-like
         }
     }
 }
