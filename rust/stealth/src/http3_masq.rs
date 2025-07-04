@@ -36,4 +36,11 @@ impl Masquerade {
         h.insert(":authority".into(), "example.com".into());
         h
     }
+
+    /// Encode request headers using the provided QPACK engine.
+    pub fn encode_request(&self, path: &str, qpack: &mut crate::qpack::QpackEngine) -> Vec<u8> {
+        let headers = self.request_headers(path);
+        let pairs: Vec<(String, String)> = headers.into_iter().collect();
+        qpack.encode(&pairs)
+    }
 }

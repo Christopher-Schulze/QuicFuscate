@@ -1,4 +1,6 @@
 use crate::browser::{BrowserFingerprint, BrowserProfile};
+use rustls::{self, client::ServerName, ClientConfig, ClientConnection, RootCertStore};
+use std::sync::Arc;
 
 pub struct FakeTls {
     profile: BrowserProfile,
@@ -22,36 +24,45 @@ impl FakeTls {
 
     pub fn enable(&mut self, e: bool) { self.enabled = e; }
 
-    /// Generate a minimal fake TLS ClientHello packet.
+    /// Generate a TLS ClientHello packet mimicking the configured browser.
     pub fn generate_client_hello(&self) -> Vec<u8> {
         if !self.enabled {
             return Vec::new();
         }
-        // Build a fake handshake including cipher suite, extension and ALPN
-        // information based on the configured browser fingerprint.
+
+        // Map cipher suite codes to rustls SupportedCipherSuite references.
+        fn map_suite(code: u16) -> Option<rustls::SupportedCipherSuite> {
+            use rustls::cipher_suite::*;
+            match code {
+                0x1301 => Some(TLS13_AES_128_GCM_SHA256),
+                0x1302 => Some(TLS13_AES_256_GCM_SHA384),
+                0x1303 => Some(TLS13_CHACHA20_POLY1305_SHA256),
+                _ => None,
+            }
+        }
+
         let tls = &self.fingerprint.tls;
+        let suites: Vec<rustls::SupportedCipherSuite> =
+            tls.cipher_suites.iter().filter_map(|&cs| map_suite(cs)).collect();
 
-        let mut hello = vec![0x16, 0x03, 0x01];
+        let config = ClientConfig::builder()
+            .with_cipher_suites(&suites)
+            .with_safe_default_kx_groups()
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_root_certificates(RootCertStore::empty())
+            .with_no_client_auth();
+        let mut config = config;
+        config.alpn_protocols = tls
+            .alpn
+            .iter()
+            .map(|a| a.as_bytes().to_vec())
+            .collect();
 
-        // Cipher suites
-        hello.push(tls.cipher_suites.len() as u8);
-        for cs in &tls.cipher_suites {
-            hello.extend_from_slice(&cs.to_be_bytes());
-        }
-
-        // Extensions
-        hello.push(tls.extensions.len() as u8);
-        for ext in &tls.extensions {
-            hello.extend_from_slice(&ext.to_be_bytes());
-        }
-
-        // ALPN identifiers
-        hello.push(tls.alpn.len() as u8);
-        for alpn in &tls.alpn {
-            hello.push(alpn.len() as u8);
-            hello.extend_from_slice(alpn.as_bytes());
-        }
-
-        hello
+        let server = ServerName::try_from("example.com").unwrap();
+        let mut conn = ClientConnection::new(Arc::new(config), server).unwrap();
+        let mut out = Vec::new();
+        conn.write_tls(&mut out).unwrap();
+        out
     }
 }
