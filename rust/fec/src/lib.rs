@@ -1,6 +1,5 @@
 //! Forward Error Correction utilities and FFI bindings.
 
-use rand::Rng;
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use serde::{Deserialize, Serialize};
 use std::ptr;
@@ -265,15 +264,16 @@ pub struct Cm256Scheme;
 
 impl FecScheme for Cm256Scheme {
     fn encode(&self, data: &[u8], seq: u32) -> Result<Vec<FECPacket>> {
-        let r = ReedSolomon::new(1, 1).map_err(|e| FECError::ReedSolomon(e.to_string()))?;
-        let mut shards = vec![data.to_vec(), vec![0u8; data.len()]];
-        r.encode(&mut shards)
-            .map_err(|e| FECError::ReedSolomon(e.to_string()))?;
+        let size = ((data.len() + 63) / 64) * 64;
+        let mut shards = vec![vec![0u8; size], vec![0u8; size]];
+        shards[0][..data.len()].copy_from_slice(data);
+        leopard_codec::encode(&mut shards[..], 1)
+            .map_err(|e| FECError::ReedSolomon(format!("{e}")))?;
         Ok(vec![
             FECPacket {
                 sequence_number: seq,
                 is_repair: false,
-                data: shards[0].clone(),
+                data: shards[0][..data.len()].to_vec(),
             },
             FECPacket {
                 sequence_number: seq,
@@ -295,12 +295,9 @@ pub struct RlncScheme;
 
 impl FecScheme for RlncScheme {
     fn encode(&self, data: &[u8], seq: u32) -> Result<Vec<FECPacket>> {
-        let coeff: u8 = rand::thread_rng().gen_range(1..=255);
-        let mut repair = vec![0u8; data.len()];
-        GaloisField::multiply_vector_scalar(&mut repair, data, coeff);
-        let mut repair_packet = Vec::with_capacity(data.len() + 1);
-        repair_packet.push(coeff);
-        repair_packet.extend_from_slice(&repair);
+        let mut encoder = rlnc::full::encoder::Encoder::new(data.to_vec(), 1)
+            .map_err(|e| FECError::ReedSolomon(format!("{e:?}")))?;
+        let repair = encoder.code(&mut rand09::rng());
         Ok(vec![
             FECPacket {
                 sequence_number: seq,
@@ -310,7 +307,7 @@ impl FecScheme for RlncScheme {
             FECPacket {
                 sequence_number: seq,
                 is_repair: true,
-                data: repair_packet,
+                data: repair,
             },
         ])
     }
@@ -320,17 +317,15 @@ impl FecScheme for RlncScheme {
             return Ok(p.data.clone());
         }
         if let Some(p) = packets.iter().find(|p| p.is_repair) {
-            if p.data.is_empty() {
-                return Ok(Vec::new());
-            }
-            let coeff = p.data[0];
-            if coeff == 0 {
-                return Ok(Vec::new());
-            }
-            let inv = GaloisField::inverse(coeff);
-            let mut out = vec![0u8; p.data.len() - 1];
-            GaloisField::multiply_vector_scalar(&mut out, &p.data[1..], inv);
-            return Ok(out);
+            let piece_len = p.data.len() - 1;
+            let mut decoder = rlnc::full::decoder::Decoder::new(piece_len, 1)
+                .map_err(|e| FECError::ReedSolomon(format!("{e:?}")))?;
+            decoder
+                .decode(&p.data)
+                .map_err(|e| FECError::ReedSolomon(format!("{e:?}")))?;
+            return decoder
+                .get_decoded_data()
+                .map_err(|e| FECError::ReedSolomon(format!("{e:?}")));
         }
         Ok(Vec::new())
     }
@@ -593,14 +588,31 @@ impl FECModule {
     pub fn encode_packet(&self, data: &[u8], sequence_number: u32) -> Result<Vec<FECPacket>> {
         let mut stats = self.stats.lock().map_err(|_| FECError::LockPoisoned)?;
         stats.packets_encoded += 1;
-        if self.state == FecState::Off {
+        let repairs = match self.state {
+            FecState::Off => 0,
+            FecState::LowLoss => 1,
+            FecState::MidLoss => 2,
+            FecState::HighLoss => 3,
+        };
+        if repairs == 0 {
             return Ok(vec![FECPacket {
                 sequence_number,
                 is_repair: false,
                 data: data.to_vec(),
             }]);
         }
-        self.encoder.encode(data, sequence_number)
+        let mut packets = Vec::with_capacity(1 + repairs);
+        let mut first = self.encoder.encode(data, sequence_number)?;
+        packets.push(first.remove(0));
+        packets.extend(first.into_iter().filter(|p| p.is_repair));
+        for _ in 1..repairs {
+            let mut extra = self.encoder.encode(data, sequence_number)?;
+            if let Some(rp) = extra.into_iter().find(|p| p.is_repair) {
+                packets.push(rp);
+            }
+        }
+        stats.repair_packets_generated += repairs as u64;
+        Ok(packets)
     }
 
     pub fn decode(&self, packets: &[FECPacket]) -> Result<Vec<u8>> {
@@ -619,6 +631,12 @@ impl FECModule {
             FecMode::Adaptive => self.controller.update(metrics.packet_loss_rate as f32),
         };
         self.set_state(state);
+        self.config.redundancy_ratio = match self.state {
+            FecState::Off => 0.0,
+            FecState::LowLoss => 0.2,
+            FecState::MidLoss => 0.5,
+            FecState::HighLoss => 1.0,
+        };
     }
 
     pub fn get_statistics(&self) -> Result<Statistics> {
@@ -761,22 +779,6 @@ pub extern "C" fn fec_module_get_statistics(handle: *mut FECModule, buf: *mut St
     }
     -1
 }
-
-pub fn fec_module_init_stub() -> *mut FECModule {
-    std::ptr::null_mut()
-}
-
-pub fn fec_module_cleanup_stub(_handle: *mut FECModule) {}
-
-pub fn fec_module_encode_stub(_handle: *mut FECModule, data: &[u8]) -> Vec<u8> {
-    data.to_vec()
-}
-
-pub fn fec_module_decode_stub(_handle: *mut FECModule, data: &[u8]) -> Vec<u8> {
-    data.to_vec()
-}
-
-pub fn fec_module_free_stub(_handle: *mut FECModule, _ptr: *mut u8, _len: usize) {}
 
 /// Safe wrapper around the raw FECModule FFI handle.
 ///
