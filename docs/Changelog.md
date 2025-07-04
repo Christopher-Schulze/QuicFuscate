@@ -1,5 +1,11 @@
 # QuicFuscate Changelog
 
+## [2024-12-23] - Dynamic Window Cross-Fade
+
+### ✨ Added
+- Sliding-window FEC now supports PLAN-based dynamic window adjustments and cross-fade transitions.
+- Mode switches mix repair packets 50/50 for 32 packets before fully adopting the new window.
+
 ## [2024-12-22] - Deprecated C++ Removal
 
 ### 🔥 Removed
