@@ -151,6 +151,22 @@ pub enum FecMode {
     Extreme,
 }
 
+impl std::str::FromStr for FecMode {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "0" | "zero" => Ok(FecMode::Zero),
+            "1" | "light" | "leicht" => Ok(FecMode::Light),
+            "2" | "normal" => Ok(FecMode::Normal),
+            "3" | "medium" | "mittel" => Ok(FecMode::Medium),
+            "4" | "strong" | "stark" => Ok(FecMode::Strong),
+            "5" | "extreme" => Ok(FecMode::Extreme),
+            _ => Err(()),
+        }
+    }
+}
+
 /// Represents a packet in the FEC system, using an aligned buffer for the payload.
 #[derive(Debug)]
 pub struct Packet {
@@ -313,6 +329,7 @@ pub struct ModeManager {
     current_mode: FecMode,
     pid: PidController,
     mode_thresholds: HashMap<FecMode, f32>,
+    window_sizes: HashMap<FecMode, usize>,
     last_mode_change: Instant,
     min_dwell_time: Duration,
     hysteresis: f32,
@@ -323,15 +340,11 @@ impl ModeManager {
     const CROSS_FADE_LEN: usize = 32;
     const ALPHA_K: f32 = 0.5;
 
-    fn initial_window(mode: FecMode) -> usize {
-        match mode {
-            FecMode::Zero => 0,
-            FecMode::Light => 16,
-            FecMode::Normal => 64,
-            FecMode::Medium => 128,
-            FecMode::Strong => 512,
-            FecMode::Extreme => 1024,
-        }
+    fn initial_window(&self, mode: FecMode) -> usize {
+        self.window_sizes
+            .get(&mode)
+            .copied()
+            .unwrap_or_else(|| *FecConfig::default_windows().get(&mode).unwrap_or(&0))
     }
 
     fn window_range(mode: FecMode) -> (usize, usize) {
@@ -361,7 +374,7 @@ impl ModeManager {
         let n = ((window as f32) * ratio).ceil() as usize;
         (window, n)
     }
-    fn new(pid_config: PidConfig, hysteresis: f32) -> Self {
+    fn new(pid_config: PidConfig, hysteresis: f32, window_sizes: HashMap<FecMode, usize>) -> Self {
         let mut mode_thresholds = HashMap::new();
         mode_thresholds.insert(FecMode::Zero, 0.01);
         mode_thresholds.insert(FecMode::Light, 0.05);
@@ -371,12 +384,16 @@ impl ModeManager {
         mode_thresholds.insert(FecMode::Extreme, 1.0); // Effectively a catch-all
 
         let current_mode = FecMode::Zero;
-        let current_window = Self::initial_window(current_mode);
+        let current_window = window_sizes
+            .get(&current_mode)
+            .copied()
+            .unwrap_or_else(|| *FecConfig::default_windows().get(&current_mode).unwrap_or(&0));
 
         Self {
             current_mode,
             pid: PidController::new(pid_config),
             mode_thresholds,
+            window_sizes,
             last_mode_change: Instant::now(),
             min_dwell_time: Duration::from_millis(500),
             hysteresis,
@@ -392,7 +409,7 @@ impl ModeManager {
         if estimated_loss > self.mode_thresholds[&FecMode::Strong] + self.hysteresis {
             let prev = (self.current_mode, self.current_window);
             self.current_mode = FecMode::Extreme;
-            self.current_window = Self::initial_window(self.current_mode);
+            self.current_window = self.initial_window(self.current_mode);
             self.last_mode_change = Instant::now();
             return (self.current_mode, self.current_window, Some(prev));
         }
@@ -423,7 +440,7 @@ impl ModeManager {
         if new_mode != self.current_mode {
             self.current_mode = new_mode;
             self.last_mode_change = Instant::now();
-            self.current_window = Self::initial_window(new_mode);
+            self.current_window = self.initial_window(new_mode);
         }
 
         // Dynamic window update according to PLAN
@@ -1006,13 +1023,95 @@ pub struct FecConfig {
     pub burst_window: usize,
     pub hysteresis: f32,
     pub pid: PidConfig,
-    // Mode-specific params would go here
+    pub window_sizes: HashMap<FecMode, usize>,
+}
+
+impl FecConfig {
+    pub fn default_windows() -> HashMap<FecMode, usize> {
+        use FecMode::*;
+        let mut m = HashMap::new();
+        m.insert(Zero, 0);
+        m.insert(Light, 16);
+        m.insert(Normal, 64);
+        m.insert(Medium, 128);
+        m.insert(Strong, 512);
+        m.insert(Extreme, 1024);
+        m
+    }
+
+    pub fn from_toml(s: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        #[derive(serde::Deserialize)]
+        struct Root {
+            adaptive_fec: Adaptive,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct Adaptive {
+            lambda: Option<f32>,
+            burst_window: Option<usize>,
+            hysteresis: Option<f32>,
+            pid: Option<PidSection>,
+            modes: Option<Vec<ModeSection>>,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct PidSection {
+            kp: f32,
+            ki: f32,
+            kd: f32,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct ModeSection {
+            name: String,
+            w0: usize,
+        }
+
+        let raw: Root = toml::from_str(s)?;
+        let af = raw.adaptive_fec;
+        let pid = af.pid.unwrap_or(PidSection { kp: 0.5, ki: 0.1, kd: 0.2 });
+        let mut windows = FecConfig::default_windows();
+        if let Some(modes) = af.modes {
+            for msec in modes {
+                if let Ok(mode) = msec.name.parse() {
+                    windows.insert(mode, msec.w0);
+                }
+            }
+        }
+        Ok(FecConfig {
+            lambda: af.lambda.unwrap_or(0.1),
+            burst_window: af.burst_window.unwrap_or(20),
+            hysteresis: af.hysteresis.unwrap_or(0.02),
+            pid: PidConfig { kp: pid.kp, ki: pid.ki, kd: pid.kd },
+            window_sizes: windows,
+        })
+    }
+}
+
+impl Default for FecConfig {
+    fn default() -> Self {
+        Self {
+            lambda: 0.1,
+            burst_window: 20,
+            hysteresis: 0.02,
+            pid: PidConfig {
+                kp: 0.5,
+                ki: 0.1,
+                kd: 0.2,
+            },
+            window_sizes: FecConfig::default_windows(),
+        }
+    }
 }
 
 impl AdaptiveFec {
     pub fn new(config: FecConfig, mem_pool: Arc<MemoryPool>) -> Self {
         init_gf_tables();
-        let mode_mgr = ModeManager::new(config.pid.clone(), config.hysteresis);
+        let mode_mgr = ModeManager::new(
+            config.pid.clone(),
+            config.hysteresis,
+            config.window_sizes.clone(),
+        );
         let (k, n) = ModeManager::params_for(mode_mgr.current_mode, mode_mgr.current_window);
 
         Self {
@@ -1241,6 +1340,7 @@ mod tests {
             burst_window: 50,
             hysteresis: 0.02,
             pid: PidConfig { kp: 1.0, ki: 0.0, kd: 0.0 },
+            window_sizes: FecConfig::default_windows(),
         };
         let mut fec = AdaptiveFec::new(cfg, Arc::clone(&pool));
         fec.report_loss(18, 20);
@@ -1256,6 +1356,7 @@ mod tests {
             burst_window: 50,
             hysteresis: 0.02,
             pid: PidConfig { kp: 1.0, ki: 0.0, kd: 0.0 },
+            window_sizes: FecConfig::default_windows(),
         };
         let mut fec = AdaptiveFec::new(cfg, Arc::clone(&pool));
         fec.report_loss(10, 20);
@@ -1266,5 +1367,90 @@ mod tests {
             fec.on_send(pkt, &mut out);
         }
         assert!(!fec.is_transitioning());
+    }
+
+    #[test]
+    fn parse_config_toml() {
+        let cfg_str = r#"
+            [adaptive_fec]
+            lambda = 0.05
+            burst_window = 30
+            hysteresis = 0.01
+            pid = { kp = 1.5, ki = 0.2, kd = 0.1 }
+
+            [[adaptive_fec.modes]]
+            name = "light"
+            w0 = 20
+
+            [[adaptive_fec.modes]]
+            name = "extreme"
+            w0 = 2048
+        "#;
+        let cfg = FecConfig::from_toml(cfg_str).unwrap();
+        assert_eq!(cfg.pid.kp, 1.5);
+        assert_eq!(cfg.window_sizes[&FecMode::Light], 20);
+        assert_eq!(cfg.window_sizes[&FecMode::Extreme], 2048);
+        assert_eq!(cfg.lambda, 0.05);
+        assert_eq!(cfg.burst_window, 30);
+    }
+
+    #[test]
+    fn recovery_low_loss() {
+        init_gf_tables();
+        let pool = Arc::new(MemoryPool::new(64, 64));
+        let k = 10;
+        let n = 12;
+        let mut enc = Encoder::new(k, n);
+        let mut packets = Vec::new();
+        for i in 0..k {
+            let p = make_packet(i as u64, i as u8, &pool);
+            enc.add_source_packet(p.clone());
+            packets.push(p);
+        }
+        let mut repairs = Vec::new();
+        for i in 0..(n - k) {
+            repairs.push(enc.generate_repair_packet(i, &pool).unwrap());
+        }
+        let mut dec = Decoder::new(k, Arc::clone(&pool));
+        for (idx, pkt) in packets.into_iter().enumerate() {
+            if idx != 3 {
+                dec.add_packet(pkt).unwrap();
+            }
+        }
+        for r in repairs {
+            dec.add_packet(r).unwrap();
+        }
+        assert!(dec.is_decoded);
+    }
+
+    #[test]
+    fn recovery_high_loss() {
+        init_gf_tables();
+        let pool = Arc::new(MemoryPool::new(128, 64));
+        let k = 16;
+        let n = 32;
+        let mut enc = Encoder::new(k, n);
+        let mut packets = Vec::new();
+        for i in 0..k {
+            let p = make_packet(i as u64, (i % 255) as u8, &pool);
+            enc.add_source_packet(p.clone());
+            packets.push(p);
+        }
+        let mut repairs = Vec::new();
+        for i in 0..(n - k) {
+            repairs.push(enc.generate_repair_packet(i, &pool).unwrap());
+        }
+        let mut dec = Decoder::new(k, Arc::clone(&pool));
+        for (idx, pkt) in packets.into_iter().enumerate() {
+            if idx % 2 == 0 {
+                dec.add_packet(pkt).unwrap();
+            }
+        }
+        for (i, r) in repairs.into_iter().enumerate() {
+            if i % 3 != 0 {
+                dec.add_packet(r).unwrap();
+            }
+        }
+        assert!(dec.is_decoded);
     }
 }
