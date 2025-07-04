@@ -1,12 +1,11 @@
+use crate::core::QuicFuscateConnection;
+use crate::stealth::StealthConfig;
+use clap::{Parser, Subcommand};
+use log::{error, info, warn};
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::time::Instant;
-use clap::{Parser, Subcommand};
-use log::{error, info, warn};
-use crate::stealth::StealthConfig;
-use crate::core::QuicFuscateConnection;
-
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -58,11 +57,20 @@ async fn main() -> std::io::Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
-        Commands::Client { server_addr, url, profile } => {
+        Commands::Client {
+            server_addr,
+            url,
+            profile,
+        } => {
             let browser = profile.parse().unwrap_or(BrowserProfile::Chrome);
             run_client(server_addr, url, browser).await?;
         }
-        Commands::Server { listen, cert, key, profile } => {
+        Commands::Server {
+            listen,
+            cert,
+            key,
+            profile,
+        } => {
             let browser = profile.parse().unwrap_or(BrowserProfile::Chrome);
             run_server(listen, cert, key, browser).await?;
         }
@@ -71,11 +79,14 @@ async fn main() -> std::io::Result<()> {
     Ok(())
 }
 
-async fn run_client(server_addr_str: &str, url: &str, profile: BrowserProfile) -> std::io::Result<()> {
-    let server_addr = server_addr_str
-        .to_socket_addrs()?
-        .next()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "Server address not found"))?;
+async fn run_client(
+    server_addr_str: &str,
+    url: &str,
+    profile: BrowserProfile,
+) -> std::io::Result<()> {
+    let server_addr = server_addr_str.to_socket_addrs()?.next().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "Server address not found")
+    })?;
 
     let socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
     socket.connect(server_addr)?;
@@ -84,7 +95,9 @@ async fn run_client(server_addr_str: &str, url: &str, profile: BrowserProfile) -
     info!("Client connecting to {}", server_addr);
 
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
-    config.set_application_protos(b"\x0ahq-interop\x05h3-29\x05h3-28\x05h3-27\x08http/0.9").unwrap();
+    config
+        .set_application_protos(b"\x0ahq-interop\x05h3-29\x05h3-28\x05h3-27\x08http/0.9")
+        .unwrap();
     config.set_max_idle_timeout(30000);
     config.set_max_recv_udp_payload_size(1460);
     config.set_max_send_udp_payload_size(1200);
@@ -105,7 +118,6 @@ async fn run_client(server_addr_str: &str, url: &str, profile: BrowserProfile) -
     )
     .expect("failed to create client connection");
 
-+
     let mut buf = [0; 65535];
     let mut out = [0; 1460];
 
@@ -119,7 +131,9 @@ async fn run_client(server_addr_str: &str, url: &str, profile: BrowserProfile) -
         // Process incoming packets
         match socket.recv(&mut buf) {
             Ok(len) => {
-                let _ = conn.conn.recv(&mut buf[..len], quiche::RecvInfo { from: server_addr });
+                let _ = conn
+                    .conn
+                    .recv(&mut buf[..len], quiche::RecvInfo { from: server_addr });
                 info!("Received packet of size {}", len);
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -130,13 +144,13 @@ async fn run_client(server_addr_str: &str, url: &str, profile: BrowserProfile) -
                 break;
             }
         }
-        
+
         // If connection is established, send a request
         if conn.conn.is_established() {
             let req = format!("GET {}\r\n", url);
             match conn.conn.stream_send(0, req.as_bytes(), true) {
                 Ok(_) => info!("Sent request: {}", req.trim()),
-                Err(quiche::Error::Done) => {},
+                Err(quiche::Error::Done) => {}
                 Err(e) => {
                     error!("Failed to send request: {:?}", e);
                     break;
@@ -171,9 +185,15 @@ async fn run_server(
     info!("Server listening on {}", listen_addr);
 
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
-    config.load_cert_chain_from_pem_file(cert_path.to_str().unwrap()).unwrap();
-    config.load_priv_key_from_pem_file(key_path.to_str().unwrap()).unwrap();
-    config.set_application_protos(b"\x0ahq-interop\x05h3-29\x05h3-28\x05h3-27\x08http/0.9").unwrap();
+    config
+        .load_cert_chain_from_pem_file(cert_path.to_str().unwrap())
+        .unwrap();
+    config
+        .load_priv_key_from_pem_file(key_path.to_str().unwrap())
+        .unwrap();
+    config
+        .set_application_protos(b"\x0ahq-interop\x05h3-29\x05h3-28\x05h3-27\x08http/0.9")
+        .unwrap();
     config.set_max_idle_timeout(30000);
     config.set_max_recv_udp_payload_size(1460);
     config.set_max_send_udp_payload_size(1200);
@@ -206,20 +226,25 @@ async fn run_server(
                     )
                     .expect("failed to create server connection")
                 });
-                
+
                 let recv_info = quiche::RecvInfo { from };
                 if let Err(e) = client_conn.conn.recv(&mut buf[..len], recv_info) {
                     error!("QUIC recv failed: {:?}", e);
                     continue;
                 }
-                
+
                 // Process stream data
                 if client_conn.conn.is_established() {
                     for stream_id in client_conn.conn.readable() {
                         let mut stream_buf = [0; 4096];
-                        while let Ok((read, fin)) = client_conn.conn.stream_recv(stream_id, &mut stream_buf) {
+                        while let Ok((read, fin)) =
+                            client_conn.conn.stream_recv(stream_id, &mut stream_buf)
+                        {
                             let data = &stream_buf[..read];
-                            info!("Received on stream {}: {} bytes, fin={}", stream_id, read, fin);
+                            info!(
+                                "Received on stream {}: {} bytes, fin={}",
+                                stream_id, read, fin
+                            );
                             // Echo back the received data
                             if let Err(e) = client_conn.conn.stream_send(stream_id, data, fin) {
                                 error!("Stream send failed: {:?}", e);
@@ -251,7 +276,7 @@ async fn run_server(
 
         // Clean up closed connections
         clients.retain(|_, conn| !conn.conn.is_closed());
-        
+
         // Sleep to avoid busy-looping
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
