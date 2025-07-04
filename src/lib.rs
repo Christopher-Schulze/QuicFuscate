@@ -10,3 +10,10 @@ pub mod fec;
 pub mod optimize;
 pub mod stealth;
 pub mod xdp_socket;
+
+pub use optimize::{CpuFeature, FeatureDetector};
+
+/// Provides global access to detected CPU features.
+pub fn cpu_features() -> &'static FeatureDetector {
+    FeatureDetector::instance()
+}
