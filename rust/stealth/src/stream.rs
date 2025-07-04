@@ -12,6 +12,12 @@ pub struct StreamEngine {
     streams: HashMap<u64, Stream>,
 }
 
+impl Default for StreamEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum StreamError {
     #[error("no data available")]

@@ -43,6 +43,12 @@ pub struct XORObfuscator {
     rng: SmallRng,
 }
 
+impl Default for XORObfuscator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl XORObfuscator {
     /// Create a new obfuscator with default configuration.
     pub fn new() -> Self {

@@ -5,6 +5,12 @@ pub struct SpinBitRandomizer {
     enabled: bool,
 }
 
+impl Default for SpinBitRandomizer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SpinBitRandomizer {
     pub fn new() -> Self {
         Self { probability: 0.5, enabled: true }
