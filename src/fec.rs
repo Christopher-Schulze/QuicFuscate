@@ -40,6 +40,7 @@
 use crate::optimize::{self, MemoryPool, OptimizationManager, SimdPolicy};
 use aligned_box::AlignedBox;
 use std::collections::{HashMap, VecDeque};
+use rayon::prelude::*;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -549,17 +550,32 @@ impl Encoder {
 
         let coeffs = self.generate_cauchy_coefficients(repair_packet_index);
 
-        optimize::dispatch(|_policy| {
-            // This is where SIMD-accelerated XORing would happen.
-            // For example, processing 16 bytes at a time with AVX2/NEON.
-            for (i, source_packet) in self.source_window.iter().enumerate() {
-                let coeff = coeffs[i];
-                if coeff == 0 {
-                    continue;
-                }
-                let source_data = &source_packet.data[..source_packet.len];
-                for j in 0..packet_len {
-                    repair_data[j] = gf_mul_add(coeff, source_data[j], repair_data[j]);
+        optimize::dispatch(|policy| {
+            if policy.as_any().is::<optimize::Avx2>() || policy.as_any().is::<optimize::Neon>() {
+                use rayon::prelude::*;
+                self.source_window
+                    .par_iter()
+                    .enumerate()
+                    .for_each(|(i, source_packet)| {
+                        let coeff = coeffs[i];
+                        if coeff == 0 {
+                            return;
+                        }
+                        let source_data = &source_packet.data[..source_packet.len];
+                        for j in 0..packet_len {
+                            repair_data[j] = gf_mul_add(coeff, source_data[j], repair_data[j]);
+                        }
+                    });
+            } else {
+                for (i, source_packet) in self.source_window.iter().enumerate() {
+                    let coeff = coeffs[i];
+                    if coeff == 0 {
+                        continue;
+                    }
+                    let source_data = &source_packet.data[..source_packet.len];
+                    for j in 0..packet_len {
+                        repair_data[j] = gf_mul_add(coeff, source_data[j], repair_data[j]);
+                    }
                 }
             }
         });
@@ -1015,6 +1031,15 @@ impl AdaptiveFec {
         }
     }
 
+    pub fn current_mode(&self) -> FecMode {
+        let mgr = self.mode_mgr.lock().unwrap();
+        mgr.current_mode
+    }
+
+    pub fn is_transitioning(&self) -> bool {
+        self.transition_left > 0
+    }
+
     /// Processes an outgoing packet, adding it to the FEC window and pushing
     /// resulting systematic and repair packets into the outgoing queue.
     pub fn on_send(&mut self, pkt: Packet, outgoing_queue: &mut VecDeque<Packet>) {
@@ -1121,6 +1146,7 @@ impl AdaptiveFec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
 
     fn make_packet(id: u64, val: u8, pool: &Arc<MemoryPool>) -> Packet {
         let mut buf = pool.alloc();
@@ -1204,5 +1230,41 @@ mod tests {
         for i in 0..k {
             assert_eq!(out[i].data[0], (i % 256) as u8);
         }
+    }
+
+    #[test]
+    fn extreme_mode_trigger() {
+        init_gf_tables();
+        let pool = Arc::new(MemoryPool::new(32, 64));
+        let cfg = FecConfig {
+            lambda: 0.01,
+            burst_window: 50,
+            hysteresis: 0.02,
+            pid: PidConfig { kp: 1.0, ki: 0.0, kd: 0.0 },
+        };
+        let mut fec = AdaptiveFec::new(cfg, Arc::clone(&pool));
+        fec.report_loss(18, 20);
+        assert_eq!(fec.current_mode(), FecMode::Extreme);
+    }
+
+    #[test]
+    fn cross_fade_transition() {
+        init_gf_tables();
+        let pool = Arc::new(MemoryPool::new(32, 64));
+        let cfg = FecConfig {
+            lambda: 0.01,
+            burst_window: 50,
+            hysteresis: 0.02,
+            pid: PidConfig { kp: 1.0, ki: 0.0, kd: 0.0 },
+        };
+        let mut fec = AdaptiveFec::new(cfg, Arc::clone(&pool));
+        fec.report_loss(10, 20);
+        assert!(fec.is_transitioning());
+        for i in 0..ModeManager::CROSS_FADE_LEN {
+            let pkt = make_packet(i as u64, i as u8, &pool);
+            let mut out = VecDeque::new();
+            fec.on_send(pkt, &mut out);
+        }
+        assert!(!fec.is_transitioning());
     }
 }

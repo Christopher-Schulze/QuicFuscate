@@ -36,6 +36,7 @@
 //! It also includes foundational structures for zero-copy operations and memory pooling.
 
 use aligned_box::{AlignedBox, MIN_ALIGN};
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Once};
 use log::info;
@@ -117,27 +118,49 @@ impl FeatureDetector {
 //
 
 /// Represents the execution policy for SIMD operations.
-pub trait SimdPolicy {}
+pub trait SimdPolicy: Any {
+    fn as_any(&self) -> &dyn Any;
+}
 
 /// Marker struct for AVX-512 execution.
 pub struct Avx512;
-impl SimdPolicy for Avx512 {}
+impl SimdPolicy for Avx512 {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
 
 /// Marker struct for AVX2 execution.
 pub struct Avx2;
-impl SimdPolicy for Avx2 {}
+impl SimdPolicy for Avx2 {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
 
 /// Marker struct for PCLMULQDQ execution.
 pub struct Pclmulqdq;
-impl SimdPolicy for Pclmulqdq {}
+impl SimdPolicy for Pclmulqdq {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
 
 /// Marker struct for ARM NEON execution.
 pub struct Neon;
-impl SimdPolicy for Neon {}
+impl SimdPolicy for Neon {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
 
 /// Marker struct for scalar (non-SIMD) execution.
 pub struct Scalar;
-impl SimdPolicy for Scalar {}
+impl SimdPolicy for Scalar {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
 
 /// Dispatches to the best available SIMD implementation at runtime.
 /// The policies are ordered from most to least performant.
