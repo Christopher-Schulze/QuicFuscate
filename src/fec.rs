@@ -39,8 +39,8 @@
 
 use crate::optimize::{self, MemoryPool, OptimizationManager, SimdPolicy};
 use aligned_box::AlignedBox;
-use std::collections::{HashMap, VecDeque};
 use rayon::prelude::*;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -141,7 +141,9 @@ fn init_gf_tables() {
 
 // --- Core Data Structures ---
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+use clap::ValueEnum;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, ValueEnum)]
 pub enum FecMode {
     Zero,
     Light,
@@ -361,7 +363,7 @@ impl ModeManager {
         let n = ((window as f32) * ratio).ceil() as usize;
         (window, n)
     }
-    fn new(pid_config: PidConfig, hysteresis: f32) -> Self {
+    fn new(pid_config: PidConfig, hysteresis: f32, initial_mode: FecMode) -> Self {
         let mut mode_thresholds = HashMap::new();
         mode_thresholds.insert(FecMode::Zero, 0.01);
         mode_thresholds.insert(FecMode::Light, 0.05);
@@ -370,7 +372,7 @@ impl ModeManager {
         mode_thresholds.insert(FecMode::Strong, 0.50);
         mode_thresholds.insert(FecMode::Extreme, 1.0); // Effectively a catch-all
 
-        let current_mode = FecMode::Zero;
+        let current_mode = initial_mode;
         let current_window = Self::initial_window(current_mode);
 
         Self {
@@ -1006,13 +1008,14 @@ pub struct FecConfig {
     pub burst_window: usize,
     pub hysteresis: f32,
     pub pid: PidConfig,
+    pub initial_mode: FecMode,
     // Mode-specific params would go here
 }
 
 impl AdaptiveFec {
     pub fn new(config: FecConfig, mem_pool: Arc<MemoryPool>) -> Self {
         init_gf_tables();
-        let mode_mgr = ModeManager::new(config.pid.clone(), config.hysteresis);
+        let mode_mgr = ModeManager::new(config.pid.clone(), config.hysteresis, config.initial_mode);
         let (k, n) = ModeManager::params_for(mode_mgr.current_mode, mode_mgr.current_window);
 
         Self {
@@ -1240,7 +1243,12 @@ mod tests {
             lambda: 0.01,
             burst_window: 50,
             hysteresis: 0.02,
-            pid: PidConfig { kp: 1.0, ki: 0.0, kd: 0.0 },
+            pid: PidConfig {
+                kp: 1.0,
+                ki: 0.0,
+                kd: 0.0,
+            },
+            initial_mode: FecMode::Zero,
         };
         let mut fec = AdaptiveFec::new(cfg, Arc::clone(&pool));
         fec.report_loss(18, 20);
@@ -1255,7 +1263,12 @@ mod tests {
             lambda: 0.01,
             burst_window: 50,
             hysteresis: 0.02,
-            pid: PidConfig { kp: 1.0, ki: 0.0, kd: 0.0 },
+            pid: PidConfig {
+                kp: 1.0,
+                ki: 0.0,
+                kd: 0.0,
+            },
+            initial_mode: FecMode::Zero,
         };
         let mut fec = AdaptiveFec::new(cfg, Arc::clone(&pool));
         fec.report_loss(10, 20);

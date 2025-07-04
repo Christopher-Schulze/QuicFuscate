@@ -184,6 +184,12 @@ Run `quicfuscate_demo --help` to see all available options. Important flags incl
   -v, --verbose              Verbose logging
       --debug-tls            Show TLS debug information
       --list-fingerprints    List available browser fingerprints
+      --fec-mode <mode>      Initial FEC mode (zero|light|normal|medium|strong|extreme)
+      --disable-doh          Disable DNS over HTTPS
+      --disable-fronting     Disable domain fronting
+      --disable-xor          Disable XOR obfuscation
+      --disable-http3        Disable HTTP/3 masquerading
+      --metrics-addr <addr>  Start Prometheus exporter on address
 ```
 
 ## 🔄 Continuous Integration
