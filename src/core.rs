@@ -49,6 +49,7 @@ pub struct QuicFuscateConnection {
     pub conn: quiche::Connection,
     pub peer_addr: SocketAddr,
     local_addr: SocketAddr,
+    host_header: String,
 
     // Core Modules
     crypto_selector: CipherSuiteSelector,
@@ -98,11 +99,13 @@ impl QuicFuscateConnection {
         let scid = quiche::ConnectionId::from_ref(&[0; quiche::MAX_CONN_ID_LEN]);
         let local_addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
         
-        let conn = quiche::connect(Some(server_name), &scid, local_addr, remote_addr, &mut config)
+        let (sni, host_header) = stealth_manager.get_connection_headers(server_name);
+
+        let conn = quiche::connect(Some(&sni), &scid, local_addr, remote_addr, &mut config)
             .map_err(|e| format!("Failed to create QUIC connection: {}", e))?;
             
         let xdp_socket = optimization_manager.create_xdp_socket(local_addr, remote_addr);
-        Ok(Self::new(conn, local_addr, remote_addr, stealth_manager, optimization_manager, xdp_socket))
+        Ok(Self::new(conn, local_addr, remote_addr, host_header, stealth_manager, optimization_manager, xdp_socket))
     }
     
     pub fn new_server(
@@ -125,13 +128,14 @@ impl QuicFuscateConnection {
 
         let xdp_socket = optimization_manager.create_xdp_socket(local_addr, remote_addr);
 
-        Ok(Self::new(conn, local_addr, remote_addr, stealth_manager, optimization_manager, xdp_socket))
+        Ok(Self::new(conn, local_addr, remote_addr, String::new(), stealth_manager, optimization_manager, xdp_socket))
     }
 
     fn new(
         conn: quiche::Connection,
         local_addr: SocketAddr,
         peer_addr: SocketAddr,
+        host_header: String,
         stealth_manager: Arc<StealthManager>,
         optimization_manager: Arc<OptimizationManager>,
         xdp_socket: Option<XdpSocket>,
@@ -151,6 +155,7 @@ impl QuicFuscateConnection {
             conn,
             peer_addr,
             local_addr,
+            host_header,
             crypto_selector: CipherSuiteSelector::new(),
             fec: AdaptiveFec::new(fec_config, optimization_manager.clone()),
             stealth_manager,
@@ -262,6 +267,12 @@ impl QuicFuscateConnection {
         self.conn.on_validation(quiche::PathEvent::New(new_addr));
         // Probing the new path is necessary to ensure it's viable.
         // The actual send/recv loop will handle the probe packets.
+    }
+
+    /// Returns the Host header that should be used for HTTP requests when domain
+    /// fronting is active.
+    pub fn host_header(&self) -> &str {
+        &self.host_header
     }
 
     /// Update internal state, e.g., FEC mode based on statistics.

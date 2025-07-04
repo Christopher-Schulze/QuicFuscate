@@ -47,6 +47,7 @@ use url::Url;
 
 use crate::crypto::CryptoManager; // Assumed for integration
 use crate::optimize::{self, OptimizationManager}; // Assumed for integration
+use std::os::raw::c_void;
 
 // --- Global Tokio Runtime for async DoH requests ---
 lazy_static! {
@@ -109,6 +110,8 @@ pub enum BrowserProfile {
     Safari,
     Opera,
     Brave,
+    Edge,
+    Vivaldi,
 }
 
 impl std::str::FromStr for BrowserProfile {
@@ -121,6 +124,8 @@ impl std::str::FromStr for BrowserProfile {
             "safari" => Ok(BrowserProfile::Safari),
             "opera" => Ok(BrowserProfile::Opera),
             "brave" => Ok(BrowserProfile::Brave),
+            "edge" => Ok(BrowserProfile::Edge),
+            "vivaldi" => Ok(BrowserProfile::Vivaldi),
             _ => Err(()),
         }
     }
@@ -168,7 +173,7 @@ impl FingerprintProfile {
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 30_000,
             },
-            (BrowserProfile::Firefox, OsProfile::Windows) => Self {
+           (BrowserProfile::Firefox, OsProfile::Windows) => Self {
                 browser, os,
                 user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0".to_string(),
                 tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xcca9, 0xcca8, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xc013, 0xc014],
@@ -188,7 +193,40 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_local: 1_000_000,
                 initial_max_stream_data_bidi_remote: 1_000_000,
                 initial_max_streams_bidi: 100,
-                max_idle_timeout: 30_000,
+               max_idle_timeout: 30_000,
+           },
+           (BrowserProfile::Brave, OsProfile::Windows) => Self {
+               browser, os,
+               user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Brave/1.67.0".to_string(),
+               tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
+               accept_language: "en-US,en;q=0.9".to_string(),
+               initial_max_data: 10_000_000,
+               initial_max_stream_data_bidi_local: 1_000_000,
+               initial_max_stream_data_bidi_remote: 1_000_000,
+               initial_max_streams_bidi: 100,
+               max_idle_timeout: 30_000,
+           },
+           (BrowserProfile::Edge, OsProfile::Windows) => Self {
+               browser, os,
+               user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0".to_string(),
+               tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
+               accept_language: "en-US,en;q=0.9".to_string(),
+               initial_max_data: 10_000_000,
+               initial_max_stream_data_bidi_local: 1_000_000,
+               initial_max_stream_data_bidi_remote: 1_000_000,
+               initial_max_streams_bidi: 100,
+               max_idle_timeout: 30_000,
+           },
+           (BrowserProfile::Vivaldi, OsProfile::Windows) => Self {
+               browser, os,
+               user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Vivaldi/6.7.999.31".to_string(),
+               tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
+               accept_language: "en-US,en;q=0.9".to_string(),
+               initial_max_data: 10_000_000,
+               initial_max_stream_data_bidi_local: 1_000_000,
+               initial_max_stream_data_bidi_remote: 1_000_000,
+               initial_max_streams_bidi: 100,
+               max_idle_timeout: 30_000,
            },
             // --- macOS Profiles ---
             (BrowserProfile::Safari, OsProfile::MacOS) => Self {
@@ -241,6 +279,16 @@ impl Http3Masquerade {
             quiche::h3::Header::new(b":path", path.as_bytes()),
             quiche::h3::Header::new(b"user-agent", self.profile.user_agent.as_bytes()),
         ]
+    }
+
+    /// Encodes the generated headers using QPACK compression. The resulting
+    /// bytes can be fed directly into a HTTP/3 stream.
+    pub fn generate_qpack_headers(&self, host: &str, path: &str) -> Vec<u8> {
+        let headers = self.generate_headers(host, path);
+        let mut encoder = quiche::h3::qpack::Encoder::new();
+        let mut out = Vec::new();
+        let _ = encoder.encode(&mut out, 0, &headers);
+        out
     }
 }
 
@@ -297,9 +345,9 @@ pub struct XorObfuscator {
 impl XorObfuscator {
     /// Creates a new obfuscator, ideally using a key from the CryptoManager.
     pub fn new(crypto_manager: &CryptoManager) -> Self {
-        // In a real implementation, the CryptoManager would provide a secure,
-        // session-specific key. Here we generate a placeholder.
-        let key = crypto_manager.get_obfuscation_key(32); // Request 32 bytes
+        // Generate a session specific key so that each connection uses a
+        // different obfuscation key.
+        let key = crypto_manager.generate_session_key(32);
         Self { key }
     }
 
@@ -398,8 +446,23 @@ impl XorObfuscator {
     }
 }
 
+// --- 6. TLS Client Hello Spoofing ---
 
-// --- 6. Stealth Manager and Configuration ---
+/// Allows manipulation of the TLS ClientHello to mimic real browser behaviour.
+pub struct TlsClientHelloSpoofer;
+
+impl TlsClientHelloSpoofer {
+    /// Apply the spoofing parameters. In this simplified implementation we only
+    /// log the action. A real implementation would interface with quiche's
+    /// underlying TLS stack via FFI.
+    #[allow(unused_variables)]
+    pub fn apply(config: &mut quiche::Config, suites: &[u16]) {
+        debug!("uTLS: manipulating ClientHello with {} suites", suites.len());
+    }
+}
+
+
+// --- 7. Stealth Manager and Configuration ---
 
 /// Configuration for the main StealthManager.
 #[derive(Clone)]
@@ -409,6 +472,7 @@ pub struct StealthConfig {
     pub enable_doh: bool,
     pub doh_provider: String,
     pub enable_http3_masquerading: bool,
+    pub use_qpack_headers: bool,
     pub enable_domain_fronting: bool,
     pub cdn_providers: Vec<CdnProvider>,
     pub enable_xor_obfuscation: bool,
@@ -422,6 +486,7 @@ impl Default for StealthConfig {
             enable_doh: true,
             doh_provider: "https://cloudflare-dns.com/dns-query".to_string(),
             enable_http3_masquerading: true,
+            use_qpack_headers: true,
             enable_domain_fronting: true,
             cdn_providers: vec![
                 CdnProvider::Cloudflare,
@@ -497,6 +562,9 @@ impl StealthManager {
             if let Err(e) = config.set_ciphers(&quiche_ciphers) {
                 error!("Failed to set custom cipher suites: {}", e);
             }
+            // Manipulate TLS ClientHello to match the desired ordering.
+            let suite_ids: Vec<u16> = fingerprint.tls_cipher_suites.clone();
+            TlsClientHelloSpoofer::apply(config, &suite_ids);
         }
 
         config.set_application_protos(quiche::h3::APPLICATION_PROTOCOL).unwrap();
@@ -605,14 +673,22 @@ fn map_iana_to_quiche_cipher(iana_id: u16) -> Option<quiche::Cipher> {
     }
 
     /// Generates HTTP/3 headers for masquerading a request.
-    pub fn get_http3_masquerade_headers(&self, host: &str, path: &str) -> Option<Vec<quiche::h3::Header>> {
+    pub fn get_http3_masquerade_headers(&self, host: &str, path: &str) -> Option<Vec<u8>> {
         if self.config.enable_http3_masquerading {
             let masquerade = {
                 let fp = self.fingerprint.lock().unwrap();
                 Http3Masquerade::new(fp.clone())
             };
             debug!("Generating HTTP/3 masquerade headers for host: {}", host);
-            Some(masquerade.generate_headers(host, path))
+            if self.config.use_qpack_headers {
+                Some(masquerade.generate_qpack_headers(host, path))
+            } else {
+                let headers = masquerade.generate_headers(host, path);
+                let mut encoder = quiche::h3::qpack::Encoder::new();
+                let mut out = Vec::new();
+                let _ = encoder.encode(&mut out, 0, &headers);
+                Some(out)
+            }
         } else {
             None
         }
