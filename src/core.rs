@@ -180,6 +180,7 @@ impl QuicFuscateConnection {
                 kd: 0.2,
             },
             initial_mode: fec_mode,
+            window_sizes: FecConfig::default_windows(),
         };
 
         Self {
@@ -188,7 +189,7 @@ impl QuicFuscateConnection {
             local_addr,
             host_header,
             crypto_selector: CipherSuiteSelector::new(),
-            fec: AdaptiveFec::new(fec_config, optimization_manager.clone()),
+            fec: AdaptiveFec::new(fec_config, optimization_manager.memory_pool()),
             stealth_manager,
             optimization_manager,
             stats: ConnectionStats::default(),
