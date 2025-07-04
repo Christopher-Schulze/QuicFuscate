@@ -38,6 +38,7 @@
 use crate::crypto::{CryptoManager, CipherSuiteSelector};
 use crate::fec::{AdaptiveFec, FecConfig, Packet as FecPacket, PidConfig};
 use crate::optimize::{OptimizationManager, MemoryPool};
+use crate::xdp_socket::XdpSocket;
 use crate::stealth::{StealthManager, StealthConfig};
 use std::collections::VecDeque;
 use std::net::{SocketAddr, Ipv4Addr};
@@ -63,6 +64,7 @@ pub struct QuicFuscateConnection {
     // The outgoing buffer now holds fully formed FEC packets, ready for direct sending.
     // This eliminates the serialization overhead entirely.
     outgoing_fec_packets: VecDeque<FecPacket>,
+    xdp_socket: Option<XdpSocket>,
 }
 
 /// Tracks performance and reliability metrics for a connection.
@@ -99,7 +101,8 @@ impl QuicFuscateConnection {
         let conn = quiche::connect(Some(server_name), &scid, local_addr, remote_addr, &mut config)
             .map_err(|e| format!("Failed to create QUIC connection: {}", e))?;
             
-        Ok(Self::new(conn, local_addr, remote_addr, stealth_manager, optimization_manager))
+        let xdp_socket = optimization_manager.create_xdp_socket(local_addr, remote_addr);
+        Ok(Self::new(conn, local_addr, remote_addr, stealth_manager, optimization_manager, xdp_socket))
     }
     
     pub fn new_server(
@@ -119,8 +122,10 @@ impl QuicFuscateConnection {
         
         let conn = quiche::accept(scid, odcid, local_addr, remote_addr, &mut config)
             .map_err(|e| format!("Failed to accept QUIC connection: {}", e))?;
-            
-        Ok(Self::new(conn, local_addr, remote_addr, stealth_manager, optimization_manager))
+
+        let xdp_socket = optimization_manager.create_xdp_socket(local_addr, remote_addr);
+
+        Ok(Self::new(conn, local_addr, remote_addr, stealth_manager, optimization_manager, xdp_socket))
     }
 
     fn new(
@@ -129,6 +134,7 @@ impl QuicFuscateConnection {
         peer_addr: SocketAddr,
         stealth_manager: Arc<StealthManager>,
         optimization_manager: Arc<OptimizationManager>,
+        xdp_socket: Option<XdpSocket>,
     ) -> Self {
         let fec_config = FecConfig {
             lambda: 0.1,
@@ -152,17 +158,20 @@ impl QuicFuscateConnection {
             stats: ConnectionStats::default(),
             packet_id_counter: 0,
             outgoing_fec_packets: VecDeque::new(),
+            xdp_socket,
         }
     }
 
     /// Processes an incoming raw buffer, parsing it into an FEC packet and handling recovery.
     /// This now avoids any serialization overhead.
     pub fn recv(&mut self, data: &mut [u8]) -> Result<usize, String> {
-        // The incoming data is now a raw FecPacket, not a serialized blob.
-        // We pass it directly to the FEC layer.
-        // In a real-world scenario, a lightweight framing protocol would be needed here
-        // to delineate packets. For this integration, we assume one raw buffer = one FecPacket.
-        let fec_packet = FecPacket::from_raw(self.packet_id_counter, data, &self.optimization_manager)?;
+        let len = if let Some(ref xdp) = self.xdp_socket {
+            xdp.recv(data).map_err(|e| e.to_string())?
+        } else {
+            data.len()
+        };
+
+        let fec_packet = FecPacket::from_raw(self.packet_id_counter, &data[..len], &self.optimization_manager)?;
 
         let recovered_packets = self.fec.on_receive(fec_packet)
             .map_err(|e| format!("FEC decoding failed: {}", e))?;
@@ -179,7 +188,7 @@ impl QuicFuscateConnection {
             }
         }
         
-        Ok(data.len())
+        Ok(len)
     }
     
     /// Prepares QUIC packets for sending, wraps them in FEC, and buffers them.
@@ -187,9 +196,14 @@ impl QuicFuscateConnection {
     pub fn send(&mut self, buf: &mut [u8]) -> Result<usize, quiche::Error> {
         // If there are buffered FEC packets, send one directly.
         if let Some(packet) = self.outgoing_fec_packets.pop_front() {
-            let written = packet.to_raw(buf)?;
-            // The buffer from the packet is automatically returned to the pool when it's dropped.
-            return Ok(written);
+            if let Some(ref xdp) = self.xdp_socket {
+                xdp.send(&[&packet.data[..packet.len]])
+                    .map_err(|_| quiche::Error::Done)?;
+                return Ok(packet.len);
+            } else {
+                let written = packet.to_raw(buf)?;
+                return Ok(written);
+            }
         }
 
         // Otherwise, generate a new QUIC packet using a pooled buffer.
@@ -230,8 +244,14 @@ impl QuicFuscateConnection {
 
         // Pop the first packet from the buffer to send it now.
         if let Some(packet) = self.outgoing_fec_packets.pop_front() {
-            let written = packet.to_raw(buf)?;
-            Ok(written)
+            if let Some(ref xdp) = self.xdp_socket {
+                xdp.send(&[&packet.data[..packet.len]])
+                    .map_err(|_| quiche::Error::Done)?;
+                Ok(packet.len)
+            } else {
+                let written = packet.to_raw(buf)?;
+                Ok(written)
+            }
         } else {
             Ok(0)
         }

@@ -38,6 +38,9 @@
 use aligned_box::{AlignedBox, MIN_ALIGN};
 use std::collections::HashMap;
 use std::sync::{Arc, Once};
+use log::info;
+use std::net::SocketAddr;
+use crate::xdp_socket::XdpSocket;
 use crossbeam_queue::ArrayQueue;
 #[cfg(target_arch = "aarch64")]
 use std::arch::is_aarch64_feature_detected;
@@ -241,13 +244,17 @@ impl<'a> ZeroCopyBuffer<'a> {
 
 pub struct OptimizationManager {
     memory_pool: MemoryPool,
+    xdp_available: bool,
 }
 
 impl OptimizationManager {
     pub fn new() -> Self {
         // Default values for capacity and block size, can be made configurable later.
+        let xdp_available = XdpSocket::is_supported();
+        info!("XDP available: {}", xdp_available);
         Self {
             memory_pool: MemoryPool::new(1024, 4096),
+            xdp_available,
         }
     }
 
@@ -257,6 +264,18 @@ impl OptimizationManager {
 
     pub fn free_block(&self, block: AlignedBox<[u8]>) {
         self.memory_pool.free(block);
+    }
+
+    pub fn is_xdp_available(&self) -> bool {
+        self.xdp_available
+    }
+
+    pub fn create_xdp_socket(&self, bind: SocketAddr, remote: SocketAddr) -> Option<XdpSocket> {
+        if self.xdp_available {
+            XdpSocket::new(bind, remote).ok()
+        } else {
+            None
+        }
     }
 }
 

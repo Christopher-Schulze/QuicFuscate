@@ -9,3 +9,4 @@ pub mod crypto;
 pub mod fec;
 pub mod optimize;
 pub mod stealth;
+pub mod xdp_socket;
