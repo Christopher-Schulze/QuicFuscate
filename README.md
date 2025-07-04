@@ -80,21 +80,21 @@ cloning using one of the methods below.
 After cloning the project, initialize the submodule with:
 
 ```bash
-git submodule update --init --recursive libs/patched_quiche/quiche
+git submodule update --init --recursive libs/patched_quiche
 ```
 
 If the command fails with a missing commit error (e.g.
 ```
 fatal: remote error: upload-pack: not our ref 5700a7c74927d2c4912ac95e904c6ad3642b6868
-Fetched in submodule path 'libs/patched_quiche/quiche', but it did not contain 5700a7c74927d2c4912ac95e904c6ad3642b6868.
+Fetched in submodule path 'libs/patched_quiche', but it did not contain 5700a7c74927d2c4912ac95e904c6ad3642b6868.
 ```
 ), the upstream `quiche` repository might not contain the pinned
 revision `5700a7c74927d2c4912ac95e904c6ad3642b6868`. Update the
 submodule URL to a mirror that includes this commit and retry:
 
 ```bash
-git submodule set-url libs/patched_quiche/quiche <mirror-url>
-git submodule update --init libs/patched_quiche/quiche
+git submodule set-url libs/patched_quiche <mirror-url>
+git submodule update --init libs/patched_quiche
 ```
 
 Alternatively, run the helper script to automatically set the mirror,
@@ -113,9 +113,9 @@ variable to skip fetching and build from that path instead.
 Compile the patched **quiche** library using Cargo:
 
 ```bash
-cd libs/patched_quiche/quiche
+cd libs/patched_quiche
 cargo build --release
-cd ../..
+cd ..
 ```
 
 ### Building
