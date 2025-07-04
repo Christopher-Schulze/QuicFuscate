@@ -1,5 +1,11 @@
 # QuicFuscate Changelog
 
+## [2024-12-23] - CLI Compilation Fixes
+
+### ✅ Behoben
+- Die Kommandozeilenanwendung kompiliert wieder nach Anpassungen an den
+  Verbindungsaufrufen und Feldnamen.
+
 ## [2024-12-22] - Deprecated C++ Removal
 
 ### 🔥 Removed

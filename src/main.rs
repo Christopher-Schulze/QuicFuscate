@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 use clap::{Parser, Subcommand};
 use log::{error, info, warn};
-use quicfuscate_core::stealth::StealthConfig;
-use quicfuscate_core::QuicFuscateConnection;
+use crate::stealth::StealthConfig;
+use crate::core::QuicFuscateConnection;
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -85,17 +85,18 @@ async fn run_client(server_addr_str: &str, url: &str) -> std::io::Result<()> {
     config.verify_peer(false); // In a real app, you should verify the server cert.
 
     let mut conn = QuicFuscateConnection::new_client(
+        "example.com",
         server_addr,
-        "example.com", // SNI
-        Box::new(config),
+        config,
         StealthConfig::default(),
-    );
+    )
+    .expect("failed to create client connection");
 
     let mut buf = [0; 65535];
     let mut out = [0; 1460];
 
     // Send initial packet
-    if let Some((len, _)) = conn.quiche.send(&mut out) {
+    if let Some((len, _)) = conn.conn.send(&mut out) {
         socket.send(&out[..len])?;
         info!("Sent initial packet of size {}", len);
     }
@@ -104,7 +105,7 @@ async fn run_client(server_addr_str: &str, url: &str) -> std::io::Result<()> {
         // Process incoming packets
         match socket.recv(&mut buf) {
             Ok(len) => {
-                let _ = conn.quiche.recv(&mut buf[..len], quiche::RecvInfo { from: server_addr });
+                let _ = conn.conn.recv(&mut buf[..len], quiche::RecvInfo { from: server_addr });
                 info!("Received packet of size {}", len);
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -117,9 +118,9 @@ async fn run_client(server_addr_str: &str, url: &str) -> std::io::Result<()> {
         }
         
         // If connection is established, send a request
-        if conn.quiche.is_established() {
+        if conn.conn.is_established() {
             let req = format!("GET {}\r\n", url);
-            match conn.quiche.stream_send(0, req.as_bytes(), true) {
+            match conn.conn.stream_send(0, req.as_bytes(), true) {
                 Ok(_) => info!("Sent request: {}", req.trim()),
                 Err(quiche::Error::Done) => {},
                 Err(e) => {
@@ -130,13 +131,13 @@ async fn run_client(server_addr_str: &str, url: &str) -> std::io::Result<()> {
         }
 
         // Send outgoing packets
-        while let Some((len, _)) = conn.quiche.send(&mut out) {
+        while let Some((len, _)) = conn.conn.send(&mut out) {
             socket.send(&out[..len])?;
             info!("Sent packet of size {}", len);
         }
 
         // Check for timeout
-        conn.quiche.on_timeout();
+        conn.conn.on_timeout();
 
         // Sleep to avoid busy-looping
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -174,28 +175,33 @@ async fn run_server(listen_addr: &str, cert_path: &PathBuf, key_path: &PathBuf) 
                 info!("Received {} bytes from {}", len, from);
                 let client_conn = clients.entry(from).or_insert_with(|| {
                     info!("New client connected: {}", from);
+                    let scid = quiche::ConnectionId::from_ref(&[0; quiche::MAX_CONN_ID_LEN]);
                     QuicFuscateConnection::new_server(
+                        &scid,
+                        None,
+                        socket.local_addr().unwrap(),
                         from,
-                        Box::new(config.clone()),
+                        config.clone(),
                         stealth_config.clone(),
                     )
+                    .expect("failed to create server connection")
                 });
                 
                 let recv_info = quiche::RecvInfo { from };
-                if let Err(e) = client_conn.quiche.recv(&mut buf[..len], recv_info) {
+                if let Err(e) = client_conn.conn.recv(&mut buf[..len], recv_info) {
                     error!("QUIC recv failed: {:?}", e);
                     continue;
                 }
                 
                 // Process stream data
-                if client_conn.quiche.is_established() {
-                    for stream_id in client_conn.quiche.readable() {
+                if client_conn.conn.is_established() {
+                    for stream_id in client_conn.conn.readable() {
                         let mut stream_buf = [0; 4096];
-                        while let Ok((read, fin)) = client_conn.quiche.stream_recv(stream_id, &mut stream_buf) {
+                        while let Ok((read, fin)) = client_conn.conn.stream_recv(stream_id, &mut stream_buf) {
                             let data = &stream_buf[..read];
                             info!("Received on stream {}: {} bytes, fin={}", stream_id, read, fin);
                             // Echo back the received data
-                            if let Err(e) = client_conn.quiche.stream_send(stream_id, data, fin) {
+                            if let Err(e) = client_conn.conn.stream_send(stream_id, data, fin) {
                                 error!("Stream send failed: {:?}", e);
                             }
                         }
@@ -213,18 +219,18 @@ async fn run_server(listen_addr: &str, cert_path: &PathBuf, key_path: &PathBuf) 
 
         // Send packets for all clients
         for (addr, conn) in clients.iter_mut() {
-            while let Some((len, _)) = conn.quiche.send(&mut out) {
+            while let Some((len, _)) = conn.conn.send(&mut out) {
                 if let Err(e) = socket.send_to(&out[..len], addr) {
                     error!("Failed to send packet to {}: {}", addr, e);
                 } else {
                     info!("Sent {} bytes to {}", len, addr);
                 }
             }
-            conn.quiche.on_timeout();
+            conn.conn.on_timeout();
         }
 
         // Clean up closed connections
-        clients.retain(|_, conn| !conn.quiche.is_closed());
+        clients.retain(|_, conn| !conn.conn.is_closed());
         
         // Sleep to avoid busy-looping
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
