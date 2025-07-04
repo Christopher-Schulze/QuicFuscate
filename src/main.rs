@@ -1,10 +1,13 @@
 use crate::core::QuicFuscateConnection;
 use crate::stealth::StealthConfig;
+use crate::stealth::{BrowserProfile, FingerprintProfile, OsProfile};
+use crate::telemetry;
 use clap::{Parser, Subcommand};
 use log::{error, info, warn};
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 #[derive(Parser, Debug)]
@@ -30,6 +33,18 @@ enum Commands {
         /// Browser fingerprint profile (chrome, firefox, opera, brave)
         #[clap(long, default_value = "chrome")]
         profile: String,
+
+        /// Comma separated list of profiles to cycle through
+        #[clap(long, value_delimiter = ',')]
+        profile_seq: Option<Vec<String>>,
+
+        /// Interval in seconds for profile switching
+        #[clap(long, default_value_t = 0)]
+        profile_interval: u64,
+
+        /// Address for Prometheus exporter
+        #[clap(long)]
+        metrics_addr: Option<String>,
     },
     /// Runs the server
     Server {
@@ -48,6 +63,18 @@ enum Commands {
         /// Browser fingerprint profile used for connections
         #[clap(long, default_value = "chrome")]
         profile: String,
+
+        /// Comma separated list of profiles to cycle through
+        #[clap(long, value_delimiter = ',')]
+        profile_seq: Option<Vec<String>>,
+
+        /// Interval in seconds for profile switching
+        #[clap(long, default_value_t = 0)]
+        profile_interval: u64,
+
+        /// Address for Prometheus exporter
+        #[clap(long)]
+        metrics_addr: Option<String>,
     },
 }
 
@@ -61,18 +88,41 @@ async fn main() -> std::io::Result<()> {
             server_addr,
             url,
             profile,
+            profile_seq,
+            profile_interval,
+            metrics_addr,
         } => {
             let browser = profile.parse().unwrap_or(BrowserProfile::Chrome);
-            run_client(server_addr, url, browser).await?;
+            run_client(
+                server_addr,
+                url,
+                browser,
+                profile_seq,
+                *profile_interval,
+                metrics_addr,
+            )
+            .await?;
         }
         Commands::Server {
             listen,
             cert,
             key,
             profile,
+            profile_seq,
+            profile_interval,
+            metrics_addr,
         } => {
             let browser = profile.parse().unwrap_or(BrowserProfile::Chrome);
-            run_server(listen, cert, key, browser).await?;
+            run_server(
+                listen,
+                cert,
+                key,
+                browser,
+                profile_seq,
+                *profile_interval,
+                metrics_addr,
+            )
+            .await?;
         }
     }
 
@@ -83,6 +133,9 @@ async fn run_client(
     server_addr_str: &str,
     url: &str,
     profile: BrowserProfile,
+    profile_seq: &Option<Vec<String>>,
+    profile_interval: u64,
+    metrics_addr: &Option<String>,
 ) -> std::io::Result<()> {
     let server_addr = server_addr_str.to_socket_addrs()?.next().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "Server address not found")
@@ -108,6 +161,12 @@ async fn run_client(
     config.set_initial_max_streams_uni(100);
     config.verify_peer(false); // In a real app, you should verify the server cert.
 
+    if let Some(addr) = metrics_addr {
+        if let Ok(a) = addr.parse() {
+            telemetry::start_exporter(a);
+        }
+    }
+
     let mut stealth_config = StealthConfig::default();
     stealth_config.browser_profile = profile;
     let mut conn = QuicFuscateConnection::new_client(
@@ -117,6 +176,25 @@ async fn run_client(
         StealthConfig::default(),
     )
     .expect("failed to create client connection");
+
+    let profiles: Vec<BrowserProfile> = match profile_seq {
+        Some(seq) => seq.iter().filter_map(|s| s.parse().ok()).collect(),
+        None => vec![profile],
+    };
+
+    if profile_interval > 0 && profiles.len() > 1 {
+        let sm = conn.stealth_manager();
+        let os = stealth_config.os_profile;
+        tokio::spawn(async move {
+            let mut idx = 0usize;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(profile_interval)).await;
+                idx = (idx + 1) % profiles.len();
+                let p = FingerprintProfile::new(profiles[idx], os);
+                sm.set_fingerprint_profile(p);
+            }
+        });
+    }
 
     let mut buf = [0; 65535];
     let mut out = [0; 1460];
@@ -179,10 +257,19 @@ async fn run_server(
     cert_path: &PathBuf,
     key_path: &PathBuf,
     profile: BrowserProfile,
+    profile_seq: &Option<Vec<String>>,
+    profile_interval: u64,
+    metrics_addr: &Option<String>,
 ) -> std::io::Result<()> {
     let socket = std::net::UdpSocket::bind(listen_addr)?;
     socket.set_nonblocking(true)?;
     info!("Server listening on {}", listen_addr);
+
+    if let Some(addr) = metrics_addr {
+        if let Ok(a) = addr.parse() {
+            telemetry::start_exporter(a);
+        }
+    }
 
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
     config
@@ -206,8 +293,29 @@ async fn run_server(
     let mut clients = HashMap::new();
     let mut buf = [0; 65535];
     let mut out = [0; 1460];
-    let mut stealth_config = StealthConfig::default();
-    stealth_config.browser_profile = profile;
+    let stealth_config = Arc::new(Mutex::new(StealthConfig::default()));
+    {
+        let mut sc = stealth_config.lock().unwrap();
+        sc.browser_profile = profile;
+    }
+
+    let profiles: Vec<BrowserProfile> = match profile_seq {
+        Some(seq) => seq.iter().filter_map(|s| s.parse().ok()).collect(),
+        None => vec![profile],
+    };
+
+    if profile_interval > 0 && profiles.len() > 1 {
+        let cfg = stealth_config.clone();
+        tokio::spawn(async move {
+            let os = cfg.lock().unwrap().os_profile;
+            let mut idx = 0usize;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(profile_interval)).await;
+                idx = (idx + 1) % profiles.len();
+                cfg.lock().unwrap().browser_profile = profiles[idx];
+            }
+        });
+    }
 
     loop {
         match socket.recv_from(&mut buf) {
@@ -216,13 +324,14 @@ async fn run_server(
                 let client_conn = clients.entry(from).or_insert_with(|| {
                     info!("New client connected: {}", from);
                     let scid = quiche::ConnectionId::from_ref(&[0; quiche::MAX_CONN_ID_LEN]);
+                    let cfg = stealth_config.lock().unwrap().clone();
                     QuicFuscateConnection::new_server(
                         &scid,
                         None,
                         socket.local_addr().unwrap(),
                         from,
                         config.clone(),
-                        stealth_config.clone(),
+                        cfg,
                     )
                     .expect("failed to create server connection")
                 });
