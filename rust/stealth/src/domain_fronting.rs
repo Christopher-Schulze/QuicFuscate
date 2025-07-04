@@ -22,15 +22,25 @@ impl SniHiding {
 
     pub fn enable(&mut self, enable: bool) { self.enabled = enable; }
 
-    /// Replace the Host header with the fronting domain.
+    /// Replace the Host/`:authority` header with the fronting domain.
     pub fn apply_domain_fronting(&self, headers: &str) -> String {
         if !self.enabled {
-            headers.to_string()
-        } else {
-            headers.replace(
-                &format!("Host: {}", self.config.real_domain),
-                &format!("Host: {}", self.config.front_domain),
-            )
+            return headers.to_string();
         }
+
+        headers
+            .lines()
+            .map(|l| {
+                let lower = l.to_ascii_lowercase();
+                if lower.starts_with("host:") {
+                    format!("Host: {}", self.config.front_domain)
+                } else if lower.starts_with(":authority") {
+                    format!(":authority {}", self.config.front_domain)
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\r\n")
     }
 }

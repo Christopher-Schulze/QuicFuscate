@@ -22,4 +22,18 @@ impl Masquerade {
             HashMap::new()
         }
     }
+
+    /// Generate a basic set of HTTP/3 request headers for the given path.
+    pub fn request_headers(&self, path: &str) -> HashMap<String, String> {
+        if !self.enabled {
+            return HashMap::new();
+        }
+
+        let mut h = default_headers(self.profile);
+        h.insert(":method".into(), "GET".into());
+        h.insert(":scheme".into(), "https".into());
+        h.insert(":path".into(), path.into());
+        h.insert(":authority".into(), "example.com".into());
+        h
+    }
 }
