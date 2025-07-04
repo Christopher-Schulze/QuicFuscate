@@ -36,11 +36,13 @@
 //? inspection (DPI) systems. It integrates multiple strategies to create a
 //! layered defense against network surveillance.
 
+use crate::telemetry::{DNS_QUERIES, OBFUSCATED_PACKETS};
 use lazy_static::lazy_static;
 use log::{debug, error, info};
 use reqwest::Client;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
 use url::Url;
@@ -51,11 +53,10 @@ use std::os::raw::c_void;
 
 // --- Global Tokio Runtime for async DoH requests ---
 lazy_static! {
-    static ref DOH_RUNTIME: Runtime =
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("Failed to create Tokio runtime for DoH");
+    static ref DOH_RUNTIME: Runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to create Tokio runtime for DoH");
 }
 
 // --- 1. DNS over HTTPS (DoH) ---
@@ -69,8 +70,11 @@ lazy_static! {
 /// # Returns
 /// A `Result` containing the resolved `IpAddr` or a `reqwest::Error`.
 pub async fn resolve_doh(
-    client: &Client, domain: &str, doh_provider: &str,
+    client: &Client,
+    domain: &str,
+    doh_provider: &str,
 ) -> Result<IpAddr, reqwest::Error> {
+    DNS_QUERIES.inc();
     let mut url = Url::parse(doh_provider).unwrap();
     url.query_pairs_mut()
         .append_pair("name", domain)
@@ -249,9 +253,16 @@ impl FingerprintProfile {
     pub fn generate_http_headers(&self) -> HashMap<String, String> {
         let mut headers = HashMap::new();
         headers.insert("User-Agent".to_string(), self.user_agent.clone());
-        headers.insert("Accept".to_string(), "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8".to_string());
+        headers.insert(
+            "Accept".to_string(),
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+                .to_string(),
+        );
         headers.insert("Accept-Language".to_string(), self.accept_language.clone());
-        headers.insert("Accept-Encoding".to_string(), "gzip, deflate, br".to_string());
+        headers.insert(
+            "Accept-Encoding".to_string(),
+            "gzip, deflate, br".to_string(),
+        );
         headers.insert("Connection".to_string(), "keep-alive".to_string());
         headers
     }
@@ -300,7 +311,8 @@ pub enum CdnProvider {
     Cloudflare,
     Google,
     MicrosoftAzure,
-    // Add more providers as needed
+    Akamai,
+    Fastly,
 }
 
 impl CdnProvider {
@@ -309,6 +321,8 @@ impl CdnProvider {
             CdnProvider::Cloudflare => "www.cloudflare.com",
             CdnProvider::Google => "www.google.com",
             CdnProvider::MicrosoftAzure => "azure.microsoft.com",
+            CdnProvider::Akamai => "www.akamai.com",
+            CdnProvider::Fastly => "www.fastly.com",
         }
     }
 }
@@ -316,22 +330,22 @@ impl CdnProvider {
 /// Manages domain fronting by rotating through CDN providers.
 pub struct DomainFrontingManager {
     providers: Vec<CdnProvider>,
-    last_provider_index: Mutex<usize>,
+    index: AtomicUsize,
 }
 
 impl DomainFrontingManager {
     pub fn new(providers: Vec<CdnProvider>) -> Self {
         Self {
             providers,
-            last_provider_index: Mutex::new(0),
+            index: AtomicUsize::new(0),
         }
     }
 
     /// Selects the next CDN provider to use for domain fronting.
     pub fn get_fronted_domain(&self) -> &'static str {
-        let mut index = self.last_provider_index.lock().unwrap();
-        *index = (*index + 1) % self.providers.len();
-        self.providers[*index].get_domain()
+        let current = self.index.fetch_add(1, Ordering::SeqCst);
+        let idx = current % self.providers.len();
+        self.providers[idx].get_domain()
     }
 }
 
@@ -340,6 +354,7 @@ impl DomainFrontingManager {
 /// A simple XOR obfuscator for packet payloads.
 pub struct XorObfuscator {
     key: Vec<u8>,
+    position: AtomicUsize,
 }
 
 impl XorObfuscator {
@@ -348,7 +363,10 @@ impl XorObfuscator {
         // Generate a session specific key so that each connection uses a
         // different obfuscation key.
         let key = crypto_manager.generate_session_key(32);
-        Self { key }
+        Self {
+            key,
+            position: AtomicUsize::new(0),
+        }
     }
 
     /// Applies XOR obfuscation to a mutable payload using the best available SIMD implementation.
@@ -357,7 +375,10 @@ impl XorObfuscator {
             return;
         }
 
+        OBFUSCATED_PACKETS.inc();
         let key = &self.key;
+        let key_len = key.len();
+        let start = self.position.load(Ordering::Relaxed);
 
         optimize::dispatch(|policy| {
             let len = payload.len();
@@ -375,17 +396,15 @@ impl XorObfuscator {
                         const CHUNK_SIZE: usize = 32;
 
                         if len >= CHUNK_SIZE {
-                            // Create a repeating key pattern to fill a 256-bit register.
-                            // This avoids repeatedly loading a small key.
-                            let mut key_pattern = [0u8; CHUNK_SIZE];
-                            for i in 0..CHUNK_SIZE {
-                                key_pattern[i] = key[i % key.len()];
-                            }
-                            let key_vec =
-                                _mm256_loadu_si256(key_pattern.as_ptr() as *const __m256i);
-
                             let payload_ptr = payload.as_mut_ptr();
                             while processed + CHUNK_SIZE <= len {
+                                let mut key_pattern = [0u8; CHUNK_SIZE];
+                                for i in 0..CHUNK_SIZE {
+                                    key_pattern[i] = key[(start + processed + i) % key_len];
+                                }
+                                let key_vec =
+                                    _mm256_loadu_si256(key_pattern.as_ptr() as *const __m256i);
+
                                 let data_ptr = payload_ptr.add(processed);
                                 let data_vec = _mm256_loadu_si256(data_ptr as *const __m256i);
                                 let xor_result = _mm256_xor_si256(data_vec, key_vec);
@@ -403,14 +422,14 @@ impl XorObfuscator {
 
                         if len >= CHUNK_SIZE {
                             // Create a repeating key pattern for a 128-bit register.
-                            let mut key_pattern = [0u8; CHUNK_SIZE];
-                            for i in 0..CHUNK_SIZE {
-                                key_pattern[i] = key[i % key.len()];
-                            }
-                            let key_vec = vld1q_u8(key_pattern.as_ptr());
-
                             let payload_ptr = payload.as_mut_ptr();
                             while processed + CHUNK_SIZE <= len {
+                                let mut key_pattern = [0u8; CHUNK_SIZE];
+                                for i in 0..CHUNK_SIZE {
+                                    key_pattern[i] = key[(start + processed + i) % key_len];
+                                }
+                                let key_vec = vld1q_u8(key_pattern.as_ptr());
+
                                 let data_ptr = payload_ptr.add(processed);
                                 let data_vec = vld1q_u8(data_ptr);
                                 let xor_result = veorq_u8(data_vec, key_vec);
@@ -423,7 +442,7 @@ impl XorObfuscator {
                     // Scalar fallback for other architectures or when SIMD is disabled.
                     _ => {
                         for (i, byte) in payload.iter_mut().enumerate() {
-                            *byte ^= key[i % key.len()];
+                            *byte ^= key[(start + i) % key_len];
                         }
                         // The scalar path processes the entire payload, so we can return.
                         return;
@@ -434,10 +453,12 @@ impl XorObfuscator {
             // Process any remaining bytes that did not fit into a full SIMD chunk.
             if processed < len {
                 for i in processed..len {
-                    payload[i] ^= key[i % key.len()];
+                    payload[i] ^= key[(start + i) % key_len];
                 }
             }
         });
+        let new_pos = (start + payload.len()) % key_len;
+        self.position.store(new_pos, Ordering::Relaxed);
     }
 
     /// Reverses XOR obfuscation. The operation is symmetrical.
@@ -457,10 +478,12 @@ impl TlsClientHelloSpoofer {
     /// underlying TLS stack via FFI.
     #[allow(unused_variables)]
     pub fn apply(config: &mut quiche::Config, suites: &[u16]) {
-        debug!("uTLS: manipulating ClientHello with {} suites", suites.len());
+        debug!(
+            "uTLS: manipulating ClientHello with {} suites",
+            suites.len()
+        );
     }
 }
-
 
 // --- 7. Stealth Manager and Configuration ---
 
@@ -492,6 +515,8 @@ impl Default for StealthConfig {
                 CdnProvider::Cloudflare,
                 CdnProvider::Google,
                 CdnProvider::MicrosoftAzure,
+                CdnProvider::Akamai,
+                CdnProvider::Fastly,
             ],
             enable_xor_obfuscation: true,
         }
@@ -550,10 +575,14 @@ impl StealthManager {
     /// would be required. This is a simulation based on available quiche settings.
     pub fn apply_utls_profile(&self, config: &mut quiche::Config) {
         let fingerprint = self.fingerprint.lock().unwrap();
-        info!("Applying uTLS fingerprint for: {:?}/{:?}", fingerprint.browser, fingerprint.os);
+        info!(
+            "Applying uTLS fingerprint for: {:?}/{:?}",
+            fingerprint.browser, fingerprint.os
+        );
 
         // Set cipher suites according to the profile's specified order.
-        let quiche_ciphers: Vec<quiche::Cipher> = fingerprint.tls_cipher_suites
+        let quiche_ciphers: Vec<quiche::Cipher> = fingerprint
+            .tls_cipher_suites
             .iter()
             .filter_map(|&iana_id| map_iana_to_quiche_cipher(iana_id))
             .collect();
@@ -567,12 +596,17 @@ impl StealthManager {
             TlsClientHelloSpoofer::apply(config, &suite_ids);
         }
 
-        config.set_application_protos(quiche::h3::APPLICATION_PROTOCOL).unwrap();
+        config
+            .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
+            .unwrap();
 
         // Apply the detailed QUIC transport parameters from the harmonized profile.
         config.set_initial_max_data(fingerprint.initial_max_data);
-        config.set_initial_max_stream_data_bidi_local(fingerprint.initial_max_stream_data_bidi_local);
-        config.set_initial_max_stream_data_bidi_remote(fingerprint.initial_max_stream_data_bidi_remote);
+        config
+            .set_initial_max_stream_data_bidi_local(fingerprint.initial_max_stream_data_bidi_local);
+        config.set_initial_max_stream_data_bidi_remote(
+            fingerprint.initial_max_stream_data_bidi_remote,
+        );
         config.set_initial_max_streams_bidi(fingerprint.initial_max_streams_bidi);
         config.set_max_idle_timeout(fingerprint.max_idle_timeout);
     }
@@ -588,20 +622,25 @@ impl StealthManager {
     pub fn current_profile(&self) -> FingerprintProfile {
         self.fingerprint.lock().unwrap().clone()
     }
-    
+
     /// Resolves a domain, using DoH if enabled.
     pub fn resolve_domain(&self, domain: &str) -> IpAddr {
         if self.config.enable_doh {
-            debug!("Resolving {} via DoH provider: {}", domain, self.config.doh_provider);
-            DOH_RUNTIME.block_on(resolve_doh(
-                &self.doh_client,
-                domain,
-                &self.config.doh_provider,
-            )).unwrap_or_else(|e| {
-                error!("DoH resolution failed: {}. Falling back.", e);
-                // Simple fallback, in a real scenario might try standard DNS.
-                IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))
-            })
+            debug!(
+                "Resolving {} via DoH provider: {}",
+                domain, self.config.doh_provider
+            );
+            DOH_RUNTIME
+                .block_on(resolve_doh(
+                    &self.doh_client,
+                    domain,
+                    &self.config.doh_provider,
+                ))
+                .unwrap_or_else(|e| {
+                    error!("DoH resolution failed: {}. Falling back.", e);
+                    // Simple fallback, in a real scenario might try standard DNS.
+                    IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))
+                })
         } else {
             // Fallback to standard DNS resolution (conceptual)
             info!("DoH disabled, using standard DNS for {}", domain);
@@ -615,7 +654,10 @@ impl StealthManager {
     pub fn get_connection_headers(&self, real_host: &str) -> (String, String) {
         if self.config.enable_domain_fronting && self.domain_fronter.is_some() {
             let fronted_domain = self.domain_fronter.as_ref().unwrap().get_fronted_domain();
-            debug!("Domain fronting enabled. SNI: {}, Host: {}", fronted_domain, real_host);
+            debug!(
+                "Domain fronting enabled. SNI: {}, Host: {}",
+                fronted_domain, real_host
+            );
             (fronted_domain.to_string(), real_host.to_string()) // SNI = front, Host = real
         } else {
             (real_host.to_string(), real_host.to_string()) // SNI = real, Host = real
@@ -627,39 +669,39 @@ impl StealthManager {
         // The optimization manager could provide an efficient buffer from a pool.
         // let mut buffer = self.optimization_manager.get_buffer(payload.len());
         // buffer.copy_from_slice(payload);
-/// Maps an IANA-defined TLS cipher suite ID to the `quiche::Cipher` enum.
-///
-/// Note: `quiche` only supports a subset of all possible cipher suites.
-/// This function will ignore any unsupported ciphers.
-fn map_iana_to_quiche_cipher(iana_id: u16) -> Option<quiche::Cipher> {
-    match iana_id {
-        // TLS 1.3 Cipher Suites
-        0x1301 => Some(quiche::Cipher::TLS13_AES_128_GCM_SHA256),
-        0x1302 => Some(quiche::Cipher::TLS13_AES_256_GCM_SHA384),
-        0x1303 => Some(quiche::Cipher::TLS13_CHACHA20_POLY1305_SHA256),
+        /// Maps an IANA-defined TLS cipher suite ID to the `quiche::Cipher` enum.
+        ///
+        /// Note: `quiche` only supports a subset of all possible cipher suites.
+        /// This function will ignore any unsupported ciphers.
+        fn map_iana_to_quiche_cipher(iana_id: u16) -> Option<quiche::Cipher> {
+            match iana_id {
+                // TLS 1.3 Cipher Suites
+                0x1301 => Some(quiche::Cipher::TLS13_AES_128_GCM_SHA256),
+                0x1302 => Some(quiche::Cipher::TLS13_AES_256_GCM_SHA384),
+                0x1303 => Some(quiche::Cipher::TLS13_CHACHA20_POLY1305_SHA256),
 
-        // TLS 1.2 Cipher Suites (ECDHE)
-        0xc02b => Some(quiche::Cipher::ECDHE_ECDSA_WITH_AES_128_GCM_SHA256),
-        0xc02f => Some(quiche::Cipher::ECDHE_RSA_WITH_AES_128_GCM_SHA256),
-        0xc02c => Some(quiche::Cipher::ECDHE_ECDSA_WITH_AES_256_GCM_SHA384),
-        0xc030 => Some(quiche::Cipher::ECDHE_RSA_WITH_AES_256_GCM_SHA384),
-        0xcca9 => Some(quiche::Cipher::ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256),
-        0xcca8 => Some(quiche::Cipher::ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256),
-        
-        // Other common but potentially unsupported ciphers - mapped to None
-        // 0xc013 => ECDHE_RSA_WITH_AES_128_CBC_SHA
-        // 0xc014 => ECDHE_RSA_WITH_AES_256_CBC_SHA
-        // 0xc009 => ECDHE_ECDSA_WITH_AES_128_CBC_SHA
-        // 0xc00a => ECDHE_ECDSA_WITH_AES_256_CBC_SHA
-        _ => None,
-    }
-}
-        
+                // TLS 1.2 Cipher Suites (ECDHE)
+                0xc02b => Some(quiche::Cipher::ECDHE_ECDSA_WITH_AES_128_GCM_SHA256),
+                0xc02f => Some(quiche::Cipher::ECDHE_RSA_WITH_AES_128_GCM_SHA256),
+                0xc02c => Some(quiche::Cipher::ECDHE_ECDSA_WITH_AES_256_GCM_SHA384),
+                0xc030 => Some(quiche::Cipher::ECDHE_RSA_WITH_AES_256_GCM_SHA384),
+                0xcca9 => Some(quiche::Cipher::ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256),
+                0xcca8 => Some(quiche::Cipher::ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256),
+
+                // Other common but potentially unsupported ciphers - mapped to None
+                // 0xc013 => ECDHE_RSA_WITH_AES_128_CBC_SHA
+                // 0xc014 => ECDHE_RSA_WITH_AES_256_CBC_SHA
+                // 0xc009 => ECDHE_ECDSA_WITH_AES_128_CBC_SHA
+                // 0xc00a => ECDHE_ECDSA_WITH_AES_256_CBC_SHA
+                _ => None,
+            }
+        }
+
         if self.config.enable_xor_obfuscation && self.xor_obfuscator.is_some() {
             debug!("Applying XOR obfuscation to outgoing packet.");
             self.xor_obfuscator.as_ref().unwrap().obfuscate(payload);
         }
-        
+
         // HTTP/3 Masquerading is applied at the stream level when sending data,
         // not on raw packets here.
     }
