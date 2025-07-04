@@ -1,10 +1,9 @@
-//! Forward Error Correction utilities and FFI bindings.
+//! Forward Error Correction utilities.
 
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use serde::{Deserialize, Serialize};
 use std::ptr;
-use std::slice;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use thiserror::Error;
 use quicfuscate_error::QuicFuscateError;
 
@@ -56,8 +55,6 @@ impl FECError {
 pub struct FECConfig {
     pub redundancy_ratio: f64,
     pub enable_simd: bool,
-    pub memory_pool_block_size: usize,
-    pub memory_pool_initial_blocks: usize,
     pub mode: FecMode,
     pub target_latency_ms: f32,
 }
@@ -67,8 +64,6 @@ impl Default for FECConfig {
         Self {
             redundancy_ratio: 0.1,
             enable_simd: true,
-            memory_pool_block_size: 2048,
-            memory_pool_initial_blocks: 32,
             mode: FecMode::Adaptive,
             target_latency_ms: 50.0,
         }
@@ -97,35 +92,6 @@ pub struct FECPacket {
     pub data: Vec<u8>,
 }
 
-pub struct MemoryPool {
-    block_size: usize,
-    free: Mutex<Vec<Vec<u8>>>,
-}
-
-impl MemoryPool {
-    pub fn new(block_size: usize, initial: usize) -> Self {
-        let mut blocks = Vec::with_capacity(initial);
-        for _ in 0..initial {
-            blocks.push(vec![0u8; block_size]);
-        }
-        Self {
-            block_size,
-            free: Mutex::new(blocks),
-        }
-    }
-
-    pub fn allocate(&self) -> Result<Vec<u8>> {
-        let mut guard = self.free.lock().map_err(|_| FECError::LockPoisoned)?;
-        Ok(guard.pop().unwrap_or_else(|| vec![0u8; self.block_size]))
-    }
-
-    pub fn deallocate(&self, mut block: Vec<u8>) -> Result<()> {
-        block.clear();
-        let mut guard = self.free.lock().map_err(|_| FECError::LockPoisoned)?;
-        guard.push(block);
-        Ok(())
-    }
-}
 
 #[derive(Clone, Copy, Default)]
 pub struct Statistics {
@@ -568,7 +534,6 @@ unsafe fn multiply_vector_scalar_neon(dst: &mut [u8], src: &[u8], scalar: u8) {
 
 pub struct FECModule {
     config: FECConfig,
-    pool: Arc<MemoryPool>,
     stats: Mutex<Statistics>,
     encoder: EncoderCore,
     decoder: DecoderCore,
@@ -579,15 +544,10 @@ pub struct FECModule {
 
 impl FECModule {
     pub fn new(config: FECConfig) -> Self {
-        let pool = Arc::new(MemoryPool::new(
-            config.memory_pool_block_size,
-            config.memory_pool_initial_blocks,
-        ));
         let hw = HwDispatch::detect();
         let algo = FecAlgorithm::StripeXor;
         Self {
             config,
-            pool,
             stats: Mutex::new(Statistics::default()),
             encoder: EncoderCore::new(algo),
             decoder: DecoderCore::new(algo),
@@ -679,236 +639,3 @@ impl FECModule {
     }
 }
 
-// --- FFI ---
-
-#[no_mangle]
-pub extern "C" fn fec_module_init() -> *mut FECModule {
-    Box::into_raw(Box::new(FECModule::new(FECConfig::default())))
-}
-
-#[no_mangle]
-pub extern "C" fn fec_module_cleanup(handle: *mut FECModule) {
-    if handle.is_null() {
-        return;
-    }
-    unsafe {
-        drop(Box::from_raw(handle));
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn fec_module_encode(
-    handle: *mut FECModule,
-    data: *const u8,
-    len: usize,
-    out_len: *mut usize,
-) -> *mut u8 {
-    if handle.is_null() || data.is_null() {
-        return ptr::null_mut();
-    }
-    let mod_ref = unsafe { &mut *handle };
-    let slice = unsafe { slice::from_raw_parts(data, len) };
-    if let Ok(packets) = mod_ref.encode_packet(slice, 0) {
-        if let Some(pkt) = packets.first() {
-            unsafe {
-                *out_len = pkt.data.len();
-            }
-            if let Ok(mut buf) = mod_ref.pool.allocate() {
-                let size = pkt.data.len();
-                buf.resize(size, 0);
-                buf[..size].copy_from_slice(&pkt.data);
-                let ptr = buf.as_mut_ptr();
-                std::mem::forget(buf);
-                return ptr;
-            }
-        }
-    }
-    ptr::null_mut()
-}
-
-#[no_mangle]
-pub extern "C" fn fec_module_decode(
-    handle: *mut FECModule,
-    data: *const u8,
-    len: usize,
-    out_len: *mut usize,
-) -> *mut u8 {
-    if handle.is_null() || data.is_null() {
-        return ptr::null_mut();
-    }
-    let mod_ref = unsafe { &mut *handle };
-    let slice = unsafe { slice::from_raw_parts(data, len) };
-    let pkt = FECPacket {
-        sequence_number: 0,
-        is_repair: false,
-        data: slice.to_vec(),
-    };
-    if let Ok(result) = mod_ref.decode(&[pkt]) {
-        unsafe {
-            *out_len = result.len();
-        }
-        if let Ok(mut buf) = mod_ref.pool.allocate() {
-            let size = result.len();
-            buf.resize(size, 0);
-            buf[..size].copy_from_slice(&result);
-            let ptr = buf.as_mut_ptr();
-            std::mem::forget(buf);
-            return ptr;
-        }
-    }
-    ptr::null_mut()
-}
-
-#[no_mangle]
-pub extern "C" fn fec_module_free(handle: *mut FECModule, ptr: *mut u8, len: usize) {
-    if ptr.is_null() {
-        return;
-    }
-    if handle.is_null() {
-        unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
-        }
-        return;
-    }
-    let mod_ref = unsafe { &mut *handle };
-    let cap = mod_ref.config.memory_pool_block_size;
-    unsafe {
-        let buf = Vec::from_raw_parts(ptr, len, cap);
-        let _ = mod_ref.pool.deallocate(buf);
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn fec_module_set_redundancy(handle: *mut FECModule, r: f64) -> i32 {
-    if handle.is_null() {
-        return -1;
-    }
-    let mod_ref = unsafe { &mut *handle };
-    mod_ref.config.redundancy_ratio = r;
-    0
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct StatFFI {
-    packets_encoded: u64,
-    packets_decoded: u64,
-    repair_packets_generated: u64,
-}
-
-#[no_mangle]
-pub extern "C" fn fec_module_get_statistics(handle: *mut FECModule, buf: *mut StatFFI) -> i32 {
-    if handle.is_null() || buf.is_null() {
-        return -1;
-    }
-    let mod_ref = unsafe { &mut *handle };
-    if let Ok(stats) = mod_ref.get_statistics() {
-        unsafe {
-            *buf = StatFFI {
-                packets_encoded: stats.packets_encoded,
-                packets_decoded: stats.packets_decoded,
-                repair_packets_generated: stats.repair_packets_generated,
-            };
-        }
-        return 0;
-    }
-    -1
-}
-
-/// Safe wrapper around the raw FECModule FFI handle.
-///
-/// Memory returned from `encode` and `decode` is automatically freed when the
-/// handle goes out of scope.
-pub struct FecHandle {
-    ptr: *mut FECModule,
-}
-
-impl FecHandle {
-    /// Create a new handle.
-    pub fn new() -> Self {
-        let ptr = unsafe { fec_module_init() };
-        Self { ptr }
-    }
-
-    /// Encode data using the underlying module.
-    pub fn encode(&mut self, data: &[u8]) -> Result<Vec<u8>> {
-        let mut out_len = 0usize;
-        let ptr = unsafe {
-            fec_module_encode(
-                self.ptr,
-                data.as_ptr(),
-                data.len(),
-                &mut out_len as *mut usize,
-            )
-        };
-        if ptr.is_null() {
-            return Ok(Vec::new());
-        }
-        let slice = unsafe { std::slice::from_raw_parts(ptr, out_len) };
-        let out = slice.to_vec();
-        unsafe { fec_module_free(self.ptr, ptr, out_len) };
-        Ok(out)
-    }
-
-    /// Decode data using the underlying module.
-    pub fn decode(&mut self, data: &[u8]) -> Result<Vec<u8>> {
-        let mut out_len = 0usize;
-        let ptr = unsafe {
-            fec_module_decode(
-                self.ptr,
-                data.as_ptr(),
-                data.len(),
-                &mut out_len as *mut usize,
-            )
-        };
-        if ptr.is_null() {
-            return Ok(Vec::new());
-        }
-        let slice = unsafe { std::slice::from_raw_parts(ptr, out_len) };
-        let out = slice.to_vec();
-        unsafe { fec_module_free(self.ptr, ptr, out_len) };
-        Ok(out)
-    }
-}
-
-impl Drop for FecHandle {
-    fn drop(&mut self) {
-        unsafe { fec_module_cleanup(self.ptr) };
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn encode_decode_via_ffi() {
-        let handle = fec_module_init();
-        assert!(!handle.is_null());
-        let msg = b"hello";
-        let mut out_len = 0usize;
-        let enc_ptr =
-            fec_module_encode(handle, msg.as_ptr(), msg.len(), &mut out_len as *mut usize);
-        assert!(!enc_ptr.is_null());
-        let enc_slice = unsafe { std::slice::from_raw_parts(enc_ptr, out_len) };
-        let enc = enc_slice.to_vec();
-        fec_module_free(handle, enc_ptr, out_len);
-        let mut dec_len = 0usize;
-        let dec_ptr =
-            fec_module_decode(handle, enc.as_ptr(), enc.len(), &mut dec_len as *mut usize);
-        let dec_slice = unsafe { std::slice::from_raw_parts(dec_ptr, dec_len) };
-        let dec = dec_slice.to_vec();
-        fec_module_free(handle, dec_ptr, dec_len);
-        fec_module_cleanup(handle);
-        assert_eq!(dec, msg);
-    }
-
-    #[test]
-    fn handle_wrapper_roundtrip() {
-        let mut handle = FecHandle::new();
-        let msg = b"hello";
-        let enc = handle.encode(msg).unwrap();
-        let dec = handle.decode(&enc).unwrap();
-        assert_eq!(dec, msg);
-    }
-}
