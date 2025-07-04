@@ -1,4 +1,5 @@
 use quicfuscate_cli::options::{CommandLineOptions, Fingerprint};
+use quicfuscate_cli::run_cli;
 use clap::Parser;
 
 #[test]
@@ -47,5 +48,13 @@ fn host_alias() -> Result<(), clap::Error> {
         "example.org",
     ])?;
     assert_eq!(opts.server, "example.org");
+    Ok(())
+}
+
+#[test]
+fn demo_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+    let opts = CommandLineOptions::try_parse_from(["prog"])?;
+    let result = run_cli(opts, true)?;
+    assert_eq!(result, b"demo data".to_vec());
     Ok(())
 }

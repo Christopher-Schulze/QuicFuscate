@@ -1,11 +1,9 @@
-mod options;
 use clap::Parser;
-use options::{CommandLineOptions, Fingerprint, FecCliMode};
-use fec::FECConfig;
-use core as quic_core; // dummy use, kann entfernt werden, falls nicht gebraucht
-use stealth::{QuicFuscateStealth, BrowserProfile};
 use env_logger::Env;
 use log::info;
+
+use quicfuscate_cli::options::{CommandLineOptions, Fingerprint, FecCliMode};
+use quicfuscate_cli::run_cli;
 
 fn print_fingerprints() {
     println!("Verfügbare Browser-Fingerprints:");
@@ -24,12 +22,12 @@ fn main() {
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
     let opts = CommandLineOptions::parse();
 
-    println!("QuicFuscate CLI gestartet. Optionen: --server/--host, --port, etc.");
-
     if opts.list_fingerprints {
         print_fingerprints();
         return;
     }
+
+    let demo_mode = std::env::args().next().map(|a| a.contains("demo")).unwrap_or(false);
 
     println!("QuicFuscate VPN - QUIC mit uTLS Integration");
     println!("=========================================");
@@ -51,35 +49,16 @@ fn main() {
     if opts.verbose {
         info!("[verbose] Verbose logging enabled");
     }
-
     if opts.debug_tls {
         info!("[debug] TLS debug enabled");
     }
 
-    let mut fec_cfg = FECConfig::default();
-    fec_cfg.mode = opts.fec.into();
-    fec_cfg.redundancy_ratio = (opts.fec_ratio as f64) / 100.0;
-    match opts.fec {
-        FecCliMode::Off => info!("FEC disabled"),
-        FecCliMode::Performance => info!("FEC performance mode"),
-        FecCliMode::Always => info!("FEC always-on ratio {}%", opts.fec_ratio),
-        FecCliMode::Adaptive => info!("FEC adaptive with target latency {} ms", opts.fec_ratio),
+    match run_cli(opts, demo_mode) {
+        Ok(data) => {
+            if demo_mode {
+                println!("Demo roundtrip: {}", String::from_utf8_lossy(&data));
+            }
+        }
+        Err(e) => eprintln!("Error: {}", e),
     }
-
-    let mut stealth = QuicFuscateStealth::new();
-    stealth.set_browser_profile(BrowserProfile::from(opts.fingerprint));
-    stealth.enable_utls(!opts.no_utls);
-    stealth.set_spinbit_probability(opts.spin_probability);
-    stealth.set_zero_rtt_max_early_data(opts.zero_rtt_max);
-    stealth.enable_domain_fronting(opts.domain_fronting);
-    stealth.enable_http3_masq(opts.http3_masq);
-    stealth.enable_doh(opts.doh);
-    stealth.enable_spinbit(opts.spin_random);
-    stealth.enable_zero_rtt(opts.zero_rtt);
-    if stealth.initialize() {
-        info!("Stealth subsystem initialized.");
-    } else {
-        info!("Failed to initialize stealth subsystem.");
-    }
-    stealth.shutdown();
 }

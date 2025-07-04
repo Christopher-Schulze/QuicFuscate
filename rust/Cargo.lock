@@ -731,6 +731,7 @@ dependencies = [
  "fec",
  "log",
  "stealth",
+ "tokio",
 ]
 
 [[package]]
