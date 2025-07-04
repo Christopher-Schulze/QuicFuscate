@@ -11,6 +11,8 @@ subtle = "2.4"
 thiserror = "1"
 openssl-sys = "0.9"
 quicfuscate-error = { path = "../error" }
+aegis = { version = "0.9", features = ["pure-rust"] }
+morus = "0.1"
 
 [features]
 aegis128x = []

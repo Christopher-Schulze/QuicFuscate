@@ -1,11 +1,28 @@
 #![cfg(feature = "aegis128x")]
 use crypto::Aegis128X;
 
-const MSG: &[u8] = b"hello aegis";
-const KEY: [u8; 16] = [0u8; 16];
-const NONCE: [u8; 16] = [0u8; 16];
-const EXPECTED_CT: &[u8] = b"hello aegis";
-const EXPECTED_TAG: [u8; 16] = [0u8; 16];
+const MSG: &[u8] = &[
+    4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7,
+    4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7,
+    4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7,
+    4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7,
+];
+const KEY: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+const NONCE: [u8; 16] = [
+    16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+];
+const AD: &[u8] = &[1, 2, 3, 4, 1, 2, 3, 4];
+const EXPECTED_CT: &[u8] = &[
+    87, 149, 84, 67, 1, 153, 127, 147, 98, 27, 39, 136, 9, 214, 51, 27, 59, 250, 111, 24, 233, 13,
+    177, 44, 74, 163, 89, 101, 181, 233, 140, 95, 198, 251, 78, 84, 188, 182, 17, 24, 66, 194, 6,
+    55, 37, 46, 255, 116, 124, 179, 168, 248, 91, 55, 222, 128, 145, 154, 88, 159, 224, 242, 72,
+    114, 188, 146, 99, 96, 105, 103, 57, 224, 85, 32, 100, 126, 57, 9, 137, 225, 235, 95, 212, 47,
+    153, 103, 138, 2, 118, 164, 152, 248, 196, 84, 118, 28, 157, 106, 172, 182, 71, 173, 86, 190,
+    98, 178, 156, 34, 205, 75, 87, 97, 179, 143, 67, 213, 165, 238, 6, 47,
+];
+const EXPECTED_TAG: [u8; 16] = [
+    26, 235, 194, 0, 128, 79, 64, 92, 171, 99, 127, 42, 222, 187, 109, 119,
+];
 
 #[test]
 fn encrypt_decrypt_vectors() -> Result<(), crypto::CryptoError> {
@@ -13,12 +30,12 @@ fn encrypt_decrypt_vectors() -> Result<(), crypto::CryptoError> {
     let cipher = Aegis128X::new();
     let mut ct = Vec::new();
     let mut tag = [0u8; 16];
-    cipher.encrypt(MSG, &KEY, &NONCE, b"", &mut ct, &mut tag)?;
+    cipher.encrypt(MSG, &KEY, &NONCE, AD, &mut ct, &mut tag)?;
     assert_eq!(ct, EXPECTED_CT);
     assert_eq!(tag, EXPECTED_TAG);
 
     let mut pt = Vec::new();
-    cipher.decrypt(&ct, &KEY, &NONCE, b"", &tag, &mut pt)?;
+    cipher.decrypt(&ct, &KEY, &NONCE, AD, &tag, &mut pt)?;
     assert_eq!(pt, MSG);
     Ok(())
 }
