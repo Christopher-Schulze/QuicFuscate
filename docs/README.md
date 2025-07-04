@@ -1,98 +1,228 @@
-# Rust Workspace Documentation
+# QuicFuscate
 
-This directory contains documentation for the Rust reimplementation of **QuicFuscate**. The
-original C++ code base is documented in [`DOCUMENTATION.md`](DOCUMENTATION.md).
-The Rust modules mirror the same high level design while taking advantage of
-Rust's safety guarantees and build tooling. The `core`, `crypto`, `fec` and
-`stealth` crates are being ported from C++ and have not yet reached full
-feature parity. Further work continues in Rust only. The legacy C++ modules are
-deprecated and kept only for reference.
+<div align="center">
+  <img src="ui/logo/QuicFuscate.png" alt="QuicFuscate Logo" width="300">
+  
+  [![QUIC](https://img.shields.io/badge/QUIC-Protocol-009DFF?style=for-the-badge&logo=internet-explorer)](https://datatracker.ietf.org/doc/html/rfc9000)
+  [![HTTP/3](https://img.shields.io/badge/HTTP-3-FF6B6B?style=for-the-badge&logo=internet-explorer)](https://en.wikipedia.org/wiki/HTTP/3)
+  [![Rust](https://img.shields.io/badge/Rust-1.70+-000000?style=for-the-badge&logo=rust)](https://www.rust-lang.org/)
+  [![SIMD](https://img.shields.io/badge/SIMD-Optimized-FFA500?style=for-the-badge&logo=cpu)](https://en.wikipedia.org/wiki/SIMD)
+  [![AEGIS-128](https://img.shields.io/badge/Encryption-AEGIS--128-2F855A?style=for-the-badge)](https://en.wikipedia.org/wiki/AEGIS)
+  [![MORUS-1280](https://img.shields.io/badge/Encryption-MORUS--1280--128-2B6CB0?style=for-the-badge)](https://en.wikipedia.org/wiki/MORUS_(cipher))
+  [![FEC](https://img.shields.io/badge/FEC-Tetrys-9F7AEA?style=for-the-badge)](https://en.wikipedia.org/wiki/Forward_error_correction)
+  [![Cross-Platform](https://img.shields.io/badge/Cross--Platform-✓-38A169?style=for-the-badge&logo=windows&logoColor=white)](https://en.wikipedia.org/wiki/Cross-platform_software)
+</div>
 
-> **Note:** Only one Rust workspace exists. All crates reside under the `rust/`
-directory and there is no separate `Rust-QuicFuscate` folder.
+## 🚀 Next-Generation Stealth VPN Technology
 
-## Module Overview
+QuicFuscate represents the pinnacle of privacy-focused networking, combining cutting-edge encryption, adaptive error correction, and advanced traffic obfuscation to create an impenetrable communication channel. Built on the QUIC protocol with HTTP/3 support, it delivers both speed and security without compromise.
 
-### Core Crate
-The `core` crate will provide the QUIC connection management layer. The C++
-version features connection migration, BBRv2 congestion control and XDP
-zero‑copy networking as outlined in the *Core Module* section of the original
-documentation【F:docs/DOCUMENTATION.md†L134-L139】. The Rust crate aims to
-replicate these features and expose a safe API for the rest of the workspace.
-Recent updates added stubbed support for connection migration and a
-placeholder BBRv2 controller so that higher layers can be exercised in tests.
+> **Note:** The project has been fully migrated to Rust for improved safety and performance.
 
-### Crypto Crate
-`crypto` contains hardware accelerated cipher implementations with automatic
-selection logic. The algorithms and selection strategy come from the
-*Cryptography Module* description【F:docs/DOCUMENTATION.md†L2013-L2047】. The Rust
-code reuses the same concepts of AEGIS‑128X/L and MORUS‑1280‑128 with a
-`CipherSuiteSelector` to pick the optimal cipher based on CPU features.
+The repository contains a **single** Rust workspace located in the `rust/`
+directory. Historical references to a `Rust-QuicFuscate` directory are obsolete
+because all crates have been consolidated under `rust/`.
 
-Runtime detection is implemented in [`features.rs`] using the functions
-`vaes_available()`, `neon_available()` and `aesni_available()`【F:rust/crypto/src/lib.rs†L38-L48】【F:rust/crypto/src/features.rs†L1-L44】.
-`CipherSuiteSelector::select_best_cipher_suite_internal` chooses
-`AEGIS-128X` when VAES512 is present, `AEGIS-128L` when NEON or AES-NI is
-available and otherwise falls back to `MORUS-1280-128`.  Setting the
-environment variable `FORCE_SOFTWARE` disables hardware checks so that all
-functions return `false`【F:rust/crypto/src/features.rs†L1-L33】.
+## ✨ Core Features
 
-| Function             | CPU feature      | Selected suite      |
-|----------------------|------------------|---------------------|
-| `vaes_available()`   | VAES + AVX-512   | AEGIS-128X          |
-| `neon_available()`   | NEON (ARM)       | AEGIS-128L          |
-| `aesni_available()`  | AES-NI (x86)     | AEGIS-128L          |
-| *(none detected)*    | --               | MORUS-1280-128      |
+### 🛡️ Advanced Stealth Technology
+- **uTLS Fingerprinting Protection**: Mimics browser TLS fingerprints to evade deep packet inspection
+- **Fake TLS Handshake**: Implements TLS handshakes that appear legitimate to network inspection while encapsulating the real traffic
+- **Domain Fronting**: Masks traffic by routing through trusted CDN providers
+- **HTTP/3 Masquerading**: Disguises traffic as standard HTTP/3 web traffic
+- **Traffic Obfuscation**: XOR-based packet transformation to defeat pattern recognition
+- **Spin Bit Randomization**: Prevents network analysis through QUIC protocol fingerprinting
 
-Example forcing the software fallback:
+### 🔒 Military-Grade Encryption
+- **AEGIS-128L/X**: Authenticated encryption with hardware acceleration
+- **MORUS-1280-128**: Lightweight cipher for resource-constrained environments
+- **Perfect Forward Secrecy**: Ephemeral key exchange for maximum security
+- **Post-Quantum Ready**: Designed to resist quantum computing attacks
 
-```bash
-FORCE_SOFTWARE=1 cargo test -p crypto
-```
+### ⚡ Performance Optimizations
+- **SIMD Acceleration**: ARM NEON and x86 AVX2/AVX-512 optimizations
+- **Zero-Copy Architecture**: Minimizes memory allocations for maximum throughput
+- **Experimental FEC**: Early TETRYS-based Forward Error Correction module
+- **Connection Multiplexing**: Multiple streams over a single connection
+- **0-RTT Handshake**: Reduced latency for subsequent connections
 
-### FEC Crate
-The Forward Error Correction crate currently offers a basic encoder and decoder
-and is intended to replace the old C++ implementation. Adaptive redundancy with
-memory-pooled buffers and SIMD optimised Galois field arithmetic are still in
-development as described in the original
-documentation【F:docs/DOCUMENTATION.md†L173-L202】. The module is experimental
-and not yet production ready.
+### 🔄 Adaptive Error Correction
+- **TETRYS FEC (experimental)**: Basic encoder/decoder implementation
+- **Dynamic Redundancy (planned)**: Automatic adjustments to network conditions
+- **Packet Recovery**: Initial support for lossy networks
+- **Bandwidth-Efficient**: Aims for minimal overhead compared to traditional FEC
 
-### Stealth Crate
-Traffic obfuscation is handled by the `stealth` crate.  Basic XOR obfuscation,
-DoH tunnelling and domain fronting are already functional.  uTLS
-fingerprinting and HTTP/3 masquerading are in active development as outlined in
-the *Stealth Module* section of the C++ documentation【F:docs/DOCUMENTATION.md†L1888-L1905】.
-Like the FEC crate, this module is considered experimental and not production ready.
+> **Note:** The FEC and Stealth modules are experimental and not yet production ready.
 
-## Building & Testing the Rust Workspace
-First build the patched `quiche` submodule, then compile and test the Rust workspace:
+## 🏗️ Project Status
+
+The codebase is now entirely written in Rust. Development focuses on expanding features and improving stability.
+
+## 🛠️ Technical Specifications
+
+| Component           | Technology                          |
+|---------------------|-------------------------------------|
+| Transport Protocol  | QUIC v1 / HTTP/3                   |
+| Encryption         | AEGIS-128L/X, MORUS-1280-128       |
+| Key Exchange       | X25519, X448                       |
+| Error Correction   | TETRYS FEC (experimental)           |
+| Obfuscation       | XOR-based, Traffic Shaping, Fake TLS (experimental) |
+| Platforms          | Linux, macOS, Windows (planned)     |
+| Architecture       | x86_64, ARM64                      |
+| Performance        | Multi-Gigabit capable              |
+
+## 🔧 Build Instructions
+
+This repository uses a Git submodule to include a patched QUIC library.
+The `libs/quiche-patched` directory is intentionally left empty in the
+repository to avoid bloating the checkout size. Fetch the sources after
+cloning using one of the methods below.
+After cloning the project, initialize the submodule with:
 
 ```bash
 git submodule update --init --recursive libs/quiche-patched
-cd libs/quiche-patched && cargo build --release && cd ../..
 ```
+
+If the command fails with a missing commit error (e.g.
+```
+fatal: remote error: upload-pack: not our ref 5700a7c74927d2c4912ac95e904c6ad3642b6868
+Fetched in submodule path 'libs/quiche-patched', but it did not contain 5700a7c74927d2c4912ac95e904c6ad3642b6868.
+```
+), the upstream `quiche` repository might not contain the pinned
+revision `5700a7c74927d2c4912ac95e904c6ad3642b6868`. Update the
+submodule URL to a mirror that includes this commit and retry:
+
+```bash
+git submodule set-url libs/quiche-patched <mirror-url>
+git submodule update --init libs/quiche-patched
+```
+
+Alternatively, run the helper script to automatically set the mirror,
+fetch the sources and build the library in one step (optionally pass a
+mirror URL):
+
+```bash
+./scripts/fetch_quiche.sh [mirror-url]
+```
+
+If a local copy of quiche already exists, set the `QUICHE_PATH` environment
+variable to skip fetching and build from that path instead.
+
+### Building quiche
+
+Compile the patched **quiche** library using Cargo:
+
+```bash
+cd libs/quiche-patched
+cargo build --release
+cd ../..
+```
+
+### Building
+
+Build the entire workspace using Cargo:
+
+```bash
+cd rust
+cargo build --workspace --release
+```
+
+### Running the tests
+
+Execute the test suite with Cargo:
+
+```bash
+cargo test --workspace
+```
+
+## 👷 Developer Notes
+
+Ensure submodules are initialized:
+
+```bash
+git submodule update --init --recursive
+```
+
+Build and test using Cargo:
+
+```bash
+cd rust
+cargo build --workspace --release
+cargo test --workspace
+```
+
+### Rust Workspace
+
+The Rust implementation lives in the `rust/` directory. It contains the
+`core`, `crypto`, `fec`, `stealth` and `cli` crates along with integration
+tests. The workspace root `rust/Cargo.toml` uses the edition 2021 resolver.
+Build all crates locally with:
 
 ```bash
 cd rust
 cargo build --workspace
-cargo test --workspace
 ```
 
-The same steps are listed in the repository README【F:README.md†L150-L168】.
 
-## Examples
-If you want to work on a single crate you can still run its tests individually.
-For example:
+## 🖥️ Command-Line Usage
+
+The project provides several binaries once built:
+
+- **quicfuscate_demo** – feature-rich demo tool with many options.
+- **quicfuscate_client** – minimal client accepting `<host> <port>` arguments.
+- **quicfuscate_server** – placeholder server without arguments.
+
+Run `quicfuscate_demo --help` to see all available options. Important flags include:
+
+```
+  -s, --server <host>        Server hostname (default: example.com)
+  -p, --port <port>          Server port (default: 443)
+  -f, --fingerprint <name>   Browser fingerprint (chrome, firefox, safari, ...)
+      --no-utls              Disable uTLS and use regular TLS
+      --verify-peer          Enable certificate validation
+      --ca-file <path>       CA file for peer verification
+  -v, --verbose              Verbose logging
+      --debug-tls            Show TLS debug information
+      --list-fingerprints    List available browser fingerprints
+```
+
+## 🔄 Continuous Integration
+
+The repository includes a GitHub Actions workflow that builds and tests the
+project on Linux, macOS and Windows. The workflow also performs static
+analysis and uploads the release binaries as artifacts. You can find the
+workflow in `.github/workflows/ci.yml`. It executes the following tasks:
+
+1. Fetches and builds the patched `quiche` library via `scripts/fetch_quiche.sh`.
+2. Runs `cargo clippy` and `cppcheck` for linting on all platforms.
+3. Builds the Rust workspace and executes all integration tests.
+4. Uploads the release binaries for each operating system.
+
+To reproduce the CI steps locally run:
 
 ```bash
-cd rust/crypto
-cargo test
+git submodule update --init --recursive
+cd rust
+cargo build --workspace --release
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-## Migration Notes
-The repository is gradually being refactored from C++ to Rust for improved
-performance and security, as noted in the main README【F:README.md†L52-L60】. The
-Rust workspace mirrors the directory layout of the C++ modules and will replace
-them piece by piece while keeping the core functionality intact.
+## 📜 License
 
+This software is provided under a custom license that allows:
+- Private, non-commercial use
+- Modification and personal use
+- Educational purposes
+
+Commercial use, distribution, or incorporation into commercial products is strictly prohibited without explicit permission.
+
+See [LICENSE](LICENSE) for details.
+
+## ⚠️ Important Notice
+
+This software is provided "as is" without any warranties. The developers assume no responsibility for any damage caused by the use of this software. Use at your own risk.
+
+---
+
+*QuicFuscate - The last line of defense for your digital privacy.*

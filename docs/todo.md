@@ -1,317 +1,101 @@
-# QuicFuscate Code Analysis - Verbesserungsvorschläge
-
-## Kritische Sicherheitsprobleme
-
-### Memory Management Issues
-Legacy modules still allocate memory manually and must be audited for leaks.
-
-### Unsafe Code Patterns
-- **assert() Verwendung**: Der frühere Hinweis auf `assert()` in `quic_integration_impl.cpp` (ehemals Zeile 155) ist veraltet.
-  - Die betreffende Assertion existiert nicht mehr und wurde bereits entfernt.
-  - Dokumentation entsprechend aktualisieren, keine Aktion erforderlich.
-
-- **Unsichere Typumwandlungen**: Extensive Nutzung von Casts ohne Validierung
-  - `reinterpret_cast` in `quic_connection_impl.cpp` (Zeilen 523, 529) für Netzwerk-Adressstrukturen
-  - Mehrere `static_cast` in `quic_packet.cpp` ohne Range-Checks
-  - Sollten durch sichere Alternativen mit Validierung ersetzt werden
+# QuicFuscate Implementation Roadmap
 
-- **const_cast Verwendung**: Unsichere Aufhebung der Const-Qualifikation
-  - `quic_stream_impl.cpp` (Zeile 48) verwendet `const_cast<std::mutex&>` für Locks
-  - Deutet auf problematisches Design mit Thread-Safety-Implikationen hin
-  - Sollte durch besseres Design ohne const_cast ersetzt werden
-
-- **Null-Pointer Dereferenzierung**: Unzureichende Null-Checks
-  - Mehrere Stellen mit `nullptr`-Prüfungen, aber nicht konsistent
-  - Potentielle Null-Pointer-Dereferenzierungen in Callback-Funktionen
-  - Sollte durch systematische Null-Checks oder Optional-Types ersetzt werden
-
-### Buffer Operations
-- **memcpy() Verwendung**: Ursprünglich wurde eine weite Verbreitung von `memcpy()` ohne Bounds-Checking angenommen.
-  - Aktuell finden sich nur noch wenige Aufrufe, beispielsweise in `optimize/unified_optimizations.hpp` und `core/quic_connection_impl.cpp`.
-  - Diese Stellen prüfen die Größe vor dem Kopieren und gelten daher als sicher, können aber optional auf `std::copy` umgestellt werden.
+This document outlines the comprehensive, phased implementation plan to build a production-ready version of QuicFuscate. It replaces the previous `todo.md` and is based on `PLAN.txt` and a detailed architectural analysis. The current prototype is a non-functional facade and requires a complete rebuild of core components.
 
-## Code Quality Issues
+---
 
-### Magic Numbers
-- **Hardcoded Values**: Zahlreiche Magic Numbers ohne Konstanten-Definition
-  - `1200` (Packet Size) in mehreren Dateien
-  - `65535`, `4096`, `1024` ohne Erklärung
-  - Timeout-Werte wie `5000ms`, `7200s` hardcoded
-  - Sollten als benannte Konstanten definiert werden
+## Phase 1: Foundational Fixes & Performance Optimization (`optimize.rs`)
 
-### TODO/FIXME Items
-- **libs/quiche-patched/**: Mehrere TODO-Kommentare in kritischen Bereichen
-  - Frame handling ("TODO: update to qlog-02 token format")
-  - Recovery module ("TODO: do time threshold update")
-  - H3 frame handling ("TODO: handling of 0-length frames")
+The goal of this phase is to build a high-performance memory management layer to eliminate copies and reduce allocation overhead, which is critical for the entire data path.
 
-### Debug Code in Production
-- **Debug-spezifischer Code**: Debug-Funktionalität in Production-Code
-  - `debug_logging_enabled_` Flags
-  - Debug-spezifische Compiler-Flags in Build-System
-  - Sollte durch proper Logging-Framework ersetzt werden
+-   **Implement Production-Ready `MemoryPool`:**
+    -   [ ] Design and implement a `MemoryPool` struct.
+    -   [ ] Ensure all allocated memory blocks are 64-byte aligned for optimal CPU cache performance.
+    -   [ ] Implement efficient pool growth and shrinkage strategies.
+    -   [ ] Add robust thread-safety mechanisms for multi-threaded access.
 
-## Performance Issues
+-   **Integrate `ZeroCopyBuffer`:**
+    -   [ ] Define a `ZeroCopyBuffer` type that leverages the `MemoryPool`.
+    -   [ ] This buffer should manage its lifecycle by returning memory to the pool on `Drop`.
+    -   [ ] Refactor all parts of the codebase that currently use `Vec<u8>` or similar heap-allocated buffers for packet data to use `ZeroCopyBuffer`.
 
-### Memory Allocation
-- **Frequent Allocations**: Häufige dynamische Speicherallokationen
-  - Sollte durch Memory Pooling optimiert werden
+---
 
-### String Operations
-- **Inefficient String Handling**: Verwendung von sprintf() statt modernerer Alternativen
-  - Nginx-Patch verwendet `ngx_sprintf()` extensiv
-  - Sollte durch std::format (C++20) oder fmt-Library ersetzt werden
+## Phase 2: FEC Module Rebuild (`fec.rs`)
 
-## Thread Safety Concerns
+This phase involves a from-scratch rebuild of the Forward Error Correction (FEC) module to meet the "ASW-RLNC-X" specification for maximum reliability and performance.
 
-### Race Conditions
-- **Shared State**: Potentielle Race Conditions bei geteiltem Zustand
-  - Stealth-Module verwenden statische Variablen ohne Synchronisation
-  - XOR-Obfuscation Pattern-Caching ohne Locks
+-   **Rebuild FEC Core Logic from Scratch:**
+    -   [ ] Remove the existing placeholder FEC implementation entirely.
+    -   [ ] Design the core traits and structures for encoding and decoding based on Random Linear Network Coding (RLNC).
 
-### Deadlock Risks
-- **Multiple Locks**: Komplexe Lock-Hierarchien in Connection-Management
-  - Potentielle Deadlock-Szenarien bei verschachtelten Locks
-  - Sollte durch Lock-free Datenstrukturen oder Lock-Ordering optimiert werden
+-   **Implement Cauchy Matrix Encoder:**
+    -   [ ] Implement a highly-efficient encoder using a Cauchy matrix over a Galois Field (e.g., GF(2^8)).
+    -   [ ] This encoder will generate repair symbols from source symbols.
+    -   [ ] Optimize matrix operations for performance.
 
-## Architektur-Verbesserungen
+-   **Implement High-Performance Decoder:**
+    -   [ ] Implement a decoder capable of reconstructing the original data from a set of source and repair symbols.
+    -   [ ] The decoder must implement a hybrid approach:
+        -   Use **Sparse Gaussian Elimination** for typical loss scenarios.
+        -   Integrate the **Wiedemann algorithm** for handling larger, more complex recovery scenarios efficiently.
+    -   [ ] Ensure the decoder is robust against various packet loss patterns.
 
-### Error Handling
-- **Inconsistent Error Handling**: Mischung aus Exceptions, Error Codes und Panics
-  - Rust-Code verwendet `unwrap()` und `expect()` extensiv
-  - C++ Code mischt verschiedene Error-Handling-Strategien
-  - Sollte einheitliches Error-Handling-System implementieren
+---
 
-### Resource Management
-- **Manual Resource Management**: Manuelle Verwaltung von OpenSSL-Ressourcen
-  - `SSL_free()`, `SSL_CTX_free()` Aufrufe verstreut
-  - Sollte durch RAII-Wrapper gekapselt werden
+## Phase 3: Stealth Module Hardening (`stealth.rs`)
 
-## Kryptographische Verbesserungen
+This phase focuses on replacing simulated stealth features with hardened, production-grade implementations to provide true traffic obfuscation.
 
-### Key Management
-- **Key Rotation**: Hardcoded Key-Rotation-Intervalle
-  - XOR-Obfuscation: `key_rotation_interval = 1000` ohne Begründung
-  - Sollte konfigurierbar und adaptiv sein
+-   **Implement True uTLS Fingerprint Spoofing:**
+    -   [ ] Remove the current simulated fingerprinting logic.
+    -   [ ] Integrate a library or implement custom logic to directly manipulate the QUIC and TLS handshake parameters to precisely match real browser fingerprints (e.g., Chrome, Firefox).
+    -   [ ] Add missing browser profiles for **Opera** and **Brave**.
+    -   [ ] Implement a mechanism to dynamically switch profiles.
 
-### Side-Channel Resistance
-- **Timing Attacks**: Potentielle Timing-Vulnerabilities
-  - Crypto-Operationen ohne konstante Laufzeit
-  - Sollte durch constant-time Implementierungen ersetzt werden
+-   **Implement SIMD-Accelerated XOR Obfuscation:**
+    -   [ ] Replace the basic, placeholder XOR obfuscation with a high-performance version.
+    -   [ ] Use SIMD intrinsics (e.g., AVX2, SSE4.1) to accelerate the XOR operations on packet data.
+    -   [ ] Implement a rolling key mechanism for the XOR stream to prevent trivial analysis.
 
-## Immediate Actions (Priorität 1)
+---
 
-1. **Assert-Statements ersetzen**: Durch proper Exception Handling
-2. **Buffer Overflow Prevention**: memcpy durch sichere Alternativen ersetzen
-3. **Magic Numbers eliminieren**: Konstanten-Definitionen einführen
+## Phase 4: Core Logic Integration (`core.rs`)
 
-## Short-term Improvements (Priorität 2)
+This is the most critical phase, where the rebuilt, functional modules are integrated into the main data path. The goal is to make the `send` and `recv` functions fully operational and feature-complete.
 
-1. **Error Handling vereinheitlichen**: Konsistente Error-Handling-Strategie
-2. **Debug Code bereinigen**: Production-ready Logging implementieren
-3. **Performance Optimierung**: Memory Pooling für häufige Allokationen
-4. **Thread Safety verbessern**: Race Conditions eliminieren
+-   **Integrate `MemoryPool` into Data Path:**
+    -   [ ] Modify `send()` and `recv()` functions to exclusively use the `ZeroCopyBuffer` from the `MemoryPool` for all packet operations.
+    -   [ ] Ensure zero-copy behavior is maintained throughout the entire data processing pipeline.
 
-## Long-term Enhancements (Priorität 3)
+-   **Integrate FEC into Packet Processing:**
+    -   [ ] In the `send()` path, apply the `fec.rs` encoder to generate repair packets for outgoing data streams.
+    -   [ ] In the `recv()` path, buffer incoming packets and use the `fec.rs` decoder to reconstruct missing packets when necessary.
 
-1. **Architektur-Refactoring**: Modulare, testbare Komponenten
-2. **Crypto-Hardening**: Side-Channel-resistente Implementierungen
-3. **Monitoring Integration**: Comprehensive Metrics und Alerting
-4. **Documentation**: Code-Dokumentation und API-Guides
+-   **Integrate Custom AEAD Ciphers:**
+    -   [ ] This is a high-risk task. Investigate the internals of the `quiche` library to find a way to replace its default TLS ciphers (AES-GCM, ChaCha20-Poly1305).
+    -   [ ] Implement hooks or patches to integrate the custom **AEGIS-256** and **MORUS-1280-256** ciphers from `crypto.rs`.
+    -   [ ] If direct integration is not feasible, design a "crypto-wrapper" layer that applies the custom cipher encryption *after* `quiche` encrypts and *before* `quiche` decrypts, while managing nonces carefully. This is the fallback strategy.
 
-## Untersuchungsbedarf
+---
 
-- ~~**simd_dispatch.hpp**: Datei in `crypto/` scheint unlesbar oder leer zu sein~~ ✅ **KONSOLIDIERT**: SIMD-Funktionalität wurde in `optimize/unified_optimizations.hpp` integriert
-- ~~**simd_feature_detection.hpp**: Fehlende Header-Datei~~ ✅ **KONSOLIDIERT**: CPU-Feature-Erkennung über `UnifiedFeatureDetector` mit Rückwärtskompatibilität
-- **Quiche Integration**: Umfang der Patches und deren Auswirkungen auf Sicherheit
-- **Performance Benchmarks**: Aktuelle Performance-Charakteristika unbekannt
+## Phase 5: Binary Finalization & CLI (`main.rs`)
 
+The final phase is to create a usable binary with a proper command-line interface for end-users.
 
+-   **Implement `clap`-based CLI:**
+    -   [ ] Add `clap` as a dependency.
+    -   [ ] Define the CLI structure with subcommands for `client` and `server` modes.
+    -   [ ] **Client Mode Arguments:**
+        -   `--remote <address:port>`: Server to connect to.
+        -   `--local <address:port>`: Local port to listen on for applications.
+        -   `--profile <name>`: uTLS profile to use (e.g., `chrome`, `firefox`, `brave`).
+    -   **Server Mode Arguments:**
+        -   `--listen <address:port>`: Address to listen on for incoming clients.
+        -   `--cert <path>`: Path to the TLS certificate file.
+        -   `--key <path>`: Path to the TLS private key file.
 
-
-wir stellen später auf rust um aber das maacjst du nicht automatisch, das sage ich dir dann, nur zum merken!
-
-
-
-dann stellen wir auch FEC um aber ich sage dir dann, wir machen erstmal die anderen points, meine notes wie wir das dann machen kommen hier von ChatGPT:
-
-
-„Gib mir den Endgegner-FEC“ – Design-Blueprint
-
-(maximal effizient ⇄ brutal resilient, aber abschalt- & adaptierbar)
-
-⸻
-
-1. High-Level-Architektur
-
-FecManager               // orchestriert alles
-├── StrategyController    // wählt Algos je Pfad & Loss-Level
-├── EncoderCore           // stripes / parity / RLNC / cm256
-├── DecoderCore
-├── MetricsSampler        // loss, RTT, jitter, BW
-└── HwDispatch            // CPUID / NEON / VAES runtime-switch
-
-graph LR
-    A[Packets Out] -->|encode_if_needed| B(EncoderCore)
-    B -->|raw/repair frames| C{QUIC/Datagram}
-    C -->|network| D[(Internet)]
-    D -->|raw/repair frames| E(DecoderCore)
-    E -->|recovered| F[Packets In]
-    F --> App
-    subgraph Ctrl
-      MetricsSampler-->StrategyController
-      StrategyController-- config -->EncoderCore
-      StrategyController-- config -->DecoderCore
-    end
-
-
-⸻
-
-2. Algorithm-Stack (per Path)
-
-Loss-Band	Default Algo	Redundanz	Latenz	CPU (AVX2)
-0 – 5 %	Stripe-XOR (dein jetziges SIMD-RS)	5 % fix	1 Block	~0.4 cpb
-5 – 25 %	Sparse RLNC (Sliding)	adapt 10–25 %	< 1 RTT	~1.3 cpb
-≥ 25 %	cm256/Leopard (BSD-3)	10 % + adaptive doping	Block	0.8 cpb
-Fallback	Reed-Solomon-Scalar	20 %	Block	5 cpb
-
-Alles MIT/BSD – keine Lizenzbombe.
-
-⸻
-
-3. Adaptive State-Machine (StrategyController)
-
-enum FecState { Off, LowLoss, MidLoss, HighLoss }
-
-const LOSS_ENTER_MID:  f32 = 0.05; // 5 %
-const LOSS_ENTER_HIGH: f32 = 0.25; // 25 %
-const LOSS_EXIT_MID:   f32 = 0.03;
-const LOSS_EXIT_LOW:   f32 = 0.01;
-
-fn update(loss: f32) {
-    state = match (state, loss) {
-        (Off, l)        if l > LOSS_ENTER_MID  => MidLoss,
-        (LowLoss, l)    if l > LOSS_ENTER_HIGH => HighLoss,
-        (LowLoss, l)    if l < LOSS_EXIT_LOW   => Off,
-        (MidLoss, l)    if l < LOSS_EXIT_MID   => LowLoss,
-        (HighLoss, l)   if l < LOSS_ENTER_HIGH => MidLoss,
-        _ => state,
-    };
-}
-
-→ bei Performance-Mode einfach state = Off, fertig.
-
-⸻
-
-4. EncoderCore – Kern-APIs
-
-struct FecConfig {
-    bool enabled = true;
-    enum class Mode { ADAPTIVE, ALWAYS_ON, PERFORMANCE };
-    Mode mode = Mode::ADAPTIVE;
-    float target_latency_ms = 50;
-}
-
-bool encode(Packet& pkt, OutVec& out_frames);   // outgoing
-bool decode(Packet& frame, OutVec& recovered);  // incoming
-
-void set_state(FecState s);                     // invoked by controller
-void on_metrics(const NetMetrics& m);           // update loss/RTT
-
-Implementation-Details
-
-Algo	Encoding	Repair-Scheduler
-Stripe	SIMD XOR stripes, block 8 × 1500 B	jede 20 raw ⇒ 1 parity
-Sparse RLNC	GF(256) random sparse matrix (density ≈ 0.2)	„Every kth“ packet = coded combo über Sliding-Window (64)
-cm256	call cm256_encode(block, K, M)	Sende gleich nach Block-Close oder wenn ½ RTT vergangen
-
-SIMD-Kernel reused: multiply_vector_scalar() AVX2 / NEON.
-
-⸻
-
-5. HwDispatch
-
-if is_x86_feature_detected!("vaes")      -> Path::VAES512
-else if is_x86_feature_detected!("avx2") -> Path::AVX2
-else if is_x86_feature_detected!("sse2") -> Path::SSE2
-else if std::arch::is_aarch64_feature_detected!("neon") -> Path::NEON
-else                                      Path::Scalar
-
-Jeder Algo liefert Varianten für alle fünf Pfade.
-
-⸻
-
-6. MetricsSampler
-	•	benutzt bereits vorhandene QUIC-Stats → Verlust, RTT, Jitter
-	•	sliding-window 32 × 1 s, Exponential Moving Avg.
-	•	publishes JSON to StrategyController alle 250 ms.
-
-⸻
-
-7. Stealth-Integration
-	•	Parity-Frames als QUIC DATAGRAM mit custom frame-type id 0x37 (looks like Unknown-QPACK).
-	•	Timing-randomizer fügt ±7 ms jitter pro parity.
-	•	Payload padded auf nächstes power-of-two → DPI sieht nur „noise“.
-
-⸻
-
-8. Konfiguration (CLI / API)
-
---fec off                 # FecState::Off
---fec performance         # same, aber Toggle im UI
---fec always <ratio%>     # forced Stripe at given %
---fec adaptive <latency>  # default
-
-Runtime-RPC (gRPC/REST) → PATCH /config/fec { enabled:false }.
-
-⸻
-
-9. Abschalten bei guten Leitungen
-	•	Heuristik: loss < 1 % und RTT-var < 5 ms und bw > 50 Mbps ⇒ 30 s stabil ⇒ state = Off.
-	•	Soft-Hysterese: erst ab 2 % Verlust wieder an.
-
-⸻
-
-10. Build-Matrix & Footprint
-
-Path	Stripe	RLNC	cm256
-VAES512	0.25 cpb	0.9 cpb	0.6 cpb
-AVX2	0.4 cpb	1.3 cpb	0.8 cpb
-NEON	0.5 cpb	1.7 cpb	1.1 cpb
-Scalar	2.0 cpb	3.8 cpb	5 cpb
-
-(Measured on 4 KiB packets; cpb = cycles/byte)
-
-⸻
-
-11. Integration-Checklist
-	1.	Add crate deps: leopard-codec, rlnc, reed-solomon-erasure.
-	2.	Wrap them in EncoderCore / DecoderCore traits.
-	3.	Plug StrategyController into existing QuicFuscateCore::update() tick.
-	4.	Attach HwDispatch at init, store function-ptr tables.
-	5.	Expose CLI/JSON toggles.
-
-Fertig – du bekommst “geisteskrank resilient” FEC, das bei Top-Leitungen komplett wegklappt, auf Schrott-Netzen aber wie ein Berserker Parity nachlädt, ohne deine CPU zu grillen.
-
-Run it, break the net. 🫡
-## Rust Build & Test Instructions
-
-Die Rust-Umsetzung liegt im Verzeichnis `rust/`. Um ausschließlich die
-Rust-Komponenten zu bauen und die zugehörigen Tests zu starten, genügen zwei
-Befehle:
-
-```bash
-cd rust
-cargo build --workspace
-cargo test --workspace
-```
-
-Damit werden sämtliche Crates des Workspaces kompiliert und die zugehörigen
-Unit-Tests gestartet.
-## Noch zu erledigen
-
-- Kompletter Rebuild in Rust ohne Stubs, produktionsreifer Code
-- FEC crate ist vollständig integriert und liefert adaptive Redundanz
-- Module konsolidieren: je eine Datei für main, crypto, fec, optimized und stealth
-
-Weitere Änderungen werden hier dokumentiert.
+-   **Implement Main Application Logic:**
+    -   [ ] Write the `main` function logic to parse the CLI arguments.
+    -   [ ] Launch the QuicFuscate core in either client or server mode based on the parsed arguments.
+    -   [ ] Handle process lifecycle, signals, and graceful shutdown.

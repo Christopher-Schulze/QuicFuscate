@@ -1,0 +1,176 @@
+Folgendes, wir haben jetzt dieses Projekt aus unserem GitHub-Repo gezogen. Ich will als erstes, dass du das ganze Projekt vollständig analysierst und jedes einzelne File komplett liest. Das heißt jedes File und jede Zeile genauso, wie ich sage. Das ist wichtig, damit wir genau wissen, was überall drin steht. So, das wurde in C++ geschrieben und wurde jetzt zu Rust refactored. Kann sein, dass hier noch was fehlt oder was noch nicht komplett ist. Erstmal machst du ein Code Review und guckst es dir ganz genau an. So, und dann möchte ich, dass die komplette Implementierung dieses Projekts vollständig bis zum letzten Atom fertiggestellt wird. Bedeutet komplett in Rust. Alle Funktionen, alles muss komplett da sein. Keine Spielzeugimplementationen, keine Platzhalter, keine Stubs, keine Andeutungen, keine fehlerhaften oder unvollständigen Implementierungen. Alles muss da sein, 100%. End-to-end. Keine Ausnahmen, ja. Das musst du sicherstellen, das ist das oberste Ziel. So, dann... Ich gehe jetzt selbst mal rein und lese hier die Dokumentation. Eine Sekunde. Also was es sein soll, ist im Wesentlichen, es soll ein VPN-Protokoll sein, das komplett in Rust geschrieben ist. Wir brauchen praktisch hier nur die Lib dazu. Komplett in Rust geschrieben und voll auf Performance optimiert. So, und zwar, ich mache mal für mich die Dokumentation auf, eine Sekunde. Das Ganze soll ein High-Performance-Protokoll sein. Quick for Skate, es soll auf Quick basieren, es soll sehr modular sein. Es sollen aber auch nicht zu viele kleine Dateien sein. Das heißt, alles Mögliche soll zusammengefasst sein. Alles was FEC zugehörig ist, soll in einem FEC.rs liegen. Alles was zu Stealth-Techniken gehört, soll in Stealth.rs liegen. Also nicht in verschiedenen Ordnern, sondern in einzelnen Files. Alles was zu Optimierung, Hardware-Beschleunigung gehört, soll SIMD oder irgendwelche Hardware-Beschleunigung, Erkennung von Cyphern oder whatever, soll in Optimize.rs liegen. Alles was zu Cypher gehört, irgendwas zur Verschlüsselung, soll in Crypto.rs liegen. Alles was zu FEC gehört, soll in FEC.rs liegen. Alles was zu Core gehört, soll in Core.rs liegen. Ist auch alles klar, sehr gut. Dann lässt sich eigentlich nur sagen, dass das so refactored werden soll. Und dass du dich bei den Features komplett an die Dokumentation halten sollst. Alles soll zu 100% da sein und optimal implementiert, abgestimmt und optimiert. Es soll wirklich bis zum allerletzten Detail alles miteinander komplett so tief es geht verzahnt sein. Aber so dass es trotzdem noch modular ist und gut wartbar ist.
+
+
+Ich gehe mal kurz durch, damit wir auch alles haben. Wir haben Stealth-Module, Crypto-Module, FEC, dann die Optimierungs-Module, usw. Ich gehe mal die ganzen Features durch, erkläre dir genau, was ich da erwarte und wo die reingehören. Erstmal brauchen wir eine grundlegende Quick-Implementation, die soll da sein. Dieses Squish. Q-U-I-C-H-E Es ist ja so, dass manchmal auch geupdated wird. Bedeutet, ich will dieses Squish irgendwie als Core haben. Entweder wir müssen das in Rust umschreiben oder irgendwie einbetten, aber so, dass es so schnell und high-performant wie möglich ist. Oder einfach als Lib.rs oder so. Dass wir das auch austauschen können, dass es updatebar ist. Aber wir müssen das patchen. Du kannst auch mal in die Dokumentation gucken, in die Squish. Reicht aber auch, wenn das nicht so geht zum Austauschen, wenn du keine Möglichkeit findest. Dann bitte einfach nur einmal die neueste Version nehmen und die patchen. Und dann bauen wir alles auf dieser neuesten Version auf und fertig. Dann ist es halt nicht austauschbar. Du musst es analysieren. Wir haben ja schon Squish patched, haben ja schon unser Libs. Genau. So, das zu dem Kern. Dann die ganzen anderen Sachen, die kommen in Core rein. Alles so Main und irgendwas, blablabla. Wir machen eine Main, da kannst du alles drin starten. Aber dann kommt alles in Core rein, was irgendwie zu dem Programm generell gehört. Also wir haben folgendes, also wir haben praktisch dieses QUIC-Protokoll als Kern, das haben wir voll optimiert, auch mit BBRV2, Congestion Control, und mit XTP, Zero Copy Optimization. Zero Copy bitte überall in jedem Modul einsetzen, wo es nur um die geht. Und zwar so perfekt und effektiv voll ausführlich wie es geht. So, jetzt komme ich mal dazu, was in Stealth rein soll. Ich möchte in Stealth folgende Funktionalitäten. Ich möchte DNS over HTTPS. Ich möchte Fake TLS. Ich möchte U-TLS und ich möchte auch, dass es durchgängig überall Fake TLS genannt wird und auch U-TLS. Ich möchte auch HTTP3 Masquerading und ich möchte auch Domain Fronting. Alles in der bestmöglichsten, highly sophisticated Form, die es gibt. Ich möchte auch XOR-based Traffic Obfuscation. Und ich möchte auch, wie im Trojan-VPN, perfekte Fake Headers. Ja, wir haben ja irgendwo Fake Fingerprints, das ist glaube ich bei U-TLS, und Fake Headers und ich möchte, dass die auch zueinander passen und abgestimmt sind. Nicht, dass ein Fingerprint und ein Header sehen so aus und einer so aus. Nein, das muss immer alles voll abgestimmt sein. Und dazu möchte ich vorliegend Profile haben, die sowohl Fingerprint als auch Header als auch alles andere haben. Und zwar in der maximal optimiertesten, möglichst realistischen Form. Am besten so fünf bis zehn Profile. Modernste Browser, modernste Betriebssysteme, alles. Bestehend aus macOS, Windows, Android, iOS, Linux. Und als Browser kannst du nehmen Safari auf Mac, oder Chrome, oder Firefox. Auf Windows kannst du alles mögliche nehmen, was es gibt. Edge, Chrome, Firefox, Opera, Brave. So auf Linux nimmst du bitte einfach nur Firefox. Genau, macOS nimmst du Safari und iOS auch Safari. Und auf Android nimmst du einfach den Android Chrome Browser. Dann nimmst du auch überall die Fingerprints und die Fake Headers, das muss alles perfekt sein. Und wirklich abgestimmt, das muss immer aus einem Guss kommen. Fake Fingerprint muss zum Header passen und die ganze andere Obfuscation muss auch mit voll reinspielen. Bei dem Domain-Fronting macht es so, dass die Seiten denken, es kommt von irgendeiner legitimen Seite. Nimmst du bitte Cloudflare, Google.com, Microsoft.com und zwei andere Seiten, die dafür am besten geeignet sind, so fünf Stück. So kannst du immer mit einer Logik vernünftig rotieren. Genau, die ganzen Sachen müssen aus einem Guss kommen und perfekt abgestimmt sein. Die müssen alle in sich, alle diese Features perfekt abgestimmt sein, perfekt optimiert sein miteinander und perfekt abgestimmt und harmonisiert sein und darüber hinaus auch komplett in QUIC so tief wie möglich eingebaut sein und harmonisiert. Und ich möchte auch, dass alle Features, alles was da ist, dass es vollends auch mit der ganzen Kryptografie von dem Self und dem Core voll abgestimmt ist. Mit den Kryptografie, die wir haben. Wir haben ja AEGIS-128L und AEGIS-128X und dann haben wir MOROS-1280 und 128. Das sind ja unsere Protokolle. Das muss auch mit dem Self komplett passen, mit den Handshakes oder Fake, Scheiße oder whatever. Das muss auch optimiert sein. Genau, so dann unsere Ciphers, die habe ich gerade genannt, die hast du auch schon gefunden. Die müssen auch komplett mit dem Core verbandelt sein und den Self graben und wir haben ein optimierendes Framework drin. Wir haben so eine zentrale CPU Detection, die erkennt, auf welcher Architektur sind wir, was für eine CPU, was für ein System. Und ich will volle Hardware Beschleunigung für jedes System, für x86, für x64 und ARM, also Neon oder AVX, alle möglichen Versionen, für alle Sachen. Für die FEC-Sachen, für die Self-Sachen, für die Core-Sachen, für alles. Dann haben wir auch viele Optimierungen, zum Beispiel Zero Copy wollen wir überall haben und alle anderen Optimierungen, die ich schon genannt habe, auch überall. Wir haben zum Beispiel CPU Feature Detection, genau, wir wollen das alles ausnutzen. SEMD, Dispatch and Operations haben wir. Memory Pool Configuration und Stream Optimization, das will ich alles überall haben, in jedem Modul, so gut wie es geht. Das will ich auch in der Forward Error Correction haben. Bei allen Staff Features will ich das haben. Und bei allen Core-Sachen, alles muss Hardware Beschleunigt sein, einfach fucking alles. Und entsprechend, wie der CPU Feature oder CPU Architecture Detection, wie das läuft, werden auch die Cypher Suites ausgewählt, weil die sind unterschiedlich stark auf bestimmten Systemen. So wäre zum Beispiel AEGIS 128X die erste Wahl, die zweite Wahl wäre AEGIS 128L und wenn so gut wie gar nichts vorhanden ist an Beschleunigung, dann nehmen wir Morus 1280 128. Hier seht ihr noch die Core-Module. Connection, Migration, BB, RV2, Congestion Control, XDP, Zero Copy und MTU Discovery. Das würde ich zum Beispiel auch alles in einem Core-Modul haben. Immer schon alles in einzelnen Modulen haben, damit wir nicht so viele Module haben. Die Cypher-Suites, alles da. Ich will, dass alle Stealth-Features, das komplette FEC, alle Optimierungen, alle Optimizations, alle Kryptos und alle Optimierungen, alle Hardwarebeschleunigungen, einfach alles global, jedes einzelne Feature, egal was. Ob zur Optimierung, ob zum Stealth, ob zu FEC, ob zum Core, ob zur Geschwindigkeitsoptimierung, ob irgendwas anderes für die Verbindung. Egal, vollkommen egal welches Feature. Alles soll komplett im ganzen Projekt miteinander harmonisiert und vollständig so stark es geht optimiert und abgestimmt sein. Alles soll End-to-End, 100% vollständig, ohne Platzhalter, ohne Stubs, ohne Unvollständigkeiten, absolut maximal vollständig Production-Ready implementiert sein. Ohne Ausnahme. Und es soll alles maximal intelligent, maximal effektiv, so effektiv wie es nur geht für die jeweilige Implementation, das Feature oder den Zweck und den Sinn, maximal effektiv, so effektiv, so krass es nur geht, so wirkungsvoll es nur irgendwie geht, implementiert sein. Finde da jeden Weg, das so wirkungsvoll wie möglich zu machen. Aber alles auch wieder vollständig harmonisiert mit jedem anderen Feature. Und jede einzelne Implementierung, einfach jedes Atom darin, soll so effizient wie nur irgendwie möglich, vollständig implementiert sein. So effizient es geht, alles. Jedes einzelne Feature, jede Klasse, jedes Atom, jede Optimierung, einfach alles. Alles soll maximal effizient sein, alles miteinander so stark es geht optimiert. Auch Rust und der ganze Code, die ganze Libs soll so Memory und effizient, Ressourcen optimiert sein wie es geht. Selbst das Compiling, alles. Es soll einfach alles perfekt sein. Maximum raus, wenn es irgendwie geht. Die Stealth-Profile im Handy sollen nicht unnötig viele sein, sondern nur so viele, wie ich gesagt habe, und es soll perfekt aufeinander abgestimmt sein und so fucking realistisch sein, wie es geht. Aber nicht unnötig ineffizient. Ja, das würde passen. Genau, und dann eine Sache, zu der ich mich noch gar nicht geäußert habe. Das ist, also zu den ganzen Optimierungen kannst du auch alles lesen, das machst du wie in einer Doku. 
+
+Bei FEC verwirfst du was bisher als plan ist und machst das hier:
+
+Hier kommt die ultimative, ultra-detaillierte Spezifikation deines AI-Agenten für adaptive FEC – von „kein FEC, lol“ bis „brutalster Recover-King“ und darüber hinaus. Jede einzelne Schraube ist feinjustiert, damit dein System in jeder Extremsituation abgeht wie ’ne Panzerfaust.
+
+⸻
+
+1. Ziele & Architekturüberblick
+
+Zielsetzung
+	•	Einheitliches Framework: „ASW-RLNC-X“ – Adaptive Systematic Sliding-Window RLNC Extended
+	•	Stufenlos adaptierbar von Modus 0 (kein FEC) bis Modus 5 (Extrem Recover)
+	•	Unsichtbarer Wechsel: Kein Ruckeln, kein Quality-Drop bei Moduswechseln
+	•	Primär: ≤ 1 % Latenz-Overhead, minimale CPU in Modi 1–4
+	•	Sekundär: maximale Recovery-Power in Modus 5 (bis ~80 % Verlust)
+
+High-Level-Pfade
+	1.	Loss Estimation: Exponentielles Moving-Average + kurzzeitige Burst-Detektion
+	2.	Mode Selection: PID-geregelte Schwellwert-Logik mit Hysterese und Cross-Fade
+	3.	Encoding/Decoding: Systematic Sliding-Window RLNC mit Tweaks
+	4.	Hardware-Accelerations: SIMD, Multithreading, Memory-Pools
+
+⸻
+
+2. Modus-Definitionen & Dynamische Fenster
+
+| Modus   | Overhead-Max │ p_est Range    │ Initial Window W₀ │ CPU-Budget │ Dynamische Anpassung             |
+|:—––:|:————:|:–––––––:|:—————–:|:–––––:|:––––––––––––––––:|
+| 0   | 0 %          │ p < 1 %        │ –                 │ 0 %        | Fallback auf Pass-Through        |
+| 1   | ≤ 5 %        │ 1 % ≤ p < 5 %  │ 16                │ ≤ 5 %       | W = clamp(8…32, W_prev·α_loss)   |
+| 2   | ≤ 15 %       │ 5 % ≤ p < 15 % │ 64                │ ≤ 10 %      | W = clamp(32…128, W_prev·α_loss) |
+| 3   | ≤ 30 %       │ 15 % ≤ p < 30 %│ 128               │ ≤ 20 %      | W = clamp(64…256, W_prev·α_loss) |
+| 4   | ≤ 50 %       │ 30 % ≤ p < 50 %│ 512               │ ≤ 40 %      | W = clamp(256…1024, W_prev·α_loss)|
+| 5   | unlimitiert  │ p ≥ 50 %       │ 1024              │ ≤ 70 %      | Rateless, W ⭢ ∞ bei Bedarf       |
+	•	p_est: exp. MA über letzte 1000 Pakete + Burst-Spike-Detector
+	•	Hysterese: ±2 % um Flapping zu vermeiden
+	•	Dynamik-Faktor α_loss ≔ 1 + k·(p_est – p_target), k≈0.5
+	•	Clamp verhindert zu abruptes Wachstum/Schrumpfen
+
+⸻
+
+3. Advanced Encoding & Decoding
+
+3.1. Systematisches Sliding-Window RLNC
+	1.	Systematik:
+	•	Phase A: Aussendung von K Originalpaketen
+	•	Phase B: Aussendung von N–K linear kombinierten Paketen
+	2.	Koeffizienten-Generierung
+	•	GF(2⁸) mit PCLMULQDQ-basierten Karatsuba-Multiplikationen auf x86
+	•	ARM64: Crypto-Extension für PMULL + NEON-Vectorization
+	•	Koeffizienten aus Cauchy-Matrix für minimale Dichte → leicht invertierbare Matrizen
+	3.	Fenster & Overhead
+	•	N = ⌈(1 + O)·K⌉, O = O_target aus Tabelle
+	•	Cross-Fade-Window bei Mode-Switch: in ersten M Paketen 50/50, danach 100 % neu
+
+3.2. High-Performance Dekodierung
+	•	Sparse Gaussian Elimination
+	•	Repräsentiere Matrix in Compressed-Sparse-Row (CSR)
+	•	Stoppe, sobald Rang = K erreicht → Early-Exit
+	•	Block-LU mit Wiedemann-Algorithmus
+	•	Bei großen W (>256) Umschalten auf Wiedemann (O(n·nnz))
+	•	In Kombination mit Block-Recursive-Inversion auf CPU-Caches angepasst
+	•	Memory-Pooling
+	•	Prä-allokierte Pools für Fenster-Matrices, vermeide malloc/free
+
+⸻
+
+4. Hyper-Adaptives Verhalten
+	1.	Loss Estimator
+	•	exp. MA (λ=0.01) + Burst-Window (N=50 Pakete)
+	•	Kalman-Filter-Feintuning möglich für Rauschentfernung
+	2.	Mode Decision
+	•	PID-Controller auf p_est gegen Mode-Schwellen
+	•	Anti-Oscillation: Mindestens 500 ms Verweilzeit
+	3.	Seamless Cross-Transition
+	•	A/B-Testing zweier Parameter-Sätze in echtem Traffic
+	•	Blitzschnell: Wechsel innerhalb <1 RTT
+	4.	Emergency-Override
+	•	Bei plötzlicher Loss-Spike >20 % binnen 100 ms: direkt Modus 5 aktivieren
+
+⸻
+
+5. Feintuning der Finite-Field-Operationen
+	•	Log/Anti-Log-Tabellen für GF(2⁸) mit 256-Einträge, im L1-Cache
+	•	Bit-Slicing: Packe 8 Bytes in NEON-Register, führe 8 Multiplies parallel aus
+	•	Prefetch+Software-Pipelining: Lade kommende Koeffizienten vor
+	•	Loop-Unrolling in critical loops, minimaler Branching
+
+⸻
+
+6. Hardware-Level Optimierungen
+	•	x86
+	•	AVX512-VBMI für Byte-Shuffle bei Tabellenzugriff
+	•	PCLMULQDQ für Karatsuba GF-Multiplikation
+	•	ARM64
+	•	Crypto-Extension PMULL + NEON für 128-bit GF-Ops
+	•	LL/SC Synchronisation für Multithreading
+	•	Parallel-ISM
+	•	Tokio-Tasks je Sliding-Window, Rayon für Bulk-Decoding
+	•	NUMA-Awareness auf Multi-Socket-Systemen:
+	•	Fenstermemory + Pools lokal zu CPU-Socket binden
+
+⸻
+
+7. Rust-Implementierungs-Blueprint
+
+
+
+pub enum Mode { Zero, Light, Normal, Medium, Strong, Extreme }
+
+pub struct AdaptiveFec {
+    estimator: LossEstimator,
+    mode_mgr: ModeManager,
+    encoder: Encoder,
+    decoder: Decoder,
+}
+
+impl AdaptiveFec {
+    pub fn new(config: &Config) -> Self;
+    pub fn on_send(&mut self, pkt: &[u8]) -> Vec<Packet>;
+    pub fn on_receive(&mut self, pkts: &[Packet]) -> Option<Vec<u8>>;
+    pub fn report_loss(&mut self, lost: usize, total: usize);
+}
+
+7.3. Konfigurations-TOML
+
+[adaptive_fec]
+lambda = 0.01
+burst_window = 50
+hysteresis = 0.02
+pid = { kp=1.2, ki=0.5, kd=0.1 }
+
+[[adaptive_fec.modes]]
+name     = "leicht";   w0 = 16;   overhead = 0.05; cpu = 0.05
+[[adaptive_fec.modes]]
+name     = "normal";   w0 = 64;   overhead = 0.15; cpu = 0.10
+# … analog für mittel, stark, extrem …
+
+
+⸻
+
+8. Qualitätssicherung & Metriken
+	•	RTT-Impact ≤ 1 ms bei W≤128, ≤ 2 ms bei W≤512
+	•	CPU-Utilization:
+	•	Modus 1 ≤ 5 % @1 Gbps, Modus 3 ≤ 20 %, Modus 5 ≤ 70 %
+	•	Recovery-Guarantees:
+	•	p_loss=30 % → ≥ 99,9 % Decodierungserfolg
+	•	p_loss=50 % → ≥ 97 %
+	•	p_loss=80 % → ≥ 90 % (Fallback-Timeout nach X s)
+	•	Burst-Resilience:
+	•	Spike bis 50 % für 200 ms → kein Moduswechsel, sondern gesteigerte Rateless-Phase
+
+⸻
+
+9. Erweiterungsmöglichkeiten & Tunin
+	1.	Kalman-Loss-Filter: statt exp. MA für extrem glatte p_est
+	4.	Real-Time-Monitoring: Telemetrie via Prometheus-Exporter (Fenster-Stats, CPU, Throughput)
+	5.	Feldgrößen-Switch: GF(2^16) bei Extremmodus für noch robustere Kombis
+
+⸻
+
+
+---
+
+mache es sogfältig am ende soll es mindestens so sein, aber halt auch implmentierbar sein, logisch!
+
+
+
+Also ich will alles end 2 end implemnetier haben! 
+Passe die Documentation.md an hinsichtlich FEC und falls ich andere features noch genannt habe, dann erstelle einen detailierten plan wie du vorgehen willst in "todo.md" könnte veraltet sein checke die erstmal udn guck ob du davon noch was übernimmst, 
+
+pack da die steps und roadmap rein und dann beginne mit der umsetztung go! MAXIMALE PERFEKTION! KOMPLETT ohne stubs, platzhalter oder sonst was go!
