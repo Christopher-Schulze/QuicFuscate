@@ -11,3 +11,8 @@ tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 rand = { version = "0.8", features = ["small_rng"] }
 thiserror = "1"
+reqwest = { version = "0.11", optional = true, default-features = false, features = ["rustls-tls"] }
+serde_json = { version = "1", optional = true }
+
+[features]
+doh-reqwest = ["reqwest", "serde_json"]
