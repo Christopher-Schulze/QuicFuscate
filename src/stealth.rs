@@ -146,6 +146,21 @@ pub enum OsProfile {
     Android,
 }
 
+impl std::str::FromStr for OsProfile {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "windows" => Ok(OsProfile::Windows),
+            "macos" | "mac" => Ok(OsProfile::MacOS),
+            "linux" => Ok(OsProfile::Linux),
+            "ios" => Ok(OsProfile::IOS),
+            "android" => Ok(OsProfile::Android),
+            _ => Err(()),
+        }
+    }
+}
+
 /// Represents a complete client fingerprint profile.
 #[derive(Debug, Clone)]
 pub struct FingerprintProfile {
@@ -234,7 +249,7 @@ impl FingerprintProfile {
                max_idle_timeout: 30_000,
            },
             // --- macOS Profiles ---
-            (BrowserProfile::Safari, OsProfile::MacOS) => Self {
+           (BrowserProfile::Safari, OsProfile::MacOS) => Self {
                 browser, os,
                 user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15".to_string(),
                 tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xc009, 0xc013, 0xc00a, 0xc014],
@@ -244,6 +259,61 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 2_097_152,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 45_000,
+            },
+            (BrowserProfile::Chrome, OsProfile::MacOS) => Self {
+                browser, os,
+                user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36".to_string(),
+                tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
+                accept_language: "en-US,en;q=0.9".to_string(),
+                initial_max_data: 10_000_000,
+                initial_max_stream_data_bidi_local: 1_000_000,
+                initial_max_stream_data_bidi_remote: 1_000_000,
+                initial_max_streams_bidi: 100,
+                max_idle_timeout: 30_000,
+            },
+            (BrowserProfile::Chrome, OsProfile::Linux) => Self {
+                browser, os,
+                user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36".to_string(),
+                tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
+                accept_language: "en-US,en;q=0.9".to_string(),
+                initial_max_data: 10_000_000,
+                initial_max_stream_data_bidi_local: 1_000_000,
+                initial_max_stream_data_bidi_remote: 1_000_000,
+                initial_max_streams_bidi: 100,
+                max_idle_timeout: 30_000,
+            },
+            (BrowserProfile::Firefox, OsProfile::Linux) => Self {
+                browser, os,
+                user_agent: "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:127.0) Gecko/20100101 Firefox/127.0".to_string(),
+                tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xcca9, 0xcca8, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xc013, 0xc014],
+                accept_language: "en-US,en;q=0.5".to_string(),
+                initial_max_data: 12_582_912,
+                initial_max_stream_data_bidi_local: 1_048_576,
+                initial_max_stream_data_bidi_remote: 1_048_576,
+                initial_max_streams_bidi: 100,
+                max_idle_timeout: 60_000,
+            },
+            (BrowserProfile::Chrome, OsProfile::Android) => Self {
+                browser, os,
+                user_agent: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36".to_string(),
+                tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
+                accept_language: "en-US,en;q=0.9".to_string(),
+                initial_max_data: 5_000_000,
+                initial_max_stream_data_bidi_local: 500_000,
+                initial_max_stream_data_bidi_remote: 500_000,
+                initial_max_streams_bidi: 100,
+                max_idle_timeout: 30_000,
+            },
+            (BrowserProfile::Safari, OsProfile::IOS) => Self {
+                browser, os,
+                user_agent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1".to_string(),
+                tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xc009, 0xc013, 0xc00a, 0xc014],
+                accept_language: "en-US,en;q=0.9".to_string(),
+                initial_max_data: 5_000_000,
+                initial_max_stream_data_bidi_local: 500_000,
+                initial_max_stream_data_bidi_remote: 500_000,
+                initial_max_streams_bidi: 100,
+                max_idle_timeout: 30_000,
             },
             // --- Fallback Profile ---
             _ => Self::new(BrowserProfile::Chrome, OsProfile::Windows),
@@ -284,13 +354,25 @@ impl Http3Masquerade {
     /// Generates a list of QPACK-style headers for an HTTP/3 request.
     /// This is a simplified representation. A real implementation uses QPACK.
     pub fn generate_headers(&self, host: &str, path: &str) -> Vec<quiche::h3::Header> {
-        vec![
+        let mut headers = vec![
             quiche::h3::Header::new(b":method", b"GET"),
             quiche::h3::Header::new(b":scheme", b"https"),
             quiche::h3::Header::new(b":authority", host.as_bytes()),
             quiche::h3::Header::new(b":path", path.as_bytes()),
             quiche::h3::Header::new(b"user-agent", self.profile.user_agent.as_bytes()),
-        ]
+        ];
+
+        let http_headers = self.profile.generate_http_headers();
+        if let Some(al) = http_headers.get("Accept-Language") {
+            headers.push(quiche::h3::Header::new(b"accept-language", al.as_bytes()));
+        }
+        if let Some(acc) = http_headers.get("Accept") {
+            headers.push(quiche::h3::Header::new(b"accept", acc.as_bytes()));
+        }
+        if let Some(enc) = http_headers.get("Accept-Encoding") {
+            headers.push(quiche::h3::Header::new(b"accept-encoding", enc.as_bytes()));
+        }
+        headers
     }
 
     /// Encodes the generated headers using QPACK compression. The resulting
@@ -342,11 +424,27 @@ impl DomainFrontingManager {
         }
     }
 
-    /// Selects the next CDN provider to use for domain fronting.
+    /// Selects the next CDN provider to use for domain fronting in a round-robin fashion.
     pub fn get_fronted_domain(&self) -> &'static str {
         let current = self.index.fetch_add(1, Ordering::SeqCst);
         let idx = current % self.providers.len();
         self.providers[idx].get_domain()
+    }
+
+    /// Randomly chooses a CDN provider. Useful when deterministic rotation is undesired.
+    pub fn random_domain(&self) -> &'static str {
+        use rand::seq::SliceRandom;
+        let mut rng = rand::thread_rng();
+        self.providers
+            .choose(&mut rng)
+            .map(|p| p.get_domain())
+            .unwrap_or("cdn.example.com")
+    }
+
+    /// Replaces the current provider list.
+    pub fn set_providers(&mut self, providers: Vec<CdnProvider>) {
+        self.providers = providers;
+        self.index.store(0, Ordering::SeqCst);
     }
 }
 
@@ -468,6 +566,13 @@ impl XorObfuscator {
     /// Reverses XOR obfuscation. The operation is symmetrical.
     pub fn deobfuscate(&self, payload: &mut [u8]) {
         self.obfuscate(payload);
+    }
+
+    /// Generates a fresh obfuscation key using the provided CryptoManager.
+    pub fn rekey(&self, crypto_manager: &CryptoManager) {
+        let mut key = self.key.lock().unwrap();
+        *key = crypto_manager.generate_session_key(32);
+        self.position.store(0, Ordering::Relaxed);
     }
 }
 
@@ -671,19 +776,17 @@ impl StealthManager {
     /// Starts automatic rotation through the given browser profiles.
     /// This spawns a task on the DoH runtime which periodically updates the
     /// active fingerprint.
-    pub fn start_profile_rotation(self: &Arc<Self>, browsers: Vec<BrowserProfile>, interval: std::time::Duration) {
-        if browsers.is_empty() {
+    pub fn start_profile_rotation(self: &Arc<Self>, profiles: Vec<FingerprintProfile>, interval: std::time::Duration) {
+        if profiles.is_empty() {
             return;
         }
         let mgr = Arc::clone(self);
         DOH_RUNTIME.spawn(async move {
-            let os = mgr.current_profile().os;
             let mut idx = 0usize;
             loop {
                 tokio::time::sleep(interval).await;
-                idx = (idx + 1) % browsers.len();
-                let profile = FingerprintProfile::new(browsers[idx], os);
-                mgr.set_fingerprint_profile(profile);
+                idx = (idx + 1) % profiles.len();
+                mgr.set_fingerprint_profile(profiles[idx].clone());
             }
         });
     }
