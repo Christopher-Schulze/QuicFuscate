@@ -111,6 +111,21 @@ pub enum BrowserProfile {
     Brave,
 }
 
+impl std::str::FromStr for BrowserProfile {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "chrome" => Ok(BrowserProfile::Chrome),
+            "firefox" => Ok(BrowserProfile::Firefox),
+            "safari" => Ok(BrowserProfile::Safari),
+            "opera" => Ok(BrowserProfile::Opera),
+            "brave" => Ok(BrowserProfile::Brave),
+            _ => Err(()),
+        }
+    }
+}
+
 /// Defines the target operating system for fingerprint spoofing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OsProfile {
@@ -421,7 +436,7 @@ impl Default for StealthConfig {
 /// The central orchestrator for all stealth techniques.
 pub struct StealthManager {
     config: StealthConfig,
-    fingerprint: FingerprintProfile,
+    fingerprint: Mutex<FingerprintProfile>,
     doh_client: Client,
     domain_fronter: Option<DomainFrontingManager>,
     xor_obfuscator: Option<XorObfuscator>,
@@ -453,7 +468,7 @@ impl StealthManager {
 
         Self {
             config,
-            fingerprint,
+            fingerprint: Mutex::new(fingerprint),
             doh_client: Client::new(),
             domain_fronter,
             xor_obfuscator,
@@ -469,10 +484,11 @@ impl StealthManager {
     /// to control the Client Hello message format (cipher suite order, extensions, GREASE values)
     /// would be required. This is a simulation based on available quiche settings.
     pub fn apply_utls_profile(&self, config: &mut quiche::Config) {
-        info!("Applying uTLS fingerprint for: {:?}/{:?}", self.fingerprint.browser, self.fingerprint.os);
+        let fingerprint = self.fingerprint.lock().unwrap();
+        info!("Applying uTLS fingerprint for: {:?}/{:?}", fingerprint.browser, fingerprint.os);
 
         // Set cipher suites according to the profile's specified order.
-        let quiche_ciphers: Vec<quiche::Cipher> = self.fingerprint.tls_cipher_suites
+        let quiche_ciphers: Vec<quiche::Cipher> = fingerprint.tls_cipher_suites
             .iter()
             .filter_map(|&iana_id| map_iana_to_quiche_cipher(iana_id))
             .collect();
@@ -486,11 +502,23 @@ impl StealthManager {
         config.set_application_protos(quiche::h3::APPLICATION_PROTOCOL).unwrap();
 
         // Apply the detailed QUIC transport parameters from the harmonized profile.
-        config.set_initial_max_data(self.fingerprint.initial_max_data);
-        config.set_initial_max_stream_data_bidi_local(self.fingerprint.initial_max_stream_data_bidi_local);
-        config.set_initial_max_stream_data_bidi_remote(self.fingerprint.initial_max_stream_data_bidi_remote);
-        config.set_initial_max_streams_bidi(self.fingerprint.initial_max_streams_bidi);
-        config.set_max_idle_timeout(self.fingerprint.max_idle_timeout);
+        config.set_initial_max_data(fingerprint.initial_max_data);
+        config.set_initial_max_stream_data_bidi_local(fingerprint.initial_max_stream_data_bidi_local);
+        config.set_initial_max_stream_data_bidi_remote(fingerprint.initial_max_stream_data_bidi_remote);
+        config.set_initial_max_streams_bidi(fingerprint.initial_max_streams_bidi);
+        config.set_max_idle_timeout(fingerprint.max_idle_timeout);
+    }
+
+    /// Changes the active fingerprint profile at runtime.
+    /// Call `apply_utls_profile` again to update an existing quiche configuration.
+    pub fn set_fingerprint_profile(&self, profile: FingerprintProfile) {
+        let mut fp = self.fingerprint.lock().unwrap();
+        *fp = profile;
+    }
+
+    /// Returns the currently active fingerprint profile.
+    pub fn current_profile(&self) -> FingerprintProfile {
+        self.fingerprint.lock().unwrap().clone()
     }
     
     /// Resolves a domain, using DoH if enabled.
@@ -579,7 +607,10 @@ fn map_iana_to_quiche_cipher(iana_id: u16) -> Option<quiche::Cipher> {
     /// Generates HTTP/3 headers for masquerading a request.
     pub fn get_http3_masquerade_headers(&self, host: &str, path: &str) -> Option<Vec<quiche::h3::Header>> {
         if self.config.enable_http3_masquerading {
-            let masquerade = Http3Masquerade::new(self.fingerprint.clone());
+            let masquerade = {
+                let fp = self.fingerprint.lock().unwrap();
+                Http3Masquerade::new(fp.clone())
+            };
             debug!("Generating HTTP/3 masquerade headers for host: {}", host);
             Some(masquerade.generate_headers(host, path))
         } else {
