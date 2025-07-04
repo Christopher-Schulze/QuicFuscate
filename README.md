@@ -166,25 +166,24 @@ cargo build --workspace
 
 ## 🖥️ Command-Line Usage
 
-The project provides several binaries once built:
+After building the project a single `quicfuscate` binary is available. It
+provides `client` and `server` subcommands.
 
-- **quicfuscate_demo** – feature-rich demo tool with many options.
-- **quicfuscate_client** – minimal client accepting `<host> <port>` arguments.
-- **quicfuscate_server** – placeholder server without arguments.
+### Start the server
 
-Run `quicfuscate_demo --help` to see all available options. Important flags include:
-
+```bash
+./quicfuscate server --listen 0.0.0.0:4433 \
+    --cert cert.pem --key key.pem
 ```
-  -s, --server <host>        Server hostname (default: example.com)
-  -p, --port <port>          Server port (default: 443)
-  -f, --fingerprint <name>   Browser fingerprint (chrome, firefox, safari, ...)
-      --no-utls              Disable uTLS and use regular TLS
-      --verify-peer          Enable certificate validation
-      --ca-file <path>       CA file for peer verification
-  -v, --verbose              Verbose logging
-      --debug-tls            Show TLS debug information
-      --list-fingerprints    List available browser fingerprints
+
+### Start a client
+
+```bash
+./quicfuscate client --remote example.com:4433 \
+    --local 127.0.0.1:1080 --profile firefox
 ```
+
+Run `quicfuscate --help` for a full list of options.
 
 ## 🔄 Continuous Integration
 
