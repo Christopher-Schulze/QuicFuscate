@@ -107,4 +107,12 @@ impl QuicFuscateStealth {
     pub fn apply_domain_fronting(&self, headers: &str) -> String {
         self.domain_fronting.apply_domain_fronting(headers)
     }
+
+    pub fn apply_sni_fronting(&self, hello: &[u8]) -> Vec<u8> {
+        self.domain_fronting.apply_tls_fronting(hello)
+    }
+
+    pub fn generate_h3_request(&mut self, path: &str) -> Vec<u8> {
+        self.http3_masq.encode_request(path, &mut self.qpack)
+    }
 }
