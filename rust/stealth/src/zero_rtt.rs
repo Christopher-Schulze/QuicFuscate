@@ -3,6 +3,17 @@ pub struct ZeroRttConfig {
     pub enabled: bool,
 }
 
+use thiserror::Error;
+use quicfuscate_error::QuicFuscateError;
+
+#[derive(Debug, Error)]
+pub enum ZeroRttError {
+    #[error("zero-RTT disabled or data too large")]
+    InvalidEarlyData,
+}
+
+impl QuicFuscateError for ZeroRttError {}
+
 impl Default for ZeroRttConfig {
     fn default() -> Self {
         Self { max_early_data: 1024, enabled: false }
@@ -33,14 +44,14 @@ impl ZeroRttEngine {
     pub fn set_enabled(&mut self, e: bool) { self.cfg.enabled = e; }
     pub fn set_max_early_data(&mut self, max: usize) { self.cfg.max_early_data = max; }
 
-    pub async fn send_early_data(&mut self, data: &[u8]) -> Result<(), ()> {
+    pub async fn send_early_data(&mut self, data: &[u8]) -> Result<(), ZeroRttError> {
         self.attempts += 1;
 
         // Mirror the checks performed by the C++ implementation. Early data
         // can only be sent when zero-RTT has been enabled and the payload size
         // stays within the configured limit.
         if !self.cfg.enabled || data.len() > self.cfg.max_early_data {
-            return Err(());
+            return Err(ZeroRttError::InvalidEarlyData);
         }
 
         // In the C++ version the data would be written to the network. Here we

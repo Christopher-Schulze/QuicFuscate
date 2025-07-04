@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use thiserror::Error;
+use quicfuscate_error::QuicFuscateError;
 
 struct Stream {
     priority: u8,
@@ -25,6 +26,8 @@ pub enum StreamError {
     #[error("stream closed")]
     Closed,
 }
+
+impl QuicFuscateError for StreamError {}
 
 pub type Result<T> = std::result::Result<T, StreamError>;
 

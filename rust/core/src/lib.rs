@@ -6,6 +6,7 @@
 #[cfg(feature = "quiche")]
 use quiche;
 use thiserror::Error;
+use quicfuscate_error::QuicFuscateError;
 use once_cell::sync::Lazy;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
@@ -27,6 +28,8 @@ pub enum CoreError {
     #[error("QUIC error: {0}")]
     Quic(String),
 }
+
+impl QuicFuscateError for CoreError {}
 
 pub type Result<T> = std::result::Result<T, CoreError>;
 
@@ -149,7 +152,7 @@ impl QuicConnection {
         self.current_path = Some(addr.to_string());
         NETWORK
             .lock()
-            .unwrap()
+            .map_err(|_| CoreError::Quic("network lock poisoned".into()))?
             .entry(addr.to_string())
             .or_insert_with(VecDeque::new);
 
@@ -196,7 +199,7 @@ impl QuicConnection {
             .map_err(|_| CoreError::Quic("invalid address".into()))?;
         NETWORK
             .lock()
-            .unwrap()
+            .map_err(|_| CoreError::Quic("network lock poisoned".into()))?
             .entry(new_addr.to_string())
             .or_insert_with(VecDeque::new);
         self.current_path = Some(new_addr.to_string());
@@ -209,7 +212,9 @@ impl QuicConnection {
             return Err(CoreError::Quic("not connected".into()));
         }
         let addr = self.current_path.clone().ok_or_else(|| CoreError::Quic("no path".into()))?;
-        let mut net = NETWORK.lock().unwrap();
+        let mut net = NETWORK
+            .lock()
+            .map_err(|_| CoreError::Quic("network lock poisoned".into()))?;
         let queue = net.entry(addr).or_insert_with(VecDeque::new);
         queue.push_back(data.to_vec());
         Ok(())
@@ -221,7 +226,9 @@ impl QuicConnection {
             return Err(CoreError::Quic("not connected".into()));
         }
         if let Some(addr) = &self.current_path {
-            let mut net = NETWORK.lock().unwrap();
+            let mut net = NETWORK
+                .lock()
+                .map_err(|_| CoreError::Quic("network lock poisoned".into()))?;
             if let Some(queue) = net.get_mut(addr) {
                 return Ok(queue.pop_front());
             }

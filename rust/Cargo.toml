@@ -5,6 +5,7 @@ members = [
     "crypto",
     "fec",
     "stealth",
+    "error",
     "cli",
     "tests",
 ]
