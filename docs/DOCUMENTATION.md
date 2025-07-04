@@ -31,7 +31,7 @@ QuicFuscate/
 ├── docs/
 │   └── DOCUMENTATION.md
 ├── libs/
-│   └── quiche-patched/
+│   └── patched_quiche/
 └── ui/
     └── logo/
 ```

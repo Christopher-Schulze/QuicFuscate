@@ -26,8 +26,8 @@
 - `core/quic_connection.hpp`: Include und Variable von ASCON zu MORUS geändert
 - `stealth/browser_profiles/fingerprints/browser_fingerprint.hpp`: Cipher Suite Liste aktualisiert
 - `stealth/tls/FakeTLS.hpp`, `stealth/tls/FakeTLS.cpp`, `stealth/tls/uTLS.cpp`: TLS-Fingerprinting angepasst
-- `libs/quiche-patched/src/crypto.rs`: Algorithm enum und alle Referenzen aktualisiert
-- `libs/quiche-patched/src/tls.rs`: TLS-Cipher-Mapping aktualisiert
+- `libs/patched_quiche/quiche/src/crypto.rs`: Algorithm enum und alle Referenzen aktualisiert
+- `libs/patched_quiche/quiche/src/tls.rs`: TLS-Cipher-Mapping aktualisiert
 - `DOCUMENTATION.md`: Vollständige Dokumentation überarbeitet
 
 ### 📝 Technische Details
