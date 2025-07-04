@@ -49,7 +49,7 @@ use std::arch::is_x86_feature_detected;
 #[cfg(unix)]
 use std::os::unix::io::RawFd;
 #[cfg(unix)]
-use libc::{msghdr, iovec, sendmsg};
+use libc::{iovec, msghdr, recvmsg, sendmsg};
 
 /// Enumerates the CPU features relevant for QuicFuscate's optimizations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -226,6 +226,18 @@ impl<'a> ZeroCopyBuffer<'a> {
         Self { iovecs, _marker: std::marker::PhantomData }
     }
 
+    /// Creates a new `ZeroCopyBuffer` from mutable slices for receiving.
+    pub fn new_mut(buffers: &mut [&'a mut [u8]]) -> Self {
+        let iovecs = buffers
+            .iter_mut()
+            .map(|buf| iovec {
+                iov_base: buf.as_mut_ptr() as *mut libc::c_void,
+                iov_len: buf.len(),
+            })
+            .collect();
+        Self { iovecs, _marker: std::marker::PhantomData }
+    }
+
     /// Sends the data using `sendmsg` for true zero-copy transmission.
     pub fn send(&self, fd: RawFd) -> isize {
         let msg = msghdr {
@@ -238,6 +250,20 @@ impl<'a> ZeroCopyBuffer<'a> {
             msg_flags: 0,
         };
         unsafe { sendmsg(fd, &msg, 0) }
+    }
+
+    /// Receives data using `recvmsg` into the buffers.
+    pub fn recv(&mut self, fd: RawFd) -> isize {
+        let mut msg = msghdr {
+            msg_name: std::ptr::null_mut(),
+            msg_namelen: 0,
+            msg_iov: self.iovecs.as_mut_ptr(),
+            msg_iovlen: self.iovecs.len() as _,
+            msg_control: std::ptr::null_mut(),
+            msg_controllen: 0,
+            msg_flags: 0,
+        };
+        unsafe { recvmsg(fd, &mut msg, 0) }
     }
 }
 // --- Placeholder for full integration ---

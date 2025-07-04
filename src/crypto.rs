@@ -36,7 +36,7 @@
 //! features a runtime selector to choose the most performant cipher suite
 //! based on detected CPU capabilities.
 
-use crate::optimize::{CpuFeature, FeatureDetector};
+use crate::{cpu_features, CpuFeature};
 use aead::{Aead, KeyInit, Nonce, Payload};
 use aegis::{aegis128l::Aegis128L, aegis128x::Aegis128X};
 use morus::Morus;
@@ -58,7 +58,7 @@ pub struct CipherSuiteSelector {
 impl CipherSuiteSelector {
     /// Creates a new `CipherSuiteSelector` and determines the best available cipher.
     pub fn new() -> Self {
-        let detector = FeatureDetector::instance();
+        let detector = cpu_features();
         
         let selected_suite = if detector.has_feature(CpuFeature::VAES) {
             CipherSuite::Aegis128X
