@@ -1,4 +1,4 @@
-# QuicFuscate Changelog
+
 
 ## [2024-12-23] - CLI Compilation Fixes
 

@@ -7,6 +7,7 @@ use log::{error, info, warn};
 use crate::stealth::StealthConfig;
 use crate::core::QuicFuscateConnection;
 
+
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 #[clap(propagate_version = true)]
@@ -26,6 +27,10 @@ enum Commands {
         /// The URL to request
         #[clap(short, long, default_value = "https://example.com")]
         url: String,
+
+        /// Browser fingerprint profile (chrome, firefox, opera, brave)
+        #[clap(long, default_value = "chrome")]
+        profile: String,
     },
     /// Runs the server
     Server {
@@ -40,6 +45,10 @@ enum Commands {
         /// Path to the private key file
         #[clap(short, long, required = true)]
         key: PathBuf,
+
+        /// Browser fingerprint profile used for connections
+        #[clap(long, default_value = "chrome")]
+        profile: String,
     },
 }
 
@@ -49,18 +58,20 @@ async fn main() -> std::io::Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
-        Commands::Client { server_addr, url } => {
-            run_client(server_addr, url).await?;
+        Commands::Client { server_addr, url, profile } => {
+            let browser = profile.parse().unwrap_or(BrowserProfile::Chrome);
+            run_client(server_addr, url, browser).await?;
         }
-        Commands::Server { listen, cert, key } => {
-            run_server(listen, cert, key).await?;
+        Commands::Server { listen, cert, key, profile } => {
+            let browser = profile.parse().unwrap_or(BrowserProfile::Chrome);
+            run_server(listen, cert, key, browser).await?;
         }
     }
 
     Ok(())
 }
 
-async fn run_client(server_addr_str: &str, url: &str) -> std::io::Result<()> {
+async fn run_client(server_addr_str: &str, url: &str, profile: BrowserProfile) -> std::io::Result<()> {
     let server_addr = server_addr_str
         .to_socket_addrs()?
         .next()
@@ -84,6 +95,8 @@ async fn run_client(server_addr_str: &str, url: &str) -> std::io::Result<()> {
     config.set_initial_max_streams_uni(100);
     config.verify_peer(false); // In a real app, you should verify the server cert.
 
+    let mut stealth_config = StealthConfig::default();
+    stealth_config.browser_profile = profile;
     let mut conn = QuicFuscateConnection::new_client(
         "example.com",
         server_addr,
@@ -92,6 +105,7 @@ async fn run_client(server_addr_str: &str, url: &str) -> std::io::Result<()> {
     )
     .expect("failed to create client connection");
 
++
     let mut buf = [0; 65535];
     let mut out = [0; 1460];
 
@@ -146,7 +160,12 @@ async fn run_client(server_addr_str: &str, url: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-async fn run_server(listen_addr: &str, cert_path: &PathBuf, key_path: &PathBuf) -> std::io::Result<()> {
+async fn run_server(
+    listen_addr: &str,
+    cert_path: &PathBuf,
+    key_path: &PathBuf,
+    profile: BrowserProfile,
+) -> std::io::Result<()> {
     let socket = std::net::UdpSocket::bind(listen_addr)?;
     socket.set_nonblocking(true)?;
     info!("Server listening on {}", listen_addr);
@@ -167,7 +186,8 @@ async fn run_server(listen_addr: &str, cert_path: &PathBuf, key_path: &PathBuf) 
     let mut clients = HashMap::new();
     let mut buf = [0; 65535];
     let mut out = [0; 1460];
-    let stealth_config = StealthConfig::default();
+    let mut stealth_config = StealthConfig::default();
+    stealth_config.browser_profile = profile;
 
     loop {
         match socket.recv_from(&mut buf) {
