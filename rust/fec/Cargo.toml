@@ -13,6 +13,7 @@ leopard-codec = "0.1"
 reed-solomon-erasure = "6"
 serde = { version = "1", features = ["derive"] }
 rand = "0.8"
+rand09 = { package = "rand", version = "0.9.1" }
 
 [dev-dependencies]
 criterion = "0.5"

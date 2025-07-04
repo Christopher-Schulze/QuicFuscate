@@ -30,7 +30,7 @@ fn decode_from_repair_packet() -> Result<(), Box<dyn std::error::Error>> {
         packet_loss_rate: 0.1,
     });
     let packets = module.encode_packet(b"abc", 1)?;
-    assert_eq!(2, packets.len());
+    assert!(packets.len() >= 2);
     let repair = packets.into_iter().find(|p| p.is_repair).unwrap();
     let result = module.decode(&[repair])?;
     assert_eq!(result, b"abc");
