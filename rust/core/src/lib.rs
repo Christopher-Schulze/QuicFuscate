@@ -6,6 +6,13 @@
 #[cfg(feature = "quiche")]
 use quiche;
 use thiserror::Error;
+use once_cell::sync::Lazy;
+use std::collections::{HashMap, VecDeque};
+use std::sync::Mutex;
+
+static NETWORK: Lazy<Mutex<HashMap<String, VecDeque<Vec<u8>>>>> = Lazy::new(|| {
+    Mutex::new(HashMap::new())
+});
 
 mod quic_packet;
 pub use quic_packet::{PacketType, QuicPacket, QuicPacketHeader};
@@ -140,10 +147,19 @@ impl QuicConnection {
             .map_err(|_| CoreError::Quic("invalid address".into()))?;
 
         self.current_path = Some(addr.to_string());
+        NETWORK
+            .lock()
+            .unwrap()
+            .entry(addr.to_string())
+            .or_insert_with(VecDeque::new);
 
         #[cfg(feature = "quiche")]
         {
             self.conn = Some(quiche::Connection);
+        }
+
+        if self.bbr && self.bbr_controller.is_none() {
+            self.bbr_controller = Some(BbrCongestionController::new());
         }
 
         self.state = ConnectionState::Connected;
@@ -178,8 +194,39 @@ impl QuicConnection {
         let _sock_addr: std::net::SocketAddr = new_addr
             .parse()
             .map_err(|_| CoreError::Quic("invalid address".into()))?;
+        NETWORK
+            .lock()
+            .unwrap()
+            .entry(new_addr.to_string())
+            .or_insert_with(VecDeque::new);
         self.current_path = Some(new_addr.to_string());
         Ok(())
+    }
+
+    /// Send data on the current connection path.
+    pub fn send(&mut self, data: &[u8]) -> Result<()> {
+        if self.state != ConnectionState::Connected {
+            return Err(CoreError::Quic("not connected".into()));
+        }
+        let addr = self.current_path.clone().ok_or_else(|| CoreError::Quic("no path".into()))?;
+        let mut net = NETWORK.lock().unwrap();
+        let queue = net.entry(addr).or_insert_with(VecDeque::new);
+        queue.push_back(data.to_vec());
+        Ok(())
+    }
+
+    /// Receive pending data if available.
+    pub fn recv(&mut self) -> Result<Option<Vec<u8>>> {
+        if self.state != ConnectionState::Connected {
+            return Err(CoreError::Quic("not connected".into()));
+        }
+        if let Some(addr) = &self.current_path {
+            let mut net = NETWORK.lock().unwrap();
+            if let Some(queue) = net.get_mut(addr) {
+                return Ok(queue.pop_front());
+            }
+        }
+        Ok(None)
     }
 
     /// Enable or disable the BBRv2 congestion control algorithm.
@@ -233,7 +280,6 @@ impl QuicConnection {
 }
 
 /// Manager for sending and validating MTU probes.
-use std::collections::HashMap;
 use std::time::Instant;
 
 /// Status of MTU discovery on a path.

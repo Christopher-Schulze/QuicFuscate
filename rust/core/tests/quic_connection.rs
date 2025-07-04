@@ -48,3 +48,14 @@ fn enabling_bbr_creates_controller() {
     conn.enable_bbr_congestion_control(true);
     assert!(conn.is_bbr_enabled());
 }
+
+#[test]
+fn send_recv_roundtrip() {
+    let cfg = QuicConfig { server_name: "localhost".into(), port: 443 };
+    let mut client = QuicConnection::new(cfg.clone()).unwrap();
+    let mut server = QuicConnection::new(cfg).unwrap();
+    client.connect("127.0.0.1:443").unwrap();
+    server.connect("127.0.0.1:443").unwrap();
+    client.send(b"ping").unwrap();
+    assert_eq!(server.recv().unwrap(), Some(b"ping".to_vec()));
+}
