@@ -1,5 +1,15 @@
 # QuicFuscate Changelog
 
+## [2025-07-05] - XDP Socket Support
+
+### ✨ Added
+- Minimal `XdpSocket` implementation providing zero-copy send/receive on Linux.
+
+### 🔧 Changed
+- `OptimizationManager` and `QuicFuscateConnection` now leverage `XdpSocket` when available.
+
+
+
 ## [2024-12-22] - Deprecated C++ Removal
 
 ### 🔥 Removed
