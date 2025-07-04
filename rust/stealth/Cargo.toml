@@ -14,6 +14,7 @@ thiserror = "1"
 quicfuscate-error = { path = "../error" }
 reqwest = { version = "0.11", optional = true, default-features = false, features = ["rustls-tls"] }
 serde_json = { version = "1", optional = true }
+rustls = "0.21"
 
 [features]
 doh-reqwest = ["reqwest", "serde_json"]

@@ -43,4 +43,27 @@ impl SniHiding {
             .collect::<Vec<_>>()
             .join("\r\n")
     }
+
+    /// Replace the real domain with the front domain inside a TLS ClientHello.
+    /// This is a naive search/replace implementation sufficient for tests.
+    pub fn apply_tls_fronting(&self, data: &[u8]) -> Vec<u8> {
+        if !self.enabled {
+            return data.to_vec();
+        }
+
+        fn find_subseq(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+            haystack
+                .windows(needle.len())
+                .position(|w| w == needle)
+        }
+
+        let mut out = data.to_vec();
+        if let Some(pos) = find_subseq(&out, self.config.real_domain.as_bytes()) {
+            out.splice(
+                pos..pos + self.config.real_domain.len(),
+                self.config.front_domain.as_bytes().iter().cloned(),
+            );
+        }
+        out
+    }
 }

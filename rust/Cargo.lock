@@ -1536,6 +1536,7 @@ dependencies = [
  "quicfuscate-error",
  "rand 0.8.5",
  "reqwest",
+ "rustls",
  "serde_json",
  "thiserror",
  "tokio",
