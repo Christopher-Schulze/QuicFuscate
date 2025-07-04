@@ -1,10 +1,10 @@
 # QuicFuscate Changelog
 
-## [2024-12-23] - Dynamic Window Cross-Fade
 
 ### ✨ Added
-- Sliding-window FEC now supports PLAN-based dynamic window adjustments and cross-fade transitions.
-- Mode switches mix repair packets 50/50 for 32 packets before fully adopting the new window.
+- CLI flag `--profile` selects the browser fingerprint (`chrome`, `firefox`, `opera`, `brave`).
+- `StealthManager::set_fingerprint_profile` allows runtime switching and updates QUIC parameters via `apply_utls_profile`.
+
 
 ## [2024-12-22] - Deprecated C++ Removal
 
