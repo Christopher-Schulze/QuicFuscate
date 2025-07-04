@@ -6,6 +6,7 @@ members = [
     "fec",
     "stealth",
     "error",
+    "logger",
     "cli",
     "tests",
 ]

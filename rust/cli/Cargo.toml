@@ -29,6 +29,9 @@ stealth = { path = "../stealth" }
 fec = { path = "../fec" }
 log = "0.4"
 env_logger = "0.10"
+serde = { version = "1", features = ["derive"] }
+toml = "0.5"
+logger = { path = "../logger" }
 tokio = { version = "1", features = ["rt", "macros"] }
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 rustls-pemfile = "1"

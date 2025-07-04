@@ -1,5 +1,5 @@
 [package]
-name = "quicfuscate-error"
+name = "logger"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,3 +8,4 @@ path = "src/lib.rs"
 
 [dependencies]
 log = "0.4"
+env_logger = "0.10"

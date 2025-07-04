@@ -253,6 +253,7 @@ checksum = "b05b61dc5112cbb17e4b6cd61790d9845d13888356391624cbe7e41efeac1e75"
 name = "core"
 version = "0.1.0"
 dependencies = [
+ "log",
  "once_cell",
  "quicfuscate-error",
  "quiche",
@@ -346,6 +347,7 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 name = "crypto"
 version = "0.1.0"
 dependencies = [
+ "log",
  "openssl-sys",
  "quicfuscate-error",
  "subtle",
@@ -419,6 +421,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "leopard-codec",
+ "log",
  "quicfuscate-error",
  "rand 0.8.5",
  "rand 0.9.1",
@@ -888,6 +891,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13dc2df351e3202783a1fe0d44375f7295ffb4049267b0f3018346dc122a1d94"
 
 [[package]]
+name = "logger"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "log",
+]
+
+[[package]]
 name = "lru"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1112,16 +1123,22 @@ dependencies = [
  "env_logger",
  "fec",
  "log",
+ "logger",
  "rustls",
  "rustls-pemfile",
+ "serde",
  "stealth",
  "tempfile",
  "tokio",
+ "toml",
 ]
 
 [[package]]
 name = "quicfuscate-error"
 version = "0.1.0"
+dependencies = [
+ "log",
+]
 
 [[package]]
 name = "quiche"
@@ -1533,6 +1550,7 @@ name = "stealth"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "log",
  "quicfuscate-error",
  "rand 0.8.5",
  "reqwest",
@@ -1714,6 +1732,15 @@ dependencies = [
  "futures-sink",
  "pin-project-lite",
  "tokio",
+]
+
+[[package]]
+name = "toml"
+version = "0.5.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f4f7f0dd8d50a853a531c426359045b1998f04219d88799810762cd4ad314234"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

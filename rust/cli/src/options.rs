@@ -1,4 +1,5 @@
 use clap::{Parser, ValueEnum};
+use serde::{Deserialize, Serialize};
 use fec::FecMode;
 use stealth::BrowserProfile;
 use core as quic_core;
@@ -7,7 +8,7 @@ use quic_core::{
     DEFAULT_PERIODIC_PROBE_INTERVAL_MS,
 };
 
-#[derive(Copy, Clone, PartialEq, Eq, ValueEnum, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum, Debug, Serialize, Deserialize)]
 pub enum FecCliMode {
     Off,
     Performance,
@@ -26,7 +27,7 @@ impl From<FecCliMode> for FecMode {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug, Serialize, Deserialize)]
 pub enum Fingerprint {
     Chrome,
     Firefox,
@@ -51,7 +52,7 @@ impl From<Fingerprint> for BrowserProfile {
     }
 }
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Serialize, Deserialize)]
 #[command(author, version, about="QuicFuscate VPN - QUIC mit uTLS Integration", long_about=None)]
 pub struct CommandLineOptions {
     /// Server-Hostname oder IP-Adresse
@@ -61,6 +62,10 @@ pub struct CommandLineOptions {
     /// Server-Port
     #[arg(short, long, default_value_t = 443)]
     pub port: u16,
+
+    /// Pfad zur Konfigurationsdatei
+    #[arg(long)]
+    pub config: Option<std::path::PathBuf>,
 
     /// Browser-Fingerprint
     #[arg(short, long, value_enum, default_value_t = Fingerprint::Chrome)]
@@ -143,6 +148,36 @@ pub struct CommandLineOptions {
     pub probe_interval: u32,
 }
 
+impl Default for CommandLineOptions {
+    fn default() -> Self {
+        Self {
+            server: "example.com".into(),
+            port: 443,
+            config: None,
+            fingerprint: Fingerprint::Chrome,
+            no_utls: false,
+            verify_peer: false,
+            ca_file: None,
+            verbose: false,
+            fec: FecCliMode::Adaptive,
+            fec_ratio: 5.0,
+            debug_tls: false,
+            list_fingerprints: false,
+            domain_fronting: false,
+            http3_masq: false,
+            doh: false,
+            spin_random: false,
+            spin_probability: 0.5,
+            zero_rtt: false,
+            zero_rtt_max: 1024,
+            min_mtu: DEFAULT_MIN_MTU,
+            max_mtu: DEFAULT_MAX_MTU,
+            probe_timeout: DEFAULT_PROBE_TIMEOUT_MS,
+            probe_interval: DEFAULT_PERIODIC_PROBE_INTERVAL_MS,
+        }
+    }
+}
+
 impl CommandLineOptions {
     /// Construct a [`QuicLimits`] instance from CLI options.
     pub fn to_limits(&self) -> QuicLimits {
@@ -154,5 +189,50 @@ impl CommandLineOptions {
             probe_timeout_ms: self.probe_timeout,
             periodic_probe_interval_ms: self.probe_interval,
         }
+    }
+
+    /// Load options from the given TOML configuration file.
+    /// Fields not provided on the command line will be filled from the file.
+    pub fn merge_config(mut self) -> Result<Self, Box<dyn std::error::Error>> {
+        let path = match &self.config {
+            Some(p) => p,
+            None => return Ok(self),
+        };
+        let contents = std::fs::read_to_string(path)?;
+        let file_opts: CommandLineOptions = toml::from_str(&contents)?;
+        let defaults = CommandLineOptions::default();
+
+        macro_rules! maybe_use {
+            ($field:ident) => {
+                if self.$field == defaults.$field {
+                    self.$field = file_opts.$field;
+                }
+            };
+        }
+
+        maybe_use!(server);
+        maybe_use!(port);
+        maybe_use!(fingerprint);
+        maybe_use!(no_utls);
+        maybe_use!(verify_peer);
+        maybe_use!(ca_file);
+        maybe_use!(verbose);
+        maybe_use!(fec);
+        maybe_use!(fec_ratio);
+        maybe_use!(debug_tls);
+        maybe_use!(list_fingerprints);
+        maybe_use!(domain_fronting);
+        maybe_use!(http3_masq);
+        maybe_use!(doh);
+        maybe_use!(spin_random);
+        maybe_use!(spin_probability);
+        maybe_use!(zero_rtt);
+        maybe_use!(zero_rtt_max);
+        maybe_use!(min_mtu);
+        maybe_use!(max_mtu);
+        maybe_use!(probe_timeout);
+        maybe_use!(probe_interval);
+
+        Ok(self)
     }
 }
