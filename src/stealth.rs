@@ -46,6 +46,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
 use url::Url;
+use sha2::{Digest, Sha256};
 
 use crate::crypto::CryptoManager; // Assumed for integration
 use crate::optimize::{self, OptimizationManager}; // Assumed for integration
@@ -353,7 +354,7 @@ impl DomainFrontingManager {
 
 /// A simple XOR obfuscator for packet payloads.
 pub struct XorObfuscator {
-    key: Vec<u8>,
+    key: Mutex<Vec<u8>>,
     position: AtomicUsize,
 }
 
@@ -364,19 +365,19 @@ impl XorObfuscator {
         // different obfuscation key.
         let key = crypto_manager.generate_session_key(32);
         Self {
-            key,
+            key: Mutex::new(key),
             position: AtomicUsize::new(0),
         }
     }
 
     /// Applies XOR obfuscation to a mutable payload using the best available SIMD implementation.
     pub fn obfuscate(&self, payload: &mut [u8]) {
-        if self.key.is_empty() {
+        let mut key = self.key.lock().unwrap();
+        if key.is_empty() {
             return;
         }
 
         OBFUSCATED_PACKETS.inc();
-        let key = &self.key;
         let key_len = key.len();
         let start = self.position.load(Ordering::Relaxed);
 
@@ -457,8 +458,11 @@ impl XorObfuscator {
                 }
             }
         });
-        let new_pos = (start + payload.len()) % key_len;
-        self.position.store(new_pos, Ordering::Relaxed);
+        // Rolling key update using SHA-256 after each packet
+        let digest = Sha256::digest(&key[..]);
+        key.clear();
+        key.extend_from_slice(&digest);
+        self.position.store(0, Ordering::Relaxed);
     }
 
     /// Reverses XOR obfuscation. The operation is symmetrical.
@@ -482,6 +486,47 @@ impl TlsClientHelloSpoofer {
             "uTLS: manipulating ClientHello with {} suites",
             suites.len()
         );
+
+        // Build a custom ClientHello using rustls and pass it to quiche via FFI.
+        fn build_client_hello(suites: &[u16]) -> Vec<u8> {
+            use rustls::client::{ClientConfig, ClientConnection, ServerName};
+            use rustls::{RootCertStore, ALL_CIPHER_SUITES};
+            use std::sync::Arc;
+
+            let mut cfg = ClientConfig::builder()
+                .with_cipher_suites(ALL_CIPHER_SUITES)
+                .with_safe_default_kx_groups()
+                .with_protocol_versions(&[&rustls::version::TLS13])
+                .unwrap()
+                .with_root_certificates(RootCertStore::empty())
+                .with_no_client_auth();
+
+            let custom: Vec<&'static rustls::SupportedCipherSuite> = suites
+                .iter()
+                .filter_map(|id| ALL_CIPHER_SUITES
+                    .iter()
+                    .find(|cs| cs.suite().get_u16() == *id))
+                .copied()
+                .collect();
+
+            if !custom.is_empty() {
+                cfg.cipher_suites = custom;
+            }
+
+            let server = ServerName::try_from("example.com").unwrap();
+            let mut conn = ClientConnection::new(Arc::new(cfg), server).unwrap();
+            let mut out = Vec::new();
+            let _ = conn.write_tls(&mut out);
+            out
+        }
+
+        let hello = build_client_hello(suites);
+        unsafe {
+            extern "C" {
+                fn quiche_config_set_custom_tls(cfg: *mut c_void, hello: *const u8, len: usize);
+            }
+            quiche_config_set_custom_tls(config as *mut _ as *mut c_void, hello.as_ptr(), hello.len());
+        }
     }
 }
 
@@ -623,6 +668,26 @@ impl StealthManager {
         self.fingerprint.lock().unwrap().clone()
     }
 
+    /// Starts automatic rotation through the given browser profiles.
+    /// This spawns a task on the DoH runtime which periodically updates the
+    /// active fingerprint.
+    pub fn start_profile_rotation(self: &Arc<Self>, browsers: Vec<BrowserProfile>, interval: std::time::Duration) {
+        if browsers.is_empty() {
+            return;
+        }
+        let mgr = Arc::clone(self);
+        DOH_RUNTIME.spawn(async move {
+            let os = mgr.current_profile().os;
+            let mut idx = 0usize;
+            loop {
+                tokio::time::sleep(interval).await;
+                idx = (idx + 1) % browsers.len();
+                let profile = FingerprintProfile::new(browsers[idx], os);
+                mgr.set_fingerprint_profile(profile);
+            }
+        });
+    }
+
     /// Resolves a domain, using DoH if enabled.
     pub fn resolve_domain(&self, domain: &str) -> IpAddr {
         if self.config.enable_doh {
@@ -731,6 +796,17 @@ impl StealthManager {
                 let _ = encoder.encode(&mut out, 0, &headers);
                 Some(out)
             }
+        } else {
+            None
+        }
+    }
+
+    /// Returns a vector of HTTP/3 headers for a request.
+    pub fn get_http3_header_list(&self, host: &str, path: &str) -> Option<Vec<quiche::h3::Header>> {
+        if self.config.enable_http3_masquerading {
+            let fp = self.fingerprint.lock().unwrap();
+            let masquerade = Http3Masquerade::new(fp.clone());
+            Some(masquerade.generate_headers(host, path))
         } else {
             None
         }

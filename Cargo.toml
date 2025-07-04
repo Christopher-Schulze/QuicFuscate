@@ -26,4 +26,5 @@ crossbeam-queue = "0.3"
 libc = "0.2"
 prometheus = "0.13"
 hyper = { version = "0.14", features = ["full"] }
+sha2 = "0.10"
 
