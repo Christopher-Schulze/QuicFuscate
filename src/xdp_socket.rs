@@ -38,9 +38,16 @@ impl XdpSocket {
         }
     }
 
-    /// Receives data into the provided buffer.
+    /// Receives data into the provided buffer using `recvmsg` for zero-copy.
     pub fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
-        self.socket.recv(buf)
+        let mut slice = [&mut buf[..]];
+        let mut zc = ZeroCopyBuffer::new_mut(&mut slice);
+        let ret = zc.recv(self.fd());
+        if ret < 0 {
+            Err(Error::last_os_error())
+        } else {
+            Ok(ret as usize)
+        }
     }
 }
 

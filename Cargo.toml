@@ -27,4 +27,4 @@ libc = "0.2"
 prometheus = "0.13"
 hyper = { version = "0.14", features = ["full"] }
 sha2 = "0.10"
-
+rayon = "1.9"
