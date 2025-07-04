@@ -90,6 +90,7 @@ pub enum ConnectionState {
 }
 
 pub struct QuicConnection {
+    #[allow(dead_code)]
     config: QuicConfig,
     mtu_discovery: bool,
     migration: bool,
@@ -270,6 +271,12 @@ pub struct PathMtuManager {
     incoming_failures: u8,
     blackhole_threshold: u8,
     callback: Option<Box<dyn Fn(MtuChange) + Send + Sync>>,
+}
+
+impl Default for PathMtuManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PathMtuManager {
@@ -547,6 +554,12 @@ pub struct QuicStreamOptimizer {
     base_chunk: u32,
 }
 
+impl Default for QuicStreamOptimizer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl QuicStreamOptimizer {
     pub fn new() -> Self {
         Self {
@@ -563,7 +576,7 @@ impl QuicStreamOptimizer {
         let entry = self
             .streams
             .entry(stream_id)
-            .or_insert_with(StreamInfo::default);
+            .or_default();
         entry.priority = priority;
         true
     }
@@ -572,7 +585,7 @@ impl QuicStreamOptimizer {
         let entry = self
             .streams
             .entry(stream_id)
-            .or_insert_with(StreamInfo::default);
+            .or_default();
         entry.window = size;
         true
     }

@@ -15,6 +15,12 @@ pub struct ZeroRttEngine {
     pub successes: usize,
 }
 
+impl Default for ZeroRttEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ZeroRttEngine {
     pub fn new() -> Self {
         Self { cfg: ZeroRttConfig::default(), attempts: 0, successes: 0 }

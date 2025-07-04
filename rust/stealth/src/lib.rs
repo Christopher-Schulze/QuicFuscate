@@ -36,6 +36,12 @@ pub struct QuicFuscateStealth {
     pub tls: FakeTls,
 }
 
+impl Default for QuicFuscateStealth {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl QuicFuscateStealth {
     pub fn new() -> Self {
         Self {

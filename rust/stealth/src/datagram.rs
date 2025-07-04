@@ -37,6 +37,12 @@ pub struct DatagramEngine {
     max_bundle: usize,
 }
 
+impl Default for DatagramEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DatagramEngine {
     pub fn new() -> Self {
         Self {
