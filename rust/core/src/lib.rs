@@ -6,16 +6,7 @@
 #[cfg(feature = "quiche")]
 use quiche;
 use thiserror::Error;
-use once_cell::sync::Lazy;
-#[cfg(not(feature = "quiche"))]
-use std::collections::{HashMap, VecDeque};
-#[cfg(not(feature = "quiche"))]
-use std::sync::Mutex;
-
-#[cfg(not(feature = "quiche"))]
-static NETWORK: Lazy<Mutex<HashMap<String, VecDeque<Vec<u8>>>>> = Lazy::new(|| {
-    Mutex::new(HashMap::new())
-});
+use std::collections::HashMap;
 
 mod quic_packet;
 pub use quic_packet::{PacketType, QuicPacket, QuicPacketHeader};
@@ -151,22 +142,34 @@ impl QuicConnection {
 
         self.current_path = Some(addr.to_string());
 
-        #[cfg(not(feature = "quiche"))]
-        {
-            NETWORK
-                .lock()
-                .map_err(|_| CoreError::Quic("network lock poisoned".into()))?
-                .entry(addr.to_string())
-                .or_insert_with(VecDeque::new);
-        }
-
         #[cfg(feature = "quiche")]
         {
-            self.conn = Some(quiche::Connection::connect(addr));
+            self.conn = Some(quiche::Connection::connect(addr).map_err(CoreError::Io)?);
         }
 
         if self.bbr && self.bbr_controller.is_none() {
             self.bbr_controller = Some(BbrCongestionController::new());
+        }
+
+        self.state = ConnectionState::Connected;
+        Ok(())
+    }
+
+    /// Bind to a local address for receiving datagrams.
+    pub fn bind(&mut self, addr: &str) -> Result<()> {
+        if self.state != ConnectionState::New {
+            return Err(CoreError::Quic("already connected".into()));
+        }
+
+        let _sock_addr: std::net::SocketAddr = addr
+            .parse()
+            .map_err(|_| CoreError::Quic("invalid address".into()))?;
+
+        self.current_path = Some(addr.to_string());
+
+        #[cfg(feature = "quiche")]
+        {
+            self.conn = Some(quiche::Connection::bind(addr).map_err(CoreError::Io)?);
         }
 
         self.state = ConnectionState::Connected;
@@ -202,18 +205,9 @@ impl QuicConnection {
             .parse()
             .map_err(|_| CoreError::Quic("invalid address".into()))?;
 
-        #[cfg(not(feature = "quiche"))]
-        {
-            NETWORK
-                .lock()
-                .map_err(|_| CoreError::Quic("network lock poisoned".into()))?
-                .entry(new_addr.to_string())
-                .or_insert_with(VecDeque::new);
-        }
-
         #[cfg(feature = "quiche")]
         {
-            self.conn = Some(quiche::Connection::connect(new_addr));
+            self.conn = Some(quiche::Connection::connect(new_addr).map_err(CoreError::Io)?);
         }
 
         self.current_path = Some(new_addr.to_string());
@@ -225,17 +219,10 @@ impl QuicConnection {
         if self.state != ConnectionState::Connected {
             return Err(CoreError::Quic("not connected".into()));
         }
-        #[cfg(not(feature = "quiche"))]
-        {
-            let addr = self.current_path.clone().ok_or_else(|| CoreError::Quic("no path".into()))?;
-            let mut net = NETWORK.lock().map_err(|_| CoreError::Quic("network lock poisoned".into()))?;
-            let queue = net.entry(addr).or_insert_with(VecDeque::new);
-            queue.push_back(data.to_vec());
-        }
         #[cfg(feature = "quiche")]
         {
             if let Some(conn) = &mut self.conn {
-                conn.send(data);
+                conn.send(data).map_err(CoreError::Io)?;
             }
         }
         Ok(())
@@ -246,20 +233,10 @@ impl QuicConnection {
         if self.state != ConnectionState::Connected {
             return Err(CoreError::Quic("not connected".into()));
         }
-        #[cfg(not(feature = "quiche"))]
-        {
-            if let Some(addr) = &self.current_path {
-                let mut net = NETWORK.lock().map_err(|_| CoreError::Quic("network lock poisoned".into()))?;
-                if let Some(queue) = net.get_mut(addr) {
-                    return Ok(queue.pop_front());
-                }
-            }
-            return Ok(None);
-        }
         #[cfg(feature = "quiche")]
         {
             if let Some(conn) = &mut self.conn {
-                return Ok(conn.recv());
+                return conn.recv().map_err(CoreError::Io);
             }
             Ok(None)
         }
@@ -312,6 +289,12 @@ impl QuicConnection {
     /// Retrieve the currently connected path, if any.
     pub fn current_path(&self) -> Option<&str> {
         self.current_path.as_deref()
+    }
+
+    /// Retrieve the local socket address if available.
+    #[cfg(feature = "quiche")]
+    pub fn local_addr(&self) -> Option<std::net::SocketAddr> {
+        self.conn.as_ref().and_then(|c| c.local_addr().ok())
     }
 }
 
