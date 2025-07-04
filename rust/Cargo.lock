@@ -254,6 +254,7 @@ name = "core"
 version = "0.1.0"
 dependencies = [
  "once_cell",
+ "quicfuscate-error",
  "quiche",
  "thiserror",
 ]
@@ -346,6 +347,7 @@ name = "crypto"
 version = "0.1.0"
 dependencies = [
  "openssl-sys",
+ "quicfuscate-error",
  "subtle",
  "thiserror",
 ]
@@ -401,6 +403,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "leopard-codec",
+ "quicfuscate-error",
  "rand 0.8.5",
  "rand 0.9.1",
  "reed-solomon-erasure",
@@ -1092,6 +1095,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "quicfuscate-error"
+version = "0.1.0"
+
+[[package]]
 name = "quiche"
 version = "0.1.0"
 dependencies = [
@@ -1488,6 +1495,7 @@ name = "stealth"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "quicfuscate-error",
  "rand 0.8.5",
  "reqwest",
  "serde_json",

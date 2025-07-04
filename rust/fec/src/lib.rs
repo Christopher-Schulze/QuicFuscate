@@ -6,6 +6,7 @@ use std::ptr;
 use std::slice;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
+use quicfuscate_error::QuicFuscateError;
 
 #[derive(Debug, Error)]
 pub enum FECError {
@@ -14,6 +15,8 @@ pub enum FECError {
     #[error("reed-solomon error: {0}")]
     ReedSolomon(String),
 }
+
+impl QuicFuscateError for FECError {}
 
 pub type Result<T> = std::result::Result<T, FECError>;
 
