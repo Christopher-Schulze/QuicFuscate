@@ -74,12 +74,16 @@ impl Default for FECConfig {
 
 pub struct NetworkMetrics {
     pub packet_loss_rate: f64,
+    pub rtt_variation_ms: f64,
+    pub bandwidth_mbps: f64,
 }
 
 impl Default for NetworkMetrics {
     fn default() -> Self {
         Self {
             packet_loss_rate: 0.0,
+            rtt_variation_ms: 0.0,
+            bandwidth_mbps: 0.0,
         }
     }
 }
@@ -195,12 +199,14 @@ impl MetricsSampler {
 
 pub struct StrategyController {
     state: FecState,
+    good_ticks: u32,
 }
 
 impl StrategyController {
     pub fn new() -> Self {
         Self {
             state: FecState::Off,
+            good_ticks: 0,
         }
     }
 
@@ -208,12 +214,17 @@ impl StrategyController {
         self.state
     }
 
-    pub fn update(&mut self, loss: f32) -> FecState {
+    pub fn update(&mut self, loss: f32, rtt_var: f32, bandwidth: f32) -> FecState {
         const LOSS_ENTER_MID: f32 = 0.05;
         const LOSS_ENTER_HIGH: f32 = 0.25;
         const LOSS_EXIT_MID: f32 = 0.03;
         const LOSS_EXIT_LOW: f32 = 0.01;
-        self.state = match (self.state, loss) {
+        const LOSS_REENABLE: f32 = 0.02;
+        const RTT_GOOD: f32 = 5.0;
+        const BW_GOOD: f32 = 50.0;
+        const GOOD_TICKS: u32 = 30;
+
+        let mut new_state = match (self.state, loss) {
             (FecState::Off, l) if l > LOSS_ENTER_MID => FecState::MidLoss,
             (FecState::LowLoss, l) if l > LOSS_ENTER_HIGH => FecState::HighLoss,
             (FecState::LowLoss, l) if l < LOSS_EXIT_LOW => FecState::Off,
@@ -221,6 +232,23 @@ impl StrategyController {
             (FecState::HighLoss, l) if l < LOSS_ENTER_HIGH => FecState::MidLoss,
             _ => self.state,
         };
+
+        if loss < LOSS_EXIT_LOW && rtt_var < RTT_GOOD && bandwidth > BW_GOOD {
+            self.good_ticks += 1;
+            if self.good_ticks >= GOOD_TICKS {
+                new_state = FecState::Off;
+            }
+        } else {
+            self.good_ticks = 0;
+        }
+
+        if new_state == FecState::Off && self.good_ticks == 0 {
+            if loss > LOSS_REENABLE || rtt_var >= RTT_GOOD || bandwidth <= BW_GOOD {
+                new_state = if loss > LOSS_ENTER_MID { FecState::MidLoss } else { FecState::LowLoss };
+            }
+        }
+
+        self.state = new_state;
         self.state
     }
 }
@@ -628,7 +656,11 @@ impl FECModule {
         let mut state = match self.config.mode {
             FecMode::Performance => FecState::Off,
             FecMode::AlwaysOn => FecState::LowLoss,
-            FecMode::Adaptive => self.controller.update(metrics.packet_loss_rate as f32),
+            FecMode::Adaptive => self.controller.update(
+                metrics.packet_loss_rate as f32,
+                metrics.rtt_variation_ms as f32,
+                metrics.bandwidth_mbps as f32,
+            ),
         };
         self.set_state(state);
         self.config.redundancy_ratio = match self.state {
