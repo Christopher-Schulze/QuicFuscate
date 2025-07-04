@@ -34,6 +34,10 @@ enum Commands {
         #[clap(long, default_value = "chrome")]
         profile: String,
 
+        /// Operating system for the profile (windows, macos, linux, ios, android)
+        #[clap(long, default_value = "windows")]
+        os: String,
+
         /// Comma separated list of profiles to cycle through
         #[clap(long, value_delimiter = ',')]
         profile_seq: Option<Vec<String>>,
@@ -64,6 +68,10 @@ enum Commands {
         #[clap(long, default_value = "chrome")]
         profile: String,
 
+        /// Operating system for the profile (windows, macos, linux, ios, android)
+        #[clap(long, default_value = "windows")]
+        os: String,
+
         /// Comma separated list of profiles to cycle through
         #[clap(long, value_delimiter = ',')]
         profile_seq: Option<Vec<String>>,
@@ -88,15 +96,18 @@ async fn main() -> std::io::Result<()> {
             server_addr,
             url,
             profile,
+            os,
             profile_seq,
             profile_interval,
             metrics_addr,
         } => {
             let browser = profile.parse().unwrap_or(BrowserProfile::Chrome);
+            let os_profile = os.parse().unwrap_or(OsProfile::Windows);
             run_client(
                 server_addr,
                 url,
                 browser,
+                os_profile,
                 profile_seq,
                 *profile_interval,
                 metrics_addr,
@@ -108,16 +119,19 @@ async fn main() -> std::io::Result<()> {
             cert,
             key,
             profile,
+            os,
             profile_seq,
             profile_interval,
             metrics_addr,
         } => {
             let browser = profile.parse().unwrap_or(BrowserProfile::Chrome);
+            let os_profile = os.parse().unwrap_or(OsProfile::Windows);
             run_server(
                 listen,
                 cert,
                 key,
                 browser,
+                os_profile,
                 profile_seq,
                 *profile_interval,
                 metrics_addr,
@@ -129,10 +143,23 @@ async fn main() -> std::io::Result<()> {
     Ok(())
 }
 
+fn parse_profile_entry(entry: &str, default_os: OsProfile) -> Option<FingerprintProfile> {
+    let parts: Vec<&str> = entry.split('@').collect();
+    let browser_part = parts.get(0)?;
+    let browser = browser_part.parse().ok()?;
+    let os = if let Some(os_part) = parts.get(1) {
+        os_part.parse().ok()?
+    } else {
+        default_os
+    };
+    Some(FingerprintProfile::new(browser, os))
+}
+
 async fn run_client(
     server_addr_str: &str,
     url: &str,
     profile: BrowserProfile,
+    os: OsProfile,
     profile_seq: &Option<Vec<String>>,
     profile_interval: u64,
     metrics_addr: &Option<String>,
@@ -169,17 +196,21 @@ async fn run_client(
 
     let mut stealth_config = StealthConfig::default();
     stealth_config.browser_profile = profile;
+    stealth_config.os_profile = os;
     let mut conn = QuicFuscateConnection::new_client(
         "example.com",
         server_addr,
         config,
-        StealthConfig::default(),
+        stealth_config.clone(),
     )
     .expect("failed to create client connection");
 
-    let profiles: Vec<BrowserProfile> = match profile_seq {
-        Some(seq) => seq.iter().filter_map(|s| s.parse().ok()).collect(),
-        None => vec![profile],
+    let profiles: Vec<FingerprintProfile> = match profile_seq {
+        Some(seq) => seq
+            .iter()
+            .filter_map(|s| parse_profile_entry(s, os))
+            .collect(),
+        None => vec![FingerprintProfile::new(profile, os)],
     };
 
     if profile_interval > 0 && profiles.len() > 1 {
@@ -251,6 +282,7 @@ async fn run_server(
     cert_path: &PathBuf,
     key_path: &PathBuf,
     profile: BrowserProfile,
+    os: OsProfile,
     profile_seq: &Option<Vec<String>>,
     profile_interval: u64,
     metrics_addr: &Option<String>,
@@ -291,22 +323,24 @@ async fn run_server(
     {
         let mut sc = stealth_config.lock().unwrap();
         sc.browser_profile = profile;
+        sc.os_profile = os;
     }
 
-    let profiles: Vec<BrowserProfile> = match profile_seq {
-        Some(seq) => seq.iter().filter_map(|s| s.parse().ok()).collect(),
-        None => vec![profile],
+    let profiles: Vec<FingerprintProfile> = match profile_seq {
+        Some(seq) => seq.iter().filter_map(|s| parse_profile_entry(s, os)).collect(),
+        None => vec![FingerprintProfile::new(profile, os)],
     };
 
     if profile_interval > 0 && profiles.len() > 1 {
         let cfg = stealth_config.clone();
         tokio::spawn(async move {
-            let os = cfg.lock().unwrap().os_profile;
             let mut idx = 0usize;
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(profile_interval)).await;
                 idx = (idx + 1) % profiles.len();
-                cfg.lock().unwrap().browser_profile = profiles[idx];
+                let mut guard = cfg.lock().unwrap();
+                guard.browser_profile = profiles[idx].browser;
+                guard.os_profile = profiles[idx].os;
             }
         });
     }
