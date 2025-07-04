@@ -163,6 +163,12 @@ impl CryptoManager {
         OsRng.fill_bytes(&mut key);
         key
     }
+
+    /// Generates a session specific key. This helper wraps [`get_obfuscation_key`]
+    /// to make the intent clear when a new connection is created.
+    pub fn generate_session_key(&self, length: usize) -> Vec<u8> {
+        self.get_obfuscation_key(length)
+    }
 }
 
 impl Default for CryptoManager {
