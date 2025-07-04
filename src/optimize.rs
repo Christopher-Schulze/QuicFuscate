@@ -35,21 +35,21 @@
 //! function dispatching to select the best hardware-accelerated implementation.
 //! It also includes foundational structures for zero-copy operations and memory pooling.
 
-use aligned_box::{AlignedBox, MIN_ALIGN};
-use std::collections::HashMap;
-use std::sync::{Arc, Once};
-use log::info;
-use std::net::SocketAddr;
 use crate::xdp_socket::XdpSocket;
+use aligned_box::{AlignedBox, MIN_ALIGN};
 use crossbeam_queue::ArrayQueue;
+#[cfg(unix)]
+use libc::{iovec, msghdr, sendmsg};
+use log::info;
 #[cfg(target_arch = "aarch64")]
 use std::arch::is_aarch64_feature_detected;
 #[cfg(target_arch = "x86_64")]
 use std::arch::is_x86_feature_detected;
+use std::collections::HashMap;
+use std::net::SocketAddr;
 #[cfg(unix)]
 use std::os::unix::io::RawFd;
-#[cfg(unix)]
-use libc::{msghdr, iovec, sendmsg};
+use std::sync::{Arc, Once};
 
 /// Enumerates the CPU features relevant for QuicFuscate's optimizations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -160,6 +160,15 @@ where
     }
 }
 
+/// Convenience macro around [`dispatch`] to reduce boilerplate when selecting
+/// the best SIMD implementation at runtime.
+#[macro_export]
+macro_rules! simd_dispatch {
+    ($body:expr) => {
+        $crate::optimize::dispatch($body)
+    };
+}
+
 //
 // Foundational Structures for Global Optimizations
 //
@@ -167,9 +176,25 @@ where
 /// A high-performance, thread-safe memory pool for fixed-size blocks.
 /// This implementation uses a concurrent queue to manage free blocks,
 /// minimizing lock contention and fragmentation.
+#[derive(Clone)]
 pub struct MemoryPool {
     pool: Arc<ArrayQueue<AlignedBox<[u8]>>>,
     block_size: usize,
+}
+
+/// Configuration for [`MemoryPool`].
+pub struct MemoryPoolConfig {
+    pub capacity: usize,
+    pub block_size: usize,
+}
+
+impl Default for MemoryPoolConfig {
+    fn default() -> Self {
+        Self {
+            capacity: 1024,
+            block_size: 4096,
+        }
+    }
 }
 
 impl MemoryPool {
@@ -188,10 +213,31 @@ impl MemoryPool {
         }
     }
 
+    /// Creates a new pool using the provided [`MemoryPoolConfig`].
+    pub fn from_config(cfg: MemoryPoolConfig) -> Self {
+        Self::new(cfg.capacity, cfg.block_size)
+    }
+
+    /// Creates a pool using environment variables `QUICFUSCATE_POOL_CAPACITY`
+    /// and `QUICFUSCATE_POOL_BLOCK_SIZE` if present.
+    pub fn from_env() -> Self {
+        let capacity = std::env::var("QUICFUSCATE_POOL_CAPACITY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1024);
+        let block_size = std::env::var("QUICFUSCATE_POOL_BLOCK_SIZE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4096);
+        Self::new(capacity, block_size)
+    }
+
     /// Allocates a 64-byte aligned memory block from the pool.
     /// If the pool is empty, a new block is created.
     pub fn alloc(&self) -> AlignedBox<[u8]> {
-        self.pool.pop().unwrap_or_else(|| AlignedBox::new_zeroed(self.block_size, MIN_ALIGN))
+        self.pool
+            .pop()
+            .unwrap_or_else(|| AlignedBox::new_zeroed(self.block_size, MIN_ALIGN))
     }
 
     /// Returns a memory block to the pool.
@@ -223,7 +269,10 @@ impl<'a> ZeroCopyBuffer<'a> {
                 iov_len: buf.len(),
             })
             .collect();
-        Self { iovecs, _marker: std::marker::PhantomData }
+        Self {
+            iovecs,
+            _marker: std::marker::PhantomData,
+        }
     }
 
     /// Sends the data using `sendmsg` for true zero-copy transmission.
@@ -249,11 +298,10 @@ pub struct OptimizationManager {
 
 impl OptimizationManager {
     pub fn new() -> Self {
-        // Default values for capacity and block size, can be made configurable later.
         let xdp_available = XdpSocket::is_supported();
         info!("XDP available: {}", xdp_available);
         Self {
-            memory_pool: MemoryPool::new(1024, 4096),
+            memory_pool: MemoryPool::from_env(),
             xdp_available,
         }
     }

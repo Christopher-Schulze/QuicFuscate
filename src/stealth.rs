@@ -50,11 +50,10 @@ use crate::optimize::{self, OptimizationManager}; // Assumed for integration
 
 // --- Global Tokio Runtime for async DoH requests ---
 lazy_static! {
-    static ref DOH_RUNTIME: Runtime =
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("Failed to create Tokio runtime for DoH");
+    static ref DOH_RUNTIME: Runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to create Tokio runtime for DoH");
 }
 
 // --- 1. DNS over HTTPS (DoH) ---
@@ -68,7 +67,9 @@ lazy_static! {
 /// # Returns
 /// A `Result` containing the resolved `IpAddr` or a `reqwest::Error`.
 pub async fn resolve_doh(
-    client: &Client, domain: &str, doh_provider: &str,
+    client: &Client,
+    domain: &str,
+    doh_provider: &str,
 ) -> Result<IpAddr, reqwest::Error> {
     let mut url = Url::parse(doh_provider).unwrap();
     url.query_pairs_mut()
@@ -211,9 +212,16 @@ impl FingerprintProfile {
     pub fn generate_http_headers(&self) -> HashMap<String, String> {
         let mut headers = HashMap::new();
         headers.insert("User-Agent".to_string(), self.user_agent.clone());
-        headers.insert("Accept".to_string(), "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8".to_string());
+        headers.insert(
+            "Accept".to_string(),
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+                .to_string(),
+        );
         headers.insert("Accept-Language".to_string(), self.accept_language.clone());
-        headers.insert("Accept-Encoding".to_string(), "gzip, deflate, br".to_string());
+        headers.insert(
+            "Accept-Encoding".to_string(),
+            "gzip, deflate, br".to_string(),
+        );
         headers.insert("Connection".to_string(), "keep-alive".to_string());
         headers
     }
@@ -311,7 +319,7 @@ impl XorObfuscator {
 
         let key = &self.key;
 
-        optimize::dispatch(|policy| {
+        crate::simd_dispatch!(|policy| {
             let len = payload.len();
             let mut processed = 0;
 
@@ -397,7 +405,6 @@ impl XorObfuscator {
         self.obfuscate(payload);
     }
 }
-
 
 // --- 6. Stealth Manager and Configuration ---
 
@@ -485,10 +492,14 @@ impl StealthManager {
     /// would be required. This is a simulation based on available quiche settings.
     pub fn apply_utls_profile(&self, config: &mut quiche::Config) {
         let fingerprint = self.fingerprint.lock().unwrap();
-        info!("Applying uTLS fingerprint for: {:?}/{:?}", fingerprint.browser, fingerprint.os);
+        info!(
+            "Applying uTLS fingerprint for: {:?}/{:?}",
+            fingerprint.browser, fingerprint.os
+        );
 
         // Set cipher suites according to the profile's specified order.
-        let quiche_ciphers: Vec<quiche::Cipher> = fingerprint.tls_cipher_suites
+        let quiche_ciphers: Vec<quiche::Cipher> = fingerprint
+            .tls_cipher_suites
             .iter()
             .filter_map(|&iana_id| map_iana_to_quiche_cipher(iana_id))
             .collect();
@@ -499,12 +510,17 @@ impl StealthManager {
             }
         }
 
-        config.set_application_protos(quiche::h3::APPLICATION_PROTOCOL).unwrap();
+        config
+            .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
+            .unwrap();
 
         // Apply the detailed QUIC transport parameters from the harmonized profile.
         config.set_initial_max_data(fingerprint.initial_max_data);
-        config.set_initial_max_stream_data_bidi_local(fingerprint.initial_max_stream_data_bidi_local);
-        config.set_initial_max_stream_data_bidi_remote(fingerprint.initial_max_stream_data_bidi_remote);
+        config
+            .set_initial_max_stream_data_bidi_local(fingerprint.initial_max_stream_data_bidi_local);
+        config.set_initial_max_stream_data_bidi_remote(
+            fingerprint.initial_max_stream_data_bidi_remote,
+        );
         config.set_initial_max_streams_bidi(fingerprint.initial_max_streams_bidi);
         config.set_max_idle_timeout(fingerprint.max_idle_timeout);
     }
@@ -520,20 +536,25 @@ impl StealthManager {
     pub fn current_profile(&self) -> FingerprintProfile {
         self.fingerprint.lock().unwrap().clone()
     }
-    
+
     /// Resolves a domain, using DoH if enabled.
     pub fn resolve_domain(&self, domain: &str) -> IpAddr {
         if self.config.enable_doh {
-            debug!("Resolving {} via DoH provider: {}", domain, self.config.doh_provider);
-            DOH_RUNTIME.block_on(resolve_doh(
-                &self.doh_client,
-                domain,
-                &self.config.doh_provider,
-            )).unwrap_or_else(|e| {
-                error!("DoH resolution failed: {}. Falling back.", e);
-                // Simple fallback, in a real scenario might try standard DNS.
-                IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))
-            })
+            debug!(
+                "Resolving {} via DoH provider: {}",
+                domain, self.config.doh_provider
+            );
+            DOH_RUNTIME
+                .block_on(resolve_doh(
+                    &self.doh_client,
+                    domain,
+                    &self.config.doh_provider,
+                ))
+                .unwrap_or_else(|e| {
+                    error!("DoH resolution failed: {}. Falling back.", e);
+                    // Simple fallback, in a real scenario might try standard DNS.
+                    IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))
+                })
         } else {
             // Fallback to standard DNS resolution (conceptual)
             info!("DoH disabled, using standard DNS for {}", domain);
@@ -547,7 +568,10 @@ impl StealthManager {
     pub fn get_connection_headers(&self, real_host: &str) -> (String, String) {
         if self.config.enable_domain_fronting && self.domain_fronter.is_some() {
             let fronted_domain = self.domain_fronter.as_ref().unwrap().get_fronted_domain();
-            debug!("Domain fronting enabled. SNI: {}, Host: {}", fronted_domain, real_host);
+            debug!(
+                "Domain fronting enabled. SNI: {}, Host: {}",
+                fronted_domain, real_host
+            );
             (fronted_domain.to_string(), real_host.to_string()) // SNI = front, Host = real
         } else {
             (real_host.to_string(), real_host.to_string()) // SNI = real, Host = real
@@ -559,39 +583,39 @@ impl StealthManager {
         // The optimization manager could provide an efficient buffer from a pool.
         // let mut buffer = self.optimization_manager.get_buffer(payload.len());
         // buffer.copy_from_slice(payload);
-/// Maps an IANA-defined TLS cipher suite ID to the `quiche::Cipher` enum.
-///
-/// Note: `quiche` only supports a subset of all possible cipher suites.
-/// This function will ignore any unsupported ciphers.
-fn map_iana_to_quiche_cipher(iana_id: u16) -> Option<quiche::Cipher> {
-    match iana_id {
-        // TLS 1.3 Cipher Suites
-        0x1301 => Some(quiche::Cipher::TLS13_AES_128_GCM_SHA256),
-        0x1302 => Some(quiche::Cipher::TLS13_AES_256_GCM_SHA384),
-        0x1303 => Some(quiche::Cipher::TLS13_CHACHA20_POLY1305_SHA256),
+        /// Maps an IANA-defined TLS cipher suite ID to the `quiche::Cipher` enum.
+        ///
+        /// Note: `quiche` only supports a subset of all possible cipher suites.
+        /// This function will ignore any unsupported ciphers.
+        fn map_iana_to_quiche_cipher(iana_id: u16) -> Option<quiche::Cipher> {
+            match iana_id {
+                // TLS 1.3 Cipher Suites
+                0x1301 => Some(quiche::Cipher::TLS13_AES_128_GCM_SHA256),
+                0x1302 => Some(quiche::Cipher::TLS13_AES_256_GCM_SHA384),
+                0x1303 => Some(quiche::Cipher::TLS13_CHACHA20_POLY1305_SHA256),
 
-        // TLS 1.2 Cipher Suites (ECDHE)
-        0xc02b => Some(quiche::Cipher::ECDHE_ECDSA_WITH_AES_128_GCM_SHA256),
-        0xc02f => Some(quiche::Cipher::ECDHE_RSA_WITH_AES_128_GCM_SHA256),
-        0xc02c => Some(quiche::Cipher::ECDHE_ECDSA_WITH_AES_256_GCM_SHA384),
-        0xc030 => Some(quiche::Cipher::ECDHE_RSA_WITH_AES_256_GCM_SHA384),
-        0xcca9 => Some(quiche::Cipher::ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256),
-        0xcca8 => Some(quiche::Cipher::ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256),
-        
-        // Other common but potentially unsupported ciphers - mapped to None
-        // 0xc013 => ECDHE_RSA_WITH_AES_128_CBC_SHA
-        // 0xc014 => ECDHE_RSA_WITH_AES_256_CBC_SHA
-        // 0xc009 => ECDHE_ECDSA_WITH_AES_128_CBC_SHA
-        // 0xc00a => ECDHE_ECDSA_WITH_AES_256_CBC_SHA
-        _ => None,
-    }
-}
-        
+                // TLS 1.2 Cipher Suites (ECDHE)
+                0xc02b => Some(quiche::Cipher::ECDHE_ECDSA_WITH_AES_128_GCM_SHA256),
+                0xc02f => Some(quiche::Cipher::ECDHE_RSA_WITH_AES_128_GCM_SHA256),
+                0xc02c => Some(quiche::Cipher::ECDHE_ECDSA_WITH_AES_256_GCM_SHA384),
+                0xc030 => Some(quiche::Cipher::ECDHE_RSA_WITH_AES_256_GCM_SHA384),
+                0xcca9 => Some(quiche::Cipher::ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256),
+                0xcca8 => Some(quiche::Cipher::ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256),
+
+                // Other common but potentially unsupported ciphers - mapped to None
+                // 0xc013 => ECDHE_RSA_WITH_AES_128_CBC_SHA
+                // 0xc014 => ECDHE_RSA_WITH_AES_256_CBC_SHA
+                // 0xc009 => ECDHE_ECDSA_WITH_AES_128_CBC_SHA
+                // 0xc00a => ECDHE_ECDSA_WITH_AES_256_CBC_SHA
+                _ => None,
+            }
+        }
+
         if self.config.enable_xor_obfuscation && self.xor_obfuscator.is_some() {
             debug!("Applying XOR obfuscation to outgoing packet.");
             self.xor_obfuscator.as_ref().unwrap().obfuscate(payload);
         }
-        
+
         // HTTP/3 Masquerading is applied at the stream level when sending data,
         // not on raw packets here.
     }
@@ -605,7 +629,11 @@ fn map_iana_to_quiche_cipher(iana_id: u16) -> Option<quiche::Cipher> {
     }
 
     /// Generates HTTP/3 headers for masquerading a request.
-    pub fn get_http3_masquerade_headers(&self, host: &str, path: &str) -> Option<Vec<quiche::h3::Header>> {
+    pub fn get_http3_masquerade_headers(
+        &self,
+        host: &str,
+        path: &str,
+    ) -> Option<Vec<quiche::h3::Header>> {
         if self.config.enable_http3_masquerading {
             let masquerade = {
                 let fp = self.fingerprint.lock().unwrap();

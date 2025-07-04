@@ -35,13 +35,13 @@
 //! orchestrates the crypto, FEC, and stealth modules to manage a full
 //! QUIC connection lifecycle.
 
-use crate::crypto::{CryptoManager, CipherSuiteSelector};
+use crate::crypto::{CipherSuiteSelector, CryptoManager};
 use crate::fec::{AdaptiveFec, FecConfig, Packet as FecPacket, PidConfig};
-use crate::optimize::{OptimizationManager, MemoryPool};
+use crate::optimize::{MemoryPool, OptimizationManager};
+use crate::stealth::{StealthConfig, StealthManager};
 use crate::xdp_socket::XdpSocket;
-use crate::stealth::{StealthManager, StealthConfig};
 use std::collections::VecDeque;
-use std::net::{SocketAddr, Ipv4Addr};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 /// Represents a single QuicFuscate connection and manages its state.
@@ -53,7 +53,7 @@ pub struct QuicFuscateConnection {
     // Core Modules
     crypto_selector: CipherSuiteSelector,
     fec: AdaptiveFec,
-    
+
     // Stealth & Optimization Modules
     stealth_manager: Arc<StealthManager>,
     optimization_manager: Arc<OptimizationManager>,
@@ -91,20 +91,37 @@ impl QuicFuscateConnection {
 
         let crypto_manager = Arc::new(CryptoManager::new());
         let optimization_manager = Arc::new(OptimizationManager::new());
-        let stealth_manager = Arc::new(StealthManager::new(stealth_config, crypto_manager.clone(), optimization_manager.clone()));
+        let stealth_manager = Arc::new(StealthManager::new(
+            stealth_config,
+            crypto_manager.clone(),
+            optimization_manager.clone(),
+        ));
 
         stealth_manager.apply_utls_profile(&mut config);
-        
+
         let scid = quiche::ConnectionId::from_ref(&[0; quiche::MAX_CONN_ID_LEN]);
         let local_addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
-        
-        let conn = quiche::connect(Some(server_name), &scid, local_addr, remote_addr, &mut config)
-            .map_err(|e| format!("Failed to create QUIC connection: {}", e))?;
-            
+
+        let conn = quiche::connect(
+            Some(server_name),
+            &scid,
+            local_addr,
+            remote_addr,
+            &mut config,
+        )
+        .map_err(|e| format!("Failed to create QUIC connection: {}", e))?;
+
         let xdp_socket = optimization_manager.create_xdp_socket(local_addr, remote_addr);
-        Ok(Self::new(conn, local_addr, remote_addr, stealth_manager, optimization_manager, xdp_socket))
+        Ok(Self::new(
+            conn,
+            local_addr,
+            remote_addr,
+            stealth_manager,
+            optimization_manager,
+            xdp_socket,
+        ))
     }
-    
+
     pub fn new_server(
         scid: &quiche::ConnectionId,
         odcid: Option<&quiche::ConnectionId>,
@@ -118,14 +135,25 @@ impl QuicFuscateConnection {
 
         let crypto_manager = Arc::new(CryptoManager::new());
         let optimization_manager = Arc::new(OptimizationManager::new());
-        let stealth_manager = Arc::new(StealthManager::new(stealth_config, crypto_manager.clone(), optimization_manager.clone()));
-        
+        let stealth_manager = Arc::new(StealthManager::new(
+            stealth_config,
+            crypto_manager.clone(),
+            optimization_manager.clone(),
+        ));
+
         let conn = quiche::accept(scid, odcid, local_addr, remote_addr, &mut config)
             .map_err(|e| format!("Failed to accept QUIC connection: {}", e))?;
 
         let xdp_socket = optimization_manager.create_xdp_socket(local_addr, remote_addr);
 
-        Ok(Self::new(conn, local_addr, remote_addr, stealth_manager, optimization_manager, xdp_socket))
+        Ok(Self::new(
+            conn,
+            local_addr,
+            remote_addr,
+            stealth_manager,
+            optimization_manager,
+            xdp_socket,
+        ))
     }
 
     fn new(
@@ -162,35 +190,48 @@ impl QuicFuscateConnection {
         }
     }
 
-    /// Processes an incoming raw buffer, parsing it into an FEC packet and handling recovery.
-    /// This now avoids any serialization overhead.
-    pub fn recv(&mut self, data: &mut [u8]) -> Result<usize, String> {
+    /// Receives data from the network using the configured `XdpSocket`.
+    /// Incoming bytes are parsed into an FEC packet for further processing.
+    pub fn recv(&mut self) -> Result<usize, String> {
+        let mut buffer = self.optimization_manager.alloc_block();
         let len = if let Some(ref xdp) = self.xdp_socket {
-            xdp.recv(data).map_err(|e| e.to_string())?
+            xdp.recv(&mut buffer).map_err(|e| e.to_string())?
         } else {
-            data.len()
+            return Err("XDP socket not available".into());
         };
 
-        let fec_packet = FecPacket::from_raw(self.packet_id_counter, &data[..len], &self.optimization_manager)?;
+        let fec_packet = FecPacket::from_raw(
+            self.packet_id_counter,
+            &buffer[..len],
+            &self.optimization_manager,
+        )?;
+        // buffer contents copied, return block to pool
+        self.optimization_manager.free_block(buffer);
 
-        let recovered_packets = self.fec.on_receive(fec_packet)
+        let recovered_packets = self
+            .fec
+            .on_receive(fec_packet)
             .map_err(|e| format!("FEC decoding failed: {}", e))?;
 
         for mut packet in recovered_packets {
             // Deobfuscate payload if enabled
-            self.stealth_manager.process_incoming_packet(&mut packet.data);
-            
+            self.stealth_manager
+                .process_incoming_packet(&mut packet.data);
+
             // Process the reconstructed QUIC packet
-            let recv_info = quiche::RecvInfo { from: self.peer_addr, to: self.local_addr };
+            let recv_info = quiche::RecvInfo {
+                from: self.peer_addr,
+                to: self.local_addr,
+            };
             if let Err(e) = self.conn.recv(&mut packet.data, recv_info) {
                 // Log error, but continue processing other recovered packets
                 eprintln!("quiche::recv failed after FEC recovery: {}", e);
             }
         }
-        
+
         Ok(len)
     }
-    
+
     /// Prepares QUIC packets for sending, wraps them in FEC, and buffers them.
     /// This has been completely refactored to eliminate serialization and copies.
     pub fn send(&mut self, buf: &mut [u8]) -> Result<usize, quiche::Error> {
@@ -226,7 +267,8 @@ impl QuicFuscateConnection {
         send_buffer[..write].iter_mut().for_each(|b| *b = 0);
 
         // Obfuscate payload if enabled
-        self.stealth_manager.process_outgoing_packet(&mut send_buffer[..write]);
+        self.stealth_manager
+            .process_outgoing_packet(&mut send_buffer[..write]);
 
         // Create a systematic FEC packet, passing ownership of the buffer.
         let fec_packet = FecPacket {
@@ -256,7 +298,7 @@ impl QuicFuscateConnection {
             Ok(0)
         }
     }
-    
+
     /// Handles connection migration to a new network path.
     pub fn migrate_connection(&mut self, new_addr: SocketAddr) {
         self.conn.on_validation(quiche::PathEvent::New(new_addr));
@@ -274,26 +316,27 @@ impl QuicFuscateConnection {
             self.stats.loss_rate = stats.lost as f32 / stats.sent as f32;
         }
         self.stats.rtt = stats.rtt.as_millis() as f32;
-        
+
         // Report stats to the adaptive FEC controller.
-        self.fec.report_loss(stats.lost as usize, stats.sent as usize);
+        self.fec
+            .report_loss(stats.lost as usize, stats.sent as usize);
 
         // Handle path events for connection migration
         while let Some(e) = self.conn.path_event_next() {
             match e {
                 quiche::PathEvent::New(addr) => {
                     println!("New path available: {}", addr);
-                },
+                }
                 quiche::PathEvent::Validated(addr) => {
                     println!("Path validated: {}", addr);
                     self.peer_addr = addr;
-                },
+                }
                 quiche::PathEvent::Closed(addr, e) => {
                     println!("Path {} closed: {}", addr, e);
-                },
+                }
                 quiche::PathEvent::Reused(addr) => {
                     println!("Path {} reused", addr);
-                },
+                }
                 quiche::PathEvent::Available(addr) => {
                     println!("Path {} available", addr);
                 }

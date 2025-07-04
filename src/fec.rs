@@ -47,13 +47,13 @@ use std::time::{Duration, Instant};
 
 /// A dispatching wrapper for Galois Field (GF(2^8)) multiplication.
 ///
-/// This function uses the `optimize::dispatch` mechanism to select the most
+/// This function uses the `simd_dispatch!` macro to select the most
 /// performant implementation of GF(2^8)) multiplication available on the current CPU
 /// architecture, ranging from table-lookups to SIMD-accelerated versions (PCLMULQDQ, NEON).
 #[inline(always)]
-fn gf_mul(a: u8, b: u8) -> u8 {
+pub(crate) fn gf_mul(a: u8, b: u8) -> u8 {
     let mut result = 0;
-    optimize::dispatch(|policy| {
+    crate::simd_dispatch!(|policy| {
         result = match policy {
             #[cfg(all(target_arch = "x86_64", target_feature = "pclmulqdq"))]
             &optimize::Pclmulqdq => {
@@ -106,7 +106,7 @@ fn gf_inv(a: u8) -> u8 {
 
 /// Performs `a * b + c` in GF(2^8)).
 #[inline(always)]
-fn gf_mul_add(a: u8, b: u8, c: u8) -> u8 {
+pub(crate) fn gf_mul_add(a: u8, b: u8, c: u8) -> u8 {
     gf_mul(a, b) ^ c
 }
 
@@ -549,7 +549,7 @@ impl Encoder {
 
         let coeffs = self.generate_cauchy_coefficients(repair_packet_index);
 
-        optimize::dispatch(|_policy| {
+        crate::simd_dispatch!(|_policy| {
             // This is where SIMD-accelerated XORing would happen.
             // For example, processing 16 bytes at a time with AVX2/NEON.
             for (i, source_packet) in self.source_window.iter().enumerate() {
