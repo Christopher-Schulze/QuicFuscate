@@ -1,4 +1,5 @@
 use crate::core::QuicFuscateConnection;
+use crate::fec::FecMode;
 use crate::stealth::StealthConfig;
 use crate::stealth::{BrowserProfile, FingerprintProfile, OsProfile};
 use crate::telemetry;
@@ -49,6 +50,26 @@ enum Commands {
         /// Address for Prometheus exporter
         #[clap(long)]
         metrics_addr: Option<String>,
+
+        /// Initial FEC mode
+        #[clap(long, value_enum, default_value = "zero")]
+        fec_mode: FecMode,
+
+        /// Disable DNS over HTTPS
+        #[clap(long)]
+        disable_doh: bool,
+
+        /// Disable domain fronting
+        #[clap(long)]
+        disable_fronting: bool,
+
+        /// Disable XOR obfuscation
+        #[clap(long)]
+        disable_xor: bool,
+
+        /// Disable HTTP/3 masquerading
+        #[clap(long)]
+        disable_http3: bool,
     },
     /// Runs the server
     Server {
@@ -83,6 +104,26 @@ enum Commands {
         /// Address for Prometheus exporter
         #[clap(long)]
         metrics_addr: Option<String>,
+
+        /// Initial FEC mode
+        #[clap(long, value_enum, default_value = "zero")]
+        fec_mode: FecMode,
+
+        /// Disable DNS over HTTPS
+        #[clap(long)]
+        disable_doh: bool,
+
+        /// Disable domain fronting
+        #[clap(long)]
+        disable_fronting: bool,
+
+        /// Disable XOR obfuscation
+        #[clap(long)]
+        disable_xor: bool,
+
+        /// Disable HTTP/3 masquerading
+        #[clap(long)]
+        disable_http3: bool,
     },
 }
 
@@ -100,6 +141,11 @@ async fn main() -> std::io::Result<()> {
             profile_seq,
             profile_interval,
             metrics_addr,
+            fec_mode,
+            disable_doh,
+            disable_fronting,
+            disable_xor,
+            disable_http3,
         } => {
             let browser = profile.parse().unwrap_or(BrowserProfile::Chrome);
             let os_profile = os.parse().unwrap_or(OsProfile::Windows);
@@ -111,6 +157,11 @@ async fn main() -> std::io::Result<()> {
                 profile_seq,
                 *profile_interval,
                 metrics_addr,
+                *fec_mode,
+                *disable_doh,
+                *disable_fronting,
+                *disable_xor,
+                *disable_http3,
             )
             .await?;
         }
@@ -123,6 +174,11 @@ async fn main() -> std::io::Result<()> {
             profile_seq,
             profile_interval,
             metrics_addr,
+            fec_mode,
+            disable_doh,
+            disable_fronting,
+            disable_xor,
+            disable_http3,
         } => {
             let browser = profile.parse().unwrap_or(BrowserProfile::Chrome);
             let os_profile = os.parse().unwrap_or(OsProfile::Windows);
@@ -135,6 +191,11 @@ async fn main() -> std::io::Result<()> {
                 profile_seq,
                 *profile_interval,
                 metrics_addr,
+                *fec_mode,
+                *disable_doh,
+                *disable_fronting,
+                *disable_xor,
+                *disable_http3,
             )
             .await?;
         }
@@ -163,6 +224,11 @@ async fn run_client(
     profile_seq: &Option<Vec<String>>,
     profile_interval: u64,
     metrics_addr: &Option<String>,
+    fec_mode: FecMode,
+    disable_doh: bool,
+    disable_fronting: bool,
+    disable_xor: bool,
+    disable_http3: bool,
 ) -> std::io::Result<()> {
     let server_addr = server_addr_str.to_socket_addrs()?.next().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "Server address not found")
@@ -194,16 +260,20 @@ async fn run_client(
         }
     }
 
+    let url_parsed =
+        url::Url::parse(url).unwrap_or_else(|_| url::Url::parse("https://example.com/").unwrap());
     let mut stealth_config = StealthConfig::default();
     stealth_config.browser_profile = profile;
     stealth_config.os_profile = os;
-    let mut conn = QuicFuscateConnection::new_client(
-        "example.com",
-        server_addr,
-        config,
-        stealth_config.clone(),
-    )
-    .expect("failed to create client connection");
+    stealth_config.enable_doh = !disable_doh;
+    stealth_config.enable_domain_fronting = !disable_fronting;
+    stealth_config.enable_xor_obfuscation = !disable_xor;
+    stealth_config.enable_http3_masquerading = !disable_http3;
+
+    let host = url_parsed.host_str().unwrap_or("example.com");
+    let mut conn =
+        QuicFuscateConnection::new_client(host, server_addr, config, stealth_config, fec_mode)
+            .expect("failed to create client connection");
 
     let profiles: Vec<FingerprintProfile> = match profile_seq {
         Some(seq) => seq
@@ -215,59 +285,62 @@ async fn run_client(
 
     if profile_interval > 0 && profiles.len() > 1 {
         let sm = conn.stealth_manager();
-        sm.start_profile_rotation(
-            profiles,
-            std::time::Duration::from_secs(profile_interval),
-        );
+        sm.start_profile_rotation(profiles, std::time::Duration::from_secs(profile_interval));
     }
 
     let mut buf = [0; 65535];
-    let mut out = [0; 1460];
+    let mut out = [0; 65535];
 
     // Send initial packet
-    if let Some((len, _)) = conn.conn.send(&mut out) {
-        socket.send(&out[..len])?;
-        info!("Sent initial packet of size {}", len);
+    if let Ok(len) = conn.send(&mut out) {
+        if len > 0 {
+            socket.send(&out[..len])?;
+            info!("Sent initial packet of size {}", len);
+        }
     }
+
+    let mut request_sent = false;
 
     loop {
         // Process incoming packets
         match socket.recv(&mut buf) {
             Ok(len) => {
-                let _ = conn
-                    .conn
-                    .recv(&mut buf[..len], quiche::RecvInfo { from: server_addr });
-                info!("Received packet of size {}", len);
+                let _ = conn.recv(&mut buf[..len]);
             }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // No packets to read, continue
-            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(e) => {
                 error!("Failed to read from socket: {}", e);
                 break;
             }
         }
 
-        // If connection is established, send a request
-        if conn.conn.is_established() {
-            let req = format!("GET {}\r\n", url);
-            match conn.conn.stream_send(0, req.as_bytes(), true) {
-                Ok(_) => info!("Sent request: {}", req.trim()),
-                Err(quiche::Error::Done) => {}
+        if conn.conn.is_established() && !request_sent {
+            if let Err(e) = conn.send_http3_request(url_parsed.path()) {
+                warn!("HTTP/3 request failed: {:?}", e);
+            } else {
+                request_sent = true;
+            }
+        }
+
+        if let Err(e) = conn.poll_http3() {
+            warn!("HTTP/3 error: {:?}", e);
+        }
+
+        loop {
+            match conn.send(&mut out) {
+                Ok(len) if len > 0 => {
+                    socket.send(&out[..len])?;
+                }
+                Ok(_) => break,
+                Err(quiche::Error::Done) => break,
                 Err(e) => {
-                    error!("Failed to send request: {:?}", e);
+                    error!("Send failed: {:?}", e);
                     break;
                 }
             }
         }
 
-        // Send outgoing packets
-        while let Some((len, _)) = conn.conn.send(&mut out) {
-            socket.send(&out[..len])?;
-            info!("Sent packet of size {}", len);
-        }
-
-        // Check for timeout
+        conn.update_state();
         conn.conn.on_timeout();
 
         // Sleep to avoid busy-looping
@@ -286,6 +359,11 @@ async fn run_server(
     profile_seq: &Option<Vec<String>>,
     profile_interval: u64,
     metrics_addr: &Option<String>,
+    fec_mode: FecMode,
+    disable_doh: bool,
+    disable_fronting: bool,
+    disable_xor: bool,
+    disable_http3: bool,
 ) -> std::io::Result<()> {
     let socket = std::net::UdpSocket::bind(listen_addr)?;
     socket.set_nonblocking(true)?;
@@ -324,6 +402,10 @@ async fn run_server(
         let mut sc = stealth_config.lock().unwrap();
         sc.browser_profile = profile;
         sc.os_profile = os;
+        sc.enable_doh = !disable_doh;
+        sc.enable_domain_fronting = !disable_fronting;
+        sc.enable_xor_obfuscation = !disable_xor;
+        sc.enable_http3_masquerading = !disable_http3;
     }
 
     let profiles: Vec<FingerprintProfile> = match profile_seq {
@@ -360,34 +442,18 @@ async fn run_server(
                         from,
                         config.clone(),
                         cfg,
+                        fec_mode,
                     )
                     .expect("failed to create server connection")
                 });
 
-                let recv_info = quiche::RecvInfo { from };
-                if let Err(e) = client_conn.conn.recv(&mut buf[..len], recv_info) {
+                if let Err(e) = client_conn.recv(&mut buf[..len]) {
                     error!("QUIC recv failed: {:?}", e);
                     continue;
                 }
 
-                // Process stream data
-                if client_conn.conn.is_established() {
-                    for stream_id in client_conn.conn.readable() {
-                        let mut stream_buf = [0; 4096];
-                        while let Ok((read, fin)) =
-                            client_conn.conn.stream_recv(stream_id, &mut stream_buf)
-                        {
-                            let data = &stream_buf[..read];
-                            info!(
-                                "Received on stream {}: {} bytes, fin={}",
-                                stream_id, read, fin
-                            );
-                            // Echo back the received data
-                            if let Err(e) = client_conn.conn.stream_send(stream_id, data, fin) {
-                                error!("Stream send failed: {:?}", e);
-                            }
-                        }
-                    }
+                if let Err(e) = client_conn.poll_http3() {
+                    warn!("HTTP/3 error: {:?}", e);
                 }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -401,13 +467,22 @@ async fn run_server(
 
         // Send packets for all clients
         for (addr, conn) in clients.iter_mut() {
-            while let Some((len, _)) = conn.conn.send(&mut out) {
-                if let Err(e) = socket.send_to(&out[..len], addr) {
-                    error!("Failed to send packet to {}: {}", addr, e);
-                } else {
-                    info!("Sent {} bytes to {}", len, addr);
+            loop {
+                match conn.send(&mut out) {
+                    Ok(len) if len > 0 => {
+                        if let Err(e) = socket.send_to(&out[..len], addr) {
+                            error!("Failed to send packet to {}: {}", addr, e);
+                        }
+                    }
+                    Ok(_) => break,
+                    Err(quiche::Error::Done) => break,
+                    Err(e) => {
+                        error!("Send failed to {}: {:?}", addr, e);
+                        break;
+                    }
                 }
             }
+            conn.update_state();
             conn.conn.on_timeout();
         }
 

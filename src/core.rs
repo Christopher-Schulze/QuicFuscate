@@ -85,6 +85,7 @@ impl QuicFuscateConnection {
         remote_addr: SocketAddr,
         mut config: quiche::Config,
         stealth_config: StealthConfig,
+        fec_mode: FecMode,
     ) -> Result<Self, String> {
         // --- Explicitly set BBRv2 Congestion Control as per PLAN.txt ---
         config.set_cc_algorithm(quiche::CongestionControlAlgorithm::BBRv2);
@@ -118,6 +119,7 @@ impl QuicFuscateConnection {
             stealth_manager,
             optimization_manager,
             xdp_socket,
+            fec_mode,
         ))
     }
 
@@ -128,6 +130,7 @@ impl QuicFuscateConnection {
         remote_addr: SocketAddr,
         mut config: quiche::Config,
         stealth_config: StealthConfig,
+        fec_mode: FecMode,
     ) -> Result<Self, String> {
         config.set_cc_algorithm(quiche::CongestionControlAlgorithm::BBRv2);
         config.enable_mtu_probing();
@@ -153,6 +156,7 @@ impl QuicFuscateConnection {
             stealth_manager,
             optimization_manager,
             xdp_socket,
+            fec_mode,
         ))
     }
 
@@ -164,6 +168,7 @@ impl QuicFuscateConnection {
         stealth_manager: Arc<StealthManager>,
         optimization_manager: Arc<OptimizationManager>,
         xdp_socket: Option<XdpSocket>,
+        fec_mode: FecMode,
     ) -> Self {
         let fec_config = FecConfig {
             lambda: 0.1,
@@ -174,6 +179,7 @@ impl QuicFuscateConnection {
                 ki: 0.1,
                 kd: 0.2,
             },
+            initial_mode: fec_mode,
             window_sizes: FecConfig::default_windows(),
         };
 
@@ -346,6 +352,37 @@ impl QuicFuscateConnection {
 
         if let Some(ref mut h3) = self.h3_conn {
             h3.send_request(&mut self.conn, &headers, true)?;
+        }
+        Ok(())
+    }
+
+    /// Polls HTTP/3 events and prints received data.
+    pub fn poll_http3(&mut self) -> Result<(), quiche::h3::Error> {
+        if let Some(ref mut h3) = self.h3_conn {
+            loop {
+                match h3.poll(&mut self.conn) {
+                    Ok((stream_id, quiche::h3::Event::Headers { list, .. })) => {
+                        for h in list {
+                            println!(
+                                "{}: {}",
+                                String::from_utf8_lossy(h.name()),
+                                String::from_utf8_lossy(h.value())
+                            );
+                        }
+                    }
+                    Ok((stream_id, quiche::h3::Event::Data)) => {
+                        let mut buf = [0; 4096];
+                        while let Ok(read) = h3.recv_body(&mut self.conn, stream_id, &mut buf) {
+                            let data = &buf[..read];
+                            println!("Received {} bytes on stream {}", read, stream_id);
+                            println!("{}", String::from_utf8_lossy(data));
+                        }
+                    }
+                    Ok((_id, quiche::h3::Event::Finished)) => {}
+                    Err(quiche::h3::Error::Done) => break,
+                    Err(e) => return Err(e),
+                }
+            }
         }
         Ok(())
     }

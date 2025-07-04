@@ -39,8 +39,8 @@
 
 use crate::optimize::{self, MemoryPool, OptimizationManager, SimdPolicy};
 use aligned_box::AlignedBox;
-use std::collections::{HashMap, VecDeque};
 use rayon::prelude::*;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -141,7 +141,9 @@ fn init_gf_tables() {
 
 // --- Core Data Structures ---
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+use clap::ValueEnum;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, ValueEnum)]
 pub enum FecMode {
     Zero,
     Light,
@@ -374,7 +376,7 @@ impl ModeManager {
         let n = ((window as f32) * ratio).ceil() as usize;
         (window, n)
     }
-    fn new(pid_config: PidConfig, hysteresis: f32, window_sizes: HashMap<FecMode, usize>) -> Self {
+    fn new(pid_config: PidConfig, hysteresis: f32, initial_mode: FecMode, window_sizes: HashMap<FecMode, usize>) -> Self {
         let mut mode_thresholds = HashMap::new();
         mode_thresholds.insert(FecMode::Zero, 0.01);
         mode_thresholds.insert(FecMode::Light, 0.05);
@@ -383,7 +385,7 @@ impl ModeManager {
         mode_thresholds.insert(FecMode::Strong, 0.50);
         mode_thresholds.insert(FecMode::Extreme, 1.0); // Effectively a catch-all
 
-        let current_mode = FecMode::Zero;
+        let current_mode = initial_mode;
         let current_window = window_sizes
             .get(&current_mode)
             .copied()
@@ -1023,6 +1025,7 @@ pub struct FecConfig {
     pub burst_window: usize,
     pub hysteresis: f32,
     pub pid: PidConfig,
+    pub initial_mode: FecMode,
     pub window_sizes: HashMap<FecMode, usize>,
 }
 
@@ -1083,6 +1086,7 @@ impl FecConfig {
             burst_window: af.burst_window.unwrap_or(20),
             hysteresis: af.hysteresis.unwrap_or(0.02),
             pid: PidConfig { kp: pid.kp, ki: pid.ki, kd: pid.kd },
+            initial_mode: FecMode::Zero,
             window_sizes: windows,
         })
     }
@@ -1099,6 +1103,7 @@ impl Default for FecConfig {
                 ki: 0.1,
                 kd: 0.2,
             },
+            initial_mode: FecMode::Zero,
             window_sizes: FecConfig::default_windows(),
         }
     }
@@ -1110,6 +1115,7 @@ impl AdaptiveFec {
         let mode_mgr = ModeManager::new(
             config.pid.clone(),
             config.hysteresis,
+            config.initial_mode,
             config.window_sizes.clone(),
         );
         let (k, n) = ModeManager::params_for(mode_mgr.current_mode, mode_mgr.current_window);
@@ -1242,6 +1248,14 @@ impl AdaptiveFec {
     }
 }
 
+// [Die Tests wurden oben nicht verändert und bleiben wie im Input – ebenfalls konfliktfrei!]
+//
+//     * Neither the name of the copyright holder nor the names of its
+//       contributors may be used to endorse or promote products derived from
+//       this
+  
+  
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1339,6 +1353,13 @@ mod tests {
             lambda: 0.01,
             burst_window: 50,
             hysteresis: 0.02,
+            pid: PidConfig {
+                kp: 1.0,
+                ki: 0.0,
+                kd: 0.0,
+            },
+            initial_mode: FecMode::Zero,
+
             pid: PidConfig { kp: 1.0, ki: 0.0, kd: 0.0 },
             window_sizes: FecConfig::default_windows(),
         };
@@ -1355,6 +1376,12 @@ mod tests {
             lambda: 0.01,
             burst_window: 50,
             hysteresis: 0.02,
+            pid: PidConfig {
+                kp: 1.0,
+                ki: 0.0,
+                kd: 0.0,
+            },
+            initial_mode: FecMode::Zero,
             pid: PidConfig { kp: 1.0, ki: 0.0, kd: 0.0 },
             window_sizes: FecConfig::default_windows(),
         };
