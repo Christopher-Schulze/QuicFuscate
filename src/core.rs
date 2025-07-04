@@ -174,6 +174,7 @@ impl QuicFuscateConnection {
                 ki: 0.1,
                 kd: 0.2,
             },
+            window_sizes: FecConfig::default_windows(),
         };
 
         Self {
