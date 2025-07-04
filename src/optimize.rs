@@ -35,22 +35,22 @@
 //! function dispatching to select the best hardware-accelerated implementation.
 //! It also includes foundational structures for zero-copy operations and memory pooling.
 
-use aligned_box::{AlignedBox, MIN_ALIGN};
-use std::any::Any;
-use std::collections::HashMap;
-use std::sync::{Arc, Once};
-use log::info;
-use std::net::SocketAddr;
 use crate::xdp_socket::XdpSocket;
+use aligned_box::AlignedBox;
 use crossbeam_queue::ArrayQueue;
+#[cfg(unix)]
+use libc::{iovec, msghdr, recvmsg, sendmsg};
+use log::info;
+use std::any::Any;
 #[cfg(target_arch = "aarch64")]
 use std::arch::is_aarch64_feature_detected;
 #[cfg(target_arch = "x86_64")]
 use std::arch::is_x86_feature_detected;
+use std::collections::HashMap;
+use std::net::SocketAddr;
 #[cfg(unix)]
 use std::os::unix::io::RawFd;
-#[cfg(unix)]
-use libc::{iovec, msghdr, recvmsg, sendmsg};
+use std::sync::{Arc, Once};
 
 /// Enumerates the CPU features relevant for QuicFuscate's optimizations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -190,6 +190,7 @@ where
 /// A high-performance, thread-safe memory pool for fixed-size blocks.
 /// This implementation uses a concurrent queue to manage free blocks,
 /// minimizing lock contention and fragmentation.
+#[derive(Clone)]
 pub struct MemoryPool {
     pool: Arc<ArrayQueue<AlignedBox<[u8]>>>,
     block_size: usize,
@@ -202,7 +203,7 @@ impl MemoryPool {
         let pool = ArrayQueue::new(capacity);
         for _ in 0..capacity {
             // Pre-allocate blocks with 64-byte alignment for optimal cache performance.
-            let mut aligned_box = AlignedBox::new_zeroed(block_size, MIN_ALIGN);
+            let aligned_box = AlignedBox::slice_from_default(64, block_size).unwrap();
             pool.push(aligned_box).unwrap();
         }
         Self {
@@ -214,7 +215,9 @@ impl MemoryPool {
     /// Allocates a 64-byte aligned memory block from the pool.
     /// If the pool is empty, a new block is created.
     pub fn alloc(&self) -> AlignedBox<[u8]> {
-        self.pool.pop().unwrap_or_else(|| AlignedBox::new_zeroed(self.block_size, MIN_ALIGN))
+        self.pool
+            .pop()
+            .unwrap_or_else(|| AlignedBox::slice_from_default(64, self.block_size).unwrap())
     }
 
     /// Returns a memory block to the pool.
@@ -246,7 +249,10 @@ impl<'a> ZeroCopyBuffer<'a> {
                 iov_len: buf.len(),
             })
             .collect();
-        Self { iovecs, _marker: std::marker::PhantomData }
+        Self {
+            iovecs,
+            _marker: std::marker::PhantomData,
+        }
     }
 
     /// Creates a new `ZeroCopyBuffer` from mutable slices for receiving.
@@ -258,7 +264,10 @@ impl<'a> ZeroCopyBuffer<'a> {
                 iov_len: buf.len(),
             })
             .collect();
-        Self { iovecs, _marker: std::marker::PhantomData }
+        Self {
+            iovecs,
+            _marker: std::marker::PhantomData,
+        }
     }
 
     /// Sends the data using `sendmsg` for true zero-copy transmission.
@@ -292,7 +301,7 @@ impl<'a> ZeroCopyBuffer<'a> {
 // --- Placeholder for full integration ---
 
 pub struct OptimizationManager {
-    memory_pool: MemoryPool,
+    memory_pool: Arc<MemoryPool>,
     xdp_available: bool,
 }
 
@@ -302,7 +311,7 @@ impl OptimizationManager {
         let xdp_available = XdpSocket::is_supported();
         info!("XDP available: {}", xdp_available);
         Self {
-            memory_pool: MemoryPool::new(1024, 4096),
+            memory_pool: Arc::new(MemoryPool::new(1024, 4096)),
             xdp_available,
         }
     }
@@ -317,6 +326,10 @@ impl OptimizationManager {
 
     pub fn is_xdp_available(&self) -> bool {
         self.xdp_available
+    }
+
+    pub fn memory_pool(&self) -> Arc<MemoryPool> {
+        Arc::clone(&self.memory_pool)
     }
 
     pub fn create_xdp_socket(&self, bind: SocketAddr, remote: SocketAddr) -> Option<XdpSocket> {
