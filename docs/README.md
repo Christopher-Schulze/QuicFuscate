@@ -29,6 +29,27 @@ selection logic. The algorithms and selection strategy come from the
 code reuses the same concepts of AEGIS‑128X/L and MORUS‑1280‑128 with a
 `CipherSuiteSelector` to pick the optimal cipher based on CPU features.
 
+Runtime detection is implemented in [`features.rs`] using the functions
+`vaes_available()`, `neon_available()` and `aesni_available()`【F:rust/crypto/src/lib.rs†L38-L48】【F:rust/crypto/src/features.rs†L1-L44】.
+`CipherSuiteSelector::select_best_cipher_suite_internal` chooses
+`AEGIS-128X` when VAES512 is present, `AEGIS-128L` when NEON or AES-NI is
+available and otherwise falls back to `MORUS-1280-128`.  Setting the
+environment variable `FORCE_SOFTWARE` disables hardware checks so that all
+functions return `false`【F:rust/crypto/src/features.rs†L1-L33】.
+
+| Function             | CPU feature      | Selected suite      |
+|----------------------|------------------|---------------------|
+| `vaes_available()`   | VAES + AVX-512   | AEGIS-128X          |
+| `neon_available()`   | NEON (ARM)       | AEGIS-128L          |
+| `aesni_available()`  | AES-NI (x86)     | AEGIS-128L          |
+| *(none detected)*    | --               | MORUS-1280-128      |
+
+Example forcing the software fallback:
+
+```bash
+FORCE_SOFTWARE=1 cargo test -p crypto
+```
+
 ### FEC Crate
 The Forward Error Correction crate currently offers a basic encoder and decoder
 and is intended to replace the old C++ implementation. Adaptive redundancy with

@@ -28,6 +28,8 @@ fn decode_from_repair_packet() -> Result<(), Box<dyn std::error::Error>> {
     let mut module = FECModule::new(FECConfig::default());
     module.update_network_metrics(fec::NetworkMetrics {
         packet_loss_rate: 0.1,
+        rtt_variation_ms: 10.0,
+        bandwidth_mbps: 10.0,
     });
     let packets = module.encode_packet(b"abc", 1)?;
     assert!(packets.len() >= 2);
@@ -46,6 +48,8 @@ fn update_metrics_increases_redundancy() -> Result<(), Box<dyn std::error::Error
     assert!(packets_before.len() >= 1);
     module.update_network_metrics(fec::NetworkMetrics {
         packet_loss_rate: 0.5,
+        rtt_variation_ms: 10.0,
+        bandwidth_mbps: 10.0,
     });
     let packets_after = module.encode_packet(b"data", 1)?;
     assert!(packets_after.len() > 1);
@@ -61,8 +65,32 @@ fn strategy_switches_algorithm() -> Result<(), Box<dyn std::error::Error>> {
     // Introduce moderate loss
     module.update_network_metrics(fec::NetworkMetrics {
         packet_loss_rate: 0.1,
+        rtt_variation_ms: 10.0,
+        bandwidth_mbps: 10.0,
     });
     let pkts = module.encode_packet(b"abc", 2)?;
     assert!(pkts.len() > 1);
+    Ok(())
+}
+
+#[test]
+fn good_network_disables_fec() -> Result<(), Box<dyn std::error::Error>> {
+    let mut module = FECModule::new(FECConfig::default());
+    module.update_network_metrics(fec::NetworkMetrics {
+        packet_loss_rate: 0.5,
+        rtt_variation_ms: 20.0,
+        bandwidth_mbps: 10.0,
+    });
+    let pkts = module.encode_packet(b"abc", 1)?;
+    assert!(pkts.len() > 1);
+    for _ in 0..31 {
+        module.update_network_metrics(fec::NetworkMetrics {
+            packet_loss_rate: 0.0,
+            rtt_variation_ms: 1.0,
+            bandwidth_mbps: 100.0,
+        });
+    }
+    let pkts = module.encode_packet(b"abc", 2)?;
+    assert_eq!(1, pkts.len());
     Ok(())
 }
