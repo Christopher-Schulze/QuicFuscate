@@ -37,10 +37,10 @@
 //! based on detected CPU capabilities.
 
 use crate::{cpu_features, CpuFeature};
-use aead::{Aead, KeyInit, Nonce, Payload};
+use aead::{Aead, KeyInit};
 use aegis::{aegis128l::Aegis128L, aegis128x::Aegis128X};
 use morus::Morus;
-use rand::{RngCore, rngs::OsRng};
+use rand::{rngs::OsRng, RngCore};
 
 /// Enumerates the available cipher suites.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,16 +50,147 @@ pub enum CipherSuite {
     Morus1280_128,
 }
 
+/// Trait implemented by each cipher providing encryption and decryption.
+trait CipherImpl {
+    fn encrypt(
+        &self,
+        key: &[u8],
+        nonce: &[u8],
+        ad: &[u8],
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, &'static str>;
+
+    fn decrypt(
+        &self,
+        key: &[u8],
+        nonce: &[u8],
+        ad: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, &'static str>;
+}
+
+struct Aegis128XImpl;
+
+impl CipherImpl for Aegis128XImpl {
+    fn encrypt(
+        &self,
+        key: &[u8],
+        nonce: &[u8],
+        ad: &[u8],
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, &'static str> {
+        let key_array: &[u8; 32] = key.try_into().map_err(|_| "Invalid key length for Aegis128X")?;
+        let nonce_array: &[u8; 32] = nonce.try_into().map_err(|_| "Invalid nonce length for Aegis128X")?;
+        let cipher = Aegis128X::new(key_array, nonce_array);
+        let (mut ciphertext, tag) = cipher.encrypt(plaintext, ad);
+        ciphertext.extend_from_slice(&tag);
+        Ok(ciphertext)
+    }
+
+    fn decrypt(
+        &self,
+        key: &[u8],
+        nonce: &[u8],
+        ad: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, &'static str> {
+        if ciphertext.len() < 16 {
+            return Err("Ciphertext too short for Aegis128X");
+        }
+        let key_array: &[u8; 32] = key.try_into().map_err(|_| "Invalid key length for Aegis128X")?;
+        let nonce_array: &[u8; 32] = nonce.try_into().map_err(|_| "Invalid nonce length for Aegis128X")?;
+        let cipher = Aegis128X::new(key_array, nonce_array);
+        let (msg, tag_slice) = ciphertext.split_at(ciphertext.len() - 16);
+        let tag = aegis::Tag::from_slice(tag_slice);
+        cipher.decrypt(msg, &tag, ad).map_err(|_| "Decryption failed")
+    }
+}
+
+struct Aegis128LImpl;
+
+impl CipherImpl for Aegis128LImpl {
+    fn encrypt(
+        &self,
+        key: &[u8],
+        nonce: &[u8],
+        ad: &[u8],
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, &'static str> {
+        let key_array: &[u8; 16] = key.try_into().map_err(|_| "Invalid key length")?;
+        let nonce_array: &[u8; 16] = nonce.try_into().map_err(|_| "Invalid nonce length")?;
+        let cipher = Aegis128L::new(key_array, nonce_array);
+        let (mut ciphertext, tag) = cipher.encrypt(plaintext, ad);
+        ciphertext.extend_from_slice(&tag);
+        Ok(ciphertext)
+    }
+
+    fn decrypt(
+        &self,
+        key: &[u8],
+        nonce: &[u8],
+        ad: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, &'static str> {
+        if ciphertext.len() < 16 {
+            return Err("Ciphertext too short");
+        }
+        let key_array: &[u8; 16] = key.try_into().map_err(|_| "Invalid key length")?;
+        let nonce_array: &[u8; 16] = nonce.try_into().map_err(|_| "Invalid nonce length")?;
+        let cipher = Aegis128L::new(key_array, nonce_array);
+        let (msg, tag_slice) = ciphertext.split_at(ciphertext.len() - 16);
+        let tag = aegis::Tag::from_slice(tag_slice);
+        cipher.decrypt(msg, &tag, ad).map_err(|_| "Decryption failed")
+    }
+}
+
+struct MorusImpl;
+
+impl CipherImpl for MorusImpl {
+    fn encrypt(
+        &self,
+        key: &[u8],
+        nonce: &[u8],
+        ad: &[u8],
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, &'static str> {
+        let key_array: &[u8; 16] = key.try_into().map_err(|_| "Invalid key length for Morus")?;
+        let nonce_array: &[u8; 16] = nonce.try_into().map_err(|_| "Invalid nonce length for Morus")?;
+        let mut cipher = Morus::new(key_array, nonce_array);
+        let (mut ciphertext, tag) = cipher.encrypt(plaintext, ad);
+        ciphertext.extend_from_slice(&tag);
+        Ok(ciphertext)
+    }
+
+    fn decrypt(
+        &self,
+        key: &[u8],
+        nonce: &[u8],
+        ad: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, &'static str> {
+        if ciphertext.len() < 16 {
+            return Err("Ciphertext too short for Morus");
+        }
+        let key_array: &[u8; 16] = key.try_into().map_err(|_| "Invalid key length for Morus")?;
+        let nonce_array: &[u8; 16] = nonce.try_into().map_err(|_| "Invalid nonce length for Morus")?;
+        let mut cipher = Morus::new(key_array, nonce_array);
+        let (msg, tag_slice) = ciphertext.split_at(ciphertext.len() - 16);
+        let tag: &[u8; 16] = tag_slice.try_into().unwrap();
+        cipher.decrypt(msg, tag, ad).map_err(|_| "Decryption failed")
+    }
+}
+
 /// Selects the optimal cipher suite at runtime based on CPU features.
 pub struct CipherSuiteSelector {
     selected_suite: CipherSuite,
+    cipher: Box<dyn CipherImpl + Send + Sync>,
 }
 
 impl CipherSuiteSelector {
     /// Creates a new `CipherSuiteSelector` and determines the best available cipher.
     pub fn new() -> Self {
         let detector = cpu_features();
-        
+
         let selected_suite = if detector.has_feature(CpuFeature::VAES) {
             CipherSuite::Aegis128X
         } else if detector.has_feature(CpuFeature::AESNI) || detector.has_feature(CpuFeature::NEON) {
@@ -67,8 +198,28 @@ impl CipherSuiteSelector {
         } else {
             CipherSuite::Morus1280_128
         };
+        Self::with_suite(selected_suite)
+    }
 
-        Self { selected_suite }
+    /// Creates a selector for the given suite.
+    pub fn with_suite(suite: CipherSuite) -> Self {
+        let cipher: Box<dyn CipherImpl + Send + Sync> = match suite {
+            CipherSuite::Aegis128X => Box::new(Aegis128XImpl),
+            CipherSuite::Aegis128L => Box::new(Aegis128LImpl),
+            CipherSuite::Morus1280_128 => Box::new(MorusImpl),
+        };
+
+        Self { selected_suite: suite, cipher }
+    }
+
+    /// Returns the IANA TLS cipher suite identifier corresponding to the
+    /// selected cipher. This is used when configuring the TLS stack.
+    pub fn tls_cipher(&self) -> u16 {
+        match self.selected_suite {
+            CipherSuite::Aegis128X => 0x1302, // TLS_AES_256_GCM_SHA384
+            CipherSuite::Aegis128L => 0x1301, // TLS_AES_128_GCM_SHA256
+            CipherSuite::Morus1280_128 => 0x1303, // TLS_CHACHA20_POLY1305_SHA256
+        }
     }
 
     /// Returns the selected cipher suite.
@@ -78,66 +229,12 @@ impl CipherSuiteSelector {
 
     /// Encrypts data using the automatically selected cipher suite.
     pub fn encrypt(&self, key: &[u8], nonce: &[u8], ad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, &'static str> {
-        match self.selected_suite {
-            CipherSuite::Aegis128X => {
-                let key_array: &[u8; 32] = key.try_into().map_err(|_| "Invalid key length for Aegis128X")?;
-                let nonce_array: &[u8; 32] = nonce.try_into().map_err(|_| "Invalid nonce length for Aegis128X")?;
-                let cipher = Aegis128X::new(key_array, nonce_array);
-                let (mut ciphertext, tag) = cipher.encrypt(plaintext, ad);
-                ciphertext.extend_from_slice(&tag);
-                Ok(ciphertext)
-            },
-            CipherSuite::Aegis128L => {
-                let key_array: &[u8; 16] = key.try_into().map_err(|_| "Invalid key length for Aegis")?;
-                let nonce_array: &[u8; 16] = nonce.try_into().map_err(|_| "Invalid nonce length for Aegis")?;
-                let cipher = Aegis128L::new(key_array, nonce_array);
-                let (mut ciphertext, tag) = cipher.encrypt(plaintext, ad);
-                ciphertext.extend_from_slice(&tag);
-                Ok(ciphertext)
-            },
-            CipherSuite::Morus1280_128 => {
-                let key_array: &[u8; 16] = key.try_into().map_err(|_| "Invalid key length for Morus")?;
-                let nonce_array: &[u8; 16] = nonce.try_into().map_err(|_| "Invalid nonce length for Morus")?;
-                let mut cipher = Morus::new(key_array, nonce_array);
-                let (mut ciphertext, tag) = cipher.encrypt(plaintext, ad);
-                ciphertext.extend_from_slice(&tag);
-                Ok(ciphertext)
-            },
-        }
+        self.cipher.encrypt(key, nonce, ad, plaintext)
     }
 
     /// Decrypts data using the automatically selected cipher suite.
     pub fn decrypt(&self, key: &[u8], nonce: &[u8], ad: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, &'static str> {
-        let payload = Payload { msg: ciphertext, aad: ad };
-        match self.selected_suite {
-            CipherSuite::Aegis128X => {
-                if payload.msg.len() < 16 { return Err("Ciphertext too short for Aegis128X"); }
-                let key_array: &[u8; 32] = key.try_into().map_err(|_| "Invalid key length for Aegis128X")?;
-                let nonce_array: &[u8; 32] = nonce.try_into().map_err(|_| "Invalid nonce length for Aegis128X")?;
-                let cipher = Aegis128X::new(key_array, nonce_array);
-                let (ciphertext, tag_slice) = payload.msg.split_at(payload.msg.len() - 16);
-                let tag = aegis::Tag::from_slice(tag_slice);
-                cipher.decrypt(ciphertext, &tag, payload.aad).map_err(|_| "Decryption failed")
-            },
-            CipherSuite::Aegis128L => {
-                if payload.msg.len() < 16 { return Err("Ciphertext too short"); }
-                let key_array: &[u8; 16] = key.try_into().map_err(|_| "Invalid key length")?;
-                let nonce_array: &[u8; 16] = nonce.try_into().map_err(|_| "Invalid nonce length")?;
-                let cipher = Aegis128L::new(key_array, nonce_array);
-                let (ciphertext, tag_slice) = payload.msg.split_at(payload.msg.len() - 16);
-                let tag = aegis::Tag::from_slice(tag_slice);
-                cipher.decrypt(ciphertext, &tag, payload.aad).map_err(|_| "Decryption failed")
-            },
-            CipherSuite::Morus1280_128 => {
-                if payload.msg.len() < 16 { return Err("Ciphertext too short for Morus"); }
-                let key_array: &[u8; 16] = key.try_into().map_err(|_| "Invalid key length for Morus")?;
-                let nonce_array: &[u8; 16] = nonce.try_into().map_err(|_| "Invalid nonce length for Morus")?;
-                let mut cipher = Morus::new(key_array, nonce_array);
-                let (ciphertext, tag_slice) = payload.msg.split_at(payload.msg.len() - 16);
-                let tag: &[u8; 16] = tag_slice.try_into().unwrap();
-                cipher.decrypt(ciphertext, tag, payload.aad).map_err(|_| "Decryption failed")
-            },
-        }
+        self.cipher.decrypt(key, nonce, ad, ciphertext)
     }
 }
 
