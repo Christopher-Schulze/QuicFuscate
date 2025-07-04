@@ -1,0 +1,10 @@
+[package]
+name = "aegis"
+version = "0.9.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+aegis-128x = []

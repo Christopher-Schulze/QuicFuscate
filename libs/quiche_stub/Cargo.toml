@@ -1,0 +1,8 @@
+[package]
+name = "quiche_stub"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+name = "quiche"
+path = "src/lib.rs"

@@ -71,6 +71,22 @@ impl CipherSuiteSelector {
         Self { selected_suite }
     }
 
+    /// Creates a selector using a mocked set of CPU features. This is only
+    /// available during testing and allows verifying the runtime decision
+    /// logic without relying on the actual host CPU.
+    #[cfg(test)]
+    pub fn new_with_features(features: &[CpuFeature]) -> Self {
+        let has = |f: CpuFeature| features.contains(&f);
+        let selected_suite = if has(CpuFeature::VAES) {
+            CipherSuite::Aegis128X
+        } else if has(CpuFeature::AESNI) || has(CpuFeature::NEON) {
+            CipherSuite::Aegis128L
+        } else {
+            CipherSuite::Morus1280_128
+        };
+        Self { selected_suite }
+    }
+
     /// Returns the selected cipher suite.
     pub fn selected_suite(&self) -> CipherSuite {
         self.selected_suite

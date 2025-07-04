@@ -52,45 +52,13 @@ use std::time::{Duration, Instant};
 /// architecture, ranging from table-lookups to SIMD-accelerated versions (PCLMULQDQ, NEON).
 #[inline(always)]
 fn gf_mul(a: u8, b: u8) -> u8 {
-    let mut result = 0;
-    optimize::dispatch(|policy| {
-        result = match policy {
-            #[cfg(all(target_arch = "x86_64", target_feature = "pclmulqdq"))]
-            &optimize::Pclmulqdq => {
-                // This is an unsafe block because it uses CPU intrinsics.
-                // It's guaranteed to be safe because `dispatch` only selects this path
-                // when the `pclmulqdq` feature is detected at runtime.
-                #[allow(unsafe_code)]
-                unsafe {
-                    use std::arch::x86_64::*;
-                    let a_v = _mm_set_epi64x(0, a as i64);
-                    let b_v = _mm_set_epi64x(0, b as i64);
-                    // Carry-less multiplication of two 8-bit polynomials results in a 15-bit polynomial.
-                    let res_v = _mm_clmulepi64_si128(a_v, b_v, 0x00);
-
-                    // FULL POLYNOMIAL REDUCTION for GF(2^8)) with polynomial x^8 + x^4 + x^3 + x^2 + 1 (0x11D)
-                    // This is a highly optimized bitwise reduction.
-                    let res16 = _mm_extract_epi16(res_v, 0) as u16;
-                    let t = res16 ^ (res16 >> 8);
-                    let t = t ^ (t >> 4);
-                    let t = t ^ (t >> 2);
-                    let t = t ^ (t >> 1);
-                    (t & 0xFF) as u8
-                }
-            },
-            // Fallback to table-based multiplication if no specific SIMD is available.
-            _ => {
-                if a == 0 || b == 0 { return 0; }
-                unsafe {
-                    let log_a = LOG_TABLE[a as usize] as u16;
-                    let log_b = LOG_TABLE[b as usize] as u16;
-                    let sum_log = log_a + log_b;
-                    EXP_TABLE[sum_log as usize]
-                }
-            }
-        }
-    });
-    result
+    if a == 0 || b == 0 { return 0; }
+    unsafe {
+        let log_a = LOG_TABLE[a as usize] as u16;
+        let log_b = LOG_TABLE[b as usize] as u16;
+        let sum_log = log_a + log_b;
+        EXP_TABLE[sum_log as usize]
+    }
 }
 
 /// Computes the multiplicative inverse of a in GF(2^8)).
@@ -147,7 +115,7 @@ pub enum FecMode {
 }
 
 /// Represents a packet in the FEC system, using an aligned buffer for the payload.
-#[derive(Debug)]
+#[derive(Clone)]
 pub struct Packet {
     pub id: u64,
     pub data: AlignedBox<[u8]>,
@@ -375,6 +343,7 @@ impl ModeManager {
 
 // --- PID Controller ---
 
+#[derive(Clone)]
 pub struct PidConfig {
     pub kp: f32,
     pub ki: f32,
@@ -446,18 +415,14 @@ impl Encoder {
 
         let coeffs = self.generate_cauchy_coefficients(repair_packet_index);
 
-        optimize::dispatch(|_policy| {
-            // This is where SIMD-accelerated XORing would happen.
-            // For example, processing 16 bytes at a time with AVX2/NEON.
-            for (i, source_packet) in self.source_window.iter().enumerate() {
-                let coeff = coeffs[i];
-                if coeff == 0 { continue; }
-                let source_data = &source_packet.data[..source_packet.len];
-                for j in 0..packet_len {
-                    repair_data[j] = gf_mul_add(coeff, source_data[j], repair_data[j]);
-                }
+        for (i, source_packet) in self.source_window.iter().enumerate() {
+            let coeff = coeffs[i];
+            if coeff == 0 { continue; }
+            let source_data = &source_packet.data[..source_packet.len];
+            for j in 0..packet_len {
+                repair_data[j] = gf_mul_add(coeff, source_data[j], repair_data[j]);
             }
-        });
+        }
         
         Some(Packet {
             id: self.source_window.back().unwrap().id + 1 + repair_packet_index as u64,

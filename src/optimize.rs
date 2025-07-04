@@ -35,7 +35,8 @@
 //! function dispatching to select the best hardware-accelerated implementation.
 //! It also includes foundational structures for zero-copy operations and memory pooling.
 
-use aligned_box::{AlignedBox, MIN_ALIGN};
+use aligned_box::AlignedBox;
+const MIN_ALIGN: usize = 64;
 use std::collections::HashMap;
 use std::sync::{Arc, Once};
 use crossbeam_queue::ArrayQueue;
@@ -176,7 +177,7 @@ impl MemoryPool {
         let pool = ArrayQueue::new(capacity);
         for _ in 0..capacity {
             // Pre-allocate blocks with 64-byte alignment for optimal cache performance.
-            let mut aligned_box = AlignedBox::new_zeroed(block_size, MIN_ALIGN);
+            let mut aligned_box = AlignedBox::<[u8]>::slice_from_default(MIN_ALIGN, block_size).unwrap();
             pool.push(aligned_box).unwrap();
         }
         Self {
@@ -188,7 +189,7 @@ impl MemoryPool {
     /// Allocates a 64-byte aligned memory block from the pool.
     /// If the pool is empty, a new block is created.
     pub fn alloc(&self) -> AlignedBox<[u8]> {
-        self.pool.pop().unwrap_or_else(|| AlignedBox::new_zeroed(self.block_size, MIN_ALIGN))
+        self.pool.pop().unwrap_or_else(|| AlignedBox::<[u8]>::slice_from_default(MIN_ALIGN, self.block_size).unwrap())
     }
 
     /// Returns a memory block to the pool.

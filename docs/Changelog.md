@@ -1,5 +1,10 @@
 # QuicFuscate Changelog
 
+## [2024-12-23] - Test Coverage Improvements
+
+### ➕ Added
+- Integration tests under `tests/` verifying FEC encoding/decoding and CPU-based cipher selection.
+
 ## [2024-12-22] - Deprecated C++ Removal
 
 ### 🔥 Removed
