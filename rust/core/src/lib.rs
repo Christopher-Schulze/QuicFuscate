@@ -6,10 +6,14 @@
 #[cfg(feature = "quiche")]
 use quiche;
 use thiserror::Error;
+#[cfg(not(feature = "quiche"))]
 use once_cell::sync::Lazy;
+#[cfg(not(feature = "quiche"))]
 use std::collections::{HashMap, VecDeque};
+#[cfg(not(feature = "quiche"))]
 use std::sync::Mutex;
 
+#[cfg(not(feature = "quiche"))]
 static NETWORK: Lazy<Mutex<HashMap<String, VecDeque<Vec<u8>>>>> = Lazy::new(|| {
     Mutex::new(HashMap::new())
 });
@@ -147,15 +151,19 @@ impl QuicConnection {
             .map_err(|_| CoreError::Quic("invalid address".into()))?;
 
         self.current_path = Some(addr.to_string());
-        NETWORK
-            .lock()
-            .unwrap()
-            .entry(addr.to_string())
-            .or_insert_with(VecDeque::new);
+
+        #[cfg(not(feature = "quiche"))]
+        {
+            NETWORK
+                .lock()
+                .unwrap()
+                .entry(addr.to_string())
+                .or_insert_with(VecDeque::new);
+        }
 
         #[cfg(feature = "quiche")]
         {
-            self.conn = Some(quiche::Connection);
+            self.conn = Some(quiche::Connection::connect(addr));
         }
 
         if self.bbr && self.bbr_controller.is_none() {
@@ -194,11 +202,20 @@ impl QuicConnection {
         let _sock_addr: std::net::SocketAddr = new_addr
             .parse()
             .map_err(|_| CoreError::Quic("invalid address".into()))?;
-        NETWORK
-            .lock()
-            .unwrap()
-            .entry(new_addr.to_string())
-            .or_insert_with(VecDeque::new);
+        #[cfg(not(feature = "quiche"))]
+        {
+            NETWORK
+                .lock()
+                .unwrap()
+                .entry(new_addr.to_string())
+                .or_insert_with(VecDeque::new);
+        }
+
+        #[cfg(feature = "quiche")]
+        {
+            self.conn = Some(quiche::Connection::connect(new_addr));
+        }
+
         self.current_path = Some(new_addr.to_string());
         Ok(())
     }
@@ -208,10 +225,20 @@ impl QuicConnection {
         if self.state != ConnectionState::Connected {
             return Err(CoreError::Quic("not connected".into()));
         }
-        let addr = self.current_path.clone().ok_or_else(|| CoreError::Quic("no path".into()))?;
-        let mut net = NETWORK.lock().unwrap();
-        let queue = net.entry(addr).or_insert_with(VecDeque::new);
-        queue.push_back(data.to_vec());
+        #[cfg(not(feature = "quiche"))]
+        {
+            let addr = self.current_path.clone().ok_or_else(|| CoreError::Quic("no path".into()))?;
+            let mut net = NETWORK.lock().unwrap();
+            let queue = net.entry(addr).or_insert_with(VecDeque::new);
+            queue.push_back(data.to_vec());
+        }
+
+        #[cfg(feature = "quiche")]
+        {
+            if let Some(conn) = &mut self.conn {
+                conn.send(data);
+            }
+        }
         Ok(())
     }
 
@@ -220,13 +247,24 @@ impl QuicConnection {
         if self.state != ConnectionState::Connected {
             return Err(CoreError::Quic("not connected".into()));
         }
-        if let Some(addr) = &self.current_path {
-            let mut net = NETWORK.lock().unwrap();
-            if let Some(queue) = net.get_mut(addr) {
-                return Ok(queue.pop_front());
+        #[cfg(not(feature = "quiche"))]
+        {
+            if let Some(addr) = &self.current_path {
+                let mut net = NETWORK.lock().unwrap();
+                if let Some(queue) = net.get_mut(addr) {
+                    return Ok(queue.pop_front());
+                }
             }
+            return Ok(None);
         }
-        Ok(None)
+
+        #[cfg(feature = "quiche")]
+        {
+            if let Some(conn) = &mut self.conn {
+                return Ok(conn.recv());
+            }
+            Ok(None)
+        }
     }
 
     /// Enable or disable the BBRv2 congestion control algorithm.

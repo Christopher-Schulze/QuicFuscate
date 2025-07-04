@@ -402,6 +402,7 @@ dependencies = [
  "criterion",
  "leopard-codec",
  "rand 0.8.5",
+ "rand 0.9.1",
  "reed-solomon-erasure",
  "rlnc",
  "serde",
@@ -1093,6 +1094,9 @@ dependencies = [
 [[package]]
 name = "quiche"
 version = "0.1.0"
+dependencies = [
+ "once_cell",
+]
 
 [[package]]
 name = "quote"

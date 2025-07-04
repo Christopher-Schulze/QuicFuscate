@@ -59,3 +59,15 @@ fn send_recv_roundtrip() {
     client.send(b"ping").unwrap();
     assert_eq!(server.recv().unwrap(), Some(b"ping".to_vec()));
 }
+
+#[cfg(feature = "quiche")]
+#[test]
+fn send_recv_roundtrip_quiche() {
+    let cfg = QuicConfig { server_name: "localhost".into(), port: 443 };
+    let mut client = QuicConnection::new(cfg.clone()).unwrap();
+    let mut server = QuicConnection::new(cfg).unwrap();
+    client.connect("127.0.0.1:443").unwrap();
+    server.connect("127.0.0.1:443").unwrap();
+    client.send(b"pong").unwrap();
+    assert_eq!(server.recv().unwrap(), Some(b"pong".to_vec()));
+}

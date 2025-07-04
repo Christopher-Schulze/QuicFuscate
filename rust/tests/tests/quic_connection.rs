@@ -39,3 +39,16 @@ fn connect_and_transfer() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(server.recv()?, Some(b"hello".to_vec()));
     Ok(())
 }
+
+#[cfg(feature = "quiche")]
+#[test]
+fn connect_and_transfer_quiche() -> Result<(), Box<dyn std::error::Error>> {
+    let cfg = QuicConfig { server_name: "localhost".into(), port: 443 };
+    let mut client = QuicConnection::new(cfg.clone())?;
+    let mut server = QuicConnection::new(cfg)?;
+    client.connect("127.0.0.1:443")?;
+    server.connect("127.0.0.1:443")?;
+    client.send(b"world")?;
+    assert_eq!(server.recv()?, Some(b"world".to_vec()));
+    Ok(())
+}
