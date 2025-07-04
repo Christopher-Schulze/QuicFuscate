@@ -184,16 +184,10 @@ async fn run_client(
 
     if profile_interval > 0 && profiles.len() > 1 {
         let sm = conn.stealth_manager();
-        let os = stealth_config.os_profile;
-        tokio::spawn(async move {
-            let mut idx = 0usize;
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(profile_interval)).await;
-                idx = (idx + 1) % profiles.len();
-                let p = FingerprintProfile::new(profiles[idx], os);
-                sm.set_fingerprint_profile(p);
-            }
-        });
+        sm.start_profile_rotation(
+            profiles,
+            std::time::Duration::from_secs(profile_interval),
+        );
     }
 
     let mut buf = [0; 65535];

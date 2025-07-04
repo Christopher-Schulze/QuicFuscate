@@ -66,6 +66,7 @@ pub struct QuicFuscateConnection {
     // This eliminates the serialization overhead entirely.
     outgoing_fec_packets: VecDeque<FecPacket>,
     xdp_socket: Option<XdpSocket>,
+    h3_conn: Option<quiche::h3::Connection>,
 }
 
 /// Tracks performance and reliability metrics for a connection.
@@ -188,6 +189,7 @@ impl QuicFuscateConnection {
             packet_id_counter: 0,
             outgoing_fec_packets: VecDeque::new(),
             xdp_socket,
+            h3_conn: None,
         }
     }
 
@@ -313,6 +315,38 @@ impl QuicFuscateConnection {
     /// Returns the stealth manager for dynamic profile updates.
     pub fn stealth_manager(&self) -> Arc<StealthManager> {
         self.stealth_manager.clone()
+    }
+
+    /// Initializes the HTTP/3 connection if it hasn't been created yet.
+    pub fn init_http3(&mut self) -> Result<(), quiche::h3::Error> {
+        if self.h3_conn.is_none() {
+            let h3_cfg = quiche::h3::Config::new()?;
+            let h3 = quiche::h3::Connection::with_transport(&mut self.conn, &h3_cfg)?;
+            self.h3_conn = Some(h3);
+        }
+        Ok(())
+    }
+
+    /// Sends a masqueraded HTTP/3 GET request using the stealth manager.
+    pub fn send_http3_request(&mut self, path: &str) -> Result<(), quiche::h3::Error> {
+        self.init_http3()?;
+        let host = self.host_header.clone();
+        let headers = self
+            .stealth_manager
+            .get_http3_header_list(&host, path)
+            .unwrap_or_else(|| {
+                vec![
+                    quiche::h3::Header::new(b":method", b"GET"),
+                    quiche::h3::Header::new(b":scheme", b"https"),
+                    quiche::h3::Header::new(b":authority", host.as_bytes()),
+                    quiche::h3::Header::new(b":path", path.as_bytes()),
+                ]
+            });
+
+        if let Some(ref mut h3) = self.h3_conn {
+            h3.send_request(&mut self.conn, &headers, true)?;
+        }
+        Ok(())
     }
 
     /// Update internal state, e.g., FEC mode based on statistics.
