@@ -53,6 +53,12 @@ pub struct QuicPacket {
     pub payload: Vec<u8>,
 }
 
+impl Default for QuicPacket {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl QuicPacket {
     pub fn new() -> Self {
         Self {
@@ -135,9 +141,12 @@ impl QuicPacket {
     pub fn size(&self) -> usize {
         17 + self.payload.len()
     }
+}
 
-    pub fn to_string(&self) -> String {
-        format!(
+impl std::fmt::Display for QuicPacket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
             "QuicPacket[type={:?}, version=0x{:08x}, conn_id=0x{:016x}, pkt_num={}, payload_size={}]",
             self.header.packet_type,
             self.header.version,
