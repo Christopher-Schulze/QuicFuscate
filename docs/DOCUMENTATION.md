@@ -930,28 +930,42 @@ fn encode_packet(&self, data: &[u8]) -> Vec<FECPacket> {
 
 **Configuration Parameters:**
 ```rust
-pub struct FECConfig {
-    pub redundancy_mode: RedundancyMode,
-    pub min_redundancy_ratio: f64,
-    pub max_redundancy_ratio: f64,
-    pub memory_pool_block_size: usize,
-    pub memory_pool_initial_blocks: usize,
-    pub stealth_mode: bool,
+pub struct FecConfig {
+    pub lambda: f32,
+    pub burst_window: usize,
+    pub hysteresis: f32,
+    pub pid: PidConfig,
+    pub initial_mode: FecMode,
+    pub kalman_enabled: bool,
+    pub kalman_q: f32,
+    pub kalman_r: f32,
+    pub window_sizes: HashMap<FecMode, usize>,
 }
 
-impl Default for FECConfig {
+impl Default for FecConfig {
     fn default() -> Self {
-        FECConfig {
-            redundancy_mode: RedundancyMode::ADAPTIVE_ADVANCED,
-            min_redundancy_ratio: 0.1,  // 10% Minimum
-            max_redundancy_ratio: 0.5,  // 50% Maximum
-            memory_pool_block_size: 4096,
-            memory_pool_initial_blocks: 100,
-            stealth_mode: true,
+        FecConfig {
+            lambda: 0.1,
+            burst_window: 20,
+            hysteresis: 0.01,
+            pid: PidConfig { kp: 0.5, ki: 0.1, kd: 0.2 },
+            initial_mode: FecMode::Zero,
+            kalman_enabled: false,
+            kalman_q: 0.001,
+            kalman_r: 0.01,
+            window_sizes: FecConfig::default_windows(),
         }
     }
 }
 ```
+
+* **`lambda`** – Smoothing factor for the loss estimator's exponential moving average.
+* **`burst_window`** – Number of recent packets tracked for burst loss detection.
+* **`hysteresis`** – Threshold to avoid rapid mode switching when loss fluctuates around a boundary.
+* **`pid`** – Proportional–Integral–Derivative controller settings for mode adjustments.
+* **`initial_mode`** – FEC mode used on startup before feedback is available.
+* **`kalman_enabled`**, **`kalman_q`**, **`kalman_r`** – Parameters for an optional Kalman filter applied to the loss estimate.
+* **`window_sizes`** – Mapping of `FecMode` to its baseline sliding‑window size.
 
 **Performance Optimizations:**
 - SIMD-accelerated Galois field operations (NEON/AVX2/AVX512)
