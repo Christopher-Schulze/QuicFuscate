@@ -202,16 +202,26 @@ impl QuicFuscateConnection {
 
     /// Processes an incoming raw buffer, parsing it into an FEC packet and handling recovery.
     /// This now avoids any serialization overhead.
-    pub fn recv(&mut self, data: &mut [u8]) -> Result<usize, String> {
+    pub fn recv(&mut self, data: &[u8]) -> Result<usize, String> {
+        let mut block = self.optimization_manager.alloc_block();
         let len = if let Some(ref xdp) = self.xdp_socket {
-            xdp.recv(data).map_err(|e| e.to_string())?
+            match xdp.recv(&mut block) {
+                Ok(l) => l,
+                Err(e) => {
+                    self.optimization_manager.free_block(block);
+                    return Err(e.to_string());
+                }
+            }
         } else {
-            data.len()
+            let copy_len = data.len().min(block.len());
+            block[..copy_len].copy_from_slice(&data[..copy_len]);
+            copy_len
         };
 
-        let fec_packet = FecPacket::from_raw(
+        let fec_packet = FecPacket::from_block(
             self.packet_id_counter,
-            &data[..len],
+            block,
+            len,
             &self.optimization_manager,
         )?;
 

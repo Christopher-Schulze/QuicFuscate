@@ -288,7 +288,7 @@ async fn run_client(
         // Process incoming packets
         match socket.recv(&mut buf) {
             Ok(len) => {
-                let _ = conn.recv(&mut buf[..len]);
+                let _ = conn.recv(&buf[..len]);
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(e) => {
@@ -423,7 +423,7 @@ async fn run_server(
                     .expect("failed to create server connection")
                 });
 
-                if let Err(e) = client_conn.recv(&mut buf[..len]) {
+                if let Err(e) = client_conn.recv(&buf[..len]) {
                     error!("QUIC recv failed: {:?}", e);
                     continue;
                 }

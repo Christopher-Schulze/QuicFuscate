@@ -311,6 +311,54 @@ impl Packet {
         })
     }
 
+    /// Creates a packet from a pooled memory block. The `len` parameter
+    /// specifies the amount of valid data in the block.
+    pub fn from_block(
+        id: u64,
+        mut block: AlignedBox<[u8]>,
+        len: usize,
+        opt_manager: &OptimizationManager,
+    ) -> Result<Self, String> {
+        if len == 0 || len > block.len() {
+            opt_manager.free_block(block);
+            return Err("Invalid raw packet length".to_string());
+        }
+
+        let is_systematic = block[0] == 1;
+        let mut offset = 1;
+
+        let (coefficients, payload_offset) = if !is_systematic {
+            if len < 3 {
+                opt_manager.free_block(block);
+                return Err("Buffer too short for coefficient length".to_string());
+            }
+            let coeff_len = u16::from_be_bytes([block[offset], block[offset + 1]]) as usize;
+            offset += 2;
+            if len < offset + coeff_len {
+                opt_manager.free_block(block);
+                return Err("Buffer too short for coefficients".to_string());
+            }
+            let coeffs = block[offset..offset + coeff_len].to_vec();
+            (Some(coeffs), offset + coeff_len)
+        } else {
+            (None, offset)
+        };
+
+        let payload_len = len - payload_offset;
+        if payload_offset > 0 {
+            block.copy_within(payload_offset..len, 0);
+        }
+
+        Ok(Packet {
+            id,
+            data: Some(block),
+            len: payload_len,
+            is_systematic,
+            coefficients,
+            mem_pool: opt_manager.memory_pool(),
+        })
+    }
+
     /// Serializes the packet into a raw byte buffer for transmission.
     pub fn to_raw(&self, buffer: &mut [u8]) -> Result<usize, quiche::Error> {
         let mut required_len = self.len + 1;

@@ -12,6 +12,17 @@ fn memory_pool_alloc_free() {
 }
 
 #[test]
+fn memory_pool_reuse() {
+    let pool = MemoryPool::new(1, 64);
+    let block = pool.alloc();
+    let ptr = block.as_ptr();
+    pool.free(block);
+    let block2 = pool.alloc();
+    assert_eq!(ptr, block2.as_ptr());
+    pool.free(block2);
+}
+
+#[test]
 fn xdp_socket_creation() {
     let mgr = OptimizationManager::new();
     let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
