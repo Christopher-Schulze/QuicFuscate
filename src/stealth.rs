@@ -39,13 +39,13 @@
 use lazy_static::lazy_static;
 use log::{debug, error, info};
 use reqwest::Client;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
 use url::Url;
-use sha2::{Digest, Sha256};
 
 use crate::crypto::CryptoManager; // Assumed for integration
 use crate::optimize::{self, OptimizationManager}; // Assumed for integration
@@ -269,9 +269,53 @@ impl FingerprintProfile {
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 30_000,
             },
+            (BrowserProfile::Opera, OsProfile::MacOS) => Self {
+                browser, os,
+                user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 OPR/112.0.0.0".to_string(),
+                tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
+                accept_language: "en-US,en;q=0.9".to_string(),
+                initial_max_data: 10_000_000,
+                initial_max_stream_data_bidi_local: 1_000_000,
+                initial_max_stream_data_bidi_remote: 1_000_000,
+                initial_max_streams_bidi: 100,
+                max_idle_timeout: 30_000,
+            },
+            (BrowserProfile::Brave, OsProfile::MacOS) => Self {
+                browser, os,
+                user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Brave/1.67.0".to_string(),
+                tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
+                accept_language: "en-US,en;q=0.9".to_string(),
+                initial_max_data: 10_000_000,
+                initial_max_stream_data_bidi_local: 1_000_000,
+                initial_max_stream_data_bidi_remote: 1_000_000,
+                initial_max_streams_bidi: 100,
+                max_idle_timeout: 30_000,
+            },
             (BrowserProfile::Chrome, OsProfile::Linux) => Self {
                 browser, os,
                 user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36".to_string(),
+                tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
+                accept_language: "en-US,en;q=0.9".to_string(),
+                initial_max_data: 10_000_000,
+                initial_max_stream_data_bidi_local: 1_000_000,
+                initial_max_stream_data_bidi_remote: 1_000_000,
+                initial_max_streams_bidi: 100,
+                max_idle_timeout: 30_000,
+            },
+            (BrowserProfile::Opera, OsProfile::Linux) => Self {
+                browser, os,
+                user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 OPR/112.0.0.0".to_string(),
+                tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
+                accept_language: "en-US,en;q=0.9".to_string(),
+                initial_max_data: 10_000_000,
+                initial_max_stream_data_bidi_local: 1_000_000,
+                initial_max_stream_data_bidi_remote: 1_000_000,
+                initial_max_streams_bidi: 100,
+                max_idle_timeout: 30_000,
+            },
+            (BrowserProfile::Brave, OsProfile::Linux) => Self {
+                browser, os,
+                user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Brave/1.67.0".to_string(),
                 tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
                 accept_language: "en-US,en;q=0.9".to_string(),
                 initial_max_data: 10_000_000,
@@ -605,9 +649,11 @@ impl TlsClientHelloSpoofer {
 
             let custom: Vec<&'static rustls::SupportedCipherSuite> = suites
                 .iter()
-                .filter_map(|id| ALL_CIPHER_SUITES
-                    .iter()
-                    .find(|cs| cs.suite().get_u16() == *id))
+                .filter_map(|id| {
+                    ALL_CIPHER_SUITES
+                        .iter()
+                        .find(|cs| cs.suite().get_u16() == *id)
+                })
                 .copied()
                 .collect();
 
@@ -627,7 +673,11 @@ impl TlsClientHelloSpoofer {
             extern "C" {
                 fn quiche_config_set_custom_tls(cfg: *mut c_void, hello: *const u8, len: usize);
             }
-            quiche_config_set_custom_tls(config as *mut _ as *mut c_void, hello.as_ptr(), hello.len());
+            quiche_config_set_custom_tls(
+                config as *mut _ as *mut c_void,
+                hello.as_ptr(),
+                hello.len(),
+            );
         }
     }
 }
@@ -773,7 +823,11 @@ impl StealthManager {
     /// Starts automatic rotation through the given browser profiles.
     /// This spawns a task on the DoH runtime which periodically updates the
     /// active fingerprint.
-    pub fn start_profile_rotation(self: &Arc<Self>, profiles: Vec<FingerprintProfile>, interval: std::time::Duration) {
+    pub fn start_profile_rotation(
+        self: &Arc<Self>,
+        profiles: Vec<FingerprintProfile>,
+        interval: std::time::Duration,
+    ) {
         if profiles.is_empty() {
             return;
         }
