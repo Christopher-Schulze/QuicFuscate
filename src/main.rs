@@ -123,6 +123,7 @@ enum Commands {
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     env_logger::init();
+    crate::telemetry::serve("0.0.0.0:9898");
     let cli = Cli::parse();
 
     match &cli.command {
