@@ -174,3 +174,24 @@ Also ich will alles end 2 end implemnetier haben!
 Passe die Documentation.md an hinsichtlich FEC und falls ich andere features noch genannt habe, dann erstelle einen detailierten plan wie du vorgehen willst in "todo.md" könnte veraltet sein checke die erstmal udn guck ob du davon noch was übernimmst, 
 
 pack da die steps und roadmap rein und dann beginne mit der umsetztung go! MAXIMALE PERFEKTION! KOMPLETT ohne stubs, platzhalter oder sonst was go!
+
+
+
+
+update: wie wir mit der Quiche umgehen!
+
+
+Gewählter Ansatz:
+
+Quiche als Submodul beibehalten
+Durch das Submodul kann jederzeit eine neue Version aus dem offiziellen Repository gezogen werden. Eigene Anpassungen werden anschließend in libs/patched_quiche eingepflegt. So lässt sich das Upstream‑Update reproduzierbar nachziehen, ohne dass der Rest des Projekts davon abhängt, wie viel oder wenig Code von Quiche letztlich genutzt wird.
+Gezielte Patches
+Die Anpassungen (z. B. spezielles TLS‑Handling, SIMD‑Optimierungen) werden als Patches oder dedizierte Commits in diesem Ordner verwaltet. Damit bleiben die Änderungen klar nachvollziehbar und können bei einem späteren Upstream‑Update erneut angewendet werden.
+Optional ein „original_quiche“-Snapshot
+Falls man zusätzlich eine völlig unveränderte Kopie behalten möchte, ließe sich ein separates Submodul libs/original_quiche einrichten. Dieses dient lediglich als Referenz oder Fallback, muss aber nicht in den Build eingebunden werden. Dadurch bleibt das Projekt leichtgewichtig, und nur das optimierte patched_quiche wird tatsächlich genutzt.
+Automatisierte Patch-Skripte
+Um das Aktualisieren zu vereinfachen, kann ein Skript unter scripts/ die Patches automatisch anwenden, nachdem das Submodul aktualisiert wurde. So minimiert man manuellen Aufwand und kann neue Quiche-Versionen schnell einbinden.
+Mit diesem Ansatz bleibt die Bibliothek modular aktualisierbar. Man profitiert von den regelmäßigen Verbesserungen des Quiche‑Projekts, ohne überflüssigen Code oder Features einzuschleppen. Gleichzeitig können die eigenen Optimierungen (etwa spezielle TLS-Anpassungen oder Hardwarebeschleunigung) sauber gepflegt und erneut angewendet werden, falls Quiche aktualisiert wird.
+
+
+--- --- ---
