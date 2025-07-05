@@ -2,7 +2,6 @@ use crate::core::QuicFuscateConnection;
 use crate::fec::FecMode;
 use crate::stealth::StealthConfig;
 use crate::stealth::{BrowserProfile, FingerprintProfile, OsProfile};
-use crate::telemetry;
 use clap::{Parser, Subcommand};
 use log::{error, info, warn};
 use std::collections::HashMap;
@@ -47,9 +46,6 @@ enum Commands {
         #[clap(long, default_value_t = 0)]
         profile_interval: u64,
 
-        /// Address for Prometheus exporter
-        #[clap(long)]
-        metrics_addr: Option<String>,
 
         /// Initial FEC mode
         #[clap(long, value_enum, default_value = "zero")]
@@ -101,9 +97,6 @@ enum Commands {
         #[clap(long, default_value_t = 0)]
         profile_interval: u64,
 
-        /// Address for Prometheus exporter
-        #[clap(long)]
-        metrics_addr: Option<String>,
 
         /// Initial FEC mode
         #[clap(long, value_enum, default_value = "zero")]
@@ -140,7 +133,6 @@ async fn main() -> std::io::Result<()> {
             os,
             profile_seq,
             profile_interval,
-            metrics_addr,
             fec_mode,
             disable_doh,
             disable_fronting,
@@ -156,7 +148,6 @@ async fn main() -> std::io::Result<()> {
                 os_profile,
                 profile_seq,
                 *profile_interval,
-                metrics_addr,
                 *fec_mode,
                 *disable_doh,
                 *disable_fronting,
@@ -173,7 +164,6 @@ async fn main() -> std::io::Result<()> {
             os,
             profile_seq,
             profile_interval,
-            metrics_addr,
             fec_mode,
             disable_doh,
             disable_fronting,
@@ -190,7 +180,6 @@ async fn main() -> std::io::Result<()> {
                 os_profile,
                 profile_seq,
                 *profile_interval,
-                metrics_addr,
                 *fec_mode,
                 *disable_doh,
                 *disable_fronting,
@@ -223,7 +212,6 @@ async fn run_client(
     os: OsProfile,
     profile_seq: &Option<Vec<String>>,
     profile_interval: u64,
-    metrics_addr: &Option<String>,
     fec_mode: FecMode,
     disable_doh: bool,
     disable_fronting: bool,
@@ -253,12 +241,6 @@ async fn run_client(
     config.set_initial_max_streams_bidi(100);
     config.set_initial_max_streams_uni(100);
     config.verify_peer(false); // In a real app, you should verify the server cert.
-
-    if let Some(addr) = metrics_addr {
-        if let Ok(a) = addr.parse() {
-            telemetry::start_exporter(a);
-        }
-    }
 
     let url_parsed =
         url::Url::parse(url).unwrap_or_else(|_| url::Url::parse("https://example.com/").unwrap());
@@ -358,7 +340,6 @@ async fn run_server(
     os: OsProfile,
     profile_seq: &Option<Vec<String>>,
     profile_interval: u64,
-    metrics_addr: &Option<String>,
     fec_mode: FecMode,
     disable_doh: bool,
     disable_fronting: bool,
@@ -368,12 +349,6 @@ async fn run_server(
     let socket = std::net::UdpSocket::bind(listen_addr)?;
     socket.set_nonblocking(true)?;
     info!("Server listening on {}", listen_addr);
-
-    if let Some(addr) = metrics_addr {
-        if let Ok(a) = addr.parse() {
-            telemetry::start_exporter(a);
-        }
-    }
 
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
     config

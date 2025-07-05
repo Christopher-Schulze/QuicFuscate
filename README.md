@@ -189,7 +189,6 @@ Run `quicfuscate_demo --help` to see all available options. Important flags incl
       --disable-fronting     Disable domain fronting
       --disable-xor          Disable XOR obfuscation
       --disable-http3        Disable HTTP/3 masquerading
-      --metrics-addr <addr>  Start Prometheus exporter on address
 ```
 
 ## 🔄 Continuous Integration
