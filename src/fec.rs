@@ -189,10 +189,11 @@ impl std::str::FromStr for FecMode {
 #[derive(Debug)]
 pub struct Packet {
     pub id: u64,
-    pub data: AlignedBox<[u8]>,
+    pub data: Option<AlignedBox<[u8]>>,
     pub len: usize,
     pub is_systematic: bool,
     pub coefficients: Option<Vec<u8>>, // Present only in repair packets
+    mem_pool: Arc<MemoryPool>,
 }
 
 impl Packet {
@@ -237,10 +238,11 @@ impl Packet {
 
         Ok(Packet {
             id,
-            data,
+            data: Some(data),
             len: payload.len(),
             is_systematic,
             coefficients,
+            mem_pool: opt_manager.memory_pool(),
         })
     }
 
@@ -266,7 +268,9 @@ impl Packet {
             offset += coeffs.len();
         }
 
-        buffer[offset..offset + self.len].copy_from_slice(&self.data[..self.len]);
+        if let Some(ref data) = self.data {
+            buffer[offset..offset + self.len].copy_from_slice(&data[..self.len]);
+        }
         offset += self.len;
 
         Ok(offset)
@@ -276,13 +280,24 @@ impl Packet {
     /// This is a deep copy of the data into a new buffer from the memory pool.
     pub fn clone_for_encoder(&self, mem_pool: &Arc<MemoryPool>) -> Self {
         let mut new_data = mem_pool.alloc();
-        new_data[..self.len].copy_from_slice(&self.data[..self.len]);
+        if let Some(ref data) = self.data {
+            new_data[..self.len].copy_from_slice(&data[..self.len]);
+        }
         Packet {
             id: self.id,
-            data: new_data,
+            data: Some(new_data),
             len: self.len,
             is_systematic: self.is_systematic,
             coefficients: self.coefficients.clone(),
+            mem_pool: Arc::clone(mem_pool),
+        }
+    }
+}
+
+impl Drop for Packet {
+    fn drop(&mut self) {
+        if let Some(data) = self.data.take() {
+            self.mem_pool.free(data);
         }
     }
 }
@@ -596,7 +611,10 @@ impl Encoder {
                         if coeff == 0 {
                             return;
                         }
-                        let source_data = &source_packet.data[..source_packet.len];
+                        let source_data = &source_packet
+                            .data
+                            .as_ref()
+                            .expect("packet data missing")[..source_packet.len];
                         for j in 0..packet_len {
                             repair_data[j] = gf_mul_add(coeff, source_data[j], repair_data[j]);
                         }
@@ -607,7 +625,10 @@ impl Encoder {
                     if coeff == 0 {
                         continue;
                     }
-                    let source_data = &source_packet.data[..source_packet.len];
+                    let source_data = &source_packet
+                        .data
+                        .as_ref()
+                        .expect("packet data missing")[..source_packet.len];
                     for j in 0..packet_len {
                         repair_data[j] = gf_mul_add(coeff, source_data[j], repair_data[j]);
                     }
@@ -617,10 +638,11 @@ impl Encoder {
 
         Some(Packet {
             id: self.source_window.back().unwrap().id + 1 + repair_packet_index as u64,
-            data: repair_data,
+            data: Some(repair_data),
             len: packet_len,
             is_systematic: false,
             coefficients: Some(coeffs),
+            mem_pool: Arc::clone(mem_pool),
         })
     }
 
@@ -832,7 +854,7 @@ impl Decoder {
             }
             (identity_row, None) // Systematic data is stored directly
         } else if let Some(coeffs) = packet.coefficients {
-            (coeffs, Some(packet.data)) // Repair packet provides data
+            (coeffs, packet.data) // Repair packet provides data
         } else {
             return Err("Repair packet missing coefficients.");
         };
@@ -909,10 +931,11 @@ impl Decoder {
 
                     self.systematic_packets[i] = Some(Packet {
                         id: i as u64, // NOTE: Assumes packet ID aligns with matrix index.
-                        data: packet_data,
+                        data: Some(packet_data),
                         len: data_len,
                         is_systematic: true,
                         coefficients: None,
+                        mem_pool: Arc::clone(&self.mem_pool),
                     });
                 }
             }
@@ -1289,10 +1312,11 @@ mod tests {
         }
         Packet {
             id,
-            data: buf,
+            data: Some(buf),
             len: 8,
             is_systematic: true,
             coefficients: None,
+            mem_pool: Arc::clone(pool),
         }
     }
 
@@ -1326,7 +1350,7 @@ mod tests {
         let out = dec.get_decoded_packets();
         assert_eq!(out.len(), k);
         for i in 0..k {
-            assert_eq!(out[i].data[0], i as u8);
+            assert_eq!(out[i].data.as_ref().unwrap()[0], i as u8);
         }
     }
 
@@ -1362,7 +1386,7 @@ mod tests {
         let out = dec.get_decoded_packets();
         assert_eq!(out.len(), k);
         for i in 0..k {
-            assert_eq!(out[i].data[0], (i % 256) as u8);
+            assert_eq!(out[i].data.as_ref().unwrap()[0], (i % 256) as u8);
         }
     }
 

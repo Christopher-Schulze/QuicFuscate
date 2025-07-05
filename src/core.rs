@@ -221,18 +221,19 @@ impl QuicFuscateConnection {
             .map_err(|e| format!("FEC decoding failed: {}", e))?;
 
         for mut packet in recovered_packets {
-            // Deobfuscate payload if enabled
-            self.stealth_manager
-                .process_incoming_packet(&mut packet.data);
+            if let Some(ref mut data) = packet.data {
+                // Deobfuscate payload if enabled
+                self.stealth_manager.process_incoming_packet(data);
 
-            // Process the reconstructed QUIC packet
-            let recv_info = quiche::RecvInfo {
-                from: self.peer_addr,
-                to: self.local_addr,
-            };
-            if let Err(e) = self.conn.recv(&mut packet.data, recv_info) {
-                // Log error, but continue processing other recovered packets
-                eprintln!("quiche::recv failed after FEC recovery: {}", e);
+                // Process the reconstructed QUIC packet
+                let recv_info = quiche::RecvInfo {
+                    from: self.peer_addr,
+                    to: self.local_addr,
+                };
+                if let Err(e) = self.conn.recv(data, recv_info) {
+                    // Log error, but continue processing other recovered packets
+                    eprintln!("quiche::recv failed after FEC recovery: {}", e);
+                }
             }
         }
 
@@ -243,15 +244,18 @@ impl QuicFuscateConnection {
     /// This has been completely refactored to eliminate serialization and copies.
     pub fn send(&mut self, buf: &mut [u8]) -> Result<usize, quiche::Error> {
         // If there are buffered FEC packets, send one directly.
-        if let Some(packet) = self.outgoing_fec_packets.pop_front() {
-            if let Some(ref xdp) = self.xdp_socket {
-                xdp.send(&[&packet.data[..packet.len]])
+        if let Some(mut packet) = self.outgoing_fec_packets.pop_front() {
+            let len = if let Some(ref xdp) = self.xdp_socket {
+                xdp.send(&[&packet.data.as_ref().unwrap()[..packet.len]])
                     .map_err(|_| quiche::Error::Done)?;
-                return Ok(packet.len);
+                packet.len
             } else {
-                let written = packet.to_raw(buf)?;
-                return Ok(written);
+                packet.to_raw(buf)?
+            };
+            if let Some(data) = packet.data.take() {
+                self.optimization_manager.free_block(data);
             }
+            return Ok(len);
         }
 
         // Otherwise, generate a new QUIC packet using a pooled buffer.
@@ -270,8 +274,7 @@ impl QuicFuscateConnection {
             return Ok(0);
         }
 
-        // Adjust buffer length to the actual data written.
-        send_buffer[..write].iter_mut().for_each(|b| *b = 0);
+        // The buffer may be larger than the written data; the length is tracked separately.
 
         // Obfuscate payload if enabled
         self.stealth_manager
@@ -280,10 +283,11 @@ impl QuicFuscateConnection {
         // Create a systematic FEC packet, passing ownership of the buffer.
         let fec_packet = FecPacket {
             id: self.packet_id_counter,
-            data: send_buffer,
+            data: Some(send_buffer),
             len: write,
             is_systematic: true,
             coefficients: None,
+            mem_pool: self.optimization_manager.memory_pool(),
         };
         self.packet_id_counter += 1;
 
@@ -292,15 +296,18 @@ impl QuicFuscateConnection {
         self.fec.on_send(fec_packet, &mut self.outgoing_fec_packets);
 
         // Pop the first packet from the buffer to send it now.
-        if let Some(packet) = self.outgoing_fec_packets.pop_front() {
-            if let Some(ref xdp) = self.xdp_socket {
-                xdp.send(&[&packet.data[..packet.len]])
+        if let Some(mut packet) = self.outgoing_fec_packets.pop_front() {
+            let len = if let Some(ref xdp) = self.xdp_socket {
+                xdp.send(&[&packet.data.as_ref().unwrap()[..packet.len]])
                     .map_err(|_| quiche::Error::Done)?;
-                Ok(packet.len)
+                packet.len
             } else {
-                let written = packet.to_raw(buf)?;
-                Ok(written)
+                packet.to_raw(buf)?
+            };
+            if let Some(data) = packet.data.take() {
+                self.optimization_manager.free_block(data);
             }
+            Ok(len)
         } else {
             Ok(0)
         }
