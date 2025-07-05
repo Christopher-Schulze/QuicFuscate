@@ -1898,4 +1898,72 @@ mod tests {
         }
         assert!(dec.is_decoded);
     }
+
+    #[test]
+    fn extreme_mode_recovery() {
+        init_gf_tables();
+        let pool = Arc::new(MemoryPool::new(2048, 64));
+        let k = 64;
+        let n = k + 16;
+        let mut enc = Encoder16::new(k, n);
+        let mut packets = Vec::new();
+        for i in 0..k {
+            let p = make_packet(i as u64, (i % 255) as u8, &pool);
+            enc.add_source_packet(p.clone());
+            packets.push(p);
+        }
+        let mut repairs = Vec::new();
+        for i in 0..(n - k) {
+            repairs.push(enc.generate_repair_packet(i, &pool).unwrap());
+        }
+        let mut dec = Decoder16::new(k, Arc::clone(&pool));
+        for (idx, pkt) in packets.into_iter().enumerate() {
+            if idx % 3 != 0 {
+                dec.add_packet(pkt).unwrap();
+            }
+        }
+        for r in repairs {
+            dec.add_packet(r).unwrap();
+        }
+        assert!(dec.is_decoded);
+        let out = dec.get_decoded_packets();
+        assert_eq!(out.len(), k);
+        for i in 0..k {
+            assert_eq!(out[i].data.as_ref().unwrap()[0], (i % 255) as u8);
+        }
+    }
+
+    #[test]
+    fn very_large_window_recovery() {
+        init_gf_tables();
+        let pool = Arc::new(MemoryPool::new(4096, 64));
+        let k = 1024;
+        let n = k + 8;
+        let mut enc = Encoder::new(k, n);
+        let mut packets = Vec::new();
+        for i in 0..k {
+            let p = make_packet(i as u64, (i % 256) as u8, &pool);
+            enc.add_source_packet(p.clone());
+            packets.push(p);
+        }
+        let mut repairs = Vec::new();
+        for i in 0..(n - k) {
+            repairs.push(enc.generate_repair_packet(i, &pool).unwrap());
+        }
+        let mut dec = Decoder::new(k, Arc::clone(&pool));
+        for (idx, pkt) in packets.into_iter().enumerate() {
+            if idx % 5 != 0 {
+                dec.add_packet(pkt).unwrap();
+            }
+        }
+        for r in repairs {
+            dec.add_packet(r).unwrap();
+        }
+        assert!(dec.is_decoded);
+        let out = dec.get_decoded_packets();
+        assert_eq!(out.len(), k);
+        for i in 0..k {
+            assert_eq!(out[i].data.as_ref().unwrap()[0], (i % 256) as u8);
+        }
+    }
 }
