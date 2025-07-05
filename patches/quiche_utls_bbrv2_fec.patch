@@ -1,0 +1,67 @@
+diff --git a/quiche/src/ffi.rs b/quiche/src/ffi.rs
+index 5cd7e38..aef9364 100644
+--- a/quiche/src/ffi.rs
++++ b/quiche/src/ffi.rs
+@@ -225,6 +225,36 @@ pub extern "C" fn quiche_config_enable_early_data(config: &mut Config) {
+     config.enable_early_data();
+ }
+ 
++#[no_mangle]
++pub extern "C" fn quiche_config_set_custom_tls(
++    config: &mut Config,
++    hello: *const u8,
++    len: size_t,
++) {
++    if hello.is_null() || len == 0 {
++        config.custom_tls = None;
++        return;
++    }
++    let slice = unsafe { slice::from_raw_parts(hello, len) };
++    config.set_custom_tls(slice);
++}
++
++#[no_mangle]
++pub extern "C" fn quiche_config_set_custom_bbr_params(
++    config: &mut Config,
++    params: *const BbrParams,
++) {
++    if params.is_null() {
++        return;
++    }
++    unsafe { config.set_custom_bbr_params(*params) };
++}
++
++#[no_mangle]
++pub extern "C" fn quiche_conn_enable_fec(_conn: &mut Connection, _mode: u8) {
++    // Hook for FEC integration; implementation is provided in QuicFuscate.
++}
++
+ #[no_mangle]
+ /// Corresponds to the `Config::set_application_protos_wire_format` Rust
+ /// function.
+diff --git a/quiche/src/lib.rs b/quiche/src/lib.rs
+index 29da972..2066cb1 100644
+--- a/quiche/src/lib.rs
++++ b/quiche/src/lib.rs
+@@ -811,6 +811,8 @@ pub struct Config {
+ 
+     cc_algorithm: CongestionControlAlgorithm,
+     custom_bbr_params: Option<BbrParams>,
++    /// Optional TLS ClientHello used for uTLS fingerprinting.
++    pub custom_tls: Option<Vec<u8>>,
+     initial_congestion_window_packets: usize,
+ 
+     pmtud: bool,
+@@ -1293,6 +1295,12 @@ impl Config {
+         self.custom_bbr_params = Some(custom_bbr_settings);
+     }
+ 
++    /// Sets a custom TLS ClientHello used for uTLS fingerprinting.
++    #[doc(hidden)]
++    pub fn set_custom_tls(&mut self, hello: &[u8]) {
++        self.custom_tls = Some(hello.to_vec());
++    }
++
+     /// Sets the congestion control algorithm used by string.
+     ///
+     /// The default value is `cubic`. On error `Error::CongestionControl`

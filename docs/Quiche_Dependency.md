@@ -26,8 +26,8 @@ This document consolidates all information regarding the integration, optimizati
    QuicFuscate/
    ├── libs/
    │   └── patched_quiche/      # Customized quiche version
-   │       ├── quiche/          # quiche source code
-   │       └── patches/         # Applied patches
+   │       └── quiche/          # quiche source code
+   ├── patches/                 # Project-specific patches
    ├── scripts/                 # Automation scripts
    └── docs/                    # Documentation
    ```
@@ -134,7 +134,7 @@ QuicFuscate includes a GitHub Actions workflow for automated building and testin
 2. **Build Process**
    - Executes the quiche workflow script
    - Supports both release and debug builds
-   - Applies all patches from `libs/patches/`
+   - Applies all patches from `patches/`
 
 3. **Artifact Handling**
    - Packages the built artifacts

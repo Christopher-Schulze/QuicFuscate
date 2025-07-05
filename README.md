@@ -107,6 +107,14 @@ mirror URL):
 If a local copy of quiche already exists, set the `QUICHE_PATH` environment
 variable to skip fetching and build from that path instead.
 
+Custom patches are stored in the top-level `patches/` directory. The
+`quiche_workflow.sh` script automatically fetches a fresh copy of quiche,
+applies all patches and builds the library:
+
+```bash
+./scripts/quiche_workflow.sh --type release
+```
+
 ### Building quiche
 
 Compile the patched **quiche** library using Cargo:
