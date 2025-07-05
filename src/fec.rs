@@ -79,8 +79,8 @@ fn gf_mul(a: u8, b: u8) -> u8 {
                     (t & 0xFF) as u8
                 }
             }
-            // Fallback to table-based multiplication if no specific SIMD is available.
-            _ => {
+            // SSE2 or fallback to table-based multiplication if no specific SIMD is available.
+            &optimize::Sse2 | _ => {
                 if a == 0 || b == 0 {
                     return 0;
                 }
@@ -1090,6 +1090,11 @@ impl FecConfig {
             window_sizes: windows,
         })
     }
+
+    pub fn from_file(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let contents = std::fs::read_to_string(path)?;
+        Self::from_toml(&contents)
+    }
 }
 
 impl Default for FecConfig {
@@ -1419,6 +1424,27 @@ mod tests {
         assert_eq!(cfg.window_sizes[&FecMode::Extreme], 2048);
         assert_eq!(cfg.lambda, 0.05);
         assert_eq!(cfg.burst_window, 30);
+    }
+
+    #[test]
+    fn adaptive_transition_from_toml() {
+        init_gf_tables();
+        let pool = Arc::new(MemoryPool::new(32, 64));
+        let cfg_str = r#"
+            [adaptive_fec]
+            lambda = 0.1
+            burst_window = 10
+            hysteresis = 0.02
+            pid = { kp = 1.0, ki = 0.0, kd = 0.0 }
+
+            [[adaptive_fec.modes]]
+            name = "extreme"
+            w0 = 1024
+        "#;
+        let cfg = FecConfig::from_toml(cfg_str).unwrap();
+        let mut fec = AdaptiveFec::new(cfg, Arc::clone(&pool));
+        fec.report_loss(15, 20);
+        assert_eq!(fec.current_mode(), FecMode::Extreme);
     }
 
     #[test]
