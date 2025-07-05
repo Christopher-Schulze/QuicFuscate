@@ -297,6 +297,7 @@ impl QuicFuscateConnection {
             len: write,
             is_systematic: true,
             coefficients: None,
+            coeff_len: 0,
             mem_pool: self.optimization_manager.memory_pool(),
         };
         self.packet_id_counter += 1;

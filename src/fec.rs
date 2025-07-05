@@ -269,7 +269,8 @@ pub struct Packet {
     pub data: Option<AlignedBox<[u8]>>,
     pub len: usize,
     pub is_systematic: bool,
-    pub coefficients: Option<Vec<u8>>, // Present only in repair packets
+    pub coefficients: Option<AlignedBox<[u8]>>,
+    pub coeff_len: usize,
     mem_pool: Arc<MemoryPool>,
 }
 
@@ -289,7 +290,7 @@ impl Packet {
         let is_systematic = raw_data[0] == 1;
         let mut offset = 1;
 
-        let (coefficients, payload_offset) = if !is_systematic {
+        let (coefficients, coeff_len, payload_offset) = if !is_systematic {
             if raw_data.len() < 3 {
                 return Err("Buffer too short for coefficient length".to_string());
             }
@@ -300,10 +301,11 @@ impl Packet {
             if raw_data.len() < offset + coeff_len {
                 return Err("Buffer too short for coefficients".to_string());
             }
-            let coeffs = raw_data[offset..offset + coeff_len].to_vec();
-            (Some(coeffs), offset + coeff_len)
+            let mut coeff_block = opt_manager.alloc_block();
+            coeff_block[..coeff_len].copy_from_slice(&raw_data[offset..offset + coeff_len]);
+            (Some(coeff_block), coeff_len, offset + coeff_len)
         } else {
-            (None, offset)
+            (None, 0, offset)
         };
 
         let payload = &raw_data[payload_offset..];
@@ -319,6 +321,7 @@ impl Packet {
             len: payload.len(),
             is_systematic,
             coefficients,
+            coeff_len,
             mem_pool: opt_manager.memory_pool(),
         })
     }
@@ -339,7 +342,7 @@ impl Packet {
         let is_systematic = block[0] == 1;
         let mut offset = 1;
 
-        let (coefficients, payload_offset) = if !is_systematic {
+        let (coefficients, coeff_len, payload_offset) = if !is_systematic {
             if len < 3 {
                 opt_manager.free_block(block);
                 return Err("Buffer too short for coefficient length".to_string());
@@ -350,10 +353,11 @@ impl Packet {
                 opt_manager.free_block(block);
                 return Err("Buffer too short for coefficients".to_string());
             }
-            let coeffs = block[offset..offset + coeff_len].to_vec();
-            (Some(coeffs), offset + coeff_len)
+            let mut coeff_block = opt_manager.alloc_block();
+            coeff_block[..coeff_len].copy_from_slice(&block[offset..offset + coeff_len]);
+            (Some(coeff_block), coeff_len, offset + coeff_len)
         } else {
-            (None, offset)
+            (None, 0, offset)
         };
 
         let payload_len = len - payload_offset;
@@ -367,6 +371,7 @@ impl Packet {
             len: payload_len,
             is_systematic,
             coefficients,
+            coeff_len,
             mem_pool: opt_manager.memory_pool(),
         })
     }
@@ -374,8 +379,8 @@ impl Packet {
     /// Serializes the packet into a raw byte buffer for transmission.
     pub fn to_raw(&self, buffer: &mut [u8]) -> Result<usize, quiche::Error> {
         let mut required_len = self.len + 1;
-        if let Some(coeffs) = &self.coefficients {
-            required_len += 2 + coeffs.len();
+        if let Some(_) = &self.coefficients {
+            required_len += 2 + self.coeff_len;
         }
         if buffer.len() < required_len {
             return Err(quiche::Error::BufferTooShort);
@@ -386,11 +391,12 @@ impl Packet {
         offset += 1;
 
         if let Some(coeffs) = &self.coefficients {
-            let coeff_len = coeffs.len() as u16;
+            let coeff_len = self.coeff_len as u16;
             buffer[offset..offset + 2].copy_from_slice(&coeff_len.to_be_bytes());
             offset += 2;
-            buffer[offset..offset + coeffs.len()].copy_from_slice(coeffs);
-            offset += coeffs.len();
+            buffer[offset..offset + self.coeff_len]
+                .copy_from_slice(&coeffs[..self.coeff_len]);
+            offset += self.coeff_len;
         }
 
         if let Some(ref data) = self.data {
@@ -413,7 +419,12 @@ impl Packet {
             data: Some(new_data),
             len: self.len,
             is_systematic: self.is_systematic,
-            coefficients: self.coefficients.clone(),
+            coefficients: self.coefficients.as_ref().map(|c| {
+                let mut nb = mem_pool.alloc();
+                nb[..self.coeff_len].copy_from_slice(&c[..self.coeff_len]);
+                nb
+            }),
+            coeff_len: self.coeff_len,
             mem_pool: Arc::clone(mem_pool),
         }
     }
@@ -423,6 +434,9 @@ impl Drop for Packet {
     fn drop(&mut self) {
         if let Some(data) = self.data.take() {
             self.mem_pool.free(data);
+        }
+        if let Some(coeffs) = self.coefficients.take() {
+            self.mem_pool.free(coeffs);
         }
     }
 }
@@ -756,13 +770,20 @@ impl Encoder16 {
                 j += 2;
             }
         }
-        let coeff_bytes: Vec<u8> = coeffs.iter().flat_map(|c| c.to_be_bytes()).collect();
+        let mut coeff_block = mem_pool.alloc();
+        for (i, c) in coeffs.iter().enumerate() {
+            let bytes = c.to_be_bytes();
+            coeff_block[2 * i] = bytes[0];
+            coeff_block[2 * i + 1] = bytes[1];
+        }
         Some(Packet {
             id: self.source_window.back().unwrap().id + 1 + repair_packet_index as u64,
             data: repair_data,
             len: packet_len,
             is_systematic: false,
-            coefficients: Some(coeff_bytes),
+            coefficients: Some(coeff_block),
+            coeff_len: coeffs.len() * 2,
+            mem_pool: Arc::clone(mem_pool),
         })
     }
 
@@ -902,12 +923,15 @@ impl Encoder {
             }
         });
 
+        let mut coeff_block = mem_pool.alloc();
+        coeff_block[..coeffs.len()].copy_from_slice(&coeffs);
         Some(Packet {
             id: self.source_window.back().unwrap().id + 1 + repair_packet_index as u64,
             data: Some(repair_data),
             len: packet_len,
             is_systematic: false,
-            coefficients: Some(coeffs),
+            coefficients: Some(coeff_block),
+            coeff_len: coeffs.len(),
             mem_pool: Arc::clone(mem_pool),
         })
     }
@@ -1251,7 +1275,7 @@ impl Decoder {
             return Ok(self.is_decoded);
         }
 
-        let (coeffs, packet_data_owned) = if packet.is_systematic {
+        if packet.is_systematic {
             let index = (packet.id as usize) % self.k;
             let mut identity_row = vec![0; self.k];
             identity_row[index] = 1;
@@ -1260,15 +1284,14 @@ impl Decoder {
             } else {
                 return Ok(self.is_decoded); // Duplicate packet
             }
-            (identity_row, None) // Systematic data is stored directly
+            self.decoding_matrix.append_row(&identity_row, None);
+            Ok(self.try_decode())
         } else if let Some(coeffs) = packet.coefficients {
-            (coeffs, packet.data) // Repair packet provides data
+            self.decoding_matrix.append_row(&coeffs[..packet.coeff_len], packet.data);
+            Ok(self.try_decode())
         } else {
-            return Err("Repair packet missing coefficients.");
-        };
-
-        self.decoding_matrix.append_row(&coeffs, packet_data_owned);
-        Ok(self.try_decode())
+            Err("Repair packet missing coefficients.")
+        }
     }
 
     /// Attempts to decode once enough packets (K) have been received.
