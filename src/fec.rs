@@ -53,7 +53,12 @@ pub struct KalmanFilter {
 
 impl KalmanFilter {
     fn new(q: f32, r: f32) -> Self {
-        Self { estimate: 0.0, error_cov: 1.0, q, r }
+        Self {
+            estimate: 0.0,
+            error_cov: 1.0,
+            q,
+            r,
+        }
     }
 
     fn update(&mut self, measurement: f32) -> f32 {
@@ -155,16 +160,21 @@ const GF16_POLY: u32 = 0x1100b;
 #[inline(always)]
 fn gf16_mul(mut a: u16, mut b: u16) -> u16 {
     let mut res: u16 = 0;
-    while b != 0 {
-        if (b & 1) != 0 {
-            res ^= a;
+    optimize::dispatch(|_policy| {
+        // SIMD accelerated implementations could be plugged in here. For now we
+        // use the classic shift-and-add approach which is efficient for the
+        // small field size.
+        while b != 0 {
+            if (b & 1) != 0 {
+                res ^= a;
+            }
+            b >>= 1;
+            a <<= 1;
+            if (a & 0x10000) != 0 {
+                a ^= GF16_POLY as u16;
+            }
         }
-        b >>= 1;
-        a <<= 1;
-        if (a & 0x10000) != 0 {
-            a ^= GF16_POLY as u16;
-        }
-    }
+    });
     res
 }
 
@@ -183,7 +193,9 @@ fn gf16_pow(mut x: u16, mut power: u32) -> u16 {
 
 #[inline(always)]
 fn gf16_inv(x: u16) -> u16 {
-    if x == 0 { panic!("Inverse of 0") }
+    if x == 0 {
+        panic!("Inverse of 0")
+    }
     gf16_pow(x, 0x1_0000 - 2)
 }
 
@@ -525,7 +537,12 @@ impl ModeManager {
         let n = ((window as f32) * ratio).ceil() as usize;
         (window, n)
     }
-    fn new(pid_config: PidConfig, hysteresis: f32, initial_mode: FecMode, window_sizes: HashMap<FecMode, usize>) -> Self {
+    fn new(
+        pid_config: PidConfig,
+        hysteresis: f32,
+        initial_mode: FecMode,
+        window_sizes: HashMap<FecMode, usize>,
+    ) -> Self {
         let mut mode_thresholds = HashMap::new();
         mode_thresholds.insert(FecMode::Zero, 0.01);
         mode_thresholds.insert(FecMode::Light, 0.05);
@@ -535,10 +552,11 @@ impl ModeManager {
         mode_thresholds.insert(FecMode::Extreme, 1.0); // Effectively a catch-all
 
         let current_mode = initial_mode;
-        let current_window = window_sizes
-            .get(&current_mode)
-            .copied()
-            .unwrap_or_else(|| *FecConfig::default_windows().get(&current_mode).unwrap_or(&0));
+        let current_window = window_sizes.get(&current_mode).copied().unwrap_or_else(|| {
+            *FecConfig::default_windows()
+                .get(&current_mode)
+                .unwrap_or(&0)
+        });
 
         Self {
             current_mode,
@@ -694,7 +712,11 @@ pub struct Encoder16 {
 
 impl Encoder16 {
     fn new(k: usize, n: usize) -> Self {
-        Self { k, n, source_window: VecDeque::with_capacity(k) }
+        Self {
+            k,
+            n,
+            source_window: VecDeque::with_capacity(k),
+        }
     }
 
     fn add_source_packet(&mut self, packet: Packet) {
@@ -719,16 +741,18 @@ impl Encoder16 {
         let coeffs = self.generate_cauchy_coefficients(repair_packet_index);
         for (i, src) in self.source_window.iter().enumerate() {
             let coeff = coeffs[i];
-            if coeff == 0 { continue; }
+            if coeff == 0 {
+                continue;
+            }
             let data = &src.data[..packet_len];
             let mut j = 0;
             while j + 1 < packet_len {
-                let s = u16::from_be_bytes([data[j], data[j+1]]);
-                let r = u16::from_be_bytes([repair_data[j], repair_data[j+1]]);
+                let s = u16::from_be_bytes([data[j], data[j + 1]]);
+                let r = u16::from_be_bytes([repair_data[j], repair_data[j + 1]]);
                 let v = gf16_mul_add(coeff, s, r);
                 let b = v.to_be_bytes();
                 repair_data[j] = b[0];
-                repair_data[j+1] = b[1];
+                repair_data[j + 1] = b[1];
                 j += 2;
             }
         }
@@ -856,10 +880,9 @@ impl Encoder {
                         if coeff == 0 {
                             return;
                         }
-                        let source_data = &source_packet
-                            .data
-                            .as_ref()
-                            .expect("packet data missing")[..source_packet.len];
+                        let source_data =
+                            &source_packet.data.as_ref().expect("packet data missing")
+                                [..source_packet.len];
                         for j in 0..packet_len {
                             repair_data[j] = gf_mul_add(coeff, source_data[j], repair_data[j]);
                         }
@@ -870,10 +893,8 @@ impl Encoder {
                     if coeff == 0 {
                         continue;
                     }
-                    let source_data = &source_packet
-                        .data
-                        .as_ref()
-                        .expect("packet data missing")[..source_packet.len];
+                    let source_data = &source_packet.data.as_ref().expect("packet data missing")
+                        [..source_packet.len];
                     for j in 0..packet_len {
                         repair_data[j] = gf_mul_add(coeff, source_data[j], repair_data[j]);
                     }
@@ -1009,41 +1030,61 @@ impl CsrMatrix {
     fn scale_row(&mut self, row: usize, factor: u8) {
         let row_start = self.row_ptr[row];
         let row_end = self.row_ptr[row + 1];
-        for i in row_start..row_end {
-            self.values[i] = gf_mul(self.values[i], factor);
-        }
-        if let Some(ref mut payload) = self.payloads[row] {
-            for b in payload.iter_mut() {
-                *b = gf_mul(*b, factor);
+        optimize::dispatch(|policy| {
+            if policy.as_any().is::<optimize::Avx2>() || policy.as_any().is::<optimize::Neon>() {
+                self.values[row_start..row_end]
+                    .par_iter_mut()
+                    .for_each(|v| *v = gf_mul(*v, factor));
+                if let Some(ref mut payload) = self.payloads[row] {
+                    payload.par_iter_mut().for_each(|b| *b = gf_mul(*b, factor));
+                }
+            } else {
+                for i in row_start..row_end {
+                    self.values[i] = gf_mul(self.values[i], factor);
+                }
+                if let Some(ref mut payload) = self.payloads[row] {
+                    for b in payload.iter_mut() {
+                        *b = gf_mul(*b, factor);
+                    }
+                }
             }
-        }
+        });
     }
 
     fn add_scaled_row(&mut self, target_row: usize, source_row: usize, factor: u8) {
-        let mut dense = vec![0u8; self.num_cols];
-        for (c, v) in self.row_entries(target_row) {
-            dense[c] = v;
-        }
-        for (c, v) in self.row_entries(source_row) {
-            dense[c] ^= gf_mul(v, factor);
-        }
-        self.clear_row(target_row);
-        let entries: Vec<(usize, u8)> = dense
-            .iter()
-            .enumerate()
-            .filter(|&(_, &v)| v != 0)
-            .map(|(c, &v)| (c, v))
-            .collect();
-        self.insert_row(target_row, &entries);
-
-        if let (Some(src), Some(tgt)) = (
-            self.payloads[source_row].as_ref(),
-            self.payloads[target_row].as_mut(),
-        ) {
-            for i in 0..tgt.len().min(src.len()) {
-                tgt[i] = gf_mul_add(factor, src[i], tgt[i]);
+        optimize::dispatch(|policy| {
+            let mut dense = vec![0u8; self.num_cols];
+            for (c, v) in self.row_entries(target_row) {
+                dense[c] = v;
             }
-        }
+            for (c, v) in self.row_entries(source_row) {
+                dense[c] ^= gf_mul(v, factor);
+            }
+            self.clear_row(target_row);
+            let entries: Vec<(usize, u8)> = dense
+                .iter()
+                .enumerate()
+                .filter(|&(_, &v)| v != 0)
+                .map(|(c, &v)| (c, v))
+                .collect();
+            self.insert_row(target_row, &entries);
+
+            if let (Some(src), Some(tgt)) = (
+                self.payloads[source_row].as_ref(),
+                self.payloads[target_row].as_mut(),
+            ) {
+                if policy.as_any().is::<optimize::Avx2>() || policy.as_any().is::<optimize::Neon>()
+                {
+                    tgt.par_iter_mut()
+                        .zip(src.par_iter())
+                        .for_each(|(t, &s)| *t = gf_mul_add(factor, s, *t));
+                } else {
+                    for i in 0..tgt.len().min(src.len()) {
+                        tgt[i] = gf_mul_add(factor, src[i], tgt[i]);
+                    }
+                }
+            }
+        });
     }
 }
 
@@ -1073,11 +1114,19 @@ pub struct Decoder16 {
 
 impl Decoder16 {
     fn new(k: usize, mem_pool: Arc<MemoryPool>) -> Self {
-        Self { k, mem_pool, matrix: Vec::new(), payloads: Vec::new(), is_decoded: false }
+        Self {
+            k,
+            mem_pool,
+            matrix: Vec::new(),
+            payloads: Vec::new(),
+            is_decoded: false,
+        }
     }
 
     fn add_packet(&mut self, packet: Packet) -> Result<bool, &'static str> {
-        if self.is_decoded || self.matrix.len() >= self.k { return Ok(self.is_decoded); }
+        if self.is_decoded || self.matrix.len() >= self.k {
+            return Ok(self.is_decoded);
+        }
         let coeffs = if packet.is_systematic {
             let mut row = vec![0u16; self.k];
             let idx = (packet.id as usize) % self.k;
@@ -1088,48 +1137,89 @@ impl Decoder16 {
         } else if let Some(c) = packet.coefficients {
             let mut row = Vec::with_capacity(self.k);
             for i in 0..self.k {
-                let hi = c[2*i];
-                let lo = c[2*i+1];
+                let hi = c[2 * i];
+                let lo = c[2 * i + 1];
                 row.push(u16::from_be_bytes([hi, lo]));
             }
             self.matrix.push(row);
             self.payloads.push(Some(packet.data));
             row
-        } else { return Err("missing coeffs"); };
+        } else {
+            return Err("missing coeffs");
+        };
         Ok(self.try_decode())
     }
 
     fn try_decode(&mut self) -> bool {
-        if self.matrix.len() < self.k { return false; }
+        if self.matrix.len() < self.k {
+            return false;
+        }
         let k = self.k;
         for i in 0..k {
             // pivot search
             let mut pivot = i;
-            while pivot < k && self.matrix[pivot][i] == 0 { pivot += 1; }
-            if pivot == k { return false; }
+            while pivot < k && self.matrix[pivot][i] == 0 {
+                pivot += 1;
+            }
+            if pivot == k {
+                return false;
+            }
             self.matrix.swap(i, pivot);
             self.payloads.swap(i, pivot);
             let inv = gf16_inv(self.matrix[i][i]);
-            for val in self.matrix[i].iter_mut() { *val = gf16_mul(*val, inv); }
-            if let Some(ref mut p) = self.payloads[i] {
-                let mut j=0; while j+1<p.len() { let v=u16::from_be_bytes([p[j],p[j+1]]); let v=gf16_mul(v,inv); let b=v.to_be_bytes(); p[j]=b[0]; p[j+1]=b[1]; j+=2; }
+            for val in self.matrix[i].iter_mut() {
+                *val = gf16_mul(*val, inv);
             }
-            for r in 0..k { if r!=i && self.matrix[r][i]!=0 {
-                let factor = self.matrix[r][i];
-                for c in 0..k { let t = gf16_mul(factor, self.matrix[i][c]); self.matrix[r][c] ^= t; }
-                if let (Some(ref src), Some(ref mut tgt)) = (&self.payloads[i], &mut self.payloads[r]) {
-                    let mut j=0; while j+1<src.len() { let s=u16::from_be_bytes([src[j],src[j+1]]); let t=u16::from_be_bytes([tgt[j],tgt[j+1]]); let val=gf16_mul_add(factor,s,t); let b=val.to_be_bytes(); tgt[j]=b[0]; tgt[j+1]=b[1]; j+=2; }
+            if let Some(ref mut p) = self.payloads[i] {
+                let mut j = 0;
+                while j + 1 < p.len() {
+                    let v = u16::from_be_bytes([p[j], p[j + 1]]);
+                    let v = gf16_mul(v, inv);
+                    let b = v.to_be_bytes();
+                    p[j] = b[0];
+                    p[j + 1] = b[1];
+                    j += 2;
                 }
-            }}
+            }
+            for r in 0..k {
+                if r != i && self.matrix[r][i] != 0 {
+                    let factor = self.matrix[r][i];
+                    for c in 0..k {
+                        let t = gf16_mul(factor, self.matrix[i][c]);
+                        self.matrix[r][c] ^= t;
+                    }
+                    if let (Some(ref src), Some(ref mut tgt)) =
+                        (&self.payloads[i], &mut self.payloads[r])
+                    {
+                        let mut j = 0;
+                        while j + 1 < src.len() {
+                            let s = u16::from_be_bytes([src[j], src[j + 1]]);
+                            let t = u16::from_be_bytes([tgt[j], tgt[j + 1]]);
+                            let val = gf16_mul_add(factor, s, t);
+                            let b = val.to_be_bytes();
+                            tgt[j] = b[0];
+                            tgt[j + 1] = b[1];
+                            j += 2;
+                        }
+                    }
+                }
+            }
         }
-        self.is_decoded=true; true
+        self.is_decoded = true;
+        true
     }
 
     fn get_decoded_packets(&mut self) -> Vec<Packet> {
         let mut out = Vec::new();
-        for (i,payload) in self.payloads.iter_mut().enumerate() {
+        for (i, payload) in self.payloads.iter_mut().enumerate() {
             if let Some(data) = payload.take() {
-                out.push(Packet { id: i as u64, data, len: data.len(), is_systematic: true, coefficients: None });
+                out.push(Packet {
+                    id: i as u64,
+                    data,
+                    len: data.len(),
+                    is_systematic: true,
+                    coefficients: None,
+                });
             }
         }
         out
@@ -1435,7 +1525,11 @@ impl FecConfig {
 
         let raw: Root = toml::from_str(s)?;
         let af = raw.adaptive_fec;
-        let pid = af.pid.unwrap_or(PidSection { kp: 0.5, ki: 0.1, kd: 0.2 });
+        let pid = af.pid.unwrap_or(PidSection {
+            kp: 0.5,
+            ki: 0.1,
+            kd: 0.2,
+        });
         let mut windows = FecConfig::default_windows();
         if let Some(modes) = af.modes {
             for msec in modes {
@@ -1448,7 +1542,11 @@ impl FecConfig {
             lambda: af.lambda.unwrap_or(0.1),
             burst_window: af.burst_window.unwrap_or(20),
             hysteresis: af.hysteresis.unwrap_or(0.02),
-            pid: PidConfig { kp: pid.kp, ki: pid.ki, kd: pid.kd },
+            pid: PidConfig {
+                kp: pid.kp,
+                ki: pid.ki,
+                kd: pid.kd,
+            },
             initial_mode: FecMode::Zero,
             kalman_enabled: af.kalman_enabled.unwrap_or(false),
             kalman_q: af.kalman_q.unwrap_or(0.001),
@@ -1498,7 +1596,9 @@ impl AdaptiveFec {
             estimator: Arc::new(Mutex::new(LossEstimator::new(
                 config.lambda,
                 config.burst_window,
-                config.kalman_enabled.then(|| KalmanFilter::new(config.kalman_q, config.kalman_r)),
+                config
+                    .kalman_enabled
+                    .then(|| KalmanFilter::new(config.kalman_q, config.kalman_r)),
             ))),
             mode_mgr: Arc::new(Mutex::new(mode_mgr)),
             encoder: EncoderVariant::new(mode_mgr.current_mode, k, n),
@@ -1554,9 +1654,9 @@ impl AdaptiveFec {
         mem_pool: &Arc<MemoryPool>,
         outgoing_queue: &mut VecDeque<Packet>,
     ) {
-        let (k,n) = match encoder {
-            EncoderVariant::G8(e)=> (e.k, e.n),
-            EncoderVariant::G16(e)=> (e.k, e.n),
+        let (k, n) = match encoder {
+            EncoderVariant::G8(e) => (e.k, e.n),
+            EncoderVariant::G16(e) => (e.k, e.n),
         };
         let num_repair = n.saturating_sub(k);
         for i in 0..num_repair {
@@ -1640,8 +1740,6 @@ impl AdaptiveFec {
 //     * Neither the name of the copyright holder nor the names of its
 //       contributors may be used to endorse or promote products derived from
 //       this
-  
-  
 
 #[cfg(test)]
 mod tests {
