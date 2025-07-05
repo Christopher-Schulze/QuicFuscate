@@ -5,8 +5,9 @@
 2. [Integration Guidelines](#integration-guidelines)
 3. [Optimization Strategy](#optimization-strategy)
 4. [Build System](#build-system)
-5. [Advanced Optimizations](#advanced-optimizations)
-6. [Maintenance](#maintenance)
+5. [Custom TLS Hooks](#custom-tls-hooks)
+6. [Advanced Optimizations](#advanced-optimizations)
+7. [Maintenance](#maintenance)
 
 ## Overview
 
@@ -92,6 +93,37 @@ This document consolidates all information regarding the integration, optimizati
 [dependencies]
 quiche = { path = "libs/patched_quiche/quiche" }
 ```
+
+## Custom TLS Hooks
+
+QuicFuscate relies on a patched version of **quiche** to inject prebuilt TLS
+ClientHello messages. This allows the stealth layer to emulate real browsers
+without modifying the Rust code of quiche during runtime.
+
+### Required Changes
+
+- `libs/patched_quiche/quiche/include/quiche.h` – declaration of the additional
+  `quiche_config_set_custom_tls()` function.
+- `libs/patched_quiche/quiche/src/ffi.rs` – implementation of the FFI symbol and
+  binding to `Config`.
+- `libs/patched_quiche/quiche/src/lib.rs` – store the provided ClientHello in the
+  configuration object.
+- `libs/patched_quiche/quiche/src/tls/mod.rs` – pass the stored buffer to the TLS
+  backend during connection setup.
+
+The patch series under `libs/patched_quiche/patches/` contains these
+modifications (see `custom_tls.patch`). Apply them via
+`scripts/maintain_quiche.sh patch` after fetching the submodule.
+
+### Provided FFI Symbols
+
+```c
+void quiche_config_set_custom_tls(quiche_config *cfg,
+                                  const uint8_t *hello, size_t len);
+```
+
+When the patched library is absent, a stub implementation lives in
+`src/tls_ffi.rs` so unit tests continue to compile.
 
 ## Advanced Optimizations
 
@@ -182,6 +214,9 @@ The `scripts/quiche_workflow.sh` script provides a complete local development wo
    ```bash
    # Generate new patch
    ./scripts/generate_patch.sh "Description of changes"
+
+   # Alternatively manage the quiche tree and apply patches
+   ./scripts/maintain_quiche.sh patch
    ```
 
 ### Version Control
