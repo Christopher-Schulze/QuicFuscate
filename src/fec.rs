@@ -79,6 +79,22 @@ fn gf_mul(a: u8, b: u8) -> u8 {
                     (t & 0xFF) as u8
                 }
             }
+            #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+            &optimize::Neon => {
+                #[allow(unsafe_code)]
+                unsafe {
+                    use std::arch::aarch64::*;
+                    let a_v = vdupq_n_u8(a);
+                    let b_v = vdupq_n_u8(b);
+                    let res = vmull_p8(vget_low_u8(a_v), vget_low_u8(b_v));
+                    let mut t = vgetq_lane_u16(res, 0);
+                    t ^= t >> 8;
+                    t ^= t >> 4;
+                    t ^= t >> 2;
+                    t ^= t >> 1;
+                    (t & 0xFF) as u8
+                }
+            }
             // SSE2 or fallback to table-based multiplication if no specific SIMD is available.
             &optimize::Sse2 | _ => {
                 if a == 0 || b == 0 {
