@@ -4,6 +4,7 @@ use crate::stealth::StealthConfig;
 use crate::stealth::{BrowserProfile, FingerprintProfile, OsProfile};
 use clap::{Parser, Subcommand};
 use log::{error, info, warn};
+use tokio::signal;
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
@@ -22,9 +23,13 @@ struct Cli {
 enum Commands {
     /// Runs the client
     Client {
-        /// The server address to connect to
-        #[clap(required = true)]
-        server_addr: String,
+        /// The remote server address to connect to
+        #[clap(long, required = true)]
+        remote: String,
+
+        /// Local UDP address to bind
+        #[clap(long, default_value = "0.0.0.0:0")]
+        local: String,
 
         /// The URL to request
         #[clap(short, long, default_value = "https://example.com")]
@@ -128,7 +133,8 @@ async fn main() -> std::io::Result<()> {
 
     match &cli.command {
         Commands::Client {
-            server_addr,
+            remote,
+            local,
             url,
             profile,
             os,
@@ -143,7 +149,8 @@ async fn main() -> std::io::Result<()> {
             let browser = profile.parse().unwrap_or(BrowserProfile::Chrome);
             let os_profile = os.parse().unwrap_or(OsProfile::Windows);
             run_client(
-                server_addr,
+                remote,
+                local,
                 url,
                 browser,
                 os_profile,
@@ -207,7 +214,8 @@ fn parse_profile_entry(entry: &str, default_os: OsProfile) -> Option<Fingerprint
 }
 
 async fn run_client(
-    server_addr_str: &str,
+    remote_addr_str: &str,
+    local_addr_str: &str,
     url: &str,
     profile: BrowserProfile,
     os: OsProfile,
@@ -219,11 +227,15 @@ async fn run_client(
     disable_xor: bool,
     disable_http3: bool,
 ) -> std::io::Result<()> {
-    let server_addr = server_addr_str.to_socket_addrs()?.next().ok_or_else(|| {
+    let server_addr = remote_addr_str.to_socket_addrs()?.next().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "Server address not found")
     })?;
 
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
+    let local_addr = local_addr_str.to_socket_addrs()?.next().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "Local address invalid")
+    })?;
+
+    let socket = std::net::UdpSocket::bind(local_addr)?;
     socket.connect(server_addr)?;
     socket.set_nonblocking(true)?;
 
@@ -254,9 +266,15 @@ async fn run_client(
     stealth_config.enable_http3_masquerading = !disable_http3;
 
     let host = url_parsed.host_str().unwrap_or("example.com");
-    let mut conn =
-        QuicFuscateConnection::new_client(host, server_addr, config, stealth_config, fec_mode)
-            .expect("failed to create client connection");
+    let mut conn = QuicFuscateConnection::new_client(
+        host,
+        local_addr,
+        server_addr,
+        config,
+        stealth_config,
+        fec_mode,
+    )
+    .expect("failed to create client connection");
 
     let profiles: Vec<FingerprintProfile> = match profile_seq {
         Some(seq) => seq
@@ -283,19 +301,27 @@ async fn run_client(
     }
 
     let mut request_sent = false;
+    let mut shutdown = signal::ctrl_c();
+    tokio::pin!(shutdown);
 
     loop {
-        // Process incoming packets
-        match socket.recv(&mut buf) {
-            Ok(len) => {
-                let _ = conn.recv(&buf[..len]);
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(e) => {
-                error!("Failed to read from socket: {}", e);
+        tokio::select! {
+            _ = &mut shutdown => {
+                info!("Shutdown signal received");
                 break;
             }
-        }
+            _ = async {
+                // Process incoming packets
+                match socket.recv(&mut buf) {
+                    Ok(len) => {
+                        let _ = conn.recv(&buf[..len]);
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(e) => {
+                        error!("Failed to read from socket: {}", e);
+                        return;
+                    }
+                }
 
         if conn.conn.is_established() && !request_sent {
             if let Err(e) = conn.send_http3_request(url_parsed.path()) {
@@ -323,11 +349,13 @@ async fn run_client(
             }
         }
 
-        conn.update_state();
-        conn.conn.on_timeout();
+                conn.update_state();
+                conn.conn.on_timeout();
 
-        // Sleep to avoid busy-looping
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                // Sleep to avoid busy-looping
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            } => {}
+        }
     }
 
     Ok(())
@@ -403,8 +431,17 @@ async fn run_server(
         });
     }
 
+    let mut shutdown = signal::ctrl_c();
+    tokio::pin!(shutdown);
+
     loop {
-        match socket.recv_from(&mut buf) {
+        tokio::select! {
+            _ = &mut shutdown => {
+                info!("Shutdown signal received");
+                break;
+            }
+            _ = async {
+                match socket.recv_from(&mut buf) {
             Ok((len, from)) => {
                 info!("Received {} bytes from {}", len, from);
                 let client_conn = clients.entry(from).or_insert_with(|| {
@@ -462,11 +499,13 @@ async fn run_server(
             conn.conn.on_timeout();
         }
 
-        // Clean up closed connections
-        clients.retain(|_, conn| !conn.conn.is_closed());
+                // Clean up closed connections
+                clients.retain(|_, conn| !conn.conn.is_closed());
 
-        // Sleep to avoid busy-looping
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                // Sleep to avoid busy-looping
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            } => {}
+        }
     }
 
     Ok(())

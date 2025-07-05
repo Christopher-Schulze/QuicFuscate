@@ -27,6 +27,7 @@ async fn client_server_end_to_end() {
     stealth_cfg.enable_domain_fronting = true;
     let mut client_conn = QuicFuscateConnection::new_client(
         "example.com",
+        client_socket.local_addr().unwrap(),
         server_addr,
         client_config,
         stealth_cfg.clone(),

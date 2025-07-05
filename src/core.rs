@@ -41,7 +41,7 @@ use crate::optimize::{MemoryPool, OptimizationManager};
 use crate::stealth::{StealthConfig, StealthManager};
 use crate::xdp_socket::XdpSocket;
 use std::collections::VecDeque;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 /// Represents a single QuicFuscate connection and manages its state.
@@ -82,6 +82,7 @@ impl QuicFuscateConnection {
     /// Creates a new client connection.
     pub fn new_client(
         server_name: &str,
+        local_addr: SocketAddr,
         remote_addr: SocketAddr,
         mut config: quiche::Config,
         stealth_config: StealthConfig,
@@ -103,7 +104,6 @@ impl QuicFuscateConnection {
         stealth_manager.apply_utls_profile(&mut config);
 
         let scid = quiche::ConnectionId::from_ref(&[0; quiche::MAX_CONN_ID_LEN]);
-        let local_addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
 
         let (sni, host_header) = stealth_manager.get_connection_headers(server_name);
 
