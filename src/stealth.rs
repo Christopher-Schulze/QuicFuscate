@@ -36,7 +36,6 @@
 //? inspection (DPI) systems. It integrates multiple strategies to create a
 //! layered defense against network surveillance.
 
-use crate::telemetry::{DNS_QUERIES, OBFUSCATED_PACKETS};
 use lazy_static::lazy_static;
 use log::{debug, error, info};
 use reqwest::Client;
@@ -75,7 +74,6 @@ pub async fn resolve_doh(
     domain: &str,
     doh_provider: &str,
 ) -> Result<IpAddr, reqwest::Error> {
-    DNS_QUERIES.inc();
     let mut url = Url::parse(doh_provider).unwrap();
     url.query_pairs_mut()
         .append_pair("name", domain)
@@ -475,7 +473,6 @@ impl XorObfuscator {
             return;
         }
 
-        OBFUSCATED_PACKETS.inc();
         let key_len = key.len();
         let start = self.position.load(Ordering::Relaxed);
 
