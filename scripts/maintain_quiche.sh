@@ -12,7 +12,7 @@ NC='\033[0m' # No Color
 # Pfade
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 QUICHE_DIR="${SCRIPT_DIR}/../libs/patched_quiche"
-PATCH_DIR="${SCRIPT_DIR}/../patches"
+PATCH_DIR="${SCRIPT_DIR}/../libs/patches"
 
 # Hilfsfunktionen
 log() {
