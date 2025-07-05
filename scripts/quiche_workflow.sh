@@ -31,7 +31,6 @@ error() {
 # Konfiguration
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIBS_DIR="$BASE_DIR/libs"
-VANILLA_DIR="$LIBS_DIR/vanilla_quiche"
 PATCHED_DIR="$LIBS_DIR/patched_quiche"
 # Directory containing patch files (*.patch)
 PATCHES_DIR="$LIBS_DIR/patches"
@@ -41,7 +40,7 @@ BUILD_TYPE="release"
 MIRROR_URL="https://github.com/cloudflare/quiche.git"
 
 # Erstelle benötigte Verzeichnisse
-mkdir -p "$LOG_DIR" "$PATCHES_DIR" "$VANILLA_DIR" "$PATCHED_DIR"
+mkdir -p "$LOG_DIR" "$PATCHES_DIR" "$PATCHED_DIR"
 
 # Lade den aktuellen Status
 load_state() {
@@ -90,27 +89,24 @@ fetch_quiche() {
     
     log "Starte Herunterladen von quiche..."
     log "Quelle: $MIRROR_URL"
-    log "Ziel: $VANILLA_DIR"
-    
-    # Lösche vorhandene Inhalte, falls vorhanden
-    rm -rf "$VANILLA_DIR" "$PATCHED_DIR"
-    
-    # Erstelle die Verzeichnisse neu
-    mkdir -p "$VANILLA_DIR" "$PATCHED_DIR"
-    
-    # Klone die neueste Version
-    if [ -d "$VANILLA_DIR/.git" ]; then
+    log "Ziel: $PATCHED_DIR"
+
+    mkdir -p "$PATCHED_DIR"
+
+    if git -C "$BASE_DIR" submodule status libs/patched_quiche >/dev/null 2>&1; then
+        log "Initialisiere Submodul libs/patched_quiche..."
+        run_command "Submodul aktualisieren" \
+            "git submodule set-url libs/patched_quiche \"$MIRROR_URL\" && git submodule update --init libs/patched_quiche"
+    fi
+
+    if [ -e "$PATCHED_DIR/.git" ]; then
         log "Repository existiert bereits, aktualisiere..."
         run_command "Aktualisieren des Quiche-Repositories" \
-            "(cd \"$VANILLA_DIR\" && git fetch --all && git reset --hard origin/HEAD)"
+            "(cd \"$PATCHED_DIR\" && git fetch --all && git reset --hard origin/HEAD)"
     else
         run_command "Klonen des Quiche-Repositories" \
-            "git clone --depth 1 \"$MIRROR_URL\" \"$VANILLA_DIR\""
+            "git clone --depth 1 \"$MIRROR_URL\" \"$PATCHED_DIR\""
     fi
-    
-    # Kopiere die unveränderte Version in das gepatchte Verzeichnis
-    run_command "Erstellen der Arbeitskopie" \
-        "cp -r \"$VANILLA_DIR/\"* \"$PATCHED_DIR/\""
     
     success "Quiche erfolgreich heruntergeladen und vorbereitet"
     return 0

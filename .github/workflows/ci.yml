@@ -17,6 +17,14 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Verify submodules
+        shell: bash
+        run: |
+          if [ ! -d libs/patched_quiche ]; then
+            echo "libs/patched_quiche missing" >&2
+            exit 1
+          fi
+
       - name: Set up Rust
         uses: actions-rs/toolchain@v1
         with:
@@ -37,7 +45,7 @@ jobs:
       - name: Fetch and build quiche
         shell: bash
         run: |
-          ./scripts/fetch_quiche.sh
+          ./scripts/quiche_workflow.sh --step fetch
 
       - name: Run Clippy
         shell: bash
