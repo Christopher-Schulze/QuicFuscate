@@ -12,6 +12,17 @@
 
 This document consolidates all information regarding the integration, optimization, and maintenance of the quiche library within the QuicFuscate project. The quiche library serves as the foundation for QUIC protocol implementation, specifically tailored for QuicFuscate's requirements.
 
+## Quick Start
+
+Clone the repository, run the workflow to fetch quiche and build the project:
+
+```bash
+./scripts/quiche_workflow.sh --step fetch
+cargo build --workspace --release
+```
+
+The `fetch` step initializes the `libs/patched_quiche` submodule automatically.
+
 ## Integration Guidelines
 
 ### Core Principles
@@ -168,8 +179,8 @@ The `scripts/quiche_workflow.sh` script provides a complete local development wo
 
 2. **Manual Process** (if needed):
    ```bash
-   # Fetch the latest quiche version
-   ./scripts/fetch_quiche.sh
+   # Fetch the latest quiche version and initialize the submodule
+   ./scripts/quiche_workflow.sh --step fetch
 
    # Apply custom patches
    ./scripts/apply_patches.sh

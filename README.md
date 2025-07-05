@@ -73,13 +73,21 @@ The codebase is now entirely written in Rust. Development focuses on expanding f
 ## 🔧 Build Instructions
 
 This repository uses a Git submodule to include a patched QUIC library.
-The `libs/patched_quiche` directory is intentionally left empty in the
-repository to avoid bloating the checkout size. Fetch the sources after
-cloning using one of the methods below.
-After cloning the project, initialize the submodule with:
+The `libs/patched_quiche` directory is intentionally left empty to keep the
+checkout small. Fetch the sources after cloning by running the workflow
+script below.
+After cloning simply run the workflow script which fetches the sources and
+initializes the submodule automatically:
 
 ```bash
-git submodule update --init --recursive libs/patched_quiche
+./scripts/quiche_workflow.sh --step fetch
+```
+
+Quick start after cloning:
+
+```bash
+./scripts/quiche_workflow.sh --step fetch
+cargo build --workspace --release
 ```
 
 If the command fails with a missing commit error (e.g.
@@ -93,19 +101,12 @@ submodule URL to a mirror that includes this commit and retry:
 
 ```bash
 git submodule set-url libs/patched_quiche <mirror-url>
-git submodule update --init libs/patched_quiche
+./scripts/quiche_workflow.sh --step fetch
 ```
 
-Alternatively, run the helper script to automatically set the mirror,
-fetch the sources and build the library in one step (optionally pass a
-mirror URL):
-
-```bash
-./scripts/fetch_quiche.sh [mirror-url]
-```
-
-If a local copy of quiche already exists, set the `QUICHE_PATH` environment
-variable to skip fetching and build from that path instead.
+The workflow script replaces the old `fetch_quiche.sh` helper and can be
+re-run at any time. If a local copy of quiche already exists, set the
+`QUICHE_PATH` environment variable to use that path instead.
 
 ### Building quiche
 
