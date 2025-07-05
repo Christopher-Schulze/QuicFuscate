@@ -37,7 +37,6 @@
 
 use crate::xdp_socket::XdpSocket;
 use aligned_box::AlignedBox;
-use crossbeam_queue::ArrayQueue;
 #[cfg(unix)]
 use libc::{iovec, msghdr, recvmsg, sendmsg};
 use log::info;
@@ -50,7 +49,8 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 #[cfg(unix)]
 use std::os::unix::io::RawFd;
-use std::sync::{Arc, Once};
+use std::sync::{Arc, Once, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Enumerates the CPU features relevant for QuicFuscate's optimizations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -204,40 +204,56 @@ where
 /// minimizing lock contention and fragmentation.
 #[derive(Clone)]
 pub struct MemoryPool {
-    pool: Arc<ArrayQueue<AlignedBox<[u8]>>>,
+    pool: Arc<Mutex<Vec<AlignedBox<[u8]>>>>,
     block_size: usize,
+    capacity: Arc<AtomicUsize>,
 }
 
 impl MemoryPool {
     /// Creates a new memory pool with a specified capacity and block size.
     /// All allocated blocks are 64-byte aligned.
     pub fn new(capacity: usize, block_size: usize) -> Self {
-        let pool = ArrayQueue::new(capacity);
+        let mut vec = Vec::with_capacity(capacity);
         for _ in 0..capacity {
-            // Pre-allocate blocks with 64-byte alignment for optimal cache performance.
             let aligned_box = AlignedBox::slice_from_default(64, block_size).unwrap();
-            pool.push(aligned_box).unwrap();
+            vec.push(aligned_box);
         }
         Self {
-            pool: Arc::new(pool),
+            pool: Arc::new(Mutex::new(vec)),
             block_size,
+            capacity: Arc::new(AtomicUsize::new(capacity)),
         }
     }
 
     /// Allocates a 64-byte aligned memory block from the pool.
     /// If the pool is empty, a new block is created.
     pub fn alloc(&self) -> AlignedBox<[u8]> {
-        self.pool
-            .pop()
-            .unwrap_or_else(|| AlignedBox::slice_from_default(64, self.block_size).unwrap())
+        let mut pool = self.pool.lock().unwrap();
+        pool.pop().unwrap_or_else(|| {
+            AlignedBox::slice_from_default(64, self.block_size).unwrap()
+        })
     }
 
     /// Returns a memory block to the pool.
     /// If the pool is full, the block is dropped.
     pub fn free(&self, mut block: AlignedBox<[u8]>) {
-        // Ensure the block is cleared before reuse to prevent data leaks.
         block.iter_mut().for_each(|x| *x = 0);
-        let _ = self.pool.push(block);
+        let mut pool = self.pool.lock().unwrap();
+        if pool.len() < self.capacity.load(Ordering::Relaxed) {
+            pool.push(block);
+        }
+    }
+
+    /// Adjusts the maximum number of cached blocks at runtime.
+    pub fn set_capacity(&self, new_capacity: usize) {
+        self.capacity.store(new_capacity, Ordering::Relaxed);
+        let mut pool = self.pool.lock().unwrap();
+        while pool.len() > new_capacity {
+            pool.pop();
+        }
+        while pool.len() < new_capacity {
+            pool.push(AlignedBox::slice_from_default(64, self.block_size).unwrap());
+        }
     }
 }
 
@@ -308,6 +324,26 @@ impl<'a> ZeroCopyBuffer<'a> {
             msg_flags: 0,
         };
         unsafe { recvmsg(fd, &mut msg, 0) }
+    }
+
+    /// Returns the total length represented by all iovecs.
+    pub fn len(&self) -> usize {
+        self.iovecs.iter().map(|iov| iov.iov_len).sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.iovecs.is_empty()
+    }
+
+    pub fn as_iovecs(&self) -> &[iovec] {
+        &self.iovecs
+    }
+}
+
+#[cfg(unix)]
+impl<'a> Drop for ZeroCopyBuffer<'a> {
+    fn drop(&mut self) {
+        self.iovecs.clear();
     }
 }
 // --- Placeholder for full integration ---
