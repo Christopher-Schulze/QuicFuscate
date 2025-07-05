@@ -58,6 +58,7 @@ pub enum CpuFeature {
     // x86/x64 features
     AVX,
     AVX2,
+    SSE2,
     AVX512F,
     VAES,
     AESNI,
@@ -88,6 +89,7 @@ impl FeatureDetector {
             {
                 features.insert(CpuFeature::AVX, is_x86_feature_detected!("avx"));
                 features.insert(CpuFeature::AVX2, is_x86_feature_detected!("avx2"));
+                features.insert(CpuFeature::SSE2, is_x86_feature_detected!("sse2"));
                 features.insert(CpuFeature::AVX512F, is_x86_feature_detected!("avx512f"));
                 features.insert(CpuFeature::VAES, is_x86_feature_detected!("vaes"));
                 features.insert(CpuFeature::AESNI, is_x86_feature_detected!("aes"));
@@ -138,6 +140,14 @@ impl SimdPolicy for Avx2 {
     }
 }
 
+/// Marker struct for SSE2 execution.
+pub struct Sse2;
+impl SimdPolicy for Sse2 {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 /// Marker struct for PCLMULQDQ execution.
 pub struct Pclmulqdq;
 impl SimdPolicy for Pclmulqdq {
@@ -174,6 +184,8 @@ where
         f(&Avx512)
     } else if detector.has_feature(CpuFeature::AVX2) {
         f(&Avx2)
+    } else if detector.has_feature(CpuFeature::SSE2) {
+        f(&Sse2)
     } else if detector.has_feature(CpuFeature::PCLMULQDQ) {
         f(&Pclmulqdq)
     } else if detector.has_feature(CpuFeature::NEON) {
