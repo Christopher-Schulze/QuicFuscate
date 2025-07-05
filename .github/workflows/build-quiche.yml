@@ -58,10 +58,20 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-cargo-
     
-    - name: Run Quiche Workflow
+    - name: fetch_quiche
       run: |
         chmod +x ./scripts/quiche_workflow.sh
-        ./scripts/quiche_workflow.sh --type ${{ inputs.build_type || 'release' }}
+        ./scripts/quiche_workflow.sh --step fetch
+
+    - name: apply_patches
+      run: |
+        chmod +x ./scripts/quiche_workflow.sh
+        ./scripts/quiche_workflow.sh --step patch
+
+    - name: build_quiche
+      run: |
+        chmod +x ./scripts/quiche_workflow.sh
+        ./scripts/quiche_workflow.sh --step build --type ${{ inputs.build_type || 'release' }}
     
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4

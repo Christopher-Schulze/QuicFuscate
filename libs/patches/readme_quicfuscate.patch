@@ -1,0 +1,10 @@
+--- a/README.md
++++ b/README.md
+@@
+ [![docs.rs](https://docs.rs/quiche/badge.svg)](https://docs.rs/quiche)
+ [![license](https://img.shields.io/github/license/cloudflare/quiche.svg)](https://opensource.org/licenses/BSD-2-Clause)
+ ![build](https://img.shields.io/github/actions/workflow/status/cloudflare/quiche/stable.yml?branch=master)
++
++Patched by QuicFuscate.
+ 
+ [quiche] is an implementation of the QUIC transport protocol and HTTP/3 as

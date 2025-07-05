@@ -33,6 +33,7 @@ BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIBS_DIR="$BASE_DIR/libs"
 VANILLA_DIR="$LIBS_DIR/vanilla_quiche"
 PATCHED_DIR="$LIBS_DIR/patched_quiche"
+# Directory containing patch files (*.patch)
 PATCHES_DIR="$LIBS_DIR/patches"
 LOG_DIR="$LIBS_DIR/logs"
 STATE_FILE="$BASE_DIR/.quiche_workflow_state"
