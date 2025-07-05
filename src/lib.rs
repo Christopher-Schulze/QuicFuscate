@@ -10,6 +10,7 @@ pub mod fec;
 pub mod optimize;
 pub mod stealth;
 pub mod xdp_socket;
+pub mod tls_ffi;
 
 pub use optimize::{CpuFeature, FeatureDetector};
 
