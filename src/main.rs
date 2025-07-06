@@ -56,6 +56,10 @@ enum Commands {
         #[clap(long, value_enum, default_value = "zero")]
         fec_mode: FecMode,
 
+        /// Enable certificate validation when connecting to the server
+        #[clap(long)]
+        verify_peer: bool,
+
         /// Disable DNS over HTTPS
         #[clap(long)]
         disable_doh: bool,
@@ -157,6 +161,7 @@ async fn main() -> std::io::Result<()> {
                 profile_seq,
                 *profile_interval,
                 *fec_mode,
+                *verify_peer,
                 *disable_doh,
                 *disable_fronting,
                 *disable_xor,
@@ -222,6 +227,7 @@ async fn run_client(
     profile_seq: &Option<Vec<String>>,
     profile_interval: u64,
     fec_mode: FecMode,
+    verify_peer: bool,
     disable_doh: bool,
     disable_fronting: bool,
     disable_xor: bool,
@@ -253,7 +259,7 @@ async fn run_client(
     config.set_initial_max_stream_data_bidi_remote(1_000_000);
     config.set_initial_max_streams_bidi(100);
     config.set_initial_max_streams_uni(100);
-    config.verify_peer(false); // In a real app, you should verify the server cert.
+    config.verify_peer(verify_peer);
 
     let url_parsed =
         url::Url::parse(url).unwrap_or_else(|_| url::Url::parse("https://example.com/").unwrap());
