@@ -192,12 +192,21 @@ Run `quicfuscate_demo --help` to see all available options. Important flags incl
       --debug-tls            Show TLS debug information
       --list-fingerprints    List available browser fingerprints
       --fec-mode <mode>      Initial FEC mode (zero|light|normal|medium|strong|extreme)
+      --fec-config <path>    Load Adaptive FEC settings from TOML file
       --doh-provider <url>   Custom DNS-over-HTTPS resolver
       --front-domain <d>     Domain used for fronting (repeat or comma separated)
       --disable-doh          Disable DNS over HTTPS
       --disable-fronting     Disable domain fronting
       --disable-xor          Disable XOR obfuscation
       --disable-http3        Disable HTTP/3 masquerading
+```
+
+Example FEC configuration:
+
+```toml
+[adaptive_fec]
+lambda = 0.05
+burst_window = 30
 ```
 
 ## 🔄 Continuous Integration

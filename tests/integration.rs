@@ -1,10 +1,12 @@
 use quicfuscate::core::QuicFuscateConnection;
-use quicfuscate::fec::FecMode;
+use quicfuscate::fec::{FecMode, FecConfig};
 use quicfuscate::stealth::StealthConfig;
 use quicfuscate::telemetry;
 use std::net::UdpSocket;
 use std::os::raw::c_void;
 use quicfuscate::stealth::{BrowserProfile, FingerprintProfile, TlsClientHelloSpoofer};
+use std::fs::File;
+use std::io::Write;
 
 #[tokio::test]
 async fn client_server_end_to_end() {
@@ -27,13 +29,14 @@ async fn client_server_end_to_end() {
     client_config.verify_peer(false);
     let mut stealth_cfg = StealthConfig::default();
     stealth_cfg.enable_domain_fronting = true;
+    let mut fec_cfg = FecConfig { initial_mode: FecMode::Light, ..FecConfig::default() };
     let mut client_conn = QuicFuscateConnection::new_client(
         "example.com",
         client_socket.local_addr().unwrap(),
         server_addr,
         client_config,
         stealth_cfg.clone(),
-        FecMode::Light,
+        fec_cfg,
     )
     .unwrap();
     let mut server_config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
@@ -53,6 +56,7 @@ async fn client_server_end_to_end() {
     server_config.set_initial_max_streams_uni(100);
     let scid = quiche::ConnectionId::from_ref(&[0; quiche::MAX_CONN_ID_LEN]);
     let client_addr = client_socket.local_addr().unwrap();
+    let mut fec_cfg_srv = FecConfig { initial_mode: FecMode::Light, ..FecConfig::default() };
     let mut server_conn = QuicFuscateConnection::new_server(
         &scid,
         None,
@@ -60,7 +64,7 @@ async fn client_server_end_to_end() {
         client_addr,
         server_config,
         stealth_cfg,
-        FecMode::Light,
+        fec_cfg_srv,
     )
     .unwrap();
     let (sni, host) = server_conn
@@ -143,13 +147,14 @@ async fn tls_custom_clienthello() {
     }
 
     let stealth_cfg = StealthConfig::default();
+    let fec_cfg = FecConfig { initial_mode: FecMode::Light, ..FecConfig::default() };
     let mut client_conn = QuicFuscateConnection::new_client(
         "example.com",
         client_socket.local_addr().unwrap(),
         server_addr,
         client_config,
         stealth_cfg.clone(),
-        FecMode::Light,
+        fec_cfg,
     )
     .unwrap();
 
@@ -164,6 +169,7 @@ async fn tls_custom_clienthello() {
 
     let scid = quiche::ConnectionId::from_ref(&[0; quiche::MAX_CONN_ID_LEN]);
     let client_addr = client_socket.local_addr().unwrap();
+    let fec_cfg_srv = FecConfig { initial_mode: FecMode::Light, ..FecConfig::default() };
     let mut server_conn = QuicFuscateConnection::new_server(
         &scid,
         None,
@@ -171,7 +177,7 @@ async fn tls_custom_clienthello() {
         client_addr,
         server_config,
         stealth_cfg,
-        FecMode::Light,
+        fec_cfg_srv,
     )
     .unwrap();
 
@@ -201,13 +207,14 @@ async fn profile_rotation_changes_profile() {
     let mut client_config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
     client_config.verify_peer(false);
     let mut stealth_cfg = StealthConfig::default();
+    let fec_cfg = FecConfig { initial_mode: FecMode::Light, ..FecConfig::default() };
     let mut client_conn = QuicFuscateConnection::new_client(
         "example.com",
         client_socket.local_addr().unwrap(),
         server_addr,
         client_config,
         stealth_cfg.clone(),
-        FecMode::Light,
+        fec_cfg,
     )
     .unwrap();
 
@@ -221,6 +228,7 @@ async fn profile_rotation_changes_profile() {
     server_config.verify_peer(false);
     let scid = quiche::ConnectionId::from_ref(&[0; quiche::MAX_CONN_ID_LEN]);
     let client_addr = client_socket.local_addr().unwrap();
+    let fec_cfg_srv = FecConfig { initial_mode: FecMode::Light, ..FecConfig::default() };
     let mut server_conn = QuicFuscateConnection::new_server(
         &scid,
         None,
@@ -228,7 +236,7 @@ async fn profile_rotation_changes_profile() {
         client_addr,
         server_config,
         stealth_cfg.clone(),
-        FecMode::Light,
+        fec_cfg_srv,
     )
     .unwrap();
 
@@ -254,3 +262,14 @@ async fn profile_rotation_changes_profile() {
     let current = sm.current_profile();
     assert_eq!(current.browser, BrowserProfile::Firefox);
 }
+
+#[test]
+fn fec_config_from_file() {
+    let toml = "[adaptive_fec]\nlambda = 0.05";
+    let path = std::env::temp_dir().join("fec_test.toml");
+    let mut file = File::create(&path).unwrap();
+    file.write_all(toml.as_bytes()).unwrap();
+    let cfg = FecConfig::from_file(&path).unwrap();
+    assert!((cfg.lambda - 0.05).abs() < 1e-6);
+}
+

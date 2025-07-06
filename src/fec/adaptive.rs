@@ -308,6 +308,8 @@ impl PidController {
 
         (self.config.kp * error) + (self.config.ki * self.integral) + (self.config.kd * derivative)
     }
+}
+
 pub struct AdaptiveFec {
     estimator: Arc<Mutex<LossEstimator>>,
     mode_mgr: Arc<Mutex<ModeManager>>,
