@@ -149,7 +149,37 @@ apply_patches() {
     fi
 }
 
-# Schritt 3: Quiche bauen
+# Schritt 3: Patches verifizieren
+verify_patches() {
+    log "Starte Verifikation der Patches..."
+
+    if [ ! -d "$PATCHES_DIR" ] || [ -z "$(ls -A "$PATCHES_DIR"/*.patch 2>/dev/null)" ]; then
+        warn "Keine Patch-Dateien in $PATCHES_DIR gefunden"
+        return 0
+    fi
+
+    pushd "$PATCHED_DIR" > /dev/null || error "Konnte nicht in $PATCHED_DIR wechseln"
+
+    for patch_file in "$PATCHES_DIR"/*.patch; do
+        if [ -f "$patch_file" ]; then
+            log "Prüfe Patch: $(basename "$patch_file")"
+            if ! git apply --reverse --check "$patch_file" >/dev/null 2>&1; then
+                error "Patch $(basename "$patch_file") konnte nicht verifiziert werden"
+            fi
+        fi
+    done
+
+    if [ -n "$(git status --porcelain)" ]; then
+        git status --porcelain
+        error "Unerwartete Änderungen im Arbeitsverzeichnis nach dem Patchen"
+    fi
+
+    popd > /dev/null || return 1
+
+    success "Alle Patches erfolgreich verifiziert"
+}
+
+# Schritt 4: Quiche bauen
 build_quiche() {
     log "Starte Build im $BUILD_TYPE-Modus..."
     
@@ -186,7 +216,7 @@ build_quiche() {
     popd > /dev/null || return 1
 }
 
-# Schritt 4: Tests durchführen
+# Schritt 5: Tests durchführen
 test_quiche() {
     log "Starte Tests..."
     
@@ -222,14 +252,15 @@ show_help() {
     echo "Optionen:"
     echo "  -t, --type TYPE     Build-Typ (release|debug), Standard: release"
     echo "  -m, --mirror URL    Git-Repository-URL für quiche"
-    echo "  -s, --step SCHRITT  Bestimmten Schritt ausführen (fetch|patch|build|test)"
+    echo "  -s, --step SCHRITT  Bestimmten Schritt ausführen (fetch|patch|verify_patches|build|test)"
     echo "  -h, --help          Zeige diese Hilfe"
     echo
     echo "Verfügbare Schritte:"
-    echo "  fetch      Quiche herunterladen"
-    echo "  patch      Patches anwenden"
-    echo "  build      Quiche bauen"
-    echo "  test       Tests durchführen"
+    echo "  fetch          Quiche herunterladen"
+    echo "  patch          Patches anwenden"
+    echo "  verify_patches Patches überprüfen"
+    echo "  build          Quiche bauen"
+    echo "  test           Tests durchführen"
     exit 0
 }
 
@@ -257,7 +288,7 @@ main() {
                 ;;
             --step|-s)
                 if [ -z "${2:-}" ]; then
-                    error "Kein Schritt angegeben. Verwende --step fetch|patch|build|test"
+                    error "Kein Schritt angegeben. Verwende --step fetch|patch|verify_patches|build|test"
                 fi
                 START_STEP="$2"
                 shift 2
@@ -275,24 +306,28 @@ main() {
     run_step() {
         local step="$1"
         case "$step" in
-            "fetch") 
+            "fetch")
                 log "Führe Schritt aus: fetch (Quiche herunterladen)"
                 fetch_quiche
                 ;;
-            "patch") 
+            "patch")
                 log "Führe Schritt aus: patch (Patches anwenden)"
                 apply_patches
                 ;;
-            "build") 
+            "verify_patches")
+                log "Führe Schritt aus: verify_patches (Patches überprüfen)"
+                verify_patches
+                ;;
+            "build")
                 log "Führe Schritt aus: build (Quiche bauen)"
                 build_quiche
                 ;;
-            "test") 
+            "test")
                 log "Führe Schritt aus: test (Tests durchführen)"
                 test_quiche
                 ;;
-            *) 
-                error "Unbekannter Schritt: $step. Gültige Schritte: fetch, patch, build, test"
+            *)
+                error "Unbekannter Schritt: $step. Gültige Schritte: fetch, patch, verify_patches, build, test"
                 ;;
         esac
     }
@@ -306,7 +341,7 @@ main() {
         log "Starte kompletten Workflow..."
         
         # Definiere die Reihenfolge der Schritte
-        local steps_order=("fetch" "patch" "build" "test")
+        local steps_order=("fetch" "patch" "verify_patches" "build" "test")
         
         # Führe jeden Schritt aus
         for step in "${steps_order[@]}"; do
