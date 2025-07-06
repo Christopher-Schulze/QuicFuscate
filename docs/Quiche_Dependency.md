@@ -167,6 +167,7 @@ QuicFuscate includes a GitHub Actions workflow for automated building and testin
 - **Manual Triggers**: Supports manual execution with custom build types
 - **Artifact Publishing**: Automatically uploads build artifacts
 - **Release Management**: Creates GitHub releases for main/master builds
+- **Automated Testing**: Executes quiche tests and stores logs as artifacts
 
 #### Workflow Steps
 1. **Setup Environment**
@@ -179,8 +180,12 @@ QuicFuscate includes a GitHub Actions workflow for automated building and testin
    - Supports both release and debug builds
   - Applies all patches from `libs/patches/*.patch`
 
-3. **Artifact Handling**
-   - Packages the built artifacts
+3. **Test Execution**
+   - Runs `scripts/quiche_workflow.sh --step test`
+   - Captures test logs for later inspection
+
+4. **Artifact Handling**
+   - Packages the built artifacts and test logs
    - Uploads them as workflow artifacts
    - Creates GitHub releases for stable builds
 
