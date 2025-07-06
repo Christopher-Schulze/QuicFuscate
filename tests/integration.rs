@@ -1,10 +1,10 @@
 use quicfuscate::core::QuicFuscateConnection;
-use quicfuscate::fec::FecMode;
+use quicfuscate::fec::{FecConfig, FecMode};
 use quicfuscate::stealth::StealthConfig;
+use quicfuscate::stealth::{BrowserProfile, FingerprintProfile, TlsClientHelloSpoofer};
 use quicfuscate::telemetry;
 use std::net::UdpSocket;
 use std::os::raw::c_void;
-use quicfuscate::stealth::{BrowserProfile, FingerprintProfile, TlsClientHelloSpoofer};
 
 #[tokio::test]
 async fn client_server_end_to_end() {
@@ -27,13 +27,17 @@ async fn client_server_end_to_end() {
     client_config.verify_peer(false);
     let mut stealth_cfg = StealthConfig::default();
     stealth_cfg.enable_domain_fronting = true;
+    let fec_cfg = FecConfig {
+        initial_mode: FecMode::Light,
+        ..Default::default()
+    };
     let mut client_conn = QuicFuscateConnection::new_client(
         "example.com",
         client_socket.local_addr().unwrap(),
         server_addr,
         client_config,
         stealth_cfg.clone(),
-        FecMode::Light,
+        fec_cfg.clone(),
     )
     .unwrap();
     let mut server_config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
@@ -60,7 +64,7 @@ async fn client_server_end_to_end() {
         client_addr,
         server_config,
         stealth_cfg,
-        FecMode::Light,
+        fec_cfg.clone(),
     )
     .unwrap();
     let (sni, host) = server_conn
@@ -143,13 +147,17 @@ async fn tls_custom_clienthello() {
     }
 
     let stealth_cfg = StealthConfig::default();
+    let fec_cfg = FecConfig {
+        initial_mode: FecMode::Light,
+        ..Default::default()
+    };
     let mut client_conn = QuicFuscateConnection::new_client(
         "example.com",
         client_socket.local_addr().unwrap(),
         server_addr,
         client_config,
         stealth_cfg.clone(),
-        FecMode::Light,
+        fec_cfg.clone(),
     )
     .unwrap();
 
@@ -171,14 +179,16 @@ async fn tls_custom_clienthello() {
         client_addr,
         server_config,
         stealth_cfg,
-        FecMode::Light,
+        fec_cfg.clone(),
     )
     .unwrap();
 
     let mut buf = [0u8; 65535];
     let mut out = [0u8; 65535];
     let len = client_conn.send(&mut out).unwrap();
-    assert!(out[..len].windows(custom_hello.len()).any(|w| w == custom_hello));
+    assert!(out[..len]
+        .windows(custom_hello.len())
+        .any(|w| w == custom_hello));
 
     // Process on server so connection completes
     server_socket.send_to(&out[..len], client_addr).unwrap();
@@ -201,13 +211,17 @@ async fn profile_rotation_changes_profile() {
     let mut client_config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
     client_config.verify_peer(false);
     let mut stealth_cfg = StealthConfig::default();
+    let fec_cfg = FecConfig {
+        initial_mode: FecMode::Light,
+        ..Default::default()
+    };
     let mut client_conn = QuicFuscateConnection::new_client(
         "example.com",
         client_socket.local_addr().unwrap(),
         server_addr,
         client_config,
         stealth_cfg.clone(),
-        FecMode::Light,
+        fec_cfg.clone(),
     )
     .unwrap();
 
@@ -228,7 +242,7 @@ async fn profile_rotation_changes_profile() {
         client_addr,
         server_config,
         stealth_cfg.clone(),
-        FecMode::Light,
+        fec_cfg.clone(),
     )
     .unwrap();
 
@@ -253,4 +267,103 @@ async fn profile_rotation_changes_profile() {
 
     let current = sm.current_profile();
     assert_eq!(current.browser, BrowserProfile::Firefox);
+}
+
+#[tokio::test]
+async fn client_server_with_toml_config() {
+    telemetry::serve("127.0.0.1:0");
+    let cfg_str = r#"
+        [adaptive_fec]
+        lambda = 0.05
+        burst_window = 30
+        hysteresis = 0.01
+        pid = { kp = 1.5, ki = 0.2, kd = 0.1 }
+
+        [[adaptive_fec.modes]]
+        name = "light"
+        w0 = 20
+    "#;
+    let path = std::env::temp_dir().join("fec_test.toml");
+    std::fs::write(&path, cfg_str).unwrap();
+    let mut fec_cfg = FecConfig::from_file(&path).unwrap();
+    fec_cfg.initial_mode = FecMode::Light;
+
+    let server_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    server_socket.set_nonblocking(true).unwrap();
+    let server_addr = server_socket.local_addr().unwrap();
+    let client_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    client_socket.set_nonblocking(true).unwrap();
+    client_socket.connect(server_addr).unwrap();
+
+    let mut client_config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+    client_config.verify_peer(false);
+    let stealth_cfg = StealthConfig::default();
+    let mut client_conn = QuicFuscateConnection::new_client(
+        "example.com",
+        client_socket.local_addr().unwrap(),
+        server_addr,
+        client_config,
+        stealth_cfg.clone(),
+        fec_cfg.clone(),
+    )
+    .unwrap();
+
+    let mut server_config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+    server_config
+        .load_cert_chain_from_pem_file("libs/vanilla_quiche/quiche/examples/cert.crt")
+        .unwrap();
+    server_config
+        .load_priv_key_from_pem_file("libs/vanilla_quiche/quiche/examples/cert.key")
+        .unwrap();
+    server_config.verify_peer(false);
+    let scid = quiche::ConnectionId::from_ref(&[0; quiche::MAX_CONN_ID_LEN]);
+    let client_addr = client_socket.local_addr().unwrap();
+    let mut server_conn = QuicFuscateConnection::new_server(
+        &scid,
+        None,
+        server_addr,
+        client_addr,
+        server_config,
+        stealth_cfg,
+        fec_cfg,
+    )
+    .unwrap();
+
+    let mut buf = [0u8; 65535];
+    let mut out = [0u8; 65535];
+    for _ in 0..50 {
+        if let Ok(len) = client_conn.send(&mut out) {
+            if len > 0 {
+                client_socket.send(&out[..len]).unwrap();
+            }
+        }
+        loop {
+            match server_socket.recv_from(&mut buf) {
+                Ok((len, _)) => {
+                    let _ = server_conn.recv(&mut buf[..len]);
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) => panic!("recv_from server: {}", e),
+            }
+        }
+        if let Ok(len) = server_conn.send(&mut out) {
+            if len > 0 {
+                server_socket.send_to(&out[..len], client_addr).unwrap();
+            }
+        }
+        loop {
+            match client_socket.recv(&mut buf) {
+                Ok(len) => {
+                    let _ = client_conn.recv(&mut buf[..len]);
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) => panic!("recv client: {}", e),
+            }
+        }
+        if client_conn.conn.is_established() && server_conn.conn.is_established() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(client_conn.conn.is_established() && server_conn.conn.is_established());
 }

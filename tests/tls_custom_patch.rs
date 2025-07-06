@@ -1,5 +1,5 @@
 use quicfuscate::core::QuicFuscateConnection;
-use quicfuscate::fec::FecMode;
+use quicfuscate::fec::{FecConfig, FecMode};
 use quicfuscate::stealth::StealthConfig;
 use std::net::UdpSocket;
 use std::os::raw::c_void;
@@ -45,13 +45,17 @@ async fn tls_custom_patch() {
     }
 
     let stealth_cfg = StealthConfig::default();
+    let fec_cfg = FecConfig {
+        initial_mode: FecMode::Light,
+        ..Default::default()
+    };
     let mut client_conn = QuicFuscateConnection::new_client(
         "example.com",
         client_socket.local_addr().unwrap(),
         server_addr,
         client_config,
         stealth_cfg.clone(),
-        FecMode::Light,
+        fec_cfg.clone(),
     )
     .unwrap();
 
@@ -73,7 +77,7 @@ async fn tls_custom_patch() {
         client_addr,
         server_config,
         stealth_cfg,
-        FecMode::Light,
+        fec_cfg,
     )
     .unwrap();
 

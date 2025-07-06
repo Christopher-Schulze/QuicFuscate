@@ -86,7 +86,7 @@ impl QuicFuscateConnection {
         remote_addr: SocketAddr,
         mut config: quiche::Config,
         stealth_config: StealthConfig,
-        fec_mode: FecMode,
+        fec_config: FecConfig,
     ) -> Result<Self, String> {
         // --- Explicitly set BBRv2 Congestion Control as per PLAN.txt ---
         config.set_cc_algorithm(quiche::CongestionControlAlgorithm::BBRv2);
@@ -119,7 +119,7 @@ impl QuicFuscateConnection {
             stealth_manager,
             optimization_manager,
             xdp_socket,
-            fec_mode,
+            fec_config,
         ))
     }
 
@@ -130,7 +130,7 @@ impl QuicFuscateConnection {
         remote_addr: SocketAddr,
         mut config: quiche::Config,
         stealth_config: StealthConfig,
-        fec_mode: FecMode,
+        fec_config: FecConfig,
     ) -> Result<Self, String> {
         config.set_cc_algorithm(quiche::CongestionControlAlgorithm::BBRv2);
         config.enable_mtu_probing();
@@ -156,7 +156,7 @@ impl QuicFuscateConnection {
             stealth_manager,
             optimization_manager,
             xdp_socket,
-            fec_mode,
+            fec_config,
         ))
     }
 
@@ -168,21 +168,8 @@ impl QuicFuscateConnection {
         stealth_manager: Arc<StealthManager>,
         optimization_manager: Arc<OptimizationManager>,
         xdp_socket: Option<XdpSocket>,
-        fec_mode: FecMode,
+        fec_config: FecConfig,
     ) -> Self {
-        let fec_config = FecConfig {
-            lambda: 0.1,
-            burst_window: 20,
-            hysteresis: 0.02,
-            pid: PidConfig {
-                kp: 0.5,
-                ki: 0.1,
-                kd: 0.2,
-            },
-            initial_mode: fec_mode,
-            window_sizes: FecConfig::default_windows(),
-        };
-
         Self {
             conn,
             peer_addr,

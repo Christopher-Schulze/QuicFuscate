@@ -1,5 +1,5 @@
 use crate::core::QuicFuscateConnection;
-use crate::fec::FecMode;
+use crate::fec::{FecConfig, FecMode};
 use crate::stealth::StealthConfig;
 use crate::stealth::{BrowserProfile, FingerprintProfile, OsProfile};
 use clap::{Parser, Subcommand};
@@ -54,6 +54,10 @@ enum Commands {
         /// Initial FEC mode
         #[clap(long, value_enum, default_value = "zero")]
         fec_mode: FecMode,
+
+        /// Path to a TOML file with FEC configuration
+        #[clap(long)]
+        fec_config: Option<PathBuf>,
 
         /// Custom DNS-over-HTTPS provider URL
         #[clap(long, default_value = "https://cloudflare-dns.com/dns-query")]
@@ -158,8 +162,10 @@ async fn main() -> std::io::Result<()> {
             profile_seq,
             profile_interval,
             fec_mode,
+            fec_config,
             doh_provider,
             front_domain,
+            verify_peer,
             disable_doh,
             disable_fronting,
             disable_xor,
@@ -176,6 +182,7 @@ async fn main() -> std::io::Result<()> {
                 profile_seq,
                 *profile_interval,
                 *fec_mode,
+                &fec_config,
                 &doh_provider,
                 &front_domain,
                 *verify_peer,
@@ -195,6 +202,7 @@ async fn main() -> std::io::Result<()> {
             profile_seq,
             profile_interval,
             fec_mode,
+            fec_config,
             doh_provider,
             front_domain,
             disable_doh,
@@ -213,6 +221,7 @@ async fn main() -> std::io::Result<()> {
                 profile_seq,
                 *profile_interval,
                 *fec_mode,
+                &fec_config,
                 &doh_provider,
                 &front_domain,
                 *disable_doh,
@@ -248,6 +257,7 @@ async fn run_client(
     profile_seq: &Option<Vec<String>>,
     profile_interval: u64,
     fec_mode: FecMode,
+    fec_config: &Option<PathBuf>,
     doh_provider: &str,
     front_domain: &Vec<String>,
     verify_peer: bool,
@@ -299,6 +309,19 @@ async fn run_client(
     stealth_config.enable_xor_obfuscation = !disable_xor;
     stealth_config.enable_http3_masquerading = !disable_http3;
 
+    let mut fec_cfg = if let Some(path) = fec_config {
+        match FecConfig::from_file(path) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                warn!("Failed to load FEC config from {}: {}", path.display(), e);
+                FecConfig::default()
+            }
+        }
+    } else {
+        FecConfig::default()
+    };
+    fec_cfg.initial_mode = fec_mode;
+
     let host = url_parsed.host_str().unwrap_or("example.com");
     let mut conn = QuicFuscateConnection::new_client(
         host,
@@ -306,7 +329,7 @@ async fn run_client(
         server_addr,
         config,
         stealth_config,
-        fec_mode,
+        fec_cfg,
     )
     .expect("failed to create client connection");
 
@@ -404,6 +427,7 @@ async fn run_server(
     profile_seq: &Option<Vec<String>>,
     profile_interval: u64,
     fec_mode: FecMode,
+    fec_config: &Option<PathBuf>,
     doh_provider: &str,
     front_domain: &Vec<String>,
     disable_doh: bool,
@@ -449,6 +473,19 @@ async fn run_server(
         sc.enable_xor_obfuscation = !disable_xor;
         sc.enable_http3_masquerading = !disable_http3;
     }
+
+    let mut fec_cfg = if let Some(path) = fec_config {
+        match FecConfig::from_file(path) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                warn!("Failed to load FEC config from {}: {}", path.display(), e);
+                FecConfig::default()
+            }
+        }
+    } else {
+        FecConfig::default()
+    };
+    fec_cfg.initial_mode = fec_mode;
 
     let profiles: Vec<FingerprintProfile> = match profile_seq {
         Some(seq) => seq
@@ -496,7 +533,7 @@ async fn run_server(
                         from,
                         config.clone(),
                         cfg,
-                        fec_mode,
+                        fec_cfg.clone(),
                     )
                     .expect("failed to create server connection")
                 });
