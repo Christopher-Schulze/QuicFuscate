@@ -4,12 +4,12 @@ use crate::stealth::StealthConfig;
 use crate::stealth::{BrowserProfile, FingerprintProfile, OsProfile};
 use clap::{Parser, Subcommand};
 use log::{error, info, warn};
-use tokio::signal;
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use tokio::signal;
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -51,10 +51,17 @@ enum Commands {
         #[clap(long, default_value_t = 0)]
         profile_interval: u64,
 
-
         /// Initial FEC mode
         #[clap(long, value_enum, default_value = "zero")]
         fec_mode: FecMode,
+
+        /// Custom DNS-over-HTTPS provider URL
+        #[clap(long, default_value = "https://cloudflare-dns.com/dns-query")]
+        doh_provider: String,
+
+        /// Domain used for fronting (can be specified multiple times)
+        #[clap(long, value_delimiter = ',')]
+        front_domain: Vec<String>,
 
         /// Disable DNS over HTTPS
         #[clap(long)]
@@ -102,10 +109,17 @@ enum Commands {
         #[clap(long, default_value_t = 0)]
         profile_interval: u64,
 
-
         /// Initial FEC mode
         #[clap(long, value_enum, default_value = "zero")]
         fec_mode: FecMode,
+
+        /// Custom DNS-over-HTTPS provider URL
+        #[clap(long, default_value = "https://cloudflare-dns.com/dns-query")]
+        doh_provider: String,
+
+        /// Domain used for fronting (can be specified multiple times)
+        #[clap(long, value_delimiter = ',')]
+        front_domain: Vec<String>,
 
         /// Disable DNS over HTTPS
         #[clap(long)]
@@ -141,6 +155,8 @@ async fn main() -> std::io::Result<()> {
             profile_seq,
             profile_interval,
             fec_mode,
+            doh_provider,
+            front_domain,
             disable_doh,
             disable_fronting,
             disable_xor,
@@ -157,6 +173,8 @@ async fn main() -> std::io::Result<()> {
                 profile_seq,
                 *profile_interval,
                 *fec_mode,
+                &doh_provider,
+                &front_domain,
                 *disable_doh,
                 *disable_fronting,
                 *disable_xor,
@@ -173,6 +191,8 @@ async fn main() -> std::io::Result<()> {
             profile_seq,
             profile_interval,
             fec_mode,
+            doh_provider,
+            front_domain,
             disable_doh,
             disable_fronting,
             disable_xor,
@@ -189,6 +209,8 @@ async fn main() -> std::io::Result<()> {
                 profile_seq,
                 *profile_interval,
                 *fec_mode,
+                &doh_provider,
+                &front_domain,
                 *disable_doh,
                 *disable_fronting,
                 *disable_xor,
@@ -222,6 +244,8 @@ async fn run_client(
     profile_seq: &Option<Vec<String>>,
     profile_interval: u64,
     fec_mode: FecMode,
+    doh_provider: &str,
+    front_domain: &Vec<String>,
     disable_doh: bool,
     disable_fronting: bool,
     disable_xor: bool,
@@ -232,7 +256,10 @@ async fn run_client(
     })?;
 
     let local_addr = local_addr_str.to_socket_addrs()?.next().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "Local address invalid")
+        std::io::Error::new(
+            std::io::ErrorKind::AddrNotAvailable,
+            "Local address invalid",
+        )
     })?;
 
     let socket = std::net::UdpSocket::bind(local_addr)?;
@@ -261,7 +288,9 @@ async fn run_client(
     stealth_config.browser_profile = profile;
     stealth_config.os_profile = os;
     stealth_config.enable_doh = !disable_doh;
+    stealth_config.doh_provider = doh_provider.to_string();
     stealth_config.enable_domain_fronting = !disable_fronting;
+    stealth_config.fronting_domains = front_domain.clone();
     stealth_config.enable_xor_obfuscation = !disable_xor;
     stealth_config.enable_http3_masquerading = !disable_http3;
 
@@ -370,6 +399,8 @@ async fn run_server(
     profile_seq: &Option<Vec<String>>,
     profile_interval: u64,
     fec_mode: FecMode,
+    doh_provider: &str,
+    front_domain: &Vec<String>,
     disable_doh: bool,
     disable_fronting: bool,
     disable_xor: bool,
@@ -407,13 +438,18 @@ async fn run_server(
         sc.browser_profile = profile;
         sc.os_profile = os;
         sc.enable_doh = !disable_doh;
+        sc.doh_provider = doh_provider.to_string();
         sc.enable_domain_fronting = !disable_fronting;
+        sc.fronting_domains = front_domain.clone();
         sc.enable_xor_obfuscation = !disable_xor;
         sc.enable_http3_masquerading = !disable_http3;
     }
 
     let profiles: Vec<FingerprintProfile> = match profile_seq {
-        Some(seq) => seq.iter().filter_map(|s| parse_profile_entry(s, os)).collect(),
+        Some(seq) => seq
+            .iter()
+            .filter_map(|s| parse_profile_entry(s, os))
+            .collect(),
         None => vec![FingerprintProfile::new(profile, os)],
     };
 

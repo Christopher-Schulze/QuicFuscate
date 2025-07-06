@@ -456,40 +456,50 @@ impl CdnProvider {
     }
 }
 
-/// Manages domain fronting by rotating through CDN providers.
+/// Manages domain fronting by rotating through configured domains.
 pub struct DomainFrontingManager {
-    providers: Vec<CdnProvider>,
+    domains: Vec<String>,
     index: AtomicUsize,
 }
 
 impl DomainFrontingManager {
-    pub fn new(providers: Vec<CdnProvider>) -> Self {
+    /// Creates a new manager from a list of domains.
+    pub fn new(domains: Vec<String>) -> Self {
         Self {
-            providers,
+            domains,
             index: AtomicUsize::new(0),
         }
     }
 
-    /// Selects the next CDN provider to use for domain fronting in a round-robin fashion.
-    pub fn get_fronted_domain(&self) -> &'static str {
-        let current = self.index.fetch_add(1, Ordering::SeqCst);
-        let idx = current % self.providers.len();
-        self.providers[idx].get_domain()
+    /// Creates a manager from built-in CDN providers.
+    pub fn from_providers(providers: Vec<CdnProvider>) -> Self {
+        let domains = providers
+            .into_iter()
+            .map(|p| p.get_domain().to_string())
+            .collect();
+        Self::new(domains)
     }
 
-    /// Randomly chooses a CDN provider. Useful when deterministic rotation is undesired.
-    pub fn random_domain(&self) -> &'static str {
+    /// Selects the next domain to use for domain fronting in a round-robin fashion.
+    pub fn get_fronted_domain(&self) -> String {
+        let current = self.index.fetch_add(1, Ordering::SeqCst);
+        let idx = current % self.domains.len();
+        self.domains[idx].clone()
+    }
+
+    /// Randomly chooses a domain. Useful when deterministic rotation is undesired.
+    pub fn random_domain(&self) -> String {
         use rand::seq::SliceRandom;
         let mut rng = rand::thread_rng();
-        self.providers
+        self.domains
             .choose(&mut rng)
-            .map(|p| p.get_domain())
-            .unwrap_or("cdn.example.com")
+            .cloned()
+            .unwrap_or_else(|| "cdn.example.com".to_string())
     }
 
-    /// Replaces the current provider list.
-    pub fn set_providers(&mut self, providers: Vec<CdnProvider>) {
-        self.providers = providers;
+    /// Replaces the current domain list.
+    pub fn set_domains(&mut self, domains: Vec<String>) {
+        self.domains = domains;
         self.index.store(0, Ordering::SeqCst);
     }
 }
@@ -698,6 +708,7 @@ pub struct StealthConfig {
     pub enable_http3_masquerading: bool,
     pub use_qpack_headers: bool,
     pub enable_domain_fronting: bool,
+    pub fronting_domains: Vec<String>,
     pub cdn_providers: Vec<CdnProvider>,
     pub enable_xor_obfuscation: bool,
 }
@@ -712,6 +723,7 @@ impl Default for StealthConfig {
             enable_http3_masquerading: true,
             use_qpack_headers: true,
             enable_domain_fronting: true,
+            fronting_domains: Vec::new(),
             cdn_providers: vec![
                 CdnProvider::Cloudflare,
                 CdnProvider::Google,
@@ -746,7 +758,11 @@ impl StealthManager {
         let fingerprint = FingerprintProfile::new(config.browser_profile, config.os_profile);
 
         let domain_fronter = if config.enable_domain_fronting {
-            Some(DomainFrontingManager::new(config.cdn_providers.clone()))
+            if !config.fronting_domains.is_empty() {
+                Some(DomainFrontingManager::new(config.fronting_domains.clone()))
+            } else {
+                Some(DomainFrontingManager::from_providers(config.cdn_providers.clone()))
+            }
         } else {
             None
         };
@@ -877,12 +893,17 @@ impl StealthManager {
     /// Applies domain fronting if enabled.
     pub fn get_connection_headers(&self, real_host: &str) -> (String, String) {
         if self.config.enable_domain_fronting && self.domain_fronter.is_some() {
-            let fronted_domain = self.domain_fronter.as_ref().unwrap().get_fronted_domain();
+            let fronted_domain = self
+                .domain_fronter
+                .as_ref()
+                .unwrap()
+                .get_fronted_domain();
             debug!(
                 "Domain fronting enabled. SNI: {}, Host: {}",
-                fronted_domain, real_host
+                fronted_domain,
+                real_host
             );
-            (fronted_domain.to_string(), real_host.to_string()) // SNI = front, Host = real
+            (fronted_domain, real_host.to_string()) // SNI = front, Host = real
         } else {
             (real_host.to_string(), real_host.to_string()) // SNI = real, Host = real
         }
