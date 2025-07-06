@@ -1,5 +1,5 @@
 use crate::core::QuicFuscateConnection;
-use crate::fec::FecMode;
+use crate::fec::{FecMode, FecConfig};
 use crate::stealth::StealthConfig;
 use crate::stealth::{BrowserProfile, FingerprintProfile, OsProfile};
 use clap::{Parser, Subcommand};
@@ -54,6 +54,14 @@ enum Commands {
         /// Initial FEC mode
         #[clap(long, value_enum, default_value = "zero")]
         fec_mode: FecMode,
+
+        /// Path to a TOML file with Adaptive FEC settings
+        #[clap(long, value_name = "PATH")]
+        fec_config: Option<PathBuf>,
+
+        /// Path to a TOML file with Adaptive FEC settings
+        #[clap(long, value_name = "PATH")]
+        fec_config: Option<PathBuf>,
 
         /// Custom DNS-over-HTTPS provider URL
         #[clap(long, default_value = "https://cloudflare-dns.com/dns-query")]
@@ -158,6 +166,7 @@ async fn main() -> std::io::Result<()> {
             profile_seq,
             profile_interval,
             fec_mode,
+            fec_config,
             doh_provider,
             front_domain,
             disable_doh,
@@ -176,6 +185,7 @@ async fn main() -> std::io::Result<()> {
                 profile_seq,
                 *profile_interval,
                 *fec_mode,
+                fec_config,
                 &doh_provider,
                 &front_domain,
                 *verify_peer,
@@ -195,6 +205,7 @@ async fn main() -> std::io::Result<()> {
             profile_seq,
             profile_interval,
             fec_mode,
+            fec_config,
             doh_provider,
             front_domain,
             disable_doh,
@@ -213,6 +224,7 @@ async fn main() -> std::io::Result<()> {
                 profile_seq,
                 *profile_interval,
                 *fec_mode,
+                fec_config,
                 &doh_provider,
                 &front_domain,
                 *disable_doh,
@@ -248,6 +260,7 @@ async fn run_client(
     profile_seq: &Option<Vec<String>>,
     profile_interval: u64,
     fec_mode: FecMode,
+    fec_config: &Option<PathBuf>,
     doh_provider: &str,
     front_domain: &Vec<String>,
     verify_peer: bool,
@@ -272,6 +285,13 @@ async fn run_client(
     socket.set_nonblocking(true)?;
 
     info!("Client connecting to {}", server_addr);
+
+    let mut fec_cfg = if let Some(path) = fec_config {
+        FecConfig::from_file(path).unwrap_or_default()
+    } else {
+        FecConfig::default()
+    };
+    fec_cfg.initial_mode = fec_mode;
 
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
     config
@@ -306,7 +326,7 @@ async fn run_client(
         server_addr,
         config,
         stealth_config,
-        fec_mode,
+        fec_cfg,
     )
     .expect("failed to create client connection");
 
@@ -404,6 +424,7 @@ async fn run_server(
     profile_seq: &Option<Vec<String>>,
     profile_interval: u64,
     fec_mode: FecMode,
+    fec_config: &Option<PathBuf>,
     doh_provider: &str,
     front_domain: &Vec<String>,
     disable_doh: bool,
@@ -414,6 +435,13 @@ async fn run_server(
     let socket = std::net::UdpSocket::bind(listen_addr)?;
     socket.set_nonblocking(true)?;
     info!("Server listening on {}", listen_addr);
+
+    let mut fec_cfg = if let Some(path) = fec_config {
+        FecConfig::from_file(path).unwrap_or_default()
+    } else {
+        FecConfig::default()
+    };
+    fec_cfg.initial_mode = fec_mode;
 
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
     config
@@ -496,7 +524,7 @@ async fn run_server(
                         from,
                         config.clone(),
                         cfg,
-                        fec_mode,
+                        fec_cfg.clone(),
                     )
                     .expect("failed to create server connection")
                 });

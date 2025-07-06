@@ -79,19 +79,6 @@ impl KalmanFilter {
 }
 
 
-
-            self.transition_decoder = Some(std::mem::replace(
-                &mut self.decoder,
-                DecoderVariant::new(old_mode, ok, Arc::clone(&self.mem_pool)),
-            ));
-            self.transition_left = ModeManager::CROSS_FADE_LEN;
-        } else {
-            self.encoder = EncoderVariant::new(new_mode, k, n);
-            self.decoder = DecoderVariant::new(new_mode, k, Arc::clone(&self.mem_pool));
-        }
-    }
-}
-
 // [Die Tests wurden oben nicht verändert und bleiben wie im Input – ebenfalls konfliktfrei!]
 //
 //     * Neither the name of the copyright holder nor the names of its
