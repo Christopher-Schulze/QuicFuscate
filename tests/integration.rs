@@ -3,6 +3,8 @@ use quicfuscate::fec::FecMode;
 use quicfuscate::stealth::StealthConfig;
 use quicfuscate::telemetry;
 use std::net::UdpSocket;
+use std::os::raw::c_void;
+use quicfuscate::stealth::{BrowserProfile, FingerprintProfile, TlsClientHelloSpoofer};
 
 #[tokio::test]
 async fn client_server_end_to_end() {
@@ -112,4 +114,143 @@ async fn client_server_end_to_end() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     assert!(telemetry::ENCODED_PACKETS.get() > 0);
+}
+
+#[tokio::test]
+async fn tls_custom_clienthello() {
+    telemetry::serve("127.0.0.1:0");
+    let server_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    server_socket.set_nonblocking(true).unwrap();
+    let server_addr = server_socket.local_addr().unwrap();
+
+    let client_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    client_socket.set_nonblocking(true).unwrap();
+    client_socket.connect(server_addr).unwrap();
+
+    let mut client_config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+    client_config.verify_peer(false);
+
+    let custom_hello = [1u8, 2, 3, 4, 5];
+    unsafe {
+        extern "C" {
+            fn quiche_config_set_custom_tls(cfg: *mut c_void, hello: *const u8, len: usize);
+        }
+        quiche_config_set_custom_tls(
+            &mut client_config as *mut _ as *mut c_void,
+            custom_hello.as_ptr(),
+            custom_hello.len(),
+        );
+    }
+
+    let stealth_cfg = StealthConfig::default();
+    let mut client_conn = QuicFuscateConnection::new_client(
+        "example.com",
+        client_socket.local_addr().unwrap(),
+        server_addr,
+        client_config,
+        stealth_cfg.clone(),
+        FecMode::Light,
+    )
+    .unwrap();
+
+    let mut server_config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+    server_config
+        .load_cert_chain_from_pem_file("libs/vanilla_quiche/quiche/examples/cert.crt")
+        .unwrap();
+    server_config
+        .load_priv_key_from_pem_file("libs/vanilla_quiche/quiche/examples/cert.key")
+        .unwrap();
+    server_config.verify_peer(false);
+
+    let scid = quiche::ConnectionId::from_ref(&[0; quiche::MAX_CONN_ID_LEN]);
+    let client_addr = client_socket.local_addr().unwrap();
+    let mut server_conn = QuicFuscateConnection::new_server(
+        &scid,
+        None,
+        server_addr,
+        client_addr,
+        server_config,
+        stealth_cfg,
+        FecMode::Light,
+    )
+    .unwrap();
+
+    let mut buf = [0u8; 65535];
+    let mut out = [0u8; 65535];
+    let len = client_conn.send(&mut out).unwrap();
+    assert!(out[..len].windows(custom_hello.len()).any(|w| w == custom_hello));
+
+    // Process on server so connection completes
+    server_socket.send_to(&out[..len], client_addr).unwrap();
+    if let Ok((srv_len, _)) = server_socket.recv_from(&mut buf) {
+        let _ = client_conn.recv(&mut buf[..srv_len]);
+    }
+}
+
+#[tokio::test]
+async fn profile_rotation_changes_profile() {
+    telemetry::serve("127.0.0.1:0");
+    let server_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    server_socket.set_nonblocking(true).unwrap();
+    let server_addr = server_socket.local_addr().unwrap();
+
+    let client_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    client_socket.set_nonblocking(true).unwrap();
+    client_socket.connect(server_addr).unwrap();
+
+    let mut client_config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+    client_config.verify_peer(false);
+    let mut stealth_cfg = StealthConfig::default();
+    let mut client_conn = QuicFuscateConnection::new_client(
+        "example.com",
+        client_socket.local_addr().unwrap(),
+        server_addr,
+        client_config,
+        stealth_cfg.clone(),
+        FecMode::Light,
+    )
+    .unwrap();
+
+    let mut server_config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+    server_config
+        .load_cert_chain_from_pem_file("libs/vanilla_quiche/quiche/examples/cert.crt")
+        .unwrap();
+    server_config
+        .load_priv_key_from_pem_file("libs/vanilla_quiche/quiche/examples/cert.key")
+        .unwrap();
+    server_config.verify_peer(false);
+    let scid = quiche::ConnectionId::from_ref(&[0; quiche::MAX_CONN_ID_LEN]);
+    let client_addr = client_socket.local_addr().unwrap();
+    let mut server_conn = QuicFuscateConnection::new_server(
+        &scid,
+        None,
+        server_addr,
+        client_addr,
+        server_config,
+        stealth_cfg.clone(),
+        FecMode::Light,
+    )
+    .unwrap();
+
+    let profiles = vec![
+        FingerprintProfile::new(BrowserProfile::Chrome, stealth_cfg.os_profile),
+        FingerprintProfile::new(BrowserProfile::Firefox, stealth_cfg.os_profile),
+    ];
+    let sm = client_conn.stealth_manager();
+    sm.start_profile_rotation(profiles.clone(), std::time::Duration::from_millis(500));
+
+    let mut buf = [0u8; 65535];
+    let mut out = [0u8; 65535];
+    // Send data for a short period allowing rotation to occur
+    for _ in 0..5 {
+        if let Ok(len) = client_conn.send(&mut out) {
+            if len > 0 {
+                server_socket.send_to(&out[..len], client_addr).unwrap();
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+
+    let current = sm.current_profile();
+    assert_eq!(current.browser, BrowserProfile::Firefox);
 }
