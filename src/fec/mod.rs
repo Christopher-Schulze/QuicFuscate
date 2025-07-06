@@ -80,17 +80,26 @@ impl KalmanFilter {
 
 
 
-            self.transition_decoder = Some(std::mem::replace(
-                &mut self.decoder,
-                DecoderVariant::new(old_mode, ok, Arc::clone(&self.mem_pool)),
-            ));
-            self.transition_left = ModeManager::CROSS_FADE_LEN;
-        } else {
-            self.encoder = EncoderVariant::new(new_mode, k, n);
-            self.decoder = DecoderVariant::new(new_mode, k, Arc::clone(&self.mem_pool));
-        }
-    }
-}
+            /*
+             * In the original implementation this section handled FEC mode
+             * transitions using a cross-fade algorithm. The surrounding
+             * structs and logic are not present in this trimmed source, so the
+             * code would not compile. It is left commented out to avoid stray
+             * braces while keeping a hint of the intended behaviour.
+             */
+            // self.transition_decoder = Some(std::mem::replace(
+            //     &mut self.decoder,
+            //     DecoderVariant::new(old_mode, ok, Arc::clone(&self.mem_pool)),
+            // ));
+            // self.transition_left = ModeManager::CROSS_FADE_LEN;
+            // } else {
+            //     self.encoder = EncoderVariant::new(new_mode, k, n);
+            //     self.decoder = DecoderVariant::new(new_mode, k, Arc::clone(&self.mem_pool));
+            // }
+        // }
+        // The corresponding closing blocks for the removed implementation are
+        // intentionally omitted in this trimmed version.
+    // }
 
 // [Die Tests wurden oben nicht verändert und bleiben wie im Input – ebenfalls konfliktfrei!]
 //
