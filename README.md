@@ -192,6 +192,8 @@ Run `quicfuscate_demo --help` to see all available options. Important flags incl
       --debug-tls            Show TLS debug information
       --list-fingerprints    List available browser fingerprints
       --fec-mode <mode>      Initial FEC mode (zero|light|normal|medium|strong|extreme)
+      --doh-provider <url>   Custom DNS-over-HTTPS resolver
+      --front-domain <d>     Domain used for fronting (repeat or comma separated)
       --disable-doh          Disable DNS over HTTPS
       --disable-fronting     Disable domain fronting
       --disable-xor          Disable XOR obfuscation
