@@ -77,7 +77,8 @@ The `libs/patched_quiche` directory is intentionally left empty to keep the
 checkout small. Fetch the sources after cloning by running the workflow
 script below.
 After cloning simply run the workflow script which fetches the sources and
-initializes the submodule automatically:
+initializes the submodule automatically. The script exports `QUICHE_PATH`
+to `libs/patched_quiche/quiche` so that Cargo can find the library:
 
 ```bash
 ./scripts/quiche_workflow.sh --step fetch
@@ -107,6 +108,12 @@ git submodule set-url libs/patched_quiche <mirror-url>
 The workflow script replaces the old `fetch_quiche.sh` helper and can be
 re-run at any time. If a local copy of quiche already exists, set the
 `QUICHE_PATH` environment variable to use that path instead.
+When building manually make sure this variable points to
+`libs/patched_quiche/quiche`:
+
+```bash
+export QUICHE_PATH=$(pwd)/libs/patched_quiche/quiche
+```
 
 ### Building quiche
 

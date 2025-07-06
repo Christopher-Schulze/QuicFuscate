@@ -147,6 +147,15 @@ apply_patches() {
     else
         warn "Keine Patch-Dateien im .patch-Format gefunden"
     fi
+
+    # Stelle sicher, dass das Build-Verzeichnis existiert
+    local build_dir="$PATCHED_DIR/target"
+    if [ -d "$build_dir" ]; then
+        log "Build-Verzeichnis bereits vorhanden: $build_dir"
+    else
+        log "Erstelle Build-Verzeichnis: $build_dir"
+        mkdir -p "$build_dir"
+    fi
 }
 
 # Schritt 3: Patches verifizieren
