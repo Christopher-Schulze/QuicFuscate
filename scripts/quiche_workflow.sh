@@ -54,6 +54,12 @@ load_state() {
         LAST_STEP="none"
         BUILD_TYPE="${BUILD_TYPE:-release}"
     fi
+
+    # Ensure quiche sources are present
+    if [ ! -d "$PATCHED_DIR/quiche" ]; then
+        warn "Quiche-Verzeichnis fehlt: $PATCHED_DIR/quiche"
+        fetch_quiche || error "Automatisches Herunterladen fehlgeschlagen. Bitte $0 --step fetch ausf\xC3\xBChren."
+    fi
 }
 
 # Speichere den aktuellen Status
@@ -89,6 +95,11 @@ run_command() {
 # Schritt 1: Quiche herunterladen
 fetch_quiche() {
     local log_file="$LOG_DIR/fetch_quiche_$(date +%Y%m%d_%H%M%S).log"
+
+    if [ -d "$PATCHED_DIR/quiche" ]; then
+        log "Quiche-Verzeichnis bereits vorhanden: $PATCHED_DIR/quiche"
+        return 0
+    fi
     
     log "Starte Herunterladen von quiche..."
     log "Quelle: $MIRROR_URL"
@@ -110,7 +121,11 @@ fetch_quiche() {
         run_command "Klonen des Quiche-Repositories" \
             "git clone --depth 1 \"$MIRROR_URL\" \"$PATCHED_DIR\""
     fi
-    
+
+    if [ ! -d "$PATCHED_DIR/quiche" ]; then
+        error "Quiche-Verzeichnis konnte nach dem Klonen nicht gefunden werden"
+    fi
+
     success "Quiche erfolgreich heruntergeladen und vorbereitet"
     return 0
 }
