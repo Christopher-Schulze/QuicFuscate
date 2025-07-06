@@ -40,6 +40,7 @@ use aligned_box::AlignedBox;
 #[cfg(unix)]
 use libc::{iovec, msghdr, recvmsg, sendmsg};
 use log::info;
+use crate::telemetry;
 use std::any::Any;
 #[cfg(target_arch = "aarch64")]
 use std::arch::is_aarch64_feature_detected;
@@ -229,9 +230,13 @@ impl MemoryPool {
     /// If the pool is empty, a new block is created.
     pub fn alloc(&self) -> AlignedBox<[u8]> {
         let mut pool = self.pool.lock().unwrap();
-        pool.pop().unwrap_or_else(|| {
-            AlignedBox::slice_from_default(64, self.block_size).unwrap()
-        })
+        match pool.pop() {
+            Some(b) => b,
+            None => {
+                telemetry::FEC_OVERFLOWS.inc();
+                AlignedBox::slice_from_default(64, self.block_size).unwrap()
+            }
+        }
     }
 
     /// Returns a memory block to the pool.

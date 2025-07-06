@@ -38,6 +38,7 @@
 //! optimizations for finite field arithmetic and memory management.
 
 use crate::optimize::{self, MemoryPool, OptimizationManager, SimdPolicy};
+use log::{debug, error, info};
 use aligned_box::AlignedBox;
 use rayon::prelude::*;
 use std::collections::{HashMap, VecDeque};
@@ -284,6 +285,7 @@ impl Packet {
         opt_manager: &OptimizationManager,
     ) -> Result<Self, String> {
         if raw_data.is_empty() {
+            error!("from_raw: input buffer empty");
             return Err("Raw data is empty".to_string());
         }
 
@@ -292,6 +294,7 @@ impl Packet {
 
         let (coefficients, coeff_len, payload_offset) = if !is_systematic {
             if raw_data.len() < 3 {
+                error!("from_raw: coefficient length missing");
                 return Err("Buffer too short for coefficient length".to_string());
             }
             let coeff_len =
@@ -299,6 +302,7 @@ impl Packet {
             offset += 2;
 
             if raw_data.len() < offset + coeff_len {
+                error!("from_raw: coefficient data truncated");
                 return Err("Buffer too short for coefficients".to_string());
             }
             let mut coeff_block = opt_manager.alloc_block();
@@ -311,6 +315,7 @@ impl Packet {
         let payload = &raw_data[payload_offset..];
         let mut data = opt_manager.alloc_block();
         if data.len() < payload.len() {
+            error!("from_raw: pool buffer too small");
             return Err("Buffer from pool is too small".to_string());
         }
         data[..payload.len()].copy_from_slice(payload);
@@ -336,6 +341,7 @@ impl Packet {
     ) -> Result<Self, String> {
         if len == 0 || len > block.len() {
             opt_manager.free_block(block);
+            error!("from_block: invalid length {}", len);
             return Err("Invalid raw packet length".to_string());
         }
 
@@ -345,12 +351,14 @@ impl Packet {
         let (coefficients, coeff_len, payload_offset) = if !is_systematic {
             if len < 3 {
                 opt_manager.free_block(block);
+                error!("from_block: coefficient length missing");
                 return Err("Buffer too short for coefficient length".to_string());
             }
             let coeff_len = u16::from_be_bytes([block[offset], block[offset + 1]]) as usize;
             offset += 2;
             if len < offset + coeff_len {
                 opt_manager.free_block(block);
+                error!("from_block: coefficient data truncated");
                 return Err("Buffer too short for coefficients".to_string());
             }
             let mut coeff_block = opt_manager.alloc_block();
@@ -635,6 +643,10 @@ impl ModeManager {
         self.current_window = new_window;
 
         if prev_mode != self.current_mode || prev_window != self.current_window {
+            info!(
+                "FEC mode change: {:?} -> {:?}, window {} -> {}",
+                prev_mode, self.current_mode, prev_window, self.current_window
+            );
             return (
                 self.current_mode,
                 self.current_window,

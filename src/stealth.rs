@@ -49,6 +49,7 @@ use url::Url;
 
 use crate::crypto::CryptoManager; // Assumed for integration
 use crate::optimize::{self, OptimizationManager}; // Assumed for integration
+use crate::telemetry;
 use std::os::raw::c_void;
 
 // --- Global Tokio Runtime for async DoH requests ---
@@ -68,13 +69,16 @@ lazy_static! {
 /// * `doh_provider` - The URL of the DoH resolver (e.g., "https://cloudflare-dns.com/dns-query").
 ///
 /// # Returns
-/// A `Result` containing the resolved `IpAddr` or a `reqwest::Error`.
+/// A `Result` containing the resolved `IpAddr` or an error.
 pub async fn resolve_doh(
     client: &Client,
     domain: &str,
     doh_provider: &str,
-) -> Result<IpAddr, reqwest::Error> {
-    let mut url = Url::parse(doh_provider).unwrap();
+) -> Result<IpAddr, Box<dyn std::error::Error>> {
+    let mut url = Url::parse(doh_provider).map_err(|e| {
+        error!("Invalid DoH provider URL: {}", e);
+        e
+    })?;
     url.query_pairs_mut()
         .append_pair("name", domain)
         .append_pair("type", "A");
@@ -88,19 +92,19 @@ pub async fn resolve_doh(
         .await?;
 
     if let Some(answers) = resp.get("Answer") {
-        for answer in answers.as_array().unwrap() {
-            if answer["type"] == 1 {
-                // A record
-                if let Some(ip_str) = answer["data"].as_str() {
-                    if let Ok(ip) = ip_str.parse() {
-                        return Ok(ip);
+        if let Some(arr) = answers.as_array() {
+            for answer in arr {
+                if answer["type"] == 1 {
+                    if let Some(ip_str) = answer["data"].as_str() {
+                        if let Ok(ip) = ip_str.parse() {
+                            return Ok(ip);
+                        }
                     }
                 }
             }
         }
     }
-    // Fallback or error
-    Ok(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)))
+    Err("No A record returned".into())
 }
 
 // --- 2. Browser/OS Fingerprinting ---
@@ -849,17 +853,18 @@ impl StealthManager {
                 "Resolving {} via DoH provider: {}",
                 domain, self.config.doh_provider
             );
-            DOH_RUNTIME
-                .block_on(resolve_doh(
-                    &self.doh_client,
-                    domain,
-                    &self.config.doh_provider,
-                ))
-                .unwrap_or_else(|e| {
+            match DOH_RUNTIME.block_on(resolve_doh(
+                &self.doh_client,
+                domain,
+                &self.config.doh_provider,
+            )) {
+                Ok(ip) => ip,
+                Err(e) => {
+                    telemetry::DNS_ERRORS.inc();
                     error!("DoH resolution failed: {}. Falling back.", e);
-                    // Simple fallback, in a real scenario might try standard DNS.
                     IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))
-                })
+                }
+            }
         } else {
             // Fallback to standard DNS resolution (conceptual)
             info!("DoH disabled, using standard DNS for {}", domain);

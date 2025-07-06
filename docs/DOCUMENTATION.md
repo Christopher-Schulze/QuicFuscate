@@ -1094,3 +1094,15 @@ let sni_hidding = SniHidding::new();
 let modified_client_hello = sni_hidding.process_client_hello(client_hello);
 let new_sni = sni_hidding.modify_sni(client_hello, "new_sni.example.com");
 let modified_headers = sni_hidding.apply_domain_fronting(http_headers);
+
+## Production Configuration
+When deploying QuicFuscate in a production environment you should expose the
+telemetry endpoint and adjust resource limits:
+
+- Run `telemetry::serve("0.0.0.0:9898")` and scrape this endpoint with
+  Prometheus.
+- Increase the `MemoryPool` capacity to match expected traffic volume.
+- Configure a reliable DoH provider in `StealthConfig` for consistent DNS
+  resolution.
+- Use `FecConfig::from_file` to tune window sizes and PID constants for your
+  network conditions.
