@@ -59,10 +59,6 @@ enum Commands {
         #[clap(long, value_name = "PATH")]
         fec_config: Option<PathBuf>,
 
-        /// Path to a TOML file with Adaptive FEC settings
-        #[clap(long, value_name = "PATH")]
-        fec_config: Option<PathBuf>,
-
         /// Custom DNS-over-HTTPS provider URL
         #[clap(long, default_value = "https://cloudflare-dns.com/dns-query")]
         doh_provider: String,
