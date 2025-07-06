@@ -186,7 +186,7 @@ Run `quicfuscate_demo --help` to see all available options. Important flags incl
   -p, --port <port>          Server port (default: 443)
   -f, --fingerprint <name>   Browser fingerprint (chrome, firefox, safari, ...)
       --no-utls              Disable uTLS and use regular TLS
-      --verify-peer          Enable certificate validation
+      --verify-peer          Validate the server certificate (disabled by default)
       --ca-file <path>       CA file for peer verification
   -v, --verbose              Verbose logging
       --debug-tls            Show TLS debug information
