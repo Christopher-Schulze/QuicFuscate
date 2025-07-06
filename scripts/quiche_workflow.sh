@@ -150,6 +150,10 @@ apply_patches() {
         if [ -f "$patch_file" ]; then
             patch_count=$((patch_count + 1))
             log "Wende Patch an: $(basename "$patch_file")"
+
+            if ! (cd "$PATCHED_DIR" && git apply --check "$patch_file" >/dev/null 2>&1); then
+                error "Patch $(basename "$patch_file") kann nicht angewendet werden (git apply --check fehlgeschlagen)"
+            fi
             
             if ! (cd "$PATCHED_DIR" && patch -p1 --no-backup-if-mismatch -r - < "$patch_file"); then
                 error "Fehler beim Anwenden von $(basename "$patch_file")"
