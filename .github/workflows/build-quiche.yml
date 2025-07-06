@@ -72,7 +72,15 @@ jobs:
       run: |
         chmod +x ./scripts/quiche_workflow.sh
         ./scripts/quiche_workflow.sh --step build --type ${{ inputs.build_type || 'release' }}
-    
+
+    - name: Build QuicFuscate binaries
+      run: |
+        if [ "${{ inputs.build_type || 'release' }}" = "release" ]; then
+          cargo build --release
+        else
+          cargo build
+        fi
+
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
@@ -80,6 +88,7 @@ jobs:
         path: |
           libs/patched_quiche/target/${{ inputs.build_type || 'release' }}/quiche
           libs/patched_quiche/target/${{ inputs.build_type || 'release' }}/deps/*.rlib
+          target/${{ inputs.build_type || 'release' }}/quicfuscate*
         retention-days: 7
         compression-level: 9
     
@@ -91,6 +100,7 @@ jobs:
           libs/patched_quiche/target/${{ inputs.build_type || 'release' }}/quiche
           libs/patched_quiche/target/${{ inputs.build_type || 'release' }}/*.a
           libs/patched_quiche/target/${{ inputs.build_type || 'release' }}/deps/*.rlib
+          target/${{ inputs.build_type || 'release' }}/quicfuscate*
         generate_release_notes: true
         draft: false
         prerelease: false

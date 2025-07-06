@@ -213,6 +213,14 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+## 📦 Releases
+
+Pre-built binaries are automatically generated for the `main` and `master`
+branches. Visit the [GitHub Releases](https://github.com/yourname/QuicFuscate/releases)
+page to download the latest `quicfuscate` executables for your platform.
+Each release bundles the patched `quiche` library together with the
+`quicfuscate_*` binaries.
+
 ## 📜 License
 
 This software is provided under a custom license that allows:
