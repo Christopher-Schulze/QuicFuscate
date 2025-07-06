@@ -39,6 +39,9 @@ STATE_FILE="$BASE_DIR/.quiche_workflow_state"
 BUILD_TYPE="release"
 MIRROR_URL="https://github.com/cloudflare/quiche.git"
 
+# Make quiche available to Cargo
+export QUICHE_PATH="$PATCHED_DIR/quiche"
+
 # Erstelle benötigte Verzeichnisse
 mkdir -p "$LOG_DIR" "$PATCHES_DIR" "$PATCHED_DIR"
 
