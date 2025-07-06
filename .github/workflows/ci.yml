@@ -47,6 +47,15 @@ jobs:
         run: |
           ./scripts/quiche_workflow.sh --step fetch
 
+      - name: Ensure QUICHE_PATH
+        shell: bash
+        run: |
+          echo "QUICHE_PATH=${{ github.workspace }}/libs/patched_quiche/quiche" >> $GITHUB_ENV
+          if [ ! -d "${{ github.workspace }}/libs/patched_quiche/quiche" ]; then
+            echo "libs/patched_quiche/quiche missing" >&2
+            exit 1
+          fi
+
       - name: Run Clippy
         shell: bash
         run: |

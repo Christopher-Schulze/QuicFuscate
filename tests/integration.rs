@@ -36,10 +36,10 @@ async fn client_server_end_to_end() {
     .unwrap();
     let mut server_config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
     server_config
-        .load_cert_chain_from_pem_file("libs/vanilla_quiche/quiche/examples/cert.crt")
+        .load_cert_chain_from_pem_file("libs/patched_quiche/quiche/examples/cert.crt")
         .unwrap();
     server_config
-        .load_priv_key_from_pem_file("libs/vanilla_quiche/quiche/examples/cert.key")
+        .load_priv_key_from_pem_file("libs/patched_quiche/quiche/examples/cert.key")
         .unwrap();
     server_config
         .set_application_protos(b"\x0ahq-interop\x05h3-29\x05h3-28\x05h3-27\x08http/0.9")

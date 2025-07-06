@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 aligned_box = "0.2"
-quiche = { path = "libs/vanilla_quiche/quiche" }
+quiche = { path = "libs/patched_quiche/quiche" }
 rustls = "0.22.2"
 aegis = "0.9.0"
 morus = "0.1.3"
