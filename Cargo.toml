@@ -5,7 +5,9 @@ edition = "2021"
 
 [dependencies]
 aligned_box = "0.2"
-quiche = { path = "libs/patched_quiche/quiche" }
+# Fallback to the crates.io release of quiche when the patched sources
+# are not present. This still builds BoringSSL via the bundled sources.
+quiche = "0.24.4"
 rustls = "0.22.2"
 aegis = { version = "0.9.0", features = ["rustcrypto-traits-06"] }
 morus = "0.1.3"
