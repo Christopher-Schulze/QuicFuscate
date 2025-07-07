@@ -9,8 +9,20 @@ use lazy_static::lazy_static;
 //! - `fec_overflow_total`: Number of times the FEC memory pool had to allocate
 //!   a new block because the pool was exhausted.
 //! - `dns_errors_total`: Number of DNS resolution errors.
+//! - `bytes_sent_total`: UDP bytes sent via the core.
+//! - `bytes_received_total`: UDP bytes received via the core.
+//! - `mem_pool_capacity`: Current capacity of the memory pool.
+//! - `mem_pool_in_use`: Number of blocks currently checked out from the pool.
+//! - `cpu_feature_mask`: Bitmask of detected CPU features.
 
-use prometheus::{Encoder, IntCounter, IntGauge, TextEncoder, register_int_counter, register_int_gauge};
+use prometheus::{
+    Encoder,
+    IntCounter,
+    IntGauge,
+    TextEncoder,
+    register_int_counter,
+    register_int_gauge,
+};
 
 lazy_static! {
     pub static ref ENCODED_PACKETS: IntCounter =
@@ -25,6 +37,16 @@ lazy_static! {
         register_int_counter!("fec_overflow_total", "FEC memory pool overflows").unwrap();
     pub static ref DNS_ERRORS: IntCounter =
         register_int_counter!("dns_errors_total", "Number of DNS resolution errors").unwrap();
+    pub static ref BYTES_SENT: IntCounter =
+        register_int_counter!("bytes_sent_total", "Total UDP bytes sent").unwrap();
+    pub static ref BYTES_RECEIVED: IntCounter =
+        register_int_counter!("bytes_received_total", "Total UDP bytes received").unwrap();
+    pub static ref MEM_POOL_CAPACITY: IntGauge =
+        register_int_gauge!("mem_pool_capacity", "Memory pool capacity").unwrap();
+    pub static ref MEM_POOL_IN_USE: IntGauge =
+        register_int_gauge!("mem_pool_in_use", "Memory pool blocks in use").unwrap();
+    pub static ref CPU_FEATURE_MASK: IntGauge =
+        register_int_gauge!("cpu_feature_mask", "Detected CPU features bitmask").unwrap();
 }
 
 pub fn serve(addr: &str) {
