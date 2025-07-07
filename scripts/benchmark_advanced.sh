@@ -64,7 +64,10 @@ run_benchmark() {
     
     jq --argjson result "$result" '. + [$result]' "$BENCHMARK_RESULTS" > "${BENCHMARK_RESULTS}.tmp"
     mv "${BENCHMARK_RESULTS}.tmp" "$BENCHMARK_RESULTS"
-    
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -s http://localhost:9898/metrics | grep mem_pool >> "$BENCH_DIR/metrics.log" || true
+    fi
     log_info "Benchmark abgeschlossen: ${duration_ms}ms (CPU: ${cpu_usage}%, RAM: ${mem_usage}MB)"
 }
 

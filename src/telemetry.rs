@@ -52,6 +52,18 @@ lazy_static! {
         register_int_gauge!("mem_pool_in_use", "Memory pool blocks in use").unwrap();
     pub static ref MEM_POOL_USAGE_BYTES: IntGauge =
         register_int_gauge!("mem_pool_usage_bytes", "Memory pool bytes in use").unwrap();
+    pub static ref MEM_POOL_FRAGMENTATION: IntGauge =
+        register_int_gauge!(
+            "mem_pool_fragmentation",
+            "Memory pool fragmentation in blocks"
+        )
+        .unwrap();
+    pub static ref MEM_POOL_UTILIZATION: IntGauge =
+        register_int_gauge!(
+            "mem_pool_utilization_percent",
+            "Memory pool utilization percentage"
+        )
+        .unwrap();
     pub static ref CPU_FEATURE_MASK: IntGauge =
         register_int_gauge!("cpu_feature_mask", "Detected CPU features bitmask").unwrap();
     pub static ref SIMD_ACTIVE: IntGauge =

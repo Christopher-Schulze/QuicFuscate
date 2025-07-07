@@ -40,6 +40,9 @@ run_benchmark() {
         log "Fehler beim Benchmark (Exit-Code: $exit_code)"
     fi
     
+    if command -v curl >/dev/null 2>&1; then
+        curl -s http://localhost:9898/metrics | grep mem_pool >> "$LOG_FILE" || true
+    fi
     echo "----------------------------------------" >> "$LOG_FILE"
 }
 
