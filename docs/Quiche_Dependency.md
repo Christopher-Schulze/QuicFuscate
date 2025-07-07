@@ -24,6 +24,24 @@ cargo build --workspace --release
 
 The `fetch` step initializes the `libs/patched_quiche` submodule automatically.
 
+## Schritt-für-Schritt-Anleitung
+
+1. **Vorbedingungen installieren**
+   - Rust 1.82+ samt `cargo`
+   - `cmake`, `perl` und `go` für den BoringSSL‑Build
+
+2. **Workflow ausführen**
+   ```bash
+   ./scripts/quiche_workflow.sh --type release
+   ```
+   Dieser Aufruf lädt quiche, wendet alle Patches an und erstellt die Bibliothek
+   im Release‑Modus.
+
+3. **Patches aktualisieren und Build wiederholen**
+   - Änderungen an `libs/patches/*.patch` vornehmen
+   - Den obigen Workflow erneut starten, um die Patches anzuwenden und die
+     kompilierten Artefakte zu aktualisieren
+
 ## Integration Guidelines
 
 ### Core Principles
