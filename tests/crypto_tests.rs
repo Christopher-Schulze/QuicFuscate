@@ -4,7 +4,8 @@ use quicfuscate::crypto::{CipherSuite, CipherSuiteSelector};
 fn run_test(suite: CipherSuite) {
     let selector = CipherSuiteSelector::with_suite(suite);
     let (key_len, nonce_len) = match suite {
-        CipherSuite::Aegis128X => (32, 32),
+        // Both AEGIS variants operate on 128-bit keys and nonces.
+        CipherSuite::Aegis128X => (16, 16),
         CipherSuite::Aegis128L => (16, 16),
         CipherSuite::Morus1280_128 => (16, 16),
     };
