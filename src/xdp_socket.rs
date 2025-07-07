@@ -98,7 +98,7 @@ impl XdpSocket {
             }
         };
 
-        let (socket, rx, tx) = match Socket::new(
+        let (_socket, rx, tx) = match Socket::new(
             umem.clone(),
             &iface,
             0,
@@ -128,12 +128,73 @@ impl XdpSocket {
         })
     }
 
+    pub fn reconfigure(&mut self, bind: SocketAddr, remote: SocketAddr) -> io::Result<()> {
+        self.state.take();
+        let udp = std::net::UdpSocket::bind(bind)?;
+        udp.connect(remote)?;
+        udp.set_nonblocking(true)?;
+
+        let iface = infer_iface(&bind);
+        const BUF_NUM: usize = 4096;
+        const BUF_LEN: usize = 2048;
+        let (area, mut bufs) = match MmapArea::new(BUF_NUM, BUF_LEN, MmapAreaOptions { huge_tlb: false }) {
+            Ok(v) => v,
+            Err(_) => {
+                telemetry::XDP_FALLBACKS.inc();
+                self.udp = udp;
+                return Ok(());
+            }
+        };
+        let (umem, mut cq, mut fq) = match Umem::new(
+            area,
+            XSK_RING_CONS__DEFAULT_NUM_DESCS,
+            XSK_RING_PROD__DEFAULT_NUM_DESCS,
+        ) {
+            Ok(v) => v,
+            Err(_) => {
+                telemetry::XDP_FALLBACKS.inc();
+                self.udp = udp;
+                return Ok(());
+            }
+        };
+
+        let (socket, rx, tx) = match Socket::new(
+            umem.clone(),
+            &iface,
+            0,
+            XSK_RING_CONS__DEFAULT_NUM_DESCS,
+            XSK_RING_PROD__DEFAULT_NUM_DESCS,
+            SocketOptions::default(),
+        ) {
+            Ok(v) => v,
+            Err(_) => {
+                telemetry::XDP_FALLBACKS.inc();
+                self.udp = udp;
+                return Ok(());
+            }
+        };
+        let _ = fq.fill(&mut bufs, bufs.len());
+
+        self.udp = udp;
+        self.state = Some(XdpState {
+            rx,
+            tx,
+            fq,
+            cq,
+            pool: bufs,
+            pending: ArrayDeque::new(),
+        });
+        Ok(())
+    }
+
     fn fd(&self) -> RawFd {
         self.udp.as_raw_fd()
     }
 
     pub fn send(&mut self, buffers: &[&[u8]]) -> io::Result<usize> {
+        use std::time::Instant;
         if let Some(state) = self.state.as_mut() {
+            let start = Instant::now();
             if let Some(mut b) = state.pool.pop() {
                 let len = buffers.iter().map(|b| b.len()).sum::<usize>();
                 let data = buffers[0];
@@ -145,6 +206,11 @@ impl XdpSocket {
                 let _ = state.cq.service(&mut state.pool, sent);
                 if sent == 1 {
                     telemetry::XDP_BYTES_SENT.inc_by(copy_len as u64);
+                    telemetry::XDP_SEND_LATENCY
+                        .inc_by(start.elapsed().as_micros() as u64);
+                    let tput =
+                        (copy_len as u64 * 8 * 1_000_000) / start.elapsed().as_micros().max(1) as u64;
+                    telemetry::XDP_THROUGHPUT.set((tput / 1_000_000) as i64);
                     return Ok(copy_len);
                 }
                 state.pool.extend(state.pending.drain(..));
@@ -161,7 +227,9 @@ impl XdpSocket {
     }
 
     pub fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        use std::time::Instant;
         if let Some(state) = self.state.as_mut() {
+            let start = Instant::now();
             let mut recvq: ArrayDeque<[BufMmap<[u8; 2048]>; PENDING_LEN], Wrapping> =
                 ArrayDeque::new();
             match state.rx.try_recv(&mut recvq, 1, [0u8; 2048]) {
@@ -173,6 +241,11 @@ impl XdpSocket {
                         let mut temp = vec![b];
                         let _ = state.fq.fill(&mut temp, 1);
                         telemetry::XDP_BYTES_RECEIVED.inc_by(copy_len as u64);
+                        telemetry::XDP_RECV_LATENCY
+                            .inc_by(start.elapsed().as_micros() as u64);
+                        let tput =
+                            (copy_len as u64 * 8 * 1_000_000) / start.elapsed().as_micros().max(1) as u64;
+                        telemetry::XDP_THROUGHPUT.set((tput / 1_000_000) as i64);
                         return Ok(copy_len);
                     }
                 }
@@ -246,6 +319,14 @@ impl XdpSocket {
     pub fn update_remote(&self, remote: SocketAddr) -> io::Result<()> {
         self.socket.connect(remote)
     }
+
+    pub fn reconfigure(&mut self, bind_addr: SocketAddr, remote_addr: SocketAddr) -> io::Result<()> {
+        let socket = std::net::UdpSocket::bind(bind_addr)?;
+        socket.connect(remote_addr)?;
+        socket.set_nonblocking(true)?;
+        self.socket = socket;
+        Ok(())
+    }
 }
 
 #[cfg(not(unix))]
@@ -255,6 +336,10 @@ impl XdpSocket {
     }
 
     pub fn update_remote(&self, _remote: SocketAddr) -> io::Result<()> {
+        Err(Error::new(ErrorKind::Other, "XDP sockets not supported"))
+    }
+
+    pub fn reconfigure(&mut self, _bind: SocketAddr, _remote: SocketAddr) -> io::Result<()> {
         Err(Error::new(ErrorKind::Other, "XDP sockets not supported"))
     }
 

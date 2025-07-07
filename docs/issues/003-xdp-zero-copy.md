@@ -10,8 +10,20 @@ possible.
 ## Tasks
 - [x] Implement full AF_XDP socket initialization including UMEM setup and ring configuration.
 - [x] Provide graceful fallback to standard UDP sockets when XDP is unavailable.
-- [ ] Add path migration support by reconfiguring the XDP socket on the fly.
-- [ ] Benchmark throughput and update telemetry metrics for XDP specific statistics.
+- [x] Add path migration support by reconfiguring the XDP socket on the fly.
+- [x] Benchmark throughput and update telemetry metrics for XDP specific statistics.
+
+## Kernel & System Setup
+
+The benchmarks require a recent Linux kernel (5.15+) with `CONFIG_XDP_SOCKETS` enabled.
+`libbpf-dev` must be installed and the user running the tests needs `CAP_NET_ADMIN`.
+For reliable zero-copy operation increase locked memory limits, e.g.
+
+```bash
+sudo ulimit -l unlimited
+sudo sysctl -w net.core.rmem_max=26214400
+sudo sysctl -w net.core.wmem_max=26214400
+```
 
 ## Planned Commits
 1. **af_xdp module** – new low level wrapper around libbpf for UMEM and rings.
