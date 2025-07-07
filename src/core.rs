@@ -101,7 +101,8 @@ impl QuicFuscateConnection {
             optimization_manager.clone(),
         ));
 
-        stealth_manager.apply_utls_profile(&mut config);
+        stealth_manager
+            .apply_utls_profile(&mut config, Some(CipherSuiteSelector::new().tls_cipher()));
 
         let scid = quiche::ConnectionId::from_ref(&[0; quiche::MAX_CONN_ID_LEN]);
 
@@ -170,8 +171,6 @@ impl QuicFuscateConnection {
         xdp_socket: Option<XdpSocket>,
         fec_config: FecConfig,
     ) -> Self {
-
-
         Self {
             conn,
             peer_addr,

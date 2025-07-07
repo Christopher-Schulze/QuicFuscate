@@ -1,4 +1,3 @@
-use lazy_static::lazy_static;
 //! Telemetry metrics used throughout QuicFuscate.
 //!
 //! Currently exported metrics:
@@ -9,8 +8,11 @@ use lazy_static::lazy_static;
 //! - `fec_overflow_total`: Number of times the FEC memory pool had to allocate
 //!   a new block because the pool was exhausted.
 //! - `dns_errors_total`: Number of DNS resolution errors.
+use lazy_static::lazy_static;
 
-use prometheus::{Encoder, IntCounter, IntGauge, TextEncoder, register_int_counter, register_int_gauge};
+use prometheus::{
+    register_int_counter, register_int_gauge, Encoder, IntCounter, IntGauge, TextEncoder,
+};
 
 lazy_static! {
     pub static ref ENCODED_PACKETS: IntCounter =
@@ -28,8 +30,8 @@ lazy_static! {
 }
 
 pub fn serve(addr: &str) {
-    use std::net::TcpListener;
     use std::io::Write;
+    use std::net::TcpListener;
     let listener = TcpListener::bind(addr).expect("bind metrics");
     std::thread::spawn(move || {
         let encoder = TextEncoder::new();

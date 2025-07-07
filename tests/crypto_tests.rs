@@ -1,3 +1,4 @@
+use hex;
 use quicfuscate::crypto::{CipherSuite, CipherSuiteSelector};
 
 fn run_test(suite: CipherSuite) {
@@ -11,7 +12,9 @@ fn run_test(suite: CipherSuite) {
     let nonce = vec![0u8; nonce_len];
     let ad = b"ad";
     let plaintext = b"hello world";
-    let ct = selector.encrypt(&key, &nonce, ad, plaintext).expect("encrypt");
+    let ct = selector
+        .encrypt(&key, &nonce, ad, plaintext)
+        .expect("encrypt");
     let pt = selector.decrypt(&key, &nonce, ad, &ct).expect("decrypt");
     assert_eq!(plaintext.to_vec(), pt);
 }
@@ -29,4 +32,21 @@ fn test_aegis128l() {
 #[test]
 fn test_morus() {
     run_test(CipherSuite::Morus1280_128);
+}
+
+#[test]
+fn test_vectors() {
+    let selector = CipherSuiteSelector::with_suite(CipherSuite::Aegis128L);
+    let key = [0u8; 16];
+    let nonce = [0u8; 16];
+    let ct = selector
+        .encrypt(&key, &nonce, b"ad", b"test")
+        .expect("encrypt");
+    assert_eq!(hex::encode(ct), "5dc5bd6b4aca031f3870dd6ad7068531a3e9866a");
+
+    let selector = CipherSuiteSelector::with_suite(CipherSuite::Morus1280_128);
+    let ct = selector
+        .encrypt(&key, &nonce, b"ad", b"test")
+        .expect("encrypt");
+    assert_eq!(hex::encode(ct), "1d36c344344630f7179573e22a6f9ddaa8600269");
 }
