@@ -36,6 +36,7 @@
 //? inspection (DPI) systems. It integrates multiple strategies to create a
 //! layered defense against network surveillance.
 
+use base64;
 use clap::ValueEnum;
 use lazy_static::lazy_static;
 use log::{debug, error, info};
@@ -48,7 +49,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
 use url::Url;
-use base64;
 
 use crate::crypto::CryptoManager; // Assumed for integration
 use crate::optimize::{self, OptimizationManager}; // Assumed for integration
@@ -242,9 +242,53 @@ impl FingerprintProfile {
                initial_max_streams_bidi: 100,
                max_idle_timeout: 30_000,
            },
+           (BrowserProfile::Edge, OsProfile::MacOS) => Self {
+               browser, os,
+               user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0".to_string(),
+               tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
+               accept_language: "en-US,en;q=0.9".to_string(),
+               initial_max_data: 10_000_000,
+               initial_max_stream_data_bidi_local: 1_000_000,
+               initial_max_stream_data_bidi_remote: 1_000_000,
+               initial_max_streams_bidi: 100,
+               max_idle_timeout: 30_000,
+           },
+           (BrowserProfile::Edge, OsProfile::Linux) => Self {
+               browser, os,
+               user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0".to_string(),
+               tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
+               accept_language: "en-US,en;q=0.9".to_string(),
+               initial_max_data: 10_000_000,
+               initial_max_stream_data_bidi_local: 1_000_000,
+               initial_max_stream_data_bidi_remote: 1_000_000,
+               initial_max_streams_bidi: 100,
+               max_idle_timeout: 30_000,
+           },
            (BrowserProfile::Vivaldi, OsProfile::Windows) => Self {
                browser, os,
                user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Vivaldi/6.7.999.31".to_string(),
+               tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
+               accept_language: "en-US,en;q=0.9".to_string(),
+               initial_max_data: 10_000_000,
+               initial_max_stream_data_bidi_local: 1_000_000,
+               initial_max_stream_data_bidi_remote: 1_000_000,
+               initial_max_streams_bidi: 100,
+               max_idle_timeout: 30_000,
+           },
+           (BrowserProfile::Vivaldi, OsProfile::MacOS) => Self {
+               browser, os,
+               user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Vivaldi/6.7.999.31".to_string(),
+               tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
+               accept_language: "en-US,en;q=0.9".to_string(),
+               initial_max_data: 10_000_000,
+               initial_max_stream_data_bidi_local: 1_000_000,
+               initial_max_stream_data_bidi_remote: 1_000_000,
+               initial_max_streams_bidi: 100,
+               max_idle_timeout: 30_000,
+           },
+           (BrowserProfile::Vivaldi, OsProfile::Linux) => Self {
+               browser, os,
+               user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Vivaldi/6.7.999.31".to_string(),
                tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
                accept_language: "en-US,en;q=0.9".to_string(),
                initial_max_data: 10_000_000,
@@ -297,6 +341,17 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 1_000_000,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 30_000,
+            },
+            (BrowserProfile::Firefox, OsProfile::MacOS) => Self {
+                browser, os,
+                user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6; rv:127.0) Gecko/20100101 Firefox/127.0".to_string(),
+                tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xcca9, 0xcca8, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xc013, 0xc014],
+                accept_language: "en-US,en;q=0.5".to_string(),
+                initial_max_data: 12_582_912,
+                initial_max_stream_data_bidi_local: 1_048_576,
+                initial_max_stream_data_bidi_remote: 1_048_576,
+                initial_max_streams_bidi: 100,
+                max_idle_timeout: 60_000,
             },
             (BrowserProfile::Chrome, OsProfile::Linux) => Self {
                 browser, os,
@@ -721,7 +776,8 @@ impl TlsClientHelloSpoofer {
             out
         }
 
-        let hello = Self::load_client_hello(browser, os).unwrap_or_else(|| build_client_hello(suites));
+        let hello =
+            Self::load_client_hello(browser, os).unwrap_or_else(|| build_client_hello(suites));
         unsafe {
             extern "C" {
                 fn quiche_config_set_custom_tls(cfg: *mut c_void, hello: *const u8, len: usize);
@@ -798,15 +854,33 @@ impl StealthConfig {
         let root: Root = toml::from_str(s)?;
         let mut cfg = StealthConfig::default();
         if let Some(sec) = root.stealth {
-            if let Some(v) = sec.browser_profile { cfg.browser_profile = v; }
-            if let Some(v) = sec.os_profile { cfg.os_profile = v; }
-            if let Some(v) = sec.enable_doh { cfg.enable_doh = v; }
-            if let Some(v) = sec.doh_provider { cfg.doh_provider = v; }
-            if let Some(v) = sec.enable_http3_masquerading { cfg.enable_http3_masquerading = v; }
-            if let Some(v) = sec.use_qpack_headers { cfg.use_qpack_headers = v; }
-            if let Some(v) = sec.enable_domain_fronting { cfg.enable_domain_fronting = v; }
-            if let Some(v) = sec.fronting_domains { cfg.fronting_domains = v; }
-            if let Some(v) = sec.enable_xor_obfuscation { cfg.enable_xor_obfuscation = v; }
+            if let Some(v) = sec.browser_profile {
+                cfg.browser_profile = v;
+            }
+            if let Some(v) = sec.os_profile {
+                cfg.os_profile = v;
+            }
+            if let Some(v) = sec.enable_doh {
+                cfg.enable_doh = v;
+            }
+            if let Some(v) = sec.doh_provider {
+                cfg.doh_provider = v;
+            }
+            if let Some(v) = sec.enable_http3_masquerading {
+                cfg.enable_http3_masquerading = v;
+            }
+            if let Some(v) = sec.use_qpack_headers {
+                cfg.use_qpack_headers = v;
+            }
+            if let Some(v) = sec.enable_domain_fronting {
+                cfg.enable_domain_fronting = v;
+            }
+            if let Some(v) = sec.fronting_domains {
+                cfg.fronting_domains = v;
+            }
+            if let Some(v) = sec.enable_xor_obfuscation {
+                cfg.enable_xor_obfuscation = v;
+            }
         }
         Ok(cfg)
     }
@@ -898,12 +972,7 @@ impl StealthManager {
                 error!("Failed to set custom cipher suites: {}", e);
             }
             // Manipulate TLS ClientHello to match the desired ordering.
-            TlsClientHelloSpoofer::apply(
-                config,
-                fingerprint.browser,
-                fingerprint.os,
-                &suite_ids,
-            );
+            TlsClientHelloSpoofer::apply(config, fingerprint.browser, fingerprint.os, &suite_ids);
         }
 
         config
@@ -1044,6 +1113,22 @@ impl StealthManager {
         if self.config.enable_xor_obfuscation && self.xor_obfuscator.is_some() {
             debug!("Reversing XOR obfuscation on incoming packet.");
             self.xor_obfuscator.as_ref().unwrap().deobfuscate(payload);
+        }
+    }
+
+    /// Processes a TLS ClientHello message before it is sent.
+    pub fn process_client_hello(&self, payload: &mut [u8]) {
+        if self.config.enable_xor_obfuscation && self.xor_obfuscator.is_some() {
+            debug!("Obfuscating ClientHello payload.");
+            self.xor_obfuscator.as_ref().unwrap().obfuscate(payload);
+        }
+    }
+
+    /// Obfuscates arbitrary payload data within a specific context.
+    pub fn obfuscate_payload(&self, payload: &mut [u8], _context_id: u64) {
+        if self.config.enable_xor_obfuscation && self.xor_obfuscator.is_some() {
+            debug!("Obfuscating payload for context {}", _context_id);
+            self.xor_obfuscator.as_ref().unwrap().obfuscate(payload);
         }
     }
 
