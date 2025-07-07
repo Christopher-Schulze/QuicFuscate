@@ -60,6 +60,11 @@ impl XdpSocket {
             Ok(ret as usize)
         }
     }
+
+    /// Re-connects the socket to a new remote address after path migration.
+    pub fn update_remote(&self, remote: SocketAddr) -> io::Result<()> {
+        self.socket.connect(remote)
+    }
 }
 
 #[cfg(all(unix, feature = "xdp"))]
@@ -76,6 +81,10 @@ pub struct XdpSocket;
 #[cfg(not(unix))]
 impl XdpSocket {
     pub fn new(_bind: SocketAddr, _remote: SocketAddr) -> io::Result<Self> {
+        Err(Error::new(ErrorKind::Other, "XDP sockets not supported"))
+    }
+
+    pub fn update_remote(&self, _remote: SocketAddr) -> io::Result<()> {
         Err(Error::new(ErrorKind::Other, "XDP sockets not supported"))
     }
 }
