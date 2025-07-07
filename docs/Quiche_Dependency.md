@@ -255,6 +255,16 @@ The `scripts/quiche_workflow.sh` script provides a complete local development wo
    ./scripts/maintain_quiche.sh patch
    ```
 
+4. **Submodule Update**:
+   Update the embedded quiche sources to the latest upstream commit and store the
+   new state in version control:
+   ```bash
+   git submodule update --remote libs/patched_quiche
+   git add libs/patched_quiche
+   git commit -m "Update quiche submodule"
+   ```
+   Verify afterwards that all patches still apply and the build succeeds.
+
 ### Version Control
 
 - All changes to quiche must be tracked in git
