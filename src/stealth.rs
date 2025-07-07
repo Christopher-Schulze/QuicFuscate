@@ -726,8 +726,7 @@ impl TlsClientHelloSpoofer {
     }
 
     /// Apply the spoofing parameters using a custom ClientHello from
-    /// `browser_profiles` if available. Falls back to a generated hello when
-    /// no profile file exists.
+    /// `browser_profiles`.
     pub fn apply(
         config: &mut quiche::Config,
         browser: BrowserProfile,
@@ -741,43 +740,14 @@ impl TlsClientHelloSpoofer {
             suites.len()
         );
 
-        // Build a custom ClientHello using rustls and pass it to quiche via FFI.
-        fn build_client_hello(suites: &[u16]) -> Vec<u8> {
-            use rustls::client::{ClientConfig, ClientConnection, ServerName};
-            use rustls::{RootCertStore, ALL_CIPHER_SUITES};
-            use std::sync::Arc;
-
-            let mut cfg = ClientConfig::builder()
-                .with_cipher_suites(ALL_CIPHER_SUITES)
-                .with_safe_default_kx_groups()
-                .with_protocol_versions(&[&rustls::version::TLS13])
-                .unwrap()
-                .with_root_certificates(RootCertStore::empty())
-                .with_no_client_auth();
-
-            let custom: Vec<&'static rustls::SupportedCipherSuite> = suites
-                .iter()
-                .filter_map(|id| {
-                    ALL_CIPHER_SUITES
-                        .iter()
-                        .find(|cs| cs.suite().get_u16() == *id)
-                })
-                .copied()
-                .collect();
-
-            if !custom.is_empty() {
-                cfg.cipher_suites = custom;
+        // Load a pre-recorded ClientHello from disk.
+        let hello = match Self::load_client_hello(browser, os) {
+            Some(h) => h,
+            None => {
+                error!("Missing ClientHello profile for {:?}/{:?}", browser, os);
+                return;
             }
-
-            let server = ServerName::try_from("example.com").unwrap();
-            let mut conn = ClientConnection::new(Arc::new(cfg), server).unwrap();
-            let mut out = Vec::new();
-            let _ = conn.write_tls(&mut out);
-            out
-        }
-
-        let hello =
-            Self::load_client_hello(browser, os).unwrap_or_else(|| build_client_hello(suites));
+        };
         unsafe {
             extern "C" {
                 fn quiche_config_set_custom_tls(cfg: *mut c_void, hello: *const u8, len: usize);
