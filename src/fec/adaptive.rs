@@ -246,12 +246,15 @@ impl ModeManager {
             telemetry::FEC_MODE.set(self.current_mode as i64);
             telemetry::LOSS_RATE.set((estimated_loss * 100.0) as i64);
             telemetry::FEC_MODE_SWITCHES.inc();
+            telemetry::FEC_WINDOW.set(self.current_window as i64);
             return (
                 self.current_mode,
                 self.current_window,
                 Some((prev_mode, prev_window)),
             );
         }
+
+        telemetry::FEC_WINDOW.set(self.current_window as i64);
 
         (self.current_mode, self.current_window, None)
     }
@@ -392,9 +395,9 @@ impl FecConfig {
         let raw: Root = toml::from_str(s)?;
         let af = raw.adaptive_fec;
         let pid = af.pid.unwrap_or(PidSection {
-            kp: 0.5,
-            ki: 0.1,
-            kd: 0.2,
+            kp: 1.2,
+            ki: 0.5,
+            kd: 0.1,
         });
         let mut windows = FecConfig::default_windows();
         if let Some(modes) = af.modes {
@@ -434,9 +437,9 @@ impl Default for FecConfig {
             burst_window: 20,
             hysteresis: 0.02,
             pid: PidConfig {
-                kp: 0.5,
-                ki: 0.1,
-                kd: 0.2,
+                kp: 1.2,
+                ki: 0.5,
+                kd: 0.1,
             },
             initial_mode: FecMode::Zero,
             kalman_enabled: false,
@@ -458,7 +461,7 @@ impl AdaptiveFec {
         );
         let (k, n) = ModeManager::params_for(mode_mgr.current_mode, mode_mgr.current_window);
 
-        Self {
+        let this = Self {
             estimator: Arc::new(Mutex::new(LossEstimator::new(
                 config.lambda,
                 config.burst_window,
@@ -474,7 +477,9 @@ impl AdaptiveFec {
             transition_left: 0,
             mem_pool,
             config,
-        }
+        };
+        telemetry::FEC_WINDOW.set(mode_mgr.current_window as i64);
+        this
     }
 
     pub fn current_mode(&self) -> FecMode {

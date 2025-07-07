@@ -68,6 +68,7 @@ pub struct QuicFuscateConnection {
     outgoing_fec_packets: VecDeque<FecPacket>,
     xdp_socket: Option<XdpSocket>,
     h3_conn: Option<quiche::h3::Connection>,
+    last_telemetry: std::time::Instant,
 }
 
 /// Tracks performance and reliability metrics for a connection.
@@ -191,6 +192,7 @@ impl QuicFuscateConnection {
             outgoing_fec_packets: VecDeque::new(),
             xdp_socket,
             h3_conn: None,
+            last_telemetry: std::time::Instant::now(),
         }
     }
 
@@ -438,6 +440,12 @@ impl QuicFuscateConnection {
         // Report stats to the adaptive FEC controller.
         self.fec
             .report_loss(stats.lost as usize, stats.sent as usize);
+
+        if self.last_telemetry.elapsed() >= std::time::Duration::from_secs(1) {
+            telemetry::update_memory_usage();
+            telemetry::flush();
+            self.last_telemetry = std::time::Instant::now();
+        }
 
         // Handle path events for connection migration
         while let Some(event) = self.conn.path_event_next() {

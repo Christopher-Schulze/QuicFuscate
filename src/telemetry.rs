@@ -6,6 +6,8 @@
 //! - `loss_rate_percent`: Current estimated loss rate multiplied by 100.
 //! - `fec_mode`: Active FEC mode as numeric value.
 //! - `fec_mode_switch_total`: Number of FEC mode transitions.
+//! - `fec_window_size`: Current FEC window size.
+//! - `decoding_time_ms`: Time spent in the last decode run in milliseconds.
 //! - `fec_overflow_total`: Number of times the FEC memory pool had to allocate
 //!   a new block because the pool was exhausted.
 //! - `dns_errors_total`: Number of DNS resolution errors.
@@ -36,6 +38,10 @@ lazy_static! {
         register_int_gauge!("fec_mode", "Current FEC mode").unwrap();
     pub static ref FEC_MODE_SWITCHES: IntCounter =
         register_int_counter!("fec_mode_switch_total", "FEC mode transitions").unwrap();
+    pub static ref FEC_WINDOW: IntGauge =
+        register_int_gauge!("fec_window_size", "Current FEC window size").unwrap();
+    pub static ref DECODING_TIME_MS: IntGauge =
+        register_int_gauge!("decoding_time_ms", "Last decoder runtime in ms").unwrap();
     pub static ref FEC_OVERFLOWS: IntCounter =
         register_int_counter!("fec_overflow_total", "FEC memory pool overflows").unwrap();
     pub static ref DNS_ERRORS: IntCounter =
