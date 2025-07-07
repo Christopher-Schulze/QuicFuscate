@@ -491,7 +491,8 @@ main() {
         log "Starte kompletten Workflow..."
         
         # Definiere die Reihenfolge der Schritte
-        local steps_order=("fetch" "patch" "verify_patches" "build" "test")
+        # Die Patch-Verifikation erfolgt nun automatisch in apply_patches
+        local steps_order=("fetch" "patch" "build" "test")
         
         # Führe jeden Schritt aus
         for step in "${steps_order[@]}"; do

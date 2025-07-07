@@ -53,7 +53,7 @@ use url::Url;
 use crate::crypto::CryptoManager; // Assumed for integration
 use crate::optimize::{self, OptimizationManager}; // Assumed for integration
 use crate::telemetry;
-use std::os::raw::c_void;
+use crate::tls_ffi;
 
 // --- Global Tokio Runtime for async DoH requests ---
 lazy_static! {
@@ -869,11 +869,8 @@ impl TlsClientHelloSpoofer {
             },
         };
         unsafe {
-            extern "C" {
-                fn quiche_config_set_custom_tls(cfg: *mut c_void, hello: *const u8, len: usize);
-            }
-            quiche_config_set_custom_tls(
-                config as *mut _ as *mut c_void,
+            tls_ffi::quiche_config_set_custom_tls(
+                config as *mut _ as *mut std::ffi::c_void,
                 hello.as_ptr(),
                 hello.len(),
             );
