@@ -53,6 +53,15 @@ MIRROR_URL="https://github.com/cloudflare/quiche.git"
 # Make quiche available to Cargo
 export QUICHE_PATH="$PATCHED_DIR/quiche"
 
+# Ensure the quiche submodule exists and is initialized
+init_submodule() {
+    if [ ! -d "$PATCHED_DIR/.git" ]; then
+        log "Initialisiere Submodul libs/patched_quiche"
+        git submodule set-url libs/patched_quiche "$MIRROR_URL" 2>/dev/null || true
+        git submodule update --init --recursive libs/patched_quiche
+    fi
+}
+
 # Erstelle benötigte Verzeichnisse
 mkdir -p "$LOG_DIR" "$PATCHES_DIR" "$PATCHED_DIR"
 
@@ -65,6 +74,8 @@ load_state() {
         LAST_STEP="none"
         BUILD_TYPE="${BUILD_TYPE:-release}"
     fi
+
+    init_submodule
 
     # Ensure quiche sources are present and initialized
     if [ ! -d "$PATCHED_DIR/quiche" ] || [ ! -d "$PATCHED_DIR/.git" ]; then
@@ -217,8 +228,14 @@ apply_patches() {
     run_command "Erstelle Backup vor dem Patchen" \
         "cp -r \"$PATCHED_DIR\" \"$backup_dir\""
     
-    # Wende Patches an in definierter Reihenfolge
-    local ordered=(boringssl_custom_hello.patch custom_tls.patch simd_optimizations.patch readme_quicfuscate.patch)
+    # Reihenfolge der Patches kontrollieren
+    local ordered=()
+    if [ -f "$PATCHES_DIR/series" ]; then
+        mapfile -t ordered < "$PATCHES_DIR/series"
+    else
+        ordered=( $(ls "$PATCHES_DIR"/*.patch 2>/dev/null | sort -V | xargs -n1 basename) )
+    fi
+
     local patch_count=0
     for name in "${ordered[@]}"; do
         local patch_file="$PATCHES_DIR/$name"
@@ -306,8 +323,12 @@ build_quiche() {
     
     rm -f "$latest_link"
     ln -s "$BUILD_TYPE" "$latest_link"
-    
-    success "Build erfolgreich abgeschlossen"
+
+    if ls "$target_dir"/libquiche* >/dev/null 2>&1 || ls "$target_dir"/deps/libquiche* >/dev/null 2>&1; then
+        success "Build erfolgreich abgeschlossen"
+    else
+        error "Erwartete Build-Artefakte fehlen im $target_dir"
+    fi
     log "- Ausgabeverzeichnis: $target_dir"
     log "- Symbolischer Link: $latest_link -> $BUILD_TYPE"
     
