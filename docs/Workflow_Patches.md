@@ -37,3 +37,21 @@ git -C patched_quiche reset --hard HEAD~1
 ```
 
 Store the patch under `libs/patches/`. The workflow applies all patches automatically during builds.
+
+## GitHub Actions
+
+The repository provides an automated workflow in `.github/workflows/build-quiche.yml`.
+It clones the project with all submodules, runs the helper script for each step
+(fetch, patch, verify, build and test) and uploads the resulting artifacts. Run
+it manually from the GitHub UI or trigger it on each push.
+
+### When to create new patches
+
+Create a new patch whenever:
+
+- the quiche submodule is updated,
+- custom TLS handling or SIMD optimizations change, or
+- additional features require modifications to the vendored quiche sources.
+
+Use the procedure above to generate a `.patch` file and store it under
+`libs/patches/`.
