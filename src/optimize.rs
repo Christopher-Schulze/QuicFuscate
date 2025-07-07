@@ -53,7 +53,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 // Use cpufeatures for portable runtime detection
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-cpufeatures::new!(cpuid_x86, "avx512f", "avx2", "avx", "sse2", "vaes", "aes", "pclmulqdq");
+cpufeatures::new!(cpuid_x86, "avx512f", "avx512bw", "avx2", "avx", "sse2", "vaes", "aes", "pclmulqdq");
 #[cfg(target_arch = "aarch64")]
 cpufeatures::new!(cpuid_arm, "neon");
 
@@ -112,7 +112,7 @@ impl FeatureDetector {
                 features.insert(CpuFeature::AVX, info.has_avx());
                 features.insert(CpuFeature::AVX2, info.has_avx2());
                 features.insert(CpuFeature::SSE2, info.has_sse2());
-                features.insert(CpuFeature::AVX512F, info.has_avx512f());
+                features.insert(CpuFeature::AVX512F, info.has_avx512f() && info.has_avx512bw());
                 features.insert(CpuFeature::VAES, info.has_vaes());
                 features.insert(CpuFeature::AESNI, info.has_aes());
                 features.insert(CpuFeature::PCLMULQDQ, info.has_pclmulqdq());
