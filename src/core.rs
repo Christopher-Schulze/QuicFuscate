@@ -338,7 +338,11 @@ impl QuicFuscateConnection {
             telemetry!(telemetry::XDP_ACTIVE.set(0));
         }
 
-        self.conn.migrate(self.local_addr, new_peer)
+        let res = self.conn.migrate(self.local_addr, new_peer);
+        if res.is_ok() {
+            telemetry!(telemetry::PATH_MIGRATIONS.inc());
+        }
+        res
     }
 
     /// Returns the Host header that should be used for HTTP requests when domain

@@ -137,6 +137,7 @@ To migrate an established connection to a new local port, call `migrate_connecti
 
 ```rust
 let new_addr = "127.0.0.1:0".parse().unwrap();
-conn.migrate_connection(new_addr).unwrap();
+let path_id = conn.migrate_connection(new_addr).unwrap();
+println!("migrated to path {path_id}");
 ```
 The library records successful migrations via the `path_migrations_total` telemetry counter.
