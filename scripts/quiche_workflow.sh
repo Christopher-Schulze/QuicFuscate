@@ -137,12 +137,7 @@ patch_failure() {
     local backup_dir="$2"
     warn "$message"
     rollback_backup "$backup_dir"
-    read -r -p "Erneut versuchen? [j/N] " retry
-    if [[ $retry =~ ^[JjYy]$ ]]; then
-        apply_patches
-    else
-        error "Patchvorgang abgebrochen."
-    fi
+    error "Patchvorgang abgebrochen: $message"
 }
 
 fetch_quiche() {

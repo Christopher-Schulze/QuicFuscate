@@ -272,6 +272,10 @@ The `scripts/quiche_workflow.sh` script provides a complete local development wo
    - Check system resource usage
    - Review optimization flags
 
+3. **Patch Application Failures**
+   - The workflow aborts automatically when a patch fails to apply.
+   - Review the error message and fix the patch before rerunning.
+
 ### Getting Help
 
 For issues with the quiche integration:
