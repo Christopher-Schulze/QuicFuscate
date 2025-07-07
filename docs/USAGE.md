@@ -9,7 +9,7 @@ quicfuscate client \
   --profile chrome \
   --front-domain cdn.example.com \
   --verify-peer \
-  --fec-config ./fec.toml
+  --config ./example_config.toml
 ```
 
 ## Server
@@ -20,12 +20,12 @@ quicfuscate server \
   --cert ./server.crt \
   --key ./server.key \
   --profile firefox \
-  --fec-config ./fec.toml
+  --config ./example_config.toml
 ```
 
 Ensure certificate and key are valid PEM files. Use `CTRL+C` to gracefully stop the process.
 
-The optional `--fec-config` flag loads Adaptive FEC parameters from the specified TOML file.
+Use the `--config` flag to load a unified TOML file containing FEC, stealth and optimization settings. See `docs/example_config.toml` for details.
 
 ### Stealth Options
 
@@ -93,9 +93,9 @@ quicfuscate server \
   --pool-block 4096
 ```
 
-### Example FEC Configuration
+### Example Configuration
 
-Provide a TOML file via `--fec-config` to fine-tune the adaptive engine:
+The file `docs/example_config.toml` demonstrates how to tune the adaptive engine:
 
 ```toml
 [adaptive_fec]

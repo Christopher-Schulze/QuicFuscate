@@ -55,6 +55,8 @@ lazy_static! {
         register_int_gauge!("xdp_active", "XDP enabled status").unwrap();
     pub static ref MEM_POOL_CAPACITY: IntGauge =
         register_int_gauge!("mem_pool_capacity", "Memory pool capacity").unwrap();
+    pub static ref MEM_POOL_BLOCK_SIZE: IntGauge =
+        register_int_gauge!("mem_pool_block_size", "Memory pool block size").unwrap();
     pub static ref MEM_POOL_IN_USE: IntGauge =
         register_int_gauge!("mem_pool_in_use", "Memory pool blocks in use").unwrap();
     pub static ref MEM_POOL_USAGE_BYTES: IntGauge =
@@ -85,6 +87,10 @@ lazy_static! {
         register_int_counter!("simd_usage_neon_total", "SIMD NEON dispatches").unwrap();
     pub static ref SIMD_USAGE_SCALAR: IntCounter =
         register_int_counter!("simd_usage_scalar_total", "Scalar dispatches").unwrap();
+    pub static ref STEALTH_BROWSER_PROFILE: IntGauge =
+        register_int_gauge!("stealth_browser_profile", "Active browser profile").unwrap();
+    pub static ref STEALTH_OS_PROFILE: IntGauge =
+        register_int_gauge!("stealth_os_profile", "Active OS profile").unwrap();
     pub static ref PATH_MIGRATIONS: IntCounter =
         register_int_counter!("path_migrations_total", "Successful connection migrations").unwrap();
 }

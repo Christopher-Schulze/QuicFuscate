@@ -1,0 +1,25 @@
+[adaptive_fec]
+lambda = 0.05
+burst_window = 30
+hysteresis = 0.02
+kalman_enabled = true
+kalman_q = 0.002
+kalman_r = 0.02
+
+[[adaptive_fec.modes]]
+name = "light"
+w0 = 20
+
+[stealth]
+browser_profile = "chrome"
+os_profile = "windows"
+enable_doh = true
+doh_provider = "https://cloudflare-dns.com/dns-query"
+enable_domain_fronting = true
+fronting_domains = ["cdn.example.com"]
+enable_xor_obfuscation = true
+
+[optimize]
+pool_capacity = 1024
+block_size = 4096
+enable_xdp = false

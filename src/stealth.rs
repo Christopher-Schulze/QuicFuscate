@@ -948,6 +948,17 @@ impl StealthConfig {
         let contents = std::fs::read_to_string(path)?;
         Self::from_toml(&contents)
     }
+
+    /// Validate the configuration values.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.enable_doh && self.doh_provider.is_empty() {
+            return Err("doh_provider must not be empty when DoH is enabled".into());
+        }
+        if self.enable_domain_fronting && self.fronting_domains.is_empty() && self.cdn_providers.is_empty() {
+            return Err("fronting_domains required when domain fronting is enabled".into());
+        }
+        Ok(())
+    }
 }
 
 /// The central orchestrator for all stealth techniques.
