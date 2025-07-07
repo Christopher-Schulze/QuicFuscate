@@ -182,11 +182,15 @@ fn gf8_window_512() {
             dec.add_packet(pkt).unwrap();
         }
     }
-    for r in repairs { dec.add_packet(r).unwrap(); }
+    for r in repairs {
+        dec.add_packet(r).unwrap();
+    }
     assert!(dec.is_decoded);
     let out = dec.get_decoded_packets();
     assert_eq!(out.len(), k);
-    for i in 0..k { assert_eq!(out[i].data.as_ref().unwrap()[0], (i % 256) as u8); }
+    for i in 0..k {
+        assert_eq!(out[i].data.as_ref().unwrap()[0], (i % 256) as u8);
+    }
 }
 
 #[test]
@@ -208,13 +212,19 @@ fn gf16_window_1024() {
     }
     let mut dec = Decoder16::new(k, Arc::clone(&pool));
     for (idx, pkt) in packets.into_iter().enumerate() {
-        if idx % 2 == 0 { dec.add_packet(pkt).unwrap(); }
+        if idx % 2 == 0 {
+            dec.add_packet(pkt).unwrap();
+        }
     }
-    for r in repairs { dec.add_packet(r).unwrap(); }
+    for r in repairs {
+        dec.add_packet(r).unwrap();
+    }
     assert!(dec.is_decoded);
     let out = dec.get_decoded_packets();
     assert_eq!(out.len(), k);
-    for i in 0..k { assert_eq!(out[i].data.as_ref().unwrap()[0], (i % 255) as u8); }
+    for i in 0..k {
+        assert_eq!(out[i].data.as_ref().unwrap()[0], (i % 255) as u8);
+    }
 }
 
 #[test]
@@ -246,5 +256,17 @@ fn adaptive_transitions_all_modes() {
         fec.report_loss(*lost, *total);
         sleep(Duration::from_millis(600));
         assert_eq!(fec.current_mode(), *mode);
+    }
+}
+
+#[test]
+fn bitsliced_mul_matches_table() {
+    quicfuscate::fec::init_gf_tables();
+    for a in 0u8..=255 {
+        for b in 0u8..=255 {
+            let table = quicfuscate::fec::gf_tables::gf_mul_table(a, b);
+            let bs = quicfuscate::fec::gf_tables::gf_mul(a, b);
+            assert_eq!(table, bs, "a={} b={} mismatch", a, b);
+        }
     }
 }

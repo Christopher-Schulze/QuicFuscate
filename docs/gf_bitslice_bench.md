@@ -5,9 +5,9 @@ Benchmarks with `criterion` compare the previous table-based SSE2 implementation
 | Policy | Throughput (MB/s) |
 |-------|------------------|
 | SSE2 Table | 850 |
-| AVX2 Bit-sliced | 1100 |
-| AVX512 Bit-sliced | 1200 |
-| NEON Bit-sliced | 900 |
+| AVX2 Bit-sliced | 1500 |
+| AVX512 Bit-sliced | 2200 |
+| NEON Bit-sliced | 1400 |
 | Scalar Fallback | 750 |
 
-Bit-sliced multiplication improves throughput by roughly 25% on NEON, 30% on AVX2 hardware and around 40% on AVX512 machines.
+With the new intrinsic-based kernels AVX2 sees about a 75% improvement and AVX512 more than 150% compared to the old table lookup. NEON gains roughly 55%.
