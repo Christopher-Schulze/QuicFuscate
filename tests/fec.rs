@@ -126,6 +126,40 @@ fn gf8_large_window() {
 }
 
 #[test]
+fn gf16_large_window() {
+    quicfuscate::fec::init_gf_tables();
+    let pool = Arc::new(MemoryPool::new(8192, 64));
+    let k = 512;
+    let n = k + 8;
+    let mut enc = Encoder16::new(k, n);
+    let mut packets = Vec::new();
+    for i in 0..k {
+        let p = make_packet(i as u64, (i % 255) as u8, &pool);
+        enc.add_source_packet(p.clone());
+        packets.push(p);
+    }
+    let mut repairs = Vec::new();
+    for i in 0..(n - k) {
+        repairs.push(enc.generate_repair_packet(i, &pool).unwrap());
+    }
+    let mut dec = Decoder16::new(k, Arc::clone(&pool));
+    for (idx, pkt) in packets.into_iter().enumerate() {
+        if idx % 3 != 0 {
+            dec.add_packet(pkt).unwrap();
+        }
+    }
+    for r in repairs {
+        dec.add_packet(r).unwrap();
+    }
+    assert!(dec.is_decoded);
+    let out = dec.get_decoded_packets();
+    assert_eq!(out.len(), k);
+    for i in 0..k {
+        assert_eq!(out[i].data.as_ref().unwrap()[0], (i % 255) as u8);
+    }
+}
+
+#[test]
 fn adaptive_transitions_all_modes() {
     use std::thread::sleep;
     use std::time::Duration;
