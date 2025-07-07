@@ -39,8 +39,7 @@
 use crate::{cpu_features, CpuFeature};
 use aead::{AeadInPlace, KeyInit, Nonce, Tag};
 use aegis::compat::rustcrypto_traits_06::{
-    aegis128l::Aegis128L as Aegis128LAead,
-    aegis128x2::Aegis128X2 as Aegis128XAead,
+    aegis128l::Aegis128L as Aegis128LAead, aegis128x2::Aegis128X2 as Aegis128XAead,
 };
 use morus::Morus;
 use rand::{rngs::OsRng, RngCore};
@@ -129,8 +128,7 @@ impl CipherImpl for Aegis128LImpl {
         ad: &[u8],
         plaintext: &[u8],
     ) -> Result<Vec<u8>, &'static str> {
-        let cipher = Aegis128LAead::<16>::new_from_slice(key)
-            .map_err(|_| "Invalid key length")?;
+        let cipher = Aegis128LAead::<16>::new_from_slice(key).map_err(|_| "Invalid key length")?;
         let mut buffer = plaintext.to_vec();
         let nonce = Nonce::<Aegis128LAead<16>>::from_slice(nonce);
         let tag: Tag<Aegis128LAead<16>> = cipher
@@ -150,8 +148,7 @@ impl CipherImpl for Aegis128LImpl {
         if ciphertext.len() < 16 {
             return Err("Ciphertext too short");
         }
-        let cipher = Aegis128LAead::<16>::new_from_slice(key)
-            .map_err(|_| "Invalid key length")?;
+        let cipher = Aegis128LAead::<16>::new_from_slice(key).map_err(|_| "Invalid key length")?;
         let (msg, tag_slice) = ciphertext.split_at(ciphertext.len() - 16);
         let mut buffer = msg.to_vec();
         cipher
@@ -177,7 +174,9 @@ impl CipherImpl for MorusImpl {
         plaintext: &[u8],
     ) -> Result<Vec<u8>, &'static str> {
         let key_array: &[u8; 16] = key.try_into().map_err(|_| "Invalid key length for Morus")?;
-        let nonce_array: &[u8; 16] = nonce.try_into().map_err(|_| "Invalid nonce length for Morus")?;
+        let nonce_array: &[u8; 16] = nonce
+            .try_into()
+            .map_err(|_| "Invalid nonce length for Morus")?;
         let mut cipher = Morus::new(key_array, nonce_array);
         let (mut ciphertext, tag) = cipher.encrypt(plaintext, ad);
         ciphertext.extend_from_slice(&tag);
@@ -195,11 +194,15 @@ impl CipherImpl for MorusImpl {
             return Err("Ciphertext too short for Morus");
         }
         let key_array: &[u8; 16] = key.try_into().map_err(|_| "Invalid key length for Morus")?;
-        let nonce_array: &[u8; 16] = nonce.try_into().map_err(|_| "Invalid nonce length for Morus")?;
+        let nonce_array: &[u8; 16] = nonce
+            .try_into()
+            .map_err(|_| "Invalid nonce length for Morus")?;
         let mut cipher = Morus::new(key_array, nonce_array);
         let (msg, tag_slice) = ciphertext.split_at(ciphertext.len() - 16);
         let tag: &[u8; 16] = tag_slice.try_into().unwrap();
-        cipher.decrypt(msg, tag, ad).map_err(|_| "Decryption failed")
+        cipher
+            .decrypt(msg, tag, ad)
+            .map_err(|_| "Decryption failed")
     }
 }
 
@@ -216,7 +219,8 @@ impl CipherSuiteSelector {
 
         let selected_suite = if detector.has_feature(CpuFeature::VAES) {
             CipherSuite::Aegis128X
-        } else if detector.has_feature(CpuFeature::AESNI) || detector.has_feature(CpuFeature::NEON) {
+        } else if detector.has_feature(CpuFeature::AESNI) || detector.has_feature(CpuFeature::NEON)
+        {
             CipherSuite::Aegis128L
         } else {
             CipherSuite::Morus1280_128
@@ -232,7 +236,10 @@ impl CipherSuiteSelector {
             CipherSuite::Morus1280_128 => Box::new(MorusImpl),
         };
 
-        Self { selected_suite: suite, cipher }
+        Self {
+            selected_suite: suite,
+            cipher,
+        }
     }
 
     /// Returns the IANA TLS cipher suite identifier corresponding to the
@@ -241,7 +248,8 @@ impl CipherSuiteSelector {
         match self.selected_suite {
             CipherSuite::Aegis128X => 0x1302, // TLS_AES_256_GCM_SHA384
             CipherSuite::Aegis128L => 0x1301, // TLS_AES_128_GCM_SHA256
-            CipherSuite::Morus1280_128 => 0x1303, // TLS_CHACHA20_POLY1305_SHA256
+            // Custom ID reserved for MORUS-1280-128
+            CipherSuite::Morus1280_128 => 0x1304,
         }
     }
 
@@ -251,12 +259,24 @@ impl CipherSuiteSelector {
     }
 
     /// Encrypts data using the automatically selected cipher suite.
-    pub fn encrypt(&self, key: &[u8], nonce: &[u8], ad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, &'static str> {
+    pub fn encrypt(
+        &self,
+        key: &[u8],
+        nonce: &[u8],
+        ad: &[u8],
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, &'static str> {
         self.cipher.encrypt(key, nonce, ad, plaintext)
     }
 
     /// Decrypts data using the automatically selected cipher suite.
-    pub fn decrypt(&self, key: &[u8], nonce: &[u8], ad: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, &'static str> {
+    pub fn decrypt(
+        &self,
+        key: &[u8],
+        nonce: &[u8],
+        ad: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, &'static str> {
         self.cipher.decrypt(key, nonce, ad, ciphertext)
     }
 }
