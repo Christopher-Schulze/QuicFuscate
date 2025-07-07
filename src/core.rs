@@ -88,6 +88,7 @@ impl QuicFuscateConnection {
         stealth_config: StealthConfig,
         mut fec_config: FecConfig,
         opt_cfg: OptimizeConfig,
+        use_utls: bool,
     ) -> Result<Self, String> {
         // --- Explicitly set BBRv2 Congestion Control as per PLAN.txt ---
         config.set_cc_algorithm(quiche::CongestionControlAlgorithm::BBRv2);
@@ -102,8 +103,10 @@ impl QuicFuscateConnection {
             optimization_manager.clone(),
         ));
 
-        stealth_manager
-            .apply_utls_profile(&mut config, Some(CipherSuiteSelector::new().tls_cipher()));
+        if use_utls {
+            stealth_manager
+                .apply_utls_profile(&mut config, Some(CipherSuiteSelector::new().tls_cipher()));
+        }
 
         let scid = quiche::ConnectionId::from_ref(&[0; quiche::MAX_CONN_ID_LEN]);
 
@@ -320,10 +323,7 @@ impl QuicFuscateConnection {
     /// The underlying QUIC connection will attempt to validate the new path
     /// and switch over once validation succeeds. Any error is returned so the
     /// caller can react accordingly.
-    pub fn migrate_connection(
-        &mut self,
-        new_peer: SocketAddr,
-    ) -> Result<u64, quiche::Error> {
+    pub fn migrate_connection(&mut self, new_peer: SocketAddr) -> Result<u64, quiche::Error> {
         // Initiate path migration using quiche's API. The local address remains
         // unchanged, but a new peer address is supplied. quiche handles sending
         // the probing packets required for validation.
@@ -407,7 +407,10 @@ impl QuicFuscateConnection {
                     Err(e) => return Err(e),
                 }
             }
-            println!("HTTP/3 events processed in {} ms", start.elapsed().as_millis());
+            println!(
+                "HTTP/3 events processed in {} ms",
+                start.elapsed().as_millis()
+            );
         }
         Ok(())
     }
@@ -444,9 +447,7 @@ impl QuicFuscateConnection {
                     println!("Path closed: {local}->{peer}");
                 }
                 quiche::PathEvent::ReusedSourceConnectionId(seq, old, new) => {
-                    println!(
-                        "CID {seq} reused from {old:?} to {new:?}"
-                    );
+                    println!("CID {seq} reused from {old:?} to {new:?}");
                 }
                 quiche::PathEvent::PeerMigrated(local, peer) => {
                     println!("Peer migrated: {local}->{peer}");

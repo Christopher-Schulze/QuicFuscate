@@ -1,9 +1,9 @@
 use crate::core::QuicFuscateConnection;
-use crate::fec::{FecMode, FecConfig};
+use crate::fec::{FecConfig, FecMode};
 use crate::stealth::StealthConfig;
 use crate::stealth::{BrowserProfile, FingerprintProfile, OsProfile};
 use crate::telemetry;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use log::{error, info, warn};
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -16,6 +16,9 @@ use tokio::signal;
 #[clap(author, version, about, long_about = None)]
 #[clap(propagate_version = true)]
 struct Cli {
+    /// Enable verbose logging
+    #[clap(short, long, global = true)]
+    verbose: bool,
     #[clap(subcommand)]
     command: Commands,
 }
@@ -37,12 +40,12 @@ enum Commands {
         url: String,
 
         /// Browser fingerprint profile (chrome, firefox, opera, brave)
-        #[clap(long, default_value = "chrome")]
-        profile: String,
+        #[clap(long, value_enum, default_value_t = BrowserProfile::Chrome)]
+        profile: BrowserProfile,
 
         /// Operating system for the profile (windows, macos, linux, ios, android)
-        #[clap(long, default_value = "windows")]
-        os: String,
+        #[clap(long, value_enum, default_value_t = OsProfile::Windows)]
+        os: OsProfile,
 
         /// Comma separated list of profiles to cycle through
         #[clap(long, value_delimiter = ',')]
@@ -83,6 +86,18 @@ enum Commands {
         /// Domain used for fronting (can be specified multiple times)
         #[clap(long, value_delimiter = ',')]
         front_domain: Vec<String>,
+        /// CA file for peer verification
+        #[clap(long, value_name = "PATH")]
+        ca_file: Option<PathBuf>,
+        /// Disable uTLS and use regular TLS
+        #[clap(long)]
+        no_utls: bool,
+        /// Show TLS debug information
+        #[clap(long)]
+        debug_tls: bool,
+        /// List available browser fingerprints
+        #[clap(long)]
+        list_fingerprints: bool,
         /// Enable certificate validation when connecting to the server
         #[clap(long)]
         verify_peer: bool,
@@ -118,12 +133,12 @@ enum Commands {
         key: PathBuf,
 
         /// Browser fingerprint profile used for connections
-        #[clap(long, default_value = "chrome")]
-        profile: String,
+        #[clap(long, value_enum, default_value_t = BrowserProfile::Chrome)]
+        profile: BrowserProfile,
 
         /// Operating system for the profile (windows, macos, linux, ios, android)
-        #[clap(long, default_value = "windows")]
-        os: String,
+        #[clap(long, value_enum, default_value_t = OsProfile::Windows)]
+        os: OsProfile,
 
         /// Comma separated list of profiles to cycle through
         #[clap(long, value_delimiter = ',')]
@@ -165,9 +180,12 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    let cli = Cli::parse();
+    if cli.verbose {
+        std::env::set_var("RUST_LOG", "info");
+    }
     env_logger::init();
     crate::telemetry::serve("0.0.0.0:9898");
-    let cli = Cli::parse();
 
     match &cli.command {
         Commands::Client {
@@ -182,13 +200,18 @@ async fn main() -> std::io::Result<()> {
             fec_config,
             doh_provider,
             front_domain,
+            ca_file,
+            no_utls,
+            debug_tls,
+            list_fingerprints,
+            verify_peer,
             disable_doh,
             disable_fronting,
             disable_xor,
             disable_http3,
         } => {
-            let browser = profile.parse().unwrap_or(BrowserProfile::Chrome);
-            let os_profile = os.parse().unwrap_or(OsProfile::Windows);
+            let browser = *profile;
+            let os_profile = *os;
             run_client(
                 remote,
                 local,
@@ -203,6 +226,10 @@ async fn main() -> std::io::Result<()> {
                 fec_config,
                 &doh_provider,
                 &front_domain,
+                &ca_file,
+                *no_utls,
+                *debug_tls,
+                *list_fingerprints,
                 *verify_peer,
                 *disable_doh,
                 *disable_fronting,
@@ -220,6 +247,8 @@ async fn main() -> std::io::Result<()> {
             profile_seq,
             profile_interval,
             fec_mode,
+            pool_capacity,
+            pool_block,
             fec_config,
             doh_provider,
             front_domain,
@@ -228,8 +257,8 @@ async fn main() -> std::io::Result<()> {
             disable_xor,
             disable_http3,
         } => {
-            let browser = profile.parse().unwrap_or(BrowserProfile::Chrome);
-            let os_profile = os.parse().unwrap_or(OsProfile::Windows);
+            let browser = *profile;
+            let os_profile = *os;
             run_server(
                 listen,
                 cert,
@@ -259,9 +288,21 @@ async fn main() -> std::io::Result<()> {
 fn parse_profile_entry(entry: &str, default_os: OsProfile) -> Option<FingerprintProfile> {
     let parts: Vec<&str> = entry.split('@').collect();
     let browser_part = parts.get(0)?;
-    let browser = browser_part.parse().ok()?;
+    let browser = match browser_part.parse() {
+        Ok(b) => b,
+        Err(_) => {
+            eprintln!("Invalid browser profile: {}", browser_part);
+            return None;
+        }
+    };
     let os = if let Some(os_part) = parts.get(1) {
-        os_part.parse().ok()?
+        match os_part.parse() {
+            Ok(o) => o,
+            Err(_) => {
+                eprintln!("Invalid OS profile: {}", os_part);
+                return None;
+            }
+        }
     } else {
         default_os
     };
@@ -282,12 +323,24 @@ async fn run_client(
     fec_config: &Option<PathBuf>,
     doh_provider: &str,
     front_domain: &Vec<String>,
+    ca_file: &Option<PathBuf>,
+    no_utls: bool,
+    debug_tls: bool,
+    list_fingerprints: bool,
     verify_peer: bool,
     disable_doh: bool,
     disable_fronting: bool,
     disable_xor: bool,
     disable_http3: bool,
 ) -> std::io::Result<()> {
+    if list_fingerprints {
+        println!("Available browser profiles:");
+        for v in BrowserProfile::value_variants() {
+            println!("- {}", v.to_possible_value().unwrap().get_name());
+        }
+        return Ok(());
+    }
+
     let server_addr = remote_addr_str.to_socket_addrs()?.next().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "Server address not found")
     })?;
@@ -306,7 +359,13 @@ async fn run_client(
     info!("Client connecting to {}", server_addr);
 
     let mut fec_cfg = if let Some(path) = fec_config {
-        FecConfig::from_file(path).unwrap_or_default()
+        match FecConfig::from_file(path) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                error!("Failed to load FEC config {}: {}", path.display(), e);
+                FecConfig::default()
+            }
+        }
     } else {
         FecConfig::default()
     };
@@ -325,6 +384,14 @@ async fn run_client(
     config.set_initial_max_streams_bidi(100);
     config.set_initial_max_streams_uni(100);
     config.verify_peer(verify_peer);
+    if debug_tls {
+        config.log_keys();
+    }
+    if let Some(path) = ca_file {
+        if let Err(e) = config.load_verify_locations_from_file(path.to_str().unwrap()) {
+            error!("Failed to load CA file {}: {}", path.display(), e);
+        }
+    }
 
     let url_parsed =
         url::Url::parse(url).unwrap_or_else(|_| url::Url::parse("https://example.com/").unwrap());
@@ -350,6 +417,7 @@ async fn run_client(
             pool_capacity,
             block_size: pool_block,
         },
+        !no_utls,
     )
     .expect("failed to create client connection");
 
@@ -465,7 +533,13 @@ async fn run_server(
     info!("Server listening on {}", listen_addr);
 
     let mut fec_cfg = if let Some(path) = fec_config {
-        FecConfig::from_file(path).unwrap_or_default()
+        match FecConfig::from_file(path) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                error!("Failed to load FEC config {}: {}", path.display(), e);
+                FecConfig::default()
+            }
+        }
     } else {
         FecConfig::default()
     };
