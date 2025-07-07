@@ -152,6 +152,7 @@ The system dynamically adjusts redundancy and window sizes based on real-time ne
     *   **SIMD Acceleration**: Galois Field (GF(2⁸)) arithmetic nutzt nun bitgeschnittene Kernels (AVX2/AVX512/NEON), siehe `docs/issues/004-gf-bitslicing.md`.
     *   **Multi-Threading**: Tokio tasks are used to manage sliding windows, while Rayon is used for parallelizing bulk decoding operations.
     *   **Memory Management**: Pre-allocated memory pools are used for window matrices to avoid `malloc`/`free` overhead during runtime. NUMA-awareness ensures memory stays local to the processing CPU socket.
+    *   **NUMA Configuration**: On multi-socket machines the memory pool allocates blocks per NUMA node via `libnuma` so each worker accesses local memory.
 
 ##### Rust Implementation Blueprint
 
