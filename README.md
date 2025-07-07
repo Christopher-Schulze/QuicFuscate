@@ -117,6 +117,15 @@ When building manually make sure this variable points to
 export QUICHE_PATH=$(pwd)/libs/patched_quiche/quiche
 ```
 
+### ⚠️ Ohne Fetch kein Build
+
+`cargo build` schlägt fehl, wenn das Verzeichnis `libs/patched_quiche/quiche`
+noch nicht existiert. Führe deshalb vor dem Bauen immer zuerst:
+
+```bash
+./scripts/quiche_workflow.sh --step fetch
+```
+
 ### Building quiche
 
 Compile the patched **quiche** library using Cargo:
