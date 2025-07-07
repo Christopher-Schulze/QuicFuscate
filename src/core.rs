@@ -37,7 +37,7 @@
 
 use crate::crypto::{CipherSuiteSelector, CryptoManager};
 use crate::fec::{AdaptiveFec, FecConfig, Packet as FecPacket, PidConfig};
-use crate::optimize::{MemoryPool, OptimizationManager};
+use crate::optimize::{MemoryPool, OptimizationManager, OptimizeConfig};
 use crate::stealth::{StealthConfig, StealthManager};
 use crate::xdp_socket::XdpSocket;
 use std::collections::VecDeque;
@@ -87,6 +87,7 @@ impl QuicFuscateConnection {
         mut config: quiche::Config,
         stealth_config: StealthConfig,
         mut fec_config: FecConfig,
+        opt_cfg: OptimizeConfig,
     ) -> Result<Self, String> {
         // --- Explicitly set BBRv2 Congestion Control as per PLAN.txt ---
         config.set_cc_algorithm(quiche::CongestionControlAlgorithm::BBRv2);
@@ -94,7 +95,7 @@ impl QuicFuscateConnection {
         config.enable_mtu_probing();
 
         let crypto_manager = Arc::new(CryptoManager::new());
-        let optimization_manager = Arc::new(OptimizationManager::new());
+        let optimization_manager = Arc::new(OptimizationManager::from_cfg(opt_cfg));
         let stealth_manager = Arc::new(StealthManager::new(
             stealth_config,
             crypto_manager.clone(),
@@ -132,12 +133,13 @@ impl QuicFuscateConnection {
         mut config: quiche::Config,
         stealth_config: StealthConfig,
         mut fec_config: FecConfig,
+        opt_cfg: OptimizeConfig,
     ) -> Result<Self, String> {
         config.set_cc_algorithm(quiche::CongestionControlAlgorithm::BBRv2);
         config.enable_mtu_probing();
 
         let crypto_manager = Arc::new(CryptoManager::new());
-        let optimization_manager = Arc::new(OptimizationManager::new());
+        let optimization_manager = Arc::new(OptimizationManager::from_cfg(opt_cfg));
         let stealth_manager = Arc::new(StealthManager::new(
             stealth_config,
             crypto_manager.clone(),

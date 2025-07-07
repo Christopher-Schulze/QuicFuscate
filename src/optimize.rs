@@ -53,6 +53,22 @@ use std::os::unix::io::RawFd;
 use std::sync::{Arc, Once, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// Configuration for optimization parameters passed from the CLI.
+#[derive(Clone, Copy)]
+pub struct OptimizeConfig {
+    pub pool_capacity: usize,
+    pub block_size: usize,
+}
+
+impl Default for OptimizeConfig {
+    fn default() -> Self {
+        Self {
+            pool_capacity: 1024,
+            block_size: 4096,
+        }
+    }
+}
+
 /// Enumerates the CPU features relevant for QuicFuscate's optimizations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CpuFeature {
@@ -104,6 +120,14 @@ impl FeatureDetector {
             // Unsafe block is required to initialize the static mutable variable.
             // `Once::call_once` guarantees this is safe and runs only once.
             unsafe {
+                let mask = features.iter().fold(0u64, |m, (k, v)| {
+                    if *v {
+                        m | (1u64 << (*k as u8))
+                    } else {
+                        m
+                    }
+                });
+                telemetry::CPU_FEATURE_MASK.set(mask as i64);
                 DETECTOR = Some(FeatureDetector { features });
             }
         });
@@ -208,6 +232,7 @@ pub struct MemoryPool {
     pool: Arc<Mutex<Vec<AlignedBox<[u8]>>>>,
     block_size: usize,
     capacity: Arc<AtomicUsize>,
+    in_use: AtomicUsize,
 }
 
 impl MemoryPool {
@@ -219,10 +244,12 @@ impl MemoryPool {
             let aligned_box = AlignedBox::slice_from_default(64, block_size).unwrap();
             vec.push(aligned_box);
         }
+        telemetry::MEM_POOL_CAPACITY.set(capacity as i64);
         Self {
             pool: Arc::new(Mutex::new(vec)),
             block_size,
             capacity: Arc::new(AtomicUsize::new(capacity)),
+            in_use: AtomicUsize::new(0),
         }
     }
 
@@ -231,9 +258,17 @@ impl MemoryPool {
     pub fn alloc(&self) -> AlignedBox<[u8]> {
         let mut pool = self.pool.lock().unwrap();
         match pool.pop() {
-            Some(b) => b,
+            Some(b) => {
+                let cnt = self.in_use.fetch_add(1, Ordering::Relaxed) + 1;
+                telemetry::MEM_POOL_IN_USE.set(cnt as i64);
+                b
+            }
             None => {
                 telemetry::FEC_OVERFLOWS.inc();
+                let cap = self.capacity.fetch_add(1, Ordering::Relaxed) + 1;
+                telemetry::MEM_POOL_CAPACITY.set(cap as i64);
+                self.in_use.fetch_add(1, Ordering::Relaxed);
+                telemetry::MEM_POOL_IN_USE.set(self.in_use.load(Ordering::Relaxed) as i64);
                 AlignedBox::slice_from_default(64, self.block_size).unwrap()
             }
         }
@@ -247,11 +282,14 @@ impl MemoryPool {
         if pool.len() < self.capacity.load(Ordering::Relaxed) {
             pool.push(block);
         }
+        let cnt = self.in_use.fetch_sub(1, Ordering::Relaxed) - 1;
+        telemetry::MEM_POOL_IN_USE.set(cnt as i64);
     }
 
     /// Adjusts the maximum number of cached blocks at runtime.
     pub fn set_capacity(&self, new_capacity: usize) {
         self.capacity.store(new_capacity, Ordering::Relaxed);
+        telemetry::MEM_POOL_CAPACITY.set(new_capacity as i64);
         let mut pool = self.pool.lock().unwrap();
         while pool.len() > new_capacity {
             pool.pop();
@@ -359,14 +397,21 @@ pub struct OptimizationManager {
 }
 
 impl OptimizationManager {
-    pub fn new() -> Self {
-        // Default values for capacity and block size, can be made configurable later.
+    pub fn new_with_config(capacity: usize, block_size: usize) -> Self {
         let xdp_available = XdpSocket::is_supported();
         info!("XDP available: {}", xdp_available);
         Self {
-            memory_pool: Arc::new(MemoryPool::new(1024, 4096)),
+            memory_pool: Arc::new(MemoryPool::new(capacity, block_size)),
             xdp_available,
         }
+    }
+
+    pub fn from_cfg(cfg: OptimizeConfig) -> Self {
+        Self::new_with_config(cfg.pool_capacity, cfg.block_size)
+    }
+
+    pub fn new() -> Self {
+        Self::new_with_config(1024, 4096)
     }
 
     pub fn alloc_block(&self) -> AlignedBox<[u8]> {

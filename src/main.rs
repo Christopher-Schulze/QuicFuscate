@@ -2,6 +2,7 @@ use crate::core::QuicFuscateConnection;
 use crate::fec::{FecMode, FecConfig};
 use crate::stealth::StealthConfig;
 use crate::stealth::{BrowserProfile, FingerprintProfile, OsProfile};
+use crate::telemetry;
 use clap::{Parser, Subcommand};
 use log::{error, info, warn};
 use std::collections::HashMap;
@@ -54,6 +55,22 @@ enum Commands {
         /// Initial FEC mode
         #[clap(long, value_enum, default_value = "zero")]
         fec_mode: FecMode,
+
+        /// Memory pool capacity (number of blocks)
+        #[clap(long, default_value_t = 1024)]
+        pool_capacity: usize,
+
+        /// Memory pool block size in bytes
+        #[clap(long, default_value_t = 4096)]
+        pool_block: usize,
+
+        /// Memory pool capacity (number of blocks)
+        #[clap(long, default_value_t = 1024)]
+        pool_capacity: usize,
+
+        /// Memory pool block size in bytes
+        #[clap(long, default_value_t = 4096)]
+        pool_block: usize,
 
         /// Path to a TOML file with Adaptive FEC settings
         #[clap(long, value_name = "PATH")]
@@ -181,6 +198,8 @@ async fn main() -> std::io::Result<()> {
                 profile_seq,
                 *profile_interval,
                 *fec_mode,
+                *pool_capacity,
+                *pool_block,
                 fec_config,
                 &doh_provider,
                 &front_domain,
@@ -220,6 +239,8 @@ async fn main() -> std::io::Result<()> {
                 profile_seq,
                 *profile_interval,
                 *fec_mode,
+                *pool_capacity,
+                *pool_block,
                 fec_config,
                 &doh_provider,
                 &front_domain,
@@ -256,6 +277,8 @@ async fn run_client(
     profile_seq: &Option<Vec<String>>,
     profile_interval: u64,
     fec_mode: FecMode,
+    pool_capacity: usize,
+    pool_block: usize,
     fec_config: &Option<PathBuf>,
     doh_provider: &str,
     front_domain: &Vec<String>,
@@ -323,6 +346,10 @@ async fn run_client(
         config,
         stealth_config,
         fec_cfg,
+        OptimizeConfig {
+            pool_capacity,
+            block_size: pool_block,
+        },
     )
     .expect("failed to create client connection");
 
@@ -345,6 +372,7 @@ async fn run_client(
     // Send initial packet
     if let Ok(len) = conn.send(&mut out) {
         if len > 0 {
+            telemetry::BYTES_SENT.inc_by(len as u64);
             socket.send(&out[..len])?;
             info!("Sent initial packet of size {}", len);
         }
@@ -364,6 +392,7 @@ async fn run_client(
                 // Process incoming packets
                 match socket.recv(&mut buf) {
                     Ok(len) => {
+                        telemetry::BYTES_RECEIVED.inc_by(len as u64);
                         let _ = conn.recv(&buf[..len]);
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
@@ -388,6 +417,7 @@ async fn run_client(
         loop {
             match conn.send(&mut out) {
                 Ok(len) if len > 0 => {
+                    telemetry::BYTES_SENT.inc_by(len as u64);
                     socket.send(&out[..len])?;
                 }
                 Ok(_) => break,
@@ -420,6 +450,8 @@ async fn run_server(
     profile_seq: &Option<Vec<String>>,
     profile_interval: u64,
     fec_mode: FecMode,
+    pool_capacity: usize,
+    pool_block: usize,
     fec_config: &Option<PathBuf>,
     doh_provider: &str,
     front_domain: &Vec<String>,
@@ -508,6 +540,7 @@ async fn run_server(
             _ = async {
                 match socket.recv_from(&mut buf) {
             Ok((len, from)) => {
+                telemetry::BYTES_RECEIVED.inc_by(len as u64);
                 info!("Received {} bytes from {}", len, from);
                 let client_conn = clients.entry(from).or_insert_with(|| {
                     info!("New client connected: {}", from);
@@ -521,6 +554,10 @@ async fn run_server(
                         config.clone(),
                         cfg,
                         fec_cfg.clone(),
+                        OptimizeConfig {
+                            pool_capacity,
+                            block_size: pool_block,
+                        },
                     )
                     .expect("failed to create server connection")
                 });
@@ -548,6 +585,7 @@ async fn run_server(
             loop {
                 match conn.send(&mut out) {
                     Ok(len) if len > 0 => {
+                        telemetry::BYTES_SENT.inc_by(len as u64);
                         if let Err(e) = socket.send_to(&out[..len], addr) {
                             error!("Failed to send packet to {}: {}", addr, e);
                         }

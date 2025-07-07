@@ -1,5 +1,6 @@
 #[cfg(unix)]
 use crate::optimize::ZeroCopyBuffer;
+use crate::telemetry;
 #[cfg(unix)]
 use std::io::{self, Error, ErrorKind};
 #[cfg(unix)]
@@ -34,6 +35,7 @@ impl XdpSocket {
         if ret < 0 {
             Err(Error::last_os_error())
         } else {
+            telemetry::BYTES_SENT.inc_by(ret as u64);
             Ok(ret as usize)
         }
     }
@@ -46,6 +48,7 @@ impl XdpSocket {
         if ret < 0 {
             Err(Error::last_os_error())
         } else {
+            telemetry::BYTES_RECEIVED.inc_by(ret as u64);
             Ok(ret as usize)
         }
     }
