@@ -37,8 +37,12 @@
 //! based on detected CPU capabilities.
 
 use crate::{cpu_features, CpuFeature};
-use aead::{Aead, KeyInit};
-use aegis::{aegis128l::Aegis128L, aegis128x::Aegis128X};
+use aead::{AeadInPlace, KeyInit};
+use aead::generic_array::GenericArray;
+use aegis::compat::rustcrypto_traits_06::{
+    aegis128l::Aegis128L as Aegis128LAead,
+    aegis128x2::Aegis128X2 as Aegis128XAead,
+};
 use morus::Morus;
 use rand::{rngs::OsRng, RngCore};
 
@@ -79,12 +83,14 @@ impl CipherImpl for Aegis128XImpl {
         ad: &[u8],
         plaintext: &[u8],
     ) -> Result<Vec<u8>, &'static str> {
-        let key_array: &[u8; 32] = key.try_into().map_err(|_| "Invalid key length for Aegis128X")?;
-        let nonce_array: &[u8; 32] = nonce.try_into().map_err(|_| "Invalid nonce length for Aegis128X")?;
-        let cipher = Aegis128X::new(key_array, nonce_array);
-        let (mut ciphertext, tag) = cipher.encrypt(plaintext, ad);
-        ciphertext.extend_from_slice(&tag);
-        Ok(ciphertext)
+        let cipher = Aegis128XAead::<16>::new_from_slice(key)
+            .map_err(|_| "Invalid key length for Aegis128X")?;
+        let mut buffer = plaintext.to_vec();
+        let tag = cipher
+            .encrypt_in_place_detached(GenericArray::from_slice(nonce), ad, &mut buffer)
+            .map_err(|_| "Encryption failed")?;
+        buffer.extend_from_slice(&tag);
+        Ok(buffer)
     }
 
     fn decrypt(
@@ -97,12 +103,19 @@ impl CipherImpl for Aegis128XImpl {
         if ciphertext.len() < 16 {
             return Err("Ciphertext too short for Aegis128X");
         }
-        let key_array: &[u8; 32] = key.try_into().map_err(|_| "Invalid key length for Aegis128X")?;
-        let nonce_array: &[u8; 32] = nonce.try_into().map_err(|_| "Invalid nonce length for Aegis128X")?;
-        let cipher = Aegis128X::new(key_array, nonce_array);
+        let cipher = Aegis128XAead::<16>::new_from_slice(key)
+            .map_err(|_| "Invalid key length for Aegis128X")?;
         let (msg, tag_slice) = ciphertext.split_at(ciphertext.len() - 16);
-        let tag = aegis::Tag::from_slice(tag_slice);
-        cipher.decrypt(msg, &tag, ad).map_err(|_| "Decryption failed")
+        let mut buffer = msg.to_vec();
+        cipher
+            .decrypt_in_place_detached(
+                GenericArray::from_slice(nonce),
+                ad,
+                &mut buffer,
+                GenericArray::from_slice(tag_slice),
+            )
+            .map_err(|_| "Decryption failed")?;
+        Ok(buffer)
     }
 }
 
@@ -116,12 +129,14 @@ impl CipherImpl for Aegis128LImpl {
         ad: &[u8],
         plaintext: &[u8],
     ) -> Result<Vec<u8>, &'static str> {
-        let key_array: &[u8; 16] = key.try_into().map_err(|_| "Invalid key length")?;
-        let nonce_array: &[u8; 16] = nonce.try_into().map_err(|_| "Invalid nonce length")?;
-        let cipher = Aegis128L::new(key_array, nonce_array);
-        let (mut ciphertext, tag) = cipher.encrypt(plaintext, ad);
-        ciphertext.extend_from_slice(&tag);
-        Ok(ciphertext)
+        let cipher = Aegis128LAead::<16>::new_from_slice(key)
+            .map_err(|_| "Invalid key length")?;
+        let mut buffer = plaintext.to_vec();
+        let tag = cipher
+            .encrypt_in_place_detached(GenericArray::from_slice(nonce), ad, &mut buffer)
+            .map_err(|_| "Encryption failed")?;
+        buffer.extend_from_slice(&tag);
+        Ok(buffer)
     }
 
     fn decrypt(
@@ -134,12 +149,19 @@ impl CipherImpl for Aegis128LImpl {
         if ciphertext.len() < 16 {
             return Err("Ciphertext too short");
         }
-        let key_array: &[u8; 16] = key.try_into().map_err(|_| "Invalid key length")?;
-        let nonce_array: &[u8; 16] = nonce.try_into().map_err(|_| "Invalid nonce length")?;
-        let cipher = Aegis128L::new(key_array, nonce_array);
+        let cipher = Aegis128LAead::<16>::new_from_slice(key)
+            .map_err(|_| "Invalid key length")?;
         let (msg, tag_slice) = ciphertext.split_at(ciphertext.len() - 16);
-        let tag = aegis::Tag::from_slice(tag_slice);
-        cipher.decrypt(msg, &tag, ad).map_err(|_| "Decryption failed")
+        let mut buffer = msg.to_vec();
+        cipher
+            .decrypt_in_place_detached(
+                GenericArray::from_slice(nonce),
+                ad,
+                &mut buffer,
+                GenericArray::from_slice(tag_slice),
+            )
+            .map_err(|_| "Decryption failed")?;
+        Ok(buffer)
     }
 }
 
