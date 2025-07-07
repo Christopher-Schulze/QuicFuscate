@@ -22,12 +22,12 @@ graph TD
 ### Project Structure
 ```
 QuicFuscate/
-├── rust/
-│   ├── core/
-│   ├── crypto/
+├── src/
+│   ├── core.rs
+│   ├── crypto.rs
 │   ├── fec/
-│   ├── stealth/
-│   └── cli/
+│   ├── stealth.rs
+│   └── main.rs
 ├── docs/
 │   └── DOCUMENTATION.md
 ├── libs/
@@ -374,7 +374,7 @@ pub mod simd {
 **Note**: Previously separate `simd_dispatch.hpp` and `simd_feature_detection.hpp` headers have been consolidated into this unified system for better maintainability and reduced code duplication.
 
 ### Command Line Interface (CLI)
-The command-line client and server are implemented in the Rust crate `rust/cli`. It provides binaries `quicfuscate_client` and `quicfuscate_server` built with Cargo.
+The command-line interface resides in `src/main.rs` and builds the `quicfuscate` binary using Cargo.
 
 ### Browser Fingerprinting
 Defined in `stealth/browser_profiles/fingerprints/browser_fingerprint.rs`:
