@@ -48,6 +48,7 @@ jobs:
           build-essential \
           pkg-config \
           libssl-dev \
+          patch
           git
     
     - name: Cache Cargo dependencies
