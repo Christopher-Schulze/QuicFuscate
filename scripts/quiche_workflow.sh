@@ -28,6 +28,16 @@ error() {
     exit 1
 }
 
+# Determines the current quiche commit for logging.
+detect_quiche_version() {
+    if [ -d "$PATCHED_DIR/.git" ]; then
+        QUICHE_VERSION=$(git -C "$PATCHED_DIR" rev-parse --short HEAD)
+        log "Quiche-Version: $QUICHE_VERSION"
+    else
+        QUICHE_VERSION="unknown"
+    fi
+}
+
 # Konfiguration
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIBS_DIR="$BASE_DIR/libs"
@@ -159,12 +169,16 @@ fetch_quiche() {
         log "Repository existiert bereits, aktualisiere..."
         run_command "Aktualisieren des Quiche-Repositories" \
             "(cd \"$PATCHED_DIR\" && git fetch --all && git reset --hard origin/HEAD)"
+        run_command "Submodule einbinden" \
+            "(cd \"$PATCHED_DIR\" && git submodule update --init --recursive)"
     else
         local attempt=0
         until [ -d "$PATCHED_DIR/.git" ]; do
             attempt=$((attempt + 1))
             if run_command "Klonen des Quiche-Repositories (Versuch $attempt)" \
                 "git clone --depth 1 \"$MIRROR_URL\" \"$PATCHED_DIR\""; then
+                run_command "Submodule einbinden" \
+                    "(cd \"$PATCHED_DIR\" && git submodule update --init --recursive)"
                 break
             fi
             warn "Klonen fehlgeschlagen. Wiederhole..."
