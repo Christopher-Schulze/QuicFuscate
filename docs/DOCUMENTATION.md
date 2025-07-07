@@ -374,9 +374,11 @@ pub mod simd {
 **Note**: Previously separate `simd_dispatch.hpp` and `simd_feature_detection.hpp` headers have been consolidated into this unified system for better maintainability and reduced code duplication.
 
 ### Command Line Interface (CLI)
+
 The command-line client and server are built from `src/main.rs` using
 the `clap` crate. Running `cargo build --release` produces the binaries
 `quicfuscate_client` and `quicfuscate_server`.
+
 
 ### Browser Fingerprinting
 Defined in `stealth/browser_profiles/fingerprints/browser_fingerprint.rs`:

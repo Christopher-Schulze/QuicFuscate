@@ -19,9 +19,11 @@ QuicFuscate represents the pinnacle of privacy-focused networking, combining cut
 
 > **Note:** The project has been fully migrated to Rust for improved safety and performance.
 
-The repository is organized as a single Rust crate with sources under the
-`src/` directory. Historical references to a `Rust-QuicFuscate` workspace are
-obsolete because everything now lives in this crate.
+
+
+The codebase has been simplified into a single crate rooted in the `src/`
+directory. Historical references to a `rust/` workspace are obsolete because all
+modules now live under `src/`.
 
 ## ✨ Core Features
 
@@ -127,7 +129,8 @@ cd ..
 
 ### Building
 
-Build the crate using Cargo:
+## Build the crate using Cargo:
+
 
 ```bash
 cargo build --release
@@ -156,15 +159,18 @@ cargo build --release
 cargo test
 ```
 
-### Source Layout
+### Project Layout
 
-All Rust sources reside in the `src/` directory. Modules such as `core`,
-`crypto`, `fec`, `stealth` and others are compiled as part of the single
-crate. Build the crate locally with:
+All Rust sources reside in the `src/` directory. Modules such as `core`, `crypto`, `fec`, `stealth` and others are compiled as part of the single crate. The crate exposes both a library and the main CLI binary.
+
+Build the crate locally:
 
 ```bash
+# Debug build
 cargo build
-```
+
+# Optimized release build
+cargo build --release
 
 
 ## 🖥️ Command-Line Usage
