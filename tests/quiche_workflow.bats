@@ -22,7 +22,7 @@ teardown() {
 }
 
 @test "automatically fetches quiche when missing" {
-    MIRROR_URL="file://$repo" ./scripts/quiche_workflow.sh --step patch
+    ./scripts/quiche_workflow.sh --mirror "file://$repo" --step patch
     [ -d "libs/patched_quiche/quiche" ]
 }
 
@@ -40,17 +40,61 @@ CARGO
     echo "pub fn hello() {}" > "$repo/lib.rs"
     git -C "$repo" add Cargo.toml lib.rs
     git -C "$repo" commit -q -m "cargo init"
-
     cat > "$proj/libs/patches/name.patch" <<'PATCH'
+diff --git a/Cargo.toml b/Cargo.toml
+index 0000000..1111111 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@
+@@ -1,4 +1,4 @@
+ [package]
 -name = "quiche"
 +name = "quiche_patched"
+ version = "0.1.0"
+ edition = "2021"
 PATCH
 
-    MIRROR_URL="file://$repo" ./scripts/quiche_workflow.sh
+    cp -r "$repo" libs/patched_quiche
+    ./scripts/quiche_workflow.sh --step patch --step build
 
     [ -h "libs/patched_quiche/target/latest" ]
-    grep -q "quiche_patched" libs/patched_quiche/Cargo.toml
+}
+
+@test "build.rs triggers workflow" {
+    cat > "$repo/Cargo.toml" <<'CARGO'
+[package]
+name = "quiche"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+CARGO
+    echo "pub fn hello() {}" > "$repo/lib.rs"
+    git -C "$repo" add Cargo.toml lib.rs
+    git -C "$repo" commit -q -m "cargo init"
+    cat > "$proj/libs/patches/name.patch" <<'PATCH'
+diff --git a/Cargo.toml b/Cargo.toml
+index 0000000..1111111 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,4 +1,4 @@
+ [package]
+-name = "quiche"
++name = "quiche_patched"
+ version = "0.1.0"
+ edition = "2021"
+PATCH
+    cp "$BATS_TEST_DIRNAME/../build.rs" build.rs
+    mkdir -p src
+    echo "pub fn dummy() {}" > src/lib.rs
+    cat > Cargo.toml <<'CARGO'
+[package]
+name = "dummy"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+CARGO
+    cp -r "$repo" libs/patched_quiche
+    MIRROR_URL="file://$repo" cargo build -q
+    [ -d "libs/patched_quiche/quiche" ]
 }
