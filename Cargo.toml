@@ -28,3 +28,6 @@ sha2 = "0.10"
 rayon = "1.9"
 toml = "0.8"
 prometheus = "0.13"
+
+[dev-dependencies]
+hex="0.4"

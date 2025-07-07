@@ -26,3 +26,31 @@ teardown() {
     [ -d "libs/patched_quiche/quiche" ]
 }
 
+
+@test "runs full workflow" {
+    cat > "$repo/Cargo.toml" <<'CARGO'
+[package]
+name = "quiche"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+CARGO
+    echo "pub fn hello() {}" > "$repo/lib.rs"
+    git -C "$repo" add Cargo.toml lib.rs
+    git -C "$repo" commit -q -m "cargo init"
+
+    cat > "$proj/libs/patches/name.patch" <<'PATCH'
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@
+-name = "quiche"
++name = "quiche_patched"
+PATCH
+
+    MIRROR_URL="file://$repo" ./scripts/quiche_workflow.sh
+
+    [ -h "libs/patched_quiche/target/latest" ]
+    grep -q "quiche_patched" libs/patched_quiche/Cargo.toml
+}

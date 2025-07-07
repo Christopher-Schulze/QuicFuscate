@@ -102,7 +102,8 @@ impl QuicFuscateConnection {
             optimization_manager.clone(),
         ));
 
-        stealth_manager.apply_utls_profile(&mut config);
+        stealth_manager
+            .apply_utls_profile(&mut config, Some(CipherSuiteSelector::new().tls_cipher()));
 
         let scid = quiche::ConnectionId::from_ref(&[0; quiche::MAX_CONN_ID_LEN]);
 
@@ -172,8 +173,6 @@ impl QuicFuscateConnection {
         xdp_socket: Option<XdpSocket>,
         fec_config: FecConfig,
     ) -> Self {
-
-
         Self {
             conn,
             peer_addr,
@@ -316,10 +315,19 @@ impl QuicFuscateConnection {
     }
 
     /// Handles connection migration to a new network path.
-    pub fn migrate_connection(&mut self, new_addr: SocketAddr) {
-        self.conn.on_validation(quiche::PathEvent::New(new_addr));
-        // Probing the new path is necessary to ensure it's viable.
-        // The actual send/recv loop will handle the probe packets.
+    /// Triggers connection migration to a new peer address.
+    ///
+    /// The underlying QUIC connection will attempt to validate the new path
+    /// and switch over once validation succeeds. Any error is returned so the
+    /// caller can react accordingly.
+    pub fn migrate_connection(
+        &mut self,
+        new_peer: SocketAddr,
+    ) -> Result<u64, quiche::Error> {
+        // Initiate path migration using quiche's API. The local address remains
+        // unchanged, but a new peer address is supplied. quiche handles sending
+        // the probing packets required for validation.
+        self.conn.migrate(self.local_addr, new_peer)
     }
 
     /// Returns the Host header that should be used for HTTP requests when domain
@@ -336,7 +344,11 @@ impl QuicFuscateConnection {
     /// Initializes the HTTP/3 connection if it hasn't been created yet.
     pub fn init_http3(&mut self) -> Result<(), quiche::h3::Error> {
         if self.h3_conn.is_none() {
-            let h3_cfg = quiche::h3::Config::new()?;
+            // Enable a modest QPACK dynamic table to improve compression.
+            let mut h3_cfg = quiche::h3::Config::new()?;
+            h3_cfg.set_qpack_max_table_capacity(64 * 1024);
+            h3_cfg.set_qpack_blocked_streams(16);
+
             let h3 = quiche::h3::Connection::with_transport(&mut self.conn, &h3_cfg)?;
             self.h3_conn = Some(h3);
         }
@@ -360,7 +372,9 @@ impl QuicFuscateConnection {
             });
 
         if let Some(ref mut h3) = self.h3_conn {
+            let start = std::time::Instant::now();
             h3.send_request(&mut self.conn, &headers, true)?;
+            println!("HTTP/3 request sent in {} ms", start.elapsed().as_millis());
         }
         Ok(())
     }
@@ -368,6 +382,7 @@ impl QuicFuscateConnection {
     /// Polls HTTP/3 events and prints received data.
     pub fn poll_http3(&mut self) -> Result<(), quiche::h3::Error> {
         if let Some(ref mut h3) = self.h3_conn {
+            let start = std::time::Instant::now();
             loop {
                 match h3.poll(&mut self.conn) {
                     Ok((stream_id, quiche::h3::Event::Headers { list, .. })) => {
@@ -392,6 +407,7 @@ impl QuicFuscateConnection {
                     Err(e) => return Err(e),
                 }
             }
+            println!("HTTP/3 events processed in {} ms", start.elapsed().as_millis());
         }
         Ok(())
     }
@@ -412,23 +428,29 @@ impl QuicFuscateConnection {
             .report_loss(stats.lost as usize, stats.sent as usize);
 
         // Handle path events for connection migration
-        while let Some(e) = self.conn.path_event_next() {
-            match e {
-                quiche::PathEvent::New(addr) => {
-                    println!("New path available: {}", addr);
+        while let Some(event) = self.conn.path_event_next() {
+            match event {
+                quiche::PathEvent::New(local, peer) => {
+                    println!("New path detected: {local}->{peer}");
                 }
-                quiche::PathEvent::Validated(addr) => {
-                    println!("Path validated: {}", addr);
-                    self.peer_addr = addr;
+                quiche::PathEvent::Validated(local, peer) => {
+                    println!("Path validated: {local}->{peer}");
+                    self.peer_addr = peer;
                 }
-                quiche::PathEvent::Closed(addr, e) => {
-                    println!("Path {} closed: {}", addr, e);
+                quiche::PathEvent::FailedValidation(local, peer) => {
+                    eprintln!("Path validation failed: {local}->{peer}");
                 }
-                quiche::PathEvent::Reused(addr) => {
-                    println!("Path {} reused", addr);
+                quiche::PathEvent::Closed(local, peer) => {
+                    println!("Path closed: {local}->{peer}");
                 }
-                quiche::PathEvent::Available(addr) => {
-                    println!("Path {} available", addr);
+                quiche::PathEvent::ReusedSourceConnectionId(seq, old, new) => {
+                    println!(
+                        "CID {seq} reused from {old:?} to {new:?}"
+                    );
+                }
+                quiche::PathEvent::PeerMigrated(local, peer) => {
+                    println!("Peer migrated: {local}->{peer}");
+                    self.peer_addr = peer;
                 }
             }
         }

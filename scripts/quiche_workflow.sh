@@ -60,6 +60,7 @@ load_state() {
         warn "Quiche-Verzeichnis fehlt: $PATCHED_DIR/quiche"
         fetch_quiche || error "Automatisches Herunterladen fehlgeschlagen. Bitte $0 --step fetch ausf\xC3\xBChren."
     fi
+    detect_quiche_version
 }
 
 # Speichere den aktuellen Status
@@ -93,6 +94,47 @@ run_command() {
 }
 
 # Schritt 1: Quiche herunterladen
+
+# Prüft, ob benötigte Programme installiert sind
+check_dependencies() {
+    local missing=()
+    for cmd in "$@"; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            missing+=("$cmd")
+        fi
+    done
+    if [ ${#missing[@]} -ne 0 ]; then
+        error "Fehlende Abhängigkeiten: ${missing[*]}. Bitte installieren und erneut ausführen."
+    fi
+}
+
+# Stelle ein zuvor erstelltes Backup wieder her
+rollback_backup() {
+    local backup_dir="$1"
+    if [ -d "$backup_dir" ]; then
+        log "Rolle auf Backup $backup_dir zurück..."
+        rm -rf "$PATCHED_DIR"
+        mv "$backup_dir" "$PATCHED_DIR"
+        success "Backup wiederhergestellt"
+    else
+        warn "Kein Backup zum Zurückrollen gefunden ($backup_dir)"
+    fi
+}
+
+# Behandelt Fehlermeldungen beim Patchen und bietet optional einen erneuten Versuch an
+patch_failure() {
+    local message="$1"
+    local backup_dir="$2"
+    warn "$message"
+    rollback_backup "$backup_dir"
+    read -r -p "Erneut versuchen? [j/N] " retry
+    if [[ $retry =~ ^[JjYy]$ ]]; then
+        apply_patches
+    else
+        error "Patchvorgang abgebrochen."
+    fi
+}
+
 fetch_quiche() {
     local log_file="$LOG_DIR/fetch_quiche_$(date +%Y%m%d_%H%M%S).log"
 
@@ -110,7 +152,7 @@ fetch_quiche() {
     if git -C "$BASE_DIR" submodule status libs/patched_quiche >/dev/null 2>&1; then
         log "Initialisiere Submodul libs/patched_quiche..."
         run_command "Submodul aktualisieren" \
-            "git submodule set-url libs/patched_quiche \"$MIRROR_URL\" && git submodule update --init libs/patched_quiche"
+            "git submodule set-url libs/patched_quiche \"$MIRROR_URL\" && git submodule update --init --recursive libs/patched_quiche"
     fi
 
     if [ -e "$PATCHED_DIR/.git" ]; then
@@ -118,9 +160,21 @@ fetch_quiche() {
         run_command "Aktualisieren des Quiche-Repositories" \
             "(cd \"$PATCHED_DIR\" && git fetch --all && git reset --hard origin/HEAD)"
     else
-        run_command "Klonen des Quiche-Repositories" \
-            "git clone --depth 1 \"$MIRROR_URL\" \"$PATCHED_DIR\""
+        local attempt=0
+        until [ -d "$PATCHED_DIR/.git" ]; do
+            attempt=$((attempt + 1))
+            if run_command "Klonen des Quiche-Repositories (Versuch $attempt)" \
+                "git clone --depth 1 \"$MIRROR_URL\" \"$PATCHED_DIR\""; then
+                break
+            fi
+            warn "Klonen fehlgeschlagen. Wiederhole..."
+            rm -rf "$PATCHED_DIR"
+            [ $attempt -ge 3 ] && error "Klonen des Quiche-Repositories nach $attempt Versuchen fehlgeschlagen"
+            sleep 5
+        done
     fi
+
+    detect_quiche_version
 
     if [ ! -d "$PATCHED_DIR/quiche" ]; then
         error "Quiche-Verzeichnis konnte nach dem Klonen nicht gefunden werden"
@@ -133,6 +187,7 @@ fetch_quiche() {
 # Schritt 2: Patches anwenden
 apply_patches() {
     log "Starte Anwenden der Patches..."
+    check_dependencies git patch
     
     if [ ! -d "$PATCHES_DIR" ] || [ -z "$(ls -A "$PATCHES_DIR"/*.patch 2>/dev/null)" ]; then
         warn "Keine Patch-Dateien in $PATCHES_DIR gefunden"
@@ -152,11 +207,11 @@ apply_patches() {
             log "Wende Patch an: $(basename "$patch_file")"
 
             if ! (cd "$PATCHED_DIR" && git apply --check "$patch_file" >/dev/null 2>&1); then
-                error "Patch $(basename "$patch_file") kann nicht angewendet werden (git apply --check fehlgeschlagen)"
+                patch_failure "Patch $(basename "$patch_file") kann nicht angewendet werden (git apply --check fehlgeschlagen)" "$backup_dir"
             fi
             
             if ! (cd "$PATCHED_DIR" && patch -p1 --no-backup-if-mismatch -r - < "$patch_file"); then
-                error "Fehler beim Anwenden von $(basename "$patch_file")"
+                patch_failure "Fehler beim Anwenden von $(basename "$patch_file")" "$backup_dir"
             fi
         fi
     done

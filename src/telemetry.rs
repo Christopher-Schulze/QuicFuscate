@@ -1,4 +1,3 @@
-use lazy_static::lazy_static;
 //! Telemetry metrics used throughout QuicFuscate.
 //!
 //! Currently exported metrics:
@@ -22,6 +21,7 @@ use prometheus::{
     TextEncoder,
     register_int_counter,
     register_int_gauge,
+
 };
 
 lazy_static! {
@@ -50,8 +50,8 @@ lazy_static! {
 }
 
 pub fn serve(addr: &str) {
-    use std::net::TcpListener;
     use std::io::Write;
+    use std::net::TcpListener;
     let listener = TcpListener::bind(addr).expect("bind metrics");
     std::thread::spawn(move || {
         let encoder = TextEncoder::new();

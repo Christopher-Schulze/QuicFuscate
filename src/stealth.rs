@@ -761,7 +761,9 @@ impl StealthManager {
             if !config.fronting_domains.is_empty() {
                 Some(DomainFrontingManager::new(config.fronting_domains.clone()))
             } else {
-                Some(DomainFrontingManager::from_providers(config.cdn_providers.clone()))
+                Some(DomainFrontingManager::from_providers(
+                    config.cdn_providers.clone(),
+                ))
             }
         } else {
             None
@@ -790,16 +792,22 @@ impl StealthManager {
     /// NOTE: For a perfect fingerprint match, patching the underlying TLS stack (e.g., BoringSSL)
     /// to control the Client Hello message format (cipher suite order, extensions, GREASE values)
     /// would be required. This is a simulation based on available quiche settings.
-    pub fn apply_utls_profile(&self, config: &mut quiche::Config) {
+    pub fn apply_utls_profile(&self, config: &mut quiche::Config, preferred: Option<u16>) {
         let fingerprint = self.fingerprint.lock().unwrap();
         info!(
             "Applying uTLS fingerprint for: {:?}/{:?}",
             fingerprint.browser, fingerprint.os
         );
 
-        // Set cipher suites according to the profile's specified order.
-        let quiche_ciphers: Vec<quiche::Cipher> = fingerprint
-            .tls_cipher_suites
+        // Build the final cipher list, optionally preferring a runtime selected suite.
+        let mut suite_ids = fingerprint.tls_cipher_suites.clone();
+        if let Some(id) = preferred {
+            if !suite_ids.contains(&id) {
+                suite_ids.insert(0, id);
+            }
+        }
+
+        let quiche_ciphers: Vec<quiche::Cipher> = suite_ids
             .iter()
             .filter_map(|&iana_id| map_iana_to_quiche_cipher(iana_id))
             .collect();
@@ -809,7 +817,6 @@ impl StealthManager {
                 error!("Failed to set custom cipher suites: {}", e);
             }
             // Manipulate TLS ClientHello to match the desired ordering.
-            let suite_ids: Vec<u16> = fingerprint.tls_cipher_suites.clone();
             TlsClientHelloSpoofer::apply(config, &suite_ids);
         }
 
@@ -893,15 +900,10 @@ impl StealthManager {
     /// Applies domain fronting if enabled.
     pub fn get_connection_headers(&self, real_host: &str) -> (String, String) {
         if self.config.enable_domain_fronting && self.domain_fronter.is_some() {
-            let fronted_domain = self
-                .domain_fronter
-                .as_ref()
-                .unwrap()
-                .get_fronted_domain();
+            let fronted_domain = self.domain_fronter.as_ref().unwrap().get_fronted_domain();
             debug!(
                 "Domain fronting enabled. SNI: {}, Host: {}",
-                fronted_domain,
-                real_host
+                fronted_domain, real_host
             );
             (fronted_domain, real_host.to_string()) // SNI = front, Host = real
         } else {

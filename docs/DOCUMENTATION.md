@@ -113,6 +113,10 @@ selector.encrypt(plaintext, len, key, nonce, ad, ad_len, ciphertext, tag);
 2. **AEGIS-128L**: With AES-NI (x86) or ARM Crypto Extensions
 3. **MORUS-1280-128**: Software fallback without hardware acceleration
 
+The selected cipher's IANA ID can be retrieved via `CipherSuiteSelector::tls_cipher()`.
+`StealthManager` uses this to build a matching TLS ClientHello with
+`quiche_config_set_custom_tls`, ensuring end-to-end compatibility.
+
 #### Forward Error Correction (FEC) Module
 Defined in `fec.rs`:
 
@@ -374,7 +378,11 @@ pub mod simd {
 **Note**: Previously separate `simd_dispatch.hpp` and `simd_feature_detection.hpp` headers have been consolidated into this unified system for better maintainability and reduced code duplication.
 
 ### Command Line Interface (CLI)
-The command-line interface resides in `src/main.rs` and builds the `quicfuscate` binary using Cargo.
+
+The command-line client and server are built from `src/main.rs` using
+the `clap` crate. Running `cargo build --release` produces the binaries
+`quicfuscate_client` and `quicfuscate_server`.
+
 
 ### Browser Fingerprinting
 Defined in `stealth/browser_profiles/fingerprints/browser_fingerprint.rs`:
