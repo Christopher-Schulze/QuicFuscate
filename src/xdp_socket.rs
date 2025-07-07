@@ -141,6 +141,7 @@ impl XdpSocket {
             Ok(v) => v,
             Err(_) => {
                 telemetry::XDP_FALLBACKS.inc();
+                telemetry::XDP_ACTIVE.set(0);
                 self.udp = udp;
                 return Ok(());
             }
@@ -153,6 +154,7 @@ impl XdpSocket {
             Ok(v) => v,
             Err(_) => {
                 telemetry::XDP_FALLBACKS.inc();
+                telemetry::XDP_ACTIVE.set(0);
                 self.udp = udp;
                 return Ok(());
             }
@@ -169,6 +171,7 @@ impl XdpSocket {
             Ok(v) => v,
             Err(_) => {
                 telemetry::XDP_FALLBACKS.inc();
+                telemetry::XDP_ACTIVE.set(0);
                 self.udp = udp;
                 return Ok(());
             }
@@ -184,6 +187,7 @@ impl XdpSocket {
             pool: bufs,
             pending: ArrayDeque::new(),
         });
+        telemetry::XDP_ACTIVE.set(1);
         Ok(())
     }
 

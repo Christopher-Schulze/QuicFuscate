@@ -15,9 +15,14 @@ possible.
 
 ## Kernel & System Setup
 
-The benchmarks require a recent Linux kernel (5.15+) with `CONFIG_XDP_SOCKETS` enabled.
-`libbpf-dev` must be installed and the user running the tests needs `CAP_NET_ADMIN`.
-For reliable zero-copy operation increase locked memory limits, e.g.
+The benchmarks require a recent Linux kernel (5.15+) with the following options
+compiled in:
+
+- `CONFIG_BPF` and `CONFIG_BPF_SYSCALL`
+- `CONFIG_XDP_SOCKETS`
+
+Install `libbpf-dev` and ensure the test user has `CAP_NET_ADMIN`.  To avoid
+packet drops when using zero-copy, raise the locked memory limit:
 
 ```bash
 sudo ulimit -l unlimited
