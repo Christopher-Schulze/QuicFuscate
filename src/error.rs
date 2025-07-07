@@ -4,6 +4,8 @@ use thiserror::Error;
 pub enum ConnectionError {
     #[error("quiche error: {0}")]
     Quiche(#[from] quiche::Error),
+    #[error("http3 error: {0}")]
+    H3(#[from] quiche::h3::Error),
     #[error("fec error: {0}")]
     Fec(String),
 }
