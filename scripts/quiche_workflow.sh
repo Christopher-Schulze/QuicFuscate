@@ -29,6 +29,24 @@ error() {
     exit 1
 }
 
+# Prüft, ob eine Internetverbindung besteht
+check_internet() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -Is --connect-timeout 5 "$MIRROR_URL" >/dev/null 2>&1 && return 0
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q --spider --timeout=5 "$MIRROR_URL" >/dev/null 2>&1 && return 0
+    elif command -v ping >/dev/null 2>&1; then
+        ping -c1 -W1 1.1.1.1 >/dev/null 2>&1 && return 0
+    fi
+    error "Keine Internetverbindung erkannt. Bitte Verbindung prüfen."
+}
+
+# Fragt den Benutzer, ob ein Vorgang wiederholt werden soll
+ask_retry() {
+    read -r -p "Erneut versuchen? [j/N] " answer
+    [[ "$answer" =~ ^[Jj]$ ]]
+}
+
 # Determines the current quiche commit for logging.
 detect_quiche_version() {
     if [ -d "$PATCHED_DIR/.git" ]; then
@@ -155,13 +173,21 @@ patch_failure() {
     local backup_dir="$2"
     local detail="${3:-}"
     warn "$message"
-    [ -n "$detail" ] && warn "$detail"
-    rollback_backup "$backup_dir"
-    error "Patchvorgang abgebrochen: $message"
+    [ -n "$detail" ] && {
+        warn "$detail"
+        [ -f "$detail" ] && tail -n 20 "$detail"
+    }
+    if ask_retry; then
+        rollback_backup "$backup_dir"
+        apply_patches
+    else
+        rollback_backup "$backup_dir"
+        error "Patchvorgang abgebrochen: $message"
+    fi
 }
 
 fetch_quiche() {
-    local log_file="$LOG_DIR/fetch_quiche_$(date +%Y%m%d_%H%M%S).log"
+    local log_file
 
     if [ -d "$PATCHED_DIR/quiche" ]; then
         log "Quiche-Verzeichnis bereits vorhanden: $PATCHED_DIR/quiche"
@@ -171,6 +197,7 @@ fetch_quiche() {
     log "Starte Herunterladen von quiche..."
     log "Quelle: $MIRROR_URL"
     log "Ziel: $PATCHED_DIR"
+    check_internet
 
     mkdir -p "$PATCHED_DIR"
 
@@ -188,18 +215,21 @@ fetch_quiche() {
             "(cd \"$PATCHED_DIR\" && git submodule update --init --recursive)"
     else
         local attempt=0
-        until [ -d "$PATCHED_DIR/.git" ]; do
+        while true; do
             attempt=$((attempt + 1))
-            if run_command "Klonen des Quiche-Repositories (Versuch $attempt)" \
-                "git clone --depth 1 \"$MIRROR_URL\" \"$PATCHED_DIR\""; then
-                run_command "Submodule einbinden" \
-                    "(cd \"$PATCHED_DIR\" && git submodule update --init --recursive)"
+            log_file="$LOG_DIR/clone_attempt_${attempt}_$(date +%Y%m%d_%H%M%S).log"
+            log "Klonen des Quiche-Repositories (Versuch $attempt)"
+            if git clone --depth 1 "$MIRROR_URL" "$PATCHED_DIR" >"$log_file" 2>&1; then
+                git -C "$PATCHED_DIR" submodule update --init --recursive >>"$log_file" 2>&1
                 break
             fi
-            warn "Klonen fehlgeschlagen. Wiederhole..."
-            rm -rf "$PATCHED_DIR"
-            [ $attempt -ge 3 ] && error "Klonen des Quiche-Repositories nach $attempt Versuchen fehlgeschlagen"
-            sleep 5
+            warn "Klonen fehlgeschlagen. Details siehe $log_file"
+            if ask_retry; then
+                rm -rf "$PATCHED_DIR"
+                continue
+            else
+                error "Klonen des Quiche-Repositories abgebrochen"
+            fi
         done
     fi
 
@@ -242,14 +272,15 @@ apply_patches() {
         [ -f "$patch_file" ] || continue
         patch_count=$((patch_count + 1))
         log "Wende Patch an: $name"
-        if ! (cd "$PATCHED_DIR" && patch -p1 --no-backup-if-mismatch -r - < "$patch_file"); then
-            patch_failure "Fehler beim Anwenden von $name" "$backup_dir" "Datei: $patch_file"
+        local patch_log="$LOG_DIR/patch_${name}_$(date +%Y%m%d_%H%M%S).log"
+        if ! (cd "$PATCHED_DIR" && patch -p1 --no-backup-if-mismatch -r - < "$patch_file" >"$patch_log" 2>&1); then
+            patch_failure "Fehler beim Anwenden von $name" "$backup_dir" "$patch_log"
         fi
     done
     
     if [ $patch_count -gt 0 ]; then
         success "$patch_count Patches erfolgreich angewendet"
-        if ! run_command "verify_patches" "verify_patches"; then
+        if ! verify_patches; then
             patch_failure "Patch-Verifikation fehlgeschlagen" "$backup_dir"
         fi
     else
@@ -472,6 +503,7 @@ main() {
     
     # Workflow abgeschlossen
     save_state "completed"
+    rm -f "$STATE_FILE"
     success "Quiche-Workflow erfolgreich abgeschlossen!"
 }
 
