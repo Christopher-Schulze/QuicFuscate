@@ -43,6 +43,7 @@ modules now live under `src/`.
 
 ### ⚡ Performance Optimizations
 - **SIMD Acceleration**: ARM NEON and x86 AVX2/AVX-512 optimizations
+- **Bit-Sliced GF Multiplication**: Faster FEC arithmetic via dedicated AVX2/AVX512/NEON kernels
 - **Zero-Copy Architecture**: Minimizes memory allocations for maximum throughput
 - **Adaptive RLNC FEC**: Sliding-window RLNC encoder/decoder with SIMD acceleration
 - **Connection Multiplexing**: Multiple streams over a single connection

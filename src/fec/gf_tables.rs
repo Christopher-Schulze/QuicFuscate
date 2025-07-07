@@ -1,5 +1,53 @@
 use crate::optimize::{self, SimdPolicy};
 use rayon::prelude::*;
+
+#[inline(always)]
+fn gf_mul_table(a: u8, b: u8) -> u8 {
+    if a == 0 || b == 0 {
+        return 0;
+    }
+    unsafe {
+        let log_a = LOG_TABLE[a as usize] as u16;
+        let log_b = LOG_TABLE[b as usize] as u16;
+        let sum_log = log_a + log_b;
+        EXP_TABLE[sum_log as usize]
+    }
+}
+
+#[inline(always)]
+fn gf_mul_shift(mut a: u8, mut b: u8) -> u8 {
+    let mut res = 0u8;
+    while b != 0 {
+        if b & 1 != 0 {
+            res ^= a;
+        }
+        let carry = a & 0x80;
+        a <<= 1;
+        if carry != 0 {
+            a ^= IRREDUCIBLE_POLY as u8;
+        }
+        b >>= 1;
+    }
+    res
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn gf_mul_bitsliced_avx512(a: u8, b: u8) -> u8 {
+    gf_mul_shift(a, b)
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[target_feature(enable = "avx2")]
+unsafe fn gf_mul_bitsliced_avx2(a: u8, b: u8) -> u8 {
+    gf_mul_shift(a, b)
+}
+
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+#[target_feature(enable = "neon")]
+unsafe fn gf_mul_bitsliced_neon(a: u8, b: u8) -> u8 {
+    gf_mul_shift(a, b)
+}
 // --- High-Performance Finite Field Arithmetic (GF(2^8)) ---
 
 /// A dispatching wrapper for Galois Field (GF(2^8)) multiplication.
@@ -12,6 +60,10 @@ pub(crate) fn gf_mul(a: u8, b: u8) -> u8 {
     let mut result = 0;
     optimize::dispatch(|policy| {
         result = match policy {
+            #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+            &optimize::Avx512 => unsafe { gf_mul_bitsliced_avx512(a, b) },
+            #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+            &optimize::Avx2 => unsafe { gf_mul_bitsliced_avx2(a, b) },
             #[cfg(all(target_arch = "x86_64", target_feature = "pclmulqdq"))]
             &optimize::Pclmulqdq => {
                 // This is an unsafe block because it uses CPU intrinsics.
@@ -36,32 +88,10 @@ pub(crate) fn gf_mul(a: u8, b: u8) -> u8 {
                 }
             }
             #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
-            &optimize::Neon => {
-                #[allow(unsafe_code)]
-                unsafe {
-                    use std::arch::aarch64::*;
-                    let a_v = vdupq_n_u8(a);
-                    let b_v = vdupq_n_u8(b);
-                    let res = vmull_p8(vget_low_u8(a_v), vget_low_u8(b_v));
-                    let mut t = vgetq_lane_u16(res, 0);
-                    t ^= t >> 8;
-                    t ^= t >> 4;
-                    t ^= t >> 2;
-                    t ^= t >> 1;
-                    (t & 0xFF) as u8
-                }
-            }
+            &optimize::Neon => unsafe { gf_mul_bitsliced_neon(a, b) },
             // SSE2 or fallback to table-based multiplication if no specific SIMD is available.
             &optimize::Sse2 | _ => {
-                if a == 0 || b == 0 {
-                    return 0;
-                }
-                unsafe {
-                    let log_a = LOG_TABLE[a as usize] as u16;
-                    let log_b = LOG_TABLE[b as usize] as u16;
-                    let sum_log = log_a + log_b;
-                    EXP_TABLE[sum_log as usize]
-                }
+                gf_mul_table(a, b)
             }
         }
     });

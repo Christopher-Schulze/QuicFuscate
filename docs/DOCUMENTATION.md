@@ -149,7 +149,7 @@ The system dynamically adjusts redundancy and window sizes based on real-time ne
     *   **Emergency Override**: A sudden, high-loss spike triggers an immediate switch to the maximum recovery mode (Mode 5).
 
 4.  **Hardware-Level Optimizations**:
-    *   **SIMD Acceleration**: Galois Field (GF(2⁸)) arithmetic uses table-based SIMD routines. Planned bit-sliced kernels are outlined in `docs/issues/004-gf-bitslicing.md`.
+    *   **SIMD Acceleration**: Galois Field (GF(2⁸)) arithmetic nutzt nun bitgeschnittene Kernels (AVX2/AVX512/NEON), siehe `docs/issues/004-gf-bitslicing.md`.
     *   **Multi-Threading**: Tokio tasks are used to manage sliding windows, while Rayon is used for parallelizing bulk decoding operations.
     *   **Memory Management**: Pre-allocated memory pools are used for window matrices to avoid `malloc`/`free` overhead during runtime. NUMA-awareness ensures memory stays local to the processing CPU socket.
 
