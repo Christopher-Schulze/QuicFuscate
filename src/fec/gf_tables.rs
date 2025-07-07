@@ -34,76 +34,71 @@ fn gf_mul_shift(mut a: u8, mut b: u8) -> u8 {
 #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
 #[target_feature(enable = "avx512f,avx512vbmi")]
 unsafe fn gf_mul_bitsliced_avx512(a: u8, b: u8) -> u8 {
-    use std::arch::x86_64::*;
-
-    if a == 0 || b == 0 {
-        return 0;
+    // Simplified bitsliced multiplication using shift/xor logic.
+    // In a real implementation this would operate on multiple GF elements
+    // in parallel using AVX512 intrinsics. The current routine mirrors the
+    // scalar algorithm but allows easy drop-in replacement once a fully
+    // vectorized kernel becomes available.
+    let mut a = a;
+    let mut b = b;
+    let mut res = 0u8;
+    while b != 0 {
+        if b & 1 != 0 {
+            res ^= a;
+        }
+        let carry = a & 0x80;
+        a <<= 1;
+        if carry != 0 {
+            a ^= IRREDUCIBLE_POLY as u8;
+        }
+        b >>= 1;
     }
-
-    let log_ptr_a = LOG_TABLE.as_ptr().add(a as usize);
-    let log_ptr_b = LOG_TABLE.as_ptr().add(b as usize);
-
-    _mm_prefetch(log_ptr_a as *const i8, _MM_HINT_T0);
-    _mm_prefetch(log_ptr_b as *const i8, _MM_HINT_T0);
-
-    let log_a = *log_ptr_a as u16;
-    let log_b = *log_ptr_b as u16;
-    let sum = (log_a + log_b) as usize;
-
-    let exp_ptr = EXP_TABLE.as_ptr().add(sum);
-    _mm_prefetch(exp_ptr as *const i8, _MM_HINT_T0);
-
-    *exp_ptr
+    res
 }
 
 #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 #[target_feature(enable = "avx2")]
 unsafe fn gf_mul_bitsliced_avx2(a: u8, b: u8) -> u8 {
-    use std::arch::x86_64::*;
-
-    if a == 0 || b == 0 {
-        return 0;
+    // Placeholder bitsliced routine using scalar operations. The structure
+    // mirrors `gf_mul_shift` but is marked with AVX2 so it can later be
+    // replaced by an optimized implementation.
+    let mut a = a;
+    let mut b = b;
+    let mut res = 0u8;
+    while b != 0 {
+        if b & 1 != 0 {
+            res ^= a;
+        }
+        let carry = a & 0x80;
+        a <<= 1;
+        if carry != 0 {
+            a ^= IRREDUCIBLE_POLY as u8;
+        }
+        b >>= 1;
     }
-
-    let log_ptr_a = LOG_TABLE.as_ptr().add(a as usize);
-    let log_ptr_b = LOG_TABLE.as_ptr().add(b as usize);
-
-    _mm_prefetch(log_ptr_a as *const i8, _MM_HINT_T0);
-    _mm_prefetch(log_ptr_b as *const i8, _MM_HINT_T0);
-
-    let log_a = *log_ptr_a as u16;
-    let log_b = *log_ptr_b as u16;
-    let sum = (log_a + log_b) as usize;
-
-    let exp_ptr = EXP_TABLE.as_ptr().add(sum);
-    _mm_prefetch(exp_ptr as *const i8, _MM_HINT_T0);
-
-    *exp_ptr
+    res
 }
 
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 #[target_feature(enable = "neon")]
 unsafe fn gf_mul_bitsliced_neon(a: u8, b: u8) -> u8 {
-    use std::arch::aarch64::*;
-
-    if a == 0 || b == 0 {
-        return 0;
+    // See notes in the AVX routines. This mirrors the scalar algorithm but is
+    // isolated for easy replacement with a NEON implementation later on.
+    let mut a = a;
+    let mut b = b;
+    let mut res = 0u8;
+    while b != 0 {
+        if b & 1 != 0 {
+            res ^= a;
+        }
+        let carry = a & 0x80;
+        a <<= 1;
+        if carry != 0 {
+            a ^= IRREDUCIBLE_POLY as u8;
+        }
+        b >>= 1;
     }
-
-    let log_ptr_a = LOG_TABLE.as_ptr().add(a as usize);
-    let log_ptr_b = LOG_TABLE.as_ptr().add(b as usize);
-
-    __prefetch(log_ptr_a as *const i8);
-    __prefetch(log_ptr_b as *const i8);
-
-    let log_a = *log_ptr_a as u16;
-    let log_b = *log_ptr_b as u16;
-    let sum = (log_a + log_b) as usize;
-
-    let exp_ptr = EXP_TABLE.as_ptr().add(sum);
-    __prefetch(exp_ptr as *const i8);
-
-    *exp_ptr
+    res
 }
 // --- High-Performance Finite Field Arithmetic (GF(2^8)) ---
 
@@ -115,7 +110,7 @@ unsafe fn gf_mul_bitsliced_neon(a: u8, b: u8) -> u8 {
 #[inline(always)]
 pub(crate) fn gf_mul(a: u8, b: u8) -> u8 {
     let mut result = 0;
-    optimize::dispatch(|policy| {
+    optimize::dispatch_bitslice(|policy| {
         result = match policy {
             #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
             &optimize::Avx512 => unsafe { gf_mul_bitsliced_avx512(a, b) },
@@ -147,9 +142,7 @@ pub(crate) fn gf_mul(a: u8, b: u8) -> u8 {
             #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
             &optimize::Neon => unsafe { gf_mul_bitsliced_neon(a, b) },
             // SSE2 or fallback to table-based multiplication if no specific SIMD is available.
-            &optimize::Sse2 | _ => {
-                gf_mul_table(a, b)
-            }
+            &optimize::Sse2 | _ => gf_mul_table(a, b),
         }
     });
     result
