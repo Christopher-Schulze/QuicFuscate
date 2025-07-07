@@ -1,12 +1,13 @@
 use quicfuscate::core::QuicFuscateConnection;
-use quicfuscate::fec::{FecMode, FecConfig};
+use quicfuscate::fec::{FecConfig, FecMode};
+use quicfuscate::optimize::OptimizeConfig;
 use quicfuscate::stealth::StealthConfig;
-use quicfuscate::telemetry;
-use std::net::UdpSocket;
-use std::os::raw::c_void;
 use quicfuscate::stealth::{BrowserProfile, FingerprintProfile, TlsClientHelloSpoofer};
+use quicfuscate::telemetry;
 use std::fs::File;
 use std::io::Write;
+use std::net::UdpSocket;
+use std::os::raw::c_void;
 
 #[tokio::test]
 async fn client_server_end_to_end() {
@@ -29,7 +30,10 @@ async fn client_server_end_to_end() {
     client_config.verify_peer(false);
     let mut stealth_cfg = StealthConfig::default();
     stealth_cfg.enable_domain_fronting = true;
-    let mut fec_cfg = FecConfig { initial_mode: FecMode::Light, ..FecConfig::default() };
+    let mut fec_cfg = FecConfig {
+        initial_mode: FecMode::Light,
+        ..FecConfig::default()
+    };
     let mut client_conn = QuicFuscateConnection::new_client(
         "example.com",
         client_socket.local_addr().unwrap(),
@@ -37,6 +41,8 @@ async fn client_server_end_to_end() {
         client_config,
         stealth_cfg.clone(),
         fec_cfg,
+        OptimizeConfig::default(),
+        true,
     )
     .unwrap();
     let mut server_config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
@@ -56,7 +62,10 @@ async fn client_server_end_to_end() {
     server_config.set_initial_max_streams_uni(100);
     let scid = quiche::ConnectionId::from_ref(&[0; quiche::MAX_CONN_ID_LEN]);
     let client_addr = client_socket.local_addr().unwrap();
-    let mut fec_cfg_srv = FecConfig { initial_mode: FecMode::Light, ..FecConfig::default() };
+    let mut fec_cfg_srv = FecConfig {
+        initial_mode: FecMode::Light,
+        ..FecConfig::default()
+    };
     let mut server_conn = QuicFuscateConnection::new_server(
         &scid,
         None,
@@ -65,6 +74,7 @@ async fn client_server_end_to_end() {
         server_config,
         stealth_cfg,
         fec_cfg_srv,
+        OptimizeConfig::default(),
     )
     .unwrap();
     let (sni, host) = server_conn
@@ -147,7 +157,10 @@ async fn tls_custom_clienthello() {
     }
 
     let stealth_cfg = StealthConfig::default();
-    let fec_cfg = FecConfig { initial_mode: FecMode::Light, ..FecConfig::default() };
+    let fec_cfg = FecConfig {
+        initial_mode: FecMode::Light,
+        ..FecConfig::default()
+    };
     let mut client_conn = QuicFuscateConnection::new_client(
         "example.com",
         client_socket.local_addr().unwrap(),
@@ -155,6 +168,8 @@ async fn tls_custom_clienthello() {
         client_config,
         stealth_cfg.clone(),
         fec_cfg,
+        OptimizeConfig::default(),
+        true,
     )
     .unwrap();
 
@@ -169,7 +184,10 @@ async fn tls_custom_clienthello() {
 
     let scid = quiche::ConnectionId::from_ref(&[0; quiche::MAX_CONN_ID_LEN]);
     let client_addr = client_socket.local_addr().unwrap();
-    let fec_cfg_srv = FecConfig { initial_mode: FecMode::Light, ..FecConfig::default() };
+    let fec_cfg_srv = FecConfig {
+        initial_mode: FecMode::Light,
+        ..FecConfig::default()
+    };
     let mut server_conn = QuicFuscateConnection::new_server(
         &scid,
         None,
@@ -178,13 +196,16 @@ async fn tls_custom_clienthello() {
         server_config,
         stealth_cfg,
         fec_cfg_srv,
+        OptimizeConfig::default(),
     )
     .unwrap();
 
     let mut buf = [0u8; 65535];
     let mut out = [0u8; 65535];
     let len = client_conn.send(&mut out).unwrap();
-    assert!(out[..len].windows(custom_hello.len()).any(|w| w == custom_hello));
+    assert!(out[..len]
+        .windows(custom_hello.len())
+        .any(|w| w == custom_hello));
 
     // Process on server so connection completes
     server_socket.send_to(&out[..len], client_addr).unwrap();
@@ -207,7 +228,10 @@ async fn profile_rotation_changes_profile() {
     let mut client_config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
     client_config.verify_peer(false);
     let mut stealth_cfg = StealthConfig::default();
-    let fec_cfg = FecConfig { initial_mode: FecMode::Light, ..FecConfig::default() };
+    let fec_cfg = FecConfig {
+        initial_mode: FecMode::Light,
+        ..FecConfig::default()
+    };
     let mut client_conn = QuicFuscateConnection::new_client(
         "example.com",
         client_socket.local_addr().unwrap(),
@@ -215,6 +239,8 @@ async fn profile_rotation_changes_profile() {
         client_config,
         stealth_cfg.clone(),
         fec_cfg,
+        OptimizeConfig::default(),
+        true,
     )
     .unwrap();
 
@@ -228,7 +254,10 @@ async fn profile_rotation_changes_profile() {
     server_config.verify_peer(false);
     let scid = quiche::ConnectionId::from_ref(&[0; quiche::MAX_CONN_ID_LEN]);
     let client_addr = client_socket.local_addr().unwrap();
-    let fec_cfg_srv = FecConfig { initial_mode: FecMode::Light, ..FecConfig::default() };
+    let fec_cfg_srv = FecConfig {
+        initial_mode: FecMode::Light,
+        ..FecConfig::default()
+    };
     let mut server_conn = QuicFuscateConnection::new_server(
         &scid,
         None,
@@ -237,6 +266,7 @@ async fn profile_rotation_changes_profile() {
         server_config,
         stealth_cfg.clone(),
         fec_cfg_srv,
+        OptimizeConfig::default(),
     )
     .unwrap();
 
@@ -297,19 +327,18 @@ async fn connection_migration_events() {
         cfg,
         stealth_cfg.clone(),
         fec_cfg.clone(),
+        OptimizeConfig::default(),
+        true,
     )
     .unwrap();
 
     let scid = quiche::ConnectionId::from_ref(&[0; quiche::MAX_CONN_ID_LEN]);
     let mut srv_cfg = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
-    srv_cfg.load_cert_chain_from_pem_file(
-        "libs/vanilla_quiche/quiche/examples/cert.crt",
-    )
-    .unwrap();
     srv_cfg
-        .load_priv_key_from_pem_file(
-            "libs/vanilla_quiche/quiche/examples/cert.key",
-        )
+        .load_cert_chain_from_pem_file("libs/vanilla_quiche/quiche/examples/cert.crt")
+        .unwrap();
+    srv_cfg
+        .load_priv_key_from_pem_file("libs/vanilla_quiche/quiche/examples/cert.key")
         .unwrap();
 
     let mut server_conn = QuicFuscateConnection::new_server(
@@ -320,6 +349,7 @@ async fn connection_migration_events() {
         srv_cfg,
         stealth_cfg,
         fec_cfg,
+        OptimizeConfig::default(),
     )
     .unwrap();
 
@@ -337,7 +367,9 @@ async fn connection_migration_events() {
         }
         if let Ok(len) = server_conn.send(&mut out) {
             if len > 0 {
-                primary_socket.send_to(&out[..len], client_socket.local_addr().unwrap()).unwrap();
+                primary_socket
+                    .send_to(&out[..len], client_socket.local_addr().unwrap())
+                    .unwrap();
             }
         }
         if let Ok(len) = client_socket.recv(&mut buf) {
@@ -361,4 +393,3 @@ async fn connection_migration_events() {
         // just consume for test
     }
 }
-

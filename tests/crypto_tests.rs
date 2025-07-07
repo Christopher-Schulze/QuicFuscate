@@ -4,10 +4,11 @@ use quicfuscate::crypto::{CipherSuite, CipherSuiteSelector};
 fn run_test(suite: CipherSuite) {
     let selector = CipherSuiteSelector::with_suite(suite);
     let (key_len, nonce_len) = match suite {
-        // Both AEGIS variants operate on 128-bit keys and nonces.
         CipherSuite::Aegis128X => (16, 16),
         CipherSuite::Aegis128L => (16, 16),
+        CipherSuite::Aegis256 => (32, 32),
         CipherSuite::Morus1280_128 => (16, 16),
+        CipherSuite::Morus1280_256 => (32, 16),
     };
     let key = vec![0u8; key_len];
     let nonce = vec![0u8; nonce_len];
@@ -31,8 +32,18 @@ fn test_aegis128l() {
 }
 
 #[test]
+fn test_aegis256() {
+    run_test(CipherSuite::Aegis256);
+}
+
+#[test]
 fn test_morus() {
     run_test(CipherSuite::Morus1280_128);
+}
+
+#[test]
+fn test_morus256() {
+    run_test(CipherSuite::Morus1280_256);
 }
 
 #[test]
