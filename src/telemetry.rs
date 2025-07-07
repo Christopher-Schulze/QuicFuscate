@@ -73,6 +73,7 @@ lazy_static! {
         register_int_counter!("simd_usage_scalar_total", "Scalar dispatches").unwrap();
     pub static ref PATH_MIGRATIONS: IntCounter =
         register_int_counter!("path_migrations_total", "Successful connection migrations").unwrap();
+
 }
 
 pub fn update_memory_usage() {
