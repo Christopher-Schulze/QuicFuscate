@@ -50,3 +50,4 @@ xdp = ["afxdp"]
 [dev-dependencies]
 hex="0.4"
 criterion="0.5"
+once_cell="1.19"

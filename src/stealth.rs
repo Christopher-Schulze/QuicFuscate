@@ -180,12 +180,13 @@ pub struct FingerprintProfile {
     pub initial_max_stream_data_bidi_remote: u64,
     pub initial_max_streams_bidi: u64,
     pub max_idle_timeout: u64,
+    pub client_hello: Option<Vec<u8>>,
 }
 
 impl FingerprintProfile {
     /// Creates a new profile for a given browser and OS combination, with harmonized values.
     pub fn new(browser: BrowserProfile, os: OsProfile) -> Self {
-        match (browser, os) {
+        let mut profile = match (browser, os) {
             // --- Windows Profiles ---
             (BrowserProfile::Chrome, OsProfile::Windows) => Self {
                 browser, os,
@@ -197,6 +198,7 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 1_000_000,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 30_000,
+                client_hello: None,
             },
            (BrowserProfile::Firefox, OsProfile::Windows) => Self {
                 browser, os,
@@ -208,6 +210,7 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 1_048_576,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 60_000,
+                client_hello: None,
             },
            (BrowserProfile::Opera, OsProfile::Windows) => Self {
                browser, os,
@@ -219,6 +222,7 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 1_000_000,
                 initial_max_streams_bidi: 100,
                max_idle_timeout: 30_000,
+                client_hello: None,
            },
            (BrowserProfile::Brave, OsProfile::Windows) => Self {
                browser, os,
@@ -230,6 +234,7 @@ impl FingerprintProfile {
                initial_max_stream_data_bidi_remote: 1_000_000,
                initial_max_streams_bidi: 100,
                max_idle_timeout: 30_000,
+                client_hello: None,
            },
            (BrowserProfile::Edge, OsProfile::Windows) => Self {
                browser, os,
@@ -241,6 +246,7 @@ impl FingerprintProfile {
                initial_max_stream_data_bidi_remote: 1_000_000,
                initial_max_streams_bidi: 100,
                max_idle_timeout: 30_000,
+                client_hello: None,
            },
            (BrowserProfile::Edge, OsProfile::MacOS) => Self {
                browser, os,
@@ -252,6 +258,7 @@ impl FingerprintProfile {
                initial_max_stream_data_bidi_remote: 1_000_000,
                initial_max_streams_bidi: 100,
                max_idle_timeout: 30_000,
+                client_hello: None,
            },
            (BrowserProfile::Edge, OsProfile::Linux) => Self {
                browser, os,
@@ -263,6 +270,7 @@ impl FingerprintProfile {
                initial_max_stream_data_bidi_remote: 1_000_000,
                initial_max_streams_bidi: 100,
                max_idle_timeout: 30_000,
+                client_hello: None,
            },
            (BrowserProfile::Vivaldi, OsProfile::Windows) => Self {
                browser, os,
@@ -274,6 +282,7 @@ impl FingerprintProfile {
                initial_max_stream_data_bidi_remote: 1_000_000,
                initial_max_streams_bidi: 100,
                max_idle_timeout: 30_000,
+                client_hello: None,
            },
            (BrowserProfile::Vivaldi, OsProfile::MacOS) => Self {
                browser, os,
@@ -285,6 +294,7 @@ impl FingerprintProfile {
                initial_max_stream_data_bidi_remote: 1_000_000,
                initial_max_streams_bidi: 100,
                max_idle_timeout: 30_000,
+                client_hello: None,
            },
            (BrowserProfile::Vivaldi, OsProfile::Linux) => Self {
                browser, os,
@@ -296,6 +306,7 @@ impl FingerprintProfile {
                initial_max_stream_data_bidi_remote: 1_000_000,
                initial_max_streams_bidi: 100,
                max_idle_timeout: 30_000,
+                client_hello: None,
            },
             // --- macOS Profiles ---
            (BrowserProfile::Safari, OsProfile::MacOS) => Self {
@@ -308,6 +319,7 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 2_097_152,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 45_000,
+                client_hello: None,
             },
             (BrowserProfile::Chrome, OsProfile::MacOS) => Self {
                 browser, os,
@@ -319,6 +331,7 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 1_000_000,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 30_000,
+                client_hello: None,
             },
             (BrowserProfile::Opera, OsProfile::MacOS) => Self {
                 browser, os,
@@ -330,6 +343,7 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 1_000_000,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 30_000,
+                client_hello: None,
             },
             (BrowserProfile::Brave, OsProfile::MacOS) => Self {
                 browser, os,
@@ -341,6 +355,7 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 1_000_000,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 30_000,
+                client_hello: None,
             },
             (BrowserProfile::Firefox, OsProfile::MacOS) => Self {
                 browser, os,
@@ -352,6 +367,7 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 1_048_576,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 60_000,
+                client_hello: None,
             },
             (BrowserProfile::Chrome, OsProfile::Linux) => Self {
                 browser, os,
@@ -363,6 +379,7 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 1_000_000,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 30_000,
+                client_hello: None,
             },
             (BrowserProfile::Opera, OsProfile::Linux) => Self {
                 browser, os,
@@ -374,6 +391,7 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 1_000_000,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 30_000,
+                client_hello: None,
             },
             (BrowserProfile::Brave, OsProfile::Linux) => Self {
                 browser, os,
@@ -385,6 +403,7 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 1_000_000,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 30_000,
+                client_hello: None,
             },
             (BrowserProfile::Firefox, OsProfile::Linux) => Self {
                 browser, os,
@@ -396,6 +415,7 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 1_048_576,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 60_000,
+                client_hello: None,
             },
             (BrowserProfile::Chrome, OsProfile::Android) => Self {
                 browser, os,
@@ -407,6 +427,7 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 500_000,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 30_000,
+                client_hello: None,
             },
             (BrowserProfile::Firefox, OsProfile::Android) => Self {
                 browser, os,
@@ -418,6 +439,7 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 500_000,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 30_000,
+                client_hello: None,
             },
             (BrowserProfile::Opera, OsProfile::Android) => Self {
                 browser, os,
@@ -429,6 +451,7 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 500_000,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 30_000,
+                client_hello: None,
             },
             (BrowserProfile::Brave, OsProfile::Android) => Self {
                 browser, os,
@@ -440,6 +463,7 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 500_000,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 30_000,
+                client_hello: None,
             },
             (BrowserProfile::Edge, OsProfile::Android) => Self {
                 browser, os,
@@ -451,6 +475,7 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 500_000,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 30_000,
+                client_hello: None,
             },
             (BrowserProfile::Vivaldi, OsProfile::Android) => Self {
                 browser, os,
@@ -462,6 +487,7 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 500_000,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 30_000,
+                client_hello: None,
             },
             (BrowserProfile::Safari, OsProfile::IOS) => Self {
                 browser, os,
@@ -473,10 +499,14 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 500_000,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 30_000,
+                client_hello: None,
             },
             // --- Fallback Profile ---
             _ => Self::new(BrowserProfile::Chrome, OsProfile::Windows),
-        }
+        };
+
+        profile.client_hello = TlsClientHelloSpoofer::load_client_hello(browser, os);
+        profile
     }
 
     /// Generates a set of realistic HTTP headers based on the profile.
@@ -816,26 +846,28 @@ impl TlsClientHelloSpoofer {
 
     /// Apply the spoofing parameters using a custom ClientHello from
     /// `browser_profiles`.
-    pub fn apply(
-        config: &mut quiche::Config,
-        browser: BrowserProfile,
-        os: OsProfile,
-        suites: &[u16],
-    ) {
+    pub fn apply(config: &mut quiche::Config, profile: &FingerprintProfile, suites: &[u16]) {
         debug!(
             "uTLS: manipulating ClientHello for {:?}/{:?} with {} suites",
-            browser,
-            os,
+            profile.browser,
+            profile.os,
             suites.len()
         );
 
-        // Load a pre-recorded ClientHello from disk.
-        let hello = match Self::load_client_hello(browser, os) {
-            Some(h) => h,
-            None => {
-                error!("Missing ClientHello profile for {:?}/{:?}", browser, os);
-                return;
-            }
+        // Use preloaded ClientHello from the profile if available.
+        let hello = match &profile.client_hello {
+            Some(h) => h.clone(),
+            None => match Self::load_client_hello(profile.browser, profile.os) {
+                Some(h) => h,
+                None => {
+                    error!(
+                        "Missing ClientHello profile for {:?}/{:?}",
+                        profile.browser,
+                        profile.os
+                    );
+                    return;
+                }
+            },
         };
         unsafe {
             extern "C" {
@@ -1042,7 +1074,7 @@ impl StealthManager {
                 error!("Failed to set custom cipher suites: {}", e);
             }
             // Manipulate TLS ClientHello to match the desired ordering.
-            TlsClientHelloSpoofer::apply(config, fingerprint.browser, fingerprint.os, &suite_ids);
+            TlsClientHelloSpoofer::apply(config, &fingerprint, &suite_ids);
         }
 
         config
