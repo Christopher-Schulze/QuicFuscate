@@ -448,6 +448,18 @@ let tls_params = fingerprint.generate_tls_parameters();
 4. **Fingerprint Customization**:
    - Adjustable browser and OS types
 
+### Available Fingerprint Profiles
+
+| Browser | OS     | File                     |
+| ------- | ------ | ------------------------ |
+| Chrome  | Windows | `chrome_windows.chlo`   |
+| Firefox | Windows | `firefox_windows.chlo`  |
+| Opera   | Windows | `opera_windows.chlo`    |
+| Brave   | Windows | `brave_windows.chlo`    |
+| Edge    | Windows | `edge_windows.chlo`     |
+| Vivaldi | Windows | `vivaldi_windows.chlo`  |
+| Safari  | macOS   | `safari_macos.chlo`     |
+
 ### Adding new Browser Fingerprints
 Real TLS ClientHello bytes are stored in `browser_profiles/` with the file name
 format `<browser>_<os>.chlo`. The content must be base64 encoded. To add a new
@@ -459,6 +471,8 @@ fingerprint:
 3. Rebuild the patched quiche library using `scripts/quiche_workflow.sh --step patch`.
 4. Run the unit tests with `cargo test` to verify the fingerprint is loaded
    correctly.
+5. Launch QuicFuscate with `--profile <browser> --os <os>` to activate
+   the new fingerprint at runtime.
 
 ### HTTP Header Spoofing
 Defined in `stealth/browser_profiles/headers/FakeHeaders.rs`:
