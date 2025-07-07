@@ -71,6 +71,14 @@ enum Commands {
         #[clap(long, default_value_t = 4096)]
         pool_block: usize,
 
+        /// Enable XDP acceleration if supported
+        #[clap(long)]
+        xdp: bool,
+
+        /// Enable XDP acceleration if supported
+        #[clap(long)]
+        xdp: bool,
+
         /// Path to a TOML file with Adaptive FEC settings
         #[clap(long, value_name = "PATH")]
         fec_config: Option<PathBuf>,
@@ -231,6 +239,7 @@ async fn main() -> std::io::Result<()> {
                 *fec_mode,
                 *pool_capacity,
                 *pool_block,
+                *xdp,
                 fec_config,
                 &doh_provider,
                 &front_domain,
@@ -328,6 +337,7 @@ async fn run_client(
     fec_mode: FecMode,
     pool_capacity: usize,
     pool_block: usize,
+    xdp: bool,
     fec_config: &Option<PathBuf>,
     doh_provider: &str,
     front_domain: &Vec<String>,
@@ -424,6 +434,7 @@ async fn run_client(
         OptimizeConfig {
             pool_capacity,
             block_size: pool_block,
+            enable_xdp: xdp,
         },
         !no_utls,
     )
@@ -564,6 +575,7 @@ async fn run_server(
     fec_mode: FecMode,
     pool_capacity: usize,
     pool_block: usize,
+    xdp: bool,
     fec_config: &Option<PathBuf>,
     doh_provider: &str,
     front_domain: &Vec<String>,
@@ -683,6 +695,7 @@ async fn run_server(
                         OptimizeConfig {
                             pool_capacity,
                             block_size: pool_block,
+                            enable_xdp: xdp,
                         },
                     )
                     .expect("failed to create server connection")
