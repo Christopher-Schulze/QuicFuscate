@@ -2,6 +2,7 @@ use crate::core::QuicFuscateConnection;
 use crate::fec::{FecConfig, FecMode};
 #[cfg(unix)]
 use crate::optimize::ZeroCopyBuffer;
+use crate::optimize::OptimizeConfig;
 use crate::stealth::StealthConfig;
 use crate::stealth::{BrowserProfile, FingerprintProfile, OsProfile};
 use crate::telemetry;
@@ -90,18 +91,23 @@ enum Commands {
         /// Domain used for fronting (can be specified multiple times)
         #[clap(long, value_delimiter = ',')]
         front_domain: Vec<String>,
+
         /// CA file for peer verification
         #[clap(long, value_name = "PATH")]
         ca_file: Option<PathBuf>,
+
         /// Disable uTLS and use regular TLS
         #[clap(long)]
         no_utls: bool,
+
         /// Show TLS debug information
         #[clap(long)]
         debug_tls: bool,
+
         /// List available browser fingerprints
         #[clap(long)]
         list_fingerprints: bool,
+
         /// Enable certificate validation when connecting to the server
         #[clap(long)]
         verify_peer: bool,
@@ -209,7 +215,7 @@ async fn main() -> std::io::Result<()> {
         std::env::set_var("RUST_LOG", "info");
     }
     env_logger::init();
-    crate::telemetry::serve("0.0.0.0:9898");
+    telemetry::serve("0.0.0.0:9898");
 
     match &cli.command {
         Commands::Client {
@@ -221,6 +227,10 @@ async fn main() -> std::io::Result<()> {
             profile_seq,
             profile_interval,
             fec_mode,
+            pool_capacity,
+            pool_block,
+            thp,
+            numa_node,
             fec_config,
             doh_provider,
             front_domain,
@@ -250,9 +260,9 @@ async fn main() -> std::io::Result<()> {
                 *thp,
                 *numa_node,
                 fec_config,
-                &doh_provider,
-                &front_domain,
-                &ca_file,
+                doh_provider,
+                front_domain,
+                ca_file,
                 *no_utls,
                 *debug_tls,
                 *list_fingerprints,
@@ -275,6 +285,8 @@ async fn main() -> std::io::Result<()> {
             fec_mode,
             pool_capacity,
             pool_block,
+            thp,
+            numa_node,
             fec_config,
             doh_provider,
             front_domain,
@@ -299,8 +311,8 @@ async fn main() -> std::io::Result<()> {
                 *thp,
                 *numa_node,
                 fec_config,
-                &doh_provider,
-                &front_domain,
+                doh_provider,
+                front_domain,
                 *disable_doh,
                 *disable_fronting,
                 *disable_xor,
@@ -446,8 +458,8 @@ async fn run_client(
         OptimizeConfig {
             pool_capacity,
             block_size: pool_block,
-            transparent_hugepages: *thp,
-            numa_node: *numa_node,
+            transparent_hugepages: thp,
+            numa_node,
         },
         !no_utls,
     )
@@ -530,40 +542,40 @@ async fn run_client(
                     }
                 }
 
-        if conn.conn.is_established() && !request_sent {
-            if let Err(e) = conn.send_http3_request(url_parsed.path()) {
-                warn!("HTTP/3 request failed: {:?}", e);
-            } else {
-                request_sent = true;
-            }
-        }
-
-        if let Err(e) = conn.poll_http3() {
-            warn!("HTTP/3 error: {:?}", e);
-        }
-
-        loop {
-            match conn.send(&mut out) {
-                Ok(len) if len > 0 => {
-                    telemetry::BYTES_SENT.inc_by(len as u64);
-                    #[cfg(unix)]
-                    {
-                        let zc = ZeroCopyBuffer::new(&[&out[..len]]);
-                        zc.send(socket.as_raw_fd());
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        socket.send(&out[..len])?;
+                if conn.conn.is_established() && !request_sent {
+                    if let Err(e) = conn.send_http3_request(url_parsed.path()) {
+                        warn!("HTTP/3 request failed: {:?}", e);
+                    } else {
+                        request_sent = true;
                     }
                 }
-                Ok(_) => break,
-                Err(crate::error::ConnectionError::Quiche(quiche::Error::Done)) => break,
-                Err(e) => {
-                    error!("Send failed: {:?}", e);
-                    break;
+
+                if let Err(e) = conn.poll_http3() {
+                    warn!("HTTP/3 error: {:?}", e);
                 }
-            }
-        }
+
+                loop {
+                    match conn.send(&mut out) {
+                        Ok(len) if len > 0 => {
+                            telemetry::BYTES_SENT.inc_by(len as u64);
+                            #[cfg(unix)]
+                            {
+                                let zc = ZeroCopyBuffer::new(&[&out[..len]]);
+                                zc.send(socket.as_raw_fd());
+                            }
+                            #[cfg(not(unix))]
+                            {
+                                socket.send(&out[..len])?;
+                            }
+                        }
+                        Ok(_) => break,
+                        Err(crate::error::ConnectionError::Quiche(quiche::Error::Done)) => break,
+                        Err(e) => {
+                            error!("Send failed: {:?}", e);
+                            break;
+                        }
+                    }
+                }
 
                 conn.update_state();
                 conn.conn.on_timeout();
@@ -691,70 +703,70 @@ async fn run_server(
             }
             _ = async {
                 match socket.recv_from(&mut buf) {
-            Ok((len, from)) => {
-                telemetry::BYTES_RECEIVED.inc_by(len as u64);
-                info!("Received {} bytes from {}", len, from);
-                let client_conn = clients.entry(from).or_insert_with(|| {
-                    info!("New client connected: {}", from);
-                    let scid = quiche::ConnectionId::from_ref(&[0; quiche::MAX_CONN_ID_LEN]);
-                    let cfg = stealth_config.lock().unwrap().clone();
-                    QuicFuscateConnection::new_server(
-                        &scid,
-                        None,
-                        socket.local_addr().unwrap(),
-                        from,
-                        config.clone(),
-                        cfg,
-                        fec_cfg.clone(),
-                        OptimizeConfig {
-                            pool_capacity,
-                            block_size: pool_block,
-                            transparent_hugepages: *thp,
-                            numa_node: *numa_node,
-                        },
-                    )
-                    .expect("failed to create server connection")
-                });
+                    Ok((len, from)) => {
+                        telemetry::BYTES_RECEIVED.inc_by(len as u64);
+                        info!("Received {} bytes from {}", len, from);
+                        let client_conn = clients.entry(from).or_insert_with(|| {
+                            info!("New client connected: {}", from);
+                            let scid = quiche::ConnectionId::from_ref(&[0; quiche::MAX_CONN_ID_LEN]);
+                            let cfg = stealth_config.lock().unwrap().clone();
+                            QuicFuscateConnection::new_server(
+                                &scid,
+                                None,
+                                socket.local_addr().unwrap(),
+                                from,
+                                config.clone(),
+                                cfg,
+                                fec_cfg.clone(),
+                                OptimizeConfig {
+                                    pool_capacity,
+                                    block_size: pool_block,
+                                    transparent_hugepages: thp,
+                                    numa_node,
+                                },
+                            )
+                            .expect("failed to create server connection")
+                        });
 
-                if let Err(e) = client_conn.recv(&buf[..len]) {
-                    error!("QUIC recv failed: {:?}", e);
-                    continue;
-                }
+                        if let Err(e) = client_conn.recv(&buf[..len]) {
+                            error!("QUIC recv failed: {:?}", e);
+                            continue;
+                        }
 
-                if let Err(e) = client_conn.poll_http3() {
-                    warn!("HTTP/3 error: {:?}", e);
-                }
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // No packets to read
-            }
-            Err(e) => {
-                error!("Failed to read from socket: {}", e);
-                break;
-            }
-        }
-
-        // Send packets for all clients
-        for (addr, conn) in clients.iter_mut() {
-            loop {
-                match conn.send(&mut out) {
-                    Ok(len) if len > 0 => {
-                        telemetry::BYTES_SENT.inc_by(len as u64);
-                        if let Err(e) = socket.send_to(&out[..len], addr) {
-                            error!("Failed to send packet to {}: {}", addr, e);
+                        if let Err(e) = client_conn.poll_http3() {
+                            warn!("HTTP/3 error: {:?}", e);
                         }
                     }
-                    Ok(_) => break,
-                    Err(crate::error::ConnectionError::Quiche(quiche::Error::Done)) => break,
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        // No packets to read
+                    }
                     Err(e) => {
-                        error!("Send failed to {}: {:?}", addr, e);
+                        error!("Failed to read from socket: {}", e);
                         break;
                     }
                 }
-            }
-            conn.update_state();
-            conn.conn.on_timeout();
-        }
+
+                // Send packets for all clients
+                for (addr, conn) in clients.iter_mut() {
+                    loop {
+                        match conn.send(&mut out) {
+                            Ok(len) if len > 0 => {
+                                telemetry::BYTES_SENT.inc_by(len as u64);
+                                if let Err(e) = socket.send_to(&out[..len], addr) {
+                                    error!("Failed to send packet to {}: {}", addr, e);
+                                }
+                            }
+                            Ok(_) => break,
+                            Err(crate::error::ConnectionError::Quiche(quiche::Error::Done)) => break,
+                            Err(e) => {
+                                error!("Send failed to {}: {:?}", addr, e);
+                                break;
+                            }
+                        }
+                    }
+                    conn.update_state();
+                    conn.conn.on_timeout();
+                }
 
                 // Clean up closed connections
                 clients.retain(|_, conn| !conn.conn.is_closed());

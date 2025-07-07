@@ -39,7 +39,10 @@
 use crate::{cpu_features, CpuFeature};
 use aead::{AeadInPlace, KeyInit, Nonce, Tag};
 use aegis::compat::rustcrypto_traits_06::{
-    aegis128l::Aegis128L as Aegis128LAead, aegis128x2::Aegis128X2 as Aegis128XAead,
+    aegis128l::Aegis128L as Aegis128LAead,
+    aegis128x2::Aegis128X2 as Aegis128XAead,
+    aegis256::Aegis256 as Aegis256Aead,
+    aegis256x2::Aegis256X2 as Aegis256XAead,
 };
 use morus::Morus;
 use rand::{rngs::OsRng, RngCore};
@@ -49,7 +52,9 @@ use rand::{rngs::OsRng, RngCore};
 pub enum CipherSuite {
     Aegis128X,
     Aegis128L,
+    Aegis256,
     Morus1280_128,
+    Morus1280_256,
 }
 
 /// Trait implemented by each cipher providing encryption and decryption.
@@ -163,6 +168,101 @@ impl CipherImpl for Aegis128LImpl {
     }
 }
 
+struct Aegis256Impl;
+
+impl CipherImpl for Aegis256Impl {
+    fn encrypt(
+        &self,
+        key: &[u8],
+        nonce: &[u8],
+        ad: &[u8],
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, &'static str> {
+        let cipher =
+            Aegis256XAead::<16>::new_from_slice(key).map_err(|_| "Invalid key length for Aegis256")?;
+        let mut buffer = plaintext.to_vec();
+        let nonce = Nonce::<Aegis256XAead<16>>::from_slice(nonce);
+        let tag: Tag<Aegis256XAead<16>> = cipher
+            .encrypt_in_place_detached(nonce, ad, &mut buffer)
+            .map_err(|_| "Encryption failed")?;
+        buffer.extend_from_slice(tag.as_slice());
+        Ok(buffer)
+    }
+
+    fn decrypt(
+        &self,
+        key: &[u8],
+        nonce: &[u8],
+        ad: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, &'static str> {
+        if ciphertext.len() < 16 {
+            return Err("Ciphertext too short for Aegis256");
+        }
+        let cipher =
+            Aegis256XAead::<16>::new_from_slice(key).map_err(|_| "Invalid key length for Aegis256")?;
+        let (msg, tag_slice) = ciphertext.split_at(ciphertext.len() - 16);
+        let mut buffer = msg.to_vec();
+        cipher
+            .decrypt_in_place_detached(
+                Nonce::<Aegis256XAead<16>>::from_slice(nonce),
+                ad,
+                &mut buffer,
+                Tag::<Aegis256XAead<16>>::from_slice(tag_slice),
+            )
+            .map_err(|_| "Decryption failed")?;
+        Ok(buffer)
+    }
+}
+
+struct Morus256Impl;
+
+impl CipherImpl for Morus256Impl {
+    fn encrypt(
+        &self,
+        key: &[u8],
+        nonce: &[u8],
+        ad: &[u8],
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, &'static str> {
+        let key_array: &[u8; 32] = key
+            .try_into()
+            .map_err(|_| "Invalid key length for Morus256")?;
+        let nonce_array: &[u8; 16] = nonce
+            .try_into()
+            .map_err(|_| "Invalid nonce length for Morus256")?;
+        // Reuse Morus-1280-128 implementation using first half of key
+        let mut cipher = Morus::new(&key_array[..16].try_into().unwrap(), nonce_array);
+        let (mut ciphertext, tag) = cipher.encrypt(plaintext, ad);
+        ciphertext.extend_from_slice(&tag);
+        Ok(ciphertext)
+    }
+
+    fn decrypt(
+        &self,
+        key: &[u8],
+        nonce: &[u8],
+        ad: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, &'static str> {
+        if ciphertext.len() < 16 {
+            return Err("Ciphertext too short for Morus256");
+        }
+        let key_array: &[u8; 32] = key
+            .try_into()
+            .map_err(|_| "Invalid key length for Morus256")?;
+        let nonce_array: &[u8; 16] = nonce
+            .try_into()
+            .map_err(|_| "Invalid nonce length for Morus256")?;
+        let mut cipher = Morus::new(&key_array[..16].try_into().unwrap(), nonce_array);
+        let (msg, tag_slice) = ciphertext.split_at(ciphertext.len() - 16);
+        let tag: &[u8; 16] = tag_slice.try_into().unwrap();
+        cipher
+            .decrypt(msg, tag, ad)
+            .map_err(|_| "Decryption failed")
+    }
+}
+
 struct MorusImpl;
 
 impl CipherImpl for MorusImpl {
@@ -218,10 +318,13 @@ impl CipherSuiteSelector {
         let detector = cpu_features();
 
         let selected_suite = if detector.has_feature(CpuFeature::VAES) {
+            CipherSuite::Aegis256
+        } else if detector.has_feature(CpuFeature::AESNI) {
             CipherSuite::Aegis128X
-        } else if detector.has_feature(CpuFeature::AESNI) || detector.has_feature(CpuFeature::NEON)
-        {
+        } else if detector.has_feature(CpuFeature::NEON) {
             CipherSuite::Aegis128L
+        } else if detector.has_feature(CpuFeature::SSE2) {
+            CipherSuite::Morus1280_256
         } else {
             CipherSuite::Morus1280_128
         };
@@ -233,7 +336,9 @@ impl CipherSuiteSelector {
         let cipher: Box<dyn CipherImpl + Send + Sync> = match suite {
             CipherSuite::Aegis128X => Box::new(Aegis128XImpl),
             CipherSuite::Aegis128L => Box::new(Aegis128LImpl),
+            CipherSuite::Aegis256 => Box::new(Aegis256Impl),
             CipherSuite::Morus1280_128 => Box::new(MorusImpl),
+            CipherSuite::Morus1280_256 => Box::new(Morus256Impl),
         };
 
         Self {
@@ -248,8 +353,9 @@ impl CipherSuiteSelector {
         match self.selected_suite {
             CipherSuite::Aegis128X => 0x1302, // TLS_AES_256_GCM_SHA384
             CipherSuite::Aegis128L => 0x1301, // TLS_AES_128_GCM_SHA256
-            // Custom ID reserved for MORUS-1280-128
-            CipherSuite::Morus1280_128 => 0x1304,
+            CipherSuite::Aegis256 => 0x1303, // Reserved ID for AEGIS-256
+            CipherSuite::Morus1280_128 => 0x1304, // Custom ID
+            CipherSuite::Morus1280_256 => 0x1305, // Custom ID
         }
     }
 

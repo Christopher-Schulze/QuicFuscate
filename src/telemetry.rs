@@ -36,6 +36,12 @@ lazy_static! {
         register_int_counter!("bytes_sent_total", "Total UDP bytes sent").unwrap();
     pub static ref BYTES_RECEIVED: IntCounter =
         register_int_counter!("bytes_received_total", "Total UDP bytes received").unwrap();
+    pub static ref XDP_BYTES_SENT: IntCounter =
+        register_int_counter!("xdp_bytes_sent_total", "Total XDP bytes sent").unwrap();
+    pub static ref XDP_BYTES_RECEIVED: IntCounter =
+        register_int_counter!("xdp_bytes_received_total", "Total XDP bytes received").unwrap();
+    pub static ref XDP_FALLBACKS: IntCounter =
+        register_int_counter!("xdp_fallback_total", "Number of times XDP fell back to UDP").unwrap();
     pub static ref MEM_POOL_CAPACITY: IntGauge =
         register_int_gauge!("mem_pool_capacity", "Memory pool capacity").unwrap();
     pub static ref MEM_POOL_IN_USE: IntGauge =
