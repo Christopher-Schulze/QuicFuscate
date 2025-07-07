@@ -1,0 +1,19 @@
+--- a/deps/boringssl/ssl/handshake_client.cc
++++ b/deps/boringssl/ssl/handshake_client.cc
+@@
+ bool ssl_add_client_hello(SSL_HANDSHAKE *hs) {
+   SSL *const ssl = hs->ssl;
++  if (!ssl->custom_client_hello.empty()) {
++    Array<uint8_t> msg;
++    if (!msg.CopyFrom(bssl::Span<const uint8_t>(
++            ssl->custom_client_hello.data(),
++            ssl->custom_client_hello.size()))) {
++      return false;
++    }
++    return ssl->method->add_message(ssl, std::move(msg));
++  }
+   ScopedCBB cbb;
+   CBB body;
+   ssl_client_hello_type_t type = hs->selected_ech_config
+                                      ? ssl_client_hello_outer
+                                      : ssl_client_hello_unencrypted;
