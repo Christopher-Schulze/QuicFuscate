@@ -36,6 +36,7 @@
 //? inspection (DPI) systems. It integrates multiple strategies to create a
 //! layered defense against network surveillance.
 
+use clap::ValueEnum;
 use lazy_static::lazy_static;
 use log::{debug, error, info};
 use reqwest::Client;
@@ -110,7 +111,7 @@ pub async fn resolve_doh(
 // --- 2. Browser/OS Fingerprinting ---
 
 /// Defines the target browser for fingerprint spoofing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum)]
 pub enum BrowserProfile {
     Chrome,
     Firefox,
@@ -139,7 +140,7 @@ impl std::str::FromStr for BrowserProfile {
 }
 
 /// Defines the target operating system for fingerprint spoofing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum)]
 pub enum OsProfile {
     Windows,
     MacOS,
