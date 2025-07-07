@@ -554,10 +554,17 @@ impl OptimizationManager {
     }
 
     pub fn create_xdp_socket(&self, bind: SocketAddr, remote: SocketAddr) -> Option<XdpSocket> {
-        if self.use_xdp {
-            XdpSocket::new(bind, remote).ok()
-        } else {
-            None
+        if !self.xdp_available {
+            return None;
+        }
+
+        match XdpSocket::new(bind, remote) {
+            Ok(sock) => Some(sock),
+            Err(e) => {
+                info!("XDP init failed, falling back to UDP: {}", e);
+                Some(XdpSocket::new_udp(bind, remote).ok()?)
+            }
+
         }
     }
 }

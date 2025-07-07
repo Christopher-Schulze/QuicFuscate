@@ -55,6 +55,9 @@ main() {
     
     # 2. Laufzeit-Tests
     run_benchmark "Unit Tests" "cargo test --release -- --nocapture"
+
+    # XDP specific tests if feature available
+    run_benchmark "XDP Socket" "cargo test --release --test xdp_socket --features xdp -- --nocapture"
     
     # 3. Performance-Tests
     if [ -f "target/release/quiche-client" ] && [ -f "target/release/quiche-server" ]; then
