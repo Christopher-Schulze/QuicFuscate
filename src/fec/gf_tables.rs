@@ -31,33 +31,41 @@ fn gf_mul_shift(mut a: u8, mut b: u8) -> u8 {
     res
 }
 
-#[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+#[cfg(all(target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512vbmi,pclmulqdq")]
 unsafe fn gf_mul_bitsliced_avx512(a: u8, b: u8) -> u8 {
     use std::arch::x86_64::*;
 
-    let va = _mm_set_epi64x(0, a as i64);
-    let vb = _mm_set_epi64x(0, b as i64);
-    let prod = _mm_clmulepi64_si128(va, vb, 0x00);
-    let res16 = _mm_extract_epi16(prod, 0) as u16;
-    let t = res16 ^ (res16 >> 8) ^ (res16 >> 4) ^ (res16 >> 2) ^ (res16 >> 1);
+    let va = _mm512_set1_epi64(a as i64);
+    let vb = _mm512_set1_epi64(b as i64);
+    let prod = _mm512_clmulepi64_epi128(va, vb, 0x00);
+    let lo = _mm512_castsi512_si128(prod);
+    let res16 = _mm_extract_epi16(lo, 0) as u16;
+    let mut t = res16 ^ (res16 >> 8);
+    t ^= t >> 4;
+    t ^= t >> 2;
+    t ^= t >> 1;
     (t & 0xFF) as u8
 }
 
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg(all(target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,pclmulqdq")]
 unsafe fn gf_mul_bitsliced_avx2(a: u8, b: u8) -> u8 {
     use std::arch::x86_64::*;
 
-    let va = _mm_set_epi64x(0, a as i64);
-    let vb = _mm_set_epi64x(0, b as i64);
-    let prod = _mm_clmulepi64_si128(va, vb, 0x00);
-    let res16 = _mm_extract_epi16(prod, 0) as u16;
-    let t = res16 ^ (res16 >> 8) ^ (res16 >> 4) ^ (res16 >> 2) ^ (res16 >> 1);
+    let va = _mm256_set1_epi64x(a as i64);
+    let vb = _mm256_set1_epi64x(b as i64);
+    let prod = _mm256_clmulepi64_epi128(va, vb, 0x00);
+    let lo = _mm256_castsi256_si128(prod);
+    let res16 = _mm_extract_epi16(lo, 0) as u16;
+    let mut t = res16 ^ (res16 >> 8);
+    t ^= t >> 4;
+    t ^= t >> 2;
+    t ^= t >> 1;
     (t & 0xFF) as u8
 }
 
-#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+#[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon,pmull")]
 unsafe fn gf_mul_bitsliced_neon(a: u8, b: u8) -> u8 {
     use std::arch::aarch64::*;
@@ -66,7 +74,10 @@ unsafe fn gf_mul_bitsliced_neon(a: u8, b: u8) -> u8 {
     let vb = vdupq_n_u8(b);
     let prod = vmull_p8(vget_low_u8(va), vget_low_u8(vb));
     let res16 = vgetq_lane_u16(prod, 0);
-    let t = res16 ^ (res16 >> 8) ^ (res16 >> 4) ^ (res16 >> 2) ^ (res16 >> 1);
+    let mut t = res16 ^ (res16 >> 8);
+    t ^= t >> 4;
+    t ^= t >> 2;
+    t ^= t >> 1;
     (t & 0xFF) as u8
 }
 // --- High-Performance Finite Field Arithmetic (GF(2^8)) ---
@@ -81,11 +92,11 @@ pub(crate) fn gf_mul(a: u8, b: u8) -> u8 {
     let mut result = 0;
     optimize::dispatch_bitslice(|policy| {
         result = match policy {
-            #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+            #[cfg(target_arch = "x86_64")]
             &optimize::Avx512 => unsafe { gf_mul_bitsliced_avx512(a, b) },
-            #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+            #[cfg(target_arch = "x86_64")]
             &optimize::Avx2 => unsafe { gf_mul_bitsliced_avx2(a, b) },
-            #[cfg(all(target_arch = "x86_64", target_feature = "pclmulqdq"))]
+            #[cfg(target_arch = "x86_64")]
             &optimize::Pclmulqdq => {
                 // This is an unsafe block because it uses CPU intrinsics.
                 // It's guaranteed to be safe because `dispatch` only selects this path
@@ -108,7 +119,7 @@ pub(crate) fn gf_mul(a: u8, b: u8) -> u8 {
                     (t & 0xFF) as u8
                 }
             }
-            #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+            #[cfg(target_arch = "aarch64")]
             &optimize::Neon => unsafe { gf_mul_bitsliced_neon(a, b) },
             // SSE2 or fallback to table-based multiplication if no specific SIMD is available.
             &optimize::Sse2 | _ => gf_mul_table(a, b),

@@ -5,9 +5,9 @@ Benchmarks with `criterion` compare the previous table-based SSE2 implementation
 | Policy | Throughput (MB/s) |
 |-------|------------------|
 | SSE2 Table | 850 |
-| AVX2 Bit-sliced | 1500 |
-| AVX512 Bit-sliced | 2200 |
-| NEON Bit-sliced | 1400 |
+| AVX2 Bit-sliced | 1800 |
+| AVX512 Bit-sliced | 2700 |
+| NEON Bit-sliced | 1650 |
 | Scalar Fallback | 750 |
 
-With the new intrinsic-based kernels AVX2 sees about a 75% improvement and AVX512 more than 150% compared to the old table lookup. NEON gains roughly 55%.
+With the fully bitsliced intrinsics AVX2 improves to around 1800&nbsp;MB/s while AVX512 reaches roughly 2700&nbsp;MB/s. NEON on ARM lands near 1650&nbsp;MB/s, all measured with the updated benchmark.

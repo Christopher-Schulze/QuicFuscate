@@ -226,6 +226,7 @@ impl FeatureDetector {
                     CpuFeature::AVX512F,
                     info.has_avx512f() && info.has_avx512bw(),
                 );
+                features.insert(CpuFeature::AVX512VBMI, info.has_avx512vbmi());
 
                 features.insert(CpuFeature::VAES, info.has_vaes());
                 features.insert(CpuFeature::AESNI, info.has_aes());
