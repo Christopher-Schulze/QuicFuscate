@@ -148,6 +148,18 @@ enum Commands {
         #[clap(long, value_enum, default_value = "zero")]
         fec_mode: FecMode,
 
+        /// Memory pool capacity (number of blocks)
+        #[clap(long, default_value_t = 1024)]
+        pool_capacity: usize,
+
+        /// Memory pool block size in bytes
+        #[clap(long, default_value_t = 4096)]
+        pool_block: usize,
+
+        /// Path to a TOML file with Adaptive FEC settings
+        #[clap(long, value_name = "PATH")]
+        fec_config: Option<PathBuf>,
+
         /// Custom DNS-over-HTTPS provider URL
         #[clap(long, default_value = "https://cloudflare-dns.com/dns-query")]
         doh_provider: String,
@@ -425,6 +437,14 @@ async fn run_client(
         None => vec![FingerprintProfile::new(profile, os)],
     };
 
+    if profile_interval > 0 && profiles.is_empty() {
+        error!("No valid profiles supplied with --profile-seq");
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid profile sequence",
+        ));
+    }
+
     if profile_interval > 0 && profiles.len() > 1 {
         let sm = conn.stealth_manager();
         sm.start_profile_rotation(profiles, std::time::Duration::from_secs(profile_interval));
@@ -611,6 +631,14 @@ async fn run_server(
             .collect(),
         None => vec![FingerprintProfile::new(profile, os)],
     };
+
+    if profile_interval > 0 && profiles.is_empty() {
+        error!("No valid profiles supplied with --profile-seq");
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid profile sequence",
+        ));
+    }
 
     if profile_interval > 0 && profiles.len() > 1 {
         let cfg = stealth_config.clone();
