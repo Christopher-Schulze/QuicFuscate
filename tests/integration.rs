@@ -273,3 +273,92 @@ fn fec_config_from_file() {
     assert!((cfg.lambda - 0.05).abs() < 1e-6);
 }
 
+#[tokio::test]
+async fn connection_migration_events() {
+    telemetry::serve("127.0.0.1:0");
+
+    let primary_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    primary_socket.set_nonblocking(true).unwrap();
+    let primary_addr = primary_socket.local_addr().unwrap();
+
+    let client_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    client_socket.set_nonblocking(true).unwrap();
+    client_socket.connect(primary_addr).unwrap();
+
+    let mut cfg = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+    cfg.verify_peer(false);
+    let stealth_cfg = StealthConfig::default();
+    let fec_cfg = FecConfig::default();
+
+    let mut client_conn = QuicFuscateConnection::new_client(
+        "example.com",
+        client_socket.local_addr().unwrap(),
+        primary_addr,
+        cfg,
+        stealth_cfg.clone(),
+        fec_cfg.clone(),
+    )
+    .unwrap();
+
+    let scid = quiche::ConnectionId::from_ref(&[0; quiche::MAX_CONN_ID_LEN]);
+    let mut srv_cfg = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+    srv_cfg.load_cert_chain_from_pem_file(
+        "libs/vanilla_quiche/quiche/examples/cert.crt",
+    )
+    .unwrap();
+    srv_cfg
+        .load_priv_key_from_pem_file(
+            "libs/vanilla_quiche/quiche/examples/cert.key",
+        )
+        .unwrap();
+
+    let mut server_conn = QuicFuscateConnection::new_server(
+        &scid,
+        None,
+        primary_addr,
+        client_socket.local_addr().unwrap(),
+        srv_cfg,
+        stealth_cfg,
+        fec_cfg,
+    )
+    .unwrap();
+
+    // Basic handshake
+    let mut buf = [0u8; 65535];
+    let mut out = [0u8; 65535];
+    for _ in 0..10 {
+        if let Ok(len) = client_conn.send(&mut out) {
+            if len > 0 {
+                primary_socket.send_to(&out[..len], primary_addr).unwrap();
+            }
+        }
+        if let Ok((len, _)) = primary_socket.recv_from(&mut buf) {
+            server_conn.recv(&mut buf[..len]).ok();
+        }
+        if let Ok(len) = server_conn.send(&mut out) {
+            if len > 0 {
+                primary_socket.send_to(&out[..len], client_socket.local_addr().unwrap()).unwrap();
+            }
+        }
+        if let Ok(len) = client_socket.recv(&mut buf) {
+            client_conn.recv(&mut buf[..len]).ok();
+        }
+        if client_conn.conn.is_established() && server_conn.conn.is_established() {
+            break;
+        }
+    }
+
+    let new_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    new_socket.set_nonblocking(true).unwrap();
+    let new_addr = new_socket.local_addr().unwrap();
+
+    // Trigger migration on client
+    client_conn.migrate_connection(new_addr).ok();
+
+    // Drain path events
+    client_conn.update_state();
+    while let Some(_e) = client_conn.conn.path_event_next() {
+        // just consume for test
+    }
+}
+
