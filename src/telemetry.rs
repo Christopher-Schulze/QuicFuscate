@@ -11,6 +11,10 @@
 //! - `dns_errors_total`: Number of DNS resolution errors.
 //! - `bytes_sent_total`: UDP bytes sent via the core.
 //! - `bytes_received_total`: UDP bytes received via the core.
+//! - `xdp_bytes_sent_total`: Total bytes sent over XDP.
+//! - `xdp_bytes_received_total`: Total bytes received over XDP.
+//! - `xdp_fallback_total`: Number of times XDP fell back to UDP.
+//! - `xdp_active`: Gauge whether XDP is currently active.
 //! - `mem_pool_capacity`: Current capacity of the memory pool.
 //! - `mem_pool_in_use`: Number of blocks currently checked out from the pool.
 //! - `cpu_feature_mask`: Bitmask of detected CPU features.
