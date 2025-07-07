@@ -1,9 +1,9 @@
+use crate::app_config::AppConfig;
 use crate::core::QuicFuscateConnection;
 use crate::fec::{FecConfig, FecMode};
-use crate::app_config::AppConfig;
+use crate::optimize::OptimizeConfig;
 #[cfg(unix)]
 use crate::optimize::ZeroCopyBuffer;
-use crate::optimize::OptimizeConfig;
 use crate::stealth::StealthConfig;
 use crate::stealth::{BrowserProfile, FingerprintProfile, OsProfile};
 use crate::telemetry;
@@ -427,13 +427,22 @@ async fn run_client(
             }
             Err(e) => {
                 error!("Failed to load config {}: {}", cfg.display(), e);
-                (FecConfig::default(), StealthConfig::default(), OptimizeConfig::default())
+                (
+                    FecConfig::default(),
+                    StealthConfig::default(),
+                    OptimizeConfig::default(),
+                )
             }
         }
     } else {
         let mut fec = if let Some(path) = fec_config {
             match FecConfig::from_file(path) {
-                Ok(cfg) => cfg,
+                Ok(cfg) => {
+                    if let Err(e) = cfg.validate() {
+                        warn!("FEC config validation failed: {}", e);
+                    }
+                    cfg
+                }
                 Err(e) => {
                     error!("Failed to load FEC config {}: {}", path.display(), e);
                     FecConfig::default()
@@ -688,13 +697,22 @@ async fn run_server(
             }
             Err(e) => {
                 error!("Failed to load config {}: {}", cfg.display(), e);
-                (FecConfig::default(), StealthConfig::default(), OptimizeConfig::default())
+                (
+                    FecConfig::default(),
+                    StealthConfig::default(),
+                    OptimizeConfig::default(),
+                )
             }
         }
     } else {
         let mut fec = if let Some(path) = fec_config {
             match FecConfig::from_file(path) {
-                Ok(cfg) => cfg,
+                Ok(cfg) => {
+                    if let Err(e) = cfg.validate() {
+                        warn!("FEC config validation failed: {}", e);
+                    }
+                    cfg
+                }
                 Err(e) => {
                     error!("Failed to load FEC config {}: {}", path.display(), e);
                     FecConfig::default()

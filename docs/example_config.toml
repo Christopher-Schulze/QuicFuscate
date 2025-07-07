@@ -18,6 +18,8 @@ doh_provider = "https://cloudflare-dns.com/dns-query"
 enable_domain_fronting = true
 fronting_domains = ["cdn.example.com"]
 enable_xor_obfuscation = true
+enable_http3_masquerading = true
+use_qpack_headers = true
 
 [optimize]
 pool_capacity = 1024
