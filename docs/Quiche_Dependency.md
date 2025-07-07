@@ -109,11 +109,17 @@ The `fetch` step initializes the `libs/patched_quiche` submodule automatically.
 ### Building
 
 ```bash
-# Build in release mode (recommended)
-./scripts/build_quiche.sh release
+# 1. Fetch the quiche sources
+./scripts/quiche_workflow.sh --step fetch
 
-# Or in debug mode
-./scripts/build_quiche.sh debug
+# 2. Apply all local patches (TLS hooks and BoringSSL tweaks)
+./scripts/quiche_workflow.sh --step patch
+
+# 3. Build in release mode (recommended)
+./scripts/quiche_workflow.sh --step build
+
+# For a debug build use
+./scripts/quiche_workflow.sh --type debug
 ```
 
 ### Custom Build Features

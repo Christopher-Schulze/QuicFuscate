@@ -43,10 +43,12 @@ use reqwest::Client;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
 use url::Url;
+use base64;
 
 use crate::crypto::CryptoManager; // Assumed for integration
 use crate::optimize::{self, OptimizationManager}; // Assumed for integration
@@ -638,13 +640,49 @@ impl XorObfuscator {
 pub struct TlsClientHelloSpoofer;
 
 impl TlsClientHelloSpoofer {
-    /// Apply the spoofing parameters. In this simplified implementation we only
-    /// log the action. A real implementation would interface with quiche's
-    /// underlying TLS stack via FFI.
-    #[allow(unused_variables)]
-    pub fn apply(config: &mut quiche::Config, suites: &[u16]) {
+    fn profile_path(browser: BrowserProfile, os: OsProfile) -> std::path::PathBuf {
+        let browser = match browser {
+            BrowserProfile::Chrome => "chrome",
+            BrowserProfile::Firefox => "firefox",
+            BrowserProfile::Safari => "safari",
+            BrowserProfile::Opera => "opera",
+            BrowserProfile::Brave => "brave",
+            BrowserProfile::Edge => "edge",
+            BrowserProfile::Vivaldi => "vivaldi",
+        };
+        let os = match os {
+            OsProfile::Windows => "windows",
+            OsProfile::MacOS => "macos",
+            OsProfile::Linux => "linux",
+            OsProfile::IOS => "ios",
+            OsProfile::Android => "android",
+        };
+        Path::new("browser_profiles").join(format!("{}_{}.chlo", browser, os))
+    }
+
+    fn load_client_hello(browser: BrowserProfile, os: OsProfile) -> Option<Vec<u8>> {
+        let path = Self::profile_path(browser, os);
+        if let Ok(data) = std::fs::read_to_string(&path) {
+            if let Ok(buf) = base64::decode(data.trim()) {
+                return Some(buf);
+            }
+        }
+        None
+    }
+
+    /// Apply the spoofing parameters using a custom ClientHello from
+    /// `browser_profiles` if available. Falls back to a generated hello when
+    /// no profile file exists.
+    pub fn apply(
+        config: &mut quiche::Config,
+        browser: BrowserProfile,
+        os: OsProfile,
+        suites: &[u16],
+    ) {
         debug!(
-            "uTLS: manipulating ClientHello with {} suites",
+            "uTLS: manipulating ClientHello for {:?}/{:?} with {} suites",
+            browser,
+            os,
             suites.len()
         );
 
@@ -683,7 +721,7 @@ impl TlsClientHelloSpoofer {
             out
         }
 
-        let hello = build_client_hello(suites);
+        let hello = Self::load_client_hello(browser, os).unwrap_or_else(|| build_client_hello(suites));
         unsafe {
             extern "C" {
                 fn quiche_config_set_custom_tls(cfg: *mut c_void, hello: *const u8, len: usize);
@@ -818,7 +856,12 @@ impl StealthManager {
                 error!("Failed to set custom cipher suites: {}", e);
             }
             // Manipulate TLS ClientHello to match the desired ordering.
-            TlsClientHelloSpoofer::apply(config, &suite_ids);
+            TlsClientHelloSpoofer::apply(
+                config,
+                fingerprint.browser,
+                fingerprint.os,
+                &suite_ids,
+            );
         }
 
         config
