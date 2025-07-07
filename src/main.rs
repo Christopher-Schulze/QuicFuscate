@@ -580,6 +580,11 @@ async fn run_client(
         }
 
                 conn.update_state();
+                info!(
+                    "client stats: RTT {:.0} ms, Loss {:.2}%",
+                    conn.stats.rtt,
+                    conn.stats.loss_rate * 100.0
+                );
                 conn.conn.on_timeout();
 
                 // Sleep to avoid busy-looping
@@ -788,6 +793,12 @@ async fn run_server(
                 }
             }
             conn.update_state();
+            info!(
+                "client {} stats: RTT {:.0} ms, Loss {:.2}%",
+                addr,
+                conn.stats.rtt,
+                conn.stats.loss_rate * 100.0
+            );
             conn.conn.on_timeout();
         }
 
