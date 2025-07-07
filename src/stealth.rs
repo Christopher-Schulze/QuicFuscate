@@ -1034,9 +1034,11 @@ impl StealthManager {
             None
         };
 
-        telemetry::STEALTH_DOH.set(if config.enable_doh { 1 } else { 0 });
-        telemetry::STEALTH_FRONTING.set(if config.enable_domain_fronting { 1 } else { 0 });
-        telemetry::STEALTH_XOR.set(if config.enable_xor_obfuscation { 1 } else { 0 });
+        telemetry!(telemetry::STEALTH_DOH.set(if config.enable_doh { 1 } else { 0 }));
+        telemetry!(
+            telemetry::STEALTH_FRONTING.set(if config.enable_domain_fronting { 1 } else { 0 })
+        );
+        telemetry!(telemetry::STEALTH_XOR.set(if config.enable_xor_obfuscation { 1 } else { 0 }));
 
         Self {
             config,
@@ -1146,7 +1148,7 @@ impl StealthManager {
             )) {
                 Ok(ip) => ip,
                 Err(e) => {
-                    telemetry::DNS_ERRORS.inc();
+                    telemetry!(telemetry::DNS_ERRORS.inc());
                     error!("DoH resolution failed: {}. Falling back.", e);
                     IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))
                 }

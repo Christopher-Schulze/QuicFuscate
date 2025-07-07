@@ -333,9 +333,9 @@ impl QuicFuscateConnection {
             .create_xdp_socket(self.local_addr, new_peer);
         if let Some(ref xdp) = self.xdp_socket {
             let _ = xdp.update_remote(new_peer);
-            telemetry::XDP_ACTIVE.set(1);
+            telemetry!(telemetry::XDP_ACTIVE.set(1));
         } else {
-            telemetry::XDP_ACTIVE.set(0);
+            telemetry!(telemetry::XDP_ACTIVE.set(0));
         }
 
         self.conn.migrate(self.local_addr, new_peer)
@@ -442,8 +442,8 @@ impl QuicFuscateConnection {
             .report_loss(stats.lost as usize, stats.sent as usize);
 
         if self.last_telemetry.elapsed() >= std::time::Duration::from_secs(1) {
-            telemetry::update_memory_usage();
-            telemetry::flush();
+            telemetry!(telemetry::update_memory_usage());
+            telemetry!(telemetry::flush());
             self.last_telemetry = std::time::Instant::now();
         }
 
@@ -460,16 +460,13 @@ impl QuicFuscateConnection {
                     if let Some(ref mut xdp) = self.xdp_socket {
                         if let Err(e) = xdp.reconfigure(local, peer) {
                             eprintln!("XDP reconfigure failed: {e}");
-                            self.xdp_socket = self
-                                .optimization_manager
-                                .create_xdp_socket(local, peer);
+                            self.xdp_socket =
+                                self.optimization_manager.create_xdp_socket(local, peer);
                         }
                     } else {
-                        self.xdp_socket = self
-                            .optimization_manager
-                            .create_xdp_socket(local, peer);
+                        self.xdp_socket = self.optimization_manager.create_xdp_socket(local, peer);
                     }
-                    telemetry::PATH_MIGRATIONS.inc();
+                    telemetry!(telemetry::PATH_MIGRATIONS.inc());
                 }
                 quiche::PathEvent::FailedValidation(local, peer) => {
                     eprintln!("Path validation failed: {local}->{peer}");
@@ -487,16 +484,13 @@ impl QuicFuscateConnection {
                     if let Some(ref mut xdp) = self.xdp_socket {
                         if let Err(e) = xdp.reconfigure(local, peer) {
                             eprintln!("XDP reconfigure failed: {e}");
-                            self.xdp_socket = self
-                                .optimization_manager
-                                .create_xdp_socket(local, peer);
+                            self.xdp_socket =
+                                self.optimization_manager.create_xdp_socket(local, peer);
                         }
                     } else {
-                        self.xdp_socket = self
-                            .optimization_manager
-                            .create_xdp_socket(local, peer);
+                        self.xdp_socket = self.optimization_manager.create_xdp_socket(local, peer);
                     }
-                    telemetry::PATH_MIGRATIONS.inc();
+                    telemetry!(telemetry::PATH_MIGRATIONS.inc());
                 }
             }
         }

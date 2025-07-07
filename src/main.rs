@@ -14,6 +14,7 @@ use std::net::{SocketAddr, ToSocketAddrs};
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::signal;
@@ -26,6 +27,9 @@ struct Cli {
     /// Enable verbose logging
     #[clap(short, long, global = true)]
     verbose: bool,
+    /// Enable telemetry metrics
+    #[clap(long, global = true)]
+    telemetry: bool,
     #[clap(subcommand)]
     command: Commands,
 }
@@ -220,7 +224,10 @@ async fn main() -> std::io::Result<()> {
         std::env::set_var("RUST_LOG", "info");
     }
     env_logger::init();
-    crate::telemetry::serve("0.0.0.0:9898");
+    if cli.telemetry {
+        telemetry::TELEMETRY_ENABLED.store(true, Ordering::Relaxed);
+        crate::telemetry::serve("0.0.0.0:9898");
+    }
 
     match &cli.command {
         Commands::Client {
@@ -323,7 +330,9 @@ async fn main() -> std::io::Result<()> {
         }
     }
 
-    telemetry::flush();
+    if telemetry::TELEMETRY_ENABLED.load(Ordering::Relaxed) {
+        telemetry::flush();
+    }
     Ok(())
 }
 
@@ -488,8 +497,8 @@ async fn run_client(
     stealth_config.fronting_domains = front_domain.clone();
     stealth_config.enable_xor_obfuscation = !disable_xor;
     stealth_config.enable_http3_masquerading = !disable_http3;
-    telemetry::STEALTH_BROWSER_PROFILE.set(stealth_config.browser_profile as i64);
-    telemetry::STEALTH_OS_PROFILE.set(stealth_config.os_profile as i64);
+    telemetry!(telemetry::STEALTH_BROWSER_PROFILE.set(stealth_config.browser_profile as i64));
+    telemetry!(telemetry::STEALTH_OS_PROFILE.set(stealth_config.os_profile as i64));
 
     let host = url_parsed.host_str().unwrap_or("example.com");
     let opt_params = if config_path.is_some() {
@@ -544,7 +553,7 @@ async fn run_client(
     // Send initial packet
     if let Ok(len) = conn.send(&mut out) {
         if len > 0 {
-            telemetry::BYTES_SENT.inc_by(len as u64);
+            telemetry!(telemetry::BYTES_SENT.inc_by(len as u64));
             #[cfg(unix)]
             {
                 let zc = ZeroCopyBuffer::new(&[&out[..len]]);
@@ -585,7 +594,7 @@ async fn run_client(
                     }
                 } {
                     Ok(len) => {
-                        telemetry::BYTES_RECEIVED.inc_by(len as u64);
+                        telemetry!(telemetry::BYTES_RECEIVED.inc_by(len as u64));
                         let _ = conn.recv(&buf[..len]);
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
@@ -610,7 +619,7 @@ async fn run_client(
         loop {
             match conn.send(&mut out) {
                 Ok(len) if len > 0 => {
-                    telemetry::BYTES_SENT.inc_by(len as u64);
+                    telemetry!(telemetry::BYTES_SENT.inc_by(len as u64));
                     #[cfg(unix)]
                     {
                         let zc = ZeroCopyBuffer::new(&[&out[..len]]);
@@ -759,8 +768,8 @@ async fn run_server(
         sc.fronting_domains = front_domain.clone();
         sc.enable_xor_obfuscation = !disable_xor;
         sc.enable_http3_masquerading = !disable_http3;
-        telemetry::STEALTH_BROWSER_PROFILE.set(sc.browser_profile as i64);
-        telemetry::STEALTH_OS_PROFILE.set(sc.os_profile as i64);
+        telemetry!(telemetry::STEALTH_BROWSER_PROFILE.set(sc.browser_profile as i64));
+        telemetry!(telemetry::STEALTH_OS_PROFILE.set(sc.os_profile as i64));
     }
     let opt_params = if config_path.is_some() {
         OptimizeConfig {
@@ -821,7 +830,7 @@ async fn run_server(
             _ = async {
                 match socket.recv_from(&mut buf) {
             Ok((len, from)) => {
-                telemetry::BYTES_RECEIVED.inc_by(len as u64);
+                telemetry!(telemetry::BYTES_RECEIVED.inc_by(len as u64));
                 info!("Received {} bytes from {}", len, from);
                 let client_conn = clients.entry(from).or_insert_with(|| {
                     info!("New client connected: {}", from);
@@ -863,7 +872,7 @@ async fn run_server(
             loop {
                 match conn.send(&mut out) {
                     Ok(len) if len > 0 => {
-                        telemetry::BYTES_SENT.inc_by(len as u64);
+                        telemetry!(telemetry::BYTES_SENT.inc_by(len as u64));
                         if let Err(e) = socket.send_to(&out[..len], addr) {
                             error!("Failed to send packet to {}: {}", addr, e);
                         }

@@ -662,7 +662,7 @@ impl Decoder {
                 }
             }
         }
-        telemetry::DECODING_TIME_MS.set(start.elapsed().as_millis() as i64);
+        telemetry!(telemetry::DECODING_TIME_MS.set(start.elapsed().as_millis() as i64));
         true
     }
 
@@ -676,7 +676,7 @@ impl Decoder {
 
     /// Solves the decoding problem using a block-Lanczos based Wiedemann algorithm.
     fn wiedemann_algorithm(&mut self) -> bool {
-        crate::telemetry::WIEDEMANN_USAGE.inc();
+        telemetry!(crate::telemetry::WIEDEMANN_USAGE.inc());
         let start = std::time::Instant::now();
 
         let k = self.k;
@@ -776,7 +776,7 @@ impl Decoder {
             }
         }
         self.is_decoded = true;
-        crate::telemetry::DECODING_TIME_MS.set(start.elapsed().as_millis() as i64);
+        telemetry!(crate::telemetry::DECODING_TIME_MS.set(start.elapsed().as_millis() as i64));
         true
     }
 

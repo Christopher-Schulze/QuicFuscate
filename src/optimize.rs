@@ -254,7 +254,7 @@ impl FeatureDetector {
                             }
                         },
                     );
-                telemetry::CPU_FEATURE_MASK.set(mask as i64);
+                telemetry!(telemetry::CPU_FEATURE_MASK.set(mask as i64));
 
                 // determine active SIMD policy for telemetry
                 let policy = if features.get(&CpuFeature::AVX512F).copied().unwrap_or(false)
@@ -273,7 +273,7 @@ impl FeatureDetector {
                 } else {
                     0
                 };
-                telemetry::SIMD_ACTIVE.set(policy);
+                telemetry!(telemetry::SIMD_ACTIVE.set(policy));
 
                 DETECTOR = Some(FeatureDetector { features });
             }
@@ -353,21 +353,21 @@ where
     let detector = FeatureDetector::instance();
 
     if detector.has_feature(CpuFeature::AVX512F) && detector.has_feature(CpuFeature::AVX512VBMI) {
-        telemetry::SIMD_USAGE_AVX512.inc();
+        telemetry!(telemetry::SIMD_USAGE_AVX512.inc());
         f(&Avx512)
     } else if detector.has_feature(CpuFeature::AVX2) {
-        telemetry::SIMD_USAGE_AVX2.inc();
+        telemetry!(telemetry::SIMD_USAGE_AVX2.inc());
         f(&Avx2)
     } else if detector.has_feature(CpuFeature::SSE2) {
-        telemetry::SIMD_USAGE_SSE2.inc();
+        telemetry!(telemetry::SIMD_USAGE_SSE2.inc());
         f(&Sse2)
     } else if detector.has_feature(CpuFeature::PCLMULQDQ) {
         f(&Pclmulqdq)
     } else if detector.has_feature(CpuFeature::NEON) {
-        telemetry::SIMD_USAGE_NEON.inc();
+        telemetry!(telemetry::SIMD_USAGE_NEON.inc());
         f(&Neon)
     } else {
-        telemetry::SIMD_USAGE_SCALAR.inc();
+        telemetry!(telemetry::SIMD_USAGE_SCALAR.inc());
         f(&Scalar)
     }
 }
@@ -435,11 +435,11 @@ impl MemoryPool {
             pools.push(q);
             remaining -= node_cap;
         }
-        telemetry::MEM_POOL_CAPACITY.set(capacity as i64);
-        telemetry::MEM_POOL_BLOCK_SIZE.set(block_size as i64);
-        telemetry::MEM_POOL_USAGE_BYTES.set(0);
-        telemetry::MEM_POOL_FRAGMENTATION.set(0);
-        telemetry::MEM_POOL_UTILIZATION.set(0);
+        telemetry!(telemetry::MEM_POOL_CAPACITY.set(capacity as i64));
+        telemetry!(telemetry::MEM_POOL_BLOCK_SIZE.set(block_size as i64));
+        telemetry!(telemetry::MEM_POOL_USAGE_BYTES.set(0));
+        telemetry!(telemetry::MEM_POOL_FRAGMENTATION.set(0));
+        telemetry!(telemetry::MEM_POOL_UTILIZATION.set(0));
         let pool = Self {
             pools,
             block_size,
@@ -478,16 +478,16 @@ impl MemoryPool {
         let cap = self.capacity.load(Ordering::Relaxed);
         let in_use = self.in_use.load(Ordering::Relaxed);
         let avail = self.available.load(Ordering::Relaxed);
-        telemetry::MEM_POOL_IN_USE.set(in_use as i64);
-        telemetry::MEM_POOL_USAGE_BYTES.set((in_use * self.block_size) as i64);
+        telemetry!(telemetry::MEM_POOL_IN_USE.set(in_use as i64));
+        telemetry!(telemetry::MEM_POOL_USAGE_BYTES.set((in_use * self.block_size) as i64));
         let frag = cap.saturating_sub(in_use + avail);
-        telemetry::MEM_POOL_FRAGMENTATION.set(frag as i64);
+        telemetry!(telemetry::MEM_POOL_FRAGMENTATION.set(frag as i64));
         let util = if cap == 0 {
             0
         } else {
             (in_use * 100 / cap) as i64
         };
-        telemetry::MEM_POOL_UTILIZATION.set(util);
+        telemetry!(telemetry::MEM_POOL_UTILIZATION.set(util));
     }
 
     /// Allocates a 64-byte aligned memory block from the pool.
@@ -499,16 +499,16 @@ impl MemoryPool {
                 self.available.fetch_sub(1, Ordering::Relaxed);
                 self.in_use.fetch_add(1, Ordering::Relaxed);
                 self.update_metrics();
-                telemetry::update_memory_usage();
+                telemetry!(telemetry::update_memory_usage());
                 return b;
             }
         }
-        telemetry::FEC_OVERFLOWS.inc();
+        telemetry!(telemetry::FEC_OVERFLOWS.inc());
         let new_cap = self.capacity.load(Ordering::Relaxed) * 2;
         self.grow(new_cap);
         self.in_use.fetch_add(1, Ordering::Relaxed);
         self.update_metrics();
-        telemetry::update_memory_usage();
+        telemetry!(telemetry::update_memory_usage());
         let mut block = AlignedBox::slice_from_default(64, self.block_size).unwrap();
         #[cfg(target_os = "linux")]
         unsafe {
@@ -532,7 +532,7 @@ impl MemoryPool {
         }
         self.in_use.fetch_sub(1, Ordering::Relaxed);
         self.update_metrics();
-        telemetry::update_memory_usage();
+        telemetry!(telemetry::update_memory_usage());
     }
 
     /// Adjusts the maximum number of cached blocks at runtime.
@@ -559,9 +559,9 @@ impl MemoryPool {
                 }
             }
         }
-        telemetry::MEM_POOL_CAPACITY.set(self.capacity.load(Ordering::Relaxed) as i64);
+        telemetry!(telemetry::MEM_POOL_CAPACITY.set(self.capacity.load(Ordering::Relaxed) as i64));
         self.update_metrics();
-        telemetry::update_memory_usage();
+        telemetry!(telemetry::update_memory_usage());
     }
 }
 
@@ -850,7 +850,7 @@ impl OptimizationManager {
         let supported = XdpSocket::is_supported();
         info!("XDP available: {}", supported);
         let enabled = enable_xdp && supported;
-        telemetry::XDP_ACTIVE.set(if enabled { 1 } else { 0 });
+        telemetry!(telemetry::XDP_ACTIVE.set(if enabled { 1 } else { 0 }));
         Self {
             memory_pool: Arc::new(MemoryPool::new(capacity, block_size)),
             xdp_available: supported,
