@@ -270,3 +270,54 @@ fn bitsliced_mul_matches_table() {
         }
     }
 }
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn avx2_kernel_matches_table() {
+    if !std::is_x86_feature_detected!("avx2") || !std::is_x86_feature_detected!("pclmulqdq") {
+        return;
+    }
+    quicfuscate::fec::init_gf_tables();
+    for a in 0u8..=255 {
+        for b in 0u8..=255 {
+            let table = quicfuscate::fec::gf_tables::gf_mul_table(a, b);
+            let bs = unsafe { quicfuscate::fec::gf_tables::gf_mul_bitsliced_avx2(a, b) };
+            assert_eq!(table, bs, "a={} b={} mismatch", a, b);
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn avx512_kernel_matches_table() {
+    if !(std::is_x86_feature_detected!("avx512f")
+        && std::is_x86_feature_detected!("avx512vbmi")
+        && std::is_x86_feature_detected!("pclmulqdq"))
+    {
+        return;
+    }
+    quicfuscate::fec::init_gf_tables();
+    for a in 0u8..=255 {
+        for b in 0u8..=255 {
+            let table = quicfuscate::fec::gf_tables::gf_mul_table(a, b);
+            let bs = unsafe { quicfuscate::fec::gf_tables::gf_mul_bitsliced_avx512(a, b) };
+            assert_eq!(table, bs, "a={} b={} mismatch", a, b);
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn neon_kernel_matches_table() {
+    if !std::arch::is_aarch64_feature_detected!("pmull") {
+        return;
+    }
+    quicfuscate::fec::init_gf_tables();
+    for a in 0u8..=255 {
+        for b in 0u8..=255 {
+            let table = quicfuscate::fec::gf_tables::gf_mul_table(a, b);
+            let bs = unsafe { quicfuscate::fec::gf_tables::gf_mul_bitsliced_neon(a, b) };
+            assert_eq!(table, bs, "a={} b={} mismatch", a, b);
+        }
+    }
+}
