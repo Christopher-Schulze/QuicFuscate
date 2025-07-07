@@ -14,3 +14,8 @@ pub unsafe extern "C" fn quiche_config_set_custom_tls(
 ) {
     log::debug!("quiche_config_set_custom_tls stub invoked");
 }
+
+#[no_mangle]
+pub unsafe extern "C" fn quiche_config_enable_simd(_cfg: *mut c_void) {
+    log::debug!("quiche_config_enable_simd stub invoked");
+}
