@@ -43,6 +43,21 @@ The optional `--fec-config` flag loads Adaptive FEC parameters from the specifie
     --list-fingerprints    Show available browser fingerprints
 ```
 
+### Real TLS Fingerprints
+
+When built against the patched `quiche` library, QuicFuscate can replay
+captured TLS ClientHello messages. Store the base64 encoded handshake in
+`browser_profiles/<browser>_<os>.chlo` and build with `QUICHE_PATH` pointing
+to the patched sources:
+
+```bash
+export QUICHE_PATH=$(pwd)/libs/patched_quiche/quiche
+./scripts/quiche_workflow.sh --step build
+```
+
+The runtime automatically loads the matching profile based on the selected
+`--profile` and `--os` options.
+
 ### Optimization Parameters
 
 Both client and server accept additional flags to tune the memory pool used for
