@@ -35,25 +35,34 @@
 //! function dispatching to select the best hardware-accelerated implementation.
 //! It also includes foundational structures for zero-copy operations and memory pooling.
 
+use crate::telemetry;
 use crate::xdp_socket::XdpSocket;
 use aligned_box::AlignedBox;
+use cpufeatures;
 #[cfg(unix)]
 use libc::{iovec, msghdr, recvmsg, sendmsg};
 use log::info;
-use crate::telemetry;
-use cpufeatures;
 use std::any::Any;
-use std::io;
 use std::collections::HashMap;
+use std::io;
 use std::net::SocketAddr;
 #[cfg(unix)]
 use std::os::unix::io::RawFd;
-use std::sync::{Arc, Once, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, Once};
 
 // Use cpufeatures for portable runtime detection
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-cpufeatures::new!(cpuid_x86, "avx512f", "avx2", "avx", "sse2", "vaes", "aes", "pclmulqdq");
+cpufeatures::new!(
+    cpuid_x86,
+    "avx512f",
+    "avx2",
+    "avx",
+    "sse2",
+    "vaes",
+    "aes",
+    "pclmulqdq"
+);
 #[cfg(target_arch = "aarch64")]
 cpufeatures::new!(cpuid_arm, "neon");
 
@@ -62,6 +71,7 @@ cpufeatures::new!(cpuid_arm, "neon");
 pub struct OptimizeConfig {
     pub pool_capacity: usize,
     pub block_size: usize,
+    pub enable_xdp: bool,
 }
 
 impl Default for OptimizeConfig {
@@ -69,6 +79,7 @@ impl Default for OptimizeConfig {
         Self {
             pool_capacity: 1024,
             block_size: 4096,
+            enable_xdp: false,
         }
     }
 }
@@ -126,13 +137,17 @@ impl FeatureDetector {
             // Unsafe block is required to initialize the static mutable variable.
             // `Once::call_once` guarantees this is safe and runs only once.
             unsafe {
-                let mask = features.iter().fold(0u64, |m, (k, v)| {
-                    if *v {
-                        m | (1u64 << (*k as u8))
-                    } else {
-                        m
-                    }
-                });
+                let mask =
+                    features.iter().fold(
+                        0u64,
+                        |m, (k, v)| {
+                            if *v {
+                                m | (1u64 << (*k as u8))
+                            } else {
+                                m
+                            }
+                        },
+                    );
                 telemetry::CPU_FEATURE_MASK.set(mask as i64);
 
                 // determine active SIMD policy for telemetry
@@ -465,7 +480,8 @@ impl<'a> ZeroCopyBuffer<'a> {
                     *len = msg.msg_namelen;
                     Ok(ret)
                 }
-            }).map(|(ret, addr)| (ret, addr.as_socket().unwrap()))
+            })
+            .map(|(ret, addr)| (ret, addr.as_socket().unwrap()))
         }
     }
 
@@ -494,24 +510,26 @@ impl<'a> Drop for ZeroCopyBuffer<'a> {
 pub struct OptimizationManager {
     memory_pool: Arc<MemoryPool>,
     xdp_available: bool,
+    use_xdp: bool,
 }
 
 impl OptimizationManager {
-    pub fn new_with_config(capacity: usize, block_size: usize) -> Self {
-        let xdp_available = XdpSocket::is_supported();
-        info!("XDP available: {}", xdp_available);
+    pub fn new_with_config(capacity: usize, block_size: usize, enable_xdp: bool) -> Self {
+        let supported = XdpSocket::is_supported();
+        info!("XDP available: {}", supported);
         Self {
             memory_pool: Arc::new(MemoryPool::new(capacity, block_size)),
-            xdp_available,
+            xdp_available: supported,
+            use_xdp: enable_xdp && supported,
         }
     }
 
     pub fn from_cfg(cfg: OptimizeConfig) -> Self {
-        Self::new_with_config(cfg.pool_capacity, cfg.block_size)
+        Self::new_with_config(cfg.pool_capacity, cfg.block_size, cfg.enable_xdp)
     }
 
     pub fn new() -> Self {
-        Self::new_with_config(1024, 4096)
+        Self::new_with_config(1024, 4096, false)
     }
 
     pub fn alloc_block(&self) -> AlignedBox<[u8]> {
@@ -526,12 +544,16 @@ impl OptimizationManager {
         self.xdp_available
     }
 
+    pub fn is_xdp_enabled(&self) -> bool {
+        self.use_xdp
+    }
+
     pub fn memory_pool(&self) -> Arc<MemoryPool> {
         Arc::clone(&self.memory_pool)
     }
 
     pub fn create_xdp_socket(&self, bind: SocketAddr, remote: SocketAddr) -> Option<XdpSocket> {
-        if self.xdp_available {
+        if self.use_xdp {
             XdpSocket::new(bind, remote).ok()
         } else {
             None
