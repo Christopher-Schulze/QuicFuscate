@@ -75,9 +75,9 @@ enum Commands {
         #[clap(long)]
         xdp: bool,
 
-        /// Enable XDP acceleration if supported
-        #[clap(long)]
-        xdp: bool,
+        /// Path to a unified TOML configuration file
+        #[clap(long, value_name = "PATH")]
+        config: Option<PathBuf>,
 
         /// Path to a TOML file with Adaptive FEC settings
         #[clap(long, value_name = "PATH")]
@@ -164,6 +164,10 @@ enum Commands {
         #[clap(long, default_value_t = 4096)]
         pool_block: usize,
 
+        /// Path to a unified TOML configuration file
+        #[clap(long, value_name = "PATH")]
+        config: Option<PathBuf>,
+
         /// Path to a TOML file with Adaptive FEC settings
         #[clap(long, value_name = "PATH")]
         fec_config: Option<PathBuf>,
@@ -240,6 +244,7 @@ async fn main() -> std::io::Result<()> {
                 *pool_capacity,
                 *pool_block,
                 *xdp,
+                config,
                 fec_config,
                 &doh_provider,
                 &front_domain,
@@ -287,6 +292,7 @@ async fn main() -> std::io::Result<()> {
                 *fec_mode,
                 *pool_capacity,
                 *pool_block,
+                config,
                 fec_config,
                 &doh_provider,
                 &front_domain,
@@ -299,6 +305,7 @@ async fn main() -> std::io::Result<()> {
         }
     }
 
+    telemetry::flush();
     Ok(())
 }
 
@@ -338,6 +345,7 @@ async fn run_client(
     pool_capacity: usize,
     pool_block: usize,
     xdp: bool,
+    config: &Option<PathBuf>,
     fec_config: &Option<PathBuf>,
     doh_provider: &str,
     front_domain: &Vec<String>,
@@ -376,7 +384,15 @@ async fn run_client(
 
     info!("Client connecting to {}", server_addr);
 
-    let mut fec_cfg = if let Some(path) = fec_config {
+    let mut fec_cfg = if let Some(cfg) = config {
+        match FecConfig::from_file(cfg) {
+            Ok(c) => c,
+            Err(e) => {
+                error!("Failed to load config {}: {}", cfg.display(), e);
+                FecConfig::default()
+            }
+        }
+    } else if let Some(path) = fec_config {
         match FecConfig::from_file(path) {
             Ok(cfg) => cfg,
             Err(e) => {
@@ -413,7 +429,17 @@ async fn run_client(
 
     let url_parsed =
         url::Url::parse(url).unwrap_or_else(|_| url::Url::parse("https://example.com/").unwrap());
-    let mut stealth_config = StealthConfig::default();
+    let mut stealth_config = if let Some(cfg) = config {
+        match StealthConfig::from_file(cfg) {
+            Ok(c) => c,
+            Err(e) => {
+                error!("Failed to load config {}: {}", cfg.display(), e);
+                StealthConfig::default()
+            }
+        }
+    } else {
+        StealthConfig::default()
+    };
     stealth_config.browser_profile = profile;
     stealth_config.os_profile = os;
     stealth_config.enable_doh = !disable_doh;
@@ -489,6 +515,7 @@ async fn run_client(
         tokio::select! {
             _ = &mut shutdown => {
                 info!("Shutdown signal received");
+                let _ = conn.conn.close(true, 0x0, b"ctrl_c");
                 break;
             }
             _ = async {
@@ -576,6 +603,7 @@ async fn run_server(
     pool_capacity: usize,
     pool_block: usize,
     xdp: bool,
+    config: &Option<PathBuf>,
     fec_config: &Option<PathBuf>,
     doh_provider: &str,
     front_domain: &Vec<String>,
@@ -588,7 +616,15 @@ async fn run_server(
     socket.set_nonblocking(true)?;
     info!("Server listening on {}", listen_addr);
 
-    let mut fec_cfg = if let Some(path) = fec_config {
+    let mut fec_cfg = if let Some(cfg) = config {
+        match FecConfig::from_file(cfg) {
+            Ok(c) => c,
+            Err(e) => {
+                error!("Failed to load config {}: {}", cfg.display(), e);
+                FecConfig::default()
+            }
+        }
+    } else if let Some(path) = fec_config {
         match FecConfig::from_file(path) {
             Ok(cfg) => cfg,
             Err(e) => {
@@ -623,7 +659,18 @@ async fn run_server(
     let mut clients = HashMap::new();
     let mut buf = [0; 65535];
     let mut out = [0; 1460];
-    let stealth_config = Arc::new(Mutex::new(StealthConfig::default()));
+    let initial_sc = if let Some(cfg) = config {
+        match StealthConfig::from_file(cfg) {
+            Ok(c) => c,
+            Err(e) => {
+                error!("Failed to load config {}: {}", cfg.display(), e);
+                StealthConfig::default()
+            }
+        }
+    } else {
+        StealthConfig::default()
+    };
+    let stealth_config = Arc::new(Mutex::new(initial_sc));
     {
         let mut sc = stealth_config.lock().unwrap();
         sc.browser_profile = profile;
@@ -673,6 +720,9 @@ async fn run_server(
         tokio::select! {
             _ = &mut shutdown => {
                 info!("Shutdown signal received");
+                for conn in clients.values_mut() {
+                    let _ = conn.conn.close(true, 0x0, b"ctrl_c");
+                }
                 break;
             }
             _ = async {
