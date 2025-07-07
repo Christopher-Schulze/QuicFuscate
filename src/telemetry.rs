@@ -100,3 +100,12 @@ pub fn serve(addr: &str) {
         }
     });
 }
+
+pub fn flush() {
+    let encoder = TextEncoder::new();
+    let metrics = prometheus::gather();
+    let mut buf = Vec::new();
+    if encoder.encode(&metrics, &mut buf).is_ok() {
+        log::info!("\n{}", String::from_utf8_lossy(&buf));
+    }
+}

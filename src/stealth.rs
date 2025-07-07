@@ -775,6 +775,48 @@ impl Default for StealthConfig {
     }
 }
 
+impl StealthConfig {
+    pub fn from_toml(s: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        #[derive(serde::Deserialize)]
+        struct Root {
+            stealth: Option<Section>,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct Section {
+            browser_profile: Option<BrowserProfile>,
+            os_profile: Option<OsProfile>,
+            enable_doh: Option<bool>,
+            doh_provider: Option<String>,
+            enable_http3_masquerading: Option<bool>,
+            use_qpack_headers: Option<bool>,
+            enable_domain_fronting: Option<bool>,
+            fronting_domains: Option<Vec<String>>,
+            enable_xor_obfuscation: Option<bool>,
+        }
+
+        let root: Root = toml::from_str(s)?;
+        let mut cfg = StealthConfig::default();
+        if let Some(sec) = root.stealth {
+            if let Some(v) = sec.browser_profile { cfg.browser_profile = v; }
+            if let Some(v) = sec.os_profile { cfg.os_profile = v; }
+            if let Some(v) = sec.enable_doh { cfg.enable_doh = v; }
+            if let Some(v) = sec.doh_provider { cfg.doh_provider = v; }
+            if let Some(v) = sec.enable_http3_masquerading { cfg.enable_http3_masquerading = v; }
+            if let Some(v) = sec.use_qpack_headers { cfg.use_qpack_headers = v; }
+            if let Some(v) = sec.enable_domain_fronting { cfg.enable_domain_fronting = v; }
+            if let Some(v) = sec.fronting_domains { cfg.fronting_domains = v; }
+            if let Some(v) = sec.enable_xor_obfuscation { cfg.enable_xor_obfuscation = v; }
+        }
+        Ok(cfg)
+    }
+
+    pub fn from_file(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let contents = std::fs::read_to_string(path)?;
+        Self::from_toml(&contents)
+    }
+}
+
 /// The central orchestrator for all stealth techniques.
 pub struct StealthManager {
     config: StealthConfig,
