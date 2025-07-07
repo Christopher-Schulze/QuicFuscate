@@ -1,5 +1,5 @@
---- a/quiche/include/quiche.h
-+++ b/quiche/include/quiche.h
+--- a/quiche/include/quiche.h	2025-07-07 12:46:13.644989117 +0000
++++ b/quiche/include/quiche.h	2025-07-07 12:56:14.512035875 +0000
 @@ -179,6 +179,9 @@
  
  // Enables sending or receiving early data.
@@ -10,9 +10,9 @@
  
  // Configures the list of supported application protocols.
  int quiche_config_set_application_protos(quiche_config *config,
---- a/quiche/src/ffi.rs
-+++ b/quiche/src/ffi.rs
-@@ -226,6 +226,15 @@
+--- a/quiche/src/ffi.rs	2025-07-07 12:46:13.644989117 +0000
++++ b/quiche/src/ffi.rs	2025-07-07 12:57:20.159628930 +0000
+@@ -226,6 +226,14 @@
  }
  
  #[no_mangle]
@@ -23,21 +23,20 @@
 +    config.set_custom_tls(hello);
 +}
 +
-+
 +#[no_mangle]
  /// Corresponds to the `Config::set_application_protos_wire_format` Rust
  /// function.
  pub extern "C" fn quiche_config_set_application_protos(
---- a/quiche/src/lib.rs
-+++ b/quiche/src/lib.rs
-@@ -837,6 +837,7 @@
+--- a/quiche/src/lib.rs	2025-07-07 12:46:13.648989117 +0000
++++ b/quiche/src/lib.rs	2025-07-07 12:57:58.683392424 +0000
+@@ -836,6 +836,7 @@
+     max_amplification_factor: usize,
  
      disable_dcid_reuse: bool,
- 
 +    custom_tls: Option<Vec<u8>>,
+ 
      track_unknown_transport_params: Option<usize>,
  }
- 
 @@ -909,6 +910,7 @@
              max_amplification_factor: MAX_AMPLIFICATION_FACTOR,
  
@@ -46,19 +45,27 @@
  
              track_unknown_transport_params: None,
          })
-@@ -1043,6 +1045,11 @@
-         self.tls_ctx.set_early_data_enabled(true);
-     }
+@@ -1040,6 +1042,11 @@
  
+     /// Enables sending or receiving early data.
+     pub fn enable_early_data(&mut self) {
 +    /// Stores a custom TLS ClientHello message.
 +    pub fn set_custom_tls(&mut self, hello: &[u8]) {
 +        self.custom_tls = Some(hello.to_vec());
 +    }
 +
-     /// Configures the list of supported application protocols.
-     ///
-     /// On the client this configures the list of protocols to send to the
-@@ -1946,7 +1953,10 @@
+         self.tls_ctx.set_early_data_enabled(true);
+     }
+ 
+@@ -1647,6 +1654,7 @@
+     /// Whether the connection should prevent from reusing destination
+     /// Connection IDs when the peer migrates.
+     disable_dcid_reuse: bool,
++    custom_tls: Option<Vec<u8>>,
+ 
+     /// The number of streams reset by local.
+     reset_stream_local_count: u64,
+@@ -1946,7 +1954,10 @@
          scid: &ConnectionId, odcid: Option<&ConnectionId>, local: SocketAddr,
          peer: SocketAddr, config: &mut Config, is_server: bool,
      ) -> Result<Connection<F>> {
@@ -70,8 +77,16 @@
          Connection::with_tls(scid, odcid, local, peer, config, tls, is_server)
      }
  
---- a/quiche/src/tls/mod.rs
-+++ b/quiche/src/tls/mod.rs
+@@ -8420,6 +8431,7 @@
+     /// Handles potential connection migration.
+     fn on_peer_migrated(
+         &mut self, new_pid: usize, disable_dcid_reuse: bool, now: time::Instant,
++    custom_tls: Option<Vec<u8>>,
+     ) -> Result<()> {
+         let active_path_id = self.paths.get_active_path_id()?;
+ 
+--- a/quiche/src/tls/mod.rs	2025-07-07 12:46:13.656989117 +0000
++++ b/quiche/src/tls/mod.rs	2025-07-07 12:59:40.118658905 +0000
 @@ -353,6 +353,7 @@
      /// SSL_process_quic_post_handshake should be called when whenever
      /// SSL_provide_quic_data is called to process the provided data.
@@ -98,13 +113,13 @@
  
          Ok(())
      }
-@@ -560,6 +565,9 @@
-     pub fn write_level(&self) -> crypto::Level {
+@@ -561,6 +566,9 @@
          unsafe { SSL_quic_write_level(self.as_ptr()) }
      }
+ 
 +    pub fn set_custom_tls(&mut self, hello: Vec<u8>) {
 +        self.custom_tls = Some(hello);
 +    }
- 
      pub fn cipher(&self) -> Option<crypto::Algorithm> {
          let cipher =
+             map_result_ptr(unsafe { SSL_get_current_cipher(self.as_ptr()) });
