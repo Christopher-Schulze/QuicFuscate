@@ -40,6 +40,7 @@ use crate::fec::{AdaptiveFec, FecConfig, Packet as FecPacket, PidConfig};
 use crate::optimize::{MemoryPool, OptimizationManager, OptimizeConfig};
 use crate::stealth::{StealthConfig, StealthManager};
 use crate::xdp_socket::XdpSocket;
+use crate::telemetry;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -444,6 +445,7 @@ impl QuicFuscateConnection {
                     if let Some(ref xdp) = self.xdp_socket {
                         let _ = xdp.update_remote(peer);
                     }
+                    telemetry::PATH_MIGRATIONS.inc();
                 }
                 quiche::PathEvent::FailedValidation(local, peer) => {
                     eprintln!("Path validation failed: {local}->{peer}");
@@ -460,6 +462,7 @@ impl QuicFuscateConnection {
                     if let Some(ref xdp) = self.xdp_socket {
                         let _ = xdp.update_remote(peer);
                     }
+                    telemetry::PATH_MIGRATIONS.inc();
                 }
             }
         }

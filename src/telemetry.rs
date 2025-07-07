@@ -13,6 +13,7 @@
 //! - `mem_pool_capacity`: Current capacity of the memory pool.
 //! - `mem_pool_in_use`: Number of blocks currently checked out from the pool.
 //! - `cpu_feature_mask`: Bitmask of detected CPU features.
+//! - `path_migrations_total`: Successful connection migrations.
 
 use prometheus::{
     register_int_counter, register_int_gauge, Encoder, IntCounter, IntGauge, TextEncoder,
@@ -67,10 +68,9 @@ lazy_static! {
         register_int_counter!("simd_usage_neon_total", "SIMD NEON dispatches").unwrap();
     pub static ref SIMD_USAGE_SCALAR: IntCounter =
         register_int_counter!("simd_usage_scalar_total", "Scalar dispatches").unwrap();
-    pub static ref DECODING_TIME_MS: IntGauge =
-        register_int_gauge!("decoding_time_ms", "Time spent in last decoding in ms").unwrap();
-    pub static ref WIEDEMANN_USAGE: IntCounter =
-        register_int_counter!("wiedemann_usage_total", "Number of Wiedemann decodings").unwrap();
+    pub static ref PATH_MIGRATIONS: IntCounter =
+        register_int_counter!("path_migrations_total", "Successful connection migrations").unwrap();
+
 }
 
 pub fn update_memory_usage() {

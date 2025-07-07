@@ -77,3 +77,13 @@ quicfuscate server \
   --pool-capacity 1024 \
   --pool-block 4096
 ```
+
+### Connection Migration
+
+To migrate an established connection to a new local port, call `migrate_connection` on the active session:
+
+```rust
+let new_addr = "127.0.0.1:0".parse().unwrap();
+conn.migrate_connection(new_addr).unwrap();
+```
+The library records successful migrations via the `path_migrations_total` telemetry counter.
