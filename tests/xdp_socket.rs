@@ -1,7 +1,9 @@
 #[cfg(target_os = "linux")]
 mod tests {
     use quicfuscate::xdp_socket::XdpSocket;
+    use std::env;
     use std::net::UdpSocket;
+    use std::process::Command;
     use std::time::{Duration, Instant};
 
     fn wait_recv(sock: &UdpSocket, buf: &mut [u8]) -> usize {
@@ -15,8 +17,52 @@ mod tests {
                     }
                     std::thread::sleep(Duration::from_millis(10));
                 }
-                Err(e) => panic!("recv failed: {e}")
+                Err(e) => panic!("recv failed: {e}"),
             }
+        }
+    }
+
+    struct VethGuard;
+    impl VethGuard {
+        fn setup() -> Self {
+            Command::new("ip")
+                .args([
+                    "link",
+                    "add",
+                    "veth-test0",
+                    "type",
+                    "veth",
+                    "peer",
+                    "name",
+                    "veth-test1",
+                ])
+                .status()
+                .unwrap();
+            Command::new("ip")
+                .args(["addr", "add", "10.5.0.1/24", "dev", "veth-test0"])
+                .status()
+                .unwrap();
+            Command::new("ip")
+                .args(["addr", "add", "10.5.0.2/24", "dev", "veth-test1"])
+                .status()
+                .unwrap();
+            Command::new("ip")
+                .args(["link", "set", "veth-test0", "up"])
+                .status()
+                .unwrap();
+            Command::new("ip")
+                .args(["link", "set", "veth-test1", "up"])
+                .status()
+                .unwrap();
+            Self
+        }
+    }
+
+    impl Drop for VethGuard {
+        fn drop(&mut self) {
+            let _ = Command::new("ip")
+                .args(["link", "del", "veth-test0"])
+                .status();
         }
     }
 
@@ -31,19 +77,17 @@ mod tests {
                     }
                     std::thread::sleep(Duration::from_millis(10));
                 }
-                Err(e) => panic!("recv failed: {e}")
+                Err(e) => panic!("recv failed: {e}"),
             }
         }
     }
 
     #[test]
     fn xdp_socket_send_and_recv() {
-        // Reserve an address for the XDP socket
-        let tmp = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let xdp_addr = tmp.local_addr().unwrap();
-        drop(tmp);
-
-        let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let _guard = VethGuard::setup();
+        env::set_var("XDP_IFACE", "veth-test0");
+        let xdp_addr: std::net::SocketAddr = "10.5.0.1:0".parse().unwrap();
+        let udp = UdpSocket::bind("10.5.0.2:0").unwrap();
         udp.connect(xdp_addr).unwrap();
         udp.set_nonblocking(true).unwrap();
         let udp_addr = udp.local_addr().unwrap();
@@ -61,6 +105,7 @@ mod tests {
         let mut buf2 = [0u8; 32];
         let n2 = wait_recv_xdp(&xdp, &mut buf2);
         assert_eq!(&buf2[..n2], reply);
+        env::remove_var("XDP_IFACE");
     }
 }
 

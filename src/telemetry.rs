@@ -15,15 +15,9 @@
 //! - `cpu_feature_mask`: Bitmask of detected CPU features.
 
 use prometheus::{
-    Encoder,
-    IntCounter,
-    IntGauge,
-    TextEncoder,
-    register_int_counter,
-    register_int_gauge,
-
+    register_int_counter, register_int_gauge, Encoder, IntCounter, IntGauge, TextEncoder,
 };
-use sysinfo::{SystemExt, PidExt};
+use sysinfo::{PidExt, SystemExt};
 
 lazy_static! {
     pub static ref ENCODED_PACKETS: IntCounter =
@@ -47,7 +41,10 @@ lazy_static! {
     pub static ref XDP_BYTES_RECEIVED: IntCounter =
         register_int_counter!("xdp_bytes_received_total", "Total XDP bytes received").unwrap();
     pub static ref XDP_FALLBACKS: IntCounter =
-        register_int_counter!("xdp_fallback_total", "Number of times XDP fell back to UDP").unwrap();
+        register_int_counter!("xdp_fallback_total", "Number of times XDP fell back to UDP")
+            .unwrap();
+    pub static ref XDP_ACTIVE: IntGauge =
+        register_int_gauge!("xdp_active", "XDP enabled status").unwrap();
     pub static ref MEM_POOL_CAPACITY: IntGauge =
         register_int_gauge!("mem_pool_capacity", "Memory pool capacity").unwrap();
     pub static ref MEM_POOL_IN_USE: IntGauge =

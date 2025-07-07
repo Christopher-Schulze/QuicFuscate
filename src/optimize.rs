@@ -124,7 +124,10 @@ impl FeatureDetector {
                 features.insert(CpuFeature::AVX, info.has_avx());
                 features.insert(CpuFeature::AVX2, info.has_avx2());
                 features.insert(CpuFeature::SSE2, info.has_sse2());
-                features.insert(CpuFeature::AVX512F, info.has_avx512f() && info.has_avx512bw());
+                features.insert(
+                    CpuFeature::AVX512F,
+                    info.has_avx512f() && info.has_avx512bw(),
+                );
                 features.insert(CpuFeature::VAES, info.has_vaes());
                 features.insert(CpuFeature::AESNI, info.has_aes());
                 features.insert(CpuFeature::PCLMULQDQ, info.has_pclmulqdq());
@@ -518,10 +521,12 @@ impl OptimizationManager {
     pub fn new_with_config(capacity: usize, block_size: usize, enable_xdp: bool) -> Self {
         let supported = XdpSocket::is_supported();
         info!("XDP available: {}", supported);
+        let enabled = enable_xdp && supported;
+        telemetry::XDP_ACTIVE.set(if enabled { 1 } else { 0 });
         Self {
             memory_pool: Arc::new(MemoryPool::new(capacity, block_size)),
             xdp_available: supported,
-            use_xdp: enable_xdp && supported,
+            use_xdp: enabled,
         }
     }
 
@@ -554,7 +559,7 @@ impl OptimizationManager {
     }
 
     pub fn create_xdp_socket(&self, bind: SocketAddr, remote: SocketAddr) -> Option<XdpSocket> {
-        if !self.xdp_available {
+        if !self.xdp_available || !self.use_xdp {
             return None;
         }
 
@@ -564,7 +569,6 @@ impl OptimizationManager {
                 info!("XDP init failed, falling back to UDP: {}", e);
                 Some(XdpSocket::new_udp(bind, remote).ok()?)
             }
-
         }
     }
 }
