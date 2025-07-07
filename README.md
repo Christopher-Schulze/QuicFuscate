@@ -19,9 +19,9 @@ QuicFuscate represents the pinnacle of privacy-focused networking, combining cut
 
 > **Note:** The project has been fully migrated to Rust for improved safety and performance.
 
-The repository contains a **single** Rust workspace located in the `rust/`
-directory. Historical references to a `Rust-QuicFuscate` directory are obsolete
-because all crates have been consolidated under `rust/`.
+The codebase has been simplified into a single crate rooted in the `src/`
+directory. Historical references to a `rust/` workspace are obsolete because all
+modules now live under `src/`.
 
 ## ✨ Core Features
 
@@ -88,7 +88,7 @@ Quick start after cloning:
 
 ```bash
 ./scripts/quiche_workflow.sh --step fetch
-cargo build --workspace --release
+cargo build --release
 ```
 
 If the command fails with a missing commit error (e.g.
@@ -127,11 +127,10 @@ cd ..
 
 ### Building
 
-Build the entire workspace using Cargo:
+Build the project using Cargo:
 
 ```bash
-cd rust
-cargo build --workspace --release
+cargo build --release
 ```
 
 ### Running the tests
@@ -139,7 +138,7 @@ cargo build --workspace --release
 Execute the test suite with Cargo:
 
 ```bash
-cargo test --workspace
+cargo test
 ```
 
 ## 👷 Developer Notes
@@ -153,21 +152,17 @@ git submodule update --init --recursive
 Build and test using Cargo:
 
 ```bash
-cd rust
-cargo build --workspace --release
-cargo test --workspace
+cargo build --release
+cargo test
 ```
 
-### Rust Workspace
+### Project Layout
 
-The Rust implementation lives in the `rust/` directory. It contains the
-`core`, `crypto`, `fec`, `stealth` and `cli` crates along with integration
-tests. The workspace root `rust/Cargo.toml` uses the edition 2021 resolver.
-Build all crates locally with:
+All Rust sources reside in the `src/` directory. The crate exposes both a
+library and the main CLI binary. Simply run:
 
 ```bash
-cd rust
-cargo build --workspace
+cargo build --release
 ```
 
 
@@ -218,17 +213,16 @@ workflow in `.github/workflows/ci.yml`. It executes the following tasks:
 
 1. Fetches and builds the patched `quiche` library via `scripts/fetch_quiche.sh`.
 2. Runs `cargo clippy` and `cppcheck` for linting on all platforms.
-3. Builds the Rust workspace and executes all integration tests.
+3. Builds the crate and executes all integration tests.
 4. Uploads the release binaries for each operating system.
 
 To reproduce the CI steps locally run:
 
 ```bash
 git submodule update --init --recursive
-cd rust
-cargo build --workspace --release
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo build --release
+cargo test
+cargo clippy --all-targets -- -D warnings
 ```
 
 ## 📦 Releases
