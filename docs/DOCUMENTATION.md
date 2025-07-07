@@ -447,6 +447,19 @@ let tls_params = fingerprint.generate_tls_parameters();
    - Emulates TLS 1.3 handshake characteristics
 4. **Fingerprint Customization**:
    - Adjustable browser and OS types
+
+### Adding new Browser Fingerprints
+Real TLS ClientHello bytes are stored in `browser_profiles/` with the file name
+format `<browser>_<os>.chlo`. The content must be base64 encoded. To add a new
+fingerprint:
+
+1. Capture the ClientHello bytes using your preferred tooling.
+2. Encode the raw bytes with base64 and save them as
+   `browser_profiles/<browser>_<os>.chlo`.
+3. Rebuild the patched quiche library using `scripts/quiche_workflow.sh --step patch`.
+4. Run the unit tests with `cargo test` to verify the fingerprint is loaded
+   correctly.
+
 ### HTTP Header Spoofing
 Defined in `stealth/browser_profiles/headers/FakeHeaders.rs`:
 

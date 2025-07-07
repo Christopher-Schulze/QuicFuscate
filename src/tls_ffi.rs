@@ -10,6 +10,10 @@ static LIB: OnceLock<Option<Library>> = OnceLock::new();
 static SET_TLS: OnceLock<Option<CustomTlsFn>> = OnceLock::new();
 static ENABLE_SIMD: OnceLock<Option<EnableSimdFn>> = OnceLock::new();
 
+#[cfg(test)]
+pub static LAST_HELLO: once_cell::sync::Lazy<std::sync::Mutex<Vec<u8>>> =
+    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(Vec::new()));
+
 fn load_real_symbols() {
     if let Ok(path) = std::env::var("QUICHE_PATH") {
         let lib_path = format!("{}/target/latest/libquiche.so", path);
@@ -55,6 +59,13 @@ pub unsafe extern "C" fn quiche_config_set_custom_tls(
         real(cfg, hello, len);
     } else {
         log::debug!("quiche_config_set_custom_tls stub invoked");
+    }
+
+    #[cfg(test)]
+    {
+        let mut buf = LAST_HELLO.lock().unwrap();
+        buf.clear();
+        buf.extend_from_slice(unsafe { std::slice::from_raw_parts(hello, len) });
     }
 }
 
