@@ -2,7 +2,6 @@ use quicfuscate::core::QuicFuscateConnection;
 use quicfuscate::fec::FecMode;
 use quicfuscate::stealth::StealthConfig;
 use std::net::UdpSocket;
-use std::os::raw::c_void;
 use std::process::Command;
 
 #[tokio::test]
@@ -34,16 +33,6 @@ async fn tls_custom_patch() {
 
     let data = std::fs::read_to_string("browser_profiles/chrome_windows.chlo").unwrap();
     let custom_hello = base64::decode(data.trim()).unwrap();
-    unsafe {
-        extern "C" {
-            fn quiche_config_set_custom_tls(cfg: *mut c_void, hello: *const u8, len: usize);
-        }
-        quiche_config_set_custom_tls(
-            &mut client_config as *mut _ as *mut c_void,
-            custom_hello.as_ptr(),
-            custom_hello.len(),
-        );
-    }
 
     let stealth_cfg = StealthConfig::default();
     let mut client_conn = QuicFuscateConnection::new_client(

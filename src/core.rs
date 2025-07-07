@@ -335,6 +335,7 @@ impl QuicFuscateConnection {
         } else {
             telemetry::XDP_ACTIVE.set(0);
         }
+
         self.conn.migrate(self.local_addr, new_peer)
     }
 
@@ -364,7 +365,7 @@ impl QuicFuscateConnection {
     }
 
     /// Sends a masqueraded HTTP/3 GET request using the stealth manager.
-    pub fn send_http3_request(&mut self, path: &str) -> Result<(), quiche::h3::Error> {
+    pub fn send_http3_request(&mut self, path: &str) -> Result<(), crate::error::ConnectionError> {
         self.init_http3()?;
         let host = self.host_header.clone();
         let headers = self
@@ -388,7 +389,7 @@ impl QuicFuscateConnection {
     }
 
     /// Polls HTTP/3 events and prints received data.
-    pub fn poll_http3(&mut self) -> Result<(), quiche::h3::Error> {
+    pub fn poll_http3(&mut self) -> Result<(), crate::error::ConnectionError> {
         if let Some(ref mut h3) = self.h3_conn {
             let start = std::time::Instant::now();
             loop {
@@ -412,7 +413,7 @@ impl QuicFuscateConnection {
                     }
                     Ok((_id, quiche::h3::Event::Finished)) => {}
                     Err(quiche::h3::Error::Done) => break,
-                    Err(e) => return Err(e),
+                    Err(e) => return Err(e.into()),
                 }
             }
             println!(
@@ -447,9 +448,9 @@ impl QuicFuscateConnection {
                 quiche::PathEvent::Validated(local, peer) => {
                     println!("Path validated: {local}->{peer}");
                     self.peer_addr = peer;
-                    if let Some(ref xdp) = self.xdp_socket {
-                        let _ = xdp.update_remote(peer);
-                    }
+                    self.xdp_socket = self
+                        .optimization_manager
+                        .create_xdp_socket(self.local_addr, peer);
                     telemetry::PATH_MIGRATIONS.inc();
                 }
                 quiche::PathEvent::FailedValidation(local, peer) => {
@@ -464,9 +465,9 @@ impl QuicFuscateConnection {
                 quiche::PathEvent::PeerMigrated(local, peer) => {
                     println!("Peer migrated: {local}->{peer}");
                     self.peer_addr = peer;
-                    if let Some(ref xdp) = self.xdp_socket {
-                        let _ = xdp.update_remote(peer);
-                    }
+                    self.xdp_socket = self
+                        .optimization_manager
+                        .create_xdp_socket(self.local_addr, peer);
                     telemetry::PATH_MIGRATIONS.inc();
                 }
             }

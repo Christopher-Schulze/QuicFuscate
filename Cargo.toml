@@ -34,9 +34,13 @@ prometheus = "0.13"
 sysinfo = "0.35"
 socket2 = "0.5"
 base64 = "0.21"
+libloading = "0.8"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Networking_WinSock"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# direct FFI to libnuma, no crate dependency
 
 afxdp = { version = "0.4", optional = true }
 

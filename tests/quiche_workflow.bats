@@ -98,3 +98,35 @@ CARGO
     MIRROR_URL="file://$repo" cargo build -q
     [ -d "libs/patched_quiche/quiche" ]
 }
+
+@test "download patch and build quiche" {
+    cat > "$repo/Cargo.toml" <<'CARGO'
+[package]
+name = "quiche"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+CARGO
+    echo "pub fn hello() {}" > "$repo/lib.rs"
+    git -C "$repo" add Cargo.toml lib.rs
+    git -C "$repo" commit -q -m "cargo init"
+    cat > "$proj/libs/patches/name.patch" <<'PATCH'
+diff --git a/Cargo.toml b/Cargo.toml
+index 0000000..1111111 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,4 +1,4 @@
+ [package]
+-name = "quiche"
++name = "quiche_patched"
+ version = "0.1.0"
+ edition = "2021"
+PATCH
+
+    run ./scripts/quiche_workflow.sh --mirror "file://$repo" --step fetch --step patch --step build
+    [ "$status" -eq 0 ]
+    grep -q 'name = "quiche_patched"' libs/patched_quiche/quiche/Cargo.toml
+    [ -e "libs/patched_quiche/target/latest" ]
+}

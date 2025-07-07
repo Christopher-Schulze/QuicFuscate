@@ -39,11 +39,9 @@ use crate::telemetry;
 use crate::xdp_socket::XdpSocket;
 use aligned_box::AlignedBox;
 use cpufeatures;
+use crossbeam_queue::SegQueue;
 #[cfg(unix)]
 use libc::{iovec, msghdr, recvmsg, sendmsg};
-#[cfg(windows)]
-use windows_sys::Win32::Networking::WinSock::{WSABUF, WSAMSG, WSASendMsg, WSARecvMsg};
-use crossbeam_queue::SegQueue;
 use log::info;
 use std::any::Any;
 use std::collections::HashMap;
@@ -53,6 +51,53 @@ use std::net::SocketAddr;
 use std::os::unix::io::RawFd;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Once};
+#[cfg(windows)]
+use windows_sys::Win32::Networking::WinSock::{WSARecvMsg, WSASendMsg, WSABUF, WSAMSG};
+
+#[cfg(target_os = "linux")]
+mod numa {
+    use libc::{c_int, c_void, size_t};
+    extern "C" {
+        pub fn numa_available() -> c_int;
+        pub fn numa_num_configured_nodes() -> c_int;
+        pub fn numa_node_of_cpu(cpu: c_int) -> c_int;
+        pub fn numa_tonode_memory(start: *mut c_void, size: size_t, node: c_int);
+    }
+    pub fn is_available() -> bool {
+        unsafe { numa_available() >= 0 }
+    }
+    pub fn num_nodes() -> usize {
+        if is_available() {
+            unsafe { numa_num_configured_nodes() as usize }
+        } else {
+            1
+        }
+    }
+    pub fn current_node() -> usize {
+        if !is_available() {
+            return 0;
+        }
+        let cpu = unsafe { libc::sched_getcpu() };
+        if cpu < 0 {
+            0
+        } else {
+            unsafe { numa_node_of_cpu(cpu) as usize }
+        }
+    }
+    pub unsafe fn move_to_node(ptr: *mut u8, size: usize, node: usize) {
+        if is_available() {
+            numa_tonode_memory(ptr as *mut c_void, size as size_t, node as c_int);
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+mod numa {
+    pub fn is_available() -> bool { false }
+    pub fn num_nodes() -> usize { 1 }
+    pub fn current_node() -> usize { 0 }
+    pub unsafe fn move_to_node(_ptr: *mut u8, _size: usize, _node: usize) {}
+}
 
 // Use cpufeatures for portable runtime detection
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -69,7 +114,7 @@ cpufeatures::new!(
     "pclmulqdq"
 );
 #[cfg(target_arch = "aarch64")]
-cpufeatures::new!(cpuid_arm, "neon");
+cpufeatures::new!(cpuid_arm, "neon", "aes", "pmull");
 
 /// Configuration for optimization parameters passed from the CLI.
 #[derive(Clone, Copy)]
@@ -134,10 +179,6 @@ impl FeatureDetector {
                     info.has_avx512f() && info.has_avx512bw(),
                 );
 
-              
-              
-              
-              
                 features.insert(CpuFeature::VAES, info.has_vaes());
                 features.insert(CpuFeature::AESNI, info.has_aes());
                 features.insert(CpuFeature::PCLMULQDQ, info.has_pclmulqdq());
@@ -146,6 +187,8 @@ impl FeatureDetector {
             {
                 let info = cpuid_arm::get();
                 features.insert(CpuFeature::NEON, info.has_neon());
+                features.insert(CpuFeature::AESNI, info.has_aes());
+                features.insert(CpuFeature::PCLMULQDQ, info.has_pmull());
             }
 
             // Unsafe block is required to initialize the static mutable variable.
@@ -166,7 +209,10 @@ impl FeatureDetector {
 
                 // determine active SIMD policy for telemetry
                 let policy = if features.get(&CpuFeature::AVX512F).copied().unwrap_or(false)
-                    && features.get(&CpuFeature::AVX512VBMI).copied().unwrap_or(false)
+                    && features
+                        .get(&CpuFeature::AVX512VBMI)
+                        .copied()
+                        .unwrap_or(false)
                 {
                     3
                 } else if features.get(&CpuFeature::AVX2).copied().unwrap_or(false) {
@@ -257,9 +303,7 @@ where
 {
     let detector = FeatureDetector::instance();
 
-    if detector.has_feature(CpuFeature::AVX512F)
-        && detector.has_feature(CpuFeature::AVX512VBMI)
-    {
+    if detector.has_feature(CpuFeature::AVX512F) && detector.has_feature(CpuFeature::AVX512VBMI) {
         telemetry::SIMD_USAGE_AVX512.inc();
         f(&Avx512)
     } else if detector.has_feature(CpuFeature::AVX2) {
@@ -279,6 +323,25 @@ where
     }
 }
 
+/// Dispatches specifically for GF bitsliced operations. Only AVX512, AVX2 and
+/// NEON are considered; all other architectures fall back to scalar code.
+pub fn dispatch_bitslice<F, R>(f: F) -> R
+where
+    F: Fn(&dyn SimdPolicy) -> R,
+{
+    let detector = FeatureDetector::instance();
+
+    if detector.has_feature(CpuFeature::AVX512F) && detector.has_feature(CpuFeature::AVX512VBMI) {
+        f(&Avx512)
+    } else if detector.has_feature(CpuFeature::AVX2) {
+        f(&Avx2)
+    } else if detector.has_feature(CpuFeature::NEON) {
+        f(&Neon)
+    } else {
+        f(&Scalar)
+    }
+}
+
 //
 // Foundational Structures for Global Optimizations
 //
@@ -287,8 +350,9 @@ where
 /// This implementation uses a concurrent queue to manage free blocks,
 /// minimizing lock contention and fragmentation.
 pub struct MemoryPool {
-    pool: Arc<SegQueue<AlignedBox<[u8]>>>,
+    pools: Vec<Arc<SegQueue<AlignedBox<[u8]>>>>,
     block_size: usize,
+    num_nodes: usize,
     capacity: AtomicUsize,
     in_use: AtomicUsize,
     available: AtomicUsize,
@@ -298,17 +362,33 @@ impl MemoryPool {
     /// Creates a new memory pool with a specified capacity and block size.
     /// All allocated blocks are 64-byte aligned.
     pub fn new(capacity: usize, block_size: usize) -> Self {
-        let queue = Arc::new(SegQueue::new());
-        for _ in 0..capacity {
-            queue.push(AlignedBox::slice_from_default(64, block_size).unwrap());
+        let nodes = numa::num_nodes();
+        let mut pools = Vec::with_capacity(nodes);
+        let mut remaining = capacity;
+        for n in 0..nodes {
+            let node_cap = capacity / nodes + if n < capacity % nodes { 1 } else { 0 };
+            let q = Arc::new(SegQueue::new());
+            for _ in 0..node_cap {
+                let mut block = AlignedBox::slice_from_default(64, block_size).unwrap();
+                #[cfg(target_os = "linux")]
+                unsafe {
+                    if numa::is_available() {
+                        numa::move_to_node(block.as_mut_ptr(), block_size, n);
+                    }
+                }
+                q.push(block);
+            }
+            pools.push(q);
+            remaining -= node_cap;
         }
         telemetry::MEM_POOL_CAPACITY.set(capacity as i64);
         telemetry::MEM_POOL_USAGE_BYTES.set(0);
         telemetry::MEM_POOL_FRAGMENTATION.set(0);
         telemetry::MEM_POOL_UTILIZATION.set(0);
         let pool = Self {
-            pool: queue,
+            pools,
             block_size,
+            num_nodes: nodes,
             capacity: AtomicUsize::new(capacity),
             in_use: AtomicUsize::new(0),
             available: AtomicUsize::new(capacity),
@@ -319,10 +399,21 @@ impl MemoryPool {
 
     fn grow(&self, new_capacity: usize) {
         while self.capacity.load(Ordering::Relaxed) < new_capacity {
-            self.pool
-                .push(AlignedBox::slice_from_default(64, self.block_size).unwrap());
-            self.available.fetch_add(1, Ordering::Relaxed);
-            self.capacity.fetch_add(1, Ordering::Relaxed);
+            for (n, q) in self.pools.iter().enumerate() {
+                if self.capacity.load(Ordering::Relaxed) >= new_capacity {
+                    break;
+                }
+                let mut block = AlignedBox::slice_from_default(64, self.block_size).unwrap();
+                #[cfg(target_os = "linux")]
+                unsafe {
+                    if numa::is_available() {
+                        numa::move_to_node(block.as_mut_ptr(), self.block_size, n);
+                    }
+                }
+                q.push(block);
+                self.available.fetch_add(1, Ordering::Relaxed);
+                self.capacity.fetch_add(1, Ordering::Relaxed);
+            }
         }
         telemetry::MEM_POOL_CAPACITY.set(self.capacity.load(Ordering::Relaxed) as i64);
         self.update_metrics();
@@ -336,19 +427,26 @@ impl MemoryPool {
         telemetry::MEM_POOL_USAGE_BYTES.set((in_use * self.block_size) as i64);
         let frag = cap.saturating_sub(in_use + avail);
         telemetry::MEM_POOL_FRAGMENTATION.set(frag as i64);
-        let util = if cap == 0 { 0 } else { (in_use * 100 / cap) as i64 };
+        let util = if cap == 0 {
+            0
+        } else {
+            (in_use * 100 / cap) as i64
+        };
         telemetry::MEM_POOL_UTILIZATION.set(util);
     }
 
     /// Allocates a 64-byte aligned memory block from the pool.
     /// If the pool is empty, a new block is created.
     pub fn alloc(&self) -> AlignedBox<[u8]> {
-        if let Some(b) = self.pool.pop() {
-            self.available.fetch_sub(1, Ordering::Relaxed);
-            let cnt = self.in_use.fetch_add(1, Ordering::Relaxed) + 1;
-            self.update_metrics();
-            telemetry::update_memory_usage();
-            return b;
+        let node = numa::current_node();
+        if let Some(queue) = self.pools.get(node) {
+            if let Some(mut b) = queue.pop() {
+                self.available.fetch_sub(1, Ordering::Relaxed);
+                self.in_use.fetch_add(1, Ordering::Relaxed);
+                self.update_metrics();
+                telemetry::update_memory_usage();
+                return b;
+            }
         }
         telemetry::FEC_OVERFLOWS.inc();
         let new_cap = self.capacity.load(Ordering::Relaxed) * 2;
@@ -356,15 +454,25 @@ impl MemoryPool {
         self.in_use.fetch_add(1, Ordering::Relaxed);
         self.update_metrics();
         telemetry::update_memory_usage();
-        AlignedBox::slice_from_default(64, self.block_size).unwrap()
+        let mut block = AlignedBox::slice_from_default(64, self.block_size).unwrap();
+        #[cfg(target_os = "linux")]
+        unsafe {
+            if numa::is_available() {
+                numa::move_to_node(block.as_mut_ptr(), self.block_size, node);
+            }
+        }
+        block
     }
 
     /// Returns a memory block to the pool.
     /// If the pool is full, the block is dropped.
     pub fn free(&self, mut block: AlignedBox<[u8]>) {
         block.iter_mut().for_each(|x| *x = 0);
+        let node = numa::current_node();
         if self.available.load(Ordering::Relaxed) < self.capacity.load(Ordering::Relaxed) {
-            self.pool.push(block);
+            if let Some(q) = self.pools.get(node) {
+                q.push(block);
+            }
             self.available.fetch_add(1, Ordering::Relaxed);
         }
         self.in_use.fetch_sub(1, Ordering::Relaxed);
@@ -381,13 +489,15 @@ impl MemoryPool {
             // shrink: drop excess blocks
             let mut diff = current - new_capacity;
             while diff > 0 && self.available.load(Ordering::Relaxed) > 0 {
-                if self.pool.pop().is_some() {
-                    self.available.fetch_sub(1, Ordering::Relaxed);
-                    self.capacity.fetch_sub(1, Ordering::Relaxed);
-                    diff -= 1;
-                } else {
-                    break;
+                for q in &self.pools {
+                    if diff == 0 { break; }
+                    if let Some(_) = q.pop() {
+                        self.available.fetch_sub(1, Ordering::Relaxed);
+                        self.capacity.fetch_sub(1, Ordering::Relaxed);
+                        diff -= 1;
+                    }
                 }
+                if diff == 0 { break; }
             }
         }
         telemetry::MEM_POOL_CAPACITY.set(self.capacity.load(Ordering::Relaxed) as i64);
@@ -544,7 +654,10 @@ impl<'a> ZeroCopyBuffer<'a> {
                 buf: b.as_ptr() as *mut i8,
             })
             .collect();
-        Self { bufs, _marker: std::marker::PhantomData }
+        Self {
+            bufs,
+            _marker: std::marker::PhantomData,
+        }
     }
 
     pub fn new_mut(buffers: &mut [&'a mut [u8]]) -> Self {
@@ -555,13 +668,39 @@ impl<'a> ZeroCopyBuffer<'a> {
                 buf: b.as_mut_ptr() as *mut i8,
             })
             .collect();
-        Self { bufs, _marker: std::marker::PhantomData }
+        Self {
+            bufs,
+            _marker: std::marker::PhantomData,
+        }
     }
 
     pub fn send(&self, sock: windows_sys::Win32::Networking::WinSock::SOCKET) -> i32 {
         let mut msg = WSAMSG {
             name: core::ptr::null_mut(),
             namelen: 0,
+            lpBuffers: self.bufs.as_ptr() as *mut _,
+            dwBufferCount: self.bufs.len() as u32,
+            Control: WSABUF {
+                len: 0,
+                buf: core::ptr::null_mut(),
+            },
+            dwFlags: 0,
+        };
+        let mut sent: u32 = 0;
+        unsafe { WSASendMsg(sock, &msg, 0, &mut sent, core::ptr::null_mut(), None) };
+        sent as i32
+    }
+
+    pub fn send_to(
+        &self,
+        sock: windows_sys::Win32::Networking::WinSock::SOCKET,
+        addr: SocketAddr,
+    ) -> i32 {
+        use socket2::SockAddr;
+        let sockaddr = SockAddr::from(addr);
+        let mut msg = WSAMSG {
+            name: sockaddr.as_ptr() as *mut _,
+            namelen: sockaddr.len(),
             lpBuffers: self.bufs.as_ptr() as *mut _,
             dwBufferCount: self.bufs.len() as u32,
             Control: WSABUF { len: 0, buf: core::ptr::null_mut() },
@@ -578,7 +717,10 @@ impl<'a> ZeroCopyBuffer<'a> {
             namelen: 0,
             lpBuffers: self.bufs.as_mut_ptr(),
             dwBufferCount: self.bufs.len() as u32,
-            Control: WSABUF { len: 0, buf: core::ptr::null_mut() },
+            Control: WSABUF {
+                len: 0,
+                buf: core::ptr::null_mut(),
+            },
             dwFlags: 0,
         };
         let mut recvd: u32 = 0;
@@ -586,16 +728,52 @@ impl<'a> ZeroCopyBuffer<'a> {
         recvd as i32
     }
 
+    pub fn recv_from(
+        &mut self,
+        sock: windows_sys::Win32::Networking::WinSock::SOCKET,
+    ) -> io::Result<(i32, SocketAddr)> {
+        use socket2::SockAddr;
+        use windows_sys::Win32::Networking::WinSock::SOCKADDR_STORAGE;
+        let mut storage: SOCKADDR_STORAGE = unsafe { core::mem::zeroed() };
+        let mut msg = WSAMSG {
+            name: &mut storage as *mut _ as *mut _,
+            namelen: core::mem::size_of::<SOCKADDR_STORAGE>() as u32,
+            lpBuffers: self.bufs.as_mut_ptr(),
+            dwBufferCount: self.bufs.len() as u32,
+            Control: WSABUF { len: 0, buf: core::ptr::null_mut() },
+            dwFlags: 0,
+        };
+        let mut recvd: u32 = 0;
+        let ret = unsafe { WSARecvMsg(sock, &mut msg, &mut recvd, core::ptr::null_mut(), None) };
+        if ret == 0 {
+            let addr = unsafe {
+                SockAddr::from_raw_parts(
+                    &storage as *const _ as *const _,
+                    msg.namelen,
+                )
+                .as_socket()
+                .unwrap()
+            };
+            Ok((recvd as i32, addr))
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.bufs.iter().map(|b| b.len as usize).sum()
     }
 
-    pub fn is_empty(&self) -> bool { self.bufs.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.bufs.is_empty()
+    }
 }
 
 #[cfg(windows)]
 impl<'a> Drop for ZeroCopyBuffer<'a> {
-    fn drop(&mut self) { self.bufs.clear(); }
+    fn drop(&mut self) {
+        self.bufs.clear();
+    }
 }
 // --- Placeholder for full integration ---
 

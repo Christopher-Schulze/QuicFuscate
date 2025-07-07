@@ -2,6 +2,7 @@
 # Quiche Workflow Manager - Steuert den gesamten Quiche-Integrationsprozess
 
 set -euo pipefail
+trap 'error "Unerwarteter Fehler in ${FUNCNAME:-main} (Zeile $LINENO)"' ERR
 
 # Farben für die Ausgabe
 GREEN='\033[0;32m'
@@ -87,11 +88,17 @@ run_command() {
     local step_name="$1"
     local command_str="$2"
     local log_file="$LOG_DIR/${step_name}_$(date +%Y%m%d_%H%M%S).log"
-    
+
     log "Starte: $step_name"
     log "Befehl: $command_str"
     log "Log-Ausgabe: $log_file"
-    
+
+    # Prüfe, ob das verwendete Kommando existiert
+    local cmd=( $command_str )
+    if ! command -v "${cmd[0]}" >/dev/null 2>&1; then
+        error "Kommando nicht gefunden: ${cmd[0]}"
+    fi
+
     # Führe den Befehl aus und leite die Ausgabe um
     if eval "$command_str" 2>&1 | tee "$log_file"; then
         success "$step_name erfolgreich abgeschlossen"
@@ -135,7 +142,9 @@ rollback_backup() {
 patch_failure() {
     local message="$1"
     local backup_dir="$2"
+    local detail="${3:-}"
     warn "$message"
+    [ -n "$detail" ] && warn "$detail"
     rollback_backup "$backup_dir"
     error "Patchvorgang abgebrochen: $message"
 }
@@ -217,7 +226,7 @@ apply_patches() {
         patch_count=$((patch_count + 1))
         log "Wende Patch an: $name"
         if ! (cd "$PATCHED_DIR" && patch -p1 --no-backup-if-mismatch -r - < "$patch_file"); then
-            patch_failure "Fehler beim Anwenden von $name" "$backup_dir"
+            patch_failure "Fehler beim Anwenden von $name" "$backup_dir" "Datei: $patch_file"
         fi
     done
     

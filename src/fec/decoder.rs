@@ -576,7 +576,8 @@ impl Decoder {
             self.decoding_matrix.append_row(&identity_row, None);
             Ok(self.try_decode())
         } else if let Some(coeffs) = packet.coefficients {
-            self.decoding_matrix.append_row(&coeffs[..packet.coeff_len], packet.data);
+            self.decoding_matrix
+                .append_row(&coeffs[..packet.coeff_len], packet.data);
             Ok(self.try_decode())
         } else {
             Err("Repair packet missing coefficients.")
@@ -791,31 +792,33 @@ impl Decoder {
             }
         }
 
-        let mut v = init.to_vec();
-        for t in 0..(2 * k) {
-            for b in 0..block {
+        fn mat_vec_mul(a: &[Vec<u8>], x: &[u8]) -> Vec<u8> {
+            let n = x.len();
+            let mut out = vec![0u8; n];
+            for r in 0..n {
+                let mut acc = 0u8;
+                for c in 0..n {
+                    if a[r][c] != 0 {
+                        acc ^= gf_mul(a[r][c], x[c]);
+                    }
+                }
+                out[r] = acc;
+            }
+            out
+        }
+
+        for b in 0..block {
+            let mut v = init[b].clone();
+            for t in 0..(2 * k) {
                 let mut dot = 0u8;
                 for i in 0..k {
-                    dot ^= gf_mul(init[b][i], v[b][i]);
+                    dot ^= gf_mul(init[b][i], v[i]);
                 }
                 seq[b][t] = dot;
+                v = mat_vec_mul(&a, &v);
             }
-
-            // next vectors
-            let mut next = vec![vec![0u8; k]; block];
-            for b in 0..block {
-                for r in 0..k {
-                    let mut acc = 0u8;
-                    for c in 0..k {
-                        if a[r][c] != 0 {
-                            acc ^= gf_mul(a[r][c], v[b][c]);
-                        }
-                    }
-                    next[b][r] = acc;
-                }
-            }
-            v = next;
         }
+
         seq
     }
 
@@ -956,4 +959,3 @@ fn recursive_inverse(m: &[Vec<u8>]) -> Option<Vec<Vec<u8>>> {
 }
 
 // --- Main Public Interface ---
-

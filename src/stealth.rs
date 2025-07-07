@@ -408,6 +408,61 @@ impl FingerprintProfile {
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 30_000,
             },
+            (BrowserProfile::Firefox, OsProfile::Android) => Self {
+                browser, os,
+                user_agent: "Mozilla/5.0 (Android 14; Mobile; rv:127.0) Gecko/127.0 Firefox/127.0".to_string(),
+                tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xcca9, 0xcca8, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xc013, 0xc014],
+                accept_language: "en-US,en;q=0.9".to_string(),
+                initial_max_data: 5_000_000,
+                initial_max_stream_data_bidi_local: 500_000,
+                initial_max_stream_data_bidi_remote: 500_000,
+                initial_max_streams_bidi: 100,
+                max_idle_timeout: 30_000,
+            },
+            (BrowserProfile::Opera, OsProfile::Android) => Self {
+                browser, os,
+                user_agent: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36 OPR/112.0.0.0".to_string(),
+                tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
+                accept_language: "en-US,en;q=0.9".to_string(),
+                initial_max_data: 5_000_000,
+                initial_max_stream_data_bidi_local: 500_000,
+                initial_max_stream_data_bidi_remote: 500_000,
+                initial_max_streams_bidi: 100,
+                max_idle_timeout: 30_000,
+            },
+            (BrowserProfile::Brave, OsProfile::Android) => Self {
+                browser, os,
+                user_agent: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36 Brave/1.67.0".to_string(),
+                tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
+                accept_language: "en-US,en;q=0.9".to_string(),
+                initial_max_data: 5_000_000,
+                initial_max_stream_data_bidi_local: 500_000,
+                initial_max_stream_data_bidi_remote: 500_000,
+                initial_max_streams_bidi: 100,
+                max_idle_timeout: 30_000,
+            },
+            (BrowserProfile::Edge, OsProfile::Android) => Self {
+                browser, os,
+                user_agent: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36 EdgA/126.0.0.0".to_string(),
+                tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
+                accept_language: "en-US,en;q=0.9".to_string(),
+                initial_max_data: 5_000_000,
+                initial_max_stream_data_bidi_local: 500_000,
+                initial_max_stream_data_bidi_remote: 500_000,
+                initial_max_streams_bidi: 100,
+                max_idle_timeout: 30_000,
+            },
+            (BrowserProfile::Vivaldi, OsProfile::Android) => Self {
+                browser, os,
+                user_agent: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36 Vivaldi/6.7.999.31".to_string(),
+                tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
+                accept_language: "en-US,en;q=0.9".to_string(),
+                initial_max_data: 5_000_000,
+                initial_max_stream_data_bidi_local: 500_000,
+                initial_max_stream_data_bidi_remote: 500_000,
+                initial_max_streams_bidi: 100,
+                max_idle_timeout: 30_000,
+            },
             (BrowserProfile::Safari, OsProfile::IOS) => Self {
                 browser, os,
                 user_agent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1".to_string(),
@@ -486,6 +541,40 @@ impl Http3Masquerade {
         let mut encoder = quiche::h3::qpack::Encoder::new();
         let mut out = Vec::new();
         let _ = encoder.encode(&mut out, 0, &headers);
+        out
+    }
+}
+
+/// Configuration for [`FakeHeaders`].
+pub struct FakeHeadersConfig {
+    pub optimize_for_quic: bool,
+    pub use_qpack_headers: bool,
+}
+
+/// Generates HTTP/3 headers optionally optimized for QUIC.
+pub struct FakeHeaders {
+    cfg: FakeHeadersConfig,
+    profile: FingerprintProfile,
+}
+
+impl FakeHeaders {
+    pub fn new(cfg: FakeHeadersConfig, profile: FingerprintProfile) -> Self {
+        Self { cfg, profile }
+    }
+
+    pub fn header_list(&self, host: &str, path: &str) -> Vec<quiche::h3::Header> {
+        let mut headers = Http3Masquerade::new(self.profile.clone()).generate_headers(host, path);
+        if self.cfg.optimize_for_quic {
+            headers.retain(|h| h.name() != b"connection");
+        }
+        headers
+    }
+
+    pub fn qpack_block(&self, host: &str, path: &str) -> Vec<u8> {
+        let list = self.header_list(host, path);
+        let mut enc = quiche::h3::qpack::Encoder::new();
+        let mut out = Vec::new();
+        let _ = enc.encode(&mut out, 0, &list);
         out
     }
 }
@@ -726,8 +815,7 @@ impl TlsClientHelloSpoofer {
     }
 
     /// Apply the spoofing parameters using a custom ClientHello from
-    /// `browser_profiles` if available. Falls back to a generated hello when
-    /// no profile file exists.
+    /// `browser_profiles`.
     pub fn apply(
         config: &mut quiche::Config,
         browser: BrowserProfile,
@@ -741,43 +829,14 @@ impl TlsClientHelloSpoofer {
             suites.len()
         );
 
-        // Build a custom ClientHello using rustls and pass it to quiche via FFI.
-        fn build_client_hello(suites: &[u16]) -> Vec<u8> {
-            use rustls::client::{ClientConfig, ClientConnection, ServerName};
-            use rustls::{RootCertStore, ALL_CIPHER_SUITES};
-            use std::sync::Arc;
-
-            let mut cfg = ClientConfig::builder()
-                .with_cipher_suites(ALL_CIPHER_SUITES)
-                .with_safe_default_kx_groups()
-                .with_protocol_versions(&[&rustls::version::TLS13])
-                .unwrap()
-                .with_root_certificates(RootCertStore::empty())
-                .with_no_client_auth();
-
-            let custom: Vec<&'static rustls::SupportedCipherSuite> = suites
-                .iter()
-                .filter_map(|id| {
-                    ALL_CIPHER_SUITES
-                        .iter()
-                        .find(|cs| cs.suite().get_u16() == *id)
-                })
-                .copied()
-                .collect();
-
-            if !custom.is_empty() {
-                cfg.cipher_suites = custom;
+        // Load a pre-recorded ClientHello from disk.
+        let hello = match Self::load_client_hello(browser, os) {
+            Some(h) => h,
+            None => {
+                error!("Missing ClientHello profile for {:?}/{:?}", browser, os);
+                return;
             }
-
-            let server = ServerName::try_from("example.com").unwrap();
-            let mut conn = ClientConnection::new(Arc::new(cfg), server).unwrap();
-            let mut out = Vec::new();
-            let _ = conn.write_tls(&mut out);
-            out
-        }
-
-        let hello =
-            Self::load_client_hello(browser, os).unwrap_or_else(|| build_client_hello(suites));
+        };
         unsafe {
             extern "C" {
                 fn quiche_config_set_custom_tls(cfg: *mut c_void, hello: *const u8, len: usize);
@@ -1135,18 +1194,22 @@ impl StealthManager {
     /// Generates HTTP/3 headers for masquerading a request.
     pub fn get_http3_masquerade_headers(&self, host: &str, path: &str) -> Option<Vec<u8>> {
         if self.config.enable_http3_masquerading {
-            let masquerade = {
-                let fp = self.fingerprint.lock().unwrap();
-                Http3Masquerade::new(fp.clone())
-            };
+            let fp = self.fingerprint.lock().unwrap();
+            let fh = FakeHeaders::new(
+                FakeHeadersConfig {
+                    optimize_for_quic: true,
+                    use_qpack_headers: self.config.use_qpack_headers,
+                },
+                fp.clone(),
+            );
             debug!("Generating HTTP/3 masquerade headers for host: {}", host);
             if self.config.use_qpack_headers {
-                Some(masquerade.generate_qpack_headers(host, path))
+                Some(fh.qpack_block(host, path))
             } else {
-                let headers = masquerade.generate_headers(host, path);
-                let mut encoder = quiche::h3::qpack::Encoder::new();
+                let headers = fh.header_list(host, path);
+                let mut enc = quiche::h3::qpack::Encoder::new();
                 let mut out = Vec::new();
-                let _ = encoder.encode(&mut out, 0, &headers);
+                let _ = enc.encode(&mut out, 0, &headers);
                 Some(out)
             }
         } else {
@@ -1158,8 +1221,14 @@ impl StealthManager {
     pub fn get_http3_header_list(&self, host: &str, path: &str) -> Option<Vec<quiche::h3::Header>> {
         if self.config.enable_http3_masquerading {
             let fp = self.fingerprint.lock().unwrap();
-            let masquerade = Http3Masquerade::new(fp.clone());
-            Some(masquerade.generate_headers(host, path))
+            let fh = FakeHeaders::new(
+                FakeHeadersConfig {
+                    optimize_for_quic: true,
+                    use_qpack_headers: self.config.use_qpack_headers,
+                },
+                fp.clone(),
+            );
+            Some(fh.header_list(host, path))
         } else {
             None
         }
