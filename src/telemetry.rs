@@ -53,6 +53,18 @@ lazy_static! {
             .unwrap();
     pub static ref XDP_ACTIVE: IntGauge =
         register_int_gauge!("xdp_active", "XDP enabled status").unwrap();
+    pub static ref XDP_SEND_LATENCY: IntCounter = register_int_counter!(
+        "xdp_send_latency_us_total",
+        "Total microseconds spent sending via XDP"
+    )
+    .unwrap();
+    pub static ref XDP_RECV_LATENCY: IntCounter = register_int_counter!(
+        "xdp_recv_latency_us_total",
+        "Total microseconds spent receiving via XDP"
+    )
+    .unwrap();
+    pub static ref XDP_THROUGHPUT: IntGauge =
+        register_int_gauge!("xdp_throughput_mbps", "Current XDP throughput in Mbps").unwrap();
     pub static ref MEM_POOL_CAPACITY: IntGauge =
         register_int_gauge!("mem_pool_capacity", "Memory pool capacity").unwrap();
     pub static ref MEM_POOL_IN_USE: IntGauge =
