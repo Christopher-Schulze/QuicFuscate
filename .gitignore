@@ -104,3 +104,4 @@ tests/*.o
 # CLion
 .idea/
 cmake-build-*/
+libs/logs/
