@@ -1,16 +1,16 @@
 use crate::core::QuicFuscateConnection;
 use crate::fec::{FecConfig, FecMode};
+#[cfg(unix)]
+use crate::optimize::ZeroCopyBuffer;
 use crate::stealth::StealthConfig;
 use crate::stealth::{BrowserProfile, FingerprintProfile, OsProfile};
 use crate::telemetry;
 use clap::{Parser, Subcommand, ValueEnum};
 use log::{error, info, warn};
-#[cfg(unix)]
-use std::os::unix::io::AsRawFd;
-#[cfg(unix)]
-use crate::optimize::ZeroCopyBuffer;
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -62,14 +62,6 @@ enum Commands {
         /// Initial FEC mode
         #[clap(long, value_enum, default_value = "zero")]
         fec_mode: FecMode,
-
-        /// Memory pool capacity (number of blocks)
-        #[clap(long, default_value_t = 1024)]
-        pool_capacity: usize,
-
-        /// Memory pool block size in bytes
-        #[clap(long, default_value_t = 4096)]
-        pool_block: usize,
 
         /// Memory pool capacity (number of blocks)
         #[clap(long, default_value_t = 1024)]
