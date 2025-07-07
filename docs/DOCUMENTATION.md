@@ -37,7 +37,7 @@ QuicFuscate/
 ```
 
 ### Key Features
-1. **Advanced QUIC Implementation**: Enhanced QUIC transport protocol with BBRv2 congestion control. XDP zero-copy support is planned but not yet functional.
+1. **Advanced QUIC Implementation**: Enhanced QUIC transport protocol with BBRv2 congestion control. XDP zero-copy is available with automatic UDP fallback when unsupported.
 2. **Comprehensive Stealth Capabilities**: 
    - DNS-over-HTTPS with browser profile emulation
    - Domain fronting and HTTP/3 masquerading
@@ -83,7 +83,7 @@ enabled. Call `report_error()` whenever a recoverable error occurs.
 Handles QUIC connection management with advanced features:
 - **Connection Migration**: Seamless switching between network interfaces
 - **BBRv2 Congestion Control**: Optimized for high throughput and low latency
-- **XDP Zero-Copy**: Planned kernel bypass for maximum performance (implementation pending, see `docs/issues/003-xdp-zero-copy.md`)
+- **XDP Zero-Copy**: Kernel bypass via AF_XDP with graceful fallback to UDP (see `docs/issues/003-xdp-zero-copy.md`)
 - **MTU Discovery**: Automatic packet size optimization
 
 #### Cipher Suite Selector
@@ -1150,3 +1150,17 @@ the optional telemetry endpoint:
   resolution.
 - Use `FecConfig::from_file` to tune window sizes and PID constants for your
   network conditions.
+
+### XDP Configuration
+QuicFuscate can optionally use AF_XDP sockets for zero-copy packet processing.
+Enable this in the `[optimize]` section of the configuration file:
+
+```toml
+[optimize]
+enable_xdp = true
+```
+
+The interface is chosen automatically based on the bind address. Override it by
+setting the `XDP_IFACE` environment variable before starting the application.
+When XDP initialization fails or the feature is disabled, QuicFuscate falls back
+to standard UDP sockets without interrupting existing connections.

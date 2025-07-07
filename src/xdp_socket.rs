@@ -64,6 +64,7 @@ impl XdpSocket {
         let socket = std::net::UdpSocket::bind(bind)?;
         socket.connect(remote)?;
         socket.set_nonblocking(true)?;
+        telemetry!(telemetry::XDP_ACTIVE.set(0));
         Ok(Self {
             udp: socket,
             state: None,
@@ -81,8 +82,9 @@ impl XdpSocket {
         let (area, mut bufs) =
             match MmapArea::new(BUF_NUM, BUF_LEN, MmapAreaOptions { huge_tlb: false }) {
                 Ok(v) => v,
-                Err(e) => {
+                Err(_) => {
                     telemetry!(telemetry::XDP_FALLBACKS.inc());
+                    telemetry!(telemetry::XDP_ACTIVE.set(0));
                     return Ok(Self { udp, state: None });
                 }
             };
@@ -94,6 +96,7 @@ impl XdpSocket {
             Ok(v) => v,
             Err(_) => {
                 telemetry!(telemetry::XDP_FALLBACKS.inc());
+                telemetry!(telemetry::XDP_ACTIVE.set(0));
                 return Ok(Self { udp, state: None });
             }
         };
@@ -109,12 +112,14 @@ impl XdpSocket {
             Ok(v) => v,
             Err(_) => {
                 telemetry!(telemetry::XDP_FALLBACKS.inc());
+                telemetry!(telemetry::XDP_ACTIVE.set(0));
                 return Ok(Self { udp, state: None });
             }
         };
 
         let _ = fq.fill(&mut bufs, bufs.len());
 
+        telemetry!(telemetry::XDP_ACTIVE.set(1));
         Ok(Self {
             udp,
             state: Some(XdpState {
@@ -207,7 +212,8 @@ impl XdpSocket {
                 b.data[..copy_len].copy_from_slice(&data[..copy_len]);
                 b.set_len(copy_len as u16);
                 let _ = state.pending.push_back(b);
-                let sent = state.tx.try_send(&mut state.pending, 1).unwrap_or(0);
+                let result = state.tx.try_send(&mut state.pending, 1);
+                let sent = result.unwrap_or(0);
                 let _ = state.cq.service(&mut state.pool, sent);
                 if sent == 1 {
                     telemetry!(telemetry::XDP_BYTES_SENT.inc_by(copy_len as u64));
@@ -218,6 +224,10 @@ impl XdpSocket {
                         / start.elapsed().as_micros().max(1) as u64;
                     telemetry!(telemetry::XDP_THROUGHPUT.set((tput / 1_000_000) as i64));
                     return Ok(copy_len);
+                } else if result.is_err() {
+                    telemetry!(telemetry::XDP_FALLBACKS.inc());
+                    telemetry!(telemetry::XDP_ACTIVE.set(0));
+                    self.state = None;
                 }
                 state.pool.extend(state.pending.drain(..));
             }
@@ -256,6 +266,11 @@ impl XdpSocket {
                         return Ok(copy_len);
                     }
                 }
+                Err(_) => {
+                    telemetry!(telemetry::XDP_FALLBACKS.inc());
+                    telemetry!(telemetry::XDP_ACTIVE.set(0));
+                    self.state = None;
+                }
                 _ => {}
             }
         }
@@ -285,6 +300,7 @@ impl XdpSocket {
         let socket = std::net::UdpSocket::bind(bind_addr)?;
         socket.connect(remote_addr)?;
         socket.set_nonblocking(true)?;
+        telemetry!(telemetry::XDP_ACTIVE.set(0));
         Ok(Self { socket })
     }
 
