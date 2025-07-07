@@ -25,6 +25,20 @@
 use prometheus::{
     register_int_counter, register_int_gauge, Encoder, IntCounter, IntGauge, TextEncoder,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Global switch controlling whether telemetry metrics are recorded.
+pub static TELEMETRY_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Executes the given expression only when telemetry is enabled.
+#[macro_export]
+macro_rules! telemetry {
+    ($e:expr) => {
+        if $crate::telemetry::TELEMETRY_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+            $e;
+        }
+    };
+}
 use sysinfo::{PidExt, SystemExt};
 
 lazy_static! {

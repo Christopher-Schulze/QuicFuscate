@@ -243,10 +243,10 @@ impl ModeManager {
                 self.current_window,
                 estimated_loss * 100.0
             );
-            telemetry::FEC_MODE.set(self.current_mode as i64);
-            telemetry::LOSS_RATE.set((estimated_loss * 100.0) as i64);
-            telemetry::FEC_MODE_SWITCHES.inc();
-            telemetry::FEC_WINDOW.set(self.current_window as i64);
+            telemetry!(telemetry::FEC_MODE.set(self.current_mode as i64));
+            telemetry!(telemetry::LOSS_RATE.set((estimated_loss * 100.0) as i64));
+            telemetry!(telemetry::FEC_MODE_SWITCHES.inc());
+            telemetry!(telemetry::FEC_WINDOW.set(self.current_window as i64));
             return (
                 self.current_mode,
                 self.current_window,
@@ -254,7 +254,7 @@ impl ModeManager {
             );
         }
 
-        telemetry::FEC_WINDOW.set(self.current_window as i64);
+        telemetry!(telemetry::FEC_WINDOW.set(self.current_window as i64));
 
         (self.current_mode, self.current_window, None)
     }
@@ -497,11 +497,11 @@ impl AdaptiveFec {
             mem_pool,
             config,
         };
-        telemetry::FEC_WINDOW.set(mode_mgr.current_window as i64);
-        telemetry::FEC_LAMBDA.set((config.lambda * 1000.0) as i64);
-        telemetry::FEC_BURST_WINDOW.set(config.burst_window as i64);
-        telemetry::FEC_HYSTERESIS.set((config.hysteresis * 1000.0) as i64);
-        telemetry::FEC_KALMAN.set(if config.kalman_enabled { 1 } else { 0 });
+        telemetry!(telemetry::FEC_WINDOW.set(mode_mgr.current_window as i64));
+        telemetry!(telemetry::FEC_LAMBDA.set((config.lambda * 1000.0) as i64));
+        telemetry!(telemetry::FEC_BURST_WINDOW.set(config.burst_window as i64));
+        telemetry!(telemetry::FEC_HYSTERESIS.set((config.hysteresis * 1000.0) as i64));
+        telemetry!(telemetry::FEC_KALMAN.set(if config.kalman_enabled { 1 } else { 0 }));
         this
     }
 
@@ -524,7 +524,7 @@ impl AdaptiveFec {
         self.encoder
             .add_source_packet(pkt.clone_for_encoder(&self.mem_pool));
         outgoing_queue.push_back(pkt);
-        crate::telemetry::ENCODED_PACKETS.inc();
+        telemetry!(crate::telemetry::ENCODED_PACKETS.inc());
 
         if self.transition_left > ModeManager::CROSS_FADE_LEN / 2 {
             if let Some(enc) = self.transition_encoder.as_mut() {
@@ -556,7 +556,7 @@ impl AdaptiveFec {
         for i in 0..num_repair {
             if let Some(repair_packet) = encoder.generate_repair_packet(i, mem_pool) {
                 outgoing_queue.push_back(repair_packet);
-                crate::telemetry::ENCODED_PACKETS.inc();
+                telemetry!(crate::telemetry::ENCODED_PACKETS.inc());
             }
         }
     }
@@ -576,7 +576,7 @@ impl AdaptiveFec {
             Ok(is_now_decoded) => {
                 if !was_decoded && is_now_decoded {
                     recovered.extend(self.decoder.get_decoded_packets());
-                    crate::telemetry::DECODED_PACKETS.inc_by(recovered.len() as u64);
+                    telemetry!(crate::telemetry::DECODED_PACKETS.inc_by(recovered.len() as u64));
                 }
             }
             Err(e) => return Err(e),
@@ -588,7 +588,7 @@ impl AdaptiveFec {
                 Ok(now) => {
                     if !was_dec && now {
                         recovered.extend(trans_dec.get_decoded_packets());
-                        crate::telemetry::DECODED_PACKETS.inc_by(recovered.len() as u64);
+                        telemetry!(crate::telemetry::DECODED_PACKETS.inc_by(recovered.len() as u64));
                     }
                 }
                 Err(e) => return Err(e),
@@ -604,7 +604,7 @@ impl AdaptiveFec {
         estimator.report_loss(lost, total);
         let estimated_loss = estimator.get_estimated_loss();
         drop(estimator);
-        crate::telemetry::LOSS_RATE.set((estimated_loss * 100.0) as i64);
+        telemetry!(crate::telemetry::LOSS_RATE.set((estimated_loss * 100.0) as i64));
 
         let mut mode_mgr = self.mode_mgr.lock().unwrap();
         let (new_mode, new_window, prev) = mode_mgr.update(estimated_loss);

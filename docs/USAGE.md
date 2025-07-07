@@ -12,6 +12,9 @@ quicfuscate client \
   --config ./example_config.toml
 ```
 
+Telemetry metrics are disabled by default. Launch the binary with `--telemetry`
+to expose Prometheus statistics on `0.0.0.0:9898`.
+
 ## Server
 
 ```
