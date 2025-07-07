@@ -67,6 +67,10 @@ jobs:
         chmod +x ./scripts/quiche_workflow.sh
         ./scripts/quiche_workflow.sh --type ${{ inputs.build_type || 'release' }}
 
+    - name: Verify quiche artifacts
+      run: |
+        ls -al libs/patched_quiche/target/${{ inputs.build_type || 'release' }}/libquiche* || ls -al libs/patched_quiche/target/${{ inputs.build_type || 'release' }}/deps/libquiche*
+
     - name: Set QUICHE_PATH
       run: echo "QUICHE_PATH=${{ github.workspace }}/libs/patched_quiche/quiche" >> $GITHUB_ENV
 

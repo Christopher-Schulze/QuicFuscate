@@ -278,6 +278,12 @@ The `scripts/quiche_workflow.sh` script provides a complete local development wo
 3. **Patch Application Failures**
    - The workflow aborts automatically when a patch fails to apply.
    - Review the error message and fix the patch before rerunning.
+4. **Manual Patch Conflict Resolution**
+   - Reapply the failing patch with `git apply --reject <patch>` to create `.rej` files.
+   - Edit the affected sources and resolve each hunk manually.
+   - After fixing the conflicts run `git add -u` and regenerate the patch with
+     `git diff > libs/patches/<patch-name>.patch`.
+   - Restart the workflow to verify the updated patch series.
 
 ### Getting Help
 
