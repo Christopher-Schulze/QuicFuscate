@@ -2,6 +2,7 @@ use super::decoder::DecoderVariant;
 use super::encoder::{EncoderVariant, Packet, PidConfig};
 use super::gf_tables::init_gf_tables;
 use crate::optimize::MemoryPool;
+use crate::telemetry;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -235,9 +236,16 @@ impl ModeManager {
 
         if prev_mode != self.current_mode || prev_window != self.current_window {
             info!(
-                "FEC mode change: {:?} -> {:?}, window {} -> {}",
-                prev_mode, self.current_mode, prev_window, self.current_window
+                "FEC mode change: {:?} -> {:?}, window {} -> {}, loss {:.2}%",
+                prev_mode,
+                self.current_mode,
+                prev_window,
+                self.current_window,
+                estimated_loss * 100.0
             );
+            telemetry::FEC_MODE.set(self.current_mode as i64);
+            telemetry::LOSS_RATE.set((estimated_loss * 100.0) as i64);
+            telemetry::FEC_MODE_SWITCHES.inc();
             return (
                 self.current_mode,
                 self.current_window,
@@ -572,7 +580,6 @@ impl AdaptiveFec {
 
         let mut mode_mgr = self.mode_mgr.lock().unwrap();
         let (new_mode, new_window, prev) = mode_mgr.update(estimated_loss);
-        crate::telemetry::FEC_MODE.set(new_mode as i64);
         let (k, n) = ModeManager::params_for(new_mode, new_window);
 
         if let Some((old_mode, old_window)) = prev {

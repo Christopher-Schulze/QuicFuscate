@@ -78,6 +78,28 @@ quicfuscate server \
   --pool-block 4096
 ```
 
+### Example FEC Configuration
+
+Provide a TOML file via `--fec-config` to fine-tune the adaptive engine:
+
+```toml
+[adaptive_fec]
+lambda = 0.05
+burst_window = 30
+hysteresis = 0.02
+kalman_enabled = true
+kalman_q = 0.002
+kalman_r = 0.02
+
+[[adaptive_fec.modes]]
+name = "light"
+w0 = 20
+
+[[adaptive_fec.modes]]
+name = "extreme"
+w0 = 2048
+```
+
 ### Connection Migration
 
 To migrate an established connection to a new local port, call `migrate_connection` on the active session:
