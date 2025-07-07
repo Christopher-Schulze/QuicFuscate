@@ -43,6 +43,7 @@ use crossbeam_queue::SegQueue;
 #[cfg(unix)]
 use libc::{iovec, msghdr, recvmsg, sendmsg};
 use log::info;
+use serde::Deserialize;
 use std::any::Any;
 use std::collections::HashMap;
 use std::io;
@@ -137,6 +138,47 @@ impl Default for OptimizeConfig {
             block_size: 4096,
             enable_xdp: false,
         }
+    }
+}
+
+impl OptimizeConfig {
+    pub fn from_toml(s: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        #[derive(Deserialize)]
+        struct Root {
+            optimize: Option<Section>,
+        }
+        #[derive(Deserialize)]
+        struct Section {
+            pool_capacity: Option<usize>,
+            block_size: Option<usize>,
+            enable_xdp: Option<bool>,
+        }
+        let root: Root = toml::from_str(s)?;
+        let sec = root.optimize.unwrap_or(Section {
+            pool_capacity: None,
+            block_size: None,
+            enable_xdp: None,
+        });
+        Ok(Self {
+            pool_capacity: sec.pool_capacity.unwrap_or(1024),
+            block_size: sec.block_size.unwrap_or(4096),
+            enable_xdp: sec.enable_xdp.unwrap_or(false),
+        })
+    }
+
+    pub fn from_file(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let contents = std::fs::read_to_string(path)?;
+        Self::from_toml(&contents)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.pool_capacity == 0 {
+            return Err("pool_capacity must be > 0".into());
+        }
+        if self.block_size == 0 {
+            return Err("block_size must be > 0".into());
+        }
+        Ok(())
     }
 }
 
@@ -393,6 +435,7 @@ impl MemoryPool {
             remaining -= node_cap;
         }
         telemetry::MEM_POOL_CAPACITY.set(capacity as i64);
+        telemetry::MEM_POOL_BLOCK_SIZE.set(block_size as i64);
         telemetry::MEM_POOL_USAGE_BYTES.set(0);
         telemetry::MEM_POOL_FRAGMENTATION.set(0);
         telemetry::MEM_POOL_UTILIZATION.set(0);

@@ -1,7 +1,9 @@
 use crate::core::QuicFuscateConnection;
 use crate::fec::{FecConfig, FecMode};
+use crate::app_config::AppConfig;
 #[cfg(unix)]
 use crate::optimize::ZeroCopyBuffer;
+use crate::optimize::OptimizeConfig;
 use crate::stealth::StealthConfig;
 use crate::stealth::{BrowserProfile, FingerprintProfile, OsProfile};
 use crate::telemetry;
@@ -376,6 +378,7 @@ async fn run_client(
     disable_xor: bool,
     disable_http3: bool,
 ) -> std::io::Result<()> {
+    let config_path = config.clone();
     if list_fingerprints {
         println!("Available browser profiles:");
         for v in BrowserProfile::value_variants() {
@@ -414,24 +417,32 @@ async fn run_client(
         });
     }
 
-    let mut fec_cfg = if let Some(cfg) = config {
-        match FecConfig::from_file(cfg) {
-            Ok(c) => c,
+    let (mut fec_cfg, mut stealth_config, mut opt_cfg) = if let Some(cfg) = config_path.as_ref() {
+        match AppConfig::from_file(cfg) {
+            Ok(c) => {
+                if let Err(e) = c.validate() {
+                    warn!("Config validation failed: {}", e);
+                }
+                (c.fec, c.stealth, c.optimize)
+            }
             Err(e) => {
                 error!("Failed to load config {}: {}", cfg.display(), e);
-                FecConfig::default()
-            }
-        }
-    } else if let Some(path) = fec_config {
-        match FecConfig::from_file(path) {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                error!("Failed to load FEC config {}: {}", path.display(), e);
-                FecConfig::default()
+                (FecConfig::default(), StealthConfig::default(), OptimizeConfig::default())
             }
         }
     } else {
-        FecConfig::default()
+        let mut fec = if let Some(path) = fec_config {
+            match FecConfig::from_file(path) {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    error!("Failed to load FEC config {}: {}", path.display(), e);
+                    FecConfig::default()
+                }
+            }
+        } else {
+            FecConfig::default()
+        };
+        (fec, StealthConfig::default(), OptimizeConfig::default())
     };
     fec_cfg.initial_mode = fec_mode;
 
@@ -459,17 +470,7 @@ async fn run_client(
 
     let url_parsed =
         url::Url::parse(url).unwrap_or_else(|_| url::Url::parse("https://example.com/").unwrap());
-    let mut stealth_config = if let Some(cfg) = config {
-        match StealthConfig::from_file(cfg) {
-            Ok(c) => c,
-            Err(e) => {
-                error!("Failed to load config {}: {}", cfg.display(), e);
-                StealthConfig::default()
-            }
-        }
-    } else {
-        StealthConfig::default()
-    };
+    let mut stealth_config = stealth_config;
     stealth_config.browser_profile = profile;
     stealth_config.os_profile = os;
     stealth_config.enable_doh = !disable_doh;
@@ -478,20 +479,31 @@ async fn run_client(
     stealth_config.fronting_domains = front_domain.clone();
     stealth_config.enable_xor_obfuscation = !disable_xor;
     stealth_config.enable_http3_masquerading = !disable_http3;
+    telemetry::STEALTH_BROWSER_PROFILE.set(stealth_config.browser_profile as i64);
+    telemetry::STEALTH_OS_PROFILE.set(stealth_config.os_profile as i64);
 
     let host = url_parsed.host_str().unwrap_or("example.com");
+    let opt_params = if config_path.is_some() {
+        OptimizeConfig {
+            pool_capacity: opt_cfg.pool_capacity,
+            block_size: opt_cfg.block_size,
+            enable_xdp: opt_cfg.enable_xdp || xdp,
+        }
+    } else {
+        OptimizeConfig {
+            pool_capacity,
+            block_size: pool_block,
+            enable_xdp: xdp,
+        }
+    };
     let mut conn = QuicFuscateConnection::new_client(
         host,
         local_addr,
         server_addr,
         config,
-        stealth_config,
+        stealth_config.clone(),
         fec_cfg,
-        OptimizeConfig {
-            pool_capacity,
-            block_size: pool_block,
-            enable_xdp: xdp,
-        },
+        opt_params,
         !no_utls,
     )
     .expect("failed to create client connection");
@@ -648,6 +660,7 @@ async fn run_server(
     disable_xor: bool,
     disable_http3: bool,
 ) -> std::io::Result<()> {
+    let config_path = config.clone();
     let socket = std::net::UdpSocket::bind(listen_addr)?;
     socket.set_nonblocking(true)?;
     info!("Server listening on {}", listen_addr);
@@ -665,24 +678,32 @@ async fn run_server(
         });
     }
 
-    let mut fec_cfg = if let Some(cfg) = config {
-        match FecConfig::from_file(cfg) {
-            Ok(c) => c,
+    let (mut fec_cfg, mut stealth_cfg, mut opt_cfg) = if let Some(cfg) = config_path.as_ref() {
+        match AppConfig::from_file(cfg) {
+            Ok(c) => {
+                if let Err(e) = c.validate() {
+                    warn!("Config validation failed: {}", e);
+                }
+                (c.fec, c.stealth, c.optimize)
+            }
             Err(e) => {
                 error!("Failed to load config {}: {}", cfg.display(), e);
-                FecConfig::default()
-            }
-        }
-    } else if let Some(path) = fec_config {
-        match FecConfig::from_file(path) {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                error!("Failed to load FEC config {}: {}", path.display(), e);
-                FecConfig::default()
+                (FecConfig::default(), StealthConfig::default(), OptimizeConfig::default())
             }
         }
     } else {
-        FecConfig::default()
+        let mut fec = if let Some(path) = fec_config {
+            match FecConfig::from_file(path) {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    error!("Failed to load FEC config {}: {}", path.display(), e);
+                    FecConfig::default()
+                }
+            }
+        } else {
+            FecConfig::default()
+        };
+        (fec, StealthConfig::default(), OptimizeConfig::default())
     };
     fec_cfg.initial_mode = fec_mode;
 
@@ -708,17 +729,7 @@ async fn run_server(
     let mut clients = HashMap::new();
     let mut buf = [0; 65535];
     let mut out = [0; 1460];
-    let initial_sc = if let Some(cfg) = config {
-        match StealthConfig::from_file(cfg) {
-            Ok(c) => c,
-            Err(e) => {
-                error!("Failed to load config {}: {}", cfg.display(), e);
-                StealthConfig::default()
-            }
-        }
-    } else {
-        StealthConfig::default()
-    };
+    let initial_sc = stealth_cfg.clone();
     let stealth_config = Arc::new(Mutex::new(initial_sc));
     {
         let mut sc = stealth_config.lock().unwrap();
@@ -730,7 +741,22 @@ async fn run_server(
         sc.fronting_domains = front_domain.clone();
         sc.enable_xor_obfuscation = !disable_xor;
         sc.enable_http3_masquerading = !disable_http3;
+        telemetry::STEALTH_BROWSER_PROFILE.set(sc.browser_profile as i64);
+        telemetry::STEALTH_OS_PROFILE.set(sc.os_profile as i64);
     }
+    let opt_params = if config_path.is_some() {
+        OptimizeConfig {
+            pool_capacity: opt_cfg.pool_capacity,
+            block_size: opt_cfg.block_size,
+            enable_xdp: opt_cfg.enable_xdp || xdp,
+        }
+    } else {
+        OptimizeConfig {
+            pool_capacity,
+            block_size: pool_block,
+            enable_xdp: xdp,
+        }
+    };
 
     let profiles: Vec<FingerprintProfile> = match profile_seq {
         Some(seq) => seq
@@ -791,11 +817,7 @@ async fn run_server(
                         config.clone(),
                         cfg,
                         fec_cfg.clone(),
-                        OptimizeConfig {
-                            pool_capacity,
-                            block_size: pool_block,
-                            enable_xdp: xdp,
-                        },
+                        opt_params,
                     )
                     .expect("failed to create server connection")
                 });

@@ -8,6 +8,7 @@ pub mod core;
 pub mod crypto;
 pub mod fec;
 pub mod optimize;
+pub mod app_config;
 pub mod stealth;
 pub mod xdp_socket;
 pub mod tls_ffi;

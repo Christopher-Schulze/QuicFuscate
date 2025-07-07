@@ -450,6 +450,25 @@ impl Default for FecConfig {
     }
 }
 
+impl FecConfig {
+    /// Validate the configuration values.
+    pub fn validate(&self) -> Result<(), String> {
+        if !(0.0..=1.0).contains(&self.lambda) {
+            return Err("lambda must be between 0 and 1".into());
+        }
+        if self.burst_window == 0 {
+            return Err("burst_window must be > 0".into());
+        }
+        if !(0.0..1.0).contains(&self.hysteresis) {
+            return Err("hysteresis must be between 0 and 1".into());
+        }
+        if self.kalman_enabled && (self.kalman_q <= 0.0 || self.kalman_r <= 0.0) {
+            return Err("kalman_q and kalman_r must be positive".into());
+        }
+        Ok(())
+    }
+}
+
 impl AdaptiveFec {
     pub fn new(config: FecConfig, mem_pool: Arc<MemoryPool>) -> Self {
         init_gf_tables();
