@@ -1,10 +1,10 @@
+use super::decoder::DecoderVariant;
+use super::encoder::{EncoderVariant, Packet, PidConfig};
+use super::gf_tables::init_gf_tables;
+use crate::optimize::MemoryPool;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use crate::optimize::MemoryPool;
-use super::encoder::{EncoderVariant, Packet, PidConfig};
-use super::decoder::DecoderVariant;
-use super::gf_tables::init_gf_tables;
 // --- Core Data Structures ---
 
 use clap::ValueEnum;
@@ -37,7 +37,6 @@ impl std::str::FromStr for FecMode {
 
 /// Represents a packet in the FEC system, using an aligned buffer for the payload.
 #[derive(Debug)]
-
 // --- Loss Estimator & Mode Management ---
 
 /// Estimates packet loss using an Exponential Moving Average and a burst detection window.
@@ -135,10 +134,13 @@ impl ModeManager {
     fn overhead_ratio(mode: FecMode) -> f32 {
         match mode {
             FecMode::Zero => 1.0,
-            FecMode::Light => 17.0 / 16.0,
-            FecMode::Normal => 74.0 / 64.0,
-            FecMode::Medium => 166.0 / 128.0,
-            FecMode::Strong => 384.0 / 256.0,
+            // Overhead targets from PLAN.txt
+            FecMode::Light => 1.05,
+            FecMode::Normal => 1.15,
+            FecMode::Medium => 1.30,
+            FecMode::Strong => 1.50,
+            // Extreme mode behaves rateless with an unbounded window. A
+            // conservative ratio keeps arithmetic reasonable.
             FecMode::Extreme => 2.0,
         }
     }
@@ -574,14 +576,16 @@ impl AdaptiveFec {
         let (k, n) = ModeManager::params_for(new_mode, new_window);
 
         if let Some((old_mode, old_window)) = prev {
-            let (ok, on) = ModeManager::params_for(old_mode, old_window);
+            let (ok, _) = ModeManager::params_for(old_mode, old_window);
+            // Keep the previous encoder/decoder for the cross-fade phase and
+            // immediately switch to the new configuration.
             self.transition_encoder = Some(std::mem::replace(
                 &mut self.encoder,
                 EncoderVariant::new(new_mode, k, n),
             ));
             self.transition_decoder = Some(std::mem::replace(
                 &mut self.decoder,
-                DecoderVariant::new(old_mode, ok, Arc::clone(&self.mem_pool)),
+                DecoderVariant::new(new_mode, k, Arc::clone(&self.mem_pool)),
             ));
             self.transition_left = ModeManager::CROSS_FADE_LEN;
         } else {

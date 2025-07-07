@@ -90,3 +90,69 @@ fn adaptive_mode_switch_high_loss() {
     fec.report_loss(40, 50);
     assert_eq!(fec.current_mode(), FecMode::Extreme);
 }
+
+#[test]
+fn gf8_large_window() {
+    quicfuscate::fec::init_gf_tables();
+    let pool = Arc::new(MemoryPool::new(4096, 64));
+    let k = 1024;
+    let n = k + 8;
+    let mut enc = Encoder::new(k, n);
+    let mut packets = Vec::new();
+    for i in 0..k {
+        let p = make_packet(i as u64, (i % 256) as u8, &pool);
+        enc.add_source_packet(p.clone());
+        packets.push(p);
+    }
+    let mut repairs = Vec::new();
+    for i in 0..(n - k) {
+        repairs.push(enc.generate_repair_packet(i, &pool).unwrap());
+    }
+    let mut dec = Decoder::new(k, Arc::clone(&pool));
+    for (idx, pkt) in packets.into_iter().enumerate() {
+        if idx % 3 != 0 {
+            dec.add_packet(pkt).unwrap();
+        }
+    }
+    for r in repairs {
+        dec.add_packet(r).unwrap();
+    }
+    assert!(dec.is_decoded);
+    let out = dec.get_decoded_packets();
+    assert_eq!(out.len(), k);
+    for i in 0..k {
+        assert_eq!(out[i].data.as_ref().unwrap()[0], (i % 256) as u8);
+    }
+}
+
+#[test]
+fn adaptive_transitions_all_modes() {
+    use std::thread::sleep;
+    use std::time::Duration;
+
+    quicfuscate::fec::init_gf_tables();
+    let pool = Arc::new(MemoryPool::new(32, 64));
+    let mut cfg = FecConfig::default();
+    cfg.lambda = 1.0;
+    cfg.pid = quicfuscate::fec::PidConfig {
+        kp: 1.0,
+        ki: 0.0,
+        kd: 0.0,
+    };
+    let mut fec = AdaptiveFec::new(cfg, Arc::clone(&pool));
+
+    let steps = [
+        (0, 100, FecMode::Zero),     // 0 %
+        (2, 100, FecMode::Light),    // 2 %
+        (10, 100, FecMode::Normal),  // 10 %
+        (25, 100, FecMode::Medium),  // 25 %
+        (45, 100, FecMode::Strong),  // 45 %
+        (60, 100, FecMode::Extreme), // 60 %
+    ];
+
+    for (lost, total, mode) in steps.iter() {
+        fec.report_loss(*lost, *total);
+        sleep(Duration::from_millis(600));
+        assert_eq!(fec.current_mode(), *mode);
+    }
+}
