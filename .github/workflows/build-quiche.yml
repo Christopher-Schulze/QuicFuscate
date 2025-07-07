@@ -68,24 +68,24 @@ jobs:
         chmod +x ./scripts/quiche_workflow.sh
         ./scripts/quiche_workflow.sh --step patch
 
-      - name: build_quiche
-        run: |
-          chmod +x ./scripts/quiche_workflow.sh
-          ./scripts/quiche_workflow.sh --step build --type ${{ inputs.build_type || 'release' }}
+    - name: build_quiche
+      run: |
+        chmod +x ./scripts/quiche_workflow.sh
+        ./scripts/quiche_workflow.sh --step build --type ${{ inputs.build_type || 'release' }}
 
-      - name: test_quiche
-        run: |
-          chmod +x ./scripts/quiche_workflow.sh
-          ./scripts/quiche_workflow.sh --step test
+    - name: test_quiche
+      run: |
+        chmod +x ./scripts/quiche_workflow.sh
+        ./scripts/quiche_workflow.sh --step test
 
-      - name: Upload Test Logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: quiche-test-logs
-          path: libs/logs/
-          retention-days: 7
-          compression-level: 9
+    - name: Upload Test Logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: quiche-test-logs
+        path: libs/logs/
+        retention-days: 7
+        compression-level: 9
 
     - name: Build QuicFuscate binaries
       run: |
