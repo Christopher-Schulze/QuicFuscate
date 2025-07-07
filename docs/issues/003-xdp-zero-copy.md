@@ -1,11 +1,15 @@
 # Issue: AF_XDP Zero-Copy Path
 
 ## Description
-`src/xdp_socket.rs` only contains placeholders and returns errors when attempting to create an AF_XDP socket. PLAN.txt specifies a zero-copy network path with XDP acceleration.
+`src/xdp_socket.rs` now supports setting up UMEM and ring buffers using the
+`afxdp` crate. If initialization fails or the feature is not compiled the code
+falls back to ordinary UDP sockets. The active interface can be overridden via
+the `XDP_IFACE` environment variable which makes testing with veth pairs
+possible.
 
 ## Tasks
-- [ ] Implement full AF_XDP socket initialization including UMEM setup and ring configuration.
-- [ ] Provide graceful fallback to standard UDP sockets when XDP is unavailable.
+- [x] Implement full AF_XDP socket initialization including UMEM setup and ring configuration.
+- [x] Provide graceful fallback to standard UDP sockets when XDP is unavailable.
 - [ ] Add path migration support by reconfiguring the XDP socket on the fly.
 - [ ] Benchmark throughput and update telemetry metrics for XDP specific statistics.
 

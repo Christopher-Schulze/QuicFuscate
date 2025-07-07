@@ -48,6 +48,9 @@ pub struct XdpSocket;
 
 #[cfg(all(unix, feature = "xdp"))]
 fn infer_iface(addr: &SocketAddr) -> String {
+    if let Ok(iface) = std::env::var("XDP_IFACE") {
+        return iface;
+    }
     if addr.ip().is_loopback() {
         "lo".to_string()
     } else {
@@ -61,7 +64,10 @@ impl XdpSocket {
         let socket = std::net::UdpSocket::bind(bind)?;
         socket.connect(remote)?;
         socket.set_nonblocking(true)?;
-        Ok(Self { udp: socket, state: None })
+        Ok(Self {
+            udp: socket,
+            state: None,
+        })
     }
 
     pub fn new(bind: SocketAddr, remote: SocketAddr) -> io::Result<Self> {
@@ -72,14 +78,19 @@ impl XdpSocket {
         let iface = infer_iface(&bind);
         const BUF_NUM: usize = 4096;
         const BUF_LEN: usize = 2048;
-        let (area, mut bufs) = match MmapArea::new(BUF_NUM, BUF_LEN, MmapAreaOptions { huge_tlb: false }) {
-            Ok(v) => v,
-            Err(e) => {
-                telemetry::XDP_FALLBACKS.inc();
-                return Ok(Self { udp, state: None });
-            }
-        };
-        let (umem, mut cq, mut fq) = match Umem::new(area, XSK_RING_CONS__DEFAULT_NUM_DESCS, XSK_RING_PROD__DEFAULT_NUM_DESCS) {
+        let (area, mut bufs) =
+            match MmapArea::new(BUF_NUM, BUF_LEN, MmapAreaOptions { huge_tlb: false }) {
+                Ok(v) => v,
+                Err(e) => {
+                    telemetry::XDP_FALLBACKS.inc();
+                    return Ok(Self { udp, state: None });
+                }
+            };
+        let (umem, mut cq, mut fq) = match Umem::new(
+            area,
+            XSK_RING_CONS__DEFAULT_NUM_DESCS,
+            XSK_RING_PROD__DEFAULT_NUM_DESCS,
+        ) {
             Ok(v) => v,
             Err(_) => {
                 telemetry::XDP_FALLBACKS.inc();
@@ -151,7 +162,8 @@ impl XdpSocket {
 
     pub fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if let Some(state) = self.state.as_mut() {
-            let mut recvq: ArrayDeque<[BufMmap<[u8; 2048]>; PENDING_LEN], Wrapping> = ArrayDeque::new();
+            let mut recvq: ArrayDeque<[BufMmap<[u8; 2048]>; PENDING_LEN], Wrapping> =
+                ArrayDeque::new();
             match state.rx.try_recv(&mut recvq, 1, [0u8; 2048]) {
                 Ok(n) if n > 0 => {
                     if let Some(mut b) = recvq.pop_front() {
@@ -260,4 +272,3 @@ impl XdpSocket {
         cfg!(all(target_os = "linux", feature = "xdp"))
     }
 }
-
