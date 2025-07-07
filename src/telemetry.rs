@@ -45,8 +45,12 @@ lazy_static! {
         register_int_gauge!("mem_pool_capacity", "Memory pool capacity").unwrap();
     pub static ref MEM_POOL_IN_USE: IntGauge =
         register_int_gauge!("mem_pool_in_use", "Memory pool blocks in use").unwrap();
+    pub static ref MEM_POOL_USAGE_BYTES: IntGauge =
+        register_int_gauge!("mem_pool_usage_bytes", "Memory pool bytes in use").unwrap();
     pub static ref CPU_FEATURE_MASK: IntGauge =
         register_int_gauge!("cpu_feature_mask", "Detected CPU features bitmask").unwrap();
+    pub static ref SIMD_ACTIVE: IntGauge =
+        register_int_gauge!("simd_active_policy", "Active SIMD policy").unwrap();
 }
 
 pub fn serve(addr: &str) {

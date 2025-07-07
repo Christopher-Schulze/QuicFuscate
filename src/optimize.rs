@@ -41,6 +41,7 @@ use aligned_box::AlignedBox;
 use libc::{iovec, msghdr, recvmsg, sendmsg};
 use log::info;
 use crate::telemetry;
+use cpufeatures;
 use std::any::Any;
 #[cfg(target_arch = "aarch64")]
 use std::arch::is_aarch64_feature_detected;
@@ -52,6 +53,16 @@ use std::net::SocketAddr;
 use std::os::unix::io::RawFd;
 use std::sync::{Arc, Once, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+// Use cpufeatures for portable runtime detection
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+cpufeatures::new!(feat_avx512f, "avx512f");
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+cpufeatures::new!(feat_avx2, "avx2");
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+cpufeatures::new!(feat_sse2, "sse2");
+#[cfg(target_arch = "aarch64")]
+cpufeatures::new!(feat_neon, "neon");
 
 /// Configuration for optimization parameters passed from the CLI.
 #[derive(Clone, Copy)]
@@ -102,19 +113,19 @@ impl FeatureDetector {
             let mut features = HashMap::new();
 
             // Detect features for the current architecture at runtime.
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             {
                 features.insert(CpuFeature::AVX, is_x86_feature_detected!("avx"));
-                features.insert(CpuFeature::AVX2, is_x86_feature_detected!("avx2"));
-                features.insert(CpuFeature::SSE2, is_x86_feature_detected!("sse2"));
-                features.insert(CpuFeature::AVX512F, is_x86_feature_detected!("avx512f"));
+                features.insert(CpuFeature::AVX2, feat_avx2::get());
+                features.insert(CpuFeature::SSE2, feat_sse2::get());
+                features.insert(CpuFeature::AVX512F, feat_avx512f::get());
                 features.insert(CpuFeature::VAES, is_x86_feature_detected!("vaes"));
                 features.insert(CpuFeature::AESNI, is_x86_feature_detected!("aes"));
                 features.insert(CpuFeature::PCLMULQDQ, is_x86_feature_detected!("pclmulqdq"));
             }
             #[cfg(target_arch = "aarch64")]
             {
-                features.insert(CpuFeature::NEON, is_aarch64_feature_detected!("neon"));
+                features.insert(CpuFeature::NEON, feat_neon::get());
             }
 
             // Unsafe block is required to initialize the static mutable variable.
@@ -128,6 +139,21 @@ impl FeatureDetector {
                     }
                 });
                 telemetry::CPU_FEATURE_MASK.set(mask as i64);
+
+                // determine active SIMD policy for telemetry
+                let policy = if features.get(&CpuFeature::AVX512F).copied().unwrap_or(false) {
+                    3
+                } else if features.get(&CpuFeature::AVX2).copied().unwrap_or(false) {
+                    2
+                } else if features.get(&CpuFeature::SSE2).copied().unwrap_or(false)
+                    || features.get(&CpuFeature::NEON).copied().unwrap_or(false)
+                {
+                    1
+                } else {
+                    0
+                };
+                telemetry::SIMD_ACTIVE.set(policy);
+
                 DETECTOR = Some(FeatureDetector { features });
             }
         });
@@ -245,6 +271,7 @@ impl MemoryPool {
             vec.push(aligned_box);
         }
         telemetry::MEM_POOL_CAPACITY.set(capacity as i64);
+        telemetry::MEM_POOL_USAGE_BYTES.set(0);
         Self {
             pool: Arc::new(Mutex::new(vec)),
             block_size,
@@ -253,25 +280,39 @@ impl MemoryPool {
         }
     }
 
+    fn grow(&self, new_capacity: usize) {
+        let mut pool = self.pool.lock().unwrap();
+        if new_capacity > pool.len() {
+            for _ in pool.len()..new_capacity {
+                pool.push(AlignedBox::slice_from_default(64, self.block_size).unwrap());
+            }
+            self.capacity.store(new_capacity, Ordering::Relaxed);
+            telemetry::MEM_POOL_CAPACITY.set(new_capacity as i64);
+            let cnt = self.in_use.load(Ordering::Relaxed);
+            telemetry::MEM_POOL_USAGE_BYTES.set((cnt * self.block_size) as i64);
+        }
+    }
+
     /// Allocates a 64-byte aligned memory block from the pool.
     /// If the pool is empty, a new block is created.
     pub fn alloc(&self) -> AlignedBox<[u8]> {
         let mut pool = self.pool.lock().unwrap();
-        match pool.pop() {
-            Some(b) => {
-                let cnt = self.in_use.fetch_add(1, Ordering::Relaxed) + 1;
-                telemetry::MEM_POOL_IN_USE.set(cnt as i64);
-                b
-            }
-            None => {
-                telemetry::FEC_OVERFLOWS.inc();
-                let cap = self.capacity.fetch_add(1, Ordering::Relaxed) + 1;
-                telemetry::MEM_POOL_CAPACITY.set(cap as i64);
-                self.in_use.fetch_add(1, Ordering::Relaxed);
-                telemetry::MEM_POOL_IN_USE.set(self.in_use.load(Ordering::Relaxed) as i64);
-                AlignedBox::slice_from_default(64, self.block_size).unwrap()
-            }
+        if let Some(b) = pool.pop() {
+            let cnt = self.in_use.fetch_add(1, Ordering::Relaxed) + 1;
+            telemetry::MEM_POOL_IN_USE.set(cnt as i64);
+            telemetry::MEM_POOL_USAGE_BYTES.set((cnt * self.block_size) as i64);
+            return b;
         }
+        drop(pool);
+        telemetry::FEC_OVERFLOWS.inc();
+        let new_cap = self.capacity.load(Ordering::Relaxed) * 2;
+        self.grow(new_cap);
+        let mut pool = self.pool.lock().unwrap();
+        let block = pool.pop().unwrap();
+        let cnt = self.in_use.fetch_add(1, Ordering::Relaxed) + 1;
+        telemetry::MEM_POOL_IN_USE.set(cnt as i64);
+        telemetry::MEM_POOL_USAGE_BYTES.set((cnt * self.block_size) as i64);
+        block
     }
 
     /// Returns a memory block to the pool.
@@ -284,6 +325,7 @@ impl MemoryPool {
         }
         let cnt = self.in_use.fetch_sub(1, Ordering::Relaxed) - 1;
         telemetry::MEM_POOL_IN_USE.set(cnt as i64);
+        telemetry::MEM_POOL_USAGE_BYTES.set((cnt * self.block_size) as i64);
     }
 
     /// Adjusts the maximum number of cached blocks at runtime.
@@ -297,6 +339,8 @@ impl MemoryPool {
         while pool.len() < new_capacity {
             pool.push(AlignedBox::slice_from_default(64, self.block_size).unwrap());
         }
+        let cnt = self.in_use.load(Ordering::Relaxed);
+        telemetry::MEM_POOL_USAGE_BYTES.set((cnt * self.block_size) as i64);
     }
 }
 

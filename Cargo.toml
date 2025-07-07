@@ -7,7 +7,7 @@ edition = "2021"
 aligned_box = "0.2"
 quiche = { path = "libs/patched_quiche/quiche" }
 rustls = "0.22.2"
-aegis = "0.9.0"
+aegis = { version = "0.9.0", features = ["rustcrypto-traits-06"] }
 morus = "0.1.3"
 aead = { version = "0.5.2", features = ["alloc"] }
 rand = "0.8"
@@ -28,7 +28,11 @@ sha2 = "0.10"
 rayon = "1.9"
 toml = "0.8"
 prometheus = "0.13"
-thiserror = "1"
+
+afxdp = { version = "0.4", optional = true }
+
+[features]
+xdp = ["afxdp"]
 
 [dev-dependencies]
 hex="0.4"
