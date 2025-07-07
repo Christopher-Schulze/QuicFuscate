@@ -10,6 +10,10 @@
 //! - `dns_errors_total`: Number of DNS resolution errors.
 //! - `bytes_sent_total`: UDP bytes sent via the core.
 //! - `bytes_received_total`: UDP bytes received via the core.
+//! - `xdp_bytes_sent_total`: Total bytes sent over XDP.
+//! - `xdp_bytes_received_total`: Total bytes received over XDP.
+//! - `xdp_fallback_total`: Number of times XDP fell back to UDP.
+//! - `xdp_active`: Gauge whether XDP is currently active.
 //! - `mem_pool_capacity`: Current capacity of the memory pool.
 //! - `mem_pool_in_use`: Number of blocks currently checked out from the pool.
 //! - `cpu_feature_mask`: Bitmask of detected CPU features.
@@ -52,18 +56,16 @@ lazy_static! {
         register_int_gauge!("mem_pool_in_use", "Memory pool blocks in use").unwrap();
     pub static ref MEM_POOL_USAGE_BYTES: IntGauge =
         register_int_gauge!("mem_pool_usage_bytes", "Memory pool bytes in use").unwrap();
-    pub static ref MEM_POOL_FRAGMENTATION: IntGauge =
-        register_int_gauge!(
-            "mem_pool_fragmentation",
-            "Memory pool fragmentation in blocks"
-        )
-        .unwrap();
-    pub static ref MEM_POOL_UTILIZATION: IntGauge =
-        register_int_gauge!(
-            "mem_pool_utilization_percent",
-            "Memory pool utilization percentage"
-        )
-        .unwrap();
+    pub static ref MEM_POOL_FRAGMENTATION: IntGauge = register_int_gauge!(
+        "mem_pool_fragmentation",
+        "Memory pool fragmentation in blocks"
+    )
+    .unwrap();
+    pub static ref MEM_POOL_UTILIZATION: IntGauge = register_int_gauge!(
+        "mem_pool_utilization_percent",
+        "Memory pool utilization percentage"
+    )
+    .unwrap();
     pub static ref CPU_FEATURE_MASK: IntGauge =
         register_int_gauge!("cpu_feature_mask", "Detected CPU features bitmask").unwrap();
     pub static ref SIMD_ACTIVE: IntGauge =
@@ -82,7 +84,6 @@ lazy_static! {
         register_int_counter!("simd_usage_scalar_total", "Scalar dispatches").unwrap();
     pub static ref PATH_MIGRATIONS: IntCounter =
         register_int_counter!("path_migrations_total", "Successful connection migrations").unwrap();
-
 }
 
 pub fn update_memory_usage() {

@@ -39,8 +39,8 @@ use crate::crypto::{CipherSuiteSelector, CryptoManager};
 use crate::fec::{AdaptiveFec, FecConfig, Packet as FecPacket, PidConfig};
 use crate::optimize::{MemoryPool, OptimizationManager, OptimizeConfig};
 use crate::stealth::{StealthConfig, StealthManager};
-use crate::xdp_socket::XdpSocket;
 use crate::telemetry;
+use crate::xdp_socket::XdpSocket;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -219,10 +219,9 @@ impl QuicFuscateConnection {
             &self.optimization_manager,
         )?;
 
-        let recovered_packets = self
-            .fec
-            .on_receive(fec_packet)
-            .map_err(|e| crate::error::ConnectionError::Fec(format!("FEC decoding failed: {}", e)))?;
+        let recovered_packets = self.fec.on_receive(fec_packet).map_err(|e| {
+            crate::error::ConnectionError::Fec(format!("FEC decoding failed: {}", e))
+        })?;
 
         for mut packet in recovered_packets {
             if let Some(ref mut data) = packet.data {
@@ -327,8 +326,14 @@ impl QuicFuscateConnection {
         // Initiate path migration using quiche's API. The local address remains
         // unchanged, but a new peer address is supplied. quiche handles sending
         // the probing packets required for validation.
+        self.xdp_socket = self
+            .optimization_manager
+            .create_xdp_socket(self.local_addr, new_peer);
         if let Some(ref xdp) = self.xdp_socket {
             let _ = xdp.update_remote(new_peer);
+            telemetry::XDP_ACTIVE.set(1);
+        } else {
+            telemetry::XDP_ACTIVE.set(0);
         }
         self.conn.migrate(self.local_addr, new_peer)
     }

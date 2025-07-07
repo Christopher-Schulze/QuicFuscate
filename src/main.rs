@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::signal;
+use tokio::time;
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -74,6 +75,18 @@ enum Commands {
         /// Enable XDP acceleration if supported
         #[clap(long)]
         xdp: bool,
+
+        /// Print live XDP statistics
+        #[clap(long)]
+        xdp_stats: bool,
+
+        /// Enable XDP acceleration if supported
+        #[clap(long)]
+        xdp: bool,
+
+        /// Print live XDP statistics
+        #[clap(long)]
+        xdp_stats: bool,
 
         /// Path to a unified TOML configuration file
         #[clap(long, value_name = "PATH")]
@@ -244,6 +257,7 @@ async fn main() -> std::io::Result<()> {
                 *pool_capacity,
                 *pool_block,
                 *xdp,
+                *xdp_stats,
                 config,
                 fec_config,
                 &doh_provider,
@@ -292,6 +306,8 @@ async fn main() -> std::io::Result<()> {
                 *fec_mode,
                 *pool_capacity,
                 *pool_block,
+                *xdp,
+                *xdp_stats,
                 config,
                 fec_config,
                 &doh_provider,
@@ -345,6 +361,7 @@ async fn run_client(
     pool_capacity: usize,
     pool_block: usize,
     xdp: bool,
+    xdp_stats: bool,
     config: &Option<PathBuf>,
     fec_config: &Option<PathBuf>,
     doh_provider: &str,
@@ -383,6 +400,19 @@ async fn run_client(
     socket.set_nonblocking(true)?;
 
     info!("Client connecting to {}", server_addr);
+
+    if xdp_stats {
+        tokio::spawn(async move {
+            loop {
+                println!(
+                    "XDP tx: {} bytes, rx: {} bytes",
+                    telemetry::XDP_BYTES_SENT.get(),
+                    telemetry::XDP_BYTES_RECEIVED.get()
+                );
+                time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        });
+    }
 
     let mut fec_cfg = if let Some(cfg) = config {
         match FecConfig::from_file(cfg) {
@@ -603,6 +633,7 @@ async fn run_server(
     pool_capacity: usize,
     pool_block: usize,
     xdp: bool,
+    xdp_stats: bool,
     config: &Option<PathBuf>,
     fec_config: &Option<PathBuf>,
     doh_provider: &str,
@@ -615,6 +646,19 @@ async fn run_server(
     let socket = std::net::UdpSocket::bind(listen_addr)?;
     socket.set_nonblocking(true)?;
     info!("Server listening on {}", listen_addr);
+
+    if xdp_stats {
+        tokio::spawn(async move {
+            loop {
+                println!(
+                    "XDP tx: {} bytes, rx: {} bytes",
+                    telemetry::XDP_BYTES_SENT.get(),
+                    telemetry::XDP_BYTES_RECEIVED.get()
+                );
+                time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        });
+    }
 
     let mut fec_cfg = if let Some(cfg) = config {
         match FecConfig::from_file(cfg) {
