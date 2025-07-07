@@ -518,7 +518,7 @@ graph TB
 ```
 
 ### Stealth Governance
-Defined in `stealth/stealth_gov.rs`:
+Defined in `src/stealth.rs`:
 
 ```rust
 pub struct StealthManager {
@@ -535,23 +535,23 @@ impl StealthManager {
     }
     
     // Processes outgoing packets with stealth techniques
-    pub fn process_outgoing_packet(&self, packet: Vec<u8>) -> Vec<Vec<u8>> {
-        // Implementation to process outgoing packets
+    pub fn process_outgoing_packet(&self, payload: &mut [u8]) {
+        // Applies XOR obfuscation if enabled
     }
-    
+
     // Processes incoming packets
-    pub fn process_incoming_packet(&self, packet: Vec<u8>) -> Vec<u8> {
-        // Implementation to process incoming packets
+    pub fn process_incoming_packet(&self, payload: &mut [u8]) {
+        // Reverses XOR obfuscation
     }
-    
+
     // Handles TLS Client Hello packets
-    pub fn process_client_hello(&self, client_hello: Vec<u8>) -> Vec<u8> {
-        // Implementation to process Client Hello packets
+    pub fn process_client_hello(&self, payload: &mut [u8]) {
+        // Optional obfuscation of the ClientHello
     }
-    
-    // Obfuscates payload using XOR patterns
-    pub fn obfuscate_payload(&self, payload: Vec<u8>, context_id: u64) -> Vec<u8> {
-        // Implementation to obfuscate payload
+
+    // Obfuscates arbitrary payload data
+    pub fn obfuscate_payload(&self, payload: &mut [u8], context_id: u64) {
+        // Context specific XOR obfuscation
     }
     
     // Manages QUIC path migration
@@ -727,12 +727,15 @@ The generated TLS parameters are directly compatible with the uTLS implementatio
 ```
 
 **Browser Emulation:**
-Supported profiles in `stealth/uTLS.hpp`:
-- `Chrome_Latest`
-- `Firefox_Quantum`
-- `Safari_MacOS`
-- `Edge_Windows`
-- `Tor_Browser`
+QuicFuscate provides several built-in profiles which mimic real browsers.
+Supported profiles:
+- `Chrome`
+- `Firefox`
+- `Safari`
+- `Opera`
+- `Brave`
+- `Edge`
+- `Vivaldi`
 
 **Error Handling:**
 - Error code 1: uTLS initialization error
