@@ -392,4 +392,5 @@ async fn connection_migration_events() {
     while let Some(_e) = client_conn.conn.path_event_next() {
         // just consume for test
     }
+    assert!(telemetry::PATH_MIGRATIONS.get() > 0);
 }
