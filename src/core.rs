@@ -456,9 +456,19 @@ impl QuicFuscateConnection {
                 quiche::PathEvent::Validated(local, peer) => {
                     println!("Path validated: {local}->{peer}");
                     self.peer_addr = peer;
-                    self.xdp_socket = self
-                        .optimization_manager
-                        .create_xdp_socket(self.local_addr, peer);
+                    self.local_addr = local;
+                    if let Some(ref mut xdp) = self.xdp_socket {
+                        if let Err(e) = xdp.reconfigure(local, peer) {
+                            eprintln!("XDP reconfigure failed: {e}");
+                            self.xdp_socket = self
+                                .optimization_manager
+                                .create_xdp_socket(local, peer);
+                        }
+                    } else {
+                        self.xdp_socket = self
+                            .optimization_manager
+                            .create_xdp_socket(local, peer);
+                    }
                     telemetry::PATH_MIGRATIONS.inc();
                 }
                 quiche::PathEvent::FailedValidation(local, peer) => {
@@ -473,9 +483,19 @@ impl QuicFuscateConnection {
                 quiche::PathEvent::PeerMigrated(local, peer) => {
                     println!("Peer migrated: {local}->{peer}");
                     self.peer_addr = peer;
-                    self.xdp_socket = self
-                        .optimization_manager
-                        .create_xdp_socket(self.local_addr, peer);
+                    self.local_addr = local;
+                    if let Some(ref mut xdp) = self.xdp_socket {
+                        if let Err(e) = xdp.reconfigure(local, peer) {
+                            eprintln!("XDP reconfigure failed: {e}");
+                            self.xdp_socket = self
+                                .optimization_manager
+                                .create_xdp_socket(local, peer);
+                        }
+                    } else {
+                        self.xdp_socket = self
+                            .optimization_manager
+                            .create_xdp_socket(local, peer);
+                    }
                     telemetry::PATH_MIGRATIONS.inc();
                 }
             }
