@@ -39,11 +39,9 @@ use crate::telemetry;
 use crate::xdp_socket::XdpSocket;
 use aligned_box::AlignedBox;
 use cpufeatures;
+use crossbeam_queue::SegQueue;
 #[cfg(unix)]
 use libc::{iovec, msghdr, recvmsg, sendmsg};
-#[cfg(windows)]
-use windows_sys::Win32::Networking::WinSock::{WSABUF, WSAMSG, WSASendMsg, WSARecvMsg};
-use crossbeam_queue::SegQueue;
 use log::info;
 use std::any::Any;
 use std::collections::HashMap;
@@ -53,6 +51,8 @@ use std::net::SocketAddr;
 use std::os::unix::io::RawFd;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Once};
+#[cfg(windows)]
+use windows_sys::Win32::Networking::WinSock::{WSARecvMsg, WSASendMsg, WSABUF, WSAMSG};
 
 // Use cpufeatures for portable runtime detection
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -134,10 +134,6 @@ impl FeatureDetector {
                     info.has_avx512f() && info.has_avx512bw(),
                 );
 
-              
-              
-              
-              
                 features.insert(CpuFeature::VAES, info.has_vaes());
                 features.insert(CpuFeature::AESNI, info.has_aes());
                 features.insert(CpuFeature::PCLMULQDQ, info.has_pclmulqdq());
@@ -166,7 +162,10 @@ impl FeatureDetector {
 
                 // determine active SIMD policy for telemetry
                 let policy = if features.get(&CpuFeature::AVX512F).copied().unwrap_or(false)
-                    && features.get(&CpuFeature::AVX512VBMI).copied().unwrap_or(false)
+                    && features
+                        .get(&CpuFeature::AVX512VBMI)
+                        .copied()
+                        .unwrap_or(false)
                 {
                     3
                 } else if features.get(&CpuFeature::AVX2).copied().unwrap_or(false) {
@@ -257,9 +256,7 @@ where
 {
     let detector = FeatureDetector::instance();
 
-    if detector.has_feature(CpuFeature::AVX512F)
-        && detector.has_feature(CpuFeature::AVX512VBMI)
-    {
+    if detector.has_feature(CpuFeature::AVX512F) && detector.has_feature(CpuFeature::AVX512VBMI) {
         telemetry::SIMD_USAGE_AVX512.inc();
         f(&Avx512)
     } else if detector.has_feature(CpuFeature::AVX2) {
@@ -275,6 +272,25 @@ where
         f(&Neon)
     } else {
         telemetry::SIMD_USAGE_SCALAR.inc();
+        f(&Scalar)
+    }
+}
+
+/// Dispatches specifically for GF bitsliced operations. Only AVX512, AVX2 and
+/// NEON are considered; all other architectures fall back to scalar code.
+pub fn dispatch_bitslice<F, R>(f: F) -> R
+where
+    F: Fn(&dyn SimdPolicy) -> R,
+{
+    let detector = FeatureDetector::instance();
+
+    if detector.has_feature(CpuFeature::AVX512F) && detector.has_feature(CpuFeature::AVX512VBMI) {
+        f(&Avx512)
+    } else if detector.has_feature(CpuFeature::AVX2) {
+        f(&Avx2)
+    } else if detector.has_feature(CpuFeature::NEON) {
+        f(&Neon)
+    } else {
         f(&Scalar)
     }
 }
@@ -336,7 +352,11 @@ impl MemoryPool {
         telemetry::MEM_POOL_USAGE_BYTES.set((in_use * self.block_size) as i64);
         let frag = cap.saturating_sub(in_use + avail);
         telemetry::MEM_POOL_FRAGMENTATION.set(frag as i64);
-        let util = if cap == 0 { 0 } else { (in_use * 100 / cap) as i64 };
+        let util = if cap == 0 {
+            0
+        } else {
+            (in_use * 100 / cap) as i64
+        };
         telemetry::MEM_POOL_UTILIZATION.set(util);
     }
 
@@ -544,7 +564,10 @@ impl<'a> ZeroCopyBuffer<'a> {
                 buf: b.as_ptr() as *mut i8,
             })
             .collect();
-        Self { bufs, _marker: std::marker::PhantomData }
+        Self {
+            bufs,
+            _marker: std::marker::PhantomData,
+        }
     }
 
     pub fn new_mut(buffers: &mut [&'a mut [u8]]) -> Self {
@@ -555,7 +578,10 @@ impl<'a> ZeroCopyBuffer<'a> {
                 buf: b.as_mut_ptr() as *mut i8,
             })
             .collect();
-        Self { bufs, _marker: std::marker::PhantomData }
+        Self {
+            bufs,
+            _marker: std::marker::PhantomData,
+        }
     }
 
     pub fn send(&self, sock: windows_sys::Win32::Networking::WinSock::SOCKET) -> i32 {
@@ -564,7 +590,10 @@ impl<'a> ZeroCopyBuffer<'a> {
             namelen: 0,
             lpBuffers: self.bufs.as_ptr() as *mut _,
             dwBufferCount: self.bufs.len() as u32,
-            Control: WSABUF { len: 0, buf: core::ptr::null_mut() },
+            Control: WSABUF {
+                len: 0,
+                buf: core::ptr::null_mut(),
+            },
             dwFlags: 0,
         };
         let mut sent: u32 = 0;
@@ -578,7 +607,10 @@ impl<'a> ZeroCopyBuffer<'a> {
             namelen: 0,
             lpBuffers: self.bufs.as_mut_ptr(),
             dwBufferCount: self.bufs.len() as u32,
-            Control: WSABUF { len: 0, buf: core::ptr::null_mut() },
+            Control: WSABUF {
+                len: 0,
+                buf: core::ptr::null_mut(),
+            },
             dwFlags: 0,
         };
         let mut recvd: u32 = 0;
@@ -590,12 +622,16 @@ impl<'a> ZeroCopyBuffer<'a> {
         self.bufs.iter().map(|b| b.len as usize).sum()
     }
 
-    pub fn is_empty(&self) -> bool { self.bufs.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.bufs.is_empty()
+    }
 }
 
 #[cfg(windows)]
 impl<'a> Drop for ZeroCopyBuffer<'a> {
-    fn drop(&mut self) { self.bufs.clear(); }
+    fn drop(&mut self) {
+        self.bufs.clear();
+    }
 }
 // --- Placeholder for full integration ---
 

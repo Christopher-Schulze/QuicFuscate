@@ -38,15 +38,15 @@
 //! optimizations for finite field arithmetic and memory management.
 
 use crate::optimize::{self, MemoryPool, OptimizationManager, SimdPolicy};
-use log::{debug, error, info};
 use aligned_box::AlignedBox;
+use log::{debug, error, info};
 use rayon::prelude::*;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub mod gf_tables;
 pub mod encoder;
+pub mod gf_tables;
 pub use gf_tables::*;
 pub mod adaptive;
 pub use adaptive::*;
@@ -77,7 +77,6 @@ impl KalmanFilter {
         self.estimate
     }
 }
-
 
 // [Die Tests wurden oben nicht verändert und bleiben wie im Input – ebenfalls konfliktfrei!]
 //
@@ -172,6 +171,18 @@ mod tests {
         assert_eq!(out.len(), k);
         for i in 0..k {
             assert_eq!(out[i].data.as_ref().unwrap()[0], (i % 256) as u8);
+        }
+    }
+
+    #[test]
+    fn bitsliced_mul_correct() {
+        init_gf_tables();
+        for a in 0u8..=255 {
+            for b in 0u8..=255 {
+                let table = super::gf_tables::gf_mul_table(a, b);
+                let bs = super::gf_tables::gf_mul(a, b);
+                assert_eq!(table, bs, "a={} b={} mismatch", a, b);
+            }
         }
     }
 
