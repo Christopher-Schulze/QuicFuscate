@@ -5,6 +5,7 @@
 //! - `decoded_packets_total`: Number of packets successfully decoded.
 //! - `loss_rate_percent`: Current estimated loss rate multiplied by 100.
 //! - `fec_mode`: Active FEC mode as numeric value.
+//! - `fec_mode_switch_total`: Number of FEC mode transitions.
 //! - `fec_overflow_total`: Number of times the FEC memory pool had to allocate
 //!   a new block because the pool was exhausted.
 //! - `dns_errors_total`: Number of DNS resolution errors.
@@ -29,6 +30,8 @@ lazy_static! {
         register_int_gauge!("loss_rate_percent", "Current loss rate * 100").unwrap();
     pub static ref FEC_MODE: IntGauge =
         register_int_gauge!("fec_mode", "Current FEC mode").unwrap();
+    pub static ref FEC_MODE_SWITCHES: IntCounter =
+        register_int_counter!("fec_mode_switch_total", "FEC mode transitions").unwrap();
     pub static ref FEC_OVERFLOWS: IntCounter =
         register_int_counter!("fec_overflow_total", "FEC memory pool overflows").unwrap();
     pub static ref DNS_ERRORS: IntCounter =
@@ -52,18 +55,16 @@ lazy_static! {
         register_int_gauge!("mem_pool_in_use", "Memory pool blocks in use").unwrap();
     pub static ref MEM_POOL_USAGE_BYTES: IntGauge =
         register_int_gauge!("mem_pool_usage_bytes", "Memory pool bytes in use").unwrap();
-    pub static ref MEM_POOL_FRAGMENTATION: IntGauge =
-        register_int_gauge!(
-            "mem_pool_fragmentation",
-            "Memory pool fragmentation in blocks"
-        )
-        .unwrap();
-    pub static ref MEM_POOL_UTILIZATION: IntGauge =
-        register_int_gauge!(
-            "mem_pool_utilization_percent",
-            "Memory pool utilization percentage"
-        )
-        .unwrap();
+    pub static ref MEM_POOL_FRAGMENTATION: IntGauge = register_int_gauge!(
+        "mem_pool_fragmentation",
+        "Memory pool fragmentation in blocks"
+    )
+    .unwrap();
+    pub static ref MEM_POOL_UTILIZATION: IntGauge = register_int_gauge!(
+        "mem_pool_utilization_percent",
+        "Memory pool utilization percentage"
+    )
+    .unwrap();
     pub static ref CPU_FEATURE_MASK: IntGauge =
         register_int_gauge!("cpu_feature_mask", "Detected CPU features bitmask").unwrap();
     pub static ref SIMD_ACTIVE: IntGauge =
@@ -82,7 +83,6 @@ lazy_static! {
         register_int_counter!("simd_usage_scalar_total", "Scalar dispatches").unwrap();
     pub static ref PATH_MIGRATIONS: IntCounter =
         register_int_counter!("path_migrations_total", "Successful connection migrations").unwrap();
-
 }
 
 pub fn update_memory_usage() {
