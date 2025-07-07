@@ -57,6 +57,7 @@ use std::sync::{Arc, Mutex, Once};
 cpufeatures::new!(
     cpuid_x86,
     "avx512f",
+    "avx512vbmi",
     "avx2",
     "avx",
     "sse2",
@@ -93,6 +94,7 @@ pub enum CpuFeature {
     AVX2,
     SSE2,
     AVX512F,
+    AVX512VBMI,
     VAES,
     AESNI,
     PCLMULQDQ,
@@ -125,6 +127,7 @@ impl FeatureDetector {
                 features.insert(CpuFeature::AVX2, info.has_avx2());
                 features.insert(CpuFeature::SSE2, info.has_sse2());
                 features.insert(CpuFeature::AVX512F, info.has_avx512f() && info.has_avx512bw());
+                features.insert(CpuFeature::AVX512VBMI, info.has_avx512vbmi());
                 features.insert(CpuFeature::VAES, info.has_vaes());
                 features.insert(CpuFeature::AESNI, info.has_aes());
                 features.insert(CpuFeature::PCLMULQDQ, info.has_pclmulqdq());
@@ -152,7 +155,9 @@ impl FeatureDetector {
                 telemetry::CPU_FEATURE_MASK.set(mask as i64);
 
                 // determine active SIMD policy for telemetry
-                let policy = if features.get(&CpuFeature::AVX512F).copied().unwrap_or(false) {
+                let policy = if features.get(&CpuFeature::AVX512F).copied().unwrap_or(false)
+                    && features.get(&CpuFeature::AVX512VBMI).copied().unwrap_or(false)
+                {
                     3
                 } else if features.get(&CpuFeature::AVX2).copied().unwrap_or(false) {
                     2
@@ -242,7 +247,9 @@ where
 {
     let detector = FeatureDetector::instance();
 
-    if detector.has_feature(CpuFeature::AVX512F) {
+    if detector.has_feature(CpuFeature::AVX512F)
+        && detector.has_feature(CpuFeature::AVX512VBMI)
+    {
         telemetry::SIMD_USAGE_AVX512.inc();
         f(&Avx512)
     } else if detector.has_feature(CpuFeature::AVX2) {

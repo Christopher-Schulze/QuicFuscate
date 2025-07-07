@@ -32,21 +32,78 @@ fn gf_mul_shift(mut a: u8, mut b: u8) -> u8 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
-#[target_feature(enable = "avx512f")]
+#[target_feature(enable = "avx512f,avx512vbmi")]
 unsafe fn gf_mul_bitsliced_avx512(a: u8, b: u8) -> u8 {
-    gf_mul_shift(a, b)
+    use std::arch::x86_64::*;
+
+    if a == 0 || b == 0 {
+        return 0;
+    }
+
+    let log_ptr_a = LOG_TABLE.as_ptr().add(a as usize);
+    let log_ptr_b = LOG_TABLE.as_ptr().add(b as usize);
+
+    _mm_prefetch(log_ptr_a as *const i8, _MM_HINT_T0);
+    _mm_prefetch(log_ptr_b as *const i8, _MM_HINT_T0);
+
+    let log_a = *log_ptr_a as u16;
+    let log_b = *log_ptr_b as u16;
+    let sum = (log_a + log_b) as usize;
+
+    let exp_ptr = EXP_TABLE.as_ptr().add(sum);
+    _mm_prefetch(exp_ptr as *const i8, _MM_HINT_T0);
+
+    *exp_ptr
 }
 
 #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 #[target_feature(enable = "avx2")]
 unsafe fn gf_mul_bitsliced_avx2(a: u8, b: u8) -> u8 {
-    gf_mul_shift(a, b)
+    use std::arch::x86_64::*;
+
+    if a == 0 || b == 0 {
+        return 0;
+    }
+
+    let log_ptr_a = LOG_TABLE.as_ptr().add(a as usize);
+    let log_ptr_b = LOG_TABLE.as_ptr().add(b as usize);
+
+    _mm_prefetch(log_ptr_a as *const i8, _MM_HINT_T0);
+    _mm_prefetch(log_ptr_b as *const i8, _MM_HINT_T0);
+
+    let log_a = *log_ptr_a as u16;
+    let log_b = *log_ptr_b as u16;
+    let sum = (log_a + log_b) as usize;
+
+    let exp_ptr = EXP_TABLE.as_ptr().add(sum);
+    _mm_prefetch(exp_ptr as *const i8, _MM_HINT_T0);
+
+    *exp_ptr
 }
 
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 #[target_feature(enable = "neon")]
 unsafe fn gf_mul_bitsliced_neon(a: u8, b: u8) -> u8 {
-    gf_mul_shift(a, b)
+    use std::arch::aarch64::*;
+
+    if a == 0 || b == 0 {
+        return 0;
+    }
+
+    let log_ptr_a = LOG_TABLE.as_ptr().add(a as usize);
+    let log_ptr_b = LOG_TABLE.as_ptr().add(b as usize);
+
+    __prefetch(log_ptr_a as *const i8);
+    __prefetch(log_ptr_b as *const i8);
+
+    let log_a = *log_ptr_a as u16;
+    let log_b = *log_ptr_b as u16;
+    let sum = (log_a + log_b) as usize;
+
+    let exp_ptr = EXP_TABLE.as_ptr().add(sum);
+    __prefetch(exp_ptr as *const i8);
+
+    *exp_ptr
 }
 // --- High-Performance Finite Field Arithmetic (GF(2^8)) ---
 
