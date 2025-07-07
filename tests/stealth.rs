@@ -1,6 +1,8 @@
 use quicfuscate::crypto::CryptoManager;
 use quicfuscate::optimize::OptimizationManager;
 use quicfuscate::stealth::{StealthConfig, StealthManager};
+use quicfuscate::stealth::{BrowserProfile, FingerprintProfile, OsProfile};
+use std::time::Duration;
 use std::sync::Arc;
 
 #[test]
@@ -54,4 +56,45 @@ fn doh_disabled_fallback() {
 
     let ip = mgr.resolve_domain("example.com");
     assert_eq!(ip.to_string(), "1.1.1.1");
+}
+
+#[test]
+fn doh_failure_fallback() {
+    let crypto = Arc::new(CryptoManager::new());
+    let optimize = Arc::new(OptimizationManager::new());
+    let mut config = StealthConfig::default();
+    config.doh_provider = "https://invalid.invalid/dns-query".to_string();
+    let mgr = StealthManager::new(config, crypto, optimize);
+
+    let ip = mgr.resolve_domain("example.com");
+    assert_eq!(ip.to_string(), "1.1.1.1");
+}
+
+#[test]
+fn profile_rotation_changes_active_profile() {
+    let crypto = Arc::new(CryptoManager::new());
+    let optimize = Arc::new(OptimizationManager::new());
+    let config = StealthConfig::default();
+    let mgr = Arc::new(StealthManager::new(config, crypto, optimize));
+
+    let profiles = vec![
+        FingerprintProfile::new(BrowserProfile::Chrome, OsProfile::Windows),
+        FingerprintProfile::new(BrowserProfile::Firefox, OsProfile::Linux),
+    ];
+    let first = mgr.current_profile();
+    mgr.start_profile_rotation(profiles, Duration::from_millis(10));
+    std::thread::sleep(Duration::from_millis(30));
+    let second = mgr.current_profile();
+    assert_ne!(first.browser, second.browser);
+}
+
+#[test]
+fn apply_utls_profile_runs() {
+    let crypto = Arc::new(CryptoManager::new());
+    let optimize = Arc::new(OptimizationManager::new());
+    let config = StealthConfig::default();
+    let mgr = StealthManager::new(config, crypto, optimize);
+
+    let mut cfg = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+    mgr.apply_utls_profile(&mut cfg, None);
 }
