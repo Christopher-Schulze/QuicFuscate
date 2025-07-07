@@ -36,6 +36,7 @@
 //? inspection (DPI) systems. It integrates multiple strategies to create a
 //! layered defense against network surveillance.
 
+use base64;
 use clap::ValueEnum;
 use lazy_static::lazy_static;
 use log::{debug, error, info};
@@ -48,7 +49,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
 use url::Url;
-use base64;
 
 use crate::crypto::CryptoManager; // Assumed for integration
 use crate::optimize::{self, OptimizationManager}; // Assumed for integration
@@ -721,7 +721,8 @@ impl TlsClientHelloSpoofer {
             out
         }
 
-        let hello = Self::load_client_hello(browser, os).unwrap_or_else(|| build_client_hello(suites));
+        let hello =
+            Self::load_client_hello(browser, os).unwrap_or_else(|| build_client_hello(suites));
         unsafe {
             extern "C" {
                 fn quiche_config_set_custom_tls(cfg: *mut c_void, hello: *const u8, len: usize);
@@ -798,15 +799,33 @@ impl StealthConfig {
         let root: Root = toml::from_str(s)?;
         let mut cfg = StealthConfig::default();
         if let Some(sec) = root.stealth {
-            if let Some(v) = sec.browser_profile { cfg.browser_profile = v; }
-            if let Some(v) = sec.os_profile { cfg.os_profile = v; }
-            if let Some(v) = sec.enable_doh { cfg.enable_doh = v; }
-            if let Some(v) = sec.doh_provider { cfg.doh_provider = v; }
-            if let Some(v) = sec.enable_http3_masquerading { cfg.enable_http3_masquerading = v; }
-            if let Some(v) = sec.use_qpack_headers { cfg.use_qpack_headers = v; }
-            if let Some(v) = sec.enable_domain_fronting { cfg.enable_domain_fronting = v; }
-            if let Some(v) = sec.fronting_domains { cfg.fronting_domains = v; }
-            if let Some(v) = sec.enable_xor_obfuscation { cfg.enable_xor_obfuscation = v; }
+            if let Some(v) = sec.browser_profile {
+                cfg.browser_profile = v;
+            }
+            if let Some(v) = sec.os_profile {
+                cfg.os_profile = v;
+            }
+            if let Some(v) = sec.enable_doh {
+                cfg.enable_doh = v;
+            }
+            if let Some(v) = sec.doh_provider {
+                cfg.doh_provider = v;
+            }
+            if let Some(v) = sec.enable_http3_masquerading {
+                cfg.enable_http3_masquerading = v;
+            }
+            if let Some(v) = sec.use_qpack_headers {
+                cfg.use_qpack_headers = v;
+            }
+            if let Some(v) = sec.enable_domain_fronting {
+                cfg.enable_domain_fronting = v;
+            }
+            if let Some(v) = sec.fronting_domains {
+                cfg.fronting_domains = v;
+            }
+            if let Some(v) = sec.enable_xor_obfuscation {
+                cfg.enable_xor_obfuscation = v;
+            }
         }
         Ok(cfg)
     }
@@ -898,12 +917,7 @@ impl StealthManager {
                 error!("Failed to set custom cipher suites: {}", e);
             }
             // Manipulate TLS ClientHello to match the desired ordering.
-            TlsClientHelloSpoofer::apply(
-                config,
-                fingerprint.browser,
-                fingerprint.os,
-                &suite_ids,
-            );
+            TlsClientHelloSpoofer::apply(config, fingerprint.browser, fingerprint.os, &suite_ids);
         }
 
         config

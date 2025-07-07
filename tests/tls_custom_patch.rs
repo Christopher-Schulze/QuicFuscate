@@ -32,7 +32,8 @@ async fn tls_custom_patch() {
     let mut client_config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
     client_config.verify_peer(false);
 
-    let custom_hello = [9u8, 8, 7, 6];
+    let data = std::fs::read_to_string("browser_profiles/chrome_windows.chlo").unwrap();
+    let custom_hello = base64::decode(data.trim()).unwrap();
     unsafe {
         extern "C" {
             fn quiche_config_set_custom_tls(cfg: *mut c_void, hello: *const u8, len: usize);
@@ -82,7 +83,7 @@ async fn tls_custom_patch() {
     let len = client_conn.send(&mut out).unwrap();
     assert!(out[..len]
         .windows(custom_hello.len())
-        .any(|w| w == custom_hello));
+        .any(|w| w == custom_hello.as_slice()));
 
     // Let server process to complete connection
     server_socket.send_to(&out[..len], client_addr).unwrap();

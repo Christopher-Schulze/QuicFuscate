@@ -208,20 +208,16 @@ apply_patches() {
     run_command "Erstelle Backup vor dem Patchen" \
         "cp -r \"$PATCHED_DIR\" \"$backup_dir\""
     
-    # Wende Patches an
+    # Wende Patches an in definierter Reihenfolge
+    local ordered=(boringssl_custom_hello.patch custom_tls.patch simd_optimizations.patch readme_quicfuscate.patch)
     local patch_count=0
-    for patch_file in "$PATCHES_DIR"/*.patch; do
-        if [ -f "$patch_file" ]; then
-            patch_count=$((patch_count + 1))
-            log "Wende Patch an: $(basename "$patch_file")"
-
-            if ! (cd "$PATCHED_DIR" && git apply --check "$patch_file" >/dev/null 2>&1); then
-                patch_failure "Patch $(basename "$patch_file") kann nicht angewendet werden (git apply --check fehlgeschlagen)" "$backup_dir"
-            fi
-            
-            if ! (cd "$PATCHED_DIR" && patch -p1 --no-backup-if-mismatch -r - < "$patch_file"); then
-                patch_failure "Fehler beim Anwenden von $(basename "$patch_file")" "$backup_dir"
-            fi
+    for name in "${ordered[@]}"; do
+        local patch_file="$PATCHES_DIR/$name"
+        [ -f "$patch_file" ] || continue
+        patch_count=$((patch_count + 1))
+        log "Wende Patch an: $name"
+        if ! (cd "$PATCHED_DIR" && patch -p1 --no-backup-if-mismatch -r - < "$patch_file"); then
+            patch_failure "Fehler beim Anwenden von $name" "$backup_dir"
         fi
     done
     
@@ -257,10 +253,8 @@ verify_patches() {
 
     for patch_file in "$PATCHES_DIR"/*.patch; do
         if [ -f "$patch_file" ]; then
-            log "Prüfe Patch: $(basename "$patch_file")"
-            if ! git apply --reverse --check "$patch_file" >/dev/null 2>&1; then
-                error "Patch $(basename "$patch_file") konnte nicht verifiziert werden"
-            fi
+            log "Prüfe Patch: $(basename \"$patch_file\")"
+            patch --dry-run -p1 < "$patch_file" >/dev/null || error "Patch $(basename \"$patch_file\") konnte nicht verifiziert werden"
         fi
     done
 
