@@ -118,6 +118,9 @@
      }
  
 +    pub fn set_custom_tls(&mut self, hello: Vec<u8>) {
++        unsafe {
++            SSL_set_custom_client_hello(self.as_mut_ptr(), hello.as_ptr(), hello.len());
++        }
 +        self.custom_tls = Some(hello);
 +    }
      pub fn cipher(&self) -> Option<crypto::Algorithm> {

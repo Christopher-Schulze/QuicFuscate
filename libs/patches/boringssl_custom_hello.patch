@@ -1,11 +1,19 @@
 --- a/deps/boringssl/include/openssl/ssl.h
 +++ b/deps/boringssl/include/openssl/ssl.h
 @@
- void SSL_set_custom_client_hello(SSL *ssl, const uint8_t *data, size_t len);
+-void SSL_set_custom_client_hello(SSL *ssl, const uint8_t *data, size_t len);
++// Sets a raw ClientHello buffer that will be sent verbatim.
++void SSL_set_custom_client_hello(SSL *ssl, const uint8_t *data, size_t len);
+--- a/deps/boringssl/ssl/internal.h
++++ b/deps/boringssl/ssl/internal.h
+@@
+ struct ssl_st {
+@@
++  std::vector<uint8_t> custom_client_hello;
+ };
 --- a/deps/boringssl/ssl/ssl_lib.cc
 +++ b/deps/boringssl/ssl/ssl_lib.cc
 @@
  void SSL_set_custom_client_hello(SSL *ssl, const uint8_t *data, size_t len) {
      ssl->custom_client_hello.assign(data, data + len);
  }
-
