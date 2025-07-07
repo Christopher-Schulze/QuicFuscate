@@ -15,14 +15,14 @@ This document consolidates all information regarding the integration, optimizati
 
 ## Quick Start
 
-Clone the repository, run the workflow to fetch quiche and build the project:
+Clone the repository and run the workflow to download, patch and build quiche:
 
 ```bash
-./scripts/quiche_workflow.sh --step fetch
-cargo build --workspace --release
+./scripts/quiche_workflow.sh --type release
 ```
 
-The `fetch` step initializes the `libs/patched_quiche` submodule automatically.
+The workflow fetches the sources, applies all patches and builds quiche in one go.
+If a patch fails to apply check the logs under `libs/logs` for details.
 
 ## Schritt-für-Schritt-Anleitung
 
@@ -109,18 +109,15 @@ The `fetch` step initializes the `libs/patched_quiche` submodule automatically.
 ### Building
 
 ```bash
-# 1. Fetch the quiche sources
-./scripts/quiche_workflow.sh --step fetch
-
-# 2. Apply all local patches (TLS hooks and BoringSSL tweaks)
-./scripts/quiche_workflow.sh --step patch
-
-# 3. Build in release mode (recommended)
-./scripts/quiche_workflow.sh --step build
+# Complete workflow (release build)
+./scripts/quiche_workflow.sh --type release
 
 # For a debug build use
 ./scripts/quiche_workflow.sh --type debug
 ```
+
+If any step fails the build script aborts. Consult the log files in
+`libs/logs` for the exact error messages.
 
 ### Custom Build Features
 

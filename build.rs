@@ -20,7 +20,7 @@ fn main() {
         .iter()
         .collect();
 
-        let status = Command::new("bash")
+        let output = Command::new("bash")
             .arg(script)
             .arg("--step")
             .arg("fetch")
@@ -28,12 +28,19 @@ fn main() {
             .arg("patch")
             .arg("--step")
             .arg("verify_patches")
-            .status()
+            .output()
             .expect("Failed to execute quiche workflow");
 
-        if !status.success() {
-            let code = status.code().unwrap_or(-1);
-            panic!("Quiche workflow failed with exit code {}", code);
+        if !output.status.success() {
+            let code = output.status.code().unwrap_or(-1);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            panic!(
+                "Quiche workflow failed with exit code {}\nstdout:\n{}\nstderr:\n{}",
+                code,
+                stdout,
+                stderr
+            );
         } else {
             println!("cargo:warning=Workflow completed successfully");
         }
