@@ -23,6 +23,7 @@ use prometheus::{
     register_int_gauge,
 
 };
+use sysinfo::{SystemExt, PidExt};
 
 lazy_static! {
     pub static ref ENCODED_PACKETS: IntCounter =
@@ -51,6 +52,26 @@ lazy_static! {
         register_int_gauge!("cpu_feature_mask", "Detected CPU features bitmask").unwrap();
     pub static ref SIMD_ACTIVE: IntGauge =
         register_int_gauge!("simd_active_policy", "Active SIMD policy").unwrap();
+    pub static ref MEMORY_USAGE_BYTES: IntGauge =
+        register_int_gauge!("memory_usage_bytes", "Resident memory usage of the process").unwrap();
+    pub static ref SIMD_USAGE_AVX512: IntCounter =
+        register_int_counter!("simd_usage_avx512_total", "SIMD AVX512 dispatches").unwrap();
+    pub static ref SIMD_USAGE_AVX2: IntCounter =
+        register_int_counter!("simd_usage_avx2_total", "SIMD AVX2 dispatches").unwrap();
+    pub static ref SIMD_USAGE_SSE2: IntCounter =
+        register_int_counter!("simd_usage_sse2_total", "SIMD SSE2 dispatches").unwrap();
+    pub static ref SIMD_USAGE_NEON: IntCounter =
+        register_int_counter!("simd_usage_neon_total", "SIMD NEON dispatches").unwrap();
+    pub static ref SIMD_USAGE_SCALAR: IntCounter =
+        register_int_counter!("simd_usage_scalar_total", "Scalar dispatches").unwrap();
+}
+
+pub fn update_memory_usage() {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_process(sysinfo::get_current_pid().unwrap());
+    if let Some(proc) = sys.process(sysinfo::get_current_pid().unwrap()) {
+        MEMORY_USAGE_BYTES.set(proc.memory() as i64 * 1024);
+    }
 }
 
 pub fn serve(addr: &str) {
