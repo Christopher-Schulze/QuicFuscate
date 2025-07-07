@@ -60,6 +60,7 @@ load_state() {
         warn "Quiche-Verzeichnis fehlt: $PATCHED_DIR/quiche"
         fetch_quiche || error "Automatisches Herunterladen fehlgeschlagen. Bitte $0 --step fetch ausf\xC3\xBChren."
     fi
+    detect_quiche_version
 }
 
 # Speichere den aktuellen Status
@@ -110,7 +111,7 @@ fetch_quiche() {
     if git -C "$BASE_DIR" submodule status libs/patched_quiche >/dev/null 2>&1; then
         log "Initialisiere Submodul libs/patched_quiche..."
         run_command "Submodul aktualisieren" \
-            "git submodule set-url libs/patched_quiche \"$MIRROR_URL\" && git submodule update --init libs/patched_quiche"
+            "git submodule set-url libs/patched_quiche \"$MIRROR_URL\" && git submodule update --init --recursive libs/patched_quiche"
     fi
 
     if [ -e "$PATCHED_DIR/.git" ]; then
@@ -118,9 +119,21 @@ fetch_quiche() {
         run_command "Aktualisieren des Quiche-Repositories" \
             "(cd \"$PATCHED_DIR\" && git fetch --all && git reset --hard origin/HEAD)"
     else
-        run_command "Klonen des Quiche-Repositories" \
-            "git clone --depth 1 \"$MIRROR_URL\" \"$PATCHED_DIR\""
+        local attempt=0
+        until [ -d "$PATCHED_DIR/.git" ]; do
+            attempt=$((attempt + 1))
+            if run_command "Klonen des Quiche-Repositories (Versuch $attempt)" \
+                "git clone --depth 1 \"$MIRROR_URL\" \"$PATCHED_DIR\""; then
+                break
+            fi
+            warn "Klonen fehlgeschlagen. Wiederhole..."
+            rm -rf "$PATCHED_DIR"
+            [ $attempt -ge 3 ] && error "Klonen des Quiche-Repositories nach $attempt Versuchen fehlgeschlagen"
+            sleep 5
+        done
     fi
+
+    detect_quiche_version
 
     if [ ! -d "$PATCHED_DIR/quiche" ]; then
         error "Quiche-Verzeichnis konnte nach dem Klonen nicht gefunden werden"

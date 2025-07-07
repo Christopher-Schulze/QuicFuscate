@@ -1,0 +1,50 @@
+--- a/quiche/include/quiche.h
++++ b/quiche/include/quiche.h
+@@
+ void quiche_config_enable_early_data(quiche_config *config);
++// Enables specialized SIMD optimizations for high performance.
++void quiche_config_enable_simd(quiche_config *config);
+ 
+ // Configures the list of supported application protocols.
+ int quiche_config_set_application_protos(quiche_config *config,
+                                          const uint8_t *protos,
+--- a/quiche/src/ffi.rs
++++ b/quiche/src/ffi.rs
+@@
+ pub extern "C" fn quiche_config_enable_early_data(config: &mut Config) {
+     config.enable_early_data();
+ }
++
++#[no_mangle]
++pub extern "C" fn quiche_config_enable_simd(config: &mut Config) {
++    config.enable_simd();
++}
+--- a/quiche/src/lib.rs
++++ b/quiche/src/lib.rs
+@@
+     max_amplification_factor: usize,
+ 
+     disable_dcid_reuse: bool,
++
++    simd: bool,
+ 
+     track_unknown_transport_params: Option<usize>,
+ }
+@@
+             max_amplification_factor: MAX_AMPLIFICATION_FACTOR,
+ 
+             disable_dcid_reuse: false,
++            simd: false,
+ 
+             track_unknown_transport_params: None,
+         })
+@@
+     pub fn enable_early_data(&mut self) {
+         self.tls_ctx.set_early_data_enabled(true);
+     }
++
++    /// Enables specialized SIMD optimizations.
++    pub fn enable_simd(&mut self) {
++        self.simd = true;
++    }
+ 
