@@ -11,7 +11,7 @@ quiche = "0.24.4"
 rustls = "0.22.2"
 aegis = { version = "0.9.0", features = ["rustcrypto-traits-06"] }
 morus = "0.1.3"
-aead = { version = "0.5.2", features = ["alloc"] }
+aead = { version = "0.6.0-rc.0", features = ["alloc"] }
 rand = "0.8"
 log = "0.4"
 env_logger = "0.11.3"
