@@ -416,27 +416,29 @@ pub struct MemoryPool {
 }
 
 impl MemoryPool {
+    /// Allocate a 64-byte aligned block bound to the given NUMA node.
+    fn alloc_numa_block(block_size: usize, node: usize) -> AlignedBox<[u8]> {
+        let mut block = AlignedBox::slice_from_default(64, block_size).unwrap();
+        #[cfg(target_os = "linux")]
+        unsafe {
+            if numa::is_available() {
+                numa::move_to_node(block.as_mut_ptr(), block_size, node);
+            }
+        }
+        block
+    }
     /// Creates a new memory pool with a specified capacity and block size.
     /// All allocated blocks are 64-byte aligned.
     pub fn new(capacity: usize, block_size: usize) -> Self {
         let nodes = numa::num_nodes();
         let mut pools = Vec::with_capacity(nodes);
-        let mut remaining = capacity;
         for n in 0..nodes {
             let node_cap = capacity / nodes + if n < capacity % nodes { 1 } else { 0 };
             let q = Arc::new(SegQueue::new());
             for _ in 0..node_cap {
-                let mut block = AlignedBox::slice_from_default(64, block_size).unwrap();
-                #[cfg(target_os = "linux")]
-                unsafe {
-                    if numa::is_available() {
-                        numa::move_to_node(block.as_mut_ptr(), block_size, n);
-                    }
-                }
-                q.push(block);
+                q.push(Self::alloc_numa_block(block_size, n));
             }
             pools.push(q);
-            remaining -= node_cap;
         }
         telemetry!(telemetry::MEM_POOL_CAPACITY.set(capacity as i64));
         telemetry!(telemetry::MEM_POOL_BLOCK_SIZE.set(block_size as i64));
@@ -461,14 +463,7 @@ impl MemoryPool {
                 if self.capacity.load(Ordering::Relaxed) >= new_capacity {
                     break;
                 }
-                let mut block = AlignedBox::slice_from_default(64, self.block_size).unwrap();
-                #[cfg(target_os = "linux")]
-                unsafe {
-                    if numa::is_available() {
-                        numa::move_to_node(block.as_mut_ptr(), self.block_size, n);
-                    }
-                }
-                q.push(block);
+                q.push(Self::alloc_numa_block(self.block_size, n));
                 self.available.fetch_add(1, Ordering::Relaxed);
                 self.capacity.fetch_add(1, Ordering::Relaxed);
             }
@@ -512,14 +507,7 @@ impl MemoryPool {
         self.in_use.fetch_add(1, Ordering::Relaxed);
         self.update_metrics();
         telemetry!(telemetry::update_memory_usage());
-        let mut block = AlignedBox::slice_from_default(64, self.block_size).unwrap();
-        #[cfg(target_os = "linux")]
-        unsafe {
-            if numa::is_available() {
-                numa::move_to_node(block.as_mut_ptr(), self.block_size, node);
-            }
-        }
-        block
+        Self::alloc_numa_block(self.block_size, node)
     }
 
     /// Returns a memory block to the pool.
