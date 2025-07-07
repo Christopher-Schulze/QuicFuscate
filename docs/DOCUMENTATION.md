@@ -37,7 +37,7 @@ QuicFuscate/
 ```
 
 ### Key Features
-1. **Advanced QUIC Implementation**: Enhanced QUIC transport protocol with BBRv2 congestion control and XDP zero-copy optimization
+1. **Advanced QUIC Implementation**: Enhanced QUIC transport protocol with BBRv2 congestion control. XDP zero-copy support is planned but not yet functional.
 2. **Comprehensive Stealth Capabilities**: 
    - DNS-over-HTTPS with browser profile emulation
    - Domain fronting and HTTP/3 masquerading
@@ -83,7 +83,7 @@ enabled. Call `report_error()` whenever a recoverable error occurs.
 Handles QUIC connection management with advanced features:
 - **Connection Migration**: Seamless switching between network interfaces
 - **BBRv2 Congestion Control**: Optimized for high throughput and low latency
-- **XDP Zero-Copy**: Kernel bypass for maximum network performance
+- **XDP Zero-Copy**: Planned kernel bypass for maximum performance (implementation pending, see `docs/issues/003-xdp-zero-copy.md`)
 - **MTU Discovery**: Automatic packet size optimization
 
 #### Cipher Suite Selector
@@ -139,9 +139,9 @@ The system dynamically adjusts redundancy and window sizes based on real-time ne
 
 1.  **Systematic Sliding-Window RLNC**: Transmits original (systematic) packets first, followed by repair packets generated from linear combinations of the source packets. This allows for immediate use of received data without waiting for a full block. Coefficients are generated from a Cauchy matrix to ensure minimal density and efficient decoding.
 
-2.  **High-Performance Decoding**: Employs advanced, hardware-accelerated algorithms for matrix inversion:
-    *   **Sparse Gaussian Elimination**: Operates on a highly-optimized Compressed-Sparse-Row (CSR) matrix representation. It includes an "Early Exit" mechanism to terminate decoding as soon as a solution is found, minimizing CPU usage.
-    *   **Wiedemann Algorithm**: For larger windows (W > 256), the system seamlessly switches to a fully implemented Wiedemann algorithm. This includes a performant Lanczos iteration for sequence generation and a Berlekamp-Massey algorithm for minimal polynomial calculation, ensuring scalability and performance in high-loss scenarios.
+2.  **High-Performance Decoding**: Employs hardware-accelerated algorithms for matrix inversion:
+    *   **Sparse Gaussian Elimination**: Operates on a Compressed-Sparse-Row (CSR) matrix representation and stops once full rank is reached.
+    *   **Wiedemann Algorithm (partial)**: For large windows the decoder currently generates a Lanczos sequence and derives a minimal polynomial via Berlekamp–Massey but falls back to Gaussian elimination for the final solve. A full Wiedemann implementation is tracked in `docs/issues/001-full-wiedemann-decoding.md`.
 
 3.  **Hyper-Adaptive Behavior**:
     *   **Loss Estimation**: Uses an exponential moving average combined with a short-term burst detector to react to both gradual and sudden changes in network quality.
@@ -149,7 +149,7 @@ The system dynamically adjusts redundancy and window sizes based on real-time ne
     *   **Emergency Override**: A sudden, high-loss spike triggers an immediate switch to the maximum recovery mode (Mode 5).
 
 4.  **Hardware-Level Optimizations**:
-    *   **SIMD Acceleration**: Galois Field (GF(2⁸)) arithmetic is heavily accelerated using AVX512/AVX2 on x86 (via `PCLMULQDQ` with full, correct polynomial reduction) and NEON (Crypto Extension PMULL) on ARM64.
+    *   **SIMD Acceleration**: Galois Field (GF(2⁸)) arithmetic uses table-based SIMD routines. Planned bit-sliced kernels are outlined in `docs/issues/004-gf-bitslicing.md`.
     *   **Multi-Threading**: Tokio tasks are used to manage sliding windows, while Rayon is used for parallelizing bulk decoding operations.
     *   **Memory Management**: Pre-allocated memory pools are used for window matrices to avoid `malloc`/`free` overhead during runtime. NUMA-awareness ensures memory stays local to the processing CPU socket.
 
@@ -217,7 +217,7 @@ let read_data = stream.read_data();
 ```
 
 #### uTLS Implementation (TLS Fingerprint Spoofing)
-Defined in `stealth/uTLS.rs`:
+Defined in `stealth/uTLS.rs` (currently a simulation only):
 
 ```rust
 pub struct UTLSImplementation {
@@ -232,6 +232,11 @@ pub struct UTLSImplementation {
 let utls = UTLSImplementation::new();
 utls.configure_tls();
 ```
+
+The current implementation only adjusts quiche configuration and crafts a custom
+ClientHello. Precise reproduction of real browser TLS fingerprints requires
+patches to `quiche` and BoringSSL. Planned work is tracked in
+`docs/issues/002-real-tls-fingerprints.md`.
 
 #### Domain Fronting Implementation
 Defined in `stealth/DomainFronting.rs`:
