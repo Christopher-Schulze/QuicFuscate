@@ -5,6 +5,10 @@ use crate::stealth::{BrowserProfile, FingerprintProfile, OsProfile};
 use crate::telemetry;
 use clap::{Parser, Subcommand};
 use log::{error, info, warn};
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
+#[cfg(unix)]
+use crate::optimize::ZeroCopyBuffer;
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
@@ -373,7 +377,15 @@ async fn run_client(
     if let Ok(len) = conn.send(&mut out) {
         if len > 0 {
             telemetry::BYTES_SENT.inc_by(len as u64);
-            socket.send(&out[..len])?;
+            #[cfg(unix)]
+            {
+                let zc = ZeroCopyBuffer::new(&[&out[..len]]);
+                zc.send(socket.as_raw_fd());
+            }
+            #[cfg(not(unix))]
+            {
+                socket.send(&out[..len])?;
+            }
             info!("Sent initial packet of size {}", len);
         }
     }
@@ -390,7 +402,19 @@ async fn run_client(
             }
             _ = async {
                 // Process incoming packets
-                match socket.recv(&mut buf) {
+                match {
+                    #[cfg(unix)]
+                    {
+                        let mut slice = [&mut buf[..]];
+                        let mut zc = ZeroCopyBuffer::new_mut(&mut slice);
+                        let r = zc.recv(socket.as_raw_fd());
+                        if r >= 0 { Ok(r as usize) } else { Err(std::io::Error::last_os_error()) }
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        socket.recv(&mut buf)
+                    }
+                } {
                     Ok(len) => {
                         telemetry::BYTES_RECEIVED.inc_by(len as u64);
                         let _ = conn.recv(&buf[..len]);
@@ -418,7 +442,15 @@ async fn run_client(
             match conn.send(&mut out) {
                 Ok(len) if len > 0 => {
                     telemetry::BYTES_SENT.inc_by(len as u64);
-                    socket.send(&out[..len])?;
+                    #[cfg(unix)]
+                    {
+                        let zc = ZeroCopyBuffer::new(&[&out[..len]]);
+                        zc.send(socket.as_raw_fd());
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        socket.send(&out[..len])?;
+                    }
                 }
                 Ok(_) => break,
                 Err(quiche::Error::Done) => break,

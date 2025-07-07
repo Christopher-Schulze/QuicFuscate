@@ -28,6 +28,10 @@ sha2 = "0.10"
 rayon = "1.9"
 toml = "0.8"
 prometheus = "0.13"
+afxdp = { version = "0.4", optional = true }
+
+[features]
+xdp = ["afxdp"]
 
 [dev-dependencies]
 hex="0.4"
