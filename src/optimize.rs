@@ -93,9 +93,15 @@ mod numa {
 
 #[cfg(not(target_os = "linux"))]
 mod numa {
-    pub fn is_available() -> bool { false }
-    pub fn num_nodes() -> usize { 1 }
-    pub fn current_node() -> usize { 0 }
+    pub fn is_available() -> bool {
+        false
+    }
+    pub fn num_nodes() -> usize {
+        1
+    }
+    pub fn current_node() -> usize {
+        0
+    }
     pub unsafe fn move_to_node(_ptr: *mut u8, _size: usize, _node: usize) {}
 }
 
@@ -331,11 +337,16 @@ where
 {
     let detector = FeatureDetector::instance();
 
-    if detector.has_feature(CpuFeature::AVX512F) && detector.has_feature(CpuFeature::AVX512VBMI) {
+    if detector.has_feature(CpuFeature::AVX512F)
+        && detector.has_feature(CpuFeature::AVX512VBMI)
+        && detector.has_feature(CpuFeature::PCLMULQDQ)
+    {
         f(&Avx512)
-    } else if detector.has_feature(CpuFeature::AVX2) {
+    } else if detector.has_feature(CpuFeature::AVX2) && detector.has_feature(CpuFeature::PCLMULQDQ)
+    {
         f(&Avx2)
-    } else if detector.has_feature(CpuFeature::NEON) {
+    } else if detector.has_feature(CpuFeature::NEON) && detector.has_feature(CpuFeature::PCLMULQDQ)
+    {
         f(&Neon)
     } else {
         f(&Scalar)
@@ -490,14 +501,18 @@ impl MemoryPool {
             let mut diff = current - new_capacity;
             while diff > 0 && self.available.load(Ordering::Relaxed) > 0 {
                 for q in &self.pools {
-                    if diff == 0 { break; }
+                    if diff == 0 {
+                        break;
+                    }
                     if let Some(_) = q.pop() {
                         self.available.fetch_sub(1, Ordering::Relaxed);
                         self.capacity.fetch_sub(1, Ordering::Relaxed);
                         diff -= 1;
                     }
                 }
-                if diff == 0 { break; }
+                if diff == 0 {
+                    break;
+                }
             }
         }
         telemetry::MEM_POOL_CAPACITY.set(self.capacity.load(Ordering::Relaxed) as i64);
@@ -703,7 +718,10 @@ impl<'a> ZeroCopyBuffer<'a> {
             namelen: sockaddr.len(),
             lpBuffers: self.bufs.as_ptr() as *mut _,
             dwBufferCount: self.bufs.len() as u32,
-            Control: WSABUF { len: 0, buf: core::ptr::null_mut() },
+            Control: WSABUF {
+                len: 0,
+                buf: core::ptr::null_mut(),
+            },
             dwFlags: 0,
         };
         let mut sent: u32 = 0;
@@ -740,19 +758,19 @@ impl<'a> ZeroCopyBuffer<'a> {
             namelen: core::mem::size_of::<SOCKADDR_STORAGE>() as u32,
             lpBuffers: self.bufs.as_mut_ptr(),
             dwBufferCount: self.bufs.len() as u32,
-            Control: WSABUF { len: 0, buf: core::ptr::null_mut() },
+            Control: WSABUF {
+                len: 0,
+                buf: core::ptr::null_mut(),
+            },
             dwFlags: 0,
         };
         let mut recvd: u32 = 0;
         let ret = unsafe { WSARecvMsg(sock, &mut msg, &mut recvd, core::ptr::null_mut(), None) };
         if ret == 0 {
             let addr = unsafe {
-                SockAddr::from_raw_parts(
-                    &storage as *const _ as *const _,
-                    msg.namelen,
-                )
-                .as_socket()
-                .unwrap()
+                SockAddr::from_raw_parts(&storage as *const _ as *const _, msg.namelen)
+                    .as_socket()
+                    .unwrap()
             };
             Ok((recvd as i32, addr))
         } else {

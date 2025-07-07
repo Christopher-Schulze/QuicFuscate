@@ -2,7 +2,7 @@ use crate::optimize::{self, SimdPolicy};
 use rayon::prelude::*;
 
 #[inline(always)]
-fn gf_mul_table(a: u8, b: u8) -> u8 {
+pub(crate) fn gf_mul_table(a: u8, b: u8) -> u8 {
     if a == 0 || b == 0 {
         return 0;
     }
@@ -32,73 +32,42 @@ fn gf_mul_shift(mut a: u8, mut b: u8) -> u8 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
-#[target_feature(enable = "avx512f,avx512vbmi")]
+#[target_feature(enable = "avx512f,avx512vbmi,pclmulqdq")]
 unsafe fn gf_mul_bitsliced_avx512(a: u8, b: u8) -> u8 {
-    // Simplified bitsliced multiplication using shift/xor logic.
-    // In a real implementation this would operate on multiple GF elements
-    // in parallel using AVX512 intrinsics. The current routine mirrors the
-    // scalar algorithm but allows easy drop-in replacement once a fully
-    // vectorized kernel becomes available.
-    let mut a = a;
-    let mut b = b;
-    let mut res = 0u8;
-    while b != 0 {
-        if b & 1 != 0 {
-            res ^= a;
-        }
-        let carry = a & 0x80;
-        a <<= 1;
-        if carry != 0 {
-            a ^= IRREDUCIBLE_POLY as u8;
-        }
-        b >>= 1;
-    }
-    res
+    use std::arch::x86_64::*;
+
+    let va = _mm_set_epi64x(0, a as i64);
+    let vb = _mm_set_epi64x(0, b as i64);
+    let prod = _mm_clmulepi64_si128(va, vb, 0x00);
+    let res16 = _mm_extract_epi16(prod, 0) as u16;
+    let t = res16 ^ (res16 >> 8) ^ (res16 >> 4) ^ (res16 >> 2) ^ (res16 >> 1);
+    (t & 0xFF) as u8
 }
 
 #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-#[target_feature(enable = "avx2")]
+#[target_feature(enable = "avx2,pclmulqdq")]
 unsafe fn gf_mul_bitsliced_avx2(a: u8, b: u8) -> u8 {
-    // Placeholder bitsliced routine using scalar operations. The structure
-    // mirrors `gf_mul_shift` but is marked with AVX2 so it can later be
-    // replaced by an optimized implementation.
-    let mut a = a;
-    let mut b = b;
-    let mut res = 0u8;
-    while b != 0 {
-        if b & 1 != 0 {
-            res ^= a;
-        }
-        let carry = a & 0x80;
-        a <<= 1;
-        if carry != 0 {
-            a ^= IRREDUCIBLE_POLY as u8;
-        }
-        b >>= 1;
-    }
-    res
+    use std::arch::x86_64::*;
+
+    let va = _mm_set_epi64x(0, a as i64);
+    let vb = _mm_set_epi64x(0, b as i64);
+    let prod = _mm_clmulepi64_si128(va, vb, 0x00);
+    let res16 = _mm_extract_epi16(prod, 0) as u16;
+    let t = res16 ^ (res16 >> 8) ^ (res16 >> 4) ^ (res16 >> 2) ^ (res16 >> 1);
+    (t & 0xFF) as u8
 }
 
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
-#[target_feature(enable = "neon")]
+#[target_feature(enable = "neon,pmull")]
 unsafe fn gf_mul_bitsliced_neon(a: u8, b: u8) -> u8 {
-    // See notes in the AVX routines. This mirrors the scalar algorithm but is
-    // isolated for easy replacement with a NEON implementation later on.
-    let mut a = a;
-    let mut b = b;
-    let mut res = 0u8;
-    while b != 0 {
-        if b & 1 != 0 {
-            res ^= a;
-        }
-        let carry = a & 0x80;
-        a <<= 1;
-        if carry != 0 {
-            a ^= IRREDUCIBLE_POLY as u8;
-        }
-        b >>= 1;
-    }
-    res
+    use std::arch::aarch64::*;
+
+    let va = vdupq_n_u8(a);
+    let vb = vdupq_n_u8(b);
+    let prod = vmull_p8(vget_low_u8(va), vget_low_u8(vb));
+    let res16 = vgetq_lane_u16(prod, 0);
+    let t = res16 ^ (res16 >> 8) ^ (res16 >> 4) ^ (res16 >> 2) ^ (res16 >> 1);
+    (t & 0xFF) as u8
 }
 // --- High-Performance Finite Field Arithmetic (GF(2^8)) ---
 
