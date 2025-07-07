@@ -604,6 +604,7 @@ impl Decoder {
     fn gaussian_elimination(&mut self) -> bool {
         // This is a simplified sparse implementation. A truly high-performance version
         // would require more complex data structures and operations to minimize cache misses.
+        let start = std::time::Instant::now();
         let k = self.k;
         let mut rank = 0;
 
@@ -661,6 +662,7 @@ impl Decoder {
                 }
             }
         }
+        telemetry::DECODING_TIME_MS.set(start.elapsed().as_millis() as i64);
         true
     }
 
