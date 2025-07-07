@@ -862,8 +862,7 @@ impl TlsClientHelloSpoofer {
                 None => {
                     error!(
                         "Missing ClientHello profile for {:?}/{:?}",
-                        profile.browser,
-                        profile.os
+                        profile.browser, profile.os
                     );
                     return;
                 }
@@ -986,7 +985,10 @@ impl StealthConfig {
         if self.enable_doh && self.doh_provider.is_empty() {
             return Err("doh_provider must not be empty when DoH is enabled".into());
         }
-        if self.enable_domain_fronting && self.fronting_domains.is_empty() && self.cdn_providers.is_empty() {
+        if self.enable_domain_fronting
+            && self.fronting_domains.is_empty()
+            && self.cdn_providers.is_empty()
+        {
             return Err("fronting_domains required when domain fronting is enabled".into());
         }
         Ok(())
@@ -1031,6 +1033,10 @@ impl StealthManager {
         } else {
             None
         };
+
+        telemetry::STEALTH_DOH.set(if config.enable_doh { 1 } else { 0 });
+        telemetry::STEALTH_FRONTING.set(if config.enable_domain_fronting { 1 } else { 0 });
+        telemetry::STEALTH_XOR.set(if config.enable_xor_obfuscation { 1 } else { 0 });
 
         Self {
             config,

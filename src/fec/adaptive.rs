@@ -498,6 +498,10 @@ impl AdaptiveFec {
             config,
         };
         telemetry::FEC_WINDOW.set(mode_mgr.current_window as i64);
+        telemetry::FEC_LAMBDA.set((config.lambda * 1000.0) as i64);
+        telemetry::FEC_BURST_WINDOW.set(config.burst_window as i64);
+        telemetry::FEC_HYSTERESIS.set((config.hysteresis * 1000.0) as i64);
+        telemetry::FEC_KALMAN.set(if config.kalman_enabled { 1 } else { 0 });
         this
     }
 

@@ -111,6 +111,20 @@ lazy_static! {
         register_int_gauge!("stealth_os_profile", "Active OS profile").unwrap();
     pub static ref PATH_MIGRATIONS: IntCounter =
         register_int_counter!("path_migrations_total", "Successful connection migrations").unwrap();
+    pub static ref FEC_LAMBDA: IntGauge =
+        register_int_gauge!("fec_lambda_scaled", "FEC lambda * 1000").unwrap();
+    pub static ref FEC_BURST_WINDOW: IntGauge =
+        register_int_gauge!("fec_burst_window", "FEC burst window").unwrap();
+    pub static ref FEC_HYSTERESIS: IntGauge =
+        register_int_gauge!("fec_hysteresis_scaled", "FEC hysteresis * 1000").unwrap();
+    pub static ref FEC_KALMAN: IntGauge =
+        register_int_gauge!("fec_kalman_enabled", "Kalman filter enabled").unwrap();
+    pub static ref STEALTH_DOH: IntGauge =
+        register_int_gauge!("stealth_doh", "DNS-over-HTTPS enabled").unwrap();
+    pub static ref STEALTH_FRONTING: IntGauge =
+        register_int_gauge!("stealth_fronting", "Domain fronting enabled").unwrap();
+    pub static ref STEALTH_XOR: IntGauge =
+        register_int_gauge!("stealth_xor", "XOR obfuscation enabled").unwrap();
 }
 
 pub fn update_memory_usage() {

@@ -95,7 +95,8 @@ quicfuscate server \
 
 ### Example Configuration
 
-The file `docs/example_config.toml` demonstrates how to tune the adaptive engine:
+The unified configuration file combines FEC tuning with stealth and optimization
+options. Below is the content of `docs/example_config.toml`:
 
 ```toml
 [adaptive_fec]
@@ -110,9 +111,21 @@ kalman_r = 0.02
 name = "light"
 w0 = 20
 
-[[adaptive_fec.modes]]
-name = "extreme"
-w0 = 2048
+[stealth]
+browser_profile = "chrome"
+os_profile = "windows"
+enable_doh = true
+doh_provider = "https://cloudflare-dns.com/dns-query"
+enable_domain_fronting = true
+fronting_domains = ["cdn.example.com"]
+enable_xor_obfuscation = true
+enable_http3_masquerading = true
+use_qpack_headers = true
+
+[optimize]
+pool_capacity = 1024
+block_size = 4096
+enable_xdp = false
 ```
 
 ### Connection Migration
