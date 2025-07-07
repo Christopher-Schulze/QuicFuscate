@@ -41,6 +41,9 @@ use aligned_box::AlignedBox;
 use cpufeatures;
 #[cfg(unix)]
 use libc::{iovec, msghdr, recvmsg, sendmsg};
+#[cfg(windows)]
+use windows_sys::Win32::Networking::WinSock::{WSABUF, WSAMSG, WSASendMsg, WSARecvMsg};
+use crossbeam_queue::SegQueue;
 use log::info;
 use std::any::Any;
 use std::collections::HashMap;
@@ -269,108 +272,112 @@ where
 /// A high-performance, thread-safe memory pool for fixed-size blocks.
 /// This implementation uses a concurrent queue to manage free blocks,
 /// minimizing lock contention and fragmentation.
-#[derive(Clone)]
 pub struct MemoryPool {
-    pool: Arc<Mutex<Vec<AlignedBox<[u8]>>>>,
+    pool: Arc<SegQueue<AlignedBox<[u8]>>>,
     block_size: usize,
-    capacity: Arc<AtomicUsize>,
+    capacity: AtomicUsize,
     in_use: AtomicUsize,
+    available: AtomicUsize,
 }
 
 impl MemoryPool {
     /// Creates a new memory pool with a specified capacity and block size.
     /// All allocated blocks are 64-byte aligned.
     pub fn new(capacity: usize, block_size: usize) -> Self {
-        let mut vec = Vec::with_capacity(capacity);
+        let queue = Arc::new(SegQueue::new());
         for _ in 0..capacity {
-            let aligned_box = AlignedBox::slice_from_default(64, block_size).unwrap();
-            vec.push(aligned_box);
+            queue.push(AlignedBox::slice_from_default(64, block_size).unwrap());
         }
         telemetry::MEM_POOL_CAPACITY.set(capacity as i64);
         telemetry::MEM_POOL_USAGE_BYTES.set(0);
-        Self {
-            pool: Arc::new(Mutex::new(vec)),
+        telemetry::MEM_POOL_FRAGMENTATION.set(0);
+        telemetry::MEM_POOL_UTILIZATION.set(0);
+        let pool = Self {
+            pool: queue,
             block_size,
-            capacity: Arc::new(AtomicUsize::new(capacity)),
+            capacity: AtomicUsize::new(capacity),
             in_use: AtomicUsize::new(0),
-        }
+            available: AtomicUsize::new(capacity),
+        };
+        pool.update_metrics();
+        pool
     }
 
     fn grow(&self, new_capacity: usize) {
-        let pool_arc = Arc::clone(&self.pool);
-        let cap = Arc::clone(&self.capacity);
-        let block_size = self.block_size;
-        std::thread::spawn(move || {
-            let mut new_blocks = Vec::new();
-            {
-                let pool = pool_arc.lock().unwrap();
-                if new_capacity <= pool.len() {
-                    return;
-                }
-            }
-            for _ in 0..(new_capacity - cap.load(Ordering::Relaxed)) {
-                new_blocks.push(AlignedBox::slice_from_default(64, block_size).unwrap());
-            }
-            let mut pool = pool_arc.lock().unwrap();
-            pool.extend(new_blocks);
-            cap.store(new_capacity, Ordering::Relaxed);
-            telemetry::MEM_POOL_CAPACITY.set(new_capacity as i64);
-            let cnt = cap.load(Ordering::Relaxed);
-            let in_use = cnt - pool.len();
-            telemetry::MEM_POOL_USAGE_BYTES.set((in_use * block_size) as i64);
-        });
+        while self.capacity.load(Ordering::Relaxed) < new_capacity {
+            self.pool
+                .push(AlignedBox::slice_from_default(64, self.block_size).unwrap());
+            self.available.fetch_add(1, Ordering::Relaxed);
+            self.capacity.fetch_add(1, Ordering::Relaxed);
+        }
+        telemetry::MEM_POOL_CAPACITY.set(self.capacity.load(Ordering::Relaxed) as i64);
+        self.update_metrics();
+    }
+
+    fn update_metrics(&self) {
+        let cap = self.capacity.load(Ordering::Relaxed);
+        let in_use = self.in_use.load(Ordering::Relaxed);
+        let avail = self.available.load(Ordering::Relaxed);
+        telemetry::MEM_POOL_IN_USE.set(in_use as i64);
+        telemetry::MEM_POOL_USAGE_BYTES.set((in_use * self.block_size) as i64);
+        let frag = cap.saturating_sub(in_use + avail);
+        telemetry::MEM_POOL_FRAGMENTATION.set(frag as i64);
+        let util = if cap == 0 { 0 } else { (in_use * 100 / cap) as i64 };
+        telemetry::MEM_POOL_UTILIZATION.set(util);
     }
 
     /// Allocates a 64-byte aligned memory block from the pool.
     /// If the pool is empty, a new block is created.
     pub fn alloc(&self) -> AlignedBox<[u8]> {
-        let mut pool = self.pool.lock().unwrap();
-        if let Some(b) = pool.pop() {
+        if let Some(b) = self.pool.pop() {
+            self.available.fetch_sub(1, Ordering::Relaxed);
             let cnt = self.in_use.fetch_add(1, Ordering::Relaxed) + 1;
-            telemetry::MEM_POOL_IN_USE.set(cnt as i64);
-            telemetry::MEM_POOL_USAGE_BYTES.set((cnt * self.block_size) as i64);
+            self.update_metrics();
             telemetry::update_memory_usage();
             return b;
         }
-        drop(pool);
         telemetry::FEC_OVERFLOWS.inc();
         let new_cap = self.capacity.load(Ordering::Relaxed) * 2;
         self.grow(new_cap);
-        let block = AlignedBox::slice_from_default(64, self.block_size).unwrap();
-        let cnt = self.in_use.fetch_add(1, Ordering::Relaxed) + 1;
-        telemetry::MEM_POOL_IN_USE.set(cnt as i64);
-        telemetry::MEM_POOL_USAGE_BYTES.set((cnt * self.block_size) as i64);
+        self.in_use.fetch_add(1, Ordering::Relaxed);
+        self.update_metrics();
         telemetry::update_memory_usage();
-        block
+        AlignedBox::slice_from_default(64, self.block_size).unwrap()
     }
 
     /// Returns a memory block to the pool.
     /// If the pool is full, the block is dropped.
     pub fn free(&self, mut block: AlignedBox<[u8]>) {
         block.iter_mut().for_each(|x| *x = 0);
-        let mut pool = self.pool.lock().unwrap();
-        if pool.len() < self.capacity.load(Ordering::Relaxed) {
-            pool.push(block);
+        if self.available.load(Ordering::Relaxed) < self.capacity.load(Ordering::Relaxed) {
+            self.pool.push(block);
+            self.available.fetch_add(1, Ordering::Relaxed);
         }
-        let cnt = self.in_use.fetch_sub(1, Ordering::Relaxed) - 1;
-        telemetry::MEM_POOL_IN_USE.set(cnt as i64);
-        telemetry::MEM_POOL_USAGE_BYTES.set((cnt * self.block_size) as i64);
+        self.in_use.fetch_sub(1, Ordering::Relaxed);
+        self.update_metrics();
         telemetry::update_memory_usage();
     }
 
     /// Adjusts the maximum number of cached blocks at runtime.
     pub fn set_capacity(&self, new_capacity: usize) {
-        self.capacity.store(new_capacity, Ordering::Relaxed);
-        telemetry::MEM_POOL_CAPACITY.set(new_capacity as i64);
-        let mut pool = self.pool.lock().unwrap();
-        while pool.len() > new_capacity {
-            pool.pop();
+        let current = self.capacity.load(Ordering::Relaxed);
+        if new_capacity > current {
+            self.grow(new_capacity);
+        } else {
+            // shrink: drop excess blocks
+            let mut diff = current - new_capacity;
+            while diff > 0 && self.available.load(Ordering::Relaxed) > 0 {
+                if self.pool.pop().is_some() {
+                    self.available.fetch_sub(1, Ordering::Relaxed);
+                    self.capacity.fetch_sub(1, Ordering::Relaxed);
+                    diff -= 1;
+                } else {
+                    break;
+                }
+            }
         }
-        while pool.len() < new_capacity {
-            pool.push(AlignedBox::slice_from_default(64, self.block_size).unwrap());
-        }
-        let cnt = self.in_use.load(Ordering::Relaxed);
-        telemetry::MEM_POOL_USAGE_BYTES.set((cnt * self.block_size) as i64);
+        telemetry::MEM_POOL_CAPACITY.set(self.capacity.load(Ordering::Relaxed) as i64);
+        self.update_metrics();
         telemetry::update_memory_usage();
     }
 }
@@ -505,6 +512,76 @@ impl<'a> Drop for ZeroCopyBuffer<'a> {
     fn drop(&mut self) {
         self.iovecs.clear();
     }
+}
+
+#[cfg(windows)]
+pub struct ZeroCopyBuffer<'a> {
+    bufs: Vec<WSABUF>,
+    _marker: std::marker::PhantomData<&'a [u8]>,
+}
+
+#[cfg(windows)]
+impl<'a> ZeroCopyBuffer<'a> {
+    pub fn new(buffers: &[&'a [u8]]) -> Self {
+        let bufs = buffers
+            .iter()
+            .map(|b| WSABUF {
+                len: b.len() as u32,
+                buf: b.as_ptr() as *mut i8,
+            })
+            .collect();
+        Self { bufs, _marker: std::marker::PhantomData }
+    }
+
+    pub fn new_mut(buffers: &mut [&'a mut [u8]]) -> Self {
+        let bufs = buffers
+            .iter_mut()
+            .map(|b| WSABUF {
+                len: b.len() as u32,
+                buf: b.as_mut_ptr() as *mut i8,
+            })
+            .collect();
+        Self { bufs, _marker: std::marker::PhantomData }
+    }
+
+    pub fn send(&self, sock: windows_sys::Win32::Networking::WinSock::SOCKET) -> i32 {
+        let mut msg = WSAMSG {
+            name: core::ptr::null_mut(),
+            namelen: 0,
+            lpBuffers: self.bufs.as_ptr() as *mut _,
+            dwBufferCount: self.bufs.len() as u32,
+            Control: WSABUF { len: 0, buf: core::ptr::null_mut() },
+            dwFlags: 0,
+        };
+        let mut sent: u32 = 0;
+        unsafe { WSASendMsg(sock, &msg, 0, &mut sent, core::ptr::null_mut(), None) };
+        sent as i32
+    }
+
+    pub fn recv(&mut self, sock: windows_sys::Win32::Networking::WinSock::SOCKET) -> i32 {
+        let mut msg = WSAMSG {
+            name: core::ptr::null_mut(),
+            namelen: 0,
+            lpBuffers: self.bufs.as_mut_ptr(),
+            dwBufferCount: self.bufs.len() as u32,
+            Control: WSABUF { len: 0, buf: core::ptr::null_mut() },
+            dwFlags: 0,
+        };
+        let mut recvd: u32 = 0;
+        unsafe { WSARecvMsg(sock, &mut msg, &mut recvd, core::ptr::null_mut(), None) };
+        recvd as i32
+    }
+
+    pub fn len(&self) -> usize {
+        self.bufs.iter().map(|b| b.len as usize).sum()
+    }
+
+    pub fn is_empty(&self) -> bool { self.bufs.is_empty() }
+}
+
+#[cfg(windows)]
+impl<'a> Drop for ZeroCopyBuffer<'a> {
+    fn drop(&mut self) { self.bufs.clear(); }
 }
 // --- Placeholder for full integration ---
 
