@@ -22,6 +22,17 @@ fn memory_pool_reuse() {
     pool.free(block2);
 }
 
+#[cfg(windows)]
+#[test]
+fn zerocopybuffer_basic() {
+    use quicfuscate::optimize::ZeroCopyBuffer;
+    let data1 = [1u8, 2, 3];
+    let data2 = [4u8, 5];
+    let buf = ZeroCopyBuffer::new(&[&data1[..], &data2[..]]);
+    assert_eq!(buf.len(), 5);
+    assert!(!buf.is_empty());
+}
+
 #[test]
 fn xdp_socket_creation() {
     let mgr = OptimizationManager::new();
