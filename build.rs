@@ -26,18 +26,16 @@ fn main() {
             .arg("fetch")
             .arg("--step")
             .arg("patch")
-            .status();
+            .arg("--step")
+            .arg("verify_patches")
+            .status()
+            .expect("Failed to execute quiche workflow");
 
-        match status {
-            Ok(s) if s.success() => {
-                println!("cargo:warning=Workflow completed successfully");
-            }
-            Ok(s) => {
-                println!("cargo:warning=Workflow failed with status {}", s);
-            }
-            Err(e) => {
-                println!("cargo:warning=Could not execute workflow: {}", e);
-            }
+        if !status.success() {
+            let code = status.code().unwrap_or(-1);
+            panic!("Quiche workflow failed with exit code {}", code);
+        } else {
+            println!("cargo:warning=Workflow completed successfully");
         }
     }
 }
