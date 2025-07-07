@@ -93,6 +93,47 @@ run_command() {
 }
 
 # Schritt 1: Quiche herunterladen
+
+# Prüft, ob benötigte Programme installiert sind
+check_dependencies() {
+    local missing=()
+    for cmd in "$@"; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            missing+=("$cmd")
+        fi
+    done
+    if [ ${#missing[@]} -ne 0 ]; then
+        error "Fehlende Abhängigkeiten: ${missing[*]}. Bitte installieren und erneut ausführen."
+    fi
+}
+
+# Stelle ein zuvor erstelltes Backup wieder her
+rollback_backup() {
+    local backup_dir="$1"
+    if [ -d "$backup_dir" ]; then
+        log "Rolle auf Backup $backup_dir zurück..."
+        rm -rf "$PATCHED_DIR"
+        mv "$backup_dir" "$PATCHED_DIR"
+        success "Backup wiederhergestellt"
+    else
+        warn "Kein Backup zum Zurückrollen gefunden ($backup_dir)"
+    fi
+}
+
+# Behandelt Fehlermeldungen beim Patchen und bietet optional einen erneuten Versuch an
+patch_failure() {
+    local message="$1"
+    local backup_dir="$2"
+    warn "$message"
+    rollback_backup "$backup_dir"
+    read -r -p "Erneut versuchen? [j/N] " retry
+    if [[ $retry =~ ^[JjYy]$ ]]; then
+        apply_patches
+    else
+        error "Patchvorgang abgebrochen."
+    fi
+}
+
 fetch_quiche() {
     local log_file="$LOG_DIR/fetch_quiche_$(date +%Y%m%d_%H%M%S).log"
 
@@ -133,6 +174,7 @@ fetch_quiche() {
 # Schritt 2: Patches anwenden
 apply_patches() {
     log "Starte Anwenden der Patches..."
+    check_dependencies git patch
     
     if [ ! -d "$PATCHES_DIR" ] || [ -z "$(ls -A "$PATCHES_DIR"/*.patch 2>/dev/null)" ]; then
         warn "Keine Patch-Dateien in $PATCHES_DIR gefunden"
@@ -152,11 +194,11 @@ apply_patches() {
             log "Wende Patch an: $(basename "$patch_file")"
 
             if ! (cd "$PATCHED_DIR" && git apply --check "$patch_file" >/dev/null 2>&1); then
-                error "Patch $(basename "$patch_file") kann nicht angewendet werden (git apply --check fehlgeschlagen)"
+                patch_failure "Patch $(basename "$patch_file") kann nicht angewendet werden (git apply --check fehlgeschlagen)" "$backup_dir"
             fi
             
             if ! (cd "$PATCHED_DIR" && patch -p1 --no-backup-if-mismatch -r - < "$patch_file"); then
-                error "Fehler beim Anwenden von $(basename "$patch_file")"
+                patch_failure "Fehler beim Anwenden von $(basename "$patch_file")" "$backup_dir"
             fi
         fi
     done
