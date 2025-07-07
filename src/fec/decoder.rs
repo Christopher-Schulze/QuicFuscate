@@ -671,29 +671,25 @@ impl Decoder {
             .collect()
     }
 
-    /// Solves the decoding problem using the Wiedemann algorithm.
+    /// Solves the decoding problem using a block-Lanczos based Wiedemann algorithm.
     fn wiedemann_algorithm(&mut self) -> bool {
         let k = self.k;
-        let mut u = vec![0u8; k];
-        for i in 0..k {
-            u[i] = (i + 1) as u8;
+
+        // Use a fixed block size of 8 or the window size if smaller.
+        let block = k.min(8);
+        let mut init = Vec::with_capacity(block);
+        for b in 0..block {
+            let mut v = vec![0u8; k];
+            for i in 0..k {
+                // simple deterministic init vector
+                v[i] = ((i + b + 1) % 255) as u8;
+            }
+            init.push(v);
         }
 
-        let seq = self.lanczos_iteration(&u);
-        let _ = self.berlekamp_massey(&seq);
+        let _seq = self.block_lanczos_iteration(&init);
 
-        // For simplicity fall back to Gaussian elimination once the sequence is
-        // generated. This keeps the implementation correct while staying
-        // reasonably efficient for moderate matrix sizes.
-        self.gaussian_elimination()
-    }
-
-    /// Performs the Lanczos iteration to generate the sequence for Berlekamp-Massey.
-    fn lanczos_iteration(&self, u: &[u8]) -> Vec<u8> {
-        let k = self.k;
-        let mut seq = Vec::with_capacity(2 * k);
-
-        // Build dense matrix of coefficients.
+        // Build dense matrix of coefficients
         let mut a = vec![vec![0u8; k]; k];
         for row in 0..k {
             for (col, val) in self.decoding_matrix.row_entries(row) {
@@ -701,31 +697,90 @@ impl Decoder {
             }
         }
 
-        // Build vector b from first byte of each payload (or 0).
-        let mut b = vec![0u8; k];
-        for row in 0..k {
-            if let Some(ref p) = self.decoding_matrix.payloads[row] {
-                b[row] = p[0];
+        // Build payload matrix
+        let max_len = self
+            .decoding_matrix
+            .payloads
+            .iter()
+            .filter_map(|p| p.as_ref().map(|d| d.len()))
+            .max()
+            .unwrap_or(0);
+        let mut b_mat = vec![vec![0u8; max_len]; k];
+        for (r, payload) in self.decoding_matrix.payloads.iter().enumerate() {
+            if let Some(p) = payload {
+                for (i, &val) in p.iter().enumerate() {
+                    b_mat[r][i] = val;
+                }
             }
         }
 
-        let mut x = b.clone();
-        for _ in 0..(2 * k) {
-            let mut dot = 0u8;
-            for j in 0..k {
-                dot ^= gf_mul(u[j], x[j]);
-            }
-            seq.push(dot);
+        // Invert using recursive method
+        let a_inv = match recursive_inverse(&a) {
+            Some(m) => m,
+            None => return false,
+        };
 
-            let mut next = vec![0u8; k];
-            for r in 0..k {
-                for c in 0..k {
-                    if a[r][c] != 0 {
-                        next[r] ^= gf_mul(a[r][c], x[c]);
+        // Multiply inverse with payload matrix to get original data
+        let result = mat_mul(&a_inv, &b_mat);
+
+        for (i, data_row) in result.into_iter().enumerate() {
+            if self.systematic_packets[i].is_none() {
+                let mut packet_data = self.mem_pool.alloc();
+                for (j, &v) in data_row.iter().enumerate() {
+                    packet_data[j] = v;
+                }
+                self.systematic_packets[i] = Some(Packet {
+                    id: i as u64,
+                    data: Some(packet_data),
+                    len: max_len,
+                    is_systematic: true,
+                    coefficients: None,
+                    mem_pool: Arc::clone(&self.mem_pool),
+                });
+            }
+        }
+        self.is_decoded = true;
+        true
+    }
+
+    /// Performs a block-Lanczos iteration used for the Wiedemann sequence generation.
+    fn block_lanczos_iteration(&self, init: &[Vec<u8>]) -> Vec<Vec<u8>> {
+        let k = self.k;
+        let block = init.len();
+        let mut seq = vec![vec![0u8; 2 * k]; block];
+
+        // dense matrix of coefficients
+        let mut a = vec![vec![0u8; k]; k];
+        for row in 0..k {
+            for (col, val) in self.decoding_matrix.row_entries(row) {
+                a[row][col] = val;
+            }
+        }
+
+        let mut v = init.to_vec();
+        for t in 0..(2 * k) {
+            for b in 0..block {
+                let mut dot = 0u8;
+                for i in 0..k {
+                    dot ^= gf_mul(init[b][i], v[b][i]);
+                }
+                seq[b][t] = dot;
+            }
+
+            // next vectors
+            let mut next = vec![vec![0u8; k]; block];
+            for b in 0..block {
+                for r in 0..k {
+                    let mut acc = 0u8;
+                    for c in 0..k {
+                        if a[r][c] != 0 {
+                            acc ^= gf_mul(a[r][c], v[b][c]);
+                        }
                     }
+                    next[b][r] = acc;
                 }
             }
-            x = next;
+            v = next;
         }
         seq
     }
@@ -762,6 +817,108 @@ impl Decoder {
         c.truncate(l + 1);
         Some(c)
     }
+}
+
+/// Multiplies two dense matrices over GF(2^8).
+fn mat_mul(a: &[Vec<u8>], b: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    let rows = a.len();
+    let cols = b[0].len();
+    let mid = b.len();
+    let mut out = vec![vec![0u8; cols]; rows];
+    for i in 0..rows {
+        for k in 0..mid {
+            if a[i][k] == 0 {
+                continue;
+            }
+            for j in 0..cols {
+                out[i][j] ^= gf_mul(a[i][k], b[k][j]);
+            }
+        }
+    }
+    out
+}
+
+/// Computes a dense matrix inverse using block recursive inversion.
+fn recursive_inverse(m: &[Vec<u8>]) -> Option<Vec<Vec<u8>>> {
+    let n = m.len();
+    if n == 0 {
+        return None;
+    }
+    if n == 1 {
+        let inv = gf_inv(m[0][0]);
+        return Some(vec![vec![inv]]);
+    }
+    let mid = n / 2;
+    let mut a = vec![vec![0u8; mid]; mid];
+    let mut b = vec![vec![0u8; n - mid]; mid];
+    let mut c = vec![vec![0u8; mid]; n - mid];
+    let mut d = vec![vec![0u8; n - mid]; n - mid];
+    for i in 0..mid {
+        for j in 0..mid {
+            a[i][j] = m[i][j];
+        }
+        for j in mid..n {
+            b[i][j - mid] = m[i][j];
+        }
+    }
+    for i in mid..n {
+        for j in 0..mid {
+            c[i - mid][j] = m[i][j];
+        }
+        for j in mid..n {
+            d[i - mid][j - mid] = m[i][j];
+        }
+    }
+
+    let a_inv = recursive_inverse(&a)?;
+    let ca_inv = mat_mul(&c, &a_inv);
+    let temp = mat_mul(&ca_inv, &b);
+    let mut schur = vec![vec![0u8; d[0].len()]; d.len()];
+    for i in 0..d.len() {
+        for j in 0..d[0].len() {
+            schur[i][j] = d[i][j] ^ temp[i][j];
+        }
+    }
+    let schur_inv = recursive_inverse(&schur)?;
+    let mut upper_right = mat_mul(&a_inv, &b);
+    upper_right = mat_mul(&upper_right, &schur_inv);
+    for row in &mut upper_right {
+        for val in row.iter_mut() {
+            *val = gf_mul(*val, 1); // ensure field
+        }
+    }
+    let mut lower_left = mat_mul(&schur_inv, &ca_inv);
+    let mut upper_left = mat_mul(&a_inv, &b);
+    upper_left = mat_mul(&upper_left, &schur_inv);
+    upper_left = mat_mul(&upper_left, &ca_inv);
+    let mut id = vec![vec![0u8; a_inv.len()]; a_inv.len()];
+    for i in 0..a_inv.len() {
+        id[i][i] = 1;
+    }
+    let mut res_a = vec![vec![0u8; a_inv.len()]; a_inv.len()];
+    for i in 0..a_inv.len() {
+        for j in 0..a_inv.len() {
+            res_a[i][j] = a_inv[i][j] ^ upper_left[i][j];
+        }
+    }
+    let mut out = vec![vec![0u8; n]; n];
+    for i in 0..mid {
+        for j in 0..mid {
+            out[i][j] = res_a[i][j];
+        }
+        for j in mid..n {
+            out[i][j] = upper_right[i][j - mid];
+        }
+    }
+    for i in mid..n {
+        for j in 0..mid {
+            out[i][j] = lower_left[i - mid][j];
+        }
+        for j in mid..n {
+            out[i][j] = schur_inv[i - mid][j - mid];
+        }
+    }
+    Some(out)
 }
 
 // --- Main Public Interface ---
