@@ -71,6 +71,14 @@ enum Commands {
         #[clap(long, default_value_t = 4096)]
         pool_block: usize,
 
+        /// Enable Transparent Huge Pages for the memory pool
+        #[clap(long)]
+        thp: bool,
+
+        /// NUMA node for memory allocations
+        #[clap(long)]
+        numa_node: Option<i32>,
+
         /// Path to a TOML file with Adaptive FEC settings
         #[clap(long, value_name = "PATH")]
         fec_config: Option<PathBuf>,
@@ -156,6 +164,14 @@ enum Commands {
         #[clap(long, default_value_t = 4096)]
         pool_block: usize,
 
+        /// Enable Transparent Huge Pages for the memory pool
+        #[clap(long)]
+        thp: bool,
+
+        /// NUMA node for memory allocations
+        #[clap(long)]
+        numa_node: Option<i32>,
+
         /// Path to a TOML file with Adaptive FEC settings
         #[clap(long, value_name = "PATH")]
         fec_config: Option<PathBuf>,
@@ -231,6 +247,8 @@ async fn main() -> std::io::Result<()> {
                 *fec_mode,
                 *pool_capacity,
                 *pool_block,
+                *thp,
+                *numa_node,
                 fec_config,
                 &doh_provider,
                 &front_domain,
@@ -278,6 +296,8 @@ async fn main() -> std::io::Result<()> {
                 *fec_mode,
                 *pool_capacity,
                 *pool_block,
+                *thp,
+                *numa_node,
                 fec_config,
                 &doh_provider,
                 &front_domain,
@@ -328,6 +348,8 @@ async fn run_client(
     fec_mode: FecMode,
     pool_capacity: usize,
     pool_block: usize,
+    thp: bool,
+    numa_node: Option<i32>,
     fec_config: &Option<PathBuf>,
     doh_provider: &str,
     front_domain: &Vec<String>,
@@ -424,6 +446,8 @@ async fn run_client(
         OptimizeConfig {
             pool_capacity,
             block_size: pool_block,
+            transparent_hugepages: *thp,
+            numa_node: *numa_node,
         },
         !no_utls,
     )
@@ -564,6 +588,8 @@ async fn run_server(
     fec_mode: FecMode,
     pool_capacity: usize,
     pool_block: usize,
+    thp: bool,
+    numa_node: Option<i32>,
     fec_config: &Option<PathBuf>,
     doh_provider: &str,
     front_domain: &Vec<String>,
@@ -683,6 +709,8 @@ async fn run_server(
                         OptimizeConfig {
                             pool_capacity,
                             block_size: pool_block,
+                            transparent_hugepages: *thp,
+                            numa_node: *numa_node,
                         },
                     )
                     .expect("failed to create server connection")

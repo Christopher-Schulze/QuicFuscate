@@ -15,15 +15,9 @@
 //! - `cpu_feature_mask`: Bitmask of detected CPU features.
 
 use prometheus::{
-    Encoder,
-    IntCounter,
-    IntGauge,
-    TextEncoder,
-    register_int_counter,
-    register_int_gauge,
-
+    register_int_counter, register_int_gauge, Encoder, IntCounter, IntGauge, TextEncoder,
 };
-use sysinfo::{SystemExt, PidExt};
+use sysinfo::{PidExt, SystemExt};
 
 lazy_static! {
     pub static ref ENCODED_PACKETS: IntCounter =
@@ -48,6 +42,18 @@ lazy_static! {
         register_int_gauge!("mem_pool_in_use", "Memory pool blocks in use").unwrap();
     pub static ref MEM_POOL_USAGE_BYTES: IntGauge =
         register_int_gauge!("mem_pool_usage_bytes", "Memory pool bytes in use").unwrap();
+    pub static ref MEM_POOL_BLOCK_SIZE: IntGauge =
+        register_int_gauge!("mem_pool_block_size_bytes", "Memory pool block size").unwrap();
+    pub static ref MEM_POOL_TOTAL_BYTES: IntGauge = register_int_gauge!(
+        "mem_pool_total_bytes",
+        "Total bytes allocated for memory pool"
+    )
+    .unwrap();
+    pub static ref MEM_POOL_FREE: IntGauge = register_int_gauge!(
+        "mem_pool_free_blocks",
+        "Number of free blocks in memory pool"
+    )
+    .unwrap();
     pub static ref CPU_FEATURE_MASK: IntGauge =
         register_int_gauge!("cpu_feature_mask", "Detected CPU features bitmask").unwrap();
     pub static ref SIMD_ACTIVE: IntGauge =

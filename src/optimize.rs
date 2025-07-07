@@ -35,25 +35,40 @@
 //! function dispatching to select the best hardware-accelerated implementation.
 //! It also includes foundational structures for zero-copy operations and memory pooling.
 
+use crate::telemetry;
 use crate::xdp_socket::XdpSocket;
 use aligned_box::AlignedBox;
+use cpufeatures;
 #[cfg(unix)]
 use libc::{iovec, msghdr, recvmsg, sendmsg};
 use log::info;
-use crate::telemetry;
-use cpufeatures;
 use std::any::Any;
-use std::io;
 use std::collections::HashMap;
+use std::io;
 use std::net::SocketAddr;
 #[cfg(unix)]
 use std::os::unix::io::RawFd;
-use std::sync::{Arc, Once, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, Once};
+
+#[cfg(target_os = "linux")]
+extern "C" {
+    fn numa_available() -> libc::c_int;
+    fn numa_tonode_memory(start: *mut libc::c_void, size: libc::size_t, node: libc::c_int);
+}
 
 // Use cpufeatures for portable runtime detection
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-cpufeatures::new!(cpuid_x86, "avx512f", "avx2", "avx", "sse2", "vaes", "aes", "pclmulqdq");
+cpufeatures::new!(
+    cpuid_x86,
+    "avx512f",
+    "avx2",
+    "avx",
+    "sse2",
+    "vaes",
+    "aes",
+    "pclmulqdq"
+);
 #[cfg(target_arch = "aarch64")]
 cpufeatures::new!(cpuid_arm, "neon");
 
@@ -62,6 +77,8 @@ cpufeatures::new!(cpuid_arm, "neon");
 pub struct OptimizeConfig {
     pub pool_capacity: usize,
     pub block_size: usize,
+    pub transparent_hugepages: bool,
+    pub numa_node: Option<i32>,
 }
 
 impl Default for OptimizeConfig {
@@ -69,6 +86,8 @@ impl Default for OptimizeConfig {
         Self {
             pool_capacity: 1024,
             block_size: 4096,
+            transparent_hugepages: false,
+            numa_node: None,
         }
     }
 }
@@ -126,13 +145,17 @@ impl FeatureDetector {
             // Unsafe block is required to initialize the static mutable variable.
             // `Once::call_once` guarantees this is safe and runs only once.
             unsafe {
-                let mask = features.iter().fold(0u64, |m, (k, v)| {
-                    if *v {
-                        m | (1u64 << (*k as u8))
-                    } else {
-                        m
-                    }
-                });
+                let mask =
+                    features.iter().fold(
+                        0u64,
+                        |m, (k, v)| {
+                            if *v {
+                                m | (1u64 << (*k as u8))
+                            } else {
+                                m
+                            }
+                        },
+                    );
                 telemetry::CPU_FEATURE_MASK.set(mask as i64);
 
                 // determine active SIMD policy for telemetry
@@ -259,24 +282,32 @@ pub struct MemoryPool {
     block_size: usize,
     capacity: Arc<AtomicUsize>,
     in_use: AtomicUsize,
+    use_thp: bool,
+    numa_node: Option<i32>,
 }
 
 impl MemoryPool {
     /// Creates a new memory pool with a specified capacity and block size.
     /// All allocated blocks are 64-byte aligned.
-    pub fn new(capacity: usize, block_size: usize) -> Self {
+    pub fn new(capacity: usize, block_size: usize, use_thp: bool, numa_node: Option<i32>) -> Self {
         let mut vec = Vec::with_capacity(capacity);
         for _ in 0..capacity {
-            let aligned_box = AlignedBox::slice_from_default(64, block_size).unwrap();
+            let mut aligned_box = AlignedBox::slice_from_default(64, block_size).unwrap();
+            Self::apply_advise(&mut aligned_box, block_size, use_thp, numa_node);
             vec.push(aligned_box);
         }
         telemetry::MEM_POOL_CAPACITY.set(capacity as i64);
         telemetry::MEM_POOL_USAGE_BYTES.set(0);
+        telemetry::MEM_POOL_BLOCK_SIZE.set(block_size as i64);
+        telemetry::MEM_POOL_TOTAL_BYTES.set((capacity * block_size) as i64);
+        telemetry::MEM_POOL_FREE.set(capacity as i64);
         Self {
             pool: Arc::new(Mutex::new(vec)),
             block_size,
             capacity: Arc::new(AtomicUsize::new(capacity)),
             in_use: AtomicUsize::new(0),
+            use_thp,
+            numa_node,
         }
     }
 
@@ -284,6 +315,8 @@ impl MemoryPool {
         let pool_arc = Arc::clone(&self.pool);
         let cap = Arc::clone(&self.capacity);
         let block_size = self.block_size;
+        let use_thp = self.use_thp;
+        let numa_node = self.numa_node;
         std::thread::spawn(move || {
             let mut new_blocks = Vec::new();
             {
@@ -293,7 +326,9 @@ impl MemoryPool {
                 }
             }
             for _ in 0..(new_capacity - cap.load(Ordering::Relaxed)) {
-                new_blocks.push(AlignedBox::slice_from_default(64, block_size).unwrap());
+                let mut b = AlignedBox::slice_from_default(64, block_size).unwrap();
+                MemoryPool::apply_advise(&mut b, block_size, use_thp, numa_node);
+                new_blocks.push(b);
             }
             let mut pool = pool_arc.lock().unwrap();
             pool.extend(new_blocks);
@@ -302,6 +337,8 @@ impl MemoryPool {
             let cnt = cap.load(Ordering::Relaxed);
             let in_use = cnt - pool.len();
             telemetry::MEM_POOL_USAGE_BYTES.set((in_use * block_size) as i64);
+            telemetry::MEM_POOL_TOTAL_BYTES.set((cnt * block_size) as i64);
+            telemetry::MEM_POOL_FREE.set(pool.len() as i64);
         });
     }
 
@@ -313,6 +350,7 @@ impl MemoryPool {
             let cnt = self.in_use.fetch_add(1, Ordering::Relaxed) + 1;
             telemetry::MEM_POOL_IN_USE.set(cnt as i64);
             telemetry::MEM_POOL_USAGE_BYTES.set((cnt * self.block_size) as i64);
+            telemetry::MEM_POOL_FREE.set(pool.len() as i64);
             telemetry::update_memory_usage();
             return b;
         }
@@ -320,10 +358,14 @@ impl MemoryPool {
         telemetry::FEC_OVERFLOWS.inc();
         let new_cap = self.capacity.load(Ordering::Relaxed) * 2;
         self.grow(new_cap);
-        let block = AlignedBox::slice_from_default(64, self.block_size).unwrap();
+        let mut block = AlignedBox::slice_from_default(64, self.block_size).unwrap();
+        MemoryPool::apply_advise(&mut block, self.block_size, self.use_thp, self.numa_node);
         let cnt = self.in_use.fetch_add(1, Ordering::Relaxed) + 1;
         telemetry::MEM_POOL_IN_USE.set(cnt as i64);
         telemetry::MEM_POOL_USAGE_BYTES.set((cnt * self.block_size) as i64);
+        telemetry::MEM_POOL_TOTAL_BYTES
+            .set((self.capacity.load(Ordering::Relaxed) * self.block_size) as i64);
+        telemetry::MEM_POOL_FREE.set((self.capacity.load(Ordering::Relaxed) - cnt) as i64);
         telemetry::update_memory_usage();
         block
     }
@@ -339,6 +381,7 @@ impl MemoryPool {
         let cnt = self.in_use.fetch_sub(1, Ordering::Relaxed) - 1;
         telemetry::MEM_POOL_IN_USE.set(cnt as i64);
         telemetry::MEM_POOL_USAGE_BYTES.set((cnt * self.block_size) as i64);
+        telemetry::MEM_POOL_FREE.set(pool.len() as i64);
         telemetry::update_memory_usage();
     }
 
@@ -351,11 +394,42 @@ impl MemoryPool {
             pool.pop();
         }
         while pool.len() < new_capacity {
-            pool.push(AlignedBox::slice_from_default(64, self.block_size).unwrap());
+            let mut b = AlignedBox::slice_from_default(64, self.block_size).unwrap();
+            MemoryPool::apply_advise(&mut b, self.block_size, self.use_thp, self.numa_node);
+            pool.push(b);
         }
         let cnt = self.in_use.load(Ordering::Relaxed);
         telemetry::MEM_POOL_USAGE_BYTES.set((cnt * self.block_size) as i64);
+        telemetry::MEM_POOL_TOTAL_BYTES.set((new_capacity * self.block_size) as i64);
+        telemetry::MEM_POOL_FREE.set(pool.len() as i64);
         telemetry::update_memory_usage();
+    }
+
+    fn apply_advise(
+        block: &mut AlignedBox<[u8]>,
+        size: usize,
+        use_thp: bool,
+        numa_node: Option<i32>,
+    ) {
+        #[cfg(target_os = "linux")]
+        unsafe {
+            if use_thp {
+                libc::madvise(
+                    block.as_mut_ptr() as *mut libc::c_void,
+                    size,
+                    libc::MADV_HUGEPAGE,
+                );
+            }
+            if let Some(node) = numa_node {
+                if numa_available() >= 0 {
+                    numa_tonode_memory(
+                        block.as_mut_ptr() as *mut libc::c_void,
+                        size,
+                        node as libc::c_int,
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -465,7 +539,8 @@ impl<'a> ZeroCopyBuffer<'a> {
                     *len = msg.msg_namelen;
                     Ok(ret)
                 }
-            }).map(|(ret, addr)| (ret, addr.as_socket().unwrap()))
+            })
+            .map(|(ret, addr)| (ret, addr.as_socket().unwrap()))
         }
     }
 
@@ -497,21 +572,31 @@ pub struct OptimizationManager {
 }
 
 impl OptimizationManager {
-    pub fn new_with_config(capacity: usize, block_size: usize) -> Self {
+    pub fn new_with_config(
+        capacity: usize,
+        block_size: usize,
+        use_thp: bool,
+        numa_node: Option<i32>,
+    ) -> Self {
         let xdp_available = XdpSocket::is_supported();
         info!("XDP available: {}", xdp_available);
         Self {
-            memory_pool: Arc::new(MemoryPool::new(capacity, block_size)),
+            memory_pool: Arc::new(MemoryPool::new(capacity, block_size, use_thp, numa_node)),
             xdp_available,
         }
     }
 
     pub fn from_cfg(cfg: OptimizeConfig) -> Self {
-        Self::new_with_config(cfg.pool_capacity, cfg.block_size)
+        Self::new_with_config(
+            cfg.pool_capacity,
+            cfg.block_size,
+            cfg.transparent_hugepages,
+            cfg.numa_node,
+        )
     }
 
     pub fn new() -> Self {
-        Self::new_with_config(1024, 4096)
+        Self::new_with_config(1024, 4096, false, None)
     }
 
     pub fn alloc_block(&self) -> AlignedBox<[u8]> {
