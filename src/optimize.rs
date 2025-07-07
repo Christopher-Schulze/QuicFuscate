@@ -112,6 +112,7 @@ mod numa {
 cpufeatures::new!(
     cpuid_x86,
     "avx512f",
+    "avx512bw",
     "avx512vbmi",
     "avx2",
     "avx",
@@ -190,6 +191,7 @@ pub enum CpuFeature {
     AVX2,
     SSE2,
     AVX512F,
+    AVX512BW,
     AVX512VBMI,
     VAES,
     AESNI,
@@ -226,6 +228,7 @@ impl FeatureDetector {
                     CpuFeature::AVX512F,
                     info.has_avx512f() && info.has_avx512bw(),
                 );
+                features.insert(CpuFeature::AVX512BW, info.has_avx512bw());
                 features.insert(CpuFeature::AVX512VBMI, info.has_avx512vbmi());
 
                 features.insert(CpuFeature::VAES, info.has_vaes());

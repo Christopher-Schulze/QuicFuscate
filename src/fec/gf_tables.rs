@@ -33,7 +33,7 @@ fn gf_mul_shift(mut a: u8, mut b: u8) -> u8 {
 
 #[cfg(all(target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512vbmi,pclmulqdq")]
-unsafe fn gf_mul_bitsliced_avx512(a: u8, b: u8) -> u8 {
+pub(crate) unsafe fn gf_mul_bitsliced_avx512(a: u8, b: u8) -> u8 {
     use std::arch::x86_64::*;
 
     let va = _mm512_set1_epi64(a as i64);
@@ -50,7 +50,7 @@ unsafe fn gf_mul_bitsliced_avx512(a: u8, b: u8) -> u8 {
 
 #[cfg(all(target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,pclmulqdq")]
-unsafe fn gf_mul_bitsliced_avx2(a: u8, b: u8) -> u8 {
+pub(crate) unsafe fn gf_mul_bitsliced_avx2(a: u8, b: u8) -> u8 {
     use std::arch::x86_64::*;
 
     let va = _mm256_set1_epi64x(a as i64);
@@ -67,7 +67,7 @@ unsafe fn gf_mul_bitsliced_avx2(a: u8, b: u8) -> u8 {
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon,pmull")]
-unsafe fn gf_mul_bitsliced_neon(a: u8, b: u8) -> u8 {
+pub(crate) unsafe fn gf_mul_bitsliced_neon(a: u8, b: u8) -> u8 {
     use std::arch::aarch64::*;
 
     let va = vdupq_n_u8(a);
