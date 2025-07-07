@@ -673,21 +673,24 @@ impl Decoder {
 
     /// Solves the decoding problem using a block-Lanczos based Wiedemann algorithm.
     fn wiedemann_algorithm(&mut self) -> bool {
+        crate::telemetry::WIEDEMANN_USAGE.inc();
+        let start = std::time::Instant::now();
+
         let k = self.k;
 
-        // Use a fixed block size of 8 or the window size if smaller.
-        let block = k.min(8);
+        // Choose block size depending on window size
+        let block = (k / 256).max(1).min(32);
         let mut init = Vec::with_capacity(block);
         for b in 0..block {
             let mut v = vec![0u8; k];
             for i in 0..k {
-                // simple deterministic init vector
+                // deterministic init vectors
                 v[i] = ((i + b + 1) % 255) as u8;
             }
             init.push(v);
         }
 
-        let _seq = self.block_lanczos_iteration(&init);
+        let seq = self.block_lanczos_iteration(&init);
 
         // Build dense matrix of coefficients
         let mut a = vec![vec![0u8; k]; k];
@@ -714,11 +717,41 @@ impl Decoder {
             }
         }
 
-        // Invert using recursive method
-        let a_inv = match recursive_inverse(&a) {
-            Some(m) => m,
+        // Minimal polynomial from first Lanczos sequence
+        let poly = match self.berlekamp_massey(&seq[0]) {
+            Some(p) => p,
             None => return false,
         };
+
+        if poly.len() <= 1 || poly[0] == 0 {
+            return false;
+        }
+
+        // Compute matrix powers of A
+        let mut powers: Vec<Vec<Vec<u8>>> = Vec::with_capacity(poly.len());
+        // A^0 = I
+        let mut id = vec![vec![0u8; k]; k];
+        for i in 0..k {
+            id[i][i] = 1;
+        }
+        powers.push(id);
+        for _ in 1..poly.len() {
+            let prev = powers.last().unwrap();
+            powers.push(mat_mul(prev, &a));
+        }
+
+        // Compute inverse via polynomial
+        let c0_inv = gf_inv(poly[0]);
+        let mut a_inv = vec![vec![0u8; k]; k];
+        for (idx, coef) in poly.iter().enumerate().skip(1) {
+            let coef = gf_mul(*coef, c0_inv);
+            let mat = &powers[idx - 1];
+            for r in 0..k {
+                for c in 0..k {
+                    a_inv[r][c] ^= gf_mul(coef, mat[r][c]);
+                }
+            }
+        }
 
         // Multiply inverse with payload matrix to get original data
         let result = mat_mul(&a_inv, &b_mat);
@@ -740,6 +773,7 @@ impl Decoder {
             }
         }
         self.is_decoded = true;
+        crate::telemetry::DECODING_TIME_MS.set(start.elapsed().as_millis() as i64);
         true
     }
 
