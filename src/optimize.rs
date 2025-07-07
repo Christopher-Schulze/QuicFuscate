@@ -43,10 +43,7 @@ use log::info;
 use crate::telemetry;
 use cpufeatures;
 use std::any::Any;
-#[cfg(target_arch = "aarch64")]
-use std::arch::is_aarch64_feature_detected;
-#[cfg(target_arch = "x86_64")]
-use std::arch::is_x86_feature_detected;
+use std::io;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 #[cfg(unix)]
@@ -56,13 +53,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 // Use cpufeatures for portable runtime detection
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-cpufeatures::new!(feat_avx512f, "avx512f");
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-cpufeatures::new!(feat_avx2, "avx2");
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-cpufeatures::new!(feat_sse2, "sse2");
+cpufeatures::new!(cpuid_x86, "avx512f", "avx2", "avx", "sse2", "vaes", "aes", "pclmulqdq");
 #[cfg(target_arch = "aarch64")]
-cpufeatures::new!(feat_neon, "neon");
+cpufeatures::new!(cpuid_arm, "neon");
 
 /// Configuration for optimization parameters passed from the CLI.
 #[derive(Clone, Copy)]
@@ -115,17 +108,19 @@ impl FeatureDetector {
             // Detect features for the current architecture at runtime.
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             {
-                features.insert(CpuFeature::AVX, is_x86_feature_detected!("avx"));
-                features.insert(CpuFeature::AVX2, feat_avx2::get());
-                features.insert(CpuFeature::SSE2, feat_sse2::get());
-                features.insert(CpuFeature::AVX512F, feat_avx512f::get());
-                features.insert(CpuFeature::VAES, is_x86_feature_detected!("vaes"));
-                features.insert(CpuFeature::AESNI, is_x86_feature_detected!("aes"));
-                features.insert(CpuFeature::PCLMULQDQ, is_x86_feature_detected!("pclmulqdq"));
+                let info = cpuid_x86::get();
+                features.insert(CpuFeature::AVX, info.has_avx());
+                features.insert(CpuFeature::AVX2, info.has_avx2());
+                features.insert(CpuFeature::SSE2, info.has_sse2());
+                features.insert(CpuFeature::AVX512F, info.has_avx512f());
+                features.insert(CpuFeature::VAES, info.has_vaes());
+                features.insert(CpuFeature::AESNI, info.has_aes());
+                features.insert(CpuFeature::PCLMULQDQ, info.has_pclmulqdq());
             }
             #[cfg(target_arch = "aarch64")]
             {
-                features.insert(CpuFeature::NEON, feat_neon::get());
+                let info = cpuid_arm::get();
+                features.insert(CpuFeature::NEON, info.has_neon());
             }
 
             // Unsafe block is required to initialize the static mutable variable.
@@ -232,16 +227,21 @@ where
     let detector = FeatureDetector::instance();
 
     if detector.has_feature(CpuFeature::AVX512F) {
+        telemetry::SIMD_USAGE_AVX512.inc();
         f(&Avx512)
     } else if detector.has_feature(CpuFeature::AVX2) {
+        telemetry::SIMD_USAGE_AVX2.inc();
         f(&Avx2)
     } else if detector.has_feature(CpuFeature::SSE2) {
+        telemetry::SIMD_USAGE_SSE2.inc();
         f(&Sse2)
     } else if detector.has_feature(CpuFeature::PCLMULQDQ) {
         f(&Pclmulqdq)
     } else if detector.has_feature(CpuFeature::NEON) {
+        telemetry::SIMD_USAGE_NEON.inc();
         f(&Neon)
     } else {
+        telemetry::SIMD_USAGE_SCALAR.inc();
         f(&Scalar)
     }
 }
@@ -281,16 +281,28 @@ impl MemoryPool {
     }
 
     fn grow(&self, new_capacity: usize) {
-        let mut pool = self.pool.lock().unwrap();
-        if new_capacity > pool.len() {
-            for _ in pool.len()..new_capacity {
-                pool.push(AlignedBox::slice_from_default(64, self.block_size).unwrap());
+        let pool_arc = Arc::clone(&self.pool);
+        let cap = Arc::clone(&self.capacity);
+        let block_size = self.block_size;
+        std::thread::spawn(move || {
+            let mut new_blocks = Vec::new();
+            {
+                let pool = pool_arc.lock().unwrap();
+                if new_capacity <= pool.len() {
+                    return;
+                }
             }
-            self.capacity.store(new_capacity, Ordering::Relaxed);
+            for _ in 0..(new_capacity - cap.load(Ordering::Relaxed)) {
+                new_blocks.push(AlignedBox::slice_from_default(64, block_size).unwrap());
+            }
+            let mut pool = pool_arc.lock().unwrap();
+            pool.extend(new_blocks);
+            cap.store(new_capacity, Ordering::Relaxed);
             telemetry::MEM_POOL_CAPACITY.set(new_capacity as i64);
-            let cnt = self.in_use.load(Ordering::Relaxed);
-            telemetry::MEM_POOL_USAGE_BYTES.set((cnt * self.block_size) as i64);
-        }
+            let cnt = cap.load(Ordering::Relaxed);
+            let in_use = cnt - pool.len();
+            telemetry::MEM_POOL_USAGE_BYTES.set((in_use * block_size) as i64);
+        });
     }
 
     /// Allocates a 64-byte aligned memory block from the pool.
@@ -301,17 +313,18 @@ impl MemoryPool {
             let cnt = self.in_use.fetch_add(1, Ordering::Relaxed) + 1;
             telemetry::MEM_POOL_IN_USE.set(cnt as i64);
             telemetry::MEM_POOL_USAGE_BYTES.set((cnt * self.block_size) as i64);
+            telemetry::update_memory_usage();
             return b;
         }
         drop(pool);
         telemetry::FEC_OVERFLOWS.inc();
         let new_cap = self.capacity.load(Ordering::Relaxed) * 2;
         self.grow(new_cap);
-        let mut pool = self.pool.lock().unwrap();
-        let block = pool.pop().unwrap();
+        let block = AlignedBox::slice_from_default(64, self.block_size).unwrap();
         let cnt = self.in_use.fetch_add(1, Ordering::Relaxed) + 1;
         telemetry::MEM_POOL_IN_USE.set(cnt as i64);
         telemetry::MEM_POOL_USAGE_BYTES.set((cnt * self.block_size) as i64);
+        telemetry::update_memory_usage();
         block
     }
 
@@ -326,6 +339,7 @@ impl MemoryPool {
         let cnt = self.in_use.fetch_sub(1, Ordering::Relaxed) - 1;
         telemetry::MEM_POOL_IN_USE.set(cnt as i64);
         telemetry::MEM_POOL_USAGE_BYTES.set((cnt * self.block_size) as i64);
+        telemetry::update_memory_usage();
     }
 
     /// Adjusts the maximum number of cached blocks at runtime.
@@ -341,6 +355,7 @@ impl MemoryPool {
         }
         let cnt = self.in_use.load(Ordering::Relaxed);
         telemetry::MEM_POOL_USAGE_BYTES.set((cnt * self.block_size) as i64);
+        telemetry::update_memory_usage();
     }
 }
 
@@ -399,6 +414,22 @@ impl<'a> ZeroCopyBuffer<'a> {
         unsafe { sendmsg(fd, &msg, 0) }
     }
 
+    /// Sends the data to the specified address using `sendmsg`.
+    pub fn send_to(&self, fd: RawFd, addr: SocketAddr) -> isize {
+        use socket2::SockAddr;
+        let sockaddr = SockAddr::from(addr);
+        let msg = msghdr {
+            msg_name: sockaddr.as_ptr() as *mut _,
+            msg_namelen: sockaddr.len(),
+            msg_iov: self.iovecs.as_ptr() as *mut _,
+            msg_iovlen: self.iovecs.len() as _,
+            msg_control: std::ptr::null_mut(),
+            msg_controllen: 0,
+            msg_flags: 0,
+        };
+        unsafe { sendmsg(fd, &msg, 0) }
+    }
+
     /// Receives data using `recvmsg` into the buffers.
     pub fn recv(&mut self, fd: RawFd) -> isize {
         let mut msg = msghdr {
@@ -411,6 +442,31 @@ impl<'a> ZeroCopyBuffer<'a> {
             msg_flags: 0,
         };
         unsafe { recvmsg(fd, &mut msg, 0) }
+    }
+
+    /// Receives data and returns the sender address.
+    pub fn recv_from(&mut self, fd: RawFd) -> io::Result<(isize, SocketAddr)> {
+        use socket2::SockAddr;
+        unsafe {
+            SockAddr::try_init(|storage, len| {
+                let mut msg = msghdr {
+                    msg_name: storage.cast(),
+                    msg_namelen: *len,
+                    msg_iov: self.iovecs.as_mut_ptr(),
+                    msg_iovlen: self.iovecs.len() as _,
+                    msg_control: std::ptr::null_mut(),
+                    msg_controllen: 0,
+                    msg_flags: 0,
+                };
+                let ret = recvmsg(fd, &mut msg, 0);
+                if ret < 0 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    *len = msg.msg_namelen;
+                    Ok(ret)
+                }
+            }).map(|(ret, addr)| (ret, addr.as_socket().unwrap()))
+        }
     }
 
     /// Returns the total length represented by all iovecs.
