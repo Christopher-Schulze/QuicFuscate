@@ -65,10 +65,10 @@ load_state() {
         BUILD_TYPE="${BUILD_TYPE:-release}"
     fi
 
-    # Ensure quiche sources are present
-    if [ ! -d "$PATCHED_DIR/quiche" ]; then
-        warn "Quiche-Verzeichnis fehlt: $PATCHED_DIR/quiche"
-        fetch_quiche || error "Automatisches Herunterladen fehlgeschlagen. Bitte $0 --step fetch ausf\xC3\xBChren."
+    # Ensure quiche sources are present and initialized
+    if [ ! -d "$PATCHED_DIR/quiche" ] || [ ! -d "$PATCHED_DIR/.git" ]; then
+        warn "Quiche-Verzeichnis fehlt oder Submodul nicht initialisiert: $PATCHED_DIR/quiche"
+        fetch_quiche || error "Automatisches Herunterladen fehlgeschlagen. Bitte $0 --step fetch ausführen."
     fi
     detect_quiche_version
 }
@@ -227,6 +227,9 @@ apply_patches() {
     
     if [ $patch_count -gt 0 ]; then
         success "$patch_count Patches erfolgreich angewendet"
+        if ! run_command "verify_patches" "verify_patches"; then
+            patch_failure "Patch-Verifikation fehlgeschlagen" "$backup_dir"
+        fi
     else
         warn "Keine Patch-Dateien im .patch-Format gefunden"
     fi
