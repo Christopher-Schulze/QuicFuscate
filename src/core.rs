@@ -192,14 +192,14 @@ impl QuicFuscateConnection {
 
     /// Processes an incoming raw buffer, parsing it into an FEC packet and handling recovery.
     /// This now avoids any serialization overhead.
-    pub fn recv(&mut self, data: &[u8]) -> Result<usize, String> {
+    pub fn recv(&mut self, data: &[u8]) -> Result<usize, crate::error::ConnectionError> {
         let mut block = self.optimization_manager.alloc_block();
         let len = if let Some(ref xdp) = self.xdp_socket {
             match xdp.recv(&mut block) {
                 Ok(l) => l,
                 Err(e) => {
                     self.optimization_manager.free_block(block);
-                    return Err(e.to_string());
+                    return Err(crate::error::ConnectionError::Fec(e.to_string()));
                 }
             }
         } else {
@@ -218,7 +218,7 @@ impl QuicFuscateConnection {
         let recovered_packets = self
             .fec
             .on_receive(fec_packet)
-            .map_err(|e| format!("FEC decoding failed: {}", e))?;
+            .map_err(|e| crate::error::ConnectionError::Fec(format!("FEC decoding failed: {}", e)))?;
 
         for mut packet in recovered_packets {
             if let Some(ref mut data) = packet.data {
@@ -242,12 +242,12 @@ impl QuicFuscateConnection {
 
     /// Prepares QUIC packets for sending, wraps them in FEC, and buffers them.
     /// This has been completely refactored to eliminate serialization and copies.
-    pub fn send(&mut self, buf: &mut [u8]) -> Result<usize, quiche::Error> {
+    pub fn send(&mut self, buf: &mut [u8]) -> Result<usize, crate::error::ConnectionError> {
         // If there are buffered FEC packets, send one directly.
         if let Some(mut packet) = self.outgoing_fec_packets.pop_front() {
             let len = if let Some(ref xdp) = self.xdp_socket {
                 xdp.send(&[&packet.data.as_ref().unwrap()[..packet.len]])
-                    .map_err(|_| quiche::Error::Done)?;
+                    .map_err(|e| crate::error::ConnectionError::Fec(e.to_string()))?;
                 packet.len
             } else {
                 packet.to_raw(buf)?
@@ -263,9 +263,8 @@ impl QuicFuscateConnection {
         let (write, _send_info) = match self.conn.send(&mut send_buffer) {
             Ok(v) => v,
             Err(e) => {
-                // Return buffer to the pool on failure
                 self.optimization_manager.free_block(send_buffer);
-                return Err(e);
+                return Err(crate::error::ConnectionError::Quiche(e));
             }
         };
 
@@ -300,7 +299,7 @@ impl QuicFuscateConnection {
         if let Some(mut packet) = self.outgoing_fec_packets.pop_front() {
             let len = if let Some(ref xdp) = self.xdp_socket {
                 xdp.send(&[&packet.data.as_ref().unwrap()[..packet.len]])
-                    .map_err(|_| quiche::Error::Done)?;
+                    .map_err(|e| crate::error::ConnectionError::Fec(e.to_string()))?;
                 packet.len
             } else {
                 packet.to_raw(buf)?
@@ -327,6 +326,9 @@ impl QuicFuscateConnection {
         // Initiate path migration using quiche's API. The local address remains
         // unchanged, but a new peer address is supplied. quiche handles sending
         // the probing packets required for validation.
+        if let Some(ref xdp) = self.xdp_socket {
+            let _ = xdp.update_remote(new_peer);
+        }
         self.conn.migrate(self.local_addr, new_peer)
     }
 
@@ -436,6 +438,9 @@ impl QuicFuscateConnection {
                 quiche::PathEvent::Validated(local, peer) => {
                     println!("Path validated: {local}->{peer}");
                     self.peer_addr = peer;
+                    if let Some(ref xdp) = self.xdp_socket {
+                        let _ = xdp.update_remote(peer);
+                    }
                 }
                 quiche::PathEvent::FailedValidation(local, peer) => {
                     eprintln!("Path validation failed: {local}->{peer}");
@@ -451,6 +456,9 @@ impl QuicFuscateConnection {
                 quiche::PathEvent::PeerMigrated(local, peer) => {
                     println!("Peer migrated: {local}->{peer}");
                     self.peer_addr = peer;
+                    if let Some(ref xdp) = self.xdp_socket {
+                        let _ = xdp.update_remote(peer);
+                    }
                 }
             }
         }

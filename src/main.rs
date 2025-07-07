@@ -421,7 +421,7 @@ async fn run_client(
                     socket.send(&out[..len])?;
                 }
                 Ok(_) => break,
-                Err(quiche::Error::Done) => break,
+                Err(crate::error::ConnectionError::Quiche(quiche::Error::Done)) => break,
                 Err(e) => {
                     error!("Send failed: {:?}", e);
                     break;
@@ -591,7 +591,7 @@ async fn run_server(
                         }
                     }
                     Ok(_) => break,
-                    Err(quiche::Error::Done) => break,
+                    Err(crate::error::ConnectionError::Quiche(quiche::Error::Done)) => break,
                     Err(e) => {
                         error!("Send failed to {}: {:?}", addr, e);
                         break;

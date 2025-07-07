@@ -12,6 +12,7 @@ pub mod stealth;
 pub mod xdp_socket;
 pub mod tls_ffi;
 pub mod telemetry;
+pub mod error;
 
 pub use optimize::{CpuFeature, FeatureDetector};
 
