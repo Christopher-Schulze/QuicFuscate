@@ -8,12 +8,20 @@ use std::net::SocketAddr;
 #[cfg(unix)]
 use std::os::unix::io::{AsRawFd, RawFd};
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "xdp"))]
+use afxdp::Socket;
+
+#[cfg(all(unix, feature = "xdp"))]
+pub struct XdpSocket {
+    socket: Socket<'static, [u8; 2048]>,
+}
+
+#[cfg(all(unix, not(feature = "xdp")))]
 pub struct XdpSocket {
     socket: std::net::UdpSocket,
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(feature = "xdp")))]
 impl XdpSocket {
     /// Attempts to create a new XDP-enabled UDP socket bound to `bind_addr` and connected to `remote_addr`.
     pub fn new(bind_addr: SocketAddr, remote_addr: SocketAddr) -> io::Result<Self> {
@@ -54,6 +62,14 @@ impl XdpSocket {
     }
 }
 
+#[cfg(all(unix, feature = "xdp"))]
+impl XdpSocket {
+    pub fn new(_bind: SocketAddr, _remote: SocketAddr) -> io::Result<Self> {
+        // Placeholder: real XDP initialization would go here
+        Err(Error::new(ErrorKind::Other, "AF_XDP support not fully implemented"))
+    }
+}
+
 #[cfg(not(unix))]
 pub struct XdpSocket;
 
@@ -67,6 +83,6 @@ impl XdpSocket {
 impl XdpSocket {
     /// Checks if XDP sockets are supported on the current platform.
     pub fn is_supported() -> bool {
-        cfg!(target_os = "linux")
+        cfg!(all(target_os = "linux", feature = "xdp"))
     }
 }
