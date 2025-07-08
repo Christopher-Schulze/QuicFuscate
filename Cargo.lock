@@ -1485,6 +1485,7 @@ dependencies = [
  "sha2",
  "socket2",
  "sysinfo",
+ "thiserror 1.0.69",
  "tokio",
  "toml",
  "url",

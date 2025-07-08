@@ -144,6 +144,26 @@ mod xdp_tests {
         assert!(telemetry::XDP_BYTES_SENT.get() >= start + (msg.len() + msg2.len()) as u64);
         env::remove_var("XDP_IFACE");
     }
+
+    #[test]
+    fn xdp_socket_missing_iface_fallback() {
+        env::set_var("XDP_IFACE", "nonexistent0");
+        let xdp_addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+        udp.connect(xdp_addr).unwrap();
+        udp.set_nonblocking(true).unwrap();
+        let udp_addr = udp.local_addr().unwrap();
+
+        let xdp = XdpSocket::new(xdp_addr, udp_addr).unwrap();
+        assert!(!xdp.is_active());
+
+        let msg = b"test";
+        assert_eq!(xdp.send(&[msg.as_ref()]).unwrap(), msg.len());
+        let mut buf = [0u8; 32];
+        let n = wait_recv(&udp, &mut buf);
+        assert_eq!(&buf[..n], msg);
+        env::remove_var("XDP_IFACE");
+    }
 }
 
 #[cfg(all(target_os = "linux", not(feature = "xdp")))]

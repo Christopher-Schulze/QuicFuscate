@@ -9,6 +9,9 @@ use std::net::SocketAddr;
 use std::os::unix::io::{AsRawFd, RawFd};
 
 #[cfg(all(unix, feature = "xdp"))]
+use thiserror::Error;
+
+#[cfg(all(unix, feature = "xdp"))]
 use {
     afxdp::{
         buf_mmap::BufMmap,
@@ -47,6 +50,103 @@ pub struct XdpSocket {
 pub struct XdpSocket;
 
 #[cfg(all(unix, feature = "xdp"))]
+#[derive(Debug, Error)]
+pub enum XdpInitError {
+    #[error("memory map failed")]
+    Mmap,
+    #[error("invalid ring size")]
+    InvalidRing,
+    #[error("umem setup failed: {0}")]
+    Umem(#[source] io::Error),
+    #[error("socket creation failed: {0}")]
+    Socket(#[source] io::Error),
+    #[error("kernel does not support AF_XDP")]
+    Unsupported,
+}
+
+#[cfg(all(unix, feature = "xdp"))]
+fn is_unsupported(err: &io::Error) -> bool {
+    matches!(
+        err.raw_os_error(),
+        Some(libc::ENOSYS)
+            | Some(libc::EOPNOTSUPP)
+            | Some(libc::EPERM)
+            | Some(libc::EINVAL)
+            | Some(libc::ENODEV)
+            | Some(libc::EAFNOSUPPORT)
+    )
+}
+
+#[cfg(all(unix, feature = "xdp"))]
+impl From<afxdp::mmap_area::MmapError> for XdpInitError {
+    fn from(_e: afxdp::mmap_area::MmapError) -> Self {
+        XdpInitError::Mmap
+    }
+}
+
+#[cfg(all(unix, feature = "xdp"))]
+impl From<afxdp::umem::UmemNewError> for XdpInitError {
+    fn from(e: afxdp::umem::UmemNewError) -> Self {
+        match e {
+            afxdp::umem::UmemNewError::RingNotPowerOfTwo => XdpInitError::InvalidRing,
+            afxdp::umem::UmemNewError::Create(err) => {
+                if is_unsupported(&err) {
+                    XdpInitError::Unsupported
+                } else {
+                    XdpInitError::Umem(err)
+                }
+            }
+        }
+    }
+}
+
+#[cfg(all(unix, feature = "xdp"))]
+impl From<afxdp::socket::SocketNewError> for XdpInitError {
+    fn from(e: afxdp::socket::SocketNewError) -> Self {
+        match e {
+            afxdp::socket::SocketNewError::RingNotPowerOfTwo => XdpInitError::InvalidRing,
+            afxdp::socket::SocketNewError::Create(err) => {
+                if is_unsupported(&err) {
+                    XdpInitError::Unsupported
+                } else {
+                    XdpInitError::Socket(err)
+                }
+            }
+        }
+    }
+}
+
+#[cfg(all(unix, feature = "xdp"))]
+fn init_state(iface: &str) -> Result<XdpState, XdpInitError> {
+    const BUF_NUM: usize = 4096;
+    const BUF_LEN: usize = 2048;
+    let (area, mut bufs) =
+        MmapArea::new(BUF_NUM, BUF_LEN, MmapAreaOptions { huge_tlb: false })?;
+    let (umem, mut cq, mut fq) = Umem::new(
+        area,
+        XSK_RING_CONS__DEFAULT_NUM_DESCS,
+        XSK_RING_PROD__DEFAULT_NUM_DESCS,
+    )?;
+    let (_socket, rx, tx) = Socket::new(
+        umem.clone(),
+        iface,
+        0,
+        XSK_RING_CONS__DEFAULT_NUM_DESCS,
+        XSK_RING_PROD__DEFAULT_NUM_DESCS,
+        SocketOptions::default(),
+    )?;
+    let _ = fq.fill(&mut bufs, bufs.len());
+    Ok(XdpState {
+        rx,
+        tx,
+        fq,
+        cq,
+        pool: bufs,
+        pending: ArrayDeque::new(),
+    })
+}
+
+#[cfg(all(unix, feature = "xdp"))]
 fn infer_iface(addr: &SocketAddr) -> String {
     if let Ok(iface) = std::env::var("XDP_IFACE") {
         return iface;
@@ -77,60 +177,23 @@ impl XdpSocket {
         udp.set_nonblocking(true)?;
 
         let iface = infer_iface(&bind);
-        const BUF_NUM: usize = 4096;
-        const BUF_LEN: usize = 2048;
-        let (area, mut bufs) =
-            match MmapArea::new(BUF_NUM, BUF_LEN, MmapAreaOptions { huge_tlb: false }) {
-                Ok(v) => v,
-                Err(_) => {
-                    telemetry!(telemetry::XDP_FALLBACKS.inc());
-                    telemetry!(telemetry::XDP_ACTIVE.set(0));
-                    return Ok(Self { udp, state: None });
-                }
-            };
-        let (umem, mut cq, mut fq) = match Umem::new(
-            area,
-            XSK_RING_CONS__DEFAULT_NUM_DESCS,
-            XSK_RING_PROD__DEFAULT_NUM_DESCS,
-        ) {
-            Ok(v) => v,
-            Err(_) => {
+        match init_state(&iface) {
+            Ok(state) => {
+                telemetry!(telemetry::XDP_ACTIVE.set(1));
+                Ok(Self { udp, state: Some(state) })
+            }
+            Err(XdpInitError::Unsupported) => {
                 telemetry!(telemetry::XDP_FALLBACKS.inc());
                 telemetry!(telemetry::XDP_ACTIVE.set(0));
-                return Ok(Self { udp, state: None });
+                Ok(Self { udp, state: None })
             }
-        };
-
-        let (_socket, rx, tx) = match Socket::new(
-            umem.clone(),
-            &iface,
-            0,
-            XSK_RING_CONS__DEFAULT_NUM_DESCS,
-            XSK_RING_PROD__DEFAULT_NUM_DESCS,
-            SocketOptions::default(),
-        ) {
-            Ok(v) => v,
-            Err(_) => {
+            Err(e) => {
                 telemetry!(telemetry::XDP_FALLBACKS.inc());
                 telemetry!(telemetry::XDP_ACTIVE.set(0));
-                return Ok(Self { udp, state: None });
+                log::warn!("XDP initialization failed: {e}");
+                Ok(Self { udp, state: None })
             }
-        };
-
-        let _ = fq.fill(&mut bufs, bufs.len());
-
-        telemetry!(telemetry::XDP_ACTIVE.set(1));
-        Ok(Self {
-            udp,
-            state: Some(XdpState {
-                rx,
-                tx,
-                fq,
-                cq,
-                pool: bufs,
-                pending: ArrayDeque::new(),
-            }),
-        })
+        }
     }
 
     pub fn reconfigure(&mut self, bind: SocketAddr, remote: SocketAddr) -> io::Result<()> {
@@ -140,61 +203,27 @@ impl XdpSocket {
         udp.set_nonblocking(true)?;
 
         let iface = infer_iface(&bind);
-        const BUF_NUM: usize = 4096;
-        const BUF_LEN: usize = 2048;
-        let (area, mut bufs) =
-            match MmapArea::new(BUF_NUM, BUF_LEN, MmapAreaOptions { huge_tlb: false }) {
-                Ok(v) => v,
-                Err(_) => {
-                    telemetry!(telemetry::XDP_FALLBACKS.inc());
-                    telemetry!(telemetry::XDP_ACTIVE.set(0));
-                    self.udp = udp;
-                    return Ok(());
-                }
-            };
-        let (umem, mut cq, mut fq) = match Umem::new(
-            area,
-            XSK_RING_CONS__DEFAULT_NUM_DESCS,
-            XSK_RING_PROD__DEFAULT_NUM_DESCS,
-        ) {
-            Ok(v) => v,
-            Err(_) => {
+        match init_state(&iface) {
+            Ok(state) => {
+                self.udp = udp;
+                self.state = Some(state);
+                telemetry!(telemetry::XDP_ACTIVE.set(1));
+                Ok(())
+            }
+            Err(XdpInitError::Unsupported) => {
                 telemetry!(telemetry::XDP_FALLBACKS.inc());
                 telemetry!(telemetry::XDP_ACTIVE.set(0));
                 self.udp = udp;
-                return Ok(());
+                Ok(())
             }
-        };
-
-        let (socket, rx, tx) = match Socket::new(
-            umem.clone(),
-            &iface,
-            0,
-            XSK_RING_CONS__DEFAULT_NUM_DESCS,
-            XSK_RING_PROD__DEFAULT_NUM_DESCS,
-            SocketOptions::default(),
-        ) {
-            Ok(v) => v,
-            Err(_) => {
+            Err(e) => {
                 telemetry!(telemetry::XDP_FALLBACKS.inc());
                 telemetry!(telemetry::XDP_ACTIVE.set(0));
+                log::warn!("XDP reconfigure failed: {e}");
                 self.udp = udp;
-                return Ok(());
+                Ok(())
             }
-        };
-        let _ = fq.fill(&mut bufs, bufs.len());
-
-        self.udp = udp;
-        self.state = Some(XdpState {
-            rx,
-            tx,
-            fq,
-            cq,
-            pool: bufs,
-            pending: ArrayDeque::new(),
-        });
-        telemetry!(telemetry::XDP_ACTIVE.set(1));
-        Ok(())
+        }
     }
 
     fn fd(&self) -> RawFd {
