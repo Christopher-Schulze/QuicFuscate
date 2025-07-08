@@ -50,6 +50,9 @@ impl Encoder16 {
             let data = &src.data[..packet_len];
             let mut j = 0;
             while j + 1 < packet_len {
+                if j + 64 < packet_len {
+                    unsafe { prefetch_data(data.as_ptr().add(j + 64)); }
+                }
                 let s = u16::from_be_bytes([data[j], data[j + 1]]);
                 let r = u16::from_be_bytes([repair_data[j], repair_data[j + 1]]);
                 let v = gf16_mul_add(coeff, s, r);
@@ -194,6 +197,9 @@ impl Encoder {
                             &source_packet.data.as_ref().expect("packet data missing")
                                 [..source_packet.len];
                         for j in 0..packet_len {
+                            if j + 64 < packet_len {
+                                unsafe { prefetch_data(source_data.as_ptr().add(j + 64)); }
+                            }
                             repair_data[j] = gf_mul_add(coeff, source_data[j], repair_data[j]);
                         }
                     });
@@ -206,6 +212,9 @@ impl Encoder {
                     let source_data = &source_packet.data.as_ref().expect("packet data missing")
                         [..source_packet.len];
                     for j in 0..packet_len {
+                        if j + 64 < packet_len {
+                            unsafe { prefetch_data(source_data.as_ptr().add(j + 64)); }
+                        }
                         repair_data[j] = gf_mul_add(coeff, source_data[j], repair_data[j]);
                     }
                 }
@@ -360,19 +369,40 @@ impl CsrMatrix {
         let row_end = self.row_ptr[row + 1];
         optimize::dispatch(|policy| {
             if policy.as_any().is::<optimize::Avx2>() || policy.as_any().is::<optimize::Neon>() {
+                use rayon::prelude::*;
                 self.values[row_start..row_end]
                     .par_iter_mut()
-                    .for_each(|v| *v = gf_mul(*v, factor));
+                    .enumerate()
+                    .for_each(|(idx, v)| {
+                        if idx + 32 < row_end - row_start {
+                            unsafe { prefetch_data(self.values.as_ptr().add(row_start + idx + 32)); }
+                        }
+                        *v = gf_mul(*v, factor);
+                    });
                 if let Some(ref mut payload) = self.payloads[row] {
-                    payload.par_iter_mut().for_each(|b| *b = gf_mul(*b, factor));
+                    payload
+                        .par_iter_mut()
+                        .enumerate()
+                        .for_each(|(i, b)| {
+                            if i + 32 < payload.len() {
+                                unsafe { prefetch_data(payload.as_ptr().add(i + 32)); }
+                            }
+                            *b = gf_mul(*b, factor);
+                        });
                 }
             } else {
                 for i in row_start..row_end {
+                    if i + 32 < row_end {
+                        unsafe { prefetch_data(self.values.as_ptr().add(i + 32)); }
+                    }
                     self.values[i] = gf_mul(self.values[i], factor);
                 }
                 if let Some(ref mut payload) = self.payloads[row] {
-                    for b in payload.iter_mut() {
-                        *b = gf_mul(*b, factor);
+                    for j in 0..payload.len() {
+                        if j + 32 < payload.len() {
+                            unsafe { prefetch_data(payload.as_ptr().add(j + 32)); }
+                        }
+                        payload[j] = gf_mul(payload[j], factor);
                     }
                 }
             }
@@ -403,11 +433,20 @@ impl CsrMatrix {
             ) {
                 if policy.as_any().is::<optimize::Avx2>() || policy.as_any().is::<optimize::Neon>()
                 {
+                    use rayon::prelude::*;
                     tgt.par_iter_mut()
-                        .zip(src.par_iter())
-                        .for_each(|(t, &s)| *t = gf_mul_add(factor, s, *t));
+                        .enumerate()
+                        .for_each(|(i, t)| {
+                            if i + 32 < src.len() {
+                                unsafe { prefetch_data(src.as_ptr().add(i + 32)); }
+                            }
+                            *t = gf_mul_add(factor, src[i], *t);
+                        });
                 } else {
                     for i in 0..tgt.len().min(src.len()) {
+                        if i + 32 < src.len() {
+                            unsafe { prefetch_data(src.as_ptr().add(i + 32)); }
+                        }
                         tgt[i] = gf_mul_add(factor, src[i], tgt[i]);
                     }
                 }

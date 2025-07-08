@@ -30,6 +30,20 @@ pub(crate) unsafe fn prefetch_exp(idx: usize) {
 }
 
 #[inline(always)]
+pub(crate) unsafe fn prefetch_data(ptr: *const u8) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+        _mm_prefetch(ptr as *const i8, _MM_HINT_T0);
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        use std::arch::aarch64::__prefetch;
+        __prefetch(ptr);
+    }
+}
+
+#[inline(always)]
 pub(crate) fn gf_mul_table(a: u8, b: u8) -> u8 {
     if a == 0 || b == 0 {
         return 0;
@@ -60,37 +74,47 @@ fn gf_mul_shift(mut a: u8, mut b: u8) -> u8 {
 }
 
 #[cfg(all(target_arch = "x86_64"))]
-#[target_feature(enable = "avx512f,avx512vbmi,pclmulqdq")]
+#[target_feature(enable = "avx512f,avx512vbmi")]
 pub(crate) unsafe fn gf_mul_bitsliced_avx512(a: u8, b: u8) -> u8 {
     use std::arch::x86_64::*;
 
-    let va = _mm512_set1_epi64(a as i64);
-    let vb = _mm512_set1_epi64(b as i64);
-    let prod = _mm512_clmulepi64_epi128(va, vb, 0x00);
-    let lo = _mm512_castsi512_si128(prod);
-    let r = _mm_extract_epi16(lo, 0) as u16;
-    let mut t = r ^ (r >> 8);
-    t ^= t >> 4;
-    t ^= t >> 2;
-    t ^= t >> 1;
-    (t & 0xFF) as u8
+    let mut va = _mm512_set1_epi8(a as i8);
+    let mut res = _mm512_setzero_si512();
+    let poly = _mm512_set1_epi8(IRREDUCIBLE_POLY as i8);
+    let mut vb = b;
+    for _ in 0..8 {
+        let mask = _mm512_set1_epi8(((vb & 1) as i8).wrapping_neg());
+        res = _mm512_xor_si512(res, _mm512_and_si512(va, mask));
+        let carry = _mm512_movepi8_mask(_mm512_and_si512(va, _mm512_set1_epi8(0x80u8 as i8))) as u64;
+        va = _mm512_add_epi8(va, va);
+        if carry & 1 != 0 {
+            va = _mm512_xor_si512(va, poly);
+        }
+        vb >>= 1;
+    }
+    _mm_extract_epi8(_mm512_castsi512_si128(res), 0) as u8
 }
 
 #[cfg(all(target_arch = "x86_64"))]
-#[target_feature(enable = "avx2,pclmulqdq")]
+#[target_feature(enable = "avx2")]
 pub(crate) unsafe fn gf_mul_bitsliced_avx2(a: u8, b: u8) -> u8 {
     use std::arch::x86_64::*;
 
-    let va = _mm256_set1_epi64x(a as i64);
-    let vb = _mm256_set1_epi64x(b as i64);
-    let prod = _mm256_clmulepi64_epi128(va, vb, 0x00);
-    let lo = _mm256_castsi256_si128(prod);
-    let r = _mm_extract_epi16(lo, 0) as u16;
-    let mut t = r ^ (r >> 8);
-    t ^= t >> 4;
-    t ^= t >> 2;
-    t ^= t >> 1;
-    (t & 0xFF) as u8
+    let mut va = _mm256_set1_epi8(a as i8);
+    let mut res = _mm256_setzero_si256();
+    let poly = _mm256_set1_epi8(IRREDUCIBLE_POLY as i8);
+    let mut vb = b;
+    for _ in 0..8 {
+        let mask = _mm256_set1_epi8(((vb & 1) as i8).wrapping_neg());
+        res = _mm256_xor_si256(res, _mm256_and_si256(va, mask));
+        let carry_mask = _mm256_movemask_epi8(_mm256_and_si256(va, _mm256_set1_epi8(0x80u8 as i8)));
+        va = _mm256_add_epi8(va, va);
+        if carry_mask & 1 != 0 {
+            va = _mm256_xor_si256(va, poly);
+        }
+        vb >>= 1;
+    }
+    _mm_extract_epi8(_mm256_castsi256_si128(res), 0) as u8
 }
 
 #[cfg(all(target_arch = "x86_64"))]
@@ -110,19 +134,25 @@ pub(crate) unsafe fn gf_mul_bitsliced_sse2(a: u8, b: u8) -> u8 {
 }
 
 #[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon,pmull")]
+#[target_feature(enable = "neon")]
 pub(crate) unsafe fn gf_mul_bitsliced_neon(a: u8, b: u8) -> u8 {
     use std::arch::aarch64::*;
 
-    let va = vdupq_n_u8(a);
-    let vb = vdupq_n_u8(b);
-    let prod = vmull_p8(vget_low_u8(va), vget_low_u8(vb));
-    let r = vgetq_lane_u16(prod, 0);
-    let mut t = r ^ (r >> 8);
-    t ^= t >> 4;
-    t ^= t >> 2;
-    t ^= t >> 1;
-    (t & 0xFF) as u8
+    let mut va = vdupq_n_u8(a);
+    let mut res = vdupq_n_u8(0);
+    let poly = vdupq_n_u8(IRREDUCIBLE_POLY as u8);
+    let mut vb = b;
+    for _ in 0..8 {
+        let mask = vdupq_n_u8(if (vb & 1) != 0 { 0xFF } else { 0 });
+        res = veorq_u8(res, vandq_u8(va, mask));
+        let carry = vandq_u8(va, vdupq_n_u8(0x80));
+        va = vshlq_n_u8(va, 1);
+        if vgetq_lane_u8(carry, 0) != 0 {
+            va = veorq_u8(va, poly);
+        }
+        vb >>= 1;
+    }
+    vgetq_lane_u8(res, 0)
 }
 // --- High-Performance Finite Field Arithmetic (GF(2^8)) ---
 
