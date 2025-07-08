@@ -21,6 +21,15 @@ Clone the repository and run the workflow to download, patch and build quiche:
 ./scripts/quiche_workflow.sh --type release
 ```
 
+After completion the environment variable `QUICHE_PATH` points to the patched
+sources under `libs/patched_quiche/quiche`. Use it when building other
+components:
+
+```bash
+export QUICHE_PATH=$(pwd)/libs/patched_quiche/quiche
+cargo build --release
+```
+
 The workflow fetches the sources, applies all patches and builds quiche in one go.
 If a patch fails to apply check the logs under `libs/logs` for details.
 

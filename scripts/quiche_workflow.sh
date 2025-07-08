@@ -233,6 +233,11 @@ fetch_quiche() {
             if git clone --depth 1 "$MIRROR_URL" "$PATCHED_DIR" >"$log_file" 2>&1; then
                 git -C "$PATCHED_DIR" submodule update --init --recursive >>"$log_file" 2>&1
                 ensure_quiche_dir
+                if [ ! -d "$PATCHED_DIR/quiche" ]; then
+                    warn "Quiche-Verzeichnis fehlt nach dem Klonen"
+                    rm -rf "$PATCHED_DIR"
+                    continue
+                fi
                 break
             fi
             warn "Klonen fehlgeschlagen. Details siehe $log_file"
@@ -256,6 +261,10 @@ fetch_quiche() {
 apply_patches() {
     log "Starte Anwenden der Patches..."
     check_dependencies git patch
+
+    if [ ! -d "$PATCHED_DIR/quiche" ]; then
+        error "Quiche-Quellcode fehlt. Bitte zuerst $0 --step fetch ausführen"
+    fi
     
     if [ ! -d "$PATCHES_DIR" ] || [ -z "$(ls -A "$PATCHES_DIR"/*.patch 2>/dev/null)" ]; then
         warn "Keine Patch-Dateien in $PATCHES_DIR gefunden"
