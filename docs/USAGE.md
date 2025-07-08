@@ -62,6 +62,14 @@ export QUICHE_PATH=$(pwd)/libs/patched_quiche/quiche
 The runtime automatically loads the matching profile based on the selected
 `--profile` and `--os` options.
 
+### FakeTLS Handshake
+
+When stealth mode is active, QuicFuscate sends a minimal TLS handshake.
+The ClientHello bytes are taken from the selected fingerprint profile and
+a synthetic ServerHello with placeholder certificate is returned. This
+reduces handshake overhead while still presenting TLS-like packets on the
+wire.
+
 ### Optimization Parameters
 
 Both client and server accept additional flags to tune the memory pool used for
