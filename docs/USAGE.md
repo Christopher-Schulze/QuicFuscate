@@ -70,6 +70,30 @@ a synthetic ServerHello with placeholder certificate is returned. This
 reduces handshake overhead while still presenting TLS-like packets on the
 wire.
 
+To force FakeTLS via the configuration file add:
+
+```toml
+[stealth]
+use_fake_tls = true
+```
+
+Custom handshakes can be generated programmatically:
+
+```rust
+use quicfuscate::fake_tls::{FakeTls, ClientHelloParams, ServerHelloParams};
+
+let hello = FakeTls::client_hello_custom(ClientHelloParams {
+    tls_version: 0x0303,
+    cipher_suites: &[0x1301, 0x1302],
+    extensions: &[],
+});
+let server = FakeTls::server_hello_custom(ServerHelloParams {
+    tls_version: 0x0303,
+    cipher_suite: 0x1301,
+    extensions: &[],
+});
+```
+
 ### Optimization Parameters
 
 Both client and server accept additional flags to tune the memory pool used for

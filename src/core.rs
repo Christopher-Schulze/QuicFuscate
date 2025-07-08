@@ -106,12 +106,11 @@ impl QuicFuscateConnection {
             optimization_manager.clone(),
         ));
 
-        if stealth_manager.use_fake_tls() {
-            let _ = stealth_manager.fake_tls_handshake();
-        } else if use_utls {
-            stealth_manager
-                .apply_utls_profile(&mut config, Some(CipherSuiteSelector::new().tls_cipher()));
-        }
+        let _ = stealth_manager.configure_tls(
+            &mut config,
+            use_utls,
+            Some(CipherSuiteSelector::new().tls_cipher()),
+        );
 
         let scid = quiche::ConnectionId::from_ref(&[0; quiche::MAX_CONN_ID_LEN]);
 

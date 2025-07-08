@@ -1235,6 +1235,26 @@ impl StealthManager {
         fake_tls::FakeTls::handshake(&fp)
     }
 
+    /// Configures the provided quiche `Config` for the active fingerprint.
+    /// Depending on the configuration this either applies an uTLS profile or
+    /// generates FakeTLS handshake bytes. The returned vector is only populated
+    /// when FakeTLS is in use.
+    pub fn configure_tls(
+        &self,
+        cfg: &mut quiche::Config,
+        enable_utls: bool,
+        preferred: Option<u16>,
+    ) -> Option<Vec<u8>> {
+        if self.config.use_fake_tls {
+            Some(self.fake_tls_handshake())
+        } else if enable_utls {
+            self.apply_utls_profile(cfg, preferred);
+            None
+        } else {
+            None
+        }
+    }
+
     /// Starts automatic rotation through the given browser profiles.
     /// This spawns a task on the DoH runtime which periodically updates the
     /// active fingerprint.

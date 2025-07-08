@@ -1,5 +1,6 @@
 use quicfuscate::fake_tls::{
-    FakeTls, DEFAULT_CERTIFICATE, DEFAULT_CLIENT_HELLO, DEFAULT_SERVER_HELLO,
+    ClientHelloParams, FakeTls, ServerHelloParams, DEFAULT_CERTIFICATE, DEFAULT_CLIENT_HELLO,
+    DEFAULT_SERVER_HELLO,
 };
 use quicfuscate::stealth::{BrowserProfile, FingerprintProfile, OsProfile};
 
@@ -17,4 +18,22 @@ fn fake_tls_handshake_sequence() {
     let mut expected = DEFAULT_CLIENT_HELLO.to_vec();
     expected.extend_from_slice(&resp);
     assert_eq!(all, expected);
+}
+
+#[test]
+fn custom_handshake_builder() {
+    let ch = ClientHelloParams {
+        tls_version: 0x0303,
+        cipher_suites: &[0x1301, 0x1302],
+        extensions: &[],
+    };
+    let sh = ServerHelloParams {
+        tls_version: 0x0303,
+        cipher_suite: 0x1301,
+        extensions: &[],
+    };
+
+    let hello = FakeTls::client_hello_custom(ch);
+    let server = FakeTls::server_hello_custom(sh);
+    assert_eq!(FakeTls::handshake_custom(ch, sh), [hello, server].concat());
 }
