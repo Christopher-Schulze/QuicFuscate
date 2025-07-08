@@ -9,6 +9,8 @@ type BuilderNewFn = unsafe extern "C" fn() -> *mut c_void;
 type BuilderAddFn = unsafe extern "C" fn(*mut c_void, *const u8, usize);
 type BuilderUseFn = unsafe extern "C" fn(*mut c_void, *mut c_void);
 type BuilderFreeFn = unsafe extern "C" fn(*mut c_void);
+type DisableGreaseFn = unsafe extern "C" fn(*mut c_void, i32);
+type DeterministicFn = unsafe extern "C" fn(*mut c_void, i32);
 
 static LIB: OnceLock<Option<Library>> = OnceLock::new();
 static SET_TLS: OnceLock<Option<CustomTlsFn>> = OnceLock::new();
@@ -17,6 +19,8 @@ static BUILDER_NEW: OnceLock<Option<BuilderNewFn>> = OnceLock::new();
 static BUILDER_ADD: OnceLock<Option<BuilderAddFn>> = OnceLock::new();
 static BUILDER_USE: OnceLock<Option<BuilderUseFn>> = OnceLock::new();
 static BUILDER_FREE: OnceLock<Option<BuilderFreeFn>> = OnceLock::new();
+static DISABLE_GREASE: OnceLock<Option<DisableGreaseFn>> = OnceLock::new();
+static SET_DETERMINISTIC: OnceLock<Option<DeterministicFn>> = OnceLock::new();
 
 #[cfg(test)]
 pub static LAST_HELLO: once_cell::sync::Lazy<std::sync::Mutex<Vec<u8>>> =
@@ -54,6 +58,18 @@ fn load_real_symbols() {
                 let bfree: Result<Symbol<BuilderFreeFn>, _> = lib.get(b"quiche_chlo_builder_free");
                 if let Ok(f) = bfree {
                     BUILDER_FREE.set(Some(*f)).ok();
+                }
+
+                let dgrease: Result<Symbol<DisableGreaseFn>, _> =
+                    lib.get(b"SSL_disable_tls_grease");
+                if let Ok(f) = dgrease {
+                    DISABLE_GREASE.set(Some(*f)).ok();
+                }
+
+                let dhello: Result<Symbol<DeterministicFn>, _> =
+                    lib.get(b"SSL_set_deterministic_hello");
+                if let Ok(f) = dhello {
+                    SET_DETERMINISTIC.set(Some(*f)).ok();
                 }
             }
             LIB.set(Some(lib)).ok();
@@ -144,6 +160,28 @@ pub unsafe extern "C" fn quiche_chlo_builder_free_wrapper(builder: *mut c_void) 
     });
     if let Some(real) = f.as_ref() {
         real(builder);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn quiche_ssl_disable_tls_grease(ssl: *mut c_void, val: i32) {
+    let f = DISABLE_GREASE.get_or_init(|| {
+        load_real_symbols();
+        DISABLE_GREASE.get().cloned().flatten()
+    });
+    if let Some(real) = f.as_ref() {
+        real(ssl, val);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn quiche_ssl_set_deterministic_hello(ssl: *mut c_void, val: i32) {
+    let f = SET_DETERMINISTIC.get_or_init(|| {
+        load_real_symbols();
+        SET_DETERMINISTIC.get().cloned().flatten()
+    });
+    if let Some(real) = f.as_ref() {
+        real(ssl, val);
     }
 }
 

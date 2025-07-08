@@ -1076,7 +1076,6 @@ impl StealthManager {
         crypto_manager: Arc<CryptoManager>,
         optimization_manager: Arc<OptimizationManager>,
     ) -> Self {
-        config.use_fake_tls = true;
         let mut fingerprint = FingerprintProfile::new(config.browser_profile, config.os_profile);
         if fingerprint.client_hello.is_none() {
             fingerprint.client_hello =
