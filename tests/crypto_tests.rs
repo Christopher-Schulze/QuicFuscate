@@ -9,6 +9,7 @@ fn run_test(suite: CipherSuite) {
         CipherSuite::Aegis256 => (32, 32),
         CipherSuite::Morus1280_128 => (16, 16),
         CipherSuite::Morus1280_256 => (32, 16),
+        CipherSuite::SoftwareFallback => (16, 16),
     };
     let key = vec![0u8; key_len];
     let nonce = vec![0u8; nonce_len];
@@ -44,6 +45,11 @@ fn test_morus() {
 #[test]
 fn test_morus256() {
     run_test(CipherSuite::Morus1280_256);
+}
+
+#[test]
+fn test_fallback() {
+    run_test(CipherSuite::SoftwareFallback);
 }
 
 #[test]
