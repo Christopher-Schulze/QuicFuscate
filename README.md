@@ -94,6 +94,11 @@ Quick start after cloning:
 cargo build --release
 ```
 
+Browser fingerprints are stored as base64 encoded `.chlo` files under
+`browser_profiles/`. When the patched quiche is built, these files are
+fed into the new `ChloBuilder` API to recreate the exact ClientHello
+layout during connection setup.
+
 If the command fails with a missing commit error (e.g.
 ```
 fatal: remote error: upload-pack: not our ref 5700a7c74927d2c4912ac95e904c6ad3642b6868

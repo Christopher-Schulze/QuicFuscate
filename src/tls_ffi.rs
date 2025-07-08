@@ -5,10 +5,18 @@ use libloading::{Library, Symbol};
 
 type CustomTlsFn = unsafe extern "C" fn(*mut c_void, *const u8, usize);
 type EnableSimdFn = unsafe extern "C" fn(*mut c_void);
+type BuilderNewFn = unsafe extern "C" fn() -> *mut c_void;
+type BuilderAddFn = unsafe extern "C" fn(*mut c_void, *const u8, usize);
+type BuilderUseFn = unsafe extern "C" fn(*mut c_void, *mut c_void);
+type BuilderFreeFn = unsafe extern "C" fn(*mut c_void);
 
 static LIB: OnceLock<Option<Library>> = OnceLock::new();
 static SET_TLS: OnceLock<Option<CustomTlsFn>> = OnceLock::new();
 static ENABLE_SIMD: OnceLock<Option<EnableSimdFn>> = OnceLock::new();
+static BUILDER_NEW: OnceLock<Option<BuilderNewFn>> = OnceLock::new();
+static BUILDER_ADD: OnceLock<Option<BuilderAddFn>> = OnceLock::new();
+static BUILDER_USE: OnceLock<Option<BuilderUseFn>> = OnceLock::new();
+static BUILDER_FREE: OnceLock<Option<BuilderFreeFn>> = OnceLock::new();
 
 #[cfg(test)]
 pub static LAST_HELLO: once_cell::sync::Lazy<std::sync::Mutex<Vec<u8>>> =
@@ -29,6 +37,23 @@ fn load_real_symbols() {
                     lib.get(b"quiche_config_enable_simd");
                 if let Ok(f) = simd {
                     ENABLE_SIMD.set(Some(*f)).ok();
+                }
+
+                let bnew: Result<Symbol<BuilderNewFn>, _> = lib.get(b"quiche_chlo_builder_new");
+                if let Ok(f) = bnew {
+                    BUILDER_NEW.set(Some(*f)).ok();
+                }
+                let badd: Result<Symbol<BuilderAddFn>, _> = lib.get(b"quiche_chlo_builder_add");
+                if let Ok(f) = badd {
+                    BUILDER_ADD.set(Some(*f)).ok();
+                }
+                let buse: Result<Symbol<BuilderUseFn>, _> = lib.get(b"quiche_config_set_chlo_builder");
+                if let Ok(f) = buse {
+                    BUILDER_USE.set(Some(*f)).ok();
+                }
+                let bfree: Result<Symbol<BuilderFreeFn>, _> = lib.get(b"quiche_chlo_builder_free");
+                if let Ok(f) = bfree {
+                    BUILDER_FREE.set(Some(*f)).ok();
                 }
             }
             LIB.set(Some(lib)).ok();
@@ -66,6 +91,59 @@ pub unsafe extern "C" fn quiche_config_set_custom_tls(
         let mut buf = LAST_HELLO.lock().unwrap();
         buf.clear();
         buf.extend_from_slice(unsafe { std::slice::from_raw_parts(hello, len) });
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn quiche_chlo_builder_new_wrapper() -> *mut c_void {
+    let f = BUILDER_NEW.get_or_init(|| {
+        load_real_symbols();
+        BUILDER_NEW.get().cloned().flatten()
+    });
+    if let Some(real) = f.as_ref() {
+        real()
+    } else {
+        std::ptr::null_mut()
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn quiche_chlo_builder_add_wrapper(
+    builder: *mut c_void,
+    data: *const u8,
+    len: usize,
+) {
+    let f = BUILDER_ADD.get_or_init(|| {
+        load_real_symbols();
+        BUILDER_ADD.get().cloned().flatten()
+    });
+    if let Some(real) = f.as_ref() {
+        real(builder, data, len);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn quiche_config_set_chlo_builder_wrapper(
+    cfg: *mut c_void,
+    builder: *mut c_void,
+) {
+    let f = BUILDER_USE.get_or_init(|| {
+        load_real_symbols();
+        BUILDER_USE.get().cloned().flatten()
+    });
+    if let Some(real) = f.as_ref() {
+        real(cfg, builder);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn quiche_chlo_builder_free_wrapper(builder: *mut c_void) {
+    let f = BUILDER_FREE.get_or_init(|| {
+        load_real_symbols();
+        BUILDER_FREE.get().cloned().flatten()
+    });
+    if let Some(real) = f.as_ref() {
+        real(builder);
     }
 }
 

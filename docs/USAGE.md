@@ -51,7 +51,8 @@ Use the `--config` flag to load a unified TOML file containing FEC, stealth and 
 When built against the patched `quiche` library, QuicFuscate can replay
 captured TLS ClientHello messages. Store the base64 encoded handshake in
 `browser_profiles/<browser>_<os>.chlo` and build with `QUICHE_PATH` pointing
-to the patched sources:
+to the patched sources. The runtime loads the file, feeds the bytes to
+`ChloBuilder` and attaches it to the configuration:
 
 ```bash
 export QUICHE_PATH=$(pwd)/libs/patched_quiche/quiche
