@@ -157,6 +157,13 @@ void quiche_config_set_custom_tls(quiche_config *cfg,
 When the patched library is absent, a stub implementation lives in
 `src/tls_ffi.rs` so unit tests continue to compile.
 
+## Browser Fingerprints
+
+Real ClientHello messages are stored as base64 files in `browser_profiles/*.chlo`.
+`StealthManager` loads the corresponding file and injects the bytes via
+`quiche_config_set_custom_tls`. After adding new fingerprints, rebuild the
+patched library with `scripts/quiche_workflow.sh --type release`.
+
 ## Advanced Optimizations
 
 ### CPU-Specific Optimizations

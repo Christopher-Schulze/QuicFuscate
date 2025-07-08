@@ -1048,12 +1048,10 @@ impl StealthManager {
         }
     }
 
-    /// Applies the configured uTLS profile to a quiche configuration.
-    /// This function simulates a real uTLS fingerprint by configuring various
-    /// QUIC transport parameters to match the typical behavior of the target browser.
-    /// NOTE: For a perfect fingerprint match, patching the underlying TLS stack (e.g., BoringSSL)
-    /// to control the Client Hello message format (cipher suite order, extensions, GREASE values)
-    /// would be required. This is a simulation based on available quiche settings.
+    /// Applies the configured TLS fingerprint to a quiche configuration.
+    /// ClientHello bytes are loaded from `browser_profiles/*.chlo` and passed
+    /// to quiche using the `quiche_config_set_custom_tls` hook. This ensures
+    /// the handshake matches the captured browser exactly.
     pub fn apply_utls_profile(&self, config: &mut quiche::Config, preferred: Option<u16>) {
         let fingerprint = self.fingerprint.lock().unwrap();
         info!(
