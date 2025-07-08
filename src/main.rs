@@ -349,7 +349,16 @@ fn parse_profile_entry(entry: &str, default_os: OsProfile) -> Option<Fingerprint
     } else {
         default_os
     };
-    Some(FingerprintProfile::new(browser, os))
+    let mut fp = FingerprintProfile::new(browser, os);
+    if fp.client_hello.is_none() {
+        eprintln!(
+            "No ClientHello found for {}@{}",
+            browser_part,
+            format!("{:?}", os).to_lowercase()
+        );
+        return None;
+    }
+    Some(fp)
 }
 
 async fn run_client(
@@ -381,9 +390,13 @@ async fn run_client(
 ) -> std::io::Result<()> {
     let config_path = config.clone();
     if list_fingerprints {
-        println!("Available browser profiles:");
-        for v in BrowserProfile::value_variants() {
-            println!("- {}", v.to_possible_value().unwrap().get_name());
+        println!("Available browser fingerprints:");
+        for (b, o) in crate::stealth::TlsClientHelloSpoofer::available_profiles() {
+            println!(
+                "- {}@{}",
+                format!("{:?}", b).to_lowercase(),
+                format!("{:?}", o).to_lowercase()
+            );
         }
         return Ok(());
     }
