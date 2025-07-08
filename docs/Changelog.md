@@ -1,5 +1,14 @@
 
 
+## [2025-07-09] - Optimierte Bitslice-Kerne
+
+### ✨ Added
+- Optimierte Multiplikationsroutinen für AVX2, AVX512 und NEON.
+- Benchmarkdokumentation aktualisiert.
+
+### 📜 Ergebnisse
+- AVX2 erreicht nun ca. 2,5 GB/s, AVX512 rund 4 GB/s und NEON etwa 2,3 GB/s.
+
 ## [2024-12-24] - Bit-Sliced GF Multiplication
 
 ### ✨ Added
