@@ -51,7 +51,9 @@ impl Encoder16 {
             let mut j = 0;
             while j + 1 < packet_len {
                 if j + 64 < packet_len {
-                    unsafe { prefetch_data(data.as_ptr().add(j + 64)); }
+                    unsafe {
+                        prefetch_data(data.as_ptr().add(j + 64));
+                    }
                 }
                 let s = u16::from_be_bytes([data[j], data[j + 1]]);
                 let r = u16::from_be_bytes([repair_data[j], repair_data[j + 1]]);
@@ -196,11 +198,30 @@ impl Encoder {
                         let source_data =
                             &source_packet.data.as_ref().expect("packet data missing")
                                 [..source_packet.len];
-                        for j in 0..packet_len {
-                            if j + 64 < packet_len {
-                                unsafe { prefetch_data(source_data.as_ptr().add(j + 64)); }
+                        let mut j = 0;
+                        while j + 4 <= packet_len {
+                            unsafe {
+                                if j + 68 < packet_len {
+                                    prefetch_data(source_data.as_ptr().add(j + 68));
+                                }
                             }
                             repair_data[j] = gf_mul_add(coeff, source_data[j], repair_data[j]);
+                            repair_data[j + 1] =
+                                gf_mul_add(coeff, source_data[j + 1], repair_data[j + 1]);
+                            repair_data[j + 2] =
+                                gf_mul_add(coeff, source_data[j + 2], repair_data[j + 2]);
+                            repair_data[j + 3] =
+                                gf_mul_add(coeff, source_data[j + 3], repair_data[j + 3]);
+                            j += 4;
+                        }
+                        while j < packet_len {
+                            unsafe {
+                                if j + 64 < packet_len {
+                                    prefetch_data(source_data.as_ptr().add(j + 64));
+                                }
+                            }
+                            repair_data[j] = gf_mul_add(coeff, source_data[j], repair_data[j]);
+                            j += 1;
                         }
                     });
             } else {
@@ -211,11 +232,30 @@ impl Encoder {
                     }
                     let source_data = &source_packet.data.as_ref().expect("packet data missing")
                         [..source_packet.len];
-                    for j in 0..packet_len {
-                        if j + 64 < packet_len {
-                            unsafe { prefetch_data(source_data.as_ptr().add(j + 64)); }
+                    let mut j = 0;
+                    while j + 4 <= packet_len {
+                        unsafe {
+                            if j + 68 < packet_len {
+                                prefetch_data(source_data.as_ptr().add(j + 68));
+                            }
                         }
                         repair_data[j] = gf_mul_add(coeff, source_data[j], repair_data[j]);
+                        repair_data[j + 1] =
+                            gf_mul_add(coeff, source_data[j + 1], repair_data[j + 1]);
+                        repair_data[j + 2] =
+                            gf_mul_add(coeff, source_data[j + 2], repair_data[j + 2]);
+                        repair_data[j + 3] =
+                            gf_mul_add(coeff, source_data[j + 3], repair_data[j + 3]);
+                        j += 4;
+                    }
+                    while j < packet_len {
+                        unsafe {
+                            if j + 64 < packet_len {
+                                prefetch_data(source_data.as_ptr().add(j + 64));
+                            }
+                        }
+                        repair_data[j] = gf_mul_add(coeff, source_data[j], repair_data[j]);
+                        j += 1;
                     }
                 }
             }
@@ -375,32 +415,37 @@ impl CsrMatrix {
                     .enumerate()
                     .for_each(|(idx, v)| {
                         if idx + 32 < row_end - row_start {
-                            unsafe { prefetch_data(self.values.as_ptr().add(row_start + idx + 32)); }
+                            unsafe {
+                                prefetch_data(self.values.as_ptr().add(row_start + idx + 32));
+                            }
                         }
                         *v = gf_mul(*v, factor);
                     });
                 if let Some(ref mut payload) = self.payloads[row] {
-                    payload
-                        .par_iter_mut()
-                        .enumerate()
-                        .for_each(|(i, b)| {
-                            if i + 32 < payload.len() {
-                                unsafe { prefetch_data(payload.as_ptr().add(i + 32)); }
+                    payload.par_iter_mut().enumerate().for_each(|(i, b)| {
+                        if i + 32 < payload.len() {
+                            unsafe {
+                                prefetch_data(payload.as_ptr().add(i + 32));
                             }
-                            *b = gf_mul(*b, factor);
-                        });
+                        }
+                        *b = gf_mul(*b, factor);
+                    });
                 }
             } else {
                 for i in row_start..row_end {
                     if i + 32 < row_end {
-                        unsafe { prefetch_data(self.values.as_ptr().add(i + 32)); }
+                        unsafe {
+                            prefetch_data(self.values.as_ptr().add(i + 32));
+                        }
                     }
                     self.values[i] = gf_mul(self.values[i], factor);
                 }
                 if let Some(ref mut payload) = self.payloads[row] {
                     for j in 0..payload.len() {
                         if j + 32 < payload.len() {
-                            unsafe { prefetch_data(payload.as_ptr().add(j + 32)); }
+                            unsafe {
+                                prefetch_data(payload.as_ptr().add(j + 32));
+                            }
                         }
                         payload[j] = gf_mul(payload[j], factor);
                     }
@@ -434,20 +479,37 @@ impl CsrMatrix {
                 if policy.as_any().is::<optimize::Avx2>() || policy.as_any().is::<optimize::Neon>()
                 {
                     use rayon::prelude::*;
-                    tgt.par_iter_mut()
-                        .enumerate()
-                        .for_each(|(i, t)| {
-                            if i + 32 < src.len() {
-                                unsafe { prefetch_data(src.as_ptr().add(i + 32)); }
-                            }
-                            *t = gf_mul_add(factor, src[i], *t);
-                        });
-                } else {
-                    for i in 0..tgt.len().min(src.len()) {
+                    tgt.par_iter_mut().enumerate().for_each(|(i, t)| {
                         if i + 32 < src.len() {
-                            unsafe { prefetch_data(src.as_ptr().add(i + 32)); }
+                            unsafe {
+                                prefetch_data(src.as_ptr().add(i + 32));
+                            }
+                        }
+                        *t = gf_mul_add(factor, src[i], *t);
+                    });
+                } else {
+                    let mut i = 0;
+                    let max = tgt.len().min(src.len());
+                    while i + 4 <= max {
+                        unsafe {
+                            if i + 36 < src.len() {
+                                prefetch_data(src.as_ptr().add(i + 36));
+                            }
                         }
                         tgt[i] = gf_mul_add(factor, src[i], tgt[i]);
+                        tgt[i + 1] = gf_mul_add(factor, src[i + 1], tgt[i + 1]);
+                        tgt[i + 2] = gf_mul_add(factor, src[i + 2], tgt[i + 2]);
+                        tgt[i + 3] = gf_mul_add(factor, src[i + 3], tgt[i + 3]);
+                        i += 4;
+                    }
+                    while i < max {
+                        unsafe {
+                            if i + 32 < src.len() {
+                                prefetch_data(src.as_ptr().add(i + 32));
+                            }
+                        }
+                        tgt[i] = gf_mul_add(factor, src[i], tgt[i]);
+                        i += 1;
                     }
                 }
             }
