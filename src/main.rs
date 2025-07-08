@@ -86,14 +86,6 @@ enum Commands {
         #[clap(long)]
         xdp_stats: bool,
 
-        /// Enable XDP acceleration if supported
-        #[clap(long)]
-        xdp: bool,
-
-        /// Print live XDP statistics
-        #[clap(long)]
-        xdp_stats: bool,
-
         /// Path to a unified TOML configuration file
         #[clap(long, value_name = "PATH")]
         config: Option<PathBuf>,
