@@ -147,13 +147,15 @@ async fn tls_custom_clienthello() {
     let custom_hello = [1u8, 2, 3, 4, 5];
     unsafe {
         extern "C" {
-            fn quiche_config_set_custom_tls(cfg: *mut c_void, hello: *const u8, len: usize);
+            fn quiche_chlo_builder_new_wrapper() -> *mut c_void;
+            fn quiche_chlo_builder_add_wrapper(b: *mut c_void, data: *const u8, len: usize);
+            fn quiche_config_set_chlo_builder_wrapper(cfg: *mut c_void, b: *mut c_void);
+            fn quiche_chlo_builder_free_wrapper(b: *mut c_void);
         }
-        quiche_config_set_custom_tls(
-            &mut client_config as *mut _ as *mut c_void,
-            custom_hello.as_ptr(),
-            custom_hello.len(),
-        );
+        let b = quiche_chlo_builder_new_wrapper();
+        quiche_chlo_builder_add_wrapper(b, custom_hello.as_ptr(), custom_hello.len());
+        quiche_config_set_chlo_builder_wrapper(&mut client_config as *mut _ as *mut c_void, b);
+        quiche_chlo_builder_free_wrapper(b);
     }
 
     let stealth_cfg = StealthConfig::default();

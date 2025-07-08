@@ -1,3 +1,4 @@
+diff --git a/deps/boringssl/ssl/handshake_client.cc b/deps/boringssl/ssl/handshake_client.cc
 --- a/deps/boringssl/ssl/handshake_client.cc
 +++ b/deps/boringssl/ssl/handshake_client.cc
 @@

@@ -1,5 +1,7 @@
 boringssl_custom_hello.patch
 boringssl_clienthello_hook.patch
+boringssl_deterministic_grease.patch
 custom_tls.patch
+custom_tls_builder.patch
 simd_optimizations.patch
 readme_quicfuscate.patch

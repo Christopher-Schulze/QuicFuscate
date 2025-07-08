@@ -1,0 +1,71 @@
+diff -ruN '--exclude=.git' quiche_vanilla/include/quiche.h quiche_patch/include/quiche.h
+@@
+ void quiche_config_set_custom_tls(quiche_config *cfg,
+                                   const uint8_t *hello, size_t len);
++typedef struct quiche_chlo_builder quiche_chlo_builder;
++quiche_chlo_builder *quiche_chlo_builder_new();
++void quiche_chlo_builder_add(quiche_chlo_builder *b, const uint8_t *data, size_t len);
++void quiche_config_set_chlo_builder(quiche_config *cfg, quiche_chlo_builder *b);
++void quiche_chlo_builder_free(quiche_chlo_builder *b);
+ diff -ruN '--exclude=.git' quiche_vanilla/src/ffi.rs quiche_patch/src/ffi.rs
+@@
+ pub extern "C" fn quiche_config_set_custom_tls(
+     config: &mut Config, hello: *const u8, len: size_t,
+ ) {
+     let hello = unsafe { slice::from_raw_parts(hello, len) };
+     config.set_custom_tls(hello);
+ }
++
++#[no_mangle]
++pub extern "C" fn quiche_chlo_builder_new() -> *mut crate::ChloBuilder {
++    Box::into_raw(Box::new(crate::ChloBuilder::new()))
++}
++
++#[no_mangle]
++pub extern "C" fn quiche_chlo_builder_add(
++    builder: &mut crate::ChloBuilder, data: *const u8, len: size_t,
++) {
++    let slice = unsafe { slice::from_raw_parts(data, len) };
++    builder.add(slice);
++}
++
++#[no_mangle]
++pub extern "C" fn quiche_config_set_chlo_builder(
++    cfg: &mut Config, builder: *mut crate::ChloBuilder,
++) {
++    if let Some(b) = unsafe { builder.as_ref() } {
++        cfg.set_custom_tls(b.bytes());
++    }
++}
++
++#[no_mangle]
++pub extern "C" fn quiche_chlo_builder_free(builder: *mut crate::ChloBuilder) {
++    if !builder.is_null() {
++        unsafe { drop(Box::from_raw(builder)); }
++    }
++}
+ diff -ruN '--exclude=.git' quiche_vanilla/src/lib.rs quiche_patch/src/lib.rs
+@@
+ pub struct Config {
+@@
+     custom_tls: Option<Vec<u8>>,
+@@
+ }
+@@
+     pub fn set_custom_tls(&mut self, hello: &[u8]) {
+         self.custom_tls = Some(hello.to_vec());
+     }
++
++    pub fn set_custom_tls_builder(&mut self, builder: &ChloBuilder) {
++        self.custom_tls = Some(builder.bytes().to_vec());
++    }
+@@
+ }
++
++pub struct ChloBuilder(Vec<u8>);
++
++impl ChloBuilder {
++    pub fn new() -> Self { Self(Vec::new()) }
++    pub fn add(&mut self, data: &[u8]) { self.0.extend_from_slice(data); }
++    pub fn bytes(&self) -> &[u8] { &self.0 }
++}

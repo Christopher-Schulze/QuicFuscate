@@ -1109,11 +1109,15 @@ impl StealthManager {
 
             if let Some(ref hello) = fingerprint.client_hello {
                 unsafe {
-                    tls_ffi::quiche_config_set_custom_tls(
-                        config as *mut _ as *mut std::ffi::c_void,
-                        hello.as_ptr(),
-                        hello.len(),
-                    );
+                    let b = tls_ffi::quiche_chlo_builder_new_wrapper();
+                    if !b.is_null() {
+                        tls_ffi::quiche_chlo_builder_add_wrapper(b, hello.as_ptr(), hello.len());
+                        tls_ffi::quiche_config_set_chlo_builder_wrapper(
+                            config as *mut _ as *mut std::ffi::c_void,
+                            b,
+                        );
+                        tls_ffi::quiche_chlo_builder_free_wrapper(b);
+                    }
                 }
             } else {
                 error!(
@@ -1152,11 +1156,12 @@ impl StealthManager {
 
         if let (Some(ref hello), Some(c)) = (&p.client_hello, cfg.as_deref_mut()) {
             unsafe {
-                tls_ffi::quiche_config_set_custom_tls(
-                    c as *mut _ as *mut std::ffi::c_void,
-                    hello.as_ptr(),
-                    hello.len(),
-                );
+                let b = tls_ffi::quiche_chlo_builder_new_wrapper();
+                if !b.is_null() {
+                    tls_ffi::quiche_chlo_builder_add_wrapper(b, hello.as_ptr(), hello.len());
+                    tls_ffi::quiche_config_set_chlo_builder_wrapper(c as *mut _ as *mut std::ffi::c_void, b);
+                    tls_ffi::quiche_chlo_builder_free_wrapper(b);
+                }
             }
         }
 
