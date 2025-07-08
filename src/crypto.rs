@@ -39,11 +39,11 @@
 use crate::{cpu_features, CpuFeature};
 use aead::{AeadInPlace, KeyInit, Nonce, Tag};
 use aegis::compat::rustcrypto_traits_06::{
-    aegis128l::Aegis128L as Aegis128LAead,
-    aegis128x2::Aegis128X2 as Aegis128XAead,
-    aegis256::Aegis256 as Aegis256Aead,
-    aegis256x2::Aegis256X2 as Aegis256XAead,
+    aegis128l::Aegis128L as Aegis128LAead, aegis128x2::Aegis128X2 as Aegis128XAead,
+    aegis256::Aegis256 as Aegis256Aead, aegis256x2::Aegis256X2 as Aegis256XAead,
+    aegis256x4::Aegis256X4 as Aegis256X4Aead,
 };
+use log::info;
 use morus::Morus;
 use rand::{rngs::OsRng, RngCore};
 
@@ -180,15 +180,28 @@ impl CipherImpl for Aegis256Impl {
         ad: &[u8],
         plaintext: &[u8],
     ) -> Result<Vec<u8>, &'static str> {
-        let cipher =
-            Aegis256XAead::<16>::new_from_slice(key).map_err(|_| "Invalid key length for Aegis256")?;
-        let mut buffer = plaintext.to_vec();
-        let nonce = Nonce::<Aegis256XAead<16>>::from_slice(nonce);
-        let tag: Tag<Aegis256XAead<16>> = cipher
-            .encrypt_in_place_detached(nonce, ad, &mut buffer)
-            .map_err(|_| "Encryption failed")?;
-        buffer.extend_from_slice(tag.as_slice());
-        Ok(buffer)
+        let detector = cpu_features();
+        if detector.has_feature(CpuFeature::VAES) && detector.has_feature(CpuFeature::AVX512F) {
+            let cipher = Aegis256X4Aead::<16>::new_from_slice(key)
+                .map_err(|_| "Invalid key length for Aegis256")?;
+            let mut buffer = plaintext.to_vec();
+            let nonce = Nonce::<Aegis256X4Aead<16>>::from_slice(nonce);
+            let tag: Tag<Aegis256X4Aead<16>> = cipher
+                .encrypt_in_place_detached(nonce, ad, &mut buffer)
+                .map_err(|_| "Encryption failed")?;
+            buffer.extend_from_slice(tag.as_slice());
+            Ok(buffer)
+        } else {
+            let cipher = Aegis256XAead::<16>::new_from_slice(key)
+                .map_err(|_| "Invalid key length for Aegis256")?;
+            let mut buffer = plaintext.to_vec();
+            let nonce = Nonce::<Aegis256XAead<16>>::from_slice(nonce);
+            let tag: Tag<Aegis256XAead<16>> = cipher
+                .encrypt_in_place_detached(nonce, ad, &mut buffer)
+                .map_err(|_| "Encryption failed")?;
+            buffer.extend_from_slice(tag.as_slice());
+            Ok(buffer)
+        }
     }
 
     fn decrypt(
@@ -201,19 +214,36 @@ impl CipherImpl for Aegis256Impl {
         if ciphertext.len() < 16 {
             return Err("Ciphertext too short for Aegis256");
         }
-        let cipher =
-            Aegis256XAead::<16>::new_from_slice(key).map_err(|_| "Invalid key length for Aegis256")?;
-        let (msg, tag_slice) = ciphertext.split_at(ciphertext.len() - 16);
-        let mut buffer = msg.to_vec();
-        cipher
-            .decrypt_in_place_detached(
-                Nonce::<Aegis256XAead<16>>::from_slice(nonce),
-                ad,
-                &mut buffer,
-                Tag::<Aegis256XAead<16>>::from_slice(tag_slice),
-            )
-            .map_err(|_| "Decryption failed")?;
-        Ok(buffer)
+        let detector = cpu_features();
+        if detector.has_feature(CpuFeature::VAES) && detector.has_feature(CpuFeature::AVX512F) {
+            let cipher = Aegis256X4Aead::<16>::new_from_slice(key)
+                .map_err(|_| "Invalid key length for Aegis256")?;
+            let (msg, tag_slice) = ciphertext.split_at(ciphertext.len() - 16);
+            let mut buffer = msg.to_vec();
+            cipher
+                .decrypt_in_place_detached(
+                    Nonce::<Aegis256X4Aead<16>>::from_slice(nonce),
+                    ad,
+                    &mut buffer,
+                    Tag::<Aegis256X4Aead<16>>::from_slice(tag_slice),
+                )
+                .map_err(|_| "Decryption failed")?;
+            Ok(buffer)
+        } else {
+            let cipher = Aegis256XAead::<16>::new_from_slice(key)
+                .map_err(|_| "Invalid key length for Aegis256")?;
+            let (msg, tag_slice) = ciphertext.split_at(ciphertext.len() - 16);
+            let mut buffer = msg.to_vec();
+            cipher
+                .decrypt_in_place_detached(
+                    Nonce::<Aegis256XAead<16>>::from_slice(nonce),
+                    ad,
+                    &mut buffer,
+                    Tag::<Aegis256XAead<16>>::from_slice(tag_slice),
+                )
+                .map_err(|_| "Decryption failed")?;
+            Ok(buffer)
+        }
     }
 }
 
@@ -371,6 +401,8 @@ impl CipherSuiteSelector {
             CipherSuite::SoftwareFallback => Box::new(SoftwareFallbackImpl),
         };
 
+        info!("Selected cipher suite: {:?}", suite);
+
         Self {
             selected_suite: suite,
             cipher,
@@ -381,11 +413,11 @@ impl CipherSuiteSelector {
     /// selected cipher. This is used when configuring the TLS stack.
     pub fn tls_cipher(&self) -> u16 {
         match self.selected_suite {
-            CipherSuite::Aegis128X => 0x1302, // TLS_AES_256_GCM_SHA384
-            CipherSuite::Aegis128L => 0x1301, // TLS_AES_128_GCM_SHA256
-            CipherSuite::Aegis256 => 0x1303, // Reserved ID for AEGIS-256
-            CipherSuite::Morus1280_128 => 0x1304, // Custom ID
-            CipherSuite::Morus1280_256 => 0x1305, // Custom ID
+            CipherSuite::Aegis128X => 0x1302,        // TLS_AES_256_GCM_SHA384
+            CipherSuite::Aegis128L => 0x1301,        // TLS_AES_128_GCM_SHA256
+            CipherSuite::Aegis256 => 0x1303,         // Reserved ID for AEGIS-256
+            CipherSuite::Morus1280_128 => 0x1304,    // Custom ID
+            CipherSuite::Morus1280_256 => 0x1305,    // Custom ID
             CipherSuite::SoftwareFallback => 0x1306, // Custom ID
         }
     }
