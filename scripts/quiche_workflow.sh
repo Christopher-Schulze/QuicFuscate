@@ -75,15 +75,20 @@ NON_INTERACTIVE="${NON_INTERACTIVE:-0}"
 # Make quiche available to Cargo
 export QUICHE_PATH="$PATCHED_DIR/quiche"
 
+# Sicherstellen, dass das Quiche-Verzeichnis existiert
+ensure_quiche_dir() {
+    if [ ! -d "$PATCHED_DIR/quiche" ]; then
+        error "Submodule $PATCHED_DIR/quiche fehlt nach dem Update"
+    fi
+}
+
 # Ensure the quiche submodule exists and is initialized
 init_submodule() {
     if [ ! -d "$PATCHED_DIR/.git" ]; then
         log "Initialisiere Submodul libs/patched_quiche"
         git submodule set-url libs/patched_quiche "$MIRROR_URL" 2>/dev/null || true
         git submodule update --init --recursive libs/patched_quiche
-        if [ ! -d "$PATCHED_DIR/quiche" ]; then
-            error "Submodule libs/patched_quiche/quiche fehlt nach dem Update"
-        fi
+        ensure_quiche_dir
     fi
 }
 
@@ -180,9 +185,11 @@ patch_failure() {
     local backup_dir="$2"
     local detail="${3:-}"
     warn "$message"
-    if [ -n "$detail" ]; then
-        warn "Logauszug ($detail):"
-        [ -f "$detail" ] && tail -n 20 "$detail"
+    if [ -n "$detail" ] && [ -f "$detail" ]; then
+        warn "Logauszug aus $detail:"
+        tail -n 20 "$detail"
+    elif [ -n "$detail" ]; then
+        warn "Logdatei $detail nicht gefunden"
     fi
     rollback_backup "$backup_dir"
     error "Patchvorgang abgebrochen: $message"
@@ -207,10 +214,8 @@ fetch_quiche() {
         log "Initialisiere Submodul libs/patched_quiche..."
         run_command "Submodul aktualisieren" \
             "git submodule set-url libs/patched_quiche \"$MIRROR_URL\" && git submodule update --init --recursive libs/patched_quiche"
+        ensure_quiche_dir
     fi
-        if [ ! -d "$PATCHED_DIR/quiche" ]; then
-            error "Submodule libs/patched_quiche/quiche fehlt nach dem Update"
-        fi
 
     if [ -e "$PATCHED_DIR/.git" ]; then
         log "Repository existiert bereits, aktualisiere..."
@@ -218,9 +223,7 @@ fetch_quiche() {
             "(cd \"$PATCHED_DIR\" && git fetch --all && git reset --hard origin/HEAD)"
         run_command "Submodule einbinden" \
             "(cd \"$PATCHED_DIR\" && git submodule update --init --recursive)"
-        if [ ! -d "$PATCHED_DIR/quiche" ]; then
-            error "Submodule libs/patched_quiche/quiche fehlt nach dem Update"
-        fi
+        ensure_quiche_dir
     else
         local attempt=0
         while true; do
@@ -229,9 +232,7 @@ fetch_quiche() {
             log "Klonen des Quiche-Repositories (Versuch $attempt)"
             if git clone --depth 1 "$MIRROR_URL" "$PATCHED_DIR" >"$log_file" 2>&1; then
                 git -C "$PATCHED_DIR" submodule update --init --recursive >>"$log_file" 2>&1
-                if [ ! -d "$PATCHED_DIR/quiche" ]; then
-                    error "Submodule libs/patched_quiche/quiche fehlt nach dem Update"
-                fi
+                ensure_quiche_dir
                 break
             fi
             warn "Klonen fehlgeschlagen. Details siehe $log_file"
@@ -245,10 +246,7 @@ fetch_quiche() {
     fi
 
     detect_quiche_version
-
-    if [ ! -d "$PATCHED_DIR/quiche" ]; then
-        error "Quiche-Verzeichnis konnte nach dem Klonen nicht gefunden werden"
-    fi
+    ensure_quiche_dir
 
     success "Quiche erfolgreich heruntergeladen und vorbereitet"
     return 0
