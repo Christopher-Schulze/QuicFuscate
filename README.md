@@ -180,6 +180,22 @@ cargo build --release
 cargo test
 ```
 
+### Build-Probleme beheben
+
+Schlägt der Workflow trotz erfüllter Abhängigkeiten fehl, finden sich detailierte
+Logs unter `libs/logs/`. Ein häufiger Grund ist ein nicht initialisiertes
+Submodul. In diesem Fall hilft folgender Befehl:
+
+```bash
+git submodule update --init libs/patched_quiche
+```
+
+Anschließend den Workflow erneut starten:
+
+```bash
+./scripts/quiche_workflow.sh --step fetch
+```
+
 ### Project Layout
 
 All Rust sources reside in the `src/` directory. Modules such as `core`, `crypto`, `fec`, `stealth` and others are compiled as part of the single crate. The crate exposes both a library and the main CLI binary.
