@@ -92,6 +92,15 @@ init_submodule() {
     fi
 }
 
+# Prüft, ob das Submodul initialisiert ist und führt ggf. ein Update aus
+check_submodule_initialized() {
+    if ! git -C "$PATCHED_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        warn "Submodul libs/patched_quiche nicht initialisiert. Hole Daten..."
+        git submodule update --init libs/patched_quiche || \
+            error "Submodule konnte nicht initialisiert werden"
+    fi
+}
+
 # Erstelle benötigte Verzeichnisse
 mkdir -p "$LOG_DIR" "$PATCHES_DIR" "$PATCHED_DIR"
 
@@ -105,6 +114,7 @@ load_state() {
         BUILD_TYPE="${BUILD_TYPE:-release}"
     fi
 
+    check_submodule_initialized
     init_submodule
 
     # Ensure quiche sources are present and initialized
@@ -292,13 +302,13 @@ apply_patches() {
         log "Wende Patch an: $name"
         local patch_log="$LOG_DIR/patch_${name}_$(date +%Y%m%d_%H%M%S).log"
         if [[ "$name" == "custom_tls.patch" || "$name" == "custom_tls_builder.patch" || $name == boringssl_* ]]; then
-            if ! (cd "$PATCHED_DIR/quiche" && patch -p1 --no-backup-if-mismatch -r - < "$patch_file" >"$patch_log" 2>&1); then
-                patch_failure "Fehler beim Anwenden von $name" "$backup_dir" "$patch_log"
-            fi
+            (cd "$PATCHED_DIR/quiche" && patch -p1 --no-backup-if-mismatch -r - < "$patch_file" >"$patch_log" 2>&1)
         else
-            if ! (cd "$PATCHED_DIR" && patch -p1 --no-backup-if-mismatch -r - < "$patch_file" >"$patch_log" 2>&1); then
-                patch_failure "Fehler beim Anwenden von $name" "$backup_dir" "$patch_log"
-            fi
+            (cd "$PATCHED_DIR" && patch -p1 --no-backup-if-mismatch -r - < "$patch_file" >"$patch_log" 2>&1)
+        fi
+        local status=$?
+        if [ $status -ne 0 ] || grep -q "FAILED" "$patch_log"; then
+            patch_failure "Fehler beim Anwenden von $name" "$backup_dir" "$patch_log"
         fi
     done
     

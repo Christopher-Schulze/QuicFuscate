@@ -19,6 +19,14 @@ Specific steps can be called individually:
 ./scripts/quiche_workflow.sh --step build
 ./scripts/quiche_workflow.sh --step test
 ```
+If the workflow aborts during patching or building consult the log files under `libs/logs/` for details. Often the submodule was not initialised correctly.
+Re-run the following command and start the workflow again:
+
+```bash
+git submodule update --init libs/patched_quiche
+./scripts/quiche_workflow.sh --step fetch
+```
+
 
 After the `fetch` step the submodule `libs/patched_quiche` is fully initialised including its own submodules. The environment variable `QUICHE_PATH` will point to the sources.
 
