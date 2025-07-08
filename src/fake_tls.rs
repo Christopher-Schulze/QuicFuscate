@@ -4,6 +4,28 @@
 
 use crate::stealth::FingerprintProfile;
 
+/// Parameters used to craft a minimal ClientHello message.
+#[derive(Clone, Copy)]
+pub struct ClientHelloParams<'a> {
+    /// TLS protocol version (e.g. `0x0303` for TLS 1.2).
+    pub tls_version: u16,
+    /// List of cipher suites encoded as IANA identifiers.
+    pub cipher_suites: &'a [u16],
+    /// Raw extension block to append after the compression method.
+    pub extensions: &'a [u8],
+}
+
+/// Parameters used to craft a minimal ServerHello message.
+#[derive(Clone, Copy)]
+pub struct ServerHelloParams<'a> {
+    /// TLS protocol version returned by the server.
+    pub tls_version: u16,
+    /// Selected cipher suite encoded as IANA identifier.
+    pub cipher_suite: u16,
+    /// Raw extension block of the server response.
+    pub extensions: &'a [u8],
+}
+
 /// Hard coded ClientHello payload used when a profile does not provide one.
 /// This is not a valid TLS handshake, it merely resembles one for DPI evasion.
 pub const DEFAULT_CLIENT_HELLO: &[u8] = &[
@@ -49,18 +71,69 @@ impl FakeTls {
         out
     }
 
-    /// Returns the fake server response consisting of ServerHello and
-    /// Certificate records.
+    /// Builds a minimal ClientHello record using the provided parameters.
+    pub fn client_hello_custom(params: ClientHelloParams) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&params.tls_version.to_be_bytes());
+        payload.extend_from_slice(&[0u8; 32]); // random
+        payload.push(0); // session id len
+        payload.extend_from_slice(&((params.cipher_suites.len() * 2) as u16).to_be_bytes());
+        for cs in params.cipher_suites {
+            payload.extend_from_slice(&cs.to_be_bytes());
+        }
+        payload.push(1); // compression methods len
+        payload.push(0); // null compression
+        payload.extend_from_slice(&(params.extensions.len() as u16).to_be_bytes());
+        payload.extend_from_slice(params.extensions);
+        Self::record(0x01, &payload)
+    }
+
+    /// Builds a minimal ServerHello record using the provided parameters.
+    pub fn server_hello_custom(params: ServerHelloParams) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&params.tls_version.to_be_bytes());
+        payload.extend_from_slice(&[0u8; 32]); // random
+        payload.push(0); // session id len
+        payload.extend_from_slice(&params.cipher_suite.to_be_bytes());
+        payload.push(0); // null compression
+        payload.extend_from_slice(&(params.extensions.len() as u16).to_be_bytes());
+        payload.extend_from_slice(params.extensions);
+        Self::record(0x02, &payload)
+    }
+
+    /// Builds a full FakeTLS handshake from explicit parameters.
+    pub fn handshake_custom(ch: ClientHelloParams, sh: ServerHelloParams) -> Vec<u8> {
+        let mut out = Self::client_hello_custom(ch);
+        out.extend_from_slice(&Self::server_hello_custom(sh));
+        out
+    }
+
+    /// Returns the fake server response consisting of ServerHello and a dummy
+    /// certificate record.
     pub fn server_response() -> Vec<u8> {
-        let mut out = Self::record(0x02, b"fake-server");
-        out.extend_from_slice(&Self::record(0x0b, b"cert"));
+        let mut out = DEFAULT_SERVER_HELLO.to_vec();
+        out.extend_from_slice(DEFAULT_CERTIFICATE);
         out
     }
 
     /// Generates the complete FakeTLS handshake sequence.
     pub fn handshake(profile: &FingerprintProfile) -> Vec<u8> {
-        let mut out = Self::client_hello(profile);
-        out.extend_from_slice(&Self::server_response());
-        out
+        if profile.client_hello.is_none() {
+            let ch_params = ClientHelloParams {
+                tls_version: 0x0303,
+                cipher_suites: &profile.tls_cipher_suites,
+                extensions: &[],
+            };
+            let sh_params = ServerHelloParams {
+                tls_version: 0x0303,
+                cipher_suite: *profile.tls_cipher_suites.first().unwrap_or(&0x1301),
+                extensions: &[],
+            };
+            Self::handshake_custom(ch_params, sh_params)
+        } else {
+            let mut out = Self::client_hello(profile);
+            out.extend_from_slice(&Self::server_response());
+            out
+        }
     }
 }
