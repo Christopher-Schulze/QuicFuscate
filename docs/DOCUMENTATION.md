@@ -115,8 +115,7 @@ selector.encrypt(plaintext, len, key, nonce, ad, ad_len, ciphertext, tag);
 
 The selected cipher's IANA ID can be retrieved via `CipherSuiteSelector::tls_cipher()`.
 `StealthManager` uses this to build a matching TLS ClientHello via the
-`ChloBuilder` API (`quiche_chlo_builder_*`), ensuring end-to-end
-compatibility.
+`quiche_config_set_custom_tls` API, ensuring end-to-end compatibility.
 
 #### Forward Error Correction (FEC) Module
 Defined in `fec.rs`:

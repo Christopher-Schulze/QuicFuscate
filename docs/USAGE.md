@@ -47,12 +47,11 @@ Use the `--config` flag to load a unified TOML file containing FEC, stealth and 
 ```
 
 ### Real TLS Fingerprints
-
 When built against the patched `quiche` library, QuicFuscate can replay
 captured TLS ClientHello messages. Store the base64 encoded handshake in
 `browser_profiles/<browser>_<os>.chlo` and build with `QUICHE_PATH` pointing
-to the patched sources. The runtime loads the file, feeds the bytes to
-`ChloBuilder` and attaches it to the configuration:
+to the patched sources. The runtime loads the file and injects the bytes
+through `quiche_config_set_custom_tls`:
 
 ```bash
 export QUICHE_PATH=$(pwd)/libs/patched_quiche/quiche

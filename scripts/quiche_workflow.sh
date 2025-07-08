@@ -291,7 +291,7 @@ apply_patches() {
         patch_count=$((patch_count + 1))
         log "Wende Patch an: $name"
         local patch_log="$LOG_DIR/patch_${name}_$(date +%Y%m%d_%H%M%S).log"
-        if [[ "$name" == "custom_tls.patch" ]]; then
+        if [[ "$name" == "custom_tls.patch" || "$name" == boringssl_*.patch ]]; then
             if ! (cd "$PATCHED_DIR/quiche" && patch -p1 --no-backup-if-mismatch -r - < "$patch_file" >"$patch_log" 2>&1); then
                 patch_failure "Fehler beim Anwenden von $name" "$backup_dir" "$patch_log"
             fi
@@ -338,7 +338,7 @@ verify_patches() {
         if [ -f "$patch_file" ]; then
             local name="$(basename \"$patch_file\")"
             log "Prüfe Patch: $name"
-            if [[ "$name" == "custom_tls.patch" ]]; then
+            if [[ "$name" == "custom_tls.patch" || "$name" == boringssl_*.patch ]]; then
                 (cd "$PATCHED_DIR/quiche" && patch --dry-run -p1 < "$patch_file" >/dev/null) || error "Patch $name konnte nicht verifiziert werden"
             else
                 patch --dry-run -p1 < "$patch_file" >/dev/null || error "Patch $name konnte nicht verifiziert werden"

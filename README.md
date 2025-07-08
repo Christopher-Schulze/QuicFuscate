@@ -93,11 +93,7 @@ Quick start after cloning:
 ./scripts/quiche_workflow.sh --step fetch
 cargo build --release
 ```
-
-Browser fingerprints are stored as base64 encoded `.chlo` files under
-`browser_profiles/`. When the patched quiche is built, these files are
-fed into the new `ChloBuilder` API to recreate the exact ClientHello
-layout during connection setup.
+Browser fingerprints are stored as base64 encoded `.chlo` files under `browser_profiles/`. When the patched quiche is built, these files are injected via `quiche_config_set_custom_tls` to recreate the exact ClientHello layout during connection setup. Select the desired fingerprint via `--profile` and `--os` at runtime.
 
 If the command fails with a missing commit error (e.g.
 ```

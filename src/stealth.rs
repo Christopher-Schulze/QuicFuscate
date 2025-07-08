@@ -835,41 +835,9 @@ impl TlsClientHelloSpoofer {
     }
 
     fn load_client_hello(browser: BrowserProfile, os: OsProfile) -> Option<Vec<u8>> {
-        let data = match (browser, os) {
-            (BrowserProfile::Chrome, OsProfile::Windows) => {
-                Some(include_str!("../browser_profiles/chrome_windows.chlo"))
-            }
-            (BrowserProfile::Firefox, OsProfile::Windows) => {
-                Some(include_str!("../browser_profiles/firefox_windows.chlo"))
-            }
-            (BrowserProfile::Opera, OsProfile::Windows) => {
-                Some(include_str!("../browser_profiles/opera_windows.chlo"))
-            }
-            (BrowserProfile::Brave, OsProfile::Windows) => {
-                Some(include_str!("../browser_profiles/brave_windows.chlo"))
-            }
-            (BrowserProfile::Edge, OsProfile::Windows) => {
-                Some(include_str!("../browser_profiles/edge_windows.chlo"))
-            }
-            (BrowserProfile::Vivaldi, OsProfile::Windows) => {
-                Some(include_str!("../browser_profiles/vivaldi_windows.chlo"))
-            }
-            (BrowserProfile::Safari, OsProfile::MacOS) => {
-                Some(include_str!("../browser_profiles/safari_macos.chlo"))
-            }
-            _ => None,
-        };
-
-        if let Some(s) = data {
-            base64::decode(s.trim()).ok()
-        } else {
-            let path = Self::profile_path(browser, os);
-            std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|d| base64::decode(d.trim()).ok())
-        }
+        let path = Self::profile_path(browser, os);
+        std::fs::read_to_string(&path).ok().and_then(|d| base64::decode(d.trim()).ok())
     }
-
     /// Returns a list of all available browser/OS combinations for which a
     /// ClientHello dump exists in `browser_profiles`.
     pub fn available_profiles() -> Vec<(BrowserProfile, OsProfile)> {
@@ -1109,15 +1077,7 @@ impl StealthManager {
 
             if let Some(ref hello) = fingerprint.client_hello {
                 unsafe {
-                    let b = tls_ffi::quiche_chlo_builder_new_wrapper();
-                    if !b.is_null() {
-                        tls_ffi::quiche_chlo_builder_add_wrapper(b, hello.as_ptr(), hello.len());
-                        tls_ffi::quiche_config_set_chlo_builder_wrapper(
-                            config as *mut _ as *mut std::ffi::c_void,
-                            b,
-                        );
-                        tls_ffi::quiche_chlo_builder_free_wrapper(b);
-                    }
+                    tls_ffi::quiche_config_set_custom_tls(config as *mut _ as *mut std::ffi::c_void, hello.as_ptr(), hello.len());
                 }
             } else {
                 error!(
@@ -1156,12 +1116,7 @@ impl StealthManager {
 
         if let (Some(ref hello), Some(c)) = (&p.client_hello, cfg.as_deref_mut()) {
             unsafe {
-                let b = tls_ffi::quiche_chlo_builder_new_wrapper();
-                if !b.is_null() {
-                    tls_ffi::quiche_chlo_builder_add_wrapper(b, hello.as_ptr(), hello.len());
-                    tls_ffi::quiche_config_set_chlo_builder_wrapper(c as *mut _ as *mut std::ffi::c_void, b);
-                    tls_ffi::quiche_chlo_builder_free_wrapper(b);
-                }
+                tls_ffi::quiche_config_set_custom_tls(c as *mut _ as *mut std::ffi::c_void, hello.as_ptr(), hello.len());
             }
         }
 

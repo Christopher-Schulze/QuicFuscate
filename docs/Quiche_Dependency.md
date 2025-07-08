@@ -143,8 +143,7 @@ without modifying the Rust code of quiche during runtime.
 
 ### Required Changes
 
-- `libs/patched_quiche/quiche/include/quiche.h` – declaration of the additional
-  `quiche_config_set_custom_tls()` and builder helpers.
+- `libs/patched_quiche/quiche/include/quiche.h` – declaration of the additional `quiche_config_set_custom_tls()` API.
 - `libs/patched_quiche/quiche/src/ffi.rs` – implementation of the FFI symbol and
   binding to `Config`.
 - `libs/patched_quiche/quiche/src/lib.rs` – store the provided ClientHello in the
@@ -161,15 +160,7 @@ modifications (see `custom_tls.patch`). Apply them via
 ```c
 void quiche_config_set_custom_tls(quiche_config *cfg,
                                   const uint8_t *hello, size_t len);
-typedef struct quiche_chlo_builder quiche_chlo_builder;
-quiche_chlo_builder *quiche_chlo_builder_new();
-void quiche_chlo_builder_add(quiche_chlo_builder *b,
-                             const uint8_t *data, size_t len);
-void quiche_config_set_chlo_builder(quiche_config *cfg,
-                                    quiche_chlo_builder *b);
-void quiche_chlo_builder_free(quiche_chlo_builder *b);
 ```
-
 When the patched library is absent, a stub implementation lives in
 `src/tls_ffi.rs` so unit tests continue to compile.
 
@@ -177,7 +168,7 @@ When the patched library is absent, a stub implementation lives in
 
 Real ClientHello messages are stored as base64 files in `browser_profiles/*.chlo`.
 `StealthManager` loads the corresponding file and injects the bytes using
-`quiche_chlo_builder_*` helpers.
+`quiche_config_set_custom_tls` helper function.
 
 ### Neue Fingerprints erstellen
 
