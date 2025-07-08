@@ -2,6 +2,34 @@ use crate::optimize::{self, SimdPolicy};
 use rayon::prelude::*;
 
 #[inline(always)]
+pub(crate) unsafe fn prefetch_log(idx: usize) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+        _mm_prefetch(LOG_TABLE.as_ptr().add(idx) as *const i8, _MM_HINT_T0);
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        use std::arch::aarch64::__prefetch;
+        __prefetch(LOG_TABLE.as_ptr().add(idx));
+    }
+}
+
+#[inline(always)]
+pub(crate) unsafe fn prefetch_exp(idx: usize) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+        _mm_prefetch(EXP_TABLE.as_ptr().add(idx) as *const i8, _MM_HINT_T0);
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        use std::arch::aarch64::__prefetch;
+        __prefetch(EXP_TABLE.as_ptr().add(idx));
+    }
+}
+
+#[inline(always)]
 pub(crate) fn gf_mul_table(a: u8, b: u8) -> u8 {
     if a == 0 || b == 0 {
         return 0;
@@ -40,13 +68,12 @@ pub(crate) unsafe fn gf_mul_bitsliced_avx512(a: u8, b: u8) -> u8 {
     let vb = _mm512_set1_epi64(b as i64);
     let prod = _mm512_clmulepi64_epi128(va, vb, 0x00);
     let lo = _mm512_castsi512_si128(prod);
-    let mut r = _mm_extract_epi16(lo, 0) as u16;
-    for i in (8..=15).rev() {
-        if (r & (1 << i)) != 0 {
-            r ^= IRREDUCIBLE_POLY << (i - 8);
-        }
-    }
-    (r & 0xFF) as u8
+    let r = _mm_extract_epi16(lo, 0) as u16;
+    let mut t = r ^ (r >> 8);
+    t ^= t >> 4;
+    t ^= t >> 2;
+    t ^= t >> 1;
+    (t & 0xFF) as u8
 }
 
 #[cfg(all(target_arch = "x86_64"))]
@@ -58,13 +85,12 @@ pub(crate) unsafe fn gf_mul_bitsliced_avx2(a: u8, b: u8) -> u8 {
     let vb = _mm256_set1_epi64x(b as i64);
     let prod = _mm256_clmulepi64_epi128(va, vb, 0x00);
     let lo = _mm256_castsi256_si128(prod);
-    let mut r = _mm_extract_epi16(lo, 0) as u16;
-    for i in (8..=15).rev() {
-        if (r & (1 << i)) != 0 {
-            r ^= IRREDUCIBLE_POLY << (i - 8);
-        }
-    }
-    (r & 0xFF) as u8
+    let r = _mm_extract_epi16(lo, 0) as u16;
+    let mut t = r ^ (r >> 8);
+    t ^= t >> 4;
+    t ^= t >> 2;
+    t ^= t >> 1;
+    (t & 0xFF) as u8
 }
 
 #[cfg(all(target_arch = "x86_64"))]
@@ -91,13 +117,12 @@ pub(crate) unsafe fn gf_mul_bitsliced_neon(a: u8, b: u8) -> u8 {
     let va = vdupq_n_u8(a);
     let vb = vdupq_n_u8(b);
     let prod = vmull_p8(vget_low_u8(va), vget_low_u8(vb));
-    let mut r = vgetq_lane_u16(prod, 0);
-    for i in (8..=15).rev() {
-        if (r & (1 << i)) != 0 {
-            r ^= IRREDUCIBLE_POLY << (i - 8);
-        }
-    }
-    (r & 0xFF) as u8
+    let r = vgetq_lane_u16(prod, 0);
+    let mut t = r ^ (r >> 8);
+    t ^= t >> 4;
+    t ^= t >> 2;
+    t ^= t >> 1;
+    (t & 0xFF) as u8
 }
 // --- High-Performance Finite Field Arithmetic (GF(2^8)) ---
 
@@ -133,6 +158,20 @@ pub(crate) fn gf_inv(a: u8) -> u8 {
         panic!("Inverse of 0 is undefined in GF(2^8))");
     }
     unsafe { EXP_TABLE[255 - LOG_TABLE[a as usize] as usize] }
+}
+
+#[inline(always)]
+pub(crate) fn gf_inv_prefetch(a: u8) -> u8 {
+    if a == 0 {
+        panic!("Inverse of 0 is undefined in GF(2^8))");
+    }
+    unsafe {
+        prefetch_log(a as usize);
+        let log_a = LOG_TABLE[a as usize];
+        let exp_idx = 255 - log_a as usize;
+        prefetch_exp(exp_idx);
+        EXP_TABLE[exp_idx]
+    }
 }
 
 /// Performs `a * b + c` in GF(2^8)).

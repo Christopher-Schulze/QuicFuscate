@@ -230,7 +230,22 @@ impl Encoder {
     /// `C_ji = 1 / (X_i + Y_j)`.
     fn generate_cauchy_coefficients(&self, repair_index: usize) -> Vec<u8> {
         let y = (self.k + repair_index) as u8;
-        (0..self.k).map(|i| gf_inv(i as u8 ^ y)).collect()
+        let mut coeffs = Vec::with_capacity(self.k);
+        if self.k == 0 {
+            return coeffs;
+        }
+        unsafe {
+            prefetch_log((0u8 ^ y) as usize);
+        }
+        for i in 0..self.k {
+            if i + 1 < self.k {
+                unsafe {
+                    prefetch_log(((i + 1) as u8 ^ y) as usize);
+                }
+            }
+            coeffs.push(gf_inv_prefetch(i as u8 ^ y));
+        }
+        coeffs
     }
 }
 /// Represents a sparse matrix in Compressed-Sparse-Row (CSR) format.
