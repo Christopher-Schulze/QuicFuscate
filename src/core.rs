@@ -106,7 +106,9 @@ impl QuicFuscateConnection {
             optimization_manager.clone(),
         ));
 
-        if use_utls {
+        if stealth_manager.current_profile().handshake_type == crate::stealth::HandshakeType::FakeTLS {
+            let _ = stealth_manager.fake_tls_handshake();
+        } else if use_utls {
             stealth_manager
                 .apply_utls_profile(&mut config, Some(CipherSuiteSelector::new().tls_cipher()));
         }

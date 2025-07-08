@@ -30,10 +30,16 @@ modules now live under `src/`.
 ### 🛡️ Advanced Stealth Technology
 - **uTLS Fingerprinting Protection**: Mimics browser TLS fingerprints to evade deep packet inspection
 - **TLS Handshake Spoofing**: Replays captured ClientHello messages for realistic fingerprints ([Issue #002](docs/issues/002-real-tls-fingerprints.md))
+- **FakeTLS Handshake**: Sends a lightweight forged handshake without establishing real TLS
 - **Domain Fronting**: Masks traffic by routing through trusted CDN providers
 - **HTTP/3 Masquerading**: Disguises traffic as standard HTTP/3 web traffic
 - **Traffic Obfuscation**: XOR-based packet transformation to defeat pattern recognition
 - **Spin Bit Randomization**: Planned feature for masking QUIC traffic metadata
+
+FakeTLS differs from the real uTLS-based fingerprinting by avoiding a complete TLS session.
+Instead it emits a static ClientHello and immediately returns a fake ServerHello
+with a placeholder certificate. This keeps the handshake lightweight while still
+presenting TLS-like traffic to network monitors.
 
 ### 🔒 Military-Grade Encryption
 - **AEGIS-128L/X**: Authenticated encryption with hardware acceleration
