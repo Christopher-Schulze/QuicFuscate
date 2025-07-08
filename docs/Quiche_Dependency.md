@@ -161,8 +161,15 @@ When the patched library is absent, a stub implementation lives in
 
 Real ClientHello messages are stored as base64 files in `browser_profiles/*.chlo`.
 `StealthManager` loads the corresponding file and injects the bytes via
-`quiche_config_set_custom_tls`. After adding new fingerprints, rebuild the
-patched library with `scripts/quiche_workflow.sh --type release`.
+`quiche_config_set_custom_tls`.
+
+### Neue Fingerprints erstellen
+
+1. Zeichne den TLS-Handshake des Zielbrowsers z.B. mit Wireshark auf.
+2. Extrahiere den kompletten ClientHello-Buffer und kodieren ihn mit `base64`.
+3. Speichere die Daten als `<browser>_<os>.chlo` unter `browser_profiles/`.
+4. Führe anschließend `scripts/quiche_workflow.sh --type release` aus, um die
+   gepatchte Bibliothek mit den neuen Profilen neu zu bauen.
 
 ## Advanced Optimizations
 
