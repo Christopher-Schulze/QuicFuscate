@@ -55,6 +55,8 @@ pub enum CipherSuite {
     Aegis256,
     Morus1280_128,
     Morus1280_256,
+    /// Pure software fallback without SIMD
+    SoftwareFallback,
 }
 
 /// Trait implemented by each cipher providing encryption and decryption.
@@ -306,6 +308,31 @@ impl CipherImpl for MorusImpl {
     }
 }
 
+/// Minimal software fallback that performs no encryption.
+struct SoftwareFallbackImpl;
+
+impl CipherImpl for SoftwareFallbackImpl {
+    fn encrypt(
+        &self,
+        _key: &[u8],
+        _nonce: &[u8],
+        _ad: &[u8],
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, &'static str> {
+        Ok(plaintext.to_vec())
+    }
+
+    fn decrypt(
+        &self,
+        _key: &[u8],
+        _nonce: &[u8],
+        _ad: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, &'static str> {
+        Ok(ciphertext.to_vec())
+    }
+}
+
 /// Selects the optimal cipher suite at runtime based on CPU features.
 pub struct CipherSuiteSelector {
     selected_suite: CipherSuite,
@@ -320,13 +347,15 @@ impl CipherSuiteSelector {
         let selected_suite = if detector.has_feature(CpuFeature::VAES) {
             CipherSuite::Aegis256
         } else if detector.has_feature(CpuFeature::AESNI) {
-            CipherSuite::Aegis128X
-        } else if detector.has_feature(CpuFeature::NEON) {
-            CipherSuite::Aegis128L
-        } else if detector.has_feature(CpuFeature::SSE2) {
+            if cfg!(any(target_arch = "x86", target_arch = "x86_64")) {
+                CipherSuite::Aegis128X
+            } else {
+                CipherSuite::Aegis128L
+            }
+        } else if detector.has_any(&[CpuFeature::NEON, CpuFeature::SSE2]) {
             CipherSuite::Morus1280_256
         } else {
-            CipherSuite::Morus1280_128
+            CipherSuite::SoftwareFallback
         };
         Self::with_suite(selected_suite)
     }
@@ -339,6 +368,7 @@ impl CipherSuiteSelector {
             CipherSuite::Aegis256 => Box::new(Aegis256Impl),
             CipherSuite::Morus1280_128 => Box::new(MorusImpl),
             CipherSuite::Morus1280_256 => Box::new(Morus256Impl),
+            CipherSuite::SoftwareFallback => Box::new(SoftwareFallbackImpl),
         };
 
         Self {
@@ -356,6 +386,7 @@ impl CipherSuiteSelector {
             CipherSuite::Aegis256 => 0x1303, // Reserved ID for AEGIS-256
             CipherSuite::Morus1280_128 => 0x1304, // Custom ID
             CipherSuite::Morus1280_256 => 0x1305, // Custom ID
+            CipherSuite::SoftwareFallback => 0x1306, // Custom ID
         }
     }
 

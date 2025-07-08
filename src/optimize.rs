@@ -288,6 +288,11 @@ impl FeatureDetector {
     pub fn has_feature(&self, feature: CpuFeature) -> bool {
         *self.features.get(&feature).unwrap_or(&false)
     }
+
+    /// Checks if any of the provided features is supported.
+    pub fn has_any(&self, feats: &[CpuFeature]) -> bool {
+        feats.iter().any(|f| self.has_feature(*f))
+    }
 }
 
 //
