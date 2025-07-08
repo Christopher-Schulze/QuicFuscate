@@ -65,7 +65,7 @@ jobs:
     - name: Run quiche workflow
       run: |
         chmod +x ./scripts/quiche_workflow.sh
-        ./scripts/quiche_workflow.sh --type ${{ inputs.build_type || 'release' }}
+        ./scripts/quiche_workflow.sh --non-interactive --type ${{ inputs.build_type || 'release' }}
 
     - name: Verify quiche artifacts
       run: |

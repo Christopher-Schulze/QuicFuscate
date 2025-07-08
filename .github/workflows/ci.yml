@@ -48,7 +48,7 @@ jobs:
       - name: Fetch and build quiche
         shell: bash
         run: |
-          ./scripts/quiche_workflow.sh --step fetch
+          ./scripts/quiche_workflow.sh --non-interactive --step fetch
 
       - name: Ensure QUICHE_PATH
         shell: bash

@@ -43,6 +43,9 @@ check_internet() {
 
 # Fragt den Benutzer, ob ein Vorgang wiederholt werden soll
 ask_retry() {
+    if [[ "${NON_INTERACTIVE:-}" == "1" ]]; then
+        return 1
+    fi
     read -r -p "Erneut versuchen? [j/N] " answer
     [[ "$answer" =~ ^[Jj]$ ]]
 }
@@ -67,6 +70,7 @@ LOG_DIR="$LIBS_DIR/logs"
 STATE_FILE="$BASE_DIR/.quiche_workflow_state"
 BUILD_TYPE="release"
 MIRROR_URL="https://github.com/cloudflare/quiche.git"
+NON_INTERACTIVE="${NON_INTERACTIVE:-0}"
 
 # Make quiche available to Cargo
 export QUICHE_PATH="$PATCHED_DIR/quiche"
@@ -403,6 +407,8 @@ show_help() {
     echo "  -t, --type TYPE     Build-Typ (release|debug), Standard: release"
     echo "  -m, --mirror URL    Git-Repository-URL für quiche"
     echo "  -s, --step SCHRITT  Bestimmten Schritt ausführen (fetch|patch|verify_patches|build|test)"
+    echo "  -n, --non-interactive  Nicht interaktiv ausführen (Abbruch bei Fehlern)"
+    echo "                        oder NON_INTERACTIVE=1 setzen"
     echo "  -h, --help          Zeige diese Hilfe"
     echo
     echo "Verfügbare Schritte:"
@@ -442,6 +448,10 @@ main() {
                 fi
                 START_STEP="$2"
                 shift 2
+                ;;
+            --non-interactive|-n)
+                NON_INTERACTIVE=1
+                shift
                 ;;
             --help|-h)
                 show_help
