@@ -388,10 +388,16 @@ where
         && detector.has_feature(CpuFeature::PCLMULQDQ)
     {
         f(&Avx512)
-    } else if detector.has_feature(CpuFeature::AVX2) && detector.has_feature(CpuFeature::PCLMULQDQ)
+    } else if detector.has_feature(CpuFeature::AVX2)
+        && detector.has_feature(CpuFeature::PCLMULQDQ)
     {
         f(&Avx2)
-    } else if detector.has_feature(CpuFeature::NEON) && detector.has_feature(CpuFeature::PCLMULQDQ)
+    } else if detector.has_feature(CpuFeature::SSE2)
+        && detector.has_feature(CpuFeature::PCLMULQDQ)
+    {
+        f(&Sse2)
+    } else if detector.has_feature(CpuFeature::NEON)
+        && detector.has_feature(CpuFeature::PCLMULQDQ)
     {
         f(&Neon)
     } else {

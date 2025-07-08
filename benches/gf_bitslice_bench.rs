@@ -8,6 +8,8 @@ use quicfuscate::fec::gf_tables::{
     gf_mul_bitsliced_avx2,
     #[cfg(target_arch = "x86_64")]
     gf_mul_bitsliced_avx512,
+    #[cfg(target_arch = "x86_64")]
+    gf_mul_bitsliced_sse2,
     #[cfg(target_arch = "aarch64")]
     gf_mul_bitsliced_neon,
 };
@@ -30,6 +32,17 @@ fn gf_bitslice_bench(c: &mut Criterion) {
 
     #[cfg(target_arch = "x86_64")]
     {
+        if std::is_x86_feature_detected!("sse2") && std::is_x86_feature_detected!("pclmulqdq") {
+            group.bench_function(BenchmarkId::new("sse2", 0), |bencher| {
+                bencher.iter(|| {
+                    let mut acc = 0u8;
+                    for i in 0..a.len() {
+                        unsafe { acc ^= gf_mul_bitsliced_sse2(black_box(a[i]), black_box(b[i])); }
+                    }
+                    black_box(acc);
+                });
+            });
+        }
         if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("pclmulqdq") {
             group.bench_function(BenchmarkId::new("avx2", 0), |bencher| {
                 bencher.iter(|| {

@@ -67,6 +67,22 @@ pub(crate) unsafe fn gf_mul_bitsliced_avx2(a: u8, b: u8) -> u8 {
     (r & 0xFF) as u8
 }
 
+#[cfg(all(target_arch = "x86_64"))]
+#[target_feature(enable = "sse2,pclmulqdq")]
+pub(crate) unsafe fn gf_mul_bitsliced_sse2(a: u8, b: u8) -> u8 {
+    use std::arch::x86_64::*;
+
+    let a_v = _mm_set_epi64x(0, a as i64);
+    let b_v = _mm_set_epi64x(0, b as i64);
+    let res_v = _mm_clmulepi64_si128(a_v, b_v, 0x00);
+    let res16 = _mm_extract_epi16(res_v, 0) as u16;
+    let t = res16 ^ (res16 >> 8);
+    let t = t ^ (t >> 4);
+    let t = t ^ (t >> 2);
+    let t = t ^ (t >> 1);
+    (t & 0xFF) as u8
+}
+
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon,pmull")]
 pub(crate) unsafe fn gf_mul_bitsliced_neon(a: u8, b: u8) -> u8 {
@@ -100,32 +116,11 @@ pub(crate) fn gf_mul(a: u8, b: u8) -> u8 {
             #[cfg(target_arch = "x86_64")]
             &optimize::Avx2 => unsafe { gf_mul_bitsliced_avx2(a, b) },
             #[cfg(target_arch = "x86_64")]
-            &optimize::Pclmulqdq => {
-                // This is an unsafe block because it uses CPU intrinsics.
-                // It's guaranteed to be safe because `dispatch` only selects this path
-                // when the `pclmulqdq` feature is detected at runtime.
-                #[allow(unsafe_code)]
-                unsafe {
-                    use std::arch::x86_64::*;
-                    let a_v = _mm_set_epi64x(0, a as i64);
-                    let b_v = _mm_set_epi64x(0, b as i64);
-                    // Carry-less multiplication of two 8-bit polynomials results in a 15-bit polynomial.
-                    let res_v = _mm_clmulepi64_si128(a_v, b_v, 0x00);
-
-                    // FULL POLYNOMIAL REDUCTION for GF(2^8)) with polynomial x^8 + x^4 + x^3 + x^2 + 1 (0x11D)
-                    // This is a highly optimized bitwise reduction.
-                    let res16 = _mm_extract_epi16(res_v, 0) as u16;
-                    let t = res16 ^ (res16 >> 8);
-                    let t = t ^ (t >> 4);
-                    let t = t ^ (t >> 2);
-                    let t = t ^ (t >> 1);
-                    (t & 0xFF) as u8
-                }
-            }
+            &optimize::Sse2 => unsafe { gf_mul_bitsliced_sse2(a, b) },
             #[cfg(target_arch = "aarch64")]
             &optimize::Neon => unsafe { gf_mul_bitsliced_neon(a, b) },
-            // SSE2 or fallback to table-based multiplication if no specific SIMD is available.
-            &optimize::Sse2 | _ => gf_mul_table(a, b),
+            // Fallback to table-based multiplication if no specific SIMD is available.
+            _ => gf_mul_table(a, b),
         }
     });
     result
