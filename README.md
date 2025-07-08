@@ -49,12 +49,12 @@ modules now live under `src/`.
 - **Connection Multiplexing**: Multiple streams over a single connection
 - **0-RTT Handshake**: Reduced latency for subsequent connections
 
-- **ASW-RLNC-X FEC (experimental)**: Adaptive systematic sliding-window scheme
+- **ASW-RLNC-X FEC**: Adaptive systematic sliding-window scheme
 - **Dynamic Redundancy**: Automatic adjustments to network conditions
 - **Packet Recovery**: Robust reconstruction for lossy networks
 - **Bandwidth-Efficient**: Minimal overhead thanks to RLNC
 
-> **Note:** The FEC and Stealth modules are experimental and not yet production ready.
+
 
 ## 🏗️ Project Status
 
@@ -67,8 +67,8 @@ The codebase is now entirely written in Rust. Development focuses on expanding f
 | Transport Protocol  | QUIC v1 / HTTP/3                   |
 | Encryption         | AEGIS-128L/X, MORUS-1280-128       |
 | Key Exchange       | X25519, X448                       |
-| Error Correction   | ASW-RLNC-X FEC (experimental)       |
-| Obfuscation       | XOR-based, Traffic Shaping, Fake TLS (experimental) |
+| Error Correction   | ASW-RLNC-X FEC       |
+| Obfuscation       | XOR-based, Traffic Shaping, Fake TLS |
 | Platforms          | Linux, macOS, Windows (planned)     |
 | Architecture       | x86_64, ARM64                      |
 | Performance        | Multi-Gigabit capable              |

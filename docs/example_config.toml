@@ -24,4 +24,4 @@ use_qpack_headers = true
 [optimize]
 pool_capacity = 1024
 block_size = 4096
-enable_xdp = false
+enable_xdp = true

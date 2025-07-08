@@ -41,6 +41,7 @@ use crate::optimize::{MemoryPool, OptimizationManager, OptimizeConfig};
 use crate::stealth::{StealthConfig, StealthManager};
 use crate::telemetry;
 use crate::xdp_socket::XdpSocket;
+use log::{debug, error, info, warn};
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -237,7 +238,7 @@ impl QuicFuscateConnection {
                 };
                 if let Err(e) = self.conn.recv(data, recv_info) {
                     // Log error, but continue processing other recovered packets
-                    eprintln!("quiche::recv failed after FEC recovery: {}", e);
+                    error!("quiche::recv failed after FEC recovery: {}", e);
                 }
             }
         }
@@ -389,7 +390,7 @@ impl QuicFuscateConnection {
         if let Some(ref mut h3) = self.h3_conn {
             let start = std::time::Instant::now();
             h3.send_request(&mut self.conn, &headers, true)?;
-            println!("HTTP/3 request sent in {} ms", start.elapsed().as_millis());
+            info!("HTTP/3 request sent in {} ms", start.elapsed().as_millis());
         }
         Ok(())
     }
@@ -402,7 +403,7 @@ impl QuicFuscateConnection {
                 match h3.poll(&mut self.conn) {
                     Ok((stream_id, quiche::h3::Event::Headers { list, .. })) => {
                         for h in list {
-                            println!(
+                            debug!(
                                 "{}: {}",
                                 String::from_utf8_lossy(h.name()),
                                 String::from_utf8_lossy(h.value())
@@ -413,8 +414,8 @@ impl QuicFuscateConnection {
                         let mut buf = [0; 4096];
                         while let Ok(read) = h3.recv_body(&mut self.conn, stream_id, &mut buf) {
                             let data = &buf[..read];
-                            println!("Received {} bytes on stream {}", read, stream_id);
-                            println!("{}", String::from_utf8_lossy(data));
+                            debug!("Received {} bytes on stream {}", read, stream_id);
+                            debug!("{}", String::from_utf8_lossy(data));
                         }
                     }
                     Ok((_id, quiche::h3::Event::Finished)) => {}
@@ -422,7 +423,7 @@ impl QuicFuscateConnection {
                     Err(e) => return Err(e.into()),
                 }
             }
-            println!(
+            debug!(
                 "HTTP/3 events processed in {} ms",
                 start.elapsed().as_millis()
             );
@@ -455,15 +456,15 @@ impl QuicFuscateConnection {
         while let Some(event) = self.conn.path_event_next() {
             match event {
                 quiche::PathEvent::New(local, peer) => {
-                    println!("New path detected: {local}->{peer}");
+                    info!("New path detected: {local}->{peer}");
                 }
                 quiche::PathEvent::Validated(local, peer) => {
-                    println!("Path validated: {local}->{peer}");
+                    info!("Path validated: {local}->{peer}");
                     self.peer_addr = peer;
                     self.local_addr = local;
                     if let Some(ref mut xdp) = self.xdp_socket {
                         if let Err(e) = xdp.reconfigure(local, peer) {
-                            eprintln!("XDP reconfigure failed: {e}");
+                            warn!("XDP reconfigure failed: {e}");
                             self.xdp_socket =
                                 self.optimization_manager.create_xdp_socket(local, peer);
                         }
@@ -473,21 +474,21 @@ impl QuicFuscateConnection {
                     telemetry!(telemetry::PATH_MIGRATIONS.inc());
                 }
                 quiche::PathEvent::FailedValidation(local, peer) => {
-                    eprintln!("Path validation failed: {local}->{peer}");
+                    warn!("Path validation failed: {local}->{peer}");
                 }
                 quiche::PathEvent::Closed(local, peer) => {
-                    println!("Path closed: {local}->{peer}");
+                    info!("Path closed: {local}->{peer}");
                 }
                 quiche::PathEvent::ReusedSourceConnectionId(seq, old, new) => {
-                    println!("CID {seq} reused from {old:?} to {new:?}");
+                    info!("CID {seq} reused from {old:?} to {new:?}");
                 }
                 quiche::PathEvent::PeerMigrated(local, peer) => {
-                    println!("Peer migrated: {local}->{peer}");
+                    info!("Peer migrated: {local}->{peer}");
                     self.peer_addr = peer;
                     self.local_addr = local;
                     if let Some(ref mut xdp) = self.xdp_socket {
                         if let Err(e) = xdp.reconfigure(local, peer) {
-                            eprintln!("XDP reconfigure failed: {e}");
+                            warn!("XDP reconfigure failed: {e}");
                             self.xdp_socket =
                                 self.optimization_manager.create_xdp_socket(local, peer);
                         }

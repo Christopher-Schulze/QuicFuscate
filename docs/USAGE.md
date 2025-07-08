@@ -83,7 +83,8 @@ quicfuscate client \
   --profile chrome \
   --front-domain cdn.example.com \
   --pool-capacity 1024 \
-  --pool-block 4096
+  --pool-block 4096 \
+  --xdp
 ```
 
 ```
@@ -93,7 +94,8 @@ quicfuscate server \
   --key ./server.key \
   --profile chrome \
   --pool-capacity 1024 \
-  --pool-block 4096
+  --pool-block 4096 \
+  --xdp
 ```
 
 ### Example Configuration
@@ -128,7 +130,7 @@ use_qpack_headers = true
 [optimize]
 pool_capacity = 1024
 block_size = 4096
-enable_xdp = false
+enable_xdp = true
 ```
 
 ### Connection Migration
