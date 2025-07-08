@@ -27,19 +27,19 @@ modules now live under `src/`.
 
 ## ✨ Core Features
 
--### 🛡️ Advanced Stealth Technology
+### 🛡️ Advanced Stealth Technology
 - **uTLS Fingerprinting Protection**: Mimics browser TLS fingerprints to evade deep packet inspection
 - **TLS Handshake Spoofing**: Replays captured ClientHello messages for realistic fingerprints ([Issue #002](docs/issues/002-real-tls-fingerprints.md))
 - **Domain Fronting**: Masks traffic by routing through trusted CDN providers
 - **HTTP/3 Masquerading**: Disguises traffic as standard HTTP/3 web traffic
 - **Traffic Obfuscation**: XOR-based packet transformation to defeat pattern recognition
-- **Spin Bit Randomization**: Prevents network analysis through QUIC protocol fingerprinting
+- **Spin Bit Randomization**: Planned feature for masking QUIC traffic metadata
 
 ### 🔒 Military-Grade Encryption
 - **AEGIS-128L/X**: Authenticated encryption with hardware acceleration
 - **MORUS-1280-128**: Lightweight cipher for resource-constrained environments
 - **Perfect Forward Secrecy**: Ephemeral key exchange for maximum security
-- **Post-Quantum Ready**: Designed to resist quantum computing attacks
+- **Post-Quantum Ready**: PQ algorithms planned but not yet implemented
 
 ### ⚡ Performance Optimizations
 - **SIMD Acceleration**: ARM NEON and x86 AVX2/AVX-512 optimizations
