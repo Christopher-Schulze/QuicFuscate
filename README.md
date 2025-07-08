@@ -81,22 +81,22 @@ The codebase is now entirely written in Rust. Development focuses on expanding f
 
 ## 🔧 Build Instructions
 
-This repository uses a Git submodule to include a patched QUIC library.
-The `libs/patched_quiche` directory is intentionally left empty to keep the
-checkout small. Fetch the sources after cloning by running the workflow
-script below.
-After cloning simply run the workflow script which fetches the sources and
-initializes the submodule automatically. The script exports `QUICHE_PATH`
-to `libs/patched_quiche/quiche` so that Cargo can find the library:
+This repository uses a Git submodule to include a patched QUIC library. The
+`libs/patched_quiche` directory is intentionally left empty to keep the checkout
+small.
+
+Simply invoke the workflow script once after cloning. It fetches the sources,
+applies all patches and builds the library automatically while exporting
+`QUICHE_PATH` so that Cargo can locate the compiled quiche:
 
 ```bash
-./scripts/quiche_workflow.sh --step fetch
+./scripts/quiche_workflow.sh --non-interactive
 ```
 
-Quick start after cloning:
+After the workflow finishes you can build the rest of the project with Cargo as
+usual:
 
 ```bash
-./scripts/quiche_workflow.sh --step fetch
 cargo build --release
 ```
 
@@ -116,7 +116,7 @@ submodule URL to a mirror that includes this commit and retry:
 
 ```bash
 git submodule set-url libs/patched_quiche <mirror-url>
-./scripts/quiche_workflow.sh --step fetch
+./scripts/quiche_workflow.sh --non-interactive
 ```
 
 The workflow script replaces the old `fetch_quiche.sh` helper and can be
@@ -132,10 +132,10 @@ export QUICHE_PATH=$(pwd)/libs/patched_quiche/quiche
 ### ⚠️ Ohne Fetch kein Build
 
 `cargo build` schlägt fehl, wenn das Verzeichnis `libs/patched_quiche/quiche`
-noch nicht existiert. Führe deshalb vor dem Bauen immer zuerst:
+noch nicht existiert. Führe deshalb vor dem Bauen immer zuerst den Workflow aus:
 
 ```bash
-./scripts/quiche_workflow.sh --step fetch
+./scripts/quiche_workflow.sh --non-interactive
 ```
 
 ### Building quiche
@@ -193,7 +193,7 @@ git submodule update --init libs/patched_quiche
 Anschließend den Workflow erneut starten:
 
 ```bash
-./scripts/quiche_workflow.sh --step fetch
+./scripts/quiche_workflow.sh --non-interactive
 ```
 
 ### Project Layout
