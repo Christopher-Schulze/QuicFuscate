@@ -293,7 +293,7 @@ apply_patches() {
             patch_failure "Patch-Verifikation fehlgeschlagen" "$backup_dir"
         fi
         # Rebuild BoringSSL hooks to ensure patched symbols are available
-        run_command "BoringSSL hooks build" "(cd \"$PATCHED_DIR\" && cargo build --release -p quiche --lib)"
+        run_command "BoringSSL hooks build" "(cd \"$PATCHED_DIR\" && cargo build --release -p quiche --features ffi --lib)"
     else
         warn "Keine Patch-Dateien im .patch-Format gefunden"
     fi

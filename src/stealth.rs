@@ -1129,11 +1129,26 @@ impl StealthManager {
 
     /// Changes the active fingerprint profile at runtime.
     /// Call `apply_utls_profile` again to update an existing quiche configuration.
-    pub fn set_fingerprint_profile(&self, profile: FingerprintProfile) {
+    pub fn set_fingerprint_profile(
+        &self,
+        profile: FingerprintProfile,
+        mut cfg: Option<&mut quiche::Config>,
+    ) {
         let mut p = profile;
         if p.client_hello.is_none() {
             p.client_hello = TlsClientHelloSpoofer::load_client_hello(p.browser, p.os);
         }
+
+        if let (Some(ref hello), Some(c)) = (&p.client_hello, cfg.as_deref_mut()) {
+            unsafe {
+                tls_ffi::quiche_config_set_custom_tls(
+                    c as *mut _ as *mut std::ffi::c_void,
+                    hello.as_ptr(),
+                    hello.len(),
+                );
+            }
+        }
+
         let mut fp = self.fingerprint.lock().unwrap();
         *fp = p;
     }
@@ -1160,7 +1175,7 @@ impl StealthManager {
             loop {
                 tokio::time::sleep(interval).await;
                 idx = (idx + 1) % profiles.len();
-                mgr.set_fingerprint_profile(profiles[idx].clone());
+                mgr.set_fingerprint_profile(profiles[idx].clone(), None);
             }
         });
     }
