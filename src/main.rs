@@ -110,9 +110,6 @@ enum Commands {
         /// Show TLS debug information
         #[clap(long)]
         debug_tls: bool,
-        /// Use FakeTLS instead of a real handshake
-        #[clap(long)]
-        fake_tls: bool,
         /// List available browser fingerprints
         #[clap(long)]
         list_fingerprints: bool,
@@ -135,9 +132,6 @@ enum Commands {
         /// Disable HTTP/3 masquerading
         #[clap(long)]
         disable_http3: bool,
-        /// Use FakeTLS instead of a real handshake
-        #[clap(long)]
-        fake_tls: bool,
     },
     /// Runs the server
     Server {
@@ -278,7 +272,6 @@ async fn main() -> std::io::Result<()> {
                 *disable_fronting,
                 *disable_xor,
                 *disable_http3,
-                *fake_tls,
             )
             .await?;
         }
@@ -300,7 +293,6 @@ async fn main() -> std::io::Result<()> {
             disable_fronting,
             disable_xor,
             disable_http3,
-            fake_tls,
         } => {
             let browser = *profile;
             let os_profile = *os;
@@ -325,7 +317,6 @@ async fn main() -> std::io::Result<()> {
                 *disable_fronting,
                 *disable_xor,
                 *disable_http3,
-                *fake_tls,
             )
             .await?;
         }
@@ -396,7 +387,6 @@ async fn run_client(
     disable_fronting: bool,
     disable_xor: bool,
     disable_http3: bool,
-    fake_tls: bool,
 ) -> std::io::Result<()> {
     let config_path = config.clone();
     if list_fingerprints {
@@ -506,7 +496,6 @@ async fn run_client(
     let mut stealth_config = stealth_config;
     stealth_config.browser_profile = profile;
     stealth_config.os_profile = os;
-    stealth_config.use_fake_tls = fake_tls;
     stealth_config.enable_doh = !disable_doh;
     stealth_config.doh_provider = doh_provider.to_string();
     stealth_config.enable_domain_fronting = !disable_fronting;
@@ -693,7 +682,6 @@ async fn run_server(
     disable_fronting: bool,
     disable_xor: bool,
     disable_http3: bool,
-    fake_tls: bool,
 ) -> std::io::Result<()> {
     let config_path = config.clone();
     let socket = std::net::UdpSocket::bind(listen_addr)?;
@@ -779,7 +767,6 @@ async fn run_server(
         let mut sc = stealth_config.lock().unwrap();
         sc.browser_profile = profile;
         sc.os_profile = os;
-        sc.use_fake_tls = fake_tls;
         sc.enable_doh = !disable_doh;
         sc.doh_provider = doh_provider.to_string();
         sc.enable_domain_fronting = !disable_fronting;

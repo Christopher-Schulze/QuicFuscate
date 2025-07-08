@@ -51,10 +51,10 @@ use tokio::runtime::Runtime;
 use url::Url;
 
 use crate::crypto::CryptoManager; // Assumed for integration
+use crate::fake_tls;
 use crate::optimize::{self, OptimizationManager}; // Assumed for integration
 use crate::telemetry;
 use crate::tls_ffi;
-use crate::fake_tls;
 
 // --- Global Tokio Runtime for async DoH requests ---
 lazy_static! {
@@ -152,14 +152,6 @@ pub enum OsProfile {
     Android,
 }
 
-/// Chooses between performing a real uTLS handshake or sending a minimal
-/// FakeTLS handshake.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum)]
-pub enum HandshakeType {
-    RealTLS,
-    FakeTLS,
-}
-
 impl std::str::FromStr for OsProfile {
     type Err = ();
 
@@ -180,7 +172,6 @@ impl std::str::FromStr for OsProfile {
 pub struct FingerprintProfile {
     pub browser: BrowserProfile,
     pub os: OsProfile,
-    pub handshake_type: HandshakeType,
     pub user_agent: String,
     pub tls_cipher_suites: Vec<u16>,
     pub accept_language: String,
@@ -199,9 +190,7 @@ impl FingerprintProfile {
         let mut profile = match (browser, os) {
             // --- Windows Profiles ---
             (BrowserProfile::Chrome, OsProfile::Windows) => Self {
-                browser, os,
-                handshake_type: HandshakeType::RealTLS,
-                user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36".to_string(),
+                browser, os,                user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36".to_string(),
                 tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
                 accept_language: "en-US,en;q=0.9".to_string(),
                 initial_max_data: 10_000_000,
@@ -212,9 +201,7 @@ impl FingerprintProfile {
                 client_hello: None,
             },
            (BrowserProfile::Firefox, OsProfile::Windows) => Self {
-                browser, os,
-                handshake_type: HandshakeType::RealTLS,
-                user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0".to_string(),
+                browser, os,                user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0".to_string(),
                 tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xcca9, 0xcca8, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xc013, 0xc014],
                 accept_language: "en-US,en;q=0.5".to_string(),
                 initial_max_data: 12_582_912,
@@ -225,9 +212,7 @@ impl FingerprintProfile {
                 client_hello: None,
             },
            (BrowserProfile::Opera, OsProfile::Windows) => Self {
-               browser, os,
-                handshake_type: HandshakeType::RealTLS,
-               user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 OPR/112.0.0.0".to_string(),
+               browser, os,               user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 OPR/112.0.0.0".to_string(),
                tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
                accept_language: "en-US,en;q=0.9".to_string(),
                 initial_max_data: 10_000_000,
@@ -238,9 +223,7 @@ impl FingerprintProfile {
                 client_hello: None,
            },
            (BrowserProfile::Brave, OsProfile::Windows) => Self {
-               browser, os,
-                handshake_type: HandshakeType::RealTLS,
-               user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Brave/1.67.0".to_string(),
+               browser, os,               user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Brave/1.67.0".to_string(),
                tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
                accept_language: "en-US,en;q=0.9".to_string(),
                initial_max_data: 10_000_000,
@@ -251,9 +234,7 @@ impl FingerprintProfile {
                 client_hello: None,
            },
            (BrowserProfile::Edge, OsProfile::Windows) => Self {
-               browser, os,
-                handshake_type: HandshakeType::RealTLS,
-               user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0".to_string(),
+               browser, os,               user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0".to_string(),
                tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
                accept_language: "en-US,en;q=0.9".to_string(),
                initial_max_data: 10_000_000,
@@ -264,9 +245,7 @@ impl FingerprintProfile {
                 client_hello: None,
            },
            (BrowserProfile::Edge, OsProfile::MacOS) => Self {
-               browser, os,
-                handshake_type: HandshakeType::RealTLS,
-               user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0".to_string(),
+               browser, os,               user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0".to_string(),
                tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
                accept_language: "en-US,en;q=0.9".to_string(),
                initial_max_data: 10_000_000,
@@ -277,9 +256,7 @@ impl FingerprintProfile {
                 client_hello: None,
            },
            (BrowserProfile::Edge, OsProfile::Linux) => Self {
-               browser, os,
-                handshake_type: HandshakeType::RealTLS,
-               user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0".to_string(),
+               browser, os,               user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0".to_string(),
                tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
                accept_language: "en-US,en;q=0.9".to_string(),
                initial_max_data: 10_000_000,
@@ -290,9 +267,7 @@ impl FingerprintProfile {
                 client_hello: None,
            },
            (BrowserProfile::Vivaldi, OsProfile::Windows) => Self {
-               browser, os,
-                handshake_type: HandshakeType::RealTLS,
-               user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Vivaldi/6.7.999.31".to_string(),
+               browser, os,               user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Vivaldi/6.7.999.31".to_string(),
                tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
                accept_language: "en-US,en;q=0.9".to_string(),
                initial_max_data: 10_000_000,
@@ -303,9 +278,7 @@ impl FingerprintProfile {
                 client_hello: None,
            },
            (BrowserProfile::Vivaldi, OsProfile::MacOS) => Self {
-               browser, os,
-                handshake_type: HandshakeType::RealTLS,
-               user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Vivaldi/6.7.999.31".to_string(),
+               browser, os,               user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Vivaldi/6.7.999.31".to_string(),
                tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
                accept_language: "en-US,en;q=0.9".to_string(),
                initial_max_data: 10_000_000,
@@ -316,9 +289,7 @@ impl FingerprintProfile {
                 client_hello: None,
            },
            (BrowserProfile::Vivaldi, OsProfile::Linux) => Self {
-               browser, os,
-                handshake_type: HandshakeType::RealTLS,
-               user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Vivaldi/6.7.999.31".to_string(),
+               browser, os,               user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Vivaldi/6.7.999.31".to_string(),
                tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
                accept_language: "en-US,en;q=0.9".to_string(),
                initial_max_data: 10_000_000,
@@ -330,9 +301,7 @@ impl FingerprintProfile {
            },
             // --- macOS Profiles ---
            (BrowserProfile::Safari, OsProfile::MacOS) => Self {
-                browser, os,
-                handshake_type: HandshakeType::RealTLS,
-                user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15".to_string(),
+                browser, os,                user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15".to_string(),
                 tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xc009, 0xc013, 0xc00a, 0xc014],
                 accept_language: "en-US,en;q=0.9".to_string(),
                 initial_max_data: 15_728_640,
@@ -343,9 +312,7 @@ impl FingerprintProfile {
                 client_hello: None,
             },
             (BrowserProfile::Chrome, OsProfile::MacOS) => Self {
-                browser, os,
-                handshake_type: HandshakeType::RealTLS,
-                user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36".to_string(),
+                browser, os,                user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36".to_string(),
                 tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
                 accept_language: "en-US,en;q=0.9".to_string(),
                 initial_max_data: 10_000_000,
@@ -356,9 +323,7 @@ impl FingerprintProfile {
                 client_hello: None,
             },
             (BrowserProfile::Opera, OsProfile::MacOS) => Self {
-                browser, os,
-                handshake_type: HandshakeType::RealTLS,
-                user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 OPR/112.0.0.0".to_string(),
+                browser, os,                user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 OPR/112.0.0.0".to_string(),
                 tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
                 accept_language: "en-US,en;q=0.9".to_string(),
                 initial_max_data: 10_000_000,
@@ -369,9 +334,7 @@ impl FingerprintProfile {
                 client_hello: None,
             },
             (BrowserProfile::Brave, OsProfile::MacOS) => Self {
-                browser, os,
-                handshake_type: HandshakeType::RealTLS,
-                user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Brave/1.67.0".to_string(),
+                browser, os,                user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Brave/1.67.0".to_string(),
                 tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
                 accept_language: "en-US,en;q=0.9".to_string(),
                 initial_max_data: 10_000_000,
@@ -382,9 +345,7 @@ impl FingerprintProfile {
                 client_hello: None,
             },
             (BrowserProfile::Firefox, OsProfile::MacOS) => Self {
-                browser, os,
-                handshake_type: HandshakeType::RealTLS,
-                user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6; rv:127.0) Gecko/20100101 Firefox/127.0".to_string(),
+                browser, os,                user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6; rv:127.0) Gecko/20100101 Firefox/127.0".to_string(),
                 tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xcca9, 0xcca8, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xc013, 0xc014],
                 accept_language: "en-US,en;q=0.5".to_string(),
                 initial_max_data: 12_582_912,
@@ -395,9 +356,7 @@ impl FingerprintProfile {
                 client_hello: None,
             },
             (BrowserProfile::Chrome, OsProfile::Linux) => Self {
-                browser, os,
-                handshake_type: HandshakeType::RealTLS,
-                user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36".to_string(),
+                browser, os,                user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36".to_string(),
                 tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
                 accept_language: "en-US,en;q=0.9".to_string(),
                 initial_max_data: 10_000_000,
@@ -408,9 +367,7 @@ impl FingerprintProfile {
                 client_hello: None,
             },
             (BrowserProfile::Opera, OsProfile::Linux) => Self {
-                browser, os,
-                handshake_type: HandshakeType::RealTLS,
-                user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 OPR/112.0.0.0".to_string(),
+                browser, os,                user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 OPR/112.0.0.0".to_string(),
                 tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
                 accept_language: "en-US,en;q=0.9".to_string(),
                 initial_max_data: 10_000_000,
@@ -421,9 +378,7 @@ impl FingerprintProfile {
                 client_hello: None,
             },
             (BrowserProfile::Brave, OsProfile::Linux) => Self {
-                browser, os,
-                handshake_type: HandshakeType::RealTLS,
-                user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Brave/1.67.0".to_string(),
+                browser, os,                user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Brave/1.67.0".to_string(),
                 tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
                 accept_language: "en-US,en;q=0.9".to_string(),
                 initial_max_data: 10_000_000,
@@ -434,9 +389,7 @@ impl FingerprintProfile {
                 client_hello: None,
             },
             (BrowserProfile::Firefox, OsProfile::Linux) => Self {
-                browser, os,
-                handshake_type: HandshakeType::RealTLS,
-                user_agent: "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:127.0) Gecko/20100101 Firefox/127.0".to_string(),
+                browser, os,                user_agent: "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:127.0) Gecko/20100101 Firefox/127.0".to_string(),
                 tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xcca9, 0xcca8, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xc013, 0xc014],
                 accept_language: "en-US,en;q=0.5".to_string(),
                 initial_max_data: 12_582_912,
@@ -447,9 +400,7 @@ impl FingerprintProfile {
                 client_hello: None,
             },
             (BrowserProfile::Chrome, OsProfile::Android) => Self {
-                browser, os,
-                handshake_type: HandshakeType::RealTLS,
-                user_agent: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36".to_string(),
+                browser, os,                user_agent: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36".to_string(),
                 tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
                 accept_language: "en-US,en;q=0.9".to_string(),
                 initial_max_data: 5_000_000,
@@ -460,9 +411,7 @@ impl FingerprintProfile {
                 client_hello: None,
             },
             (BrowserProfile::Firefox, OsProfile::Android) => Self {
-                browser, os,
-                handshake_type: HandshakeType::RealTLS,
-                user_agent: "Mozilla/5.0 (Android 14; Mobile; rv:127.0) Gecko/127.0 Firefox/127.0".to_string(),
+                browser, os,                user_agent: "Mozilla/5.0 (Android 14; Mobile; rv:127.0) Gecko/127.0 Firefox/127.0".to_string(),
                 tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xcca9, 0xcca8, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xc013, 0xc014],
                 accept_language: "en-US,en;q=0.9".to_string(),
                 initial_max_data: 5_000_000,
@@ -473,9 +422,7 @@ impl FingerprintProfile {
                 client_hello: None,
             },
             (BrowserProfile::Opera, OsProfile::Android) => Self {
-                browser, os,
-                handshake_type: HandshakeType::RealTLS,
-                user_agent: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36 OPR/112.0.0.0".to_string(),
+                browser, os,                user_agent: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36 OPR/112.0.0.0".to_string(),
                 tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
                 accept_language: "en-US,en;q=0.9".to_string(),
                 initial_max_data: 5_000_000,
@@ -486,9 +433,7 @@ impl FingerprintProfile {
                 client_hello: None,
             },
             (BrowserProfile::Brave, OsProfile::Android) => Self {
-                browser, os,
-                handshake_type: HandshakeType::RealTLS,
-                user_agent: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36 Brave/1.67.0".to_string(),
+                browser, os,                user_agent: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36 Brave/1.67.0".to_string(),
                 tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
                 accept_language: "en-US,en;q=0.9".to_string(),
                 initial_max_data: 5_000_000,
@@ -499,9 +444,7 @@ impl FingerprintProfile {
                 client_hello: None,
             },
             (BrowserProfile::Edge, OsProfile::Android) => Self {
-                browser, os,
-                handshake_type: HandshakeType::RealTLS,
-                user_agent: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36 EdgA/126.0.0.0".to_string(),
+                browser, os,                user_agent: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36 EdgA/126.0.0.0".to_string(),
                 tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
                 accept_language: "en-US,en;q=0.9".to_string(),
                 initial_max_data: 5_000_000,
@@ -512,9 +455,7 @@ impl FingerprintProfile {
                 client_hello: None,
             },
             (BrowserProfile::Vivaldi, OsProfile::Android) => Self {
-                browser, os,
-                handshake_type: HandshakeType::RealTLS,
-                user_agent: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36 Vivaldi/6.7.999.31".to_string(),
+                browser, os,                user_agent: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36 Vivaldi/6.7.999.31".to_string(),
                 tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014],
                 accept_language: "en-US,en;q=0.9".to_string(),
                 initial_max_data: 5_000_000,
@@ -525,9 +466,7 @@ impl FingerprintProfile {
                 client_hello: None,
             },
             (BrowserProfile::Safari, OsProfile::IOS) => Self {
-                browser, os,
-                handshake_type: HandshakeType::RealTLS,
-                user_agent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1".to_string(),
+                browser, os,                user_agent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1".to_string(),
                 tls_cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xc009, 0xc013, 0xc00a, 0xc014],
                 accept_language: "en-US,en;q=0.9".to_string(),
                 initial_max_data: 5_000_000,
@@ -1133,13 +1072,15 @@ pub struct StealthManager {
 impl StealthManager {
     /// Creates a new `StealthManager` with the given configuration.
     pub fn new(
-        config: StealthConfig,
+        mut config: StealthConfig,
         crypto_manager: Arc<CryptoManager>,
         optimization_manager: Arc<OptimizationManager>,
     ) -> Self {
+        config.use_fake_tls = true;
         let mut fingerprint = FingerprintProfile::new(config.browser_profile, config.os_profile);
-        if config.use_fake_tls {
-            fingerprint.handshake_type = HandshakeType::FakeTLS;
+        if fingerprint.client_hello.is_none() {
+            fingerprint.client_hello =
+                TlsClientHelloSpoofer::load_client_hello(fingerprint.browser, fingerprint.os);
         }
 
         let domain_fronter = if config.enable_domain_fronting {
@@ -1195,14 +1136,6 @@ impl StealthManager {
             "Applying uTLS fingerprint for: {:?}/{:?}",
             fingerprint.browser, fingerprint.os
         );
-
-        if fingerprint.handshake_type == HandshakeType::FakeTLS {
-            // FakeTLS does not inject a real ClientHello
-            if let Err(e) = config.set_application_protos(quiche::h3::APPLICATION_PROTOCOL) {
-                error!("Failed to set ALPN: {}", e);
-            }
-            return;
-        }
 
         // Build the final cipher list, optionally preferring a runtime selected suite.
         let mut suite_ids = fingerprint.tls_cipher_suites.clone();
@@ -1474,5 +1407,10 @@ impl StealthManager {
         } else {
             None
         }
+    }
+
+    /// Returns whether FakeTLS should be used for handshakes.
+    pub fn use_fake_tls(&self) -> bool {
+        self.config.use_fake_tls
     }
 }

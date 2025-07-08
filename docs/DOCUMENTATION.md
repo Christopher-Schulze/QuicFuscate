@@ -476,6 +476,13 @@ fingerprint:
 5. Launch QuicFuscate with `--profile <browser> --os <os>` to activate
    the new fingerprint at runtime.
 
+### FakeTLS Handshake
+
+FakeTLS emits a forged TLS handshake without performing real encryption.
+The ClientHello is taken from the active fingerprint profile and the server
+responds with a minimal ServerHello and certificate. This keeps the
+handshake lightweight while still mimicking genuine TLS traffic.
+
 ### HTTP Header Spoofing
 Defined in `stealth/browser_profiles/headers/FakeHeaders.rs`:
 
