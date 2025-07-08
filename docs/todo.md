@@ -1,6 +1,6 @@
 # QuicFuscate Implementation Roadmap
 
-This document outlines the comprehensive, phased implementation plan to build a production-ready version of QuicFuscate. It replaces the previous `todo.md` and is based on `PLAN.txt` and a detailed architectural analysis. The current prototype is a non-functional facade and requires a complete rebuild of core components.
+This document outlines the comprehensive, phased implementation plan for QuicFuscate. The core networking, FEC and stealth components are already functional, and ongoing work focuses on optimization and feature hardening. It replaces the previous `todo.md` and draws from `PLAN.txt` and a detailed architectural analysis.
 
 ---
 
