@@ -836,6 +836,7 @@ impl TlsClientHelloSpoofer {
 
     fn load_client_hello(browser: BrowserProfile, os: OsProfile) -> Option<Vec<u8>> {
         let data = match (browser, os) {
+            // Windows profiles
             (BrowserProfile::Chrome, OsProfile::Windows) => {
                 Some(include_str!("../browser_profiles/chrome_windows.chlo"))
             }
@@ -854,9 +855,75 @@ impl TlsClientHelloSpoofer {
             (BrowserProfile::Vivaldi, OsProfile::Windows) => {
                 Some(include_str!("../browser_profiles/vivaldi_windows.chlo"))
             }
+
+            // macOS profiles
             (BrowserProfile::Safari, OsProfile::MacOS) => {
                 Some(include_str!("../browser_profiles/safari_macos.chlo"))
             }
+            (BrowserProfile::Chrome, OsProfile::MacOS) => {
+                Some(include_str!("../browser_profiles/chrome_macos.chlo"))
+            }
+            (BrowserProfile::Firefox, OsProfile::MacOS) => {
+                Some(include_str!("../browser_profiles/firefox_macos.chlo"))
+            }
+            (BrowserProfile::Opera, OsProfile::MacOS) => {
+                Some(include_str!("../browser_profiles/opera_macos.chlo"))
+            }
+            (BrowserProfile::Brave, OsProfile::MacOS) => {
+                Some(include_str!("../browser_profiles/brave_macos.chlo"))
+            }
+            (BrowserProfile::Edge, OsProfile::MacOS) => {
+                Some(include_str!("../browser_profiles/edge_macos.chlo"))
+            }
+            (BrowserProfile::Vivaldi, OsProfile::MacOS) => {
+                Some(include_str!("../browser_profiles/vivaldi_macos.chlo"))
+            }
+
+            // Linux profiles
+            (BrowserProfile::Chrome, OsProfile::Linux) => {
+                Some(include_str!("../browser_profiles/chrome_linux.chlo"))
+            }
+            (BrowserProfile::Firefox, OsProfile::Linux) => {
+                Some(include_str!("../browser_profiles/firefox_linux.chlo"))
+            }
+            (BrowserProfile::Opera, OsProfile::Linux) => {
+                Some(include_str!("../browser_profiles/opera_linux.chlo"))
+            }
+            (BrowserProfile::Brave, OsProfile::Linux) => {
+                Some(include_str!("../browser_profiles/brave_linux.chlo"))
+            }
+            (BrowserProfile::Edge, OsProfile::Linux) => {
+                Some(include_str!("../browser_profiles/edge_linux.chlo"))
+            }
+            (BrowserProfile::Vivaldi, OsProfile::Linux) => {
+                Some(include_str!("../browser_profiles/vivaldi_linux.chlo"))
+            }
+
+            // Android profiles
+            (BrowserProfile::Chrome, OsProfile::Android) => {
+                Some(include_str!("../browser_profiles/chrome_android.chlo"))
+            }
+            (BrowserProfile::Firefox, OsProfile::Android) => {
+                Some(include_str!("../browser_profiles/firefox_android.chlo"))
+            }
+            (BrowserProfile::Opera, OsProfile::Android) => {
+                Some(include_str!("../browser_profiles/opera_android.chlo"))
+            }
+            (BrowserProfile::Brave, OsProfile::Android) => {
+                Some(include_str!("../browser_profiles/brave_android.chlo"))
+            }
+            (BrowserProfile::Edge, OsProfile::Android) => {
+                Some(include_str!("../browser_profiles/edge_android.chlo"))
+            }
+            (BrowserProfile::Vivaldi, OsProfile::Android) => {
+                Some(include_str!("../browser_profiles/vivaldi_android.chlo"))
+            }
+
+            // iOS profiles
+            (BrowserProfile::Safari, OsProfile::IOS) => {
+                Some(include_str!("../browser_profiles/safari_ios.chlo"))
+            }
+
             _ => None,
         };
 
@@ -1159,7 +1226,10 @@ impl StealthManager {
                 let b = tls_ffi::quiche_chlo_builder_new_wrapper();
                 if !b.is_null() {
                     tls_ffi::quiche_chlo_builder_add_wrapper(b, hello.as_ptr(), hello.len());
-                    tls_ffi::quiche_config_set_chlo_builder_wrapper(c as *mut _ as *mut std::ffi::c_void, b);
+                    tls_ffi::quiche_config_set_chlo_builder_wrapper(
+                        c as *mut _ as *mut std::ffi::c_void,
+                        b,
+                    );
                     tls_ffi::quiche_chlo_builder_free_wrapper(b);
                 }
             }
