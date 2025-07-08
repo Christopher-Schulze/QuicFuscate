@@ -85,7 +85,8 @@ pub(crate) unsafe fn gf_mul_bitsliced_avx512(a: u8, b: u8) -> u8 {
     for _ in 0..8 {
         let mask = _mm512_set1_epi8(((vb & 1) as i8).wrapping_neg());
         res = _mm512_xor_si512(res, _mm512_and_si512(va, mask));
-        let carry = _mm512_movepi8_mask(_mm512_and_si512(va, _mm512_set1_epi8(0x80u8 as i8))) as u64;
+        let carry =
+            _mm512_movepi8_mask(_mm512_and_si512(va, _mm512_set1_epi8(0x80u8 as i8))) as u64;
         va = _mm512_add_epi8(va, va);
         if carry & 1 != 0 {
             va = _mm512_xor_si512(va, poly);
@@ -93,6 +94,12 @@ pub(crate) unsafe fn gf_mul_bitsliced_avx512(a: u8, b: u8) -> u8 {
         vb >>= 1;
     }
     _mm_extract_epi8(_mm512_castsi512_si128(res), 0) as u8
+}
+
+#[cfg(all(target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,avx512vbmi")]
+pub(crate) unsafe fn gf_mul_avx512(a: u8, b: u8) -> u8 {
+    gf_mul_bitsliced_avx512(a, b)
 }
 
 #[cfg(all(target_arch = "x86_64"))]
@@ -115,6 +122,12 @@ pub(crate) unsafe fn gf_mul_bitsliced_avx2(a: u8, b: u8) -> u8 {
         vb >>= 1;
     }
     _mm_extract_epi8(_mm256_castsi256_si128(res), 0) as u8
+}
+
+#[cfg(all(target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub(crate) unsafe fn gf_mul_avx2(a: u8, b: u8) -> u8 {
+    gf_mul_bitsliced_avx2(a, b)
 }
 
 #[cfg(all(target_arch = "x86_64"))]
@@ -154,6 +167,12 @@ pub(crate) unsafe fn gf_mul_bitsliced_neon(a: u8, b: u8) -> u8 {
     }
     vgetq_lane_u8(res, 0)
 }
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+pub(crate) unsafe fn gf_mul_neon(a: u8, b: u8) -> u8 {
+    gf_mul_bitsliced_neon(a, b)
+}
 // --- High-Performance Finite Field Arithmetic (GF(2^8)) ---
 
 /// A dispatching wrapper for Galois Field (GF(2^8)) multiplication.
@@ -167,13 +186,13 @@ pub(crate) fn gf_mul(a: u8, b: u8) -> u8 {
     optimize::dispatch_bitslice(|policy| {
         result = match policy {
             #[cfg(target_arch = "x86_64")]
-            &optimize::Avx512 => unsafe { gf_mul_bitsliced_avx512(a, b) },
+            &optimize::Avx512 => unsafe { gf_mul_avx512(a, b) },
             #[cfg(target_arch = "x86_64")]
-            &optimize::Avx2 => unsafe { gf_mul_bitsliced_avx2(a, b) },
+            &optimize::Avx2 => unsafe { gf_mul_avx2(a, b) },
             #[cfg(target_arch = "x86_64")]
             &optimize::Sse2 => unsafe { gf_mul_bitsliced_sse2(a, b) },
             #[cfg(target_arch = "aarch64")]
-            &optimize::Neon => unsafe { gf_mul_bitsliced_neon(a, b) },
+            &optimize::Neon => unsafe { gf_mul_neon(a, b) },
             // Fallback to table-based multiplication if no specific SIMD is available.
             _ => gf_mul_table(a, b),
         }
