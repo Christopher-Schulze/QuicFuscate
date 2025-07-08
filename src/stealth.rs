@@ -844,6 +844,30 @@ impl TlsClientHelloSpoofer {
         None
     }
 
+    /// Returns a list of all available browser/OS combinations for which a
+    /// ClientHello dump exists in `browser_profiles`.
+    pub fn available_profiles() -> Vec<(BrowserProfile, OsProfile)> {
+        let mut out = Vec::new();
+        if let Ok(entries) = std::fs::read_dir("browser_profiles") {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let s = name.to_string_lossy();
+                if !s.ends_with(".chlo") {
+                    continue;
+                }
+                let n = s.trim_end_matches(".chlo");
+                let parts: Vec<&str> = n.split('_').collect();
+                if parts.len() != 2 {
+                    continue;
+                }
+                if let (Ok(b), Ok(o)) = (parts[0].parse(), parts[1].parse()) {
+                    out.push((b, o));
+                }
+            }
+        }
+        out
+    }
+
     /// Apply the spoofing parameters using a custom ClientHello from
     /// `browser_profiles`.
     pub fn apply(config: &mut quiche::Config, profile: &FingerprintProfile, suites: &[u16]) {
@@ -1048,6 +1072,14 @@ impl StealthManager {
         }
     }
 
+    /// Returns all fingerprint profiles for which a ClientHello dump exists.
+    pub fn available_fingerprints() -> Vec<FingerprintProfile> {
+        TlsClientHelloSpoofer::available_profiles()
+            .into_iter()
+            .map(|(b, o)| FingerprintProfile::new(b, o))
+            .collect()
+    }
+
     /// Applies the configured TLS fingerprint to a quiche configuration.
     /// ClientHello bytes are loaded from `browser_profiles/*.chlo` and passed
     /// to quiche using the `quiche_config_set_custom_tls` hook. This ensures
@@ -1098,8 +1130,12 @@ impl StealthManager {
     /// Changes the active fingerprint profile at runtime.
     /// Call `apply_utls_profile` again to update an existing quiche configuration.
     pub fn set_fingerprint_profile(&self, profile: FingerprintProfile) {
+        let mut p = profile;
+        if p.client_hello.is_none() {
+            p.client_hello = TlsClientHelloSpoofer::load_client_hello(p.browser, p.os);
+        }
         let mut fp = self.fingerprint.lock().unwrap();
-        *fp = profile;
+        *fp = p;
     }
 
     /// Returns the currently active fingerprint profile.
