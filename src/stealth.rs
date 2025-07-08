@@ -912,6 +912,30 @@ impl TlsClientHelloSpoofer {
         }
     }
 
+    /// Injects the given ClientHello bytes into the quiche configuration via FFI.
+    fn inject_bytes(cfg: &mut quiche::Config, hello: &[u8]) {
+        unsafe {
+            let b = tls_ffi::quiche_chlo_builder_new_wrapper();
+            if !b.is_null() {
+                tls_ffi::quiche_chlo_builder_add_wrapper(b, hello.as_ptr(), hello.len());
+                tls_ffi::quiche_config_set_chlo_builder_wrapper(
+                    cfg as *mut _ as *mut std::ffi::c_void,
+                    b,
+                );
+                tls_ffi::quiche_chlo_builder_free_wrapper(b);
+            }
+        }
+    }
+
+    /// Loads the specified profile and injects it into the quiche config.
+    pub fn inject_profile(cfg: &mut quiche::Config, browser: BrowserProfile, os: OsProfile) {
+        if let Some(hello) = Self::load_client_hello(browser, os) {
+            Self::inject_bytes(cfg, &hello);
+        } else {
+            error!("Missing ClientHello profile for {:?}/{:?}", browser, os);
+        }
+    }
+
     /// Returns a list of all available browser/OS combinations for which a
     /// ClientHello dump exists in `browser_profiles`.
     pub fn available_profiles() -> Vec<(BrowserProfile, OsProfile)> {
@@ -1160,17 +1184,7 @@ impl StealthManager {
             }
 
             if let Some(ref hello) = fingerprint.client_hello {
-                unsafe {
-                    let b = tls_ffi::quiche_chlo_builder_new_wrapper();
-                    if !b.is_null() {
-                        tls_ffi::quiche_chlo_builder_add_wrapper(b, hello.as_ptr(), hello.len());
-                        tls_ffi::quiche_config_set_chlo_builder_wrapper(
-                            config as *mut _ as *mut std::ffi::c_void,
-                            b,
-                        );
-                        tls_ffi::quiche_chlo_builder_free_wrapper(b);
-                    }
-                }
+                TlsClientHelloSpoofer::inject_bytes(config, hello);
             } else {
                 error!(
                     "Missing ClientHello profile for {:?}/{:?}",
@@ -1207,17 +1221,7 @@ impl StealthManager {
         }
 
         if let (Some(ref hello), Some(c)) = (&p.client_hello, cfg.as_deref_mut()) {
-            unsafe {
-                let b = tls_ffi::quiche_chlo_builder_new_wrapper();
-                if !b.is_null() {
-                    tls_ffi::quiche_chlo_builder_add_wrapper(b, hello.as_ptr(), hello.len());
-                    tls_ffi::quiche_config_set_chlo_builder_wrapper(
-                        c as *mut _ as *mut std::ffi::c_void,
-                        b,
-                    );
-                    tls_ffi::quiche_chlo_builder_free_wrapper(b);
-                }
-            }
+            TlsClientHelloSpoofer::inject_bytes(c, hello);
         }
 
         let mut fp = self.fingerprint.lock().unwrap();
