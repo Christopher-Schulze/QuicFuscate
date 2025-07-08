@@ -27,9 +27,9 @@ modules now live under `src/`.
 
 ## ✨ Core Features
 
-### 🛡️ Advanced Stealth Technology
+-### 🛡️ Advanced Stealth Technology
 - **uTLS Fingerprinting Protection**: Mimics browser TLS fingerprints to evade deep packet inspection
-- **Fake TLS Handshake**: Implements TLS handshakes that appear legitimate to network inspection while encapsulating the real traffic
+- **TLS Handshake Spoofing**: Replays captured ClientHello messages for realistic fingerprints ([Issue #002](docs/issues/002-real-tls-fingerprints.md))
 - **Domain Fronting**: Masks traffic by routing through trusted CDN providers
 - **HTTP/3 Masquerading**: Disguises traffic as standard HTTP/3 web traffic
 - **Traffic Obfuscation**: XOR-based packet transformation to defeat pattern recognition
@@ -68,7 +68,7 @@ The codebase is now entirely written in Rust. Development focuses on expanding f
 | Encryption         | AEGIS-128L/X, MORUS-1280-128       |
 | Key Exchange       | X25519, X448                       |
 | Error Correction   | ASW-RLNC-X FEC       |
-| Obfuscation       | XOR-based, Traffic Shaping, Fake TLS |
+| Obfuscation       | XOR-based, Traffic Shaping, TLS Handshake Spoofing |
 | Platforms          | Linux, macOS, Windows (planned)     |
 | Architecture       | x86_64, ARM64                      |
 | Performance        | Multi-Gigabit capable              |
