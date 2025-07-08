@@ -35,6 +35,7 @@ sysinfo = "0.35"
 socket2 = "0.5"
 base64 = "0.21"
 libloading = "0.8"
+thiserror = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Networking_WinSock"] }

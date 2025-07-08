@@ -114,6 +114,16 @@ If a patch fails to apply check the logs under `libs/logs` for details.
 - CMake (for BoringSSL)
 - Perl (for BoringSSL)
 - Go (for BoringSSL)
+- libbpf-dev (for AF_XDP support)
+
+### System Requirements
+
+When building with the optional `xdp` feature, the host needs a recent Linux
+kernel (5.15+) with `CONFIG_XDP_SOCKETS` enabled. The user running the
+application must have `CAP_NET_ADMIN` privileges and the `libbpf` library
+installed. For zero-copy operation ensure the locked memory limit is high
+enough, e.g. `ulimit -l unlimited`. If these requirements are not met,
+QuicFuscate automatically falls back to standard UDP sockets.
 
 ### Building
 
