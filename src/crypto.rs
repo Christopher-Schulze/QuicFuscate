@@ -478,6 +478,36 @@ impl CryptoManager {
     pub fn generate_session_key(&self, length: usize) -> Vec<u8> {
         self.get_obfuscation_key(length)
     }
+
+    /// Generates a Kyber768 keypair for post-quantum key exchange.
+    #[cfg(feature = "pq")]
+    pub fn pq_keypair(&self) -> (Vec<u8>, Vec<u8>) {
+        crate::pq::PqCrypto::kyber_keypair()
+    }
+
+    /// Encapsulates a shared secret to the provided Kyber768 public key.
+    #[cfg(feature = "pq")]
+    pub fn pq_encapsulate(&self, pk: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        crate::pq::PqCrypto::kyber_encapsulate(pk)
+    }
+
+    /// Decapsulates a Kyber768 ciphertext to obtain the shared secret.
+    #[cfg(feature = "pq")]
+    pub fn pq_decapsulate(&self, ct: &[u8], sk: &[u8]) -> Vec<u8> {
+        crate::pq::PqCrypto::kyber_decapsulate(ct, sk)
+    }
+
+    /// Signs data using Dilithium3.
+    #[cfg(feature = "pq")]
+    pub fn pq_sign(&self, msg: &[u8], sk: &[u8]) -> Vec<u8> {
+        crate::pq::PqCrypto::dilithium_sign(msg, sk)
+    }
+
+    /// Verifies a Dilithium3 signature.
+    #[cfg(feature = "pq")]
+    pub fn pq_verify(&self, msg: &[u8], sig: &[u8], pk: &[u8]) -> bool {
+        crate::pq::PqCrypto::dilithium_verify(msg, sig, pk)
+    }
 }
 
 impl Default for CryptoManager {
