@@ -64,11 +64,10 @@ The runtime automatically loads the matching profile based on the selected
 
 ### FakeTLS Handshake
 
-When stealth mode is active, QuicFuscate sends a minimal TLS handshake.
-The ClientHello bytes are taken from the selected fingerprint profile and
-a synthetic ServerHello with placeholder certificate is returned. This
-reduces handshake overhead while still presenting TLS-like packets on the
-wire.
+When stealth mode is active, QuicFuscate emits a trimmed TLS handshake.
+The ClientHello is derived from the active fingerprint profile while the
+ServerHello and certificate are synthesized. Message lengths are kept
+shorter than a real handshake for quicker startup.
 
 To force FakeTLS via the configuration file add:
 
@@ -80,18 +79,36 @@ use_fake_tls = true
 Custom handshakes can be generated programmatically:
 
 ```rust
-use quicfuscate::fake_tls::{FakeTls, ClientHelloParams, ServerHelloParams};
+use quicfuscate::fake_tls::{
+    ClientHelloParams, FakeTls, ServerHelloParams,
+};
 
 let hello = FakeTls::client_hello_custom(ClientHelloParams {
     tls_version: 0x0303,
-    cipher_suites: &[0x1301, 0x1302],
+    cipher_suites: &[0x1301],
     extensions: &[],
 });
-let server = FakeTls::server_hello_custom(ServerHelloParams {
-    tls_version: 0x0303,
-    cipher_suite: 0x1301,
-    extensions: &[],
-});
+let response = FakeTls::server_response_custom(
+    ServerHelloParams {
+        tls_version: 0x0303,
+        cipher_suite: 0x1301,
+        extensions: &[],
+    },
+    b"cert",
+);
+let full = FakeTls::handshake_custom_with_cert(
+    ClientHelloParams {
+        tls_version: 0x0303,
+        cipher_suites: &[0x1301],
+        extensions: &[],
+    },
+    ServerHelloParams {
+        tls_version: 0x0303,
+        cipher_suite: 0x1301,
+        extensions: &[],
+    },
+    b"cert",
+);
 ```
 
 ### Optimization Parameters

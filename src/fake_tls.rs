@@ -4,6 +4,14 @@
 
 use crate::stealth::FingerprintProfile;
 
+/// Owned variant of [`ServerHelloParams`] for storing in fingerprint profiles.
+#[derive(Debug, Clone)]
+pub struct ServerHelloParamsOwned {
+    pub tls_version: u16,
+    pub cipher_suite: u16,
+    pub extensions: Vec<u8>,
+}
+
 /// Parameters used to craft a minimal ClientHello message.
 #[derive(Clone, Copy)]
 pub struct ClientHelloParams<'a> {
@@ -101,10 +109,33 @@ impl FakeTls {
         Self::record(0x02, &payload)
     }
 
+    /// Builds a TLS Certificate record from raw certificate bytes.
+    pub fn certificate_record(cert: &[u8]) -> Vec<u8> {
+        Self::record(0x0b, cert)
+    }
+
+    /// Builds the server response consisting of a custom ServerHello and certificate.
+    pub fn server_response_custom(sh: ServerHelloParams, cert: &[u8]) -> Vec<u8> {
+        let mut out = Self::server_hello_custom(sh);
+        out.extend_from_slice(&Self::certificate_record(cert));
+        out
+    }
+
     /// Builds a full FakeTLS handshake from explicit parameters.
     pub fn handshake_custom(ch: ClientHelloParams, sh: ServerHelloParams) -> Vec<u8> {
         let mut out = Self::client_hello_custom(ch);
         out.extend_from_slice(&Self::server_hello_custom(sh));
+        out
+    }
+
+    /// Builds a FakeTLS handshake including a custom certificate record.
+    pub fn handshake_custom_with_cert(
+        ch: ClientHelloParams,
+        sh: ServerHelloParams,
+        cert: &[u8],
+    ) -> Vec<u8> {
+        let mut out = Self::client_hello_custom(ch);
+        out.extend_from_slice(&Self::server_response_custom(sh, cert));
         out
     }
 
@@ -118,21 +149,43 @@ impl FakeTls {
 
     /// Generates the complete FakeTLS handshake sequence.
     pub fn handshake(profile: &FingerprintProfile) -> Vec<u8> {
-        if profile.client_hello.is_none() {
+        let cert = profile
+            .certificate
+            .as_deref()
+            .unwrap_or(DEFAULT_CERTIFICATE);
+
+        if profile.client_hello.is_none() && profile.server_hello.is_none() {
+            let cipher_suite = *profile.tls_cipher_suites.first().unwrap_or(&0x1301);
+            let suites = [cipher_suite];
             let ch_params = ClientHelloParams {
                 tls_version: 0x0303,
-                cipher_suites: &profile.tls_cipher_suites,
+                cipher_suites: &suites,
                 extensions: &[],
             };
             let sh_params = ServerHelloParams {
                 tls_version: 0x0303,
-                cipher_suite: *profile.tls_cipher_suites.first().unwrap_or(&0x1301),
+                cipher_suite,
                 extensions: &[],
             };
-            Self::handshake_custom(ch_params, sh_params)
+            Self::handshake_custom_with_cert(ch_params, sh_params, cert)
         } else {
             let mut out = Self::client_hello(profile);
-            out.extend_from_slice(&Self::server_response());
+
+            let sh_params = if let Some(ref owned) = profile.server_hello {
+                ServerHelloParams {
+                    tls_version: owned.tls_version,
+                    cipher_suite: owned.cipher_suite,
+                    extensions: &owned.extensions,
+                }
+            } else {
+                ServerHelloParams {
+                    tls_version: 0x0303,
+                    cipher_suite: *profile.tls_cipher_suites.first().unwrap_or(&0x1301),
+                    extensions: &[],
+                }
+            };
+
+            out.extend_from_slice(&Self::server_response_custom(sh_params, cert));
             out
         }
     }
