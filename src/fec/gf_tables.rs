@@ -162,6 +162,66 @@ pub(crate) unsafe fn gf_mul_bitsliced_neon(a: u8, b: u8) -> u8 {
 pub(crate) unsafe fn gf_mul_neon(a: u8, b: u8) -> u8 {
     gf_mul_bitsliced_neon(a, b)
 }
+
+// Vectorized slice multiplication ------------------------------------------------
+
+#[cfg(all(target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,avx512vbmi,pclmulqdq")]
+unsafe fn gf_mul_slice_avx512(a: &[u8], b: &[u8], out: &mut [u8]) {
+    for i in 0..a.len() {
+        out[i] = gf_mul_bitsliced_avx512(a[i], b[i]);
+    }
+}
+
+#[cfg(all(target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,pclmulqdq")]
+unsafe fn gf_mul_slice_avx2(a: &[u8], b: &[u8], out: &mut [u8]) {
+    for i in 0..a.len() {
+        out[i] = gf_mul_bitsliced_avx2(a[i], b[i]);
+    }
+}
+
+#[cfg(all(target_arch = "x86_64"))]
+#[target_feature(enable = "sse2,pclmulqdq")]
+unsafe fn gf_mul_slice_sse2(a: &[u8], b: &[u8], out: &mut [u8]) {
+    for i in 0..a.len() {
+        out[i] = gf_mul_bitsliced_sse2(a[i], b[i]);
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon,pmull")]
+unsafe fn gf_mul_slice_neon(a: &[u8], b: &[u8], out: &mut [u8]) {
+    for i in 0..a.len() {
+        out[i] = gf_mul_bitsliced_neon(a[i], b[i]);
+    }
+}
+
+/// Element-wise multiplication of two equally sized slices.
+///
+/// The appropriate SIMD implementation is chosen at runtime via `optimize`.
+pub(crate) fn gf_mul_slice(a: &[u8], b: &[u8], out: &mut [u8]) {
+    assert_eq!(a.len(), b.len());
+    assert_eq!(out.len(), a.len());
+
+    optimize::dispatch_bitslice(|policy| {
+        match policy {
+            #[cfg(target_arch = "x86_64")]
+            &optimize::Avx512 => unsafe { gf_mul_slice_avx512(a, b, out) },
+            #[cfg(target_arch = "x86_64")]
+            &optimize::Avx2 => unsafe { gf_mul_slice_avx2(a, b, out) },
+            #[cfg(target_arch = "x86_64")]
+            &optimize::Sse2 => unsafe { gf_mul_slice_sse2(a, b, out) },
+            #[cfg(target_arch = "aarch64")]
+            &optimize::Neon => unsafe { gf_mul_slice_neon(a, b, out) },
+            _ => {
+                for i in 0..a.len() {
+                    out[i] = gf_mul_table(a[i], b[i]);
+                }
+            }
+        }
+    });
+}
 // --- High-Performance Finite Field Arithmetic (GF(2^8)) ---
 
 /// A dispatching wrapper for Galois Field (GF(2^8)) multiplication.
