@@ -51,7 +51,7 @@ use tokio::runtime::Runtime;
 use url::Url;
 
 use crate::crypto::CryptoManager; // Assumed for integration
-use crate::fake_tls;
+use crate::fake_tls::{self, ServerHelloParamsOwned};
 use crate::optimize::{self, OptimizationManager}; // Assumed for integration
 use crate::telemetry;
 use crate::tls_ffi;
@@ -182,6 +182,8 @@ pub struct FingerprintProfile {
     pub initial_max_streams_bidi: u64,
     pub max_idle_timeout: u64,
     pub client_hello: Option<Vec<u8>>,
+    pub server_hello: Option<ServerHelloParamsOwned>,
+    pub certificate: Option<Vec<u8>>,
 }
 
 impl FingerprintProfile {
@@ -481,6 +483,8 @@ impl FingerprintProfile {
         };
 
         profile.client_hello = TlsClientHelloSpoofer::load_client_hello(browser, os);
+        profile.server_hello = None;
+        profile.certificate = None;
         profile
     }
 

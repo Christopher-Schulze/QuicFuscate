@@ -37,3 +37,27 @@ fn custom_handshake_builder() {
     let server = FakeTls::server_hello_custom(sh);
     assert_eq!(FakeTls::handshake_custom(ch, sh), [hello, server].concat());
 }
+
+#[test]
+fn custom_certificate_support() {
+    let ch = ClientHelloParams {
+        tls_version: 0x0303,
+        cipher_suites: &[0x1301],
+        extensions: &[],
+    };
+    let sh = ServerHelloParams {
+        tls_version: 0x0303,
+        cipher_suite: 0x1301,
+        extensions: &[],
+    };
+    let cert = b"test";
+    let resp = FakeTls::server_response_custom(sh, cert);
+    let mut expected = FakeTls::server_hello_custom(sh);
+    expected.extend_from_slice(&FakeTls::certificate_record(cert));
+    assert_eq!(resp, expected);
+
+    let full = FakeTls::handshake_custom_with_cert(ch, sh, cert);
+    let mut exp = FakeTls::client_hello_custom(ch);
+    exp.extend_from_slice(&expected);
+    assert_eq!(full, exp);
+}
