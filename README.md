@@ -45,7 +45,7 @@ presenting TLS-like traffic to network monitors.
 - **AEGIS-128L/X**: Authenticated encryption with hardware acceleration
 - **MORUS-1280-128**: Lightweight cipher for resource-constrained environments
 - **Perfect Forward Secrecy**: Ephemeral key exchange for maximum security
-- **Post-Quantum Ready**: PQ algorithms planned but not yet implemented
+- **Post-Quantum Ready**: Optional Kyber/Dilithium handshake support
 
 ### ⚡ Performance Optimizations
 - **SIMD Acceleration**: ARM NEON and x86 AVX2/AVX-512 optimizations

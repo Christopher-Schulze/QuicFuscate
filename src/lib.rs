@@ -15,6 +15,8 @@ pub mod tls_ffi;
 pub mod fake_tls;
 pub mod telemetry;
 pub mod error;
+#[cfg(feature = "pq")]
+pub mod pq;
 
 pub use optimize::{CpuFeature, FeatureDetector};
 
