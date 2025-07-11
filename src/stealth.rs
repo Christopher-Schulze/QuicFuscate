@@ -814,106 +814,10 @@ impl TlsClientHelloSpoofer {
     }
 
     fn load_client_hello(browser: BrowserProfile, os: OsProfile) -> Option<Vec<u8>> {
-        let data = match (browser, os) {
-            // Windows profiles
-            (BrowserProfile::Chrome, OsProfile::Windows) => {
-                Some(include_str!("../browser_profiles/chrome_windows.chlo"))
-            }
-            (BrowserProfile::Firefox, OsProfile::Windows) => {
-                Some(include_str!("../browser_profiles/firefox_windows.chlo"))
-            }
-            (BrowserProfile::Opera, OsProfile::Windows) => {
-                Some(include_str!("../browser_profiles/opera_windows.chlo"))
-            }
-            (BrowserProfile::Brave, OsProfile::Windows) => {
-                Some(include_str!("../browser_profiles/brave_windows.chlo"))
-            }
-            (BrowserProfile::Edge, OsProfile::Windows) => {
-                Some(include_str!("../browser_profiles/edge_windows.chlo"))
-            }
-            (BrowserProfile::Vivaldi, OsProfile::Windows) => {
-                Some(include_str!("../browser_profiles/vivaldi_windows.chlo"))
-            }
-
-            // macOS profiles
-            (BrowserProfile::Safari, OsProfile::MacOS) => {
-                Some(include_str!("../browser_profiles/safari_macos.chlo"))
-            }
-            (BrowserProfile::Chrome, OsProfile::MacOS) => {
-                Some(include_str!("../browser_profiles/chrome_macos.chlo"))
-            }
-            (BrowserProfile::Firefox, OsProfile::MacOS) => {
-                Some(include_str!("../browser_profiles/firefox_macos.chlo"))
-            }
-            (BrowserProfile::Opera, OsProfile::MacOS) => {
-                Some(include_str!("../browser_profiles/opera_macos.chlo"))
-            }
-            (BrowserProfile::Brave, OsProfile::MacOS) => {
-                Some(include_str!("../browser_profiles/brave_macos.chlo"))
-            }
-            (BrowserProfile::Edge, OsProfile::MacOS) => {
-                Some(include_str!("../browser_profiles/edge_macos.chlo"))
-            }
-            (BrowserProfile::Vivaldi, OsProfile::MacOS) => {
-                Some(include_str!("../browser_profiles/vivaldi_macos.chlo"))
-            }
-
-            // Linux profiles
-            (BrowserProfile::Chrome, OsProfile::Linux) => {
-                Some(include_str!("../browser_profiles/chrome_linux.chlo"))
-            }
-            (BrowserProfile::Firefox, OsProfile::Linux) => {
-                Some(include_str!("../browser_profiles/firefox_linux.chlo"))
-            }
-            (BrowserProfile::Opera, OsProfile::Linux) => {
-                Some(include_str!("../browser_profiles/opera_linux.chlo"))
-            }
-            (BrowserProfile::Brave, OsProfile::Linux) => {
-                Some(include_str!("../browser_profiles/brave_linux.chlo"))
-            }
-            (BrowserProfile::Edge, OsProfile::Linux) => {
-                Some(include_str!("../browser_profiles/edge_linux.chlo"))
-            }
-            (BrowserProfile::Vivaldi, OsProfile::Linux) => {
-                Some(include_str!("../browser_profiles/vivaldi_linux.chlo"))
-            }
-
-            // Android profiles
-            (BrowserProfile::Chrome, OsProfile::Android) => {
-                Some(include_str!("../browser_profiles/chrome_android.chlo"))
-            }
-            (BrowserProfile::Firefox, OsProfile::Android) => {
-                Some(include_str!("../browser_profiles/firefox_android.chlo"))
-            }
-            (BrowserProfile::Opera, OsProfile::Android) => {
-                Some(include_str!("../browser_profiles/opera_android.chlo"))
-            }
-            (BrowserProfile::Brave, OsProfile::Android) => {
-                Some(include_str!("../browser_profiles/brave_android.chlo"))
-            }
-            (BrowserProfile::Edge, OsProfile::Android) => {
-                Some(include_str!("../browser_profiles/edge_android.chlo"))
-            }
-            (BrowserProfile::Vivaldi, OsProfile::Android) => {
-                Some(include_str!("../browser_profiles/vivaldi_android.chlo"))
-            }
-
-            // iOS profiles
-            (BrowserProfile::Safari, OsProfile::IOS) => {
-                Some(include_str!("../browser_profiles/safari_ios.chlo"))
-            }
-
-            _ => None,
-        };
-
-        if let Some(s) = data {
-            base64::decode(s.trim()).ok()
-        } else {
-            let path = Self::profile_path(browser, os);
-            std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|d| base64::decode(d.trim()).ok())
-        }
+        let path = Self::profile_path(browser, os);
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|d| base64::decode(d.trim()).ok())
     }
 
     /// Injects the given ClientHello bytes into the quiche configuration via FFI.
@@ -927,6 +831,9 @@ impl TlsClientHelloSpoofer {
                     b,
                 );
                 tls_ffi::quiche_chlo_builder_free_wrapper(b);
+                // Disable GREASE and randomization when injecting a real ClientHello
+                tls_ffi::quiche_ssl_disable_tls_grease(std::ptr::null_mut(), 1);
+                tls_ffi::quiche_ssl_set_deterministic_hello(std::ptr::null_mut(), 1);
             }
         }
     }
@@ -1254,13 +1161,22 @@ impl StealthManager {
         preferred: Option<u16>,
     ) -> Option<Vec<u8>> {
         if self.config.use_fake_tls {
-            Some(self.fake_tls_handshake())
-        } else if enable_utls {
-            self.apply_utls_profile(cfg, preferred);
-            None
-        } else {
-            None
+            let hello = self.fake_tls_handshake();
+            if !hello.is_empty() {
+                return Some(hello);
+            }
         }
+
+        if enable_utls {
+            self.apply_utls_profile(cfg, preferred);
+            // ensure deterministic handshake when using real TLS fingerprints
+            unsafe {
+                tls_ffi::quiche_ssl_disable_tls_grease(std::ptr::null_mut(), 1);
+                tls_ffi::quiche_ssl_set_deterministic_hello(std::ptr::null_mut(), 1);
+            }
+        }
+
+        None
     }
 
     /// Starts automatic rotation through the given browser profiles.
