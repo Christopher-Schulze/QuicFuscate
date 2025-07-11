@@ -168,32 +168,84 @@ pub(crate) unsafe fn gf_mul_neon(a: u8, b: u8) -> u8 {
 #[cfg(all(target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512vbmi,pclmulqdq")]
 unsafe fn gf_mul_slice_avx512(a: &[u8], b: &[u8], out: &mut [u8]) {
-    for i in 0..a.len() {
+    let mut i = 0;
+    while i + 4 <= a.len() {
+        if i + 64 < a.len() {
+            prefetch_data(a.as_ptr().add(i + 64));
+            prefetch_data(b.as_ptr().add(i + 64));
+        }
         out[i] = gf_mul_bitsliced_avx512(a[i], b[i]);
+        out[i + 1] = gf_mul_bitsliced_avx512(a[i + 1], b[i + 1]);
+        out[i + 2] = gf_mul_bitsliced_avx512(a[i + 2], b[i + 2]);
+        out[i + 3] = gf_mul_bitsliced_avx512(a[i + 3], b[i + 3]);
+        i += 4;
+    }
+    while i < a.len() {
+        out[i] = gf_mul_bitsliced_avx512(a[i], b[i]);
+        i += 1;
     }
 }
 
 #[cfg(all(target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,pclmulqdq")]
 unsafe fn gf_mul_slice_avx2(a: &[u8], b: &[u8], out: &mut [u8]) {
-    for i in 0..a.len() {
+    let mut i = 0;
+    while i + 4 <= a.len() {
+        if i + 64 < a.len() {
+            prefetch_data(a.as_ptr().add(i + 64));
+            prefetch_data(b.as_ptr().add(i + 64));
+        }
         out[i] = gf_mul_bitsliced_avx2(a[i], b[i]);
+        out[i + 1] = gf_mul_bitsliced_avx2(a[i + 1], b[i + 1]);
+        out[i + 2] = gf_mul_bitsliced_avx2(a[i + 2], b[i + 2]);
+        out[i + 3] = gf_mul_bitsliced_avx2(a[i + 3], b[i + 3]);
+        i += 4;
+    }
+    while i < a.len() {
+        out[i] = gf_mul_bitsliced_avx2(a[i], b[i]);
+        i += 1;
     }
 }
 
 #[cfg(all(target_arch = "x86_64"))]
 #[target_feature(enable = "sse2,pclmulqdq")]
 unsafe fn gf_mul_slice_sse2(a: &[u8], b: &[u8], out: &mut [u8]) {
-    for i in 0..a.len() {
+    let mut i = 0;
+    while i + 4 <= a.len() {
+        if i + 64 < a.len() {
+            prefetch_data(a.as_ptr().add(i + 64));
+            prefetch_data(b.as_ptr().add(i + 64));
+        }
         out[i] = gf_mul_bitsliced_sse2(a[i], b[i]);
+        out[i + 1] = gf_mul_bitsliced_sse2(a[i + 1], b[i + 1]);
+        out[i + 2] = gf_mul_bitsliced_sse2(a[i + 2], b[i + 2]);
+        out[i + 3] = gf_mul_bitsliced_sse2(a[i + 3], b[i + 3]);
+        i += 4;
+    }
+    while i < a.len() {
+        out[i] = gf_mul_bitsliced_sse2(a[i], b[i]);
+        i += 1;
     }
 }
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon,pmull")]
 unsafe fn gf_mul_slice_neon(a: &[u8], b: &[u8], out: &mut [u8]) {
-    for i in 0..a.len() {
+    let mut i = 0;
+    while i + 4 <= a.len() {
+        if i + 64 < a.len() {
+            prefetch_data(a.as_ptr().add(i + 64));
+            prefetch_data(b.as_ptr().add(i + 64));
+        }
         out[i] = gf_mul_bitsliced_neon(a[i], b[i]);
+        out[i + 1] = gf_mul_bitsliced_neon(a[i + 1], b[i + 1]);
+        out[i + 2] = gf_mul_bitsliced_neon(a[i + 2], b[i + 2]);
+        out[i + 3] = gf_mul_bitsliced_neon(a[i + 3], b[i + 3]);
+        i += 4;
+    }
+    while i < a.len() {
+        out[i] = gf_mul_bitsliced_neon(a[i], b[i]);
+        i += 1;
     }
 }
 
@@ -204,20 +256,18 @@ pub(crate) fn gf_mul_slice(a: &[u8], b: &[u8], out: &mut [u8]) {
     assert_eq!(a.len(), b.len());
     assert_eq!(out.len(), a.len());
 
-    optimize::dispatch_bitslice(|policy| {
-        match policy {
-            #[cfg(target_arch = "x86_64")]
-            &optimize::Avx512 => unsafe { gf_mul_slice_avx512(a, b, out) },
-            #[cfg(target_arch = "x86_64")]
-            &optimize::Avx2 => unsafe { gf_mul_slice_avx2(a, b, out) },
-            #[cfg(target_arch = "x86_64")]
-            &optimize::Sse2 => unsafe { gf_mul_slice_sse2(a, b, out) },
-            #[cfg(target_arch = "aarch64")]
-            &optimize::Neon => unsafe { gf_mul_slice_neon(a, b, out) },
-            _ => {
-                for i in 0..a.len() {
-                    out[i] = gf_mul_table(a[i], b[i]);
-                }
+    optimize::dispatch_bitslice(|policy| match policy {
+        #[cfg(target_arch = "x86_64")]
+        &optimize::Avx512 => unsafe { gf_mul_slice_avx512(a, b, out) },
+        #[cfg(target_arch = "x86_64")]
+        &optimize::Avx2 => unsafe { gf_mul_slice_avx2(a, b, out) },
+        #[cfg(target_arch = "x86_64")]
+        &optimize::Sse2 => unsafe { gf_mul_slice_sse2(a, b, out) },
+        #[cfg(target_arch = "aarch64")]
+        &optimize::Neon => unsafe { gf_mul_slice_neon(a, b, out) },
+        _ => {
+            for i in 0..a.len() {
+                out[i] = gf_mul_table(a[i], b[i]);
             }
         }
     });
