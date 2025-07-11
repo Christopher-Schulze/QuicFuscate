@@ -2,6 +2,7 @@ use std::os::raw::c_void;
 use std::sync::OnceLock;
 
 use libloading::{Library, Symbol};
+use base64;
 
 type CustomTlsFn = unsafe extern "C" fn(*mut c_void, *const u8, usize);
 type EnableSimdFn = unsafe extern "C" fn(*mut c_void);
@@ -197,4 +198,13 @@ pub unsafe extern "C" fn quiche_config_enable_simd(_cfg: *mut c_void) {
     } else {
         log::debug!("quiche_config_enable_simd stub invoked");
     }
+}
+
+/// Convenience helper to read a base64 encoded ClientHello from `path`
+/// and inject it into the given quiche configuration.
+pub fn load_client_hello_from_file(cfg: *mut c_void, path: &str) -> std::io::Result<()> {
+    let data = std::fs::read_to_string(path)?;
+    let bytes = base64::decode(data.trim()).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    unsafe { quiche_config_set_custom_tls(cfg, bytes.as_ptr(), bytes.len()) };
+    Ok(())
 }

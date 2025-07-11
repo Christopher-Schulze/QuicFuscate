@@ -39,7 +39,7 @@ modules now live under `src/`.
 FakeTLS differs from the real uTLS-based fingerprinting by avoiding a complete TLS session.
 Instead it emits a static ClientHello and immediately returns a fake ServerHello
 with a placeholder certificate. This keeps the handshake lightweight while still
-presenting TLS-like traffic to network monitors.
+presenting TLS-like traffic to network monitors. Should FakeTLS be unavailable, the library falls back to loading a real fingerprint via the FFI interface.
 
 ### 🔒 Military-Grade Encryption
 - **AEGIS-128L/X**: Authenticated encryption with hardware acceleration
