@@ -1,5 +1,3 @@
-# QuicFuscate
-
 <div align="center">
   <img src="ui/logo/QuicFuscate.png" alt="QuicFuscate Logo" width="300">
   
@@ -13,7 +11,7 @@
   [![Cross-Platform](https://img.shields.io/badge/Cross--Platform-✓-38A169?style=for-the-badge&logo=windows&logoColor=white)](https://en.wikipedia.org/wiki/Cross-platform_software)
 </div>
 
-## 🚀 Next-Generation Stealth VPN Technology
+## 🚀 Stealth VPN Technology
 
 QuicFuscate is a PoC VPN protocol for privacy-focused networking, combining cutting-edge encryption, adaptive error correction, and advanced traffic obfuscation to create an impenetrable communication channel. Built on the QUIC protocol with HTTP/3 support, it delivers both speed and security without compromise.
 
