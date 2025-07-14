@@ -15,7 +15,7 @@
 
 ## 🚀 Next-Generation Stealth VPN Technology
 
-QuicFuscate represents the pinnacle of privacy-focused networking, combining cutting-edge encryption, adaptive error correction, and advanced traffic obfuscation to create an impenetrable communication channel. Built on the QUIC protocol with HTTP/3 support, it delivers both speed and security without compromise.
+QuicFuscate is a PoC VPN protocol for privacy-focused networking, combining cutting-edge encryption, adaptive error correction, and advanced traffic obfuscation to create an impenetrable communication channel. Built on the QUIC protocol with HTTP/3 support, it delivers both speed and security without compromise.
 
 > **Note:** The project has been fully migrated to Rust for improved safety and performance.
 
