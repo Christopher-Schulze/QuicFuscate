@@ -1,0 +1,106 @@
+# QuicFuscate Configuration Example
+# This file demonstrates all available configuration options for QuicFuscate.
+# Copy this file to your desired location and modify as needed.
+
+# Adaptive Forward Error Correction (FEC) Configuration
+[adaptive_fec]
+# Exponential moving average factor for loss rate estimation (0.0-1.0)
+lambda = 0.1
+
+# Window size for burst loss detection
+burst_window = 20
+
+# Hysteresis factor to prevent mode oscillation (0.0-1.0)
+hysteresis = 0.02
+
+# PID controller parameters for adaptive mode switching
+[adaptive_fec.pid]
+kp = 1.2  # Proportional gain
+ki = 0.5  # Integral gain
+kd = 0.1  # Derivative gain
+
+# Enable Kalman filter for enhanced loss estimation
+kalman_enabled = false
+kalman_q = 0.001  # Process noise covariance
+kalman_r = 0.01   # Measurement noise covariance
+
+# Custom window sizes for each FEC mode
+# Format: [[adaptive_fec.modes]]
+# name = "mode_name"
+# w0 = window_size
+
+[[adaptive_fec.modes]]
+name = "zero"
+w0 = 0
+
+[[adaptive_fec.modes]]
+name = "light"
+w0 = 16
+
+[[adaptive_fec.modes]]
+name = "normal"
+w0 = 64
+
+[[adaptive_fec.modes]]
+name = "medium"
+w0 = 128
+
+[[adaptive_fec.modes]]
+name = "strong"
+w0 = 512
+
+[[adaptive_fec.modes]]
+name = "extreme"
+w0 = 1024
+
+# Stealth and Obfuscation Configuration
+[stealth]
+# Browser profile for TLS fingerprinting
+# Available options: Chrome, Firefox, Safari, Edge, Opera, Brave
+browser_profile = "Chrome"
+
+# Operating system profile
+# Available options: Windows, MacOS, Linux, Android, iOS
+os_profile = "Windows"
+
+# Enable fake TLS handshake generation
+use_fake_tls = false
+
+# DNS over HTTPS configuration
+enable_doh = true
+doh_provider = "cloudflare-dns.com"  # Options: cloudflare-dns.com, dns.google, quad9.net
+
+# HTTP/3 masquerading to appear as regular web traffic
+enable_http3_masquerading = true
+
+# Use QPACK headers for HTTP/3 masquerading
+use_qpack_headers = true
+
+# Domain fronting for traffic obfuscation
+enable_domain_fronting = true
+fronting_domains = [
+    "www.google.com",
+    "www.microsoft.com",
+    "www.amazon.com"
+]
+
+# CDN providers for domain fronting
+cdn_providers = [
+    "cloudflare",
+    "fastly",
+    "akamai"
+]
+
+# XOR obfuscation for packet payload
+enable_xor_obfuscation = true
+
+# Runtime Optimization Configuration
+[optimize]
+# Memory pool capacity for zero-copy operations
+pool_capacity = 1024
+
+# Block size for memory allocation (bytes)
+block_size = 4096
+
+# Enable XDP (eXpress Data Path) acceleration on Linux
+enable_xdp = false

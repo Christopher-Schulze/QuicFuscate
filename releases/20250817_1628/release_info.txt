@@ -1,0 +1,17 @@
+QuicFuscate macOS ARM64 Release
+==============================
+Build Date: Sun Aug 17 16:32:26 CEST 2025
+Target: aarch64-apple-darwin
+Rust Version: rustc 1.86.0 (05f9846f8 2025-03-31)
+Cargo Version: cargo 1.86.0 (adf9b6ad1 2025-02-28)
+Repository: https://github.com/Christopher-Schulze/QuicFuscate.git
+Commit: 6c657be08847ad45eaf46bb11f6a34998e1d40ac
+Branch: main
+Binaries: 1
+
+Files in this release:
+total 20112
+drwxr-xr-x@ 4 christopher  staff       128 Aug 17 16:32 .
+drwxr-xr-x@ 5 christopher  staff       160 Aug 17 16:28 ..
+-rwxr-xr-x@ 1 christopher  staff  10289232 Aug 17 16:32 quicfuscate_macos_arm64
+-rw-r--r--@ 1 christopher  staff       400 Aug 17 16:32 release_info.txt

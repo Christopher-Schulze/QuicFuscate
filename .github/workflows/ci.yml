@@ -1,0 +1,166 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          submodules: recursive
+
+      - name: Init submodules
+        run: git submodule update --init --recursive
+
+      - name: Verify submodules
+        shell: bash
+        run: |
+          if [ ! -d libs/patched_quiche ]; then
+            echo "libs/patched_quiche missing" >&2
+            exit 1
+          fi
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          components: clippy
+          override: true
+
+      - name: Cache cargo registry
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Fetch and build quiche
+        shell: bash
+        run: |
+          ./scripts/quiche_workflow.sh --non-interactive --step fetch
+
+      - name: Ensure QUICHE_PATH
+        shell: bash
+        run: |
+          echo "QUICHE_PATH=${{ github.workspace }}/libs/patched_quiche/quiche" >> $GITHUB_ENV
+          if [ ! -d "${{ github.workspace }}/libs/patched_quiche/quiche" ]; then
+            echo "libs/patched_quiche/quiche missing" >&2
+            exit 1
+          fi
+
+      - name: Run Clippy
+        shell: bash
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run cppcheck
+        shell: bash
+        run: |
+          if ! command -v cppcheck >/dev/null; then
+            if [[ "${{ runner.os }}" == "Linux" ]]; then
+              sudo apt-get update && sudo apt-get install -y cppcheck
+            elif [[ "${{ runner.os }}" == "macOS" ]]; then
+              brew install cppcheck
+            elif [[ "${{ runner.os }}" == "Windows" ]]; then
+              choco install cppcheck -y
+            fi
+          fi
+          cppcheck --error-exitcode=1 -q cli
+
+      - name: Build
+        shell: bash
+        run: |
+          cargo build --workspace --release
+
+      - name: Run tests
+        shell: bash
+        run: |
+          cargo test --workspace --all-targets
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ runner.os }}-binaries
+          path: |
+            target/release/quicfuscate*
+            target/release/*.dll
+            target/release/*.dylib
+            target/release/*.so
+
+  e2e-tls:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+
+      - name: Cache cargo registry
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: "E2E TLS: decode ALL profiles (shell)"
+        shell: bash
+        run: |
+          set -e
+          if base64 --help 2>&1 | grep -q '\-d'; then DEC='-d'; else DEC='-D'; fi
+          found=0
+          for d in browser_profiles src/browser_profiles; do
+            [ -d "$d" ] || continue
+            for f in "$d"/*.chlo; do
+              [ -e "$f" ] || continue
+              base=$(basename "$f"); name=${base%.chlo}; browser=${name%%_*}; os=${name#*_}
+              size=$(base64 $DEC "$f" | wc -c | tr -d ' ')
+              printf ' - %-10s/%-10s | %6d bytes | head(16B): ' "${browser^}" "${os^}" $size
+              base64 $DEC "$f" | dd bs=1 count=16 2>/dev/null | hexdump -v -e '16/1 "%02x"' | sed 's/..../& /g'
+              echo
+              found=1
+            done
+          done
+          if [ "$found" = 0 ]; then echo 'No .chlo profiles found.'; fi
+
+      - name: "E2E TLS: VERIFY ALL (shell)"
+        shell: bash
+        run: |
+          set -e
+          if base64 --help 2>&1 | grep -q '\-d'; then DEC='-d'; else DEC='-D'; fi
+          failed=0; total=0
+          for d in browser_profiles src/browser_profiles; do
+            [ -d "$d" ] || continue
+            for f in "$d"/*.chlo; do
+              [ -e "$f" ] || continue
+              total=$((total+1))
+              s=${f%.chlo}.sha256
+              base=$(basename "$f"); name=${base%.chlo}; browser=${name%%_*}; os=${name#*_}
+              if [ ! -f "$s" ]; then echo " - ${browser^}/${os^}: [MISS] sidecar $s"; failed=$((failed+1)); continue; fi
+              got=$(base64 $DEC "$f" | shasum -a 256 | awk '{print $1}')
+              exp=$(tr -d '\n\r' < "$s")
+              if [ "$got" = "$exp" ]; then echo " - ${browser^}/${os^}: [ OK ]"; else echo " - ${browser^}/${os^}: [FAIL] mismatch"; echo "    expected: $exp"; echo "         got: $got"; failed=$((failed+1)); fi
+            done
+          done
+          echo "[E2E] Summary: total=$total failed=$failed"
+          test $failed -eq 0
+

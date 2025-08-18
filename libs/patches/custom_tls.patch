@@ -1,0 +1,125 @@
+diff -ruN '--exclude=.git' quiche_vanilla/include/quiche.h quiche_patch/include/quiche.h
+--- quiche_vanilla/include/quiche.h	2025-07-08 08:03:42.758596754 +0000
++++ quiche_patch/include/quiche.h	2025-07-08 08:04:06.615123573 +0000
+@@ -179,6 +179,9 @@
+ 
+ // Enables sending or receiving early data.
+ void quiche_config_enable_early_data(quiche_config *config);
++// Supplies a custom TLS ClientHello message for connection setup.
++void quiche_config_set_custom_tls(quiche_config *cfg,
++                                  const uint8_t *hello, size_t len);
+ 
+ // Configures the list of supported application protocols.
+ int quiche_config_set_application_protos(quiche_config *config,
+diff -ruN '--exclude=.git' quiche_vanilla/src/ffi.rs quiche_patch/src/ffi.rs
+--- quiche_vanilla/src/ffi.rs	2025-07-08 08:03:42.758596754 +0000
++++ quiche_patch/src/ffi.rs	2025-07-08 08:04:17.819368725 +0000
+@@ -226,6 +226,14 @@
+ }
+ 
+ #[no_mangle]
++pub extern "C" fn quiche_config_set_custom_tls(
++    config: &mut Config, hello: *const u8, len: size_t,
++) {
++    let hello = unsafe { slice::from_raw_parts(hello, len) };
++    config.set_custom_tls(hello);
++}
++
++#[no_mangle]
+ /// Corresponds to the `Config::set_application_protos_wire_format` Rust
+ /// function.
+ pub extern "C" fn quiche_config_set_application_protos(
+diff -ruN '--exclude=.git' quiche_vanilla/src/lib.rs quiche_patch/src/lib.rs
+--- quiche_vanilla/src/lib.rs	2025-07-08 08:03:42.762596842 +0000
++++ quiche_patch/src/lib.rs	2025-07-08 08:04:58.960247744 +0000
+@@ -836,6 +836,7 @@
+     max_amplification_factor: usize,
+ 
+     disable_dcid_reuse: bool,
++    custom_tls: Option<Vec<u8>>,
+ 
+     track_unknown_transport_params: Option<usize>,
+ }
+@@ -909,6 +910,7 @@
+             max_amplification_factor: MAX_AMPLIFICATION_FACTOR,
+ 
+             disable_dcid_reuse: false,
++            custom_tls: None,
+ 
+             track_unknown_transport_params: None,
+         })
+@@ -1043,6 +1045,11 @@
+         self.tls_ctx.set_early_data_enabled(true);
+     }
+ 
++    /// Stores a custom TLS ClientHello message.
++    pub fn set_custom_tls(&mut self, hello: &[u8]) {
++        self.custom_tls = Some(hello.to_vec());
++    }
++
+     /// Configures the list of supported application protocols.
+     ///
+     /// On the client this configures the list of protocols to send to the
+@@ -1946,7 +1953,10 @@
+         scid: &ConnectionId, odcid: Option<&ConnectionId>, local: SocketAddr,
+         peer: SocketAddr, config: &mut Config, is_server: bool,
+     ) -> Result<Connection<F>> {
+-        let tls = config.tls_ctx.new_handshake()?;
++        let mut tls = config.tls_ctx.new_handshake()?;
++        if let Some(ref hello) = config.custom_tls {
++            tls.set_custom_tls(hello.clone());
++        }
+         Connection::with_tls(scid, odcid, local, peer, config, tls, is_server)
+     }
+ 
+diff -ruN '--exclude=.git' quiche_vanilla/src/tls/mod.rs quiche_patch/src/tls/mod.rs
+--- quiche_vanilla/src/tls/mod.rs	2025-07-08 08:03:42.766596930 +0000
++++ quiche_patch/src/tls/mod.rs	2025-07-08 08:06:25.734125773 +0000
+@@ -353,6 +353,7 @@
+     /// SSL_process_quic_post_handshake should be called when whenever
+     /// SSL_provide_quic_data is called to process the provided data.
+     provided_data_outstanding: bool,
++    custom_tls: Option<Vec<u8>>,
+ }
+ 
+ impl Handshake {
+@@ -367,6 +368,7 @@
+         Handshake {
+             ptr,
+             provided_data_outstanding: false,
++            custom_tls: None,
+         }
+     }
+ 
+@@ -387,6 +389,9 @@
+         self.set_quic_early_data_context(b"quiche")?;
+ 
+         self.set_quiet_shutdown(true);
++        if let Some(ref hello) = self.custom_tls {
++            self.provide_data(crypto::Level::Initial, hello)?;
++        }
+ 
+         Ok(())
+     }
+@@ -561,6 +566,13 @@
+         unsafe { SSL_quic_write_level(self.as_ptr()) }
+     }
+ 
++    pub fn set_custom_tls(&mut self, hello: Vec<u8>) {
++        unsafe {
++            SSL_set_custom_client_hello(self.as_mut_ptr(), hello.as_ptr(), hello.len());
++        }
++        self.custom_tls = Some(hello);
++    }
++
+     pub fn cipher(&self) -> Option<crypto::Algorithm> {
+         let cipher =
+             map_result_ptr(unsafe { SSL_get_current_cipher(self.as_ptr()) });
+@@ -1192,6 +1204,7 @@
+     );
+ 
+     fn SSL_get_servername(ssl: *const SSL, ty: c_int) -> *const c_char;
++    fn SSL_set_custom_client_hello(ssl: *mut SSL, data: *const u8, len: usize);
+ 
+     fn SSL_provide_quic_data(
+         ssl: *mut SSL, level: crypto::Level, data: *const u8, len: usize,

@@ -1,0 +1,56 @@
+diff --git a/deps/boringssl/include/openssl/ssl.h b/deps/boringssl/include/openssl/ssl.h
+--- a/deps/boringssl/include/openssl/ssl.h
++++ b/deps/boringssl/include/openssl/ssl.h
+@@
+ void SSL_set_custom_client_hello(SSL *ssl, const uint8_t *data, size_t len);
++// Disable GREASE and other randomization for deterministic handshakes.
++void SSL_disable_tls_grease(SSL *ssl, int disabled);
++void SSL_set_deterministic_hello(SSL *ssl, int enabled);
+diff --git a/deps/boringssl/ssl/internal.h b/deps/boringssl/ssl/internal.h
+--- a/deps/boringssl/ssl/internal.h
++++ b/deps/boringssl/ssl/internal.h
+@@
+   std::vector<uint8_t> custom_client_hello;
++  bool disable_tls_grease = false;
++  bool deterministic_hello = false;
+ };
+diff --git a/deps/boringssl/ssl/ssl_lib.cc b/deps/boringssl/ssl/ssl_lib.cc
+--- a/deps/boringssl/ssl/ssl_lib.cc
++++ b/deps/boringssl/ssl/ssl_lib.cc
+@@
+ void SSL_set_custom_client_hello(SSL *ssl, const uint8_t *data, size_t len) {
+     ssl->custom_client_hello.assign(data, data + len);
+ }
++
++void SSL_disable_tls_grease(SSL *ssl, int disabled) {
++    ssl->disable_tls_grease = disabled != 0;
++}
++
++void SSL_set_deterministic_hello(SSL *ssl, int enabled) {
++    ssl->deterministic_hello = enabled != 0;
++}
+diff --git a/deps/boringssl/ssl/handshake_client.cc b/deps/boringssl/ssl/handshake_client.cc
+--- a/deps/boringssl/ssl/handshake_client.cc
++++ b/deps/boringssl/ssl/handshake_client.cc
+@@
+   SSL *const ssl = hs->ssl;
++  if (!ssl->custom_client_hello.empty()) {
++    Array<uint8_t> msg;
++    if (!msg.CopyFrom(bssl::Span<const uint8_t>(
++            ssl->custom_client_hello.data(),
++            ssl->custom_client_hello.size()))) {
++      return false;
++    }
++    return ssl->method->add_message(ssl, std::move(msg));
++  }
++  if (ssl->disable_tls_grease) {
++    hs->should_grease = false;
++  }
++  if (ssl->deterministic_hello) {
++    hs->deterministic = true;
++  }
+   ScopedCBB cbb;
+   CBB body;
+   ssl_client_hello_type_t type = hs->selected_ech_config
+                                      ? ssl_client_hello_outer
+                                      : ssl_client_hello_unencrypted;

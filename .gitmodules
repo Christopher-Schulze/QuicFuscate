@@ -1,0 +1,4 @@
+[submodule "libs/vanilla_quiche"]
+        path = libs/vanilla_quiche
+	url = https://github.com/cloudflare/quiche.git
+        branch = main
