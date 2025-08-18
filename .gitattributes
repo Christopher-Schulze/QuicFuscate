@@ -1,0 +1,22 @@
+# GitHub Linguist configuration for accurate language stats
+
+# Upstream vendored sources (do not count towards language breakdown)
+libs/patched_quiche/** linguist-vendored
+libs/vanilla_quiche/** linguist-vendored
+
+# Generated/build artifacts
+releases/** linguist-generated
+libs/logs/** linguist-generated
+
+# Documentation
+docs/** linguist-documentation
+ui/** linguist-documentation
+
+# Common documentation assets
+*.png linguist-documentation
+*.jpg linguist-documentation
+*.jpeg linguist-documentation
+*.svg linguist-documentation
+*.gif linguist-documentation
+*.webp linguist-documentation
+*.ico linguist-documentation
