@@ -389,7 +389,6 @@ impl Connection {
             conn_bytes_sent: 0,
             pending_control: VecDeque::new(),
             crypto: Arc::new(parking_lot::RwLock::new(packet::CryptoContext::default())),
-            app_seal_tag_reserve: 0,
             short_header_tag_reserve: 0,
             ecn_ect0: 0,
             ecn_ect1: 0,
@@ -1066,19 +1065,7 @@ impl Connection {
         // across multiple generations before we receive packets in each phase.
         let mut rx_key_advances = 0usize;
         let (hdr_native, aad_len, pt_len) = loop {
-            let decrypt = if pre_ty == PacketType::Short {
-                let candidates = {
-                    let crypto_ref_for_rx = self.crypto.read();
-                    crypto_ref_for_rx.snapshot_short_header_rx()
-                };
-                packet::decrypt_short_header_candidates(
-                    &candidates,
-                    buf,
-                    short_dcid_len,
-                    largest_hint,
-                    pre_parsed_hdr.clone(),
-                )
-            } else {
+            let decrypt = {
                 let crypto_ref_for_rx = self.crypto.read();
                 packet::unprotect_and_decrypt_parsed(
                     &crypto_ref_for_rx,
