@@ -23,6 +23,8 @@ use std::sync::OnceLock;
 const DATA_AEAD_OVERRIDE_AUTO: u8 = 0;
 const DATA_AEAD_OVERRIDE_AEGIS_L: u8 = 1;
 const DATA_AEAD_OVERRIDE_MORUS: u8 = 2;
+const DATA_AEAD_OVERRIDE_AEGIS_X4: u8 = 3;
+const DATA_AEAD_OVERRIDE_AEGIS_X8: u8 = 4;
 
 static DATA_AEAD_OVERRIDE_MODE: AtomicU8 = AtomicU8::new(DATA_AEAD_OVERRIDE_AUTO);
 
@@ -763,6 +765,8 @@ fn record_data_aead_plan(plan: CryptoAeadPlan) {
 fn resolve_data_aead_plan(default_workload_len: usize) -> CryptoAeadPlan {
     match data_aead_override_mode() {
         DATA_AEAD_OVERRIDE_AEGIS_L => CryptoAeadPlan::Aegis128L,
+        DATA_AEAD_OVERRIDE_AEGIS_X4 => CryptoAeadPlan::Aegis128X4,
+        DATA_AEAD_OVERRIDE_AEGIS_X8 => CryptoAeadPlan::Aegis128X8,
         DATA_AEAD_OVERRIDE_MORUS => CryptoAeadPlan::Morus,
         _ => CryptoAeadPlan::select_for_len(default_workload_len),
     }
@@ -861,8 +865,11 @@ pub fn install_data_aead_config(cfg: &crate::engine::CryptoConfig) {
             "aegis-128l" | "aegis128l" | "aegis" => {
                 set_data_aead_override_mode(DATA_AEAD_OVERRIDE_AEGIS_L)
             }
-            "aegis-128x4" | "aegis128x4" | "aegis-128x8" | "aegis128x8" => {
-                set_data_aead_override_mode(DATA_AEAD_OVERRIDE_AEGIS_L)
+            "aegis-128x4" | "aegis128x4" => {
+                set_data_aead_override_mode(DATA_AEAD_OVERRIDE_AEGIS_X4)
+            }
+            "aegis-128x8" | "aegis128x8" => {
+                set_data_aead_override_mode(DATA_AEAD_OVERRIDE_AEGIS_X8)
             }
             "morus" | "morus-1280-128" | "morus1280-128" => {
                 set_data_aead_override_mode(DATA_AEAD_OVERRIDE_MORUS)

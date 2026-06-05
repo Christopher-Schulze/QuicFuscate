@@ -1,5 +1,8 @@
 use super::chacha20poly1305::ChaCha20Poly1305;
-use super::{DATA_AEAD_OVERRIDE_AEGIS_L, DATA_AEAD_OVERRIDE_AUTO};
+use super::{
+    DATA_AEAD_OVERRIDE_AEGIS_L, DATA_AEAD_OVERRIDE_AEGIS_X4, DATA_AEAD_OVERRIDE_AEGIS_X8,
+    DATA_AEAD_OVERRIDE_AUTO,
+};
 use crate::crypto::aead::{AeadOpen, AeadSeal};
 use crate::engine::{AeadPreference, CryptoConfig};
 use std::sync::Mutex;
@@ -56,15 +59,15 @@ fn data_aead_config_force_overrides_preference() {
 }
 
 #[test]
-fn data_aead_config_force_aegis_aliases_fold_into_aegis_contract() {
+fn data_aead_config_force_aegis_x4_x8_use_distinct_overrides() {
     let _guard = DATA_AEAD_TEST_LOCK.lock().unwrap();
     let mut cfg = CryptoConfig { aead_preference: AeadPreference::Auto, force_aead: "aegis-128x4".to_string() };
     super::install_data_aead_config(&cfg);
-    assert_eq!(super::data_aead_override_mode(), DATA_AEAD_OVERRIDE_AEGIS_L);
+    assert_eq!(super::data_aead_override_mode(), DATA_AEAD_OVERRIDE_AEGIS_X4);
 
     cfg.force_aead = "aegis-128x8".to_string();
     super::install_data_aead_config(&cfg);
-    assert_eq!(super::data_aead_override_mode(), DATA_AEAD_OVERRIDE_AEGIS_L);
+    assert_eq!(super::data_aead_override_mode(), DATA_AEAD_OVERRIDE_AEGIS_X8);
 
     super::set_data_aead_override_mode(DATA_AEAD_OVERRIDE_AUTO);
 }
