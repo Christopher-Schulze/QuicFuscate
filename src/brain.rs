@@ -254,6 +254,37 @@ struct StealthBrainState {
     bandit_last_arm: Option<usize>,
     last_intelligent_level: u8,
     last_intelligent_level_change: Instant,
+    /// Reused histogram scratch for JS divergence (avoids per-tick Vec alloc).
+    size_hist_snap: Vec<u64>,
+    iat_hist_snap: Vec<u64>,
+}
+
+/// Scalar telemetry exported from the decay/snapshot write-lock phase.
+struct PolicyMetricsSnap {
+    ce_ratio_recent: f64,
+    ack_us: f64,
+    ack_us_long: f64,
+    jitter_us: f64,
+    reorder_ratio: f64,
+    cooldown_ok: bool,
+    fec_hint_ppm: Option<u32>,
+    fec_hint_interval: Option<u64>,
+    size_div: f64,
+    iat_div: f64,
+}
+
+/// Actuator decisions produced by the consolidated mutation write-lock phase.
+struct PolicyActuatorSnap {
+    thr: u64,
+    do_ack: bool,
+    do_pacing: bool,
+    do_timing: bool,
+    do_bias: bool,
+    do_gran: bool,
+    do_cc: bool,
+    do_padding: bool,
+    bias: u8,
+    gran: u16,
 }
 
 impl StealthBrainState {
@@ -303,9 +334,10 @@ impl StealthBrainState {
             bandit_last_arm: None,
             last_intelligent_level: 0,
             last_intelligent_level_change: crate::time_source::now_instant(),
+            size_hist_snap: vec![0; cfg.size_bins],
+            iat_hist_snap: vec![0; cfg.iat_bins],
         }
     }
-    // snapshot() removed with Snapshot archival
 }
 
 #[derive(Clone, Copy)]
@@ -610,24 +642,20 @@ impl TransportObserver for StealthBrain {
     }
 
     fn apply_policy(&self, conn: &mut Connection) {
-        // Decay histograms and compute ECN/reorder deltas and trends under lock
-        let (
-            ce_ratio_recent,
-            ack_us,
-            ack_us_long,
-            jitter_us,
-            size_hist,
-            iat_hist,
-            reorder_ratio,
-            cooldown_ok,
-            signal_rtt_spikes,
-            signal_rst,
-            signal_tos,
-            signal_other,
-            fec_hint_ppm,
-            fec_hint_interval,
-        );
-        {
+        let signal_rtt_spikes =
+            crate::optimize::telemetry::STEALTH_SIGNAL_RTT_SPIKES.swap(0, Ordering::Relaxed);
+        let signal_rst = crate::optimize::telemetry::STEALTH_SIGNAL_RST.swap(0, Ordering::Relaxed);
+        let signal_tos =
+            crate::optimize::telemetry::STEALTH_SIGNAL_TOS_ANOM.swap(0, Ordering::Relaxed);
+        let signal_other =
+            crate::optimize::telemetry::STEALTH_SIGNAL_OTHER.swap(0, Ordering::Relaxed);
+        let dr_now = conn.delivery_rate();
+        let ts = crate::time_source::now_system()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::from_secs(0))
+            .subsec_nanos() as u64;
+
+        let metrics = {
             let mut st = self.st.write();
             // Decay histograms to emphasize recent behavior
             let df = self.cfg.hist_decay as f64;
@@ -669,25 +697,28 @@ impl TransportObserver for StealthBrain {
             } else {
                 0.0
             };
-            // Export snapshot pieces
-            ce_ratio_recent = ce_ratio_recent_local;
-            ack_us = st.ack_delay_ewma_us;
-            ack_us_long = st.ack_delay_long_ewma_us;
-            jitter_us = st.rtt_jitter_ewma_us;
-            size_hist = st.size.bins.iter().copied().collect::<Vec<_>>();
-            iat_hist = st.iat.bins.iter().copied().collect::<Vec<_>>();
-            reorder_ratio = rr;
-            // Cooldown
-            cooldown_ok = elapsed_since(st.last_policy_change)
+            let size_bin_len = st.size.bins.len();
+            let iat_bin_len = st.iat.bins.len();
+            if st.size_hist_snap.len() != size_bin_len {
+                st.size_hist_snap.resize(size_bin_len, 0);
+            }
+            if st.iat_hist_snap.len() != iat_bin_len {
+                st.iat_hist_snap.resize(iat_bin_len, 0);
+            }
+            for i in 0..size_bin_len {
+                st.size_hist_snap[i] = *st.size.bins.get(i).unwrap_or(&0);
+            }
+            for i in 0..iat_bin_len {
+                st.iat_hist_snap[i] = *st.iat.bins.get(i).unwrap_or(&0);
+            }
+
+            let ce_ratio_recent = ce_ratio_recent_local;
+            let ack_us = st.ack_delay_ewma_us;
+            let ack_us_long = st.ack_delay_long_ewma_us;
+            let jitter_us = st.rtt_jitter_ewma_us;
+            let reorder_ratio = rr;
+            let cooldown_ok = elapsed_since(st.last_policy_change)
                 > Duration::from_millis(self.cfg.policy_cooldown_ms);
-            // Read stealth signals atomically (Relaxed is enough)
-            signal_rtt_spikes =
-                crate::optimize::telemetry::STEALTH_SIGNAL_RTT_SPIKES.swap(0, Ordering::Relaxed);
-            signal_rst = crate::optimize::telemetry::STEALTH_SIGNAL_RST.swap(0, Ordering::Relaxed);
-            signal_tos =
-                crate::optimize::telemetry::STEALTH_SIGNAL_TOS_ANOM.swap(0, Ordering::Relaxed);
-            signal_other =
-                crate::optimize::telemetry::STEALTH_SIGNAL_OTHER.swap(0, Ordering::Relaxed);
             let ce_filtered = if let Some(kf) = st.kalman_ce.as_mut() {
                 kf.update(ce_ratio_recent as f32) as f64
             } else {
@@ -745,34 +776,56 @@ impl TransportObserver for StealthBrain {
             let interval_changed = interval_u64 != st.last_fec_interval;
             let due = now.duration_since(st.last_fec_update) > Duration::from_millis(300);
 
-            if ppm_changed || interval_changed || due {
-                st.last_red_ppm = ppm_u64;
-                st.last_fec_interval = interval_u64;
-                st.last_fec_update = now;
-                fec_hint_ppm = Some(ppm_u64 as u32);
-                fec_hint_interval = Some(interval_u64);
-            } else {
-                fec_hint_ppm = None;
-                fec_hint_interval = None;
-            }
-        }
+            let (fec_hint_ppm, fec_hint_interval) =
+                if ppm_changed || interval_changed || due {
+                    st.last_red_ppm = ppm_u64;
+                    st.last_fec_interval = interval_u64;
+                    st.last_fec_update = now;
+                    (Some(ppm_u64 as u32), Some(interval_u64))
+                } else {
+                    (None, None)
+                };
 
-        if let Some(interval) = fec_hint_interval {
+            let size_t = Self::size_profile_target(st.size_hist_snap.len());
+            let iat_t = Self::iat_profile_target(st.iat_hist_snap.len());
+            let size_sum: u64 = st.size_hist_snap.iter().sum();
+            let size_div =
+                brain_accel::jensen_shannon_divergence(&st.size_hist_snap, size_sum, &size_t);
+            let iat_sum: u64 = st.iat_hist_snap.iter().sum();
+            let iat_div =
+                brain_accel::jensen_shannon_divergence(&st.iat_hist_snap, iat_sum, &iat_t);
+
+            PolicyMetricsSnap {
+                ce_ratio_recent,
+                ack_us,
+                ack_us_long,
+                jitter_us,
+                reorder_ratio,
+                cooldown_ok,
+                fec_hint_ppm,
+                fec_hint_interval,
+                size_div,
+                iat_div,
+            }
+        };
+
+        if let Some(interval) = metrics.fec_hint_interval {
             FEC_INTERVAL_HINT_PKTS.store(interval, Ordering::Relaxed);
         }
-        if let Some(ppm) = fec_hint_ppm {
+        if let Some(ppm) = metrics.fec_hint_ppm {
             FEC_REDUNDANCY_PPM.store(ppm, Ordering::Relaxed);
         }
-        let ce_scaled = (ce_ratio_recent * 1000.0).clamp(0.0, 1000.0) as u32;
+        let ce_scaled = (metrics.ce_ratio_recent * 1000.0).clamp(0.0, 1000.0) as u32;
         self.loss_rate.store(ce_scaled, Ordering::Relaxed);
 
-        // Histogram closeness to target profiles (JS divergence)
-        let size_t = Self::size_profile_target(size_hist.len());
-        let iat_t = Self::iat_profile_target(iat_hist.len());
-        let size_sum: u64 = size_hist.iter().sum();
-        let size_div = brain_accel::jensen_shannon_divergence(&size_hist, size_sum, &size_t);
-        let iat_sum: u64 = iat_hist.iter().sum();
-        let iat_div = brain_accel::jensen_shannon_divergence(&iat_hist, iat_sum, &iat_t);
+        let ce_ratio_recent = metrics.ce_ratio_recent;
+        let ack_us = metrics.ack_us;
+        let ack_us_long = metrics.ack_us_long;
+        let jitter_us = metrics.jitter_us;
+        let reorder_ratio = metrics.reorder_ratio;
+        let cooldown_ok = metrics.cooldown_ok;
+        let size_div = metrics.size_div;
+        let iat_div = metrics.iat_div;
 
         // Derive ACK threshold: tighter under CE/jitter, looser on clean paths
         let rtt_spike_weight = (signal_rtt_spikes as f64).min(8.0);
@@ -825,7 +878,7 @@ impl TransportObserver for StealthBrain {
                 0u8
             };
         // Cooldown 800ms to avoid flapping for the compatibility hint channel.
-        let prefer_masque_effective = {
+        let (prefer_masque_effective, current_level) = {
             let now = crate::time_source::now_instant();
             let mut st = self.st.write();
             let can_toggle =
@@ -862,17 +915,10 @@ impl TransportObserver for StealthBrain {
                 st.last_masque_hint = prefer_masque_brain;
                 st.last_masque_hint_change = now;
             }
-            st.last_masque_hint
+            (st.last_masque_hint, effective_level)
         };
-        // Export compatibility hint gauge for StealthManager to follow when the
-        // experimental MASQUE surface was explicitly enabled.
         crate::optimize::telemetry::MASQUE_HINT
             .store(if prefer_masque_effective { 1 } else { 0 }, Ordering::Relaxed);
-
-        // Mirror FEC actuators to the transport/FEC observers via atomics.
-
-        // Read back the level that was just stored so we can pass it to policy derivation.
-        let current_level = INTELLIGENT_STEALTH_LEVEL_HINT.load(Ordering::Relaxed) as u8;
         let mut stealth_policy = crate::stealth::StealthManager::derive_intelligent_runtime_policy(
             crate::stealth::IntelligentStealthInputs {
                 level_hint: current_level,
@@ -890,21 +936,15 @@ impl TransportObserver for StealthBrain {
             },
         );
 
-        // Jitter dithering (+/-10%) to avoid crisp patterns
-        let ts = crate::time_source::now_system()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::from_secs(0))
-            .subsec_nanos() as u64;
-        let dither_pct = ((ts >> 7) % 21) as i64 - 10; // -10..+10
+        let dither_pct = ((ts >> 7) % 21) as i64 - 10;
         stealth_policy.timing_max_jitter_us = ((stealth_policy.timing_max_jitter_us as i64)
             + ((stealth_policy.timing_max_jitter_us as i64 * dither_pct) / 100))
             .max(0) as u32;
 
-        // Throughput-aware ACK threshold bandit (epsilon-greedy)
-        let dr_now = conn.delivery_rate();
-        {
+        let actuators = {
             let mut st = self.st.write();
-            // Reward previous arm
+            let now = crate::time_source::now_instant();
+            let mut thr_local = thr;
             if let Some(arm) = st.bandit_last_arm.take() {
                 let n = st.bandit_counts[arm];
                 let dr_prev = st.last_delivery_rate;
@@ -924,7 +964,6 @@ impl TransportObserver for StealthBrain {
                 st.bandit_counts[arm] = n + 1;
             }
             st.last_delivery_rate = dr_now;
-            // Choose next arm
             let arms: [u64; 4] = [2, 3, 4, 8];
             let roll = ((ts ^ (ts.rotate_left(17))) % 10_000) as f64 / 10_000.0;
             let explore = roll
@@ -932,7 +971,6 @@ impl TransportObserver for StealthBrain {
             let pick = if explore {
                 ((ts >> 13) as usize) & 3
             } else {
-                // argmax avg_reward; fallback to closest to heuristic thr
                 let mut best = 0usize;
                 let mut best_val = f64::NEG_INFINITY;
                 for i in 0..4 {
@@ -947,7 +985,7 @@ impl TransportObserver for StealthBrain {
                     let mut idx = 0usize;
                     let mut diff = u64::MAX;
                     for (i, &a) in arms.iter().enumerate() {
-                        let d = a.abs_diff(thr);
+                        let d = a.abs_diff(thr_local);
                         if d < diff {
                             diff = d;
                             idx = i;
@@ -957,57 +995,33 @@ impl TransportObserver for StealthBrain {
                 }
             };
             st.bandit_last_arm = Some(pick);
-            // Override target threshold towards bandit's arm (step limiting below keeps smoothness)
-            let target = arms[pick];
-            if target != thr {
-                thr = target;
+            let bandit_thr = arms[pick];
+            if bandit_thr != thr_local {
+                thr_local = bandit_thr;
             }
-        }
-
-        // Decide whether to apply based on last state and cooldown
-        let (do_ack, do_pacing, do_timing, do_bias, do_gran, do_cc, do_padding);
-        // Smooth target ACK threshold towards last value by stepping one unit per policy tick.
-        // Initialize local working copy from current heuristic target.
-        let mut thr_local = thr;
-        let bias: u8;
-        let gran: u16;
-        let mut touch_change_stamp = false;
-        {
-            let mut st = self.st.write();
             let cooldown = cooldown_ok;
-            // ACK threshold
             {
                 use core::cmp::Ordering;
                 let last = st.last_ack_thr as i64;
                 let tgt = thr_local as i64;
-                match tgt.cmp(&last) {
-                    Ordering::Greater => {
-                        thr_local = (last + 1)
-                            .clamp(self.cfg.ack_min as i64, self.cfg.ack_max as i64)
-                            as u64;
-                    }
-                    Ordering::Less => {
-                        thr_local = (last - 1)
-                            .clamp(self.cfg.ack_min as i64, self.cfg.ack_max as i64)
-                            as u64;
-                    }
-                    Ordering::Equal => {}
-                }
+                thr_local = match tgt.cmp(&last) {
+                    Ordering::Greater => (last + 1)
+                        .clamp(self.cfg.ack_min as i64, self.cfg.ack_max as i64)
+                        as u64,
+                    Ordering::Less => (last - 1)
+                        .clamp(self.cfg.ack_min as i64, self.cfg.ack_max as i64)
+                        as u64,
+                    Ordering::Equal => thr_local,
+                };
             }
-            do_ack = cooldown && (st.last_ack_thr != thr_local);
+            let do_ack = cooldown && (st.last_ack_thr != thr_local);
             if do_ack {
                 st.last_ack_thr = thr_local;
-                touch_change_stamp = true;
             }
-            thr = thr_local;
-            // pacing
-            do_pacing = cooldown && (st.last_pacing != stealth_policy.external_pacing);
+            let do_pacing = cooldown && (st.last_pacing != stealth_policy.external_pacing);
             if do_pacing {
                 st.last_pacing = stealth_policy.external_pacing;
-                touch_change_stamp = true;
             }
-            // timing (enabled/jitter) applies if the enable flag changes or the bounded hint
-            // moved materially.
             let j_old = st.last_jitter_hint;
             let j_new = stealth_policy.timing_max_jitter_us;
             let j_diff = if j_old == 0 || j_new == 0 {
@@ -1016,7 +1030,7 @@ impl TransportObserver for StealthBrain {
                 (j_old as i64 - j_new as i64).abs()
             };
             let j_rel = if j_old > 0 { (j_diff.abs() as f64) / (j_old as f64) } else { 1.0 };
-            do_timing = cooldown
+            let do_timing = cooldown
                 && (st.last_timing_enabled != stealth_policy.timing_enabled
                     || j_old == 0
                     || j_new == 0
@@ -1024,26 +1038,20 @@ impl TransportObserver for StealthBrain {
             if do_timing {
                 st.last_timing_enabled = stealth_policy.timing_enabled;
                 st.last_jitter_hint = j_new;
-                touch_change_stamp = true;
             }
-            do_bias = cooldown && (st.last_bias != stealth_policy.mimic_bias);
-            do_gran = cooldown && (st.last_gran != stealth_policy.adaptive_granularity);
+            let do_bias = cooldown && (st.last_bias != stealth_policy.mimic_bias);
             if do_bias {
                 st.last_bias = stealth_policy.mimic_bias;
-                touch_change_stamp = true;
             }
+            let do_gran = cooldown && (st.last_gran != stealth_policy.adaptive_granularity);
             if do_gran {
                 st.last_gran = stealth_policy.adaptive_granularity;
-                touch_change_stamp = true;
             }
-            bias = stealth_policy.mimic_bias;
-            gran = stealth_policy.adaptive_granularity;
-            do_cc = cooldown && (st.last_cc_profile != stealth_policy.cc_profile);
+            let do_cc = cooldown && (st.last_cc_profile != stealth_policy.cc_profile);
             if do_cc {
                 st.last_cc_profile = stealth_policy.cc_profile;
-                touch_change_stamp = true;
             }
-            do_padding = cooldown
+            let do_padding = cooldown
                 && (st.last_padding_enabled != stealth_policy.padding_enabled
                     || st.last_padding_strategy != stealth_policy.padding_strategy
                     || st.last_padding_max != stealth_policy.padding_max);
@@ -1051,12 +1059,35 @@ impl TransportObserver for StealthBrain {
                 st.last_padding_enabled = stealth_policy.padding_enabled;
                 st.last_padding_strategy = stealth_policy.padding_strategy;
                 st.last_padding_max = stealth_policy.padding_max;
-                touch_change_stamp = true;
             }
-            if touch_change_stamp {
-                st.last_policy_change = crate::time_source::now_instant();
+            if do_ack || do_pacing || do_timing || do_bias || do_gran || do_cc || do_padding {
+                st.last_policy_change = now;
             }
-        }
+            Self::update_probing_budget(&mut st, &self.cfg);
+            self.maybe_emit_dpi_probe(&mut st);
+            PolicyActuatorSnap {
+                thr: thr_local,
+                do_ack,
+                do_pacing,
+                do_timing,
+                do_bias,
+                do_gran,
+                do_cc,
+                do_padding,
+                bias: stealth_policy.mimic_bias,
+                gran: stealth_policy.adaptive_granularity,
+            }
+        };
+        let thr = actuators.thr;
+        let do_ack = actuators.do_ack;
+        let do_pacing = actuators.do_pacing;
+        let do_timing = actuators.do_timing;
+        let do_bias = actuators.do_bias;
+        let do_gran = actuators.do_gran;
+        let do_cc = actuators.do_cc;
+        let do_padding = actuators.do_padding;
+        let bias = actuators.bias;
+        let gran = actuators.gran;
 
         let intelligent_runtime = conn.intelligent_stealth_runtime_enabled();
         let permissions = conn.brain_runtime_permissions();
@@ -1093,13 +1124,8 @@ impl TransportObserver for StealthBrain {
             conn.apply_brain_stealth_runtime_delta(stealth_delta);
         }
 
-        // Epsilon-greedy exploration for ACK threshold and FEC interval (tiny prob)
         if cooldown_ok && self.cfg.explore_prob > 0.0 {
-            let ts = crate::time_source::now_system()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or(Duration::from_secs(0))
-                .subsec_nanos() as u64;
-            let roll = ((ts ^ (ts.rotate_left(13))) % 10_000) as f64 / 10_000.0; // 0.0000..0.9999
+            let roll = ((ts ^ (ts.rotate_left(13))) % 10_000) as f64 / 10_000.0;
             if roll < (self.cfg.explore_prob as f64) {
                 let alt_thr = (thr as i64 + if (ts & 1) == 0 { 1 } else { -1 })
                     .clamp(self.cfg.ack_min as i64, self.cfg.ack_max as i64)
@@ -1108,13 +1134,6 @@ impl TransportObserver for StealthBrain {
                     conn.set_ack_eliciting_threshold(alt_thr);
                 }
             }
-        }
-
-        // DPI probing (strictly rate limited, side-effect free here)
-        {
-            let mut st = self.st.write();
-            Self::update_probing_budget(&mut st, &self.cfg);
-            self.maybe_emit_dpi_probe(&mut st);
         }
 
         trace!("brain: policy ack_thr={}{} pacing={}{} bias={}{} gran={}{} pad(strat={},max={}) intelligent_rt={} ce_recent={:.3} ack_us(s/l)={:.0}/{:.0} jitter_us~{:.0} reorder={:.3} size_div={:.3} iat_div={:.3}",
