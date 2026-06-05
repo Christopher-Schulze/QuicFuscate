@@ -201,6 +201,10 @@ pub struct Connection {
     pending_control: VecDeque<Frame<'static>>,
     // Crypto context (AEAD/HP) hooks for header and payload processing
     crypto: Arc<parking_lot::RwLock<packet::CryptoContext>>,
+    /// Cached application AEAD tag reserve (0 or 16); avoids RwLock on buffer sizing.
+    app_seal_tag_reserve: u8,
+    /// Cached AEAD tag reserve (0 or 16) after 1-RTT seal key installation.
+    short_header_tag_reserve: u8,
     // ECN counters (for ACK ECN section)
     ecn_ect0: u64,
     ecn_ect1: u64,
@@ -387,6 +391,7 @@ impl Connection {
             conn_bytes_sent: 0,
             pending_control: VecDeque::new(),
             crypto: Arc::new(parking_lot::RwLock::new(packet::CryptoContext::default())),
+            short_header_tag_reserve: 0,
             ecn_ect0: 0,
             ecn_ect1: 0,
             ecn_ce: 0,
@@ -941,6 +946,7 @@ impl Connection {
             // Without this, the transport would never transition to 1-RTT and application streams
             // (including HTTP/3 HEADERS carrying x-qf-auth) would stall behind the handshake gate.
             provider.poll_secrets_and_install(&self.crypto)?;
+            self.refresh_short_header_tag_reserve();
         } else {
             // Store in crypto stream for later processing
             let mut crypto = self.crypto.write();
@@ -1044,6 +1050,8 @@ impl Connection {
                     let mut crypto = self.crypto.write();
                     crypto.install_aes_gcm_initial(read_secret, write_secret);
                     crypto.install_hp_initial(read_secret, write_secret);
+                    drop(crypto);
+                    self.refresh_app_seal_tag_reserve();
                     self.next_send_pn_by_space[0] = 0;
                     self.pkt_spaces[0] = pnspace::PktNumSpace::default();
                 }
@@ -1467,12 +1475,14 @@ impl Connection {
     }
 
     #[inline(always)]
+    fn refresh_short_header_tag_reserve(&mut self) {
+        self.short_header_tag_reserve =
+            if self.crypto.read().seal_1rtt.is_some() { 16 } else { 0 };
+    }
+
+    #[inline(always)]
     fn tag_reserve_1rtt(&self) -> usize {
-        if self.crypto.read().seal_1rtt.is_some() {
-            16
-        } else {
-            0
-        }
+        self.short_header_tag_reserve as usize
     }
 
     #[inline(always)]
@@ -1744,44 +1754,57 @@ impl Connection {
     ) -> Result<usize, crate::error::ConnectionError> {
         use crate::error::ConnectionError;
 
-        let crypto_guard = self.crypto.read();
-        if let Some(seal) = crypto_guard.seal_1rtt.as_deref().or(crypto_guard.seal_0rtt.as_deref())
-        {
+        let use_1rtt_seal = {
+            let crypto_guard = self.crypto.read();
+            crypto_guard.seal_1rtt.is_some()
+        };
+        let sealed_len = {
+            let crypto_guard = self.crypto.read();
+            let seal = crypto_guard
+                .seal_1rtt
+                .as_deref()
+                .or(crypto_guard.seal_0rtt.as_deref())
+                .ok_or_else(|| {
+                    ConnectionError::TlsError("missing AEAD sealer for short-header packet".into())
+                })?;
             let ad_len = pn_off + pn_len;
             let (ad_slice, rest) = out.split_at_mut(ad_len);
             let pt_len = off.saturating_sub(ad_len);
-            let sealed_len = seal.seal_with_u64_counter(pn, ad_slice, rest, pt_len, None)?;
-            off = ad_len + sealed_len;
-            let hp = if crypto_guard.seal_1rtt.is_some() {
+            seal.seal_with_u64_counter(pn, ad_slice, rest, pt_len, None)
+        }?;
+        let ad_len = pn_off + pn_len;
+        off = ad_len + sealed_len;
+        let mask = {
+            let crypto_guard = self.crypto.read();
+            let hp = if use_1rtt_seal {
                 crypto_guard.hp_1rtt.as_deref()
             } else {
                 crypto_guard.hp_0rtt.as_deref().or(crypto_guard.hp_1rtt.as_deref())
             };
-            if let Some(hp) = hp {
-                if off >= pn_off + 4 + packet::SAMPLE_LEN {
+            if off >= pn_off + 4 + packet::SAMPLE_LEN {
+                hp.map(|hp| {
                     let sample = &out[pn_off + 4..pn_off + 4 + packet::SAMPLE_LEN];
-                    let mut first_orig = 0x40 | (((pn_len as u8) - 1) & 0x03);
-                    if self.key_phase {
-                        first_orig |= packet::KEY_PHASE_BIT;
-                    }
-                    let mask = hp.new_mask(sample);
-                    out[0] = first_orig ^ (mask[0] & 0x1f);
-                    for i in 0..pn_len {
-                        out[pn_off + i] ^= mask[i + 1];
-                    }
-                } else {
-                    out[0] = (0x40 | (((pn_len as u8) - 1) & 0x03))
-                        | if self.key_phase { packet::KEY_PHASE_BIT } else { 0 };
-                }
+                    hp.new_mask(sample)
+                })
             } else {
-                out[0] = (0x40 | (((pn_len as u8) - 1) & 0x03))
-                    | if self.key_phase { packet::KEY_PHASE_BIT } else { 0 };
+                None
             }
-            self.next_send_pn_by_space[2] = self.next_send_pn_by_space[2].wrapping_add(1);
-            Ok(off)
+        };
+        if let Some(mask) = mask {
+            let mut first_orig = 0x40 | (((pn_len as u8) - 1) & 0x03);
+            if self.key_phase {
+                first_orig |= packet::KEY_PHASE_BIT;
+            }
+            out[0] = first_orig ^ (mask[0] & 0x1f);
+            for i in 0..pn_len {
+                out[pn_off + i] ^= mask[i + 1];
+            }
         } else {
-            Err(ConnectionError::TlsError("missing AEAD sealer for short-header packet".into()))
+            out[0] = (0x40 | (((pn_len as u8) - 1) & 0x03))
+                | if self.key_phase { packet::KEY_PHASE_BIT } else { 0 };
         }
+        self.next_send_pn_by_space[2] = self.next_send_pn_by_space[2].wrapping_add(1);
+        Ok(off)
     }
 
     #[inline(always)]
@@ -1864,6 +1887,7 @@ impl Connection {
         // handshake completion and key installation are not dependent on receiving more CRYPTO.
         if let Some(provider) = &mut self.tls_provider {
             provider.poll_secrets_and_install(&self.crypto)?;
+            self.refresh_app_seal_tag_reserve();
         }
 
         let handshake_incomplete =
@@ -2201,6 +2225,7 @@ impl Connection {
         }
         if updated {
             self.key_phase = !self.key_phase;
+            self.refresh_app_seal_tag_reserve();
         }
     }
 
@@ -3242,6 +3267,12 @@ pub struct BenchConnectionPair {
 #[cfg(feature = "benches")]
 /// Build a matched client/server pair ready for 1-RTT send/recv micro-benchmarks.
 pub fn bench_paired_1rtt_connections() -> BenchConnectionPair {
+    bench_paired_1rtt_connections_stealth(false)
+}
+
+#[cfg(feature = "benches")]
+/// Build a matched client/server pair for 1-RTT benches with stealth knobs toggled.
+pub fn bench_paired_1rtt_connections_stealth(stealth_on: bool) -> BenchConnectionPair {
     use std::net::{Ipv4Addr, SocketAddr};
 
     use crate::crypto::aead::{Algorithm, KeyScheduleHooks, Level};
@@ -3252,9 +3283,12 @@ pub fn bench_paired_1rtt_connections() -> BenchConnectionPair {
     let peer_server = local_client;
 
     let mut config = Config::new_with_version(PROTOCOL_VERSION).expect("bench config");
-    config.stealth_timing_enabled = false;
-    config.stealth_padding_enabled = false;
-    config.external_pacing = true;
+    config.stealth_timing_enabled = stealth_on;
+    config.stealth_timing_max_jitter_us = if stealth_on { 2_500 } else { 0 };
+    config.stealth_padding_enabled = stealth_on;
+    config.stealth_padding_strategy = if stealth_on { 3 } else { 0 };
+    config.stealth_padding_max_size = if stealth_on { 256 } else { 0 };
+    config.external_pacing = !stealth_on;
 
     let client_scid = [0x11u8; 8];
     let server_scid = [0x22u8; 8];
@@ -3272,11 +3306,13 @@ pub fn bench_paired_1rtt_connections() -> BenchConnectionPair {
         crypto.set_write_secret(Level::OneRTT, Algorithm::AES128_GCM, &client_write);
         crypto.set_read_secret(Level::OneRTT, Algorithm::AES128_GCM, &server_write);
     }
+    client.refresh_app_seal_tag_reserve();
     {
         let mut crypto = server.crypto.write();
         crypto.set_write_secret(Level::OneRTT, Algorithm::AES128_GCM, &server_write);
         crypto.set_read_secret(Level::OneRTT, Algorithm::AES128_GCM, &client_write);
     }
+    server.refresh_app_seal_tag_reserve();
 
     client.is_established = true;
     server.is_established = true;
