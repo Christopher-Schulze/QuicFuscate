@@ -953,7 +953,8 @@ impl TransportObserver for StealthBrain {
                 } else {
                     0.0
                 };
-                let penalty = 0.7 * ce_ratio_recent + 0.3 * (jitter_us / (ack_us.max(1.0)));
+                let penalty: f64 =
+                    0.7 * ce_ratio_recent + 0.3 * (jitter_us / (ack_us.max(1.0)));
                 let r = dr_gain - penalty.max(0.0);
                 let new_avg = if n == 0 {
                     r
