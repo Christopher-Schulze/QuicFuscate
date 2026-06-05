@@ -7,7 +7,9 @@
 
 use std::net::SocketAddr;
 use std::os::fd::RawFd;
+use std::sync::Arc;
 
+use crate::optimize::{AlignedBox, MemoryPool};
 use io_uring::{opcode, IoUring, Probe};
 
 /// Default submission queue depth (must be power of two).
@@ -441,11 +443,47 @@ const DEFAULT_RECV_BUF_SIZE: usize = 2048;
 
 /// A single completed receive from `UringRecvBatch::drain_completions`.
 pub struct RecvCompletion {
-    /// Packet payload (copied from the ring buffer before the SQE is re-posted).
+    /// Packet payload for the legacy contiguous-buffer mode.
     pub data: Vec<u8>,
+    /// Packet payload for pool-backed receive mode.
+    pub block: Option<AlignedBox<[u8]>>,
+    /// Valid payload length inside `block` when pool-backed receive mode is active.
+    pub len: usize,
     /// Source address - `Some` when the batch was created with `with_addr = true`
     /// (server path, unconnected socket). `None` for the client path.
     pub addr: Option<SocketAddr>,
+}
+
+impl RecvCompletion {
+    #[inline]
+    pub fn len(&self) -> usize {
+        if self.block.is_some() {
+            self.len
+        } else {
+            self.data.len()
+        }
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline]
+    pub fn as_slice(&self) -> &[u8] {
+        match self.block.as_ref() {
+            Some(block) => &block[..self.len.min(block.len())],
+            None => &self.data,
+        }
+    }
+
+    #[inline]
+    pub fn into_pooled_block(self) -> Option<(AlignedBox<[u8]>, usize)> {
+        self.block.map(|block| {
+            let len = self.len.min(block.len());
+            (block, len)
+        })
+    }
 }
 
 /// Batch UDP receiver backed by a dedicated io_uring ring and an eventfd bridge
@@ -473,8 +511,11 @@ pub struct UringRecvBatch {
     /// Contiguous buffer pool: `depth * buf_size` bytes.
     /// Buffer `i` occupies `bufs[i * buf_size .. (i+1) * buf_size]`.
     bufs: Vec<u8>,
+    /// Optional MemoryPool-backed receive slots for zero-copy kernel-to-FEC handoff.
+    blocks: Vec<Option<AlignedBox<[u8]>>>,
+    memory_pool: Option<Arc<MemoryPool>>,
     buf_size: usize,
-    /// Pre-built iovec array pointing into `bufs`.
+    /// Pre-built iovec array pointing into `bufs` or pool-backed `blocks`.
     iovecs: Vec<libc::iovec>,
     /// Pre-built msghdr array pointing into `iovecs` (and `addrs` when `with_addr`).
     msgs: Vec<libc::msghdr>,
@@ -496,6 +537,27 @@ impl UringRecvBatch {
     ///
     /// Returns `None` when io_uring or eventfd creation fails.
     pub fn new(socket_fd: RawFd, depth: u32, buf_size: usize, with_addr: bool) -> Option<Self> {
+        Self::new_inner(socket_fd, depth, buf_size, with_addr, None)
+    }
+
+    /// Create a receive batch whose RecvMsg slots are backed by `MemoryPool` blocks.
+    pub fn new_with_pool(
+        socket_fd: RawFd,
+        depth: u32,
+        buf_size: usize,
+        with_addr: bool,
+        memory_pool: Arc<MemoryPool>,
+    ) -> Option<Self> {
+        Self::new_inner(socket_fd, depth, buf_size, with_addr, Some(memory_pool))
+    }
+
+    fn new_inner(
+        socket_fd: RawFd,
+        depth: u32,
+        buf_size: usize,
+        with_addr: bool,
+        memory_pool: Option<Arc<MemoryPool>>,
+    ) -> Option<Self> {
         let depth = depth.max(4).next_power_of_two();
         let buf_size = buf_size.max(1500);
 
@@ -529,17 +591,39 @@ impl UringRecvBatch {
 
         let d = depth as usize;
 
-        // Contiguous buffer pool.
-        let bufs = vec![0u8; d * buf_size];
+        let pooled = memory_pool.is_some();
+        let bufs = if pooled { Vec::new() } else { vec![0u8; d * buf_size] };
+        let mut blocks = Vec::with_capacity(d);
+        if let Some(pool) = memory_pool.as_ref() {
+            for _ in 0..d {
+                let block = pool.alloc();
+                if block.len() < buf_size {
+                    log::debug!(
+                        "io_uring recv pool block too small: block_len={}, buf_size={buf_size}",
+                        block.len()
+                    );
+                    pool.free(block);
+                    for block in blocks.into_iter().flatten() {
+                        pool.free(block);
+                    }
+                    return None;
+                }
+                blocks.push(Some(block));
+            }
+        } else {
+            blocks.resize_with(d, || None);
+        }
 
         // Pre-build iovecs pointing into the buffer pool.
         let mut iovecs: Vec<libc::iovec> = Vec::with_capacity(d);
         for i in 0..d {
-            iovecs.push(libc::iovec {
+            let iov_base = if let Some(block) = blocks[i].as_mut() {
+                block.as_mut_ptr() as *mut libc::c_void
+            } else {
                 // Safety: bufs lives as long as self; no reallocation after this.
-                iov_base: unsafe { bufs.as_ptr().add(i * buf_size) as *mut libc::c_void },
-                iov_len: buf_size,
-            });
+                unsafe { bufs.as_ptr().add(i * buf_size) as *mut libc::c_void }
+            };
+            iovecs.push(libc::iovec { iov_base, iov_len: buf_size });
         }
 
         // Pre-build sockaddr storage (server only).
@@ -565,13 +649,15 @@ impl UringRecvBatch {
         }
 
         log::debug!(
-            "io_uring recv batch created: depth={depth}, buf_size={buf_size}, with_addr={with_addr}"
+            "io_uring recv batch created: depth={depth}, buf_size={buf_size}, with_addr={with_addr}, pooled={pooled}"
         );
 
         Some(Self {
             ring,
             eventfd: efd,
             bufs,
+            blocks,
+            memory_pool,
             buf_size,
             iovecs,
             msgs,
@@ -585,6 +671,21 @@ impl UringRecvBatch {
     /// Create with default depth (64) and buffer size (2048).
     pub fn with_defaults(socket_fd: RawFd, with_addr: bool) -> Option<Self> {
         Self::new(socket_fd, DEFAULT_RECV_DEPTH, DEFAULT_RECV_BUF_SIZE, with_addr)
+    }
+
+    /// Create a pool-backed receive batch with default depth and buffer size.
+    pub fn with_defaults_pool(
+        socket_fd: RawFd,
+        with_addr: bool,
+        memory_pool: Arc<MemoryPool>,
+    ) -> Option<Self> {
+        Self::new_with_pool(
+            socket_fd,
+            DEFAULT_RECV_DEPTH,
+            DEFAULT_RECV_BUF_SIZE,
+            with_addr,
+            memory_pool,
+        )
     }
 
     /// Raw eventfd descriptor for Tokio `AsyncFd` registration.
@@ -628,9 +729,9 @@ impl UringRecvBatch {
 
     /// Drain all ready CQEs and return completed receives.
     ///
-    /// For each completion the packet data is **copied** from the ring buffer
-    /// into `RecvCompletion::data`, and the SQE for that buffer slot is
-    /// immediately re-posted so the kernel can fill it again.
+    /// For contiguous-buffer mode, packet data is copied into `RecvCompletion::data`.
+    /// For pool-backed mode, ownership of the filled pool block moves into the
+    /// completion and the slot is immediately armed with a replacement block.
     pub fn drain_completions(&mut self) -> std::io::Result<Vec<RecvCompletion>> {
         let mut completions = Vec::new();
         let mut repost_indices: Vec<usize> = Vec::new();
@@ -643,14 +744,40 @@ impl UringRecvBatch {
 
                 if result > 0 && idx < self.depth as usize {
                     let len = result as usize;
-                    let start = idx * self.buf_size;
-                    let end = start + len.min(self.buf_size);
-                    let data = self.bufs[start..end].to_vec();
-
                     let addr = if self.with_addr { parse_sockaddr(&self.addrs[idx]) } else { None };
+                    let len = len.min(self.buf_size);
 
-                    completions.push(RecvCompletion { data, addr });
-                    repost_indices.push(idx);
+                    if let Some(pool) = self.memory_pool.as_ref() {
+                        if let Some(block) = self.blocks[idx].take() {
+                            let mut replacement = pool.alloc();
+                            if replacement.len() < self.buf_size {
+                                pool.free(replacement);
+                                self.blocks[idx] = Some(block);
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    "io_uring recv pool block smaller than receive buffer",
+                                ));
+                            }
+                            self.iovecs[idx].iov_base =
+                                replacement.as_mut_ptr() as *mut libc::c_void;
+                            self.iovecs[idx].iov_len = self.buf_size;
+                            self.blocks[idx] = Some(replacement);
+                            completions.push(RecvCompletion {
+                                data: Vec::new(),
+                                block: Some(block),
+                                len,
+                                addr,
+                            });
+                            repost_indices.push(idx);
+                        }
+                    } else {
+                        let start = idx * self.buf_size;
+                        let end = start + len;
+                        let data = self.bufs[start..end].to_vec();
+                        completions.push(RecvCompletion { data, block: None, len, addr });
+                        repost_indices.push(idx);
+                        self.iovecs[idx].iov_len = self.buf_size;
+                    }
 
                     // Reset the sockaddr for next receive.
                     if self.with_addr {
@@ -658,8 +785,6 @@ impl UringRecvBatch {
                         self.msgs[idx].msg_namelen =
                             std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
                     }
-                    // Reset iov_len for next receive.
-                    self.iovecs[idx].iov_len = self.buf_size;
                 } else if result < 0 {
                     let errno = -result;
                     // EAGAIN (11), ECONNRESET (104), ECONNREFUSED (111) are expected.
@@ -695,6 +820,11 @@ impl UringRecvBatch {
 
 impl Drop for UringRecvBatch {
     fn drop(&mut self) {
+        if let Some(pool) = self.memory_pool.as_ref() {
+            for block in self.blocks.drain(..).flatten() {
+                pool.free(block);
+            }
+        }
         unsafe {
             libc::close(self.eventfd);
         }

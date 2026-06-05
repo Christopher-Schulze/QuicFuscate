@@ -66,9 +66,11 @@ This section is the fast path for skeptical review. It is not a marketing summar
   `io_uring_enter` call; client outbound path dispatches via `UringBatchSender` in `IoDriver`.
 - The client inbound path uses a dedicated `UringRecvBatch` ring with pre-posted `RecvMsg` SQEs
   and an **eventfd bridge** to Tokio: `register_eventfd_async(eventfd)` wakes a
-  `tokio::io::unix::AsyncFd` on CQ completions, eliminating all per-packet `recvmsg` syscalls
-  and the epoll/io_uring race condition. Fallback to Tokio `recv()` + `try_recv()` when
-  io_uring is unavailable.
+  `tokio::io::unix::AsyncFd` on CQ completions. In pool-backed mode those RecvMsg slots point
+  directly at shared `MemoryPool` blocks; completions transfer the filled block into
+  `core::recv_pooled_block()` while immediately arming the ring slot with a replacement block.
+  This removes the io_uring-to-FEC memcpy on the Linux client fast path. Fallback to Tokio
+  `recv()` + `try_recv()` when io_uring is unavailable.
 - busy-poll socket tuning is not used.
 
 ### Shortest Audit Path
@@ -1611,7 +1613,7 @@ See "Unified TLS Provider (RealTLS + TLS Cover) -> Fingerprint Source Model" for
 #### Advanced Optimizations
 - Crypto hotpaths use target-feature gated intrinsics (`aes`, `sse2`, `avx2`, `vaes`, `neon`); runtime dispatch via `cpufeatures` selects the best backend.
 - AEGIS/MORUS implementations include unsafe blocks for SIMD lanes where necessary; all sensitive operations remain constant-time by design.
-- Transport/H3 uses zero-copy iovecs, io_uring fast paths (feature `io_uring`, crate `io-uring` v0.7) and aligned pools (`MemoryPool`) for minimal copies. The client `IoDriver` uses `UringBatchSender` (in `src/optimize/uring_batch.rs`) for batch `SendMsg` submission before falling back to `sendmmsg`, enabling io_uring datagram sends automatically on capable Linux kernels.
+- Transport/H3 uses zero-copy iovecs, io_uring fast paths (feature `io_uring`, crate `io-uring` v0.7) and aligned pools (`MemoryPool`) for minimal copies. The client `IoDriver` uses `UringBatchSender` (in `src/optimize/uring_batch.rs`) for batch `SendMsg` submission before falling back to `sendmmsg`, and uses pool-backed `UringRecvBatch` slots on Linux so inbound datagrams can enter FEC through `core::recv_pooled_block()` without an intermediate `Vec` copy.
 - Frame parsing is zero-copy: `Frame<'a>` uses `Cow<'a, [u8]>` for data fields, borrowing directly from the decrypted packet buffer in `from_bytes()`. Combined with the in-order Stream fast path (sequential data copies directly to recv_buf, skipping the recv_frags BTreeMap), the common-case receive path avoids heap allocation entirely.
 - Stealth hotpaths (header/QPACK building and persona-driven shaping) prefer SIMD kernels with safe scalar fallback; mutex/atomic usage is minimized in hotpaths.
 
@@ -3236,7 +3238,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `rt-profile-overrides` validates `QUICFUSCATE_PROFILE_OVERRIDE` parity between scalar and SIMD paths.
 - `rt-profile-fuzz-parity` runs randomized parity checks across scalar and SIMD fast paths.
 
-> Note: Linux fast paths (io_uring datagram send, MASQUE DATAGRAM) are runtime-gated and auto-enable when the kernel exposes the required syscalls. macOS tooling still skips these checks by default-run targeted Linux smoke suites when touching transport or MASQUE code paths.
+> Note: Linux fast paths (io_uring datagram send/recv, MASQUE DATAGRAM) are runtime-gated and auto-enable when the kernel exposes the required syscalls. macOS tooling still skips these checks by default - run targeted Linux smoke suites when touching transport, receive buffering, or MASQUE code paths.
 
 > AVX10 rollout: Once real AVX10.1 hardware is available, build with `cargo build --features internal_avx10_preview` and run `./scripts/tests/smoke/smoke-avx10.sh --require --output-dir <artifacts>`, archive the generated logs (profile + bench CSVs), and update this document with validated results.
 

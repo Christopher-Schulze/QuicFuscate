@@ -83,15 +83,16 @@ Uses `StealthConfig::from_mode(runtime_mode)` - was silently using `..Default::d
 2. TLS handshake path: `src/qftls.rs` (`CombinedProvider`) -> rustls keys -> `src/transport/packet.rs`
 3. Stealth shaping path: `src/stealth/` (`StealthManager`) -> `src/transport/config.rs` -> `src/transport/connection.rs`
 4. FEC encode/decode path: `src/fec/` (`AdaptiveFec`) -> transport observer hooks -> packet egress/ingress
-5. Probe mitigation path: `src/stealth/` detector -> `src/reality.rs` fallback proxy -> upstream targets
-6. Engine embedding path: `src/engine/engine.rs` -> `src/implementations/{client,server}/` runtimes
-7. Admin control plane path: `src/implementations/server/admin_http.rs` -> `qkey_registry.rs` -> live server policy enforcement
-8. Desktop frontend path: `apps/svelte-desktop/src/lib/stores/tauri-bridge.svelte.ts` -> Tauri invoke -> engine/control runtime
-9. 0-RTT anti-replay path: `src/transport/anti_replay.rs` (`StrikeRegister`) -> `src/transport/config.rs` (attached at server startup) -> `src/transport/connection.rs` `recv()` gate -> silent discard on replay
-10. Desktop native host path: `apps/tauri/src-tauri/src/main.rs` -> Tauri commands -> engine/control runtime
-11. Web-admin path: `apps/svelte-admin/src/lib/api.ts` -> Vite dev proxy (`/api` -> `127.0.0.1:9000`) -> admin HTTP endpoints -> server runtime state
-12. Build publish path: `scripts/build/build-web-admin.sh` -> `assets/web-admin/` consumed by `--admin-web-root`
-13. Shared packages path: `packages/ui` (Svelte 5 components) + `packages/theme` (CSS tokens/glass/layout) -> consumed by both Svelte apps
+5. Linux client zero-copy inbound path: `src/implementations/client/io_driver.rs` -> pool-backed `src/optimize/uring_batch.rs` `UringRecvBatch` -> `src/core.rs` `recv_pooled_block()` -> `src/fec/mod.rs` -> `src/transport/connection.rs`
+6. Probe mitigation path: `src/stealth/` detector -> `src/reality.rs` fallback proxy -> upstream targets
+7. Engine embedding path: `src/engine/engine.rs` -> `src/implementations/{client,server}/` runtimes
+8. Admin control plane path: `src/implementations/server/admin_http.rs` -> `qkey_registry.rs` -> live server policy enforcement
+9. Desktop frontend path: `apps/svelte-desktop/src/lib/stores/tauri-bridge.svelte.ts` -> Tauri invoke -> engine/control runtime
+10. 0-RTT anti-replay path: `src/transport/anti_replay.rs` (`StrikeRegister`) -> `src/transport/config.rs` (attached at server startup) -> `src/transport/connection.rs` `recv()` gate -> silent discard on replay
+11. Desktop native host path: `apps/tauri/src-tauri/src/main.rs` -> Tauri commands -> engine/control runtime
+12. Web-admin path: `apps/svelte-admin/src/lib/api.ts` -> Vite dev proxy (`/api` -> `127.0.0.1:9000`) -> admin HTTP endpoints -> server runtime state
+13. Build publish path: `scripts/build/build-web-admin.sh` -> `assets/web-admin/` consumed by `--admin-web-root`
+14. Shared packages path: `packages/ui` (Svelte 5 components) + `packages/theme` (CSS tokens/glass/layout) -> consumed by both Svelte apps
 
 ## ASCII Repository Tree (curated tracked-source snapshot)
 

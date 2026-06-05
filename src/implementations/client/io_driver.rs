@@ -543,7 +543,7 @@ impl IoDriver {
         // Try io_uring recv path on Linux.
         #[cfg(all(target_os = "linux", feature = "io_uring"))]
         {
-            if let Some((mut uring_recv, async_efd)) = Self::try_init_uring_recv(&socket) {
+            if let Some((mut uring_recv, async_efd)) = Self::try_init_uring_recv(&socket, &conn) {
                 return self
                     .run_inbound_uring(tun, conn, handshake_event, &mut uring_recv, async_efd)
                     .await;
@@ -697,15 +697,20 @@ impl IoDriver {
                         crate::telemetry::IO_URING_RECV_BATCHES.inc();
                         crate::telemetry::IO_URING_RECV_PACKETS.inc_by(completions.len() as u64);
 
-                        for c in &completions {
+                        for c in completions {
                             self.stats.udp_packets_received.fetch_add(1, Ordering::Relaxed);
                             let global = crate::instrumentation::global();
-                            global.transport.record_bytes_in(c.data.len() as u64);
+                            global.transport.record_bytes_in(c.len() as u64);
                             global.transport.record_packet_in();
 
                             {
                                 let mut conn_guard = conn.lock();
-                                if let Err(e) = conn_guard.recv(&c.data) {
+                                let recv_result = if let Some(block) = c.block {
+                                    conn_guard.recv_pooled_block(block, c.len)
+                                } else {
+                                    conn_guard.recv(&c.data)
+                                };
+                                if let Err(e) = recv_result {
                                     log::debug!("Connection recv error: {:?}", e);
                                     self.stats.errors.fetch_add(1, Ordering::Relaxed);
                                 }
@@ -762,6 +767,7 @@ impl IoDriver {
     #[cfg(all(target_os = "linux", feature = "io_uring"))]
     fn try_init_uring_recv(
         socket: &Arc<UdpSocket>,
+        conn: &Arc<parking_lot::Mutex<QuicFuscateConnection>>,
     ) -> Option<(
         crate::optimize::uring_batch::UringRecvBatch,
         tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>,
@@ -769,8 +775,12 @@ impl IoDriver {
         use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
         let socket_fd = socket.as_raw_fd();
-        let mut uring_recv =
-            crate::optimize::uring_batch::UringRecvBatch::with_defaults(socket_fd, false)?;
+        let memory_pool = { conn.lock().recv_memory_pool() };
+        let mut uring_recv = crate::optimize::uring_batch::UringRecvBatch::with_defaults_pool(
+            socket_fd,
+            false,
+            memory_pool,
+        )?;
 
         if uring_recv.post_initial().is_err() {
             log::debug!("io_uring recv post_initial failed");

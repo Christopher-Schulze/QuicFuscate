@@ -14,7 +14,7 @@ use crate::brain::DeepIntegrationOrchestrator;
 use crate::brain::{CombinedObserver, StealthBrain};
 use crate::crypto::CryptoManager;
 use crate::fec::{AdaptiveFec, FecConfig, FecPacket, FecTransportObserver};
-use crate::optimize::{OptimizationManager, OptimizeConfig};
+use crate::optimize::{AlignedBox, MemoryPool, OptimizationManager, OptimizeConfig};
 use crate::stealth::{StealthConfig, StealthManager, StealthMode};
 use std::sync::Arc;
 #[cfg(feature = "orchestrator")]
@@ -851,9 +851,20 @@ impl QuicFuscateConnection {
         }
         let copy_len = data.len();
         block[..copy_len].copy_from_slice(&data[..copy_len]);
-        let len = copy_len;
+        self.recv_pooled_block(block, copy_len)
+    }
 
-        // Hand over the pooled block directly without extra allocation.
+    /// Processes an incoming packet that already resides in a pooled block.
+    pub fn recv_pooled_block(
+        &mut self,
+        block: AlignedBox<[u8]>,
+        len: usize,
+    ) -> Result<usize, crate::error::ConnectionError> {
+        if len > block.len() {
+            self.optimization_manager.free_block(block);
+            return Err(crate::error::ConnectionError::BufferTooShort);
+        }
+
         let fec_packet = FecPacket::new(
             self.packet_id_counter,
             Some(block),
@@ -897,6 +908,11 @@ impl QuicFuscateConnection {
             .map_err(|e| crate::error::ConnectionError::Transport(e.to_string()))?;
 
         Ok(len)
+    }
+
+    /// Shared receive-side memory pool for socket fast paths.
+    pub fn recv_memory_pool(&self) -> Arc<MemoryPool> {
+        self.optimization_manager.memory_pool().clone()
     }
 
     /// Prepares QUIC packets for sending, wraps them in FEC, and buffers them.
