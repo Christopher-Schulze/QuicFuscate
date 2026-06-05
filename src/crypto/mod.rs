@@ -710,6 +710,188 @@ fn build_morus_data_aead(
     )
 }
 
+/// Concrete data-plane AEAD dispatch without vtable calls for retained backends.
+pub(crate) enum DataAead {
+    Aegis128L(Aegis128LAead),
+    Aegis128X4(Aegis128X4Aead),
+    Aegis128X8(Aegis128X8Aead),
+    Morus(MorusAead),
+}
+
+impl DataAead {
+    #[inline(always)]
+    fn new(plan: CryptoAeadPlan, key: &[u8; 16], iv: &[u8; 12]) -> Self {
+        match plan {
+            CryptoAeadPlan::Aegis128L => Self::Aegis128L(Aegis128LAead::new(key, iv)),
+            CryptoAeadPlan::Aegis128X4 => Self::Aegis128X4(Aegis128X4Aead::new(key, iv)),
+            CryptoAeadPlan::Aegis128X8 => Self::Aegis128X8(Aegis128X8Aead::new(key, iv)),
+            CryptoAeadPlan::Morus => Self::Morus(MorusAead::new(key, iv)),
+        }
+    }
+}
+
+impl AeadSeal for DataAead {
+    #[inline(always)]
+    fn seal_with_u64_counter(
+        &self,
+        counter: u64,
+        ad: &[u8],
+        buf: &mut [u8],
+        len: usize,
+        extra_in: Option<&[u8]>,
+    ) -> Result<usize, crate::error::ConnectionError> {
+        match self {
+            Self::Aegis128L(aead) => aead.seal_with_u64_counter(counter, ad, buf, len, extra_in),
+            Self::Aegis128X4(aead) => aead.seal_with_u64_counter(counter, ad, buf, len, extra_in),
+            Self::Aegis128X8(aead) => aead.seal_with_u64_counter(counter, ad, buf, len, extra_in),
+            Self::Morus(aead) => aead.seal_with_u64_counter(counter, ad, buf, len, extra_in),
+        }
+    }
+
+    #[inline(always)]
+    fn supports_batch_seal(&self) -> bool {
+        match self {
+            Self::Aegis128L(aead) => aead.supports_batch_seal(),
+            Self::Aegis128X4(aead) => aead.supports_batch_seal(),
+            Self::Aegis128X8(aead) => aead.supports_batch_seal(),
+            Self::Morus(aead) => aead.supports_batch_seal(),
+        }
+    }
+
+    #[inline(always)]
+    fn seal_batch(
+        &self,
+        items: &mut [crate::crypto::aead::AeadSealItem<'_>],
+    ) -> Result<(), crate::error::ConnectionError> {
+        match self {
+            Self::Aegis128L(aead) => aead.seal_batch(items),
+            Self::Aegis128X4(aead) => aead.seal_batch(items),
+            Self::Aegis128X8(aead) => aead.seal_batch(items),
+            Self::Morus(aead) => aead.seal_batch(items),
+        }
+    }
+}
+
+impl AeadOpen for DataAead {
+    #[inline(always)]
+    fn open_with_u64_counter(
+        &self,
+        counter: u64,
+        ad: &[u8],
+        buf: &mut [u8],
+    ) -> Result<usize, crate::error::ConnectionError> {
+        match self {
+            Self::Aegis128L(aead) => aead.open_with_u64_counter(counter, ad, buf),
+            Self::Aegis128X4(aead) => aead.open_with_u64_counter(counter, ad, buf),
+            Self::Aegis128X8(aead) => aead.open_with_u64_counter(counter, ad, buf),
+            Self::Morus(aead) => aead.open_with_u64_counter(counter, ad, buf),
+        }
+    }
+
+    #[inline(always)]
+    fn supports_batch_open(&self) -> bool {
+        match self {
+            Self::Aegis128L(aead) => aead.supports_batch_open(),
+            Self::Aegis128X4(aead) => aead.supports_batch_open(),
+            Self::Aegis128X8(aead) => aead.supports_batch_open(),
+            Self::Morus(aead) => aead.supports_batch_open(),
+        }
+    }
+
+    #[inline(always)]
+    fn open_batch(
+        &self,
+        items: &mut [crate::crypto::aead::AeadOpenItem<'_>],
+    ) -> Result<(), crate::error::ConnectionError> {
+        match self {
+            Self::Aegis128L(aead) => aead.open_batch(items),
+            Self::Aegis128X4(aead) => aead.open_batch(items),
+            Self::Aegis128X8(aead) => aead.open_batch(items),
+            Self::Morus(aead) => aead.open_batch(items),
+        }
+    }
+}
+
+pub(crate) enum PacketAeadSeal {
+    Data(DataAead),
+    Dynamic(Box<dyn AeadSeal + Send + Sync>),
+}
+
+impl AeadSeal for PacketAeadSeal {
+    #[inline(always)]
+    fn seal_with_u64_counter(
+        &self,
+        counter: u64,
+        ad: &[u8],
+        buf: &mut [u8],
+        len: usize,
+        extra_in: Option<&[u8]>,
+    ) -> Result<usize, crate::error::ConnectionError> {
+        match self {
+            Self::Data(aead) => aead.seal_with_u64_counter(counter, ad, buf, len, extra_in),
+            Self::Dynamic(aead) => aead.seal_with_u64_counter(counter, ad, buf, len, extra_in),
+        }
+    }
+
+    #[inline(always)]
+    fn supports_batch_seal(&self) -> bool {
+        match self {
+            Self::Data(aead) => aead.supports_batch_seal(),
+            Self::Dynamic(aead) => aead.supports_batch_seal(),
+        }
+    }
+
+    #[inline(always)]
+    fn seal_batch(
+        &self,
+        items: &mut [crate::crypto::aead::AeadSealItem<'_>],
+    ) -> Result<(), crate::error::ConnectionError> {
+        match self {
+            Self::Data(aead) => aead.seal_batch(items),
+            Self::Dynamic(aead) => aead.seal_batch(items),
+        }
+    }
+}
+
+pub(crate) enum PacketAeadOpen {
+    Data(DataAead),
+    Dynamic(Box<dyn AeadOpen + Send + Sync>),
+}
+
+impl AeadOpen for PacketAeadOpen {
+    #[inline(always)]
+    fn open_with_u64_counter(
+        &self,
+        counter: u64,
+        ad: &[u8],
+        buf: &mut [u8],
+    ) -> Result<usize, crate::error::ConnectionError> {
+        match self {
+            Self::Data(aead) => aead.open_with_u64_counter(counter, ad, buf),
+            Self::Dynamic(aead) => aead.open_with_u64_counter(counter, ad, buf),
+        }
+    }
+
+    #[inline(always)]
+    fn supports_batch_open(&self) -> bool {
+        match self {
+            Self::Data(aead) => aead.supports_batch_open(),
+            Self::Dynamic(aead) => aead.supports_batch_open(),
+        }
+    }
+
+    #[inline(always)]
+    fn open_batch(
+        &self,
+        items: &mut [crate::crypto::aead::AeadOpenItem<'_>],
+    ) -> Result<(), crate::error::ConnectionError> {
+        match self {
+            Self::Data(aead) => aead.open_batch(items),
+            Self::Dynamic(aead) => aead.open_batch(items),
+        }
+    }
+}
+
 /// Data-plane AEAD backend selector for benchmarks.
 #[cfg(feature = "benches")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -786,6 +968,19 @@ fn build_data_aead(
     }
 }
 
+#[inline(always)]
+fn build_packet_data_aead(
+    plan: CryptoAeadPlan,
+    key: &[u8; 16],
+    iv: &[u8; 12],
+) -> (PacketAeadSeal, PacketAeadOpen) {
+    record_data_aead_plan(plan);
+    (
+        PacketAeadSeal::Data(DataAead::new(plan, key, iv)),
+        PacketAeadOpen::Data(DataAead::new(plan, key, iv)),
+    )
+}
+
 /// Constructs a boxed seal/open AEAD pair for the given benchmark backend.
 #[cfg(feature = "benches")]
 pub fn build_data_aead_for_benches(
@@ -821,6 +1016,19 @@ pub fn select_data_aead(
 
     let plan = resolve_data_aead_plan(DEFAULT_TRANSPORT_AEAD_WORKLOAD_LEN);
     build_data_aead(plan, &k16, &iv12)
+}
+
+/// Selects the data-plane AEAD backend for packet hot paths without boxed dispatch.
+pub(crate) fn select_packet_data_aead(key: &[u8], iv: &[u8]) -> (PacketAeadSeal, PacketAeadOpen) {
+    const DEFAULT_TRANSPORT_AEAD_WORKLOAD_LEN: usize = crate::transport::TYPICAL_1RTT_PAYLOAD_LEN;
+
+    let mut k16 = [0u8; 16];
+    k16.copy_from_slice(&key[..16]);
+    let mut iv12 = [0u8; 12];
+    iv12.copy_from_slice(&iv[..12]);
+
+    let plan = resolve_data_aead_plan(DEFAULT_TRANSPORT_AEAD_WORKLOAD_LEN);
+    build_packet_data_aead(plan, &k16, &iv12)
 }
 
 fn data_aead_override_mode() -> u8 {

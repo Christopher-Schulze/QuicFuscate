@@ -982,6 +982,7 @@ pub struct MacTun {
   - If hardware AES is available, prefer AEGIS.
   - Internal AEGIS batching width (`Aegis128X4` / `Aegis128X8`) is selected automatically as an implementation detail.
   - If hardware AES is not available, fall back to `Morus1280_128`.
+- Packet hot path dispatch: normal 0-RTT/1-RTT data-plane AEAD slots resolve to `DataAead` enum variants (`Aegis128L`, `Aegis128X4`, `Aegis128X8`, `Morus`) and avoid boxed trait dispatch. Rustls-provided packet keys remain supported through the explicit `PacketAead*::Dynamic` wrapper arm.
 - Performance evidence:
   - retained backend evidence is produced by `scripts/benchmarks/suites/bench-retained-crypto-backends.sh`
   - the suite records hardware profile, per-backend throughput, and per-size winners for `Aegis128L`, `Aegis128X4`, `Aegis128X8`, and `Morus1280_128`
@@ -1355,7 +1356,7 @@ cargo test
    - `cargo clippy -- -D warnings`
 
 #### Integration Guidelines and Optimization Strategy
-- Data-plane AEAD follows `CryptoAeadPlan` from `simd.rs` and is resolved once in `src/crypto/` into concrete implementations.
+- Data-plane AEAD follows `CryptoAeadPlan` from `simd.rs` and is resolved once in `src/crypto/` into concrete packet dispatch wrappers.
 - On tag failure: constant-time verify -> error; no plaintext is emitted.
 - Keep cipher concerns isolated; avoid mixing AEGIS logic into transport code.
 - Keep performance- and safety-critical crypto changes covered by `scripts/tests/suites/test-crypto.sh`.
@@ -1404,7 +1405,7 @@ let text = telemetry::export_telemetry_text();
   - Wiedemann/Berlekamp-Massey and bitsliced GF multiplication on ARM NEON are always available (feature `internal_wiedemann` enables Wiedemann test coverage); Berlekamp-Massey has a VL-aware SVE2 path (`FEC_BERLEKAMP_SVE2_OPS` telemetry), otherwise falls back to NEON/scalar.
   - SVE2-aware matrix multiply uses real VL-SVE2 XOR-stores; SSSE3 dispatch added (`matrix_multiply_ssse3`) falling back to scalar only for `X86_P0a`.
 - `src/crypto/`
-  - AEAD glue; consumes FeatureDetector/plan at instantiation for runtime selection
+  - AEAD glue; consumes FeatureDetector/plan at instantiation for runtime selection. Retained data-plane packet AEADs use enum dispatch, with boxed dispatch retained only for Rustls packet-key adapters and public benchmark/test helper APIs.
 - MORUS-1280-128 scalar and SIMD backends are instrumented via `MORUS1280_SCALAR_OPS`, `MORUS1280_SSE2_OPS`, `MORUS1280_SSSE3_OPS`, `MORUS1280_SSE41_OPS`, `MORUS1280_SSE42_OPS`, and `MORUS1280_NEON_OPS`.
   - ChaCha20-Poly1305: ChaCha keystream SIMD XOR (SSE4.1/SSSE3->AVX->AVX2->AVX-512, NEON & SVE2), Poly1305 MAC dispatch (SSE2/AVX2/AVX-512, NEON/SVE2)
   - AES-128-GCM: `Aes128Ctx` caches round keys once; CTR uses 4-lane AESNI/AESE batches, SSSE3 hosts use SIMD fallback (`aes128_encrypt_block_ssse3`, `ctr_xor_ssse3`, telemetry `AES_BLOCK_SSSE3_OPS`/`AES_CTR_SSSE3_OPS`), NEON/SVE2 use AESE/PMULL paths, and non-SIMD CPUs use the scalar T-Table.
