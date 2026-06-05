@@ -87,7 +87,7 @@ impl OutboundPipeline {
     }
 
     fn apply_fec_packets(&self, packet: &[u8]) -> Result<Vec<Vec<u8>>, PipelineError> {
-        let fec = self.fec.lock().map_err(|_| PipelineError::LockError)?;
+        let mut fec = self.fec.lock().map_err(|_| PipelineError::LockError)?;
         Ok(fec.encode_packets(packet))
     }
 }
@@ -132,7 +132,7 @@ impl InboundPipeline {
     }
 
     fn apply_fec_packets(&self, packet: &[u8]) -> Result<Vec<Vec<u8>>, PipelineError> {
-        let fec = self.fec.lock().map_err(|_| PipelineError::LockError)?;
+        let mut fec = self.fec.lock().map_err(|_| PipelineError::LockError)?;
         Ok(fec.decode_packets(packet))
     }
 }

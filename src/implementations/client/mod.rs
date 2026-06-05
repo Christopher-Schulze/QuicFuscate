@@ -87,7 +87,7 @@ pub struct ClientSubsystems {
 
 /// FEC codec wrapper for the client.
 pub struct FecCodec {
-    inner: parking_lot::Mutex<crate::fec::AdaptiveFec>,
+    inner: crate::fec::AdaptiveFec,
     packet_id: std::sync::atomic::AtomicU64,
 }
 
@@ -96,21 +96,20 @@ impl FecCodec {
         let fec_config = crate::fec::FecConfig::from_engine_section(&config);
 
         Self {
-            inner: parking_lot::Mutex::new(crate::fec::AdaptiveFec::new(fec_config)),
+            inner: crate::fec::AdaptiveFec::new(fec_config),
             packet_id: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
-    pub fn encode_packets(&self, data: &[u8]) -> Vec<Vec<u8>> {
-        let mut fec = self.inner.lock();
-        let mem_pool = fec.memory_pool().clone();
+    pub fn encode_packets(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
+        let mem_pool = self.inner.memory_pool().clone();
         let id = self.packet_id.fetch_add(1, Ordering::Relaxed);
         let mut block = mem_pool.alloc();
         let len = data.len().min(block.len());
         block[..len].copy_from_slice(&data[..len]);
         let packet = crate::fec::FecPacket::new(id, Some(block), len, true, None, 0, mem_pool);
         let mut out = Vec::new();
-        for pkt in fec.on_send(packet) {
+        for pkt in self.inner.on_send(packet) {
             if let Some(data) = pkt.payload_slice() {
                 out.push(data.to_vec());
             }
@@ -118,14 +117,13 @@ impl FecCodec {
         out
     }
 
-    pub fn decode_packets(&self, data: &[u8]) -> Vec<Vec<u8>> {
-        let mut fec = self.inner.lock();
-        let mem_pool = fec.memory_pool().clone();
+    pub fn decode_packets(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
+        let mem_pool = self.inner.memory_pool().clone();
         let mut block = mem_pool.alloc();
         let len = data.len().min(block.len());
         block[..len].copy_from_slice(&data[..len]);
         let packet = crate::fec::FecPacket::new(0, Some(block), len, true, None, 0, mem_pool);
-        match fec.on_receive(packet) {
+        match self.inner.on_receive(packet) {
             Ok(pkts) => pkts
                 .into_iter()
                 .filter_map(|pkt| pkt.payload_slice().map(|data| data.to_vec()))
