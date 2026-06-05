@@ -1,4 +1,4 @@
-import "../../../../../apps/svelte-desktop/node_modules/@testing-library/jest-dom/vitest.js";
+import "@testing-library/jest-dom/vitest";
 import { beforeEach, vi } from "vitest";
 
 function ensurePortalStage(): void {

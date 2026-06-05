@@ -13,6 +13,10 @@ export default defineConfig({
     alias: {
       "@testing-library/svelte": resolve(__dirname, "node_modules/@testing-library/svelte"),
       "@testing-library/jest-dom": resolve(__dirname, "node_modules/@testing-library/jest-dom"),
+      "@testing-library/jest-dom/vitest": resolve(
+        __dirname,
+        "node_modules/@testing-library/jest-dom/vitest.js",
+      ),
     },
   },
   server: {

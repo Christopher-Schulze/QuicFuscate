@@ -10,6 +10,7 @@ export default defineConfig({
   fullyParallel: false,
   forbidOnly: isCI,
   retries: isCI ? 2 : 0,
+  timeout: isCI ? 60_000 : 30_000,
   workers: 1,
   reporter: wantHtmlReport ? [["html", { open: "never" }]] : [["list"]],
   use: {

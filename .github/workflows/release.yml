@@ -1,0 +1,59 @@
+name: Release Build
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ "v*" ]
+  workflow_dispatch:
+
+jobs:
+  linux-server-bundle:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@1.93.0
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.21"
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-linux-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Build admin web assets
+        run: |
+          bun install
+          bash scripts/build/build-web-admin.sh
+
+      - name: Create server bundle
+        run: |
+          bash scripts/build/build-server-bundle.sh \
+            --binary ./target/release/quicfuscate \
+            --assets ./assets/web-admin
+
+      - name: Upload server bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: quicfuscate-server-linux
+          path: scripts/out/build/
+          if-no-files-found: error
+
+      - name: Upload release binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: quicfuscate-linux-binary
+          path: target/release/quicfuscate

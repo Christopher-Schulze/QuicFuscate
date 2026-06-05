@@ -5,6 +5,7 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   frontend-checks:
@@ -16,6 +17,9 @@ jobs:
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.2.21"
+
+      - name: Install workspace dependencies
+        run: bun install
 
       - name: Install Svelte desktop dependencies
         shell: bash
@@ -53,17 +57,8 @@ jobs:
         with:
           bun-version: "1.2.21"
 
-      - name: Install Svelte admin dependencies
-        shell: bash
-        working-directory: apps/svelte-admin
-        run: |
-          bun install
-
-      - name: Install Svelte desktop dependencies
-        shell: bash
-        working-directory: apps/svelte-desktop
-        run: |
-          bun install
+      - name: Install workspace dependencies
+        run: bun install
 
       - name: Install Playwright browser for Svelte admin
         shell: bash
@@ -104,8 +99,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     env:
-      SCCACHE_GHA_ENABLED: "true"
-      RUSTC_WRAPPER: "sccache"
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -116,9 +110,6 @@ jobs:
         with:
           toolchain: 1.93.0
           components: clippy
-
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@v0.0.6
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -144,7 +135,7 @@ jobs:
       - name: Run tests
         shell: bash
         run: |
-          cargo test --workspace --all-targets
+          cargo test --workspace --all-targets --features rust-tests
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -181,8 +172,7 @@ jobs:
           - os: windows-latest
             features: "rust-tests"
     env:
-      SCCACHE_GHA_ENABLED: "true"
-      RUSTC_WRAPPER: "sccache"
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -190,9 +180,6 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@1.93.0
-
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@v0.0.6
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -215,8 +202,7 @@ jobs:
   linux-fastpath-gates:
     runs-on: ubuntu-latest
     env:
-      SCCACHE_GHA_ENABLED: "true"
-      RUSTC_WRAPPER: "sccache"
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -226,9 +212,6 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.93.0
-
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@v0.0.6
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -280,6 +263,9 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
 
+      - name: Link fuzz crate for cargo-fuzz
+        run: ln -sfn scripts/tests/fuzz fuzz
+
       - name: Fuzz packet_parsing
         working-directory: scripts/tests/fuzz
         run: cargo +nightly fuzz run packet_parsing -- -max_total_time=60 -runs=1000
@@ -319,8 +305,7 @@ jobs:
     needs: [build-test]
     if: github.event_name == 'pull_request'
     env:
-      SCCACHE_GHA_ENABLED: "true"
-      RUSTC_WRAPPER: "sccache"
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -328,9 +313,6 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@1.93.0
-
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@v0.0.6
 
       - name: Cache cargo registry + criterion baselines
         uses: actions/cache@v4
