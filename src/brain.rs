@@ -285,6 +285,8 @@ struct PolicyActuatorSnap {
     do_padding: bool,
     bias: u8,
     gran: u16,
+    prefer_masque_effective: bool,
+    stealth_policy: crate::transport::StealthRuntimePolicy,
 }
 
 impl StealthBrainState {
@@ -877,10 +879,9 @@ impl TransportObserver for StealthBrain {
             } else {
                 0u8
             };
-        // Cooldown 800ms to avoid flapping for the compatibility hint channel.
-        let (prefer_masque_effective, current_level) = {
-            let now = crate::time_source::now_instant();
+        let actuators = {
             let mut st = self.st.write();
+            let now = crate::time_source::now_instant();
             let can_toggle =
                 now.duration_since(st.last_masque_hint_change) > Duration::from_millis(800);
             let elapsed_level = now.duration_since(st.last_intelligent_level_change);
@@ -915,35 +916,30 @@ impl TransportObserver for StealthBrain {
                 st.last_masque_hint = prefer_masque_brain;
                 st.last_masque_hint_change = now;
             }
-            (st.last_masque_hint, effective_level)
-        };
-        crate::optimize::telemetry::MASQUE_HINT
-            .store(if prefer_masque_effective { 1 } else { 0 }, Ordering::Relaxed);
-        let mut stealth_policy = crate::stealth::StealthManager::derive_intelligent_runtime_policy(
-            crate::stealth::IntelligentStealthInputs {
-                level_hint: current_level,
-                ce_ratio_recent,
-                ack_us,
-                size_div,
-                iat_div,
-                reorder_ratio,
-                rtt_spike_weight,
-                signal_tos,
-                signal_other,
-                jitter_max_us: self.cfg.jitter_max_us,
-                pad_max_low: self.cfg.pad_max_low,
-                pad_max_high: self.cfg.pad_max_high,
-            },
-        );
+            let prefer_masque_effective = st.last_masque_hint;
 
-        let dither_pct = ((ts >> 7) % 21) as i64 - 10;
-        stealth_policy.timing_max_jitter_us = ((stealth_policy.timing_max_jitter_us as i64)
-            + ((stealth_policy.timing_max_jitter_us as i64 * dither_pct) / 100))
-            .max(0) as u32;
+            let mut stealth_policy =
+                crate::stealth::StealthManager::derive_intelligent_runtime_policy(
+                    crate::stealth::IntelligentStealthInputs {
+                        level_hint: effective_level,
+                        ce_ratio_recent,
+                        ack_us,
+                        size_div,
+                        iat_div,
+                        reorder_ratio,
+                        rtt_spike_weight,
+                        signal_tos,
+                        signal_other,
+                        jitter_max_us: self.cfg.jitter_max_us,
+                        pad_max_low: self.cfg.pad_max_low,
+                        pad_max_high: self.cfg.pad_max_high,
+                    },
+                );
+            let dither_pct = ((ts >> 7) % 21) as i64 - 10;
+            stealth_policy.timing_max_jitter_us = ((stealth_policy.timing_max_jitter_us as i64)
+                + ((stealth_policy.timing_max_jitter_us as i64 * dither_pct) / 100))
+                .max(0) as u32;
 
-        let actuators = {
-            let mut st = self.st.write();
-            let now = crate::time_source::now_instant();
             let mut thr_local = thr;
             if let Some(arm) = st.bandit_last_arm.take() {
                 let n = st.bandit_counts[arm];
@@ -1077,8 +1073,14 @@ impl TransportObserver for StealthBrain {
                 do_padding,
                 bias: stealth_policy.mimic_bias,
                 gran: stealth_policy.adaptive_granularity,
+                prefer_masque_effective,
+                stealth_policy,
             }
         };
+        crate::optimize::telemetry::MASQUE_HINT.store(
+            if actuators.prefer_masque_effective { 1 } else { 0 },
+            Ordering::Relaxed,
+        );
         let thr = actuators.thr;
         let do_ack = actuators.do_ack;
         let do_pacing = actuators.do_pacing;
@@ -1089,6 +1091,7 @@ impl TransportObserver for StealthBrain {
         let do_padding = actuators.do_padding;
         let bias = actuators.bias;
         let gran = actuators.gran;
+        let stealth_policy = actuators.stealth_policy;
 
         let intelligent_runtime = conn.intelligent_stealth_runtime_enabled();
         let permissions = conn.brain_runtime_permissions();
