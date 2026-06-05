@@ -769,6 +769,49 @@ mod tests {
             unprotect_and_decrypt(&crypto, &mut incoming, 0, 0).expect("decrypt with read window");
         assert_eq!(&incoming[aad_len..aad_len + pt_len], plaintext);
     }
+
+    #[test]
+    fn data_aead_batch_seal_open_via_crypto_context() {
+        use crate::crypto::aead::{AeadOpenItem, AeadSealItem};
+
+        let key = [0x7Eu8; 32];
+        let iv = [0x6Du8; 16];
+        let (seal, open) = select_data_aead(&key, &iv);
+        let mut crypto = CryptoContext::default();
+        crypto.seal_1rtt = Some(seal);
+        crypto.open_1rtt = Some(open);
+
+        let ad = b"pkt-batch-ad";
+        let pt = b"packet-batch-payload";
+        let mut bufs: Vec<Vec<u8>> = (0..4)
+            .map(|_| {
+                let mut b = vec![0u8; pt.len() + 16];
+                b[..pt.len()].copy_from_slice(pt);
+                b
+            })
+            .collect();
+        let mut seal_items: Vec<AeadSealItem<'_>> = bufs
+            .iter_mut()
+            .enumerate()
+            .map(|(i, buf)| AeadSealItem {
+                counter: i as u64 + 10,
+                ad,
+                buf: buf.as_mut_slice(),
+                plaintext_len: pt.len(),
+            })
+            .collect();
+        seal_data_aead_batch(&crypto, seal_items.as_mut_slice()).expect("batch seal");
+
+        let mut open_items: Vec<AeadOpenItem<'_>> = bufs
+            .iter_mut()
+            .enumerate()
+            .map(|(i, buf)| AeadOpenItem { counter: i as u64 + 10, ad, buf: buf.as_mut_slice() })
+            .collect();
+        open_data_aead_batch(&crypto, open_items.as_mut_slice()).expect("batch open");
+        for buf in &bufs {
+            assert_eq!(&buf[..pt.len()], pt);
+        }
+    }
 }
 
 /// Applies header protection to an outgoing packet (masks first byte and PN).
@@ -868,6 +911,34 @@ pub fn encrypt_and_protect(
     protect_header(crypto, buf, pn_off, pn_len, pkt_type)?;
 
     Ok(hdr_len + ciphertext_len)
+}
+
+/// Seal multiple 1-RTT/0-RTT payloads through the installed data-plane AEAD sealer.
+///
+/// Buffers must not alias. AEGIS backends reuse cipher state across the batch.
+pub fn seal_data_aead_batch(
+    crypto: &CryptoContext,
+    items: &mut [tls_aead::AeadSealItem<'_>],
+) -> Result<(), ConnectionError> {
+    let seal = crypto
+        .seal_1rtt
+        .as_deref()
+        .or(crypto.seal_0rtt.as_deref())
+        .ok_or_else(|| ConnectionError::TlsError("missing AEAD sealer for batch seal".into()))?;
+    seal.seal_batch(items)
+}
+
+/// Open multiple 1-RTT/0-RTT payloads through the installed data-plane AEAD opener.
+pub fn open_data_aead_batch(
+    crypto: &CryptoContext,
+    items: &mut [tls_aead::AeadOpenItem<'_>],
+) -> Result<(), ConnectionError> {
+    let open = crypto
+        .open_1rtt
+        .as_deref()
+        .or(crypto.open_0rtt.as_deref())
+        .ok_or_else(|| ConnectionError::TlsError("missing AEAD opener for batch open".into()))?;
+    open.open_batch(items)
 }
 
 /// Formats a Version Negotiation packet into `out`.

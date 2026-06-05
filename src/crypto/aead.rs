@@ -18,6 +18,28 @@ pub enum Level {
     /// 1-RTT (application data) encryption level.
     OneRTT,
 }
+/// One in-place AEAD seal operation participating in a batch.
+pub struct AeadSealItem<'a> {
+    /// QUIC packet number used for nonce derivation.
+    pub counter: u64,
+    /// Associated data (typically the protected header prefix).
+    pub ad: &'a [u8],
+    /// Payload buffer: first `plaintext_len` bytes are plaintext; 16-byte tag is written after.
+    pub buf: &'a mut [u8],
+    /// Plaintext length before the AEAD tag.
+    pub plaintext_len: usize,
+}
+
+/// One in-place AEAD open operation participating in a batch.
+pub struct AeadOpenItem<'a> {
+    /// QUIC packet number used for nonce derivation.
+    pub counter: u64,
+    /// Associated data (typically the protected header prefix).
+    pub ad: &'a [u8],
+    /// Ciphertext + tag buffer; decrypted plaintext is written in place.
+    pub buf: &'a mut [u8],
+}
+
 /// Trait for AEAD decryption (open) operations.
 pub trait AeadOpen {
     fn open_with_u64_counter(
@@ -28,7 +50,24 @@ pub trait AeadOpen {
     ) -> Result<usize, crate::error::ConnectionError> {
         Err(crate::error::ConnectionError::CryptoError("crypto failure".into()))
     }
+
+    /// Returns true when this implementation has a specialized batch open path.
+    fn supports_batch_open(&self) -> bool {
+        false
+    }
+
+    /// Open multiple packets. Default falls back to single-packet open.
+    fn open_batch(
+        &self,
+        items: &mut [AeadOpenItem<'_>],
+    ) -> Result<(), crate::error::ConnectionError> {
+        for item in items {
+            self.open_with_u64_counter(item.counter, item.ad, item.buf)?;
+        }
+        Ok(())
+    }
 }
+
 /// Trait for AEAD encryption (seal) operations.
 pub trait AeadSeal {
     fn seal_with_u64_counter(
@@ -40,6 +79,28 @@ pub trait AeadSeal {
         _extra_in: Option<&[u8]>,
     ) -> Result<usize, crate::error::ConnectionError> {
         Err(crate::error::ConnectionError::CryptoError("crypto failure".into()))
+    }
+
+    /// Returns true when this implementation has a specialized batch seal path.
+    fn supports_batch_seal(&self) -> bool {
+        false
+    }
+
+    /// Seal multiple packets. Default falls back to single-packet seal.
+    fn seal_batch(
+        &self,
+        items: &mut [AeadSealItem<'_>],
+    ) -> Result<(), crate::error::ConnectionError> {
+        for item in items {
+            self.seal_with_u64_counter(
+                item.counter,
+                item.ad,
+                item.buf,
+                item.plaintext_len,
+                None,
+            )?;
+        }
+        Ok(())
     }
 }
 

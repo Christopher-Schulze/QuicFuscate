@@ -3,7 +3,7 @@ use super::{
     DATA_AEAD_OVERRIDE_AEGIS_L, DATA_AEAD_OVERRIDE_AEGIS_X4, DATA_AEAD_OVERRIDE_AEGIS_X8,
     DATA_AEAD_OVERRIDE_AUTO,
 };
-use crate::crypto::aead::{AeadOpen, AeadSeal};
+use crate::crypto::aead::{AeadOpen, AeadOpenItem, AeadSeal, AeadSealItem};
 use crate::engine::{AeadPreference, CryptoConfig};
 use std::sync::Mutex;
 
@@ -91,6 +91,53 @@ fn data_aead_force_aegis_x4_alias_roundtrip() {
     let pt_len = open.open_with_u64_counter(7, ad, buf.as_mut_slice()).unwrap();
     assert_eq!(pt_len, pt.len());
     assert_eq!(&buf[..pt_len], pt);
+
+    super::set_data_aead_override_mode(DATA_AEAD_OVERRIDE_AUTO);
+}
+
+#[test]
+fn data_aead_x4_batch_seal_open_roundtrip() {
+    let _guard = DATA_AEAD_TEST_LOCK.lock().unwrap();
+    let cfg = CryptoConfig { aead_preference: AeadPreference::Auto, force_aead: "aegis-128x4".to_string() };
+    super::install_data_aead_config(&cfg);
+
+    let key = [0x5Au8; 32];
+    let iv = [0x6Bu8; 16];
+    let ad = b"transport-batch-ad";
+    let pt = b"batch-payload-12345";
+
+    let (seal, open) = super::select_data_aead(&key, &iv);
+    assert!(seal.supports_batch_seal());
+    assert!(open.supports_batch_open());
+
+    let mut bufs: Vec<Vec<u8>> = (0..8)
+        .map(|_| {
+            let mut b = vec![0u8; pt.len() + 16];
+            b[..pt.len()].copy_from_slice(pt);
+            b
+        })
+        .collect();
+    let mut seal_items: Vec<AeadSealItem<'_>> = bufs
+        .iter_mut()
+        .enumerate()
+        .map(|(i, buf)| AeadSealItem {
+            counter: i as u64 + 1,
+            ad,
+            buf: buf.as_mut_slice(),
+            plaintext_len: pt.len(),
+        })
+        .collect();
+    seal.seal_batch(seal_items.as_mut_slice()).unwrap();
+
+    let mut open_items: Vec<AeadOpenItem<'_>> = bufs
+        .iter_mut()
+        .enumerate()
+        .map(|(i, buf)| AeadOpenItem { counter: i as u64 + 1, ad, buf: buf.as_mut_slice() })
+        .collect();
+    open.open_batch(open_items.as_mut_slice()).unwrap();
+    for buf in &bufs {
+        assert_eq!(&buf[..pt.len()], pt);
+    }
 
     super::set_data_aead_override_mode(DATA_AEAD_OVERRIDE_AUTO);
 }

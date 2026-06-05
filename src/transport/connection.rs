@@ -1748,26 +1748,24 @@ impl Connection {
         pn_len: usize,
         mut off: usize,
     ) -> Result<usize, crate::error::ConnectionError> {
-        use crate::error::ConnectionError;
-
         let use_1rtt_seal = {
             let crypto_guard = self.crypto.read();
             crypto_guard.seal_1rtt.is_some()
         };
         let sealed_len = {
             let crypto_guard = self.crypto.read();
-            let seal = crypto_guard
-                .seal_1rtt
-                .as_deref()
-                .or(crypto_guard.seal_0rtt.as_deref())
-                .ok_or_else(|| {
-                    ConnectionError::TlsError("missing AEAD sealer for short-header packet".into())
-                })?;
             let ad_len = pn_off + pn_len;
             let (ad_slice, rest) = out.split_at_mut(ad_len);
             let pt_len = off.saturating_sub(ad_len);
-            seal.seal_with_u64_counter(pn, ad_slice, rest, pt_len, None)
-        }?;
+            let mut item = crate::crypto::aead::AeadSealItem {
+                counter: pn,
+                ad: ad_slice,
+                buf: rest,
+                plaintext_len: pt_len,
+            };
+            packet::seal_data_aead_batch(&crypto_guard, core::slice::from_mut(&mut item))?;
+            pt_len + 16
+        };
         let ad_len = pn_off + pn_len;
         off = ad_len + sealed_len;
         let mask = {
