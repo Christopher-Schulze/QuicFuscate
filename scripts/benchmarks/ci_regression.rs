@@ -372,6 +372,86 @@ fn bench_transpose(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// Connection 1-RTT send/recv loop (TODO-399)
+// ---------------------------------------------------------------------------
+fn bench_connection_1rtt_send_recv(c: &mut Criterion) {
+    use quicfuscate::error::ConnectionError;
+    use quicfuscate::transport::{bench_paired_1rtt_connections, BenchConnectionPair};
+
+    let mut group = c.benchmark_group("connection_1rtt_send_recv");
+    for payload_len in [256usize, 1024, 1400] {
+        let payload = vec![0x5Au8; payload_len];
+        group.throughput(Throughput::Bytes((payload_len * 2) as u64));
+        group.bench_function(format!("payload_{payload_len}B"), |b| {
+            b.iter(|| {
+                let BenchConnectionPair { mut client, mut server, recv_info } =
+                    bench_paired_1rtt_connections();
+                let mut wire = [0u8; 2048];
+                black_box(client.stream_send(0, black_box(&payload), false)).expect("stream_send");
+                let (sent, _) = black_box(client.send(&mut wire)).expect("send");
+                if sent == 0 {
+                    panic!("expected encrypted 1-RTT packet");
+                }
+                match black_box(server.recv(&mut wire[..sent], &recv_info)) {
+                    Ok(_) => {}
+                    Err(ConnectionError::Done) => {}
+                    Err(e) => panic!("recv failed: {e:?}"),
+                }
+            });
+        });
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// ACK sent-byte accounting under N in-flight PNs (TODO-400)
+// ---------------------------------------------------------------------------
+fn bench_ack_sent_byte_accounting(c: &mut Criterion) {
+    use quicfuscate::transport::{bench_paired_1rtt_connections, BenchConnectionPair};
+
+    let mut group = c.benchmark_group("ack_sent_byte_accounting");
+    for inflight in [32u64, 128, 512, 2048] {
+        group.throughput(Throughput::Elements(inflight));
+        group.bench_function(format!("{inflight}_inflight_ack_all"), |b| {
+            b.iter(|| {
+                let BenchConnectionPair { mut client, .. } = bench_paired_1rtt_connections();
+                black_box(client.bench_seed_sent_bytes_by_pn(inflight, 1200));
+                let ranges = [(0u64, inflight)];
+                black_box(client.bench_account_ack_ranges(black_box(&ranges)));
+            });
+        });
+        group.bench_function(format!("{inflight}_inflight_ack_half"), |b| {
+            b.iter(|| {
+                let half = inflight / 2;
+                let BenchConnectionPair { mut client, .. } = bench_paired_1rtt_connections();
+                black_box(client.bench_seed_sent_bytes_by_pn(inflight, 1200));
+                let ranges = [(0u64, half)];
+                black_box(client.bench_account_ack_ranges(black_box(&ranges)));
+            });
+        });
+    }
+
+    // Sparse ACK ranges (every 4th PN) to stress range iteration vs map size.
+    for inflight in [512u64, 2048] {
+        group.bench_function(format!("{inflight}_inflight_ack_sparse"), |b| {
+            b.iter(|| {
+                let BenchConnectionPair { mut client, .. } = bench_paired_1rtt_connections();
+                client.bench_seed_sent_bytes_by_pn(inflight, 1200);
+                let mut ranges = Vec::with_capacity((inflight / 4) as usize);
+                let mut start = 0u64;
+                while start < inflight {
+                    let end = (start + 1).min(inflight);
+                    ranges.push((start, end));
+                    start += 4;
+                }
+                black_box(client.bench_account_ack_ranges(black_box(&ranges)));
+            });
+        });
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
 // Group registration
 // ---------------------------------------------------------------------------
 criterion_group!(
@@ -390,6 +470,8 @@ criterion_group!(
     bench_popcnt,
     bench_rng_fill,
     bench_pkt_num_encode,
+    bench_connection_1rtt_send_recv,
+    bench_ack_sent_byte_accounting,
 );
 
 criterion_group!(

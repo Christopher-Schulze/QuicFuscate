@@ -38,6 +38,8 @@ pub use config::Config;
 #[cfg(feature = "stream_ring_buffer")]
 pub use connection::StreamRingBuffer;
 pub use connection::{Connection, PathEvent};
+#[cfg(feature = "benches")]
+pub use connection::{bench_paired_1rtt_connections, BenchConnectionPair};
 pub use pn::{cid, pnspace, rand, range_buf, ranges, varint};
 #[cfg(target_os = "linux")]
 use std::sync::atomic::Ordering;

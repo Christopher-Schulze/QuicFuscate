@@ -1392,51 +1392,7 @@ impl Connection {
                             }
                         }
                         Frame::Ack { ranges, .. } => {
-                            // Sum acked bytes based on the PN->byte map.
-                            let now = Instant::now();
-                            let mut acked_total = 0usize;
-                            let mut lost_total = 0usize;
-                            let largest_acked = ranges
-                                .iter()
-                                .filter_map(|(_, end)| end.checked_sub(1))
-                                .max()
-                                .unwrap_or(0);
-                            let packet_threshold = 3u64;
-                            for (start, end) in &ranges {
-                                let acked: Vec<(u64, usize)> = self
-                                    .sent_bytes_by_pn
-                                    .range(*start..*end)
-                                    .map(|(&pn, &sz)| (pn, sz))
-                                    .collect();
-                                for (pn, sz) in acked {
-                                    self.sent_bytes_by_pn.remove(&pn);
-                                    acked_total = acked_total.saturating_add(sz);
-                                }
-                            }
-                            if largest_acked >= packet_threshold {
-                                let loss_cutoff = largest_acked - packet_threshold;
-                                let lost: Vec<(u64, usize)> = self
-                                    .sent_bytes_by_pn
-                                    .range(..=loss_cutoff)
-                                    .map(|(&pn, &sz)| (pn, sz))
-                                    .collect();
-                                for (pn, sz) in lost {
-                                    self.sent_bytes_by_pn.remove(&pn);
-                                    self.recovery.on_loss_packet(pn, sz, now);
-                                    lost_total = lost_total.saturating_add(sz);
-                                    self.stats.lost = self.stats.lost.saturating_add(1);
-                                    self.stats.lost_bytes =
-                                        self.stats.lost_bytes.saturating_add(sz as u64);
-                                }
-                            }
-                            if acked_total > 0 {
-                                self.recovery.on_ack(acked_total, now);
-                                self.stats.acked_bytes =
-                                    self.stats.acked_bytes.saturating_add(acked_total as u64);
-                                self.cwnd = self.recovery.cwnd;
-                            } else if lost_total > 0 {
-                                self.cwnd = self.recovery.cwnd;
-                            }
+                            self.account_sent_bytes_for_ack_ranges(&ranges);
                         }
                         Frame::Crypto { offset, data } => {
                             let lvl = match pkt_ty {
@@ -3226,6 +3182,126 @@ impl Connection {
     #[cfg(any(test, feature = "rust-tests"))]
     pub fn available_dcids(&self) -> usize {
         0
+    }
+
+    /// Update recovery state from an ACK frame using the PN->byte sent map.
+    fn account_sent_bytes_for_ack_ranges(&mut self, ranges: &[(u64, u64)]) {
+        let now = Instant::now();
+        let mut acked_total = 0usize;
+        let mut lost_total = 0usize;
+        let largest_acked = ranges
+            .iter()
+            .filter_map(|(_, end)| end.checked_sub(1))
+            .max()
+            .unwrap_or(0);
+        let packet_threshold = 3u64;
+        for (start, end) in ranges {
+            let acked: Vec<(u64, usize)> = self
+                .sent_bytes_by_pn
+                .range(*start..*end)
+                .map(|(&pn, &sz)| (pn, sz))
+                .collect();
+            for (pn, sz) in acked {
+                self.sent_bytes_by_pn.remove(&pn);
+                acked_total = acked_total.saturating_add(sz);
+            }
+        }
+        if largest_acked >= packet_threshold {
+            let loss_cutoff = largest_acked - packet_threshold;
+            let lost: Vec<(u64, usize)> = self
+                .sent_bytes_by_pn
+                .range(..=loss_cutoff)
+                .map(|(&pn, &sz)| (pn, sz))
+                .collect();
+            for (pn, sz) in lost {
+                self.sent_bytes_by_pn.remove(&pn);
+                self.recovery.on_loss_packet(pn, sz, now);
+                lost_total = lost_total.saturating_add(sz);
+                self.stats.lost = self.stats.lost.saturating_add(1);
+                self.stats.lost_bytes = self.stats.lost_bytes.saturating_add(sz as u64);
+            }
+        }
+        if acked_total > 0 {
+            self.recovery.on_ack(acked_total, now);
+            self.stats.acked_bytes = self.stats.acked_bytes.saturating_add(acked_total as u64);
+            self.cwnd = self.recovery.cwnd;
+        } else if lost_total > 0 {
+            self.cwnd = self.recovery.cwnd;
+        }
+    }
+}
+
+#[cfg(feature = "benches")]
+/// Client/server transport pair with 1-RTT keys installed for criterion benches.
+pub struct BenchConnectionPair {
+    pub client: Connection,
+    pub server: Connection,
+    pub recv_info: RecvInfo,
+}
+
+#[cfg(feature = "benches")]
+/// Build a matched client/server pair ready for 1-RTT send/recv micro-benchmarks.
+pub fn bench_paired_1rtt_connections() -> BenchConnectionPair {
+    use std::net::{Ipv4Addr, SocketAddr};
+
+    use crate::crypto::aead::{Algorithm, KeyScheduleHooks, Level};
+
+    let local_client = SocketAddr::from((Ipv4Addr::LOCALHOST, 29101));
+    let peer_client = SocketAddr::from((Ipv4Addr::LOCALHOST, 29102));
+    let local_server = peer_client;
+    let peer_server = local_client;
+
+    let mut config = Config::new_with_version(PROTOCOL_VERSION).expect("bench config");
+    config.stealth_timing_enabled = false;
+    config.stealth_padding_enabled = false;
+    config.external_pacing = true;
+
+    let client_scid = [0x11u8; 8];
+    let server_scid = [0x22u8; 8];
+    let client_write = [0xAAu8; 32];
+    let server_write = [0xBBu8; 32];
+
+    let mut client = Connection::new_client(&client_scid, local_client, peer_client, config.clone());
+    let mut server = Connection::new_server(&server_scid, local_server, peer_server, config);
+
+    client.set_destination_cid(ConnectionId::from_vec(server_scid.to_vec()));
+    server.set_destination_cid(ConnectionId::from_vec(client_scid.to_vec()));
+
+    {
+        let mut crypto = client.crypto.write();
+        crypto.set_write_secret(Level::OneRTT, Algorithm::AES128_GCM, &client_write);
+        crypto.set_read_secret(Level::OneRTT, Algorithm::AES128_GCM, &server_write);
+    }
+    {
+        let mut crypto = server.crypto.write();
+        crypto.set_write_secret(Level::OneRTT, Algorithm::AES128_GCM, &server_write);
+        crypto.set_read_secret(Level::OneRTT, Algorithm::AES128_GCM, &client_write);
+    }
+
+    client.is_established = true;
+    server.is_established = true;
+    client.stats.recv = 1;
+    server.stats.recv = 1;
+    client.stats.sent = 1;
+    server.stats.sent = 1;
+
+    let recv_info = RecvInfo { from: peer_server, to: local_server, ecn: None };
+    BenchConnectionPair { client, server, recv_info }
+}
+
+#[cfg(feature = "benches")]
+impl Connection {
+    /// Seed the sent-byte map for ACK accounting benchmarks.
+    pub fn bench_seed_sent_bytes_by_pn(&mut self, count: u64, bytes_per_pn: usize) {
+        self.sent_bytes_by_pn.clear();
+        for pn in 0..count {
+            self.sent_bytes_by_pn.insert(pn, bytes_per_pn);
+        }
+    }
+
+    /// Run ACK sent-byte accounting (same logic as inbound ACK frame handling).
+    pub fn bench_account_ack_ranges(&mut self, ranges: &[(u64, u64)]) {
+        self.account_sent_bytes_for_ack_ranges(ranges);
     }
 }
 
