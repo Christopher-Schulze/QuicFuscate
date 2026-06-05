@@ -4,7 +4,7 @@ use super::{
     TransportObserver, INITIAL_WINDOW, MAX_STREAM_SIZE, MIN_CLIENT_INITIAL_LEN, PROTOCOL_VERSION,
 };
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -216,7 +216,7 @@ pub struct Connection {
     fec_cb_sent_bytes: Arc<std::sync::atomic::AtomicU64>,
     fec_cb_lost_bytes: Arc<std::sync::atomic::AtomicU64>,
     // Sent packet accounting: PN -> bytes (Application epoch)
-    sent_bytes_by_pn: std::collections::HashMap<u64, usize>,
+    sent_bytes_by_pn: BTreeMap<u64, usize>,
     // Stealth timing: next eligible send time (if timing obfuscation enabled)
     next_send_at: Option<Instant>,
     // Whether Brain may actively steer stealth runtime actuators for this connection.
@@ -289,6 +289,19 @@ impl StreamRingBuffer {
     fn is_empty(&self) -> bool {
         self.size == 0
     }
+}
+
+#[cfg(all(test, feature = "stream_ring_buffer"))]
+#[test]
+fn stream_ring_buffer_roundtrip() {
+    let mut ring = StreamRingBuffer::new();
+    let payload: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
+    let written = ring.write(&payload);
+    assert_eq!(written, payload.len());
+    let mut out = vec![0u8; payload.len()];
+    let read = ring.read(&mut out);
+    assert_eq!(read, payload.len());
+    assert_eq!(out, payload);
 }
 
 impl Connection {
@@ -384,7 +397,7 @@ impl Connection {
             fec_cb_lost_packets: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             fec_cb_sent_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             fec_cb_lost_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            sent_bytes_by_pn: HashMap::new(),
+            sent_bytes_by_pn: BTreeMap::new(),
             next_send_at: None,
             intelligent_stealth_runtime: false,
             brain_runtime_permissions: crate::transport::BrainRuntimePermissions::default(),
@@ -1382,33 +1395,39 @@ impl Connection {
                             // Sum acked bytes based on the PN->byte map.
                             let now = Instant::now();
                             let mut acked_total = 0usize;
-                            let mut acked_remove = Vec::new();
-                            let mut lost_remove = Vec::new();
+                            let mut lost_total = 0usize;
                             let largest_acked = ranges
                                 .iter()
                                 .filter_map(|(_, end)| end.checked_sub(1))
                                 .max()
                                 .unwrap_or(0);
                             let packet_threshold = 3u64;
-                            for (&pn, &sz) in self.sent_bytes_by_pn.iter() {
-                                if ranges.iter().any(|(s, e)| pn >= *s && pn < *e) {
+                            for (start, end) in &ranges {
+                                let acked: Vec<(u64, usize)> = self
+                                    .sent_bytes_by_pn
+                                    .range(*start..*end)
+                                    .map(|(&pn, &sz)| (pn, sz))
+                                    .collect();
+                                for (pn, sz) in acked {
+                                    self.sent_bytes_by_pn.remove(&pn);
                                     acked_total = acked_total.saturating_add(sz);
-                                    acked_remove.push(pn);
-                                } else if pn.saturating_add(packet_threshold) <= largest_acked {
-                                    lost_remove.push((pn, sz));
                                 }
                             }
-                            for pn in acked_remove {
-                                self.sent_bytes_by_pn.remove(&pn);
-                            }
-                            let mut lost_total = 0usize;
-                            for (pn, sz) in lost_remove {
-                                self.sent_bytes_by_pn.remove(&pn);
-                                self.recovery.on_loss_packet(pn, sz, now);
-                                lost_total = lost_total.saturating_add(sz);
-                                self.stats.lost = self.stats.lost.saturating_add(1);
-                                self.stats.lost_bytes =
-                                    self.stats.lost_bytes.saturating_add(sz as u64);
+                            if largest_acked >= packet_threshold {
+                                let loss_cutoff = largest_acked - packet_threshold;
+                                let lost: Vec<(u64, usize)> = self
+                                    .sent_bytes_by_pn
+                                    .range(..=loss_cutoff)
+                                    .map(|(&pn, &sz)| (pn, sz))
+                                    .collect();
+                                for (pn, sz) in lost {
+                                    self.sent_bytes_by_pn.remove(&pn);
+                                    self.recovery.on_loss_packet(pn, sz, now);
+                                    lost_total = lost_total.saturating_add(sz);
+                                    self.stats.lost = self.stats.lost.saturating_add(1);
+                                    self.stats.lost_bytes =
+                                        self.stats.lost_bytes.saturating_add(sz as u64);
+                                }
                             }
                             if acked_total > 0 {
                                 self.recovery.on_ack(acked_total, now);
