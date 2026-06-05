@@ -452,6 +452,40 @@ fn bench_ack_sent_byte_accounting(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// Stealth on vs off on the same 1-RTT workload (TODO-401)
+// ---------------------------------------------------------------------------
+fn bench_connection_1rtt_stealth_compare(c: &mut Criterion) {
+    use quicfuscate::error::ConnectionError;
+    use quicfuscate::transport::{
+        bench_paired_1rtt_connections_stealth, BenchConnectionPair,
+    };
+
+    let payload = vec![0x5Au8; 1024];
+    let mut group = c.benchmark_group("connection_1rtt_stealth_compare");
+    group.throughput(Throughput::Bytes((payload.len() * 2) as u64));
+    for (label, stealth_on) in [("stealth_off", false), ("stealth_on", true)] {
+        group.bench_function(label, |b| {
+            b.iter(|| {
+                let BenchConnectionPair { mut client, mut server, recv_info } =
+                    bench_paired_1rtt_connections_stealth(stealth_on);
+                let mut wire = [0u8; 2048];
+                black_box(client.stream_send(0, black_box(&payload), false)).expect("stream_send");
+                let (sent, _) = black_box(client.send(&mut wire)).expect("send");
+                if sent == 0 {
+                    panic!("expected encrypted 1-RTT packet");
+                }
+                match black_box(server.recv(&mut wire[..sent], &recv_info)) {
+                    Ok(_) => {}
+                    Err(ConnectionError::Done) => {}
+                    Err(e) => panic!("recv failed: {e:?}"),
+                }
+            });
+        });
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
 // Group registration
 // ---------------------------------------------------------------------------
 criterion_group!(
@@ -472,6 +506,7 @@ criterion_group!(
     bench_pkt_num_encode,
     bench_connection_1rtt_send_recv,
     bench_ack_sent_byte_accounting,
+    bench_connection_1rtt_stealth_compare,
 );
 
 criterion_group!(
