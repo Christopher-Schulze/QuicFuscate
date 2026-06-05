@@ -1122,50 +1122,9 @@ impl MorusAead {
         ad: &[u8],
         nonce: &[u8; 16],
     ) -> (Vec<u8>, [u8; 16]) {
-        // Runtime dispatch: select best available SIMD backend once, then reuse.
-        match morus_backend() {
-            #[cfg(target_arch = "x86_64")]
-            MorusBackend::Sse42 => {
-                // SAFETY:
-                // - `morus_backend()` selected `Sse42` only after runtime CPU
-                //   feature detection confirmed that path
-                // - the helper consumes borrowed slices and returns owned output
-                if let Some(res) = unsafe { self.encrypt_morus1280_sse42(plaintext, ad, nonce) } {
-                    return res;
-                }
-            }
-            #[cfg(target_arch = "x86_64")]
-            MorusBackend::Sse41 => {
-                if let Some(res) = self.encrypt_morus1280_sse41(plaintext, ad, nonce) {
-                    return res;
-                }
-            }
-            #[cfg(target_arch = "x86_64")]
-            MorusBackend::Ssse3 => {
-                if let Some(res) = self.encrypt_morus1280_ssse3(plaintext, ad, nonce) {
-                    return res;
-                }
-            }
-            #[cfg(target_arch = "x86_64")]
-            MorusBackend::Sse2 => {
-                // SAFETY:
-                // - `morus_backend()` selected `Sse2` only after runtime CPU
-                //   feature detection confirmed that path
-                // - all slice ownership remains with this wrapper
-                if let Some(res) = unsafe { self.encrypt_morus1280_sse2(plaintext, ad, nonce) } {
-                    return res;
-                }
-            }
-            #[cfg(target_arch = "aarch64")]
-            MorusBackend::Neon => {
-                if let Some(res) = self.encrypt_morus1280_neon(plaintext, ad, nonce) {
-                    return res;
-                }
-            }
-            MorusBackend::Scalar => {}
-        }
-        // Fallback: scalar
-        self.encrypt_native(plaintext, ad, nonce)
+        let mut out = plaintext.to_vec();
+        let tag = self.encrypt_in_place_optimized(&mut out, ad, nonce);
+        (out, tag)
     }
 
     fn decrypt_optimized(
@@ -1175,94 +1134,131 @@ impl MorusAead {
         ad: &[u8],
         nonce: &[u8; 16],
     ) -> Result<Vec<u8>, ()> {
-        // Runtime dispatch: select best available SIMD backend once, then reuse.
+        let mut out = ciphertext.to_vec();
+        self.decrypt_in_place_optimized(&mut out, tag, ad, nonce).map_err(|_| ())?;
+        Ok(out)
+    }
+
+    fn encrypt_in_place_optimized(
+        &self,
+        buffer: &mut [u8],
+        ad: &[u8],
+        nonce: &[u8; 16],
+    ) -> [u8; 16] {
         match morus_backend() {
             #[cfg(target_arch = "x86_64")]
             MorusBackend::Sse42 => {
-                // SAFETY:
-                // - `morus_backend()` selected `Sse42` only after runtime CPU
-                //   feature detection confirmed that path
-                // - the helper only reads the borrowed inputs and returns owned output
-                if let Some(res) =
-                    unsafe { self.decrypt_morus1280_sse42(ciphertext, tag, ad, nonce) }
+                if let Some(tag) =
+                    unsafe { self.encrypt_morus1280_sse42_inplace(buffer, ad, nonce) }
                 {
-                    return res;
+                    return tag;
                 }
             }
             #[cfg(target_arch = "x86_64")]
             MorusBackend::Sse41 => {
-                if let Some(res) = self.decrypt_morus1280_sse41(ciphertext, tag, ad, nonce) {
-                    return res;
+                if let Some(tag) = self.encrypt_morus1280_sse41_inplace(buffer, ad, nonce) {
+                    return tag;
                 }
             }
             #[cfg(target_arch = "x86_64")]
             MorusBackend::Ssse3 => {
-                if let Some(res) = self.decrypt_morus1280_ssse3(ciphertext, tag, ad, nonce) {
-                    return res;
+                if let Some(tag) = self.encrypt_morus1280_ssse3_inplace(buffer, ad, nonce) {
+                    return tag;
                 }
             }
             #[cfg(target_arch = "x86_64")]
             MorusBackend::Sse2 => {
-                // SAFETY:
-                // - `morus_backend()` selected `Sse2` only after runtime CPU
-                //   feature detection confirmed that path
-                // - the wrapper keeps all input ownership local to this call
-                if let Some(res) =
-                    unsafe { self.decrypt_morus1280_sse2(ciphertext, tag, ad, nonce) }
+                if let Some(tag) = unsafe { self.encrypt_morus1280_sse2_inplace(buffer, ad, nonce) }
                 {
-                    return res;
+                    return tag;
                 }
             }
             #[cfg(target_arch = "aarch64")]
             MorusBackend::Neon => {
-                if let Some(res) = self.decrypt_morus1280_neon(ciphertext, tag, ad, nonce) {
-                    return res;
+                if let Some(tag) = self.encrypt_morus1280_neon_inplace(buffer, ad, nonce) {
+                    return tag;
                 }
             }
             MorusBackend::Scalar => {}
         }
-        // Fallback: scalar
-        self.decrypt_native(ciphertext, tag, ad, nonce)
+        self.encrypt_in_place(buffer, ad, nonce)
+    }
+
+    fn decrypt_in_place_optimized(
+        &self,
+        buffer: &mut [u8],
+        tag: &[u8; 16],
+        ad: &[u8],
+        nonce: &[u8; 16],
+    ) -> Result<(), AeadError> {
+        match morus_backend() {
+            #[cfg(target_arch = "x86_64")]
+            MorusBackend::Sse42 => {
+                if let Some(res) =
+                    unsafe { self.decrypt_morus1280_sse42_inplace(buffer, tag, ad, nonce) }
+                {
+                    return res.map_err(|_| AeadError::TagMismatch);
+                }
+            }
+            #[cfg(target_arch = "x86_64")]
+            MorusBackend::Sse41 => {
+                if let Some(res) = self.decrypt_morus1280_sse41_inplace(buffer, tag, ad, nonce) {
+                    return res.map_err(|_| AeadError::TagMismatch);
+                }
+            }
+            #[cfg(target_arch = "x86_64")]
+            MorusBackend::Ssse3 => {
+                if let Some(res) = self.decrypt_morus1280_ssse3_inplace(buffer, tag, ad, nonce) {
+                    return res.map_err(|_| AeadError::TagMismatch);
+                }
+            }
+            #[cfg(target_arch = "x86_64")]
+            MorusBackend::Sse2 => {
+                if let Some(res) =
+                    unsafe { self.decrypt_morus1280_sse2_inplace(buffer, tag, ad, nonce) }
+                {
+                    return res.map_err(|_| AeadError::TagMismatch);
+                }
+            }
+            #[cfg(target_arch = "aarch64")]
+            MorusBackend::Neon => {
+                if let Some(res) = self.decrypt_morus1280_neon_inplace(buffer, tag, ad, nonce) {
+                    return res.map_err(|_| AeadError::TagMismatch);
+                }
+            }
+            MorusBackend::Scalar => {}
+        }
+        self.decrypt_in_place(buffer, tag, ad, nonce)
     }
 
     // SSSE3-boosted MORUS-1280-128 (vectorized XOR/load/store with byte-align shuffles)
     #[cfg(target_arch = "x86_64")]
-    fn encrypt_morus1280_ssse3(
+    fn encrypt_morus1280_ssse3_inplace(
         &self,
-        plaintext: &[u8],
+        buffer: &mut [u8],
         ad: &[u8],
         nonce: &[u8; 16],
-    ) -> Option<(Vec<u8>, [u8; 16])> {
-        // SAFETY:
-        // - this wrapper is only reachable through runtime backend selection
-        //   that has already chosen the SSSE3 path
-        // - the inner function only operates on borrowed slices and owned output
-        unsafe { Some(self.encrypt_morus1280_ssse3_inner(plaintext, ad, nonce)) }
+    ) -> Option<[u8; 16]> {
+        unsafe { Some(self.encrypt_morus1280_ssse3_inner(buffer, ad, nonce)) }
     }
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "ssse3")]
-    // SAFETY: target_feature gate ensures SSSE3. Caller verified CPU support via
-    // runtime backend selection. `plaintext`, `ad`, `nonce` are borrowed slices;
-    // output is an owned Vec. Internal SIMD state ops use stack-owned arrays.
     unsafe fn encrypt_morus1280_ssse3_inner(
         &self,
-        plaintext: &[u8],
+        buffer: &mut [u8],
         ad: &[u8],
         nonce: &[u8; 16],
-    ) -> (Vec<u8>, [u8; 16]) {
+    ) -> [u8; 16] {
         crate::optimize::telemetry::MORUS1280_SSSE3_OPS.inc();
         let mut state = Morus1280State::init(&self.key, nonce);
         state.process_ad(ad);
 
-        let mut out = plaintext.to_vec();
         {
-            let mut chunks = out.chunks_exact_mut(32);
+            let mut chunks = buffer.chunks_exact_mut(32);
             for chunk in &mut chunks {
                 let block: &mut [u8; 32] = chunk.try_into().unwrap();
                 let ks = state.keystream_block();
-                // SAFETY: inside target_feature(ssse3) fn; block is &mut [u8; 32]
-                // from chunks_exact_mut, ks is stack-owned [u64; 4].
                 let plain_words =
                     unsafe { Morus1280State::xor_keystream_block_encrypt_sse(block, &ks) };
                 state.update_simd_ssse3(plain_words);
@@ -1276,50 +1272,38 @@ impl MorusAead {
             }
         }
 
-        let tag = state.finalize(ad.len(), plaintext.len());
-        (out, tag)
+        state.finalize(ad.len(), buffer.len())
     }
 
-    // SSSE3 dual-lane decrypt matching encrypt_morus1280_ssse3
     #[cfg(target_arch = "x86_64")]
-    fn decrypt_morus1280_ssse3(
+    fn decrypt_morus1280_ssse3_inplace(
         &self,
-        ciphertext: &[u8],
+        buffer: &mut [u8],
         tag: &[u8; 16],
         ad: &[u8],
         nonce: &[u8; 16],
-    ) -> Option<Result<Vec<u8>, ()>> {
-        // SAFETY:
-        // - this wrapper is only reachable through runtime backend selection
-        //   that has already chosen the SSSE3 path
-        // - borrowed inputs stay local and the inner function returns owned output
-        unsafe { Some(self.decrypt_morus1280_ssse3_inner(ciphertext, tag, ad, nonce)) }
+    ) -> Option<Result<(), ()>> {
+        unsafe { Some(self.decrypt_morus1280_ssse3_inner(buffer, tag, ad, nonce)) }
     }
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "ssse3")]
-    // SAFETY: target_feature gate ensures SSSE3. Caller verified CPU support via
-    // runtime backend selection. `ciphertext`, `tag`, `ad`, `nonce` are borrowed
-    // slices; output is an owned Vec. Tag comparison uses constant-time equality.
     unsafe fn decrypt_morus1280_ssse3_inner(
         &self,
-        ciphertext: &[u8],
+        buffer: &mut [u8],
         tag: &[u8; 16],
         ad: &[u8],
         nonce: &[u8; 16],
-    ) -> Result<Vec<u8>, ()> {
+    ) -> Result<(), ()> {
         crate::optimize::telemetry::MORUS1280_SSSE3_OPS.inc();
         let mut state = Morus1280State::init(&self.key, nonce);
         state.process_ad(ad);
 
-        let mut out = ciphertext.to_vec();
         {
-            let mut chunks = out.chunks_exact_mut(32);
+            let mut chunks = buffer.chunks_exact_mut(32);
             for chunk in &mut chunks {
                 let block: &mut [u8; 32] = chunk.try_into().unwrap();
                 let ks = state.keystream_block();
-                // SAFETY: inside target_feature(ssse3) fn; block is &mut [u8; 32]
-                // from chunks_exact_mut, ks is stack-owned [u64; 4].
                 let plain_words =
                     unsafe { Morus1280State::xor_keystream_block_decrypt_sse(block, &ks) };
                 state.update_simd_ssse3(plain_words);
@@ -1333,44 +1317,38 @@ impl MorusAead {
             }
         }
 
-        let computed_tag = state.finalize(ad.len(), ciphertext.len());
+        let computed_tag = state.finalize(ad.len(), buffer.len());
         if super::subtle_ct_eq(&computed_tag, tag) {
-            Ok(out)
+            Ok(())
         } else {
             Err(())
         }
     }
 
     #[cfg(target_arch = "x86_64")]
-    fn encrypt_morus1280_sse41(
+    fn encrypt_morus1280_sse41_inplace(
         &self,
-        plaintext: &[u8],
+        buffer: &mut [u8],
         ad: &[u8],
         nonce: &[u8; 16],
-    ) -> Option<(Vec<u8>, [u8; 16])> {
+    ) -> Option<[u8; 16]> {
         crate::optimize::telemetry::MORUS1280_SSE41_OPS.inc();
-        // SAFETY:
-        // - runtime backend selection already chose the SSE4.1 path
-        // - this boundary forwards only borrowed inputs and returns owned output
-        unsafe { Some(self.encrypt_morus1280_sse41_inner(plaintext, ad, nonce)) }
+        unsafe { Some(self.encrypt_morus1280_sse41_inner(buffer, ad, nonce)) }
     }
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "sse4.1")]
-    // SAFETY: target_feature gate ensures SSE4.1. Caller verified CPU support.
-    // All data is borrowed slices or stack-owned; no raw pointer escapes.
     unsafe fn encrypt_morus1280_sse41_inner(
         &self,
-        plaintext: &[u8],
+        buffer: &mut [u8],
         ad: &[u8],
         nonce: &[u8; 16],
-    ) -> (Vec<u8>, [u8; 16]) {
+    ) -> [u8; 16] {
         let mut state = Morus1280State::init(&self.key, nonce);
         state.process_ad(ad);
 
-        let mut out = plaintext.to_vec();
         {
-            let mut chunks = out.chunks_exact_mut(32);
+            let mut chunks = buffer.chunks_exact_mut(32);
             for chunk in &mut chunks {
                 let block: &mut [u8; 32] = chunk.try_into().unwrap();
                 let ks = state.keystream_block();
@@ -1386,42 +1364,35 @@ impl MorusAead {
             }
         }
 
-        let tag = state.finalize(ad.len(), plaintext.len());
-        (out, tag)
+        state.finalize(ad.len(), buffer.len())
     }
 
     #[cfg(target_arch = "x86_64")]
-    fn decrypt_morus1280_sse41(
+    fn decrypt_morus1280_sse41_inplace(
         &self,
-        ciphertext: &[u8],
+        buffer: &mut [u8],
         tag: &[u8; 16],
         ad: &[u8],
         nonce: &[u8; 16],
-    ) -> Option<Result<Vec<u8>, ()>> {
+    ) -> Option<Result<(), ()>> {
         crate::optimize::telemetry::MORUS1280_SSE41_OPS.inc();
-        // SAFETY:
-        // - runtime backend selection already chose the SSE4.1 path
-        // - this wrapper preserves ownership/lifetime boundaries around the inner SIMD path
-        unsafe { Some(self.decrypt_morus1280_sse41_inner(ciphertext, tag, ad, nonce)) }
+        unsafe { Some(self.decrypt_morus1280_sse41_inner(buffer, tag, ad, nonce)) }
     }
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "sse4.1")]
-    // SAFETY: target_feature gate ensures SSE4.1. Caller verified CPU support.
-    // Tag comparison uses constant-time equality. No raw pointer escapes.
     unsafe fn decrypt_morus1280_sse41_inner(
         &self,
-        ciphertext: &[u8],
+        buffer: &mut [u8],
         tag: &[u8; 16],
         ad: &[u8],
         nonce: &[u8; 16],
-    ) -> Result<Vec<u8>, ()> {
+    ) -> Result<(), ()> {
         let mut state = Morus1280State::init(&self.key, nonce);
         state.process_ad(ad);
 
-        let mut out = ciphertext.to_vec();
         {
-            let mut chunks = out.chunks_exact_mut(32);
+            let mut chunks = buffer.chunks_exact_mut(32);
             for chunk in &mut chunks {
                 let block: &mut [u8; 32] = chunk.try_into().unwrap();
                 let ks = state.keystream_block();
@@ -1437,48 +1408,38 @@ impl MorusAead {
             }
         }
 
-        let computed_tag = state.finalize(ad.len(), ciphertext.len());
+        let computed_tag = state.finalize(ad.len(), buffer.len());
         if super::subtle_ct_eq(&computed_tag, tag) {
-            Ok(out)
+            Ok(())
         } else {
             Err(())
         }
     }
 
-    // SSE4.2 optimized MORUS-1280-128 encrypt
     #[cfg(target_arch = "x86_64")]
-    // SAFETY: caller must ensure SSE4.2 is available (verified by runtime backend
-    // selection in encrypt_optimized). Delegates to encrypt_morus1280_sse42_inner.
-    unsafe fn encrypt_morus1280_sse42(
+    unsafe fn encrypt_morus1280_sse42_inplace(
         &self,
-        plaintext: &[u8],
+        buffer: &mut [u8],
         ad: &[u8],
         nonce: &[u8; 16],
-    ) -> Option<(Vec<u8>, [u8; 16])> {
+    ) -> Option<[u8; 16]> {
         crate::optimize::telemetry::MORUS1280_SSE42_OPS.inc();
-        // SAFETY:
-        // - runtime backend selection already chose the SSE4.2 path before
-        //   this wrapper is called
-        // - borrowed inputs stay confined to this call boundary
-        unsafe { Some(self.encrypt_morus1280_sse42_inner(plaintext, ad, nonce)) }
+        Some(self.encrypt_morus1280_sse42_inner(buffer, ad, nonce))
     }
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "sse4.2")]
-    // SAFETY: target_feature gate ensures SSE4.2. All data is borrowed slices or
-    // stack-owned; SIMD state operations stay within [[u64;4];5] bounds.
     unsafe fn encrypt_morus1280_sse42_inner(
         &self,
-        plaintext: &[u8],
+        buffer: &mut [u8],
         ad: &[u8],
         nonce: &[u8; 16],
-    ) -> (Vec<u8>, [u8; 16]) {
+    ) -> [u8; 16] {
         let mut state = Morus1280State::init(&self.key, nonce);
         state.process_ad(ad);
 
-        let mut out = plaintext.to_vec();
         {
-            let mut chunks = out.chunks_exact_mut(32);
+            let mut chunks = buffer.chunks_exact_mut(32);
             for chunk in &mut chunks {
                 let block: &mut [u8; 32] = chunk.try_into().unwrap();
                 let ks = state.keystream_block();
@@ -1494,46 +1455,35 @@ impl MorusAead {
             }
         }
 
-        let tag = state.finalize(ad.len(), plaintext.len());
-        (out, tag)
+        state.finalize(ad.len(), buffer.len())
     }
 
-    // SSE4.2 optimized MORUS-1280-128 decrypt
     #[cfg(target_arch = "x86_64")]
-    // SAFETY: caller must ensure SSE4.2 is available (verified by runtime backend
-    // selection in decrypt_optimized). Delegates to decrypt_morus1280_sse42_inner.
-    unsafe fn decrypt_morus1280_sse42(
+    unsafe fn decrypt_morus1280_sse42_inplace(
         &self,
-        ciphertext: &[u8],
+        buffer: &mut [u8],
         tag: &[u8; 16],
         ad: &[u8],
         nonce: &[u8; 16],
-    ) -> Option<Result<Vec<u8>, ()>> {
+    ) -> Option<Result<(), ()>> {
         crate::optimize::telemetry::MORUS1280_SSE42_OPS.inc();
-        // SAFETY:
-        // - runtime backend selection already chose the SSE4.2 path before
-        //   this wrapper is called
-        // - borrowed inputs stay local and no raw-pointer ownership escapes
-        unsafe { Some(self.decrypt_morus1280_sse42_inner(ciphertext, tag, ad, nonce)) }
+        Some(self.decrypt_morus1280_sse42_inner(buffer, tag, ad, nonce))
     }
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "sse4.2")]
-    // SAFETY: target_feature gate ensures SSE4.2. Tag comparison uses
-    // constant-time equality. All data is borrowed or stack-owned.
     unsafe fn decrypt_morus1280_sse42_inner(
         &self,
-        ciphertext: &[u8],
+        buffer: &mut [u8],
         tag: &[u8; 16],
         ad: &[u8],
         nonce: &[u8; 16],
-    ) -> Result<Vec<u8>, ()> {
+    ) -> Result<(), ()> {
         let mut state = Morus1280State::init(&self.key, nonce);
         state.process_ad(ad);
 
-        let mut out = ciphertext.to_vec();
         {
-            let mut chunks = out.chunks_exact_mut(32);
+            let mut chunks = buffer.chunks_exact_mut(32);
             for chunk in &mut chunks {
                 let block: &mut [u8; 32] = chunk.try_into().unwrap();
                 let ks = state.keystream_block();
@@ -1549,32 +1499,28 @@ impl MorusAead {
             }
         }
 
-        let computed_tag = state.finalize(ad.len(), ciphertext.len());
+        let computed_tag = state.finalize(ad.len(), buffer.len());
         if super::subtle_ct_eq(&computed_tag, tag) {
-            Ok(out)
+            Ok(())
         } else {
             Err(())
         }
     }
 
-    // SSE2 dual-lane (x2) fallback for legacy CPUs without SSSE3
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "sse2")]
-    // SAFETY: target_feature gate ensures SSE2 (baseline x86_64). All data is
-    // borrowed slices or stack-owned; SIMD state operations use aligned arrays.
-    unsafe fn encrypt_morus1280_sse2(
+    unsafe fn encrypt_morus1280_sse2_inplace(
         &self,
-        plaintext: &[u8],
+        buffer: &mut [u8],
         ad: &[u8],
         nonce: &[u8; 16],
-    ) -> Option<(Vec<u8>, [u8; 16])> {
+    ) -> Option<[u8; 16]> {
         crate::optimize::telemetry::MORUS1280_SSE2_OPS.inc();
         let mut state = Morus1280State::init(&self.key, nonce);
         state.process_ad(ad);
 
-        let mut out = plaintext.to_vec();
         {
-            let mut chunks = out.chunks_exact_mut(32);
+            let mut chunks = buffer.chunks_exact_mut(32);
             for chunk in &mut chunks {
                 let block: &mut [u8; 32] = chunk.try_into().unwrap();
                 let ks = state.keystream_block();
@@ -1590,29 +1536,24 @@ impl MorusAead {
             }
         }
 
-        let tag = state.finalize(ad.len(), plaintext.len());
-        Some((out, tag))
+        Some(state.finalize(ad.len(), buffer.len()))
     }
 
-    // SSE2 dual-lane decrypt fallback
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "sse2")]
-    // SAFETY: target_feature gate ensures SSE2. Tag comparison uses constant-time
-    // equality. All data is borrowed slices or stack-owned arrays.
-    unsafe fn decrypt_morus1280_sse2(
+    unsafe fn decrypt_morus1280_sse2_inplace(
         &self,
-        ciphertext: &[u8],
+        buffer: &mut [u8],
         tag: &[u8; 16],
         ad: &[u8],
         nonce: &[u8; 16],
-    ) -> Option<Result<Vec<u8>, ()>> {
+    ) -> Option<Result<(), ()>> {
         crate::optimize::telemetry::MORUS1280_SSE2_OPS.inc();
         let mut state = Morus1280State::init(&self.key, nonce);
         state.process_ad(ad);
 
-        let mut out = ciphertext.to_vec();
         {
-            let mut chunks = out.chunks_exact_mut(32);
+            let mut chunks = buffer.chunks_exact_mut(32);
             for chunk in &mut chunks {
                 let block: &mut [u8; 32] = chunk.try_into().unwrap();
                 let ks = state.keystream_block();
@@ -1628,36 +1569,32 @@ impl MorusAead {
             }
         }
 
-        let computed_tag = state.finalize(ad.len(), ciphertext.len());
+        let computed_tag = state.finalize(ad.len(), buffer.len());
         if super::subtle_ct_eq(&computed_tag, tag) {
-            Some(Ok(out))
+            Some(Ok(()))
         } else {
             Some(Err(()))
         }
     }
 
-    // NEON-accelerated MORUS-1280-128 using NEON keystream + SIMD state update
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
-    fn encrypt_morus1280_neon(
+    fn encrypt_morus1280_neon_inplace(
         &self,
-        plaintext: &[u8],
+        buffer: &mut [u8],
         ad: &[u8],
         nonce: &[u8; 16],
-    ) -> Option<(Vec<u8>, [u8; 16])> {
+    ) -> Option<[u8; 16]> {
         crate::optimize::telemetry::MORUS1280_NEON_OPS.inc();
         let mut state = Morus1280State::init(&self.key, nonce);
         state.process_ad(ad);
 
-        let mut out = plaintext.to_vec();
         {
-            let mut chunks = out.chunks_exact_mut(32);
+            let mut chunks = buffer.chunks_exact_mut(32);
             for chunk in &mut chunks {
                 let mut tmp = [0u8; 32];
                 tmp.copy_from_slice(chunk);
                 let block: &mut [u8; 32] = &mut tmp;
                 let ks = state.keystream_block();
-                // SAFETY: compile-time neon gate; `block` is &mut [u8;32] and `ks`
-                // is &[u64;4], both providing 32 readable/writable bytes.
                 let plain_words =
                     unsafe { Morus1280State::xor_keystream_block_encrypt_neon(block, &ks) };
                 state.update(plain_words);
@@ -1672,43 +1609,39 @@ impl MorusAead {
             }
         }
 
-        let tag = state.finalize(ad.len(), plaintext.len());
-        Some((out, tag))
+        Some(state.finalize(ad.len(), buffer.len()))
     }
 
     #[cfg(all(target_arch = "aarch64", not(target_feature = "neon")))]
-    fn encrypt_morus1280_neon(
+    fn encrypt_morus1280_neon_inplace(
         &self,
-        plaintext: &[u8],
+        buffer: &mut [u8],
         ad: &[u8],
         nonce: &[u8; 16],
-    ) -> Option<(Vec<u8>, [u8; 16])> {
-        let _ = (plaintext, ad, nonce);
+    ) -> Option<[u8; 16]> {
+        let _ = (buffer, ad, nonce);
         None
     }
 
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
-    fn decrypt_morus1280_neon(
+    fn decrypt_morus1280_neon_inplace(
         &self,
-        ciphertext: &[u8],
+        buffer: &mut [u8],
         tag: &[u8; 16],
         ad: &[u8],
         nonce: &[u8; 16],
-    ) -> Option<Result<Vec<u8>, ()>> {
+    ) -> Option<Result<(), ()>> {
         crate::optimize::telemetry::MORUS1280_NEON_OPS.inc();
         let mut state = Morus1280State::init(&self.key, nonce);
         state.process_ad(ad);
 
-        let mut out = ciphertext.to_vec();
         {
-            let mut chunks = out.chunks_exact_mut(32);
+            let mut chunks = buffer.chunks_exact_mut(32);
             for chunk in &mut chunks {
                 let mut tmp = [0u8; 32];
                 tmp.copy_from_slice(chunk);
                 let block: &mut [u8; 32] = &mut tmp;
                 let ks = state.keystream_block();
-                // SAFETY: compile-time neon gate; `block` is &mut [u8;32] and `ks`
-                // is &[u64;4], both providing 32 readable/writable bytes.
                 let plain_words =
                     unsafe { Morus1280State::xor_keystream_block_decrypt_neon(block, &ks) };
                 state.update(plain_words);
@@ -1723,23 +1656,23 @@ impl MorusAead {
             }
         }
 
-        let computed_tag = state.finalize(ad.len(), ciphertext.len());
+        let computed_tag = state.finalize(ad.len(), buffer.len());
         if super::subtle_ct_eq(&computed_tag, tag) {
-            Some(Ok(out))
+            Some(Ok(()))
         } else {
             Some(Err(()))
         }
     }
 
     #[cfg(all(target_arch = "aarch64", not(target_feature = "neon")))]
-    fn decrypt_morus1280_neon(
+    fn decrypt_morus1280_neon_inplace(
         &self,
-        ciphertext: &[u8],
+        buffer: &mut [u8],
         tag: &[u8; 16],
         ad: &[u8],
         nonce: &[u8; 16],
-    ) -> Option<Result<Vec<u8>, ()>> {
-        let _ = (ciphertext, tag, ad, nonce);
+    ) -> Option<Result<(), ()>> {
+        let _ = (buffer, tag, ad, nonce);
         None
     }
 }
@@ -1759,12 +1692,10 @@ impl AeadSeal for MorusAead {
             return Err(ConnectionError::BufferTooShort);
         }
         let (pt, rest) = buf.split_at_mut(len);
-        // Prefetch plaintext on x86_64 SSE2 to reduce cache miss latency
         #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
         super::prefetch_morus_buffer(pt.as_ptr(), len);
         let nonce16 = super::make_nonce16(&self.iv, counter);
-        let (ct, tag) = self.encrypt_optimized(pt, ad, &nonce16);
-        pt.copy_from_slice(&ct);
+        let tag = self.encrypt_in_place_optimized(pt, ad, &nonce16);
         rest[..16].copy_from_slice(&tag);
         Ok(len + 16)
     }
@@ -1783,16 +1714,13 @@ impl AeadOpen for MorusAead {
         }
         let ct_len = buf.len() - 16;
         let (ct, tag_in) = buf.split_at_mut(ct_len);
-        // Prefetch ciphertext on x86_64 SSE2 to reduce cache miss latency
         #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
         super::prefetch_morus_buffer(ct.as_ptr(), ct_len);
         let mut tag = [0u8; 16];
         tag.copy_from_slice(&tag_in[..16]);
         let nonce16 = super::make_nonce16(&self.iv, counter);
-        let pt = self
-            .decrypt_optimized(ct, &tag, ad, &nonce16)
+        self.decrypt_in_place_optimized(ct, &tag, ad, &nonce16)
             .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
-        ct.copy_from_slice(&pt);
         Ok(ct_len)
     }
 }
