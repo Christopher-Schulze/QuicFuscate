@@ -102,6 +102,8 @@ prefetch = []
 rate_limiter = []
 std = []
 stream_ring_buffer = []
+# Throughput-oriented transport profile (ring-buffer streams, prefetch hints).
+throughput = ["stream_ring_buffer", "prefetch", "aggressive_inline"]
 unsafe_rust = []
 zero_copy_dgram = []
 
