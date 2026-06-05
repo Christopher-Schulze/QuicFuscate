@@ -354,7 +354,7 @@ This unity yields a homogeneous, believable fingerprint that remains difficult t
 - Risk/Tradeoff: enabling TLS Cover increases cover-byte volume and per-packet processing work.
 - Certificate tooling: development certificates enabled by feature `dev-certs` (rcgen); production uses PEM chain via `--cert/--key` (server) and CA bundle via `--ca-file` (client).
 - Session management: internal session cache for 0-RTT resumption (size-limited, not user-configurable).
-  - Anti-replay: 0-RTT data is protected by a SHA-256 strike register (`src/transport/anti_replay.rs`) per RFC 8446 Section 8 and RFC 9001 Section 9.2. Replayed 0-RTT packets are silently discarded; clients fall back to 1-RTT automatically. Configurable via `[anti_replay]` TOML section.
+  - Anti-replay: 0-RTT data is protected by a SHA-256 strike register (`src/transport/anti_replay.rs`) per RFC 8446 Section 8 and RFC 9001 Section 9.2. The register uses a Bloom fast-negative in front of the full-fingerprint index and a FIFO ring for O(1) capacity eviction. Replayed 0-RTT packets are silently discarded; clients fall back to 1-RTT automatically. Configurable via `[anti_replay]` TOML section.
 
 #### Fingerprint Source Model
 - Primary runtime path: deterministic in-memory ClientHello synthesis via `TlsClientHelloSpoofer` from `BrowserProfile` and `OsProfile`.
@@ -1264,7 +1264,7 @@ Transport submodules (`src/transport/`):
 - `src/transport/recovery.rs` - loss detection/recovery controller.
 - `src/transport/batch.rs` - explicit rust parity/test-only batched IO surface, not part of the normal runtime transport path.
 - `src/transport/udpfast.rs` - narrowed UDP fastpath compatibility layer used by harness/XDP-compat coverage; internal buffer/counter machinery is not part of the public runtime contract.
-- `src/transport/anti_replay.rs` - 0-RTT strike register (SHA-256 fingerprint dedup).
+- `src/transport/anti_replay.rs` - 0-RTT strike register (SHA-256 fingerprint dedup, Bloom fast-negative, FIFO ring eviction).
 - `src/transport/cc/mod.rs` - pluggable CongestionController trait and CcImpl dispatch.
 - `src/transport/cc/reno.rs` - RFC 6582 NewReno implementation.
 - `src/transport/cc/bbr2.rs` - BBR v2 standalone implementation (IETF draft-ietf-ccwg-bbr). Four-state machine (Startup/Drain/ProbeBW/ProbeRTT), windowed max-bandwidth filter, loss tracking via EWMA. No external crate dependency.

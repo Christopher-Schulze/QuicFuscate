@@ -93,7 +93,7 @@ Uses `StealthConfig::from_mode(runtime_mode)` - was silently using `..Default::d
 9. Engine embedding path: `src/engine/engine.rs` -> `src/implementations/{client,server}/` runtimes
 10. Admin control plane path: `src/implementations/server/admin_http.rs` -> `qkey_registry.rs` -> live server policy enforcement
 11. Desktop frontend path: `apps/svelte-desktop/src/lib/stores/tauri-bridge.svelte.ts` -> Tauri invoke -> engine/control runtime
-12. 0-RTT anti-replay path: `src/transport/anti_replay.rs` (`StrikeRegister`) -> `src/transport/config.rs` (attached at server startup) -> `src/transport/connection.rs` `recv()` gate -> silent discard on replay
+12. 0-RTT anti-replay path: `src/transport/anti_replay.rs` (`StrikeRegister` with SHA-256 fingerprints, Bloom fast-negative, FIFO ring eviction) -> `src/transport/config.rs` (attached at server startup) -> `src/transport/connection.rs` `recv()` gate -> silent discard on replay
 13. Desktop native host path: `apps/tauri/src-tauri/src/main.rs` -> Tauri commands -> engine/control runtime
 14. Web-admin path: `apps/svelte-admin/src/lib/api.ts` -> Vite dev proxy (`/api` -> `127.0.0.1:9000`) -> admin HTTP endpoints -> server runtime state
 15. Build publish path: `scripts/build/build-web-admin.sh` -> `assets/web-admin/` consumed by `--admin-web-root`

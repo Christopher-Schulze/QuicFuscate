@@ -6,7 +6,7 @@
 
 use parking_lot::RwLock;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 /// Anti-replay configuration for 0-RTT early data.
@@ -40,6 +40,8 @@ impl Default for AntiReplayConfig {
 /// present is a replay and must be silently discarded.
 pub struct StrikeRegister {
     entries: RwLock<HashMap<[u8; 32], Instant>>,
+    order: RwLock<VecDeque<[u8; 32]>>,
+    bloom: RwLock<BloomFilter>,
     config: AntiReplayConfig,
     last_cleanup: RwLock<Instant>,
 }
@@ -49,6 +51,10 @@ impl StrikeRegister {
     pub fn new(config: AntiReplayConfig) -> Self {
         Self {
             entries: RwLock::new(HashMap::new()),
+            order: RwLock::new(VecDeque::with_capacity(
+                effective_capacity(config.max_entries).min(4096),
+            )),
+            bloom: RwLock::new(BloomFilter::for_capacity(config.max_entries)),
             last_cleanup: RwLock::new(Instant::now()),
             config,
         }
@@ -75,22 +81,34 @@ impl StrikeRegister {
     /// Returns `false` if it IS a replay (reject).
     ///
     /// When `max_entries` is reached, the oldest entry is evicted before insertion.
+    /// A Bloom filter provides fast-negative checks before the full HashMap lookup,
+    /// and a FIFO ring makes capacity eviction O(1).
     pub fn check_and_insert(&self, fingerprint: &[u8; 32], now: Instant) -> bool {
         let mut entries = self.entries.write();
+        let bloom_maybe = self.bloom.read().might_contain(fingerprint);
 
         // Reject if already seen (replay)
-        if entries.contains_key(fingerprint) {
+        if bloom_maybe && entries.contains_key(fingerprint) {
             return false;
         }
 
         // Capacity eviction: remove oldest if at limit
-        if entries.len() >= self.config.max_entries {
-            if let Some(oldest_key) = entries.iter().min_by_key(|(_, ts)| *ts).map(|(k, _)| *k) {
-                entries.remove(&oldest_key);
+        let capacity = effective_capacity(self.config.max_entries);
+        {
+            let mut order = self.order.write();
+            while entries.len() >= capacity {
+                if let Some(oldest_key) = order.pop_front() {
+                    entries.remove(&oldest_key);
+                } else {
+                    entries.clear();
+                    break;
+                }
             }
+            order.push_back(*fingerprint);
         }
 
         entries.insert(*fingerprint, now);
+        self.bloom.write().insert(fingerprint);
         true
     }
 
@@ -111,6 +129,13 @@ impl StrikeRegister {
         let max_age = self.config.max_ticket_age;
         let mut entries = self.entries.write();
         entries.retain(|_, first_seen| now.duration_since(*first_seen) < max_age);
+        let mut order = self.order.write();
+        order.retain(|fingerprint| entries.contains_key(fingerprint));
+        let mut bloom = BloomFilter::for_capacity(self.config.max_entries);
+        for fingerprint in entries.keys() {
+            bloom.insert(fingerprint);
+        }
+        *self.bloom.write() = bloom;
     }
 
     /// Current number of tracked entries.
@@ -121,6 +146,51 @@ impl StrikeRegister {
     /// Returns true if the register is empty.
     pub fn is_empty(&self) -> bool {
         self.entries.read().is_empty()
+    }
+}
+
+fn effective_capacity(configured: usize) -> usize {
+    configured.max(1)
+}
+
+#[derive(Clone, Debug)]
+struct BloomFilter {
+    bits: Vec<u64>,
+    mask: u64,
+}
+
+impl BloomFilter {
+    fn for_capacity(capacity: usize) -> Self {
+        let bits = effective_capacity(capacity).saturating_mul(16).max(1024).next_power_of_two();
+        let words = bits / u64::BITS as usize;
+        Self { bits: vec![0; words], mask: bits as u64 - 1 }
+    }
+
+    fn insert(&mut self, fingerprint: &[u8; 32]) {
+        for bit in self.bit_indices(fingerprint) {
+            self.bits[bit / u64::BITS as usize] |= 1u64 << (bit % u64::BITS as usize);
+        }
+    }
+
+    fn might_contain(&self, fingerprint: &[u8; 32]) -> bool {
+        self.bit_indices(fingerprint).into_iter().all(|bit| {
+            (self.bits[bit / u64::BITS as usize] & (1u64 << (bit % u64::BITS as usize))) != 0
+        })
+    }
+
+    fn bit_indices(&self, fingerprint: &[u8; 32]) -> [usize; 4] {
+        let mut first = [0u8; 8];
+        first.copy_from_slice(&fingerprint[0..8]);
+        let mut second = [0u8; 8];
+        second.copy_from_slice(&fingerprint[8..16]);
+        let h1 = u64::from_be_bytes(first);
+        let h2 = u64::from_be_bytes(second) | 1;
+        [
+            (h1 & self.mask) as usize,
+            (h1.wrapping_add(h2) & self.mask) as usize,
+            (h1.wrapping_add(h2.wrapping_mul(2)) & self.mask) as usize,
+            (h1.wrapping_add(h2.wrapping_mul(3)) & self.mask) as usize,
+        ]
     }
 }
 
@@ -208,6 +278,33 @@ mod tests {
         // Evicted entry (i=0) should be insertable again
         let fp_evicted = StrikeRegister::compute_fingerprint(&[0], &[0], &[0]);
         assert!(reg.check_and_insert(&fp_evicted, now + Duration::from_millis(11)));
+    }
+
+    #[test]
+    fn zero_capacity_is_clamped_to_one_entry() {
+        let mut cfg = test_config();
+        cfg.max_entries = 0;
+        let reg = StrikeRegister::new(cfg);
+        let now = Instant::now();
+
+        let fp1 = StrikeRegister::compute_fingerprint(b"first", b"first", b"first");
+        let fp2 = StrikeRegister::compute_fingerprint(b"second", b"second", b"second");
+        assert!(reg.check_and_insert(&fp1, now));
+        assert!(!reg.check_and_insert(&fp1, now));
+        assert!(reg.check_and_insert(&fp2, now + Duration::from_millis(1)));
+        assert_eq!(reg.len(), 1);
+    }
+
+    #[test]
+    fn bloom_filter_tracks_inserted_fingerprints() {
+        let fp = StrikeRegister::compute_fingerprint(b"dcid", b"scid", b"payload");
+        let other = StrikeRegister::compute_fingerprint(b"dcid", b"scid", b"other");
+        let mut bloom = BloomFilter::for_capacity(8);
+
+        assert!(!bloom.might_contain(&fp));
+        bloom.insert(&fp);
+        assert!(bloom.might_contain(&fp));
+        assert!(!bloom.might_contain(&other));
     }
 
     #[test]
