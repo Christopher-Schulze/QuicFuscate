@@ -7,6 +7,7 @@ It is maintained as the current architecture and repository index, with a curate
 
 - Runtime core: Rust crate under `src/` with entrypoints in `src/main.rs` and `src/lib.rs`.
 - Data path wiring: app or TUN ingress -> core/transport -> stealth shaping -> crypto -> FEC -> network I/O.
+- Client packet I/O is owned by `src/implementations/client/io_driver.rs` plus `src/core.rs`; `src/implementations/client/pipeline.rs` is not part of the production module graph.
 - Control plane wiring: CLI + engine + admin surfaces + metrics/telemetry endpoints.
 - UI wiring: `apps/svelte-desktop` (Svelte 5 desktop frontend) and `apps/svelte-admin` (SvelteKit/Svelte 5 admin frontend) are the active UI surfaces. The retained native desktop host/runtime bridge lives in `apps/tauri/src-tauri`. Shared UI primitives live in `packages/ui` (Svelte components) and `packages/theme` (CSS).
 - Automation wiring: scripts in `scripts/` orchestrate build/test/benchmark/audit tasks; generated local artifact directories are intentionally outside this map.

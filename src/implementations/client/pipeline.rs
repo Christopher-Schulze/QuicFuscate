@@ -1,8 +1,8 @@
-//! Packet processing pipeline for the client.
+//! Legacy client packet processing adapter kept for narrow unit coverage.
 //!
-//! This module implements the bidirectional packet flow:
-//! - Outbound: TUN -> Stealth -> FEC -> QUIC
-//! - Inbound: QUIC -> FEC -> Stealth -> TUN
+//! Production TUN/UDP flow is owned by `IoDriver` and `QuicFuscateConnection`,
+//! which route inbound packets through the shared `MemoryPool` and FEC path.
+//! This file is retained on disk but is not part of the client module graph.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

@@ -1195,7 +1195,7 @@ Client implementation (`src/implementations/client/`):
 - `src/implementations/client/integration.rs` - integration test scaffolding (`MockServer`, `TestClient`, `TestHarness`).
 - `src/implementations/client/io_driver.rs` - async packet hotpath driver and performance counters/thresholds.
 - `src/implementations/client/killswitch.rs` - platform kill-switch lifecycle and backend execution.
-- `src/implementations/client/pipeline.rs` - inbound/outbound pipeline stages and pipeline error/stat types.
+- `src/implementations/client/pipeline.rs` - legacy non-runtime adapter note; production packet I/O is owned by `io_driver.rs` and `core::QuicFuscateConnection`.
 - `src/implementations/client/profile.rs` - profile persistence/load/save and profile manager.
 - `src/implementations/client/quality.rs` - connection quality and bandwidth tracking utilities.
 - `src/implementations/client/runtime.rs` - Tokio runtime creation/shared runtime helpers.

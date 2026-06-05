@@ -3,7 +3,7 @@
 //! This module provides the production-ready client implementation with:
 //! - TUN device integration
 //! - QUIC connection management
-//! - Packet I/O pipeline
+//! - Packet I/O driver
 //! - Stealth and FEC processing
 //!
 //! # Architecture
@@ -20,7 +20,6 @@ mod connection;
 mod integration;
 mod io_driver;
 pub mod killswitch;
-mod pipeline;
 pub mod platform;
 pub mod profile;
 pub mod quality;
@@ -31,7 +30,6 @@ pub use backend::*;
 pub use connection::*;
 pub use io_driver::*;
 pub use killswitch::KillSwitch;
-pub use pipeline::*;
 pub use profile::{Profile, ProfileError, ProfileManager};
 pub use quality::{BandwidthTracker, Quality, QualityTracker};
 pub use runtime::*;

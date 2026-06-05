@@ -4845,12 +4845,6 @@ impl StealthManager {
         self.process_incoming_packet(payload, source);
     }
 
-    /// Obfuscates arbitrary payload data within a specific context.
-    pub(crate) fn obfuscate_payload(&self, _payload: &mut [u8], _context_id: u64) {}
-
-    /// Deobfuscates payload data for a specific context.
-    pub(crate) fn deobfuscate_payload(&self, _payload: &mut [u8], _context_id: u64) {}
-
     /// Handles active probe detection by switching to higher stealth mode
     fn on_probe_detected(&self, source: std::net::SocketAddr) {
         warn!("Active probe detected from {} - escalating stealth mode", source);
