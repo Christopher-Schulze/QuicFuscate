@@ -259,8 +259,9 @@ struct StealthBrainState {
     iat_hist_snap: Vec<u64>,
 }
 
-/// Scalar telemetry exported from the decay/snapshot write-lock phase.
-struct PolicyMetricsSnap {
+
+/// Actuator decisions produced by the consolidated mutation write-lock phase.
+struct PolicyActuatorSnap {
     ce_ratio_recent: f64,
     ack_us: f64,
     ack_us_long: f64,
@@ -271,10 +272,6 @@ struct PolicyMetricsSnap {
     fec_hint_interval: Option<u64>,
     size_div: f64,
     iat_div: f64,
-}
-
-/// Actuator decisions produced by the consolidated mutation write-lock phase.
-struct PolicyActuatorSnap {
     thr: u64,
     do_ack: bool,
     do_pacing: bool,
@@ -657,7 +654,7 @@ impl TransportObserver for StealthBrain {
             .unwrap_or(Duration::from_secs(0))
             .subsec_nanos() as u64;
 
-        let metrics = {
+        let actuators = {
             let mut st = self.st.write();
             // Decay histograms to emphasize recent behavior
             let df = self.cfg.hist_decay as f64;
@@ -797,90 +794,53 @@ impl TransportObserver for StealthBrain {
             let iat_div =
                 brain_accel::jensen_shannon_divergence(&st.iat_hist_snap, iat_sum, &iat_t);
 
-            PolicyMetricsSnap {
-                ce_ratio_recent,
-                ack_us,
-                ack_us_long,
-                jitter_us,
-                reorder_ratio,
-                cooldown_ok,
-                fec_hint_ppm,
-                fec_hint_interval,
-                size_div,
-                iat_div,
-            }
-        };
-
-        if let Some(interval) = metrics.fec_hint_interval {
-            FEC_INTERVAL_HINT_PKTS.store(interval, Ordering::Relaxed);
-        }
-        if let Some(ppm) = metrics.fec_hint_ppm {
-            FEC_REDUNDANCY_PPM.store(ppm, Ordering::Relaxed);
-        }
-        let ce_scaled = (metrics.ce_ratio_recent * 1000.0).clamp(0.0, 1000.0) as u32;
-        self.loss_rate.store(ce_scaled, Ordering::Relaxed);
-
-        let ce_ratio_recent = metrics.ce_ratio_recent;
-        let ack_us = metrics.ack_us;
-        let ack_us_long = metrics.ack_us_long;
-        let jitter_us = metrics.jitter_us;
-        let reorder_ratio = metrics.reorder_ratio;
-        let cooldown_ok = metrics.cooldown_ok;
-        let size_div = metrics.size_div;
-        let iat_div = metrics.iat_div;
-
-        // Derive ACK threshold: tighter under CE/jitter, looser on clean paths
-        let rtt_spike_weight = (signal_rtt_spikes as f64).min(8.0);
-        let mut thr = if ce_ratio_recent > 0.05 || ack_us > 12_000.0 || rtt_spike_weight >= 4.0 {
-            2
-        } else if ce_ratio_recent < 0.001 && ack_us < 3_000.0 && rtt_spike_weight == 0.0 {
-            8
-        } else {
-            4
-        } as u64;
-        // Penalize if distributions deviate a lot (be more reactive)
-        if size_div + iat_div > 1.2 {
-            thr = thr.clamp(2, 4);
-        }
-        thr = thr.clamp(self.cfg.ack_min, self.cfg.ack_max);
-        // Compatibility-only MASQUE hint channel: expose hostile-path pressure
-        // without coupling it to the canonical Intelligent runtime.
-        let prefer_masque_brain = ce_ratio_recent > 0.03
-            || rtt_spike_weight >= 2.0
-            || signal_rst > 0
-            || signal_tos > 0
-            || (size_div + iat_div) > 1.6
-            || reorder_ratio > 0.02;
-        // Explicit multi-signal Intelligent controls (continuous, not probe-only).
-        let loss_pressure = ce_ratio_recent.min(1.0) as f32;
-        let jitter_pressure = (jitter_us / (self.cfg.jitter_max_us.max(1) as f64)).min(1.0) as f32;
-        let timeout_pressure = ((ack_us / 12_000.0).min(1.5) / 1.5) as f32;
-        let retransmit_pressure =
-            (reorder_ratio * 20.0).min(1.0) as f32 + if signal_rst > 0 { 0.25 } else { 0.0 };
-        let retransmit_pressure = retransmit_pressure.min(1.0);
-        let probe_pressure = if signal_other > 0 || signal_rst > 0 {
-            1.0
-        } else if signal_tos > 0 {
-            0.5
-        } else {
-            0.0
-        };
-        let composite_pressure = 0.32 * loss_pressure
-            + 0.20 * jitter_pressure
-            + 0.18 * timeout_pressure
-            + 0.15 * retransmit_pressure
-            + 0.15 * probe_pressure;
-        let target_level =
-            if composite_pressure >= 0.75 || probe_pressure >= 0.95 || loss_pressure >= 0.10 {
-                2u8
-            } else if composite_pressure >= 0.38 || loss_pressure >= 0.03 || rtt_spike_weight >= 2.0
-            {
-                1u8
+            // Derive ACK threshold: tighter under CE/jitter, looser on clean paths
+            let rtt_spike_weight = (signal_rtt_spikes as f64).min(8.0);
+            let mut thr = if ce_ratio_recent > 0.05 || ack_us > 12_000.0 || rtt_spike_weight >= 4.0 {
+                2
+            } else if ce_ratio_recent < 0.001 && ack_us < 3_000.0 && rtt_spike_weight == 0.0 {
+                8
             } else {
-                0u8
+                4
+            } as u64;
+            if size_div + iat_div > 1.2 {
+                thr = thr.clamp(2, 4);
+            }
+            thr = thr.clamp(self.cfg.ack_min, self.cfg.ack_max);
+            let prefer_masque_brain = ce_ratio_recent > 0.03
+                || rtt_spike_weight >= 2.0
+                || signal_rst > 0
+                || signal_tos > 0
+                || (size_div + iat_div) > 1.6
+                || reorder_ratio > 0.02;
+            let loss_pressure = ce_ratio_recent.min(1.0) as f32;
+            let jitter_pressure =
+                (jitter_us / (self.cfg.jitter_max_us.max(1) as f64)).min(1.0) as f32;
+            let timeout_pressure = ((ack_us / 12_000.0).min(1.5) / 1.5) as f32;
+            let retransmit_pressure =
+                (reorder_ratio * 20.0).min(1.0) as f32 + if signal_rst > 0 { 0.25 } else { 0.0 };
+            let retransmit_pressure = retransmit_pressure.min(1.0);
+            let probe_pressure = if signal_other > 0 || signal_rst > 0 {
+                1.0
+            } else if signal_tos > 0 {
+                0.5
+            } else {
+                0.0
             };
-        let actuators = {
-            let mut st = self.st.write();
+            let composite_pressure = 0.32 * loss_pressure
+                + 0.20 * jitter_pressure
+                + 0.18 * timeout_pressure
+                + 0.15 * retransmit_pressure
+                + 0.15 * probe_pressure;
+            let target_level =
+                if composite_pressure >= 0.75 || probe_pressure >= 0.95 || loss_pressure >= 0.10 {
+                    2u8
+                } else if composite_pressure >= 0.38 || loss_pressure >= 0.03 || rtt_spike_weight >= 2.0
+                {
+                    1u8
+                } else {
+                    0u8
+                };
             let now = crate::time_source::now_instant();
             let can_toggle =
                 now.duration_since(st.last_masque_hint_change) > Duration::from_millis(800);
@@ -1063,6 +1023,16 @@ impl TransportObserver for StealthBrain {
             Self::update_probing_budget(&mut st, &self.cfg);
             self.maybe_emit_dpi_probe(&mut st);
             PolicyActuatorSnap {
+                ce_ratio_recent,
+                ack_us,
+                ack_us_long,
+                jitter_us,
+                reorder_ratio,
+                cooldown_ok,
+                fec_hint_ppm,
+                fec_hint_interval,
+                size_div,
+                iat_div,
                 thr: thr_local,
                 do_ack,
                 do_pacing,
@@ -1077,10 +1047,26 @@ impl TransportObserver for StealthBrain {
                 stealth_policy,
             }
         };
+        if let Some(interval) = actuators.fec_hint_interval {
+            FEC_INTERVAL_HINT_PKTS.store(interval, Ordering::Relaxed);
+        }
+        if let Some(ppm) = actuators.fec_hint_ppm {
+            FEC_REDUNDANCY_PPM.store(ppm, Ordering::Relaxed);
+        }
+        let ce_scaled = (actuators.ce_ratio_recent * 1000.0).clamp(0.0, 1000.0) as u32;
+        self.loss_rate.store(ce_scaled, Ordering::Relaxed);
         crate::optimize::telemetry::MASQUE_HINT.store(
             if actuators.prefer_masque_effective { 1 } else { 0 },
             Ordering::Relaxed,
         );
+        let ce_ratio_recent = actuators.ce_ratio_recent;
+        let ack_us = actuators.ack_us;
+        let ack_us_long = actuators.ack_us_long;
+        let jitter_us = actuators.jitter_us;
+        let reorder_ratio = actuators.reorder_ratio;
+        let cooldown_ok = actuators.cooldown_ok;
+        let size_div = actuators.size_div;
+        let iat_div = actuators.iat_div;
         let thr = actuators.thr;
         let do_ack = actuators.do_ack;
         let do_pacing = actuators.do_pacing;
