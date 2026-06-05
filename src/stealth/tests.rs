@@ -1,39 +1,7 @@
+use super::test_support::*;
 use super::{PaddingStrategy, StealthConfig, StealthManager, StealthMode};
 use crate::{crypto::CryptoManager, optimize::OptimizationManager};
-use std::sync::{Arc, Mutex, OnceLock};
-
-struct EnvGuard {
-    key: &'static str,
-    prev: Option<String>,
-}
-
-impl EnvGuard {
-    fn set(key: &'static str, value: &str) -> Self {
-        let prev = std::env::var(key).ok();
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, prev }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match self.prev.as_deref() {
-            Some(value) => unsafe {
-                std::env::set_var(self.key, value);
-            },
-            None => unsafe {
-                std::env::remove_var(self.key);
-            },
-        }
-    }
-}
-
-fn acquire_env_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().expect("env lock")
-}
+use std::sync::Arc;
 
 #[test]
 fn canonical_stealth_modes_keep_padding_ssot() {

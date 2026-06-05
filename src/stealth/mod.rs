@@ -5494,6 +5494,7 @@ pub(crate) struct IntelligentStealthInputs {
 
 #[cfg(test)]
 mod stealth_coverage_tests {
+    use crate::stealth::test_support::{EnvGuard, acquire_env_lock};
     use super::*;
     use std::sync::Arc;
 
@@ -5788,32 +5789,6 @@ mod stealth_coverage_tests {
     // =========================================================================
     // 5. apply_env_overrides
     // =========================================================================
-
-    // EnvGuard + env lock for thread safety (mirrors tests.rs pattern)
-    struct EnvGuard {
-        key: &'static str,
-        prev: Option<String>,
-    }
-    impl EnvGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let prev = std::env::var(key).ok();
-            unsafe { std::env::set_var(key, value); }
-            Self { key, prev }
-        }
-    }
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match self.prev.as_deref() {
-                Some(v) => unsafe { std::env::set_var(self.key, v); },
-                None => unsafe { std::env::remove_var(self.key); },
-            }
-        }
-    }
-
-    fn acquire_env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().expect("env lock")
-    }
 
     #[test]
     fn env_override_known_modes() {
@@ -6349,6 +6324,9 @@ mod stealth_coverage_tests {
         assert_eq!(cfg.padding_strategy, PaddingStrategy::BrowserMimic);
     }
 }
+
+#[cfg(test)]
+mod test_support;
 
 #[cfg(test)]
 mod tests;
