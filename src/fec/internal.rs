@@ -304,7 +304,7 @@ impl EncoderVariant {
             EncoderVariant::GF4(e) => e.take_packet(p),
             EncoderVariant::Fountain(e) => {
                 // Add source symbol to LT encoder
-                if let Some(ref data) = p.data {
+                if let Some(data) = p.payload_slice() {
                     e.add_source_symbol(data.to_vec());
                 }
             }
@@ -336,17 +336,15 @@ impl EncoderVariant {
                     let off = i * 4;
                     coeff_block[off..off + 4].copy_from_slice(&be);
                 }
-                Some(FecPacket {
-                    id: symbol_id,
-                    data: Some(pool.alloc_from_slice(&encoded_data)),
-                    data_len: enc.symbol_size(),
-                    is_systematic: false,
-                    coefficients: Some(coeff_block),
-                    coeff_len: take * 4,
-                    mem_pool: Arc::clone(pool),
-                    seq: symbol_id,
-                    timestamp: std::time::Instant::now(),
-                })
+                Some(FecPacket::new(
+                    symbol_id,
+                    Some(pool.alloc_from_slice(&encoded_data)),
+                    enc.symbol_size(),
+                    false,
+                    Some(coeff_block),
+                    take * 4,
+                    Arc::clone(pool),
+                ))
             }
             EncoderVariant::AdaptiveRS(a) => a.generate_repair_packet(i, pool),
         }
@@ -526,7 +524,8 @@ impl DecoderVariant {
             DecoderVariant::GF4(d) => d.take_packet(p),
             DecoderVariant::Fountain(d) => {
                 // Add received symbol to LT decoder, use indices if available
-                if let Some(ref data) = p.data {
+                if let Some(data) = p.payload_slice() {
+                    let payload = data.to_vec();
                     if let Some(ref coeffs) = p.coefficients {
                         let mut set = std::collections::HashSet::new();
                         let bytes = &coeffs[..p.coeff_len.min(coeffs.len())];
@@ -535,9 +534,9 @@ impl DecoderVariant {
                                 as usize;
                             set.insert(idx);
                         }
-                        let _ = d.add_encoded_symbol(p.id, data.to_vec(), set);
+                        let _ = d.add_encoded_symbol(p.id, payload, set);
                     } else {
-                        d.add_received_symbol(p.id, data.to_vec());
+                        d.add_received_symbol(p.id, payload);
                     }
                 }
             }
@@ -564,17 +563,15 @@ impl DecoderVariant {
                     for symbol in symbols.into_iter() {
                         let pool = Arc::clone(&d.mem_pool);
                         let new_id = next_repair_id();
-                        let packet = FecPacket {
-                            id: new_id,
-                            data: Some(pool.alloc_from_slice(&symbol)),
-                            data_len: symbol.len(),
-                            is_systematic: true,
-                            coefficients: None,
-                            coeff_len: 0,
-                            mem_pool: pool,
-                            seq: new_id,
-                            timestamp: std::time::Instant::now(),
-                        };
+                        let packet = FecPacket::new(
+                            new_id,
+                            Some(pool.alloc_from_slice(&symbol)),
+                            symbol.len(),
+                            true,
+                            None,
+                            0,
+                            pool,
+                        );
                         packets.push_back(packet);
                     }
                     Some(packets)
@@ -615,17 +612,16 @@ impl DecoderVariant {
                 let mut partial = VecDeque::new();
                 for symbol in d.get_partial().into_iter() {
                     let pool = Arc::clone(&d.mem_pool);
-                    let packet = FecPacket {
-                        id: symbol.len() as u64,
-                        data: Some(pool.alloc_from_slice(&symbol)),
-                        data_len: symbol.len(),
-                        is_systematic: true,
-                        coefficients: None,
-                        coeff_len: 0,
-                        mem_pool: pool,
-                        seq: symbol.len() as u64,
-                        timestamp: std::time::Instant::now(),
-                    };
+                    let id = symbol.len() as u64;
+                    let packet = FecPacket::new(
+                        id,
+                        Some(pool.alloc_from_slice(&symbol)),
+                        symbol.len(),
+                        true,
+                        None,
+                        0,
+                        pool,
+                    );
                     partial.push_back(packet);
                 }
                 // Update progress gauge with current progress

@@ -21,6 +21,42 @@ fn next_repair_id() -> u64 {
 
 use crate::env_utils::{env_flag, env_parse};
 
+/// Pool-backed payload buffer shared across FEC packet handles via `Arc`.
+#[derive(Clone)]
+struct SharedFecBuffer {
+    inner: Arc<SharedFecBufferInner>,
+}
+
+struct SharedFecBufferInner {
+    buf: Option<AlignedBox<[u8]>>,
+    pool: Arc<MemoryPool>,
+}
+
+impl Drop for SharedFecBufferInner {
+    fn drop(&mut self) {
+        if let Some(buf) = self.buf.take() {
+            self.pool.free(buf);
+        }
+    }
+}
+
+impl SharedFecBuffer {
+    fn new(buf: AlignedBox<[u8]>, pool: Arc<MemoryPool>) -> Self {
+        Self {
+            inner: Arc::new(SharedFecBufferInner { buf: Some(buf), pool }),
+        }
+    }
+
+    fn bytes(&self, len: usize) -> &[u8] {
+        let buf = self.inner.buf.as_ref().expect("shared FEC buffer already freed");
+        &buf[..len.min(buf.len())]
+    }
+
+    fn to_vec(&self, len: usize) -> Vec<u8> {
+        self.bytes(len).to_vec()
+    }
+}
+
 #[derive(Clone)]
 struct FecRuntimePolicy {
     decoder_policy: String,
@@ -1128,8 +1164,8 @@ impl KalmanFilter {
 pub struct FecPacket {
     /// Unique packet identifier (source ID or repair window anchor).
     pub id: u64,
-    /// Aligned payload buffer, recycled to the memory pool on drop.
-    pub data: Option<AlignedBox<[u8]>>,
+    /// Aligned payload buffer, recycled to the memory pool when the last handle drops.
+    pub data: Option<SharedFecBuffer>,
     /// Actual byte count of valid payload within `data`.
     pub data_len: usize,
     /// True for original source packets, false for repair/coded packets.
@@ -1148,10 +1184,7 @@ pub struct FecPacket {
 
 impl Drop for FecPacket {
     fn drop(&mut self) {
-        // Automatically recycle buffers back into the correct pool.
-        if let Some(data) = self.data.take() {
-            self.mem_pool.free(data);
-        }
+        // Payload buffers recycle when the last SharedFecBuffer handle drops.
         if let Some(coeffs) = self.coefficients.take() {
             self.mem_pool.free(coeffs);
         }
@@ -1220,6 +1253,8 @@ impl FecPacket {
             None => None,
         };
 
+        let data = data.map(|buf| SharedFecBuffer::new(buf, Arc::clone(&mem_pool)));
+
         Self {
             id,
             data,
@@ -1233,6 +1268,22 @@ impl FecPacket {
         }
     }
 
+    /// Payload bytes for this packet (up to `data_len`).
+    #[inline]
+    pub(crate) fn payload_slice(&self) -> Option<&[u8]> {
+        self.data.as_ref().map(|shared| shared.bytes(self.data_len))
+    }
+
+    /// Mutable payload view when this packet is the sole owner of the shared buffer.
+    #[inline]
+    pub(crate) fn payload_mut_unique(&mut self) -> Option<&mut [u8]> {
+        let shared = self.data.as_mut()?;
+        let inner = Arc::get_mut(&mut shared.inner)?;
+        let buf = inner.buf.as_mut()?;
+        let end = self.data_len.min(buf.len());
+        Some(&mut buf[..end])
+    }
+
     /// Create a systematic FEC packet from a raw byte block, copying into a pool buffer.
     pub fn from_block(id: u64, block: &[u8], mem_pool: Arc<MemoryPool>) -> Self {
         let mut dst = mem_pool.alloc();
@@ -1244,8 +1295,8 @@ impl FecPacket {
     /// Copy only the payload into `buf` (no headers). This is NOT the
     /// streaming DATAGRAM format - for transport, use `to_stream_raw()`.
     pub fn to_raw(&self, buf: &mut [u8]) -> Result<usize, String> {
-        if let Some(ref data) = self.data {
-            let len = self.data_len.min(buf.len());
+        if let Some(data) = self.payload_slice() {
+            let len = data.len().min(buf.len());
             buf[..len].copy_from_slice(&data[..len]);
             Ok(len)
         } else {
@@ -1284,8 +1335,8 @@ impl FecPacket {
         } else if self.coeff_len > 0 {
             return Err("coeff_len>0 but no coefficients present".into());
         }
-        if let Some(ref data) = self.data {
-            let n = self.data_len.min(buf.len().saturating_sub(off));
+        if let Some(data) = self.payload_slice() {
+            let n = data.len().min(buf.len().saturating_sub(off));
             if n < self.data_len {
                 return Err("BufferTooShort".into());
             }
@@ -1337,17 +1388,15 @@ impl FecPacket {
             return Err("DataBufferTooSmall".into());
         }
         dbuf[..payload_len].copy_from_slice(&input[off..]);
-        Ok(Self {
-            id: base_id,
-            data: Some(dbuf),
-            data_len: payload_len,
+        Ok(Self::new(
+            base_id,
+            Some(dbuf),
+            payload_len,
             is_systematic,
-            coefficients: coeffs,
+            coeffs,
             coeff_len,
-            mem_pool: pool,
-            seq: base_id, // Default: seq = id
-            timestamp: std::time::Instant::now(),
-        })
+            pool,
+        ))
     }
 
     /// Returns the payload length in bytes.
@@ -1362,15 +1411,7 @@ impl FecPacket {
 
 impl Clone for FecPacket {
     fn clone(&self) -> Self {
-        // Clone data by allocating from mem_pool
-        let data_clone = if let Some(ref data) = self.data {
-            let mut buf = self.mem_pool.alloc();
-            let n = self.data_len.min(buf.len());
-            buf[..n].copy_from_slice(&data[..n]);
-            Some(buf)
-        } else {
-            None
-        };
+        let data_clone = self.data.clone();
 
         let coeffs_clone = if let Some(ref coeffs) = self.coefficients {
             let mut buf = self.mem_pool.alloc();
@@ -1381,15 +1422,17 @@ impl Clone for FecPacket {
             None
         };
 
-        Self::new(
-            self.id,
-            data_clone,
-            self.data_len,
-            self.is_systematic,
-            coeffs_clone,
-            self.coeff_len,
-            Arc::clone(&self.mem_pool),
-        )
+        Self {
+            id: self.id,
+            data: data_clone,
+            data_len: self.data_len,
+            is_systematic: self.is_systematic,
+            coefficients: coeffs_clone,
+            coeff_len: self.coeff_len,
+            mem_pool: Arc::clone(&self.mem_pool),
+            seq: self.seq,
+            timestamp: self.timestamp,
+        }
     }
 }
 
@@ -1526,8 +1569,8 @@ impl Encoder<GF8> {
 
         // Manual row accumulation
         for (j, pkt) in self.window.iter().enumerate().take(wlen) {
-            if let Some(ref data) = pkt.data {
-                let len = pkt.data_len.min(max_len);
+            if let Some(data) = pkt.payload_slice() {
+                let len = data.len().min(max_len);
                 let c = coeff_box[j];
                 // Accumulate: out[i] ^= c * data[i]
                 gf_tables::gf_mul_scalar_slice(c, &data[..len], &mut out[..len]);
@@ -1607,8 +1650,8 @@ impl Encoder<GF4> {
         const CHUNK_SIZE: usize = 128;
 
         for (j, pkt) in self.window.iter().enumerate().take(wlen) {
-            if let Some(ref data) = pkt.data {
-                let len = pkt.data_len.min(max_len);
+            if let Some(data) = pkt.payload_slice() {
+                let len = data.len().min(max_len);
                 let c = coeff_box[j];
 
                 // Accumulate: out ^= c * data (GF4)
@@ -1710,8 +1753,8 @@ impl Encoder16 {
                     }
                     let mut acc = vec![0u8; end - start];
                     for (j, pkt) in self.window.iter().enumerate().take(wlen) {
-                        if let Some(ref data) = pkt.data {
-                            let s_len = pkt.data_len.min(max_len_even);
+                        if let Some(data) = pkt.payload_slice() {
+                            let s_len = data.len().min(max_len_even);
                             if start < s_len {
                                 let len = (s_len - start).min(acc.len());
                                 if len >= 2 {
@@ -1740,8 +1783,8 @@ impl Encoder16 {
             }
         } else {
             for (j, pkt) in self.window.iter().enumerate().take(self.k) {
-                if let Some(ref data) = pkt.data {
-                    let s_len = pkt.data_len.min(max_len_even);
+                if let Some(data) = pkt.payload_slice() {
+                    let s_len = data.len().min(max_len_even);
                     if s_len < 2 {
                         continue;
                     }
@@ -1803,11 +1846,11 @@ impl Decoder8 {
 
     fn take_packet(&mut self, p: FecPacket) {
         if p.is_systematic {
-            if let Some(ref data) = p.data {
+            if let Some(data) = p.payload_slice() {
                 // Store if not already known
                 self.known.entry(p.id).or_insert_with(|| {
                     let mut buf = self.mem_pool.alloc();
-                    let n = p.data_len.min(buf.len());
+                    let n = data.len().min(buf.len());
                     buf[..n].copy_from_slice(&data[..n]);
                     (buf, n)
                 });
@@ -1830,7 +1873,7 @@ impl Decoder8 {
                 let mut data_buf2 = self.mem_pool.alloc();
                 let n1 = len.min(data_buf1.len());
                 let n2 = len.min(data_buf2.len());
-                if let Some(ref d) = p.data {
+                if let Some(d) = p.payload_slice() {
                     data_buf1[..n1].copy_from_slice(&d[..n1]);
                     data_buf2[..n2].copy_from_slice(&d[..n2]);
                 }
@@ -2443,10 +2486,10 @@ impl Decoder4 {
 
     fn take_packet(&mut self, p: FecPacket) {
         if p.is_systematic {
-            if let Some(ref data) = p.data {
+            if let Some(data) = p.payload_slice() {
                 self.known.entry(p.id).or_insert_with(|| {
                     let mut buf = self.mem_pool.alloc();
-                    let n = p.data_len.min(buf.len());
+                    let n = data.len().min(buf.len());
                     buf[..n].copy_from_slice(&data[..n]);
                     (buf, n)
                 });
@@ -2456,7 +2499,7 @@ impl Decoder4 {
             // Mirror Decoder8 logic for compatibility
             let mut data_buf = self.mem_pool.alloc();
             let n = p.data_len.min(data_buf.len());
-            if let Some(ref d) = p.data {
+            if let Some(d) = p.payload_slice() {
                 data_buf[..n].copy_from_slice(&d[..n]);
             }
 
@@ -2621,10 +2664,10 @@ impl Decoder16 {
 
     fn take_packet(&mut self, p: FecPacket) {
         if p.is_systematic {
-            if let Some(ref data) = p.data {
+            if let Some(data) = p.payload_slice() {
                 self.known.entry(p.id).or_insert_with(|| {
                     let mut buf = self.mem_pool.alloc();
-                    let n = p.data_len.min(buf.len());
+                    let n = data.len().min(buf.len());
                     buf[..n].copy_from_slice(&data[..n]);
                     (buf, n)
                 });
@@ -2647,7 +2690,7 @@ impl Decoder16 {
             let mut db2 = self.mem_pool.alloc();
             let n1 = len.min(db1.len());
             let n2 = len.min(db2.len());
-            if let Some(ref d) = p.data {
+            if let Some(d) = p.payload_slice() {
                 db1[..n1].copy_from_slice(&d[..n1]);
                 db2[..n2].copy_from_slice(&d[..n2]);
             }
@@ -2693,17 +2736,15 @@ impl Decoder16 {
         if self.is_complete() {
             let mut result = VecDeque::new();
             for (&id, (data, len)) in self.known.iter() {
-                result.push_back(FecPacket {
+                result.push_back(FecPacket::new(
                     id,
-                    is_systematic: true,
-                    data: Some(self.mem_pool.alloc_from_slice(&data[..*len])),
-                    data_len: *len,
-                    coefficients: None,
-                    coeff_len: 0,
-                    mem_pool: Arc::clone(&self.mem_pool),
-                    seq: id,
-                    timestamp: std::time::Instant::now(),
-                });
+                    Some(self.mem_pool.alloc_from_slice(&data[..*len])),
+                    *len,
+                    true,
+                    None,
+                    0,
+                    Arc::clone(&self.mem_pool),
+                ));
             }
             Some(result)
         } else {

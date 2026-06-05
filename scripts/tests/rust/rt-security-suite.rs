@@ -349,7 +349,7 @@ fn fec_properties_single_repair_recovers_missing() {
     let recovered = dec.poll_recovered();
     let recovered_two = recovered.into_iter().find(|p| p.id == 2);
     let recovered_two = recovered_two.expect("missing packet recovered");
-    let recovered_data = recovered_two.data.as_ref().expect("recovered data");
+    let recovered_data = recovered_two.payload_slice().expect("recovered data");
     let recovered_slice = &recovered_data[..payloads[1].1.len()];
     assert_eq!(recovered_slice, payloads[1].1.as_slice());
 }

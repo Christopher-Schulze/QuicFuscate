@@ -230,7 +230,7 @@ proptest! {
         let expected_id = (drop_index + 1) as u64;
         let recovered = dec.poll_recovered().into_iter().find(|p| p.id == expected_id);
         let recovered = recovered.expect("missing packet should be recovered");
-        let recovered_data = recovered.data.as_ref().expect("recovered data");
+        let recovered_data = recovered.payload_slice().expect("recovered data");
         prop_assert_eq!(&recovered_data[..32], payloads[drop_index].as_slice());
     }
 

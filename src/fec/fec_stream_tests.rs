@@ -24,8 +24,7 @@ fn stream_raw_roundtrip_systematic() {
     assert_eq!(p2.coeff_len, 0);
     assert!(p2.coefficients.is_none());
     assert_eq!(p2.data_len, n);
-    assert!(p2.data.is_some());
-    let d2 = p2.data.as_ref().unwrap();
+    let d2 = p2.payload_slice().expect("payload");
     for (i, &b) in d2.iter().take(n).enumerate() {
         assert_eq!(b, (i as u8).wrapping_mul(3).wrapping_add(7));
     }
@@ -61,7 +60,7 @@ fn stream_raw_roundtrip_repair() {
         assert_eq!(b, (j as u8).wrapping_add(1));
     }
     assert_eq!(p2.data_len, n);
-    let d2 = p2.data.as_ref().unwrap();
+    let d2 = p2.payload_slice().expect("payload");
     for (i, &b) in d2.iter().take(n).enumerate() {
         assert_eq!(b, (i as u8).wrapping_mul(17));
     }
@@ -108,12 +107,9 @@ fn test_zero_cpu_fast_path() {
     assert_eq!(output[0].data_len, n);
 
     // Verify data integrity
-    if let Some(ref out_data) = output[0].data {
-        for (i, &b) in out_data.iter().take(n).enumerate() {
-            assert_eq!(b, (i as u8).wrapping_mul(7));
-        }
-    } else {
-        panic!("Output packet should have data");
+    let out_data = output[0].payload_slice().expect("output payload");
+    for (i, &b) in out_data.iter().take(n).enumerate() {
+        assert_eq!(b, (i as u8).wrapping_mul(7));
     }
 }
 

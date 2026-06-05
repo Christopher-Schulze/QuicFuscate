@@ -871,8 +871,7 @@ impl QuicFuscateConnection {
         })?;
 
         for mut packet in recovered_packets {
-            if let Some(ref mut data_box) = packet.data {
-                let data: &mut [u8] = &mut data_box[..packet.data_len];
+            if let Some(data) = packet.payload_mut_unique() {
                 // Deobfuscate payload if enabled
                 self.stealth_manager.process_incoming_packet(data, self.peer_addr);
 

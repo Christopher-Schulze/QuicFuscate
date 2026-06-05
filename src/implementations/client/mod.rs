@@ -111,8 +111,8 @@ impl FecCodec {
         let packet = crate::fec::FecPacket::new(id, Some(block), len, true, None, 0, mem_pool);
         let mut out = Vec::new();
         for pkt in fec.on_send(packet) {
-            if let Some(data) = pkt.data.as_ref() {
-                out.push(data[..pkt.data_len].to_vec());
+            if let Some(data) = pkt.payload_slice() {
+                out.push(data.to_vec());
             }
         }
         out
@@ -128,7 +128,7 @@ impl FecCodec {
         match fec.on_receive(packet) {
             Ok(pkts) => pkts
                 .into_iter()
-                .filter_map(|pkt| pkt.data.as_ref().map(|data| data[..pkt.data_len].to_vec()))
+                .filter_map(|pkt| pkt.payload_slice().map(|data| data.to_vec()))
                 .collect(),
             Err(_) => Vec::new(),
         }

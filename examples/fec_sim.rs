@@ -81,7 +81,7 @@ fn main() {
     for p in rx {
         let out = fec.on_receive(p).expect("decode");
         for q in out {
-            if q.data.is_some() {
+            if q.payload_slice().is_some() {
                 recovered_total += 1;
                 if q.id >= source_id_start && q.id < source_id_end {
                     delivered_ids.insert(q.id);
