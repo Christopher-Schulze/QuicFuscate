@@ -201,8 +201,6 @@ pub struct Connection {
     pending_control: VecDeque<Frame<'static>>,
     // Crypto context (AEAD/HP) hooks for header and payload processing
     crypto: Arc<parking_lot::RwLock<packet::CryptoContext>>,
-    /// Cached application AEAD tag reserve (0 or 16); avoids RwLock on buffer sizing.
-    app_seal_tag_reserve: u8,
     /// Cached AEAD tag reserve (0 or 16) after 1-RTT seal key installation.
     short_header_tag_reserve: u8,
     // ECN counters (for ACK ECN section)
@@ -391,6 +389,7 @@ impl Connection {
             conn_bytes_sent: 0,
             pending_control: VecDeque::new(),
             crypto: Arc::new(parking_lot::RwLock::new(packet::CryptoContext::default())),
+            app_seal_tag_reserve: 0,
             short_header_tag_reserve: 0,
             ecn_ect0: 0,
             ecn_ect1: 0,
@@ -1051,7 +1050,7 @@ impl Connection {
                     crypto.install_aes_gcm_initial(read_secret, write_secret);
                     crypto.install_hp_initial(read_secret, write_secret);
                     drop(crypto);
-                    self.refresh_app_seal_tag_reserve();
+                    self.refresh_short_header_tag_reserve();
                     self.next_send_pn_by_space[0] = 0;
                     self.pkt_spaces[0] = pnspace::PktNumSpace::default();
                 }
@@ -1067,7 +1066,19 @@ impl Connection {
         // across multiple generations before we receive packets in each phase.
         let mut rx_key_advances = 0usize;
         let (hdr_native, aad_len, pt_len) = loop {
-            let decrypt = {
+            let decrypt = if pre_ty == PacketType::Short {
+                let candidates = {
+                    let crypto_ref_for_rx = self.crypto.read();
+                    crypto_ref_for_rx.snapshot_short_header_rx()
+                };
+                packet::decrypt_short_header_candidates(
+                    &candidates,
+                    buf,
+                    short_dcid_len,
+                    largest_hint,
+                    pre_parsed_hdr.clone(),
+                )
+            } else {
                 let crypto_ref_for_rx = self.crypto.read();
                 packet::unprotect_and_decrypt_parsed(
                     &crypto_ref_for_rx,
@@ -1887,7 +1898,7 @@ impl Connection {
         // handshake completion and key installation are not dependent on receiving more CRYPTO.
         if let Some(provider) = &mut self.tls_provider {
             provider.poll_secrets_and_install(&self.crypto)?;
-            self.refresh_app_seal_tag_reserve();
+            self.refresh_short_header_tag_reserve();
         }
 
         let handshake_incomplete =
@@ -2225,7 +2236,7 @@ impl Connection {
         }
         if updated {
             self.key_phase = !self.key_phase;
-            self.refresh_app_seal_tag_reserve();
+            self.refresh_short_header_tag_reserve();
         }
     }
 
@@ -3306,13 +3317,13 @@ pub fn bench_paired_1rtt_connections_stealth(stealth_on: bool) -> BenchConnectio
         crypto.set_write_secret(Level::OneRTT, Algorithm::AES128_GCM, &client_write);
         crypto.set_read_secret(Level::OneRTT, Algorithm::AES128_GCM, &server_write);
     }
-    client.refresh_app_seal_tag_reserve();
+    client.refresh_short_header_tag_reserve();
     {
         let mut crypto = server.crypto.write();
         crypto.set_write_secret(Level::OneRTT, Algorithm::AES128_GCM, &server_write);
         crypto.set_read_secret(Level::OneRTT, Algorithm::AES128_GCM, &client_write);
     }
-    server.refresh_app_seal_tag_reserve();
+    server.refresh_short_header_tag_reserve();
 
     client.is_established = true;
     server.is_established = true;
