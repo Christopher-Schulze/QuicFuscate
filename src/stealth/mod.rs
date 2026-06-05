@@ -4715,10 +4715,10 @@ impl StealthManager {
         &self,
         _payload: &mut [u8],
     ) -> Option<std::time::Duration> {
-        // One primary timing owner per runtime state:
+        // Shaping delays are merged in core::QuicFuscateConnection::send() with transport
+        // jitter (when active). One release gate: next_packet_release.
         // - explicit realtime choke -> RateChoker
         // - Anti-DPI without choke -> FlowShaper
-        // - light Stealth timing stays on the transport timing gate
         let mut total_delay = std::time::Duration::ZERO;
         let mut choked_bytes = 0u64;
         let anti_mode = matches!(self.config.mode, StealthMode::AntiDpi);

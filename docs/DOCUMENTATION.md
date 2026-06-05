@@ -657,8 +657,9 @@ DNS-over-HTTPS now supports multiple providers with automatic round-robin rotati
 
 The stealth timing system has been fully refactored to eliminate blocking `std::thread::sleep()`:
 - `stealth::StealthManager::process_outgoing_packet()` returns `Option<Duration>` delay instead of blocking.
-- `core::QuicFuscateConnection` maintains `next_packet_release: Option<Instant>`.
+- `core::QuicFuscateConnection` is the single outbound timing owner via `next_packet_release: Option<Instant>`.
 - `send()` checks `next_packet_release`; if `now < release_time`, returns `Ok(0)` (yield) without blocking the reactor.
+- Transport stealth jitter (`stealth_timing_enabled` / `stealth_timing_max_jitter_us`) is merged into the same release deadline; `transport::Connection::send` no longer maintains a parallel gate.
 - When delay expires, clears the block and proceeds to flush `outgoing_fec_packets`.
 
 ### Compression Module

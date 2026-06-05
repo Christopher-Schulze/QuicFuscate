@@ -220,7 +220,6 @@ pub struct Connection {
     // Sent packet accounting: PN -> bytes (Application epoch)
     sent_bytes_by_pn: BTreeMap<u64, usize>,
     // Stealth timing: next eligible send time (if timing obfuscation enabled)
-    next_send_at: Option<Instant>,
     // Whether Brain may actively steer stealth runtime actuators for this connection.
     intelligent_stealth_runtime: bool,
     // Fine-grained lock surface for explicit operator transport overrides.
@@ -401,7 +400,6 @@ impl Connection {
             fec_cb_sent_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             fec_cb_lost_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             sent_bytes_by_pn: BTreeMap::new(),
-            next_send_at: None,
             intelligent_stealth_runtime: false,
             brain_runtime_permissions: crate::transport::BrainRuntimePermissions::default(),
             observer: None,
@@ -2046,15 +2044,7 @@ impl Connection {
                 &targeted_frame.frame,
             );
         }
-        // Stealth timing gate (disabled when external pacing is active)
-        if self.config.stealth_timing_enabled && !self.config.external_pacing {
-            let now = Instant::now();
-            if let Some(next) = self.next_send_at {
-                if now < next {
-                    return Err(ConnectionError::Done);
-                }
-            }
-        }
+        // Outbound stealth timing is owned by core::QuicFuscateConnection (next_packet_release).
         // Build short header prefix with DCID; we'll append PN bytes next
         let base_hdr = packet::Header {
             ty: PacketType::Short,
@@ -2140,15 +2130,6 @@ impl Connection {
         // Track sent bytes by packet number for precise ACK accounting
         self.sent_bytes_by_pn.insert(pn, total);
         self.cwnd = self.recovery.cwnd;
-        // Schedule next send time if timing obfuscation is enabled
-        if self.config.stealth_timing_enabled && !self.config.external_pacing {
-            let max_jitter_us = self.config.stealth_timing_max_jitter_us;
-            if max_jitter_us > 0 {
-                let jitter = crate::transport::rand::rand_u64_uniform(max_jitter_us as u64 + 1);
-                let next = Instant::now() + Duration::from_micros(jitter);
-                self.next_send_at = Some(next);
-            }
-        }
         Ok((total, info))
     }
 
@@ -2643,6 +2624,29 @@ impl Connection {
         self.config.ack_eliciting_threshold
     }
 
+    /// Whether the transport-level stealth jitter gate is active (core-owned scheduling).
+    pub(crate) fn transport_stealth_timing_active(&self) -> bool {
+        self.config.stealth_timing_enabled && !self.config.external_pacing
+    }
+
+    /// Configured transport stealth jitter ceiling in microseconds.
+    pub(crate) fn transport_stealth_timing_max_jitter_us(&self) -> u32 {
+        self.config.stealth_timing_max_jitter_us
+    }
+
+    /// Samples a transport stealth jitter delay when the gate is active.
+    pub(crate) fn transport_stealth_jitter_delay(&self) -> Option<Duration> {
+        if !self.transport_stealth_timing_active() {
+            return None;
+        }
+        let max_jitter_us = self.transport_stealth_timing_max_jitter_us();
+        if max_jitter_us == 0 {
+            return None;
+        }
+        let jitter_us = crate::transport::rand::rand_u64_uniform(max_jitter_us as u64 + 1);
+        Some(Duration::from_micros(jitter_us))
+    }
+
     /// Whether external pacing is enabled (internal sleeps disabled)
     #[cfg(any(test, feature = "rust-tests"))]
     pub fn external_pacing_enabled(&self) -> bool {
@@ -3112,12 +3116,6 @@ impl Connection {
         }
 
         let now = Instant::now();
-        if let Some(next) = self.next_send_at {
-            if next > now {
-                return Some(next);
-            }
-        }
-
         let rate_bps = self.recovery.get_pacing_rate().or(self.config.max_pacing_rate)?;
         if rate_bps == 0 || self.bytes_in_flight == 0 {
             return Some(now);
@@ -3878,5 +3876,26 @@ mod tests {
         assert!(c.intelligent_stealth_runtime_enabled_for_test());
         c.set_intelligent_stealth_runtime_for_test(false);
         assert!(!c.intelligent_stealth_runtime_enabled_for_test());
+    }
+
+    #[test]
+    fn transport_stealth_jitter_disabled_when_external_pacing() {
+        let mut c = make_conn();
+        c.set_stealth_timing(true, 5_000);
+        c.set_external_pacing_for_test(true);
+        assert!(!c.transport_stealth_timing_active());
+        assert!(c.transport_stealth_jitter_delay().is_none());
+    }
+
+    #[test]
+    fn transport_stealth_jitter_bounded_when_gate_active() {
+        let mut c = make_conn();
+        c.set_stealth_timing(true, 100);
+        c.set_external_pacing_for_test(false);
+        assert!(c.transport_stealth_timing_active());
+        let delay = c
+            .transport_stealth_jitter_delay()
+            .expect("jitter should be scheduled when gate active");
+        assert!(delay <= Duration::from_micros(100));
     }
 }

@@ -23,7 +23,7 @@ use std::sync::OnceLock;
 use crate::telemetry;
 use log::{debug, info, warn};
 use std::collections::VecDeque;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[cfg(feature = "orchestrator")]
 static ORCHESTRATOR: OnceLock<Arc<DeepIntegrationOrchestrator>> = OnceLock::new();
@@ -1009,12 +1009,17 @@ impl QuicFuscateConnection {
             self.outgoing_fec_packets.push_back(pkt);
         }
 
-        // If the StealthManager requested a delay, enforce it NOW.
-        // We have already buffered the packets in `outgoing_fec_packets`.
-        // We set the timer and return 0 (Yield). The next call to send() will check the timer.
+        // Single outbound stealth timing owner: core merges StealthManager shaping delay
+        // with transport jitter (when enabled) into one release deadline. Connection::send
+        // no longer maintains a parallel next_send_at gate.
         if established {
-            if let Some(delay) = delay_opt {
-                let release_at = now + delay;
+            let transport_jitter = self.conn.transport_stealth_jitter_delay();
+            if let Some(release_at) = Self::compute_outbound_stealth_release(
+                now,
+                delay_opt,
+                transport_jitter,
+            )
+            {
                 self.next_packet_release = Some(release_at);
                 return Ok(0); // Yield immediately, do not send the just-generated packets yet.
             }
@@ -1028,6 +1033,24 @@ impl QuicFuscateConnection {
         } else {
             Ok(0)
         }
+    }
+
+    /// Merges StealthManager delay and transport jitter into one release instant.
+    /// When both apply, the later deadline wins (no stacked duplicate yields).
+    pub(crate) fn compute_outbound_stealth_release(
+        now: Instant,
+        stealth_manager_delay: Option<Duration>,
+        transport_jitter: Option<Duration>,
+    ) -> Option<Instant> {
+        let mut release = stealth_manager_delay.map(|delay| now + delay);
+        if let Some(jitter) = transport_jitter {
+            let candidate = now + jitter;
+            release = Some(match release {
+                Some(current) => current.max(candidate),
+                None => candidate,
+            });
+        }
+        release
     }
 
     /// Starts validation for connection migration to a new network path.
@@ -1451,6 +1474,34 @@ mod tests {
         let mut headers = vec![crate::transport::h3::Header::new(b"host", b"example.com")];
         conn_stub.inject_qkey_auth(&mut headers);
         assert_eq!(headers.len(), 1);
+    }
+
+    #[test]
+    fn outbound_stealth_release_merges_to_single_latest_deadline() {
+        let now = Instant::now();
+        let manager_delay = Duration::from_millis(8);
+        let transport_jitter = Duration::from_millis(3);
+        let release = QuicFuscateConnection::compute_outbound_stealth_release(
+            now,
+            Some(manager_delay),
+            Some(transport_jitter),
+        )
+        .expect("both delays should produce a release");
+        assert_eq!(release, now + manager_delay);
+
+        let jitter_only = QuicFuscateConnection::compute_outbound_stealth_release(
+            now,
+            None,
+            Some(transport_jitter),
+        )
+        .expect("transport jitter alone should schedule release");
+        assert_eq!(jitter_only, now + transport_jitter);
+    }
+
+    #[test]
+    fn outbound_stealth_release_none_when_no_delays() {
+        let now = Instant::now();
+        assert!(QuicFuscateConnection::compute_outbound_stealth_release(now, None, None).is_none());
     }
 
     /// Minimal stub to test inject_qkey_auth_header without full QuicFuscateConnection
