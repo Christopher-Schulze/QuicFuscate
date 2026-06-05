@@ -1,7 +1,6 @@
 use crate::accelerate::compress::classify as classify_bytes;
 use crate::optimize::{CpuProfile, FeatureDetector, MemoryPool};
 use std::collections::HashMap;
-use std::io::Write;
 use std::sync::{Arc, Mutex, OnceLock};
 use zstd::stream::raw::CParameter;
 
@@ -241,38 +240,18 @@ impl CompressionManager {
         let orig_len = data.len() as u32;
         crate::optimize::telemetry::COMPRESS_BYTES_IN.inc_by(orig_len as u64);
         out[1..5].copy_from_slice(&orig_len.to_be_bytes());
-        let dst = &mut out[5..];
-        // Auto-gate: use streaming encoder for large payloads to reduce latency.
-        let mut encoder = match zstd::stream::Encoder::new(Vec::new(), self.cfg.max_level) {
-            Ok(enc) => enc,
+        let mut compressor = match zstd::bulk::Compressor::new(self.cfg.max_level) {
+            Ok(compressor) => compressor,
             Err(_) => return None,
         };
-        self.tune_encoder(&mut encoder, data.len(), &analysis);
-        if encoder.write_all(data).is_err() {
-            return None;
-        }
-        let z = match encoder.finish() {
-            Ok(buf) => buf,
+        tune_compressor_with_analysis(&mut compressor, data.len(), &analysis, self.cfg.max_level);
+        let compressed_len = match compressor.compress_to_buffer(data, &mut out[5..]) {
+            Ok(len) => len,
             Err(_) => return None,
         };
-        // Do not allow truncation: only copy if result fits.
-        if z.len() > dst.len() {
-            // Not enough space in current block - signal caller to skip compression.
-            return None;
-        }
-        dst[..z.len()].copy_from_slice(&z[..]);
         crate::optimize::telemetry::COMPRESS_SUCCESS.inc();
-        crate::optimize::telemetry::COMPRESS_BYTES_OUT.inc_by(z.len() as u64);
-        Some((out, 5 + z.len()))
-    }
-
-    fn tune_encoder(
-        &self,
-        encoder: &mut zstd::stream::Encoder<'_, Vec<u8>>,
-        input_len: usize,
-        analysis: &CompressionAnalysis,
-    ) {
-        tune_encoder_with_analysis(encoder, input_len, analysis, self.cfg.max_level);
+        crate::optimize::telemetry::COMPRESS_BYTES_OUT.inc_by(compressed_len as u64);
+        Some((out, 5 + compressed_len))
     }
 
     /// Decompress a pooled buffer created by compress_to_pool
@@ -302,18 +281,18 @@ impl CompressionManager {
     }
 }
 
-fn tune_encoder_with_analysis(
-    encoder: &mut zstd::stream::Encoder<'_, Vec<u8>>,
+fn tune_compressor_with_analysis(
+    compressor: &mut zstd::bulk::Compressor<'_>,
     input_len: usize,
     analysis: &CompressionAnalysis,
     max_level: i32,
 ) {
     fn set_param_best_effort(
-        encoder: &mut zstd::stream::Encoder<'_, Vec<u8>>,
+        compressor: &mut zstd::bulk::Compressor<'_>,
         parameter: CParameter,
         label: &'static str,
     ) {
-        if let Err(e) = encoder.set_parameter(parameter) {
+        if let Err(e) = compressor.set_parameter(parameter) {
             log::debug!("Zstd encoder parameter '{}' rejected: {}", label, e);
         }
     }
@@ -321,13 +300,13 @@ fn tune_encoder_with_analysis(
     let threads = std::thread::available_parallelism().map(|v| v.get()).unwrap_or(1);
     if threads > 1 && input_len >= 64 * 1024 {
         let workers = threads.min(8) as u32;
-        set_param_best_effort(encoder, CParameter::NbWorkers(workers), "NbWorkers");
+        set_param_best_effort(compressor, CParameter::NbWorkers(workers), "NbWorkers");
     }
 
     let textual = analysis.is_textual();
     if input_len >= 128 * 1024 || analysis.chunk_repeat_ratio() >= 0.35 {
         set_param_best_effort(
-            encoder,
+            compressor,
             CParameter::EnableLongDistanceMatching(true),
             "EnableLongDistanceMatching",
         );
@@ -343,25 +322,25 @@ fn tune_encoder_with_analysis(
         | CpuProfile::X86_P4a
         | CpuProfile::X86_P4b => {
             // Wider vectors benefit from larger target block sizes
-            set_param_best_effort(encoder, CParameter::TargetLength(8192), "TargetLength");
+            set_param_best_effort(compressor, CParameter::TargetLength(8192), "TargetLength");
         }
         CpuProfile::X86_P2a | CpuProfile::X86_P2b => {
             let target = if textual { 4096 } else { 6144 };
-            set_param_best_effort(encoder, CParameter::TargetLength(target), "TargetLength");
+            set_param_best_effort(compressor, CParameter::TargetLength(target), "TargetLength");
         }
         CpuProfile::ARM_A2 | CpuProfile::Apple_M => {
             let target = if textual { 3072 } else { 4096 };
-            set_param_best_effort(encoder, CParameter::TargetLength(target), "TargetLength");
+            set_param_best_effort(compressor, CParameter::TargetLength(target), "TargetLength");
         }
         _ => {
             let target = if textual { 2048 } else { 3072 };
-            set_param_best_effort(encoder, CParameter::TargetLength(target), "TargetLength");
+            set_param_best_effort(compressor, CParameter::TargetLength(target), "TargetLength");
         }
     }
 
     if textual && analysis.null_ratio() < 0.01 {
         set_param_best_effort(
-            encoder,
+            compressor,
             CParameter::CompressionLevel(max_level.max(6)),
             "CompressionLevel",
         );
@@ -691,7 +670,6 @@ pub fn compress_with_dict(
     dict_bytes: &[u8],
     dict_version: u32,
 ) -> Option<(aligned_box::AlignedBox<[u8]>, usize)> {
-    use std::io::Write;
     crate::optimize::telemetry::COMPRESS_ATTEMPTS.inc();
     let analysis = CompressionAnalysis::from_full(data);
     analysis.record_telemetry();
@@ -711,17 +689,9 @@ pub fn compress_with_dict(
     out[3..5].copy_from_slice(&(dict_version as u16).to_be_bytes());
     let orig_len = data.len() as u32;
     out[5..9].copy_from_slice(&orig_len.to_be_bytes());
-    let dst = &mut out[9..];
-    // EncoderDictionary
-    let mut enc = zstd::stream::Encoder::with_dictionary(Vec::new(), level, dict_bytes).ok()?;
-    tune_encoder_with_analysis(&mut enc, data.len(), &analysis, level);
-    enc.write_all(data).ok()?;
-    let z = enc.finish().ok()?;
-    let n = z.len().min(dst.len());
-    dst[..n].copy_from_slice(&z[..n]);
-    if n < z.len() {
-        crate::optimize::telemetry::COMPRESS_TRUNCATIONS.inc();
-    }
+    let mut compressor = zstd::bulk::Compressor::with_dictionary(level, dict_bytes).ok()?;
+    tune_compressor_with_analysis(&mut compressor, data.len(), &analysis, level);
+    let n = compressor.compress_to_buffer(data, &mut out[9..]).ok()?;
     crate::optimize::telemetry::COMPRESS_SUCCESS.inc();
     crate::optimize::telemetry::COMPRESS_DICT_USED.inc();
     crate::optimize::telemetry::COMPRESS_BYTES_IN.inc_by(orig_len as u64);
@@ -974,5 +944,49 @@ mod tests {
         };
         assert!((a.chunk_repeat_ratio() - 0.3).abs() < 0.01);
         assert!((a.chunk_skew() - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn compress_to_pool_roundtrip_uses_zstd_frame() {
+        let pool = Arc::new(MemoryPool::new(4, 16 * 1024));
+        let manager = CompressionManager::new(CompressionConfig::default());
+        let mut payload = Vec::new();
+        for _ in 0..64 {
+            payload.extend_from_slice(b"content-type: text/plain\r\nhello hello hello\r\n");
+        }
+
+        let (compressed, used) = manager.compress_to_pool(&pool, &payload).expect("compress");
+        assert_eq!(compressed[0], 0x5A);
+        assert_eq!(&compressed[1..5], &(payload.len() as u32).to_be_bytes());
+        assert!(used > 5);
+        assert!(used <= compressed.len());
+
+        let (decompressed, decompressed_len) =
+            manager.decompress_to_pool(&pool, &compressed[..used]).expect("decompress");
+        assert_eq!(decompressed_len, payload.len());
+        assert_eq!(&decompressed[..decompressed_len], payload.as_slice());
+    }
+
+    #[test]
+    fn compress_with_dict_roundtrip_uses_pool_buffer() {
+        let pool = body_pool();
+        let dict = b"header:value\ncontent-type:text/plain\nhello hello hello\n";
+        let mut payload = Vec::new();
+        for _ in 0..48 {
+            payload
+                .extend_from_slice(b"header:value\ncontent-type:text/plain\nhello hello hello\n");
+        }
+
+        let (compressed, used) =
+            compress_with_dict(&pool, &payload, 5, dict, 7).expect("compress with dict");
+        assert_eq!(compressed[0], 0x5D);
+        assert_eq!(&compressed[5..9], &(payload.len() as u32).to_be_bytes());
+        assert!(used > 9);
+        assert!(used <= compressed.len());
+
+        let (decompressed, decompressed_len) =
+            decompress_with_dict(&pool, &compressed[..used], dict).expect("decompress with dict");
+        assert_eq!(decompressed_len, payload.len());
+        assert_eq!(&decompressed[..decompressed_len], payload.as_slice());
     }
 }

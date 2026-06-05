@@ -433,8 +433,9 @@ cfg.log_keys();
   - It automatically selects between direct and streaming mode based on `QUICFUSCATE_ZSTD_STREAM_MIN` (default: 262,144 bytes).
   - Header semantics are identical to direct: `0x5A` (no dict) or `0x5D` (with dict-ID: 2B hash, 2B version, then 4B length).
 - Safe path (`src/compress.rs`):
-  - `CompressionManager::compress_to_pool()` automatically uses the streaming encoder (`zstd::stream::Encoder`) above the threshold.
-  - No API change; behavior is compatible, header remains `0x5A` in the safe path.
+  - `CompressionManager::compress_to_pool()` writes zstd output directly into the caller-provided pool block after the `0x5A` header via `zstd::bulk::Compressor::compress_to_buffer`.
+  - Dictionary compression writes directly into the body-pool block after the `0x5D` dictionary header via `zstd::bulk::Compressor::with_dictionary(...).compress_to_buffer(...)`.
+  - No API change; behavior is compatible, headers remain `0x5A` and `0x5D` in the safe path.
 
 #### Provider API (Unified)
 ```rust
@@ -677,6 +678,7 @@ The compression module (`src/compress.rs`) provides adaptive zstd payload compre
 - **`CompressionConfig`**: Configuration with minimum length thresholds and compression levels
 - **`CompressionPolicy`**: Runtime policy control for adaptive compression decisions
 - **`CompressionAnalysis`**: SIMD-powered preprocessing (ASCII/newline/null/high-bit counters + chunk hashing) feeding telemetry (`COMPRESS_PREPROC_*`) and influencing encoder tuning.
+- Pool-backed compression writes compressed zstd frames directly into `MemoryPool` / body-pool blocks with `compress_to_buffer`, avoiding an intermediate compressed `Vec` copy while preserving H3 payload semantics and wire headers.
 
 #### Supported Algorithms
 - **zstd** only (levels 1-22), with optional dictionary training
@@ -1618,7 +1620,7 @@ See "Unified TLS Provider (RealTLS + TLS Cover) -> Fingerprint Source Model" for
 #### Advanced Optimizations
 - Crypto hotpaths use target-feature gated intrinsics (`aes`, `sse2`, `avx2`, `vaes`, `neon`); runtime dispatch via `cpufeatures` selects the best backend.
 - AEGIS/MORUS implementations include unsafe blocks for SIMD lanes where necessary; all sensitive operations remain constant-time by design.
-- Transport/H3 uses zero-copy iovecs, io_uring fast paths (feature `io_uring`, crate `io-uring` v0.7) and aligned pools (`MemoryPool`) for minimal copies. The client `IoDriver` uses `UringBatchSender` (in `src/optimize/uring_batch.rs`) for batch `SendMsg` submission before falling back to `sendmmsg`, and uses pool-backed `UringRecvBatch` slots on Linux so inbound datagrams can enter FEC through `core::recv_pooled_block()` without an intermediate `Vec` copy.
+- Transport/H3 uses zero-copy iovecs, io_uring fast paths (feature `io_uring`, crate `io-uring` v0.7), pool-backed compression buffers, and aligned pools (`MemoryPool`) for minimal copies. The client `IoDriver` uses `UringBatchSender` (in `src/optimize/uring_batch.rs`) for batch `SendMsg` submission before falling back to `sendmmsg`, and uses pool-backed `UringRecvBatch` slots on Linux so inbound datagrams can enter FEC through `core::recv_pooled_block()` without an intermediate `Vec` copy.
 - Frame parsing is zero-copy: `Frame<'a>` uses `Cow<'a, [u8]>` for data fields, borrowing directly from the decrypted packet buffer in `from_bytes()`. Combined with the in-order Stream fast path (sequential data copies directly to recv_buf, skipping the recv_frags BTreeMap), the common-case receive path avoids heap allocation entirely.
 - Stealth hotpaths (header/QPACK building and persona-driven shaping) prefer SIMD kernels with safe scalar fallback; mutex/atomic usage is minimized in hotpaths.
 

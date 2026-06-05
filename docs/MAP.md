@@ -8,6 +8,7 @@ It is maintained as the current architecture and repository index, with a curate
 - Runtime core: Rust crate under `src/` with entrypoints in `src/main.rs` and `src/lib.rs`.
 - Data path wiring: app or TUN ingress -> core/transport -> stealth shaping -> crypto -> FEC -> network I/O.
 - Packet crypto wiring: Initial/Handshake use boxed AES-GCM compatibility keys; normal 0-RTT/1-RTT data-plane AEAD uses `DataAead` enum dispatch; Rustls packet-key integrations use the explicit dynamic packet wrapper arm.
+- Compression wiring: `src/compress.rs` writes safe-path zstd output directly into `MemoryPool` / body-pool blocks via `compress_to_buffer`; H3 compression semantics and `0x5A` / `0x5D` frame headers remain unchanged.
 - Client packet I/O is owned by `src/implementations/client/io_driver.rs` plus `src/core.rs`; `src/implementations/client/pipeline.rs` is not part of the production module graph.
 - Control plane wiring: CLI + engine + admin surfaces + metrics/telemetry endpoints.
 - UI wiring: `apps/svelte-desktop` (Svelte 5 desktop frontend) and `apps/svelte-admin` (SvelteKit/Svelte 5 admin frontend) are the active UI surfaces. The retained native desktop host/runtime bridge lives in `apps/tauri/src-tauri`. Shared UI primitives live in `packages/ui` (Svelte components) and `packages/theme` (CSS).
@@ -87,15 +88,16 @@ Uses `StealthConfig::from_mode(runtime_mode)` - was silently using `..Default::d
 4. FEC encode/decode path: `src/fec/` (`AdaptiveFec`) -> transport observer hooks -> packet egress/ingress
 5. Linux client zero-copy inbound path: `src/implementations/client/io_driver.rs` -> pool-backed `src/optimize/uring_batch.rs` `UringRecvBatch` -> `src/core.rs` `recv_pooled_block()` -> `src/fec/mod.rs` -> `src/transport/connection.rs`
 6. Packet-number decode path: `src/transport/packet.rs` header-protection removal -> `src/optimize/transport.rs` `decode_packet_number()` -> BMI2/SVE2/NEON/scalar dispatch
-7. Probe mitigation path: `src/stealth/` detector -> `src/reality.rs` fallback proxy -> upstream targets
-8. Engine embedding path: `src/engine/engine.rs` -> `src/implementations/{client,server}/` runtimes
-9. Admin control plane path: `src/implementations/server/admin_http.rs` -> `qkey_registry.rs` -> live server policy enforcement
-10. Desktop frontend path: `apps/svelte-desktop/src/lib/stores/tauri-bridge.svelte.ts` -> Tauri invoke -> engine/control runtime
-11. 0-RTT anti-replay path: `src/transport/anti_replay.rs` (`StrikeRegister`) -> `src/transport/config.rs` (attached at server startup) -> `src/transport/connection.rs` `recv()` gate -> silent discard on replay
-12. Desktop native host path: `apps/tauri/src-tauri/src/main.rs` -> Tauri commands -> engine/control runtime
-13. Web-admin path: `apps/svelte-admin/src/lib/api.ts` -> Vite dev proxy (`/api` -> `127.0.0.1:9000`) -> admin HTTP endpoints -> server runtime state
-14. Build publish path: `scripts/build/build-web-admin.sh` -> `assets/web-admin/` consumed by `--admin-web-root`
-15. Shared packages path: `packages/ui` (Svelte 5 components) + `packages/theme` (CSS tokens/glass/layout) -> consumed by both Svelte apps
+7. Compression pool path: `src/transport/h3.rs` payload policy -> `src/compress.rs` direct zstd `compress_to_buffer` into `MemoryPool` / body-pool blocks -> H3 compressed body bytes
+8. Probe mitigation path: `src/stealth/` detector -> `src/reality.rs` fallback proxy -> upstream targets
+9. Engine embedding path: `src/engine/engine.rs` -> `src/implementations/{client,server}/` runtimes
+10. Admin control plane path: `src/implementations/server/admin_http.rs` -> `qkey_registry.rs` -> live server policy enforcement
+11. Desktop frontend path: `apps/svelte-desktop/src/lib/stores/tauri-bridge.svelte.ts` -> Tauri invoke -> engine/control runtime
+12. 0-RTT anti-replay path: `src/transport/anti_replay.rs` (`StrikeRegister`) -> `src/transport/config.rs` (attached at server startup) -> `src/transport/connection.rs` `recv()` gate -> silent discard on replay
+13. Desktop native host path: `apps/tauri/src-tauri/src/main.rs` -> Tauri commands -> engine/control runtime
+14. Web-admin path: `apps/svelte-admin/src/lib/api.ts` -> Vite dev proxy (`/api` -> `127.0.0.1:9000`) -> admin HTTP endpoints -> server runtime state
+15. Build publish path: `scripts/build/build-web-admin.sh` -> `assets/web-admin/` consumed by `--admin-web-root`
+16. Shared packages path: `packages/ui` (Svelte 5 components) + `packages/theme` (CSS tokens/glass/layout) -> consumed by both Svelte apps
 
 ## ASCII Repository Tree (curated tracked-source snapshot)
 
