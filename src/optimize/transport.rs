@@ -110,22 +110,23 @@ fn aggregate_congestion_scalar(samples: &[CongestionSample]) -> CongestionSummar
 unsafe fn aggregate_congestion_vnni(samples: &[CongestionSample]) -> CongestionSummary {
     CONGESTION_VNNI_BATCHES.inc_by(samples.len() as u64);
 
-    let mut cwnd = Vec::with_capacity(samples.len());
-    let mut inflight = Vec::with_capacity(samples.len());
-    let mut delivery = Vec::with_capacity(samples.len());
-    let mut lost = Vec::with_capacity(samples.len());
-
-    for sample in samples {
-        cwnd.push(sample.cwnd);
-        inflight.push(sample.bytes_in_flight);
-        delivery.push(sample.delivery_rate);
-        lost.push(sample.lost_packets);
+    // Stack buffers: congestion window is bounded by CONGESTION_WINDOW_SIZE (64).
+    let mut cwnd = [0u32; CONGESTION_WINDOW_SIZE];
+    let mut inflight = [0u32; CONGESTION_WINDOW_SIZE];
+    let mut delivery = [0u32; CONGESTION_WINDOW_SIZE];
+    let mut lost = [0u32; CONGESTION_WINDOW_SIZE];
+    let n = samples.len().min(CONGESTION_WINDOW_SIZE);
+    for (i, sample) in samples.iter().take(n).enumerate() {
+        cwnd[i] = sample.cwnd;
+        inflight[i] = sample.bytes_in_flight;
+        delivery[i] = sample.delivery_rate;
+        lost[i] = sample.lost_packets;
     }
 
-    let total_cwnd = sum_u32_vnni(&cwnd);
-    let total_inflight = sum_u32_vnni(&inflight);
-    let total_delivery = sum_u32_vnni(&delivery);
-    let total_lost = sum_u32_vnni(&lost);
+    let total_cwnd = sum_u32_vnni(&cwnd[..n]);
+    let total_inflight = sum_u32_vnni(&inflight[..n]);
+    let total_delivery = sum_u32_vnni(&delivery[..n]);
+    let total_lost = sum_u32_vnni(&lost[..n]);
 
     let congestion_score =
         total_inflight / 1024 + total_lost * 4096 + total_cwnd * 64 + total_delivery / 8192;
