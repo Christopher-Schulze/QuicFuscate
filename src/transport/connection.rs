@@ -984,17 +984,22 @@ impl Connection {
         // Pre-parse header to determine space and largest PN hint.
         // For short headers, DCID length is the local SCID length (the peer routes to our CID).
         let short_dcid_len = self.scid.as_ref().len();
-        let (pre_ty, largest_hint) = match packet::parse_header(buf, short_dcid_len) {
-            Ok((hdr_native, _)) => {
+        let (pre_ty, largest_hint, pre_parsed_hdr) = match packet::parse_header(buf, short_dcid_len)
+        {
+            Ok((hdr_native, pn_off)) => {
                 let t = hdr_native.ty;
                 let idx = match t {
                     PacketType::Initial => 0,
                     PacketType::Handshake => 1,
                     _ => 2,
                 };
-                (t, self.pkt_spaces[idx].largest_recv.unwrap_or(0))
+                (
+                    t,
+                    self.pkt_spaces[idx].largest_recv.unwrap_or(0),
+                    Some((hdr_native, pn_off)),
+                )
             }
-            Err(_) => (PacketType::Short, 0),
+            Err(_) => (PacketType::Short, 0, None),
         };
 
         // Retry verification (no payload decrypt)
@@ -1043,7 +1048,13 @@ impl Connection {
         let (hdr_native, aad_len, pt_len) = loop {
             let decrypt = {
                 let crypto_ref_for_rx = self.crypto.read();
-                packet::unprotect_and_decrypt(&crypto_ref_for_rx, buf, short_dcid_len, largest_hint)
+                packet::unprotect_and_decrypt_parsed(
+                    &crypto_ref_for_rx,
+                    buf,
+                    short_dcid_len,
+                    largest_hint,
+                    pre_parsed_hdr.clone(),
+                )
             };
             match decrypt {
                 Ok(v) => break v,

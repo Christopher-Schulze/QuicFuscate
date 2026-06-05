@@ -812,7 +812,8 @@ pub fn select_data_aead(
     key: &[u8],
     iv: &[u8],
 ) -> (Box<dyn AeadSeal + Send + Sync>, Box<dyn AeadOpen + Send + Sync>) {
-    const DEFAULT_TRANSPORT_AEAD_WORKLOAD_LEN: usize = crate::transport::MIN_CLIENT_INITIAL_LEN;
+    const DEFAULT_TRANSPORT_AEAD_WORKLOAD_LEN: usize =
+        crate::transport::TYPICAL_1RTT_PAYLOAD_LEN;
 
     // Normalize key/iv materials
     let mut k16 = [0u8; 16];

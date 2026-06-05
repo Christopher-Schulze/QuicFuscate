@@ -480,6 +480,10 @@ impl ConnectionId {
 /// Minimum size of a client Initial packet per RFC 9000 Section 14.1 (1200 bytes).
 pub const MIN_CLIENT_INITIAL_LEN: usize = 1200;
 
+/// Representative 1-RTT datagram payload size for data-plane AEAD backend selection.
+/// Slightly below typical path MTU (1500) minus IP/UDP/QUIC short-header overhead.
+pub const TYPICAL_1RTT_PAYLOAD_LEN: usize = 1400;
+
 /// Initial congestion window size in bytes.
 pub const INITIAL_WINDOW: usize = 14720;
 

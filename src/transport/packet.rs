@@ -386,8 +386,12 @@ fn unprotect_and_decrypt_with_key(
     buf: &mut [u8],
     short_dcid_len: usize,
     largest_pn_hint: u64,
+    pre_parsed: Option<(Header, usize)>,
 ) -> Result<(Header, usize, usize), ConnectionError> {
-    let (mut hdr, pn_off) = parse_header(buf, short_dcid_len)?;
+    let (mut hdr, pn_off) = match pre_parsed {
+        Some(parsed) => parsed,
+        None => parse_header(buf, short_dcid_len)?,
+    };
 
     // Remove header protection when sample is available; otherwise accept unprotected headers.
     // Sample is taken 4 bytes after the PN offset.
@@ -465,8 +469,24 @@ pub fn unprotect_and_decrypt(
     short_dcid_len: usize,
     largest_pn_hint: u64,
 ) -> Result<(Header, usize, usize), ConnectionError> {
-    // Parse once to identify packet class and route to the right key set.
-    let (hdr, pn_off) = parse_header(buf, short_dcid_len)?;
+    unprotect_and_decrypt_parsed(crypto, buf, short_dcid_len, largest_pn_hint, None)
+}
+
+/// Like [`unprotect_and_decrypt`], but accepts an optional pre-parsed header to avoid
+/// redundant header parsing on the recv hot path.
+pub fn unprotect_and_decrypt_parsed(
+    crypto: &CryptoContext,
+    buf: &mut [u8],
+    short_dcid_len: usize,
+    largest_pn_hint: u64,
+    pre_parsed: Option<(Header, usize)>,
+) -> Result<(Header, usize, usize), ConnectionError> {
+    // Parse once (or reuse caller parse) to identify packet class and route to the right key set.
+    let (hdr, pn_off) = match pre_parsed {
+        Some(parsed) => parsed,
+        None => parse_header(buf, short_dcid_len)?,
+    };
+    let parsed = (hdr.clone(), pn_off);
     match hdr.ty {
         PacketType::Initial => {
             let (hp, aead) = match (
@@ -476,7 +496,14 @@ pub fn unprotect_and_decrypt(
                 (Some(hp), Some(aead)) => (hp.as_ref(), aead.as_ref()),
                 _ => return Err(ConnectionError::Done),
             };
-            unprotect_and_decrypt_with_key(hp, aead, buf, short_dcid_len, largest_pn_hint)
+            unprotect_and_decrypt_with_key(
+                hp,
+                aead,
+                buf,
+                short_dcid_len,
+                largest_pn_hint,
+                Some(parsed),
+            )
         }
         PacketType::Handshake => {
             let (hp, aead) = match (
@@ -486,7 +513,14 @@ pub fn unprotect_and_decrypt(
                 (Some(hp), Some(aead)) => (hp.as_ref(), aead.as_ref()),
                 _ => return Err(ConnectionError::Done),
             };
-            unprotect_and_decrypt_with_key(hp, aead, buf, short_dcid_len, largest_pn_hint)
+            unprotect_and_decrypt_with_key(
+                hp,
+                aead,
+                buf,
+                short_dcid_len,
+                largest_pn_hint,
+                Some(parsed),
+            )
         }
         PacketType::ZeroRTT => {
             let (hp, aead) = match (
@@ -496,7 +530,14 @@ pub fn unprotect_and_decrypt(
                 (Some(hp), Some(aead)) => (hp.as_ref(), aead.as_ref()),
                 _ => return Err(ConnectionError::Done),
             };
-            unprotect_and_decrypt_with_key(hp, aead, buf, short_dcid_len, largest_pn_hint)
+            unprotect_and_decrypt_with_key(
+                hp,
+                aead,
+                buf,
+                short_dcid_len,
+                largest_pn_hint,
+                Some(parsed),
+            )
         }
         PacketType::Short => {
             let mut candidates: Vec<(&dyn HeaderProtector, &dyn crate::crypto::aead::AeadOpen)> =
@@ -521,8 +562,15 @@ pub fn unprotect_and_decrypt(
                         buf.copy_from_slice(orig);
                     }
                 }
-                match unprotect_and_decrypt_with_key(hp, aead, buf, short_dcid_len, largest_pn_hint)
-                {
+                let pre = if i == 0 { Some(parsed.clone()) } else { None };
+                match unprotect_and_decrypt_with_key(
+                    hp,
+                    aead,
+                    buf,
+                    short_dcid_len,
+                    largest_pn_hint,
+                    pre,
+                ) {
                     Ok(v) => return Ok(v),
                     Err(e) => last_err = e,
                 }
