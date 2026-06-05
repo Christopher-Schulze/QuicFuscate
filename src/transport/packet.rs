@@ -422,24 +422,12 @@ fn unprotect_and_decrypt_with_key(
         return Err(ConnectionError::BufferTooShort);
     }
 
-    let mut pn = 0u64;
+    let mut encoded_pn = 0u32;
     for i in 0..pn_len {
-        pn = (pn << 8) | buf[pn_off + i] as u64;
+        encoded_pn = (encoded_pn << 8) | buf[pn_off + i] as u32;
     }
-
-    let pn_nbits = pn_len * 8;
-    let expected_pn = largest_pn_hint + 1;
-    let pn_win = 1u64 << pn_nbits;
-    let pn_hwin = pn_win / 2;
-    let candidate = (expected_pn & !(pn_win - 1)) | pn;
-
-    hdr.pkt_num = if candidate + pn_hwin <= expected_pn {
-        candidate + pn_win
-    } else if candidate > expected_pn + pn_hwin && candidate >= pn_win {
-        candidate - pn_win
-    } else {
-        candidate
-    };
+    hdr.pkt_num =
+        crate::optimize::transport::decode_packet_number(encoded_pn, largest_pn_hint, pn_len as u8);
 
     let aad_len = pn_off + pn_len;
     let payload_off = aad_len;

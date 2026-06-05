@@ -5,9 +5,7 @@
 use crate::optimize::telemetry::CONGESTION_NEON_BATCHES;
 #[cfg(all(target_arch = "x86_64", any(test, feature = "rust-tests")))]
 use crate::optimize::telemetry::{CONGESTION_AVX2_BATCHES, CONGESTION_VNNI_BATCHES};
-#[cfg(all(target_arch = "x86_64", any(test, feature = "rust-tests")))]
-use crate::optimize::CpuProfile;
-#[cfg(all(target_arch = "aarch64", any(test, feature = "rust-tests")))]
+#[cfg(any(test, feature = "rust-tests"))]
 use crate::optimize::CpuProfile;
 use crate::optimize::FeatureDetector;
 use crate::transport::Stats;
@@ -721,43 +719,28 @@ unsafe fn count_ecn_marks_sve2(bitmap: &[u64]) -> u32 {
 
 /// Fast packet number decoding with BMI2 PEXT
 #[inline(always)]
-#[cfg(any(test, feature = "rust-tests"))]
 pub fn decode_packet_number(encoded: u32, expected: u64, pn_len: u8) -> u64 {
     if pn_len == 0 {
         return expected;
     }
 
-    let _profile = FeatureDetector::instance().profile();
-
     #[cfg(target_arch = "x86_64")]
-    match _profile {
-        CpuProfile::X86_P2b
-        | CpuProfile::X86_P3a
-        | CpuProfile::X86_P3b
-        | CpuProfile::X86_P3c
-        | CpuProfile::X86_P3d
-        | CpuProfile::X86_P3e
-        | CpuProfile::X86_P4a
-        | CpuProfile::X86_P4b => {
+    {
+        let features = FeatureDetector::instance().features_full();
+        if features.bmi2 {
             return unsafe { decode_packet_number_bmi2(encoded, expected, pn_len) };
         }
-        _ => {}
     }
 
     #[cfg(target_arch = "aarch64")]
-    match _profile {
-        CpuProfile::ARM_A2 => unsafe {
-            return decode_packet_number_sve2(encoded, expected, pn_len);
-        },
-        CpuProfile::ARM_A0
-        | CpuProfile::ARM_A1a
-        | CpuProfile::ARM_A1b
-        | CpuProfile::ARM_A1c
-        | CpuProfile::ARM_A1d
-        | CpuProfile::Apple_M => unsafe {
-            return decode_packet_number_neon(encoded, expected, pn_len);
-        },
-        _ => {}
+    {
+        let features = FeatureDetector::instance().features_full();
+        if features.sve2 {
+            return unsafe { decode_packet_number_sve2(encoded, expected, pn_len) };
+        }
+        if features.neon {
+            return unsafe { decode_packet_number_neon(encoded, expected, pn_len) };
+        }
     }
 
     // Scalar fallback
@@ -769,7 +752,7 @@ pub fn decode_packet_number(encoded: u32, expected: u64, pn_len: u8) -> u64 {
     finalize_packet_number(candidate, expected_pn, pn_bits)
 }
 
-#[cfg(all(target_arch = "x86_64", any(test, feature = "rust-tests")))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "bmi2")]
 unsafe fn decode_packet_number_bmi2(encoded: u32, expected: u64, pn_len: u8) -> u64 {
     // Use PEXT to extract packet number bits efficiently
@@ -788,7 +771,6 @@ unsafe fn decode_packet_number_bmi2(encoded: u32, expected: u64, pn_len: u8) -> 
     finalize_packet_number(candidate, expected_pn, pn_bits)
 }
 
-#[cfg(any(test, feature = "rust-tests"))]
 #[inline(always)]
 fn finalize_packet_number(candidate: u64, expected_pn: u64, pn_bits: u32) -> u64 {
     debug_assert!(pn_bits > 0 && pn_bits <= 32);
@@ -807,7 +789,7 @@ fn finalize_packet_number(candidate: u64, expected_pn: u64, pn_bits: u32) -> u64
     }
 }
 
-#[cfg(all(target_arch = "aarch64", any(test, feature = "rust-tests")))]
+#[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 unsafe fn decode_packet_number_neon(encoded: u32, expected: u64, pn_len: u8) -> u64 {
     use std::arch::aarch64::*;
@@ -828,7 +810,7 @@ unsafe fn decode_packet_number_neon(encoded: u32, expected: u64, pn_len: u8) -> 
     finalize_packet_number(candidate, expected_pn, pn_bits)
 }
 
-#[cfg(all(target_arch = "aarch64", any(test, feature = "rust-tests")))]
+#[cfg(target_arch = "aarch64")]
 unsafe fn decode_packet_number_sve2(encoded: u32, expected: u64, pn_len: u8) -> u64 {
     #[cfg(target_feature = "sve2")]
     {
@@ -841,7 +823,7 @@ unsafe fn decode_packet_number_sve2(encoded: u32, expected: u64, pn_len: u8) -> 
     }
 }
 
-#[cfg(all(target_arch = "aarch64", target_feature = "sve2", any(test, feature = "rust-tests")))]
+#[cfg(all(target_arch = "aarch64", target_feature = "sve2"))]
 #[target_feature(enable = "sve2")]
 unsafe fn decode_packet_number_sve2_impl(encoded: u32, expected: u64, pn_len: u8) -> u64 {
     use std::arch::aarch64::*;

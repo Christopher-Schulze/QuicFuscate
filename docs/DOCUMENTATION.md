@@ -26,6 +26,7 @@
 | `transport::batch` | `experimental/internal` | rust-parity/test-only transport surface |
 | `accelerate::*` parity helpers | `compat-only` | internal runtime owner plus explicit `rust-tests` parity surface |
 | `accelerate::random` helpers | `compat-only` | heuristic/perf helper surface only |
+| Packet-number decode dispatch | `active` | `transport::packet` calls `optimize::transport::decode_packet_number()` after header protection removal; BMI2/SVE2/NEON/scalar dispatch preserves QUIC reconstruction semantics |
 
 ## Runtime Complexity Layer Model
 
@@ -71,6 +72,9 @@ This section is the fast path for skeptical review. It is not a marketing summar
   `core::recv_pooled_block()` while immediately arming the ring slot with a replacement block.
   This removes the io_uring-to-FEC memcpy on the Linux client fast path. Fallback to Tokio
   `recv()` + `try_recv()` when io_uring is unavailable.
+- Packet-number decode on packet open is centralized in `src/optimize/transport.rs`:
+  `src/transport/packet.rs` removes header protection, rebuilds the encoded packet-number field,
+  then dispatches through BMI2 on x86_64, SVE2/NEON on aarch64, or the scalar fallback.
 - busy-poll socket tuning is not used.
 
 ### Shortest Audit Path
@@ -1232,8 +1236,8 @@ Optimize submodules (`src/optimize/`):
 - `src/optimize/string.rs` - string/text acceleration helpers.
 - `src/optimize/telemetry.rs` - global telemetry counters and snapshot/export helpers.
 - `src/optimize/transport.rs` - transport acceleration helpers.
-  - Runtime-owned entrypoint: `aggregate_congestion(...)` for rolling congestion-window summarization in `src/core.rs`.
-  - Parity/test-only helpers: bitmap range ops, ECN popcount, packet-number decode, ACK-range search, and stream-frame parsing acceleration are gated behind `cfg(any(test, feature = "rust-tests"))`.
+  - Runtime-owned entrypoints: `aggregate_congestion(...)` for rolling congestion-window summarization in `src/core.rs`, and `decode_packet_number(...)` for packet-open PN reconstruction in `src/transport/packet.rs`.
+  - Parity/test-only helpers: bitmap range ops, ECN popcount, ACK-range search, and stream-frame parsing acceleration are gated behind `cfg(any(test, feature = "rust-tests"))`.
 - `src/optimize/udp.rs` - UDP fastpath helper layer.
 - `src/optimize/unsafe.rs` - unsafe FFI backend for zstd compression.
 - `src/optimize/uring_batch.rs` - io_uring batch sender (Linux-only, feature-gated).

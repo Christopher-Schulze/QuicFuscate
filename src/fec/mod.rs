@@ -4528,7 +4528,7 @@ impl Decoder8 {
     }
 
     /// Returns true if enough source packets have been recovered to fill the block.
-    #[cfg(any(test, feature = "rust-tests"))]
+    #[cfg(test)]
     pub fn is_complete(&self) -> bool {
         self.known.len() >= self.k
     }
