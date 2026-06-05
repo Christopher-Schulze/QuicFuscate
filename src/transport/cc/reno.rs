@@ -66,7 +66,8 @@ impl CongestionController for Reno {
         } else {
             // Congestion avoidance: AIMD additive increase
             // Increase by MSS * acked_bytes / cwnd per ACK (roughly MSS per RTT)
-            let increase = (self.mss as u64 * acked_bytes as u64 / self.cwnd.max(1) as u64) as usize;
+            let increase =
+                (self.mss as u64 * acked_bytes as u64 / self.cwnd.max(1) as u64) as usize;
             self.cwnd += increase.max(1);
         }
 
@@ -262,8 +263,12 @@ mod tests {
         let sp = Arc::clone(&sent_pkt);
         let lp = Arc::clone(&lost_pkt);
         reno.set_fec_callbacks(
-            Arc::new(move |pn, _| { sp.store(pn, Ordering::Relaxed); }),
-            Arc::new(move |pn, _| { lp.store(pn, Ordering::Relaxed); }),
+            Arc::new(move |pn, _| {
+                sp.store(pn, Ordering::Relaxed);
+            }),
+            Arc::new(move |pn, _| {
+                lp.store(pn, Ordering::Relaxed);
+            }),
         );
         let now = Instant::now();
         reno.on_packet_sent(7, mss, now);

@@ -812,8 +812,8 @@ pub mod varint {
 
 #[cfg(test)]
 mod tests {
-    use super::ranges::RangeSet;
     use super::pnspace::PktNumSpace;
+    use super::ranges::RangeSet;
     use super::varint;
 
     // --- RangeSet tests ---
@@ -939,7 +939,17 @@ mod tests {
 
     #[test]
     fn varint_write_read_roundtrip() {
-        let test_values = [0u64, 1, 63, 64, 16383, 16384, 1_073_741_823, 1_073_741_824, 4_611_686_018_427_387_903];
+        let test_values = [
+            0u64,
+            1,
+            63,
+            64,
+            16383,
+            16384,
+            1_073_741_823,
+            1_073_741_824,
+            4_611_686_018_427_387_903,
+        ];
         for &v in &test_values {
             let mut buf = [0u8; 8];
             let written = varint::write_varint(v, &mut buf).unwrap();

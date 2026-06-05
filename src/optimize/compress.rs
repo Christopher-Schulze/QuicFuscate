@@ -418,7 +418,11 @@ mod tests {
             let is_null = b == 0;
             let is_high = b & 0x80 != 0;
 
-            assert_eq!(c.ascii_printable, u32::from(is_printable), "byte {b:#04X}: ascii_printable");
+            assert_eq!(
+                c.ascii_printable,
+                u32::from(is_printable),
+                "byte {b:#04X}: ascii_printable"
+            );
             assert_eq!(c.newline, u32::from(is_newline), "byte {b:#04X}: newline");
             assert_eq!(c.carriage_return, u32::from(is_cr), "byte {b:#04X}: carriage_return");
             assert_eq!(c.tab, u32::from(is_tab), "byte {b:#04X}: tab");
@@ -432,7 +436,10 @@ mod tests {
                 + u32::from(is_tab)
                 + u32::from(is_null)
                 + u32::from(is_high);
-            assert!(primary_count <= 1, "byte {b:#04X}: classified into {primary_count} categories");
+            assert!(
+                primary_count <= 1,
+                "byte {b:#04X}: classified into {primary_count} categories"
+            );
         }
     }
 
@@ -482,10 +489,11 @@ mod tests {
         assert_eq!(c.tab, repeats as u32);
         assert_eq!(c.nulls, repeats as u32);
         assert_eq!(c.high_bytes, repeats as u32); // 0xFF
-        // 0x01 is "other" - not counted in any bucket
+                                                  // 0x01 is "other" - not counted in any bucket
 
         // Verify totals: counted categories + uncounted "other" = total length
-        let counted = c.ascii_printable + c.newline + c.carriage_return + c.tab + c.nulls + c.high_bytes;
+        let counted =
+            c.ascii_printable + c.newline + c.carriage_return + c.tab + c.nulls + c.high_bytes;
         let uncounted = 4096 - counted as usize; // 0x01 bytes
         assert_eq!(uncounted, repeats); // 512 bytes of 0x01
     }

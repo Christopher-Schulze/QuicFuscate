@@ -10,8 +10,8 @@ use core::time::Duration;
 use std::sync::Arc;
 use std::time::Instant;
 
-use super::cc::{self, CcImpl, CongestionController};
 pub use super::cc::stealth_shaper::BrowserProfile;
+use super::cc::{self, CcImpl, CongestionController};
 
 /// QUIC loss recovery and congestion control state.
 ///
@@ -110,27 +110,24 @@ impl Recovery {
                 let placeholder = CcImpl::Reno(cc::reno::Reno::new(self.cwnd, self.mss));
                 let old = std::mem::replace(&mut self.cc, placeholder);
                 if let CcImpl::Bbr3(inner) = old {
-                    self.cc = CcImpl::StealthBbr3(
-                        cc::stealth_shaper::StealthShaper::new(inner, profile),
-                    );
+                    self.cc =
+                        CcImpl::StealthBbr3(cc::stealth_shaper::StealthShaper::new(inner, profile));
                 }
             }
             CcImpl::Bbr2(_) if enabled => {
                 let placeholder = CcImpl::Reno(cc::reno::Reno::new(self.cwnd, self.mss));
                 let old = std::mem::replace(&mut self.cc, placeholder);
                 if let CcImpl::Bbr2(inner) = old {
-                    self.cc = CcImpl::StealthBbr2(
-                        cc::stealth_shaper::StealthShaper::new(inner, profile),
-                    );
+                    self.cc =
+                        CcImpl::StealthBbr2(cc::stealth_shaper::StealthShaper::new(inner, profile));
                 }
             }
             CcImpl::Reno(_) if enabled => {
                 let placeholder = CcImpl::Reno(cc::reno::Reno::new(self.cwnd, self.mss));
                 let old = std::mem::replace(&mut self.cc, placeholder);
                 if let CcImpl::Reno(inner) = old {
-                    self.cc = CcImpl::StealthReno(
-                        cc::stealth_shaper::StealthShaper::new(inner, profile),
-                    );
+                    self.cc =
+                        CcImpl::StealthReno(cc::stealth_shaper::StealthShaper::new(inner, profile));
                 }
             }
             _ => {}
@@ -143,8 +140,7 @@ impl Recovery {
         F1: Fn(u64, usize) + Send + Sync + 'static,
         F2: Fn(u64, usize) + Send + Sync + 'static,
     {
-        self.cc
-            .set_fec_callbacks(Arc::new(on_sent), Arc::new(on_lost));
+        self.cc.set_fec_callbacks(Arc::new(on_sent), Arc::new(on_lost));
     }
 
     /// Sync pub fields from the inner CC after a mutation.
@@ -289,8 +285,7 @@ mod tests {
 
     #[test]
     fn test_reno_algorithm() {
-        let mut recovery =
-            Recovery::with_algorithm(12_000, 1200, super::cc::Algorithm::Reno);
+        let mut recovery = Recovery::with_algorithm(12_000, 1200, super::cc::Algorithm::Reno);
         let now = Instant::now();
         recovery.on_packet_sent(1, 1200, now);
         recovery.on_ack(1200, now);

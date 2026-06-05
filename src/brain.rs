@@ -259,7 +259,6 @@ struct StealthBrainState {
     iat_hist_snap: Vec<u64>,
 }
 
-
 /// Actuator decisions produced by the consolidated mutation write-lock phase.
 struct PolicyActuatorSnap {
     ce_ratio_recent: f64,
@@ -775,15 +774,14 @@ impl TransportObserver for StealthBrain {
             let interval_changed = interval_u64 != st.last_fec_interval;
             let due = now.duration_since(st.last_fec_update) > Duration::from_millis(300);
 
-            let (fec_hint_ppm, fec_hint_interval) =
-                if ppm_changed || interval_changed || due {
-                    st.last_red_ppm = ppm_u64;
-                    st.last_fec_interval = interval_u64;
-                    st.last_fec_update = now;
-                    (Some(ppm_u64 as u32), Some(interval_u64))
-                } else {
-                    (None, None)
-                };
+            let (fec_hint_ppm, fec_hint_interval) = if ppm_changed || interval_changed || due {
+                st.last_red_ppm = ppm_u64;
+                st.last_fec_interval = interval_u64;
+                st.last_fec_update = now;
+                (Some(ppm_u64 as u32), Some(interval_u64))
+            } else {
+                (None, None)
+            };
 
             let size_t = Self::size_profile_target(st.size_hist_snap.len());
             let iat_t = Self::iat_profile_target(st.iat_hist_snap.len());
@@ -796,7 +794,8 @@ impl TransportObserver for StealthBrain {
 
             // Derive ACK threshold: tighter under CE/jitter, looser on clean paths
             let rtt_spike_weight = (signal_rtt_spikes as f64).min(8.0);
-            let mut thr = if ce_ratio_recent > 0.05 || ack_us > 12_000.0 || rtt_spike_weight >= 4.0 {
+            let mut thr = if ce_ratio_recent > 0.05 || ack_us > 12_000.0 || rtt_spike_weight >= 4.0
+            {
                 2
             } else if ce_ratio_recent < 0.001 && ack_us < 3_000.0 && rtt_spike_weight == 0.0 {
                 8
@@ -832,15 +831,17 @@ impl TransportObserver for StealthBrain {
                 + 0.18 * timeout_pressure
                 + 0.15 * retransmit_pressure
                 + 0.15 * probe_pressure;
-            let target_level =
-                if composite_pressure >= 0.75 || probe_pressure >= 0.95 || loss_pressure >= 0.10 {
-                    2u8
-                } else if composite_pressure >= 0.38 || loss_pressure >= 0.03 || rtt_spike_weight >= 2.0
-                {
-                    1u8
-                } else {
-                    0u8
-                };
+            let target_level = if composite_pressure >= 0.75
+                || probe_pressure >= 0.95
+                || loss_pressure >= 0.10
+            {
+                2u8
+            } else if composite_pressure >= 0.38 || loss_pressure >= 0.03 || rtt_spike_weight >= 2.0
+            {
+                1u8
+            } else {
+                0u8
+            };
             let now = crate::time_source::now_instant();
             let can_toggle =
                 now.duration_since(st.last_masque_hint_change) > Duration::from_millis(800);
@@ -909,8 +910,7 @@ impl TransportObserver for StealthBrain {
                 } else {
                     0.0
                 };
-                let penalty: f64 =
-                    0.7 * ce_ratio_recent + 0.3 * (jitter_us / (ack_us.max(1.0)));
+                let penalty: f64 = 0.7 * ce_ratio_recent + 0.3 * (jitter_us / (ack_us.max(1.0)));
                 let r = dr_gain - penalty.max(0.0);
                 let new_avg = if n == 0 {
                     r
@@ -962,12 +962,12 @@ impl TransportObserver for StealthBrain {
                 let last = st.last_ack_thr as i64;
                 let tgt = thr_local as i64;
                 thr_local = match tgt.cmp(&last) {
-                    Ordering::Greater => (last + 1)
-                        .clamp(self.cfg.ack_min as i64, self.cfg.ack_max as i64)
-                        as u64,
-                    Ordering::Less => (last - 1)
-                        .clamp(self.cfg.ack_min as i64, self.cfg.ack_max as i64)
-                        as u64,
+                    Ordering::Greater => {
+                        (last + 1).clamp(self.cfg.ack_min as i64, self.cfg.ack_max as i64) as u64
+                    }
+                    Ordering::Less => {
+                        (last - 1).clamp(self.cfg.ack_min as i64, self.cfg.ack_max as i64) as u64
+                    }
                     Ordering::Equal => thr_local,
                 };
             }
@@ -1055,10 +1055,8 @@ impl TransportObserver for StealthBrain {
         }
         let ce_scaled = (actuators.ce_ratio_recent * 1000.0).clamp(0.0, 1000.0) as u32;
         self.loss_rate.store(ce_scaled, Ordering::Relaxed);
-        crate::optimize::telemetry::MASQUE_HINT.store(
-            if actuators.prefer_masque_effective { 1 } else { 0 },
-            Ordering::Relaxed,
-        );
+        crate::optimize::telemetry::MASQUE_HINT
+            .store(if actuators.prefer_masque_effective { 1 } else { 0 }, Ordering::Relaxed);
         let ce_ratio_recent = actuators.ce_ratio_recent;
         let ack_us = actuators.ack_us;
         let ack_us_long = actuators.ack_us_long;

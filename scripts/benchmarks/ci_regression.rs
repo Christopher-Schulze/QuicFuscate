@@ -456,9 +456,7 @@ fn bench_ack_sent_byte_accounting(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 fn bench_connection_1rtt_stealth_compare(c: &mut Criterion) {
     use quicfuscate::error::ConnectionError;
-    use quicfuscate::transport::{
-        bench_paired_1rtt_connections_stealth, BenchConnectionPair,
-    };
+    use quicfuscate::transport::{bench_paired_1rtt_connections_stealth, BenchConnectionPair};
 
     let payload = vec![0x5Au8; 1024];
     let mut group = c.benchmark_group("connection_1rtt_stealth_compare");
@@ -509,22 +507,11 @@ criterion_group!(
     bench_connection_1rtt_stealth_compare,
 );
 
-criterion_group!(
-    fec_benches,
-    bench_fec_matrix_mul,
-);
+criterion_group!(fec_benches, bench_fec_matrix_mul,);
 
-criterion_group!(
-    stealth_benches,
-    bench_padding_gen,
-);
+criterion_group!(stealth_benches, bench_padding_gen,);
 
-criterion_group!(
-    optimization_benches,
-    bench_sort,
-    bench_shuffle_op,
-    bench_transpose,
-);
+criterion_group!(optimization_benches, bench_sort, bench_shuffle_op, bench_transpose,);
 
 criterion_main!(
     crypto_benches,

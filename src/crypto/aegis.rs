@@ -2024,12 +2024,12 @@ mod tests {
 
     // Fixed key/nonce used across all inline tests.
     const KEY: [u8; 16] = [
-        0x10, 0x01, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x10, 0x01, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00,
     ];
     const NONCE: [u8; 16] = [
-        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
-        0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
+        0x1f,
     ];
 
     // Encrypt with Aegis128L; returns (ciphertext, tag).
@@ -2196,7 +2196,7 @@ mod tests {
 
     #[test]
     fn aegis128x4_batch_seal_matches_single() {
-        use super::{Aegis128X4Aead, AeadSeal, AeadSealItem};
+        use super::{AeadSeal, AeadSealItem, Aegis128X4Aead};
 
         let key = [0x77u8; 16];
         let iv = [0x88u8; 12];
@@ -2236,7 +2236,7 @@ mod tests {
 
     #[test]
     fn aegis128x8_batch_open_matches_single() {
-        use super::{Aegis128X8Aead, AeadOpen, AeadOpenItem, AeadSeal, AeadSealItem};
+        use super::{AeadOpen, AeadOpenItem, AeadSeal, AeadSealItem, Aegis128X8Aead};
 
         let key = [0x99u8; 16];
         let iv = [0xAAu8; 12];
@@ -2247,12 +2247,8 @@ mod tests {
 
         let mut sealed = vec![0u8; pt.len() + 16];
         sealed[..pt.len()].copy_from_slice(pt);
-        let mut seal_item = AeadSealItem {
-            counter: 42,
-            ad,
-            buf: sealed.as_mut_slice(),
-            plaintext_len: pt.len(),
-        };
+        let mut seal_item =
+            AeadSealItem { counter: 42, ad, buf: sealed.as_mut_slice(), plaintext_len: pt.len() };
         seal.seal_batch(core::slice::from_mut(&mut seal_item)).unwrap();
 
         let mut single = sealed.clone();

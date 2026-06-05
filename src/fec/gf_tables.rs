@@ -787,11 +787,7 @@ mod tests {
         for (a, b, c) in triples {
             let lhs = gf_mul_table(gf_mul_table(a, b), c);
             let rhs = gf_mul_table(a, gf_mul_table(b, c));
-            assert_eq!(
-                lhs, rhs,
-                "associativity failed for a={}, b={}, c={}",
-                a, b, c
-            );
+            assert_eq!(lhs, rhs, "associativity failed for a={}, b={}, c={}", a, b, c);
         }
     }
 
@@ -802,11 +798,7 @@ mod tests {
         for a in 1..=255u8 {
             let inv = gf_inv8(a);
             let product = gf_mul_table(a, inv);
-            assert_eq!(
-                product, 1,
-                "a * inv(a) should be 1 for a={} (inv={})",
-                a, inv
-            );
+            assert_eq!(product, 1, "a * inv(a) should be 1 for a={} (inv={})", a, inv);
         }
     }
 
@@ -881,11 +873,7 @@ mod tests {
         for &a in &[1u16, 2, 7, 255, 1000, 0x8000, 0xFFFF] {
             let inv = gf16_inv(a);
             let product = gf16_mul(a, inv);
-            assert_eq!(
-                product, 1,
-                "gf16 a * inv(a) should be 1 for a={} (inv={})",
-                a, inv
-            );
+            assert_eq!(product, 1, "gf16 a * inv(a) should be 1 for a={} (inv={})", a, inv);
         }
     }
 

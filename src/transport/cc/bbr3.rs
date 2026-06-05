@@ -224,9 +224,9 @@ impl Bbr3 {
         // Update cwnd
         self.extra_acked = self.ack_epoch_acked.saturating_sub(self.cwnd);
         let burst_boost = ((self.extra_acked / self.mss).min(4)) * self.mss;
-        let mut target_cwnd =
-            (self.cwnd_gain * self.btlbw as f64 * self.min_rtt.as_secs_f64()) as usize
-                + burst_boost;
+        let mut target_cwnd = (self.cwnd_gain * self.btlbw as f64 * self.min_rtt.as_secs_f64())
+            as usize
+            + burst_boost;
         if self.epoch_start {
             target_cwnd = target_cwnd.saturating_add(self.mss);
             self.epoch_start = false;
@@ -411,10 +411,7 @@ mod tests {
             bbr.on_packet_sent(i as u64, 12_000, t0 + rtt * i);
             bbr.on_ack(12_000, t0 + rtt * i + rtt);
         }
-        assert!(
-            bbr.pacing_rate().unwrap_or(0) > 0,
-            "pacing_rate must be > 0 after enough ACKs"
-        );
+        assert!(bbr.pacing_rate().unwrap_or(0) > 0, "pacing_rate must be > 0 after enough ACKs");
     }
 
     #[test]
@@ -487,8 +484,12 @@ mod tests {
         let sp = Arc::clone(&sent_pkt);
         let lp = Arc::clone(&lost_pkt);
         bbr.set_fec_callbacks(
-            Arc::new(move |pn, _| { sp.store(pn, Ordering::Relaxed); }),
-            Arc::new(move |pn, _| { lp.store(pn, Ordering::Relaxed); }),
+            Arc::new(move |pn, _| {
+                sp.store(pn, Ordering::Relaxed);
+            }),
+            Arc::new(move |pn, _| {
+                lp.store(pn, Ordering::Relaxed);
+            }),
         );
         let now = Instant::now();
         bbr.on_packet_sent(42, 1200, now);
@@ -547,10 +548,7 @@ mod tests {
             );
         } else {
             // Already in ProbeBW - the drain completed during convergence
-            assert!(
-                !matches!(bbr.state, State::Startup),
-                "BBR3 must not be stuck in Startup"
-            );
+            assert!(!matches!(bbr.state, State::Startup), "BBR3 must not be stuck in Startup");
         }
     }
 }

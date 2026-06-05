@@ -1474,16 +1474,8 @@ mod tests {
             let expected_val = i as u8; // identity: gf_mul(i, 1) = i
             let low_nibble = expected_val & 0x0F;
             let high_nibble = (expected_val >> 4) & 0x0F;
-            assert_eq!(
-                table.low[i as usize], low_nibble,
-                "low nibble mismatch at index {}",
-                i
-            );
-            assert_eq!(
-                table.high[i as usize], high_nibble,
-                "high nibble mismatch at index {}",
-                i
-            );
+            assert_eq!(table.low[i as usize], low_nibble, "low nibble mismatch at index {}", i);
+            assert_eq!(table.high[i as usize], high_nibble, "high nibble mismatch at index {}", i);
         }
     }
 

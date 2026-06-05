@@ -1689,7 +1689,8 @@ pub fn evaluate_qkey_http3_headers(
         Ok(value) => value.trim(),
         Err(_) => return QKeyHeaderAuthOutcome::Reject(b"invalid_qkey_auth"),
     };
-    if crate::implementations::server::qkey_registry::token_matches_hash(provided, expected.trim()) {
+    if crate::implementations::server::qkey_registry::token_matches_hash(provided, expected.trim())
+    {
         QKeyHeaderAuthOutcome::Authenticated
     } else {
         QKeyHeaderAuthOutcome::Reject(b"invalid_qkey_auth")
@@ -4667,8 +4668,7 @@ mod tests {
     fn test_server_admin_core_block_unblock_ip() {
         let metrics = Arc::new(Metrics::new());
         let blocked_ips = Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new()));
-        let client_snapshots =
-            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let client_snapshots = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let (tx, _rx) = mpsc::unbounded_channel::<AdminAction>();
         let qkeys = Arc::new(std::sync::Mutex::new(QKeyRegistry::new(16, None, None)));
         let core = ServerAdminCore::new(
@@ -4698,8 +4698,7 @@ mod tests {
     fn test_server_admin_core_list_blocked_ips() {
         let metrics = Arc::new(Metrics::new());
         let blocked_ips = Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new()));
-        let client_snapshots =
-            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let client_snapshots = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let (tx, _rx) = mpsc::unbounded_channel::<AdminAction>();
         let qkeys = Arc::new(std::sync::Mutex::new(QKeyRegistry::new(16, None, None)));
         let core = ServerAdminCore::new(
@@ -4736,7 +4735,10 @@ mod tests {
     #[test]
     fn test_resolve_qkey_store_path_with_override() {
         let override_path = std::path::PathBuf::from("/custom/path/keys.json");
-        let path = resolve_qkey_store_path(Some(std::path::Path::new("/etc/conf.toml")), Some(override_path.clone()));
+        let path = resolve_qkey_store_path(
+            Some(std::path::Path::new("/etc/conf.toml")),
+            Some(override_path.clone()),
+        );
         assert_eq!(path, override_path);
     }
 
@@ -4814,10 +4816,7 @@ mod tests {
 
     #[test]
     fn test_extract_host_from_endpoint_various_formats() {
-        assert_eq!(
-            extract_host_from_endpoint("example.com:4433"),
-            Some("example.com".to_string())
-        );
+        assert_eq!(extract_host_from_endpoint("example.com:4433"), Some("example.com".to_string()));
         assert_eq!(
             extract_host_from_endpoint("[::1]:4433"),
             None // IPv6 addresses are not valid SNI hostnames
@@ -4919,11 +4918,11 @@ mod tests {
             &mut sc,
             BrowserProfile::Firefox,
             OsProfile::Windows,
-            true,  // disable_doh
+            true, // disable_doh
             "custom-doh",
             false, // disable_fronting
             &front_domains,
-            true,  // disable_http3
+            true, // disable_http3
         );
         assert_eq!(sc.initial_browser, BrowserProfile::Firefox);
         assert_eq!(sc.initial_os, OsProfile::Windows);

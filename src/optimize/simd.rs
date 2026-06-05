@@ -2240,10 +2240,9 @@ mod tests {
     #[test]
     fn test_xor_repeating_key32_roundtrip() {
         let key: [u8; 32] = [
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
-            0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
-            0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20,
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
+            0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C,
+            0x1D, 0x1E, 0x1F, 0x20,
         ];
         let original: Vec<u8> = (0..100).collect();
         let mut data = original.clone();
@@ -2528,11 +2527,15 @@ mod tests {
 
     #[test]
     fn test_aes_round_deterministic() {
-        let mut state1 = [0x32, 0x43, 0xF6, 0xA8, 0x88, 0x5A, 0x30, 0x8D,
-                          0x31, 0x31, 0x98, 0xA2, 0xE0, 0x37, 0x07, 0x34];
+        let mut state1 = [
+            0x32, 0x43, 0xF6, 0xA8, 0x88, 0x5A, 0x30, 0x8D, 0x31, 0x31, 0x98, 0xA2, 0xE0, 0x37,
+            0x07, 0x34,
+        ];
         let mut state2 = state1;
-        let round_key = [0x2B, 0x7E, 0x15, 0x16, 0x28, 0xAE, 0xD2, 0xA6,
-                         0xAB, 0xF7, 0x15, 0x88, 0x09, 0xCF, 0x4F, 0x3C];
+        let round_key = [
+            0x2B, 0x7E, 0x15, 0x16, 0x28, 0xAE, 0xD2, 0xA6, 0xAB, 0xF7, 0x15, 0x88, 0x09, 0xCF,
+            0x4F, 0x3C,
+        ];
         crypto::aes_round(&mut state1, &round_key);
         crypto::aes_round(&mut state2, &round_key);
         assert_eq!(state1, state2);
@@ -2584,10 +2587,7 @@ mod tests {
         let blocks = crypto::chacha20_blocks_x4(&key, &nonce, counter);
         for i in 0..4u32 {
             let scalar = chacha20_block(&key, counter.wrapping_add(i), &nonce);
-            assert_eq!(
-                blocks[i as usize], scalar,
-                "block {} mismatch between x4 and scalar", i
-            );
+            assert_eq!(blocks[i as usize], scalar, "block {} mismatch between x4 and scalar", i);
         }
     }
 
@@ -2600,10 +2600,7 @@ mod tests {
         let blocks = crypto::chacha20_blocks_x16(&key, &nonce, counter);
         for i in 0..16u32 {
             let scalar = chacha20_block(&key, counter.wrapping_add(i), &nonce);
-            assert_eq!(
-                blocks[i as usize], scalar,
-                "block {} mismatch between x16 and scalar", i
-            );
+            assert_eq!(blocks[i as usize], scalar, "block {} mismatch between x16 and scalar", i);
         }
     }
 

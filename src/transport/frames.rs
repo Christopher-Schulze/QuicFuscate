@@ -762,8 +762,8 @@ mod tests {
         let written = to_bytes(&frame, &mut buf).expect("to_bytes ping");
         assert_eq!(written, 1);
 
-        let (decoded, consumed) = from_bytes(&buf[..written], PacketType::Short)
-            .expect("from_bytes ping");
+        let (decoded, consumed) =
+            from_bytes(&buf[..written], PacketType::Short).expect("from_bytes ping");
         assert_eq!(consumed, written);
         assert!(matches!(decoded, Frame::Ping { .. }));
     }
@@ -777,8 +777,8 @@ mod tests {
         // All bytes should be zero
         assert!(buf[..written].iter().all(|&b| b == 0));
 
-        let (decoded, consumed) = from_bytes(&buf[..written], PacketType::Short)
-            .expect("from_bytes padding");
+        let (decoded, consumed) =
+            from_bytes(&buf[..written], PacketType::Short).expect("from_bytes padding");
         assert_eq!(consumed, written);
         match decoded {
             Frame::Padding { len } => assert_eq!(len, 10),
@@ -789,11 +789,7 @@ mod tests {
     #[test]
     fn test_roundtrip_ack_simple() {
         // Single range: packets 10..15 (exclusive end = 15)
-        let frame = Frame::Ack {
-            ack_delay: 100,
-            ranges: vec![(10, 15)],
-            ecn_counts: None,
-        };
+        let frame = Frame::Ack { ack_delay: 100, ranges: vec![(10, 15)], ecn_counts: None };
         let wlen = wire_len(&frame);
         assert!(wlen > 0);
 
@@ -801,8 +797,8 @@ mod tests {
         let written = to_bytes(&frame, &mut buf).expect("to_bytes ack");
         assert_eq!(written, wlen);
 
-        let (decoded, consumed) = from_bytes(&buf[..written], PacketType::Short)
-            .expect("from_bytes ack");
+        let (decoded, consumed) =
+            from_bytes(&buf[..written], PacketType::Short).expect("from_bytes ack");
         assert_eq!(consumed, written);
         match decoded {
             Frame::Ack { ack_delay, ranges, ecn_counts } => {
@@ -836,8 +832,8 @@ mod tests {
         let written = to_bytes(&frame, &mut buf).expect("to_bytes stream");
         assert_eq!(written, wlen);
 
-        let (decoded, consumed) = from_bytes(&buf[..written], PacketType::Short)
-            .expect("from_bytes stream");
+        let (decoded, consumed) =
+            from_bytes(&buf[..written], PacketType::Short).expect("from_bytes stream");
         assert_eq!(consumed, written);
         match decoded {
             Frame::Stream { stream_id, offset, data, fin } => {

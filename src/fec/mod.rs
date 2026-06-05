@@ -23,7 +23,7 @@ use crate::env_utils::{env_flag, env_parse};
 
 /// Pool-backed payload buffer shared across FEC packet handles via `Arc`.
 #[derive(Clone)]
-struct SharedFecBuffer {
+pub(crate) struct SharedFecBuffer {
     inner: Arc<SharedFecBufferInner>,
 }
 
@@ -42,18 +42,12 @@ impl Drop for SharedFecBufferInner {
 
 impl SharedFecBuffer {
     fn new(buf: AlignedBox<[u8]>, pool: Arc<MemoryPool>) -> Self {
-        Self {
-            inner: Arc::new(SharedFecBufferInner { buf: Some(buf), pool }),
-        }
+        Self { inner: Arc::new(SharedFecBufferInner { buf: Some(buf), pool }) }
     }
 
     fn bytes(&self, len: usize) -> &[u8] {
         let buf = self.inner.buf.as_ref().expect("shared FEC buffer already freed");
         &buf[..len.min(buf.len())]
-    }
-
-    fn to_vec(&self, len: usize) -> Vec<u8> {
-        self.bytes(len).to_vec()
     }
 }
 
@@ -1165,7 +1159,7 @@ pub struct FecPacket {
     /// Unique packet identifier (source ID or repair window anchor).
     pub id: u64,
     /// Aligned payload buffer, recycled to the memory pool when the last handle drops.
-    pub data: Option<SharedFecBuffer>,
+    pub(crate) data: Option<SharedFecBuffer>,
     /// Actual byte count of valid payload within `data`.
     pub data_len: usize,
     /// True for original source packets, false for repair/coded packets.
@@ -1270,7 +1264,7 @@ impl FecPacket {
 
     /// Payload bytes for this packet (up to `data_len`).
     #[inline]
-    pub(crate) fn payload_slice(&self) -> Option<&[u8]> {
+    pub fn payload_slice(&self) -> Option<&[u8]> {
         self.data.as_ref().map(|shared| shared.bytes(self.data_len))
     }
 
@@ -1388,15 +1382,7 @@ impl FecPacket {
             return Err("DataBufferTooSmall".into());
         }
         dbuf[..payload_len].copy_from_slice(&input[off..]);
-        Ok(Self::new(
-            base_id,
-            Some(dbuf),
-            payload_len,
-            is_systematic,
-            coeffs,
-            coeff_len,
-            pool,
-        ))
+        Ok(Self::new(base_id, Some(dbuf), payload_len, is_systematic, coeffs, coeff_len, pool))
     }
 
     /// Returns the payload length in bytes.

@@ -181,8 +181,12 @@ fn fec_callbacks_work_with_all_algorithms() {
 
         let mut r = Recovery::with_algorithm(12_000, 1200, algo);
         r.set_fec_callbacks(
-            move |pn, _| { s.store(pn, Ordering::Relaxed); },
-            move |pn, _| { l.store(pn, Ordering::Relaxed); },
+            move |pn, _| {
+                s.store(pn, Ordering::Relaxed);
+            },
+            move |pn, _| {
+                l.store(pn, Ordering::Relaxed);
+            },
         );
 
         let now = Instant::now();
@@ -249,11 +253,7 @@ fn bbr2_convergence_synthetic_link() {
     const BDP: usize = 25_000; // bytes per RTT at target rate
 
     // Start with 2 * BDP initial cwnd so startup can probe immediately.
-    let mut r = Recovery::with_algorithm(
-        BDP * 2,
-        MSS,
-        quicfuscate::transport::cc::Algorithm::Bbr2,
-    );
+    let mut r = Recovery::with_algorithm(BDP * 2, MSS, quicfuscate::transport::cc::Algorithm::Bbr2);
     r.update_rtt(RTT);
 
     let t0 = Instant::now();
@@ -288,11 +288,7 @@ fn bbr3_convergence_synthetic_link() {
     const MSS: usize = 1200;
     const BDP: usize = 25_000; // bytes per RTT at target rate
 
-    let mut r = Recovery::with_algorithm(
-        BDP * 2,
-        MSS,
-        quicfuscate::transport::cc::Algorithm::Bbr3,
-    );
+    let mut r = Recovery::with_algorithm(BDP * 2, MSS, quicfuscate::transport::cc::Algorithm::Bbr3);
     r.update_rtt(RTT);
 
     let t0 = Instant::now();

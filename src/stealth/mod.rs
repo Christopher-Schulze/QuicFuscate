@@ -5106,7 +5106,11 @@ impl StealthManager {
             if matches!(self.config.mode, StealthMode::Intelligent) {
                 // Level 2 (anti-dpi pressure): burst every 15s for stronger cover.
                 // Level 0/1: every 30s to keep overhead minimal.
-                if self.intelligent_runtime_level() >= 2 { 15 } else { 30 }
+                if self.intelligent_runtime_level() >= 2 {
+                    15
+                } else {
+                    30
+                }
             } else {
                 15
             }
@@ -5401,8 +5405,7 @@ impl StealthManager {
         if !self.config.enable_cover_ping || self.config.cover_ping_interval_ms == 0 {
             return false;
         }
-        let interval =
-            std::time::Duration::from_millis(self.config.cover_ping_interval_ms);
+        let interval = std::time::Duration::from_millis(self.config.cover_ping_interval_ms);
         let mut guard = self.next_cover_ping.lock();
         let now = std::time::Instant::now();
         if now >= *guard {
@@ -5427,8 +5430,7 @@ impl StealthManager {
         if !self.config.enable_cover_ping || self.config.cover_ping_interval_ms == 0 {
             return false;
         }
-        let interval =
-            std::time::Duration::from_millis(self.config.cover_ping_interval_ms * 3);
+        let interval = std::time::Duration::from_millis(self.config.cover_ping_interval_ms * 3);
         let mut guard = self.next_cover_stream.lock();
         let now = std::time::Instant::now();
         if now >= *guard {
@@ -5494,8 +5496,8 @@ pub(crate) struct IntelligentStealthInputs {
 
 #[cfg(test)]
 mod stealth_coverage_tests {
-    use crate::stealth::test_support::{EnvGuard, acquire_env_lock};
     use super::*;
+    use crate::stealth::test_support::{acquire_env_lock, EnvGuard};
     use std::sync::Arc;
 
     fn make_manager(config: StealthConfig) -> StealthManager {
@@ -5588,11 +5590,7 @@ mod stealth_coverage_tests {
             let d = shaper.apply_jitter();
             let us = d.as_micros() as u64;
             // min = max(2000/2, 1) = 1000, max = 2000
-            assert!(
-                (1000..=2000).contains(&us),
-                "jitter {} us outside [1000, 2000]",
-                us
-            );
+            assert!((1000..=2000).contains(&us), "jitter {} us outside [1000, 2000]", us);
         }
     }
 
@@ -5773,7 +5771,11 @@ mod stealth_coverage_tests {
         let m = make_manager(StealthConfig::stealth());
         for _ in 0..20 {
             let data = m.generate_cover_stream_data();
-            assert!((16..=64).contains(&data.len()), "cover stream len {} out of [16,64]", data.len());
+            assert!(
+                (16..=64).contains(&data.len()),
+                "cover stream len {} out of [16,64]",
+                data.len()
+            );
         }
     }
 
@@ -5875,7 +5877,11 @@ mod stealth_coverage_tests {
     #[test]
     fn domain_fronting_ultra_stealth_has_many_domains() {
         let df = DomainFrontingManager::ultra_stealth();
-        assert!(df.domains.len() >= 20, "ultra stealth should have 20+ domains, got {}", df.domains.len());
+        assert!(
+            df.domains.len() >= 20,
+            "ultra stealth should have 20+ domains, got {}",
+            df.domains.len()
+        );
     }
 
     // =========================================================================
@@ -6162,8 +6168,10 @@ mod stealth_coverage_tests {
         let fp = FingerprintProfile::new(BrowserProfile::Chrome, OsProfile::Windows);
         let masq = Http3Masquerade::new(fp);
         let headers = masq.generate_headers("example.com", "/");
-        assert!(headers.iter().any(|h| h.name() == b"sec-ch-ua"),
-            "Chrome masquerade should include sec-ch-ua");
+        assert!(
+            headers.iter().any(|h| h.name() == b"sec-ch-ua"),
+            "Chrome masquerade should include sec-ch-ua"
+        );
     }
 
     #[test]
@@ -6303,8 +6311,12 @@ mod stealth_coverage_tests {
                 "1" | "random" => Some(PaddingStrategy::Random),
                 "2" | "fixed" => Some(PaddingStrategy::Fixed),
                 "3" | "adaptive" => Some(PaddingStrategy::Adaptive),
-                "4" | "browser" | "browser-mimic" | "browsermimic" => Some(PaddingStrategy::BrowserMimic),
-                "5" | "normalize" | "packet-normalize" | "packetnormalize" => Some(PaddingStrategy::PacketNormalize),
+                "4" | "browser" | "browser-mimic" | "browsermimic" => {
+                    Some(PaddingStrategy::BrowserMimic)
+                }
+                "5" | "normalize" | "packet-normalize" | "packetnormalize" => {
+                    Some(PaddingStrategy::PacketNormalize)
+                }
                 _ => None,
             }
         };

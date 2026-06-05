@@ -89,8 +89,7 @@ impl UringBatchSender {
         };
 
         if sqpoll_active {
-            crate::telemetry::IO_URING_SQPOLL_ACTIVE
-                .store(1, std::sync::atomic::Ordering::Relaxed);
+            crate::telemetry::IO_URING_SQPOLL_ACTIVE.store(1, std::sync::atomic::Ordering::Relaxed);
         }
         if zc_supported {
             log::debug!("io_uring SendMsgZc (zero-copy) supported");
@@ -241,12 +240,7 @@ impl UringBatchSender {
     }
 
     /// Push one chunk of SendMsg SQEs (by index range into `self.msgs`) and reap completions.
-    fn submit_chunk(
-        &mut self,
-        fd: RawFd,
-        start: usize,
-        count: usize,
-    ) -> std::io::Result<usize> {
+    fn submit_chunk(&mut self, fd: RawFd, start: usize, count: usize) -> std::io::Result<usize> {
         let fd = io_uring::types::Fd(fd);
 
         // Push SQEs.
@@ -300,12 +294,7 @@ impl UringBatchSender {
     /// We call `submit_and_wait(count)` to wait for at least `count` CQEs, then
     /// drain the full CQ.  Notification CQEs that arrive later are swept up
     /// in the next call's drain.
-    fn submit_chunk_zc(
-        &mut self,
-        fd: RawFd,
-        start: usize,
-        count: usize,
-    ) -> std::io::Result<usize> {
+    fn submit_chunk_zc(&mut self, fd: RawFd, start: usize, count: usize) -> std::io::Result<usize> {
         let fd_typed = io_uring::types::Fd(fd);
 
         // Push SendMsgZc SQEs.
@@ -532,7 +521,9 @@ impl UringRecvBatch {
         // Register the eventfd so CQ completions trigger it.
         if ring.submitter().register_eventfd_async(efd).is_err() {
             log::debug!("register_eventfd_async failed");
-            unsafe { libc::close(efd); }
+            unsafe {
+                libc::close(efd);
+            }
             return None;
         }
 
@@ -656,11 +647,7 @@ impl UringRecvBatch {
                     let end = start + len.min(self.buf_size);
                     let data = self.bufs[start..end].to_vec();
 
-                    let addr = if self.with_addr {
-                        parse_sockaddr(&self.addrs[idx])
-                    } else {
-                        None
-                    };
+                    let addr = if self.with_addr { parse_sockaddr(&self.addrs[idx]) } else { None };
 
                     completions.push(RecvCompletion { data, addr });
                     repost_indices.push(idx);
@@ -691,10 +678,9 @@ impl UringRecvBatch {
             {
                 let mut sq = self.ring.submission();
                 for &idx in &repost_indices {
-                    let entry =
-                        opcode::RecvMsg::new(fd, &mut self.msgs[idx] as *mut libc::msghdr)
-                            .build()
-                            .user_data(idx as u64);
+                    let entry = opcode::RecvMsg::new(fd, &mut self.msgs[idx] as *mut libc::msghdr)
+                        .build()
+                        .user_data(idx as u64);
                     unsafe {
                         let _ = sq.push(&entry);
                     }

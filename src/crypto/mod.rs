@@ -344,7 +344,6 @@ impl CryptoManager {
     pub fn generate_session_key(&self, length: usize) -> Vec<u8> {
         self.get_obfuscation_key(length)
     }
-
 }
 
 impl Default for CryptoManager {
@@ -812,8 +811,7 @@ pub fn select_data_aead(
     key: &[u8],
     iv: &[u8],
 ) -> (Box<dyn AeadSeal + Send + Sync>, Box<dyn AeadOpen + Send + Sync>) {
-    const DEFAULT_TRANSPORT_AEAD_WORKLOAD_LEN: usize =
-        crate::transport::TYPICAL_1RTT_PAYLOAD_LEN;
+    const DEFAULT_TRANSPORT_AEAD_WORKLOAD_LEN: usize = crate::transport::TYPICAL_1RTT_PAYLOAD_LEN;
 
     // Normalize key/iv materials
     let mut k16 = [0u8; 16];
@@ -906,4 +904,3 @@ pub fn install_data_aead_config(cfg: &crate::engine::CryptoConfig) {
 
 /// Re-export of QUIC key derivation (HKDF-based Initial/Handshake/1-RTT key schedule).
 pub use self::quic_kdf as kdf;
-

@@ -777,9 +777,11 @@ mod tests {
         let key = [0x7Eu8; 32];
         let iv = [0x6Du8; 16];
         let (seal, open) = select_data_aead(&key, &iv);
-        let mut crypto = CryptoContext::default();
-        crypto.seal_1rtt = Some(seal);
-        crypto.open_1rtt = Some(open);
+        let crypto = CryptoContext {
+            seal_1rtt: Some(seal),
+            open_1rtt: Some(open),
+            ..CryptoContext::default()
+        };
 
         let ad = b"pkt-batch-ad";
         let pt = b"packet-batch-payload";
@@ -920,11 +922,10 @@ pub fn seal_data_aead_batch(
     crypto: &CryptoContext,
     items: &mut [tls_aead::AeadSealItem<'_>],
 ) -> Result<(), ConnectionError> {
-    let seal = crypto
-        .seal_1rtt
-        .as_deref()
-        .or(crypto.seal_0rtt.as_deref())
-        .ok_or_else(|| ConnectionError::TlsError("missing AEAD sealer for batch seal".into()))?;
+    let seal =
+        crypto.seal_1rtt.as_deref().or(crypto.seal_0rtt.as_deref()).ok_or_else(|| {
+            ConnectionError::TlsError("missing AEAD sealer for batch seal".into())
+        })?;
     seal.seal_batch(items)
 }
 
@@ -933,11 +934,10 @@ pub fn open_data_aead_batch(
     crypto: &CryptoContext,
     items: &mut [tls_aead::AeadOpenItem<'_>],
 ) -> Result<(), ConnectionError> {
-    let open = crypto
-        .open_1rtt
-        .as_deref()
-        .or(crypto.open_0rtt.as_deref())
-        .ok_or_else(|| ConnectionError::TlsError("missing AEAD opener for batch open".into()))?;
+    let open =
+        crypto.open_1rtt.as_deref().or(crypto.open_0rtt.as_deref()).ok_or_else(|| {
+            ConnectionError::TlsError("missing AEAD opener for batch open".into())
+        })?;
     open.open_batch(items)
 }
 
@@ -1275,16 +1275,14 @@ impl TlsCoverCipher {
         plaintext_len: usize,
     ) -> Result<usize, ConnectionError> {
         match self {
-            TlsCoverCipher::ChaCha(cipher) => {
-                crate::crypto::aead::AeadSeal::seal_with_u64_counter(
-                    cipher,
-                    counter,
-                    aad,
-                    buffer,
-                    plaintext_len,
-                    None,
-                )
-            }
+            TlsCoverCipher::ChaCha(cipher) => crate::crypto::aead::AeadSeal::seal_with_u64_counter(
+                cipher,
+                counter,
+                aad,
+                buffer,
+                plaintext_len,
+                None,
+            ),
             TlsCoverCipher::AesGcm(cipher) => tls_aead::AeadSeal::seal_with_u64_counter(
                 cipher,
                 counter,
@@ -1300,9 +1298,7 @@ impl TlsCoverCipher {
     fn open(&self, counter: u64, aad: &[u8], buffer: &mut [u8]) -> Result<usize, ConnectionError> {
         match self {
             TlsCoverCipher::ChaCha(cipher) => {
-                crate::crypto::aead::AeadOpen::open_with_u64_counter(
-                    cipher, counter, aad, buffer,
-                )
+                crate::crypto::aead::AeadOpen::open_with_u64_counter(cipher, counter, aad, buffer)
             }
             TlsCoverCipher::AesGcm(cipher) => {
                 tls_aead::AeadOpen::open_with_u64_counter(cipher, counter, aad, buffer)

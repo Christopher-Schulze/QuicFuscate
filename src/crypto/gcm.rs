@@ -1,4 +1,3 @@
-
 #[cfg(all(test, target_arch = "x86_64"))]
 use std::sync::Mutex;
 
@@ -505,7 +504,11 @@ mod tests {
 
         let recovered = aes_gcm_open(&key, &iv, aad, &ciphertext, &tag);
         assert!(recovered.is_some(), "open must succeed with valid tag");
-        assert_eq!(recovered.as_deref(), Some(&plaintext[..]), "recovered plaintext must match original");
+        assert_eq!(
+            recovered.as_deref(),
+            Some(&plaintext[..]),
+            "recovered plaintext must match original"
+        );
     }
 
     #[test]

@@ -42,8 +42,7 @@ fn h3_masque_connect_udp_and_datagram() {
     let flow_id = h3c.enable_masque_datagram(&mut conn, sid).expect("enable datagram");
     assert_eq!(flow_id, 0, "default flow_id must be 0");
 
-    h3c.send_masque_datagram(&mut conn, sid, b"test payload")
-        .expect("send datagram");
+    h3c.send_masque_datagram(&mut conn, sid, b"test payload").expect("send datagram");
     assert_eq!(conn.dgram_send_queue_len(), 1);
 }
 
@@ -89,9 +88,7 @@ fn h3_header_accessors() {
 #[test]
 fn h3_masque_established_tracking() {
     let (mut conn, mut h3c) = make_h3_pair();
-    let sid = h3c
-        .connect_udp(&mut conn, "proxy.test", "target.test:443")
-        .expect("connect_udp");
+    let sid = h3c.connect_udp(&mut conn, "proxy.test", "target.test:443").expect("connect_udp");
     assert!(!h3c.masque_established(sid), "not yet established");
     h3c.mark_masque_established(sid);
     assert!(h3c.masque_established(sid), "must be established after mark");

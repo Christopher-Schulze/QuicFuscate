@@ -1050,6 +1050,7 @@ impl MorusAead {
         Self { key: k, iv: v }
     }
 
+    #[cfg(any(test, feature = "rust-tests"))]
     fn encrypt_native(&self, plaintext: &[u8], ad: &[u8], nonce: &[u8; 16]) -> (Vec<u8>, [u8; 16]) {
         crate::optimize::telemetry::MORUS1280_SCALAR_OPS.inc();
         let mut state = Morus1280State::init(&self.key, nonce);
@@ -1071,6 +1072,7 @@ impl MorusAead {
         state.finalize(ad.len(), buffer.len())
     }
 
+    #[cfg(any(test, feature = "rust-tests"))]
     fn decrypt_native(
         &self,
         ciphertext: &[u8],
@@ -1116,6 +1118,7 @@ impl MorusAead {
     }
 
     // Optimized methods with runtime CPU feature detection
+    #[cfg(any(test, feature = "rust-tests"))]
     fn encrypt_optimized(
         &self,
         plaintext: &[u8],
@@ -1127,6 +1130,7 @@ impl MorusAead {
         (out, tag)
     }
 
+    #[cfg(any(test, feature = "rust-tests"))]
     fn decrypt_optimized(
         &self,
         ciphertext: &[u8],

@@ -79,10 +79,7 @@ impl Xoshiro256pp {
 
     #[inline(always)]
     fn next_u64(&mut self) -> u64 {
-        let result = self.s[0]
-            .wrapping_add(self.s[3])
-            .rotate_left(23)
-            .wrapping_add(self.s[0]);
+        let result = self.s[0].wrapping_add(self.s[3]).rotate_left(23).wrapping_add(self.s[0]);
         let t = self.s[1] << 17;
         self.s[2] ^= self.s[0];
         self.s[3] ^= self.s[1];
@@ -359,7 +356,9 @@ mod tests {
         assert!(
             dampened >= expected.saturating_sub(1) && dampened <= expected + 1,
             "flow_shaper must reduce BBR3 rate by 2%: raw={}, dampened={}, expected={}",
-            raw, dampened, expected
+            raw,
+            dampened,
+            expected
         );
     }
 
@@ -377,7 +376,9 @@ mod tests {
         assert!(
             dampened >= expected.saturating_sub(1) && dampened <= expected + 1,
             "flow_shaper must reduce BBR2 rate by 2%: raw={}, dampened={}, expected={}",
-            raw, dampened, expected
+            raw,
+            dampened,
+            expected
         );
     }
 

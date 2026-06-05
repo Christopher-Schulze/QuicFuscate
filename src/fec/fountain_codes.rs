@@ -436,9 +436,11 @@ mod tests {
                     expected[j] ^= originals[idx][j];
                 }
             }
-            assert_eq!(encoded, expected,
+            assert_eq!(
+                encoded, expected,
                 "encoded symbol {sym_id} must equal XOR of source symbols at indices {:?}",
-                indices);
+                indices
+            );
         }
     }
 
@@ -479,8 +481,10 @@ mod tests {
             next_id += 1;
         }
 
-        assert!(dec.belief_propagation_decode(),
-            "must decode with degree-1 seeds + high-degree encoded symbols");
+        assert!(
+            dec.belief_propagation_decode(),
+            "must decode with degree-1 seeds + high-degree encoded symbols"
+        );
         let result = dec.get_decoded_symbols().expect("complete");
         for (i, sym) in result.iter().enumerate() {
             assert_eq!(sym, &originals[i], "symbol {i} mismatch after roundtrip");
@@ -493,9 +497,8 @@ mod tests {
         // the decoder must recover all immediately.
         let k = 4;
         let symbol_size = 8;
-        let originals: Vec<Vec<u8>> = (0..k)
-            .map(|i| vec![(i as u8 + 1) * 11; symbol_size])
-            .collect();
+        let originals: Vec<Vec<u8>> =
+            (0..k).map(|i| vec![(i as u8 + 1) * 11; symbol_size]).collect();
 
         let pool = make_pool();
         let mut dec = LTDecoder::new(k, symbol_size, pool);
@@ -572,10 +575,8 @@ mod tests {
         idx.insert(2);
         dec.add_encoded_symbol(1, vec![0xBB; sz], idx);
 
-        assert!((dec.decoding_progress() - 0.25).abs() < f32::EPSILON,
-            "1 of 4 decoded = 25%");
-        assert!(dec.get_decoded_symbols().is_none(),
-            "incomplete decode must return None");
+        assert!((dec.decoding_progress() - 0.25).abs() < f32::EPSILON, "1 of 4 decoded = 25%");
+        assert!(dec.get_decoded_symbols().is_none(), "incomplete decode must return None");
 
         let partial = dec.get_partial();
         assert_eq!(partial.len(), 1, "partial should contain 1 decoded symbol");
@@ -591,8 +592,11 @@ mod tests {
 
         // add_received_symbol does not provide index info - no peeling possible
         dec.add_received_symbol(1, vec![0xFF; sz]);
-        assert_eq!(dec.decoding_progress(), 0.0,
-            "received symbol without indices cannot trigger decode");
+        assert_eq!(
+            dec.decoding_progress(),
+            0.0,
+            "received symbol without indices cannot trigger decode"
+        );
     }
 
     // ---------------------------------------------------------------
@@ -605,13 +609,11 @@ mod tests {
             let dist = LTEncoder::robust_soliton_distribution(k);
             // Must be non-decreasing (CDF property)
             for i in 1..dist.len() {
-                assert!(dist[i] >= dist[i - 1],
-                    "CDF must be non-decreasing at k={k}, i={i}");
+                assert!(dist[i] >= dist[i - 1], "CDF must be non-decreasing at k={k}, i={i}");
             }
             // Last element must be ~1.0 (within floating point tolerance)
             let last = dist[dist.len() - 1];
-            assert!((last - 1.0).abs() < 1e-10,
-                "CDF must reach 1.0 at k={k}, got {last}");
+            assert!((last - 1.0).abs() < 1e-10, "CDF must reach 1.0 at k={k}, got {last}");
         }
     }
 
@@ -661,13 +663,11 @@ mod tests {
         for sym_id in 1..=20u64 {
             let (_, indices) = enc.generate_symbol_with_indices(sym_id);
             for &idx in &indices {
-                assert!(idx < k,
-                    "index {idx} out of bounds for k={k} at sym_id={sym_id}");
+                assert!(idx < k, "index {idx} out of bounds for k={k} at sym_id={sym_id}");
             }
             // Indices should be unique (HashSet was used during generation)
             let unique: HashSet<usize> = indices.iter().copied().collect();
-            assert_eq!(unique.len(), indices.len(),
-                "indices must be unique for sym_id={sym_id}");
+            assert_eq!(unique.len(), indices.len(), "indices must be unique for sym_id={sym_id}");
         }
     }
 
@@ -682,9 +682,8 @@ mod tests {
         // should recover remaining symbols from the high-degree encoded pool.
         let k = 10;
         let sz = 64;
-        let originals: Vec<Vec<u8>> = (0..k)
-            .map(|i| (0..sz).map(|j| ((i * 13 + j * 7) & 0xFF) as u8).collect())
-            .collect();
+        let originals: Vec<Vec<u8>> =
+            (0..k).map(|i| (0..sz).map(|j| ((i * 13 + j * 7) & 0xFF) as u8).collect()).collect();
 
         let mut enc = LTEncoder::new(k, sz);
         for sym in &originals {

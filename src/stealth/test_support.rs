@@ -15,14 +15,6 @@ impl EnvGuard {
         }
         Self { key, prev }
     }
-
-    pub fn unset(key: &'static str) -> Self {
-        let prev = env::var_os(key);
-        unsafe {
-            env::remove_var(key);
-        }
-        Self { key, prev }
-    }
 }
 
 impl Drop for EnvGuard {

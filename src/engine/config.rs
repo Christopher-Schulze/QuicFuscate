@@ -365,10 +365,7 @@ pub struct CryptoConfig {
 
 impl Default for CryptoConfig {
     fn default() -> Self {
-        Self {
-            aead_preference: AeadPreference::Auto,
-            force_aead: String::new(),
-        }
+        Self { aead_preference: AeadPreference::Auto, force_aead: String::new() }
     }
 }
 

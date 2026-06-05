@@ -1485,8 +1485,7 @@ mod tests {
     fn test_interleaved_encoder_round_robin_distribution() {
         let policy = test_policy();
         let pool = make_pool();
-        let mut enc =
-            InterleavedEncoder::new_with_policy(FecMode::Normal, 8, 12, 2, &policy);
+        let mut enc = InterleavedEncoder::new_with_policy(FecMode::Normal, 8, 12, 2, &policy);
 
         // Feed 4 packets - should distribute 2 per block
         for i in 0..4 {
@@ -1501,8 +1500,7 @@ mod tests {
     #[test]
     fn test_interleaved_encoder_params() {
         let policy = test_policy();
-        let enc =
-            InterleavedEncoder::new_with_policy(FecMode::Normal, 8, 12, 2, &policy);
+        let enc = InterleavedEncoder::new_with_policy(FecMode::Normal, 8, 12, 2, &policy);
         let (k, n) = enc.params();
         assert_eq!(k, 8);
         assert_eq!(n, 12);

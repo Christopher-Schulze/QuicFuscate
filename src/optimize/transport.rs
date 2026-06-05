@@ -939,14 +939,8 @@ mod tests {
             .collect();
         let summary = aggregate_congestion(&samples);
         assert_eq!(summary.total_cwnd, 100 * CONGESTION_WINDOW_SIZE as u64);
-        assert_eq!(
-            summary.total_bytes_in_flight,
-            50 * CONGESTION_WINDOW_SIZE as u64
-        );
-        assert_eq!(
-            summary.total_delivery_rate,
-            1000 * CONGESTION_WINDOW_SIZE as u64
-        );
+        assert_eq!(summary.total_bytes_in_flight, 50 * CONGESTION_WINDOW_SIZE as u64);
+        assert_eq!(summary.total_delivery_rate, 1000 * CONGESTION_WINDOW_SIZE as u64);
         // lost_packets: sum of 0..64 = (64*63)/2 = 2016
         let expected_lost: u64 = (0..CONGESTION_WINDOW_SIZE as u64).sum();
         assert_eq!(summary.total_lost_packets, expected_lost);

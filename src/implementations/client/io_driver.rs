@@ -383,9 +383,13 @@ impl IoDriver {
                     #[cfg(target_os = "linux")]
                     let dispatch = {
                         #[cfg(feature = "io_uring")]
-                        { resolve_outbound_dispatch(queued, self.has_uring()) }
+                        {
+                            resolve_outbound_dispatch(queued, self.has_uring())
+                        }
                         #[cfg(not(feature = "io_uring"))]
-                        { resolve_outbound_dispatch(queued, false) }
+                        {
+                            resolve_outbound_dispatch(queued, false)
+                        }
                     };
                     #[cfg(target_os = "linux")]
                     let mut already_sent = 0usize;
@@ -547,8 +551,7 @@ impl IoDriver {
         }
 
         // Fallback: standard Tokio recv path.
-        self.run_inbound_standard(tun, conn, socket, handshake_event)
-            .await
+        self.run_inbound_standard(tun, conn, socket, handshake_event).await
     }
 
     /// Standard inbound path using Tokio async recv + try_recv drain loop.
@@ -617,7 +620,12 @@ impl IoDriver {
                     }
 
                     Self::process_inbound_batch(
-                        &self.stats, &conn, &tun, &mut stream_buf, &inbound_batch, queued,
+                        &self.stats,
+                        &conn,
+                        &tun,
+                        &mut stream_buf,
+                        &inbound_batch,
+                        queued,
                     );
                 }
                 Ok(Ok(_)) => {}
@@ -651,11 +659,9 @@ impl IoDriver {
 
         while !self.shutdown.load(Ordering::Relaxed) {
             // Wait for CQ notification via eventfd (with shutdown timeout).
-            let readable = tokio::time::timeout(
-                tokio::time::Duration::from_millis(200),
-                async_efd.readable(),
-            )
-            .await;
+            let readable =
+                tokio::time::timeout(tokio::time::Duration::from_millis(200), async_efd.readable())
+                    .await;
 
             match readable {
                 Ok(Ok(mut guard)) => {
@@ -675,22 +681,21 @@ impl IoDriver {
                         )
                     };
                     if efd_ret < 0 {
-                        log::debug!(
-                            "eventfd read failed: {}",
-                            std::io::Error::last_os_error()
-                        );
+                        log::debug!("eventfd read failed: {}", std::io::Error::last_os_error());
                     }
                     guard.clear_ready();
 
                     // Drain all completed receives.
                     let completions = uring_recv.drain_completions().map_err(|e| {
-                        EngineError::Io(std::io::Error::new(e.kind(), format!("uring recv drain: {e}")))
+                        EngineError::Io(std::io::Error::new(
+                            e.kind(),
+                            format!("uring recv drain: {e}"),
+                        ))
                     })?;
 
                     if !completions.is_empty() {
                         crate::telemetry::IO_URING_RECV_BATCHES.inc();
-                        crate::telemetry::IO_URING_RECV_PACKETS
-                            .inc_by(completions.len() as u64);
+                        crate::telemetry::IO_URING_RECV_PACKETS.inc_by(completions.len() as u64);
 
                         for c in &completions {
                             self.stats.udp_packets_received.fetch_add(1, Ordering::Relaxed);
@@ -725,9 +730,7 @@ impl IoDriver {
                                     log::warn!("TUN write error: {:?}", e);
                                     self.stats.errors.fetch_add(1, Ordering::Relaxed);
                                 } else {
-                                    self.stats
-                                        .tun_packets_written
-                                        .fetch_add(1, Ordering::Relaxed);
+                                    self.stats.tun_packets_written.fetch_add(1, Ordering::Relaxed);
                                 }
                             }
                         }
@@ -793,8 +796,7 @@ impl IoDriver {
         let async_efd = tokio::io::unix::AsyncFd::new(owned_efd).ok()?;
 
         log::info!("io_uring recv batch initialised (eventfd bridge active)");
-        crate::telemetry::IO_URING_RECV_ACTIVE
-            .store(1, std::sync::atomic::Ordering::Relaxed);
+        crate::telemetry::IO_URING_RECV_ACTIVE.store(1, std::sync::atomic::Ordering::Relaxed);
 
         Some((uring_recv, async_efd))
     }

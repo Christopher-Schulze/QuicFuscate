@@ -1008,11 +1008,7 @@ impl Connection {
                     PacketType::Handshake => 1,
                     _ => 2,
                 };
-                (
-                    t,
-                    self.pkt_spaces[idx].largest_recv.unwrap_or(0),
-                    Some((hdr_native, pn_off)),
-                )
+                (t, self.pkt_spaces[idx].largest_recv.unwrap_or(0), Some((hdr_native, pn_off)))
             }
             Err(_) => (PacketType::Short, 0, None),
         };
@@ -1331,7 +1327,8 @@ impl Connection {
                             let clamped = if max > MAX_PEER_MAX_DATA {
                                 log::warn!(
                                     "[transport] peer MAX_DATA {} exceeds cap {}, clamping",
-                                    max, MAX_PEER_MAX_DATA
+                                    max,
+                                    MAX_PEER_MAX_DATA
                                 );
                                 MAX_PEER_MAX_DATA
                             } else {
@@ -1472,8 +1469,7 @@ impl Connection {
 
     #[inline(always)]
     fn refresh_short_header_tag_reserve(&mut self) {
-        self.short_header_tag_reserve =
-            if self.crypto.read().seal_1rtt.is_some() { 16 } else { 0 };
+        self.short_header_tag_reserve = if self.crypto.read().seal_1rtt.is_some() { 16 } else { 0 };
     }
 
     #[inline(always)]
@@ -3208,18 +3204,12 @@ impl Connection {
         let now = Instant::now();
         let mut acked_total = 0usize;
         let mut lost_total = 0usize;
-        let largest_acked = ranges
-            .iter()
-            .filter_map(|(_, end)| end.checked_sub(1))
-            .max()
-            .unwrap_or(0);
+        let largest_acked =
+            ranges.iter().filter_map(|(_, end)| end.checked_sub(1)).max().unwrap_or(0);
         let packet_threshold = 3u64;
         for (start, end) in ranges {
-            let acked: Vec<(u64, usize)> = self
-                .sent_bytes_by_pn
-                .range(*start..*end)
-                .map(|(&pn, &sz)| (pn, sz))
-                .collect();
+            let acked: Vec<(u64, usize)> =
+                self.sent_bytes_by_pn.range(*start..*end).map(|(&pn, &sz)| (pn, sz)).collect();
             for (pn, sz) in acked {
                 self.sent_bytes_by_pn.remove(&pn);
                 acked_total = acked_total.saturating_add(sz);
@@ -3227,11 +3217,8 @@ impl Connection {
         }
         if largest_acked >= packet_threshold {
             let loss_cutoff = largest_acked - packet_threshold;
-            let lost: Vec<(u64, usize)> = self
-                .sent_bytes_by_pn
-                .range(..=loss_cutoff)
-                .map(|(&pn, &sz)| (pn, sz))
-                .collect();
+            let lost: Vec<(u64, usize)> =
+                self.sent_bytes_by_pn.range(..=loss_cutoff).map(|(&pn, &sz)| (pn, sz)).collect();
             for (pn, sz) in lost {
                 self.sent_bytes_by_pn.remove(&pn);
                 self.recovery.on_loss_packet(pn, sz, now);
@@ -3289,7 +3276,8 @@ pub fn bench_paired_1rtt_connections_stealth(stealth_on: bool) -> BenchConnectio
     let client_write = [0xAAu8; 32];
     let server_write = [0xBBu8; 32];
 
-    let mut client = Connection::new_client(&client_scid, local_client, peer_client, config.clone());
+    let mut client =
+        Connection::new_client(&client_scid, local_client, peer_client, config.clone());
     let mut server = Connection::new_server(&server_scid, local_server, peer_server, config);
 
     client.set_destination_cid(ConnectionId::from_vec(server_scid.to_vec()));
@@ -3379,10 +3367,7 @@ mod tests {
         // Force connection window to 10 bytes – smaller than the send payload.
         c.peer_max_data = 10;
         let result = c.stream_send(0, &[0u8; 100], false);
-        assert!(
-            result.is_err(),
-            "stream_send must fail when payload exceeds peer_max_data"
-        );
+        assert!(result.is_err(), "stream_send must fail when payload exceeds peer_max_data");
     }
 
     #[test]
@@ -3392,7 +3377,8 @@ mod tests {
         assert!(c.stream_send(0, &[0u8; 100], false).is_err(), "precondition: blocked");
         // Simulate peer sending MAX_DATA that opens the window.
         c.peer_max_data = 10_000;
-        let sent = c.stream_send(0, &[0u8; 100], false).expect("should succeed after window update");
+        let sent =
+            c.stream_send(0, &[0u8; 100], false).expect("should succeed after window update");
         assert_eq!(sent, 100);
     }
 
@@ -3401,11 +3387,12 @@ mod tests {
         let mut c = make_conn();
         c.peer_max_data = 10;
         let _ = c.stream_send(0, &[0u8; 100], false);
-        let has_data_blocked = c
-            .pending_control
-            .iter()
-            .any(|f| matches!(f, Frame::DataBlocked { .. }));
-        assert!(has_data_blocked, "DataBlocked frame must be queued when connection window is exhausted");
+        let has_data_blocked =
+            c.pending_control.iter().any(|f| matches!(f, Frame::DataBlocked { .. }));
+        assert!(
+            has_data_blocked,
+            "DataBlocked frame must be queued when connection window is exhausted"
+        );
     }
 
     #[test]
@@ -3434,11 +3421,12 @@ mod tests {
             s.max_stream_data_tx = 5;
         }
         let _ = c.stream_send(0, &[0u8; 100], false);
-        let has_stream_blocked = c
-            .pending_control
-            .iter()
-            .any(|f| matches!(f, Frame::StreamDataBlocked { .. }));
-        assert!(has_stream_blocked, "StreamDataBlocked frame must be queued when stream window is exhausted");
+        let has_stream_blocked =
+            c.pending_control.iter().any(|f| matches!(f, Frame::StreamDataBlocked { .. }));
+        assert!(
+            has_stream_blocked,
+            "StreamDataBlocked frame must be queued when stream window is exhausted"
+        );
     }
 
     // ---- Priority 2: State Transitions ------------------------------------
@@ -3496,7 +3484,10 @@ mod tests {
         install_write_secret(&mut c);
         assert!(!c.key_phase);
         c.key_update();
-        assert!(c.key_phase, "key_update() must flip key_phase to true when write secret is present");
+        assert!(
+            c.key_phase,
+            "key_update() must flip key_phase to true when write secret is present"
+        );
     }
 
     #[test]
@@ -3578,11 +3569,7 @@ mod tests {
         c.close(true, 1, b"first").unwrap();
         c.close(true, 2, b"second").unwrap();
         assert!(c.is_closed(), "connection must remain closed after double close");
-        assert_eq!(
-            c.pending_control.len(),
-            2,
-            "both close frames should be queued"
-        );
+        assert_eq!(c.pending_control.len(), 2, "both close frames should be queued");
     }
 
     // ---- Stream Open/Close and Flow Control ------------------------------
@@ -3612,7 +3599,8 @@ mod tests {
         let err = c.stream_send(4, b"more", false).unwrap_err();
         assert!(
             matches!(err, crate::error::ConnectionError::FinalSize),
-            "sending after FIN must return FinalSize error, got {:?}", err
+            "sending after FIN must return FinalSize error, got {:?}",
+            err
         );
     }
 
@@ -3664,27 +3652,18 @@ mod tests {
     fn is_in_early_data_when_configured() {
         let mut cfg = Config::new_with_version(PROTOCOL_VERSION).unwrap();
         cfg.enable_early_data = true;
-        let c = Connection::new_with_role(
-            b"test_scid_0123456789",
-            local(),
-            peer(),
-            cfg,
-            false,
+        let c = Connection::new_with_role(b"test_scid_0123456789", local(), peer(), cfg, false);
+        assert!(
+            c.is_in_early_data(),
+            "connection with enable_early_data must report is_in_early_data"
         );
-        assert!(c.is_in_early_data(), "connection with enable_early_data must report is_in_early_data");
     }
 
     #[test]
     fn not_in_early_data_when_established() {
         let mut cfg = Config::new_with_version(PROTOCOL_VERSION).unwrap();
         cfg.enable_early_data = true;
-        let mut c = Connection::new_with_role(
-            b"test_scid_0123456789",
-            local(),
-            peer(),
-            cfg,
-            false,
-        );
+        let mut c = Connection::new_with_role(b"test_scid_0123456789", local(), peer(), cfg, false);
         c.is_established = true;
         assert!(!c.is_in_early_data(), "established connection must not be in early data");
     }
@@ -3692,7 +3671,10 @@ mod tests {
     #[test]
     fn not_in_early_data_when_disabled() {
         let c = make_conn();
-        assert!(!c.is_in_early_data(), "connection without enable_early_data must not be in early data");
+        assert!(
+            !c.is_in_early_data(),
+            "connection without enable_early_data must not be in early data"
+        );
     }
 
     // ---- Idle Timeout and Keepalive --------------------------------------
@@ -3738,14 +3720,11 @@ mod tests {
     fn conn_max_data_initial_matches_config() {
         let cfg = Config::new_with_version(PROTOCOL_VERSION).unwrap();
         let initial_max = cfg.initial_max_data;
-        let c = Connection::new_with_role(
-            b"test_scid_0123456789",
-            local(),
-            peer(),
-            cfg,
-            false,
+        let c = Connection::new_with_role(b"test_scid_0123456789", local(), peer(), cfg, false);
+        assert_eq!(
+            c.conn_max_data, initial_max,
+            "conn_max_data must match config initial_max_data"
         );
-        assert_eq!(c.conn_max_data, initial_max, "conn_max_data must match config initial_max_data");
     }
 
     #[test]
@@ -3768,7 +3747,11 @@ mod tests {
     #[test]
     fn three_pn_spaces_exist() {
         let c = make_conn();
-        assert_eq!(c.pkt_spaces.len(), 3, "must have exactly 3 PN spaces (Initial, Handshake, Application)");
+        assert_eq!(
+            c.pkt_spaces.len(),
+            3,
+            "must have exactly 3 PN spaces (Initial, Handshake, Application)"
+        );
         assert_eq!(c.next_send_pn_by_space.len(), 3, "must have 3 next_send_pn counters");
     }
 
@@ -3778,12 +3761,14 @@ mod tests {
     fn close_app_and_transport_produce_different_frames() {
         let mut c1 = make_conn();
         c1.close(true, 42, b"app error").unwrap();
-        let has_app = c1.pending_control.iter().any(|f| matches!(f, Frame::ApplicationClose { .. }));
+        let has_app =
+            c1.pending_control.iter().any(|f| matches!(f, Frame::ApplicationClose { .. }));
         assert!(has_app, "app close must produce ApplicationClose frame");
 
         let mut c2 = make_conn();
         c2.close(false, 0x01, b"protocol error").unwrap();
-        let has_conn = c2.pending_control.iter().any(|f| matches!(f, Frame::ConnectionClose { .. }));
+        let has_conn =
+            c2.pending_control.iter().any(|f| matches!(f, Frame::ConnectionClose { .. }));
         assert!(has_conn, "transport close must produce ConnectionClose frame");
     }
 
@@ -3863,8 +3848,10 @@ mod tests {
     #[test]
     fn intelligent_stealth_runtime_default_off() {
         let c = make_conn();
-        assert!(!c.intelligent_stealth_runtime_enabled_for_test(),
-            "intelligent stealth runtime must default to off");
+        assert!(
+            !c.intelligent_stealth_runtime_enabled_for_test(),
+            "intelligent stealth runtime must default to off"
+        );
     }
 
     #[test]

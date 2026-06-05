@@ -1,4 +1,3 @@
-
 use super::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 const SBOX: [u8; 256] = [
@@ -357,10 +356,7 @@ mod legacy_simd_tests {
         };
         let out_a = super::aes128_encrypt_block(&key, &block_a);
         let out_b = super::aes128_encrypt_block(&key, &block_b);
-        assert_ne!(
-            out_a, out_b,
-            "different plaintexts must produce different output"
-        );
+        assert_ne!(out_a, out_b, "different plaintexts must produce different output");
     }
 
     #[test]
@@ -376,10 +372,7 @@ mod legacy_simd_tests {
         assert_eq!(&expanded1[..16], &key);
         // Verify round keys are not all zeros after expansion
         let non_zero_count = expanded1[16..].iter().filter(|&&b| b != 0).count();
-        assert!(
-            non_zero_count > 0,
-            "expanded key schedule must have non-zero round keys"
-        );
+        assert!(non_zero_count > 0, "expanded key schedule must have non-zero round keys");
     }
 
     #[test]
@@ -389,8 +382,14 @@ mod legacy_simd_tests {
             0x77, 0x81,
         ];
         let blocks: [[u8; 16]; 4] = [
-            [0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96, 0xe9, 0x3d, 0x7e, 0x11, 0x73, 0x93, 0x17, 0x2a],
-            [0xae, 0x2d, 0x8a, 0x57, 0x1e, 0x03, 0xac, 0x9c, 0x9e, 0xb7, 0x6f, 0xac, 0x45, 0xaf, 0x8e, 0x51],
+            [
+                0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96, 0xe9, 0x3d, 0x7e, 0x11, 0x73, 0x93,
+                0x17, 0x2a,
+            ],
+            [
+                0xae, 0x2d, 0x8a, 0x57, 0x1e, 0x03, 0xac, 0x9c, 0x9e, 0xb7, 0x6f, 0xac, 0x45, 0xaf,
+                0x8e, 0x51,
+            ],
             [0x00; 16],
             [0xFF; 16],
         ];
@@ -398,10 +397,7 @@ mod legacy_simd_tests {
         for block in &blocks {
             let first = ctx.encrypt_block(block);
             let second = ctx.encrypt_block(block);
-            assert_eq!(
-                first, second,
-                "Aes128Ctx::encrypt_block must be deterministic"
-            );
+            assert_eq!(first, second, "Aes128Ctx::encrypt_block must be deterministic");
             // AES is a permutation - output must differ from input
             assert_ne!(first, *block, "Aes128Ctx output must differ from plaintext");
         }
@@ -415,8 +411,10 @@ mod legacy_simd_tests {
     fn test_ctr_xor_various_lengths() {
         let key: [u8; 16] = [0x01; 16];
         let ctx = super::Aes128Ctx::new(&key);
-        let base_counter: [u8; 16] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                                       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02];
+        let base_counter: [u8; 16] = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x02,
+        ];
 
         for &len in &[0usize, 1, 15, 16, 17, 32, 100] {
             let input = vec![0xABu8; len];

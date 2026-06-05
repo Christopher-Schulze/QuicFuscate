@@ -1,4 +1,3 @@
-
 use crate::optimize::{telemetry, FeatureDetector};
 #[inline(always)]
 fn le32(x: &[u8]) -> u32 {

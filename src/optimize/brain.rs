@@ -1801,10 +1801,7 @@ mod tests {
         // avg(1,2,3)=2.0, avg(2,3,4)=3.0, avg(3,4,5)=4.0
         let expected = [1.0, 1.5, 2.0, 3.0, 4.0];
         for (i, (&r, &e)) in result.iter().zip(expected.iter()).enumerate() {
-            assert!(
-                (r - e).abs() < 1e-5,
-                "moving_average[{i}]: got {r}, expected {e}"
-            );
+            assert!((r - e).abs() < 1e-5, "moving_average[{i}]: got {r}, expected {e}");
         }
     }
 
@@ -1938,10 +1935,7 @@ mod tests {
         let mut data = vec![1.0, 2.0, 3.0, 4.0];
         softmax_batch(&mut data);
         let sum: f32 = data.iter().sum();
-        assert!(
-            (sum - 1.0).abs() < 1e-4,
-            "softmax output should sum to 1.0, got {sum}"
-        );
+        assert!((sum - 1.0).abs() < 1e-4, "softmax output should sum to 1.0, got {sum}");
     }
 
     #[test]
@@ -1949,8 +1943,18 @@ mod tests {
         let mut data = vec![1.0, 2.0, 3.0];
         softmax_batch(&mut data);
         // Larger input -> larger softmax probability
-        assert!(data[0] < data[1], "softmax should preserve ordering: data[0]={} < data[1]={}", data[0], data[1]);
-        assert!(data[1] < data[2], "softmax should preserve ordering: data[1]={} < data[2]={}", data[1], data[2]);
+        assert!(
+            data[0] < data[1],
+            "softmax should preserve ordering: data[0]={} < data[1]={}",
+            data[0],
+            data[1]
+        );
+        assert!(
+            data[1] < data[2],
+            "softmax should preserve ordering: data[1]={} < data[2]={}",
+            data[1],
+            data[2]
+        );
     }
 
     #[test]
@@ -2008,10 +2012,7 @@ mod tests {
         let sum = e0 + e1 + e2;
         let expected = [e0 / sum, e1 / sum, e2 / sum];
         for (i, (&got, &exp)) in data.iter().zip(expected.iter()).enumerate() {
-            assert!(
-                (got - exp).abs() < 1e-5,
-                "softmax_scalar[{i}]: got {got}, expected {exp}"
-            );
+            assert!((got - exp).abs() < 1e-5, "softmax_scalar[{i}]: got {got}, expected {exp}");
         }
     }
 }

@@ -1,4 +1,3 @@
-
 /// QUIC packet protection algorithm identifier.
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug)]
@@ -92,13 +91,7 @@ pub trait AeadSeal {
         items: &mut [AeadSealItem<'_>],
     ) -> Result<(), crate::error::ConnectionError> {
         for item in items {
-            self.seal_with_u64_counter(
-                item.counter,
-                item.ad,
-                item.buf,
-                item.plaintext_len,
-                None,
-            )?;
+            self.seal_with_u64_counter(item.counter, item.ad, item.buf, item.plaintext_len, None)?;
         }
         Ok(())
     }

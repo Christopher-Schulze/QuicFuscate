@@ -464,9 +464,7 @@ mod tests {
         assert_eq!(sent, 1);
 
         // Verify the packet was actually received
-        recv_sock
-            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
-            .expect("set timeout");
+        recv_sock.set_read_timeout(Some(std::time::Duration::from_secs(2))).expect("set timeout");
         let mut buf = [0u8; 128];
         let (n, _from) = recv_sock.recv_from(&mut buf).expect("recv_from failed");
         assert_eq!(&buf[..n], payload);
@@ -476,9 +474,7 @@ mod tests {
     fn test_send_batch_multiple_packets_to_same_dest() {
         let recv_sock = UdpSocket::bind("127.0.0.1:0").expect("bind recv failed");
         let dest: SocketAddr = recv_sock.local_addr().expect("local_addr failed");
-        recv_sock
-            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
-            .expect("set timeout");
+        recv_sock.set_read_timeout(Some(std::time::Duration::from_secs(2))).expect("set timeout");
 
         let send_sock = UdpSocket::bind("127.0.0.1:0").expect("bind send failed");
 
@@ -514,9 +510,7 @@ mod tests {
             Err(_) => return, // IPv6 not available, skip gracefully
         };
         let dest: SocketAddr = recv_sock.local_addr().expect("local_addr");
-        recv_sock
-            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
-            .expect("set timeout");
+        recv_sock.set_read_timeout(Some(std::time::Duration::from_secs(2))).expect("set timeout");
 
         let send_sock = UdpSocket::bind("[::1]:0").expect("bind send");
         let payload = b"ipv6test";
@@ -530,4 +524,3 @@ mod tests {
         assert_eq!(&buf[..n], payload);
     }
 }
-

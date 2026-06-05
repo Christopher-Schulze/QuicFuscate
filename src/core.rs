@@ -951,9 +951,7 @@ impl QuicFuscateConnection {
         // idle HTTP/3 traffic patterns beyond what PINGs alone can achieve.
         if established && self.stealth_manager.should_inject_cover_stream_frame() {
             let data = self.stealth_manager.generate_cover_stream_data();
-            let _ = self
-                .conn
-                .stream_send(StealthManager::COVER_STREAM_ID, &data, false);
+            let _ = self.conn.stream_send(StealthManager::COVER_STREAM_ID, &data, false);
         }
 
         // Otherwise, generate a new QUIC packet using a pooled buffer.
@@ -1014,11 +1012,8 @@ impl QuicFuscateConnection {
         // no longer maintains a parallel next_send_at gate.
         if established {
             let transport_jitter = self.conn.transport_stealth_jitter_delay();
-            if let Some(release_at) = Self::compute_outbound_stealth_release(
-                now,
-                delay_opt,
-                transport_jitter,
-            )
+            if let Some(release_at) =
+                Self::compute_outbound_stealth_release(now, delay_opt, transport_jitter)
             {
                 self.next_packet_release = Some(release_at);
                 return Ok(0); // Yield immediately, do not send the just-generated packets yet.
@@ -1409,7 +1404,8 @@ mod tests {
 
     #[test]
     fn env_optional_trimmed_returns_none_for_missing() {
-        let result = QuicFuscateConnection::env_optional_trimmed("QUICFUSCATE_TEST_NONEXISTENT_VAR_XYZ");
+        let result =
+            QuicFuscateConnection::env_optional_trimmed("QUICFUSCATE_TEST_NONEXISTENT_VAR_XYZ");
         assert!(result.is_none());
     }
 
@@ -1433,9 +1429,7 @@ mod tests {
 
     #[test]
     fn inject_qkey_auth_header_adds_header() {
-        let conn_stub = ConnectionStatsOnlyStub {
-            qkey_auth_token_hex: Some("abc123".to_string()),
-        };
+        let conn_stub = ConnectionStatsOnlyStub { qkey_auth_token_hex: Some("abc123".to_string()) };
         let mut headers = vec![];
         conn_stub.inject_qkey_auth(&mut headers);
         assert_eq!(headers.len(), 1);
@@ -1445,9 +1439,7 @@ mod tests {
 
     #[test]
     fn inject_qkey_auth_header_skips_empty_token() {
-        let conn_stub = ConnectionStatsOnlyStub {
-            qkey_auth_token_hex: Some("  ".to_string()),
-        };
+        let conn_stub = ConnectionStatsOnlyStub { qkey_auth_token_hex: Some("  ".to_string()) };
         let mut headers = vec![];
         conn_stub.inject_qkey_auth(&mut headers);
         assert!(headers.is_empty());
@@ -1455,9 +1447,8 @@ mod tests {
 
     #[test]
     fn inject_qkey_auth_header_replaces_existing() {
-        let conn_stub = ConnectionStatsOnlyStub {
-            qkey_auth_token_hex: Some("new_token".to_string()),
-        };
+        let conn_stub =
+            ConnectionStatsOnlyStub { qkey_auth_token_hex: Some("new_token".to_string()) };
         let mut headers = vec![
             crate::transport::h3::Header::new(b"x-qf-auth", b"old"),
             crate::transport::h3::Header::new(b"content-type", b"text"),

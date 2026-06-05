@@ -610,7 +610,6 @@ pub trait QuicTlsProvider: Send + Sync {
         }
         Ok(())
     }
-
 }
 
 /// Create the canonical TLS provider.
@@ -812,10 +811,10 @@ mod rustls_provider {
     use parking_lot::RwLock;
     #[cfg(debug_assertions)]
     use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-    use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer, ServerName};
-    use rustls::quic::{self};
     #[cfg(debug_assertions)]
     use rustls::pki_types::UnixTime;
+    use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer, ServerName};
+    use rustls::quic::{self};
     #[cfg(debug_assertions)]
     use rustls::DigitallySignedStruct;
     use rustls::{ClientConfig, RootCertStore, ServerConfig};

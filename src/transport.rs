@@ -13,6 +13,8 @@ pub mod anti_replay;
 #[cfg(any(test, feature = "rust-tests"))]
 #[doc(hidden)]
 pub mod batch;
+/// Pluggable congestion control: Reno, BBR3, StealthShaper wrapper.
+pub mod cc;
 /// QUIC connection configuration and transport parameter setters.
 pub mod config;
 /// QUIC connection state machine and stream/datagram I/O.
@@ -25,8 +27,6 @@ pub mod h3;
 pub mod packet;
 /// Packet number spaces, connection IDs, varint codec, range sets, and RNG.
 pub mod pn;
-/// Pluggable congestion control: Reno, BBR3, StealthShaper wrapper.
-pub mod cc;
 /// Loss recovery and congestion control integration.
 pub mod recovery;
 /// High-performance UDP send/recv with GSO/GRO and batch I/O.
@@ -37,11 +37,11 @@ pub use anti_replay::{AntiReplayConfig, StrikeRegister};
 pub use config::Config;
 #[cfg(feature = "stream_ring_buffer")]
 pub use connection::StreamRingBuffer;
-pub use connection::{Connection, PathEvent};
 #[cfg(feature = "benches")]
 pub use connection::{
     bench_paired_1rtt_connections, bench_paired_1rtt_connections_stealth, BenchConnectionPair,
 };
+pub use connection::{Connection, PathEvent};
 pub use pn::{cid, pnspace, rand, range_buf, ranges, varint};
 #[cfg(target_os = "linux")]
 use std::sync::atomic::Ordering;

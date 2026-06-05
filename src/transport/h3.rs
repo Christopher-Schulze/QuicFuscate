@@ -1973,8 +1973,8 @@ mod tests {
     fn test_encode_capsule_roundtrip() {
         let payload = b"test capsule payload data";
         let capsule = Connection::encode_capsule(0x00, payload);
-        let (ctype, used, decoded) = Connection::decode_capsule(&capsule)
-            .expect("decode capsule roundtrip");
+        let (ctype, used, decoded) =
+            Connection::decode_capsule(&capsule).expect("decode capsule roundtrip");
         assert_eq!(ctype, 0x00);
         assert_eq!(used, capsule.len());
         assert_eq!(decoded, payload);
@@ -1983,8 +1983,8 @@ mod tests {
     #[test]
     fn test_encode_capsule_empty_payload() {
         let capsule = Connection::encode_capsule(0x21, &[]);
-        let (ctype, used, decoded) = Connection::decode_capsule(&capsule)
-            .expect("decode empty capsule");
+        let (ctype, used, decoded) =
+            Connection::decode_capsule(&capsule).expect("decode empty capsule");
         assert_eq!(ctype, 0x21);
         assert_eq!(used, capsule.len());
         assert!(decoded.is_empty());
@@ -1997,8 +1997,7 @@ mod tests {
         cfg.set_max_field_section_size(1024 * 1024);
         let mut h3 = super::h3::Connection::with_transport(&mut conn, &cfg).expect("h3");
 
-        let sid = h3.connect_udp(&mut conn, "proxy.test", "target.test:443")
-            .expect("connect_udp");
+        let sid = h3.connect_udp(&mut conn, "proxy.test", "target.test:443").expect("connect_udp");
 
         // Before marking: not established
         assert!(!h3.masque_established(sid));
@@ -2020,13 +2019,12 @@ mod tests {
         // First byte(s) encode the capsule type as varint.
         // 0x21 = 33 fits in a single-byte varint (< 64).
         assert!(!capsule.is_empty());
-        let (decoded_type, _) = Connection::decode_varint(&capsule)
-            .expect("varint decode");
+        let (decoded_type, _) = Connection::decode_varint(&capsule).expect("varint decode");
         assert_eq!(decoded_type, 0x21);
 
         // Full roundtrip confirms payload integrity
-        let (ctype, _, decoded_payload) = Connection::decode_capsule(&capsule)
-            .expect("decode capsule");
+        let (ctype, _, decoded_payload) =
+            Connection::decode_capsule(&capsule).expect("decode capsule");
         assert_eq!(ctype, 0x21);
         assert_eq!(decoded_payload, payload);
     }
@@ -2056,9 +2054,7 @@ mod tests {
     fn qpack_encode_decode_literal_header() {
         let mut enc = qpack::Encoder::new();
         let mut dec = qpack::Decoder::new();
-        let headers = vec![
-            Header::new(b"x-custom-header", b"custom-value-123"),
-        ];
+        let headers = vec![Header::new(b"x-custom-header", b"custom-value-123")];
         let mut buf = vec![0u8; 4096];
         let written = enc.encode(&headers, &mut buf).expect("encode");
         assert!(written > 2, "literal encoding must produce more than 2 bytes");
@@ -2108,8 +2104,7 @@ mod tests {
         let mut buf = vec![0x01]; // HEADERS type
         Connection::encode_varint(10, &mut buf);
         buf.extend_from_slice(&[0u8; 10]);
-        let (frame_type, frame_len, _) =
-            Connection::parse_frame_header(&buf).expect("parse");
+        let (frame_type, frame_len, _) = Connection::parse_frame_header(&buf).expect("parse");
         assert_eq!(frame_type, 0x01, "frame type must be HEADERS");
         assert_eq!(frame_len, 10);
     }
@@ -2118,8 +2113,7 @@ mod tests {
     fn parse_frame_header_settings_type() {
         let mut buf = vec![0x04]; // SETTINGS type
         Connection::encode_varint(0, &mut buf);
-        let (frame_type, frame_len, _) =
-            Connection::parse_frame_header(&buf).expect("parse");
+        let (frame_type, frame_len, _) = Connection::parse_frame_header(&buf).expect("parse");
         assert_eq!(frame_type, 0x04, "frame type must be SETTINGS");
         assert_eq!(frame_len, 0);
     }
@@ -2174,8 +2168,10 @@ mod tests {
         let mut cfg = Config::new().expect("cfg");
         cfg.set_max_field_section_size(0);
         let result = super::h3::Connection::with_transport(&mut conn, &cfg);
-        assert!(matches!(result, Err(Error::ExcessiveLoad)),
-            "zero max_field_section_size must be rejected");
+        assert!(
+            matches!(result, Err(Error::ExcessiveLoad)),
+            "zero max_field_section_size must be rejected"
+        );
     }
 
     #[test]
@@ -2184,8 +2180,10 @@ mod tests {
         let mut cfg = Config::new().expect("cfg");
         cfg.set_max_field_section_size(32 * 1024 * 1024); // 32 MiB > 16 MiB limit
         let result = super::h3::Connection::with_transport(&mut conn, &cfg);
-        assert!(matches!(result, Err(Error::ExcessiveLoad)),
-            "excessive max_field_section_size must be rejected");
+        assert!(
+            matches!(result, Err(Error::ExcessiveLoad)),
+            "excessive max_field_section_size must be rejected"
+        );
     }
 
     // ---- GOAWAY Handling -------------------------------------------------
@@ -2197,13 +2195,11 @@ mod tests {
         cfg.set_max_field_section_size(1024 * 1024);
         let mut h3 = super::h3::Connection::with_transport(&mut conn, &cfg).expect("h3");
         h3.goaway_sent = true;
-        let result = h3.send_request(
-            &mut conn,
-            &[Header::new(b":method", b"GET")],
-            true,
+        let result = h3.send_request(&mut conn, &[Header::new(b":method", b"GET")], true);
+        assert!(
+            matches!(result, Err(Error::ClosedCriticalStream)),
+            "send_request after GOAWAY must fail"
         );
-        assert!(matches!(result, Err(Error::ClosedCriticalStream)),
-            "send_request after GOAWAY must fail");
     }
 
     #[test]
@@ -2213,11 +2209,7 @@ mod tests {
         cfg.set_max_field_section_size(1024 * 1024);
         let mut h3 = super::h3::Connection::with_transport(&mut conn, &cfg).expect("h3");
         h3.goaway_received = true;
-        let result = h3.send_request(
-            &mut conn,
-            &[Header::new(b":method", b"GET")],
-            true,
-        );
+        let result = h3.send_request(&mut conn, &[Header::new(b":method", b"GET")], true);
         assert!(matches!(result, Err(Error::ClosedCriticalStream)));
     }
 
@@ -2282,8 +2274,10 @@ mod tests {
         let sid = h3.send_request(&mut conn, &headers, true).expect("send_request");
         // Stream is finished (fin_sent=true)
         let result = h3.send_body(&mut conn, sid, b"body", false);
-        assert!(matches!(result, Err(Error::Done)),
-            "send_body on finished stream must return Done");
+        assert!(
+            matches!(result, Err(Error::Done)),
+            "send_body on finished stream must return Done"
+        );
     }
 
     // ---- Huffman Encoding ------------------------------------------------
@@ -2295,8 +2289,8 @@ mod tests {
         let mut encoded = vec![0u8; est + 8];
         let enc_len = qpack::huff_encode_into(input, &mut encoded);
         let mut decoded = vec![0u8; input.len() + 16];
-        let dec_len = qpack::huff_decode_into(&encoded[..enc_len], &mut decoded)
-            .expect("huff decode");
+        let dec_len =
+            qpack::huff_decode_into(&encoded[..enc_len], &mut decoded).expect("huff decode");
         assert_eq!(&decoded[..dec_len], input);
     }
 
@@ -2339,8 +2333,10 @@ mod tests {
         let css = generate_fake_css(1000);
         assert_eq!(css.len(), 1000);
         // Should contain CSS-like content
-        assert!(css.windows(4).any(|w| w == b"body" || w == b".rul"),
-            "generated CSS must contain CSS-like text");
+        assert!(
+            css.windows(4).any(|w| w == b"body" || w == b".rul"),
+            "generated CSS must contain CSS-like text"
+        );
     }
 
     #[test]

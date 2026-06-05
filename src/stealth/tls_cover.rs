@@ -444,7 +444,12 @@ mod tests {
             let hi = (v >> 8) as u8;
             let lo = (v & 0xFF) as u8;
             // Both bytes should have the same low nibble 0xA
-            assert_eq!(hi & 0x0F, 0x0A, "GREASE high byte low nibble should be 0xA for idx={}", idx);
+            assert_eq!(
+                hi & 0x0F,
+                0x0A,
+                "GREASE high byte low nibble should be 0xA for idx={}",
+                idx
+            );
             assert_eq!(lo & 0x0F, 0x0A, "GREASE low byte low nibble should be 0xA for idx={}", idx);
             // High nibbles match each other
             assert_eq!(hi >> 4, lo >> 4, "GREASE nibble pattern mismatch for idx={}", idx);
@@ -550,11 +555,8 @@ mod tests {
 
     #[test]
     fn test_client_hello_with_session_id() {
-        let params = ClientHelloParams {
-            tls_version: 0x0303,
-            cipher_suites: &[0x1301],
-            extensions: &[],
-        };
+        let params =
+            ClientHelloParams { tls_version: 0x0303, cipher_suites: &[0x1301], extensions: &[] };
         let sid = [0xAA; 32];
         let with_sid = TlsCover::client_hello_custom_with_sid(params, Some(&sid));
         let without_sid = TlsCover::client_hello_custom(ClientHelloParams {
@@ -617,8 +619,13 @@ mod tests {
         assert!(cs_len > 0, "cipher suites should not be empty");
         // First cipher suite should NOT be a GREASE value (GREASE has pattern 0x?A?A)
         let first_cs = u16::from_be_bytes([record[cs_offset + 2], record[cs_offset + 3]]);
-        let is_grease = (first_cs & 0x0F0F) == 0x0A0A && ((first_cs >> 4) & 0x0F) == ((first_cs >> 12) & 0x0F);
-        assert!(!is_grease, "Safari should not have GREASE cipher suite first, got 0x{:04X}", first_cs);
+        let is_grease =
+            (first_cs & 0x0F0F) == 0x0A0A && ((first_cs >> 4) & 0x0F) == ((first_cs >> 12) & 0x0F);
+        assert!(
+            !is_grease,
+            "Safari should not have GREASE cipher suite first, got 0x{:04X}",
+            first_cs
+        );
     }
 
     #[test]
@@ -631,7 +638,11 @@ mod tests {
         assert_eq!(ext1[1], 0x0D);
         // Body length in 8..40 range
         let body_len = u16::from_be_bytes([ext1[2], ext1[3]]) as usize;
-        assert!((8..=40).contains(&body_len), "ECH GREASE body length {} out of expected range", body_len);
+        assert!(
+            (8..=40).contains(&body_len),
+            "ECH GREASE body length {} out of expected range",
+            body_len
+        );
         assert_eq!(ext1.len(), 4 + body_len);
     }
 

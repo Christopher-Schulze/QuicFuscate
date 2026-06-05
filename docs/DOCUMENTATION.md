@@ -1313,7 +1313,7 @@ Tips
 ### AEGIS
 - Integrated internally in `src/crypto/`; validated via integration tests in `scripts/tests/rust/rt-baseline-oracles.rs`.
 - Workflow: develop -> test -> clippy. Deterministic, offline; run in repo root.
-- Data-plane AEAD selection can be overridden via config (`[crypto] aead_preference` / `force_aead`) with canonical choices `aegis-128l` and `morus`; aliases `aegis-128x4` and `aegis-128x8` remain compatibility inputs that fold back into the AEGIS family posture. Initial/Handshake remain AES-128-GCM for QUIC long-header compatibility.
+- Data-plane AEAD selection can be overridden via config (`[crypto] aead_preference` / `force_aead`) with canonical choices `aegis-128l` and `morus`; `aegis-128x4` and `aegis-128x8` select the corresponding retained internal AEGIS backends. Initial/Handshake remain AES-128-GCM for QUIC long-header compatibility.
 - `src/profile.rs` is a test/compat alias surface for `Aegis128Profile` and converts to/from `simd::CryptoAeadPlan` via `select()`/`select_for_len()` helpers. It is gated behind `cfg(any(test, feature = "rust-tests"))` and is not part of the default product-facing crate surface.
 
 We do not list the crate's file structure exhaustively; instead we focus on the essential aspects and how to run the tests.

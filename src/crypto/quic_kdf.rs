@@ -1,4 +1,3 @@
-
 use super::hkdf::{hkdf_expand, hkdf_extract};
 
 /// QUIC version 1 initial salt (RFC 9001, Section 5.2)
@@ -152,10 +151,9 @@ mod tests {
         // HKDF-Extract(initial_salt, cid) yields a known 32-byte PRK.
         // The expected value is taken from RFC 9001 Appendix A.1:
         let expected: [u8; 32] = [
-            0x7d, 0xb5, 0xdf, 0x06, 0xe7, 0xa6, 0x9e, 0x43,
-            0x24, 0x96, 0xad, 0xed, 0xb0, 0x08, 0x51, 0x92,
-            0x35, 0x95, 0x22, 0x15, 0x96, 0xae, 0x2a, 0xe9,
-            0xfb, 0x81, 0x15, 0xc1, 0xe9, 0xed, 0x0a, 0x44,
+            0x7d, 0xb5, 0xdf, 0x06, 0xe7, 0xa6, 0x9e, 0x43, 0x24, 0x96, 0xad, 0xed, 0xb0, 0x08,
+            0x51, 0x92, 0x35, 0x95, 0x22, 0x15, 0x96, 0xae, 0x2a, 0xe9, 0xfb, 0x81, 0x15, 0xc1,
+            0xe9, 0xed, 0x0a, 0x44,
         ];
         let actual = derive_initial_secret(&RFC9001_DCID, 0x00000001);
         assert_eq!(actual, expected, "must match RFC 9001 Appendix A.1 initial_secret");
@@ -170,13 +168,11 @@ mod tests {
         let initial_secret = derive_initial_secret(&RFC9001_DCID, 0x00000001);
         let client_secret = derive_client_initial_secret(&initial_secret);
         assert_eq!(client_secret.len(), 32);
-        assert_ne!(client_secret.as_slice(), &[0u8; 32],
-            "client secret must not be all zeros");
+        assert_ne!(client_secret.as_slice(), &[0u8; 32], "client secret must not be all zeros");
 
         // Pin: calling again must produce identical output
         let client_secret2 = derive_client_initial_secret(&initial_secret);
-        assert_eq!(client_secret, client_secret2,
-            "client secret derivation must be deterministic");
+        assert_eq!(client_secret, client_secret2, "client secret derivation must be deterministic");
     }
 
     #[test]
@@ -184,12 +180,10 @@ mod tests {
         let initial_secret = derive_initial_secret(&RFC9001_DCID, 0x00000001);
         let server_secret = derive_server_initial_secret(&initial_secret);
         assert_eq!(server_secret.len(), 32);
-        assert_ne!(server_secret.as_slice(), &[0u8; 32],
-            "server secret must not be all zeros");
+        assert_ne!(server_secret.as_slice(), &[0u8; 32], "server secret must not be all zeros");
 
         let server_secret2 = derive_server_initial_secret(&initial_secret);
-        assert_eq!(server_secret, server_secret2,
-            "server secret derivation must be deterministic");
+        assert_eq!(server_secret, server_secret2, "server secret derivation must be deterministic");
     }
 
     #[test]
@@ -301,12 +295,9 @@ mod tests {
         let client_keys = derive_keys(&client_secret, 16, 12, 16);
         let server_keys = derive_keys(&server_secret, 16, 12, 16);
 
-        assert_ne!(client_keys.key, server_keys.key,
-            "client and server packet keys must differ");
-        assert_ne!(client_keys.iv, server_keys.iv,
-            "client and server IVs must differ");
-        assert_ne!(client_keys.hp, server_keys.hp,
-            "client and server HP keys must differ");
+        assert_ne!(client_keys.key, server_keys.key, "client and server packet keys must differ");
+        assert_ne!(client_keys.iv, server_keys.iv, "client and server IVs must differ");
+        assert_ne!(client_keys.hp, server_keys.hp, "client and server HP keys must differ");
     }
 
     // ---------------------------------------------------------------
@@ -331,8 +322,7 @@ mod tests {
         let initial = derive_initial_secret(&RFC9001_DCID, 1);
         let client = derive_client_initial_secret(&initial);
         let next = derive_next_secret(&client);
-        assert_ne!(next.as_slice(), client.as_slice(),
-            "key update must produce different secret");
+        assert_ne!(next.as_slice(), client.as_slice(), "key update must produce different secret");
         assert_eq!(next.len(), 32, "next secret must be 32 bytes");
     }
 
@@ -353,8 +343,10 @@ mod tests {
         seen.insert(current.clone());
         for _ in 0..10 {
             current = derive_next_secret(&current);
-            assert!(seen.insert(current.clone()),
-                "key update chain must produce unique secrets at each step");
+            assert!(
+                seen.insert(current.clone()),
+                "key update chain must produce unique secrets at each step"
+            );
         }
     }
 
@@ -398,10 +390,12 @@ mod tests {
         let secret = [0xCCu8; 32];
         let key16 = derive_pkt_key(&secret, 16);
         let key32 = derive_pkt_key(&secret, 32);
-        assert_eq!(&key32[..16], key16.as_slice(),
-            "HKDF-Expand prefix must be identical for same info");
-        assert_ne!(&key32[16..], &[0u8; 16],
-            "extended key material must not be all zeros");
+        assert_eq!(
+            &key32[..16],
+            key16.as_slice(),
+            "HKDF-Expand prefix must be identical for same info"
+        );
+        assert_ne!(&key32[16..], &[0u8; 16], "extended key material must not be all zeros");
     }
 
     #[test]

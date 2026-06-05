@@ -533,10 +533,7 @@ fn cover_ping_should_send_respects_interval() {
     );
     // After sleeping past the interval it should fire again
     std::thread::sleep(std::time::Duration::from_millis(25));
-    assert!(
-        manager.should_send_cover_ping(),
-        "call after interval elapsed must return true again"
-    );
+    assert!(manager.should_send_cover_ping(), "call after interval elapsed must return true again");
 }
 
 #[test]
@@ -545,10 +542,7 @@ fn cover_ping_disabled_when_config_off() {
     let crypto = Arc::new(CryptoManager::new());
     let manager = StealthManager::new(StealthConfig::off(), optimization, crypto);
     // off() preset has enable_cover_ping = false
-    assert!(
-        !manager.should_send_cover_ping(),
-        "off preset must never fire cover ping"
-    );
+    assert!(!manager.should_send_cover_ping(), "off preset must never fire cover ping");
 }
 
 #[test]
@@ -631,8 +625,10 @@ fn http3_masquerade_pseudo_headers_present() {
 #[test]
 fn http3_masquerade_user_agent_differs_by_browser() {
     use super::{BrowserProfile, FingerprintProfile, Http3Masquerade, OsProfile};
-    let chrome = Http3Masquerade::new(FingerprintProfile::new(BrowserProfile::Chrome, OsProfile::Windows));
-    let firefox = Http3Masquerade::new(FingerprintProfile::new(BrowserProfile::Firefox, OsProfile::Linux));
+    let chrome =
+        Http3Masquerade::new(FingerprintProfile::new(BrowserProfile::Chrome, OsProfile::Windows));
+    let firefox =
+        Http3Masquerade::new(FingerprintProfile::new(BrowserProfile::Firefox, OsProfile::Linux));
 
     let ua = |headers: &[crate::transport::h3::Header]| {
         headers

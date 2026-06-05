@@ -359,21 +359,10 @@ pub fn export_telemetry_text() -> String {
             IO_URING_SUBMIT_PACKETS.get()
         );
         let _ = writeln!(out, "quicfuscate_io_uring_fallbacks_total {}", IO_URING_FALLBACKS.get());
-        let _ = writeln!(
-            out,
-            "quicfuscate_io_uring_sqpoll_active {}",
-            get(&IO_URING_SQPOLL_ACTIVE)
-        );
-        let _ = writeln!(
-            out,
-            "quicfuscate_io_uring_zc_sends_total {}",
-            IO_URING_ZC_SENDS.get()
-        );
-        let _ = writeln!(
-            out,
-            "quicfuscate_io_uring_zc_notifs_total {}",
-            IO_URING_ZC_NOTIFS.get()
-        );
+        let _ =
+            writeln!(out, "quicfuscate_io_uring_sqpoll_active {}", get(&IO_URING_SQPOLL_ACTIVE));
+        let _ = writeln!(out, "quicfuscate_io_uring_zc_sends_total {}", IO_URING_ZC_SENDS.get());
+        let _ = writeln!(out, "quicfuscate_io_uring_zc_notifs_total {}", IO_URING_ZC_NOTIFS.get());
         let _ = writeln!(
             out,
             "quicfuscate_io_uring_server_submit_calls_total {}",
@@ -394,11 +383,7 @@ pub fn export_telemetry_text() -> String {
             "quicfuscate_io_uring_recv_packets_total {}",
             IO_URING_RECV_PACKETS.get()
         );
-        let _ = writeln!(
-            out,
-            "quicfuscate_io_uring_recv_active {}",
-            get(&IO_URING_RECV_ACTIVE)
-        );
+        let _ = writeln!(out, "quicfuscate_io_uring_recv_active {}", get(&IO_URING_RECV_ACTIVE));
     } // end packets
 
     if stealth {

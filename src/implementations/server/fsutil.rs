@@ -142,6 +142,9 @@ mod tests {
         assert_eq!(hex_from_bytes(&[0x00]), "00");
         assert_eq!(hex_from_bytes(&[0xff]), "ff");
         assert_eq!(hex_from_bytes(&[0xde, 0xad, 0xbe, 0xef]), "deadbeef");
-        assert_eq!(hex_from_bytes(&[0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]), "0123456789abcdef");
+        assert_eq!(
+            hex_from_bytes(&[0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]),
+            "0123456789abcdef"
+        );
     }
 }

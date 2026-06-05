@@ -89,10 +89,7 @@ struct MaxBwFilter {
 
 impl MaxBwFilter {
     fn new() -> Self {
-        Self {
-            samples: [(0, 0); 10],
-            idx: 0,
-        }
+        Self { samples: [(0, 0); 10], idx: 0 }
     }
 
     /// Record a new bandwidth sample at the given round.
@@ -104,12 +101,7 @@ impl MaxBwFilter {
     /// Return the maximum bandwidth within `window` rounds of `current_round`.
     fn max_within(&self, current_round: u64, window: u64) -> u64 {
         let cutoff = current_round.saturating_sub(window);
-        self.samples
-            .iter()
-            .filter(|(r, _)| *r >= cutoff)
-            .map(|(_, bw)| *bw)
-            .max()
-            .unwrap_or(0)
+        self.samples.iter().filter(|(r, _)| *r >= cutoff).map(|(_, bw)| *bw).max().unwrap_or(0)
     }
 }
 
@@ -234,10 +226,7 @@ impl Bbr2 {
     /// Inflight target for the current state.
     fn target_inflight(&self) -> usize {
         let bdp = self.bdp();
-        max(
-            (bdp as f64 * self.cwnd_gain) as usize + self.extra_acked,
-            self.min_pipe_cwnd(),
-        )
+        max((bdp as f64 * self.cwnd_gain) as usize + self.extra_acked, self.min_pipe_cwnd())
     }
 
     /// Current loss rate [0.0, 1.0].
@@ -535,10 +524,7 @@ impl CongestionController for Bbr2 {
 
         // BBR2 loss response: reduce cwnd by lost_bytes (but not below min)
         if !matches!(self.state, State::Startup) {
-            self.cwnd = max(
-                self.cwnd.saturating_sub(lost_bytes),
-                self.min_pipe_cwnd(),
-            );
+            self.cwnd = max(self.cwnd.saturating_sub(lost_bytes), self.min_pipe_cwnd());
         }
     }
 
@@ -642,7 +628,10 @@ mod tests {
             bbr.on_packet_sent(i, 1200, now + Duration::from_millis(i * 10));
         }
         bbr.on_ack(6000, now + Duration::from_millis(100));
-        assert!(bbr.pacing_rate().unwrap_or(0) > 0, "pacing_rate must be > 0 after ACKs with time delta");
+        assert!(
+            bbr.pacing_rate().unwrap_or(0) > 0,
+            "pacing_rate must be > 0 after ACKs with time delta"
+        );
         assert!(bbr.cwnd() >= bbr.min_pipe_cwnd());
     }
 
@@ -681,8 +670,12 @@ mod tests {
         let sp = Arc::clone(&sent_pkt);
         let lp = Arc::clone(&lost_pkt);
         bbr.set_fec_callbacks(
-            Arc::new(move |pn, _| { sp.store(pn, Ordering::Relaxed); }),
-            Arc::new(move |pn, _| { lp.store(pn, Ordering::Relaxed); }),
+            Arc::new(move |pn, _| {
+                sp.store(pn, Ordering::Relaxed);
+            }),
+            Arc::new(move |pn, _| {
+                lp.store(pn, Ordering::Relaxed);
+            }),
         );
         let now = Instant::now();
         bbr.on_packet_sent(42, 1200, now);
@@ -696,7 +689,7 @@ mod tests {
         let mut bbr = Bbr2::new(12_000, 1200);
         bbr.max_bw = 1_000_000; // 1 MB/s
         bbr.min_rtt = Duration::from_millis(50); // 50ms
-        // BDP = 1_000_000 * 0.05 = 50_000
+                                                 // BDP = 1_000_000 * 0.05 = 50_000
         assert_eq!(bbr.bdp(), 50_000);
     }
 

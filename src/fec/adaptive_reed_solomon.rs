@@ -169,7 +169,10 @@ mod tests {
         // Low loss but high latency -> must NOT enter LOW branch (k stays base_k, not base_k*1.2)
         let (k_hi_lat, _, _) = adapt_once(0.01, 200.0, 100.0);
         let (k_lo_lat, _, _) = adapt_once(0.01, 5.0, 100.0);
-        assert_ne!(k_hi_lat, k_lo_lat, "high latency must not trigger the low-latency k enlargement");
+        assert_ne!(
+            k_hi_lat, k_lo_lat,
+            "high latency must not trigger the low-latency k enlargement"
+        );
         assert_eq!(k_hi_lat, 10, "high latency + low loss falls into balanced branch, k = base_k");
     }
 

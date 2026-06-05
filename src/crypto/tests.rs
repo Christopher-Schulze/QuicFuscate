@@ -61,7 +61,10 @@ fn data_aead_config_force_overrides_preference() {
 #[test]
 fn data_aead_config_force_aegis_x4_x8_use_distinct_overrides() {
     let _guard = DATA_AEAD_TEST_LOCK.lock().unwrap();
-    let mut cfg = CryptoConfig { aead_preference: AeadPreference::Auto, force_aead: "aegis-128x4".to_string() };
+    let mut cfg = CryptoConfig {
+        aead_preference: AeadPreference::Auto,
+        force_aead: "aegis-128x4".to_string(),
+    };
     super::install_data_aead_config(&cfg);
     assert_eq!(super::data_aead_override_mode(), DATA_AEAD_OVERRIDE_AEGIS_X4);
 
@@ -75,7 +78,10 @@ fn data_aead_config_force_aegis_x4_x8_use_distinct_overrides() {
 #[test]
 fn data_aead_force_aegis_x4_alias_roundtrip() {
     let _guard = DATA_AEAD_TEST_LOCK.lock().unwrap();
-    let cfg = CryptoConfig { aead_preference: AeadPreference::Auto, force_aead: "aegis-128x4".to_string() };
+    let cfg = CryptoConfig {
+        aead_preference: AeadPreference::Auto,
+        force_aead: "aegis-128x4".to_string(),
+    };
     super::install_data_aead_config(&cfg);
 
     let key = [0x11u8; 32];
@@ -98,7 +104,10 @@ fn data_aead_force_aegis_x4_alias_roundtrip() {
 #[test]
 fn data_aead_x4_batch_seal_open_roundtrip() {
     let _guard = DATA_AEAD_TEST_LOCK.lock().unwrap();
-    let cfg = CryptoConfig { aead_preference: AeadPreference::Auto, force_aead: "aegis-128x4".to_string() };
+    let cfg = CryptoConfig {
+        aead_preference: AeadPreference::Auto,
+        force_aead: "aegis-128x4".to_string(),
+    };
     super::install_data_aead_config(&cfg);
 
     let key = [0x5Au8; 32];
@@ -145,7 +154,10 @@ fn data_aead_x4_batch_seal_open_roundtrip() {
 #[test]
 fn data_aead_force_aegis_x8_alias_roundtrip() {
     let _guard = DATA_AEAD_TEST_LOCK.lock().unwrap();
-    let cfg = CryptoConfig { aead_preference: AeadPreference::Auto, force_aead: "aegis-128x8".to_string() };
+    let cfg = CryptoConfig {
+        aead_preference: AeadPreference::Auto,
+        force_aead: "aegis-128x8".to_string(),
+    };
     super::install_data_aead_config(&cfg);
 
     let key = [0x33u8; 32];
