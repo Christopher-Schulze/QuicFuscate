@@ -50,6 +50,11 @@ pub struct UringBatchSender {
     zc_supported: bool,
 }
 
+// SAFETY: UringBatchSender owns its ring and scratch vectors. The raw pointers
+// inside msghdr/iovec entries are rebuilt from those owned vectors during
+// synchronous &mut self submissions and are protected by the caller's mutex.
+unsafe impl Send for UringBatchSender {}
+
 impl UringBatchSender {
     /// Try to create a sender with the given queue depth.
     ///
