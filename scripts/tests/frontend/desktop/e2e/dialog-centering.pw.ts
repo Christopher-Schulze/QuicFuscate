@@ -67,7 +67,10 @@ test.describe("Dialog Centering [Desktop Browser Mode]", () => {
     await createTunnelShell(page, "Center Delete");
     const card = page.locator("[data-tunnel-card]").filter({ hasText: "Center Delete" }).first();
     await expect(card).toBeVisible();
-    await card.getByRole("button", { name: "Remove tunnel", exact: true }).click();
+    await card.getByRole("button", { name: "Open configuration", exact: true }).click();
+    const configDialog = page.getByRole("dialog", { name: "Tunnel Configuration" });
+    await expect(configDialog).toBeVisible();
+    await configDialog.getByRole("button", { name: "Delete", exact: true }).click();
     await expect(page.getByRole("dialog", { name: "Delete Tunnel" })).toBeVisible();
     await assertDialogCenteredInStage(page, testInfo, "delete-confirm");
   });

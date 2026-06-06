@@ -178,9 +178,9 @@ async function stubAdminApi(page: Page, opts: StubOptions = {}) {
           data: {
             lines: [
               {
-                ts: "12:00:00",
-                level: "INFO",
-                text: "admin init",
+                ts: Date.now(),
+                level: "info",
+                msg: "admin init",
               },
             ],
             cursor: 1,

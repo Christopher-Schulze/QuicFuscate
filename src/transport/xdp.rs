@@ -647,11 +647,11 @@ mod fastpath_udp_tests {
         }
     }
 
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+    static UDP_FASTPATH_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn auto_mode_falls_back_to_udp_fastpath_when_uring_unavailable() {
-        let _env_lock = ENV_MUTEX.lock().expect("env mutex");
+        let _env_lock = UDP_FASTPATH_MUTEX.lock().expect("udp fastpath mutex");
         let _guard = EnvGuard::set("QUICFUSCATE_FASTPATH", "auto");
 
         let mut fp = FastPathTransport::new();
@@ -664,6 +664,7 @@ mod fastpath_udp_tests {
 
     #[test]
     fn send_segmented_compat_udp_path_sends_all_segments_over_multiple_batches() {
+        let _udp_lock = UDP_FASTPATH_MUTEX.lock().expect("udp fastpath mutex");
         let receiver = UdpSocket::bind("127.0.0.1:0").expect("bind receiver");
         receiver.set_read_timeout(Some(Duration::from_secs(1))).expect("set read timeout");
         let recv_addr = receiver.local_addr().expect("receiver local addr");
@@ -695,7 +696,7 @@ mod fastpath_udp_tests {
 
     #[test]
     fn unsupported_fastpath_value_defaults_to_udp_fastpath_auto_policy() {
-        let _env_lock = ENV_MUTEX.lock().expect("env mutex");
+        let _env_lock = UDP_FASTPATH_MUTEX.lock().expect("udp fastpath mutex");
         let _guard = EnvGuard::set("QUICFUSCATE_FASTPATH", "legacy-fastpath");
 
         let mut fp = FastPathTransport::new();
@@ -711,6 +712,7 @@ mod fastpath_udp_tests {
 
     #[test]
     fn recv_coalesced_fastpath_reads_from_udp_fastpath() {
+        let _udp_lock = UDP_FASTPATH_MUTEX.lock().expect("udp fastpath mutex");
         let sender = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
         sender.set_write_timeout(Some(Duration::from_secs(1))).expect("set write timeout");
 
@@ -749,6 +751,7 @@ mod fastpath_udp_tests {
 
     #[test]
     fn send_segmented_compat_flushes_single_packet_when_vectored_enabled() {
+        let _udp_lock = UDP_FASTPATH_MUTEX.lock().expect("udp fastpath mutex");
         let receiver = UdpSocket::bind("127.0.0.1:0").expect("bind receiver");
         receiver.set_read_timeout(Some(Duration::from_secs(1))).expect("set read timeout");
         let recv_addr = receiver.local_addr().expect("receiver local addr");

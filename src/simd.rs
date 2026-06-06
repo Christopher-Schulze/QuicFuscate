@@ -924,7 +924,12 @@ pub(crate) mod arm {
 
     #[inline(always)]
     unsafe fn compress_sha_blocks(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
+        #[cfg(not(windows))]
         sha2_asm::compress256(state, blocks);
+        #[cfg(windows)]
+        {
+            let _ = (state, blocks);
+        }
     }
 
     #[target_feature(enable = "neon", enable = "sha2")]
@@ -2355,15 +2360,15 @@ pub mod crypto {
 
     #[derive(Copy, Clone, Debug, Eq, PartialEq)]
     enum Sha256Backend {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", not(windows)))]
         Avx2,
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", not(windows)))]
         Vnni,
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", not(windows)))]
         ShaNi,
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "aarch64", not(windows)))]
         Neon,
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "aarch64", not(windows)))]
         Sve2,
         Scalar,
     }
@@ -2379,7 +2384,7 @@ pub mod crypto {
         SHA256_PLAN.get_or_init(|| {
             let features = FeatureDetector::instance();
 
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", not(windows)))]
             {
                 if features.has_feature(CpuFeature::AVXVNNI)
                     && features.has_feature(CpuFeature::AVX2)
@@ -2394,7 +2399,7 @@ pub mod crypto {
                 }
             }
 
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(all(target_arch = "aarch64", not(windows)))]
             {
                 if features.has_feature(CpuFeature::SVE2)
                     && features.has_feature(CpuFeature::SHA256)
@@ -2417,13 +2422,13 @@ pub mod crypto {
         // at init time. Each callee reads `data` and returns a hash digest -
         // no pointer aliasing or alignment requirements beyond slice validity.
         match backend {
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", not(windows)))]
             Sha256Backend::Avx2 => unsafe { super::x86::sha256_avx2(data) },
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", not(windows)))]
             Sha256Backend::Vnni => unsafe { super::x86::sha256_vnni(data) },
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", not(windows)))]
             Sha256Backend::ShaNi => unsafe { super::x86::sha256_hw(data) },
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(all(target_arch = "aarch64", not(windows)))]
             Sha256Backend::Neon | Sha256Backend::Sve2 => unsafe { arm::sha256_hw(data) },
             Sha256Backend::Scalar => scalar::sha256(data),
         }
@@ -2612,12 +2617,22 @@ mod x86 {
 
     #[inline(always)]
     unsafe fn compress_batch_avx2(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
+        #[cfg(not(windows))]
         sha2_asm::compress256(state, blocks);
+        #[cfg(windows)]
+        {
+            let _ = (state, blocks);
+        }
     }
 
     #[inline(always)]
     unsafe fn compress_batch_vnni(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
+        #[cfg(not(windows))]
         sha2_asm::compress256(state, blocks);
+        #[cfg(windows)]
+        {
+            let _ = (state, blocks);
+        }
     }
 
     /// SSE2 pre-fastpath for varint decoding: quickly find length via continuation-bit mask
@@ -2658,6 +2673,10 @@ mod x86 {
 
     #[target_feature(enable = "avx2")]
     pub(super) unsafe fn sha256_avx2(data: &[u8]) -> [u8; 32] {
+        #[cfg(windows)]
+        {
+            return super::scalar::sha256(data);
+        }
         let digest = super::sha256_hash_with_batch(data, 1, |state, blocks| {
             compress_batch_avx2(state, blocks)
         });
@@ -2667,6 +2686,10 @@ mod x86 {
 
     #[target_feature(enable = "avx512f", enable = "avx512vl", enable = "avx512vnni")]
     pub(super) unsafe fn sha256_vnni(data: &[u8]) -> [u8; 32] {
+        #[cfg(windows)]
+        {
+            return super::scalar::sha256(data);
+        }
         let digest = super::sha256_hash_with_batch(data, 2, |state, blocks| {
             compress_batch_vnni(state, blocks)
         });

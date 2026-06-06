@@ -48,7 +48,6 @@ cpufeatures = "0.2"
 getrandom = "0.2"
 libc = "0.2"
 sha2 = "0.10"
-sha2-asm = "0.6.4"
 hmac = "0.12"
 hkdf = "0.12"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
@@ -68,6 +67,9 @@ hex = "0.4"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { version = "0.7", optional = true }
+
+[target.'cfg(not(windows))'.dependencies]
+sha2-asm = "0.6.4"
 
 [dev-dependencies]
 proptest = "1.6"

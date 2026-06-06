@@ -1,5 +1,5 @@
-import "@testing-library/jest-dom/vitest";
-import { beforeEach, vi } from "vitest";
+import { cleanup } from "@testing-library/svelte";
+import { afterEach, beforeEach, vi } from "vitest";
 
 function ensurePortalStage(): void {
   if (document.getElementById("qf-app-stage")) return;
@@ -103,4 +103,9 @@ beforeEach(() => {
   });
 
   ensurePortalStage();
+});
+
+afterEach(async () => {
+  cleanup();
+  await new Promise((resolve) => window.setTimeout(resolve, 32));
 });

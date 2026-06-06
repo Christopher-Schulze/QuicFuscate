@@ -1,6 +1,6 @@
 #![cfg(feature = "rust-tests")]
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use proptest::prelude::*;
 use quicfuscate::crypto::aead::{AeadOpen, AeadSeal};
@@ -16,6 +16,8 @@ use quicfuscate::transport::{ConnectionId, Frame, PacketType};
 use std::borrow::Cow;
 
 const MAX_VARINT: u64 = 0x3fff_ffff_ffff_ffff;
+
+static DATA_AEAD_CONFIG_MUTEX: Mutex<()> = Mutex::new(());
 
 proptest! {
     #![proptest_config(ProptestConfig {
@@ -78,6 +80,7 @@ proptest! {
         plaintext in proptest::collection::vec(any::<u8>(), 0..192),
         aad in proptest::collection::vec(any::<u8>(), 0..48),
     ) {
+        let _config_lock = DATA_AEAD_CONFIG_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let key = [0x11u8; 16];
         let iv = [0x22u8; 12];
 
@@ -123,6 +126,7 @@ proptest! {
         plaintext in proptest::collection::vec(any::<u8>(), 0..192),
         aad in proptest::collection::vec(any::<u8>(), 0..48),
     ) {
+        let _config_lock = DATA_AEAD_CONFIG_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let key = [0x51u8; 16];
         let iv = [0x61u8; 12];
 
@@ -163,6 +167,7 @@ proptest! {
         plaintext in proptest::collection::vec(any::<u8>(), 0..192),
         aad in proptest::collection::vec(any::<u8>(), 0..48),
     ) {
+        let _config_lock = DATA_AEAD_CONFIG_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let key = [0x77u8; 16];
         let iv = [0x88u8; 12];
 

@@ -36,7 +36,7 @@ test.describe("Desktop UI Smoke", () => {
     const logLevel = page.getByRole("button", { name: /^Log level / });
     await logLevel.click();
     await page.waitForTimeout(120);
-    await page.locator("[role='option']").filter({ hasText: /^debug$/ }).first().click();
+    await page.getByRole("option", { name: /^debug$/ }).click();
     await expect(logLevel).toContainText("debug");
 
     await nav.getByRole("button", { name: "Logs", exact: true }).click();

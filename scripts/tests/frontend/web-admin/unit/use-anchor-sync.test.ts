@@ -2,12 +2,23 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 const setAnchorMock = vi.hoisted(() => vi.fn());
 
-// @quicfuscate/ui resolves (via symlink) to packages/ui/index.ts which
-// re-exports Svelte components with @lucide/svelte peer deps that fail
-// to resolve during the Vite transform phase.
-// We mock the resolved absolute path so both the transform interceptor
-// and the runtime module registry use the same key.
-vi.mock("/Users/christopher/CODE/QuicFuscate/packages/ui/index.ts", () => ({
+vi.mock("@quicfuscate/ui", () => ({
+  setAnchor: setAnchorMock,
+  getAnchor: vi.fn(() => null),
+  getToasts: vi.fn(() => []),
+  addToast: vi.fn(),
+  removeToast: vi.fn(),
+  getToneStyle: vi.fn(),
+  notify: vi.fn(),
+  notifySuccess: vi.fn(),
+  notifyWarning: vi.fn(),
+  notifyError: vi.fn(),
+  cn: vi.fn((...args: string[]) => args.filter(Boolean).join(" ")),
+  ripple: vi.fn(),
+  createCopyFeedback: vi.fn(),
+}));
+
+vi.mock("../../../../../packages/ui/index.ts", () => ({
   setAnchor: setAnchorMock,
   getAnchor: vi.fn(() => null),
   getToasts: vi.fn(() => []),

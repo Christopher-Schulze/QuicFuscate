@@ -1160,7 +1160,7 @@ test.describe("Web Admin UI", () => {
 
     test("No-log mode hides output and shows help text", async ({ page }) => {
       await selectLogMode(page, "No-Log");
-      await expect(page.getByText("Zero-Log Privacy Modus", { exact: true })).toBeVisible();
+      await expect(page.getByText("Zero-Log Privacy Mode", { exact: true })).toBeVisible();
       await expect(
         page.getByText("Log output is disabled in No-Log mode. Switch to Normal or Verbose to view server logs.", { exact: true }),
       ).toBeVisible();
@@ -1226,8 +1226,8 @@ test.describe("Web Admin UI", () => {
       await expect(dialog).toBeVisible();
 
       await setInputValue(dialog.locator('input[name="admin-change-current-password"]'), "123");
-      await setInputValue(dialog.locator('input[name="admin-change-new-password"]'), "abcd");
-      await setInputValue(dialog.locator('input[name="admin-change-confirm-password"]'), "abcd");
+      await setInputValue(dialog.locator('input[name="admin-change-new-password"]'), "abcdef");
+      await setInputValue(dialog.locator('input[name="admin-change-confirm-password"]'), "abcdef");
       const postReqPromise = page.waitForRequest((req) => {
         return req.url().includes("/api/admin/auth") && req.method() === "POST";
       });
@@ -1236,7 +1236,7 @@ test.describe("Web Admin UI", () => {
       const postReq = await postReqPromise;
       expect(JSON.parse(postReq.postData() || "{}")).toEqual({
         current_password: "123",
-        new_password: "abcd",
+        new_password: "abcdef",
       });
 
       // A successful password update forces re-login.
@@ -1341,8 +1341,8 @@ test.describe("Web Admin UI", () => {
       await expect(dialog).toBeVisible();
 
       await dialog.getByLabel("Current Password", { exact: true }).fill("123");
-      await dialog.getByLabel("New Password", { exact: true }).fill("abcd");
-      await dialog.getByLabel("Confirm Password", { exact: true }).fill("abcd");
+      await dialog.getByLabel("New Password", { exact: true }).fill("abcdef");
+      await dialog.getByLabel("Confirm Password", { exact: true }).fill("abcdef");
       await dialog.getByRole("button", { name: "Save" }).click();
 
       await expect(dialog.getByText("Too many attempts. Try again in 10 seconds.", { exact: true })).toBeVisible();
@@ -1357,8 +1357,8 @@ test.describe("Web Admin UI", () => {
       await expect(dialog).toBeVisible();
 
       await dialog.getByLabel("Current Password", { exact: true }).fill("123");
-      await dialog.getByLabel("New Password", { exact: true }).fill("abcd");
-      await dialog.getByLabel("Confirm Password", { exact: true }).fill("abce");
+      await dialog.getByLabel("New Password", { exact: true }).fill("abcdef");
+      await dialog.getByLabel("Confirm Password", { exact: true }).fill("abcdeg");
       await expect(dialog.getByRole("button", { name: "Save" })).toBeDisabled();
     });
 
@@ -1373,14 +1373,14 @@ test.describe("Web Admin UI", () => {
       await expect(dialog.getByRole("button", { name: "Save" })).toBeDisabled();
     });
 
-    test("Change password Save enables at the four-character minimum", async ({ page }) => {
+    test("Change password Save enables at the six-character minimum", async ({ page }) => {
       await page.getByRole("button", { name: "Change Password" }).click();
       const dialog = page.getByRole("dialog", { name: "Change Password" });
       await expect(dialog).toBeVisible();
 
       await dialog.getByLabel("Current Password", { exact: true }).fill("123");
-      await dialog.getByLabel("New Password", { exact: true }).fill("abcd");
-      await dialog.getByLabel("Confirm Password", { exact: true }).fill("abcd");
+      await dialog.getByLabel("New Password", { exact: true }).fill("abcdef");
+      await dialog.getByLabel("Confirm Password", { exact: true }).fill("abcdef");
       await expect(dialog.getByRole("button", { name: "Save" })).toBeEnabled();
     });
 

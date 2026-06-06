@@ -1,4 +1,3 @@
-import "@testing-library/jest-dom/vitest";
 import { beforeEach, vi } from "vitest";
 
 function ensurePortalStage(): void {

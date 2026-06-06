@@ -112,12 +112,14 @@ test.describe("Desktop UI (Browser Mode)", () => {
     await expect(createButton(page)).toBeVisible();
     await expect(importQkeyButton(page)).toBeVisible();
 
-    // Remove the tunnel and confirm the destructive action.
+    // Remove the tunnel through the configuration flow and confirm the destructive action.
     const berlinCard = page.locator("[data-tunnel-card]").filter({ hasText: "Berlin" }).first();
-    await berlinCard.hover();
-    const removeBtn = berlinCard.getByRole("button", { name: "Remove tunnel", exact: true });
-    await expect(removeBtn).toBeVisible();
-    await removeBtn.click();
+    const configBtn = berlinCard.getByRole("button", { name: "Open configuration", exact: true });
+    await expect(configBtn).toBeVisible();
+    await configBtn.click();
+    const configDialog = page.getByRole("dialog", { name: "Tunnel Configuration" });
+    await expect(configDialog).toBeVisible();
+    await configDialog.getByRole("button", { name: "Delete", exact: true }).click();
     const deleteDialog = page.getByRole("dialog", { name: "Delete Tunnel" });
     await expect(deleteDialog).toBeVisible();
     await deleteDialog.getByRole("button", { name: "Delete", exact: true }).click();
