@@ -100,41 +100,20 @@ use windows_sys::Win32::Networking::WinSock::{WSARecvMsg, WSASendMsg, WSABUF, WS
 
 #[cfg(target_os = "linux")]
 mod numa {
-    use libc::{c_int, c_void, size_t};
-    extern "C" {
-        pub fn numa_available() -> c_int;
-        pub fn numa_num_configured_nodes() -> c_int;
-        pub fn numa_node_of_cpu(cpu: c_int) -> c_int;
-        pub fn numa_tonode_memory(start: *mut c_void, size: size_t, node: c_int);
+    pub fn is_available() -> bool {
+        false
     }
 
-    pub fn is_available() -> bool {
-        unsafe { numa_available() >= 0 }
-    }
     pub fn num_nodes() -> usize {
-        if is_available() {
-            unsafe { numa_num_configured_nodes() as usize }
-        } else {
-            1
-        }
+        1
     }
+
     pub fn current_node() -> usize {
-        if !is_available() {
-            return 0;
-        }
-        let cpu = unsafe { libc::sched_getcpu() };
-        if cpu < 0 {
-            0
-        } else {
-            unsafe { numa_node_of_cpu(cpu) as usize }
-        }
+        0
     }
-    pub(crate) fn move_to_node(ptr: *mut u8, size: usize, node: usize) {
-        if is_available() {
-            unsafe {
-                numa_tonode_memory(ptr as *mut c_void, size as size_t, node as c_int);
-            }
-        }
+
+    pub(crate) fn move_to_node(_ptr: *mut u8, _size: usize, _node: usize) {
+        // Link-free Linux fallback: preserve allocation correctness without libnuma.
     }
 }
 
