@@ -12,7 +12,9 @@
 // For production fast-path transport, use:
 //   - `UdpFastPath`       (src/transport/udpfast.rs) - cross-platform UDP batching
 
-#[cfg(all(target_os = "linux", feature = "internal_af_xdp_experimental"))]
+#[cfg(all(target_os = "linux", test))]
+use libc::{c_void, socklen_t};
+#[cfg(all(target_os = "linux", any(feature = "internal_af_xdp_experimental", test)))]
 use std::mem;
 #[cfg(all(target_os = "linux", feature = "internal_af_xdp_experimental"))]
 use std::os::unix::io::RawFd;

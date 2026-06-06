@@ -64,7 +64,7 @@ pub(super) unsafe fn canonical_ack_blocks_avx2(ranges: &[(u64, u64)]) -> Vec<(u6
                 // SAFETY: `__m256i` (32 bytes) has the same size and layout as
                 // `[u64; 4]` (4 * 8 = 32 bytes). The transmute extracts lane values
                 // for scalar comparison. All bit patterns are valid for u64.
-                let mut tmp: [u64; 4] = core::mem::transmute(e_vec);
+                let tmp: [u64; 4] = core::mem::transmute(e_vec);
                 let mut local_max = max_candidate;
                 for lane in 0..(count as usize) {
                     if tmp[lane] > local_max {
@@ -156,7 +156,7 @@ pub(super) unsafe fn canonical_ack_blocks_avx512(ranges: &[(u64, u64)]) -> Vec<(
                 // SAFETY: `__m512i` (64 bytes) has the same size and layout as
                 // `[u64; 8]` (8 * 8 = 64 bytes). The transmute extracts lane values
                 // for scalar max-finding. All bit patterns are valid for u64.
-                let mut tmp: [u64; 8] = core::mem::transmute(e_vec);
+                let tmp: [u64; 8] = core::mem::transmute(e_vec);
                 let mut local_max = max_candidate;
                 for lane in 0..(count as usize) {
                     if tmp[lane] > local_max {

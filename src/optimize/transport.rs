@@ -5,7 +5,7 @@
 use crate::optimize::telemetry::CONGESTION_NEON_BATCHES;
 #[cfg(all(
     target_arch = "x86_64",
-    any(test, feature = "rust-tests", feature = "unsafe_rust")
+    any(test, feature = "rust-tests", feature = "unsafe_rust", feature = "simd-selfcheck")
 ))]
 use crate::optimize::telemetry::{CONGESTION_AVX2_BATCHES, CONGESTION_VNNI_BATCHES};
 #[cfg(any(test, feature = "rust-tests"))]

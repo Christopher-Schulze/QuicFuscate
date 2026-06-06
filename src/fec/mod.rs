@@ -3,7 +3,7 @@
 
 use crate::accelerate;
 use crate::brain::{FEC_INTERVAL_HINT_PKTS, FEC_REDUNDANCY_PPM};
-#[cfg(all(target_arch = "x86_64", feature = "unsafe_rust"))]
+#[cfg(all(target_arch = "x86_64", any(feature = "unsafe_rust", feature = "simd-selfcheck")))]
 use crate::fec::gf_tables::prefetch_fec_slice;
 use crate::optimize::{CpuProfile, FeatureDetector, MemoryPool};
 use aligned_box::AlignedBox;
@@ -2308,7 +2308,7 @@ impl Decoder8 {
         let use_amx = false;
 
         #[cfg(target_arch = "x86_64")]
-        let mut amx_buffers = if use_amx {
+        let mut _amx_buffers = if use_amx {
             let mut flat_matrix = vec![0u8; m * n];
             for (i, row) in matrix.iter().enumerate().take(m) {
                 for (j, &val) in row.iter().enumerate().take(n) {
@@ -2322,10 +2322,8 @@ impl Decoder8 {
         };
 
         let row_limit = matrix.len().min(n);
-        let mut column_buffers: Vec<Vec<u8>> = Vec::new();
-        let mut spmv_acc: Vec<u8> = Vec::new();
-        if !use_amx && row_limit > 0 && n > 0 {
-            column_buffers = (0..n)
+        let (column_buffers, mut spmv_acc) = if !use_amx && row_limit > 0 && n > 0 {
+            let column_buffers = (0..n)
                 .map(|col| {
                     let mut column = vec![0u8; row_limit];
                     for row in 0..row_limit {
@@ -2334,8 +2332,10 @@ impl Decoder8 {
                     column
                 })
                 .collect();
-            spmv_acc = vec![0u8; row_limit];
-        }
+            (column_buffers, vec![0u8; row_limit])
+        } else {
+            (Vec::new(), Vec::new())
+        };
 
         if !use_amx {
             crate::telemetry::WIEDEMANN_SCALAR_OPS.inc();
@@ -2350,11 +2350,14 @@ impl Decoder8 {
             *slot = s;
 
             // av = A * av (Matrix-Vector multiply)
+            #[cfg(any(not(target_arch = "x86_64"), target_feature = "amx-tile"))]
             let mut next_av = vec![0u8; n];
+            #[cfg(all(target_arch = "x86_64", not(target_feature = "amx-tile")))]
+            let next_av = vec![0u8; n];
 
             #[cfg(all(target_arch = "x86_64", target_feature = "amx-tile"))]
             if use_amx {
-                if let Some(buffers) = amx_buffers.as_mut() {
+                if let Some(buffers) = _amx_buffers.as_mut() {
                     let copy_len = buffers.av_col.len().min(av.len());
                     buffers.av_col[..copy_len].copy_from_slice(&av[..copy_len]);
                     buffers.result.fill(0);

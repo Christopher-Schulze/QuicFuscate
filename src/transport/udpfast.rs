@@ -547,8 +547,7 @@ impl UdpFastPath {
                 let mut data = vec![0u8; len];
                 data.copy_from_slice(&self.recv_batch[i].as_slice()[..len]);
 
-                // SAFETY: recvmmsg initialized addrs[i] and wrote msg_namelen for that storage.
-                let addr = unsafe { socket2::SockAddr::new(addrs[i], msgs[i].msg_hdr.msg_namelen) };
+                let addr = socket2::SockAddr::new(addrs[i], msgs[i].msg_hdr.msg_namelen);
 
                 if let Some(peer) = addr.as_socket() {
                     results.push((data, peer));

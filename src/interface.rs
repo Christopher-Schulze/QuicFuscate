@@ -548,7 +548,7 @@ mod linux_tun {
         /// Open a Linux TUN device with the given configuration.
         pub fn open(cfg: &TunConfig) -> io::Result<Self> {
             // Try canonical path first, fallback to /dev/tun (Android)
-            let mut file = match OpenOptions::new().read(true).write(true).open("/dev/net/tun") {
+            let file = match OpenOptions::new().read(true).write(true).open("/dev/net/tun") {
                 Ok(f) => f,
                 Err(_) => OpenOptions::new().read(true).write(true).open("/dev/tun")?,
             };

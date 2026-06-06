@@ -25,7 +25,7 @@ pub struct UdpGsoConfig {
     pub gso_size: u16,
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(feature = "simd-selfcheck")))]
 use std::arch::x86_64::*;
 
 impl UdpGsoConfig {
