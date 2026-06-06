@@ -132,6 +132,14 @@ Use this section as the shortest non-marketing answer to "what evidence exists r
 - Signed desktop binaries are not part of the shipped source artifact set.
 - Updater integration exists in code and remains disabled in shipped source builds unless signed artifacts are provided.
 
+### Current Release Checkpoint
+
+- Repository checkpoint: `af90538` (`docs: harden agent ui boundary`) is synchronized on `main`.
+- GitHub `CI` run `27050145427`, `Clippy Matrix` run `27050145428`, and `Release Build` run `27050145421` are green on that checkpoint.
+- The Linux fastpath evidence job remains non-blocking and red inside CI, so Linux fastpath production support is not claimed as fixed.
+- TODO-412 (server deploy and real-world profiling baseline) is deferred until server SSH/access details, TLS certificate paths or an approved self-signed test setup, and a profiling target are available.
+- UI changes remain protected by the `AGENTS.md` UI Change Boundary: no UI component, view, style, asset, text, or adjacent UI cleanup is allowed without an explicit current-task request for that exact UI change.
+
 ### Release Security Audit Baseline
 
 Audit command evidence:
