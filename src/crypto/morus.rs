@@ -121,7 +121,7 @@ impl Morus1280State {
     unsafe fn update_simd_ssse3(&mut self, m: [u64; 4]) {
         use core::arch::x86_64::*;
 
-        let (mut s0_lo, mut s0_hi) = Self::load_u64x4_sse(&self.s[0]);
+        let (s0_lo, s0_hi) = Self::load_u64x4_sse(&self.s[0]);
         let (s1_lo, s1_hi) = Self::load_u64x4_sse(&self.s[1]);
         let (s2_lo, s2_hi) = Self::load_u64x4_sse(&self.s[2]);
         let (s3_lo, s3_hi) = Self::load_u64x4_sse(&self.s[3]);
@@ -221,7 +221,7 @@ impl Morus1280State {
     unsafe fn update_simd_sse41(&mut self, m: [u64; 4]) {
         use core::arch::x86_64::*;
 
-        let (mut s0_lo, mut s0_hi) = Self::load_u64x4_sse(&self.s[0]);
+        let (s0_lo, s0_hi) = Self::load_u64x4_sse(&self.s[0]);
         let (s1_lo, s1_hi) = Self::load_u64x4_sse(&self.s[1]);
         let (s2_lo, s2_hi) = Self::load_u64x4_sse(&self.s[2]);
         let (s3_lo, s3_hi) = Self::load_u64x4_sse(&self.s[3]);
@@ -295,7 +295,7 @@ impl Morus1280State {
     unsafe fn update_simd_sse2(&mut self, m: [u64; 4]) {
         use core::arch::x86_64::*;
 
-        let (mut s0_lo, mut s0_hi) = Self::load_u64x4_sse(&self.s[0]);
+        let (s0_lo, s0_hi) = Self::load_u64x4_sse(&self.s[0]);
         let (s1_lo, s1_hi) = Self::load_u64x4_sse(&self.s[1]);
         let (s2_lo, s2_hi) = Self::load_u64x4_sse(&self.s[2]);
         let (s3_lo, s3_hi) = Self::load_u64x4_sse(&self.s[3]);

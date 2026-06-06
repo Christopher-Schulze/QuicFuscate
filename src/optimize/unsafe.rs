@@ -382,6 +382,8 @@ impl Drop for UnsafePacket {
 /// SIMD-accelerated Galois Field operations
 pub mod simd_gf {
     #[cfg(target_arch = "x86_64")]
+    use super::{slice, telemetry};
+    #[cfg(target_arch = "x86_64")]
     use std::arch::x86_64::*;
 
     /// Simple GF(2^8) multiplication for scalar fallback
@@ -428,6 +430,14 @@ pub mod simd_gf {
             }
 
             Self { low, high }
+        }
+
+        pub fn low_nibble(&self, index: usize) -> u8 {
+            self.low[index]
+        }
+
+        pub fn high_nibble(&self, index: usize) -> u8 {
+            self.high[index]
         }
     }
 
@@ -1291,7 +1301,7 @@ mod tests {
         }
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     #[test]
     fn test_simd_xor() {
         let mut dst = vec![0xAA; 64];
@@ -1301,12 +1311,11 @@ mod tests {
         // AVX2 (gated by cfg). Both slices have equal length (64 bytes = 2 AVX2 chunks).
         // dst and src are separate heap allocations, so they do not overlap.
         unsafe {
-            #[cfg(target_feature = "avx2")]
             simd_gf::xor_blocks_avx2(&mut dst, &src);
+        }
 
-            for byte in &dst {
-                assert_eq!(*byte, 0xFF);
-            }
+        for byte in &dst {
+            assert_eq!(*byte, 0xFF);
         }
     }
 
@@ -1474,8 +1483,18 @@ mod tests {
             let expected_val = i as u8; // identity: gf_mul(i, 1) = i
             let low_nibble = expected_val & 0x0F;
             let high_nibble = (expected_val >> 4) & 0x0F;
-            assert_eq!(table.low[i as usize], low_nibble, "low nibble mismatch at index {}", i);
-            assert_eq!(table.high[i as usize], high_nibble, "high nibble mismatch at index {}", i);
+            assert_eq!(
+                table.low_nibble(i as usize),
+                low_nibble,
+                "low nibble mismatch at index {}",
+                i
+            );
+            assert_eq!(
+                table.high_nibble(i as usize),
+                high_nibble,
+                "high nibble mismatch at index {}",
+                i
+            );
         }
     }
 

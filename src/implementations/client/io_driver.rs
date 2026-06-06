@@ -147,7 +147,8 @@ impl IoHotpathAdapter for SystemIoHotpathAdapter {
             let _ = socket.into_raw_fd();
         }
 
-        crate::optimize::zc_batch::sendmmsg(socket_fd, payloads).map_err(|e| e.to_string())
+        crate::optimize::zc_batch::sendmmsg(socket_fd, payloads)
+            .map_err(|e: std::io::Error| e.to_string())
     }
 }
 
@@ -258,7 +259,8 @@ impl IoDriver {
     /// Create a new I/O driver.
     pub fn new(config: IoDriverConfig) -> Self {
         #[cfg(target_os = "linux")]
-        let hotpath_adapter: Arc<dyn IoHotpathAdapter> = Arc::new(SystemIoHotpathAdapter);
+        let hotpath_adapter: Arc<dyn IoHotpathAdapter> =
+            Arc::new(SystemIoHotpathAdapter::default());
         #[cfg(all(target_os = "linux", feature = "io_uring"))]
         let (uring_sender, uring_available) = {
             let sender = crate::optimize::uring_batch::UringBatchSender::with_defaults();
@@ -327,13 +329,14 @@ impl IoDriver {
         conn: Arc<parking_lot::Mutex<QuicFuscateConnection>>,
         socket: Arc<UdpSocket>,
     ) -> Result<(), EngineError> {
+        #[cfg(target_os = "linux")]
         let mut send_buf = vec![0u8; 65535];
+        #[cfg(target_os = "linux")]
         let batch_cap = self.normalized_batch_size();
+        #[cfg(target_os = "linux")]
         let mut batch_payloads: Vec<Vec<u8>> =
             (0..batch_cap).map(|_| Vec::with_capacity(2048)).collect();
         #[cfg(target_os = "linux")]
-        let mut batch_refs: Vec<&[u8]> = Vec::with_capacity(batch_cap);
-
         while !self.shutdown.load(Ordering::Relaxed) {
             // Read from TUN - returns (block, len)
             // TUN read path is blocking; loop structure keeps the behavior explicit.
@@ -380,17 +383,8 @@ impl IoDriver {
                         continue;
                     }
 
-                    #[cfg(target_os = "linux")]
-                    let dispatch = {
-                        #[cfg(feature = "io_uring")]
-                        {
-                            resolve_outbound_dispatch(queued, self.has_uring())
-                        }
-                        #[cfg(not(feature = "io_uring"))]
-                        {
-                            resolve_outbound_dispatch(queued, false)
-                        }
-                    };
+                    #[cfg(all(target_os = "linux", feature = "io_uring"))]
+                    let dispatch = { resolve_outbound_dispatch(queued, self.has_uring()) };
                     #[cfg(target_os = "linux")]
                     let mut already_sent = 0usize;
                     #[cfg(not(target_os = "linux"))]
@@ -403,7 +397,7 @@ impl IoDriver {
                         // io_uring batch path (preferred when available).
                         #[cfg(feature = "io_uring")]
                         if matches!(dispatch, OutboundDispatch::IoUringBatch) {
-                            batch_refs.clear();
+                            let mut batch_refs: Vec<&[u8]> = Vec::with_capacity(queued);
                             for payload in batch_payloads.iter().take(queued) {
                                 batch_refs.push(payload.as_slice());
                             }
@@ -429,7 +423,7 @@ impl IoDriver {
 
                         // sendmmsg batch path (fallback from io_uring, or primary).
                         if already_sent == 0 && queued > 1 {
-                            batch_refs.clear();
+                            let mut batch_refs: Vec<&[u8]> = Vec::with_capacity(queued);
                             for payload in batch_payloads.iter().take(queued) {
                                 batch_refs.push(payload.as_slice());
                             }
@@ -525,6 +519,15 @@ impl IoDriver {
             }
         }
 
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (tun, conn, socket);
+            Err(EngineError::Transport(
+                "outbound Linux TUN loop is only available on Linux".to_string(),
+            ))
+        }
+
+        #[cfg(target_os = "linux")]
         Ok(())
     }
 

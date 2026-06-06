@@ -154,7 +154,7 @@ pub struct Header {
     pub key_phase: bool,
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 use std::arch::x86_64::*;
 
 /// SIMD-optimized packet number encoding

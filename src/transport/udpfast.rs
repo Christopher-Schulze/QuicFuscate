@@ -9,16 +9,16 @@ use std::io;
 use std::mem;
 use std::net::SocketAddr;
 #[cfg(target_os = "linux")]
-use std::os::unix::io::RawFd;
+use std::os::fd::AsRawFd;
 #[cfg(target_os = "linux")]
-use std::ptr;
+use std::os::unix::io::RawFd;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // Linux-specific imports
 #[cfg(target_os = "linux")]
 use libc::{
-    c_void, cmsghdr, iovec, msghdr, recvmmsg, sockaddr_storage, timespec, CMSG_DATA, CMSG_FIRSTHDR,
-    CMSG_LEN, CMSG_NXTHDR, CMSG_SPACE, MSG_DONTWAIT, SOL_UDP, UDP_GRO, UDP_SEGMENT,
+    c_void, iovec, mmsghdr, msghdr, recvmmsg, sockaddr_storage, timespec, CMSG_DATA, CMSG_FIRSTHDR,
+    CMSG_LEN, CMSG_SPACE, MSG_DONTWAIT, SOL_UDP, UDP_GRO, UDP_SEGMENT,
 };
 
 #[cfg(target_os = "macos")]
@@ -454,7 +454,8 @@ impl UdpFastPath {
             let iov = iovec { iov_base: data.as_ptr() as *mut c_void, iov_len: data.len() };
 
             // Setup control message for GSO
-            let mut cmsg_buf = [0u8; CMSG_SPACE(mem::size_of::<u16>() as u32) as usize];
+            let cmsg_buf_len = CMSG_SPACE(mem::size_of::<u16>() as u32) as usize;
+            let mut cmsg_buf = vec![0u8; cmsg_buf_len];
 
             let mut msg: msghdr = mem::zeroed();
             msg.msg_name = sock_addr.as_ptr() as *mut c_void;
@@ -517,7 +518,7 @@ impl UdpFastPath {
                 msgs.push(msg);
             }
 
-            let timeout = timespec {
+            let mut timeout = timespec {
                 tv_sec: 0,
                 tv_nsec: 1000000, // 1ms timeout
             };
@@ -527,7 +528,7 @@ impl UdpFastPath {
                 msgs.as_mut_ptr(),
                 batch_size as u32,
                 MSG_DONTWAIT,
-                &timeout as *const _,
+                &mut timeout as *mut _,
             );
 
             if received < 0 {
@@ -546,10 +547,8 @@ impl UdpFastPath {
                 let mut data = vec![0u8; len];
                 data.copy_from_slice(&self.recv_batch[i].as_slice()[..len]);
 
-                let addr = socket2::SockAddr::from_raw_parts(
-                    &addrs[i] as *const _ as *const libc::sockaddr,
-                    msgs[i].msg_hdr.msg_namelen,
-                );
+                // SAFETY: recvmmsg initialized addrs[i] and wrote msg_namelen for that storage.
+                let addr = unsafe { socket2::SockAddr::new(addrs[i], msgs[i].msg_hdr.msg_namelen) };
 
                 if let Some(peer) = addr.as_socket() {
                     results.push((data, peer));

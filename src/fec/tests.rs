@@ -13,6 +13,8 @@ use super::{
     FecMode, FecObserverPlatformHints, FecObserverProfilePolicy, FecPacket, FecRuntimePlan,
     FecRuntimePolicy, FecTransportObserver, SimdLevel, TransportProfile,
 };
+#[cfg(target_arch = "x86_64")]
+use super::{matrix_multiply_avx512, matrix_multiply_scalar};
 use crate::optimize::telemetry;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;

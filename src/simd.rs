@@ -1774,6 +1774,7 @@ impl SimdOps {
 
     /// Select best implementation based on CPU features
     #[inline(always)]
+    #[allow(unused_variables)]
     pub fn dispatch<T>(
         &self,
         _x86_avx512: impl FnOnce() -> T,
@@ -2536,11 +2537,10 @@ pub mod qpack {
 #[cfg(target_arch = "x86_64")]
 mod x86 {
     use super::scalar;
-    use super::{prefetch, PrefetchHint};
     use std::arch::x86_64::*;
     use std::sync::Once;
 
-    pub use super::x86_extended::{
+    pub(super) use super::x86_extended::{
         encode_varint_avx2, encode_varint_avx512, encode_varint_sse2, pack_bits_bmi2,
         qpack_decode_avx2, qpack_decode_ssse3, qpack_encode_ssse3, reed_solomon_decode_avx2,
         reed_solomon_decode_gfni, reed_solomon_encode_avx2, reed_solomon_encode_gfni,
@@ -4091,7 +4091,6 @@ mod x86_extended {
 
             // Calculate discrepancy using GFNI
             if error_degree > 0 {
-                let disc_vec = _mm512_set1_epi8(0);
                 let mut j = 1;
 
                 while j <= error_degree && j + 64 <= len {
@@ -4126,7 +4125,6 @@ mod x86_extended {
                 let mut new_locator = error_locator.clone();
 
                 // Vectorized polynomial update
-                let disc_broadcast = _mm512_set1_epi8(discrepancy as i8);
                 let inv_disc = scalar::gf_inv(syndrome_shift);
                 let factor = _mm512_set1_epi8(scalar::gf_mul_byte(discrepancy, inv_disc) as i8);
 
@@ -4957,7 +4955,7 @@ mod x86_extended {
 
         // Lookup tables for b multiplication
         let b_lo = _mm256_and_si256(b, mask);
-        let b_hi = _mm256_srli_epi16(_mm256_and_si256(b, _mm256_set1_epi8(0xF0u8 as i8)), 4);
+        let _b_hi = _mm256_srli_epi16(_mm256_and_si256(b, _mm256_set1_epi8(0xF0u8 as i8)), 4);
 
         // Multiplication via table lookups
         let tbl_lo = _mm256_shuffle_epi8(
@@ -5433,9 +5431,7 @@ mod tests_arm {
 
 // Continue with rest of x86 module implementations after the main x86 module
 #[cfg(target_arch = "x86_64")]
-mod x86_rest {
-    use super::*;
-}
+mod x86_rest {}
 
 /// Pure-scalar fallback implementations for every SIMD-dispatched operation.
 pub mod scalar {

@@ -304,7 +304,7 @@ unsafe fn mac_avx2(h: [u64; 5], r: [u64; 5], m: &[u8]) -> [u64; 5] {
         let h4u = h4 as u32;
 
         let prods0 = mul_even_u32_avx2(h0u, h1u, h2u, h3u, r0, s4, s3, s2);
-        let mut d0 = (prods0[0] as u128)
+        let d0 = (prods0[0] as u128)
             + (prods0[1] as u128)
             + (prods0[2] as u128)
             + (prods0[3] as u128)
@@ -409,7 +409,7 @@ unsafe fn mac_avx512(h: [u64; 5], r: [u64; 5], m: &[u8]) -> [u64; 5] {
         let h4u = h4 as u32;
 
         let prods0 = mul_even_u32_avx512(h0u, h1u, h2u, h3u, r0, s4, s3, s2);
-        let mut d0 = (prods0[0] as u128)
+        let d0 = (prods0[0] as u128)
             + (prods0[1] as u128)
             + (prods0[2] as u128)
             + (prods0[3] as u128)

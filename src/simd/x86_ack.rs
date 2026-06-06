@@ -1,4 +1,3 @@
-#![cfg(target_arch = "x86_64")]
 //! x86 SIMD helpers for ACK range canonicalization/merge
 //! AVX2/AVX-512 implementations used by transport layer
 

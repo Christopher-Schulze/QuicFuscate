@@ -43,9 +43,6 @@ pub use connection::{
 };
 pub use connection::{Connection, PathEvent};
 pub use pn::{cid, pnspace, rand, range_buf, ranges, varint};
-#[cfg(target_os = "linux")]
-use std::sync::atomic::Ordering;
-
 /// Best-effort socket capability setup shared across runtime hotpaths.
 #[doc(hidden)]
 pub fn init_socket_acceleration(socket: &std::net::UdpSocket) -> std::io::Result<()> {

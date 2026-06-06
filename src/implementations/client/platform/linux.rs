@@ -126,8 +126,7 @@ impl PlatformBackend for LinuxPlatform {
         use std::os::unix::io::AsRawFd;
         use std::os::unix::io::IntoRawFd;
 
-        let mut file = match std::fs::OpenOptions::new().read(true).write(true).open("/dev/net/tun")
-        {
+        let file = match std::fs::OpenOptions::new().read(true).write(true).open("/dev/net/tun") {
             Ok(f) => f,
             Err(_) => std::fs::OpenOptions::new()
                 .read(true)

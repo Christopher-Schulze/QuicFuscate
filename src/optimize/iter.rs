@@ -17,8 +17,6 @@ pub fn sum_f32(data: &[f32]) -> f32 {
             | CpuProfile::X86_P3d
             | CpuProfile::X86_P3e
             | CpuProfile::X86_P4a
-            | CpuProfile::X86_P4b
-            | CpuProfile::X86_P4a
             | CpuProfile::X86_P4b => unsafe {
                 telemetry::ITER_SUM_F32_AVX512_OPS.inc();
                 return sum_f32_avx512(data);

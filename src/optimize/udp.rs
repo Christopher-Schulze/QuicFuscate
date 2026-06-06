@@ -391,7 +391,7 @@ pub struct NicParallelism;
 impl NicParallelism {
     pub fn configure_rps(interface: &str) -> std::io::Result<()> {
         let mut sys = sysinfo::System::new();
-        sys.refresh_cpu();
+        sys.refresh_cpu_all();
         let cpu_count = sys.cpus().len().max(1);
         let cpu_mask = (1u128 << cpu_count) - 1;
         let mask_str = format!("{:x}", cpu_mask);

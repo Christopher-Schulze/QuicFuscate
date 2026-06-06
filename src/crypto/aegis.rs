@@ -7,9 +7,6 @@
 use crate::crypto::aead::{AeadOpen, AeadOpenItem, AeadSeal, AeadSealItem};
 use std::sync::atomic::Ordering;
 
-#[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::*;
-
 /// AEGIS-128L AEAD wrapper for the data-plane AEAD trait.
 pub struct Aegis128LAead {
     key: [u8; 16],

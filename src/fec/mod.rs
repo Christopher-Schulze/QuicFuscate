@@ -3,6 +3,8 @@
 
 use crate::accelerate;
 use crate::brain::{FEC_INTERVAL_HINT_PKTS, FEC_REDUNDANCY_PPM};
+#[cfg(all(target_arch = "x86_64", feature = "unsafe_rust"))]
+use crate::fec::gf_tables::prefetch_fec_slice;
 use crate::optimize::{CpuProfile, FeatureDetector, MemoryPool};
 use aligned_box::AlignedBox;
 use parking_lot::RwLock;
@@ -2300,7 +2302,7 @@ impl Decoder8 {
         #[cfg(target_arch = "x86_64")]
         let use_amx = {
             let plans = crate::simd::planner::AccelerationPlanner::global();
-            plans.fec.has_amx_int8 && m >= 64 && n >= 64
+            plans.features.amx_tile && plans.features.amx_int8 && m >= 64 && n >= 64
         };
         #[cfg(not(target_arch = "x86_64"))]
         let use_amx = false;

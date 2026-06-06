@@ -12,11 +12,11 @@
 // For production fast-path transport, use:
 //   - `UdpFastPath`       (src/transport/udpfast.rs) - cross-platform UDP batching
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "internal_af_xdp_experimental"))]
 use std::mem;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "internal_af_xdp_experimental"))]
 use std::os::unix::io::RawFd;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "internal_af_xdp_experimental"))]
 use std::ptr;
 #[cfg(all(target_os = "linux", feature = "internal_af_xdp_experimental"))]
 use std::sync::Arc;
@@ -25,7 +25,7 @@ use std::sync::Arc;
 #[cfg(all(target_os = "linux", feature = "internal_af_xdp_experimental"))]
 pub(super) mod linux {
     use super::*;
-    use libc::c_void;
+    use libc::{c_void, socklen_t};
 
     const XDP_RING_SIZE: u32 = 2048;
 

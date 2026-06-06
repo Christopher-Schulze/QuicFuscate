@@ -592,7 +592,6 @@ mod tests {
 unsafe fn ghash_hw_pclmul(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
     use core::arch::x86_64::*;
     // Byte-swap mask for BE<->LE
-    let shuf = _mm_set_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
     // Load H and convert to LE polynomial domain
     let h_be = _mm_loadu_si128(h.as_ptr() as *const __m128i);
     let h_le =

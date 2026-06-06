@@ -33,7 +33,12 @@ pub(crate) fn init_tables() {
 pub(crate) fn prefetch_gf_log_lookup(idx: usize) {
     #[cfg(target_arch = "x86_64")]
     {
-        crate::optimize::prefetch(LOG_TABLE.as_ptr().add(idx), crate::optimize::PrefetchHint::T0);
+        unsafe {
+            crate::optimize::prefetch(
+                LOG_TABLE.as_ptr().add(idx),
+                crate::optimize::PrefetchHint::T0,
+            );
+        }
     }
     #[cfg(target_arch = "aarch64")]
     {

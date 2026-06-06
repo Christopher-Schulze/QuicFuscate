@@ -3,8 +3,6 @@
 //! This module is not part of the normal runtime transport surface.
 
 use crate::accelerate::transport_io as accelerate;
-#[cfg(all(target_os = "linux", any(test, feature = "rust-tests")))]
-use crate::optimize::SimdDispatch;
 #[cfg(any(test, feature = "rust-tests"))]
 use crate::simd::planner::AccelerationPlanner;
 #[cfg(any(test, feature = "rust-tests"))]
@@ -238,7 +236,7 @@ impl BatchProcessor {
         let mut results = Vec::new();
 
         // Setup timeout
-        let ts = timeout.map(|d| libc::timespec {
+        let mut ts = timeout.map(|d| libc::timespec {
             tv_sec: d.as_secs() as i64,
             tv_nsec: d.subsec_nanos() as i64,
         });
@@ -284,7 +282,7 @@ impl BatchProcessor {
                 self.recv_msgs.as_mut_ptr(),
                 self.batch_size as u32,
                 libc::MSG_DONTWAIT,
-                ts.as_ref().map_or(std::ptr::null(), |t| t as *const _),
+                ts.as_mut().map_or(std::ptr::null_mut(), |t| t as *mut _),
             )
         };
 

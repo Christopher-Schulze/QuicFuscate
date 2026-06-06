@@ -1,7 +1,4 @@
-#![cfg(target_arch = "x86_64")]
 //! x86 SIMD helpers for QUIC header validation
-
-use std::arch::x86_64::*;
 
 /// AVX-512 fast-path header validation
 /// Checks QUIC fixed bit and basic length guards.

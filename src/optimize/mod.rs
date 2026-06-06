@@ -2340,6 +2340,9 @@ impl MemoryPool {
         unsafe { std::ptr::write_bytes(ptr, 0u8, block_size) };
         let slice = unsafe { std::slice::from_raw_parts_mut(ptr, block_size) };
         // SAFETY: ptr was allocated with the given layout; aligned_box will track layout for dealloc
+        #[cfg(target_os = "linux")]
+        let mut block = unsafe { AlignedBox::<[u8]>::from_raw_parts(slice, layout) };
+        #[cfg(not(target_os = "linux"))]
         let block = unsafe { AlignedBox::<[u8]>::from_raw_parts(slice, layout) };
         // Hint huge pages on Linux if enabled
         #[cfg(target_os = "linux")]
@@ -2356,7 +2359,7 @@ impl MemoryPool {
             }
         }
         #[cfg(target_os = "linux")]
-        unsafe {
+        {
             if numa::is_available() {
                 let policy = *NUMA_POLICY.get_or_init(resolve_numa_policy);
                 let nodes = numa::num_nodes().max(1);
@@ -2848,6 +2851,9 @@ impl Drop for ZeroCopyBuffer<'_> {
 /// Linux-only batched UDP I/O via sendmmsg/recvmmsg syscalls.
 #[cfg(target_os = "linux")]
 pub mod zc_batch {
+    use std::io;
+    use std::os::fd::RawFd;
+
     /// Sends multiple UDP packets in a single syscall via sendmmsg.
     pub fn sendmmsg(fd: RawFd, packets: &[&[u8]]) -> io::Result<usize> {
         super::udp::send_batch_connected(fd, packets)

@@ -59,9 +59,6 @@ fn prefetch_morus_buffer(_ptr: *const u8, _len: usize) {}
 // Hardware-accelerated crypto with AES-NI for AEGIS and MORUS
 // ============================================================================
 
-#[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::*;
-
 // ============================================================================
 // AEGIS-128 RUNTIME DISPATCH SYSTEM
 // ============================================================================
