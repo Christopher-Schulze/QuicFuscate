@@ -401,21 +401,17 @@ impl IoDriver {
                             for payload in batch_payloads.iter().take(queued) {
                                 batch_refs.push(payload.as_slice());
                             }
-                            if let Ok(mut guard) = self.uring_sender.lock() {
-                                if let Some(ref mut uring) = *guard {
-                                    match uring.send_batch(socket_fd, &batch_refs) {
-                                        Ok(n) => {
-                                            already_sent = n.min(queued);
-                                            crate::telemetry::IO_URING_SUBMIT_PACKETS
-                                                .inc_by(already_sent as u64);
-                                        }
-                                        Err(e) => {
-                                            log::debug!(
-                                                "io_uring batch failed, falling back: {}",
-                                                e
-                                            );
-                                            crate::telemetry::IO_URING_FALLBACKS.inc();
-                                        }
+                            let mut guard = self.uring_sender.lock();
+                            if let Some(ref mut uring) = *guard {
+                                match uring.send_batch(socket_fd, &batch_refs) {
+                                    Ok(n) => {
+                                        already_sent = n.min(queued);
+                                        crate::telemetry::IO_URING_SUBMIT_PACKETS
+                                            .inc_by(already_sent as u64);
+                                    }
+                                    Err(e) => {
+                                        log::debug!("io_uring batch failed, falling back: {}", e);
+                                        crate::telemetry::IO_URING_FALLBACKS.inc();
                                     }
                                 }
                             }
@@ -689,12 +685,9 @@ impl IoDriver {
                     guard.clear_ready();
 
                     // Drain all completed receives.
-                    let completions = uring_recv.drain_completions().map_err(|e| {
-                        EngineError::Io(std::io::Error::new(
-                            e.kind(),
-                            format!("uring recv drain: {e}"),
-                        ))
-                    })?;
+                    let completions = uring_recv
+                        .drain_completions()
+                        .map_err(|e| EngineError::Io(format!("uring recv drain: {e}")))?;
 
                     if !completions.is_empty() {
                         crate::telemetry::IO_URING_RECV_BATCHES.inc();

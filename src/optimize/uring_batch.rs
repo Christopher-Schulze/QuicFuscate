@@ -304,13 +304,9 @@ impl UringBatchSender {
             let mut sq = self.ring.submission();
             for idx in 0..count {
                 let msg = &self.msgs[start + idx];
-                // Safety: msghdr and its iov remain valid until both the primary
-                // and notification CQEs are drained below.
-                let entry = unsafe {
-                    opcode::SendMsgZc::new(fd_typed, msg as *const libc::msghdr)
-                        .build()
-                        .user_data(idx as u64)
-                };
+                let entry = opcode::SendMsgZc::new(fd_typed, msg as *const libc::msghdr)
+                    .build()
+                    .user_data(idx as u64);
                 unsafe {
                     if sq.push(&entry).is_err() {
                         break;
@@ -396,12 +392,11 @@ fn fill_sockaddr(addr: SocketAddr, storage: &mut libc::sockaddr_storage) {
     }
 }
 
-/// Per-thread io_uring sender for the server outbound path.
-///
-/// Avoids struct changes to the server runtime.  The server's flush loop
-/// calls `server_send_batch_to()` directly.  The `RefCell` borrow is never
-/// held across `await` points (collection and io_uring submission are both
-/// synchronous).
+// Per-thread io_uring sender for the server outbound path.
+//
+// Avoids struct changes to the server runtime. The server's flush loop calls
+// `server_send_batch_to()` directly. The `RefCell` borrow is never held across
+// `await` points (collection and io_uring submission are both synchronous).
 thread_local! {
     static SERVER_URING_SENDER: std::cell::RefCell<Option<UringBatchSender>> =
         std::cell::RefCell::new(UringBatchSender::with_defaults());
@@ -527,6 +522,12 @@ pub struct UringRecvBatch {
     /// (unconnected server socket). When false, connected client socket.
     with_addr: bool,
 }
+
+// SAFETY: UringRecvBatch owns its ring, eventfd, backing buffers, iovecs, msghdrs,
+// and sockaddr storage. The raw pointers embedded in iovecs/msghdrs always point
+// into those owned vectors and are only used through &mut self methods, so moving
+// the struct between Tokio worker threads does not create concurrent access.
+unsafe impl Send for UringRecvBatch {}
 
 impl UringRecvBatch {
     /// Create a receive batch on `socket_fd`.

@@ -206,8 +206,7 @@ unsafe fn append_ascii_avx2(dst: &mut Vec<u8>, src: &[u8]) {
 
     let len = src.len();
     let start = dst.len();
-    dst.reserve(len);
-    dst.set_len(start + len);
+    dst.resize(start + len, 0);
 
     let mut out = dst.as_mut_ptr().add(start);
     let mut idx = 0usize;
