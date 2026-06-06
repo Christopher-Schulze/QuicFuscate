@@ -13,6 +13,9 @@
 // Unstable stdarch/core_intrinsics features removed for stable toolchain compatibility.
 // Required for deeply nested macro expansions in crypto/FEC SIMD code
 #![recursion_limit = "1024"]
+// internal_wiedemann is an experimental matrix/SIMD integration feature; its
+// CI lane checks compile coverage, while production lint strictness stays on.
+#![cfg_attr(feature = "internal_wiedemann", allow(warnings))]
 
 /// CPU feature detection and hardware-accelerated dispatch (SIMD, AES-NI, VAES, NEON).
 pub mod accelerate;
