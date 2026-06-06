@@ -367,28 +367,28 @@ cargo tauri dev
 
 ### Safe Alternatives (terminate cleanly)
 
-**Web Admin UI** (`apps/web-admin-ui/`):
+**Web Admin UI** (`apps/svelte-admin/`):
 ```bash
 # Typecheck + build (terminates, no server):
-cd apps/web-admin-ui && bun run check
+cd apps/svelte-admin && bun run check
 
 # Build + serve for 30 seconds then auto-exit:
-cd apps/web-admin-ui && bun run serve:codex
+cd apps/svelte-admin && bun run serve:codex
 
 # Build only (production bundle into dist/):
-cd apps/web-admin-ui && bun run build
+cd apps/svelte-admin && bun run build
 ```
 
-**Desktop App** (`apps/desktop/`):
+**Desktop App** (`apps/svelte-desktop/` frontend, `apps/tauri/` host):
 ```bash
 # Typecheck + build (terminates, no server):
-cd apps/desktop && bun run check
+cd apps/svelte-desktop && bun run check
 
 # Build + serve for 30 seconds then auto-exit:
-cd apps/desktop && bun run serve:codex
+cd apps/svelte-desktop && bun run serve:codex
 
 # Build only (production bundle into dist/):
-cd apps/desktop && bun run build
+cd apps/svelte-desktop && bun run build
 ```
 
 **Rust backend** (always safe - terminates):
@@ -403,12 +403,12 @@ cargo test --features rust-tests
 **macOS has no `timeout` command.** Use background process + sleep + kill:
 ```bash
 # Start vite dev, auto-kill after 30 seconds (macOS-compatible):
-bash -c 'cd apps/web-admin-ui && bun dev & PID=$!; sleep 30; kill $PID 2>/dev/null; exit 0'
+bash -c 'cd apps/svelte-admin && bun dev & PID=$!; sleep 30; kill $PID 2>/dev/null; exit 0'
 ```
 
 Or use `&` with explicit cleanup for interactive verification:
 ```bash
-cd apps/web-admin-ui && bun dev &
+cd apps/svelte-admin && bun dev &
 DEV_PID=$!
 sleep 5  # wait for server startup
 # ... do your verification ...
@@ -420,8 +420,8 @@ kill $DEV_PID 2>/dev/null || true
 ### Build Output Paths
 
 After `bun run build`:
-- Web Admin UI: `apps/web-admin-ui/dist/` (index.html + assets/)
-- Desktop App: `apps/desktop/dist/` (index.html + assets/)
+- Web Admin UI: `apps/svelte-admin/build/` (static adapter output)
+- Desktop frontend: `apps/svelte-desktop/build/` (static adapter output consumed by Tauri host)
 - Production web admin bundle: `assets/web-admin/` (copied by `scripts/build-web-admin.sh`)
 
 ---
@@ -436,20 +436,20 @@ QuicFuscate is a QUIC-based VPN with advanced stealth, cryptography, adaptive FE
 - Build: `cargo check` / `cargo build`
 - Tests: `cargo test --features rust-tests`
 
-### 2. Web Admin UI (`apps/web-admin-ui/`)
-- React 19 + TypeScript + Vite + TailwindCSS + HeroUI + Jotai + Framer Motion
+### 2. Web Admin UI (`apps/svelte-admin/`)
+- SvelteKit + Svelte 5 + TypeScript + Vite + TailwindCSS + Bits UI/shared `packages/ui`
 - Package manager: **bun** (not npm/yarn)
-- Install: `cd apps/web-admin-ui && bun install`
-- Build: `cd apps/web-admin-ui && bun run build`
-- Typecheck: `cd apps/web-admin-ui && bun run check`
+- Install: `cd apps/svelte-admin && bun install`
+- Build: `cd apps/svelte-admin && bun run build`
+- Typecheck: `cd apps/svelte-admin && bun run check`
 
-### 3. Desktop App (`apps/desktop/`)
-- Tauri 2 + React 19 + TypeScript + Vite + TailwindCSS + HeroUI + Jotai + Framer Motion
+### 3. Desktop App (`apps/svelte-desktop/` + `apps/tauri/`)
+- SvelteKit + Svelte 5 frontend with Tauri 2 native host/runtime bridge
 - Package manager: **bun** (not npm/yarn)
-- Install: `cd apps/desktop && bun install`
-- Build: `cd apps/desktop && bun run build`
-- Typecheck: `cd apps/desktop && bun run check`
-- Tauri build: `cd apps/desktop && bun run tauri build`
+- Install: `cd apps/svelte-desktop && bun install`
+- Build: `cd apps/svelte-desktop && bun run build`
+- Typecheck: `cd apps/svelte-desktop && bun run check`
+- Tauri host check: `cd apps/tauri/src-tauri && cargo check`
 
 ---
 
@@ -509,10 +509,10 @@ Wire -> Pooled Buffer
 | Changelog | `docs/changelog.md` |
 | Architecture overview | `docs/architecture.md` |
 | Agent instructions | `AGENTS.md` |
-| Codex instructions | `CODEX.md` (this file) |
 | Rust core | `src/` |
-| Web Admin UI | `apps/web-admin-ui/` |
-| Desktop App | `apps/desktop/` |
+| Web Admin UI | `apps/svelte-admin/` |
+| Desktop frontend | `apps/svelte-desktop/` |
+| Desktop Tauri host | `apps/tauri/` |
 | Server implementation | `src/implementations/server/` |
 | Client implementation | `src/implementations/client/` |
 | Admin HTTP server | `src/implementations/server/admin_http.rs` |
@@ -530,6 +530,7 @@ Wire -> Pooled Buffer
 
 ## UI Change Boundary
 - Do not modify UI surfaces, UI components, UI styles, UI assets, frontend views, desktop app UI, or web admin UI unless the user explicitly asks for that exact UI change in the current task.
+- Do only the UI work the user explicitly requested, and only that. Never broaden a request into adjacent UI cleanup, redesign, component refactors, style polish, text changes, asset changes, or frontend behavior changes.
 - Do not "improve", refactor, polish, rename, migrate, or clean UI code proactively. Backend, Rust core, server, build, CI, docs, and non-UI tests may proceed normally when in scope.
 - If a requested backend or infrastructure task appears to require UI changes, stop and ask for explicit approval before touching any UI file.
 - Treat `apps/svelte-admin/`, `apps/svelte-desktop/`, `apps/tauri/` UI-facing files, `packages/ui/`, `packages/theme/`, `assets/web-admin/`, and any frontend component/style/test files as protected UI territory unless explicitly authorized.
