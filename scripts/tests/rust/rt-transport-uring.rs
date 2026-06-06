@@ -89,9 +89,8 @@ fn uring_batch_invalid_fd_returns_error() {
     // fd -1 is invalid - should return error or zero sent (not panic).
     let result = sender.send_batch(-1, &payloads);
     // Either an Err or Ok(0) is acceptable - the key is no panic.
-    match result {
-        Ok(n) => assert_eq!(n, 0, "invalid fd should send nothing"),
-        Err(_) => {} // expected
+    if let Ok(n) = result {
+        assert_eq!(n, 0, "invalid fd should send nothing");
     }
 }
 
