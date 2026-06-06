@@ -1,5 +1,6 @@
 // x86 SSE2 optimized helpers
 // Safety: All functions here require that the CPU supports SSE2.
+#![allow(dead_code)]
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;

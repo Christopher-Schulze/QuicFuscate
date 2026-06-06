@@ -1,5 +1,6 @@
 //! x86 SIMD helpers for ACK range canonicalization/merge
 //! AVX2/AVX-512 implementations used by transport layer
+#![allow(dead_code)]
 
 use std::arch::x86_64::*;
 

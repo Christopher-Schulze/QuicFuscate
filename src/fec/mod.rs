@@ -3,7 +3,7 @@
 
 use crate::accelerate;
 use crate::brain::{FEC_INTERVAL_HINT_PKTS, FEC_REDUNDANCY_PPM};
-#[cfg(all(target_arch = "x86_64", any(feature = "unsafe_rust", feature = "simd-selfcheck")))]
+#[cfg(target_arch = "x86_64")]
 use crate::fec::gf_tables::prefetch_fec_slice;
 use crate::optimize::{CpuProfile, FeatureDetector, MemoryPool};
 use aligned_box::AlignedBox;
@@ -388,6 +388,7 @@ fn matrix_multiply_accumulate(a: &[Vec<u8>], b: &[Vec<u8>], result: &mut [Vec<u8
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "ssse3")]
+    #[allow(dead_code)]
     unsafe fn gf_mul_scalar_slice_ssse3(coeff: u8, src: &[u8], out_xor: &mut [u8]) {
         use std::arch::x86_64::*;
         debug_assert_eq!(src.len(), out_xor.len());
@@ -563,6 +564,7 @@ const STREAM_ADJUST_MIN_MS: u64 = 150;
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f", enable = "avx512bw", enable = "avx512vl", enable = "gfni")]
+#[allow(dead_code)]
 unsafe fn matrix_multiply_avx512(a: &[Vec<u8>], b: &[Vec<u8>], result: &mut [Vec<u8>]) {
     use std::arch::x86_64::*;
 
@@ -2293,6 +2295,7 @@ impl Decoder8 {
         crate::telemetry::WIEDEMANN_USAGE.inc();
 
         #[cfg(target_arch = "x86_64")]
+        #[allow(dead_code)]
         struct AmxBuffers {
             flat_matrix: Vec<u8>,
             result: Vec<u8>,
@@ -2322,6 +2325,7 @@ impl Decoder8 {
         };
 
         let row_limit = matrix.len().min(n);
+        #[cfg(any(not(target_arch = "x86_64"), target_feature = "amx-tile"))]
         let (column_buffers, mut spmv_acc) = if !use_amx && row_limit > 0 && n > 0 {
             let column_buffers = (0..n)
                 .map(|col| {
@@ -2332,6 +2336,21 @@ impl Decoder8 {
                     column
                 })
                 .collect();
+            (column_buffers, vec![0u8; row_limit])
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        #[cfg(all(target_arch = "x86_64", not(target_feature = "amx-tile")))]
+        let (_column_buffers, _spmv_acc) = if !use_amx && row_limit > 0 && n > 0 {
+            let column_buffers = (0..n)
+                .map(|col| {
+                    let mut column = vec![0u8; row_limit];
+                    for row in 0..row_limit {
+                        column[row] = *matrix[row].get(col).unwrap_or(&0);
+                    }
+                    column
+                })
+                .collect::<Vec<_>>();
             (column_buffers, vec![0u8; row_limit])
         } else {
             (Vec::new(), Vec::new())

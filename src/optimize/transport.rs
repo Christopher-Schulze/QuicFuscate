@@ -3,10 +3,7 @@
 
 #[cfg(target_arch = "aarch64")]
 use crate::optimize::telemetry::CONGESTION_NEON_BATCHES;
-#[cfg(all(
-    target_arch = "x86_64",
-    any(test, feature = "rust-tests", feature = "unsafe_rust", feature = "simd-selfcheck")
-))]
+#[cfg(target_arch = "x86_64")]
 use crate::optimize::telemetry::{CONGESTION_AVX2_BATCHES, CONGESTION_VNNI_BATCHES};
 #[cfg(any(test, feature = "rust-tests"))]
 use crate::optimize::CpuProfile;

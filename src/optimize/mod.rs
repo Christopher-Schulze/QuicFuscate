@@ -63,9 +63,6 @@ use std::sync::{Arc, OnceLock};
 #[cfg(target_arch = "x86_64")]
 #[path = "x86_sse2.rs"]
 pub mod x86_sse2;
-#[cfg(all(target_arch = "x86_64", not(feature = "simd-selfcheck")))]
-use x86_sse2::xor_repeating_key32_sse2;
-
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug)]
 enum NumaPolicy {

@@ -25,9 +25,6 @@ pub struct UdpGsoConfig {
     pub gso_size: u16,
 }
 
-#[cfg(all(target_arch = "x86_64", not(feature = "simd-selfcheck")))]
-use std::arch::x86_64::*;
-
 impl UdpGsoConfig {
     /// Detect and enable UDP GSO on socket
     pub fn enable(sock: &UdpSocket) -> std::io::Result<Self> {

@@ -4068,6 +4068,7 @@ pub(crate) mod amx {
 // ============================================================================
 
 #[cfg(target_arch = "x86_64")]
+#[allow(dead_code)]
 mod x86_extended {
     use super::scalar;
     use super::*;
@@ -5289,6 +5290,7 @@ mod x86_extended {
     #[cfg(all(test, target_arch = "x86_64"))]
     mod tests {
         use super::*;
+        use crate::simd::x86::{ghash_pclmulqdq, ghash_vpclmulqdq};
         use crate::transport::h3::qpack;
         use std::is_x86_feature_detected;
 
@@ -5355,7 +5357,7 @@ mod x86_extended {
             let data = b"example ghash payload block";
 
             let mut pclmul_tag = [0u8; 16];
-            unsafe { super::ghash_pclmulqdq(&h, data, &mut pclmul_tag) };
+            unsafe { ghash_pclmulqdq(&h, data, &mut pclmul_tag) };
 
             let mut scalar_tag = [0u8; 16];
             super::super::scalar::ghash(&h, data, &mut scalar_tag);
@@ -5376,7 +5378,7 @@ mod x86_extended {
             let data = b"double block ghash data stream";
 
             let mut vpclmul_tag = [0u8; 16];
-            unsafe { super::ghash_vpclmulqdq(&h, data, &mut vpclmul_tag) };
+            unsafe { ghash_vpclmulqdq(&h, data, &mut vpclmul_tag) };
 
             let mut scalar_tag = [0u8; 16];
             super::super::scalar::ghash(&h, data, &mut scalar_tag);

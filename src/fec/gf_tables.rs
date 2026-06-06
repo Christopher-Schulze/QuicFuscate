@@ -104,6 +104,7 @@ pub(crate) unsafe fn gf_mul_gfni(a: u8, b: u8) -> u8 {
 }
 
 #[cfg(target_arch = "x86_64")]
+#[allow(dead_code)]
 pub(crate) unsafe fn gf_mul_bitsliced_avx512(a: u8, b: u8) -> u8 {
     use std::arch::x86_64::*;
     let a128 = _mm_set_epi64x(0, a as i64);
@@ -122,11 +123,13 @@ pub(crate) unsafe fn gf_mul_bitsliced_avx512(a: u8, b: u8) -> u8 {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512vbmi")]
+#[allow(dead_code)]
 pub(crate) unsafe fn gf_mul_avx512(a: u8, b: u8) -> u8 {
     gf_mul_bitsliced_avx512(a, b)
 }
 
 #[cfg(target_arch = "x86_64")]
+#[allow(dead_code)]
 pub(crate) unsafe fn gf_mul_bitsliced_avx2(a: u8, b: u8) -> u8 {
     use std::arch::x86_64::*;
     let a128 = _mm_set_epi64x(0, a as i64);
@@ -145,11 +148,13 @@ pub(crate) unsafe fn gf_mul_bitsliced_avx2(a: u8, b: u8) -> u8 {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+#[allow(dead_code)]
 pub(crate) unsafe fn gf_mul_avx2(a: u8, b: u8) -> u8 {
     gf_mul_bitsliced_avx2(a, b)
 }
 
 #[cfg(target_arch = "x86_64")]
+#[allow(dead_code)]
 pub(crate) unsafe fn gf_mul_bitsliced_sse2(a: u8, b: u8) -> u8 {
     use std::arch::x86_64::*;
     let a_v = _mm_set_epi64x(0, a as i64);
