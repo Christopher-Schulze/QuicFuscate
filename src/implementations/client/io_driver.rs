@@ -135,16 +135,9 @@ impl IoHotpathAdapter for SystemIoHotpathAdapter {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
-            use std::os::fd::{FromRawFd, IntoRawFd};
-            // SAFETY: `socket_fd` is a valid open UDP socket fd passed in by the caller
-            // (`SystemIoHotpathAdapter` receives it from the IO driver which owns it).
-            // We call `into_raw_fd()` immediately after the acceleration init so the fd
-            // is not closed when `socket` is dropped; the driver retains ownership.
-            let socket = unsafe { std::net::UdpSocket::from_raw_fd(socket_fd) };
-            if let Err(e) = crate::transport::init_socket_acceleration(&socket) {
+            if let Err(e) = crate::transport::init_socket_acceleration_fd(socket_fd) {
                 log::debug!("batch acceleration init failed: {}", e);
             }
-            let _ = socket.into_raw_fd();
         }
 
         crate::optimize::zc_batch::sendmmsg(socket_fd, payloads)
@@ -393,14 +386,18 @@ impl IoDriver {
                     {
                         use std::os::fd::AsRawFd;
                         let socket_fd = socket.as_raw_fd();
+                        let mut batch_refs: Vec<&[u8]> = Vec::new();
 
                         // io_uring batch path (preferred when available).
                         #[cfg(feature = "io_uring")]
                         if matches!(dispatch, OutboundDispatch::IoUringBatch) {
-                            let mut batch_refs: Vec<&[u8]> = Vec::with_capacity(queued);
-                            for payload in batch_payloads.iter().take(queued) {
-                                batch_refs.push(payload.as_slice());
-                            }
+                            batch_refs.reserve(queued);
+                            batch_refs.extend(
+                                batch_payloads
+                                    .iter()
+                                    .take(queued)
+                                    .map(|payload| payload.as_slice()),
+                            );
                             let mut guard = self.uring_sender.lock();
                             if let Some(ref mut uring) = *guard {
                                 match uring.send_batch(socket_fd, &batch_refs) {
@@ -419,9 +416,14 @@ impl IoDriver {
 
                         // sendmmsg batch path (fallback from io_uring, or primary).
                         if already_sent == 0 && queued > 1 {
-                            let mut batch_refs: Vec<&[u8]> = Vec::with_capacity(queued);
-                            for payload in batch_payloads.iter().take(queued) {
-                                batch_refs.push(payload.as_slice());
+                            if batch_refs.is_empty() {
+                                batch_refs.reserve(queued);
+                                batch_refs.extend(
+                                    batch_payloads
+                                        .iter()
+                                        .take(queued)
+                                        .map(|payload| payload.as_slice()),
+                                );
                             }
                             match try_sendmmsg_batch(
                                 self.hotpath_adapter.as_ref(),

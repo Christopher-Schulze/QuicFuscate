@@ -15,7 +15,7 @@ use std::sync::atomic::Ordering;
 #[cfg(any(test, feature = "rust-tests"))]
 use std::time::Duration;
 
-#[cfg(all(unix, any(test, feature = "rust-tests")))]
+#[cfg(all(unix, not(target_os = "linux"), any(test, feature = "rust-tests")))]
 use std::os::unix::io::FromRawFd;
 
 #[cfg(target_os = "linux")]
@@ -143,18 +143,7 @@ impl BatchProcessor {
         // Try accelerated batch send first
         #[cfg(not(feature = "rust-tests"))]
         {
-            // Create a temporary UdpSocket from raw fd for accelerate API
-            use std::os::unix::io::{FromRawFd, IntoRawFd};
-            // SAFETY: `socket` is a valid, open UDP socket fd provided by the caller.
-            // We immediately call `into_raw_fd()` after use so the fd is not closed when
-            // `sock` is dropped; the caller retains ownership of the descriptor.
-            let sock = unsafe { UdpSocket::from_raw_fd(socket) };
-
-            // Use sendmmsg through accelerate
-            let result = accelerate::send_batch(&sock, packets);
-
-            // Release socket without closing fd
-            let _ = sock.into_raw_fd();
+            let result = accelerate::send_batch_fd(socket, packets);
 
             if let Ok(sent) = result {
                 BATCH_SENDS.fetch_add(1, Ordering::Relaxed);
@@ -165,18 +154,7 @@ impl BatchProcessor {
 
         #[cfg(feature = "rust-tests")]
         if !self.force_batch_send_fallback {
-            // Create a temporary UdpSocket from raw fd for accelerate API
-            use std::os::unix::io::{FromRawFd, IntoRawFd};
-            // SAFETY: `socket` is a valid, open UDP socket fd provided by the caller.
-            // We immediately call `into_raw_fd()` after use so the fd is not closed when
-            // `sock` is dropped; the caller retains ownership of the descriptor.
-            let sock = unsafe { UdpSocket::from_raw_fd(socket) };
-
-            // Use sendmmsg through accelerate
-            let result = accelerate::send_batch(&sock, packets);
-
-            // Release socket without closing fd
-            let _ = sock.into_raw_fd();
+            let result = accelerate::send_batch_fd(socket, packets);
 
             if let Ok(sent) = result {
                 BATCH_SENDS.fetch_add(1, Ordering::Relaxed);
@@ -192,31 +170,45 @@ impl BatchProcessor {
             return Ok(0);
         }
 
-        use std::os::unix::io::IntoRawFd;
-        // SAFETY: `socket` is a valid, open UDP socket fd provided by the caller.
-        // `into_raw_fd()` is called on all exit paths (both early returns and the normal
-        // path at line end) so the fd is never double-closed or prematurely dropped.
-        let sock = unsafe { UdpSocket::from_raw_fd(socket) };
         let mut sent = 0usize;
-        for (data, addr) in packets.iter().take(batch_count) {
-            match sock.send_to(data, addr) {
-                Ok(_) => {
+        'send_loop: for (data, addr) in packets.iter().take(batch_count) {
+            let sock_addr = socket2::SockAddr::from(*addr);
+            loop {
+                // SAFETY: `socket` is a valid UDP fd supplied by the caller. `data` and
+                // `sock_addr` live for the duration of this syscall and are not retained.
+                let rc = unsafe {
+                    libc::sendto(
+                        socket,
+                        data.as_ptr() as *const libc::c_void,
+                        data.len(),
+                        libc::MSG_DONTWAIT,
+                        sock_addr.as_ptr(),
+                        sock_addr.len(),
+                    )
+                };
+                if rc >= 0 {
                     sent += 1;
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    if sent == 0 {
-                        let _ = sock.into_raw_fd();
-                        return Err(err);
-                    }
                     break;
                 }
-                Err(err) => {
-                    let _ = sock.into_raw_fd();
-                    return Err(err);
+
+                let err = std::io::Error::last_os_error();
+                match err.kind() {
+                    std::io::ErrorKind::Interrupted => continue,
+                    std::io::ErrorKind::WouldBlock => {
+                        if sent == 0 {
+                            return Err(err);
+                        }
+                        break 'send_loop;
+                    }
+                    _ => {
+                        if sent > 0 {
+                            break 'send_loop;
+                        }
+                        return Err(err);
+                    }
                 }
             }
         }
-        let _ = sock.into_raw_fd();
 
         BATCH_SENDS.fetch_add(1, Ordering::Relaxed);
         PACKETS_BATCHED.fetch_add(sent, Ordering::Relaxed);
@@ -233,7 +225,7 @@ impl BatchProcessor {
     ) -> std::io::Result<Vec<(Vec<u8>, SocketAddr)>> {
         use std::mem;
 
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(self.batch_size);
 
         // Setup timeout
         let mut ts = timeout.map(|d| libc::timespec {

@@ -1,8 +1,13 @@
 use libc::{c_void, iovec, msghdr, sockaddr_storage, socklen_t};
+#[cfg(target_os = "linux")]
+use smallvec::SmallVec;
 use std::net::{SocketAddr, UdpSocket};
 use std::os::unix::io::AsRawFd;
 #[cfg(target_os = "linux")]
 use std::os::unix::io::RawFd;
+
+#[cfg(target_os = "linux")]
+const UDP_BATCH_STACK: usize = 64;
 
 #[cfg(target_os = "macos")]
 extern "C" {
@@ -26,22 +31,29 @@ pub struct UdpGsoConfig {
 }
 
 impl UdpGsoConfig {
-    /// Detect and enable UDP GSO on socket
+    /// Detect UDP GSO support on socket.
+    #[cfg(target_os = "linux")]
     pub fn enable(sock: &UdpSocket) -> std::io::Result<Self> {
-        let fd = sock.as_raw_fd();
+        Self::enable_fd(sock.as_raw_fd())
+    }
 
-        // Enable UDP_SEGMENT option (SOL_UDP = 17, UDP_SEGMENT = 103)
+    /// Detect UDP GSO support on an existing socket descriptor.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn enable_fd(fd: RawFd) -> std::io::Result<Self> {
+        // UDP_SEGMENT is a per-message segment-size knob, not a boolean enable.
+        // Probe support only; send paths must attach the actual segment size.
         const SOL_UDP: libc::c_int = 17;
         const UDP_SEGMENT: libc::c_int = 103;
 
-        let enable: libc::c_int = 1;
+        let mut current_size: libc::c_int = 0;
+        let mut current_size_len = std::mem::size_of::<libc::c_int>() as socklen_t;
         let ret = unsafe {
-            libc::setsockopt(
+            libc::getsockopt(
                 fd,
                 SOL_UDP,
                 UDP_SEGMENT,
-                &enable as *const _ as *const c_void,
-                std::mem::size_of_val(&enable) as socklen_t,
+                &mut current_size as *mut _ as *mut c_void,
+                &mut current_size_len,
             )
         };
 
@@ -50,6 +62,12 @@ impl UdpGsoConfig {
         } else {
             Ok(Self { enabled: false, max_segments: 1, gso_size: 0 })
         }
+    }
+
+    /// Detect UDP GSO support on socket.
+    #[cfg(not(target_os = "linux"))]
+    pub fn enable(_sock: &UdpSocket) -> std::io::Result<Self> {
+        Ok(Self { enabled: false, max_segments: 1, gso_size: 0 })
     }
 }
 
@@ -60,21 +78,22 @@ impl UdpGsoConfig {
 /// Batched UDP send with sendmmsg (Linux/BSD)
 #[cfg(target_os = "linux")]
 pub fn send_batch(sock: &UdpSocket, packets: &[(&[u8], SocketAddr)]) -> std::io::Result<usize> {
-    send_batch_linux(sock, packets)
+    send_batch_fd(sock.as_raw_fd(), packets)
 }
 
 #[cfg(target_os = "linux")]
-fn send_batch_linux(sock: &UdpSocket, packets: &[(&[u8], SocketAddr)]) -> std::io::Result<usize> {
+pub(crate) fn send_batch_fd(fd: RawFd, packets: &[(&[u8], SocketAddr)]) -> std::io::Result<usize> {
     use std::mem::MaybeUninit;
 
     if packets.is_empty() {
         return Ok(0);
     }
 
-    let fd = sock.as_raw_fd();
-    let mut messages: Vec<libc::mmsghdr> = Vec::with_capacity(packets.len());
-    let mut iovecs: Vec<iovec> = Vec::with_capacity(packets.len());
-    let mut addrs: Vec<sockaddr_storage> = Vec::with_capacity(packets.len());
+    let mut messages: SmallVec<[libc::mmsghdr; UDP_BATCH_STACK]> =
+        SmallVec::with_capacity(packets.len());
+    let mut iovecs: SmallVec<[iovec; UDP_BATCH_STACK]> = SmallVec::with_capacity(packets.len());
+    let mut addrs: SmallVec<[sockaddr_storage; UDP_BATCH_STACK]> =
+        SmallVec::with_capacity(packets.len());
 
     for (data, addr) in packets {
         let mut storage = MaybeUninit::<sockaddr_storage>::uninit();
@@ -179,8 +198,9 @@ pub(crate) fn send_batch_connected(fd: RawFd, payloads: &[&[u8]]) -> std::io::Re
         return Ok(0);
     }
 
-    let mut iovecs: Vec<iovec> = Vec::with_capacity(payloads.len());
-    let mut msgs: Vec<libc::mmsghdr> = Vec::with_capacity(payloads.len());
+    let mut iovecs: SmallVec<[iovec; UDP_BATCH_STACK]> = SmallVec::with_capacity(payloads.len());
+    let mut msgs: SmallVec<[libc::mmsghdr; UDP_BATCH_STACK]> =
+        SmallVec::with_capacity(payloads.len());
 
     for payload in payloads {
         iovecs.push(iovec { iov_base: payload.as_ptr() as *mut c_void, iov_len: payload.len() });
@@ -217,8 +237,8 @@ pub(crate) fn recv_batch_connected(fd: RawFd, bufs: &mut [&mut [u8]]) -> std::io
         return Ok(0);
     }
 
-    let mut iovecs: Vec<iovec> = Vec::with_capacity(bufs.len());
-    let mut msgs: Vec<libc::mmsghdr> = Vec::with_capacity(bufs.len());
+    let mut iovecs: SmallVec<[iovec; UDP_BATCH_STACK]> = SmallVec::with_capacity(bufs.len());
+    let mut msgs: SmallVec<[libc::mmsghdr; UDP_BATCH_STACK]> = SmallVec::with_capacity(bufs.len());
 
     for buf in bufs.iter_mut() {
         iovecs.push(iovec { iov_base: buf.as_mut_ptr() as *mut c_void, iov_len: buf.len() });
@@ -415,8 +435,8 @@ mod tests {
 
     #[test]
     fn test_gso_config_fields_default_disabled() {
-        // GSO enable requires a real socket; on macOS setsockopt(SOL_UDP) fails
-        // gracefully returning an Ok with enabled=false
+        // GSO probing requires a real socket; unsupported platforms fail gracefully
+        // with enabled=false.
         let sock = UdpSocket::bind("127.0.0.1:0").expect("bind failed");
         let config = UdpGsoConfig::enable(&sock).expect("enable should not fail");
         // On macOS/non-Linux, GSO is unsupported so enabled=false

@@ -56,6 +56,20 @@ pub fn init_socket_acceleration(socket: &std::net::UdpSocket) -> std::io::Result
     Ok(())
 }
 
+/// Best-effort socket capability setup for callers that own only a raw socket fd.
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub(crate) fn init_socket_acceleration_fd(socket_fd: std::os::fd::RawFd) -> std::io::Result<()> {
+    let gso_enabled = crate::accelerate::transport_io::UdpGsoConfig::enable_fd(socket_fd)
+        .map(|cfg| cfg.enabled)
+        .unwrap_or(false);
+
+    log::info!("Network acceleration initialized:");
+    log::info!("  GSO: {}", gso_enabled);
+
+    Ok(())
+}
+
 /// Experimental AF_XDP constructor probe kept behind the transport root,
 /// which is the sole retained owner for explicit AF_XDP compatibility hooks.
 #[cfg(all(

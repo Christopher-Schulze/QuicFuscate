@@ -1852,21 +1852,33 @@ pub async fn flush_live_server_outgoing(
 
     if !staging.is_empty() {
         // Try io_uring batch on Linux when the feature is compiled in.
-        // On success returns early; on failure or non-Linux falls through to
-        // individual async sends below.
-        #[cfg(all(target_os = "linux", feature = "io_uring"))]
-        {
-            use std::os::unix::io::AsRawFd;
-            let fd = socket.as_raw_fd();
-            let packets: Vec<(SocketAddr, &[u8])> =
-                staging.iter().map(|p| (addr, p.as_slice())).collect();
-            if crate::optimize::uring_batch::server_send_batch_to(fd, &packets).is_some() {
+        // Full success returns early; partial success falls through for the unsent tail.
+        let already_sent = {
+            #[cfg(all(target_os = "linux", feature = "io_uring"))]
+            {
+                use std::os::unix::io::AsRawFd;
+                let fd = socket.as_raw_fd();
+                let packets: Vec<(SocketAddr, &[u8])> =
+                    staging.iter().map(|p| (addr, p.as_slice())).collect();
+                crate::optimize::uring_batch::server_send_batch_to(fd, &packets)
+                    .unwrap_or(0)
+                    .min(staging.len())
+            }
+
+            #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
+            {
+                0usize
+            }
+        };
+        if already_sent == staging.len() {
+            #[cfg(all(target_os = "linux", feature = "io_uring"))]
+            {
                 record_live_snapshot_bytes_out(client_snapshots, addr, bytes_sent, session_id);
                 return Ok((bytes_sent, packets_sent));
             }
         }
-        // io_uring unavailable or failed: send via individual async calls.
-        for p in &staging {
+        // io_uring unavailable, failed, or partially sent: finish via individual async calls.
+        for p in staging.iter().skip(already_sent) {
             send_live_datagram_to(socket, &addr, p).await?;
         }
     }

@@ -14,6 +14,9 @@ use std::os::fd::AsRawFd;
 use std::os::unix::io::RawFd;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(target_os = "linux")]
+use smallvec::SmallVec;
+
 // Linux-specific imports
 #[cfg(target_os = "linux")]
 use libc::{
@@ -160,13 +163,16 @@ impl UdpFastPath {
     #[cfg(target_os = "linux")]
     fn enable_gso(&mut self) {
         unsafe {
-            let val: i32 = 1;
-            let ret = libc::setsockopt(
+            // UDP_SEGMENT is a segment-size knob, not a boolean. Probe support only;
+            // send_gso() supplies the actual per-message segment size.
+            let mut val: i32 = 0;
+            let mut len = mem::size_of::<i32>() as libc::socklen_t;
+            let ret = libc::getsockopt(
                 self.fd,
                 SOL_UDP,
                 UDP_SEGMENT,
-                &val as *const _ as *const c_void,
-                mem::size_of_val(&val) as libc::socklen_t,
+                &mut val as *mut _ as *mut c_void,
+                &mut len,
             );
             self.gso_enabled = ret == 0;
             if self.gso_enabled {
@@ -204,7 +210,8 @@ impl UdpFastPath {
         self.gro_enabled = false;
     }
 
-    // Sophisticated batched send - cross-platform optimized
+    // Sophisticated batched send - cross-platform optimized.
+    // All variants return packet count; byte accounting stays in internal counters.
     #[cfg(any(target_os = "linux", target_os = "android"))]
     pub fn send_batch(&mut self, packets: &[(&[u8], SocketAddr)]) -> io::Result<usize> {
         if unlikely(packets.is_empty()) {
@@ -214,7 +221,8 @@ impl UdpFastPath {
 
         // Fast path for single packet
         if batch_packets.len() == 1 {
-            return self.send_single(batch_packets[0].0, batch_packets[0].1);
+            self.send_single(batch_packets[0].0, batch_packets[0].1)?;
+            return Ok(1);
         }
 
         for window in batch_packets.windows(2) {
@@ -244,7 +252,8 @@ impl UdpFastPath {
         }
         let batch_packets = &packets[..packets.len().min(MAX_BATCH_SIZE)];
         if batch_packets.len() == 1 {
-            return self.send_single(batch_packets[0].0, batch_packets[0].1);
+            self.send_single(batch_packets[0].0, batch_packets[0].1)?;
+            return Ok(1);
         }
 
         let mut msgs: Vec<msghdr> = Vec::with_capacity(batch_packets.len());
@@ -455,7 +464,13 @@ impl UdpFastPath {
 
             // Setup control message for GSO
             let cmsg_buf_len = CMSG_SPACE(mem::size_of::<u16>() as u32) as usize;
-            let mut cmsg_buf = vec![0u8; cmsg_buf_len];
+            let mut cmsg_buf = [0u8; 64];
+            if cmsg_buf_len > cmsg_buf.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "UDP GSO control message exceeds stack buffer",
+                ));
+            }
 
             let mut msg: msghdr = mem::zeroed();
             msg.msg_name = sock_addr.as_ptr() as *mut c_void;
@@ -463,7 +478,7 @@ impl UdpFastPath {
             msg.msg_iov = &iov as *const _ as *mut iovec;
             msg.msg_iovlen = 1;
             msg.msg_control = cmsg_buf.as_mut_ptr() as *mut c_void;
-            msg.msg_controllen = cmsg_buf.len();
+            msg.msg_controllen = cmsg_buf_len;
 
             let cmsg = CMSG_FIRSTHDR(&msg);
             if !cmsg.is_null() {
@@ -482,7 +497,7 @@ impl UdpFastPath {
                 return Err(io::Error::last_os_error());
             }
 
-            let segments = (data.len() + segment_size - 1) / segment_size;
+            let segments = data.len().div_ceil(segment_size);
             self.packets_sent.fetch_add(segments as u64, Ordering::Relaxed);
             self.bytes_sent.fetch_add(sent as u64, Ordering::Relaxed);
 
@@ -495,9 +510,13 @@ impl UdpFastPath {
     pub fn recv_batch(&mut self, max_packets: usize) -> io::Result<Vec<(Vec<u8>, SocketAddr)>> {
         unsafe {
             let batch_size = max_packets.min(MAX_BATCH_SIZE);
-            let mut msgs: Vec<mmsghdr> = Vec::with_capacity(batch_size);
-            let mut iovecs: Vec<iovec> = Vec::with_capacity(batch_size);
-            let mut addrs: Vec<sockaddr_storage> = Vec::with_capacity(batch_size);
+            if batch_size == 0 {
+                return Ok(Vec::new());
+            }
+            let mut msgs: SmallVec<[mmsghdr; MAX_BATCH_SIZE]> = SmallVec::with_capacity(batch_size);
+            let mut iovecs: SmallVec<[iovec; MAX_BATCH_SIZE]> = SmallVec::with_capacity(batch_size);
+            let mut addrs: SmallVec<[sockaddr_storage; MAX_BATCH_SIZE]> =
+                SmallVec::with_capacity(batch_size);
 
             for i in 0..batch_size {
                 let buf = &mut self.recv_batch[i];
@@ -609,5 +628,51 @@ impl UdpFastPath {
             self.packets_sent.load(Ordering::Relaxed),
             self.packets_received.load(Ordering::Relaxed),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UdpFastPath;
+    use std::net::UdpSocket;
+    use std::time::Duration;
+
+    #[test]
+    fn send_batch_single_packet_returns_packet_count_not_bytes() {
+        let receiver = UdpSocket::bind("127.0.0.1:0").expect("bind receiver");
+        receiver.set_read_timeout(Some(Duration::from_secs(1))).expect("set receiver timeout");
+        let recv_addr = receiver.local_addr().expect("receiver addr");
+
+        let mut sender =
+            UdpFastPath::new_with_flags("127.0.0.1:0".parse().expect("bind sender"), false, false)
+                .expect("create udp fast path");
+        let payload = b"single-packet-flush";
+        let sent =
+            sender.send_batch(&[(payload.as_slice(), recv_addr)]).expect("single packet send");
+
+        assert_eq!(sent, 1, "send_batch reports packets, not bytes");
+
+        let mut buf = [0u8; 128];
+        let (n, _) = receiver.recv_from(&mut buf).expect("recv packet");
+        assert_eq!(n, payload.len(), "payload length mismatch");
+        assert_eq!(&buf[..n], payload, "payload mismatch");
+
+        let (bytes_sent, _, packets_sent, _) = sender.counters_for_rust_tests();
+        assert_eq!(bytes_sent, payload.len() as u64);
+        assert_eq!(packets_sent, 1);
+    }
+
+    #[test]
+    fn recv_batch_zero_packets_returns_empty_without_syscall() {
+        let mut fast_path =
+            UdpFastPath::new_with_flags("127.0.0.1:0".parse().expect("bind addr"), false, false)
+                .expect("create udp fast path");
+
+        let packets = fast_path.recv_batch(0).expect("recv zero packet batch");
+        assert!(packets.is_empty());
+
+        let (_, bytes_received, _, packets_received) = fast_path.counters_for_rust_tests();
+        assert_eq!(bytes_received, 0);
+        assert_eq!(packets_received, 0);
     }
 }

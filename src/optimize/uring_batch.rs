@@ -1,7 +1,7 @@
 // io_uring batch UDP sender using the official `io-uring` crate.
 //
 // Replaces the old self-rolled libc::io_uring_setup/io_uring_enter code with
-// proper batch submission: N SendMsg SQEs queued, single submit_and_wait(N),
+// proper batch submission: queued SendMsg SQEs, single submit_and_wait(queued),
 // then reap all CQEs. This amortises the syscall overhead across the entire
 // batch instead of doing one submit_and_wait(1) per packet.
 
@@ -44,6 +44,8 @@ pub struct UringBatchSender {
     msgs: Vec<libc::msghdr>,
     /// Pre-allocated sockaddr_storage for send_batch_to (unconnected sends).
     sockaddrs: Vec<libc::sockaddr_storage>,
+    /// Pre-allocated completion bitmap for contiguous-prefix accounting.
+    send_success: Vec<bool>,
     /// True when the ring was constructed with SQPOLL mode.
     sqpoll_active: bool,
     /// True when the kernel supports SendMsgZc (probed at init).
@@ -54,6 +56,11 @@ pub struct UringBatchSender {
 // inside msghdr/iovec entries are rebuilt from those owned vectors during
 // synchronous &mut self submissions and are protected by the caller's mutex.
 unsafe impl Send for UringBatchSender {}
+
+struct SubmitOutcome {
+    queued: usize,
+    sent: usize,
+}
 
 impl UringBatchSender {
     /// Try to create a sender with the given queue depth.
@@ -110,6 +117,7 @@ impl UringBatchSender {
             iovecs: Vec::with_capacity(cap),
             msgs: Vec::with_capacity(cap),
             sockaddrs: Vec::with_capacity(cap),
+            send_success: Vec::with_capacity(cap),
             sqpoll_active,
             zc_supported,
         })
@@ -135,7 +143,7 @@ impl UringBatchSender {
     /// Submit a batch of datagrams on a **connected** UDP socket.
     ///
     /// Queues one `SendMsg` SQE per payload, then issues a single
-    /// `submit_and_wait(count)` to push them all into the kernel in one
+    /// `submit_and_wait(queued)` to push them all into the kernel in one
     /// syscall transition. Returns the number of successfully sent packets.
     ///
     /// Payloads that exceed the submission queue capacity are sent in
@@ -170,15 +178,27 @@ impl UringBatchSender {
 
         if self.zc_supported {
             // Zero-copy path: SendMsgZc with dual-CQE drain.
-            for chunk_start in (0..self.msgs.len()).step_by(sq_cap) {
+            let mut chunk_start = 0usize;
+            while chunk_start < self.msgs.len() {
                 let chunk_end = (chunk_start + sq_cap).min(self.msgs.len());
-                total_sent += self.submit_chunk_zc(fd, chunk_start, chunk_end - chunk_start)?;
+                let outcome = self.submit_chunk_zc(fd, chunk_start, chunk_end - chunk_start)?;
+                chunk_start += outcome.queued;
+                total_sent += outcome.sent;
+                if outcome.sent < outcome.queued {
+                    return Ok(total_sent);
+                }
             }
         } else {
             // Standard path: SendMsg with single CQE per SQE.
-            for chunk_start in (0..self.msgs.len()).step_by(sq_cap) {
+            let mut chunk_start = 0usize;
+            while chunk_start < self.msgs.len() {
                 let chunk_end = (chunk_start + sq_cap).min(self.msgs.len());
-                total_sent += self.submit_chunk(fd, chunk_start, chunk_end - chunk_start)?;
+                let outcome = self.submit_chunk(fd, chunk_start, chunk_end - chunk_start)?;
+                chunk_start += outcome.queued;
+                total_sent += outcome.sent;
+                if outcome.sent < outcome.queued {
+                    return Ok(total_sent);
+                }
             }
         }
 
@@ -237,9 +257,16 @@ impl UringBatchSender {
         let sq_cap = self.ring.params().sq_entries() as usize;
         let mut total_sent = 0usize;
 
-        for chunk_start in (0..self.msgs.len()).step_by(sq_cap) {
+        let mut chunk_start = 0usize;
+        while chunk_start < self.msgs.len() {
             let chunk_end = (chunk_start + sq_cap).min(self.msgs.len());
-            total_sent += self.submit_chunk(fd, chunk_start, chunk_end - chunk_start)?;
+            let outcome = self.submit_chunk(fd, chunk_start, chunk_end - chunk_start)?;
+            chunk_start += outcome.queued;
+            total_sent += outcome.sent;
+            if outcome.sent < outcome.queued {
+                crate::telemetry::IO_URING_SERVER_PACKETS.inc_by(total_sent as u64);
+                return Ok(total_sent);
+            }
         }
 
         crate::telemetry::IO_URING_SERVER_PACKETS.inc_by(total_sent as u64);
@@ -247,10 +274,16 @@ impl UringBatchSender {
     }
 
     /// Push one chunk of SendMsg SQEs (by index range into `self.msgs`) and reap completions.
-    fn submit_chunk(&mut self, fd: RawFd, start: usize, count: usize) -> std::io::Result<usize> {
+    fn submit_chunk(
+        &mut self,
+        fd: RawFd,
+        start: usize,
+        count: usize,
+    ) -> std::io::Result<SubmitOutcome> {
         let fd = io_uring::types::Fd(fd);
 
         // Push SQEs.
+        let mut queued = 0usize;
         {
             let mut sq = self.ring.submission();
             for idx in 0..count {
@@ -267,19 +300,29 @@ impl UringBatchSender {
                         break;
                     }
                 }
+                queued += 1;
             }
+        }
+        if queued == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "io_uring submission queue accepted no SendMsg SQEs",
+            ));
         }
 
         // Single syscall: submit all queued SQEs and wait for all completions.
-        self.ring.submit_and_wait(count)?;
+        self.ring.submit_and_wait(queued)?;
         crate::telemetry::IO_URING_SUBMIT_CALLS.inc();
 
-        // Reap completions.
-        let mut success_count: usize = 0;
+        // Reap completions. Callers retry via `skip(sent)`, so expose only the
+        // contiguous successful prefix, not an unordered success total.
+        self.send_success.clear();
+        self.send_success.resize(queued, false);
         let cq = self.ring.completion();
         for cqe in cq {
-            if cqe.result() >= 0 {
-                success_count += 1;
+            let idx = cqe.user_data() as usize;
+            if cqe.result() >= 0 && idx < self.send_success.len() {
+                self.send_success[idx] = true;
             } else {
                 log::trace!(
                     "io_uring SendMsg CQE error: user_data={} result={}",
@@ -288,8 +331,9 @@ impl UringBatchSender {
                 );
             }
         }
+        let sent = self.send_success.iter().take_while(|&&ok| ok).count();
 
-        Ok(success_count)
+        Ok(SubmitOutcome { queued, sent })
     }
 
     /// Push one chunk of `SendMsgZc` SQEs and reap primary + notification CQEs.
@@ -298,13 +342,19 @@ impl UringBatchSender {
     /// - **Primary** (`CQE_F_MORE` set): data accepted into socket buffer.
     /// - **Notification** (`CQE_F_NOTIF` set): kernel released the buffer.
     ///
-    /// We call `submit_and_wait(count)` to wait for at least `count` CQEs, then
+    /// We call `submit_and_wait(queued)` to wait for queued CQEs, then
     /// drain the full CQ.  Notification CQEs that arrive later are swept up
     /// in the next call's drain.
-    fn submit_chunk_zc(&mut self, fd: RawFd, start: usize, count: usize) -> std::io::Result<usize> {
+    fn submit_chunk_zc(
+        &mut self,
+        fd: RawFd,
+        start: usize,
+        count: usize,
+    ) -> std::io::Result<SubmitOutcome> {
         let fd_typed = io_uring::types::Fd(fd);
 
         // Push SendMsgZc SQEs.
+        let mut queued = 0usize;
         {
             let mut sq = self.ring.submission();
             for idx in 0..count {
@@ -317,14 +367,22 @@ impl UringBatchSender {
                         break;
                     }
                 }
+                queued += 1;
             }
         }
+        if queued == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "io_uring submission queue accepted no SendMsgZc SQEs",
+            ));
+        }
 
-        // Wait for at least `count` CQEs (primary or notification), then drain all.
-        self.ring.submit_and_wait(count)?;
+        // Wait for at least the queued CQEs (primary or notification), then drain all.
+        self.ring.submit_and_wait(queued)?;
         crate::telemetry::IO_URING_SUBMIT_CALLS.inc();
 
-        let mut primary_success = 0usize;
+        self.send_success.clear();
+        self.send_success.resize(queued, false);
         {
             let cq = self.ring.completion();
             for cqe in cq {
@@ -334,8 +392,9 @@ impl UringBatchSender {
                     crate::telemetry::IO_URING_ZC_NOTIFS.inc();
                 } else {
                     // Primary send CQE.
-                    if cqe.result() >= 0 {
-                        primary_success += 1;
+                    let idx = cqe.user_data() as usize;
+                    if cqe.result() >= 0 && idx < self.send_success.len() {
+                        self.send_success[idx] = true;
                         crate::telemetry::IO_URING_ZC_SENDS.inc();
                     } else {
                         log::trace!(
@@ -352,8 +411,9 @@ impl UringBatchSender {
         // implicitly used: the flag signals whether a notification follows, but
         // we drain both CQE types unconditionally, so we do not need to branch on it.
         let _ = CQE_F_MORE;
+        let sent = self.send_success.iter().take_while(|&&ok| ok).count();
 
-        Ok(primary_success)
+        Ok(SubmitOutcome { queued, sent })
     }
 }
 
@@ -410,17 +470,18 @@ thread_local! {
 /// Send a batch of `(addr, payload)` pairs on an **unconnected** server UDP
 /// socket via the thread-local io_uring sender.
 ///
-/// Returns `Some(sent_count)` on success, `None` when io_uring is unavailable
-/// or the send failed (caller should fall back to individual async sends).
+/// Returns `Some(sent_count)` when at least one packet was sent, `None` when
+/// io_uring is unavailable or no progress was made.
 pub fn server_send_batch_to(fd: RawFd, packets: &[(SocketAddr, &[u8])]) -> Option<usize> {
     SERVER_URING_SENDER.with(|cell| {
         let mut guard = cell.borrow_mut();
         if let Some(ref mut sender) = *guard {
             match sender.send_batch_to(fd, packets) {
-                Ok(n) => {
+                Ok(n) if n > 0 => {
                     crate::telemetry::IO_URING_SERVER_SUBMIT_CALLS.inc();
                     Some(n)
                 }
+                Ok(_) => None,
                 Err(e) => {
                     log::debug!("io_uring server send_batch_to failed: {e}");
                     None
@@ -806,6 +867,7 @@ impl UringRecvBatch {
         // Re-post consumed SQEs.
         if !repost_indices.is_empty() {
             let fd = io_uring::types::Fd(self.socket_fd);
+            let mut reposted = 0usize;
             {
                 let mut sq = self.ring.submission();
                 for &idx in &repost_indices {
@@ -813,11 +875,22 @@ impl UringRecvBatch {
                         .build()
                         .user_data(idx as u64);
                     unsafe {
-                        let _ = sq.push(&entry);
+                        if sq.push(&entry).is_err() {
+                            break;
+                        }
                     }
+                    reposted += 1;
                 }
             }
-            self.ring.submit()?;
+            if reposted > 0 {
+                self.ring.submit()?;
+            }
+            if reposted < repost_indices.len() {
+                log::warn!(
+                    "io_uring recv repost: only {reposted}/{} RecvMsg SQEs rearmed (SQ too small)",
+                    repost_indices.len()
+                );
+            }
         }
 
         Ok(completions)
