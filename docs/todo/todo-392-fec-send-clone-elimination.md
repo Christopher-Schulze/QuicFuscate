@@ -4,7 +4,7 @@ title: Eliminate FecPacket clone on send hot path
 severity: HIGH
 phase: A
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-06-05
 ---
 

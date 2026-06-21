@@ -1758,3 +1758,37 @@ fn test_env_guard_unset_functionality() {
     // Cleanup
     std::env::remove_var(test_key);
 }
+
+// TODO-392: regression guard — cloning a source (systematic) FEC packet must
+// share the payload buffer via Arc (refcount bump), never copy the datagram.
+// The send hot path relies on this to forward the packet to the wire while the
+// encoder retains a handle for repair generation, without a full-payload copy.
+#[test]
+fn source_packet_clone_shares_buffer_via_arc() {
+    let pool = crate::optimize::global_pool();
+    let mut data = pool.alloc();
+    for (i, b) in data.iter_mut().enumerate() {
+        *b = i as u8;
+    }
+    let pkt = FecPacket::new(42, Some(data), 128, true, None, 0, Arc::clone(&pool));
+
+    let buf_ref = pkt.data.as_ref().expect("source packet has data buffer");
+    let count_before = buf_ref.strong_count();
+    assert_eq!(count_before, 1, "fresh packet owns a single buffer handle");
+
+    let pkt_clone = pkt.clone();
+    let count_after = buf_ref.strong_count();
+    assert_eq!(
+        count_after,
+        count_before + 1,
+        "clone must bump the Arc refcount, not allocate a new buffer"
+    );
+
+    // The cloned packet must observe the same payload bytes (shared buffer).
+    let clone_ref = pkt_clone.data.as_ref().expect("clone retains data buffer");
+    assert_eq!(clone_ref.bytes(128), buf_ref.bytes(128));
+
+    // Dropping the clone must return to the original refcount (no leak/double-free).
+    drop(pkt_clone);
+    assert_eq!(buf_ref.strong_count(), count_before);
+}

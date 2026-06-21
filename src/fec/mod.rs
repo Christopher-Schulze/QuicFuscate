@@ -51,6 +51,14 @@ impl SharedFecBuffer {
         let buf = self.inner.buf.as_ref().expect("shared FEC buffer already freed");
         &buf[..len.min(buf.len())]
     }
+
+    /// Number of strong references to the underlying pool buffer.
+    /// Used by regression tests to prove FEC packet clones share the buffer
+    /// via `Arc` rather than copying the payload (TODO-392).
+    #[cfg(test)]
+    fn strong_count(&self) -> usize {
+        std::sync::Arc::strong_count(&self.inner)
+    }
 }
 
 #[derive(Clone)]
