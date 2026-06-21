@@ -415,18 +415,20 @@ fn bench_ack_sent_byte_accounting(c: &mut Criterion) {
         group.bench_function(format!("{inflight}_inflight_ack_all"), |b| {
             b.iter(|| {
                 let BenchConnectionPair { mut client, .. } = bench_paired_1rtt_connections();
-                black_box(client.bench_seed_sent_bytes_by_pn(inflight, 1200));
+                client.bench_seed_sent_bytes_by_pn(inflight, 1200);
                 let ranges = [(0u64, inflight)];
-                black_box(client.bench_account_ack_ranges(black_box(&ranges)));
+                client.bench_account_ack_ranges(black_box(&ranges));
+                black_box(());
             });
         });
         group.bench_function(format!("{inflight}_inflight_ack_half"), |b| {
             b.iter(|| {
                 let half = inflight / 2;
                 let BenchConnectionPair { mut client, .. } = bench_paired_1rtt_connections();
-                black_box(client.bench_seed_sent_bytes_by_pn(inflight, 1200));
+                client.bench_seed_sent_bytes_by_pn(inflight, 1200);
                 let ranges = [(0u64, half)];
-                black_box(client.bench_account_ack_ranges(black_box(&ranges)));
+                client.bench_account_ack_ranges(black_box(&ranges));
+                black_box(());
             });
         });
     }
@@ -444,7 +446,8 @@ fn bench_ack_sent_byte_accounting(c: &mut Criterion) {
                     ranges.push((start, end));
                     start += 4;
                 }
-                black_box(client.bench_account_ack_ranges(black_box(&ranges)));
+                client.bench_account_ack_ranges(black_box(&ranges));
+                black_box(());
             });
         });
     }

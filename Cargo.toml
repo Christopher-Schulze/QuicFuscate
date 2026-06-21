@@ -115,6 +115,7 @@ dev-certs = ["rcgen"]
 
 # --- Platform features ---
 tun-windows = []
+tun-ios = []
 
 # --- Internal / experimental features ---
 internal_af_xdp_experimental = []
