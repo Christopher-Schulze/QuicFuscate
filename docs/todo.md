@@ -11,7 +11,7 @@ Execution order: **Phase A (config + quick wins) -> Phase B (load path) -> Phase
 | ID | Phase | Priority | Title | Status |
 |----|-------|----------|-------|--------|
 | TODO-389 | A | P0 | Fix `aegis128x4`/`x8` config override mapping to Aegis-L only | **DONE** |
-| TODO-390 | A | P0 | AEAD backend selection uses MTU workload length, not Initial size | **OPEN** (code-check 2026-07-23: still uses DEFAULT_TRANSPORT_AEAD_WORKLOAD_LEN, no separate 1-RTT constant) |
+| TODO-390 | A | P0 | AEAD backend selection uses MTU workload length, not Initial size | **DONE** (introduced documented `DEFAULT_DATA_PLANE_AEAD_LEN`=1400 in crypto/mod.rs, decoupled from Initial sizing; X8 selected on VAES hosts at data-plane length) |
 | TODO-391 | A | P1 | Eliminate double QUIC header parse in `Connection::recv` | **OPEN** (code-check 2026-07-23: no unprotect_and_decrypt_with_parsed_header variant found) |
 | TODO-392 | A | P1 | Eliminate `FecPacket::clone()` on FEC send hot path | **OPEN** (code-check 2026-07-23: Arc::clone present but full packet clone elimination unclear, needs deeper inspection) |
 | TODO-393 | A | P1 | Reuse AEGIS cipher state across packets (avoid per-PN init) | **OPEN** (code-check 2026-07-23: Aegis128L::new still called per packet in seal/open_with_u64_counter) |

@@ -28,6 +28,20 @@ const DATA_AEAD_OVERRIDE_AEGIS_X8: u8 = 4;
 
 static DATA_AEAD_OVERRIDE_MODE: AtomicU8 = AtomicU8::new(DATA_AEAD_OVERRIDE_AUTO);
 
+/// Representative payload length used to auto-select the data-plane AEAD
+/// backend width for 0-RTT/1-RTT packet protection.
+///
+/// This is intentionally distinct from QUIC Initial packet sizing
+/// (`crate::transport::MIN_CLIENT_INITIAL_LEN`, ~1200 B). Typical 1-RTT
+/// datagrams carry a payload close to the path MTU (~1400 B), and the
+/// X4/X8 wide backends are only selected once the workload crosses the
+/// planner's length thresholds. Feeding an Initial-sized length would
+/// under-select the wide backends on AVX/VAES-capable hosts.
+///
+/// Forced overrides (`force_aead` / `AeadPreference`) bypass this length
+/// entirely, so changing it never affects explicit backend pinning.
+pub(crate) const DEFAULT_DATA_PLANE_AEAD_LEN: usize = 1400;
+
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 fn prefetch_aegis_state(ptr: *const u8) {
@@ -1003,28 +1017,24 @@ pub fn select_data_aead(
     key: &[u8],
     iv: &[u8],
 ) -> (Box<dyn AeadSeal + Send + Sync>, Box<dyn AeadOpen + Send + Sync>) {
-    const DEFAULT_TRANSPORT_AEAD_WORKLOAD_LEN: usize = crate::transport::TYPICAL_1RTT_PAYLOAD_LEN;
-
     // Normalize key/iv materials
     let mut k16 = [0u8; 16];
     k16.copy_from_slice(&key[..16]);
     let mut iv12 = [0u8; 12];
     iv12.copy_from_slice(&iv[..12]);
 
-    let plan = resolve_data_aead_plan(DEFAULT_TRANSPORT_AEAD_WORKLOAD_LEN);
+    let plan = resolve_data_aead_plan(DEFAULT_DATA_PLANE_AEAD_LEN);
     build_data_aead(plan, &k16, &iv12)
 }
 
 /// Selects the data-plane AEAD backend for packet hot paths without boxed dispatch.
 pub(crate) fn select_packet_data_aead(key: &[u8], iv: &[u8]) -> (PacketAeadSeal, PacketAeadOpen) {
-    const DEFAULT_TRANSPORT_AEAD_WORKLOAD_LEN: usize = crate::transport::TYPICAL_1RTT_PAYLOAD_LEN;
-
     let mut k16 = [0u8; 16];
     k16.copy_from_slice(&key[..16]);
     let mut iv12 = [0u8; 12];
     iv12.copy_from_slice(&iv[..12]);
 
-    let plan = resolve_data_aead_plan(DEFAULT_TRANSPORT_AEAD_WORKLOAD_LEN);
+    let plan = resolve_data_aead_plan(DEFAULT_DATA_PLANE_AEAD_LEN);
     build_packet_data_aead(plan, &k16, &iv12)
 }
 

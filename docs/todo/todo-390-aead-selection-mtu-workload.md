@@ -4,7 +4,7 @@ title: AEAD selection uses MTU workload length
 severity: MEDIUM
 phase: A
 priority: P0
-status: OPEN
+status: DONE
 created: 2026-06-05
 ---
 
