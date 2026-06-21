@@ -4,8 +4,9 @@ title: Hot-Path-Lock-Entfernung (bündelt TODO-396 + TODO-397 + TODO-398)
 severity: HIGH
 phase: "2"
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-07-23
+resolved: 2026-07-23
 depends_on: [TODO-418]
 supersedes: [TODO-396, TODO-397, TODO-398]
 ---

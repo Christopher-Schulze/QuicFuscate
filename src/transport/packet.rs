@@ -3,6 +3,7 @@ use crate::crypto::{select_packet_data_aead, AesGcm128, ChaCha20Poly1305};
 use crate::error::ConnectionError;
 use crate::optimize::telemetry;
 use std::collections::VecDeque;
+use std::sync::Arc;
 // no direct varint helpers used here
 
 /// Derive 16-byte header protection key from TLS secret (RFC 9001 compliant)
@@ -460,6 +461,35 @@ pub fn unprotect_and_decrypt(
     unprotect_and_decrypt_parsed(crypto, buf, short_dcid_len, largest_pn_hint, None)
 }
 
+/// Lock-free 1-RTT fast path for `unprotect_and_decrypt_parsed`.
+///
+/// Attempts to unprotect+decrypt a Short-header packet using the ArcSwap-loaded
+/// 1-RTT keys. Returns `Done` if the packet is not Short-header or no 1-RTT keys
+/// are available, signaling the caller to fall back to the full RwLock path.
+pub(crate) fn unprotect_and_decrypt_1rtt(
+    keys: &OneRttCrypto,
+    buf: &mut [u8],
+    short_dcid_len: usize,
+    largest_pn_hint: u64,
+    pre_parsed: Option<(Header, usize)>,
+) -> Result<(Header, usize, usize), ConnectionError> {
+    let (hdr, pn_off) = match pre_parsed {
+        Some(parsed) => parsed,
+        None => parse_header(buf, short_dcid_len)?,
+    };
+    if hdr.ty != PacketType::Short {
+        return Err(ConnectionError::Done);
+    }
+    unprotect_and_decrypt_with_key(
+        &*keys.hp_open,
+        &*keys.open,
+        buf,
+        short_dcid_len,
+        largest_pn_hint,
+        Some((hdr, pn_off)),
+    )
+}
+
 /// Like [`unprotect_and_decrypt`], but accepts an optional pre-parsed header to avoid
 /// redundant header parsing on the recv hot path.
 pub fn unprotect_and_decrypt_parsed(
@@ -530,13 +560,13 @@ pub fn unprotect_and_decrypt_parsed(
         PacketType::Short => {
             let mut candidates: Vec<(&dyn HeaderProtector, &dyn crate::crypto::aead::AeadOpen)> =
                 Vec::new();
-            let hp_1rtt = crypto.hp_1rtt_open.as_ref().or(crypto.hp_1rtt.as_ref());
-            if let (Some(hp), Some(aead)) = (hp_1rtt, crypto.open_1rtt.as_ref()) {
-                candidates.push((hp.as_ref(), aead as &dyn tls_aead::AeadOpen));
+            let hp_1rtt = crypto.hp_1rtt_open.as_deref().or(crypto.hp_1rtt.as_deref());
+            if let (Some(hp), Some(aead)) = (hp_1rtt, crypto.open_1rtt.as_deref()) {
+                candidates.push((hp, aead as &dyn tls_aead::AeadOpen));
             }
             if let Some(hp) = hp_1rtt {
                 for prev in &crypto.previous_read_1rtt {
-                    candidates.push((hp.as_ref(), &prev.open as &dyn tls_aead::AeadOpen));
+                    candidates.push((hp, &*prev.open as &dyn tls_aead::AeadOpen));
                 }
             }
             if candidates.is_empty() {
@@ -766,8 +796,8 @@ mod tests {
         let iv = [0x6Du8; 16];
         let (seal, open) = select_packet_data_aead(&key, &iv);
         let crypto = CryptoContext {
-            seal_1rtt: Some(seal),
-            open_1rtt: Some(open),
+            seal_1rtt: Some(Arc::new(seal)),
+            open_1rtt: Some(Arc::new(open)),
             ..CryptoContext::default()
         };
 
@@ -814,10 +844,10 @@ pub fn protect_header(
 ) -> Result<(), ConnectionError> {
     // Select HP based on packet type
     let hp = match pkt_type {
-        PacketType::Initial => crypto.hp_initial.as_ref(),
-        PacketType::Handshake => crypto.hp_handshake.as_ref(),
-        PacketType::ZeroRTT => crypto.hp_0rtt.as_ref(),
-        PacketType::Short => crypto.hp_1rtt.as_ref(),
+        PacketType::Initial => crypto.hp_initial.as_deref(),
+        PacketType::Handshake => crypto.hp_handshake.as_deref(),
+        PacketType::ZeroRTT => crypto.hp_0rtt.as_deref(),
+        PacketType::Short => crypto.hp_1rtt.as_deref(),
         _ => return Ok(()),
     };
 
@@ -868,7 +898,7 @@ pub fn encrypt_and_protect(
             crypto.seal_handshake.as_deref().map(|a| a as &dyn tls_aead::AeadSeal)
         }
         PacketType::ZeroRTT => crypto.seal_0rtt.as_ref().map(|a| a as &dyn tls_aead::AeadSeal),
-        PacketType::Short => crypto.seal_1rtt.as_ref().map(|a| a as &dyn tls_aead::AeadSeal),
+        PacketType::Short => crypto.seal_1rtt.as_deref().map(|a| a as &dyn tls_aead::AeadSeal),
         _ => return Ok(hdr_len),
     };
 
@@ -913,7 +943,7 @@ pub fn seal_data_aead_batch(
     items: &mut [tls_aead::AeadSealItem<'_>],
 ) -> Result<(), ConnectionError> {
     let seal =
-        crypto.seal_1rtt.as_ref().or(crypto.seal_0rtt.as_ref()).ok_or_else(|| {
+        crypto.seal_1rtt.as_deref().or(crypto.seal_0rtt.as_ref()).ok_or_else(|| {
             ConnectionError::TlsError("missing AEAD sealer for batch seal".into())
         })?;
     seal.seal_batch(items)
@@ -925,7 +955,7 @@ pub fn open_data_aead_batch(
     items: &mut [tls_aead::AeadOpenItem<'_>],
 ) -> Result<(), ConnectionError> {
     let open =
-        crypto.open_1rtt.as_ref().or(crypto.open_0rtt.as_ref()).ok_or_else(|| {
+        crypto.open_1rtt.as_deref().or(crypto.open_0rtt.as_ref()).ok_or_else(|| {
             ConnectionError::TlsError("missing AEAD opener for batch open".into())
         })?;
     open.open_batch(items)
@@ -1308,7 +1338,23 @@ impl TlsCoverCipher {
 const ONE_RTT_READ_KEY_WINDOW: usize = 4;
 
 struct PreviousRead1RttKey {
-    open: crate::crypto::PacketAeadOpen,
+    open: Arc<crate::crypto::PacketAeadOpen>,
+}
+
+/// Lock-free 1-RTT crypto keys for the data-plane hot path.
+///
+/// Stored in `ArcSwapOption<OneRttCrypto>` on `Connection`. The hot path
+/// (seal/open) loads this lock-free instead of acquiring the CryptoContext
+/// RwLock. Key updates store a new `Arc<OneRttCrypto>` atomically.
+pub(crate) struct OneRttCrypto {
+    /// 1-RTT seal (encrypt) key.
+    pub(crate) seal: Arc<crate::crypto::PacketAeadSeal>,
+    /// 1-RTT open (decrypt) key.
+    pub(crate) open: Arc<crate::crypto::PacketAeadOpen>,
+    /// Header protector for outgoing 1-RTT packets.
+    pub(crate) hp_seal: Arc<dyn HeaderProtector + Send + Sync>,
+    /// Header protector for incoming 1-RTT packets.
+    pub(crate) hp_open: Arc<dyn HeaderProtector + Send + Sync>,
 }
 
 /// Per-connection cryptographic state (AEAD keys, HP keys, TLS Cover cipher, CryptoStreams).
@@ -1321,7 +1367,7 @@ pub struct CryptoContext {
     /// AEAD open (decrypt) key for 0-RTT packets (forked data-plane AEAD).
     pub(crate) open_0rtt: Option<crate::crypto::PacketAeadOpen>,
     /// AEAD open (decrypt) key for 1-RTT packets (forked data-plane AEAD).
-    pub(crate) open_1rtt: Option<crate::crypto::PacketAeadOpen>,
+    pub(crate) open_1rtt: Option<Arc<crate::crypto::PacketAeadOpen>>,
     /// AEAD seal (encrypt) key for Initial packets.
     pub seal_initial: Option<Box<dyn crate::crypto::aead::AeadSeal + Send + Sync>>,
     /// AEAD seal (encrypt) key for Handshake packets.
@@ -1329,7 +1375,7 @@ pub struct CryptoContext {
     /// AEAD seal (encrypt) key for 0-RTT packets.
     pub(crate) seal_0rtt: Option<crate::crypto::PacketAeadSeal>,
     /// AEAD seal (encrypt) key for 1-RTT packets.
-    pub(crate) seal_1rtt: Option<crate::crypto::PacketAeadSeal>,
+    pub(crate) seal_1rtt: Option<Arc<crate::crypto::PacketAeadSeal>>,
     /// Header protection key for outgoing Initial packets.
     pub hp_initial: Option<Box<dyn HeaderProtector + Send + Sync>>,
     /// Header protection key for outgoing Handshake packets.
@@ -1337,7 +1383,7 @@ pub struct CryptoContext {
     /// Header protection key for outgoing 0-RTT packets.
     pub hp_0rtt: Option<Box<dyn HeaderProtector + Send + Sync>>,
     /// Header protection key for outgoing 1-RTT packets.
-    pub hp_1rtt: Option<Box<dyn HeaderProtector + Send + Sync>>,
+    pub hp_1rtt: Option<Arc<dyn HeaderProtector + Send + Sync>>,
     /// Header protection key for incoming Initial packets (direction-specific).
     pub hp_initial_open: Option<Box<dyn HeaderProtector + Send + Sync>>,
     /// Header protection key for incoming Handshake packets (direction-specific).
@@ -1345,7 +1391,7 @@ pub struct CryptoContext {
     /// Header protection key for incoming 0-RTT packets (direction-specific).
     pub hp_0rtt_open: Option<Box<dyn HeaderProtector + Send + Sync>>,
     /// Header protection key for incoming 1-RTT packets (direction-specific).
-    pub hp_1rtt_open: Option<Box<dyn HeaderProtector + Send + Sync>>,
+    pub hp_1rtt_open: Option<Arc<dyn HeaderProtector + Send + Sync>>,
     /// Current 1-RTT read secret for key update derivation.
     pub read_secret_1rtt: Option<Vec<u8>>,
     /// Current 1-RTT write secret for key update derivation.
@@ -1509,18 +1555,18 @@ impl CryptoContext {
     fn install_read_1rtt_secret(&mut self, secret: &[u8]) {
         let (key, iv) = derive_key_iv(secret);
         let (_, open) = select_packet_data_aead(&key, &iv);
-        self.open_1rtt = Some(open);
-        self.hp_1rtt_open = Some(Box::new(crate::crypto::aead::AesHp::new(secret)));
+        self.open_1rtt = Some(Arc::new(open));
+        self.hp_1rtt_open = Some(Arc::new(crate::crypto::aead::AesHp::new(secret)));
     }
 
     fn install_write_1rtt_secret(&mut self, secret: &[u8]) {
         let (key, iv) = derive_key_iv(secret);
         let (seal, _) = select_packet_data_aead(&key, &iv);
-        self.seal_1rtt = Some(seal);
-        self.hp_1rtt = Some(Box::new(crate::crypto::aead::AesHp::new(secret)));
+        self.seal_1rtt = Some(Arc::new(seal));
+        self.hp_1rtt = Some(Arc::new(crate::crypto::aead::AesHp::new(secret)));
     }
 
-    fn push_previous_read_key(&mut self, open: crate::crypto::PacketAeadOpen) {
+    fn push_previous_read_key(&mut self, open: Arc<crate::crypto::PacketAeadOpen>) {
         self.previous_read_1rtt.push_back(PreviousRead1RttKey { open });
         while self.previous_read_1rtt.len() > ONE_RTT_READ_KEY_WINDOW {
             let _ = self.previous_read_1rtt.pop_front();
@@ -1535,7 +1581,7 @@ impl CryptoContext {
         if let Some(prev_open) = self.open_1rtt.take() {
             self.push_previous_read_key(prev_open);
         }
-        self.open_1rtt = Some(crate::crypto::PacketAeadOpen::Dynamic(open));
+        self.open_1rtt = Some(Arc::new(crate::crypto::PacketAeadOpen::Dynamic(open)));
         self.read_generation_1rtt = self.read_generation_1rtt.saturating_add(1);
         self.read_secret_1rtt = None;
     }
@@ -1545,7 +1591,7 @@ impl CryptoContext {
         &mut self,
         seal: Box<dyn crate::crypto::aead::AeadSeal + Send + Sync>,
     ) {
-        self.seal_1rtt = Some(crate::crypto::PacketAeadSeal::Dynamic(seal));
+        self.seal_1rtt = Some(Arc::new(crate::crypto::PacketAeadSeal::Dynamic(seal)));
         self.write_generation_1rtt = self.write_generation_1rtt.saturating_add(1);
         self.write_secret_1rtt = None;
     }
@@ -1561,7 +1607,7 @@ impl CryptoContext {
         }
         let (key, iv) = derive_key_iv(&next);
         let (_, open) = select_packet_data_aead(&key, &iv);
-        self.open_1rtt = Some(open);
+        self.open_1rtt = Some(Arc::new(open));
         self.read_secret_1rtt = Some(next);
         self.read_generation_1rtt = self.read_generation_1rtt.saturating_add(1);
         true
@@ -1575,7 +1621,7 @@ impl CryptoContext {
         let next = crate::crypto::kdf::derive_next_secret(cur);
         let (key, iv) = derive_key_iv(&next);
         let (seal, _) = select_packet_data_aead(&key, &iv);
-        self.seal_1rtt = Some(seal);
+        self.seal_1rtt = Some(Arc::new(seal));
         self.write_secret_1rtt = Some(next);
         self.write_generation_1rtt = self.write_generation_1rtt.saturating_add(1);
         true

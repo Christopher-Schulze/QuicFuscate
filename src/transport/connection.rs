@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::optimize::{prefetch, PrefetchHint};
+use crate::crypto::aead::AeadSeal;
 
 const MAX_RX_KEY_UPDATE_ADVANCE: usize = 4;
 const PATH_VALIDATION_TIMEOUT: Duration = Duration::from_secs(3);
@@ -201,6 +202,9 @@ pub struct Connection {
     pending_control: VecDeque<Frame<'static>>,
     // Crypto context (AEAD/HP) hooks for header and payload processing
     crypto: Arc<parking_lot::RwLock<packet::CryptoContext>>,
+    /// Lock-free 1-RTT crypto keys for the data-plane hot path.
+    /// Loaded via `arc_swap::ArcSwapOption::load()` — no lock acquisition in steady state.
+    crypto_1rtt: arc_swap::ArcSwapOption<packet::OneRttCrypto>,
     /// Cached AEAD tag reserve (0 or 16) after 1-RTT seal key installation.
     short_header_tag_reserve: u8,
     // ECN counters (for ACK ECN section)
@@ -388,6 +392,7 @@ impl Connection {
             conn_bytes_sent: 0,
             pending_control: VecDeque::new(),
             crypto: Arc::new(parking_lot::RwLock::new(packet::CryptoContext::default())),
+            crypto_1rtt: arc_swap::ArcSwapOption::new(None),
             short_header_tag_reserve: 0,
             ecn_ect0: 0,
             ecn_ect1: 0,
@@ -1059,6 +1064,23 @@ impl Connection {
         // across multiple generations before we receive packets in each phase.
         let mut rx_key_advances = 0usize;
         let (hdr_native, aad_len, pt_len) = loop {
+            // Hot path: try lock-free 1-RTT ArcSwap first.
+            if let Some(keys) = self.crypto_1rtt.load().as_ref() {
+                match packet::unprotect_and_decrypt_1rtt(
+                    keys,
+                    buf,
+                    short_dcid_len,
+                    largest_hint,
+                    pre_parsed_hdr.clone(),
+                ) {
+                    Ok(v) => break v,
+                    Err(ConnectionError::Done) | Err(ConnectionError::CryptoError(_)) => {
+                        // Fall through to RwLock path (key update in progress or non-Short packet)
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            // Fallback: full RwLock path (handles Initial, Handshake, 0-RTT, previous keys).
             let decrypt = {
                 let crypto_ref_for_rx = self.crypto.read();
                 packet::unprotect_and_decrypt_parsed(
@@ -1469,7 +1491,36 @@ impl Connection {
 
     #[inline(always)]
     fn refresh_short_header_tag_reserve(&mut self) {
-        self.short_header_tag_reserve = if self.crypto.read().seal_1rtt.is_some() { 16 } else { 0 };
+        let has_seal = self.crypto.read().seal_1rtt.is_some();
+        self.short_header_tag_reserve = if has_seal { 16 } else { 0 };
+        // Sync the lock-free 1-RTT ArcSwap whenever we refresh the tag reserve.
+        // This is called after all TLS key installations and key updates, ensuring
+        // the ArcSwap mirrors the RwLock-protected CryptoContext.
+        self.sync_1rtt();
+    }
+
+    /// Sync the lock-free `crypto_1rtt` ArcSwap from the RwLock-protected CryptoContext.
+    ///
+    /// Must be called after any `crypto.write()` that installs, rotates, or clears 1-RTT keys.
+    /// In steady state (no key updates), the ArcSwap is never touched — the hot path loads
+    /// it lock-free via `arc_swap::ArcSwapOption::load()`.
+    fn sync_1rtt(&self) {
+        let crypto = self.crypto.read();
+        if let (Some(seal), Some(open), Some(hp_seal), Some(hp_open)) = (
+            crypto.seal_1rtt.clone(),
+            crypto.open_1rtt.clone(),
+            crypto.hp_1rtt.clone(),
+            crypto.hp_1rtt_open.clone(),
+        ) {
+            self.crypto_1rtt.store(Some(std::sync::Arc::new(packet::OneRttCrypto {
+                seal,
+                open,
+                hp_seal,
+                hp_open,
+            })));
+        } else {
+            self.crypto_1rtt.store(None);
+        }
     }
 
     #[inline(always)]
@@ -1744,6 +1795,46 @@ impl Connection {
         pn_len: usize,
         mut off: usize,
     ) -> Result<usize, crate::error::ConnectionError> {
+        // Hot path: try lock-free 1-RTT ArcSwap first.
+        let one_rtt = self.crypto_1rtt.load();
+        if let Some(keys) = one_rtt.as_ref() {
+            // 1-RTT steady state — no lock acquisition.
+            let ad_len = pn_off + pn_len;
+            let (ad_slice, rest) = out.split_at_mut(ad_len);
+            let pt_len = off.saturating_sub(ad_len);
+            let mut item = crate::crypto::aead::AeadSealItem {
+                counter: pn,
+                ad: ad_slice,
+                buf: rest,
+                plaintext_len: pt_len,
+            };
+            keys.seal.seal_batch(core::slice::from_mut(&mut item))?;
+            let sealed_len = pt_len + 16;
+            off = ad_len + sealed_len;
+            let mask = if off >= pn_off + 4 + packet::SAMPLE_LEN {
+                let sample = &out[pn_off + 4..pn_off + 4 + packet::SAMPLE_LEN];
+                Some(keys.hp_seal.new_mask(sample))
+            } else {
+                None
+            };
+            if let Some(mask) = mask {
+                let mut first_orig = 0x40 | (((pn_len as u8) - 1) & 0x03);
+                if self.key_phase {
+                    first_orig |= packet::KEY_PHASE_BIT;
+                }
+                out[0] = first_orig ^ (mask[0] & 0x1f);
+                for i in 0..pn_len {
+                    out[pn_off + i] ^= mask[i + 1];
+                }
+            } else {
+                out[0] = (0x40 | (((pn_len as u8) - 1) & 0x03))
+                    | if self.key_phase { packet::KEY_PHASE_BIT } else { 0 };
+            }
+            self.next_send_pn_by_space[2] = self.next_send_pn_by_space[2].wrapping_add(1);
+            return Ok(off);
+        }
+
+        // Fallback: 0-RTT or handshake — use RwLock.
         let use_1rtt_seal = {
             let crypto_guard = self.crypto.read();
             crypto_guard.seal_1rtt.is_some()
@@ -2183,7 +2274,11 @@ impl Connection {
         if provider_updated {
             return true;
         }
-        self.crypto.write().key_update_1rtt_read()
+        let updated = self.crypto.write().key_update_1rtt_read();
+        if updated {
+            self.sync_1rtt();
+        }
+        updated
     }
 
     /// Performs a local 1-RTT write key update and toggles the short-header key phase bit.

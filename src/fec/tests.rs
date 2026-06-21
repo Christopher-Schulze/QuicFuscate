@@ -1057,8 +1057,7 @@ fn test_transition_decoder_uses_instance_policy_snapshot() {
         .transition_decoder
         .as_ref()
         .expect("transition decoder must exist")
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .lock();
     assert_eq!(transition_decoder.first_block_decoder_policy(), Some("gauss"));
 }
 
@@ -1077,16 +1076,14 @@ fn test_transition_fountain_uses_instance_policy_snapshot() {
         .transition_encoder
         .as_ref()
         .expect("transition encoder must exist")
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .lock();
     assert_eq!(transition_encoder.first_block_fountain_symbol_size(), Some(1200));
 
     let transition_decoder = fec
         .transition_decoder
         .as_ref()
         .expect("transition decoder must exist")
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .lock();
     assert_eq!(transition_decoder.first_block_fountain_symbol_size(), Some(1200));
 }
 

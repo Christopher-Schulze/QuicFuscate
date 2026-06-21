@@ -1079,15 +1079,15 @@ mod rustls_provider {
 
             let mut crypto = self.crypto.write();
             crypto.seal_1rtt =
-                Some(crate::crypto::PacketAeadSeal::Dynamic(Box::new(RustlsPacketSeal {
+                Some(Arc::new(crate::crypto::PacketAeadSeal::Dynamic(Box::new(RustlsPacketSeal {
                     key: local_pkt.clone(),
-                })));
+                }))));
             crypto.open_1rtt =
-                Some(crate::crypto::PacketAeadOpen::Dynamic(Box::new(RustlsPacketOpen {
+                Some(Arc::new(crate::crypto::PacketAeadOpen::Dynamic(Box::new(RustlsPacketOpen {
                     key: remote_pkt.clone(),
-                })));
-            crypto.hp_1rtt = Some(Box::new(RustlsHp { key: local_hp.clone() }));
-            crypto.hp_1rtt_open = Some(Box::new(RustlsHp { key: remote_hp.clone() }));
+                }))));
+            crypto.hp_1rtt = Some(Arc::new(RustlsHp { key: local_hp.clone() }));
+            crypto.hp_1rtt_open = Some(Arc::new(RustlsHp { key: remote_hp.clone() }));
             self.pending_local_1rtt.clear();
             self.pending_remote_1rtt.clear();
             Ok(())

@@ -465,6 +465,9 @@ fn server_push_intensity_internal(loss_rate_permille: u32, bandwidth_bps: u64) -
 pub struct StealthBrain {
     cfg: StealthBrainConfig,
     st: RwLock<StealthBrainState>,
+    // Lock-free buffers for observer callbacks — drained in apply_policy's single write lock.
+    pending_ecn: AtomicU64, // packed: ect0 in high 32 bits, ect1 in bits 16..32, ce in low 16
+    pending_ack_delay: AtomicU64, // ack_delay in microseconds
     // Server Push cover-traffic knobs and telemetry inputs
     #[cfg(any(test, feature = "rust-tests"))]
     server_push_enabled: AtomicBool,
@@ -487,6 +490,8 @@ impl StealthBrain {
         let brain = Arc::new(Self {
             st: RwLock::new(StealthBrainState::new(&cfg)),
             cfg,
+            pending_ecn: AtomicU64::new(0),
+            pending_ack_delay: AtomicU64::new(0),
             #[cfg(any(test, feature = "rust-tests"))]
             server_push_enabled: AtomicBool::new(false),
             #[cfg(any(test, feature = "rust-tests"))]
@@ -579,34 +584,8 @@ impl StealthBrain {
 
 impl TransportObserver for StealthBrain {
     fn on_ack(&self, ack_delay: u64, _ranges: &[(u64, u64)]) {
-        let mut st = self.st.write();
-        // Simple EWMA in microseconds
-        let s = ack_delay as f64; // already exponent-applied by transport telemetry path
-        let a_short = 0.3;
-        let a_long = 0.1;
-        if st.ack_delay_ewma_us == 0.0 {
-            st.ack_delay_ewma_us = s;
-        } else {
-            st.ack_delay_ewma_us = a_short * s + (1.0 - a_short) * st.ack_delay_ewma_us;
-        }
-        if st.ack_delay_long_ewma_us == 0.0 {
-            st.ack_delay_long_ewma_us = s;
-        } else {
-            st.ack_delay_long_ewma_us = a_long * s + (1.0 - a_long) * st.ack_delay_long_ewma_us;
-        }
-        // Lightweight jitter proxy: absolute deviation between short and long ack EWMA
-        let diff = (st.ack_delay_ewma_us - st.ack_delay_long_ewma_us).abs();
-        if st.rtt_jitter_ewma_us == 0.0 {
-            st.rtt_jitter_ewma_us = diff;
-        } else {
-            st.rtt_jitter_ewma_us = 0.1 * diff + 0.9 * st.rtt_jitter_ewma_us;
-        }
-        // Central RTT spike signal (rough): count when deviation exceeds 12ms
-        if diff > 12_000.0 {
-            crate::optimize::telemetry::STEALTH_SIGNAL_RTT_SPIKES.fetch_add(1, Ordering::Relaxed);
-        }
-        // Budget maintenance
-        Self::update_probing_budget(&mut st, &self.cfg);
+        // Lock-free: buffer ack_delay for apply_policy to drain in its single write lock.
+        self.pending_ack_delay.store(ack_delay, Ordering::Relaxed);
     }
 
     fn on_packet_recv(&self, pn: u64, len: usize) {
@@ -633,10 +612,9 @@ impl TransportObserver for StealthBrain {
     }
 
     fn on_ecn_update(&self, ect0: u64, ect1: u64, ce: u64) {
-        let mut st = self.st.write();
-        st.ect0 = ect0;
-        st.ect1 = ect1;
-        st.ce = ce;
+        // Lock-free: pack ECN counters into a single u64 for apply_policy to drain.
+        let packed = (ect0.min(0xFFFF) << 48) | (ect1.min(0xFFFF) << 32) | ce.min(0xFFFFFFFF);
+        self.pending_ecn.store(packed, Ordering::Relaxed);
     }
 
     fn apply_policy(&self, conn: &mut Connection) {
@@ -655,6 +633,44 @@ impl TransportObserver for StealthBrain {
 
         let actuators = {
             let mut st = self.st.write();
+
+            // Drain lock-free pending ECN counters (buffered by on_ecn_update).
+            let ecn_packed = self.pending_ecn.swap(0, Ordering::Relaxed);
+            if ecn_packed != 0 {
+                st.ect0 = ecn_packed >> 48;
+                st.ect1 = ecn_packed >> 32 & 0xFFFF;
+                st.ce = ecn_packed & 0xFFFFFFFF;
+            }
+
+            // Drain lock-free pending ack_delay (buffered by on_ack).
+            let ack_delay_raw = self.pending_ack_delay.swap(0, Ordering::Relaxed);
+            if ack_delay_raw > 0 {
+                let s = ack_delay_raw as f64;
+                let a_short = 0.3;
+                let a_long = 0.1;
+                if st.ack_delay_ewma_us == 0.0 {
+                    st.ack_delay_ewma_us = s;
+                } else {
+                    st.ack_delay_ewma_us = a_short * s + (1.0 - a_short) * st.ack_delay_ewma_us;
+                }
+                if st.ack_delay_long_ewma_us == 0.0 {
+                    st.ack_delay_long_ewma_us = s;
+                } else {
+                    st.ack_delay_long_ewma_us = a_long * s + (1.0 - a_long) * st.ack_delay_long_ewma_us;
+                }
+                let diff = (st.ack_delay_ewma_us - st.ack_delay_long_ewma_us).abs();
+                if st.rtt_jitter_ewma_us == 0.0 {
+                    st.rtt_jitter_ewma_us = diff;
+                } else {
+                    st.rtt_jitter_ewma_us = 0.1 * diff + 0.9 * st.rtt_jitter_ewma_us;
+                }
+                if diff > 12_000.0 {
+                    crate::optimize::telemetry::STEALTH_SIGNAL_RTT_SPIKES
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                Self::update_probing_budget(&mut st, &self.cfg);
+            }
+
             // Decay histograms to emphasize recent behavior
             let df = self.cfg.hist_decay as f64;
             {

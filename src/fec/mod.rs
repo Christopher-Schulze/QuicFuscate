@@ -7,11 +7,11 @@ use crate::brain::{FEC_INTERVAL_HINT_PKTS, FEC_REDUNDANCY_PPM};
 use crate::fec::gf_tables::prefetch_fec_slice;
 use crate::optimize::{CpuProfile, FeatureDetector, MemoryPool};
 use aligned_box::AlignedBox;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 // Global repair ID counter for fountain codes
@@ -3324,7 +3324,7 @@ impl AdaptiveFec {
         }
         // Normal path: forward systematic and feed encoder
         output.push(packet.clone());
-        let mut encoder = self.encoder.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut encoder = self.encoder.lock();
         encoder.take_packet(packet);
 
         // Check if we should generate repair packets
@@ -3387,7 +3387,7 @@ impl AdaptiveFec {
 
     /// Process incoming FEC packet through the decoder and return any recovered packets.
     pub fn on_receive(&mut self, packet: FecPacket) -> Result<Vec<FecPacket>, String> {
-        let mut decoder = self.decoder.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut decoder = self.decoder.lock();
         decoder.take_packet(packet);
 
         if let Some(result) = decoder.get_result() {
@@ -3430,7 +3430,7 @@ impl AdaptiveFec {
 
         // Process with current encoder (old mode)
         if old_weight > 0.0 {
-            let mut encoder = self.encoder.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut encoder = self.encoder.lock();
             encoder.take_packet(packet.clone());
 
             let (k, n) = encoder.params();
@@ -3453,7 +3453,7 @@ impl AdaptiveFec {
         if new_weight > 0.0 && self.transition_encoder.is_some() {
             if let Some(ref transition_enc) = self.transition_encoder {
                 let mut encoder =
-                    transition_enc.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    transition_enc.lock();
                 encoder.take_packet(packet);
 
                 let (k, n) = encoder.params();
@@ -3525,20 +3525,8 @@ impl AdaptiveFec {
 
     /// **GRADUAL MODE SWITCHING**: Initiate seamless transition to new controller target
     fn transition_to_target(&mut self, target: FecProtectionTarget) {
-        let current = match self.mode_manager.lock() {
-            Ok(mgr) => mgr.current_mode(),
-            Err(poisoned) => {
-                log::warn!("mode_manager poisoned; recovering");
-                poisoned.into_inner().current_mode()
-            }
-        };
-        let current_window = match self.mode_manager.lock() {
-            Ok(mgr) => mgr.current_window(),
-            Err(poisoned) => {
-                log::warn!("mode_manager poisoned while reading window; recovering");
-                poisoned.into_inner().current_window()
-            }
-        };
+        let current = self.mode_manager.lock().current_mode();
+        let current_window = self.mode_manager.lock().current_window();
         let (resolved_mode, k, n) = internal::ModeManager::params_for_target(
             target,
             current_window.max(64),
@@ -3577,7 +3565,7 @@ impl AdaptiveFec {
         self.streaming_mode = matches!(resolved_mode, FecMode::Streaming);
 
         let mut mode_mgr =
-            self.mode_manager.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.mode_manager.lock();
         mode_mgr.force_state(resolved_mode, k);
     }
 
@@ -3967,7 +3955,7 @@ unsafe fn gf16_mul_avx2(a: u16, b: u16) -> u16 {
 
 impl AdaptiveFec {
     fn emit_streaming_repair(&mut self, output_queue: &mut VecDeque<FecPacket>) {
-        let mut encoder = self.encoder.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut encoder = self.encoder.lock();
 
         if encoder.packets_in_window() > 0 {
             let coeff = self.stream_idx;
@@ -3997,13 +3985,7 @@ impl AdaptiveFec {
 
     /// Return the currently active FEC protection mode.
     pub fn current_mode(&self) -> FecMode {
-        match self.mode_manager.lock() {
-            Ok(mgr) => mgr.current_mode(),
-            Err(poisoned) => {
-                log::warn!("mode_manager poisoned; recovering");
-                poisoned.into_inner().current_mode()
-            }
-        }
+        self.mode_manager.lock().current_mode()
     }
 
     /// Returns true if a cross-fade mode transition is currently in progress.
@@ -4020,13 +4002,7 @@ impl AdaptiveFec {
 
     fn update_mode(&mut self, estimated_loss: f32) {
         let (prev, current_mode, current_window) = {
-            let mut mode_mgr = match self.mode_manager.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => {
-                    log::warn!("mode_manager poisoned; recovering");
-                    poisoned.into_inner()
-                }
-            };
+            let mut mode_mgr = self.mode_manager.lock();
             let prev = mode_mgr.update(estimated_loss);
             let cur_mode = mode_mgr.current_mode();
             let cur_window = mode_mgr.current_window();
@@ -4085,13 +4061,7 @@ impl AdaptiveFec {
         let k = new_window;
 
         if switched {
-            let mut mode_mgr = match self.mode_manager.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => {
-                    log::warn!("mode_manager poisoned while syncing policy override; recovering");
-                    poisoned.into_inner()
-                }
-            };
+            let mut mode_mgr = self.mode_manager.lock();
             mode_mgr.force_state(new_mode, new_window);
         }
 
@@ -4123,7 +4093,7 @@ impl AdaptiveFec {
             // CRITICAL: Drain ZeroDecoder buffers BEFORE creating new decoder
             // This ensures no packet loss during Zero->Real FEC transitions
             let zero_buffers = if old_mode == FecMode::Zero {
-                let mut decoder = self.decoder.lock().unwrap_or_else(|p| p.into_inner());
+                let mut decoder = self.decoder.lock();
                 let buffers = decoder.drain_zero_buffers();
                 crate::telemetry::ZERO_MODE_UPGRADES
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -4154,7 +4124,7 @@ impl AdaptiveFec {
             // This preserves all in-flight packets during Zero->Real FEC upgrade
             if !zero_buffers.is_empty() {
                 if let Some(ref trans_dec) = self.transition_decoder {
-                    let mut dec = trans_dec.lock().unwrap_or_else(|p| p.into_inner());
+                    let mut dec = trans_dec.lock();
                     for pkt in zero_buffers {
                         dec.take_packet(pkt);
                     }
@@ -4178,7 +4148,7 @@ impl AdaptiveFec {
             self.runtime_policy.auto_gf4_enabled,
         );
         let mut mode_mgr =
-            self.mode_manager.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.mode_manager.lock();
         mode_mgr.force_state(target_mode, k);
         self.streaming_mode = true;
         crate::telemetry::FEC_MODE.store(target_mode as u64, std::sync::atomic::Ordering::Relaxed);

@@ -61,7 +61,7 @@ Pre-loop cleanup tasks completed before handing work to the continuous loop.
 |----|-------|----------|-------|--------|------------|
 | TODO-413 | 0 | P0 | TODO-System-Sanierung + CI-Gate (Status-Feld-Pflicht) | **DONE** | — |
 | TODO-418 | 1 | P0 | Profiling-Baseline + tc-netem-Setup auf broderick | **DONE** | 413 |
-| TODO-417 | 2 | P1 | Hot-Path-Lock-Entfernung (bündelt 396+397+398) | **OPEN** | 418 |
+| TODO-417 | 2 | P1 | Hot-Path-Lock-Entfernung (bündelt 396+397+398) | **DONE** | 418 |
 | TODO-414 | 2 | P1 | Streaming-FEC in adaptiven Loop (supersedes 409) | **OPEN** | 418 |
 | TODO-416 | 2 | P1 | Graduelle Stealth-Eskalation (3-Stufen-Rampe) | **OPEN** | 418 |
 | TODO-415 | 3 | P1 | Reality-Grade TLS-Mimikry (3 Phasen, inkrementell) | **OPEN** | 416 |
