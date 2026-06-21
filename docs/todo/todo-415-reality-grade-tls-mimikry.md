@@ -4,9 +4,13 @@ title: Reality-Grade TLS-Mimikry (3 Phasen, inkrementell)
 severity: HIGH
 phase: "3"
 priority: P1
-status: OPEN
+status: PARTIAL
 created: 2026-07-23
+resolved: 2026-07-23
 depends_on: [TODO-416]
+phase1_done: true
+phase2_done: false
+phase3_done: false
 supersedes: []
 ---
 

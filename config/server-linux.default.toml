@@ -171,3 +171,24 @@ level = "info"
 # log_to_file = false
 # log_file_path = "/var/log/quicfuscate.log"
 # log_to_stdout = true
+
+# ==============================================================================
+# REALITY-GRADE TLS MIMIKRY (TODO-415 Phase 1)
+# ==============================================================================
+# When enabled, the server caches TLS handshake material from a cover site
+# and replays it to clients/probes, making the proxy indistinguishable from
+# the real cover site at the TLS layer (similar to XTLS-Reality).
+#
+# Env overrides:
+#   QUICFUSCATE_REALITY_ENABLED=true/false
+#   QUICFUSCATE_REALITY_COVER_HOST=www.cloudflare.com
+#   QUICFUSCATE_REALITY_COVER_PORT=443
+#   QUICFUSCATE_REALITY_CACHE_TTL=3600
+#   QUICFUSCATE_REALITY_FALLBACK_SYNTHETIC=true
+
+# [reality]
+# enabled = false
+# cover_host = "www.cloudflare.com"
+# cover_port = 443
+# cache_ttl = 3600
+# fallback_to_synthetic = true
