@@ -244,6 +244,15 @@ jobs:
       - name: Run cargo audit
         run: cargo audit --deny warnings
 
+  todo-consistency:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: TODO consistency audit
+        shell: bash
+        run: bash scripts/tests/audits/audit-todo-consistency.sh
+
   fuzz-targets:
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

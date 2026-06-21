@@ -1,0 +1,28 @@
+mindmap
+  root((TODO 78: Product Surface Minimization))
+    Goal
+      Reduce public product surface to canonical runtime capabilities
+      Preserve stealth and FEC capability
+      Remove buzzword-driven exposure
+    Classification Pass
+      Product-visible features
+      Internal runtime toggles
+      Test-only features
+      Compat-only features
+      Removable features
+    Immediate Cull Candidates
+      af_xdp_experimental
+      amx-int8
+      amx-tile
+      avx10_preview
+      tun-ios
+    Candidate Internalization
+      avx512vbmi2
+      wiedemann
+      zero_copy_dgram
+      simd-selfcheck
+      benches
+    Acceptance Criteria
+      Cargo feature list maps to real product posture
+      Non-canonical ISA and experiment knobs stop reading like product commitments
+      Docs and guardrails match the reduced feature contract
