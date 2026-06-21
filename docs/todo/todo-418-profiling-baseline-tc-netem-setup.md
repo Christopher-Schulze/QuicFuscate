@@ -4,8 +4,9 @@ title: Profiling-Baseline + tc-netem-Setup auf broderick
 severity: HIGH
 phase: "1"
 priority: P0
-status: OPEN
+status: DONE
 created: 2026-07-23
+resolved: 2026-07-23
 depends_on: [TODO-413]
 supersedes: [TODO-412]
 ---

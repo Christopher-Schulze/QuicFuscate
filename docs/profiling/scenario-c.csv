@@ -1,0 +1,2 @@
+scenario,label,size,batch,iters,result
+c,c,1200,128,20000,variant=udpfast size=1200B iters=20000 batch=128 sent_packets=1280000 sent_bytes=1536000000 recv_bytes=1529316000 time_ms=4948.10 throughput_MiBps=296.04

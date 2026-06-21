@@ -1,0 +1,790 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="534" onload="init(evt)" viewBox="0 0 1200 534" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+		if (currentSearchTerm === null) return;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="534.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >Scenario D: QUIC Connection (FEC off)</text>
+<text id="details" x="10.00" y="517" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="517" > </text>
+<g id="frames">
+<g >
+<title>sock_recvmsg (8,951,536,370 samples, 15.45%)</title><rect x="653.2" y="101" width="182.3" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="656.20" y="111.5" >sock_recvmsg</text>
+</g>
+<g >
+<title>import_ubuf (620,824,585 samples, 1.07%)</title><rect x="988.3" y="85" width="12.7" height="15.0" fill="rgb(237,149,35)" rx="2" ry="2" />
+<text  x="991.33" y="95.5" ></text>
+</g>
+<g >
+<title>get_random_u16 (236,389,289 samples, 0.41%)</title><rect x="553.9" y="181" width="4.9" height="15.0" fill="rgb(207,9,2)" rx="2" ry="2" />
+<text  x="556.94" y="191.5" ></text>
+</g>
+<g >
+<title>el0_svc (41,100,930,152 samples, 70.93%)</title><rect x="347.6" y="229" width="837.0" height="15.0" fill="rgb(244,183,43)" rx="2" ry="2" />
+<text  x="350.56" y="239.5" >el0_svc</text>
+</g>
+<g >
+<title>___sys_recvmsg (265,674,070 samples, 0.46%)</title><rect x="581.6" y="149" width="5.4" height="15.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="584.60" y="159.5" ></text>
+</g>
+<g >
+<title>[quicfuscate] (57,942,176,314 samples, 100.00%)</title><rect x="10.0" y="341" width="1180.0" height="15.0" fill="rgb(245,187,44)" rx="2" ry="2" />
+<text  x="13.00" y="351.5" >[quicfuscate]</text>
+</g>
+<g >
+<title>import_iovec (3,959,825,917 samples, 6.83%)</title><rect x="920.3" y="101" width="80.7" height="15.0" fill="rgb(241,168,40)" rx="2" ry="2" />
+<text  x="923.33" y="111.5" >import_io..</text>
+</g>
+<g >
+<title>quicfuscate (57,942,176,314 samples, 100.00%)</title><rect x="10.0" y="469" width="1180.0" height="15.0" fill="rgb(234,135,32)" rx="2" ry="2" />
+<text  x="13.00" y="479.5" >quicfuscate</text>
+</g>
+<g >
+<title>[quicfuscate] (57,942,176,314 samples, 100.00%)</title><rect x="10.0" y="389" width="1180.0" height="15.0" fill="rgb(245,187,44)" rx="2" ry="2" />
+<text  x="13.00" y="399.5" >[quicfuscate]</text>
+</g>
+<g >
+<title>__pi_memset_generic (472,242,240 samples, 0.82%)</title><rect x="587.0" y="149" width="9.6" height="15.0" fill="rgb(216,52,12)" rx="2" ry="2" />
+<text  x="590.01" y="159.5" ></text>
+</g>
+<g >
+<title>begin_current_label_crit_section (768,051,369 samples, 1.33%)</title><rect x="812.6" y="37" width="15.7" height="15.0" fill="rgb(237,148,35)" rx="2" ry="2" />
+<text  x="815.63" y="47.5" ></text>
+</g>
+<g >
+<title>[quicfuscate] (2,186,573,240 samples, 3.77%)</title><rect x="136.4" y="261" width="44.5" height="15.0" fill="rgb(245,187,44)" rx="2" ry="2" />
+<text  x="139.36" y="271.5" >[qui..</text>
+</g>
+<g >
+<title>__libc_start_call_main (57,942,176,314 samples, 100.00%)</title><rect x="10.0" y="421" width="1180.0" height="15.0" fill="rgb(210,26,6)" rx="2" ry="2" />
+<text  x="13.00" y="431.5" >__libc_start_call_main</text>
+</g>
+<g >
+<title>memset (29,507,995 samples, 0.05%)</title><rect x="1011.2" y="117" width="0.6" height="15.0" fill="rgb(208,14,3)" rx="2" ry="2" />
+<text  x="1014.20" y="127.5" ></text>
+</g>
+<g >
+<title>security_socket_recvmsg (2,983,209,183 samples, 5.15%)</title><rect x="768.1" y="85" width="60.8" height="15.0" fill="rgb(254,226,54)" rx="2" ry="2" />
+<text  x="771.12" y="95.5" >securi..</text>
+</g>
+<g >
+<title>copy_iovec_from_user (916,143,381 samples, 1.58%)</title><rect x="969.7" y="85" width="18.6" height="15.0" fill="rgb(207,9,2)" rx="2" ry="2" />
+<text  x="972.67" y="95.5" ></text>
+</g>
+<g >
+<title>__pi_memset_generic (383,962,872 samples, 0.66%)</title><rect x="787.4" y="53" width="7.8" height="15.0" fill="rgb(216,52,12)" rx="2" ry="2" />
+<text  x="790.35" y="63.5" ></text>
+</g>
+<g >
+<title>[quicfuscate] (57,942,176,314 samples, 100.00%)</title><rect x="10.0" y="453" width="1180.0" height="15.0" fill="rgb(245,187,44)" rx="2" ry="2" />
+<text  x="13.00" y="463.5" >[quicfuscate]</text>
+</g>
+<g >
+<title>invoke_syscall (30,346,871,458 samples, 52.37%)</title><rect x="558.8" y="181" width="618.0" height="15.0" fill="rgb(209,18,4)" rx="2" ry="2" />
+<text  x="561.75" y="191.5" >invoke_syscall</text>
+</g>
+<g >
+<title>copy_msghdr_from_user (384,209,931 samples, 0.66%)</title><rect x="1019.6" y="133" width="7.8" height="15.0" fill="rgb(240,161,38)" rx="2" ry="2" />
+<text  x="1022.62" y="143.5" ></text>
+</g>
+<g >
+<title>udp_recvmsg (4,076,872,123 samples, 7.04%)</title><rect x="685.1" y="69" width="83.0" height="15.0" fill="rgb(221,75,18)" rx="2" ry="2" />
+<text  x="688.09" y="79.5" >udp_recvmsg</text>
+</g>
+<g >
+<title>kfree (176,953,562 samples, 0.31%)</title><rect x="1088.8" y="133" width="3.6" height="15.0" fill="rgb(222,78,18)" rx="2" ry="2" />
+<text  x="1091.81" y="143.5" ></text>
+</g>
+<g >
+<title>__local_bh_enable_ip (59,094,199 samples, 0.10%)</title><rect x="763.3" y="37" width="1.2" height="15.0" fill="rgb(237,147,35)" rx="2" ry="2" />
+<text  x="766.30" y="47.5" ></text>
+</g>
+<g >
+<title>kfree (324,962,881 samples, 0.56%)</title><rect x="1004.6" y="117" width="6.6" height="15.0" fill="rgb(222,78,18)" rx="2" ry="2" />
+<text  x="1007.58" y="127.5" ></text>
+</g>
+<g >
+<title>__local_bh_enable_ip (177,215,783 samples, 0.31%)</title><rect x="690.5" y="53" width="3.6" height="15.0" fill="rgb(237,147,35)" rx="2" ry="2" />
+<text  x="693.51" y="63.5" ></text>
+</g>
+<g >
+<title>apparmor_socket_recvmsg (2,422,494,749 samples, 4.18%)</title><rect x="779.5" y="69" width="49.4" height="15.0" fill="rgb(246,190,45)" rx="2" ry="2" />
+<text  x="782.54" y="79.5" >appa..</text>
+</g>
+<g >
+<title>__libc_start_main@@GLIBC_2.34 (57,942,176,314 samples, 100.00%)</title><rect x="10.0" y="437" width="1180.0" height="15.0" fill="rgb(229,113,27)" rx="2" ry="2" />
+<text  x="13.00" y="447.5" >__libc_start_main@@GLIBC_2.34</text>
+</g>
+<g >
+<title>__skb_try_recv_from_queue (59,110,444 samples, 0.10%)</title><rect x="764.5" y="37" width="1.2" height="15.0" fill="rgb(243,175,41)" rx="2" ry="2" />
+<text  x="767.51" y="47.5" ></text>
+</g>
+<g >
+<title>aa_inet_msg_perm (236,120,422 samples, 0.41%)</title><rect x="774.7" y="69" width="4.8" height="15.0" fill="rgb(249,205,49)" rx="2" ry="2" />
+<text  x="777.73" y="79.5" ></text>
+</g>
+<g >
+<title>do_el0_svc (88,681,861 samples, 0.15%)</title><rect x="345.8" y="229" width="1.8" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="348.76" y="239.5" ></text>
+</g>
+<g >
+<title>___sys_recvmsg (19,765,615,268 samples, 34.11%)</title><rect x="612.3" y="133" width="402.5" height="15.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="615.28" y="143.5" >___sys_recvmsg</text>
+</g>
+<g >
+<title>el0_svc_common.constprop.0 (88,593,477 samples, 0.15%)</title><rect x="1182.8" y="213" width="1.8" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="1185.78" y="223.5" ></text>
+</g>
+<g >
+<title>[quicfuscate] (4,078,023,803 samples, 7.04%)</title><rect x="97.8" y="277" width="83.1" height="15.0" fill="rgb(245,187,44)" rx="2" ry="2" />
+<text  x="100.84" y="287.5" >[quicfusc..</text>
+</g>
+<g >
+<title>__skb_recv_udp (3,515,287,456 samples, 6.07%)</title><rect x="694.1" y="53" width="71.6" height="15.0" fill="rgb(225,94,22)" rx="2" ry="2" />
+<text  x="697.12" y="63.5" >__skb_re..</text>
+</g>
+<g >
+<title>__skb_try_recv_from_queue (118,245,261 samples, 0.20%)</title><rect x="765.7" y="53" width="2.4" height="15.0" fill="rgb(243,175,41)" rx="2" ry="2" />
+<text  x="768.71" y="63.5" ></text>
+</g>
+<g >
+<title>__pi_memset_generic (946,337,180 samples, 1.63%)</title><rect x="855.4" y="117" width="19.2" height="15.0" fill="rgb(216,52,12)" rx="2" ry="2" />
+<text  x="858.35" y="127.5" ></text>
+</g>
+<g >
+<title>__sys_recvmsg (24,433,430,303 samples, 42.17%)</title><rect x="596.6" y="149" width="497.6" height="15.0" fill="rgb(252,216,51)" rx="2" ry="2" />
+<text  x="599.63" y="159.5" >__sys_recvmsg</text>
+</g>
+<g >
+<title>inet_recvmsg (206,934,915 samples, 0.36%)</title><rect x="646.6" y="101" width="4.2" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="649.57" y="111.5" ></text>
+</g>
+<g >
+<title>uaccess_ttbr0_disable.isra.0 (206,520,666 samples, 0.36%)</title><rect x="963.7" y="69" width="4.2" height="15.0" fill="rgb(242,173,41)" rx="2" ry="2" />
+<text  x="966.66" y="79.5" ></text>
+</g>
+<g >
+<title>[quicfuscate] (57,942,176,314 samples, 100.00%)</title><rect x="10.0" y="405" width="1180.0" height="15.0" fill="rgb(245,187,44)" rx="2" ry="2" />
+<text  x="13.00" y="415.5" >[quicfuscate]</text>
+</g>
+<g >
+<title>all (57,942,176,314 samples, 100%)</title><rect x="10.0" y="485" width="1180.0" height="15.0" fill="rgb(213,39,9)" rx="2" ry="2" />
+<text  x="13.00" y="495.5" ></text>
+</g>
+<g >
+<title>__GI___pthread_enable_asynccancel (88,394,847 samples, 0.15%)</title><rect x="184.5" y="277" width="1.8" height="15.0" fill="rgb(240,165,39)" rx="2" ry="2" />
+<text  x="187.50" y="287.5" ></text>
+</g>
+<g >
+<title>sock_recvmsg (88,834,688 samples, 0.15%)</title><rect x="1011.8" y="117" width="1.8" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="1014.80" y="127.5" ></text>
+</g>
+<g >
+<title>__GI___pthread_disable_asynccancel (177,412,832 samples, 0.31%)</title><rect x="180.9" y="277" width="3.6" height="15.0" fill="rgb(236,146,34)" rx="2" ry="2" />
+<text  x="183.89" y="287.5" ></text>
+</g>
+<g >
+<title>el0_svc_common.constprop.0 (31,232,816,329 samples, 53.90%)</title><rect x="540.7" y="197" width="636.1" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="543.71" y="207.5" >el0_svc_common.constprop.0</text>
+</g>
+<g >
+<title>__skb_recv_udp (177,457,423 samples, 0.31%)</title><rect x="681.5" y="69" width="3.6" height="15.0" fill="rgb(225,94,22)" rx="2" ry="2" />
+<text  x="684.48" y="79.5" ></text>
+</g>
+<g >
+<title>copy_iovec_from_user (1,270,394,928 samples, 2.19%)</title><rect x="937.8" y="69" width="25.9" height="15.0" fill="rgb(207,9,2)" rx="2" ry="2" />
+<text  x="940.78" y="79.5" >c..</text>
+</g>
+<g >
+<title>[quicfuscate] (56,937,859,999 samples, 98.27%)</title><rect x="25.0" y="293" width="1159.6" height="15.0" fill="rgb(245,187,44)" rx="2" ry="2" />
+<text  x="28.04" y="303.5" >[quicfuscate]</text>
+</g>
+<g >
+<title>__pi_memset_generic (236,328,677 samples, 0.41%)</title><rect x="1014.8" y="133" width="4.8" height="15.0" fill="rgb(216,52,12)" rx="2" ry="2" />
+<text  x="1017.81" y="143.5" ></text>
+</g>
+<g >
+<title>el0t_64_sync (41,189,612,013 samples, 71.09%)</title><rect x="345.8" y="261" width="838.8" height="15.0" fill="rgb(217,56,13)" rx="2" ry="2" />
+<text  x="348.76" y="271.5" >el0t_64_sync</text>
+</g>
+<g >
+<title>security_socket_recvmsg (118,240,173 samples, 0.20%)</title><rect x="650.8" y="101" width="2.4" height="15.0" fill="rgb(254,226,54)" rx="2" ry="2" />
+<text  x="653.79" y="111.5" ></text>
+</g>
+<g >
+<title>uaccess_ttbr0_enable.isra.0 (88,726,060 samples, 0.15%)</title><rect x="967.9" y="69" width="1.8" height="15.0" fill="rgb(246,192,45)" rx="2" ry="2" />
+<text  x="970.86" y="79.5" ></text>
+</g>
+<g >
+<title>fput (768,195,337 samples, 1.33%)</title><rect x="1073.2" y="133" width="15.6" height="15.0" fill="rgb(225,96,23)" rx="2" ry="2" />
+<text  x="1076.17" y="143.5" ></text>
+</g>
+<g >
+<title>__GI___pthread_disable_asynccancel (1,536,203,635 samples, 2.65%)</title><rect x="271.2" y="261" width="31.3" height="15.0" fill="rgb(236,146,34)" rx="2" ry="2" />
+<text  x="274.18" y="271.5" >__..</text>
+</g>
+<g >
+<title>[quicfuscate] (57,942,176,314 samples, 100.00%)</title><rect x="10.0" y="309" width="1180.0" height="15.0" fill="rgb(245,187,44)" rx="2" ry="2" />
+<text  x="13.00" y="319.5" >[quicfuscate]</text>
+</g>
+<g >
+<title>__arch_copy_from_user (827,427,968 samples, 1.43%)</title><rect x="835.5" y="117" width="16.8" height="15.0" fill="rgb(254,229,54)" rx="2" ry="2" />
+<text  x="838.49" y="127.5" ></text>
+</g>
+<g >
+<title>el0t_64_sync_handler (41,189,612,013 samples, 71.09%)</title><rect x="345.8" y="245" width="838.8" height="15.0" fill="rgb(211,32,7)" rx="2" ry="2" />
+<text  x="348.76" y="255.5" >el0t_64_sync_handler</text>
+</g>
+<g >
+<title>__import_iovec (2,363,980,916 samples, 4.08%)</title><rect x="921.5" y="85" width="48.2" height="15.0" fill="rgb(214,42,10)" rx="2" ry="2" />
+<text  x="924.53" y="95.5" >__im..</text>
+</g>
+<g >
+<title>fdget (118,236,492 samples, 0.20%)</title><rect x="1094.2" y="149" width="2.4" height="15.0" fill="rgb(241,167,40)" rx="2" ry="2" />
+<text  x="1097.22" y="159.5" ></text>
+</g>
+<g >
+<title>inet_recvmsg (4,992,956,319 samples, 8.62%)</title><rect x="666.4" y="85" width="101.7" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="669.44" y="95.5" >inet_recvmsg</text>
+</g>
+<g >
+<title>aa_inet_msg_perm (1,625,177,242 samples, 2.80%)</title><rect x="795.2" y="53" width="33.1" height="15.0" fill="rgb(249,205,49)" rx="2" ry="2" />
+<text  x="798.17" y="63.5" >aa..</text>
+</g>
+<g >
+<title>[quicfuscate] (57,942,176,314 samples, 100.00%)</title><rect x="10.0" y="325" width="1180.0" height="15.0" fill="rgb(245,187,44)" rx="2" ry="2" />
+<text  x="13.00" y="335.5" >[quicfuscate]</text>
+</g>
+<g >
+<title>[quicfuscate] (57,942,176,314 samples, 100.00%)</title><rect x="10.0" y="373" width="1180.0" height="15.0" fill="rgb(245,187,44)" rx="2" ry="2" />
+<text  x="13.00" y="383.5" >[quicfuscate]</text>
+</g>
+<g >
+<title>__aarch64_cas4_acq (1,093,142,561 samples, 1.89%)</title><rect x="280.2" y="245" width="22.3" height="15.0" fill="rgb(231,124,29)" rx="2" ry="2" />
+<text  x="283.20" y="255.5" >_..</text>
+</g>
+<g >
+<title>__arm64_sys_recvmsg (25,555,455,491 samples, 44.11%)</title><rect x="577.4" y="165" width="520.4" height="15.0" fill="rgb(236,144,34)" rx="2" ry="2" />
+<text  x="580.39" y="175.5" >__arm64_sys_recvmsg</text>
+</g>
+<g >
+<title>____sys_recvmsg (177,299,480 samples, 0.31%)</title><rect x="608.7" y="133" width="3.6" height="15.0" fill="rgb(224,90,21)" rx="2" ry="2" />
+<text  x="611.67" y="143.5" ></text>
+</g>
+<g >
+<title>____sys_recvmsg (10,222,651,435 samples, 17.64%)</title><rect x="627.3" y="117" width="208.2" height="15.0" fill="rgb(224,90,21)" rx="2" ry="2" />
+<text  x="630.31" y="127.5" >____sys_recvmsg</text>
+</g>
+<g >
+<title>__libc_recvmsg (49,019,370,206 samples, 84.60%)</title><rect x="186.3" y="277" width="998.3" height="15.0" fill="rgb(220,72,17)" rx="2" ry="2" />
+<text  x="189.30" y="287.5" >__libc_recvmsg</text>
+</g>
+<g >
+<title>__GI___pthread_enable_asynccancel (2,125,727,528 samples, 3.67%)</title><rect x="302.5" y="261" width="43.3" height="15.0" fill="rgb(240,165,39)" rx="2" ry="2" />
+<text  x="305.47" y="271.5" >__GI..</text>
+</g>
+<g >
+<title>copy_msghdr_from_user (6,204,073,938 samples, 10.71%)</title><rect x="874.6" y="117" width="126.4" height="15.0" fill="rgb(240,161,38)" rx="2" ry="2" />
+<text  x="877.62" y="127.5" >copy_msghdr_fro..</text>
+</g>
+<g >
+<title>udp_recvmsg (325,269,849 samples, 0.56%)</title><rect x="828.9" y="85" width="6.6" height="15.0" fill="rgb(221,75,18)" rx="2" ry="2" />
+<text  x="831.87" y="95.5" ></text>
+</g>
+<g >
+<title>__copy_msghdr (945,137,545 samples, 1.63%)</title><rect x="901.1" y="101" width="19.2" height="15.0" fill="rgb(244,179,43)" rx="2" ry="2" />
+<text  x="904.08" y="111.5" ></text>
+</g>
+<g >
+<title>apparmor_socket_recvmsg (206,646,625 samples, 0.36%)</title><rect x="662.2" y="85" width="4.2" height="15.0" fill="rgb(246,190,45)" rx="2" ry="2" />
+<text  x="665.23" y="95.5" ></text>
+</g>
+<g >
+<title>__sys_recvmsg (88,687,146 samples, 0.15%)</title><rect x="1097.8" y="165" width="1.8" height="15.0" fill="rgb(252,216,51)" rx="2" ry="2" />
+<text  x="1100.83" y="175.5" ></text>
+</g>
+<g >
+<title>__errno_location (206,806,717 samples, 0.36%)</title><rect x="1184.6" y="293" width="4.2" height="15.0" fill="rgb(233,130,31)" rx="2" ry="2" />
+<text  x="1187.59" y="303.5" ></text>
+</g>
+<g >
+<title>invoke_syscall (295,358,742 samples, 0.51%)</title><rect x="1176.8" y="197" width="6.0" height="15.0" fill="rgb(209,18,4)" rx="2" ry="2" />
+<text  x="1179.77" y="207.5" ></text>
+</g>
+<g >
+<title>[quicfuscate] (57,942,176,314 samples, 100.00%)</title><rect x="10.0" y="357" width="1180.0" height="15.0" fill="rgb(245,187,44)" rx="2" ry="2" />
+<text  x="13.00" y="367.5" >[quicfuscate]</text>
+</g>
+<g >
+<title>__arm64_sys_recvmsg (147,781,500 samples, 0.26%)</title><rect x="550.9" y="181" width="3.0" height="15.0" fill="rgb(236,144,34)" rx="2" ry="2" />
+<text  x="553.93" y="191.5" ></text>
+</g>
+<g >
+<title>fdget (2,245,134,041 samples, 3.87%)</title><rect x="1027.4" y="133" width="45.8" height="15.0" fill="rgb(241,167,40)" rx="2" ry="2" />
+<text  x="1030.45" y="143.5" >fdget</text>
+</g>
+<g >
+<title>get_random_u16 (3,787,402,790 samples, 6.54%)</title><rect x="1099.6" y="165" width="77.2" height="15.0" fill="rgb(207,9,2)" rx="2" ry="2" />
+<text  x="1102.64" y="175.5" >get_rand..</text>
+</g>
+<g >
+<title>uaccess_ttbr0_enable.isra.0 (59,070,821 samples, 0.10%)</title><rect x="1013.6" y="117" width="1.2" height="15.0" fill="rgb(246,192,45)" rx="2" ry="2" />
+<text  x="1016.61" y="127.5" ></text>
+</g>
+<g >
+<title>fput (59,060,756 samples, 0.10%)</title><rect x="1096.6" y="149" width="1.2" height="15.0" fill="rgb(225,96,23)" rx="2" ry="2" />
+<text  x="1099.63" y="159.5" ></text>
+</g>
+<g >
+<title>begin_current_label_crit_section (29,638,872 samples, 0.05%)</title><rect x="828.3" y="53" width="0.6" height="15.0" fill="rgb(237,148,35)" rx="2" ry="2" />
+<text  x="831.27" y="63.5" ></text>
+</g>
+<g >
+<title>memset (88,629,689 samples, 0.15%)</title><rect x="1092.4" y="133" width="1.8" height="15.0" fill="rgb(208,14,3)" rx="2" ry="2" />
+<text  x="1095.42" y="143.5" ></text>
+</g>
+<g >
+<title>__copy_msghdr (147,558,330 samples, 0.25%)</title><rect x="852.3" y="117" width="3.1" height="15.0" fill="rgb(244,179,43)" rx="2" ry="2" />
+<text  x="855.35" y="127.5" ></text>
+</g>
+<g >
+<title>__libc_recvmsg (58,912,285 samples, 0.10%)</title><rect x="1188.8" y="293" width="1.2" height="15.0" fill="rgb(220,72,17)" rx="2" ry="2" />
+<text  x="1191.80" y="303.5" ></text>
+</g>
+<g >
+<title>import_iovec (177,174,264 samples, 0.31%)</title><rect x="1001.0" y="117" width="3.6" height="15.0" fill="rgb(241,168,40)" rx="2" ry="2" />
+<text  x="1003.97" y="127.5" ></text>
+</g>
+<g >
+<title>__aarch64_cas4_acq (1,357,763,152 samples, 2.34%)</title><rect x="318.1" y="245" width="27.7" height="15.0" fill="rgb(231,124,29)" rx="2" ry="2" />
+<text  x="321.11" y="255.5" >_..</text>
+</g>
+<g >
+<title>do_el0_svc (31,528,175,071 samples, 54.41%)</title><rect x="540.7" y="213" width="642.1" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="543.71" y="223.5" >do_el0_svc</text>
+</g>
+</g>
+</svg>
