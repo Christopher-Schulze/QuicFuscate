@@ -1034,8 +1034,9 @@ impl Connection {
             }
 
             // Client-side Retry handling: adopt token/DCID and re-derive Initial keys.
+            // Reuse the pre-parsed header instead of re-parsing (TODO-391).
             if !self.is_server {
-                if let Ok((retry_hdr, _)) = packet::parse_header(buf, short_dcid_len) {
+                if let Some((retry_hdr, _)) = pre_parsed_hdr.as_ref() {
                     if !retry_hdr.scid.is_empty() {
                         self.set_destination_cid(ConnectionId::from_vec(retry_hdr.scid.clone()));
                     }

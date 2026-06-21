@@ -4,7 +4,7 @@ title: Eliminate double header parse in Connection::recv
 severity: MEDIUM
 phase: A
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-06-05
 ---
 
