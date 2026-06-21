@@ -504,7 +504,10 @@ pub fn unprotect_and_decrypt_parsed(
         Some(parsed) => parsed,
         None => parse_header(buf, short_dcid_len)?,
     };
-    let parsed = (hdr.clone(), pn_off);
+    // Move hdr into the match arms — only one arm executes, so no clone needed
+    // for Initial/Handshake/ZeroRTT. For Short, use take() to pass the header
+    // to the first candidate only (subsequent candidates get None and re-parse
+    // internally), eliminating the pre-clone that was here previously.
     match hdr.ty {
         PacketType::Initial => {
             let (hp, aead) = match (
@@ -520,7 +523,7 @@ pub fn unprotect_and_decrypt_parsed(
                 buf,
                 short_dcid_len,
                 largest_pn_hint,
-                Some(parsed),
+                Some((hdr, pn_off)),
             )
         }
         PacketType::Handshake => {
@@ -537,7 +540,7 @@ pub fn unprotect_and_decrypt_parsed(
                 buf,
                 short_dcid_len,
                 largest_pn_hint,
-                Some(parsed),
+                Some((hdr, pn_off)),
             )
         }
         PacketType::ZeroRTT => {
@@ -554,7 +557,7 @@ pub fn unprotect_and_decrypt_parsed(
                 buf,
                 short_dcid_len,
                 largest_pn_hint,
-                Some(parsed),
+                Some((hdr, pn_off)),
             )
         }
         PacketType::Short => {
@@ -574,13 +577,18 @@ pub fn unprotect_and_decrypt_parsed(
             }
             let original = if candidates.len() > 1 { Some(buf.to_vec()) } else { None };
             let mut last_err = ConnectionError::CryptoError("crypto failure".into());
-            for (i, (hp, aead)) in candidates.into_iter().enumerate() {
-                if i > 0 {
+            // take() moves the header to the first candidate; subsequent
+            // candidates get None and parse internally. No clone needed.
+            let mut hdr_opt = Some((hdr, pn_off));
+            for (hp, aead) in candidates.into_iter() {
+                // Restore buf from the original snapshot for candidates after
+                // the first (previous attempt's HP removal modified buf).
+                if hdr_opt.is_none() {
                     if let Some(orig) = original.as_ref() {
                         buf.copy_from_slice(orig);
                     }
                 }
-                let pre = if i == 0 { Some(parsed.clone()) } else { None };
+                let pre = hdr_opt.take();
                 match unprotect_and_decrypt_with_key(
                     hp,
                     aead,
