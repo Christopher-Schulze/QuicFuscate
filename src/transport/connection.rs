@@ -1087,9 +1087,7 @@ impl Connection {
                         // HP-protected (mask covers 0x1f only), so parse_header still
                         // identifies the packet type correctly after HP removal.
                         if pre_parsed_hdr.is_none() {
-                            pre_parsed_hdr = packet::parse_header(buf, short_dcid_len)
-                                .ok()
-                                .map(|(h, o)| (h, o));
+                            pre_parsed_hdr = packet::parse_header(buf, short_dcid_len).ok();
                         }
                     }
                     Err(e) => return Err(e),
@@ -1116,9 +1114,7 @@ impl Connection {
                     rx_key_advances += 1;
                     // Re-parse for the next retry iteration.
                     if pre_parsed_hdr.is_none() {
-                        pre_parsed_hdr = packet::parse_header(buf, short_dcid_len)
-                            .ok()
-                            .map(|(h, o)| (h, o));
+                        pre_parsed_hdr = packet::parse_header(buf, short_dcid_len).ok();
                     }
                     continue;
                 }

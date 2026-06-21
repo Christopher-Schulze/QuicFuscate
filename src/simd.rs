@@ -407,10 +407,12 @@ pub(crate) mod planner {
         fn x86_data_plane_length_selects_x8_with_vaes() {
             let features =
                 CpuFeatures { aesni: true, vaes: true, avx2: true, ..CpuFeatures::default() };
-            assert!(
-                crate::crypto::DEFAULT_DATA_PLANE_AEAD_LEN >= CryptoPlan::AEGIS_X8_MIN_LEN,
-                "data-plane length must reach the X8 threshold"
-            );
+            const _: () = {
+                assert!(
+                    crate::crypto::DEFAULT_DATA_PLANE_AEAD_LEN >= CryptoPlan::AEGIS_X8_MIN_LEN,
+                    "data-plane length must reach the X8 threshold"
+                );
+            };
             assert_eq!(
                 CryptoPlan::x86_for_length(crate::crypto::DEFAULT_DATA_PLANE_AEAD_LEN, &features),
                 CryptoAeadPlan::Aegis128X8
