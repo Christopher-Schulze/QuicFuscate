@@ -795,6 +795,11 @@ enum Commands {
         /// Enable certificate validation when connecting to the server
         #[clap(long)]
         verify_peer: bool,
+        /// QKey string used to authenticate with the server (provides the
+        /// x-qf-auth bearer token). When omitted, the client connects without
+        /// a QKey token and will be rejected by servers that require one.
+        #[clap(long, value_name = "QKEY")]
+        qkey: Option<String>,
     },
     /// Runs the server
     Server {
@@ -1045,6 +1050,7 @@ async fn async_main() -> std::io::Result<()> {
             debug_tls,
             list_fingerprints,
             verify_peer,
+            qkey,
         } => {
             let fec_mode = resolve_cli_fec_mode_override(shared.fec_mode);
             run_client(
@@ -1076,6 +1082,7 @@ async fn async_main() -> std::io::Result<()> {
                 shared.tun_mtu,
                 shared.tun_ip,
                 shared.tun_netmask,
+                qkey.as_deref(),
             )
             .await?;
         }
@@ -1378,6 +1385,7 @@ async fn run_client(
     tun_mtu: Option<u16>,
     tun_ip: Option<String>,
     tun_netmask: Option<String>,
+    qkey: Option<&str>,
 ) -> std::io::Result<()> {
     let config_path = config.as_ref();
     if list_fingerprints {
@@ -1470,6 +1478,27 @@ async fn run_client(
         pool_block,
         "client runtime config",
     );
+    // Derive the QKey bearer token (x-qf-auth) from a supplied QKey string.
+    // Servers that require a QKey reject clients without a valid token.
+    let qkey_auth_token_hex = match qkey {
+        Some(raw) if !raw.trim().is_empty() => {
+            match quicfuscate::engine::qkey::parse(raw.trim()) {
+                Ok(parsed) => match parsed.token.as_deref().map(str::trim) {
+                    Some(tok) if !tok.is_empty() => Some(tok.to_string()),
+                    _ => {
+                        error!("supplied --qkey does not contain a token");
+                        return Err(std::io::Error::other("qkey missing token"));
+                    }
+                },
+                Err(e) => {
+                    error!("failed to parse --qkey: {}", e);
+                    return Err(std::io::Error::other("invalid qkey"));
+                }
+            }
+        }
+        _ => None,
+    };
+
     let mut conn = match QuicFuscateConnection::new_client(
         host,
         local_addr,
@@ -1478,7 +1507,7 @@ async fn run_client(
         stealth_config.clone(),
         fec_cfg,
         opt_params,
-        None,
+        qkey_auth_token_hex,
         !no_utls,
     ) {
         Ok(c) => c,

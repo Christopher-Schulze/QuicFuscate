@@ -4530,11 +4530,11 @@ impl StealthManager {
         config.set_initial_max_streams_bidi(fingerprint.initial_max_streams_bidi);
         config.set_max_idle_timeout(fingerprint.max_idle_timeout);
 
-        // Chrome-like ACK policy tuned per browser profile
-        let browser_profile = {
-            let fp = self.fingerprint.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            fp.browser
-        };
+        // Chrome-like ACK policy tuned per browser profile.
+        // Reuse the already-held `fingerprint` guard: re-locking the same
+        // non-reentrant mutex here would deadlock (the guard acquired above is
+        // still in scope until the end of this function).
+        let browser_profile = fingerprint.browser;
         match browser_profile {
             BrowserProfile::Chrome | BrowserProfile::Edge => {
                 config.set_ack_eliciting_threshold(2);

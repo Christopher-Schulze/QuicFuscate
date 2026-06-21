@@ -236,8 +236,14 @@ cpufeatures::new!(
     "aes",
     "pclmulqdq"
 );
+// NOTE: On AArch64, NEON is part of the mandatory baseline and is therefore
+// not an individually detectable feature in `cpufeatures` (only optional
+// extensions like "aes"/"sha2" are). NEON availability is asserted directly in
+// the detection routine below. The generated detector is unused (real runtime
+// detection uses /proc/cpuinfo on Linux and sysctl on macOS) but is kept for
+// parity with the x86 path.
 #[cfg(target_arch = "aarch64")]
-cpufeatures::new!(cpuid_arm, "neon", "aes");
+cpufeatures::new!(cpuid_arm, "aes");
 
 /// Configuration for optimization parameters passed from the CLI.
 #[derive(Clone, Copy)]
