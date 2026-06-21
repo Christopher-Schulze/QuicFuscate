@@ -4,7 +4,7 @@ title: Criterion ACK stress benchmark
 severity: HIGH
 phase: C
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-06-05
 ---
 

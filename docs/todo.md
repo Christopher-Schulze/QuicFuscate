@@ -20,9 +20,9 @@ Execution order: **Phase A (config + quick wins) -> Phase B (load path) -> Phase
 | TODO-396 | B | P2 | Brain `apply_policy` lock coalescing and histogram reuse | **OPEN** — superseded by TODO-417 (bundled into Hot-Path-Lock-Elimination). code-check 2026-07-23: no explicit lock coalescing found, RwLock present at brain.rs:467 |
 | TODO-397 | B | P2 | FEC encoder/decoder Mutex contention reduction | **OPEN** — superseded by TODO-417. code-check 2026-07-23: std::sync::Mutex still present at fec/mod.rs:2991-2994, not parking_lot |
 | TODO-398 | B | P2 | CryptoContext RwLock scope reduction on 1-RTT hot path | **OPEN** — superseded by TODO-417 (ArcSwap approach). code-check 2026-07-23: no cache found, RwLock still acquired per packet |
-| TODO-399 | C | P1 | Criterion bench: `Connection` 1-RTT send/recv loop | **OPEN** (code-check 2026-07-23: connection_1rtt_send_recv bench exists per TODO-407, but TODO-399 acceptance criteria not fully met) |
-| TODO-400 | C | P1 | Criterion bench: ACK processing under N in-flight PNs | **OPEN** (code-check 2026-07-23: no ACK stress bench found) |
-| TODO-401 | C | P2 | CI regression: stealth-on vs stealth-off same workload | **OPEN** (code-check 2026-07-23: no CI gate found) |
+| TODO-399 | C | P1 | Criterion bench: `Connection` 1-RTT send/recv loop | **DONE** (`connection_1rtt_send_recv` group in ci_regression.rs, 3 payload sizes, mock paired 1-RTT connections; wired into bench-ci-regression.sh + ci.yml benchmarks job with critcmp baseline) |
+| TODO-400 | C | P1 | Criterion bench: ACK processing under N in-flight PNs | **DONE** (`ack_sent_byte_accounting` group: 32/128/512/1024/2048/10240 inflight, ack_all/ack_half/ack_sparse variants; wired into ci_regression + ci.yml benchmarks job) |
+| TODO-401 | C | P2 | CI regression: stealth-on vs stealth-off same workload | **DONE** (`connection_1rtt_stealth_compare` group runs stealth_off/stealth_on on identical 1-RTT workload; ci.yml benchmarks job applies 15% warn / 30% error thresholds via bench-ci-regression.sh) |
 | TODO-402 | D | P2 | Batch AEAD seal/open (Aegis X4/X8 wiring) | **DONE** |
 | TODO-403 | D | P2 | Zero-copy inbound: recv buffer through FEC into transport | **DONE** |
 | TODO-404 | D | P3 | Unify client `pipeline.rs` with `core` pooled path | **DONE** |

@@ -4,7 +4,7 @@ title: Criterion Connection send/recv bench
 severity: HIGH
 phase: C
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-06-05
 ---
 

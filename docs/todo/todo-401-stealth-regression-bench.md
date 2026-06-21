@@ -4,7 +4,7 @@ title: Stealth-on vs stealth-off CI regression
 severity: MEDIUM
 phase: C
 priority: P2
-status: OPEN
+status: DONE
 created: 2026-06-05
 ---
 

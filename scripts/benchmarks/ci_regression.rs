@@ -410,7 +410,7 @@ fn bench_ack_sent_byte_accounting(c: &mut Criterion) {
     use quicfuscate::transport::{bench_paired_1rtt_connections, BenchConnectionPair};
 
     let mut group = c.benchmark_group("ack_sent_byte_accounting");
-    for inflight in [32u64, 128, 512, 2048] {
+    for inflight in [32u64, 128, 512, 1024, 2048, 10240] {
         group.throughput(Throughput::Elements(inflight));
         group.bench_function(format!("{inflight}_inflight_ack_all"), |b| {
             b.iter(|| {
@@ -432,7 +432,7 @@ fn bench_ack_sent_byte_accounting(c: &mut Criterion) {
     }
 
     // Sparse ACK ranges (every 4th PN) to stress range iteration vs map size.
-    for inflight in [512u64, 2048] {
+    for inflight in [512u64, 2048, 10240] {
         group.bench_function(format!("{inflight}_inflight_ack_sparse"), |b| {
             b.iter(|| {
                 let BenchConnectionPair { mut client, .. } = bench_paired_1rtt_connections();
