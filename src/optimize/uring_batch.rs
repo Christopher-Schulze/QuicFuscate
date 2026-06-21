@@ -282,6 +282,13 @@ impl UringBatchSender {
     ) -> std::io::Result<SubmitOutcome> {
         let fd = io_uring::types::Fd(fd);
 
+        // Drain any stale CQEs from previous operations to ensure
+        // submit_and_wait(queued) waits for the correct CQEs.
+        {
+            let cq = self.ring.completion();
+            for _ in cq {}
+        }
+
         // Push SQEs.
         let mut queued = 0usize;
         {
@@ -352,6 +359,20 @@ impl UringBatchSender {
         count: usize,
     ) -> std::io::Result<SubmitOutcome> {
         let fd_typed = io_uring::types::Fd(fd);
+
+        // Drain stale CQEs from previous ZC chunks.  Each SendMsgZc SQE
+        // produces a primary CQE *and* a notification CQE (CQE_F_NOTIF).
+        // Notification CQEs arrive asynchronously and can satisfy
+        // submit_and_wait prematurely on the next chunk, causing the reap
+        // loop to see only notifications and report sent=0.
+        {
+            let cq = self.ring.completion();
+            for cqe in cq {
+                if cqe.flags() & CQE_F_NOTIF != 0 {
+                    crate::telemetry::IO_URING_ZC_NOTIFS.inc();
+                }
+            }
+        }
 
         // Push SendMsgZc SQEs.
         let mut queued = 0usize;
