@@ -4,7 +4,7 @@ title: Reuse AEGIS cipher state across packets
 severity: MEDIUM
 phase: A
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-06-05
 ---
 

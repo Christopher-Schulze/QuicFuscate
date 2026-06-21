@@ -2294,4 +2294,47 @@ mod tests {
         let pt = dec(&ct_base, ad, &tag_base).unwrap();
         assert_eq!(pt, msg);
     }
+
+    // TODO-393: differential test — the AEAD wrapper reuses cipher state via
+    // `reinit` after the first packet. Output must be byte-identical to a fresh
+    // `Aegis128L::new` per packet (the pre-optimization baseline).
+    #[test]
+    fn aegis128l_aead_reinit_matches_fresh_new_per_packet() {
+        use super::super::make_nonce16;
+        use super::{AeadOpen, AeadSeal, Aegis128LAead};
+
+        let key = [0x7au8; 16];
+        let iv = [0x1bu8; 12];
+        let ad = b"diff-ad";
+        let pt = b"reinit-state-reuse-payload";
+
+        let seal = Aegis128LAead::new(&key, &iv);
+        let open = Aegis128LAead::new(&key, &iv);
+
+        for counter in 1u64..=64 {
+            // Reference: fresh cipher per packet (baseline).
+            let nonce16 = make_nonce16(&iv, counter);
+            let mut ref_buf = vec![0u8; pt.len() + 16];
+            ref_buf[..pt.len()].copy_from_slice(pt);
+            let ref_tag =
+                Aegis128L::new(&key, &nonce16).unwrap().encrypt_in_place(&mut ref_buf[..pt.len()], ad);
+            ref_buf[pt.len()..].copy_from_slice(&ref_tag);
+
+            // Optimized: AEAD wrapper (reinit after first packet).
+            let mut opt_buf = vec![0u8; pt.len() + 16];
+            opt_buf[..pt.len()].copy_from_slice(pt);
+            let opt_len = seal
+                .seal_with_u64_counter(counter, ad, opt_buf.as_mut_slice(), pt.len(), None)
+                .unwrap();
+            assert_eq!(opt_len, pt.len() + 16);
+            assert_eq!(opt_buf, ref_buf, "ciphertext/tag diverged at counter {counter}");
+
+            // Decrypt via the wrapper must recover plaintext.
+            let pt_len = open
+                .open_with_u64_counter(counter, ad, opt_buf.as_mut_slice())
+                .unwrap();
+            assert_eq!(pt_len, pt.len());
+            assert_eq!(&opt_buf[..pt_len], pt);
+        }
+    }
 }
