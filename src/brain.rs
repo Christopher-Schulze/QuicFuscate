@@ -233,6 +233,8 @@ struct StealthBrainState {
     last_padding_enabled: bool,
     last_padding_strategy: u8,
     last_padding_max: usize,
+    last_padding_rate: u8,
+    last_timing_rate: u8,
     last_cc_profile: crate::transport::recovery::BrowserProfile,
     // ECN deltas and trends
     prev_ect0: u64,
@@ -279,6 +281,7 @@ struct PolicyActuatorSnap {
     do_gran: bool,
     do_cc: bool,
     do_padding: bool,
+    do_timing_rate: bool,
     bias: u8,
     gran: u16,
     prefer_masque_effective: bool,
@@ -316,6 +319,8 @@ impl StealthBrainState {
             last_padding_enabled: false,
             last_padding_strategy: 0,
             last_padding_max: 0,
+            last_padding_rate: 100,
+            last_timing_rate: 100,
             last_cc_profile: crate::transport::recovery::BrowserProfile::Chrome,
             prev_ect0: 0,
             prev_ect1: 0,
@@ -1027,13 +1032,20 @@ impl TransportObserver for StealthBrain {
             let do_padding = cooldown
                 && (st.last_padding_enabled != stealth_policy.padding_enabled
                     || st.last_padding_strategy != stealth_policy.padding_strategy
-                    || st.last_padding_max != stealth_policy.padding_max);
+                    || st.last_padding_max != stealth_policy.padding_max
+                    || st.last_padding_rate != stealth_policy.padding_rate);
             if do_padding {
                 st.last_padding_enabled = stealth_policy.padding_enabled;
                 st.last_padding_strategy = stealth_policy.padding_strategy;
                 st.last_padding_max = stealth_policy.padding_max;
+                st.last_padding_rate = stealth_policy.padding_rate;
             }
-            if do_ack || do_pacing || do_timing || do_bias || do_gran || do_cc || do_padding {
+            let do_timing_rate = cooldown
+                && (st.last_timing_rate != stealth_policy.timing_rate);
+            if do_timing_rate {
+                st.last_timing_rate = stealth_policy.timing_rate;
+            }
+            if do_ack || do_pacing || do_timing || do_bias || do_gran || do_cc || do_padding || do_timing_rate {
                 st.last_policy_change = now;
             }
             Self::update_probing_budget(&mut st, &self.cfg);
@@ -1057,6 +1069,7 @@ impl TransportObserver for StealthBrain {
                 do_gran,
                 do_cc,
                 do_padding,
+                do_timing_rate,
                 bias: stealth_policy.mimic_bias,
                 gran: stealth_policy.adaptive_granularity,
                 prefer_masque_effective,
@@ -1089,6 +1102,7 @@ impl TransportObserver for StealthBrain {
         let do_gran = actuators.do_gran;
         let do_cc = actuators.do_cc;
         let do_padding = actuators.do_padding;
+        let do_timing_rate = actuators.do_timing_rate;
         let bias = actuators.bias;
         let gran = actuators.gran;
         let stealth_policy = actuators.stealth_policy;
@@ -1123,6 +1137,10 @@ impl TransportObserver for StealthBrain {
                 stealth_policy.padding_strategy,
                 stealth_policy.padding_max,
             ));
+            stealth_delta.padding_rate = Some(stealth_policy.padding_rate);
+        }
+        if intelligent_runtime && permissions.timing && do_timing_rate {
+            stealth_delta.timing_rate = Some(stealth_policy.timing_rate);
         }
         if intelligent_runtime {
             conn.apply_brain_stealth_runtime_delta(stealth_delta);

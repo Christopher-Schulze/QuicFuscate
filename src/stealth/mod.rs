@@ -4118,6 +4118,171 @@ impl StealthConfig {
     }
 }
 
+// =============================================================================
+// Gradual Stealth Escalation State (TODO-416)
+// =============================================================================
+
+/// Probe-count-based escalation state machine for Intelligent stealth mode.
+///
+/// Tracks probe detection timestamps in a sliding window and escalates/de-escalates
+/// the stealth level based on configurable thresholds:
+/// - Level 0 → 1: requires ≥ `threshold_l1` probes within 60 seconds.
+/// - Level 1 → 2: requires ≥ `threshold_l2` probes within 120 seconds.
+/// - De-escalation: after `quiet_period_secs` with zero probe detections.
+///
+/// This complements the brain's pressure-based hysteresis by providing
+/// probe-count-driven escalation that matches the TODO-416 acceptance criteria.
+struct EscalationState {
+    /// Current escalation level (0=Performance, 1=Stealth, 2=AntiDpi).
+    current_level: AtomicU8,
+    /// Sliding window of probe detection timestamps (epoch millis).
+    probe_timestamps: Mutex<VecDeque<u64>>,
+    /// Time of the last probe detection (epoch millis, 0 = none).
+    last_probe_time: AtomicU64,
+    /// Time of the last escalation event (epoch millis, 0 = none).
+    last_escalation_time: AtomicU64,
+    /// Threshold for L0→L1 escalation (default: 3 probes in 60s).
+    threshold_l1: u32,
+    /// Threshold for L1→L2 escalation (default: 8 probes in 120s).
+    threshold_l2: u32,
+    /// Quiet period before de-escalation (default: 300 seconds).
+    quiet_period_secs: u64,
+}
+
+impl EscalationState {
+    fn new() -> Self {
+        Self {
+            current_level: AtomicU8::new(0),
+            probe_timestamps: Mutex::new(VecDeque::with_capacity(32)),
+            last_probe_time: AtomicU64::new(0),
+            last_escalation_time: AtomicU64::new(0),
+            threshold_l1: crate::env_utils::env_parse::<u32>(
+                "QUICFUSCATE_STEALTH_ESCALATION_PROBE_THRESHOLD_L1",
+            )
+            .unwrap_or(3),
+            threshold_l2: crate::env_utils::env_parse::<u32>(
+                "QUICFUSCATE_STEALTH_ESCALATION_PROBE_THRESHOLD_L2",
+            )
+            .unwrap_or(8),
+            quiet_period_secs: crate::env_utils::env_parse::<u64>(
+                "QUICFUSCATE_STEALTH_DEESCALATION_QUIET_PERIOD_SEC",
+            )
+            .unwrap_or(300),
+        }
+    }
+
+    #[inline]
+    fn now_millis() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
+    /// Current escalation level.
+    fn current_level(&self) -> u8 {
+        self.current_level.load(Ordering::Relaxed)
+    }
+
+    /// Record a probe detection and check if escalation thresholds are met.
+    /// Returns the new level if escalation occurred, None if no change.
+    fn record_probe(&self) -> Option<u8> {
+        let now = Self::now_millis();
+        self.last_probe_time.store(now, Ordering::Relaxed);
+
+        let mut timestamps = self.probe_timestamps.lock().unwrap_or_else(|p| p.into_inner());
+        timestamps.push_back(now);
+
+        // Prune entries older than 120 seconds (the L2 window).
+        let cutoff_120s = now.saturating_sub(120_000);
+        while let Some(&front) = timestamps.front() {
+            if front < cutoff_120s {
+                timestamps.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        let count_120s = timestamps.len() as u32;
+        // Count probes within the 60-second window for L1 threshold.
+        let cutoff_60s = now.saturating_sub(60_000);
+        let count_60s = timestamps.iter().filter(|&&t| t >= cutoff_60s).count() as u32;
+
+        let current = self.current_level.load(Ordering::Relaxed);
+        let new_level = if count_120s >= self.threshold_l2 {
+            2u8
+        } else if count_60s >= self.threshold_l1 {
+            1u8
+        } else {
+            return None;
+        };
+
+        if new_level > current {
+            self.current_level.store(new_level, Ordering::Relaxed);
+            self.last_escalation_time.store(now, Ordering::Relaxed);
+            // Publish the new level to the global hint so the brain and
+            // sync_intelligent_level() pick it up.
+            crate::brain::INTELLIGENT_STEALTH_LEVEL_HINT.store(new_level as u32, Ordering::Relaxed);
+            return Some(new_level);
+        }
+        None
+    }
+
+    /// Check if the quiet period has elapsed and de-escalate if so.
+    /// Returns the new level if de-escalation occurred, None if no change.
+    fn check_de_escalation(&self) -> Option<u8> {
+        let current = self.current_level.load(Ordering::Relaxed);
+        if current == 0 {
+            return None;
+        }
+
+        let last_probe = self.last_probe_time.load(Ordering::Relaxed);
+        if last_probe == 0 {
+            return None;
+        }
+
+        let now = Self::now_millis();
+        let quiet_ms = self.quiet_period_secs * 1000;
+        if now.saturating_sub(last_probe) < quiet_ms {
+            return None;
+        }
+
+        // Quiet period elapsed — de-escalate by one level.
+        let new_level = current - 1;
+        self.current_level.store(new_level, Ordering::Relaxed);
+        // Update the last_probe_time so the next de-escalation check waits
+        // another full quiet period before dropping further.
+        self.last_probe_time.store(now, Ordering::Relaxed);
+        crate::brain::INTELLIGENT_STEALTH_LEVEL_HINT.store(new_level as u32, Ordering::Relaxed);
+        Some(new_level)
+    }
+
+    /// Force-set the level (used by explicit mode transitions).
+    #[allow(dead_code)]
+    fn set_level(&self, level: u8) {
+        self.current_level.store(level, Ordering::Relaxed);
+    }
+
+    /// Reset to level 0 and clear probe history (test-only).
+    #[cfg(test)]
+    fn reset(&self) {
+        self.current_level.store(0, Ordering::Relaxed);
+        self.last_probe_time.store(0, Ordering::Relaxed);
+        self.last_escalation_time.store(0, Ordering::Relaxed);
+        let mut timestamps = self.probe_timestamps.lock().unwrap_or_else(|p| p.into_inner());
+        timestamps.clear();
+    }
+
+    /// Number of probes in the 60-second window (test-only).
+    #[cfg(test)]
+    fn probe_count_60s(&self) -> u32 {
+        let now = Self::now_millis();
+        let cutoff = now.saturating_sub(60_000);
+        let timestamps = self.probe_timestamps.lock().unwrap_or_else(|p| p.into_inner());
+        timestamps.iter().filter(|&&t| t >= cutoff).count() as u32
+    }
+}
+
 /// The main stealth manager that coordinates all obfuscation techniques.
 pub struct StealthManager {
     config: StealthConfig,
@@ -4153,6 +4318,8 @@ pub struct StealthManager {
     server_push_runtime_enabled: std::sync::atomic::AtomicBool,
     /// Probe hits counter (Dynamic escalation heuristic)
     probe_hits: Arc<AtomicUsize>,
+    /// Probe-count-based escalation state machine (TODO-416).
+    escalation_state: Arc<EscalationState>,
     /// Runtime override: padding rate 0-100 (set on probe detection or escalation).
     /// Level 0 = 0%, Level 1 = 50%, Level 2 = 100%.
     runtime_padding_rate: AtomicU8,
@@ -4293,6 +4460,7 @@ impl StealthManager {
             server_push_state,
             server_push_runtime_enabled: std::sync::atomic::AtomicBool::new(false),
             probe_hits: Arc::new(AtomicUsize::new(0)),
+            escalation_state: Arc::new(EscalationState::new()),
             runtime_padding_rate: AtomicU8::new(0),
             runtime_timing_rate: AtomicU8::new(0),
             runtime_rotation_rate: AtomicU8::new(0),
@@ -4848,59 +5016,80 @@ impl StealthManager {
         self.process_incoming_packet(payload, source);
     }
 
-    /// Handles active probe detection by switching to higher stealth mode
+    /// Handles active probe detection using the gradual escalation state machine.
+    ///
+    /// Instead of immediately escalating to Level 2 on a single probe (the old
+    /// binary behavior), this records the probe in `EscalationState` and only
+    /// escalates if the configurable thresholds are met:
+    /// - Level 0 → 1: ≥3 probes within 60 seconds.
+    /// - Level 1 → 2: ≥8 probes within 120 seconds.
+    ///
+    /// A single probe is logged but does NOT trigger escalation.
     fn on_probe_detected(&self, source: std::net::SocketAddr) {
-        warn!("Active probe detected from {} - escalating stealth mode", source);
+        warn!("Active probe detected from {}", source);
         // Dynamic/Performance policy: only escalate if Intelligent/Stealth was chosen.
         // Performance mode stays performance-focused and does not auto-escalate.
-        // Only escalate when the user explicitly chose a dynamic/adaptive mode.
-        // Performance and Stealth modes do not auto-escalate on probe - that would violate
-        // the user's explicit performance preference.
         let allow_escalation = self.config.dynamic_enabled;
         if !allow_escalation {
             info!("Probe detected in non-dynamic mode - not escalating (user preference: performance/stealth)");
             return;
         }
 
-        // Force a fast fingerprint rotation by moving last-rotation timestamp back
-        if let Ok(mut last) = self.last_rotation.lock() {
-            *last = std::time::Instant::now() - std::time::Duration::from_secs(3600);
-        }
+        // Increment probe hits counter for telemetry.
+        let _hits = self.probe_hits.fetch_add(1, Ordering::Relaxed) + 1;
 
-        // Increment probe hits and decide escalation severity
-        let hits = self.probe_hits.fetch_add(1, Ordering::Relaxed) + 1;
-        let anti_mode = matches!(self.config.mode, StealthMode::AntiDpi);
-        let hard_escalation = hits >= 1; // escalate immediately
-                                         // Update runtime toggles approximating Anti-DPI behaviour (or Anti-DPI Extreme if already Anti-DPI)
-        if hard_escalation && anti_mode && self.config.enable_realtime_choke {
-            if let Ok(mut guard) = self.rate_choker.lock() {
-                *guard = RateChoker::new(50, 12);
+        // Record the probe in the escalation state machine and check thresholds.
+        let new_level = self.escalation_state.record_probe();
+
+        if let Some(level) = new_level {
+            // Threshold met — escalate.
+            info!(
+                "Stealth escalated to level {} due to probe pattern from {}",
+                level, source
+            );
+            telemetry!(crate::telemetry::STEALTH_MODE_ESCALATED.inc());
+
+            // Apply the graduated escalation.
+            self.escalate_to_level(level);
+
+            // Inject pressure into the Brain's signal_other bucket so the next
+            // derive_intelligent_runtime_policy call aligns with the escalation.
+            crate::optimize::telemetry::STEALTH_SIGNAL_OTHER.fetch_add(10, Ordering::Relaxed);
+
+            // Mark escalated window for stronger pacing (Level 2 only).
+            if level >= 2 {
+                self.escalated.store(true, Ordering::Relaxed);
+                if let Ok(mut guard) = self.escalated_until.lock() {
+                    *guard =
+                        Some(std::time::Instant::now() + std::time::Duration::from_secs(20 * 60));
+                }
+
+                // Force a fast fingerprint rotation by moving last-rotation timestamp back.
+                if let Ok(mut last) = self.last_rotation.lock() {
+                    *last = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+                }
+
+                // Force stronger domain fronting rotation.
+                if let Some(df) = &self.domain_fronting {
+                    df.random_domain();
+                }
+
+                // Anti-DPI mode with realtime choke: activate rate choker.
+                let anti_mode = matches!(self.config.mode, StealthMode::AntiDpi);
+                if anti_mode && self.config.enable_realtime_choke {
+                    if let Ok(mut guard) = self.rate_choker.lock() {
+                        *guard = RateChoker::new(50, 12);
+                    }
+                }
             }
+        } else {
+            // Threshold not met — log but do not escalate.
+            debug!(
+                "Probe from {} recorded but escalation threshold not yet met (level={})",
+                source,
+                self.escalation_state.current_level()
+            );
         }
-
-        // Force stronger domain fronting rotation
-        if let Some(df) = &self.domain_fronting {
-            // This will use ultra-stealth rotation
-            df.random_domain();
-        }
-
-        // Mark escalated window (e.g., 20 minutes) for stronger pacing
-        self.escalated.store(true, Ordering::Relaxed);
-        if let Ok(mut guard) = self.escalated_until.lock() {
-            *guard = Some(std::time::Instant::now() + std::time::Duration::from_secs(20 * 60));
-        }
-        telemetry!(crate::telemetry::STEALTH_MODE_ESCALATED.inc());
-        // Force all runtime overrides on immediately (full intensity = Level 2).
-        self.runtime_padding_rate.store(100, Ordering::Relaxed);
-        self.runtime_timing_rate.store(100, Ordering::Relaxed);
-        self.runtime_rotation_rate.store(100, Ordering::Relaxed);
-        // Inject immediate pressure into the Brain's signal_other bucket so the next
-        // derive_intelligent_runtime_policy call escalates without waiting for sensor fusion.
-        crate::optimize::telemetry::STEALTH_SIGNAL_OTHER.fetch_add(10, Ordering::Relaxed);
-        info!("Stealth mode escalated to Anti-DPI due to probe from {}", source);
-
-        // Apply Anti-DPI escalation features and align runtime state.
-        self.escalate_to_anti_dpi_features();
     }
 
     /// Generates HTTP/3 headers for masquerading a request.
@@ -5034,6 +5223,27 @@ impl StealthManager {
             _ => crate::transport::recovery::BrowserProfile::Chrome,
         };
 
+        // Gradual intensity rates from TODO-416: each level maps to a
+        // percentage that controls what fraction of packets are padded
+        // and how much jitter is applied.
+        // Level 0: 0% padding, 0% timing
+        // Level 1: 50% padding (configurable), 0% timing
+        // Level 2: 100% padding, 100% timing
+        let padding_rate = if !padding_enabled {
+            0u8
+        } else {
+            match inputs.level_hint {
+                0 => 0u8,
+                1 => crate::env_utils::env_parse::<u8>("QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1")
+                    .unwrap_or(50),
+                _ => 100u8,
+            }
+        };
+        let timing_rate = match inputs.level_hint {
+            0 | 1 => 0u8,
+            _ => 100u8,
+        };
+
         crate::transport::StealthRuntimePolicy {
             external_pacing,
             timing_enabled: !external_pacing,
@@ -5044,6 +5254,8 @@ impl StealthManager {
             padding_enabled,
             padding_strategy,
             padding_max,
+            padding_rate,
+            timing_rate,
         }
     }
 
@@ -5101,11 +5313,24 @@ impl StealthManager {
     /// Apply the brain-computed intelligent level to runtime overrides.
     /// Called periodically (e.g., from the connection tick) to sync runtime
     /// padding/timing/rotation rates with the brain's escalation level.
+    /// Also checks probe-count-based de-escalation from `EscalationState`.
     /// Only active in Intelligent mode — explicit modes set their rates directly.
     pub(crate) fn sync_intelligent_level(&self) {
         if !self.is_intelligent_runtime() {
             return;
         }
+
+        // Check if the quiet period has elapsed and de-escalate if so.
+        // This runs on every tick so de-escalation happens promptly after
+        // the quiet period expires, without waiting for the brain's next
+        // policy cycle.
+        if let Some(new_level) = self.escalation_state.check_de_escalation() {
+            info!("Stealth de-escalated to level {} after quiet period", new_level);
+            self.de_escalate_to_level(new_level);
+            // Return early — the de-escalation already set the rates.
+            return;
+        }
+
         let level = crate::brain::intelligent_stealth_level_hint() as u8;
         let current_padding = self.runtime_padding_rate.load(Ordering::Relaxed);
         let target_padding = match level {
@@ -5287,6 +5512,7 @@ impl StealthManager {
 
     /// Escalate to Anti-DPI level features (without changing enum mode).
     /// This is the Level 2 escalation — full padding + timing + rotation.
+    #[allow(dead_code)]
     fn escalate_to_anti_dpi_features(&self) {
         self.escalate_to_level(2);
     }
@@ -5327,8 +5553,7 @@ impl StealthManager {
             level, padding_rate, timing_rate, rotation_rate);
     }
 
-    /// De-escalate to a lower stealth level (called by brain after quiet period).
-    #[allow(dead_code)]
+    /// De-escalate to a lower stealth level (called after quiet period).
     pub(crate) fn de_escalate_to_level(&self, level: u8) {
         self.escalate_to_level(level);
         if level == 0 {
@@ -5342,21 +5567,52 @@ impl StealthManager {
     }
 
     /// Get current runtime padding rate (0-100).
-    #[allow(dead_code)]
+    #[cfg(any(test, feature = "rust-tests"))]
     pub(crate) fn runtime_padding_rate(&self) -> u8 {
         self.runtime_padding_rate.load(Ordering::Relaxed)
     }
 
     /// Get current runtime timing rate (0-100).
-    #[allow(dead_code)]
+    #[cfg(any(test, feature = "rust-tests"))]
     pub(crate) fn runtime_timing_rate(&self) -> u8 {
         self.runtime_timing_rate.load(Ordering::Relaxed)
     }
 
     /// Get current runtime rotation rate (0-100).
-    #[allow(dead_code)]
+    #[cfg(any(test, feature = "rust-tests"))]
     pub(crate) fn runtime_rotation_rate(&self) -> u8 {
         self.runtime_rotation_rate.load(Ordering::Relaxed)
+    }
+
+    /// Get the current escalation level from the EscalationState (test accessor).
+    #[cfg(any(test, feature = "rust-tests"))]
+    pub fn escalation_level(&self) -> u8 {
+        self.escalation_state.current_level()
+    }
+
+    /// Record a probe in the escalation state machine (test accessor).
+    /// Returns the new level if escalation occurred, None if no change.
+    #[cfg(any(test, feature = "rust-tests"))]
+    pub fn record_probe_for_test(&self) -> Option<u8> {
+        self.escalation_state.record_probe()
+    }
+
+    /// Check and perform de-escalation if quiet period elapsed (test accessor).
+    #[cfg(any(test, feature = "rust-tests"))]
+    pub fn check_de_escalation_for_test(&self) -> Option<u8> {
+        self.escalation_state.check_de_escalation()
+    }
+
+    /// Reset escalation state (test-only).
+    #[cfg(test)]
+    pub fn reset_escalation_state(&self) {
+        self.escalation_state.reset();
+    }
+
+    /// Get probe count in 60s window (test-only).
+    #[cfg(test)]
+    pub fn probe_count_60s(&self) -> u32 {
+        self.escalation_state.probe_count_60s()
     }
 
     /// Indicates whether MASQUE should be preferred while escalated and available.

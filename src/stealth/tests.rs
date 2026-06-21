@@ -811,6 +811,10 @@ fn cover_stream_data_length_in_range() {
     }
 }
 
+// =============================================================================
+// TODO-416: Gradual Stealth Escalation Tests
+// =============================================================================
+
 #[test]
 fn test_escalate_to_level_0_no_overhead() {
     let mgr = StealthManager::new(
@@ -883,4 +887,178 @@ fn test_gradual_escalation_ladder() {
     let l2_padding = mgr.runtime_padding_rate();
     assert!(l0_padding < l1_padding, "level 1 should have more padding than level 0");
     assert!(l1_padding < l2_padding, "level 2 should have more padding than level 1");
+}
+
+/// Single probe detection must NOT trigger escalation (stays at Level 0).
+#[test]
+fn test_single_probe_no_escalation() {
+    let mgr = StealthManager::new(
+        StealthConfig::intelligent(),
+        Arc::new(OptimizationManager::new()),
+        Arc::new(CryptoManager::new()),
+    );
+    mgr.reset_escalation_state();
+    // Record a single probe — should not escalate.
+    let result = mgr.record_probe_for_test();
+    assert!(result.is_none(), "single probe must not trigger escalation");
+    assert_eq!(mgr.escalation_level(), 0, "level should remain 0 after 1 probe");
+    assert_eq!(mgr.probe_count_60s(), 1, "probe should be recorded in window");
+}
+
+/// Three probes within 60 seconds must escalate to Level 1.
+#[test]
+fn test_three_probes_in_60s_escalate_to_level_1() {
+    let mgr = StealthManager::new(
+        StealthConfig::intelligent(),
+        Arc::new(OptimizationManager::new()),
+        Arc::new(CryptoManager::new()),
+    );
+    mgr.reset_escalation_state();
+
+    // Probe 1: no escalation
+    let r1 = mgr.record_probe_for_test();
+    assert!(r1.is_none(), "probe 1 should not escalate");
+
+    // Probe 2: no escalation
+    let r2 = mgr.record_probe_for_test();
+    assert!(r2.is_none(), "probe 2 should not escalate");
+
+    // Probe 3: escalate to level 1
+    let r3 = mgr.record_probe_for_test();
+    assert_eq!(r3, Some(1), "probe 3 should escalate to level 1");
+    assert_eq!(mgr.escalation_level(), 1, "level should be 1 after 3 probes");
+}
+
+/// Eight probes within 120 seconds must escalate to Level 2.
+#[test]
+fn test_eight_probes_in_120s_escalate_to_level_2() {
+    let mgr = StealthManager::new(
+        StealthConfig::intelligent(),
+        Arc::new(OptimizationManager::new()),
+        Arc::new(CryptoManager::new()),
+    );
+    mgr.reset_escalation_state();
+
+    // First 3 probes → level 1
+    for _ in 0..3 {
+        mgr.record_probe_for_test();
+    }
+    assert_eq!(mgr.escalation_level(), 1, "should be at level 1 after 3 probes");
+
+    // 5 more probes (total 8) → level 2
+    let mut last_result = None;
+    for _ in 3..8 {
+        last_result = mgr.record_probe_for_test();
+    }
+    assert_eq!(last_result, Some(2), "8th probe should escalate to level 2");
+    assert_eq!(mgr.escalation_level(), 2, "level should be 2 after 8 probes");
+}
+
+/// De-escalation: after quiet period, level should drop by one.
+/// This test uses a very short quiet period via env override.
+#[test]
+fn test_de_escalation_after_quiet_period() {
+    use std::sync::Mutex;
+
+    // Use a 1-second quiet period for testing.
+    static ENV_GUARD: Mutex<()> = Mutex::new(());
+    let _guard = ENV_GUARD.lock().unwrap();
+    std::env::set_var("QUICFUSCATE_STEALTH_DEESCALATION_QUIET_PERIOD_SEC", "1");
+
+    let mgr = StealthManager::new(
+        StealthConfig::intelligent(),
+        Arc::new(OptimizationManager::new()),
+        Arc::new(CryptoManager::new()),
+    );
+    mgr.reset_escalation_state();
+
+    // Escalate to level 2 with 8 probes
+    for _ in 0..8 {
+        mgr.record_probe_for_test();
+    }
+    assert_eq!(mgr.escalation_level(), 2, "should be at level 2");
+
+    // Wait for quiet period to elapse (1 second + small buffer)
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+
+    // Check de-escalation — should drop from 2 to 1
+    let result = mgr.check_de_escalation_for_test();
+    assert_eq!(result, Some(1), "should de-escalate from 2 to 1 after quiet period");
+    assert_eq!(mgr.escalation_level(), 1, "level should be 1 after de-escalation");
+
+    // Wait again for another quiet period
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+
+    // Should de-escalate from 1 to 0
+    let result2 = mgr.check_de_escalation_for_test();
+    assert_eq!(result2, Some(0), "should de-escalate from 1 to 0 after quiet period");
+    assert_eq!(mgr.escalation_level(), 0, "level should be 0 after second de-escalation");
+
+    std::env::remove_var("QUICFUSCATE_STEALTH_DEESCALATION_QUIET_PERIOD_SEC");
+}
+
+/// Padding rate in StealthRuntimePolicy scales correctly per level.
+#[test]
+fn test_policy_padding_rate_scales_per_level() {
+    use crate::stealth::IntelligentStealthInputs;
+
+    // Level 0: padding_rate = 0
+    let policy_l0 = StealthManager::derive_intelligent_runtime_policy(IntelligentStealthInputs {
+        level_hint: 0,
+        ce_ratio_recent: 0.0,
+        ack_us: 5000.0,
+        size_div: 0.0,
+        iat_div: 0.0,
+        reorder_ratio: 0.0,
+        rtt_spike_weight: 0.0,
+        signal_tos: 0,
+        signal_other: 0,
+        jitter_max_us: 3000,
+        pad_max_low: 128,
+        pad_max_high: 512,
+    });
+    assert_eq!(policy_l0.padding_rate, 0, "level 0 padding rate should be 0");
+    assert_eq!(policy_l0.timing_rate, 0, "level 0 timing rate should be 0");
+
+    // Level 2 with pressure: padding_rate = 100, timing_rate = 100
+    let policy_l2 = StealthManager::derive_intelligent_runtime_policy(IntelligentStealthInputs {
+        level_hint: 2,
+        ce_ratio_recent: 0.15,
+        ack_us: 15000.0,
+        size_div: 1.5,
+        iat_div: 1.2,
+        reorder_ratio: 0.05,
+        rtt_spike_weight: 4.0,
+        signal_tos: 1,
+        signal_other: 1,
+        jitter_max_us: 3000,
+        pad_max_low: 128,
+        pad_max_high: 512,
+    });
+    assert_eq!(policy_l2.padding_rate, 100, "level 2 padding rate should be 100");
+    assert_eq!(policy_l2.timing_rate, 100, "level 2 timing rate should be 100");
+}
+
+/// Timing rate in StealthRuntimePolicy is 0 at level 1, 100 at level 2.
+#[test]
+fn test_policy_timing_rate_per_level() {
+    use crate::stealth::IntelligentStealthInputs;
+
+    // Level 1 with pressure: timing_rate = 0 (timing only at level 2)
+    let policy_l1 = StealthManager::derive_intelligent_runtime_policy(IntelligentStealthInputs {
+        level_hint: 1,
+        ce_ratio_recent: 0.05,
+        ack_us: 8000.0,
+        size_div: 0.8,
+        iat_div: 0.5,
+        reorder_ratio: 0.01,
+        rtt_spike_weight: 1.0,
+        signal_tos: 0,
+        signal_other: 1,
+        jitter_max_us: 3000,
+        pad_max_low: 128,
+        pad_max_high: 512,
+    });
+    assert_eq!(policy_l1.timing_rate, 0, "level 1 timing rate should be 0");
+    assert!(policy_l1.padding_rate > 0, "level 1 padding rate should be > 0");
 }

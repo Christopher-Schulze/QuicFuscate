@@ -2224,6 +2224,17 @@ impl Connection {
         if !self.config.stealth_padding_enabled {
             return 0;
         }
+        // Gradual padding rate: only pad a fraction of packets based on the
+        // configured rate (0-100%). At 100%, every packet is padded; at 50%,
+        // only half of packets receive padding. This implements the gradual
+        // stealth escalation from TODO-416.
+        let padding_rate = self.config.stealth_padding_rate;
+        if padding_rate < 100 {
+            let roll = crate::transport::rand::rand_u64_uniform(100) as u8;
+            if roll >= padding_rate {
+                return 0;
+            }
+        }
         let max = self.config.stealth_padding_max_size.min(budget);
         if max == 0 {
             return 0;
@@ -2272,6 +2283,9 @@ impl Connection {
             .map(|provider| provider.key_update_read().is_ok())
             .unwrap_or(false);
         if provider_updated {
+            // The rustls provider rotated the read key inside CryptoContext.
+            // Sync the lock-free ArcSwap so the hot path picks up the new key.
+            self.sync_1rtt();
             return true;
         }
         let updated = self.crypto.write().key_update_1rtt_read();
@@ -2732,7 +2746,16 @@ impl Connection {
         if max_jitter_us == 0 {
             return None;
         }
-        let jitter_us = crate::transport::rand::rand_u64_uniform(max_jitter_us as u64 + 1);
+        // Gradual timing rate: scale jitter magnitude by the configured rate
+        // (0-100%). At 100%, full jitter is applied; at 50%, jitter is halved.
+        // This implements the gradual stealth escalation from TODO-416.
+        let timing_rate = self.config.stealth_timing_rate;
+        let scaled_max = if timing_rate >= 100 {
+            max_jitter_us
+        } else {
+            ((max_jitter_us * timing_rate as u32) / 100).max(1)
+        };
+        let jitter_us = crate::transport::rand::rand_u64_uniform(scaled_max as u64 + 1);
         Some(Duration::from_micros(jitter_us))
     }
 
@@ -2872,6 +2895,14 @@ impl Connection {
         self.config.stealth_padding_strategy = strategy;
         self.config.stealth_padding_max_size = max_size;
     }
+    /// Set padding application rate (0-100%): fraction of packets that receive padding.
+    pub(crate) fn set_stealth_padding_rate(&mut self, rate: u8) {
+        self.config.stealth_padding_rate = rate.min(100);
+    }
+    /// Set timing obfuscation rate (0-100%): scales jitter magnitude.
+    pub(crate) fn set_stealth_timing_rate(&mut self, rate: u8) {
+        self.config.stealth_timing_rate = rate.min(100);
+    }
     pub(crate) fn apply_brain_stealth_runtime_delta(
         &mut self,
         delta: crate::transport::StealthRuntimeDelta,
@@ -2893,6 +2924,12 @@ impl Connection {
         }
         if let Some((enabled, strategy, max_size)) = delta.padding {
             self.set_stealth_padding(enabled, strategy, max_size);
+        }
+        if let Some(rate) = delta.padding_rate {
+            self.set_stealth_padding_rate(rate);
+        }
+        if let Some(rate) = delta.timing_rate {
+            self.set_stealth_timing_rate(rate);
         }
     }
     /// Configure CC stealth profile to shape pacing like common browsers

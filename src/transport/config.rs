@@ -79,9 +79,13 @@ pub struct Config {
     pub(crate) stealth_padding_strategy: u8, // 0=off,1=random,2=fixed,3=adaptive,4=browser-mimic,5=packet-normalize
     pub(crate) stealth_padding_max_size: usize,
     pub(crate) stealth_normalize_target_size: usize,
+    /// Padding application rate (0-100%): fraction of packets that receive padding.
+    pub(crate) stealth_padding_rate: u8,
     // Stealth timing knobs
     pub(crate) stealth_timing_enabled: bool,
     pub(crate) stealth_timing_max_jitter_us: u32,
+    /// Timing obfuscation rate (0-100%): scales jitter magnitude.
+    pub(crate) stealth_timing_rate: u8,
     // Adaptive padding granularity (bytes), default 64
     pub(crate) stealth_adaptive_granularity: u16,
     // BrowserMimic bias code: 1=very small (Safari/iOS), 2=small (Firefox/Linux), 3=default (Chromium/Windows), 4=mobile (Android)
@@ -154,8 +158,10 @@ impl Config {
             stealth_padding_strategy: 0,
             stealth_padding_max_size: 0,
             stealth_normalize_target_size: 0,
+            stealth_padding_rate: 100,
             stealth_timing_enabled: false,
             stealth_timing_max_jitter_us: 0,
+            stealth_timing_rate: 100,
             stealth_adaptive_granularity: 64,
             stealth_mimic_bias: 3,
             ack_eliciting_threshold: 2,
@@ -662,6 +668,10 @@ impl Config {
         self.stealth_padding_strategy = strategy;
         self.stealth_padding_max_size = max_size;
     }
+    /// Sets the padding application rate (0-100%): fraction of packets that receive padding.
+    pub fn set_stealth_padding_rate(&mut self, rate: u8) {
+        self.stealth_padding_rate = rate.min(100);
+    }
     /// Sets the PacketNormalize target size (strategy 5). 0 = disabled.
     pub fn set_stealth_normalize_target(&mut self, target_size: usize) {
         self.stealth_normalize_target_size = target_size;
@@ -670,6 +680,10 @@ impl Config {
     pub fn set_stealth_timing(&mut self, enabled: bool, max_jitter_us: u32) {
         self.stealth_timing_enabled = enabled;
         self.stealth_timing_max_jitter_us = max_jitter_us;
+    }
+    /// Sets the timing obfuscation rate (0-100%): scales jitter magnitude.
+    pub fn set_stealth_timing_rate(&mut self, rate: u8) {
+        self.stealth_timing_rate = rate.min(100);
     }
     /// Sets the adaptive padding granularity in bytes (minimum 1).
     pub fn set_stealth_adaptive_granularity(&mut self, gran: u16) {

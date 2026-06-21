@@ -22,10 +22,22 @@ It is maintained as the current architecture and repository index, with a curate
 All call sites map `Auto` -> `StealthMode::Intelligent` in `stealth/mod.rs`.
 
 ### StealthManager Runtime Overrides (src/stealth/mod.rs)
-Three `AtomicBool` fields added: `runtime_padding_forced`, `runtime_timing_forced`, `runtime_rotation_enabled`.
-Set by `on_probe_detected()` and `escalate_to_anti_dpi_features()` - both activate all three on any probe.
-`on_probe_detected` only escalates when `config.dynamic_enabled` is true (Intelligent mode). Performance/Stealth do NOT auto-escalate.
-Probe also injects +10 into `STEALTH_SIGNAL_OTHER` for immediate Brain pressure on next tick.
+Three `AtomicU8` rate fields: `runtime_padding_rate`, `runtime_timing_rate`, `runtime_rotation_rate` (each 0-100%).
+Set by `escalate_to_level(n)` based on escalation level (0=0%, 1=50% configurable, 2=100%).
+Padding and timing rates flow through `StealthRuntimePolicy` → `StealthRuntimeDelta` → connection config.
+`compute_stealth_padding()` uses `stealth_padding_rate` for probabilistic packet padding.
+`transport_stealth_jitter_delay()` uses `stealth_timing_rate` to scale jitter magnitude.
+`maybe_rotate_fingerprint()` reads `runtime_rotation_rate` (threshold >50 = active).
+
+### EscalationState (src/stealth/mod.rs) — TODO-416
+Probe-count-based escalation state machine on `StealthManager`.
+- `record_probe()`: records timestamp, checks thresholds (≥3 in 60s → L1, ≥8 in 120s → L2).
+- `check_de_escalation()`: drops one level after configurable quiet period (default 300s).
+- `on_probe_detected()` uses `EscalationState` instead of immediate binary escalation.
+- `sync_intelligent_level()` calls `check_de_escalation()` on each tick.
+- Config knobs: `QUICFUSCATE_STEALTH_ESCALATION_PROBE_THRESHOLD_L1` (3), `_L2` (8),
+  `QUICFUSCATE_STEALTH_DEESCALATION_QUIET_PERIOD_SEC` (300), `QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1` (50).
+- `on_probe_detected` only escalates when `config.dynamic_enabled` is true (Intelligent mode).
 
 ### IntelligentStealthInputs.level_hint (src/stealth/mod.rs)
 Brain reads `INTELLIGENT_STEALTH_LEVEL_HINT` after hysteresis and passes as `level_hint: u8` (0/1/2) to `derive_intelligent_runtime_policy`.

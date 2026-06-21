@@ -154,6 +154,12 @@ pub struct StealthRuntimePolicy {
     pub padding_strategy: u8,
     /// Maximum padding size in bytes.
     pub padding_max: usize,
+    /// Padding application rate (0-100%): fraction of packets that receive padding.
+    /// 100 = every packet, 50 = half of packets, 0 = no padding.
+    pub padding_rate: u8,
+    /// Timing obfuscation rate (0-100%): scales the jitter magnitude.
+    /// 100 = full jitter, 50 = half jitter, 0 = no jitter.
+    pub timing_rate: u8,
 }
 
 /// Incremental stealth parameter update emitted by the Brain sensor-fusion engine.
@@ -171,6 +177,10 @@ pub struct StealthRuntimeDelta {
     pub cc_profile: Option<crate::transport::recovery::BrowserProfile>,
     /// New padding (enabled, strategy, max_size) triple, if changed.
     pub padding: Option<(bool, u8, usize)>,
+    /// New padding application rate (0-100), if changed.
+    pub padding_rate: Option<u8>,
+    /// New timing obfuscation rate (0-100), if changed.
+    pub timing_rate: Option<u8>,
 }
 
 // ============================================================================

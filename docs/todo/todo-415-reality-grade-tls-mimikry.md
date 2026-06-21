@@ -177,3 +177,29 @@ This is a **3-phase incremental** task. Each phase is independently shippable.
 - Each phase should be shipped independently — don't block Phase 1 on Phase 2/3 completion.
 - The `[reality]` config section is **opt-in** (default `enabled = false`) — existing deployments are unaffected.
 - `rustls` 0.23 (already a dependency) supports client-side TLS 1.3 — no new crypto dependency needed.
+
+## Phase 1 Implementation Limitations (as shipped)
+
+The Phase 1 implementation (`src/reality.rs`) has a known limitation: the
+`capture()` method uses raw TCP + a hand-built TLS 1.3 ClientHello with a
+**dummy x25519 key** instead of using `rustls` as a proper TLS client.
+
+**Consequence**: Only the unencrypted ServerHello is captured. The encrypted
+flight (Certificate, CertificateVerify, Finished) cannot be captured without
+completing the TLS 1.3 key exchange, which requires a real key pair. The
+`certificate_chain` field stores raw encrypted bytes, not actual certificates.
+
+**Impact on Phase 1 acceptance**: Items 5-7 (server responds with cached
+ServerHello to clients, QKey auth in encrypted extension, probes receive
+cached response) are NOT yet wired into the server handshake path. The cache
+infrastructure (`CoverHandshakeCache`, `CoverMaterial`, `RealityConfig`,
+`build_tls13_client_hello()`) is complete and tested, but not integrated
+into the actual connection handshake.
+
+**Fix for full Phase 1 completion**: Replace `build_tls13_client_hello()`
+with a `rustls` client connection that completes the full TLS 1.3 handshake
+and captures all server flight bytes. Then wire `CoverHandshakeCache` into
+the server's handshake response path in `src/transport/` or `src/server/`.
+
+This is why the TODO status is `PARTIAL` with `phase1_done: true` (cache
+infrastructure) but the full acceptance criteria are not yet met.
