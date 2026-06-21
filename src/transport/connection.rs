@@ -1004,8 +1004,10 @@ impl Connection {
         // Pre-parse header to determine space and largest PN hint.
         // For short headers, DCID length is the local SCID length (the peer routes to our CID).
         let short_dcid_len = self.scid.as_ref().len();
-        let (pre_ty, largest_hint, pre_parsed_hdr) = match packet::parse_header(buf, short_dcid_len)
-        {
+        let (pre_ty, largest_hint, mut pre_parsed_hdr) = match packet::parse_header(
+            buf,
+            short_dcid_len,
+        ) {
             Ok((hdr_native, pn_off)) => {
                 let t = hdr_native.ty;
                 let idx = match t {
@@ -1066,17 +1068,29 @@ impl Connection {
         let mut rx_key_advances = 0usize;
         let (hdr_native, aad_len, pt_len) = loop {
             // Hot path: try lock-free 1-RTT ArcSwap first.
+            // Consume pre_parsed_hdr by move (no clone) — on the common 1-RTT
+            // success path this eliminates a Header clone (Vec dcid/scid alloc)
+            // per packet. On the rare failure path we re-parse below.
             if let Some(keys) = self.crypto_1rtt.load().as_ref() {
                 match packet::unprotect_and_decrypt_1rtt(
                     keys,
                     buf,
                     short_dcid_len,
                     largest_hint,
-                    pre_parsed_hdr.clone(),
+                    pre_parsed_hdr.take(),
                 ) {
                     Ok(v) => break v,
                     Err(ConnectionError::Done) | Err(ConnectionError::CryptoError(_)) => {
-                        // Fall through to RwLock path (key update in progress or non-Short packet)
+                        // Fall through to RwLock path (key update in progress or non-Short packet).
+                        // Re-parse if the 1-RTT attempt consumed pre_parsed_hdr.
+                        // Safe: for Short headers the form/fixed bits (0x80/0x40) are not
+                        // HP-protected (mask covers 0x1f only), so parse_header still
+                        // identifies the packet type correctly after HP removal.
+                        if pre_parsed_hdr.is_none() {
+                            pre_parsed_hdr = packet::parse_header(buf, short_dcid_len)
+                                .ok()
+                                .map(|(h, o)| (h, o));
+                        }
                     }
                     Err(e) => return Err(e),
                 }
@@ -1089,7 +1103,7 @@ impl Connection {
                     buf,
                     short_dcid_len,
                     largest_hint,
-                    pre_parsed_hdr.clone(),
+                    pre_parsed_hdr.take(),
                 )
             };
             match decrypt {
@@ -1100,6 +1114,12 @@ impl Connection {
                         && self.try_advance_read_keys() =>
                 {
                     rx_key_advances += 1;
+                    // Re-parse for the next retry iteration.
+                    if pre_parsed_hdr.is_none() {
+                        pre_parsed_hdr = packet::parse_header(buf, short_dcid_len)
+                            .ok()
+                            .map(|(h, o)| (h, o));
+                    }
                     continue;
                 }
                 Err(ConnectionError::Done) => return Err(ConnectionError::Done),
