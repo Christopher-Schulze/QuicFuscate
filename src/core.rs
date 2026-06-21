@@ -1364,6 +1364,9 @@ impl QuicFuscateConnection {
         // Feed RTT estimate to FEC controller for stream_every scaling.
         let rtt_ms = self.stats.rtt.max(0.0) as u32;
         self.fec.set_rtt_hint(rtt_ms);
+
+        // Sync stealth runtime level with brain's intelligent level hint.
+        self.stealth_manager.sync_intelligent_level();
     }
 
     /// Returns the current estimated RTT in milliseconds.

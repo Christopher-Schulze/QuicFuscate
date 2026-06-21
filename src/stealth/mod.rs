@@ -85,7 +85,7 @@ use std::sync::LazyLock;
 // use of sha2 replaced with centralized SIMD dispatch
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
 use url::Url;
@@ -4153,12 +4153,15 @@ pub struct StealthManager {
     server_push_runtime_enabled: std::sync::atomic::AtomicBool,
     /// Probe hits counter (Dynamic escalation heuristic)
     probe_hits: Arc<AtomicUsize>,
-    /// Runtime override: forced padding (set on probe detection or escalation).
-    runtime_padding_forced: AtomicBool,
-    /// Runtime override: forced timing obfuscation (set on probe detection or escalation).
-    runtime_timing_forced: AtomicBool,
-    /// Runtime override: forced fingerprint rotation (set on probe detection or escalation).
-    runtime_rotation_enabled: AtomicBool,
+    /// Runtime override: padding rate 0-100 (set on probe detection or escalation).
+    /// Level 0 = 0%, Level 1 = 50%, Level 2 = 100%.
+    runtime_padding_rate: AtomicU8,
+    /// Runtime override: timing obfuscation rate 0-100 (set on probe detection or escalation).
+    /// Level 0 = 0%, Level 1 = 0%, Level 2 = 100%.
+    runtime_timing_rate: AtomicU8,
+    /// Runtime override: fingerprint rotation rate 0-100 (set on probe detection or escalation).
+    /// Threshold at >50 = active. Level 0/1 = 0%, Level 2 = 100%.
+    runtime_rotation_rate: AtomicU8,
     /// Optimization manager for memory pools
     _optimization_manager: Arc<OptimizationManager>,
     /// Reality Fallback Proxy for active probe handling
@@ -4290,9 +4293,9 @@ impl StealthManager {
             server_push_state,
             server_push_runtime_enabled: std::sync::atomic::AtomicBool::new(false),
             probe_hits: Arc::new(AtomicUsize::new(0)),
-            runtime_padding_forced: AtomicBool::new(false),
-            runtime_timing_forced: AtomicBool::new(false),
-            runtime_rotation_enabled: AtomicBool::new(false),
+            runtime_padding_rate: AtomicU8::new(0),
+            runtime_timing_rate: AtomicU8::new(0),
+            runtime_rotation_rate: AtomicU8::new(0),
             _optimization_manager: optimization_manager,
             reality_proxy,
             fallback_rx: Arc::new(Mutex::new(rx)),
@@ -4382,7 +4385,7 @@ impl StealthManager {
             RotationMode::Fixed => false,
             RotationMode::Slots | RotationMode::All => self.config.enable_fingerprint_rotation,
         };
-        let runtime_override = self.runtime_rotation_enabled.load(Ordering::Relaxed);
+        let runtime_override = self.runtime_rotation_rate.load(Ordering::Relaxed) > 50;
         let effective_enable = mode_allows || (anti_mode && escalated) || runtime_override;
         if !effective_enable {
             return;
@@ -4887,10 +4890,10 @@ impl StealthManager {
             *guard = Some(std::time::Instant::now() + std::time::Duration::from_secs(20 * 60));
         }
         telemetry!(crate::telemetry::STEALTH_MODE_ESCALATED.inc());
-        // Force all runtime overrides on immediately.
-        self.runtime_padding_forced.store(true, Ordering::Relaxed);
-        self.runtime_timing_forced.store(true, Ordering::Relaxed);
-        self.runtime_rotation_enabled.store(true, Ordering::Relaxed);
+        // Force all runtime overrides on immediately (full intensity = Level 2).
+        self.runtime_padding_rate.store(100, Ordering::Relaxed);
+        self.runtime_timing_rate.store(100, Ordering::Relaxed);
+        self.runtime_rotation_rate.store(100, Ordering::Relaxed);
         // Inject immediate pressure into the Brain's signal_other bucket so the next
         // derive_intelligent_runtime_policy call escalates without waiting for sensor fusion.
         crate::optimize::telemetry::STEALTH_SIGNAL_OTHER.fetch_add(10, Ordering::Relaxed);
@@ -5095,6 +5098,28 @@ impl StealthManager {
         }
     }
 
+    /// Apply the brain-computed intelligent level to runtime overrides.
+    /// Called periodically (e.g., from the connection tick) to sync runtime
+    /// padding/timing/rotation rates with the brain's escalation level.
+    /// Only active in Intelligent mode — explicit modes set their rates directly.
+    pub(crate) fn sync_intelligent_level(&self) {
+        if !self.is_intelligent_runtime() {
+            return;
+        }
+        let level = crate::brain::intelligent_stealth_level_hint() as u8;
+        let current_padding = self.runtime_padding_rate.load(Ordering::Relaxed);
+        let target_padding = match level {
+            0 => 0u8,
+            1 => crate::env_utils::env_parse::<u8>("QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1")
+                .unwrap_or(50),
+            _ => 100u8,
+        };
+        // Only update if different to avoid unnecessary atomic writes
+        if current_padding != target_padding {
+            self.escalate_to_level(level);
+        }
+    }
+
     fn server_push_burst_interval_secs(&self) -> u64 {
         if self.config.server_push_burst_interval == 0 {
             if matches!(self.config.mode, StealthMode::Intelligent) {
@@ -5261,23 +5286,77 @@ impl StealthManager {
     }
 
     /// Escalate to Anti-DPI level features (without changing enum mode).
+    /// This is the Level 2 escalation — full padding + timing + rotation.
     fn escalate_to_anti_dpi_features(&self) {
-        // Increase intensity conservatively to at least 0.8
-        if let Ok(mut st) = self.server_push_state.lock() {
-            if st.current_intensity < 0.8 {
-                st.current_intensity = 0.8;
+        self.escalate_to_level(2);
+    }
+
+    /// Escalate to a specific stealth level (0=Performance, 1=Stealth, 2=AntiDpi).
+    /// Each level sets graduated intensity on padding/timing/rotation.
+    pub(crate) fn escalate_to_level(&self, level: u8) {
+        let padding_rate = match level {
+            0 => 0u8,
+            1 => crate::env_utils::env_parse::<u8>("QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1")
+                .unwrap_or(50),
+            _ => 100u8,
+        };
+        let timing_rate = match level {
+            0 | 1 => 0u8,
+            _ => 100u8,
+        };
+        let rotation_rate = match level {
+            0 | 1 => 0u8,
+            _ => 100u8,
+        };
+        self.runtime_padding_rate.store(padding_rate, Ordering::Relaxed);
+        self.runtime_timing_rate.store(timing_rate, Ordering::Relaxed);
+        self.runtime_rotation_rate.store(rotation_rate, Ordering::Relaxed);
+
+        if level >= 2 {
+            // Level 2: full escalation with server push cover
+            if let Ok(mut st) = self.server_push_state.lock() {
+                if st.current_intensity < 0.8 {
+                    st.current_intensity = 0.8;
+                }
+            }
+            if let Some(ref sched) = self.cover_traffic {
+                sched.set_interval_ms(2500);
             }
         }
-        // If a scheduler exists, tighten interval; otherwise rely on push promises only.
-        // Called only from Intelligent-mode escalation path; always use 2500 ms.
-        if let Some(ref sched) = self.cover_traffic {
-            sched.set_interval_ms(2500);
+        debug!("Stealth escalated to level {}: padding={}%, timing={}%, rotation={}%",
+            level, padding_rate, timing_rate, rotation_rate);
+    }
+
+    /// De-escalate to a lower stealth level (called by brain after quiet period).
+    #[allow(dead_code)]
+    pub(crate) fn de_escalate_to_level(&self, level: u8) {
+        self.escalate_to_level(level);
+        if level == 0 {
+            // Full reset: clear escalated flag and timer
+            self.escalated.store(false, Ordering::Relaxed);
+            if let Ok(mut guard) = self.escalated_until.lock() {
+                *guard = None;
+            }
         }
-        // Force all three runtime overrides on so padding/timing/rotation activate immediately.
-        self.runtime_padding_forced.store(true, Ordering::Relaxed);
-        self.runtime_timing_forced.store(true, Ordering::Relaxed);
-        self.runtime_rotation_enabled.store(true, Ordering::Relaxed);
-        debug!("Escalated: Server Push cover traffic + padding/timing/rotation all forced on");
+        debug!("Stealth de-escalated to level {}", level);
+    }
+
+    /// Get current runtime padding rate (0-100).
+    #[allow(dead_code)]
+    pub(crate) fn runtime_padding_rate(&self) -> u8 {
+        self.runtime_padding_rate.load(Ordering::Relaxed)
+    }
+
+    /// Get current runtime timing rate (0-100).
+    #[allow(dead_code)]
+    pub(crate) fn runtime_timing_rate(&self) -> u8 {
+        self.runtime_timing_rate.load(Ordering::Relaxed)
+    }
+
+    /// Get current runtime rotation rate (0-100).
+    #[allow(dead_code)]
+    pub(crate) fn runtime_rotation_rate(&self) -> u8 {
+        self.runtime_rotation_rate.load(Ordering::Relaxed)
     }
 
     /// Indicates whether MASQUE should be preferred while escalated and available.

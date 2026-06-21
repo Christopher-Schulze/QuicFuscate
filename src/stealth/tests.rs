@@ -810,3 +810,77 @@ fn cover_stream_data_length_in_range() {
         );
     }
 }
+
+#[test]
+fn test_escalate_to_level_0_no_overhead() {
+    let mgr = StealthManager::new(
+        StealthConfig::intelligent(),
+        Arc::new(OptimizationManager::new()),
+        Arc::new(CryptoManager::new()),
+    );
+    mgr.escalate_to_level(0);
+    assert_eq!(mgr.runtime_padding_rate(), 0);
+    assert_eq!(mgr.runtime_timing_rate(), 0);
+    assert_eq!(mgr.runtime_rotation_rate(), 0);
+}
+
+#[test]
+fn test_escalate_to_level_1_partial_padding() {
+    let mgr = StealthManager::new(
+        StealthConfig::intelligent(),
+        Arc::new(OptimizationManager::new()),
+        Arc::new(CryptoManager::new()),
+    );
+    mgr.escalate_to_level(1);
+    // Level 1: padding at 50% (default), no timing, no rotation
+    assert!(mgr.runtime_padding_rate() > 0, "padding should be active at level 1");
+    assert!(mgr.runtime_padding_rate() <= 100, "padding rate should be <= 100");
+    assert_eq!(mgr.runtime_timing_rate(), 0, "timing should be off at level 1");
+    assert_eq!(mgr.runtime_rotation_rate(), 0, "rotation should be off at level 1");
+}
+
+#[test]
+fn test_escalate_to_level_2_full_overhead() {
+    let mgr = StealthManager::new(
+        StealthConfig::intelligent(),
+        Arc::new(OptimizationManager::new()),
+        Arc::new(CryptoManager::new()),
+    );
+    mgr.escalate_to_level(2);
+    assert_eq!(mgr.runtime_padding_rate(), 100);
+    assert_eq!(mgr.runtime_timing_rate(), 100);
+    assert_eq!(mgr.runtime_rotation_rate(), 100);
+}
+
+#[test]
+fn test_de_escalate_from_level_2_to_0() {
+    let mgr = StealthManager::new(
+        StealthConfig::intelligent(),
+        Arc::new(OptimizationManager::new()),
+        Arc::new(CryptoManager::new()),
+    );
+    mgr.escalate_to_level(2);
+    assert_eq!(mgr.runtime_padding_rate(), 100);
+    mgr.de_escalate_to_level(0);
+    assert_eq!(mgr.runtime_padding_rate(), 0);
+    assert_eq!(mgr.runtime_timing_rate(), 0);
+    assert_eq!(mgr.runtime_rotation_rate(), 0);
+}
+
+#[test]
+fn test_gradual_escalation_ladder() {
+    let mgr = StealthManager::new(
+        StealthConfig::intelligent(),
+        Arc::new(OptimizationManager::new()),
+        Arc::new(CryptoManager::new()),
+    );
+    // Level 0 → Level 1 → Level 2: each step increases overhead
+    mgr.escalate_to_level(0);
+    let l0_padding = mgr.runtime_padding_rate();
+    mgr.escalate_to_level(1);
+    let l1_padding = mgr.runtime_padding_rate();
+    mgr.escalate_to_level(2);
+    let l2_padding = mgr.runtime_padding_rate();
+    assert!(l0_padding < l1_padding, "level 1 should have more padding than level 0");
+    assert!(l1_padding < l2_padding, "level 2 should have more padding than level 1");
+}
