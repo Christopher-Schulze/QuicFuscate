@@ -373,7 +373,6 @@ impl CoverHandshakeCache {
     ///
     /// On failure, returns an error (caller decides fallback per `fallback_to_synthetic`).
     pub async fn capture(&self) -> Result<CoverMaterial, String> {
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         use tokio::net::TcpStream;
         use tokio_rustls::rustls;
         use tokio_rustls::TlsConnector;
@@ -406,18 +405,22 @@ impl CoverHandshakeCache {
             rustls::pki_types::ServerName::try_from(self.config.cover_host.clone())
                 .map_err(|e| format!("invalid cover_host: {}", e))?;
         let (capturing, capture_rx) = capturing_stream(tcp);
-        let mut tls = connector.connect(server_name, capturing).await.map_err(|e| {
+        let tls = connector.connect(server_name, capturing).await.map_err(|e| {
             format!("TLS handshake with {} failed: {}", addr, e)
         })?;
 
-        // Drive a minimal HTTP/1.1 request to flush the server's full first flight
-        // (some servers wait for client data before sending post-ServerHello records).
-        let _ = tls.write_all(b"HEAD / HTTP/1.1\r\nHost: {}\r\n\r\n").await;
-        // Read one byte to ensure the server flight is fully received and captured.
-        let mut tmp = [0u8; 1];
-        let _ = tls.read(&mut tmp).await;
-
-        // Collect all raw bytes captured during the handshake.
+        // In TLS 1.3 the server sends its full first flight (ServerHello +
+        // encrypted EncryptedExtensions/Certificate/CertificateVerify/Finished)
+        // immediately after processing the ClientHello, without waiting for
+        // client application data. The handshake is therefore already complete
+        // at this point and all server-flight bytes have been captured by the
+        // CapturingStream wrapper.
+        //
+        // CRITICAL: we must drop `tls` BEFORE calling `capture_rx.collect()`.
+        // `collect()` awaits a oneshot receiver that is only fulfilled when
+        // `CapturingStream::drop` runs — and `CapturingStream` is owned by
+        // `tls`. Without the explicit drop, `collect()` would deadlock.
+        drop(tls);
         let raw = capture_rx.collect().await;
 
         // Parse the raw TLS records to extract ServerHello and certificate material.
@@ -886,5 +889,58 @@ mod tests {
         };
         let cache = CoverHandshakeCache::new(cfg);
         assert_eq!(cache.cover_addr(), "www.cloudflare.com:8443");
+    }
+
+    /// Regression test for the capture-path deadlock (TODO-415 rework).
+    ///
+    /// `RawCaptureHandle::collect()` awaits a oneshot receiver that is only
+    /// fulfilled when the `CapturingStream` is dropped. If the owner of the
+    /// `CapturingStream` is not dropped before `collect()`, the call deadlocks.
+    /// This test verifies that dropping the stream releases the captured bytes
+    /// and `collect()` returns promptly.
+    #[test]
+    fn capturing_stream_collect_returns_after_drop() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        rt.block_on(async {
+            // Use an in-memory duplex pipe so we control the "server" side.
+            let (mut server, client) = tokio::io::duplex(1024);
+
+            // Write known bytes from the server side before wrapping the client.
+            let payload = b"HELLO_CAPTURE_BYTES";
+            server.write_all(payload).await.expect("server write");
+            // Close the server side so the client read hits EOF.
+            drop(server);
+
+            let (mut capturing, handle) = capturing_stream(client);
+
+            // Read everything from the capturing stream to drain it.
+            let mut buf = vec![0u8; 256];
+            let _ = capturing.read(&mut buf).await;
+
+            // CRITICAL: drop the capturing stream BEFORE collect().
+            // This triggers CapturingStream::drop which sends the buffer.
+            drop(capturing);
+
+            // collect() must return promptly (not deadlock).
+            let captured = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                handle.collect(),
+            )
+            .await
+            .expect("collect() must not deadlock");
+
+            assert!(
+                captured.windows(payload.len()).any(|w| w == payload),
+                "captured bytes must contain the payload; got {} bytes: {:?}",
+                captured.len(),
+                &captured[..captured.len().min(payload.len())]
+            );
+        });
     }
 }
