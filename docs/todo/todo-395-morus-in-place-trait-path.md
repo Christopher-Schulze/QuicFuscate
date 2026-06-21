@@ -4,7 +4,7 @@ title: MORUS in-place seal/open on trait path
 severity: HIGH
 phase: B
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-06-05
 ---
 

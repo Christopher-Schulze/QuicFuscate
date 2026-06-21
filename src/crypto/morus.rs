@@ -2157,4 +2157,54 @@ mod morus_tests {
         assert_eq!(ct_opt, expected_ct);
         assert_eq!(tag_opt, expected_tag);
     }
+
+    // TODO-395: regression guard — the AeadSeal/AeadOpen trait path must
+    // operate in-place on the caller buffer (no intermediate Vec) and produce
+    // output identical to the native in-place encrypt/decrypt path.
+    #[test]
+    fn morus_trait_path_matches_in_place_and_roundtrips() {
+        use super::{AeadOpen, AeadSeal};
+
+        let key = [0x5eu8; 16];
+        let iv = [0x2cu8; 12];
+        let ad = b"trait-path-ad";
+        let pt: Vec<u8> = (0u8..200).map(|i| i.wrapping_mul(7)).collect();
+
+        let morus = MorusAead::new(&key, &iv);
+
+        for counter in 1u64..=16 {
+            let nonce16 = super::super::make_nonce16(&iv, counter);
+
+            // Reference: native in-place path.
+            let mut ref_buf = pt.clone();
+            let ref_tag = morus.encrypt_in_place(&mut ref_buf, ad, &nonce16);
+
+            // Trait path: seal_with_u64_counter (must be in-place, no to_vec).
+            let mut trait_buf = vec![0u8; pt.len() + 16];
+            trait_buf[..pt.len()].copy_from_slice(&pt);
+            let sealed_len = morus
+                .seal_with_u64_counter(counter, ad, trait_buf.as_mut_slice(), pt.len(), None)
+                .unwrap();
+            assert_eq!(sealed_len, pt.len() + 16);
+            assert_eq!(&trait_buf[..pt.len()], ref_buf.as_slice());
+            assert_eq!(&trait_buf[pt.len()..], &ref_tag);
+
+            // Trait path: open_with_u64_counter must recover plaintext in-place.
+            let pt_len = morus
+                .open_with_u64_counter(counter, ad, trait_buf.as_mut_slice())
+                .unwrap();
+            assert_eq!(pt_len, pt.len());
+            assert_eq!(&trait_buf[..pt_len], pt.as_slice());
+        }
+
+        // Forgery: a flipped ciphertext bit must fail authentication on the trait path.
+        let mut bad = vec![0u8; pt.len() + 16];
+        bad[..pt.len()].copy_from_slice(&pt);
+        morus.seal_with_u64_counter(99, ad, bad.as_mut_slice(), pt.len(), None).unwrap();
+        bad[0] ^= 0xff;
+        assert!(
+            morus.open_with_u64_counter(99, ad, bad.as_mut_slice()).is_err(),
+            "tampered ciphertext must fail authentication"
+        );
+    }
 }
