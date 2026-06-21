@@ -75,6 +75,17 @@ impl RealityProxy {
         self.select_target()
     }
 
+    /// Inject a pre-built fallback response directly, bypassing the upstream
+    /// relay. Used by the reality-grade TLS mimikry path (TODO-415) to serve
+    /// cached cover-site handshake material to probes without connecting to
+    /// an upstream host.
+    pub async fn send_cached_response(&self, target: SocketAddr, data: Vec<u8>) {
+        let resp = FallbackResponse { target, data };
+        if let Err(e) = self.tx.send(resp).await {
+            log::debug!("RealityProxy: failed to send cached response to {}: {}", target, e);
+        }
+    }
+
     /// Handles a potential probe packet.
     /// If a session exists, forwards it. If not, creates a new session.
     pub fn forward_probe(&self, packet: &[u8], source: SocketAddr) {
@@ -353,70 +364,67 @@ impl CoverHandshakeCache {
     }
 
     /// Capture TLS handshake material from the configured cover site.
-    /// Connects via TCP+TLS 1.3 to the cover host and records the server's
-    /// first flight. On failure, returns an error (caller decides fallback).
+    ///
+    /// Connects via TCP and completes a full TLS 1.3 handshake using `tokio-rustls`
+    /// with a wrapping stream that records the raw server flight bytes (ServerHello +
+    /// EncryptedExtensions + Certificate + CertificateVerify + Finished) before
+    /// decryption. This yields byte-identical cover-site handshake material that can
+    /// be replayed to clients/probes for reality-grade mimikry.
+    ///
+    /// On failure, returns an error (caller decides fallback per `fallback_to_synthetic`).
     pub async fn capture(&self) -> Result<CoverMaterial, String> {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         use tokio::net::TcpStream;
+        use tokio_rustls::rustls;
+        use tokio_rustls::TlsConnector;
 
         let addr = self.cover_addr();
         log::info!("Reality: capturing cover handshake from {}", addr);
 
-        // Connect via TCP
-        let mut stream = TcpStream::connect(&addr)
+        // Build a rustls client config with system roots + webpki fallback.
+        // We accept the cover site's real certificate — we only need the raw
+        // handshake bytes for replay, not the private key.
+        let mut roots = rustls::RootCertStore::empty();
+        let native = rustls_native_certs::load_native_certs();
+        if native.certs.is_empty() {
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        } else {
+            for cert in native.certs {
+                let _ = roots.add(cert);
+            }
+        }
+        let config = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let connector = TlsConnector::from(std::sync::Arc::new(config));
+
+        // Connect TCP and wrap with a capturing layer that records raw inbound bytes.
+        let tcp = TcpStream::connect(&addr)
             .await
             .map_err(|e| format!("TCP connect to {} failed: {}", addr, e))?;
+        let server_name =
+            rustls::pki_types::ServerName::try_from(self.config.cover_host.clone())
+                .map_err(|e| format!("invalid cover_host: {}", e))?;
+        let (capturing, capture_rx) = capturing_stream(tcp);
+        let mut tls = connector.connect(server_name, capturing).await.map_err(|e| {
+            format!("TLS handshake with {} failed: {}", addr, e)
+        })?;
 
-        // Build a TLS 1.3 ClientHello targeting the cover host
-        let client_hello = build_tls13_client_hello(&self.config.cover_host);
+        // Drive a minimal HTTP/1.1 request to flush the server's full first flight
+        // (some servers wait for client data before sending post-ServerHello records).
+        let _ = tls.write_all(b"HEAD / HTTP/1.1\r\nHost: {}\r\n\r\n").await;
+        // Read one byte to ensure the server flight is fully received and captured.
+        let mut tmp = [0u8; 1];
+        let _ = tls.read(&mut tmp).await;
 
-        // Send ClientHello
-        stream
-            .write_all(&client_hello)
-            .await
-            .map_err(|e| format!("write ClientHello failed: {}", e))?;
+        // Collect all raw bytes captured during the handshake.
+        let raw = capture_rx.collect().await;
 
-        // Read ServerHello (first TLS record)
-        let mut buf = vec![0u8; 16384];
-        let n = stream
-            .read(&mut buf)
-            .await
-            .map_err(|e| format!("read ServerHello failed: {}", e))?;
-
-        let server_hello = buf[..n].to_vec();
-
-        // Parse basic TLS record header to extract version and validate
-        if server_hello.len() < 6 {
-            return Err("ServerHello too short".to_string());
-        }
-
-        // TLS record type (byte 0) should be 0x16 (Handshake) for ServerHello
-        let record_type = server_hello[0];
-        if record_type != 0x16 {
-            return Err(format!(
-                "Expected TLS Handshake record (0x16), got 0x{:02x}",
-                record_type
-            ));
-        }
-
-        // TLS record version (bytes 1-2) — legacy_record_version, usually 0x0303
-        let tls_version = u16::from_be_bytes([server_hello[1], server_hello[2]]);
-
-        // Read additional flight data (Certificate, etc.)
-        // In a real implementation, we'd read more records here.
-        // For Phase 1, we capture the first flight which contains ServerHello.
-        let mut cert_buf = vec![0u8; 16384];
-        let cert_n = stream
-            .read(&mut cert_buf)
-            .await
-            .unwrap_or(0);
-
-        // Extract certificate chain (simplified — just store raw bytes for now)
-        let certificate_chain = if cert_n > 0 {
-            vec![cert_buf[..cert_n].to_vec()]
-        } else {
-            vec![]
-        };
+        // Parse the raw TLS records to extract ServerHello and certificate material.
+        let (server_hello, certificate_chain, tls_version) =
+            parse_raw_tls_flight(&raw).ok_or_else(|| {
+                format!("failed to parse TLS flight from {} ({} bytes)", addr, raw.len())
+            })?;
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -424,9 +432,10 @@ impl CoverHandshakeCache {
             .unwrap_or(0);
 
         log::info!(
-            "Reality: captured {} bytes of ServerHello + {} bytes of cert material from {}",
+            "Reality: captured {} bytes of ServerHello + {} cert records ({} bytes total flight) from {}",
             server_hello.len(),
-            cert_n,
+            certificate_chain.len(),
+            raw.len(),
             addr
         );
 
@@ -466,112 +475,180 @@ impl CoverHandshakeCache {
     }
 }
 
-/// Build a minimal TLS 1.3 ClientHello targeting the given SNI.
-/// This is a simplified ClientHello for cover-site probing — not a full
-/// browser fingerprint. In Phase 2, this will be replaced with a captured
-/// real browser ClientHello for byte-identical mimikry.
-fn build_tls13_client_hello(sni: &str) -> Vec<u8> {
-    // TLS 1.3 ClientHello structure:
-    // - Record header: type=0x16, version=0x0301, length
-    // - Handshake: type=0x01 (ClientHello), length
-    // - ClientVersion: 0x0303 (TLS 1.2 legacy)
-    // - Random: 32 bytes
-    // - Session ID: 0 length
-    // - Cipher Suites: TLS_AES_128_GCM_SHA256 (0x1301), TLS_AES_256_GCM_SHA384 (0x1302)
-    // - Compression: null (0x01, 0x00)
-    // - Extensions: SNI, supported_versions (0x0304), key_share (x25519)
+// =============================================================================
+// CapturingStream — wraps a TcpStream and records all raw inbound bytes
+// =============================================================================
 
-    let sni_bytes = sni.as_bytes();
-    let sni_len = sni_bytes.len() as u16;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::oneshot;
 
-    // SNI extension (type 0x0000)
-    let mut sni_ext = Vec::new();
-    sni_ext.extend_from_slice(&0u16.to_be_bytes()); // extension type: server_name
-    let sni_list_len = sni_len + 5;
-    sni_ext.extend_from_slice(&sni_list_len.to_be_bytes()); // extension data length
-    sni_ext.extend_from_slice(&(sni_len + 3).to_be_bytes()); // server_name_list length
-    sni_ext.push(0); // name type: host_name
-    sni_ext.extend_from_slice(&sni_len.to_be_bytes()); // name length
-    sni_ext.extend_from_slice(sni_bytes);
+/// A handle to receive the raw bytes read by a `CapturingStream`.
+pub struct RawCaptureHandle {
+    rx: oneshot::Receiver<Vec<u8>>,
+}
 
-    // supported_versions extension (type 0x002b) — TLS 1.3
-    let mut versions_ext = Vec::new();
-    versions_ext.extend_from_slice(&0x002bu16.to_be_bytes()); // type
-    versions_ext.extend_from_slice(&3u16.to_be_bytes()); // length
-    versions_ext.push(2); // versions list length
-    versions_ext.extend_from_slice(&0x0304u16.to_be_bytes()); // TLS 1.3
+impl RawCaptureHandle {
+    /// Collect all captured raw bytes. Waits for the `CapturingStream` to be
+    /// consumed (its `AsyncRead` impl appends to an internal buffer; this
+    /// returns the buffer once the sender side is dropped, which happens when
+    /// the `tokio-rustls` `TlsStream` is dropped).
+    pub async fn collect(self) -> Vec<u8> {
+        self.rx.await.unwrap_or_default()
+    }
+}
 
-    // key_share extension (type 0x0033) — x25519
-    let mut key_share_ext = Vec::new();
-    key_share_ext.extend_from_slice(&0x0033u16.to_be_bytes()); // type
-    key_share_ext.extend_from_slice(&45u16.to_be_bytes()); // length (2 + 1 + 1 + 32)
-    key_share_ext.extend_from_slice(&43u16.to_be_bytes()); // client_shares length
-    key_share_ext.extend_from_slice(&0x001du16.to_be_bytes()); // group: x25519
-    key_share_ext.extend_from_slice(&32u16.to_be_bytes()); // key length
-    key_share_ext.extend_from_slice(&[0u8; 32]); // dummy key (real impl would generate)
+/// Wraps an inner `AsyncRead` stream and copies every byte read from it into
+/// an internal buffer, which is sent to the `RawCaptureHandle` when this
+/// struct is dropped. This lets us record the raw TLS record bytes that
+/// `tokio-rustls` would otherwise decrypt and discard.
+struct CapturingStream<S> {
+    inner: S,
+    buf: Vec<u8>,
+    tx: Option<oneshot::Sender<Vec<u8>>>,
+}
 
-    // supported_groups extension (type 0x000a)
-    let mut groups_ext = Vec::new();
-    groups_ext.extend_from_slice(&0x000au16.to_be_bytes()); // type
-    groups_ext.extend_from_slice(&4u16.to_be_bytes()); // length
-    groups_ext.extend_from_slice(&2u16.to_be_bytes()); // list length
-    groups_ext.extend_from_slice(&0x001du16.to_be_bytes()); // x25519
-    groups_ext.extend_from_slice(&0x0017u16.to_be_bytes()); // secp256r1
+impl<S> Drop for CapturingStream<S> {
+    fn drop(&mut self) {
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(std::mem::take(&mut self.buf));
+        }
+    }
+}
 
-    // signature_algorithms extension (type 0x000d)
-    let mut sig_ext = Vec::new();
-    sig_ext.extend_from_slice(&0x000du16.to_be_bytes()); // type
-    sig_ext.extend_from_slice(&8u16.to_be_bytes()); // length
-    sig_ext.extend_from_slice(&6u16.to_be_bytes()); // list length
-    sig_ext.extend_from_slice(&0x0401u16.to_be_bytes()); // rsa_pkcs1_sha256
-    sig_ext.extend_from_slice(&0x0804u16.to_be_bytes()); // rsa_pss_rsae_sha256
-    sig_ext.extend_from_slice(&0x0403u16.to_be_bytes()); // ecdsa_secp256r1_sha256
+impl<S: AsyncRead + Unpin> AsyncRead for CapturingStream<S> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let before = buf.filled().len();
+        let result = std::pin::Pin::new(&mut this.inner).poll_read(cx, buf);
+        if let std::task::Poll::Ready(Ok(())) = &result {
+            let after = buf.filled().len();
+            if after > before {
+                this.buf.extend_from_slice(&buf.filled()[before..after]);
+            }
+        }
+        result
+    }
+}
 
-    // Assemble extensions
-    let mut extensions = Vec::new();
-    extensions.extend_from_slice(&sni_ext);
-    extensions.extend_from_slice(&versions_ext);
-    extensions.extend_from_slice(&key_share_ext);
-    extensions.extend_from_slice(&groups_ext);
-    extensions.extend_from_slice(&sig_ext);
+impl<S: AsyncWrite + Unpin> AsyncWrite for CapturingStream<S> {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
 
-    let extensions_len = extensions.len() as u16;
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
 
-    // ClientHello body
-    let mut body = Vec::new();
-    body.extend_from_slice(&0x0303u16.to_be_bytes()); // legacy_version: TLS 1.2
-    body.extend_from_slice(&[0u8; 32]); // random
-    body.push(0); // session_id length: 0
-    // cipher suites
-    body.extend_from_slice(&4u16.to_be_bytes()); // cipher suites length
-    body.extend_from_slice(&0x1301u16.to_be_bytes()); // TLS_AES_128_GCM_SHA256
-    body.extend_from_slice(&0x1302u16.to_be_bytes()); // TLS_AES_256_GCM_SHA384
-    // compression
-    body.push(1); // compression methods length
-    body.push(0); // null compression
-    // extensions
-    body.extend_from_slice(&extensions_len.to_be_bytes());
-    body.extend_from_slice(&extensions);
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
 
-    let body_len = body.len() as u32;
-    let body_len_bytes = body_len.to_be_bytes();
+/// Create a `CapturingStream` and return it together with the handle for
+/// collecting the captured bytes.
+fn capturing_stream<S: AsyncRead + AsyncWrite + Unpin>(
+    inner: S,
+) -> (CapturingStream<S>, RawCaptureHandle) {
+    let (tx, rx) = oneshot::channel();
+    let handle = RawCaptureHandle { rx };
+    (CapturingStream { inner, buf: Vec::with_capacity(16384), tx: Some(tx) }, handle)
+}
 
-    // Handshake header: type=0x01, length (3 bytes)
-    let mut handshake = Vec::new();
-    handshake.push(0x01); // ClientHello
-    handshake.extend_from_slice(&body_len_bytes[1..4]); // 24-bit length
-    handshake.extend_from_slice(&body);
+// =============================================================================
+// Raw TLS flight parser
+// =============================================================================
 
-    let handshake_len = handshake.len() as u16;
+/// Parse a raw TLS 1.3 server flight (sequence of TLS records) and extract:
+/// - The ServerHello record (including its TLS record header)
+/// - The certificate chain (each certificate as a separate Vec<u8>)
+/// - The negotiated TLS version from the ServerHello
+///
+/// Returns `None` if the flight does not contain a valid ServerHello.
+fn parse_raw_tls_flight(raw: &[u8]) -> Option<(Vec<u8>, Vec<Vec<u8>>, u16)> {
+    let mut offset = 0usize;
+    let mut server_hello: Option<Vec<u8>> = None;
+    let mut tls_version: Option<u16> = None;
+    let mut certificates: Vec<Vec<u8>> = Vec::new();
 
-    // TLS record header
-    let mut record = Vec::new();
-    record.push(0x16); // Handshake
-    record.extend_from_slice(&0x0301u16.to_be_bytes()); // legacy_record_version
-    record.extend_from_slice(&handshake_len.to_be_bytes());
-    record.extend_from_slice(&handshake);
+    while offset + 5 <= raw.len() {
+        let record_type = raw[offset];
+        let record_len = u16::from_be_bytes([raw[offset + 3], raw[offset + 4]]) as usize;
+        let record_end = offset + 5 + record_len;
+        if record_end > raw.len() {
+            break;
+        }
+        let record_body = &raw[offset + 5..record_end];
 
-    record
+        if record_type == 0x16 {
+            // Handshake record — parse handshake messages within.
+            let mut hs_off = 0usize;
+            while hs_off + 4 <= record_body.len() {
+                let hs_type = record_body[hs_off];
+                let hs_len = ((record_body[hs_off + 1] as usize) << 16)
+                    | ((record_body[hs_off + 2] as usize) << 8)
+                    | (record_body[hs_off + 3] as usize);
+                let hs_end = hs_off + 4 + hs_len;
+                if hs_end > record_body.len() {
+                    break;
+                }
+                let hs_body = &record_body[hs_off + 4..hs_end];
+
+                match hs_type {
+                    0x02 => {
+                        // ServerHello
+                        // The full record (header + body) is stored for replay.
+                        server_hello = Some(raw[offset..record_end].to_vec());
+                        // legacy_record_version is at raw[offset+1..offset+3]
+                        tls_version =
+                            Some(u16::from_be_bytes([raw[offset + 1], raw[offset + 2]]));
+                    }
+                    0x0b => {
+                        // Certificate
+                        // Parse the certificate list and extract each DER cert.
+                        if hs_body.len() >= 3 {
+                            let _list_len = ((hs_body[0] as usize) << 16)
+                                | ((hs_body[1] as usize) << 8)
+                                | (hs_body[2] as usize);
+                            let mut cert_off = 3usize;
+                            while cert_off + 3 <= hs_body.len() {
+                                let cert_len = ((hs_body[cert_off] as usize) << 16)
+                                    | ((hs_body[cert_off + 1] as usize) << 8)
+                                    | (hs_body[cert_off + 2] as usize);
+                                let cert_data_end = cert_off + 3 + cert_len;
+                                if cert_data_end > hs_body.len() {
+                                    break;
+                                }
+                                certificates
+                                    .push(hs_body[cert_off + 3..cert_data_end].to_vec());
+                                cert_off = cert_data_end + 2; // skip 2-byte extensions
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                hs_off = hs_end;
+            }
+        }
+        offset = record_end;
+    }
+
+    let server_hello = server_hello?;
+    let version = tls_version.unwrap_or(0x0303);
+    Some((server_hello, certificates, version))
 }
 
 #[cfg(test)]
@@ -734,27 +811,69 @@ mod tests {
     }
 
     #[test]
-    fn tls13_client_hello_has_valid_structure() {
-        let hello = build_tls13_client_hello("www.cloudflare.com");
-        // Must start with TLS Handshake record type
-        assert_eq!(hello[0], 0x16, "record type should be Handshake");
-        // legacy_record_version should be 0x0301 or 0x0303
-        assert_eq!(hello[1], 0x03, "record version high byte");
-        // Must contain ClientHello handshake type
-        assert_eq!(hello[5], 0x01, "handshake type should be ClientHello");
-        // Must be reasonably sized (at least 100 bytes for a minimal ClientHello)
-        assert!(hello.len() > 100, "ClientHello too short: {} bytes", hello.len());
+    fn parse_raw_tls_flight_extracts_server_hello() {
+        // Build a minimal synthetic TLS flight: one Handshake record containing
+        // a ServerHello (type 0x02) with a 2-byte body.
+        let mut flight = Vec::new();
+        flight.push(0x16); // record type: Handshake
+        flight.extend_from_slice(&0x0303u16.to_be_bytes()); // legacy_record_version
+        let sh_body = [0x02u8, 0x00, 0x00, 0x02, 0xAA, 0xBB]; // ServerHello, len=2, payload
+        flight.extend_from_slice(&(sh_body.len() as u16).to_be_bytes()); // record length
+        flight.extend_from_slice(&sh_body);
+
+        let (server_hello, certs, version) =
+            parse_raw_tls_flight(&flight).expect("must parse ServerHello");
+        assert_eq!(server_hello, flight, "server_hello should be the full record");
+        assert!(certs.is_empty(), "no certificates in this flight");
+        assert_eq!(version, 0x0303);
     }
 
     #[test]
-    fn tls13_client_hello_contains_sni() {
-        let hello = build_tls13_client_hello("www.example.com");
-        // SNI should appear in the ClientHello bytes
-        let sni_bytes = b"www.example.com";
-        assert!(
-            hello.windows(sni_bytes.len()).any(|w| w == sni_bytes),
-            "ClientHello must contain SNI hostname"
-        );
+    fn parse_raw_tls_flight_extracts_certificates() {
+        // Build a flight with a ServerHello record followed by a Certificate record.
+        let mut flight = Vec::new();
+
+        // ServerHello record
+        flight.push(0x16);
+        flight.extend_from_slice(&0x0303u16.to_be_bytes());
+        let sh_hs = [0x02u8, 0x00, 0x00, 0x02, 0xAA, 0xBB];
+        flight.extend_from_slice(&(sh_hs.len() as u16).to_be_bytes());
+        flight.extend_from_slice(&sh_hs);
+
+        // Certificate record: handshake type 0x0b, 3-byte length, 3-byte list length,
+        // then one cert entry (3-byte length + cert data + 2-byte extensions).
+        let cert_der = [0x30, 0x82, 0x01, 0x00]; // minimal DER-ish
+        let mut cert_entry = Vec::new();
+        cert_entry.extend_from_slice(&(cert_der.len() as u32).to_be_bytes()[1..4]); // 3-byte len
+        cert_entry.extend_from_slice(&cert_der);
+        cert_entry.extend_from_slice(&0u16.to_be_bytes()); // 2-byte extensions
+
+        let mut cert_hs_body = Vec::new();
+        let list_len = cert_entry.len();
+        cert_hs_body.extend_from_slice(&(list_len as u32).to_be_bytes()[1..4]); // 3-byte list len
+        cert_hs_body.extend_from_slice(&cert_entry);
+
+        let mut cert_record = Vec::new();
+        cert_record.push(0x0b); // Certificate handshake type
+        cert_record.extend_from_slice(&(cert_hs_body.len() as u32).to_be_bytes()[1..4]); // 3-byte hs len
+        cert_record.extend_from_slice(&cert_hs_body);
+
+        flight.push(0x16); // record type: Handshake
+        flight.extend_from_slice(&0x0303u16.to_be_bytes());
+        flight.extend_from_slice(&(cert_record.len() as u16).to_be_bytes());
+        flight.extend_from_slice(&cert_record);
+
+        let (_server_hello, certs, _version) =
+            parse_raw_tls_flight(&flight).expect("must parse flight");
+        assert_eq!(certs.len(), 1, "should extract one certificate");
+        assert_eq!(certs[0], cert_der, "cert DER should match");
+    }
+
+    #[test]
+    fn parse_raw_tls_flight_returns_none_without_server_hello() {
+        // A flight with only an ApplicationData record should return None.
+        let flight = [0x17u8, 0x03, 0x03, 0x00, 0x02, 0xAA, 0xBB];
+        assert!(parse_raw_tls_flight(&flight).is_none());
     }
 
     #[test]

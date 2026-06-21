@@ -401,8 +401,11 @@ pub(crate) mod planner {
             );
         }
 
-        // TODO-390: the data-plane AEAD auto-selection length must clear the
-        // X8 threshold so wide backends are not under-selected on VAES hosts.
+        // Regression guard: the data-plane AEAD auto-selection length must
+        // clear the X8 threshold so wide backends are not under-selected on
+        // VAES-capable hosts. The constant `DEFAULT_DATA_PLANE_AEAD_LEN` is
+        // 1400 (matching `TYPICAL_1RTT_PAYLOAD_LEN`); this test ensures it
+        // never drops below `AEGIS_X8_MIN_LEN`.
         #[test]
         fn x86_data_plane_length_selects_x8_with_vaes() {
             let features =

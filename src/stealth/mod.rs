@@ -4336,6 +4336,10 @@ pub struct StealthManager {
     /// Receiver for upstream responses (Reality Fallback)
     pub(crate) fallback_rx:
         Arc<Mutex<tokio::sync::mpsc::Receiver<crate::reality::FallbackResponse>>>,
+    /// Cover handshake cache for reality-grade TLS mimikry (TODO-415).
+    /// When enabled, holds cached TLS handshake material from a cover site
+    /// that can be replayed to probes for byte-identical mimikry.
+    pub(crate) cover_cache: Option<Arc<crate::reality::CoverHandshakeCache>>,
     /// Next scheduled cover PING emission time
     next_cover_ping: parking_lot::Mutex<std::time::Instant>,
     /// Next scheduled cover APPLICATION_DATA stream frame injection time
@@ -4441,6 +4445,26 @@ impl StealthManager {
             log::info!("Reality Proxy (Reverse Proxy) initialized for Active Probe fallback.");
         }
 
+        // COVER HANDSHAKE CACHE INITIALIZATION (TODO-415)
+        // Load RealityConfig from env. When enabled, create the cache and spawn
+        // the background refresh loop so cover material is captured and kept fresh.
+        let reality_config = crate::reality::RealityConfig::from_env();
+        let cover_cache = if reality_config.enabled {
+            let cache = Arc::new(crate::reality::CoverHandshakeCache::new(reality_config.clone()));
+            let cache_for_loop = Arc::clone(&cache);
+            tokio::spawn(async move {
+                cache_for_loop.refresh_loop().await;
+            });
+            log::info!(
+                "Cover handshake cache initialized for {} (TTL={}s)",
+                reality_config.cover_host,
+                reality_config.cache_ttl
+            );
+            Some(cache)
+        } else {
+            None
+        };
+
         Self {
             config,
             fingerprint,
@@ -4467,6 +4491,7 @@ impl StealthManager {
             _optimization_manager: optimization_manager,
             reality_proxy,
             fallback_rx: Arc::new(Mutex::new(rx)),
+            cover_cache,
             next_cover_ping: parking_lot::Mutex::new(std::time::Instant::now()),
             next_cover_stream: parking_lot::Mutex::new(std::time::Instant::now()),
         }
@@ -5720,10 +5745,41 @@ impl StealthManager {
     }
 
     /// Forwards an invalid/probe packet to the Reality Proxy.
+    ///
+    /// When reality-grade TLS mimikry is enabled (TODO-415) and the cover cache
+    /// has fresh material, the probe is served the cached cover-site ServerHello
+    /// directly — no upstream relay needed. Otherwise, falls back to the
+    /// `RealityProxy` relay path.
     pub(crate) fn handle_fallback(&self, packet: &[u8], source: std::net::SocketAddr) {
+        // Phase 1 (TODO-415): serve cached cover material directly to probes.
+        if let Some(material) = self.cover_handshake_material() {
+            log::debug!(
+                "Serving cached cover handshake ({} bytes) to probe from {}",
+                material.server_hello.len(),
+                source
+            );
+            if let Some(proxy) = &self.reality_proxy {
+                // Send the cached ServerHello bytes directly as a fallback
+                // response, bypassing the upstream relay. The server's send
+                // loop picks this up via poll_fallback().
+                let server_hello = material.server_hello.clone();
+                let proxy = Arc::clone(proxy);
+                tokio::spawn(async move {
+                    proxy.send_cached_response(source, server_hello).await;
+                });
+            }
+            return;
+        }
         if let Some(proxy) = &self.reality_proxy {
             proxy.forward_probe(packet, source);
         }
+    }
+
+    /// Returns cached cover-site TLS handshake material if reality-grade mimikry
+    /// is enabled and the cache has fresh material. Returns `None` if disabled,
+    /// cache empty, or material stale — caller should fall back to synthetic TLS.
+    pub(crate) fn cover_handshake_material(&self) -> Option<std::sync::Arc<crate::reality::CoverMaterial>> {
+        self.cover_cache.as_ref()?.get()
     }
 
     /// Returns true if a cover PING should be sent now, and advances the internal timer.
@@ -5891,6 +5947,15 @@ mod stealth_coverage_tests {
         assert!(m.flow_shaper.is_some());
         assert!(m.cover_traffic.is_some());
         assert!(m.domain_fronting.is_some());
+    }
+
+    #[test]
+    fn cover_cache_is_none_when_reality_disabled() {
+        // QUICFUSCATE_REALITY_ENABLED defaults to false, so the cover cache
+        // should not be initialized.
+        let m = make_manager(StealthConfig::intelligent());
+        assert!(m.cover_cache.is_none(), "cover_cache should be None when reality is disabled");
+        assert!(m.cover_handshake_material().is_none(), "no material when cache is absent");
     }
 
     #[test]

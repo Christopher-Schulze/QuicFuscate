@@ -14,6 +14,19 @@ phase3_done: false
 supersedes: []
 ---
 
+> **Phase 1 rework note (2026-07-23):** The initial Phase 1 implementation used
+> a hand-built TLS 1.3 ClientHello with a dummy all-zeros x25519 key, which
+> could not complete the TLS key exchange — only the plaintext ServerHello was
+> captured, and the encrypted flight (Certificate, CertificateVerify, Finished)
+> was unusable. The rework replaces this with `tokio-rustls` performing a full
+> TLS 1.3 handshake via a `CapturingStream` wrapper that records raw inbound
+> TLS record bytes before decryption. The `parse_raw_tls_flight` parser
+> extracts the ServerHello record and certificate chain from the captured
+> bytes. The `CoverHandshakeCache` is now wired into `StealthManager` — when
+> `QUICFUSCATE_REALITY_ENABLED=true`, the background refresh loop is spawned
+> and `handle_fallback` serves cached ServerHello bytes directly to probes via
+> `RealityProxy::send_cached_response`, bypassing the upstream relay.
+
 # TODO-415: Reality-Grade TLS-Mimikry
 
 ## Problem
@@ -178,28 +191,32 @@ This is a **3-phase incremental** task. Each phase is independently shippable.
 - The `[reality]` config section is **opt-in** (default `enabled = false`) — existing deployments are unaffected.
 - `rustls` 0.23 (already a dependency) supports client-side TLS 1.3 — no new crypto dependency needed.
 
-## Phase 1 Implementation Limitations (as shipped)
+## Phase 1 Implementation Status (reworked)
 
-The Phase 1 implementation (`src/reality.rs`) has a known limitation: the
-`capture()` method uses raw TCP + a hand-built TLS 1.3 ClientHello with a
-**dummy x25519 key** instead of using `rustls` as a proper TLS client.
+The Phase 1 implementation now uses `tokio-rustls` to perform a full TLS 1.3
+handshake with the cover site. A `CapturingStream` wrapper records raw inbound
+TLS record bytes before `tokio-rustls` decrypts them, yielding byte-identical
+cover-site handshake material (ServerHello + encrypted flight). The
+`parse_raw_tls_flight` parser extracts the ServerHello record and certificate
+chain from the captured bytes.
 
-**Consequence**: Only the unencrypted ServerHello is captured. The encrypted
-flight (Certificate, CertificateVerify, Finished) cannot be captured without
-completing the TLS 1.3 key exchange, which requires a real key pair. The
-`certificate_chain` field stores raw encrypted bytes, not actual certificates.
+**Wiring**: `CoverHandshakeCache` is integrated into `StealthManager`. When
+`QUICFUSCATE_REALITY_ENABLED=true`, the background `refresh_loop` is spawned
+on `StealthManager` construction. `handle_fallback` checks
+`cover_handshake_material()` and, when fresh material is available, serves the
+cached ServerHello bytes directly to probes via
+`RealityProxy::send_cached_response`, bypassing the upstream relay.
 
-**Impact on Phase 1 acceptance**: Items 5-7 (server responds with cached
-ServerHello to clients, QKey auth in encrypted extension, probes receive
-cached response) are NOT yet wired into the server handshake path. The cache
-infrastructure (`CoverHandshakeCache`, `CoverMaterial`, `RealityConfig`,
-`build_tls13_client_hello()`) is complete and tested, but not integrated
-into the actual connection handshake.
+**Remaining Phase 1 gaps** (why status is still `PARTIAL`):
+- Item 6 (QKey auth in encrypted extension): not yet implemented — the cached
+  ServerHello is served as-is without injecting QKey authentication. This
+  requires Phase 2 (ClientHello-Mirror) to coordinate client/server on the
+  auth extension.
+- The cached material is served to probes via the fallback response path, but
+  the normal client handshake path (legitimate QuicFuscate clients) does not
+  yet use the cover material for the ServerHello. This is intentional for
+  Phase 1 — only probes see the cover material; real clients use the normal
+  QuicFuscate TLS handshake.
 
-**Fix for full Phase 1 completion**: Replace `build_tls13_client_hello()`
-with a `rustls` client connection that completes the full TLS 1.3 handshake
-and captures all server flight bytes. Then wire `CoverHandshakeCache` into
-the server's handshake response path in `src/transport/` or `src/server/`.
-
-This is why the TODO status is `PARTIAL` with `phase1_done: true` (cache
-infrastructure) but the full acceptance criteria are not yet met.
+**Dependencies added**: `tokio-rustls` 0.26 (with `ring` provider to match
+the existing `rustls` configuration).

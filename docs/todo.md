@@ -11,7 +11,7 @@ Execution order: **Phase A (config + quick wins) -> Phase B (load path) -> Phase
 | ID | Phase | Priority | Title | Status |
 |----|-------|----------|-------|--------|
 | TODO-389 | A | P0 | Fix `aegis128x4`/`x8` config override mapping to Aegis-L only | **DONE** |
-| TODO-390 | A | P0 | AEAD backend selection uses MTU workload length, not Initial size | **DONE** (introduced documented `DEFAULT_DATA_PLANE_AEAD_LEN`=1400 in crypto/mod.rs, decoupled from Initial sizing; X8 selected on VAES hosts at data-plane length) |
+| TODO-390 | A | P0 | AEAD backend selection uses MTU workload length, not Initial size | **SCRAP** — premise incorrect: code already used `TYPICAL_1RTT_PAYLOAD_LEN`=1400, not Initial sizing. Constant renamed to `DEFAULT_DATA_PLANE_AEAD_LEN` for documentation clarity; regression guard test added in simd.rs |
 | TODO-391 | A | P1 | Eliminate double QUIC header parse in `Connection::recv` | **DONE** (recv threads pre_parsed_hdr through decrypt paths; Retry client branch now reuses pre-parsed header instead of re-parsing) |
 | TODO-392 | A | P1 | Eliminate `FecPacket::clone()` on FEC send hot path | **DONE** (SharedFecBuffer Arc-backed design already makes source-packet clone a refcount bump, no payload copy; added regression test guarding zero-copy clone property; transition path audited — 3 handles minimal) |
 | TODO-393 | A | P1 | Reuse AEGIS cipher state across packets (avoid per-PN init) | **DONE** (state stored persistently in AEAD struct; `new` only on first packet, `reinit` reuses allocation thereafter; differential test proves reinit output byte-identical to fresh-new per packet across 64 counters) |

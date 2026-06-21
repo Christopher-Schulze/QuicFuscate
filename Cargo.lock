@@ -1639,6 +1639,7 @@ dependencies = [
  "socket2 0.5.10",
  "sysinfo",
  "tokio",
+ "tokio-rustls",
  "toml",
  "url",
  "webpki-roots 0.26.11",
