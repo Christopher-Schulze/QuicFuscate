@@ -1072,7 +1072,7 @@ impl ModeManager {
 
     #[inline]
     fn target_for_loss(avg_loss: f32, auto_gf4: bool) -> FecProtectionTarget {
-        continuous_fec_target(avg_loss, auto_gf4, false, 2048, 1024)
+        continuous_fec_target(avg_loss, auto_gf4, false, 2048, 1024, 0, 0.0)
     }
 
     #[inline]

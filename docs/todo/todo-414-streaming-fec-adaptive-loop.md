@@ -4,8 +4,9 @@ title: Streaming-FEC in adaptiven Loop integrieren (supersedes TODO-409)
 severity: HIGH
 phase: "2"
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-07-23
+resolved: 2026-07-23
 depends_on: [TODO-418]
 supersedes: [TODO-409]
 ---

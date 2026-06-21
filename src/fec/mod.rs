@@ -285,6 +285,8 @@ fn continuous_fec_target(
     disturbance: bool,
     fountain_window: usize,
     extreme_window: usize,
+    rtt_ms: u32,
+    burst_variance: f32,
 ) -> FecProtectionTarget {
     let clean = avg_loss < 0.001 && !disturbance;
     if clean {
@@ -294,9 +296,15 @@ fn continuous_fec_target(
     let burst = if disturbance { (avg_loss.max(0.15) * 1.5).clamp(0.0, 1.0) } else { avg_loss };
     let pressure = FecProtectionPressure::new(avg_loss, burst);
 
+    // StreamingAdaptive: select Streaming for moderate burst-loss (5-15%)
+    // when burst variance is high (indicating bursty rather than uniform loss).
+    // Falls back to LowCostBlock for uniform loss, escalates to HeavyBlock above 15%.
     let family = if pressure.loss >= 0.25 {
         FecBackendFamily::Fountain
     } else if disturbance && pressure.loss >= 0.15 {
+        FecBackendFamily::Streaming
+    } else if pressure.loss >= 0.05 && pressure.loss < 0.15 && burst_variance > 0.3 {
+        // Burst-loss regime: streaming FEC is optimal for burst patterns
         FecBackendFamily::Streaming
     } else if pressure.total < 0.10 {
         FecBackendFamily::LowCostBlock
@@ -350,15 +358,27 @@ fn continuous_fec_target(
 
     let stream_every = match family {
         FecBackendFamily::Streaming => {
-            if pressure.total >= 0.22 {
-                Some(1)
+            // Base interval from pressure (higher pressure = smaller interval = faster recovery)
+            let base = if pressure.total >= 0.22 {
+                1
             } else if pressure.total >= 0.18 {
-                Some(2)
+                2
             } else if pressure.total >= 0.15 {
-                Some(3)
+                3
             } else {
-                Some(4)
-            }
+                4
+            };
+            // RTT-coupled scaling: high RTT → larger interval (less overhead, recovery is RTT-bound)
+            // Low RTT → smaller interval (faster recovery, overhead is cheap)
+            // Formula: scale = clamp(rtt / reference_rtt, 0.5, 3.0), reference = 100ms
+            let reference_rtt = 100u32;
+            let scale = if rtt_ms > 0 {
+                (rtt_ms as f32 / reference_rtt as f32).clamp(0.5, 3.0)
+            } else {
+                1.0
+            };
+            let scaled = (base as f32 * scale).round() as usize;
+            Some(scaled.clamp(1, 18))
         }
         _ => None,
     };
@@ -1129,6 +1149,37 @@ impl LossEstimator {
         self.cusum_pos > self.cusum_thresh
             || self.cusum_neg > self.cusum_thresh
             || self.stable_ctr == 0
+    }
+
+    /// Returns a normalized burst variance estimate [0.0, 1.0].
+    /// High values indicate bursty loss patterns (clustered losses),
+    /// low values indicate uniform/random loss.
+    /// Computed as the variance of run lengths between loss events in the burst window.
+    pub fn burst_variance(&self) -> f32 {
+        if self.burst_window.len() < 8 {
+            return 0.0;
+        }
+        // Compute run-length variance: lengths of consecutive non-loss runs
+        let mut runs: Vec<u32> = Vec::new();
+        let mut current_run = 0u32;
+        for &lost in &self.burst_window {
+            if lost {
+                if current_run > 0 {
+                    runs.push(current_run);
+                }
+                current_run = 0;
+            } else {
+                current_run += 1;
+            }
+        }
+        if runs.is_empty() {
+            return 0.0;
+        }
+        let n = runs.len() as f32;
+        let mean = runs.iter().map(|&r| r as f32).sum::<f32>() / n;
+        let variance = runs.iter().map(|&r| (r as f32 - mean).powi(2)).sum::<f32>() / n;
+        // Normalize: variance / (mean^2 + 1) gives a coefficient-of-variation-like metric
+        (variance / (mean * mean + 1.0)).min(1.0)
     }
 }
 
@@ -3024,6 +3075,12 @@ pub struct AdaptiveFec {
     interleave_depth: usize,
     fountain_window: usize,
     extreme_window: usize,
+    /// Current RTT estimate in milliseconds (0 = unknown/unset).
+    /// Fed by transport via `set_rtt_hint()` and used to scale `stream_every`.
+    rtt_ms: u32,
+    /// Cross-fade window size in packets (default 32). During mode transitions,
+    /// both old and new repair symbols are emitted for this many packets.
+    cross_fade_window: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -3304,6 +3361,9 @@ impl AdaptiveFec {
             interleave_depth,
             fountain_window,
             extreme_window,
+            rtt_ms: 0,
+            cross_fade_window: env_parse::<usize>("QUICFUSCATE_FEC_CROSS_FADE_WINDOW")
+                .unwrap_or(32),
         }
     }
 
@@ -3498,6 +3558,8 @@ impl AdaptiveFec {
             self.loss_estimator.disturbance_detected(),
             self.fountain_window,
             self.extreme_window,
+            self.rtt_ms,
+            self.loss_estimator.burst_variance(),
         );
 
         match target.family {
@@ -3556,8 +3618,13 @@ impl AdaptiveFec {
 
         // Start cross-fade transition
         let old_target = target_from_mode(current, current_window);
-        self.cross_fade_packets =
-            Self::compute_cross_fade_target_len(old_target, target, current_window, k);
+        self.cross_fade_packets = Self::compute_cross_fade_target_len_capped(
+            old_target,
+            target,
+            current_window,
+            k,
+            self.cross_fade_window,
+        );
         self.transition_left = self.cross_fade_packets;
         self.transition_progress = 0.0;
 
@@ -3628,18 +3695,40 @@ impl AdaptiveFec {
         }
 
         let k_delta = old_k.abs_diff(new_k);
+        // Cross-fade window sizes: Fountain transitions get the largest window
+        // to avoid throughput cliffs at mode boundaries.
         let base = match (old_target.family, new_target.family) {
             (FecBackendFamily::Zero, FecBackendFamily::LowCostBlock)
             | (FecBackendFamily::LowCostBlock, FecBackendFamily::Zero) => 8,
             (FecBackendFamily::Streaming, FecBackendFamily::HeavyBlock)
             | (FecBackendFamily::HeavyBlock, FecBackendFamily::Streaming) => 12,
+            // Fountain cross-fade: emit both block repairs AND fountain symbols
+            // for the cross-fade window to avoid throughput cliff at boundary.
             (_, FecBackendFamily::Fountain) | (FecBackendFamily::Fountain, _) => 24,
             (FecBackendFamily::Zero, FecBackendFamily::Streaming)
             | (FecBackendFamily::Streaming, FecBackendFamily::Zero) => 10,
             _ => 16,
         };
         let k_factor = (k_delta / 16).min(8);
-        (base + k_factor).clamp(5, 40)
+        (base + k_factor).min(40)
+    }
+
+    /// Compute cross-fade length with configurable maximum from `cross_fade_window`.
+    /// This allows operators to tune the cross-fade duration via
+    /// `QUICFUSCATE_FEC_CROSS_FADE_WINDOW` env var.
+    fn compute_cross_fade_target_len_capped(
+        old_target: FecProtectionTarget,
+        new_target: FecProtectionTarget,
+        old_k: usize,
+        new_k: usize,
+        cap: usize,
+    ) -> usize {
+        let len = Self::compute_cross_fade_target_len(old_target, new_target, old_k, new_k);
+        if cap > 0 {
+            len.min(cap)
+        } else {
+            len
+        }
     }
 }
 
@@ -3971,6 +4060,12 @@ impl AdaptiveFec {
 
     // Removed packet_to_fec_packet (unused).
 
+    /// Update RTT estimate for stream_every scaling.
+    /// Called by transport when a new RTT sample is available.
+    pub fn set_rtt_hint(&mut self, rtt_ms: u32) {
+        self.rtt_ms = rtt_ms;
+    }
+
     /// Report observed packet loss to update the estimator and drive adaptive mode switching.
     pub fn report_loss(&mut self, lost: usize, total: usize) {
         // Update estimator with current observation and drive mode via smoothed loss
@@ -4019,6 +4114,8 @@ impl AdaptiveFec {
             self.loss_estimator.disturbance_detected(),
             self.fountain_window,
             self.extreme_window,
+            self.rtt_ms,
+            self.loss_estimator.burst_variance(),
         );
         let mut controller_target = if prev.is_some() {
             desired_target
@@ -4087,8 +4184,13 @@ impl AdaptiveFec {
         if switched {
             let (_ok, _on) = internal::ModeManager::params_for(old_mode, old_window);
             let old_target = target_from_mode(old_mode, old_window);
-            self.cross_fade_packets =
-                Self::compute_cross_fade_target_len(old_target, controller_target, old_window, k);
+            self.cross_fade_packets = Self::compute_cross_fade_target_len_capped(
+                old_target,
+                controller_target,
+                old_window,
+                k,
+                self.cross_fade_window,
+            );
 
             // CRITICAL: Drain ZeroDecoder buffers BEFORE creating new decoder
             // This ensures no packet loss during Zero->Real FEC transitions

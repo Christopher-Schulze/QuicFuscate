@@ -40,7 +40,7 @@ fn test_auto_mode_streaming_selection() {
 
 #[test]
 fn test_continuous_target_keeps_clean_link_zero_family() {
-    let target = continuous_fec_target(0.0, true, false, 2048, 1024);
+    let target = continuous_fec_target(0.0, true, false, 2048, 1024, 0, 0.0);
     assert_eq!(target.family, FecBackendFamily::Zero);
     assert_eq!(target.effective_window, 0);
     assert_eq!(target.stream_every, None);
@@ -48,7 +48,7 @@ fn test_continuous_target_keeps_clean_link_zero_family() {
 
 #[test]
 fn test_continuous_target_escalates_to_streaming_under_disturbance() {
-    let target = continuous_fec_target(0.16, true, true, 2048, 1024);
+    let target = continuous_fec_target(0.16, true, true, 2048, 1024, 0, 0.0);
     assert_eq!(target.family, FecBackendFamily::Streaming);
     assert_eq!(target.effective_window, 1024);
     assert!(target.stream_every.is_some());
@@ -56,7 +56,7 @@ fn test_continuous_target_escalates_to_streaming_under_disturbance() {
 
 #[test]
 fn test_continuous_target_escalates_to_fountain_under_extreme_loss() {
-    let target = continuous_fec_target(0.30, true, false, 2048, 1024);
+    let target = continuous_fec_target(0.30, true, false, 2048, 1024, 0, 0.0);
     assert_eq!(target.family, FecBackendFamily::Fountain);
     assert_eq!(target.effective_window, 2048);
     assert!(target.redundancy >= 5.0);
@@ -64,7 +64,7 @@ fn test_continuous_target_escalates_to_fountain_under_extreme_loss() {
 
 #[test]
 fn test_mode_manager_params_follow_controller_target() {
-    let target = continuous_fec_target(0.18, true, true, 2048, 1024);
+    let target = continuous_fec_target(0.18, true, true, 2048, 1024, 0, 0.0);
     let (mode, k, n) = super::internal::ModeManager::params_for_target(target, 64, true);
     assert_eq!(mode, FecMode::Streaming);
     assert_eq!(k, 1024);
@@ -126,14 +126,61 @@ fn test_backend_family_mapping_preserves_heavy_block_adaptive_rs_path() {
 
 #[test]
 fn test_target_rank_monotonic_from_clean_to_extreme() {
-    let clean = continuous_fec_target(0.0, true, false, 2048, 1024);
+    let clean = continuous_fec_target(0.0, true, false, 2048, 1024, 0, 0.0);
     let low = target_from_mode(FecMode::Normal, 64);
     let heavy = target_from_mode(FecMode::Strong, 128);
-    let fountain = continuous_fec_target(0.30, true, false, 2048, 1024);
+    let fountain = continuous_fec_target(0.30, true, false, 2048, 1024, 0, 0.0);
 
     assert!(target_rank(clean) < target_rank(low));
     assert!(target_rank(low) < target_rank(heavy));
     assert!(target_rank(heavy) < target_rank(fountain));
+}
+
+#[test]
+fn test_streaming_adaptive_selected_for_burst_loss_5_to_15_percent() {
+    // 10% loss with high burst variance → StreamingAdaptive (Streaming family)
+    let target = continuous_fec_target(0.10, true, false, 2048, 1024, 0, 0.5);
+    assert_eq!(target.family, FecBackendFamily::Streaming);
+    assert!(target.stream_every.is_some());
+}
+
+#[test]
+fn test_streaming_adaptive_falls_back_to_lowcost_for_uniform_loss() {
+    // 8% loss with low burst variance (uniform) → LowCostBlock, not Streaming
+    let target = continuous_fec_target(0.08, true, false, 2048, 1024, 0, 0.1);
+    assert_eq!(target.family, FecBackendFamily::LowCostBlock);
+}
+
+#[test]
+fn test_streaming_adaptive_escalates_to_heavyblock_above_15_percent() {
+    // 18% loss → HeavyBlock (not Streaming, even with high burst variance)
+    let target = continuous_fec_target(0.18, true, false, 2048, 1024, 0, 0.5);
+    assert_eq!(target.family, FecBackendFamily::HeavyBlock);
+}
+
+#[test]
+fn test_stream_every_scales_with_rtt() {
+    // Low RTT (20ms) → smaller stream_every (faster recovery)
+    let low_rtt = continuous_fec_target(0.16, true, true, 2048, 1024, 20, 0.0);
+    // High RTT (300ms) → larger stream_every (less overhead)
+    let high_rtt = continuous_fec_target(0.16, true, true, 2048, 1024, 300, 0.0);
+    let low_interval = low_rtt.stream_every.unwrap();
+    let high_interval = high_rtt.stream_every.unwrap();
+    assert!(
+        high_interval > low_interval,
+        "high RTT should produce larger stream_every: {} > {}",
+        high_interval,
+        low_interval
+    );
+}
+
+#[test]
+fn test_stream_every_clamped_to_bounds() {
+    // Very high RTT → stream_every should be clamped to max 18
+    let target = continuous_fec_target(0.16, true, true, 2048, 1024, 10000, 0.0);
+    let interval = target.stream_every.unwrap();
+    assert!(interval <= 18, "stream_every should be clamped to max 18, got {}", interval);
+    assert!(interval >= 1, "stream_every should be at least 1, got {}", interval);
 }
 
 #[test]

@@ -1360,6 +1360,10 @@ impl QuicFuscateConnection {
                 self.fec_last_report_lost = lost_total;
             }
         }
+
+        // Feed RTT estimate to FEC controller for stream_every scaling.
+        let rtt_ms = self.stats.rtt.max(0.0) as u32;
+        self.fec.set_rtt_hint(rtt_ms);
     }
 
     /// Returns the current estimated RTT in milliseconds.
