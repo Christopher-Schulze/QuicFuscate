@@ -1041,11 +1041,13 @@ mod rustls_provider {
         ) -> Result<(), ConnectionError> {
             match kc {
                 rustls::quic::KeyChange::Handshake { keys } => {
+                    eprintln!("[DEBUG] KeyChange::Handshake is_server={}", self.is_server);
                     super::trace_key_change(self.is_server, "Handshake");
                     self.install_handshake_keys(keys)?;
                     self.write_level = super::Level::Handshake;
                 }
                 rustls::quic::KeyChange::OneRtt { keys, next } => {
+                    eprintln!("[DEBUG] KeyChange::OneRtt is_server={}", self.is_server);
                     super::trace_key_change(self.is_server, "OneRtt");
                     self.install_1rtt_keys(keys)?;
                     self.next_1rtt_secrets = Some(next);
