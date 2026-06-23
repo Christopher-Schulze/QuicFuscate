@@ -1922,9 +1922,14 @@ pub async fn process_live_server_client_datagram(
         stats.record_received(packet.len() as u64);
     }
 
-    if let Err(error) = conn.recv(packet) {
-        log::error!("QUIC recv failed for {}: {:?}", addr, error);
-    } else {
+    match conn.recv(packet) {
+        Ok(()) => {
+            eprintln!("[DEBUG] conn.recv OK for {} (len={})", addr, packet.len());
+        }
+        Err(error) => {
+            eprintln!("[DEBUG] conn.recv FAILED for {}: {:?}", addr, error);
+            log::error!("QUIC recv failed for {}: {:?}", addr, error);
+        }
     }
 
     let require_auth = qkey_auth.is_some();
