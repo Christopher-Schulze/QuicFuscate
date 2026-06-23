@@ -100,7 +100,7 @@ Based on the profiling baseline:
 
 4. **Netfilter optimization** — add a fast-path ACCEPT rule for loopback UDP to eliminate the 15% netfilter overhead during profiling. **Script:** `scripts/install/setup-netfilter-fastpath.sh`
 
-5. **io_uring zero-copy** — the SendMsgZc path (TODO-419 fix) should be profiled separately to measure the skb allocation reduction.
+5. **io_uring zero-copy** — SendMsgZc is already implemented in `src/optimize/uring_batch.rs` and active in production (IoDriver + SERVER_URING_SENDER). The ZC path is probed at init and used automatically on kernel 6.0+. Telemetry counters: `quicfuscate_io_uring_zc_sends_total`, `quicfuscate_io_uring_zc_notifs_total`. **Profiling script:** `scripts/benchmarks/profiling-zc.sh` — 3 scenarios (m-o) to measure skb allocation reduction.
 
 6. **RTT inflation fix** — the 0→385ms loopback RTT bug has been fixed (commit `85651d8`). RTT is now sampled from ACK frames per RFC 9000 §5.1, not inflated by 100ms on every timeout. Re-run profiling to verify RTT stays stable.
 
