@@ -898,11 +898,11 @@ impl QuicFuscateConnection {
         let recovered_packets = self.fec.on_receive(fec_packet).map_err(|e| {
             crate::error::ConnectionError::Transport(format!("FEC decoding failed: {}", e))
         })?;
-        eprintln!("[DEBUG] FEC returned {} pkts is_server={}", recovered_packets.len(), self.conn.is_server);
+        eprintln!("[DEBUG] FEC returned {} pkts", recovered_packets.len());
 
         for mut packet in recovered_packets {
             if let Some(data) = packet.payload_mut_unique() {
-                eprintln!("[DEBUG] inner recv len={} is_server={}", data.len(), self.conn.is_server);
+                eprintln!("[DEBUG] inner recv len={}", data.len());
                 // Deobfuscate payload if enabled
                 self.stealth_manager.process_incoming_packet(data, self.peer_addr);
 
@@ -913,7 +913,7 @@ impl QuicFuscateConnection {
                     ecn: None,
                 };
                 if let Err(e) = self.conn.recv(data, &recv_info) {
-                    eprintln!("[DEBUG] inner recv FAILED is_server={}: {:?}", self.conn.is_server, e);
+                    eprintln!("[DEBUG] inner recv FAILED: {:?}", e);
                     // Log error, but continue processing other recovered packets
                     debug!("transport::recv failed (possible probe): {}", e); // demoted to debug to reduce noise
 
