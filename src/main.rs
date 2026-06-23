@@ -1557,8 +1557,11 @@ async fn run_client(
     let mut request_sent = false;
 
     // Optional TUN bridging setup
-    let (tun_rx, mut h3_stream_id): (Option<std::sync::mpsc::Receiver<Vec<u8>>>, Option<u64>) =
-        if tun_enable {
+    let (tun_rx, tun_writer, mut h3_stream_id): (
+        Option<std::sync::mpsc::Receiver<Vec<u8>>>,
+        Option<Arc<parking_lot::Mutex<quicfuscate::interface::TunInterface>>>,
+        Option<u64>,
+    ) = if tun_enable {
             let tcfg = quicfuscate::interface::TunConfig {
                 name: tun_name,
                 ip: tun_ip.and_then(|s| s.parse().ok()),
@@ -1570,11 +1573,14 @@ async fn run_client(
             let pool = optm.memory_pool();
             match quicfuscate::interface::TunInterface::open(tcfg, pool.clone()) {
                 Ok(tun) => {
+                    let tun = Arc::new(parking_lot::Mutex::new(tun));
                     // Spawn a blocking reader thread that forwards TUN frames into a channel
                     let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+                    let tun_for_reader = tun.clone();
                     std::thread::spawn(move || {
                         loop {
-                            match tun.read_block() {
+                            let read_result = tun_for_reader.lock().read_block();
+                            match read_result {
                                 Ok((block, len)) if len > 0 => {
                                     let mut v = vec![0u8; len];
                                     v.copy_from_slice(&block[..len]);
@@ -1588,15 +1594,15 @@ async fn run_client(
                             }
                         }
                     });
-                    (Some(rx), None)
+                    (Some(rx), Some(tun), None)
                 }
                 Err(e) => {
                     warn!("TUN open failed: {:?}", e);
-                    (None, None)
+                    (None, None, None)
                 }
             }
         } else {
-            (None, None)
+            (None, None, None)
         };
     let mut housekeeping = interval(Duration::from_millis(5));
     housekeeping.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -1660,10 +1666,32 @@ async fn run_client(
                             }
                         }
                     }
-                    if let Err(e) = conn.poll_http3_with(|_data| {
-                        // client-side downlink to TUN could be added by writing to the interface
+                    // Downlink: H3 stream data from server → TUN interface
+                    let tun_writer_ref = tun_writer.clone();
+                    if let Err(e) = conn.poll_http3_with(move |data| {
+                        if let Some(ref tw) = tun_writer_ref {
+                            if let Err(e) = tw.lock().write_packet(data) {
+                                warn!("Client TUN write (H3 downlink) failed: {:?}", e);
+                            }
+                        }
                     }) {
                         warn!("HTTP/3 poll in TUN mode failed: {:?}", e);
+                    }
+                    // Also drain QUIC datagrams from server → TUN (server TUN→dgram path)
+                    if let Some(ref tw) = tun_writer {
+                        let mut dgram_buf = [0u8; 65535];
+                        loop {
+                            match conn.conn.dgram_recv(&mut dgram_buf) {
+                                Ok(n) if n > 0 => {
+                                    if let Err(e) = tw.lock().write_packet(&dgram_buf[..n]) {
+                                        warn!("Client TUN write (dgram downlink) failed: {:?}", e);
+                                    }
+                                }
+                                Ok(_) => break,
+                                Err(quicfuscate::error::ConnectionError::Done) => break,
+                                Err(_) => break,
+                            }
+                        }
                     }
                 } else if let Err(e) = conn.poll_http3() {
                     warn!("HTTP/3 error: {:?}", e);

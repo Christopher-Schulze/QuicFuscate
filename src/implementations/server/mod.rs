@@ -1896,7 +1896,7 @@ pub async fn process_live_server_client_datagram(
     out: &mut [u8],
     metrics: &Metrics,
     client_snapshots: &Arc<std::sync::Mutex<std::collections::HashMap<SocketAddr, ClientSnapshot>>>,
-    server_tun: Option<&TunInterface>,
+    server_tun: Option<&Arc<TunInterface>>,
     tun_enable: bool,
 ) -> std::io::Result<LiveClientDatagramResult> {
     use std::cell::Cell;
@@ -1952,6 +1952,26 @@ pub async fn process_live_server_client_datagram(
         },
     ) {
         log::warn!("HTTP/3 header/body poll failed for {}: {:?}", addr, error);
+    }
+
+    // Also drain QUIC datagrams from the client and forward to TUN.
+    // This handles the IoDriver client path (dgram_send → server dgram_recv → TUN write).
+    if tun_enable {
+        if let Some(tun) = server_tun {
+            let mut dgram_buf = [0u8; 65535];
+            loop {
+                match conn.conn.dgram_recv(&mut dgram_buf) {
+                    Ok(n) if n > 0 => {
+                        if let Err(error) = tun.write(&dgram_buf[..n]) {
+                            log::warn!("Server TUN write (dgram) failed: {:?}", error);
+                        }
+                    }
+                    Ok(_) => break,
+                    Err(crate::error::ConnectionError::Done) => break,
+                    Err(_) => break,
+                }
+            }
+        }
     }
 
     let auth_result = require_auth.then(|| (conn_id.clone(), authed.get()));
@@ -2580,7 +2600,7 @@ struct ServerRuntimeLiveParts<'a> {
     live_state: &'a mut LiveServerState,
     accept_loop: &'a AcceptLoop,
     accept_max_clients: usize,
-    server_tun: Option<&'a TunInterface>,
+    server_tun: Option<&'a Arc<TunInterface>>,
 }
 
 struct ServerLiveRuntime {
@@ -2592,7 +2612,10 @@ struct ServerLiveRuntime {
     metrics: Arc<Metrics>,
     socket: Arc<UdpSocket>,
     local_addr: SocketAddr,
-    server_tun: Option<TunInterface>,
+    server_tun: Option<Arc<TunInterface>>,
+    /// Channel receiving packets read from the server TUN interface (spawned reader thread).
+    /// Forwarded to the appropriate client via QUIC datagrams in the run_loop.
+    tun_rx: Option<std::sync::mpsc::Receiver<Vec<u8>>>,
     blocked_ips: Arc<parking_lot::RwLock<std::collections::HashSet<String>>>,
     qkey_registry: Arc<std::sync::Mutex<QKeyRegistry>>,
     admin_web_bootstrap: StandaloneAdminWebBootstrap,
@@ -3426,16 +3449,42 @@ impl ServerRuntime {
         let local_addr = socket.local_addr()?;
         let (admin_actions_tx, admin_actions_rx) = mpsc::unbounded_channel::<AdminAction>();
         let accept_max_clients = server_config.max_clients;
-        let server_tun = tun_config.and_then(|tun_config| {
-            let optm = crate::optimize::OptimizationManager::from_cfg(opt_params);
-            match open_server_tun(tun_config, optm.memory_pool()) {
-                Ok(tun) => Some(tun),
-                Err(error) => {
-                    log::warn!("server TUN open failed: {}", error);
-                    None
+        let (server_tun, tun_rx) = match tun_config {
+            Some(tun_config) => {
+                let optm = crate::optimize::OptimizationManager::from_cfg(opt_params);
+                match open_server_tun(tun_config, optm.memory_pool()) {
+                    Ok(tun) => {
+                        let tun_arc = Arc::new(tun);
+                        // Spawn a blocking reader thread that forwards TUN frames into a channel.
+                        // These packets are forwarded to the client via QUIC datagrams in the run_loop.
+                        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+                        let tun_for_reader = tun_arc.clone();
+                        std::thread::spawn(move || {
+                            loop {
+                                match tun_for_reader.read_block() {
+                                    Ok((block, len)) if len > 0 => {
+                                        let mut v = vec![0u8; len];
+                                        v.copy_from_slice(&block[..len]);
+                                        if tx.send(v).is_err() {
+                                            break;
+                                        }
+                                    }
+                                    Ok(_) => {}
+                                    Err(_) => break,
+                                }
+                            }
+                        });
+                        log::info!("Server TUN reader thread spawned for bidirectional forwarding");
+                        (Some(tun_arc), Some(rx))
+                    }
+                    Err(error) => {
+                        log::warn!("server TUN open failed: {}", error);
+                        (None, None)
+                    }
                 }
             }
-        });
+            None => (None, None),
+        };
 
         runtime.live = Some(ServerLiveRuntime {
             live_state: LiveServerState::new(server_config),
@@ -3447,6 +3496,7 @@ impl ServerRuntime {
             socket,
             local_addr,
             server_tun,
+            tun_rx,
             blocked_ips,
             qkey_registry,
             admin_web_bootstrap,
@@ -3881,6 +3931,8 @@ impl ServerRuntime {
             .admin_actions_rx
             .take()
             .ok_or_else(|| std::io::Error::other("server admin action receiver unavailable"))?;
+        // Take the TUN reader channel (if any) for forwarding TUN→client datagrams.
+        let mut tun_rx = self.live_mut().tun_rx.take();
         let mut buf = [0; 65535];
         let mut out = [0; 1460];
         let mut housekeeping = tokio::time::interval(Duration::from_millis(5));
@@ -4038,6 +4090,46 @@ impl ServerRuntime {
                                 runtime_parts.accept_loop,
                             )
                             .await;
+                        // Forward TUN→client: drain any packets from the TUN reader thread
+                        // and send them to the first connected client via QUIC datagrams.
+                        if let Some(ref rx) = tun_rx {
+                            for _ in 0..32 {
+                                match rx.try_recv() {
+                                    Ok(pkt) => {
+                                        let live = self.live_mut();
+                                        // Send to the first active client (simple VPN model: 1 TUN ↔ 1 client).
+                                        if let Some((addr, conn)) = live.live_state.clients.iter_mut().next() {
+                                            let addr = *addr;
+                                            if let Err(e) = conn.conn.dgram_send(&pkt) {
+                                                log::debug!("TUN→dgram_send to {}: {:?}", addr, e);
+                                            }
+                                        }
+                                        // Flush outgoing for all clients after queuing dgrams
+                                        let live = self.live_mut();
+                                        let live_state = &mut live.live_state;
+                                        for (addr, conn) in live_state.clients.iter_mut() {
+                                            let addr = *addr;
+                                            loop {
+                                                let written = match conn.send(&mut out) {
+                                                    Ok(0) => break,
+                                                    Ok(n) => n,
+                                                    Err(_) => break,
+                                                };
+                                                if let Err(e) = socket.try_send_to(&out[..written], addr) {
+                                                    log::debug!("TUN→socket send to {}: {:?}", addr, e);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                        tun_rx = None;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                         // Sweep expired entries from 0-RTT anti-replay strike register.
                         if let Some(ref sr) = runtime_config.strike_register {
                             sr.cleanup(std::time::Instant::now());
