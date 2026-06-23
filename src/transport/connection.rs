@@ -918,6 +918,7 @@ impl Connection {
         offset: u64,
         data: Cow<'_, [u8]>,
     ) -> Result<(), crate::error::ConnectionError> {
+        eprintln!("[DEBUG] process_crypto_frame lvl={:?} offset={} data_len={}", level, offset, data.len());
         if let Some(provider) = &mut self.tls_provider {
             // CRYPTO frames can arrive out-of-order. Buffer and drain contiguous handshake bytes
             // before feeding into the TLS provider.
@@ -969,7 +970,9 @@ impl Connection {
         max_len: usize,
     ) -> Option<(u64, Vec<u8>)> {
         if let Some(provider) = &mut self.tls_provider {
-            provider.next_crypto_frame(level, max_len)
+            let result = provider.next_crypto_frame(level, max_len);
+            eprintln!("[DEBUG] next_crypto_frame lvl={:?} max_len={} -> {}", level, max_len, result.as_ref().map(|(off, data)| format!("off={} len={}", off, data.len())).unwrap_or_else(|| "None".to_string()));
+            result
         } else {
             let mut crypto = self.crypto.write();
             let stream = match level {
