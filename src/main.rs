@@ -136,7 +136,7 @@ async fn recv_connected_datagram(
     socket: &tokio::net::UdpSocket,
     buf: &mut [u8],
 ) -> std::io::Result<usize> {
-    use std::io::{Error, ErrorKind};
+    use std::io::Error;
     use std::os::unix::io::AsRawFd;
 
     // Use `async_io` to avoid edge-triggered busy-loop (same fix as server).
@@ -175,7 +175,7 @@ async fn send_connected_datagram(
     socket: &tokio::net::UdpSocket,
     data: &[u8],
 ) -> std::io::Result<()> {
-    use std::io::{Error, ErrorKind};
+    use std::io::Error;
     use std::os::unix::io::AsRawFd;
 
     // Use `async_io` to avoid edge-triggered busy-loop (same fix as recv).

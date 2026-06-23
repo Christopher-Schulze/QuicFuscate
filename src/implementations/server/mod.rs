@@ -1761,31 +1761,29 @@ pub async fn send_live_datagram_to(
     addr: &SocketAddr,
     data: &[u8],
 ) -> std::io::Result<()> {
-    use std::io::ErrorKind;
     use std::os::unix::io::AsRawFd;
     use tokio::io::Interest;
 
-    loop {
-        socket.ready(Interest::WRITABLE).await?;
-        let zc = ZeroCopyBuffer::new(&[data]);
-        let rc = zc.send_to(socket.as_raw_fd(), *addr);
-        if rc >= 0 {
-            if rc as usize == data.len() {
-                return Ok(());
+    // Use `async_io` to avoid edge-triggered busy-loop (same fix as recv).
+    let fd = socket.as_raw_fd();
+    socket
+        .async_io(Interest::WRITABLE, || {
+            let zc = ZeroCopyBuffer::new(&[data]);
+            let rc = zc.send_to(fd, *addr);
+            if rc >= 0 {
+                if rc as usize == data.len() {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "partial datagram send_to",
+                    ))
+                }
             } else {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::WriteZero,
-                    "partial datagram send_to",
-                ));
+                Err(std::io::Error::last_os_error())
             }
-        }
-        let err = std::io::Error::last_os_error();
-        if err.kind() == ErrorKind::WouldBlock {
-            continue;
-        } else {
-            return Err(err);
-        }
-    }
+        })
+        .await
 }
 
 #[cfg(not(unix))]
