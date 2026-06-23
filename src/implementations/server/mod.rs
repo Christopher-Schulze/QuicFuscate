@@ -3369,19 +3369,21 @@ pub(crate) async fn recv_datagram_from(
 ) -> std::io::Result<(usize, std::net::SocketAddr)> {
     use std::io::ErrorKind;
 
-    loop {
-        socket.ready(Interest::READABLE).await?;
-        let mut slice = [&mut buf[..]];
-        let mut zc = ZeroCopyBuffer::new_mut(&mut slice);
-        return match zc.recv_from(socket.as_raw_fd()) {
-            Ok((rc, addr)) if rc >= 0 => Ok((rc as usize, addr)),
-            Ok((_, _)) => {
-                Err(std::io::Error::new(ErrorKind::UnexpectedEof, "negative recv_from result"))
+    // Use `async_io` so tokio properly clears the edge-triggered readiness
+    // when `recvmsg` returns `WouldBlock`.  Calling `ready()` + raw `recvmsg`
+    // in a loop causes a busy-spin because tokio never observes the EAGAIN.
+    let fd = socket.as_raw_fd();
+    socket
+        .async_io(Interest::READABLE, || {
+            let mut slice = [&mut buf[..]];
+            let mut zc = ZeroCopyBuffer::new_mut(&mut slice);
+            match zc.recv_from(fd) {
+                Ok((rc, addr)) if rc >= 0 => Ok((rc as usize, addr)),
+                Ok(_) => Err(std::io::Error::new(ErrorKind::UnexpectedEof, "negative recv_from result")),
+                Err(e) => Err(e),
             }
-            Err(ref e) if e.kind() == ErrorKind::WouldBlock => continue,
-            Err(e) => Err(e),
-        };
-    }
+        })
+        .await
 }
 
 #[cfg(not(unix))]

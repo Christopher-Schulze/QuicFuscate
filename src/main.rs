@@ -138,21 +138,21 @@ async fn recv_connected_datagram(
 ) -> std::io::Result<usize> {
     use std::io::{Error, ErrorKind};
     use std::os::unix::io::AsRawFd;
-    loop {
-        socket.ready(Interest::READABLE).await?;
-        let mut slice = [&mut buf[..]];
-        let mut zc = ZeroCopyBuffer::new_mut(&mut slice);
-        let rc = zc.recv(socket.as_raw_fd());
-        if rc >= 0 {
-            return Ok(rc as usize);
-        }
-        let err = Error::last_os_error();
-        if err.kind() == ErrorKind::WouldBlock {
-            continue;
-        } else {
-            return Err(err);
-        }
-    }
+
+    // Use `async_io` to avoid edge-triggered busy-loop (same fix as server).
+    let fd = socket.as_raw_fd();
+    socket
+        .async_io(Interest::READABLE, || {
+            let mut slice = [&mut buf[..]];
+            let mut zc = ZeroCopyBuffer::new_mut(&mut slice);
+            let rc = zc.recv(fd);
+            if rc >= 0 {
+                Ok(rc as usize)
+            } else {
+                Err(Error::last_os_error())
+            }
+        })
+        .await
 }
 
 #[cfg(not(unix))]
@@ -178,27 +178,26 @@ async fn send_connected_datagram(
     use std::io::{Error, ErrorKind};
     use std::os::unix::io::AsRawFd;
 
-    loop {
-        socket.ready(Interest::WRITABLE).await?;
-        let zc = ZeroCopyBuffer::new(&[data]);
-        let rc = zc.send(socket.as_raw_fd());
-        if rc >= 0 {
-            if rc as usize == data.len() {
-                return Ok(());
+    // Use `async_io` to avoid edge-triggered busy-loop (same fix as recv).
+    let fd = socket.as_raw_fd();
+    socket
+        .async_io(Interest::WRITABLE, || {
+            let zc = ZeroCopyBuffer::new(&[data]);
+            let rc = zc.send(fd);
+            if rc >= 0 {
+                if rc as usize == data.len() {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "partial datagram send",
+                    ))
+                }
             } else {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::WriteZero,
-                    "partial datagram send",
-                ));
+                Err(Error::last_os_error())
             }
-        }
-        let err = Error::last_os_error();
-        if err.kind() == ErrorKind::WouldBlock {
-            continue;
-        } else {
-            return Err(err);
-        }
-    }
+        })
+        .await
 }
 
 #[cfg(not(unix))]
