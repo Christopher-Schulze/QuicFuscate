@@ -1302,6 +1302,7 @@ mod rustls_provider {
 
         fn load_certs_from_file() -> Result<Vec<CertificateDer<'static>>, ConnectionError> {
             if let Some(path) = TLS_CERT_PATH_OVERRIDE.get().map(|s| s.as_str()) {
+                eprintln!("[DEBUG] Server loading cert from override: {}", path);
                 let cert_data = std::fs::read(path).map_err(|e| {
                     ConnectionError::TlsError(format!("Cert read failed ({}): {}", path, e))
                 })?;
