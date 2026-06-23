@@ -70,16 +70,15 @@ run_tun_scenario() {
     local label="$1"
     local title="$2"
     local fec_mode="${3:-auto}"
-    local stealth_mode="${4:-off}"
-    local netem_delay="${5:-0ms}"
-    local netem_loss="${6:-0%}"
+    local netem_delay="${4:-0ms}"
+    local netem_loss="${5:-0%}"
     local perf_data="$OUTPUT_DIR/perf-${label}.data"
     local svg="$OUTPUT_DIR/flamegraph-${label}.svg"
     local csv="$OUTPUT_DIR/scenario-${label}.csv"
 
     echo ""
     echo "=== Scenario $label: $title ==="
-    echo "  FEC=$fec_mode  Stealth=$stealth_mode  Netem: delay=$netem_delay loss=$netem_loss"
+    echo "  FEC=$fec_mode  Netem: delay=$netem_delay loss=$netem_loss"
 
     # Configure netem for this scenario
     NETEM_DELAY="$netem_delay"
@@ -90,7 +89,7 @@ run_tun_scenario() {
 
     # Start server with TUN
     "$BINARY" server --cert "$CERT" --key "$KEY" --listen 127.0.0.1:4433 \
-        --fec-mode "$fec_mode" --stealth "$stealth_mode" \
+        --fec-mode "$fec_mode" \
         --tun --tun-ip "$SERVER_TUN_IP" --tun-netmask "$TUN_NETMASK" \
         -v > "/tmp/server-${label}.log" 2>&1 &
     local spid=$!
@@ -127,8 +126,8 @@ run_tun_scenario() {
     echo "  Stats: $rtt  $loss"
 
     generate_flamegraph "$perf_data" "$svg" "$title (Server, TUN mode)"
-    echo "scenario,label,fec_mode,stealth_mode,netem_delay,netem_loss,throughput,rtt,loss" > "$csv"
-    echo "$label,$label,$fec_mode,$stealth_mode,$netem_delay,$netem_loss,$throughput,$rtt,$loss" >> "$csv"
+    echo "scenario,label,fec_mode,netem_delay,netem_loss,throughput,rtt,loss" > "$csv"
+    echo "$label,$label,$fec_mode,$netem_delay,$netem_loss,$throughput,$rtt,$loss" >> "$csv"
 
     # Cleanup
     iperf3 -s -B "$CLIENT_TUN_IP" -k 2>/dev/null || true
@@ -154,33 +153,30 @@ echo "Duration per scenario: ${DURATION}s"
 echo ""
 
 # Scenario g: TUN mode, no loss, no delay — baseline data plane
-run_tun_scenario "g" "TUN Data Plane (FEC auto, no loss)" auto off 0ms 0%
+run_tun_scenario "g" "TUN Data Plane (FEC auto, no loss)" auto 0ms 0%
 
 # Scenario h: TUN mode with 50ms delay — latency stress
-run_tun_scenario "h" "TUN Data Plane (FEC auto, 50ms delay)" auto off 50ms 0%
+run_tun_scenario "h" "TUN Data Plane (FEC auto, 50ms delay)" auto 50ms 0%
 
 # Scenario i: TUN mode with 5% loss — FEC stress (activates FEC encode/decode)
-run_tun_scenario "i" "TUN Data Plane (FEC auto, 5% loss)" auto off 0ms 5%
+run_tun_scenario "i" "TUN Data Plane (FEC auto, 5% loss)" auto 0ms 5%
 
 # Scenario j: TUN mode with 50ms delay + 5% loss — combined stress
-run_tun_scenario "j" "TUN Data Plane (FEC auto, 50ms+5% loss)" auto off 50ms 5%
+run_tun_scenario "j" "TUN Data Plane (FEC auto, 50ms+5% loss)" auto 50ms 5%
 
-# Scenario k: TUN mode with stealth performance — stealth shaping under load
-run_tun_scenario "k" "TUN Data Plane (FEC auto, stealth perf, 5% loss)" auto performance 0ms 5%
-
-# Scenario l: TUN mode with FEC off + 5% loss — FEC impact comparison
-run_tun_scenario "l" "TUN Data Plane (FEC off, 5% loss)" off off 0ms 5%
+# Scenario k: TUN mode with FEC off + 5% loss — FEC impact comparison
+run_tun_scenario "k" "TUN Data Plane (FEC off, 5% loss)" off 0ms 5%
 
 echo ""
 echo "=== TUN-mode Profiling Complete ==="
 echo ""
 echo "CSV files:"
-ls -la "$OUTPUT_DIR"/scenario-{g,h,i,j,k,l}.csv 2>/dev/null
+ls -la "$OUTPUT_DIR"/scenario-{g,h,i,j,k}.csv 2>/dev/null
 echo ""
 echo "Flamegraphs:"
-ls -la "$OUTPUT_DIR"/flamegraph-{g,h,i,j,k,l}.svg 2>/dev/null
+ls -la "$OUTPUT_DIR"/flamegraph-{g,h,i,j,k}.svg 2>/dev/null
 echo ""
 echo "Next steps:"
-echo "  1. Compare throughput: FEC on vs off (scenarios i vs l)"
-echo "  2. Identify data-plane hotspots in flamegraphs (should show FEC/AEAD/stealth)"
+echo "  1. Compare throughput: FEC on vs off (scenarios i vs k)"
+echo "  2. Identify data-plane hotspots in flamegraphs (should show FEC/AEAD)"
 echo "  3. Use results to gate Phase 4 micro-optimizations (TODO-390..401)"
