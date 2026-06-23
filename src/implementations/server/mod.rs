@@ -1554,13 +1554,18 @@ pub fn parse_live_server_initial_auth(
     metrics: &Metrics,
 ) -> Option<LiveInitialAuthContext> {
     let (mut initial_hdr, _) = match crate::transport::packet::parse_header(packet, 0) {
-        Ok(value) => value,
-        Err(_) => {
+        Ok(value) => {
+            eprintln!("[DEBUG] parse_header OK: ty={:?} dcid_len={}", value.0.ty, value.0.dcid.len());
+            value
+        }
+        Err(e) => {
+            eprintln!("[DEBUG] parse_header FAILED: {:?}", e);
             metrics.record_connection_rejected();
             return None;
         }
     };
     if initial_hdr.ty != crate::transport::PacketType::Initial {
+        eprintln!("[DEBUG] packet type {:?} != Initial", initial_hdr.ty);
         metrics.record_connection_rejected();
         return None;
     }
@@ -1568,6 +1573,7 @@ pub fn parse_live_server_initial_auth(
     let odcid = crate::transport::ConnectionId::from_vec(std::mem::take(&mut initial_hdr.dcid));
     let initial_token = initial_hdr.token.take();
     let require_qkey = require_qkey_for_new_clients();
+    eprintln!("[DEBUG] require_qkey={} token_len={}", require_qkey, initial_token.as_ref().map(|t| t.len()).unwrap_or(0));
     let mut qkey_record = None;
     let mut pending_qkey_auth = None;
 
