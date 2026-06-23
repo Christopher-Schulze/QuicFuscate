@@ -912,6 +912,7 @@ impl QuicFuscateConnection {
                 };
                 if let Err(e) = self.conn.recv(data, &recv_info) {
                     // Log error, but continue processing other recovered packets
+                    eprintln!("[DEBUG] inner conn.recv FAILED: {:?}", e);
                     debug!("transport::recv failed (possible probe): {}", e); // demoted to debug to reduce noise
 
                     // REALITY FALLBACK
