@@ -3377,7 +3377,9 @@ impl AdaptiveFec {
 
     /// **SEAMLESS** Process outgoing packet through FEC encoder with smooth mode transitions
     pub fn on_send(&mut self, packet: FecPacket) -> Vec<FecPacket> {
-        let mut output = Vec::new();
+        // Pre-allocate for the common case: 1 systematic packet (Zero mode or
+        // no repair generation). Avoids the implicit grow on first push.
+        let mut output = Vec::with_capacity(1);
 
         // **ZERO-CPU FAST PATH**: Ultra-optimized pass-through
         if self.current_mode() == FecMode::Zero && self.transition_left == 0 {
