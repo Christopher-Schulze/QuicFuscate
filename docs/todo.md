@@ -51,6 +51,20 @@ Pre-loop cleanup tasks completed before handing work to the continuous loop.
 
 ---
 
+## Active - TUN VPN Data Plane (2026-06-23)
+
+Handshake, cert validation (incl. `--ca-file`), H3 OOB panic, idle-timeout/loss inflation, and
+client Finished delivery are all fixed and on `main` (commits `2b9c880`, `5572142`, `0bade3a`,
+`953fe84`, `8085f9b`). What remains is the actual VPN payload path through the TUN bridge.
+
+| ID | Priority | Title | Status | Depends On |
+|----|----------|-------|--------|------------|
+| TODO-422 | P1 | TUN VPN data plane end-to-end via MASQUE (CONNECT-UDP capsule <-> TUN routing) | **OPEN** — deferred by user decision; Option A (MASQUE) chosen over Option B (DATA frames) for stealth + datagram performance. Full plan in detail file. | — |
+
+Detail file: `docs/todo/todo-422-tun-vpn-data-plane-masque.md`.
+
+---
+
 ## Active - Radical Replan Wave (2026-07-23)
 
 **Motivation:** Deep-dive analysis identified three core problems: (1) TODO-system drift (33 files without status, 11 false DONE claims), (2) no real profiling baseline (all micro-opts are blind), (3) stealth is fallback-proxy not reality-grade mimicry. This wave addresses all three with five big levers, sequenced for maximum impact.
