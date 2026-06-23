@@ -1565,7 +1565,7 @@ async fn run_client(
     // Optional TUN bridging setup
     let (tun_rx, tun_writer, mut h3_stream_id): (
         Option<std::sync::mpsc::Receiver<Vec<u8>>>,
-        Option<Arc<parking_lot::Mutex<quicfuscate::interface::TunInterface>>>,
+        Option<Arc<quicfuscate::interface::TunInterface>>,
         Option<u64>,
     ) = if tun_enable {
             let tcfg = quicfuscate::interface::TunConfig {
@@ -1579,13 +1579,17 @@ async fn run_client(
             let pool = optm.memory_pool();
             match quicfuscate::interface::TunInterface::open(tcfg, pool.clone()) {
                 Ok(tun) => {
-                    let tun = Arc::new(parking_lot::Mutex::new(tun));
+                    // Share the TUN via a plain Arc (no Mutex): read_block() and write()
+                    // both take &self and the kernel serializes the fd, so the blocking
+                    // reader thread must NOT hold a lock that would starve the downlink
+                    // writer (that deadlock left the tunnel one-directional).
+                    let tun = Arc::new(tun);
                     // Spawn a blocking reader thread that forwards TUN frames into a channel
                     let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
                     let tun_for_reader = tun.clone();
                     std::thread::spawn(move || {
                         loop {
-                            let read_result = tun_for_reader.lock().read_block();
+                            let read_result = tun_for_reader.read_block();
                             match read_result {
                                 Ok((block, len)) if len > 0 => {
                                     let mut v = vec![0u8; len];
@@ -1676,7 +1680,7 @@ async fn run_client(
                     let tun_writer_ref = tun_writer.clone();
                     if let Err(e) = conn.poll_http3_with(move |data| {
                         if let Some(ref tw) = tun_writer_ref {
-                            if let Err(e) = tw.lock().write_packet(data) {
+                            if let Err(e) = tw.write(data) {
                                 warn!("Client TUN write (H3 downlink) failed: {:?}", e);
                             }
                         }
@@ -1689,7 +1693,7 @@ async fn run_client(
                         loop {
                             match conn.conn.dgram_recv(&mut dgram_buf) {
                                 Ok(n) if n > 0 => {
-                                    if let Err(e) = tw.lock().write_packet(&dgram_buf[..n]) {
+                                    if let Err(e) = tw.write(&dgram_buf[..n]) {
                                         warn!("Client TUN write (dgram downlink) failed: {:?}", e);
                                     }
                                 }

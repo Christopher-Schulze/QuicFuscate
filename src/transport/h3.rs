@@ -174,7 +174,7 @@ pub struct Connection {
 #[derive(Debug, Clone)]
 struct StreamState {
     _headers: Vec<Header>,
-    _body_buffer: Vec<u8>,
+    body_buffer: Vec<u8>,
     _received_bytes: usize,
     _stream_type: StreamType,
     sent_bytes: usize,
@@ -270,7 +270,7 @@ impl Connection {
             stream_id,
             StreamState {
                 _headers: Vec::new(),
-                _body_buffer: Vec::new(),
+                body_buffer: Vec::new(),
                 _received_bytes: 0,
                 _stream_type: StreamType::Control,
                 sent_bytes: 0,
@@ -310,7 +310,7 @@ impl Connection {
             stream_id,
             StreamState {
                 _headers: headers.to_vec(),
-                _body_buffer: Vec::new(),
+                body_buffer: Vec::new(),
                 _received_bytes: 0,
                 _stream_type: StreamType::Request,
                 sent_bytes: frame.len(),
@@ -338,7 +338,7 @@ impl Connection {
             stream_id,
             StreamState {
                 _headers: headers.to_vec(),
-                _body_buffer: Vec::new(),
+                body_buffer: Vec::new(),
                 _received_bytes: 0,
                 _stream_type: StreamType::Response,
                 sent_bytes: 0,
@@ -465,12 +465,16 @@ impl Connection {
         stream_id: u64,
         out: &mut [u8],
     ) -> Result<usize, Error> {
-        if !self.streams.contains_key(&stream_id) {
-            return Err(Error::Done);
+        // Return buffered DATA-frame payload accumulated by process_stream(). Returns 0
+        // when the buffer is currently drained (caller's read loop stops on 0), and
+        // Error::Done when the stream is unknown.
+        let st = self.streams.get_mut(&stream_id).ok_or(Error::Done)?;
+        if st.body_buffer.is_empty() {
+            return Ok(0);
         }
-        let data = b"Response body";
-        let len = std::cmp::min(out.len(), data.len());
-        out[..len].copy_from_slice(&data[..len]);
+        let len = std::cmp::min(out.len(), st.body_buffer.len());
+        out[..len].copy_from_slice(&st.body_buffer[..len]);
+        st.body_buffer.drain(..len);
         Ok(len)
     }
 
@@ -585,7 +589,7 @@ impl Connection {
                 stream_id,
                 StreamState {
                     _headers: headers_for_stream,
-                    _body_buffer: cover_payload,
+                    body_buffer: cover_payload,
                     _received_bytes: 0,
                     _stream_type: StreamType::Push,
                     sent_bytes: 0,
@@ -612,7 +616,7 @@ impl Connection {
             if st._stream_type != StreamType::Push || st.fin_sent {
                 continue;
             }
-            let total = st._body_buffer.len();
+            let total = st.body_buffer.len();
             if st.sent_bytes < total {
                 let remaining = total - st.sent_bytes;
                 let take = remaining.min(CHUNK);
@@ -621,7 +625,7 @@ impl Connection {
                 let mut frame = Vec::new();
                 frame.push(0x00); // DATA
                 Self::encode_varint(take as u64, &mut frame);
-                frame.extend_from_slice(&st._body_buffer[start..end]);
+                frame.extend_from_slice(&st.body_buffer[start..end]);
                 let fin = end == total;
                 if conn.stream_send(*stream_id, &frame, fin).is_ok() {
                     st.sent_bytes += take;
@@ -684,6 +688,20 @@ impl Connection {
             return Ok(());
         }
         buf.truncate(len);
+        // Track state for peer-initiated streams (e.g. incoming requests) so DATA payload
+        // can be buffered and returned by recv_body(). Locally-opened streams are already
+        // present; this fills in the gap for streams we first observe here.
+        self.streams.entry(stream_id).or_insert_with(|| StreamState {
+            _headers: Vec::new(),
+            body_buffer: Vec::new(),
+            _received_bytes: 0,
+            _stream_type: StreamType::Request,
+            sent_bytes: 0,
+            fin_sent: false,
+            fin_received: false,
+            _stream_type_dup: StreamType::Request,
+            masque_established: false,
+        });
         // Parse frames from buffer
         let mut offset = 0;
         while offset < buf.len() {
@@ -701,33 +719,37 @@ impl Connection {
             match frame_type {
                 0x00 => {
                     // DATA frame; if this stream is MASQUE, decode capsules
-                    if let Some(st) = self.streams.get(&stream_id) {
-                        if matches!(st._stream_type, StreamType::Masque) {
-                            let mut pos = 0usize;
-                            while pos < frame_data.len() {
-                                match Self::decode_capsule(&frame_data[pos..]) {
-                                    Ok((ctype, used, payload)) => {
-                                        self.pending_events.push_back((
-                                            stream_id,
-                                            Event::MasqueCapsule { capsule_type: ctype, payload },
-                                        ));
-                                        if used == 0 {
-                                            break;
-                                        }
-                                        pos += used;
-                                    }
-                                    Err(_) => {
+                    let is_masque = self
+                        .streams
+                        .get(&stream_id)
+                        .map(|st| matches!(st._stream_type, StreamType::Masque))
+                        .unwrap_or(false);
+                    if is_masque {
+                        let mut pos = 0usize;
+                        while pos < frame_data.len() {
+                            match Self::decode_capsule(&frame_data[pos..]) {
+                                Ok((ctype, used, payload)) => {
+                                    self.pending_events.push_back((
+                                        stream_id,
+                                        Event::MasqueCapsule { capsule_type: ctype, payload },
+                                    ));
+                                    if used == 0 {
                                         break;
                                     }
+                                    pos += used;
+                                }
+                                Err(_) => {
+                                    break;
                                 }
                             }
-                        } else {
-                            let event = Event::Data;
-                            self.pending_events.push_back((stream_id, event));
                         }
                     } else {
-                        let event = Event::Data;
-                        self.pending_events.push_back((stream_id, event));
+                        // Buffer the DATA payload so recv_body() returns the real body bytes
+                        // (e.g. the IP packets tunneled over an H3 stream), then signal Data.
+                        if let Some(st) = self.streams.get_mut(&stream_id) {
+                            st.body_buffer.extend_from_slice(frame_data);
+                        }
+                        self.pending_events.push_back((stream_id, Event::Data));
                     }
                 }
                 0x01 => {
