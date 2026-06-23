@@ -1915,6 +1915,8 @@ pub async fn process_live_server_client_datagram(
 
     if let Err(error) = conn.recv(packet) {
         log::error!("QUIC recv failed for {}: {:?}", addr, error);
+    } else {
+        eprintln!("[DEBUG] server recv OK from {} len={}", addr, packet.len());
     }
 
     let require_auth = qkey_auth.is_some();
@@ -1979,7 +1981,7 @@ pub async fn process_live_server_client_datagram(
         remove_auth_conn_id = Some(conn_id.clone());
     }
 
-    flush_live_server_outgoing(
+    let flush_result = flush_live_server_outgoing(
         socket,
         addr,
         conn,
@@ -1990,6 +1992,7 @@ pub async fn process_live_server_client_datagram(
         session_id,
     )
     .await?;
+    eprintln!("[DEBUG] flush_live_server_outgoing: bytes_sent={} packets_sent={}", flush_result.0, flush_result.1);
 
     Ok(LiveClientDatagramResult { auth_result, remove_auth_conn_id })
 }
