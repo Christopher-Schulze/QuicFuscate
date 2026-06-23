@@ -185,6 +185,7 @@ impl QuicFuscateConnection {
         fec_config: FecConfig,
         opt_cfg: OptimizeConfig,
         qkey_auth_token_hex: Option<String>,
+        qkey_initial_token: Option<Vec<u8>>,
         use_utls: bool,
     ) -> Result<Self, String> {
         let crypto_manager = Arc::new(CryptoManager::new());
@@ -205,6 +206,12 @@ impl QuicFuscateConnection {
         let scid = crate::transport::ConnectionId::from_ref(&scid_bytes);
 
         let (sni, host_header) = stealth_manager.get_connection_headers(server_name);
+
+        // When a QKey is provided, embed its 12-char hex ID as the QUIC Initial packet
+        // token so the server can look up the QKey record during connection acceptance.
+        if let Some(token_bytes) = qkey_initial_token {
+            config.set_initial_token(Some(token_bytes));
+        }
 
         let conn = crate::transport::packet::connect(
             Some(&sni),

@@ -60,6 +60,10 @@ impl ClientConnection {
         log::info!("Connecting to {} (SNI: {}) from {}", remote_addr, sni, local_addr);
 
         // Create QUIC connection using core.rs
+        let qkey_token = config.connection.qkey_token.clone().filter(|t| !t.trim().is_empty());
+        let qkey_initial_token: Option<Vec<u8>> = qkey_token.as_deref().map(|raw| {
+            crate::engine::qkey::id(raw.trim()).into_bytes()
+        });
         let conn = QuicFuscateConnection::new_client(
             &sni,
             local_addr,
@@ -68,7 +72,8 @@ impl ClientConnection {
             stealth_config,
             fec_config,
             opt_config,
-            config.connection.qkey_token.clone().filter(|t| !t.trim().is_empty()),
+            qkey_token,
+            qkey_initial_token,
             false, // use_utls
         )
         .map_err(|e| {

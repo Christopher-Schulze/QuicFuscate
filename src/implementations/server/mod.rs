@@ -1554,18 +1554,13 @@ pub fn parse_live_server_initial_auth(
     metrics: &Metrics,
 ) -> Option<LiveInitialAuthContext> {
     let (mut initial_hdr, _) = match crate::transport::packet::parse_header(packet, 0) {
-        Ok(value) => {
-            eprintln!("[DEBUG] parse_header OK: ty={:?} dcid_len={}", value.0.ty, value.0.dcid.len());
-            value
-        }
-        Err(e) => {
-            eprintln!("[DEBUG] parse_header FAILED: {:?}", e);
+        Ok(value) => value,
+        Err(_) => {
             metrics.record_connection_rejected();
             return None;
         }
     };
     if initial_hdr.ty != crate::transport::PacketType::Initial {
-        eprintln!("[DEBUG] packet type {:?} != Initial", initial_hdr.ty);
         metrics.record_connection_rejected();
         return None;
     }
@@ -1573,7 +1568,6 @@ pub fn parse_live_server_initial_auth(
     let odcid = crate::transport::ConnectionId::from_vec(std::mem::take(&mut initial_hdr.dcid));
     let initial_token = initial_hdr.token.take();
     let require_qkey = require_qkey_for_new_clients();
-    eprintln!("[DEBUG] require_qkey={} token_len={}", require_qkey, initial_token.as_ref().map(|t| t.len()).unwrap_or(0));
     let mut qkey_record = None;
     let mut pending_qkey_auth = None;
 
@@ -1922,7 +1916,6 @@ pub async fn process_live_server_client_datagram(
     if let Err(error) = conn.recv(packet) {
         log::error!("QUIC recv failed for {}: {:?}", addr, error);
     } else {
-        eprintln!("[DEBUG] server recv OK from {} len={}", addr, packet.len());
     }
 
     let require_auth = qkey_auth.is_some();
@@ -1987,7 +1980,7 @@ pub async fn process_live_server_client_datagram(
         remove_auth_conn_id = Some(conn_id.clone());
     }
 
-    let flush_result = flush_live_server_outgoing(
+    flush_live_server_outgoing(
         socket,
         addr,
         conn,
@@ -1998,7 +1991,6 @@ pub async fn process_live_server_client_datagram(
         session_id,
     )
     .await?;
-    eprintln!("[DEBUG] flush_live_server_outgoing: bytes_sent={} packets_sent={}", flush_result.0, flush_result.1);
 
     Ok(LiveClientDatagramResult { auth_result, remove_auth_conn_id })
 }
@@ -2040,7 +2032,6 @@ pub fn build_live_server_client_init(
         match parse_live_server_initial_auth(request.packet, request.qkey_registry, request.metrics) {
             Some(ctx) => ctx,
             None => {
-                eprintln!("[DEBUG] parse_live_server_initial_auth returned None for {}", request.remote_addr);
                 return None;
             }
         };
@@ -2352,12 +2343,10 @@ impl LiveServerState {
                     AcceptDecision::Accept => {}
                     AcceptDecision::Backpressure => {
                         metrics.connections_rejected.fetch_add(1, Ordering::Relaxed);
-                        eprintln!("[DEBUG] Rejected by Backpressure (should_accept) for {}", addr);
                         return LiveClientAcquire::Backpressure;
                     }
-                    AcceptDecision::Reject(reason) => {
+                    AcceptDecision::Reject(_) => {
                         metrics.connections_rejected.fetch_add(1, Ordering::Relaxed);
-                        eprintln!("[DEBUG] Rejected by should_accept for {}: {:?}", addr, reason);
                         return LiveClientAcquire::Rejected;
                     }
                 }
@@ -2365,15 +2354,13 @@ impl LiveServerState {
                 let mut init = match build() {
                     Some(value) => value,
                     None => {
-                        eprintln!("[DEBUG] build() returned None for {}", addr);
                         return LiveClientAcquire::Rejected;
                     }
                 };
                 let (session_id, session_stats) = match self.domain.accept(addr) {
                     Ok(value) => value,
-                    Err(e) => {
+                    Err(_) => {
                         metrics.connections_rejected.fetch_add(1, Ordering::Relaxed);
-                        eprintln!("[DEBUG] domain.accept failed for {}: {:?}", addr, e);
                         return LiveClientAcquire::Rejected;
                     }
                 };
@@ -4012,7 +3999,6 @@ impl ServerRuntime {
                     recv_res = recv_datagram_from(&socket, &mut buf) => {
                         match recv_res {
                             Ok((len, from)) => {
-                                eprintln!("[DEBUG] run_loop recv {} bytes from {}", len, from);
                                 crate::telemetry!(crate::telemetry::BYTES_RECEIVED.inc_by(len as u64));
                                 metrics.record_ingress_datagram(len);
 
@@ -4065,16 +4051,13 @@ impl ServerRuntime {
                                 },
                                 ) {
                                     LiveClientAcquire::Ready(v) => {
-                                        eprintln!("[DEBUG] acquired Ready client for {}", from);
                                         v
                                     },
                                     LiveClientAcquire::Backpressure => {
-                                        eprintln!("[DEBUG] Backpressure for {}", from);
                                         tokio::time::sleep(runtime_parts.accept_loop.backpressure_delay()).await;
                                         continue;
                                     }
                                     LiveClientAcquire::Rejected => {
-                                        eprintln!("[DEBUG] Rejected client {}", from);
                                         continue;
                                     }
                                 };

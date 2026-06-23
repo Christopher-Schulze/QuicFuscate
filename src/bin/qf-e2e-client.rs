@@ -94,6 +94,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fec_config,
         opt_config,
         Some(token_hex.clone()),
+        None, // qkey_initial_token
         false,
     )
     .map_err(|e| format!("client init failed: {e}"))?;

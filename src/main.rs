@@ -1497,6 +1497,10 @@ async fn run_client(
         }
         _ => None,
     };
+    // Compute the 12-char QKey ID for the QUIC Initial packet token.
+    let qkey_initial_token: Option<Vec<u8>> = qkey.as_deref().map(|raw| {
+        quicfuscate::engine::qkey::id(raw.trim()).into_bytes()
+    });
 
     let mut conn = match QuicFuscateConnection::new_client(
         host,
@@ -1507,6 +1511,7 @@ async fn run_client(
         fec_cfg,
         opt_params,
         qkey_auth_token_hex,
+        qkey_initial_token,
         !no_utls,
     ) {
         Ok(c) => c,
