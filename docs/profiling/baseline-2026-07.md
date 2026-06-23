@@ -56,10 +56,20 @@ The QuicFuscate user-space code accounts for <3% of CPU time in the UDP fast pat
 - Adding a fast-path ACCEPT rule for loopback UDP traffic
 - Using `iptables -I INPUT -p udp --dport 4433 -j ACCEPT`
 - **Script:** `scripts/install/setup-netfilter-fastpath.sh` automates this
-- **Status:** Script created, not yet applied on broderick (requires SSH)
+- **Status:** ✅ Applied and verified on broderick (2026-06-23)
+  - Before: 178.17 MiB/s, nft_do_chain avg 453 ns/call
+  - After: 190.12 MiB/s, nft_do_chain avg 421 ns/call
+  - Improvement: +6.7% throughput, -7.1% nft_do_chain time per call
 
 ### 3. Memory Allocation Overhead (15%)
 `__kmalloc` and `__slab_free` for skb allocation/freeing are significant. This is inherent to the kernel UDP path and cannot be reduced from user space. io_uring's zero-copy mode (SendMsgZc) can reduce this by eliminating skb allocation for sent data.
+- **Status:** ✅ SendMsgZc verified on broderick (kernel 6.17, 2026-06-23)
+  - `SendMsgZc supported: true` — probed at init via `io_uring::Probe`
+  - ZC path uses `zerocopy_fill_skb_from_iter` instead of `__kmalloc_node_track_caller_noprof`
+  - ZC throughput: 234K pps (loopback) vs 359K pps (regular sendmsg)
+  - ZC is slower on loopback — expected, benefits are on real NICs with DMA
+  - 13/13 io_uring integration tests pass, 10/10 uring_batch lib tests pass
+  - Flamegraph: `docs/profiling/results/flamegraph-zc.svg`
 
 ### 4. Small Packet Penalty (Scenario B)
 256B packets achieve only 69.9 MiB/s vs 294 MiB/s for 1200B packets — a 4.2x penalty. This is because:
@@ -94,18 +104,19 @@ Based on the profiling baseline:
 
 1. **Rebuild with debug symbols** (`RUSTFLAGS="-g"` or `debug = true` in release profile) for user-space flamegraph resolution. Current flamegraphs show `[harness]` for all user-space frames.
 
-2. **TUN mode profiling** — the QUIC connection scenarios have minimal traffic. For real profiling of the QUIC data plane (FEC, crypto, stealth), need TUN mode with actual data transfer. **Script:** `scripts/benchmarks/profiling-tun-mode.sh` — 6 scenarios (g-l) with iperf3 through tunnel + tc-netem loss/latency simulation.
+2. **TUN mode profiling** — the QUIC connection scenarios have minimal traffic. For real profiling of the QUIC data plane (FEC, crypto, stealth), need TUN mode with actual data transfer. **Script:** `scripts/benchmarks/profiling-tun-mode.sh` — 5 scenarios (g-k) with tc-netem loss/latency simulation. **Note:** TUN mode is currently broken (client sends via QUIC datagrams, server only forwards H3 stream data to TUN — protocol mismatch). Data-plane profiling was done via harness udp-throughput instead. See `docs/profiling/results/SUMMARY.md` for verified results.
 
-3. **tc-netem simulation** — add `tc qdisc add dev lo root netem delay 50ms loss 5%` for loss/latency profiling. This will activate FEC encoding/decoding and reveal the FEC hot path. Automated in `profiling-tun-mode.sh`.
+3. **tc-netem simulation** — add `tc qdisc add dev lo root netem delay 50ms loss 5%` for loss/latency profiling. This will activate FEC encoding/decoding and reveal the FEC hot path. Automated in `profiling-tun-mode.sh`. ✅ Verified with 5 scenarios (g-k).
 
-4. **Netfilter optimization** — add a fast-path ACCEPT rule for loopback UDP to eliminate the 15% netfilter overhead during profiling. **Script:** `scripts/install/setup-netfilter-fastpath.sh`
+4. **Netfilter optimization** — add a fast-path ACCEPT rule for loopback UDP to eliminate the 15% netfilter overhead during profiling. **Script:** `scripts/install/setup-netfilter-fastpath.sh`. ✅ Applied and verified on broderick.
 
-5. **io_uring zero-copy** — SendMsgZc is already implemented in `src/optimize/uring_batch.rs` and active in production (IoDriver + SERVER_URING_SENDER). The ZC path is probed at init and used automatically on kernel 6.0+. Telemetry counters: `quicfuscate_io_uring_zc_sends_total`, `quicfuscate_io_uring_zc_notifs_total`. **Profiling script:** `scripts/benchmarks/profiling-zc.sh` — 3 scenarios (m-o) to measure skb allocation reduction.
+5. **io_uring zero-copy** — SendMsgZc is already implemented in `src/optimize/uring_batch.rs` and active in production (IoDriver + SERVER_URING_SENDER). The ZC path is probed at init and used automatically on kernel 6.0+. Telemetry counters: `quicfuscate_io_uring_zc_sends_total`, `quicfuscate_io_uring_zc_notifs_total`. **Profiling script:** `scripts/benchmarks/profiling-zc.sh` — 3 scenarios (m-o) to measure skb allocation reduction. ✅ Verified: SendMsgZc supported=true, ZC path avoids `__kmalloc` for skb allocation.
 
 6. **RTT inflation fix** — the 0→385ms loopback RTT bug has been fixed (commit `85651d8`). RTT is now sampled from ACK frames per RFC 9000 §5.1, not inflated by 100ms on every timeout. Re-run profiling to verify RTT stays stable.
 
 ## Files
 
+### Baseline (2026-07-23)
 - `flamegraph-a.svg` — Scenario A: UDP Fastpath (1200B, batch=32)
 - `flamegraph-b.svg` — Scenario B: Small Packets (256B, batch=64)
 - `flamegraph-c.svg` — Scenario C: Large Batch (1200B, batch=128)
@@ -114,3 +125,9 @@ Based on the profiling baseline:
 - `flamegraph-f-server.svg` — Scenario F: QUIC Connection (FEC auto, stealth performance)
 - `scenario-{a-f}.csv` — Raw metrics per scenario
 - `flamegraph-udp-fastpath.svg` — Initial UDP fastpath benchmark (pre-scenario)
+
+### Data-Plane Profiling (2026-06-23, verified on broderick)
+- `results/flamegraph-{g,h,i,j,k}.svg` — Data-plane flamegraphs with tc-netem
+- `results/flamegraph-zc.svg` — io_uring ZC vs regular sendmsg flamegraph
+- `results/scenario-{g,h,i,j,k}.csv` — Per-scenario throughput results
+- `results/SUMMARY.md` — Verified profiling results summary
