@@ -13,6 +13,7 @@ use crate::transport::packet::CryptoContext;
 
 static TLS_CERT_PATH_OVERRIDE: OnceLock<String> = OnceLock::new();
 static TLS_KEY_PATH_OVERRIDE: OnceLock<String> = OnceLock::new();
+static TLS_CA_PATH_OVERRIDE: OnceLock<String> = OnceLock::new();
 static TLS_OVERRIDE_REQUIRED: AtomicBool = AtomicBool::new(false);
 /// Configurable max early data size for server TLS config.
 /// RFC 9001 §4.6.1: QUIC requires this to be either 0 (no 0-RTT) or 0xFFFF_FFFF (0-RTT enabled).
@@ -54,6 +55,15 @@ pub fn set_tls_cert_key_paths(cert_path: &str, key_path: &str) {
         log::debug!("TLS key path override already set, keeping existing value");
     }
     TLS_OVERRIDE_REQUIRED.store(true, Ordering::SeqCst);
+}
+
+/// Override the TLS CA file path for client mode peer verification.
+/// When set, the CA file is loaded and added to the root certificate store
+/// in addition to native/webpki roots.
+pub fn set_tls_ca_path(ca_path: &str) {
+    if TLS_CA_PATH_OVERRIDE.set(ca_path.to_string()).is_err() {
+        log::debug!("TLS CA path override already set, keeping existing value");
+    }
 }
 
 // ===============================
@@ -1132,6 +1142,23 @@ mod rustls_provider {
                         ConnectionError::TlsError(format!("Failed to add native cert: {}", e))
                     })?;
                 }
+            }
+            // Load CA override from --ca-file if set
+            if let Some(ca_path) = TLS_CA_PATH_OVERRIDE.get() {
+                let ca_data = std::fs::read(ca_path).map_err(|e| {
+                    ConnectionError::TlsError(format!("CA file read failed ({}): {}", ca_path, e))
+                })?;
+                let ca_certs = rustls::pki_types::CertificateDer::pem_slice_iter(&ca_data)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| {
+                        ConnectionError::TlsError(format!("CA file parse failed ({}): {}", ca_path, e))
+                    })?;
+                for cert in ca_certs {
+                    roots.add(cert).map_err(|e| {
+                        ConnectionError::TlsError(format!("Failed to add CA cert: {}", e))
+                    })?;
+                }
+                log::info!("Loaded CA certificates from override: {}", ca_path);
             }
 
             let builder = ClientConfig::builder_with_provider(Arc::new(

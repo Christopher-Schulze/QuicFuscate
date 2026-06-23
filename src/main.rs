@@ -1435,6 +1435,8 @@ async fn run_client(
                 if let Err(e) = config.load_verify_locations_from_file(s) {
                     error!("Failed to load CA file {}: {}", path.display(), e);
                 }
+                // Also set the global override so the rustls provider picks it up
+                quicfuscate::qftls::set_tls_ca_path(s);
             }
             None => {
                 error!("CA file path is not valid UTF-8: {}", path.display());
