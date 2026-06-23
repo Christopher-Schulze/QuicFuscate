@@ -2340,22 +2340,28 @@ impl LiveServerState {
                     AcceptDecision::Accept => {}
                     AcceptDecision::Backpressure => {
                         metrics.connections_rejected.fetch_add(1, Ordering::Relaxed);
+                        eprintln!("[DEBUG] Rejected by Backpressure (should_accept) for {}", addr);
                         return LiveClientAcquire::Backpressure;
                     }
-                    AcceptDecision::Reject(_) => {
+                    AcceptDecision::Reject(reason) => {
                         metrics.connections_rejected.fetch_add(1, Ordering::Relaxed);
+                        eprintln!("[DEBUG] Rejected by should_accept for {}: {:?}", addr, reason);
                         return LiveClientAcquire::Rejected;
                     }
                 }
 
                 let mut init = match build() {
                     Some(value) => value,
-                    None => return LiveClientAcquire::Rejected,
+                    None => {
+                        eprintln!("[DEBUG] build() returned None for {}", addr);
+                        return LiveClientAcquire::Rejected;
+                    }
                 };
                 let (session_id, session_stats) = match self.domain.accept(addr) {
                     Ok(value) => value,
-                    Err(_) => {
+                    Err(e) => {
                         metrics.connections_rejected.fetch_add(1, Ordering::Relaxed);
+                        eprintln!("[DEBUG] domain.accept failed for {}: {:?}", addr, e);
                         return LiveClientAcquire::Rejected;
                     }
                 };
