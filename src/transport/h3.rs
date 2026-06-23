@@ -688,7 +688,16 @@ impl Connection {
         let mut offset = 0;
         while offset < buf.len() {
             let (frame_type, frame_len, frame_offset) = Self::parse_frame_header(&buf[offset..])?;
-            let frame_data = &buf[offset + frame_offset..offset + frame_offset + frame_len];
+            // Validate the frame body is fully contained in this chunk before slicing.
+            // A frame length read from the wire that exceeds the available bytes (a partial
+            // frame split across stream_recv chunks, or a malformed/hostile length) would
+            // otherwise index out of bounds and panic the whole runtime.
+            let body_start = offset + frame_offset;
+            let body_end = match body_start.checked_add(frame_len) {
+                Some(end) if end <= buf.len() => end,
+                _ => break,
+            };
+            let frame_data = &buf[body_start..body_end];
             match frame_type {
                 0x00 => {
                     // DATA frame; if this stream is MASQUE, decode capsules
