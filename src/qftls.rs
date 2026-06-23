@@ -1053,7 +1053,6 @@ mod rustls_provider {
                 self.crypto_buffer.clear();
                 let kc = self.connection.write_hs(&mut self.crypto_buffer);
                 let produced = !self.crypto_buffer.is_empty();
-                eprintln!("[DEBUG] flush_handshake_io: produced={} kc={:?} write_level={:?}", produced, kc.is_some(), self.write_level);
                 if produced {
                     let level = self.write_level;
                     let pending = std::mem::take(&mut self.crypto_buffer);

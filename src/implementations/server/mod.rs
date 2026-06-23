@@ -68,7 +68,6 @@ use tokio::sync::mpsc;
 
 use crate::core::QuicFuscateConnection;
 use crate::engine::{EngineConfig, EngineError};
-use crate::error::ConnectionError;
 use crate::fec::FecConfig;
 use crate::interface::{TunConfig, TunInterface};
 use crate::optimize::MemoryPool;
@@ -1833,7 +1832,6 @@ pub async fn flush_live_server_outgoing(
         send_calls += 1;
         match conn.send(out) {
             Ok(len) if len > 0 => {
-                eprintln!("[DEBUG] conn.send returned {} bytes for {}", len, addr);
                 crate::telemetry::BYTES_SENT.inc_by(len as u64);
                 metrics.record_egress_datagram(len);
                 if let Some(stats) = session_stats.as_ref() {
@@ -1845,7 +1843,6 @@ pub async fn flush_live_server_outgoing(
             }
             Ok(0) => {
                 if send_calls == 1 {
-                    eprintln!("[DEBUG] conn.send returned 0 on first call for {} (no response to send)", addr);
                 }
                 break;
             }
@@ -1923,11 +1920,8 @@ pub async fn process_live_server_client_datagram(
     }
 
     match conn.recv(packet) {
-        Ok(n) => {
-            eprintln!("[DEBUG] conn.recv OK for {} (len={}, consumed={})", addr, packet.len(), n);
-        }
+        Ok(_) => {}
         Err(error) => {
-            eprintln!("[DEBUG] conn.recv FAILED for {}: {:?}", addr, error);
             log::error!("QUIC recv failed for {}: {:?}", addr, error);
         }
     }

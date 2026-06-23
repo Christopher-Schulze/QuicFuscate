@@ -898,7 +898,6 @@ impl QuicFuscateConnection {
         let recovered_packets = self.fec.on_receive(fec_packet).map_err(|e| {
             crate::error::ConnectionError::Transport(format!("FEC decoding failed: {}", e))
         })?;
-        eprintln!("[DEBUG] FEC on_receive returned {} packets", recovered_packets.len());
 
         for mut packet in recovered_packets {
             if let Some(data) = packet.payload_mut_unique() {
@@ -913,7 +912,6 @@ impl QuicFuscateConnection {
                 };
                 if let Err(e) = self.conn.recv(data, &recv_info) {
                     // Log error, but continue processing other recovered packets
-                    eprintln!("[DEBUG] inner conn.recv FAILED: {:?}", e);
                     debug!("transport::recv failed (possible probe): {}", e); // demoted to debug to reduce noise
 
                     // REALITY FALLBACK

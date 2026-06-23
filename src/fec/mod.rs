@@ -3457,16 +3457,30 @@ impl AdaptiveFec {
 
     /// Process incoming FEC packet through the decoder and return any recovered packets.
     pub fn on_receive(&mut self, packet: FecPacket) -> Result<Vec<FecPacket>, String> {
+        // Systematic (source) packets must always be forwarded to the QUIC stack
+        // immediately, regardless of FEC decoder state. The decoder still receives
+        // a clone for tracking/recovery purposes, but the original is returned
+        // directly so the handshake and data flow are not stalled.
+        let is_systematic = packet.is_systematic;
+        let mut output = Vec::new();
+
         let mut decoder = self.decoder.lock();
-        decoder.take_packet(packet);
+        decoder.take_packet(packet.clone());
 
         if let Some(result) = decoder.get_result() {
-            Ok(result.into_iter().collect())
+            output.extend(result);
         } else if self.partial_enabled {
-            Ok(decoder.get_partial_result().into_iter().collect())
-        } else {
-            Ok(Vec::new())
+            output.extend(decoder.get_partial_result());
         }
+
+        // Always ensure the systematic packet is forwarded. Block decoders only
+        // emit "recovered" packets in get_result/get_partial_result, so systematic
+        // packets that arrived intact would be silently dropped without this.
+        if is_systematic && !output.iter().any(|p| p.id == packet.id) {
+            output.push(packet);
+        }
+
+        Ok(output)
     }
 
     /// Return a reference to the internal memory pool
