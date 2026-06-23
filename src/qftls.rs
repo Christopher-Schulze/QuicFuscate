@@ -1041,13 +1041,11 @@ mod rustls_provider {
         ) -> Result<(), ConnectionError> {
             match kc {
                 rustls::quic::KeyChange::Handshake { keys } => {
-                    eprintln!("[DEBUG] KeyChange::Handshake is_server={}", self.is_server);
                     super::trace_key_change(self.is_server, "Handshake");
                     self.install_handshake_keys(keys)?;
                     self.write_level = super::Level::Handshake;
                 }
                 rustls::quic::KeyChange::OneRtt { keys, next } => {
-                    eprintln!("[DEBUG] KeyChange::OneRtt is_server={}", self.is_server);
                     super::trace_key_change(self.is_server, "OneRtt");
                     self.install_1rtt_keys(keys)?;
                     self.next_1rtt_secrets = Some(next);
@@ -1125,7 +1123,10 @@ mod rustls_provider {
             Ok(())
         }
 
-        fn create_client_connection() -> Result<rustls::quic::Connection, ConnectionError> {
+        /// Build the client root certificate store: native/webpki roots plus any CA
+        /// supplied via `--ca-file` (TLS_CA_PATH_OVERRIDE). Shared by the initial client
+        /// connection and the pre-handshake rebuild so both honor the CA override.
+        fn build_client_root_store() -> Result<RootCertStore, ConnectionError> {
             let mut roots = RootCertStore::empty();
             let native = load_native_certs();
             if !native.errors.is_empty() {
@@ -1147,7 +1148,6 @@ mod rustls_provider {
             }
             // Load CA override from --ca-file if set
             if let Some(ca_path) = TLS_CA_PATH_OVERRIDE.get() {
-                eprintln!("[DEBUG] Loading CA from override: {}", ca_path);
                 let ca_data = std::fs::read(ca_path).map_err(|e| {
                     ConnectionError::TlsError(format!("CA file read failed ({}): {}", ca_path, e))
                 })?;
@@ -1156,17 +1156,18 @@ mod rustls_provider {
                     .map_err(|e| {
                         ConnectionError::TlsError(format!("CA file parse failed ({}): {}", ca_path, e))
                     })?;
-                eprintln!("[DEBUG] CA file contains {} certs", ca_certs.len());
                 for cert in ca_certs {
                     roots.add(cert).map_err(|e| {
                         ConnectionError::TlsError(format!("Failed to add CA cert: {}", e))
                     })?;
                 }
-                eprintln!("[DEBUG] roots store now has {} certs", roots.len());
                 log::info!("Loaded CA certificates from override: {}", ca_path);
-            } else {
-                eprintln!("[DEBUG] No CA override set");
             }
+            Ok(roots)
+        }
+
+        fn create_client_connection() -> Result<rustls::quic::Connection, ConnectionError> {
+            let roots = Self::build_client_root_store()?;
 
             let builder = ClientConfig::builder_with_provider(Arc::new(
                 rustls::crypto::ring::default_provider(),
@@ -1304,7 +1305,6 @@ mod rustls_provider {
 
         fn load_certs_from_file() -> Result<Vec<CertificateDer<'static>>, ConnectionError> {
             if let Some(path) = TLS_CERT_PATH_OVERRIDE.get().map(|s| s.as_str()) {
-                eprintln!("[DEBUG] Server loading cert from override: {}", path);
                 let cert_data = std::fs::read(path).map_err(|e| {
                     ConnectionError::TlsError(format!("Cert read failed ({}): {}", path, e))
                 })?;
@@ -1394,18 +1394,11 @@ mod rustls_provider {
             &mut self,
             profile: &TlsProfile,
         ) -> Result<(), ConnectionError> {
-            // Build a fresh ClientConfig with ALPN and early data settings based on profile
-            let mut roots = RootCertStore::empty();
-            let native = load_native_certs();
-            if native.certs.is_empty() {
-                roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-            } else {
-                for cert in native.certs {
-                    roots.add(cert).map_err(|e| {
-                        ConnectionError::TlsError(format!("Failed to add native cert: {}", e))
-                    })?;
-                }
-            }
+            // Build a fresh ClientConfig with ALPN and early data settings based on profile.
+            // Use the shared root store so the --ca-file CA override is honored here too
+            // (otherwise the rebuilt connection would only trust native roots and reject
+            // a custom CA with UnknownIssuer).
+            let roots = Self::build_client_root_store()?;
             let builder = ClientConfig::builder_with_provider(Arc::new(
                 rustls::crypto::ring::default_provider(),
             ))
