@@ -1923,8 +1923,8 @@ pub async fn process_live_server_client_datagram(
     }
 
     match conn.recv(packet) {
-        Ok(()) => {
-            eprintln!("[DEBUG] conn.recv OK for {} (len={})", addr, packet.len());
+        Ok(n) => {
+            eprintln!("[DEBUG] conn.recv OK for {} (len={}, consumed={})", addr, packet.len(), n);
         }
         Err(error) => {
             eprintln!("[DEBUG] conn.recv FAILED for {}: {:?}", addr, error);
