@@ -55,6 +55,8 @@ The QuicFuscate user-space code accounts for <3% of CPU time in the UDP fast pat
 `nft_do_chain` evaluates iptables rules for every packet. On broderick, the default firewall rules add ~15% overhead. This can be reduced by:
 - Adding a fast-path ACCEPT rule for loopback UDP traffic
 - Using `iptables -I INPUT -p udp --dport 4433 -j ACCEPT`
+- **Script:** `scripts/install/setup-netfilter-fastpath.sh` automates this
+- **Status:** Script created, not yet applied on broderick (requires SSH)
 
 ### 3. Memory Allocation Overhead (15%)
 `__kmalloc` and `__slab_free` for skb allocation/freeing are significant. This is inherent to the kernel UDP path and cannot be reduced from user space. io_uring's zero-copy mode (SendMsgZc) can reduce this by eliminating skb allocation for sent data.
