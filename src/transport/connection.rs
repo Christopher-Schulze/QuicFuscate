@@ -3065,6 +3065,22 @@ impl Connection {
     pub fn server_name(&self) -> Option<&str> {
         self.tls_provider.as_ref().and_then(|p| p.server_name_get())
     }
+
+    /// Set the QKey auth token on the TLS provider (client side).
+    /// The token is injected into QUIC transport parameters, which are
+    /// carried in the TLS EncryptedExtensions message — encrypted at the
+    /// Handshake level, invisible to DPI (TODO-415 Phase 2).
+    pub fn set_qkey_auth_token(&mut self, token: &[u8]) {
+        if let Some(provider) = &mut self.tls_provider {
+            provider.set_qkey_auth_token(token);
+        }
+    }
+
+    /// Get the QKey auth token extracted from peer's transport parameters (server side).
+    /// Returns None if the peer did not send a QKey auth parameter.
+    pub fn peer_qkey_auth_token(&self) -> Option<&[u8]> {
+        self.tls_provider.as_ref().and_then(|p| p.peer_qkey_auth_token())
+    }
     /// Stream priority
     /// Sets urgency and incremental scheduling hints for a stream.
     #[cfg(any(test, feature = "rust-tests"))]

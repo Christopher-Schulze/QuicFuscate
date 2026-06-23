@@ -5759,12 +5759,14 @@ impl StealthManager {
                 source
             );
             if let Some(proxy) = &self.reality_proxy {
-                // Send the cached ServerHello bytes directly as a fallback
-                // response, bypassing the upstream relay. The server's send
-                // loop picks this up via poll_fallback().
+                // Phase 3 (TODO-415): serve the full cached TLS flight (ServerHello +
+                // encrypted flight) directly to probes. This is byte-identical to
+                // what the real cover site would return — the probe sees a valid
+                // TLS 1.3 handshake response but cannot complete the key exchange
+                // (no private key), exactly matching the XTLS-Reality approach.
                 // Synchronous try_send — no tokio::spawn needed per probe.
-                let server_hello = material.server_hello.clone();
-                proxy.send_cached_response(source, server_hello);
+                let raw_flight = material.raw_flight.clone();
+                proxy.send_cached_response(source, raw_flight);
             }
             return;
         }

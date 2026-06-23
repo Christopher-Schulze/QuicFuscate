@@ -330,6 +330,17 @@ impl QuicFuscateConnection {
             warn!("Failed to configure TLS profile for SNI {}: {:?}", sni_str, e);
         }
 
+        // TODO-415 Phase 2: Inject QKey auth token into QUIC transport parameters.
+        // The token is carried in TLS EncryptedExtensions — encrypted at the
+        // Handshake level, invisible to DPI. This supplements the existing
+        // x-qf-auth HTTP/3 header mechanism with a TLS-layer auth channel.
+        if let Some(ref token) = s.qkey_auth_token_hex {
+            let token = token.trim();
+            if !token.is_empty() {
+                s.conn.set_qkey_auth_token(token.as_bytes());
+            }
+        }
+
         // Initialize DeepIntegrationOrchestrator if feature enabled
         #[cfg(feature = "orchestrator")]
         {

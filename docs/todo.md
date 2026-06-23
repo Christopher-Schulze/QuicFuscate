@@ -64,7 +64,7 @@ Pre-loop cleanup tasks completed before handing work to the continuous loop.
 | TODO-417 | 2 | P1 | Hot-Path-Lock-Entfernung (bündelt 396+397+398) | **DONE** | 418 |
 | TODO-414 | 2 | P1 | Streaming-FEC in adaptiven Loop (supersedes 409) | **DONE** | 418 |
 | TODO-416 | 2 | P1 | Graduelle Stealth-Eskalation (3-Stufen-Rampe) | **DONE** | 418 |
-| TODO-415 | 3 | P1 | Reality-Grade TLS-Mimikry (Phase 1 done, 2/3 pending) | **PARTIAL** | 416 |
+| TODO-415 | 3 | P1 | Reality-Grade TLS-Mimikry (Phase 1-3 done) | **DONE** | 416 |
 
 Detail files: `docs/todo/todo-{id}-*.md` for each item above.
 

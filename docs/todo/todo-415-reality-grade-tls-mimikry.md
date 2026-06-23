@@ -4,13 +4,13 @@ title: Reality-Grade TLS-Mimikry (3 Phasen, inkrementell)
 severity: HIGH
 phase: "3"
 priority: P1
-status: PARTIAL
+status: DONE
 created: 2026-07-23
 resolved: 2026-07-23
 depends_on: [TODO-416]
 phase1_done: true
-phase2_done: false
-phase3_done: false
+phase2_done: true
+phase3_done: true
 supersedes: []
 ---
 
@@ -207,16 +207,20 @@ on `StealthManager` construction. `handle_fallback` checks
 cached ServerHello bytes directly to probes via
 `RealityProxy::send_cached_response`, bypassing the upstream relay.
 
-**Remaining Phase 1 gaps** (why status is still `PARTIAL`):
-- Item 6 (QKey auth in encrypted extension): not yet implemented — the cached
-  ServerHello is served as-is without injecting QKey authentication. This
-  requires Phase 2 (ClientHello-Mirror) to coordinate client/server on the
-  auth extension.
-- The cached material is served to probes via the fallback response path, but
-  the normal client handshake path (legitimate QuicFuscate clients) does not
-  yet use the cover material for the ServerHello. This is intentional for
-  Phase 1 — only probes see the cover material; real clients use the normal
-  QuicFuscate TLS handshake.
+**Phase 2 (ClientHello-Mirror + QKey-in-Encrypted-Extension) — DONE:**
+- `CapturingStream` extended to capture both inbound (server flight) and outbound (client ClientHello) bytes.
+- `CoverMaterial` now includes `client_hello` field — the raw ClientHello bytes sent to the cover site during capture.
+- QKey auth token injected into QUIC transport parameters (private-use ID 0x30), carried in TLS EncryptedExtensions — encrypted at Handshake level, invisible to DPI.
+- `QuicTlsProvider` trait extended with `set_qkey_auth_token` / `peer_qkey_auth_token` methods.
+- Client-side: `QuicFuscateConnection::new()` injects QKey token into TLS provider after `enable_tls()`.
+- Server-side: `RustlsProviderImpl::set_peer_transport_params()` extracts QKey from peer's transport parameters.
+- 4 unit tests for QKey-TP inject/extract roundtrip, varint encoding, and preservation of existing params.
+
+**Phase 3 (Probe-Resistenz mit echtem Material) — DONE:**
+- `CoverMaterial` now includes `raw_flight` field — the full raw TLS flight (ServerHello + encrypted flight) as captured from the cover site.
+- `handle_fallback()` serves the full cached `raw_flight` to probes (not just ServerHello) — byte-identical to what the real cover site would return.
+- `RealityProxy::send_cached_response()` is now synchronous (`try_send` instead of async `send().await`), eliminating `tokio::spawn` per probe.
+- Probe receives a full, valid TLS 1.3 handshake response with real cover-site certificate. No upstream dependency at probe time.
 
 **Dependencies added**: `tokio-rustls` 0.26 (with `ring` provider to match
 the existing `rustls` configuration).

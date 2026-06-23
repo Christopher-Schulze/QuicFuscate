@@ -290,6 +290,15 @@ impl RealityConfig {
 pub struct CoverMaterial {
     /// Raw ServerHello bytes (including TLS record header).
     pub server_hello: Vec<u8>,
+    /// Full raw TLS flight bytes (ServerHello + encrypted flight) as captured
+    /// from the cover site. Used by Phase 3 probe-resistance to serve a
+    /// byte-identical cover-site response to active probes.
+    pub raw_flight: Vec<u8>,
+    /// Raw ClientHello bytes that the client sent to the cover site during
+    /// capture. Used by Phase 2 (ClientHello-Mirror) — the QuicFuscate client
+    /// sends a byte-identical ClientHello to the server, making client→server
+    /// traffic indistinguishable from client→cover-site traffic.
+    pub client_hello: Vec<u8>,
     /// Server certificate chain (DER-encoded, as received from cover site).
     pub certificate_chain: Vec<Vec<u8>>,
     /// SNI from the cover site response (for validation).
@@ -425,7 +434,8 @@ impl CoverHandshakeCache {
         // `CapturingStream::drop` runs — and `CapturingStream` is owned by
         // `tls`. Without the explicit drop, `collect()` would deadlock.
         drop(tls);
-        let raw = capture_rx.collect().await;
+        let captured = capture_rx.collect().await;
+        let raw = captured.inbound;
 
         // Parse the raw TLS records to extract ServerHello and certificate material.
         let (server_hello, certificate_chain, tls_version) =
@@ -439,15 +449,18 @@ impl CoverHandshakeCache {
             .unwrap_or(0);
 
         log::info!(
-            "Reality: captured {} bytes of ServerHello + {} cert records ({} bytes total flight) from {}",
+            "Reality: captured {} bytes of ServerHello + {} cert records ({} bytes total flight, {} bytes ClientHello) from {}",
             server_hello.len(),
             certificate_chain.len(),
             raw.len(),
+            captured.outbound.len(),
             addr
         );
 
         Ok(CoverMaterial {
             server_hello,
+            raw_flight: raw,
+            client_hello: captured.outbound,
             certificate_chain,
             sni: self.config.cover_host.clone(),
             captured_at: now,
@@ -483,7 +496,7 @@ impl CoverHandshakeCache {
 }
 
 // =============================================================================
-// CapturingStream — wraps a TcpStream and records all raw inbound bytes
+// CapturingStream — wraps a TcpStream and records raw inbound AND outbound bytes
 // =============================================================================
 
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -491,33 +504,48 @@ use tokio::sync::oneshot;
 
 /// A handle to receive the raw bytes read by a `CapturingStream`.
 pub struct RawCaptureHandle {
-    rx: oneshot::Receiver<Vec<u8>>,
+    rx: oneshot::Receiver<CapturedBytes>,
+}
+
+/// Raw bytes captured from both directions of a `CapturingStream`.
+#[derive(Debug, Default)]
+pub struct CapturedBytes {
+    /// Bytes read from the inner stream (inbound — server flight).
+    pub inbound: Vec<u8>,
+    /// Bytes written to the inner stream (outbound — client flight, e.g. ClientHello).
+    pub outbound: Vec<u8>,
 }
 
 impl RawCaptureHandle {
     /// Collect all captured raw bytes. Waits for the `CapturingStream` to be
-    /// consumed (its `AsyncRead` impl appends to an internal buffer; this
-    /// returns the buffer once the sender side is dropped, which happens when
-    /// the `tokio-rustls` `TlsStream` is dropped).
-    pub async fn collect(self) -> Vec<u8> {
+    /// dropped (its `AsyncRead`/`AsyncWrite` impls append to internal buffers;
+    /// this returns the buffers once the sender side is dropped).
+    pub async fn collect(self) -> CapturedBytes {
         self.rx.await.unwrap_or_default()
     }
 }
 
-/// Wraps an inner `AsyncRead` stream and copies every byte read from it into
-/// an internal buffer, which is sent to the `RawCaptureHandle` when this
-/// struct is dropped. This lets us record the raw TLS record bytes that
-/// `tokio-rustls` would otherwise decrypt and discard.
+/// Wraps an inner `AsyncRead + AsyncWrite` stream and copies every byte read
+/// from and written to it into internal buffers, which are sent to the
+/// `RawCaptureHandle` when this struct is dropped. This lets us record the
+/// raw TLS record bytes that `tokio-rustls` would otherwise decrypt/discard
+/// (inbound) and the ClientHello bytes the client sends (outbound).
 struct CapturingStream<S> {
     inner: S,
-    buf: Vec<u8>,
-    tx: Option<oneshot::Sender<Vec<u8>>>,
+    /// Inbound bytes (server→client).
+    read_buf: Vec<u8>,
+    /// Outbound bytes (client→server, e.g. ClientHello).
+    write_buf: Vec<u8>,
+    tx: Option<oneshot::Sender<CapturedBytes>>,
 }
 
 impl<S> Drop for CapturingStream<S> {
     fn drop(&mut self) {
         if let Some(tx) = self.tx.take() {
-            let _ = tx.send(std::mem::take(&mut self.buf));
+            let _ = tx.send(CapturedBytes {
+                inbound: std::mem::take(&mut self.read_buf),
+                outbound: std::mem::take(&mut self.write_buf),
+            });
         }
     }
 }
@@ -534,7 +562,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for CapturingStream<S> {
         if let std::task::Poll::Ready(Ok(())) = &result {
             let after = buf.filled().len();
             if after > before {
-                this.buf.extend_from_slice(&buf.filled()[before..after]);
+                this.read_buf.extend_from_slice(&buf.filled()[before..after]);
             }
         }
         result
@@ -547,7 +575,12 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for CapturingStream<S> {
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
-        std::pin::Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+        let this = self.get_mut();
+        let result = std::pin::Pin::new(&mut this.inner).poll_write(cx, buf);
+        if let std::task::Poll::Ready(Ok(n)) = &result {
+            this.write_buf.extend_from_slice(&buf[..*n]);
+        }
+        result
     }
 
     fn poll_flush(
@@ -566,13 +599,18 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for CapturingStream<S> {
 }
 
 /// Create a `CapturingStream` and return it together with the handle for
-/// collecting the captured bytes.
+/// collecting the captured bytes (both inbound and outbound).
 fn capturing_stream<S: AsyncRead + AsyncWrite + Unpin>(
     inner: S,
 ) -> (CapturingStream<S>, RawCaptureHandle) {
     let (tx, rx) = oneshot::channel();
     let handle = RawCaptureHandle { rx };
-    (CapturingStream { inner, buf: Vec::with_capacity(16384), tx: Some(tx) }, handle)
+    (CapturingStream {
+        inner,
+        read_buf: Vec::with_capacity(16384),
+        write_buf: Vec::with_capacity(4096),
+        tx: Some(tx),
+    }, handle)
 }
 
 // =============================================================================
@@ -768,6 +806,8 @@ mod tests {
         let cache = CoverHandshakeCache::new(RealityConfig::default());
         let material = CoverMaterial {
             server_hello: vec![0x16, 0x03, 0x03, 0x00, 0x10, 0x02, 0x00, 0x00, 0x0c],
+            raw_flight: vec![0x16, 0x03, 0x03, 0x00, 0x10, 0x02, 0x00, 0x00, 0x0c],
+            client_hello: vec![],
             certificate_chain: vec![vec![0x01, 0x02, 0x03]],
             sni: "example.com".to_string(),
             captured_at: std::time::SystemTime::now()
@@ -788,6 +828,8 @@ mod tests {
         let cache = CoverHandshakeCache::new(RealityConfig::default());
         let material = CoverMaterial {
             server_hello: vec![0x16],
+            raw_flight: vec![0x16],
+            client_hello: vec![],
             certificate_chain: vec![],
             sni: "test.com".to_string(),
             captured_at: std::time::SystemTime::now()
@@ -806,6 +848,8 @@ mod tests {
     fn cover_material_staleness_check() {
         let material = CoverMaterial {
             server_hello: vec![],
+            raw_flight: vec![],
+            client_hello: vec![],
             certificate_chain: vec![],
             sni: "test.com".to_string(),
             captured_at: 1000,
@@ -940,10 +984,10 @@ mod tests {
             .expect("collect() must not deadlock");
 
             assert!(
-                captured.windows(payload.len()).any(|w| w == payload),
-                "captured bytes must contain the payload; got {} bytes: {:?}",
-                captured.len(),
-                &captured[..captured.len().min(payload.len())]
+                captured.inbound.windows(payload.len()).any(|w| w == payload),
+                "captured inbound bytes must contain the payload; got {} bytes: {:?}",
+                captured.inbound.len(),
+                &captured.inbound[..captured.inbound.len().min(payload.len())]
             );
         });
     }
