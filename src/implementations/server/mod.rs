@@ -2031,7 +2031,13 @@ pub fn build_live_server_client_init(
     request: LiveClientBuildRequest<'_>,
 ) -> Option<LiveClientInit> {
     let initial_ctx =
-        parse_live_server_initial_auth(request.packet, request.qkey_registry, request.metrics)?;
+        match parse_live_server_initial_auth(request.packet, request.qkey_registry, request.metrics) {
+            Some(ctx) => ctx,
+            None => {
+                eprintln!("[DEBUG] parse_live_server_initial_auth returned None for {}", request.remote_addr);
+                return None;
+            }
+        };
     log::info!("New client connected: {}", request.remote_addr);
 
     let cfg = match request.stealth_config.lock() {
