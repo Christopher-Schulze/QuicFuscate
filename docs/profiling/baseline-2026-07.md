@@ -94,13 +94,15 @@ Based on the profiling baseline:
 
 1. **Rebuild with debug symbols** (`RUSTFLAGS="-g"` or `debug = true` in release profile) for user-space flamegraph resolution. Current flamegraphs show `[harness]` for all user-space frames.
 
-2. **TUN mode profiling** — the QUIC connection scenarios have minimal traffic. For real profiling of the QUIC data plane (FEC, crypto, stealth), need TUN mode with actual data transfer.
+2. **TUN mode profiling** — the QUIC connection scenarios have minimal traffic. For real profiling of the QUIC data plane (FEC, crypto, stealth), need TUN mode with actual data transfer. **Script:** `scripts/benchmarks/profiling-tun-mode.sh` — 6 scenarios (g-l) with iperf3 through tunnel + tc-netem loss/latency simulation.
 
-3. **tc-netem simulation** — add `tc qdisc add dev lo root netem delay 50ms loss 5%` for loss/latency profiling. This will activate FEC encoding/decoding and reveal the FEC hot path.
+3. **tc-netem simulation** — add `tc qdisc add dev lo root netem delay 50ms loss 5%` for loss/latency profiling. This will activate FEC encoding/decoding and reveal the FEC hot path. Automated in `profiling-tun-mode.sh`.
 
-4. **Netfilter optimization** — add a fast-path ACCEPT rule for loopback UDP to eliminate the 15% netfilter overhead during profiling.
+4. **Netfilter optimization** — add a fast-path ACCEPT rule for loopback UDP to eliminate the 15% netfilter overhead during profiling. **Script:** `scripts/install/setup-netfilter-fastpath.sh`
 
 5. **io_uring zero-copy** — the SendMsgZc path (TODO-419 fix) should be profiled separately to measure the skb allocation reduction.
+
+6. **RTT inflation fix** — the 0→385ms loopback RTT bug has been fixed (commit `85651d8`). RTT is now sampled from ACK frames per RFC 9000 §5.1, not inflated by 100ms on every timeout. Re-run profiling to verify RTT stays stable.
 
 ## Files
 
