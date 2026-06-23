@@ -1913,18 +1913,9 @@ impl Connection {
         send_peer: SocketAddr,
         frame: &Frame<'_>,
     ) -> Result<(usize, SendInfo), crate::error::ConnectionError> {
-        let base_hdr = packet::Header {
-            ty: PacketType::Short,
-            version: 0,
-            dcid: self.dcid.to_vec(),
-            scid: self.scid.to_vec(),
-            pkt_num: 0,
-            pkt_num_len: 0,
-            token: None,
-            versions: None,
-            key_phase: false,
-        };
-        let hdr_len = packet::format_header(&base_hdr, out)?;
+        // Build short header prefix with DCID directly — avoids two Vec
+        // allocations (dcid.to_vec() + scid.to_vec()) per outbound packet.
+        let hdr_len = packet::format_short_header(self.dcid.as_ref(), false, out)?;
         let pn = self.next_send_pn_by_space[2];
         let pn_len = if pn < (1 << 8) {
             1
@@ -2147,19 +2138,9 @@ impl Connection {
             );
         }
         // Outbound stealth timing is owned by core::QuicFuscateConnection (next_packet_release).
-        // Build short header prefix with DCID; we'll append PN bytes next
-        let base_hdr = packet::Header {
-            ty: PacketType::Short,
-            version: 0,
-            dcid: self.dcid.to_vec(),
-            scid: self.scid.to_vec(),
-            pkt_num: 0,
-            pkt_num_len: 0,
-            token: None,
-            versions: None,
-            key_phase: false,
-        };
-        let hdr_len = packet::format_header(&base_hdr, out)?; // first byte + DCID
+        // Build short header prefix with DCID directly — avoids two Vec
+        // allocations (dcid.to_vec() + scid.to_vec()) per outbound packet.
+        let hdr_len = packet::format_short_header(self.dcid.as_ref(), false, out)?; // first byte + DCID
         let dcid_end = 1 + self.dcid.as_ref().len();
         // Decide packet number and length
         let pn = self.next_send_pn_by_space[2];

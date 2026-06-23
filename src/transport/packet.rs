@@ -314,6 +314,31 @@ pub fn parse_header(buf: &[u8], short_dcid_len: usize) -> Result<(Header, usize)
     Ok((hdr, off))
 }
 
+/// Format a Short header directly from a DCID slice, bypassing `Header`
+/// construction. This eliminates two `Vec` allocations (`dcid.to_vec()` +
+/// `scid.to_vec()`) on the 1-RTT send hot path — `ConnectionId` is already
+/// a stack-allocated `Copy` type and `scid` is always empty for Short headers.
+#[inline]
+pub fn format_short_header(
+    dcid: &[u8],
+    key_phase: bool,
+    out: &mut [u8],
+) -> Result<usize, ConnectionError> {
+    if out.is_empty() {
+        return Err(ConnectionError::BufferTooShort);
+    }
+    let mut first = crate::transport::packet::FIXED_BIT; // 0x40
+    if key_phase {
+        first |= crate::transport::packet::KEY_PHASE_BIT;
+    }
+    out[0] = first;
+    if out.len() < 1 + dcid.len() {
+        return Err(ConnectionError::BufferTooShort);
+    }
+    out[1..1 + dcid.len()].copy_from_slice(dcid);
+    Ok(1 + dcid.len())
+}
+
 /// Minimal header formatting to get PN offset and header fields
 pub fn format_header(h: &Header, out: &mut [u8]) -> Result<usize, ConnectionError> {
     if out.is_empty() {
