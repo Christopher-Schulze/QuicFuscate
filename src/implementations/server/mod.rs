@@ -3994,6 +3994,7 @@ impl ServerRuntime {
                     recv_res = recv_datagram_from(&socket, &mut buf) => {
                         match recv_res {
                             Ok((len, from)) => {
+                                eprintln!("[DEBUG] run_loop recv {} bytes from {}", len, from);
                                 crate::telemetry!(crate::telemetry::BYTES_RECEIVED.inc_by(len as u64));
                                 metrics.record_ingress_datagram(len);
 
@@ -4045,12 +4046,19 @@ impl ServerRuntime {
                                     )
                                 },
                                 ) {
-                                    LiveClientAcquire::Ready(v) => v,
+                                    LiveClientAcquire::Ready(v) => {
+                                        eprintln!("[DEBUG] acquired Ready client for {}", from);
+                                        v
+                                    },
                                     LiveClientAcquire::Backpressure => {
+                                        eprintln!("[DEBUG] Backpressure for {}", from);
                                         tokio::time::sleep(runtime_parts.accept_loop.backpressure_delay()).await;
                                         continue;
                                     }
-                                    LiveClientAcquire::Rejected => continue,
+                                    LiveClientAcquire::Rejected => {
+                                        eprintln!("[DEBUG] Rejected client {}", from);
+                                        continue;
+                                    }
                                 };
 
                                 let datagram_result = match process_live_server_client_datagram(
