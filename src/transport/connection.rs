@@ -969,8 +969,7 @@ impl Connection {
         max_len: usize,
     ) -> Option<(u64, Vec<u8>)> {
         if let Some(provider) = &mut self.tls_provider {
-            let result = provider.next_crypto_frame(level, max_len);
-            result
+            provider.next_crypto_frame(level, max_len)
         } else {
             let mut crypto = self.crypto.write();
             let stream = match level {
@@ -1973,6 +1972,14 @@ impl Connection {
         if unlikely(out.len() < MIN_CLIENT_INITIAL_LEN) {
             return Err(ConnectionError::BufferTooShort);
         }
+        // Never emit a QUIC packet larger than the negotiated max UDP payload size.
+        // The caller's buffer may be larger than the path MTU (e.g. a pooled 2 KiB block),
+        // but downstream send paths use fixed-size datagram buffers; an oversized packet
+        // would be silently truncated, destroying the AEAD tag and making the peer unable
+        // to decrypt. Clamping the working buffer to the MTU forces CRYPTO/stream framing
+        // to fragment across multiple packets instead of overflowing a single one.
+        let mtu_cap = out.len().min(self.dgram_send_max_size.max(MIN_CLIENT_INITIAL_LEN));
+        let out = &mut out[..mtu_cap];
         // Congestion gate: only send if within cwnd budget
         if !self.recovery.can_send(self.dgram_send_max_size) {
             return Err(ConnectionError::Done);
@@ -2047,10 +2054,19 @@ impl Connection {
                 let header_len = hdr_len_wo_pn + pn_len;
                 let mut off = header_len;
 
+                // The CRYPTO data budget must reserve room for everything written into
+                // the same packet *after* the data: the AEAD tag (16), the CRYPTO frame
+                // header (type 1 + offset varint ≤8 + length varint ≤8), and the ACK/PING
+                // frames added below. Without this reserve, next_crypto_frame() returns up
+                // to `out.len() - off - 16` bytes, the framed packet overflows the buffer,
+                // the seal fails with BufferTooShort, and the already-drained CRYPTO bytes
+                // are lost forever (never retransmitted) — stalling the handshake.
+                const SEND_FRAME_OVERHEAD_RESERVE: usize = 64;
+                let crypto_budget = out.len().saturating_sub(off + 16 + SEND_FRAME_OVERHEAD_RESERVE);
                 let (lvl, max_len) = match pkt_ty {
-                    PacketType::Initial => (crate::qftls::Level::Initial, out.len() - off - 16),
-                    PacketType::Handshake => (crate::qftls::Level::Handshake, out.len() - off - 16),
-                    _ => (crate::qftls::Level::Application, out.len() - off - 16),
+                    PacketType::Initial => (crate::qftls::Level::Initial, crypto_budget),
+                    PacketType::Handshake => (crate::qftls::Level::Handshake, crypto_budget),
+                    _ => (crate::qftls::Level::Application, crypto_budget),
                 };
                 if max_len < 32 {
                     continue;
