@@ -1145,6 +1145,7 @@ mod rustls_provider {
             }
             // Load CA override from --ca-file if set
             if let Some(ca_path) = TLS_CA_PATH_OVERRIDE.get() {
+                eprintln!("[DEBUG] Loading CA from override: {}", ca_path);
                 let ca_data = std::fs::read(ca_path).map_err(|e| {
                     ConnectionError::TlsError(format!("CA file read failed ({}): {}", ca_path, e))
                 })?;
@@ -1153,12 +1154,16 @@ mod rustls_provider {
                     .map_err(|e| {
                         ConnectionError::TlsError(format!("CA file parse failed ({}): {}", ca_path, e))
                     })?;
+                eprintln!("[DEBUG] CA file contains {} certs", ca_certs.len());
                 for cert in ca_certs {
                     roots.add(cert).map_err(|e| {
                         ConnectionError::TlsError(format!("Failed to add CA cert: {}", e))
                     })?;
                 }
+                eprintln!("[DEBUG] roots store now has {} certs", roots.len());
                 log::info!("Loaded CA certificates from override: {}", ca_path);
+            } else {
+                eprintln!("[DEBUG] No CA override set");
             }
 
             let builder = ClientConfig::builder_with_provider(Arc::new(
