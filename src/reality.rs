@@ -79,10 +79,14 @@ impl RealityProxy {
     /// relay. Used by the reality-grade TLS mimikry path (TODO-415) to serve
     /// cached cover-site handshake material to probes without connecting to
     /// an upstream host.
-    pub async fn send_cached_response(&self, target: SocketAddr, data: Vec<u8>) {
+    ///
+    /// Synchronous: uses `try_send` to avoid spawning a tokio task per probe.
+    /// The channel has capacity 64; if full (backpressure), the response is
+    /// dropped with a debug log — preferable to blocking the recv hot path.
+    pub fn send_cached_response(&self, target: SocketAddr, data: Vec<u8>) {
         let resp = FallbackResponse { target, data };
-        if let Err(e) = self.tx.send(resp).await {
-            log::debug!("RealityProxy: failed to send cached response to {}: {}", target, e);
+        if let Err(e) = self.tx.try_send(resp) {
+            log::debug!("RealityProxy: failed to send cached response: {}", e);
         }
     }
 

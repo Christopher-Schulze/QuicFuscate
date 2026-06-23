@@ -5762,11 +5762,9 @@ impl StealthManager {
                 // Send the cached ServerHello bytes directly as a fallback
                 // response, bypassing the upstream relay. The server's send
                 // loop picks this up via poll_fallback().
+                // Synchronous try_send — no tokio::spawn needed per probe.
                 let server_hello = material.server_hello.clone();
-                let proxy = Arc::clone(proxy);
-                tokio::spawn(async move {
-                    proxy.send_cached_response(source, server_hello).await;
-                });
+                proxy.send_cached_response(source, server_hello);
             }
             return;
         }
