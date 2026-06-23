@@ -2454,7 +2454,11 @@ impl LiveServerState {
                     conn.rtt_ms(),
                     conn.loss_rate() * 100.0
                 );
-                conn.conn.on_timeout();
+                // Only drive the idle timeout when the connection has actually been
+                // idle; calling it every tick collapses cwnd and inflates loss.
+                if conn.conn.idle_timeout_elapsed() {
+                    conn.conn.on_timeout();
+                }
             }
         }
         self.enforce_qkey_auth_timeouts(metrics);

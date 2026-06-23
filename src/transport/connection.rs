@@ -189,6 +189,10 @@ pub struct Connection {
     #[cfg(any(test, feature = "rust-tests"))]
     retired_scids: VecDeque<ConnectionId>,
     bytes_in_flight_started: Option<Instant>,
+    /// Last time an inbound packet was successfully received. Drives the idle
+    /// timeout: run loops call on_timeout() every tick, but it must only act once
+    /// the connection has actually been idle for `timeout()`, not on every tick.
+    last_activity: Instant,
     // Basic flow-control (local receive limits)
     // Receive-side connection window (what we allow peer to send)
     conn_max_data: u64,
@@ -385,6 +389,7 @@ impl Connection {
             #[cfg(any(test, feature = "rust-tests"))]
             retired_scids: VecDeque::new(),
             bytes_in_flight_started: None,
+            last_activity: Instant::now(),
             conn_max_data: initial_max_data,
             conn_bytes_recvd: 0,
             peer_max_data: initial_max_data,
@@ -1505,6 +1510,7 @@ impl Connection {
         let len = end;
         self.stats.recv += 1;
         self.stats.recv_bytes += len as u64;
+        self.last_activity = Instant::now();
         if !self.is_established && self.stats.recv > 0 && self.stats.sent > 0 {
             self.is_established = true;
         }
@@ -1996,8 +2002,13 @@ impl Connection {
         let handshake_incomplete =
             self.tls_provider.as_ref().map(|p| !p.handshake_complete()).unwrap_or(false);
 
-        // If TLS handshake not complete, attempt to send Initial/Handshake packet with CRYPTO frame
-        if handshake_incomplete {
+        // Always flush any pending Initial/Handshake CRYPTO before falling through to the
+        // 1-RTT path, even if rustls has just reported the handshake complete. The client's
+        // Finished is produced at the very instant completion flips to true; if we skipped the
+        // handshake send path as soon as handshake_complete became true, that Finished would
+        // never reach the wire and the peer would stay stuck handshaking forever (it would
+        // only ever see Initial + 1-RTT, never the Handshake-level Finished).
+        {
             let (has_initial, has_handshake) = {
                 let crypto = self.crypto.read();
                 (crypto.seal_initial.is_some(), crypto.seal_handshake.is_some())
@@ -2150,7 +2161,12 @@ impl Connection {
                 ));
             }
 
-            return Err(ConnectionError::Done);
+            // No pending Initial/Handshake CRYPTO to send. If the handshake is still in
+            // progress there is nothing else to do this turn; once it is complete we fall
+            // through to the 1-RTT path below.
+            if handshake_incomplete {
+                return Err(ConnectionError::Done);
+            }
         }
         if let Some(targeted_frame) = self.pop_targeted_path_frame_for_send() {
             return self.send_targeted_short_header_frame(
@@ -3040,6 +3056,16 @@ impl Connection {
     pub fn timeout(&self) -> Option<Duration> {
         Some(Duration::from_millis(30000))
     }
+    /// Whether the connection has been idle (no inbound packet) for at least the
+    /// idle-timeout window. Run loops invoke this each housekeeping tick to decide
+    /// whether to drive `on_timeout()`; calling on_timeout() unconditionally every
+    /// tick would inflate the loss counter and repeatedly collapse the congestion
+    /// window for a perfectly healthy connection.
+    pub fn idle_timeout_elapsed(&self) -> bool {
+        let window = self.timeout().unwrap_or(Duration::from_secs(30));
+        self.last_activity.elapsed() >= window
+    }
+
     /// Handles timeout
     pub fn on_timeout(&mut self) {
         // Handle connection timeout
