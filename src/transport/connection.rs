@@ -221,8 +221,8 @@ pub struct Connection {
     fec_cb_lost_packets: Arc<std::sync::atomic::AtomicU64>,
     fec_cb_sent_bytes: Arc<std::sync::atomic::AtomicU64>,
     fec_cb_lost_bytes: Arc<std::sync::atomic::AtomicU64>,
-    // Sent packet accounting: PN -> bytes (Application epoch)
-    sent_bytes_by_pn: BTreeMap<u64, usize>,
+    // Sent packet accounting: PN -> (bytes, send_time) for ACK accounting + RTT sampling
+    sent_packets_by_pn: BTreeMap<u64, (usize, Instant)>,
     // Stealth timing: next eligible send time (if timing obfuscation enabled)
     // Whether Brain may actively steer stealth runtime actuators for this connection.
     intelligent_stealth_runtime: bool,
@@ -404,7 +404,7 @@ impl Connection {
             fec_cb_lost_packets: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             fec_cb_sent_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             fec_cb_lost_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            sent_bytes_by_pn: BTreeMap::new(),
+            sent_packets_by_pn: BTreeMap::new(),
             intelligent_stealth_runtime: false,
             brain_runtime_permissions: crate::transport::BrainRuntimePermissions::default(),
             observer: None,
@@ -1431,8 +1431,13 @@ impl Connection {
                                 }
                             }
                         }
-                        Frame::Ack { ranges, .. } => {
-                            self.account_sent_bytes_for_ack_ranges(&ranges);
+                        Frame::Ack { ranges, ack_delay, .. } => {
+                            // Decode ack_delay using the configured ack_delay_exponent
+                            // (RFC 9000 §19.3: ack_delay is in microseconds = value << exponent)
+                            let exp = self.config.ack_delay_exponent.min(20);
+                            let ack_delay_us = ack_delay << exp;
+                            let ack_delay = Duration::from_micros(ack_delay_us);
+                            self.account_sent_bytes_for_ack_ranges_with_delay(&ranges, ack_delay);
                         }
                         Frame::Crypto { offset, data } => {
                             let lvl = match pkt_ty {
@@ -1948,8 +1953,9 @@ impl Connection {
         self.mark_unvalidated_path_send(send_local, send_peer, off);
         self.stats.sent += 1;
         self.stats.sent_bytes += off as u64;
-        self.recovery.on_packet_sent(pn, off, Instant::now());
-        self.sent_bytes_by_pn.insert(pn, off);
+        let now = Instant::now();
+        self.recovery.on_packet_sent(pn, off, now);
+        self.sent_packets_by_pn.insert(pn, (off, now));
         self.cwnd = self.recovery.cwnd;
         self.refresh_path_count();
         Ok((off, info))
@@ -2209,9 +2215,10 @@ impl Connection {
             self.is_established = true;
         }
         // Update recovery bytes-in-flight and mirror cwnd
-        self.recovery.on_packet_sent(pn, total, Instant::now());
-        // Track sent bytes by packet number for precise ACK accounting
-        self.sent_bytes_by_pn.insert(pn, total);
+        let now = Instant::now();
+        self.recovery.on_packet_sent(pn, total, now);
+        // Track sent bytes + send time by packet number for ACK accounting + RTT sampling
+        self.sent_packets_by_pn.insert(pn, (total, now));
         self.cwnd = self.recovery.cwnd;
         Ok((total, info))
     }
@@ -3039,9 +3046,11 @@ impl Connection {
             }
         }
 
-        // Update RTT estimate
-        self.rtt = self.rtt.saturating_add(Duration::from_millis(100));
-        self.recovery.update_rtt(self.rtt);
+        // RTT estimate is NOT inflated on timeout. Per RFC 9000 §5.1, the RTT
+        // estimate is only updated from ACK samples (see account_sent_bytes_for_ack_ranges_with_delay).
+        // The previous code added 100ms on every timeout, causing monotonic RTT inflation
+        // (0→385ms observed on loopback). The PTO backoff is handled by the loss detection
+        // timer, not by inflating self.rtt.
         // Treat timeout as loss of in-flight bytes (coarse approximation)
         if self.bytes_in_flight > 0 {
             let lost = self.bytes_in_flight;
@@ -3345,28 +3354,57 @@ impl Connection {
         0
     }
 
-    /// Update recovery state from an ACK frame using the PN->byte sent map.
+    /// Update recovery state from an ACK frame using the PN->(bytes, send_time) map.
+    /// Also generates an RTT sample from the largest acknowledged PN's send time.
+    /// Wrapper for zero ack_delay (used by bench code).
+    #[cfg(feature = "benches")]
     fn account_sent_bytes_for_ack_ranges(&mut self, ranges: &[(u64, u64)]) {
+        self.account_sent_bytes_for_ack_ranges_with_delay(ranges, Duration::ZERO)
+    }
+
+    /// Update recovery state from an ACK frame with the ACK delay from the peer.
+    /// Generates an RTT sample: rtt = now - send_time - ack_delay (RFC 9000 §5).
+    fn account_sent_bytes_for_ack_ranges_with_delay(
+        &mut self,
+        ranges: &[(u64, u64)],
+        ack_delay: Duration,
+    ) {
         let now = Instant::now();
         let mut acked_total = 0usize;
         let mut lost_total = 0usize;
         let largest_acked =
             ranges.iter().filter_map(|(_, end)| end.checked_sub(1)).max().unwrap_or(0);
         let packet_threshold = 3u64;
+
+        // RTT sample: look up send_time of the largest acknowledged PN.
+        // Per RFC 9000 §5.1, only the largest acked PN yields a valid RTT sample
+        // (smaller PNs may have been acknowledged by coalesced ACKs with older send times).
+        let mut rtt_sample: Option<Duration> = None;
+
         for (start, end) in ranges {
-            let acked: Vec<(u64, usize)> =
-                self.sent_bytes_by_pn.range(*start..*end).map(|(&pn, &sz)| (pn, sz)).collect();
-            for (pn, sz) in acked {
-                self.sent_bytes_by_pn.remove(&pn);
+            let acked: Vec<(u64, (usize, Instant))> = self
+                .sent_packets_by_pn
+                .range(*start..*end)
+                .map(|(&pn, &info)| (pn, info))
+                .collect();
+            for (pn, (sz, send_time)) in acked {
+                if pn == largest_acked {
+                    let elapsed = now.saturating_duration_since(send_time);
+                    rtt_sample = Some(elapsed.saturating_sub(ack_delay));
+                }
+                self.sent_packets_by_pn.remove(&pn);
                 acked_total = acked_total.saturating_add(sz);
             }
         }
         if largest_acked >= packet_threshold {
             let loss_cutoff = largest_acked - packet_threshold;
-            let lost: Vec<(u64, usize)> =
-                self.sent_bytes_by_pn.range(..=loss_cutoff).map(|(&pn, &sz)| (pn, sz)).collect();
-            for (pn, sz) in lost {
-                self.sent_bytes_by_pn.remove(&pn);
+            let lost: Vec<(u64, (usize, Instant))> = self
+                .sent_packets_by_pn
+                .range(..=loss_cutoff)
+                .map(|(&pn, &info)| (pn, info))
+                .collect();
+            for (pn, (sz, _)) in lost {
+                self.sent_packets_by_pn.remove(&pn);
                 self.recovery.on_loss_packet(pn, sz, now);
                 lost_total = lost_total.saturating_add(sz);
                 self.stats.lost = self.stats.lost.saturating_add(1);
@@ -3379,6 +3417,16 @@ impl Connection {
             self.cwnd = self.recovery.cwnd;
         } else if lost_total > 0 {
             self.cwnd = self.recovery.cwnd;
+        }
+
+        // Apply RTT sample to connection + recovery (RFC 9000 §5).
+        // This is the ONLY path that should update self.rtt with real measurements.
+        // The timeout path uses exponential backoff, not additive growth.
+        if let Some(sample) = rtt_sample {
+            if sample > Duration::ZERO {
+                self.rtt = sample;
+                self.recovery.update_rtt(sample);
+            }
         }
     }
 }
@@ -3455,11 +3503,12 @@ pub fn bench_paired_1rtt_connections_stealth(stealth_on: bool) -> BenchConnectio
 
 #[cfg(feature = "benches")]
 impl Connection {
-    /// Seed the sent-byte map for ACK accounting benchmarks.
+    /// Seed the sent-packet map for ACK accounting benchmarks.
     pub fn bench_seed_sent_bytes_by_pn(&mut self, count: u64, bytes_per_pn: usize) {
-        self.sent_bytes_by_pn.clear();
+        self.sent_packets_by_pn.clear();
+        let now = Instant::now();
         for pn in 0..count {
-            self.sent_bytes_by_pn.insert(pn, bytes_per_pn);
+            self.sent_packets_by_pn.insert(pn, (bytes_per_pn, now));
         }
     }
 
@@ -3834,11 +3883,18 @@ mod tests {
     }
 
     #[test]
-    fn on_timeout_increases_rtt_estimate() {
+    fn on_timeout_does_not_inflate_rtt() {
+        // RFC 9000 §5.1: RTT estimate is only updated from ACK samples,
+        // not from timeout events. The previous code added 100ms on every
+        // timeout, causing monotonic RTT inflation (0→385ms on loopback).
+        // This test verifies the fix: on_timeout must NOT change self.rtt.
         let mut c = make_conn();
         let rtt_before = c.rtt;
         c.on_timeout();
-        assert!(c.rtt > rtt_before, "on_timeout must increase RTT estimate");
+        assert_eq!(
+            c.rtt, rtt_before,
+            "on_timeout must NOT inflate RTT — only ACK samples update RTT (RFC 9000 §5.1)"
+        );
     }
 
     #[test]
@@ -3847,6 +3903,72 @@ mod tests {
         c.on_timeout();
         c.on_timeout();
         assert!(c.timeout_count >= 2, "multiple on_timeout calls must accumulate timeout_count");
+    }
+
+    #[test]
+    fn ack_updates_rtt_from_send_time() {
+        // RFC 9000 §5.1: RTT sample = now - send_time - ack_delay.
+        // This test verifies that ACK processing generates a valid RTT sample
+        // from the largest acknowledged PN's send time.
+        let mut c = make_conn();
+        let initial_rtt = c.rtt;
+
+        // Simulate sending packet PN=0 with a known send time in the past.
+        let send_time = Instant::now() - Duration::from_millis(50);
+        c.sent_packets_by_pn.insert(0, (1200, send_time));
+
+        // Process an ACK acknowledging PN=0 (range 0..1).
+        let ranges = vec![(0u64, 1u64)];
+        c.account_sent_bytes_for_ack_ranges_with_delay(&ranges, Duration::ZERO);
+
+        // RTT should now be updated to ~50ms (now - send_time), not the initial value.
+        assert!(
+            c.rtt < initial_rtt + Duration::from_millis(100),
+            "RTT should be updated from ACK sample, not inflated. Got {:?}, initial {:?}",
+            c.rtt,
+            initial_rtt
+        );
+        assert!(
+            c.rtt >= Duration::from_millis(40),
+            "RTT sample should be ~50ms. Got {:?}",
+            c.rtt
+        );
+    }
+
+    #[test]
+    fn ack_with_delay_subtracts_ack_delay() {
+        // RTT sample should subtract the peer's ack_delay (RFC 9000 §19.3).
+        let mut c = make_conn();
+        let send_time = Instant::now() - Duration::from_millis(100);
+        c.sent_packets_by_pn.insert(0, (1200, send_time));
+
+        let ranges = vec![(0u64, 1u64)];
+        let ack_delay = Duration::from_millis(30);
+        c.account_sent_bytes_for_ack_ranges_with_delay(&ranges, ack_delay);
+
+        // RTT should be ~70ms (100ms elapsed - 30ms ack_delay).
+        assert!(
+            c.rtt >= Duration::from_millis(60) && c.rtt <= Duration::from_millis(80),
+            "RTT should be ~70ms (100-30). Got {:?}",
+            c.rtt
+        );
+    }
+
+    #[test]
+    fn timeout_does_not_inflate_rtt_repeatedly() {
+        // Verify that repeated timeouts do NOT cause monotonic RTT inflation.
+        // This is the regression test for the 0→385ms loopback RTT bug.
+        let mut c = make_conn();
+        let rtt_before = c.rtt;
+        for _ in 0..10 {
+            c.on_timeout();
+        }
+        assert_eq!(
+            c.rtt, rtt_before,
+            "10 timeouts must not inflate RTT. Got {:?}, expected {:?}",
+            c.rtt,
+            rtt_before
+        );
     }
 
     // ---- MAX_STREAMS / MAX_DATA Handling ---------------------------------
