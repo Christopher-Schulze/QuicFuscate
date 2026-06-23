@@ -898,6 +898,7 @@ impl QuicFuscateConnection {
         let recovered_packets = self.fec.on_receive(fec_packet).map_err(|e| {
             crate::error::ConnectionError::Transport(format!("FEC decoding failed: {}", e))
         })?;
+        eprintln!("[DEBUG] FEC on_receive returned {} packets", recovered_packets.len());
 
         for mut packet in recovered_packets {
             if let Some(data) = packet.payload_mut_unique() {
