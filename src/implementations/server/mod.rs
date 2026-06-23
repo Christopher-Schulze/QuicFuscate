@@ -1828,9 +1828,12 @@ pub async fn flush_live_server_outgoing(
     // This lets us submit them as a single io_uring batch (one io_uring_enter
     // syscall instead of one sendmsg per packet).
     let mut staging: Vec<Vec<u8>> = Vec::new();
+    let mut send_calls = 0u32;
     loop {
+        send_calls += 1;
         match conn.send(out) {
             Ok(len) if len > 0 => {
+                eprintln!("[DEBUG] conn.send returned {} bytes for {}", len, addr);
                 crate::telemetry::BYTES_SENT.inc_by(len as u64);
                 metrics.record_egress_datagram(len);
                 if let Some(stats) = session_stats.as_ref() {
@@ -1840,7 +1843,13 @@ pub async fn flush_live_server_outgoing(
                 packets_sent = packets_sent.saturating_add(1);
                 staging.push(out[..len].to_vec());
             }
-            Ok(_) | Err(ConnectionError::Done) => break,
+            Ok(0) => {
+                if send_calls == 1 {
+                    eprintln!("[DEBUG] conn.send returned 0 on first call for {} (no response to send)", addr);
+                }
+                break;
+            }
+            Ok(_) => break,
             Err(e) => {
                 log::error!("Send failed to {}: {:?}", addr, e);
                 break;
