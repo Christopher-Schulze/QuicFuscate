@@ -30,8 +30,8 @@ static ORCHESTRATOR: OnceLock<Arc<DeepIntegrationOrchestrator>> = OnceLock::new(
 use std::net::SocketAddr;
 
 // Type aliases to simplify handler types
-type CapsuleHandler = Arc<std::sync::Mutex<Box<dyn FnMut(u64, &[u8]) + Send>>>;
-type DatagramHandler = Arc<std::sync::Mutex<Box<dyn FnMut(&[u8]) + Send>>>;
+pub type CapsuleHandler = Arc<std::sync::Mutex<Box<dyn FnMut(u64, &[u8]) + Send>>>;
+pub type DatagramHandler = Arc<std::sync::Mutex<Box<dyn FnMut(&[u8]) + Send>>>;
 
 struct Http3PollBindings {
     masque_datagram_cb: Option<DatagramHandler>,
@@ -92,7 +92,11 @@ pub struct QuicFuscateConnection {
     masque_cb: Option<CapsuleHandler>,
     masque_datagram_cb: Option<DatagramHandler>,
     masque_control_cb: Option<CapsuleHandler>,
+    /// Locally-initiated MASQUE CONNECT-UDP stream id (client side).
     masque_stream_id: Option<u64>,
+    /// Peer-initiated MASQUE CONNECT-UDP stream id (server side: the client opened
+    /// the flow; we reuse its stream id for downlink datagram sends).
+    masque_peer_stream_id: Option<u64>,
     fec_last_report_sent: u64,
     fec_last_report_lost: u64,
     #[cfg(feature = "orchestrator")]
@@ -298,6 +302,7 @@ impl QuicFuscateConnection {
             masque_datagram_cb: None,
             masque_control_cb: None,
             masque_stream_id: None,
+            masque_peer_stream_id: None,
             fec_last_report_sent: 0,
             fec_last_report_lost: 0,
             #[cfg(feature = "orchestrator")]
@@ -416,7 +421,13 @@ impl QuicFuscateConnection {
         &mut self,
         host: &str,
     ) -> Result<Option<u64>, crate::transport::h3::Error> {
-        if !self.stealth_manager.masque_preferred_runtime() {
+        // When TUN bridging is active (a MASQUE datagram sink is installed),
+        // always use MASQUE CONNECT-UDP as the tunnel transport regardless of
+        // the stealth escalation state. Without this, TUN traffic would fall
+        // back to H3 DATA frames (Option B) and the downlink MASQUE path would
+        // be inconsistent with the uplink.
+        let tun_bridging = self.masque_datagram_cb.is_some();
+        if !self.stealth_manager.masque_preferred_runtime() && !tun_bridging {
             return Ok(None);
         }
 
@@ -424,9 +435,11 @@ impl QuicFuscateConnection {
             return Ok(Some(sid));
         }
 
-        let Some(proxy) = self.stealth_manager.masque_proxy() else {
-            return Ok(None);
-        };
+        // For TUN bridging, fall back to the connection's host header as the
+        // MASQUE proxy authority when the stealth manager has no MASQUE config
+        // (no masque_manager / fronting domains). The proxy authority is just
+        // the H3 :authority header — the server validates it against itself.
+        let proxy = self.stealth_manager.masque_proxy().unwrap_or_else(|| format!("{}:443", host));
 
         let target = format!("{}:443", host);
         let Some(ref mut h3) = self.h3_conn else {
@@ -640,6 +653,19 @@ impl QuicFuscateConnection {
                 );
                 match h3.poll(&mut self.conn) {
                     Ok(Some((sid, crate::transport::h3::Event::Headers { list, .. }))) => {
+                        // Detect peer-initiated MASQUE CONNECT-UDP requests (server side:
+                        // the client opens the flow). Record the stream id and provision
+                        // QUIC DATAGRAM queues so downlink sends work. Inlined here to
+                        // avoid a double &mut self borrow while h3 is held.
+                        if Self::is_connect_udp_request(&list)
+                            && self.masque_peer_stream_id.is_none()
+                        {
+                            self.masque_peer_stream_id = Some(sid);
+                            let _ = h3.enable_masque_datagram(&mut self.conn, sid);
+                            crate::telemetry::MASQUE_ACTIVE
+                                .store(1, std::sync::atomic::Ordering::Relaxed);
+                            debug!("MASQUE peer CONNECT-UDP flow recorded (stream={})", sid);
+                        }
                         on_headers(sid, &list);
                     }
                     Ok(Some((sid, crate::transport::h3::Event::Data))) => {
@@ -701,6 +727,21 @@ impl QuicFuscateConnection {
                     Err(crate::transport::h3::Error::Done) => break,
                     Err(e) => return Err(e.into()),
                 }
+                Self::drain_masque_datagrams(
+                    h3,
+                    &mut self.conn,
+                    &self.stealth_manager,
+                    &bindings.masque_datagram_cb,
+                    &bindings.masque_cb,
+                );
+            }
+            // Always drain MASQUE datagrams after the H3 event loop exits.
+            // QUIC DATAGRAM frames (carrying MASQUE CONNECT-UDP payloads) are
+            // NOT H3 events: they sit in the QUIC datagram recv queue and are
+            // never returned by h3.poll(). Without this post-loop drain, TUN
+            // uplink packets would be silently dropped whenever the H3 event
+            // queue is empty (the common case after handshake).
+            if let Some(ref mut h3) = self.h3_conn {
                 Self::drain_masque_datagrams(
                     h3,
                     &mut self.conn,
@@ -851,11 +892,36 @@ impl QuicFuscateConnection {
         masque_datagram_cb: &Option<DatagramHandler>,
         masque_cb: &Option<CapsuleHandler>,
     ) {
-        if stealth_manager.masque_datagram_enabled() {
+        // Drain whenever a sink is present (TUN bridge) or the stealth runtime
+        // explicitly enabled MASQUE datagrams. Without this, MASQUE-framed
+        // datagrams would be left in the QUIC datagram queue and either dropped
+        // or consumed as corrupted raw bytes by a bare dgram_recv loop.
+        let has_sink = masque_datagram_cb.is_some() || masque_cb.is_some();
+        if stealth_manager.masque_datagram_enabled() || has_sink {
             while let Some((_fid, pl)) = h3.try_recv_masque_datagram(conn) {
                 Self::dispatch_masque_datagram_payload(masque_datagram_cb, masque_cb, &pl[..]);
             }
         }
+    }
+
+    /// Returns true if the H3 headers describe a MASQUE CONNECT-UDP request
+    /// (`:method: CONNECT` + `:protocol: connect-udp`).
+    fn is_connect_udp_request(headers: &[crate::transport::h3::Header]) -> bool {
+        let mut method_connect = false;
+        let mut protocol_connect_udp = false;
+        for h in headers {
+            if h.name().eq_ignore_ascii_case(b":method")
+                && h.value().eq_ignore_ascii_case(b"CONNECT")
+            {
+                method_connect = true;
+            }
+            if h.name().eq_ignore_ascii_case(b":protocol")
+                && h.value().eq_ignore_ascii_case(b"connect-udp")
+            {
+                protocol_connect_udp = true;
+            }
+        }
+        method_connect && protocol_connect_udp
     }
 
     /// Processes an incoming raw buffer, parsing it into an FEC packet and handling recovery.
@@ -1216,7 +1282,50 @@ impl QuicFuscateConnection {
         }
     }
 
-    /// Polls HTTP/3 events and prints received data.
+    /// Sends a raw IP packet downlink to the peer over the peer-initiated MASQUE
+    /// CONNECT-UDP flow (server side: client opened the flow, we reuse its stream
+    /// id for the datagram flow-id mapping). Falls back to a bare QUIC datagram
+    /// if no MASQUE flow has been established yet.
+    pub fn send_masque_downlink(
+        &mut self,
+        payload: &[u8],
+    ) -> Result<(), crate::error::ConnectionError> {
+        if let Some(sid) = self.masque_peer_stream_id {
+            if let Some(ref mut h3) = self.h3_conn {
+                h3.send_masque_datagram(&mut self.conn, sid, payload)?;
+                return Ok(());
+            }
+        }
+        // Fallback: bare QUIC datagram (pre-MASQUE clients).
+        self.conn.dgram_send(payload)?;
+        Ok(())
+    }
+
+    /// Installs a sink for decoded MASQUE datagram payloads (raw IP packets).
+    /// Used by both server (uplink: MASQUE → TUN) and client (downlink: MASQUE → TUN).
+    pub fn set_masque_datagram_cb(&mut self, cb: DatagramHandler) {
+        self.masque_datagram_cb = Some(cb);
+    }
+
+    /// Returns true if a MASQUE datagram sink has been installed.
+    pub fn has_masque_datagram_cb(&self) -> bool {
+        self.masque_datagram_cb.is_some()
+    }
+
+    /// Records the stream id of a peer-initiated MASQUE CONNECT-UDP flow and
+    /// provisions QUIC DATAGRAM queues on this side so downlink sends work.
+    pub fn record_masque_peer_stream(&mut self, stream_id: u64) {
+        if self.masque_peer_stream_id.is_some() {
+            return;
+        }
+        self.masque_peer_stream_id = Some(stream_id);
+        if let Some(ref mut h3) = self.h3_conn {
+            let _ = h3.enable_masque_datagram(&mut self.conn, stream_id);
+        }
+        crate::telemetry::MASQUE_ACTIVE.store(1, std::sync::atomic::Ordering::Relaxed);
+        debug!("MASQUE peer CONNECT-UDP flow recorded (stream={})", stream_id);
+    }
+
     pub fn poll_http3(&mut self) -> Result<(), crate::error::ConnectionError> {
         self.poll_http3_event_loop(
             "poll_http3",
@@ -1332,6 +1441,7 @@ impl QuicFuscateConnection {
         } else {
             crate::telemetry::MASQUE_ACTIVE.store(0, std::sync::atomic::Ordering::Relaxed);
             self.masque_stream_id = None;
+            self.masque_peer_stream_id = None;
         }
 
         // Sync FEC-owned runtime hints only. Generic transport actuators are driven

@@ -188,10 +188,7 @@ async fn send_connected_datagram(
                 if rc as usize == data.len() {
                     Ok(())
                 } else {
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::WriteZero,
-                        "partial datagram send",
-                    ))
+                    Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "partial datagram send"))
                 }
             } else {
                 Err(Error::last_os_error())
@@ -1482,27 +1479,24 @@ async fn run_client(
     // Derive the QKey bearer token (x-qf-auth) from a supplied QKey string.
     // Servers that require a QKey reject clients without a valid token.
     let qkey_auth_token_hex = match qkey {
-        Some(raw) if !raw.trim().is_empty() => {
-            match quicfuscate::engine::qkey::parse(raw.trim()) {
-                Ok(parsed) => match parsed.token.as_deref().map(str::trim) {
-                    Some(tok) if !tok.is_empty() => Some(tok.to_string()),
-                    _ => {
-                        error!("supplied --qkey does not contain a token");
-                        return Err(std::io::Error::other("qkey missing token"));
-                    }
-                },
-                Err(e) => {
-                    error!("failed to parse --qkey: {}", e);
-                    return Err(std::io::Error::other("invalid qkey"));
+        Some(raw) if !raw.trim().is_empty() => match quicfuscate::engine::qkey::parse(raw.trim()) {
+            Ok(parsed) => match parsed.token.as_deref().map(str::trim) {
+                Some(tok) if !tok.is_empty() => Some(tok.to_string()),
+                _ => {
+                    error!("supplied --qkey does not contain a token");
+                    return Err(std::io::Error::other("qkey missing token"));
                 }
+            },
+            Err(e) => {
+                error!("failed to parse --qkey: {}", e);
+                return Err(std::io::Error::other("invalid qkey"));
             }
-        }
+        },
         _ => None,
     };
     // Compute the 12-char QKey ID for the QUIC Initial packet token.
-    let qkey_initial_token: Option<Vec<u8>> = qkey.as_deref().map(|raw| {
-        quicfuscate::engine::qkey::id(raw.trim()).into_bytes()
-    });
+    let qkey_initial_token: Option<Vec<u8>> =
+        qkey.map(|raw| quicfuscate::engine::qkey::id(raw.trim()).into_bytes());
 
     let mut conn = match QuicFuscateConnection::new_client(
         host,
@@ -1563,57 +1557,69 @@ async fn run_client(
     let mut request_sent = false;
 
     // Optional TUN bridging setup
+    #[allow(clippy::type_complexity)]
     let (tun_rx, tun_writer, mut h3_stream_id): (
         Option<std::sync::mpsc::Receiver<Vec<u8>>>,
         Option<Arc<quicfuscate::interface::TunInterface>>,
         Option<u64>,
     ) = if tun_enable {
-            let tcfg = quicfuscate::interface::TunConfig {
-                name: tun_name,
-                ip: tun_ip.and_then(|s| s.parse().ok()),
-                netmask: tun_netmask.and_then(|s| s.parse().ok()),
-                mtu: tun_mtu.unwrap_or(1500),
-                ..Default::default()
-            };
-            let optm = OptimizationManager::from_cfg(opt_params);
-            let pool = optm.memory_pool();
-            match quicfuscate::interface::TunInterface::open(tcfg, pool.clone()) {
-                Ok(tun) => {
-                    // Share the TUN via a plain Arc (no Mutex): read_block() and write()
-                    // both take &self and the kernel serializes the fd, so the blocking
-                    // reader thread must NOT hold a lock that would starve the downlink
-                    // writer (that deadlock left the tunnel one-directional).
-                    let tun = Arc::new(tun);
-                    // Spawn a blocking reader thread that forwards TUN frames into a channel
-                    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
-                    let tun_for_reader = tun.clone();
-                    std::thread::spawn(move || {
-                        loop {
-                            let read_result = tun_for_reader.read_block();
-                            match read_result {
-                                Ok((block, len)) if len > 0 => {
-                                    let mut v = vec![0u8; len];
-                                    v.copy_from_slice(&block[..len]);
-                                    if tx.send(v).is_err() {
-                                        break;
-                                    }
-                                    // block freed when dropped
-                                }
-                                Ok(_) => {}
-                                Err(_) => break,
-                            }
-                        }
-                    });
-                    (Some(rx), Some(tun), None)
-                }
-                Err(e) => {
-                    warn!("TUN open failed: {:?}", e);
-                    (None, None, None)
-                }
-            }
-        } else {
-            (None, None, None)
+        let tcfg = quicfuscate::interface::TunConfig {
+            name: tun_name,
+            ip: tun_ip.and_then(|s| s.parse().ok()),
+            netmask: tun_netmask.and_then(|s| s.parse().ok()),
+            mtu: tun_mtu.unwrap_or(1500),
+            ..Default::default()
         };
+        let optm = OptimizationManager::from_cfg(opt_params);
+        let pool = optm.memory_pool();
+        match quicfuscate::interface::TunInterface::open(tcfg, pool.clone()) {
+            Ok(tun) => {
+                // Share the TUN via a plain Arc (no Mutex): read_block() and write()
+                // both take &self and the kernel serializes the fd, so the blocking
+                // reader thread must NOT hold a lock that would starve the downlink
+                // writer (that deadlock left the tunnel one-directional).
+                let tun = Arc::new(tun);
+                // Install the MASQUE→TUN sink so downlink CONNECT-UDP datagrams
+                // (decoded raw IP packets) are written to the client TUN by
+                // drain_masque_datagrams inside poll_http3_event_loop.
+                let tun_for_cb = tun.clone();
+                conn.set_masque_datagram_cb(std::sync::Arc::new(std::sync::Mutex::new(Box::new(
+                    move |payload: &[u8]| {
+                        if let Err(e) = tun_for_cb.write(payload) {
+                            warn!("Client TUN write (MASQUE downlink) failed: {:?}", e);
+                        }
+                    },
+                ))));
+                // Spawn a blocking reader thread that forwards TUN frames into a channel
+                let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+                let tun_for_reader = tun.clone();
+                std::thread::spawn(move || {
+                    loop {
+                        let read_result = tun_for_reader.read_block();
+                        match read_result {
+                            Ok((block, len)) if len > 0 => {
+                                let mut v = vec![0u8; len];
+                                v.copy_from_slice(&block[..len]);
+                                if tx.send(v).is_err() {
+                                    break;
+                                }
+                                // block freed when dropped
+                            }
+                            Ok(_) => {}
+                            Err(_) => break,
+                        }
+                    }
+                });
+                (Some(rx), Some(tun), None)
+            }
+            Err(e) => {
+                warn!("TUN open failed: {:?}", e);
+                (None, None, None)
+            }
+        }
+    } else {
+        (None, None, None)
+    };
     let mut housekeeping = interval(Duration::from_millis(5));
     housekeeping.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
@@ -1687,22 +1693,12 @@ async fn run_client(
                     }) {
                         warn!("HTTP/3 poll in TUN mode failed: {:?}", e);
                     }
-                    // Also drain QUIC datagrams from server → TUN (server TUN→dgram path)
-                    if let Some(ref tw) = tun_writer {
-                        let mut dgram_buf = [0u8; 65535];
-                        loop {
-                            match conn.conn.dgram_recv(&mut dgram_buf) {
-                                Ok(n) if n > 0 => {
-                                    if let Err(e) = tw.write(&dgram_buf[..n]) {
-                                        warn!("Client TUN write (dgram downlink) failed: {:?}", e);
-                                    }
-                                }
-                                Ok(_) => break,
-                                Err(quicfuscate::error::ConnectionError::Done) => break,
-                                Err(_) => break,
-                            }
-                        }
-                    }
+                    // MASQUE CONNECT-UDP downlink datagrams are drained and written
+                    // to the TUN by drain_masque_datagrams (inside poll_http3_with
+                    // above) via the masque_datagram_cb sink installed at TUN open.
+                    // The previous bare dgram_recv loop expected unframed QUIC
+                    // datagrams and has been removed in favor of the single
+                    // consistent MASQUE transport.
                 } else if let Err(e) = conn.poll_http3() {
                     warn!("HTTP/3 error: {:?}", e);
                 }

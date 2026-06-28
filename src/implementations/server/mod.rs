@@ -1919,6 +1919,25 @@ pub async fn process_live_server_client_datagram(
         }
     }
 
+    // Install the MASQUE→TUN sink once per connection when TUN bridging is
+    // active. Decoded MASQUE CONNECT-UDP datagram payloads (raw IP packets)
+    // are written to the server TUN interface by this callback, invoked from
+    // drain_masque_datagrams inside poll_http3_event_loop.
+    if tun_enable {
+        if let Some(tun) = server_tun {
+            if !conn.has_masque_datagram_cb() {
+                let tun_sink = Arc::clone(tun);
+                conn.set_masque_datagram_cb(Arc::new(std::sync::Mutex::new(Box::new(
+                    move |payload: &[u8]| {
+                        if let Err(error) = tun_sink.write(payload) {
+                            log::warn!("Server TUN write (MASQUE) failed: {:?}", error);
+                        }
+                    },
+                ))));
+            }
+        }
+    }
+
     let require_auth = qkey_auth.is_some();
     let expected_token_sha256 = qkey_auth.as_ref().map(|state| state.expected_token_sha256.clone());
     let authed = Cell::new(qkey_auth.as_ref().map(|state| state.authed).unwrap_or(true));
@@ -1954,25 +1973,11 @@ pub async fn process_live_server_client_datagram(
         log::warn!("HTTP/3 header/body poll failed for {}: {:?}", addr, error);
     }
 
-    // Also drain QUIC datagrams from the client and forward to TUN.
-    // This handles the IoDriver client path (dgram_send → server dgram_recv → TUN write).
-    if tun_enable {
-        if let Some(tun) = server_tun {
-            let mut dgram_buf = [0u8; 65535];
-            loop {
-                match conn.conn.dgram_recv(&mut dgram_buf) {
-                    Ok(n) if n > 0 => {
-                        if let Err(error) = tun.write(&dgram_buf[..n]) {
-                            log::warn!("Server TUN write (dgram) failed: {:?}", error);
-                        }
-                    }
-                    Ok(_) => break,
-                    Err(crate::error::ConnectionError::Done) => break,
-                    Err(_) => break,
-                }
-            }
-        }
-    }
+    // MASQUE CONNECT-UDP uplink datagrams are drained and written to the TUN by
+    // drain_masque_datagrams (inside poll_http3_with_headers above) via the
+    // masque_datagram_cb sink installed earlier. The previous bare dgram_recv
+    // loop was either redundant (datagrams already drained) or wrote corrupted
+    // bytes (MASQUE flow-id varint prefix not stripped) and has been removed.
 
     let auth_result = require_auth.then(|| (conn_id.clone(), authed.get()));
     let mut remove_auth_conn_id = None;
@@ -2029,13 +2034,16 @@ pub struct LiveClientBuildRequest<'a> {
 pub fn build_live_server_client_init(
     request: LiveClientBuildRequest<'_>,
 ) -> Option<LiveClientInit> {
-    let initial_ctx =
-        match parse_live_server_initial_auth(request.packet, request.qkey_registry, request.metrics) {
-            Some(ctx) => ctx,
-            None => {
-                return None;
-            }
-        };
+    let initial_ctx = match parse_live_server_initial_auth(
+        request.packet,
+        request.qkey_registry,
+        request.metrics,
+    ) {
+        Some(ctx) => ctx,
+        None => {
+            return None;
+        }
+    };
     log::info!("New client connected: {}", request.remote_addr);
 
     let cfg = match request.stealth_config.lock() {
@@ -3390,7 +3398,9 @@ pub(crate) async fn recv_datagram_from(
             let mut zc = ZeroCopyBuffer::new_mut(&mut slice);
             match zc.recv_from(fd) {
                 Ok((rc, addr)) if rc >= 0 => Ok((rc as usize, addr)),
-                Ok(_) => Err(std::io::Error::new(ErrorKind::UnexpectedEof, "negative recv_from result")),
+                Ok(_) => {
+                    Err(std::io::Error::new(ErrorKind::UnexpectedEof, "negative recv_from result"))
+                }
                 Err(e) => Err(e),
             }
         })
@@ -3472,19 +3482,17 @@ impl ServerRuntime {
                         // These packets are forwarded to the client via QUIC datagrams in the run_loop.
                         let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
                         let tun_for_reader = tun_arc.clone();
-                        std::thread::spawn(move || {
-                            loop {
-                                match tun_for_reader.read_block() {
-                                    Ok((block, len)) if len > 0 => {
-                                        let mut v = vec![0u8; len];
-                                        v.copy_from_slice(&block[..len]);
-                                        if tx.send(v).is_err() {
-                                            break;
-                                        }
+                        std::thread::spawn(move || loop {
+                            match tun_for_reader.read_block() {
+                                Ok((block, len)) if len > 0 => {
+                                    let mut v = vec![0u8; len];
+                                    v.copy_from_slice(&block[..len]);
+                                    if tx.send(v).is_err() {
+                                        break;
                                     }
-                                    Ok(_) => {}
-                                    Err(_) => break,
                                 }
+                                Ok(_) => {}
+                                Err(_) => break,
                             }
                         });
                         log::info!("Server TUN reader thread spawned for bidirectional forwarding");
@@ -4117,8 +4125,8 @@ impl ServerRuntime {
                                         // Send to the first active client (simple VPN model: 1 TUN ↔ 1 client).
                                         if let Some((addr, conn)) = live.live_state.clients.iter_mut().next() {
                                             let addr = *addr;
-                                            if let Err(e) = conn.conn.dgram_send(&pkt) {
-                                                log::debug!("TUN→dgram_send to {}: {:?}", addr, e);
+                                            if let Err(e) = conn.send_masque_downlink(&pkt) {
+                                                log::debug!("TUN→MASQUE send to {}: {:?}", addr, e);
                                             }
                                         }
                                         // Flush outgoing for all clients after queuing dgrams
