@@ -661,7 +661,8 @@ impl TransportObserver for StealthBrain {
                 if st.ack_delay_long_ewma_us == 0.0 {
                     st.ack_delay_long_ewma_us = s;
                 } else {
-                    st.ack_delay_long_ewma_us = a_long * s + (1.0 - a_long) * st.ack_delay_long_ewma_us;
+                    st.ack_delay_long_ewma_us =
+                        a_long * s + (1.0 - a_long) * st.ack_delay_long_ewma_us;
                 }
                 let diff = (st.ack_delay_ewma_us - st.ack_delay_long_ewma_us).abs();
                 if st.rtt_jitter_ewma_us == 0.0 {
@@ -1040,12 +1041,19 @@ impl TransportObserver for StealthBrain {
                 st.last_padding_max = stealth_policy.padding_max;
                 st.last_padding_rate = stealth_policy.padding_rate;
             }
-            let do_timing_rate = cooldown
-                && (st.last_timing_rate != stealth_policy.timing_rate);
+            let do_timing_rate = cooldown && (st.last_timing_rate != stealth_policy.timing_rate);
             if do_timing_rate {
                 st.last_timing_rate = stealth_policy.timing_rate;
             }
-            if do_ack || do_pacing || do_timing || do_bias || do_gran || do_cc || do_padding || do_timing_rate {
+            if do_ack
+                || do_pacing
+                || do_timing
+                || do_bias
+                || do_gran
+                || do_cc
+                || do_padding
+                || do_timing_rate
+            {
                 st.last_policy_change = now;
             }
             Self::update_probing_budget(&mut st, &self.cfg);

@@ -2316,8 +2316,9 @@ mod tests {
             let nonce16 = make_nonce16(&iv, counter);
             let mut ref_buf = vec![0u8; pt.len() + 16];
             ref_buf[..pt.len()].copy_from_slice(pt);
-            let ref_tag =
-                Aegis128L::new(&key, &nonce16).unwrap().encrypt_in_place(&mut ref_buf[..pt.len()], ad);
+            let ref_tag = Aegis128L::new(&key, &nonce16)
+                .unwrap()
+                .encrypt_in_place(&mut ref_buf[..pt.len()], ad);
             ref_buf[pt.len()..].copy_from_slice(&ref_tag);
 
             // Optimized: AEAD wrapper (reinit after first packet).
@@ -2330,9 +2331,7 @@ mod tests {
             assert_eq!(opt_buf, ref_buf, "ciphertext/tag diverged at counter {counter}");
 
             // Decrypt via the wrapper must recover plaintext.
-            let pt_len = open
-                .open_with_u64_counter(counter, ad, opt_buf.as_mut_slice())
-                .unwrap();
+            let pt_len = open.open_with_u64_counter(counter, ad, opt_buf.as_mut_slice()).unwrap();
             assert_eq!(pt_len, pt.len());
             assert_eq!(&opt_buf[..pt_len], pt);
         }

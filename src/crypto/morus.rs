@@ -2190,9 +2190,8 @@ mod morus_tests {
             assert_eq!(&trait_buf[pt.len()..], &ref_tag);
 
             // Trait path: open_with_u64_counter must recover plaintext in-place.
-            let pt_len = morus
-                .open_with_u64_counter(counter, ad, trait_buf.as_mut_slice())
-                .unwrap();
+            let pt_len =
+                morus.open_with_u64_counter(counter, ad, trait_buf.as_mut_slice()).unwrap();
             assert_eq!(pt_len, pt.len());
             assert_eq!(&trait_buf[..pt_len], pt.as_slice());
         }

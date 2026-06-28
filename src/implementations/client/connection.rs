@@ -61,9 +61,8 @@ impl ClientConnection {
 
         // Create QUIC connection using core.rs
         let qkey_token = config.connection.qkey_token.clone().filter(|t| !t.trim().is_empty());
-        let qkey_initial_token: Option<Vec<u8>> = qkey_token.as_deref().map(|raw| {
-            crate::engine::qkey::id(raw.trim()).into_bytes()
-        });
+        let qkey_initial_token: Option<Vec<u8>> =
+            qkey_token.as_deref().map(|raw| crate::engine::qkey::id(raw.trim()).into_bytes());
         let conn = QuicFuscateConnection::new_client(
             &sni,
             local_addr,

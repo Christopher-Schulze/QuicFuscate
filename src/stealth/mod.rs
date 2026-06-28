@@ -85,7 +85,7 @@ use std::sync::LazyLock;
 // use of sha2 replaced with centralized SIMD dispatch
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
 use url::Url;
@@ -5068,10 +5068,7 @@ impl StealthManager {
 
         if let Some(level) = new_level {
             // Threshold met — escalate.
-            info!(
-                "Stealth escalated to level {} due to probe pattern from {}",
-                level, source
-            );
+            info!("Stealth escalated to level {} due to probe pattern from {}", level, source);
             telemetry!(crate::telemetry::STEALTH_MODE_ESCALATED.inc());
 
             // Apply the graduated escalation.
@@ -5574,8 +5571,10 @@ impl StealthManager {
                 sched.set_interval_ms(2500);
             }
         }
-        debug!("Stealth escalated to level {}: padding={}%, timing={}%, rotation={}%",
-            level, padding_rate, timing_rate, rotation_rate);
+        debug!(
+            "Stealth escalated to level {}: padding={}%, timing={}%, rotation={}%",
+            level, padding_rate, timing_rate, rotation_rate
+        );
     }
 
     /// De-escalate to a lower stealth level (called after quiet period).
@@ -5778,7 +5777,9 @@ impl StealthManager {
     /// Returns cached cover-site TLS handshake material if reality-grade mimikry
     /// is enabled and the cache has fresh material. Returns `None` if disabled,
     /// cache empty, or material stale — caller should fall back to synthetic TLS.
-    pub(crate) fn cover_handshake_material(&self) -> Option<std::sync::Arc<crate::reality::CoverMaterial>> {
+    pub(crate) fn cover_handshake_material(
+        &self,
+    ) -> Option<std::sync::Arc<crate::reality::CoverMaterial>> {
         self.cover_cache.as_ref()?.get()
     }
 

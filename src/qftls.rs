@@ -605,7 +605,9 @@ pub trait QuicTlsProvider: Send + Sync {
     fn set_qkey_auth_token(&mut self, _token: &[u8]) {}
     /// Get QKey auth token extracted from peer's transport parameters (server side).
     /// Default: None (providers without QKey support).
-    fn peer_qkey_auth_token(&self) -> Option<&[u8]> { None }
+    fn peer_qkey_auth_token(&self) -> Option<&[u8]> {
+        None
+    }
     /// Initiate key update
     fn key_update(&mut self) -> Result<(), ConnectionError>;
     /// Advance read-side 1-RTT keys only.
@@ -1108,14 +1110,12 @@ mod rustls_provider {
                 keys.remote.header.into();
 
             let mut crypto = self.crypto.write();
-            crypto.seal_1rtt =
-                Some(Arc::new(crate::crypto::PacketAeadSeal::Dynamic(Box::new(RustlsPacketSeal {
-                    key: local_pkt.clone(),
-                }))));
-            crypto.open_1rtt =
-                Some(Arc::new(crate::crypto::PacketAeadOpen::Dynamic(Box::new(RustlsPacketOpen {
-                    key: remote_pkt.clone(),
-                }))));
+            crypto.seal_1rtt = Some(Arc::new(crate::crypto::PacketAeadSeal::Dynamic(Box::new(
+                RustlsPacketSeal { key: local_pkt.clone() },
+            ))));
+            crypto.open_1rtt = Some(Arc::new(crate::crypto::PacketAeadOpen::Dynamic(Box::new(
+                RustlsPacketOpen { key: remote_pkt.clone() },
+            ))));
             crypto.hp_1rtt = Some(Arc::new(RustlsHp { key: local_hp.clone() }));
             crypto.hp_1rtt_open = Some(Arc::new(RustlsHp { key: remote_hp.clone() }));
             self.pending_local_1rtt.clear();
@@ -1154,7 +1154,10 @@ mod rustls_provider {
                 let ca_certs = rustls::pki_types::CertificateDer::pem_slice_iter(&ca_data)
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|e| {
-                        ConnectionError::TlsError(format!("CA file parse failed ({}): {}", ca_path, e))
+                        ConnectionError::TlsError(format!(
+                            "CA file parse failed ({}): {}",
+                            ca_path, e
+                        ))
                     })?;
                 for cert in ca_certs {
                     roots.add(cert).map_err(|e| {

@@ -1100,11 +1100,8 @@ fn test_transition_decoder_uses_instance_policy_snapshot() {
     let _g3 = EnvGuard::set("QUICFUSCATE_FEC_DECODER", "auto");
     fec.transition_to_mode(FecMode::Normal);
 
-    let transition_decoder = fec
-        .transition_decoder
-        .as_ref()
-        .expect("transition decoder must exist")
-        .lock();
+    let transition_decoder =
+        fec.transition_decoder.as_ref().expect("transition decoder must exist").lock();
     assert_eq!(transition_decoder.first_block_decoder_policy(), Some("gauss"));
 }
 
@@ -1119,18 +1116,12 @@ fn test_transition_fountain_uses_instance_policy_snapshot() {
     let _g3 = EnvGuard::set("QUICFUSCATE_FOUNTAIN_SYMBOL", "900");
     fec.transition_to_mode(FecMode::Fountain);
 
-    let transition_encoder = fec
-        .transition_encoder
-        .as_ref()
-        .expect("transition encoder must exist")
-        .lock();
+    let transition_encoder =
+        fec.transition_encoder.as_ref().expect("transition encoder must exist").lock();
     assert_eq!(transition_encoder.first_block_fountain_symbol_size(), Some(1200));
 
-    let transition_decoder = fec
-        .transition_decoder
-        .as_ref()
-        .expect("transition decoder must exist")
-        .lock();
+    let transition_decoder =
+        fec.transition_decoder.as_ref().expect("transition decoder must exist").lock();
     assert_eq!(transition_decoder.first_block_fountain_symbol_size(), Some(1200));
 }
 

@@ -326,10 +326,7 @@ pub struct CoverHandshakeCache {
 impl CoverHandshakeCache {
     /// Create a new empty cache with the given config.
     pub fn new(config: RealityConfig) -> Self {
-        Self {
-            config,
-            material: parking_lot::RwLock::new(None),
-        }
+        Self { config, material: parking_lot::RwLock::new(None) }
     }
 
     /// Get cached cover material if available and not stale.
@@ -405,22 +402,21 @@ impl CoverHandshakeCache {
                 let _ = roots.add(cert);
             }
         }
-        let config = rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
+        let config =
+            rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
         let connector = TlsConnector::from(std::sync::Arc::new(config));
 
         // Connect TCP and wrap with a capturing layer that records raw inbound bytes.
         let tcp = TcpStream::connect(&addr)
             .await
             .map_err(|e| format!("TCP connect to {} failed: {}", addr, e))?;
-        let server_name =
-            rustls::pki_types::ServerName::try_from(self.config.cover_host.clone())
-                .map_err(|e| format!("invalid cover_host: {}", e))?;
+        let server_name = rustls::pki_types::ServerName::try_from(self.config.cover_host.clone())
+            .map_err(|e| format!("invalid cover_host: {}", e))?;
         let (capturing, capture_rx) = capturing_stream(tcp);
-        let tls = connector.connect(server_name, capturing).await.map_err(|e| {
-            format!("TLS handshake with {} failed: {}", addr, e)
-        })?;
+        let tls = connector
+            .connect(server_name, capturing)
+            .await
+            .map_err(|e| format!("TLS handshake with {} failed: {}", addr, e))?;
 
         // In TLS 1.3 the server sends its full first flight (ServerHello +
         // encrypted EncryptedExtensions/Certificate/CertificateVerify/Finished)
@@ -438,8 +434,8 @@ impl CoverHandshakeCache {
         let raw = captured.inbound;
 
         // Parse the raw TLS records to extract ServerHello and certificate material.
-        let (server_hello, certificate_chain, tls_version) =
-            parse_raw_tls_flight(&raw).ok_or_else(|| {
+        let (server_hello, certificate_chain, tls_version) = parse_raw_tls_flight(&raw)
+            .ok_or_else(|| {
                 format!("failed to parse TLS flight from {} ({} bytes)", addr, raw.len())
             })?;
 
@@ -605,12 +601,15 @@ fn capturing_stream<S: AsyncRead + AsyncWrite + Unpin>(
 ) -> (CapturingStream<S>, RawCaptureHandle) {
     let (tx, rx) = oneshot::channel();
     let handle = RawCaptureHandle { rx };
-    (CapturingStream {
-        inner,
-        read_buf: Vec::with_capacity(16384),
-        write_buf: Vec::with_capacity(4096),
-        tx: Some(tx),
-    }, handle)
+    (
+        CapturingStream {
+            inner,
+            read_buf: Vec::with_capacity(16384),
+            write_buf: Vec::with_capacity(4096),
+            tx: Some(tx),
+        },
+        handle,
+    )
 }
 
 // =============================================================================
@@ -658,8 +657,7 @@ fn parse_raw_tls_flight(raw: &[u8]) -> Option<(Vec<u8>, Vec<Vec<u8>>, u16)> {
                         // The full record (header + body) is stored for replay.
                         server_hello = Some(raw[offset..record_end].to_vec());
                         // legacy_record_version is at raw[offset+1..offset+3]
-                        tls_version =
-                            Some(u16::from_be_bytes([raw[offset + 1], raw[offset + 2]]));
+                        tls_version = Some(u16::from_be_bytes([raw[offset + 1], raw[offset + 2]]));
                     }
                     0x0b => {
                         // Certificate
@@ -677,8 +675,7 @@ fn parse_raw_tls_flight(raw: &[u8]) -> Option<(Vec<u8>, Vec<Vec<u8>>, u16)> {
                                 if cert_data_end > hs_body.len() {
                                     break;
                                 }
-                                certificates
-                                    .push(hs_body[cert_off + 3..cert_data_end].to_vec());
+                                certificates.push(hs_body[cert_off + 3..cert_data_end].to_vec());
                                 cert_off = cert_data_end + 2; // skip 2-byte extensions
                             }
                         }
@@ -976,12 +973,10 @@ mod tests {
             drop(capturing);
 
             // collect() must return promptly (not deadlock).
-            let captured = tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                handle.collect(),
-            )
-            .await
-            .expect("collect() must not deadlock");
+            let captured =
+                tokio::time::timeout(std::time::Duration::from_secs(2), handle.collect())
+                    .await
+                    .expect("collect() must not deadlock");
 
             assert!(
                 captured.inbound.windows(payload.len()).any(|w| w == payload),

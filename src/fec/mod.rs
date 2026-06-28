@@ -3536,8 +3536,7 @@ impl AdaptiveFec {
         // Process with transition encoder (new mode)
         if new_weight > 0.0 && self.transition_encoder.is_some() {
             if let Some(ref transition_enc) = self.transition_encoder {
-                let mut encoder =
-                    transition_enc.lock();
+                let mut encoder = transition_enc.lock();
                 encoder.take_packet(packet);
 
                 let (k, n) = encoder.params();
@@ -3655,8 +3654,7 @@ impl AdaptiveFec {
         // Update streaming mode flag
         self.streaming_mode = matches!(resolved_mode, FecMode::Streaming);
 
-        let mut mode_mgr =
-            self.mode_manager.lock();
+        let mut mode_mgr = self.mode_manager.lock();
         mode_mgr.force_state(resolved_mode, k);
     }
 
@@ -4273,8 +4271,7 @@ impl AdaptiveFec {
             64,
             self.runtime_policy.auto_gf4_enabled,
         );
-        let mut mode_mgr =
-            self.mode_manager.lock();
+        let mut mode_mgr = self.mode_manager.lock();
         mode_mgr.force_state(target_mode, k);
         self.streaming_mode = true;
         crate::telemetry::FEC_MODE.store(target_mode as u64, std::sync::atomic::Ordering::Relaxed);
