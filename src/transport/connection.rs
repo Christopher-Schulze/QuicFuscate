@@ -9,8 +9,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::optimize::{prefetch, PrefetchHint};
 use crate::crypto::aead::AeadSeal;
+use crate::optimize::{prefetch, PrefetchHint};
 
 const MAX_RX_KEY_UPDATE_ADVANCE: usize = 4;
 const PATH_VALIDATION_TIMEOUT: Duration = Duration::from_secs(3);
@@ -1009,21 +1009,19 @@ impl Connection {
         // Pre-parse header to determine space and largest PN hint.
         // For short headers, DCID length is the local SCID length (the peer routes to our CID).
         let short_dcid_len = self.scid.as_ref().len();
-        let (pre_ty, largest_hint, mut pre_parsed_hdr) = match packet::parse_header(
-            buf,
-            short_dcid_len,
-        ) {
-            Ok((hdr_native, pn_off)) => {
-                let t = hdr_native.ty;
-                let idx = match t {
-                    PacketType::Initial => 0,
-                    PacketType::Handshake => 1,
-                    _ => 2,
-                };
-                (t, self.pkt_spaces[idx].largest_recv.unwrap_or(0), Some((hdr_native, pn_off)))
-            }
-            Err(_) => (PacketType::Short, 0, None),
-        };
+        let (pre_ty, largest_hint, mut pre_parsed_hdr) =
+            match packet::parse_header(buf, short_dcid_len) {
+                Ok((hdr_native, pn_off)) => {
+                    let t = hdr_native.ty;
+                    let idx = match t {
+                        PacketType::Initial => 0,
+                        PacketType::Handshake => 1,
+                        _ => 2,
+                    };
+                    (t, self.pkt_spaces[idx].largest_recv.unwrap_or(0), Some((hdr_native, pn_off)))
+                }
+                Err(_) => (PacketType::Short, 0, None),
+            };
 
         // Retry verification (no payload decrypt)
         if let PacketType::Retry = pre_ty {
@@ -1986,8 +1984,13 @@ impl Connection {
         // to fragment across multiple packets instead of overflowing a single one.
         let mtu_cap = out.len().min(self.dgram_send_max_size.max(MIN_CLIENT_INITIAL_LEN));
         let out = &mut out[..mtu_cap];
-        // Congestion gate: only send if within cwnd budget
-        if !self.recovery.can_send(self.dgram_send_max_size) {
+        // Congestion gate: only send if within cwnd budget.
+        // ACK-only packets bypass the gate (RFC 9002 §7.2) to prevent
+        // congestion-control deadlocks where both sides exhaust their windows
+        // and neither can send ACKs to release budget.
+        let congestion_blocked = !self.recovery.can_send(self.dgram_send_max_size);
+        let ack_bypass = congestion_blocked && self.has_pending_application_ack();
+        if congestion_blocked && !ack_bypass {
             return Err(ConnectionError::Done);
         }
         self.poll_path_validation_timeout(Instant::now());
@@ -2073,7 +2076,8 @@ impl Connection {
                 // the seal fails with BufferTooShort, and the already-drained CRYPTO bytes
                 // are lost forever (never retransmitted) — stalling the handshake.
                 const SEND_FRAME_OVERHEAD_RESERVE: usize = 64;
-                let crypto_budget = out.len().saturating_sub(off + 16 + SEND_FRAME_OVERHEAD_RESERVE);
+                let crypto_budget =
+                    out.len().saturating_sub(off + 16 + SEND_FRAME_OVERHEAD_RESERVE);
                 let (lvl, max_len) = match pkt_ty {
                     PacketType::Initial => (crate::qftls::Level::Initial, crypto_budget),
                     PacketType::Handshake => (crate::qftls::Level::Handshake, crypto_budget),
@@ -2224,9 +2228,14 @@ impl Connection {
 
         off = self.flush_pending_control_frames(out, off)?;
         off = self.maybe_emit_application_ack_frame(out, off)?;
-        off = self.maybe_flush_one_writable_stream(out, off)?;
-        // FEC feed removed (handled by core)
-        off = self.maybe_flush_one_datagram_frame(out, off)?;
+        // When bypassing the congestion gate for ACK-only packets, skip
+        // stream and datagram data — those are congestion-controlled and
+        // must not be sent when the window is exhausted.
+        if !ack_bypass {
+            off = self.maybe_flush_one_writable_stream(out, off)?;
+            // FEC feed removed (handled by core)
+            off = self.maybe_flush_one_datagram_frame(out, off)?;
+        }
         off = self.maybe_apply_stealth_padding(out, pn_off, pn_len, off)?;
         off = self.seal_short_header_packet(out, pn, pn_off, pn_len, off)?;
 
@@ -2247,12 +2256,17 @@ impl Connection {
         if !self.is_established && self.stats.recv > 0 && self.stats.sent > 0 {
             self.is_established = true;
         }
-        // Update recovery bytes-in-flight and mirror cwnd
-        let now = Instant::now();
-        self.recovery.on_packet_sent(pn, total, now);
-        // Track sent bytes + send time by packet number for ACK accounting + RTT sampling
-        self.sent_packets_by_pn.insert(pn, (total, now));
-        self.cwnd = self.recovery.cwnd;
+        // ACK-only packets that bypassed the congestion gate are not
+        // congestion-controlled: they must not inflate bytes_in_flight
+        // (RFC 9002 §7.2). They are also not ACK-eliciting, so the peer
+        // will never ACK them — tracking them would leak bytes_in_flight
+        // permanently.
+        if !ack_bypass {
+            let now = Instant::now();
+            self.recovery.on_packet_sent(pn, total, now);
+            self.sent_packets_by_pn.insert(pn, (total, now));
+            self.cwnd = self.recovery.cwnd;
+        }
         Ok((total, info))
     }
 
@@ -3064,6 +3078,14 @@ impl Connection {
     pub fn idle_timeout_elapsed(&self) -> bool {
         let window = self.timeout().unwrap_or(Duration::from_secs(30));
         self.last_activity.elapsed() >= window
+    }
+
+    /// Returns true if there are pending ACK frames in the application (1-RTT)
+    /// packet space that need to be sent. Used to bypass the congestion gate
+    /// for ACK-only packets (RFC 9002 §7.2).
+    #[inline(always)]
+    pub fn has_pending_application_ack(&self) -> bool {
+        self.pkt_spaces[2].has_pending_ack()
     }
 
     /// Handles timeout
@@ -3971,11 +3993,7 @@ mod tests {
             c.rtt,
             initial_rtt
         );
-        assert!(
-            c.rtt >= Duration::from_millis(40),
-            "RTT sample should be ~50ms. Got {:?}",
-            c.rtt
-        );
+        assert!(c.rtt >= Duration::from_millis(40), "RTT sample should be ~50ms. Got {:?}", c.rtt);
     }
 
     #[test]
@@ -4009,8 +4027,7 @@ mod tests {
         assert_eq!(
             c.rtt, rtt_before,
             "10 timeouts must not inflate RTT. Got {:?}, expected {:?}",
-            c.rtt,
-            rtt_before
+            c.rtt, rtt_before
         );
     }
 

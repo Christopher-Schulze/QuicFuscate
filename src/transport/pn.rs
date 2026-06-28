@@ -87,6 +87,15 @@ pub mod pnspace {
             self.ack_ranges.iter().map(|r| (r.start, r.end)).collect()
         }
 
+        /// Returns true if an ACK frame is pending emission (without consuming it).
+        /// Used to bypass the congestion gate for ACK-only packets, which are
+        /// critical for protocol liveness and must not be blocked by congestion
+        /// control (RFC 9002 §7.2: ACK-only packets are not congestion-controlled).
+        #[inline(always)]
+        pub fn has_pending_ack(&self) -> bool {
+            self.ack_elicited
+        }
+
         /// Takes an ACK decision and returns (ack_delay, ranges)
         #[inline(always)]
         pub fn take_ack(&mut self, ack_delay_exponent: u64) -> Option<(u64, Vec<(u64, u64)>)> {
