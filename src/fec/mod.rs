@@ -680,6 +680,9 @@ mod gf16_tests;
 #[cfg(test)]
 mod e2e_tests;
 
+#[cfg(test)]
+mod resource_tests;
+
 // ============================================================================
 // Transport Integration: FecTransportObserver
 // Collects lightweight transport telemetry (ACK delay, ECN) and exposes a
