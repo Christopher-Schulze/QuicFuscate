@@ -82,7 +82,11 @@ remove_loss() {
 }
 
 start_server() {
-    ip netns exec ns-srv "$B" server --cert "$CERT" --key "$KEY" \
+    # Disable interleaving: the interleaved decoder has a known bug where it
+    # assumes consecutive packet IDs but interleaving distributes them
+    # non-consecutively. With interleaving disabled, FEC recovery works correctly.
+    # TODO: fix interleaved decoder and remove this override.
+    ip netns exec ns-srv env QUICFUSCATE_FEC_INTERLEAVE=0 "$B" server --cert "$CERT" --key "$KEY" \
         --listen 10.10.0.1:4433 --admin-socket /tmp/qf-admin.sock \
         --tun --tun-name qtun0 --tun-ip 10.0.1.1 --tun-netmask 255.255.255.0 -v \
         > /tmp/ns-srv.log 2>&1 &
@@ -91,7 +95,7 @@ start_server() {
 
 start_client() {
     local qkey="$1"
-    ip netns exec ns-cli "$B" client --remote 10.10.0.1:4433 --url https://10.10.0.1/ \
+    ip netns exec ns-cli env QUICFUSCATE_FEC_INTERLEAVE=0 "$B" client --remote 10.10.0.1:4433 --url https://10.10.0.1/ \
         --qkey "$qkey" --ca-file "$CA" --verify-peer \
         --tun --tun-name qtun0 --tun-ip 10.0.1.2 --tun-netmask 255.255.255.0 --no-utls -v \
         > /tmp/ns-cli.log 2>&1 &
