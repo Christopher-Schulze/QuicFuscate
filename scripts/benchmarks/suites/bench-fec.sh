@@ -45,5 +45,8 @@ run_cargo build --release --features "${CARGO_FEATURES:-benches}"
 echo -e "\n> Benchmarking GF(256) Matrix Multiply (Reed-Solomon core)..."
 run cargo bench --features benches -- fec_matrix_mul
 
+echo -e "\n> Benchmarking FEC Encode/Decode Pipeline (TODO-424)..."
+run cargo bench --features benches -- fec_pipeline
+
 echo -e "\n[OK] FEC Benchmarks Complete"
 json_end "$JSON"

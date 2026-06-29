@@ -481,3 +481,9 @@ name = "ci_regression"
 path = "scripts/benchmarks/ci_regression.rs"
 harness = false
 required-features = ["benches"]
+
+[[bench]]
+name = "fec_pipeline"
+path = "benches/fec_pipeline.rs"
+harness = false
+required-features = ["benches"]
