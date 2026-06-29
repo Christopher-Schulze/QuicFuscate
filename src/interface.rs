@@ -23,7 +23,7 @@ use crate::optimize::MemoryPool;
 use crate::telemetry::TELEMETRY_ENABLED;
 use aligned_box::AlignedBox;
 use std::io::{self};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
 
@@ -160,11 +160,23 @@ pub struct TunConfig {
     pub mtu: u16,
     /// If true, consumers should prefer memory-pool backed I/O.
     pub zero_copy: bool,
+    /// IPv6 address for dual-stack TUN (None = IPv4-only).
+    pub ip6: Option<Ipv6Addr>,
+    /// IPv6 prefix length (e.g., 64).
+    pub prefix6: Option<u8>,
 }
 
 impl Default for TunConfig {
     fn default() -> Self {
-        Self { name: None, ip: None, netmask: None, mtu: 1500, zero_copy: true }
+        Self {
+            name: None,
+            ip: None,
+            netmask: None,
+            mtu: 1500,
+            zero_copy: true,
+            ip6: None,
+            prefix6: None,
+        }
     }
 }
 

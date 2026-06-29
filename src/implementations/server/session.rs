@@ -1,7 +1,7 @@
 //! Session management for the server.
 
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -42,6 +42,7 @@ pub struct Session {
     id: SessionId,
     remote_addr: SocketAddr,
     client_ip: Ipv4Addr,
+    client_ipv6: Option<Ipv6Addr>,
     created_at: Instant,
     timeout: Duration,
     stats: Arc<SessionStats>,
@@ -79,6 +80,25 @@ impl Session {
             id: SessionId::new(),
             remote_addr,
             client_ip,
+            client_ipv6: None,
+            created_at: Instant::now(),
+            timeout: Duration::from_secs(timeout_secs),
+            stats: Arc::new(SessionStats::new()),
+        }
+    }
+
+    /// Create a new dual-stack session with IPv4 and IPv6 addresses.
+    pub fn new_dual_stack(
+        remote_addr: SocketAddr,
+        client_ip: Ipv4Addr,
+        client_ipv6: Option<Ipv6Addr>,
+        timeout_secs: u64,
+    ) -> Self {
+        Self {
+            id: SessionId::new(),
+            remote_addr,
+            client_ip,
+            client_ipv6,
             created_at: Instant::now(),
             timeout: Duration::from_secs(timeout_secs),
             stats: Arc::new(SessionStats::new()),
@@ -95,9 +115,14 @@ impl Session {
         self.remote_addr
     }
 
-    /// Get assigned client IP.
+    /// Get assigned client IPv4 address.
     pub fn client_ip(&self) -> Ipv4Addr {
         self.client_ip
+    }
+
+    /// Get assigned client IPv6 address (if dual-stack).
+    pub fn client_ipv6(&self) -> Option<Ipv6Addr> {
+        self.client_ipv6
     }
 
     /// Get session uptime.
@@ -124,6 +149,7 @@ impl Session {
 pub struct SessionManager {
     sessions: HashMap<SessionId, Session>,
     by_client_ip: HashMap<Ipv4Addr, SessionId>,
+    by_client_ipv6: HashMap<Ipv6Addr, SessionId>,
     by_remote_addr: HashMap<SocketAddr, SessionId>,
     max_sessions: usize,
 }
@@ -134,6 +160,7 @@ impl SessionManager {
         Self {
             sessions: HashMap::new(),
             by_client_ip: HashMap::new(),
+            by_client_ipv6: HashMap::new(),
             by_remote_addr: HashMap::new(),
             max_sessions,
         }
@@ -147,10 +174,14 @@ impl SessionManager {
 
         let id = session.id;
         let client_ip = session.client_ip;
+        let client_ipv6 = session.client_ipv6;
         let remote_addr = session.remote_addr;
 
         self.sessions.insert(id, session);
         self.by_client_ip.insert(client_ip, id);
+        if let Some(v6) = client_ipv6 {
+            self.by_client_ipv6.insert(v6, id);
+        }
         self.by_remote_addr.insert(remote_addr, id);
 
         // Record metrics
@@ -164,6 +195,9 @@ impl SessionManager {
     pub fn remove(&mut self, id: SessionId) -> Option<Session> {
         if let Some(session) = self.sessions.remove(&id) {
             self.by_client_ip.remove(&session.client_ip);
+            if let Some(v6) = session.client_ipv6 {
+                self.by_client_ipv6.remove(&v6);
+            }
             self.by_remote_addr.remove(&session.remote_addr);
 
             // Record metrics
@@ -188,9 +222,14 @@ impl SessionManager {
         self.sessions.iter()
     }
 
-    /// Get session by client IP.
+    /// Get session by client IPv4 address.
     pub fn get_by_client_ip(&self, ip: Ipv4Addr) -> Option<&Session> {
         self.by_client_ip.get(&ip).and_then(|id| self.sessions.get(id))
+    }
+
+    /// Get session by client IPv6 address.
+    pub fn get_by_client_ipv6(&self, ip: Ipv6Addr) -> Option<&Session> {
+        self.by_client_ipv6.get(&ip).and_then(|id| self.sessions.get(id))
     }
 
     /// Get session by remote address.

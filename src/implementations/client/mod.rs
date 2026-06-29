@@ -211,6 +211,8 @@ impl ClientRuntime {
             netmask: self.config.interface.tun_netmask,
             mtu: self.config.interface.tun_mtu,
             zero_copy: self.config.interface.zero_copy,
+            ip6: None,
+            prefix6: None,
         };
 
         let tun = match TunInterface::open(tun_config, self.pool.clone()) {

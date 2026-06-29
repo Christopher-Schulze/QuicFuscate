@@ -756,6 +756,14 @@ struct SharedArgs {
     #[clap(long)]
     tun_netmask: Option<String>,
 
+    /// TUN IPv6 address (for dual-stack VPN)
+    #[clap(long)]
+    tun_ip6: Option<String>,
+
+    /// TUN IPv6 prefix length (1-128, default 64)
+    #[clap(long)]
+    tun_prefix6: Option<u8>,
+
     /// Enable kill switch (blocks all non-VPN traffic when disconnected)
     #[clap(long)]
     kill_switch: bool,

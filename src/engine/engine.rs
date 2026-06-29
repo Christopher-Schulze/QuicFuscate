@@ -1325,6 +1325,8 @@ mod tests {
             netmask: None,
             mtu: 1500,
             zero_copy: true,
+            ip6: None,
+            prefix6: None,
         };
         crate::interface::TunInterface::open(cfg, pool).is_ok()
     }

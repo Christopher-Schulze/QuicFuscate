@@ -57,7 +57,7 @@ use self::qkey_registry::{QKeyEntry, QKeyRecord, QKeyRegistry};
 use parking_lot::RwLock;
 #[cfg(feature = "rate_limiter")]
 use std::net::IpAddr;
-use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -106,6 +106,16 @@ pub struct ServerConfig {
     pub dns_servers: Vec<Ipv4Addr>,
     /// WAN interface for NAT
     pub wan_interface: String,
+    /// IPv6 IP pool start (None = IPv6 disabled)
+    pub ipv6_pool_start: Option<Ipv6Addr>,
+    /// IPv6 IP pool end
+    pub ipv6_pool_end: Option<Ipv6Addr>,
+    /// Server IPv6 TUN address
+    pub ipv6_server_ip: Option<Ipv6Addr>,
+    /// IPv6 prefix length (e.g., 64)
+    pub ipv6_prefix_len: u8,
+    /// IPv6 DNS servers to push
+    pub ipv6_dns_servers: Vec<Ipv6Addr>,
 }
 
 impl Default for ServerConfig {
@@ -120,6 +130,14 @@ impl Default for ServerConfig {
             server_netmask: Ipv4Addr::new(255, 255, 255, 0),
             dns_servers: vec![Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(8, 8, 8, 8)],
             wan_interface: "eth0".to_string(),
+            ipv6_pool_start: Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0x0002)),
+            ipv6_pool_end: Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0x00fe)),
+            ipv6_server_ip: Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0x0001)),
+            ipv6_prefix_len: 64,
+            ipv6_dns_servers: vec![
+                Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111), // Cloudflare
+                Ipv6Addr::new(0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888), // Google
+            ],
         }
     }
 }
@@ -859,6 +877,8 @@ impl ServerHostResources {
                 .or(Some(server_config.server_netmask.into())),
             mtu: engine_config.interface.tun_mtu,
             zero_copy: engine_config.interface.zero_copy,
+            ip6: server_config.ipv6_server_ip,
+            prefix6: Some(server_config.ipv6_prefix_len),
         };
 
         let tun = open_server_tun(tun_config, pool).map_err(EngineError::Tun)?;
@@ -3404,6 +3424,35 @@ fn parse_ipv4_dest(pkt: &[u8]) -> Option<std::net::Ipv4Addr> {
     Some(dest)
 }
 
+/// Extract the destination IPv6 address from a raw IP packet.
+/// Returns None if the packet is too short or is not IPv6.
+fn parse_ipv6_dest(pkt: &[u8]) -> Option<Ipv6Addr> {
+    if pkt.len() < 40 {
+        return None;
+    }
+    let version = pkt[0] >> 4;
+    if version != 6 {
+        return None;
+    }
+    // IPv6 destination address is at offset 24-39
+    let mut addr = [0u8; 16];
+    addr.copy_from_slice(&pkt[24..40]);
+    Some(Ipv6Addr::from(addr))
+}
+
+/// Extract the destination IP address (IPv4 or IPv6) from a raw IP packet.
+fn parse_ip_dest(pkt: &[u8]) -> Option<std::net::IpAddr> {
+    if pkt.is_empty() {
+        return None;
+    }
+    let version = pkt[0] >> 4;
+    match version {
+        4 => parse_ipv4_dest(pkt).map(std::net::IpAddr::V4),
+        6 => parse_ipv6_dest(pkt).map(std::net::IpAddr::V6),
+        _ => None,
+    }
+}
+
 pub(crate) fn open_server_tun(
     tun_config: TunConfig,
     pool: Arc<MemoryPool>,
@@ -4188,13 +4237,21 @@ impl ServerRuntime {
                                             }
                                         }
 
-                                        // Parse the destination IPv4 address from the packet
-                                        // and route to the matching client.
-                                        let target_addr = parse_ipv4_dest(&pkt)
+                                        // Parse the destination IP address (IPv4 or IPv6)
+                                        // from the packet and route to the matching client.
+                                        let target_addr = parse_ip_dest(&pkt)
                                             .and_then(|dest_ip| {
-                                                live.live_state.domain.shared.sessions.read()
-                                                    .get_by_client_ip(dest_ip)
-                                                    .map(|s| s.remote_addr())
+                                                let sessions = live.live_state.domain.shared.sessions.read();
+                                                match dest_ip {
+                                                    std::net::IpAddr::V4(v4) => {
+                                                        sessions.get_by_client_ip(v4)
+                                                            .map(|s| s.remote_addr())
+                                                    }
+                                                    std::net::IpAddr::V6(v6) => {
+                                                        sessions.get_by_client_ipv6(v6)
+                                                            .map(|s| s.remote_addr())
+                                                    }
+                                                }
                                             });
 
                                         if let Some(addr) = target_addr {
@@ -4395,6 +4452,65 @@ mod tests {
         let config = ServerConfig::default();
         assert_eq!(config.max_clients, 100);
         assert_eq!(config.server_ip, Ipv4Addr::new(10, 8, 0, 1));
+        // IPv6 defaults
+        assert!(config.ipv6_server_ip.is_some());
+        assert_eq!(
+            config.ipv6_server_ip.unwrap(),
+            Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0x0001)
+        );
+        assert_eq!(config.ipv6_prefix_len, 64);
+    }
+
+    #[test]
+    fn test_parse_ipv6_dest_valid() {
+        // Construct a minimal IPv6 packet header (40 bytes)
+        let mut pkt = [0u8; 40];
+        pkt[0] = 0x60; // version 6
+        // Destination at offset 24-39: fd00::1
+        pkt[24] = 0xfd;
+        pkt[39] = 0x01;
+        let dest = parse_ipv6_dest(&pkt).unwrap();
+        assert_eq!(dest, Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0x0001));
+    }
+
+    #[test]
+    fn test_parse_ipv6_dest_too_short() {
+        let pkt = vec![0u8; 30];
+        assert!(parse_ipv6_dest(&pkt).is_none());
+    }
+
+    #[test]
+    fn test_parse_ipv6_dest_wrong_version() {
+        let mut pkt = [0u8; 40];
+        pkt[0] = 0x45; // IPv4
+        assert!(parse_ipv6_dest(&pkt).is_none());
+    }
+
+    #[test]
+    fn test_parse_ip_dest_dispatches_v4_and_v6() {
+        // IPv4 packet
+        let mut pkt4 = [0u8; 20];
+        pkt4[0] = 0x45;
+        pkt4[16] = 10;
+        pkt4[17] = 8;
+        pkt4[18] = 0;
+        pkt4[19] = 2;
+        match parse_ip_dest(&pkt4) {
+            Some(std::net::IpAddr::V4(v4)) => assert_eq!(v4, Ipv4Addr::new(10, 8, 0, 2)),
+            other => panic!("expected V4, got {:?}", other),
+        }
+
+        // IPv6 packet
+        let mut pkt6 = [0u8; 40];
+        pkt6[0] = 0x60;
+        pkt6[24] = 0xfd;
+        pkt6[39] = 0x01;
+        match parse_ip_dest(&pkt6) {
+            Some(std::net::IpAddr::V6(v6)) => {
+                assert_eq!(v6, Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0x0001))
+            }
+            other => panic!("expected V6, got {:?}", other),
+        }
     }
 
     #[test]

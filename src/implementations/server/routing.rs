@@ -7,7 +7,7 @@
 
 #[cfg(target_os = "macos")]
 use std::io::Write;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use std::process::Command;
 #[cfg(target_os = "macos")]
@@ -19,6 +19,10 @@ pub struct RoutingManager {
     server_ip: Ipv4Addr,
     netmask: Ipv4Addr,
     wan_interface: String,
+    /// IPv6 server TUN address (None = IPv6 disabled).
+    server_ipv6: Option<Ipv6Addr>,
+    /// IPv6 prefix length (e.g., 64).
+    ipv6_prefix_len: u8,
 }
 
 /// Routing errors.
@@ -44,20 +48,51 @@ impl std::fmt::Display for RoutingError {
 impl std::error::Error for RoutingError {}
 
 impl RoutingManager {
-    /// Create a new routing manager.
+    /// Create a new routing manager (IPv4-only).
     pub fn new(
         tun_name: String,
         server_ip: Ipv4Addr,
         netmask: Ipv4Addr,
         wan_interface: String,
     ) -> Self {
-        Self { tun_name, server_ip, netmask, wan_interface }
+        Self {
+            tun_name,
+            server_ip,
+            netmask,
+            wan_interface,
+            server_ipv6: None,
+            ipv6_prefix_len: 64,
+        }
+    }
+
+    /// Create a new dual-stack routing manager.
+    pub fn new_dual_stack(
+        tun_name: String,
+        server_ip: Ipv4Addr,
+        netmask: Ipv4Addr,
+        wan_interface: String,
+        server_ipv6: Ipv6Addr,
+        ipv6_prefix_len: u8,
+    ) -> Self {
+        Self {
+            tun_name,
+            server_ip,
+            netmask,
+            wan_interface,
+            server_ipv6: Some(server_ipv6),
+            ipv6_prefix_len,
+        }
+    }
+
+    /// Returns true if IPv6 is enabled.
+    pub fn is_ipv6_enabled(&self) -> bool {
+        self.server_ipv6.is_some()
     }
 
     /// Set up routing rules.
     #[cfg(target_os = "linux")]
     pub fn setup(&self) -> Result<(), RoutingError> {
-        // Enable IP forwarding
+        // Enable IPv4 forwarding
         self.enable_ip_forwarding()?;
 
         // Calculate subnet
@@ -68,6 +103,14 @@ impl RoutingManager {
 
         log::info!("Routing configured: {} via {}", subnet, self.wan_interface);
 
+        // IPv6 setup (if enabled)
+        if self.is_ipv6_enabled() {
+            self.enable_ipv6_forwarding()?;
+            let v6_subnet = self.calculate_ipv6_subnet();
+            self.setup_ip6tables(&v6_subnet)?;
+            log::info!("IPv6 routing configured: {} via {}", v6_subnet, self.wan_interface);
+        }
+
         Ok(())
     }
 
@@ -77,6 +120,15 @@ impl RoutingManager {
         let subnet = self.calculate_subnet();
         self.setup_pf(&subnet)?;
         log::info!("Routing configured (macOS/pf): {} via {}", subnet, self.wan_interface);
+
+        // IPv6 setup (if enabled)
+        if self.is_ipv6_enabled() {
+            self.enable_ipv6_forwarding_macos()?;
+            let v6_subnet = self.calculate_ipv6_subnet();
+            self.setup_pf_v6(&v6_subnet)?;
+            log::info!("IPv6 routing configured (macOS/pf): {} via {}", v6_subnet, self.wan_interface);
+        }
+
         Ok(())
     }
 
@@ -86,6 +138,15 @@ impl RoutingManager {
         let subnet = self.calculate_subnet();
         self.setup_windows_nat(&subnet)?;
         log::info!("Routing configured (Windows/NetNat): {} via {}", subnet, self.wan_interface);
+
+        // IPv6 setup (if enabled)
+        if self.is_ipv6_enabled() {
+            self.enable_ipv6_forwarding_windows()?;
+            let v6_subnet = self.calculate_ipv6_subnet();
+            self.setup_windows_nat_v6(&v6_subnet)?;
+            log::info!("IPv6 routing configured (Windows/NetNat): {} via {}", v6_subnet, self.wan_interface);
+        }
+
         Ok(())
     }
 
@@ -431,6 +492,146 @@ impl RoutingManager {
         let network_ip = Ipv4Addr::from(network);
 
         format!("{}/{}", network_ip, mask_bits)
+    }
+
+    /// Calculate the IPv6 subnet CIDR (e.g., "fd00::/64").
+    fn calculate_ipv6_subnet(&self) -> String {
+        match self.server_ipv6 {
+            Some(ip) => format!("{}/{}", ip, self.ipv6_prefix_len),
+            None => String::new(),
+        }
+    }
+
+    // ================================================================
+    // IPv6 forwarding and NAT
+    // ================================================================
+
+    #[cfg(target_os = "linux")]
+    fn enable_ipv6_forwarding(&self) -> Result<(), RoutingError> {
+        std::fs::write("/proc/sys/net/ipv6/conf/all/forwarding", "1")
+            .map_err(|_| RoutingError::PermissionDenied)?;
+        log::debug!("IPv6 forwarding enabled");
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn setup_ip6tables(&self, subnet: &str) -> Result<(), RoutingError> {
+        // MASQUERADE for outbound IPv6 traffic
+        let status = Command::new("ip6tables")
+            .args([
+                "-t", "nat", "-A", "POSTROUTING",
+                "-s", subnet,
+                "-o", &self.wan_interface,
+                "-j", "MASQUERADE",
+            ])
+            .status()
+            .map_err(|e| RoutingError::CommandFailed(e.to_string()))?;
+
+        if !status.success() {
+            return Err(RoutingError::CommandFailed("ip6tables NAT rule failed".to_string()));
+        }
+
+        // Allow forwarding from TUN to WAN (IPv6)
+        let status = Command::new("ip6tables")
+            .args([
+                "-A", "FORWARD",
+                "-i", &self.tun_name,
+                "-o", &self.wan_interface,
+                "-j", "ACCEPT",
+            ])
+            .status()
+            .map_err(|e| RoutingError::CommandFailed(e.to_string()))?;
+
+        if !status.success() {
+            return Err(RoutingError::CommandFailed("ip6tables FORWARD rule failed".to_string()));
+        }
+
+        // Allow established connections back
+        let status = Command::new("ip6tables")
+            .args([
+                "-A", "FORWARD",
+                "-i", &self.wan_interface,
+                "-o", &self.tun_name,
+                "-m", "state", "--state", "RELATED,ESTABLISHED",
+                "-j", "ACCEPT",
+            ])
+            .status()
+            .map_err(|e| RoutingError::CommandFailed(e.to_string()))?;
+
+        if !status.success() {
+            return Err(RoutingError::CommandFailed("ip6tables ESTABLISHED rule failed".to_string()));
+        }
+
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn enable_ipv6_forwarding_macos(&self) -> Result<(), RoutingError> {
+        self.run_command(
+            "sysctl",
+            &["-w", "net.inet6.ip6.forwarding=1"],
+            "enable macOS IPv6 forwarding",
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn pf_rules_v6(&self, subnet: &str) -> String {
+        format!(
+            "nat on {} inet6 from {} to any -> ({})\n\
+             pass quick on {} inet6 from {} to any keep state\n\
+             pass quick on {} inet6 from any to {} keep state\n",
+            self.wan_interface, subnet, self.wan_interface,
+            self.tun_name, subnet,
+            self.wan_interface, subnet
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn setup_pf_v6(&self, subnet: &str) -> Result<(), RoutingError> {
+        let rules = self.pf_rules_v6(subnet);
+        let mut child = Command::new("pfctl")
+            .args(["-a", Self::MACOS_PF_ANCHOR, "-f", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| RoutingError::CommandFailed(format!("pfctl spawn failed: {e}")))?;
+
+        if let Some(stdin) = child.stdin.as_mut() {
+            stdin.write_all(rules.as_bytes()).map_err(|e| {
+                RoutingError::CommandFailed(format!("pfctl v6 rule write failed: {e}"))
+            })?;
+        } else {
+            return Err(RoutingError::CommandFailed("pfctl stdin unavailable".to_string()));
+        }
+
+        let output = child
+            .wait_with_output()
+            .map_err(|e| RoutingError::CommandFailed(format!("pfctl wait failed: {e}")))?;
+        self.map_process_error("pfctl v6 anchor load", output)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn enable_ipv6_forwarding_windows(&self) -> Result<(), RoutingError> {
+        let iface = Self::ps_escape(&self.wan_interface);
+        let script = format!(
+            "$ErrorActionPreference='Stop'; \
+             Set-NetIPInterface -InterfaceAlias '{iface}' -AddressFamily IPv6 -Forwarding Enabled"
+        );
+        self.run_powershell(&script, "Set-NetIPInterface IPv6 forwarding")
+    }
+
+    #[cfg(target_os = "windows")]
+    fn setup_windows_nat_v6(&self, subnet: &str) -> Result<(), RoutingError> {
+        let nat_name = format!("{}_v6", Self::WINDOWS_NAT_NAME);
+        let script = format!(
+            "$ErrorActionPreference='Stop'; \
+             if (Get-NetNat -Name '{nat_name}' -ErrorAction SilentlyContinue) {{ \
+               Remove-NetNat -Name '{nat_name}' -Confirm:$false | Out-Null \
+             }}; \
+             New-NetNat -Name '{nat_name}' -InternalIPInterfaceAddressPrefix '{subnet}' | Out-Null"
+        );
+        self.run_powershell(&script, "New-NetNat IPv6")
     }
 }
 
