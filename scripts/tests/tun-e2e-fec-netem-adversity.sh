@@ -32,6 +32,10 @@ PASS=0
 FAIL=0
 SKIP=0
 
+# Load required kernel modules for tc-netem
+modprobe sch_netem 2>/dev/null || true
+modprobe sch_tbf 2>/dev/null || true
+
 # --- cert setup ---
 cd "$CERT_DIR"
 cat > /tmp/leaf-ext.cnf <<EOF
@@ -111,8 +115,9 @@ ping_through_tunnel() {
     ping_output=$(ip netns exec ns-cli ping -c "$PING_COUNT" -i "$PING_INTERVAL" -W 5 -I qtun0 10.0.1.1 2>&1)
     local ping_loss
     ping_loss=$(echo "$ping_output" | grep 'packet loss' | grep -oP '[\d.]+(?=% packet loss)' | awk '{printf "%d", $1}' || echo "100")
+    # Extract avg RTT (second value in "min/avg/max/mdev = X/Y/Z/W")
     local ping_rtt
-    ping_rtt=$(echo "$ping_output" | grep 'rtt min' | grep -oP '[\d.]+(?=/)' || echo "0")
+    ping_rtt=$(echo "$ping_output" | grep 'rtt min' | sed 's|.*/\([0-9.]*\)/.*|\1|' || echo "0")
     echo "${ping_loss}:${ping_rtt}"
 }
 
@@ -304,8 +309,8 @@ test_combined_adversity() {
     fi
 
     # Apply combined qdisc: netem (delay+jitter+loss) then tbf (bandwidth)
-    ip netns exec ns-cli tc qdisc add dev veth-cli root netem delay 100ms 10ms 25% loss 5%
-    ip netns exec ns-cli tc qdisc add dev veth-cli parent 1: tbf rate 10Mbit burst 32kbit latency 400ms
+    ip netns exec ns-cli tc qdisc add dev veth-cli root handle 1: netem delay 100ms 10ms 25% loss 5%
+    ip netns exec ns-cli tc qdisc add dev veth-cli parent 1: handle 2: tbf rate 10Mbit burst 32kbit latency 400ms
 
     local result
     result=$(ping_through_tunnel)
