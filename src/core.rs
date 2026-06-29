@@ -1314,8 +1314,14 @@ impl QuicFuscateConnection {
 
     /// Sends a raw IP packet downlink to the peer over the peer-initiated MASQUE
     /// CONNECT-UDP flow (server side: client opened the flow, we reuse its stream
-    /// id for the datagram flow-id mapping). Falls back to a bare QUIC datagram
-    /// if no MASQUE flow has been established yet.
+    /// id for the datagram flow-id mapping). Returns `Done` if no MASQUE flow has
+    /// been established yet — the packet is dropped, which is acceptable for
+    /// best-effort IP traffic; subsequent packets will succeed once the client's
+    /// CONNECT-UDP request is processed and `masque_peer_stream_id` is set.
+    ///
+    /// A bare QUIC datagram fallback was intentionally removed: the client only
+    /// drains MASQUE-framed datagrams via `drain_masque_datagrams` and would
+    /// never consume a bare dgram, causing silent data loss and queue growth.
     pub fn send_masque_downlink(
         &mut self,
         payload: &[u8],
@@ -1327,10 +1333,12 @@ impl QuicFuscateConnection {
                 return Ok(());
             }
         }
-        // Fallback: bare QUIC datagram (pre-MASQUE clients).
-        info!("MASQUE downlink fallback to bare dgram: {}B", payload.len());
-        self.conn.dgram_send(payload)?;
-        Ok(())
+        // No MASQUE flow yet — drop the packet. The client's CONNECT-UDP
+        // request is processed asynchronously in poll_http3_event_loop, which
+        // sets masque_peer_stream_id. Retrying is unnecessary: the TUN reader
+        // thread sends the next packet immediately, and IP traffic is
+        // best-effort (lost packets are retransmitted by higher layers).
+        Err(crate::error::ConnectionError::Done)
     }
 
     /// Installs a sink for decoded MASQUE datagram payloads (raw IP packets).

@@ -1554,23 +1554,46 @@ impl Connection {
         self.short_header_tag_reserve as usize
     }
 
+    /// Returns true if `frame` is ack-eliciting per RFC 9000 §19 / RFC 9002 §7.2.
+    /// Ack-eliciting frames require the peer to send an ACK and are congestion-
+    /// controlled. Non-ack-eliciting frames: PADDING, ACK, CONNECTION_CLOSE,
+    /// APPLICATION_CLOSE. All other frame types are ack-eliciting.
+    #[inline(always)]
+    fn frame_is_ack_eliciting(frame: &Frame<'_>) -> bool {
+        !matches!(
+            frame,
+            Frame::Padding { .. }
+                | Frame::Ack { .. }
+                | Frame::ConnectionClose { .. }
+                | Frame::ApplicationClose { .. }
+        )
+    }
+
+    /// Flushes pending control frames. Returns `(new_off, wrote_ack_eliciting)`
+    /// where `wrote_ack_eliciting` is true if any ack-eliciting frame was
+    /// emitted (e.g. PING, MAX_DATA, NEW_CONNECTION_ID). This is used by the
+    /// caller to decide whether the packet is congestion-controlled.
     #[inline(always)]
     fn flush_pending_control_frames(
         &mut self,
         out: &mut [u8],
         mut off: usize,
-    ) -> Result<usize, crate::error::ConnectionError> {
+    ) -> Result<(usize, bool), crate::error::ConnectionError> {
+        let mut wrote_ack_eliciting = false;
         while let Some(ctrl) = self.pending_control.front() {
             let need = frames::wire_len(ctrl);
             let tag_reserve = self.tag_reserve_1rtt();
             if out.len() >= off + need + tag_reserve {
                 off += frames::to_bytes(ctrl, &mut out[off..])?;
+                if Self::frame_is_ack_eliciting(ctrl) {
+                    wrote_ack_eliciting = true;
+                }
                 self.pending_control.pop_front();
             } else {
                 break;
             }
         }
-        Ok(off)
+        Ok((off, wrote_ack_eliciting))
     }
 
     #[inline(always)]
@@ -1618,12 +1641,15 @@ impl Connection {
         Ok(off)
     }
 
+    /// Flushes one writable stream's pending data. Returns `(new_off,
+    /// wrote_ack_eliciting)` — STREAM frames are always ack-eliciting when
+    /// actually emitted (RFC 9000 §19.8).
     #[inline(always)]
     fn maybe_flush_one_writable_stream(
         &mut self,
         out: &mut [u8],
         mut off: usize,
-    ) -> Result<usize, crate::error::ConnectionError> {
+    ) -> Result<(usize, bool), crate::error::ConnectionError> {
         use crate::error::ConnectionError;
 
         if let Some(stream_id) = self.writable_streams.front().copied() {
@@ -1710,6 +1736,8 @@ impl Connection {
                         if emptied && fin_now {
                             self.writable_streams.retain(|&id| id != stream_id);
                         }
+                        // STREAM frames are always ack-eliciting (RFC 9000 §19.8).
+                        return Ok((off, true));
                     }
                 } else if s.send_fin {
                     // Stream has no pending data but fin was requested: emit a
@@ -1730,6 +1758,8 @@ impl Connection {
                         let written = frames::to_bytes(&frame, &mut out[off..])?;
                         off += written;
                         self.writable_streams.retain(|&id| id != stream_id);
+                        // fin-only STREAM is still ack-eliciting.
+                        return Ok((off, true));
                     }
                 } else {
                     // Stream has no pending data and no fin: remove it from the
@@ -1742,15 +1772,17 @@ impl Connection {
                 }
             }
         }
-        Ok(off)
+        Ok((off, false))
     }
 
+    /// Flushes one DATAGRAM frame. Returns `(new_off, wrote_ack_eliciting)`.
+    /// DATAGRAM frames are ack-eliciting per RFC 9221 §2.
     #[inline(always)]
     fn maybe_flush_one_datagram_frame(
         &mut self,
         out: &mut [u8],
         mut off: usize,
-    ) -> Result<usize, crate::error::ConnectionError> {
+    ) -> Result<(usize, bool), crate::error::ConnectionError> {
         if let Some(front) = self.dgram_send_queue.front() {
             #[cfg(not(feature = "zero_copy_dgram"))]
             let need = 1 + 2 + front.len();
@@ -1767,6 +1799,8 @@ impl Connection {
                     match frames::to_bytes(&frame, &mut out[off..]) {
                         Ok(written) => {
                             off += written;
+                            // DATAGRAM frames are ack-eliciting (RFC 9221 §2).
+                            return Ok((off, true));
                         }
                         Err(e) => {
                             if let Frame::Datagram { data } = frame {
@@ -1783,10 +1817,11 @@ impl Connection {
                     let written = frames::to_bytes(&frame, &mut out[off..])?;
                     off += written;
                     self.dgram_send_queue.pop_front();
+                    return Ok((off, true));
                 }
             }
         }
-        Ok(off)
+        Ok((off, false))
     }
 
     #[inline(always)]
@@ -2209,6 +2244,10 @@ impl Connection {
         // (header + AEAD tag only). Without this guard, the sender enters an
         // infinite loop of 38B empty packets that flood the socket buffer and
         // starve the recv path on the peer.
+        //
+        // `handshake_incomplete` is not checked here because the early return
+        // above (after the Initial/Handshake CRYPTO flush loop) already handles
+        // that case — by this point `handshake_incomplete` is always false.
         let has_pending_data = !self.pending_control.is_empty()
             || self.has_pending_application_ack()
             || !self.writable_streams.is_empty()
@@ -2244,9 +2283,23 @@ impl Connection {
         let pn_off = dcid_end;
         let mut off = pn_off + pn_len;
 
+        // Track whether any ack-eliciting frame was written in this packet.
+        // Per RFC 9002 §7.2, only packets containing ack-eliciting frames are
+        // congestion-controlled. Non-ack-eliciting frames: PADDING, ACK,
+        // CONNECTION_CLOSE, APPLICATION_CLOSE. All others (STREAM, DATAGRAM,
+        // CRYPTO, PING, MAX_DATA, NEW_CONNECTION_ID, etc.) are ack-eliciting.
+        let mut wrote_ack_eliciting = false;
+
         // Some TLS implementations (including rustls QUIC) can emit post-handshake data in the
         // application space. While the handshake is still in progress, prefer sending those
         // CRYPTO frames before other application traffic.
+        //
+        // NOTE: This block is currently unreachable because the early return above
+        // (after the Initial/Handshake CRYPTO flush loop) already returns Done when
+        // `handshake_incomplete` is true. It is retained as a structural placeholder
+        // for a future fix that emits Application-level CRYPTO (e.g. NewSessionTicket)
+        // in the 1-RTT path after handshake completion — at which point the condition
+        // should be inverted or removed.
         if handshake_incomplete {
             let max_len = out.len().saturating_sub(off + 16);
             if max_len >= 32 {
@@ -2257,27 +2310,31 @@ impl Connection {
                     let need = frames::wire_len(&frame);
                     if out.len() >= off + need + 16 {
                         off += frames::to_bytes(&frame, &mut out[off..])?;
+                        // CRYPTO frames are ack-eliciting (RFC 9000 §19.6).
+                        wrote_ack_eliciting = true;
                     }
                 }
             }
         }
 
-        off = self.flush_pending_control_frames(out, off)?;
+        let (off_after_ctrl, ctrl_ack_eliciting) = self.flush_pending_control_frames(out, off)?;
+        off = off_after_ctrl;
+        wrote_ack_eliciting |= ctrl_ack_eliciting;
         off = self.maybe_emit_application_ack_frame(out, off)?;
         // When bypassing the congestion gate for ACK-only packets, skip
         // stream and datagram data — those are congestion-controlled and
         // must not be sent when the window is exhausted.
-        let off_before_stream = off;
         if !ack_bypass {
-            off = self.maybe_flush_one_writable_stream(out, off)?;
+            let (off_after_stream, stream_ack_eliciting) =
+                self.maybe_flush_one_writable_stream(out, off)?;
+            off = off_after_stream;
+            wrote_ack_eliciting |= stream_ack_eliciting;
             // FEC feed removed (handled by core)
-            off = self.maybe_flush_one_datagram_frame(out, off)?;
+            let (off_after_dgram, dgram_ack_eliciting) =
+                self.maybe_flush_one_datagram_frame(out, off)?;
+            off = off_after_dgram;
+            wrote_ack_eliciting |= dgram_ack_eliciting;
         }
-        // Determine whether this packet carries only ACK/control frames
-        // (no stream or datagram data). Such packets are not congestion-
-        // controlled (RFC 9002 §7.2) and must not inflate bytes_in_flight.
-        // This must be captured BEFORE stealth padding / sealing modify `off`.
-        let has_stream_or_dgram_payload = off > off_before_stream;
         off = self.maybe_apply_stealth_padding(out, pn_off, pn_len, off)?;
         off = self.seal_short_header_packet(out, pn, pn_off, pn_len, off)?;
 
@@ -2298,19 +2355,20 @@ impl Connection {
         if !self.is_established && self.stats.recv > 0 && self.stats.sent > 0 {
             self.is_established = true;
         }
-        // ACK-only packets that bypassed the congestion gate are not
-        // congestion-controlled: they must not inflate bytes_in_flight
-        // (RFC 9002 §7.2). They are also not ACK-eliciting, so the peer
-        // will never ACK them — tracking them would leak bytes_in_flight
-        // permanently.
+        // Per RFC 9002 §7.2, only packets containing ack-eliciting frames are
+        // congestion-controlled. Packets carrying only ACK/PADDING/CONNECTION_CLOSE
+        // are not congestion-controlled and must not inflate bytes_in_flight.
+        // They are also not tracked in sent_packets_by_pn because the peer will
+        // never ACK them — tracking them would leak bytes_in_flight permanently.
         //
-        // Additionally, packets that carry only ACK/control frames and no
-        // stream or datagram data (off == off_before_stream) are treated as
-        // non-congestion-controlled. Without this, a sender that emits many
-        // small ACK-only packets while the window is still open would inflate
-        // bytes_in_flight until the window exhausts, then deadlock because the
-        // peer cannot return ACKs (its own window is also full).
-        let is_ack_only = ack_bypass || !has_stream_or_dgram_payload;
+        // `wrote_ack_eliciting` is set whenever any ack-eliciting frame (STREAM,
+        // DATAGRAM, CRYPTO, PING, MAX_DATA, NEW_CONNECTION_ID, RESET_STREAM,
+        // STOP_SENDING, PATH_CHALLENGE, PATH_RESPONSE, HANDSHAKE_DONE, etc.) was
+        // emitted. This is the correct RFC 9002 §7.2 condition — the previous
+        // heuristic ("no stream/dgram payload") misclassified PING-only keepalive
+        // probes and flow-control updates as non-congestion-controlled, breaking
+        // PTO-based loss detection for those packets.
+        let is_ack_only = !wrote_ack_eliciting;
         if !is_ack_only {
             let now = Instant::now();
             self.recovery.on_packet_sent(pn, total, now);
