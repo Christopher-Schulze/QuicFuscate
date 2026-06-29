@@ -3380,6 +3380,27 @@ pub fn apply_runtime_config_reload(
     Ok(())
 }
 
+/// Extract the destination IPv4 address from a raw IP packet.
+///
+/// Returns `None` if the packet is too short, is not IPv4, or has options
+/// that make the header length invalid.
+fn parse_ipv4_dest(pkt: &[u8]) -> Option<std::net::Ipv4Addr> {
+    if pkt.len() < 20 {
+        return None;
+    }
+    let version = pkt[0] >> 4;
+    if version != 4 {
+        return None;
+    }
+    let ihl = (pkt[0] & 0x0F) as usize * 4;
+    if ihl < 20 || pkt.len() < ihl {
+        return None;
+    }
+    // Destination IP is at bytes 16-19
+    let dest = std::net::Ipv4Addr::new(pkt[16], pkt[17], pkt[18], pkt[19]);
+    Some(dest)
+}
+
 pub(crate) fn open_server_tun(
     tun_config: TunConfig,
     pool: Arc<MemoryPool>,
@@ -4123,17 +4144,40 @@ impl ServerRuntime {
                             )
                             .await;
                         // Forward TUN→client: drain any packets from the TUN reader thread
-                        // and send them to the first connected client via QUIC datagrams.
+                        // and route them to the correct client based on the destination IP
+                        // in the IP packet header. Each client has a unique TUN IP from the
+                        // server's IP pool, and we look up the session by client_ip to find
+                        // the corresponding SocketAddr.
                         if let Some(ref rx) = tun_rx {
                             for _ in 0..32 {
                                 match rx.try_recv() {
                                     Ok(pkt) => {
                                         let live = self.live_mut();
-                                        // Send to the first active client (simple VPN model: 1 TUN ↔ 1 client).
-                                        if let Some((addr, conn)) = live.live_state.clients.iter_mut().next() {
-                                            let addr = *addr;
-                                            if let Err(e) = conn.send_masque_downlink(&pkt) {
-                                                log::debug!("TUN→MASQUE send to {}: {:?}", addr, e);
+                                        // Parse the destination IPv4 address from the packet
+                                        // and route to the matching client.
+                                        let target_addr = parse_ipv4_dest(&pkt)
+                                            .and_then(|dest_ip| {
+                                                live.live_state.domain.shared.sessions.read()
+                                                    .get_by_client_ip(dest_ip)
+                                                    .map(|s| s.remote_addr())
+                                            });
+
+                                        if let Some(addr) = target_addr {
+                                            // Route to the specific client that owns this IP
+                                            if let Some(conn) = live.live_state.clients.get_mut(&addr) {
+                                                if let Err(e) = conn.send_masque_downlink(&pkt) {
+                                                    log::debug!("TUN→MASQUE send to {}: {:?}", addr, e);
+                                                }
+                                            }
+                                        } else {
+                                            // Fallback: if we can't determine the destination
+                                            // (non-IPv4, broadcast, or unknown IP), send to all
+                                            // connected clients. This handles ARP-like traffic
+                                            // and ensures no packets are silently dropped.
+                                            for (addr, conn) in live.live_state.clients.iter_mut() {
+                                                if let Err(e) = conn.send_masque_downlink(&pkt) {
+                                                    log::debug!("TUN→MASQUE broadcast to {}: {:?}", addr, e);
+                                                }
                                             }
                                         }
                                         // Flush outgoing for all clients after queuing dgrams
@@ -4309,6 +4353,53 @@ mod tests {
         let config = ServerConfig::default();
         assert_eq!(config.max_clients, 100);
         assert_eq!(config.server_ip, Ipv4Addr::new(10, 8, 0, 1));
+    }
+
+    #[test]
+    fn test_parse_ipv4_dest_valid() {
+        // Construct a minimal IPv4 packet with dest 10.8.0.2
+        let mut pkt = [0u8; 20];
+        pkt[0] = 0x45; // version 4, IHL 5
+        pkt[16] = 10;
+        pkt[17] = 8;
+        pkt[18] = 0;
+        pkt[19] = 2;
+        let dest = parse_ipv4_dest(&pkt).unwrap();
+        assert_eq!(dest, Ipv4Addr::new(10, 8, 0, 2));
+    }
+
+    #[test]
+    fn test_parse_ipv4_dest_too_short() {
+        let pkt = [0u8; 10];
+        assert!(parse_ipv4_dest(&pkt).is_none());
+    }
+
+    #[test]
+    fn test_parse_ipv4_dest_not_ipv4() {
+        // IPv6 packet (version 6)
+        let mut pkt = [0u8; 40];
+        pkt[0] = 0x60; // version 6
+        assert!(parse_ipv4_dest(&pkt).is_none());
+    }
+
+    #[test]
+    fn test_parse_ipv4_dest_with_options() {
+        // IPv4 packet with IHL=6 (24 bytes header)
+        let mut pkt = [0u8; 24];
+        pkt[0] = 0x46; // version 4, IHL 6
+        pkt[16] = 192;
+        pkt[17] = 168;
+        pkt[18] = 1;
+        pkt[19] = 100;
+        let dest = parse_ipv4_dest(&pkt).unwrap();
+        assert_eq!(dest, Ipv4Addr::new(192, 168, 1, 100));
+    }
+
+    #[test]
+    fn test_parse_ipv4_dest_invalid_ihl() {
+        let mut pkt = [0u8; 20];
+        pkt[0] = 0x40; // IHL=0, invalid
+        assert!(parse_ipv4_dest(&pkt).is_none());
     }
 
     #[test]
