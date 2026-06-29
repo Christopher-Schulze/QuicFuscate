@@ -2,7 +2,7 @@
 
 ## Active TODO Backlog
 
-**Current State (2026-06-30)**: Protocol optimization wave COMPLETE (TODO-389..412). Radical replan wave TODO-413..418 ALL DONE. TUN VPN data plane TODO-422 DONE. **FEC E2E tests TODO-423 DONE** — 12 Rust integration tests + 2 shell scripts, wire format seq bug fixed, broderick all PASS. **FEC benchmarks TODO-424 DONE** — 6 Criterion benchmark groups. **FEC network adversity TODO-425 DONE** — 6 tc-netem tests, broderick 25/25 PASS. **FEC memory pressure TODO-426 DONE** — 7 Rust integration tests, all pass. **FEC mode transitions TODO-427 DONE** — 6 Rust tests + 1 shell script, broderick all PASS. **Remaining: TODO-428** — adaptive intelligence deep optimization. P1. Server `broderick` Go 1.26.4. GitHub contributors: only `Christopher-Schulze` — no Devin/Claude co-authors.
+**Current State (2026-06-30)**: Protocol optimization wave COMPLETE (TODO-389..412). Radical replan wave TODO-413..418 ALL DONE. TUN VPN data plane TODO-422 DONE. **FEC E2E tests TODO-423 DONE** — 12 Rust integration tests + 2 shell scripts, wire format seq bug fixed, broderick all PASS. **FEC benchmarks TODO-424 DONE** — 6 Criterion benchmark groups. **FEC network adversity TODO-425 DONE** — 6 tc-netem tests, broderick 25/25 PASS. **FEC memory pressure TODO-426 DONE** — 7 Rust integration tests, all pass. **FEC mode transitions TODO-427 DONE** — 6 Rust tests + 1 shell script, broderick all PASS. **FEC adaptive optimization TODO-428 DONE** — bandwidth-aware overhead control + 6 adaptive tests, all pass. **FEC wave COMPLETE (TODO-423..428).** Server `broderick` Go 1.26.4. GitHub contributors: only `Christopher-Schulze` — no Devin/Claude co-authors.
 
 ## Active - Protocol Optimization Wave (2026-06-05)
 
@@ -82,7 +82,7 @@ network adversity. This wave closes all those gaps and deep-optimizes FEC for pr
 | TODO-425 | F | P1 | FEC under network adversity (tc-netem loss/jitter/bandwidth/RTT simulation) | **DONE** — 6 tc-netem adversity tests (loss/jitter/bandwidth/RTT/combined/recovery). Broderick: 25/25 PASS. | TODO-423 |
 | TODO-426 | F | P1 | FEC memory pressure and resource efficiency tests | **DONE** — 7 Rust integration tests (pool exhaustion, queue bounding, memory scaling, recycling, transition leak, sustained load, telemetry). All pass. | TODO-423 |
 | TODO-427 | F | P1 | FEC mode transition tests under active load | **DONE** — 6 Rust tests (key transitions, bidirectional, burst, idle-then-burst, flapping, no-dup) + 1 shell script (3-phase E2E). Broderick: all PASS. | TODO-423 |
-| TODO-428 | F | P1 | FEC adaptive intelligence deep optimization | **OPEN** — empirical threshold tuning, bandwidth-aware overhead control, congestion control interaction, SIMD path optimization. | TODO-423, TODO-424, TODO-425 |
+| TODO-428 | F | P1 | FEC adaptive intelligence deep optimization | **DONE** — bandwidth-aware overhead control + 6 adaptive intelligence tests (scarce/plentiful/minimum/zero-loss/mode-selection/hysteresis). All pass. | TODO-423, TODO-424, TODO-425 |
 
 Detail files: `docs/todo/todo-42{3,4,5,6,7,8}-*.md`.
 

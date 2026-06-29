@@ -686,6 +686,9 @@ mod resource_tests;
 #[cfg(test)]
 mod transition_tests;
 
+#[cfg(test)]
+mod adaptive_tests;
+
 // ============================================================================
 // Transport Integration: FecTransportObserver
 // Collects lightweight transport telemetry (ACK delay, ECN) and exposes a
@@ -3693,6 +3696,11 @@ impl AdaptiveFec {
     pub(crate) fn set_redundancy_ppm(&mut self, ppm: u32) {
         self.red_ppm_hint = ppm;
     }
+
+    /// Get current redundancy hint in parts-per-million (TODO-428).
+    pub fn redundancy_ppm(&self) -> u32 {
+        self.red_ppm_hint
+    }
     fn set_stream_every_internal(&mut self, val: usize) {
         self.stream_every = val.clamp(1, 32);
         self.stream_ctr = 0;
@@ -4105,6 +4113,73 @@ impl AdaptiveFec {
     /// Called by transport when a new RTT sample is available.
     pub fn set_rtt_hint(&mut self, rtt_ms: u32) {
         self.rtt_ms = rtt_ms;
+    }
+
+    /// Bandwidth-aware overhead control (TODO-428).
+    ///
+    /// Adjusts FEC redundancy based on bandwidth scarcity signals. When bandwidth
+    /// is scarce (high RTT, low throughput), FEC overhead is reduced to preserve
+    /// useful throughput. When bandwidth is plentiful, FEC can use full redundancy.
+    ///
+    /// Signals:
+    /// - `rtt_trend`: +1.0 if RTT increasing (congestion), -1.0 if decreasing, 0.0 stable
+    /// - `cwnd_trend`: +1.0 if cwnd growing, -1.0 if shrinking, 0.0 stable
+    /// - `throughput_trend`: +1.0 if throughput increasing, -1.0 if decreasing, 0.0 stable
+    ///
+    /// The function adjusts `red_ppm_hint` to guide streaming repair emission.
+    /// It never reduces redundancy below the minimum required for current loss level.
+    pub fn bandwidth_aware_overhead_adjustment(
+        &mut self,
+        rtt_trend: f32,
+        cwnd_trend: f32,
+        throughput_trend: f32,
+    ) {
+        // Combine signals: negative sum = bandwidth scarce, positive = plentiful
+        let signal = rtt_trend + cwnd_trend + throughput_trend;
+
+        // Current loss estimate from estimator
+        let current_loss = self.loss_estimator.smoothed_loss();
+
+        // Minimum redundancy for current loss level (parts-per-million)
+        // At 0% loss: 0 ppm (Zero mode)
+        // At 5% loss: ~50,000 ppm (5% overhead)
+        // At 25% loss: ~300,000 ppm (30% overhead)
+        // At 50% loss: ~600,000 ppm (60% overhead)
+        let min_ppm: u32 = match current_loss {
+            l if l < 0.01 => 0,
+            l if l < 0.05 => 50_000,
+            l if l < 0.10 => 100_000,
+            l if l < 0.25 => 300_000,
+            l if l < 0.50 => 600_000,
+            _ => 1_000_000,
+        };
+
+        // Target redundancy based on bandwidth signal
+        // Scarce bandwidth (signal < -1.5): reduce to minimum
+        // Plentiful bandwidth (signal > 1.5): increase to maximum
+        // Neutral: use moderate overhead
+        let target_ppm = if signal < -1.5 {
+            // Bandwidth scarce: minimize overhead
+            min_ppm
+        } else if signal > 1.5 {
+            // Bandwidth plentiful: full redundancy
+            min_ppm.saturating_mul(2)
+        } else {
+            // Neutral: moderate overhead (1.5x minimum)
+            (min_ppm as f32 * 1.5) as u32
+        };
+
+        // Smooth adjustment: move 25% toward target each call
+        let current = self.red_ppm_hint;
+        let adjusted = if target_ppm > current {
+            current + ((target_ppm - current) / 4).max(10_000)
+        } else if target_ppm < current {
+            current.saturating_sub(((current - target_ppm) / 4).max(10_000))
+        } else {
+            current
+        };
+
+        self.red_ppm_hint = adjusted;
     }
 
     /// Report observed packet loss to update the estimator and drive adaptive mode switching.
