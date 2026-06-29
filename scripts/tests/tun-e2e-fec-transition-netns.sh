@@ -90,7 +90,7 @@ ping_phase() {
     ping_output=$(ip netns exec ns-cli ping -c "$count" -i 0.1 -W 5 -I qtun0 10.0.1.1 2>&1)
     local ping_loss
     ping_loss=$(echo "$ping_output" | grep 'packet loss' | grep -oP '[\d.]+(?=% packet loss)' | awk '{printf "%d", $1}' || echo "100")
-    echo "  Phase ${label}: ${ping_loss}% tunnel loss"
+    echo "  Phase ${label}: ${ping_loss}% tunnel loss" >&2
     echo "$ping_loss"
 }
 
