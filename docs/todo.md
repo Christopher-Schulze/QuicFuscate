@@ -2,7 +2,7 @@
 
 ## Active TODO Backlog
 
-**Current State (2026-07-23)**: Protocol optimization wave **PARTIALLY COMPLETE** (TODO-389..412). CI/release workflows **all green** at `1dd8a3b` (CI, Clippy Matrix, Release Build, Linux fastpath-gates). Single branch `main`. Prior wave TODO-308..388 ALL DONE (33 files, YAML-frontmatter backfilled 2026-07-23). Of TODO-389..411: **12 DONE** (389,393,394,402,403,404,405,406,407,408,410,411), **11 OPEN** (390,391,392,395,396,397,398,399,400,401,409) — code-verified 2026-07-23, prior index claims of "all DONE" were incorrect. **New wave TODO-413..418** planned 2026-07-23 (radical replan: Sanierung → Profiling → Architecture → Stealth). Session fixes committed: `eeb2177` (aarch64 build, deadlock, --qkey), `1dd8a3b` (io_uring stale-CQE drain). Server `broderick` Go updated 1.22.2 → 1.26.4. GitHub contributors: only `Christopher-Schulze` — no Devin/Claude co-authors.
+**Current State (2026-06-29)**: Protocol optimization wave **COMPLETE** (TODO-389..412). CI/release workflows all green. Single branch `main`. Prior wave TODO-308..388 ALL DONE. Of TODO-389..412: all DONE or SUPERSEDED — no OPEN items remain in that range. Radical replan wave TODO-413..418 ALL DONE. TUN VPN data plane TODO-422 DONE (MASQUE CONNECT-UDP both directions, commits `367d56f`..`8474f3c`). **No actionable OPEN TODOs remain** — TODO-412 is SUPERSEDED by TODO-418 (externally blocked Oracle Cloud UDP path, tc-netem substitute in place). Deferred items (356/358/362/378) are docs-hygiene / dead-code-audit, not action levers. Server `broderick` Go 1.26.4. GitHub contributors: only `Christopher-Schulze` — no Devin/Claude co-authors.
 
 ## Active - Protocol Optimization Wave (2026-06-05)
 
@@ -17,9 +17,9 @@ Execution order: **Phase A (config + quick wins) -> Phase B (load path) -> Phase
 | TODO-393 | A | P1 | Reuse AEGIS cipher state across packets (avoid per-PN init) | **DONE** (state stored persistently in AEAD struct; `new` only on first packet, `reinit` reuses allocation thereafter; differential test proves reinit output byte-identical to fresh-new per packet across 64 counters) |
 | TODO-394 | B | P1 | Replace `sent_bytes_by_pn` full-scan ACK accounting | **DONE** |
 | TODO-395 | B | P1 | MORUS seal/open in-place on trait path (remove `to_vec` copies) | **DONE** (trait path already calls encrypt/decrypt_in_place_optimized directly on caller buffer; SIMD _inner fns write in-place via chunks_exact_mut; to_vec only in test/allocating convenience methods; added trait-path differential + forgery regression test) |
-| TODO-396 | B | P2 | Brain `apply_policy` lock coalescing and histogram reuse | **OPEN** — superseded by TODO-417 (bundled into Hot-Path-Lock-Elimination). code-check 2026-07-23: no explicit lock coalescing found, RwLock present at brain.rs:467 |
-| TODO-397 | B | P2 | FEC encoder/decoder Mutex contention reduction | **OPEN** — superseded by TODO-417. code-check 2026-07-23: std::sync::Mutex still present at fec/mod.rs:2991-2994, not parking_lot |
-| TODO-398 | B | P2 | CryptoContext RwLock scope reduction on 1-RTT hot path | **OPEN** — superseded by TODO-417 (ArcSwap approach). code-check 2026-07-23: no cache found, RwLock still acquired per packet |
+| TODO-396 | B | P2 | Brain `apply_policy` lock coalescing and histogram reuse | **SUPERSEDED** by TODO-417 (Hot-Path-Lock-Elimination, DONE). Bundled into ArcSwap + lock-free 1-RTT path. |
+| TODO-397 | B | P2 | FEC encoder/decoder Mutex contention reduction | **SUPERSEDED** by TODO-417 (Hot-Path-Lock-Elimination, DONE). |
+| TODO-398 | B | P2 | CryptoContext RwLock scope reduction on 1-RTT hot path | **SUPERSEDED** by TODO-417 (Hot-Path-Lock-Elimination, DONE). ArcSwap lock-free 1-RTT path eliminates per-packet RwLock. |
 | TODO-399 | C | P1 | Criterion bench: `Connection` 1-RTT send/recv loop | **DONE** (`connection_1rtt_send_recv` group in ci_regression.rs, 3 payload sizes, mock paired 1-RTT connections; wired into bench-ci-regression.sh + ci.yml benchmarks job with critcmp baseline) |
 | TODO-400 | C | P1 | Criterion bench: ACK processing under N in-flight PNs | **DONE** (`ack_sent_byte_accounting` group: 32/128/512/1024/2048/10240 inflight, ack_all/ack_half/ack_sparse variants; wired into ci_regression + ci.yml benchmarks job) |
 | TODO-401 | C | P2 | CI regression: stealth-on vs stealth-off same workload | **DONE** (`connection_1rtt_stealth_compare` group runs stealth_off/stealth_on on identical 1-RTT workload; ci.yml benchmarks job applies 15% warn / 30% error thresholds via bench-ci-regression.sh) |
@@ -30,10 +30,10 @@ Execution order: **Phase A (config + quick wins) -> Phase B (load path) -> Phase
 | TODO-406 | B | P2 | Consolidate dual stealth timing gates (core + connection) | **DONE** |
 | TODO-407 | B | P3 | Replace `Box<dyn Aead>` with enum dispatch in `CryptoContext` | **DONE** |
 | TODO-408 | B | P3 | Fix VNNI `aggregate_congestion` per-call heap allocations | **DONE** |
-| TODO-409 | A | P2 | Evaluate `stream_ring_buffer` as default for throughput profile | **OPEN** — superseded by TODO-414 (Streaming-FEC adaptive loop). code-check 2026-07-23: feature gated at connection.rs:243,252, default off, unclear if should be on |
+| TODO-409 | A | P2 | Evaluate `stream_ring_buffer` as default for throughput profile | **SUPERSEDED** by TODO-414 (Streaming-FEC adaptive loop, DONE). Feature remains opt-in; adaptive loop determines when streaming mode warrants ring-buffer usage. |
 | TODO-410 | B | P3 | Zstd compression streaming directly into memory pool | **DONE** |
 | TODO-411 | B | P3 | StrikeRegister 0-RTT anti-replay ring buffer + bloom front | **DONE** |
-| TODO-412 | E | P1 | Server deploy + real-world protocol profiling baseline | **OPEN** — superseded by TODO-418 (Profiling-Baseline + tc-netem-Setup). Externally blocked by Oracle Cloud UDP Security List (cloud-level, not iptables). Loopback + tc-netem path chosen as pragmatic alternative |
+| TODO-412 | E | P1 | Server deploy + real-world protocol profiling baseline | **SUPERSEDED** by TODO-418 (Profiling-Baseline + tc-netem-Setup, DONE). Real-world Oracle Cloud UDP path remains externally blocked (cloud-level Security List, not iptables); loopback + tc-netem baseline established as pragmatic substitute. Reopen only if Oracle Cloud UDP egress is unblocked. |
 
 Detail files: `docs/todo/todo-{id}-*.md` for each item above.
 
@@ -51,15 +51,15 @@ Pre-loop cleanup tasks completed before handing work to the continuous loop.
 
 ---
 
-## Active - TUN VPN Data Plane (2026-06-23)
+## Completed - TUN VPN Data Plane (2026-06-23 → 2026-06-29)
 
 Handshake, cert validation (incl. `--ca-file`), H3 OOB panic, idle-timeout/loss inflation, and
 client Finished delivery are all fixed and on `main` (commits `2b9c880`, `5572142`, `0bade3a`,
-`953fe84`, `8085f9b`). What remains is the actual VPN payload path through the TUN bridge.
+`953fe84`, `8085f9b`). The VPN payload path through the TUN bridge is now wired end-to-end.
 
 | ID | Priority | Title | Status | Depends On |
 |----|----------|-------|--------|------------|
-| TODO-422 | P1 | TUN VPN data plane end-to-end via MASQUE (CONNECT-UDP capsule <-> TUN routing) | **OPEN** — deferred by user decision; Option A (MASQUE) chosen over Option B (DATA frames) for stealth + datagram performance. Full plan in detail file. | — |
+| TODO-422 | P1 | TUN VPN data plane end-to-end via MASQUE (CONNECT-UDP capsule <-> TUN routing) | **DONE** — Option A (MASQUE) implemented both directions: client uplink via `http3_send_body_chunk` → `send_masque_datagram`, server downlink via `send_masque_downlink` on peer-initiated CONNECT-UDP flow, downlink drain via `drain_masque_datagrams` → `masque_datagram_cb` → TUN write. E2E test harness at `scripts/tests/tun-e2e-netns.sh`. Commits `367d56f`..`8474f3c`. | — |
 
 Detail file: `docs/todo/todo-422-tun-vpn-data-plane-masque.md`.
 
@@ -84,17 +84,17 @@ Detail files: `docs/todo/todo-{id}-*.md` for each item above.
 
 ### Phase 4 — Mikro-Optimierungen (nur bei Flamegraph-Evidence)
 
-These OPEN TODOs from the prior wave are **not scrapped** but **gated**: no implementation without profiling evidence from TODO-418 showing the relevant code in the Top-10 hotspots.
+All items below were **implemented and marked DONE** in the main wave table above. They are retained here as profiling-evidence cross-references for TODO-418. No OPEN items remain in this section.
 
-| ID | Title | Gate Condition |
-|----|-------|----------------|
-| TODO-390 | AEAD-Selection MTU-Workload | Flamegraph shows AEAD-Dispatch in Top-10 |
-| TODO-391 | Double header parse | Flamegraph shows parse_header in Top-10 |
-| TODO-392 | FecPacket clone on send | Flamegraph shows clone in Top-10 |
-| TODO-395 | MORUS in-place | Flamegraph shows to_vec in Top-10 AND MORUS is selected backend |
-| TODO-399 | Criterion Connection bench | Validated by TODO-418 profiling scenarios |
-| TODO-400 | Criterion ACK stress bench | Validated by TODO-418 profiling scenarios |
-| TODO-401 | Stealth-on vs stealth-off CI | Validated by TODO-418 profiling scenarios |
+| ID | Title | Status |
+|----|-------|--------|
+| TODO-390 | AEAD-Selection MTU-Workload | **SCRAP** (premise incorrect) — see main table |
+| TODO-391 | Double header parse | **DONE** — pre_parsed_hdr threaded through decrypt paths |
+| TODO-392 | FecPacket clone on send | **DONE** — SharedFecBuffer Arc-backed, zero-copy |
+| TODO-395 | MORUS in-place | **DONE** — trait path calls in-place directly |
+| TODO-399 | Criterion Connection bench | **DONE** — `connection_1rtt_send_recv` group |
+| TODO-400 | Criterion ACK stress bench | **DONE** — `ack_sent_byte_accounting` group |
+| TODO-401 | Stealth-on vs stealth-off CI | **DONE** — `connection_1rtt_stealth_compare` group |
 
 ### SCRAP / DEFERRED Items (2026-07-23)
 

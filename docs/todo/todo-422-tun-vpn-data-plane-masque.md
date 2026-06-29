@@ -4,8 +4,9 @@ title: TUN VPN data plane end-to-end via MASQUE (CONNECT-UDP capsule <-> TUN rou
 severity: HIGH
 phase: "2"
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-06-23
+completed: 2026-06-29
 depends_on: []
 ---
 
