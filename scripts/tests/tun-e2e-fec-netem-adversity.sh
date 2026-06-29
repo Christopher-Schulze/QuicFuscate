@@ -190,6 +190,7 @@ test_jitter_sweep() {
     for jitter in 0 10 50 100 200 500; do
         cleanup
         setup_netns
+        start_tunnel
         if ! check_handshake; then
             echo "${jitter}ms | N/A | N/A | FAIL (handshake)"
             FAIL=$((FAIL + 1))
@@ -229,6 +230,7 @@ test_bandwidth() {
     for bw in 100Mbit 50Mbit 10Mbit 5Mbit 1Mbit; do
         cleanup
         setup_netns
+        start_tunnel
         if ! check_handshake; then
             echo "${bw} | N/A | N/A | FAIL (handshake)"
             FAIL=$((FAIL + 1))
@@ -266,6 +268,7 @@ test_rtt_variation() {
     for rtt in 1 10 50 100 200 300; do
         cleanup
         setup_netns
+        start_tunnel
         if ! check_handshake; then
             echo "${rtt}ms | N/A | N/A | FAIL (handshake)"
             FAIL=$((FAIL + 1))
