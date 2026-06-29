@@ -92,6 +92,85 @@ stays up. Resources are cheap, liveness is expensive.
 
 ---
 
+## Active - Production VPN Readiness Wave (2026-06-30)
+
+**Motivation:** Deep 8-axis audit (TUN data plane, Auth/PKI, Security/KillSwitch, DNS, FEC bugs,
+Transport, Production ops, Platform) reveals QuicFuscate is NOT production-ready. The architecture
+is sound (L3 IP-tunnel over QUIC, like WireGuard) but critical integration gaps, broken multi-client,
+unwired kill switch, missing DNS-through-tunnel, and platform stubs block production use. This wave
+closes every gap to reach a complete, production-ready VPN protocol.
+
+**Audit findings summary (verified, not assumed):**
+
+| Axis | Critical Blockers | High Gaps | Status |
+|------|-------------------|-----------|--------|
+| TUN data plane | No ICMP, no IPv6 routing, multi-client broken (sends to first client only) | No PMTUD | Wave G |
+| Auth/PKI | Self-signed cert fallback in production, no immediate revocation | No key rotation, no CA hierarchy, no audit logging | Wave G+H |
+| Security | Kill switch NOT wired into runtime (traffic leak guaranteed) | No IPv6 leak prevention, no traffic isolation, no mlock | Wave G+H |
+| DNS | DoH implemented but 0 calls, no DNS proxy, no DNS-through-tunnel | No split DNS, no DNSSEC, search_domains always empty | Wave H |
+| FEC bugs | InterleavedDecoder DATA LOSS bug (consecutive ID assumption) | swap_remove is NOT a bug (verified correct) | Wave G |
+| Transport | No multipath (WiFi+LTE bonding impossible) | Migration cwnd reset too aggressive, PMTUD disabled, no CUBIC | Wave J |
+| Production ops | Multi-client TUN broken, no HA/clustering | No log rotation, no Docker, no per-client bandwidth, no SIGTERM | Wave I |
+| Platform | Windows TUN = stub, iOS/Android = stubs | No privilege dropping, no mlock, no CPU affinity | Wave I |
+
+**Execution order: Wave G (P0 Critical) → Wave H (P1 Security) → Wave I (P1 Platform/Deploy) → Wave J (P1-P2 Transport/Advanced)**
+
+### Wave G — P0 Critical Blockers (must fix before any production use)
+
+| ID | Phase | Priority | Title | Status | Depends On |
+|----|-------|----------|-------|--------|------------|
+| TODO-429 | G | P0 | Kill switch integration into client runtime | **OPEN** — KillSwitch struct exists (566 lines, Linux/macOS/Windows) but is NEVER instantiated or called. Wire into ClientRuntime: enable on connect, disable on disconnect, activate on connection loss. | — |
+| TODO-430 | G | P0 | Multi-client TUN forwarding fix | **OPEN** — Server sends TUN packets only to first connected client (mod.rs:4133 `clients.iter_mut().next()`). Implement per-client routing: each client gets own TUN IP, server routes based on dest IP in packet. | TODO-422 |
+| TODO-431 | G | P0 | IPv6 support (routing, NAT, TUN addressing) | **OPEN** — routing.rs is IPv4-only (MASQUERADE, ip_forward). No IPv6 NAT, no IPv6 IP pool, no IPv6 TUN address config. Add ip6tables MASQUERADE, IPv6 pool, dual-stack TUN. | — |
+| TODO-432 | G | P0 | ICMP handling (echo reply, PMTUD packet-too-big) | **OPEN** — Zero ICMP code in entire codebase. Without ICMP echo reply, ping to TUN IP fails. Without ICMP packet-too-big, PMTUD breaks. Implement minimal ICMP: echo reply, dest unreachable, packet too big. | — |
+| TODO-433 | G | P0 | InterleavedDecoder consecutive-ID bug fix | **OPEN** — InterleavedDecoder assumes consecutive packet IDs within blocks but interleaving distributes non-consecutively. FEC recovery fails with DATA LOSS when QUICFUSCATE_FEC_INTERLEAVE=1. Fix coefficient-to-packet-ID mapping. | — |
+| TODO-434 | G | P0 | Production PKI (CA hierarchy, cert generation, no self-signed fallback) | **OPEN** — qftls.rs falls back to ephemeral self-signed certs if no file found (line 1246-1249). No CA hierarchy, no OCSP, no CRL. Implement proper PKI: root CA, intermediate CA, server cert chain, cert generation tooling, cert expiration checking. | — |
+
+### Wave H — P1 Security Hardening
+
+| ID | Phase | Priority | Title | Status | Depends On |
+|----|-------|----------|-------|--------|------------|
+| TODO-435 | H | P1 | DNS through tunnel (DoH wire-in, DNS proxy, server forwarding) | **OPEN** — DoH fully implemented (stealth/mod.rs:938-1056) but 0 calls in codebase. ServerConfig.dns_servers is a dead field. No DNS proxy. Wire DoH into client resolution, implement DNS proxy on client (intercept port 53), implement DNS forwarding on server. | TODO-429 |
+| TODO-436 | H | P1 | Key rotation & immediate revocation | **OPEN** — QKeys never rotate. Revocation doesn't terminate active connections. Implement auto-rotation (time-based + volume-based), connection termination on revoke (track QKey-to-connection mapping). | TODO-434 |
+| TODO-437 | H | P1 | IPv6 + DNS leak prevention | **OPEN** — Kill switch has no ip6tables rules (IPv6 leak guaranteed). No port-53 DNS filtering. Add ip6tables-restore, pf IPv6, netsh IPv6. Add DNS-specific firewall rules (block UDP 53 except to VPN DNS). | TODO-429 |
+| TODO-438 | H | P1 | Traffic isolation between clients | **OPEN** — All clients share same TUN interface. No namespace/VRF isolation. Client A can see client B's traffic. Implement per-client routing table or VRF isolation. | TODO-430 |
+| TODO-439 | H | P1 | Security audit logging (SIEM-compatible) | **OPEN** — No security event logs. No audit trail for auth/revocation/firewall events. Implement structured JSON audit logging with immutable trail. | — |
+| TODO-440 | H | P1 | Key erasure & memory locking (mlock, zeroize) | **OPEN** — Only ChaCha20 keys zeroized on Drop. AES-GCM, AEGIS, MORUS, TLS secrets not zeroized. No mlock for sensitive data. Extend zeroize to all key material, add mlock for crypto buffers. | — |
+| TODO-441 | H | P1 | Privilege dropping (post-bind setuid/setgid) | **OPEN** — Server runs with full privileges after init. No setuid/setgid/chroot. Implement privilege dropping after socket bind + TUN setup. | — |
+
+### Wave I — P1 Platform & Deployment
+
+| ID | Phase | Priority | Title | Status | Depends On |
+|----|-------|----------|-------|--------|------------|
+| TODO-442 | I | P1 | Windows TUN (Wintun integration) | **OPEN** — Windows TUN is a stub (interface.rs:856-877, returns error). No Wintun dependency. Implement Wintun DLL loading, packet read/write, TUN config. | — |
+| TODO-443 | I | P1 | Mobile platforms (iOS NetworkExtension, Android VpnService) | **OPEN** — iOS TUN is a stub (interface.rs:843-854). Android uses LinuxTun but no VpnService. No mobile kill switch or routing. Implement iOS NEPacketTunnelProvider, Android VpnService JNI. | — |
+| TODO-444 | I | P1 | nftables support (modern Linux firewall) | **OPEN** — Kill switch and routing use legacy iptables only. nftables is standard on modern Linux. Add nftables backend with auto-detection (nft → iptables fallback). | TODO-429 |
+| TODO-445 | I | P1 | Per-client bandwidth limits & quotas | **OPEN** — No per-client bandwidth shaping. No traffic quotas. No fairness. Implement per-session token bucket, per-client rate limits, traffic quotas. | TODO-430 |
+| TODO-446 | I | P1 | Production logging (rotation, structured JSON, file output) | **OPEN** — No log rotation. No structured JSON. log_file_path in config but not used. Implement log rotation, JSON structured logging, file output with configurable path. | — |
+| TODO-447 | I | P1 | Container deployment (Docker, docker-compose, K8s) | **OPEN** — No Dockerfile, no docker-compose, no K8s manifests. Create Dockerfile (multi-stage build), docker-compose for quick start, K8s deployment + service + configmap. | — |
+| TODO-448 | I | P1 | Graceful shutdown (SIGTERM, drain mode, connection handoff) | **OPEN** — Only SIGINT handled. No SIGTERM. No drain mode. No connection drain. Active connections killed instantly. Add SIGTERM, configurable grace period, drain mode, graceful connection close. | — |
+
+### Wave J — P1-P2 Transport & Advanced
+
+| ID | Phase | Priority | Title | Status | Depends On |
+|----|-------|----------|-------|--------|------------|
+| TODO-449 | J | P1 | Multipath support (WiFi+LTE bonding) | **OPEN** — No multipath. Connection tracks one path at a time (connection.rs:76-78). VPN bonding impossible. Implement QUIC multipath (draft-ietf-quic-multipath), per-path CC, packet scheduling. | — |
+| TODO-450 | J | P1 | Connection migration fix (gentle cwnd handling) | **OPEN** — Migration resets cwnd to INITIAL_WINDOW and bytes_in_flight to 0 (connection.rs:683-684). Too aggressive, causes throughput collapse. Implement gentle migration: preserve cwnd, gradual adaptation. | — |
+| TODO-451 | J | P1 | PMTUD enablement (DPLPMTUD, black hole detection) | **OPEN** — PMTU discovery disabled by default (config.rs:137). No DPLPMTUD. No black hole detection. Enable by default, implement DPLPMTUD (RFC 8899), black hole detection with MTU fallback. | TODO-432 |
+| TODO-452 | J | P2 | CUBIC congestion control | **OPEN** — Only BBR2/BBR3/Reno implemented. CUBIC is Linux default. Implement CUBIC (RFC 9438) for compatibility with Linux servers. | — |
+| TODO-453 | J | P2 | QUIC version negotiation | **OPEN** — Only QUIC v1 supported. Version negotiation packet parsed but not used (packet.rs:274). No fallback. Implement multi-version support, version negotiation logic. | — |
+| TODO-454 | J | P2 | NAT traversal (STUN/TURN/ICE for symmetric NAT) | **OPEN** — Standard QUIC NAT works for cone NAT. No STUN/TURN/ICE. Symmetric NAT and restrictive firewalls block connections. Implement STUN binding, ICE candidate gathering, TURN relay fallback. | — |
+| TODO-455 | J | P2 | Traffic analysis defense (chaffing, constant rates, full padding) | **OPEN** — Padding is rate-limited (not all packets). Timing jitter is rate-limited. No chaffing (dummy traffic). No constant packet rates. Implement 100% padding mode, chaffing, constant-rate mode for high-security. | — |
+
+Detail files: `docs/todo/todo-42{9,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55}-*.md`.
+
+**Production readiness philosophy:** QuicFuscate must be a complete VPN protocol — invisible when
+the link is clean, heroic when the link is broken, and secure under all conditions. No traffic leaks,
+no data loss, no privilege escalation, no single point of failure. Every feature must be wired in,
+tested under real conditions, and documented.
+
+---
+
 ## Active - Radical Replan Wave (2026-07-23)
 
 **Motivation:** Deep-dive analysis identified three core problems: (1) TODO-system drift (33 files without status, 11 false DONE claims), (2) no real profiling baseline (all micro-opts are blind), (3) stealth is fallback-proxy not reality-grade mimicry. This wave addresses all three with five big levers, sequenced for maximum impact.
