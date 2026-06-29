@@ -1573,14 +1573,32 @@ impl Connection {
     /// where `wrote_ack_eliciting` is true if any ack-eliciting frame was
     /// emitted (e.g. PING, MAX_DATA, NEW_CONNECTION_ID). This is used by the
     /// caller to decide whether the packet is congestion-controlled.
+    ///
+    /// When `congestion_bypass` is true, the caller is emitting an ACK-only
+    /// packet to bypass the congestion gate (RFC 9002 §7.2). In that mode only
+    /// non-ack-eliciting control frames (CONNECTION_CLOSE / APPLICATION_CLOSE)
+    /// may be emitted — emitting ack-eliciting frames would inflate
+    /// bytes_in_flight beyond cwnd, violating RFC 9002 §7.2 ("A sender MUST
+    /// NOT send a packet if it would cause bytes_in_flight to exceed the
+    /// congestion window"). Ack-eliciting control frames are left in the queue
+    /// and flushed on a later non-bypassed send.
     #[inline(always)]
     fn flush_pending_control_frames(
         &mut self,
         out: &mut [u8],
         mut off: usize,
+        congestion_bypass: bool,
     ) -> Result<(usize, bool), crate::error::ConnectionError> {
         let mut wrote_ack_eliciting = false;
         while let Some(ctrl) = self.pending_control.front() {
+            // When bypassing the congestion gate, skip ack-eliciting control
+            // frames (PING, MAX_DATA, NEW_CONNECTION_ID, HANDSHAKE_DONE,
+            // RESET_STREAM, STOP_SENDING, PATH_CHALLENGE, PATH_RESPONSE,
+            // DATA_BLOCKED, STREAM_DATA_BLOCKED, …). They are left in the
+            // queue and emitted on a later send that respects the cwnd.
+            if congestion_bypass && Self::frame_is_ack_eliciting(ctrl) {
+                break;
+            }
             let need = frames::wire_len(ctrl);
             let tag_reserve = self.tag_reserve_1rtt();
             if out.len() >= off + need + tag_reserve {
@@ -2245,9 +2263,9 @@ impl Connection {
         // infinite loop of 38B empty packets that flood the socket buffer and
         // starve the recv path on the peer.
         //
-        // `handshake_incomplete` is not checked here because the early return
-        // above (after the Initial/Handshake CRYPTO flush loop) already handles
-        // that case — by this point `handshake_incomplete` is always false.
+        // The handshake-incomplete case is already handled by the early return
+        // above (after the Initial/Handshake CRYPTO flush loop) — by this point
+        // the handshake is always complete.
         let has_pending_data = !self.pending_control.is_empty()
             || self.has_pending_application_ack()
             || !self.writable_streams.is_empty()
@@ -2290,34 +2308,15 @@ impl Connection {
         // CRYPTO, PING, MAX_DATA, NEW_CONNECTION_ID, etc.) are ack-eliciting.
         let mut wrote_ack_eliciting = false;
 
-        // Some TLS implementations (including rustls QUIC) can emit post-handshake data in the
-        // application space. While the handshake is still in progress, prefer sending those
-        // CRYPTO frames before other application traffic.
-        //
-        // NOTE: This block is currently unreachable because the early return above
-        // (after the Initial/Handshake CRYPTO flush loop) already returns Done when
-        // `handshake_incomplete` is true. It is retained as a structural placeholder
-        // for a future fix that emits Application-level CRYPTO (e.g. NewSessionTicket)
-        // in the 1-RTT path after handshake completion — at which point the condition
-        // should be inverted or removed.
-        if handshake_incomplete {
-            let max_len = out.len().saturating_sub(off + 16);
-            if max_len >= 32 {
-                if let Some((crypto_off, data)) =
-                    self.next_crypto_frame(crate::qftls::Level::Application, max_len)
-                {
-                    let frame = Frame::Crypto { offset: crypto_off, data: Cow::Owned(data) };
-                    let need = frames::wire_len(&frame);
-                    if out.len() >= off + need + 16 {
-                        off += frames::to_bytes(&frame, &mut out[off..])?;
-                        // CRYPTO frames are ack-eliciting (RFC 9000 §19.6).
-                        wrote_ack_eliciting = true;
-                    }
-                }
-            }
-        }
+        // Post-handshake Application-level CRYPTO (e.g. NewSessionTicket) is not
+        // emitted here. The early return above guarantees `handshake_incomplete`
+        // is false at this point, so any Application CRYPTO would be
+        // post-handshake and should be flushed via a dedicated path that
+        // respects flow control and the congestion window. The previous
+        // `if handshake_incomplete` block was unreachable dead code.
 
-        let (off_after_ctrl, ctrl_ack_eliciting) = self.flush_pending_control_frames(out, off)?;
+        let (off_after_ctrl, ctrl_ack_eliciting) =
+            self.flush_pending_control_frames(out, off, ack_bypass)?;
         off = off_after_ctrl;
         wrote_ack_eliciting |= ctrl_ack_eliciting;
         off = self.maybe_emit_application_ack_frame(out, off)?;

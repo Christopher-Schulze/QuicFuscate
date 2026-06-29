@@ -655,8 +655,9 @@ impl QuicFuscateConnection {
                     Ok(Some((sid, crate::transport::h3::Event::Headers { list, .. }))) => {
                         // Detect peer-initiated MASQUE CONNECT-UDP requests (server side:
                         // the client opens the flow). Record the stream id and provision
-                        // QUIC DATAGRAM queues so downlink sends work. Inlined here to
-                        // avoid a double &mut self borrow while h3 is held.
+                        // QUIC DATAGRAM queues so downlink sends work. Inlined here
+                        // because h3 is borrowed from self.h3_conn while we also need
+                        // &mut self.conn — a helper taking &mut self would conflict.
                         if Self::is_connect_udp_request(&list)
                             && self.masque_peer_stream_id.is_none()
                         {
@@ -1350,20 +1351,6 @@ impl QuicFuscateConnection {
     /// Returns true if a MASQUE datagram sink has been installed.
     pub fn has_masque_datagram_cb(&self) -> bool {
         self.masque_datagram_cb.is_some()
-    }
-
-    /// Records the stream id of a peer-initiated MASQUE CONNECT-UDP flow and
-    /// provisions QUIC DATAGRAM queues on this side so downlink sends work.
-    pub fn record_masque_peer_stream(&mut self, stream_id: u64) {
-        if self.masque_peer_stream_id.is_some() {
-            return;
-        }
-        self.masque_peer_stream_id = Some(stream_id);
-        if let Some(ref mut h3) = self.h3_conn {
-            let _ = h3.enable_masque_datagram(&mut self.conn, stream_id);
-        }
-        crate::telemetry::MASQUE_ACTIVE.store(1, std::sync::atomic::Ordering::Relaxed);
-        debug!("MASQUE peer CONNECT-UDP flow recorded (stream={})", stream_id);
     }
 
     pub fn poll_http3(&mut self) -> Result<(), crate::error::ConnectionError> {
