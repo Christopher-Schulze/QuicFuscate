@@ -102,7 +102,8 @@ start_tunnel() {
 apply_qdisc() {
     local qdisc="$1"
     if [ -n "$qdisc" ]; then
-        ip netns exec ns-cli tc qdisc add dev veth-cli root "$qdisc"
+        # shellcheck disable=SC2086
+        ip netns exec ns-cli tc qdisc add dev veth-cli root $qdisc
     fi
 }
 
