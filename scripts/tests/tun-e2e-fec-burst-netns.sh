@@ -20,7 +20,8 @@ KEY="$PROJECT_ROOT/config/local/server.key"
 CA="$PROJECT_ROOT/config/local/ca.crt"
 CERT_DIR="$PROJECT_ROOT/config/local"
 
-PING_COUNT="${PING_COUNT:-30}"
+PING_COUNT="${PING_COUNT:-100}"
+PING_INTERVAL="${PING_INTERVAL:-0.1}"
 PASS=0
 FAIL=0
 
@@ -104,9 +105,9 @@ run_burst_test() {
     ip netns exec ns-cli tc qdisc add dev veth-cli root netem loss "${loss_pct}%" "${correlation}%"
     echo "Applied: ${loss_pct}% loss with ${correlation}% correlation"
 
-    echo "Pinging through tunnel (${PING_COUNT} pings)..."
+    echo "Pinging through tunnel (${PING_COUNT} pings @ ${PING_INTERVAL}s interval)..."
     local ping_output
-    ping_output=$(ip netns exec ns-cli ping -c "$PING_COUNT" -W 3 -I qtun0 10.0.1.1 2>&1)
+    ping_output=$(ip netns exec ns-cli ping -c "$PING_COUNT" -i "$PING_INTERVAL" -W 3 -I qtun0 10.0.1.1 2>&1)
     echo "$ping_output" | tail -3
 
     local ping_loss

@@ -24,7 +24,8 @@ CA="$PROJECT_ROOT/config/local/ca.crt"
 CERT_DIR="$PROJECT_ROOT/config/local"
 
 LOSS_LEVELS="${LOSS_LEVELS:-0 5 10 25}"
-PING_COUNT="${PING_COUNT:-20}"
+PING_COUNT="${PING_COUNT:-100}"
+PING_INTERVAL="${PING_INTERVAL:-0.1}"
 
 PASS=0
 FAIL=0
@@ -151,10 +152,10 @@ run_loss_level() {
         echo "Applied tc-netem loss: ${loss_pct}%"
     fi
 
-    # Ping through tunnel
-    echo "Pinging through tunnel (${PING_COUNT} pings, ${loss_pct}% loss)..."
+    # Ping through tunnel (fast interval to fill FEC windows quickly)
+    echo "Pinging through tunnel (${PING_COUNT} pings @ ${PING_INTERVAL}s interval, ${loss_pct}% loss)..."
     local ping_output
-    ping_output=$(ip netns exec ns-cli ping -c "$PING_COUNT" -W 3 -I qtun0 10.0.1.1 2>&1)
+    ping_output=$(ip netns exec ns-cli ping -c "$PING_COUNT" -i "$PING_INTERVAL" -W 3 -I qtun0 10.0.1.1 2>&1)
     echo "$ping_output" | tail -3
 
     # Extract packet loss percentage (handle decimals like "3.33%")
