@@ -22,6 +22,7 @@ pub mod admin_http;
 pub mod admin_logs;
 #[doc(hidden)]
 pub mod fsutil;
+pub mod icmp;
 mod ip_pool;
 mod limits;
 pub mod metrics;
@@ -2639,6 +2640,8 @@ struct ServerLiveRuntime {
     socket: Arc<UdpSocket>,
     local_addr: SocketAddr,
     server_tun: Option<Arc<TunInterface>>,
+    /// Server TUN IP for ICMP echo reply handling.
+    server_tun_ip: Option<Ipv4Addr>,
     /// Channel receiving packets read from the server TUN interface (spawned reader thread).
     /// Forwarded to the appropriate client via QUIC datagrams in the run_loop.
     tun_rx: Option<std::sync::mpsc::Receiver<Vec<u8>>>,
@@ -3500,6 +3503,7 @@ impl ServerRuntime {
         let local_addr = socket.local_addr()?;
         let (admin_actions_tx, admin_actions_rx) = mpsc::unbounded_channel::<AdminAction>();
         let accept_max_clients = server_config.max_clients;
+        let server_tun_ip = Some(server_config.server_ip);
         let (server_tun, tun_rx) = match tun_config {
             Some(tun_config) => {
                 let optm = crate::optimize::OptimizationManager::from_cfg(opt_params);
@@ -3545,6 +3549,7 @@ impl ServerRuntime {
             socket,
             local_addr,
             server_tun,
+            server_tun_ip,
             tun_rx,
             blocked_ips,
             qkey_registry,
@@ -4153,6 +4158,36 @@ impl ServerRuntime {
                                 match rx.try_recv() {
                                     Ok(pkt) => {
                                         let live = self.live_mut();
+                                        let server_tun_ip = live.server_tun_ip;
+                                        let server_tun = live.server_tun.clone();
+
+                                        // Check if this is an ICMP packet destined for the server's own TUN IP.
+                                        // If so, handle it locally (echo reply) instead of forwarding.
+                                        if let Some(server_ip) = server_tun_ip {
+                                            if pkt.len() >= 20 && (pkt[0] >> 4) == 4 {
+                                                let dest = Ipv4Addr::new(pkt[16], pkt[17], pkt[18], pkt[19]);
+                                                if dest == server_ip {
+                                                    let ihl = ((pkt[0] & 0x0F) as usize) * 4;
+                                                    if let Some(icmp) = icmp::parse_icmpv4(ihl, &pkt) {
+                                                        if icmp.icmp_type == icmp::icmp_type::ECHO_REQUEST {
+                                                            let reply = icmp::build_echo_reply(&pkt);
+                                                            if let Some(ref tun) = server_tun {
+                                                                if let Err(e) = tun.write(&reply) {
+                                                                    log::warn!("ICMP echo reply write to TUN failed: {:?}", e);
+                                                                }
+                                                            }
+                                                            // Skip forwarding — handled locally
+                                                            continue;
+                                                        }
+                                                        // Other ICMP types to server IP: ignore
+                                                        continue;
+                                                    }
+                                                    // Non-ICMP packet to server IP: ignore (no local TCP/UDP stack)
+                                                    continue;
+                                                }
+                                            }
+                                        }
+
                                         // Parse the destination IPv4 address from the packet
                                         // and route to the matching client.
                                         let target_addr = parse_ipv4_dest(&pkt)
@@ -4170,13 +4205,20 @@ impl ServerRuntime {
                                                 }
                                             }
                                         } else {
-                                            // Fallback: if we can't determine the destination
-                                            // (non-IPv4, broadcast, or unknown IP), send to all
-                                            // connected clients. This handles ARP-like traffic
-                                            // and ensures no packets are silently dropped.
-                                            for (addr, conn) in live.live_state.clients.iter_mut() {
-                                                if let Err(e) = conn.send_masque_downlink(&pkt) {
-                                                    log::debug!("TUN→MASQUE broadcast to {}: {:?}", addr, e);
+                                            // No matching client session — send ICMP Destination Unreachable
+                                            // (Host Unreachable) back to the source, so the sender gets
+                                            // immediate feedback instead of waiting for TCP timeout.
+                                            if pkt.len() >= 20 && (pkt[0] >> 4) == 4 {
+                                                let unreachable = icmp::build_icmp_unreachable(
+                                                    &pkt,
+                                                    icmp::icmp_type::DESTINATION_UNREACHABLE,
+                                                    icmp::icmp_code::HOST_UNREACHABLE,
+                                                    None,
+                                                );
+                                                if !unreachable.is_empty() {
+                                                    if let Some(ref tun) = server_tun {
+                                                        let _ = tun.write(&unreachable);
+                                                    }
                                                 }
                                             }
                                         }
