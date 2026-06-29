@@ -1711,6 +1711,34 @@ impl Connection {
                             self.writable_streams.retain(|&id| id != stream_id);
                         }
                     }
+                } else if s.send_fin {
+                    // Stream has no pending data but fin was requested: emit a
+                    // fin-only STREAM frame so the peer learns the stream is
+                    // half-closed. Without this, the fin flag would never reach
+                    // the peer and the stream would stay open forever.
+                    let header_overhead = 1
+                        + crate::transport::varint::varint_len(stream_id)
+                        + crate::transport::varint::varint_len(s.send_off)
+                        + 2;
+                    if off + header_overhead + tag_reserve < out.len() {
+                        let frame = Frame::Stream {
+                            stream_id: s.id,
+                            offset: s.send_off,
+                            data: Cow::Owned(Vec::new()),
+                            fin: true,
+                        };
+                        let written = frames::to_bytes(&frame, &mut out[off..])?;
+                        off += written;
+                        self.writable_streams.retain(|&id| id != stream_id);
+                    }
+                } else {
+                    // Stream has no pending data and no fin: remove it from the
+                    // writable queue so the next stream gets a turn. The stream
+                    // is re-added to the queue when stream_send() is called again.
+                    // Without this, an idle stream blocks all other streams
+                    // forever because maybe_flush_one_writable_stream only looks
+                    // at the front of the queue.
+                    self.writable_streams.retain(|&id| id != stream_id);
                 }
             }
         }
@@ -1821,6 +1849,17 @@ impl Connection {
         pn_len: usize,
         mut off: usize,
     ) -> Result<usize, crate::error::ConnectionError> {
+        // Set PN length bits in the first byte BEFORE sealing so the AAD
+        // matches what the peer sees after HP removal. Without this, the
+        // first byte used for AEAD sealing is 0x40 (from format_short_header,
+        // which doesn't set PN length bits), but the peer reconstructs it as
+        // 0x40 | (pn_len-1) after HP removal. For 1-byte PN this happens to
+        // match (0x40), but for 2+ byte PN the AAD differs and decryption fails.
+        out[0] = 0x40 | (((pn_len as u8) - 1) & 0x03);
+        if self.key_phase {
+            out[0] |= packet::KEY_PHASE_BIT;
+        }
+
         // Hot path: try lock-free 1-RTT ArcSwap first.
         let one_rtt = self.crypto_1rtt.load();
         if let Some(keys) = one_rtt.as_ref() {
@@ -1844,17 +1883,10 @@ impl Connection {
                 None
             };
             if let Some(mask) = mask {
-                let mut first_orig = 0x40 | (((pn_len as u8) - 1) & 0x03);
-                if self.key_phase {
-                    first_orig |= packet::KEY_PHASE_BIT;
-                }
-                out[0] = first_orig ^ (mask[0] & 0x1f);
+                out[0] ^= mask[0] & 0x1f;
                 for i in 0..pn_len {
                     out[pn_off + i] ^= mask[i + 1];
                 }
-            } else {
-                out[0] = (0x40 | (((pn_len as u8) - 1) & 0x03))
-                    | if self.key_phase { packet::KEY_PHASE_BIT } else { 0 };
             }
             self.next_send_pn_by_space[2] = self.next_send_pn_by_space[2].wrapping_add(1);
             return Ok(off);
@@ -1898,17 +1930,10 @@ impl Connection {
             }
         };
         if let Some(mask) = mask {
-            let mut first_orig = 0x40 | (((pn_len as u8) - 1) & 0x03);
-            if self.key_phase {
-                first_orig |= packet::KEY_PHASE_BIT;
-            }
-            out[0] = first_orig ^ (mask[0] & 0x1f);
+            out[0] ^= mask[0] & 0x1f;
             for i in 0..pn_len {
                 out[pn_off + i] ^= mask[i + 1];
             }
-        } else {
-            out[0] = (0x40 | (((pn_len as u8) - 1) & 0x03))
-                | if self.key_phase { packet::KEY_PHASE_BIT } else { 0 };
         }
         self.next_send_pn_by_space[2] = self.next_send_pn_by_space[2].wrapping_add(1);
         Ok(off)
@@ -2180,6 +2205,17 @@ impl Connection {
                 &targeted_frame.frame,
             );
         }
+        // Nothing to send: return Done to avoid emitting empty 1-RTT packets
+        // (header + AEAD tag only). Without this guard, the sender enters an
+        // infinite loop of 38B empty packets that flood the socket buffer and
+        // starve the recv path on the peer.
+        let has_pending_data = !self.pending_control.is_empty()
+            || self.has_pending_application_ack()
+            || !self.writable_streams.is_empty()
+            || !self.dgram_send_queue.is_empty();
+        if !has_pending_data && !ack_bypass {
+            return Err(ConnectionError::Done);
+        }
         // Outbound stealth timing is owned by core::QuicFuscateConnection (next_packet_release).
         // Build short header prefix with DCID directly — avoids two Vec
         // allocations (dcid.to_vec() + scid.to_vec()) per outbound packet.
@@ -2231,11 +2267,17 @@ impl Connection {
         // When bypassing the congestion gate for ACK-only packets, skip
         // stream and datagram data — those are congestion-controlled and
         // must not be sent when the window is exhausted.
+        let off_before_stream = off;
         if !ack_bypass {
             off = self.maybe_flush_one_writable_stream(out, off)?;
             // FEC feed removed (handled by core)
             off = self.maybe_flush_one_datagram_frame(out, off)?;
         }
+        // Determine whether this packet carries only ACK/control frames
+        // (no stream or datagram data). Such packets are not congestion-
+        // controlled (RFC 9002 §7.2) and must not inflate bytes_in_flight.
+        // This must be captured BEFORE stealth padding / sealing modify `off`.
+        let has_stream_or_dgram_payload = off > off_before_stream;
         off = self.maybe_apply_stealth_padding(out, pn_off, pn_len, off)?;
         off = self.seal_short_header_packet(out, pn, pn_off, pn_len, off)?;
 
@@ -2261,7 +2303,15 @@ impl Connection {
         // (RFC 9002 §7.2). They are also not ACK-eliciting, so the peer
         // will never ACK them — tracking them would leak bytes_in_flight
         // permanently.
-        if !ack_bypass {
+        //
+        // Additionally, packets that carry only ACK/control frames and no
+        // stream or datagram data (off == off_before_stream) are treated as
+        // non-congestion-controlled. Without this, a sender that emits many
+        // small ACK-only packets while the window is still open would inflate
+        // bytes_in_flight until the window exhausts, then deadlock because the
+        // peer cannot return ACKs (its own window is also full).
+        let is_ack_only = ack_bypass || !has_stream_or_dgram_payload;
+        if !is_ack_only {
             let now = Instant::now();
             self.recovery.on_packet_sent(pn, total, now);
             self.sent_packets_by_pn.insert(pn, (total, now));
@@ -2629,7 +2679,6 @@ impl Connection {
         return self.dgram_recv_queue.iter().map(|v| v.len).sum();
     }
     /// Number of DATAGRAMs currently in the send queue.
-    #[cfg(any(test, feature = "rust-tests"))]
     pub fn dgram_send_queue_len(&self) -> usize {
         self.dgram_send_queue.len()
     }
@@ -3259,6 +3308,11 @@ impl Connection {
         } else {
             self.readable_streams.pop_front()
         }
+    }
+
+    /// Returns the number of streams with pending writable data.
+    pub fn writable_streams_count(&self) -> usize {
+        self.writable_streams.len()
     }
 
     /// Pops the next stream ID with queued send data (test helper).

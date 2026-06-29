@@ -697,12 +697,16 @@ fn active_probe_detector_dpi_quic_scan_mask_detected() {
     use super::{ActiveProbeDetector, ProbeResponseMode};
     let detector = ActiveProbeDetector::new(10, ProbeResponseMode::Block);
     let addr = "10.0.0.1:5000".parse().unwrap();
-    // DPI_QUIC_Scan: pattern [0xc0, 0x00, 0x00, 0x00, 0x01] mask [0xff,0x00,0x00,0x00,0xff]
-    // Matching packet: byte[0]=0xc0 (& 0xff == 0xc0), byte[4]=0x01 (& 0xff == 0x01)
-    // bytes 1-3 are wildcarded (mask=0x00) so any value works
+    // DPI_QUIC_Scan pattern was removed because it matched legitimate QUICv1
+    // Initial packets (0xc0 + version 0x00000001 + DCID len 0x01). The pattern
+    // is indistinguishable from a real client's Initial at the byte level.
+    // Verify that the removed pattern no longer triggers false positives.
     let probe = vec![0xc0u8, 0xDE, 0xAD, 0xBE, 0x01, 0x00];
     let result = detector.check_packet(&probe, addr);
-    assert!(result.is_some(), "DPI QUIC scan masked pattern must be detected");
+    assert!(
+        result.is_none(),
+        "DPI QUIC scan pattern must not match (removed: false positive on QUICv1 Initial)"
+    );
 }
 
 #[test]
@@ -711,8 +715,7 @@ fn active_probe_detector_benign_packet_ignored() {
     let detector = ActiveProbeDetector::new(10, ProbeResponseMode::Ignore);
     let addr = "192.168.1.1:443".parse().unwrap();
     // A typical valid QUIC Initial (long header, version 1): starts with 0xC0 | flags, version...
-    // but byte[0]=0xC0 and byte[4]=0x00 doesn't match DPI_QUIC_Scan (needs byte[4]=0x01)
-    // and doesn't match GFW_TLS_Probe (needs byte[0]=0x16)
+    // byte[0]=0xC0 doesn't match GFW_TLS_Probe (needs byte[0]=0x16)
     let benign = vec![0xC0u8, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00];
     let result = detector.check_packet(&benign, addr);
     assert!(result.is_none(), "benign QUIC packet must not trigger probe detection");

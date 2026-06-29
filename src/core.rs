@@ -447,7 +447,7 @@ impl QuicFuscateConnection {
         };
 
         let sid = h3.connect_udp(&mut self.conn, &proxy, &target)?;
-        debug!("MASQUE CONNECT-UDP opened (proxy={}, target={})", proxy, target);
+        info!("MASQUE CONNECT-UDP opened (proxy={}, target={}, sid={})", proxy, target, sid);
         crate::telemetry::MASQUE_ACTIVE.store(1, std::sync::atomic::Ordering::Relaxed);
 
         match h3.enable_masque_datagram(&mut self.conn, sid) {
@@ -664,7 +664,7 @@ impl QuicFuscateConnection {
                             let _ = h3.enable_masque_datagram(&mut self.conn, sid);
                             crate::telemetry::MASQUE_ACTIVE
                                 .store(1, std::sync::atomic::Ordering::Relaxed);
-                            debug!("MASQUE peer CONNECT-UDP flow recorded (stream={})", sid);
+                            info!("MASQUE peer CONNECT-UDP flow recorded (stream={})", sid);
                         }
                         on_headers(sid, &list);
                     }
@@ -966,24 +966,37 @@ impl QuicFuscateConnection {
         })?;
 
         for mut packet in recovered_packets {
+            // payload_mut_unique() returns None when the FEC decoder still
+            // holds an Arc clone of the shared buffer. In that case, copy the
+            // payload into a fresh pooled buffer so conn.recv() can mutate it
+            // (header protection removal + AEAD decryption are in-place).
             if let Some(data) = packet.payload_mut_unique() {
-                // Deobfuscate payload if enabled
                 self.stealth_manager.process_incoming_packet(data, self.peer_addr);
-
-                // Process the reconstructed QUIC packet
                 let recv_info = crate::transport::RecvInfo {
                     from: self.peer_addr,
                     to: self.local_addr,
                     ecn: None,
                 };
                 if let Err(e) = self.conn.recv(data, &recv_info) {
-                    // Log error, but continue processing other recovered packets
-                    debug!("transport::recv failed (possible probe): {}", e); // demoted to debug to reduce noise
-
-                    // REALITY FALLBACK
-                    // Forward invalid/failed packets to upstream proxy
+                    debug!("transport::recv failed (possible probe): {}", e);
                     self.stealth_manager.handle_fallback(data, self.peer_addr);
                 }
+            } else if let Some(slice) = packet.payload_slice() {
+                let mut buf = self.optimization_manager.alloc_block();
+                let n = slice.len().min(buf.len());
+                buf[..n].copy_from_slice(&slice[..n]);
+                let data = &mut buf[..n];
+                self.stealth_manager.process_incoming_packet(data, self.peer_addr);
+                let recv_info = crate::transport::RecvInfo {
+                    from: self.peer_addr,
+                    to: self.local_addr,
+                    ecn: None,
+                };
+                if let Err(e) = self.conn.recv(data, &recv_info) {
+                    debug!("transport::recv failed (possible probe): {}", e);
+                    self.stealth_manager.handle_fallback(data, self.peer_addr);
+                }
+                self.optimization_manager.free_block(buf);
             }
         }
 
@@ -1034,11 +1047,25 @@ impl QuicFuscateConnection {
             self.next_packet_release = None;
         }
 
-        // If there are buffered FEC packets, send one directly.
-        if let Some(packet) = self.outgoing_fec_packets.pop_front() {
-            let len = packet.to_raw(buf)?;
-            // Drop handles pool recycling automatically.
-            return Ok(len);
+        // If there are buffered FEC packets, send one directly — but only if
+        // there is no pending stream/datagram data that would be starved by
+        // FEC draining. Without this guard, a burst of FEC repair packets can
+        // fill the outgoing queue and block new QUIC packets (carrying stream
+        // data or DATAGRAM frames) from being generated, causing a liveness
+        // deadlock where the peer never receives application data.
+        let has_pending_app_data =
+            self.conn.writable_streams_count() > 0 || self.conn.dgram_send_queue_len() > 0;
+        if !has_pending_app_data {
+            if let Some(packet) = self.outgoing_fec_packets.pop_front() {
+                let len = packet.to_raw(buf)?;
+                // Drop handles pool recycling automatically.
+                return Ok(len);
+            }
+        } else if self.outgoing_fec_packets.len() > 4 {
+            // Drain excess FEC packets when the queue grows too large, even
+            // with pending app data, to avoid unbounded memory growth.
+            // But still fall through to generate a new QUIC packet this turn.
+            self.outgoing_fec_packets.drain(4..);
         }
 
         // Cover PING: inject post-handshake keepalive if the interval has elapsed.
@@ -1241,7 +1268,10 @@ impl QuicFuscateConnection {
                 Ok(Some(sid)) => {
                     if let Some(ref mut h3) = self.h3_conn {
                         match h3.send_masque_datagram(&mut self.conn, sid, data) {
-                            Ok(()) => return Ok(()),
+                            Ok(()) => {
+                                info!("MASQUE TX: sid={} {}B", sid, data.len());
+                                return Ok(());
+                            }
                             Err(e) => {
                                 warn!(
                                     "MASQUE datagram send failed, falling back to H3 body: {:?}",
@@ -1293,10 +1323,12 @@ impl QuicFuscateConnection {
         if let Some(sid) = self.masque_peer_stream_id {
             if let Some(ref mut h3) = self.h3_conn {
                 h3.send_masque_datagram(&mut self.conn, sid, payload)?;
+                info!("MASQUE downlink TX: sid={} {}B", sid, payload.len());
                 return Ok(());
             }
         }
         // Fallback: bare QUIC datagram (pre-MASQUE clients).
+        info!("MASQUE downlink fallback to bare dgram: {}B", payload.len());
         self.conn.dgram_send(payload)?;
         Ok(())
     }

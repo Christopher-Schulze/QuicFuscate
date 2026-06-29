@@ -1963,8 +1963,15 @@ pub async fn process_live_server_client_datagram(
             }
             if tun_enable {
                 if let Some(tun) = server_tun {
-                    if let Err(error) = tun.write(data) {
-                        log::warn!("Server TUN write failed: {:?}", error);
+                    // Only write to TUN if the data looks like a valid IP packet
+                    // (version 4 or 6 in the high nibble of the first byte).
+                    // This filters out CONNECT-UDP capsule protocol data on the
+                    // MASQUE stream, which is not a raw IP packet and would cause
+                    // EINVAL on TUN write.
+                    if !data.is_empty() && (data[0] >> 4 == 4 || data[0] >> 4 == 6) {
+                        if let Err(error) = tun.write(data) {
+                            log::warn!("Server TUN write failed: {:?}", error);
+                        }
                     }
                 }
             }

@@ -2671,13 +2671,14 @@ impl ActiveProbeDetector {
                 mask: None,
                 _severity: 8,
             },
-            // DPI fingerprinting attempts
-            ProbePattern {
-                name: "DPI_QUIC_Scan".to_string(),
-                pattern: vec![0xc0, 0x00, 0x00, 0x00, 0x01],
-                mask: Some(vec![0xff, 0x00, 0x00, 0x00, 0xff]),
-                _severity: 6,
-            },
+            // DPI_QUIC_Scan pattern removed: it matched byte[0]==0xc0 && byte[4]==0x01,
+            // which is the exact signature of a legitimate QUICv1 Initial packet
+            // (long header 0xc0, version 0x00000001, DCID length 0x01). This caused
+            // false positives on every real client's Initial, triggering probe
+            // response mode and corrupting the handshake. A censor's QUIC probe is
+            // indistinguishable from a legitimate Initial at the byte pattern level;
+            // active probe detection must instead rely on connection-level heuristics
+            // (unknown source, retry behavior, etc.) not raw packet matching.
             // Port_Scan_SYN pattern removed: raw TCP SYN packets (TCP flags byte 0x02) cannot
             // appear as valid QUIC payloads because RFC 9000 mandates the Fixed Bit (bit 6 = 0x40)
             // in every QUIC short-header and bit 7 (0x80) in every QUIC long-header. A payload
