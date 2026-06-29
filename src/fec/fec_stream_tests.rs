@@ -14,7 +14,7 @@ fn stream_raw_roundtrip_systematic() {
     }
     let pkt = FecPacket::new(42, Some(data), n, true, None, 0, Arc::clone(&pool));
     // Serialize
-    let mut buf = vec![0u8; 2 + 1 + 8 + 2 + n];
+    let mut buf = vec![0u8; 2 + 1 + 8 + 8 + 2 + n];
     let used = pkt.to_stream_raw(&mut buf[..]).expect("serialize");
     buf.truncate(used);
     // Parse
@@ -46,7 +46,7 @@ fn stream_raw_roundtrip_repair() {
     }
     let pkt = FecPacket::new(1000, Some(data), n, false, Some(coeffs), k, Arc::clone(&pool));
     // Serialize
-    let mut buf = vec![0u8; 2 + 1 + 8 + 2 + k + n];
+    let mut buf = vec![0u8; 2 + 1 + 8 + 8 + 2 + k + n];
     let used = pkt.to_stream_raw(&mut buf[..]).expect("serialize");
     buf.truncate(used);
     // Parse

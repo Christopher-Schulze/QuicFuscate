@@ -677,6 +677,9 @@ mod fec_stream_tests;
 #[cfg(test)]
 mod gf16_tests;
 
+#[cfg(test)]
+mod e2e_tests;
+
 // ============================================================================
 // Transport Integration: FecTransportObserver
 // Collects lightweight transport telemetry (ACK delay, ECN) and exposes a
@@ -1362,10 +1365,10 @@ impl FecPacket {
     }
 
     /// Serialize a streaming-friendly raw format for transport DATAGRAM:
-    /// [magic:2=0xF1EC][is_systematic:1][base_id:8][coeff_len:2][coeffs (coeff_len bytes)][payload]
+    /// [magic:2=0xF1EC][is_systematic:1][base_id:8][seq:8][coeff_len:2][coeffs (coeff_len bytes)][payload]
     pub fn to_stream_raw(&self, buf: &mut [u8]) -> Result<usize, String> {
         let mut off = 0usize;
-        if buf.len() < 2 + 1 + 8 + 2 {
+        if buf.len() < 2 + 1 + 8 + 8 + 2 {
             return Err("BufferTooShort".into());
         }
         // Magic for safe demultiplexing of FEC datagrams
@@ -1376,6 +1379,9 @@ impl FecPacket {
         off += 1;
         // base_id conveys the equation window anchor (id of the last source in window at sender)
         buf[off..off + 8].copy_from_slice(&self.id.to_be_bytes());
+        off += 8;
+        // seq conveys the transport sequence (used by InterleavedDecoder for block routing)
+        buf[off..off + 8].copy_from_slice(&self.seq.to_be_bytes());
         off += 8;
         let coeff_len: u16 = self.coeff_len as u16;
         if buf.len() < off + 2 {
@@ -1408,7 +1414,7 @@ impl FecPacket {
     /// Parse streaming-friendly raw format from transport DATAGRAM.
     /// Returns a FecPacket owning aligned buffers allocated from the pool.
     pub fn from_stream_raw(input: &[u8], pool: Arc<MemoryPool>) -> Result<Self, String> {
-        if input.len() < 2 + 1 + 8 + 2 {
+        if input.len() < 2 + 1 + 8 + 8 + 2 {
             return Err("BufferTooShort".into());
         }
         if input[0] != 0xF1 || input[1] != 0xEC {
@@ -1420,6 +1426,10 @@ impl FecPacket {
         let mut id_bytes = [0u8; 8];
         id_bytes.copy_from_slice(&input[off..off + 8]);
         let base_id = u64::from_be_bytes(id_bytes);
+        off += 8;
+        let mut seq_bytes = [0u8; 8];
+        seq_bytes.copy_from_slice(&input[off..off + 8]);
+        let seq = u64::from_be_bytes(seq_bytes);
         off += 8;
         let mut cl_bytes = [0u8; 2];
         cl_bytes.copy_from_slice(&input[off..off + 2]);
@@ -1445,7 +1455,10 @@ impl FecPacket {
             return Err("DataBufferTooSmall".into());
         }
         dbuf[..payload_len].copy_from_slice(&input[off..]);
-        Ok(Self::new(base_id, Some(dbuf), payload_len, is_systematic, coeffs, coeff_len, pool))
+        let mut pkt =
+            Self::new(base_id, Some(dbuf), payload_len, is_systematic, coeffs, coeff_len, pool);
+        pkt.seq = seq;
+        Ok(pkt)
     }
 
     /// Returns the payload length in bytes.
