@@ -110,7 +110,8 @@ run_burst_test() {
     echo "$ping_output" | tail -3
 
     local ping_loss
-    ping_loss=$(echo "$ping_output" | grep 'packet loss' | grep -oP '\d+(?=% packet loss)' || echo "100")
+    # Extract integer packet loss percentage (handle decimals like "3.33%")
+    ping_loss=$(echo "$ping_output" | grep 'packet loss' | grep -oP '[\d.]+(?=% packet loss)' | awk '{printf "%d", $1}' || echo "100")
     echo "Tunnel loss: ${ping_loss}%"
 
     if [ "$ping_loss" -le "$max_loss" ]; then

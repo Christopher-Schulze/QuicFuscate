@@ -157,9 +157,9 @@ run_loss_level() {
     ping_output=$(ip netns exec ns-cli ping -c "$PING_COUNT" -W 3 -I qtun0 10.0.1.1 2>&1)
     echo "$ping_output" | tail -3
 
-    # Extract packet loss percentage
+    # Extract packet loss percentage (handle decimals like "3.33%")
     local ping_loss
-    ping_loss=$(echo "$ping_output" | grep 'packet loss' | grep -oP '\d+(?=% packet loss)' || echo "100")
+    ping_loss=$(echo "$ping_output" | grep 'packet loss' | grep -oP '[\d.]+(?=% packet loss)' | awk '{printf "%d", $1}' || echo "100")
     echo "Ping loss through tunnel: ${ping_loss}%"
 
     # Acceptance criteria
