@@ -95,12 +95,9 @@ struct TransportSim {
 impl TransportSim {
     fn new(loss_rate: f32, seed: u64) -> Self {
         let _guard = acquire_env_lock();
-        // Disable interleaving for E2E recovery tests. The interleaved decoder
-        // has a known bug where it assumes consecutive packet IDs (base_id - k + 1
-        // .. base_id) but interleaving distributes IDs across blocks non-consecutively.
-        // This is tracked as a separate TODO. With interleaving disabled, the
-        // decoder correctly maps repair coefficients to source packet IDs.
-        let interleave_off = EnvGuard::set("QUICFUSCATE_FEC_INTERLEAVE", "0");
+        // Interleaving is now fixed (TODO-433): the decoder uses source_id_map
+        // to correctly map coefficients to non-consecutive source packet IDs.
+        // Tests run with the production default (interleave enabled).
         // Use Normal mode as initial — this is the production "Auto" default.
         let config = FecConfig { initial_mode: FecMode::Normal, ..FecConfig::default() };
         Self {
@@ -112,7 +109,7 @@ impl TransportSim {
             sent_count: 0,
             repair_count: 0,
             dropped_count: 0,
-            _env_guards: vec![interleave_off],
+            _env_guards: vec![],
         }
     }
 
@@ -213,7 +210,6 @@ fn test_fec_e2e_single_loss_recovered() {
     // second window. The repairs for that window contain linear combinations
     // of all 64 source packets, enabling recovery of the dropped one.
     let _guard = acquire_env_lock();
-    let interleave_off = EnvGuard::set("QUICFUSCATE_FEC_INTERLEAVE", "0");
     let config = FecConfig { initial_mode: FecMode::Normal, ..FecConfig::default() };
     let drop_id: u64 = 70;
     let mut sim = TransportSim {
@@ -225,7 +221,7 @@ fn test_fec_e2e_single_loss_recovered() {
         sent_count: 0,
         repair_count: 0,
         dropped_count: 0,
-        _env_guards: vec![interleave_off],
+        _env_guards: vec![],
     };
 
     // Send 128 packets (2 windows). Packet 70 will be dropped by the channel.
@@ -255,7 +251,6 @@ fn test_fec_e2e_burst_loss_recovered() {
     // all 3 lost packets are in the same window and can be recovered from
     // the 16 repair packets for that window.
     let _guard = acquire_env_lock();
-    let interleave_off = EnvGuard::set("QUICFUSCATE_FEC_INTERLEAVE", "0");
     let config = FecConfig { initial_mode: FecMode::Normal, ..FecConfig::default() };
     let drop_ids: HashSet<u64> = vec![130, 131, 132].into_iter().collect();
     let mut sim = TransportSim {
@@ -267,7 +262,7 @@ fn test_fec_e2e_burst_loss_recovered() {
         sent_count: 0,
         repair_count: 0,
         dropped_count: 0,
-        _env_guards: vec![interleave_off],
+        _env_guards: vec![],
     };
 
     // Send 192 packets (3 windows). Packets 130, 131, 132 will be dropped.
@@ -418,7 +413,6 @@ fn test_fec_e2e_no_duplication_no_ordering_violation() {
 #[test]
 fn test_fec_e2e_zero_mode_passthrough_no_repairs() {
     let _guard = acquire_env_lock();
-    let interleave_off = EnvGuard::set("QUICFUSCATE_FEC_INTERLEAVE", "0");
     let config = FecConfig { initial_mode: FecMode::Zero, ..FecConfig::default() };
     let mut sim = TransportSim {
         sender: AdaptiveFec::new(config.clone()),
@@ -429,7 +423,7 @@ fn test_fec_e2e_zero_mode_passthrough_no_repairs() {
         sent_count: 0,
         repair_count: 0,
         dropped_count: 0,
-        _env_guards: vec![interleave_off],
+        _env_guards: vec![],
     };
 
     // Send 100 packets in Zero mode — no repairs should be generated

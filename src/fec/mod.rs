@@ -1894,6 +1894,9 @@ struct Decoder8 {
     known: HashMap<u64, (AlignedBox<[u8]>, usize)>,
     equations: Vec<Equation8>,
     emit_q: VecDeque<FecPacket>,
+    /// Interleave depth (1 = non-interleaved, >1 = interleaved mode).
+    /// Source IDs in a block's window are spaced `depth` apart.
+    depth: usize,
 }
 
 impl Decoder8 {
@@ -1905,6 +1908,10 @@ impl Decoder8 {
     }
 
     fn new_with_policy(k: usize, pool: Arc<MemoryPool>, policy: &FecRuntimePolicy) -> Self {
+        Self::new_with_depth(k, pool, policy, 1)
+    }
+
+    fn new_with_depth(k: usize, pool: Arc<MemoryPool>, policy: &FecRuntimePolicy, depth: usize) -> Self {
         Self {
             k,
             mem_pool: pool,
@@ -1912,6 +1919,23 @@ impl Decoder8 {
             known: HashMap::new(),
             equations: Vec::new(),
             emit_q: VecDeque::new(),
+            depth,
+        }
+    }
+
+    /// Resolve coefficient index `j` to the actual source packet ID.
+    ///
+    /// In interleaved mode (depth > 1), source IDs in a block's window are
+    /// spaced `depth` apart: base_id - (k-1-j) * depth.
+    /// In non-interleaved mode (depth = 1), this simplifies to base_id - k + 1 + j.
+    #[inline]
+    fn source_id_for(&self, base_id: u64, j: usize) -> u64 {
+        if self.depth > 1 {
+            // Interleaved: source IDs are spaced `depth` apart
+            base_id.saturating_sub((self.k as u64 - 1 - j as u64) * self.depth as u64)
+        } else {
+            // Non-interleaved: consecutive IDs
+            base_id.saturating_sub(self.k as u64 - 1) + j as u64
         }
     }
 
@@ -1997,7 +2021,7 @@ impl Decoder8 {
             .enumerate()
             .take(self.k)
             .filter_map(|(j, &c)| {
-                let sid = base_id.saturating_sub(self.k as u64 - 1) + j as u64;
+                let sid = self.source_id_for(base_id, j);
                 if c != 0 && !self.known.contains_key(&sid) {
                     Some((j, sid))
                 } else {
@@ -2013,7 +2037,7 @@ impl Decoder8 {
             if *coeff == 0 {
                 continue;
             }
-            let sid = eq.base_id.saturating_sub(self.k as u64 - 1) + j as u64;
+            let sid = self.source_id_for(eq.base_id, j);
             if let Some((ref kdata, klen)) = self.known.get(&sid) {
                 let sl = core::cmp::min(eq.len, *klen);
                 gf_tables::gf_mul_scalar_slice(*coeff, &kdata[..sl], &mut eq.data[..sl]);
@@ -2024,7 +2048,7 @@ impl Decoder8 {
         let mut last_idx: Option<(usize, u64, u8)> = None;
         for (j, &c) in eq.coeffs.iter().enumerate().take(self.k) {
             if c != 0 {
-                let sid = eq.base_id.saturating_sub(self.k as u64 - 1) + j as u64;
+                let sid = self.source_id_for(eq.base_id, j);
                 if !self.known.contains_key(&sid) {
                     if last_idx.is_some() {
                         // More than one unknown remains
@@ -2137,10 +2161,12 @@ impl Decoder8 {
         let mut a = vec![vec![0u8; u]; m];
         for (i, eq) in self.equations.iter().enumerate() {
             for (col, sid) in unknowns.iter().enumerate() {
-                let base = eq.base_id.saturating_sub(self.k as u64 - 1);
-                if *sid >= base && *sid < base + self.k as u64 {
-                    let j = (*sid - base) as usize;
-                    a[i][col] = *eq.coeffs.get(j).unwrap_or(&0);
+                // Find which coefficient index j maps to this sid
+                for j in 0..self.k {
+                    if self.source_id_for(eq.base_id, j) == *sid {
+                        a[i][col] = *eq.coeffs.get(j).unwrap_or(&0);
+                        break;
+                    }
                 }
             }
         }
@@ -2159,7 +2185,7 @@ impl Decoder8 {
                     if cj == 0 {
                         continue;
                     }
-                    let sid = eq.base_id.saturating_sub(self.k as u64 - 1) + j as u64;
+                    let sid = self.source_id_for(eq.base_id, j);
                     if let Some((ref kd, klen)) = self.known.get(&sid) {
                         if b < *klen {
                             rhs ^= gf_tables::gf_mul_table(cj, kd[b]);
@@ -2266,7 +2292,7 @@ impl Decoder8 {
             min_len = core::cmp::min(min_len, eq.len);
             for j in 0..self.k {
                 if eq.coeffs[j] != 0 {
-                    let sid = eq.base_id.saturating_sub(self.k as u64 - 1) + j as u64;
+                    let sid = self.source_id_for(eq.base_id, j);
                     if !self.known.contains_key(&sid) {
                         unknown_set.insert(sid);
                     }
@@ -2279,6 +2305,26 @@ impl Decoder8 {
         if n == 0 || self.equations.len() < n {
             return false;
         }
+
+        // Precompute coefficient index for each (eq_idx, unknown_sid) pair
+        // so the Rayon closure doesn't need &self.
+        let eq_coeff_lookup: Vec<Vec<Option<u8>>> = self
+            .equations
+            .iter()
+            .map(|eq| {
+                unknowns
+                    .iter()
+                    .map(|&sid| {
+                        for j in 0..self.k {
+                            if self.source_id_for(eq.base_id, j) == sid {
+                                return eq.coeffs.get(j).copied();
+                            }
+                        }
+                        None
+                    })
+                    .collect()
+            })
+            .collect();
 
         // Block Wiedemann for parallel processing
         let _block_size = 32.min(n / 4 + 1);
@@ -2295,11 +2341,9 @@ impl Decoder8 {
                 for (i, eq) in self.equations.iter().enumerate() {
                     if byte_idx < eq.len {
                         rhs[i] = eq.data[byte_idx];
-                        for (j, &uid) in unknowns.iter().enumerate() {
-                            let base = eq.base_id.saturating_sub(self.k as u64 - 1);
-                            if uid >= base && uid < base + self.k as u64 {
-                                let idx = (uid - base) as usize;
-                                matrix[i][j] = eq.coeffs[idx];
+                        for (j, _uid) in unknowns.iter().enumerate() {
+                            if let Some(coeff) = eq_coeff_lookup[i][j] {
+                                matrix[i][j] = coeff;
                             }
                         }
                     }
@@ -2559,19 +2603,45 @@ struct Equation4 {
 }
 
 struct Decoder4 {
+    k: usize,
     mem_pool: Arc<MemoryPool>,
     known: HashMap<u64, (AlignedBox<[u8]>, usize)>,
     equations: Vec<Equation4>,
     emit_q: VecDeque<FecPacket>,
+    /// Interleave depth (1 = non-interleaved).
+    depth: usize,
 }
 
 impl Decoder4 {
-    fn new(_k: usize, pool: Arc<MemoryPool>) -> Self {
+    #[allow(dead_code)]
+    fn new(k: usize, pool: Arc<MemoryPool>) -> Self {
         Self {
+            k,
             mem_pool: pool,
             known: HashMap::new(),
             equations: Vec::new(),
             emit_q: VecDeque::new(),
+            depth: 1,
+        }
+    }
+
+    fn new_with_depth(k: usize, pool: Arc<MemoryPool>, depth: usize) -> Self {
+        Self {
+            k,
+            mem_pool: pool,
+            known: HashMap::new(),
+            equations: Vec::new(),
+            emit_q: VecDeque::new(),
+            depth,
+        }
+    }
+
+    #[inline]
+    fn source_id_for(&self, base_id: u64, j: usize) -> u64 {
+        if self.depth > 1 {
+            base_id.saturating_sub((self.k as u64 - 1 - j as u64) * self.depth as u64)
+        } else {
+            base_id.wrapping_add(j as u64)
         }
     }
 
@@ -2637,7 +2707,7 @@ impl Decoder4 {
                 j += 1;
                 continue;
             }
-            let pid = eq.base_id.wrapping_add(j as u64);
+            let pid = self.source_id_for(eq.base_id, j);
 
             if let Some((kdata, len)) = self.known.get(&pid) {
                 let sl = eq.len.min(*len);
@@ -2665,7 +2735,7 @@ impl Decoder4 {
             let Some(idx) = unknown_idx else {
                 return false;
             };
-            let pid = eq.base_id.wrapping_add(idx as u64);
+            let pid = self.source_id_for(eq.base_id, idx);
             let c = eq.coeffs[idx];
             let inv = GF4_INV[(c & 0xF) as usize];
 
@@ -2740,6 +2810,8 @@ struct Decoder16 {
     known: HashMap<u64, (AlignedBox<[u8]>, usize)>,
     equations: Vec<Equation16>,
     emit_q: VecDeque<FecPacket>,
+    /// Interleave depth (1 = non-interleaved).
+    depth: usize,
 }
 
 impl Decoder16 {
@@ -2750,6 +2822,27 @@ impl Decoder16 {
             known: HashMap::new(),
             equations: Vec::new(),
             emit_q: VecDeque::new(),
+            depth: 1,
+        }
+    }
+
+    fn new_with_depth(k: usize, pool: Arc<MemoryPool>, depth: usize) -> Self {
+        Self {
+            k,
+            mem_pool: pool,
+            known: HashMap::new(),
+            equations: Vec::new(),
+            emit_q: VecDeque::new(),
+            depth,
+        }
+    }
+
+    #[inline]
+    fn source_id_for(&self, base_id: u64, j: usize) -> u64 {
+        if self.depth > 1 {
+            base_id.saturating_sub((self.k as u64 - 1 - j as u64) * self.depth as u64)
+        } else {
+            base_id.saturating_sub(self.k as u64 - 1) + j as u64
         }
     }
 
@@ -2857,7 +2950,7 @@ impl Decoder16 {
             .enumerate()
             .take(self.k)
             .filter_map(|(j, &c)| {
-                let sid = base_id.saturating_sub(self.k as u64 - 1) + j as u64;
+                let sid = self.source_id_for(base_id, j);
                 if c != 0 && !self.known.contains_key(&sid) {
                     Some((j, sid))
                 } else {
@@ -2873,7 +2966,7 @@ impl Decoder16 {
             if *coeff == 0 {
                 continue;
             }
-            let sid = eq.base_id.saturating_sub(self.k as u64 - 1) + j as u64;
+            let sid = self.source_id_for(eq.base_id, j);
             if let Some((ref kdata, klen)) = self.known.get(&sid) {
                 let sl = core::cmp::min(eq.len & !1, *klen & !1); // even length
                 if sl >= 2 {
@@ -2886,7 +2979,7 @@ impl Decoder16 {
         let mut last: Option<(usize, u64, u16)> = None;
         for (j, &c) in eq.coeffs.iter().enumerate().take(self.k) {
             if c != 0 {
-                let sid = eq.base_id.saturating_sub(self.k as u64 - 1) + j as u64;
+                let sid = self.source_id_for(eq.base_id, j);
                 if !self.known.contains_key(&sid) {
                     if last.is_some() {
                         return false;
@@ -2974,11 +3067,12 @@ impl Decoder16 {
                     let b0 = eq.data[2 * w] as u16;
                     let b1 = eq.data[2 * w + 1] as u16;
                     y[i] = (b0 << 8) | b1;
-                    let base = eq.base_id.saturating_sub(self.k as u64 - 1);
                     for (col, &sid) in unknowns.iter().enumerate() {
-                        if sid >= base && sid < base + self.k as u64 {
-                            let j = (sid - base) as usize;
-                            a[i][col] = *eq.coeffs.get(j).unwrap_or(&0);
+                        for j in 0..self.k {
+                            if self.source_id_for(eq.base_id, j) == sid {
+                                a[i][col] = *eq.coeffs.get(j).unwrap_or(&0);
+                                break;
+                            }
                         }
                     }
                 }

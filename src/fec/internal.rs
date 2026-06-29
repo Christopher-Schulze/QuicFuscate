@@ -483,6 +483,18 @@ impl DecoderVariant {
         pool: Arc<MemoryPool>,
         policy: &super::FecRuntimePolicy,
     ) -> Self {
+        Self::new_with_depth(mode, k, pool, policy, 1)
+    }
+
+    /// Create a decoder variant with explicit interleave depth.
+    /// depth=1 is non-interleaved; depth>1 enables interleaved source ID mapping.
+    pub fn new_with_depth(
+        mode: FecMode,
+        k: usize,
+        pool: Arc<MemoryPool>,
+        policy: &super::FecRuntimePolicy,
+        depth: usize,
+    ) -> Self {
         let target = super::target_from_mode(mode, k);
         match super::fec_backend_family(mode) {
             super::FecBackendFamily::Fountain => {
@@ -495,9 +507,9 @@ impl DecoderVariant {
             super::FecBackendFamily::Zero => DecoderVariant::Zero(ZeroDecoder::new(k, pool)),
             super::FecBackendFamily::LowCostBlock => {
                 if super::low_cost_block_uses_gf4(target) {
-                    DecoderVariant::GF4(Decoder4::new(k, pool))
+                    DecoderVariant::GF4(Decoder4::new_with_depth(k, pool, depth))
                 } else {
-                    DecoderVariant::GF8(Decoder8::new_with_policy(k, pool, policy))
+                    DecoderVariant::GF8(Decoder8::new_with_depth(k, pool, policy, depth))
                 }
             }
             super::FecBackendFamily::HeavyBlock => {
@@ -506,11 +518,11 @@ impl DecoderVariant {
                         mode, k, pool, policy,
                     ))
                 } else {
-                    DecoderVariant::GF16(Decoder16::new(k, pool))
+                    DecoderVariant::GF16(Decoder16::new_with_depth(k, pool, depth))
                 }
             }
             super::FecBackendFamily::Streaming => {
-                DecoderVariant::GF8(Decoder8::new_with_policy(k, pool, policy))
+                DecoderVariant::GF8(Decoder8::new_with_depth(k, pool, policy, depth))
             }
         }
     }
@@ -673,10 +685,20 @@ impl LazyDecoder {
         pool: Arc<MemoryPool>,
         policy: &FecRuntimePolicy,
     ) -> Self {
+        Self::new_with_depth(mode, k, pool, policy, 1)
+    }
+
+    pub fn new_with_depth(
+        mode: FecMode,
+        k: usize,
+        pool: Arc<MemoryPool>,
+        policy: &FecRuntimePolicy,
+        depth: usize,
+    ) -> Self {
         let lazy_enabled = policy.lazy_enabled;
 
         Self {
-            inner: DecoderVariant::new_with_policy(mode, k, pool, policy),
+            inner: DecoderVariant::new_with_depth(mode, k, pool, policy, depth),
             pending_repairs: VecDeque::with_capacity(32),
             seen_seqs: std::collections::BTreeSet::new(),
             expected_seq: 0,
@@ -936,7 +958,7 @@ impl InterleavedDecoder {
         let block_k = (k / actual_depth).max(1);
 
         let blocks = (0..actual_depth)
-            .map(|_| LazyDecoder::new_with_policy(mode, block_k, Arc::clone(&pool), policy))
+            .map(|_| LazyDecoder::new_with_depth(mode, block_k, Arc::clone(&pool), policy, actual_depth))
             .collect();
 
         Self { blocks, depth: actual_depth }
