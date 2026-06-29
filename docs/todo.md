@@ -2,7 +2,7 @@
 
 ## Active TODO Backlog
 
-**Current State (2026-06-29)**: Protocol optimization wave **COMPLETE** (TODO-389..412). CI/release workflows all green. Single branch `main`. Prior wave TODO-308..388 ALL DONE. Of TODO-389..412: all DONE or SUPERSEDED — no OPEN items remain in that range. Radical replan wave TODO-413..418 ALL DONE. TUN VPN data plane TODO-422 DONE (MASQUE CONNECT-UDP both directions, commits `367d56f`..`8474f3c`). **No actionable OPEN TODOs remain** — TODO-412 is SUPERSEDED by TODO-418 (externally blocked Oracle Cloud UDP path, tc-netem substitute in place). Deferred items (356/358/362/378) are docs-hygiene / dead-code-audit, not action levers. Server `broderick` Go 1.26.4. GitHub contributors: only `Christopher-Schulze` — no Devin/Claude co-authors.
+**Current State (2026-06-29)**: Protocol optimization wave COMPLETE (TODO-389..412). Radical replan wave TODO-413..418 ALL DONE. TUN VPN data plane TODO-422 DONE (MASQUE CONNECT-UDP both directions, E2E test passed on broderick: 0% ping loss through tunnel). **New wave: FEC Performance & Testing (TODO-423..428)** — 6 open items for E2E FEC tests through real QUIC transport, full-stack benchmarks, tc-netem adversity simulation, memory pressure tests, mode transition tests under load, and adaptive intelligence deep optimization. All P0/P1. E2E TUN test verified on broderick. Server `broderick` Go 1.26.4. GitHub contributors: only `Christopher-Schulze` — no Devin/Claude co-authors.
 
 ## Active - Protocol Optimization Wave (2026-06-05)
 
@@ -62,6 +62,33 @@ client Finished delivery are all fixed and on `main` (commits `2b9c880`, `557214
 | TODO-422 | P1 | TUN VPN data plane end-to-end via MASQUE (CONNECT-UDP capsule <-> TUN routing) | **DONE** — Option A (MASQUE) implemented both directions: client uplink via `http3_send_body_chunk` → `send_masque_datagram`, server downlink via `send_masque_downlink` on peer-initiated CONNECT-UDP flow, downlink drain via `drain_masque_datagrams` → `masque_datagram_cb` → TUN write. E2E test harness at `scripts/tests/tun-e2e-netns.sh`. Commits `367d56f`..`8474f3c`. | — |
 
 Detail file: `docs/todo/todo-422-tun-vpn-data-plane-masque.md`.
+
+---
+
+## Active - FEC Performance & Testing Wave (2026-06-29)
+
+**Motivation:** FEC has 50+ unit tests but zero E2E tests through real QUIC transport. All existing
+tests inject loss at the FEC module level, never at the network layer. No benchmarks measure the
+real FEC encode/decode pipeline. No tests verify resource efficiency under memory pressure. The
+adaptive intelligence (Kalman, CUSUM, hysteresis) has never been empirically validated under real
+network adversity. This wave closes all those gaps and deep-optimizes FEC for production.
+
+**Execution order: Phase F (E2E tests → benchmarks → adversity → resource → transitions → deep optimization)**
+
+| ID | Phase | Priority | Title | Status | Depends On |
+|----|-------|----------|-------|--------|------------|
+| TODO-423 | F | P0 | E2E FEC tests through real QUIC transport (netns + tc-netem) | **OPEN** — 6 loss levels (0-50%), burst loss, jitter+loss, Rust integration test through mock QUIC. | TODO-422 |
+| TODO-424 | F | P1 | FEC full-stack performance benchmarks (encode/decode pipeline, mode switch, streaming) | **OPEN** — Criterion benchmarks for on_send/on_receive pipeline, mode transition overhead, lazy fast path, streaming repair. | TODO-423 |
+| TODO-425 | F | P1 | FEC under network adversity (tc-netem loss/jitter/bandwidth/RTT simulation) | **OPEN** — loss sweep, jitter sweep, bandwidth test, RTT test, combined adversity, recovery test. Resource efficiency targets per condition. | TODO-423 |
+| TODO-426 | F | P1 | FEC memory pressure and resource efficiency tests | **OPEN** — pool exhaustion, queue bounding, memory scaling, recycling rate, leak detection, sustained load stability. | TODO-423 |
+| TODO-427 | F | P1 | FEC mode transition tests under active load | **OPEN** — full 9×9 transition matrix, bidirectional, burst, idle-then-burst, flapping prevention, handshake safety, E2E via tc-netem. | TODO-423 |
+| TODO-428 | F | P1 | FEC adaptive intelligence deep optimization | **OPEN** — empirical threshold tuning, bandwidth-aware overhead control, congestion control interaction, SIMD path optimization. | TODO-423, TODO-424, TODO-425 |
+
+Detail files: `docs/todo/todo-42{3,4,5,6,7,8}-*.md`.
+
+**Resource efficiency philosophy:** FEC should be invisible when the link is clean and heroic when
+the link is broken. In extreme loss scenarios, FEC may consume significant resources — but the link
+stays up. Resources are cheap, liveness is expensive.
 
 ---
 
