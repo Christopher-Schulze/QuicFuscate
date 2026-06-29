@@ -2,7 +2,7 @@
 
 ## Active TODO Backlog
 
-**Current State (2026-06-30)**: Protocol optimization wave COMPLETE (TODO-389..412). Radical replan wave TODO-413..418 ALL DONE. TUN VPN data plane TODO-422 DONE. **FEC E2E tests TODO-423 DONE** — 12 Rust integration tests + 2 shell scripts (loss sweep + burst), wire format seq bug fixed, broderick tests all PASS. **Remaining: TODO-424..428** — full-stack benchmarks, tc-netem adversity, memory pressure, mode transitions, adaptive optimization. All P1. Server `broderick` Go 1.26.4. GitHub contributors: only `Christopher-Schulze` — no Devin/Claude co-authors.
+**Current State (2026-06-30)**: Protocol optimization wave COMPLETE (TODO-389..412). Radical replan wave TODO-413..418 ALL DONE. TUN VPN data plane TODO-422 DONE. **FEC E2E tests TODO-423 DONE** — 12 Rust integration tests + 2 shell scripts, wire format seq bug fixed, broderick all PASS. **FEC benchmarks TODO-424 DONE** — 6 Criterion benchmark groups (encode/decode/transition/streaming/lazy/window-burst). **Remaining: TODO-425..428** — tc-netem adversity, memory pressure, mode transitions, adaptive optimization. All P1. Server `broderick` Go 1.26.4. GitHub contributors: only `Christopher-Schulze` — no Devin/Claude co-authors.
 
 ## Active - Protocol Optimization Wave (2026-06-05)
 
@@ -78,7 +78,7 @@ network adversity. This wave closes all those gaps and deep-optimizes FEC for pr
 | ID | Phase | Priority | Title | Status | Depends On |
 |----|-------|----------|-------|--------|------------|
 | TODO-423 | F | P0 | E2E FEC tests through real QUIC transport (netns + tc-netem) | **DONE** — 12 Rust integration tests + 2 shell scripts (loss sweep + burst). Wire format seq bug fixed. Broderick: 5/5 ping tests PASS, 2/2 burst tests PASS. | TODO-422 |
-| TODO-424 | F | P1 | FEC full-stack performance benchmarks (encode/decode pipeline, mode switch, streaming) | **OPEN** — Criterion benchmarks for on_send/on_receive pipeline, mode transition overhead, lazy fast path, streaming repair. | TODO-423 |
+| TODO-424 | F | P1 | FEC full-stack performance benchmarks (encode/decode pipeline, mode switch, streaming) | **DONE** — 6 Criterion benchmark groups (encode/decode/transition/streaming/lazy/window-burst). Sample results: Zero 134ns, Normal 977ns, transition 147ns. | TODO-423 |
 | TODO-425 | F | P1 | FEC under network adversity (tc-netem loss/jitter/bandwidth/RTT simulation) | **OPEN** — loss sweep, jitter sweep, bandwidth test, RTT test, combined adversity, recovery test. Resource efficiency targets per condition. | TODO-423 |
 | TODO-426 | F | P1 | FEC memory pressure and resource efficiency tests | **OPEN** — pool exhaustion, queue bounding, memory scaling, recycling rate, leak detection, sustained load stability. | TODO-423 |
 | TODO-427 | F | P1 | FEC mode transition tests under active load | **OPEN** — full 9×9 transition matrix, bidirectional, burst, idle-then-burst, flapping prevention, handshake safety, E2E via tc-netem. | TODO-423 |
