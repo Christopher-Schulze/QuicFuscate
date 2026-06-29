@@ -97,6 +97,30 @@ pub struct Session {
 }
 ```
 
+### 4. Race conditions on revocation
+
+The current revocation path (`qkey_registry.rs:222` `revoke()`) removes the
+QKey from the entries map without any synchronization against concurrent
+operations:
+
+- **TOCTOU between lookup and terminate:** A new connection could authenticate
+  with the QKey between the revocation check and the connection termination,
+  creating a window where a revoked key still grants access.
+- **Concurrent revocation attempts:** Two admin calls to revoke the same QKey
+  simultaneously could cause double-termination attempts, panics on already-
+  closed connections, or inconsistent registry state.
+- **Rotation vs. revocation race:** If rotation and revocation happen
+  simultaneously, a connection could transition to the rotated key after
+  revocation was supposed to block all keys in the rotation chain.
+- **Connection close vs. new stream:** A connection being closed by revocation
+  could simultaneously open a new stream that passes the auth check before
+  the connection close frame is processed.
+
+The `QKeyRegistry` uses `std::sync::Mutex` (line 30) for entries, but
+`LiveServerState` has no lock coordinating the connection map with the
+registry. The revocation path must be atomic: lock registry → lock connection
+map → terminate all connections → remove from registry → unlock.
+
 ## Goal
 
 - QKeys auto-rotate based on time (default: every 24 hours) and volume
@@ -243,6 +267,41 @@ pub struct Session {
   5. Write a revocation audit log entry (see TODO-439 for the audit
      log infrastructure; if not yet implemented, log at `warn!`
      level with structured fields).
+
+### Step 7.5: Atomic revocation (race condition fix)
+
+**File:** `src/implementations/server/mod.rs`, `src/implementations/server/qkey_registry.rs`
+
+The revocation must be atomic to prevent the race conditions documented in
+section 4 of the Problem. Implement a `revoke_atomic` method:
+
+1. Acquire `QKeyRegistry::mutex` (already exists, line 30).
+2. Acquire `LiveServerState::connections_mutex` (new — add a `Mutex<()>` or
+   use the existing `RwLock` write guard) to prevent concurrent connection
+   map modifications.
+3. While holding both locks:
+   a. Remove the QKey from the registry.
+   b. Look up all connections using this QKey.
+   c. Close each connection with `conn.close(true, 0x0, b"qkey_revoked")`.
+   d. Remove each connection from `LiveServerState.clients` and
+      `qkey_connections`.
+4. Release both locks.
+5. Write the revocation audit log entry (outside the locks to avoid
+   blocking on I/O while holding the connection map lock).
+
+This prevents:
+- TOCTOU: new connections cannot authenticate between revoke and terminate
+  because the registry lock is held.
+- Double-termination: the connection map lock prevents two concurrent
+  revocations from both trying to close the same connection.
+- Rotation race: rotation must also acquire both locks before transitioning
+  connections, ensuring revocation and rotation are mutually exclusive.
+
+For the connection-close-vs-new-stream race: add a `revoked: AtomicBool`
+flag to `QKeyAuthState`. The auth check in
+`close_live_client_for_qkey_auth_failure` (line 1699) checks this flag
+before allowing new streams. When revocation starts, set this flag before
+closing the connection.
 
 ### Step 8: Graceful rotation transition for active connections
 

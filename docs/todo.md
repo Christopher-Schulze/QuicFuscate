@@ -131,12 +131,15 @@ closes every gap to reach a complete, production-ready VPN protocol.
 | ID | Phase | Priority | Title | Status | Depends On |
 |----|-------|----------|-------|--------|------------|
 | TODO-435 | H | P1 | DNS through tunnel (DoH wire-in, DNS proxy, server forwarding) | **OPEN** — DoH fully implemented (stealth/mod.rs:938-1056) but 0 calls in codebase. ServerConfig.dns_servers is a dead field. No DNS proxy. Wire DoH into client resolution, implement DNS proxy on client (intercept port 53), implement DNS forwarding on server. | TODO-429 |
-| TODO-436 | H | P1 | Key rotation & immediate revocation | **OPEN** — QKeys never rotate. Revocation doesn't terminate active connections. Implement auto-rotation (time-based + volume-based), connection termination on revoke (track QKey-to-connection mapping). | TODO-434 |
+| TODO-436 | H | P1 | Key rotation & immediate revocation (incl. race condition fix) | **OPEN** — QKeys never rotate. Revocation doesn't terminate active connections. Race conditions on revocation (TOCTOU, concurrent revoke, rotation-vs-revoke). Implement auto-rotation, atomic revocation, QKey-to-connection mapping. | TODO-434 |
 | TODO-437 | H | P1 | IPv6 + DNS leak prevention | **OPEN** — Kill switch has no ip6tables rules (IPv6 leak guaranteed). No port-53 DNS filtering. Add ip6tables-restore, pf IPv6, netsh IPv6. Add DNS-specific firewall rules (block UDP 53 except to VPN DNS). | TODO-429 |
 | TODO-438 | H | P1 | Traffic isolation between clients | **OPEN** — All clients share same TUN interface. No namespace/VRF isolation. Client A can see client B's traffic. Implement per-client routing table or VRF isolation. | TODO-430 |
 | TODO-439 | H | P1 | Security audit logging (SIEM-compatible) | **OPEN** — No security event logs. No audit trail for auth/revocation/firewall events. Implement structured JSON audit logging with immutable trail. | — |
 | TODO-440 | H | P1 | Key erasure & memory locking (mlock, zeroize) | **OPEN** — Only ChaCha20 keys zeroized on Drop. AES-GCM, AEGIS, MORUS, TLS secrets not zeroized. No mlock for sensitive data. Extend zeroize to all key material, add mlock for crypto buffers. | — |
 | TODO-441 | H | P1 | Privilege dropping (post-bind setuid/setgid) | **OPEN** — Server runs with full privileges after init. No setuid/setgid/chroot. Implement privilege dropping after socket bind + TUN setup. | — |
+| TODO-456 | H | P1 | Auth rate limiting (brute-force protection) | **OPEN** — No auth-specific rate limiting. General PacketRateLimiter (limits.rs:137-227) and ConnectionLimiter exist but NO rate limiting on QKey auth attempts. Brute-force possible. Implement per-IP auth rate limiting, exponential backoff, auto-IP-blocking after N failures. | — |
+| TODO-457 | H | P1 | Mutual auth & replay protection for QKey transport | **OPEN** — No mutual authentication. Client presents bearer token, server never proves identity beyond TLS. No replay protection (nonce+timestamp). No token binding to TLS session. Implement mTLS, QKey token binding (RFC 5705), nonce-based replay protection, challenge-response. | TODO-434 |
+| TODO-458 | H | P1 | QKey token storage encryption at rest | **OPEN** — QKey tokens stored as SHA-256 hashes in plaintext JSON (qkey_registry.rs:persist/load). qkeys.json has no encryption at rest. SHA-256 of short tokens is brute-forceable. Implement AES-256-GCM encryption with master key from env, Argon2id key derivation, integrity check, migration from plaintext. | TODO-440 |
 
 ### Wave I — P1 Platform & Deployment
 
@@ -149,6 +152,9 @@ closes every gap to reach a complete, production-ready VPN protocol.
 | TODO-446 | I | P1 | Production logging (rotation, structured JSON, file output) | **OPEN** — No log rotation. No structured JSON. log_file_path in config but not used. Implement log rotation, JSON structured logging, file output with configurable path. | — |
 | TODO-447 | I | P1 | Container deployment (Docker, docker-compose, K8s) | **OPEN** — No Dockerfile, no docker-compose, no K8s manifests. Create Dockerfile (multi-stage build), docker-compose for quick start, K8s deployment + service + configmap. | — |
 | TODO-448 | I | P1 | Graceful shutdown (SIGTERM, drain mode, connection handoff) | **OPEN** — Only SIGINT handled. No SIGTERM. No drain mode. No connection drain. Active connections killed instantly. Add SIGTERM, configurable grace period, drain mode, graceful connection close. | — |
+| TODO-459 | I | P1 | DDoS protection hardening | **OPEN** — Default rate limit 10000 PPS too high (limits.rs:21). No burst size control. No global rate limit. No DDoS detection. No GeoIP blocking. No external blacklist sync. Implement lower default, burst config, global cap, anomaly detection, GeoIP (maxminddb), blacklist sync (AbuseIPDB), challenge-response. | — |
+| TODO-460 | I | P1 | Install script fix (user creation, directory permissions) | **OPEN** — Install script (scripts/install/install-server-linux.sh) doesn't create quicfuscate user required by systemd service. No directory creation for /var/lib/quicfuscate, /etc/quicfuscate. No permission setup. Implement useradd/groupadd, mkdir, chown, chmod, prerequisite validation. | — |
+| TODO-461 | I | P1 | TUN teardown retry & stale cleanup | **OPEN** — TUN teardown can fail without retry (mod.rs:889-897). No cleanup verification. Stale rules/interfaces persist on crash. Implement retry loop (3 attempts), verify cleanup, force cleanup, cleanup_on_startup() for stale rules from crashed sessions. | — |
 
 ### Wave J — P1-P2 Transport & Advanced
 
@@ -161,8 +167,10 @@ closes every gap to reach a complete, production-ready VPN protocol.
 | TODO-453 | J | P2 | QUIC version negotiation | **OPEN** — Only QUIC v1 supported. Version negotiation packet parsed but not used (packet.rs:274). No fallback. Implement multi-version support, version negotiation logic. | — |
 | TODO-454 | J | P2 | NAT traversal (STUN/TURN/ICE for symmetric NAT) | **OPEN** — Standard QUIC NAT works for cone NAT. No STUN/TURN/ICE. Symmetric NAT and restrictive firewalls block connections. Implement STUN binding, ICE candidate gathering, TURN relay fallback. | — |
 | TODO-455 | J | P2 | Traffic analysis defense (chaffing, constant rates, full padding) | **OPEN** — Padding is rate-limited (not all packets). Timing jitter is rate-limited. No chaffing (dummy traffic). No constant packet rates. Implement 100% padding mode, chaffing, constant-rate mode for high-security. | — |
+| TODO-462 | J | P2 | TCP/ICMP fingerprint obfuscation | **OPEN** — No network-level packet fingerprint obfuscation. TCP fingerprinting (p0f, nmap OS detection) can identify OS from TTL, window size, MSS, options order. ICMP fingerprinting reveals OS from echo reply format. Implement TTL normalization, TCP window/MSS normalization, TCP option reordering, ICMP response normalization, fingerprint_profile config. | — |
+| TODO-463 | J | P2 | Loss detection improvements (RACK, time-based, RTT variance) | **OPEN** — No time-based loss detection (recovery.rs: only PTO-based). No RACK (RFC 8985). No RTT variance tracking (only min/avg). No bandwidth estimation for Reno. Implement time-based loss detection, RACK, RTT variance (stddev/EWMA), Reno bandwidth estimation. | — |
 
-Detail files: `docs/todo/todo-42{9,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55}-*.md`.
+Detail files: `docs/todo/todo-42{9,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63}-*.md`.
 
 **Production readiness philosophy:** QuicFuscate must be a complete VPN protocol — invisible when
 the link is clean, heroic when the link is broken, and secure under all conditions. No traffic leaks,
