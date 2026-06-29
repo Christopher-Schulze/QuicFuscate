@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 
 use super::config::{ConfigError, EngineConfig, EngineMode};
-use crate::implementations::client::ClientRuntime;
+use crate::implementations::client::{ClientRuntime, KillSwitch};
 use crate::implementations::server::{
     metrics::Metrics, normalize_runtime_optimize_config, AdminAction, PreparedStandaloneLaunch,
     ServerRuntime,
@@ -251,6 +251,8 @@ pub struct QuicFuscateEngine {
     server_metrics: Option<Arc<Metrics>>,
     /// Engine start time
     start_time: Option<Instant>,
+    /// Kill switch (client mode, optional)
+    kill_switch: Option<Arc<KillSwitch>>,
 }
 
 /// Structured control-plane events emitted by the engine runtime.
@@ -563,6 +565,7 @@ impl QuicFuscateEngine {
             server_loop_shutdown_tx: None,
             server_metrics: None,
             start_time: None,
+            kill_switch: None,
         };
 
         Ok(engine)
@@ -774,6 +777,22 @@ impl QuicFuscateEngine {
             return Err(e);
         }
 
+        // Initialize kill switch for client mode if enabled
+        if self.config.engine.mode == EngineMode::Client && self.config.security.kill_switch {
+            // Optionally cleanup stale rules from a crashed previous session
+            if self.config.security.cleanup_firewall_on_start {
+                if let Err(e) = KillSwitch::cleanup_stale_rules() {
+                    log::warn!("Kill switch stale rule cleanup failed: {}", e);
+                }
+            }
+            let ks = Arc::new(KillSwitch::new());
+            ks.enable().map_err(|e| {
+                EngineError::Internal(format!("Kill switch enable failed: {}", e))
+            })?;
+            self.kill_switch = Some(ks);
+            log::info!("Kill switch enabled (firewall blocking until VPN connects)");
+        }
+
         log::info!(
             "Engine started in {} mode (stealth: {}, fec: {})",
             if self.config.engine.mode == EngineMode::Client { "client" } else { "server" },
@@ -845,6 +864,13 @@ impl QuicFuscateEngine {
         self.server_metrics = None;
         self.start_time = None;
 
+        // Disable kill switch on stop (removes all firewall rules)
+        if let Some(ks) = self.kill_switch.take() {
+            if let Err(e) = ks.disable() {
+                log::warn!("Kill switch disable on stop failed: {}", e);
+            }
+        }
+
         log::info!("Engine stopped gracefully");
 
         self.set_state(EngineState::Stopped);
@@ -911,6 +937,19 @@ impl QuicFuscateEngine {
 
         log::info!("Connecting to {} in client mode", remote);
 
+        // Notify kill switch that VPN is connected
+        if let Some(ref ks) = self.kill_switch {
+            let tun_name = if self.config.interface.tun_name.is_empty() {
+                "tun0"
+            } else {
+                &self.config.interface.tun_name
+            };
+            ks.on_vpn_connected(tun_name, &remote.ip().to_string()).map_err(|e| {
+                EngineError::Internal(format!("Kill switch VPN-connected failed: {}", e))
+            })?;
+            log::info!("Kill switch: VPN traffic allowed, non-VPN traffic blocked");
+        }
+
         self.set_state(EngineState::Connected);
         self.notify_state_change(EngineState::Connecting, EngineState::Connected);
         self.notify_connected(remote);
@@ -935,6 +974,14 @@ impl QuicFuscateEngine {
             runtime.disconnect()?;
         }
 
+        // Notify kill switch that VPN is disconnected
+        if let Some(ref ks) = self.kill_switch {
+            if let Err(e) = ks.on_vpn_disconnected() {
+                log::error!("Kill switch on_vpn_disconnected failed: {}", e);
+            }
+            log::warn!("Kill switch: all traffic blocked (VPN disconnected)");
+        }
+
         log::info!("Disconnecting from remote server");
 
         self.set_state(EngineState::Running);
@@ -952,6 +999,39 @@ impl QuicFuscateEngine {
             self.disconnect()?;
         }
         self.connect()
+    }
+
+    /// Handle unexpected connection loss (heartbeat timeout, remote close, etc.).
+    ///
+    /// Activates the kill switch immediately if enabled, transitions to Running state,
+    /// and emits a disconnected event with the given reason.
+    pub fn handle_connection_loss(&mut self, reason: DisconnectReason) {
+        if self.state != EngineState::Connected {
+            return;
+        }
+        log::warn!("Connection loss detected: {:?}, activating kill switch", reason);
+
+        if let Some(ref ks) = self.kill_switch {
+            if let Err(e) = ks.on_vpn_disconnected() {
+                log::error!("Kill switch activation on connection loss failed: {}", e);
+            }
+        }
+
+        if let Some(runtime) = self.client_runtime.as_mut() {
+            if let Err(e) = runtime.disconnect() {
+                log::warn!("Client runtime disconnect on connection loss failed: {}", e);
+            }
+        }
+
+        let old_state = self.state;
+        self.set_state(EngineState::Running);
+        self.notify_state_change(old_state, EngineState::Running);
+        self.notify_disconnected(reason);
+    }
+
+    /// Check if the kill switch is currently enabled.
+    pub fn is_kill_switch_enabled(&self) -> bool {
+        self.kill_switch.as_ref().map(|ks| ks.is_enabled()).unwrap_or(false)
     }
 
     // ========================================================================

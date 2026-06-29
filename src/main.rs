@@ -755,6 +755,14 @@ struct SharedArgs {
     /// TUN netmask
     #[clap(long)]
     tun_netmask: Option<String>,
+
+    /// Enable kill switch (blocks all non-VPN traffic when disconnected)
+    #[clap(long)]
+    kill_switch: bool,
+
+    /// Cleanup stale firewall rules from a crashed previous session, then exit
+    #[clap(long)]
+    cleanup_firewall: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1079,6 +1087,8 @@ async fn async_main() -> std::io::Result<()> {
                 shared.tun_ip,
                 shared.tun_netmask,
                 qkey.as_deref(),
+                shared.kill_switch,
+                shared.cleanup_firewall,
             )
             .await?;
         }
@@ -1382,8 +1392,21 @@ async fn run_client(
     tun_ip: Option<String>,
     tun_netmask: Option<String>,
     qkey: Option<&str>,
+    kill_switch_enabled: bool,
+    cleanup_firewall: bool,
 ) -> std::io::Result<()> {
     let config_path = config.as_ref();
+
+    // Handle --cleanup-firewall: remove stale rules from crashed session, then exit
+    if cleanup_firewall {
+        info!("Cleaning up stale kill switch firewall rules...");
+        match quicfuscate::implementations::client::KillSwitch::cleanup_stale_rules() {
+            Ok(()) => info!("Stale firewall rules cleaned up successfully"),
+            Err(e) => error!("Failed to cleanup stale rules: {}", e),
+        }
+        return Ok(());
+    }
+
     if list_fingerprints {
         info!("Available browser fingerprints:");
         for (b, o) in TlsClientHelloSpoofer::available_profiles() {
@@ -1406,6 +1429,23 @@ async fn run_client(
     let socket = tokio::net::UdpSocket::from_std(std_socket)?;
 
     info!("Client connecting to {}", server_addr);
+
+    // Initialize kill switch if enabled
+    let kill_switch = if kill_switch_enabled {
+        let ks = std::sync::Arc::new(quicfuscate::implementations::client::KillSwitch::new());
+        match ks.enable() {
+            Ok(()) => {
+                info!("Kill switch enabled (firewall blocking until VPN connects)");
+                Some(ks)
+            }
+            Err(e) => {
+                warn!("Kill switch enable failed (need root?): {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     let (fec_cfg, mut stealth_config, opt_cfg, _) =
         load_runtime_profiles(config_path, fec_config, fec_mode);
@@ -1555,8 +1595,10 @@ async fn run_client(
     }
 
     let mut request_sent = false;
+    let mut kill_switch_connected = false;
 
     // Optional TUN bridging setup
+    let tun_name_str = tun_name.clone().unwrap_or_else(|| "tun0".to_string());
     #[allow(clippy::type_complexity)]
     let (tun_rx, tun_writer, mut h3_stream_id): (
         Option<std::sync::mpsc::Receiver<Vec<u8>>>,
@@ -1636,6 +1678,12 @@ async fn run_client(
                 if let Err(e) = conn.conn.close(true, 0x0, b"ctrl_c") {
                     warn!("Client close on ctrl_c failed: {:?}", e);
                 }
+                // Disable kill switch on clean shutdown
+                if let Some(ref ks) = kill_switch {
+                    if let Err(e) = ks.disable() {
+                        warn!("Kill switch disable on shutdown failed: {}", e);
+                    }
+                }
                 break;
             }
             recv_res = recv_connected_datagram(&socket, &mut buf) => {
@@ -1689,6 +1737,18 @@ async fn run_client(
                         }
                         Err(e) => {
                             warn!("HTTP/3 request failed: {:?}", e);
+                        }
+                    }
+                }
+
+                // Activate kill switch VPN-allow rules once connection is established
+                if conn.conn.is_established() && !kill_switch_connected {
+                    kill_switch_connected = true;
+                    if let Some(ref ks) = kill_switch {
+                        let server_ip = server_addr.ip().to_string();
+                        match ks.on_vpn_connected(&tun_name_str, &server_ip) {
+                            Ok(()) => info!("Kill switch: VPN traffic allowed, non-VPN blocked"),
+                            Err(e) => warn!("Kill switch on_vpn_connected failed: {}", e),
                         }
                     }
                 }

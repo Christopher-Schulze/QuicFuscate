@@ -50,6 +50,9 @@ pub struct EngineConfig {
     pub optimization: OptimizationConfig,
     /// 0-RTT anti-replay protection settings
     pub anti_replay: AntiReplaySection,
+    /// Security settings (kill switch, leak prevention)
+    #[serde(default)]
+    pub security: SecurityConfig,
 }
 
 impl EngineConfig {
@@ -949,6 +952,34 @@ impl Default for AntiReplaySection {
             max_ticket_age_secs: 10,
             max_entries: 100_000,
             max_early_data_size: 16384,
+        }
+    }
+}
+
+// ============================================================================
+// SECURITY SECTION
+// ============================================================================
+
+/// Security settings: kill switch, leak prevention, connection-loss detection.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct SecurityConfig {
+    /// Enable kill switch (blocks all non-VPN traffic when disconnected).
+    pub kill_switch: bool,
+    /// Heartbeat timeout in milliseconds — if no data received from server for
+    /// this duration, trigger connection-loss detection and activate kill switch.
+    /// Default: 30000 (30s). Set to 0 to disable heartbeat watchdog.
+    pub heartbeat_timeout_ms: u64,
+    /// Cleanup stale firewall rules from a crashed previous session on startup.
+    pub cleanup_firewall_on_start: bool,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            kill_switch: false,
+            heartbeat_timeout_ms: 30_000,
+            cleanup_firewall_on_start: false,
         }
     }
 }
