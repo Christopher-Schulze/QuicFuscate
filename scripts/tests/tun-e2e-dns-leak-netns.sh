@@ -11,7 +11,8 @@
 # Requirements: root, Linux, iproute2, tcpdump, openssl, python3, nc, dig.
 set -euo pipefail
 
-PROJECT_ROOT="${PROJECT_ROOT:-/root/QuicFuscate}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 B="${BINARY:-$PROJECT_ROOT/target/release/quicfuscate}"
 CERT="$PROJECT_ROOT/config/local/server.crt"
 KEY="$PROJECT_ROOT/config/local/server.key"

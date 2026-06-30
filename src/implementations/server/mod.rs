@@ -956,7 +956,7 @@ struct SharedServerDomain {
     connection_limiter: Arc<parking_lot::Mutex<ConnectionLimiter>>,
     #[cfg(feature = "rate_limiter")]
     packet_rate_limiter: Arc<parking_lot::Mutex<PacketRateLimiterDomain>>,
-    /// Server-wide global rate limiter — caps aggregate PPS across all IPs
+    /// Server-wide global rate limiter - caps aggregate PPS across all IPs
     /// to prevent total overload when many sources each stay under the per-IP
     /// limit. Checked before per-IP limiting on the accept hot path.
     #[cfg(feature = "rate_limiter")]
@@ -1050,7 +1050,7 @@ impl ServerHostResources {
 
     fn teardown(self) {
         if let Some(routing) = self.routing {
-            // Retry teardown up to 3 times — iptables/pf commands can fail
+            // Retry teardown up to 3 times - iptables/pf commands can fail
             // transiently under load or when the kernel is reaping state.
             let mut last_err = None;
             for attempt in 1..=3 {
@@ -1968,6 +1968,35 @@ pub fn evaluate_qkey_http3_headers(
     }
 }
 
+pub fn evaluate_qkey_transport_token(
+    token: Option<&[u8]>,
+    expected_token_sha256: Option<&str>,
+    already_authed: bool,
+) -> QKeyHeaderAuthOutcome {
+    let Some(expected) = expected_token_sha256 else {
+        return QKeyHeaderAuthOutcome::Unchanged;
+    };
+    if already_authed {
+        return QKeyHeaderAuthOutcome::Authenticated;
+    }
+    let Some(token) = token else {
+        return QKeyHeaderAuthOutcome::Unchanged;
+    };
+    let provided = match std::str::from_utf8(token) {
+        Ok(value) => value.trim(),
+        Err(_) => return QKeyHeaderAuthOutcome::Reject(b"invalid_qkey_auth"),
+    };
+    if provided.is_empty() {
+        return QKeyHeaderAuthOutcome::Unchanged;
+    }
+    if crate::implementations::server::qkey_registry::token_matches_hash(provided, expected.trim())
+    {
+        QKeyHeaderAuthOutcome::Authenticated
+    } else {
+        QKeyHeaderAuthOutcome::Reject(b"invalid_qkey_auth")
+    }
+}
+
 pub fn close_live_client_for_qkey_auth_failure(
     conn: &mut QuicFuscateConnection,
     metrics: &Metrics,
@@ -2171,6 +2200,7 @@ pub async fn process_live_server_client_datagram(
     dns_upstream_resolvers: Arc<Vec<Ipv4Addr>>,
 ) -> std::io::Result<LiveClientDatagramResult> {
     use std::cell::Cell;
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
     // Packet normalizer for OS fingerprint obfuscation (TODO-462).
     // Applied to all IPv4 packets before they are written to the TUN interface
@@ -2201,10 +2231,32 @@ pub async fn process_live_server_client_datagram(
         }
     }
 
-    // Install the MASQUE→TUN sink once per connection when TUN bridging is
-    // active. Decoded MASQUE CONNECT-UDP datagram payloads (raw IP packets)
-    // are written to the server TUN interface by this callback, invoked from
-    // drain_masque_datagrams inside poll_http3_event_loop.
+    let require_auth = qkey_auth.is_some();
+    let expected_token_sha256 = qkey_auth.as_ref().map(|state| state.expected_token_sha256.clone());
+    let auth_gate =
+        Arc::new(AtomicBool::new(qkey_auth.as_ref().map(|state| state.authed).unwrap_or(true)));
+    let should_close: Cell<Option<&'static [u8]>> = Cell::new(None);
+    match evaluate_qkey_transport_token(
+        conn.conn.peer_qkey_auth_token(),
+        expected_token_sha256.as_deref(),
+        auth_gate.load(AtomicOrdering::Relaxed),
+    ) {
+        QKeyHeaderAuthOutcome::Unchanged => {}
+        QKeyHeaderAuthOutcome::Authenticated => {
+            auth_gate.store(true, AtomicOrdering::Relaxed);
+        }
+        QKeyHeaderAuthOutcome::Reject(reason) => {
+            should_close.set(Some(reason));
+        }
+    }
+
+    // Install the MASQUE→TUN sink when TUN bridging is active. Decoded MASQUE
+    // CONNECT-UDP datagram payloads (raw IP packets) are written to the server
+    // TUN interface by this callback, invoked from drain_masque_datagrams
+    // inside poll_http3_event_loop. The callback is rebound on each packet
+    // processing pass so it always captures the current QKey auth gate; keeping
+    // the first unauthenticated gate forever would silently drop later valid
+    // MASQUE datagrams.
     if tun_enable {
         if let Some(tun) = server_tun {
             if !conn.has_masque_downlink_queue() {
@@ -2212,61 +2264,58 @@ pub async fn process_live_server_client_datagram(
                     std::collections::VecDeque::new(),
                 )));
             }
-            if !conn.has_masque_datagram_cb() {
-                let tun_sink = Arc::clone(tun);
-                let masque_normalizer = std::sync::Arc::clone(&normalizer);
-                let dns_resolvers = Arc::clone(&dns_upstream_resolvers);
-                let dns_downlink_queue = conn
-                    .masque_downlink_queue()
-                    .expect("MASQUE downlink queue installed before callback");
-                conn.set_masque_datagram_cb(Arc::new(std::sync::Mutex::new(Box::new(
-                    move |payload: &[u8]| {
-                        if spawn_dns_intercept(
-                            payload,
-                            Arc::clone(&dns_resolvers),
-                            Arc::clone(&dns_downlink_queue),
-                            fingerprint_profile,
-                        ) {
-                            return;
-                        }
-                        // Apply OS fingerprint normalization for IPv4 packets
-                        // before writing to TUN (TODO-462).
-                        if !payload.is_empty() && payload[0] >> 4 == 4 {
-                            let mut buf = payload.to_vec();
-                            masque_normalizer.normalize_ipv4(&mut buf);
-                            if let Err(error) = tun_sink.write(&buf) {
-                                log::warn!("Server TUN write (MASQUE) failed: {:?}", error);
-                            }
-                        } else if let Err(error) = tun_sink.write(payload) {
+            let tun_sink = Arc::clone(tun);
+            let masque_normalizer = std::sync::Arc::clone(&normalizer);
+            let dns_resolvers = Arc::clone(&dns_upstream_resolvers);
+            let dns_downlink_queue = conn
+                .masque_downlink_queue()
+                .expect("MASQUE downlink queue installed before callback");
+            let datagram_auth_gate = Arc::clone(&auth_gate);
+            conn.set_masque_datagram_cb(Arc::new(std::sync::Mutex::new(Box::new(
+                move |payload: &[u8]| {
+                    if require_auth && !datagram_auth_gate.load(AtomicOrdering::Relaxed) {
+                        return;
+                    }
+                    if spawn_dns_intercept(
+                        payload,
+                        Arc::clone(&dns_resolvers),
+                        Arc::clone(&dns_downlink_queue),
+                        fingerprint_profile,
+                    ) {
+                        return;
+                    }
+                    // Apply OS fingerprint normalization for IPv4 packets
+                    // before writing to TUN (TODO-462).
+                    if !payload.is_empty() && payload[0] >> 4 == 4 {
+                        let mut buf = payload.to_vec();
+                        masque_normalizer.normalize_ipv4(&mut buf);
+                        if let Err(error) = tun_sink.write(&buf) {
                             log::warn!("Server TUN write (MASQUE) failed: {:?}", error);
                         }
-                    },
-                ))));
-            }
+                    } else if let Err(error) = tun_sink.write(payload) {
+                        log::warn!("Server TUN write (MASQUE) failed: {:?}", error);
+                    }
+                },
+            ))));
         }
     }
-
-    let require_auth = qkey_auth.is_some();
-    let expected_token_sha256 = qkey_auth.as_ref().map(|state| state.expected_token_sha256.clone());
-    let authed = Cell::new(qkey_auth.as_ref().map(|state| state.authed).unwrap_or(true));
-    let should_close: Cell<Option<&'static [u8]>> = Cell::new(None);
 
     if let Err(error) = conn.poll_http3_with_headers(
         |_sid, headers| match evaluate_qkey_http3_headers(
             headers,
             expected_token_sha256.as_deref(),
-            authed.get(),
+            auth_gate.load(AtomicOrdering::Relaxed),
         ) {
             QKeyHeaderAuthOutcome::Unchanged => {}
             QKeyHeaderAuthOutcome::Authenticated => {
-                authed.set(true);
+                auth_gate.store(true, AtomicOrdering::Relaxed);
             }
             QKeyHeaderAuthOutcome::Reject(reason) => {
                 should_close.set(Some(reason));
             }
         },
         |_sid, data| {
-            if require_auth && !authed.get() {
+            if require_auth && !auth_gate.load(AtomicOrdering::Relaxed) {
                 return;
             }
             if tun_enable {
@@ -2302,7 +2351,8 @@ pub async fn process_live_server_client_datagram(
     // loop was either redundant (datagrams already drained) or wrote corrupted
     // bytes (MASQUE flow-id varint prefix not stripped) and has been removed.
 
-    let auth_result = require_auth.then(|| (conn_id.clone(), authed.get()));
+    let auth_result =
+        require_auth.then(|| (conn_id.clone(), auth_gate.load(AtomicOrdering::Relaxed)));
     let mut remove_auth_conn_id = None;
     if let Some(reason) = should_close.get() {
         close_live_client_for_qkey_auth_failure(conn, metrics, addr, reason);
@@ -2410,7 +2460,7 @@ pub fn build_live_server_client_init(
         }
     };
 
-    // Successful initial auth — clear any previous failed attempts for this IP
+    // Successful initial auth - clear any previous failed attempts for this IP
     {
         let ip = request.remote_addr.ip();
         let mut limiter = request.auth_rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
@@ -2623,7 +2673,7 @@ fn accept_session_in_domain(
         match v6_pool.allocate() {
             Some(v6) => Some(v6),
             None => {
-                // IPv6 pool exhausted — release IPv4 and fail
+                // IPv6 pool exhausted - release IPv4 and fail
                 ip_pool.release(client_ip);
                 return Err(AcceptError::IpPoolExhausted);
             }
@@ -2766,12 +2816,12 @@ impl LiveServerState {
     /// processing, TUN forwarding, and client flushing), the actual fetch
     /// is dispatched via `tokio::spawn` as a background task. The
     /// `last_blacklist_sync` timestamp is recorded *before* spawning so
-    /// overlapping syncs are prevented — if a sync is still in flight when
+    /// overlapping syncs are prevented - if a sync is still in flight when
     /// the next interval elapses, the new tick sees a recent timestamp and
     /// skips. The background task updates the shared `BlacklistSync` (via
     /// its `Arc`) in place; `replace_list` takes the internal write lock,
     /// so concurrent `is_blocked` reads remain safe. Errors are logged and
-    /// non-fatal — the blacklist continues to use the last-known-good set.
+    /// non-fatal - the blacklist continues to use the last-known-good set.
     #[cfg(feature = "rate_limiter")]
     fn maybe_sync_blacklist(&self) {
         let blacklist = self.domain.blacklist();
@@ -5184,7 +5234,7 @@ impl ServerRuntime {
                                                                     log::warn!("ICMP echo reply write to TUN failed: {:?}", e);
                                                                 }
                                                             }
-                                                            // Skip forwarding — handled locally
+                                                            // Skip forwarding - handled locally
                                                             continue;
                                                         }
                                                         // Other ICMP types to server IP: ignore
@@ -5221,7 +5271,7 @@ impl ServerRuntime {
                                                 }
                                             }
                                         } else {
-                                            // No matching client session — send ICMP Destination Unreachable
+                                            // No matching client session - send ICMP Destination Unreachable
                                             // (Host Unreachable) back to the source, so the sender gets
                                             // immediate feedback instead of waiting for TCP timeout.
                                             if pkt.len() >= 20 && (pkt[0] >> 4) == 4 {
@@ -6512,6 +6562,52 @@ mod tests {
             connected_at: Instant::now(),
         };
         assert!(!state.is_expired());
+    }
+
+    fn sha256_hex_for_qkey_token(token_hex: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let bytes = hex::decode(token_hex).unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        format!("{:x}", hasher.finalize())
+    }
+
+    #[test]
+    fn test_evaluate_qkey_transport_token_authenticates_valid_token() {
+        let token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let expected = sha256_hex_for_qkey_token(token);
+
+        let outcome =
+            evaluate_qkey_transport_token(Some(token.as_bytes()), Some(expected.as_str()), false);
+
+        assert!(matches!(outcome, QKeyHeaderAuthOutcome::Authenticated));
+    }
+
+    #[test]
+    fn test_evaluate_qkey_transport_token_missing_allows_http3_fallback() {
+        let expected = sha256_hex_for_qkey_token(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+
+        let outcome = evaluate_qkey_transport_token(None, Some(expected.as_str()), false);
+
+        assert!(matches!(outcome, QKeyHeaderAuthOutcome::Unchanged));
+    }
+
+    #[test]
+    fn test_evaluate_qkey_transport_token_rejects_invalid_token() {
+        let expected = sha256_hex_for_qkey_token(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+        let invalid_token = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+        let outcome = evaluate_qkey_transport_token(
+            Some(invalid_token.as_bytes()),
+            Some(expected.as_str()),
+            false,
+        );
+
+        assert!(matches!(outcome, QKeyHeaderAuthOutcome::Reject(b"invalid_qkey_auth")));
     }
 
     // --- Logging mode tests ---

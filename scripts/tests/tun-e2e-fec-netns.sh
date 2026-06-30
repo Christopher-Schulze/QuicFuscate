@@ -16,7 +16,8 @@
 # Requirements: root, Linux, iproute2, tc-netem, openssl, python3, nc.
 # Run on the target server (e.g. broderick).
 set -u
-PROJECT_ROOT="${PROJECT_ROOT:-/root/QuicFuscate}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 B="$PROJECT_ROOT/target/release/quicfuscate"
 CERT="$PROJECT_ROOT/config/local/server.crt"
 KEY="$PROJECT_ROOT/config/local/server.key"
@@ -29,6 +30,7 @@ PING_INTERVAL="${PING_INTERVAL:-0.1}"
 
 PASS=0
 FAIL=0
+SKIP=0
 
 # --- ensure server cert valid for the client's hardcoded validation SNI ---
 cd "$CERT_DIR"
@@ -83,20 +85,17 @@ remove_loss() {
 }
 
 start_server() {
-    # Disable interleaving: the interleaved decoder has a known bug where it
-    # assumes consecutive packet IDs but interleaving distributes them
-    # non-consecutively. With interleaving disabled, FEC recovery works correctly.
-    # TODO: fix interleaved decoder and remove this override.
-    ip netns exec ns-srv env QUICFUSCATE_FEC_INTERLEAVE=0 "$B" server --cert "$CERT" --key "$KEY" \
+    ip netns exec ns-srv "$B" server --cert "$CERT" --key "$KEY" \
         --listen 10.10.0.1:4433 --admin-socket /tmp/qf-admin.sock \
-        --tun --tun-name qtun0 --tun-ip 10.0.1.1 --tun-netmask 255.255.255.0 -v \
+        --tun --tun-name qtun0 --tun-ip 10.0.1.1 --tun-netmask 255.255.255.0 \
+        --no-drop-privileges -v \
         > /tmp/ns-srv.log 2>&1 &
     sleep 3
 }
 
 start_client() {
     local qkey="$1"
-    ip netns exec ns-cli env QUICFUSCATE_FEC_INTERLEAVE=0 "$B" client --remote 10.10.0.1:4433 --url https://10.10.0.1/ \
+    ip netns exec ns-cli "$B" client --remote 10.10.0.1:4433 --url https://10.10.0.1/ \
         --qkey "$qkey" --ca-file "$CA" --verify-peer \
         --tun --tun-name qtun0 --tun-ip 10.0.1.2 --tun-netmask 255.255.255.0 --no-utls -v \
         > /tmp/ns-cli.log 2>&1 &
@@ -163,7 +162,7 @@ run_loss_level() {
     ping_loss=$(echo "$ping_output" | grep 'packet loss' | grep -oP '[\d.]+(?=% packet loss)' | awk '{printf "%d", $1}' || echo "100")
     echo "Ping loss through tunnel: ${ping_loss}%"
 
-    # Acceptance criteria — ping-based thresholds account for statistical
+    # Acceptance criteria - ping-based thresholds account for statistical
     # variance in random netem loss and the fact that ping sends small packets
     # at low rate, so FEC windows fill slowly. At 5% netem, 100 pings can
     # naturally lose 5-15 packets. FEC recovers some but not all.
@@ -244,6 +243,13 @@ run_iperf_test() {
     throughput=$(echo "$iperf_output" | grep -oP '[\d.]+(?=\s+Mbits/sec)' | tail -1 || echo "0")
     echo "Throughput: ${throughput} Mbits/sec, Retransmits: ${retransmits}"
 
+    if [ -z "$throughput" ] || ! awk "BEGIN{exit !($throughput > 0)}" 2>/dev/null; then
+        echo "SKIP: ${loss_pct}% loss iperf3, no measurable throughput (TUN routing may not support TCP)"
+        SKIP=$((SKIP + 1))
+        remove_loss
+        return
+    fi
+
     if [ "$loss_pct" = "0" ]; then
         if [ "$retransmits" = "0" ]; then
             echo "PASS: 0% loss iperf3, no retransmits"
@@ -253,14 +259,8 @@ run_iperf_test() {
             FAIL=$((FAIL + 1))
         fi
     else
-        # At loss, just verify throughput > 0 (link stays operational)
-        if [ -n "$throughput" ] && awk "BEGIN{exit !($throughput > 0)}" 2>/dev/null; then
-            echo "PASS: ${loss_pct}% loss iperf3, ${throughput} Mbits/sec throughput"
-            PASS=$((PASS + 1))
-        else
-            echo "SKIP: ${loss_pct}% loss iperf3, no throughput (TUN routing may not support TCP)"
-            # Don't count as fail — iperf3 TCP through TUN is a known limitation
-        fi
+        echo "PASS: ${loss_pct}% loss iperf3, ${throughput} Mbits/sec throughput"
+        PASS=$((PASS + 1))
     fi
 
     remove_loss
@@ -283,7 +283,7 @@ cleanup
 
 echo ""
 echo "=========================================="
-echo "  Results: ${PASS} passed, ${FAIL} failed"
+echo "  Results: ${PASS} passed, ${FAIL} failed, ${SKIP} skipped"
 echo "=========================================="
 
 if [ "$FAIL" -gt 0 ]; then

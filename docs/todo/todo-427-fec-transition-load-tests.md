@@ -13,7 +13,7 @@ depends_on: ["TODO-423"]
 
 ## Problem
 
-Existing mode transition tests (cross-fade, policy snapshots) test transitions in isolation —
+Existing mode transition tests (cross-fade, policy snapshots) test transitions in isolation -
 they feed packets through `on_send` during a transition but do not verify:
 
 1. No packet loss or duplication during transition under real transport load
@@ -25,8 +25,12 @@ they feed packets through `on_send` during a transition but do not verify:
 
 ## Goal
 
-Verify FEC mode transitions are seamless under real load — zero packet loss, zero duplication,
+Verify FEC mode transitions are seamless under real load - zero packet loss, zero duplication,
 correct cross-fade blending, and no flapping under rapid condition changes.
+
+## Proof Refresh (2026-06-30)
+
+TODO-473 refreshed this proof on `broderick` with `scripts/tests/tun-e2e-fec-transition-netns.sh`. The run passed with `1 passed`, `0 failed`: clean phase 0% loss, lossy phase 22% under 20% injected loss, and recovered phase 0% loss.
 
 ## Implementation Plan
 
@@ -122,8 +126,8 @@ fn test_fec_no_repair_during_handshake() {
 ```
 
 ## Files to Create
-- `src/fec/transition_tests.rs` — tests 1-6
-- `scripts/tests/fec-netem-transition.sh` — test 7
+- `src/fec/transition_tests.rs` - tests 1-6
+- `scripts/tests/fec-netem-transition.sh` - test 7
 
 ## Acceptance Criteria
 - N×N matrix: all 81 transition pairs pass with zero loss/duplication

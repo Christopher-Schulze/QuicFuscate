@@ -24,19 +24,23 @@ Implement full DNS-through-tunnel: a client-side DNS proxy that intercepts port 
 - Tests cover IPv4 and IPv6 UDP/53 parsing and response packet rebuilding.
 - `scripts/tests/tun-e2e-dns-leak-netns.sh` provides the real Linux network-namespace E2E proof: server/client TUN over MASQUE, a DNS query to the server TUN IP, and tcpdump on the client underlay asserting zero raw TCP/UDP port 53 packets.
 
+## Proof Refresh (2026-06-30)
+
+TODO-473 refreshed this proof on `broderick` with the hardened `scripts/tests/tun-e2e-dns-leak-netns.sh` gate. The run passed with `dig_exit=0`, DNS `status: NXDOMAIN`, and `raw_port_53_packets=0` on the client underlay capture.
+
 ## Historical Audit (pre-implementation)
 
 ### DoH implementation (client-side, exists but not wired in)
-- `src/stealth/mod.rs:938-955` — A global Tokio runtime `DOH_RUNTIME` is created for async DoH requests. Uses 2 worker threads (min of 2 and available parallelism). Returns `None` gracefully if runtime creation fails.
-- `src/stealth/mod.rs:957-965` — `DOH_PROVIDERS` constant lists 4 DoH endpoints: Cloudflare, Quad9, Google, NextDNS. Used for multi-provider fallback.
-- `src/stealth/mod.rs:967-968` — `DOH_PROVIDER_INDEX` atomic for round-robin rotation.
-- `src/stealth/mod.rs:981-1012` — `resolve_doh_multi()` tries providers in round-robin order, falling back on failure. Accepts a `preferred_provider` parameter.
-- `src/stealth/mod.rs:1015-1047` — `resolve_doh_single()` does the actual HTTP GET with `Accept: application/dns-json` header, parses JSON response, extracts A record. Uses Google's JSON DoH API format (`?name=domain&type=A`).
-- `src/stealth/mod.rs:1049-1056` — `resolve_doh()` is the public API, delegates to `resolve_doh_multi()`.
+- `src/stealth/mod.rs:938-955` - A global Tokio runtime `DOH_RUNTIME` is created for async DoH requests. Uses 2 worker threads (min of 2 and available parallelism). Returns `None` gracefully if runtime creation fails.
+- `src/stealth/mod.rs:957-965` - `DOH_PROVIDERS` constant lists 4 DoH endpoints: Cloudflare, Quad9, Google, NextDNS. Used for multi-provider fallback.
+- `src/stealth/mod.rs:967-968` - `DOH_PROVIDER_INDEX` atomic for round-robin rotation.
+- `src/stealth/mod.rs:981-1012` - `resolve_doh_multi()` tries providers in round-robin order, falling back on failure. Accepts a `preferred_provider` parameter.
+- `src/stealth/mod.rs:1015-1047` - `resolve_doh_single()` does the actual HTTP GET with `Accept: application/dns-json` header, parses JSON response, extracts A record. Uses Google's JSON DoH API format (`?name=domain&type=A`).
+- `src/stealth/mod.rs:1049-1056` - `resolve_doh()` is the public API, delegates to `resolve_doh_multi()`.
 
 ### Server-side DNS (dead field)
-- `src/implementations/server/mod.rs:106` — `ServerConfig.dns_servers: Vec<Ipv4Addr>` — "DNS servers to push" field. Default: `[1.1.1.1, 8.8.8.8]` (line 131).
-- `src/implementations/server/mod.rs:118` — `ServerConfig.ipv6_dns_servers: Vec<Ipv6Addr>` — IPv6 DNS servers. Default: Cloudflare + Google IPv6 (lines 137-140).
+- `src/implementations/server/mod.rs:106` - `ServerConfig.dns_servers: Vec<Ipv4Addr>` - "DNS servers to push" field. Default: `[1.1.1.1, 8.8.8.8]` (line 131).
+- `src/implementations/server/mod.rs:118` - `ServerConfig.ipv6_dns_servers: Vec<Ipv6Addr>` - IPv6 DNS servers. Default: Cloudflare + Google IPv6 (lines 137-140).
 - These fields are **never used** for actual DNS forwarding. They are only passed to the client as configuration metadata. The server does not resolve DNS for clients.
 
 ### Key gap: `resolve_doh()` is not wired into the client resolution path
@@ -53,13 +57,13 @@ Without a DNS proxy, client applications resolve DNS directly via the system res
 DNS queries on port 53 are plaintext (UDP). DPI can trivially see which domains a user is resolving. Even DNS-over-TLS (port 853) is a distinct protocol that DPI can identify and block. DoH (port 443, HTTPS) is the only DNS protocol that blends in with normal web traffic.
 
 ### Current DoH limitations
-1. **JSON API only**: `resolve_doh_single()` uses Google's JSON DoH API (`?name=domain&type=A`). This is non-standard — the RFC 8484 wire format sends raw DNS packets in HTTP POST body or base64url in GET parameter. The JSON API is Google-specific and not supported by all DoH providers.
+1. **JSON API only**: `resolve_doh_single()` uses Google's JSON DoH API (`?name=domain&type=A`). This is non-standard - the RFC 8484 wire format sends raw DNS packets in HTTP POST body or base64url in GET parameter. The JSON API is Google-specific and not supported by all DoH providers.
 2. **A records only**: Only type A (IPv4) is resolved. No AAAA (IPv6), no MX, no TXT, no SRV, no PTR.
 3. **No caching**: Every resolution is a fresh HTTP request. No TTL-based cache.
 4. **Not a proxy**: It's a library function, not a system-level DNS proxy that intercepts port 53.
 
 ### Server-side gap
-The server receives client traffic via TUN and NATs it to the internet. But DNS queries from the client go to whatever DNS server the client's system is configured to use — which may be outside the tunnel. The server has `dns_servers` config but does nothing with it except pass it to the client as metadata.
+The server receives client traffic via TUN and NATs it to the internet. But DNS queries from the client go to whatever DNS server the client's system is configured to use - which may be outside the tunnel. The server has `dns_servers` config but does nothing with it except pass it to the client as metadata.
 
 ## Proposed Architecture
 
@@ -112,9 +116,9 @@ The server receives client traffic via TUN and NATs it to the internet. But DNS 
 
 ### Key design decisions
 1. **Wire format (RFC 8484)**: Replace JSON API with RFC 8484 wire format. DNS query is a raw DNS packet sent as HTTP POST body with `Content-Type: application/dns-message`, or base64url in GET `?dns=` parameter. This is the standard, supported by Cloudflare, Google, Quad9, and all major DoH providers.
-2. **Server-side DoH endpoint**: The server exposes an HTTP/3 endpoint at `/dns-query` that accepts DoH wire-format queries. This is the same path used by the QUIC tunnel — the DNS query is just another HTTP/3 request through the tunnel, indistinguishable from VPN data traffic.
+2. **Server-side DoH endpoint**: The server exposes an HTTP/3 endpoint at `/dns-query` that accepts DoH wire-format queries. This is the same path used by the QUIC tunnel - the DNS query is just another HTTP/3 request through the tunnel, indistinguishable from VPN data traffic.
 3. **Client DNS proxy**: A local UDP listener on `127.0.0.1:5353` that receives redirected port 53 traffic, parses DNS wire format, and forwards via DoH through the tunnel.
-4. **Split DNS**: Domain-based routing — configured domains (e.g., `*.corp.example.com`) are resolved locally, everything else goes through the tunnel.
+4. **Split DNS**: Domain-based routing - configured domains (e.g., `*.corp.example.com`) are resolved locally, everything else goes through the tunnel.
 5. **DNSSEC validation**: Optional, performed server-side before returning the response to the client.
 
 ## Implementation Plan
@@ -134,7 +138,7 @@ The server receives client traffic via TUN and NATs it to the internet. But DNS 
 5. Support EDNS0 (OPT record) for larger UDP responses and DNSSEC OK (DO) bit.
 
 ### Phase 3: DNS cache
-1. Create `src/dns/cache.rs` with `DnsCache` — TTL-aware cache keyed by `(domain, record_type)`.
+1. Create `src/dns/cache.rs` with `DnsCache` - TTL-aware cache keyed by `(domain, record_type)`.
 2. Use `moka` crate (already a potential dep) or a simple `DashMap` with periodic TTL eviction.
 3. Cache hits return immediately without network round-trip.
 4. Negative caching: cache NXDOMAIN responses for their TTL (minimum 5s per RFC 2308).
@@ -177,19 +181,19 @@ The server receives client traffic via TUN and NATs it to the internet. But DNS 
 ### Chosen: `hickory-dns` (formerly `trust-dns`) for DNS wire-format parsing
 - Pure Rust, async, supports DNSSEC, widely used.
 - `hickory-proto` crate provides wire-format parsing/serialization without the full resolver.
-- Alternative: `dnsparser` (lighter but less complete). Rejected — missing EDNS0 and DNSSEC support.
-- Alternative: Hand-rolled parser. Rejected — DNS wire format has edge cases (name compression, EDNS0, unknown RR types) that are easy to get wrong.
+- Alternative: `dnsparser` (lighter but less complete). Rejected - missing EDNS0 and DNSSEC support.
+- Alternative: Hand-rolled parser. Rejected - DNS wire format has edge cases (name compression, EDNS0, unknown RR types) that are easy to get wrong.
 
 ### Chosen: `moka` for DNS cache
 - High-performance concurrent cache with TTL support.
 - Already commonly used in Rust networking projects.
-- Alternative: `DashMap` with manual TTL eviction — simpler but less efficient under high concurrency.
+- Alternative: `DashMap` with manual TTL eviction - simpler but less efficient under high concurrency.
 
 ### Evaluated and rejected
-- **DNS-over-QUIC (DoQ, RFC 9250)**: Rejected — while more efficient than DoH (no HTTP overhead), it uses a separate port (853) and is a distinct protocol that DPI can identify. DoH over the existing QUIC tunnel is stealthier.
-- **DNS-over-TLS (DoT)**: Rejected — uses port 853, identifiable by DPI.
-- **dnscrypt**: Rejected — non-standard protocol, limited provider support.
-- **OS-level DNS interception (systemd-resolved, NetworkManager)**: Rejected — too platform-specific. iptables REDIRECT is universal on Linux and works regardless of the system resolver.
+- **DNS-over-QUIC (DoQ, RFC 9250)**: Rejected - while more efficient than DoH (no HTTP overhead), it uses a separate port (853) and is a distinct protocol that DPI can identify. DoH over the existing QUIC tunnel is stealthier.
+- **DNS-over-TLS (DoT)**: Rejected - uses port 853, identifiable by DPI.
+- **dnscrypt**: Rejected - non-standard protocol, limited provider support.
+- **OS-level DNS interception (systemd-resolved, NetworkManager)**: Rejected - too platform-specific. iptables REDIRECT is universal on Linux and works regardless of the system resolver.
 
 ## Stealth/Efficiency Considerations
 
@@ -232,25 +236,25 @@ The server receives client traffic via TUN and NATs it to the internet. But DNS 
 ## Files to Create/Modify
 
 ### New files
-- `src/dns/mod.rs` — DNS module root: `DnsProxy`, `DnsCache`, `DnsConfig`, `SplitDnsZone`
-- `src/dns/wire.rs` — DNS wire-format parser/serializer (RFC 1035 + EDNS0)
-- `src/dns/doh.rs` — RFC 8484 DoH wire-format client (replaces JSON-based `resolve_doh_single`)
-- `src/dns/proxy.rs` — Client-side DNS proxy (UDP listener on 127.0.0.1:5353)
-- `src/dns/cache.rs` — TTL-aware DNS cache
-- `src/dns/split.rs` — Split DNS domain matching
-- `src/implementations/server/dns_forwarder.rs` — Server-side DoH forwarding endpoint
-- `tests/dns_proxy.rs` — Integration tests for client DNS proxy
-- `tests/dns_forwarder.rs` — Integration tests for server DNS forwarder
-- `tests/dns_e2e.rs` — End-to-end DNS-through-tunnel tests
+- `src/dns/mod.rs` - DNS module root: `DnsProxy`, `DnsCache`, `DnsConfig`, `SplitDnsZone`
+- `src/dns/wire.rs` - DNS wire-format parser/serializer (RFC 1035 + EDNS0)
+- `src/dns/doh.rs` - RFC 8484 DoH wire-format client (replaces JSON-based `resolve_doh_single`)
+- `src/dns/proxy.rs` - Client-side DNS proxy (UDP listener on 127.0.0.1:5353)
+- `src/dns/cache.rs` - TTL-aware DNS cache
+- `src/dns/split.rs` - Split DNS domain matching
+- `src/implementations/server/dns_forwarder.rs` - Server-side DoH forwarding endpoint
+- `tests/dns_proxy.rs` - Integration tests for client DNS proxy
+- `tests/dns_forwarder.rs` - Integration tests for server DNS forwarder
+- `tests/dns_e2e.rs` - End-to-end DNS-through-tunnel tests
 
 ### Modified files
-- `src/stealth/mod.rs` — Refactor `resolve_doh()` to use wire format from `src/dns/doh.rs`; keep as compatibility wrapper
-- `src/implementations/server/mod.rs` — Wire `dns_servers` field to `DnsForwarder`; register `/dns-query` HTTP/3 route
-- `src/implementations/client/mod.rs` — Start DNS proxy on client connect, install iptables REDIRECT rule
-- `src/implementations/client/killswitch.rs` — Add DNS redirect rule to kill switch (block port 53 when VPN disconnected)
-- `src/main.rs` — Add `--dns-proxy` / `--no-dns-proxy` CLI flag, `--split-dns` config option
-- `Cargo.toml` — Add `hickory-proto = "0.24"`, `moka = { version = "0.12", features = ["future"] }`
-- `src/lib.rs` — Add `pub mod dns;`
+- `src/stealth/mod.rs` - Refactor `resolve_doh()` to use wire format from `src/dns/doh.rs`; keep as compatibility wrapper
+- `src/implementations/server/mod.rs` - Wire `dns_servers` field to `DnsForwarder`; register `/dns-query` HTTP/3 route
+- `src/implementations/client/mod.rs` - Start DNS proxy on client connect, install iptables REDIRECT rule
+- `src/implementations/client/killswitch.rs` - Add DNS redirect rule to kill switch (block port 53 when VPN disconnected)
+- `src/main.rs` - Add `--dns-proxy` / `--no-dns-proxy` CLI flag, `--split-dns` config option
+- `Cargo.toml` - Add `hickory-proto = "0.24"`, `moka = { version = "0.12", features = ["future"] }`
+- `src/lib.rs` - Add `pub mod dns;`
 
 ## Risks & Mitigations
 

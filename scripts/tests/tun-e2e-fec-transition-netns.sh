@@ -8,7 +8,8 @@
 #
 # Acceptance: 0% ping loss DURING transitions (not just before/after).
 set -u
-PROJECT_ROOT="${PROJECT_ROOT:-/root/QuicFuscate}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 B="$PROJECT_ROOT/target/release/quicfuscate"
 CERT="$PROJECT_ROOT/config/local/server.crt"
 KEY="$PROJECT_ROOT/config/local/server.key"
@@ -53,9 +54,10 @@ setup_netns() {
 }
 
 start_tunnel() {
-    ip netns exec ns-srv env QUICFUSCATE_FEC_INTERLEAVE=0 "$B" server --cert "$CERT" --key "$KEY" \
+    ip netns exec ns-srv "$B" server --cert "$CERT" --key "$KEY" \
         --listen 10.10.0.1:4433 --admin-socket /tmp/qf-admin.sock \
-        --tun --tun-name qtun0 --tun-ip 10.0.1.1 --tun-netmask 255.255.255.0 -v \
+        --tun --tun-name qtun0 --tun-ip 10.0.1.1 --tun-netmask 255.255.255.0 \
+        --no-drop-privileges -v \
         > /tmp/ns-srv.log 2>&1 &
     sleep 3
 
@@ -63,7 +65,7 @@ start_tunnel() {
     qkey=$(echo '{"cmd":"qkey"}' | nc -U /tmp/qf-admin.sock 2>/dev/null | \
         python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["data"]["qkey"])' 2>/dev/null)
 
-    ip netns exec ns-cli env QUICFUSCATE_FEC_INTERLEAVE=0 "$B" client --remote 10.10.0.1:4433 --url https://10.10.0.1/ \
+    ip netns exec ns-cli "$B" client --remote 10.10.0.1:4433 --url https://10.10.0.1/ \
         --qkey "$qkey" --ca-file "$CA" --verify-peer \
         --tun --tun-name qtun0 --tun-ip 10.0.1.2 --tun-netmask 255.255.255.0 --no-utls -v \
         > /tmp/ns-cli.log 2>&1 &
@@ -111,14 +113,14 @@ fi
 echo "Phase 1: Clean link (0% loss)..."
 loss1=$(ping_phase 50 "1")
 
-# Phase 2: Inject 20% loss — FEC escalates (live transition)
+# Phase 2: Inject 20% loss - FEC escalates (live transition)
 echo "Phase 2: Inject 20% loss (FEC escalates)..."
 ip netns exec ns-cli tc qdisc add dev veth-cli root netem loss 20%
 sleep 2  # Let FEC detect loss and start transition
 loss2=$(ping_phase 50 "2")
 ip netns exec ns-cli tc qdisc del dev veth-cli root 2>/dev/null
 
-# Phase 3: Remove loss — FEC de-escalates (live transition)
+# Phase 3: Remove loss - FEC de-escalates (live transition)
 echo "Phase 3: Remove loss (FEC de-escalates)..."
 sleep 3  # Wait for de-escalation
 loss3=$(ping_phase 50 "3")

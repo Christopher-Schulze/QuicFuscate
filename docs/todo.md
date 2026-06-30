@@ -2,7 +2,7 @@
 
 ## Active TODO Backlog
 
-**Current State (2026-06-30)**: Protocol optimization wave COMPLETE (TODO-389..412). Radical replan wave TODO-413..418 ALL DONE. TUN VPN data plane TODO-422 DONE. **FEC E2E tests TODO-423 DONE** - 12 Rust integration tests + 2 shell scripts, wire format seq bug fixed, broderick all PASS. **FEC benchmarks TODO-424 DONE** - 6 Criterion benchmark groups. **FEC network adversity TODO-425 DONE** - 6 tc-netem tests, broderick 25/25 PASS. **FEC memory pressure TODO-426 DONE** - 7 Rust integration tests, all pass. **FEC mode transitions TODO-427 DONE** - 6 Rust tests + 1 shell script, broderick all PASS. **FEC adaptive optimization TODO-428 DONE** - bandwidth-aware overhead control + 6 adaptive tests, all pass. **FEC wave COMPLETE (TODO-423..428).** **Stealth Stack Coherence Wave TODO-464..471 DONE** - Engine uTLS/persona wiring, session-frozen identity, fronting policy rationalization, randomized cover, Brain actuator ownership, Core H3/MASQUE ownership, protocol-mimicry truth, and WebTransport cover. **CI/App Backend Release Gate TODO-472 DONE** - GitHub `CI` (`28461670844`), `Clippy Matrix` (`28461670906`), and `Release Build` (`28461670799`) are green on `09cb9f2`; CI now validates the Tauri native backend with `cargo check` and `cargo test`. Server `broderick` Go 1.26.4. GitHub contributors: only `Christopher-Schulze` - no Devin/Claude co-authors.
+**Current State (2026-06-30)**: Protocol optimization wave COMPLETE (TODO-389..412). Radical replan wave TODO-413..418 ALL DONE. TUN VPN data plane TODO-422 DONE. **FEC E2E tests TODO-423 DONE** - 12 Rust integration tests + hardened Linux netns scripts, wire format seq bug fixed, broderick all PASS. **FEC benchmarks TODO-424 DONE** - 6 Criterion benchmark groups. **FEC network adversity TODO-425 DONE** - 6 tc-netem suites, broderick 25/25 PASS. **FEC memory pressure TODO-426 DONE** - 7 Rust integration tests, all pass. **FEC mode transitions TODO-427 DONE** - 6 Rust tests + 1 shell script, broderick all PASS. **FEC adaptive optimization TODO-428 DONE** - bandwidth-aware overhead control + 6 adaptive tests, all pass. **FEC wave COMPLETE (TODO-423..428).** **Stealth Stack Coherence Wave TODO-464..471 DONE** - Engine uTLS/persona wiring, session-frozen identity, fronting policy rationalization, randomized cover, Brain actuator ownership, Core H3/MASQUE ownership, protocol-mimicry truth, and WebTransport cover. **CI/App Backend Release Gate TODO-472 DONE** - GitHub `CI` (`28461670844`), `Clippy Matrix` (`28461670906`), and `Release Build` (`28461670799`) are green on `09cb9f2`; CI now validates the Tauri native backend with `cargo check` and `cargo test`. **Production E2E proof hardening TODO-473 DONE** - standalone TUN server pool aligns with CLI TUN IP/netmask, H3/MASQUE CONNECT-UDP carries QKey auth, server MASQUE datagrams are gated by live QKey transport/header auth, DNS leak proof shows raw_port_53_packets=0, and broderick release/netns gates are green. Server `broderick` Go 1.26.4. GitHub contributors: only `Christopher-Schulze` - no Devin/Claude co-authors.
 
 ## Active - Protocol Optimization Wave (2026-06-05)
 
@@ -11,9 +11,9 @@ Execution order: **Phase A (config + quick wins) -> Phase B (load path) -> Phase
 | ID | Phase | Priority | Title | Status |
 |----|-------|----------|-------|--------|
 | TODO-389 | A | P0 | Fix `aegis128x4`/`x8` config override mapping to Aegis-L only | **DONE** |
-| TODO-390 | A | P0 | AEAD backend selection uses MTU workload length, not Initial size | **SCRAP** — premise incorrect: code already used `TYPICAL_1RTT_PAYLOAD_LEN`=1400, not Initial sizing. Constant renamed to `DEFAULT_DATA_PLANE_AEAD_LEN` for documentation clarity; regression guard test added in simd.rs |
+| TODO-390 | A | P0 | AEAD backend selection uses MTU workload length, not Initial size | **SCRAP** - premise incorrect: code already used `TYPICAL_1RTT_PAYLOAD_LEN`=1400, not Initial sizing. Constant renamed to `DEFAULT_DATA_PLANE_AEAD_LEN` for documentation clarity; regression guard test added in simd.rs |
 | TODO-391 | A | P1 | Eliminate double QUIC header parse in `Connection::recv` | **DONE** (recv threads pre_parsed_hdr through decrypt paths; Retry client branch now reuses pre-parsed header instead of re-parsing) |
-| TODO-392 | A | P1 | Eliminate `FecPacket::clone()` on FEC send hot path | **DONE** (SharedFecBuffer Arc-backed design already makes source-packet clone a refcount bump, no payload copy; added regression test guarding zero-copy clone property; transition path audited — 3 handles minimal) |
+| TODO-392 | A | P1 | Eliminate `FecPacket::clone()` on FEC send hot path | **DONE** (SharedFecBuffer Arc-backed design already makes source-packet clone a refcount bump, no payload copy; added regression test guarding zero-copy clone property; transition path audited - 3 handles minimal) |
 | TODO-393 | A | P1 | Reuse AEGIS cipher state across packets (avoid per-PN init) | **DONE** (state stored persistently in AEAD struct; `new` only on first packet, `reinit` reuses allocation thereafter; differential test proves reinit output byte-identical to fresh-new per packet across 64 counters) |
 | TODO-394 | B | P1 | Replace `sent_bytes_by_pn` full-scan ACK accounting | **DONE** |
 | TODO-395 | B | P1 | MORUS seal/open in-place on trait path (remove `to_vec` copies) | **DONE** (trait path already calls encrypt/decrypt_in_place_optimized directly on caller buffer; SIMD _inner fns write in-place via chunks_exact_mut; to_vec only in test/allocating convenience methods; added trait-path differential + forgery regression test) |
@@ -45,7 +45,7 @@ Pre-loop cleanup tasks completed before handing work to the continuous loop.
 
 | ID | Priority | Title | Status | Commit / Result |
 |----|----------|-------|--------|-----------------|
-| TODO-419 | P0 | Fix CI: `linux-fastpath-gates` `uring_batch` chunked-send stale CQE | **DONE** | `1dd8a3b` — CI all green |
+| TODO-419 | P0 | Fix CI: `linux-fastpath-gates` `uring_batch` chunked-send stale CQE | **DONE** | `1dd8a3b` - CI all green |
 | TODO-420 | P0 | Update `broderick` Go toolchain 1.22.2 → 1.26.4 | **DONE** | `go version go1.26.4 linux/arm64` |
 | TODO-421 | P0 | Verify GitHub contributors: no Devin/Claude co-authors | **DONE** | API shows only `Christopher-Schulze` |
 
@@ -59,7 +59,7 @@ client Finished delivery are all fixed and on `main` (commits `2b9c880`, `557214
 
 | ID | Priority | Title | Status | Depends On |
 |----|----------|-------|--------|------------|
-| TODO-422 | P1 | TUN VPN data plane end-to-end via MASQUE (CONNECT-UDP capsule <-> TUN routing) | **DONE** — Option A (MASQUE) implemented both directions: client uplink via `http3_send_body_chunk` → `send_masque_datagram`, server downlink via `send_masque_downlink` on peer-initiated CONNECT-UDP flow, downlink drain via `drain_masque_datagrams` → `masque_datagram_cb` → TUN write. E2E test harness at `scripts/tests/tun-e2e-netns.sh`. Commits `367d56f`..`8474f3c`. | — |
+| TODO-422 | P1 | TUN VPN data plane end-to-end via MASQUE (CONNECT-UDP capsule <-> TUN routing) | **DONE** - Option A (MASQUE) implemented both directions: client uplink via `http3_send_body_chunk` → `send_masque_datagram`, server downlink via `send_masque_downlink` on peer-initiated CONNECT-UDP flow, downlink drain via `drain_masque_datagrams` → `masque_datagram_cb` → TUN write. E2E test harness at `scripts/tests/tun-e2e-netns.sh`. Commits `367d56f`..`8474f3c`. | - |
 
 Detail file: `docs/todo/todo-422-tun-vpn-data-plane-masque.md`.
 
@@ -77,17 +77,17 @@ network adversity. This wave closes all those gaps and deep-optimizes FEC for pr
 
 | ID | Phase | Priority | Title | Status | Depends On |
 |----|-------|----------|-------|--------|------------|
-| TODO-423 | F | P0 | E2E FEC tests through real QUIC transport (netns + tc-netem) | **DONE** — 12 Rust integration tests + 2 shell scripts (loss sweep + burst). Wire format seq bug fixed. Broderick: 5/5 ping tests PASS, 2/2 burst tests PASS. | TODO-422 |
-| TODO-424 | F | P1 | FEC full-stack performance benchmarks (encode/decode pipeline, mode switch, streaming) | **DONE** — 6 Criterion benchmark groups (encode/decode/transition/streaming/lazy/window-burst). Sample results: Zero 134ns, Normal 977ns, transition 147ns. | TODO-423 |
-| TODO-425 | F | P1 | FEC under network adversity (tc-netem loss/jitter/bandwidth/RTT simulation) | **DONE** — 6 tc-netem adversity tests (loss/jitter/bandwidth/RTT/combined/recovery). Broderick: 25/25 PASS. | TODO-423 |
-| TODO-426 | F | P1 | FEC memory pressure and resource efficiency tests | **DONE** — 7 Rust integration tests (pool exhaustion, queue bounding, memory scaling, recycling, transition leak, sustained load, telemetry). All pass. | TODO-423 |
-| TODO-427 | F | P1 | FEC mode transition tests under active load | **DONE** — 6 Rust tests (key transitions, bidirectional, burst, idle-then-burst, flapping, no-dup) + 1 shell script (3-phase E2E). Broderick: all PASS. | TODO-423 |
-| TODO-428 | F | P1 | FEC adaptive intelligence deep optimization | **DONE** — bandwidth-aware overhead control + 6 adaptive intelligence tests (scarce/plentiful/minimum/zero-loss/mode-selection/hysteresis). All pass. | TODO-423, TODO-424, TODO-425 |
+| TODO-423 | F | P0 | E2E FEC tests through real QUIC transport (netns + tc-netem) | **DONE** - 12 Rust integration tests + 2 shell scripts (loss sweep + burst). Wire format seq bug fixed. Broderick: 5/5 ping tests PASS, 2/2 burst tests PASS. | TODO-422 |
+| TODO-424 | F | P1 | FEC full-stack performance benchmarks (encode/decode pipeline, mode switch, streaming) | **DONE** - 6 Criterion benchmark groups (encode/decode/transition/streaming/lazy/window-burst). Sample results: Zero 134ns, Normal 977ns, transition 147ns. | TODO-423 |
+| TODO-425 | F | P1 | FEC under network adversity (tc-netem loss/jitter/bandwidth/RTT simulation) | **DONE** - 6 tc-netem adversity tests (loss/jitter/bandwidth/RTT/combined/recovery). Broderick: 25/25 PASS. | TODO-423 |
+| TODO-426 | F | P1 | FEC memory pressure and resource efficiency tests | **DONE** - 7 Rust integration tests (pool exhaustion, queue bounding, memory scaling, recycling, transition leak, sustained load, telemetry). All pass. | TODO-423 |
+| TODO-427 | F | P1 | FEC mode transition tests under active load | **DONE** - 6 Rust tests (key transitions, bidirectional, burst, idle-then-burst, flapping, no-dup) + 1 shell script (3-phase E2E). Broderick: all PASS. | TODO-423 |
+| TODO-428 | F | P1 | FEC adaptive intelligence deep optimization | **DONE** - bandwidth-aware overhead control + 6 adaptive intelligence tests (scarce/plentiful/minimum/zero-loss/mode-selection/hysteresis). All pass. | TODO-423, TODO-424, TODO-425 |
 
 Detail files: `docs/todo/todo-42{3,4,5,6,7,8}-*.md`.
 
 **Resource efficiency philosophy:** FEC should be invisible when the link is clean and heroic when
-the link is broken. In extreme loss scenarios, FEC may consume significant resources — but the link
+the link is broken. In extreme loss scenarios, FEC may consume significant resources - but the link
 stays up. Resources are cheap, liveness is expensive.
 
 ---
@@ -115,64 +115,64 @@ closes every gap to reach a complete, production-ready VPN protocol.
 
 **Execution order: Wave G (P0 Critical) → Wave H (P1 Security) → Wave I (P1 Platform/Deploy) → Wave J (P1-P2 Transport/Advanced)**
 
-### Wave G — P0 Critical Blockers (must fix before any production use)
+### Wave G - P0 Critical Blockers (must fix before any production use)
 
 | ID | Phase | Priority | Title | Status | Depends On |
 |----|-------|----------|-------|--------|------------|
-| TODO-429 | G | P0 | Kill switch integration into client runtime | **DONE** — KillSwitch wired into QuicFuscateEngine: `kill_switch: Option<Arc<KillSwitch>>` field, `SecurityConfig.kill_switch` config option, enable on `start()`, `on_vpn_connected()` on connect, `on_vpn_disconnected()` on disconnect, `handle_connection_loss()` on heartbeat timeout, `Drop` impl cleanup, `cleanup_stale_rules()` for crash recovery. 4 tests pass. | — |
-| TODO-430 | G | P0 | Multi-client TUN forwarding fix | **DONE** — Server routes TUN packets by destination IP using `parse_ip_dest()` (IPv4 + IPv6). Each client gets unique TUN IP from IP pool. Session lookup by client_ip → SocketAddr. 7 tests pass. | TODO-422 |
-| TODO-431 | G | P0 | IPv6 support (routing, NAT, TUN addressing) | **DONE** — Ipv6Pool, ServerConfig IPv6 fields, Session dual-stack, RoutingManager IPv6 NAT (ip6tables/pf inet6/NetNat v6), TunConfig ip6/prefix6, CLI --tun-ip6/--tun-prefix6, parse_ipv6_dest, IPv6 forwarding. 13 tests pass. | — |
-| TODO-432 | G | P0 | ICMP handling (echo reply, PMTUD packet-too-big) | **DONE** — New `src/implementations/server/icmp.rs` module with parse_icmpv4, build_echo_reply, build_icmp_unreachable. Server TUN forwarding loop handles echo requests to server IP and generates host-unreachable for unroutable packets. 8 unit tests pass. | — |
-| TODO-433 | G | P0 | InterleavedDecoder consecutive-ID bug fix | **DONE** — Added `depth` field to Decoder8/16/4. `source_id_for()` computes `base_id - (k-1-j) * depth` in interleaved mode. Threaded depth through DecoderVariant/LazyDecoder/InterleavedDecoder. Removed QUICFUSCATE_FEC_INTERLEAVE=0 workaround from all E2E tests. All 165 FEC tests pass with interleave enabled. | — |
-| TODO-434 | G | P0 | Production PKI (CA hierarchy, cert generation, no self-signed fallback) | **DONE** — `src/pki/mod.rs`: CA hierarchy (Root CA → Intermediate CA → Server Leaf), ECDSA P-256, `generate_hierarchy()`, `ensure_pki()` for auto-init, PEM export with restrictive key permissions (0600). `time` crate added for cert validity. | — |
+| TODO-429 | G | P0 | Kill switch integration into client runtime | **DONE** - KillSwitch wired into QuicFuscateEngine: `kill_switch: Option<Arc<KillSwitch>>` field, `SecurityConfig.kill_switch` config option, enable on `start()`, `on_vpn_connected()` on connect, `on_vpn_disconnected()` on disconnect, `handle_connection_loss()` on heartbeat timeout, `Drop` impl cleanup, `cleanup_stale_rules()` for crash recovery. 4 tests pass. | - |
+| TODO-430 | G | P0 | Multi-client TUN forwarding fix | **DONE** - Server routes TUN packets by destination IP using `parse_ip_dest()` (IPv4 + IPv6). Each client gets unique TUN IP from IP pool. Session lookup by client_ip → SocketAddr. 7 tests pass. | TODO-422 |
+| TODO-431 | G | P0 | IPv6 support (routing, NAT, TUN addressing) | **DONE** - Ipv6Pool, ServerConfig IPv6 fields, Session dual-stack, RoutingManager IPv6 NAT (ip6tables/pf inet6/NetNat v6), TunConfig ip6/prefix6, CLI --tun-ip6/--tun-prefix6, parse_ipv6_dest, IPv6 forwarding. 13 tests pass. | - |
+| TODO-432 | G | P0 | ICMP handling (echo reply, PMTUD packet-too-big) | **DONE** - New `src/implementations/server/icmp.rs` module with parse_icmpv4, build_echo_reply, build_icmp_unreachable. Server TUN forwarding loop handles echo requests to server IP and generates host-unreachable for unroutable packets. 8 unit tests pass. | - |
+| TODO-433 | G | P0 | InterleavedDecoder consecutive-ID bug fix | **DONE** - Added `depth` field to Decoder8/16/4. `source_id_for()` computes `base_id - (k-1-j) * depth` in interleaved mode. Threaded depth through DecoderVariant/LazyDecoder/InterleavedDecoder. Removed QUICFUSCATE_FEC_INTERLEAVE=0 workaround from all E2E tests. All 165 FEC tests pass with interleave enabled. | - |
+| TODO-434 | G | P0 | Production PKI (CA hierarchy, cert generation, no self-signed fallback) | **DONE** - `src/pki/mod.rs`: CA hierarchy (Root CA → Intermediate CA → Server Leaf), ECDSA P-256, `generate_hierarchy()`, `ensure_pki()` for auto-init, PEM export with restrictive key permissions (0600). `time` crate added for cert validity. | - |
 
-### Wave H — P1 Security Hardening
-
-| ID | Phase | Priority | Title | Status | Depends On |
-|----|-------|----------|-------|--------|------------|
-| TODO-435 | H | P1 | DNS through tunnel (DoH wire-in, DNS proxy, server forwarding) | **DONE** — `src/dns/mod.rs` provides RFC 1035 parsing, DoH client helpers, upstream forwarding, shared DoH client cache, and NXDOMAIN fallback. `src/implementations/server/mod.rs` now wires DNS into the live MASQUE/TUN path: IPv4 and IPv6 UDP/53 client packets are intercepted before TUN egress, resolved through configured server upstream resolvers, rebuilt with correct IP/UDP checksums, and queued back to the client over MASQUE downlink. `scripts/tests/tun-e2e-dns-leak-netns.sh` verifies a real Linux netns client/server TUN/MASQUE session with DNS success and `raw_port_53_packets=0` on the client underlay. | TODO-429 |
-| TODO-436 | H | P1 | Key rotation & immediate revocation (incl. race condition fix) | **DONE** — `src/implementations/server/revocation.rs` and `src/implementations/server/mod.rs` now enforce runtime revocation: revoked QKeys are rejected during initial auth, successful auth associates SessionId↔QKey, admin revoke removes registry entries and closes active sessions, pending auth cannot complete after revocation, disconnect/timeout/reconcile paths dissociate tracker state, and pending scheduled revocations are processed in housekeeping. Automatic raw-QKey generation is intentionally not enabled without a client distribution channel; production lifecycle is TTL + admin issue/revoke. | TODO-434 |
-| TODO-437 | H | P1 | IPv6 + DNS leak prevention | **DONE** — Kill switch now applies ip6tables rules in parallel with iptables: `ensure_chain()`, `block_traffic()`, `allow_vpn_traffic()`, `cleanup()`, and `cleanup_stale()` all handle both IPv4 and IPv6. IPv6 rules allow loopback + tun interface, drop everything else. Best-effort for ip6tables (some systems disable IPv6). | TODO-429 |
-| TODO-438 | H | P1 | Traffic isolation between clients | **DONE** — `src/implementations/server/isolation.rs`: `ClientIsolationManager` (source IP validation, inter-client traffic blocking), `IsolationError` (spoofing, inter-client), iptables/nftables rule generation, `IsolationStats` counters. | TODO-430 |
-| TODO-439 | H | P1 | Security audit logging (SIEM-compatible) | **DONE** — `src/audit/mod.rs`: Hash-chained audit log (SHA-256), `AuditLog` with `verify_chain()` tamper detection, `AuditEntry` with 18 event types, NDJSON output for SIEM, `AuditSeverity` levels, chain resume on restart. | — |
-| TODO-440 | H | P1 | Key erasure & memory locking (mlock, zeroize) | **DONE** — Drop impls with zeroize added for AEGIS (Aegis128LAead, Aegis128X4Aead, Aegis128X8Aead, Aegis128L, Aegis128X4, Aegis128X8), AES-GCM (AesGcm128 including expanded round keys on x86_64), and MORUS (MorusAead, Morus1280State). AesBlock::zeroize() helper added. mlock not implemented (requires platform-specific unsafe code, deferred to TODO-441 privilege dropping wave). | — |
-| TODO-441 | H | P1 | Privilege dropping (post-bind setuid/setgid) | **DONE** — `src/privilege/`: `drop_privileges()` (setgid before setuid, POSIX order), `check_capabilities()` (Linux CapEff parsing, `CAP_NET_ADMIN`/`CAP_NET_RAW`/`CAP_NET_BIND_SERVICE`), `--no-drop-privileges` CLI flag, wired into `run_server()` post-setup. | — |
-| TODO-456 | H | P1 | Auth rate limiting (brute-force protection) | **DONE** — New `AuthRateLimiter` struct in limits.rs: per-IP sliding-window rate limiting for QKey auth attempts. Default: 10 failed attempts per 60s window. Integrated into `build_live_server_client_init()`: checks before QKey lookup, records failures, clears on success. `LiveServerState` holds `Arc<Mutex<AuthRateLimiter>>`. 4 unit tests pass. | — |
-| TODO-457 | H | P1 | Mutual auth & replay protection for QKey transport | **DONE** — `src/implementations/server/auth_frame.rs`: `AuthFrame` (HMAC-SHA256, constant-time verify, wire format). `src/implementations/server/replay_window.rs`: `ReplayWindow` (sliding bitmap, SHA-256 nonce indexing). Wired into `QKeyRegistry::verify_auth_frame()`. | TODO-434 |
-| TODO-458 | H | P1 | QKey token storage encryption at rest | **DONE** — QKey registry now supports AES-256-GCM encryption at rest via `QUICFUSCATE_QKEY_ENC_KEY` env var (64-char hex = 32 bytes). `encrypt_payload()`/`decrypt_payload()` use internal ChaCha20-Poly1305 with random nonce. Magic prefix `QFENC1` identifies encrypted files. Backward compatible: plaintext files still load when no key is set. File permissions remain 0o600. | TODO-440 |
-
-### Wave I — P1 Platform & Deployment
+### Wave H - P1 Security Hardening
 
 | ID | Phase | Priority | Title | Status | Depends On |
 |----|-------|----------|-------|--------|------------|
-| TODO-442 | I | P1 | Windows TUN (Wintun integration) | **DONE** — `src/interface/wintun.rs`: Dynamic `wintun.dll` loading via `LoadLibraryA`/`GetProcAddress`, all 8 Wintun API functions resolved, `WintunDevice` with read/write/close, IP assignment via `netsh`, `unsafe impl Send+Sync`, non-Windows stub. `windows-sys` dep added. | — |
-| TODO-443 | I | P1 | Mobile platforms (iOS NetworkExtension, Android VpnService) | **SCRAP** — Mobile apps are out of scope. Desktop/server only. | — |
-| TODO-444 | I | P1 | nftables support (modern Linux firewall) | **DONE** — `src/firewall/mod.rs`: `FirewallBackend` enum (Iptables/Nftables), `detect_backend()` auto-detection, `nft_available()` check, `FirewallOps` trait, `NftablesKillSwitch` (inet table, default DROP), server routing nftables path. | TODO-429 |
-| TODO-445 | I | P1 | Per-client bandwidth limits & quotas | **DONE** — `src/implementations/server/bandwidth.rs`: `BandwidthLimiter` (token bucket, bytes/sec), `QuotaTracker` (cumulative quota per billing period), `PerClientBandwidthManager` (per-client limits + quotas), `BandwidthStats`, wired into `SessionManager`. | TODO-430 |
-| TODO-446 | I | P1 | Production logging (rotation, structured JSON, file output) | **DONE** — `src/logging.rs`: `SizeRotatingAppender` (100MB default, 5 files), JSON NDJSON format, syslog RFC 5424, `log::Log` trait impl, `LoggingConfig` with module-level overrides, file output with restrictive permissions. | — |
-| TODO-447 | I | P1 | Container deployment (Docker, docker-compose, K8s) | **DEFERRED** — Container deployment is explicitly out of scope for the current production-readiness pass. Docker/K8s/Helm were not built or validated; only the stale Rust fixed-version pin in `Dockerfile` was removed to keep the repository on the stable Rust channel everywhere. | — |
-| TODO-448 | I | P1 | Graceful shutdown (SIGTERM, drain mode, connection handoff) | **DONE** — `wait_shutdown_signal()` helper handles both SIGINT (ctrl_c) and SIGTERM on Unix, Ctrl+C on Windows. Server run loop and client run loop both use unified handler. `systemctl stop`, `docker stop`, K8s pod termination all trigger graceful shutdown with CONNECTION_CLOSE + TUN cleanup + kill switch disable. | — |
-| TODO-459 | I | P1 | DDoS protection hardening | **DONE** — Default per-IP rate limit lowered to 1,000 PPS (from 10,000). `RateLimitConfig.burst_size` decouples burst from steady-state. `GlobalRateLimiter` caps aggregate server-wide PPS (50,000 default) with PPS estimation. `EwmaAnomalyDetector` (EWMA spike detection, 3× threshold, auto-clear) wired into `allow_incoming_datagram()` — halves per-IP limits during anomalies. `GeoIpBlocker` (stub, graceful degradation without maxminddb) and `BlacklistSync` (TTL-based IP blocklist with manual/feed sync) wired into packet acceptance path. `prune_rate_limits_if_due()` feeds PPS to detector and prunes blacklist. | — |
-| TODO-460 | I | P1 | Install script fix (user creation, directory permissions) | **DONE** — `ensure_group()` + `ensure_user()` with dedicated group, `validate_prerequisites()` (iptables/ip/systemctl), `/var/log/quicfuscate` dir creation, `chmod 0700` state dir, `chmod 0750` config/log dirs, TOML validation via python3, post-start `systemctl is-active` verification. | — |
-| TODO-461 | I | P1 | TUN teardown retry & stale cleanup | **DONE** — `ServerHostResources::teardown()` retries routing teardown 3× with backoff (100ms, 200ms). `RoutingManager::cleanup_stale()` removes leftover iptables/pf/NetNat rules on startup before `setup()`. Linux/macOS/Windows all covered. | — |
+| TODO-435 | H | P1 | DNS through tunnel (DoH wire-in, DNS proxy, server forwarding) | **DONE** - `src/dns/mod.rs` provides RFC 1035 parsing, DoH client helpers, upstream forwarding, shared DoH client cache, and NXDOMAIN fallback. `src/implementations/server/mod.rs` now wires DNS into the live MASQUE/TUN path: IPv4 and IPv6 UDP/53 client packets are intercepted before TUN egress, resolved through configured server upstream resolvers, rebuilt with correct IP/UDP checksums, and queued back to the client over MASQUE downlink. `scripts/tests/tun-e2e-dns-leak-netns.sh` verifies a real Linux netns client/server TUN/MASQUE session with DNS success and `raw_port_53_packets=0` on the client underlay. | TODO-429 |
+| TODO-436 | H | P1 | Key rotation & immediate revocation (incl. race condition fix) | **DONE** - `src/implementations/server/revocation.rs` and `src/implementations/server/mod.rs` now enforce runtime revocation: revoked QKeys are rejected during initial auth, successful auth associates SessionId↔QKey, admin revoke removes registry entries and closes active sessions, pending auth cannot complete after revocation, disconnect/timeout/reconcile paths dissociate tracker state, and pending scheduled revocations are processed in housekeeping. Automatic raw-QKey generation is intentionally not enabled without a client distribution channel; production lifecycle is TTL + admin issue/revoke. | TODO-434 |
+| TODO-437 | H | P1 | IPv6 + DNS leak prevention | **DONE** - Kill switch now applies ip6tables rules in parallel with iptables: `ensure_chain()`, `block_traffic()`, `allow_vpn_traffic()`, `cleanup()`, and `cleanup_stale()` all handle both IPv4 and IPv6. IPv6 rules allow loopback + tun interface, drop everything else. Best-effort for ip6tables (some systems disable IPv6). | TODO-429 |
+| TODO-438 | H | P1 | Traffic isolation between clients | **DONE** - `src/implementations/server/isolation.rs`: `ClientIsolationManager` (source IP validation, inter-client traffic blocking), `IsolationError` (spoofing, inter-client), iptables/nftables rule generation, `IsolationStats` counters. | TODO-430 |
+| TODO-439 | H | P1 | Security audit logging (SIEM-compatible) | **DONE** - `src/audit/mod.rs`: Hash-chained audit log (SHA-256), `AuditLog` with `verify_chain()` tamper detection, `AuditEntry` with 18 event types, NDJSON output for SIEM, `AuditSeverity` levels, chain resume on restart. | - |
+| TODO-440 | H | P1 | Key erasure & memory locking (mlock, zeroize) | **DONE** - Drop impls with zeroize added for AEGIS (Aegis128LAead, Aegis128X4Aead, Aegis128X8Aead, Aegis128L, Aegis128X4, Aegis128X8), AES-GCM (AesGcm128 including expanded round keys on x86_64), and MORUS (MorusAead, Morus1280State). AesBlock::zeroize() helper added. mlock not implemented (requires platform-specific unsafe code, deferred to TODO-441 privilege dropping wave). | - |
+| TODO-441 | H | P1 | Privilege dropping (post-bind setuid/setgid) | **DONE** - `src/privilege/`: `drop_privileges()` (setgid before setuid, POSIX order), `check_capabilities()` (Linux CapEff parsing, `CAP_NET_ADMIN`/`CAP_NET_RAW`/`CAP_NET_BIND_SERVICE`), `--no-drop-privileges` CLI flag, wired into `run_server()` post-setup. | - |
+| TODO-456 | H | P1 | Auth rate limiting (brute-force protection) | **DONE** - New `AuthRateLimiter` struct in limits.rs: per-IP sliding-window rate limiting for QKey auth attempts. Default: 10 failed attempts per 60s window. Integrated into `build_live_server_client_init()`: checks before QKey lookup, records failures, clears on success. `LiveServerState` holds `Arc<Mutex<AuthRateLimiter>>`. 4 unit tests pass. | - |
+| TODO-457 | H | P1 | Mutual auth & replay protection for QKey transport | **DONE** - `src/implementations/server/auth_frame.rs`: `AuthFrame` (HMAC-SHA256, constant-time verify, wire format). `src/implementations/server/replay_window.rs`: `ReplayWindow` (sliding bitmap, SHA-256 nonce indexing). Wired into `QKeyRegistry::verify_auth_frame()`. | TODO-434 |
+| TODO-458 | H | P1 | QKey token storage encryption at rest | **DONE** - QKey registry now supports AES-256-GCM encryption at rest via `QUICFUSCATE_QKEY_ENC_KEY` env var (64-char hex = 32 bytes). `encrypt_payload()`/`decrypt_payload()` use internal ChaCha20-Poly1305 with random nonce. Magic prefix `QFENC1` identifies encrypted files. Backward compatible: plaintext files still load when no key is set. File permissions remain 0o600. | TODO-440 |
 
-### Wave J — P1-P2 Transport & Advanced
+### Wave I - P1 Platform & Deployment
 
 | ID | Phase | Priority | Title | Status | Depends On |
 |----|-------|----------|-------|--------|------------|
-| TODO-449 | J | P1 | Multipath support (WiFi+LTE bonding) | **DONE** — `src/transport/path.rs`: `PathManager` (multi-path, `best_path_for_send()` by RTT×congestion score), `PathState` (per-path CC, RTT, cwnd, validation). `src/transport/path_scheduler.rs`: `PathScheduler` (RoundRobin, LowestLatency, WeightedProportional). Config: `multipath_enabled`, `max_paths`. | — |
-| TODO-450 | J | P1 | Connection migration fix (gentle cwnd handling) | **DONE** — `Recovery::on_path_change()` halves cwnd (50% reduction) instead of resetting to INITIAL_WINDOW. `bytes_in_flight` preserved. Wired into `commit_path_validation()` in connection.rs. CC trait `set_cwnd()` used by all implementations. Test `test_gentle_path_migration_preserves_cwnd` passes. | — |
-| TODO-451 | J | P1 | PMTUD enablement (DPLPMTUD, black hole detection) | **DONE** — DPLPMTUD enabled by default (RFC 8899). `PmtuState` state machine with binary-search probing, black-hole detection (10s no-ACK → reset to PMTU_MIN), wired into `Connection::send()` (MTU clamp + PING/PADDING probe injection) and `account_sent_bytes_for_ack_ranges_with_delay()` (probe ACK confirm, probe loss backoff, `on_any_ack` watchdog). `pmtu_discovery_enabled` default flipped to `true` in config. | TODO-432 |
-| TODO-452 | J | P2 | CUBIC congestion control | **DONE** — `src/transport/cc/cubic.rs`: Full CUBIC (RFC 9438) — cubic window function W(t)=C*(t-K)^3+W_max, TCP friendliness, HyStart++ (RFC 9406), fast convergence, beta=0.7. `Cubic` + `StealthCubic` variants in Algorithm/CcImpl enums. | — |
-| TODO-453 | J | P2 | QUIC version negotiation | **DONE** — `PROTOCOL_VERSION_V2` (0x6b3343cf, RFC 9369), `is_supported_version()`, `Config.supported_versions` field, `negotiate_version()` (highest common), `generate_version_negotiation_packet()` + `parse_version_negotiation()`, v2 salt mapping fix in `quic_kdf.rs`. | — |
-| TODO-454 | J | P2 | NAT traversal (STUN/TURN/ICE for symmetric NAT) | **DONE** — `src/transport/nat.rs`: `StunClient` (RFC 5389, XOR-MAPPED-ADDRESS), `IceAgent` (candidate gathering, pair selection per RFC 8445), `TurnClient` (RFC 5766, Allocate/CreatePermission/SendIndication), `NatTraversalConfig` in Config. | — |
-| TODO-455 | J | P2 | Traffic analysis defense (chaffing, constant rates, full padding) | **DONE** — `TrafficAnalysisDefense` enum (Off/FullPadding/ConstantRate) in config.rs. FullPadding pads all 1-RTT packets to `max_udp_payload_size`. ConstantRate mode activates `ChaffGenerator` (jittered ±10% dummy packet injection with PING+PADDING, ack-eliciting for bidirectional cover traffic). ChaffGenerator wired into `Connection::send()` — injects chaff when no real ack-eliciting payload is due, resets chaff clock on real traffic. `CHAFF_PADDING_FRAME_BYTE` used in `generate_chaff()`. | — |
-| TODO-462 | J | P2 | TCP/ICMP fingerprint obfuscation | **DONE** — `src/stealth/fingerprint.rs`: `OsFingerprintProfile` (Linux/Windows/MacOS/Android), `PacketNormalizer` (TTL, TCP window, MSS, option reordering, IP ID, DF bit), RFC 1624 incremental checksum, wired into TUN egress + ICMP reply. | — |
-| TODO-463 | J | P2 | Loss detection improvements (RACK, time-based, RTT variance) | **DONE** — EWMA SRTT + RTTVAR smoothing (RFC 6298) in `Recovery::update_rtt()`. `rtt_var()` and `min_rtt()` getters. Time-based loss detection (`time_loss_deadline()`, RFC 9002 §6.1.2: threshold = 9/8 × SRTT). RACK loss detection (`rack_is_lost()`, RFC 8985: reordering window = SRTT + RTTVAR). All methods tested with 4 dedicated tests. | — |
+| TODO-442 | I | P1 | Windows TUN (Wintun integration) | **DONE** - `src/interface/wintun.rs`: Dynamic `wintun.dll` loading via `LoadLibraryA`/`GetProcAddress`, all 8 Wintun API functions resolved, `WintunDevice` with read/write/close, IP assignment via `netsh`, `unsafe impl Send+Sync`, non-Windows stub. `windows-sys` dep added. | - |
+| TODO-443 | I | P1 | Mobile platforms (iOS NetworkExtension, Android VpnService) | **SCRAP** - Mobile apps are out of scope. Desktop/server only. | - |
+| TODO-444 | I | P1 | nftables support (modern Linux firewall) | **DONE** - `src/firewall/mod.rs`: `FirewallBackend` enum (Iptables/Nftables), `detect_backend()` auto-detection, `nft_available()` check, `FirewallOps` trait, `NftablesKillSwitch` (inet table, default DROP), server routing nftables path. | TODO-429 |
+| TODO-445 | I | P1 | Per-client bandwidth limits & quotas | **DONE** - `src/implementations/server/bandwidth.rs`: `BandwidthLimiter` (token bucket, bytes/sec), `QuotaTracker` (cumulative quota per billing period), `PerClientBandwidthManager` (per-client limits + quotas), `BandwidthStats`, wired into `SessionManager`. | TODO-430 |
+| TODO-446 | I | P1 | Production logging (rotation, structured JSON, file output) | **DONE** - `src/logging.rs`: `SizeRotatingAppender` (100MB default, 5 files), JSON NDJSON format, syslog RFC 5424, `log::Log` trait impl, `LoggingConfig` with module-level overrides, file output with restrictive permissions. | - |
+| TODO-447 | I | P1 | Container deployment (Docker, docker-compose, K8s) | **DEFERRED** - Container deployment is explicitly out of scope for the current production-readiness pass. Docker/K8s/Helm were not built or validated; only the stale Rust fixed-version pin in `Dockerfile` was removed to keep the repository on the stable Rust channel everywhere. | - |
+| TODO-448 | I | P1 | Graceful shutdown (SIGTERM, drain mode, connection handoff) | **DONE** - `wait_shutdown_signal()` helper handles both SIGINT (ctrl_c) and SIGTERM on Unix, Ctrl+C on Windows. Server run loop and client run loop both use unified handler. `systemctl stop`, `docker stop`, K8s pod termination all trigger graceful shutdown with CONNECTION_CLOSE + TUN cleanup + kill switch disable. | - |
+| TODO-459 | I | P1 | DDoS protection hardening | **DONE** - Default per-IP rate limit lowered to 1,000 PPS (from 10,000). `RateLimitConfig.burst_size` decouples burst from steady-state. `GlobalRateLimiter` caps aggregate server-wide PPS (50,000 default) with PPS estimation. `EwmaAnomalyDetector` (EWMA spike detection, 3× threshold, auto-clear) wired into `allow_incoming_datagram()` - halves per-IP limits during anomalies. `GeoIpBlocker` (stub, graceful degradation without maxminddb) and `BlacklistSync` (TTL-based IP blocklist with manual/feed sync) wired into packet acceptance path. `prune_rate_limits_if_due()` feeds PPS to detector and prunes blacklist. | - |
+| TODO-460 | I | P1 | Install script fix (user creation, directory permissions) | **DONE** - `ensure_group()` + `ensure_user()` with dedicated group, `validate_prerequisites()` (iptables/ip/systemctl), `/var/log/quicfuscate` dir creation, `chmod 0700` state dir, `chmod 0750` config/log dirs, TOML validation via python3, post-start `systemctl is-active` verification. | - |
+| TODO-461 | I | P1 | TUN teardown retry & stale cleanup | **DONE** - `ServerHostResources::teardown()` retries routing teardown 3× with backoff (100ms, 200ms). `RoutingManager::cleanup_stale()` removes leftover iptables/pf/NetNat rules on startup before `setup()`. Linux/macOS/Windows all covered. | - |
+
+### Wave J - P1-P2 Transport & Advanced
+
+| ID | Phase | Priority | Title | Status | Depends On |
+|----|-------|----------|-------|--------|------------|
+| TODO-449 | J | P1 | Multipath support (WiFi+LTE bonding) | **DONE** - `src/transport/path.rs`: `PathManager` (multi-path, `best_path_for_send()` by RTT×congestion score), `PathState` (per-path CC, RTT, cwnd, validation). `src/transport/path_scheduler.rs`: `PathScheduler` (RoundRobin, LowestLatency, WeightedProportional). Config: `multipath_enabled`, `max_paths`. | - |
+| TODO-450 | J | P1 | Connection migration fix (gentle cwnd handling) | **DONE** - `Recovery::on_path_change()` halves cwnd (50% reduction) instead of resetting to INITIAL_WINDOW. `bytes_in_flight` preserved. Wired into `commit_path_validation()` in connection.rs. CC trait `set_cwnd()` used by all implementations. Test `test_gentle_path_migration_preserves_cwnd` passes. | - |
+| TODO-451 | J | P1 | PMTUD enablement (DPLPMTUD, black hole detection) | **DONE** - DPLPMTUD enabled by default (RFC 8899). `PmtuState` state machine with binary-search probing, black-hole detection (10s no-ACK → reset to PMTU_MIN), wired into `Connection::send()` (MTU clamp + PING/PADDING probe injection) and `account_sent_bytes_for_ack_ranges_with_delay()` (probe ACK confirm, probe loss backoff, `on_any_ack` watchdog). `pmtu_discovery_enabled` default flipped to `true` in config. | TODO-432 |
+| TODO-452 | J | P2 | CUBIC congestion control | **DONE** - `src/transport/cc/cubic.rs`: Full CUBIC (RFC 9438) - cubic window function W(t)=C*(t-K)^3+W_max, TCP friendliness, HyStart++ (RFC 9406), fast convergence, beta=0.7. `Cubic` + `StealthCubic` variants in Algorithm/CcImpl enums. | - |
+| TODO-453 | J | P2 | QUIC version negotiation | **DONE** - `PROTOCOL_VERSION_V2` (0x6b3343cf, RFC 9369), `is_supported_version()`, `Config.supported_versions` field, `negotiate_version()` (highest common), `generate_version_negotiation_packet()` + `parse_version_negotiation()`, v2 salt mapping fix in `quic_kdf.rs`. | - |
+| TODO-454 | J | P2 | NAT traversal (STUN/TURN/ICE for symmetric NAT) | **DONE** - `src/transport/nat.rs`: `StunClient` (RFC 5389, XOR-MAPPED-ADDRESS), `IceAgent` (candidate gathering, pair selection per RFC 8445), `TurnClient` (RFC 5766, Allocate/CreatePermission/SendIndication), `NatTraversalConfig` in Config. | - |
+| TODO-455 | J | P2 | Traffic analysis defense (chaffing, constant rates, full padding) | **DONE** - `TrafficAnalysisDefense` enum (Off/FullPadding/ConstantRate) in config.rs. FullPadding pads all 1-RTT packets to `max_udp_payload_size`. ConstantRate mode activates `ChaffGenerator` (jittered ±10% dummy packet injection with PING+PADDING, ack-eliciting for bidirectional cover traffic). ChaffGenerator wired into `Connection::send()` - injects chaff when no real ack-eliciting payload is due, resets chaff clock on real traffic. `CHAFF_PADDING_FRAME_BYTE` used in `generate_chaff()`. | - |
+| TODO-462 | J | P2 | TCP/ICMP fingerprint obfuscation | **DONE** - `src/stealth/fingerprint.rs`: `OsFingerprintProfile` (Linux/Windows/MacOS/Android), `PacketNormalizer` (TTL, TCP window, MSS, option reordering, IP ID, DF bit), RFC 1624 incremental checksum, wired into TUN egress + ICMP reply. | - |
+| TODO-463 | J | P2 | Loss detection improvements (RACK, time-based, RTT variance) | **DONE** - EWMA SRTT + RTTVAR smoothing (RFC 6298) in `Recovery::update_rtt()`. `rtt_var()` and `min_rtt()` getters. Time-based loss detection (`time_loss_deadline()`, RFC 9002 §6.1.2: threshold = 9/8 × SRTT). RACK loss detection (`rack_is_lost()`, RFC 8985: reordering window = SRTT + RTTVAR). All methods tested with 4 dedicated tests. | - |
 
 Detail files: `docs/todo/todo-{434,435,436,437,438,439,440,441,442,444,445,446,447,449,450,451,452,453,454,455,456,457,458,459,462,463}-*.md`.
 
-**Production readiness philosophy:** QuicFuscate must be a complete VPN protocol — invisible when
+**Production readiness philosophy:** QuicFuscate must be a complete VPN protocol - invisible when
 the link is clean, heroic when the link is broken, and secure under all conditions. No traffic leaks,
 no data loss, no privilege escalation, no single point of failure. Every feature must be wired in,
 tested under real conditions, and documented.
@@ -206,8 +206,9 @@ not mutate the active persona mid-session.
 | TODO-470 | K | P1 | Protocol mimicry flag truth and config cleanup | **DONE** - flag now normalizes concrete H3/QPACK/TLS cover knobs | TODO-466 |
 | TODO-471 | K | P2 | WebTransport cover profile design and integration | **DONE** - WebTransport is integrated as bounded H3 cover, not a competing tunnel | TODO-467, TODO-469 |
 | TODO-472 | R | P0 | CI app backend release gate synchronization | **DONE** - GitHub CI, Clippy Matrix, Release Build, README, DOCUMENTATION, MAP, and TODO truth now point to the green `09cb9f2` checkpoint | TODO-215, TODO-217 |
+| TODO-473 | R | P0 | Linux production E2E proof hardening | **DONE** - Broderick release build, base TUN/MASQUE, DNS leak, FEC smoke, burst, transition, and netem-adversity gates are green; optional iperf TCP-to-server-TUN proof now skips instead of fake-passing when no throughput is measurable | TODO-422, TODO-423, TODO-425, TODO-435, TODO-457 |
 
-Detail files: `docs/todo/todo-{464,465,466,467,468,469,470,471,472}-*.md`.
+Detail files: `docs/todo/todo-{464,465,466,467,468,469,470,471,472,473}-*.md`.
 
 **Stealth stack result:** Performance mode is fast and coherent, not fronting-heavy. Intelligent
 mode is the default adaptive profile with stable identity and dynamic actuator tuning. Stealth and
@@ -225,7 +226,7 @@ experimental, or bound to explicit policy.
 
 | ID | Phase | Priority | Title | Status | Depends On |
 |----|-------|----------|-------|--------|------------|
-| TODO-413 | 0 | P0 | TODO-System-Sanierung + CI-Gate (Status-Feld-Pflicht) | **DONE** | — |
+| TODO-413 | 0 | P0 | TODO-System-Sanierung + CI-Gate (Status-Feld-Pflicht) | **DONE** | - |
 | TODO-418 | 1 | P0 | Profiling-Baseline + tc-netem-Setup auf broderick | **DONE** | 413 |
 | TODO-417 | 2 | P1 | Hot-Path-Lock-Entfernung (bündelt 396+397+398) | **DONE** | 418 |
 | TODO-414 | 2 | P1 | Streaming-FEC in adaptiven Loop (supersedes 409) | **DONE** | 418 |
@@ -234,33 +235,33 @@ experimental, or bound to explicit policy.
 
 Detail files: `docs/todo/todo-{id}-*.md` for each item above.
 
-### Phase 4 — Mikro-Optimierungen (nur bei Flamegraph-Evidence)
+### Phase 4 - Mikro-Optimierungen (nur bei Flamegraph-Evidence)
 
 All items below were **implemented and marked DONE** in the main wave table above. They are retained here as profiling-evidence cross-references for TODO-418. No OPEN items remain in this section.
 
 | ID | Title | Status |
 |----|-------|--------|
-| TODO-390 | AEAD-Selection MTU-Workload | **SCRAP** (premise incorrect) — see main table |
-| TODO-391 | Double header parse | **DONE** — pre_parsed_hdr threaded through decrypt paths |
-| TODO-392 | FecPacket clone on send | **DONE** — SharedFecBuffer Arc-backed, zero-copy |
-| TODO-395 | MORUS in-place | **DONE** — trait path calls in-place directly |
-| TODO-399 | Criterion Connection bench | **DONE** — `connection_1rtt_send_recv` group |
-| TODO-400 | Criterion ACK stress bench | **DONE** — `ack_sent_byte_accounting` group |
-| TODO-401 | Stealth-on vs stealth-off CI | **DONE** — `connection_1rtt_stealth_compare` group |
+| TODO-390 | AEAD-Selection MTU-Workload | **SCRAP** (premise incorrect) - see main table |
+| TODO-391 | Double header parse | **DONE** - pre_parsed_hdr threaded through decrypt paths |
+| TODO-392 | FecPacket clone on send | **DONE** - SharedFecBuffer Arc-backed, zero-copy |
+| TODO-395 | MORUS in-place | **DONE** - trait path calls in-place directly |
+| TODO-399 | Criterion Connection bench | **DONE** - `connection_1rtt_send_recv` group |
+| TODO-400 | Criterion ACK stress bench | **DONE** - `ack_sent_byte_accounting` group |
+| TODO-401 | Stealth-on vs stealth-off CI | **DONE** - `connection_1rtt_stealth_compare` group |
 
 ### SCRAP / DEFERRED Items (2026-07-23)
 
 Marked in individual detail files. Not individually actionable.
 
 **SCRAP** (not in scope or replaced by tooling):
-- TODO-369, 373, 374, 377: UI test gaps — OFF LIMITS per AGENTS.md
-- TODO-379-388 (10×): Coverage-gaps per module — replaced by single `cargo tarpaulin` baseline run
-- TODO-370, 371: FEC-sim/smoke redundancy — existing 1167 lib-tests sufficient
+- TODO-369, 373, 374, 377: UI test gaps - OFF LIMITS per AGENTS.md
+- TODO-379-388 (10×): Coverage-gaps per module - replaced by single `cargo tarpaulin` baseline run
+- TODO-370, 371: FEC-sim/smoke redundancy - existing 1167 lib-tests sufficient
 
 **DEFERRED** (kosmetisch, nicht handlungsleitend):
 - TODO-356, 357, 372: Docs hygiene (stale counts, rust-version, readme)
-- TODO-358, 362: Dead-code (PQ-traits, FEC-internal) — `cargo dead`/`cargo udeps` covers this
-- TODO-378: Code TODO-markers — `grep -rn "TODO" src/` is not a task
+- TODO-358, 362: Dead-code (PQ-traits, FEC-internal) - `cargo dead`/`cargo udeps` covers this
+- TODO-378: Code TODO-markers - `grep -rn "TODO" src/` is not a task
 
 ### Completed Items (Session 41 - Final Forensic Audit 2026-03-27)
 
@@ -270,23 +271,23 @@ Details: `docs/todo/todo-{id}.md` for each item.
 
 | ID | Severity | Title | Status |
 |----|----------|-------|--------|
-| TODO-356 | MODERATE | context.md + todo.md stale test counts (852->916, 1522->1587) | **DEFERRED** — docs hygiene, not action-lever |
+| TODO-356 | MODERATE | context.md + todo.md stale test counts (852->916, 1522->1587) | **DEFERRED** - docs hygiene, not action-lever |
 | TODO-357 | MODERATE | CONTRIBUTING.md Rust toolchain wording drift | **DONE** - CONTRIBUTING.md now says Rust stable selected by rust-toolchain.toml |
 | TODO-363 | MODERATE | Stealth env var QUICFUSCATE_STEALTH_MODE=auto silently rejected | **DONE** - added "auto" alias in apply_env_overrides() |
 | TODO-364 | MODERATE | Dual 0-RTT config fields (enable_0rtt vs enable_early_data) undocumented | **DONE** - added clarifying comments in quicfuscate.toml |
 | TODO-365 | MODERATE | server-linux.default.toml missing [anti_replay] + XDP sections | **DONE** - added [anti_replay] section + XDP comments |
-| TODO-370 | MODERATE | fec_sim overlap between test-fec-simulation.sh and test-fec-e2e-loss.sh | **SCRAP** — existing 1167 lib-tests sufficient |
-| TODO-369 | MODERATE | packages/ui 5 untested components + 2 untested utilities (44% coverage) | **SCRAP** — UI OFF LIMITS per AGENTS.md |
+| TODO-370 | MODERATE | fec_sim overlap between test-fec-simulation.sh and test-fec-e2e-loss.sh | **SCRAP** - existing 1167 lib-tests sufficient |
+| TODO-369 | MODERATE | packages/ui 5 untested components + 2 untested utilities (44% coverage) | **SCRAP** - UI OFF LIMITS per AGENTS.md |
 
 #### MODERATE - Code Quality (7 items) - ALL DONE
 
 | ID | Severity | Title | Status |
 |----|----------|-------|--------|
-| TODO-358 | MODERATE | 4 dead PQ trait methods in qftls.rs + stale doc strings | **DEFERRED** — `cargo dead`/`cargo udeps` covers this |
+| TODO-358 | MODERATE | 4 dead PQ trait methods in qftls.rs + stale doc strings | **DEFERRED** - `cargo dead`/`cargo udeps` covers this |
 | TODO-359 | MODERATE | ~25 unsafe blocks missing SAFETY comments (5 files) | **DONE** - 30 SAFETY comments across batch.rs, linux.rs, macos.rs, io_driver.rs, connection.rs |
 | TODO-360 | MODERATE | eprintln! in transport hot path (connection.rs:1298) | **DONE** - changed to log::warn! |
 | TODO-361 | MODERATE | hkdf_expand panics on out_len > 8160 instead of Result | **DONE** - explicit assert with RFC 5869 reference |
-| TODO-362 | MODERATE | 8x #[allow(dead_code)] in fec/internal.rs - audit needed | **DEFERRED** — `cargo dead`/`cargo udeps` covers this |
+| TODO-362 | MODERATE | 8x #[allow(dead_code)] in fec/internal.rs - audit needed | **DEFERRED** - `cargo dead`/`cargo udeps` covers this |
 | TODO-366 | MODERATE | Switch.svelte + Select.svelte duplicated between apps (~80% identical) | **DONE** - extracted to packages/ui, deleted from both apps |
 | TODO-367 | MODERATE | cn() import inconsistency: desktop $lib/format vs admin @quicfuscate/ui | **DONE** - desktop now imports cn from @quicfuscate/ui |
 
@@ -295,14 +296,14 @@ Details: `docs/todo/todo-{id}.md` for each item.
 | ID | Severity | Title | Status |
 |----|----------|-------|--------|
 | TODO-368 | LOW | fatal-error-screen.test.ts misplaced (components/ vs components/ui/) | **DONE** - moved to components/ui/ |
-| TODO-371 | LOW | smoke-fec-quick.sh redundant (pure pass-through) | **SCRAP** — existing 1167 lib-tests sufficient |
+| TODO-371 | LOW | smoke-fec-quick.sh redundant (pure pass-through) | **SCRAP** - existing 1167 lib-tests sufficient |
 | TODO-372 | LOW | README.md test count "800+" -> "900+" | **DONE** - updated |
-| TODO-373 | LOW | Desktop clipboard.ts untested (4 strategies + fallbacks) | **SCRAP** — UI OFF LIMITS per AGENTS.md |
-| TODO-374 | LOW | Admin use-anchor-sync.ts untested (ResizeObserver/DOM tracking) | **SCRAP** — UI OFF LIMITS per AGENTS.md |
+| TODO-373 | LOW | Desktop clipboard.ts untested (4 strategies + fallbacks) | **SCRAP** - UI OFF LIMITS per AGENTS.md |
+| TODO-374 | LOW | Admin use-anchor-sync.ts untested (ResizeObserver/DOM tracking) | **SCRAP** - UI OFF LIMITS per AGENTS.md |
 | TODO-375 | LOW | quicfuscate-ctl.rs unwrap() on JSON - crashes on malformed responses | **DONE** - proper error messages |
 | TODO-376 | LOW | CI: simd-selfcheck only tested on Linux, not macOS/Windows | **DONE** - added macOS entry in feature-matrix |
-| TODO-377 | LOW | Desktop +error.svelte page has no test (admin equivalent IS tested) | **SCRAP** — UI OFF LIMITS per AGENTS.md |
-| TODO-378 | LOW | 7 TODO markers in Rust src/ - review and cleanup | **DEFERRED** — `grep -rn "TODO" src/` is not a task |
+| TODO-377 | LOW | Desktop +error.svelte page has no test (admin equivalent IS tested) | **SCRAP** - UI OFF LIMITS per AGENTS.md |
+| TODO-378 | LOW | 7 TODO markers in Rust src/ - review and cleanup | **DEFERRED** - `grep -rn "TODO" src/` is not a task |
 
 #### COVERAGE - Rust Test Gaps (10 items) - ALL SCRAP (replaced by `cargo tarpaulin`)
 

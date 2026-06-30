@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# FEC under network adversity — comprehensive tc-netem test suite (TODO-425).
+# FEC under network adversity - comprehensive tc-netem test suite (TODO-425).
 #
 # Tests FEC behavior under every realistic network degradation pattern:
 #   1. Loss sweep (0-50%) with throughput measurement
-#   2. Jitter sweep (0-500ms) — mode stability under jitter
-#   3. Bandwidth limitation (1-100Mbit) — FEC overhead vs. useful throughput
-#   4. RTT variation (1-300ms) — FEC recovery vs. retransmission latency
+#   2. Jitter sweep (0-500ms) - mode stability under jitter
+#   3. Bandwidth limitation (1-100Mbit) - FEC overhead vs. useful throughput
+#   4. RTT variation (1-300ms) - FEC recovery vs. retransmission latency
 #   5. Combined adversity (mobile network simulation)
 #   6. Adversity recovery (clean → loss → clean transitions)
 #
@@ -19,7 +19,8 @@
 #
 # Requirements: root, Linux, iproute2, tc-netem, openssl, python3, nc.
 set -u
-PROJECT_ROOT="${PROJECT_ROOT:-/root/QuicFuscate}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 B="$PROJECT_ROOT/target/release/quicfuscate"
 CERT="$PROJECT_ROOT/config/local/server.crt"
 KEY="$PROJECT_ROOT/config/local/server.key"
@@ -75,10 +76,10 @@ setup_netns() {
 }
 
 start_tunnel() {
-    # Interleaving disabled (known decoder bug, see TODO-423)
-    ip netns exec ns-srv env QUICFUSCATE_FEC_INTERLEAVE=0 "$B" server --cert "$CERT" --key "$KEY" \
+    ip netns exec ns-srv "$B" server --cert "$CERT" --key "$KEY" \
         --listen 10.10.0.1:4433 --admin-socket /tmp/qf-admin.sock \
-        --tun --tun-name qtun0 --tun-ip 10.0.1.1 --tun-netmask 255.255.255.0 -v \
+        --tun --tun-name qtun0 --tun-ip 10.0.1.1 --tun-netmask 255.255.255.0 \
+        --no-drop-privileges -v \
         > /tmp/ns-srv.log 2>&1 &
     sleep 3
 
@@ -86,7 +87,7 @@ start_tunnel() {
     qkey=$(echo '{"cmd":"qkey"}' | nc -U /tmp/qf-admin.sock 2>/dev/null | \
         python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["data"]["qkey"])' 2>/dev/null)
 
-    ip netns exec ns-cli env QUICFUSCATE_FEC_INTERLEAVE=0 "$B" client --remote 10.10.0.1:4433 --url https://10.10.0.1/ \
+    ip netns exec ns-cli "$B" client --remote 10.10.0.1:4433 --url https://10.10.0.1/ \
         --qkey "$qkey" --ca-file "$CA" --verify-peer \
         --tun --tun-name qtun0 --tun-ip 10.0.1.2 --tun-netmask 255.255.255.0 --no-utls -v \
         > /tmp/ns-cli.log 2>&1 &

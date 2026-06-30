@@ -13,7 +13,7 @@ depends_on: ["TODO-422"]
 
 ## Problem
 
-All 50+ existing FEC tests are **unit tests in isolation** — they test the FEC module
+All 50+ existing FEC tests are **unit tests in isolation** - they test the FEC module
 directly (`AdaptiveFec::on_send` / `on_receive`) but never exercise FEC through the real
 QUIC transport stack. There are zero tests that verify:
 
@@ -22,7 +22,7 @@ QUIC transport stack. There are zero tests that verify:
 3. FEC interacts correctly with QUIC congestion control, ACK processing, and stream flow control.
 4. FEC mode transitions happen correctly during live QUIC data transfer.
 
-The existing `examples/fec_sim.rs` is a standalone simulation — it does not use the QUIC
+The existing `examples/fec_sim.rs` is a standalone simulation - it does not use the QUIC
 transport at all. The `scripts/tests/suites/test-fec-e2e-loss.sh` script runs `fec_sim`,
 not a real QUIC connection.
 
@@ -30,6 +30,10 @@ not a real QUIC connection.
 
 Build E2E tests that put FEC through the **real QUIC transport** with **real packet loss**
 injected at the network layer (tc-netem), verifying end-to-end recovery.
+
+## Proof Refresh (2026-06-30)
+
+TODO-473 refreshed this proof on `broderick` with the hardened `scripts/tests/tun-e2e-fec-netns.sh` gate. `PING_COUNT=20 LOSS_LEVELS="0 5 10"` passed the hard ping gates with `3 passed`, `0 failed`, and `2 skipped` optional iperf3 probes. The iperf3 probes are intentionally not counted as PASS unless real throughput is measurable.
 
 ## Implementation Plan
 
@@ -59,15 +63,15 @@ matches expected recovery ratio. Verify FEC mode telemetry (`FEC_MODE`) escalate
 ### 2. Burst loss E2E test (`scripts/tests/tun-e2e-fec-burst-netns.sh`)
 
 tc-netem can simulate burst loss patterns:
-- `loss 10% 25%` — 10% average loss with 25% correlation (bursty)
-- `loss 20% 50%` — heavy burst loss
+- `loss 10% 25%` - 10% average loss with 25% correlation (bursty)
+- `loss 20% 50%` - heavy burst loss
 
 Verify FEC interleaving + streaming mode handles burst patterns better than block codes.
 Verify mode transitions to Streaming/Fountain under burst patterns.
 
 ### 3. Jitter + loss combined E2E test
 
-tc-netem `delay 50ms 20ms 25%` + `loss 5%` — real-world degraded link simulation.
+tc-netem `delay 50ms 20ms 25%` + `loss 5%` - real-world degraded link simulation.
 Verify FEC + QUIC congestion control interact correctly under jitter+loss.
 
 ### 4. Rust integration test: FEC through mock QUIC transport
@@ -81,9 +85,9 @@ them via in-memory packet exchange, injects drops at the exchange layer, and ver
 - No packet duplication or ordering violations
 
 ## Files to Create
-- `scripts/tests/tun-e2e-fec-netns.sh` — netns + tc-netem FEC E2E test
-- `scripts/tests/tun-e2e-fec-burst-netns.sh` — burst loss E2E test
-- `src/fec/e2e_tests.rs` — Rust integration test (FEC through mock QUIC)
+- `scripts/tests/tun-e2e-fec-netns.sh` - netns + tc-netem FEC E2E test
+- `scripts/tests/tun-e2e-fec-burst-netns.sh` - burst loss E2E test
+- `src/fec/e2e_tests.rs` - Rust integration test (FEC through mock QUIC)
 
 ## Acceptance Criteria
 - `tun-e2e-fec-netns.sh` passes on broderick for all 6 loss levels in the matrix

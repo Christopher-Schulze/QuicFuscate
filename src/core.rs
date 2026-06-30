@@ -345,7 +345,7 @@ impl QuicFuscateConnection {
         }
 
         // TODO-415 Phase 2: Inject QKey auth token into QUIC transport parameters.
-        // The token is carried in TLS EncryptedExtensions — encrypted at the
+        // The token is carried in TLS EncryptedExtensions - encrypted at the
         // Handshake level, invisible to DPI. This supplements the existing
         // x-qf-auth HTTP/3 header mechanism with a TLS-layer auth channel.
         if let Some(ref token) = s.qkey_auth_token_hex {
@@ -440,15 +440,17 @@ impl QuicFuscateConnection {
         // For TUN bridging, fall back to the connection's host header as the
         // MASQUE proxy authority when the stealth manager has no MASQUE config
         // (no masque_manager / fronting domains). The proxy authority is just
-        // the H3 :authority header — the server validates it against itself.
+        // the H3 :authority header - the server validates it against itself.
         let proxy = self.stealth_manager.masque_proxy().unwrap_or_else(|| format!("{}:443", host));
 
         let target = format!("{}:443", host);
+        let mut extra_headers = Vec::new();
+        self.inject_qkey_auth_header(&mut extra_headers);
         let Some(ref mut h3) = self.h3_conn else {
             return Ok(None);
         };
 
-        let sid = h3.connect_udp(&mut self.conn, &proxy, &target)?;
+        let sid = h3.connect_udp_with_headers(&mut self.conn, &proxy, &target, &extra_headers)?;
         info!("MASQUE CONNECT-UDP opened (proxy={}, target={}, sid={})", proxy, target, sid);
         crate::telemetry::MASQUE_ACTIVE.store(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -666,7 +668,7 @@ impl QuicFuscateConnection {
                         // the client opens the flow). Record the stream id and provision
                         // QUIC DATAGRAM queues so downlink sends work. Inlined here
                         // because h3 is borrowed from self.h3_conn while we also need
-                        // &mut self.conn — a helper taking &mut self would conflict.
+                        // &mut self.conn - a helper taking &mut self would conflict.
                         if Self::is_connect_udp_request(&list)
                             && self.masque_peer_stream_id.is_none()
                         {
@@ -1057,7 +1059,7 @@ impl QuicFuscateConnection {
             self.next_packet_release = None;
         }
 
-        // If there are buffered FEC packets, send one directly — but only if
+        // If there are buffered FEC packets, send one directly - but only if
         // there is no pending stream/datagram data that would be starved by
         // FEC draining. Without this guard, a burst of FEC repair packets can
         // fill the outgoing queue and block new QUIC packets (carrying stream
@@ -1325,7 +1327,7 @@ impl QuicFuscateConnection {
     /// Sends a raw IP packet downlink to the peer over the peer-initiated MASQUE
     /// CONNECT-UDP flow (server side: client opened the flow, we reuse its stream
     /// id for the datagram flow-id mapping). Returns `Done` if no MASQUE flow has
-    /// been established yet — the packet is dropped, which is acceptable for
+    /// been established yet - the packet is dropped, which is acceptable for
     /// best-effort IP traffic; subsequent packets will succeed once the client's
     /// CONNECT-UDP request is processed and `masque_peer_stream_id` is set.
     ///
@@ -1343,7 +1345,7 @@ impl QuicFuscateConnection {
                 return Ok(());
             }
         }
-        // No MASQUE flow yet — drop the packet. The client's CONNECT-UDP
+        // No MASQUE flow yet - drop the packet. The client's CONNECT-UDP
         // request is processed asynchronously in poll_http3_event_loop, which
         // sets masque_peer_stream_id. Retrying is unnecessary: the TUN reader
         // thread sends the next packet immediately, and IP traffic is

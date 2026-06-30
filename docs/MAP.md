@@ -7,6 +7,9 @@ It is maintained as the current architecture and repository index, with a curate
 
 - Runtime core: Rust crate under `src/` with entrypoints in `src/main.rs` and `src/lib.rs`.
 - Data path wiring: app or TUN ingress -> core/transport -> stealth shaping -> crypto -> FEC -> network I/O.
+- Production VPN carrier: authenticated Core H3/MASQUE CONNECT-UDP carries TUN IP packets. QKey auth is presented through encrypted QUIC transport parameters and H3 `x-qf-auth`; the server gates MASQUE DATAGRAM-to-TUN delivery on the current authenticated state.
+- Standalone TUN routing: explicit `--tun-ip` / `--tun-netmask` on the server updates `ServerConfig.server_ip`, `server_netmask`, and the client IPv4 pool, keeping Linux namespace deployments and runtime session routing in the same subnet.
+- DNS-through-tunnel: server MASQUE/TUN uplink intercepts IPv4/IPv6 UDP/53 packets before generic TUN egress, resolves through configured server DNS upstreams, and queues rebuilt DNS responses over MASQUE downlink.
 - Packet crypto wiring: Initial/Handshake use boxed AES-GCM compatibility keys; normal 0-RTT/1-RTT data-plane AEAD uses `DataAead` enum dispatch; Rustls packet-key integrations use the explicit dynamic packet wrapper arm.
 - Compression wiring: `src/compress.rs` writes safe-path zstd output directly into `MemoryPool` / body-pool blocks via `compress_to_buffer`; H3 compression semantics and `0x5A` / `0x5D` frame headers remain unchanged.
 - Client packet I/O is owned by `src/implementations/client/io_driver.rs` plus `src/core.rs`; `src/implementations/client/pipeline.rs` is not part of the production module graph.
@@ -37,7 +40,16 @@ Padding and timing rates flow through `StealthRuntimePolicy` → `StealthRuntime
 - WebTransport cover is H3 application cover only, active for Anti-DPI or Intelligent level 2, never a competing VPN carrier.
 - Core H3/MASQUE remains the production VPN/TUN data plane; `stealth::MasqueManager` remains compatibility/experiment machinery.
 
-### EscalationState (src/stealth/mod.rs) — TODO-416
+### Linux Production E2E Evidence (2026-06-30)
+- `broderick` release build: `cargo build --release --bin quicfuscate` passes on Linux.
+- `scripts/tests/tun-e2e-netns.sh`: real server/client netns TUN over authenticated H3/MASQUE, 5/5 ping, 0% tunnel loss.
+- `scripts/tests/tun-e2e-dns-leak-netns.sh`: DNS query through server TUN IP returns a response and tcpdump observes `raw_port_53_packets=0` on the client underlay.
+- `scripts/tests/tun-e2e-fec-netns.sh`: 0%, 5%, and 10% loss ping gates pass; optional iperf3 TCP-to-server-TUN probes skip unless real throughput is measured.
+- `scripts/tests/tun-e2e-fec-burst-netns.sh`: correlated burst-loss gates pass.
+- `scripts/tests/tun-e2e-fec-transition-netns.sh`: clean -> lossy -> recovered live transition gate passes.
+- `scripts/tests/tun-e2e-fec-netem-adversity.sh`: broad adversity matrix passes with 25 passed, 0 failed.
+
+### EscalationState (src/stealth/mod.rs) - TODO-416
 Probe-count-based escalation state machine on `StealthManager`.
 - `record_probe()`: records timestamp, checks thresholds (≥3 in 60s → L1, ≥8 in 120s → L2).
 - `check_de_escalation()`: drops one level after configurable quiet period (default 300s).

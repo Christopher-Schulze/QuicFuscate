@@ -13,7 +13,8 @@
 #
 # Requirements: root, Linux, iproute2, tc-netem, openssl, python3, nc.
 set -u
-PROJECT_ROOT="${PROJECT_ROOT:-/root/QuicFuscate}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 B="$PROJECT_ROOT/target/release/quicfuscate"
 CERT="$PROJECT_ROOT/config/local/server.crt"
 KEY="$PROJECT_ROOT/config/local/server.key"
@@ -77,10 +78,10 @@ run_burst_test() {
     cleanup
     setup_netns
 
-    # Start server (interleaving disabled — known decoder bug, see tun-e2e-fec-netns.sh)
-    ip netns exec ns-srv env QUICFUSCATE_FEC_INTERLEAVE=0 "$B" server --cert "$CERT" --key "$KEY" \
+    ip netns exec ns-srv "$B" server --cert "$CERT" --key "$KEY" \
         --listen 10.10.0.1:4433 --admin-socket /tmp/qf-admin.sock \
-        --tun --tun-name qtun0 --tun-ip 10.0.1.1 --tun-netmask 255.255.255.0 -v \
+        --tun --tun-name qtun0 --tun-ip 10.0.1.1 --tun-netmask 255.255.255.0 \
+        --no-drop-privileges -v \
         > /tmp/ns-srv.log 2>&1 &
     sleep 3
 
@@ -89,7 +90,7 @@ run_burst_test() {
         python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["data"]["qkey"])' 2>/dev/null)
 
     # Start client
-    ip netns exec ns-cli env QUICFUSCATE_FEC_INTERLEAVE=0 "$B" client --remote 10.10.0.1:4433 --url https://10.10.0.1/ \
+    ip netns exec ns-cli "$B" client --remote 10.10.0.1:4433 --url https://10.10.0.1/ \
         --qkey "$qkey" --ca-file "$CA" --verify-peer \
         --tun --tun-name qtun0 --tun-ip 10.0.1.2 --tun-netmask 255.255.255.0 --no-utls -v \
         > /tmp/ns-cli.log 2>&1 &

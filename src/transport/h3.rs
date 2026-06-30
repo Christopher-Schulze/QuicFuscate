@@ -874,13 +874,24 @@ impl Connection {
         proxy: &str,
         target: &str,
     ) -> Result<u64, Error> {
+        self.connect_udp_with_headers(conn, proxy, target, &[])
+    }
+
+    /// Establish a MASQUE CONNECT-UDP stream with additional request headers.
+    pub fn connect_udp_with_headers(
+        &mut self,
+        conn: &mut super::Connection,
+        proxy: &str,
+        target: &str,
+        extra_headers: &[Header],
+    ) -> Result<u64, Error> {
         // Split target "host:port" into MASQUE path segments; fallback to old style if no ':'
         let (host, port) = match target.rsplit_once(':') {
             Some((h, p)) => (h, p),
             None => (target, "443"),
         };
         let path = format!("/.well-known/masque/udp/{}/{}/", host, port);
-        let headers = vec![
+        let mut headers = vec![
             Header::new(b":method", b"CONNECT"),
             Header::new(b":protocol", b"connect-udp"),
             Header::new(b":scheme", b"https"),
@@ -888,6 +899,7 @@ impl Connection {
             Header::new(b":path", path.as_bytes()),
             Header::new(b"capsule-protocol", b"?1"),
         ];
+        headers.extend_from_slice(extra_headers);
         // Send request without FIN
         let sid = self.send_request(conn, &headers, false)?;
         if let Some(st) = self.streams.get_mut(&sid) {
@@ -1918,6 +1930,24 @@ mod tests {
 
         h3.send_masque_datagram(&mut conn, sid, &[0xAA, 0xBB, 0xCC]).expect("datagram enqueue");
         assert_eq!(1, conn.dgram_send_queue_len());
+    }
+
+    #[test]
+    fn connect_udp_with_headers_preserves_auth_header() {
+        let mut conn = make_conn();
+        let mut cfg = super::Config::new().expect("cfg");
+        cfg.set_max_field_section_size(1024 * 1024);
+        let mut h3 = super::h3::Connection::with_transport(&mut conn, &cfg).expect("h3");
+        let sid = h3
+            .connect_udp_with_headers(
+                &mut conn,
+                "masque.example.com",
+                "target.example.com:443",
+                &[Header::new(b"x-qf-auth", b"token-123")],
+            )
+            .expect("connect_udp");
+        let st = h3.streams.get(&sid).expect("state");
+        assert!(st._headers.iter().any(|h| h.name() == b"x-qf-auth" && h.value() == b"token-123"));
     }
 
     #[test]

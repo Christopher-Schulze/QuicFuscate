@@ -19,7 +19,7 @@ use quicfuscate::stealth::{BrowserProfile, FingerprintProfile, OsProfile};
 use quicfuscate::telemetry;
 #[cfg(feature = "benches")]
 use std::collections::VecDeque;
-use std::net::ToSocketAddrs;
+use std::net::{Ipv4Addr, ToSocketAddrs};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -891,7 +891,7 @@ enum Commands {
         #[clap(long, value_name = "PATH")]
         qkey_store: Option<PathBuf>,
 
-        /// Skip privilege dropping after setup (debugging only — never use in production)
+        /// Skip privilege dropping after setup (debugging only - never use in production)
         #[clap(long = "no-drop-privileges")]
         no_drop_privileges: bool,
     },
@@ -1414,6 +1414,71 @@ fn runtime_optimize_config(
     }
 }
 
+fn derive_client_pool_for_tun(
+    server_ip: Ipv4Addr,
+    netmask: Ipv4Addr,
+) -> Option<(Ipv4Addr, Ipv4Addr)> {
+    let ip = u32::from(server_ip);
+    let mask = u32::from(netmask);
+    let network = ip & mask;
+    let broadcast = network | !mask;
+    let first_host = network.checked_add(1)?;
+    let last_host = broadcast.checked_sub(1)?;
+    if first_host > last_host {
+        return None;
+    }
+
+    if ip < last_host {
+        let start = ip.checked_add(1)?;
+        if start <= last_host {
+            return Some((Ipv4Addr::from(start), Ipv4Addr::from(last_host)));
+        }
+    }
+
+    if ip > first_host {
+        let end = ip.checked_sub(1)?;
+        if first_host <= end {
+            return Some((Ipv4Addr::from(first_host), Ipv4Addr::from(end)));
+        }
+    }
+
+    None
+}
+
+fn apply_standalone_tun_server_config(
+    server_config: &mut quicfuscate::implementations::server::ServerConfig,
+    tun_ip: Option<&str>,
+    tun_netmask: Option<&str>,
+) -> std::io::Result<()> {
+    let Some(tun_ip) = tun_ip else {
+        return Ok(());
+    };
+    let server_ip = tun_ip.parse::<Ipv4Addr>().map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("invalid --tun-ip: {e}"))
+    })?;
+    let netmask = match tun_netmask {
+        Some(mask) => mask.parse::<Ipv4Addr>().map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid --tun-netmask: {e}"),
+            )
+        })?,
+        None => server_config.server_netmask,
+    };
+    let Some((pool_start, pool_end)) = derive_client_pool_for_tun(server_ip, netmask) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("no usable client IP pool for TUN address {server_ip}/{netmask}"),
+        ));
+    };
+
+    server_config.server_ip = server_ip;
+    server_config.server_netmask = netmask;
+    server_config.ip_pool_start = pool_start;
+    server_config.ip_pool_end = pool_end;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_client(
     remote_addr_str: &str,
@@ -1925,6 +1990,37 @@ mod runtime_reload_tests {
         assert_eq!(resolved.block_size, 32_768);
     }
 
+    #[test]
+    fn derive_client_pool_for_tun_uses_hosts_after_server_ip_when_possible() {
+        let pool =
+            derive_client_pool_for_tun(Ipv4Addr::new(10, 0, 1, 1), Ipv4Addr::new(255, 255, 255, 0))
+                .expect("pool");
+        assert_eq!(pool.0, Ipv4Addr::new(10, 0, 1, 2));
+        assert_eq!(pool.1, Ipv4Addr::new(10, 0, 1, 254));
+    }
+
+    #[test]
+    fn derive_client_pool_for_tun_uses_hosts_before_server_ip_at_subnet_end() {
+        let pool = derive_client_pool_for_tun(
+            Ipv4Addr::new(10, 0, 1, 254),
+            Ipv4Addr::new(255, 255, 255, 0),
+        )
+        .expect("pool");
+        assert_eq!(pool.0, Ipv4Addr::new(10, 0, 1, 1));
+        assert_eq!(pool.1, Ipv4Addr::new(10, 0, 1, 253));
+    }
+
+    #[test]
+    fn apply_standalone_tun_server_config_aligns_server_ip_and_pool() {
+        let mut config = quicfuscate::implementations::server::ServerConfig::default();
+        apply_standalone_tun_server_config(&mut config, Some("10.0.1.1"), Some("255.255.255.0"))
+            .expect("apply tun config");
+        assert_eq!(config.server_ip, Ipv4Addr::new(10, 0, 1, 1));
+        assert_eq!(config.server_netmask, Ipv4Addr::new(255, 255, 255, 0));
+        assert_eq!(config.ip_pool_start, Ipv4Addr::new(10, 0, 1, 2));
+        assert_eq!(config.ip_pool_end, Ipv4Addr::new(10, 0, 1, 254));
+    }
+
     fn write_temp_config(contents: &str) -> std::path::PathBuf {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
@@ -2191,9 +2287,16 @@ async fn run_server(
         );
     }
 
-    let server_config =
+    let mut server_config =
         quicfuscate::implementations::server::server_config_from_listen_addr(listen_addr)
             .map_err(std::io::Error::other)?;
+    if tun_enable {
+        apply_standalone_tun_server_config(
+            &mut server_config,
+            tun_ip.as_deref(),
+            tun_netmask.as_deref(),
+        )?;
+    }
     let opt_params = runtime_optimize_config(
         config_path,
         opt_cfg,
@@ -2281,9 +2384,9 @@ async fn run_server(
         if cap_report.is_root {
             info!("Dropping root privileges to quicfuscate:quicfuscate");
             match quicfuscate::privilege::drop_privileges("quicfuscate", "quicfuscate") {
-                Ok(()) => info!("Privileges dropped — running as unprivileged user"),
+                Ok(()) => info!("Privileges dropped - running as unprivileged user"),
                 Err(e) => {
-                    error!("Failed to drop privileges: {} — refusing to continue as root", e);
+                    error!("Failed to drop privileges: {} - refusing to continue as root", e);
                     return Err(std::io::Error::other("privilege drop failed"));
                 }
             }

@@ -2971,7 +2971,8 @@ Curated domain sets are defined in `CdnProvider` and `DomainFrontingManager::ult
 QuicFuscate can bridge a TUN interface by encapsulating frames in HTTP/3 streams:
 
 - Client: when `--tun` is set, a blocking reader thread forwards frames into an H3 stream; zero-copy pool integration minimizes allocations.
-- Server: with `--tun`, downlink frames received via H3 are written to a TUN interface (when available on the platform) or dropped with a warning.
+- Server: with `--tun`, authenticated MASQUE CONNECT-UDP datagrams carrying raw IP packets are written to a TUN interface (when available on the platform). Standalone server mode derives `ServerConfig.server_ip`, `server_netmask`, and the client IPv4 pool from explicit `--tun-ip` / `--tun-netmask`, so runtime session routing and OS TUN addressing stay aligned.
+- Authentication: the client injects QKey auth into both encrypted QUIC transport parameters and the H3/MASQUE CONNECT-UDP header path. The server accepts either valid proof and gates MASQUE DATAGRAM-to-TUN delivery on the current authenticated state.
 - Platform support (interface.rs):
   - Linux/Android: `/dev/net/tun` via `TUNSETIFF` (IFF_TUN | IFF_NO_PI)
   - macOS: `utun` (PF_SYSTEM/SYSPROTO_CONTROL), 4-byte AF header using readv/writev
@@ -3304,12 +3305,17 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `test-security-fuzzing.sh` - Security & fuzzing (ASAN/MSAN/UBSAN, fuzz targets, concurrency, `rt-property-suite` via proptest)
 - `test-performance-regression.sh` - Performance regression with baseline comparison
 - `test-e2e.sh` - End-to-end integration tests with real network scenarios
+- `tun-e2e-netns.sh` - Linux network-namespace production smoke: real server/client TUN over authenticated H3/MASQUE CONNECT-UDP and a hard 0%-loss ping assertion through the tunnel
 - `tun-e2e-dns-leak-netns.sh` - Linux network-namespace DNS leak proof: real server/client TUN over MASQUE, DNS query through the server TUN IP, and tcpdump assertion that the client underlay sees zero raw TCP/UDP port 53 packets
 - `test-e2e-admin-web.sh` - Admin web E2E (login/status/config/qkey + headless QKey connect via `qf-e2e-client` and `qf-e2e-desktop`)
 - `test-desktop-webadmin-rust-integration.sh` - Cross-surface desktop/web-admin/core integration contract checks
 - `test-fec-all.sh` - Dispatcher: runs all FEC suites (test-fec, test-fec-simulation, test-fec-e2e-loss, auto-controller)
 - `test-fec-auto-controller-scenarios.sh` - FEC auto-controller scenario-driven tests
 - `test-fec-auto-controller-proof.sh` - FEC auto-controller proof orchestration
+- `tun-e2e-fec-netns.sh` - Linux netns FEC smoke over the real tunnel with tc-netem loss. Ping gates are hard pass/fail; optional iperf3 TCP probes are skipped unless real throughput is measured.
+- `tun-e2e-fec-burst-netns.sh` - Linux netns burst-loss FEC proof using correlated tc-netem loss patterns.
+- `tun-e2e-fec-transition-netns.sh` - Linux netns live FEC mode transition proof across clean, lossy, and recovered phases.
+- `tun-e2e-fec-netem-adversity.sh` - Linux netns broad adversity matrix: loss sweep, jitter, bandwidth, RTT+loss, mobile-network mix, and recovery.
 - `test-runtime-soak-chaos.sh` - Runtime soak/chaos (delegates to E2E, FEC loss, admin web)
 - `test-security.sh` - Security suite (rt-security-suite + rt-property-suite)
 > Note: `test-all.sh` was archived; run suites sequentially or use `util-run-full-suite.sh` which delegates to the individual suite scripts.
@@ -3802,6 +3808,7 @@ The overall approach prioritizes runtime performance over architectural purity. 
 1. Verify `qkey_id` is exactly 12 hex characters
 2. Verify `qkey_token` matches what was registered on the server
 3. Check the QKey has not been revoked on the server
+4. For TUN/MASQUE failures, check both auth layers: the encrypted QUIC transport parameter and the H3 `x-qf-auth` CONNECT-UDP header. MASQUE DATAGRAM delivery to TUN is intentionally blocked until one current auth proof has validated.
 
 ### DNS Leak Detection and Prevention
 
@@ -3811,6 +3818,8 @@ The overall approach prioritizes runtime performance over architectural purity. 
 nslookup -type=A example.com
 # The response should come from your configured VPN DNS servers, not your ISP
 ```
+
+Linux root validation uses `scripts/tests/tun-e2e-dns-leak-netns.sh`. The gate creates server/client namespaces, opens a real QKey-authenticated TUN/MASQUE tunnel, runs a DNS query through the server TUN IP, and captures the client underlay with tcpdump. Passing evidence requires a DNS response plus `raw_port_53_packets=0`.
 
 #### Common DNS Leak Causes
 1. **Split-tunnel configuration:** Ensure all DNS traffic routes through the tunnel
@@ -3838,7 +3847,7 @@ Enable kill-switch to prevent any traffic outside the tunnel.
 
 **Stale rules from crashed session:**
 - Run `quicfuscate client --cleanup-firewall` to remove stale kill-switch rules
-- This only flushes the `QUICFUSCATE_KS` chain and removes the jump rule from OUTPUT — it does NOT touch unrelated user firewall rules
+- This only flushes the `QUICFUSCATE_KS` chain and removes the jump rule from OUTPUT - it does NOT touch unrelated user firewall rules
 
 #### macOS
 **pf rules not loading:**

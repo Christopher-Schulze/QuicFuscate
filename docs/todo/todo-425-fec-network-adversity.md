@@ -26,6 +26,10 @@ not test the interaction between FEC and:
 Build a comprehensive tc-netem adversity test suite that verifies FEC behaves intelligently
 under every realistic network degradation pattern.
 
+## Proof Refresh (2026-06-30)
+
+TODO-473 refreshed this proof on `broderick` with `scripts/tests/tun-e2e-fec-netem-adversity.sh`. The run passed with `25 passed`, `0 failed`, and `0 skipped`, covering loss through 50%, jitter through 500ms, bandwidth down to 1Mbit, RTT through 300ms plus 5% loss, a mobile-network mix, and clean-loss-clean recovery.
+
 ## Implementation Plan
 
 ### 1. Loss sweep with throughput measurement
