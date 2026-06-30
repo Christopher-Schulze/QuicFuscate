@@ -531,9 +531,12 @@ Wire -> Pooled Buffer
 ## UI Change Boundary
 - Do not modify UI surfaces, UI components, UI styles, UI assets, frontend views, desktop app UI, or web admin UI unless the user explicitly asks for that exact UI change in the current task.
 - Do only the UI work the user explicitly requested, and only that. Never broaden a request into adjacent UI cleanup, redesign, component refactors, style polish, text changes, asset changes, or frontend behavior changes.
-- Do not "improve", refactor, polish, rename, migrate, or clean UI code proactively. Backend, Rust core, server, build, CI, docs, and non-UI tests may proceed normally when in scope.
+- Do not change any visible element, layout, spacing, style, theme token, CSS class, animation, transition, icon, asset, copy/text, route, navigation behavior, screenshot baseline, or frontend component structure unless that exact visual/UI change is explicitly requested.
+- Do not "improve", refactor, polish, rename, migrate, normalize, deduplicate, or clean UI code proactively. Backend, Rust core, server, build, CI, docs, and non-UI tests may proceed normally when in scope.
 - If a requested backend or infrastructure task appears to require UI changes, stop and ask for explicit approval before touching any UI file.
-- Treat `apps/svelte-admin/`, `apps/svelte-desktop/`, `apps/tauri/` UI-facing files, `packages/ui/`, `packages/theme/`, `assets/web-admin/`, and any frontend component/style/test files as protected UI territory unless explicitly authorized.
+- Treat `apps/svelte-admin/`, `apps/svelte-desktop/`, `packages/ui/`, `packages/theme/`, `assets/web-admin/`, frontend component/style/asset/test files, Playwright visual baselines, and generated UI bundles as protected UI territory unless explicitly authorized.
+- `apps/tauri/src-tauri/` may be edited for backend/host logic, persistence, commands, security, and build integration. Tauri window configuration, dimensions, titles, icons, menus, tray UI, visible webview behavior, CSP changes that require UI adaptation, and frontend bundle behavior are UI-facing and require explicit approval.
+- Running existing frontend install/check/build/test commands is allowed for CI/backend validation, but editing frontend source, generated UI artifacts, or UI snapshots to make a backend/CI task pass is forbidden without explicit UI approval.
 
 ## Edit Rules
 - Never overwrite entire files. Apply precise, minimal edits only.

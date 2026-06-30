@@ -133,6 +133,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "arc-swap"
+version = "1.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c049c0be4daef0b145cb3555416b3b8ef5b7888a38aea1a3a155801fe7b0810b"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "argon2"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2028,6 +2037,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "469fb0b9cefa57e3ef31275ee7cacb78f2fdca44e4765491884a2b119d4eb130"
 
 [[package]]
+name = "ipnetwork"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf370abdafd54d13e54a620e8c3e1145f28e46cc9d704bc6d94414559df41763"
+
+[[package]]
 name = "iri-string"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2340,6 +2355,19 @@ name = "matches"
 version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2532096657941c2fea9c289d370a250971c689d4f143798ff67113ec042024a5"
+
+[[package]]
+name = "maxminddb"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65e84ef32bcbf18a95548989e880db4af6fafd563463753afb4b9a149fb2782c"
+dependencies = [
+ "ipnetwork",
+ "log",
+ "memchr",
+ "serde",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "memchr"
@@ -3235,9 +3263,10 @@ dependencies = [
 
 [[package]]
 name = "quicfuscate"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "aligned_box",
+ "arc-swap",
  "argon2",
  "base64 0.21.7",
  "clap",
@@ -3256,6 +3285,7 @@ dependencies = [
  "hyper-util",
  "libc",
  "log",
+ "maxminddb",
  "parking_lot",
  "password-hash",
  "rand 0.9.2",
@@ -3271,7 +3301,9 @@ dependencies = [
  "smallvec",
  "socket2 0.5.10",
  "sysinfo",
+ "time",
  "tokio",
+ "tokio-rustls",
  "toml 0.8.2",
  "url",
  "webpki-roots 0.26.11",
@@ -3282,7 +3314,7 @@ dependencies = [
 
 [[package]]
 name = "quicfuscate-desktop"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "arboard",
  "env_logger",

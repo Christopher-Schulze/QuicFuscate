@@ -93,6 +93,52 @@ jobs:
             apps/svelte-admin/test-results/
             apps/svelte-desktop/test-results/
 
+  app-backend-checks:
+    runs-on: macos-latest
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.21"
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/tauri/src-tauri/target
+          key: ${{ runner.os }}-app-backend-${{ hashFiles('apps/tauri/src-tauri/Cargo.lock', 'Cargo.lock') }}
+
+      - name: Install workspace dependencies
+        run: bun install
+
+      - name: Build desktop frontend bundle for Tauri context
+        shell: bash
+        working-directory: apps/svelte-desktop
+        run: |
+          bun install
+          bun run build
+
+      - name: Check Tauri host backend
+        shell: bash
+        working-directory: apps/tauri/src-tauri
+        run: cargo check
+
+      - name: Test Tauri host backend
+        shell: bash
+        working-directory: apps/tauri/src-tauri
+        run: cargo test
+
   build-test:
     runs-on: ${{ matrix.os }}
     strategy:

@@ -37,13 +37,13 @@ fn test_mode_feature_matrix_core_expectations() {
     assert!(!off.enable_traffic_padding);
 
     assert!(perf.enable_http3_masquerading);
-    assert!(perf.enable_domain_fronting);
+    assert!(!perf.enable_domain_fronting);
     assert!(perf.use_tls_cover);
     assert!(!perf.enable_traffic_padding);
     assert!(!perf.enable_timing_obfuscation);
 
     assert!(stealth.enable_http3_masquerading);
-    assert!(stealth.enable_domain_fronting);
+    assert!(!stealth.enable_domain_fronting);
     assert!(stealth.enable_traffic_padding);
     assert!(stealth.enable_timing_obfuscation);
     assert!(stealth.use_tls_cover);
@@ -58,7 +58,7 @@ fn test_mode_feature_matrix_core_expectations() {
     assert_eq!(intelligent.mode, StealthMode::Intelligent);
     assert!(intelligent.dynamic_enabled);
     assert!(intelligent.enable_http3_masquerading);
-    assert!(intelligent.enable_domain_fronting);
+    assert!(!intelligent.enable_domain_fronting);
 }
 
 #[test]
@@ -68,7 +68,6 @@ fn test_anti_dpi_escalation_stack_is_cumulative_and_reversible() {
     let anti = StealthConfig::anti_dpi();
 
     assert!(stealth.enable_http3_masquerading >= perf.enable_http3_masquerading);
-    assert!(stealth.enable_domain_fronting >= perf.enable_domain_fronting);
     assert!(stealth.use_tls_cover >= perf.use_tls_cover);
 
     assert!(anti.enable_http3_masquerading >= stealth.enable_http3_masquerading);
@@ -99,8 +98,24 @@ fn test_no_mode_silently_disables_required_primitives() {
             "mode {:?} must keep HTTP/3 masquerading enabled",
             mode
         );
-        assert!(cfg.enable_domain_fronting, "mode {:?} must keep domain fronting enabled", mode);
     }
+
+    assert!(
+        !StealthConfig::from_mode(StealthMode::Performance).enable_domain_fronting,
+        "Performance mode must stay on the clean H3/QUIC path by default"
+    );
+    assert!(
+        !StealthConfig::from_mode(StealthMode::Stealth).enable_domain_fronting,
+        "Stealth mode must not front domains without explicit fronting domains"
+    );
+    assert!(
+        !StealthConfig::from_mode(StealthMode::Intelligent).enable_domain_fronting,
+        "Intelligent mode starts from the clean Performance baseline"
+    );
+    assert!(
+        StealthConfig::from_mode(StealthMode::AntiDpi).enable_domain_fronting,
+        "Anti-DPI mode is the only preset that enables domain fronting by default"
+    );
 }
 
 #[test]
