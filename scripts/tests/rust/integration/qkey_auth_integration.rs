@@ -112,6 +112,7 @@ fn simulate_qkey_http3_auth(
         fec_config.clone(),
         opt_config,
         Some(client_token_hex.trim().to_lowercase()),
+        None,
         false,
     )?;
 

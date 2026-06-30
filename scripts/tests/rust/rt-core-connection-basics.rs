@@ -69,6 +69,7 @@ fn new_client_sets_host_header_and_defaults() {
         fec,
         opt,
         None,
+        None,
         false,
     )
     .expect("new_client");
@@ -120,6 +121,7 @@ fn update_state_applies_validated_path_migrations_and_updates_peer() {
         fec,
         opt,
         None,
+        None,
         false,
     )
     .expect("new_client");
@@ -158,6 +160,7 @@ fn update_state_keeps_ack_and_pacing_owned_outside_fec_when_brain_disabled() {
         stealth,
         fec,
         opt,
+        None,
         None,
         false,
     )

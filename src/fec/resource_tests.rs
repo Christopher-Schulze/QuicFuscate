@@ -82,14 +82,19 @@ fn test_fec_memory_scales_with_load_not_unbounded() {
 
     let pool = make_pool();
 
-    // Run 5k packets at 0% loss
-    let config0 = FecConfig { initial_mode: FecMode::Zero, ..FecConfig::default() };
-    let mut fec0 = AdaptiveFec::new(config0);
-    for id in 0..5_000u64 {
-        let pkt = mk_src_packet(id, 1400, &pool);
-        let _ = fec0.on_send(pkt);
-    }
-    let mem_zero_loss = MEM_POOL_IN_USE.load(Ordering::Relaxed);
+    // Run 5k packets at 0% loss in a scope so fec0 is dropped before measuring
+    // the Normal-mode delta. This isolates the Normal-mode memory impact from
+    // the Zero-mode encoder/decoder's retained buffers.
+    {
+        let config0 = FecConfig { initial_mode: FecMode::Zero, ..FecConfig::default() };
+        let mut fec0 = AdaptiveFec::new(config0);
+        for id in 0..5_000u64 {
+            let pkt = mk_src_packet(id, 1400, &pool);
+            let _ = fec0.on_send(pkt);
+        }
+    } // fec0 dropped here — buffers returned to pool
+
+    let mem_baseline = MEM_POOL_IN_USE.load(Ordering::Relaxed);
 
     // Run 5k packets at 50% loss (Normal mode — faster than Strong/Extreme)
     let config50 = FecConfig { initial_mode: FecMode::Normal, ..FecConfig::default() };
@@ -98,25 +103,23 @@ fn test_fec_memory_scales_with_load_not_unbounded() {
         let pkt = mk_src_packet(id, 1400, &pool);
         let _ = fec50.on_send(pkt);
     }
-    let mem_50pct_loss = MEM_POOL_IN_USE.load(Ordering::Relaxed);
+    let mem_after = MEM_POOL_IN_USE.load(Ordering::Relaxed);
 
-    // 50% loss memory should be < 5x zero-loss memory
-    // Note: zero-loss in Zero mode uses minimal memory, so the ratio may be
-    // large in absolute terms. The key check is that Normal mode doesn't
-    // consume unbounded memory.
-    if mem_zero_loss > 0 {
-        let ratio = mem_50pct_loss / mem_zero_loss;
-        assert!(
-            ratio < 50,
-            "memory at 50% loss is {}x zero-loss (expected <50x): zero={}, 50%={}",
-            ratio,
-            mem_zero_loss,
-            mem_50pct_loss
-        );
-    }
-    // Absolute bound: Normal mode should not use more than 10000 blocks
-    // (decoder holds up to k=64 buffers per block for recovery windows)
-    assert!(mem_50pct_loss < 10_000, "Normal mode memory unbounded: {} blocks", mem_50pct_loss);
+    // Measure the delta caused by the Normal-mode run, not the absolute value.
+    // The global pool is shared across all tests, so the absolute counter may
+    // include leftover state from prior tests. The delta isolates this test's
+    // own memory impact.
+    let delta = mem_after.saturating_sub(mem_baseline);
+    // Normal mode k=64: decoder holds up to k=64 source packets per recovery
+    // block. 5k packets / 64 = ~79 blocks, each holding up to 64 buffers.
+    // Allow generous headroom for encoder repair queues and cross-fade buffers.
+    assert!(
+        delta < 10_000,
+        "Normal mode memory delta unbounded: {} blocks (baseline={}, after={})",
+        delta,
+        mem_baseline,
+        mem_after
+    );
 }
 
 // ---------------------------------------------------------------------------
