@@ -60,21 +60,71 @@ random_password() {
   tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24
 }
 
+ensure_group() {
+  local group="$1"
+  if getent group "$group" >/dev/null 2>&1; then
+    return 0
+  fi
+  if need_cmd groupadd; then
+    groupadd --system "$group"
+    return 0
+  fi
+  if need_cmd addgroup; then
+    addgroup --system "$group"
+    return 0
+  fi
+  echo "error: cannot create group '$group' (need groupadd or addgroup)" >&2
+  exit 1
+}
+
 ensure_user() {
   local user="$1"
+  local group="$1"
   if id -u "$user" >/dev/null 2>&1; then
+    local prim_group
+    prim_group="$(id -gn "$user" 2>/dev/null || true)"
+    if [[ -n "$prim_group" && "$prim_group" != "$group" ]]; then
+      echo "warn: user '$user' has primary group '$prim_group', expected '$group'" >&2
+    fi
     return 0
   fi
   if need_cmd useradd; then
-    useradd --system --home-dir /var/lib/quicfuscate --no-create-home --shell /usr/sbin/nologin "$user"
+    useradd --system \
+            --gid "$group" \
+            --home-dir /var/lib/quicfuscate \
+            --no-create-home \
+            --shell /usr/sbin/nologin \
+            "$user"
     return 0
   fi
   if need_cmd adduser; then
-    adduser --system --no-create-home --home /var/lib/quicfuscate --shell /usr/sbin/nologin --group "$user"
+    adduser --system \
+            --group "$group" \
+            --no-create-home \
+            --home /var/lib/quicfuscate \
+            --shell /usr/sbin/nologin \
+            --disabled-password \
+            "$user"
     return 0
   fi
   echo "error: cannot create user '$user' (need useradd or adduser)" >&2
   exit 1
+}
+
+validate_prerequisites() {
+  local missing=()
+  if ! need_cmd iptables; then missing+=("iptables"); fi
+  if ! need_cmd ip;       then missing+=("iproute2 (ip)"); fi
+  if [[ "$no_start" != "1" ]] && ! need_cmd systemctl; then
+    missing+=("systemctl")
+  fi
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    echo "error: missing prerequisites:" >&2
+    printf '  - %s\n' "${missing[@]}" >&2
+    echo "hint: on Debian/Ubuntu: apt-get install iptables iproute2 systemd" >&2
+    echo "hint: on RHEL/Fedora:   dnf install iptables iproute systemd" >&2
+    exit 1
+  fi
 }
 
 copy_tree() {
@@ -127,6 +177,7 @@ main() {
   done
 
   require_root
+  validate_prerequisites
 
   # Bundle-friendly defaults:
   # - If invoked from an extracted bundle, the typical layout is:
@@ -174,12 +225,23 @@ main() {
     exit 1
   fi
 
-  ensure_user "quicfuscate"
+  ensure_group "quicfuscate"
+  ensure_user  "quicfuscate"
 
-  mkdir -p /etc/quicfuscate "$state_dir" /usr/share/quicfuscate
-  chown -R quicfuscate:quicfuscate "$state_dir"
-  chmod 0750 /etc/quicfuscate || true
-  chmod 0750 "$state_dir" || true
+  local log_dir="/var/log/quicfuscate"
+  mkdir -p /etc/quicfuscate "$state_dir" "$log_dir" /usr/share/quicfuscate
+
+  # Data/state dir: holds QKey store, per-client state — restrictive.
+  chown quicfuscate:quicfuscate "$state_dir"
+  chmod 0700 "$state_dir"
+
+  # Config dir: admin panel writes here, root + group read.
+  chown root:quicfuscate /etc/quicfuscate
+  chmod 0750 /etc/quicfuscate
+
+  # Log dir: server writes audit + runtime logs here.
+  chown quicfuscate:quicfuscate "$log_dir"
+  chmod 0750 "$log_dir"
 
   if [[ "$build" == "1" ]]; then
     if ! need_cmd cargo; then
@@ -224,6 +286,15 @@ main() {
     fi
     install -m 0640 "$template" "$config_dst"
     chown root:quicfuscate "$config_dst" || true
+  fi
+
+  # Validate installed config is parseable TOML (if python3 is available)
+  if need_cmd python3; then
+    if ! python3 -c "import tomllib,sys; tomllib.load(open('$config_dst','rb'))" \
+          >/dev/null 2>&1; then
+      echo "error: installed config is not valid TOML: $config_dst" >&2
+      exit 1
+    fi
   fi
 
   if [[ -z "$admin_password" ]]; then
@@ -284,7 +355,14 @@ EOF
     systemctl daemon-reload
     if [[ "$no_start" != "1" ]]; then
       systemctl enable --now quicfuscate.service
-      systemctl status --no-pager quicfuscate.service || true
+      sleep 1
+      if ! systemctl is-active --quiet quicfuscate.service; then
+        echo "error: quicfuscate.service failed to start" >&2
+        systemctl status --no-pager quicfuscate.service || true
+        journalctl -u quicfuscate.service -n 50 --no-pager || true
+        exit 1
+      fi
+      echo "quicfuscate.service is active."
     else
       echo "info: service installed but not started (--no-start)"
     fi
