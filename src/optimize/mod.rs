@@ -76,7 +76,7 @@ static NUMA_POLICY: OnceLock<NumaPolicy> = OnceLock::new();
 
 #[cfg(target_os = "linux")]
 fn resolve_numa_policy() -> NumaPolicy {
-    if let Some(val) = std::env::var("QUICFUSCATE_NUMA_POLICY").ok() {
+    if let Ok(val) = std::env::var("QUICFUSCATE_NUMA_POLICY") {
         let v = val.to_lowercase();
         if v == "local" {
             return NumaPolicy::Local;

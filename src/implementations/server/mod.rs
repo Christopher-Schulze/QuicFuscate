@@ -1013,13 +1013,13 @@ impl ServerHostResources {
 
         #[cfg(target_os = "linux")]
         let routing = {
-            let routing = if server_config.ipv6_server_ip.is_some() {
+            let routing = if let Some(ipv6_server_ip) = server_config.ipv6_server_ip {
                 RoutingManager::new_dual_stack(
                     "qfserver0".to_string(),
                     server_config.server_ip,
                     server_config.server_netmask,
                     server_config.wan_interface.clone(),
-                    server_config.ipv6_server_ip.unwrap(),
+                    ipv6_server_ip,
                     server_config.ipv6_prefix_len,
                 )
             } else {

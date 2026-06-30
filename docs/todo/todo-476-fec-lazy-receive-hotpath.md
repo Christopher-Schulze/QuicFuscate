@@ -1,3 +1,14 @@
+---
+id: TODO-476
+title: FEC Lazy Receive Hotpath and Bounded Clean-Block Tracking
+severity: MEDIUM
+phase: "R"
+priority: P1
+status: DONE
+created: 2026-06-30
+depends_on: [TODO-424, TODO-426]
+---
+
 # TODO-476: FEC Lazy Receive Hotpath and Bounded Clean-Block Tracking
 
 ## Status

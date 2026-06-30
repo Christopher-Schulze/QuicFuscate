@@ -729,16 +729,13 @@ impl FecObserverPlatformHints {
         let mobile_os = cfg!(any(target_os = "ios", target_os = "android"));
 
         #[cfg(target_os = "linux")]
-        {
-            let containerized_server = std::path::Path::new("/.dockerenv").exists()
-                || std::env::var("KUBERNETES_SERVICE_HOST").is_ok();
-            return Self { mobile_os, containerized_server };
-        }
+        let containerized_server = std::path::Path::new("/.dockerenv").exists()
+            || std::env::var("KUBERNETES_SERVICE_HOST").is_ok();
 
         #[cfg(not(target_os = "linux"))]
-        {
-            Self { mobile_os, containerized_server: false }
-        }
+        let containerized_server = false;
+
+        Self { mobile_os, containerized_server }
     }
 }
 

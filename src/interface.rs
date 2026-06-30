@@ -577,8 +577,8 @@ mod linux_tun {
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
                 let bytes = c.as_bytes_with_nul();
                 let len = bytes.len().min(ifr.ifr_name.len());
-                for i in 0..len {
-                    ifr.ifr_name[i] = bytes[i] as libc::c_char;
+                for (i, byte) in bytes.iter().enumerate().take(len) {
+                    ifr.ifr_name[i] = *byte as libc::c_char;
                 }
             }
             let fd = file.as_raw_fd();
@@ -593,7 +593,7 @@ mod linux_tun {
                 if c == 0 {
                     break;
                 }
-                name.push(c as u8 as char);
+                name.push(char::from(c.to_ne_bytes()[0]));
             }
 
             // Take ownership of the fd to avoid per-call File reconstruction

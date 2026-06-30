@@ -46,6 +46,8 @@ pub struct UringBatchSender {
     sockaddrs: Vec<libc::sockaddr_storage>,
     /// Pre-allocated completion bitmap for contiguous-prefix accounting.
     send_success: Vec<bool>,
+    /// Pre-allocated primary-CQE bitmap for SendMsgZc completion accounting.
+    zc_primary_seen: Vec<bool>,
     /// True when the ring was constructed with SQPOLL mode.
     sqpoll_active: bool,
     /// True when the kernel supports SendMsgZc (probed at init).
@@ -118,6 +120,7 @@ impl UringBatchSender {
             msgs: Vec::with_capacity(cap),
             sockaddrs: Vec::with_capacity(cap),
             send_success: Vec::with_capacity(cap),
+            zc_primary_seen: Vec::with_capacity(cap),
             sqpoll_active,
             zc_supported,
         })
@@ -243,14 +246,14 @@ impl UringBatchSender {
 
         // Pass 3: build msghdrs with stable pointers into iovecs and sockaddrs.
         // Both vecs are fully populated above - no further pushes, so no realloc.
-        for i in 0..packets.len() {
+        for (i, (addr, _)) in packets.iter().enumerate() {
             // SAFETY: iovecs[i] and sockaddrs[i] are valid for the lifetime of
             // this call and the Vecs will not reallocate after this point.
             let mut hdr: libc::msghdr = unsafe { std::mem::zeroed() };
             hdr.msg_iov = &mut self.iovecs[i] as *mut libc::iovec;
             hdr.msg_iovlen = 1;
             hdr.msg_name = &mut self.sockaddrs[i] as *mut _ as *mut libc::c_void;
-            hdr.msg_namelen = addr_len(packets[i].0);
+            hdr.msg_namelen = addr_len(*addr);
             self.msgs.push(hdr);
         }
 
@@ -349,9 +352,11 @@ impl UringBatchSender {
     /// - **Primary** (`CQE_F_MORE` set): data accepted into socket buffer.
     /// - **Notification** (`CQE_F_NOTIF` set): kernel released the buffer.
     ///
-    /// We call `submit_and_wait(queued)` to wait for queued CQEs, then
-    /// drain the full CQ.  Notification CQEs that arrive later are swept up
-    /// in the next call's drain.
+    /// We call `submit_and_wait(queued)` to submit the SQEs, then keep draining
+    /// until every queued SQE has produced its primary CQE. Notification CQEs
+    /// can arrive before or after primaries on different kernels; counting only
+    /// the first `queued` CQEs would make multi-chunk batches report partial
+    /// success when the second chunk observes notification CQEs first.
     fn submit_chunk_zc(
         &mut self,
         fd: RawFd,
@@ -400,15 +405,23 @@ impl UringBatchSender {
             ));
         }
 
-        // Wait for at least the queued CQEs (primary or notification), then drain all.
+        // Wait for at least `queued` CQEs to kick the batch, then keep waiting
+        // until all primary send CQEs have been observed. SendMsgZc completion
+        // ordering is kernel-dependent: notification CQEs can satisfy the first
+        // wait without proving that every packet in this chunk was accepted.
         self.ring.submit_and_wait(queued)?;
         crate::telemetry::IO_URING_SUBMIT_CALLS.inc();
 
         self.send_success.clear();
         self.send_success.resize(queued, false);
-        {
+        self.zc_primary_seen.clear();
+        self.zc_primary_seen.resize(queued, false);
+        let mut primary_seen_count = 0usize;
+        while primary_seen_count < queued {
             let cq = self.ring.completion();
+            let mut drained = 0usize;
             for cqe in cq {
+                drained += 1;
                 let flags = cqe.flags();
                 if flags & CQE_F_NOTIF != 0 {
                     // Buffer-release notification: kernel finished with the buffer.
@@ -416,17 +429,30 @@ impl UringBatchSender {
                 } else {
                     // Primary send CQE.
                     let idx = cqe.user_data() as usize;
-                    if cqe.result() >= 0 && idx < self.send_success.len() {
-                        self.send_success[idx] = true;
-                        crate::telemetry::IO_URING_ZC_SENDS.inc();
-                    } else {
+                    if idx < self.zc_primary_seen.len() && !self.zc_primary_seen[idx] {
+                        self.zc_primary_seen[idx] = true;
+                        primary_seen_count += 1;
+                        if cqe.result() >= 0 {
+                            self.send_success[idx] = true;
+                            crate::telemetry::IO_URING_ZC_SENDS.inc();
+                        } else {
+                            log::trace!(
+                                "io_uring SendMsgZc error: user_data={} result={}",
+                                cqe.user_data(),
+                                cqe.result()
+                            );
+                        }
+                    } else if idx >= self.zc_primary_seen.len() {
                         log::trace!(
-                            "io_uring SendMsgZc error: user_data={} result={}",
+                            "io_uring SendMsgZc unexpected CQE: user_data={} result={}",
                             cqe.user_data(),
                             cqe.result()
                         );
                     }
                 }
+            }
+            if primary_seen_count < queued && drained == 0 {
+                self.ring.submit_and_wait(1)?;
             }
         }
 
@@ -711,8 +737,8 @@ impl UringRecvBatch {
 
         // Pre-build iovecs pointing into the buffer pool.
         let mut iovecs: Vec<libc::iovec> = Vec::with_capacity(d);
-        for i in 0..d {
-            let iov_base = if let Some(block) = blocks[i].as_mut() {
+        for (i, block_slot) in blocks.iter_mut().enumerate().take(d) {
+            let iov_base = if let Some(block) = block_slot.as_mut() {
                 block.as_mut_ptr() as *mut libc::c_void
             } else {
                 // SAFETY: bufs lives as long as self; no reallocation after this.

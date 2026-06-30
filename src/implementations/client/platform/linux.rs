@@ -174,7 +174,8 @@ impl PlatformBackend for LinuxPlatform {
 
         // Reconstruct name from ifr_name with explicit null-terminator search
         let name_len = ifr.ifr_name.iter().position(|&c| c == 0).unwrap_or(ifr.ifr_name.len());
-        let name: String = ifr.ifr_name[..name_len].iter().map(|&c| c as u8 as char).collect();
+        let name: String =
+            ifr.ifr_name[..name_len].iter().map(|&c| char::from(c.to_ne_bytes()[0])).collect();
         if name.is_empty() {
             return Err(PlatformError::DeviceError(
                 "Kernel did not return a valid tunnel interface name".to_string(),
