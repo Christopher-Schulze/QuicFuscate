@@ -1174,7 +1174,11 @@ mod tests {
 
     #[test]
     fn test_global_rate_limiter_allows_within_burst() {
-        let limiter = GlobalRateLimiter::new(50_000, 10);
+        // Disable refill for this burst-only invariant. With a high sustained
+        // rate, a slow CI runner can legitimately refill one token while this
+        // loop is still executing, making the "11th is dropped" assertion
+        // time-dependent. Refill behavior is covered separately below.
+        let limiter = GlobalRateLimiter::new(0, 10);
         // Burst capacity is 10.
         for _ in 0..10 {
             assert!(limiter.check());
