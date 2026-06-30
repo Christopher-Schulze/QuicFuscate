@@ -5594,10 +5594,12 @@ mtu = 500
 
     #[test]
     fn test_shared_server_domain_no_ipv6_pool_when_disabled() {
-        let mut config = ServerConfig::default();
-        config.ipv6_pool_start = None;
-        config.ipv6_pool_end = None;
-        config.ipv6_server_ip = None;
+        let config = ServerConfig {
+            ipv6_pool_start: None,
+            ipv6_pool_end: None,
+            ipv6_server_ip: None,
+            ..Default::default()
+        };
         let domain = SharedServerDomain::new(&config);
         // IPv6 pool should not be created
         assert!(domain.ipv6_pool.is_none());

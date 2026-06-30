@@ -35,6 +35,8 @@ fn test_tun_open_rejects_invalid_mtu_before_platform_handling() {
         netmask: None,
         mtu: 500,
         zero_copy: true,
+        ip6: None,
+        prefix6: None,
     };
     let err =
         quicfuscate::interface::TunInterface::open(cfg, pool).expect_err("invalid mtu must fail");

@@ -94,6 +94,8 @@ fn tun_factory_roundtrip_reads_and_writes() {
         netmask: None,
         mtu: 1400,
         zero_copy: true,
+        ip6: None,
+        prefix6: None,
     };
     let tun = TunInterface::open(cfg, pool).expect("open tun");
     assert_eq!(tun.name(), "dummy0");

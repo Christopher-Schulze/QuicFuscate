@@ -48,6 +48,8 @@ fn example_usage() {
         zero_copy: true,
         ip: None,
         netmask: None,
+        ip6: None,
+        prefix6: None,
     };
     let tun = TunInterface::open(cfg, pool).expect("open tun");
 
