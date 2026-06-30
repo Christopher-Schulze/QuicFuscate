@@ -906,6 +906,9 @@ impl ServerHostResources {
                 )
             };
 
+            // Clean up stale rules from a crashed previous session before setup.
+            routing.cleanup_stale();
+
             if let Err(e) = routing.setup() {
                 log::warn!("Failed to setup routing: {:?}", e);
                 None
@@ -922,8 +925,30 @@ impl ServerHostResources {
 
     fn teardown(self) {
         if let Some(routing) = self.routing {
-            if let Err(e) = routing.teardown() {
-                log::warn!("Failed to teardown routing: {:?}", e);
+            // Retry teardown up to 3 times — iptables/pf commands can fail
+            // transiently under load or when the kernel is reaping state.
+            let mut last_err = None;
+            for attempt in 1..=3 {
+                match routing.teardown() {
+                    Ok(()) => {
+                        last_err = None;
+                        break;
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Routing teardown attempt {}/3 failed: {:?}",
+                            attempt,
+                            e
+                        );
+                        last_err = Some(e);
+                        if attempt < 3 {
+                            std::thread::sleep(std::time::Duration::from_millis(100 * attempt as u64));
+                        }
+                    }
+                }
+            }
+            if let Some(e) = last_err {
+                log::error!("Routing teardown failed after 3 attempts: {:?}", e);
             }
         }
         log::info!("Closing server TUN: {}", self.tun.name());

@@ -162,6 +162,75 @@ impl RoutingManager {
         Err(RoutingError::UnsupportedPlatform)
     }
 
+    /// Remove stale routing rules from a crashed previous session.
+    ///
+    /// This is safe to call on startup before `setup()`. It flushes any
+    /// leftover iptables/pf/netsh rules that may persist from a process
+    /// that was killed before its `teardown()` could run.
+    #[cfg(target_os = "linux")]
+    pub fn cleanup_stale(&self) {
+        let subnet = self.calculate_subnet();
+        log::info!("Cleaning up stale routing rules for subnet {}", subnet);
+
+        // Remove NAT rule (idempotent — errors are expected if rules don't exist)
+        let _ = Command::new("iptables")
+            .args(["-t", "nat", "-D", "POSTROUTING", "-s", &subnet,
+                   "-o", &self.wan_interface, "-j", "MASQUERADE"])
+            .status();
+        let _ = Command::new("iptables")
+            .args(["-D", "FORWARD", "-i", &self.tun_name, "-j", "ACCEPT"])
+            .status();
+        let _ = Command::new("iptables")
+            .args(["-D", "FORWARD", "-o", &self.tun_name, "-j", "ACCEPT"])
+            .status();
+        let _ = Command::new("iptables")
+            .args(["-D", "FORWARD", "-i", &self.wan_interface, "-o", &self.tun_name,
+                   "-m", "state", "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT"])
+            .status();
+
+        // IPv6 stale cleanup
+        if self.is_ipv6_enabled() {
+            let v6_subnet = self.calculate_ipv6_subnet();
+            let _ = Command::new("ip6tables")
+                .args(["-t", "nat", "-D", "POSTROUTING", "-s", &v6_subnet,
+                       "-o", &self.wan_interface, "-j", "MASQUERADE"])
+                .status();
+            let _ = Command::new("ip6tables")
+                .args(["-D", "FORWARD", "-i", &self.tun_name, "-j", "ACCEPT"])
+                .status();
+            let _ = Command::new("ip6tables")
+                .args(["-D", "FORWARD", "-o", &self.tun_name, "-j", "ACCEPT"])
+                .status();
+        }
+
+        log::info!("Stale routing cleanup complete");
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn cleanup_stale(&self) {
+        log::info!("Cleaning up stale pf anchor rules");
+        let _ = Command::new("pfctl")
+            .args(["-a", Self::MACOS_PF_ANCHOR, "-F", "all"])
+            .status();
+        log::info!("Stale routing cleanup complete");
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn cleanup_stale(&self) {
+        log::info!("Cleaning up stale NetNat rules");
+        let script = format!(
+            "$ErrorActionPreference='SilentlyContinue'; \
+             Remove-NetNat -Name '{}' -Confirm:$false; \
+             Remove-NetNat -Name '{}_v6' -Confirm:$false",
+            Self::WINDOWS_NAT_NAME, Self::WINDOWS_NAT_NAME
+        );
+        let _ = self.run_powershell(&script, "cleanup_stale");
+        log::info!("Stale routing cleanup complete");
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    pub fn cleanup_stale(&self) {}
+
     /// Tear down routing rules.
     #[cfg(target_os = "linux")]
     pub fn teardown(&self) -> Result<(), RoutingError> {
