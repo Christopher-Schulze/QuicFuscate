@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::implementations::server::bandwidth::PerClientBandwidthManager;
 use crate::rng;
 
 /// Unique session identifier.
@@ -152,6 +153,9 @@ pub struct SessionManager {
     by_client_ipv6: HashMap<Ipv6Addr, SessionId>,
     by_remote_addr: HashMap<SocketAddr, SessionId>,
     max_sessions: usize,
+    /// Optional per-client bandwidth limiter & quota tracker (TODO-445).
+    /// When `Some`, `check_bandwidth` gates data forwarding per client ID.
+    bandwidth_manager: Option<PerClientBandwidthManager>,
 }
 
 impl SessionManager {
@@ -163,7 +167,50 @@ impl SessionManager {
             by_client_ipv6: HashMap::new(),
             by_remote_addr: HashMap::new(),
             max_sessions,
+            bandwidth_manager: None,
         }
+    }
+
+    /// Create a new session manager with per-client bandwidth limits enabled.
+    ///
+    /// The `PerClientBandwidthManager` gates outbound data forwarding on a
+    /// per-client basis (bytes/sec rate limit + cumulative quota). When the
+    /// manager is absent, all sends are allowed.
+    pub fn with_bandwidth_manager(
+        max_sessions: usize,
+        bandwidth_manager: PerClientBandwidthManager,
+    ) -> Self {
+        Self {
+            sessions: HashMap::new(),
+            by_client_ip: HashMap::new(),
+            by_client_ipv6: HashMap::new(),
+            by_remote_addr: HashMap::new(),
+            max_sessions,
+            bandwidth_manager: Some(bandwidth_manager),
+        }
+    }
+
+    /// Check whether `bytes` may be sent for the given client ID under the
+    /// per-client bandwidth limits and quota.
+    ///
+    /// Returns `true` when no bandwidth manager is configured (unlimited) or
+    /// when both the rate-limit and quota checks pass. Returns `false` when the
+    /// send would exceed the client's rate limit or quota.
+    pub fn check_bandwidth(&mut self, client_id: &str, bytes: usize) -> bool {
+        match &mut self.bandwidth_manager {
+            Some(mgr) => mgr.check_send(client_id, bytes),
+            None => true,
+        }
+    }
+
+    /// Borrow the per-client bandwidth manager, if configured.
+    pub fn bandwidth_manager(&self) -> Option<&PerClientBandwidthManager> {
+        self.bandwidth_manager.as_ref()
+    }
+
+    /// Mutably borrow the per-client bandwidth manager, if configured.
+    pub fn bandwidth_manager_mut(&mut self) -> Option<&mut PerClientBandwidthManager> {
+        self.bandwidth_manager.as_mut()
     }
 
     /// Add a session.
@@ -335,5 +382,24 @@ mod tests {
 
         mgr.remove(id);
         assert_eq!(mgr.len(), 0);
+    }
+
+    #[test]
+    fn test_session_manager_bandwidth_check() {
+        // Without a bandwidth manager, all sends are allowed.
+        let mut mgr = SessionManager::new(100);
+        assert!(mgr.check_bandwidth("alice", 10_000));
+
+        // With a bandwidth manager, the per-client limits are enforced.
+        let bw = PerClientBandwidthManager::new(1_000, 1_000, 10_000, Duration::from_secs(60));
+        let mut mgr = SessionManager::with_bandwidth_manager(100, bw);
+
+        // First send within burst + quota → allowed.
+        assert!(mgr.check_bandwidth("alice", 1_000));
+        // Bucket drained → rejected.
+        assert!(!mgr.check_bandwidth("alice", 1));
+        // Quota was consumed by the successful send only.
+        let stats = mgr.bandwidth_manager().unwrap().stats("alice").unwrap();
+        assert_eq!(stats.quota_used_bytes, 1_000);
     }
 }

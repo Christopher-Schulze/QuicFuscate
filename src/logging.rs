@@ -1,0 +1,708 @@
+//! Production logging: structured JSON, size-rotating file appender, and RFC 5424 syslog.
+//!
+//! This module replaces `env_logger` with a production-grade logger built on the
+//! `log` crate facade. It supports three output formats (`Text`, `Json`, `Syslog`),
+//! size-based log file rotation, optional RFC 5424 syslog forwarding over UDP, and
+//! per-module level overrides.
+//!
+//! The logger is installed once via [`init`]. A secondary in-memory sink
+//! ([`LogSink`]) can be registered with [`set_admin_sink`] so that the Admin UI
+//! ring buffer keeps receiving entries regardless of the configured output format.
+
+use log::{Level, LevelFilter, Log, Metadata, Record};
+use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Write};
+use std::net::{SocketAddr, UdpSocket};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::engine::{LogFormat, LoggingConfig};
+
+/// Default maximum file size before rotation (100 MiB).
+pub const DEFAULT_MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
+/// Default number of rotated files to retain.
+pub const DEFAULT_MAX_FILES: usize = 5;
+/// Default syslog facility (user-level, RFC 5424).
+pub const DEFAULT_SYSLOG_FACILITY: u8 = 1;
+
+/// Errors returned by [`init`].
+#[derive(Debug)]
+pub enum LogInitError {
+    /// Failed to create or open the log file.
+    FileCreateError(io::Error),
+    /// Failed to bind the syslog UDP socket.
+    SyslogError(io::Error),
+}
+
+impl std::fmt::Display for LogInitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LogInitError::FileCreateError(e) => write!(f, "log file create error: {}", e),
+            LogInitError::SyslogError(e) => write!(f, "syslog init error: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for LogInitError {}
+
+/// A secondary in-memory sink that receives every log record in addition to the
+/// configured outputs. Implemented by the Admin UI ring buffer.
+pub trait LogSink: Send + Sync {
+    /// Push a log entry (level + pre-formatted message).
+    fn push(&self, level: Level, msg: &str);
+}
+
+static ADMIN_SINK: OnceLock<Arc<dyn LogSink>> = OnceLock::new();
+
+/// Register a secondary [`LogSink`] (e.g. the Admin UI ring buffer).
+///
+/// Safe to call once; subsequent calls are ignored.
+pub fn set_admin_sink(sink: Arc<dyn LogSink>) {
+    let _ = ADMIN_SINK.set(sink);
+}
+
+/// Initialize the production logger from a [`LoggingConfig`].
+///
+/// Installs a global `log` logger and sets the max level. If a logger is already
+/// installed, this returns `Ok(())` without reconfiguring (idempotent).
+pub fn init(config: &LoggingConfig) -> Result<(), LogInitError> {
+    let eff = config.effective();
+
+    let level = parse_level(&eff.level);
+    let format = eff.format;
+
+    // Resolve the file path: prefer the explicit `file_path`, fall back to the
+    // legacy `log_file_path` string when `log_to_file` is enabled.
+    let file_path = resolve_file_path(&eff);
+
+    let file = if let Some(p) = file_path {
+        let appender = SizeRotatingAppender::new(&p, eff.max_file_size_bytes, eff.max_files)
+            .map_err(LogInitError::FileCreateError)?;
+        Some(Mutex::new(appender))
+    } else {
+        None
+    };
+
+    let to_stderr = eff.log_to_stdout;
+
+    let syslog = if let Some(addr) = eff.syslog_addr {
+        let writer = SyslogWriter::new(addr, "quicfuscate").map_err(LogInitError::SyslogError)?;
+        Some(Mutex::new(writer))
+    } else {
+        None
+    };
+
+    let module_levels: HashMap<String, LevelFilter> = eff
+        .module_levels
+        .iter()
+        .map(|(k, v): (&String, &String)| (k.clone(), parse_level(v)))
+        .collect();
+
+    // The global max level must be at least as permissive as the most verbose
+    // module override, otherwise those records would be filtered before reaching
+    // the logger.
+    let max_level = module_levels.values().copied().max().unwrap_or(level).max(level);
+
+    let hostname = detect_hostname();
+    let procid = std::process::id().to_string();
+
+    let logger = ProductionLogger {
+        level,
+        format,
+        file,
+        to_stderr,
+        syslog,
+        module_levels,
+        hostname,
+        app_name: "quicfuscate".to_string(),
+        procid,
+    };
+
+    // set_boxed_logger fails if a logger is already installed. Treat that as
+    // a non-fatal idempotent success so callers can retry safely.
+    match log::set_boxed_logger(Box::new(logger)) {
+        Ok(()) => {
+            log::set_max_level(max_level);
+            Ok(())
+        }
+        Err(_) => Ok(()),
+    }
+}
+
+/// Resolve the effective file path for the rotating appender.
+fn resolve_file_path(config: &LoggingConfig) -> Option<PathBuf> {
+    if let Some(p) = &config.file_path {
+        return Some(p.clone());
+    }
+    if config.log_to_file && !config.log_file_path.is_empty() {
+        return Some(PathBuf::from(&config.log_file_path));
+    }
+    None
+}
+/// Parse a level string into a `LevelFilter`. Unknown values default to `Info`.
+fn parse_level(s: &str) -> LevelFilter {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "off" => LevelFilter::Off,
+        "error" => LevelFilter::Error,
+        "warn" => LevelFilter::Warn,
+        "info" => LevelFilter::Info,
+        "debug" => LevelFilter::Debug,
+        "trace" => LevelFilter::Trace,
+        _ => LevelFilter::Info,
+    }
+}
+
+// ============================================================================
+// ProductionLogger
+// ============================================================================
+
+struct ProductionLogger {
+    level: LevelFilter,
+    format: LogFormat,
+    file: Option<Mutex<SizeRotatingAppender>>,
+    to_stderr: bool,
+    syslog: Option<Mutex<SyslogWriter>>,
+    module_levels: HashMap<String, LevelFilter>,
+    hostname: String,
+    app_name: String,
+    procid: String,
+}
+
+impl Log for ProductionLogger {
+    fn enabled(&self, metadata: &Metadata) -> bool {
+        let target = metadata.target();
+        if let Some(f) = self.module_levels.get(target) {
+            return metadata.level() <= *f;
+        }
+        // Check ancestor module prefixes (e.g. "quicfuscate::engine" overrides "quicfuscate").
+        if let Some((_, f)) = self
+            .module_levels
+            .iter()
+            .filter(|(k, _)| {
+                target.starts_with(k.as_str()) && target.as_bytes().get(k.len()) == Some(&b':')
+            })
+            .max_by_key(|(k, _)| k.len())
+        {
+            return metadata.level() <= *f;
+        }
+        metadata.level() <= self.level
+    }
+
+    fn log(&self, record: &Record) {
+        // Module-level filtering (handles overrides more/less verbose than global).
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+
+        let msg_text = record.args().to_string();
+
+        // Forward to the optional Admin UI ring buffer.
+        if let Some(sink) = ADMIN_SINK.get() {
+            sink.push(record.level(), &msg_text);
+        }
+
+        // Render the line for file/stderr according to the configured format.
+        let line = match self.format {
+            LogFormat::Json => format_json(record),
+            LogFormat::Text => format_text(record),
+            LogFormat::Syslog => format_rfc5424(
+                &self.hostname,
+                &self.app_name,
+                &self.procid,
+                record.level(),
+                &msg_text,
+            ),
+        };
+        let line_nl = format!("{}\n", line);
+
+        if let Some(app) = &self.file {
+            if let Ok(mut g) = app.lock() {
+                let _ = g.write_line(line_nl.as_bytes());
+            }
+        }
+
+        if self.to_stderr {
+            let _ = io::stderr().write_all(line_nl.as_bytes());
+        }
+
+        if let Some(sw) = &self.syslog {
+            if let Ok(mut g) = sw.lock() {
+                let _ = g.write_line(record.level(), &msg_text);
+            }
+        }
+    }
+
+    fn flush(&self) {
+        if let Some(app) = &self.file {
+            if let Ok(mut g) = app.lock() {
+                let _ = g.flush();
+            }
+        }
+        let _ = io::stderr().flush();
+    }
+}
+
+// ============================================================================
+// SizeRotatingAppender
+// ============================================================================
+
+/// A file appender that rotates the active log file when it exceeds `max_size`
+/// bytes, keeping up to `max_files` rotated copies.
+///
+/// Rotation scheme: `app.log` -> `app.log.1` -> `app.log.2` -> ... -> `app.log.N`.
+/// The oldest file (`app.log.N`) is deleted on each rotation.
+pub struct SizeRotatingAppender {
+    file: Option<File>,
+    path: PathBuf,
+    current_size: u64,
+    max_size: u64,
+    max_files: usize,
+}
+
+impl SizeRotatingAppender {
+    /// Create a new appender at `path`. The file is opened in append mode and
+    /// its current size is detected so rotation accounting is correct across
+    /// restarts.
+    pub fn new(path: impl AsRef<Path>, max_size: u64, max_files: usize) -> io::Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let current_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+        Ok(Self { file: Some(file), path, current_size, max_size, max_files })
+    }
+
+    /// Append a single line (bytes) to the file, rotating first if needed.
+    pub fn write_line(&mut self, line: &[u8]) -> io::Result<()> {
+        if self.max_size > 0
+            && self.current_size > 0
+            && self.current_size.saturating_add(line.len() as u64) > self.max_size
+        {
+            self.rotate()?;
+        }
+        let f = self.ensure_open()?;
+        f.write_all(line)?;
+        self.current_size = self.current_size.saturating_add(line.len() as u64);
+        Ok(())
+    }
+
+    /// Flush the underlying file.
+    pub fn flush(&mut self) -> io::Result<()> {
+        if let Some(f) = &mut self.file {
+            f.flush()?;
+        }
+        Ok(())
+    }
+
+    /// Current tracked file size in bytes.
+    pub fn current_size(&self) -> u64 {
+        self.current_size
+    }
+
+    fn ensure_open(&mut self) -> io::Result<&mut File> {
+        if self.file.is_none() {
+            self.file = Some(OpenOptions::new().create(true).append(true).open(&self.path)?);
+        }
+        Ok(self.file.as_mut().expect("file opened"))
+    }
+
+    fn rotate(&mut self) -> io::Result<()> {
+        // Close the active handle so rename succeeds on all platforms.
+        self.file = None;
+
+        let max = self.max_files;
+        if max == 0 {
+            // No rotated files retained: truncate in place.
+            let _ = OpenOptions::new().write(true).truncate(true).open(&self.path)?;
+            self.current_size = 0;
+            return Ok(());
+        }
+
+        // Remove the oldest rotated file (app.log.<max>).
+        let oldest = rotated_path(&self.path, max);
+        let _ = std::fs::remove_file(&oldest);
+
+        // Shift app.log.<i> -> app.log.<i+1> for i in (max-1 down to 1).
+        if max > 1 {
+            for i in (1..max).rev() {
+                let from = rotated_path(&self.path, i);
+                if from.exists() {
+                    let to = rotated_path(&self.path, i + 1);
+                    std::fs::rename(&from, &to)?;
+                }
+            }
+        }
+
+        // Move the active file to app.log.1.
+        let first = rotated_path(&self.path, 1);
+        std::fs::rename(&self.path, &first)?;
+        self.current_size = 0;
+        Ok(())
+    }
+}
+
+/// Build the rotated path `base.<n>`.
+fn rotated_path(base: &Path, n: usize) -> PathBuf {
+    let mut os = base.as_os_str().to_owned();
+    os.push(format!(".{}", n));
+    PathBuf::from(os)
+}
+
+// ============================================================================
+// SyslogWriter
+// ============================================================================
+
+/// Writes RFC 5424 formatted syslog messages over UDP.
+pub struct SyslogWriter {
+    sock: UdpSocket,
+    addr: SocketAddr,
+    hostname: String,
+    app_name: String,
+    procid: String,
+    facility: u8,
+}
+
+impl SyslogWriter {
+    /// Create a new syslog writer bound to a local ephemeral port, targeting
+    /// `addr` (default `127.0.0.1:514`).
+    pub fn new(addr: SocketAddr, app_name: &str) -> io::Result<Self> {
+        let sock = UdpSocket::bind("0.0.0.0:0")?;
+        sock.connect(addr)?;
+        Ok(Self {
+            sock,
+            addr,
+            hostname: detect_hostname(),
+            app_name: app_name.to_string(),
+            procid: std::process::id().to_string(),
+            facility: DEFAULT_SYSLOG_FACILITY,
+        })
+    }
+
+    /// Format and send a single syslog message.
+    pub fn write_line(&mut self, level: Level, msg: &str) -> io::Result<()> {
+        let line = format_rfc5424(&self.hostname, &self.app_name, &self.procid, level, msg);
+        // Use send_to with the configured addr (connect was also called, but
+        // send_to keeps things explicit and robust).
+        self.sock.send_to(line.as_bytes(), self.addr)?;
+        Ok(())
+    }
+
+    /// Override the syslog facility (default: 1 = user).
+    pub fn with_facility(mut self, facility: u8) -> Self {
+        self.facility = facility;
+        self
+    }
+}
+
+/// Map a `log::Level` to an RFC 5424 severity code.
+pub fn level_to_severity(level: Level) -> u8 {
+    match level {
+        Level::Error => 3, // Error
+        Level::Warn => 4,  // Warning
+        Level::Info => 6,  // Informational
+        Level::Debug => 7, // Debug
+        Level::Trace => 7, // Debug (no trace severity in RFC 5424)
+    }
+}
+
+/// Format an RFC 5424 syslog message:
+/// `<PRI>VERSION TIMESTAMP HOSTNAME APP-NAME PROCID MSGID STRUCTURED-DATA MSG`.
+pub fn format_rfc5424(
+    hostname: &str,
+    app_name: &str,
+    procid: &str,
+    level: Level,
+    msg: &str,
+) -> String {
+    let severity = level_to_severity(level);
+    let pri = (DEFAULT_SYSLOG_FACILITY as u32) * 8 + severity as u32;
+    let ts = rfc3339_utc(SystemTime::now());
+    // MSGID and STRUCTURED-DATA are nilvalues ("-").
+    format!("<{}>1 {} {} {} {} - - {}", pri, ts, hostname, app_name, procid, msg)
+}
+
+// ============================================================================
+// Formatting helpers
+// ============================================================================
+
+/// Format a record as a human-readable text line (no trailing newline).
+pub fn format_text(record: &Record) -> String {
+    let ts = rfc3339_utc(SystemTime::now());
+    format!("{} [{}] {}: {}", ts, record.level(), record.target(), record.args())
+}
+
+/// Format a record as a single NDJSON line (no trailing newline).
+pub fn format_json(record: &Record) -> String {
+    let ts = rfc3339_utc(SystemTime::now());
+    let mut obj = serde_json::Map::new();
+    obj.insert("ts".into(), serde_json::Value::String(ts));
+    obj.insert("level".into(), serde_json::Value::String(record.level().as_str().to_lowercase()));
+    obj.insert("target".into(), serde_json::Value::String(record.target().to_string()));
+    obj.insert("msg".into(), serde_json::Value::String(record.args().to_string()));
+    if let Some(file) = record.file() {
+        obj.insert("file".into(), serde_json::Value::String(file.to_string()));
+    }
+    if let Some(line) = record.line() {
+        obj.insert("line".into(), serde_json::Value::Number(serde_json::Number::from(line)));
+    }
+    serde_json::to_string(&obj).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// Format `SystemTime` as an RFC 3339 UTC timestamp with millisecond precision.
+pub fn rfc3339_utc(now: SystemTime) -> String {
+    let dur = now.duration_since(UNIX_EPOCH).unwrap_or_default();
+    let secs = dur.as_secs();
+    let millis = dur.subsec_millis();
+    let days = (secs / 86400) as i64;
+    let rem = secs % 86400;
+    let h = rem / 3600;
+    let m = (rem % 3600) / 60;
+    let s = rem % 60;
+    let (y, mo, d) = civil_from_days(days);
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z", y, mo, d, h, m, s, millis)
+}
+
+/// Convert days since the Unix epoch (1970-01-01) to a proleptic Gregorian date.
+/// Based on Howard Hinnant's `civil_from_days` algorithm.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
+/// Best-effort hostname detection (no extra dependency).
+fn detect_hostname() -> String {
+    if let Ok(h) = std::env::var("HOSTNAME") {
+        if !h.is_empty() {
+            return h;
+        }
+    }
+    if let Ok(h) = std::env::var("COMPUTERNAME") {
+        if !h.is_empty() {
+            return h;
+        }
+    }
+    "localhost".to_string()
+}
+
+// Implement LogSink for the Admin UI ring buffer so it can be registered via
+// set_admin_sink without the logging module depending on the server module.
+impl LogSink for crate::implementations::server::admin_logs::AdminLogBuffer {
+    fn push(&self, level: Level, msg: &str) {
+        // Delegate to the existing AdminLogBuffer::push method.
+        crate::implementations::server::admin_logs::AdminLogBuffer::push(self, level, msg);
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use log::Level;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn build_and_format<F>(level: Level, target: &str, msg: &str, formatter: F) -> String
+    where
+        F: Fn(&Record) -> String,
+    {
+        let args = format_args!("{}", msg);
+        let r = Record::builder().level(level).target(target).args(args).build();
+        formatter(&r)
+    }
+
+    #[test]
+    fn json_format_contains_required_fields() {
+        let line = build_and_format(Level::Info, "quicfuscate::engine", "hello world", format_json);
+        let v: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
+        let obj = v.as_object().expect("JSON object");
+        assert_eq!(obj.get("level").and_then(|x| x.as_str()), Some("info"));
+        assert_eq!(obj.get("target").and_then(|x| x.as_str()), Some("quicfuscate::engine"));
+        assert_eq!(obj.get("msg").and_then(|x| x.as_str()), Some("hello world"));
+        assert!(obj.get("ts").and_then(|x| x.as_str()).is_some());
+    }
+
+    #[test]
+    fn text_format_is_human_readable() {
+        let line = build_and_format(Level::Warn, "net", "dropped packet", format_text);
+        assert!(line.contains("[WARN]"));
+        assert!(line.contains("net"));
+        assert!(line.contains("dropped packet"));
+        // RFC 3339 timestamp contains 'T' separator and 'Z' suffix.
+        assert!(line.contains('T'));
+        assert!(line.contains('Z'));
+    }
+
+    #[test]
+    fn syslog_format_follows_rfc5424() {
+        let line = format_rfc5424("host01", "quicfuscate", "4242", Level::Error, "boom");
+        // <PRI>VERSION ...
+        assert!(line.starts_with('<'));
+        // PRI for facility=1, severity=3 (Error) = 11.
+        assert!(line.starts_with("<11>1 "));
+        // Timestamp, hostname, app-name, procid, msgid(-), structured-data(-), msg.
+        let parts: Vec<&str> = line.splitn(8, ' ').collect();
+        assert_eq!(parts.len(), 8);
+        assert_eq!(parts[0], "<11>1");
+        assert!(parts[1].ends_with('Z'));
+        assert_eq!(parts[2], "host01");
+        assert_eq!(parts[3], "quicfuscate");
+        assert_eq!(parts[4], "4242");
+        assert_eq!(parts[5], "-"); // MSGID
+        assert_eq!(parts[6], "-"); // STRUCTURED-DATA
+        assert_eq!(parts[7], "boom");
+    }
+
+    #[test]
+    fn level_to_severity_mapping() {
+        assert_eq!(level_to_severity(Level::Error), 3);
+        assert_eq!(level_to_severity(Level::Warn), 4);
+        assert_eq!(level_to_severity(Level::Info), 6);
+        assert_eq!(level_to_severity(Level::Debug), 7);
+        assert_eq!(level_to_severity(Level::Trace), 7);
+    }
+
+    #[test]
+    fn rfc3339_is_valid_format() {
+        let ts = rfc3339_utc(SystemTime::now());
+        // YYYY-MM-DDTHH:MM:SS.mmmZ
+        assert_eq!(ts.len(), 24);
+        assert_eq!(ts.chars().nth(4), Some('-'));
+        assert_eq!(ts.chars().nth(10), Some('T'));
+        assert_eq!(ts.chars().nth(19), Some('.'));
+        assert_eq!(ts.chars().nth(23), Some('Z'));
+    }
+
+    #[test]
+    fn size_rotation_creates_numbered_files() {
+        let dir = std::env::temp_dir().join(format!("qf_log_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app.log");
+
+        // max_size = 12 bytes, keep 3 rotated files.
+        let mut app = SizeRotatingAppender::new(&path, 12, 3).unwrap();
+        // Each line is 6 bytes ("hello\n"). After 2 lines (12 bytes) the 3rd triggers rotation.
+        app.write_line(b"hello\n").unwrap();
+        app.write_line(b"hello\n").unwrap();
+        app.write_line(b"hello\n").unwrap();
+        app.flush().unwrap();
+        drop(app);
+
+        // After rotation: app.log (current) + app.log.1 (previous active).
+        assert!(path.exists(), "active log exists");
+        let one = rotated_path(&path, 1);
+        assert!(one.exists(), "app.log.1 exists after first rotation");
+        // Contents of app.log.1 should be the pre-rotation active file (2 lines).
+        let one_content = fs::read_to_string(&one).unwrap();
+        assert_eq!(one_content, "hello\nhello\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn size_rotation_shifts_oldest_out() {
+        let dir = std::env::temp_dir().join(format!("qf_log_rot_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app.log");
+
+        // max_size = 6 bytes (one "hello\n" line), keep 2 rotated files.
+        let mut app = SizeRotatingAppender::new(&path, 6, 2).unwrap();
+        for _ in 0..5 {
+            app.write_line(b"hello\n").unwrap();
+        }
+        app.flush().unwrap();
+        drop(app);
+
+        // With max_files=2, only app.log.1 and app.log.2 are retained.
+        assert!(path.exists());
+        assert!(rotated_path(&path, 1).exists());
+        assert!(rotated_path(&path, 2).exists());
+        assert!(!rotated_path(&path, 3).exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_level_maps_known_strings() {
+        assert_eq!(parse_level("error"), LevelFilter::Error);
+        assert_eq!(parse_level("WARN"), LevelFilter::Warn);
+        assert_eq!(parse_level("Info"), LevelFilter::Info);
+        assert_eq!(parse_level("debug"), LevelFilter::Debug);
+        assert_eq!(parse_level("trace"), LevelFilter::Trace);
+        assert_eq!(parse_level("off"), LevelFilter::Off);
+        // Unknown defaults to Info.
+        assert_eq!(parse_level("nope"), LevelFilter::Info);
+    }
+
+    #[test]
+    fn logger_enabled_respects_module_overrides() {
+        let mut module_levels = HashMap::new();
+        module_levels.insert("quicfuscate::net".to_string(), LevelFilter::Debug);
+        let logger = ProductionLogger {
+            level: LevelFilter::Warn,
+            format: LogFormat::Text,
+            file: None,
+            to_stderr: false,
+            syslog: None,
+            module_levels,
+            hostname: "h".to_string(),
+            app_name: "q".to_string(),
+            procid: "1".to_string(),
+        };
+
+        // Global level is Warn: Info from unknown module is filtered.
+        let m = Metadata::builder().level(Level::Info).target("other").build();
+        assert!(!logger.enabled(&m));
+
+        // Module override allows Debug from "quicfuscate::net".
+        let m2 = Metadata::builder().level(Level::Debug).target("quicfuscate::net").build();
+        assert!(logger.enabled(&m2));
+
+        // Ancestor prefix override: "quicfuscate::net::tcp" inherits "quicfuscate::net".
+        let m3 = Metadata::builder().level(Level::Debug).target("quicfuscate::net::tcp").build();
+        assert!(logger.enabled(&m3));
+
+        // Trace is above the module override (Debug), filtered.
+        let m4 = Metadata::builder().level(Level::Trace).target("quicfuscate::net").build();
+        assert!(!logger.enabled(&m4));
+    }
+
+    #[test]
+    fn resolve_file_path_prefers_explicit_path() {
+        let cfg = LoggingConfig {
+            file_path: Some(PathBuf::from("/tmp/explicit.log")),
+            log_to_file: true,
+            log_file_path: "/tmp/legacy.log".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(resolve_file_path(&cfg), Some(PathBuf::from("/tmp/explicit.log")));
+    }
+
+    #[test]
+    fn resolve_file_path_falls_back_to_legacy() {
+        let cfg = LoggingConfig {
+            file_path: None,
+            log_to_file: true,
+            log_file_path: "/tmp/legacy.log".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(resolve_file_path(&cfg), Some(PathBuf::from("/tmp/legacy.log")));
+    }
+
+    #[test]
+    fn resolve_file_path_none_when_disabled() {
+        let cfg = LoggingConfig { file_path: None, log_to_file: false, ..Default::default() };
+        assert_eq!(resolve_file_path(&cfg), None);
+    }
+}

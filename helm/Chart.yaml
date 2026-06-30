@@ -1,0 +1,21 @@
+apiVersion: v2
+name: quicfuscate
+description: |
+  QuicFuscate is a QUIC-based VPN with stealth/anti-DPI capabilities. This Helm
+  chart deploys the server with TUN device access, admin HTTP dashboard, and
+  QKey authentication.
+type: application
+version: 0.1.0
+appVersion: "0.4.0"
+keywords:
+  - vpn
+  - quic
+  - stealth
+  - anti-dpi
+  - proxy
+  - tunnel
+home: https://github.com/cognition/quicfuscate
+sources:
+  - https://github.com/cognition/quicfuscate
+maintainers:
+  - name: QuicFuscate Team

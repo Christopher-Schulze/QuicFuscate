@@ -138,12 +138,16 @@ pub mod brain;
 pub mod compress;
 /// Forward Error Correction - adaptive Reed-Solomon with PID controller and Kalman filter.
 pub mod fec;
+/// Firewall backend abstraction (iptables / nftables) for kill switch and NAT routing.
+pub mod firewall;
 /// Test harness utilities for integration and property-based testing.
 pub mod harness;
 /// Tracing and span instrumentation for runtime observability.
 pub mod instrumentation;
 /// TUN/TAP interface management and platform-specific network device abstraction.
 pub mod interface;
+/// Production logging: structured JSON, size-rotating file appender, and RFC 5424 syslog.
+pub mod logging;
 /// Runtime metrics collection - counters, gauges, and histograms for all subsystems.
 pub mod metrics;
 /// Performance optimization subsystem - memory pools, crypto planning, transport tuning.
@@ -174,6 +178,18 @@ pub mod implementations;
 
 /// Performance optimization - CPU detection, SIMD dispatch, memory pools, telemetry counters.
 pub mod optimize;
+
+/// Privilege management - post-bind privilege dropping (TODO-441).
+pub mod privilege;
+
+/// Security audit logging - hash-chained, SIEM-compatible (TODO-439).
+pub mod audit;
+
+/// Production PKI - CA hierarchy, cert generation, chain validation (TODO-434).
+pub mod pki;
+
+/// DNS through tunnel - DoH proxy, DNS forwarding, leak prevention (TODO-435).
+pub mod dns;
 
 // TLS Provider System (consolidated)
 // Compatibility aliases for existing paths.

@@ -51,9 +51,13 @@ pub fn parse_icmpv4(ip_header_len: usize, pkt: &[u8]) -> Option<IcmpHeader> {
     })
 }
 
-/// Build an ICMP Echo Reply from an Echo Request.
-/// Swaps src/dst IP, sets ICMP type to 0, recomputes checksums, sets fresh TTL=64.
-pub fn build_echo_reply(original_pkt: &[u8]) -> Vec<u8> {
+/// Build an ICMP Echo Reply from an Echo Request with a configurable TTL.
+///
+/// Swaps src/dst IP, sets ICMP type to 0, recomputes checksums, and sets the
+/// IP TTL to `ttl`. This is the parameterized variant used by the fingerprint
+/// obfuscation layer (TODO-462) so that ICMP replies match the target OS
+/// profile's characteristic TTL (e.g. 128 for Windows, 64 for Linux).
+pub fn build_echo_reply_with_ttl(original_pkt: &[u8], ttl: u8) -> Vec<u8> {
     let mut reply = original_pkt.to_vec();
     if reply.len() < 20 {
         return reply;
@@ -81,20 +85,31 @@ pub fn build_echo_reply(original_pkt: &[u8]) -> Vec<u8> {
     reply[ihl + 2] = (checksum >> 8) as u8;
     reply[ihl + 3] = (checksum & 0xFF) as u8;
 
-    // Recompute IP header checksum
+    // Set a fresh TTL for the echo reply (this is a new packet originated
+    // by the server, not a forwarded packet — TTL should not be decremented
+    // from the original request). RFC 1812 §5.3.1: TTL for locally-generated
+    // packets should be a configured default. The value is now parameterized
+    // via `ttl` to match the target OS fingerprint profile (TODO-462).
+    reply[8] = ttl;
+
+    // Recompute IP header checksum (must be done after setting TTL).
     reply[10] = 0;
     reply[11] = 0;
     let ip_cksum = ip_checksum(&reply[..ihl]);
     reply[10] = (ip_cksum >> 8) as u8;
     reply[11] = (ip_cksum & 0xFF) as u8;
 
-    // Set a fresh TTL for the echo reply (this is a new packet originated
-    // by the server, not a forwarded packet — TTL should not be decremented
-    // from the original request). RFC 1812 §5.3.1: TTL for locally-generated
-    // packets should be a configured default (typically 64).
-    reply[8] = 64;
-
     reply
+}
+
+/// Build an ICMP Echo Reply from an Echo Request.
+/// Swaps src/dst IP, sets ICMP type to 0, recomputes checksums, sets fresh TTL=64.
+///
+/// This is the backward-compatible wrapper that uses the default TTL of 64
+/// (RFC 1812 §5.3.1). For OS fingerprint obfuscation, use
+/// [`build_echo_reply_with_ttl`] with the target profile's TTL.
+pub fn build_echo_reply(original_pkt: &[u8]) -> Vec<u8> {
+    build_echo_reply_with_ttl(original_pkt, 64)
 }
 
 /// Build an ICMP Destination Unreachable / Packet Too Big message.
@@ -264,6 +279,26 @@ mod tests {
         assert_eq!(&reply[26..28], &42u16.to_be_bytes());
         // TTL set to fresh value 64 (locally-originated reply, not decremented)
         assert_eq!(reply[8], 64);
+    }
+
+    #[test]
+    fn test_build_echo_reply_with_ttl_custom() {
+        let request = make_echo_request([10, 8, 0, 2], [10, 8, 0, 1], 0xABCD, 42);
+        let reply = build_echo_reply_with_ttl(&request, 128);
+        assert_eq!(reply[8], 128, "Custom TTL should be applied");
+        assert_eq!(reply[20], icmp_type::ECHO_REPLY);
+        // Verify IP checksum is valid with the custom TTL.
+        let ip_hdr = &reply[..20];
+        let mut ip_sum: u32 = 0;
+        let mut j = 0;
+        while j + 1 < ip_hdr.len() {
+            ip_sum += u16::from_be_bytes([ip_hdr[j], ip_hdr[j + 1]]) as u32;
+            j += 2;
+        }
+        while ip_sum >> 16 != 0 {
+            ip_sum = (ip_sum & 0xFFFF) + (ip_sum >> 16);
+        }
+        assert_eq!(ip_sum as u16, 0xFFFF, "IP checksum must be valid with custom TTL");
     }
 
     #[test]

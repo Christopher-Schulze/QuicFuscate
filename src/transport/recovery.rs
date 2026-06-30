@@ -109,6 +109,12 @@ impl Recovery {
                     shaper.set_profile(profile);
                 }
             }
+            CcImpl::StealthCubic(ref mut shaper) => {
+                shaper.set_enabled(enabled);
+                if enabled {
+                    shaper.set_profile(profile);
+                }
+            }
             CcImpl::StealthBbr2(ref mut shaper) => {
                 shaper.set_enabled(enabled);
                 if enabled {
@@ -137,6 +143,15 @@ impl Recovery {
                 if let CcImpl::Reno(inner) = old {
                     self.cc =
                         CcImpl::StealthReno(cc::stealth_shaper::StealthShaper::new(inner, profile));
+                }
+            }
+            CcImpl::Cubic(_) if enabled => {
+                let placeholder = CcImpl::Reno(cc::reno::Reno::new(self.cwnd, self.mss));
+                let old = std::mem::replace(&mut self.cc, placeholder);
+                if let CcImpl::Cubic(inner) = old {
+                    self.cc = CcImpl::StealthCubic(cc::stealth_shaper::StealthShaper::new(
+                        inner, profile,
+                    ));
                 }
             }
             _ => {}

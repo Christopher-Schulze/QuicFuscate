@@ -15,9 +15,9 @@ pub const INITIAL_SALT_V2: [u8; 20] = [
 /// Derive the initial secret from the destination connection ID
 pub fn derive_initial_secret(dcid: &[u8], version: u32) -> [u8; 32] {
     let salt = match version {
-        0x00000001 | 0x6b3343cf => &INITIAL_SALT_V1[..], // v1 and v1 draft
-        0x00000002 => &INITIAL_SALT_V2[..],              // v2
-        _ => &INITIAL_SALT_V1[..],                       // default to v1
+        0x00000001 => &INITIAL_SALT_V1[..], // QUIC v1 (RFC 9001)
+        0x6b3343cf => &INITIAL_SALT_V2[..], // QUIC v2 (RFC 9369)
+        _ => &INITIAL_SALT_V1[..],          // default to v1 for unknown versions
     };
     hkdf_extract(salt, dcid)
 }
@@ -204,7 +204,7 @@ mod tests {
     #[test]
     fn v1_and_v2_salts_produce_different_secrets() {
         let s1 = derive_initial_secret(&RFC9001_DCID, 0x00000001);
-        let s2 = derive_initial_secret(&RFC9001_DCID, 0x00000002);
+        let s2 = derive_initial_secret(&RFC9001_DCID, 0x6b3343cf);
         assert_ne!(s1, s2, "v1 and v2 must use different salts");
     }
 
@@ -216,10 +216,12 @@ mod tests {
     }
 
     #[test]
-    fn draft_v1_uses_v1_salt() {
+    fn v2_uses_v2_salt() {
+        // RFC 9369: version 0x6b3343cf is QUIC v2 and must use the v2 salt,
+        // distinct from v1.
         let v1 = derive_initial_secret(&RFC9001_DCID, 0x00000001);
-        let draft = derive_initial_secret(&RFC9001_DCID, 0x6b3343cf);
-        assert_eq!(v1, draft, "draft v1 (0x6b3343cf) must use v1 salt");
+        let v2 = derive_initial_secret(&RFC9001_DCID, 0x6b3343cf);
+        assert_ne!(v1, v2, "v2 (0x6b3343cf) must use the v2 salt, not v1");
     }
 
     // ---------------------------------------------------------------

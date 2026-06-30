@@ -933,6 +933,11 @@ impl TlsCoverProvider {
 /// TLS Cover record generation for DPI evasion (synthetic ClientHello/ServerHello).
 pub mod tls_cover;
 
+/// TCP/ICMP fingerprint obfuscation (TODO-462).
+pub mod fingerprint;
+
+pub use fingerprint::{OsFingerprintProfile, PacketNormalizer};
+
 // Legacy external TLS FFI removed: native TLS fingerprint injection is used exclusively.
 
 // --- Global Tokio Runtime for async DoH requests ---

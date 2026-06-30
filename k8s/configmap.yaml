@@ -1,0 +1,121 @@
+# ==============================================================================
+# QuicFuscate Kubernetes ConfigMap
+# ==============================================================================
+# Holds the server TOML configuration and the RUST_LOG level. Mounted into the
+# pod at /etc/quicfuscate/quicfuscate.toml (read-only).
+#
+# Apply before deployment.yaml.
+# ==============================================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: quicfuscate-config
+  namespace: quicfuscate
+  labels:
+    app.kubernetes.io/name: quicfuscate
+data:
+  rust_log: "info"
+  # Canonical server configuration. Derived from config/server-linux.default.toml
+  # with container-appropriate paths. Override values via a custom ConfigMap
+  # or by editing this manifest before applying.
+  quicfuscate.toml: |
+    # ==============================================================================
+    # QuicFuscate Server Configuration - Kubernetes Deployment
+    # ==============================================================================
+
+    [engine]
+    mode = "server"
+    log_level = "info"
+    auto_start = false
+    shutdown_timeout_ms = 5000
+
+    [connection]
+    # Listen on all interfaces; the container publishes UDP 443.
+    remote = "0.0.0.0:443"
+    verify_peer = true
+    cert_file = "/etc/quicfuscate/certs/tls.crt"
+    key_file = "/etc/quicfuscate/certs/tls.key"
+    alpn = ["h3", "quicfuscate"]
+    idle_timeout_ms = 30000
+    enable_0rtt = true
+    max_streams_bidi = 100
+    max_streams_uni = 100
+    enable_migration = true
+
+    [anti_replay]
+    enabled = true
+    max_ticket_age_secs = 10
+    max_entries = 100000
+    max_early_data_size = 16384
+
+    [crypto]
+    aead_preference = "auto"
+    force_aead = ""
+
+    [stealth]
+    mode = "performance"
+
+    [fingerprint_rotation]
+    enabled = false
+    interval_secs = 300
+    mode = "fixed"
+    profile_slots = ["chrome:linux", "firefox:linux"]
+
+    [fec]
+    mode = "auto"
+    initial_mode = "auto"
+    window_excellent = 0
+    window_good = 10
+    window_fair = 30
+    window_poor = 50
+    enable_partial = true
+    enable_pid = true
+    enable_hysteresis = true
+    enable_kalman = true
+    stream_every = 5
+
+    [transport]
+    cc_algorithm = "bbr3"
+    mtu = 1400
+    max_udp_payload = 1350
+    max_idle_timeout = 30000
+    initial_rtt_ms = 100
+    enable_pacing = true
+    initial_max_data = 10000000
+    initial_max_stream_data_bidi_local = 1000000
+    initial_max_stream_data_bidi_remote = 1000000
+    initial_max_stream_data_uni = 1000000
+    initial_max_streams_bidi = 100
+    initial_max_streams_uni = 100
+    enable_early_data = false
+    dgram_recv_queue_len = 1024
+    dgram_send_queue_len = 1024
+    disable_pmtud = false
+
+    [optimization]
+    memory_pool_size = 67108864
+    memory_pool_alignment = 64
+    num_worker_threads = 0
+
+    [interface]
+    type = "tun"
+    tun_name = "quicfuse0"
+    tun_mtu = 1500
+    enable_gso = true
+    enable_gro = true
+
+    [telemetry]
+    enabled = true
+    export_interval = 60
+    collect_packet_stats = true
+    collect_stream_stats = true
+    collect_congestion_stats = true
+    collect_fec_stats = true
+    collect_stealth_stats = true
+
+    [logging]
+    level = "info"
+    log_to_file = false
+    log_file_path = "/var/log/quicfuscate/quicfuscate.log"
+    log_to_stdout = true

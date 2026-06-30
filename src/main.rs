@@ -890,6 +890,10 @@ enum Commands {
         /// QKey registry store path (defaults near config or ./config/local/qkeys.json)
         #[clap(long, value_name = "PATH")]
         qkey_store: Option<PathBuf>,
+
+        /// Skip privilege dropping after setup (debugging only — never use in production)
+        #[clap(long = "no-drop-privileges")]
+        no_drop_privileges: bool,
     },
     #[clap(hide = true)]
     CrossFadeSim {},
@@ -1028,19 +1032,27 @@ async fn async_main() -> std::io::Result<()> {
     if ADMIN_LOG_BUFFER.set(admin_log_buffer.clone()).is_err() {
         log::debug!("ADMIN_LOG_BUFFER already initialized, reusing existing buffer");
     }
+    // Register the Admin UI ring buffer as a secondary log sink so it keeps
+    // receiving entries regardless of the configured output format.
+    quicfuscate::logging::set_admin_sink(admin_log_buffer.clone());
+    // Initialize the production logger (structured JSON / size-rotating file /
+    // RFC 5424 syslog). Fall back to env_logger if it fails.
     {
-        use std::io::Write;
-        // We keep the env_logger filter permissive (Trace) and let runtime mode changes
-        // control effective verbosity via log::set_max_level.
-        let mut builder = env_logger::Builder::new();
-        builder.filter_level(log::LevelFilter::Trace);
-        let buf = admin_log_buffer.clone();
-        builder.format(move |fmt, record| {
-            let msg = format!("{}", record.args());
-            buf.push(record.level(), &msg);
-            writeln!(fmt, "[{}] {}", record.level(), msg)
-        });
-        builder.init();
+        let logging_config = quicfuscate::engine::LoggingConfig::default();
+        if let Err(e) = quicfuscate::logging::init(&logging_config) {
+            // Fallback: env_logger with the same admin ring buffer forwarding.
+            use std::io::Write;
+            let mut builder = env_logger::Builder::new();
+            builder.filter_level(log::LevelFilter::Trace);
+            let buf = admin_log_buffer.clone();
+            builder.format(move |fmt, record| {
+                let msg = format!("{}", record.args());
+                buf.push(record.level(), &msg);
+                writeln!(fmt, "[{}] {}", record.level(), msg)
+            });
+            let _ = builder.try_init();
+            log::warn!("logging::init failed ({}); using env_logger fallback", e);
+        }
     }
     // Default runtime verbosity. Server and Admin UI may override via persisted log mode.
     log::set_max_level(log::LevelFilter::Info);
@@ -1144,6 +1156,7 @@ async fn async_main() -> std::io::Result<()> {
             admin_web_password,
             qkey_ttl_secs,
             qkey_store,
+            no_drop_privileges,
         } => {
             let fec_mode = resolve_cli_fec_mode_override(shared.fec_mode);
             run_server(
@@ -1178,6 +1191,7 @@ async fn async_main() -> std::io::Result<()> {
                 admin_web_password,
                 qkey_ttl_secs,
                 qkey_store,
+                no_drop_privileges,
             )
             .await?;
         }
@@ -2095,6 +2109,7 @@ async fn run_server(
     admin_web_password: Option<String>,
     qkey_ttl_secs: Option<u64>,
     qkey_store: Option<PathBuf>,
+    no_drop_privileges: bool,
 ) -> std::io::Result<()> {
     let config_path = config.as_ref();
     let config_path_ref = config_path.map(PathBuf::as_path);
@@ -2257,6 +2272,23 @@ async fn run_server(
     launch.set_anti_replay_section(anti_replay_section);
     let local_addr = runtime.local_addr();
     info!("Server listening on {}", local_addr);
+
+    // Drop root privileges after all privileged setup (socket bind, TUN,
+    // routing, iptables) is complete. File descriptors survive the UID/GID
+    // change, so the server can continue operating unprivileged.
+    if !no_drop_privileges {
+        let cap_report = quicfuscate::privilege::check_capabilities();
+        if cap_report.is_root {
+            info!("Dropping root privileges to quicfuscate:quicfuscate");
+            match quicfuscate::privilege::drop_privileges("quicfuscate", "quicfuscate") {
+                Ok(()) => info!("Privileges dropped — running as unprivileged user"),
+                Err(e) => {
+                    error!("Failed to drop privileges: {} — refusing to continue as root", e);
+                    return Err(std::io::Error::other("privilege drop failed"));
+                }
+            }
+        }
+    }
 
     runtime.run_standalone(launch).await?;
 

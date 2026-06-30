@@ -1,5 +1,8 @@
 use std::path::PathBuf;
 
+use super::auth_frame::AuthFrame;
+use super::replay_window::ReplayWindow;
+
 /// Magic prefix identifying encrypted QKey registry files.
 const ENC_MAGIC: &[u8] = b"QFENC1";
 
@@ -159,11 +162,22 @@ pub struct QKeyRegistry {
     max_entries: usize,
     path: Option<PathBuf>,
     default_ttl_secs: Option<u64>,
+    /// Sliding-window anti-replay protection for QKey auth frames.
+    replay_window: ReplayWindow,
 }
+
+/// Default replay-window size in seconds for auth-frame replay protection.
+const DEFAULT_AUTH_REPLAY_WINDOW_SECS: u64 = 300;
 
 impl QKeyRegistry {
     pub fn new(max_entries: usize, path: Option<PathBuf>, default_ttl_secs: Option<u64>) -> Self {
-        let mut registry = Self { entries: Vec::new(), max_entries, path, default_ttl_secs };
+        let mut registry = Self {
+            entries: Vec::new(),
+            max_entries,
+            path,
+            default_ttl_secs,
+            replay_window: ReplayWindow::new(DEFAULT_AUTH_REPLAY_WINDOW_SECS),
+        };
         registry.load();
         registry
     }
@@ -318,6 +332,25 @@ impl QKeyRegistry {
 
     pub fn record_for_id_token(&mut self, token: &[u8]) -> Option<QKeyRecord> {
         self.lookup_initial_id_token(token)
+    }
+
+    /// Verify a QKey auth frame end-to-end: look up the record by the frame's
+    /// `client_id`, confirm the HMAC proves possession of the QKey token, then
+    /// run the frame through the replay window so a captured frame cannot be
+    /// reused.
+    ///
+    /// Returns `true` only if the record exists, the HMAC is valid, and the
+    /// `(timestamp, nonce)` pair is fresh.
+    pub fn verify_auth_frame(&mut self, frame: &AuthFrame, qkey_token: &[u8]) -> bool {
+        self.prune_expired();
+        let exists = self.entries.iter().any(|entry| entry.id == frame.client_id);
+        if !exists {
+            return false;
+        }
+        if !frame.verify(&frame.client_id, qkey_token) {
+            return false;
+        }
+        self.replay_window.check_and_mark(frame.timestamp, &frame.nonce)
     }
 
     /// Look up a record by Initial packet token value, which must be a 12-char
@@ -481,6 +514,7 @@ fn is_expired(expires_at: Option<u64>, now: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::auth_frame::AuthFrame;
     use super::*;
     use crate::engine::qkey;
     use std::path::Path;
@@ -738,5 +772,69 @@ mod tests {
         assert!(!ids.contains(&e1.id));
         assert!(ids.contains(&e2.id));
         assert!(ids.contains(&e3.id));
+    }
+
+    #[test]
+    fn verify_auth_frame_accepts_fresh_and_rejects_replay() {
+        let token_hex = mk_token_hex('7');
+        let qkey_value = mk_qkey_with_token(&token_hex);
+        let id = qkey_id(&qkey_value);
+
+        let mut reg = QKeyRegistry::new(200, None, None);
+        reg.insert(qkey_value, token_hex.clone(), None).expect("insert");
+
+        let token_bytes = hex::decode(token_hex.to_ascii_lowercase()).expect("decode token");
+        let mut nonce = [0u8; 16];
+        for (i, b) in nonce.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let frame = AuthFrame::build(&id, &token_bytes, 1_700_000_000, &nonce);
+
+        // Fresh frame: HMAC valid + nonce unseen -> accepted.
+        assert!(reg.verify_auth_frame(&frame, &token_bytes));
+
+        // Replay: same (timestamp, nonce) -> rejected.
+        assert!(!reg.verify_auth_frame(&frame, &token_bytes));
+
+        // New nonce, same timestamp -> accepted.
+        let mut nonce2 = nonce;
+        nonce2[0] ^= 0xff;
+        let frame2 = AuthFrame::build(&id, &token_bytes, 1_700_000_000, &nonce2);
+        assert!(reg.verify_auth_frame(&frame2, &token_bytes));
+    }
+
+    #[test]
+    fn verify_auth_frame_rejects_unknown_client_id() {
+        let token_hex = mk_token_hex('8');
+        let qkey_value = mk_qkey_with_token(&token_hex);
+        let mut reg = QKeyRegistry::new(200, None, None);
+        reg.insert(qkey_value, token_hex.clone(), None).expect("insert");
+
+        let token_bytes = hex::decode(token_hex.to_ascii_lowercase()).expect("decode token");
+        let nonce = [0u8; 16];
+        // Valid HMAC for a client id that is not registered.
+        let frame = AuthFrame::build("deadbeefdead", &token_bytes, 1, &nonce);
+        assert!(!reg.verify_auth_frame(&frame, &token_bytes));
+    }
+
+    #[test]
+    fn verify_auth_frame_rejects_wrong_token() {
+        let token_hex = mk_token_hex('9');
+        let qkey_value = mk_qkey_with_token(&token_hex);
+        let id = qkey_id(&qkey_value);
+        let mut reg = QKeyRegistry::new(200, None, None);
+        reg.insert(qkey_value, token_hex.clone(), None).expect("insert");
+
+        let token_bytes = hex::decode(token_hex.to_ascii_lowercase()).expect("decode token");
+        let wrong_token = {
+            let mut t = [0u8; 32];
+            for (i, b) in t.iter_mut().enumerate() {
+                *b = (i as u8).wrapping_add(7);
+            }
+            t.to_vec()
+        };
+        let nonce = [1u8; 16];
+        let frame = AuthFrame::build(&id, &token_bytes, 1, &nonce);
+        assert!(!reg.verify_auth_frame(&frame, &wrong_token));
     }
 }

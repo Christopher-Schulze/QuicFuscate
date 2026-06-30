@@ -1,0 +1,184 @@
+# ==============================================================================
+# QuicFuscate Helm Chart - Default Values
+# ==============================================================================
+
+# -- Number of server replicas. Must be 1: only one pod may own the TUN
+# interface and bind UDP 443 at a time. Increase only with a leader-election
+# or multi-node TUN strategy in place.
+replicaCount: 1
+
+image:
+  # -- Image repository. Set to your registry path.
+  repository: quicfuscate
+  # -- Image pull policy.
+  pullPolicy: IfNotPresent
+  # -- Image tag (defaults to the chart appVersion).
+  tag: "0.4.0"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # -- Create a dedicated service account.
+  create: false
+  annotations: {}
+  name: ""
+
+# -- Pod-level annotations.
+podAnnotations: {}
+
+# -- Pod-level security context.
+podSecurityContext:
+  runAsUser: 0
+  runAsGroup: 0
+  fsGroup: 0
+
+# -- Container security context. Privileged is required to create TUN
+# interfaces and manage iptables. Replace with focused capabilities if your
+# policy disallows privileged pods.
+securityContext:
+  privileged: true
+  # capabilities:
+  #   add:
+  #     - NET_ADMIN
+  #     - NET_BIND_SERVICE
+  #     - NET_RAW
+
+# -- Container resource requests and limits.
+resources:
+  requests:
+    cpu: 500m
+    memory: 256Mi
+  limits:
+    cpu: 4000m
+    memory: 1Gi
+
+# -- Node selector: only schedule on Linux nodes (TUN is Linux-only).
+nodeSelector:
+  kubernetes.io/os: linux
+
+tolerations: []
+
+affinity: {}
+
+# -- Deployment strategy. Recreate (not RollingUpdate) because only one pod
+# may own the TUN interface and bind UDP 443 at a time.
+strategy:
+  type: Recreate
+
+# -- Init container that runs `modprobe tun` to ensure the kernel module is
+# loaded on the host before the server starts.
+initContainer:
+  image: alpine:3.20
+  command:
+    - /bin/sh
+    - -c
+    - |
+      set -e
+      echo "Ensuring tun kernel module is loaded..."
+      modprobe tun 2>/dev/null || true
+      if [ -e /dev/net/tun ]; then
+        echo "/dev/net/tun is present."
+      else
+        echo "WARNING: /dev/net/tun not found after modprobe." >&2
+      fi
+
+# -- QUIC transport service (LoadBalancer on UDP 443).
+service:
+  type: LoadBalancer
+  # -- QUIC listen port (container and service).
+  port: 443
+  # -- Preserve client source IP for QUIC connection migration.
+  externalTrafficPolicy: Local
+  annotations: {}
+
+# -- Admin HTTP dashboard service (ClusterIP, internal only).
+adminService:
+  enabled: true
+  type: ClusterIP
+  port: 8080
+  annotations: {}
+
+# -- Admin HTTP dashboard configuration.
+admin:
+  # -- Admin web bind address inside the container.
+  bind: "0.0.0.0:8080"
+  # -- Admin username. Sourced from the secret by default.
+  user: "admin"
+  # -- Admin password. Set via secret, not here.
+  password: ""
+  # -- Web-admin static assets root inside the container.
+  webRoot: "/var/lib/quicfuscate/assets/web-admin"
+
+# -- TUN interface configuration.
+tun:
+  enabled: true
+  name: "quicfuse0"
+  mtu: 1500
+
+# -- QKey at-rest encryption key (64 hex chars = 32 bytes). Generate with
+# `openssl rand -hex 32`. Leave empty to disable at-rest encryption.
+qkey:
+  encryptionKey: ""
+
+# -- TLS certificate. Provide via an existing secret or inline PEM values.
+certs:
+  # -- Use an existing TLS secret (kubernetes.io/tls). If set, inline values
+  # below are ignored.
+  existingSecret: ""
+  # -- Inline TLS certificate (PEM). Used to create a secret when
+  # existingSecret is empty.
+  tlsCrt: ""
+  # -- Inline TLS private key (PEM).
+  tlsKey: ""
+  # -- Mount path for TLS files inside the container.
+  mountPath: "/etc/quicfuscate/certs"
+
+# -- QuicFuscate server configuration. Rendered into a ConfigMap and mounted
+# at /etc/quicfuscate/quicfuscate.toml. Override sections as needed.
+config:
+  rustLog: "info"
+  # -- Full TOML content. If empty, a default server config is rendered.
+  toml: ""
+  # -- Path inside the container where the config is mounted.
+  mountPath: "/etc/quicfuscate/quicfuscate.toml"
+
+# -- Liveness probe. GET / serves the web-admin index.html (200, no auth).
+# A dedicated unauthenticated /api/health endpoint does not yet exist.
+livenessProbe:
+  httpGet:
+    path: /
+    port: admin
+  initialDelaySeconds: 20
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+# -- Readiness probe.
+readinessProbe:
+  httpGet:
+    path: /
+    port: admin
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# -- Persistent volume claim for QKey registry and admin auth state.
+persistence:
+  enabled: true
+  size: 100Mi
+  storageClassName: ""
+  accessModes:
+    - ReadWriteOnce
+
+# -- TUN device hostPath mount.
+tunDevice:
+  hostPath: /dev/net/tun
+  type: CharDevice
+
+# -- Host /lib/modules mount for the init container's modprobe.
+libModules:
+  hostPath: /lib/modules
+  type: Directory

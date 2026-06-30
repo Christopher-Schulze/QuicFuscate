@@ -1126,11 +1126,13 @@ fn test_chaff_generator_real_traffic_suppresses_chaff() {
     let t0 = Instant::now();
     // Real traffic at t0+50ms resets the clock.
     assert!(!gen.should_chaff(t0 + Duration::from_millis(50), true));
-    // 100ms after the real packet (t0+150ms) — within one interval, no chaff.
-    assert!(!gen.should_chaff(t0 + Duration::from_millis(150), false));
-    // 120ms after the real packet (t0+170ms) — should fire.
+    // 80ms after the real packet (t0+130ms) — within the minimum jittered
+    // interval (90ms at 10pps with -10% jitter), no chaff.
+    assert!(!gen.should_chaff(t0 + Duration::from_millis(130), false));
+    // 130ms after the real packet (t0+180ms) — should fire (beyond max
+    // jittered interval of 110ms).
     assert!(
-        gen.should_chaff(t0 + Duration::from_millis(170), false),
+        gen.should_chaff(t0 + Duration::from_millis(180), false),
         "chaff should fire one interval after real traffic"
     );
 }
@@ -1140,11 +1142,11 @@ fn test_chaff_generator_record_real_traffic_resets_clock() {
     let mut gen = ChaffGenerator::new(10, 1280, true);
     let t0 = Instant::now();
     gen.record_real_traffic(t0 + Duration::from_millis(50));
-    // 100ms after recorded real traffic — within interval, no chaff.
-    assert!(!gen.should_chaff(t0 + Duration::from_millis(150), false));
-    // 120ms after recorded real traffic — should fire.
+    // 80ms after recorded real traffic — within minimum jittered interval, no chaff.
+    assert!(!gen.should_chaff(t0 + Duration::from_millis(130), false));
+    // 130ms after recorded real traffic — should fire (beyond max jittered interval).
     assert!(
-        gen.should_chaff(t0 + Duration::from_millis(170), false),
+        gen.should_chaff(t0 + Duration::from_millis(180), false),
         "chaff should fire one interval after recorded real traffic"
     );
 }

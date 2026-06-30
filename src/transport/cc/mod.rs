@@ -1,11 +1,12 @@
 //! Pluggable congestion control framework.
 //!
-//! Provides a [`CongestionController`] trait implemented by Reno, BBR2, and BBR3.
-//! [`StealthShaper`] wraps any controller to inject browser-profile-specific
-//! pacing jitter and gain shaping without altering the core CC logic.
+//! Provides a [`CongestionController`] trait implemented by Reno, CUBIC, BBR2,
+//! and BBR3. [`StealthShaper`] wraps any controller to inject browser-profile-
+//! specific pacing jitter and gain shaping without altering the core CC logic.
 
 pub mod bbr2;
 pub mod bbr3;
+pub mod cubic;
 pub mod reno;
 pub mod stealth_shaper;
 
@@ -17,6 +18,8 @@ use std::time::{Duration, Instant};
 pub enum Algorithm {
     /// TCP New Reno (RFC 6582) - conservative AIMD baseline.
     Reno,
+    /// CUBIC (RFC 9438) - cubic window growth with TCP friendliness.
+    Cubic,
     /// BBR v2 (IETF draft-ietf-ccwg-bbr) - loss-aware model-based CC.
     Bbr2,
     /// BBR v3 with stealth browser-profile shaping (recommended, default).
@@ -79,9 +82,11 @@ pub trait CongestionController: Send {
 /// Enum-dispatch wrapper for hot-path performance (no vtable indirection).
 pub(crate) enum CcImpl {
     Reno(reno::Reno),
+    Cubic(cubic::Cubic),
     Bbr2(bbr2::Bbr2),
     Bbr3(bbr3::Bbr3),
     StealthReno(stealth_shaper::StealthShaper<reno::Reno>),
+    StealthCubic(stealth_shaper::StealthShaper<cubic::Cubic>),
     StealthBbr2(stealth_shaper::StealthShaper<bbr2::Bbr2>),
     StealthBbr3(stealth_shaper::StealthShaper<bbr3::Bbr3>),
 }
@@ -90,6 +95,7 @@ pub(crate) enum CcImpl {
 pub(crate) fn create(algo: Algorithm, initial_cwnd: usize, mss: usize) -> CcImpl {
     match algo {
         Algorithm::Reno => CcImpl::Reno(reno::Reno::new(initial_cwnd, mss)),
+        Algorithm::Cubic => CcImpl::Cubic(cubic::Cubic::new(initial_cwnd, mss)),
         Algorithm::Bbr2 => CcImpl::Bbr2(bbr2::Bbr2::new(initial_cwnd, mss)),
         Algorithm::Bbr3 => CcImpl::Bbr3(bbr3::Bbr3::new(initial_cwnd, mss)),
     }
@@ -100,9 +106,11 @@ macro_rules! cc_dispatch {
     ($self:expr, $method:ident $(, $arg:expr)*) => {
         match $self {
             CcImpl::Reno(cc) => cc.$method($($arg),*),
+            CcImpl::Cubic(cc) => cc.$method($($arg),*),
             CcImpl::Bbr2(cc) => cc.$method($($arg),*),
             CcImpl::Bbr3(cc) => cc.$method($($arg),*),
             CcImpl::StealthReno(cc) => cc.$method($($arg),*),
+            CcImpl::StealthCubic(cc) => cc.$method($($arg),*),
             CcImpl::StealthBbr2(cc) => cc.$method($($arg),*),
             CcImpl::StealthBbr3(cc) => cc.$method($($arg),*),
         }

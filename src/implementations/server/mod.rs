@@ -20,13 +20,18 @@ mod accept;
 pub mod admin;
 pub mod admin_http;
 pub mod admin_logs;
+pub mod auth_frame;
+pub mod bandwidth;
 #[doc(hidden)]
 pub mod fsutil;
 pub mod icmp;
 mod ip_pool;
+pub mod isolation;
 mod limits;
 pub mod metrics;
 pub mod qkey_registry;
+pub mod replay_window;
+pub mod revocation;
 mod routing;
 mod session;
 pub mod systemd;
@@ -42,6 +47,7 @@ pub use admin::{
     ClientIdentity, ClientInfo, ClientSnapshot,
 };
 pub use admin_http::{AdminHttpHandler, AdminHttpServer};
+pub use bandwidth::{BandwidthLimiter, BandwidthStats, PerClientBandwidthManager, QuotaTracker};
 pub use ip_pool::{IpPool, Ipv6Pool};
 #[cfg(feature = "rate_limiter")]
 pub use limits::load_rate_limit_config_from_env;
@@ -75,7 +81,10 @@ use crate::optimize::MemoryPool;
 use crate::optimize::OptimizeConfig;
 #[cfg(unix)]
 use crate::optimize::ZeroCopyBuffer;
-use crate::stealth::{BrowserProfile, FingerprintProfile, OsProfile, StealthConfig};
+use crate::stealth::{
+    BrowserProfile, FingerprintProfile, OsFingerprintProfile, OsProfile, PacketNormalizer,
+    StealthConfig,
+};
 
 fn env_string(name: &str) -> Option<String> {
     std::env::var(name).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
@@ -2044,8 +2053,17 @@ pub async fn process_live_server_client_datagram(
     client_snapshots: &Arc<std::sync::Mutex<std::collections::HashMap<SocketAddr, ClientSnapshot>>>,
     server_tun: Option<&Arc<TunInterface>>,
     tun_enable: bool,
+    fingerprint_profile: OsFingerprintProfile,
 ) -> std::io::Result<LiveClientDatagramResult> {
     use std::cell::Cell;
+
+    // Packet normalizer for OS fingerprint obfuscation (TODO-462).
+    // Applied to all IPv4 packets before they are written to the TUN interface
+    // so that passive OS fingerprinting (p0f, Nmap) classifies the host as the
+    // target OS rather than the real underlying platform. Wrapped in Arc so the
+    // MASQUE datagram callback (set once per connection) can retain its own
+    // clone across calls.
+    let normalizer = std::sync::Arc::new(PacketNormalizer::new(fingerprint_profile));
 
     let LiveClientRuntime {
         connection: conn, conn_id, qkey_auth, session_stats, session_id, ..
@@ -2076,9 +2094,18 @@ pub async fn process_live_server_client_datagram(
         if let Some(tun) = server_tun {
             if !conn.has_masque_datagram_cb() {
                 let tun_sink = Arc::clone(tun);
+                let masque_normalizer = std::sync::Arc::clone(&normalizer);
                 conn.set_masque_datagram_cb(Arc::new(std::sync::Mutex::new(Box::new(
                     move |payload: &[u8]| {
-                        if let Err(error) = tun_sink.write(payload) {
+                        // Apply OS fingerprint normalization for IPv4 packets
+                        // before writing to TUN (TODO-462).
+                        if !payload.is_empty() && payload[0] >> 4 == 4 {
+                            let mut buf = payload.to_vec();
+                            masque_normalizer.normalize_ipv4(&mut buf);
+                            if let Err(error) = tun_sink.write(&buf) {
+                                log::warn!("Server TUN write (MASQUE) failed: {:?}", error);
+                            }
+                        } else if let Err(error) = tun_sink.write(payload) {
                             log::warn!("Server TUN write (MASQUE) failed: {:?}", error);
                         }
                     },
@@ -2118,7 +2145,15 @@ pub async fn process_live_server_client_datagram(
                     // MASQUE stream, which is not a raw IP packet and would cause
                     // EINVAL on TUN write.
                     if !data.is_empty() && (data[0] >> 4 == 4 || data[0] >> 4 == 6) {
-                        if let Err(error) = tun.write(data) {
+                        // Apply OS fingerprint normalization for IPv4 packets
+                        // before writing to TUN (TODO-462).
+                        if data[0] >> 4 == 4 {
+                            let mut buf = data.to_vec();
+                            normalizer.normalize_ipv4(&mut buf);
+                            if let Err(error) = tun.write(&buf) {
+                                log::warn!("Server TUN write failed: {:?}", error);
+                            }
+                        } else if let Err(error) = tun.write(data) {
                             log::warn!("Server TUN write failed: {:?}", error);
                         }
                     }
@@ -4242,6 +4277,7 @@ impl ServerRuntime {
         let disable_fronting = stealth_policy.disable_fronting;
         let front_domain = stealth_policy.front_domain.to_vec();
         let disable_http3 = stealth_policy.disable_http3;
+        let fingerprint_profile = runtime_config.transport.fingerprint_profile();
         if self.state != ServerState::Stopped {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
@@ -4405,6 +4441,7 @@ impl ServerRuntime {
                                     &client_snapshots,
                                     runtime_parts.server_tun,
                                     tun_enable,
+                                    transport.fingerprint_profile(),
                                 ).await {
                                     Ok(result) => result,
                                     Err(e) => {
@@ -4457,7 +4494,13 @@ impl ServerRuntime {
                                                     let ihl = ((pkt[0] & 0x0F) as usize) * 4;
                                                     if let Some(icmp) = icmp::parse_icmpv4(ihl, &pkt) {
                                                         if icmp.icmp_type == icmp::icmp_type::ECHO_REQUEST {
-                                                            let reply = icmp::build_echo_reply(&pkt);
+                                                            // Use the target OS profile's TTL for the echo
+                                                            // reply so that ICMP fingerprinting also matches
+                                                            // the configured profile (TODO-462).
+                                                            let reply = icmp::build_echo_reply_with_ttl(
+                                                                &pkt,
+                                                                fingerprint_profile.ttl(),
+                                                            );
                                                             if let Some(ref tun) = server_tun {
                                                                 if let Err(e) = tun.write(&reply) {
                                                                     log::warn!("ICMP echo reply write to TUN failed: {:?}", e);

@@ -13,8 +13,11 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::net::IpAddr;
+use std::net::SocketAddr;
 use std::path::Path;
+use std::path::PathBuf;
 
 // Re-export existing configs for aggregation
 pub use crate::fec::FecConfig;
@@ -600,6 +603,19 @@ pub enum LoggingMode {
     NoLog,
 }
 
+/// Logging output format for the production logger.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+    /// Human-readable text (default).
+    #[default]
+    Text,
+    /// Structured NDJSON: one JSON object per line with timestamp, level, target, message, fields.
+    Json,
+    /// RFC 5424 syslog (forwarded via UDP to `syslog_addr`).
+    Syslog,
+}
+
 /// Logging configuration.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
@@ -610,7 +626,7 @@ pub struct LoggingConfig {
     pub level: String,
     /// Log to file (forced off in no-log mode)
     pub log_to_file: bool,
-    /// Log file path
+    /// Log file path (legacy field; prefer `file_path`)
     pub log_file_path: String,
     /// Log to stdout (forced off in no-log mode)
     pub log_to_stdout: bool,
@@ -618,6 +634,20 @@ pub struct LoggingConfig {
     pub ring_buffer_capacity: usize,
     /// Strip client metadata (IPs, session IDs) from log entries
     pub strip_metadata: bool,
+    /// Output format: text, json, or syslog.
+    pub format: LogFormat,
+    /// Explicit path for the rotating file appender. When set, takes precedence
+    /// over `log_to_file` / `log_file_path`.
+    pub file_path: Option<PathBuf>,
+    /// Maximum size in bytes of the active log file before rotation (default: 100 MiB).
+    pub max_file_size_bytes: u64,
+    /// Number of rotated files to retain (default: 5).
+    pub max_files: usize,
+    /// Optional syslog forwarding target (UDP). When set, RFC 5424 messages are
+    /// sent to this address in addition to file/stderr output.
+    pub syslog_addr: Option<SocketAddr>,
+    /// Per-module level overrides, e.g. `{"quicfuscate::net": "debug"}`.
+    pub module_levels: HashMap<String, String>,
 }
 
 impl Default for LoggingConfig {
@@ -630,6 +660,12 @@ impl Default for LoggingConfig {
             log_to_stdout: true,
             ring_buffer_capacity: 512,
             strip_metadata: false,
+            format: LogFormat::Text,
+            file_path: None,
+            max_file_size_bytes: 100 * 1024 * 1024,
+            max_files: 5,
+            syslog_addr: None,
+            module_levels: HashMap::new(),
         }
     }
 }
@@ -654,6 +690,9 @@ impl LoggingConfig {
                 cfg.log_to_file = false;
                 cfg.log_to_stdout = false;
                 cfg.strip_metadata = true;
+                // Strict privacy: no disk or syslog forwarding.
+                cfg.file_path = None;
+                cfg.syslog_addr = None;
             }
         }
         cfg
@@ -972,12 +1011,33 @@ pub struct SecurityConfig {
     pub heartbeat_timeout_ms: u64,
     /// Cleanup stale firewall rules from a crashed previous session on startup.
     pub cleanup_firewall_on_start: bool,
+    /// Firewall backend selection (Linux only). When `None`, the backend is
+    /// auto-detected at runtime via [`crate::firewall::detect_backend`].
+    pub firewall: FirewallConfig,
 }
 
 impl Default for SecurityConfig {
     fn default() -> Self {
-        Self { kill_switch: false, heartbeat_timeout_ms: 30_000, cleanup_firewall_on_start: false }
+        Self {
+            kill_switch: false,
+            heartbeat_timeout_ms: 30_000,
+            cleanup_firewall_on_start: false,
+            firewall: FirewallConfig::default(),
+        }
     }
+}
+
+/// Firewall backend configuration.
+///
+/// Controls whether QuicFuscate uses `iptables` or `nftables` for kill switch
+/// and NAT/routing rules on Linux. On macOS and Windows this setting has no
+/// effect (pf / Windows Firewall are used unconditionally).
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct FirewallConfig {
+    /// Explicit backend selection. `None` (default) auto-detects at runtime,
+    /// preferring nftables when available and falling back to iptables.
+    pub backend: Option<crate::firewall::FirewallBackend>,
 }
 
 // ============================================================================
@@ -1101,5 +1161,37 @@ mod tests {
         config.interface.tun_ip = Some("10.8.0.1".parse().unwrap());
         config.interface.tun_netmask = Some("ffff:ffff:ffff:ffff::".parse().unwrap());
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_firewall_config_default_is_auto_detect() {
+        let config = EngineConfig::default();
+        assert!(config.security.firewall.backend.is_none());
+    }
+
+    #[test]
+    fn test_firewall_config_explicit_nftables() {
+        let toml = r#"
+            [security.firewall]
+            backend = "nftables"
+        "#;
+        let config = EngineConfig::from_toml(toml).unwrap();
+        assert_eq!(
+            config.security.firewall.backend,
+            Some(crate::firewall::FirewallBackend::Nftables)
+        );
+    }
+
+    #[test]
+    fn test_firewall_config_explicit_iptables() {
+        let toml = r#"
+            [security.firewall]
+            backend = "iptables"
+        "#;
+        let config = EngineConfig::from_toml(toml).unwrap();
+        assert_eq!(
+            config.security.firewall.backend,
+            Some(crate::firewall::FirewallBackend::Iptables)
+        );
     }
 }

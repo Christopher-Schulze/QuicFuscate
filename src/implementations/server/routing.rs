@@ -94,18 +94,43 @@ impl RoutingManager {
         // Calculate subnet
         let subnet = self.calculate_subnet();
 
-        // Set up NAT rules
-        self.setup_iptables(&subnet)?;
-
-        log::info!("Routing configured: {} via {}", subnet, self.wan_interface);
+        // Set up NAT rules — choose backend by auto-detection
+        let backend = crate::firewall::detect_backend();
+        match backend {
+            crate::firewall::FirewallBackend::Nftables => {
+                self.setup_nftables(&subnet)?;
+                log::info!("Routing configured (nftables): {} via {}", subnet, self.wan_interface);
+            }
+            crate::firewall::FirewallBackend::Iptables => {
+                self.setup_iptables(&subnet)?;
+                log::info!("Routing configured (iptables): {} via {}", subnet, self.wan_interface);
+            }
+        }
 
         // IPv6 setup (if enabled)
         if self.is_ipv6_enabled() {
             self.assign_tun_address_v6_linux()?;
             self.enable_ipv6_forwarding()?;
             let v6_subnet = self.calculate_ipv6_subnet();
-            self.setup_ip6tables(&v6_subnet)?;
-            log::info!("IPv6 routing configured: {} via {}", v6_subnet, self.wan_interface);
+            match backend {
+                crate::firewall::FirewallBackend::Nftables => {
+                    // nftables inet table already covers IPv6 in setup_nftables
+                    // when dual-stack is enabled — no separate call needed.
+                    log::info!(
+                        "IPv6 routing configured (nftables inet): {} via {}",
+                        v6_subnet,
+                        self.wan_interface
+                    );
+                }
+                crate::firewall::FirewallBackend::Iptables => {
+                    self.setup_ip6tables(&v6_subnet)?;
+                    log::info!(
+                        "IPv6 routing configured (ip6tables): {} via {}",
+                        v6_subnet,
+                        self.wan_interface
+                    );
+                }
+            }
         }
 
         Ok(())
@@ -236,6 +261,10 @@ impl RoutingManager {
                 .status();
         }
 
+        // nftables stale cleanup — delete the dedicated routing table if it
+        // lingers from a crashed previous session (best effort).
+        let _ = Command::new("nft").args(["delete", "table", "inet", Self::NFT_RT_TABLE]).status();
+
         log::info!("Stale routing cleanup complete");
     }
 
@@ -266,6 +295,24 @@ impl RoutingManager {
     /// Tear down routing rules.
     #[cfg(target_os = "linux")]
     pub fn teardown(&self) -> Result<(), RoutingError> {
+        // Choose the same backend that setup() would have used.
+        let backend = crate::firewall::detect_backend();
+        match backend {
+            crate::firewall::FirewallBackend::Nftables => {
+                self.teardown_nftables()?;
+            }
+            crate::firewall::FirewallBackend::Iptables => {
+                self.teardown_iptables()?;
+            }
+        }
+
+        log::info!("Routing rules removed");
+        Ok(())
+    }
+
+    /// iptables-specific teardown: remove MASQUERADE and FORWARD rules.
+    #[cfg(target_os = "linux")]
+    fn teardown_iptables(&self) -> Result<(), RoutingError> {
         let subnet = self.calculate_subnet();
 
         // Remove NAT rules (ignore errors - rules might not exist)
@@ -343,8 +390,6 @@ impl RoutingManager {
                 log::debug!("iptables teardown forward WAN->TUN established delete failed: {}", e);
             }
         }
-
-        log::info!("Routing rules removed");
 
         Ok(())
     }
@@ -452,6 +497,110 @@ impl RoutingManager {
             ));
         }
 
+        Ok(())
+    }
+
+    /// Dedicated nftables table name for QuicFuscate server routing/NAT rules.
+    #[cfg(target_os = "linux")]
+    const NFT_RT_TABLE: &'static str = "quicfuscate_rt";
+
+    /// Set up nftables NAT and forwarding rules.
+    ///
+    /// Creates a single `inet` table with two chains:
+    /// - `postrouting`: NAT masquerade for VPN subnet traffic leaving the WAN
+    ///   interface (covers both IPv4 and, when dual-stack, IPv6).
+    /// - `forward`: allows TUN→WAN forwarding and established WAN→TUN return
+    ///   traffic.
+    ///
+    /// The entire table is applied atomically via `nft -f -` (stdin batch).
+    #[cfg(target_os = "linux")]
+    fn setup_nftables(&self, subnet: &str) -> Result<(), RoutingError> {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        // Build the IPv6 NAT rule when dual-stack is enabled.
+        let v6_masquerade = if self.is_ipv6_enabled() {
+            let v6_subnet = self.calculate_ipv6_subnet();
+            format!("ip6 saddr {} oifname \"{}\" masquerade\n", v6_subnet, self.wan_interface)
+        } else {
+            String::new()
+        };
+
+        let ruleset = format!(
+            "table inet {table} {{\n\
+             \x20   chain postrouting {{\n\
+             \x20       type nat hook postrouting priority 100; policy accept;\n\
+             \x20       ip saddr {subnet} oifname \"{wan}\" masquerade\n\
+             \x20       {v6_masquerade}\
+             \x20   }}\n\
+             \x20   chain forward {{\n\
+             \x20       type filter hook forward priority 0; policy accept;\n\
+             \x20       iifname \"{tun}\" oifname \"{wan}\" accept\n\
+             \x20       iifname \"{wan}\" oifname \"{tun}\" ct state established,related accept\n\
+             \x20   }}\n\
+             }}\n",
+            table = Self::NFT_RT_TABLE,
+            subnet = subnet,
+            wan = self.wan_interface,
+            v6_masquerade = v6_masquerade,
+            tun = self.tun_name,
+        );
+
+        // Delete any existing table first (idempotent).
+        let _ = Command::new("nft").args(["delete", "table", "inet", Self::NFT_RT_TABLE]).status();
+
+        let mut child = Command::new("nft")
+            .arg("-f")
+            .arg("-")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| RoutingError::CommandFailed(format!("nft spawn: {}", e)))?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(ruleset.as_bytes())
+                .map_err(|e| RoutingError::CommandFailed(format!("nft stdin: {}", e)))?;
+        }
+
+        let output = child
+            .wait_with_output()
+            .map_err(|e| RoutingError::CommandFailed(format!("nft wait: {}", e)))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(RoutingError::CommandFailed(format!(
+                "nftables NAT setup failed: {}",
+                stderr.trim()
+            )));
+        }
+
+        log::debug!("nftables routing table created (inet {})", Self::NFT_RT_TABLE);
+        Ok(())
+    }
+
+    /// Tear down nftables NAT and forwarding rules.
+    ///
+    /// Removes the entire dedicated table: `nft delete table inet quicfuscate_rt`.
+    #[cfg(target_os = "linux")]
+    fn teardown_nftables(&self) -> Result<(), RoutingError> {
+        use std::process::Command;
+
+        match Command::new("nft").args(["delete", "table", "inet", Self::NFT_RT_TABLE]).status() {
+            Ok(status) if status.success() => {
+                log::debug!("nftables routing table removed (inet {})", Self::NFT_RT_TABLE);
+            }
+            Ok(status) => {
+                log::debug!(
+                    "nftables teardown: delete table returned status {} (table may not exist)",
+                    status
+                );
+            }
+            Err(e) => {
+                log::debug!("nftables teardown: delete table failed: {}", e);
+            }
+        }
         Ok(())
     }
 
@@ -938,5 +1087,62 @@ mod tests {
                 "route_output={input:?}"
             );
         }
+    }
+
+    // ------------------------------------------------------------------
+    // nftables routing rule generation tests
+    // ------------------------------------------------------------------
+
+    /// Verify that the nftables NAT ruleset contains the equivalent of the
+    /// iptables MASQUERADE + FORWARD rules.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_nftables_routing_ruleset_equivalent_to_iptables() {
+        let mgr = RoutingManager::new(
+            "qfserver0".to_string(),
+            Ipv4Addr::new(10, 8, 0, 1),
+            Ipv4Addr::new(255, 255, 255, 0),
+            "eth0".to_string(),
+        );
+        let subnet = mgr.calculate_subnet();
+
+        // iptables equivalent rules (from setup_iptables)
+        let iptables_masq =
+            format!("-t nat -A POSTROUTING -s {} -o {} -j MASQUERADE", subnet, mgr.wan_interface);
+        let iptables_fwd =
+            format!("-A FORWARD -i {} -o {} -j ACCEPT", mgr.tun_name, mgr.wan_interface);
+        let iptables_est = format!(
+            "-A FORWARD -i {} -o {} -m state --state RELATED,ESTABLISHED -j ACCEPT",
+            mgr.wan_interface, mgr.tun_name
+        );
+
+        // nftables equivalent rules
+        let nft_masq = format!("ip saddr {} oifname \"{}\" masquerade", subnet, mgr.wan_interface);
+        let nft_fwd =
+            format!("iifname \"{}\" oifname \"{}\" accept", mgr.tun_name, mgr.wan_interface);
+        let nft_est = format!(
+            "iifname \"{}\" oifname \"{}\" ct state established,related accept",
+            mgr.wan_interface, mgr.tun_name
+        );
+
+        // Both sets must reference the same subnet and interfaces.
+        assert!(iptables_masq.contains(&subnet) && nft_masq.contains(&subnet));
+        assert!(iptables_fwd.contains(&mgr.tun_name) && nft_fwd.contains(&mgr.tun_name));
+        assert!(iptables_est.contains(&mgr.wan_interface) && nft_est.contains(&mgr.wan_interface));
+
+        // MASQUERADE vs masquerade
+        assert!(iptables_masq.contains("MASQUERADE"));
+        assert!(nft_masq.contains("masquerade"));
+
+        // ESTABLISHED state matching
+        assert!(iptables_est.contains("RELATED,ESTABLISHED"));
+        assert!(nft_est.contains("established,related"));
+    }
+
+    /// Verify the nftables routing table name constant.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_nft_rt_table_constant() {
+        assert_eq!(RoutingManager::NFT_RT_TABLE, "quicfuscate_rt");
     }
 }

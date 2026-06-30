@@ -27,6 +27,7 @@ aligned_box = "0.2"
 rustls = { version = "0.23", features = ["ring", "tls12", "logging", "std"] }
 rustls-native-certs = "0.8"
 rcgen = { version = "0.13", optional = true }
+time = { version = "0.3", optional = true }
 webpki-roots = "0.26"
 rand = "0.9"
 fastrand = "2"
@@ -73,6 +74,13 @@ io-uring = { version = "0.7", optional = true }
 [target.'cfg(not(windows))'.dependencies]
 sha2-asm = "0.6.4"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemServices",
+] }
+
 [dev-dependencies]
 proptest = "1.6"
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -82,7 +90,7 @@ default = ["client", "server", "rate_limiter"]
 
 # --- Role features ---
 client = []
-server = ["rcgen"]
+server = ["rcgen", "time"]
 
 # --- CPU / SIMD features ---
 aes = []
@@ -112,10 +120,10 @@ unsafe_rust = []
 zero_copy_dgram = []
 
 # --- Dev / cert features ---
-dev-certs = ["rcgen"]
+dev-certs = ["rcgen", "time"]
 
 # --- Platform features ---
-tun-windows = []
+tun-windows = ["dep:windows-sys"]
 tun-ios = []
 
 # --- Internal / experimental features ---

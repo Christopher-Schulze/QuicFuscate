@@ -230,7 +230,8 @@ pub fn tun_capabilities() -> TunCapabilities {
     TunCapabilities {
         built_in: cfg!(target_os = "linux")
             || cfg!(target_os = "android")
-            || cfg!(target_os = "macos"),
+            || cfg!(target_os = "macos")
+            || (cfg!(target_os = "windows") && cfg!(feature = "tun-windows")),
         external_factory_registered: TUN_FACTORY.get().is_some(),
         supports_zero_copy: cfg!(target_os = "linux")
             || cfg!(target_os = "android")
@@ -298,7 +299,11 @@ impl TunInterface {
         }
 
         // Deterministic behavior on factory-required targets.
-        if (cfg!(target_os = "windows") || cfg!(target_os = "ios")) && TUN_FACTORY.get().is_none() {
+        // Windows has a built-in Wintun backend when `tun-windows` is enabled;
+        // iOS always requires an external NetworkExtension factory.
+        let needs_factory = cfg!(target_os = "ios")
+            || (cfg!(target_os = "windows") && !cfg!(feature = "tun-windows"));
+        if needs_factory && TUN_FACTORY.get().is_none() {
             crate::optimize::telemetry::TUN_REQUIREMENT_REJECTS.fetch_add(1, Ordering::Relaxed);
             return Err(TunError::Config(
                 "TUN factory required on this platform; call register_tun_factory first",
@@ -865,18 +870,34 @@ mod ios_tun {
     }
 }
 
+/// Wintun-backed Windows TUN device (dynamic `wintun.dll` loading).
+/// On non-Windows targets this compiles to a stub returning
+/// `TunError::Unsupported`. See [`wintun::WintunDevice`] for details.
+pub mod wintun;
+
 #[cfg(target_os = "windows")]
 mod windows_tun {
+    use super::wintun::WintunDevice;
     use super::*;
-    /// Windows stub - requires Wintun via external factory.
+
+    /// Windows TUN via Wintun. Requires the `tun-windows` feature and a
+    /// `wintun.dll` present beside the executable (or on the system search
+    /// path). Falls back to a clear Config error if Wintun is unavailable, so
+    /// callers can still register an external factory via
+    /// [`register_tun_factory`].
     #[cfg(feature = "tun-windows")]
-    pub fn open_platform_tun(_cfg: &TunConfig) -> Result<Box<dyn TunDevice>, TunError> {
-        // Placeholder: Wintun integration is expected to be provided by
-        // an external crate or caller via register_tun_factory. Returning a
-        // configuration error communicates the required action clearly.
-        Err(TunError::Config(
-            "Windows TUN requires Wintun; use register_tun_factory or link feature impl",
-        ))
+    pub fn open_platform_tun(cfg: &TunConfig) -> Result<Box<dyn TunDevice>, TunError> {
+        match WintunDevice::new(cfg) {
+            Ok(dev) => Ok(Box::new(dev)),
+            // DLL missing / incompatible: keep the existing fallback path so a
+            // caller-registered factory can still take over.
+            Err(TunError::Config(msg)) if msg.contains("wintun.dll") => {
+                Err(TunError::Config(
+                    "Windows TUN requires Wintun; wintun.dll not found - use register_tun_factory or install wintun.dll",
+                ))
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Windows stub - tun-windows feature not enabled.

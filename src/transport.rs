@@ -23,8 +23,14 @@ pub mod connection;
 pub mod frames;
 /// HTTP/3 layer over QUIC transport.
 pub mod h3;
+/// NAT traversal: STUN (RFC 5389), TURN (RFC 5766), and ICE (RFC 8445).
+pub mod nat;
 /// QUIC packet header parsing, protection, and encryption.
 pub mod packet;
+/// Multipath connection management (TODO-449): per-path state and selection.
+pub mod path;
+/// Path selection scheduler for multipath send distribution (TODO-449).
+pub mod path_scheduler;
 /// Packet number spaces, connection IDs, varint codec, range sets, and RNG.
 pub mod pn;
 /// Loss recovery and congestion control integration.
@@ -195,8 +201,21 @@ pub const OPTIMAL_BATCH_SIZE: usize = 32;
 
 // Core Constants
 
-/// QUIC protocol version (v1)
+/// QUIC protocol version 1 (RFC 9000 / RFC 9001).
 pub const PROTOCOL_VERSION: u32 = 0x00000001;
+
+/// QUIC protocol version 2 (RFC 9369).
+///
+/// Version 2 reuses the QUIC v1 wire format but swaps the long-header type
+/// bits and uses a distinct initial salt. The version identifier is the
+/// 32-bit value `0x6b3343cf` defined in RFC 9369 Section 1.
+pub const PROTOCOL_VERSION_V2: u32 = 0x6b3343cf;
+
+/// Returns `true` when `v` is a QUIC version supported by this implementation
+/// (currently v1 and v2 per RFC 9369).
+pub fn is_supported_version(v: u32) -> bool {
+    v == PROTOCOL_VERSION || v == PROTOCOL_VERSION_V2
+}
 
 /// Maximum connection ID length
 pub const MAX_CONN_ID_LEN: usize = 20;
@@ -210,6 +229,8 @@ pub const MAX_PKT_NUM_LEN: usize = 4;
 pub enum CongestionControlAlgorithm {
     /// TCP New Reno (RFC 6582) - conservative AIMD baseline.
     Reno,
+    /// CUBIC (RFC 9438) - cubic window growth with TCP friendliness.
+    Cubic,
     /// BBR v2 (IETF draft-ietf-ccwg-bbr) - loss-aware model-based CC.
     BBR2,
     /// BBR v3 with stealth browser-profile shaping (default, recommended).
@@ -343,6 +364,17 @@ mod tests {
             let v = conn.compute_stealth_padding(100, 1000);
             assert_eq!(v, 0, "Off mode with rate 0 must not pad");
         }
+    }
+
+    // --- QUIC version negotiation (TODO-453) ---
+
+    #[test]
+    fn test_is_supported_version_recognizes_v1_and_v2() {
+        assert!(is_supported_version(PROTOCOL_VERSION));
+        assert!(is_supported_version(PROTOCOL_VERSION_V2));
+        assert!(!is_supported_version(0x00000002));
+        assert!(!is_supported_version(0xdeadbeef));
+        assert!(!is_supported_version(0));
     }
 }
 

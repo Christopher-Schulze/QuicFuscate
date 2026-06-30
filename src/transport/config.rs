@@ -1,4 +1,5 @@
-use super::{CongestionControlAlgorithm, PROTOCOL_VERSION};
+use super::{is_supported_version, CongestionControlAlgorithm, PROTOCOL_VERSION};
+use crate::stealth::OsFingerprintProfile;
 use rustls::pki_types::pem::PemObject;
 
 // ============================================================================
@@ -56,10 +57,47 @@ impl TrafficAnalysisDefense {
 
 // ============================================================================
 
+/// NAT traversal configuration (TODO-454): STUN/TURN/ICE settings.
+///
+/// Controls whether the transport attempts NAT traversal via STUN binding
+/// requests, TURN relaying, and ICE candidate gathering. Disabled by default
+/// to preserve backward compatibility; enabling it allows peer-to-peer QUIC
+/// connections across NATs.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
+pub struct NatTraversalConfig {
+    /// Master switch for NAT traversal. When false, STUN/TURN/ICE are skipped.
+    pub enabled: bool,
+    /// STUN server addresses used to discover server-reflexive candidates.
+    pub stun_servers: Vec<std::net::SocketAddr>,
+    /// TURN server addresses used to obtain relayed candidates when direct
+    /// connectivity is impossible.
+    pub turn_servers: Vec<std::net::SocketAddr>,
+    /// Whether ICE candidate gathering and pair selection is enabled.
+    pub ice_enabled: bool,
+}
+
+impl NatTraversalConfig {
+    /// Parse a STUN/TURN server address from a string.
+    pub fn parse_server_addr(
+        s: &str,
+    ) -> Result<std::net::SocketAddr, crate::error::ConnectionError> {
+        s.parse().map_err(|e| {
+            crate::error::ConnectionError::Transport(format!("Invalid NAT server address: {}", e))
+        })
+    }
+}
+
+// ============================================================================
+
 /// QUIC connection configuration
 #[derive(Clone)]
 pub struct Config {
     pub(crate) version: u32,
+    /// Ordered list of QUIC versions this endpoint will advertise and accept.
+    /// The first entry is the preferred version. Defaults to `[PROTOCOL_VERSION]`
+    /// (v1). When v2 (RFC 9369) is included, Version Negotiation and initial
+    /// salt selection honour it. See TODO-453.
+    pub(crate) supported_versions: Vec<u32>,
     pub(crate) cc_algorithm: CongestionControlAlgorithm,
     pub(crate) application_protos: Vec<Vec<u8>>,
     pub(crate) max_idle_timeout: u64,
@@ -166,6 +204,23 @@ pub struct Config {
     /// Target emission rate (packets/sec) for `ConstantRate` mode. When real
     /// traffic is sparse, chaff is injected to maintain this rate. Default 100.
     pub(crate) constant_rate_pps: u32,
+    // --- TCP/ICMP fingerprint obfuscation (TODO-462) ---
+    /// Target OS fingerprint profile for packet normalization on the TUN
+    /// egress path. Controls TTL, TCP window, MSS, DF bit, IP ID behavior,
+    /// and TCP option ordering to prevent passive OS fingerprinting.
+    /// Default: Linux.
+    pub(crate) fingerprint_profile: OsFingerprintProfile,
+    // --- Multipath support (TODO-449) ---
+    /// Whether multipath (WiFi+LTE bonding) is enabled for this connection.
+    /// When disabled (the default) the connection behaves as single-path,
+    /// preserving backward compatibility.
+    pub(crate) multipath_enabled: bool,
+    /// Maximum number of concurrent paths (primary + secondaries) when
+    /// multipath is enabled. Default: 3. Clamped to at least 1.
+    pub(crate) max_paths: usize,
+    // --- NAT traversal (TODO-454) ---
+    /// NAT traversal configuration: STUN/TURN/ICE settings. Disabled by default.
+    pub(crate) nat_traversal: NatTraversalConfig,
 }
 
 impl Config {
@@ -177,6 +232,7 @@ impl Config {
 
         Ok(Self {
             version,
+            supported_versions: vec![version],
             cc_algorithm: CongestionControlAlgorithm::BBR3,
             application_protos: Vec::new(),
             max_idle_timeout: 30000,
@@ -240,24 +296,29 @@ impl Config {
             chaff_rate_pps: 0,
             chaff_size_bytes: 1280,
             constant_rate_pps: 100,
+            fingerprint_profile: OsFingerprintProfile::default(),
+            multipath_enabled: false,
+            max_paths: 3,
+            nat_traversal: NatTraversalConfig::default(),
         })
     }
 
     /// Sets the congestion control algorithm.
     ///
-    /// Supported: `Reno`, `BBR2`, `BBR3` (default).
+    /// Supported: `Reno`, `Cubic`, `BBR2`, `BBR3` (default).
     pub fn set_cc_algorithm(&mut self, algo: CongestionControlAlgorithm) {
         self.cc_algorithm = algo;
     }
     /// Sets the congestion control algorithm by name (case-insensitive).
     ///
-    /// Accepts: `reno`, `bbr2`, `bbr3`. Rejects anything else.
+    /// Accepts: `reno`, `cubic`, `bbr2`, `bbr3`. Rejects anything else.
     pub fn set_cc_algorithm_name(
         &mut self,
         name: &str,
     ) -> Result<(), crate::error::ConnectionError> {
         let algo = match name.to_lowercase().as_str() {
             "reno" => CongestionControlAlgorithm::Reno,
+            "cubic" => CongestionControlAlgorithm::Cubic,
             "bbr2" => CongestionControlAlgorithm::BBR2,
             "bbr3" => CongestionControlAlgorithm::BBR3,
             _ => return Err(crate::error::ConnectionError::InvalidState),
@@ -297,6 +358,34 @@ impl Config {
         }
         self.application_protos = protos;
         Ok(())
+    }
+
+    /// Sets the ordered list of QUIC versions this endpoint supports.
+    ///
+    /// The first entry is the preferred version. Every entry must be a
+    /// recognized QUIC version (v1 or v2 per RFC 9369); unknown versions are
+    /// rejected with [`crate::error::ConnectionError::VersionMismatch`]. An
+    /// empty list is rejected with [`crate::error::ConnectionError::InvalidState`].
+    /// See TODO-453.
+    pub fn set_supported_versions(
+        &mut self,
+        versions: Vec<u32>,
+    ) -> Result<(), crate::error::ConnectionError> {
+        if versions.is_empty() {
+            return Err(crate::error::ConnectionError::InvalidState);
+        }
+        for v in &versions {
+            if !is_supported_version(*v) {
+                return Err(crate::error::ConnectionError::VersionMismatch);
+            }
+        }
+        self.supported_versions = versions;
+        Ok(())
+    }
+
+    /// Returns the ordered list of supported QUIC versions (preferred first).
+    pub fn supported_versions(&self) -> &[u32] {
+        &self.supported_versions
     }
 
     /// Sets the maximum idle timeout
@@ -483,6 +572,93 @@ impl Config {
     /// Returns true if 0-RTT early data is currently enabled.
     pub fn is_early_data_enabled(&self) -> bool {
         self.enable_early_data
+    }
+
+    /// Sets the target OS fingerprint profile for TCP/ICMP packet normalization
+    /// on the TUN egress path (TODO-462).
+    ///
+    /// This controls TTL, TCP window size, MSS, DF bit, IP ID behavior, and TCP
+    /// option ordering to prevent passive OS fingerprinting by DPI systems.
+    /// Default: [`OsFingerprintProfile::Linux`].
+    pub fn set_fingerprint_profile(&mut self, profile: OsFingerprintProfile) {
+        self.fingerprint_profile = profile;
+    }
+
+    /// Returns the currently configured OS fingerprint profile.
+    pub fn fingerprint_profile(&self) -> OsFingerprintProfile {
+        self.fingerprint_profile
+    }
+
+    // --- Multipath support (TODO-449) ---
+
+    /// Enables or disables multipath (WiFi+LTE bonding) for this connection.
+    ///
+    /// When disabled (the default) the connection is single-path and the
+    /// transport preserves its existing RFC 9000 migration semantics. When
+    /// enabled, secondary paths may be added after validation and traffic is
+    /// distributed across them by the path scheduler.
+    pub fn set_multipath_enabled(&mut self, enabled: bool) {
+        self.multipath_enabled = enabled;
+    }
+
+    /// Sets the maximum number of concurrent paths (primary + secondaries)
+    /// when multipath is enabled. Clamped to at least 1.
+    pub fn set_max_paths(&mut self, max_paths: usize) {
+        self.max_paths = max_paths.max(1);
+    }
+
+    /// Returns whether multipath bonding is enabled.
+    pub fn multipath_enabled(&self) -> bool {
+        self.multipath_enabled
+    }
+
+    /// Returns the maximum number of concurrent paths.
+    pub fn max_paths(&self) -> usize {
+        self.max_paths
+    }
+
+    // --- NAT traversal (TODO-454) ---
+
+    /// Sets the NAT traversal configuration (STUN/TURN/ICE). Replaces any
+    /// previously configured NAT traversal settings.
+    pub fn set_nat_traversal(&mut self, config: NatTraversalConfig) {
+        self.nat_traversal = config;
+    }
+
+    /// Returns a reference to the current NAT traversal configuration.
+    pub fn nat_traversal(&self) -> &NatTraversalConfig {
+        &self.nat_traversal
+    }
+
+    /// Enables or disables NAT traversal as a whole.
+    pub fn enable_nat_traversal(&mut self, enabled: bool) {
+        self.nat_traversal.enabled = enabled;
+    }
+
+    /// Sets the list of STUN servers used for server-reflexive candidate
+    /// discovery.
+    pub fn set_stun_servers(&mut self, servers: Vec<std::net::SocketAddr>) {
+        self.nat_traversal.stun_servers = servers;
+    }
+
+    /// Sets the list of TURN servers used for relayed candidates.
+    pub fn set_turn_servers(&mut self, servers: Vec<std::net::SocketAddr>) {
+        self.nat_traversal.turn_servers = servers;
+    }
+
+    /// Enables or disables ICE candidate gathering and pair selection.
+    pub fn enable_ice(&mut self, enabled: bool) {
+        self.nat_traversal.ice_enabled = enabled;
+    }
+
+    /// Returns true if NAT traversal is enabled.
+    pub fn nat_traversal_enabled(&self) -> bool {
+        self.nat_traversal.enabled
+    }
+
+    /// Returns true if ICE is enabled.
+    pub fn ice_enabled(&self) -> bool {
+        self.nat_traversal.ice_enabled
     }
 
     /// Enables or disables TLS peer certificate verification.
@@ -898,10 +1074,60 @@ mod tests {
     }
 
     #[test]
+    fn test_nat_traversal_defaults_to_disabled() {
+        let cfg = default_config();
+        assert!(!cfg.nat_traversal_enabled(), "NAT traversal must be off by default");
+        assert!(!cfg.ice_enabled(), "ICE must be off by default");
+        assert!(cfg.nat_traversal().stun_servers.is_empty());
+        assert!(cfg.nat_traversal().turn_servers.is_empty());
+    }
+
+    #[test]
+    fn test_nat_traversal_setters() {
+        let mut cfg = default_config();
+        let stun: std::net::SocketAddr = "203.0.113.1:3478".parse().unwrap();
+        let turn: std::net::SocketAddr = "203.0.113.2:3478".parse().unwrap();
+        cfg.set_stun_servers(vec![stun]);
+        cfg.set_turn_servers(vec![turn]);
+        cfg.enable_nat_traversal(true);
+        cfg.enable_ice(true);
+        assert!(cfg.nat_traversal_enabled());
+        assert!(cfg.ice_enabled());
+        assert_eq!(cfg.nat_traversal().stun_servers, vec![stun]);
+        assert_eq!(cfg.nat_traversal().turn_servers, vec![turn]);
+    }
+
+    #[test]
+    fn test_nat_traversal_config_serde_roundtrip() {
+        let nat = NatTraversalConfig {
+            enabled: true,
+            stun_servers: vec!["203.0.113.1:3478".parse().unwrap()],
+            turn_servers: vec!["203.0.113.2:3478".parse().unwrap()],
+            ice_enabled: true,
+        };
+        let json = serde_json::to_string(&nat).unwrap();
+        let decoded: NatTraversalConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(nat, decoded);
+    }
+
+    #[test]
+    fn test_parse_server_addr_valid() {
+        let addr = NatTraversalConfig::parse_server_addr("127.0.0.1:3478").unwrap();
+        assert_eq!(addr.port(), 3478);
+    }
+
+    #[test]
+    fn test_parse_server_addr_invalid() {
+        assert!(NatTraversalConfig::parse_server_addr("not-an-address").is_err());
+    }
+
+    #[test]
     fn test_set_cc_algorithm_name_valid() {
         let mut cfg = default_config();
         assert!(cfg.set_cc_algorithm_name("reno").is_ok());
         assert!(matches!(cfg.cc_algorithm(), CongestionControlAlgorithm::Reno));
+        assert!(cfg.set_cc_algorithm_name("cubic").is_ok());
+        assert!(matches!(cfg.cc_algorithm(), CongestionControlAlgorithm::Cubic));
         assert!(cfg.set_cc_algorithm_name("bbr2").is_ok());
         assert!(matches!(cfg.cc_algorithm(), CongestionControlAlgorithm::BBR2));
         assert!(cfg.set_cc_algorithm_name("BBR3").is_ok());
@@ -911,7 +1137,7 @@ mod tests {
     #[test]
     fn test_set_cc_algorithm_name_invalid() {
         let mut cfg = default_config();
-        assert!(cfg.set_cc_algorithm_name("cubic").is_err());
+        assert!(cfg.set_cc_algorithm_name("vegas").is_err());
         assert!(cfg.set_cc_algorithm_name("").is_err());
         assert!(cfg.set_cc_algorithm_name("LEDBAT").is_err());
     }
@@ -1168,5 +1394,65 @@ mod tests {
             serde_json::to_string(&TrafficAnalysisDefense::FullPadding).unwrap(),
             "\"FullPadding\""
         );
+    }
+
+    // --- QUIC version negotiation (TODO-453) ---
+
+    #[test]
+    fn test_default_supported_versions_is_v1_only() {
+        let cfg = default_config();
+        assert_eq!(cfg.supported_versions(), &[PROTOCOL_VERSION]);
+    }
+
+    #[test]
+    fn test_set_supported_versions_v1_and_v2() {
+        let mut cfg = default_config();
+        cfg.set_supported_versions(vec![crate::transport::PROTOCOL_VERSION_V2, PROTOCOL_VERSION])
+            .expect("v1+v2 accepted");
+        assert_eq!(
+            cfg.supported_versions(),
+            &[crate::transport::PROTOCOL_VERSION_V2, PROTOCOL_VERSION]
+        );
+    }
+
+    #[test]
+    fn test_set_supported_versions_rejects_empty() {
+        let mut cfg = default_config();
+        assert!(cfg.set_supported_versions(Vec::new()).is_err());
+    }
+
+    #[test]
+    fn test_set_supported_versions_rejects_unknown() {
+        let mut cfg = default_config();
+        assert!(cfg.set_supported_versions(vec![PROTOCOL_VERSION, 0xdeadbeef]).is_err());
+        // 0x00000002 is not a recognized QUIC version (v2 is 0x6b3343cf per RFC 9369)
+        assert!(cfg.set_supported_versions(vec![0x00000002]).is_err());
+    }
+
+    // --- Multipath support (TODO-449) ---
+
+    #[test]
+    fn test_multipath_defaults_to_disabled_with_three_paths() {
+        let cfg = default_config();
+        assert!(!cfg.multipath_enabled());
+        assert_eq!(cfg.max_paths(), 3);
+    }
+
+    #[test]
+    fn test_set_multipath_enabled_toggles_flag() {
+        let mut cfg = default_config();
+        cfg.set_multipath_enabled(true);
+        assert!(cfg.multipath_enabled());
+        cfg.set_multipath_enabled(false);
+        assert!(!cfg.multipath_enabled());
+    }
+
+    #[test]
+    fn test_set_max_paths_clamped_to_at_least_one() {
+        let mut cfg = default_config();
+        cfg.set_max_paths(0);
+        assert_eq!(cfg.max_paths(), 1);
+        cfg.set_max_paths(8);
+        assert_eq!(cfg.max_paths(), 8);
     }
 }

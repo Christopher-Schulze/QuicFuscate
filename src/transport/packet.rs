@@ -680,13 +680,15 @@ mod tests {
 
     #[test]
     fn version_negotiation_clears_fixed_bit_and_parses() {
-        let mut out = [0u8; 64];
-        let used =
-            negotiate_version(&[0x11], &[0x22], &[crate::transport::PROTOCOL_VERSION], &mut out)
-                .expect("negotiate version");
-        assert_eq!(out[0] & FORM_BIT, FORM_BIT);
-        assert_eq!(out[0] & FIXED_BIT, 0);
-        let (parsed, _) = parse_header(&out[..used], 0).expect("parse vn");
+        let pkt = generate_version_negotiation_packet(
+            &[crate::transport::PROTOCOL_VERSION],
+            &[crate::transport::PROTOCOL_VERSION],
+            &[0x22], // dcid (echoes client SCID)
+            &[0x11], // scid (echoes client DCID)
+        );
+        assert_eq!(pkt[0] & FORM_BIT, FORM_BIT);
+        assert_eq!(pkt[0] & FIXED_BIT, 0);
+        let (parsed, _) = parse_header(&pkt, 0).expect("parse vn");
         assert_eq!(parsed.ty, PacketType::VersionNegotiation);
     }
 
@@ -705,6 +707,100 @@ mod tests {
         ];
         pkt.extend_from_slice(&crate::transport::PROTOCOL_VERSION.to_be_bytes());
         assert!(matches!(parse_header(&pkt, 0), Err(ConnectionError::InvalidPacket)));
+    }
+
+    // --- QUIC version negotiation (TODO-453) ---
+
+    #[test]
+    fn vn_packet_generation_and_parsing_roundtrip() {
+        let server_versions =
+            vec![crate::transport::PROTOCOL_VERSION_V2, crate::transport::PROTOCOL_VERSION];
+        let pkt = generate_version_negotiation_packet(
+            &[crate::transport::PROTOCOL_VERSION],
+            &server_versions,
+            &[0xaa, 0xbb], // dcid
+            &[0xcc],       // scid
+        );
+        let parsed = parse_version_negotiation(&pkt).expect("VN must parse");
+        assert_eq!(parsed, server_versions);
+    }
+
+    #[test]
+    fn vn_packet_parse_rejects_non_vn_packets() {
+        // Fixed bit set => not a VN packet.
+        let bad = vec![FORM_BIT | FIXED_BIT, 0, 0, 0, 0, 0, 0, 0];
+        assert!(parse_version_negotiation(&bad).is_none());
+        // Non-zero version field => not a VN packet.
+        let bad2 = vec![FORM_BIT, 0, 0, 0, 1, 0, 0];
+        assert!(parse_version_negotiation(&bad2).is_none());
+        // Truncated version list (not a multiple of 4).
+        let bad3 = vec![FORM_BIT, 0, 0, 0, 0, 0x01, 0xaa, 0x01, 0xbb, 0x01, 0x02, 0x03];
+        assert!(parse_version_negotiation(&bad3).is_none());
+        // Empty packet.
+        assert!(parse_version_negotiation(&[]).is_none());
+    }
+
+    #[test]
+    fn negotiate_version_selects_highest_common() {
+        let client = vec![crate::transport::PROTOCOL_VERSION];
+        let server =
+            vec![crate::transport::PROTOCOL_VERSION_V2, crate::transport::PROTOCOL_VERSION];
+        // Server prefers v2 but client only offers v1 => v1 selected.
+        assert_eq!(negotiate_version(&client, &server), Some(crate::transport::PROTOCOL_VERSION));
+        // Both offer v2 => server's top preference (v2) selected.
+        let client2 =
+            vec![crate::transport::PROTOCOL_VERSION, crate::transport::PROTOCOL_VERSION_V2];
+        assert_eq!(
+            negotiate_version(&client2, &server),
+            Some(crate::transport::PROTOCOL_VERSION_V2)
+        );
+    }
+
+    #[test]
+    fn negotiate_version_no_common_returns_none() {
+        let client = vec![0xdeadbeef];
+        let server = vec![crate::transport::PROTOCOL_VERSION];
+        assert!(negotiate_version(&client, &server).is_none());
+    }
+
+    #[test]
+    fn v1_and_v2_coexistence_roundtrip() {
+        // Server advertises both v1 and v2; client offers v2 first.
+        let server_versions =
+            vec![crate::transport::PROTOCOL_VERSION_V2, crate::transport::PROTOCOL_VERSION];
+        let client_versions = vec![crate::transport::PROTOCOL_VERSION_V2];
+        // Version selection picks v2.
+        assert_eq!(
+            negotiate_version(&client_versions, &server_versions),
+            Some(crate::transport::PROTOCOL_VERSION_V2)
+        );
+        // VN packet contains both server versions and parses back identically.
+        let pkt = generate_version_negotiation_packet(
+            &client_versions,
+            &server_versions,
+            &[0x01],
+            &[0x02],
+        );
+        assert_eq!(parse_version_negotiation(&pkt).unwrap(), server_versions);
+    }
+
+    #[test]
+    fn unsupported_version_triggers_vn_response() {
+        // Client offers only an unsupported version; server has no common match.
+        let client_versions = vec![0xdeadbeef];
+        let server_versions =
+            vec![crate::transport::PROTOCOL_VERSION_V2, crate::transport::PROTOCOL_VERSION];
+        assert!(negotiate_version(&client_versions, &server_versions).is_none());
+        // Server responds with a VN packet advertising its supported versions.
+        let pkt = generate_version_negotiation_packet(
+            &client_versions,
+            &server_versions,
+            &[0x11],
+            &[0x22],
+        );
+        let parsed = parse_version_negotiation(&pkt).expect("VN response must parse");
+        assert_eq!(parsed, server_versions);
+        assert!(!parsed.contains(&0xdeadbeef));
     }
 
     #[test]
@@ -994,44 +1090,104 @@ pub fn open_data_aead_batch(
     open.open_batch(items)
 }
 
-/// Formats a Version Negotiation packet into `out`.
-pub fn negotiate_version(
-    scid: &[u8],
+/// Selects the server's most-preferred QUIC version that the client also supports.
+///
+/// Iterates `server_versions` in preference order and returns the first entry
+/// that also appears in `client_versions`. Returns `None` when no common
+/// version exists — in that case the caller should emit a Version Negotiation
+/// packet via [`generate_version_negotiation_packet`]. See TODO-453.
+pub fn negotiate_version(client_versions: &[u32], server_versions: &[u32]) -> Option<u32> {
+    server_versions.iter().find(|&&sv| client_versions.contains(&sv)).copied()
+}
+
+/// Builds a Version Negotiation (VN) response packet listing `server_versions`.
+///
+/// Per RFC 9000 Section 17.2.1, the VN packet's DCID echoes the client's SCID
+/// and its SCID echoes the client's DCID; the caller is responsible for passing
+/// the already-swapped connection IDs in `dcid` / `scid`. The form bit is set
+/// and the fixed bit is cleared, as required for VN packets. The `client_versions`
+/// argument is accepted for API symmetry but is not encoded — only the server's
+/// supported versions appear in the packet body. See TODO-453.
+pub fn generate_version_negotiation_packet(
+    _client_versions: &[u32],
+    server_versions: &[u32],
     dcid: &[u8],
-    versions: &[u32],
-    out: &mut [u8],
-) -> Result<usize, ConnectionError> {
-    let mut off = 0usize;
-    if out.is_empty() {
-        return Err(ConnectionError::BufferTooShort);
-    }
+    scid: &[u8],
+) -> Vec<u8> {
+    let mut pkt =
+        Vec::with_capacity(1 + 4 + 1 + dcid.len() + 1 + scid.len() + server_versions.len() * 4);
+    // First byte: form bit set, fixed bit cleared, remaining bits random.
     let first = (crate::transport::rand::rand_u8() | FORM_BIT) & !FIXED_BIT;
-    out[off] = first;
-    off += 1;
-    if out.len() < off + 4 {
-        return Err(ConnectionError::BufferTooShort);
+    pkt.push(first);
+    // Version field is 0x00000000 for VN packets.
+    pkt.extend_from_slice(&0u32.to_be_bytes());
+    // DCID (echoes the client's SCID).
+    pkt.push(dcid.len() as u8);
+    pkt.extend_from_slice(dcid);
+    // SCID (echoes the client's DCID).
+    pkt.push(scid.len() as u8);
+    pkt.extend_from_slice(scid);
+    // Supported versions, big-endian.
+    for v in server_versions {
+        pkt.extend_from_slice(&v.to_be_bytes());
     }
-    out[off..off + 4].copy_from_slice(&0u32.to_be_bytes());
-    off += 4;
-    if out.len() < off + 1 + scid.len() + 1 + dcid.len() {
-        return Err(ConnectionError::BufferTooShort);
+    pkt
+}
+
+/// Extracts the version list from a Version Negotiation packet.
+///
+/// Returns `Some(versions)` when `pkt` is a well-formed VN packet (form bit set,
+/// fixed bit clear, version field zero, and a whole number of 4-byte version
+/// entries). Returns `None` otherwise. See TODO-453.
+pub fn parse_version_negotiation(pkt: &[u8]) -> Option<Vec<u32>> {
+    if pkt.is_empty() {
+        return None;
     }
-    out[off] = scid.len() as u8;
+    let first = pkt[0];
+    // VN packets set the form bit and clear the fixed bit.
+    if (first & FORM_BIT) == 0 || (first & FIXED_BIT) != 0 {
+        return None;
+    }
+    if pkt.len() < 5 {
+        return None;
+    }
+    let version = u32::from_be_bytes([pkt[1], pkt[2], pkt[3], pkt[4]]);
+    if version != 0 {
+        return None;
+    }
+    let mut off = 5usize;
+    // DCID length + bytes.
+    if off >= pkt.len() {
+        return None;
+    }
+    let dcid_len = pkt[off] as usize;
     off += 1;
-    out[off..off + scid.len()].copy_from_slice(scid);
-    off += scid.len();
-    out[off] = dcid.len() as u8;
+    if off + dcid_len > pkt.len() {
+        return None;
+    }
+    off += dcid_len;
+    // SCID length + bytes.
+    if off >= pkt.len() {
+        return None;
+    }
+    let scid_len = pkt[off] as usize;
     off += 1;
-    out[off..off + dcid.len()].copy_from_slice(dcid);
-    off += dcid.len();
-    for v in versions {
-        if out.len() < off + 4 {
-            return Err(ConnectionError::BufferTooShort);
-        }
-        out[off..off + 4].copy_from_slice(&v.to_be_bytes());
+    if off + scid_len > pkt.len() {
+        return None;
+    }
+    off += scid_len;
+    // Remaining bytes must be a whole number of 4-byte version entries.
+    let remaining = pkt.len().saturating_sub(off);
+    if remaining == 0 || !remaining.is_multiple_of(4) {
+        return None;
+    }
+    let count = remaining / 4;
+    let mut versions = Vec::with_capacity(count);
+    for _ in 0..count {
+        versions.push(u32::from_be_bytes([pkt[off], pkt[off + 1], pkt[off + 2], pkt[off + 3]]));
         off += 4;
     }
-    Ok(off)
+    Some(versions)
 }
 
 /// Appends a Retry Integrity Tag to a Retry packet buffer (RFC 9001 Section 5.8).
