@@ -3575,6 +3575,15 @@ impl AdaptiveFec {
 
     /// Process incoming FEC packet through the decoder and return any recovered packets.
     pub fn on_receive(&mut self, packet: FecPacket) -> Result<Vec<FecPacket>, String> {
+        // Zero mode has no repair packets to consume and cannot recover old
+        // zero-mode payloads. Keep the receive path a true ownership-preserving
+        // passthrough so the QUIC core can decrypt/header-unprotect in place
+        // instead of falling back to a copy because the decoder retained an Arc
+        // clone of the pooled buffer.
+        if self.current_mode() == FecMode::Zero && self.transition_left == 0 {
+            return Ok(vec![packet]);
+        }
+
         // Systematic (source) packets must always be forwarded to the QUIC stack
         // immediately, regardless of FEC decoder state. The decoder still receives
         // a clone for tracking/recovery purposes, but the original is returned

@@ -39,6 +39,23 @@ fn test_auto_mode_streaming_selection() {
 }
 
 #[test]
+fn test_zero_mode_receive_preserves_unique_payload_owner() {
+    let pool = crate::optimize::global_pool();
+    let mut fec = AdaptiveFec::new(FecConfig { initial_mode: FecMode::Zero, ..Default::default() });
+    let mut block = pool.alloc();
+    block[..16].copy_from_slice(b"zero-mode-packet");
+    let pkt = FecPacket::new(7, Some(block), 16, true, None, 0, Arc::clone(&pool));
+
+    let mut out = fec.on_receive(pkt).expect("zero mode receive must pass through");
+
+    assert_eq!(out.len(), 1);
+    assert!(
+        out[0].payload_mut_unique().is_some(),
+        "zero mode receive must not retain a decoder Arc clone that forces core copy fallback"
+    );
+}
+
+#[test]
 fn test_continuous_target_keeps_clean_link_zero_family() {
     let target = continuous_fec_target(0.0, true, false, 2048, 1024, 0, 0.0);
     assert_eq!(target.family, FecBackendFamily::Zero);

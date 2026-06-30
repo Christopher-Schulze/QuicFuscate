@@ -63,7 +63,7 @@ QuicFuscate is a stealth transport and VPN runtime built on a custom QUIC-based 
 - Adaptive SIMD dispatch (AVX2/AVX-512/NEON) with runtime CPU feature detection for optimal performance paths
 - AEAD selection at runtime (`Aegis128L` family, `Morus1280_128`) with automatic CPU feature detection;
   PFS by default via ephemeral X25519 key exchange
-- Hybrid FEC (Adaptive RLNC + Tetrys-like Streaming) with zero-overhead at 0% loss; escalates seamlessly under loss up to Wiedemann (GF(2^8), bitsliced, multi-U/block-BM with Rayon parallelization) and streaming burst (1 repair per N sources, partial-recovery toggle, SIMD-optimized GF(2^16) nibble paths)
+- Hybrid FEC (Adaptive RLNC + Tetrys-like Streaming) with ownership-preserving zero-overhead receive at 0% loss; escalates seamlessly under loss up to Wiedemann (GF(2^8), bitsliced, multi-U/block-BM with Rayon parallelization) and streaming burst (1 repair per N sources, partial-recovery toggle, SIMD-optimized GF(2^16) nibble paths)
 - Zero-copy I/O with tunable memory pool and optional io_uring UDP fast path (Linux); AF_XDP support is experimental and opt-in behind `internal_af_xdp_experimental`
 - Active-probe mitigation with detector-driven escalation and Reality fallback proxying to avoid protocol disclosure under active scans
 - Adaptive StealthBrain control loop for ACK policy, timing/padding shaping, MASQUE preference hints, and FEC interval/redundancy hints

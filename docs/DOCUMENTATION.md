@@ -1239,6 +1239,7 @@ Mode Selection & Hysteresis
 - Ingress
   - The receiver recognizes FEC DATAGRAMs by the 2-byte Magic. Parsing uses `FecPacket::from_stream_raw()` with zero-copy buffers from the global `MemoryPool`.
   - Parsed packets are fed into the streaming decoder; reconstructed systematics are surfaced to the application as regular DATAGRAMs.
+  - `FecMode::Zero` receive is a true ownership-preserving passthrough when no transition is active: the decoder does not retain an `Arc` clone of the pooled payload, allowing the QUIC core to decrypt and remove header protection in place without an extra copy.
 
 - Semantics & Safety
   - `base_id` stabilizes window alignment across ends; `coeff_len` encodes bytes (GF-specific width must be respected by producers/consumers).
@@ -1701,7 +1702,7 @@ See "Unified TLS Provider (RealTLS + TLS Cover) -> Fingerprint Source Model" for
 #### Advanced Optimizations
 - Crypto hotpaths use target-feature gated intrinsics (`aes`, `sse2`, `avx2`, `vaes`, `neon`); runtime dispatch via `cpufeatures` selects the best backend.
 - AEGIS/MORUS implementations include unsafe blocks for SIMD lanes where necessary; all sensitive operations remain constant-time by design.
-- Transport/H3 uses zero-copy iovecs, io_uring fast paths (feature `io_uring`, crate `io-uring` v0.7), pool-backed compression buffers, and aligned pools (`MemoryPool`) for minimal copies. The client `IoDriver` uses `UringBatchSender` (in `src/optimize/uring_batch.rs`) for batch `SendMsg` submission before falling back to `sendmmsg`, and uses pool-backed `UringRecvBatch` slots on Linux so inbound datagrams can enter FEC through `core::recv_pooled_block()` without an intermediate `Vec` copy.
+- Transport/H3 uses zero-copy iovecs, io_uring fast paths (feature `io_uring`, crate `io-uring` v0.7), pool-backed compression buffers, and aligned pools (`MemoryPool`) for minimal copies. The client `IoDriver` uses `UringBatchSender` (in `src/optimize/uring_batch.rs`) for batch `SendMsg` submission before falling back to `sendmmsg`, and uses pool-backed `UringRecvBatch` slots on Linux so inbound datagrams can enter FEC through `core::recv_pooled_block()` without an intermediate `Vec` copy. In FEC Zero mode, receive keeps the payload uniquely owned so the core avoids the copy-on-mutate fallback.
 - Frame parsing is zero-copy: `Frame<'a>` uses `Cow<'a, [u8]>` for data fields, borrowing directly from the decrypted packet buffer in `from_bytes()`. Combined with the in-order Stream fast path (sequential data copies directly to recv_buf, skipping the recv_frags BTreeMap), the common-case receive path avoids heap allocation entirely.
 - ACK sent-byte accounting drains acknowledged and packet-threshold-lost ranges from `sent_packets_by_pn` with `BTreeMap::extract_if`, avoiding the older collect-then-remove pass while preserving largest-ACK RTT sampling and recovery/loss semantics.
 - Stealth hotpaths (header/QPACK building and persona-driven shaping) prefer SIMD kernels with safe scalar fallback; mutex/atomic usage is minimized in hotpaths.
@@ -3540,6 +3541,7 @@ Notes:
 - Constructor and observer ambient policy is now centralized: `AdaptiveFec::new()` resolves explicit FEC ambient/runtime inputs once, stores the resulting `FecRuntimePolicy` on the instance, and reuses that same snapshot for internal runtime/transition builders; `FecTransportObserver` snapshots its profile/base-stream inputs once; its retained transport-profile heuristic is represented explicitly as observer policy (`Explicit(profile)` or `Ambient(profile)`); the remaining FEC mode-policy env overrides are read through one `FecRuntimePolicy` snapshot instead of scattered per-call environment reads.
 - Deterministic regression coverage exists for the remaining allowed ambient FEC controls: stream cadence stays stable per `AdaptiveFec` instance, `FecTransportObserver` stream policy snapshots per observer instance, decoder policy snapshots per `Decoder8` instance, and Fountain symbol size snapshots per Fountain encoder/decoder construction.
 - Lazy receive polling is gated by `recovery_needed()`: clean blocks return systematic packets without polling heavy recovery, tail-loss blocks with pending repairs still recover, and clean complete blocks prune their sequence tracker so long-running stable links do not retain unbounded FEC source IDs.
+- Zero-mode receive bypasses decoder retention entirely while no transition is active, preserving unique ownership of pooled payloads for in-place QUIC processing. Recovery-capable modes still retain decoder state as required for source reconstruction.
 
 Examples (manual tuning):
 
