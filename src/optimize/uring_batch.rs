@@ -34,8 +34,11 @@ const CQE_F_NOTIF: u32 = 1 << 3;
 /// supports it (requires `CAP_SYS_ADMIN` on kernels < 5.12, unrestricted
 /// since 5.12). Falls back to standard mode silently. Check `sqpoll_active()`.
 ///
-/// **SendMsgZc**: zero-copy send path (kernel 6.0+ for stability). Falls back
-/// to `SendMsg` when the probe indicates no support. Check `zc_supported()`.
+/// **SendMsgZc**: experimental zero-copy send path (kernel 6.0+ for stability).
+/// It is probed at startup but remains disabled unless
+/// `QUICFUSCATE_IO_URING_ZC=1` is set. The production default is plain
+/// `SendMsg`, because its CQE semantics are more portable across hosted CI,
+/// containers, and mixed Linux kernels. Check `zc_supported()`.
 pub struct UringBatchSender {
     ring: IoUring,
     /// Pre-allocated iovec scratch buffer (reused across batches).
@@ -50,7 +53,7 @@ pub struct UringBatchSender {
     zc_primary_seen: Vec<bool>,
     /// True when the ring was constructed with SQPOLL mode.
     sqpoll_active: bool,
-    /// True when the kernel supports SendMsgZc (probed at init).
+    /// True when SendMsgZc was probed successfully and explicitly enabled.
     zc_supported: bool,
 }
 
@@ -70,7 +73,8 @@ impl UringBatchSender {
     /// Attempts SQPOLL mode first (eliminates `io_uring_enter` syscalls during
     /// steady-state operation at the cost of a kernel polling thread).
     /// Falls back to standard mode on `EPERM` or unsupported kernels.
-    /// Probes `SendMsgZc` support via `io_uring::Probe`.
+    /// Probes `SendMsgZc` support via `io_uring::Probe`; activation still
+    /// requires `QUICFUSCATE_IO_URING_ZC=1`.
     ///
     /// Returns `None` when io_uring cannot be initialised (kernel too old,
     /// seccomp filter, missing permissions, etc.).
@@ -97,18 +101,29 @@ impl UringBatchSender {
             },
         };
 
-        // Probe SendMsgZc support (stable on kernel 6.0+).
-        let zc_supported = {
+        // Probe SendMsgZc support, but keep the path explicit opt-in. Kernel
+        // completion ordering for SendMsgZc is still less portable than plain
+        // SendMsg across hosted CI and containerized Linux environments; the
+        // stable production default must never risk blocking a sender batch.
+        let zc_probe_supported = {
             let mut probe = Probe::new();
             ring.submitter().register_probe(&mut probe).is_ok()
                 && probe.is_supported(opcode::SendMsgZc::CODE)
         };
+        let zc_opt_in = std::env::var("QUICFUSCATE_IO_URING_ZC")
+            .map(|value| {
+                matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false);
+        let zc_supported = zc_probe_supported && zc_opt_in;
 
         if sqpoll_active {
             crate::telemetry::IO_URING_SQPOLL_ACTIVE.store(1, std::sync::atomic::Ordering::Relaxed);
         }
         if zc_supported {
             log::debug!("io_uring SendMsgZc (zero-copy) supported");
+        } else if zc_probe_supported {
+            log::debug!("io_uring SendMsgZc available but disabled; set QUICFUSCATE_IO_URING_ZC=1 to opt in");
         }
 
         let cap = depth as usize;
@@ -137,7 +152,7 @@ impl UringBatchSender {
         self.sqpoll_active
     }
 
-    /// True when the kernel supports zero-copy `SendMsgZc` (kernel 6.0+).
+    /// True when zero-copy `SendMsgZc` was probed and explicitly enabled.
     #[inline]
     pub fn zc_supported(&self) -> bool {
         self.zc_supported

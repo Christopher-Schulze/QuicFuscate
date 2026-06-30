@@ -241,8 +241,8 @@ Development focuses on hardening and operational validation across all runtime s
 - Custom data-plane crypto with in-tree implementations:
   - product contract: `Aegis128L`, `Morus1280_128`
   - internal backend machine room: `Aegis128X4`, `Aegis128X8`
-- The Linux high-performance send path is `io_uring` (SQPOLL + `SendMsgZc` zero-copy auto-probed; inbound via `RecvMsg` + eventfd bridge).
-- Zero-copy is achieved via `io_uring SendMsgZc` (not `MSG_ZEROCOPY`/`SO_ZEROCOPY`).
+- The Linux high-performance send path is `io_uring` (SQPOLL auto-probed; outbound defaults to batched `SendMsg`; inbound via `RecvMsg` + eventfd bridge).
+- Experimental zero-copy send uses `io_uring SendMsgZc` (not `MSG_ZEROCOPY`/`SO_ZEROCOPY`) and is disabled unless `QUICFUSCATE_IO_URING_ZC=1` is set.
 - busy-poll socket tuning is not used.
 
 ### Security Review Fast Path

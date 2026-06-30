@@ -62,7 +62,9 @@ This section is the fast path for skeptical review. It is not a marketing summar
   - product contract: `Aegis128L`, `Morus1280_128`
   - internal backend machine room: `Aegis128X4`, `Aegis128X8`
 - The Linux high-performance send path is `io_uring` with automatic SQPOLL (kernel >= 5.12
-  or `CAP_SYS_ADMIN`) and `SendMsgZc` zero-copy (kernel >= 6.0) probed at startup.
+  or `CAP_SYS_ADMIN`) and batched `SendMsg` as the production send default.
+  Experimental `SendMsgZc` zero-copy (kernel >= 6.0) is probed at startup but only enabled
+  when `QUICFUSCATE_IO_URING_ZC=1` is set.
 - The io_uring server send path batches all outgoing packets from a connection into a single
   `io_uring_enter` call; client outbound path dispatches via `UringBatchSender` in `IoDriver`.
 - The client inbound path uses a dedicated `UringRecvBatch` ring with pre-posted `RecvMsg` SQEs
@@ -2745,9 +2747,12 @@ At runtime you can override selected stealth options without changing the config
 - `QUICFUSCATE_RATE_LIMIT_REFILL_MS` - integer `>=1`; token-bucket refill interval in milliseconds (default: `1000`).
   - These overrides are active only when the binary is built with the `rate_limiter` feature.
 - `QUICFUSCATE_FASTPATH` - `auto|off` (default: `auto`). Controls XDP/UDP fast-path selection.
-- io_uring queue depth, SQPOLL, and SendMsgZc are probed and activated automatically at runtime
-  with no env override needed. SQPOLL requires `CAP_SYS_ADMIN` on kernels < 5.12; falls back
-  to standard mode silently. SendMsgZc requires kernel 6.0+; falls back to SendMsg silently.
+- io_uring queue depth and SQPOLL are probed automatically at runtime with no env override needed.
+  SQPOLL requires `CAP_SYS_ADMIN` on kernels < 5.12 and falls back to standard mode silently.
+  SendMsgZc requires kernel 6.0+ and `QUICFUSCATE_IO_URING_ZC=1`; without that explicit opt-in,
+  the production send path stays on batched SendMsg.
+- `QUICFUSCATE_IO_URING_ZC` - `1|true|yes|on` enables experimental Linux `SendMsgZc` zero-copy
+  after the runtime probe succeeds (default: disabled).
 
 #### Memory Pool (Optimization) Environment Overrides
 
