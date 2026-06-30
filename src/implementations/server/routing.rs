@@ -55,14 +55,7 @@ impl RoutingManager {
         netmask: Ipv4Addr,
         wan_interface: String,
     ) -> Self {
-        Self {
-            tun_name,
-            server_ip,
-            netmask,
-            wan_interface,
-            server_ipv6: None,
-            ipv6_prefix_len: 64,
-        }
+        Self { tun_name, server_ip, netmask, wan_interface, server_ipv6: None, ipv6_prefix_len: 64 }
     }
 
     /// Create a new dual-stack routing manager.
@@ -132,7 +125,11 @@ impl RoutingManager {
             self.enable_ipv6_forwarding_macos()?;
             let v6_subnet = self.calculate_ipv6_subnet();
             self.setup_pf_v6(&v6_subnet)?;
-            log::info!("IPv6 routing configured (macOS/pf): {} via {}", v6_subnet, self.wan_interface);
+            log::info!(
+                "IPv6 routing configured (macOS/pf): {} via {}",
+                v6_subnet,
+                self.wan_interface
+            );
         }
 
         Ok(())
@@ -150,7 +147,11 @@ impl RoutingManager {
             self.enable_ipv6_forwarding_windows()?;
             let v6_subnet = self.calculate_ipv6_subnet();
             self.setup_windows_nat_v6(&v6_subnet)?;
-            log::info!("IPv6 routing configured (Windows/NetNat): {} via {}", v6_subnet, self.wan_interface);
+            log::info!(
+                "IPv6 routing configured (Windows/NetNat): {} via {}",
+                v6_subnet,
+                self.wan_interface
+            );
         }
 
         Ok(())
@@ -174,8 +175,18 @@ impl RoutingManager {
 
         // Remove NAT rule (idempotent — errors are expected if rules don't exist)
         let _ = Command::new("iptables")
-            .args(["-t", "nat", "-D", "POSTROUTING", "-s", &subnet,
-                   "-o", &self.wan_interface, "-j", "MASQUERADE"])
+            .args([
+                "-t",
+                "nat",
+                "-D",
+                "POSTROUTING",
+                "-s",
+                &subnet,
+                "-o",
+                &self.wan_interface,
+                "-j",
+                "MASQUERADE",
+            ])
             .status();
         let _ = Command::new("iptables")
             .args(["-D", "FORWARD", "-i", &self.tun_name, "-j", "ACCEPT"])
@@ -184,16 +195,38 @@ impl RoutingManager {
             .args(["-D", "FORWARD", "-o", &self.tun_name, "-j", "ACCEPT"])
             .status();
         let _ = Command::new("iptables")
-            .args(["-D", "FORWARD", "-i", &self.wan_interface, "-o", &self.tun_name,
-                   "-m", "state", "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT"])
+            .args([
+                "-D",
+                "FORWARD",
+                "-i",
+                &self.wan_interface,
+                "-o",
+                &self.tun_name,
+                "-m",
+                "state",
+                "--state",
+                "ESTABLISHED,RELATED",
+                "-j",
+                "ACCEPT",
+            ])
             .status();
 
         // IPv6 stale cleanup
         if self.is_ipv6_enabled() {
             let v6_subnet = self.calculate_ipv6_subnet();
             let _ = Command::new("ip6tables")
-                .args(["-t", "nat", "-D", "POSTROUTING", "-s", &v6_subnet,
-                       "-o", &self.wan_interface, "-j", "MASQUERADE"])
+                .args([
+                    "-t",
+                    "nat",
+                    "-D",
+                    "POSTROUTING",
+                    "-s",
+                    &v6_subnet,
+                    "-o",
+                    &self.wan_interface,
+                    "-j",
+                    "MASQUERADE",
+                ])
                 .status();
             let _ = Command::new("ip6tables")
                 .args(["-D", "FORWARD", "-i", &self.tun_name, "-j", "ACCEPT"])
@@ -209,9 +242,7 @@ impl RoutingManager {
     #[cfg(target_os = "macos")]
     pub fn cleanup_stale(&self) {
         log::info!("Cleaning up stale pf anchor rules");
-        let _ = Command::new("pfctl")
-            .args(["-a", Self::MACOS_PF_ANCHOR, "-F", "all"])
-            .status();
+        let _ = Command::new("pfctl").args(["-a", Self::MACOS_PF_ANCHOR, "-F", "all"]).status();
         log::info!("Stale routing cleanup complete");
     }
 
@@ -222,7 +253,8 @@ impl RoutingManager {
             "$ErrorActionPreference='SilentlyContinue'; \
              Remove-NetNat -Name '{}' -Confirm:$false; \
              Remove-NetNat -Name '{}_v6' -Confirm:$false",
-            Self::WINDOWS_NAT_NAME, Self::WINDOWS_NAT_NAME
+            Self::WINDOWS_NAT_NAME,
+            Self::WINDOWS_NAT_NAME
         );
         let _ = self.run_powershell(&script, "cleanup_stale");
         log::info!("Stale routing cleanup complete");
@@ -581,9 +613,7 @@ impl RoutingManager {
             log::debug!("ip addr add {} dev {} (may already exist)", addr, self.tun_name);
         }
         // Bring the interface up
-        let _ = Command::new("ip")
-            .args(["link", "set", "up", "dev", &self.tun_name])
-            .status();
+        let _ = Command::new("ip").args(["link", "set", "up", "dev", &self.tun_name]).status();
         log::debug!("TUN IPv4 address assigned: {} on {}", addr, self.tun_name);
         Ok(())
     }
@@ -611,7 +641,12 @@ impl RoutingManager {
     fn assign_tun_address_macos(&self) -> Result<(), RoutingError> {
         let mask_bits = self.netmask.octets().iter().map(|b| b.count_ones()).sum::<u32>();
         let _ = Command::new("ifconfig")
-            .args([&self.tun_name, &self.server_ip.to_string(), "netmask", &self.netmask.to_string()])
+            .args([
+                &self.tun_name,
+                &self.server_ip.to_string(),
+                "netmask",
+                &self.netmask.to_string(),
+            ])
             .status();
         log::debug!("TUN IPv4 address assigned: {} on {}", self.server_ip, self.tun_name);
         let _ = mask_bits; // suppress unused warning
@@ -623,7 +658,13 @@ impl RoutingManager {
     fn assign_tun_address_v6_macos(&self) -> Result<(), RoutingError> {
         if let Some(ipv6) = self.server_ipv6 {
             let _ = Command::new("ifconfig")
-                .args([&self.tun_name, "inet6", &ipv6.to_string(), "prefixlen", &self.ipv6_prefix_len.to_string()])
+                .args([
+                    &self.tun_name,
+                    "inet6",
+                    &ipv6.to_string(),
+                    "prefixlen",
+                    &self.ipv6_prefix_len.to_string(),
+                ])
                 .status();
             log::debug!("TUN IPv6 address assigned: {} on {}", ipv6, self.tun_name);
         }
@@ -666,10 +707,16 @@ impl RoutingManager {
         // MASQUERADE for outbound IPv6 traffic
         let status = Command::new("ip6tables")
             .args([
-                "-t", "nat", "-A", "POSTROUTING",
-                "-s", subnet,
-                "-o", &self.wan_interface,
-                "-j", "MASQUERADE",
+                "-t",
+                "nat",
+                "-A",
+                "POSTROUTING",
+                "-s",
+                subnet,
+                "-o",
+                &self.wan_interface,
+                "-j",
+                "MASQUERADE",
             ])
             .status()
             .map_err(|e| RoutingError::CommandFailed(e.to_string()))?;
@@ -681,10 +728,14 @@ impl RoutingManager {
         // Allow forwarding from TUN to WAN (IPv6)
         let status = Command::new("ip6tables")
             .args([
-                "-A", "FORWARD",
-                "-i", &self.tun_name,
-                "-o", &self.wan_interface,
-                "-j", "ACCEPT",
+                "-A",
+                "FORWARD",
+                "-i",
+                &self.tun_name,
+                "-o",
+                &self.wan_interface,
+                "-j",
+                "ACCEPT",
             ])
             .status()
             .map_err(|e| RoutingError::CommandFailed(e.to_string()))?;
@@ -696,17 +747,26 @@ impl RoutingManager {
         // Allow established connections back
         let status = Command::new("ip6tables")
             .args([
-                "-A", "FORWARD",
-                "-i", &self.wan_interface,
-                "-o", &self.tun_name,
-                "-m", "state", "--state", "RELATED,ESTABLISHED",
-                "-j", "ACCEPT",
+                "-A",
+                "FORWARD",
+                "-i",
+                &self.wan_interface,
+                "-o",
+                &self.tun_name,
+                "-m",
+                "state",
+                "--state",
+                "RELATED,ESTABLISHED",
+                "-j",
+                "ACCEPT",
             ])
             .status()
             .map_err(|e| RoutingError::CommandFailed(e.to_string()))?;
 
         if !status.success() {
-            return Err(RoutingError::CommandFailed("ip6tables ESTABLISHED rule failed".to_string()));
+            return Err(RoutingError::CommandFailed(
+                "ip6tables ESTABLISHED rule failed".to_string(),
+            ));
         }
 
         Ok(())
@@ -727,9 +787,13 @@ impl RoutingManager {
             "nat on {} inet6 from {} to any -> ({})\n\
              pass quick on {} inet6 from {} to any keep state\n\
              pass quick on {} inet6 from any to {} keep state\n",
-            self.wan_interface, subnet, self.wan_interface,
-            self.tun_name, subnet,
-            self.wan_interface, subnet
+            self.wan_interface,
+            subnet,
+            self.wan_interface,
+            self.tun_name,
+            subnet,
+            self.wan_interface,
+            subnet
         )
     }
 

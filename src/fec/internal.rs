@@ -958,7 +958,9 @@ impl InterleavedDecoder {
         let block_k = (k / actual_depth).max(1);
 
         let blocks = (0..actual_depth)
-            .map(|_| LazyDecoder::new_with_depth(mode, block_k, Arc::clone(&pool), policy, actual_depth))
+            .map(|_| {
+                LazyDecoder::new_with_depth(mode, block_k, Arc::clone(&pool), policy, actual_depth)
+            })
             .collect();
 
         Self { blocks, depth: actual_depth }

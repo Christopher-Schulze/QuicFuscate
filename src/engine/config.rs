@@ -976,11 +976,7 @@ pub struct SecurityConfig {
 
 impl Default for SecurityConfig {
     fn default() -> Self {
-        Self {
-            kill_switch: false,
-            heartbeat_timeout_ms: 30_000,
-            cleanup_firewall_on_start: false,
-        }
+        Self { kill_switch: false, heartbeat_timeout_ms: 30_000, cleanup_firewall_on_start: false }
     }
 }
 

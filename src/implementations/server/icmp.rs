@@ -134,7 +134,9 @@ pub fn build_icmp_unreachable(
     pkt[20] = icmp_type_val;
     pkt[21] = code;
     pkt[22..24].copy_from_slice(&0u16.to_be_bytes()); // checksum (compute later)
-    if icmp_type_val == icmp_type::DESTINATION_UNREACHABLE && code == icmp_code::FRAGMENTATION_NEEDED {
+    if icmp_type_val == icmp_type::DESTINATION_UNREACHABLE
+        && code == icmp_code::FRAGMENTATION_NEEDED
+    {
         // Packet Too Big: next-hop MTU in bytes 24-25, unused in 26-27
         let mtu = next_hop_mtu.unwrap_or(1200);
         pkt[24..26].copy_from_slice(&mtu.to_be_bytes());

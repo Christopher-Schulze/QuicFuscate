@@ -935,14 +935,12 @@ impl ServerHostResources {
                         break;
                     }
                     Err(e) => {
-                        log::warn!(
-                            "Routing teardown attempt {}/3 failed: {:?}",
-                            attempt,
-                            e
-                        );
+                        log::warn!("Routing teardown attempt {}/3 failed: {:?}", attempt, e);
                         last_err = Some(e);
                         if attempt < 3 {
-                            std::thread::sleep(std::time::Duration::from_millis(100 * attempt as u64));
+                            std::thread::sleep(std::time::Duration::from_millis(
+                                100 * attempt as u64,
+                            ));
                         }
                     }
                 }
@@ -1009,7 +1007,13 @@ impl SharedServerDomain {
         let mut pool = self.ip_pool.lock();
         let mut v6_pool = self.ipv6_pool.as_ref().map(|p| p.lock());
         let mut limiter = self.connection_limiter.lock();
-        remove_session_from_domain(&mut sessions, &mut pool, v6_pool.as_deref_mut(), &mut limiter, session_id)
+        remove_session_from_domain(
+            &mut sessions,
+            &mut pool,
+            v6_pool.as_deref_mut(),
+            &mut limiter,
+            session_id,
+        )
     }
 
     fn reap_expired(&self) -> Vec<Session> {
@@ -1017,7 +1021,12 @@ impl SharedServerDomain {
         let mut pool = self.ip_pool.lock();
         let mut v6_pool = self.ipv6_pool.as_ref().map(|p| p.lock());
         let mut limiter = self.connection_limiter.lock();
-        reap_expired_sessions_from_domain(&mut sessions, &mut pool, v6_pool.as_deref_mut(), &mut limiter)
+        reap_expired_sessions_from_domain(
+            &mut sessions,
+            &mut pool,
+            v6_pool.as_deref_mut(),
+            &mut limiter,
+        )
     }
 
     #[cfg(feature = "rate_limiter")]
@@ -2394,9 +2403,13 @@ fn reap_expired_sessions_from_domain(
     let expired_ids = collect_expired_session_ids(sessions);
     let mut removed = Vec::with_capacity(expired_ids.len());
     for session_id in expired_ids {
-        if let Some(session) =
-            remove_session_from_domain(sessions, ip_pool, ipv6_pool.as_deref_mut(), connection_limiter, session_id)
-        {
+        if let Some(session) = remove_session_from_domain(
+            sessions,
+            ip_pool,
+            ipv6_pool.as_deref_mut(),
+            connection_limiter,
+            session_id,
+        ) {
             removed.push(session);
         }
     }
@@ -4573,10 +4586,7 @@ mod tests {
         assert_eq!(config.server_ip, Ipv4Addr::new(10, 8, 0, 1));
         // IPv6 defaults
         assert!(config.ipv6_server_ip.is_some());
-        assert_eq!(
-            config.ipv6_server_ip.unwrap(),
-            Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0x0001)
-        );
+        assert_eq!(config.ipv6_server_ip.unwrap(), Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0x0001));
         assert_eq!(config.ipv6_prefix_len, 64);
     }
 
@@ -4585,7 +4595,7 @@ mod tests {
         // Construct a minimal IPv6 packet header (40 bytes)
         let mut pkt = [0u8; 40];
         pkt[0] = 0x60; // version 6
-        // Destination at offset 24-39: fd00::1
+                       // Destination at offset 24-39: fd00::1
         pkt[24] = 0xfd;
         pkt[39] = 0x01;
         let dest = parse_ipv6_dest(&pkt).unwrap();
@@ -5535,10 +5545,7 @@ mtu = 500
     fn test_accept_session_dual_stack_allocates_ipv6() {
         use std::net::SocketAddr;
         let mut sessions = SessionManager::new(10);
-        let mut ip_pool = IpPool::new(
-            Ipv4Addr::new(10, 8, 0, 2),
-            Ipv4Addr::new(10, 8, 0, 10),
-        );
+        let mut ip_pool = IpPool::new(Ipv4Addr::new(10, 8, 0, 2), Ipv4Addr::new(10, 8, 0, 10));
         let mut v6_pool = Ipv6Pool::new(
             Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0x0002),
             Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0x0005),
@@ -5562,20 +5569,14 @@ mtu = 500
         // Verify the session has an IPv6 address
         let session = sessions.get(session_id).unwrap();
         assert!(session.client_ipv6().is_some());
-        assert_eq!(
-            session.client_ipv6().unwrap(),
-            Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0x0002)
-        );
+        assert_eq!(session.client_ipv6().unwrap(), Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0x0002));
     }
 
     #[test]
     fn test_accept_session_no_ipv6_pool_when_none() {
         use std::net::SocketAddr;
         let mut sessions = SessionManager::new(10);
-        let mut ip_pool = IpPool::new(
-            Ipv4Addr::new(10, 8, 0, 2),
-            Ipv4Addr::new(10, 8, 0, 10),
-        );
+        let mut ip_pool = IpPool::new(Ipv4Addr::new(10, 8, 0, 2), Ipv4Addr::new(10, 8, 0, 10));
         let mut limiter = ConnectionLimiter::new(10);
         let remote: SocketAddr = "1.2.3.4:1234".parse().unwrap();
 
@@ -5600,10 +5601,7 @@ mtu = 500
     fn test_remove_session_releases_ipv6() {
         use std::net::SocketAddr;
         let mut sessions = SessionManager::new(10);
-        let mut ip_pool = IpPool::new(
-            Ipv4Addr::new(10, 8, 0, 2),
-            Ipv4Addr::new(10, 8, 0, 10),
-        );
+        let mut ip_pool = IpPool::new(Ipv4Addr::new(10, 8, 0, 2), Ipv4Addr::new(10, 8, 0, 10));
         let mut v6_pool = Ipv6Pool::new(
             Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0x0002),
             Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0x0003),
@@ -5620,7 +5618,8 @@ mtu = 500
             remote,
             10,
             30,
-        ).unwrap();
+        )
+        .unwrap();
 
         // IPv6 pool should have 1 allocated
         assert_eq!(v6_pool.allocated_count(), 1);

@@ -1911,7 +1911,12 @@ impl Decoder8 {
         Self::new_with_depth(k, pool, policy, 1)
     }
 
-    fn new_with_depth(k: usize, pool: Arc<MemoryPool>, policy: &FecRuntimePolicy, depth: usize) -> Self {
+    fn new_with_depth(
+        k: usize,
+        pool: Arc<MemoryPool>,
+        policy: &FecRuntimePolicy,
+        depth: usize,
+    ) -> Self {
         Self {
             k,
             mem_pool: pool,

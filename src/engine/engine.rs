@@ -786,9 +786,8 @@ impl QuicFuscateEngine {
                 }
             }
             let ks = Arc::new(KillSwitch::new());
-            ks.enable().map_err(|e| {
-                EngineError::Internal(format!("Kill switch enable failed: {}", e))
-            })?;
+            ks.enable()
+                .map_err(|e| EngineError::Internal(format!("Kill switch enable failed: {}", e)))?;
             self.kill_switch = Some(ks);
             log::info!("Kill switch enabled (firewall blocking until VPN connects)");
         }

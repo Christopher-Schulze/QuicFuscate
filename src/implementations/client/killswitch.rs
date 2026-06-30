@@ -182,9 +182,7 @@ impl LinuxKillSwitch {
         let rules_str = String::from_utf8_lossy(&output_rules.stdout);
         let jump_rule = format!("-j {}", KS_CHAIN);
         if !rules_str.contains(&jump_rule) {
-            let _ = Command::new("iptables")
-                .args(["-A", "OUTPUT", "-j", KS_CHAIN])
-                .status();
+            let _ = Command::new("iptables").args(["-A", "OUTPUT", "-j", KS_CHAIN]).status();
         }
         Ok(())
     }
@@ -310,19 +308,25 @@ impl LinuxKillSwitch {
         let chain_flushed = match Command::new("iptables").args(["-F", KS_CHAIN]).status() {
             Ok(status) if status.success() => true,
             Ok(status) => {
-                log::debug!("cleanup_stale: flush {} returned status {} (chain may not exist)", KS_CHAIN, status);
+                log::debug!(
+                    "cleanup_stale: flush {} returned status {} (chain may not exist)",
+                    KS_CHAIN,
+                    status
+                );
                 false
             }
             Err(e) => {
-                log::debug!("cleanup_stale: flush {} failed: {} (chain may not exist)", KS_CHAIN, e);
+                log::debug!(
+                    "cleanup_stale: flush {} failed: {} (chain may not exist)",
+                    KS_CHAIN,
+                    e
+                );
                 false
             }
         };
 
         // Remove the jump rule from OUTPUT (idempotent)
-        let _ = Command::new("iptables")
-            .args(["-D", "OUTPUT", "-j", KS_CHAIN])
-            .status();
+        let _ = Command::new("iptables").args(["-D", "OUTPUT", "-j", KS_CHAIN]).status();
 
         // Delete the chain itself (only succeeds if empty and no references)
         let _ = Command::new("iptables").args(["-X", KS_CHAIN]).status();
@@ -497,9 +501,7 @@ impl MacOSKillSwitch {
     fn cleanup_stale() -> Result<(), KillSwitchError> {
         use std::process::Command;
         // Flush the kill switch anchor unconditionally
-        match Command::new("pfctl")
-            .args(["-a", "com.quicfuscate.killswitch", "-F", "all"])
-            .status()
+        match Command::new("pfctl").args(["-a", "com.quicfuscate.killswitch", "-F", "all"]).status()
         {
             Ok(status) if status.success() => {
                 log::info!("Stale pf anchor rules flushed");

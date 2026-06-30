@@ -78,11 +78,7 @@ pub struct Ipv6Pool {
 impl Ipv6Pool {
     /// Create a new IPv6 address pool.
     pub fn new(start: Ipv6Addr, end: Ipv6Addr) -> Self {
-        Self {
-            start: u128::from(start),
-            end: u128::from(end),
-            allocated: HashSet::new(),
-        }
+        Self { start: u128::from(start), end: u128::from(end), allocated: HashSet::new() }
     }
 
     /// Allocate the next available IPv6 address.
