@@ -65,6 +65,8 @@ production hot-path callers reuse a caller-owned output buffer:
 - `cargo clippy --lib -- -D warnings`
 - `cargo test --lib`
 - `cargo bench --features benches --bench fec_pipeline -- fec_lazy_fast_path --sample-size 10 --warm-up-time 0.5 --measurement-time 1`
+- Broderick: `cargo test --lib -- test_on_send_into_zero_mode_reuses_output_allocation test_on_send_into_matches_on_send_first_packet test_zero_mode_receive_preserves_unique_payload_owner`
+- Broderick: `cargo bench --features benches --bench fec_pipeline -- fec_lazy_fast_path --sample-size 10 --warm-up-time 0.5 --measurement-time 1`
 
 Local benchmark result:
 
@@ -73,6 +75,12 @@ Local benchmark result:
 - `fec_lazy_fast_path/zero_mode_passthrough_reuse`: `201.89 ns` median in the
   first local run with 10 samples; expected to converge closely with the wrapper
   because the wrapper now delegates to `on_send_into`.
+- `fec_lazy_fast_path/normal_mode_no_loss`: no statistically significant change.
+
+Broderick benchmark result:
+
+- `fec_lazy_fast_path/zero_mode_passthrough`: `305.19 ns` median.
+- `fec_lazy_fast_path/zero_mode_passthrough_reuse`: `286.15 ns` median.
 - `fec_lazy_fast_path/normal_mode_no_loss`: no statistically significant change.
 
 ## Completion Criteria
