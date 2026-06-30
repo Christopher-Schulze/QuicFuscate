@@ -174,8 +174,18 @@ pub mod cid {
     }
 }
 
-/// Cryptographically secure random number generation for transport operations.
+/// Random number generation for transport operations.
+///
+/// The `rand_*` APIs are cryptographically secure and remain mandatory for
+/// security-sensitive transport values. The `fast_rand_*` APIs are explicitly
+/// non-cryptographic and only valid for hot-path heuristics such as padding and
+/// jitter decisions.
 pub mod rand {
+    use std::cell::Cell;
+
+    thread_local! {
+        static FAST_RNG_STATE: Cell<u64> = Cell::new(seed_fast_rng());
+    }
 
     /// Generate random bytes
     pub fn rand_bytes(buf: &mut [u8]) {
@@ -207,6 +217,59 @@ pub mod rand {
         let mut r = rand_u64();
         while r >= end_of_last_chunk {
             r = rand_u64();
+        }
+        r / chunk_size
+    }
+
+    #[inline(always)]
+    fn seed_fast_rng() -> u64 {
+        let seed = rand_u64();
+        if seed == 0 {
+            0x9e37_79b9_7f4a_7c15
+        } else {
+            seed
+        }
+    }
+
+    #[inline(always)]
+    fn splitmix64_step(state: u64) -> u64 {
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    /// Generate fast non-cryptographic random `u64`.
+    ///
+    /// Use only for per-packet heuristics such as timing jitter, cover traffic,
+    /// and padding decisions. Security-sensitive transport values such as
+    /// connection IDs, path challenges, keys, and nonces must keep using
+    /// `rand_bytes`, `rand_u8`, `rand_u64`, or `rand_u64_uniform`.
+    #[inline(always)]
+    pub fn fast_rand_u64() -> u64 {
+        FAST_RNG_STATE.with(|state| {
+            let next = state.get().wrapping_add(0x9e37_79b9_7f4a_7c15);
+            state.set(next);
+            splitmix64_step(next)
+        })
+    }
+
+    /// Generate fast non-cryptographic random `u64` uniformly in `[0, max)`.
+    ///
+    /// This avoids repeated OS RNG calls in hot-path stealth heuristics while
+    /// preserving rejection-sampling uniformity. Not for security-sensitive
+    /// randomness.
+    #[inline(always)]
+    pub fn fast_rand_u64_uniform(max: u64) -> u64 {
+        if max == 0 {
+            return 0;
+        }
+        let chunk_size = u64::MAX / max;
+        let end_of_last_chunk = chunk_size * max;
+
+        let mut r = fast_rand_u64();
+        while r >= end_of_last_chunk {
+            r = fast_rand_u64();
         }
         r / chunk_size
     }
@@ -822,6 +885,7 @@ pub mod varint {
 #[cfg(test)]
 mod tests {
     use super::pnspace::PktNumSpace;
+    use super::rand;
     use super::ranges::RangeSet;
     use super::varint;
 
@@ -898,6 +962,33 @@ mod tests {
         rs.push_item(7);
         let ranges: Vec<_> = rs.iter().collect();
         assert_eq!(ranges, vec![5..8]);
+    }
+
+    #[test]
+    fn fast_rand_uniform_zero_max_returns_zero() {
+        assert_eq!(rand::fast_rand_u64_uniform(0), 0);
+    }
+
+    #[test]
+    fn fast_rand_uniform_stays_below_max() {
+        for max in [1, 2, 3, 7, 64, 100, 1024, 4096] {
+            for _ in 0..256 {
+                assert!(rand::fast_rand_u64_uniform(max) < max);
+            }
+        }
+    }
+
+    #[test]
+    fn fast_rand_u64_produces_variation() {
+        let first = rand::fast_rand_u64();
+        let mut changed = false;
+        for _ in 0..16 {
+            if rand::fast_rand_u64() != first {
+                changed = true;
+                break;
+            }
+        }
+        assert!(changed, "fast transport RNG must not be a constant stream");
     }
 
     #[test]

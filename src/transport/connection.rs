@@ -2682,7 +2682,7 @@ impl Connection {
         // stealth escalation from TODO-416.
         let padding_rate = self.config.stealth_padding_rate;
         if padding_rate < 100 {
-            let roll = crate::transport::rand::rand_u64_uniform(100) as u8;
+            let roll = crate::transport::rand::fast_rand_u64_uniform(100) as u8;
             if roll >= padding_rate {
                 return 0;
             }
@@ -2693,7 +2693,8 @@ impl Connection {
         }
         match self.config.stealth_padding_strategy {
             // 1 = Random [0..=max]
-            1 => crate::transport::rand::rand_u64_uniform((max as u64).saturating_add(1)) as usize,
+            1 => crate::transport::rand::fast_rand_u64_uniform((max as u64).saturating_add(1))
+                as usize,
             // 2 = Fixed (always pad up to max budget)
             2 => max,
             // 3 = Adaptive (pad up to next 64B boundary, capped by max)
@@ -2715,9 +2716,9 @@ impl Connection {
                     _ => (4usize, 2), // default (Chromium/Windows)
                 };
                 let bucket = (max / bucket_div).max(1) as u64;
-                let mut val = crate::transport::rand::rand_u64_uniform(bucket + 1);
+                let mut val = crate::transport::rand::fast_rand_u64_uniform(bucket + 1);
                 for _ in 1..samples {
-                    let r = crate::transport::rand::rand_u64_uniform(bucket + 1);
+                    let r = crate::transport::rand::fast_rand_u64_uniform(bucket + 1);
                     if r < val {
                         val = r;
                     }
@@ -3206,7 +3207,7 @@ impl Connection {
         } else {
             ((max_jitter_us * timing_rate as u32) / 100).max(1)
         };
-        let jitter_us = crate::transport::rand::rand_u64_uniform(scaled_max as u64 + 1);
+        let jitter_us = crate::transport::rand::fast_rand_u64_uniform(scaled_max as u64 + 1);
         Some(Duration::from_micros(jitter_us))
     }
 
