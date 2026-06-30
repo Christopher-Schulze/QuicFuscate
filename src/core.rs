@@ -85,6 +85,8 @@ pub struct QuicFuscateConnection {
     // The outgoing buffer now holds fully formed FEC packets, ready for direct sending.
     // This eliminates the serialization overhead entirely.
     outgoing_fec_packets: VecDeque<FecPacket>,
+    // Reused FEC emission scratch to avoid allocating a Vec for every packet on the send path.
+    fec_send_scratch: Vec<FecPacket>,
     h3_conn: Option<crate::transport::h3::Connection>,
     last_telemetry: std::time::Instant,
     // Observer for transport telemetry -> FEC/ACK policy coupling.
@@ -296,6 +298,7 @@ impl QuicFuscateConnection {
             stats: ConnectionStats::default(),
             packet_id_counter: 0,
             outgoing_fec_packets: VecDeque::new(),
+            fec_send_scratch: Vec::with_capacity(1),
             h3_conn: None,
             last_telemetry: std::time::Instant::now(),
             transport_observer: obs.clone(),
@@ -1141,8 +1144,9 @@ impl QuicFuscateConnection {
         self.packet_id_counter += 1;
 
         // Pass to FEC encoder to get original + repair packets.
-        // The encoder now directly populates the outgoing queue.
-        for pkt in self.fec.on_send(fec_packet) {
+        // Reuse the scratch Vec so the common Zero/no-repair path stays allocation-free.
+        self.fec.on_send_into(fec_packet, &mut self.fec_send_scratch);
+        for pkt in self.fec_send_scratch.drain(..) {
             self.outgoing_fec_packets.push_back(pkt);
         }
 

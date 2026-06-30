@@ -2,7 +2,7 @@
 //
 // Unlike bench_fec_matrix_mul (which measures only GF(256) matrix multiply),
 // these benchmarks measure the real AdaptiveFec hot paths:
-//   - on_send() pipeline (ingest → window fill → repair generation → output)
+//   - on_send()/on_send_into() pipeline (ingest -> window fill -> repair generation -> output)
 //   - on_receive() pipeline (ingest → decoder → recovery → output)
 //   - Mode transition overhead (cross-fade cost)
 //   - Streaming repair emission
@@ -260,6 +260,25 @@ fn bench_fec_lazy_fast_path(c: &mut Criterion) {
             let output = fec.on_send(pkt);
             // In Zero mode, output is just the systematic packet
             for p in output {
+                let _ = fec.on_receive(p);
+            }
+            id = id.wrapping_add(1);
+            black_box(&fec);
+        });
+    });
+
+    // Zero mode with production-style reusable send output scratch.
+    group.bench_function("zero_mode_passthrough_reuse", |b| {
+        let pool = global_pool();
+        let config = config_with_mode(FecMode::Zero);
+        let mut fec = AdaptiveFec::new(config);
+        let mut output = Vec::with_capacity(1);
+        let mut id = 0u64;
+
+        b.iter(|| {
+            let pkt = mk_src_packet(id, 1400, &pool);
+            fec.on_send_into(pkt, &mut output);
+            for p in output.drain(..) {
                 let _ = fec.on_receive(p);
             }
             id = id.wrapping_add(1);

@@ -3493,22 +3493,36 @@ impl AdaptiveFec {
         }
     }
 
-    /// **SEAMLESS** Process outgoing packet through FEC encoder with smooth mode transitions
+    /// **SEAMLESS** Process outgoing packet through FEC encoder with smooth mode transitions.
+    ///
+    /// Compatibility wrapper for callers that need an owned output vector. Hot-path callers
+    /// should prefer [`AdaptiveFec::on_send_into`] and reuse their output allocation.
     pub fn on_send(&mut self, packet: FecPacket) -> Vec<FecPacket> {
-        // Pre-allocate for the common case: 1 systematic packet (Zero mode or
-        // no repair generation). Avoids the implicit grow on first push.
         let mut output = Vec::with_capacity(1);
+        self.on_send_into(packet, &mut output);
+        output
+    }
+
+    /// Process an outgoing packet through the FEC encoder, writing emitted packets into
+    /// `output` without allocating a fresh vector on every send.
+    ///
+    /// `output` is cleared first, but its allocation is retained. This keeps the core send
+    /// path allocation-free for the common Zero/no-repair case while preserving the exact
+    /// packet emission semantics of [`AdaptiveFec::on_send`].
+    pub fn on_send_into(&mut self, packet: FecPacket, output: &mut Vec<FecPacket>) {
+        output.clear();
 
         // **ZERO-CPU FAST PATH**: Ultra-optimized pass-through
         if self.current_mode() == FecMode::Zero && self.transition_left == 0 {
             // Absolute zero overhead: direct return without any processing
             output.push(packet);
-            return output;
+            return;
         }
 
         // **TRANSITION HANDLING**: Blend old and new modes during cross-fade
         if self.transition_left > 0 {
-            return self.handle_transition_packet(packet);
+            self.handle_transition_packet_into(packet, output);
+            return;
         }
         // Normal path: forward systematic and feed encoder
         output.push(packet.clone());
@@ -3557,7 +3571,7 @@ impl AdaptiveFec {
         // Telemetry: queue length, uniqueness and order depth
         crate::telemetry::FEC_EMITTED_QUEUE
             .store(output.len() as u64, std::sync::atomic::Ordering::Relaxed);
-        for p in &output {
+        for p in output.iter() {
             self.emitted_ids.insert(p.id);
             self.emitted_order.push_back(p.id);
             if self.emitted_order.len() > 4096 {
@@ -3570,7 +3584,6 @@ impl AdaptiveFec {
             .store(self.emitted_order.len() as u64, std::sync::atomic::Ordering::Relaxed);
         crate::telemetry::FEC_EMITTED_UNIQUE
             .store(self.emitted_ids.len() as u64, std::sync::atomic::Ordering::Relaxed);
-        output
     }
 
     /// Process incoming FEC packet through the decoder and return any recovered packets.
@@ -3631,10 +3644,8 @@ impl AdaptiveFec {
     fn stream_repair_scratch_len(&self) -> usize {
         self.stream_repair_scratch.len()
     }
-    /// **SEAMLESS TRANSITION**: Handle packet during mode cross-fade
-    fn handle_transition_packet(&mut self, packet: FecPacket) -> Vec<FecPacket> {
-        let mut output = Vec::new();
-
+    /// Handle packet during mode cross-fade using a caller-owned output buffer.
+    fn handle_transition_packet_into(&mut self, packet: FecPacket, output: &mut Vec<FecPacket>) {
         // Update transition progress (smooth interpolation)
         self.transition_progress =
             1.0 - (self.transition_left as f32 / self.cross_fade_packets as f32);
@@ -3704,8 +3715,6 @@ impl AdaptiveFec {
             self.transition_progress = 1.0;
             self.transition_buffer.clear();
         }
-
-        output
     }
 
     fn stream_interval_target(&self, estimated_loss: f32) -> usize {

@@ -87,6 +87,7 @@ pub struct ClientSubsystems {
 pub struct FecCodec {
     inner: crate::fec::AdaptiveFec,
     packet_id: std::sync::atomic::AtomicU64,
+    output_scratch: Vec<crate::fec::FecPacket>,
 }
 
 impl FecCodec {
@@ -96,6 +97,7 @@ impl FecCodec {
         Self {
             inner: crate::fec::AdaptiveFec::new(fec_config),
             packet_id: std::sync::atomic::AtomicU64::new(0),
+            output_scratch: Vec::with_capacity(1),
         }
     }
 
@@ -107,7 +109,8 @@ impl FecCodec {
         block[..len].copy_from_slice(&data[..len]);
         let packet = crate::fec::FecPacket::new(id, Some(block), len, true, None, 0, mem_pool);
         let mut out = Vec::new();
-        for pkt in self.inner.on_send(packet) {
+        self.inner.on_send_into(packet, &mut self.output_scratch);
+        for pkt in self.output_scratch.drain(..) {
             if let Some(data) = pkt.payload_slice() {
                 out.push(data.to_vec());
             }

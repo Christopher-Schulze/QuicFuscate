@@ -56,6 +56,55 @@ fn test_zero_mode_receive_preserves_unique_payload_owner() {
 }
 
 #[test]
+fn test_on_send_into_zero_mode_reuses_output_allocation() {
+    let pool = crate::optimize::global_pool();
+    let mut fec = AdaptiveFec::new(FecConfig { initial_mode: FecMode::Zero, ..Default::default() });
+    let mut block = pool.alloc();
+    block[..16].copy_from_slice(b"zero-send-packet");
+    let pkt = FecPacket::new(11, Some(block), 16, true, None, 0, Arc::clone(&pool));
+    let mut output = Vec::with_capacity(8);
+    output.push(FecPacket::new(999, None, 0, true, None, 0, Arc::clone(&pool)));
+    let initial_capacity = output.capacity();
+
+    fec.on_send_into(pkt, &mut output);
+
+    assert_eq!(output.len(), 1);
+    assert_eq!(output[0].id, 11);
+    assert_eq!(
+        output.capacity(),
+        initial_capacity,
+        "on_send_into must clear and reuse the caller allocation"
+    );
+}
+
+#[test]
+fn test_on_send_into_matches_on_send_first_packet() {
+    let pool = crate::optimize::global_pool();
+    let config = FecConfig { initial_mode: FecMode::Normal, ..Default::default() };
+    let mut wrapper_fec = AdaptiveFec::new(config.clone());
+    let mut reusable_fec = AdaptiveFec::new(config);
+
+    let mut wrapper_block = pool.alloc();
+    wrapper_block[..15].copy_from_slice(b"normal-send-one");
+    let wrapper_pkt = FecPacket::new(12, Some(wrapper_block), 15, true, None, 0, Arc::clone(&pool));
+
+    let mut reusable_block = pool.alloc();
+    reusable_block[..15].copy_from_slice(b"normal-send-one");
+    let reusable_pkt =
+        FecPacket::new(12, Some(reusable_block), 15, true, None, 0, Arc::clone(&pool));
+
+    let wrapper_output = wrapper_fec.on_send(wrapper_pkt);
+    let mut reusable_output = Vec::with_capacity(1);
+    reusable_fec.on_send_into(reusable_pkt, &mut reusable_output);
+
+    assert_eq!(reusable_output.len(), wrapper_output.len());
+    assert_eq!(
+        reusable_output.iter().map(|pkt| pkt.id).collect::<Vec<_>>(),
+        wrapper_output.iter().map(|pkt| pkt.id).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn test_continuous_target_keeps_clean_link_zero_family() {
     let target = continuous_fec_target(0.0, true, false, 2048, 1024, 0, 0.0);
     assert_eq!(target.family, FecBackendFamily::Zero);

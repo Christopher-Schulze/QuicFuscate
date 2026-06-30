@@ -3549,6 +3549,7 @@ Notes:
 - Deterministic regression coverage exists for the remaining allowed ambient FEC controls: stream cadence stays stable per `AdaptiveFec` instance, `FecTransportObserver` stream policy snapshots per observer instance, decoder policy snapshots per `Decoder8` instance, and Fountain symbol size snapshots per Fountain encoder/decoder construction.
 - Lazy receive polling is gated by `recovery_needed()`: clean blocks return systematic packets without polling heavy recovery, tail-loss blocks with pending repairs still recover, and clean complete blocks prune their sequence tracker so long-running stable links do not retain unbounded FEC source IDs.
 - Zero-mode receive bypasses decoder retention entirely while no transition is active, preserving unique ownership of pooled payloads for in-place QUIC processing. Recovery-capable modes still retain decoder state as required for source reconstruction.
+- Send-side hot paths should call `AdaptiveFec::on_send_into(packet, output)` with a reused output buffer. `AdaptiveFec::on_send(packet)` remains a compatibility wrapper, but `QuicFuscateConnection` and the Engine `FecCodec` use per-instance scratch vectors so clean-link sends do not allocate a fresh FEC output vector per packet.
 
 Examples (manual tuning):
 
