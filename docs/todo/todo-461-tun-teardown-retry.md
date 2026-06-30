@@ -4,7 +4,7 @@ title: "TUN teardown retry, cleanup verification, and stale-rule cleanup on star
 severity: HIGH
 phase: "I"
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-06-30
 depends_on: []
 ---

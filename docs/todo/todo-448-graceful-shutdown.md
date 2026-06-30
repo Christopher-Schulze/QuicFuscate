@@ -4,7 +4,7 @@ title: Graceful shutdown (SIGTERM, SIGHUP reload, drain mode, systemd notify)
 severity: HIGH
 phase: "I"
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-06-30
 depends_on: ["TODO-446"]
 ---
