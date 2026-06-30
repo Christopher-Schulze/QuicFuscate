@@ -4,7 +4,7 @@ title: Mobile platform TUN (iOS NetworkExtension + Android VpnService) and mobil
 severity: HIGH
 phase: "I"
 priority: P1
-status: OPEN
+status: SCRAP
 created: 2026-06-30
 depends_on: []
 ---

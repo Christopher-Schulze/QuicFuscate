@@ -4,7 +4,7 @@ title: Server deploy and real-world profiling baseline
 severity: HIGH
 phase: E
 priority: P1
-status: SUPERSEDED
+status: DEFERRED
 superseded_by: TODO-418
 created: 2026-06-05
 ---

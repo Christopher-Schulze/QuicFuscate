@@ -17,9 +17,9 @@ Execution order: **Phase A (config + quick wins) -> Phase B (load path) -> Phase
 | TODO-393 | A | P1 | Reuse AEGIS cipher state across packets (avoid per-PN init) | **DONE** (state stored persistently in AEAD struct; `new` only on first packet, `reinit` reuses allocation thereafter; differential test proves reinit output byte-identical to fresh-new per packet across 64 counters) |
 | TODO-394 | B | P1 | Replace `sent_bytes_by_pn` full-scan ACK accounting | **DONE** |
 | TODO-395 | B | P1 | MORUS seal/open in-place on trait path (remove `to_vec` copies) | **DONE** (trait path already calls encrypt/decrypt_in_place_optimized directly on caller buffer; SIMD _inner fns write in-place via chunks_exact_mut; to_vec only in test/allocating convenience methods; added trait-path differential + forgery regression test) |
-| TODO-396 | B | P2 | Brain `apply_policy` lock coalescing and histogram reuse | **SUPERSEDED** by TODO-417 (Hot-Path-Lock-Elimination, DONE). Bundled into ArcSwap + lock-free 1-RTT path. |
-| TODO-397 | B | P2 | FEC encoder/decoder Mutex contention reduction | **SUPERSEDED** by TODO-417 (Hot-Path-Lock-Elimination, DONE). |
-| TODO-398 | B | P2 | CryptoContext RwLock scope reduction on 1-RTT hot path | **SUPERSEDED** by TODO-417 (Hot-Path-Lock-Elimination, DONE). ArcSwap lock-free 1-RTT path eliminates per-packet RwLock. |
+| TODO-396 | B | P2 | Brain `apply_policy` lock coalescing and histogram reuse | **DEFERRED** by TODO-417 (Hot-Path-Lock-Elimination, DONE). Bundled into ArcSwap + lock-free 1-RTT path. |
+| TODO-397 | B | P2 | FEC encoder/decoder Mutex contention reduction | **DEFERRED** by TODO-417 (Hot-Path-Lock-Elimination, DONE). |
+| TODO-398 | B | P2 | CryptoContext RwLock scope reduction on 1-RTT hot path | **DEFERRED** by TODO-417 (Hot-Path-Lock-Elimination, DONE). ArcSwap lock-free 1-RTT path eliminates per-packet RwLock. |
 | TODO-399 | C | P1 | Criterion bench: `Connection` 1-RTT send/recv loop | **DONE** (`connection_1rtt_send_recv` group in ci_regression.rs, 3 payload sizes, mock paired 1-RTT connections; wired into bench-ci-regression.sh + ci.yml benchmarks job with critcmp baseline) |
 | TODO-400 | C | P1 | Criterion bench: ACK processing under N in-flight PNs | **DONE** (`ack_sent_byte_accounting` group: 32/128/512/1024/2048/10240 inflight, ack_all/ack_half/ack_sparse variants; wired into ci_regression + ci.yml benchmarks job) |
 | TODO-401 | C | P2 | CI regression: stealth-on vs stealth-off same workload | **DONE** (`connection_1rtt_stealth_compare` group runs stealth_off/stealth_on on identical 1-RTT workload; ci.yml benchmarks job applies 15% warn / 30% error thresholds via bench-ci-regression.sh) |
@@ -30,10 +30,10 @@ Execution order: **Phase A (config + quick wins) -> Phase B (load path) -> Phase
 | TODO-406 | B | P2 | Consolidate dual stealth timing gates (core + connection) | **DONE** |
 | TODO-407 | B | P3 | Replace `Box<dyn Aead>` with enum dispatch in `CryptoContext` | **DONE** |
 | TODO-408 | B | P3 | Fix VNNI `aggregate_congestion` per-call heap allocations | **DONE** |
-| TODO-409 | A | P2 | Evaluate `stream_ring_buffer` as default for throughput profile | **SUPERSEDED** by TODO-414 (Streaming-FEC adaptive loop, DONE). Feature remains opt-in; adaptive loop determines when streaming mode warrants ring-buffer usage. |
+| TODO-409 | A | P2 | Evaluate `stream_ring_buffer` as default for throughput profile | **DEFERRED** by TODO-414 (Streaming-FEC adaptive loop, DONE). Feature remains opt-in; adaptive loop determines when streaming mode warrants ring-buffer usage. |
 | TODO-410 | B | P3 | Zstd compression streaming directly into memory pool | **DONE** |
 | TODO-411 | B | P3 | StrikeRegister 0-RTT anti-replay ring buffer + bloom front | **DONE** |
-| TODO-412 | E | P1 | Server deploy + real-world protocol profiling baseline | **SUPERSEDED** by TODO-418 (Profiling-Baseline + tc-netem-Setup, DONE). Real-world Oracle Cloud UDP path remains externally blocked (cloud-level Security List, not iptables); loopback + tc-netem baseline established as pragmatic substitute. Reopen only if Oracle Cloud UDP egress is unblocked. |
+| TODO-412 | E | P1 | Server deploy + real-world protocol profiling baseline | **DEFERRED** by TODO-418 (Profiling-Baseline + tc-netem-Setup, DONE). Real-world Oracle Cloud UDP path remains externally blocked (cloud-level Security List, not iptables); loopback + tc-netem baseline established as pragmatic substitute. Reopen only if Oracle Cloud UDP egress is unblocked. |
 
 Detail files: `docs/todo/todo-{id}-*.md` for each item above.
 
@@ -146,7 +146,7 @@ closes every gap to reach a complete, production-ready VPN protocol.
 | ID | Phase | Priority | Title | Status | Depends On |
 |----|-------|----------|-------|--------|------------|
 | TODO-442 | I | P1 | Windows TUN (Wintun integration) | **DONE** — `src/interface/wintun.rs`: Dynamic `wintun.dll` loading via `LoadLibraryA`/`GetProcAddress`, all 8 Wintun API functions resolved, `WintunDevice` with read/write/close, IP assignment via `netsh`, `unsafe impl Send+Sync`, non-Windows stub. `windows-sys` dep added. | — |
-| TODO-443 | I | P1 | Mobile platforms (iOS NetworkExtension, Android VpnService) | **SCRAPPED** — Mobile apps are out of scope. Desktop/server only. | — |
+| TODO-443 | I | P1 | Mobile platforms (iOS NetworkExtension, Android VpnService) | **SCRAP** — Mobile apps are out of scope. Desktop/server only. | — |
 | TODO-444 | I | P1 | nftables support (modern Linux firewall) | **DONE** — `src/firewall/mod.rs`: `FirewallBackend` enum (Iptables/Nftables), `detect_backend()` auto-detection, `nft_available()` check, `FirewallOps` trait, `NftablesKillSwitch` (inet table, default DROP), server routing nftables path. | TODO-429 |
 | TODO-445 | I | P1 | Per-client bandwidth limits & quotas | **DONE** — `src/implementations/server/bandwidth.rs`: `BandwidthLimiter` (token bucket, bytes/sec), `QuotaTracker` (cumulative quota per billing period), `PerClientBandwidthManager` (per-client limits + quotas), `BandwidthStats`, wired into `SessionManager`. | TODO-430 |
 | TODO-446 | I | P1 | Production logging (rotation, structured JSON, file output) | **DONE** — `src/logging.rs`: `SizeRotatingAppender` (100MB default, 5 files), JSON NDJSON format, syslog RFC 5424, `log::Log` trait impl, `LoggingConfig` with module-level overrides, file output with restrictive permissions. | — |

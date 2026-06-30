@@ -4,7 +4,7 @@ title: CryptoContext RwLock scope reduction
 severity: MEDIUM
 phase: B
 priority: P2
-status: SUPERSEDED
+status: DEFERRED
 superseded_by: TODO-417
 created: 2026-06-05
 ---

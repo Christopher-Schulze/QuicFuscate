@@ -746,16 +746,23 @@ impl GeoIpBlocker {
             None => return false,
         };
 
-        let country: maxminddb::geoip2::Country = match reader.lookup(ip) {
-            Ok(c) => c,
-            Err(maxminddb::MaxMindDBError::AddressNotFoundError(_)) => return false,
+        let lookup_result = match reader.lookup(ip) {
+            Ok(result) => result,
             Err(e) => {
                 log::debug!("GeoIP: lookup error for {ip}: {e}");
                 return false;
             }
         };
+        let country = match lookup_result.decode::<maxminddb::geoip2::Country>() {
+            Ok(Some(country)) => country,
+            Ok(None) => return false,
+            Err(e) => {
+                log::debug!("GeoIP: decode error for {ip}: {e}");
+                return false;
+            }
+        };
 
-        let iso_code = match country.country.and_then(|c| c.iso_code) {
+        let iso_code = match country.country.iso_code {
             Some(code) => code,
             None => return false,
         };

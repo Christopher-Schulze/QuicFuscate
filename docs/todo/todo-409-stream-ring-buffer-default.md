@@ -4,7 +4,7 @@ title: stream_ring_buffer throughput profile evaluation
 severity: MEDIUM
 phase: A
 priority: P2
-status: SUPERSEDED
+status: DEFERRED
 superseded_by: TODO-414
 created: 2026-06-05
 ---
