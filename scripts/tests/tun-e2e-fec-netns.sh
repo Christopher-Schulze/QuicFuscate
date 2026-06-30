@@ -27,10 +27,18 @@ CERT_DIR="$PROJECT_ROOT/config/local"
 LOSS_LEVELS="${LOSS_LEVELS:-0 5 10 25}"
 PING_COUNT="${PING_COUNT:-100}"
 PING_INTERVAL="${PING_INTERVAL:-0.1}"
+LOCK_FILE="${QF_E2E_LOCK_FILE:-/tmp/quicfuscate-tun-e2e.lock}"
+LOCK_TIMEOUT="${QF_E2E_LOCK_TIMEOUT:-300}"
 
 PASS=0
 FAIL=0
 SKIP=0
+
+exec 9>"$LOCK_FILE"
+if ! flock -w "$LOCK_TIMEOUT" 9; then
+    echo "FAIL: could not acquire TUN E2E lock $LOCK_FILE within ${LOCK_TIMEOUT}s" >&2
+    exit 2
+fi
 
 # --- ensure server cert valid for the client's hardcoded validation SNI ---
 cd "$CERT_DIR"

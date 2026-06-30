@@ -10,6 +10,8 @@ It is maintained as the current architecture and repository index, with a curate
 - Production VPN carrier: authenticated Core H3/MASQUE CONNECT-UDP carries TUN IP packets. QKey auth is presented through encrypted QUIC transport parameters and H3 `x-qf-auth`; the server gates MASQUE DATAGRAM-to-TUN delivery on the current authenticated state.
 - Standalone TUN routing: explicit `--tun-ip` / `--tun-netmask` on the server updates `ServerConfig.server_ip`, `server_netmask`, and the client IPv4 pool, keeping Linux namespace deployments and runtime session routing in the same subnet.
 - DNS-through-tunnel: server MASQUE/TUN uplink intercepts IPv4/IPv6 UDP/53 packets before generic TUN egress, resolves through configured server DNS upstreams, and queues rebuilt DNS responses over MASQUE downlink.
+- TUN downlink hotpath: after one MASQUE downlink packet is queued, the server flushes only the owning client connection rather than sweeping all connected clients.
+- MASQUE observability: CONNECT-UDP lifecycle and peer-flow registration stay at `info`; per-packet MASQUE TX/downlink TX lines are `debug` to avoid production log amplification.
 - Packet crypto wiring: Initial/Handshake use boxed AES-GCM compatibility keys; normal 0-RTT/1-RTT data-plane AEAD uses `DataAead` enum dispatch; Rustls packet-key integrations use the explicit dynamic packet wrapper arm.
 - Compression wiring: `src/compress.rs` writes safe-path zstd output directly into `MemoryPool` / body-pool blocks via `compress_to_buffer`; H3 compression semantics and `0x5A` / `0x5D` frame headers remain unchanged.
 - Client packet I/O is owned by `src/implementations/client/io_driver.rs` plus `src/core.rs`; `src/implementations/client/pipeline.rs` is not part of the production module graph.
@@ -42,6 +44,7 @@ Padding and timing rates flow through `StealthRuntimePolicy` → `StealthRuntime
 
 ### Linux Production E2E Evidence (2026-06-30)
 - `broderick` release build: `cargo build --release --bin quicfuscate` passes on Linux.
+- All TUN/netns E2E scripts acquire a shared `flock` guard (`/tmp/quicfuscate-tun-e2e.lock` by default) because they intentionally share namespace names, process cleanup, logs, admin sockets, and generated config/cert state.
 - `scripts/tests/tun-e2e-netns.sh`: real server/client netns TUN over authenticated H3/MASQUE, 5/5 ping, 0% tunnel loss.
 - `scripts/tests/tun-e2e-dns-leak-netns.sh`: DNS query through server TUN IP returns a response and tcpdump observes `raw_port_53_packets=0` on the client underlay.
 - `scripts/tests/tun-e2e-fec-netns.sh`: 0%, 5%, and 10% loss ping gates pass; optional iperf3 TCP-to-server-TUN probes skip unless real throughput is measured.

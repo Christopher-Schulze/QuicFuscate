@@ -26,6 +26,8 @@ CLIENT_UNDERLAY_IP="${CLIENT_UNDERLAY_IP:-10.10.0.2}"
 SERVER_TUN_IP="${SERVER_TUN_IP:-10.0.1.1}"
 CLIENT_TUN_IP="${CLIENT_TUN_IP:-10.0.1.2}"
 LISTEN_PORT="${LISTEN_PORT:-4433}"
+LOCK_FILE="${QF_E2E_LOCK_FILE:-/tmp/quicfuscate-tun-e2e.lock}"
+LOCK_TIMEOUT="${QF_E2E_LOCK_TIMEOUT:-300}"
 
 TCPDUMP_LOG="/tmp/qf-dns-leak-tcpdump.log"
 TCPDUMP_PCAP="/tmp/qf-dns-leak.pcap"
@@ -52,6 +54,13 @@ trap cleanup EXIT
 for cmd in ip tcpdump openssl python3 nc dig; do
   require_cmd "$cmd"
 done
+require_cmd flock
+
+exec 9>"$LOCK_FILE"
+if ! flock -w "$LOCK_TIMEOUT" 9; then
+  echo "could not acquire TUN E2E lock $LOCK_FILE within ${LOCK_TIMEOUT}s" >&2
+  exit 2
+fi
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "must run as root" >&2

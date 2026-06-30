@@ -1281,7 +1281,7 @@ impl QuicFuscateConnection {
                     if let Some(ref mut h3) = self.h3_conn {
                         match h3.send_masque_datagram(&mut self.conn, sid, data) {
                             Ok(()) => {
-                                info!("MASQUE TX: sid={} {}B", sid, data.len());
+                                debug!("MASQUE TX: sid={} {}B", sid, data.len());
                                 return Ok(());
                             }
                             Err(e) => {
@@ -1341,7 +1341,7 @@ impl QuicFuscateConnection {
         if let Some(sid) = self.masque_peer_stream_id {
             if let Some(ref mut h3) = self.h3_conn {
                 h3.send_masque_datagram(&mut self.conn, sid, payload)?;
-                info!("MASQUE downlink TX: sid={} {}B", sid, payload.len());
+                debug!("MASQUE downlink TX: sid={} {}B", sid, payload.len());
                 return Ok(());
             }
         }

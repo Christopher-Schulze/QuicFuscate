@@ -514,6 +514,7 @@ Notes:
 - * TLS Cover provider is enabled by default across modes and can be disabled with `QUICFUSCATE_TLS_COVER=0`. Runtime cover performance mode is now driven by the active stealth mode profile rather than relying on ENV-only shadow state. `StealthConfig.use_tls_cover` (TOML alias: `use_tls_cover_extras`) only controls TLS Cover extras (ticket manager and cert emulator).
 - Risk/Tradeoff: domain fronting behavior depends on current upstream provider policy and regional filtering rules. It is not a safe default cover signal on modern CDNs.
 - Core H3/MASQUE is the production VPN/TUN carrier. The compatibility MASQUE manager inside `stealth/` is not the canonical data-plane owner.
+- Per-packet MASQUE TX/downlink logs are `debug`-only in the production hot path. CONNECT-UDP lifecycle and peer-flow registration remain `info` for operator observability without packet-rate log amplification.
 
 Production Mode Policy
 
@@ -2972,6 +2973,7 @@ QuicFuscate can bridge a TUN interface by encapsulating frames in HTTP/3 streams
 
 - Client: when `--tun` is set, a blocking reader thread forwards frames into an H3 stream; zero-copy pool integration minimizes allocations.
 - Server: with `--tun`, authenticated MASQUE CONNECT-UDP datagrams carrying raw IP packets are written to a TUN interface (when available on the platform). Standalone server mode derives `ServerConfig.server_ip`, `server_netmask`, and the client IPv4 pool from explicit `--tun-ip` / `--tun-netmask`, so runtime session routing and OS TUN addressing stay aligned.
+- Server hotpath: after a TUN packet is queued as MASQUE downlink for one session, only that target client's connection is flushed. The server does not scan and flush all clients per TUN packet.
 - Authentication: the client injects QKey auth into both encrypted QUIC transport parameters and the H3/MASQUE CONNECT-UDP header path. The server accepts either valid proof and gates MASQUE DATAGRAM-to-TUN delivery on the current authenticated state.
 - Platform support (interface.rs):
   - Linux/Android: `/dev/net/tun` via `TUNSETIFF` (IFF_TUN | IFF_NO_PI)
@@ -3319,6 +3321,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `test-runtime-soak-chaos.sh` - Runtime soak/chaos (delegates to E2E, FEC loss, admin web)
 - `test-security.sh` - Security suite (rt-security-suite + rt-property-suite)
 > Note: `test-all.sh` was archived; run suites sequentially or use `util-run-full-suite.sh` which delegates to the individual suite scripts.
+> Note: Linux TUN/netns E2E scripts acquire a global `flock` guard before touching shared namespace/process/log/cert/admin-socket state. Override with `QF_E2E_LOCK_FILE` or `QF_E2E_LOCK_TIMEOUT` only when running isolated copies.
 
 **Fuzzing (cargo-fuzz, optional)**
 - Tooling: `cargo install cargo-fuzz` (requires a nightly Rust toolchain for fuzz runs).

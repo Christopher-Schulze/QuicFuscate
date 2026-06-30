@@ -19,6 +19,14 @@ KEY="$PROJECT_ROOT/config/local/server.key"
 CA="$PROJECT_ROOT/config/local/ca.crt"
 CERT_DIR="$PROJECT_ROOT/config/local"
 KEEP_ON_FAIL="${QF_E2E_KEEP_ON_FAIL:-0}"
+LOCK_FILE="${QF_E2E_LOCK_FILE:-/tmp/quicfuscate-tun-e2e.lock}"
+LOCK_TIMEOUT="${QF_E2E_LOCK_TIMEOUT:-300}"
+
+exec 9>"$LOCK_FILE"
+if ! flock -w "$LOCK_TIMEOUT" 9; then
+  echo "FAIL: could not acquire TUN E2E lock $LOCK_FILE within ${LOCK_TIMEOUT}s" >&2
+  exit 2
+fi
 
 cleanup() {
   pkill -9 -f quicfuscate 2>/dev/null

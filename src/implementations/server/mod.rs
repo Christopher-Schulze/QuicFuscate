@@ -5263,11 +5263,14 @@ impl ServerRuntime {
                                                 }
                                             });
 
+                                        let mut queued_target_addr = None;
                                         if let Some(addr) = target_addr {
                                             // Route to the specific client that owns this IP
                                             if let Some(conn) = live.live_state.clients.get_mut(&addr) {
                                                 if let Err(e) = conn.send_masque_downlink(&pkt) {
                                                     log::debug!("TUN→MASQUE send to {}: {:?}", addr, e);
+                                                } else {
+                                                    queued_target_addr = Some(addr);
                                                 }
                                             }
                                         } else {
@@ -5288,20 +5291,22 @@ impl ServerRuntime {
                                                 }
                                             }
                                         }
-                                        // Flush outgoing for all clients after queuing dgrams
-                                        let live = self.live_mut();
-                                        let live_state = &mut live.live_state;
-                                        for (addr, conn) in live_state.clients.iter_mut() {
-                                            let addr = *addr;
-                                            loop {
-                                                let written = match conn.send(&mut out) {
-                                                    Ok(0) => break,
-                                                    Ok(n) => n,
-                                                    Err(_) => break,
-                                                };
-                                                if let Err(e) = socket.try_send_to(&out[..written], addr) {
-                                                    log::debug!("TUN→socket send to {}: {:?}", addr, e);
-                                                    break;
+                                        // Flush only the client that received queued MASQUE downlink
+                                        // data. The previous all-client sweep was O(client_count) per
+                                        // TUN packet even though only one connection had new output.
+                                        if let Some(addr) = queued_target_addr {
+                                            let live = self.live_mut();
+                                            if let Some(conn) = live.live_state.clients.get_mut(&addr) {
+                                                loop {
+                                                    let written = match conn.send(&mut out) {
+                                                        Ok(0) => break,
+                                                        Ok(n) => n,
+                                                        Err(_) => break,
+                                                    };
+                                                    if let Err(e) = socket.try_send_to(&out[..written], addr) {
+                                                        log::debug!("TUN→socket send to {}: {:?}", addr, e);
+                                                        break;
+                                                    }
                                                 }
                                             }
                                         }
