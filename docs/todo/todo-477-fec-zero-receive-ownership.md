@@ -1,3 +1,14 @@
+---
+id: TODO-477
+title: FEC zero-mode receive ownership preservation
+severity: MEDIUM
+phase: "R"
+priority: P1
+status: DONE
+created: 2026-06-30
+depends_on: [TODO-424, TODO-476]
+---
+
 # TODO-477: FEC zero-mode receive ownership preservation
 
 ## Status
