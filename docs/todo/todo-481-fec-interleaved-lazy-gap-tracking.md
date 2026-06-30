@@ -57,6 +57,8 @@ Make lazy FEC gap tracking aware of interleave depth:
 - `cargo clippy --lib -- -D warnings`
 - `cargo test --lib`
 - `cargo bench --features benches --bench fec_pipeline -- fec_lazy_fast_path --sample-size 10 --warm-up-time 0.5 --measurement-time 1`
+- Broderick: `cargo test --lib -- test_lazy_decoder_depth_normalizes_interleaved_clean_sources test_lazy_decoder_flushes_on_gap test_lazy_decoder_prunes_clean_complete_blocks`
+- Broderick: `cargo bench --features benches --bench fec_pipeline -- fec_lazy_fast_path --sample-size 10 --warm-up-time 0.5 --measurement-time 1`
 
 Local benchmark result:
 
@@ -66,6 +68,13 @@ Local benchmark result:
   statistically significant change.
 - `fec_lazy_fast_path/zero_mode_passthrough`: `202.78 ns` median, a small
   Criterion baseline regression unrelated to the normal/interleaved path.
+
+Broderick benchmark result:
+
+- `fec_lazy_fast_path/normal_mode_no_loss`: `5.1606 us` median, about `73.7%`
+  faster than the previous Broderick Criterion baseline.
+- `fec_lazy_fast_path/zero_mode_passthrough`: `301.46 ns` median.
+- `fec_lazy_fast_path/zero_mode_passthrough_reuse`: `282.43 ns` median.
 
 ## Completion Criteria
 
