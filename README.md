@@ -461,13 +461,14 @@ FEC mode mapping note:
 
 ## Continuous Integration
 
-GitHub Actions build and test the project on Linux, macOS and Windows. CI runs:
-- Rust: `cargo clippy --workspace --all-targets`, `cargo build --release`, `cargo test --workspace --all-targets` (Linux, macOS, Windows)
+GitHub Actions build and test the project on Linux and macOS. CI runs:
+- Rust core: `cargo clippy --workspace --all-targets`, `cargo build --release`, `cargo test --workspace --all-targets`
 - Rust feature matrix: `cargo test --features <feature>` for rust-tests, simd-selfcheck, io_uring combinations
-- Svelte: `bun run check`, `bun run test:unit`, `bun run test:e2e` for `apps/svelte-admin` and `apps/svelte-desktop`
+- Svelte apps: `bun run check`, `bun run test:unit`, `bun run test:e2e` for `apps/svelte-admin` and `apps/svelte-desktop`
+- Desktop native backend: build the existing `apps/svelte-desktop` bundle for Tauri context, then run `cargo check` and `cargo test` in `apps/tauri/src-tauri`
 - Clippy feature matrix: multiple feature combinations (unsafe_rust, simd-selfcheck, internal_wiedemann, io_uring) via `.github/workflows/clippy-matrix.yml`
 
-See `.github/workflows/ci.yml` and `.github/workflows/clippy-matrix.yml` for the full workflows. To reproduce CI-specific static checks locally run:
+See `.github/workflows/ci.yml`, `.github/workflows/clippy-matrix.yml`, and `.github/workflows/release.yml` for the full workflows. To reproduce CI-specific static checks locally run:
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings

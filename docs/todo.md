@@ -2,7 +2,7 @@
 
 ## Active TODO Backlog
 
-**Current State (2026-06-30)**: Protocol optimization wave COMPLETE (TODO-389..412). Radical replan wave TODO-413..418 ALL DONE. TUN VPN data plane TODO-422 DONE. **FEC E2E tests TODO-423 DONE** - 12 Rust integration tests + 2 shell scripts, wire format seq bug fixed, broderick all PASS. **FEC benchmarks TODO-424 DONE** - 6 Criterion benchmark groups. **FEC network adversity TODO-425 DONE** - 6 tc-netem tests, broderick 25/25 PASS. **FEC memory pressure TODO-426 DONE** - 7 Rust integration tests, all pass. **FEC mode transitions TODO-427 DONE** - 6 Rust tests + 1 shell script, broderick all PASS. **FEC adaptive optimization TODO-428 DONE** - bandwidth-aware overhead control + 6 adaptive tests, all pass. **FEC wave COMPLETE (TODO-423..428).** **Stealth Stack Coherence Wave TODO-464..471 DONE** - Engine uTLS/persona wiring, session-frozen identity, fronting policy rationalization, randomized cover, Brain actuator ownership, Core H3/MASQUE ownership, protocol-mimicry truth, and WebTransport cover. Server `broderick` Go 1.26.4. GitHub contributors: only `Christopher-Schulze` - no Devin/Claude co-authors.
+**Current State (2026-06-30)**: Protocol optimization wave COMPLETE (TODO-389..412). Radical replan wave TODO-413..418 ALL DONE. TUN VPN data plane TODO-422 DONE. **FEC E2E tests TODO-423 DONE** - 12 Rust integration tests + 2 shell scripts, wire format seq bug fixed, broderick all PASS. **FEC benchmarks TODO-424 DONE** - 6 Criterion benchmark groups. **FEC network adversity TODO-425 DONE** - 6 tc-netem tests, broderick 25/25 PASS. **FEC memory pressure TODO-426 DONE** - 7 Rust integration tests, all pass. **FEC mode transitions TODO-427 DONE** - 6 Rust tests + 1 shell script, broderick all PASS. **FEC adaptive optimization TODO-428 DONE** - bandwidth-aware overhead control + 6 adaptive tests, all pass. **FEC wave COMPLETE (TODO-423..428).** **Stealth Stack Coherence Wave TODO-464..471 DONE** - Engine uTLS/persona wiring, session-frozen identity, fronting policy rationalization, randomized cover, Brain actuator ownership, Core H3/MASQUE ownership, protocol-mimicry truth, and WebTransport cover. **CI/App Backend Release Gate TODO-472 DONE** - GitHub `CI` (`28461670844`), `Clippy Matrix` (`28461670906`), and `Release Build` (`28461670799`) are green on `09cb9f2`; CI now validates the Tauri native backend with `cargo check` and `cargo test`. Server `broderick` Go 1.26.4. GitHub contributors: only `Christopher-Schulze` - no Devin/Claude co-authors.
 
 ## Active - Protocol Optimization Wave (2026-06-05)
 
@@ -205,8 +205,9 @@ not mutate the active persona mid-session.
 | TODO-469 | K | P1 | MASQUE production path and experimental surface cleanup | **DONE** - docs/code comments preserve Core H3/MASQUE as canonical data plane | TODO-422, TODO-466 |
 | TODO-470 | K | P1 | Protocol mimicry flag truth and config cleanup | **DONE** - flag now normalizes concrete H3/QPACK/TLS cover knobs | TODO-466 |
 | TODO-471 | K | P2 | WebTransport cover profile design and integration | **DONE** - WebTransport is integrated as bounded H3 cover, not a competing tunnel | TODO-467, TODO-469 |
+| TODO-472 | R | P0 | CI app backend release gate synchronization | **DONE** - GitHub CI, Clippy Matrix, Release Build, README, DOCUMENTATION, MAP, and TODO truth now point to the green `09cb9f2` checkpoint | TODO-215, TODO-217 |
 
-Detail files: `docs/todo/todo-{464,465,466,467,468,469,470,471}-*.md`.
+Detail files: `docs/todo/todo-{464,465,466,467,468,469,470,471,472}-*.md`.
 
 **Stealth stack result:** Performance mode is fast and coherent, not fronting-heavy. Intelligent
 mode is the default adaptive profile with stable identity and dynamic actuator tuning. Stealth and

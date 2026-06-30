@@ -134,9 +134,10 @@ Use this section as the shortest non-marketing answer to "what evidence exists r
 
 ### Current Release Checkpoint
 
-- Repository checkpoint: `af90538` (`docs: harden agent ui boundary`) is synchronized on `main`.
-- GitHub `CI` run `27050145427`, `Clippy Matrix` run `27050145428`, and `Release Build` run `27050145421` are green on that checkpoint.
-- The Linux fastpath evidence job remains non-blocking and red inside CI, so Linux fastpath production support is not claimed as fixed.
+- Last fully verified release checkpoint before this documentation sync: `09cb9f2` (`fix: stabilize CI and app backend gates`).
+- GitHub `CI` run `28461670844`, `Clippy Matrix` run `28461670906`, and `Release Build` run `28461670799` are green on that checkpoint.
+- The CI workflow now includes an `app-backend-checks` job that builds the desktop Svelte bundle for Tauri context, then runs `cargo check` and `cargo test` in `apps/tauri/src-tauri` on macOS.
+- The Linux fastpath evidence job is green in the current CI checkpoint. This proves the current non-privileged CI fastpath suite, not a replacement for a privileged production deployment soak.
 - TODO-412 (server deploy and real-world profiling baseline) is deferred until server SSH/access details, TLS certificate paths or an approved self-signed test setup, and a profiling target are available.
 - UI changes remain protected by the `AGENTS.md` UI Change Boundary: no UI component, view, style, asset, text, or adjacent UI cleanup is allowed without an explicit current-task request for that exact UI change.
 
@@ -1774,7 +1775,10 @@ Benchmarks
 - Optional (feature-gated): build with `--features benches` to run the `crypto-bench` subcommand.
 
 #### Automated Build and CI/CD
-- The general CI workflow `ci.yml` runs Clippy and workspace tests.
+- The general CI workflow `ci.yml` runs frontend checks, frontend E2E, security audit, TODO consistency, app backend checks, release build/test, fuzz target checks, feature-matrix tests, benchmark regression checks on pull requests, and Linux fastpath evidence.
+- The `app-backend-checks` job validates the native desktop backend without UI source edits: it builds the existing `apps/svelte-desktop` bundle for Tauri context, then runs `cargo check` and `cargo test` in `apps/tauri/src-tauri`.
+- `.github/workflows/clippy-matrix.yml` runs the Rust clippy feature matrix on stable Rust with `-D warnings`.
+- `.github/workflows/release.yml` builds the release server binary, builds admin web assets, creates the server bundle, and uploads release artifacts.
 
 #### Local Development Workflow
 - Use `cargo test` for unit/integration tests and the suite scripts under `scripts/tests/suites/` for end-to-end coverage.
@@ -2350,6 +2354,7 @@ cd ../tauri && bun run tauri build
 ```
 
 The `apps/tauri/` package is a thin command wrapper around `apps/svelte-desktop/` plus the retained `apps/tauri/src-tauri/` native host. The frontend is the SvelteKit SPA from `apps/svelte-desktop/`; no separate build pipeline is needed.
+GitHub CI validates the native desktop backend through the `app-backend-checks` job: the existing desktop frontend bundle is built for Tauri context, then `cargo check` and `cargo test` run in `apps/tauri/src-tauri`.
 
 **Window Model:**
 - The production desktop window is fixed to `900 x 670` in `apps/tauri/src-tauri/tauri.conf.json` with `resizable: false`, `minWidth: 900`, `minHeight: 670`, `maxWidth: 900`, and `maxHeight: 670`.
