@@ -473,12 +473,10 @@ mod tests {
 
         // Seed with degree-1 symbols for indices that are not yet decoded
         // (simulates receiving systematic/uncoded packets in a real fountain stream)
-        let mut next_id = 1000u64;
-        for (i, orig) in originals.iter().enumerate().take(k) {
+        for (next_id, (i, orig)) in (1000u64..).zip(originals.iter().enumerate().take(k)) {
             let mut idx = HashSet::new();
             idx.insert(i);
             dec.add_encoded_symbol(next_id, orig.clone(), idx);
-            next_id += 1;
         }
 
         assert!(

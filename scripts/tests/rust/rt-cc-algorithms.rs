@@ -257,15 +257,12 @@ fn bbr2_convergence_synthetic_link() {
     r.update_rtt(RTT);
 
     let t0 = Instant::now();
-    let mut pkt_num: u64 = 1;
-
-    for round in 0..15_u32 {
+    for (pkt_num, round) in (1_u64..).zip(0..15_u32) {
         let send_time = t0 + RTT * round;
         let ack_time = send_time + RTT;
         // One RTT of traffic: send BDP bytes then ACK them after RTT.
         // delivery_rate = BDP / RTT = TARGET_BPS.
         r.on_packet_sent(pkt_num, BDP, send_time);
-        pkt_num += 1;
         r.on_ack(BDP, ack_time);
     }
 
@@ -292,13 +289,10 @@ fn bbr3_convergence_synthetic_link() {
     r.update_rtt(RTT);
 
     let t0 = Instant::now();
-    let mut pkt_num: u64 = 1;
-
-    for round in 0..20_u32 {
+    for (pkt_num, round) in (1_u64..).zip(0..20_u32) {
         let send_time = t0 + RTT * round;
         let ack_time = send_time + RTT;
         r.on_packet_sent(pkt_num, BDP, send_time);
-        pkt_num += 1;
         r.on_ack(BDP, ack_time);
     }
 

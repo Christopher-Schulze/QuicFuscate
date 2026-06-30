@@ -53,14 +53,14 @@ pub fn transpose_matrix<T: Copy>(matrix: &mut [T], rows: usize, cols: usize) {
         | CpuProfile::ARM_A1b
         | CpuProfile::ARM_A1c
         | CpuProfile::ARM_A1d
-        | CpuProfile::Apple_M => {
-            if core::mem::size_of::<T>() == 4 && rows.is_multiple_of(4) && cols.is_multiple_of(4) {
-                unsafe {
-                    transpose_matrix_neon_f32(matrix as *mut _ as *mut f32, rows, cols);
-                    return;
-                }
-            }
-        }
+        | CpuProfile::Apple_M
+            if core::mem::size_of::<T>() == 4
+                && rows.is_multiple_of(4)
+                && cols.is_multiple_of(4) =>
+        unsafe {
+            transpose_matrix_neon_f32(matrix as *mut _ as *mut f32, rows, cols);
+            return;
+        },
         _ => {}
     }
 

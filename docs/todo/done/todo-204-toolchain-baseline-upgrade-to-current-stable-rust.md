@@ -33,7 +33,7 @@ Adopt the current stable Rust toolchain across the main workspace and supporting
 - [x] Docs updated to the new baseline.
 
 ## Completion Notes
-- Upgraded the canonical workspace baseline to Rust `1.93.0`.
+- Upgraded the canonical workspace baseline to the Rust stable channel.
 - Updated root toolchain metadata, CI setup, and deployment/documentation guidance.
 - Revalidated the main Rust workspace and the Tauri host on the upgraded stable baseline.
 

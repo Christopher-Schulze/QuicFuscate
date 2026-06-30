@@ -2680,7 +2680,7 @@ impl MemoryPool {
 
                     let cap = pool.capacity.load(Ordering::Relaxed);
                     let in_use = pool.in_use.load(Ordering::Relaxed);
-                    let util = if cap > 0 { (in_use * 100) / cap } else { 0 };
+                    let util = in_use.saturating_mul(100).checked_div(cap).unwrap_or(0);
                     let mut target = cap;
                     if util > util_high {
                         target = core::cmp::min(cap.saturating_mul(2), max_cap);

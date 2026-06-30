@@ -144,16 +144,16 @@ impl TokenBucket {
 
         if elapsed >= self.refill_interval {
             let refill_interval_us = self.refill_interval.as_micros();
-            let refill_amount = if refill_interval_us > 0 {
-                let refill = (elapsed.as_micros() * self.refill_rate as u128) / refill_interval_us;
+            let refill_amount = {
+                let refill = (elapsed.as_micros() * self.refill_rate as u128)
+                    .checked_div(refill_interval_us)
+                    .unwrap_or(self.capacity as u128);
                 // Saturate to u64 range
                 if refill > u64::MAX as u128 {
                     u64::MAX
                 } else {
                     refill as u64
                 }
-            } else {
-                self.capacity
             };
 
             self.tokens = (self.tokens + refill_amount).min(self.capacity);
@@ -646,16 +646,15 @@ impl EwmaAnomalyDetector {
 }
 
 // ---------------------------------------------------------------------------
-// GeoIP blocking stub.
+// GeoIP blocking.
 //
-// The struct and configuration surface exist now so wiring and config can be
-// landed independently of the `maxminddb` integration (planned for a later
-// phase). Until a database reader is plugged in, `is_blocked` always returns
-// `false` — graceful degradation.
+// Uses the `maxminddb` crate to look up the country of an IP address in a
+// MaxMindDB GeoLite2 (or GeoIP2) database. IPs mapping to a blocked country
+// are rejected. When no database is configured, the blocker gracefully
+// degrades to allowing all IPs.
 // ---------------------------------------------------------------------------
 
 /// Configuration for GeoIP-based country blocking.
-#[allow(dead_code)] // public API for admin tooling / future wiring
 #[derive(Clone, Debug, Default)]
 pub struct GeoIpConfig {
     /// Path to a MaxMindDB GeoLite2 (or equivalent) country database.
@@ -664,21 +663,66 @@ pub struct GeoIpConfig {
     pub blocked_countries: HashSet<String>,
 }
 
-/// GeoIP-based source-IP blocker (stub).
-///
-/// The MaxMindDB reader integration is deferred to a later phase; this struct
-/// provides the configuration surface and `is_blocked` interface so callers
-/// can be wired in now. Without a loaded database it never blocks.
-#[allow(dead_code)] // public API for admin tooling / future wiring
-pub struct GeoIpBlocker {
-    config: GeoIpConfig,
+impl GeoIpConfig {
+    /// Whether both a database path and at least one blocked country are configured.
+    pub fn is_enabled(&self) -> bool {
+        self.db_path.is_some() && !self.blocked_countries.is_empty()
+    }
 }
 
-#[allow(dead_code)] // public API for admin tooling / future wiring
+/// GeoIP-based source-IP blocker.
+///
+/// Loads a MaxMindDB country database on construction and performs O(1)
+/// lookups per IP. When no database is configured, `is_blocked` always
+/// returns `false` (graceful degradation).
+pub struct GeoIpBlocker {
+    config: GeoIpConfig,
+    reader: Option<maxminddb::Reader<Vec<u8>>>,
+}
+
 impl GeoIpBlocker {
-    /// Create a new blocker from the given config.
+    /// Create a new blocker from the given config. Loads the MaxMindDB
+    /// database if `db_path` is set and blocked countries are configured.
     pub fn new(config: GeoIpConfig) -> Self {
-        Self { config }
+        let reader = if config.is_enabled() {
+            match config.db_path.as_ref().unwrap().as_path().try_exists() {
+                Ok(true) => {
+                    match maxminddb::Reader::open_readfile(config.db_path.as_ref().unwrap()) {
+                        Ok(r) => {
+                            log::info!(
+                                "GeoIP: loaded database from {}",
+                                config.db_path.as_ref().unwrap().display()
+                            );
+                            Some(r)
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "GeoIP: failed to load database from {}: {e}",
+                                config.db_path.as_ref().unwrap().display()
+                            );
+                            None
+                        }
+                    }
+                }
+                Ok(false) => {
+                    log::warn!(
+                        "GeoIP: database not found at {}",
+                        config.db_path.as_ref().unwrap().display()
+                    );
+                    None
+                }
+                Err(e) => {
+                    log::warn!(
+                        "GeoIP: cannot access database at {}: {e}",
+                        config.db_path.as_ref().unwrap().display()
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        Self { config, reader }
     }
 
     /// Create a blocker with no database and no blocked countries (no-op).
@@ -693,10 +737,30 @@ impl GeoIpBlocker {
 
     /// Returns `true` if the IP maps to a blocked country.
     ///
-    /// **Stub**: until `maxminddb` is integrated this always returns `false`,
-    /// providing graceful degradation when no GeoIP database is available.
-    pub fn is_blocked(&self, _ip: IpAddr) -> bool {
-        false
+    /// When no database is loaded, always returns `false` (graceful
+    /// degradation). Lookup errors are logged and treated as "not blocked"
+    /// to avoid blocking legitimate traffic on database corruption.
+    pub fn is_blocked(&self, ip: IpAddr) -> bool {
+        let reader = match &self.reader {
+            Some(r) => r,
+            None => return false,
+        };
+
+        let country: maxminddb::geoip2::Country = match reader.lookup(ip) {
+            Ok(c) => c,
+            Err(maxminddb::MaxMindDBError::AddressNotFoundError(_)) => return false,
+            Err(e) => {
+                log::debug!("GeoIP: lookup error for {ip}: {e}");
+                return false;
+            }
+        };
+
+        let iso_code = match country.country.and_then(|c| c.iso_code) {
+            Some(code) => code,
+            None => return false,
+        };
+
+        self.config.blocked_countries.contains(iso_code)
     }
 
     /// Borrow the configured blocked-country set.
@@ -706,31 +770,27 @@ impl GeoIpBlocker {
 }
 
 // ---------------------------------------------------------------------------
-// Blacklist sync stub.
+// Blacklist sync.
 //
-// Maintains a set of blocked IPs with per-entry TTL. The `sync` interface is
-// provided for external threat-intelligence feeds (AbuseIPDB-style); the
-// actual HTTP fetch is a later phase. Lookups are O(1) under an RwLock read.
+// Maintains a set of blocked IPs with per-entry TTL. Supports synchronization
+// from external threat-intelligence feeds (plain-text IP lists, one per line).
+// Lookups are O(1) under an RwLock read.
 // ---------------------------------------------------------------------------
 
 /// Error type for blacklist synchronization operations.
-#[allow(dead_code)] // public API for admin tooling / future wiring
 #[derive(Debug)]
 pub enum BlacklistError {
     /// No sync URL configured.
     NoSyncUrl,
-    /// Sync is not yet implemented (stub for a later integration phase).
-    NotImplemented,
-    /// I/O error reading/writing the local cache.
-    Io(std::io::Error),
+    /// HTTP fetch failed.
+    FetchError(String),
 }
 
 impl std::fmt::Display for BlacklistError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NoSyncUrl => write!(f, "no blacklist sync URL configured"),
-            Self::NotImplemented => write!(f, "blacklist sync not yet implemented"),
-            Self::Io(e) => write!(f, "blacklist I/O error: {}", e),
+            Self::FetchError(s) => write!(f, "blacklist fetch error: {s}"),
         }
     }
 }
@@ -741,9 +801,8 @@ impl std::error::Error for BlacklistError {}
 ///
 /// Tracks blocked IPs in a `HashMap<IpAddr, Instant>` (IP → expiry). Entries
 /// auto-expire past their TTL; `prune_expired` reclaims memory. The `sync`
-/// method is the interface for an external feed (e.g. AbuseIPDB) to be wired
-/// in during a later phase.
-#[allow(dead_code)] // public API for admin tooling / future wiring
+/// method fetches a plain-text IP list (one IP per line, lines starting with
+/// `#` are comments) from the configured URL and replaces the blocked set.
 pub struct BlacklistSync {
     blocked: parking_lot::RwLock<HashMap<IpAddr, Instant>>,
     default_ttl: Duration,
@@ -751,7 +810,6 @@ pub struct BlacklistSync {
     sync_interval: Duration,
 }
 
-#[allow(dead_code)] // public API for admin tooling / future wiring
 impl BlacklistSync {
     /// Create a new blacklist synchronizer.
     pub fn new(default_ttl: Duration, sync_url: Option<String>, sync_interval: Duration) -> Self {
@@ -828,16 +886,103 @@ impl BlacklistSync {
         self.sync_interval
     }
 
+    /// Whether an external sync URL is configured.
+    pub fn has_sync_url(&self) -> bool {
+        self.sync_url.is_some()
+    }
+
     /// Synchronize the blacklist from the external feed.
     ///
-    /// **Stub**: the HTTP fetch integration is deferred to a later phase.
-    /// Returns `BlacklistError::NotImplemented` when a URL is configured but
-    /// the fetch path is not yet wired, or `NoSyncUrl` when none is set.
-    pub fn sync(&self) -> Result<(), BlacklistError> {
-        match &self.sync_url {
-            None => Err(BlacklistError::NoSyncUrl),
-            Some(_) => Err(BlacklistError::NotImplemented),
+    /// Fetches a plain-text IP list (one IP per line; lines starting with `#`
+    /// or empty lines are ignored) from the configured URL via HTTPS and
+    /// replaces the blocked set. Each entry is seeded with the default TTL.
+    ///
+    /// The response body is capped at `MAX_FEED_BODY_BYTES` (16 MiB) to
+    /// prevent memory exhaustion from a compromised or misconfigured feed
+    /// endpoint. Both the `Content-Length` header and the actual byte count
+    /// are checked.
+    ///
+    /// Async because the server's housekeeping loop runs inside a Tokio
+    /// runtime; using the async `reqwest::Client` avoids the
+    /// "Cannot start a runtime from within a runtime" panic that
+    /// `reqwest::blocking` triggers under Tokio. Callers outside an async
+    /// context should wrap this in `tokio::task::spawn_blocking` + a
+    /// `Runtime::block_on`, or use a dedicated runtime.
+    pub async fn sync(&self) -> Result<usize, BlacklistError> {
+        const MAX_FEED_BODY_BYTES: u64 = 16 * 1024 * 1024; // 16 MiB
+
+        let url = match &self.sync_url {
+            Some(u) => u.clone(),
+            None => return Err(BlacklistError::NoSyncUrl),
+        };
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .https_only(true)
+            .redirect(reqwest::redirect::Policy::limited(3))
+            .user_agent("quicfuscate-blacklist-sync/1.0")
+            .build()
+            .map_err(|e| BlacklistError::FetchError(format!("client build: {e}")))?;
+
+        let response = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| BlacklistError::FetchError(format!("request: {e}")))?;
+
+        if !response.status().is_success() {
+            return Err(BlacklistError::FetchError(format!(
+                "HTTP {} from {}",
+                response.status(),
+                url
+            )));
         }
+
+        // Pre-check Content-Length if the server provided it. A feed larger
+        // than the cap is rejected before any body bytes are buffered.
+        if let Some(len) = response.content_length() {
+            if len > MAX_FEED_BODY_BYTES {
+                return Err(BlacklistError::FetchError(format!(
+                    "feed body too large: Content-Length {len} > {MAX_FEED_BODY_BYTES} bytes"
+                )));
+            }
+        }
+
+        let body = response
+            .bytes()
+            .await
+            .map_err(|e| BlacklistError::FetchError(format!("body read: {e}")))?;
+
+        // Hard cap on the actual body size (defeats servers that omit
+        // Content-Length or lie about it via chunked encoding).
+        if body.len() as u64 > MAX_FEED_BODY_BYTES {
+            return Err(BlacklistError::FetchError(format!(
+                "feed body too large: actual {} > {MAX_FEED_BODY_BYTES} bytes",
+                body.len()
+            )));
+        }
+
+        // Parse as UTF-8 lossy — IP addresses and comments are ASCII, so
+        // invalid UTF-8 bytes become U+FFFD and simply fail to parse as IPs.
+        let body_text = String::from_utf8_lossy(&body);
+
+        let mut ips = Vec::new();
+        for line in body_text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            // Strip inline comments.
+            let ip_str = line.split('#').next().unwrap_or(line).trim();
+            if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                ips.push(ip);
+            }
+        }
+
+        let count = ips.len();
+        self.replace_list(&ips);
+        log::info!("Blacklist sync: loaded {count} IPs from {url}");
+        Ok(count)
     }
 }
 
@@ -1150,7 +1295,7 @@ mod tests {
     }
 
     #[test]
-    fn test_geoip_configured_but_stub_returns_false() {
+    fn test_geoip_configured_but_missing_db_returns_false() {
         let mut countries = HashSet::new();
         countries.insert("XX".to_string());
         let config = GeoIpConfig {
@@ -1159,7 +1304,7 @@ mod tests {
         };
         let blocker = GeoIpBlocker::new(config);
         assert!(blocker.is_enabled());
-        // Stub phase: is_blocked always returns false (graceful degradation).
+        // Database doesn't exist — graceful degradation: is_blocked returns false.
         let ip: IpAddr = "8.8.8.8".parse().unwrap();
         assert!(!blocker.is_blocked(ip));
         assert!(blocker.blocked_countries().contains("XX"));
@@ -1217,17 +1362,77 @@ mod tests {
         assert_eq!(bl.len(), 2);
     }
 
-    #[test]
-    fn test_blacklist_sync_stub_errors() {
+    #[tokio::test]
+    async fn test_blacklist_sync_no_url_errors() {
         let bl_no_url = BlacklistSync::manual_only(Duration::from_secs(60));
-        assert!(matches!(bl_no_url.sync(), Err(BlacklistError::NoSyncUrl)));
+        assert!(matches!(bl_no_url.sync().await, Err(BlacklistError::NoSyncUrl)));
+    }
 
+    #[test]
+    fn test_blacklist_sync_interval() {
+        let bl = BlacklistSync::new(
+            Duration::from_secs(60),
+            Some("https://example.com/blacklist".to_string()),
+            Duration::from_secs(3600),
+        );
+        assert_eq!(bl.sync_interval(), Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn test_blacklist_has_sync_url() {
         let bl_with_url = BlacklistSync::new(
             Duration::from_secs(60),
             Some("https://example.com/blacklist".to_string()),
             Duration::from_secs(3600),
         );
-        assert!(matches!(bl_with_url.sync(), Err(BlacklistError::NotImplemented)));
-        assert_eq!(bl_with_url.sync_interval(), Duration::from_secs(3600));
+        assert!(bl_with_url.has_sync_url());
+
+        let bl_no_url = BlacklistSync::manual_only(Duration::from_secs(60));
+        assert!(!bl_no_url.has_sync_url());
+    }
+
+    #[test]
+    fn test_blacklist_sync_parses_plain_text_ips() {
+        // Verify that replace_list correctly handles a parsed IP list
+        // (the sync method uses replace_list internally).
+        let bl = BlacklistSync::manual_only(Duration::from_secs(60));
+        let ips: Vec<IpAddr> =
+            ["10.0.0.1", "10.0.0.2", "192.168.1.1"].iter().map(|s| s.parse().unwrap()).collect();
+        bl.replace_list(&ips);
+        assert!(bl.is_blocked("10.0.0.1".parse().unwrap()));
+        assert!(bl.is_blocked("10.0.0.2".parse().unwrap()));
+        assert!(bl.is_blocked("192.168.1.1".parse().unwrap()));
+        assert!(!bl.is_blocked("10.0.0.3".parse().unwrap()));
+        assert_eq!(bl.len(), 3);
+    }
+
+    #[test]
+    fn test_geoip_blocker_disabled_allows_all() {
+        let blocker = GeoIpBlocker::disabled();
+        assert!(!blocker.is_enabled());
+        assert!(!blocker.is_blocked("1.2.3.4".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_geoip_blocker_no_db_allows_all() {
+        let config = GeoIpConfig {
+            db_path: None,
+            blocked_countries: ["CN".to_string()].into_iter().collect(),
+        };
+        let blocker = GeoIpBlocker::new(config);
+        assert!(!blocker.is_enabled());
+        assert!(!blocker.is_blocked("1.2.3.4".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_geoip_blocker_missing_db_allows_all() {
+        let config = GeoIpConfig {
+            db_path: Some(PathBuf::from("/nonexistent/GeoLite2-Country.mmdb")),
+            blocked_countries: ["CN".to_string()].into_iter().collect(),
+        };
+        let blocker = GeoIpBlocker::new(config);
+        assert!(blocker.is_enabled());
+        // Database doesn't exist — should gracefully degrade to allowing all.
+        assert!(!blocker.is_blocked("1.2.3.4".parse().unwrap()));
     }
 }

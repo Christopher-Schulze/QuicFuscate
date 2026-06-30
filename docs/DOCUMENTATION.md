@@ -158,8 +158,8 @@ Attack surface and control mapping:
   - controls: Argon2 hashes, `HttpOnly` cookies, `SameSite=Strict`, secure-cookie behavior tied to HTTPS forwarding, per-IP failed-login throttling and lockout, password-change lock (`423`) paths, same-origin POST validation (`Origin` host+port must match `Host` header when present; dev proxies must not rewrite `Host` via `changeOrigin`), and per-session CSRF token checks on authenticated POST routes.
   - verification: `implementations::server::admin_http` tests for lockout, throttling, cookie flags, lock removal, and cross-origin POST rejection.
 - QKey issuance and revocation surface:
-  - controls: strict QKey parsing and canonicalization, stable token IDs, TTL normalization, revoke path validation, persisted registry constraints, and runtime auth-state rebind on source-address churn by DCID/source-id matching.
-  - verification: `implementations::server::qkey_registry` tests, admin HTTP QKey API tests, and `qkey_auth_tests::engine_qkey_id_matches_registry_qkey_id`.
+  - controls: strict QKey parsing and canonicalization, stable token IDs, TTL normalization, revoke path validation, persisted registry constraints, revoked-key rejection during initial auth, SessionId-to-QKey runtime tracking, active-session close on admin revoke, pending-auth revocation race prevention, scheduled revocation processing, and runtime auth-state rebind on source-address churn by DCID/source-id matching.
+  - verification: `implementations::server::qkey_registry` tests, admin HTTP QKey API tests, runtime revocation tests, and `qkey_auth_tests::engine_qkey_id_matches_registry_qkey_id`.
 - Engine connect-state surface:
   - controls: `engine.connect()` is handshake-aware and only sets `Connected` after runtime handshake establishment within a bounded timeout.
   - verification: `engine::engine::tests::test_engine_connect_disconnect`.
@@ -1360,7 +1360,7 @@ cargo test
 ```
 
 #### Step-by-Step Guide
-1. Install prerequisites: Rust 1.93.0 with cargo.
+1. Install prerequisites: Rust stable with cargo.
 2. Run the test script: `./scripts/tests/suites/test-crypto.sh`.
 3. Manual invocation (in repo root):
    - `cargo test`
@@ -1766,7 +1766,7 @@ Step-by-step guide for deploying QuicFuscate on a Linux server.
 #### System Requirements
 - Linux server (Ubuntu 22.04+ / Debian 12+ / RHEL 9+ recommended)
 - Minimum 2 CPU cores, 2 GB RAM (4+ cores recommended for production)
-- Rust toolchain 1.93.0+ (for building from source)
+- Rust stable toolchain (for building from source)
 - Root or sudo access for TUN device and firewall configuration
 
 **System dependencies (Ubuntu/Debian):**
@@ -2133,7 +2133,7 @@ Engine server-mode stats now follow the same runtime truth: bytes, packets, and 
 Admin orchestration helpers (`ServerAdminCore`, `AdminAction`) live in `implementations/server`, so admin, reload, metrics, and shutdown wiring no longer depend on a CLI-local server state island.
 Within the live server path, ownership is now intentionally split only along one line:
 - `LiveServerDomain` owns remote/session/IP-pool/connection-limiter/packet-rate-limiter/snapshot state.
-- `LiveServerState` owns active QUIC connection objects and QKey auth tracking.
+- `LiveServerState` owns active QUIC connection objects, QKey auth tracking, runtime QKey revocation state, and the SessionId-to-QKey tracker used to terminate active sessions on revoke.
 The standalone path also delegates DCID-based live path rebinding, closed-client reconciliation, control-plane shutdown registration, and runtime reload normalization to `implementations/server`, so runtime lifecycle and bookkeeping now converge on one canonical server model.
 Session timeout is also part of that canonical lifecycle: standalone housekeeping reaps expired shared-domain sessions according to `client_timeout_secs`, while `QKEY_AUTH_TIMEOUT` remains a separate short pre-auth gate for unauthenticated handshakes rather than a replacement for session expiry.
  
@@ -3212,6 +3212,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `test-security-fuzzing.sh` - Security & fuzzing (ASAN/MSAN/UBSAN, fuzz targets, concurrency, `rt-property-suite` via proptest)
 - `test-performance-regression.sh` - Performance regression with baseline comparison
 - `test-e2e.sh` - End-to-end integration tests with real network scenarios
+- `tun-e2e-dns-leak-netns.sh` - Linux network-namespace DNS leak proof: real server/client TUN over MASQUE, DNS query through the server TUN IP, and tcpdump assertion that the client underlay sees zero raw TCP/UDP port 53 packets
 - `test-e2e-admin-web.sh` - Admin web E2E (login/status/config/qkey + headless QKey connect via `qf-e2e-client` and `qf-e2e-desktop`)
 - `test-desktop-webadmin-rust-integration.sh` - Cross-surface desktop/web-admin/core integration contract checks
 - `test-fec-all.sh` - Dispatcher: runs all FEC suites (test-fec, test-fec-simulation, test-fec-e2e-loss, auto-controller)
@@ -3721,7 +3722,7 @@ nslookup -type=A example.com
 
 #### Common DNS Leak Causes
 1. **Split-tunnel configuration:** Ensure all DNS traffic routes through the tunnel
-2. **IPv6 DNS fallback:** If only IPv4 DNS is configured, IPv6 DNS queries may bypass the tunnel
+2. **IPv6 DNS fallback:** Configure IPv6 DNS explicitly when IPv6 is enabled. The live server intercepts both IPv4 and IPv6 UDP/53 DNS packets that arrive through the MASQUE/TUN path, but local OS resolver bypass outside the tunnel still requires kill-switch enforcement.
 3. **macOS:** DNS reset to "Empty" falls back to DHCP DNS (see platform-specific section)
 
 #### Prevention

@@ -597,7 +597,7 @@ impl IceAgent {
         }
 
         // Sort by descending priority so callers see the best candidate first.
-        candidates.sort_by(|a, b| b.priority.cmp(&a.priority));
+        candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.priority));
         candidates
     }
 

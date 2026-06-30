@@ -179,12 +179,16 @@ pub fn ghash(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
                 hw
             };
 
-            if detector.has_feature(crate::optimize::CpuFeature::SVE_PMULL) {
+            if detector.has_feature(crate::optimize::CpuFeature::SVE_PMULL)
+                && detector.has_feature(crate::optimize::CpuFeature::AES)
+            {
                 let hw = ghash_hw_sve_pmull(h, aad, ct);
                 return finalize(hw);
             }
 
-            if detector.has_feature(crate::optimize::CpuFeature::NEON_CRYPTO) {
+            if detector.has_feature(crate::optimize::CpuFeature::PMULL)
+                && detector.has_feature(crate::optimize::CpuFeature::AES)
+            {
                 let hw = ghash_hw_pmull_optimized(h, aad, ct);
                 return finalize(hw);
             }
@@ -862,7 +866,8 @@ unsafe fn ghash_block_pclmul(
 
 /// Ultra-optimized ARM PMULL GHASH with efficient unaligned/partial block handling
 #[cfg(target_arch = "aarch64")]
-#[inline(always)]
+#[inline]
+#[target_feature(enable = "neon,aes")]
 // SAFETY: requires NEON + PMULL (runtime-checked by caller). h is [u8; 16];
 // vld1q_u8 reads exactly 16 bytes. 64-byte chunk loop: i+64 <= len guard ensures
 // vld1q_u8 at offsets i, i+16, i+32, i+48 are within bounds. Single-block loop:
@@ -1114,7 +1119,7 @@ unsafe fn neon_mul_x(v: core::arch::aarch64::uint8x16_t) -> core::arch::aarch64:
 
 #[cfg(all(target_arch = "aarch64", target_feature = "sve2"))]
 #[inline]
-#[target_feature(enable = "sve2")]
+#[target_feature(enable = "sve2,neon,aes")]
 // SAFETY: target_feature gate ensures SVE2 (implies PMULL). Delegates to
 // ghash_hw_pmull_optimized which requires NEON + PMULL.
 unsafe fn ghash_hw_sve_pmull(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
@@ -1122,7 +1127,8 @@ unsafe fn ghash_hw_sve_pmull(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
 }
 
 #[cfg(all(target_arch = "aarch64", not(target_feature = "sve2")))]
-#[inline(always)]
+#[inline]
+#[target_feature(enable = "neon,aes")]
 // SAFETY: caller verified SVE PMULL at runtime. Delegates to
 // ghash_hw_pmull_optimized which requires NEON + PMULL.
 unsafe fn ghash_hw_sve_pmull(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
@@ -1130,7 +1136,8 @@ unsafe fn ghash_hw_sve_pmull(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
 }
 
 #[cfg(target_arch = "aarch64")]
-#[inline(always)]
+#[inline]
+#[target_feature(enable = "neon,aes")]
 // SAFETY: requires NEON + PMULL (caller ensures). All inputs are by-value
 // uint8x16_t. Operations: veorq, vrev64q, vextq (register byte-reverse),
 // vreinterpretq (zero-cost reinterpret), vmull_p64 (carry-less multiply),

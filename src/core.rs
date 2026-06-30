@@ -91,6 +91,7 @@ pub struct QuicFuscateConnection {
     transport_observer: Arc<FecTransportObserver>,
     masque_cb: Option<CapsuleHandler>,
     masque_datagram_cb: Option<DatagramHandler>,
+    masque_downlink_queue: Option<Arc<std::sync::Mutex<VecDeque<Vec<u8>>>>>,
     masque_control_cb: Option<CapsuleHandler>,
     /// Locally-initiated MASQUE CONNECT-UDP stream id (client side).
     masque_stream_id: Option<u64>,
@@ -300,6 +301,7 @@ impl QuicFuscateConnection {
             transport_observer: obs.clone(),
             masque_cb: None,
             masque_datagram_cb: None,
+            masque_downlink_queue: None,
             masque_control_cb: None,
             masque_stream_id: None,
             masque_peer_stream_id: None,
@@ -540,11 +542,8 @@ impl QuicFuscateConnection {
             Ok(ids) => {
                 let sent = stats.sent as u64;
                 let lost = stats.lost as u64;
-                let loss_rate_permille = if sent > 0 {
-                    (((lost.saturating_mul(1000)) / sent).min(1000)) as u32
-                } else {
-                    0
-                };
+                let loss_rate_permille =
+                    lost.saturating_mul(1000).checked_div(sent).unwrap_or(0).min(1000) as u32;
                 stealth_manager.observe_server_push_burst(
                     &base_path,
                     ids.len(),
@@ -1351,6 +1350,33 @@ impl QuicFuscateConnection {
     /// Returns true if a MASQUE datagram sink has been installed.
     pub fn has_masque_datagram_cb(&self) -> bool {
         self.masque_datagram_cb.is_some()
+    }
+
+    /// Installs a queue for raw IP packets that must be sent back to the peer
+    /// on the peer-initiated MASQUE flow after callback dispatch returns.
+    pub fn set_masque_downlink_queue(&mut self, queue: Arc<std::sync::Mutex<VecDeque<Vec<u8>>>>) {
+        self.masque_downlink_queue = Some(queue);
+    }
+
+    /// Returns the installed MASQUE downlink queue, if present.
+    pub fn masque_downlink_queue(&self) -> Option<Arc<std::sync::Mutex<VecDeque<Vec<u8>>>>> {
+        self.masque_downlink_queue.as_ref().cloned()
+    }
+
+    /// Returns true if the MASQUE downlink response queue has been installed.
+    pub fn has_masque_downlink_queue(&self) -> bool {
+        self.masque_downlink_queue.is_some()
+    }
+
+    /// Drains queued MASQUE downlink raw IP packets.
+    pub fn drain_masque_downlink_queue(&mut self) -> Vec<Vec<u8>> {
+        let Some(queue) = self.masque_downlink_queue.as_ref() else {
+            return Vec::new();
+        };
+        match queue.lock() {
+            Ok(mut guard) => guard.drain(..).collect(),
+            Err(poisoned) => poisoned.into_inner().drain(..).collect(),
+        }
     }
 
     pub fn poll_http3(&mut self) -> Result<(), crate::error::ConnectionError> {

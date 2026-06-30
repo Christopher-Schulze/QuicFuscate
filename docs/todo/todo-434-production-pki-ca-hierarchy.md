@@ -4,7 +4,7 @@ title: Production PKI (CA hierarchy, cert generation, no self-signed fallback)
 severity: HIGH
 phase: "G"
 priority: P0
-status: OPEN
+status: DONE
 created: 2026-07-23
 depends_on: []
 ---

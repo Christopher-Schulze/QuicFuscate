@@ -4,7 +4,7 @@ title: "Production logging (structured JSON, rotation, file output, per-module l
 severity: HIGH
 phase: "I"
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-07-23
 depends_on: []
 ---

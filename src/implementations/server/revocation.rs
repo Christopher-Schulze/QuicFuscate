@@ -258,7 +258,7 @@ impl KeyRotationManager {
 
     /// Process pending revocations. Called periodically (e.g., every second).
     /// Revokes keys whose overlap window has expired.
-    pub fn process_pending_revocations(&self) {
+    pub fn process_pending_revocations(&self) -> Vec<String> {
         let now = Instant::now();
         let mut pending = self.pending_revocations.write().unwrap();
         let mut to_revoke = Vec::new();
@@ -272,9 +272,12 @@ impl KeyRotationManager {
         });
         drop(pending);
 
+        let mut revoked = Vec::with_capacity(to_revoke.len());
         for key_id in to_revoke {
             self.revocation_manager.revoke(&key_id, "rotation overlap window expired");
+            revoked.push(key_id);
         }
+        revoked
     }
 
     /// Time until the next rotation (seconds).

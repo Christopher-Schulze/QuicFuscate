@@ -659,25 +659,23 @@ fn parse_raw_tls_flight(raw: &[u8]) -> Option<(Vec<u8>, Vec<Vec<u8>>, u16)> {
                         // legacy_record_version is at raw[offset+1..offset+3]
                         tls_version = Some(u16::from_be_bytes([raw[offset + 1], raw[offset + 2]]));
                     }
-                    0x0b => {
+                    0x0b if hs_body.len() >= 3 => {
                         // Certificate
                         // Parse the certificate list and extract each DER cert.
-                        if hs_body.len() >= 3 {
-                            let _list_len = ((hs_body[0] as usize) << 16)
-                                | ((hs_body[1] as usize) << 8)
-                                | (hs_body[2] as usize);
-                            let mut cert_off = 3usize;
-                            while cert_off + 3 <= hs_body.len() {
-                                let cert_len = ((hs_body[cert_off] as usize) << 16)
-                                    | ((hs_body[cert_off + 1] as usize) << 8)
-                                    | (hs_body[cert_off + 2] as usize);
-                                let cert_data_end = cert_off + 3 + cert_len;
-                                if cert_data_end > hs_body.len() {
-                                    break;
-                                }
-                                certificates.push(hs_body[cert_off + 3..cert_data_end].to_vec());
-                                cert_off = cert_data_end + 2; // skip 2-byte extensions
+                        let _list_len = ((hs_body[0] as usize) << 16)
+                            | ((hs_body[1] as usize) << 8)
+                            | (hs_body[2] as usize);
+                        let mut cert_off = 3usize;
+                        while cert_off + 3 <= hs_body.len() {
+                            let cert_len = ((hs_body[cert_off] as usize) << 16)
+                                | ((hs_body[cert_off + 1] as usize) << 8)
+                                | (hs_body[cert_off + 2] as usize);
+                            let cert_data_end = cert_off + 3 + cert_len;
+                            if cert_data_end > hs_body.len() {
+                                break;
                             }
+                            certificates.push(hs_body[cert_off + 3..cert_data_end].to_vec());
+                            cert_off = cert_data_end + 2; // skip 2-byte extensions
                         }
                     }
                     _ => {}

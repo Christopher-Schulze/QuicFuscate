@@ -15,11 +15,11 @@ resolved: 2026-03-27
 
 ## Problem
 `docs/CONTRIBUTING.md` line 42 states "Rust stable (latest)" as prerequisite.
-The project pins Rust 1.93.0 in `rust-toolchain.toml`. Contributors following
+The project uses the Rust stable channel in `rust-toolchain.toml`. Contributors following
 "latest" may use a different toolchain than CI, causing confusing failures.
 
 ## Fix Plan
-1. Edit CONTRIBUTING.md line 42: change "Rust stable (latest)" to "Rust 1.93.0 stable (pinned in rust-toolchain.toml)"
+1. Edit CONTRIBUTING.md line 42: document that Rust stable is selected by `rust-toolchain.toml`
 2. Verify no other version references need updating
 
 ## Files to Modify

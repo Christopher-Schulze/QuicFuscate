@@ -4,7 +4,7 @@ title: "IPv6 and DNS leak prevention in kill switch"
 severity: HIGH
 phase: "H"
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-06-30
 depends_on: []
 ---

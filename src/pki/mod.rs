@@ -61,11 +61,23 @@ pub const INTERMEDIATE_CA_VALIDITY_DAYS: u32 = 1825; // 5 years
 pub const SERVER_LEAF_VALIDITY_DAYS: u32 = 365; // 1 year
 
 /// A generated certificate + its private key (DER-encoded).
+///
+/// The private key (`key_der`) is zeroized on drop via the `Drop`
+/// implementation so that no CA key material (root, intermediate, or leaf)
+/// lingers in memory after the owning `GeneratedCert` goes out of scope.
+/// Certificates (`cert_der`) are public and not zeroized.
 pub struct GeneratedCert {
     /// Certificate in DER format.
     pub cert_der: Vec<u8>,
     /// Private key in DER format.
     pub key_der: Vec<u8>,
+}
+
+impl Drop for GeneratedCert {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.key_der.zeroize();
+    }
 }
 
 /// A complete CA hierarchy: root CA, intermediate CA, and server leaf.
@@ -188,33 +200,49 @@ pub fn generate_hierarchy(
     Err(PkiError::FeatureNotEnabled)
 }
 
-/// Write a certificate and its private key to disk in PEM format.
-pub fn write_cert_and_key_pem(
-    cert_der: &[u8],
-    key_der: &[u8],
-    cert_path: &Path,
-    key_path: &Path,
-) -> Result<(), PkiError> {
+/// Write a private key to disk in PEM format with restrictive permissions
+/// (0600 on Unix). The intermediate PEM string copy is wrapped in
+/// `Zeroizing<String>` so it is scrubbed on every exit path — including
+/// early returns from `?` operators — without relying on the caller to
+/// remember an explicit zeroize call. The caller's `key_der` slice is
+/// also zeroized in place on the success path (and is additionally
+/// protected by `GeneratedCert::drop` if the caller owns one). The
+/// `zeroize` crate uses volatile writes to defeat dead-store elimination.
+///
+/// Note: `GeneratedCert::drop` also zeroizes `key_der`, so even if a
+/// caller forgets to call this function the key is still scrubbed when the
+/// `GeneratedCert` is dropped.
+pub fn write_key_pem(key_der: &mut [u8], key_path: &Path) -> Result<(), PkiError> {
     use std::io::Write;
+    use zeroize::Zeroize;
 
-    // Convert DER to PEM.
-    let cert_pem = der_to_pem(cert_der, "CERTIFICATE");
-    let key_pem = der_to_pem(key_der, "PRIVATE KEY");
+    // Zeroizing<String> guarantees the PEM-encoded key material is scrubbed
+    // via volatile writes on drop, regardless of which `?` early-returns.
+    let key_pem = zeroize::Zeroizing::new(der_to_pem(key_der, "PRIVATE KEY"));
 
-    let mut cert_file = std::fs::File::create(cert_path)?;
-    cert_file.write_all(cert_pem.as_bytes())?;
-
-    // Set restrictive permissions on the key file (0600 on Unix).
-    let mut key_file = std::fs::File::create(key_path)?;
-    key_file.write_all(key_pem.as_bytes())?;
-
+    // On Unix, open the file with mode 0600 atomically via OpenOptions::mode
+    // so the private key is never briefly world-readable on disk. This
+    // eliminates the TOCTOU window that File::create (default 0644) +
+    // post-hoc set_permissions would leave.
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = key_file.metadata()?.permissions();
-        perms.set_mode(0o600);
-        std::fs::set_permissions(key_path, perms)?;
-    }
+    let mut key_file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(key_path)?
+    };
+    #[cfg(not(unix))]
+    let mut key_file = std::fs::File::create(key_path)?;
+
+    key_file.write_all(key_pem.as_bytes())?;
+    key_file.sync_all()?;
+
+    // Zeroize the caller's key_der slice on the success path. On early
+    // return, GeneratedCert::drop (if the caller owns one) still scrubs it.
+    key_der.zeroize();
 
     Ok(())
 }
@@ -250,6 +278,7 @@ fn der_to_pem(der: &[u8], label: &str) -> String {
     let mut pem = String::new();
     let _ = writeln!(pem, "-----BEGIN {label}-----");
     for chunk in b64.as_bytes().chunks(64) {
+        // base64 output is always valid ASCII/UTF-8.
         pem.push_str(std::str::from_utf8(chunk).unwrap());
         pem.push('\n');
     }
@@ -307,25 +336,20 @@ pub fn ensure_pki(
         server_hostname
     );
 
-    let hierarchy = generate_hierarchy(server_hostname, organization)?;
+    let mut hierarchy = generate_hierarchy(server_hostname, organization)?;
 
     // Write root CA.
     write_ca_cert_pem(&hierarchy.root_ca.cert_der, &root_ca_path)?;
     // Write intermediate CA.
     write_ca_cert_pem(&hierarchy.intermediate_ca.cert_der, &intermediate_ca_path)?;
-    // Write server leaf + intermediate as chain.
+    // Write server leaf + intermediate as chain (full chain for clients).
     write_cert_chain_pem(
         &hierarchy.server_leaf.cert_der,
         &hierarchy.intermediate_ca.cert_der,
         &server_cert_path,
     )?;
-    // Write server key.
-    write_cert_and_key_pem(
-        &hierarchy.server_leaf.cert_der,
-        &hierarchy.server_leaf.key_der,
-        &server_cert_path,
-        &server_key_path,
-    )?;
+    // Write server key separately (does not overwrite the cert chain).
+    write_key_pem(&mut hierarchy.server_leaf.key_der, &server_key_path)?;
 
     log::info!("PKI: Hierarchy generated successfully");
     Ok((server_cert_path, server_key_path))
@@ -370,11 +394,89 @@ mod tests {
         assert_ne!(hierarchy.intermediate_ca.cert_der, hierarchy.server_leaf.cert_der);
     }
 
+    #[cfg(feature = "rcgen")]
+    #[test]
+    fn test_ensure_pki_chain_contains_leaf_and_intermediate() {
+        let dir = std::env::temp_dir().join(format!(
+            "qf_pki_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let (cert_path, key_path) = ensure_pki(&dir, "vpn.example.com", "TestOrg").unwrap();
+
+        // The cert file must contain BOTH the leaf and the intermediate
+        // (two "BEGIN CERTIFICATE" blocks), not just the leaf.
+        let cert_content = std::fs::read_to_string(&cert_path).unwrap();
+        let cert_count = cert_content.matches("BEGIN CERTIFICATE").count();
+        assert_eq!(
+            cert_count, 2,
+            "server.crt must contain leaf + intermediate chain, found {cert_count} cert(s)"
+        );
+
+        // The key file must contain a private key, not a certificate.
+        let key_content = std::fs::read_to_string(&key_path).unwrap();
+        assert!(key_content.contains("BEGIN PRIVATE KEY"), "server.key must contain a private key");
+        assert!(
+            !key_content.contains("BEGIN CERTIFICATE"),
+            "server.key must NOT contain a certificate"
+        );
+
+        // Key file must have 0600 permissions on Unix.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::metadata(&key_path).unwrap().permissions().mode();
+            assert_eq!(
+                perms & 0o777,
+                0o600,
+                "server.key must have 0600 permissions, got {:o}",
+                perms & 0o777
+            );
+        }
+
+        // Calling ensure_pki again should reuse existing certs (idempotent).
+        let (cert2, key2) = ensure_pki(&dir, "vpn.example.com", "TestOrg").unwrap();
+        assert_eq!(cert_path, cert2);
+        assert_eq!(key_path, key2);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn test_pki_error_display() {
         let e = PkiError::GenerationFailed("test".into());
         assert!(format!("{e}").contains("test"));
         let e = PkiError::FeatureNotEnabled;
         assert!(format!("{e}").contains("not enabled"));
+    }
+
+    #[cfg(feature = "rcgen")]
+    #[test]
+    fn test_generated_cert_drop_runs_without_panic() {
+        // Smoke test: dropping a GeneratedCert (which zeroizes key_der in its
+        // Drop impl) must not panic. The zeroize crate's volatile-write
+        // contract guarantees the buffer is scrubbed before the Vec's
+        // allocator frees it; a reliable post-free memory inspection is not
+        // possible in safe Rust, so we verify the zeroize primitive itself
+        // in test_zeroize_scrubs_key_der below.
+        let cert = generate_hierarchy("vpn.example.com", "TestOrg").unwrap();
+        assert!(!cert.root_ca.key_der.is_empty());
+        drop(cert); // Must not panic.
+    }
+
+    #[test]
+    fn test_zeroize_scrubs_key_der() {
+        // Directly verify that zeroize on a key_der Vec scrubs the key
+        // material. The `zeroize` crate's Vec<T: Zeroize> impl zeroizes
+        // each element and then truncates the Vec to length 0, so the
+        // bytes are no longer observable through the Vec. This is the
+        // primitive the GeneratedCert::drop impl relies on.
+        use zeroize::Zeroize;
+        let mut key = vec![0xABu8; 64];
+        assert!(key.iter().any(|&b| b != 0), "key must be non-zero before zeroize");
+        key.zeroize();
+        assert_eq!(key.len(), 0, "zeroize must clear the Vec so bytes are unobservable");
     }
 }

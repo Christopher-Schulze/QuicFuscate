@@ -4,7 +4,7 @@ title: E2E FEC tests through real QUIC transport (netns + tc-netem)
 severity: HIGH
 phase: "F"
 priority: P0
-status: OPEN
+status: DONE
 created: 2026-06-29
 depends_on: ["TODO-422"]
 ---

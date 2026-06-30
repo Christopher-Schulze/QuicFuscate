@@ -233,11 +233,9 @@ fn aes128_encrypt_block_fast(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
     // are present before calling aes128_encrypt_block_arm. key and block are
     // fixed-size references (&[u8; 16]) owned by the caller.
     unsafe {
-        if FeatureDetector::instance().has_feature(CpuFeature::NEON_CRYPTO)
-            || FeatureDetector::instance().has_feature(CpuFeature::NEON)
-        {
+        if FeatureDetector::instance().has_feature(CpuFeature::AES) {
             // SAFETY:
-            // - runtime feature detection gates the ARM crypto/NEON fast path
+            // - runtime feature detection gates the ARM AES fast path
             // - `key` and `block` are fixed-size references owned by the caller
             // - the accelerated helper does not retain pointers past the call
             return aes128_encrypt_block_arm(key, block);
@@ -248,6 +246,7 @@ fn aes128_encrypt_block_fast(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
 
 #[cfg(target_arch = "aarch64")]
 #[inline]
+#[target_feature(enable = "aes")]
 /// # Safety
 /// Requires aarch64 with AES instructions available (checked by caller via runtime detection).
 /// `key` and `block` must point to valid 16-byte aligned data readable by the function.

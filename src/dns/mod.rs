@@ -10,6 +10,7 @@
 //! upstream DNS servers (server-side).
 
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
 
 /// Default upstream DoH providers used when none are configured.
 pub const DEFAULT_DOH_UPSTREAM: &[&str] =
@@ -221,6 +222,13 @@ pub fn is_dns_query(pkt: &[u8]) -> bool {
 }
 
 /// DNS proxy configuration.
+///
+/// The `doh_client` field caches a shared `reqwest::Client` so that DoH
+/// queries reuse a single connection pool and avoid a per-query TLS
+/// handshake. It is lazily initialized on the first DoH query via
+/// [`DnsProxyConfig::doh_client`] and cheaply cloned (Arc bump) thereafter.
+/// Callers that construct a `DnsProxyConfig` once and reuse it across many
+/// queries get the full pooling benefit automatically.
 #[derive(Debug, Clone)]
 pub struct DnsProxyConfig {
     /// Upstream DoH endpoints (client-side).
@@ -231,6 +239,34 @@ pub struct DnsProxyConfig {
     pub use_doh: bool,
     /// Listen port for the DNS proxy (default 53).
     pub listen_port: u16,
+    /// Cached shared DoH HTTP client (lazily initialized). Cloning the
+    /// config clones the `Arc`, sharing the underlying connection pool.
+    doh_client: Arc<parking_lot::Mutex<Option<reqwest::Client>>>,
+}
+
+impl DnsProxyConfig {
+    /// Returns a shared `reqwest::Client` for DoH resolution, building it
+    /// on first call and reusing it on subsequent calls. Cloning the
+    /// config (or the returned client) is cheap — both are Arc bumps that
+    /// share the same connection pool.
+    ///
+    /// Returns an error only if the initial client build fails (e.g.
+    /// TLS backend unavailable); subsequent calls retry the build.
+    pub fn doh_client(&self) -> Result<reqwest::Client, DnsProxyError> {
+        let mut guard = self.doh_client.lock();
+        if let Some(c) = guard.as_ref() {
+            return Ok(c.clone());
+        }
+        let client = build_doh_client()?;
+        *guard = Some(client.clone());
+        Ok(client)
+    }
+
+    /// Test-only accessor: whether the cached client has been built.
+    #[cfg(test)]
+    pub fn doh_client_inner(&self) -> bool {
+        self.doh_client.lock().is_some()
+    }
 }
 
 impl Default for DnsProxyConfig {
@@ -240,6 +276,7 @@ impl Default for DnsProxyConfig {
             upstream_resolvers: DEFAULT_DNS_UPSTREAM.to_vec(),
             use_doh: true,
             listen_port: 53,
+            doh_client: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 }
@@ -247,6 +284,12 @@ impl Default for DnsProxyConfig {
 /// Handle a DNS query packet by forwarding it to an upstream resolver and
 /// returning the response. This is the server-side path: plain DNS over UDP
 /// to upstream resolvers.
+///
+/// Security: the response source IP is validated to match the upstream
+/// resolver, preventing DNS amplification and response spoofing attacks.
+/// The response is also size-limited to 4096 bytes (well above the typical
+/// DNS UDP payload size of 512 bytes, accommodating EDNS0 but preventing
+/// oversized amplification payloads).
 pub fn forward_dns_query(query: &[u8], upstream: Ipv4Addr) -> std::io::Result<Vec<u8>> {
     use std::net::UdpSocket;
     let sock = UdpSocket::bind("0.0.0.0:0")?;
@@ -254,34 +297,131 @@ pub fn forward_dns_query(query: &[u8], upstream: Ipv4Addr) -> std::io::Result<Ve
     let upstream_addr = SocketAddr::new(std::net::IpAddr::V4(upstream), 53);
     sock.send_to(query, upstream_addr)?;
     let mut buf = vec![0u8; 4096];
-    let (len, _) = sock.recv_from(&mut buf)?;
-    buf.truncate(len);
-    Ok(buf)
+    // Bound the number of spoofed-response rejections. Without this an
+    // attacker flooding the ephemeral socket with forged packets could
+    // keep the loop spinning until the read timeout. 8 rejections is far
+    // beyond legitimate noise (a real upstream replies exactly once).
+    const MAX_SPOOFED_REJECTIONS: u32 = 8;
+    let mut rejections = 0u32;
+    loop {
+        let (len, resp_addr) = sock.recv_from(&mut buf)?;
+        // Reject responses from any source other than the upstream resolver.
+        // This prevents DNS spoofing/amplification attacks where an attacker
+        // sends a forged response from a different IP.
+        if resp_addr != upstream_addr {
+            rejections += 1;
+            log::warn!(
+                "DNS: rejecting response from {resp_addr} (expected {upstream_addr}) [{rejections}/{MAX_SPOOFED_REJECTIONS}]"
+            );
+            if rejections >= MAX_SPOOFED_REJECTIONS {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    "DNS: too many spoofed responses from non-upstream sources",
+                ));
+            }
+            continue;
+        }
+        buf.truncate(len);
+        return Ok(buf);
+    }
 }
 
-/// Handle a DNS query by resolving via DoH (client-side). Sends the raw DNS
-/// query as `application/dns-message` to the DoH endpoint.
+/// Build a shared `reqwest::Client` tuned for DoH resolution: short
+/// timeouts, HTTPS-only, no redirects, rustls TLS backend. The client
+/// owns a connection pool so reusing it across queries avoids a fresh
+/// TLS handshake per DNS request. Cloning the returned client is cheap
+/// (Arc bump) and shares the pool.
+pub fn build_doh_client() -> Result<reqwest::Client, DnsProxyError> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("quicfuscate-doh/1.0")
+        .build()
+        .map_err(|e| DnsProxyError::DohError(format!("HTTP client build failed: {e}")))
+}
+
+/// Handle a DNS query by resolving via DoH (client-side) using a caller-
+/// supplied `reqwest::Client`. Sends the raw DNS query as
+/// `application/dns-message` (RFC 8484) to the DoH endpoint via HTTP POST.
+/// The response body is the raw DNS response packet.
+///
+/// The client is expected to be built via [`build_doh_client`] (or an
+/// equivalent configuration) and reused across queries to benefit from
+/// connection pooling and avoid a per-query TLS handshake.
+pub async fn resolve_via_doh_with_client(
+    query: &[u8],
+    doh_endpoint: &str,
+    client: &reqwest::Client,
+) -> Result<Vec<u8>, DnsProxyError> {
+    let response = client
+        .post(doh_endpoint)
+        .header("content-type", "application/dns-message")
+        .header("accept", "application/dns-message")
+        .body(query.to_vec())
+        .send()
+        .await
+        .map_err(|e| DnsProxyError::DohError(format!("DoH request failed: {e}")))?;
+
+    if !response.status().is_success() {
+        return Err(DnsProxyError::DohError(format!(
+            "DoH endpoint returned HTTP {}",
+            response.status()
+        )));
+    }
+
+    let content_type =
+        response.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("");
+    if !content_type.contains("application/dns-message") {
+        return Err(DnsProxyError::DohError(format!(
+            "DoH endpoint returned unexpected content-type: {content_type}"
+        )));
+    }
+
+    let body = response
+        .bytes()
+        .await
+        .map_err(|e| DnsProxyError::DohError(format!("DoH response read failed: {e}")))?;
+
+    // Validate that the response is a valid DNS packet (at least 12-byte header).
+    if body.len() < 12 {
+        return Err(DnsProxyError::DohError("DoH response too short for DNS packet".into()));
+    }
+
+    // Verify the DNS transaction ID matches. RFC 8484 §4.2.1 says the ID
+    // "SHOULD be set to 0" in DoH, but in practice all major providers
+    // (Cloudflare, Google, Quad9) echo the query ID. We enforce a match as
+    // a spoofing/injection defense: an attacker who cannot see the query
+    // cannot guess the 16-bit ID. If a strict RFC 8484 server returns ID=0
+    // for a non-zero query ID, this check will reject it — but no known
+    // production DoH server does this.
+    let query_id = u16::from_be_bytes([query[0], query[1]]);
+    let response_id = u16::from_be_bytes([body[0], body[1]]);
+    if query_id != response_id {
+        return Err(DnsProxyError::DohError(format!(
+            "DoH response ID mismatch: expected {query_id}, got {response_id}"
+        )));
+    }
+
+    Ok(body.to_vec())
+}
+
+/// Handle a DNS query by resolving via DoH (client-side). Convenience
+/// wrapper around [`resolve_via_doh_with_client`] that builds a one-off
+/// `reqwest::Client` per call. Suitable for standalone/test use; for
+/// high-volume DNS proxying, build a client once with [`build_doh_client`]
+/// and call [`resolve_via_doh_with_client`] directly.
 pub async fn resolve_via_doh(query: &[u8], doh_endpoint: &str) -> Result<Vec<u8>, DnsProxyError> {
-    // Use a minimal HTTP client. We avoid pulling in reqwest/hyper for this
-    // — the DoH request is a simple POST with a binary body.
-    // In production, this would use the QUIC tunnel's HTTP/3 stack.
-    // For now, we use a plain TCP+TLS connection via std.
-    //
-    // NOTE: This is a synchronous stub that returns an error. The actual DoH
-    // resolution happens through the VPN tunnel's HTTP/3 client, which is
-    // wired in the connection layer. This function exists for standalone DNS
-    // proxy mode.
-    let _ = (query, doh_endpoint);
-    Err(DnsProxyError::NotImplemented(
-        "DoH resolution requires the VPN tunnel's HTTP/3 client".into(),
-    ))
+    let client = build_doh_client()?;
+    resolve_via_doh_with_client(query, doh_endpoint, &client).await
 }
 
 /// Error type for DNS proxy operations.
 #[derive(Debug)]
 pub enum DnsProxyError {
     IoError(std::io::Error),
-    NotImplemented(String),
+    DohError(String),
     ParseError(String),
 }
 
@@ -289,7 +429,7 @@ impl std::fmt::Display for DnsProxyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::IoError(e) => write!(f, "DNS I/O error: {e}"),
-            Self::NotImplemented(s) => write!(f, "DNS not implemented: {s}"),
+            Self::DohError(s) => write!(f, "DoH error: {s}"),
             Self::ParseError(s) => write!(f, "DNS parse error: {s}"),
         }
     }
@@ -317,14 +457,30 @@ pub async fn process_dns_query(
         .ok_or_else(|| DnsProxyError::ParseError("invalid DNS query".into()))?;
 
     if config.use_doh && !config.doh_endpoints.is_empty() {
-        // Client-side: resolve via DoH through the tunnel.
-        for endpoint in &config.doh_endpoints {
-            if let Ok(response) = resolve_via_doh(pkt, endpoint).await {
-                return Ok(response);
+        // Client-side: resolve via DoH through the tunnel. The shared HTTP
+        // client is cached in the config so it is built once and reused
+        // across all queries and endpoints, benefiting from connection
+        // pooling and avoiding a per-query TLS handshake.
+        //
+        // If the cached client cannot be built (e.g. TLS backend
+        // unavailable), fall back to NXDOMAIN rather than propagating the
+        // error — the caller expects a DNS response packet, not an error.
+        match config.doh_client() {
+            Ok(client) => {
+                for endpoint in &config.doh_endpoints {
+                    if let Ok(response) = resolve_via_doh_with_client(pkt, endpoint, &client).await
+                    {
+                        return Ok(response);
+                    }
+                }
+                // All DoH endpoints failed — fall back to NXDOMAIN.
+                Ok(build_dns_nxdomain(&query))
+            }
+            Err(e) => {
+                log::warn!("DoH client build failed, returning NXDOMAIN: {e}");
+                Ok(build_dns_nxdomain(&query))
             }
         }
-        // DoH failed, fall back to NXDOMAIN.
-        Ok(build_dns_nxdomain(&query))
     } else if !config.upstream_resolvers.is_empty() {
         // Server-side: forward to upstream DNS resolver.
         for upstream in &config.upstream_resolvers {
@@ -436,5 +592,94 @@ mod tests {
         assert!(!config.upstream_resolvers.is_empty());
         assert!(config.use_doh);
         assert_eq!(config.listen_port, 53);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_via_doh_rejects_invalid_endpoint() {
+        // An invalid endpoint should return a DohError, not panic.
+        let pkt = make_dns_query_packet("example.com", 1);
+        let result = resolve_via_doh(&pkt, "https://invalid.localhost.invalid/dns-query").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, DnsProxyError::DohError(_)));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_via_doh_rejects_http_endpoint() {
+        // The client is configured for HTTPS only; HTTP should fail.
+        let pkt = make_dns_query_packet("example.com", 1);
+        let result = resolve_via_doh(&pkt, "http://127.0.0.1:1/dns-query").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_build_doh_client_succeeds() {
+        // The client builder must succeed with the canonical configuration.
+        let client = build_doh_client();
+        assert!(client.is_ok(), "build_doh_client should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_via_doh_with_client_rejects_invalid_endpoint() {
+        // Using a shared client, an invalid endpoint should still return a
+        // DohError, not panic. This verifies the shared-client path.
+        let pkt = make_dns_query_packet("example.com", 1);
+        let client = build_doh_client().unwrap();
+        let result = resolve_via_doh_with_client(
+            &pkt,
+            "https://invalid.localhost.invalid/dns-query",
+            &client,
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), DnsProxyError::DohError(_)));
+    }
+
+    #[tokio::test]
+    async fn test_process_dns_query_with_no_resolvers_returns_nxdomain() {
+        let pkt = make_dns_query_packet("example.com", 1);
+        let config = DnsProxyConfig {
+            doh_endpoints: vec![],
+            upstream_resolvers: vec![],
+            use_doh: false,
+            ..Default::default()
+        };
+        let result = process_dns_query(&pkt, &config).await.unwrap();
+        // Should be NXDOMAIN (RCODE=3).
+        assert_eq!(result[3] & 0x0F, 3);
+    }
+
+    #[tokio::test]
+    async fn test_doh_client_is_cached_and_shared() {
+        // The cached client must be built once and reused on subsequent
+        // calls. After the first call the cache slot must be populated;
+        // the second call must succeed without rebuilding.
+        let config = DnsProxyConfig::default();
+        // Before first call: cache is empty.
+        assert!(!config.doh_client_inner(), "cache must be empty initially");
+        let _c1 = config.doh_client().unwrap();
+        // After first call: cache is populated.
+        assert!(config.doh_client_inner(), "cache must be populated after first call");
+        // Second call must succeed (returns a clone of the cached client).
+        let _c2 = config.doh_client().unwrap();
+        assert!(config.doh_client_inner(), "cache must remain populated");
+    }
+
+    #[tokio::test]
+    async fn test_process_dns_query_doh_failure_returns_nxdomain_not_error() {
+        // When DoH is enabled but all endpoints fail (unreachable), the
+        // function must return a NXDOMAIN response packet, not an error.
+        // This is the production contract: callers expect a DNS response.
+        let pkt = make_dns_query_packet("example.com", 1);
+        let config = DnsProxyConfig {
+            doh_endpoints: vec!["https://invalid.localhost.invalid/dns-query".to_string()],
+            upstream_resolvers: vec![],
+            use_doh: true,
+            ..Default::default()
+        };
+        let result = process_dns_query(&pkt, &config).await;
+        assert!(result.is_ok(), "DoH failure should return NXDOMAIN, not error");
+        let response = result.unwrap();
+        assert_eq!(response[3] & 0x0F, 3, "response should be NXDOMAIN (RCODE=3)");
     }
 }

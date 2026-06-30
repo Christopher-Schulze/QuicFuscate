@@ -4,7 +4,7 @@ title: InterleavedDecoder coefficient-to-packet-ID mapping bug — FEC recovery 
 severity: CRITICAL
 phase: "G"
 priority: P0
-status: OPEN
+status: DONE
 created: 2026-06-30
 depends_on: []
 ---

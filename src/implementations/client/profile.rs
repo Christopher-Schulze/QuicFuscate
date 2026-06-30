@@ -189,7 +189,7 @@ impl ProfileManager {
         let mut profiles: Vec<_> =
             self.profiles.values().filter(|p| p.last_connected.is_some()).collect();
 
-        profiles.sort_by(|a, b| b.last_connected.cmp(&a.last_connected));
+        profiles.sort_by_key(|profile| std::cmp::Reverse(profile.last_connected));
 
         profiles.into_iter().take(5).collect()
     }

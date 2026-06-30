@@ -34,7 +34,7 @@ Eliminate the current Clippy failures and adjacent hygiene debt so the repositor
 
 ## Completion Notes
 - Removed the dead migration-path field and the nearby hygiene issues that were breaking strict Clippy.
-- Aligned the codebase with the selected Rust `1.93.0` baseline instead of carrying stale 1.80-era compatibility friction.
+- Aligned the codebase with the selected Rust stable baseline instead of carrying stale compatibility friction.
 - Re-ran strict Clippy successfully on the full workspace.
 
 ## Acceptance Criteria

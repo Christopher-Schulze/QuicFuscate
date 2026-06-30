@@ -6,7 +6,7 @@
   <img src="assets/logo/QuicFuscate.png" alt="QuicFuscate Logo" width="300">
 
   [![Build](https://img.shields.io/badge/Build-Passing-brightgreen?style=for-the-badge&logo=github)](https://github.com/Christopher-Schulze/QuicFuscate/actions)
-  [![Rust](https://img.shields.io/badge/Rust-1.93+-000000?style=for-the-badge&logo=rust)](https://www.rust-lang.org/)
+  [![Rust](https://img.shields.io/badge/Rust-stable-000000?style=for-the-badge&logo=rust)](https://www.rust-lang.org/)
   [![QUIC](https://img.shields.io/badge/QUIC-Protocol-009DFF?style=for-the-badge&logo=internet-explorer)](https://datatracker.ietf.org/doc/html/rfc9000)
   [![HTTP/3](https://img.shields.io/badge/HTTP-3-FF6B6B?style=for-the-badge&logo=internet-explorer)](https://en.wikipedia.org/wiki/HTTP/3)
   [![Obfuscation](https://img.shields.io/badge/Obfuscation-Enabled-6A5ACD?style=for-the-badge)](#stealth-techniques)

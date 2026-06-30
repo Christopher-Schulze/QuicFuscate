@@ -20,14 +20,14 @@ Replace in both `build-test` and `e2e-tls` jobs:
 - uses: actions-rs/toolchain@v1
   with:
     profile: minimal
-    toolchain: 1.93.0
+    toolchain: stable
     components: clippy
     override: true
 
 # After
 - uses: dtolnay/rust-toolchain@stable
   with:
-    toolchain: 1.93.0
+    toolchain: stable
     components: clippy
 ```
 

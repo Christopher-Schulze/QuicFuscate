@@ -4,7 +4,7 @@ title: "DDoS protection hardening (rate limits, burst, GeoIP, blacklist sync, ch
 severity: HIGH
 phase: "I"
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-07-23
 depends_on: []
 ---

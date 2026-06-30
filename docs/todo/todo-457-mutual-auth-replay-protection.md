@@ -4,7 +4,7 @@ title: "Mutual authentication and replay protection for QKey transport"
 severity: HIGH
 phase: "I"
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-07-23
 depends_on: ["TODO-434"]
 ---

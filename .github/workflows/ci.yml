@@ -108,7 +108,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.93.0
+          toolchain: stable
           components: clippy
 
       - name: Cache cargo registry
@@ -169,7 +169,7 @@ jobs:
           submodules: false
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@1.93.0
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -204,7 +204,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.93.0
+          toolchain: stable
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -236,7 +236,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.93.0
+          toolchain: stable
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
@@ -314,7 +314,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@1.93.0
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo registry + criterion baselines
         uses: actions/cache@v4

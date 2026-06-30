@@ -4,7 +4,7 @@
 
 - **Server:** broderick (Oracle Cloud, Ubuntu 24.04 aarch64, 4 cores, 23 GB RAM, NL region)
 - **Kernel:** Linux 6.x (aarch64)
-- **Rust:** 1.93.0, release profile
+- **Rust:** stable channel, release profile
 - **Date:** 2026-07-23
 - **Method:** `perf record -F 99 -g` + FlameGraph (Brendan Gregg's stackcollapse-perf.pl + flamegraph.pl)
 - **Network:** Loopback (127.0.0.1), no tc-netem (baseline without loss/latency simulation)

@@ -93,11 +93,12 @@ enum OutboundDispatch {
     #[cfg(feature = "io_uring")]
     IoUringBatch,
     SendmmsgBatch,
+    #[cfg(any(test, feature = "io_uring"))]
     SocketPerPacket,
 }
 
 #[inline]
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", any(test, feature = "io_uring")))]
 fn resolve_outbound_dispatch(_queued: usize, _has_uring: bool) -> OutboundDispatch {
     #[cfg(feature = "io_uring")]
     if _queued > 1 && _has_uring {
@@ -215,12 +216,13 @@ pub fn evaluate_hotpath_perf_smoke(
         return Err("sendmmsg batch utilization below threshold");
     }
 
-    if counters.udp_packets_received > 0 {
-        let ratio_ppm =
-            counters.batch_drain_packets.saturating_mul(1_000_000) / counters.udp_packets_received;
-        if ratio_ppm > thresholds.max_batch_drain_ratio_ppm {
-            return Err("batch drain ratio exceeds threshold");
-        }
+    let ratio_ppm = counters
+        .batch_drain_packets
+        .saturating_mul(1_000_000)
+        .checked_div(counters.udp_packets_received)
+        .unwrap_or(0);
+    if ratio_ppm > thresholds.max_batch_drain_ratio_ppm {
+        return Err("batch drain ratio exceeds threshold");
     }
 
     Ok(())

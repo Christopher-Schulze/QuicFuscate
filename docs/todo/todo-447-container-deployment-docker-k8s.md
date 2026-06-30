@@ -4,7 +4,7 @@ title: "Container deployment (Docker, docker-compose, Kubernetes, Helm)"
 severity: HIGH
 phase: "I"
 priority: P1
-status: OPEN
+status: DEFERRED
 created: 2026-07-23
 depends_on: ["TODO-444", "TODO-446"]
 ---
@@ -14,10 +14,15 @@ depends_on: ["TODO-444", "TODO-446"]
 ## Goal
 Create a complete container deployment infrastructure for QuicFuscate: a multi-stage Dockerfile (builder + minimal runtime), docker-compose.yml for quick-start, Kubernetes manifests (Deployment, Service, ConfigMap, Secret), and a Helm chart. The container must support TUN device access (`/dev/net/tun`), `NET_ADMIN` capability for iptables/nftables, all config via environment variables (12-factor compliance), health checks via admin HTTP, and volume mounts for state (qkeys.json, certs).
 
-## Current State (verified against code)
+## Scope Status
 
-### No container infrastructure
-No `Dockerfile`, no `.dockerignore`, no `docker-compose.yml`, no `k8s/` directory, no `helm/` directory exists in the project root.
+Deferred from the current production-readiness pass by explicit user instruction: Docker, Kubernetes, and Helm are not being worked on, built, or validated here. The only container-adjacent edit in this pass is removal of the stale fixed Rust toolchain pin from `Dockerfile` so the repository consistently targets the Rust stable channel.
+
+## Current Scope Snapshot
+
+Container deployment artifacts exist in the repository (`Dockerfile`, `docker-compose.yml`, `k8s/`, `helm/`), but they were not built, tested, or validated in the current production-readiness pass. Treat the remaining sections below as historical planning context for a future container-specific validation task, not as current verified deployment truth.
+
+## Historical Audit (not validated in current pass)
 
 ### Install script exists
 `scripts/install/install-server-linux.sh` — installs binary, assets, config, systemd unit on Linux. This is a VM-based deployment script, not container-based. It installs:

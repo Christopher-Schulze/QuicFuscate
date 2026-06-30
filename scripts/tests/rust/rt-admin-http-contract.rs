@@ -212,6 +212,7 @@ fn http_request_with_headers(
     let mut stream = TcpStream::connect(addr).expect("connect");
     let mut headers = String::new();
     headers.push_str(&format!("Host: {}\r\n", addr));
+    headers.push_str(&format!("Origin: http://{}\r\n", addr));
     if let Some(c) = cookie {
         headers.push_str(&format!("Cookie: {}\r\n", c));
     }
@@ -260,6 +261,7 @@ fn http_request_with_csrf(
     let mut stream = TcpStream::connect(addr).expect("connect");
     let mut headers = String::new();
     headers.push_str(&format!("Host: {}\r\n", addr));
+    headers.push_str(&format!("Origin: http://{}\r\n", addr));
     if let Some(c) = cookie {
         headers.push_str(&format!("Cookie: {}\r\n", c));
     }

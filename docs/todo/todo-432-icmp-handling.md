@@ -4,7 +4,7 @@ title: ICMP handling — echo reply, packet-too-big, destination unreachable, ti
 severity: CRITICAL
 phase: "G"
 priority: P0
-status: OPEN
+status: DONE
 created: 2026-06-30
 depends_on: ["TODO-430"]
 ---

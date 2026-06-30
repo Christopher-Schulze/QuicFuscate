@@ -29,11 +29,11 @@ fn gfw_probe_signature_triggers_configured_response() {
 }
 
 #[test]
-fn masked_dpi_probe_signature_is_detected() {
+fn quic_initial_like_dpi_signature_is_not_flagged_as_probe() {
     let detector = ActiveProbeDetector::new(8, ProbeResponseMode::Block);
     let packet = [0xc0_u8, 0xaa, 0xbb, 0xcc, 0x01, 0x99, 0x42];
     let result = detector.check_packet(&packet, loopback_source());
-    assert_eq!(result, Some(ProbeResponseMode::Block));
+    assert_eq!(result, None);
 }
 
 #[test]
@@ -96,8 +96,10 @@ fn stealth_manager_updates_probe_telemetry_counters() {
     let before_switch = telemetry::STEALTH_PROBE_SWITCH.get();
     let before_escalated = telemetry::STEALTH_MODE_ESCALATED.get();
 
-    let mut probe_packet = vec![0x16_u8, 0x03, 0x01, 0x00, 0x00, 0x42];
-    manager.process_incoming_packet_for_test(&mut probe_packet, loopback_source());
+    for _ in 0..3 {
+        let mut probe_packet = vec![0x16_u8, 0x03, 0x01, 0x00, 0x00, 0x42];
+        manager.process_incoming_packet_for_test(&mut probe_packet, loopback_source());
+    }
 
     let after_detected = telemetry::STEALTH_PROBE_DETECTED.get();
     let after_switch = telemetry::STEALTH_PROBE_SWITCH.get();

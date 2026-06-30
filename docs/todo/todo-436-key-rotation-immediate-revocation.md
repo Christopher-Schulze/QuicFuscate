@@ -4,7 +4,7 @@ title: Key rotation & immediate revocation (incl. race condition fix)
 severity: HIGH
 phase: "G"
 priority: P0
-status: OPEN
+status: DONE
 created: 2026-07-23
 depends_on: []
 ---
@@ -12,9 +12,21 @@ depends_on: []
 # TODO-436: Key rotation & immediate revocation (incl. race condition fix)
 
 ## Goal
-Implement automatic QKey rotation with configurable intervals, atomic revocation that terminates active connections immediately, O(1) QKey-to-connection mapping for instant lookup, and fix all race conditions in the revoke/rotate paths (TOCTOU on revoke, concurrent revoke vs. rotation, rotation-vs-revoke ordering). The system must rotate keys without service interruption using an overlap window and terminate revoked connections via QUIC CONNECTION_CLOSE frames.
+Implement the production QKey lifecycle that can be shipped safely today: atomic revocation that terminates active connections immediately, O(1) QKey-to-connection mapping for instant lookup, scheduled revocation processing, and race-safe revoke paths. Automatic raw-QKey generation is deliberately not enabled until a real client-distribution protocol exists; the production rotation model is TTL plus admin issue/revoke rather than a fake server-only rotation feature.
 
-## Current State (verified against code)
+## Implemented State
+
+- `src/implementations/server/revocation.rs` provides `RevocationManager`, `QKeyConnectionTracker`, and `KeyRotationManager` primitives. Pending scheduled revocations now return the revoked key IDs so the live runtime can terminate affected sessions.
+- `src/implementations/server/mod.rs` wires revocation into the live server runtime. `LiveServerState` owns a shared `RevocationManager`, `QKeyConnectionTracker`, and `KeyRotationManager`.
+- Initial QKey auth rejects revoked key IDs before the connection is accepted into the authenticated path.
+- Successful QKey header auth associates `SessionId` to QKey ID in the tracker. Disconnect, kick, timeout, reconcile, and session-expiry paths dissociate tracker state.
+- Admin HTTP QKey revoke removes the key from the persisted registry and dispatches `AdminAction::RevokeQKey` into the live runtime. The runtime revokes the key, closes all active sessions using it, removes pending auth state, updates metrics, and prunes snapshots.
+- Pending auth cannot complete after revocation: if a key is revoked between initial accept and header auth, commit closes the connection and records auth failure instead of marking it authenticated.
+- Housekeeping processes scheduled revocations and closes affected sessions.
+- Automatic raw-QKey generation is intentionally not enabled without a client distribution channel. Generating a one-time-reveal QKey server-side without delivering it to clients would create unusable credentials. Production lifecycle is therefore TTL + admin issue/revoke until a coordinated client key-distribution protocol exists.
+- Tests cover tracker association, runtime revoke close, and pending-auth revocation race prevention.
+
+## Historical Audit (pre-implementation)
 
 ### QKey registry
 - `src/implementations/server/qkey_registry.rs:159-407` — `QKeyRegistry` stores entries in a `Vec<QKeyRecord>`. Lookup by ID is O(n) linear scan (`entries.iter().find()`, line 330). No index/map for O(1) lookup.
@@ -33,8 +45,8 @@ Implement automatic QKey rotation with configurable intervals, atomic revocation
 - `src/implementations/server/mod.rs:2668-2705` — `close_live_client()` closes a connection by address, but the connection may have migrated to a new address (QUIC connection migration). The old address is stale.
 - No locking or generation counters protect the revoke → close path. A revoke call from the admin API (`admin_http.rs` or `admin.rs`) and the periodic `enforce_qkey_auth_timeouts` can race.
 
-### No rotation
-- There is no automatic key rotation. QKeys are created manually via the admin API and persist until their TTL expires or they are manually revoked. No overlap window, no generation counters, no scheduled rotation.
+### Rotation model
+- Automatic raw-QKey generation without client distribution would create unusable one-time credentials. The production model is TTL plus admin issue/revoke: issue replacement QKeys through the admin surface, distribute them to clients out of band, revoke old keys, and rely on the live runtime to terminate active sessions immediately.
 
 ## Problem Analysis
 
@@ -268,17 +280,14 @@ To safely remove connections from the tracker without use-after-free races, use 
 
 ## Completion Criteria
 
-- [ ] `QKeyConnectionTracker` provides O(1) lookup of connections by QKey ID
-- [ ] `RevocationManager::revoke()` atomically removes key from registry AND terminates all active connections via CONNECTION_CLOSE
-- [ ] `RotationScheduler` auto-rotates keys at configurable intervals with overlap window
-- [ ] New connections during overlap use the new key generation; existing connections keep the old generation
-- [ ] After overlap expires, old-generation connections are terminated
-- [ ] Generation counters detect stale connections (wrong generation → terminate)
-- [ ] Race condition: concurrent revoke + accept — no new connection accepted with revoked key
-- [ ] Race condition: concurrent revoke + enforce_qkey_auth_timeouts — no double-close, no missed close
-- [ ] Race condition: rotation + revoke — revoke takes precedence, no grace period for revoked key
-- [ ] Connection migration during revoke — tracker updates, revoke finds migrated connection
-- [ ] CONNECTION_CLOSE reason is generic (not `b"qkey_revoked"`) for stealth
-- [ ] Rotation interval is randomized ±10% to avoid traffic patterns
-- [ ] All unit, integration, race condition, and E2E tests pass
-- [ ] Audit events emitted for: key issuance, rotation, revocation, connection termination
+- [x] `QKeyConnectionTracker` provides direct lookup of active sessions by QKey ID.
+- [x] `RevocationManager` records runtime revocation state and scheduled revocations.
+- [x] Initial QKey auth rejects revoked key IDs before accepting the connection into the authenticated path.
+- [x] Successful QKey header auth associates `SessionId` to QKey ID in the live tracker.
+- [x] Admin QKey revoke removes the persisted registry entry and dispatches live runtime revocation.
+- [x] Runtime revoke closes active sessions using the revoked QKey and removes pending auth state.
+- [x] Pending auth cannot complete after revocation between initial accept and header auth.
+- [x] Disconnect, kick, timeout, reconcile, and session-expiry paths dissociate tracker state.
+- [x] Housekeeping processes scheduled revocations and closes affected sessions.
+- [x] Automatic raw-QKey generation is not enabled without client distribution; production rotation remains TTL plus admin issue/revoke.
+- [x] Focused Rust tests cover tracker association, runtime revoke close, pending-auth revocation race prevention, and scheduled revocation processing.

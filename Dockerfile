@@ -2,8 +2,8 @@
 # ==============================================================================
 # QuicFuscate Container Image - Multi-stage Build
 # ==============================================================================
-# Builder stage compiles the release binary from source using the pinned
-# toolchain (rust-toolchain.toml => channel 1.93.0). Runtime stage ships a
+# Builder stage compiles the release binary from source using the Rust stable
+# channel (rust-toolchain.toml => stable). Runtime stage ships a
 # minimal Debian bookworm-slim image with only the dynamic libraries and
 # networking utilities required to operate the server.
 #
@@ -31,7 +31,7 @@
 # ------------------------------------------------------------------------------
 # Builder stage
 # ------------------------------------------------------------------------------
-FROM rust:1.93-bookworm AS builder
+FROM rust:bookworm AS builder
 
 # Avoid interactive prompts and cache apt metadata for reproducibility.
 ENV DEBIAN_FRONTEND=noninteractive \

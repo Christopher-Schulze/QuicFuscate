@@ -4,7 +4,7 @@ title: NAT traversal (STUN/TURN/ICE) for restrictive firewalls
 severity: HIGH
 phase: "J"
 priority: P2
-status: OPEN
+status: DONE
 created: 2026-06-30
 depends_on: []
 ---

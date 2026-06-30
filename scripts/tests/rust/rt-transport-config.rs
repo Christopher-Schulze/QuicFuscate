@@ -24,8 +24,9 @@ fn config_cc_algorithm_name_parsing() {
     assert_eq!(cfg.cc_algorithm(), CongestionControlAlgorithm::BBR2);
     cfg.set_cc_algorithm_name("bbr3").expect("bbr3");
     assert_eq!(cfg.cc_algorithm(), CongestionControlAlgorithm::BBR3);
+    cfg.set_cc_algorithm_name("cubic").expect("cubic");
+    assert_eq!(cfg.cc_algorithm(), CongestionControlAlgorithm::Cubic);
     // Unknown names are rejected
-    assert!(cfg.set_cc_algorithm_name("cubic").is_err());
     assert!(cfg.set_cc_algorithm_name("bbr").is_err());
     assert!(cfg.set_cc_algorithm_name("ledbat").is_err());
     assert!(cfg.set_cc_algorithm_name("bbr2_gcongestion").is_err());

@@ -4,7 +4,7 @@ title: Security audit logging (SIEM-compatible)
 severity: HIGH
 phase: "G"
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-07-23
 depends_on: []
 ---

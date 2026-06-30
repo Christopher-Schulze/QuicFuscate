@@ -192,3 +192,18 @@ level = "info"
 # cover_port = 443
 # cache_ttl = 3600
 # fallback_to_synthetic = true
+
+# ==============================================================================
+# DDoS PROTECTION: GEOIP BLOCKING + EXTERNAL BLACKLIST (TODO-459)
+# ==============================================================================
+# GeoIP-based country blocking and external blacklist sync are configured via
+# environment variables. Both gracefully degrade to no-op when unconfigured.
+#
+# GeoIP blocking (requires a MaxMindDB GeoLite2-Country database):
+#   QUICFUSCATE_GEOIP_DB_PATH=/path/to/GeoLite2-Country.mmdb
+#   QUICFUSCATE_GEOIP_BLOCKED_COUNTRIES=CN,RU,KP    # comma-separated ISO codes
+#
+# External blacklist sync (plain-text IP list over HTTPS, one IP per line):
+#   QUICFUSCATE_BLACKLIST_SYNC_URL=https://example.com/blocklist.txt
+#   QUICFUSCATE_BLACKLIST_TTL_SECS=3600             # TTL per blocked IP
+#   QUICFUSCATE_BLACKLIST_SYNC_INTERVAL_SECS=3600   # re-fetch interval

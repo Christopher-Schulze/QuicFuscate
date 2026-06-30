@@ -5818,19 +5818,19 @@ impl StealthManager {
     }
 
     /// Get current runtime padding rate (0-100).
-    #[cfg(any(test, feature = "rust-tests"))]
+    #[cfg(test)]
     pub(crate) fn runtime_padding_rate(&self) -> u8 {
         self.runtime_padding_rate.load(Ordering::Relaxed)
     }
 
     /// Get current runtime timing rate (0-100).
-    #[cfg(any(test, feature = "rust-tests"))]
+    #[cfg(test)]
     pub(crate) fn runtime_timing_rate(&self) -> u8 {
         self.runtime_timing_rate.load(Ordering::Relaxed)
     }
 
     /// Get current runtime rotation rate (0-100).
-    #[cfg(any(test, feature = "rust-tests"))]
+    #[cfg(test)]
     pub(crate) fn runtime_rotation_rate(&self) -> u8 {
         self.runtime_rotation_rate.load(Ordering::Relaxed)
     }

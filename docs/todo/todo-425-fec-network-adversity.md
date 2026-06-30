@@ -4,7 +4,7 @@ title: FEC under network adversity (tc-netem loss/jitter/bandwidth/RTT simulatio
 severity: HIGH
 phase: "F"
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-06-29
 depends_on: ["TODO-423"]
 ---

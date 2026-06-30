@@ -4,7 +4,7 @@ title: FEC full-stack performance benchmarks (encode/decode pipeline, mode switc
 severity: HIGH
 phase: "F"
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-06-29
 depends_on: ["TODO-423"]
 ---

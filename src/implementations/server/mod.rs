@@ -51,6 +51,8 @@ pub use bandwidth::{BandwidthLimiter, BandwidthStats, PerClientBandwidthManager,
 pub use ip_pool::{IpPool, Ipv6Pool};
 #[cfg(feature = "rate_limiter")]
 pub use limits::load_rate_limit_config_from_env;
+#[cfg(feature = "rate_limiter")]
+pub use limits::{BlacklistSync, GeoIpBlocker, GeoIpConfig};
 pub use limits::{ConnectionLimiter, GlobalRateLimiter, RateLimitConfig, RateLimiter};
 #[cfg(any(test, feature = "rust-tests"))]
 pub use metrics::GlobalMetricsServer;
@@ -125,6 +127,37 @@ pub struct ServerConfig {
     pub ipv6_prefix_len: u8,
     /// IPv6 DNS servers to push
     pub ipv6_dns_servers: Vec<Ipv6Addr>,
+    /// GeoIP-based source-IP blocking config (TODO-459). When a MaxMindDB
+    /// database path and blocked countries are configured, incoming
+    /// datagrams from those countries are dropped. Gracefully degrades to
+    /// allowing all IPs when no database is configured.
+    #[cfg(feature = "rate_limiter")]
+    pub geoip: limits::GeoIpConfig,
+    /// External blacklist synchronizer config (TODO-459). When a sync URL
+    /// is configured, the server periodically fetches a plain-text IP list
+    /// from that URL and blocks those IPs with TTL-based expiry.
+    #[cfg(feature = "rate_limiter")]
+    pub blacklist: BlacklistConfig,
+}
+
+/// Configuration for the external blacklist synchronizer.
+#[cfg(feature = "rate_limiter")]
+#[derive(Clone, Debug)]
+pub struct BlacklistConfig {
+    /// Default TTL for blocked IPs (seconds).
+    pub default_ttl_secs: u64,
+    /// HTTPS URL to fetch a plain-text IP list from (one IP per line,
+    /// `#` comments allowed). `None` = manual blocking only.
+    pub sync_url: Option<String>,
+    /// Interval between automatic sync fetches (seconds).
+    pub sync_interval_secs: u64,
+}
+
+#[cfg(feature = "rate_limiter")]
+impl Default for BlacklistConfig {
+    fn default() -> Self {
+        Self { default_ttl_secs: 3600, sync_url: None, sync_interval_secs: 3600 }
+    }
 }
 
 impl Default for ServerConfig {
@@ -147,6 +180,10 @@ impl Default for ServerConfig {
                 Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111), // Cloudflare
                 Ipv6Addr::new(0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888), // Google
             ],
+            #[cfg(feature = "rate_limiter")]
+            geoip: limits::GeoIpConfig::default(),
+            #[cfg(feature = "rate_limiter")]
+            blacklist: BlacklistConfig::default(),
         }
     }
 }
@@ -159,7 +196,67 @@ pub fn server_config_from_listen_addr(listen_addr: &str) -> Result<ServerConfig,
         .ok_or_else(|| {
             format!("listen address '{}' resolved to no socket addresses", listen_addr)
         })?;
-    Ok(ServerConfig { listen, ..ServerConfig::default() })
+    let mut config = ServerConfig { listen, ..ServerConfig::default() };
+    #[cfg(feature = "rate_limiter")]
+    {
+        config.geoip = load_geoip_config_from_env();
+        config.blacklist = load_blacklist_config_from_env();
+    }
+    Ok(config)
+}
+
+/// Load GeoIP blocking config from environment variables.
+///
+/// - `QUICFUSCATE_GEOIP_DB_PATH`: path to a MaxMindDB GeoLite2-Country database.
+/// - `QUICFUSCATE_GEOIP_BLOCKED_COUNTRIES`: comma-separated ISO country codes
+///   (e.g. "CN,RU,KP").
+#[cfg(feature = "rate_limiter")]
+fn load_geoip_config_from_env() -> limits::GeoIpConfig {
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+
+    let db_path = env_string("QUICFUSCATE_GEOIP_DB_PATH").map(PathBuf::from);
+    let blocked_countries: HashSet<String> = env_string("QUICFUSCATE_GEOIP_BLOCKED_COUNTRIES")
+        .map(|s| s.split(',').map(|c| c.trim().to_uppercase()).filter(|c| !c.is_empty()).collect())
+        .unwrap_or_default();
+
+    let config = limits::GeoIpConfig { db_path, blocked_countries };
+    if config.is_enabled() {
+        log::info!(
+            "GeoIP blocking enabled: {} blocked countries, db={}",
+            config.blocked_countries.len(),
+            config.db_path.as_ref().map(|p| p.display().to_string()).unwrap_or_default()
+        );
+    }
+    config
+}
+
+/// Load external blacklist sync config from environment variables.
+///
+/// - `QUICFUSCATE_BLACKLIST_SYNC_URL`: HTTPS URL to fetch a plain-text IP list.
+/// - `QUICFUSCATE_BLACKLIST_TTL_SECS`: TTL for blocked IPs (default: 3600).
+/// - `QUICFUSCATE_BLACKLIST_SYNC_INTERVAL_SECS`: sync interval (default: 3600).
+#[cfg(feature = "rate_limiter")]
+fn load_blacklist_config_from_env() -> BlacklistConfig {
+    let sync_url = env_string("QUICFUSCATE_BLACKLIST_SYNC_URL");
+    let default_ttl_secs = std::env::var("QUICFUSCATE_BLACKLIST_TTL_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(3600);
+    let sync_interval_secs = std::env::var("QUICFUSCATE_BLACKLIST_SYNC_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(3600);
+
+    let config = BlacklistConfig { default_ttl_secs, sync_url, sync_interval_secs };
+    if config.sync_url.is_some() {
+        log::info!(
+            "Blacklist sync enabled: ttl={}s, interval={}s",
+            config.default_ttl_secs,
+            config.sync_interval_secs
+        );
+    }
+    config
 }
 
 pub(crate) fn resolve_qkey_ttl_secs(ttl_override: Option<u64>) -> Option<u64> {
@@ -845,6 +942,7 @@ pub struct ServerTrafficSnapshot {
 
 pub enum AdminAction {
     Kick(String),
+    RevokeQKey(String),
     Reload,
     Shutdown,
 }
@@ -867,12 +965,13 @@ struct SharedServerDomain {
     /// detected, per-IP limits are temporarily halved via `limit_multiplier`.
     #[cfg(feature = "rate_limiter")]
     ddos_detector: Arc<crate::implementations::server::limits::EwmaAnomalyDetector>,
-    /// GeoIP-based source-IP blocker (TODO-459). Stub until `maxminddb` is
-    /// integrated; `is_blocked` always returns `false` without a database.
+    /// GeoIP-based source-IP blocker (TODO-459). Uses `maxminddb` to look up
+    /// the country of an incoming IP and reject blocked countries. Gracefully
+    /// degrades to allowing all IPs when no database is configured.
     #[cfg(feature = "rate_limiter")]
     geoip_blocker: Arc<crate::implementations::server::limits::GeoIpBlocker>,
     /// External blacklist synchronizer (TODO-459). TTL-based IP blocklist with
-    /// optional external feed sync (AbuseIPDB-style, stub).
+    /// optional external feed sync (plain-text IP lists over HTTPS).
     #[cfg(feature = "rate_limiter")]
     blacklist: Arc<crate::implementations::server::limits::BlacklistSync>,
     max_clients: usize,
@@ -1011,15 +1110,15 @@ impl SharedServerDomain {
                 crate::implementations::server::limits::EwmaAnomalyDetector::with_defaults(),
             ),
             #[cfg(feature = "rate_limiter")]
-            geoip_blocker: Arc::new(
-                crate::implementations::server::limits::GeoIpBlocker::disabled(),
-            ),
+            geoip_blocker: Arc::new(crate::implementations::server::limits::GeoIpBlocker::new(
+                server_config.geoip.clone(),
+            )),
             #[cfg(feature = "rate_limiter")]
-            blacklist: Arc::new(
-                crate::implementations::server::limits::BlacklistSync::manual_only(
-                    Duration::from_secs(3600),
-                ),
-            ),
+            blacklist: Arc::new(crate::implementations::server::limits::BlacklistSync::new(
+                Duration::from_secs(server_config.blacklist.default_ttl_secs),
+                server_config.blacklist.sync_url.clone(),
+                Duration::from_secs(server_config.blacklist.sync_interval_secs),
+            )),
             max_clients: server_config.max_clients,
             client_timeout_secs: server_config.client_timeout_secs,
         }
@@ -1082,7 +1181,7 @@ impl SharedServerDomain {
             return false;
         }
         // 2. GeoIP blocking (TODO-459): drop if the source IP maps to a blocked
-        //    country. Stub until maxminddb is integrated — always passes.
+        //    country. Gracefully allows all IPs when no database is configured.
         if self.geoip_blocker.is_blocked(from.ip()) {
             crate::instrumentation::global().server.rate_limit_hit();
             return false;
@@ -1299,6 +1398,20 @@ impl ServerAdminCore {
             "expires_at": issued.expires_at,
         }))
     }
+
+    pub fn revoke_http_qkey(&self, id: &str) -> AdminResponse {
+        let mut registry = self.qkeys.lock().unwrap_or_else(|e| e.into_inner());
+        if !registry.revoke(id) {
+            return AdminResponse::error("QKey not found");
+        }
+        drop(registry);
+        match self.actions.send(AdminAction::RevokeQKey(id.to_string())) {
+            Ok(()) => AdminResponse::ok_with_message("QKey revoked"),
+            Err(_) => {
+                AdminResponse::error("QKey revoked in registry but runtime channel is unavailable")
+            }
+        }
+    }
 }
 
 pub struct ServerAdminHttpRuntimeHandler {
@@ -1424,12 +1537,7 @@ impl AdminHttpHandler for ServerAdminHttpRuntimeHandler {
     }
 
     fn handle_revoke_qkey(&self, id: &str) -> AdminResponse {
-        let mut registry = self.core.qkeys().lock().unwrap_or_else(|e| e.into_inner());
-        if registry.revoke(id) {
-            AdminResponse::ok_with_message("QKey revoked")
-        } else {
-            AdminResponse::error("QKey not found")
-        }
+        self.core.revoke_http_qkey(id)
     }
 
     fn handle_shutdown(&self) -> AdminResponse {
@@ -1708,6 +1816,7 @@ pub struct LiveInitialAuthContext {
 pub fn parse_live_server_initial_auth(
     packet: &[u8],
     qkey_registry: &std::sync::Mutex<QKeyRegistry>,
+    revocation_manager: &crate::implementations::server::revocation::RevocationManager,
     metrics: &Metrics,
 ) -> Option<LiveInitialAuthContext> {
     let (mut initial_hdr, _) = match crate::transport::packet::parse_header(packet, 0) {
@@ -1744,7 +1853,12 @@ pub fn parse_live_server_initial_auth(
             record_qkey_auth_rejection(metrics);
             return None;
         };
+        if revocation_manager.is_revoked(&record.id) {
+            record_qkey_auth_rejection(metrics);
+            return None;
+        }
         pending_qkey_auth = Some(QKeyAuthState {
+            key_id: record.id.clone(),
             expected_token_sha256: record.token_sha256.clone(),
             authed: false,
             connected_at: Instant::now(),
@@ -2054,6 +2168,7 @@ pub async fn process_live_server_client_datagram(
     server_tun: Option<&Arc<TunInterface>>,
     tun_enable: bool,
     fingerprint_profile: OsFingerprintProfile,
+    dns_upstream_resolvers: Arc<Vec<Ipv4Addr>>,
 ) -> std::io::Result<LiveClientDatagramResult> {
     use std::cell::Cell;
 
@@ -2092,11 +2207,28 @@ pub async fn process_live_server_client_datagram(
     // drain_masque_datagrams inside poll_http3_event_loop.
     if tun_enable {
         if let Some(tun) = server_tun {
+            if !conn.has_masque_downlink_queue() {
+                conn.set_masque_downlink_queue(Arc::new(std::sync::Mutex::new(
+                    std::collections::VecDeque::new(),
+                )));
+            }
             if !conn.has_masque_datagram_cb() {
                 let tun_sink = Arc::clone(tun);
                 let masque_normalizer = std::sync::Arc::clone(&normalizer);
+                let dns_resolvers = Arc::clone(&dns_upstream_resolvers);
+                let dns_downlink_queue = conn
+                    .masque_downlink_queue()
+                    .expect("MASQUE downlink queue installed before callback");
                 conn.set_masque_datagram_cb(Arc::new(std::sync::Mutex::new(Box::new(
                     move |payload: &[u8]| {
+                        if spawn_dns_intercept(
+                            payload,
+                            Arc::clone(&dns_resolvers),
+                            Arc::clone(&dns_downlink_queue),
+                            fingerprint_profile,
+                        ) {
+                            return;
+                        }
                         // Apply OS fingerprint normalization for IPv4 packets
                         // before writing to TUN (TODO-462).
                         if !payload.is_empty() && payload[0] >> 4 == 4 {
@@ -2177,6 +2309,12 @@ pub async fn process_live_server_client_datagram(
         remove_auth_conn_id = Some(conn_id.clone());
     }
 
+    for packet in conn.drain_masque_downlink_queue() {
+        if let Err(error) = conn.send_masque_downlink(&packet) {
+            log::debug!("MASQUE queued downlink send to {} failed: {:?}", addr, error);
+        }
+    }
+
     flush_live_server_outgoing(
         socket,
         addr,
@@ -2198,6 +2336,19 @@ pub struct LiveServerState {
     domain: LiveServerDomain,
     auth_rate_limiter:
         Arc<std::sync::Mutex<crate::implementations::server::limits::AuthRateLimiter>>,
+    revocation_manager: Arc<crate::implementations::server::revocation::RevocationManager>,
+    qkey_tracker: Arc<crate::implementations::server::revocation::QKeyConnectionTracker>,
+    key_rotation_manager: crate::implementations::server::revocation::KeyRotationManager,
+    /// Last time the external blacklist feed sync was *started*. Used by
+    /// `run_housekeeping_tick` to trigger periodic re-syncs at the
+    /// configured `sync_interval`. `None` = sync never started yet.
+    /// Shared via `Arc<Mutex<>>` so the background sync task spawned via
+    /// `tokio::spawn` can update it without holding the `LiveServerState`
+    /// borrow. The timestamp is recorded *before* spawning the sync task
+    /// so overlapping syncs are prevented even if a prior sync is still
+    /// in flight.
+    #[cfg(feature = "rate_limiter")]
+    last_blacklist_sync: Arc<parking_lot::Mutex<Option<Instant>>>,
 }
 
 pub struct LiveClientInit {
@@ -2210,6 +2361,7 @@ pub struct LiveClientBuildRequest<'a> {
     pub local_addr: SocketAddr,
     pub remote_addr: SocketAddr,
     pub qkey_registry: &'a std::sync::Mutex<QKeyRegistry>,
+    pub revocation_manager: &'a crate::implementations::server::revocation::RevocationManager,
     pub metrics: &'a Metrics,
     pub stealth_config: &'a Arc<std::sync::Mutex<StealthConfig>>,
     pub fec_cfg_shared: &'a Arc<std::sync::Mutex<FecConfig>>,
@@ -2245,6 +2397,7 @@ pub fn build_live_server_client_init(
     let initial_ctx = match parse_live_server_initial_auth(
         request.packet,
         request.qkey_registry,
+        request.revocation_manager,
         request.metrics,
     ) {
         Some(ctx) => ctx,
@@ -2402,8 +2555,12 @@ impl LiveServerDomain {
         self.shared.session_count()
     }
 
-    fn reap_expired_remotes(&self) -> Vec<SocketAddr> {
-        self.shared.reap_expired().into_iter().map(|session| session.remote_addr()).collect()
+    fn reap_expired_remotes(&self) -> Vec<(SocketAddr, SessionId)> {
+        self.shared
+            .reap_expired()
+            .into_iter()
+            .map(|session| (session.remote_addr(), session.id()))
+            .collect()
     }
 
     fn client_snapshots(
@@ -2435,6 +2592,12 @@ impl LiveServerDomain {
     #[cfg(feature = "rate_limiter")]
     fn prune_rate_limits_if_due(&self) {
         self.shared.prune_rate_limits_if_due();
+    }
+
+    /// Returns a clone of the blacklist synchronizer Arc for async sync.
+    #[cfg(feature = "rate_limiter")]
+    fn blacklist(&self) -> Arc<crate::implementations::server::limits::BlacklistSync> {
+        Arc::clone(&self.shared.blacklist)
     }
 }
 
@@ -2551,6 +2714,16 @@ fn reap_expired_sessions_from_domain(
 
 impl LiveServerState {
     pub fn new(server_config: ServerConfig) -> Self {
+        let revocation_manager =
+            Arc::new(crate::implementations::server::revocation::RevocationManager::new());
+        let qkey_tracker =
+            Arc::new(crate::implementations::server::revocation::QKeyConnectionTracker::new());
+        let key_rotation_manager =
+            crate::implementations::server::revocation::KeyRotationManager::new(
+                crate::implementations::server::revocation::DEFAULT_ROTATION_INTERVAL_SECS,
+                crate::implementations::server::revocation::DEFAULT_OVERLAP_WINDOW_SECS,
+                Arc::clone(&revocation_manager),
+            );
         Self {
             clients: std::collections::HashMap::new(),
             qkey_auth: std::collections::HashMap::new(),
@@ -2561,6 +2734,11 @@ impl LiveServerState {
                     std::time::Duration::from_secs(60),
                 ),
             )),
+            revocation_manager,
+            qkey_tracker,
+            key_rotation_manager,
+            #[cfg(feature = "rate_limiter")]
+            last_blacklist_sync: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 
@@ -2578,6 +2756,60 @@ impl LiveServerState {
     #[cfg(feature = "rate_limiter")]
     pub fn prune_rate_limits_if_due(&self) {
         self.domain.prune_rate_limits_if_due();
+    }
+
+    /// Periodically sync the external blacklist feed if a sync URL is
+    /// configured and the sync interval has elapsed since the last sync.
+    ///
+    /// The sync is an async HTTPS fetch with a 30s timeout. To avoid
+    /// blocking the 5ms housekeeping tick (and thus all UDP packet
+    /// processing, TUN forwarding, and client flushing), the actual fetch
+    /// is dispatched via `tokio::spawn` as a background task. The
+    /// `last_blacklist_sync` timestamp is recorded *before* spawning so
+    /// overlapping syncs are prevented — if a sync is still in flight when
+    /// the next interval elapses, the new tick sees a recent timestamp and
+    /// skips. The background task updates the shared `BlacklistSync` (via
+    /// its `Arc`) in place; `replace_list` takes the internal write lock,
+    /// so concurrent `is_blocked` reads remain safe. Errors are logged and
+    /// non-fatal — the blacklist continues to use the last-known-good set.
+    #[cfg(feature = "rate_limiter")]
+    fn maybe_sync_blacklist(&self) {
+        let blacklist = self.domain.blacklist();
+        if !blacklist.has_sync_url() {
+            return;
+        }
+        let interval = blacklist.sync_interval();
+        let should_sync = {
+            let guard = self.last_blacklist_sync.lock();
+            match *guard {
+                None => true,
+                Some(last) => last.elapsed() >= interval,
+            }
+        };
+        if !should_sync {
+            return;
+        }
+        // Record the sync start time *before* spawning so that subsequent
+        // ticks do not spawn overlapping syncs while this one is in flight.
+        {
+            let mut guard = self.last_blacklist_sync.lock();
+            *guard = Some(Instant::now());
+        }
+        log::debug!("Blacklist: dispatching background sync from external feed");
+        // Spawn the sync as a detached background task. The task owns a
+        // clone of the `Arc<BlacklistSync>` and performs the HTTPS fetch
+        // without holding any borrow on `LiveServerState`. The result is
+        // logged; the blacklist is updated in place via `replace_list`.
+        tokio::spawn(async move {
+            match blacklist.sync().await {
+                Ok(count) => {
+                    log::info!("Blacklist: synced {count} IPs from external feed");
+                }
+                Err(e) => {
+                    log::warn!("Blacklist: sync failed (using last-known-good set): {e}");
+                }
+            }
+        });
     }
 
     fn values_mut(&mut self) -> impl Iterator<Item = &mut QuicFuscateConnection> {
@@ -2701,13 +2933,31 @@ impl LiveServerState {
         accept_loop: &AcceptLoop,
     ) {
         #[cfg(feature = "rate_limiter")]
-        self.prune_rate_limits_if_due();
+        {
+            self.prune_rate_limits_if_due();
+            // Periodically dispatch a background blacklist sync. The sync
+            // is an async HTTPS fetch (30s timeout) but is spawned via
+            // `tokio::spawn` so it never blocks the 5ms housekeeping tick.
+            // The dispatch only fires when the configured sync_interval has
+            // elapsed (default: 3600s), so the per-tick cost is just an
+            // `Instant::now()` comparison under a short-lived lock.
+            self.maybe_sync_blacklist();
+        }
+        let _ = self.key_rotation_manager.check_and_rotate();
+        for revoked_key_id in self.key_rotation_manager.process_pending_revocations() {
+            self.close_sessions_for_revoked_qkey(&revoked_key_id, accept_loop, metrics);
+        }
         let client_snapshots = Arc::clone(self.domain.client_snapshots());
         let addresses = self.key_addrs();
         for addr in addresses {
             let session_stats = self.domain.session_stats_by_remote(addr);
             let session_id = self.domain.session_id_by_remote(addr);
             if let Some(conn) = self.get_mut(&addr) {
+                for packet in conn.drain_masque_downlink_queue() {
+                    if let Err(error) = conn.send_masque_downlink(&packet) {
+                        log::debug!("MASQUE queued downlink send to {} failed: {:?}", addr, error);
+                    }
+                }
                 if let Err(error) = flush_live_server_outgoing(
                     socket,
                     addr,
@@ -2753,6 +3003,74 @@ impl LiveServerState {
         self.qkey_auth.remove(conn_id)
     }
 
+    fn session_id_for_conn_id(&self, conn_id: &[u8]) -> Option<SessionId> {
+        self.clients.iter().find_map(|(addr, conn)| {
+            (conn.conn.source_id().as_ref() == conn_id)
+                .then(|| self.domain.session_id_by_remote(*addr))
+                .flatten()
+        })
+    }
+
+    fn dissociate_qkey_for_session(&self, session_id: Option<SessionId>) {
+        if let Some(session_id) = session_id {
+            self.qkey_tracker.dissociate(session_id.as_u64());
+        }
+    }
+
+    fn close_sessions_for_revoked_qkey(
+        &mut self,
+        key_id: &str,
+        accept_loop: &AcceptLoop,
+        metrics: &Metrics,
+    ) {
+        let revoked_session_ids = self.qkey_tracker.drain_connections_for_key(key_id);
+        if revoked_session_ids.is_empty() {
+            return;
+        }
+        let revoked_session_ids: std::collections::HashSet<u64> =
+            revoked_session_ids.into_iter().collect();
+        let addrs: Vec<SocketAddr> = self
+            .clients
+            .keys()
+            .copied()
+            .filter(|addr| {
+                self.domain
+                    .session_id_by_remote(*addr)
+                    .map(|session_id| revoked_session_ids.contains(&session_id.as_u64()))
+                    .unwrap_or(false)
+            })
+            .collect();
+        for addr in addrs {
+            if let Some(mut conn) = self.clients.remove(&addr) {
+                let conn_id = conn.conn.source_id().as_ref().to_vec();
+                if let Err(error) = conn.conn.close(true, 0x0, b"qkey_revoked") {
+                    log::warn!(
+                        "Client close after QKey revocation failed for {}: {:?}",
+                        addr,
+                        error
+                    );
+                }
+                self.qkey_auth.remove(&conn_id);
+                accept_loop.record_closed(addr);
+                metrics.record_connection_rejected();
+            }
+            self.domain.remove_remote(addr);
+        }
+        self.domain.retain_snapshots_for_clients(&self.clients);
+        self.sync_active_metrics(metrics);
+    }
+
+    pub fn revoke_qkey_now(
+        &mut self,
+        key_id: &str,
+        reason: &str,
+        accept_loop: &AcceptLoop,
+        metrics: &Metrics,
+    ) {
+        self.revocation_manager.revoke(key_id, reason);
+        self.close_sessions_for_revoked_qkey(key_id, accept_loop, metrics);
+    }
+
     fn try_rebind_by_dcid(
         &mut self,
         from: SocketAddr,
@@ -2788,6 +3106,7 @@ impl LiveServerState {
         let Some(addr) = self.domain.remote_addr_for_identity(identity) else {
             return;
         };
+        let session_id = self.domain.session_id_by_remote(addr);
         if let Some(mut conn) = self.clients.remove(&addr) {
             let conn_id = conn.conn.source_id().as_ref().to_vec();
             if let Err(e) = conn.conn.close(true, 0x0, b"admin_kick") {
@@ -2796,6 +3115,7 @@ impl LiveServerState {
             self.qkey_auth.remove(&conn_id);
             accept_loop.record_closed(addr);
         }
+        self.dissociate_qkey_for_session(session_id);
         self.domain.remove_remote(addr);
         self.sync_active_metrics(metrics);
     }
@@ -2812,6 +3132,8 @@ impl LiveServerState {
         let closed_addrs =
             reconcile_live_clients(&mut self.clients, &mut self.qkey_auth, accept_loop, metrics);
         for addr in closed_addrs {
+            let session_id = self.domain.session_id_by_remote(addr);
+            self.dissociate_qkey_for_session(session_id);
             self.domain.remove_remote(addr);
         }
         self.domain.retain_snapshots_for_clients(&self.clients);
@@ -2823,7 +3145,7 @@ impl LiveServerState {
         if expired_remotes.is_empty() {
             return;
         }
-        for addr in expired_remotes {
+        for (addr, session_id) in expired_remotes {
             if let Some(mut conn) = self.clients.remove(&addr) {
                 let conn_id = conn.conn.source_id().as_ref().to_vec();
                 if let Err(error) = conn.conn.close(true, 0x0, b"session_timeout") {
@@ -2835,6 +3157,7 @@ impl LiveServerState {
                 }
                 self.qkey_auth.remove(&conn_id);
             }
+            self.dissociate_qkey_for_session(Some(session_id));
             accept_loop.record_closed(addr);
         }
         self.domain.retain_snapshots_for_clients(&self.clients);
@@ -2857,6 +3180,8 @@ impl LiveServerState {
                     break;
                 }
             }
+            let session_id = self.session_id_for_conn_id(&conn_id);
+            self.dissociate_qkey_for_session(session_id);
             self.remove_qkey_auth(&conn_id);
         }
     }
@@ -2865,12 +3190,52 @@ impl LiveServerState {
         &mut self,
         remove_auth_conn_id: Option<Vec<u8>>,
         auth_result: Option<(Vec<u8>, bool)>,
+        accept_loop: &AcceptLoop,
+        metrics: &Metrics,
     ) {
         if let Some(conn_id) = remove_auth_conn_id {
             self.remove_qkey_auth(&conn_id);
         } else if let Some((conn_id, authed)) = auth_result {
+            let mut authed_key_id: Option<String> = None;
             if let Some(state) = self.qkey_auth_state_mut(&conn_id) {
-                state.authed = authed;
+                if authed {
+                    authed_key_id = Some(state.key_id.clone());
+                } else {
+                    state.authed = false;
+                }
+            }
+            if let Some(key_id) = authed_key_id {
+                if self.revocation_manager.is_revoked(&key_id) {
+                    let addr = self.clients.iter().find_map(|(addr, conn)| {
+                        (conn.conn.source_id().as_ref() == conn_id.as_slice()).then_some(*addr)
+                    });
+                    if let Some(addr) = addr {
+                        let session_id = self.domain.session_id_by_remote(addr);
+                        if let Some(mut conn) = self.clients.remove(&addr) {
+                            if let Err(error) = conn.conn.close(true, 0x0, b"qkey_revoked") {
+                                log::warn!(
+                                    "Client close after pending QKey revocation failed for {}: {:?}",
+                                    addr,
+                                    error
+                                );
+                            }
+                            accept_loop.record_closed(addr);
+                            record_qkey_auth_rejection(metrics);
+                        }
+                        self.dissociate_qkey_for_session(session_id);
+                        self.domain.remove_remote(addr);
+                        self.domain.retain_snapshots_for_clients(&self.clients);
+                        self.sync_active_metrics(metrics);
+                    }
+                    self.remove_qkey_auth(&conn_id);
+                    return;
+                }
+                if let Some(state) = self.qkey_auth_state_mut(&conn_id) {
+                    state.authed = true;
+                }
+                if let Some(session_id) = self.session_id_for_conn_id(&conn_id) {
+                    self.qkey_tracker.associate(session_id.as_u64(), &key_id);
+                }
             }
         }
     }
@@ -3006,6 +3371,7 @@ pub struct IssuedQKey {
 
 #[derive(Clone)]
 pub struct QKeyAuthState {
+    pub key_id: String,
     pub expected_token_sha256: String,
     pub authed: bool,
     pub connected_at: Instant,
@@ -3692,6 +4058,304 @@ fn parse_ip_dest(pkt: &[u8]) -> Option<std::net::IpAddr> {
     }
 }
 
+struct InterceptedIpv4DnsQuery<'a> {
+    src_ip: Ipv4Addr,
+    dst_ip: Ipv4Addr,
+    src_port: u16,
+    dst_port: u16,
+    ttl: u8,
+    payload: &'a [u8],
+}
+
+struct InterceptedIpv6DnsQuery<'a> {
+    src_ip: Ipv6Addr,
+    dst_ip: Ipv6Addr,
+    src_port: u16,
+    dst_port: u16,
+    hop_limit: u8,
+    payload: &'a [u8],
+}
+
+fn parse_ipv4_udp_dns_query(pkt: &[u8]) -> Option<InterceptedIpv4DnsQuery<'_>> {
+    if pkt.len() < 28 || pkt[0] >> 4 != 4 {
+        return None;
+    }
+    let ihl = ((pkt[0] & 0x0f) as usize) * 4;
+    if ihl < 20 || pkt.len() < ihl + 8 {
+        return None;
+    }
+    let total_len = u16::from_be_bytes([pkt[2], pkt[3]]) as usize;
+    if total_len < ihl + 8 || total_len > pkt.len() {
+        return None;
+    }
+    let flags_fragment = u16::from_be_bytes([pkt[6], pkt[7]]);
+    if flags_fragment & 0x1fff != 0 {
+        return None;
+    }
+    if pkt[9] != 17 {
+        return None;
+    }
+
+    let udp = &pkt[ihl..total_len];
+    let src_port = u16::from_be_bytes([udp[0], udp[1]]);
+    let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
+    if dst_port != 53 {
+        return None;
+    }
+    let udp_len = u16::from_be_bytes([udp[4], udp[5]]) as usize;
+    if udp_len < 8 || udp_len > udp.len() {
+        return None;
+    }
+    let payload = &udp[8..udp_len];
+    if !crate::dns::is_dns_query(payload) {
+        return None;
+    }
+
+    Some(InterceptedIpv4DnsQuery {
+        src_ip: Ipv4Addr::new(pkt[12], pkt[13], pkt[14], pkt[15]),
+        dst_ip: Ipv4Addr::new(pkt[16], pkt[17], pkt[18], pkt[19]),
+        src_port,
+        dst_port,
+        ttl: pkt[8],
+        payload,
+    })
+}
+
+fn parse_ipv6_udp_dns_query(pkt: &[u8]) -> Option<InterceptedIpv6DnsQuery<'_>> {
+    if pkt.len() < 48 || pkt[0] >> 4 != 6 {
+        return None;
+    }
+    let payload_len = u16::from_be_bytes([pkt[4], pkt[5]]) as usize;
+    if payload_len < 8 || 40usize.checked_add(payload_len)? > pkt.len() {
+        return None;
+    }
+    if pkt[6] != 17 {
+        return None;
+    }
+
+    let udp = &pkt[40..40 + payload_len];
+    let src_port = u16::from_be_bytes([udp[0], udp[1]]);
+    let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
+    if dst_port != 53 {
+        return None;
+    }
+    let udp_len = u16::from_be_bytes([udp[4], udp[5]]) as usize;
+    if udp_len < 8 || udp_len > udp.len() {
+        return None;
+    }
+    let payload = &udp[8..udp_len];
+    if !crate::dns::is_dns_query(payload) {
+        return None;
+    }
+
+    let mut src = [0u8; 16];
+    src.copy_from_slice(&pkt[8..24]);
+    let mut dst = [0u8; 16];
+    dst.copy_from_slice(&pkt[24..40]);
+    Some(InterceptedIpv6DnsQuery {
+        src_ip: Ipv6Addr::from(src),
+        dst_ip: Ipv6Addr::from(dst),
+        src_port,
+        dst_port,
+        hop_limit: pkt[7],
+        payload,
+    })
+}
+
+fn ones_complement_checksum(data: &[u8]) -> u16 {
+    let mut sum = 0u32;
+    let mut chunks = data.chunks_exact(2);
+    for chunk in &mut chunks {
+        sum = sum.wrapping_add(u16::from_be_bytes([chunk[0], chunk[1]]) as u32);
+    }
+    if let Some(&byte) = chunks.remainder().first() {
+        sum = sum.wrapping_add((byte as u32) << 8);
+    }
+    while (sum >> 16) != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+fn ipv4_udp_checksum(src: Ipv4Addr, dst: Ipv4Addr, udp_packet: &[u8]) -> u16 {
+    let mut pseudo = Vec::with_capacity(12 + udp_packet.len());
+    pseudo.extend_from_slice(&src.octets());
+    pseudo.extend_from_slice(&dst.octets());
+    pseudo.push(0);
+    pseudo.push(17);
+    pseudo.extend_from_slice(&(udp_packet.len() as u16).to_be_bytes());
+    pseudo.extend_from_slice(udp_packet);
+    let checksum = ones_complement_checksum(&pseudo);
+    if checksum == 0 {
+        0xffff
+    } else {
+        checksum
+    }
+}
+
+fn ipv6_udp_checksum(src: Ipv6Addr, dst: Ipv6Addr, udp_packet: &[u8]) -> u16 {
+    let mut pseudo = Vec::with_capacity(40 + udp_packet.len());
+    pseudo.extend_from_slice(&src.octets());
+    pseudo.extend_from_slice(&dst.octets());
+    pseudo.extend_from_slice(&(udp_packet.len() as u32).to_be_bytes());
+    pseudo.extend_from_slice(&[0, 0, 0]);
+    pseudo.push(17);
+    pseudo.extend_from_slice(udp_packet);
+    let checksum = ones_complement_checksum(&pseudo);
+    if checksum == 0 {
+        0xffff
+    } else {
+        checksum
+    }
+}
+
+fn build_ipv4_udp_dns_response_packet(
+    query: &InterceptedIpv4DnsQuery<'_>,
+    dns_response: &[u8],
+    fingerprint_profile: OsFingerprintProfile,
+) -> Option<Vec<u8>> {
+    let udp_len = 8usize.checked_add(dns_response.len())?;
+    let total_len = 20usize.checked_add(udp_len)?;
+    if udp_len > u16::MAX as usize || total_len > u16::MAX as usize {
+        return None;
+    }
+
+    let mut pkt = vec![0u8; total_len];
+    pkt[0] = 0x45;
+    pkt[1] = 0;
+    pkt[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+    pkt[4..6].copy_from_slice(&0u16.to_be_bytes());
+    pkt[6..8].copy_from_slice(&0x4000u16.to_be_bytes());
+    pkt[8] = fingerprint_profile.ttl().max(query.ttl);
+    pkt[9] = 17;
+    pkt[12..16].copy_from_slice(&query.dst_ip.octets());
+    pkt[16..20].copy_from_slice(&query.src_ip.octets());
+    let ip_checksum = ones_complement_checksum(&pkt[..20]);
+    pkt[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
+
+    let udp_start = 20;
+    pkt[udp_start..udp_start + 2].copy_from_slice(&query.dst_port.to_be_bytes());
+    pkt[udp_start + 2..udp_start + 4].copy_from_slice(&query.src_port.to_be_bytes());
+    pkt[udp_start + 4..udp_start + 6].copy_from_slice(&(udp_len as u16).to_be_bytes());
+    pkt[udp_start + 8..].copy_from_slice(dns_response);
+    let udp_checksum = ipv4_udp_checksum(query.dst_ip, query.src_ip, &pkt[udp_start..]);
+    pkt[udp_start + 6..udp_start + 8].copy_from_slice(&udp_checksum.to_be_bytes());
+    Some(pkt)
+}
+
+fn build_ipv6_udp_dns_response_packet(
+    query: &InterceptedIpv6DnsQuery<'_>,
+    dns_response: &[u8],
+    fingerprint_profile: OsFingerprintProfile,
+) -> Option<Vec<u8>> {
+    let udp_len = 8usize.checked_add(dns_response.len())?;
+    if udp_len > u16::MAX as usize {
+        return None;
+    }
+    let total_len = 40usize.checked_add(udp_len)?;
+    let mut pkt = vec![0u8; total_len];
+    pkt[0] = 0x60;
+    pkt[4..6].copy_from_slice(&(udp_len as u16).to_be_bytes());
+    pkt[6] = 17;
+    pkt[7] = fingerprint_profile.ttl().max(query.hop_limit);
+    pkt[8..24].copy_from_slice(&query.dst_ip.octets());
+    pkt[24..40].copy_from_slice(&query.src_ip.octets());
+
+    let udp_start = 40;
+    pkt[udp_start..udp_start + 2].copy_from_slice(&query.dst_port.to_be_bytes());
+    pkt[udp_start + 2..udp_start + 4].copy_from_slice(&query.src_port.to_be_bytes());
+    pkt[udp_start + 4..udp_start + 6].copy_from_slice(&(udp_len as u16).to_be_bytes());
+    pkt[udp_start + 8..].copy_from_slice(dns_response);
+    let udp_checksum = ipv6_udp_checksum(query.dst_ip, query.src_ip, &pkt[udp_start..]);
+    pkt[udp_start + 6..udp_start + 8].copy_from_slice(&udp_checksum.to_be_bytes());
+    Some(pkt)
+}
+
+fn resolve_dns_query_via_upstream(query: &[u8], upstream_resolvers: &[Ipv4Addr]) -> Vec<u8> {
+    for upstream in upstream_resolvers {
+        match crate::dns::forward_dns_query(query, *upstream) {
+            Ok(response) => return response,
+            Err(error) => log::debug!("DNS upstream {} failed: {}", upstream, error),
+        }
+    }
+    match crate::dns::parse_dns_query(query) {
+        Some(parsed) => crate::dns::build_dns_nxdomain(&parsed),
+        None => Vec::new(),
+    }
+}
+
+fn spawn_dns_intercept(
+    pkt: &[u8],
+    upstream_resolvers: Arc<Vec<Ipv4Addr>>,
+    downlink_queue: Arc<std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>>,
+    fingerprint_profile: OsFingerprintProfile,
+) -> bool {
+    let parsed = parse_ipv4_udp_dns_query(pkt)
+        .map(|query| {
+            let src_ip = query.src_ip;
+            let dst_ip = query.dst_ip;
+            let src_port = query.src_port;
+            let dst_port = query.dst_port;
+            let ttl = query.ttl;
+            let payload = query.payload.to_vec();
+            Box::new(move |response: &[u8]| {
+                let query = InterceptedIpv4DnsQuery {
+                    src_ip,
+                    dst_ip,
+                    src_port,
+                    dst_port,
+                    ttl,
+                    payload: &payload,
+                };
+                build_ipv4_udp_dns_response_packet(&query, response, fingerprint_profile)
+            }) as Box<dyn FnOnce(&[u8]) -> Option<Vec<u8>> + Send>
+        })
+        .or_else(|| {
+            parse_ipv6_udp_dns_query(pkt).map(|query| {
+                let src_ip = query.src_ip;
+                let dst_ip = query.dst_ip;
+                let src_port = query.src_port;
+                let dst_port = query.dst_port;
+                let hop_limit = query.hop_limit;
+                let payload = query.payload.to_vec();
+                Box::new(move |response: &[u8]| {
+                    let query = InterceptedIpv6DnsQuery {
+                        src_ip,
+                        dst_ip,
+                        src_port,
+                        dst_port,
+                        hop_limit,
+                        payload: &payload,
+                    };
+                    build_ipv6_udp_dns_response_packet(&query, response, fingerprint_profile)
+                }) as Box<dyn FnOnce(&[u8]) -> Option<Vec<u8>> + Send>
+            })
+        });
+    let Some(build_response_packet) = parsed else {
+        return false;
+    };
+    let payload = if let Some(query) = parse_ipv4_udp_dns_query(pkt) {
+        query.payload.to_vec()
+    } else if let Some(query) = parse_ipv6_udp_dns_query(pkt) {
+        query.payload.to_vec()
+    } else {
+        return false;
+    };
+    tokio::task::spawn_blocking(move || {
+        let response = resolve_dns_query_via_upstream(&payload, upstream_resolvers.as_slice());
+        if response.is_empty() {
+            return;
+        }
+        if let Some(packet) = build_response_packet(&response) {
+            match downlink_queue.lock() {
+                Ok(mut guard) => guard.push_back(packet),
+                Err(poisoned) => poisoned.into_inner().push_back(packet),
+            }
+        }
+    });
+    true
+}
+
 pub(crate) fn open_server_tun(
     tun_config: TunConfig,
     pool: Arc<MemoryPool>,
@@ -4278,6 +4942,7 @@ impl ServerRuntime {
         let front_domain = stealth_policy.front_domain.to_vec();
         let disable_http3 = stealth_policy.disable_http3;
         let fingerprint_profile = runtime_config.transport.fingerprint_profile();
+        let dns_upstream_resolvers = Arc::new(self.server_config.dns_servers.clone());
         if self.state != ServerState::Stopped {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
@@ -4385,6 +5050,8 @@ impl ServerRuntime {
                                 let runtime_parts = self.live_parts();
                                 let client_snapshots = runtime_parts.live_state.client_snapshots().clone();
                                 let auth_rate_limiter = runtime_parts.live_state.auth_rate_limiter.clone();
+                                let revocation_manager =
+                                    Arc::clone(&runtime_parts.live_state.revocation_manager);
                                 let stealth_config = runtime_config.stealth_config.clone();
                                 let fec_cfg_shared = runtime_config.fec_cfg_shared.clone();
                                 let opt_params_shared = runtime_config.opt_params_shared.clone();
@@ -4402,6 +5069,7 @@ impl ServerRuntime {
                                                 local_addr,
                                                 remote_addr: from,
                                                 qkey_registry: qkey_registry.as_ref(),
+                                                revocation_manager: revocation_manager.as_ref(),
                                                 metrics: &metrics,
                                                 stealth_config: &stealth_config,
                                                 fec_cfg_shared: &fec_cfg_shared,
@@ -4442,6 +5110,7 @@ impl ServerRuntime {
                                     runtime_parts.server_tun,
                                     tun_enable,
                                     transport.fingerprint_profile(),
+                                    Arc::clone(&dns_upstream_resolvers),
                                 ).await {
                                     Ok(result) => result,
                                     Err(e) => {
@@ -4455,6 +5124,8 @@ impl ServerRuntime {
                                 runtime_parts.live_state.commit_qkey_auth_result(
                                     datagram_result.remove_auth_conn_id,
                                     datagram_result.auth_result,
+                                    runtime_parts.accept_loop,
+                                    &metrics,
                                 );
                             }
                             Err(e) => {
@@ -4636,6 +5307,11 @@ impl ServerRuntime {
                 }
                 false
             }
+            AdminAction::RevokeQKey(id) => {
+                let live = self.live_mut();
+                live.live_state.revoke_qkey_now(&id, "admin_revoked", &live.accept_loop, metrics);
+                false
+            }
             AdminAction::Reload => {
                 if let Err(error) = reload() {
                     log::warn!("Config reload failed: {}", error);
@@ -4789,6 +5465,152 @@ mod tests {
             }
             other => panic!("expected V6, got {:?}", other),
         }
+    }
+
+    fn test_dns_query_payload() -> Vec<u8> {
+        let mut pkt = Vec::new();
+        pkt.extend_from_slice(&0x1234u16.to_be_bytes());
+        pkt.extend_from_slice(&[0x01, 0x00]);
+        pkt.extend_from_slice(&1u16.to_be_bytes());
+        pkt.extend_from_slice(&0u16.to_be_bytes());
+        pkt.extend_from_slice(&0u16.to_be_bytes());
+        pkt.extend_from_slice(&0u16.to_be_bytes());
+        for label in ["example", "com"] {
+            pkt.push(label.len() as u8);
+            pkt.extend_from_slice(label.as_bytes());
+        }
+        pkt.push(0);
+        pkt.extend_from_slice(&1u16.to_be_bytes());
+        pkt.extend_from_slice(&1u16.to_be_bytes());
+        pkt
+    }
+
+    fn test_ipv4_udp_packet(
+        src_ip: Ipv4Addr,
+        dst_ip: Ipv4Addr,
+        src_port: u16,
+        dst_port: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let udp_len = 8 + payload.len();
+        let total_len = 20 + udp_len;
+        let mut pkt = vec![0u8; total_len];
+        pkt[0] = 0x45;
+        pkt[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+        pkt[8] = 64;
+        pkt[9] = 17;
+        pkt[12..16].copy_from_slice(&src_ip.octets());
+        pkt[16..20].copy_from_slice(&dst_ip.octets());
+        let ip_checksum = ones_complement_checksum(&pkt[..20]);
+        pkt[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
+        pkt[20..22].copy_from_slice(&src_port.to_be_bytes());
+        pkt[22..24].copy_from_slice(&dst_port.to_be_bytes());
+        pkt[24..26].copy_from_slice(&(udp_len as u16).to_be_bytes());
+        pkt[28..].copy_from_slice(payload);
+        let udp_checksum = ipv4_udp_checksum(src_ip, dst_ip, &pkt[20..]);
+        pkt[26..28].copy_from_slice(&udp_checksum.to_be_bytes());
+        pkt
+    }
+
+    fn test_ipv6_udp_packet(
+        src_ip: Ipv6Addr,
+        dst_ip: Ipv6Addr,
+        src_port: u16,
+        dst_port: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let udp_len = 8 + payload.len();
+        let mut pkt = vec![0u8; 40 + udp_len];
+        pkt[0] = 0x60;
+        pkt[4..6].copy_from_slice(&(udp_len as u16).to_be_bytes());
+        pkt[6] = 17;
+        pkt[7] = 64;
+        pkt[8..24].copy_from_slice(&src_ip.octets());
+        pkt[24..40].copy_from_slice(&dst_ip.octets());
+        pkt[40..42].copy_from_slice(&src_port.to_be_bytes());
+        pkt[42..44].copy_from_slice(&dst_port.to_be_bytes());
+        pkt[44..46].copy_from_slice(&(udp_len as u16).to_be_bytes());
+        pkt[48..].copy_from_slice(payload);
+        let udp_checksum = ipv6_udp_checksum(src_ip, dst_ip, &pkt[40..]);
+        pkt[46..48].copy_from_slice(&udp_checksum.to_be_bytes());
+        pkt
+    }
+
+    #[test]
+    fn test_parse_ipv4_udp_dns_query_detects_port_53_payload() {
+        let payload = test_dns_query_payload();
+        let pkt = test_ipv4_udp_packet(
+            Ipv4Addr::new(10, 8, 0, 2),
+            Ipv4Addr::new(1, 1, 1, 1),
+            53000,
+            53,
+            &payload,
+        );
+        let query = parse_ipv4_udp_dns_query(&pkt).expect("DNS query must parse");
+        assert_eq!(query.src_ip, Ipv4Addr::new(10, 8, 0, 2));
+        assert_eq!(query.dst_ip, Ipv4Addr::new(1, 1, 1, 1));
+        assert_eq!(query.src_port, 53000);
+        assert_eq!(query.dst_port, 53);
+        assert_eq!(query.payload, payload.as_slice());
+    }
+
+    #[test]
+    fn test_parse_ipv6_udp_dns_query_detects_port_53_payload() {
+        let payload = test_dns_query_payload();
+        let src_ip = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
+        let dst_ip = Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111);
+        let pkt = test_ipv6_udp_packet(src_ip, dst_ip, 53000, 53, &payload);
+        let query = parse_ipv6_udp_dns_query(&pkt).expect("IPv6 DNS query must parse");
+        assert_eq!(query.src_ip, src_ip);
+        assert_eq!(query.dst_ip, dst_ip);
+        assert_eq!(query.src_port, 53000);
+        assert_eq!(query.dst_port, 53);
+        assert_eq!(query.payload, payload.as_slice());
+    }
+
+    #[test]
+    fn test_build_ipv4_udp_dns_response_packet_swaps_tuple() {
+        let payload = test_dns_query_payload();
+        let pkt = test_ipv4_udp_packet(
+            Ipv4Addr::new(10, 8, 0, 2),
+            Ipv4Addr::new(1, 1, 1, 1),
+            53000,
+            53,
+            &payload,
+        );
+        let query = parse_ipv4_udp_dns_query(&pkt).expect("DNS query must parse");
+        let parsed = crate::dns::parse_dns_query(query.payload).expect("DNS payload must parse");
+        let dns_response = crate::dns::build_dns_nxdomain(&parsed);
+        let response =
+            build_ipv4_udp_dns_response_packet(&query, &dns_response, OsFingerprintProfile::Linux)
+                .expect("DNS response packet must build");
+        assert_eq!(parse_ipv4_dest(&response), Some(Ipv4Addr::new(10, 8, 0, 2)));
+        assert_eq!(
+            Ipv4Addr::new(response[12], response[13], response[14], response[15]),
+            Ipv4Addr::new(1, 1, 1, 1)
+        );
+        assert_eq!(u16::from_be_bytes([response[20], response[21]]), 53);
+        assert_eq!(u16::from_be_bytes([response[22], response[23]]), 53000);
+        assert_eq!(&response[28..], dns_response.as_slice());
+    }
+
+    #[test]
+    fn test_build_ipv6_udp_dns_response_packet_swaps_tuple() {
+        let payload = test_dns_query_payload();
+        let src_ip = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
+        let dst_ip = Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111);
+        let pkt = test_ipv6_udp_packet(src_ip, dst_ip, 53000, 53, &payload);
+        let query = parse_ipv6_udp_dns_query(&pkt).expect("IPv6 DNS query must parse");
+        let parsed = crate::dns::parse_dns_query(query.payload).expect("DNS payload must parse");
+        let dns_response = crate::dns::build_dns_nxdomain(&parsed);
+        let response =
+            build_ipv6_udp_dns_response_packet(&query, &dns_response, OsFingerprintProfile::Linux)
+                .expect("IPv6 DNS response packet must build");
+        assert_eq!(parse_ipv6_dest(&response), Some(src_ip));
+        assert_eq!(Ipv6Addr::from(<[u8; 16]>::try_from(&response[8..24]).unwrap()), dst_ip);
+        assert_eq!(u16::from_be_bytes([response[40], response[41]]), 53);
+        assert_eq!(u16::from_be_bytes([response[42], response[43]]), 53000);
+        assert_eq!(&response[48..], dns_response.as_slice());
     }
 
     #[test]
@@ -5001,6 +5823,58 @@ mod tests {
         assert_eq!(config.listen, "127.0.0.1:4433".parse().unwrap());
     }
 
+    #[cfg(feature = "rate_limiter")]
+    #[test]
+    fn test_server_config_carries_geoip_and_blacklist_defaults() {
+        // Default config should have GeoIP disabled and no blacklist sync URL.
+        let config = ServerConfig::default();
+        assert!(!config.geoip.is_enabled(), "default geoip should be disabled");
+        assert!(config.blacklist.sync_url.is_none(), "default blacklist should have no sync URL");
+    }
+
+    #[cfg(feature = "rate_limiter")]
+    #[test]
+    fn test_shared_server_domain_uses_configured_blacklist() {
+        // When ServerConfig has a blacklist sync URL, SharedServerDomain
+        // should construct a BlacklistSync with that URL (has_sync_url=true).
+        let config = ServerConfig {
+            #[cfg(feature = "rate_limiter")]
+            blacklist: BlacklistConfig {
+                default_ttl_secs: 60,
+                sync_url: Some("https://example.com/blocklist".to_string()),
+                sync_interval_secs: 300,
+            },
+            ..ServerConfig::default()
+        };
+        let domain = SharedServerDomain::new(&config);
+        assert!(domain.blacklist.has_sync_url());
+        assert_eq!(domain.blacklist.sync_interval(), Duration::from_secs(300));
+    }
+
+    #[cfg(feature = "rate_limiter")]
+    #[test]
+    fn test_shared_server_domain_uses_configured_geoip() {
+        use crate::implementations::server::limits::GeoIpConfig;
+        use std::collections::HashSet;
+        use std::path::PathBuf;
+
+        let mut countries = HashSet::new();
+        countries.insert("XX".to_string());
+        let config = ServerConfig {
+            #[cfg(feature = "rate_limiter")]
+            geoip: GeoIpConfig {
+                db_path: Some(PathBuf::from("/nonexistent/GeoLite2-Country.mmdb")),
+                blocked_countries: countries,
+            },
+            ..ServerConfig::default()
+        };
+        let domain = SharedServerDomain::new(&config);
+        // The blocker should be enabled (config has db_path + countries),
+        // but gracefully degrade (missing db → is_blocked returns false).
+        assert!(domain.geoip_blocker.is_enabled());
+        assert!(!domain.geoip_blocker.is_blocked("1.2.3.4".parse().unwrap()));
+    }
+
     #[test]
     fn test_apply_runtime_profile_identity_updates_browser_and_os() {
         let mut stealth = StealthConfig::default();
@@ -5094,6 +5968,7 @@ mod tests {
         live_state.qkey_auth.insert(
             conn_id.clone(),
             QKeyAuthState {
+                key_id: "test-key".to_string(),
                 expected_token_sha256: "deadbeef".to_string(),
                 authed: false,
                 connected_at: Instant::now() - (QKEY_AUTH_TIMEOUT + Duration::from_secs(1)),
@@ -5105,6 +5980,111 @@ mod tests {
         assert_eq!(metrics.connections_rejected.load(Ordering::Relaxed), rejected_before + 1);
         assert_eq!(metrics.auth_failed.load(Ordering::Relaxed), auth_failed_before + 1);
         assert!(!live_state.qkey_auth.contains_key(&conn_id));
+    }
+
+    #[test]
+    fn test_qkey_auth_success_associates_session_and_revocation_closes_client() {
+        let mut live_state = LiveServerState::new(ServerConfig::default());
+        let accept_loop = AcceptLoop::new(AcceptConfig::default());
+        let metrics = Metrics::new();
+        let local_addr: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+        let remote_addr: SocketAddr = "127.0.0.1:54326".parse().unwrap();
+        let (session_id, _) = live_state.domain.accept(remote_addr).expect("session accepted");
+        let mut transport =
+            crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION).unwrap();
+        let connection = create_live_server_connection(
+            local_addr,
+            remote_addr,
+            &mut transport,
+            StealthConfig::default(),
+            FecConfig::default(),
+            OptimizeConfig::default(),
+            &crate::transport::ConnectionId::from_ref(b"auth-revoke-close"),
+        )
+        .expect("live server connection must be creatable");
+        let conn_id = connection.conn.source_id().as_ref().to_vec();
+
+        live_state.clients.insert(remote_addr, connection);
+        live_state.qkey_auth.insert(
+            conn_id.clone(),
+            QKeyAuthState {
+                key_id: "test-key".to_string(),
+                expected_token_sha256: "deadbeef".to_string(),
+                authed: false,
+                connected_at: Instant::now(),
+            },
+        );
+
+        live_state.commit_qkey_auth_result(
+            None,
+            Some((conn_id.clone(), true)),
+            &accept_loop,
+            &metrics,
+        );
+
+        assert_eq!(
+            live_state.qkey_tracker.key_for_connection(session_id.as_u64()).as_deref(),
+            Some("test-key")
+        );
+
+        live_state.revoke_qkey_now("test-key", "test", &accept_loop, &metrics);
+
+        assert!(live_state.revocation_manager.is_revoked("test-key"));
+        assert!(!live_state.clients.contains_key(&remote_addr));
+        assert!(live_state.domain.session_id_by_remote(remote_addr).is_none());
+        assert!(live_state.qkey_tracker.connections_for_key("test-key").is_empty());
+        assert!(!live_state.qkey_auth.contains_key(&conn_id));
+    }
+
+    #[test]
+    fn test_pending_qkey_auth_cannot_complete_after_revocation() {
+        let mut live_state = LiveServerState::new(ServerConfig::default());
+        let accept_loop = AcceptLoop::new(AcceptConfig::default());
+        let metrics = Metrics::new();
+        let local_addr: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+        let remote_addr: SocketAddr = "127.0.0.1:54327".parse().unwrap();
+        live_state.domain.accept(remote_addr).expect("session accepted");
+        let mut transport =
+            crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION).unwrap();
+        let connection = create_live_server_connection(
+            local_addr,
+            remote_addr,
+            &mut transport,
+            StealthConfig::default(),
+            FecConfig::default(),
+            OptimizeConfig::default(),
+            &crate::transport::ConnectionId::from_ref(b"pending-revoked"),
+        )
+        .expect("live server connection must be creatable");
+        let conn_id = connection.conn.source_id().as_ref().to_vec();
+        let rejected_before = metrics.connections_rejected.load(Ordering::Relaxed);
+        let auth_failed_before = metrics.auth_failed.load(Ordering::Relaxed);
+
+        live_state.clients.insert(remote_addr, connection);
+        live_state.qkey_auth.insert(
+            conn_id.clone(),
+            QKeyAuthState {
+                key_id: "pending-key".to_string(),
+                expected_token_sha256: "deadbeef".to_string(),
+                authed: false,
+                connected_at: Instant::now(),
+            },
+        );
+        live_state.revocation_manager.revoke("pending-key", "test");
+
+        live_state.commit_qkey_auth_result(
+            None,
+            Some((conn_id.clone(), true)),
+            &accept_loop,
+            &metrics,
+        );
+
+        assert!(!live_state.clients.contains_key(&remote_addr));
+        assert!(live_state.domain.session_id_by_remote(remote_addr).is_none());
+        assert!(live_state.qkey_tracker.connections_for_key("pending-key").is_empty());
+        assert!(!live_state.qkey_auth.contains_key(&conn_id));
+        assert_eq!(metrics.connections_rejected.load(Ordering::Relaxed), rejected_before + 1);
+        assert_eq!(metrics.auth_failed.load(Ordering::Relaxed), auth_failed_before + 1);
     }
 
     #[test]
@@ -5497,6 +6477,7 @@ mod tests {
     #[test]
     fn test_qkey_auth_state_is_expired_when_not_authed_past_timeout() {
         let state = QKeyAuthState {
+            key_id: "test-key".to_string(),
             expected_token_sha256: "abc".to_string(),
             authed: false,
             connected_at: Instant::now() - (QKEY_AUTH_TIMEOUT + Duration::from_secs(1)),
@@ -5507,6 +6488,7 @@ mod tests {
     #[test]
     fn test_qkey_auth_state_not_expired_when_authed() {
         let state = QKeyAuthState {
+            key_id: "test-key".to_string(),
             expected_token_sha256: "abc".to_string(),
             authed: true,
             connected_at: Instant::now() - (QKEY_AUTH_TIMEOUT + Duration::from_secs(10)),
@@ -5517,6 +6499,7 @@ mod tests {
     #[test]
     fn test_qkey_auth_state_not_expired_when_recent() {
         let state = QKeyAuthState {
+            key_id: "test-key".to_string(),
             expected_token_sha256: "abc".to_string(),
             authed: false,
             connected_at: Instant::now(),

@@ -600,7 +600,8 @@ impl UdpFastPath {
         Ok(results)
     }
 
-    // Single packet receive
+    // Single packet receive used by the non-Linux recv_batch fallback.
+    #[cfg(not(target_os = "linux"))]
     fn recv_single(&mut self) -> io::Result<Option<(Vec<u8>, SocketAddr)>> {
         let buf = &mut self.recv_batch[0];
         match self.socket.recv_from(buf.as_mut_slice()) {

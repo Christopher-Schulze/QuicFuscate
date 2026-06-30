@@ -545,6 +545,7 @@ impl NftablesKillSwitch {
     ///
     /// This is the explicit constructor used when the caller already knows the
     /// VPN server address and TUN interface name at construction time.
+    #[cfg(test)]
     fn new_nftables(server_addr: &str, tun_iface: &str) -> Self {
         let ks = Self::new();
         *ks.server_addr.lock().unwrap() = Some(server_addr.to_string());
@@ -553,6 +554,7 @@ impl NftablesKillSwitch {
     }
 
     /// Set the VPN server UDP port for the allow rule.
+    #[cfg(test)]
     fn set_server_port(&self, port: u16) {
         *self.server_port.lock().unwrap() = Some(port);
     }
@@ -699,7 +701,7 @@ impl NftablesKillSwitch {
     /// Queries `nft list table` to determine existence; if the table is
     /// present it is deleted unconditionally.
     fn cleanup_stale() -> Result<(), KillSwitchError> {
-        use std::process::Command;
+        use std::process::{Command, Stdio};
 
         // Check if the table exists.
         let check = Command::new("nft")

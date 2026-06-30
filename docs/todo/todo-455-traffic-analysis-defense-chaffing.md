@@ -4,7 +4,7 @@ title: "Traffic analysis defense: chaffing, constant rates, full padding"
 severity: HIGH
 phase: "J"
 priority: P2
-status: OPEN
+status: DONE
 created: 2026-07-23
 depends_on: [TODO-416]
 ---

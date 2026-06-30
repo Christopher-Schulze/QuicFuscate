@@ -4,7 +4,7 @@ title: "Key erasure via zeroize and memory locking (mlock)"
 severity: HIGH
 phase: "H"
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-06-30
 depends_on: []
 ---

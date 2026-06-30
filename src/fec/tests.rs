@@ -1374,7 +1374,7 @@ fn test_batch_toggle_parallel_between_batches() {
     assert_eq!(repairs2.len(), expected, "n-k repairs in batch 2 (par)");
 
     // Properties identical
-    for rp in repairs1.into_iter().chain(repairs2.into_iter()) {
+    for rp in repairs1.into_iter().chain(repairs2) {
         assert!(!rp.is_systematic);
         assert!(rp.coefficients.is_some());
         assert_eq!(rp.coeff_len, k, "G8 coeff len == k in Normal mode");

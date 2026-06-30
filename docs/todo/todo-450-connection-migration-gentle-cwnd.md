@@ -4,7 +4,7 @@ title: Connection migration fix (gentle cwnd handling)
 severity: HIGH
 phase: "J"
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-07-23
 depends_on: []
 ---

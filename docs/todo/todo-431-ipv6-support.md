@@ -4,7 +4,7 @@ title: IPv6 support — dual-stack TUN, IPv6 NAT, IPv6 IP pool, IPv6 forwarding
 severity: CRITICAL
 phase: "G"
 priority: P0
-status: OPEN
+status: DONE
 created: 2026-06-30
 depends_on: ["TODO-430"]
 ---

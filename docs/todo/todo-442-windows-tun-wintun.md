@@ -4,7 +4,7 @@ title: "Windows TUN via Wintun integration (client + server, dynamic DLL, ring b
 severity: HIGH
 phase: "I"
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-07-23
 depends_on: []
 ---
