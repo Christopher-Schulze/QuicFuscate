@@ -507,10 +507,10 @@ Current Obfuscation-Modes - Matrix & Tuning (on = enabled, off = disabled, value
 | WebTransport Cover | off | off | escalated/anti-DPI cover only | Level 2 only |
 | MASQUE Manager | compat-only | compat-only | compat-only | compat-only |
 | MASQUE Preferred | off | off | off | off |
-| Cover Traffic Interval | 5 s | 5 s | 5 s (tightened on escalation) | 5 s (dynamic) |
+| Cover Traffic Interval | off | 5 s | 5 s (tightened on escalation) | off at Level 0; 5 s from Level 1 |
 
 Notes:
-- Active probing detection is enabled in Stealth, Anti-DPI, and Intelligent; Performance keeps overhead minimal with the detector disabled. Intelligent starts like Performance and can escalate toward Anti-DPI features on probe signals.
+- Active probing detection is enabled in Stealth, Anti-DPI, and Intelligent; Performance keeps overhead minimal with the detector disabled and no H3 cover-request scheduler. Intelligent starts like Performance at Level 0 and can escalate toward Stealth/Anti-DPI features on probe signals.
 - `sec-ch-ua*` hints are emitted only for Chromium family (Chrome/Edge); Firefox and Safari typically omit them.
 - `StealthManager` owns all preset baselines and the concrete Intelligent-mode runtime policy derivation for pacing, timing, padding, mimic bias, granularity, and CC profile. `StealthBrain` still adapts transport ACK policy globally, but its Intelligent-mode stealth steering now flows through a narrow runtime-policy delta instead of embedding raw per-actuator mapping logic inline.
 - * TLS Cover provider is enabled by default across modes and can be disabled with `QUICFUSCATE_TLS_COVER=0`. Runtime cover performance mode is now driven by the active stealth mode profile rather than relying on ENV-only shadow state. `StealthConfig.use_tls_cover` (TOML alias: `use_tls_cover_extras`) only controls TLS Cover extras (ticket manager and cert emulator).

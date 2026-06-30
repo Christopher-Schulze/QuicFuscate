@@ -4652,8 +4652,10 @@ impl StealthManager {
             None
         };
 
-        // Initialize cover traffic scheduler
-        let cover_traffic = if config.enable_http3_masquerading {
+        // Initialize cover traffic scheduler only for modes that intentionally
+        // emit H3 cover requests. Performance keeps H3/QPACK persona active
+        // but must not generate extra cover traffic on the clean path.
+        let cover_traffic = if Self::cover_traffic_scheduler_allowed(&config) {
             // Use the fronted domain or fallback to a CDN domain
             let target = if let Some(ref df) = domain_fronting {
                 df.get_fronted_domain()
@@ -5376,10 +5378,26 @@ impl StealthManager {
         if self.server_push_cover_active() {
             return None;
         }
+        if !self.cover_header_emission_allowed() {
+            return None;
+        }
         if let Some(ref sched) = self.cover_traffic {
             return sched.get_next_request();
         }
         None
+    }
+
+    fn cover_traffic_scheduler_allowed(config: &StealthConfig) -> bool {
+        config.enable_http3_masquerading
+            && !matches!(config.mode, StealthMode::Off | StealthMode::Performance)
+    }
+
+    fn cover_header_emission_allowed(&self) -> bool {
+        match self.config.mode {
+            StealthMode::Off | StealthMode::Performance => false,
+            StealthMode::Intelligent => self.intelligent_runtime_level() >= 1,
+            StealthMode::Stealth | StealthMode::AntiDpi | StealthMode::Manual => true,
+        }
     }
 
     /// Returns a vector of HTTP/3 headers for a request.
@@ -6183,11 +6201,11 @@ mod stealth_coverage_tests {
     }
 
     #[test]
-    fn manager_performance_mode_has_cover_traffic_but_no_flow_shaper() {
+    fn manager_performance_mode_has_no_cover_traffic_or_flow_shaper() {
         let m = make_manager(StealthConfig::performance());
         assert_eq!(m.mode(), StealthMode::Performance);
-        // Performance: h3 masquerade on -> cover_traffic scheduler present
-        assert!(m.cover_traffic.is_some());
+        // Performance keeps H3/QPACK persona on but emits no synthetic cover traffic.
+        assert!(m.cover_traffic.is_none());
         // Performance: no timing obfuscation -> no FlowShaper
         assert!(m.flow_shaper.is_none());
         assert!(!m.escalated.load(std::sync::atomic::Ordering::Relaxed));
@@ -6205,12 +6223,16 @@ mod stealth_coverage_tests {
 
     #[test]
     fn manager_intelligent_mode_enables_dynamic_and_probe_detector() {
+        crate::brain::clear_runtime_hints_for_test();
         let m = make_manager(StealthConfig::intelligent());
         assert_eq!(m.mode(), StealthMode::Intelligent);
         assert!(m.is_intelligent_runtime());
         assert!(m.probe_detector.is_some());
         // Intelligent inherits Performance base -> flow_shaper present (dynamic_enabled=true)
         assert!(m.flow_shaper.is_some());
+        // Intelligent keeps the scheduler available but only emits from level 1 upward.
+        assert!(m.cover_traffic.is_some());
+        assert!(!m.cover_header_emission_allowed());
         // Reality proxy enabled in Intelligent mode
         assert!(m.reality_proxy.is_some());
     }
@@ -6808,6 +6830,23 @@ mod stealth_coverage_tests {
         let (authority, path) = anti_dpi.webtransport_cover_plan().expect("anti-dpi cover plan");
         assert!(!authority.is_empty());
         assert!(path.ends_with("/wt/session"));
+    }
+
+    #[test]
+    fn h3_cover_header_emission_policy_matches_modes() {
+        crate::brain::clear_runtime_hints_for_test();
+
+        let performance = make_manager(StealthConfig::performance());
+        assert!(!performance.cover_header_emission_allowed());
+        assert!(performance.cover_headers_due().is_none());
+
+        let intelligent = make_manager(StealthConfig::intelligent());
+        assert!(!intelligent.cover_header_emission_allowed());
+        assert!(intelligent.cover_headers_due().is_none());
+
+        crate::brain::INTELLIGENT_STEALTH_LEVEL_HINT.store(1, std::sync::atomic::Ordering::Relaxed);
+        assert!(intelligent.cover_header_emission_allowed());
+        crate::brain::clear_runtime_hints_for_test();
     }
 
     #[test]
