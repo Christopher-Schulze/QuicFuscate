@@ -665,6 +665,10 @@ pub struct LazyDecoder {
     /// blocks from tail-loss blocks where no later systematic packet can reveal
     /// a sequence gap.
     k: usize,
+    /// Interleave depth used by the parent decoder. A single lazy block sees
+    /// source packet sequences spaced by this depth, so gap tracking normalizes
+    /// source sequence numbers by this value.
+    depth: usize,
     /// Expected next sequence number
     expected_seq: u64,
     /// Maximum buffered repairs before forced flush
@@ -706,11 +710,17 @@ impl LazyDecoder {
             pending_repairs: VecDeque::with_capacity(32),
             seen_seqs: std::collections::BTreeSet::new(),
             k,
+            depth: depth.max(1),
             expected_seq: 0,
             max_pending: 64,
             lazy_enabled,
             repairs_skipped: 0,
         }
+    }
+
+    #[inline]
+    fn source_block_seq(&self, seq: u64) -> u64 {
+        seq / self.depth as u64
     }
 
     /// Check if there are gaps in the received sequence
@@ -739,10 +749,11 @@ impl LazyDecoder {
 
     pub fn take_packet(&mut self, p: FecPacket) {
         if p.is_systematic {
+            let block_seq = self.source_block_seq(p.seq);
             // Source packet - track sequence
-            self.seen_seqs.insert(p.seq);
+            self.seen_seqs.insert(block_seq);
             // Update expected sequence
-            self.expected_seq = self.expected_seq.max(p.seq + 1);
+            self.expected_seq = self.expected_seq.max(block_seq + 1);
 
             // If lazy disabled, forward to decoder
             if !self.lazy_enabled {
@@ -1538,6 +1549,36 @@ mod tests {
 
         assert_eq!(dec.pending_repairs_len(), 1);
         assert!(!dec.recovery_needed(), "repair after clean full block must stay lazy");
+    }
+
+    #[test]
+    fn test_lazy_decoder_depth_normalizes_interleaved_clean_sources() {
+        let pool = make_pool();
+        let mut policy = test_policy();
+        policy.lazy_enabled = true;
+
+        let mut dec = LazyDecoder::new_with_depth(FecMode::Normal, 4, pool.clone(), &policy, 4);
+
+        for seq in [0_u64, 4, 8, 12] {
+            let mut src = mk_src_packet(seq, 100, &pool);
+            src.is_systematic = true;
+            src.seq = seq;
+            dec.take_packet(src);
+            assert!(
+                !dec.recovery_needed(),
+                "interleaved clean source sequence {seq} must not look like a loss gap"
+            );
+        }
+
+        assert_eq!(dec.seen_seqs_len(), 0, "complete interleaved clean block should be pruned");
+
+        let mut repair = mk_src_packet(100, 50, &pool);
+        repair.is_systematic = false;
+        repair.seq = 100;
+        dec.take_packet(repair);
+
+        assert_eq!(dec.pending_repairs_len(), 1);
+        assert!(!dec.recovery_needed(), "repair after interleaved clean block must stay lazy");
     }
 
     // --- ModeManager tests ---
