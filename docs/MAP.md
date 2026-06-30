@@ -785,3 +785,44 @@ This snapshot intentionally excludes gitignored paths and local generated direct
     |   `-- xdp.rs
     `-- transport.rs
 ```
+
+## IPv6 Dual-Stack Architecture (Review Fix Session)
+
+### Components
+- `Ipv6Pool` (`src/implementations/server/ip_pool.rs`): Allocate/release IPv6 addresses from ULA range (default fd00::2–fd00::fe).
+- `Session::new_dual_stack()` (`src/implementations/server/session.rs`): Creates session with both IPv4 and IPv6 client addresses.
+- `RoutingManager::new_dual_stack()` (`src/implementations/server/routing.rs`): Configures dual-stack NAT (ip6tables MASQUERADE / pf inet6 / Windows NetNat v6).
+- `TunConfig.ip6` / `TunConfig.prefix6` (`src/interface.rs`): IPv6 TUN interface address fields, now wired to CLI flags `--tun-ip6` / `--tun-prefix6`.
+
+### Wiring
+- `SharedServerDomain` (`src/implementations/server/mod.rs`):
+  - Holds `ipv6_pool: Option<Arc<Mutex<Ipv6Pool>>>` created from `ServerConfig.ipv6_pool_start/end`.
+  - `accept()` → `accept_session_in_domain()` allocates from both IPv4 and IPv6 pools, creates dual-stack session.
+  - `remove()` / `reap_expired()` → release IPv6 address back to pool.
+- `ServerHostResources::start()` (`src/implementations/server/mod.rs`):
+  - Calls `RoutingManager::new_dual_stack()` when `server_config.ipv6_server_ip.is_some()`.
+  - `RoutingManager::setup()` assigns TUN interface addresses via `ip addr add` / `ifconfig inet6` before NAT.
+- `main.rs`:
+  - Client: `--tun-ip6` / `--tun-prefix6` → `TunConfig.ip6` / `TunConfig.prefix6`.
+  - Standalone server: `TunConfig` populated from `ServerConfig.ipv6_server_ip` / `ipv6_prefix_len`.
+
+## Kill Switch Architecture (Review Fix Session)
+
+### Linux Dedicated Chain
+- Chain name: `QUICFUSCATE_KS` (constant in `src/implementations/client/killswitch.rs`).
+- `ensure_chain()`: Creates chain + jump rule from OUTPUT (idempotent).
+- `block_traffic()` / `allow_vpn_traffic()`: Apply rules into `QUICFUSCATE_KS` via `iptables-restore`.
+- `cleanup()`: Flushes only `QUICFUSCATE_KS`.
+- `cleanup_stale()`: Flushes `QUICFUSCATE_KS`, removes jump rule, deletes chain. **Never touches user's OUTPUT rules.**
+
+### Heartbeat Watchdog
+- `Connection::last_activity_elapsed()` (`src/transport/connection.rs`): Exposes time since last inbound packet.
+- `ClientConnection::last_activity_elapsed()` (`src/implementations/client/connection.rs`): Wrapper.
+- `QuicFuscateEngine::check_heartbeat()` (`src/engine/engine.rs`):
+  - Checks `security.heartbeat_timeout_ms` (default 30000, 0=disabled).
+  - When elapsed ≥ timeout and state == Connected: calls `handle_connection_loss(Timeout)`.
+  - `handle_connection_loss()` activates kill switch, disconnects client runtime, transitions to Running.
+  - Intended to be called periodically (1–5s) from the engine run loop.
+
+## ICMP Server Architecture (Review Fix Session)
+- `build_echo_reply()` (`src/implementations/server/icmp.rs`): Sets fresh TTL=64 for locally-originated echo replies (RFC 1812 §5.3.1), not decremented from original request.

@@ -136,6 +136,13 @@ impl ClientConnection {
         guard.conn.is_closed()
     }
 
+    /// Returns the duration elapsed since the last inbound packet was received.
+    /// Used by the heartbeat watchdog to detect connection loss.
+    pub fn last_activity_elapsed(&self) -> std::time::Duration {
+        let guard = self.inner.lock();
+        guard.conn.last_activity_elapsed()
+    }
+
     /// Get RTT in milliseconds.
     pub fn rtt_ms(&self) -> f32 {
         let guard = self.inner.lock();

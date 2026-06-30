@@ -92,6 +92,9 @@ impl RoutingManager {
     /// Set up routing rules.
     #[cfg(target_os = "linux")]
     pub fn setup(&self) -> Result<(), RoutingError> {
+        // Assign IPv4 address to the TUN interface
+        self.assign_tun_address_linux()?;
+
         // Enable IPv4 forwarding
         self.enable_ip_forwarding()?;
 
@@ -105,6 +108,7 @@ impl RoutingManager {
 
         // IPv6 setup (if enabled)
         if self.is_ipv6_enabled() {
+            self.assign_tun_address_v6_linux()?;
             self.enable_ipv6_forwarding()?;
             let v6_subnet = self.calculate_ipv6_subnet();
             self.setup_ip6tables(&v6_subnet)?;
@@ -116,6 +120,7 @@ impl RoutingManager {
 
     #[cfg(target_os = "macos")]
     pub fn setup(&self) -> Result<(), RoutingError> {
+        self.assign_tun_address_macos()?;
         self.enable_ip_forwarding_macos()?;
         let subnet = self.calculate_subnet();
         self.setup_pf(&subnet)?;
@@ -123,6 +128,7 @@ impl RoutingManager {
 
         // IPv6 setup (if enabled)
         if self.is_ipv6_enabled() {
+            self.assign_tun_address_v6_macos()?;
             self.enable_ipv6_forwarding_macos()?;
             let v6_subnet = self.calculate_ipv6_subnet();
             self.setup_pf_v6(&v6_subnet)?;
@@ -481,6 +487,78 @@ impl RoutingManager {
              New-NetNat -Name '{nat_name}' -InternalIPInterfaceAddressPrefix '{subnet}' | Out-Null"
         );
         self.run_powershell(&script, "New-NetNat")
+    }
+
+    // ================================================================
+    // TUN interface address assignment
+    // ================================================================
+
+    /// Assign the IPv4 address to the TUN interface on Linux.
+    #[cfg(target_os = "linux")]
+    fn assign_tun_address_linux(&self) -> Result<(), RoutingError> {
+        let subnet = self.calculate_subnet();
+        // Extract the network prefix length from the CIDR
+        let prefix_len = subnet.split('/').nth(1).unwrap_or("24");
+        let addr = format!("{}/{}", self.server_ip, prefix_len);
+
+        // Use `ip addr add` — ignore error if address already assigned
+        let status = Command::new("ip")
+            .args(["addr", "add", &addr, "dev", &self.tun_name])
+            .status()
+            .map_err(|e| RoutingError::CommandFailed(e.to_string()))?;
+
+        if !status.success() {
+            // Address may already exist — log but don't fail
+            log::debug!("ip addr add {} dev {} (may already exist)", addr, self.tun_name);
+        }
+        // Bring the interface up
+        let _ = Command::new("ip")
+            .args(["link", "set", "up", "dev", &self.tun_name])
+            .status();
+        log::debug!("TUN IPv4 address assigned: {} on {}", addr, self.tun_name);
+        Ok(())
+    }
+
+    /// Assign the IPv6 address to the TUN interface on Linux.
+    #[cfg(target_os = "linux")]
+    fn assign_tun_address_v6_linux(&self) -> Result<(), RoutingError> {
+        if let Some(ipv6) = self.server_ipv6 {
+            let addr = format!("{}/{}", ipv6, self.ipv6_prefix_len);
+            let status = Command::new("ip")
+                .args(["-6", "addr", "add", &addr, "dev", &self.tun_name])
+                .status()
+                .map_err(|e| RoutingError::CommandFailed(e.to_string()))?;
+
+            if !status.success() {
+                log::debug!("ip -6 addr add {} dev {} (may already exist)", addr, self.tun_name);
+            }
+            log::debug!("TUN IPv6 address assigned: {} on {}", addr, self.tun_name);
+        }
+        Ok(())
+    }
+
+    /// Assign the IPv4 address to the TUN interface on macOS.
+    #[cfg(target_os = "macos")]
+    fn assign_tun_address_macos(&self) -> Result<(), RoutingError> {
+        let mask_bits = self.netmask.octets().iter().map(|b| b.count_ones()).sum::<u32>();
+        let _ = Command::new("ifconfig")
+            .args([&self.tun_name, &self.server_ip.to_string(), "netmask", &self.netmask.to_string()])
+            .status();
+        log::debug!("TUN IPv4 address assigned: {} on {}", self.server_ip, self.tun_name);
+        let _ = mask_bits; // suppress unused warning
+        Ok(())
+    }
+
+    /// Assign the IPv6 address to the TUN interface on macOS.
+    #[cfg(target_os = "macos")]
+    fn assign_tun_address_v6_macos(&self) -> Result<(), RoutingError> {
+        if let Some(ipv6) = self.server_ipv6 {
+            let _ = Command::new("ifconfig")
+                .args([&self.tun_name, "inet6", &ipv6.to_string(), "prefixlen", &self.ipv6_prefix_len.to_string()])
+                .status();
+            log::debug!("TUN IPv6 address assigned: {} on {}", ipv6, self.tun_name);
+        }
+        Ok(())
     }
 
     #[cfg(any(test, target_os = "linux", target_os = "macos", target_os = "windows"))]

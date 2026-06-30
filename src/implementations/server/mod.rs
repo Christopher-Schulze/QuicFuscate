@@ -42,7 +42,7 @@ pub use admin::{
     ClientIdentity, ClientInfo, ClientSnapshot,
 };
 pub use admin_http::{AdminHttpHandler, AdminHttpServer};
-pub use ip_pool::IpPool;
+pub use ip_pool::{IpPool, Ipv6Pool};
 #[cfg(feature = "rate_limiter")]
 pub use limits::load_rate_limit_config_from_env;
 pub use limits::{ConnectionLimiter, RateLimitConfig, RateLimiter};
@@ -844,6 +844,8 @@ pub enum AdminAction {
 struct SharedServerDomain {
     sessions: Arc<RwLock<SessionManager>>,
     ip_pool: Arc<parking_lot::Mutex<IpPool>>,
+    /// IPv6 address pool (None = IPv6 disabled). Allocated lazily from ServerConfig.
+    ipv6_pool: Option<Arc<parking_lot::Mutex<Ipv6Pool>>>,
     connection_limiter: Arc<parking_lot::Mutex<ConnectionLimiter>>,
     #[cfg(feature = "rate_limiter")]
     packet_rate_limiter: Arc<parking_lot::Mutex<PacketRateLimiterDomain>>,
@@ -886,12 +888,23 @@ impl ServerHostResources {
 
         #[cfg(target_os = "linux")]
         let routing = {
-            let routing = RoutingManager::new(
-                "qfserver0".to_string(),
-                server_config.server_ip,
-                server_config.server_netmask,
-                server_config.wan_interface.clone(),
-            );
+            let routing = if server_config.ipv6_server_ip.is_some() {
+                RoutingManager::new_dual_stack(
+                    "qfserver0".to_string(),
+                    server_config.server_ip,
+                    server_config.server_netmask,
+                    server_config.wan_interface.clone(),
+                    server_config.ipv6_server_ip.unwrap(),
+                    server_config.ipv6_prefix_len,
+                )
+            } else {
+                RoutingManager::new(
+                    "qfserver0".to_string(),
+                    server_config.server_ip,
+                    server_config.server_netmask,
+                    server_config.wan_interface.clone(),
+                )
+            };
 
             if let Err(e) = routing.setup() {
                 log::warn!("Failed to setup routing: {:?}", e);
@@ -920,12 +933,20 @@ impl ServerHostResources {
 
 impl SharedServerDomain {
     fn new(server_config: &ServerConfig) -> Self {
+        // Create IPv6 pool only if both start and end are configured
+        let ipv6_pool = match (server_config.ipv6_pool_start, server_config.ipv6_pool_end) {
+            (Some(start), Some(end)) => {
+                Some(Arc::new(parking_lot::Mutex::new(Ipv6Pool::new(start, end))))
+            }
+            _ => None,
+        };
         Self {
             sessions: Arc::new(RwLock::new(SessionManager::new(server_config.max_clients))),
             ip_pool: Arc::new(parking_lot::Mutex::new(IpPool::new(
                 server_config.ip_pool_start,
                 server_config.ip_pool_end,
             ))),
+            ipv6_pool,
             connection_limiter: Arc::new(parking_lot::Mutex::new(ConnectionLimiter::new(
                 DEFAULT_MAX_CONNECTIONS_PER_IP,
             ))),
@@ -945,10 +966,12 @@ impl SharedServerDomain {
     ) -> Result<(SessionId, Arc<SessionStats>, Ipv4Addr), AcceptError> {
         let mut sessions = self.sessions.write();
         let mut pool = self.ip_pool.lock();
+        let mut v6_pool = self.ipv6_pool.as_ref().map(|p| p.lock());
         let mut limiter = self.connection_limiter.lock();
         accept_session_in_domain(
             &mut sessions,
             &mut pool,
+            v6_pool.as_deref_mut(),
             &mut limiter,
             remote_addr,
             self.max_clients,
@@ -959,15 +982,17 @@ impl SharedServerDomain {
     fn remove(&self, session_id: SessionId) -> Option<Session> {
         let mut sessions = self.sessions.write();
         let mut pool = self.ip_pool.lock();
+        let mut v6_pool = self.ipv6_pool.as_ref().map(|p| p.lock());
         let mut limiter = self.connection_limiter.lock();
-        remove_session_from_domain(&mut sessions, &mut pool, &mut limiter, session_id)
+        remove_session_from_domain(&mut sessions, &mut pool, v6_pool.as_deref_mut(), &mut limiter, session_id)
     }
 
     fn reap_expired(&self) -> Vec<Session> {
         let mut sessions = self.sessions.write();
         let mut pool = self.ip_pool.lock();
+        let mut v6_pool = self.ipv6_pool.as_ref().map(|p| p.lock());
         let mut limiter = self.connection_limiter.lock();
-        reap_expired_sessions_from_domain(&mut sessions, &mut pool, &mut limiter)
+        reap_expired_sessions_from_domain(&mut sessions, &mut pool, v6_pool.as_deref_mut(), &mut limiter)
     }
 
     #[cfg(feature = "rate_limiter")]
@@ -2249,6 +2274,7 @@ impl LiveServerDomain {
 fn accept_session_in_domain(
     sessions: &mut SessionManager,
     ip_pool: &mut IpPool,
+    mut ipv6_pool: Option<&mut Ipv6Pool>,
     connection_limiter: &mut ConnectionLimiter,
     remote_addr: SocketAddr,
     max_clients: usize,
@@ -2261,7 +2287,26 @@ fn accept_session_in_domain(
         return Err(AcceptError::MaxClientsReached);
     }
     let client_ip = ip_pool.allocate().ok_or(AcceptError::IpPoolExhausted)?;
-    let session = Session::new(remote_addr, client_ip, client_timeout_secs);
+
+    // Allocate IPv6 address if dual-stack pool is available
+    let client_ipv6 = if let Some(ref mut v6_pool) = ipv6_pool {
+        match v6_pool.allocate() {
+            Some(v6) => Some(v6),
+            None => {
+                // IPv6 pool exhausted — release IPv4 and fail
+                ip_pool.release(client_ip);
+                return Err(AcceptError::IpPoolExhausted);
+            }
+        }
+    } else {
+        None
+    };
+
+    let session = if let Some(v6) = client_ipv6 {
+        Session::new_dual_stack(remote_addr, client_ip, Some(v6), client_timeout_secs)
+    } else {
+        Session::new(remote_addr, client_ip, client_timeout_secs)
+    };
     let session_id = session.id();
     let stats = Arc::clone(session.stats());
     match sessions.add(session) {
@@ -2271,10 +2316,20 @@ fn accept_session_in_domain(
         }
         Err(SessionError::MaxSessionsReached) => {
             ip_pool.release(client_ip);
+            if let Some(v6) = client_ipv6 {
+                if let Some(ref mut v6_pool) = ipv6_pool {
+                    v6_pool.release(v6);
+                }
+            }
             Err(AcceptError::MaxClientsReached)
         }
         Err(SessionError::NotFound | SessionError::AlreadyExists) => {
             ip_pool.release(client_ip);
+            if let Some(v6) = client_ipv6 {
+                if let Some(ref mut v6_pool) = ipv6_pool {
+                    v6_pool.release(v6);
+                }
+            }
             Err(AcceptError::SessionError("failed to add live session".to_string()))
         }
     }
@@ -2283,11 +2338,17 @@ fn accept_session_in_domain(
 fn remove_session_from_domain(
     sessions: &mut SessionManager,
     ip_pool: &mut IpPool,
+    ipv6_pool: Option<&mut Ipv6Pool>,
     connection_limiter: &mut ConnectionLimiter,
     session_id: SessionId,
 ) -> Option<Session> {
     let session = sessions.remove(session_id)?;
     ip_pool.release(session.client_ip());
+    if let Some(v6) = session.client_ipv6() {
+        if let Some(v6_pool) = ipv6_pool {
+            v6_pool.release(v6);
+        }
+    }
     connection_limiter.remove(session.remote_addr().ip());
     Some(session)
 }
@@ -2302,13 +2363,14 @@ fn collect_expired_session_ids(sessions: &SessionManager) -> Vec<SessionId> {
 fn reap_expired_sessions_from_domain(
     sessions: &mut SessionManager,
     ip_pool: &mut IpPool,
+    mut ipv6_pool: Option<&mut Ipv6Pool>,
     connection_limiter: &mut ConnectionLimiter,
 ) -> Vec<Session> {
     let expired_ids = collect_expired_session_ids(sessions);
     let mut removed = Vec::with_capacity(expired_ids.len());
     for session_id in expired_ids {
         if let Some(session) =
-            remove_session_from_domain(sessions, ip_pool, connection_limiter, session_id)
+            remove_session_from_domain(sessions, ip_pool, ipv6_pool.as_deref_mut(), connection_limiter, session_id)
         {
             removed.push(session);
         }
@@ -5410,5 +5472,158 @@ cc_algorithm = "cubic"
 mtu = 500
 "#;
         assert!(validate_transport_overrides_from_toml(toml_str).is_err());
+    }
+
+    #[test]
+    fn test_accept_session_dual_stack_allocates_ipv6() {
+        use std::net::SocketAddr;
+        let mut sessions = SessionManager::new(10);
+        let mut ip_pool = IpPool::new(
+            Ipv4Addr::new(10, 8, 0, 2),
+            Ipv4Addr::new(10, 8, 0, 10),
+        );
+        let mut v6_pool = Ipv6Pool::new(
+            Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0x0002),
+            Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0x0005),
+        );
+        let mut limiter = ConnectionLimiter::new(10);
+        let remote: SocketAddr = "1.2.3.4:1234".parse().unwrap();
+
+        let result = accept_session_in_domain(
+            &mut sessions,
+            &mut ip_pool,
+            Some(&mut v6_pool),
+            &mut limiter,
+            remote,
+            10,
+            30,
+        );
+        assert!(result.is_ok());
+        let (session_id, _, client_ip) = result.unwrap();
+        assert_eq!(client_ip, Ipv4Addr::new(10, 8, 0, 2));
+
+        // Verify the session has an IPv6 address
+        let session = sessions.get(session_id).unwrap();
+        assert!(session.client_ipv6().is_some());
+        assert_eq!(
+            session.client_ipv6().unwrap(),
+            Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0x0002)
+        );
+    }
+
+    #[test]
+    fn test_accept_session_no_ipv6_pool_when_none() {
+        use std::net::SocketAddr;
+        let mut sessions = SessionManager::new(10);
+        let mut ip_pool = IpPool::new(
+            Ipv4Addr::new(10, 8, 0, 2),
+            Ipv4Addr::new(10, 8, 0, 10),
+        );
+        let mut limiter = ConnectionLimiter::new(10);
+        let remote: SocketAddr = "1.2.3.4:1234".parse().unwrap();
+
+        let result = accept_session_in_domain(
+            &mut sessions,
+            &mut ip_pool,
+            None,
+            &mut limiter,
+            remote,
+            10,
+            30,
+        );
+        assert!(result.is_ok());
+        let (session_id, _, _) = result.unwrap();
+
+        // Session should NOT have an IPv6 address
+        let session = sessions.get(session_id).unwrap();
+        assert!(session.client_ipv6().is_none());
+    }
+
+    #[test]
+    fn test_remove_session_releases_ipv6() {
+        use std::net::SocketAddr;
+        let mut sessions = SessionManager::new(10);
+        let mut ip_pool = IpPool::new(
+            Ipv4Addr::new(10, 8, 0, 2),
+            Ipv4Addr::new(10, 8, 0, 10),
+        );
+        let mut v6_pool = Ipv6Pool::new(
+            Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0x0002),
+            Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0x0003),
+        );
+        let mut limiter = ConnectionLimiter::new(10);
+        let remote: SocketAddr = "1.2.3.4:1234".parse().unwrap();
+
+        // Accept a session
+        let (session_id, _, _) = accept_session_in_domain(
+            &mut sessions,
+            &mut ip_pool,
+            Some(&mut v6_pool),
+            &mut limiter,
+            remote,
+            10,
+            30,
+        ).unwrap();
+
+        // IPv6 pool should have 1 allocated
+        assert_eq!(v6_pool.allocated_count(), 1);
+        assert_eq!(v6_pool.available(), 1);
+
+        // Remove the session
+        let removed = remove_session_from_domain(
+            &mut sessions,
+            &mut ip_pool,
+            Some(&mut v6_pool),
+            &mut limiter,
+            session_id,
+        );
+        assert!(removed.is_some());
+
+        // IPv6 pool should be fully available again
+        assert_eq!(v6_pool.allocated_count(), 0);
+        assert_eq!(v6_pool.available(), 2);
+    }
+
+    #[test]
+    fn test_shared_server_domain_creates_ipv6_pool() {
+        let config = ServerConfig::default();
+        let domain = SharedServerDomain::new(&config);
+        // Default config has IPv6 pool start/end configured
+        assert!(domain.ipv6_pool.is_some());
+    }
+
+    #[test]
+    fn test_shared_server_domain_no_ipv6_pool_when_disabled() {
+        let mut config = ServerConfig::default();
+        config.ipv6_pool_start = None;
+        config.ipv6_pool_end = None;
+        config.ipv6_server_ip = None;
+        let domain = SharedServerDomain::new(&config);
+        // IPv6 pool should not be created
+        assert!(domain.ipv6_pool.is_none());
+    }
+
+    #[test]
+    fn test_routing_manager_new_dual_stack() {
+        let mgr = RoutingManager::new_dual_stack(
+            "tun0".to_string(),
+            Ipv4Addr::new(10, 8, 0, 1),
+            Ipv4Addr::new(255, 255, 255, 0),
+            "eth0".to_string(),
+            Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0x0001),
+            64,
+        );
+        assert!(mgr.is_ipv6_enabled());
+    }
+
+    #[test]
+    fn test_routing_manager_new_no_ipv6() {
+        let mgr = RoutingManager::new(
+            "tun0".to_string(),
+            Ipv4Addr::new(10, 8, 0, 1),
+            Ipv4Addr::new(255, 255, 255, 0),
+            "eth0".to_string(),
+        );
+        assert!(!mgr.is_ipv6_enabled());
     }
 }

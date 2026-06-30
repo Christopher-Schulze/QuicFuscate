@@ -1034,6 +1034,46 @@ impl QuicFuscateEngine {
         self.kill_switch.as_ref().map(|ks| ks.is_enabled()).unwrap_or(false)
     }
 
+    /// Check the heartbeat watchdog and trigger connection-loss handling if the
+    /// heartbeat timeout has been exceeded.
+    ///
+    /// This method should be called periodically (e.g., every 1–5 seconds) by
+    /// the engine's run loop or an external monitor. When the time since the
+    /// last received packet exceeds `security.heartbeat_timeout_ms`, it calls
+    /// `handle_connection_loss(Timeout)`, which activates the kill switch and
+    /// transitions the engine back to `Running` state.
+    ///
+    /// Returns `true` if connection loss was detected and handled, `false` otherwise.
+    pub fn check_heartbeat(&mut self) -> bool {
+        // Only check when connected and heartbeat is enabled
+        if self.state != EngineState::Connected {
+            return false;
+        }
+        let timeout_ms = self.config.security.heartbeat_timeout_ms;
+        if timeout_ms == 0 {
+            return false; // Heartbeat watchdog disabled
+        }
+
+        // Get elapsed time since last inbound packet
+        let elapsed = self
+            .client_runtime
+            .as_ref()
+            .and_then(|rt| rt.connection())
+            .map(|conn| conn.last_activity_elapsed())
+            .unwrap_or(Duration::ZERO);
+
+        if elapsed >= Duration::from_millis(timeout_ms) {
+            log::warn!(
+                "Heartbeat timeout: {}ms elapsed (threshold: {}ms) — triggering connection loss",
+                elapsed.as_millis(),
+                timeout_ms
+            );
+            self.handle_connection_loss(DisconnectReason::Timeout);
+            return true;
+        }
+        false
+    }
+
     // ========================================================================
     // Runtime Control Methods
     // ========================================================================
@@ -1492,5 +1532,44 @@ mod tests {
         assert_eq!(engine.stats.active_streams.load(Ordering::Relaxed), 5);
         assert_eq!(engine.stats.rtt_ms.load(Ordering::Relaxed), 0);
         assert_eq!(engine.stats.loss_percent.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_check_heartbeat_returns_false_when_not_connected() {
+        let mut config = EngineConfig::default();
+        config.security.heartbeat_timeout_ms = 1000;
+        let mut engine = QuicFuscateEngine::new(config).expect("engine");
+        // Engine is in Created state, not Connected
+        assert!(!engine.check_heartbeat());
+    }
+
+    #[test]
+    fn test_check_heartbeat_disabled_when_timeout_zero() {
+        let mut config = EngineConfig::default();
+        config.security.heartbeat_timeout_ms = 0;
+        let mut engine = QuicFuscateEngine::new(config).expect("engine");
+        // Even if we forced state to Connected, heartbeat=0 means disabled
+        engine.state = EngineState::Connected;
+        assert!(!engine.check_heartbeat());
+    }
+
+    #[test]
+    fn test_security_config_defaults() {
+        let config = EngineConfig::default();
+        // Kill switch disabled by default (safe default)
+        assert!(!config.security.kill_switch);
+        // Heartbeat timeout default is 30s
+        assert_eq!(config.security.heartbeat_timeout_ms, 30_000);
+        // Cleanup on start disabled by default
+        assert!(!config.security.cleanup_firewall_on_start);
+    }
+
+    #[test]
+    fn test_handle_connection_loss_no_op_when_not_connected() {
+        let mut engine = QuicFuscateEngine::new(EngineConfig::default()).expect("engine");
+        // Engine is in Created state — handle_connection_loss should be a no-op
+        engine.handle_connection_loss(DisconnectReason::Timeout);
+        // State should remain Created
+        assert_eq!(engine.state(), EngineState::Created);
     }
 }

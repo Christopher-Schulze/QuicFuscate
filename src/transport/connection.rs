@@ -3186,6 +3186,13 @@ impl Connection {
         self.last_activity.elapsed() >= window
     }
 
+    /// Returns the duration elapsed since the last inbound packet was received.
+    /// Used by the heartbeat watchdog to detect connection loss before the
+    /// transport-level idle timeout fires.
+    pub fn last_activity_elapsed(&self) -> Duration {
+        self.last_activity.elapsed()
+    }
+
     /// Returns true if there are pending ACK frames in the application (1-RTT)
     /// packet space that need to be sent. Used to bypass the congestion gate
     /// for ACK-only packets (RFC 9002 §7.2).

@@ -153,22 +153,59 @@ struct LinuxKillSwitch {
     rules_active: AtomicBool,
 }
 
+/// Dedicated iptables chain name for QuicFuscate kill switch rules.
+/// Using a separate chain avoids touching the user's OUTPUT chain rules
+/// during cleanup_stale() — we only flush our own chain and remove our
+/// jump rule, leaving all other firewall configuration intact.
+#[cfg(target_os = "linux")]
+const KS_CHAIN: &str = "QUICFUSCATE_KS";
+
 #[cfg(target_os = "linux")]
 impl LinuxKillSwitch {
     fn new() -> Self {
         Self { rules_active: AtomicBool::new(false) }
     }
 
+    /// Create the dedicated kill-switch chain if it doesn't exist, and add
+    /// a jump rule from OUTPUT to it. Idempotent — safe to call multiple times.
+    fn ensure_chain() -> Result<(), KillSwitchError> {
+        use std::process::Command;
+
+        // Create chain (ignore error if it already exists)
+        let _ = Command::new("iptables").args(["-N", KS_CHAIN]).status();
+
+        // Add jump from OUTPUT to our chain (idempotent: check first)
+        let output_rules = Command::new("iptables")
+            .args(["-S", "OUTPUT"])
+            .output()
+            .map_err(|e| KillSwitchError::CommandFailed(e.to_string()))?;
+        let rules_str = String::from_utf8_lossy(&output_rules.stdout);
+        let jump_rule = format!("-j {}", KS_CHAIN);
+        if !rules_str.contains(&jump_rule) {
+            let _ = Command::new("iptables")
+                .args(["-A", "OUTPUT", "-j", KS_CHAIN])
+                .status();
+        }
+        Ok(())
+    }
+
     fn block_traffic(&self) -> Result<(), KillSwitchError> {
         use std::io::Write;
         use std::process::{Command, Stdio};
 
-        // Apply complete ruleset atomically via iptables-restore
-        let rules = "*filter\n\
-                     :OUTPUT ACCEPT [0:0]\n\
-                     -A OUTPUT -o lo -j ACCEPT\n\
-                     -A OUTPUT -j DROP\n\
-                     COMMIT\n";
+        Self::ensure_chain()?;
+
+        // Flush our chain and apply block rules into it
+        let _ = Command::new("iptables").args(["-F", KS_CHAIN]).status();
+
+        let rules = format!(
+            "*filter\n\
+             :{} - [0:0]\n\
+             -A {} -o lo -j ACCEPT\n\
+             -A {} -j DROP\n\
+             COMMIT\n",
+            KS_CHAIN, KS_CHAIN, KS_CHAIN
+        );
 
         let mut child = Command::new("iptables-restore")
             .arg("--noflush")
@@ -190,7 +227,7 @@ impl LinuxKillSwitch {
         }
 
         self.rules_active.store(true, Ordering::SeqCst);
-        log::debug!("Kill switch: traffic blocked (atomic)");
+        log::debug!("Kill switch: traffic blocked (atomic, dedicated chain)");
         Ok(())
     }
 
@@ -202,19 +239,21 @@ impl LinuxKillSwitch {
         use std::io::Write;
         use std::process::{Command, Stdio};
 
-        // First clean up any existing rules
-        self.cleanup()?;
+        Self::ensure_chain()?;
 
-        // Apply complete VPN-allow ruleset atomically via iptables-restore
+        // Flush our chain first
+        let _ = Command::new("iptables").args(["-F", KS_CHAIN]).status();
+
+        // Apply VPN-allow ruleset into our dedicated chain
         let rules = format!(
             "*filter\n\
-             :OUTPUT ACCEPT [0:0]\n\
-             -A OUTPUT -o lo -j ACCEPT\n\
-             -A OUTPUT -d {} -j ACCEPT\n\
-             -A OUTPUT -o {} -j ACCEPT\n\
-             -A OUTPUT -j DROP\n\
+             :{} - [0:0]\n\
+             -A {} -o lo -j ACCEPT\n\
+             -A {} -d {} -j ACCEPT\n\
+             -A {} -o {} -j ACCEPT\n\
+             -A {} -j DROP\n\
              COMMIT\n",
-            server_ip, tun_name
+            KS_CHAIN, KS_CHAIN, KS_CHAIN, server_ip, KS_CHAIN, tun_name, KS_CHAIN
         );
 
         let mut child = Command::new("iptables-restore")
@@ -237,7 +276,7 @@ impl LinuxKillSwitch {
         }
 
         self.rules_active.store(true, Ordering::SeqCst);
-        log::debug!("Kill switch: VPN traffic allowed, rest blocked (atomic)");
+        log::debug!("Kill switch: VPN traffic allowed, rest blocked (atomic, dedicated chain)");
         Ok(())
     }
 
@@ -248,36 +287,52 @@ impl LinuxKillSwitch {
             return Ok(());
         }
 
-        // Flush OUTPUT chain
-        match Command::new("iptables").args(["-F", "OUTPUT"]).status() {
+        // Only flush our dedicated chain — never touch OUTPUT directly
+        match Command::new("iptables").args(["-F", KS_CHAIN]).status() {
             Ok(status) if status.success() => {}
             Ok(status) => {
-                log::debug!("Kill switch cleanup iptables flush returned status {}", status);
+                log::debug!("Kill switch cleanup: flush {} returned status {}", KS_CHAIN, status);
             }
             Err(e) => {
-                log::debug!("Kill switch cleanup iptables flush failed: {}", e);
+                log::debug!("Kill switch cleanup: flush {} failed: {}", KS_CHAIN, e);
             }
         }
 
         self.rules_active.store(false, Ordering::SeqCst);
-        log::debug!("Kill switch: rules cleaned up");
+        log::debug!("Kill switch: rules cleaned up (dedicated chain)");
         Ok(())
     }
 
     fn cleanup_stale() -> Result<(), KillSwitchError> {
         use std::process::Command;
-        // Unconditionally flush OUTPUT chain to remove any stale rules
-        match Command::new("iptables").args(["-F", "OUTPUT"]).status() {
-            Ok(status) if status.success() => {
-                log::info!("Stale iptables OUTPUT rules flushed");
-                Ok(())
+        // Only flush our dedicated chain and remove the jump rule from OUTPUT.
+        // This is safe — it never touches unrelated user firewall rules.
+        let chain_flushed = match Command::new("iptables").args(["-F", KS_CHAIN]).status() {
+            Ok(status) if status.success() => true,
+            Ok(status) => {
+                log::debug!("cleanup_stale: flush {} returned status {} (chain may not exist)", KS_CHAIN, status);
+                false
             }
-            Ok(status) => Err(KillSwitchError::CommandFailed(format!(
-                "iptables -F OUTPUT returned status {}",
-                status
-            ))),
-            Err(e) => Err(KillSwitchError::CommandFailed(e.to_string())),
+            Err(e) => {
+                log::debug!("cleanup_stale: flush {} failed: {} (chain may not exist)", KS_CHAIN, e);
+                false
+            }
+        };
+
+        // Remove the jump rule from OUTPUT (idempotent)
+        let _ = Command::new("iptables")
+            .args(["-D", "OUTPUT", "-j", KS_CHAIN])
+            .status();
+
+        // Delete the chain itself (only succeeds if empty and no references)
+        let _ = Command::new("iptables").args(["-X", KS_CHAIN]).status();
+
+        if chain_flushed {
+            log::info!("Stale kill switch rules cleaned (dedicated chain {})", KS_CHAIN);
+        } else {
+            log::info!("Stale kill switch cleanup attempted (chain may not have existed)");
         }
+        Ok(())
     }
 }
 

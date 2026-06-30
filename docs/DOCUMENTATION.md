@@ -3736,12 +3736,16 @@ Enable kill-switch to prevent any traffic outside the tunnel.
 
 #### Linux
 **iptables rules not applied:**
-- Check `iptables -L -n` to verify rules exist
+- Check `iptables -L QUICFUSCATE_KS -n` to verify rules exist in the dedicated chain
 - Ensure the binary has `CAP_NET_ADMIN` capability or runs as root
 - Verify no conflicting firewall manager (ufw, firewalld) is resetting rules
 
 **Traffic leaks during connect/disconnect:**
-- Atomic iptables-restore is used for rule application. If you still experience leaks, check that iptables-restore is available on your system and that no other firewall manager is interfering.
+- Atomic iptables-restore is used for rule application into a dedicated `QUICFUSCATE_KS` chain. If you still experience leaks, check that iptables-restore is available on your system and that no other firewall manager is interfering.
+
+**Stale rules from crashed session:**
+- Run `quicfuscate client --cleanup-firewall` to remove stale kill-switch rules
+- This only flushes the `QUICFUSCATE_KS` chain and removes the jump rule from OUTPUT — it does NOT touch unrelated user firewall rules
 
 #### macOS
 **pf rules not loading:**
@@ -3750,14 +3754,53 @@ Enable kill-switch to prevent any traffic outside the tunnel.
 - If pf was already enabled, the enable command may fail silently; check system pf state before enabling
 
 **Temp file conflicts:**
-- Kill-switch config uses `/tmp/pf.conf` which can conflict with multiple instances
-- Workaround: ensure only one QuicFuscate instance runs at a time
+- Kill-switch config uses PID-scoped temp files (`/tmp/quicfuscate_killswitch_<pid>.conf`) to avoid multi-instance conflicts
+- Stale rules can be cleaned with `quicfuscate client --cleanup-firewall`
 
 #### Windows
 **Firewall rules accumulate:**
 - Old rules may not be cleaned up on disconnect; run periodic cleanup
 - Manual cleanup: `netsh advfirewall firewall show rule name=all | findstr QuicFuscate`
 - Delete stale rules: `netsh advfirewall firewall delete rule name="QuicFuscate*"`
+
+### Heartbeat Watchdog
+
+The engine includes a heartbeat watchdog that detects connection loss when no data is received from the server for a configurable timeout period. When triggered, it activates the kill switch (if enabled) and transitions the engine back to `Running` state.
+
+**Configuration:**
+```toml
+[security]
+kill_switch = true              # Enable kill switch
+heartbeat_timeout_ms = 30000    # 30s default; 0 to disable
+cleanup_firewall_on_start = false  # Clean stale rules on startup
+```
+
+**Usage:** Call `engine.check_heartbeat()` periodically (every 1–5 seconds) from your run loop. It returns `true` if connection loss was detected and handled.
+
+### IPv6 Dual-Stack Support
+
+The VPN server supports dual-stack IPv4/IPv6 operation. When IPv6 is enabled (default), the server:
+- Assigns IPv6 addresses to the TUN interface via `ip addr add` / `ifconfig inet6`
+- Allocates IPv6 addresses to clients from a dedicated `Ipv6Pool`
+- Routes IPv6 packets via `get_by_client_ipv6()` session lookup
+- Sets up ip6tables MASQUERADE / pf inet6 NAT / Windows NetNat v6
+
+**Configuration:**
+```toml
+# Server defaults (fd00::/64 ULA range)
+ipv6_pool_start = "fd00::2"
+ipv6_pool_end = "fd00::fe"
+ipv6_server_ip = "fd00::1"
+ipv6_prefix_len = 64
+ipv6_dns_servers = ["2606:4700:4700::1111", "2001:4860:4860::8888"]
+```
+
+**Client CLI:**
+```
+quicfuscate client --tun-ip6 fd00::2 --tun-prefix6 64 ...
+```
+
+To disable IPv6, set `ipv6_server_ip = None` and `ipv6_pool_start = None` in the server config.
 
 ### Performance Tuning
 

@@ -1094,6 +1094,8 @@ async fn async_main() -> std::io::Result<()> {
                 shared.tun_mtu,
                 shared.tun_ip,
                 shared.tun_netmask,
+                shared.tun_ip6,
+                shared.tun_prefix6,
                 qkey.as_deref(),
                 shared.kill_switch,
                 shared.cleanup_firewall,
@@ -1399,6 +1401,8 @@ async fn run_client(
     tun_mtu: Option<u16>,
     tun_ip: Option<String>,
     tun_netmask: Option<String>,
+    tun_ip6: Option<String>,
+    tun_prefix6: Option<u8>,
     qkey: Option<&str>,
     kill_switch_enabled: bool,
     cleanup_firewall: bool,
@@ -1618,6 +1622,8 @@ async fn run_client(
             ip: tun_ip.and_then(|s| s.parse().ok()),
             netmask: tun_netmask.and_then(|s| s.parse().ok()),
             mtu: tun_mtu.unwrap_or(1500),
+            ip6: tun_ip6.as_ref().and_then(|s| s.parse().ok()),
+            prefix6: tun_prefix6,
             ..Default::default()
         };
         let optm = OptimizationManager::from_cfg(opt_params);
@@ -2175,6 +2181,8 @@ async fn run_server(
             ip: tun_ip.and_then(|s| s.parse().ok()),
             netmask: tun_netmask.and_then(|s| s.parse().ok()),
             mtu: tun_mtu.unwrap_or(1500),
+            ip6: server_config.ipv6_server_ip,
+            prefix6: Some(server_config.ipv6_prefix_len),
             ..Default::default()
         })
     } else {

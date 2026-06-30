@@ -52,7 +52,7 @@ pub fn parse_icmpv4(ip_header_len: usize, pkt: &[u8]) -> Option<IcmpHeader> {
 }
 
 /// Build an ICMP Echo Reply from an Echo Request.
-/// Swaps src/dst IP, sets ICMP type to 0, recomputes checksums, decrements TTL.
+/// Swaps src/dst IP, sets ICMP type to 0, recomputes checksums, sets fresh TTL=64.
 pub fn build_echo_reply(original_pkt: &[u8]) -> Vec<u8> {
     let mut reply = original_pkt.to_vec();
     if reply.len() < 20 {
@@ -88,10 +88,11 @@ pub fn build_echo_reply(original_pkt: &[u8]) -> Vec<u8> {
     reply[10] = (ip_cksum >> 8) as u8;
     reply[11] = (ip_cksum & 0xFF) as u8;
 
-    // Decrement TTL
-    if reply[8] > 0 {
-        reply[8] -= 1;
-    }
+    // Set a fresh TTL for the echo reply (this is a new packet originated
+    // by the server, not a forwarded packet — TTL should not be decremented
+    // from the original request). RFC 1812 §5.3.1: TTL for locally-generated
+    // packets should be a configured default (typically 64).
+    reply[8] = 64;
 
     reply
 }
@@ -259,8 +260,8 @@ mod tests {
         // Identifier and sequence preserved
         assert_eq!(&reply[24..26], &0xABCDu16.to_be_bytes());
         assert_eq!(&reply[26..28], &42u16.to_be_bytes());
-        // TTL decremented
-        assert_eq!(reply[8], 63);
+        // TTL set to fresh value 64 (locally-originated reply, not decremented)
+        assert_eq!(reply[8], 64);
     }
 
     #[test]
