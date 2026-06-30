@@ -46,6 +46,10 @@ pub trait CongestionController: Send {
     /// Current congestion window in bytes.
     fn cwnd(&self) -> usize;
 
+    /// Set the congestion window directly (used on path migration).
+    /// The CC should accept the new value and continue from it.
+    fn set_cwnd(&mut self, cwnd: usize);
+
     /// Bytes currently in flight (unacknowledged).
     fn bytes_in_flight(&self) -> usize;
 
@@ -123,6 +127,9 @@ impl CongestionController for CcImpl {
     }
     fn cwnd(&self) -> usize {
         cc_dispatch!(self, cwnd)
+    }
+    fn set_cwnd(&mut self, cwnd: usize) {
+        cc_dispatch!(self, set_cwnd, cwnd)
     }
     fn bytes_in_flight(&self) -> usize {
         cc_dispatch!(self, bytes_in_flight)

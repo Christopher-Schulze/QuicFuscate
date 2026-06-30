@@ -1,7 +1,8 @@
 use super::{
-    cid, config::Config, frames, packet, pnspace, recovery, udpfast, ConnectionId, EcnCounts,
-    EcnMark, FecControlDelta, Frame, PacketType, PathStats, RecvInfo, SendInfo, Stats, Stream,
-    TransportObserver, INITIAL_WINDOW, MAX_STREAM_SIZE, MIN_CLIENT_INITIAL_LEN, PROTOCOL_VERSION,
+    cid, config::Config, config::TrafficAnalysisDefense, frames, packet, pnspace, recovery,
+    udpfast, ConnectionId, EcnCounts, EcnMark, FecControlDelta, Frame, PacketType, PathStats,
+    RecvInfo, SendInfo, Stats, Stream, TransportObserver, INITIAL_WINDOW, MAX_STREAM_SIZE,
+    MIN_CLIENT_INITIAL_LEN, PROTOCOL_VERSION,
 };
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -15,6 +16,143 @@ use crate::optimize::{prefetch, PrefetchHint};
 const MAX_RX_KEY_UPDATE_ADVANCE: usize = 4;
 const PATH_VALIDATION_TIMEOUT: Duration = Duration::from_secs(3);
 const MIGRATION_COOLDOWN: Duration = Duration::from_millis(750);
+
+/// DPLPMTUD (RFC 8899) state for packetization-layer MTU discovery.
+///
+/// Probes the path MTU by sending padded PING packets at increasing sizes.
+/// Uses binary search between PMTU_MIN and PMTU_MAX for fast convergence.
+/// Black hole detection: if no ACKs arrive for BLACK_HOLE_TIMEOUT, fall back
+/// to PMTU_MIN.
+const PMTU_MIN: usize = 1280; // IPv6 minimum MTU
+const PMTU_MAX: usize = 1400; // Safe max for QUIC over IPv4 (1500 - IP(20) - UDP(8) - QUIC overhead)
+const PMTU_BLACK_HOLE_TIMEOUT: Duration = Duration::from_secs(10);
+const PMTU_PROBE_INTERVAL: Duration = Duration::from_secs(60);
+
+/// DPLPMTUD probe state machine.
+#[derive(Clone, Debug)]
+pub struct PmtuState {
+    /// Current confirmed MTU (starts at PMTU_MIN).
+    confirmed_mtu: usize,
+    /// Current probe target (binary search between confirmed and max).
+    probe_target: usize,
+    /// Whether a probe is in flight (and its size).
+    probe_in_flight: Option<usize>,
+    /// Timestamp of the last probe send.
+    last_probe_sent: Option<Instant>,
+    /// Last time we received any ACK (for black hole detection).
+    last_ack_received: Instant,
+    /// Whether DPLPMTUD is enabled.
+    enabled: bool,
+}
+
+impl PmtuState {
+    pub fn new(enabled: bool) -> Self {
+        Self {
+            confirmed_mtu: PMTU_MIN,
+            probe_target: if enabled { PMTU_MAX } else { PMTU_MIN },
+            probe_in_flight: None,
+            last_probe_sent: None,
+            last_ack_received: Instant::now(),
+            enabled,
+        }
+    }
+
+    /// Returns the current effective MTU (confirmed, not probe target).
+    pub fn effective_mtu(&self) -> usize {
+        self.confirmed_mtu
+    }
+
+    /// Returns true if a DPLPMTUD probe should be sent now.
+    pub fn should_send_probe(&self, now: Instant) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        if self.probe_in_flight.is_some() {
+            return false; // Already probing
+        }
+        if self.probe_target <= self.confirmed_mtu {
+            return false; // No larger size to probe
+        }
+        // Send probe if interval has elapsed since last probe
+        match self.last_probe_sent {
+            Some(last) => now.duration_since(last) >= PMTU_PROBE_INTERVAL,
+            None => true, // First probe
+        }
+    }
+
+    /// Record that a probe of `size` bytes was sent.
+    pub fn on_probe_sent(&mut self, size: usize, now: Instant) {
+        self.probe_in_flight = Some(size);
+        self.last_probe_sent = Some(now);
+    }
+
+    /// Record that a probe was ACKed — confirm the MTU.
+    pub fn on_probe_acked(&mut self, now: Instant) {
+        if let Some(size) = self.probe_in_flight.take() {
+            self.confirmed_mtu = size;
+            // Next probe: try larger (binary search up)
+            self.probe_target = (size + PMTU_MAX) / 2;
+            if self.probe_target == size {
+                self.probe_target = PMTU_MAX; // Already at max
+            }
+        }
+        self.last_ack_received = now;
+    }
+
+    /// Record that a probe was lost — reduce probe target.
+    pub fn on_probe_lost(&mut self) {
+        if let Some(size) = self.probe_in_flight.take() {
+            // Binary search down: try midpoint between confirmed and failed size
+            self.probe_target = (self.confirmed_mtu + size) / 2;
+            if self.probe_target <= self.confirmed_mtu {
+                self.probe_target = self.confirmed_mtu; // Can't go lower
+            }
+        }
+    }
+
+    /// Check for black hole (no ACKs for extended period).
+    /// Returns true if MTU should be reset to minimum.
+    pub fn check_black_hole(&self, now: Instant) -> bool {
+        self.enabled && now.duration_since(self.last_ack_received) > PMTU_BLACK_HOLE_TIMEOUT
+    }
+
+    /// Reset to minimum MTU (black hole detected).
+    pub fn reset_to_minimum(&mut self) {
+        self.confirmed_mtu = PMTU_MIN;
+        self.probe_target = PMTU_MIN + (PMTU_MAX - PMTU_MIN) / 4; // Cautious re-probe
+        self.probe_in_flight = None;
+    }
+
+    /// Record any ACK received (for black hole detection).
+    pub fn on_any_ack(&mut self, now: Instant) {
+        self.last_ack_received = now;
+    }
+
+    /// Returns the probe size to send (or None if no probe needed).
+    pub fn probe_size(&self) -> Option<usize> {
+        if self.enabled && self.probe_in_flight.is_none() && self.probe_target > self.confirmed_mtu
+        {
+            Some(self.probe_target)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the current probe target (the size the state machine wants to
+    /// probe next), regardless of whether a probe is in flight.
+    pub fn probe_target(&self) -> Option<usize> {
+        if self.enabled && self.probe_target > self.confirmed_mtu {
+            Some(self.probe_target)
+        } else {
+            None
+        }
+    }
+
+    /// Returns true if DPLPMTUD is enabled.
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+}
 
 /// Upper bound for peer-advertised MAX_DATA to prevent resource exhaustion (1 GiB).
 /// A malicious peer sending MAX_DATA(u64::MAX) would effectively disable flow control.
@@ -238,6 +376,17 @@ pub struct Connection {
     h3: Option<crate::transport::h3::Connection>,
     // Shared 0-RTT anti-replay strike register (server-side only).
     strike_register: Option<Arc<super::anti_replay::StrikeRegister>>,
+    // DPLPMTUD (RFC 8899) state for path MTU discovery.
+    pmtu: PmtuState,
+    // Packet number of the in-flight DPLPMTUD probe (if any). Used to detect
+    // probe ACK/loss in the ACK processing path.
+    pmtu_probe_pn: Option<u64>,
+    // Chaff (dummy packet) generator for traffic analysis defense (TODO-455).
+    // Active only when `traffic_analysis_defense` is `ConstantRate` and
+    // `chaff_rate_pps > 0`. The generator is polled on every `send()` call; if
+    // it signals that a chaff packet is due and no real ack-eliciting payload
+    // was written, a PING+PADDING chaff packet is emitted instead.
+    chaff: Option<crate::stealth::ChaffGenerator>,
 }
 
 #[cfg(feature = "zero_copy_dgram")]
@@ -341,6 +490,7 @@ impl Connection {
     ) -> Self {
         let dgram_send_max_size = config.max_udp_payload_size as usize;
         let initial_max_data = config.initial_max_data;
+        let pmtu_enabled = config.pmtu_discovery_enabled();
         let mut conn = Self {
             scid: ConnectionId::from_vec(scid.to_vec()),
             dcid: ConnectionId::default(),
@@ -415,7 +565,23 @@ impl Connection {
             observer: None,
             h3: None,
             strike_register: None,
+            pmtu: PmtuState::new(pmtu_enabled),
+            pmtu_probe_pn: None,
+            chaff: None,
         };
+        // Initialize chaff generator when ConstantRate defense is configured
+        // with a non-zero chaff rate.
+        if matches!(
+            conn.config.traffic_analysis_defense,
+            crate::transport::config::TrafficAnalysisDefense::ConstantRate
+        ) && conn.config.chaff_rate_pps > 0
+        {
+            conn.chaff = Some(crate::stealth::ChaffGenerator::new(
+                conn.config.chaff_rate_pps,
+                conn.config.chaff_size_bytes,
+                true, // ack-eliciting so the peer generates cover ACKs
+            ));
+        }
         // Inherit strike register from config (server-side 0-RTT anti-replay).
         conn.strike_register = conn.config.strike_register.clone();
         // Apply configured initial RTT estimate before the first real measurement.
@@ -680,8 +846,11 @@ impl Connection {
         self.local_addr = path.local_addr;
         self.peer_addr = path.peer_addr;
         self.path_id = path.path_id;
-        self.cwnd = INITIAL_WINDOW;
-        self.bytes_in_flight = 0;
+        // Gentle migration: reduce cwnd by 50% instead of resetting to INITIAL_WINDOW.
+        // Preserve bytes_in_flight (packets are still in flight, peer will ACK/lose them).
+        // This prevents throughput collapse on WiFi→LTE transitions.
+        self.recovery.on_path_change();
+        self.cwnd = self.recovery.cwnd;
         self.validated_paths.insert((path.local_addr, path.peer_addr));
         self.last_migration_at = Some(Instant::now());
         self.path_events.push_back(PathEvent::Validated(path.local_addr, path.peer_addr));
@@ -1850,6 +2019,36 @@ impl Connection {
         pn_len: usize,
         mut off: usize,
     ) -> Result<usize, crate::error::ConnectionError> {
+        // --- Traffic analysis defense modes (TODO-455) ---
+        //
+        // FullPadding / ConstantRate take precedence over the legacy
+        // probabilistic padding path. They pad EVERY 1-RTT packet to a fixed
+        // target size regardless of `stealth_padding_rate`, eliminating
+        // size-based traffic analysis.
+        let defense = self.config.traffic_analysis_defense;
+        if matches!(defense, TrafficAnalysisDefense::FullPadding)
+            || matches!(defense, TrafficAnalysisDefense::ConstantRate)
+        {
+            let tag_reserve = self.tag_reserve_1rtt();
+            let avail = out.len().saturating_sub(off + tag_reserve);
+            // Target total packet size. FullPadding uses max_udp_payload_size;
+            // ConstantRate uses the chaff size (consistent across real + chaff).
+            let target_total = match defense {
+                TrafficAnalysisDefense::FullPadding => self.config.max_udp_payload_size as usize,
+                TrafficAnalysisDefense::ConstantRate => self.config.chaff_size_bytes as usize,
+                _ => 0,
+            };
+            if target_total > 0 && target_total > off + tag_reserve {
+                let needed = target_total - off - tag_reserve;
+                let pad_len = needed.min(avail);
+                if pad_len > 0 {
+                    let pad = Frame::Padding { len: pad_len };
+                    off += frames::to_bytes(&pad, &mut out[off..])?;
+                }
+            }
+            return Ok(off);
+        }
+
         if self.config.stealth_padding_enabled {
             let tag_reserve = self.tag_reserve_1rtt();
             let avail = out.len().saturating_sub(off + tag_reserve);
@@ -2060,8 +2259,21 @@ impl Connection {
         // would be silently truncated, destroying the AEAD tag and making the peer unable
         // to decrypt. Clamping the working buffer to the MTU forces CRYPTO/stream framing
         // to fragment across multiple packets instead of overflowing a single one.
-        let mtu_cap = out.len().min(self.dgram_send_max_size.max(MIN_CLIENT_INITIAL_LEN));
+        //
+        // DPLPMTUD (TODO-451): when enabled, clamp to the *confirmed* path MTU rather
+        // than the configured max. Probe packets are sized separately below.
+        let now = Instant::now();
+        let pmtu = self.pmtu.effective_mtu();
+        let mtu_cap = out
+            .len()
+            .min(self.dgram_send_max_size.max(MIN_CLIENT_INITIAL_LEN))
+            .min(pmtu.max(MIN_CLIENT_INITIAL_LEN));
         let out = &mut out[..mtu_cap];
+        // Black-hole detection: if no ACKs have arrived for an extended period,
+        // reset the PMTU to the minimum and let the probe loop re-discover.
+        if self.pmtu.check_black_hole(now) {
+            self.pmtu.reset_to_minimum();
+        }
         // Congestion gate: only send if within cwnd budget.
         // ACK-only packets bypass the gate (RFC 9002 §7.2) to prevent
         // congestion-control deadlocks where both sides exhaust their windows
@@ -2071,7 +2283,7 @@ impl Connection {
         if congestion_blocked && !ack_bypass {
             return Err(ConnectionError::Done);
         }
-        self.poll_path_validation_timeout(Instant::now());
+        self.poll_path_validation_timeout(now);
 
         // TLS provider may derive new secrets during write-side progression. Poll here so
         // handshake completion and key installation are not dependent on receiving more CRYPTO.
@@ -2334,6 +2546,67 @@ impl Connection {
             off = off_after_dgram;
             wrote_ack_eliciting |= dgram_ack_eliciting;
         }
+        // DPLPMTUD probe (TODO-451): when the PMTU state machine requests a
+        // probe and the current packet has no ack-eliciting payload (otherwise
+        // the real data already serves as a probe), inject a PING frame and pad
+        // the packet up to the probe target size. The probe is ack-eliciting so
+        // the peer's ACK confirms the larger MTU. We only probe when the buffer
+        // can hold the probe size (the caller's buffer is typically ≥ PMTU_MAX).
+        let mut _pmtu_probe_sent = false;
+        if !wrote_ack_eliciting
+            && self.pmtu.should_send_probe(now)
+            && out.len() >= self.pmtu.probe_target().unwrap_or(0)
+        {
+            if let Some(probe_size) = self.pmtu.probe_size() {
+                // PING frame (ack-eliciting) so the peer ACKs the probe.
+                use crate::transport::Frame;
+                let ping = Frame::Ping { mtu_probe: None };
+                off += crate::transport::frames::to_bytes(&ping, &mut out[off..])?;
+                wrote_ack_eliciting = true;
+                // Pad the remainder of the probe region with PADDING frames.
+                let tag_reserve = self.tag_reserve_1rtt();
+                let avail = out.len().saturating_sub(off + tag_reserve);
+                let needed = probe_size.saturating_sub(off + tag_reserve);
+                let pad_len = needed.min(avail);
+                if pad_len > 0 {
+                    let pad = Frame::Padding { len: pad_len };
+                    off += crate::transport::frames::to_bytes(&pad, &mut out[off..])?;
+                }
+                self.pmtu.on_probe_sent(probe_size, now);
+                _pmtu_probe_sent = true;
+                self.pmtu_probe_pn = Some(pn);
+            }
+        }
+        // Chaff injection (TODO-455): when the chaff generator signals that a
+        // dummy packet is due and no ack-eliciting payload was written (real
+        // traffic already covers the slot), inject a PING + PADDING chaff
+        // packet sized to `chaff_size_bytes`. The chaff is a real 1-RTT packet
+        // — encrypted with the same keys, same header format — indistinguishable
+        // from a real data packet to an outside observer.
+        if !wrote_ack_eliciting {
+            // Extract values before mutable borrow of self.chaff.
+            let tag_reserve = self.tag_reserve_1rtt();
+            let chaff_size = self.chaff.as_ref().map(|c| c.chaff_size_bytes()).unwrap_or(0);
+            if let Some(ref mut chaff) = self.chaff {
+                if chaff.should_chaff(now, false) {
+                    use crate::transport::Frame;
+                    let ping = Frame::Ping { mtu_probe: None };
+                    off += crate::transport::frames::to_bytes(&ping, &mut out[off..])?;
+                    wrote_ack_eliciting = true;
+                    let avail = out.len().saturating_sub(off + tag_reserve);
+                    let needed = (chaff_size as usize).saturating_sub(off + tag_reserve);
+                    let pad_len = needed.min(avail);
+                    if pad_len > 0 {
+                        let pad = Frame::Padding { len: pad_len };
+                        off += crate::transport::frames::to_bytes(&pad, &mut out[off..])?;
+                    }
+                }
+            }
+        } else if let Some(ref mut chaff) = self.chaff {
+            // Real ack-eliciting traffic was sent — reset the chaff clock so the
+            // next chaff is deferred for one interval.
+            chaff.record_real_traffic(now);
+        }
         off = self.maybe_apply_stealth_padding(out, pn_off, pn_len, off)?;
         off = self.seal_short_header_packet(out, pn, pn_off, pn_len, off)?;
 
@@ -2378,8 +2651,28 @@ impl Connection {
     }
 
     /// Compute stealth padding length given current plaintext payload length and budget.
+    ///
+    /// Dispatches on the configured [`TrafficAnalysisDefense`] mode (TODO-455):
+    /// - `Off`: existing probabilistic padding (gated by `stealth_padding_rate`).
+    /// - `FullPadding`: always pad to the full available budget (no rate gating,
+    ///   no random roll). The precise total-packet-size targeting to
+    ///   `max_udp_payload_size` is performed in `maybe_apply_stealth_padding`,
+    ///   which calls this after computing the budget; here we return `budget`
+    ///   so every packet is maximally padded regardless of `stealth_padding_rate`.
+    /// - `ConstantRate`: same maximal-padding behavior as `FullPadding` at this
+    ///   layer; the consistent target size and chaff injection are orchestrated
+    ///   by `maybe_apply_stealth_padding` and the `ChaffGenerator`.
     #[inline(always)]
     pub(crate) fn compute_stealth_padding(&self, cur_pt_len: usize, budget: usize) -> usize {
+        // Traffic analysis defense modes take precedence over the legacy
+        // probabilistic path. They never skip padding based on rate.
+        match self.config.traffic_analysis_defense {
+            TrafficAnalysisDefense::FullPadding | TrafficAnalysisDefense::ConstantRate => {
+                return budget;
+            }
+            TrafficAnalysisDefense::Off => {}
+        }
+
         if !self.config.stealth_padding_enabled {
             return 0;
         }
@@ -3598,8 +3891,28 @@ impl Connection {
             self.recovery.on_ack(acked_total, now);
             self.stats.acked_bytes = self.stats.acked_bytes.saturating_add(acked_total as u64);
             self.cwnd = self.recovery.cwnd;
+            // DPLPMTUD (TODO-451): record any ACK to refresh the black-hole
+            // watchdog, and confirm a probe if its PN was acknowledged.
+            self.pmtu.on_any_ack(now);
+            if let Some(probe_pn) = self.pmtu_probe_pn.take() {
+                if ranges.iter().any(|(s, e)| probe_pn >= *s && probe_pn < *e) {
+                    self.pmtu.on_probe_acked(now);
+                } else {
+                    // Probe not yet acked — keep tracking it.
+                    self.pmtu_probe_pn = Some(probe_pn);
+                }
+            }
         } else if lost_total > 0 {
             self.cwnd = self.recovery.cwnd;
+        }
+
+        // DPLPMTUD probe loss: if the probe PN fell below the loss threshold,
+        // the probe is considered lost and the PMTU state machine backs off.
+        if let Some(probe_pn) = self.pmtu_probe_pn {
+            if largest_acked >= packet_threshold && probe_pn < largest_acked - packet_threshold {
+                self.pmtu.on_probe_lost();
+                self.pmtu_probe_pn = None;
+            }
         }
 
         // Apply RTT sample to connection + recovery (RFC 9000 §5).

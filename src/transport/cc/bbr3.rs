@@ -304,6 +304,12 @@ impl CongestionController for Bbr3 {
         self.cwnd
     }
 
+    fn set_cwnd(&mut self, cwnd: usize) {
+        self.cwnd = cwnd.max(self.mss * 2);
+        // On path change, reset min_rtt so the new path gets fresh RTT samples
+        self.min_rtt = Duration::MAX;
+    }
+
     fn bytes_in_flight(&self) -> usize {
         self.bytes_in_flight
     }

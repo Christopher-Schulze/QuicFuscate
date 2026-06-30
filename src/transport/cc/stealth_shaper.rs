@@ -195,6 +195,10 @@ impl<T: CongestionController> CongestionController for StealthShaper<T> {
         self.inner.cwnd()
     }
 
+    fn set_cwnd(&mut self, cwnd: usize) {
+        self.inner.set_cwnd(cwnd);
+    }
+
     fn bytes_in_flight(&self) -> usize {
         self.inner.bytes_in_flight()
     }

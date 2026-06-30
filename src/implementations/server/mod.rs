@@ -45,7 +45,7 @@ pub use admin_http::{AdminHttpHandler, AdminHttpServer};
 pub use ip_pool::{IpPool, Ipv6Pool};
 #[cfg(feature = "rate_limiter")]
 pub use limits::load_rate_limit_config_from_env;
-pub use limits::{ConnectionLimiter, RateLimitConfig, RateLimiter};
+pub use limits::{ConnectionLimiter, GlobalRateLimiter, RateLimitConfig, RateLimiter};
 #[cfg(any(test, feature = "rust-tests"))]
 pub use metrics::GlobalMetricsServer;
 pub use metrics::Metrics;
@@ -849,6 +849,23 @@ struct SharedServerDomain {
     connection_limiter: Arc<parking_lot::Mutex<ConnectionLimiter>>,
     #[cfg(feature = "rate_limiter")]
     packet_rate_limiter: Arc<parking_lot::Mutex<PacketRateLimiterDomain>>,
+    /// Server-wide global rate limiter — caps aggregate PPS across all IPs
+    /// to prevent total overload when many sources each stay under the per-IP
+    /// limit. Checked before per-IP limiting on the accept hot path.
+    #[cfg(feature = "rate_limiter")]
+    global_rate_limiter: Arc<GlobalRateLimiter>,
+    /// EWMA-based DDoS anomaly detector (TODO-459). When a traffic spike is
+    /// detected, per-IP limits are temporarily halved via `limit_multiplier`.
+    #[cfg(feature = "rate_limiter")]
+    ddos_detector: Arc<crate::implementations::server::limits::EwmaAnomalyDetector>,
+    /// GeoIP-based source-IP blocker (TODO-459). Stub until `maxminddb` is
+    /// integrated; `is_blocked` always returns `false` without a database.
+    #[cfg(feature = "rate_limiter")]
+    geoip_blocker: Arc<crate::implementations::server::limits::GeoIpBlocker>,
+    /// External blacklist synchronizer (TODO-459). TTL-based IP blocklist with
+    /// optional external feed sync (AbuseIPDB-style, stub).
+    #[cfg(feature = "rate_limiter")]
+    blacklist: Arc<crate::implementations::server::limits::BlacklistSync>,
     max_clients: usize,
     client_timeout_secs: u64,
 }
@@ -978,6 +995,22 @@ impl SharedServerDomain {
                 limiter: RateLimiter::new(load_rate_limit_config_from_env()),
                 last_prune: Instant::now(),
             })),
+            #[cfg(feature = "rate_limiter")]
+            global_rate_limiter: Arc::new(GlobalRateLimiter::with_default_cap()),
+            #[cfg(feature = "rate_limiter")]
+            ddos_detector: Arc::new(
+                crate::implementations::server::limits::EwmaAnomalyDetector::with_defaults(),
+            ),
+            #[cfg(feature = "rate_limiter")]
+            geoip_blocker: Arc::new(
+                crate::implementations::server::limits::GeoIpBlocker::disabled(),
+            ),
+            #[cfg(feature = "rate_limiter")]
+            blacklist: Arc::new(
+                crate::implementations::server::limits::BlacklistSync::manual_only(
+                    Duration::from_secs(3600),
+                ),
+            ),
             max_clients: server_config.max_clients,
             client_timeout_secs: server_config.client_timeout_secs,
         }
@@ -1031,6 +1064,37 @@ impl SharedServerDomain {
 
     #[cfg(feature = "rate_limiter")]
     fn allow_incoming_datagram(&self, from: SocketAddr, len: usize) -> bool {
+        // 1. Global server-wide cap: drop if aggregate PPS exceeds the cap,
+        //    regardless of source IP. This is checked first so a flood from
+        //    many IPs cannot overwhelm the host even if each is under its
+        //    per-IP limit.
+        if !self.global_rate_limiter.check() {
+            crate::instrumentation::global().server.rate_limit_hit();
+            return false;
+        }
+        // 2. GeoIP blocking (TODO-459): drop if the source IP maps to a blocked
+        //    country. Stub until maxminddb is integrated — always passes.
+        if self.geoip_blocker.is_blocked(from.ip()) {
+            crate::instrumentation::global().server.rate_limit_hit();
+            return false;
+        }
+        // 3. External blacklist (TODO-459): drop if the source IP is on the
+        //    TTL-based blocklist (manual or from an external feed).
+        if self.blacklist.is_blocked(from.ip()) {
+            crate::instrumentation::global().server.rate_limit_hit();
+            return false;
+        }
+        // 4. Per-IP token bucket. When the DDoS anomaly detector reports a
+        //    spike, per-IP limits are temporarily halved by probabilistically
+        //    dropping ~50% of packets before the per-IP bucket is consulted.
+        if self.ddos_detector.is_anomaly() {
+            // Simple deterministic drop: use the low bit of a counter.
+            let count = self.global_rate_limiter.accepted.load(Ordering::Relaxed);
+            if count & 1 == 1 {
+                crate::instrumentation::global().server.rate_limit_hit();
+                return false;
+            }
+        }
         let limiter = self.packet_rate_limiter.lock();
         let allowed_packet = limiter.limiter.check_packet_ip(from.ip());
         let allowed_bytes = allowed_packet && limiter.limiter.check_bytes_ip(from.ip(), len as u64);
@@ -1043,6 +1107,11 @@ impl SharedServerDomain {
         if limiter.last_prune.elapsed() >= Duration::from_secs(30) {
             limiter.limiter.prune_idle(Duration::from_secs(120));
             limiter.last_prune = Instant::now();
+            // DDoS anomaly detection (TODO-459): feed the EWMA detector with
+            // the current global PPS count and prune expired blacklist entries.
+            let pps = self.global_rate_limiter.current_pps();
+            self.ddos_detector.record_pps(pps);
+            self.blacklist.prune_expired();
         }
     }
 
@@ -2092,6 +2161,8 @@ pub struct LiveServerState {
     clients: std::collections::HashMap<SocketAddr, QuicFuscateConnection>,
     qkey_auth: std::collections::HashMap<Vec<u8>, QKeyAuthState>,
     domain: LiveServerDomain,
+    auth_rate_limiter:
+        Arc<std::sync::Mutex<crate::implementations::server::limits::AuthRateLimiter>>,
 }
 
 pub struct LiveClientInit {
@@ -2112,6 +2183,8 @@ pub struct LiveClientBuildRequest<'a> {
     pub profile: BrowserProfile,
     pub os: OsProfile,
     pub disable_doh: bool,
+    pub auth_rate_limiter:
+        Arc<std::sync::Mutex<crate::implementations::server::limits::AuthRateLimiter>>,
     pub doh_provider: &'a str,
     pub disable_fronting: bool,
     pub front_domain: &'a [String],
@@ -2121,6 +2194,19 @@ pub struct LiveClientBuildRequest<'a> {
 pub fn build_live_server_client_init(
     request: LiveClientBuildRequest<'_>,
 ) -> Option<LiveClientInit> {
+    // Per-IP auth rate limiting: reject before any QKey lookup if the IP has
+    // exceeded the failed auth attempt threshold. This prevents brute-force
+    // attacks on QKey tokens.
+    {
+        let ip = request.remote_addr.ip();
+        let limiter = request.auth_rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
+        if !limiter.is_allowed(ip) {
+            log::warn!("QKey auth rate limit exceeded for {}; rejecting connection", ip);
+            request.metrics.record_connection_rejected();
+            return None;
+        }
+    }
+
     let initial_ctx = match parse_live_server_initial_auth(
         request.packet,
         request.qkey_registry,
@@ -2128,9 +2214,21 @@ pub fn build_live_server_client_init(
     ) {
         Some(ctx) => ctx,
         None => {
+            // Record the failed auth attempt for rate limiting
+            let ip = request.remote_addr.ip();
+            let mut limiter = request.auth_rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
+            limiter.record_failure(ip);
             return None;
         }
     };
+
+    // Successful initial auth — clear any previous failed attempts for this IP
+    {
+        let ip = request.remote_addr.ip();
+        let mut limiter = request.auth_rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
+        limiter.clear(ip);
+    }
+
     log::info!("New client connected: {}", request.remote_addr);
 
     let cfg = match request.stealth_config.lock() {
@@ -2422,6 +2520,12 @@ impl LiveServerState {
             clients: std::collections::HashMap::new(),
             qkey_auth: std::collections::HashMap::new(),
             domain: LiveServerDomain::new(&server_config),
+            auth_rate_limiter: Arc::new(std::sync::Mutex::new(
+                crate::implementations::server::limits::AuthRateLimiter::new(
+                    10,
+                    std::time::Duration::from_secs(60),
+                ),
+            )),
         }
     }
 
@@ -4244,6 +4348,7 @@ impl ServerRuntime {
 
                                 let runtime_parts = self.live_parts();
                                 let client_snapshots = runtime_parts.live_state.client_snapshots().clone();
+                                let auth_rate_limiter = runtime_parts.live_state.auth_rate_limiter.clone();
                                 let stealth_config = runtime_config.stealth_config.clone();
                                 let fec_cfg_shared = runtime_config.fec_cfg_shared.clone();
                                 let opt_params_shared = runtime_config.opt_params_shared.clone();
@@ -4269,6 +4374,7 @@ impl ServerRuntime {
                                             profile,
                                             os,
                                             disable_doh,
+                                            auth_rate_limiter: auth_rate_limiter.clone(),
                                             doh_provider: doh_provider.as_str(),
                                             disable_fronting,
                                             front_domain: &front_domain,
@@ -4782,6 +4888,7 @@ mod tests {
                 max_pps: 1,
                 max_bps: 0,
                 refill_interval: Duration::from_secs(60),
+                burst_size: 1,
             }),
             last_prune: Instant::now(),
         };

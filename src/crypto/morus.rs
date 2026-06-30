@@ -10,6 +10,7 @@ use std::sync::OnceLock;
 use std::arch::x86_64::*;
 
 use crate::crypto::aead::{AeadOpen, AeadSeal};
+use zeroize::Zeroize;
 
 // MORUS-1280-128 AEAD cipher implementation
 // Specification: https://competitions.cr.yp.to/round3/morusv2.pdf
@@ -18,6 +19,16 @@ use crate::crypto::aead::{AeadOpen, AeadSeal};
 #[derive(Clone)]
 struct Morus1280State {
     s: [[u64; 4]; 5],
+}
+
+impl Drop for Morus1280State {
+    fn drop(&mut self) {
+        for row in self.s.iter_mut() {
+            for word in row.iter_mut() {
+                word.zeroize();
+            }
+        }
+    }
 }
 
 impl Morus1280State {
@@ -970,6 +981,13 @@ impl Morus1280State {
 pub struct MorusAead {
     key: [u8; 16],
     iv: [u8; 12],
+}
+
+impl Drop for MorusAead {
+    fn drop(&mut self) {
+        self.key.zeroize();
+        self.iv.zeroize();
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

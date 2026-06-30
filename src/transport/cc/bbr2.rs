@@ -540,6 +540,11 @@ impl CongestionController for Bbr2 {
         self.cwnd
     }
 
+    fn set_cwnd(&mut self, cwnd: usize) {
+        self.cwnd = cwnd.max(self.mss * 2);
+        self.min_rtt = Duration::MAX;
+    }
+
     fn bytes_in_flight(&self) -> usize {
         self.bytes_in_flight
     }

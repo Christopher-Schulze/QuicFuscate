@@ -3,6 +3,59 @@ use rustls::pki_types::pem::PemObject;
 
 // ============================================================================
 
+/// Traffic analysis defense mode (TODO-455).
+///
+/// Controls how aggressively the transport layer defends against size-, timing-,
+/// and volume-based traffic analysis. The modes are ordered by increasing
+/// protection (and increasing bandwidth overhead):
+///
+/// - [`TrafficAnalysisDefense::Off`] — current probabilistic padding behavior
+///   (gated by `stealth_padding_rate`). No chaffing. This is the default and
+///   preserves backward compatibility.
+/// - [`TrafficAnalysisDefense::FullPadding`] — pad **every** outgoing 1-RTT
+///   packet to `max_udp_payload_size`, ignoring `stealth_padding_rate`.
+///   Eliminates size-based analysis entirely at the cost of bandwidth overhead
+///   on small packets.
+/// - [`TrafficAnalysisDefense::ConstantRate`] — pad to a consistent size **and**
+///   inject chaff (dummy packets) to maintain a fixed target emission rate
+///   (`constant_rate_pps`). Defeats both timing- and bandwidth-based analysis.
+///   This is the strongest defense and the most expensive — opt-in only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
+pub enum TrafficAnalysisDefense {
+    /// No traffic analysis defense beyond the existing probabilistic padding.
+    /// This is the default and preserves backward compatibility.
+    #[serde(alias = "off", alias = "Off", alias = "disabled")]
+    #[default]
+    Off,
+    /// Pad ALL outgoing 1-RTT packets to `max_udp_payload_size`.
+    /// Eliminates size-based traffic analysis. No probabilistic skipping.
+    #[serde(alias = "full", alias = "Full", alias = "full-padding", alias = "FullPadding")]
+    FullPadding,
+    /// Pad to a consistent size and inject chaff to maintain a fixed target
+    /// rate (`constant_rate_pps`). Defeats timing- and bandwidth-based analysis.
+    #[serde(
+        alias = "constant",
+        alias = "Constant",
+        alias = "constant-rate",
+        alias = "ConstantRate"
+    )]
+    ConstantRate,
+}
+
+impl TrafficAnalysisDefense {
+    /// Parse a mode from a case-insensitive string identifier.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" | "disabled" | "none" | "" => Some(Self::Off),
+            "full" | "full-padding" | "fullpadding" => Some(Self::FullPadding),
+            "constant" | "constant-rate" | "constantrate" => Some(Self::ConstantRate),
+            _ => None,
+        }
+    }
+}
+
+// ============================================================================
+
 /// QUIC connection configuration
 #[derive(Clone)]
 pub struct Config {
@@ -97,6 +150,22 @@ pub struct Config {
     pub(crate) external_pacing: bool,
     // Shared 0-RTT anti-replay strike register (server-side only).
     pub(crate) strike_register: Option<std::sync::Arc<super::anti_replay::StrikeRegister>>,
+    // --- Traffic analysis defense (TODO-455) ---
+    /// Traffic analysis defense mode. `Off` preserves the existing probabilistic
+    /// padding behavior. `FullPadding` pads every 1-RTT packet to
+    /// `max_udp_payload_size`. `ConstantRate` pads to a consistent size and
+    /// injects chaff to maintain `constant_rate_pps`.
+    pub(crate) traffic_analysis_defense: TrafficAnalysisDefense,
+    /// Dummy (chaff) packet injection rate in packets per second. 0 = disabled.
+    /// Chaff packets are real QUIC 1-RTT packets containing PING + PADDING frames,
+    /// indistinguishable from real traffic to an outside observer.
+    pub(crate) chaff_rate_pps: u32,
+    /// Target size in bytes for each chaff (dummy) packet. Default 1280 (IPv6
+    /// minimum MTU). Chaff is padded to this size so it matches real traffic.
+    pub(crate) chaff_size_bytes: u32,
+    /// Target emission rate (packets/sec) for `ConstantRate` mode. When real
+    /// traffic is sparse, chaff is injected to maintain this rate. Default 100.
+    pub(crate) constant_rate_pps: u32,
 }
 
 impl Config {
@@ -134,7 +203,7 @@ impl Config {
             max_stream_window: 6 * 1024 * 1024,
             max_amplification_factor: 3,
             send_capacity_factor: 1.0,
-            pmtu_discovery_enabled: false,
+            pmtu_discovery_enabled: true, // DPLPMTUD enabled by default (RFC 8899)
             disable_dcid_reuse: false,
             track_unknown_transport_params: None,
             chlo_template: None,
@@ -167,6 +236,10 @@ impl Config {
             ack_eliciting_threshold: 2,
             external_pacing: false,
             strike_register: None,
+            traffic_analysis_defense: TrafficAnalysisDefense::Off,
+            chaff_rate_pps: 0,
+            chaff_size_bytes: 1280,
+            constant_rate_pps: 100,
         })
     }
 
@@ -705,6 +778,75 @@ impl Config {
         self.external_pacing = v;
     }
 
+    // --- Traffic analysis defense setters (TODO-455) ---
+
+    /// Sets the traffic analysis defense mode.
+    pub fn set_traffic_analysis_defense(&mut self, mode: TrafficAnalysisDefense) {
+        self.traffic_analysis_defense = mode;
+        if matches!(mode, TrafficAnalysisDefense::ConstantRate)
+            && self.constant_rate_pps > 0
+            && self.chaff_rate_pps == 0
+        {
+            // Constant-rate mode needs chaff to fill gaps; default chaff rate
+            // to the constant target so idle periods are covered.
+            self.chaff_rate_pps = self.constant_rate_pps;
+        }
+    }
+
+    /// Sets the traffic analysis defense mode from a string identifier.
+    /// Returns `Err(InvalidState)` for unrecognized identifiers.
+    pub fn set_traffic_analysis_defense_str(
+        &mut self,
+        s: &str,
+    ) -> Result<(), crate::error::ConnectionError> {
+        match TrafficAnalysisDefense::parse(s) {
+            Some(mode) => {
+                self.set_traffic_analysis_defense(mode);
+                Ok(())
+            }
+            None => Err(crate::error::ConnectionError::InvalidState),
+        }
+    }
+
+    /// Sets the chaff (dummy packet) injection rate in packets per second.
+    /// 0 disables chaffing. Values are clamped to a sane maximum (10000 pps).
+    pub fn set_chaff_rate_pps(&mut self, pps: u32) {
+        self.chaff_rate_pps = pps.min(10_000);
+    }
+
+    /// Sets the target chaff packet size in bytes. Clamped to [64, 65535].
+    pub fn set_chaff_size_bytes(&mut self, size: u32) {
+        self.chaff_size_bytes = size.clamp(64, 65_535);
+    }
+
+    /// Sets the constant-rate target emission rate in packets per second.
+    /// 0 disables constant-rate shaping. Clamped to a sane maximum (1000 pps).
+    /// Enabling this (non-zero) with chaff disabled auto-enables chaff at the
+    /// same rate via `set_traffic_analysis_defense`.
+    pub fn set_constant_rate_pps(&mut self, pps: u32) {
+        self.constant_rate_pps = pps.min(1_000);
+    }
+
+    /// Returns the active traffic analysis defense mode.
+    pub fn traffic_analysis_defense(&self) -> TrafficAnalysisDefense {
+        self.traffic_analysis_defense
+    }
+
+    /// Returns the configured chaff rate in packets per second.
+    pub fn chaff_rate_pps(&self) -> u32 {
+        self.chaff_rate_pps
+    }
+
+    /// Returns the configured chaff packet size in bytes.
+    pub fn chaff_size_bytes(&self) -> u32 {
+        self.chaff_size_bytes
+    }
+
+    /// Returns the configured constant-rate target in packets per second.
+    pub fn constant_rate_pps(&self) -> u32 {
+        self.constant_rate_pps
+    }
+
     // duplicate removed: load_verify_locations_from_directory
 }
 
@@ -752,7 +894,7 @@ mod tests {
         assert_eq!(cfg.initial_congestion_window_packets, 10);
         assert_eq!(cfg.initial_rtt_ms, 100);
         assert!(cfg.simd_enabled());
-        assert!(!cfg.pmtu_discovery_enabled());
+        assert!(cfg.pmtu_discovery_enabled()); // DPLPMTUD now enabled by default
     }
 
     #[test]
@@ -893,5 +1035,138 @@ mod tests {
         cfg.set_stealth_timing(true, 5000);
         assert!(cfg.stealth_timing_enabled);
         assert_eq!(cfg.stealth_timing_max_jitter_us, 5000);
+    }
+
+    // --- Traffic analysis defense tests (TODO-455) ---
+
+    #[test]
+    fn test_traffic_analysis_defense_default_is_off() {
+        let cfg = default_config();
+        assert_eq!(cfg.traffic_analysis_defense(), TrafficAnalysisDefense::Off);
+        assert_eq!(cfg.chaff_rate_pps(), 0);
+        assert_eq!(cfg.chaff_size_bytes(), 1280);
+        assert_eq!(cfg.constant_rate_pps(), 100);
+    }
+
+    #[test]
+    fn test_traffic_analysis_defense_parse_all_modes() {
+        // Off variants
+        assert_eq!(TrafficAnalysisDefense::parse("off"), Some(TrafficAnalysisDefense::Off));
+        assert_eq!(TrafficAnalysisDefense::parse("Off"), Some(TrafficAnalysisDefense::Off));
+        assert_eq!(TrafficAnalysisDefense::parse("disabled"), Some(TrafficAnalysisDefense::Off));
+        assert_eq!(TrafficAnalysisDefense::parse("none"), Some(TrafficAnalysisDefense::Off));
+        assert_eq!(TrafficAnalysisDefense::parse(""), Some(TrafficAnalysisDefense::Off));
+        // FullPadding variants
+        assert_eq!(
+            TrafficAnalysisDefense::parse("full"),
+            Some(TrafficAnalysisDefense::FullPadding)
+        );
+        assert_eq!(
+            TrafficAnalysisDefense::parse("Full"),
+            Some(TrafficAnalysisDefense::FullPadding)
+        );
+        assert_eq!(
+            TrafficAnalysisDefense::parse("full-padding"),
+            Some(TrafficAnalysisDefense::FullPadding)
+        );
+        assert_eq!(
+            TrafficAnalysisDefense::parse("fullpadding"),
+            Some(TrafficAnalysisDefense::FullPadding)
+        );
+        // ConstantRate variants
+        assert_eq!(
+            TrafficAnalysisDefense::parse("constant"),
+            Some(TrafficAnalysisDefense::ConstantRate)
+        );
+        assert_eq!(
+            TrafficAnalysisDefense::parse("Constant"),
+            Some(TrafficAnalysisDefense::ConstantRate)
+        );
+        assert_eq!(
+            TrafficAnalysisDefense::parse("constant-rate"),
+            Some(TrafficAnalysisDefense::ConstantRate)
+        );
+        assert_eq!(
+            TrafficAnalysisDefense::parse("constantrate"),
+            Some(TrafficAnalysisDefense::ConstantRate)
+        );
+        // Unknown
+        assert_eq!(TrafficAnalysisDefense::parse("garbage"), None);
+    }
+
+    #[test]
+    fn test_traffic_analysis_defense_setter_modes() {
+        let mut cfg = default_config();
+        cfg.set_traffic_analysis_defense(TrafficAnalysisDefense::FullPadding);
+        assert_eq!(cfg.traffic_analysis_defense(), TrafficAnalysisDefense::FullPadding);
+        cfg.set_traffic_analysis_defense(TrafficAnalysisDefense::ConstantRate);
+        assert_eq!(cfg.traffic_analysis_defense(), TrafficAnalysisDefense::ConstantRate);
+        // ConstantRate auto-enables chaff at the constant target rate when chaff is disabled
+        assert_eq!(cfg.chaff_rate_pps(), 100);
+        cfg.set_traffic_analysis_defense(TrafficAnalysisDefense::Off);
+        assert_eq!(cfg.traffic_analysis_defense(), TrafficAnalysisDefense::Off);
+    }
+
+    #[test]
+    fn test_traffic_analysis_defense_str_setter() {
+        let mut cfg = default_config();
+        assert!(cfg.set_traffic_analysis_defense_str("full").is_ok());
+        assert_eq!(cfg.traffic_analysis_defense(), TrafficAnalysisDefense::FullPadding);
+        assert!(cfg.set_traffic_analysis_defense_str("constant-rate").is_ok());
+        assert_eq!(cfg.traffic_analysis_defense(), TrafficAnalysisDefense::ConstantRate);
+        assert!(cfg.set_traffic_analysis_defense_str("off").is_ok());
+        assert_eq!(cfg.traffic_analysis_defense(), TrafficAnalysisDefense::Off);
+        assert!(cfg.set_traffic_analysis_defense_str("nonsense").is_err());
+    }
+
+    #[test]
+    fn test_chaff_rate_clamped() {
+        let mut cfg = default_config();
+        cfg.set_chaff_rate_pps(0);
+        assert_eq!(cfg.chaff_rate_pps(), 0);
+        cfg.set_chaff_rate_pps(50);
+        assert_eq!(cfg.chaff_rate_pps(), 50);
+        // Clamped to 10000
+        cfg.set_chaff_rate_pps(99_999);
+        assert_eq!(cfg.chaff_rate_pps(), 10_000);
+    }
+
+    #[test]
+    fn test_chaff_size_clamped() {
+        let mut cfg = default_config();
+        cfg.set_chaff_size_bytes(0);
+        assert_eq!(cfg.chaff_size_bytes(), 64);
+        cfg.set_chaff_size_bytes(1400);
+        assert_eq!(cfg.chaff_size_bytes(), 1400);
+        cfg.set_chaff_size_bytes(100_000);
+        assert_eq!(cfg.chaff_size_bytes(), 65_535);
+    }
+
+    #[test]
+    fn test_constant_rate_clamped() {
+        let mut cfg = default_config();
+        cfg.set_constant_rate_pps(0);
+        assert_eq!(cfg.constant_rate_pps(), 0);
+        cfg.set_constant_rate_pps(250);
+        assert_eq!(cfg.constant_rate_pps(), 250);
+        cfg.set_constant_rate_pps(99_999);
+        assert_eq!(cfg.constant_rate_pps(), 1_000);
+    }
+
+    #[test]
+    fn test_traffic_analysis_defense_serde_roundtrip() {
+        let off: TrafficAnalysisDefense = serde_json::from_str("\"off\"").expect("off parses");
+        assert_eq!(off, TrafficAnalysisDefense::Off);
+        let full: TrafficAnalysisDefense =
+            serde_json::from_str("\"full-padding\"").expect("full parses");
+        assert_eq!(full, TrafficAnalysisDefense::FullPadding);
+        let constant: TrafficAnalysisDefense =
+            serde_json::from_str("\"constant-rate\"").expect("constant parses");
+        assert_eq!(constant, TrafficAnalysisDefense::ConstantRate);
+        // Roundtrip serialization
+        assert_eq!(
+            serde_json::to_string(&TrafficAnalysisDefense::FullPadding).unwrap(),
+            "\"FullPadding\""
+        );
     }
 }

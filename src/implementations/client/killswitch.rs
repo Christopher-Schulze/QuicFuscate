@@ -168,13 +168,17 @@ impl LinuxKillSwitch {
 
     /// Create the dedicated kill-switch chain if it doesn't exist, and add
     /// a jump rule from OUTPUT to it. Idempotent — safe to call multiple times.
+    /// Applies to both iptables (IPv4) and ip6tables (IPv6) to prevent
+    /// IPv6 traffic leaks when the kill switch is active.
     fn ensure_chain() -> Result<(), KillSwitchError> {
         use std::process::Command;
 
-        // Create chain (ignore error if it already exists)
+        // Create chain (ignore error if it already exists) — IPv4
         let _ = Command::new("iptables").args(["-N", KS_CHAIN]).status();
+        // IPv6 — prevents IPv6 traffic bypass when kill switch is active
+        let _ = Command::new("ip6tables").args(["-N", KS_CHAIN]).status();
 
-        // Add jump from OUTPUT to our chain (idempotent: check first)
+        // Add jump from OUTPUT to our chain (idempotent: check first) — IPv4
         let output_rules = Command::new("iptables")
             .args(["-S", "OUTPUT"])
             .output()
@@ -183,6 +187,16 @@ impl LinuxKillSwitch {
         let jump_rule = format!("-j {}", KS_CHAIN);
         if !rules_str.contains(&jump_rule) {
             let _ = Command::new("iptables").args(["-A", "OUTPUT", "-j", KS_CHAIN]).status();
+        }
+
+        // IPv6 — add jump from OUTPUT to our chain (idempotent: check first)
+        let output_rules_v6 = Command::new("ip6tables")
+            .args(["-S", "OUTPUT"])
+            .output()
+            .map_err(|e| KillSwitchError::CommandFailed(e.to_string()))?;
+        let rules_str_v6 = String::from_utf8_lossy(&output_rules_v6.stdout);
+        if !rules_str_v6.contains(&jump_rule) {
+            let _ = Command::new("ip6tables").args(["-A", "OUTPUT", "-j", KS_CHAIN]).status();
         }
         Ok(())
     }
@@ -193,8 +207,10 @@ impl LinuxKillSwitch {
 
         Self::ensure_chain()?;
 
-        // Flush our chain and apply block rules into it
+        // Flush our chain and apply block rules into it — IPv4
         let _ = Command::new("iptables").args(["-F", KS_CHAIN]).status();
+        // IPv6
+        let _ = Command::new("ip6tables").args(["-F", KS_CHAIN]).status();
 
         let rules = format!(
             "*filter\n\
@@ -205,6 +221,7 @@ impl LinuxKillSwitch {
             KS_CHAIN, KS_CHAIN, KS_CHAIN
         );
 
+        // Apply to iptables (IPv4)
         let mut child = Command::new("iptables-restore")
             .arg("--noflush")
             .stdin(Stdio::piped())
@@ -224,8 +241,19 @@ impl LinuxKillSwitch {
             ));
         }
 
+        // Apply to ip6tables (IPv6) — best effort, don't fail if ip6tables
+        // is unavailable (some systems disable IPv6 entirely)
+        if let Ok(mut child) =
+            Command::new("ip6tables-restore").arg("--noflush").stdin(Stdio::piped()).spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(rules.as_bytes());
+            }
+            let _ = child.wait();
+        }
+
         self.rules_active.store(true, Ordering::SeqCst);
-        log::debug!("Kill switch: traffic blocked (atomic, dedicated chain)");
+        log::debug!("Kill switch: traffic blocked (atomic, dedicated chain, IPv4+IPv6)");
         Ok(())
     }
 
@@ -239,10 +267,11 @@ impl LinuxKillSwitch {
 
         Self::ensure_chain()?;
 
-        // Flush our chain first
+        // Flush our chain first — IPv4 and IPv6
         let _ = Command::new("iptables").args(["-F", KS_CHAIN]).status();
+        let _ = Command::new("ip6tables").args(["-F", KS_CHAIN]).status();
 
-        // Apply VPN-allow ruleset into our dedicated chain
+        // Apply VPN-allow ruleset into our dedicated chain — IPv4
         let rules = format!(
             "*filter\n\
              :{} - [0:0]\n\
@@ -273,8 +302,33 @@ impl LinuxKillSwitch {
             ));
         }
 
+        // IPv6: block all except loopback and tun interface.
+        // server_ip is typically an IPv4 literal; for IPv6 we allow traffic
+        // through the tun interface only and drop everything else.
+        let rules_v6 = format!(
+            "*filter\n\
+             :{} - [0:0]\n\
+             -A {} -o lo -j ACCEPT\n\
+             -A {} -o {} -j ACCEPT\n\
+             -A {} -j DROP\n\
+             COMMIT\n",
+            KS_CHAIN, KS_CHAIN, KS_CHAIN, tun_name, KS_CHAIN
+        );
+
+        // Apply to ip6tables (IPv6) — best effort
+        if let Ok(mut child) =
+            Command::new("ip6tables-restore").arg("--noflush").stdin(Stdio::piped()).spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(rules_v6.as_bytes());
+            }
+            let _ = child.wait();
+        }
+
         self.rules_active.store(true, Ordering::SeqCst);
-        log::debug!("Kill switch: VPN traffic allowed, rest blocked (atomic, dedicated chain)");
+        log::debug!(
+            "Kill switch: VPN traffic allowed, rest blocked (atomic, dedicated chain, IPv4+IPv6)"
+        );
         Ok(())
     }
 
@@ -286,18 +340,37 @@ impl LinuxKillSwitch {
         }
 
         // Only flush our dedicated chain — never touch OUTPUT directly
+        // IPv4
         match Command::new("iptables").args(["-F", KS_CHAIN]).status() {
             Ok(status) if status.success() => {}
             Ok(status) => {
-                log::debug!("Kill switch cleanup: flush {} returned status {}", KS_CHAIN, status);
+                log::debug!(
+                    "Kill switch cleanup: flush {} (iptables) returned status {}",
+                    KS_CHAIN,
+                    status
+                );
             }
             Err(e) => {
-                log::debug!("Kill switch cleanup: flush {} failed: {}", KS_CHAIN, e);
+                log::debug!("Kill switch cleanup: flush {} (iptables) failed: {}", KS_CHAIN, e);
+            }
+        }
+        // IPv6
+        match Command::new("ip6tables").args(["-F", KS_CHAIN]).status() {
+            Ok(status) if status.success() => {}
+            Ok(status) => {
+                log::debug!(
+                    "Kill switch cleanup: flush {} (ip6tables) returned status {}",
+                    KS_CHAIN,
+                    status
+                );
+            }
+            Err(e) => {
+                log::debug!("Kill switch cleanup: flush {} (ip6tables) failed: {}", KS_CHAIN, e);
             }
         }
 
         self.rules_active.store(false, Ordering::SeqCst);
-        log::debug!("Kill switch: rules cleaned up (dedicated chain)");
+        log::debug!("Kill switch: rules cleaned up (dedicated chain, IPv4+IPv6)");
         Ok(())
     }
 
@@ -305,11 +378,13 @@ impl LinuxKillSwitch {
         use std::process::Command;
         // Only flush our dedicated chain and remove the jump rule from OUTPUT.
         // This is safe — it never touches unrelated user firewall rules.
+
+        // IPv4
         let chain_flushed = match Command::new("iptables").args(["-F", KS_CHAIN]).status() {
             Ok(status) if status.success() => true,
             Ok(status) => {
                 log::debug!(
-                    "cleanup_stale: flush {} returned status {} (chain may not exist)",
+                    "cleanup_stale: flush {} (iptables) returned status {} (chain may not exist)",
                     KS_CHAIN,
                     status
                 );
@@ -317,7 +392,7 @@ impl LinuxKillSwitch {
             }
             Err(e) => {
                 log::debug!(
-                    "cleanup_stale: flush {} failed: {} (chain may not exist)",
+                    "cleanup_stale: flush {} (iptables) failed: {} (chain may not exist)",
                     KS_CHAIN,
                     e
                 );
@@ -325,14 +400,18 @@ impl LinuxKillSwitch {
             }
         };
 
-        // Remove the jump rule from OUTPUT (idempotent)
+        // Remove the jump rule from OUTPUT (idempotent) — IPv4
         let _ = Command::new("iptables").args(["-D", "OUTPUT", "-j", KS_CHAIN]).status();
-
-        // Delete the chain itself (only succeeds if empty and no references)
+        // Delete the chain itself (only succeeds if empty and no references) — IPv4
         let _ = Command::new("iptables").args(["-X", KS_CHAIN]).status();
 
+        // IPv6 — best effort cleanup
+        let _ = Command::new("ip6tables").args(["-F", KS_CHAIN]).status();
+        let _ = Command::new("ip6tables").args(["-D", "OUTPUT", "-j", KS_CHAIN]).status();
+        let _ = Command::new("ip6tables").args(["-X", KS_CHAIN]).status();
+
         if chain_flushed {
-            log::info!("Stale kill switch rules cleaned (dedicated chain {})", KS_CHAIN);
+            log::info!("Stale kill switch rules cleaned (dedicated chain {}, IPv4+IPv6)", KS_CHAIN);
         } else {
             log::info!("Stale kill switch cleanup attempted (chain may not have existed)");
         }

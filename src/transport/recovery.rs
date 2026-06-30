@@ -24,8 +24,14 @@ pub struct Recovery {
     pub ssthresh: usize,
     /// Bytes currently considered in flight (synced from CC).
     pub bytes_in_flight: usize,
-    /// Smoothed round-trip time estimate.
+    /// Smoothed round-trip time estimate (EWMA per RFC 6298).
     pub rtt: Duration,
+    /// RTT variation (EWMA per RFC 6298).
+    rtt_var: Duration,
+    /// Minimum RTT observed (for RACK and BBR).
+    min_rtt: Duration,
+    /// Whether we have a valid RTT sample yet.
+    rtt_initialized: bool,
     /// Probe Timeout counter (exponential backoff).
     pub pto_count: u32,
     /// Timestamp of the most recent loss event.
@@ -54,6 +60,9 @@ impl Recovery {
             ssthresh: usize::MAX / 2,
             bytes_in_flight: 0,
             rtt: Duration::from_millis(100),
+            rtt_var: Duration::from_millis(50),
+            min_rtt: Duration::MAX,
+            rtt_initialized: false,
             pto_count: 0,
             loss_time: None,
             hystart: true,
@@ -203,9 +212,32 @@ impl Recovery {
         self.sync_from_cc();
     }
 
-    /// Updates the RTT estimate.
+    /// Updates the RTT estimate using EWMA smoothing per RFC 6298.
+    ///
+    /// On the first sample: SRTT = R, RTTVAR = R/2.
+    /// On subsequent samples:
+    ///   RTTVAR = 3/4 * RTTVAR + 1/4 * |SRTT - R|
+    ///   SRTT = 7/8 * SRTT + 1/8 * R
+    /// Also tracks min_rtt for RACK and BBR.
     pub fn update_rtt(&mut self, rtt: Duration) {
-        self.rtt = rtt;
+        if !self.rtt_initialized {
+            // First sample: initialize SRTT and RTTVAR
+            self.rtt = rtt;
+            self.rtt_var = rtt / 2;
+            self.min_rtt = rtt;
+            self.rtt_initialized = true;
+        } else {
+            // EWMA smoothing per RFC 6298
+            let abs_diff = rtt.abs_diff(self.rtt);
+            // RTTVAR = 3/4 * RTTVAR + 1/4 * |SRTT - R|
+            self.rtt_var = (self.rtt_var * 3 + abs_diff) / 4;
+            // SRTT = 7/8 * SRTT + 1/8 * R
+            self.rtt = (self.rtt * 7 + rtt) / 8;
+            // Track min_rtt
+            if rtt < self.min_rtt {
+                self.min_rtt = rtt;
+            }
+        }
         self.cc.update_rtt(rtt);
     }
 
@@ -214,10 +246,14 @@ impl Recovery {
         self.cwnd.saturating_sub(self.bytes_in_flight)
     }
 
-    /// Computes the Probe Timeout deadline with exponential backoff.
+    /// Computes the Probe Timeout deadline per RFC 9002 Section 6.2.1.
+    ///
+    /// PTO = SRTT + max(1*RTTVAR, granular) + max_ack_delay
+    /// With exponential backoff: PTO * 2^pto_count
     pub fn pto_deadline(&self, now: Instant) -> Instant {
-        let base = Duration::from_millis(200);
-        let pto = self.rtt.saturating_mul(2) + base;
+        let granularity = Duration::from_millis(1);
+        let max_ack_delay = Duration::from_millis(25); // QUIC default
+        let pto = self.rtt + self.rtt_var.max(granularity) + max_ack_delay;
         let backoff = 1u32 << self.pto_count.min(8);
         now + pto * backoff
     }
@@ -236,11 +272,69 @@ impl Recovery {
     pub fn pacing_enabled(&self) -> bool {
         self.pacing && self.cc.pacing_rate().is_some()
     }
+
+    /// Time-based loss detection deadline per RFC 9002 Section 6.2.
+    ///
+    /// A packet should be considered lost if it was sent more than
+    /// `max(9/8 * SRTT, 1ms)` ago and a later packet was acknowledged.
+    /// Returns `None` if RTT is not yet initialized.
+    pub fn time_loss_deadline(&self, sent_at: Instant) -> Option<Instant> {
+        if !self.rtt_initialized {
+            return None;
+        }
+        let threshold = (self.rtt * 9) / 8;
+        let threshold = threshold.max(Duration::from_millis(1));
+        Some(sent_at + threshold)
+    }
+
+    /// RACK (Recent ACKnowledgement) loss detection per RFC 8985.
+    ///
+    /// A packet is considered lost if:
+    /// 1. A later packet (higher PN) was acknowledged, AND
+    /// 2. The packet was sent more than `SRTT + RTTVAR` ago (the "RACK threshold")
+    ///
+    /// Returns true if the packet with `sent_at` timestamp should be
+    /// declared lost because a higher PN was acked at `latest_ack_time`.
+    pub fn rack_is_lost(&self, sent_at: Instant, latest_ack_time: Instant) -> bool {
+        if !self.rtt_initialized {
+            return false;
+        }
+        let rack_threshold = self.rtt + self.rtt_var;
+        latest_ack_time.duration_since(sent_at) > rack_threshold
+    }
+
+    /// Returns the current RTT variation (for diagnostics/testing).
+    pub fn rtt_var(&self) -> Duration {
+        self.rtt_var
+    }
+
+    /// Returns the minimum observed RTT (for diagnostics/testing).
+    pub fn min_rtt(&self) -> Duration {
+        self.min_rtt
+    }
+
+    /// Called when the connection migrates to a new path.
+    ///
+    /// Instead of resetting cwnd to INITIAL_WINDOW (which causes throughput
+    /// collapse), we reduce cwnd by 50% and set ssthresh to the reduced value
+    /// to enter congestion avoidance directly. bytes_in_flight is preserved
+    /// because the packets are still in flight on the new path (the peer will
+    /// ACK or lose them). The CC implementation gets a chance to reset
+    /// path-specific state (e.g. BBR3 resets min_rtt and re-enters PROBE_BW).
+    pub fn on_path_change(&mut self) {
+        let new_cwnd = (self.cwnd / 2).max(self.mss * 2);
+        self.ssthresh = new_cwnd;
+        self.cc.set_cwnd(new_cwnd);
+        self.pto_count = 0;
+        self.loss_time = None;
+        self.sync_from_cc();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::Recovery;
+    use core::time::Duration;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Instant;
@@ -300,5 +394,76 @@ mod tests {
         recovery.set_stealth_mode(true, super::BrowserProfile::Firefox);
         recovery.on_ack(1200, now);
         assert!(recovery.cwnd > 0);
+    }
+
+    #[test]
+    fn test_rtt_ewma_smoothing() {
+        let mut recovery = Recovery::new(12_000, 1200);
+        // First sample initializes
+        recovery.update_rtt(Duration::from_millis(100));
+        assert_eq!(recovery.rtt, Duration::from_millis(100));
+        assert_eq!(recovery.rtt_var(), Duration::from_millis(50));
+        // Second sample: EWMA smoothing
+        recovery.update_rtt(Duration::from_millis(120));
+        // SRTT = 7/8 * 100 + 1/8 * 120 = 87.5 + 15 = 102.5ms
+        assert!(recovery.rtt > Duration::from_millis(100));
+        assert!(recovery.rtt < Duration::from_millis(110));
+        // RTTVAR = 3/4 * 50 + 1/4 * 20 = 37.5 + 5 = 42.5ms
+        assert!(recovery.rtt_var() < Duration::from_millis(50));
+    }
+
+    #[test]
+    fn test_rtt_min_tracking() {
+        let mut recovery = Recovery::new(12_000, 1200);
+        recovery.update_rtt(Duration::from_millis(100));
+        recovery.update_rtt(Duration::from_millis(50));
+        recovery.update_rtt(Duration::from_millis(200));
+        assert_eq!(recovery.min_rtt(), Duration::from_millis(50));
+    }
+
+    #[test]
+    fn test_time_based_loss_detection() {
+        let mut recovery = Recovery::new(12_000, 1200);
+        // Before RTT is initialized, no time-based loss detection
+        let now = Instant::now();
+        assert!(recovery.time_loss_deadline(now).is_none());
+        // After RTT init, threshold = 9/8 * SRTT
+        recovery.update_rtt(Duration::from_millis(80));
+        let deadline = recovery.time_loss_deadline(now).unwrap();
+        let threshold = (Duration::from_millis(80) * 9) / 8;
+        assert_eq!(deadline, now + threshold);
+    }
+
+    #[test]
+    fn test_rack_loss_detection() {
+        let mut recovery = Recovery::new(12_000, 1200);
+        recovery.update_rtt(Duration::from_millis(100));
+        // Packet sent at t=0, ack at t=50ms — not lost (within RACK threshold)
+        let sent_at = Instant::now();
+        let ack_time = sent_at + Duration::from_millis(50);
+        assert!(!recovery.rack_is_lost(sent_at, ack_time));
+        // Packet sent at t=0, ack at t=200ms — lost (exceeds SRTT + RTTVAR)
+        let ack_time2 = sent_at + Duration::from_millis(200);
+        assert!(recovery.rack_is_lost(sent_at, ack_time2));
+    }
+
+    #[test]
+    fn test_gentle_path_migration_preserves_cwnd() {
+        use super::cc::Algorithm;
+        let mut recovery = Recovery::with_algorithm(12_000, 1200, Algorithm::Reno);
+        // Grow cwnd via ACKs (Reno slow-start doubles cwnd each RTT).
+        let now = Instant::now();
+        for i in 0..20 {
+            recovery.on_packet_sent(i, 1200, now);
+            recovery.on_ack(1200, now);
+        }
+        let cwnd_before = recovery.cwnd;
+        assert!(cwnd_before > 12_000, "cwnd should have grown: {cwnd_before}");
+        // Path change: cwnd should be halved, not reset to INITIAL_WINDOW
+        recovery.on_path_change();
+        let cwnd_after = recovery.cwnd;
+        assert!(cwnd_after > 2400, "not reset to minimum: {cwnd_after}");
+        assert!(cwnd_after <= cwnd_before);
+        assert_eq!(cwnd_after, (cwnd_before / 2).max(2400));
     }
 }

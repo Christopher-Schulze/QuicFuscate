@@ -164,7 +164,7 @@ impl UringBatchSender {
             });
         }
         for iov in &mut self.iovecs {
-            // Safety: msghdr is fully zeroed; msg_iov points into self.iovecs which
+            // SAFETY: msghdr is fully zeroed; msg_iov points into self.iovecs which
             // lives for the duration of this call. Payload slices are caller-owned
             // and remain valid until completions are reaped below.
             let mut hdr: libc::msghdr = unsafe { std::mem::zeroed() };
@@ -235,7 +235,7 @@ impl UringBatchSender {
 
         // Pass 2: fill sockaddr_storage per destination (stable for msg_name).
         for (addr, _) in packets {
-            // Safety: sockaddr_storage is POD; zeroed init is valid.
+            // SAFETY: sockaddr_storage is POD; zeroed init is valid.
             let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
             fill_sockaddr(*addr, &mut storage);
             self.sockaddrs.push(storage);
@@ -244,7 +244,7 @@ impl UringBatchSender {
         // Pass 3: build msghdrs with stable pointers into iovecs and sockaddrs.
         // Both vecs are fully populated above - no further pushes, so no realloc.
         for i in 0..packets.len() {
-            // Safety: iovecs[i] and sockaddrs[i] are valid for the lifetime of
+            // SAFETY: iovecs[i] and sockaddrs[i] are valid for the lifetime of
             // this call and the Vecs will not reallocate after this point.
             let mut hdr: libc::msghdr = unsafe { std::mem::zeroed() };
             hdr.msg_iov = &mut self.iovecs[i] as *mut libc::iovec;
@@ -298,7 +298,7 @@ impl UringBatchSender {
                 let entry = opcode::SendMsg::new(fd, msg as *const libc::msghdr)
                     .build()
                     .user_data(idx as u64);
-                // Safety: msghdr points into self.msgs; iov_base points into
+                // SAFETY: msghdr points into self.msgs; iov_base points into
                 // caller payloads. Both remain valid until completions are reaped.
                 unsafe {
                     if sq.push(&entry).is_err() {
@@ -383,6 +383,8 @@ impl UringBatchSender {
                 let entry = opcode::SendMsgZc::new(fd_typed, msg as *const libc::msghdr)
                     .build()
                     .user_data(idx as u64);
+                // SAFETY: msghdr points into self.msgs; iov_base points into
+                // caller payloads. Both remain valid until completions are reaped.
                 unsafe {
                     if sq.push(&entry).is_err() {
                         break;
@@ -453,7 +455,7 @@ fn addr_len(addr: SocketAddr) -> libc::socklen_t {
 fn fill_sockaddr(addr: SocketAddr, storage: &mut libc::sockaddr_storage) {
     match addr {
         SocketAddr::V4(v4) => {
-            // Safety: sockaddr_storage is large enough to hold sockaddr_in.
+            // SAFETY: sockaddr_storage is large enough to hold sockaddr_in.
             let sa = storage as *mut _ as *mut libc::sockaddr_in;
             unsafe {
                 (*sa).sin_family = libc::AF_INET as libc::sa_family_t;
@@ -465,7 +467,7 @@ fn fill_sockaddr(addr: SocketAddr, storage: &mut libc::sockaddr_storage) {
             }
         }
         SocketAddr::V6(v6) => {
-            // Safety: sockaddr_storage is large enough to hold sockaddr_in6.
+            // SAFETY: sockaddr_storage is large enough to hold sockaddr_in6.
             let sa = storage as *mut _ as *mut libc::sockaddr_in6;
             unsafe {
                 (*sa).sin6_family = libc::AF_INET6 as libc::sa_family_t;
@@ -662,6 +664,9 @@ impl UringRecvBatch {
         };
 
         // Create eventfd for CQ -> Tokio wakeup.
+        // SAFETY: eventfd(2) takes an initial count (0) and valid flags; both
+        // EFD_NONBLOCK and EFD_CLOEXEC are valid flag constants. The returned fd
+        // is checked for < 0 immediately after.
         let efd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
         if efd < 0 {
             log::debug!("eventfd creation failed: {}", std::io::Error::last_os_error());
@@ -671,6 +676,8 @@ impl UringRecvBatch {
         // Register the eventfd so CQ completions trigger it.
         if ring.submitter().register_eventfd_async(efd).is_err() {
             log::debug!("register_eventfd_async failed");
+            // SAFETY: efd is a valid open fd from the eventfd() call above and
+            // is not used after this close.
             unsafe {
                 libc::close(efd);
             }
@@ -708,7 +715,8 @@ impl UringRecvBatch {
             let iov_base = if let Some(block) = blocks[i].as_mut() {
                 block.as_mut_ptr() as *mut libc::c_void
             } else {
-                // Safety: bufs lives as long as self; no reallocation after this.
+                // SAFETY: bufs lives as long as self; no reallocation after this.
+                // The offset i * buf_size is within the allocated d * buf_size bytes.
                 unsafe { bufs.as_ptr().add(i * buf_size) as *mut libc::c_void }
             };
             iovecs.push(libc::iovec { iov_base, iov_len: buf_size });
@@ -716,6 +724,8 @@ impl UringRecvBatch {
 
         // Pre-build sockaddr storage (server only).
         let addrs = if with_addr {
+            // SAFETY: sockaddr_storage is POD; an all-zero bit pattern is a valid
+            // value (zeroed ss_family is ignored until fill_sockaddr writes it).
             vec![unsafe { std::mem::zeroed::<libc::sockaddr_storage>() }; d]
         } else {
             Vec::new()
@@ -724,8 +734,10 @@ impl UringRecvBatch {
         // Pre-build msghdrs.
         let mut msgs: Vec<libc::msghdr> = Vec::with_capacity(d);
         for i in 0..d {
+            // SAFETY: msghdr is POD; an all-zero bit pattern produces valid
+            // null/zero fields (msg_name, msg_control, msg_flags).
             let mut hdr: libc::msghdr = unsafe { std::mem::zeroed() };
-            // Safety: iovecs[i] is stable (no further pushes).
+            // SAFETY: iovecs[i] is stable (no further pushes).
             hdr.msg_iov = &iovecs[i] as *const libc::iovec as *mut libc::iovec;
             hdr.msg_iovlen = 1;
             if with_addr && !addrs.is_empty() {
@@ -795,6 +807,9 @@ impl UringRecvBatch {
                 let entry = opcode::RecvMsg::new(fd, &mut self.msgs[idx] as *mut libc::msghdr)
                     .build()
                     .user_data(idx as u64);
+                // SAFETY: msgs[idx] points into the stable self.msgs Vec and
+                // its iovec points into self.bufs/blocks; all outlive the kernel
+                // completion. The SQE is pushed within a single submission borrow.
                 unsafe {
                     if sq.push(&entry).is_err() {
                         break;
@@ -869,6 +884,8 @@ impl UringRecvBatch {
 
                     // Reset the sockaddr for next receive.
                     if self.with_addr {
+                        // SAFETY: sockaddr_storage is POD; zeroing is valid and
+                        // clears stale address data before the next RecvMsg.
                         self.addrs[idx] = unsafe { std::mem::zeroed() };
                         self.msgs[idx].msg_namelen =
                             std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
@@ -895,6 +912,9 @@ impl UringRecvBatch {
                     let entry = opcode::RecvMsg::new(fd, &mut self.msgs[idx] as *mut libc::msghdr)
                         .build()
                         .user_data(idx as u64);
+                    // SAFETY: msgs[idx] points into the stable self.msgs Vec and
+                    // its iovec points into self.bufs/blocks; all outlive the kernel
+                    // completion. The SQE is pushed within a single submission borrow.
                     unsafe {
                         if sq.push(&entry).is_err() {
                             break;
@@ -925,6 +945,8 @@ impl Drop for UringRecvBatch {
                 pool.free(block);
             }
         }
+        // SAFETY: self.eventfd is a valid open fd created during construction
+        // and is not accessed after Drop runs.
         unsafe {
             libc::close(self.eventfd);
         }
@@ -939,6 +961,9 @@ fn parse_sockaddr(storage: &libc::sockaddr_storage) -> Option<SocketAddr> {
     match storage.ss_family as i32 {
         libc::AF_INET => {
             let sa = storage as *const _ as *const libc::sockaddr_in;
+            // SAFETY: storage is a valid sockaddr_storage that was filled by
+            // fill_sockaddr with AF_INET, so casting to sockaddr_in is valid and
+            // the pointer is dereferenceable for the size of sockaddr_in.
             unsafe {
                 // sin_addr.s_addr is in network byte order (big-endian).
                 // Ipv4Addr::from(u32) expects host byte order.
@@ -949,6 +974,9 @@ fn parse_sockaddr(storage: &libc::sockaddr_storage) -> Option<SocketAddr> {
         }
         libc::AF_INET6 => {
             let sa = storage as *const _ as *const libc::sockaddr_in6;
+            // SAFETY: storage is a valid sockaddr_storage that was filled by
+            // fill_sockaddr with AF_INET6, so casting to sockaddr_in6 is valid
+            // and the pointer is dereferenceable for the size of sockaddr_in6.
             unsafe {
                 let ip = Ipv6Addr::from((*sa).sin6_addr.s6_addr);
                 let port = u16::from_be((*sa).sin6_port);
@@ -1049,6 +1077,7 @@ mod tests {
     fn parse_sockaddr_ipv4_roundtrip() {
         use std::net::{Ipv4Addr, SocketAddrV4};
         let original = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 12345));
+        // SAFETY: sockaddr_storage is POD; zeroed init is valid.
         let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
         fill_sockaddr(original, &mut storage);
         let parsed = parse_sockaddr(&storage);
@@ -1059,9 +1088,12 @@ mod tests {
     fn fill_sockaddr_ipv4_sets_correct_family() {
         use std::net::{Ipv4Addr, SocketAddrV4};
         let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 9999));
+        // SAFETY: sockaddr_storage is POD; zeroed init is valid.
         let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
         fill_sockaddr(addr, &mut storage);
         let sa = &storage as *const _ as *const libc::sockaddr_in;
+        // SAFETY: storage was filled by fill_sockaddr with AF_INET, so casting
+        // to sockaddr_in is valid and the pointer is dereferenceable.
         unsafe {
             assert_eq!((*sa).sin_family as i32, libc::AF_INET);
             assert_eq!((*sa).sin_port, 9999u16.to_be());

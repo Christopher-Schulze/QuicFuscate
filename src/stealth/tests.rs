@@ -1065,3 +1065,179 @@ fn test_policy_timing_rate_per_level() {
     assert_eq!(policy_l1.timing_rate, 0, "level 1 timing rate should be 0");
     assert!(policy_l1.padding_rate > 0, "level 1 padding rate should be > 0");
 }
+
+// --- ChaffGenerator tests (TODO-455) ---
+
+use super::ChaffGenerator;
+use std::time::{Duration, Instant};
+
+#[test]
+fn test_chaff_generator_disabled_rate_zero() {
+    let mut gen = ChaffGenerator::new(0, 1280, true);
+    assert!(gen.is_disabled());
+    assert_eq!(gen.rate_pps(), 0);
+    // should_chaff never returns true when disabled.
+    let now = Instant::now();
+    for _ in 0..10 {
+        assert!(!gen.should_chaff(now, false));
+    }
+}
+
+#[test]
+fn test_chaff_generator_produces_packets_at_correct_rate() {
+    // 10 pps => base interval 100ms. With ±10% jitter the interval is in
+    // [90ms, 110ms]. Over 1 second we expect ~10 emissions.
+    let mut gen = ChaffGenerator::new(10, 1280, true);
+    let start = Instant::now();
+    let mut emitted = 0usize;
+    // Simulate 1000ms of time in 1ms steps.
+    for ms in 1..=1000 {
+        let now = start + Duration::from_millis(ms);
+        if gen.should_chaff(now, false) {
+            emitted += 1;
+        }
+    }
+    // Expect roughly 10 packets; allow [7, 13] for jitter variance.
+    assert!(
+        (7..=13).contains(&emitted),
+        "expected ~10 chaff emissions in 1s at 10pps, got {emitted}"
+    );
+}
+
+#[test]
+fn test_chaff_generator_timing_boundaries() {
+    // At 10 pps the base interval is 100ms. Immediately after construction the
+    // first chaff should not fire (less than one interval elapsed). After ~100ms
+    // it should fire.
+    let mut gen = ChaffGenerator::new(10, 1280, true);
+    let t0 = Instant::now();
+    // 50ms in — should not fire (interval is >= 90ms with jitter).
+    assert!(!gen.should_chaff(t0 + Duration::from_millis(50), false));
+    // 120ms in — should fire (interval is <= 110ms with jitter).
+    assert!(
+        gen.should_chaff(t0 + Duration::from_millis(120), false),
+        "chaff should fire after one interval"
+    );
+}
+
+#[test]
+fn test_chaff_generator_real_traffic_suppresses_chaff() {
+    let mut gen = ChaffGenerator::new(10, 1280, true);
+    let t0 = Instant::now();
+    // Real traffic at t0+50ms resets the clock.
+    assert!(!gen.should_chaff(t0 + Duration::from_millis(50), true));
+    // 100ms after the real packet (t0+150ms) — within one interval, no chaff.
+    assert!(!gen.should_chaff(t0 + Duration::from_millis(150), false));
+    // 120ms after the real packet (t0+170ms) — should fire.
+    assert!(
+        gen.should_chaff(t0 + Duration::from_millis(170), false),
+        "chaff should fire one interval after real traffic"
+    );
+}
+
+#[test]
+fn test_chaff_generator_record_real_traffic_resets_clock() {
+    let mut gen = ChaffGenerator::new(10, 1280, true);
+    let t0 = Instant::now();
+    gen.record_real_traffic(t0 + Duration::from_millis(50));
+    // 100ms after recorded real traffic — within interval, no chaff.
+    assert!(!gen.should_chaff(t0 + Duration::from_millis(150), false));
+    // 120ms after recorded real traffic — should fire.
+    assert!(
+        gen.should_chaff(t0 + Duration::from_millis(170), false),
+        "chaff should fire one interval after recorded real traffic"
+    );
+}
+
+#[test]
+fn test_chaff_generator_base_interval() {
+    assert_eq!(ChaffGenerator::base_interval(0), Duration::ZERO);
+    assert_eq!(ChaffGenerator::base_interval(1), Duration::from_secs(1));
+    assert_eq!(ChaffGenerator::base_interval(10), Duration::from_millis(100));
+    assert_eq!(ChaffGenerator::base_interval(100), Duration::from_millis(10));
+    assert_eq!(ChaffGenerator::base_interval(1000), Duration::from_millis(1));
+}
+
+#[test]
+fn test_chaff_generator_jitter_within_ten_percent() {
+    // The next_interval must be within [90%, 110%] of the base interval.
+    for _ in 0..256 {
+        let gen = ChaffGenerator::new(100, 1280, true);
+        let base = ChaffGenerator::base_interval(100);
+        let lo = base * 90 / 100;
+        let hi = base * 110 / 100;
+        let ni = gen.next_interval();
+        assert!(ni >= lo && ni <= hi, "jittered interval {ni:?} outside [{lo:?}, {hi:?}]");
+    }
+}
+
+#[test]
+fn test_chaff_generator_acking_packet_has_valid_quic_structure() {
+    // A chaff packet plaintext must be: PING (0x01) + PADDING (0x00...).
+    let gen = ChaffGenerator::new(10, 1280, true);
+    assert!(gen.ack_eliciting());
+    let pt = gen.generate_chaff(100);
+    assert_eq!(pt.len(), 100, "plaintext must be exactly target_plaintext_len bytes");
+    // First byte is the PING frame type (0x01).
+    assert_eq!(pt[0], 0x01, "first frame must be PING (0x01) when ack_eliciting");
+    // Remaining bytes are PADDING frames (0x00).
+    for &b in &pt[1..] {
+        assert_eq!(b, 0x00, "padding bytes must be 0x00 (PADDING frame)");
+    }
+}
+
+#[test]
+fn test_chaff_generator_non_acking_packet_is_all_padding() {
+    let gen = ChaffGenerator::new(10, 1280, false);
+    assert!(!gen.ack_eliciting());
+    let pt = gen.generate_chaff(64);
+    assert_eq!(pt.len(), 64);
+    for &b in &pt {
+        assert_eq!(
+            b,
+            super::CHAFF_PADDING_FRAME_BYTE,
+            "non-acking chaff must be entirely PADDING frames"
+        );
+    }
+}
+
+#[test]
+fn test_chaff_generator_sized_respects_header_and_tag() {
+    // chaff_size_bytes=1280, header=20, tag=16 => plaintext = 1244.
+    let gen = ChaffGenerator::new(10, 1280, true);
+    let pt = gen.generate_chaff_sized(20, 16);
+    assert_eq!(pt.len(), 1280 - 20 - 16);
+    assert_eq!(pt[0], 0x01, "PING frame present");
+}
+
+#[test]
+fn test_chaff_generator_sized_saturates_on_small_target() {
+    // If header+tag exceeds chaff_size_bytes, plaintext is empty (no panic).
+    let gen = ChaffGenerator::new(10, 100, true);
+    let pt = gen.generate_chaff_sized(200, 16);
+    assert!(pt.is_empty(), "plaintext should be empty when overhead exceeds target");
+}
+
+#[test]
+fn test_chaff_generator_empty_plaintext() {
+    let gen = ChaffGenerator::new(10, 1280, true);
+    let pt = gen.generate_chaff(0);
+    assert!(pt.is_empty());
+}
+
+#[test]
+fn test_chaff_generator_single_byte_plaintext_omits_ping() {
+    // With ack_eliciting but only 1 byte, PING fits (1 byte). Verify it's PING.
+    let gen = ChaffGenerator::new(10, 1280, true);
+    let pt = gen.generate_chaff(1);
+    assert_eq!(pt, vec![0x01]);
+}
+
+#[test]
+fn test_chaff_generator_debug_format() {
+    let gen = ChaffGenerator::new(10, 1280, true);
+    let s = format!("{:?}", gen);
+    assert!(s.contains("ChaffGenerator"));
+    assert!(s.contains("rate_pps: 10"));
+    assert!(s.contains("chaff_size_bytes: 1280"));
+}

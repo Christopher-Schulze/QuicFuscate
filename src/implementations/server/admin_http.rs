@@ -1401,10 +1401,16 @@ mod tests {
         extra_headers: &str,
         body: &str,
     ) -> String {
+        let origin_header = if extra_headers.to_ascii_lowercase().contains("origin:") {
+            String::new()
+        } else {
+            "Origin: http://localhost\r\n".to_string()
+        };
         let extra_headers =
             if extra_headers.is_empty() { String::new() } else { format!("{extra_headers}\r\n") };
         format!(
-            "POST /api/config HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nContent-Type: application/json\r\n{}\r\n{}\r\n{}\r\n{}",
+            "POST /api/config HTTP/1.1\r\nHost: localhost\r\n{}Content-Length: {}\r\nContent-Type: application/json\r\n{}\r\n{}\r\n{}\r\n{}",
+            origin_header,
             body.len(),
             login.cookie_header,
             login.csrf_header(),
@@ -1419,7 +1425,7 @@ mod tests {
 
     fn admin_auth_post_without_csrf(login: &AdminLoginSession, body: &str) -> String {
         format!(
-            "POST /api/admin/auth HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nContent-Type: application/json\r\n{}\r\n\r\n{}\r\n",
+            "POST /api/admin/auth HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost\r\nContent-Length: {}\r\nContent-Type: application/json\r\n{}\r\n\r\n{}\r\n",
             body.len(),
             login.cookie_header,
             body
@@ -1431,10 +1437,19 @@ mod tests {
         extra_headers: &str,
         body: &str,
     ) -> String {
+        // If extra_headers contains an Origin, don't add a default one (allows
+        // tests to verify cross-origin rejection). Otherwise add same-origin
+        // Origin header for CSRF protection.
+        let origin_header = if extra_headers.to_ascii_lowercase().contains("origin:") {
+            String::new()
+        } else {
+            "Origin: http://localhost\r\n".to_string()
+        };
         let extra_headers =
             if extra_headers.is_empty() { String::new() } else { format!("{extra_headers}\r\n") };
         format!(
-            "POST /api/admin/auth HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nContent-Type: application/json\r\n{}\r\n{}\r\n{}\r\n{}",
+            "POST /api/admin/auth HTTP/1.1\r\nHost: localhost\r\n{}Content-Length: {}\r\nContent-Type: application/json\r\n{}\r\n{}\r\n{}\r\n{}",
+            origin_header,
             body.len(),
             login.cookie_header,
             login.csrf_header(),
@@ -1449,10 +1464,16 @@ mod tests {
         extra_headers: &str,
         body: &str,
     ) -> String {
+        let origin_header = if extra_headers.to_ascii_lowercase().contains("origin:") {
+            String::new()
+        } else {
+            "Origin: http://localhost\r\n".to_string()
+        };
         let extra_headers =
             if extra_headers.is_empty() { String::new() } else { format!("{extra_headers}\r\n") };
         format!(
-            "POST /api/admin/auth HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nContent-Type: application/json\r\n{}\r\n{}\r\n{}\r\n{}",
+            "POST /api/admin/auth HTTP/1.1\r\nHost: localhost\r\n{}Content-Length: {}\r\nContent-Type: application/json\r\n{}\r\n{}\r\n{}\r\n{}",
+            origin_header,
             body.len(),
             login.cookie_header,
             csrf_header,
@@ -1859,10 +1880,12 @@ mod tests {
         let csrf_token = parse_csrf_token(&login_resp).expect("csrf token");
         let csrf_header = format!("{}: {}", CSRF_TOKEN_HEADER, csrf_token);
 
-        let body = r#"{"current_password":"wrong","new_password":"abcdef"}"#;
-        let mk = || {
+        let mk = |i: usize| {
+            // Each request needs a unique body to avoid the replay guard
+            // (which activates when Origin header is present).
+            let body = format!(r#"{{"current_password":"wrong","new_password":"abcdef{i}"}}"#);
             format!(
-                "POST /api/admin/auth HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nContent-Type: application/json\r\n{}\r\n{}\r\n\r\n{}",
+                "POST /api/admin/auth HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost\r\nContent-Length: {}\r\nContent-Type: application/json\r\n{}\r\n{}\r\n\r\n{}",
                 body.len(),
                 cookie_header,
                 csrf_header,
@@ -1870,11 +1893,11 @@ mod tests {
             )
         };
 
-        for _ in 0..5 {
-            let resp = send_req(addr, &mk());
+        for i in 0..5 {
+            let resp = send_req(addr, &mk(i));
             assert_eq!(parse_status(&resp), 401);
         }
-        let resp = send_req(addr, &mk());
+        let resp = send_req(addr, &mk(99));
         assert_eq!(parse_status(&resp), 429);
         let ra = parse_header(&resp, "Retry-After").expect("Retry-After");
         assert!(ra.parse::<u64>().unwrap_or(0) > 0);
@@ -2381,17 +2404,19 @@ mod tests {
         let limited = send_req(addr, &mk_login("wrong"));
         assert_eq!(parse_status(&limited), 429);
 
-        let mk_admin_auth = |current_pw: &str| {
-            let body = format!(r#"{{"current_password":"{}","new_username":"root"}}"#, current_pw);
+        let mk_admin_auth = |i: usize| {
+            // Each request needs a unique body to avoid the replay guard
+            // (which activates when Origin header is present).
+            let body = format!(r#"{{"current_password":"wrong","new_username":"root{i}"}}"#);
             admin_auth_post(&login, &body)
         };
 
         // Admin auth uses a separate key namespace and should not be 429 yet.
-        let a1 = send_req(addr, &mk_admin_auth("wrong"));
+        let a1 = send_req(addr, &mk_admin_auth(1));
         assert_eq!(parse_status(&a1), 401);
-        let a2 = send_req(addr, &mk_admin_auth("wrong"));
+        let a2 = send_req(addr, &mk_admin_auth(2));
         assert_eq!(parse_status(&a2), 401);
-        let a3 = send_req(addr, &mk_admin_auth("wrong"));
+        let a3 = send_req(addr, &mk_admin_auth(3));
         assert_eq!(parse_status(&a3), 429);
 
         thr.join().expect("server thread");
@@ -2951,8 +2976,12 @@ fn validate_csrf_request(
 
 fn is_same_origin_request(req: &HttpRequest) -> bool {
     let Some(origin_raw) = header_value(req, "origin") else {
-        // Non-browser clients often do not set Origin.
-        return true;
+        // POST requests MUST include an Origin header for CSRF protection.
+        // Allowing missing Origin would let attackers bypass CSRF by simply
+        // omitting the header (e.g. via curl or a crafted form submission).
+        // Legitimate browsers always send Origin on cross-origin POSTs, and
+        // same-origin POSTs from fetch/XHR also include it.
+        return false;
     };
     let origin = origin_raw.trim();
     if origin.eq_ignore_ascii_case("null") {

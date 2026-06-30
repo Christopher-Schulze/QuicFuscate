@@ -16,6 +16,7 @@ use crate::optimize::{CpuFeature, FeatureDetector};
 use crate::simd::CryptoAeadPlan;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
+use zeroize::Zeroize;
 
 // Removed: rand::rngs::OsRng + RngCore. Callers now use crate::rng::fill_secure_or_abort
 // which wraps getrandom directly and avoids coupling to any rand_core version.
@@ -540,6 +541,24 @@ impl AesGcm128 {
             }
         }
         aes128_encrypt_block_fast(&self.key, ctr)
+    }
+}
+
+impl Drop for AesGcm128 {
+    fn drop(&mut self) {
+        self.key.zeroize();
+        self.iv.zeroize();
+        // The expanded round keys also contain key material.
+        #[cfg(target_arch = "x86_64")]
+        if let Some(rk) = &mut self.rk {
+            for word in rk.iter_mut() {
+                // SAFETY: __m128i is a 128-bit opaque type; storing zeros via
+                // _mm_setzero_si128 is the canonical way to zero it.
+                unsafe {
+                    *word = core::arch::x86_64::_mm_setzero_si128();
+                }
+            }
+        }
     }
 }
 

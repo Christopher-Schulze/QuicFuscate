@@ -1,5 +1,80 @@
 use std::path::PathBuf;
 
+/// Magic prefix identifying encrypted QKey registry files.
+const ENC_MAGIC: &[u8] = b"QFENC1";
+
+/// Load the encryption key from the `QUICFUSCATE_QKEY_ENC_KEY` environment variable.
+/// The key must be a 64-character hex string (32 bytes for AES-256-GCM).
+/// Returns `None` if the variable is not set or invalid, in which case
+/// the registry is stored in plaintext (backward compatible).
+fn load_enc_key() -> Option<[u8; 32]> {
+    let hex = std::env::var("QUICFUSCATE_QKEY_ENC_KEY").ok()?;
+    let hex = hex.trim();
+    if hex.len() != 64 {
+        log::warn!(
+            "QUICFUSCATE_QKEY_ENC_KEY must be 64 hex chars (32 bytes), got {} chars",
+            hex.len()
+        );
+        return None;
+    }
+    let mut key = [0u8; 32];
+    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+        let byte = u8::from_str_radix(std::str::from_utf8(chunk).ok()?, 16).ok()?;
+        key[i] = byte;
+    }
+    Some(key)
+}
+
+/// Encrypt plaintext using ChaCha20-Poly1305 with a random nonce.
+/// Returns: magic || nonce (12 bytes) || ciphertext (includes 16-byte tag)
+fn encrypt_payload(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, String> {
+    use crate::crypto::aead::AeadSeal;
+    // Generate a random 12-byte nonce
+    let mut nonce_bytes = [0u8; 12];
+    crate::rng::fill_secure(&mut nonce_bytes)
+        .map_err(|e| format!("nonce generation failed: {}", e))?;
+
+    let cipher = crate::crypto::ChaCha20Poly1305::new(key, &nonce_bytes);
+
+    // Buffer layout: plaintext + 16-byte tag
+    let mut buf = vec![0u8; plaintext.len() + 16];
+    buf[..plaintext.len()].copy_from_slice(plaintext);
+
+    let written = cipher
+        .seal_with_u64_counter(0, &[], &mut buf, plaintext.len(), None)
+        .map_err(|e| format!("encryption failed: {:?}", e))?;
+
+    let mut out = Vec::with_capacity(ENC_MAGIC.len() + 12 + written);
+    out.extend_from_slice(ENC_MAGIC);
+    out.extend_from_slice(&nonce_bytes);
+    out.extend_from_slice(&buf[..written]);
+    Ok(out)
+}
+
+/// Decrypt a payload encrypted by `encrypt_payload`.
+/// Returns the plaintext if the magic prefix matches and decryption succeeds.
+/// Returns `None` if the payload is not encrypted (no magic prefix), allowing
+/// backward-compatible reading of plaintext files.
+fn decrypt_payload(data: &[u8], key: &[u8; 32]) -> Option<Vec<u8>> {
+    if data.len() < ENC_MAGIC.len() + 12 + 16 {
+        return None; // Too short to be encrypted
+    }
+    if &data[..ENC_MAGIC.len()] != ENC_MAGIC {
+        return None; // Not encrypted — plaintext file
+    }
+
+    use crate::crypto::aead::AeadOpen;
+    let nonce_bytes = &data[ENC_MAGIC.len()..ENC_MAGIC.len() + 12];
+    let cipher = crate::crypto::ChaCha20Poly1305::new(key, nonce_bytes);
+
+    let ct_with_tag = &data[ENC_MAGIC.len() + 12..];
+    let mut buf = ct_with_tag.to_vec();
+
+    let plaintext_len = cipher.open_with_u64_counter(0, &[], &mut buf).ok()?;
+
+    Some(buf[..plaintext_len].to_vec())
+}
+
 /// Public, stable QKey id used as the QUIC Initial token.
 ///
 /// This is not a secret. Authentication is enforced separately by verifying the per-QKey token
@@ -105,7 +180,18 @@ impl QKeyRegistry {
                 return;
             }
         };
-        let mut entries: Vec<QKeyRecord> = match serde_json::from_slice(&bytes) {
+
+        // Try to decrypt if an encryption key is configured; fall back to
+        // plaintext for backward compatibility.
+        let plaintext = match load_enc_key() {
+            Some(key) => match decrypt_payload(&bytes, &key) {
+                Some(decrypted) => decrypted,
+                None => bytes, // Not encrypted or decryption failed — try plaintext
+            },
+            None => bytes, // No key configured — read as plaintext
+        };
+
+        let mut entries: Vec<QKeyRecord> = match serde_json::from_slice(&plaintext) {
             Ok(list) => list,
             Err(e) => {
                 log::warn!("qkey registry parse failed ({}): {}", path.display(), e);
@@ -294,9 +380,22 @@ impl QKeyRegistry {
                 return;
             }
         };
+
+        // Encrypt at rest if an encryption key is configured.
+        let final_payload = match load_enc_key() {
+            Some(key) => match encrypt_payload(&payload, &key) {
+                Ok(encrypted) => encrypted,
+                Err(e) => {
+                    log::warn!("qkey registry encryption failed, writing plaintext: {}", e);
+                    payload
+                }
+            },
+            None => payload, // No key — write plaintext (backward compatible)
+        };
+
         if let Err(e) = super::fsutil::atomic_write_file(
             path,
-            &payload,
+            &final_payload,
             Some(0o600),
             "qkey_registry::persist_tmp_nonce",
         ) {

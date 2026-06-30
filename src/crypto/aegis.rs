@@ -6,6 +6,7 @@
 
 use crate::crypto::aead::{AeadOpen, AeadOpenItem, AeadSeal, AeadSealItem};
 use std::sync::atomic::Ordering;
+use zeroize::Zeroize;
 
 /// AEGIS-128L AEAD wrapper for the data-plane AEAD trait.
 pub struct Aegis128LAead {
@@ -66,6 +67,27 @@ impl Aegis128X8Aead {
     }
 }
 
+impl Drop for Aegis128LAead {
+    fn drop(&mut self) {
+        self.key.zeroize();
+        self.iv.zeroize();
+    }
+}
+
+impl Drop for Aegis128X4Aead {
+    fn drop(&mut self) {
+        self.key.zeroize();
+        self.iv.zeroize();
+    }
+}
+
+impl Drop for Aegis128X8Aead {
+    fn drop(&mut self) {
+        self.key.zeroize();
+        self.iv.zeroize();
+    }
+}
+
 // ============================================================================
 // AEGIS Internal Implementation (consolidated internal; no external dependency)
 // ============================================================================
@@ -95,6 +117,7 @@ impl std::error::Error for AegisError {}
 // to architecture-specific AES instructions via #[target_feature] when available.
 mod aegis_aes_block {
     use std::sync::OnceLock;
+    use zeroize::Zeroize;
 
     #[derive(Copy, Clone, Debug, Default)]
     pub(crate) struct AesBlock([u8; 16]);
@@ -313,6 +336,11 @@ mod aegis_aes_block {
             self.0
         }
 
+        /// Zeroize the internal block bytes in place.
+        pub(crate) fn zeroize(&mut self) {
+            self.0.zeroize();
+        }
+
         #[inline(always)]
         pub(crate) fn xor(&self, other: Self) -> Self {
             #[cfg(target_arch = "x86_64")]
@@ -517,6 +545,14 @@ fn aegis128l_init_state(key: &[u8], nonce: &[u8]) -> Result<[AesBlock; 8], Aegis
 /// AEGIS-128L AEAD cipher with 8-word AES state (pure Rust, hardware-dispatched AES rounds).
 pub struct Aegis128L {
     state: [AesBlock; 8],
+}
+
+impl Drop for Aegis128L {
+    fn drop(&mut self) {
+        for block in self.state.iter_mut() {
+            block.zeroize();
+        }
+    }
 }
 
 impl Aegis128L {
@@ -849,6 +885,14 @@ impl Aegis128L {
 
 pub(crate) struct Aegis128X4 {
     state: [AesBlock; 8],
+}
+
+impl Drop for Aegis128X4 {
+    fn drop(&mut self) {
+        for block in self.state.iter_mut() {
+            block.zeroize();
+        }
+    }
 }
 
 impl Aegis128X4 {
@@ -1188,6 +1232,14 @@ impl Aegis128X4 {
 
 pub(crate) struct Aegis128X8 {
     state: [AesBlock; 8],
+}
+
+impl Drop for Aegis128X8 {
+    fn drop(&mut self) {
+        for block in self.state.iter_mut() {
+            block.zeroize();
+        }
+    }
 }
 
 impl Aegis128X8 {

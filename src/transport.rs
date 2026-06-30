@@ -254,6 +254,18 @@ mod tests {
         packet::connect(None, &scid, local, peer, &mut cfg).unwrap()
     }
 
+    fn make_conn_with_defense(mode: config::TrafficAnalysisDefense) -> Connection {
+        let mut cfg = Config::new_with_version(PROTOCOL_VERSION).unwrap();
+        cfg.set_traffic_analysis_defense(mode);
+        // Set a low padding rate to prove FullPadding ignores it.
+        cfg.set_stealth_padding_rate(0);
+        cfg.set_stealth_padding(true, 1, 64);
+        let local: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let peer: std::net::SocketAddr = "127.0.0.1:4433".parse().unwrap();
+        let scid = [0u8; 8];
+        packet::connect(None, &scid, local, peer, &mut cfg).unwrap()
+    }
+
     #[test]
     fn test_padding_random_bounds() {
         let conn = make_conn_with_padding(true, 1, 64);
@@ -292,6 +304,44 @@ mod tests {
         for _ in 0..16 {
             let v = conn.compute_stealth_padding(500, 1000);
             assert!(v <= 25);
+        }
+    }
+
+    // --- Traffic analysis defense (TODO-455) ---
+
+    #[test]
+    fn test_full_padding_pads_all_packets_regardless_of_rate() {
+        // FullPadding mode must pad every packet to the full budget, ignoring
+        // stealth_padding_rate (set to 0 here, which would skip all padding in
+        // the legacy Off path).
+        let conn = make_conn_with_defense(config::TrafficAnalysisDefense::FullPadding);
+        for _ in 0..32 {
+            // Various payload sizes — every call must return the full budget.
+            let v = conn.compute_stealth_padding(1, 1000);
+            assert_eq!(v, 1000, "FullPadding must pad to full budget");
+            let v = conn.compute_stealth_padding(500, 800);
+            assert_eq!(v, 800, "FullPadding must pad to full budget");
+            let v = conn.compute_stealth_padding(0, 64);
+            assert_eq!(v, 64, "FullPadding must pad to full budget even for empty payload");
+        }
+    }
+
+    #[test]
+    fn test_constant_rate_pads_all_packets_regardless_of_rate() {
+        let conn = make_conn_with_defense(config::TrafficAnalysisDefense::ConstantRate);
+        for _ in 0..16 {
+            let v = conn.compute_stealth_padding(100, 512);
+            assert_eq!(v, 512, "ConstantRate must pad to full budget at the compute layer");
+        }
+    }
+
+    #[test]
+    fn test_off_mode_preserves_probabilistic_padding() {
+        // Off mode with rate 0 should never pad (legacy behavior preserved).
+        let conn = make_conn_with_defense(config::TrafficAnalysisDefense::Off);
+        for _ in 0..32 {
+            let v = conn.compute_stealth_padding(100, 1000);
+            assert_eq!(v, 0, "Off mode with rate 0 must not pad");
         }
     }
 }

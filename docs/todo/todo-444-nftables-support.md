@@ -1,104 +1,128 @@
 ---
 id: TODO-444
-title: nftables backend for kill switch and routing (auto-detection with iptables fallback)
+title: "nftables backend for kill switch and routing (auto-detection with iptables fallback)"
 severity: HIGH
 phase: "I"
 priority: P1
 status: OPEN
-created: 2026-06-30
+created: 2026-07-23
 depends_on: []
 ---
 
 # TODO-444: nftables Backend for Kill Switch and Routing
 
-## Problem
+## Goal
+Add a nftables backend for both the client kill switch and server routing/NAT, with automatic detection of the available backend (`nft` binary + kernel module) and graceful fallback to iptables when nftables is unavailable. The backend must be configurable via `firewall_backend = "auto" | "nftables" | "iptables"` and use atomic transaction-based rule application via `nft -f` batch files or the `nftables` crate's JSON API.
 
-### Kill switch uses legacy iptables only
+## Current State (verified against code)
 
-The Linux kill switch (`src/implementations/client/killswitch.rs:125-240`) uses
-`iptables-restore` and `iptables` exclusively:
+### Kill switch uses iptables exclusively
+`src/implementations/client/killswitch.rs:148-590` — `LinuxKillSwitch` uses `iptables` / `iptables-restore` / `ip6tables` / `ip6tables-restore`:
+- `ensure_chain()` (line 173): creates `QUICFUSCATE_KS` chain in both iptables and ip6tables, adds jump from OUTPUT
+- `block_traffic()` (line 204): flushes chain, applies block rules via `iptables-restore --noflush`
+- `allow_vpn_traffic()` (line 262): allows VPN server IP + TUN interface, drops rest
+- `cleanup()` (line 342): flushes chain and removes jump rule
+- Uses dedicated chain `QUICFUSCATE_KS` (line 161) to avoid touching user's OUTPUT chain
 
-- `block_traffic()` (line 136): spawns `iptables-restore --noflush` with a
-  `*filter` ruleset that drops all OUTPUT except loopback
-- `allow_vpn_traffic()` (line 175): spawns `iptables-restore --noflush` with a
-  ruleset that allows VPN server + TUN + loopback, drops the rest
-- `cleanup()` (line 218): spawns `iptables -F OUTPUT`
+### Routing uses iptables exclusively
+`src/implementations/server/routing.rs:388-455` — `setup_iptables()` on Linux:
+- MASQUERADE: `iptables -t nat -A POSTROUTING -s <subnet> -o <wan> -j MASQUERADE` (line 391)
+- FORWARD TUN→WAN: `iptables -A FORWARD -i <tun> -o <wan> -j ACCEPT` (line 412)
+- FORWARD WAN→TUN: `iptables -A FORWARD -i <wan> -o <tun> -m state --state RELATED,ESTABLISHED -j ACCEPT` (line 431)
+- `teardown()` (line 268): removes rules via `iptables -D`
+- IPv6 variants via `ip6tables` (line 217-236)
 
-### Routing uses legacy iptables only
+### No nftables code anywhere
+No `nft` binary invocation, no `nftables` crate dependency, no `FirewallBackend` trait, no auto-detection logic exists anywhere in the codebase.
 
-The server routing manager (`src/implementations/server/routing.rs:58-288`) uses
-`iptables` for all Linux firewall/NAT operations:
+### Config has no firewall_backend field
+`config/server-linux.default.toml` and `config/quicfuscate.toml` have no firewall backend configuration. `src/engine/config.rs` has no `FirewallConfig` struct.
 
-- `setup()` (line 59): calls `setup_iptables()` which adds NAT MASQUERADE,
-  FORWARD ACCEPT, and ESTABLISHED/RELATED rules via `iptables -A`
-- `teardown()` (line 100): removes rules via `iptables -D`
-- `setup_iptables()` (line 221): three separate `iptables` invocations for
-  MASQUERADE, FORWARD, and ESTABLISHED rules
-
-### Why this is a problem
+## Problem Analysis
 
 nftables is the standard firewall framework on modern Linux:
-- **Debian 10+** (Buster, 2019): nftables is the default backend; `iptables` is
-  a compatibility wrapper (`iptables-nft`) that translates to nftables internally
-- **Ubuntu 20.04+** (Focal, 2020): same — `iptables-nft` is default
-- **RHEL 8+** / CentOS 8+ / Rocky 8+ / AlmaLinux 8+ (2019): nftables is the
-  default and recommended firewall; `firewalld` uses nftables backend
+- **Debian 10+** (2019): nftables is default; `iptables` is a compatibility wrapper (`iptables-nft`)
+- **Ubuntu 20.04+** (2020): same — `iptables-nft` is default
+- **RHEL 8+** / Rocky 8+ / AlmaLinux 8+ (2019): nftables is default and recommended
 - **Fedora 32+** (2020): nftables is default
 
-Using raw `iptables` commands on these systems hits the `iptables-nft`
-compatibility layer, which:
+Using raw `iptables` commands on these systems hits the `iptables-nft` compatibility layer, which:
 1. Is slower (translation overhead per rule)
 2. Can produce inconsistent state (compat layer doesn't always map cleanly)
 3. Misses nftables features (sets, maps, stateful objects, atomic transactions)
 4. Will eventually be removed when `iptables-legacy` is dropped from distros
 
-There is no nftables backend, no auto-detection, and no configuration option to
-select the firewall backend.
+The current approach also lacks atomicity — each `iptables -A` is a separate process invocation. If the server crashes mid-setup, rules are left in a partial state. nftables' `nft -f` applies an entire ruleset atomically (all or nothing).
 
-## Goal
+## Proposed Architecture
 
-A nftables backend for both kill switch and routing, with automatic detection of
-the available backend (`nft` binary + kernel module) and graceful fallback to
-iptables when nftables is unavailable. The backend is configurable via
-`firewall_backend = "auto" | "nftables" | "iptables"`.
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                    Firewall Backend Abstraction                   │
+│                                                                   │
+│  ┌─────────────────┐     ┌──────────────────────────────────┐    │
+│  │ detect_backend()│────▶│ FirewallBackendKind             │    │
+│  │ (auto/nft/ipt)  │     │   Nftables | Iptables           │    │
+│  └─────────────────┘     └──────────────────────────────────┘    │
+│          │                                                        │
+│          ▼                                                        │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │              FirewallBackend trait                        │   │
+│  │  fn block_all_traffic()                                   │   │
+│  │  fn allow_vpn_traffic(tun_name, server_ip)                │   │
+│  │  fn cleanup()                                             │   │
+│  │  fn setup_nat(subnet, tun, wan)                           │   │
+│  │  fn teardown_nat()                                        │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│          │                        │                              │
+│          ▼                        ▼                              │
+│  ┌──────────────┐         ┌──────────────┐                      │
+│  │ NftablesKS   │         │ IptablesKS   │                      │
+│  │ (nft -f -)   │         │ (existing)   │                      │
+│  │ Atomic txn   │         │ iptables -A  │                      │
+│  │ table inet   │         │ per-rule     │                      │
+│  └──────────────┘         └──────────────┘                      │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+Both backends implement the same trait. The kill switch and routing manager dispatch to the selected backend. nftables uses `table inet quicfuscate_ks` (inet family = IPv4 + IPv6 in one table) for the kill switch and `table ip quicfuscate_nat` + `table inet quicfuscate_fwd` for routing. All rules are applied atomically via `nft -f -` (stdin batch file).
 
 ## Implementation Plan
 
 ### Step 1: Backend abstraction trait
-
-Create a `FirewallBackend` trait that both iptables and nftables implement:
+Create a `FirewallBackend` trait in a new `src/firewall/mod.rs` (or inline in `killswitch.rs`):
 
 ```rust
-// src/implementations/client/killswitch.rs (or new src/firewall/mod.rs)
-
 pub enum FirewallBackendKind {
     Nftables,
     Iptables,
 }
 
-pub trait FirewallBackend {
+pub trait FirewallBackend: Send + Sync {
     fn block_all_traffic(&self) -> Result<(), KillSwitchError>;
     fn allow_vpn_traffic(&self, tun_name: &str, server_ip: &str) -> Result<(), KillSwitchError>;
     fn cleanup(&self) -> Result<(), KillSwitchError>;
 }
 
+pub trait NatBackend: Send + Sync {
+    fn setup_nat(&self, subnet: &str, tun_name: &str, wan_iface: &str) -> Result<(), RoutingError>;
+    fn teardown_nat(&self) -> Result<(), RoutingError>;
+}
+
 /// Auto-detect the best available firewall backend.
-pub fn detect_backend() -> FirewallBackendKind {
-    // 1. Check if `nft` binary exists in PATH
-    // 2. Check if nftables kernel module is loaded (or built-in):
-    //    `cat /proc/net/netfilter/nf_tables` or check /sys/module/nf_tables
-    // 3. If both → Nftables, else → Iptables
-    if nft_available() {
-        FirewallBackendKind::Nftables
-    } else {
-        FirewallBackendKind::Iptables
+pub fn detect_backend(config: &FirewallBackendMode) -> FirewallBackendKind {
+    match config {
+        FirewallBackendMode::Nftables => FirewallBackendKind::Nftables,
+        FirewallBackendMode::Iptables => FirewallBackendKind::Iptables,
+        FirewallBackendMode::Auto => {
+            if nft_available() { FirewallBackendKind::Nftables }
+            else { FirewallBackendKind::Iptables }
+        }
     }
 }
 
 fn nft_available() -> bool {
-    // Check for `nft` binary
     if std::process::Command::new("nft").arg("--version").output().is_ok() {
-        // Check kernel module
         std::path::Path::new("/sys/module/nf_tables").exists()
             || std::path::Path::new("/proc/net/netfilter/nf_tables").exists()
     } else {
@@ -108,7 +132,6 @@ fn nft_available() -> bool {
 ```
 
 ### Step 2: nftables kill switch backend
-
 Implement `NftablesKillSwitch`:
 
 ```rust
@@ -119,7 +142,6 @@ struct NftablesKillSwitch {
 
 impl NftablesKillSwitch {
     fn block_all_traffic(&self) -> Result<(), KillSwitchError> {
-        // Atomic transaction via `nft -f -` (stdin)
         let rules = r#"
 table inet quicfuscate_ks
 delete table inet quicfuscate_ks
@@ -145,6 +167,7 @@ table inet quicfuscate_ks {{
         type filter hook output priority 0; policy drop;
         oifname "lo" accept
         ip daddr {server_ip} accept
+        ip6 daddr {server_ip} accept
         oifname "{tun_name}" accept
         counter drop
     }}
@@ -154,33 +177,25 @@ table inet quicfuscate_ks {{
     }
 
     fn cleanup(&self) -> Result<(), KillSwitchError> {
-        // Delete the entire table atomically
-        let rules = "delete table inet quicfuscate_ks\n";
-        self.apply_rules(rules)
+        self.apply_rules("delete table inet quicfuscate_ks\n")
     }
 
     fn apply_rules(&self, rules: &str) -> Result<(), KillSwitchError> {
         use std::io::Write;
         use std::process::{Command, Stdio};
-
         let mut child = Command::new("nft")
-            .arg("-f")
-            .arg("-")
+            .arg("-f").arg("-")
             .stdin(Stdio::piped())
             .spawn()
             .map_err(|e| KillSwitchError::CommandFailed(e.to_string()))?;
-
         if let Some(stdin) = child.stdin.as_mut() {
             stdin.write_all(rules.as_bytes())
                 .map_err(|e| KillSwitchError::CommandFailed(e.to_string()))?;
         }
-
         let status = child.wait()
             .map_err(|e| KillSwitchError::CommandFailed(e.to_string()))?;
         if !status.success() {
-            return Err(KillSwitchError::CommandFailed(
-                "nft -f - failed to apply rules".to_string()
-            ));
+            return Err(KillSwitchError::CommandFailed("nft -f - failed".to_string()));
         }
         Ok(())
     }
@@ -188,18 +203,15 @@ table inet quicfuscate_ks {{
 ```
 
 Key design decisions:
-- Use `table inet quicfuscate_ks` (inet family = IPv4 + IPv6 in one table)
-- Use `delete table` before `table` definition for idempotent atomic application
-- Use `nft -f -` (stdin) for atomic transaction — all rules apply or none do
+- `table inet quicfuscate_ks` (inet family = IPv4 + IPv6 in one table — replaces separate iptables/ip6tables)
+- `delete table` before `table` definition for idempotent atomic application
+- `nft -f -` (stdin) for atomic transaction — all rules apply or none do
 - Chain hooks `output` at priority 0 with `policy drop`
-- Rules: accept loopback, accept VPN server IP, accept TUN interface, drop rest
 
 ### Step 3: nftables routing/NAT backend
-
 Implement nftables NAT in `routing.rs`:
 
 ```rust
-#[cfg(target_os = "linux")]
 fn setup_nftables(&self, subnet: &str) -> Result<(), RoutingError> {
     let rules = format!(r#"
 table ip quicfuscate_nat
@@ -223,26 +235,17 @@ table inet quicfuscate_fwd {{
     }}
 }}
 "#, tun = self.tun_name, wan = self.wan_interface, subnet = subnet);
-
     apply_nft_rules(&rules)
-}
-
-#[cfg(target_os = "linux")]
-fn teardown_nftables(&self) -> Result<(), RoutingError> {
-    let rules = "delete table ip quicfuscate_nat\ndelete table inet quicfuscate_fwd\n";
-    apply_nft_rules(rules)
 }
 ```
 
-Key design decisions:
-- NAT uses `table ip quicfuscate_nat` (ip family for NAT, IPv4 only)
+- NAT uses `table ip quicfuscate_nat` (ip family for IPv4 NAT)
 - `masquerade` on postrouting for traffic from VPN subnet going out WAN
 - `oifname != "tun0"` prevents masquerading traffic that stays on the tunnel
 - Forward chain in `table inet quicfuscate_fwd` for IPv4+IPv6
 - `ct state established,related` for return traffic (conntrack)
 
 ### Step 4: Refactor kill switch to use backend abstraction
-
 Modify `KillSwitch` struct to hold a `Box<dyn FirewallBackend>`:
 
 ```rust
@@ -251,139 +254,122 @@ pub struct KillSwitch {
     vpn_connected: AtomicBool,
     #[cfg(target_os = "linux")]
     backend: Box<dyn FirewallBackend>,
-    // ...
-}
-
-impl KillSwitch {
-    pub fn new() -> Self {
-        let backend = match Self::select_backend() {
-            FirewallBackendKind::Nftables => Box::new(NftablesKillSwitch::new()),
-            FirewallBackendKind::Iptables => Box::new(LinuxKillSwitch::new()),
-        };
-        Self {
-            enabled: AtomicBool::new(false),
-            vpn_connected: AtomicBool::new(false),
-            backend,
-        }
-    }
-
-    pub fn with_backend(backend: FirewallBackendKind) -> Self {
-        // For explicit config override
-        // ...
-    }
 }
 ```
 
-### Step 5: Refactor routing to use backend abstraction
+`KillSwitch::new()` calls `detect_backend()` and instantiates the appropriate backend. Add `with_backend(kind)` for explicit config override.
 
+### Step 5: Refactor routing to use backend abstraction
 Modify `RoutingManager::setup()` and `teardown()` to detect and dispatch:
 
 ```rust
-#[cfg(target_os = "linux")]
 pub fn setup(&self) -> Result<(), RoutingError> {
     self.enable_ip_forwarding()?;
     let subnet = self.calculate_subnet();
-
     match detect_backend() {
         FirewallBackendKind::Nftables => self.setup_nftables(&subnet),
         FirewallBackendKind::Iptables => self.setup_iptables(&subnet),
     }
 }
-
-#[cfg(target_os = "linux")]
-pub fn teardown(&self) -> Result<(), RoutingError> {
-    match detect_backend() {
-        FirewallBackendKind::Nftables => self.teardown_nftables(),
-        FirewallBackendKind::Iptables => self.teardown_iptables(),
-    }
-}
 ```
 
 ### Step 6: Configuration
-
-Add `firewall_backend` to the client and server config:
-
-```toml
-# config/quicfuscate.toml (client)
-firewall_backend = "auto"  # "auto" | "nftables" | "iptables"
-
-# config/server-linux.default.toml (server)
-firewall_backend = "auto"
-```
-
-Add to `LoggingConfig` or a new `FirewallConfig` in `src/engine/config.rs`:
+Add `firewall_backend` to config:
 
 ```rust
 pub struct FirewallConfig {
     pub backend: FirewallBackendMode,  // Auto, Nftables, Iptables
 }
-
-pub enum FirewallBackendMode {
-    Auto,
-    Nftables,
-    Iptables,
-}
-
-impl Default for FirewallConfig {
-    fn default() -> Self {
-        Self { backend: FirewallBackendMode::Auto }
-    }
-}
+pub enum FirewallBackendMode { Auto, Nftables, Iptables }
 ```
 
-When `backend = "nftables"` but nft is not available, return an error at startup
-(fail fast). When `backend = "auto"`, detect and log which backend was selected.
+```toml
+# config/server-linux.default.toml
+firewall_backend = "auto"  # "auto" | "nftables" | "iptables"
+```
+
+When `backend = "nftables"` but nft is not available, return an error at startup (fail fast). When `backend = "auto"`, detect and log which backend was selected.
 
 ### Step 7: Fallback testing
-
-When `backend = "auto"` and nftables is not available (e.g., old kernel, no `nft`
-binary), the code must fall back to iptables silently. Log a warning:
-
+When `backend = "auto"` and nftables is not available, fall back to iptables silently with a warning:
 ```
 WARN killswitch: nftables not available (nft binary not found), falling back to iptables
 ```
 
-## Files to Modify/Create
+## Technology Choices
 
-- `src/implementations/client/killswitch.rs:125-240` — refactor `LinuxKillSwitch`
-  into `IptablesKillSwitch`, add `NftablesKillSwitch`, add `FirewallBackend` trait
-  and `detect_backend()`
-- `src/implementations/server/routing.rs:58-288` — add `setup_nftables()`,
-  `teardown_nftables()`, refactor `setup()`/`teardown()` to dispatch by backend
-- `src/engine/config.rs` — add `FirewallConfig` with `backend` field
-- `config/quicfuscate.toml` — add `firewall_backend = "auto"`
-- `config/server-linux.default.toml` — add `firewall_backend = "auto"`
-- `docs/DOCUMENTATION.md` — document nftables backend, auto-detection, config
+| Choice | Selection | Rationale |
+|--------|-----------|-----------|
+| nftables interaction | `nft -f -` (CLI batch file via stdin) | Simplest approach; atomic transactions; no additional crate dependency; works on all nftables versions ≥ 0.9.3 |
+| Alternative: `nftables` crate v0.6.3 | Considered | Provides typed JSON API via libnftables; 2.1M downloads; but adds dependency and requires libnftables at runtime. Use for Phase II if typed rule construction is needed |
+| Table family | `inet` for kill switch, `ip` for NAT | inet = IPv4+IPv6 in one table (replaces separate iptables/ip6tables); NAT is IPv4-only (ip family) |
+| Atomic application | `delete table` + `table` definition in one `nft -f -` | Idempotent: all rules apply or none; no partial state on crash |
+| Auto-detection | Check `nft --version` + `/sys/module/nf_tables` | Two checks: binary existence + kernel module loaded/built-in |
+| Backward compatibility | Keep iptables backend fully functional | iptables still works on older systems; auto-detection picks the right one |
 
-## Acceptance Criteria
+## Stealth/Efficiency Considerations
 
-- On a system with nftables: `detect_backend()` returns `Nftables`
-- On a system without nftables: `detect_backend()` returns `Iptables`
-- Kill switch with nftables: `nft list table inet quicfuscate_ks` shows the
-  correct rules after `enable()` / `on_vpn_connected()`
-- Kill switch with nftables: `nft list table inet quicfuscate_ks` shows no table
-  (or empty) after `disable()` / `cleanup()`
-- Routing with nftables: `nft list table ip quicfuscate_nat` shows the MASQUERADE
-  rule after `setup()`
-- Routing with nftables: `nft list table inet quicfuscate_fwd` shows FORWARD rules
-  after `setup()`
-- Routing with nftables: tables are deleted after `teardown()`
-- Fallback: on a system without `nft`, kill switch and routing use iptables
-  (verified by checking `iptables -L` / `iptables -t nat -L`)
-- `firewall_backend = "nftables"` on a system without nft → startup error
-- `firewall_backend = "auto"` logs which backend was selected
-- VPN traffic flows correctly through the tunnel with nftables backend
-- Kill switch blocks all non-VPN traffic with nftables backend
-- `cargo clippy --lib -D warnings` is clean
-- All existing kill switch and routing tests still pass
+- **Atomic rule application**: nftables' `nft -f -` applies an entire ruleset in one transaction. If the process crashes mid-application, no partial rules are left — unlike iptables where each `-A` is a separate process.
+- **Performance**: nftables rules are compiled into BPF programs in the kernel. Rule lookup is O(1) via sets/maps, vs iptables' O(n) linear chain traversal. For a VPN server with many clients, this reduces per-packet firewall overhead.
+- **IPv6 leak prevention**: The `inet` family table handles both IPv4 and IPv6 in one ruleset — no risk of forgetting ip6tables rules (a common IPv6 leak vector).
+- **Stealth**: nftables tables are visible via `nft list ruleset`. The table name `quicfuscate_ks` is identifiable. For stealth, consider a generic name like `qf_ks` or allow configuration of the table name.
+- **No hot-path impact**: Firewall rules are applied once at startup/connection. The per-packet path is in-kernel BPF — zero userspace overhead.
 
-## Resource Budget
+## Testing Plan
 
-| Scenario | Budget | Notes |
-|----------|--------|-------|
-| Backend detection | < 5ms | Two path existence checks + one process spawn |
-| nft rules apply (kill switch) | < 10ms | Single `nft -f -` transaction |
-| nft rules apply (routing) | < 10ms | Single `nft -f -` transaction |
-| nft rules cleanup | < 5ms | `delete table` transaction |
-| iptables fallback apply | < 15ms | `iptables-restore` (existing path) |
-| Memory per backend | < 1KB | Struct + AtomicBool + table name string |
+### Unit tests
+- `test_nft_available_detection` — mock `nft --version` output; verify detection logic
+- `test_nftables_ruleset_generation` — verify generated nftables ruleset text is correct for block/allow/cleanup
+- `test_detect_backend_auto_nftables` — when nft is available, auto selects Nftables
+- `test_detect_backend_auto_iptables` — when nft is not available, auto selects Iptables
+- `test_detect_backend_explicit_nftables` — explicit `Nftables` mode returns Nftables regardless of availability
+
+### Integration tests (require Linux with nftables)
+- `test_nftables_killswitch_block` — `nft list table inet quicfuscate_ks` shows correct rules after `block_traffic()`
+- `test_nftables_killswitch_allow_vpn` — `nft list table inet quicfuscate_ks` shows allow rules after `allow_vpn_traffic()`
+- `test_nftables_killswitch_cleanup` — table is deleted after `cleanup()`
+- `test_nftables_routing_setup` — `nft list table ip quicfuscate_nat` shows MASQUERADE rule after `setup()`
+- `test_nftables_routing_teardown` — tables are deleted after `teardown()`
+- `test_iptables_fallback` — on system without `nft`, kill switch and routing use iptables
+- `test_firewall_backend_nftables_unavailable` — `firewall_backend = "nftables"` on system without nft → startup error
+- `test_vpn_traffic_flows_nftables` — VPN traffic flows correctly through tunnel with nftables backend
+- `test_killswitch_blocks_non_vpn_nftables` — kill switch blocks all non-VPN traffic with nftables backend
+
+## Files to Create/Modify
+
+| File | Action | Description |
+|------|--------|-------------|
+| `src/firewall/mod.rs` | Create | `FirewallBackend` trait, `NatBackend` trait, `FirewallBackendKind`, `detect_backend()`, `nft_available()` |
+| `src/implementations/client/killswitch.rs:148-590` | Modify | Refactor `LinuxKillSwitch` into `IptablesKillSwitch`, add `NftablesKillSwitch`, add trait dispatch |
+| `src/implementations/server/routing.rs:87-98, 268-350, 388-455` | Modify | Add `setup_nftables()`, `teardown_nftables()`, refactor `setup()`/`teardown()` to dispatch by backend |
+| `src/engine/config.rs` | Modify | Add `FirewallConfig` with `backend: FirewallBackendMode` field |
+| `config/quicfuscate.toml` | Modify | Add `firewall_backend = "auto"` |
+| `config/server-linux.default.toml` | Modify | Add `firewall_backend = "auto"` |
+| `docs/DOCUMENTATION.md` | Modify | Document nftables backend, auto-detection, config |
+
+## Risks & Mitigations
+
+| Risk | Severity | Mitigation |
+|------|----------|------------|
+| nftables not available on older kernels | Medium | Auto-detection falls back to iptables; explicit `nftables` mode fails fast with clear error |
+| `nft -f -` syntax errors silently fail | Medium | Check exit status; log stderr on failure; test ruleset generation |
+| nftables rules conflict with existing firewall (firewalld, ufw) | Medium | Use dedicated table name `quicfuscate_ks` / `quicfuscate_nat`; document potential conflicts |
+| iptables-nft compatibility layer confusion | Low | Auto-detection checks for `nft` binary + kernel module, not iptables-nft wrapper |
+| IPv6 rules missing in nftables | Low | `inet` family handles both IPv4 and IPv6; test with IPv6 traffic |
+| Container environments without nftables | Low | Auto-detection falls back; document that containers may need `--cap-add NET_ADMIN` |
+
+## Completion Criteria
+
+- [ ] `detect_backend()` returns `Nftables` on systems with nftables, `Iptables` on systems without
+- [ ] Kill switch with nftables: `nft list table inet quicfuscate_ks` shows correct rules after `enable()` / `on_vpn_connected()`
+- [ ] Kill switch with nftables: table is deleted after `disable()` / `cleanup()`
+- [ ] Routing with nftables: `nft list table ip quicfuscate_nat` shows MASQUERADE rule after `setup()`
+- [ ] Routing with nftables: `nft list table inet quicfuscate_fwd` shows FORWARD rules after `setup()`
+- [ ] Routing with nftables: tables are deleted after `teardown()`
+- [ ] Fallback: on system without `nft`, kill switch and routing use iptables (verified via `iptables -L`)
+- [ ] `firewall_backend = "nftables"` on system without nft → startup error
+- [ ] `firewall_backend = "auto"` logs which backend was selected
+- [ ] VPN traffic flows correctly through tunnel with nftables backend
+- [ ] Kill switch blocks all non-VPN traffic with nftables backend
+- [ ] `cargo clippy --lib -D warnings` is clean
+- [ ] All existing kill switch and routing tests still pass

@@ -104,6 +104,10 @@ impl CongestionController for Reno {
         self.cwnd
     }
 
+    fn set_cwnd(&mut self, cwnd: usize) {
+        self.cwnd = cwnd.max(self.mss * 2);
+    }
+
     fn bytes_in_flight(&self) -> usize {
         self.bytes_in_flight
     }
