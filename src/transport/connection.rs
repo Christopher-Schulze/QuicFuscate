@@ -86,7 +86,7 @@ impl PmtuState {
         self.last_probe_sent = Some(now);
     }
 
-    /// Record that a probe was ACKed — confirm the MTU.
+    /// Record that a probe was ACKed - confirm the MTU.
     pub fn on_probe_acked(&mut self, now: Instant) {
         if let Some(size) = self.probe_in_flight.take() {
             self.confirmed_mtu = size;
@@ -99,7 +99,7 @@ impl PmtuState {
         self.last_ack_received = now;
     }
 
-    /// Record that a probe was lost — reduce probe target.
+    /// Record that a probe was lost - reduce probe target.
     pub fn on_probe_lost(&mut self) {
         if let Some(size) = self.probe_in_flight.take() {
             // Binary search down: try midpoint between confirmed and failed size
@@ -345,7 +345,7 @@ pub struct Connection {
     // Crypto context (AEAD/HP) hooks for header and payload processing
     crypto: Arc<parking_lot::RwLock<packet::CryptoContext>>,
     /// Lock-free 1-RTT crypto keys for the data-plane hot path.
-    /// Loaded via `arc_swap::ArcSwapOption::load()` — no lock acquisition in steady state.
+    /// Loaded via `arc_swap::ArcSwapOption::load()` - no lock acquisition in steady state.
     crypto_1rtt: arc_swap::ArcSwapOption<packet::OneRttCrypto>,
     /// Cached AEAD tag reserve (0 or 16) after 1-RTT seal key installation.
     short_header_tag_reserve: u8,
@@ -1240,7 +1240,7 @@ impl Connection {
         let mut rx_key_advances = 0usize;
         let (hdr_native, aad_len, pt_len) = loop {
             // Hot path: try lock-free 1-RTT ArcSwap first.
-            // Consume pre_parsed_hdr by move (no clone) — on the common 1-RTT
+            // Consume pre_parsed_hdr by move (no clone) - on the common 1-RTT
             // success path this eliminates a Header clone (Vec dcid/scid alloc)
             // per packet. On the rare failure path we re-parse below.
             if let Some(keys) = self.crypto_1rtt.load().as_ref() {
@@ -1697,7 +1697,7 @@ impl Connection {
     /// Sync the lock-free `crypto_1rtt` ArcSwap from the RwLock-protected CryptoContext.
     ///
     /// Must be called after any `crypto.write()` that installs, rotates, or clears 1-RTT keys.
-    /// In steady state (no key updates), the ArcSwap is never touched — the hot path loads
+    /// In steady state (no key updates), the ArcSwap is never touched - the hot path loads
     /// it lock-free via `arc_swap::ArcSwapOption::load()`.
     fn sync_1rtt(&self) {
         let crypto = self.crypto.read();
@@ -1746,7 +1746,7 @@ impl Connection {
     /// When `congestion_bypass` is true, the caller is emitting an ACK-only
     /// packet to bypass the congestion gate (RFC 9002 §7.2). In that mode only
     /// non-ack-eliciting control frames (CONNECTION_CLOSE / APPLICATION_CLOSE)
-    /// may be emitted — emitting ack-eliciting frames would inflate
+    /// may be emitted - emitting ack-eliciting frames would inflate
     /// bytes_in_flight beyond cwnd, violating RFC 9002 §7.2 ("A sender MUST
     /// NOT send a packet if it would cause bytes_in_flight to exceed the
     /// congestion window"). Ack-eliciting control frames are left in the queue
@@ -1829,7 +1829,7 @@ impl Connection {
     }
 
     /// Flushes one writable stream's pending data. Returns `(new_off,
-    /// wrote_ack_eliciting)` — STREAM frames are always ack-eliciting when
+    /// wrote_ack_eliciting)` - STREAM frames are always ack-eliciting when
     /// actually emitted (RFC 9000 §19.8).
     #[inline(always)]
     fn maybe_flush_one_writable_stream(
@@ -2115,7 +2115,7 @@ impl Connection {
         // Hot path: try lock-free 1-RTT ArcSwap first.
         let one_rtt = self.crypto_1rtt.load();
         if let Some(keys) = one_rtt.as_ref() {
-            // 1-RTT steady state — no lock acquisition.
+            // 1-RTT steady state - no lock acquisition.
             let ad_len = pn_off + pn_len;
             let (ad_slice, rest) = out.split_at_mut(ad_len);
             let pt_len = off.saturating_sub(ad_len);
@@ -2144,7 +2144,7 @@ impl Connection {
             return Ok(off);
         }
 
-        // Fallback: 0-RTT or handshake — use RwLock.
+        // Fallback: 0-RTT or handshake - use RwLock.
         let use_1rtt_seal = {
             let crypto_guard = self.crypto.read();
             crypto_guard.seal_1rtt.is_some()
@@ -2199,7 +2199,7 @@ impl Connection {
         send_peer: SocketAddr,
         frame: &Frame<'_>,
     ) -> Result<(usize, SendInfo), crate::error::ConnectionError> {
-        // Build short header prefix with DCID directly — avoids two Vec
+        // Build short header prefix with DCID directly - avoids two Vec
         // allocations (dcid.to_vec() + scid.to_vec()) per outbound packet.
         let hdr_len = packet::format_short_header(self.dcid.as_ref(), false, out)?;
         let pn = self.next_send_pn_by_space[2];
@@ -2364,7 +2364,7 @@ impl Connection {
                 // frames added below. Without this reserve, next_crypto_frame() returns up
                 // to `out.len() - off - 16` bytes, the framed packet overflows the buffer,
                 // the seal fails with BufferTooShort, and the already-drained CRYPTO bytes
-                // are lost forever (never retransmitted) — stalling the handshake.
+                // are lost forever (never retransmitted) - stalling the handshake.
                 const SEND_FRAME_OVERHEAD_RESERVE: usize = 64;
                 let crypto_budget =
                     out.len().saturating_sub(off + 16 + SEND_FRAME_OVERHEAD_RESERVE);
@@ -2476,7 +2476,7 @@ impl Connection {
         // starve the recv path on the peer.
         //
         // The handshake-incomplete case is already handled by the early return
-        // above (after the Initial/Handshake CRYPTO flush loop) — by this point
+        // above (after the Initial/Handshake CRYPTO flush loop) - by this point
         // the handshake is always complete.
         let has_pending_data = !self.pending_control.is_empty()
             || self.has_pending_application_ack()
@@ -2486,7 +2486,7 @@ impl Connection {
             return Err(ConnectionError::Done);
         }
         // Outbound stealth timing is owned by core::QuicFuscateConnection (next_packet_release).
-        // Build short header prefix with DCID directly — avoids two Vec
+        // Build short header prefix with DCID directly - avoids two Vec
         // allocations (dcid.to_vec() + scid.to_vec()) per outbound packet.
         let hdr_len = packet::format_short_header(self.dcid.as_ref(), false, out)?; // first byte + DCID
         let dcid_end = 1 + self.dcid.as_ref().len();
@@ -2533,7 +2533,7 @@ impl Connection {
         wrote_ack_eliciting |= ctrl_ack_eliciting;
         off = self.maybe_emit_application_ack_frame(out, off)?;
         // When bypassing the congestion gate for ACK-only packets, skip
-        // stream and datagram data — those are congestion-controlled and
+        // stream and datagram data - those are congestion-controlled and
         // must not be sent when the window is exhausted.
         if !ack_bypass {
             let (off_after_stream, stream_ack_eliciting) =
@@ -2581,7 +2581,7 @@ impl Connection {
         // dummy packet is due and no ack-eliciting payload was written (real
         // traffic already covers the slot), inject a PING + PADDING chaff
         // packet sized to `chaff_size_bytes`. The chaff is a real 1-RTT packet
-        // — encrypted with the same keys, same header format — indistinguishable
+        // - encrypted with the same keys, same header format - indistinguishable
         // from a real data packet to an outside observer.
         if !wrote_ack_eliciting {
             // Extract values before mutable borrow of self.chaff.
@@ -2603,7 +2603,7 @@ impl Connection {
                 }
             }
         } else if let Some(ref mut chaff) = self.chaff {
-            // Real ack-eliciting traffic was sent — reset the chaff clock so the
+            // Real ack-eliciting traffic was sent - reset the chaff clock so the
             // next chaff is deferred for one interval.
             chaff.record_real_traffic(now);
         }
@@ -2631,12 +2631,12 @@ impl Connection {
         // congestion-controlled. Packets carrying only ACK/PADDING/CONNECTION_CLOSE
         // are not congestion-controlled and must not inflate bytes_in_flight.
         // They are also not tracked in sent_packets_by_pn because the peer will
-        // never ACK them — tracking them would leak bytes_in_flight permanently.
+        // never ACK them - tracking them would leak bytes_in_flight permanently.
         //
         // `wrote_ack_eliciting` is set whenever any ack-eliciting frame (STREAM,
         // DATAGRAM, CRYPTO, PING, MAX_DATA, NEW_CONNECTION_ID, RESET_STREAM,
         // STOP_SENDING, PATH_CHALLENGE, PATH_RESPONSE, HANDSHAKE_DONE, etc.) was
-        // emitted. This is the correct RFC 9002 §7.2 condition — the previous
+        // emitted. This is the correct RFC 9002 §7.2 condition - the previous
         // heuristic ("no stream/dgram payload") misclassified PING-only keepalive
         // probes and flow-control updates as non-congestion-controlled, breaking
         // PTO-based loss detection for those packets.
@@ -3548,7 +3548,7 @@ impl Connection {
 
     /// Set the QKey auth token on the TLS provider (client side).
     /// The token is injected into QUIC transport parameters, which are
-    /// carried in the TLS EncryptedExtensions message — encrypted at the
+    /// carried in the TLS EncryptedExtensions message - encrypted at the
     /// Handshake level, invisible to DPI (TODO-415 Phase 2).
     pub fn set_qkey_auth_token(&mut self, token: &[u8]) {
         if let Some(provider) = &mut self.tls_provider {
@@ -3858,29 +3858,19 @@ impl Connection {
         let mut rtt_sample: Option<Duration> = None;
 
         for (start, end) in ranges {
-            let acked: Vec<(u64, (usize, Instant))> = self
-                .sent_packets_by_pn
-                .range(*start..*end)
-                .map(|(&pn, &info)| (pn, info))
-                .collect();
-            for (pn, (sz, send_time)) in acked {
+            for (pn, (sz, send_time)) in
+                self.sent_packets_by_pn.extract_if(*start..*end, |_, _| true)
+            {
                 if pn == largest_acked {
                     let elapsed = now.saturating_duration_since(send_time);
                     rtt_sample = Some(elapsed.saturating_sub(ack_delay));
                 }
-                self.sent_packets_by_pn.remove(&pn);
                 acked_total = acked_total.saturating_add(sz);
             }
         }
         if largest_acked >= packet_threshold {
             let loss_cutoff = largest_acked - packet_threshold;
-            let lost: Vec<(u64, (usize, Instant))> = self
-                .sent_packets_by_pn
-                .range(..=loss_cutoff)
-                .map(|(&pn, &info)| (pn, info))
-                .collect();
-            for (pn, (sz, _)) in lost {
-                self.sent_packets_by_pn.remove(&pn);
+            for (pn, (sz, _)) in self.sent_packets_by_pn.extract_if(..=loss_cutoff, |_, _| true) {
                 self.recovery.on_loss_packet(pn, sz, now);
                 lost_total = lost_total.saturating_add(sz);
                 self.stats.lost = self.stats.lost.saturating_add(1);
@@ -3898,7 +3888,7 @@ impl Connection {
                 if ranges.iter().any(|(s, e)| probe_pn >= *s && probe_pn < *e) {
                     self.pmtu.on_probe_acked(now);
                 } else {
-                    // Probe not yet acked — keep tracking it.
+                    // Probe not yet acked - keep tracking it.
                     self.pmtu_probe_pn = Some(probe_pn);
                 }
             }
@@ -4389,7 +4379,7 @@ mod tests {
         c.on_timeout();
         assert_eq!(
             c.rtt, rtt_before,
-            "on_timeout must NOT inflate RTT — only ACK samples update RTT (RFC 9000 §5.1)"
+            "on_timeout must NOT inflate RTT - only ACK samples update RTT (RFC 9000 §5.1)"
         );
     }
 
@@ -4444,6 +4434,24 @@ mod tests {
             "RTT should be ~70ms (100-30). Got {:?}",
             c.rtt
         );
+    }
+
+    #[test]
+    fn sparse_ack_accounting_removes_acked_and_prunes_packet_threshold_losses() {
+        let mut c = make_conn();
+        let send_time = Instant::now() - Duration::from_millis(50);
+        for pn in 0..12 {
+            c.sent_packets_by_pn.insert(pn, (1200, send_time));
+        }
+
+        let ranges = vec![(0u64, 1u64), (4, 5), (8, 9)];
+        c.account_sent_bytes_for_ack_ranges_with_delay(&ranges, Duration::ZERO);
+
+        assert_eq!(c.stats.acked_bytes, 3600);
+        assert_eq!(c.stats.lost, 4);
+        assert_eq!(c.stats.lost_bytes, 4800);
+        let remaining: Vec<u64> = c.sent_packets_by_pn.keys().copied().collect();
+        assert_eq!(remaining, vec![6, 7, 9, 10, 11]);
     }
 
     #[test]
