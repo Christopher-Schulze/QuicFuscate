@@ -943,6 +943,7 @@ pub use fingerprint::{OsFingerprintProfile, PacketNormalizer};
 // --- Global Tokio Runtime for async DoH requests ---
 // Returns None when the runtime cannot be created (e.g. resource exhaustion).
 // Callers skip async DoH/MASQUE work gracefully when the runtime is unavailable.
+#[allow(dead_code)] // retained for explicit DoH/MASQUE compatibility paths outside the default lib build
 static DOH_RUNTIME: LazyLock<Option<Runtime>> = LazyLock::new(|| {
     let threads = 2.min(std::thread::available_parallelism().map_or(1, |n| n.get()));
     match tokio::runtime::Builder::new_multi_thread()
@@ -2137,6 +2138,7 @@ impl DomainFrontingManager {
     /// -----
     /// This method is thread-safe and suitable for concurrent access.
     #[inline]
+    #[allow(dead_code)] // retained for explicit/randomized fronting experiments and rust-tests
     pub fn random_domain(&self) -> String {
         use rand::seq::IndexedRandom;
         let mut rng = rand::rng();
@@ -3665,7 +3667,7 @@ impl StealthConfig {
     pub fn stealth() -> Self {
         Self {
             mode: StealthMode::Stealth,
-            enable_domain_fronting: true,
+            enable_domain_fronting: false,
             // Fields removed during consolidation
             initial_browser: BrowserProfile::Chrome,
             initial_os: OsProfile::Windows,
@@ -3868,8 +3870,10 @@ impl StealthConfig {
     pub fn performance() -> Self {
         Self {
             mode: StealthMode::Performance,
-            // Domain fronting: enabled (negligible performance impact; strengthens cover)
-            enable_domain_fronting: true,
+            // Domain fronting is not a safe baseline cover signal on modern CDNs.
+            // Keep the clean path as ordinary H3/QUIC unless explicit fronting
+            // domains are configured.
+            enable_domain_fronting: false,
             fronting_domains: vec![],
             enable_http3_masquerading: true,
             use_tls_cover: true,
@@ -3921,6 +3925,20 @@ impl StealthConfig {
         cfg.mode = StealthMode::Intelligent;
         cfg.dynamic_enabled = true;
         cfg
+    }
+
+    /// Binds the legacy protocol-mimicry flag to concrete H3/TLS cover knobs.
+    ///
+    /// The flag is intentionally treated as a bundle alias. This prevents a
+    /// misleading state where `enable_protocol_mimicry=true` exists in config
+    /// but no runtime-visible H3/TLS persona behavior is actually enabled.
+    pub(crate) fn normalize_protocol_mimicry_bundle(&mut self) {
+        if !self.enable_protocol_mimicry {
+            return;
+        }
+        self.enable_http3_masquerading = true;
+        self.use_qpack_headers = true;
+        self.use_tls_cover = true;
     }
 }
 
@@ -4123,6 +4141,7 @@ impl StealthConfig {
                 deny: cfg.compress_deny.clone(),
             });
         }
+        cfg.normalize_protocol_mimicry_bundle();
         Ok(cfg)
     }
 
@@ -4172,8 +4191,14 @@ impl StealthConfig {
         {
             return Err("off mode cannot enable stealth transport/runtime features".into());
         }
-        // When domain fronting is enabled and no domains are provided, we fall back
-        // to built-in ultra-stealth rotation (handled in StealthManager::new()).
+        if self.enable_domain_fronting
+            && self.fronting_domains.is_empty()
+            && !matches!(self.mode, StealthMode::AntiDpi)
+        {
+            log::warn!(
+                "domain fronting is enabled without fronting_domains; it will be disabled outside Anti-DPI"
+            );
+        }
         if !self.use_tls_cover {
             // Informative notice: TLS Cover extras are automatically disabled
             // (CertChainEmulator, cover PSK/tickets). Real TLS path remains fully active.
@@ -4321,6 +4346,7 @@ impl StealthConfig {
         if let Some(n) = Self::env_parse_first(["QUICFUSCATE_SERVER_PUSH_BURST_INTERVAL"]) {
             self.server_push_burst_interval = n;
         }
+        self.normalize_protocol_mimicry_bundle();
     }
 
     fn parse_browser(s: &str) -> Option<BrowserProfile> {
@@ -4553,8 +4579,9 @@ pub struct StealthManager {
     /// Runtime override: timing obfuscation rate 0-100 (set on probe detection or escalation).
     /// Level 0 = 0%, Level 1 = 0%, Level 2 = 100%.
     runtime_timing_rate: AtomicU8,
-    /// Runtime override: fingerprint rotation rate 0-100 (set on probe detection or escalation).
-    /// Threshold at >50 = active. Level 0/1 = 0%, Level 2 = 100%.
+    /// Runtime override retained for telemetry/compatibility. Active fingerprint
+    /// rotation is intentionally kept at 0 for established connections; persona
+    /// changes are deferred to future sessions.
     runtime_rotation_rate: AtomicU8,
     /// Optimization manager for memory pools
     _optimization_manager: Arc<OptimizationManager>,
@@ -4594,15 +4621,7 @@ impl StealthManager {
             config.initial_os,
         )));
 
-        let domain_fronting = if config.enable_domain_fronting {
-            if config.fronting_domains.is_empty() {
-                Some(DomainFrontingManager::ultra_stealth())
-            } else {
-                Some(DomainFrontingManager::new(config.fronting_domains.clone()))
-            }
-        } else {
-            None
-        };
+        let domain_fronting = Self::domain_fronting_for_config(&config);
 
         let profile_pool = Arc::new(TlsClientHelloSpoofer::available_profiles());
 
@@ -4724,6 +4743,22 @@ impl StealthManager {
         }
     }
 
+    fn domain_fronting_for_config(config: &StealthConfig) -> Option<DomainFrontingManager> {
+        if !config.enable_domain_fronting {
+            return None;
+        }
+        if !config.fronting_domains.is_empty() {
+            return Some(DomainFrontingManager::new(config.fronting_domains.clone()));
+        }
+        if matches!(config.mode, StealthMode::AntiDpi) {
+            return Some(DomainFrontingManager::ultra_stealth());
+        }
+        warn!(
+            "Domain fronting requested without configured fronting domains outside Anti-DPI - disabling for a coherent H3 persona"
+        );
+        None
+    }
+
     /// Creates a stealth manager with MASQUE compatibility forced on (test-only).
     #[cfg(any(test, feature = "rust-tests"))]
     pub fn new_with_masque_compat_for_test(
@@ -4794,11 +4829,15 @@ impl StealthManager {
         debug!("Profile consistency check completed for {}/{}", expected_browser, expected_os);
     }
 
-    /// Rotates fingerprint if interval has passed (considers escalation).
-    /// Respects `fingerprint_rotation_mode`: Fixed = no rotation, Slots = configured
-    /// profile_pool subset, All = all available profiles.
+    /// Advances the next-session persona cursor when rotation policy is due.
+    ///
+    /// Active connections keep a frozen Browser/OS/TLS/H3 persona for their
+    /// lifetime. Mid-session identity changes are more fingerprintable than a
+    /// stable browser session because TLS, QUIC transport params, QPACK headers,
+    /// and user-agent state would no longer agree. Rotation therefore only
+    /// updates bookkeeping for future connection selection and never mutates
+    /// `self.fingerprint`.
     pub fn maybe_rotate_fingerprint(&self) {
-        // Fixed mode: never rotate (unless AntiDpi escalation overrides)
         let escalated = self.escalated.load(Ordering::Relaxed);
         let anti_mode = matches!(self.config.mode, StealthMode::AntiDpi);
         let mode_allows = match self.config.fingerprint_rotation_mode {
@@ -4824,14 +4863,11 @@ impl StealthManager {
         };
 
         if should_rotate {
-            let idx = self.profile_index.fetch_add(1, Ordering::Relaxed) % self.profile_pool.len();
-            let (browser, os) = self.profile_pool[idx];
-
-            let new_profile = FingerprintProfile::new(browser, os);
-            *self.fingerprint.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = new_profile;
+            if !self.profile_pool.is_empty() {
+                self.profile_index.fetch_add(1, Ordering::Relaxed);
+            }
             *self.last_rotation.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = now;
-
-            info!("Rotated fingerprint to {:?}/{:?}", browser, os);
+            debug!("Deferred fingerprint rotation to the next connection; active persona remains frozen");
         }
     }
 
@@ -5067,8 +5103,10 @@ impl StealthManager {
         }
     }
 
-    /// Changes the active fingerprint profile at runtime.
-    /// Call `apply_utls_profile` again to update an existing transport TLS configuration.
+    /// Changes the active fingerprint profile before a connection is materialized.
+    /// Runtime session rotation deliberately avoids this path to keep TLS,
+    /// QUIC, QPACK and header persona state coherent for the full session.
+    #[allow(dead_code)]
     fn set_fingerprint_profile(
         &self,
         profile: FingerprintProfile,
@@ -5093,8 +5131,11 @@ impl StealthManager {
         *fp = p;
     }
 
-    /// This spawns a task on the DoH runtime which periodically updates the
-    /// active fingerprint.
+    /// Registers profile rotation as a next-session policy.
+    ///
+    /// The active connection persona is intentionally frozen. This method is
+    /// kept for compatibility with callers that configure profile rotation, but
+    /// it no longer mutates an in-flight TLS/H3 identity.
     pub fn start_profile_rotation(
         self: &Arc<Self>,
         profiles: Vec<FingerprintProfile>,
@@ -5103,19 +5144,12 @@ impl StealthManager {
         if profiles.is_empty() {
             return;
         }
-        let Some(rt) = DOH_RUNTIME.as_ref() else {
-            warn!("DoH runtime unavailable - fingerprint profile rotation disabled");
-            return;
-        };
-        let mgr = Arc::clone(self);
-        rt.spawn(async move {
-            let mut idx = 0usize;
-            loop {
-                tokio::time::sleep(interval).await;
-                idx = (idx + 1) % profiles.len();
-                mgr.set_fingerprint_profile(profiles[idx].clone(), None);
-            }
-        });
+        self.profile_index.fetch_add(1, Ordering::Relaxed);
+        info!(
+            "Fingerprint rotation configured for next sessions only ({} profiles, interval {:?}); active connection persona remains frozen",
+            profiles.len(),
+            interval
+        );
     }
 
     /// Returns the SNI and Host header values for a connection.
@@ -5313,15 +5347,10 @@ impl StealthManager {
                         Some(std::time::Instant::now() + std::time::Duration::from_secs(20 * 60));
                 }
 
-                // Force a fast fingerprint rotation by moving last-rotation timestamp back.
-                if let Ok(mut last) = self.last_rotation.lock() {
-                    *last = std::time::Instant::now() - std::time::Duration::from_secs(3600);
-                }
-
-                // Force stronger domain fronting rotation.
-                if let Some(df) = &self.domain_fronting {
-                    df.random_domain();
-                }
+                // Keep the active Browser/OS/TLS/H3 persona stable. Escalation
+                // may raise padding, timing, cover traffic and MASQUE hints,
+                // but it must not rotate fingerprints or fronting hosts inside
+                // an already-established connection.
 
                 // Anti-DPI mode with realtime choke: activate rate choker.
                 let anti_mode = matches!(self.config.mode, StealthMode::AntiDpi);
@@ -5651,6 +5680,27 @@ impl StealthManager {
         Some((self.config.server_push_base_path.clone(), current_intensity))
     }
 
+    /// Returns a bounded WebTransport-looking cover session plan.
+    ///
+    /// WebTransport cover is an H3 application-shape overlay only. It never
+    /// replaces the production Core/H3/MASQUE VPN carrier and is kept out of
+    /// the clean Performance/Intelligent level-0 path.
+    pub(crate) fn webtransport_cover_plan(&self) -> Option<(String, String)> {
+        let active = matches!(self.config.mode, StealthMode::AntiDpi)
+            || (self.is_intelligent_runtime() && self.intelligent_runtime_level() >= 2);
+        if !active || !self.config.enable_http3_masquerading {
+            return None;
+        }
+
+        let authority = self
+            .domain_fronting
+            .as_ref()
+            .map(DomainFrontingManager::get_fronted_domain)
+            .unwrap_or_else(|| "cdn.cloudflare.com".to_string());
+        let base = self.config.server_push_base_path.trim_end_matches('/');
+        Some((authority, format!("{base}/wt/session")))
+    }
+
     /// Exposes server-push cover plan for test assertions.
     #[cfg(any(test, feature = "rust-tests"))]
     pub fn server_push_cover_plan_for_test(&self) -> Option<(String, f32)> {
@@ -5779,10 +5829,7 @@ impl StealthManager {
             0 | 1 => 0u8,
             _ => 100u8,
         };
-        let rotation_rate = match level {
-            0 | 1 => 0u8,
-            _ => 100u8,
-        };
+        let rotation_rate = 0u8;
         self.runtime_padding_rate.store(padding_rate, Ordering::Relaxed);
         self.runtime_timing_rate.store(timing_rate, Ordering::Relaxed);
         self.runtime_rotation_rate.store(rotation_rate, Ordering::Relaxed);
@@ -6153,7 +6200,7 @@ mod stealth_coverage_tests {
         assert!(m.cover_traffic.is_some());
         // Stealth enables timing obfuscation -> FlowShaper present
         assert!(m.flow_shaper.is_some());
-        assert!(m.domain_fronting.is_some());
+        assert!(m.domain_fronting.is_none());
     }
 
     #[test]
@@ -6324,6 +6371,7 @@ mod stealth_coverage_tests {
     #[test]
     fn config_stealth_has_expected_defaults() {
         let cfg = StealthConfig::stealth();
+        assert!(!cfg.enable_domain_fronting);
         assert!(cfg.enable_traffic_padding);
         assert!(cfg.enable_timing_obfuscation);
         assert!(cfg.enable_http3_masquerading);
@@ -6331,6 +6379,55 @@ mod stealth_coverage_tests {
         assert!(cfg.enable_cover_ping);
         assert_eq!(cfg.padding_strategy, PaddingStrategy::Adaptive);
         assert_eq!(cfg.cover_ping_interval_ms, 30_000);
+    }
+
+    #[test]
+    fn normal_modes_do_not_enable_domain_fronting_by_default() {
+        assert!(!StealthConfig::performance().enable_domain_fronting);
+        assert!(!StealthConfig::intelligent().enable_domain_fronting);
+        assert!(!StealthConfig::stealth().enable_domain_fronting);
+        assert!(StealthConfig::anti_dpi().enable_domain_fronting);
+    }
+
+    #[test]
+    fn protocol_mimicry_flag_enables_concrete_h3_tls_cover_knobs() {
+        let mut cfg = StealthConfig::manual();
+        cfg.enable_protocol_mimicry = true;
+        cfg.enable_http3_masquerading = false;
+        cfg.use_qpack_headers = false;
+        cfg.use_tls_cover = false;
+
+        cfg.normalize_protocol_mimicry_bundle();
+
+        assert!(cfg.enable_http3_masquerading);
+        assert!(cfg.use_qpack_headers);
+        assert!(cfg.use_tls_cover);
+    }
+
+    #[test]
+    fn domain_fronting_without_domains_is_disabled_outside_anti_dpi() {
+        let mut cfg = StealthConfig::stealth();
+        cfg.enable_domain_fronting = true;
+        cfg.fronting_domains.clear();
+
+        let m = make_manager(cfg);
+        assert!(m.domain_fronting.is_none());
+    }
+
+    #[test]
+    fn active_persona_does_not_rotate_mid_session() {
+        let mut cfg = StealthConfig::anti_dpi();
+        cfg.fingerprint_rotation_interval = 1;
+        let m = make_manager(cfg);
+        let before = m.current_persona_name();
+        {
+            let mut last = m.last_rotation.lock().expect("last rotation lock");
+            *last = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+        }
+
+        m.maybe_rotate_fingerprint();
+
+        assert_eq!(m.current_persona_name(), before);
     }
 
     #[test]
@@ -6697,6 +6794,20 @@ mod stealth_coverage_tests {
     fn server_push_cover_active_in_anti_dpi() {
         let m = make_manager(StealthConfig::anti_dpi());
         assert!(m.server_push_cover_active());
+    }
+
+    #[test]
+    fn webtransport_cover_policy_is_escalated_only() {
+        let performance = make_manager(StealthConfig::performance());
+        assert!(performance.webtransport_cover_plan().is_none());
+
+        let intelligent = make_manager(StealthConfig::intelligent());
+        assert!(intelligent.webtransport_cover_plan().is_none());
+
+        let anti_dpi = make_manager(StealthConfig::anti_dpi());
+        let (authority, path) = anti_dpi.webtransport_cover_plan().expect("anti-dpi cover plan");
+        assert!(!authority.is_empty());
+        assert!(path.ends_with("/wt/session"));
     }
 
     #[test]

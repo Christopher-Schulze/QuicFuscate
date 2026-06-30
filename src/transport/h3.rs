@@ -191,9 +191,53 @@ enum StreamType {
     Control,
     Push,
     Masque,
+    WebTransportCover,
 }
 
 impl Connection {
+    fn build_stealth_cover_resource_plan(
+        base_path: &str,
+        seed: u64,
+    ) -> Vec<(String, &'static str, usize)> {
+        const RESOURCES: &[(&str, &str, usize)] = &[
+            ("/css/main.css", "text/css", 45_000),
+            ("/css/theme.css", "text/css", 18_000),
+            ("/css/fonts.css", "text/css", 8_000),
+            ("/js/app.js", "application/javascript", 120_000),
+            ("/js/runtime.js", "application/javascript", 22_000),
+            ("/js/vendor.js", "application/javascript", 280_000),
+            ("/js/analytics.js", "application/javascript", 25_000),
+            ("/images/hero.jpg", "image/jpeg", 85_000),
+            ("/images/card.jpg", "image/jpeg", 54_000),
+            ("/images/logo.png", "image/png", 12_000),
+            ("/images/icon.png", "image/png", 6_000),
+            ("/media/poster.jpg", "image/jpeg", 72_000),
+        ];
+
+        let base = base_path.trim_end_matches('/');
+        let count = 3 + ((seed >> 32) as usize % 5);
+        let start = (seed as usize) % RESOURCES.len();
+        let step = 5usize;
+        let mut plan = Vec::with_capacity(count);
+
+        for i in 0..count {
+            let (path, content_type, nominal_size) =
+                RESOURCES[(start + i * step) % RESOURCES.len()];
+            let jitter = ((seed.rotate_left((i as u32) & 31) >> 8) % 31) as i32 - 15;
+            let size =
+                ((nominal_size as i64) * (100 + jitter) as i64 / 100).clamp(1024, 320_000) as usize;
+            let version = seed.rotate_right((i as u32) & 31) & 0x0fff;
+            let full_path = if version.is_multiple_of(3) {
+                format!("{base}{path}?v={version:x}")
+            } else {
+                format!("{base}{path}")
+            };
+            plan.push((full_path, content_type, size));
+        }
+
+        plan
+    }
+
     fn encode_headers_block(&mut self, headers: &[Header]) -> Result<Vec<u8>, Error> {
         // QPACK header blocks can exceed 4KiB when stealth adds realistic header cover.
         // Grow the buffer until the encoder succeeds (bounded to avoid pathological allocations).
@@ -657,21 +701,11 @@ impl Connection {
         base_path: &str,
     ) -> Result<Vec<u64>, Error> {
         let mut push_ids = Vec::new();
+        let plan =
+            Self::build_stealth_cover_resource_plan(base_path, crate::transport::rand::rand_u64());
 
-        // Simulate typical web page resources
-        let resources = [
-            ("/css/main.css", "text/css", 45_000),
-            ("/js/app.js", "application/javascript", 120_000),
-            ("/js/vendor.js", "application/javascript", 280_000),
-            ("/images/hero.jpg", "image/jpeg", 85_000),
-            ("/images/logo.png", "image/png", 12_000),
-            ("/css/fonts.css", "text/css", 8_000),
-            ("/js/analytics.js", "application/javascript", 25_000),
-        ];
-
-        for (path, content_type, size) in &resources {
-            let full_path = format!("{}{}", base_path, path);
-            let push_id = self.create_stealth_push_promise(&full_path, content_type, *size)?;
+        for (path, content_type, size) in plan {
+            let push_id = self.create_stealth_push_promise(&path, content_type, size)?;
             push_ids.push(push_id);
         }
 
@@ -859,6 +893,33 @@ impl Connection {
         if let Some(st) = self.streams.get_mut(&sid) {
             st._stream_type = StreamType::Masque;
             st._stream_type_dup = StreamType::Masque;
+        }
+        Ok(sid)
+    }
+
+    /// Open a bounded WebTransport-looking H3 cover session.
+    ///
+    /// This is cover traffic only. It does not own VPN/TUN payload routing and
+    /// deliberately does not compete with the production MASQUE CONNECT-UDP
+    /// carrier.
+    pub(crate) fn open_webtransport_cover_session(
+        &mut self,
+        conn: &mut super::Connection,
+        authority: &str,
+        path: &str,
+    ) -> Result<u64, Error> {
+        let headers = vec![
+            Header::new(b":method", b"CONNECT"),
+            Header::new(b":protocol", b"webtransport"),
+            Header::new(b":scheme", b"https"),
+            Header::new(b":authority", authority.as_bytes()),
+            Header::new(b":path", path.as_bytes()),
+            Header::new(b"origin", format!("https://{authority}").as_bytes()),
+        ];
+        let sid = self.send_request(conn, &headers, false)?;
+        if let Some(st) = self.streams.get_mut(&sid) {
+            st._stream_type = StreamType::WebTransportCover;
+            st._stream_type_dup = StreamType::WebTransportCover;
         }
         Ok(sid)
     }
@@ -1788,6 +1849,43 @@ mod tests {
         let st = h3.streams.get(&push_id).expect("push stream");
         assert_eq!(st.sent_bytes, CHUNK);
         assert!(!st.fin_sent);
+    }
+
+    #[test]
+    fn stealth_cover_resource_plan_varies_by_seed_with_bounds() {
+        let a = super::h3::Connection::build_stealth_cover_resource_plan(
+            "/assets",
+            0x1234_5678_9abc_def0,
+        );
+        let b = super::h3::Connection::build_stealth_cover_resource_plan(
+            "/assets",
+            0x9876_5432_10fe_dcba,
+        );
+
+        assert_ne!(a, b, "cover resource plans should vary by seed");
+        for plan in [&a, &b] {
+            assert!((3..=7).contains(&plan.len()), "cover plan size out of bounds");
+            for (path, content_type, size) in plan {
+                assert!(path.starts_with("/assets/"));
+                assert!(!content_type.is_empty());
+                assert!((1024..=320_000).contains(size));
+            }
+        }
+    }
+
+    #[test]
+    fn webtransport_cover_session_marks_cover_stream_type() {
+        let mut conn = make_conn();
+        let mut cfg = super::Config::new().expect("cfg");
+        cfg.set_max_field_section_size(1024 * 1024);
+        let mut h3 = super::h3::Connection::with_transport(&mut conn, &cfg).expect("h3");
+
+        let sid = h3
+            .open_webtransport_cover_session(&mut conn, "cdn.example.com", "/assets/wt/session")
+            .expect("webtransport cover");
+        let st = h3.streams.get(&sid).expect("cover stream state");
+        assert!(matches!(st._stream_type, StreamType::WebTransportCover));
+        assert!(matches!(st._stream_type_dup, StreamType::WebTransportCover));
     }
 
     #[test]

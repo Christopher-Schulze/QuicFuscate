@@ -530,6 +530,7 @@ impl QuicFuscateConnection {
 
     fn emit_server_push_cover_burst(
         h3: &mut crate::transport::h3::Connection,
+        conn: &mut crate::transport::Connection,
         stealth_manager: &crate::stealth::StealthManager,
         stats: &crate::transport::Stats,
         intelligent_level: u32,
@@ -551,6 +552,14 @@ impl QuicFuscateConnection {
                     loss_rate_permille,
                     intelligent_level,
                 );
+                if let Some((authority, path)) = stealth_manager.webtransport_cover_plan() {
+                    match h3.open_webtransport_cover_session(conn, &authority, &path) {
+                        Ok(sid) => {
+                            debug!("WebTransport cover session opened: sid={sid}");
+                        }
+                        Err(e) => warn!("WebTransport cover session failed: {:?}", e),
+                    }
+                }
                 debug!("Server Push burst emitted: {} promises", ids.len());
             }
             Err(e) => warn!("Server Push burst generation failed: {:?}", e),
@@ -646,6 +655,7 @@ impl QuicFuscateConnection {
                 Self::emit_due_cover_headers(h3, &mut self.conn, &self.stealth_manager);
                 Self::emit_server_push_cover_burst(
                     h3,
+                    &mut self.conn,
                     &self.stealth_manager,
                     &stats,
                     intelligent_level,

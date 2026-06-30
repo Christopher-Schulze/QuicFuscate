@@ -50,14 +50,42 @@ fn init_stealth(config: &EngineConfig) -> Result<Arc<crate::stealth::StealthMana
         stealth_config.doh_provider = config.stealth.doh_provider.clone();
         stealth_config.max_padding_size = config.stealth.max_padding_size;
         stealth_config.fronting_domains = config.stealth.fronting_domains.clone();
-    } else if !config.stealth.fronting_domains.is_empty() {
+    }
+
+    if !config.stealth.fronting_domains.is_empty() {
         // Explicit fronting domain override applies to all modes.
+        stealth_config.enable_domain_fronting = config.stealth.enable_domain_fronting;
         stealth_config.fronting_domains = config.stealth.fronting_domains.clone();
     }
+    if let Ok(browser) = config.stealth.initial_browser.parse() {
+        stealth_config.initial_browser = browser;
+    }
+    if let Ok(os) = config.stealth.initial_os.parse() {
+        stealth_config.initial_os = os;
+    }
+    if let Some(strategy) = parse_padding_strategy(&config.stealth.padding_strategy) {
+        stealth_config.padding_strategy = strategy;
+    }
+    stealth_config.normalize_protocol_mimicry_bundle();
 
     let opt_mgr = Arc::new(OptimizationManager::new());
     let crypto_mgr = Arc::new(CryptoManager::new());
     Ok(Arc::new(StealthManager::new(stealth_config, opt_mgr, crypto_mgr)))
+}
+
+fn parse_padding_strategy(value: &str) -> Option<crate::stealth::PaddingStrategy> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "random" | "1" => Some(crate::stealth::PaddingStrategy::Random),
+        "fixed" | "2" => Some(crate::stealth::PaddingStrategy::Fixed),
+        "adaptive" | "3" => Some(crate::stealth::PaddingStrategy::Adaptive),
+        "browser" | "browser-mimic" | "browsermimic" | "4" => {
+            Some(crate::stealth::PaddingStrategy::BrowserMimic)
+        }
+        "normalize" | "packet-normalize" | "packetnormalize" | "5" => {
+            Some(crate::stealth::PaddingStrategy::PacketNormalize)
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]

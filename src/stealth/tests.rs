@@ -856,7 +856,7 @@ fn test_escalate_to_level_2_full_overhead() {
     mgr.escalate_to_level(2);
     assert_eq!(mgr.runtime_padding_rate(), 100);
     assert_eq!(mgr.runtime_timing_rate(), 100);
-    assert_eq!(mgr.runtime_rotation_rate(), 100);
+    assert_eq!(mgr.runtime_rotation_rate(), 0, "active persona rotation stays disabled");
 }
 
 #[test]

@@ -22,12 +22,20 @@ It is maintained as the current architecture and repository index, with a curate
 All call sites map `Auto` -> `StealthMode::Intelligent` in `stealth/mod.rs`.
 
 ### StealthManager Runtime Overrides (src/stealth/mod.rs)
-Three `AtomicU8` rate fields: `runtime_padding_rate`, `runtime_timing_rate`, `runtime_rotation_rate` (each 0-100%).
-Set by `escalate_to_level(n)` based on escalation level (0=0%, 1=50% configurable, 2=100%).
+Three `AtomicU8` rate fields are retained: `runtime_padding_rate`, `runtime_timing_rate`, `runtime_rotation_rate`.
+`escalate_to_level(n)` sets padding/timing only (L0=0%, L1=50% configurable padding and 0% timing, L2=100% padding/timing).
 Padding and timing rates flow through `StealthRuntimePolicy` → `StealthRuntimeDelta` → connection config.
 `compute_stealth_padding()` uses `stealth_padding_rate` for probabilistic packet padding.
 `transport_stealth_jitter_delay()` uses `stealth_timing_rate` to scale jitter magnitude.
-`maybe_rotate_fingerprint()` reads `runtime_rotation_rate` (threshold >50 = active).
+`runtime_rotation_rate` stays 0 for active sessions; `maybe_rotate_fingerprint()` now defers persona movement to future sessions only.
+
+### Stealth Stack Coherence Wave (2026-06-30)
+- Engine client uses `stealth.use_utls` and no longer hardcodes `use_utls=false`.
+- Connection persona is frozen for the session: Browser/OS/uTLS/QPACK/header identity does not mutate mid-connection.
+- Domain fronting defaults off in Performance, Intelligent clean path, and Stealth; Anti-DPI keeps the aggressive built-in list.
+- Server Push cover uses bounded seed-varied resource plans.
+- WebTransport cover is H3 application cover only, active for Anti-DPI or Intelligent level 2, never a competing VPN carrier.
+- Core H3/MASQUE remains the production VPN/TUN data plane; `stealth::MasqueManager` remains compatibility/experiment machinery.
 
 ### EscalationState (src/stealth/mod.rs) — TODO-416
 Probe-count-based escalation state machine on `StealthManager`.
@@ -45,9 +53,9 @@ Level 0 (clean path): padding disabled (near-zero Intelligent-mode overhead). Le
 Jitter under pressure (CE>5% or rtt_spike>4): 85% of budget (was wrongly 20% - direction fixed).
 
 ### Preset Values (src/stealth/mod.rs)
-- `performance()`: QPACK on (real Chrome always sends QPACK)
+- `performance()`: QPACK on (real Chrome always sends QPACK), domain fronting off
 - `stealth()`: Server Push Cover enabled (intensity 0.25, 60s interval)
-- `anti_dpi()`: fingerprint_rotation_interval = 120s (was 300s)
+- `anti_dpi()`: fingerprint_rotation_interval retained for next-session policy, not active-session mutation
 - `jitter_max_us` default in `StealthBrainConfig`: 5000 us (was 1500)
 
 ### Optimization + FEC + Transport - Test Coverage (Session 36, 2026-03-26)

@@ -73,7 +73,7 @@ impl ClientConnection {
             opt_config,
             qkey_token,
             qkey_initial_token,
-            false, // use_utls
+            Self::should_use_utls(config),
         )
         .map_err(|e| {
             crate::instrumentation::global().client.connection_failure();
@@ -239,19 +239,62 @@ impl ClientConnection {
     }
 
     fn build_stealth_config(config: &EngineConfig) -> crate::stealth::StealthConfig {
-        crate::stealth::StealthConfig {
-            enable_domain_fronting: config.stealth.enable_domain_fronting,
-            enable_http3_masquerading: config.stealth.enable_http3_masquerading,
-            use_tls_cover: config.stealth.use_tls_cover,
-            use_qpack_headers: config.stealth.use_qpack_headers,
-            enable_traffic_padding: config.stealth.enable_traffic_padding,
-            enable_timing_obfuscation: config.stealth.enable_timing_obfuscation,
-            enable_protocol_mimicry: config.stealth.enable_protocol_mimicry,
-            enable_doh: config.stealth.enable_doh,
-            doh_provider: config.stealth.doh_provider.clone(),
-            max_padding_size: config.stealth.max_padding_size,
-            fronting_domains: config.stealth.fronting_domains.clone(),
-            ..Default::default()
+        let mut stealth =
+            crate::stealth::StealthConfig::from_mode(Self::map_stealth_mode(config.stealth.mode));
+
+        stealth.enable_domain_fronting = config.stealth.enable_domain_fronting;
+        stealth.enable_http3_masquerading = config.stealth.enable_http3_masquerading;
+        stealth.use_tls_cover = config.stealth.use_tls_cover;
+        stealth.use_qpack_headers = config.stealth.use_qpack_headers;
+        stealth.enable_traffic_padding = config.stealth.enable_traffic_padding;
+        stealth.enable_timing_obfuscation = config.stealth.enable_timing_obfuscation;
+        stealth.enable_protocol_mimicry = config.stealth.enable_protocol_mimicry;
+        stealth.enable_doh = config.stealth.enable_doh;
+        stealth.doh_provider = config.stealth.doh_provider.clone();
+        stealth.max_padding_size = config.stealth.max_padding_size;
+        stealth.fronting_domains = config.stealth.fronting_domains.clone();
+
+        if let Ok(browser) = config.stealth.initial_browser.parse() {
+            stealth.initial_browser = browser;
+        }
+        if let Ok(os) = config.stealth.initial_os.parse() {
+            stealth.initial_os = os;
+        }
+        if let Some(strategy) = Self::parse_padding_strategy(&config.stealth.padding_strategy) {
+            stealth.padding_strategy = strategy;
+        }
+
+        stealth.normalize_protocol_mimicry_bundle();
+        stealth
+    }
+
+    fn should_use_utls(config: &EngineConfig) -> bool {
+        config.stealth.use_utls && !matches!(config.stealth.mode, crate::engine::StealthMode::Off)
+    }
+
+    fn map_stealth_mode(mode: crate::engine::StealthMode) -> crate::stealth::StealthMode {
+        match mode {
+            crate::engine::StealthMode::Off => crate::stealth::StealthMode::Off,
+            crate::engine::StealthMode::Performance => crate::stealth::StealthMode::Performance,
+            crate::engine::StealthMode::Stealth => crate::stealth::StealthMode::Stealth,
+            crate::engine::StealthMode::AntiDpi => crate::stealth::StealthMode::AntiDpi,
+            crate::engine::StealthMode::Manual => crate::stealth::StealthMode::Manual,
+            crate::engine::StealthMode::Auto => crate::stealth::StealthMode::Intelligent,
+        }
+    }
+
+    fn parse_padding_strategy(value: &str) -> Option<crate::stealth::PaddingStrategy> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "random" | "1" => Some(crate::stealth::PaddingStrategy::Random),
+            "fixed" | "2" => Some(crate::stealth::PaddingStrategy::Fixed),
+            "adaptive" | "3" => Some(crate::stealth::PaddingStrategy::Adaptive),
+            "browser" | "browser-mimic" | "browsermimic" | "4" => {
+                Some(crate::stealth::PaddingStrategy::BrowserMimic)
+            }
+            "normalize" | "packet-normalize" | "packetnormalize" | "5" => {
+                Some(crate::stealth::PaddingStrategy::PacketNormalize)
+            }
+            _ => None,
         }
     }
 
@@ -281,11 +324,47 @@ mod tests {
 
         let sc = ClientConnection::build_stealth_config(&config);
         assert!(sc.max_padding_size > 0);
+        assert_eq!(sc.mode, crate::stealth::StealthMode::Intelligent);
+        assert!(!sc.enable_domain_fronting);
+        assert!(ClientConnection::should_use_utls(&config));
 
         let fc = ClientConnection::build_fec_config(&config);
         assert!(fc.burst_window > 0);
 
         let oc = ClientConnection::build_optimize_config(&config);
         assert!(oc.pool_capacity > 0);
+    }
+
+    #[test]
+    fn test_utls_disabled_for_off_mode_and_explicit_opt_out() {
+        let mut config = EngineConfig::default();
+        config.stealth.mode = crate::engine::StealthMode::Off;
+        assert!(!ClientConnection::should_use_utls(&config));
+
+        config.stealth.mode = crate::engine::StealthMode::Stealth;
+        config.stealth.use_utls = false;
+        assert!(!ClientConnection::should_use_utls(&config));
+    }
+
+    #[test]
+    fn test_stealth_builder_applies_persona_and_protocol_bundle() {
+        let mut config = EngineConfig::default();
+        config.stealth.mode = crate::engine::StealthMode::Manual;
+        config.stealth.enable_protocol_mimicry = true;
+        config.stealth.enable_http3_masquerading = false;
+        config.stealth.use_qpack_headers = false;
+        config.stealth.use_tls_cover = false;
+        config.stealth.initial_browser = "firefox".to_string();
+        config.stealth.initial_os = "linux".to_string();
+        config.stealth.padding_strategy = "browser-mimic".to_string();
+
+        let sc = ClientConnection::build_stealth_config(&config);
+        assert_eq!(sc.mode, crate::stealth::StealthMode::Manual);
+        assert_eq!(sc.initial_browser, crate::stealth::BrowserProfile::Firefox);
+        assert_eq!(sc.initial_os, crate::stealth::OsProfile::Linux);
+        assert_eq!(sc.padding_strategy, crate::stealth::PaddingStrategy::BrowserMimic);
+        assert!(sc.enable_http3_masquerading);
+        assert!(sc.use_qpack_headers);
+        assert!(sc.use_tls_cover);
     }
 }

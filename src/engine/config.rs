@@ -770,7 +770,9 @@ pub enum FecMode {
 pub struct StealthSection {
     /// Stealth mode
     pub mode: StealthMode,
-    /// Enable domain fronting
+    /// Enable uTLS/ClientHello persona spoofing. Effective only when mode is not Off.
+    pub use_utls: bool,
+    /// Enable domain fronting. Keep disabled unless fronting domains are explicitly configured.
     pub enable_domain_fronting: bool,
     /// Enable HTTP/3 masquerading
     pub enable_http3_masquerading: bool,
@@ -804,7 +806,8 @@ impl Default for StealthSection {
     fn default() -> Self {
         Self {
             mode: StealthMode::Auto,
-            enable_domain_fronting: true,
+            use_utls: true,
+            enable_domain_fronting: false,
             enable_http3_masquerading: true,
             use_tls_cover: true,
             use_qpack_headers: true,
@@ -828,8 +831,8 @@ impl Default for StealthSection {
 pub enum StealthMode {
     /// Stealth disabled - no obfuscation applied.
     Off,
-    /// Zero-overhead stealth: domain fronting, HTTP/3 masquerading, TLS cover, DoH only.
-    /// No padding, no jitter, no rotation. Fastest possible with solid base cover.
+    /// Zero-overhead stealth: uTLS persona, HTTP/3 masquerading, TLS cover, QPACK and DoH.
+    /// No domain fronting, padding, jitter or rotation. Fastest coherent browser-like path.
     Performance,
     /// Balanced stealth: adds adaptive padding, timing jitter, protocol mimicry and light
     /// server push cover traffic. Good DPI resistance without heavy performance cost.

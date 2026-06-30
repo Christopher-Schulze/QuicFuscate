@@ -330,15 +330,20 @@ Control and observability are explicit through typed channels:
 This keeps CLI and embedded control planes aligned on one runtime mutation path.
 
 ### Cohesive Stealth Stack (Hard to Classify)
-All stealth components share one active browser/OS profile for coherence. The active profile can be rotated on an interval using `--profile-seq` and `--profile-interval`:
-- TLS: RealTLS via rustls with optional TLS Cover that generates byte-perfect ClientHello templates and TLS frames from the active profile (no external uTLS/FFI)
-- HTTP/3/QPACK: ALPN, header sets, and framing align with common web traffic patterns
-- Domain Fronting: decouples visible SNI from origin; rotations across vetted front domains diversify exposure
-- DoH: hides DNS lookups while keeping the canonical stealth runtime free of payload-side XOR obfuscation
-- Active Probe Detection + Reality Fallback: probe-like traffic is detected and, when required, relayed via `RealityProxy` to preserve realistic upstream behavior under active scanning
-- Server Push Cover Traffic: profile-coherent HTTP/3 PUSH_PROMISE and DATA bursts are emitted with runtime intensity controls during stealth escalation
-- StealthBrain Coordination: telemetry-driven policy updates synchronize ACK strategy, Intelligent-mode stealth-runtime policy deltas, server-push escalation, and FEC hints
-This unity yields a homogeneous, believable fingerprint that remains difficult to reliably classify by DPI systems.
+The stealth design is one coherent browser-like H3/MASQUE flow, not a pile of unrelated
+stealth toggles. TODO-464 through TODO-471 are complete and define the production policy.
+
+- Persona: one browser/OS/TLS/H3/QPACK persona is selected per connection and remains immutable for that connection. Profile sequences and interval rotation are next-connection/reconnect policies, not mid-session identity mutation.
+- TLS: RealTLS via rustls with optional TLS Cover that generates ClientHello templates and TLS frames from the active profile (no external uTLS/FFI). The Engine client path now passes the uTLS/persona decision instead of hardcoding it off.
+- HTTP/3/QPACK: ALPN, header sets, QPACK policy, and framing must align with the selected persona snapshot.
+- Core H3/MASQUE: production VPN/TUN payloads use the core H3/MASQUE data plane. The `stealth::MasqueManager` surface is retained compatibility/experimental machinery, not the canonical hot path.
+- Domain Fronting: useful only with explicit, vetted fronting configuration. Blind fronting defaults are disabled for Performance, Stealth, and clean Intelligent mode.
+- DoH: DNS resolution stays inside the tunnel path and keeps the canonical stealth runtime free of payload-side XOR obfuscation.
+- Active Probe Detection + Reality Fallback: probe-like traffic is detected and, when required, relayed via `RealityProxy` to preserve realistic upstream behavior under active scanning.
+- Cover Traffic: Cover PING, cover stream, randomized bounded Server Push cover, and escalated WebTransport cover are valid layers.
+- StealthBrain Coordination: telemetry-driven policy updates may tune ACK strategy, pacing, timing, padding, cover intensity, and FEC hints. Brain may steer actuators, but does not mutate active persona identity.
+
+The intended result is a homogeneous, believable fingerprint: normal QUIC cryptography, normal H3/MASQUE semantics, stable browser identity per connection, and adaptive size/timing/FEC behavior under pressure.
 
 #### Stealth Padding & Timing Obfuscation
 - Padding is applied just before AEAD sealing in `transport::Connection::send()` to ensure full authentication and confidentiality.
@@ -457,7 +462,9 @@ let provider = create_provider(false, crypto)?;
 
 ### Obfuscation-Modes Overview
 
-The stealth stack offers multiple modes balancing performance and cover traffic. Domain fronting is enabled in Performance, Stealth, Anti-DPI, and Intelligent; it is disabled in Off. When `fronting_domains` is empty and fronting is enabled, the built-in ultra-stealth domain set is used.
+The stealth stack offers multiple modes balancing performance, compatibility risk, and cover traffic.
+Performance stays fast and low-risk, Intelligent is the adaptive default, Stealth spends a moderate
+cover budget, and Anti-DPI is the aggressive profile.
 
 Preset layer vs runtime layer:
 
@@ -477,22 +484,24 @@ Preset layer vs runtime layer:
 | Runtime/env aliases | `dynamic\|intelligent\|auto` | mapped to `StealthMode::Intelligent` |
 | Runtime/env aliases | `stealthmax\|stealth-max\|max\|antidpi` | mapped to `StealthMode::AntiDpi` |
 
-Obfuscation-Modes - Matrix & Tuning (on = enabled, off = disabled, values shown when relevant)
+Current Obfuscation-Modes - Matrix & Tuning (on = enabled, off = disabled, values shown when relevant)
 
 | Feature | Performance | Stealth | Anti-DPI | Intelligent |
 |---|---:|---:|---:|---:|
-| Domain Fronting | on | on | on | on |
+| uTLS/Persona | on | on | on | on |
+| Domain Fronting | off | explicit only | on with explicit domains or built-in aggressive list | off at Level 0; explicit/escalated only |
 | HTTP/3 Masquerading | on | on | on | on |
-| QPACK Headers | on | on | on | off (dynamic) |
+| QPACK Headers | on | on | on | on |
 | XOR Obfuscation | off | off | off | off (dynamic) |
 | Traffic Padding | off | Adaptive (max 86) | BrowserMimic (max 256) | off at Level 0; dynamic at Level 1-2 |
 | Timing Obfuscation | off | 750 us default | 3000 us default | off (dynamic); forced on after probe |
 | Flow Shaper and Dummy Retransmits | off | off | on | off (dynamic) |
-| Fingerprint Rotation | off | off | 120 s | off (dynamic); forced on after probe |
-| Server Push Cover | off | light (0.25, 60 s) | on (0.8, 15 s) | Level-dependent (15 s at L2, 30 s at L0/L1) |
+| Active Fingerprint Rotation | off | off | off (next-session only) | off (next-session only) |
+| Server Push Cover | off | light randomized (0.25, 60 s) | randomized (0.8, 15 s) | Level-dependent randomized (15 s at L2, 30 s at L0/L1) |
 | Real-time Choke | off | off | off (compat/manual only) | off (dynamic) |
 | DNS-over-HTTPS | on | on | on | on |
 | TLS Cover provider | on* | on* | on* | on* |
+| WebTransport Cover | off | off | escalated/anti-DPI cover only | Level 2 only |
 | MASQUE Manager | compat-only | compat-only | compat-only | compat-only |
 | MASQUE Preferred | off | off | off | off |
 | Cover Traffic Interval | 5 s | 5 s | 5 s (tightened on escalation) | 5 s (dynamic) |
@@ -502,15 +511,74 @@ Notes:
 - `sec-ch-ua*` hints are emitted only for Chromium family (Chrome/Edge); Firefox and Safari typically omit them.
 - `StealthManager` owns all preset baselines and the concrete Intelligent-mode runtime policy derivation for pacing, timing, padding, mimic bias, granularity, and CC profile. `StealthBrain` still adapts transport ACK policy globally, but its Intelligent-mode stealth steering now flows through a narrow runtime-policy delta instead of embedding raw per-actuator mapping logic inline.
 - * TLS Cover provider is enabled by default across modes and can be disabled with `QUICFUSCATE_TLS_COVER=0`. Runtime cover performance mode is now driven by the active stealth mode profile rather than relying on ENV-only shadow state. `StealthConfig.use_tls_cover` (TOML alias: `use_tls_cover_extras`) only controls TLS Cover extras (ticket manager and cert emulator).
-- Risk/Tradeoff: domain fronting behavior depends on current upstream provider policy and regional filtering rules.
-- MASQUE remains available only as an explicit compatibility experiment and is not part of the canonical stealth runtime.
+- Risk/Tradeoff: domain fronting behavior depends on current upstream provider policy and regional filtering rules. It is not a safe default cover signal on modern CDNs.
+- Core H3/MASQUE is the production VPN/TUN carrier. The compatibility MASQUE manager inside `stealth/` is not the canonical data-plane owner.
+
+Production Mode Policy
+
+| Mode | Persona/uTLS | Core H3/MASQUE TUN | Domain fronting | Padding/timing | Cover traffic | Brain |
+|---|---|---|---|---|---|---|
+| Off | off | only if TUN requires it | off | off | off | minimal |
+| Performance | on | on | off | off | off | ACK/FEC hints only |
+| Intelligent | on | on | off by default, escalation only with vetted config | dynamic | dynamic, none/low at level 0 | full |
+| Stealth | on | on | explicit/vetted only | light | light and randomized | medium |
+| Anti-DPI | on | on | on with vetted front domains | strong | strong and randomized | full |
+| Manual | operator-defined | operator-defined | operator-defined | operator-defined | operator-defined | operator-defined, persona freeze still applies |
+
+Production invariants:
+- Persona identity is frozen per connection. Rotation applies to the next connection or reconnect only.
+- Domain fronting is not a Performance default and not a blind Intelligent level-0 default.
+- Server Push cover is randomized and bounded before it is treated as a strong cover layer.
+- WebTransport is an H3 application-cover profile, not a replacement for Core H3/MASQUE.
+
+Final stealth stack:
+
+```text
+                operator mode/profile
+                       |
+                       v
+          +--------------------------+
+          | connection persona       |
+          | Browser + OS + uTLS      |
+          | frozen for session       |
+          +-------------+------------+
+                        |
+                        v
+          +--------------------------+
+          | HTTP/3 application cover |
+          | headers, QPACK, PING,    |
+          | cover streams, bounded   |
+          | server push, WT cover    |
+          +-------------+------------+
+                        |
+                        v
+          +--------------------------+
+          | Core H3/MASQUE carrier   |
+          | production VPN/TUN path  |
+          +-------------+------------+
+                        |
+                        v
+          +--------------------------+
+          | QUIC transport + AEAD    |
+          | ACK, pacing, padding,    |
+          | timing, congestion       |
+          +-------------+------------+
+                        |
+                        v
+          +--------------------------+
+          | FEC repair layer         |
+          | interval + redundancy    |
+          | from Brain hints, owned  |
+          | and capped by FEC        |
+          +--------------------------+
+```
 
 #### Stealth Modes - Semantics
 - Off: no stealth; DoH, fronting, HTTP/3 masquerading, padding, timing, QPACK, and TLS Cover extras are all disabled.
-- Performance: DoH on; domain fronting on; HTTP/3 masquerading on; XOR off; no padding; no timing obfuscation; QPACK headers on; rotation off.
-- Stealth: DoH on; fronting on; HTTP/3 masquerading on; XOR off; QPACK headers on; adaptive padding (max 86); timing obfuscation on (default 750 us); rotation off; server push cover light (intensity 0.25, 60 s interval).
-- Anti-DPI: DoH on; fronting on (ultra list); HTTP/3 masquerading on; XOR off; QPACK headers on; BrowserMimic padding (max 256); timing obfuscation on (default 3000 us); flow shaper enabled; rotation on (120 s); server push cover enabled (intensity 0.8, 15 s interval); real-time choke off by default.
-- Intelligent: starts like Performance at level 0 (no padding, no cover overhead); escalates dynamically to Stealth/Anti-DPI features on probe signals or brain pressure; server-push burst interval is level-dependent (30 s at L0/L1, 15 s at L2).
+- Performance: uTLS/persona on; DoH on; domain fronting off; HTTP/3 masquerading on; XOR off; no padding; no timing obfuscation; QPACK headers on; active persona rotation off.
+- Stealth: uTLS/persona on; DoH on; domain fronting off unless explicit fronting domains are configured; HTTP/3 masquerading on; XOR off; QPACK headers on; adaptive padding (max 86); timing obfuscation on (default 750 us); active persona rotation off; server push cover light (intensity 0.25, 60 s interval).
+- Anti-DPI: uTLS/persona on; DoH on; fronting on with explicit domains or the built-in aggressive list; HTTP/3 masquerading on; XOR off; QPACK headers on; BrowserMimic padding (max 256); timing obfuscation on (default 3000 us); flow shaper enabled; active persona rotation is still deferred to next session; server push cover enabled (intensity 0.8, 15 s interval); WebTransport cover enabled as an H3 application-cover session; real-time choke off by default.
+- Intelligent: starts like Performance at level 0 (no padding, no cover overhead, no domain fronting); escalates dynamically to Stealth/Anti-DPI timing, padding, cover and FEC-hint behavior on probe signals or brain pressure; server-push burst interval is level-dependent (30 s at L0/L1, 15 s at L2); WebTransport cover is level-2 only.
 - Manual: all knobs as configured in TOML or env; no automatic escalation.
 
 #### Real-Time Rate Choke
@@ -550,7 +618,7 @@ Runtime wiring is cohesive rather than feature-isolated:
 - Jitter direction: under ECN congestion (CE > 5%) or high RTT spikes, jitter increases to 85% of budget (more randomization defeats timing fingerprints). Only on the external-pacing clean path is it reduced.
 - `jitter_max_us` default: 5000 us (raised from 1500; 1500 was too small to meaningfully randomize timing against a modern DPI system).
 - Level-hint passthrough: Brain computes an `effective_level` (0/1/2) via hysteresis and passes it as `level_hint` to `derive_intelligent_runtime_policy`, enabling level-dependent padding and server-push decisions.
-- Runtime overrides: `StealthManager` exposes three `AtomicU8` rate overrides (`runtime_padding_rate`, `runtime_timing_rate`, `runtime_rotation_rate`), each 0-100%. These are set by `escalate_to_level(n)` based on the escalation level (0=0%, 1=50% configurable, 2=100%). The padding and timing rates flow through `StealthRuntimePolicy` → `StealthRuntimeDelta` → connection config and are consumed by `compute_stealth_padding()` (probabilistic packet padding) and `transport_stealth_jitter_delay()` (jitter magnitude scaling). The rotation rate is read by `maybe_rotate_fingerprint()` (threshold >50 = active).
+- Runtime overrides: `StealthManager` exposes `runtime_padding_rate`, `runtime_timing_rate`, and retained `runtime_rotation_rate` atomics. Padding and timing are set by `escalate_to_level(n)` (0=0%, 1=50% configurable padding and 0% timing, 2=100% padding and timing), then flow through `StealthRuntimePolicy` -> `StealthRuntimeDelta` -> connection config and are consumed by `compute_stealth_padding()` and `transport_stealth_jitter_delay()`. `runtime_rotation_rate` is intentionally kept at 0 for active sessions; fingerprint/persona rotation is next-session only.
 - Gradual escalation (TODO-416): Probe detection uses `EscalationState` with a sliding-window probe counter. Escalation 0→1 requires ≥3 probes in 60s; 1→2 requires ≥8 probes in 120s. A single probe does NOT trigger escalation. De-escalation occurs after a configurable quiet period (default: 300s). Config knobs: `QUICFUSCATE_STEALTH_ESCALATION_PROBE_THRESHOLD_L1` (default 3), `QUICFUSCATE_STEALTH_ESCALATION_PROBE_THRESHOLD_L2` (default 8), `QUICFUSCATE_STEALTH_DEESCALATION_QUIET_PERIOD_SEC` (default 300), `QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1` (default 50).
 - Explicit transport overrides win over Brain steering. If an operator sets ACK, pacing, jitter, padding, granularity, or mimic-bias overrides, the corresponding Intelligent-mode Brain actuator is locked out for that connection instead of silently re-overriding the operator choice at runtime.
 - FEC hints: updates the internal FEC interval and redundancy hint atomics to steer encoder cadence without hard coupling.
@@ -2552,7 +2620,7 @@ Both client and server subcommands support extensive configuration:
 - Browser and OS fingerprinting profiles with rotation capabilities
 - FEC mode selection and memory pool tuning
 - UDP/io_uring fast paths (experimental AF_XDP socket code stays outside the canonical runtime path)
-- Stealth features: DoH, domain fronting, HTTP/3 masquerading, adaptive padding, timing shaping
+- Stealth features: uTLS persona shaping, DoH, explicit domain fronting, HTTP/3 masquerading, adaptive padding, timing shaping, bounded cover traffic
 - TOML configuration file support
 - TLS debugging and certificate validation options
 
@@ -2598,7 +2666,7 @@ mode = "all"
 
 - Minimal - prioritize lowest overhead and disable stealth/FEC extras.
 - Balanced - default operational baseline for mixed latency/loss environments.
-- Maximum Stealth - anti-DPI posture with rotation and adaptive recovery enabled.
+- Maximum Stealth - anti-DPI posture with aggressive cover, explicit fronting policy, next-session persona rotation, and adaptive recovery enabled.
 
 For full stealth-mode semantics and all `[stealth]` keys, use:
 - "Obfuscation-Modes Overview" and "Stealth Modes - Semantics"
@@ -2830,6 +2898,10 @@ is compiled only for test or `rust-tests` coverage. There is no stable public
 
 ### Fingerprint Rotation
 
+Fingerprint/persona rotation is connection-scoped. The settings below remain useful as a sequence
+source, but an established connection does not change browser, operating system, TLS, H3, or QPACK
+persona mid-session. Rotation selects the next persona only for a new connection or explicit reconnect.
+
 #### Configuration
 ```toml
 [fingerprint_rotation]
@@ -2867,7 +2939,12 @@ Available combinations:
 
 ### Domain Fronting
 
-Curated domain sets are defined in `CdnProvider` and `DomainFrontingManager::ultra_stealth` in `src/stealth/`. When fronting is enabled and no domains are configured, the ultra-stealth set is used.
+Curated domain sets are defined in `CdnProvider` and `DomainFrontingManager::ultra_stealth` in `src/stealth/`. Production policy is explicit-only outside Anti-DPI:
+
+- Performance, Intelligent level 0, and Stealth do not enable domain fronting by default.
+- Fronting activates outside Anti-DPI only when explicit `fronting_domains` are configured and runtime policy has not disabled fronting.
+- Anti-DPI remains the aggressive profile and may use the built-in ultra list when fronting is enabled without explicit domains.
+- Active sessions do not rotate fronting hosts or browser/OS personas mid-connection.
 
 ### Performance Optimizations
 
@@ -2957,6 +3034,11 @@ use_tls_cover = true
 
 QuicFuscate generates realistic HTTP/3 Server Push traffic to mask real flows. This feature is governed by `StealthConfig` and transport H3 internals.
 
+Server Push cover is not a fixed repeating signature. Production-grade cover bursts use bounded
+variation in resource count, ordering, payload size, path names, and cache headers. Performance mode
+keeps Server Push cover off; Intelligent level 0 stays off or near-zero; Stealth and Anti-DPI use
+randomized bursts according to their cover budget.
+
 - Configuration (Stealth):
   - `enable_server_push_cover`: enable/disable cover traffic.
   - `server_push_intensity`: 0.0-1.0 scaling for burst size/frequency.
@@ -3017,7 +3099,12 @@ fn poll_h3_events(h3: &mut H3, conn: &mut quicfuscate::transport::Connection) {
 
 ### MASQUE CONNECT-UDP (compatibility-only)
 
-The HTTP/3 stack still contains MASQUE CONNECT-UDP support for compatibility experiments. It is not part of the canonical stealth runtime and is disabled unless explicitly requested.
+There are two MASQUE surfaces and they must not be confused:
+
+- Production carrier: Core/H3 MASQUE is the canonical VPN/TUN data-plane carrier used by the live tunnel path.
+- Compatibility manager: `stealth::MasqueManager` is retained experiment and compatibility machinery.
+
+The details below describe the retained HTTP/3 CONNECT-UDP machinery and compatibility manager surface, not a separate replacement for the production TUN carrier.
 
 - Streams: establishes CONNECT-UDP control streams; keeps them open for duration of the tunnel.
 - DATAGRAM: registers Flow-ID/Context-ID; sends UDP payloads over QUIC DATAGRAM frames.
@@ -3027,8 +3114,8 @@ The HTTP/3 stack still contains MASQUE CONNECT-UDP support for compatibility exp
 - Telemetry: `MASQUE_BYTES_SENT`, `MASQUE_BYTES_RECEIVED`, and capsule counters per type.
 
 Notes
-- Canonical Stealth, Anti-DPI, and Performance modes keep MASQUE disabled.
-- "Active" still requires a successful CONNECT-UDP flow when the compatibility path is explicitly enabled.
+- Canonical Stealth, Anti-DPI, Performance, and Intelligent modes use the production H3/MASQUE TUN carrier when TUN mode is active.
+- The compatibility `stealth::MasqueManager` path is opt-in experiment machinery and should not be expanded as a second production tunnel stack.
 - CONNECT-UDP compatibility paths are documented here because the code remains available for targeted experiments.
 - If you maintain external profile dumps, `scripts/tests/utils/util-tls-export-active-profile.sh` exports them under `scripts/out/utils/.../profiles/` by default (or a caller-provided `--output-dir`) for regression tracking.
 

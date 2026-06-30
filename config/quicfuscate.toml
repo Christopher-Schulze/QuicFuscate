@@ -140,8 +140,12 @@ mode = "auto"
 # Manual mode settings (only used when mode = "manual")
 # ------------------------------------------------------------------------------
 
-# Domain fronting - Hide real destination behind CDN domains
-enable_domain_fronting = true
+# uTLS persona spoofing - match ClientHello and QUIC transport parameters to the configured browser persona.
+use_utls = true
+
+# Domain fronting - Hide real destination behind explicitly configured CDN domains.
+# Disabled by default because modern CDNs commonly block or flag SNI/Host mismatches.
+enable_domain_fronting = false
 
 # HTTP/3 masquerading - Make QUIC traffic look like HTTP/3
 enable_http3_masquerading = true

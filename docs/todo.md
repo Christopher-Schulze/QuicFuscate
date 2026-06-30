@@ -2,7 +2,7 @@
 
 ## Active TODO Backlog
 
-**Current State (2026-06-30)**: Protocol optimization wave COMPLETE (TODO-389..412). Radical replan wave TODO-413..418 ALL DONE. TUN VPN data plane TODO-422 DONE. **FEC E2E tests TODO-423 DONE** — 12 Rust integration tests + 2 shell scripts, wire format seq bug fixed, broderick all PASS. **FEC benchmarks TODO-424 DONE** — 6 Criterion benchmark groups. **FEC network adversity TODO-425 DONE** — 6 tc-netem tests, broderick 25/25 PASS. **FEC memory pressure TODO-426 DONE** — 7 Rust integration tests, all pass. **FEC mode transitions TODO-427 DONE** — 6 Rust tests + 1 shell script, broderick all PASS. **FEC adaptive optimization TODO-428 DONE** — bandwidth-aware overhead control + 6 adaptive tests, all pass. **FEC wave COMPLETE (TODO-423..428).** Server `broderick` Go 1.26.4. GitHub contributors: only `Christopher-Schulze` — no Devin/Claude co-authors.
+**Current State (2026-06-30)**: Protocol optimization wave COMPLETE (TODO-389..412). Radical replan wave TODO-413..418 ALL DONE. TUN VPN data plane TODO-422 DONE. **FEC E2E tests TODO-423 DONE** - 12 Rust integration tests + 2 shell scripts, wire format seq bug fixed, broderick all PASS. **FEC benchmarks TODO-424 DONE** - 6 Criterion benchmark groups. **FEC network adversity TODO-425 DONE** - 6 tc-netem tests, broderick 25/25 PASS. **FEC memory pressure TODO-426 DONE** - 7 Rust integration tests, all pass. **FEC mode transitions TODO-427 DONE** - 6 Rust tests + 1 shell script, broderick all PASS. **FEC adaptive optimization TODO-428 DONE** - bandwidth-aware overhead control + 6 adaptive tests, all pass. **FEC wave COMPLETE (TODO-423..428).** **Stealth Stack Coherence Wave TODO-464..471 DONE** - Engine uTLS/persona wiring, session-frozen identity, fronting policy rationalization, randomized cover, Brain actuator ownership, Core H3/MASQUE ownership, protocol-mimicry truth, and WebTransport cover. Server `broderick` Go 1.26.4. GitHub contributors: only `Christopher-Schulze` - no Devin/Claude co-authors.
 
 ## Active - Protocol Optimization Wave (2026-06-05)
 
@@ -176,6 +176,43 @@ Detail files: `docs/todo/todo-{434,435,436,437,438,439,440,441,442,444,445,446,4
 the link is clean, heroic when the link is broken, and secure under all conditions. No traffic leaks,
 no data loss, no privilege escalation, no single point of failure. Every feature must be wired in,
 tested under real conditions, and documented.
+
+---
+
+## Completed - Stealth Stack Coherence Wave (2026-06-30)
+
+**Motivation:** The current stealth stack has strong individual parts, but the final product should
+not look like "all stealth switches at once." The target is one coherent, believable H3/MASQUE flow:
+real QUIC encryption, browser-consistent TLS/H3/QPACK persona, adaptive timing/size/FEC/cover policy,
+and no mid-session identity contradictions. This wave keeps all existing code surfaces, but turns
+ambiguous or risky behaviors into explicit policy.
+
+**Final architecture decision:** Core H3/MASQUE is the production VPN/TUN carrier. The `stealth`
+module's compatibility `MasqueManager` remains retained for tests and experiments, not as the
+canonical hot path. Browser/OS personas are connection-scoped and immutable for the lifetime of a
+connection. The StealthBrain may tune timing, padding, cover, ACK, pacing, and FEC hints, but must
+not mutate the active persona mid-session.
+
+**Execution order: Phase K (persona wiring -> session freeze -> mode policy -> cover variation -> brain/FEC ownership -> MASQUE/WebTransport cleanup)**
+
+| ID | Phase | Priority | Title | Status | Depends On |
+|----|-------|----------|-------|--------|------------|
+| TODO-464 | K | P0 | Stealth persona wiring in Engine client | **DONE** - Engine client now passes `use_utls` from config and maps Engine Auto to runtime Intelligent | TODO-415 |
+| TODO-465 | K | P0 | Connection-scoped persona freeze and rotation semantics | **DONE** - active Browser/OS/TLS/H3 persona is frozen; rotation is next-session only | TODO-464 |
+| TODO-466 | K | P0 | Stealth mode policy rationalization and domain-fronting defaults | **DONE** - normal modes default fronting off; Anti-DPI retains explicit aggressive fronting | TODO-464, TODO-465 |
+| TODO-467 | K | P1 | Randomized cover traffic and server-push variation | **DONE** - server-push cover uses bounded seed-varied resource plans | TODO-466 |
+| TODO-468 | K | P1 | StealthBrain actuator ownership and FEC hint cleanup | **DONE** - Brain escalates timing/padding/cover/FEC hints, not active identity | TODO-465, TODO-467 |
+| TODO-469 | K | P1 | MASQUE production path and experimental surface cleanup | **DONE** - docs/code comments preserve Core H3/MASQUE as canonical data plane | TODO-422, TODO-466 |
+| TODO-470 | K | P1 | Protocol mimicry flag truth and config cleanup | **DONE** - flag now normalizes concrete H3/QPACK/TLS cover knobs | TODO-466 |
+| TODO-471 | K | P2 | WebTransport cover profile design and integration | **DONE** - WebTransport is integrated as bounded H3 cover, not a competing tunnel | TODO-467, TODO-469 |
+
+Detail files: `docs/todo/todo-{464,465,466,467,468,469,470,471}-*.md`.
+
+**Stealth stack result:** Performance mode is fast and coherent, not fronting-heavy. Intelligent
+mode is the default adaptive profile with stable identity and dynamic actuator tuning. Stealth and
+Anti-DPI spend more bandwidth and compatibility budget only in ways that remain internally
+consistent. No code was deleted in this wave; risky or duplicate surfaces are disabled, marked
+experimental, or bound to explicit policy.
 
 ---
 

@@ -85,7 +85,7 @@ use crate::optimize::OptimizeConfig;
 use crate::optimize::ZeroCopyBuffer;
 use crate::stealth::{
     BrowserProfile, FingerprintProfile, OsFingerprintProfile, OsProfile, PacketNormalizer,
-    StealthConfig,
+    StealthConfig, StealthMode,
 };
 
 fn env_string(name: &str) -> Option<String> {
@@ -3722,9 +3722,16 @@ pub fn apply_runtime_stealth_overrides(
     sc.enable_doh = !disable_doh;
     sc.doh_provider.clear();
     sc.doh_provider.push_str(doh_provider);
-    sc.enable_domain_fronting = !disable_fronting;
     sc.fronting_domains = front_domain.to_vec();
+    sc.enable_domain_fronting = !disable_fronting
+        && (!sc.fronting_domains.is_empty() || matches!(sc.mode, StealthMode::AntiDpi));
     sc.enable_http3_masquerading = !disable_http3;
+    if disable_http3 {
+        sc.use_qpack_headers = false;
+        sc.enable_protocol_mimicry = false;
+    } else {
+        sc.normalize_protocol_mimicry_bundle();
+    }
 }
 
 pub(crate) fn apply_runtime_profile_identity(
@@ -6578,6 +6585,35 @@ mod tests {
         assert!(sc.enable_domain_fronting);
         assert_eq!(sc.fronting_domains, front_domains);
         assert!(!sc.enable_http3_masquerading);
+    }
+
+    #[test]
+    fn test_apply_runtime_stealth_overrides_keeps_fronting_explicit_only() {
+        let mut sc = StealthConfig::default();
+        apply_runtime_stealth_overrides(
+            &mut sc,
+            BrowserProfile::Chrome,
+            OsProfile::Windows,
+            false,
+            "https://cloudflare-dns.com/dns-query",
+            false,
+            &[],
+            false,
+        );
+        assert!(!sc.enable_domain_fronting);
+
+        sc.mode = StealthMode::AntiDpi;
+        apply_runtime_stealth_overrides(
+            &mut sc,
+            BrowserProfile::Chrome,
+            OsProfile::Windows,
+            false,
+            "https://cloudflare-dns.com/dns-query",
+            false,
+            &[],
+            false,
+        );
+        assert!(sc.enable_domain_fronting);
     }
 
     // --- LiveServerDomain session tracking ---
