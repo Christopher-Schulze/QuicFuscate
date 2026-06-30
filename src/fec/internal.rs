@@ -661,6 +661,10 @@ pub struct LazyDecoder {
     pending_repairs: VecDeque<FecPacket>,
     /// Tracks seen source packet sequence numbers
     seen_seqs: std::collections::BTreeSet<u64>,
+    /// Source packets per decoder block. Used to distinguish clean full
+    /// blocks from tail-loss blocks where no later systematic packet can reveal
+    /// a sequence gap.
+    k: usize,
     /// Expected next sequence number
     expected_seq: u64,
     /// Maximum buffered repairs before forced flush
@@ -701,6 +705,7 @@ impl LazyDecoder {
             inner: DecoderVariant::new_with_depth(mode, k, pool, policy, depth),
             pending_repairs: VecDeque::with_capacity(32),
             seen_seqs: std::collections::BTreeSet::new(),
+            k,
             expected_seq: 0,
             max_pending: 64,
             lazy_enabled,
@@ -755,6 +760,12 @@ impl LazyDecoder {
                 let skipped = self.pending_repairs.len() as u64;
                 self.repairs_skipped += skipped;
                 self.pending_repairs.clear();
+                if self.k > 0
+                    && self.seen_seqs.len() >= self.k
+                    && self.seen_seqs.len().is_multiple_of(self.k)
+                {
+                    self.seen_seqs.clear();
+                }
                 // Forward source packet (decoder needs it for systematic recovery)
                 self.inner.take_packet(p);
             }
@@ -785,6 +796,27 @@ impl LazyDecoder {
         self.inner.get_result()
     }
 
+    /// Whether recovery work is currently useful.
+    ///
+    /// In lazy mode, polling the heavy decoder on every clean systematic packet
+    /// defeats the lazy fast path because `get_result()` flushes pending repairs
+    /// into the decoder. Recovery is only useful once a sequence gap exists. If
+    /// lazy mode is disabled, preserve the eager behavior and let callers poll.
+    #[inline]
+    pub fn recovery_needed(&self) -> bool {
+        if !self.lazy_enabled || self.has_gaps() {
+            return true;
+        }
+
+        // Tail loss at the end of a block does not create an internal sequence
+        // gap because no later systematic packet arrived. A pending repair is
+        // useful when the current block is not full. Clean no-loss blocks remain
+        // lazy because their seen-source count lands exactly on the block size.
+        !self.pending_repairs.is_empty()
+            && self.k > 0
+            && !self.seen_seqs.len().is_multiple_of(self.k)
+    }
+
     pub fn get_partial_result(&mut self) -> VecDeque<FecPacket> {
         // If gaps detected, flush and decode
         if self.has_gaps() {
@@ -810,6 +842,11 @@ impl LazyDecoder {
     #[cfg(test)]
     pub fn pending_repairs_len(&self) -> usize {
         self.pending_repairs.len()
+    }
+
+    #[cfg(test)]
+    pub fn seen_seqs_len(&self) -> usize {
+        self.seen_seqs.len()
     }
 
     #[cfg(test)]
@@ -1017,6 +1054,12 @@ impl InterleavedDecoder {
             }
         }
         combined
+    }
+
+    /// Whether any interleaved block has useful recovery work.
+    #[inline]
+    pub fn recovery_needed(&self) -> bool {
+        self.blocks.iter().any(LazyDecoder::recovery_needed)
     }
 
     /// Drain all buffered packets from ZeroDecoders for seamless mode transition.
@@ -1428,6 +1471,7 @@ mod tests {
         repair.seq = 100;
         dec.take_packet(repair);
         assert_eq!(dec.pending_repairs_len(), 1);
+        assert!(!dec.recovery_needed(), "buffered repair alone must not force recovery");
 
         // Feed contiguous source packet - no gap, pending repairs get cleared
         let mut src = mk_src_packet(1, 100, &pool);
@@ -1435,6 +1479,7 @@ mod tests {
         src.seq = 1;
         dec.take_packet(src);
         assert_eq!(dec.pending_repairs_len(), 0);
+        assert!(!dec.recovery_needed(), "contiguous source path must stay lazy");
     }
 
     #[test]
@@ -1466,6 +1511,33 @@ mod tests {
 
         // Gap detected -> repairs flushed to inner decoder
         assert_eq!(dec.pending_repairs_len(), 0);
+        assert!(dec.recovery_needed(), "gap must enable recovery polling");
+    }
+
+    #[test]
+    fn test_lazy_decoder_prunes_clean_complete_blocks() {
+        let pool = make_pool();
+        let mut policy = test_policy();
+        policy.lazy_enabled = true;
+
+        let mut dec = LazyDecoder::new_with_policy(FecMode::Normal, 4, pool.clone(), &policy);
+
+        for seq in 1..=4u64 {
+            let mut src = mk_src_packet(seq, 100, &pool);
+            src.is_systematic = true;
+            src.seq = seq;
+            dec.take_packet(src);
+        }
+
+        assert_eq!(dec.seen_seqs_len(), 0, "complete clean block should be pruned");
+
+        let mut repair = mk_src_packet(100, 50, &pool);
+        repair.is_systematic = false;
+        repair.seq = 100;
+        dec.take_packet(repair);
+
+        assert_eq!(dec.pending_repairs_len(), 1);
+        assert!(!dec.recovery_needed(), "repair after clean full block must stay lazy");
     }
 
     // --- ModeManager tests ---

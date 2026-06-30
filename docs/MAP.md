@@ -83,7 +83,7 @@ Jitter under pressure (CE>5% or rtt_spike>4): 85% of budget (was wrongly 20% - d
 - `fec/gf_tables.rs` (16): GF multiply properties, exhaustive inverse (all 255), GF16
 - `optimize/transport.rs` (14): congestion aggregation, bitmap, ECN popcount, pn decode
 - `optimize/sort.rs` (13): radix sort, f32 sort, argsort, duplicates, large input
-- `fec/internal.rs` (17): ZeroEncoder/Decoder, LazyDecoder flush-on-gap, ModeManager
+- `fec/internal.rs` (18): ZeroEncoder/Decoder, LazyDecoder flush-on-gap, clean-block pruning, ModeManager
 - `optimize/udp.rs` (5): GSO config, send_batch single/multi/IPv6
 
 ### Stealth Components - Test Coverage (Session 23, 2026-03-24)

@@ -3534,6 +3534,7 @@ Notes:
 - Rayon thread-pool setup is now represented explicitly as FEC global-resource policy (`Default` or `ThreadCap(n)`) before initialization, rather than a hidden optional env parse embedded in the side effect itself.
 - Constructor and observer ambient policy is now centralized: `AdaptiveFec::new()` resolves explicit FEC ambient/runtime inputs once, stores the resulting `FecRuntimePolicy` on the instance, and reuses that same snapshot for internal runtime/transition builders; `FecTransportObserver` snapshots its profile/base-stream inputs once; its retained transport-profile heuristic is represented explicitly as observer policy (`Explicit(profile)` or `Ambient(profile)`); the remaining FEC mode-policy env overrides are read through one `FecRuntimePolicy` snapshot instead of scattered per-call environment reads.
 - Deterministic regression coverage exists for the remaining allowed ambient FEC controls: stream cadence stays stable per `AdaptiveFec` instance, `FecTransportObserver` stream policy snapshots per observer instance, decoder policy snapshots per `Decoder8` instance, and Fountain symbol size snapshots per Fountain encoder/decoder construction.
+- Lazy receive polling is gated by `recovery_needed()`: clean blocks return systematic packets without polling heavy recovery, tail-loss blocks with pending repairs still recover, and clean complete blocks prune their sequence tracker so long-running stable links do not retain unbounded FEC source IDs.
 
 Examples (manual tuning):
 

@@ -3588,6 +3588,13 @@ impl AdaptiveFec {
         let mut decoder = self.decoder.lock();
         decoder.take_packet(packet.clone());
 
+        if !decoder.recovery_needed() {
+            if is_systematic {
+                output.push(packet);
+            }
+            return Ok(output);
+        }
+
         if let Some(result) = decoder.get_result() {
             output.extend(result);
         } else if self.partial_enabled {
