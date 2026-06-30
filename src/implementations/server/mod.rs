@@ -3523,6 +3523,39 @@ pub(crate) fn open_server_tun(
     TunInterface::open(tun_config, pool).map_err(|e| format!("{:?}", e))
 }
 
+/// Wait for a shutdown signal (SIGINT/SIGTERM on Unix, Ctrl+C on Windows).
+///
+/// This unifies signal handling so that `systemctl stop` (SIGTERM),
+/// `docker stop` (SIGTERM), and Ctrl+C (SIGINT) all trigger graceful
+/// shutdown with the same cleanup path.
+pub(crate) async fn wait_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("Failed to install SIGTERM handler: {}, falling back to ctrl_c only", e);
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                log::info!("SIGINT received");
+            }
+            _ = sigterm.recv() => {
+                log::info!("SIGTERM received");
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        log::info!("Shutdown signal received");
+    }
+}
+
 #[cfg(unix)]
 pub(crate) async fn recv_datagram_from(
     socket: &tokio::net::UdpSocket,
@@ -4148,9 +4181,8 @@ impl ServerRuntime {
                             break;
                         }
                     }
-                    _ = tokio::signal::ctrl_c() => {
-                        log::info!("Shutdown signal received");
-                        self.shutdown_live(b"ctrl_c");
+                    _ = wait_shutdown_signal() => {
+                        self.shutdown_live(b"shutdown");
                         break;
                     }
                     recv_res = recv_datagram_from(&socket, &mut buf) => {

@@ -203,7 +203,7 @@ fn test_fec_mode_transition_no_memory_leak() {
 
     // Memory delta should be small (no leak from transition_encoder/decoder)
     // Allow generous headroom for cross-fade buffers
-    let delta = if mem_after > mem_before { mem_after - mem_before } else { 0 };
+    let delta = mem_after.saturating_sub(mem_before);
     assert!(
         delta < 500,
         "memory leak after 100 transitions: delta={} blocks (before={}, after={})",

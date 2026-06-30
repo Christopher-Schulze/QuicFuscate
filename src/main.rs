@@ -131,6 +131,35 @@ mod rate_limiter_env_tests {
     }
 }
 
+/// Wait for a shutdown signal (SIGINT/SIGTERM on Unix, Ctrl+C on Windows).
+async fn wait_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("Failed to install SIGTERM handler: {}, falling back to ctrl_c only", e);
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("SIGINT received");
+            }
+            _ = sigterm.recv() => {
+                info!("SIGTERM received");
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        info!("Shutdown signal received");
+    }
+}
+
 #[cfg(unix)]
 async fn recv_connected_datagram(
     socket: &tokio::net::UdpSocket,
@@ -1687,10 +1716,9 @@ async fn run_client(
 
     loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                info!("Shutdown signal received");
-                if let Err(e) = conn.conn.close(true, 0x0, b"ctrl_c") {
-                    warn!("Client close on ctrl_c failed: {:?}", e);
+            _ = wait_shutdown_signal() => {
+                if let Err(e) = conn.conn.close(true, 0x0, b"shutdown") {
+                    warn!("Client close on shutdown failed: {:?}", e);
                 }
                 // Disable kill switch on clean shutdown
                 if let Some(ref ks) = kill_switch {
