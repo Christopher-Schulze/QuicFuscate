@@ -653,14 +653,130 @@ impl DecoderVariant {
 // LAZY DECODING: 0 CPU when no packet loss detected
 // =========================================================================
 
+#[derive(Debug, Default)]
+struct LazySequenceTracker {
+    /// Current clean contiguous range. This is the hot path and uses no heap.
+    contiguous: Option<(u64, u64)>,
+    /// Sorted, non-overlapping sparse ranges, allocated only after a real
+    /// out-of-order/gap case. Clean in-order traffic never touches this Vec.
+    sparse_ranges: Vec<(u64, u64)>,
+    seen_count: usize,
+}
+
+impl LazySequenceTracker {
+    #[inline]
+    fn insert(&mut self, seq: u64) {
+        if !self.sparse_ranges.is_empty() {
+            self.insert_sparse(seq);
+            return;
+        }
+
+        let Some((start, end)) = self.contiguous else {
+            self.contiguous = Some((seq, seq));
+            self.seen_count = 1;
+            return;
+        };
+
+        if seq >= start && seq <= end {
+            return;
+        }
+
+        if end.checked_add(1) == Some(seq) {
+            self.contiguous = Some((start, seq));
+            self.seen_count += 1;
+            return;
+        }
+
+        if seq.checked_add(1) == Some(start) {
+            self.contiguous = Some((seq, end));
+            self.seen_count += 1;
+            return;
+        }
+
+        self.sparse_ranges.push((start, end));
+        self.contiguous = None;
+        self.insert_sparse(seq);
+    }
+
+    fn insert_sparse(&mut self, seq: u64) {
+        for i in 0..self.sparse_ranges.len() {
+            let (start, end) = self.sparse_ranges[i];
+            if seq >= start && seq <= end {
+                return;
+            }
+
+            if end.checked_add(1) == Some(seq) {
+                self.sparse_ranges[i].1 = seq;
+                self.seen_count += 1;
+                self.merge_sparse_from(i);
+                return;
+            }
+
+            if seq.checked_add(1) == Some(start) {
+                self.sparse_ranges[i].0 = seq;
+                self.seen_count += 1;
+                if i > 0 {
+                    self.merge_sparse_from(i - 1);
+                } else {
+                    self.merge_sparse_from(i);
+                }
+                return;
+            }
+
+            if seq < start {
+                self.sparse_ranges.insert(i, (seq, seq));
+                self.seen_count += 1;
+                return;
+            }
+        }
+
+        self.sparse_ranges.push((seq, seq));
+        self.seen_count += 1;
+    }
+
+    #[inline]
+    fn merge_sparse_from(&mut self, index: usize) {
+        while index + 1 < self.sparse_ranges.len() {
+            let current_end = self.sparse_ranges[index].1;
+            let next_start = self.sparse_ranges[index + 1].0;
+            let overlaps_or_touches = current_end >= next_start
+                || current_end.checked_add(1).is_some_and(|next| next >= next_start);
+            if !overlaps_or_touches {
+                break;
+            }
+
+            let next_end = self.sparse_ranges[index + 1].1;
+            self.sparse_ranges[index].1 = current_end.max(next_end);
+            self.sparse_ranges.remove(index + 1);
+        }
+    }
+
+    #[inline]
+    fn has_gaps(&self) -> bool {
+        self.sparse_ranges.len() > 1
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        self.seen_count
+    }
+
+    #[inline]
+    fn clear(&mut self) {
+        self.contiguous = None;
+        self.sparse_ranges.clear();
+        self.seen_count = 0;
+    }
+}
+
 /// LazyDecoder wraps DecoderVariant and defers actual decoding until loss is detected.
 /// This saves ~99% CPU when there is no packet loss.
 pub struct LazyDecoder {
     inner: DecoderVariant,
     /// Buffered repair packets (only decoded when gaps detected)
     pending_repairs: VecDeque<FecPacket>,
-    /// Tracks seen source packet sequence numbers
-    seen_seqs: std::collections::BTreeSet<u64>,
+    /// Tracks seen source packet sequence ranges.
+    seen_seqs: LazySequenceTracker,
     /// Source packets per decoder block. Used to distinguish clean full
     /// blocks from tail-loss blocks where no later systematic packet can reveal
     /// a sequence gap.
@@ -708,7 +824,7 @@ impl LazyDecoder {
         Self {
             inner: DecoderVariant::new_with_depth(mode, k, pool, policy, depth),
             pending_repairs: VecDeque::with_capacity(32),
-            seen_seqs: std::collections::BTreeSet::new(),
+            seen_seqs: LazySequenceTracker::default(),
             k,
             depth: depth.max(1),
             expected_seq: 0,
@@ -726,18 +842,7 @@ impl LazyDecoder {
     /// Check if there are gaps in the received sequence
     #[inline]
     fn has_gaps(&self) -> bool {
-        if self.seen_seqs.is_empty() {
-            return false;
-        }
-        let mut it = self.seen_seqs.iter();
-        let Some(&first) = it.next() else {
-            return false;
-        };
-        let Some(&last) = self.seen_seqs.iter().next_back() else {
-            return false;
-        };
-        // Gap exists if we've seen N sequences but range is > N
-        (last - first + 1) as usize > self.seen_seqs.len()
+        self.seen_seqs.has_gaps()
     }
 
     /// Flush pending repairs to actual decoder (when loss detected)
@@ -771,10 +876,8 @@ impl LazyDecoder {
                 let skipped = self.pending_repairs.len() as u64;
                 self.repairs_skipped += skipped;
                 self.pending_repairs.clear();
-                if self.k > 0
-                    && self.seen_seqs.len() >= self.k
-                    && self.seen_seqs.len().is_multiple_of(self.k)
-                {
+                let seen_len = self.seen_seqs.len();
+                if self.k > 0 && seen_len >= self.k && seen_len.is_multiple_of(self.k) {
                     self.seen_seqs.clear();
                 }
                 // Forward source packet (decoder needs it for systematic recovery)
@@ -1579,6 +1682,50 @@ mod tests {
 
         assert_eq!(dec.pending_repairs_len(), 1);
         assert!(!dec.recovery_needed(), "repair after interleaved clean block must stay lazy");
+    }
+
+    #[test]
+    fn test_lazy_decoder_duplicate_source_does_not_inflate_clean_block() {
+        let pool = make_pool();
+        let mut policy = test_policy();
+        policy.lazy_enabled = true;
+
+        let mut dec = LazyDecoder::new_with_policy(FecMode::Normal, 4, pool.clone(), &policy);
+
+        for seq in [1_u64, 2, 2, 3] {
+            let mut src = mk_src_packet(seq, 100, &pool);
+            src.is_systematic = true;
+            src.seq = seq;
+            dec.take_packet(src);
+        }
+
+        assert_eq!(dec.seen_seqs_len(), 3, "duplicate source must not count twice");
+        assert!(!dec.recovery_needed(), "duplicate source in clean range must stay lazy");
+    }
+
+    #[test]
+    fn test_lazy_decoder_gap_can_be_filled_before_recovery_poll() {
+        let pool = make_pool();
+        let mut policy = test_policy();
+        policy.lazy_enabled = true;
+
+        let mut dec = LazyDecoder::new_with_policy(FecMode::Normal, 4, pool.clone(), &policy);
+
+        for seq in [1_u64, 3] {
+            let mut src = mk_src_packet(seq, 100, &pool);
+            src.is_systematic = true;
+            src.seq = seq;
+            dec.take_packet(src);
+        }
+        assert!(dec.recovery_needed(), "out-of-order source must expose a gap");
+
+        let mut src = mk_src_packet(2, 100, &pool);
+        src.is_systematic = true;
+        src.seq = 2;
+        dec.take_packet(src);
+
+        assert_eq!(dec.seen_seqs_len(), 3, "filled gap should preserve unique source count");
+        assert!(!dec.recovery_needed(), "filled source gap should return to the lazy clean path");
     }
 
     // --- ModeManager tests ---
