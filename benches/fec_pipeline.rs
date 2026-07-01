@@ -97,7 +97,11 @@ fn bench_fec_encode_pipeline(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
-// 1b. FEC systematic send hot path: reusable output, no repair burst
+// 1b. FEC systematic send cold-start path: fresh FEC state per packet
+//
+// This benchmark intentionally measures the cost of creating fresh AdaptiveFec
+// state and sending one systematic packet. It is useful as a cold-path guard,
+// but it is not the long-lived production send hot path.
 // ---------------------------------------------------------------------------
 
 fn bench_fec_systematic_hot_path(c: &mut Criterion) {
@@ -136,6 +140,51 @@ fn bench_fec_systematic_hot_path(c: &mut Criterion) {
                         },
                         criterion::BatchSize::SmallInput,
                     );
+                },
+            );
+        }
+    }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// 1c. FEC production send hot path: persistent FEC state + reusable output
+// ---------------------------------------------------------------------------
+
+fn bench_fec_send_reuse_hot_path(c: &mut Criterion) {
+    let modes = [
+        ("zero", FecMode::Zero),
+        ("light", FecMode::Light),
+        ("normal", FecMode::Normal),
+        ("medium", FecMode::Medium),
+        ("strong", FecMode::Strong),
+        ("streaming", FecMode::Streaming),
+    ];
+    let sizes: &[(usize, &str)] = &[(64, "64B"), (256, "256B"), (1400, "1400B"), (4096, "4KB")];
+
+    let mut group = c.benchmark_group("fec_send_reuse_hot_path");
+
+    for &(mode_name, mode) in &modes {
+        for &(size, size_label) in sizes {
+            group.throughput(Throughput::Bytes(size as u64));
+            group.bench_with_input(
+                BenchmarkId::new(mode_name, size_label),
+                &(mode, size),
+                |b, &(mode, size)| {
+                    let pool = global_pool();
+                    let config = config_with_mode(mode);
+                    let mut fec = AdaptiveFec::new(config);
+                    let mut output =
+                        Vec::with_capacity(window_size_for_mode(mode).saturating_add(8));
+                    let mut id = 0u64;
+
+                    b.iter(|| {
+                        let pkt = mk_src_packet(id, size, &pool);
+                        fec.on_send_into(pkt, &mut output);
+                        black_box(&output);
+                        id = id.wrapping_add(1);
+                    });
                 },
             );
         }
@@ -495,6 +544,7 @@ criterion_group!(
     fec_pipeline_benches,
     bench_fec_encode_pipeline,
     bench_fec_systematic_hot_path,
+    bench_fec_send_reuse_hot_path,
     bench_fec_decode_pipeline,
     bench_fec_decode_compat_alloc,
     bench_fec_mode_transition,

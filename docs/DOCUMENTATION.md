@@ -1121,7 +1121,8 @@ pub struct MacTun {
 
 - `benches/fec_pipeline.rs` uses `FecConfig::product_default()` for mode variants so Criterion windows match the Engine/CLI product defaults (`window_good=10`, `window_fair=30`, `window_poor=50`) instead of synthetic library-default windows.
 - `fec_encode_pipeline` remains the compatibility benchmark for full `on_send()` behavior.
-- `fec_systematic_hot_path` isolates reusable-output systematic sends with no repair burst, proving the normal send hot path independently from block completion.
+- `fec_systematic_hot_path` is a cold-start guard: it creates fresh `AdaptiveFec` state and output scratch per sample, so it must not be used as the production send-hotpath number.
+- `fec_send_reuse_hot_path` measures the production send path with persistent `AdaptiveFec` state, advancing packet IDs, and reusable caller-owned output scratch via `on_send_into()`.
 - `fec_decode_pipeline` measures production-style 128-packet receive batches with `on_send_into()` / `on_receive_into()` scratch reuse and a deterministic 10% source-drop mask. This protects realistic clean and lossy decode work instead of single-packet random-loss artifacts.
 - `fec_decode_compat_alloc` keeps a separate guard for the allocating `on_receive()` compatibility wrapper without presenting it as the production hot path.
 - `fec_lazy_fast_path` isolates lazy receive behavior for zero-mode passthrough and Normal-mode clean receive with reusable output scratch.
@@ -1130,6 +1131,7 @@ pub struct MacTun {
 - Broderick ARM/AArch64 decode-batch reference after TODO-490: Normal clean `282 us`, Normal 10% loss `514 us`, Strong clean `278 us`, Strong 10% loss `17.5-18.5 ms`, Streaming clean `499 us`, Streaming 10% loss `623 us`.
 - Broderick ARM/AArch64 decode-batch reference after TODO-491 lazy full-recovery gating: Normal clean `279 us`, Normal 10% loss `506 us`, Strong clean `200 us`, Strong 10% loss `195 us`, Streaming clean `447 us`, Streaming 10% loss `474 us`.
 - Broderick ARM/AArch64 lazy-fast-path reference after TODO-498 source-buffer replay: zero passthrough `285.14 ns`, zero reuse `266.47 ns`, Normal no-loss `1.284 us`, Normal no-loss reuse `1.244 us`.
+- Broderick ARM/AArch64 send-reuse-hotpath reference after TODO-499: Zero/1400B `233.37 ns`, Normal/1400B `1.1081 us`, Strong/1400B `408.48 ns`, Streaming/1400B `380.88 ns`.
 
 #### Connection Benchmark Coverage
 
