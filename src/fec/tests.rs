@@ -56,6 +56,32 @@ fn test_zero_mode_receive_preserves_unique_payload_owner() {
 }
 
 #[test]
+fn test_on_receive_into_zero_mode_reuses_output_allocation() {
+    let pool = crate::optimize::global_pool();
+    let mut fec = AdaptiveFec::new(FecConfig { initial_mode: FecMode::Zero, ..Default::default() });
+    let mut block = pool.alloc();
+    block[..16].copy_from_slice(b"zero-recv-packet");
+    let pkt = FecPacket::new(9, Some(block), 16, true, None, 0, Arc::clone(&pool));
+    let mut output = Vec::with_capacity(8);
+    output.push(FecPacket::new(999, None, 0, true, None, 0, Arc::clone(&pool)));
+    let initial_capacity = output.capacity();
+
+    fec.on_receive_into(pkt, &mut output).expect("zero mode receive_into must pass through");
+
+    assert_eq!(output.len(), 1);
+    assert_eq!(output[0].id, 9);
+    assert!(
+        output[0].payload_mut_unique().is_some(),
+        "zero mode receive_into must preserve unique payload ownership"
+    );
+    assert_eq!(
+        output.capacity(),
+        initial_capacity,
+        "on_receive_into must clear and reuse the caller allocation"
+    );
+}
+
+#[test]
 fn test_on_send_into_zero_mode_reuses_output_allocation() {
     let pool = crate::optimize::global_pool();
     let mut fec = AdaptiveFec::new(FecConfig { initial_mode: FecMode::Zero, ..Default::default() });
@@ -96,6 +122,33 @@ fn test_on_send_into_matches_on_send_first_packet() {
     let wrapper_output = wrapper_fec.on_send(wrapper_pkt);
     let mut reusable_output = Vec::with_capacity(1);
     reusable_fec.on_send_into(reusable_pkt, &mut reusable_output);
+
+    assert_eq!(reusable_output.len(), wrapper_output.len());
+    assert_eq!(
+        reusable_output.iter().map(|pkt| pkt.id).collect::<Vec<_>>(),
+        wrapper_output.iter().map(|pkt| pkt.id).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_on_receive_into_matches_on_receive_first_packet() {
+    let pool = crate::optimize::global_pool();
+    let config = FecConfig { initial_mode: FecMode::Normal, ..Default::default() };
+    let mut wrapper_fec = AdaptiveFec::new(config.clone());
+    let mut reusable_fec = AdaptiveFec::new(config);
+
+    let mut wrapper_block = pool.alloc();
+    wrapper_block[..17].copy_from_slice(b"normal-recv-one!!");
+    let wrapper_pkt = FecPacket::new(14, Some(wrapper_block), 17, true, None, 0, Arc::clone(&pool));
+
+    let mut reusable_block = pool.alloc();
+    reusable_block[..17].copy_from_slice(b"normal-recv-one!!");
+    let reusable_pkt =
+        FecPacket::new(14, Some(reusable_block), 17, true, None, 0, Arc::clone(&pool));
+
+    let wrapper_output = wrapper_fec.on_receive(wrapper_pkt).expect("wrapper receive");
+    let mut reusable_output = Vec::with_capacity(1);
+    reusable_fec.on_receive_into(reusable_pkt, &mut reusable_output).expect("reusable receive");
 
     assert_eq!(reusable_output.len(), wrapper_output.len());
     assert_eq!(

@@ -305,6 +305,30 @@ fn bench_fec_lazy_fast_path(c: &mut Criterion) {
         });
     });
 
+    // Normal mode with production-style reusable send and receive output scratch.
+    group.bench_function("normal_mode_no_loss_reuse", |b| {
+        let pool = global_pool();
+        let config = config_with_mode(FecMode::Normal);
+        let mut sender = AdaptiveFec::new(config.clone());
+        let mut receiver = AdaptiveFec::new(config);
+        let mut send_output = Vec::with_capacity(1);
+        let mut receive_output = Vec::with_capacity(1);
+        let mut id = 0u64;
+
+        b.iter(|| {
+            let pkt = mk_src_packet(id, 1400, &pool);
+            sender.on_send_into(pkt, &mut send_output);
+            for p in send_output.drain(..) {
+                receiver
+                    .on_receive_into(p, &mut receive_output)
+                    .expect("receive must accept normal-mode source packet");
+                receive_output.clear();
+            }
+            id = id.wrapping_add(1);
+            black_box(&receiver);
+        });
+    });
+
     group.finish();
 }
 

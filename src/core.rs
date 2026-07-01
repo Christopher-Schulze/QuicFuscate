@@ -87,6 +87,8 @@ pub struct QuicFuscateConnection {
     outgoing_fec_packets: VecDeque<FecPacket>,
     // Reused FEC emission scratch to avoid allocating a Vec for every packet on the send path.
     fec_send_scratch: Vec<FecPacket>,
+    // Reused FEC recovery scratch to avoid allocating a Vec for every packet on the receive path.
+    fec_receive_scratch: Vec<FecPacket>,
     h3_conn: Option<crate::transport::h3::Connection>,
     last_telemetry: std::time::Instant,
     // Observer for transport telemetry -> FEC/ACK policy coupling.
@@ -299,6 +301,7 @@ impl QuicFuscateConnection {
             packet_id_counter: 0,
             outgoing_fec_packets: VecDeque::new(),
             fec_send_scratch: Vec::with_capacity(1),
+            fec_receive_scratch: Vec::with_capacity(1),
             h3_conn: None,
             last_telemetry: std::time::Instant::now(),
             transport_observer: obs.clone(),
@@ -976,11 +979,16 @@ impl QuicFuscateConnection {
         // Ensure unique IDs for subsequent packets
         self.packet_id_counter = self.packet_id_counter.wrapping_add(1);
 
-        let recovered_packets = self.fec.on_receive(fec_packet).map_err(|e| {
-            crate::error::ConnectionError::Transport(format!("FEC decoding failed: {}", e))
-        })?;
+        let mut recovered_packets = std::mem::take(&mut self.fec_receive_scratch);
+        if let Err(e) = self.fec.on_receive_into(fec_packet, &mut recovered_packets) {
+            self.fec_receive_scratch = recovered_packets;
+            return Err(crate::error::ConnectionError::Transport(format!(
+                "FEC decoding failed: {}",
+                e
+            )));
+        }
 
-        for mut packet in recovered_packets {
+        for mut packet in recovered_packets.drain(..) {
             // payload_mut_unique() returns None when the FEC decoder still
             // holds an Arc clone of the shared buffer. In that case, copy the
             // payload into a fresh pooled buffer so conn.recv() can mutate it
@@ -1014,6 +1022,7 @@ impl QuicFuscateConnection {
                 self.optimization_manager.free_block(buf);
             }
         }
+        self.fec_receive_scratch = recovered_packets;
 
         self.conn
             .do_tls_handshake(self.tls_ch_override_template.as_deref())

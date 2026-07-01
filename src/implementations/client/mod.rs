@@ -88,6 +88,7 @@ pub struct FecCodec {
     inner: crate::fec::AdaptiveFec,
     packet_id: std::sync::atomic::AtomicU64,
     output_scratch: Vec<crate::fec::FecPacket>,
+    receive_scratch: Vec<crate::fec::FecPacket>,
 }
 
 impl FecCodec {
@@ -98,6 +99,7 @@ impl FecCodec {
             inner: crate::fec::AdaptiveFec::new(fec_config),
             packet_id: std::sync::atomic::AtomicU64::new(0),
             output_scratch: Vec::with_capacity(1),
+            receive_scratch: Vec::with_capacity(1),
         }
     }
 
@@ -124,9 +126,10 @@ impl FecCodec {
         let len = data.len().min(block.len());
         block[..len].copy_from_slice(&data[..len]);
         let packet = crate::fec::FecPacket::new(0, Some(block), len, true, None, 0, mem_pool);
-        match self.inner.on_receive(packet) {
-            Ok(pkts) => pkts
-                .into_iter()
+        match self.inner.on_receive_into(packet, &mut self.receive_scratch) {
+            Ok(()) => self
+                .receive_scratch
+                .drain(..)
                 .filter_map(|pkt| pkt.payload_slice().map(|data| data.to_vec()))
                 .collect(),
             Err(_) => Vec::new(),

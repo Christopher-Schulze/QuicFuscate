@@ -3551,6 +3551,7 @@ Notes:
 - Interleaved lazy gap tracking is depth-aware: each lazy block normalizes source sequence numbers by interleave depth before gap detection, so clean streams such as `0,4,8,12` at depth `4` do not trigger false recovery polling.
 - Zero-mode receive bypasses decoder retention entirely while no transition is active, preserving unique ownership of pooled payloads for in-place QUIC processing. Recovery-capable modes still retain decoder state as required for source reconstruction.
 - Send-side hot paths should call `AdaptiveFec::on_send_into(packet, output)` with a reused output buffer. `AdaptiveFec::on_send(packet)` remains a compatibility wrapper, but `QuicFuscateConnection` and the Engine `FecCodec` use per-instance scratch vectors so clean-link sends do not allocate a fresh FEC output vector per packet.
+- Receive-side hot paths should call `AdaptiveFec::on_receive_into(packet, output)` with a reused output buffer. `AdaptiveFec::on_receive(packet)` remains a compatibility wrapper and keeps the direct zero-mode passthrough fast path, while `QuicFuscateConnection` and the Engine `FecCodec` reuse per-instance receive scratch vectors.
 
 Examples (manual tuning):
 

@@ -3587,14 +3587,42 @@ impl AdaptiveFec {
     }
 
     /// Process incoming FEC packet through the decoder and return any recovered packets.
+    ///
+    /// Compatibility wrapper for callers that need an owned output vector. Hot-path callers
+    /// should prefer [`AdaptiveFec::on_receive_into`] and reuse their output allocation.
+    #[inline]
     pub fn on_receive(&mut self, packet: FecPacket) -> Result<Vec<FecPacket>, String> {
+        if self.current_mode() == FecMode::Zero && self.transition_left == 0 {
+            return Ok(vec![packet]);
+        }
+
+        let mut output = Vec::with_capacity(1);
+        self.on_receive_into(packet, &mut output)?;
+        Ok(output)
+    }
+
+    /// Process incoming FEC packet through the decoder, writing emitted packets into
+    /// `output` without allocating a fresh vector on every receive.
+    ///
+    /// `output` is cleared first, but its allocation is retained. This mirrors
+    /// [`AdaptiveFec::on_send_into`] for the receive hot path while preserving
+    /// the exact packet emission semantics of [`AdaptiveFec::on_receive`].
+    #[inline]
+    pub fn on_receive_into(
+        &mut self,
+        packet: FecPacket,
+        output: &mut Vec<FecPacket>,
+    ) -> Result<(), String> {
+        output.clear();
+
         // Zero mode has no repair packets to consume and cannot recover old
         // zero-mode payloads. Keep the receive path a true ownership-preserving
         // passthrough so the QUIC core can decrypt/header-unprotect in place
         // instead of falling back to a copy because the decoder retained an Arc
         // clone of the pooled buffer.
         if self.current_mode() == FecMode::Zero && self.transition_left == 0 {
-            return Ok(vec![packet]);
+            output.push(packet);
+            return Ok(());
         }
 
         // Systematic (source) packets must always be forwarded to the QUIC stack
@@ -3602,7 +3630,6 @@ impl AdaptiveFec {
         // a clone for tracking/recovery purposes, but the original is returned
         // directly so the handshake and data flow are not stalled.
         let is_systematic = packet.is_systematic;
-        let mut output = Vec::new();
 
         let mut decoder = self.decoder.lock();
         decoder.take_packet(packet.clone());
@@ -3611,7 +3638,7 @@ impl AdaptiveFec {
             if is_systematic {
                 output.push(packet);
             }
-            return Ok(output);
+            return Ok(());
         }
 
         if let Some(result) = decoder.get_result() {
@@ -3627,7 +3654,7 @@ impl AdaptiveFec {
             output.push(packet);
         }
 
-        Ok(output)
+        Ok(())
     }
 
     /// Return a reference to the internal memory pool
