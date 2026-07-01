@@ -1875,7 +1875,18 @@ impl Connection {
                         }
                         let body_len = std::cmp::min(max_body, available.min(send_avail));
                         #[cfg(not(feature = "stream_ring_buffer"))]
-                        let data_vec = s.send_buf[..body_len].to_vec();
+                        let data_len = {
+                            let data = &s.send_buf[..body_len];
+                            let written = frames::write_stream_frame(
+                                s.id,
+                                s.send_off,
+                                data,
+                                s.send_fin && body_len == available,
+                                &mut out[off..],
+                            )?;
+                            off += written;
+                            data.len()
+                        };
                         #[cfg(feature = "stream_ring_buffer")]
                         let data_vec = {
                             let mut v = vec![0u8; body_len];
@@ -1885,6 +1896,7 @@ impl Connection {
                             }
                             v
                         };
+                        #[cfg(feature = "stream_ring_buffer")]
                         let data_len = data_vec.len();
                         let fin_now = {
                             #[cfg(not(feature = "stream_ring_buffer"))]
@@ -1896,18 +1908,25 @@ impl Connection {
                                 s.send_fin && s.send_ring.is_empty()
                             }
                         };
-                        let frame = Frame::Stream {
-                            stream_id: s.id,
-                            offset: s.send_off,
-                            data: Cow::Owned(data_vec),
-                            fin: fin_now,
-                        };
-                        let written = frames::to_bytes(&frame, &mut out[off..])?;
-                        off += written;
+                        #[cfg(feature = "stream_ring_buffer")]
+                        {
+                            let frame = Frame::Stream {
+                                stream_id: s.id,
+                                offset: s.send_off,
+                                data: Cow::Owned(data_vec),
+                                fin: fin_now,
+                            };
+                            let written = frames::to_bytes(&frame, &mut out[off..])?;
+                            off += written;
+                        }
                         s.send_off += data_len as u64;
                         #[cfg(not(feature = "stream_ring_buffer"))]
                         {
-                            s.send_buf.drain(0..data_len);
+                            if data_len == s.send_buf.len() {
+                                s.send_buf.clear();
+                            } else {
+                                s.send_buf.drain(0..data_len);
+                            }
                         }
                         self.conn_bytes_sent = self.conn_bytes_sent.saturating_add(data_len as u64);
                         self.stats.stream_sent_bytes += data_len as u64;
@@ -1937,13 +1956,13 @@ impl Connection {
                         + crate::transport::varint::varint_len(s.send_off)
                         + 2;
                     if off + header_overhead + tag_reserve < out.len() {
-                        let frame = Frame::Stream {
-                            stream_id: s.id,
-                            offset: s.send_off,
-                            data: Cow::Owned(Vec::new()),
-                            fin: true,
-                        };
-                        let written = frames::to_bytes(&frame, &mut out[off..])?;
+                        let written = frames::write_stream_frame(
+                            s.id,
+                            s.send_off,
+                            &[],
+                            true,
+                            &mut out[off..],
+                        )?;
                         off += written;
                         self.writable_streams.retain(|&id| id != stream_id);
                         // fin-only STREAM is still ack-eliciting.

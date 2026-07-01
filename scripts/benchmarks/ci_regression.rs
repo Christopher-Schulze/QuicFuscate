@@ -526,6 +526,48 @@ fn bench_connection_1rtt_stealth_compare(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// STREAM frame encoding hotpath
+// ---------------------------------------------------------------------------
+fn bench_stream_frame_encoding(c: &mut Criterion) {
+    use quicfuscate::transport::{frames, Frame};
+    use std::borrow::Cow;
+
+    let mut group = c.benchmark_group("stream_frame_encoding");
+    for payload_len in [256usize, 1024, 1400] {
+        let payload = vec![0x5Au8; payload_len];
+        group.throughput(Throughput::Bytes(payload_len as u64));
+
+        group.bench_function(format!("{payload_len}B_legacy_owned_frame"), |b| {
+            let mut out = vec![0u8; payload_len + 64];
+            b.iter(|| {
+                let owned = black_box(&payload).to_vec();
+                let frame =
+                    Frame::Stream { stream_id: 0, offset: 0, data: Cow::Owned(owned), fin: false };
+                let written =
+                    frames::to_bytes(black_box(&frame), black_box(&mut out)).expect("encode");
+                black_box(written);
+            });
+        });
+
+        group.bench_function(format!("{payload_len}B_direct_writer"), |b| {
+            let mut out = vec![0u8; payload_len + 64];
+            b.iter(|| {
+                let written = frames::write_stream_frame(
+                    0,
+                    0,
+                    black_box(&payload),
+                    false,
+                    black_box(&mut out),
+                )
+                .expect("encode");
+                black_box(written);
+            });
+        });
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
 // Brain: TransportObserver policy application
 // ---------------------------------------------------------------------------
 fn bench_brain_apply_policy(c: &mut Criterion) {
@@ -624,6 +666,7 @@ criterion_group!(
     bench_connection_1rtt_send_recv,
     bench_ack_sent_byte_accounting,
     bench_connection_1rtt_stealth_compare,
+    bench_stream_frame_encoding,
     bench_brain_apply_policy,
 );
 

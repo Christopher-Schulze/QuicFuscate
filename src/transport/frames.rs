@@ -18,6 +18,35 @@ fn check_frame_len(len: usize, remaining: usize) -> Result<(), ConnectionError> 
 }
 
 #[inline(always)]
+pub fn stream_frame_wire_len(stream_id: u64, offset: u64, data_len: usize) -> usize {
+    1 + varint_len(stream_id) + varint_len(offset) + 2 + data_len
+}
+
+#[inline(always)]
+pub fn write_stream_frame(
+    stream_id: u64,
+    offset: u64,
+    data: &[u8],
+    fin: bool,
+    out: &mut [u8],
+) -> Result<usize, ConnectionError> {
+    let need = stream_frame_wire_len(stream_id, offset, data.len());
+    if out.len() < need {
+        return Err(ConnectionError::BufferTooShort);
+    }
+
+    let mut off = 0usize;
+    let ty = 0x08 | 0x04 | 0x02 | if fin { 0x01 } else { 0x00 };
+    off += write_varint(ty, &mut out[off..])?;
+    off += write_varint(stream_id, &mut out[off..])?;
+    off += write_varint(offset, &mut out[off..])?;
+    off += write_varint_with_len(data.len() as u64, 2, &mut out[off..])?;
+    out[off..off + data.len()].copy_from_slice(data);
+    off += data.len();
+    Ok(off)
+}
+
+#[inline(always)]
 pub fn wire_len(frame: &crate::transport::Frame<'_>) -> usize {
     use crate::transport::Frame as F;
     match frame {
@@ -58,9 +87,8 @@ pub fn wire_len(frame: &crate::transport::Frame<'_>) -> usize {
         }
         F::Crypto { offset, data } => 1 + varint_len(*offset) + 2 + data.len(),
         F::NewToken { token } => 1 + varint_len(token.len() as u64) + token.len(),
-        F::Stream { stream_id, offset, data, fin } => {
-            let _ty = 0x08 | 0x04 | 0x02 | if *fin { 0x01 } else { 0x00 };
-            1 + varint_len(*stream_id) + varint_len(*offset) + 2 + data.len()
+        F::Stream { stream_id, offset, data, .. } => {
+            stream_frame_wire_len(*stream_id, *offset, data.len())
         }
         F::MaxData { max } => 1 + varint_len(*max),
         F::MaxStreamData { stream_id, max } => 1 + varint_len(*stream_id) + varint_len(*max),
@@ -169,17 +197,7 @@ pub fn to_bytes(
             off += token.len();
         }
         F::Stream { stream_id, offset, data, fin } => {
-            let ty = 0x08 | 0x04 | 0x02 | if *fin { 0x01 } else { 0x00 };
-            off += write_varint(ty, &mut out[off..])?;
-            off += write_varint(*stream_id, &mut out[off..])?;
-            off += write_varint(*offset, &mut out[off..])?;
-            off += write_varint_with_len(data.len() as u64, 2, &mut out[off..])?;
-            if out.len() >= off + data.len() {
-                out[off..off + data.len()].copy_from_slice(data);
-                off += data.len();
-            } else {
-                return Err(ConnectionError::BufferTooShort);
-            }
+            off += write_stream_frame(*stream_id, *offset, data, *fin, &mut out[off..])?;
         }
         F::MaxData { max } => {
             off += write_varint(0x10, &mut out[off..])?;
@@ -844,6 +862,22 @@ mod tests {
             }
             other => panic!("expected Stream, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn write_stream_frame_matches_generic_encoder() {
+        let payload = b"direct stream payload";
+        let frame =
+            Frame::Stream { stream_id: 12, offset: 4096, data: Cow::Borrowed(payload), fin: true };
+        let mut generic = vec![0u8; 256];
+        let mut direct = vec![0u8; 256];
+
+        let generic_len = to_bytes(&frame, &mut generic).expect("generic stream encode");
+        let direct_len =
+            write_stream_frame(12, 4096, payload, true, &mut direct).expect("direct stream encode");
+
+        assert_eq!(direct_len, generic_len);
+        assert_eq!(&direct[..direct_len], &generic[..generic_len]);
     }
 
     #[test]
