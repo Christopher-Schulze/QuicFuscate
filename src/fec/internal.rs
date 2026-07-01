@@ -677,6 +677,13 @@ pub struct LazyDecoder {
     lazy_enabled: bool,
     /// Telemetry: repairs skipped (no loss)
     repairs_skipped: u64,
+    /// A repair was flushed into the heavy decoder and should trigger a full
+    /// recovery attempt exactly once.
+    full_recovery_pending: bool,
+    /// A systematic packet arrived after a gap and may have peeled already
+    /// buffered equations. Drain partial results, but do not run full
+    /// elimination unless a repair was also flushed.
+    partial_recovery_pending: bool,
 }
 
 impl LazyDecoder {
@@ -715,6 +722,8 @@ impl LazyDecoder {
             max_pending: 64,
             lazy_enabled,
             repairs_skipped: 0,
+            full_recovery_pending: false,
+            partial_recovery_pending: false,
         }
     }
 
@@ -741,10 +750,13 @@ impl LazyDecoder {
     }
 
     /// Flush pending repairs to actual decoder (when loss detected)
-    fn flush_to_decoder(&mut self) {
+    fn flush_to_decoder(&mut self) -> bool {
+        let mut flushed = false;
         while let Some(repair) = self.pending_repairs.pop_front() {
             self.inner.take_packet(repair);
+            flushed = true;
         }
+        flushed
     }
 
     pub fn take_packet(&mut self, p: FecPacket) {
@@ -758,14 +770,18 @@ impl LazyDecoder {
             // If lazy disabled, forward to decoder
             if !self.lazy_enabled {
                 self.inner.take_packet(p);
+                self.full_recovery_pending = true;
                 return;
             }
 
             // Check if we detect gaps now
             if self.has_gaps() {
                 // Loss detected! Flush buffered repairs and forward this packet
-                self.flush_to_decoder();
+                if self.flush_to_decoder() {
+                    self.full_recovery_pending = true;
+                }
                 self.inner.take_packet(p);
+                self.partial_recovery_pending = true;
             } else {
                 // No loss - drop pending repairs (they're not needed)
                 let skipped = self.pending_repairs.len() as u64;
@@ -784,27 +800,40 @@ impl LazyDecoder {
             // Repair packet - buffer it
             if !self.lazy_enabled {
                 self.inner.take_packet(p);
+                self.full_recovery_pending = true;
                 return;
             }
 
             // Buffer repair packet
             self.pending_repairs.push_back(p);
 
-            // If buffer full, force flush
-            if self.pending_repairs.len() >= self.max_pending {
-                self.flush_to_decoder();
+            // Flush only when repair data can actually advance recovery: a
+            // known gap, a tail-loss block that ended before k sources arrived,
+            // or a safety flush when the buffer reaches its cap.
+            let tail_loss_repair = self.k > 0 && !self.seen_seqs.len().is_multiple_of(self.k);
+            if self.has_gaps() || self.pending_repairs.len() >= self.max_pending {
+                if self.flush_to_decoder() {
+                    self.full_recovery_pending = true;
+                }
+            } else if tail_loss_repair {
+                self.full_recovery_pending = true;
             }
         }
     }
 
     pub fn get_result(&mut self) -> Option<VecDeque<FecPacket>> {
         // Flush any pending repairs before getting result
-        self.flush_to_decoder();
+        let _ = self.flush_to_decoder();
         // Update telemetry
         crate::telemetry::FEC_LAZY_SKIPPED
             .fetch_add(self.repairs_skipped, std::sync::atomic::Ordering::Relaxed);
         self.repairs_skipped = 0;
-        self.inner.get_result()
+        let result = self.inner.get_result();
+        self.full_recovery_pending = false;
+        if result.is_some() {
+            self.partial_recovery_pending = false;
+        }
+        result
     }
 
     /// Whether recovery work is currently useful.
@@ -815,25 +844,24 @@ impl LazyDecoder {
     /// lazy mode is disabled, preserve the eager behavior and let callers poll.
     #[inline]
     pub fn recovery_needed(&self) -> bool {
-        if !self.lazy_enabled || self.has_gaps() {
+        if !self.lazy_enabled {
             return true;
         }
 
-        // Tail loss at the end of a block does not create an internal sequence
-        // gap because no later systematic packet arrived. A pending repair is
-        // useful when the current block is not full. Clean no-loss blocks remain
-        // lazy because their seen-source count lands exactly on the block size.
-        !self.pending_repairs.is_empty()
-            && self.k > 0
-            && !self.seen_seqs.len().is_multiple_of(self.k)
+        self.full_recovery_pending || self.partial_recovery_pending
+    }
+
+    /// Whether the caller should run full recovery rather than only draining
+    /// partial peeled results.
+    #[inline]
+    pub fn full_recovery_needed(&self) -> bool {
+        !self.lazy_enabled || self.full_recovery_pending
     }
 
     pub fn get_partial_result(&mut self) -> VecDeque<FecPacket> {
-        // If gaps detected, flush and decode
-        if self.has_gaps() {
-            self.flush_to_decoder();
-        }
-        self.inner.get_partial_result()
+        let result = self.inner.get_partial_result();
+        self.partial_recovery_pending = false;
+        result
     }
 
     /// Drain buffered packets from ZeroDecoder for seamless mode transition.
@@ -863,6 +891,16 @@ impl LazyDecoder {
     #[cfg(test)]
     pub fn pending_repairs_max(&self) -> usize {
         self.max_pending
+    }
+
+    #[cfg(test)]
+    pub fn full_recovery_pending(&self) -> bool {
+        self.full_recovery_pending
+    }
+
+    #[cfg(test)]
+    pub fn partial_recovery_pending(&self) -> bool {
+        self.partial_recovery_pending
     }
 }
 
@@ -1071,6 +1109,12 @@ impl InterleavedDecoder {
     #[inline]
     pub fn recovery_needed(&self) -> bool {
         self.blocks.iter().any(LazyDecoder::recovery_needed)
+    }
+
+    /// Whether any interleaved block needs a full heavy recovery attempt.
+    #[inline]
+    pub fn full_recovery_needed(&self) -> bool {
+        self.blocks.iter().any(LazyDecoder::full_recovery_needed)
     }
 
     /// Drain all buffered packets from ZeroDecoders for seamless mode transition.
@@ -1523,6 +1567,69 @@ mod tests {
         // Gap detected -> repairs flushed to inner decoder
         assert_eq!(dec.pending_repairs_len(), 0);
         assert!(dec.recovery_needed(), "gap must enable recovery polling");
+        assert!(dec.full_recovery_pending(), "flushed repair must request full recovery");
+    }
+
+    #[test]
+    fn test_lazy_decoder_gap_without_repair_is_partial_only() {
+        let pool = make_pool();
+        let mut policy = test_policy();
+        policy.lazy_enabled = true;
+
+        let mut dec = LazyDecoder::new_with_policy(FecMode::Normal, 4, pool.clone(), &policy);
+
+        let mut s1 = mk_src_packet(1, 100, &pool);
+        s1.is_systematic = true;
+        s1.seq = 1;
+        dec.take_packet(s1);
+
+        let mut s5 = mk_src_packet(5, 100, &pool);
+        s5.is_systematic = true;
+        s5.seq = 5;
+        dec.take_packet(s5);
+
+        assert!(dec.recovery_needed(), "gap should still make partial drain useful");
+        assert!(
+            dec.partial_recovery_pending(),
+            "systematic packet after gap should allow partial drain"
+        );
+        assert!(
+            !dec.full_recovery_pending(),
+            "gap without new repair must not trigger full matrix recovery"
+        );
+    }
+
+    #[test]
+    fn test_lazy_decoder_repair_after_gap_requests_full_recovery_once() {
+        let pool = make_pool();
+        let mut policy = test_policy();
+        policy.lazy_enabled = true;
+
+        let mut dec = LazyDecoder::new_with_policy(FecMode::Normal, 4, pool.clone(), &policy);
+
+        let mut s1 = mk_src_packet(1, 100, &pool);
+        s1.is_systematic = true;
+        s1.seq = 1;
+        dec.take_packet(s1);
+
+        let mut s5 = mk_src_packet(5, 100, &pool);
+        s5.is_systematic = true;
+        s5.seq = 5;
+        dec.take_packet(s5);
+
+        let mut repair = mk_src_packet(200, 50, &pool);
+        repair.is_systematic = false;
+        repair.seq = 200;
+        dec.take_packet(repair);
+
+        assert_eq!(dec.pending_repairs_len(), 0, "repair should flush after a known gap");
+        assert!(dec.full_recovery_pending(), "new repair must request full recovery");
+
+        let _ = dec.get_result();
+        assert!(
+            !dec.full_recovery_pending(),
+            "full recovery request must be consumed after one get_result call"
+        );
     }
 
     #[test]

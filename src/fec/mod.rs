@@ -3641,8 +3641,12 @@ impl AdaptiveFec {
             return Ok(());
         }
 
-        if let Some(result) = decoder.get_result() {
-            output.extend(result);
+        if decoder.full_recovery_needed() {
+            if let Some(result) = decoder.get_result() {
+                output.extend(result);
+            } else if self.partial_enabled {
+                output.extend(decoder.get_partial_result());
+            }
         } else if self.partial_enabled {
             output.extend(decoder.get_partial_result());
         }

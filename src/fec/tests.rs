@@ -158,6 +158,41 @@ fn test_on_receive_into_matches_on_receive_first_packet() {
 }
 
 #[test]
+fn test_strong_receive_into_recovers_single_source_loss() {
+    let _env_lock = acquire_env_lock();
+    let pool = crate::optimize::global_pool();
+    let mut config = FecConfig::product_default();
+    config.initial_mode = FecMode::Strong;
+    config.window_sizes.insert(FecMode::Strong, 16);
+
+    let mut sender = AdaptiveFec::new(config.clone());
+    let mut receiver = AdaptiveFec::new(config);
+    let mut send_output = Vec::with_capacity(40);
+    let mut receive_output = Vec::with_capacity(8);
+    let mut emitted = Vec::new();
+    let missing_id = 7_u64;
+
+    for id in 0..16_u64 {
+        let pkt = mk_src_packet(id, 100, &pool);
+        sender.on_send_into(pkt, &mut send_output);
+        for packet in send_output.drain(..) {
+            if packet.is_systematic && packet.id == missing_id {
+                continue;
+            }
+            receiver
+                .on_receive_into(packet, &mut receive_output)
+                .expect("strong receive_into must accept packet");
+            emitted.extend(receive_output.drain(..));
+        }
+    }
+
+    assert!(
+        emitted.iter().any(|packet| packet.id == missing_id && packet.len() == 100),
+        "strong receive_into must recover dropped source packet {missing_id}"
+    );
+}
+
+#[test]
 fn test_continuous_target_keeps_clean_link_zero_family() {
     let target = continuous_fec_target(0.0, true, false, 2048, 1024, 0, 0.0);
     assert_eq!(target.family, FecBackendFamily::Zero);
