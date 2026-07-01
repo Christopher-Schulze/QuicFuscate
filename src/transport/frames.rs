@@ -47,6 +47,15 @@ pub fn write_stream_frame(
 }
 
 #[inline(always)]
+pub fn write_padding(len: usize, out: &mut [u8]) -> Result<usize, ConnectionError> {
+    if out.len() < len {
+        return Err(ConnectionError::BufferTooShort);
+    }
+    out[..len].fill(0x00);
+    Ok(len)
+}
+
+#[inline(always)]
 pub fn wire_len(frame: &crate::transport::Frame<'_>) -> usize {
     use crate::transport::Frame as F;
     match frame {
@@ -133,11 +142,7 @@ pub fn to_bytes(
     }
     match frame {
         F::Padding { len } => {
-            if out.len() < *len {
-                return Err(ConnectionError::BufferTooShort);
-            }
-            out[..*len].fill(0x00);
-            return Ok(*len);
+            return write_padding(*len, out);
         }
         F::Ping { .. } => {
             off += write_varint(0x01, &mut out[off..])?;
@@ -802,6 +807,16 @@ mod tests {
             Frame::Padding { len } => assert_eq!(len, 10),
             other => panic!("expected Padding, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_write_padding_direct_helper() {
+        let mut buf = [0xAAu8; 8];
+        let written = write_padding(5, &mut buf).expect("write padding");
+        assert_eq!(written, 5);
+        assert_eq!(&buf[..5], &[0, 0, 0, 0, 0]);
+        assert_eq!(&buf[5..], &[0xAA, 0xAA, 0xAA]);
+        assert!(matches!(write_padding(9, &mut buf), Err(ConnectionError::BufferTooShort)));
     }
 
     #[test]

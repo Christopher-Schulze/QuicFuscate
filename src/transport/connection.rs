@@ -2063,8 +2063,7 @@ impl Connection {
                 let needed = target_total - off - tag_reserve;
                 let pad_len = needed.min(avail);
                 if pad_len > 0 {
-                    let pad = Frame::Padding { len: pad_len };
-                    off += frames::to_bytes(&pad, &mut out[off..])?;
+                    off += frames::write_padding(pad_len, &mut out[off..])?;
                 }
             }
             return Ok(off);
@@ -2082,8 +2081,7 @@ impl Connection {
                     let needed = target - off - tag_reserve;
                     let pad_len = needed.min(avail);
                     if pad_len > 0 {
-                        let pad = Frame::Padding { len: pad_len };
-                        off += frames::to_bytes(&pad, &mut out[off..])?;
+                        off += frames::write_padding(pad_len, &mut out[off..])?;
                     }
                 }
                 return Ok(off);
@@ -2094,8 +2092,7 @@ impl Connection {
             if avail > 0 {
                 let pad_len = self.compute_stealth_padding(pt_len_now, avail);
                 if pad_len > 0 {
-                    let pad = Frame::Padding { len: pad_len };
-                    let written = frames::to_bytes(&pad, &mut out[off..])?;
+                    let written = frames::write_padding(pad_len, &mut out[off..])?;
                     off += written;
                 }
             }
@@ -2438,8 +2435,7 @@ impl Connection {
                 let target_off = target_total - 16;
                 if off < target_off {
                     let pad_len = target_off - off;
-                    let pad = Frame::Padding { len: pad_len };
-                    frames::to_bytes(&pad, &mut out[off..])?;
+                    frames::write_padding(pad_len, &mut out[off..])?;
                 }
 
                 trace_send_packet(
@@ -2590,8 +2586,7 @@ impl Connection {
                 let needed = probe_size.saturating_sub(off + tag_reserve);
                 let pad_len = needed.min(avail);
                 if pad_len > 0 {
-                    let pad = Frame::Padding { len: pad_len };
-                    off += crate::transport::frames::to_bytes(&pad, &mut out[off..])?;
+                    off += crate::transport::frames::write_padding(pad_len, &mut out[off..])?;
                 }
                 self.pmtu.on_probe_sent(probe_size, now);
                 _pmtu_probe_sent = true;
@@ -2618,8 +2613,7 @@ impl Connection {
                     let needed = (chaff_size as usize).saturating_sub(off + tag_reserve);
                     let pad_len = needed.min(avail);
                     if pad_len > 0 {
-                        let pad = Frame::Padding { len: pad_len };
-                        off += crate::transport::frames::to_bytes(&pad, &mut out[off..])?;
+                        off += crate::transport::frames::write_padding(pad_len, &mut out[off..])?;
                     }
                 }
             }
