@@ -51,11 +51,15 @@ cargo check
 
 # Check tests compile
 echo -e "\n> Checking test compilation..."
-run_cargo test --no-run --features rust-tests
+if warn_if_low_disk_for_step "${QUICFUSCATE_MIN_FULL_TEST_COMPILE_GIB:-10}" "full test binary compilation" "$PROJECT_ROOT"; then
+  run_cargo test --no-run --features rust-tests
+fi
 
 # Check benchmarks compile
 echo -e "\n> Checking benchmark compilation..."
-if ! cargo bench --no-run --features benches; then
+if ! warn_if_low_disk_for_step "${QUICFUSCATE_MIN_BENCH_COMPILE_GIB:-10}" "benchmark binary compilation" "$PROJECT_ROOT"; then
+  warn "benchmark compilation skipped due to low disk"
+elif ! cargo bench --no-run --features benches; then
   warn "benchmark compilation failed (benches may be optional in this build)"
 fi
 

@@ -494,12 +494,19 @@ impl TunInterface {
         F: FnMut(&[u8]),
     {
         loop {
-            let (block, len) = self.read_block()?;
-            if len > 0 {
-                on_packet(&block[..len]);
+            match self.read_block() {
+                Ok((block, len)) if len > 0 => {
+                    on_packet(&block[..len]);
+                    self.pool.free(block);
+                }
+                Ok((block, _)) => {
+                    self.pool.free(block);
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(e) => return Err(e),
             }
-            // Return the block to the pool by dropping it.
-            self.pool.free(block);
         }
     }
 }
@@ -596,8 +603,26 @@ mod linux_tun {
                 name.push(char::from(c.to_ne_bytes()[0]));
             }
 
-            // Take ownership of the fd to avoid per-call File reconstruction
+            // Take ownership of the fd to avoid per-call File reconstruction.
+            // Keep the descriptor nonblocking so async runtimes and shutdown
+            // paths can poll TUN without getting stuck in an uninterruptible
+            // blocking read.
             let fd = file.into_raw_fd();
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            if flags < 0 {
+                let error = io::Error::last_os_error();
+                unsafe {
+                    libc::close(fd);
+                }
+                return Err(error);
+            }
+            if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+                let error = io::Error::last_os_error();
+                unsafe {
+                    libc::close(fd);
+                }
+                return Err(error);
+            }
             let name: Arc<str> = Arc::from(name);
             Ok(Self { name, fd, mtu: cfg.mtu })
         }

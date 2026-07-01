@@ -404,10 +404,17 @@ impl ClientRuntime {
         }
         if let Some(rt) = self.runtime.as_ref() {
             let handles = std::mem::take(&mut self.io_handles);
+            for handle in &handles {
+                handle.abort();
+            }
             rt.block_on(async move {
                 for handle in handles {
                     if let Err(e) = handle.await {
-                        log::warn!("Client I/O task join failed: {}", e);
+                        if e.is_cancelled() {
+                            log::debug!("Client I/O task cancelled during disconnect");
+                        } else {
+                            log::warn!("Client I/O task join failed: {}", e);
+                        }
                     }
                 }
             });

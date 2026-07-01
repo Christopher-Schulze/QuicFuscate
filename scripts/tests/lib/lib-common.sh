@@ -89,6 +89,35 @@ mem_total() {
   fi
 }
 
+disk_free_kib() {
+  local path="${1:-.}"
+  df -Pk "$path" | awk 'NR==2 {print $4; exit}'
+}
+
+has_min_disk_gib() {
+  local min_gib="$1"
+  local path="${2:-.}"
+  local free_kib
+  free_kib="$(disk_free_kib "$path")"
+  [[ "$free_kib" =~ ^[0-9]+$ ]] || return 1
+  (( free_kib >= min_gib * 1024 * 1024 ))
+}
+
+warn_if_low_disk_for_step() {
+  local min_gib="$1"
+  local step="$2"
+  local path="${3:-.}"
+  if has_min_disk_gib "$min_gib" "$path"; then
+    return 0
+  fi
+  local free_kib
+  free_kib="$(disk_free_kib "$path" 2>/dev/null || echo 0)"
+  local free_gib
+  free_gib="$(awk -v k="$free_kib" 'BEGIN { printf "%.1f", k / 1024 / 1024 }')"
+  warn "Skipping ${step}: requires >=${min_gib}GiB free disk, found ${free_gib}GiB at ${path}"
+  return 1
+}
+
 print_system_banner() {
   echo "==============================================================="
   echo "  System: $(uname -a)"

@@ -34,7 +34,9 @@ else
 fi
 
 # 2) Core compilation + unit/integration/doc tests
-run_cargo test --no-run
+if warn_if_low_disk_for_step "${QUICFUSCATE_MIN_FULL_TEST_COMPILE_GIB:-10}" "full-suite test binary precompile" "$PROJECT_ROOT"; then
+  run_cargo test --no-run
+fi
 if (( FAST )); then
   run_cargo test --lib -- --nocapture
 else

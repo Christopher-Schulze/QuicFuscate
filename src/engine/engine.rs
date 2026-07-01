@@ -927,6 +927,9 @@ impl QuicFuscateEngine {
 
         if !handshake_ok {
             crate::telemetry::ENGINE_HANDSHAKE_TIMEOUT_TOTAL.inc();
+            if let Err(error) = runtime.disconnect() {
+                log::warn!("Client runtime cleanup after handshake timeout failed: {:?}", error);
+            }
             self.set_state(EngineState::Running);
             self.notify_state_change(EngineState::Connecting, EngineState::Running);
             return Err(EngineError::Connection(
@@ -1355,6 +1358,19 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::sync::atomic::AtomicBool;
+    use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard};
+
+    static ENGINE_TUN_TEST_LOCK: StdMutex<()> = StdMutex::new(());
+
+    fn engine_tun_test_guard() -> StdMutexGuard<'static, ()> {
+        ENGINE_TUN_TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    fn engine_tun_test_config() -> EngineConfig {
+        let mut config = EngineConfig::default();
+        config.interface.tun_name.clear();
+        config
+    }
 
     fn tun_available() -> bool {
         let pool = crate::optimize::global_pool();
@@ -1372,10 +1388,11 @@ mod tests {
 
     #[test]
     fn test_engine_lifecycle() {
+        let _tun_guard = engine_tun_test_guard();
         if !tun_available() {
             return;
         }
-        let config = EngineConfig::default();
+        let config = engine_tun_test_config();
         let mut engine = QuicFuscateEngine::new(config).unwrap();
 
         assert_eq!(engine.state(), EngineState::Created);
@@ -1389,10 +1406,11 @@ mod tests {
 
     #[test]
     fn test_engine_connect_disconnect() {
+        let _tun_guard = engine_tun_test_guard();
         if !tun_available() {
             return;
         }
-        let mut config = EngineConfig::default();
+        let mut config = engine_tun_test_config();
         config.connection.remote = "127.0.0.1:4433".to_string();
 
         let mut engine = QuicFuscateEngine::new(config).unwrap();
@@ -1428,8 +1446,9 @@ mod tests {
         assert!(disabled_transport.disable_active_migration);
     }
 
-    #[tokio::test]
-    async fn test_engine_server_start_stop_runs_standalone_runtime() {
+    #[test]
+    fn test_engine_server_start_stop_runs_standalone_runtime() {
+        let _tun_guard = engine_tun_test_guard();
         let cert_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("config/local/dev-certs/admin-local-20260208_213140.crt");
         let key_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1441,7 +1460,7 @@ mod tests {
             return;
         }
 
-        let mut config = EngineConfig::default();
+        let mut config = engine_tun_test_config();
         config.engine.mode = EngineMode::Server;
         config.connection.remote = "127.0.0.1:0".to_string();
         config.connection.cert_file = cert_path.to_string_lossy().into_owned();
@@ -1452,7 +1471,7 @@ mod tests {
         assert!(engine.server_loop_handle.is_some());
         assert!(engine.server_loop_shutdown_tx.is_some());
         assert!(engine.server_metrics.is_some());
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        std::thread::sleep(std::time::Duration::from_millis(25));
         assert!(engine.is_running());
 
         engine.stop().unwrap();
@@ -1462,10 +1481,11 @@ mod tests {
 
     #[test]
     fn test_invalid_state_transitions() {
+        let _tun_guard = engine_tun_test_guard();
         if !tun_available() {
             return;
         }
-        let config = EngineConfig::default();
+        let config = engine_tun_test_config();
         let mut engine = QuicFuscateEngine::new(config).unwrap();
 
         // Can't connect before start
@@ -1488,10 +1508,11 @@ mod tests {
 
     #[test]
     fn test_callbacks() {
+        let _tun_guard = engine_tun_test_guard();
         if !tun_available() {
             return;
         }
-        let config = EngineConfig::default();
+        let config = engine_tun_test_config();
         let mut engine = QuicFuscateEngine::new(config).unwrap();
 
         let state_changed = Arc::new(AtomicBool::new(false));

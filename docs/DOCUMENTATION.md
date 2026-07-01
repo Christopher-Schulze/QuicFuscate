@@ -1041,6 +1041,8 @@ pub struct LinuxTun {
 ```
 - TUN device creation via `ioctl(TUNSETIFF)` with IFF_TUN | IFF_NO_PI flags
 - Direct file descriptor I/O via `libc::read`/`libc::write` with EINTR retry
+- The descriptor is switched to nonblocking mode after `TUNSETIFF`; async and threaded
+  runtime loops treat `WouldBlock` as an idle poll, not as a fatal teardown signal.
 - Automatic cleanup in Drop trait
 - No intermediate buffering
 - MTU configuration support
@@ -2217,6 +2219,11 @@ Packet flow is unified across CLI and embedded paths:
 
 - outbound: `TUN -> Stealth -> FEC -> QUIC`
 - inbound: `QUIC -> FEC decode/recovery -> Stealth unwrap -> TUN`
+
+Connection teardown is deterministic: handshake-timeout failure paths clean up the
+client runtime before returning the engine to `Running`, and client disconnect
+requests cancel owned I/O tasks before dropping sockets and TUN handles. This keeps
+unreachable-server attempts from leaving detached TUN readers behind.
 
 `--profile-seq` and `--profile-interval` feed the same runtime control path used by command/API overrides.
 

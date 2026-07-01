@@ -4566,6 +4566,9 @@ impl ServerRuntime {
                                     }
                                 }
                                 Ok(_) => {}
+                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                    std::thread::sleep(Duration::from_millis(1));
+                                }
                                 Err(_) => break,
                             }
                         });
