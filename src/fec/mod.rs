@@ -3571,10 +3571,12 @@ impl AdaptiveFec {
             }
         }
 
-        // Telemetry: queue length, uniqueness and order depth
+        // Telemetry: queue length plus repair-symbol uniqueness/order depth.
+        // The common systematic-only path must not pay HashSet/VecDeque cost:
+        // repair-symbol diagnostics are only meaningful for emitted repairs.
         crate::telemetry::FEC_EMITTED_QUEUE
             .store(output.len() as u64, std::sync::atomic::Ordering::Relaxed);
-        for p in output.iter() {
+        for p in output.iter().filter(|p| !p.is_systematic) {
             self.emitted_ids.insert(p.id);
             self.emitted_order.push_back(p.id);
             if self.emitted_order.len() > 4096 {
