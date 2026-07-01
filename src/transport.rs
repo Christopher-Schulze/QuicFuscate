@@ -320,6 +320,21 @@ mod tests {
     }
 
     #[test]
+    fn test_padding_adaptive_non_power_of_two_granularity() {
+        let mut cfg = Config::new_with_version(PROTOCOL_VERSION).unwrap();
+        cfg.set_stealth_padding(true, 3, 128);
+        cfg.set_stealth_adaptive_granularity(30);
+        let local: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let peer: std::net::SocketAddr = "127.0.0.1:4433".parse().unwrap();
+        let scid = [0u8; 8];
+        let conn = packet::connect(None, &scid, local, peer, &mut cfg).unwrap();
+
+        assert_eq!(conn.compute_stealth_padding(44, 1000), 16);
+        assert_eq!(conn.compute_stealth_padding(60, 1000), 0);
+        assert_eq!(conn.compute_stealth_padding(61, 8), 8);
+    }
+
+    #[test]
     fn test_padding_browser_mimic_quarter_cap() {
         let conn = make_conn_with_padding(true, 4, 100);
         for _ in 0..16 {

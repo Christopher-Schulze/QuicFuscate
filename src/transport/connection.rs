@@ -2724,11 +2724,16 @@ impl Connection {
             // 3 = Adaptive (pad up to next 64B boundary, capped by max)
             3 => {
                 let g = self.config.stealth_adaptive_granularity.max(1) as usize;
-                let rem = cur_pt_len % g;
+                let rem = if g.is_power_of_two() { cur_pt_len & (g - 1) } else { cur_pt_len % g };
                 if rem == 0 {
                     0
                 } else {
-                    std::cmp::min(g - rem, max)
+                    let pad = g - rem;
+                    if pad < max {
+                        pad
+                    } else {
+                        max
+                    }
                 }
             }
             // 4 = BrowserMimic: bias profile to small values; bucket depends on bias
