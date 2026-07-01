@@ -324,26 +324,16 @@ pub(crate) mod planner {
         }
 
         fn arm_default(features: &CpuFeatures) -> CryptoAeadPlan {
-            if Self::arm_can_use_aegis(features) {
-                CryptoAeadPlan::Aegis128X4
-            } else {
-                CryptoAeadPlan::Morus
-            }
+            Self::arm_for_length(crate::crypto::DEFAULT_DATA_PLANE_AEAD_LEN, features)
         }
 
-        fn arm_for_length(len: usize, features: &CpuFeatures) -> CryptoAeadPlan {
-            if !Self::arm_can_use_aegis(features) {
-                return CryptoAeadPlan::Morus;
-            }
-            if len < Self::AEGIS_X4_MIN_LEN {
-                CryptoAeadPlan::Aegis128L
-            } else {
-                CryptoAeadPlan::Aegis128X4
-            }
-        }
-
-        fn arm_can_use_aegis(features: &CpuFeatures) -> bool {
-            features.neon && features.aes
+        fn arm_for_length(_len: usize, _features: &CpuFeatures) -> CryptoAeadPlan {
+            // Broderick ARM/AArch64 Criterion evidence (TODO-500) shows MORUS
+            // beats the retained AEGIS L/X4/X8 backends for 64B, 1024B, 1400B
+            // and 8192B payloads across single-packet and batch8 seal/open
+            // trait paths. Keep AEGIS available for explicit override and
+            // x86/VAES paths, but choose MORUS automatically on AArch64.
+            CryptoAeadPlan::Morus
         }
     }
 
@@ -393,12 +383,17 @@ pub(crate) mod planner {
         }
 
         #[test]
-        fn arm_small_payload_uses_single_lane_aegis() {
+        fn arm_payloads_use_morus_after_broderick_backend_evidence() {
             let features = CpuFeatures { neon: true, aes: true, ..CpuFeatures::default() };
             assert_eq!(
                 CryptoPlan::arm_for_length(CryptoPlan::AEGIS_X4_MIN_LEN - 1, &features),
-                CryptoAeadPlan::Aegis128L
+                CryptoAeadPlan::Morus
             );
+            assert_eq!(
+                CryptoPlan::arm_for_length(crate::crypto::DEFAULT_DATA_PLANE_AEAD_LEN, &features),
+                CryptoAeadPlan::Morus
+            );
+            assert_eq!(CryptoPlan::arm_for_length(8192, &features), CryptoAeadPlan::Morus);
         }
 
         // Regression guard: the data-plane AEAD auto-selection length must

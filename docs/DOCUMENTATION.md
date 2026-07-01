@@ -1065,7 +1065,7 @@ pub struct MacTun {
 - Clear error messages if factory not registered
 
 ### Cryptography Design (AEAD-First, Efficient by Construction)
-- Product-level data-plane AEAD posture: `Aegis128L` as the primary family with `Morus1280_128` as the non-AES fallback.
+- Product-level data-plane AEAD posture: retained `Aegis128L` and `Morus1280_128` families with hardware-aware automatic selection.
 - Constant-time glue and strict nonce/tag checks on hot paths
 - Perfect Forward Secrecy via ephemeral X25519
 - Runtime selection via FeatureDetector and `simd::planner` (CryptoAeadPlan) chooses the best internal implementation for the selected data-plane AEAD posture
@@ -1077,14 +1077,15 @@ pub struct MacTun {
 - This is intentionally retained custom runtime crypto, not a pure external-lib-only posture.
 - External crates are used only as baseline vectors, interoperability checks, or differential/reference oracles where available. They are not the canonical runtime providers for the retained AEGIS/MORUS data-plane contract.
 - Runtime selection:
-  - If hardware AES is available, prefer AEGIS.
-  - Internal AEGIS batching width (`Aegis128X4` / `Aegis128X8`) is selected automatically as an implementation detail.
-  - If hardware AES is not available, fall back to `Morus1280_128`.
+  - x86/x86_64 with AES uses AEGIS; large VAES-capable payloads may use `Aegis128X8` as an internal backend.
+  - AArch64 uses `Morus1280_128` automatically because Broderick ARM/AArch64 Criterion evidence shows MORUS beats retained AEGIS L/X4/X8 for 64B, 1024B, 1400B, and 8192B single and batch8 seal/open trait paths.
+  - Architectures without an evidence-backed AEGIS advantage fall back to `Morus1280_128`.
 - Packet hot path dispatch: normal 0-RTT/1-RTT data-plane AEAD slots resolve to `DataAead` enum variants (`Aegis128L`, `Aegis128X4`, `Aegis128X8`, `Morus`) and avoid boxed trait dispatch. Rustls-provided packet keys remain supported through the explicit `PacketAead*::Dynamic` wrapper arm.
 - Performance evidence:
   - retained backend evidence is produced by `scripts/benchmarks/suites/bench-retained-crypto-backends.sh`
   - the suite records hardware profile, per-backend throughput, and per-size winners for `Aegis128L`, `Aegis128X4`, `Aegis128X8`, and `Morus1280_128`
-- aarch64 currently uses the internal AEGIS backend selected by the planner; an SVE2 AES batching backend for the AEGIS update step is not enabled in the current build profile.
+- CI regression evidence for retained backend packet trait paths lives in `scripts/benchmarks/ci_regression.rs` as `data_aead_single_seal_batch`, `data_aead_single_open_batch`, `data_aead_batch8_seal`, and `data_aead_batch8_open`.
+- AArch64 SVE2 AES batching for the AEGIS update step is not enabled in the current build profile.
 - Testing: see `scripts/tests/suites/test-crypto.sh` and the comprehensive test runner. Edge cases (including non-32-byte payloads) are validated to ensure tag verification parity between encrypt/decrypt.
 
 #### GHASH Acceleration (AES-GCM)
@@ -1132,6 +1133,7 @@ pub struct MacTun {
 - Broderick ARM/AArch64 decode-batch reference after TODO-491 lazy full-recovery gating: Normal clean `279 us`, Normal 10% loss `506 us`, Strong clean `200 us`, Strong 10% loss `195 us`, Streaming clean `447 us`, Streaming 10% loss `474 us`.
 - Broderick ARM/AArch64 lazy-fast-path reference after TODO-498 source-buffer replay: zero passthrough `285.14 ns`, zero reuse `266.47 ns`, Normal no-loss `1.284 us`, Normal no-loss reuse `1.244 us`.
 - Broderick ARM/AArch64 send-reuse-hotpath reference after TODO-499: Zero/1400B `233.37 ns`, Normal/1400B `1.1081 us`, Strong/1400B `408.48 ns`, Streaming/1400B `380.88 ns`.
+- Broderick ARM/AArch64 data AEAD reference after TODO-500: MORUS wins every retained-backend packet trait path tested; 1400B single seal/open are `1.1944 us` / `1.1885 us` for MORUS versus best AEGIS `2.0736 us` / `2.1307 us`, and batch8 seal/open are `9.3550 us` / `9.4560 us` for MORUS versus best AEGIS `16.699 us` / `17.010 us`.
 
 #### Connection Benchmark Coverage
 
@@ -1139,7 +1141,7 @@ pub struct MacTun {
 - `connection_1rtt_send_recv` and `connection_1rtt_stealth_compare` use Criterion `iter_batched(..., BatchSize::PerIteration)` so paired-connection construction, CID setup, and key installation are excluded from timed measurement.
 - `transport_stealth_padding_decision` protects the real per-packet transport padding decision path. Adaptive padding uses a power-of-two remainder fastpath for the default 64-byte granularity while preserving modulo behavior for custom non-power-of-two granularities.
 - The measured routine remains the real 1-RTT path: `stream_send -> send -> recv`.
-- Broderick ARM/AArch64 reference after TODO-489: `connection_1rtt_send_recv` is about `5.55 us` for 256B, `7.14 us` for 1024B, and `7.65 us` for 1400B; `connection_1rtt_stealth_compare` is about `7.23 us` stealth-off and `7.57 us` stealth-on.
+- Broderick ARM/AArch64 reference after TODO-500 AArch64 MORUS auto-selection: `connection_1rtt_send_recv` is about `4.70 us` for 256B, `5.50 us` for 1024B, and `5.84 us` for 1400B; `connection_1rtt_stealth_compare` is about `5.48 us` stealth-off and `5.55 us` stealth-on.
 
 #### Galois Field Implementations
 
@@ -1800,7 +1802,7 @@ cargo build --release
 
 #### Runtime Dispatch (Selector)
 
-At runtime, the data-plane AEAD plan is selected based on CPU features (via `cpufeatures` and the internal `FeatureDetector`):
+At runtime, the data-plane AEAD plan is selected based on CPU features and measured backend policy (via `cpufeatures`, the internal `FeatureDetector`, and `simd::planner`):
 
 ```rust
 use quicfuscate::simd::CryptoAeadPlan;

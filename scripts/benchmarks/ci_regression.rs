@@ -5,6 +5,7 @@
 // - GHASH (GCM authentication)
 // - AES-128-GCM seal (handshake AEAD)
 // - MORUS encrypt/decrypt (data-plane AEAD)
+// - Retained data-plane AEAD backend seal/open (AEGIS L/X4/X8 vs MORUS)
 // - Varint encode/decode (QUIC transport framing)
 // - QUIC header validation (SIMD-routed)
 // - Popcnt (ECN/bitmap ops)
@@ -148,6 +149,187 @@ fn bench_morus_decrypt(c: &mut Criterion) {
             });
         });
         group.finish();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Retained data-plane AEAD backends (real packet trait path)
+// ---------------------------------------------------------------------------
+fn bench_data_aead_backends(c: &mut Criterion) {
+    use quicfuscate::crypto::aead::{AeadOpenItem, AeadSealItem};
+    use quicfuscate::crypto::{build_data_aead_for_benches, BenchDataAeadBackend};
+
+    const BATCH: usize = 8;
+
+    let key = [0xA5u8; 16];
+    let iv = [0x5Au8; 12];
+    let ad = b"ci-regression-data-aead";
+    let backends = [
+        BenchDataAeadBackend::Aegis128L,
+        BenchDataAeadBackend::Aegis128X4,
+        BenchDataAeadBackend::Aegis128X8,
+        BenchDataAeadBackend::Morus,
+    ];
+
+    for size in [64usize, 1024, 1400, 8192] {
+        let mut single_seal = c.benchmark_group("data_aead_single_seal_batch");
+        single_seal.throughput(Throughput::Bytes(size as u64));
+        for backend in backends {
+            let (seal, _) = build_data_aead_for_benches(backend, &key, &iv);
+            let mut counter = 1u64;
+            let mut buf = vec![0u8; size + 16];
+            single_seal.bench_function(format!("{}_{}B", backend.as_str(), size), |b| {
+                b.iter(|| {
+                    counter = counter.wrapping_add(1);
+                    buf[..size].fill(0xA5);
+                    let mut item = AeadSealItem {
+                        counter: black_box(counter),
+                        ad: black_box(ad),
+                        buf: black_box(buf.as_mut_slice()),
+                        plaintext_len: size,
+                    };
+                    seal.seal_batch(core::slice::from_mut(&mut item)).expect("seal");
+                    black_box(&buf);
+                });
+            });
+        }
+        single_seal.finish();
+
+        let mut single_open = c.benchmark_group("data_aead_single_open_batch");
+        single_open.throughput(Throughput::Bytes(size as u64));
+        for backend in backends {
+            let (seal, open) = build_data_aead_for_benches(backend, &key, &iv);
+            let mut sealed = vec![0xA5u8; size + 16];
+            let mut seal_item =
+                AeadSealItem { counter: 7, ad, buf: sealed.as_mut_slice(), plaintext_len: size };
+            seal.seal_batch(core::slice::from_mut(&mut seal_item)).expect("seal fixture");
+            let frozen = sealed.clone();
+            let mut work = vec![0u8; size + 16];
+            single_open.bench_function(format!("{}_{}B", backend.as_str(), size), |b| {
+                b.iter(|| {
+                    work.copy_from_slice(&frozen);
+                    let mut item =
+                        AeadOpenItem { counter: 7, ad: black_box(ad), buf: black_box(&mut work) };
+                    open.open_batch(core::slice::from_mut(&mut item)).expect("open");
+                    black_box(&work);
+                });
+            });
+        }
+        single_open.finish();
+
+        let mut batch_seal = c.benchmark_group("data_aead_batch8_seal");
+        batch_seal.throughput(Throughput::Bytes((size * BATCH) as u64));
+        for backend in backends {
+            let (seal, _) = build_data_aead_for_benches(backend, &key, &iv);
+            let mut counter = 100u64;
+            let mut bufs = vec![vec![0u8; size + 16]; BATCH];
+            batch_seal.bench_function(format!("{}_{}B", backend.as_str(), size), |b| {
+                b.iter(|| {
+                    counter = counter.wrapping_add(BATCH as u64);
+                    for buf in &mut bufs {
+                        buf[..size].fill(0x5A);
+                    }
+                    let bufs: &mut [Vec<u8>; BATCH] =
+                        bufs.as_mut_slice().try_into().expect("batch size");
+                    let [b0, b1, b2, b3, b4, b5, b6, b7] = bufs;
+                    let mut items = [
+                        AeadSealItem { counter, ad, buf: b0.as_mut_slice(), plaintext_len: size },
+                        AeadSealItem {
+                            counter: counter + 1,
+                            ad,
+                            buf: b1.as_mut_slice(),
+                            plaintext_len: size,
+                        },
+                        AeadSealItem {
+                            counter: counter + 2,
+                            ad,
+                            buf: b2.as_mut_slice(),
+                            plaintext_len: size,
+                        },
+                        AeadSealItem {
+                            counter: counter + 3,
+                            ad,
+                            buf: b3.as_mut_slice(),
+                            plaintext_len: size,
+                        },
+                        AeadSealItem {
+                            counter: counter + 4,
+                            ad,
+                            buf: b4.as_mut_slice(),
+                            plaintext_len: size,
+                        },
+                        AeadSealItem {
+                            counter: counter + 5,
+                            ad,
+                            buf: b5.as_mut_slice(),
+                            plaintext_len: size,
+                        },
+                        AeadSealItem {
+                            counter: counter + 6,
+                            ad,
+                            buf: b6.as_mut_slice(),
+                            plaintext_len: size,
+                        },
+                        AeadSealItem {
+                            counter: counter + 7,
+                            ad,
+                            buf: b7.as_mut_slice(),
+                            plaintext_len: size,
+                        },
+                    ];
+                    seal.seal_batch(black_box(&mut items)).expect("batch seal");
+                    black_box(&bufs);
+                });
+            });
+        }
+        batch_seal.finish();
+
+        let mut batch_open = c.benchmark_group("data_aead_batch8_open");
+        batch_open.throughput(Throughput::Bytes((size * BATCH) as u64));
+        for backend in backends {
+            let (seal, open) = build_data_aead_for_benches(backend, &key, &iv);
+            let mut frozen = vec![vec![0x5Au8; size + 16]; BATCH];
+            {
+                let bufs: &mut [Vec<u8>; BATCH] =
+                    frozen.as_mut_slice().try_into().expect("batch size");
+                let [b0, b1, b2, b3, b4, b5, b6, b7] = bufs;
+                let mut items = [
+                    AeadSealItem { counter: 200, ad, buf: b0.as_mut_slice(), plaintext_len: size },
+                    AeadSealItem { counter: 201, ad, buf: b1.as_mut_slice(), plaintext_len: size },
+                    AeadSealItem { counter: 202, ad, buf: b2.as_mut_slice(), plaintext_len: size },
+                    AeadSealItem { counter: 203, ad, buf: b3.as_mut_slice(), plaintext_len: size },
+                    AeadSealItem { counter: 204, ad, buf: b4.as_mut_slice(), plaintext_len: size },
+                    AeadSealItem { counter: 205, ad, buf: b5.as_mut_slice(), plaintext_len: size },
+                    AeadSealItem { counter: 206, ad, buf: b6.as_mut_slice(), plaintext_len: size },
+                    AeadSealItem { counter: 207, ad, buf: b7.as_mut_slice(), plaintext_len: size },
+                ];
+                seal.seal_batch(&mut items).expect("batch seal fixture");
+            }
+            let mut work = frozen.clone();
+            batch_open.bench_function(format!("{}_{}B", backend.as_str(), size), |b| {
+                b.iter(|| {
+                    for (dst, src) in work.iter_mut().zip(&frozen) {
+                        dst.copy_from_slice(src);
+                    }
+                    let bufs: &mut [Vec<u8>; BATCH] =
+                        work.as_mut_slice().try_into().expect("batch size");
+                    let [b0, b1, b2, b3, b4, b5, b6, b7] = bufs;
+                    let mut items = [
+                        AeadOpenItem { counter: 200, ad, buf: b0.as_mut_slice() },
+                        AeadOpenItem { counter: 201, ad, buf: b1.as_mut_slice() },
+                        AeadOpenItem { counter: 202, ad, buf: b2.as_mut_slice() },
+                        AeadOpenItem { counter: 203, ad, buf: b3.as_mut_slice() },
+                        AeadOpenItem { counter: 204, ad, buf: b4.as_mut_slice() },
+                        AeadOpenItem { counter: 205, ad, buf: b5.as_mut_slice() },
+                        AeadOpenItem { counter: 206, ad, buf: b6.as_mut_slice() },
+                        AeadOpenItem { counter: 207, ad, buf: b7.as_mut_slice() },
+                    ];
+                    open.open_batch(black_box(&mut items)).expect("batch open");
+                    black_box(&work);
+                });
+            });
+        }
+        batch_open.finish();
     }
 }
 
@@ -638,6 +820,7 @@ criterion_group!(
     bench_aes_gcm,
     bench_morus_encrypt,
     bench_morus_decrypt,
+    bench_data_aead_backends,
 );
 
 criterion_group!(
