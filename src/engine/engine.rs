@@ -105,6 +105,11 @@ fn build_runtime_transport_config(config: &EngineConfig) -> Result<Config, Engin
         transport.enable_early_data();
     }
     transport.set_disable_active_migration(!config.connection.enable_migration);
+    transport.set_nat_traversal(
+        config.nat_traversal.to_transport_config().map_err(|error| {
+            EngineError::Config(format!("NAT traversal config invalid: {error}"))
+        })?,
+    );
     if config.transport.disable_pmtud {
         transport.discover_pmtu(false);
     }
@@ -1066,7 +1071,7 @@ impl QuicFuscateEngine {
 
         if elapsed >= Duration::from_millis(timeout_ms) {
             log::warn!(
-                "Heartbeat timeout: {}ms elapsed (threshold: {}ms) — triggering connection loss",
+                "Heartbeat timeout: {}ms elapsed (threshold: {}ms) - triggering connection loss",
                 elapsed.as_millis(),
                 timeout_ms
             );
@@ -1447,6 +1452,24 @@ mod tests {
     }
 
     #[test]
+    fn test_runtime_transport_config_carries_nat_traversal_policy() {
+        let mut config = EngineConfig::default();
+        config.nat_traversal.enabled = true;
+        config.nat_traversal.mode = crate::transport::NatTraversalMode::Roaming;
+        config.nat_traversal.ice_enabled = true;
+        config.nat_traversal.stun_servers = vec!["203.0.113.1:3478".to_string()];
+        config.nat_traversal.max_candidates = 4;
+
+        let transport = build_runtime_transport_config(&config).expect("transport config");
+        let nat = transport.nat_traversal();
+        assert!(nat.enabled);
+        assert_eq!(nat.mode, crate::transport::NatTraversalMode::Roaming);
+        assert!(nat.ice_enabled);
+        assert_eq!(nat.max_candidates, 4);
+        assert_eq!(nat.stun_servers.len(), 1);
+    }
+
+    #[test]
     fn test_engine_server_start_stop_runs_standalone_runtime() {
         let _tun_guard = engine_tun_test_guard();
         let cert_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1587,7 +1610,7 @@ mod tests {
     #[test]
     fn test_handle_connection_loss_no_op_when_not_connected() {
         let mut engine = QuicFuscateEngine::new(EngineConfig::default()).expect("engine");
-        // Engine is in Created state — handle_connection_loss should be a no-op
+        // Engine is in Created state - handle_connection_loss should be a no-op
         engine.handle_connection_loss(DisconnectReason::Timeout);
         // State should remain Created
         assert_eq!(engine.state(), EngineState::Created);

@@ -34,6 +34,8 @@ pub struct EngineConfig {
     pub connection: ConnectionConfig,
     /// Transport layer settings (CC, MTU, pacing)
     pub transport: TransportConfig,
+    /// Optional NAT path discovery settings (STUN/TURN/ICE).
+    pub nat_traversal: NatTraversalSection,
     /// Cryptographic settings (AEAD, PQ)
     pub crypto: CryptoConfig,
     /// TUN/TAP interface settings
@@ -76,6 +78,7 @@ impl EngineConfig {
         self.engine.validate()?;
         self.connection.validate()?;
         self.transport.validate()?;
+        self.nat_traversal.validate()?;
         self.crypto.validate()?;
         self.interface.validate()?;
         if self.connection.enable_0rtt && !self.anti_replay.enabled {
@@ -339,6 +342,97 @@ impl TransportConfig {
             ));
         }
         Ok(())
+    }
+}
+
+// ============================================================================
+// NAT TRAVERSAL SECTION
+// ============================================================================
+
+/// Optional NAT path discovery configuration.
+///
+/// NAT traversal is a bounded connectivity tool, not a default stealth layer.
+/// It remains off unless explicitly enabled and policy-approved for a concrete
+/// discovery reason such as direct-path failure, roaming, or mesh mode.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct NatTraversalSection {
+    /// Master switch. When false, no STUN/TURN/ICE probes are emitted.
+    pub enabled: bool,
+    /// Discovery policy: off, connectivity-fallback, roaming, mesh, always.
+    pub mode: crate::transport::NatTraversalMode,
+    /// STUN servers used for server-reflexive candidate discovery.
+    pub stun_servers: Vec<String>,
+    /// TURN servers reserved for relayed-candidate support.
+    pub turn_servers: Vec<String>,
+    /// Enable ICE candidate gathering.
+    pub ice_enabled: bool,
+    /// Minimum interval between discovery probe bursts.
+    pub probe_interval_ms: u64,
+    /// Maximum candidates returned by one discovery run.
+    pub max_candidates: usize,
+}
+
+impl Default for NatTraversalSection {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: crate::transport::NatTraversalMode::Off,
+            stun_servers: Vec::new(),
+            turn_servers: Vec::new(),
+            ice_enabled: false,
+            probe_interval_ms: crate::transport::NatTraversalConfig::DEFAULT_PROBE_INTERVAL_MS,
+            max_candidates: crate::transport::NatTraversalConfig::DEFAULT_MAX_CANDIDATES,
+        }
+    }
+}
+
+impl NatTraversalSection {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.probe_interval_ms < 1_000 {
+            return Err(ConfigError::Validation(
+                "nat_traversal.probe_interval_ms must be at least 1000".into(),
+            ));
+        }
+        if self.max_candidates == 0 {
+            return Err(ConfigError::Validation(
+                "nat_traversal.max_candidates must be at least 1".into(),
+            ));
+        }
+        for value in self.stun_servers.iter().chain(self.turn_servers.iter()) {
+            crate::transport::NatTraversalConfig::parse_server_addr(value)
+                .map_err(|e| ConfigError::Validation(e.to_string()))?;
+        }
+        if !self.enabled && self.mode != crate::transport::NatTraversalMode::Off {
+            return Err(ConfigError::Validation(
+                "nat_traversal.mode must be off when nat_traversal.enabled is false".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Convert engine TOML config into the transport-level config.
+    pub fn to_transport_config(&self) -> Result<crate::transport::NatTraversalConfig, ConfigError> {
+        let parse_servers = |values: &[String]| -> Result<Vec<SocketAddr>, ConfigError> {
+            values
+                .iter()
+                .map(|value| {
+                    crate::transport::NatTraversalConfig::parse_server_addr(value)
+                        .map_err(|e| ConfigError::Validation(e.to_string()))
+                })
+                .collect()
+        };
+
+        Ok(crate::transport::NatTraversalConfig {
+            enabled: self.enabled,
+            mode: self.mode,
+            stun_servers: parse_servers(&self.stun_servers)?,
+            turn_servers: parse_servers(&self.turn_servers)?,
+            ice_enabled: self.ice_enabled,
+            probe_interval_ms: self.probe_interval_ms,
+            max_candidates: self.max_candidates,
+        }
+        .normalized())
     }
 }
 
@@ -1004,7 +1098,7 @@ impl Default for AntiReplaySection {
 pub struct SecurityConfig {
     /// Enable kill switch (blocks all non-VPN traffic when disconnected).
     pub kill_switch: bool,
-    /// Heartbeat timeout in milliseconds — if no data received from server for
+    /// Heartbeat timeout in milliseconds - if no data received from server for
     /// this duration, trigger connection-loss detection and activate kill switch.
     /// Default: 30000 (30s). Set to 0 to disable heartbeat watchdog.
     pub heartbeat_timeout_ms: u64,
@@ -1122,6 +1216,55 @@ mod tests {
 
         assert_eq!(config.engine.mode, EngineMode::Server);
         assert_eq!(config.stealth.mode, StealthMode::AntiDpi);
+    }
+
+    #[test]
+    fn test_nat_traversal_defaults_to_disabled_path_discovery() {
+        let config = EngineConfig::default();
+        assert!(!config.nat_traversal.enabled);
+        assert_eq!(config.nat_traversal.mode, crate::transport::NatTraversalMode::Off);
+        assert!(config.nat_traversal.stun_servers.is_empty());
+        assert!(config.nat_traversal.turn_servers.is_empty());
+    }
+
+    #[test]
+    fn test_nat_traversal_toml_maps_to_transport_config() {
+        let toml = r#"
+[connection]
+remote = "127.0.0.1:4433"
+
+[nat_traversal]
+enabled = true
+mode = "connectivity-fallback"
+stun_servers = ["203.0.113.1:3478"]
+turn_servers = ["203.0.113.2:3478"]
+ice_enabled = true
+probe_interval_ms = 30000
+max_candidates = 4
+"#;
+        let config = EngineConfig::from_toml(toml).unwrap();
+        config.validate().unwrap();
+        let transport_nat = config.nat_traversal.to_transport_config().unwrap();
+        assert!(transport_nat.enabled);
+        assert_eq!(transport_nat.mode, crate::transport::NatTraversalMode::ConnectivityFallback);
+        assert!(transport_nat.ice_enabled);
+        assert_eq!(transport_nat.max_candidates, 4);
+        assert_eq!(transport_nat.stun_servers.len(), 1);
+        assert_eq!(transport_nat.turn_servers.len(), 1);
+    }
+
+    #[test]
+    fn test_nat_traversal_rejects_enabled_mode_when_disabled() {
+        let toml = r#"
+[connection]
+remote = "127.0.0.1:4433"
+
+[nat_traversal]
+enabled = false
+mode = "roaming"
+"#;
+        let config = EngineConfig::from_toml(toml).unwrap();
+        assert!(config.validate().is_err());
     }
 
     #[test]

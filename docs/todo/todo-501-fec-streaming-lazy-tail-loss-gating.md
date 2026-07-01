@@ -34,7 +34,7 @@ elimination path during clean streaming traffic.
   enough tail repairs accumulate, or the pending-repair safety cap is reached.
 - Prove the clean streaming decode batch no longer pays millisecond-scale full
   recovery cost.
-- Avoid UI, frontend, Docker, Kubernetes, Helm, or unrelated runtime changes.
+- Avoid UI, frontend, Docker, deployment manifests, or unrelated runtime changes.
 
 ## Implementation
 

@@ -30,7 +30,7 @@ reuses caller-owned output scratch via `on_send_into()`.
 - Make benchmark comments distinguish cold-start from hot-path measurement.
 - Capture Broderick evidence for all FEC modes and realistic packet sizes.
 - Avoid runtime behavior changes unless the new measurement exposes a real bug.
-- Avoid UI, frontend, Docker, Kubernetes, Helm, or unrelated runtime changes.
+- Avoid UI, frontend, Docker, deployment manifests, or unrelated runtime changes.
 
 ## Implementation
 

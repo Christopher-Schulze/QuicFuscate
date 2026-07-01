@@ -215,6 +215,13 @@ impl ClientConnection {
             tc.enable_early_data();
         }
 
+        tc.set_nat_traversal(
+            config
+                .nat_traversal
+                .to_transport_config()
+                .map_err(|e| EngineError::Config(format!("NAT traversal config invalid: {e}")))?,
+        );
+
         if let Some(id) = config.connection.qkey_id.as_deref() {
             let id = id.trim();
             if !id.is_empty() {
@@ -333,6 +340,22 @@ mod tests {
 
         let oc = ClientConnection::build_optimize_config(&config);
         assert!(oc.pool_capacity > 0);
+    }
+
+    #[test]
+    fn test_client_transport_config_carries_nat_traversal_policy() {
+        let mut config = EngineConfig::default();
+        config.nat_traversal.enabled = true;
+        config.nat_traversal.mode = crate::transport::NatTraversalMode::ConnectivityFallback;
+        config.nat_traversal.ice_enabled = true;
+        config.nat_traversal.stun_servers = vec!["203.0.113.10:3478".to_string()];
+
+        let tc = ClientConnection::build_transport_config(&config).unwrap();
+        let nat = tc.nat_traversal();
+        assert!(nat.enabled);
+        assert_eq!(nat.mode, crate::transport::NatTraversalMode::ConnectivityFallback);
+        assert!(nat.ice_enabled);
+        assert_eq!(nat.stun_servers.len(), 1);
     }
 
     #[test]

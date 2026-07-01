@@ -27,7 +27,7 @@ current production-readiness checkpoint after the app backend gate was added and
 - `.github/workflows/ci.yml` includes `app-backend-checks`, which builds the existing desktop
   Svelte bundle for Tauri context and validates `apps/tauri/src-tauri` with `cargo check` and
   `cargo test`.
-- UI source, UI styles, UI assets, generated UI bundles, Docker, Kubernetes, and Helm were not
+- UI source, UI styles, UI assets, generated UI bundles, Docker, or deployment manifests were not
   modified for this gate.
 
 ## Problem
@@ -52,6 +52,6 @@ claim. That drift makes future production-readiness reviews unreliable.
 - `docs/DOCUMENTATION.md` references the current `09cb9f2` checkpoint and green GitHub run IDs.
 - `README.md` no longer claims Windows CI coverage that the current workflows do not provide.
 - `docs/todo.md` and this detail file record TODO-472 as complete.
-- No UI surfaces, frontend source files, style assets, Docker, Kubernetes, or Helm files are
+- No UI surfaces, frontend source files, style assets, Docker, or deployment manifest files are
   touched.
 - The final commit is pushed to `origin/main`.

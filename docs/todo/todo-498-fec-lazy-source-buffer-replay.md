@@ -29,7 +29,7 @@ bounded source context and stay away from the heavy decoder.
 - Replay buffered source context only when a repair makes recovery useful.
 - Keep source buffering bounded under sustained lossy systematic-only traffic.
 - Preserve tail-loss recovery when repairs arrive after incomplete blocks.
-- Avoid UI, frontend, Docker, Kubernetes, Helm, or unrelated runtime changes.
+- Avoid UI, frontend, Docker, deployment manifests, or unrelated runtime changes.
 
 ## Implementation
 

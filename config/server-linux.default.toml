@@ -33,6 +33,22 @@ remote = "0.0.0.0:4433"        # Server listen address
 # enable_migration = true   # candidate paths must validate before activation
 
 # ==============================================================================
+# NAT TRAVERSAL / PATH DISCOVERY
+# ==============================================================================
+
+[nat_traversal]
+# Optional STUN/TURN/ICE path discovery. Disabled by default because STUN/ICE
+# probes are observable and are only useful when direct UDP, roaming, or mesh
+# connectivity needs them.
+enabled = false
+# mode = "off"                  # off | connectivity-fallback | roaming | mesh | always
+# stun_servers = []             # e.g. ["203.0.113.10:3478"]
+# turn_servers = []             # reserved for relayed candidates
+# ice_enabled = false
+# probe_interval_ms = 30000
+# max_candidates = 8
+
+# ==============================================================================
 # 0-RTT ANTI-REPLAY PROTECTION
 # ==============================================================================
 

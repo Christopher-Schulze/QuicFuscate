@@ -34,7 +34,7 @@ so per-tick allocation and recomputation were unnecessary.
   semantics.
 - Preserve existing Brain ownership rules: no mid-session persona mutation,
   only runtime actuators.
-- Avoid product UI, frontend, Docker, Kubernetes, Helm, or deployment changes.
+- Avoid product UI, frontend, Docker, deployment manifests, or deployment changes.
 
 ## Implementation
 

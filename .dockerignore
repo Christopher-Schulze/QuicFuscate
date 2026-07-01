@@ -47,9 +47,5 @@ Dockerfile
 docker-compose.yml
 .dockerignore
 
-# Deployment manifests (not needed inside the image)
-k8s/
-helm/
-
 # Tauri / apps native build (excluded from workspace)
 apps/tauri/src-tauri/target/

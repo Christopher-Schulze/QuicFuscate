@@ -730,7 +730,7 @@ impl FecObserverPlatformHints {
 
         #[cfg(target_os = "linux")]
         let containerized_server = std::path::Path::new("/.dockerenv").exists()
-            || std::env::var("KUBERNETES_SERVICE_HOST").is_ok();
+            || std::path::Path::new("/run/.containerenv").exists();
 
         #[cfg(not(target_os = "linux"))]
         let containerized_server = false;

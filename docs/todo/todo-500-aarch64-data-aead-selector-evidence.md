@@ -33,7 +33,7 @@ trait path used by the 1-RTT connection hot path.
   must justify itself under actual multi-item batch calls.
 - Change AArch64 auto-selection only if Broderick evidence is clear.
 - Keep x86/VAES selection unchanged.
-- Avoid UI, frontend, Docker, Kubernetes, Helm, or unrelated runtime changes.
+- Avoid UI, frontend, Docker, deployment manifests, or unrelated runtime changes.
 
 ## Implementation
 

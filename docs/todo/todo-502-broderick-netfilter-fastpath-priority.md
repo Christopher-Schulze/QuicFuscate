@@ -33,7 +33,7 @@ the extra chain as early as possible.
 - Ensure the rule is inserted at INPUT position 1, ahead of distro or Tailscale
   chains that may have been prepended after a previous run.
 - Preserve the existing remove mode.
-- Avoid UI, frontend, Docker, Kubernetes, Helm, or unrelated runtime changes.
+- Avoid UI, frontend, Docker, deployment manifests, or unrelated runtime changes.
 
 ## Implementation
 

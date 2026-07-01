@@ -31,7 +31,7 @@ send/receive only needs the current resolved `FecMode`.
   `AdaptiveFec::on_receive()`, `AdaptiveFec::on_receive_into()`, and
   `AdaptiveFec::current_mode()`.
 - Improve Broderick `fec_lazy_fast_path` clean-link timings.
-- Avoid UI, frontend, Docker, Kubernetes, Helm, or unrelated runtime changes.
+- Avoid UI, frontend, Docker, deployment manifests, or unrelated runtime changes.
 
 ## Implementation
 

@@ -22,6 +22,8 @@ use std::time::Duration;
 
 use rand::RngCore;
 
+use super::config::{NatDiscoveryReason, NatTraversalConfig};
+
 // ============================================================================
 // Constants (RFC 5389 / RFC 5766 / RFC 8445)
 // ============================================================================
@@ -601,6 +603,31 @@ impl IceAgent {
         candidates
     }
 
+    /// Async variant of [`Self::gather_candidates`] for runtime call sites that
+    /// already execute inside Tokio. This avoids `block_in_place` and is the
+    /// preferred path for live client/server operation.
+    pub async fn gather_candidates_async(
+        &self,
+        local_addrs: &[SocketAddr],
+        stun_servers: &[SocketAddr],
+    ) -> Vec<IceCandidate> {
+        let mut candidates = Vec::new();
+
+        for &addr in local_addrs {
+            candidates.push(IceCandidate::host(addr, self.local_preference, 1));
+        }
+
+        if !stun_servers.is_empty() {
+            match self.gather_srflx(local_addrs, stun_servers).await {
+                Ok(cands) => candidates.extend(cands),
+                Err(e) => log::warn!("[nat] async SRFLX candidate gathering failed: {}", e),
+            }
+        }
+
+        candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.priority));
+        candidates
+    }
+
     /// Async helper that issues STUN Binding Requests for each server.
     async fn gather_srflx(
         &self,
@@ -661,6 +688,68 @@ impl IceAgent {
             }
         }
         best.map(|(_, l, r)| (l, r))
+    }
+}
+
+/// Optional NAT path-discovery controller.
+///
+/// This controller turns the low-level STUN/ICE building blocks into a bounded
+/// runtime policy: discovery only happens when the configured
+/// [`NatTraversalConfig`] allows the requested [`NatDiscoveryReason`] and the
+/// probe cooldown has elapsed. It deliberately does not run by default.
+#[derive(Debug, Clone)]
+pub struct NatPathDiscovery {
+    config: NatTraversalConfig,
+    ice: IceAgent,
+    last_probe: Option<std::time::Instant>,
+}
+
+impl NatPathDiscovery {
+    /// Create a controller from a normalized NAT traversal config.
+    pub fn new(config: NatTraversalConfig) -> Self {
+        Self { config: config.normalized(), ice: IceAgent::new(), last_probe: None }
+    }
+
+    /// Borrow the normalized NAT traversal config.
+    pub fn config(&self) -> &NatTraversalConfig {
+        &self.config
+    }
+
+    /// Returns true if discovery may start now for `reason`.
+    pub fn should_probe(&self, reason: NatDiscoveryReason, now: std::time::Instant) -> bool {
+        if !self.config.allows_discovery(reason) {
+            return false;
+        }
+        let interval = Duration::from_millis(self.config.probe_interval_ms);
+        match self.last_probe {
+            Some(last) => now.duration_since(last) >= interval,
+            None => true,
+        }
+    }
+
+    /// Gather local host and server-reflexive candidates when policy permits.
+    ///
+    /// Returns an empty list when disabled, when the reason is not permitted,
+    /// or when the cooldown has not elapsed. Candidate count is capped by
+    /// `config.max_candidates`.
+    pub async fn gather_candidates(
+        &mut self,
+        local_addrs: &[SocketAddr],
+        reason: NatDiscoveryReason,
+    ) -> Vec<IceCandidate> {
+        let now = std::time::Instant::now();
+        if !self.should_probe(reason, now) {
+            return Vec::new();
+        }
+        self.last_probe = Some(now);
+
+        let mut candidates = if self.config.ice_enabled {
+            self.ice.gather_candidates_async(local_addrs, &self.config.stun_servers).await
+        } else {
+            local_addrs.iter().copied().map(|addr| IceCandidate::host(addr, 65_535, 1)).collect()
+        };
+        candidates.truncate(self.config.max_candidates);
+        candidates
     }
 }
 
@@ -839,6 +928,7 @@ impl TurnClient {
 
 #[cfg(test)]
 mod tests {
+    use super::super::config::NatTraversalMode;
     use super::*;
 
     // --- STUN message header encode/decode ---
@@ -1099,6 +1189,55 @@ mod tests {
         assert!(cands.iter().all(|c| c.candidate_type == CandidateType::Host));
         // Sorted by descending priority.
         assert!(cands[0].priority >= cands[1].priority);
+    }
+
+    #[tokio::test]
+    async fn nat_path_discovery_disabled_returns_no_candidates() {
+        let mut discovery = NatPathDiscovery::new(NatTraversalConfig::default());
+        let local = vec!["10.0.0.1:5000".parse().unwrap()];
+        let cands =
+            discovery.gather_candidates(&local, NatDiscoveryReason::ConnectivityFailure).await;
+        assert!(cands.is_empty());
+    }
+
+    #[tokio::test]
+    async fn nat_path_discovery_respects_reason_policy() {
+        let config = NatTraversalConfig {
+            enabled: true,
+            mode: NatTraversalMode::ConnectivityFallback,
+            ice_enabled: false,
+            ..NatTraversalConfig::default()
+        };
+        let mut discovery = NatPathDiscovery::new(config);
+        let local = vec!["10.0.0.1:5000".parse().unwrap()];
+
+        let roaming = discovery.gather_candidates(&local, NatDiscoveryReason::Roaming).await;
+        assert!(roaming.is_empty());
+
+        let fallback =
+            discovery.gather_candidates(&local, NatDiscoveryReason::ConnectivityFailure).await;
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(fallback[0].candidate_type, CandidateType::Host);
+    }
+
+    #[tokio::test]
+    async fn nat_path_discovery_cooldown_and_cap_candidates() {
+        let config = NatTraversalConfig {
+            enabled: true,
+            mode: NatTraversalMode::Always,
+            ice_enabled: false,
+            probe_interval_ms: 60_000,
+            max_candidates: 1,
+            ..NatTraversalConfig::default()
+        };
+        let mut discovery = NatPathDiscovery::new(config);
+        let local = vec!["10.0.0.1:5000".parse().unwrap(), "10.0.0.2:5001".parse().unwrap()];
+
+        let first = discovery.gather_candidates(&local, NatDiscoveryReason::Manual).await;
+        assert_eq!(first.len(), 1);
+
+        let second = discovery.gather_candidates(&local, NatDiscoveryReason::Manual).await;
+        assert!(second.is_empty(), "cooldown must suppress immediate repeat probes");
     }
 
     // --- TURN message format ---

@@ -25,7 +25,7 @@ generic custom-granularity dispatch cost (`max(1)` plus `is_power_of_two()`).
 - Optimize the default 64-byte adaptive padding path without adding config
   state or broad refactoring.
 - Preserve custom power-of-two and non-power-of-two granularity behavior.
-- Avoid UI, frontend, Docker, Kubernetes, Helm, or unrelated runtime changes.
+- Avoid UI, frontend, Docker, deployment manifests, or unrelated runtime changes.
 
 ## Implementation
 

@@ -39,7 +39,7 @@ decode work.
   pending.
 - Add a regression test proving a clean-lane pending repair buffer survives a
   full recovery attempt in another lane.
-- Avoid frontend, UI, Docker, Kubernetes, Helm, or unrelated runtime changes.
+- Avoid frontend, UI, Docker, deployment manifests, or unrelated runtime changes.
 
 ## Implementation
 

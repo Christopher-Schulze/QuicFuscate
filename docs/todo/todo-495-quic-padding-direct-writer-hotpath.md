@@ -26,7 +26,7 @@ enum again.
 - Preserve existing `frames::to_bytes(Frame::Padding)` behavior for callers.
 - Let hot paths write padding bytes directly without generic frame dispatch.
 - Improve real 1-RTT stealth-on send/receive timing on Broderick.
-- Avoid UI, frontend, Docker, Kubernetes, Helm, or unrelated runtime changes.
+- Avoid UI, frontend, Docker, deployment manifests, or unrelated runtime changes.
 
 ## Implementation
 

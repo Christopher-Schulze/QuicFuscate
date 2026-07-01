@@ -41,7 +41,7 @@ _ = tokio::signal::ctrl_c() => {
 **SIGTERM is not handled.** This is critical because:
 - `systemctl stop` sends SIGTERM (not SIGINT)
 - Docker `docker stop` sends SIGTERM (with a 10s grace period, then SIGKILL)
-- Kubernetes pod termination sends SIGTERM (with a configurable grace period)
+- Orchestrated container termination sends SIGTERM (with a configurable grace period)
 - Container orchestrators universally use SIGTERM for graceful shutdown
 
 When SIGTERM is received, the default action is to terminate the process
@@ -536,7 +536,7 @@ Update the client (`src/main.rs:1634-1640`) to handle SIGTERM:
 - Client handles SIGHUP: reloads config without disconnecting
 - Docker `docker stop` (sends SIGTERM): server drains gracefully within
   Docker's grace period
-- K8s pod termination: server drains within `terminationGracePeriodSeconds`
+- Orchestrated container termination: server drains within the configured grace period
 - `cargo clippy --lib -- -D warnings` is clean (with and without `systemd` feature)
 - No panics during shutdown sequence
 

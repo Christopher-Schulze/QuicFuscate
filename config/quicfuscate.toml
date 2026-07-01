@@ -85,6 +85,32 @@ max_streams_uni = 100
 enable_migration = true
 
 # ==============================================================================
+# NAT TRAVERSAL / PATH DISCOVERY
+# ==============================================================================
+
+[nat_traversal]
+# Optional STUN/TURN/ICE path discovery. This is a connectivity feature, not a
+# default stealth layer. Keep it disabled unless direct UDP connectivity fails,
+# roaming path discovery is required, or mesh mode is explicitly used.
+enabled = false
+
+# Discovery policy:
+# - off: no NAT traversal probes
+# - connectivity-fallback: probe only after direct-path failure
+# - roaming: also probe after local network path changes
+# - mesh: allow mesh/peer path discovery
+# - always: diagnostics only
+mode = "off"
+
+# STUN and TURN servers are intentionally empty by default to avoid observable
+# background STUN/ICE traffic.
+stun_servers = []
+turn_servers = []
+ice_enabled = false
+probe_interval_ms = 30000
+max_candidates = 8
+
+# ==============================================================================
 # 0-RTT ANTI-REPLAY PROTECTION
 # ==============================================================================
 

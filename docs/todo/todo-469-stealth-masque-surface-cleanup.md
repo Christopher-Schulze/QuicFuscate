@@ -70,4 +70,4 @@ carrier.
 
 - Do not replace the production H3/MASQUE path.
 - Do not delete `stealth::MasqueManager`.
-- Do not add Docker/K8s/Helm deployment work.
+- Do not add Docker or deployment manifest work.

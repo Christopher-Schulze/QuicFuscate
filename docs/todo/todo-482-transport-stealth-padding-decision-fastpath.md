@@ -35,7 +35,7 @@ random roll before returning `0`.
   cases.
 - Preserve FullPadding and ConstantRate behavior, where traffic-analysis defense
   modes intentionally ignore `stealth_padding_rate`.
-- Avoid changing product UI, frontend, Docker, Kubernetes, Helm, or deployment
+- Avoid changing product UI, frontend, Docker, deployment manifests, or deployment
   manifests.
 
 ## Implementation

@@ -30,7 +30,7 @@ the intended production contract. The critical gaps were:
   coverage, not runtime config choices.
 - Keep memory microprimitives as rust-tests parity surfaces only.
 - Preserve benchmark coverage only for runtime-owned optimization paths.
-- Avoid UI, frontend, Docker, Kubernetes, Helm, or unrelated runtime changes.
+- Avoid UI, frontend, Docker, deployment manifests, or unrelated runtime changes.
 
 ## Implementation
 

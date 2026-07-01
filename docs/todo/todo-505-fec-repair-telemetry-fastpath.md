@@ -35,7 +35,7 @@ maintenance even when the encoder emitted only systematic packets.
 - Preserve bounded repair telemetry history at 4096 entries.
 - Add a regression test proving systematic-only send paths do not update repair
   telemetry.
-- Avoid frontend, UI, Docker, Kubernetes, Helm, or unrelated runtime changes.
+- Avoid frontend, UI, Docker, deployment manifests, or unrelated runtime changes.
 
 ## Implementation
 

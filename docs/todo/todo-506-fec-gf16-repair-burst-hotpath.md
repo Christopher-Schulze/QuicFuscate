@@ -33,7 +33,7 @@ path.
 - Keep clean systematic-only send paths unchanged.
 - Add a regression test proving generated GF16 coefficients still match the
   expected Cauchy formula.
-- Avoid frontend, UI, Docker, Kubernetes, Helm, or unrelated runtime changes.
+- Avoid frontend, UI, Docker, deployment manifests, or unrelated runtime changes.
 
 ## Implementation
 

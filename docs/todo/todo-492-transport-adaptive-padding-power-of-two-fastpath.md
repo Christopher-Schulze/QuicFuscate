@@ -30,7 +30,7 @@ when the granularity was a power of two.
 - Optimize the default and common power-of-two granularities without changing
   stealth policy.
 - Preserve non-power-of-two custom granularity behavior with a regression test.
-- Avoid touching UI, frontend, Docker, Kubernetes, Helm, or unrelated transport
+- Avoid touching UI, frontend, Docker, deployment manifests, or unrelated transport
   behavior.
 
 ## Implementation

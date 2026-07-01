@@ -10,17 +10,17 @@ use rustls::pki_types::pem::PemObject;
 /// and volume-based traffic analysis. The modes are ordered by increasing
 /// protection (and increasing bandwidth overhead):
 ///
-/// - [`TrafficAnalysisDefense::Off`] — current probabilistic padding behavior
+/// - [`TrafficAnalysisDefense::Off`] - current probabilistic padding behavior
 ///   (gated by `stealth_padding_rate`). No chaffing. This is the default and
 ///   preserves backward compatibility.
-/// - [`TrafficAnalysisDefense::FullPadding`] — pad **every** outgoing 1-RTT
+/// - [`TrafficAnalysisDefense::FullPadding`] - pad **every** outgoing 1-RTT
 ///   packet to `max_udp_payload_size`, ignoring `stealth_padding_rate`.
 ///   Eliminates size-based analysis entirely at the cost of bandwidth overhead
 ///   on small packets.
-/// - [`TrafficAnalysisDefense::ConstantRate`] — pad to a consistent size **and**
+/// - [`TrafficAnalysisDefense::ConstantRate`] - pad to a consistent size **and**
 ///   inject chaff (dummy packets) to maintain a fixed target emission rate
 ///   (`constant_rate_pps`). Defeats both timing- and bandwidth-based analysis.
-///   This is the strongest defense and the most expensive — opt-in only.
+///   This is the strongest defense and the most expensive - opt-in only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
 pub enum TrafficAnalysisDefense {
     /// No traffic analysis defense beyond the existing probabilistic padding.
@@ -57,16 +57,55 @@ impl TrafficAnalysisDefense {
 
 // ============================================================================
 
+/// Policy that controls when NAT traversal may emit discovery probes.
+///
+/// NAT traversal is intentionally disabled by default. STUN/ICE traffic can be
+/// useful for connectivity, roaming, and mesh scenarios, but it is also an
+/// observable protocol surface. The policy therefore treats NAT traversal as a
+/// bounded path-discovery tool, not as a default stealth mechanism.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NatTraversalMode {
+    /// Do not emit NAT traversal probes.
+    #[default]
+    Off,
+    /// Probe only after the direct path fails or becomes unreachable.
+    ConnectivityFallback,
+    /// Probe after direct failure and during local path changes or roaming.
+    Roaming,
+    /// Probe for direct failure, roaming, and explicit mesh/peer discovery.
+    Mesh,
+    /// Probe for any explicit discovery reason. Intended for diagnostics only.
+    Always,
+}
+
+/// Reason a caller wants to run NAT path discovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NatDiscoveryReason {
+    /// Direct client-to-server connectivity failed.
+    ConnectivityFailure,
+    /// The local network path changed, for example WiFi to LTE.
+    Roaming,
+    /// Mesh or peer-to-peer path establishment needs candidates.
+    Mesh,
+    /// Explicit operator/test request.
+    Manual,
+}
+
 /// NAT traversal configuration (TODO-454): STUN/TURN/ICE settings.
 ///
 /// Controls whether the transport attempts NAT traversal via STUN binding
-/// requests, TURN relaying, and ICE candidate gathering. Disabled by default
-/// to preserve backward compatibility; enabling it allows peer-to-peer QUIC
-/// connections across NATs.
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
+/// requests, TURN relaying, and ICE candidate gathering. Disabled by default.
+/// Enabling it provides optional path discovery for direct-connect failures,
+/// roaming, or mesh scenarios without turning STUN/ICE into permanent
+/// background noise.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
 pub struct NatTraversalConfig {
     /// Master switch for NAT traversal. When false, STUN/TURN/ICE are skipped.
     pub enabled: bool,
+    /// Policy that decides which discovery reasons may emit probes.
+    pub mode: NatTraversalMode,
     /// STUN server addresses used to discover server-reflexive candidates.
     pub stun_servers: Vec<std::net::SocketAddr>,
     /// TURN server addresses used to obtain relayed candidates when direct
@@ -74,9 +113,39 @@ pub struct NatTraversalConfig {
     pub turn_servers: Vec<std::net::SocketAddr>,
     /// Whether ICE candidate gathering and pair selection is enabled.
     pub ice_enabled: bool,
+    /// Minimum interval between discovery probe bursts.
+    pub probe_interval_ms: u64,
+    /// Maximum number of candidates returned by one discovery run.
+    pub max_candidates: usize,
+}
+
+impl Default for NatTraversalConfig {
+    fn default() -> Self {
+        Self::disabled()
+    }
 }
 
 impl NatTraversalConfig {
+    /// Conservative default probe interval. Large enough to avoid STUN chatter
+    /// while still reacting quickly to a real direct-path failure.
+    pub const DEFAULT_PROBE_INTERVAL_MS: u64 = 30_000;
+    /// Default candidate cap. Keeps discovery bounded even with many local
+    /// interfaces and STUN/TURN servers.
+    pub const DEFAULT_MAX_CANDIDATES: usize = 8;
+
+    /// Create an explicitly disabled config.
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            mode: NatTraversalMode::Off,
+            stun_servers: Vec::new(),
+            turn_servers: Vec::new(),
+            ice_enabled: false,
+            probe_interval_ms: Self::DEFAULT_PROBE_INTERVAL_MS,
+            max_candidates: Self::DEFAULT_MAX_CANDIDATES,
+        }
+    }
+
     /// Parse a STUN/TURN server address from a string.
     pub fn parse_server_addr(
         s: &str,
@@ -84,6 +153,43 @@ impl NatTraversalConfig {
         s.parse().map_err(|e| {
             crate::error::ConnectionError::Transport(format!("Invalid NAT server address: {}", e))
         })
+    }
+
+    /// Returns true when the configured policy permits discovery for `reason`.
+    pub fn allows_discovery(&self, reason: NatDiscoveryReason) -> bool {
+        if !self.enabled || self.mode == NatTraversalMode::Off {
+            return false;
+        }
+        match self.mode {
+            NatTraversalMode::Off => false,
+            NatTraversalMode::ConnectivityFallback => {
+                matches!(
+                    reason,
+                    NatDiscoveryReason::ConnectivityFailure | NatDiscoveryReason::Manual
+                )
+            }
+            NatTraversalMode::Roaming => {
+                matches!(
+                    reason,
+                    NatDiscoveryReason::ConnectivityFailure
+                        | NatDiscoveryReason::Roaming
+                        | NatDiscoveryReason::Manual
+                )
+            }
+            NatTraversalMode::Mesh => true,
+            NatTraversalMode::Always => true,
+        }
+    }
+
+    /// Returns a normalized copy with production-safe lower bounds.
+    pub fn normalized(&self) -> Self {
+        let mut out = self.clone();
+        out.probe_interval_ms = out.probe_interval_ms.max(1_000);
+        out.max_candidates = out.max_candidates.max(1);
+        if !out.enabled {
+            out.mode = NatTraversalMode::Off;
+        }
+        out
     }
 }
 
@@ -622,7 +728,7 @@ impl Config {
     /// Sets the NAT traversal configuration (STUN/TURN/ICE). Replaces any
     /// previously configured NAT traversal settings.
     pub fn set_nat_traversal(&mut self, config: NatTraversalConfig) {
-        self.nat_traversal = config;
+        self.nat_traversal = config.normalized();
     }
 
     /// Returns a reference to the current NAT traversal configuration.
@@ -633,6 +739,17 @@ impl Config {
     /// Enables or disables NAT traversal as a whole.
     pub fn enable_nat_traversal(&mut self, enabled: bool) {
         self.nat_traversal.enabled = enabled;
+        if !enabled {
+            self.nat_traversal.mode = NatTraversalMode::Off;
+        } else if self.nat_traversal.mode == NatTraversalMode::Off {
+            self.nat_traversal.mode = NatTraversalMode::ConnectivityFallback;
+        }
+    }
+
+    /// Sets the NAT traversal discovery policy.
+    pub fn set_nat_traversal_mode(&mut self, mode: NatTraversalMode) {
+        self.nat_traversal.mode = mode;
+        self.nat_traversal.enabled = mode != NatTraversalMode::Off;
     }
 
     /// Sets the list of STUN servers used for server-reflexive candidate
@@ -649,6 +766,16 @@ impl Config {
     /// Enables or disables ICE candidate gathering and pair selection.
     pub fn enable_ice(&mut self, enabled: bool) {
         self.nat_traversal.ice_enabled = enabled;
+    }
+
+    /// Sets the minimum interval between NAT discovery probe bursts.
+    pub fn set_nat_probe_interval_ms(&mut self, interval_ms: u64) {
+        self.nat_traversal.probe_interval_ms = interval_ms.max(1_000);
+    }
+
+    /// Sets the maximum number of candidates returned by one discovery run.
+    pub fn set_nat_max_candidates(&mut self, max_candidates: usize) {
+        self.nat_traversal.max_candidates = max_candidates.max(1);
     }
 
     /// Returns true if NAT traversal is enabled.
@@ -1078,6 +1205,12 @@ mod tests {
         let cfg = default_config();
         assert!(!cfg.nat_traversal_enabled(), "NAT traversal must be off by default");
         assert!(!cfg.ice_enabled(), "ICE must be off by default");
+        assert_eq!(cfg.nat_traversal().mode, NatTraversalMode::Off);
+        assert_eq!(
+            cfg.nat_traversal().probe_interval_ms,
+            NatTraversalConfig::DEFAULT_PROBE_INTERVAL_MS
+        );
+        assert_eq!(cfg.nat_traversal().max_candidates, NatTraversalConfig::DEFAULT_MAX_CANDIDATES);
         assert!(cfg.nat_traversal().stun_servers.is_empty());
         assert!(cfg.nat_traversal().turn_servers.is_empty());
     }
@@ -1091,8 +1224,13 @@ mod tests {
         cfg.set_turn_servers(vec![turn]);
         cfg.enable_nat_traversal(true);
         cfg.enable_ice(true);
+        cfg.set_nat_probe_interval_ms(250);
+        cfg.set_nat_max_candidates(0);
         assert!(cfg.nat_traversal_enabled());
         assert!(cfg.ice_enabled());
+        assert_eq!(cfg.nat_traversal().mode, NatTraversalMode::ConnectivityFallback);
+        assert_eq!(cfg.nat_traversal().probe_interval_ms, 1000);
+        assert_eq!(cfg.nat_traversal().max_candidates, 1);
         assert_eq!(cfg.nat_traversal().stun_servers, vec![stun]);
         assert_eq!(cfg.nat_traversal().turn_servers, vec![turn]);
     }
@@ -1101,13 +1239,36 @@ mod tests {
     fn test_nat_traversal_config_serde_roundtrip() {
         let nat = NatTraversalConfig {
             enabled: true,
+            mode: NatTraversalMode::Roaming,
             stun_servers: vec!["203.0.113.1:3478".parse().unwrap()],
             turn_servers: vec!["203.0.113.2:3478".parse().unwrap()],
             ice_enabled: true,
+            probe_interval_ms: 45_000,
+            max_candidates: 4,
         };
         let json = serde_json::to_string(&nat).unwrap();
         let decoded: NatTraversalConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(nat, decoded);
+    }
+
+    #[test]
+    fn test_nat_traversal_policy_reasons() {
+        let mut nat = NatTraversalConfig {
+            enabled: true,
+            mode: NatTraversalMode::ConnectivityFallback,
+            ..NatTraversalConfig::default()
+        };
+        assert!(nat.allows_discovery(NatDiscoveryReason::ConnectivityFailure));
+        assert!(nat.allows_discovery(NatDiscoveryReason::Manual));
+        assert!(!nat.allows_discovery(NatDiscoveryReason::Roaming));
+        assert!(!nat.allows_discovery(NatDiscoveryReason::Mesh));
+
+        nat.mode = NatTraversalMode::Roaming;
+        assert!(nat.allows_discovery(NatDiscoveryReason::Roaming));
+        assert!(!nat.allows_discovery(NatDiscoveryReason::Mesh));
+
+        nat.mode = NatTraversalMode::Mesh;
+        assert!(nat.allows_discovery(NatDiscoveryReason::Mesh));
     }
 
     #[test]

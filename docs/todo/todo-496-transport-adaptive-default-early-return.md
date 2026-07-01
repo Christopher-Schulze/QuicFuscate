@@ -27,7 +27,7 @@ generic max/match strategy dispatch.
 - Preserve custom power-of-two and non-power-of-two granularity behavior.
 - Improve the `transport_stealth_padding_decision` default adaptive path on
   Broderick with a stable focused benchmark.
-- Avoid UI, frontend, Docker, Kubernetes, Helm, or unrelated runtime changes.
+- Avoid UI, frontend, Docker, deployment manifests, or unrelated runtime changes.
 
 ## Implementation
 

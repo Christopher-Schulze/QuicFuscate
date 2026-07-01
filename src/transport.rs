@@ -40,7 +40,7 @@ pub mod udpfast;
 mod xdp;
 
 pub use anti_replay::{AntiReplayConfig, StrikeRegister};
-pub use config::Config;
+pub use config::{Config, NatDiscoveryReason, NatTraversalConfig, NatTraversalMode};
 #[cfg(feature = "stream_ring_buffer")]
 pub use connection::StreamRingBuffer;
 #[cfg(feature = "benches")]
@@ -48,6 +48,7 @@ pub use connection::{
     bench_paired_1rtt_connections, bench_paired_1rtt_connections_stealth, BenchConnectionPair,
 };
 pub use connection::{Connection, PathEvent};
+pub use nat::{IceAgent, NatPathDiscovery, StunClient, TurnClient};
 pub use pn::{cid, pnspace, rand, range_buf, ranges, varint};
 /// Best-effort socket capability setup shared across runtime hotpaths.
 #[doc(hidden)]

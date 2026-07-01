@@ -31,7 +31,7 @@ cached total was not updated.
 - Keep `Hist::total` synchronized with decayed bins.
 - Preserve existing SIMD/scalar histogram decay and Jensen-Shannon kernels.
 - Add a regression test for histogram total consistency after decay.
-- Avoid frontend, UI, Docker, Kubernetes, Helm, or unrelated runtime changes.
+- Avoid frontend, UI, Docker, deployment manifests, or unrelated runtime changes.
 
 ## Implementation
 
