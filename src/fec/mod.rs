@@ -3629,17 +3629,26 @@ impl AdaptiveFec {
         }
 
         // Systematic (source) packets must always be forwarded to the QUIC stack
-        // immediately, regardless of FEC decoder state. The decoder still receives
-        // a clone for tracking/recovery purposes, but the original is returned
-        // directly so the handshake and data flow are not stalled.
+        // immediately, regardless of FEC decoder state. The decoder receives a
+        // cheap shared-buffer clone for recovery tracking, while the original is
+        // returned directly so handshake/data flow is not stalled. Repair packets
+        // are moved into the decoder directly because they are never forwarded as
+        // originals.
         let is_systematic = packet.is_systematic;
+        let packet_id = packet.id;
+        let mut systematic_packet = None;
 
         let mut decoder = self.decoder.lock();
-        decoder.take_packet(packet.clone());
+        if is_systematic {
+            decoder.take_packet(packet.clone());
+            systematic_packet = Some(packet);
+        } else {
+            decoder.take_packet(packet);
+        }
 
         if !decoder.recovery_needed() {
-            if is_systematic {
-                output.push(packet);
+            if let Some(source) = systematic_packet.take() {
+                output.push(source);
             }
             return Ok(());
         }
@@ -3657,8 +3666,10 @@ impl AdaptiveFec {
         // Always ensure the systematic packet is forwarded. Block decoders only
         // emit "recovered" packets in get_result/get_partial_result, so systematic
         // packets that arrived intact would be silently dropped without this.
-        if is_systematic && !output.iter().any(|p| p.id == packet.id) {
-            output.push(packet);
+        if is_systematic && !output.iter().any(|p| p.id == packet_id) {
+            if let Some(source) = systematic_packet.take() {
+                output.push(source);
+            }
         }
 
         Ok(())
