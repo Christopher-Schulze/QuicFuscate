@@ -182,7 +182,7 @@ fn test_strong_receive_into_recovers_single_source_loss() {
             receiver
                 .on_receive_into(packet, &mut receive_output)
                 .expect("strong receive_into must accept packet");
-            emitted.extend(receive_output.drain(..));
+            emitted.append(&mut receive_output);
         }
     }
 
