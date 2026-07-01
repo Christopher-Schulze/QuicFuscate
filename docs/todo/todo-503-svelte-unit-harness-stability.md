@@ -56,6 +56,8 @@ test-specific timer reset does not run before the global hook.
 | `cd apps/svelte-desktop && bun run test:unit` | PASS, 30 files, 368 tests |
 | `cd apps/svelte-desktop && bun run build` | PASS |
 | `cd apps/tauri/src-tauri && cargo check` | PASS |
+| Broderick: `cd apps/svelte-admin && bun run check && bun run test:unit` | PASS, 24 files, 279 tests |
+| Broderick: `cd apps/svelte-desktop && bun run check && bun run test:unit` | PASS, 30 files, 368 tests |
 
 ## Notes
 
