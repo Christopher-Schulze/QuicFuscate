@@ -2497,6 +2497,7 @@ bash scripts/build/build-web-admin.sh
 Notes:
 - The package-owned Playwright configs in `apps/svelte-admin/` and `apps/svelte-desktop/` are the canonical frontend E2E entrypoints; the actual specs live under `scripts/tests/frontend/`.
 - Unit test suites: `scripts/tests/frontend/web-admin/unit/` (24 files, 279 tests), `scripts/tests/frontend/desktop/unit/` (30 files, 368 tests), `scripts/tests/frontend/shared-ui/unit/` (9 files, 82 tests). Total: 63 files, 729 vitest tests.
+- Active app unit harnesses run without file-level parallelism and with one Vitest worker per app. This avoids Bun/Vite/Svelte transform contention that can turn passing component assertions into false 5s timeout failures under full-suite load. The web-admin and desktop setup hooks clean up Svelte Testing Library state and restore real timers after each test.
 - `apps/tauri` is a minimal wrapper package for the native Tauri host and delegates its frontend build/check path to `apps/svelte-desktop`.
 - `packages/ui` uses package `exports` entries with explicit `svelte` conditions so the shared Svelte component package resolves cleanly without `vite-plugin-svelte` packaging warnings.
 - On a fresh machine, install the Playwright browser runtime once before the first E2E run: `cd apps/svelte-admin && bunx playwright install chromium`.

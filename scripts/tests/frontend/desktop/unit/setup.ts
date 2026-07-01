@@ -107,5 +107,6 @@ beforeEach(() => {
 
 afterEach(async () => {
   cleanup();
-  await new Promise((resolve) => window.setTimeout(resolve, 32));
+  vi.useRealTimers();
+  await new Promise((resolve) => window.setTimeout(resolve, 0));
 });

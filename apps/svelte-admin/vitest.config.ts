@@ -29,6 +29,9 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     globals: true,
+    fileParallelism: false,
+    maxWorkers: 1,
+    testTimeout: 15_000,
     setupFiles: [
       jestDomVitestPath,
       resolve(adminUnitTestRoot, "setup.ts"),

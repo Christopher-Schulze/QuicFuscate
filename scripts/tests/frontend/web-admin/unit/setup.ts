@@ -1,4 +1,5 @@
-import { beforeEach, vi } from "vitest";
+import { afterEach, beforeEach, vi } from "vitest";
+import { cleanup } from "@testing-library/svelte";
 
 function ensurePortalStage(): void {
   if (document.getElementById("qf-app-stage")) return;
@@ -74,4 +75,9 @@ beforeEach(() => {
   }
 
   ensurePortalStage();
+});
+
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
 });
