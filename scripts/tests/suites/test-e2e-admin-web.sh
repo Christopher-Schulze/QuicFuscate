@@ -109,10 +109,14 @@ fi
 TMP_DIR="$OUTPUT_DIR/tmp"
 rm -rf "$TMP_DIR"
 mkdir -p "$TMP_DIR"
+if [[ "$(id -u)" -eq 0 ]] && getent passwd quicfuscate >/dev/null 2>&1; then
+  chown quicfuscate:quicfuscate "$TMP_DIR"
+fi
 COOKIE_JAR="$TMP_DIR/cookies.txt"
 CONFIG_FILE="$TMP_DIR/server.toml"
 CONFIG_UPDATE="$TMP_DIR/server-update.toml"
 PAYLOAD_FILE="$TMP_DIR/payload.json"
+ORIGIN_HEADER="Origin: http://$ADMIN_ADDR"
 CSRF_TOKEN=""
 
 cleanup() {
@@ -289,12 +293,12 @@ import json
 print(json.dumps({"new_username": "$ADMIN_USER", "current_password": "$ADMIN_PASS", "new_password": "$NEW_ADMIN_PASS"}))
 PY
 )
-AUTH_UPDATE_RESP="$(curl -s -b "$COOKIE_JAR" -H "Content-Type: application/json" -H "X-CSRF-Token: $CSRF_TOKEN" -d "$AUTH_UPDATE_PAYLOAD" "http://$ADMIN_ADDR/api/admin/auth")"
+AUTH_UPDATE_RESP="$(curl -s -b "$COOKIE_JAR" -H "Content-Type: application/json" -H "$ORIGIN_HEADER" -H "X-CSRF-Token: $CSRF_TOKEN" -d "$AUTH_UPDATE_PAYLOAD" "http://$ADMIN_ADDR/api/admin/auth")"
 python3 - "$AUTH_UPDATE_RESP" <<'PY'
 import json, sys
 resp = json.loads(sys.argv[1])
 if not resp.get("success"):
-    raise SystemExit("admin auth update failed")
+    raise SystemExit(f"admin auth update failed: {resp}")
 PY
 
 code="$(curl -s -b "$COOKIE_JAR" -o /dev/null -w "%{http_code}" "http://$ADMIN_ADDR/api/status")"
@@ -365,12 +369,12 @@ with open(sys.argv[1], "r") as fh:
     text = fh.read()
 print(json.dumps({"config": text}))
 PY
-UPDATE_RESP="$(curl -s -b "$COOKIE_JAR" -H "Content-Type: application/json" -H "X-CSRF-Token: $CSRF_TOKEN" -d @"$PAYLOAD_FILE" "http://$ADMIN_ADDR/api/config")"
+UPDATE_RESP="$(curl -s -b "$COOKIE_JAR" -H "Content-Type: application/json" -H "$ORIGIN_HEADER" -H "X-CSRF-Token: $CSRF_TOKEN" -d @"$PAYLOAD_FILE" "http://$ADMIN_ADDR/api/config")"
 python3 - "$UPDATE_RESP" <<'PY'
 import json, sys
 resp = json.loads(sys.argv[1])
 if not resp.get("success"):
-    raise SystemExit("config update failed")
+    raise SystemExit(f"config update failed: {resp}")
 PY
 
 info "Generating QKey"
@@ -379,7 +383,7 @@ import json
 print(json.dumps({"ttl_seconds": $QKEY_TTL_SECS}))
 PY
 )
-QKEY_RESP="$(curl -s -b "$COOKIE_JAR" -H "Content-Type: application/json" -H "X-CSRF-Token: $CSRF_TOKEN" -d "$QKEY_PAYLOAD" "http://$ADMIN_ADDR/api/qkey")"
+QKEY_RESP="$(curl -s -b "$COOKIE_JAR" -H "Content-Type: application/json" -H "$ORIGIN_HEADER" -H "X-CSRF-Token: $CSRF_TOKEN" -d "$QKEY_PAYLOAD" "http://$ADMIN_ADDR/api/qkey")"
 QKEY_INFO="$(python3 - "$QKEY_RESP" "$QKEY_TTL_SECS" <<'PY'
 import json, sys, time
 resp = json.loads(sys.argv[1])
@@ -452,12 +456,12 @@ import json
 print(json.dumps({"id": "$QKEY_ID"}))
 PY
 )
-REVOKE_RESP="$(curl -s -b "$COOKIE_JAR" -H "Content-Type: application/json" -H "X-CSRF-Token: $CSRF_TOKEN" -d "$REVOKE_PAYLOAD" "http://$ADMIN_ADDR/api/qkeys/revoke")"
+REVOKE_RESP="$(curl -s -b "$COOKIE_JAR" -H "Content-Type: application/json" -H "$ORIGIN_HEADER" -H "X-CSRF-Token: $CSRF_TOKEN" -d "$REVOKE_PAYLOAD" "http://$ADMIN_ADDR/api/qkeys/revoke")"
 python3 - "$REVOKE_RESP" <<'PY'
 import json, sys
 resp = json.loads(sys.argv[1])
 if not resp.get("success"):
-    raise SystemExit("qkey revoke failed")
+    raise SystemExit(f"qkey revoke failed: {resp}")
 PY
 
 info "Verifying revoked QKey is rejected"
@@ -495,12 +499,12 @@ PY
 
 info "Switching logging mode to minimal (redaction)"
 LOG_MODE_PAYLOAD='{"mode":"minimal"}'
-MODE_RESP="$(curl -s -b "$COOKIE_JAR" -H "Content-Type: application/json" -H "X-CSRF-Token: $CSRF_TOKEN" -d "$LOG_MODE_PAYLOAD" "http://$ADMIN_ADDR/api/config/logging")"
+MODE_RESP="$(curl -s -b "$COOKIE_JAR" -H "Content-Type: application/json" -H "$ORIGIN_HEADER" -H "X-CSRF-Token: $CSRF_TOKEN" -d "$LOG_MODE_PAYLOAD" "http://$ADMIN_ADDR/api/config/logging")"
 python3 - "$MODE_RESP" <<'PY'
 import json, sys
 resp = json.loads(sys.argv[1])
 if not resp.get("success"):
-    raise SystemExit("failed to set logging mode minimal")
+    raise SystemExit(f"failed to set logging mode minimal: {resp}")
 PY
 
 LOGS_MIN_RESP="$(curl -s -b "$COOKIE_JAR" "http://$ADMIN_ADDR/api/logs?cursor=0")"
@@ -520,12 +524,12 @@ PY
 
 info "Switching logging mode to no-log (buffer cleared)"
 LOG_MODE_PAYLOAD='{"mode":"no-log"}'
-MODE_RESP="$(curl -s -b "$COOKIE_JAR" -H "Content-Type: application/json" -H "X-CSRF-Token: $CSRF_TOKEN" -d "$LOG_MODE_PAYLOAD" "http://$ADMIN_ADDR/api/config/logging")"
+MODE_RESP="$(curl -s -b "$COOKIE_JAR" -H "Content-Type: application/json" -H "$ORIGIN_HEADER" -H "X-CSRF-Token: $CSRF_TOKEN" -d "$LOG_MODE_PAYLOAD" "http://$ADMIN_ADDR/api/config/logging")"
 python3 - "$MODE_RESP" <<'PY'
 import json, sys
 resp = json.loads(sys.argv[1])
 if not resp.get("success"):
-    raise SystemExit("failed to set logging mode no-log")
+    raise SystemExit(f"failed to set logging mode no-log: {resp}")
 PY
 
 LOGS_NOLOG_RESP="$(curl -s -b "$COOKIE_JAR" "http://$ADMIN_ADDR/api/logs?cursor=0")"
@@ -545,21 +549,21 @@ PY
 
 info "Restoring logging mode to normal"
 LOG_MODE_PAYLOAD='{"mode":"normal"}'
-MODE_RESP="$(curl -s -b "$COOKIE_JAR" -H "Content-Type: application/json" -H "X-CSRF-Token: $CSRF_TOKEN" -d "$LOG_MODE_PAYLOAD" "http://$ADMIN_ADDR/api/config/logging")"
+MODE_RESP="$(curl -s -b "$COOKIE_JAR" -H "Content-Type: application/json" -H "$ORIGIN_HEADER" -H "X-CSRF-Token: $CSRF_TOKEN" -d "$LOG_MODE_PAYLOAD" "http://$ADMIN_ADDR/api/config/logging")"
 python3 - "$MODE_RESP" <<'PY'
 import json, sys
 resp = json.loads(sys.argv[1])
 if not resp.get("success"):
-    raise SystemExit("failed to restore logging mode normal")
+    raise SystemExit(f"failed to restore logging mode normal: {resp}")
 PY
 
 info "Logging out"
-LOGOUT_RESP="$(curl -s -b "$COOKIE_JAR" -H "Content-Type: application/json" -H "X-CSRF-Token: $CSRF_TOKEN" -d '{}' "http://$ADMIN_ADDR/api/logout")"
+LOGOUT_RESP="$(curl -s -b "$COOKIE_JAR" -H "Content-Type: application/json" -H "$ORIGIN_HEADER" -H "X-CSRF-Token: $CSRF_TOKEN" -d '{}' "http://$ADMIN_ADDR/api/logout")"
 python3 - "$LOGOUT_RESP" <<'PY'
 import json, sys
 resp = json.loads(sys.argv[1])
 if not resp.get("success"):
-    raise SystemExit("logout failed")
+    raise SystemExit(f"logout failed: {resp}")
 PY
 
 info "Verifying logout"
