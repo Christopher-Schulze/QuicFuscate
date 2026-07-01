@@ -10,7 +10,7 @@
 // - Popcnt (ECN/bitmap ops)
 // - Secure RNG fill (entropy path)
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, Throughput};
 
 // ---------------------------------------------------------------------------
 // AES-128 block encrypt
@@ -422,21 +422,24 @@ fn bench_connection_1rtt_send_recv(c: &mut Criterion) {
         let payload = vec![0x5Au8; payload_len];
         group.throughput(Throughput::Bytes((payload_len * 2) as u64));
         group.bench_function(format!("payload_{payload_len}B"), |b| {
-            b.iter(|| {
-                let BenchConnectionPair { mut client, mut server, recv_info } =
-                    bench_paired_1rtt_connections();
-                let mut wire = [0u8; 2048];
-                black_box(client.stream_send(0, black_box(&payload), false)).expect("stream_send");
-                let (sent, _) = black_box(client.send(&mut wire)).expect("send");
-                if sent == 0 {
-                    panic!("expected encrypted 1-RTT packet");
-                }
-                match black_box(server.recv(&mut wire[..sent], &recv_info)) {
-                    Ok(_) => {}
-                    Err(ConnectionError::Done) => {}
-                    Err(e) => panic!("recv failed: {e:?}"),
-                }
-            });
+            b.iter_batched(
+                bench_paired_1rtt_connections,
+                |BenchConnectionPair { mut client, mut server, recv_info }| {
+                    let mut wire = [0u8; 2048];
+                    black_box(client.stream_send(0, black_box(&payload), false))
+                        .expect("stream_send");
+                    let (sent, _) = black_box(client.send(&mut wire)).expect("send");
+                    if sent == 0 {
+                        panic!("expected encrypted 1-RTT packet");
+                    }
+                    match black_box(server.recv(&mut wire[..sent], &recv_info)) {
+                        Ok(_) => {}
+                        Err(ConnectionError::Done) => {}
+                        Err(e) => panic!("recv failed: {e:?}"),
+                    }
+                },
+                BatchSize::PerIteration,
+            );
         });
     }
     group.finish();
@@ -505,21 +508,24 @@ fn bench_connection_1rtt_stealth_compare(c: &mut Criterion) {
     group.throughput(Throughput::Bytes((payload.len() * 2) as u64));
     for (label, stealth_on) in [("stealth_off", false), ("stealth_on", true)] {
         group.bench_function(label, |b| {
-            b.iter(|| {
-                let BenchConnectionPair { mut client, mut server, recv_info } =
-                    bench_paired_1rtt_connections_stealth(stealth_on);
-                let mut wire = [0u8; 2048];
-                black_box(client.stream_send(0, black_box(&payload), false)).expect("stream_send");
-                let (sent, _) = black_box(client.send(&mut wire)).expect("send");
-                if sent == 0 {
-                    panic!("expected encrypted 1-RTT packet");
-                }
-                match black_box(server.recv(&mut wire[..sent], &recv_info)) {
-                    Ok(_) => {}
-                    Err(ConnectionError::Done) => {}
-                    Err(e) => panic!("recv failed: {e:?}"),
-                }
-            });
+            b.iter_batched(
+                || bench_paired_1rtt_connections_stealth(stealth_on),
+                |BenchConnectionPair { mut client, mut server, recv_info }| {
+                    let mut wire = [0u8; 2048];
+                    black_box(client.stream_send(0, black_box(&payload), false))
+                        .expect("stream_send");
+                    let (sent, _) = black_box(client.send(&mut wire)).expect("send");
+                    if sent == 0 {
+                        panic!("expected encrypted 1-RTT packet");
+                    }
+                    match black_box(server.recv(&mut wire[..sent], &recv_info)) {
+                        Ok(_) => {}
+                        Err(ConnectionError::Done) => {}
+                        Err(e) => panic!("recv failed: {e:?}"),
+                    }
+                },
+                BatchSize::PerIteration,
+            );
         });
     }
     group.finish();

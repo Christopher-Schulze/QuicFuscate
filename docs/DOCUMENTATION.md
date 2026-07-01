@@ -1117,6 +1117,13 @@ pub struct MacTun {
 - `fec_window_fill_burst` measures the packet that completes a product-sized FEC window for Light/Normal/Medium/Strong separately.
 - Broderick ARM/AArch64 product-window burst reference after TODO-488: Light k16 `32.7 us`, Normal k10 `14.9 us`, Medium k30 `23.7 us`, Strong k50 `37.7 us`.
 
+#### Connection Benchmark Coverage
+
+- `scripts/benchmarks/ci_regression.rs` contains the CI Criterion hotpath groups for transport send/receive, ACK accounting, STREAM frame encoding, Brain policy application, and stealth padding decisions.
+- `connection_1rtt_send_recv` and `connection_1rtt_stealth_compare` use Criterion `iter_batched(..., BatchSize::PerIteration)` so paired-connection construction, CID setup, and key installation are excluded from timed measurement.
+- The measured routine remains the real 1-RTT path: `stream_send -> send -> recv`.
+- Broderick ARM/AArch64 reference after TODO-489: `connection_1rtt_send_recv` is about `5.55 us` for 256B, `7.14 us` for 1024B, and `7.65 us` for 1400B; `connection_1rtt_stealth_compare` is about `7.23 us` stealth-off and `7.57 us` stealth-on.
+
 #### Galois Field Implementations
 
 **GF(2^8) - 8-bit Galois Field:**
