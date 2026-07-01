@@ -3168,6 +3168,7 @@ pub struct AdaptiveFec {
     encoder: Arc<Mutex<internal::InterleavedEncoder>>,
     // Using InterleavedDecoder (wraps LazyDecoder) for burst loss recovery
     decoder: Arc<Mutex<internal::InterleavedDecoder>>,
+    active_mode: FecMode,
     mode_manager: Arc<Mutex<internal::ModeManager>>,
     mem_pool: Arc<MemoryPool>,
     transition_encoder: Option<Arc<Mutex<internal::InterleavedEncoder>>>,
@@ -3453,6 +3454,7 @@ impl AdaptiveFec {
                 interleave_depth,
                 &runtime_policy,
             ))),
+            active_mode: mode,
             mode_manager: Arc::new(Mutex::new(internal::ModeManager::with_runtime_policy(
                 mode,
                 config.hysteresis,
@@ -3513,7 +3515,8 @@ impl AdaptiveFec {
         output.clear();
 
         // **ZERO-CPU FAST PATH**: Ultra-optimized pass-through
-        if self.current_mode() == FecMode::Zero && self.transition_left == 0 {
+        let mode = self.active_mode;
+        if mode == FecMode::Zero && self.transition_left == 0 {
             // Absolute zero overhead: direct return without any processing
             output.push(packet);
             return;
@@ -3554,7 +3557,7 @@ impl AdaptiveFec {
         drop(encoder);
 
         // **ADAPTIVE STREAMING**: Dynamic stream_every based on loss rate
-        if self.current_mode() == FecMode::Streaming {
+        if mode == FecMode::Streaming {
             self.stream_ctr += 1;
             let effective_every = self.stream_every;
             if self.stream_ctr >= effective_every {
@@ -3592,7 +3595,7 @@ impl AdaptiveFec {
     /// should prefer [`AdaptiveFec::on_receive_into`] and reuse their output allocation.
     #[inline]
     pub fn on_receive(&mut self, packet: FecPacket) -> Result<Vec<FecPacket>, String> {
-        if self.current_mode() == FecMode::Zero && self.transition_left == 0 {
+        if self.active_mode == FecMode::Zero && self.transition_left == 0 {
             return Ok(vec![packet]);
         }
 
@@ -3620,7 +3623,7 @@ impl AdaptiveFec {
         // passthrough so the QUIC core can decrypt/header-unprotect in place
         // instead of falling back to a copy because the decoder retained an Arc
         // clone of the pooled buffer.
-        if self.current_mode() == FecMode::Zero && self.transition_left == 0 {
+        if self.active_mode == FecMode::Zero && self.transition_left == 0 {
             output.push(packet);
             return Ok(());
         }
@@ -3784,8 +3787,10 @@ impl AdaptiveFec {
 
     /// **GRADUAL MODE SWITCHING**: Initiate seamless transition to new controller target
     fn transition_to_target(&mut self, target: FecProtectionTarget) {
-        let current = self.mode_manager.lock().current_mode();
-        let current_window = self.mode_manager.lock().current_window();
+        let (current, current_window) = {
+            let mode_mgr = self.mode_manager.lock();
+            (mode_mgr.current_mode(), mode_mgr.current_window())
+        };
         let (resolved_mode, k, n) = internal::ModeManager::params_for_target(
             target,
             current_window.max(64),
@@ -3827,6 +3832,7 @@ impl AdaptiveFec {
 
         // Update streaming mode flag
         self.streaming_mode = matches!(resolved_mode, FecMode::Streaming);
+        self.active_mode = resolved_mode;
 
         let mut mode_mgr = self.mode_manager.lock();
         mode_mgr.force_state(resolved_mode, k);
@@ -4348,7 +4354,7 @@ impl AdaptiveFec {
 
     /// Return the currently active FEC protection mode.
     pub fn current_mode(&self) -> FecMode {
-        self.mode_manager.lock().current_mode()
+        self.active_mode
     }
 
     /// Returns true if a cross-fade mode transition is currently in progress.
@@ -4359,6 +4365,7 @@ impl AdaptiveFec {
     /// Force a specific FEC mode for testing (bypasses adaptive controller).
     #[cfg(test)]
     pub fn force_mode_for_test(&mut self, mode: FecMode) {
+        self.active_mode = mode;
         self.mode_manager =
             Arc::new(Mutex::new(internal::ModeManager::with_switch_threshold(mode, 0.02)));
     }
@@ -4428,6 +4435,7 @@ impl AdaptiveFec {
         if switched {
             let mut mode_mgr = self.mode_manager.lock();
             mode_mgr.force_state(new_mode, new_window);
+            self.active_mode = new_mode;
         }
 
         // Telemetry: track mode and window
@@ -4519,6 +4527,7 @@ impl AdaptiveFec {
         );
         let mut mode_mgr = self.mode_manager.lock();
         mode_mgr.force_state(target_mode, k);
+        self.active_mode = target_mode;
         self.streaming_mode = true;
         crate::telemetry::FEC_MODE.store(target_mode as u64, std::sync::atomic::Ordering::Relaxed);
         crate::telemetry::FEC_WINDOW.store(k as u64, std::sync::atomic::Ordering::Relaxed);
