@@ -1117,10 +1117,20 @@ impl InterleavedDecoder {
         let mut any_result = false;
 
         for block in &mut self.blocks {
-            if let Some(results) = block.get_result() {
-                any_result = true;
-                for pkt in results {
-                    combined.push_back(pkt);
+            if block.full_recovery_needed() {
+                if let Some(results) = block.get_result() {
+                    any_result = true;
+                    for pkt in results {
+                        combined.push_back(pkt);
+                    }
+                }
+            } else if block.recovery_needed() {
+                let results = block.get_partial_result();
+                if !results.is_empty() {
+                    any_result = true;
+                    for pkt in results {
+                        combined.push_back(pkt);
+                    }
                 }
             }
         }
@@ -1153,6 +1163,11 @@ impl InterleavedDecoder {
     #[inline]
     pub fn full_recovery_needed(&self) -> bool {
         self.blocks.iter().any(LazyDecoder::full_recovery_needed)
+    }
+
+    #[cfg(test)]
+    pub fn block_pending_repairs_len(&self, block_idx: usize) -> Option<usize> {
+        self.blocks.get(block_idx).map(LazyDecoder::pending_repairs_len)
     }
 
     /// Drain all buffered packets from ZeroDecoders for seamless mode transition.

@@ -800,6 +800,52 @@ fn test_lazy_decoder_pending_repair_ring_reuse_under_load() {
 }
 
 #[test]
+fn test_interleaved_decoder_get_result_skips_idle_lazy_blocks() {
+    let pool = make_pool();
+    let mut decoder =
+        super::internal::InterleavedDecoder::new(FecMode::Streaming, 8, Arc::clone(&pool), 2);
+
+    let mut idle_source = mk_src_packet(1, 64, &pool);
+    idle_source.seq = 1;
+    decoder.take_packet(idle_source);
+
+    let mut idle_data = pool.alloc();
+    idle_data[..64].fill(0x5A);
+    let mut idle_coeffs = pool.alloc();
+    idle_coeffs[..4].fill(1);
+    let mut idle_repair =
+        FecPacket::new(100, Some(idle_data), 64, false, Some(idle_coeffs), 4, Arc::clone(&pool));
+    idle_repair.seq = 1;
+    decoder.take_packet(idle_repair);
+    assert_eq!(decoder.block_pending_repairs_len(1), Some(1));
+
+    let mut lossy_source = mk_src_packet(0, 64, &pool);
+    lossy_source.seq = 0;
+    decoder.take_packet(lossy_source);
+
+    let mut lossy_data = pool.alloc();
+    lossy_data[..64].fill(0xA5);
+    let mut lossy_coeffs = pool.alloc();
+    lossy_coeffs[..4].fill(1);
+    let mut lossy_repair =
+        FecPacket::new(200, Some(lossy_data), 64, false, Some(lossy_coeffs), 4, Arc::clone(&pool));
+    lossy_repair.seq = 0;
+    decoder.take_packet(lossy_repair);
+
+    let mut later_lossy_source = mk_src_packet(4, 64, &pool);
+    later_lossy_source.seq = 4;
+    decoder.take_packet(later_lossy_source);
+    assert!(decoder.full_recovery_needed());
+
+    let _ = decoder.get_result();
+    assert_eq!(
+        decoder.block_pending_repairs_len(1),
+        Some(1),
+        "full recovery in one interleave lane must not flush idle clean-lane repair buffers"
+    );
+}
+
+#[test]
 fn test_streaming_repairs_have_nonzero_coeffs() {
     // QUICFUSCATE_FEC_STREAM_EVERY is read during AdaptiveFec::new
     let _env_lock = acquire_env_lock();
