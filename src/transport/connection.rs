@@ -16,6 +16,7 @@ use crate::optimize::{prefetch, PrefetchHint};
 const MAX_RX_KEY_UPDATE_ADVANCE: usize = 4;
 const PATH_VALIDATION_TIMEOUT: Duration = Duration::from_secs(3);
 const MIGRATION_COOLDOWN: Duration = Duration::from_millis(750);
+const SENT_PACKET_SPLIT_DRAIN_THRESHOLD: u64 = 64;
 
 /// DPLPMTUD (RFC 8899) state for packetization-layer MTU discovery.
 ///
@@ -3862,19 +3863,32 @@ impl Connection {
         let mut rtt_sample: Option<Duration> = None;
 
         for (start, end) in ranges {
-            for (pn, (sz, send_time)) in
-                self.sent_packets_by_pn.extract_if(*start..*end, |_, _| true)
-            {
-                if pn == largest_acked {
-                    let elapsed = now.saturating_duration_since(send_time);
-                    rtt_sample = Some(elapsed.saturating_sub(ack_delay));
+            let span = end.saturating_sub(*start);
+            if span >= SENT_PACKET_SPLIT_DRAIN_THRESHOLD {
+                let acked_packets = self.drain_sent_packet_range(*start, *end);
+                for (pn, (sz, send_time)) in acked_packets {
+                    if pn == largest_acked {
+                        let elapsed = now.saturating_duration_since(send_time);
+                        rtt_sample = Some(elapsed.saturating_sub(ack_delay));
+                    }
+                    acked_total = acked_total.saturating_add(sz);
                 }
-                acked_total = acked_total.saturating_add(sz);
+            } else {
+                for (pn, (sz, send_time)) in
+                    self.sent_packets_by_pn.extract_if(*start..*end, |_, _| true)
+                {
+                    if pn == largest_acked {
+                        let elapsed = now.saturating_duration_since(send_time);
+                        rtt_sample = Some(elapsed.saturating_sub(ack_delay));
+                    }
+                    acked_total = acked_total.saturating_add(sz);
+                }
             }
         }
         if largest_acked >= packet_threshold {
             let loss_cutoff = largest_acked - packet_threshold;
-            for (pn, (sz, _)) in self.sent_packets_by_pn.extract_if(..=loss_cutoff, |_, _| true) {
+            let lost_packets = self.drain_sent_packets_through(loss_cutoff);
+            for (pn, (sz, _)) in lost_packets {
                 self.recovery.on_loss_packet(pn, sz, now);
                 lost_total = lost_total.saturating_add(sz);
                 self.stats.lost = self.stats.lost.saturating_add(1);
@@ -3918,6 +3932,36 @@ impl Connection {
                 self.recovery.update_rtt(sample);
             }
         }
+    }
+
+    fn drain_sent_packet_range(&mut self, start: u64, end: u64) -> BTreeMap<u64, (usize, Instant)> {
+        if start >= end || self.sent_packets_by_pn.is_empty() {
+            return BTreeMap::new();
+        }
+
+        let mut tail = self.sent_packets_by_pn.split_off(&end);
+        let drained = if start == 0 {
+            std::mem::take(&mut self.sent_packets_by_pn)
+        } else {
+            self.sent_packets_by_pn.split_off(&start)
+        };
+        self.sent_packets_by_pn.append(&mut tail);
+        drained
+    }
+
+    fn drain_sent_packets_through(
+        &mut self,
+        end_inclusive: u64,
+    ) -> BTreeMap<u64, (usize, Instant)> {
+        if self.sent_packets_by_pn.is_empty() {
+            return BTreeMap::new();
+        }
+
+        let Some(after_end) = end_inclusive.checked_add(1) else {
+            return std::mem::take(&mut self.sent_packets_by_pn);
+        };
+        let tail = self.sent_packets_by_pn.split_off(&after_end);
+        std::mem::replace(&mut self.sent_packets_by_pn, tail)
     }
 }
 
@@ -4487,6 +4531,40 @@ mod tests {
         assert_eq!(c.stats.lost_bytes, 4800);
         let remaining: Vec<u64> = c.sent_packets_by_pn.keys().copied().collect();
         assert_eq!(remaining, vec![6, 7, 9, 10, 11]);
+    }
+
+    #[test]
+    fn large_contiguous_ack_uses_split_drain_and_preserves_tail() {
+        let mut c = make_conn();
+        let send_time = Instant::now() - Duration::from_millis(50);
+        for pn in 0..96 {
+            c.sent_packets_by_pn.insert(pn, (1200, send_time));
+        }
+
+        let ranges = vec![(16u64, 80u64)];
+        c.account_sent_bytes_for_ack_ranges_with_delay(&ranges, Duration::ZERO);
+
+        assert_eq!(c.stats.acked_bytes, 64 * 1200);
+        let remaining: Vec<u64> = c.sent_packets_by_pn.keys().copied().collect();
+        assert_eq!(remaining, (80..96).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn large_loss_prefix_uses_split_drain_and_preserves_unlost_tail() {
+        let mut c = make_conn();
+        let send_time = Instant::now() - Duration::from_millis(50);
+        for pn in 0..128 {
+            c.sent_packets_by_pn.insert(pn, (1200, send_time));
+        }
+
+        let ranges = vec![(127u64, 128u64)];
+        c.account_sent_bytes_for_ack_ranges_with_delay(&ranges, Duration::ZERO);
+
+        assert_eq!(c.stats.acked_bytes, 1200);
+        assert_eq!(c.stats.lost, 125);
+        assert_eq!(c.stats.lost_bytes, 125 * 1200);
+        let remaining: Vec<u64> = c.sent_packets_by_pn.keys().copied().collect();
+        assert_eq!(remaining, vec![125, 126]);
     }
 
     #[test]

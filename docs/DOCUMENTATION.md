@@ -1345,7 +1345,7 @@ SIMD submodules (`src/simd/`):
 
 Transport submodules (`src/transport/`):
 - `src/transport/config.rs` - transport configuration surface.
-- `src/transport/connection.rs` - core transport connection state machine and send/recv path. Includes in-order Stream fast path (sequential data bypasses recv_frags BTreeMap, copies directly to recv_buf) and `BTreeMap::extract_if` ACK/loss range draining for sent-packet accounting. Stored frames use `Frame<'static>` with `Cow::Owned`.
+- `src/transport/connection.rs` - core transport connection state machine and send/recv path. Includes in-order Stream fast path (sequential data bypasses recv_frags BTreeMap, copies directly to recv_buf) and hybrid ACK/loss range draining for sent-packet accounting: sparse/narrow ACK ranges use `BTreeMap::extract_if`, while large contiguous ACK ranges and loss prefixes use `BTreeMap::split_off`. Stored frames use `Frame<'static>` with `Cow::Owned`.
 - `src/transport/frames.rs` - frame encoders/decoders and canonical ACK block logic. `from_bytes()` returns `Frame<'a>` with `Cow::Borrowed` data fields for zero-copy parsing; construction sites use `Cow::Owned`.
 - `src/transport/h3.rs` - HTTP/3 state machine (streams, QPACK, events, MASQUE wiring).
 - `src/transport/packet.rs` - QUIC packet parse/build, encryption/decryption glue.
@@ -1711,7 +1711,7 @@ See "Unified TLS Provider (RealTLS + TLS Cover) -> Fingerprint Source Model" for
 - AEGIS/MORUS implementations include unsafe blocks for SIMD lanes where necessary; all sensitive operations remain constant-time by design.
 - Transport/H3 uses zero-copy iovecs, io_uring fast paths (feature `io_uring`, crate `io-uring` v0.7), pool-backed compression buffers, and aligned pools (`MemoryPool`) for minimal copies. The client `IoDriver` uses `UringBatchSender` (in `src/optimize/uring_batch.rs`) for batch `SendMsg` submission before falling back to `sendmmsg`, and uses pool-backed `UringRecvBatch` slots on Linux so inbound datagrams can enter FEC through `core::recv_pooled_block()` without an intermediate `Vec` copy. In FEC Zero mode, receive keeps the payload uniquely owned so the core avoids the copy-on-mutate fallback.
 - Frame parsing is zero-copy: `Frame<'a>` uses `Cow<'a, [u8]>` for data fields, borrowing directly from the decrypted packet buffer in `from_bytes()`. Combined with the in-order Stream fast path (sequential data copies directly to recv_buf, skipping the recv_frags BTreeMap), the common-case receive path avoids heap allocation entirely.
-- ACK sent-byte accounting drains acknowledged and packet-threshold-lost ranges from `sent_packets_by_pn` with `BTreeMap::extract_if`, avoiding the older collect-then-remove pass while preserving largest-ACK RTT sampling and recovery/loss semantics.
+- ACK sent-byte accounting drains acknowledged and packet-threshold-lost ranges from `sent_packets_by_pn` without collect-then-remove passes. Sparse/narrow ACK ranges use `BTreeMap::extract_if`; large contiguous ACK ranges and packet-threshold loss prefixes use `BTreeMap::split_off`, preserving largest-ACK RTT sampling and recovery/loss semantics while reducing large-range removal cost.
 - Stealth hotpaths (header/QPACK building and persona-driven shaping) prefer SIMD kernels with safe scalar fallback; mutex/atomic usage is minimized in hotpaths.
 
 #### Feature Matrix (Crypto)
