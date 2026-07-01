@@ -1109,6 +1109,14 @@ pub struct MacTun {
 - `QUICFUSCATE_FEC_STREAM_EVERY`: Overrides repair cadence (min 1; default computed from CPU profile)
 - Aggressive profiles can use N=1 for maximum redundancy
 
+#### Benchmark Coverage
+
+- `benches/fec_pipeline.rs` uses `FecConfig::product_default()` for mode variants so Criterion windows match the Engine/CLI product defaults (`window_good=10`, `window_fair=30`, `window_poor=50`) instead of synthetic library-default windows.
+- `fec_encode_pipeline` remains the compatibility benchmark for full `on_send()` behavior.
+- `fec_systematic_hot_path` isolates reusable-output systematic sends with no repair burst, proving the normal send hot path independently from block completion.
+- `fec_window_fill_burst` measures the packet that completes a product-sized FEC window for Light/Normal/Medium/Strong separately.
+- Broderick ARM/AArch64 product-window burst reference after TODO-488: Light k16 `32.7 us`, Normal k10 `14.9 us`, Medium k30 `23.7 us`, Strong k50 `37.7 us`.
+
 #### Galois Field Implementations
 
 **GF(2^8) - 8-bit Galois Field:**

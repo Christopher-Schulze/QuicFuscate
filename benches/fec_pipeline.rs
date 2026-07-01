@@ -37,7 +37,14 @@ fn mk_src_packet(id: u64, len: usize, pool: &Arc<quicfuscate::optimize::MemoryPo
 }
 
 fn config_with_mode(mode: FecMode) -> FecConfig {
-    FecConfig { initial_mode: mode, ..FecConfig::default() }
+    let mut config = FecConfig::product_default();
+    config.initial_mode = mode;
+    config
+}
+
+fn window_size_for_mode(mode: FecMode) -> usize {
+    let config = config_with_mode(mode);
+    *config.window_sizes.get(&mode).expect("benchmark mode must have a configured FEC window")
 }
 
 // ---------------------------------------------------------------------------
@@ -80,6 +87,54 @@ fn bench_fec_encode_pipeline(c: &mut Criterion) {
         }
         group.finish();
     }
+}
+
+// ---------------------------------------------------------------------------
+// 1b. FEC systematic send hot path: reusable output, no repair burst
+// ---------------------------------------------------------------------------
+
+fn bench_fec_systematic_hot_path(c: &mut Criterion) {
+    let modes = [
+        ("zero", FecMode::Zero),
+        ("light", FecMode::Light),
+        ("normal", FecMode::Normal),
+        ("medium", FecMode::Medium),
+        ("strong", FecMode::Strong),
+        ("streaming", FecMode::Streaming),
+    ];
+    let sizes: &[(usize, &str)] = &[(64, "64B"), (256, "256B"), (1400, "1400B"), (4096, "4KB")];
+
+    let mut group = c.benchmark_group("fec_systematic_hot_path");
+
+    for &(mode_name, mode) in &modes {
+        for &(size, size_label) in sizes {
+            group.throughput(Throughput::Bytes(size as u64));
+            group.bench_with_input(
+                BenchmarkId::new(mode_name, size_label),
+                &(mode, size),
+                |b, &(mode, size)| {
+                    let pool = global_pool();
+
+                    b.iter_batched(
+                        || {
+                            let config = config_with_mode(mode);
+                            let fec = AdaptiveFec::new(config);
+                            let output = Vec::with_capacity(8);
+                            (fec, output)
+                        },
+                        |(mut fec, mut output)| {
+                            let pkt = mk_src_packet(0, size, &pool);
+                            fec.on_send_into(pkt, &mut output);
+                            black_box(&output);
+                        },
+                        criterion::BatchSize::SmallInput,
+                    );
+                },
+            );
+        }
+    }
+
+    group.finish();
 }
 
 // ---------------------------------------------------------------------------
@@ -339,31 +394,44 @@ fn bench_fec_lazy_fast_path(c: &mut Criterion) {
 fn bench_fec_window_fill_burst(c: &mut Criterion) {
     let mut group = c.benchmark_group("fec_window_fill_burst");
 
-    // Normal mode k=64: measure the packet that triggers repair generation
-    group.bench_function("normal_k64_repair_burst", |b| {
-        let pool = global_pool();
+    let modes = [
+        ("light", FecMode::Light),
+        ("normal", FecMode::Normal),
+        ("medium", FecMode::Medium),
+        ("strong", FecMode::Strong),
+    ];
 
-        b.iter_batched(
-            || {
-                // Fresh FEC for each measurement to get consistent window-fill behavior
-                let config = config_with_mode(FecMode::Normal);
-                let mut fec = AdaptiveFec::new(config);
-                // Pre-fill 63 packets (window is 64)
-                for id in 0..63u64 {
-                    let pkt = mk_src_packet(id, 1400, &pool);
-                    let _ = fec.on_send(pkt);
-                }
-                fec
+    for &(mode_name, mode) in &modes {
+        let window = window_size_for_mode(mode);
+        group.throughput(Throughput::Bytes(1400));
+        group.bench_with_input(
+            BenchmarkId::new(mode_name, format!("k{window}_repair_burst")),
+            &(mode, window),
+            |b, &(mode, window)| {
+                let pool = global_pool();
+
+                b.iter_batched(
+                    || {
+                        // Fresh FEC for each measurement keeps the measured packet
+                        // consistently positioned as the one that fills the window.
+                        let config = config_with_mode(mode);
+                        let mut fec = AdaptiveFec::new(config);
+                        for id in 0..window.saturating_sub(1) as u64 {
+                            let pkt = mk_src_packet(id, 1400, &pool);
+                            let _ = fec.on_send(pkt);
+                        }
+                        (fec, window.saturating_sub(1) as u64)
+                    },
+                    |(mut fec, id)| {
+                        let pkt = mk_src_packet(id, 1400, &pool);
+                        let output = fec.on_send(pkt);
+                        black_box(&output);
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
             },
-            |mut fec| {
-                // This packet fills the window and triggers repair generation
-                let pkt = mk_src_packet(63, 1400, &pool);
-                let output = fec.on_send(pkt);
-                black_box(&output);
-            },
-            criterion::BatchSize::SmallInput,
         );
-    });
+    }
 
     group.finish();
 }
@@ -371,6 +439,7 @@ fn bench_fec_window_fill_burst(c: &mut Criterion) {
 criterion_group!(
     fec_pipeline_benches,
     bench_fec_encode_pipeline,
+    bench_fec_systematic_hot_path,
     bench_fec_decode_pipeline,
     bench_fec_mode_transition,
     bench_fec_streaming_repair,
