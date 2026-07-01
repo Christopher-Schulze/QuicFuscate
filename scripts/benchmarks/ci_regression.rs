@@ -390,27 +390,6 @@ fn bench_shuffle_op(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
-// Optimization: cache-aware matrix transpose
-// ---------------------------------------------------------------------------
-fn bench_transpose(c: &mut Criterion) {
-    use quicfuscate::optimize::memory::transpose_matrix;
-
-    for dim in [64, 256] {
-        let template: Vec<u32> = (0..dim * dim).map(|i| i as u32).collect();
-
-        let mut group = c.benchmark_group("memory_transpose");
-        group.throughput(Throughput::Elements((dim * dim) as u64));
-        group.bench_function(format!("{dim}x{dim}"), |b| {
-            let mut data = template.clone();
-            b.iter(|| {
-                transpose_matrix(black_box(&mut data), dim, dim);
-            });
-        });
-        group.finish();
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Connection 1-RTT send/recv loop (TODO-399)
 // ---------------------------------------------------------------------------
 fn bench_connection_1rtt_send_recv(c: &mut Criterion) {
@@ -680,7 +659,7 @@ criterion_group!(fec_benches, bench_fec_matrix_mul,);
 
 criterion_group!(stealth_benches, bench_padding_gen,);
 
-criterion_group!(optimization_benches, bench_sort, bench_shuffle_op, bench_transpose,);
+criterion_group!(optimization_benches, bench_sort, bench_shuffle_op,);
 
 criterion_main!(
     crypto_benches,

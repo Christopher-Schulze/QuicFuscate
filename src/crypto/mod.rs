@@ -24,8 +24,6 @@ use zeroize::Zeroize;
 const DATA_AEAD_OVERRIDE_AUTO: u8 = 0;
 const DATA_AEAD_OVERRIDE_AEGIS_L: u8 = 1;
 const DATA_AEAD_OVERRIDE_MORUS: u8 = 2;
-const DATA_AEAD_OVERRIDE_AEGIS_X4: u8 = 3;
-const DATA_AEAD_OVERRIDE_AEGIS_X8: u8 = 4;
 
 static DATA_AEAD_OVERRIDE_MODE: AtomicU8 = AtomicU8::new(DATA_AEAD_OVERRIDE_AUTO);
 
@@ -39,8 +37,9 @@ static DATA_AEAD_OVERRIDE_MODE: AtomicU8 = AtomicU8::new(DATA_AEAD_OVERRIDE_AUTO
 /// planner's length thresholds. Feeding an Initial-sized length would
 /// under-select the wide backends on AVX/VAES-capable hosts.
 ///
-/// Forced overrides (`force_aead` / `AeadPreference`) bypass this length
-/// entirely, so changing it never affects explicit backend pinning.
+/// Forced product-family overrides (`force_aead` / `AeadPreference`) bypass
+/// this length entirely, so changing it never affects explicit family pinning.
+/// Internal AEGIS width backends remain planner-owned implementation details.
 pub(crate) const DEFAULT_DATA_PLANE_AEAD_LEN: usize = 1400;
 
 #[cfg(target_arch = "x86_64")]
@@ -975,8 +974,6 @@ fn record_data_aead_plan(plan: CryptoAeadPlan) {
 fn resolve_data_aead_plan(default_workload_len: usize) -> CryptoAeadPlan {
     match data_aead_override_mode() {
         DATA_AEAD_OVERRIDE_AEGIS_L => CryptoAeadPlan::Aegis128L,
-        DATA_AEAD_OVERRIDE_AEGIS_X4 => CryptoAeadPlan::Aegis128X4,
-        DATA_AEAD_OVERRIDE_AEGIS_X8 => CryptoAeadPlan::Aegis128X8,
         DATA_AEAD_OVERRIDE_MORUS => CryptoAeadPlan::Morus,
         _ => CryptoAeadPlan::select_for_len(default_workload_len),
     }
@@ -1068,6 +1065,7 @@ fn set_data_aead_override_mode(mode: u8) {
 ///
 /// This affects 0-RTT/1-RTT packet protection selection in the forked transport layer.
 /// It is a fork-specific data-plane decision, not a TLS cipher-suite decision, and is valid only under the explicit full-fork assumption.
+/// The config surface selects product AEAD families only; internal AEGIS width backends are planner-owned implementation details.
 /// It is not an upstream QUIC interoperability claim.
 /// Initial/Handshake remain AES-GCM at the QUIC/TLS boundary.
 pub fn install_data_aead_config(cfg: &crate::engine::CryptoConfig) {
@@ -1096,12 +1094,6 @@ pub fn install_data_aead_config(cfg: &crate::engine::CryptoConfig) {
             "auto" => set_data_aead_override_mode(DATA_AEAD_OVERRIDE_AUTO),
             "aegis-128l" | "aegis128l" | "aegis" => {
                 set_data_aead_override_mode(DATA_AEAD_OVERRIDE_AEGIS_L)
-            }
-            "aegis-128x4" | "aegis128x4" => {
-                set_data_aead_override_mode(DATA_AEAD_OVERRIDE_AEGIS_X4)
-            }
-            "aegis-128x8" | "aegis128x8" => {
-                set_data_aead_override_mode(DATA_AEAD_OVERRIDE_AEGIS_X8)
             }
             "morus" | "morus-1280-128" | "morus1280-128" => {
                 set_data_aead_override_mode(DATA_AEAD_OVERRIDE_MORUS)

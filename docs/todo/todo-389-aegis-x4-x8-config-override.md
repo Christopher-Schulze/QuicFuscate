@@ -1,6 +1,6 @@
 ---
 id: TODO-389
-title: Fix aegis128x4/x8 config override mapping
+title: Retire aegis128x4/x8 config override mapping drift
 severity: HIGH
 phase: A
 priority: P0
@@ -8,32 +8,33 @@ status: DONE
 created: 2026-06-05
 ---
 
-# TODO-389: Fix `aegis128x4`/`aegis128x8` Config Override
+# TODO-389: Retire `aegis128x4`/`aegis128x8` Config Override Drift
 
 ## Problem
 
-`install_data_aead_config()` in `src/crypto/mod.rs` maps both `aegis128x4` and `aegis128x8` to `DATA_AEAD_OVERRIDE_AEGIS_L`. Operators cannot force SIMD bulk backends via config.
+Earlier notes treated `aegis128x4` and `aegis128x8` as public runtime config aliases. That conflicts with the narrowed forked AEAD posture: product config selects AEAD families only (`auto`, `aegis-128l`, `morus`), while `Aegis128X4` and `Aegis128X8` are internal planner-owned implementation backends.
 
 ## Acceptance
 
-- `aegis128x4` sets X4 override mode
-- `aegis128x8` sets X8 override mode
-- `aegis128l` unchanged
-- Unit test covers all three override strings
-- `cargo test --features rust-tests` green for crypto config paths
+- `aegis128x4`, `aegis-128x4`, `aegis128x8`, and `aegis-128x8` are not accepted by `CryptoConfig::validate()`
+- `install_data_aead_config()` does not expose distinct X4/X8 runtime override modes
+- `aegis128l` remains the public AEGIS family override
+- Internal X4/X8 backend tests remain covered directly through planner/backend construction
+- `cargo test --features rust-tests` is green for crypto config paths
 
 ## Fix Plan
 
-1. Add `DATA_AEAD_OVERRIDE_AEGIS_X4` and `DATA_AEAD_OVERRIDE_AEGIS_X8` constants if missing
-2. Fix `match` arms in `install_data_aead_config`
-3. Wire override modes through `select_data_aead` / `resolve_data_aead_plan`
-4. Add regression test in `crypto/mod.rs` or existing crypto tests
+1. Remove public/runtime X4/X8 override constants from `src/crypto/mod.rs`
+2. Keep X4/X8 backend coverage through direct internal tests
+3. Reject X4/X8 strings at `CryptoConfig::validate()`
+4. Update docs so product-level config and internal backend names cannot drift again
 
 ## Files
 
 - `src/crypto/mod.rs`
-- `src/simd.rs` (if planner needs override awareness)
+- `src/crypto/tests.rs`
+- `src/engine/config.rs`
 
 ## Notes
 
-Config-only fix. No UI changes. No stealth behavior changes.
+Superseded by the runtime guardrail contract hardening. No UI changes. No stealth behavior changes.

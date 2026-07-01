@@ -16,7 +16,7 @@ pub mod crypto;
 /// SIMD-accelerated iterator utilities (sum, reduce).
 pub mod iter;
 /// Memory management and cache-aware operations.
-#[cfg(any(test, feature = "rust-tests", feature = "benches"))]
+#[cfg(any(test, feature = "rust-tests"))]
 pub mod memory;
 /// Random number generation and shuffle operations.
 #[cfg(any(test, feature = "rust-tests", feature = "benches"))]

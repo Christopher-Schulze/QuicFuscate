@@ -58,6 +58,7 @@ This section is the fast path for skeptical review. It is not a marketing summar
 ### Reviewer Trust Snapshot
 
 - Runtime correctness is defined by checked-in code, targeted tests, and audit scripts.
+- AI-assisted development is part of the repository workflow; code truth is defined by checked-in code and gates, not by assistant claims.
 - Custom data-plane crypto with in-tree implementations:
   - product contract: `Aegis128L`, `Morus1280_128`
   - internal backend machine room: `Aegis128X4`, `Aegis128X8`
@@ -74,10 +75,13 @@ This section is the fast path for skeptical review. It is not a marketing summar
   `core::recv_pooled_block()` while immediately arming the ring slot with a replacement block.
   This removes the io_uring-to-FEC memcpy on the Linux client fast path. Fallback to Tokio
   `recv()` + `try_recv()` when io_uring is unavailable.
+- MSG_ZEROCOPY is not part of the final runtime story.
 - Packet-number decode on packet open is centralized in `src/optimize/transport.rs`:
   `src/transport/packet.rs` removes header protection, rebuilds the encoded packet-number field,
   then dispatches through BMI2 on x86_64, SVE2/NEON on aarch64, or the scalar fallback.
 - busy-poll socket tuning is not used.
+- busy-poll socket tuning is not part of the final runtime story.
+- The repository is not reducible to `quinn-udp` plus trivial glue.
 
 ### Shortest Audit Path
 
@@ -97,6 +101,10 @@ If a claim is not backed by one of the proof surfaces below, treat it as untrust
 | Packet protection ownership | `src/transport/packet.rs`, `src/transport/connection.rs` | Packet protection and data-plane AEAD are fork-specific transport decisions, not TLS cipher-suite claims | `docs/todo/done/todo-76-forked-aead-protocol-posture-clarification.md`, targeted transport rust-tests, `audit-runtime-guardrails.sh` |
 | Unsafe SIMD / crypto machine room | `src/crypto/`, `src/simd.rs`, `src/optimize/` | Unsafe and SIMD stay internal or parity-scoped; product/runtime claims stay at owner boundaries only | `cargo clippy --all-targets --all-features -- -W clippy::all`, `scripts/tests/audits/audit-all-comprehensive.sh`, `scripts/tests/audits/audit-runtime-guardrails.sh` |
 | Stealth/TLS-cover boundary | `src/stealth/`, `src/qftls.rs` | Stealth owns persona and cover policy; rustls still owns real TLS protocol semantics | `docs/todo/done/todo-81-stealth-capability-preservation-and-simplification.md`, `docs/todo/done/todo-85-tls-cover-and-rustls-boundary-clarification.md` |
+
+## Transport Overlap and Divergence vs quinn-udp
+
+QuicFuscate is not a `quinn-udp` wrapper. It overlaps with standard UDP/QUIC transport concerns, but the runtime contract adds fork-owned packet protection, FEC integration, stealth shaping, MASQUE/TUN ownership, Brain feedback loops, and platform fastpath dispatch. Reviewer-facing conclusion: compare packet I/O mechanics where useful, but do not reduce repository scope to `quinn-udp` plus trivial glue.
 
 ### Reviewer Checklist
 
@@ -1431,7 +1439,7 @@ Tips
 ### AEGIS
 - Integrated internally in `src/crypto/`; validated via integration tests in `scripts/tests/rust/rt-baseline-oracles.rs`.
 - Workflow: develop -> test -> clippy. Deterministic, offline; run in repo root.
-- Data-plane AEAD selection can be overridden via config (`[crypto] aead_preference` / `force_aead`) with canonical choices `aegis-128l` and `morus`; `aegis-128x4` and `aegis-128x8` select the corresponding retained internal AEGIS backends. Initial/Handshake remain AES-128-GCM for QUIC long-header compatibility.
+- Data-plane AEAD selection can be overridden via config (`[crypto] aead_preference` / `force_aead`) with canonical product-family choices `aegis-128l` and `morus`; `aegis-128x4` and `aegis-128x8` are internal backend names, not supported runtime config values. Initial/Handshake remain AES-128-GCM for QUIC long-header compatibility.
 - `src/profile.rs` is a test/compat alias surface for `Aegis128Profile` and converts to/from `simd::CryptoAeadPlan` via `select()`/`select_for_len()` helpers. It is gated behind `cfg(any(test, feature = "rust-tests"))` and is not part of the default product-facing crate surface.
 
 We do not list the crate's file structure exhaustively; instead we focus on the essential aspects and how to run the tests.
@@ -3401,7 +3409,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `bench-fec-simulation.sh` - FEC performance under simulated network conditions
 - `bench-crypto.sh` - Extended crypto benchmarks with all cipher suites
 - `bench-transport.sh` - Transport benchmarks (packet/varint/frames/streams; io_uring on Linux)
-- `bench-optimization.sh` - Memory/NUMA/HugePages/SIMD/prefetch/zero-copy
+- `bench-optimization.sh` - Runtime-owned SIMD sort/shuffle optimization benchmarks; memory microprimitives are rust-tests parity-only.
 - `bench-stealth.sh` - Stealth module performance (padding, masquerading, obfuscation)
 - `bench-stealth-brain.sh` - StealthBrain ACK policy optimization benchmarks
 - `bench-compression.sh` - Compression microbenchmarks (`examples/compress_bench.rs`) for text and binary payloads with JSON output

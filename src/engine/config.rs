@@ -386,10 +386,6 @@ impl CryptoConfig {
                     | "aegis-128l"
                     | "aegis128l"
                     | "aegis"
-                    | "aegis-128x4"
-                    | "aegis128x4"
-                    | "aegis-128x8"
-                    | "aegis128x8"
                     | "morus"
                     | "morus-1280-128"
                     | "morus1280-128"
@@ -412,8 +408,8 @@ pub enum AeadPreference {
     /// Automatically select the best AEAD for the detected CPU features.
     #[default]
     Auto,
-    /// Prefer AEGIS-128L (or AEGIS-128x4/x8 on capable hardware).
-    #[serde(rename = "aegis-128l", alias = "aegis-128x4", alias = "aegis-128x8")]
+    /// Prefer the AEGIS-128L product family on capable hardware.
+    #[serde(rename = "aegis-128l")]
     Aegis128L,
     /// Prefer MORUS-1280-128 AEAD.
     Morus,
@@ -1133,6 +1129,15 @@ mod tests {
         let mut config = EngineConfig::default();
         config.connection.remote = String::new();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_crypto_force_aead_rejects_internal_width_backends() {
+        for force in ["aegis-128x4", "aegis128x4", "aegis-128x8", "aegis128x8"] {
+            let mut config = EngineConfig::default();
+            config.crypto.force_aead = force.to_string();
+            assert!(config.validate().is_err(), "{force} must stay internal-only");
+        }
     }
 
     #[test]

@@ -49,9 +49,9 @@
 - This preserves fork freedom while significantly reducing credibility loss from crypto sprawl.
 - March 6, 2026:
   - Public config surface now exposes only `auto`, `aegis-128l`, and `morus` for data-plane AEAD.
-  - Legacy `aegis-128x4` / `aegis-128x8` inputs are accepted only as compatibility aliases folding back to `Aegis128L`.
+  - Legacy `aegis-128x4` / `aegis-128x8` inputs are not product config values; they are internal backend labels and must not be accepted as runtime overrides.
   - `aes-gcm` is no longer presented as a data-plane AEAD option; AES-GCM remains an internal QUIC Initial/Handshake requirement only.
 - March 8, 2026:
   - README, canonical documentation, and the `src/crypto.rs` module header now describe `Aegis128L` and `Morus1280_128` as the actual product-level data-plane posture, while `Aegis128X4` / `Aegis128X8` are documented only as internal AEGIS batching backends.
   - The runtime guardrail now fails if public docs regress back to broad `AEGIS-128L/X` or `X4`/`X8` suite wording.
-  - The runtime override surface in `src/crypto.rs` no longer exposes `Aegis128X4` / `Aegis128X8` as distinct override modes; compatibility aliases now fold into the `Aegis128L` contract while planner-selected internal backends remain intact.
+  - The runtime override surface in `src/crypto.rs` no longer exposes `Aegis128X4` / `Aegis128X8` as distinct override modes; planner-selected internal backends remain intact.

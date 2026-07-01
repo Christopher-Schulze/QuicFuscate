@@ -11,7 +11,7 @@ use std::arch::x86_64::*;
 
 /// Cache-aware matrix transpose - optimized for cache lines
 #[inline(always)]
-#[cfg(any(test, feature = "rust-tests", feature = "benches"))]
+#[cfg(any(test, feature = "rust-tests"))]
 pub fn transpose_matrix<T: Copy>(matrix: &mut [T], rows: usize, cols: usize) {
     let profile = FeatureDetector::instance().profile();
 
@@ -68,7 +68,7 @@ pub fn transpose_matrix<T: Copy>(matrix: &mut [T], rows: usize, cols: usize) {
     transpose_matrix_blocked(matrix, rows, cols);
 }
 
-#[cfg(any(test, feature = "rust-tests", feature = "benches"))]
+#[cfg(any(test, feature = "rust-tests"))]
 fn transpose_matrix_blocked<T: Copy>(matrix: &mut [T], rows: usize, cols: usize) {
     const BLOCK_SIZE: usize = 64; // Cache line aware
     let mut result = vec![matrix[0]; rows * cols];
@@ -90,7 +90,7 @@ fn transpose_matrix_blocked<T: Copy>(matrix: &mut [T], rows: usize, cols: usize)
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-#[cfg(any(test, feature = "rust-tests", feature = "benches"))]
+#[cfg(any(test, feature = "rust-tests"))]
 unsafe fn transpose_matrix_neon_f32(matrix: *mut f32, rows: usize, cols: usize) {
     let src = std::slice::from_raw_parts(matrix, rows * cols);
     let mut result = vec![0f32; rows * cols];
@@ -105,7 +105,7 @@ unsafe fn transpose_matrix_neon_f32(matrix: *mut f32, rows: usize, cols: usize) 
 }
 
 #[cfg(target_arch = "aarch64")]
-#[cfg(any(test, feature = "rust-tests", feature = "benches"))]
+#[cfg(any(test, feature = "rust-tests"))]
 unsafe fn transpose_matrix_sve2_f32(matrix: *mut f32, rows: usize, cols: usize) {
     #[cfg(target_feature = "sve2")]
     {
@@ -121,7 +121,7 @@ unsafe fn transpose_matrix_sve2_f32(matrix: *mut f32, rows: usize, cols: usize) 
 
 #[cfg(all(target_arch = "aarch64", target_feature = "sve2"))]
 #[target_feature(enable = "sve2")]
-#[cfg(any(test, feature = "rust-tests", feature = "benches"))]
+#[cfg(any(test, feature = "rust-tests"))]
 unsafe fn transpose_matrix_sve2_impl(matrix: *mut f32, rows: usize, cols: usize) {
     use std::arch::aarch64::*;
 
@@ -166,7 +166,7 @@ unsafe fn transpose_matrix_sve2_impl(matrix: *mut f32, rows: usize, cols: usize)
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-#[cfg(any(test, feature = "rust-tests", feature = "benches"))]
+#[cfg(any(test, feature = "rust-tests"))]
 unsafe fn transpose_4x4_neon(
     src: *const f32,
     dst: *mut f32,
@@ -204,7 +204,7 @@ unsafe fn transpose_4x4_neon(
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-#[cfg(any(test, feature = "rust-tests", feature = "benches"))]
+#[cfg(any(test, feature = "rust-tests"))]
 unsafe fn transpose_matrix_avx2_f32(matrix: *mut f32, rows: usize, cols: usize) {
     let src = std::slice::from_raw_parts(matrix, rows * cols);
     let mut result = vec![0f32; rows * cols];
@@ -221,7 +221,7 @@ unsafe fn transpose_matrix_avx2_f32(matrix: *mut f32, rows: usize, cols: usize) 
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-#[cfg(any(test, feature = "rust-tests", feature = "benches"))]
+#[cfg(any(test, feature = "rust-tests"))]
 unsafe fn transpose_8x8_avx2(
     src: *const f32,
     dst: *mut f32,
@@ -271,7 +271,7 @@ unsafe fn transpose_8x8_avx2(
 }
 
 /// Rust parity/test-only lock-free ring buffer helper.
-#[cfg(any(test, feature = "rust-tests", feature = "benches"))]
+#[cfg(any(test, feature = "rust-tests"))]
 pub struct LockFreeRingBuffer {
     buffer: Vec<u8>,
     capacity: usize,
@@ -280,7 +280,7 @@ pub struct LockFreeRingBuffer {
     tail: std::sync::atomic::AtomicUsize,
 }
 
-#[cfg(any(test, feature = "rust-tests", feature = "benches"))]
+#[cfg(any(test, feature = "rust-tests"))]
 impl LockFreeRingBuffer {
     pub fn new(capacity: usize) -> Self {
         // Round up to power of 2 for fast modulo

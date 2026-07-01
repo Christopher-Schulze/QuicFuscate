@@ -1,10 +1,8 @@
 use super::chacha20poly1305::ChaCha20Poly1305;
-use super::{
-    DATA_AEAD_OVERRIDE_AEGIS_L, DATA_AEAD_OVERRIDE_AEGIS_X4, DATA_AEAD_OVERRIDE_AEGIS_X8,
-    DATA_AEAD_OVERRIDE_AUTO,
-};
+use super::{DATA_AEAD_OVERRIDE_AEGIS_L, DATA_AEAD_OVERRIDE_AUTO};
 use crate::crypto::aead::{AeadOpen, AeadOpenItem, AeadSeal, AeadSealItem};
 use crate::engine::{AeadPreference, CryptoConfig};
+use crate::simd::CryptoAeadPlan;
 use std::sync::Mutex;
 
 // DATA_AEAD_OVERRIDE_MODE is process-global. Serialize override tests to avoid races.
@@ -59,37 +57,35 @@ fn data_aead_config_force_overrides_preference() {
 }
 
 #[test]
-fn data_aead_config_force_aegis_x4_x8_use_distinct_overrides() {
+fn data_aead_config_force_internal_width_aliases_fall_back_to_auto() {
     let _guard = DATA_AEAD_TEST_LOCK.lock().unwrap();
     let mut cfg = CryptoConfig {
         aead_preference: AeadPreference::Auto,
         force_aead: "aegis-128x4".to_string(),
     };
     super::install_data_aead_config(&cfg);
-    assert_eq!(super::data_aead_override_mode(), DATA_AEAD_OVERRIDE_AEGIS_X4);
+    assert_eq!(super::data_aead_override_mode(), DATA_AEAD_OVERRIDE_AUTO);
 
     cfg.force_aead = "aegis-128x8".to_string();
     super::install_data_aead_config(&cfg);
-    assert_eq!(super::data_aead_override_mode(), DATA_AEAD_OVERRIDE_AEGIS_X8);
+    assert_eq!(super::data_aead_override_mode(), DATA_AEAD_OVERRIDE_AUTO);
 
     super::set_data_aead_override_mode(DATA_AEAD_OVERRIDE_AUTO);
 }
 
 #[test]
-fn data_aead_force_aegis_x4_alias_roundtrip() {
+fn data_aead_internal_aegis_x4_backend_roundtrip() {
     let _guard = DATA_AEAD_TEST_LOCK.lock().unwrap();
-    let cfg = CryptoConfig {
-        aead_preference: AeadPreference::Auto,
-        force_aead: "aegis-128x4".to_string(),
-    };
-    super::install_data_aead_config(&cfg);
-
     let key = [0x11u8; 32];
     let iv = [0x22u8; 16];
     let ad = b"ad";
     let pt = b"hello-quicfuscate";
+    let mut k16 = [0u8; 16];
+    k16.copy_from_slice(&key[..16]);
+    let mut iv12 = [0u8; 12];
+    iv12.copy_from_slice(&iv[..12]);
 
-    let (seal, open) = super::select_data_aead(&key, &iv);
+    let (seal, open) = super::build_data_aead(CryptoAeadPlan::Aegis128X4, &k16, &iv12);
     let mut buf = vec![0u8; pt.len() + 16];
     buf[..pt.len()].copy_from_slice(pt);
     let out_len = seal.seal_with_u64_counter(7, ad, buf.as_mut_slice(), pt.len(), None).unwrap();
@@ -104,18 +100,12 @@ fn data_aead_force_aegis_x4_alias_roundtrip() {
 #[test]
 fn data_aead_x4_batch_seal_open_roundtrip() {
     let _guard = DATA_AEAD_TEST_LOCK.lock().unwrap();
-    let cfg = CryptoConfig {
-        aead_preference: AeadPreference::Auto,
-        force_aead: "aegis-128x4".to_string(),
-    };
-    super::install_data_aead_config(&cfg);
-
-    let key = [0x5Au8; 32];
-    let iv = [0x6Bu8; 16];
+    let key = [0x5Au8; 16];
+    let iv = [0x6Bu8; 12];
     let ad = b"transport-batch-ad";
     let pt = b"batch-payload-12345";
 
-    let (seal, open) = super::select_data_aead(&key, &iv);
+    let (seal, open) = super::build_data_aead(CryptoAeadPlan::Aegis128X4, &key, &iv);
     assert!(seal.supports_batch_seal());
     assert!(open.supports_batch_open());
 
@@ -152,20 +142,18 @@ fn data_aead_x4_batch_seal_open_roundtrip() {
 }
 
 #[test]
-fn data_aead_force_aegis_x8_alias_roundtrip() {
+fn data_aead_internal_aegis_x8_backend_roundtrip() {
     let _guard = DATA_AEAD_TEST_LOCK.lock().unwrap();
-    let cfg = CryptoConfig {
-        aead_preference: AeadPreference::Auto,
-        force_aead: "aegis-128x8".to_string(),
-    };
-    super::install_data_aead_config(&cfg);
-
     let key = [0x33u8; 32];
     let iv = [0x44u8; 16];
     let ad = b"ad";
     let pt = b"hello-quicfuscate-x8";
+    let mut k16 = [0u8; 16];
+    k16.copy_from_slice(&key[..16]);
+    let mut iv12 = [0u8; 12];
+    iv12.copy_from_slice(&iv[..12]);
 
-    let (seal, open) = super::select_data_aead(&key, &iv);
+    let (seal, open) = super::build_data_aead(CryptoAeadPlan::Aegis128X8, &k16, &iv12);
     let mut buf = vec![0u8; pt.len() + 16];
     buf[..pt.len()].copy_from_slice(pt);
     let out_len = seal.seal_with_u64_counter(9, ad, buf.as_mut_slice(), pt.len(), None).unwrap();

@@ -238,12 +238,16 @@ Development focuses on hardening and operational validation across all runtime s
 
 ### Reviewer Truth Snapshot
 - Runtime correctness is defined by checked-in code, targeted tests, and audit scripts.
+- AI-assisted development is part of the repository workflow; code truth is defined by checked-in code and gates, not by assistant claims.
 - Custom data-plane crypto with in-tree implementations:
   - product contract: `Aegis128L`, `Morus1280_128`
   - internal backend machine room: `Aegis128X4`, `Aegis128X8`
 - The Linux high-performance send path is `io_uring` (SQPOLL auto-probed; outbound defaults to batched `SendMsg`; inbound via `RecvMsg` + eventfd bridge).
 - Experimental zero-copy send uses `io_uring SendMsgZc` (not `MSG_ZEROCOPY`/`SO_ZEROCOPY`) and is disabled unless `QUICFUSCATE_IO_URING_ZC=1` is set.
+- MSG_ZEROCOPY is not part of the final runtime story.
 - busy-poll socket tuning is not used.
+- busy-poll socket tuning is not part of the final runtime story.
+- The repository is not reducible to `quinn-udp` plus trivial glue.
 
 ### Security Review Fast Path
 - Suggested skeptical review order:
@@ -264,6 +268,7 @@ Development focuses on hardening and operational validation across all runtime s
   - `scripts/tests/suites/test-fec-auto-controller-proof.sh`
 - Runtime/docs contract drift gate:
   - `scripts/tests/audits/audit-runtime-guardrails.sh`
+- Transport overlap/divergence note: `docs/DOCUMENTATION.md` -> `Transport Overlap and Divergence vs quinn-udp`
 
 ### Quality Evidence Snapshot
 - Tested:

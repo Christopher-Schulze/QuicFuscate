@@ -1553,9 +1553,9 @@ pub struct CryptoContext {
     pub open_initial: Option<Box<dyn crate::crypto::aead::AeadOpen + Send + Sync>>,
     /// AEAD open (decrypt) key for Handshake packets (AES-GCM).
     pub open_handshake: Option<Box<dyn crate::crypto::aead::AeadOpen + Send + Sync>>,
-    /// AEAD open (decrypt) key for 0-RTT packets (forked data-plane AEAD).
+    /// AEAD open (decrypt) key for 0-RTT packets (forked data-plane AEAD contract under the explicit full-fork assumption).
     pub(crate) open_0rtt: Option<crate::crypto::PacketAeadOpen>,
-    /// AEAD open (decrypt) key for 1-RTT packets (forked data-plane AEAD).
+    /// AEAD open (decrypt) key for 1-RTT packets (forked data-plane AEAD contract under the explicit full-fork assumption).
     pub(crate) open_1rtt: Option<Arc<crate::crypto::PacketAeadOpen>>,
     /// AEAD seal (encrypt) key for Initial packets.
     pub seal_initial: Option<Box<dyn crate::crypto::aead::AeadSeal + Send + Sync>>,

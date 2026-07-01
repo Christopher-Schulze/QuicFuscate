@@ -46,8 +46,5 @@ run cargo bench --features benches -- sort_simd
 echo -e "\n> Benchmarking SIMD Shuffle..."
 run cargo bench --features benches -- shuffle_simd
 
-echo -e "\n> Benchmarking Matrix Transpose..."
-run cargo bench --features benches -- memory_transpose
-
 echo -e "\n[OK] Optimization Benchmarks Complete"
 json_end "$JSON"
