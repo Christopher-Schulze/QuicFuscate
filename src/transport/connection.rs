@@ -17,6 +17,7 @@ const MAX_RX_KEY_UPDATE_ADVANCE: usize = 4;
 const PATH_VALIDATION_TIMEOUT: Duration = Duration::from_secs(3);
 const MIGRATION_COOLDOWN: Duration = Duration::from_millis(750);
 const SENT_PACKET_SPLIT_DRAIN_THRESHOLD: u64 = 64;
+const ACK_PREFIX_CLASSIFY_RANGE_THRESHOLD: usize = 8;
 
 /// DPLPMTUD (RFC 8899) state for packetization-layer MTU discovery.
 ///
@@ -3881,37 +3882,94 @@ impl Connection {
         // (smaller PNs may have been acknowledged by coalesced ACKs with older send times).
         let mut rtt_sample: Option<Duration> = None;
 
-        for (start, end) in ranges {
-            let span = end.saturating_sub(*start);
-            if span >= SENT_PACKET_SPLIT_DRAIN_THRESHOLD {
-                let acked_packets = self.drain_sent_packet_range(*start, *end);
-                for (pn, (sz, send_time)) in acked_packets {
-                    if pn == largest_acked {
-                        let elapsed = now.saturating_duration_since(send_time);
-                        rtt_sample = Some(elapsed.saturating_sub(ack_delay));
-                    }
-                    acked_total = acked_total.saturating_add(sz);
+        let loss_cutoff = largest_acked.checked_sub(packet_threshold);
+        if let Some(cutoff) =
+            loss_cutoff.filter(|_| ranges.len() >= ACK_PREFIX_CLASSIFY_RANGE_THRESHOLD)
+        {
+            let mut range_idx = 0usize;
+            let prefix_packets = self.drain_sent_packets_through(cutoff);
+            for (pn, (sz, send_time)) in prefix_packets {
+                while range_idx < ranges.len() && ranges[range_idx].1 <= pn {
+                    range_idx += 1;
                 }
-            } else {
-                for (pn, (sz, send_time)) in
-                    self.sent_packets_by_pn.extract_if(*start..*end, |_, _| true)
-                {
+                let is_acked = range_idx < ranges.len()
+                    && pn >= ranges[range_idx].0
+                    && pn < ranges[range_idx].1;
+                if is_acked {
                     if pn == largest_acked {
                         let elapsed = now.saturating_duration_since(send_time);
                         rtt_sample = Some(elapsed.saturating_sub(ack_delay));
                     }
                     acked_total = acked_total.saturating_add(sz);
+                } else {
+                    self.recovery.on_loss_packet(pn, sz, now);
+                    lost_total = lost_total.saturating_add(sz);
+                    self.stats.lost = self.stats.lost.saturating_add(1);
+                    self.stats.lost_bytes = self.stats.lost_bytes.saturating_add(sz as u64);
                 }
             }
-        }
-        if largest_acked >= packet_threshold {
-            let loss_cutoff = largest_acked - packet_threshold;
-            let lost_packets = self.drain_sent_packets_through(loss_cutoff);
-            for (pn, (sz, _)) in lost_packets {
-                self.recovery.on_loss_packet(pn, sz, now);
-                lost_total = lost_total.saturating_add(sz);
-                self.stats.lost = self.stats.lost.saturating_add(1);
-                self.stats.lost_bytes = self.stats.lost_bytes.saturating_add(sz as u64);
+
+            if let Some(after_cutoff) = cutoff.checked_add(1) {
+                for (start, end) in ranges {
+                    let start = (*start).max(after_cutoff);
+                    if start >= *end {
+                        continue;
+                    }
+                    let span = end.saturating_sub(start);
+                    if span >= SENT_PACKET_SPLIT_DRAIN_THRESHOLD {
+                        let acked_packets = self.drain_sent_packet_range(start, *end);
+                        for (pn, (sz, send_time)) in acked_packets {
+                            if pn == largest_acked {
+                                let elapsed = now.saturating_duration_since(send_time);
+                                rtt_sample = Some(elapsed.saturating_sub(ack_delay));
+                            }
+                            acked_total = acked_total.saturating_add(sz);
+                        }
+                    } else {
+                        for (pn, (sz, send_time)) in
+                            self.sent_packets_by_pn.extract_if(start..*end, |_, _| true)
+                        {
+                            if pn == largest_acked {
+                                let elapsed = now.saturating_duration_since(send_time);
+                                rtt_sample = Some(elapsed.saturating_sub(ack_delay));
+                            }
+                            acked_total = acked_total.saturating_add(sz);
+                        }
+                    }
+                }
+            }
+        } else {
+            for (start, end) in ranges {
+                let span = end.saturating_sub(*start);
+                if span >= SENT_PACKET_SPLIT_DRAIN_THRESHOLD {
+                    let acked_packets = self.drain_sent_packet_range(*start, *end);
+                    for (pn, (sz, send_time)) in acked_packets {
+                        if pn == largest_acked {
+                            let elapsed = now.saturating_duration_since(send_time);
+                            rtt_sample = Some(elapsed.saturating_sub(ack_delay));
+                        }
+                        acked_total = acked_total.saturating_add(sz);
+                    }
+                } else {
+                    for (pn, (sz, send_time)) in
+                        self.sent_packets_by_pn.extract_if(*start..*end, |_, _| true)
+                    {
+                        if pn == largest_acked {
+                            let elapsed = now.saturating_duration_since(send_time);
+                            rtt_sample = Some(elapsed.saturating_sub(ack_delay));
+                        }
+                        acked_total = acked_total.saturating_add(sz);
+                    }
+                }
+            }
+            if let Some(loss_cutoff) = loss_cutoff {
+                let lost_packets = self.drain_sent_packets_through(loss_cutoff);
+                for (pn, (sz, _)) in lost_packets {
+                    self.recovery.on_loss_packet(pn, sz, now);
+                    lost_total = lost_total.saturating_add(sz);
+                    self.stats.lost = self.stats.lost.saturating_add(1);
+                    self.stats.lost_bytes = self.stats.lost_bytes.saturating_add(sz as u64);
+                }
             }
         }
         if acked_total > 0 {
@@ -4550,6 +4608,24 @@ mod tests {
         assert_eq!(c.stats.lost_bytes, 4800);
         let remaining: Vec<u64> = c.sent_packets_by_pn.keys().copied().collect();
         assert_eq!(remaining, vec![6, 7, 9, 10, 11]);
+    }
+
+    #[test]
+    fn sparse_ack_prefix_classification_preserves_ack_loss_and_tail() {
+        let mut c = make_conn();
+        let send_time = Instant::now() - Duration::from_millis(50);
+        for pn in 0..64 {
+            c.sent_packets_by_pn.insert(pn, (1200, send_time));
+        }
+
+        let ranges = (0u64..64).step_by(4).map(|pn| (pn, pn + 1)).collect::<Vec<_>>();
+        c.account_sent_bytes_for_ack_ranges_with_delay(&ranges, Duration::ZERO);
+
+        assert_eq!(c.stats.acked_bytes, 16 * 1200);
+        assert_eq!(c.stats.lost, 43);
+        assert_eq!(c.stats.lost_bytes, 43 * 1200);
+        let remaining: Vec<u64> = c.sent_packets_by_pn.keys().copied().collect();
+        assert_eq!(remaining, vec![58, 59, 61, 62, 63]);
     }
 
     #[test]
