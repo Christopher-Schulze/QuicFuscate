@@ -2705,11 +2705,20 @@ impl Connection {
                 return 0;
             }
         }
+        let strategy = self.config.stealth_padding_strategy;
+        if strategy == 3 && self.config.stealth_adaptive_granularity == 64 {
+            let rem = cur_pt_len & 63;
+            if rem == 0 {
+                return 0;
+            }
+            let max = self.config.stealth_padding_max_size.min(budget);
+            return (64 - rem).min(max);
+        }
         let max = self.config.stealth_padding_max_size.min(budget);
         if max == 0 {
             return 0;
         }
-        match self.config.stealth_padding_strategy {
+        match strategy {
             // 1 = Random [0..=max]
             1 => crate::transport::rand::fast_rand_u64_uniform((max as u64).saturating_add(1))
                 as usize,
@@ -2717,31 +2726,16 @@ impl Connection {
             2 => max,
             // 3 = Adaptive (pad up to next 64B boundary, capped by max)
             3 => {
-                if self.config.stealth_adaptive_granularity == 64 {
-                    let rem = cur_pt_len & 63;
-                    if rem == 0 {
-                        0
-                    } else {
-                        let pad = 64 - rem;
-                        if pad < max {
-                            pad
-                        } else {
-                            max
-                        }
-                    }
+                let g = self.config.stealth_adaptive_granularity.max(1) as usize;
+                let rem = if g.is_power_of_two() { cur_pt_len & (g - 1) } else { cur_pt_len % g };
+                if rem == 0 {
+                    0
                 } else {
-                    let g = self.config.stealth_adaptive_granularity.max(1) as usize;
-                    let rem =
-                        if g.is_power_of_two() { cur_pt_len & (g - 1) } else { cur_pt_len % g };
-                    if rem == 0 {
-                        0
+                    let pad = g - rem;
+                    if pad < max {
+                        pad
                     } else {
-                        let pad = g - rem;
-                        if pad < max {
-                            pad
-                        } else {
-                            max
-                        }
+                        max
                     }
                 }
             }

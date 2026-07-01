@@ -47,8 +47,8 @@ generic custom-granularity dispatch cost (`max(1)` plus `is_power_of_two()`).
 
 ## Criterion Evidence
 
-Broderick ARM/AArch64 `transport_stealth_padding_decision` after the direct
-default branch:
+Initial Broderick ARM/AArch64 `transport_stealth_padding_decision` after the
+direct default branch:
 
 | Case | Median | Result |
 |------|--------|--------|
@@ -62,3 +62,8 @@ default branch:
 
 This keeps TODO-492's semantic guarantees. It only removes generic dispatch from
 the overwhelmingly common product default.
+
+A later 40-sample Broderick rescreen on `0add68c` showed that the `5.27 ns`
+`adaptive_100pct` result was not stable; the durable baseline before TODO-496
+was about `5.505 ns`. TODO-496 moves the same default branch before generic
+strategy dispatch and provides the stable final improvement.
