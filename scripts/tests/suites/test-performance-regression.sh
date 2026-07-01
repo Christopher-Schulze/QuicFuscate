@@ -46,9 +46,9 @@ CPU_THRESHOLD=10
 
 # Fast-mode test selection (reduced set)
 if (( FAST )); then
-  THROUGHPUT_TESTS=(aegis_128l_throughput aes_gcm_throughput)
-  LATENCY_TESTS=(packet_processing stream)
-  HOTPATH_TESTS=(varint_encode)
+  THROUGHPUT_TESTS=(aes_gcm_seal/1024B data_aead_single_seal_batch/aegis128l_1400B)
+  LATENCY_TESTS=(connection_1rtt_send_recv/payload_1024B stream_frame_encoding/1024B_direct_writer)
+  HOTPATH_TESTS=(varint/roundtrip_8vals)
   RUN_MEM_CPU=0
   RUN_SIMD=0
   SCALABILITY_CONNECTIONS=(100)
@@ -70,10 +70,9 @@ EXTRA_RUSTFLAGS="${RUSTFLAGS_EXTRA:-}"
 if [[ -n "$EXTRA_RUSTFLAGS" ]]; then
   export RUSTFLAGS="${EXTRA_RUSTFLAGS} ${BASE_RUSTFLAGS}"
 fi
-LTO_FLAG="-C lto=fat"
-if [[ "$(uname -s)" == "Darwin" ]]; then
-  LTO_FLAG=""
-fi
+# Do not force LTO through global RUSTFLAGS here. It also applies to build
+# scripts/proc-macros and breaks stable `cargo bench` with proc-macro crates.
+LTO_FLAG=""
 BENCH_RUSTFLAGS="-C target-cpu=native -C opt-level=3 ${LTO_FLAG} ${EXTRA_RUSTFLAGS} ${BASE_RUSTFLAGS}"
 
 # Detect benchmark harness availability
@@ -180,7 +179,8 @@ measure_performance() {
     fi
 
     # Run the benchmark
-    local output_file="$OUTPUT_DIR/bench_${test_name}.txt"
+    local safe_test_name="${test_name//\//_}"
+    local output_file="$OUTPUT_DIR/bench_${safe_test_name}.txt"
     local output_line=""
     local result=""
     local output_missing=0
@@ -198,7 +198,7 @@ measure_performance() {
     else
         output_line=$(grep -E "time:.*\\[.*\\]" "$output_file" | head -1 || true)
     fi
-    result=$(awk '{print $2}' <<< "$output_line" | tr -d '[]' || true)
+    result=$(sed -E 's/.*\[[[:space:]]*([^] ]+).*/\1/' <<< "$output_line" || true)
     if [[ -z "$result" ]]; then
         warn "No benchmark output for $test_name (metric: $metric); check $output_file"
         output_missing=1
