@@ -239,7 +239,6 @@ jobs:
 
   linux-fastpath-gates:
     runs-on: ubuntu-latest
-    continue-on-error: true
     env:
       CARGO_INCREMENTAL: "0"
     steps:
