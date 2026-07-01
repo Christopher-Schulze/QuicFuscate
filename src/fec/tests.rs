@@ -279,6 +279,24 @@ fn test_backend_family_mapping_preserves_heavy_block_adaptive_rs_path() {
 }
 
 #[test]
+fn test_gf16_encoder_uses_expected_cauchy_coefficients() {
+    let pool = crate::optimize::global_pool();
+    let mut encoder = super::Encoder16::new(4, 8);
+    for id in 0..4 {
+        encoder.take_packet(mk_src_packet(id, 64, &pool));
+    }
+
+    let repair = encoder.generate_repair_packet(2, &pool).expect("repair packet");
+    let coeffs = repair.coefficients.as_ref().expect("gf16 repair coefficients");
+    assert_eq!(repair.coeff_len, 8);
+    for j in 0..4 {
+        let expected =
+            super::gf_tables::gf16_inv((j as u16) ^ ((4usize + 2usize) as u16)).to_be_bytes();
+        assert_eq!(&coeffs[2 * j..2 * j + 2], &expected);
+    }
+}
+
+#[test]
 fn test_target_rank_monotonic_from_clean_to_extreme() {
     let clean = continuous_fec_target(0.0, true, false, 2048, 1024, 0, 0.0);
     let low = target_from_mode(FecMode::Normal, 64);
@@ -1950,7 +1968,7 @@ fn test_env_guard_unset_functionality() {
     std::env::remove_var(test_key);
 }
 
-// TODO-392: regression guard — cloning a source (systematic) FEC packet must
+// TODO-392: regression guard - cloning a source (systematic) FEC packet must
 // share the payload buffer via Arc (refcount bump), never copy the datagram.
 // The send hot path relies on this to forward the packet to the wire while the
 // encoder retains a handle for repair generation, without a full-payload copy.

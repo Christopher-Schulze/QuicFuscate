@@ -1572,7 +1572,11 @@ impl<F> Encoder<F> {
     }
 }
 
-type Encoder16 = Encoder<GF16>;
+struct Encoder16 {
+    inner: Encoder<GF16>,
+    coeff_rows: Vec<u8>,
+    coeff_stride: usize,
+}
 
 /// Public wrapper for GF(2^8) encoder used by transport integration.
 #[cfg(any(test, feature = "rust-tests"))]
@@ -1758,11 +1762,77 @@ impl Encoder<GF4> {
 }
 
 impl Encoder16 {
+    fn new(k: usize, n: usize) -> Self {
+        let mut encoder =
+            Self { inner: Encoder::<GF16>::new(k, n), coeff_rows: Vec::new(), coeff_stride: 0 };
+        encoder.prepare_coeff_rows(n.saturating_sub(k));
+        encoder
+    }
+
+    #[inline]
+    fn take_packet(&mut self, p: FecPacket) {
+        self.inner.take_packet(p);
+    }
+
+    #[inline]
+    fn clear_window(&mut self) {
+        self.inner.clear_window();
+    }
+
+    #[inline]
+    fn packets_in_window(&self) -> usize {
+        self.inner.packets_in_window()
+    }
+
+    fn prepare_coeff_rows(&mut self, repair_rows: usize) {
+        let stride = 2 * self.inner.k;
+        self.coeff_stride = stride;
+        if stride == 0 || repair_rows == 0 {
+            self.coeff_rows.clear();
+            return;
+        }
+        self.coeff_rows.resize(repair_rows * stride, 0);
+        for idx in 0..repair_rows {
+            let row = &mut self.coeff_rows[idx * stride..(idx + 1) * stride];
+            let y: u16 = (self.inner.k as u16).wrapping_add(idx as u16);
+            for j in 0..self.inner.k {
+                let c: u16 = gf_tables::gf16_inv((j as u16) ^ y);
+                let be = c.to_be_bytes();
+                row[2 * j] = be[0];
+                row[2 * j + 1] = be[1];
+            }
+        }
+    }
+
+    fn ensure_coeff_row(&mut self, idx: usize) {
+        if self.coeff_stride != 2 * self.inner.k {
+            self.prepare_coeff_rows(idx.saturating_add(1));
+            return;
+        }
+        let rows = self.coeff_rows.len().checked_div(self.coeff_stride).unwrap_or(0);
+        if rows <= idx {
+            let old_len = self.coeff_rows.len();
+            self.coeff_rows.resize((idx + 1) * self.coeff_stride, 0);
+            for row_idx in rows..=idx {
+                let start = row_idx * self.coeff_stride;
+                let row = &mut self.coeff_rows[start..start + self.coeff_stride];
+                let y: u16 = (self.inner.k as u16).wrapping_add(row_idx as u16);
+                for j in 0..self.inner.k {
+                    let c: u16 = gf_tables::gf16_inv((j as u16) ^ y);
+                    let be = c.to_be_bytes();
+                    row[2 * j] = be[0];
+                    row[2 * j + 1] = be[1];
+                }
+            }
+            debug_assert_eq!(old_len % self.coeff_stride, 0);
+        }
+    }
+
     fn generate_repair_packet(&mut self, idx: usize, pool: &Arc<MemoryPool>) -> Option<FecPacket> {
-        if self.window.len() < self.k || self.k == 0 {
+        if self.inner.window.len() < self.inner.k || self.inner.k == 0 {
             return None;
         }
-        let max_len = self.window.iter().map(|p| p.data_len).max().unwrap_or(0);
+        let max_len = self.inner.window.iter().map(|p| p.data_len).max().unwrap_or(0);
         if max_len == 0 {
             return None;
         }
@@ -1781,27 +1851,17 @@ impl Encoder16 {
 
         // Coefficients (GF(2^16)) stored as big-endian bytes, length = 2*k
         let mut coeff_box = pool.alloc();
-        let coeff_bytes = 2 * self.k;
+        let coeff_bytes = 2 * self.inner.k;
         if coeff_box.len() < coeff_bytes {
             return None;
         }
-        let wlen = self.window.len().min(self.k);
-        // Cauchy-style coefficients: c_j = (i ^ y)^{-1} over GF(2^16),
-        // with y derived from (k + repair_index) to ensure column uniqueness.
-        let y: u16 = (self.k as u16).wrapping_add(idx as u16);
-        for j in 0..wlen {
-            let c: u16 = gf_tables::gf16_inv((j as u16) ^ y);
-            let be = c.to_be_bytes();
-            coeff_box[2 * j] = be[0];
-            coeff_box[2 * j + 1] = be[1];
-        }
-        for j in wlen..self.k {
-            coeff_box[2 * j] = 0;
-            coeff_box[2 * j + 1] = 0;
-        }
+        self.ensure_coeff_row(idx);
+        let row_start = idx * self.coeff_stride;
+        coeff_box[..coeff_bytes]
+            .copy_from_slice(&self.coeff_rows[row_start..row_start + coeff_bytes]);
 
         // Accumulate
-        let wlen = self.window.len().min(self.k);
+        let wlen = self.inner.window.len().min(self.inner.k);
         if max_len_even >= (PAR_THRESHOLD * 4) && wlen >= 8 {
             let chunk = 16384usize; // bytes, will align down to even length
             let parts: Vec<(usize, Vec<u8>)> = (0..max_len_even.div_ceil(chunk))
@@ -1820,7 +1880,7 @@ impl Encoder16 {
                         return (start, Vec::new());
                     }
                     let mut acc = vec![0u8; end - start];
-                    for (j, pkt) in self.window.iter().enumerate().take(wlen) {
+                    for (j, pkt) in self.inner.window.iter().enumerate().take(wlen) {
                         if let Some(data) = pkt.payload_slice() {
                             let s_len = data.len().min(max_len_even);
                             if start < s_len {
@@ -1850,7 +1910,7 @@ impl Encoder16 {
                 }
             }
         } else {
-            for (j, pkt) in self.window.iter().enumerate().take(self.k) {
+            for (j, pkt) in self.inner.window.iter().enumerate().take(self.inner.k) {
                 if let Some(data) = pkt.payload_slice() {
                     let s_len = data.len().min(max_len_even);
                     if s_len < 2 {
@@ -1862,7 +1922,7 @@ impl Encoder16 {
             }
         }
 
-        let id = self.window.back().map(|p| p.id).unwrap_or(0);
+        let id = self.inner.window.back().map(|p| p.id).unwrap_or(0);
         Some(FecPacket::new(
             id,
             Some(out),
@@ -3544,6 +3604,10 @@ impl AdaptiveFec {
                     0
                 };
                 let total = (base + extra.min(4)).min(base + 4);
+                let free = output.capacity().saturating_sub(output.len());
+                if free < total {
+                    output.reserve_exact(total - free);
+                }
                 for i in 0..total {
                     let idx = i % base;
                     if let Some(repair) = encoder.generate_repair_packet(idx, &self.mem_pool) {
@@ -3735,7 +3799,12 @@ impl AdaptiveFec {
                 if encoder.packets_in_window() >= k {
                     let base = n.saturating_sub(k);
                     let repair_count = (base as f32 * new_weight).ceil() as usize;
-                    for i in 0..repair_count.min(base) {
+                    let repair_count = repair_count.min(base);
+                    let free = output.capacity().saturating_sub(output.len());
+                    if free < repair_count {
+                        output.reserve_exact(repair_count - free);
+                    }
+                    for i in 0..repair_count {
                         if let Some(repair) = encoder.generate_repair_packet(i, &self.mem_pool) {
                             output.push(repair);
                         }

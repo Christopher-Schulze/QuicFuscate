@@ -1129,6 +1129,7 @@ pub struct MacTun {
 - `fec_lazy_fast_path` isolates lazy receive behavior for zero-mode passthrough and Normal-mode clean receive with reusable output scratch.
 - `fec_window_fill_burst` measures the packet that completes a product-sized FEC window for Light/Normal/Medium/Strong separately.
 - Broderick ARM/AArch64 product-window burst reference after TODO-488: Light k16 `32.7 us`, Normal k10 `14.9 us`, Medium k30 `23.7 us`, Strong k50 `37.7 us`.
+- Broderick ARM/AArch64 product-window burst reference after TODO-506 GF16 coefficient precompute: Normal k10 remains neutral around `14.25 us`, Strong k50 improves to `24.73 us` median with Criterion reporting `-38.568%` time and `+62.782%` throughput.
 - Broderick ARM/AArch64 decode-batch reference after TODO-490: Normal clean `282 us`, Normal 10% loss `514 us`, Strong clean `278 us`, Strong 10% loss `17.5-18.5 ms`, Streaming clean `499 us`, Streaming 10% loss `623 us`.
 - Broderick ARM/AArch64 decode-batch reference after TODO-491 lazy full-recovery gating: Normal clean `279 us`, Normal 10% loss `506 us`, Strong clean `200 us`, Strong 10% loss `195 us`, Streaming clean `447 us`, Streaming 10% loss `474 us`.
 - Broderick ARM/AArch64 streaming decode reference after TODO-501 lazy tail-loss gating: Streaming clean 128-packet batch `211.75 us` (`-99.213%` time versus the stale full-recovery wakeup baseline) and Streaming deterministic 10% loss batch `307.97 us` (`-97.963%` time), while Tetrys-style tail-loss recovery remains green.
@@ -3590,6 +3591,7 @@ Notes:
 - Zero-mode receive bypasses decoder retention entirely while no transition is active, preserving unique ownership of pooled payloads for in-place QUIC processing. Recovery-capable modes still retain decoder state as required for source reconstruction.
 - Send-side hot paths should call `AdaptiveFec::on_send_into(packet, output)` with a reused output buffer. `AdaptiveFec::on_send(packet)` remains a compatibility wrapper, but `QuicFuscateConnection` and the Engine `FecCodec` use per-instance scratch vectors so clean-link sends do not allocate a fresh FEC output vector per packet.
 - Send-side repair telemetry tracks only emitted repair packets for uniqueness and order-depth diagnostics. Systematic-only sends avoid HashSet/VecDeque repair-history maintenance while `FEC_EMITTED_QUEUE` continues to report non-zero-mode output queue depth.
+- Strong/AdaptiveRS GF16 repair bursts precompute Cauchy coefficient rows per encoder. Generated repair packets still carry the same coefficient bytes (`gf16_inv(j ^ (k + repair_idx))`); the optimization removes repeated coefficient-row construction and reserves output capacity before burst emission.
 - Receive-side hot paths should call `AdaptiveFec::on_receive_into(packet, output)` with a reused output buffer. `AdaptiveFec::on_receive(packet)` remains a compatibility wrapper and keeps the direct zero-mode passthrough fast path, while `QuicFuscateConnection` and the Engine `FecCodec` reuse per-instance receive scratch vectors.
 
 Examples (manual tuning):
