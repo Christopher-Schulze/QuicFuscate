@@ -18,6 +18,7 @@ use std::borrow::Cow;
 const MAX_VARINT: u64 = 0x3fff_ffff_ffff_ffff;
 
 static DATA_AEAD_CONFIG_MUTEX: Mutex<()> = Mutex::new(());
+const PUBLIC_AEGIS_ALIASES: [&str; 3] = ["aegis", "aegis-128l", "aegis128l"];
 
 proptest! {
     #![proptest_config(ProptestConfig {
@@ -98,7 +99,7 @@ proptest! {
             .expect("baseline open");
         prop_assert_eq!(&baseline_buf[..baseline_opened], plaintext.as_slice());
 
-        for alias in ["aegis", "aegis-128x4", "aegis-128x8"] {
+        for alias in PUBLIC_AEGIS_ALIASES {
             let mut cfg = CryptoConfig { aead_preference: AeadPreference::Auto, ..Default::default() };
             cfg.force_aead = alias.to_string();
             install_data_aead_config(&cfg);
@@ -114,7 +115,7 @@ proptest! {
             prop_assert_eq!(
                 &buf[..opened],
                 &baseline_buf[..baseline_opened],
-                "alias {} diverged from public Aegis128L contract",
+                "alias {} diverged from public Aegis128L plaintext contract",
                 alias
             );
         }
@@ -140,7 +141,7 @@ proptest! {
             .seal_with_u64_counter(counter, &aad, &mut baseline_buf, plaintext.len(), None)
             .expect("baseline seal");
 
-        for alias in ["aegis", "aegis-128x4", "aegis-128x8"] {
+        for alias in PUBLIC_AEGIS_ALIASES {
             let mut cfg = CryptoConfig { aead_preference: AeadPreference::Auto, ..Default::default() };
             cfg.force_aead = alias.to_string();
             install_data_aead_config(&cfg);
