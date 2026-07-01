@@ -287,6 +287,45 @@ fn bench_padding_gen(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// Transport: QUIC stealth padding decision logic
+// ---------------------------------------------------------------------------
+fn bench_transport_stealth_padding_decision(c: &mut Criterion) {
+    use quicfuscate::transport::bench_paired_1rtt_connections;
+
+    let mut group = c.benchmark_group("transport_stealth_padding_decision");
+    group.throughput(Throughput::Elements(1));
+
+    for (name, enabled, strategy, rate, granularity, mimic_bias) in [
+        ("disabled", false, 0u8, 100u8, 64u16, 3u8),
+        ("adaptive_0pct", true, 3u8, 0u8, 64u16, 3u8),
+        ("adaptive_100pct", true, 3u8, 100u8, 64u16, 3u8),
+        ("browser_mimic_100pct", true, 4u8, 100u8, 64u16, 3u8),
+        ("random_50pct", true, 1u8, 50u8, 64u16, 3u8),
+    ] {
+        group.bench_function(name, |bench| {
+            let mut pair = bench_paired_1rtt_connections();
+            pair.client.bench_set_stealth_padding(
+                enabled,
+                strategy,
+                256,
+                rate,
+                granularity,
+                mimic_bias,
+            );
+            let mut cur_pt_len = 64usize;
+
+            bench.iter(|| {
+                cur_pt_len = cur_pt_len.wrapping_add(37);
+                let current = 64 + (cur_pt_len & 1023);
+                black_box(pair.client.bench_compute_stealth_padding(black_box(current), 256));
+            });
+        });
+    }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
 // Transport: packet number encode
 // ---------------------------------------------------------------------------
 fn bench_pkt_num_encode(c: &mut Criterion) {
@@ -505,6 +544,7 @@ criterion_group!(
     bench_popcnt,
     bench_rng_fill,
     bench_pkt_num_encode,
+    bench_transport_stealth_padding_decision,
     bench_connection_1rtt_send_recv,
     bench_ack_sent_byte_accounting,
     bench_connection_1rtt_stealth_compare,

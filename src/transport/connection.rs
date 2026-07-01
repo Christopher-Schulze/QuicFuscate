@@ -2681,6 +2681,9 @@ impl Connection {
         // only half of packets receive padding. This implements the gradual
         // stealth escalation from TODO-416.
         let padding_rate = self.config.stealth_padding_rate;
+        if padding_rate == 0 {
+            return 0;
+        }
         if padding_rate < 100 {
             let roll = crate::transport::rand::fast_rand_u64_uniform(100) as u8;
             if roll >= padding_rate {
@@ -3990,6 +3993,27 @@ pub fn bench_paired_1rtt_connections_stealth(stealth_on: bool) -> BenchConnectio
 
 #[cfg(feature = "benches")]
 impl Connection {
+    /// Configure stealth padding for transport-padding benchmarks.
+    pub fn bench_set_stealth_padding(
+        &mut self,
+        enabled: bool,
+        strategy: u8,
+        max_size: usize,
+        rate: u8,
+        granularity: u16,
+        mimic_bias: u8,
+    ) {
+        self.config.set_stealth_padding(enabled, strategy, max_size);
+        self.config.set_stealth_padding_rate(rate);
+        self.config.set_stealth_adaptive_granularity(granularity);
+        self.config.set_stealth_mimic_bias(mimic_bias);
+    }
+
+    /// Run the transport stealth-padding decision logic for Criterion benchmarks.
+    pub fn bench_compute_stealth_padding(&self, cur_pt_len: usize, budget: usize) -> usize {
+        self.compute_stealth_padding(cur_pt_len, budget)
+    }
+
     /// Seed the sent-packet map for ACK accounting benchmarks.
     pub fn bench_seed_sent_bytes_by_pn(&mut self, count: u64, bytes_per_pn: usize) {
         self.sent_packets_by_pn.clear();
