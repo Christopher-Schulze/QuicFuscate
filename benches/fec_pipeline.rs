@@ -47,6 +47,13 @@ fn window_size_for_mode(mode: FecMode) -> usize {
     *config.window_sizes.get(&mode).expect("benchmark mode must have a configured FEC window")
 }
 
+const DECODE_BATCH_PACKETS: u64 = 128;
+
+#[inline]
+fn should_drop_decode_source(id: u64) -> bool {
+    id % 10 == 3
+}
+
 // ---------------------------------------------------------------------------
 // 1. FEC encode pipeline: on_send() per mode × packet size
 // ---------------------------------------------------------------------------
@@ -138,7 +145,7 @@ fn bench_fec_systematic_hot_path(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
-// 2. FEC decode pipeline: on_receive() per mode × loss pattern
+// 2. FEC decode pipeline: production-style on_receive_into() batches
 // ---------------------------------------------------------------------------
 
 fn bench_fec_decode_pipeline(c: &mut Criterion) {
@@ -150,54 +157,102 @@ fn bench_fec_decode_pipeline(c: &mut Criterion) {
 
     for &(mode_name, mode) in &modes {
         let mut group = c.benchmark_group("fec_decode_pipeline");
+        group.throughput(Throughput::Elements(DECODE_BATCH_PACKETS));
 
-        // no_loss: feed all packets, measure decode overhead
-        group.bench_function(BenchmarkId::new(mode_name, "no_loss"), |b| {
-            let pool = global_pool();
-            let config = config_with_mode(mode);
-            let mut sender = AdaptiveFec::new(config.clone());
-            let mut receiver = AdaptiveFec::new(config);
-            let mut id = 0u64;
+        for &(pattern_name, drop_sources) in
+            &[("batch128_no_loss_reuse", false), ("batch128_10pct_reuse", true)]
+        {
+            group.bench_function(BenchmarkId::new(mode_name, pattern_name), |b| {
+                let pool = global_pool();
+                let send_capacity = window_size_for_mode(mode).saturating_add(8);
 
-            b.iter(|| {
-                let pkt = mk_src_packet(id, 1400, &pool);
-                let output = sender.on_send(pkt);
-                for p in output {
-                    let _ = receiver.on_receive(p);
-                }
-                id = id.wrapping_add(1);
-                black_box(&receiver);
+                b.iter_batched(
+                    || {
+                        let config = config_with_mode(mode);
+                        let mut sender = AdaptiveFec::new(config.clone());
+                        let mut receiver = AdaptiveFec::new(config);
+                        let mut send_output = Vec::with_capacity(send_capacity);
+                        let mut receive_output = Vec::with_capacity(8);
+
+                        for id in 0..DECODE_BATCH_PACKETS {
+                            let pkt = mk_src_packet(id, 1400, &pool);
+                            sender.on_send_into(pkt, &mut send_output);
+                            for p in send_output.drain(..) {
+                                receiver
+                                    .on_receive_into(p, &mut receive_output)
+                                    .expect("prewarm packet must be accepted");
+                                receive_output.clear();
+                            }
+                        }
+
+                        (sender, receiver, send_output, receive_output, DECODE_BATCH_PACKETS)
+                    },
+                    |(mut sender, mut receiver, mut send_output, mut receive_output, start_id)| {
+                        let mut emitted = 0usize;
+                        for offset in 0..DECODE_BATCH_PACKETS {
+                            let id = start_id + offset;
+                            let pkt = mk_src_packet(id, 1400, &pool);
+                            sender.on_send_into(pkt, &mut send_output);
+                            for p in send_output.drain(..) {
+                                if drop_sources
+                                    && p.is_systematic
+                                    && should_drop_decode_source(p.id)
+                                {
+                                    continue;
+                                }
+                                receiver
+                                    .on_receive_into(p, &mut receive_output)
+                                    .expect("benchmark packet must be accepted");
+                                emitted = emitted.wrapping_add(receive_output.len());
+                                receive_output.clear();
+                            }
+                        }
+                        black_box(emitted);
+                        black_box(&receiver);
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
             });
-        });
-
-        // random10pct: feed with 10% drop rate (deterministic LCG)
-        group.bench_function(BenchmarkId::new(mode_name, "random10pct"), |b| {
-            let pool = global_pool();
-            let config = config_with_mode(mode);
-            let mut sender = AdaptiveFec::new(config.clone());
-            let mut receiver = AdaptiveFec::new(config);
-            let mut id = 0u64;
-            let mut lcg = 0xDEADBEEFu64;
-
-            b.iter(|| {
-                lcg = lcg.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-                let drop = ((lcg >> 33) as f64) / ((1u64 << 31) as f64) < 0.10;
-
-                let pkt = mk_src_packet(id, 1400, &pool);
-                let output = sender.on_send(pkt);
-                for p in output {
-                    if drop && p.is_systematic {
-                        continue;
-                    }
-                    let _ = receiver.on_receive(p);
-                }
-                id = id.wrapping_add(1);
-                black_box(&receiver);
-            });
-        });
+        }
 
         group.finish();
     }
+}
+
+// ---------------------------------------------------------------------------
+// 2b. FEC decode compatibility wrapper: allocation cost guard
+// ---------------------------------------------------------------------------
+
+fn bench_fec_decode_compat_alloc(c: &mut Criterion) {
+    let modes = [("normal", FecMode::Normal), ("strong", FecMode::Strong)];
+
+    let mut group = c.benchmark_group("fec_decode_compat_alloc");
+
+    for &(mode_name, mode) in &modes {
+        group.throughput(Throughput::Elements(1));
+        group.bench_function(BenchmarkId::new(mode_name, "single_packet_on_receive"), |b| {
+            let pool = global_pool();
+            let config = config_with_mode(mode);
+            let mut sender = AdaptiveFec::new(config.clone());
+            let mut receiver = AdaptiveFec::new(config);
+            let mut id = 0u64;
+
+            b.iter(|| {
+                let pkt = mk_src_packet(id, 1400, &pool);
+                let mut output = Vec::with_capacity(window_size_for_mode(mode).saturating_add(8));
+                sender.on_send_into(pkt, &mut output);
+                for p in output.drain(..) {
+                    let emitted =
+                        receiver.on_receive(p).expect("benchmark packet must be accepted");
+                    black_box(emitted);
+                }
+                id = id.wrapping_add(1);
+                black_box(&receiver);
+            });
+        });
+    }
+
+    group.finish();
 }
 
 // ---------------------------------------------------------------------------
@@ -441,6 +496,7 @@ criterion_group!(
     bench_fec_encode_pipeline,
     bench_fec_systematic_hot_path,
     bench_fec_decode_pipeline,
+    bench_fec_decode_compat_alloc,
     bench_fec_mode_transition,
     bench_fec_streaming_repair,
     bench_fec_lazy_fast_path,

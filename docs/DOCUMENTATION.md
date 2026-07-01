@@ -1114,8 +1114,11 @@ pub struct MacTun {
 - `benches/fec_pipeline.rs` uses `FecConfig::product_default()` for mode variants so Criterion windows match the Engine/CLI product defaults (`window_good=10`, `window_fair=30`, `window_poor=50`) instead of synthetic library-default windows.
 - `fec_encode_pipeline` remains the compatibility benchmark for full `on_send()` behavior.
 - `fec_systematic_hot_path` isolates reusable-output systematic sends with no repair burst, proving the normal send hot path independently from block completion.
+- `fec_decode_pipeline` measures production-style 128-packet receive batches with `on_send_into()` / `on_receive_into()` scratch reuse and a deterministic 10% source-drop mask. This protects realistic clean and lossy decode work instead of single-packet random-loss artifacts.
+- `fec_decode_compat_alloc` keeps a separate guard for the allocating `on_receive()` compatibility wrapper without presenting it as the production hot path.
 - `fec_window_fill_burst` measures the packet that completes a product-sized FEC window for Light/Normal/Medium/Strong separately.
 - Broderick ARM/AArch64 product-window burst reference after TODO-488: Light k16 `32.7 us`, Normal k10 `14.9 us`, Medium k30 `23.7 us`, Strong k50 `37.7 us`.
+- Broderick ARM/AArch64 decode-batch reference after TODO-490: Normal clean `282 us`, Normal 10% loss `514 us`, Strong clean `278 us`, Strong 10% loss `17.5-18.5 ms`, Streaming clean `499 us`, Streaming 10% loss `623 us`.
 
 #### Connection Benchmark Coverage
 

@@ -2123,7 +2123,7 @@ impl Decoder8 {
     }
 
     fn try_eliminate(&mut self) -> bool {
-        // Decoderwahl per ENV: QUICFUSCATE_FEC_DECODER = gauss|wiedemann|auto (default)
+        // Decoder policy via ENV: QUICFUSCATE_FEC_DECODER = gauss|wiedemann|auto (default)
         match self.decoder_policy.to_ascii_lowercase().as_str() {
             "wiedemann" => {
                 if self.try_eliminate_wiedemann() {
@@ -2286,7 +2286,7 @@ impl Decoder8 {
     fn try_eliminate_wiedemann(&mut self) -> bool {
         use rayon::prelude::*;
 
-        // Sammle Unbekannte
+        // Collect unknown source IDs.
         use std::collections::BTreeSet;
         let mut unknown_set = BTreeSet::new();
         let mut min_len = usize::MAX;
