@@ -1442,7 +1442,7 @@ pub(crate) mod qpack {
             out[written] = self._inserted_count as u8;
             out[written + 1] = self._inserted_count as u8;
             written += 2;
-            // Persona-Policy: bevorzugte Header nach vorn sortieren
+            // Persona policy: keep preferred headers first.
             let mut ordered: Vec<&Header> = headers.iter().collect();
             if !self.index_prefer.is_empty() {
                 ordered.sort_by_key(|h| {
