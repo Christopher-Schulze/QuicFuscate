@@ -2723,16 +2723,31 @@ impl Connection {
             2 => max,
             // 3 = Adaptive (pad up to next 64B boundary, capped by max)
             3 => {
-                let g = self.config.stealth_adaptive_granularity.max(1) as usize;
-                let rem = if g.is_power_of_two() { cur_pt_len & (g - 1) } else { cur_pt_len % g };
-                if rem == 0 {
-                    0
-                } else {
-                    let pad = g - rem;
-                    if pad < max {
-                        pad
+                if self.config.stealth_adaptive_granularity == 64 {
+                    let rem = cur_pt_len & 63;
+                    if rem == 0 {
+                        0
                     } else {
-                        max
+                        let pad = 64 - rem;
+                        if pad < max {
+                            pad
+                        } else {
+                            max
+                        }
+                    }
+                } else {
+                    let g = self.config.stealth_adaptive_granularity.max(1) as usize;
+                    let rem =
+                        if g.is_power_of_two() { cur_pt_len & (g - 1) } else { cur_pt_len % g };
+                    if rem == 0 {
+                        0
+                    } else {
+                        let pad = g - rem;
+                        if pad < max {
+                            pad
+                        } else {
+                            max
+                        }
                     }
                 }
             }
