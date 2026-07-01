@@ -4014,6 +4014,16 @@ impl Connection {
         self.compute_stealth_padding(cur_pt_len, budget)
     }
 
+    /// Configure Brain runtime gates for transport/brain benchmarks.
+    pub fn bench_set_brain_runtime(
+        &mut self,
+        enabled: bool,
+        permissions: crate::transport::BrainRuntimePermissions,
+    ) {
+        self.set_intelligent_stealth_runtime(enabled);
+        self.set_brain_runtime_permissions(permissions);
+    }
+
     /// Seed the sent-packet map for ACK accounting benchmarks.
     pub fn bench_seed_sent_bytes_by_pn(&mut self, count: u64, bytes_per_pn: usize) {
         self.sent_packets_by_pn.clear();

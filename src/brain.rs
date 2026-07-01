@@ -259,6 +259,9 @@ struct StealthBrainState {
     /// Reused histogram scratch for JS divergence (avoids per-tick Vec alloc).
     size_hist_snap: Vec<u64>,
     iat_hist_snap: Vec<u64>,
+    /// Reused target distributions for JS divergence.
+    size_profile_target: Vec<f64>,
+    iat_profile_target: Vec<f64>,
 }
 
 /// Actuator decisions produced by the consolidated mutation write-lock phase.
@@ -339,6 +342,8 @@ impl StealthBrainState {
             last_intelligent_level_change: crate::time_source::now_instant(),
             size_hist_snap: vec![0; cfg.size_bins],
             iat_hist_snap: vec![0; cfg.iat_bins],
+            size_profile_target: StealthBrain::size_profile_target(cfg.size_bins),
+            iat_profile_target: StealthBrain::iat_profile_target(cfg.iat_bins),
         }
     }
 }
@@ -805,14 +810,18 @@ impl TransportObserver for StealthBrain {
                 (None, None)
             };
 
-            let size_t = Self::size_profile_target(st.size_hist_snap.len());
-            let iat_t = Self::iat_profile_target(st.iat_hist_snap.len());
             let size_sum: u64 = st.size_hist_snap.iter().sum();
-            let size_div =
-                brain_accel::jensen_shannon_divergence(&st.size_hist_snap, size_sum, &size_t);
+            let size_div = brain_accel::jensen_shannon_divergence(
+                &st.size_hist_snap,
+                size_sum,
+                &st.size_profile_target,
+            );
             let iat_sum: u64 = st.iat_hist_snap.iter().sum();
-            let iat_div =
-                brain_accel::jensen_shannon_divergence(&st.iat_hist_snap, iat_sum, &iat_t);
+            let iat_div = brain_accel::jensen_shannon_divergence(
+                &st.iat_hist_snap,
+                iat_sum,
+                &st.iat_profile_target,
+            );
 
             // Derive ACK threshold: tighter under CE/jitter, looser on clean paths
             let rtt_spike_weight = (signal_rtt_spikes as f64).min(8.0);

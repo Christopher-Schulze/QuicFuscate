@@ -526,6 +526,82 @@ fn bench_connection_1rtt_stealth_compare(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// Brain: TransportObserver policy application
+// ---------------------------------------------------------------------------
+fn bench_brain_apply_policy(c: &mut Criterion) {
+    use quicfuscate::brain::{StealthBrain, StealthBrainConfig};
+    use quicfuscate::transport::{
+        bench_paired_1rtt_connections, BrainRuntimePermissions, TransportObserver,
+    };
+
+    #[derive(Clone, Copy)]
+    struct BrainCase {
+        name: &'static str,
+        intelligent_runtime: bool,
+        policy_cooldown_ms: u64,
+        ack_delay: u64,
+        ect0: u64,
+        ce: u64,
+    }
+
+    let mut group = c.benchmark_group("brain_apply_policy");
+    group.throughput(Throughput::Elements(1));
+
+    for case in [
+        BrainCase {
+            name: "clean_observer",
+            intelligent_runtime: false,
+            policy_cooldown_ms: 300,
+            ack_delay: 900,
+            ect0: 10_000,
+            ce: 0,
+        },
+        BrainCase {
+            name: "intelligent_clean",
+            intelligent_runtime: true,
+            policy_cooldown_ms: 300,
+            ack_delay: 900,
+            ect0: 10_000,
+            ce: 0,
+        },
+        BrainCase {
+            name: "intelligent_pressure_actuating",
+            intelligent_runtime: true,
+            policy_cooldown_ms: 0,
+            ack_delay: 18_000,
+            ect0: 9_400,
+            ce: 600,
+        },
+    ] {
+        group.bench_function(case.name, |bench| {
+            let mut pair = bench_paired_1rtt_connections();
+            pair.client.bench_set_brain_runtime(
+                case.intelligent_runtime,
+                BrainRuntimePermissions::default(),
+            );
+
+            let brain = StealthBrain::new(StealthBrainConfig {
+                policy_cooldown_ms: case.policy_cooldown_ms,
+                explore_prob: 0.0,
+                ..Default::default()
+            });
+            for pn in 0..256u64 {
+                brain.on_packet_recv(pn, 64 + ((pn as usize * 37) & 1023));
+            }
+            let ranges = [(1u64, 16u64)];
+
+            bench.iter(|| {
+                brain.on_ack(black_box(case.ack_delay), black_box(&ranges));
+                brain.on_ecn_update(black_box(case.ect0), black_box(0), black_box(case.ce));
+                brain.apply_policy(black_box(&mut pair.client));
+            });
+        });
+    }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
 // Group registration
 // ---------------------------------------------------------------------------
 criterion_group!(
@@ -548,6 +624,7 @@ criterion_group!(
     bench_connection_1rtt_send_recv,
     bench_ack_sent_byte_accounting,
     bench_connection_1rtt_stealth_compare,
+    bench_brain_apply_policy,
 );
 
 criterion_group!(fec_benches, bench_fec_matrix_mul,);
