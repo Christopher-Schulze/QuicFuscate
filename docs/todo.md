@@ -6,7 +6,9 @@
 
 **Current State addendum (TODO-506)**: FEC GF16 repair-burst hotpath is DONE. The R-wave now also precomputes Strong/AdaptiveRS GF16 repair coefficient rows per encoder and reserves repair-burst output capacity before emission, keeping high-redundancy product-window repair bursts much cheaper while preserving wire coefficients.
 
-**Latest checkpoint (TODO-506)**: FEC GF16 repair-burst hotpath is DONE. `Encoder16` is now a thin wrapper around `Encoder<GF16>` with precomputed Cauchy coefficient rows, and `AdaptiveFec::on_send_into()` reserves output capacity once before repair bursts. Broderick `fec_window_fill_burst/strong/k50_repair_burst` improved from about `40.99-43.73 us` median to `24.73 us` median, with Criterion reporting `-38.568%` time and `+62.782%` throughput.
+**Previous checkpoint (TODO-506)**: FEC GF16 repair-burst hotpath is DONE. `Encoder16` is now a thin wrapper around `Encoder<GF16>` with precomputed Cauchy coefficient rows, and `AdaptiveFec::on_send_into()` reserves output capacity once before repair bursts. Broderick `fec_window_fill_burst/strong/k50_repair_burst` improved from about `40.99-43.73 us` median to `24.73 us` median, with Criterion reporting `-38.568%` time and `+62.782%` throughput.
+
+**Latest checkpoint (TODO-507)**: Brain histogram direct-divergence hotpath is DONE. `StealthBrain::apply_policy()` now decays histograms directly in contiguous `VecDeque` storage, keeps `Hist::total` synchronized after decay, and feeds Jensen-Shannon divergence without scratch-vector copies. Broderick `brain_apply_policy` improves by about `7.33-8.39%` across clean observer, intelligent clean, and pressure/actuating cases.
 
 ## Active - Protocol Optimization Wave (2026-06-05)
 
@@ -244,8 +246,9 @@ not mutate the active persona mid-session.
 | TODO-504 | R | P1 | FEC interleaved recovery isolation | **DONE** - `InterleavedDecoder::get_result()` now skips idle lazy blocks instead of flushing clean-lane repair buffers when one interleave lane needs full recovery; Broderick streaming decode improves clean 128-packet batches from about `220.83 us` to `180.48 us` and deterministic 10% loss from about `499.58 us` to `256.97 us` | TODO-424, TODO-490, TODO-491, TODO-501 |
 | TODO-505 | R | P1 | FEC repair telemetry fastpath | **DONE** - `AdaptiveFec::on_send_into()` now tracks repair-symbol uniqueness/order diagnostics only for emitted repairs, keeping systematic-only send paths free of HashSet/VecDeque repair telemetry overhead; Broderick send reuse improves Light/Normal/Streaming 1400B cases by about `3.7%`, `6.4%`, and `15.8%` | TODO-424, TODO-480, TODO-499 |
 | TODO-506 | R | P1 | FEC GF16 repair-burst hotpath | **DONE** - `Encoder16` precomputes GF16 Cauchy coefficient rows per encoder and repair bursts reserve output capacity before emission; Broderick Strong product-window repair burst improves from about `40.99-43.73 us` median to `24.73 us` median | TODO-424, TODO-488, TODO-505 |
+| TODO-507 | R | P1 | Brain histogram direct divergence hotpath | **DONE** - `StealthBrain::apply_policy()` now decays histograms directly in contiguous storage, updates `Hist::total`, and runs Jensen-Shannon divergence without scratch-vector copies; Broderick `brain_apply_policy` improves by about `7.33-8.39%` | TODO-483, TODO-468 |
 
-Detail files: `docs/todo/todo-{464,465,466,467,468,469,470,471,472,473,474,475,476,477,478,479,480,481,482,483,484,485,486,487,488,489,490,491,492,493,494,495,496,497,498,499,500,501,502,503,504,505,506}-*.md`.
+Detail files: `docs/todo/todo-{464,465,466,467,468,469,470,471,472,473,474,475,476,477,478,479,480,481,482,483,484,485,486,487,488,489,490,491,492,493,494,495,496,497,498,499,500,501,502,503,504,505,506,507}-*.md`.
 
 **Stealth stack result:** Performance mode is fast and coherent, not fronting-heavy. Intelligent
 mode is the default adaptive profile with stable identity and dynamic actuator tuning. Stealth and

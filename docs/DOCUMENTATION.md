@@ -1141,6 +1141,7 @@ pub struct MacTun {
 #### Connection Benchmark Coverage
 
 - `scripts/benchmarks/ci_regression.rs` contains the CI Criterion hotpath groups for transport send/receive, ACK accounting, STREAM frame encoding, Brain policy application, and stealth padding decisions.
+- Broderick ARM/AArch64 Brain policy reference after TODO-507 direct histogram divergence: `brain_apply_policy/clean_observer` `600.01 ns`, `intelligent_clean` `599.07 ns`, and `intelligent_pressure_actuating` `550.67 ns`; Criterion reports about `7.33-8.39%` lower time versus the scratch-copy path.
 - `connection_1rtt_send_recv` and `connection_1rtt_stealth_compare` use Criterion `iter_batched(..., BatchSize::PerIteration)` so paired-connection construction, CID setup, and key installation are excluded from timed measurement.
 - `transport_stealth_padding_decision` protects the real per-packet transport padding decision path. Adaptive padding uses a power-of-two remainder fastpath for the default 64-byte granularity while preserving modulo behavior for custom non-power-of-two granularities.
 - The measured routine remains the real 1-RTT path: `stream_send -> send -> recv`.

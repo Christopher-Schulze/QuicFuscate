@@ -193,6 +193,14 @@ impl Hist {
     }
 }
 
+#[inline]
+fn decay_histogram_and_divergence(hist: &mut Hist, target: &[f64], decay: f64) -> f64 {
+    let bins = hist.bins.make_contiguous();
+    brain_accel::decay_histogram(bins, decay);
+    hist.total = bins.iter().copied().sum();
+    brain_accel::jensen_shannon_divergence(bins, hist.total, target)
+}
+
 // Snapshot struct removed and archived under archive/unused_code/brain_snapshot.rs
 
 #[derive(Debug)]
@@ -256,9 +264,6 @@ struct StealthBrainState {
     bandit_last_arm: Option<usize>,
     last_intelligent_level: u8,
     last_intelligent_level_change: Instant,
-    /// Reused histogram scratch for JS divergence (avoids per-tick Vec alloc).
-    size_hist_snap: Vec<u64>,
-    iat_hist_snap: Vec<u64>,
     /// Reused target distributions for JS divergence.
     size_profile_target: Vec<f64>,
     iat_profile_target: Vec<f64>,
@@ -340,11 +345,19 @@ impl StealthBrainState {
             bandit_last_arm: None,
             last_intelligent_level: 0,
             last_intelligent_level_change: crate::time_source::now_instant(),
-            size_hist_snap: vec![0; cfg.size_bins],
-            iat_hist_snap: vec![0; cfg.iat_bins],
             size_profile_target: StealthBrain::size_profile_target(cfg.size_bins),
             iat_profile_target: StealthBrain::iat_profile_target(cfg.iat_bins),
         }
+    }
+
+    #[inline]
+    fn size_divergence(&mut self, decay: f64) -> f64 {
+        decay_histogram_and_divergence(&mut self.size, &self.size_profile_target, decay)
+    }
+
+    #[inline]
+    fn iat_divergence(&mut self, decay: f64) -> f64 {
+        decay_histogram_and_divergence(&mut self.iat, &self.iat_profile_target, decay)
     }
 }
 
@@ -475,7 +488,7 @@ fn server_push_intensity_internal(loss_rate_permille: u32, bandwidth_bps: u64) -
 pub struct StealthBrain {
     cfg: StealthBrainConfig,
     st: RwLock<StealthBrainState>,
-    // Lock-free buffers for observer callbacks — drained in apply_policy's single write lock.
+    // Lock-free buffers for observer callbacks - drained in apply_policy's single write lock.
     pending_ecn: AtomicU64, // packed: ect0 in high 32 bits, ect1 in bits 16..32, ce in low 16
     pending_ack_delay: AtomicU64, // ack_delay in microseconds
     // Server Push cover-traffic knobs and telemetry inputs
@@ -682,16 +695,12 @@ impl TransportObserver for StealthBrain {
                 Self::update_probing_budget(&mut st, &self.cfg);
             }
 
-            // Decay histograms to emphasize recent behavior
+            // Decay histograms to emphasize recent behavior and derive divergence directly
+            // from the contiguous VecDeque storage. This avoids per-tick scratch copies and
+            // keeps Hist::total synchronized with decayed bins.
             let df = self.cfg.hist_decay as f64;
-            {
-                let bins = st.size.bins.make_contiguous();
-                brain_accel::decay_histogram(bins, df);
-            }
-            {
-                let bins = st.iat.bins.make_contiguous();
-                brain_accel::decay_histogram(bins, df);
-            }
+            let size_div = st.size_divergence(df);
+            let iat_div = st.iat_divergence(df);
             // ECN deltas
             let d_ect0 = st.ect0.saturating_sub(st.prev_ect0);
             let d_ect1 = st.ect1.saturating_sub(st.prev_ect1);
@@ -722,21 +731,6 @@ impl TransportObserver for StealthBrain {
             } else {
                 0.0
             };
-            let size_bin_len = st.size.bins.len();
-            let iat_bin_len = st.iat.bins.len();
-            if st.size_hist_snap.len() != size_bin_len {
-                st.size_hist_snap.resize(size_bin_len, 0);
-            }
-            if st.iat_hist_snap.len() != iat_bin_len {
-                st.iat_hist_snap.resize(iat_bin_len, 0);
-            }
-            for i in 0..size_bin_len {
-                st.size_hist_snap[i] = *st.size.bins.get(i).unwrap_or(&0);
-            }
-            for i in 0..iat_bin_len {
-                st.iat_hist_snap[i] = *st.iat.bins.get(i).unwrap_or(&0);
-            }
-
             let ce_ratio_recent = ce_ratio_recent_local;
             let ack_us = st.ack_delay_ewma_us;
             let ack_us_long = st.ack_delay_long_ewma_us;
@@ -809,19 +803,6 @@ impl TransportObserver for StealthBrain {
             } else {
                 (None, None)
             };
-
-            let size_sum: u64 = st.size_hist_snap.iter().sum();
-            let size_div = brain_accel::jensen_shannon_divergence(
-                &st.size_hist_snap,
-                size_sum,
-                &st.size_profile_target,
-            );
-            let iat_sum: u64 = st.iat_hist_snap.iter().sum();
-            let iat_div = brain_accel::jensen_shannon_divergence(
-                &st.iat_hist_snap,
-                iat_sum,
-                &st.iat_profile_target,
-            );
 
             // Derive ACK threshold: tighter under CE/jitter, looser on clean paths
             let rtt_spike_weight = (signal_rtt_spikes as f64).min(8.0);
@@ -1358,6 +1339,26 @@ mod intelligent_hysteresis_tests {
 
         let reason = dominant_transition_reason(0.88, 0.10, 0.05, 0.30, 0.20);
         assert!(matches!(reason, IntelligentTransitionReason::Loss));
+    }
+
+    #[test]
+    fn histogram_divergence_keeps_total_synchronized_after_decay() {
+        let config = StealthBrainConfig { size_bins: 4, iat_bins: 4, ..Default::default() };
+        let mut state = StealthBrainState::new(&config);
+
+        for _ in 0..10 {
+            state.size.add(0);
+        }
+        for _ in 0..6 {
+            state.size.add(1);
+        }
+        assert_eq!(state.size.total, 16);
+
+        let _ = state.size_divergence(0.5);
+
+        let expected_total: u64 = state.size.bins.iter().copied().sum();
+        assert_eq!(state.size.total, expected_total);
+        assert_eq!(state.size.total, 8);
     }
 }
 
