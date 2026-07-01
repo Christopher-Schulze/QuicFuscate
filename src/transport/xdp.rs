@@ -14,10 +14,8 @@
 
 #[cfg(all(target_os = "linux", test))]
 use libc::{c_void, socklen_t};
-#[cfg(all(target_os = "linux", any(feature = "internal_af_xdp_experimental", test)))]
+#[cfg(all(target_os = "linux", test))]
 use std::mem;
-#[cfg(all(target_os = "linux", feature = "internal_af_xdp_experimental"))]
-use std::os::unix::io::RawFd;
 #[cfg(all(target_os = "linux", feature = "internal_af_xdp_experimental"))]
 use std::ptr;
 #[cfg(all(target_os = "linux", feature = "internal_af_xdp_experimental"))]
@@ -27,7 +25,7 @@ use std::sync::Arc;
 #[cfg(all(target_os = "linux", feature = "internal_af_xdp_experimental"))]
 pub(super) mod linux {
     use super::*;
-    use libc::{c_void, socklen_t};
+    use libc::c_void;
 
     const XDP_RING_SIZE: u32 = 2048;
 
@@ -51,6 +49,7 @@ pub(super) mod linux {
     }
 
     // XDP ring structures
+    #[allow(dead_code)]
     pub struct XdpRing {
         pub producer: u32,
         pub consumer: u32,
@@ -80,6 +79,7 @@ pub(super) mod linux {
         pub(crate) frame_count: usize,
     }
 
+    #[allow(dead_code)]
     pub(super) struct XdpSocket {
         pub(crate) fd: i32,
         pub(crate) umem: Arc<UmemArea>,
@@ -168,6 +168,7 @@ pub(super) mod linux {
             }
         }
 
+        #[allow(dead_code)]
         pub fn send_packet(&mut self, data: &[u8]) -> Result<(), std::io::Error> {
             unsafe {
                 let producer = self.tx_ring.producer;
@@ -202,6 +203,7 @@ pub(super) mod linux {
             }
         }
 
+        #[allow(dead_code)]
         pub fn recv_packet(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
             unsafe {
                 let producer = self.rx_ring.producer;
@@ -253,6 +255,17 @@ pub(super) mod linux {
             }
         }
     }
+}
+
+#[cfg(all(target_os = "linux", feature = "internal_af_xdp_experimental"))]
+pub(super) fn run_experimental_socket_probe(
+    ifindex: u32,
+    queue_id: u32,
+    frame_size: usize,
+    frame_count: usize,
+) -> Result<(), std::io::Error> {
+    let _socket = linux::XdpSocket::new(ifindex, queue_id, frame_size, frame_count)?;
+    Ok(())
 }
 
 // GSO/GRO offload helpers retained only for compatibility tests.

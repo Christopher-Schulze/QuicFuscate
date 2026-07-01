@@ -91,8 +91,7 @@ pub fn run_xdp_experimental_socket_probe(
     frame_size: usize,
     frame_count: usize,
 ) -> std::io::Result<()> {
-    let _socket = xdp::linux::XdpSocket::new(ifindex, queue_id, frame_size, frame_count)?;
-    Ok(())
+    xdp::run_experimental_socket_probe(ifindex, queue_id, frame_size, frame_count)
 }
 
 /// Pending FEC parameter changes to be consumed by the adaptive FEC controller.
