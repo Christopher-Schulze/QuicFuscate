@@ -53,7 +53,7 @@
     }
   },
   "scripts": {
-    "test": "vitest run --config vitest.config.ts",
+    "test": "vitest run --config vitest.config.ts --pool=forks",
     "test:watch": "vitest --config vitest.config.ts --watch"
   },
   "peerDependencies": {

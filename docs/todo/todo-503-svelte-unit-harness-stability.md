@@ -44,17 +44,23 @@ test-specific timer reset does not run before the global hook.
   Library state and restore real timers after each test.
 - Removed the desktop setup's fake-timer-sensitive 32ms cleanup wait and
   replaced it with a real-timer zero-delay tick after timers are restored.
+- Updated the package-owned unit scripts in `apps/svelte-admin`,
+  `apps/svelte-desktop`, and `packages/ui` to run Vitest with `--pool=forks`.
+  This makes the normal `bun run test:unit` / `bun run test` entrypoints use
+  the same stable worker model as the verified harness, instead of relying on
+  Vitest's default pool behavior.
 
 ## Verification
 
 | Command | Result |
 |---------|--------|
 | `cd apps/svelte-admin && bun run check` | PASS, 0 errors, 0 warnings |
-| `cd apps/svelte-admin && bun run test:unit` | PASS, 24 files, 279 tests |
+| `cd apps/svelte-admin && bun run test:unit` | PASS, 24 files, 279 tests, package script uses `--pool=forks` |
 | `cd apps/svelte-admin && bun run build` | PASS |
 | `cd apps/svelte-desktop && bun run check` | PASS, 0 errors, 0 warnings |
-| `cd apps/svelte-desktop && bun run test:unit` | PASS, 30 files, 368 tests |
+| `cd apps/svelte-desktop && bun run test:unit` | PASS, 30 files, 368 tests, package script uses `--pool=forks` |
 | `cd apps/svelte-desktop && bun run build` | PASS |
+| `cd packages/ui && bun run test` | PASS, 9 files, 82 tests, package script uses `--pool=forks` |
 | `cd apps/tauri/src-tauri && cargo check` | PASS |
 | Broderick: `cd apps/svelte-admin && bun run check && bun run test:unit` | PASS, 24 files, 279 tests |
 | Broderick: `cd apps/svelte-desktop && bun run check && bun run test:unit` | PASS, 30 files, 368 tests |

@@ -10,7 +10,7 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "serve:codex": "bun run build && echo \"Build OK. For a persistent server run: bun run dev (http://localhost:4173) or bun run preview with explicit --port/--host flags.\"",
     "test": "bun run test:unit",
-    "test:unit": "vitest run --config vitest.config.ts",
+    "test:unit": "vitest run --config vitest.config.ts --pool=forks",
     "test:unit:watch": "vitest --config vitest.config.ts --watch",
     "test:e2e": "NODE_PATH=./node_modules env -u NO_COLOR -u FORCE_COLOR playwright test",
     "test:e2e:ui": "NODE_PATH=./node_modules env -u NO_COLOR -u FORCE_COLOR playwright test --ui",
