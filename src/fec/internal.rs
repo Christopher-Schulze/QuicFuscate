@@ -678,6 +678,10 @@ pub struct LazyDecoder {
     max_pending: usize,
     /// Whether lazy mode is enabled (always true by default)
     lazy_enabled: bool,
+    /// Streaming mode emits repairs continuously before a block is complete.
+    /// Those early repairs are not tail-loss evidence and must not wake the
+    /// heavy decoder unless a real sequence gap exists.
+    streaming_mode: bool,
     /// Telemetry: repairs skipped (no loss)
     repairs_skipped: u64,
     /// A repair was flushed into the heavy decoder and should trigger a full
@@ -714,6 +718,7 @@ impl LazyDecoder {
         depth: usize,
     ) -> Self {
         let lazy_enabled = policy.lazy_enabled;
+        let streaming_mode = super::fec_backend_family(mode) == super::FecBackendFamily::Streaming;
 
         Self {
             inner: DecoderVariant::new_with_depth(mode, k, pool, policy, depth),
@@ -725,6 +730,7 @@ impl LazyDecoder {
             expected_seq: 0,
             max_pending: 64,
             lazy_enabled,
+            streaming_mode,
             repairs_skipped: 0,
             full_recovery_pending: false,
             partial_recovery_pending: false,
@@ -830,7 +836,14 @@ impl LazyDecoder {
             // Flush only when repair data can actually advance recovery: a
             // known gap, a tail-loss block that ended before k sources arrived,
             // or a safety flush when the buffer reaches its cap.
-            let tail_loss_repair = self.k > 0 && !self.seen_seqs.len().is_multiple_of(self.k);
+            let incomplete_tail = self.k > 0 && !self.seen_seqs.len().is_multiple_of(self.k);
+            let tail_loss_repair = if self.streaming_mode && incomplete_tail {
+                let seen_in_block = self.seen_seqs.len() % self.k;
+                let missing_tail_sources = self.k.saturating_sub(seen_in_block).max(1);
+                self.pending_repairs.len() >= missing_tail_sources
+            } else {
+                incomplete_tail
+            };
             if self.has_gaps() || self.pending_repairs.len() >= self.max_pending {
                 if self.flush_to_decoder() {
                     self.full_recovery_pending = true;
@@ -1761,6 +1774,39 @@ mod tests {
         assert!(
             !dec.full_recovery_pending(),
             "full recovery request must be consumed after get_result"
+        );
+    }
+
+    #[test]
+    fn test_lazy_decoder_streaming_repair_before_block_end_stays_lazy() {
+        let pool = make_pool();
+        let mut policy = test_policy();
+        policy.lazy_enabled = true;
+
+        let mut dec = LazyDecoder::new_with_policy(FecMode::Streaming, 4, pool.clone(), &policy);
+
+        for seq in 1..=2u64 {
+            let mut src = mk_src_packet(seq, 100, &pool);
+            src.is_systematic = true;
+            src.seq = seq;
+            dec.take_packet(src);
+        }
+        assert_eq!(dec.pending_sources_len(), 2);
+
+        let mut repair = mk_src_packet(100, 50, &pool);
+        repair.is_systematic = false;
+        repair.seq = 100;
+        dec.take_packet(repair);
+
+        assert_eq!(dec.pending_repairs_len(), 1);
+        assert_eq!(dec.pending_sources_len(), 2);
+        assert!(
+            !dec.full_recovery_pending(),
+            "streaming repairs are emitted before block end and must not look like tail loss"
+        );
+        assert!(
+            !dec.recovery_needed(),
+            "clean streaming repair before any gap must keep the lazy decoder asleep"
         );
     }
 
