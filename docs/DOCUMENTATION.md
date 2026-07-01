@@ -1135,6 +1135,7 @@ pub struct MacTun {
 - Broderick ARM/AArch64 lazy-fast-path reference after TODO-498 source-buffer replay: zero passthrough `285.14 ns`, zero reuse `266.47 ns`, Normal no-loss `1.284 us`, Normal no-loss reuse `1.244 us`.
 - Broderick ARM/AArch64 send-reuse-hotpath reference after TODO-499: Zero/1400B `233.37 ns`, Normal/1400B `1.1081 us`, Strong/1400B `408.48 ns`, Streaming/1400B `380.88 ns`.
 - Broderick ARM/AArch64 data AEAD reference after TODO-500: MORUS wins every retained-backend packet trait path tested; 1400B single seal/open are `1.1944 us` / `1.1885 us` for MORUS versus best AEGIS `2.0736 us` / `2.1307 us`, and batch8 seal/open are `9.3550 us` / `9.4560 us` for MORUS versus best AEGIS `16.699 us` / `17.010 us`.
+- Broderick server fastpath reference after TODO-502: `scripts/install/setup-netfilter-fastpath.sh` removes stale lower-priority UDP/4433 ACCEPT rules before reinserting at INPUT line 1, so QuicFuscate UDP bypasses `ts-input` and other prepended chains before the measured `nft_do_chain` path. Repeated Broderick runs leave exactly one UDP/4433 ACCEPT rule at line 1.
 
 #### Connection Benchmark Coverage
 

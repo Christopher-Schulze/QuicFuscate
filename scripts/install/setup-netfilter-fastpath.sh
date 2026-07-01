@@ -17,10 +17,17 @@ set -euo pipefail
 
 PORT="${1:-4433}"
 
+delete_existing_fastpath_rules() {
+  local port="$1"
+  while iptables -C INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null; do
+    iptables -D INPUT -p udp --dport "$port" -j ACCEPT
+  done
+}
+
 if [[ "$PORT" == "--remove" ]]; then
   PORT="${2:-4433}"
   echo "Removing netfilter fast-path rule for UDP port $PORT..."
-  iptables -D INPUT -p udp --dport "$PORT" -j ACCEPT 2>/dev/null || true
+  delete_existing_fastpath_rules "$PORT"
   echo "Done."
   exit 0
 fi
@@ -31,10 +38,12 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 echo "Inserting netfilter fast-path rule for UDP port $PORT..."
-# Insert at position 1 (top of INPUT chain) to bypass all subsequent rules.
-# This eliminates the 15% nft_do_chain overhead measured in the profiling baseline.
-iptables -C INPUT -p udp --dport "$PORT" -j ACCEPT 2>/dev/null || \
-  iptables -I INPUT 1 -p udp --dport "$PORT" -j ACCEPT
+# Remove any stale lower-priority copy first, then insert at position 1 (top of
+# INPUT chain) to bypass all subsequent rules, including distro/Tailscale chains
+# that may be prepended after a previous run. This eliminates the measured
+# nft_do_chain overhead instead of merely adding a duplicate lower in the chain.
+delete_existing_fastpath_rules "$PORT"
+iptables -I INPUT 1 -p udp --dport "$PORT" -j ACCEPT
 
 echo "Rule inserted. Verify with:"
 echo "  iptables -L INPUT -n --line-numbers | head -5"
