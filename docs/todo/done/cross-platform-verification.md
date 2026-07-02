@@ -32,7 +32,7 @@ Windows/Linux, and ARM targets, with archived artifacts and a cadence.
 2. `cargo test --features simd-selfcheck -- --test-threads=1`
 3. Run test suites above (capture `scripts/out/*`).
 4. Run benchmark suites above (capture `scripts/out/*`).
-5. Record results in `docs/context.md` and summarize in `docs/changelog.md`.
+5. Record durable results in `docs/todo.md`, relevant TODO detail files, and `docs/DOCUMENTATION.md`.
 
 ## Artifacts
 - Store all suite logs under `scripts/out/`.

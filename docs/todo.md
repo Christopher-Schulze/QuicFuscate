@@ -10,6 +10,8 @@
 
 **Latest checkpoint (TODO-507)**: Brain histogram direct-divergence hotpath is DONE. `StealthBrain::apply_policy()` now decays histograms directly in contiguous `VecDeque` storage, keeps `Hist::total` synchronized after decay, and feeds Jensen-Shannon divergence without scratch-vector copies. Broderick `brain_apply_policy` improves by about `7.33-8.39%` across clean observer, intelligent clean, and pressure/actuating cases.
 
+**Production readiness closure (TODO-508..514)**: The runtime and CI are very far along, but the repository is not allowed to claim 100% production-ready until the final closure wave is done. Open items: canonical docs/SSOT cleanup after retiring local worklog files, post-clean local gate replay, Docker release artifact validation without local Docker dependency, security/ops acceptance audit, long-running Broderick soak/chaos proof, signed release/install/rollback proof, and real-world stealth traffic realism validation.
+
 ## Active - Protocol Optimization Wave (2026-06-05)
 
 Execution order: **Phase A (config + quick wins) -> Phase B (load path) -> Phase C (benchmarks) -> Phase D (architecture) -> Phase E (server profiling)**.
@@ -258,6 +260,28 @@ experimental, or bound to explicit policy.
 
 ---
 
+## Active - Production Readiness Closure Wave (2026-07-02)
+
+**Motivation:** The core VPN runtime, stealth stack, DNS leak proof, QKey revocation, FEC, transport hot paths, CI, and release build are in a strong state. The remaining work is not another feature wave; it is the proof and hardening layer required before the repository can honestly claim production-ready status.
+
+**Execution order:** Documentation SSOT cleanup -> local post-clean gates -> release artifact validation -> security/ops audit -> long-run soak -> signed release proof -> stealth realism validation.
+
+| ID | Phase | Priority | Title | Status | Depends On |
+|----|-------|----------|-------|--------|------------|
+| TODO-508 | S | P0 | Canonical docs SSOT cleanup after retiring local worklog files | **OPEN** - remove stale references to retired local worklog files, finish current uncommitted docs pass, align release checkpoint truth, and keep only tracked owning docs as durable project memory | TODO-472, TODO-507 |
+| TODO-509 | S | P0 | Post-clean local release gate replay | **OPEN** - after `cargo clean`, rerun the local Rust, frontend, TODO-audit, and Tauri backend gates so local evidence matches green GitHub evidence | TODO-508 |
+| TODO-510 | S | P1 | Docker release artifact validation without local Docker dependency | **OPEN** - keep Docker artifacts, but validate image build/run in GitHub or an explicit remote Linux environment; local Mac Docker remains unnecessary | TODO-447, TODO-509 |
+| TODO-511 | S | P0 | Security and ops acceptance audit closure | **OPEN** - verify code truth against remaining security/ops TODO acceptance criteria: audit logging, key erasure/mlock, privilege dropping, bandwidth quotas, IPv6/DNS leak controls, and admin/security events | TODO-439, TODO-440, TODO-441, TODO-445, TODO-437, TODO-456, TODO-458, TODO-459 |
+| TODO-512 | S | P0 | Broderick long-running production soak and chaos proof | **OPEN** - run multi-hour client/server VPN soak with reconnects, loss/jitter, FEC, DNS, QKey revoke, restart, resource, and leak assertions | TODO-473, TODO-474, TODO-509, TODO-511 |
+| TODO-513 | S | P1 | Signed release, install, upgrade, and rollback proof | **OPEN** - prove release artifacts, checksums/signatures, install script, service lifecycle, upgrade, rollback, config preservation, and uninstall behavior end to end | TODO-448, TODO-460, TODO-461, TODO-509 |
+| TODO-514 | S | P1 | Stealth traffic realism validation and profile tuning | **OPEN** - validate H3/MASQUE/WebTransport/persona/FEC/cover traffic against real-world observable patterns; remove or disable counterproductive stealth combinations by policy, not by deleting code | TODO-464, TODO-465, TODO-466, TODO-467, TODO-468, TODO-469, TODO-470, TODO-471 |
+
+Detail files: `docs/todo/todo-{508,509,510,511,512,513,514}-*.md`.
+
+**Closure rule:** Production-ready means all TODO-508 through TODO-514 are done, local and GitHub gates are green, and every remaining exception is either intentionally deferred with a documented operator impact or removed from product-facing claims.
+
+---
+
 ## Active - Radical Replan Wave (2026-07-23)
 
 **Motivation:** Deep-dive analysis identified three core problems: (1) TODO-system drift (33 files without status, 11 false DONE claims), (2) no real profiling baseline (all micro-opts are blind), (3) stealth is fallback-proxy not reality-grade mimicry. This wave addresses all three with five big levers, sequenced for maximum impact.
@@ -311,7 +335,7 @@ Details: `docs/todo/todo-{id}.md` for each item.
 
 | ID | Severity | Title | Status |
 |----|----------|-------|--------|
-| TODO-356 | MODERATE | context.md + todo.md stale test counts (852->916, 1522->1587) | **DEFERRED** - docs hygiene, not action-lever |
+| TODO-356 | MODERATE | retired local worklog + todo.md stale test counts (852->916, 1522->1587) | **DEFERRED** - local worklog removed; todo.md is current task truth |
 | TODO-357 | MODERATE | CONTRIBUTING.md Rust toolchain wording drift | **DONE** - CONTRIBUTING.md now says Rust stable selected by rust-toolchain.toml |
 | TODO-363 | MODERATE | Stealth env var QUICFUSCATE_STEALTH_MODE=auto silently rejected | **DONE** - added "auto" alias in apply_env_overrides() |
 | TODO-364 | MODERATE | Dual 0-RTT config fields (enable_0rtt vs enable_early_data) undocumented | **DONE** - added clarifying comments in quicfuscate.toml |
@@ -374,7 +398,7 @@ Details: `docs/todo/todo-{id}.md` for each item.
 |----|----------|-------|--------|
 | TODO-334 | MODERATE | DOCUMENTATION.md frontend test file counts wrong (58 vs 53) | **DONE** - corrected to 28+23=53 |
 | TODO-335 | MODERATE | DOCUMENTATION.md [stealth.fingerprint_rotation] wrong TOML path | **DONE** - corrected to [fingerprint_rotation] (top-level) |
-| TODO-336 | MODERATE | context.md CryptoAeadPlan falsely includes ChaCha20/AES-GCM | **DONE** - corrected to AEGIS/MORUS only |
+| TODO-336 | MODERATE | legacy CryptoAeadPlan note falsely included ChaCha20/AES-GCM | **DONE** - corrected to AEGIS/MORUS only |
 | TODO-337 | MODERATE | bench-crypto.sh ChaCha20 comparison always N/A (filename mismatch) | **DONE** - measure_throughput name corrected to chacha20_poly1305_native |
 | TODO-338 | MODERATE | bench-fec-simulation.sh CARGO_FEATURES/JOBS lost in subshell | **DONE** - added export, fixed FAST default 1->0 |
 | TODO-339 | MODERATE | bench-stealth-brain.sh CARGO_FEATURES/JOBS lost in subshell | **DONE** - added export |
@@ -1074,9 +1098,9 @@ Details: `docs/todo/todo-{id}.md` for each item.
 - Goal: Leave the local repository in a fully controlled staged state with no accidental unstaged or untracked residue before any later local commit.
 - Detail file: `docs/todo/todo-218-final-local-index-consolidation-and-pre-commit-stabilization.md`
 
-### 219. Backlog, Changelog, Context, and Canonical Documentation Final Synchronization (completed)
+### 219. Backlog and Canonical Documentation Final Synchronization (completed)
 - Severity: HIGH
-- Goal: Close the execution program with fully synchronized backlog, changelog, context, README, MAP, and DOCUMENTATION truth so no stale planning or drift survives the implementation wave.
+- Goal: Close the execution program with fully synchronized backlog, README, MAP, and DOCUMENTATION truth so no stale planning or drift survives the implementation wave.
 - Detail file: `docs/todo/todo-219-backlog-changelog-context-and-canonical-documentation-final-synchronization.md`
 
 ---
@@ -1582,4 +1606,4 @@ Findings from 5 AI audit reports (Mimo V2 Pro, Gemini 3.1 Pro, GLM-5, MiniMax M2
 
 - Add entries here only for real remaining work.
 - Do not re-add completed historical plans or stale parent backlog blocks.
-- Keep detailed historical execution records in `docs/todo/*.md` and `docs/context.md`.
+- Keep detailed historical execution records in `docs/todo/*.md`; do not recreate local worklog files.

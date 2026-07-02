@@ -22,7 +22,7 @@
 - `src/transport/xdp.rs`
 - `src/transport/uring.rs`
 - `scripts/tests/audits/audit-runtime-guardrails.sh`
-- `docs/context.md`
+- `docs/todo.md`
 
 ## Acceptance Criteria
 - The `uring_udp` module is gone from `src/transport/xdp.rs`.

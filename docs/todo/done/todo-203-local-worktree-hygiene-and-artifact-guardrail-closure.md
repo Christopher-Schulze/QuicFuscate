@@ -45,4 +45,4 @@ Establish a clean local artifact posture and guardrail against recurring worktre
 ## Affected Files
 - `.gitignore`
 - transient build/test output trees
-- `docs/context.md`
+- `docs/todo.md`

@@ -17,7 +17,7 @@ Rewrite the migration-related documentation surface so it is technically exact, 
 - `docs/MAP.md`
 - `README.md`
 - relevant TODO/detail files
-- `docs/context.md` and `docs/changelog.md`
+- `docs/todo.md`, `docs/DOCUMENTATION.md`, and `docs/MAP.md`
 
 ## Detailed Work Plan
 1. Gather the final migration contract after implementation and test completion.
@@ -53,5 +53,6 @@ Rewrite the migration-related documentation surface so it is technically exact, 
 - `docs/DOCUMENTATION.md`
 - `docs/MAP.md`
 - `README.md`
-- `docs/changelog.md`
-- `docs/context.md`
+- `docs/todo.md`
+- `docs/DOCUMENTATION.md`
+- `docs/MAP.md`

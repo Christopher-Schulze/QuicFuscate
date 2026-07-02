@@ -45,4 +45,4 @@ Leave the repository in a fully controlled staged state with no accidental unsta
 
 ## Affected Files
 - whole local repository state
-- `docs/context.md`
+- `docs/todo.md`

@@ -94,7 +94,7 @@ For each of the 6 scenarios:
 - `docs/profiling/baseline-2026-07.md` (new — analysis document)
 - `docs/profiling/scenario-{a-f}.csv` (new — raw data)
 - `docs/profiling/flamegraph-{a-f}-*.svg` (new — flamegraphs)
-- `docs/context.md` (update with findings)
+- `docs/profiling/` and `docs/DOCUMENTATION.md` (update durable findings)
 
 ## Server
 

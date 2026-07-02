@@ -48,5 +48,6 @@ Run, capture, and summarize the final validation matrix that proves repository t
 ## Affected Files
 - validation scripts and logs
 - `docs/DOCUMENTATION.md`
-- `docs/changelog.md`
-- `docs/context.md`
+- `docs/DOCUMENTATION.md`
+- `docs/todo.md`
+- `docs/MAP.md`

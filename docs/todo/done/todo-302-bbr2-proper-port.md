@@ -19,8 +19,8 @@ created: 2026-03-24
 - `scripts/tests/suites/test-transport.sh` - transport test suite
 - `docs/DOCUMENTATION.md` - Congestion Control section
 - `docs/MAP.md` - transport/cc module wiring
-- `docs/context.md` - work notes
-- `docs/changelog.md` - grouped entry
+- `docs/todo.md` - task truth
+- `docs/DOCUMENTATION.md` - durable behavior truth
 
 No fix is complete without verifying all relevant scripts run clean and docs reflect the new implementation.
 

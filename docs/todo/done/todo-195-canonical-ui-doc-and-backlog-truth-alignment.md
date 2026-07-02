@@ -43,6 +43,6 @@ Documentation tracked local development intent rather than repository-integrated
 - `docs/DOCUMENTATION.md`
 - `docs/MAP.md`
 - `docs/todo.md`
-- `docs/context.md`
+- `docs/todo.md`
 - `docs/todo/todo-190-full-ui-revamp.md`
 - `docs/todo/todo-128-password-minimum-increase.md`

@@ -14,8 +14,8 @@ created: 2026-03-24
 - All Rust source files that receive clippy fixes
 - `scripts/tests/suites/test-transport.sh` - verify transport tests still pass
 - `scripts/tests/suites/test-stealth.sh` - verify stealth tests still pass
-- `docs/changelog.md` - grouped entry for any non-trivial fixes
-- `docs/context.md` - work notes
+- `docs/todo.md` - task truth
+- `docs/DOCUMENTATION.md` - durable behavior truth for non-trivial fixes
 
 No fix is complete without `cargo clippy --workspace --all-targets -- -D warnings` returning 0 warnings/errors.
 

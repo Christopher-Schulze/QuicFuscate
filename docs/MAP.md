@@ -331,8 +331,6 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 |   |-- DOCUMENTATION.md
 |   |-- LICENSE
 |   |-- MAP.md
-|   |-- changelog.md
-|   |-- context.md
 |   |-- todo.md
 |   `-- todo/
 |       `-- done/          (completed detail files)

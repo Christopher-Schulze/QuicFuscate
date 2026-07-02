@@ -19,8 +19,8 @@ created: 2026-03-24
 - `scripts/tests/suites/test-transport.sh` - transport suite (if core.rs changes)
 - `docs/DOCUMENTATION.md` - TLS Cover section (lines ~2800-2940)
 - `docs/MAP.md` - stealth module wiring if changed
-- `docs/context.md` - session state
-- `docs/changelog.md` - grouped entry
+- `docs/todo.md` - task truth
+- `docs/DOCUMENTATION.md` - durable behavior truth
 
 No fix is complete without verifying all relevant scripts run clean and docs reflect the new behavior.
 

@@ -32,7 +32,8 @@ QuicFuscate is a monolithic Rust crate with a small, carefully curated `scripts/
   - Audit entrypoints are under `scripts/tests/audits/`
 - Documentation (English only)
   - `docs/DOCUMENTATION.md` - single file of truth
-  - `docs/changelog.md` - change log (add new entries at the top; do not rewrite old entries)
+  - `docs/todo.md` and `docs/todo/*.md` - task and readiness truth
+  - `docs/MAP.md` - repository map and wiring index
 
 The design favors consolidation into well-organized module directories (`src/fec/`, `src/crypto/`, `src/stealth/`, `src/optimize/`, `src/transport/`). Each directory has a `mod.rs` root with focused sub-modules. Do not duplicate logic across modules or introduce parallel implementations.
 
@@ -158,7 +159,7 @@ Component conventions:
 - `docs/DOCUMENTATION.md` is the single source of truth. Update it for any user-facing change:
   - CLI flags, environment variables (`QUICFUSCATE_*`), configuration keys
   - Stealth behavior, profile storage paths, defaults
-- Keep `docs/changelog.md` up to date (prepend newest section). Summarize what changed and why
+- Keep `docs/todo.md`, relevant TODO detail files, and `docs/MAP.md` aligned when task status, release gates, architecture, or wiring truth changes
 - Keep `README.md` concise; link to `DOCUMENTATION.md` for deep detail
 - Always update `config/quicfuscate.toml` when adding/removing config keys
 
@@ -176,7 +177,7 @@ Please verify before opening a PR:
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes locally
 - [ ] Static hardening audit passes via `./scripts/tests/audits/audit-all-comprehensive.sh`; no `unwrap/expect/dbg!/println!/panic!/todo!/unimplemented!`
   - [ ] `docs/DOCUMENTATION.md` updated (flags, env, config, behavior)
-  - [ ] `docs/changelog.md` updated with a brief, precise summary
+  - [ ] `docs/todo.md`, relevant TODO detail files, and `docs/MAP.md` updated when task status, release gates, architecture, or wiring truth changed
   - [ ] `config/quicfuscate.toml` updated if config changed
   - [ ] `README.md` updated where user entry points changed
   - [ ] Added clear rationale in code comments for complex/critical sections

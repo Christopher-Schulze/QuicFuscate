@@ -91,7 +91,7 @@ src/optimize/
 6. Build checks:
    - `cargo clean`
    - `cargo build --features simd-selfcheck`
-7. Update `docs/context.md` and `docs/todo.md`.
+7. Update `docs/todo.md` and owning project docs.
 
 **Acceptance**:
 - Diff is zero.
@@ -123,7 +123,7 @@ src/optimize/
 **Acceptance**:
 - All slices verified with zero diffs.
 - Builds and tests green.
-- `docs/context.md`, `docs/DOCUMENTATION.md`, `docs/MAP.md`, `docs/Changelog.md` updated.
+- `docs/todo.md`, `docs/DOCUMENTATION.md`, and `docs/MAP.md` updated.
 
 ## 32-bit Target Requirements
 **Targets**:
@@ -141,4 +141,4 @@ src/optimize/
 ## Rollback Policy
 - If any slice diff fails, stop immediately and restore from archive.
 - If build fails, revert only the current slice.
-- Record any deviation in `docs/context.md`.
+- Record any deviation in the relevant TODO detail file.

@@ -15,7 +15,7 @@ created: 2026-03-24
 - `scripts/tests/suites/test-stealth.sh` - stealth suite
 - `scripts/tests/rust/rt-probe-detection.rs` - probe detection test
 - `docs/DOCUMENTATION.md` - any mention of probe detection patterns
-- `docs/changelog.md` - grouped entry
+- `docs/DOCUMENTATION.md` - durable behavior truth
 
 ---
 

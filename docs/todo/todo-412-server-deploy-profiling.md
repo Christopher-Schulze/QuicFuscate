@@ -21,7 +21,7 @@ Micro-benches and CI do not reflect production server load (Linux, systemd, real
 
 - Release artifact installed via `install-server-linux.sh`
 - Baseline captured: throughput, CPU%, p99 latency, FEC mode distribution, AEAD backend selected
-- Results recorded in `docs/context.md` (not public doc unless user wants)
+- Results recorded in `docs/profiling/` and linked from `docs/DOCUMENTATION.md` when they become project truth
 - Install runbook validated (certs, firewall, admin bind)
 
 ## Fix Plan

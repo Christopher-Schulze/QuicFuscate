@@ -30,7 +30,7 @@ Create a locally authoritative repository state with all currently active files 
 - [x] Stage active frontend, backend, docs, script, and test files.
 - [x] Exclude generated caches and local-only runtime debris.
 - [x] Verify `git status --short` shows the intended local staged truth only.
-- [x] Record the final state in `docs/context.md`.
+- [x] Record the final state in owning docs.
 
 ## Acceptance Criteria
 - All currently active local source-of-truth files are present in the Git index.

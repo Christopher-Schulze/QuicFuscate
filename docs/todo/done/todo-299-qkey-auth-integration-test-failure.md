@@ -16,8 +16,8 @@ created: 2026-03-24
 - `src/core.rs`, `src/qftls.rs`, `src/transport/connection.rs` - any changed code
 - `docs/DOCUMENTATION.md` - sections: QKey Auth, TLS Cover, Transport internals
 - `docs/MAP.md` - if any module wiring changes
-- `docs/context.md` - session state update
-- `docs/changelog.md` - grouped entry
+- `docs/todo.md` - task state update
+- `docs/DOCUMENTATION.md` - durable behavior truth
 
 No fix is complete without verifying all relevant scripts run clean and docs are synchronized.
 
