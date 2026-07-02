@@ -57,9 +57,9 @@ Always ask me for the project if not mentioned.
 
 DOCS_DIR: docs/ under PROJECT_ROOT.
 SCRIPTS_DIR: scripts/ under PROJECT_ROOT.
-TASK: A discrete, user-visible deliverable or milestone listed in todo.md, or an explicitly named work item.
+TASK: A discrete, user-visible deliverable or milestone listed in docs/todo.md, a TODO detail file, or an explicitly named work item.
 EDIT: Minimal, atomic change batch that advances a TASK.
-FLUSH: Push buffered notes from context.md to persistent docs (changelog, documentation, indexes).
+FLUSH: Push durable task-relevant truth into docs/DOCUMENTATION.md, docs/todo.md, TODO detail files, docs/MAP.md, and other active docs that already own the topic.
 -
 
 
@@ -101,8 +101,6 @@ Create if missing; never overwrite existing files:
 docs/ (always present)
 documentation.md (single source of truth; skeleton sections only)
 architecture.md (canonical architecture overview)
-changelog.md (empty skeleton only if absent)
-context.md (living worklog & scratchpad for the agent)
 filemap.md (file index; may start empty)
 decisions.md (decision log; may start empty)
 wiringmap.md (component dependency/wiring map; may start empty)
@@ -113,7 +111,7 @@ Adopt existing structures; no renames/moves/dupes; never enforce our structure; 
 -
 
 5. Reading & Planning Discipline
-Initial sweep: read every file line-by-line. Record findings only in docs/context.md (+ todo.md if needed).
+Initial sweep: read every relevant file needed for the task. Record durable findings in docs/todo.md or the relevant TODO detail file if they affect future work.
 No edits during sweep. Only after the sweep, plan the first TASK with a concrete change list.
 For every TASK: gather full context (files, deps, naming, interfaces, constraints).
 -
@@ -139,19 +137,14 @@ If risky, copy original to archive/ before action.
 
 8. Documentation
 Single source of truth: docs/DOCUMENTATION.md. Keep exhaustive, technical, up-to-date.
-Live buffer: docs/context.md holds granular work notes during active edits.
-Changelog cadence (conflict-free rule):
-Do not write to changelog.md for every micro-edit.
-Write to changelog.md on TASK completion only, as a grouped entry referencing the TASK block.
-Record only significant micro-edits as concise bullets in context.md; batch trivial changes.
 Documentation cadence:
 Update documentation.md at the end of each TASK (or earlier if a flush trigger fires).
 Flush triggers (doc/index updates immediately):
-5 edits buffered for the current TASK, or 30 minutes elapsed since last flush, or context.md delta exceeds ~3000 tokens, or before any build/test run, or imminent session end/tool shutdown.
+before any build/test run, before commit, or before session end/tool shutdown when docs are stale.
 -
 
 9. Reasoning & Tool Use
-Deep multi-pass reasoning (≥2–3 iterations) before output; self-critique until coherent; verify assumptions; plan and justify each tool invocation; push beyond developer-intended depth; output only results; record relevant findings/tool outcomes in context.md.
+Deep multi-pass reasoning (≥2-3 iterations) before output; self-critique until coherent; verify assumptions; plan and justify each tool invocation; push beyond developer-intended depth; output only results; record durable findings in the owning docs.
 -
 
 10. Builds, Tests & Cleanups
@@ -162,7 +155,7 @@ On any flush trigger (see §8).
 -
 
 11. Archival & Replacement (no destructive overwrites)
-When replacing/refactoring: prove new fully subsumes old; propagate all references/docs/tests; move old to archive/ with metadata; record in changelog.md at TASK completion.
+When replacing/refactoring: prove new fully subsumes old; propagate all references/docs/tests; move old to archive/ with metadata when archival is explicitly in scope.
 -
 
 12. Architecture, Wiring & Indexes (authoritative)
@@ -183,13 +176,13 @@ Verify behavior with tests in an allowed window (see §10).
 
 15. Testing Requirements
 Provide unit/integration/e2e tests for every significant path before declaring complete.
-On failures: diagnose, fix root cause, update tests or code, and document findings in context.md → summarize in changelog.md at TASK end.
+On failures: diagnose, fix root cause, update tests or code, and document durable findings in the owning docs if they affect future work.
 -
 
 16. Safety & Data Integrity - MUST NOT:
 - delete logic to “fix” errors
 - replace code with stubs/mocks to “make it pass”
-- overwrite existing docs like changelog.md/documentation.md/architecture.md; edit surgically
+- overwrite existing docs like documentation.md/architecture.md; edit surgically
 - commit placeholders in mainline code
 Deletion safety: only delete generated artifacts; use whitelist logic; if unsure, skip and create a remediation task
 -
@@ -205,52 +198,46 @@ A component/TASK is done only if:
 Implementation is complete and production-grade (edge cases handled).
 Tests exist and pass within an allowed window.
 documentation.md, architecture.md, filemap.md, wiringmap.md are updated.
-changelog.md has a grouped, clear entry.
 No redundancies or unresolved dependencies remain.
 -
 
-19. Changelog Policy (final, reconciled)
-Granularity: one entry per completed TASK, summarizing buffered micro-edits from context.md.
-Include: motivation, scope, impacted areas, tests, follow-ups.
--
-
-20. Task Tracking & TODOs
+19. Task Tracking & TODOs
 Use todo.md in docs/ for discovered issues/improvements during sweeps.
 Each TODO entry: context, desired outcome, dependencies, completion criteria, and linkage to files.
 -
 
-## 21. Deterministic Context Management
-docs/context.md is the only scratchpad and MUST ALWAYS reflect the exact, current repository state.
-Keep both global and local context blocks and update them IMMEDIATELY after relevant changes.
-Apply flush triggers per §8 strictly (grouped changelog entries, documentation updates, index syncs) to avoid staleness.
-Treat docs/context.md as the canonical, best-possible context mirror at all times.
+## 20. Deterministic Documentation Management
+docs/DOCUMENTATION.md is the project documentation SSOT.
+docs/todo.md and docs/todo/*.md are the task and readiness truth.
+docs/MAP.md owns repo map and wiring truth.
+Update the owning docs when implementation, architecture, release gates, task status, or operational truth changes.
 -
 
-22. Build Artifacts Cleanup
+21. Build Artifacts Cleanup
 Before any build: validate cache; if unverifiable→run toolchain-specific cleanup.
 Log: timestamp, paths, commands used, size deltas, anomalies.  
 If anomalies appear, create a remediation TODO with diagnostics.
 -
 
-23. Start-of-Session Compliance (every session)
-Re-read the active TASK block in context.md.  
-If no active TASK: take top TODO/TASK, create a TASK block, then proceed.
+22. Start-of-Session Compliance (every session)
+Read docs/todo.md and the active/relevant TODO detail file before task-managed work.
+If no active TASK exists: take the top relevant TODO/TASK, create or update its TODO detail block, then proceed.
 Confirm environment matches the Stack (§3). 
 -
 
-24. Zero-Ambiguity Behavior
+23. Zero-Ambiguity Behavior
 Follow these rules strictly. Deviation only when a rule would block core progress; in such a case:
-Write a deviation note in context.md with rationale and scope.
+Write a deviation note in the relevant TODO detail file with rationale and scope.
 Proceed with the minimally invasive alternative.
 Open a TODO to reconcile the deviation.
 -
 
-25. Never-Ever - MUST NOT:
+24. Never-Ever - MUST NOT:
 - overwrite entire files to “edit”
 - delete logic to pass tests
 - create duplicate docs or sources of truth
 - introduce empty folders (except required docs/ and scripts/ root)
-- lose context; use context.md and flush deterministically
+- lose durable task truth; keep the owning docs synchronized
 
 
 !!!
@@ -280,8 +267,8 @@ DOCUMENTS: ONLY IN ENGLISH!.
 - Prefer to close out or pause current work and trigger the compaction ritual described below.
 
 ## Compaction Ritual (run at the end of each turn, and always when ≥90%)
-1. Persist a **Compaction Summary** to context.md which is a kind of KNOWLEDGE ANCHOR
-2. Immediately re-read context.md at the start of the next turn before taking action.
+1. Persist durable state into the owning docs only when it changes project truth: docs/DOCUMENTATION.md, docs/todo.md, TODO detail files, docs/MAP.md, or other existing topic owners.
+2. At the start of the next turn, re-read docs/todo.md plus the relevant TODO detail and project docs before taking action.
 
 ### Compaction Summary - required contents (high detail, but concise)
 - **Current State:** a precise snapshot of where the work stands right now.
@@ -289,14 +276,12 @@ DOCUMENTS: ONLY IN ENGLISH!.
 - **Next Tasks (Executable Plan):** numbered steps with exact details (files to edit, commands to run, acceptance criteria, dependencies, blockers, assumptions).
 - **Rules & Constraints:** the effective rules from runbook.md (complete file needs to be known) and AGENTS.md that apply to the upcoming steps.
 - **Project Structure Pointers:** key paths, workflows, and conventions to follow (do not inline full docs; reference them).
-- **Document Index:** a canonical list of important documents and where to find them (path/ID + one-line purpose) so they can be re-read on demand: changelog.md, DOCUMENTATION.md, fileandwiremap.md, project_rules.md, project-plan.md, todo.md and other important documents in the specific project like specs and target pictures.
+- **Document Index:** a canonical list of important documents and where to find them (path/ID + one-line purpose) so they can be re-read on demand: DOCUMENTATION.md, MAP.md, todo.md, TODO detail files, project rules, plans, specs, and other important project documents.
 
 ## Persistence & Reading
-- You may **write** to context.md to keep durable knowledge, you can write anything useful to it, even if use is only temporarely
-- Before compaction, update the context store(s) so they reflect the latest state; after compaction, **re-read** them as your knowledge base.
-- Keep references (paths/IDs) to all important docs; do not attempt to retain full document text in memory-store pointers and re-load on demand.
-
-- When editing context.md: only use precise, chirurgical edits. Never ever use a script or a bash command to update or edit content in context.md it's forbidden! Only manual, precise, incremental edits! nothing else! ever!
+- Keep durable knowledge only in the owning tracked docs. Do not recreate local worklog files.
+- Before compaction or handoff, update stale owning docs if project truth changed; after compaction, re-read the relevant tracked docs as the knowledge base.
+- Keep references (paths/IDs) to all important docs; do not attempt to retain full document text in memory. Store pointers and re-load on demand.
 
 ## Execution Rules
 - Operate autonomously by default; continue with the **Next Tasks** plan without asking for confirmation unless blocked by missing permissions or critical ambiguity.
@@ -306,7 +291,7 @@ DOCUMENTS: ONLY IN ENGLISH!.
 ## When Near the Limit (≥90%)
 - Stop initiating large new work; finalise a Compaction Summary first.
 - Ensure that the summary contains: current state, last three outputs, the full executable plan for upcoming tasks, pointers to all needed docs, and the rules/constraints to follow.
-- If you reach 95+% try to finish your current task on the shortest way, harmonise every changes with the docs and update context.md detailed and precisely -> den prepare for context compression and approach it.
+- If you reach 95+% try to finish your current task on the shortest way, harmonise every change with the owning docs, then prepare for context compression.
 
 ## Most important!
 - Make sure your Auto-Compaction works and we do NOT run out of context, ever!.
@@ -335,7 +320,7 @@ DOCUMENTS: ONLY IN ENGLISH!.
 
 ## Execution Principles
 - Operate autonomously by default; do not ask for confirmation unless permissions are missing or a truly critical ambiguity blocks execution.
-- Keep progress continuous and efficient (no fragmentation), ensure durability of knowledge via Context.md, and maintain strict adherence to the quality-first objective while optimizing speed and effectiveness.
+- Keep progress continuous and efficient (no fragmentation), ensure durability of project truth via the tracked owning docs, and maintain strict adherence to the quality-first objective while optimizing speed and effectiveness.
 
 
 NEVER USE EM-Dashes! If you see em-dashes convert them to "-"
@@ -505,8 +490,6 @@ Wire -> Pooled Buffer
 | Purpose | Path |
 |---------|------|
 | Main documentation | `docs/DOCUMENTATION.md` |
-| Agent context/worklog | `docs/context.md` |
-| Changelog | `docs/changelog.md` |
 | Architecture overview | `docs/architecture.md` |
 | Agent instructions | `AGENTS.md` |
 | Rust core | `src/` |
