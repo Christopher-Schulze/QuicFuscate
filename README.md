@@ -65,6 +65,7 @@ QuicFuscate is a stealth transport and VPN runtime built on a custom QUIC-based 
   PFS by default via ephemeral X25519 key exchange
 - Hybrid FEC (Adaptive RLNC + Tetrys-like Streaming) with ownership-preserving zero-overhead receive at 0% loss; escalates seamlessly under loss up to Wiedemann (GF(2^8), bitsliced, multi-U/block-BM with Rayon parallelization) and streaming burst (1 repair per N sources, partial-recovery toggle, SIMD-optimized GF(2^16) nibble paths)
 - Zero-copy I/O with tunable memory pool and optional io_uring UDP fast path (Linux); AF_XDP support is experimental and opt-in behind `internal_af_xdp_experimental`
+- Optional NAT traversal path discovery is default-off and reason-gated for connectivity fallback, roaming, or explicit mesh experiments; it is not a baseline stealth layer
 - Active-probe mitigation with detector-driven escalation and Reality fallback proxying to avoid protocol disclosure under active scans
 - Adaptive StealthBrain control loop for ACK policy, timing/padding shaping, MASQUE preference hints, and FEC interval/redundancy hints
 - HTTP/3 Server Push cover traffic with profile-coherent bursts and runtime intensity control during stealth escalation
@@ -312,6 +313,7 @@ The transport subsystem uses `src/transport.rs` as the module root and focused s
 | Adaptive Intelligence | StealthBrain policy engine (ACK/timing/padding/FEC coordination plus compatibility-only MASQUE hinting) |
 | Control Plane       | Server-authoritative QKey lifecycle (issue/revoke/persist), Admin Web/API policy enforcement |
 | Compression         | Adaptive zstd policy (signal-aware compression decisions, optional dictionary path) |
+| NAT Traversal       | Optional STUN/TURN/ICE path discovery, default-off and policy-gated                 |
 | Platforms           | Linux, macOS, Windows                                                      |
 | Architecture        | x86_64, ARM64                                                              |
 | Performance         | High-throughput, hardware-adaptive fast paths (SIMD + batching + zero-copy) |

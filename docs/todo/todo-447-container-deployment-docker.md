@@ -1,6 +1,6 @@
 ---
 id: TODO-447
-title: "Container deployment (Docker only; stale cluster manifests removed)"
+title: "Container deployment (Docker only; stale manifests removed)"
 severity: HIGH
 phase: "I"
 priority: P1
@@ -9,18 +9,18 @@ created: 2026-07-23
 depends_on: ["TODO-444", "TODO-446"]
 ---
 
-# TODO-447: Container Deployment (Docker only; stale cluster manifests removed)
+# TODO-447: Container Deployment (Docker only; stale manifests removed)
 
 ## Goal
-Keep Docker as the only retained container artifact surface for GitHub/CI image work. Cluster deployment manifests are not active deployment targets in this repository.
+Keep Docker as the only retained container artifact surface for GitHub/CI image work. Stale manifest sets are not active deployment targets in this repository.
 
 ## Scope Status
 
-Deferred from the current production-readiness pass by explicit user instruction: Docker may remain for GitHub/CI, but local Docker is not required and stale cluster manifest sets must not be presented as supported deployment surfaces.
+Deferred from the current production-readiness pass by explicit user instruction: Docker may remain for GitHub/CI, but local Docker is not required and stale manifest sets must not be presented as supported deployment surfaces.
 
 ## Current Scope Snapshot
 
-Current repository truth: `Dockerfile`, `.dockerignore`, and `docker-compose.yml` remain. The stale cluster manifest directories were removed because they were not validated and created false production-readiness signals. Treat the remaining sections below as historical planning context only, not as current verified deployment truth.
+Current repository truth: `Dockerfile`, `.dockerignore`, and `docker-compose.yml` remain. The stale manifest directories were removed because they were not validated and created false production-readiness signals. Treat the remaining sections below as historical planning context only, not as current verified deployment truth.
 
 ## Historical Audit (not validated in current pass)
 
@@ -46,7 +46,7 @@ The server has an admin HTTP interface (configured via `--admin-web` in the inst
 
 ## Problem Analysis
 
-A production VPN server can be deployed through retained Docker artifacts or through the VM/systemd installer. Cluster manifest deployment is not an active repository target.
+A production VPN server can be deployed through retained Docker artifacts or through the VM/systemd installer. Stale manifest deployment is not an active repository target.
 
 Key challenges:
 1. **TUN device in containers**: `/dev/net/tun` is not available by default. Docker validation must pass it through via `--device /dev/net/tun`.
@@ -54,7 +54,7 @@ Key challenges:
 3. **Minimal image vs. tool requirements**: The routing manager needs `iptables`, `nft`, `iproute2` binaries. A distroless or scratch image won't have these. Must use `debian-slim` or `alpine` with these packages installed.
 4. **State persistence**: QKey registry (`qkeys.json`) and TLS certs must persist across container restarts. Need volume mounts.
 5. **12-factor compliance**: All config should be overridable via environment variables for container deployments.
-6. **Cluster manifest scope**: stale cluster deployment manifests are intentionally not retained as active repository artifacts.
+6. **Manifest scope**: stale deployment manifests are intentionally not retained as active repository artifacts.
 
 ## Proposed Architecture
 
@@ -64,7 +64,7 @@ Key challenges:
 │                                                                   │
 │  ┌─────────────────────────────────────────────────────┐        │
 │  │  Dockerfile (multi-stage)                            │        │
-│  │  Stage 1: rust:1.85-bookworm (builder)               │        │
+│  │  Stage 1: rust:bookworm (stable builder)             │        │
 │  │    → cargo build --release                           │        │
 │  │  Stage 2: debian:bookworm-slim (runtime)             │        │
 │  │    → binary + iptables + iproute2 + nftables         │        │
@@ -74,14 +74,14 @@ Key challenges:
 │  ┌──────────────────┐  ┌──────────────────────────────┐         │
 │  │ docker-compose   │  │ GitHub/CI image validation     │         │
 │  │ server + client  │  │ no local Docker requirement    │         │
-│  │ --device /dev/   │  │ Cluster manifests not active   │         │
+│  │ --device /dev/   │  │ stale manifests not active     │         │
 │  │   net/tun        │  │                                │         │
 │  │ --cap-add        │  │                                │         │
 │  │   NET_ADMIN      │  │                                │         │
 │  └──────────────────┘  └──────────────────────────────┘         │
 │                                                                   │
 │  ┌─────────────────────────────────────────────────────┐        │
-│  │  Cluster manifests: removed from active repo scope    │        │
+│  │  Stale manifests: removed from active repo scope      │        │
 │  │  Reintroduce only through a dedicated validation task │        │
 │  └─────────────────────────────────────────────────────┘        │
 └──────────────────────────────────────────────────────────────────┘
@@ -92,7 +92,7 @@ Key challenges:
 ### Step 1: Multi-stage Dockerfile
 ```dockerfile
 # Dockerfile
-FROM rust:1.85-bookworm AS builder
+FROM rust:bookworm AS builder
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo "fn main() {}" > src/main.rs
@@ -150,8 +150,8 @@ volumes:
   quicfuscate-logs:
 ```
 
-### Step 4: Cluster manifest scope
-Cluster deployment manifests are intentionally removed from the active repository. If this deployment target is reintroduced later, it must be implemented as a separate, fully validated task instead of being kept as stale manifests.
+### Step 4: Manifest scope
+Stale deployment manifests are intentionally removed from the active repository. If this deployment target is reintroduced later, it must be implemented as a separate, fully validated task instead of being kept as stale manifests.
 
 ### Step 7: Environment variable config
 Support `CONFIG_FILE` env var and all config via env vars for 12-factor compliance. The existing `QUICFUSCATE_*` env var pattern (used in `limits.rs:46-50`) should be extended to all config sections.
@@ -166,11 +166,11 @@ Docker runtime sizing should be validated by CI or a dedicated Linux host becaus
 
 | Choice | Selection | Rationale |
 |--------|-----------|-----------|
-| Base image (builder) | `rust:1.85-bookworm` | Matches project MSRV; bookworm = Debian 12 (current stable) |
+| Base image (builder) | `rust:bookworm` | Uses the Rust stable Docker channel and Debian bookworm builder base |
 | Base image (runtime) | `debian:bookworm-slim` | Has apt for installing iptables/iproute2/nftables; ~75MB; widely used |
 | Alternative: `alpine` | Considered | Smaller (~5MB) but musl libc can cause issues with Rust binaries; needs `apk add iptables iproute2 nftables` |
 | Alternative: distroless | Rejected | No shell, no iptables/nft/ip command - required for routing/kill switch |
-| Container orchestration | Docker-only retained scope | Stale cluster manifest artifacts are removed from the active repository |
+| Container orchestration | Docker-only retained scope | Stale manifest artifacts are removed from the active repository |
 | Config management | Bind mounts + environment variables | Keep config/certs/state external to the image; never bake secrets |
 | Health checks | Admin HTTP root route for now | `/api/health` is still a follow-up before switching probes |
 | State persistence | Volume mounts | `/var/lib/quicfuscate` for qkeys.json; `/etc/quicfuscate/certs` for TLS |
@@ -200,16 +200,16 @@ Docker runtime sizing should be validated by CI or a dedicated Linux host becaus
 - `test_container_has_firewall_tools` - `docker exec quicfuscate-server which iptables nft ip` returns paths
 - `test_ip_forward_sysctl` - `docker exec quicfuscate-server cat /proc/sys/net/ipv4/ip_forward` returns 1
 
-### Cluster manifest tests
-Not active. There are no cluster manifest repository artifacts to validate.
+### Stale manifest tests
+Not active. There are no stale manifest repository artifacts to validate.
 
 ## Files to Create/Modify
 
 | File | Action | Description |
 |------|--------|-------------|
-| `Dockerfile` | Create | Multi-stage build (rust builder + debian-slim runtime) |
-| `.dockerignore` | Create | Exclude target/, .git/, docs/, scripts/ |
-| `docker-compose.yml` | Create | Server + client for quick-start |
+| `Dockerfile` | Retain | Multi-stage build (Rust stable builder + debian-slim runtime) |
+| `.dockerignore` | Retain | Exclude target/, .git/, docs/, scripts/ |
+| `docker-compose.yml` | Retain | Server + optional client quick-start |
 | `docs/DOCUMENTATION.md` | Modify | Document retained Docker-only container scope |
 
 ## Risks & Mitigations
@@ -223,7 +223,7 @@ Not active. There are no cluster manifest repository artifacts to validate.
 | QKey encryption key leaked in image layers | High | Never bake secrets into image; pass via env var or external secret manager |
 | Container restart loses in-memory sessions | Medium | Sessions are ephemeral by design; clients reconnect automatically |
 | iptables-nft vs iptables-legacy in container | Low | Install both; TODO-444 auto-detection handles this |
-| Stale unsupported manifests reappear | Medium | Keep cluster manifests out of active repo scope unless a dedicated validated task is opened |
+| Stale unsupported manifests reappear | Medium | Keep stale manifests out of active repo scope unless a dedicated validated task is opened |
 
 ## Completion Criteria
 
@@ -234,7 +234,7 @@ Not active. There are no cluster manifest repository artifacts to validate.
 - [ ] `docker logs` shows startup logs
 - [ ] Client can connect to server running in Docker (UDP 443 reachable)
 - [ ] `docker-compose up` starts both server and client
-- [ ] Cluster manifests remain absent from active repository artifacts unless a dedicated validated task reintroduces them
+- [ ] Stale manifests remain absent from active repository artifacts unless a dedicated validated task reintroduces them
 - [ ] Container has `iptables`, `ip`, `nft` binaries available
 - [ ] `ip_forward` sysctl is set inside container
 - [ ] No secrets in plain text in git and no secrets baked into image layers

@@ -144,10 +144,12 @@ Use this section as the shortest non-marketing answer to "what evidence exists r
 
 ### Current Release Checkpoint
 
-- Last fully verified release checkpoint before this documentation sync: `09cb9f2` (`fix: stabilize CI and app backend gates`).
-- GitHub `CI` run `28461670844`, `Clippy Matrix` run `28461670906`, and `Release Build` run `28461670799` are green on that checkpoint.
+- Last fully verified release checkpoint before this documentation sync: `5d1cc9a`.
+- GitHub `CI` run `28554576645`, `Clippy Matrix` run `28554576572`, and `Release Build` run `28554576587` are green on that checkpoint.
+- The repository uses the Rust stable channel through `rust-toolchain.toml`; no release-specific Rust toolchain pin is part of the tracked configuration.
 - The CI workflow now includes an `app-backend-checks` job that builds the desktop Svelte bundle for Tauri context, then runs `cargo check` and `cargo test` in `apps/tauri/src-tauri` on macOS.
 - The Linux fastpath evidence job is green in the current CI checkpoint. This proves the current non-privileged CI fastpath suite, not a replacement for a privileged production deployment soak.
+- Container scope is Docker-only. `Dockerfile`, `.dockerignore`, and `docker-compose.yml` remain available for GitHub/CI image work and explicit operator use. Stale unvalidated manifest directories were removed from the active repository so they cannot be mistaken for supported production deployment targets.
 - TODO-412 (server deploy and real-world profiling baseline) is deferred until server SSH/access details, TLS certificate paths or an approved self-signed test setup, and a profiling target are available.
 - UI changes remain protected by the `AGENTS.md` UI Change Boundary: no UI component, view, style, asset, text, or adjacent UI cleanup is allowed without an explicit current-task request for that exact UI change.
 
@@ -1831,6 +1833,7 @@ Benchmarks
 - The `app-backend-checks` job validates the native desktop backend without UI source edits: it builds the existing `apps/svelte-desktop` bundle for Tauri context, then runs `cargo check` and `cargo test` in `apps/tauri/src-tauri`.
 - `.github/workflows/clippy-matrix.yml` runs the Rust clippy feature matrix on stable Rust with `-D warnings`.
 - `.github/workflows/release.yml` builds the release server binary, builds admin web assets, creates the server bundle, and uploads release artifacts.
+- Latest green main checkpoint: `5d1cc9a`; CI `28554576645`, Clippy Matrix `28554576572`, Release Build `28554576587`.
 
 #### Local Development Workflow
 - Use `cargo test` for unit/integration tests and the suite scripts under `scripts/tests/suites/` for end-to-end coverage.
@@ -2366,6 +2369,28 @@ println!("started validation for path {path_id}");
 `migrate_connection` starts PATH_CHALLENGE probing immediately, but the active path only changes after a matching PATH_RESPONSE validates the candidate path.
 
 Successful validated migrations increment the internal `PATH_MIGRATIONS` telemetry counter.
+
+---
+
+### NAT Traversal and Path Discovery
+
+NAT traversal is an optional connectivity and path-discovery layer. It is not a default stealth mechanism and it must not generate permanent background STUN/ICE traffic on clean links.
+
+Runtime policy:
+- Default: disabled (`enabled = false`, `mode = "off"`).
+- Modes: `off`, `connectivity-fallback`, `roaming`, `mesh`, `always`.
+- Reasons: direct-path failure, roaming, mesh, or manual request.
+- Discovery is cooldown-limited by `probe_interval_ms` and capped by `max_candidates`.
+- With `ice_enabled = false`, discovery returns bounded host candidates only.
+- With `ice_enabled = true`, discovery may gather STUN server-reflexive candidates from configured STUN servers.
+
+Code ownership:
+- `src/transport/nat.rs`: `StunClient`, `IceAgent`, `TurnClient`, and `NatPathDiscovery`.
+- `src/transport/config.rs`: `NatTraversalConfig`, `NatTraversalMode`, and `NatDiscoveryReason`.
+- `src/engine/config.rs`: `[nat_traversal]` TOML section and validation.
+- `src/engine/engine.rs` and `src/implementations/client/connection.rs`: runtime config propagation into transport config.
+
+Operational rule: use NAT traversal for connectivity fallback, roaming path discovery, or explicit mesh experiments. Do not enable it as a blanket stealth default.
 
 ---
 
