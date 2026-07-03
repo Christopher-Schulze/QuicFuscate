@@ -4,7 +4,7 @@ title: Broderick long-running production soak and chaos proof
 severity: CRITICAL
 phase: S
 priority: P0
-status: PREPARED
+status: OPEN
 created: 2026-07-02
 depends_on: [TODO-473, TODO-474, TODO-509, TODO-511]
 ---
@@ -81,7 +81,7 @@ traffic, network adversity, restarts, auth changes, DNS use, and reconnects.
 
 ## Preparation Evidence (2026-07-03)
 
-**Status: PREPARED — soak script exists, awaiting remote Broderick execution.**
+**Status: OPEN (prepared) — soak script exists, awaiting remote Broderick execution.**
 
 - `scripts/tests/suites/test-runtime-soak-chaos.sh` already exists and
   implements the soak/chaos matrix with configurable iterations,

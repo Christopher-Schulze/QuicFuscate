@@ -4,7 +4,7 @@ title: Signed release, install, upgrade, and rollback proof
 severity: HIGH
 phase: S
 priority: P1
-status: PREPARED
+status: OPEN
 created: 2026-07-02
 depends_on: [TODO-448, TODO-460, TODO-461, TODO-509]
 ---
@@ -76,7 +76,7 @@ behavior.
 
 ## Preparation Evidence (2026-07-03)
 
-**Status: PREPARED — checksum/signature generation added to release workflow, awaiting clean VM execution.**
+**Status: OPEN (prepared) — checksum/signature generation added to release workflow, awaiting clean VM execution.**
 
 - `.github/workflows/release.yml` extended with:
   - `Generate checksums and signatures` step: produces `checksums-sha256.txt`

@@ -4,7 +4,7 @@ title: Docker release artifact validation without local Docker dependency
 severity: HIGH
 phase: S
 priority: P1
-status: PREPARED
+status: OPEN
 created: 2026-07-02
 depends_on: [TODO-447, TODO-509]
 ---
@@ -76,7 +76,7 @@ production-ready deployment path.
 
 ## Preparation Evidence (2026-07-03)
 
-**Status: PREPARED — CI job created, awaiting first GitHub Actions run.**
+**Status: OPEN (prepared) — CI job created, awaiting first GitHub Actions run.**
 
 - `.github/workflows/docker-validation.yml` created with 6 validation steps:
   1. `docker build -t quicfuscate/server:ci .` — image build
