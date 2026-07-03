@@ -59,10 +59,18 @@ jobs:
           path: target/release/quicfuscate
 
       - name: Generate checksums and signatures
+        # The checksum file must NOT be hashed itself. Writing it in-place
+        # via `sha256sum * > checksums-sha256.txt` would create the (empty)
+        # file before glob expansion, so `*` would include it and produce a
+        # self-referential entry that fails `sha256sum -c` verification.
+        # We therefore write to a temp file and move it into place after.
         run: |
           cd scripts/out/build/
-          # SHA-256 checksums for all bundle artifacts
-          sha256sum * > checksums-sha256.txt
+          # SHA-256 checksums for all bundle artifacts (excluding the
+          # checksum file itself, which doesn't exist yet during globbing).
+          tmp=$(mktemp)
+          sha256sum * > "$tmp"
+          mv "$tmp" checksums-sha256.txt
           # GPG signature if signing key is configured (optional)
           if [ -n "${{ secrets.RELEASE_GPG_KEY_ID }}" ]; then
             echo "GPG signing key configured — signing checksums"
@@ -80,3 +88,4 @@ jobs:
           path: |
             scripts/out/build/checksums-sha256.txt
             scripts/out/build/checksums-sha256.txt.sig
+          if-no-files-found: warn
