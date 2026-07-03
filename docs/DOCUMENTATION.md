@@ -252,6 +252,8 @@ Server hardening baseline:
 - Restrict `config/` and persistent state paths to owner-only access.
 - Configure log rotation and retention; avoid logging sensitive token material.
 - Back up config and QKey registry on controlled intervals with encrypted storage.
+- Enable memory locking (`[security] lock_memory = true`, `lock_blocks = true`) to prevent key material and crypto buffers from being swapped to disk. Requires `LimitMEMLOCK=infinity` in systemd or `CAP_IPC_LOCK`.
+- Enable tamper-evident audit logging via `--audit-log <path>` to record all security-relevant events (auth, QKey lifecycle, admin actions, privilege drops) in a hash-chained NDJSON file with mode 0o600.
 
 Admin UI hardening baseline:
 - Put admin UI behind HTTPS termination in production.
@@ -278,6 +280,25 @@ Verification commands:
 - `bash scripts/tests/smoke/smoke-ui-frontends.sh`
 - `bash scripts/build/build-web-admin.sh`
 - `cargo audit --json > scripts/out/tests/cargo-audit.json`
+
+### Audit Logging (TODO-515)
+
+The server runtime emits tamper-evident audit events to a hash-chained NDJSON log file when `--audit-log <path>` is provided. The audit log is initialized once during server startup via a global `OnceLock<Arc<AuditLog>>` accessor (same pattern as `ADMIN_LOG_BUFFER`), before privilege dropping.
+
+**File security:** The audit log file is created with mode `0o600` (owner read/write only). When running as root, the file is chowned to the `quicfuscate` user/group so that audit logging survives the root-to-unprivileged privilege drop. The parent directory is chowned only if the server created it — pre-existing system directories (e.g. `/var/log`) are never re-owned, which would be a privilege-escalation vector.
+
+**Hash chaining:** Each audit entry includes a SHA-256 hash computed over the canonical form `seq|timestamp|event_type|severity|source_ip|client_id|message|prev_hash`. The chain is verifiable via `AuditLog::verify_chain()`. Tampering with any entry breaks the chain.
+
+**Event types emitted at runtime:**
+- `ServerStarted` / `ServerStopped` - server lifecycle
+- `PrivilegesDropped` / `PrivilegeDropFailed` - privilege drop outcome
+- `ClientAuthenticated` / `AuthFailed` - QKey authentication result in `commit_qkey_auth_result`
+- `QkeyIssued` - QKey issued in `QKeyRegistry::insert_with_ttl`
+- `QkeyRevoked` - admin revoked a QKey
+- `AdminAction` - admin kick, failed config reload
+- `ConfigReloaded` - successful config reload
+
+**Memory locking (TODO-516):** When `[security] lock_memory = true` (default), the server calls `mlockall(MCL_CURRENT | MCL_FUTURE)` before loading key material, pinning all current and future pages against swap. When `lock_blocks = true` (default), each `MemoryPool` block is individually `mlock`ed on allocation via `MemoryPool::set_lock_blocks()`. Both require `LimitMEMLOCK=infinity` in systemd or `CAP_IPC_LOCK`. Failures are logged as warnings but do not abort startup (best-effort).
 
 ## Introduction & Purpose
 QuicFuscate is a forked stealth transport and VPN runtime built around a custom QUIC-like transport/data-plane posture, hybrid adaptive FEC, and a cohesive stealth stack. The canonical runtime is designed for strong censorship resilience and high-throughput operation under this forked protocol contract. It is not a drop-in upstream QUIC implementation.
@@ -1355,6 +1376,9 @@ Server implementation (`src/implementations/server/`):
 - `src/implementations/server/session.rs` - session ids, session state and session manager.
 - `src/implementations/server/systemd.rs` - systemd-oriented service/unit integration helpers.
 
+Audit module (`src/audit/`):
+- `src/audit/mod.rs` - tamper-evident NDJSON audit log with SHA-256 hash chaining, global `OnceLock<Arc<AuditLog>>` accessor (initialized via `--audit-log <path>`), and security event emission at all key integration points (server start/stop, privilege drop, auth success/failure, QKey issued/revoked, admin actions, config reload). File is created with mode 0o600 and chowned to the runtime user before privilege drop.
+
 Optimize submodules (`src/optimize/`):
 - `src/optimize/brain.rs` - optimize helpers used by brain/statistical hotpaths.
 - `src/optimize/compress.rs` - compression-oriented acceleration primitives.
@@ -2285,6 +2309,11 @@ Server Options (selected):
     --qkey-ttl-secs <secs> Default QKey TTL in seconds (0 disables expiration; env QUICFUSCATE_QKEY_TTL_SECS)
     --qkey-store <path> QKey registry store path (recommended: /var/lib/quicfuscate/qkeys.json)
     --metrics-port <port>   Metrics HTTP port (text format at /metrics)
+    --audit-log <path>      Tamper-evident audit log file (NDJSON, hash-chained).
+                            Security events are written to this file with mode 0o600.
+                            Must be set before privilege drop; file is chowned to
+                            the runtime user so logging survives root->unprivileged drop.
+    --no-drop-privileges    Skip privilege dropping (debugging only, never use in production)
 ```
 
 ### Admin CLI (quicfuscate-ctl)
@@ -3833,7 +3862,7 @@ These checks are deterministic, offline, and fast, designed to integrate into an
 
 ## Global Atomic State Audit
 
-The codebase uses approximately 116 global `AtomicU64`/`AtomicU32`/`AtomicBool`/`AtomicUsize`/`AtomicI64` instances across modules. This section documents the rationale, ownership, and future direction.
+The codebase uses approximately 117 global `AtomicU64`/`AtomicU32`/`AtomicBool`/`AtomicUsize`/`AtomicI64` instances across modules. This section documents the rationale, ownership, and future direction.
 
 ### Why Global Atomics
 
@@ -3845,7 +3874,7 @@ Global atomics provide lock-free, zero-overhead cross-module coordination for a 
 |---|---|---|---|
 | `src/optimize/telemetry.rs` | 97 | Metrics/Counters | Telemetry counters for H3, stealth, FEC, SIMD usage, memory pool, io_uring, CPU features, I/O driver stats. Read-only observation surface for dashboards and diagnostics. |
 | `src/brain.rs` | 3 | Hint channels | Cross-subsystem coordination hints: `FEC_INTERVAL_HINT_PKTS`, `FEC_REDUNDANCY_PPM`, `INTELLIGENT_STEALTH_LEVEL_HINT`. Written by StealthBrain and read by FEC/stealth runtime coordination paths. |
-| `src/optimize/` | 5 | Runtime config | NUMA round-robin node, NUMA node count, profile override, TLS limit. Hardware-adaptive runtime state. |
+| `src/optimize/` | 6 | Runtime config | NUMA round-robin node, NUMA node count, profile override, TLS limit, `LOCK_BLOCKS` (mlock gate for MemoryPool blocks, TODO-516). Hardware-adaptive runtime state. |
 | `src/transport/batch.rs` | 3 | Metrics | Batch send/recv/packet counters for transport telemetry. |
 | `src/crypto/` | 2 | Runtime config | `DATA_AEAD_OVERRIDE_MODE` (AEAD selection), `ARM_AES_OK` (ARM AES capability cache). |
 | `src/fec/` | 1 | Sequencing | `REPAIR_ID_COUNTER` - monotonic repair packet ID generator. |

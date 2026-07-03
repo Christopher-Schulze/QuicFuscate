@@ -416,6 +416,40 @@ log_file_path = "/var/log/quicfuscate.log"
 log_to_stdout = true
 
 # ==============================================================================
+# SECURITY
+# ==============================================================================
+# Wired: applied at server startup via SecurityConfig in src/engine/config.rs.
+# Memory locking requires LimitMEMLOCK=infinity in systemd or CAP_IPC_LOCK.
+
+[security]
+# Lock all current and future process memory against swap with
+# mlockall(MCL_CURRENT | MCL_FUTURE) on server startup (TODO-516).
+# Prevents key material, AEAD state, and QKey tokens from being written
+# to disk. Default: true on server.
+lock_memory = true
+
+# Lock MemoryPool blocks against swap with mlock on allocation (TODO-516).
+# Crypto buffers used for packet encryption/decryption are kept in RAM.
+# Default: true on server.
+lock_blocks = true
+
+# Enable kill switch (blocks all non-VPN traffic when disconnected).
+kill_switch = false
+
+# Heartbeat timeout in milliseconds - if no data received from server for
+# this duration, trigger connection-loss detection and activate kill switch.
+# Set to 0 to disable heartbeat watchdog.
+heartbeat_timeout_ms = 30000
+
+# Cleanup stale firewall rules from a crashed previous session on startup.
+cleanup_firewall_on_start = false
+
+# Firewall backend selection (Linux only). "auto" auto-detects at runtime,
+# preferring nftables when available and falling back to iptables.
+# Valid values: "auto", "iptables", "nftables"
+# firewall.backend = "auto"
+
+# ==============================================================================
 # PRESETS (Quick configurations)
 # ==============================================================================
 # Uncomment one of these to override all settings above
