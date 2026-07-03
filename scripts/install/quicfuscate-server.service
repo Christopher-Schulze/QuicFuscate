@@ -35,5 +35,10 @@ ReadWritePaths=/etc/quicfuscate /var/lib/quicfuscate
 # Tune for higher connection counts.
 LimitNOFILE=1048576
 
+# Allow mlockall to lock process memory against swap (key material, AEAD state).
+# Required by TODO-440 memory-locking acceptance criterion once the runtime
+# mlockall call is wired in (see TODO-516).
+LimitMEMLOCK=infinity
+
 [Install]
 WantedBy=multi-user.target

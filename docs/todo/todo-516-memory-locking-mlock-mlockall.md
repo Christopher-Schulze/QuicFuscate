@@ -1,0 +1,69 @@
+---
+id: TODO-516
+title: Implement mlock/mlockall for key material and memory pools
+severity: HIGH
+phase: S
+priority: P1
+status: OPEN
+created: 2026-07-03
+depends_on: [TODO-440, TODO-511]
+---
+
+# TODO-516: Implement mlock/mlockall for Key Material and Memory Pools
+
+## Context
+
+TODO-440 implemented `ZeroizeOnDrop` / manual `Drop` zeroization for
+all AEAD key material (ChaCha20Poly1305, AesGcm128, Aegis128LAead,
+Aegis128X4Aead, Aegis128X8Aead, MorusAead, Morus1280State) and PKI
+secrets (`GeneratedCert`, `key_der`). That half of TODO-440 is
+verified and complete.
+
+The TODO-511 security/ops acceptance audit found that the
+**memory-locking half of TODO-440 is not implemented**:
+- `rg 'mlock|mlockall|munlock|VirtualLock' src` returns zero matches.
+- `src/engine/config.rs` has no `lock_memory` or `lock_blocks` field.
+- `scripts/install/quicfuscate-server.service` now includes
+  `LimitMEMLOCK=infinity` (added during TODO-511), but the runtime
+  never calls `mlockall`.
+
+This means sensitive key material, AEAD state, QKey tokens, and
+crypto pool buffers remain eligible for swap-out, where they persist
+across reboots and can be recovered by an attacker with disk access.
+
+## Desired Outcome
+
+- `mlockall(MCL_CURRENT | MCL_FUTURE)` is called on server startup
+  during the privileged phase, before key material is loaded, when
+  `lock_memory = true` (default true on server, false on client).
+- `MemoryPool` blocks are `mlock`ed on allocation and
+  `munlock`ed + zeroized on deallocation when `lock_blocks = true`.
+- `lock_memory` and `lock_blocks` are configurable via engine TOML.
+- `LimitMEMLOCK=infinity` is already present in the systemd service
+  file (added during TODO-511).
+- Tests verify `mlockall` is called (Linux integration test checking
+  `/proc/<pid>/status` for `VmLck > 0`, gated behind root privileges).
+- `docs/DOCUMENTATION.md` is updated to reflect the wired state.
+
+## Acceptance Criteria
+
+- [ ] `rg 'mlockall|mlock\b' src` returns matches in the server
+      startup path and in `MemoryPool` allocation/deallocation.
+- [ ] `src/engine/config.rs` has `lock_memory` and `lock_blocks`
+      fields with sensible defaults.
+- [ ] `scripts/install/quicfuscate-server.service` retains
+      `LimitMEMLOCK=infinity`.
+- [ ] At least one test verifies `mlockall` succeeds when run with
+      sufficient privileges, or is gracefully skipped otherwise.
+- [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes.
+- [ ] `cargo test --workspace --all-targets --features rust-tests`
+      passes.
+- [ ] `docs/DOCUMENTATION.md` key-erasure section reflects the wired
+      state, not just zeroization.
+
+## Non-Goals
+
+- Do not implement Windows `VirtualLock` in this TODO unless trivial;
+  Linux/macOS `mlock`/`mlockall` is the priority.
+- Do not change UI surfaces.
+- Do not remove the zeroization that is already in place.
