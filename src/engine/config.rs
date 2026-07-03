@@ -1107,6 +1107,16 @@ pub struct SecurityConfig {
     /// Firewall backend selection (Linux only). When `None`, the backend is
     /// auto-detected at runtime via [`crate::firewall::detect_backend`].
     pub firewall: FirewallConfig,
+    /// Lock all current and future process memory against swap with
+    /// `mlockall(MCL_CURRENT | MCL_FUTURE)` on server startup (TODO-516).
+    /// Prevents key material, AEAD state, and QKey tokens from being written
+    /// to disk where they persist across reboots. Requires `LimitMEMLOCK=infinity`
+    /// in systemd or `ulimit -l unlimited`. Default: true on server.
+    pub lock_memory: bool,
+    /// Lock `MemoryPool` blocks against swap with `mlock` on allocation
+    /// (TODO-516). Crypto buffers used for packet encryption/decryption are
+    /// kept in RAM. Default: true on server, false on client.
+    pub lock_blocks: bool,
 }
 
 impl Default for SecurityConfig {
@@ -1116,6 +1126,8 @@ impl Default for SecurityConfig {
             heartbeat_timeout_ms: 30_000,
             cleanup_firewall_on_start: false,
             firewall: FirewallConfig::default(),
+            lock_memory: true,
+            lock_blocks: true,
         }
     }
 }

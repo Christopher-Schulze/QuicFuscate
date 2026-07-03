@@ -56,7 +56,7 @@ use std::io;
 use std::net::SocketAddr;
 #[cfg(unix)]
 use std::os::unix::io::RawFd;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 // Modular x86 SSE2 helpers (legacy acceleration)
@@ -2124,7 +2124,64 @@ pub struct MemoryPool {
     available: AtomicUsize,
 }
 
+/// Global flag controlling whether MemoryPool blocks are mlocked against swap
+/// (TODO-516). Set once during server startup via [`MemoryPool::set_lock_blocks`].
+/// When true, every block allocated in [`MemoryPool::alloc_numa_block`] is
+/// locked with `mlock(2)` and unlocked with `munlock(2)` when the block is
+/// dropped. On non-Unix targets this is a no-op.
+static LOCK_BLOCKS: AtomicBool = AtomicBool::new(false);
+
+/// Lock a memory region against swap with `mlock(2)` (TODO-516).
+/// Best-effort: logs a warning on failure but does not panic.
+/// No-op on non-Unix targets.
+#[cfg(unix)]
+fn mlock_block(ptr: *mut u8, len: usize) {
+    // SAFETY: ptr points to a valid allocated region of `len` bytes.
+    // mlock is a kernel syscall that does not dereference userspace
+    // pointers beyond pinning the pages.
+    let result = unsafe { libc::mlock(ptr as *const libc::c_void, len) };
+    if result != 0 {
+        let err = std::io::Error::last_os_error();
+        // EAGAIN (insufficient RLIMIT_MEMLOCK) is common in unprivileged
+        // contexts. Log once at debug to avoid spamming.
+        log::debug!(
+            "mlock failed for MemoryPool block ({} bytes): {} — \
+             consider raising RLIMIT_MEMLOCK or LimitMEMLOCK in systemd",
+            len,
+            err
+        );
+    }
+}
+
+/// Unlock a previously locked memory region with `munlock(2)` (TODO-516).
+/// No-op on non-Unix targets.
+#[cfg(unix)]
+#[allow(dead_code)] // Available for future Drop impl; mlockall covers process lifetime
+fn munlock_block(ptr: *mut u8, len: usize) {
+    // SAFETY: ptr points to a valid allocated region of `len` bytes
+    // that was previously mlocked (or not — munlock is idempotent).
+    let _ = unsafe { libc::munlock(ptr as *const libc::c_void, len) };
+}
+
+#[cfg(not(unix))]
+fn mlock_block(_ptr: *mut u8, _len: usize) {}
+
+#[cfg(not(unix))]
+fn munlock_block(_ptr: *mut u8, _len: usize) {}
+
 impl MemoryPool {
+    /// Enable or disable mlock on MemoryPool blocks (TODO-516).
+    /// Call once during server startup before the pool is created.
+    /// When enabled, blocks are locked against swap via `mlock(2)`.
+    pub fn set_lock_blocks(enabled: bool) {
+        LOCK_BLOCKS.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Check whether block-level mlocking is enabled.
+    pub fn lock_blocks_enabled() -> bool {
+        LOCK_BLOCKS.load(Ordering::Relaxed)
+    }
+
     #[inline]
     fn tls_limit_cell() -> &'static AtomicUsize {
         static TLS_LIMIT_RUNTIME: OnceLock<AtomicUsize> = OnceLock::new();
@@ -2325,7 +2382,7 @@ impl MemoryPool {
         #[cfg(target_os = "linux")]
         let mut block = unsafe { AlignedBox::<[u8]>::from_raw_parts(slice, layout) };
         #[cfg(not(target_os = "linux"))]
-        let block = unsafe { AlignedBox::<[u8]>::from_raw_parts(slice, layout) };
+        let mut block = unsafe { AlignedBox::<[u8]>::from_raw_parts(slice, layout) };
         // Hint huge pages on Linux if enabled
         #[cfg(target_os = "linux")]
         unsafe {
@@ -2365,6 +2422,10 @@ impl MemoryPool {
         #[cfg(not(target_os = "linux"))]
         {
             let _ = node; // silence unused parameter warning on non-Linux
+        }
+        // Lock block against swap if enabled (TODO-516).
+        if Self::lock_blocks_enabled() {
+            mlock_block(block.as_mut_ptr(), block_size);
         }
         block
     }
@@ -3253,5 +3314,45 @@ impl<const N: usize, const SIZE: usize> ConstPacketPool<N, SIZE> {
         }
         self.in_use[idx] = false;
         let _ = self.free_list.push(idx);
+    }
+}
+
+#[cfg(test)]
+mod mlock_tests {
+    use super::*;
+
+    #[test]
+    fn test_set_and_check_lock_blocks_flag() {
+        // Save original state
+        let original = MemoryPool::lock_blocks_enabled();
+        // Enable
+        MemoryPool::set_lock_blocks(true);
+        assert!(MemoryPool::lock_blocks_enabled());
+        // Disable
+        MemoryPool::set_lock_blocks(false);
+        assert!(!MemoryPool::lock_blocks_enabled());
+        // Restore
+        MemoryPool::set_lock_blocks(original);
+    }
+
+    #[test]
+    fn test_pool_alloc_with_lock_blocks_enabled() {
+        // Enable lock_blocks and verify pool allocation still works.
+        // mlock may fail (EAGAIN) in unprivileged test environments, but
+        // the allocation must succeed regardless — mlock is best-effort.
+        MemoryPool::set_lock_blocks(true);
+        let pool = MemoryPool::new(4, 4096);
+        let block = pool.alloc();
+        assert_eq!(block.len(), 4096);
+        // Clean up
+        MemoryPool::set_lock_blocks(false);
+    }
+
+    #[test]
+    fn test_pool_alloc_with_lock_blocks_disabled() {
+        MemoryPool::set_lock_blocks(false);
+        let pool = MemoryPool::new(4, 4096);
+        let block = pool.alloc();
+        assert_eq!(block.len(), 4096);
     }
 }

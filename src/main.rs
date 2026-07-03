@@ -2289,6 +2289,40 @@ async fn run_server(
         }
     }
 
+    // Apply memory-locking settings from SecurityConfig (TODO-516).
+    // mlockall must be called before any key material is loaded so that
+    // MCL_FUTURE locks all future allocations. MemoryPool::set_lock_blocks
+    // must be called before the pool is created so blocks are mlocked on alloc.
+    let (lock_memory, lock_blocks) = config_path
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|c| quicfuscate::engine::EngineConfig::from_toml(&c).ok())
+        .map(|cfg| (cfg.security.lock_memory, cfg.security.lock_blocks))
+        .unwrap_or((true, true)); // defaults: lock on server
+    if lock_memory {
+        #[cfg(unix)]
+        {
+            // SAFETY: mlockall with MCL_CURRENT | MCL_FUTURE pins all current
+            // and future pages. Requires CAP_IPC_LOCK or RLIMIT_MEMLOCK=infinity.
+            let flags = libc::MCL_CURRENT | libc::MCL_FUTURE;
+            if unsafe { libc::mlockall(flags) } != 0 {
+                let err = std::io::Error::last_os_error();
+                log::warn!(
+                    "mlockall failed: {}. Process memory may be swapped to disk. \
+                     Set LimitMEMLOCK=infinity in systemd or run with CAP_IPC_LOCK.",
+                    err
+                );
+            } else {
+                info!("Process memory locked against swap (mlockall MCL_CURRENT | MCL_FUTURE)");
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            log::debug!("mlockall not supported on this platform; lock_memory ignored");
+        }
+    }
+    quicfuscate::optimize::MemoryPool::set_lock_blocks(lock_blocks);
+
     let mut config = match quicfuscate::transport::Config::new_with_version(
         quicfuscate::transport::PROTOCOL_VERSION,
     ) {

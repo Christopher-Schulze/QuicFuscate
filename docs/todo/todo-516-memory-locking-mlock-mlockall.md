@@ -4,7 +4,7 @@ title: Implement mlock/mlockall for key material and memory pools
 severity: HIGH
 phase: S
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-07-03
 depends_on: [TODO-440, TODO-511]
 ---
@@ -67,3 +67,28 @@ across reboots and can be recovered by an attacker with disk access.
   Linux/macOS `mlock`/`mlockall` is the priority.
 - Do not change UI surfaces.
 - Do not remove the zeroization that is already in place.
+
+## Completion Evidence (2026-07-03)
+
+- `SecurityConfig` in `src/engine/config.rs` extended with
+  `lock_memory: bool` (default true) and `lock_blocks: bool` (default true).
+- `static LOCK_BLOCKS: AtomicBool` in `src/optimize/mod.rs` controls
+  block-level mlocking. Set via `MemoryPool::set_lock_blocks(enabled)`.
+- `mlock_block()` / `munlock_block()` helper functions in
+  `src/optimize/mod.rs` — best-effort, log on failure, no panic.
+  No-op on non-Unix targets.
+- `alloc_numa_block()` calls `mlock_block()` after block creation when
+  `LOCK_BLOCKS` is true.
+- `run_server()` in `src/main.rs` reads `security.lock_memory` and
+  `security.lock_blocks` from the EngineConfig TOML and:
+  - Calls `mlockall(MCL_CURRENT | MCL_FUTURE)` before key material is loaded.
+  - Calls `MemoryPool::set_lock_blocks(lock_blocks)` before pool creation.
+- `scripts/install/quicfuscate-server.service` already has
+  `LimitMEMLOCK=infinity` (added during TODO-511).
+- 3 new tests: `test_set_and_check_lock_blocks_flag`,
+  `test_pool_alloc_with_lock_blocks_enabled`,
+  `test_pool_alloc_with_lock_blocks_disabled`. All pass.
+- `cargo build --lib` PASS, `cargo clippy --workspace --all-targets -- -D warnings` PASS,
+  `cargo test --workspace --all-targets --features rust-tests` PASS (0 failures).
+- `rg 'mlockall|mlock\b' src` now returns matches in `src/main.rs` (mlockall)
+  and `src/optimize/mod.rs` (mlock_block, munlock_block, LOCK_BLOCKS).
