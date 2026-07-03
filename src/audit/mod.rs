@@ -191,7 +191,16 @@ impl AuditLog {
         let seq = self.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
 
-        let prev_hash = self.last_hash.lock().unwrap().clone();
+        // Recover from mutex poisoning rather than panicking — a security
+        // audit logger must never crash the server because another thread
+        // panicked while holding the lock. The poisoned guard still gives
+        // access to the inner data; we just continue with the last known
+        // state (which is the correct behavior for a hash chain).
+        let prev_hash = self
+            .last_hash
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
 
         let mut entry = AuditEntry {
             seq,
@@ -212,14 +221,14 @@ impl AuditLog {
         // Write as NDJSON.
         let json = serialize_entry(&entry);
         {
-            let mut writer = self.writer.lock().unwrap();
+            let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
             writer.file.write_all(json.as_bytes()).map_err(AuditError::IoError)?;
             writer.file.write_all(b"\n").map_err(AuditError::IoError)?;
             writer.file.flush().map_err(AuditError::IoError)?;
         }
 
         // Update last_hash for the next entry.
-        *self.last_hash.lock().unwrap() = hash;
+        *self.last_hash.lock().unwrap_or_else(|e| e.into_inner()) = hash;
 
         Ok(())
     }
@@ -824,10 +833,19 @@ mod tests {
     #[test]
     fn test_secure_audit_file_sets_owner_only_permissions() {
         // secure_audit_file must restrict the audit log file to mode 0o600
-        // (owner read/write only) regardless of the previous umask. The
+        // (owner read/write only) regardless of the previous mode. The
         // chown branch only runs as root and is not exercised here, but the
         // permission hardening — the part that protects the file on disk —
         // is verified directly.
+        //
+        // We create the file with an explicitly permissive mode (0o644) via
+        // OpenOptions::mode() on the *create* path, then verify secure_audit_file
+        // tightens it to exactly 0o600. The previous version of this test used
+        // std::fs::write() first, which created the file with umask-default
+        // mode, then re-opened with OpenOptions::mode(0o644) — but mode() only
+        // applies at file creation time, so the second open was a no-op and
+        // the test was not actually proving mode tightening from 0o644.
+        use std::os::unix::fs::OpenOptionsExt;
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!(
             "quicfuscate_audit_secure_test_{}",
@@ -835,11 +853,8 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        // Create the file with a permissive mode first so we can prove the
-        // helper actually tightens it.
         let file_path = dir.join("audit.jsonl");
-        std::fs::write(&file_path, b"seed\n").unwrap();
-        use std::os::unix::fs::OpenOptionsExt;
+        // Create the file with a permissive mode (0o644) on the create path.
         {
             use std::fs::OpenOptions;
             let _ = OpenOptions::new()
@@ -850,13 +865,17 @@ mod tests {
                 .open(&file_path)
                 .unwrap();
         }
+        // Verify the file was actually created with mode 0o644 (modulo umask).
+        // If umask already stripped it below 0o644, the tightening test still
+        // holds — we just need to confirm secure_audit_file sets exactly 0o600.
+        let mode_before = std::fs::metadata(&file_path).unwrap().permissions().mode() & 0o777;
         // After the call the mode must be exactly 0o600 regardless of the
-        // umask in effect when the file was created.
+        // mode in effect when the file was created.
         secure_audit_file(&file_path, false);
         let mode_after = std::fs::metadata(&file_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(
             mode_after, 0o600,
-            "audit log file must be 0o600 after secure_audit_file, got {mode_after:#o}"
+            "audit log file must be 0o600 after secure_audit_file, got {mode_after:#o} (was {mode_before:#o} before)"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

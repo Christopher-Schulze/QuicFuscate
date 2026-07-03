@@ -16,7 +16,8 @@ It is maintained as the current architecture and repository index, with a curate
 - Packet crypto wiring: Initial/Handshake use boxed AES-GCM compatibility keys; normal 0-RTT/1-RTT data-plane AEAD uses `DataAead` enum dispatch; Rustls packet-key integrations use the explicit dynamic packet wrapper arm.
 - Compression wiring: `src/compress.rs` writes safe-path zstd output directly into `MemoryPool` / body-pool blocks via `compress_to_buffer`; H3 compression semantics and `0x5A` / `0x5D` frame headers remain unchanged.
 - Client packet I/O is owned by `src/implementations/client/io_driver.rs` plus `src/core.rs`; `src/implementations/client/pipeline.rs` is not part of the production module graph.
-- Audit logging wiring (TODO-515): `src/audit/mod.rs` exposes a global `OnceLock<Arc<AuditLog>>` accessor initialized via `--audit-log <path>` in `run_server()`. Security events are emitted at server start/stop (`src/main.rs`), privilege drop success/failure (`src/main.rs`), QKey auth success/failure (`src/implementations/server/mod.rs::commit_qkey_auth_result`), QKey issued (`src/implementations/server/qkey_registry.rs::insert_with_ttl`), and admin actions (`src/implementations/server/mod.rs::handle_admin_action`). The audit file is mode 0o600, chowned to the runtime user before privilege drop; parent dir is chowned only if newly created.
+- Audit logging wiring (TODO-515): `src/audit/mod.rs` exposes a global `OnceLock<Arc<AuditLog>>` accessor initialized via `--audit-log <path>` in `run_server()`. Security events are emitted at server start/stop (`src/main.rs`), privilege drop success/failure (`src/main.rs`), QKey auth success/failure (`src/implementations/server/mod.rs::commit_qkey_auth_result`), QKey issued (`src/implementations/server/qkey_registry.rs::insert_with_ttl`), and admin actions (`src/implementations/server/mod.rs::handle_admin_action`). The audit file is mode 0o600, chowned to the runtime user before privilege drop; parent dir is chowned only if newly created. Mutex poisoning is recovered via `unwrap_or_else(|e| e.into_inner())` rather than panicking — a security logger must never crash the server.
+- Remote proof runbook: `docs/remote-proof-runbook.md` contains the exact commands, expected outputs, and close criteria for the three remaining `OPEN (prepared)` TODOs (510 Docker validation, 512 Broderick soak, 513 signed release proof) that require remote infrastructure.
 - Memory locking wiring (TODO-516): `src/main.rs::run_server()` calls `mlockall(MCL_CURRENT | MCL_FUTURE)` when `[security] lock_memory = true` (default) before key material is loaded. `src/optimize/mod.rs` `MemoryPool::set_lock_blocks()` gates per-block `mlock()` in `alloc_numa_block()` when `lock_blocks = true` (default). Both require `LimitMEMLOCK=infinity` in systemd or `CAP_IPC_LOCK`.
 - Control plane wiring: CLI + engine + admin surfaces + metrics/telemetry endpoints.
 - UI wiring: `apps/svelte-desktop` (Svelte 5 desktop frontend) and `apps/svelte-admin` (SvelteKit/Svelte 5 admin frontend) are the active UI surfaces. The retained native desktop host/runtime bridge lives in `apps/tauri/src-tauri`. Shared UI primitives live in `packages/ui` (Svelte components) and `packages/theme` (CSS).
@@ -335,6 +336,7 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 |   |-- DOCUMENTATION.md
 |   |-- LICENSE
 |   |-- MAP.md
+|   |-- remote-proof-runbook.md
 |   |-- todo.md
 |   `-- todo/
 |       `-- done/          (completed detail files)

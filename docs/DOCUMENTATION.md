@@ -287,6 +287,8 @@ The server runtime emits tamper-evident audit events to a hash-chained NDJSON lo
 
 **File security:** The audit log file is created with mode `0o600` (owner read/write only). When running as root, the file is chowned to the `quicfuscate` user/group so that audit logging survives the root-to-unprivileged privilege drop. The parent directory is chowned only if the server created it — pre-existing system directories (e.g. `/var/log`) are never re-owned, which would be a privilege-escalation vector.
 
+**Mutex poisoning resilience:** The audit logger recovers from mutex poisoning rather than panicking. If another thread panicked while holding the `last_hash` or `writer` mutex, the audit logger continues with the last known state via `unwrap_or_else(|e| e.into_inner())`. A security audit logger must never crash the server because of an unrelated thread panic.
+
 **Hash chaining:** Each audit entry includes a SHA-256 hash computed over the canonical form `seq|timestamp|event_type|severity|source_ip|client_id|message|prev_hash`. The chain is verifiable via `AuditLog::verify_chain()`. Tampering with any entry breaks the chain.
 
 **Event types emitted at runtime:**

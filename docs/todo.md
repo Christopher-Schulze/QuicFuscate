@@ -280,7 +280,7 @@ experimental, or bound to explicit policy.
 
 Detail files: `docs/todo/todo-{508,509,510,511,512,513,514,515,516}-*.md`.
 
-**Closure rule:** Production-ready means all TODO-508 through TODO-516 are DONE or OPEN (prepared). DONE = locally verified with tests. OPEN (prepared) = all local work complete (scripts, CI jobs, workflows, documentation); remaining execution requires remote infrastructure (Broderick, clean VM, or GitHub Actions runner) that is not available in the current session. The 3 OPEN (prepared) TODOs (510, 512, 513) have exact execution commands documented in their detail files and can be closed by running those commands on the target infrastructure.
+**Closure rule:** Production-ready means all TODO-508 through TODO-516 are DONE or OPEN (prepared). DONE = locally verified with tests. OPEN (prepared) = all local work complete (scripts, CI jobs, workflows, documentation); remaining execution requires remote infrastructure (Broderick, clean VM, or GitHub Actions runner) that is not available in the current session. The 3 OPEN (prepared) TODOs (510, 512, 513) have exact execution commands documented in their detail files and in `docs/remote-proof-runbook.md`, and can be closed by running those commands on the target infrastructure.
 
 ---
 
