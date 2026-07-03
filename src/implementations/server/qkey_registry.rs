@@ -293,6 +293,13 @@ impl QKeyRegistry {
             self.entries.drain(0..excess);
         }
         self.persist();
+        crate::audit::audit(
+            crate::audit::AuditEventType::QkeyIssued,
+            crate::audit::AuditSeverity::Info,
+            None,
+            Some(&record.id),
+            "QKey issued",
+        );
         Ok(QKeyEntry {
             id: record.id,
             name: record.name,

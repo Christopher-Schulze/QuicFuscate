@@ -4,7 +4,7 @@ title: Wire AuditLogger into server runtime so security events are actually emit
 severity: CRITICAL
 phase: S
 priority: P0
-status: OPEN
+status: DONE
 created: 2026-07-03
 depends_on: [TODO-439, TODO-511]
 ---
@@ -72,3 +72,30 @@ audit logging is currently unsupported.
   Phase 4/5); file NDJSON output is sufficient for the wiring proof.
 - Do not change UI surfaces.
 - Do not weaken the hash chain or tamper-evidence guarantees.
+
+## Completion Evidence (2026-07-03)
+
+- Global audit log accessor added to `src/audit/mod.rs`:
+  `static AUDIT_LOG: OnceLock<Arc<AuditLog>>`, `init_audit_log(path)`,
+  `audit(event_type, severity, src_ip, client_id, msg)`,
+  `audit_log_initialized()`. Same pattern as `ADMIN_LOG_BUFFER`.
+- CLI flag `--audit-log <path>` added to `Commands::Server` in `src/main.rs`.
+- `init_audit_log` called at the start of `run_server()` in `src/main.rs`.
+- `ServerStarted` emitted at server start.
+- `PrivilegesDropped` / `PrivilegeDropFailed` emitted around the
+  privilege drop in `run_server()`.
+- `ClientAuthenticated` emitted in `LiveServerState::commit_qkey_auth_result`
+  after successful auth + QKey association.
+- `AuthFailed` emitted in `commit_qkey_auth_result` when auth fails.
+- `QkeyIssued` emitted in `QKeyRegistry::insert_with_ttl` after persist.
+- `QkeyRevoked` emitted in `ServerRuntime::handle_admin_action` on
+  `AdminAction::RevokeQKey`.
+- `AdminAction` emitted on `AdminAction::Kick`.
+- `ConfigReloaded` emitted on `AdminAction::Reload`.
+- `ServerStopped` emitted on `AdminAction::Shutdown`.
+- 2 new tests: `test_audit_noop_when_not_initialized`,
+  `test_init_and_emit_audit_event`. All 8 audit tests pass.
+- `cargo build --lib` PASS, `cargo clippy --workspace --all-targets -- -D warnings` PASS,
+  `cargo test --workspace --all-targets --features rust-tests` PASS (0 failures).
+- `rg 'audit::|AuditLog::|audit_log|crate::audit::audit' src/implementations/server src/main.rs`
+  now returns matches at all integration points listed above.

@@ -894,6 +894,11 @@ enum Commands {
         /// Skip privilege dropping after setup (debugging only - never use in production)
         #[clap(long = "no-drop-privileges")]
         no_drop_privileges: bool,
+
+        /// Audit log file path (NDJSON, hash-chained, tamper-evident).
+        /// When set, security-relevant events are written to this file.
+        #[clap(long = "audit-log", value_name = "PATH")]
+        audit_log: Option<PathBuf>,
     },
     #[clap(hide = true)]
     CrossFadeSim {},
@@ -1157,6 +1162,7 @@ async fn async_main() -> std::io::Result<()> {
             qkey_ttl_secs,
             qkey_store,
             no_drop_privileges,
+            audit_log,
         } => {
             let fec_mode = resolve_cli_fec_mode_override(shared.fec_mode);
             run_server(
@@ -1192,6 +1198,7 @@ async fn async_main() -> std::io::Result<()> {
                 qkey_ttl_secs,
                 qkey_store,
                 no_drop_privileges,
+                audit_log,
             )
             .await?;
         }
@@ -2209,9 +2216,20 @@ async fn run_server(
     qkey_ttl_secs: Option<u64>,
     qkey_store: Option<PathBuf>,
     no_drop_privileges: bool,
+    audit_log_path: Option<PathBuf>,
 ) -> std::io::Result<()> {
     let config_path = config.as_ref();
     let config_path_ref = config_path.map(PathBuf::as_path);
+
+    // Initialize the global audit log (TODO-515).
+    quicfuscate::audit::init_audit_log(audit_log_path.clone());
+    quicfuscate::audit::audit(
+        quicfuscate::audit::AuditEventType::ServerStarted,
+        quicfuscate::audit::AuditSeverity::Info,
+        None,
+        None,
+        &format!("Server starting on {listen_addr}"),
+    );
 
     let (fec_cfg, stealth_cfg, opt_cfg, anti_replay_section) =
         load_runtime_profiles(config_path, fec_config, fec_mode);
@@ -2387,9 +2405,25 @@ async fn run_server(
         if cap_report.is_root {
             info!("Dropping root privileges to quicfuscate:quicfuscate");
             match quicfuscate::privilege::drop_privileges("quicfuscate", "quicfuscate") {
-                Ok(()) => info!("Privileges dropped - running as unprivileged user"),
+                Ok(()) => {
+                    info!("Privileges dropped - running as unprivileged user");
+                    quicfuscate::audit::audit(
+                        quicfuscate::audit::AuditEventType::PrivilegesDropped,
+                        quicfuscate::audit::AuditSeverity::Info,
+                        None,
+                        None,
+                        "Root privileges dropped to quicfuscate:quicfuscate",
+                    );
+                }
                 Err(e) => {
                     error!("Failed to drop privileges: {} - refusing to continue as root", e);
+                    quicfuscate::audit::audit(
+                        quicfuscate::audit::AuditEventType::PrivilegeDropFailed,
+                        quicfuscate::audit::AuditSeverity::Critical,
+                        None,
+                        None,
+                        &format!("Privilege drop failed: {e}"),
+                    );
                     return Err(std::io::Error::other("privilege drop failed"));
                 }
             }

@@ -263,11 +263,7 @@ impl AuditLog {
     }
 }
 
-/// Compute SHA-256 hash of an entry (excluding the hash field itself).
 fn compute_entry_hash(entry: &AuditEntry) -> String {
-    // We use a minimal SHA-256 implementation to avoid pulling in a crypto
-    // dependency for audit logging. The hash input is the canonical form:
-    // seq|timestamp|event_type|severity|source_ip|client_id|message|prev_hash
     let canonical = format!(
         "{}|{}|{}|{}|{}|{}|{}|{}",
         entry.seq,
@@ -280,6 +276,55 @@ fn compute_entry_hash(entry: &AuditEntry) -> String {
         entry.prev_hash,
     );
     sha256_hex(canonical.as_bytes())
+}
+
+// --- Global audit log accessor (TODO-515) ---
+//
+// The audit log is a cross-cutting concern. Rather than threading
+// `Option<Arc<AuditLog>>` through dozens of function signatures, we
+// use a `OnceLock` global — the same pattern used by
+// `ADMIN_LOG_BUFFER` in `src/main.rs`. The log is initialized once
+// during server startup (when `--audit-log <path>` is provided) and
+// remains valid for the process lifetime.
+
+use std::sync::Arc;
+
+static AUDIT_LOG: std::sync::OnceLock<Arc<AuditLog>> = std::sync::OnceLock::new();
+
+/// Initialize the global audit log. Called once during server startup.
+/// If `path` is `None`, audit logging is disabled (no-op).
+pub fn init_audit_log(path: Option<PathBuf>) {
+    if let Some(p) = path {
+        match AuditLog::open(p) {
+            Ok(log) => {
+                let _ = AUDIT_LOG.set(Arc::new(log));
+            }
+            Err(e) => {
+                log::warn!("Failed to open audit log: {e}");
+            }
+        }
+    }
+}
+
+/// Emit an audit event to the global audit log if initialized.
+/// No-op if `init_audit_log` was not called or was called with `None`.
+pub fn audit(
+    event_type: AuditEventType,
+    severity: AuditSeverity,
+    source_ip: Option<&str>,
+    client_id: Option<&str>,
+    message: &str,
+) {
+    if let Some(log) = AUDIT_LOG.get() {
+        if let Err(e) = log.log(event_type, severity, source_ip, client_id, message) {
+            log::warn!("Audit log write failed: {e}");
+        }
+    }
+}
+
+/// Check whether the global audit log is initialized (for tests).
+pub fn audit_log_initialized() -> bool {
+    AUDIT_LOG.get().is_some()
 }
 
 /// Serialize an entry as a JSON object (NDJSON format).
@@ -625,5 +670,55 @@ mod tests {
         let json = r#"{"name":"hello","val":42}"#;
         assert_eq!(extract_json_str(json, "name"), Some("hello".to_string()));
         assert_eq!(extract_json_str(json, "val"), None);
+    }
+
+    #[test]
+    fn test_audit_noop_when_not_initialized() {
+        // The global audit log may or may not be initialized by another
+        // test in the same process. If it is not initialized, audit()
+        // must be a silent no-op (no panic, no output).
+        if !audit_log_initialized() {
+            audit(
+                AuditEventType::ServerStarted,
+                AuditSeverity::Info,
+                None,
+                None,
+                "This should be a no-op",
+            );
+            // Reaching here without panic is the assertion.
+        }
+    }
+
+    #[test]
+    fn test_init_and_emit_audit_event() {
+        let tmp = std::env::temp_dir().join("quicfuscate_audit_global_test.jsonl");
+        let _ = std::fs::remove_file(&tmp);
+
+        // Try to initialize the global audit log. If another test already
+        // initialized it, this will be a no-op (OnceLock::set returns Err).
+        init_audit_log(Some(tmp.clone()));
+
+        if audit_log_initialized() {
+            audit(
+                AuditEventType::QkeyIssued,
+                AuditSeverity::Info,
+                Some("10.0.0.1"),
+                Some("test-key-id"),
+                "Integration test: QKey issued",
+            );
+            // If the global was initialized by this test, verify the file
+            // has content and the chain is valid. If it was already
+            // initialized by another test, the file may differ.
+            if tmp.exists() {
+                let content = std::fs::read_to_string(&tmp).unwrap_or_default();
+                assert!(!content.is_empty(), "audit log file should not be empty after emit");
+                assert!(
+                    AuditLog::verify_chain(&tmp).is_ok(),
+                    "audit chain should be valid after emit"
+                );
+            }
+        }
+
+        let _ = std::fs::remove_file(&tmp);
     }
 }

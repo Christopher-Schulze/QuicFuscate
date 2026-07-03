@@ -3252,6 +3252,13 @@ impl LiveServerState {
                     authed_key_id = Some(state.key_id.clone());
                 } else {
                     state.authed = false;
+                    crate::audit::audit(
+                        crate::audit::AuditEventType::AuthFailed,
+                        crate::audit::AuditSeverity::Warning,
+                        None,
+                        Some(&state.key_id),
+                        "QKey authentication failed",
+                    );
                 }
             }
             if let Some(key_id) = authed_key_id {
@@ -3286,6 +3293,13 @@ impl LiveServerState {
                 if let Some(session_id) = self.session_id_for_conn_id(&conn_id) {
                     self.qkey_tracker.associate(session_id.as_u64(), &key_id);
                 }
+                crate::audit::audit(
+                    crate::audit::AuditEventType::ClientAuthenticated,
+                    crate::audit::AuditSeverity::Info,
+                    None,
+                    Some(&key_id),
+                    "Client authenticated successfully",
+                );
             }
         }
     }
@@ -5370,21 +5384,49 @@ impl ServerRuntime {
                     let live = self.live_mut();
                     live.live_state.kick_client(&identity, &live.accept_loop, metrics);
                 }
+                crate::audit::audit(
+                    crate::audit::AuditEventType::AdminAction,
+                    crate::audit::AuditSeverity::Warning,
+                    None,
+                    Some(&id),
+                    "Admin kicked client",
+                );
                 false
             }
             AdminAction::RevokeQKey(id) => {
                 let live = self.live_mut();
                 live.live_state.revoke_qkey_now(&id, "admin_revoked", &live.accept_loop, metrics);
+                crate::audit::audit(
+                    crate::audit::AuditEventType::QkeyRevoked,
+                    crate::audit::AuditSeverity::Warning,
+                    None,
+                    Some(&id),
+                    "Admin revoked QKey",
+                );
                 false
             }
             AdminAction::Reload => {
                 if let Err(error) = reload() {
                     log::warn!("Config reload failed: {}", error);
                 }
+                crate::audit::audit(
+                    crate::audit::AuditEventType::ConfigReloaded,
+                    crate::audit::AuditSeverity::Info,
+                    None,
+                    None,
+                    "Admin triggered config reload",
+                );
                 false
             }
             AdminAction::Shutdown => {
                 log::info!("Admin shutdown requested");
+                crate::audit::audit(
+                    crate::audit::AuditEventType::ServerStopped,
+                    crate::audit::AuditSeverity::Warning,
+                    None,
+                    None,
+                    "Admin requested server shutdown",
+                );
                 self.shutdown_live(b"admin_shutdown");
                 true
             }
