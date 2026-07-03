@@ -5406,16 +5406,27 @@ impl ServerRuntime {
                 false
             }
             AdminAction::Reload => {
-                if let Err(error) = reload() {
-                    log::warn!("Config reload failed: {}", error);
+                match reload() {
+                    Ok(()) => {
+                        crate::audit::audit(
+                            crate::audit::AuditEventType::ConfigReloaded,
+                            crate::audit::AuditSeverity::Info,
+                            None,
+                            None,
+                            "Admin triggered config reload",
+                        );
+                    }
+                    Err(error) => {
+                        log::warn!("Config reload failed: {}", error);
+                        crate::audit::audit(
+                            crate::audit::AuditEventType::AdminAction,
+                            crate::audit::AuditSeverity::Warning,
+                            None,
+                            None,
+                            &format!("Config reload failed: {error}"),
+                        );
+                    }
                 }
-                crate::audit::audit(
-                    crate::audit::AuditEventType::ConfigReloaded,
-                    crate::audit::AuditSeverity::Info,
-                    None,
-                    None,
-                    "Admin triggered config reload",
-                );
                 false
             }
             AdminAction::Shutdown => {

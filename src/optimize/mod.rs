@@ -2127,8 +2127,8 @@ pub struct MemoryPool {
 /// Global flag controlling whether MemoryPool blocks are mlocked against swap
 /// (TODO-516). Set once during server startup via [`MemoryPool::set_lock_blocks`].
 /// When true, every block allocated in [`MemoryPool::alloc_numa_block`] is
-/// locked with `mlock(2)` and unlocked with `munlock(2)` when the block is
-/// dropped. On non-Unix targets this is a no-op.
+/// locked with `mlock(2)`. Pages are released back to the kernel when the
+/// block is deallocated. On non-Unix targets this is a no-op.
 static LOCK_BLOCKS: AtomicBool = AtomicBool::new(false);
 
 /// Lock a memory region against swap with `mlock(2)` (TODO-516).
@@ -2153,21 +2153,8 @@ fn mlock_block(ptr: *mut u8, len: usize) {
     }
 }
 
-/// Unlock a previously locked memory region with `munlock(2)` (TODO-516).
-/// No-op on non-Unix targets.
-#[cfg(unix)]
-#[allow(dead_code)] // Available for future Drop impl; mlockall covers process lifetime
-fn munlock_block(ptr: *mut u8, len: usize) {
-    // SAFETY: ptr points to a valid allocated region of `len` bytes
-    // that was previously mlocked (or not — munlock is idempotent).
-    let _ = unsafe { libc::munlock(ptr as *const libc::c_void, len) };
-}
-
 #[cfg(not(unix))]
 fn mlock_block(_ptr: *mut u8, _len: usize) {}
-
-#[cfg(not(unix))]
-fn munlock_block(_ptr: *mut u8, _len: usize) {}
 
 impl MemoryPool {
     /// Enable or disable mlock on MemoryPool blocks (TODO-516).

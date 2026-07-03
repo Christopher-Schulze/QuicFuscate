@@ -2234,58 +2234,62 @@ async fn run_server(
     let (fec_cfg, stealth_cfg, opt_cfg, anti_replay_section) =
         load_runtime_profiles(config_path, fec_config, fec_mode);
 
+    // Parse the TOML config file once and reuse for telemetry, logging, and
+    // memory-locking settings (TODO-515/516). CLI flags take precedence over
+    // config-file values where applicable.
+    let engine_cfg_opt = config_path
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|c| quicfuscate::engine::EngineConfig::from_toml(&c).ok());
+
     // Apply telemetry.enabled and logging.level from TOML config file when present.
     // CLI --telemetry flag (already applied above) takes precedence; config only adds enablement.
-    if let Some(cfg_path) = config_path.as_ref() {
-        if let Ok(content) = std::fs::read_to_string(cfg_path) {
-            if let Ok(engine_cfg) = quicfuscate::engine::EngineConfig::from_toml(&content) {
-                if engine_cfg.telemetry.enabled {
-                    use quicfuscate::telemetry::TELEMETRY_ENABLED;
-                    TELEMETRY_ENABLED.store(true, Ordering::Relaxed);
-                }
-                // Apply per-category telemetry export gates
-                {
-                    use quicfuscate::telemetry::{
-                        COLLECT_CONGESTION_STATS, COLLECT_FEC_STATS, COLLECT_PACKET_STATS,
-                        COLLECT_STEALTH_STATS, COLLECT_STREAM_STATS,
-                    };
-                    COLLECT_PACKET_STATS
-                        .store(engine_cfg.telemetry.collect_packet_stats, Ordering::Relaxed);
-                    COLLECT_STREAM_STATS
-                        .store(engine_cfg.telemetry.collect_stream_stats, Ordering::Relaxed);
-                    COLLECT_CONGESTION_STATS
-                        .store(engine_cfg.telemetry.collect_congestion_stats, Ordering::Relaxed);
-                    COLLECT_FEC_STATS
-                        .store(engine_cfg.telemetry.collect_fec_stats, Ordering::Relaxed);
-                    COLLECT_STEALTH_STATS
-                        .store(engine_cfg.telemetry.collect_stealth_stats, Ordering::Relaxed);
-                }
-                // Apply logging config: effective() applies mode overrides (Verbose/Minimal/NoLog),
-                // then engine.log_level overrides the result when explicitly different.
-                let effective_logging = engine_cfg.logging.effective();
-                let effective_level = if engine_cfg.engine.log_level != "info"
-                    && engine_cfg.engine.log_level != effective_logging.level
-                {
-                    engine_cfg.engine.log_level.clone()
-                } else {
-                    effective_logging.level.clone()
-                };
-                let level_filter = match effective_level.to_ascii_lowercase().as_str() {
-                    "error" => Some(log::LevelFilter::Error),
-                    "warn" => Some(log::LevelFilter::Warn),
-                    "info" => Some(log::LevelFilter::Info),
-                    "debug" => Some(log::LevelFilter::Debug),
-                    "trace" => Some(log::LevelFilter::Trace),
-                    _ => None,
-                };
-                if let Some(filter) = level_filter {
-                    log::set_max_level(filter);
-                }
-                // Apply log_to_stdout: when mode=no-log disables stdout, suppress output
-                if !effective_logging.log_to_stdout {
-                    log::set_max_level(log::LevelFilter::Off);
-                }
-            }
+    if let Some(engine_cfg) = engine_cfg_opt.as_ref() {
+        if engine_cfg.telemetry.enabled {
+            use quicfuscate::telemetry::TELEMETRY_ENABLED;
+            TELEMETRY_ENABLED.store(true, Ordering::Relaxed);
+        }
+        // Apply per-category telemetry export gates
+        {
+            use quicfuscate::telemetry::{
+                COLLECT_CONGESTION_STATS, COLLECT_FEC_STATS, COLLECT_PACKET_STATS,
+                COLLECT_STEALTH_STATS, COLLECT_STREAM_STATS,
+            };
+            COLLECT_PACKET_STATS
+                .store(engine_cfg.telemetry.collect_packet_stats, Ordering::Relaxed);
+            COLLECT_STREAM_STATS
+                .store(engine_cfg.telemetry.collect_stream_stats, Ordering::Relaxed);
+            COLLECT_CONGESTION_STATS
+                .store(engine_cfg.telemetry.collect_congestion_stats, Ordering::Relaxed);
+            COLLECT_FEC_STATS
+                .store(engine_cfg.telemetry.collect_fec_stats, Ordering::Relaxed);
+            COLLECT_STEALTH_STATS
+                .store(engine_cfg.telemetry.collect_stealth_stats, Ordering::Relaxed);
+        }
+        // Apply logging config: effective() applies mode overrides (Verbose/Minimal/NoLog),
+        // then engine.log_level overrides the result when explicitly different.
+        let effective_logging = engine_cfg.logging.effective();
+        let effective_level = if engine_cfg.engine.log_level != "info"
+            && engine_cfg.engine.log_level != effective_logging.level
+        {
+            engine_cfg.engine.log_level.clone()
+        } else {
+            effective_logging.level.clone()
+        };
+        let level_filter = match effective_level.to_ascii_lowercase().as_str() {
+            "error" => Some(log::LevelFilter::Error),
+            "warn" => Some(log::LevelFilter::Warn),
+            "info" => Some(log::LevelFilter::Info),
+            "debug" => Some(log::LevelFilter::Debug),
+            "trace" => Some(log::LevelFilter::Trace),
+            _ => None,
+        };
+        if let Some(filter) = level_filter {
+            log::set_max_level(filter);
+        }
+        // Apply log_to_stdout: when mode=no-log disables stdout, suppress output
+        if !effective_logging.log_to_stdout {
+            log::set_max_level(log::LevelFilter::Off);
         }
     }
 
@@ -2293,10 +2297,8 @@ async fn run_server(
     // mlockall must be called before any key material is loaded so that
     // MCL_FUTURE locks all future allocations. MemoryPool::set_lock_blocks
     // must be called before the pool is created so blocks are mlocked on alloc.
-    let (lock_memory, lock_blocks) = config_path
+    let (lock_memory, lock_blocks) = engine_cfg_opt
         .as_ref()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|c| quicfuscate::engine::EngineConfig::from_toml(&c).ok())
         .map(|cfg| (cfg.security.lock_memory, cfg.security.lock_blocks))
         .unwrap_or((true, true)); // defaults: lock on server
     if lock_memory {

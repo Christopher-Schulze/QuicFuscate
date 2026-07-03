@@ -293,16 +293,106 @@ static AUDIT_LOG: std::sync::OnceLock<Arc<AuditLog>> = std::sync::OnceLock::new(
 
 /// Initialize the global audit log. Called once during server startup.
 /// If `path` is `None`, audit logging is disabled (no-op).
+///
+/// On Unix, the audit log file is created with mode 0o600 (owner read/write
+/// only). When the process is running as root, the file is chowned to the
+/// `quicfuscate` user/group so that audit logging continues to work after
+/// privilege dropping. This must be called **before** `drop_privileges`.
 pub fn init_audit_log(path: Option<PathBuf>) {
     if let Some(p) = path {
-        match AuditLog::open(p) {
+        // Ensure the parent directory exists and is owned by the runtime user
+        // when running as root, so the unprivileged process can append.
+        if let Some(parent) = p.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                log::warn!("Failed to create audit log dir {}: {}", parent.display(), e);
+            }
+        }
+        match AuditLog::open(p.clone()) {
             Ok(log) => {
+                // Restrict file permissions to owner-only. This must happen
+                // while we still have root privileges to chown the file.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Err(e) =
+                        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600))
+                    {
+                        log::warn!("Failed to set audit log permissions on {}: {}", p.display(), e);
+                    }
+                    // If running as root, chown the audit log (and its parent
+                    // dir if we just created it) to the quicfuscate user/group
+                    // so the unprivileged server can continue appending after
+                    // the privilege drop.
+                    if unsafe { libc::geteuid() } == 0 {
+                        chown_to_quicfuscate(&p);
+                        if let Some(parent) = p.parent() {
+                            chown_to_quicfuscate(parent);
+                        }
+                    }
+                }
                 let _ = AUDIT_LOG.set(Arc::new(log));
             }
             Err(e) => {
                 log::warn!("Failed to open audit log: {e}");
             }
         }
+    }
+}
+
+/// Chown `path` to the `quicfuscate` user/group (Unix only).
+/// Best-effort: logs a warning on failure but does not abort startup.
+#[cfg(unix)]
+fn chown_to_quicfuscate(path: &std::path::Path) {
+    use std::ffi::CString;
+    let user = match CString::new("quicfuscate") {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let group = match CString::new("quicfuscate") {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    // SAFETY: getpwnam/getgrnam look up the user/group database. The returned
+    // pointer is valid until the next call. We copy uid/gid immediately.
+    let uid = unsafe {
+        let pwd = libc::getpwnam(user.as_ptr());
+        if pwd.is_null() {
+            log::warn!(
+                "chown: user 'quicfuscate' not found — audit log {} will remain root-owned",
+                path.display()
+            );
+            return;
+        }
+        (*pwd).pw_uid
+    };
+    let gid = unsafe {
+        let grp = libc::getgrnam(group.as_ptr());
+        if grp.is_null() {
+            log::warn!(
+                "chown: group 'quicfuscate' not found — audit log {} will remain root-owned",
+                path.display()
+            );
+            return;
+        }
+        (*grp).gr_gid
+    };
+    // SAFETY: chown changes ownership. Path is a valid filesystem path.
+    let c_path = match CString::new(path.as_os_str().as_encoded_bytes()) {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("chown: path {} not representable as CString: {}", path.display(), e);
+            return;
+        }
+    };
+    if unsafe { libc::chown(c_path.as_ptr(), uid, gid) } != 0 {
+        let err = std::io::Error::last_os_error();
+        log::warn!(
+            "chown failed for {} (uid={}, gid={}): {} — audit logging may break after privilege drop",
+            path.display(),
+            uid,
+            gid,
+            err
+        );
     }
 }
 
@@ -673,51 +763,49 @@ mod tests {
     }
 
     #[test]
-    fn test_audit_noop_when_not_initialized() {
-        // The global audit log may or may not be initialized by another
-        // test in the same process. If it is not initialized, audit()
-        // must be a silent no-op (no panic, no output).
-        if !audit_log_initialized() {
-            audit(
-                AuditEventType::ServerStarted,
-                AuditSeverity::Info,
-                None,
-                None,
-                "This should be a no-op",
-            );
-            // Reaching here without panic is the assertion.
-        }
+    fn test_audit_call_is_safe_regardless_of_init_state() {
+        // audit() must never panic, whether or not the global audit log
+        // has been initialized by another test in the same process.
+        // This test is deterministic: it does not depend on execution order.
+        audit(
+            AuditEventType::ServerStarted,
+            AuditSeverity::Info,
+            None,
+            None,
+            "Safe-to-call probe",
+        );
+        // Reaching here without panic is the assertion.
     }
 
     #[test]
     fn test_init_and_emit_audit_event() {
-        let tmp = std::env::temp_dir().join("quicfuscate_audit_global_test.jsonl");
+        // Test the init+emit+verify path directly via AuditLog (not the
+        // process-global OnceLock, which cannot be reliably initialized
+        // in parallel test execution). This verifies the same code path
+        // that init_audit_log() uses internally.
+        let tmp = std::env::temp_dir().join(format!(
+            "quicfuscate_audit_global_test_{}.jsonl",
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&tmp);
 
-        // Try to initialize the global audit log. If another test already
-        // initialized it, this will be a no-op (OnceLock::set returns Err).
-        init_audit_log(Some(tmp.clone()));
+        let log = AuditLog::open(tmp.clone()).unwrap();
+        log.log(
+            AuditEventType::QkeyIssued,
+            AuditSeverity::Info,
+            Some("10.0.0.1"),
+            Some("test-key-id"),
+            "Integration test: QKey issued",
+        )
+        .unwrap();
+        drop(log);
 
-        if audit_log_initialized() {
-            audit(
-                AuditEventType::QkeyIssued,
-                AuditSeverity::Info,
-                Some("10.0.0.1"),
-                Some("test-key-id"),
-                "Integration test: QKey issued",
-            );
-            // If the global was initialized by this test, verify the file
-            // has content and the chain is valid. If it was already
-            // initialized by another test, the file may differ.
-            if tmp.exists() {
-                let content = std::fs::read_to_string(&tmp).unwrap_or_default();
-                assert!(!content.is_empty(), "audit log file should not be empty after emit");
-                assert!(
-                    AuditLog::verify_chain(&tmp).is_ok(),
-                    "audit chain should be valid after emit"
-                );
-            }
-        }
+        let content = std::fs::read_to_string(&tmp).unwrap_or_default();
+        assert!(!content.is_empty(), "audit log file should not be empty after emit");
+        assert!(
+            AuditLog::verify_chain(&tmp).is_ok(),
+            "audit chain should be valid after emit"
+        );
 
         let _ = std::fs::remove_file(&tmp);
     }
