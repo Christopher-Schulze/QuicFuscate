@@ -144,8 +144,8 @@ Use this section as the shortest non-marketing answer to "what evidence exists r
 
 ### Current Release Checkpoint
 
-- Last fully verified release checkpoint before this documentation sync: `5d1cc9a`.
-- GitHub `CI` run `28554576645`, `Clippy Matrix` run `28554576572`, and `Release Build` run `28554576587` are green on that checkpoint.
+- Last fully verified release checkpoint before this documentation sync: `f1ec566`.
+- GitHub `CI` run `28567731479`, `Clippy Matrix` run `28567731478`, and `Release Build` run `28567731484` are green on that checkpoint.
 - The repository uses the Rust stable channel through `rust-toolchain.toml`; no release-specific Rust toolchain pin is part of the tracked configuration.
 - The CI workflow now includes an `app-backend-checks` job that builds the desktop Svelte bundle for Tauri context, then runs `cargo check` and `cargo test` in `apps/tauri/src-tauri` on macOS.
 - The Linux fastpath evidence job is green in the current CI checkpoint. This proves the current non-privileged CI fastpath suite, not a replacement for a privileged production deployment soak.
@@ -1833,7 +1833,7 @@ Benchmarks
 - The `app-backend-checks` job validates the native desktop backend without UI source edits: it builds the existing `apps/svelte-desktop` bundle for Tauri context, then runs `cargo check` and `cargo test` in `apps/tauri/src-tauri`.
 - `.github/workflows/clippy-matrix.yml` runs the Rust clippy feature matrix on stable Rust with `-D warnings`.
 - `.github/workflows/release.yml` builds the release server binary, builds admin web assets, creates the server bundle, and uploads release artifacts.
-- Latest green main checkpoint: `5d1cc9a`; CI `28554576645`, Clippy Matrix `28554576572`, Release Build `28554576587`.
+- Latest green main checkpoint: `f1ec566`; CI `28567731479`, Clippy Matrix `28567731478`, Release Build `28567731484`.
 
 #### Local Development Workflow
 - Use `cargo test` for unit/integration tests and the suite scripts under `scripts/tests/suites/` for end-to-end coverage.

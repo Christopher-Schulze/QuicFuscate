@@ -490,7 +490,7 @@ Wire -> Pooled Buffer
 | Purpose | Path |
 |---------|------|
 | Main documentation | `docs/DOCUMENTATION.md` |
-| Architecture overview | `docs/architecture.md` |
+| Architecture overview + file map + wiring map (canonical SSOT) | `docs/MAP.md` |
 | Agent instructions | `AGENTS.md` |
 | Rust core | `src/` |
 | Web Admin UI | `apps/svelte-admin/` |

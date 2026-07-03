@@ -4,7 +4,7 @@ title: Canonical docs SSOT cleanup after retiring local worklog files
 severity: HIGH
 phase: S
 priority: P0
-status: OPEN
+status: DONE
 created: 2026-07-02
 depends_on: [TODO-472, TODO-507]
 ---
@@ -96,3 +96,29 @@ any production-ready claim.
 - Do not recreate retired local worklog files.
 - Do not run Docker locally.
 - Do not rewrite historical docs wholesale; apply surgical consistency edits.
+
+## Completion Evidence (2026-07-03)
+
+- Retired worklog reference scan (`docs/changelog.md`, `docs/context.md`):
+  `rg 'changelog\.md|context\.md'` over tracked tree → no matches.
+- Old Rust/toolchain pin scan
+  (`rust:1.85`, `rust:1.93`, `1.93.0`, `1.93.1`, `channel = "1.93"`,
+  `rust-version = "1.93"`, `rust-version = "1.85"`):
+  only self-referential hits in this detail file's own scan-target list.
+  `rust-toolchain.toml` uses `channel = "stable"` with no release pin.
+- Stale manifest wording scan
+  (`k8s`, `kubernetes`, `helm`, `terraform`, `ansible`, `nomad`,
+  `deploy/manifests`, `deployment-manifests`, `k8s-manifests`):
+  only `overwhelm` false-positives and historical `docs/todo/done/` files;
+  no active doc/config references removed manifest directories.
+- `bash scripts/tests/audits/audit-todo-consistency.sh` → PASS
+  (160 detail files, 0 violations).
+- `git diff --check` → PASS.
+- Release checkpoint aligned across `docs/DOCUMENTATION.md` and `docs/todo.md`:
+  `5d1cc9a` → `f1ec566`; GitHub `CI` `28567731479`,
+  `Clippy Matrix` `28567731478`, `Release Build` `28567731484`.
+- `AGENTS.md` architecture-overview row now points at canonical `docs/MAP.md`
+  instead of retired `docs/architecture.md`.
+- `docs/MAP.md` and `docs/CONTRIBUTING.md` scanned: no stale worklog,
+  architecture.md, or old Rust-pin references; no surgical edits required.
+- Committed and pushed as the focused docs SSOT closure commit.
