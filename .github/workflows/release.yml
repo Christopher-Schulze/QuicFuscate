@@ -57,3 +57,26 @@ jobs:
         with:
           name: quicfuscate-linux-binary
           path: target/release/quicfuscate
+
+      - name: Generate checksums and signatures
+        run: |
+          cd scripts/out/build/
+          # SHA-256 checksums for all bundle artifacts
+          sha256sum * > checksums-sha256.txt
+          # GPG signature if signing key is configured (optional)
+          if [ -n "${{ secrets.RELEASE_GPG_KEY_ID }}" ]; then
+            echo "GPG signing key configured — signing checksums"
+            echo "${{ secrets.RELEASE_GPG_PRIVATE_KEY }}" | gpg --import
+            gpg --detach-sign --local-user "${{ secrets.RELEASE_GPG_KEY_ID }}" \
+              --output checksums-sha256.txt.sig checksums-sha256.txt
+          else
+            echo "No GPG signing key configured — checksums only (no signature)"
+          fi
+
+      - name: Upload checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: quicfuscate-checksums
+          path: |
+            scripts/out/build/checksums-sha256.txt
+            scripts/out/build/checksums-sha256.txt.sig

@@ -4,7 +4,7 @@ title: Docker release artifact validation without local Docker dependency
 severity: HIGH
 phase: S
 priority: P1
-status: OPEN
+status: PREPARED
 created: 2026-07-02
 depends_on: [TODO-447, TODO-509]
 ---
@@ -73,4 +73,21 @@ production-ready deployment path.
 - Do not install Docker locally on the development Mac.
 - Do not reintroduce removed stale deployment-manifest directories.
 - Do not claim privileged TUN validation unless it actually ran.
+
+## Preparation Evidence (2026-07-03)
+
+**Status: PREPARED — CI job created, awaiting first GitHub Actions run.**
+
+- `.github/workflows/docker-validation.yml` created with 6 validation steps:
+  1. `docker build -t quicfuscate/server:ci .` — image build
+  2. `docker image inspect` — image size recorded to GITHUB_STEP_SUMMARY
+  3. `docker run --rm quicfuscate/server:ci --help` — binary starts, reports Usage
+  4. `docker run --rm ... command -v iptables && command -v nft && command -v ip` — networking tools present
+  5. Static secret scan — checks for .pem/.key/.env files in image layers
+  6. Default config template verification — confirms `/etc/quicfuscate/quicfuscate.toml.default` exists
+- Triggers: PRs touching Dockerfile/.dockerignore/docker-compose.yml, and `workflow_dispatch`.
+- Does NOT validate privileged TUN/UDP bind (requires `--device /dev/net/tun` + `--cap-add NET_ADMIN`); this is documented as a real limitation in the workflow comments.
+- Dockerfile inspected: multi-stage build (rust:bookworm builder → debian:bookworm-slim runtime), runs as unprivileged `quicfuscate` user, tini entrypoint, healthcheck on admin HTTP.
+
+**Remaining for DONE:** First successful GitHub Actions run of `docker-validation.yml`. This requires a push/PR that touches the Docker paths, or a manual `workflow_dispatch` trigger.
 

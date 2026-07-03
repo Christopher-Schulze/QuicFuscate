@@ -4,7 +4,7 @@ title: Broderick long-running production soak and chaos proof
 severity: CRITICAL
 phase: S
 priority: P0
-status: OPEN
+status: PREPARED
 created: 2026-07-02
 depends_on: [TODO-473, TODO-474, TODO-509, TODO-511]
 ---
@@ -78,4 +78,36 @@ traffic, network adversity, restarts, auth changes, DNS use, and reconnects.
 - Do not fake throughput success when no measurable traffic flows.
 - Do not leave remote namespaces/processes running after failure.
 - Do not require UI changes.
+
+## Preparation Evidence (2026-07-03)
+
+**Status: PREPARED — soak script exists, awaiting remote Broderick execution.**
+
+- `scripts/tests/suites/test-runtime-soak-chaos.sh` already exists and
+  implements the soak/chaos matrix with configurable iterations,
+  admin iterations, fast mode, dry-run mode, and output directory.
+- The script supports:
+  - `--iterations N` — control loop count for reconnect/restart scenarios
+  - `--admin-iterations N` — control QKey revoke/admin action scenarios
+  - `--fast` — reduced iterations for quick validation
+  - `--dry-run` — validate script structure without executing
+  - `--output-dir DIR` — capture logs, RSS, FD counts, packet counters
+- Existing E2E scripts (`scripts/tests/suites/test-e2e.sh`,
+  `test-fec-e2e-loss.sh`, `test-security.sh`) provide the netns lock
+  discipline and cleanup patterns that the soak script reuses.
+- DNS leak assertion is already proven by
+  `scripts/tests/tun-e2e-dns-leak-netns.sh` (raw_port_53_packets=0).
+
+**Remaining for DONE:** Execute the soak script on Broderick (or equivalent
+remote Linux host) for the full test matrix duration:
+- 60 min clean baseline tunnel
+- 60 min loss/jitter adversity
+- 30 min reconnect loop
+- 15 min QKey revoke during traffic
+- 15 min server restart
+- Full run DNS leak + resource tracking
+
+Total minimum duration: ~3 hours. Requires a dedicated remote Linux host
+with two network namespaces, root privileges for TUN/iptables, and
+sufficient disk space for pcap/log captures.
 

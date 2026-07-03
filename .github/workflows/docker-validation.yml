@@ -1,0 +1,86 @@
+name: Docker Image Validation
+
+# Validates the Docker image build and runtime behavior on a GitHub-hosted
+# Linux runner. This job does NOT require local Docker on the development Mac.
+#
+# Validates:
+# - Image build succeeds
+# - Image size is recorded
+# - Binary starts and reports --help
+# - Required networking tools (iptables, nft, ip) are present
+# - No obvious secrets are baked into image layers
+#
+# Does NOT validate (requires privileged remote host):
+# - TUN device creation
+# - Full server startup with UDP bind
+# - iptables rule installation
+
+on:
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "docker-compose.yml"
+      - ".github/workflows/docker-validation.yml"
+  workflow_dispatch:
+
+jobs:
+  docker-build-and-validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t quicfuscate/server:ci .
+
+      - name: Record image size
+        run: |
+          docker image inspect quicfuscate/server:ci \
+            --format='Image size: {{.Size}} bytes ({{printf "%.1f" (divf .Size 1048576)}} MB)' \
+            | tee image-size.txt
+          echo "## Docker Image Size" >> "$GITHUB_STEP_SUMMARY"
+          echo "$(cat image-size.txt)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify binary starts and reports help
+        run: |
+          docker run --rm quicfuscate/server:ci --help > help-output.txt 2>&1
+          grep -q "Usage" help-output.txt || {
+            echo "ERROR: --help output does not contain 'Usage'"
+            cat help-output.txt
+            exit 1
+          }
+          echo "Binary --help: PASS"
+
+      - name: Verify required networking tools are present
+        run: |
+          docker run --rm quicfuscate/server:ci sh -lc '
+            command -v iptables && \
+            command -v nft && \
+            command -v ip && \
+            echo "Networking tools: PASS"
+          '
+
+      - name: Static secret scan over image layers
+        run: |
+          # Check for common secret patterns in the image filesystem
+          docker run --rm quicfuscate/server:ci sh -lc '
+            # Check for private keys, env files with secrets, or hardcoded passwords
+            if find / -name "*.pem" -o -name "*.key" -o -name ".env" 2>/dev/null | grep -v "^/etc/ssl/certs" | grep -q .; then
+              echo "WARNING: Found potential key/secret files:"
+              find / -name "*.pem" -o -name "*.key" -o -name ".env" 2>/dev/null | grep -v "^/etc/ssl/certs"
+              exit 1
+            fi
+            echo "Secret scan: PASS — no obvious secrets in image layers"
+          '
+
+      - name: Verify config is a default template (not real config)
+        run: |
+          docker run --rm quicfuscate/server:ci sh -lc '
+            if [ -f /etc/quicfuscate/quicfuscate.toml.default ]; then
+              echo "Default config template present: PASS"
+            else
+              echo "ERROR: Default config template missing"
+              exit 1
+            fi
+          '

@@ -4,7 +4,7 @@ title: Signed release, install, upgrade, and rollback proof
 severity: HIGH
 phase: S
 priority: P1
-status: OPEN
+status: PREPARED
 created: 2026-07-02
 depends_on: [TODO-448, TODO-460, TODO-461, TODO-509]
 ---
@@ -73,4 +73,34 @@ behavior.
 - Do not add local Docker dependency.
 - Do not change UI.
 - Do not publish a public release unless explicitly requested.
+
+## Preparation Evidence (2026-07-03)
+
+**Status: PREPARED — checksum/signature generation added to release workflow, awaiting clean VM execution.**
+
+- `.github/workflows/release.yml` extended with:
+  - `Generate checksums and signatures` step: produces `checksums-sha256.txt`
+    for all bundle artifacts in `scripts/out/build/`.
+  - GPG detached signature of `checksums-sha256.txt` when
+    `RELEASE_GPG_KEY_ID` and `RELEASE_GPG_PRIVATE_KEY` secrets are configured.
+    Falls back to checksums-only (no signature) when secrets are absent.
+  - `Upload checksums` step: uploads `checksums-sha256.txt` and `.sig` as
+    a separate artifact.
+- `scripts/install/install-server-linux.sh` exists and handles binary
+  installation, config placement, and systemd service setup.
+- `scripts/install/quicfuscate-server.service` is hardened with:
+  `NoNewPrivileges=true`, `PrivateTmp=true`, `ProtectSystem=full`,
+  `ProtectHome=true`, `ReadWritePaths`, `LimitNOFILE=1048576`,
+  `LimitMEMLOCK=infinity` (added during TODO-511/516).
+
+**Remaining for DONE:** Execute install/upgrade/rollback proof on a clean
+Linux VM or remote host:
+1. Download release artifacts + checksums from GitHub Actions run.
+2. Verify checksums: `sha256sum -c checksums-sha256.txt`.
+3. Verify signature (if GPG configured): `gpg --verify checksums-sha256.txt.sig`.
+4. Run `scripts/install/install-server-linux.sh` on clean Linux.
+5. Start/stop/restart service via `systemctl`.
+6. Upgrade: install new version over old, verify config/QKey state preserved.
+7. Rollback: install previous version, verify service health.
+8. Uninstall: remove binary/service, verify state archived or removed per policy.
 
