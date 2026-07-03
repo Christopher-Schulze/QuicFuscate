@@ -297,11 +297,15 @@ static AUDIT_LOG: std::sync::OnceLock<Arc<AuditLog>> = std::sync::OnceLock::new(
 /// On Unix, the audit log file is created with mode 0o600 (owner read/write
 /// only). When the process is running as root, the file is chowned to the
 /// `quicfuscate` user/group so that audit logging continues to work after
-/// privilege dropping. This must be called **before** `drop_privileges`.
+/// privilege dropping. The parent directory is chowned **only** if this
+/// function created it — a pre-existing system directory (e.g. `/var/log`)
+/// is never re-owned, which would be a privilege-escalation vector.
+/// This must be called **before** `drop_privileges`.
 pub fn init_audit_log(path: Option<PathBuf>) {
     if let Some(p) = path {
-        // Ensure the parent directory exists and is owned by the runtime user
-        // when running as root, so the unprivileged process can append.
+        // Track whether *we* created the parent dir so we only chown
+        // directories we own — never pre-existing system dirs like /var/log.
+        let parent_newly_created = p.parent().map(|parent| !parent.exists()).unwrap_or(false);
         if let Some(parent) = p.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
                 log::warn!("Failed to create audit log dir {}: {}", parent.display(), e);
@@ -309,31 +313,42 @@ pub fn init_audit_log(path: Option<PathBuf>) {
         }
         match AuditLog::open(p.clone()) {
             Ok(log) => {
-                // Restrict file permissions to owner-only. This must happen
-                // while we still have root privileges to chown the file.
                 #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    if let Err(e) =
-                        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600))
-                    {
-                        log::warn!("Failed to set audit log permissions on {}: {}", p.display(), e);
-                    }
-                    // If running as root, chown the audit log (and its parent
-                    // dir if we just created it) to the quicfuscate user/group
-                    // so the unprivileged server can continue appending after
-                    // the privilege drop.
-                    if unsafe { libc::geteuid() } == 0 {
-                        chown_to_quicfuscate(&p);
-                        if let Some(parent) = p.parent() {
-                            chown_to_quicfuscate(parent);
-                        }
-                    }
-                }
+                secure_audit_file(&p, parent_newly_created);
                 let _ = AUDIT_LOG.set(Arc::new(log));
             }
             Err(e) => {
                 log::warn!("Failed to open audit log: {e}");
+            }
+        }
+    }
+}
+
+/// Restrict permissions on the audit log file to owner-only (0o600) and,
+/// when running as root, chown the file (and a newly-created parent dir)
+/// to the `quicfuscate` user/group so audit logging survives the
+/// root→unprivileged privilege drop.
+///
+/// `parent_newly_created` must be true only when the caller created the
+/// parent directory itself. Chowning a pre-existing system directory would
+/// be a privilege-escalation vector and is therefore forbidden.
+///
+/// Extracted from `init_audit_log` so the permission logic is unit-testable
+/// without depending on the process-global `OnceLock`.
+#[cfg(unix)]
+fn secure_audit_file(path: &std::path::Path, parent_newly_created: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        log::warn!("Failed to set audit log permissions on {}: {}", path.display(), e);
+    }
+    // Only chown the parent dir if we just created it. Never reown a
+    // pre-existing directory (e.g. /var/log) — that would break other
+    // services and open a privilege-escalation path.
+    if unsafe { libc::geteuid() } == 0 {
+        chown_to_quicfuscate(path);
+        if parent_newly_created {
+            if let Some(parent) = path.parent() {
+                chown_to_quicfuscate(parent);
             }
         }
     }
@@ -410,11 +425,6 @@ pub fn audit(
             log::warn!("Audit log write failed: {e}");
         }
     }
-}
-
-/// Check whether the global audit log is initialized (for tests).
-pub fn audit_log_initialized() -> bool {
-    AUDIT_LOG.get().is_some()
 }
 
 /// Serialize an entry as a JSON object (NDJSON format).
@@ -808,5 +818,82 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_secure_audit_file_sets_owner_only_permissions() {
+        // secure_audit_file must restrict the audit log file to mode 0o600
+        // (owner read/write only) regardless of the previous umask. The
+        // chown branch only runs as root and is not exercised here, but the
+        // permission hardening — the part that protects the file on disk —
+        // is verified directly.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "quicfuscate_audit_secure_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Create the file with a permissive mode first so we can prove the
+        // helper actually tightens it.
+        let file_path = dir.join("audit.jsonl");
+        std::fs::write(&file_path, b"seed\n").unwrap();
+        use std::os::unix::fs::OpenOptionsExt;
+        {
+            use std::fs::OpenOptions;
+            let _ = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .mode(0o644)
+                .open(&file_path)
+                .unwrap();
+        }
+        // After the call the mode must be exactly 0o600 regardless of the
+        // umask in effect when the file was created.
+        secure_audit_file(&file_path, false);
+        let mode_after = std::fs::metadata(&file_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode_after, 0o600,
+            "audit log file must be 0o600 after secure_audit_file, got {mode_after:#o}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_secure_audit_file_does_not_touch_preexisting_parent_ownership() {
+        // Regression guard for the privilege-escalation bug where the parent
+        // directory was chowned unconditionally. With parent_newly_created =
+        // false, secure_audit_file must NOT chown the parent even when run
+        // as root. We cannot easily assert "no chown happened" without root,
+        // but we can assert the function returns normally and the parent's
+        // ownership is unchanged. This test documents and locks the contract.
+        let parent = std::env::temp_dir().join(format!(
+            "quicfuscate_audit_parent_guard_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir_all(&parent).unwrap();
+        let file_path = parent.join("audit.jsonl");
+        std::fs::write(&file_path, b"seed\n").unwrap();
+        let parent_meta_before = std::fs::symlink_metadata(&parent).unwrap();
+        // parent_newly_created = false simulates a pre-existing system dir.
+        secure_audit_file(&file_path, false);
+        let parent_meta_after = std::fs::symlink_metadata(&parent).unwrap();
+        // Ownership (uid/gid) must be identical before and after.
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(
+            parent_meta_before.uid(),
+            parent_meta_after.uid(),
+            "parent dir uid must not change when parent_newly_created=false"
+        );
+        assert_eq!(
+            parent_meta_before.gid(),
+            parent_meta_after.gid(),
+            "parent dir gid must not change when parent_newly_created=false"
+        );
+        let _ = std::fs::remove_dir_all(&parent);
     }
 }
