@@ -4,7 +4,7 @@ title: Post-clean local release gate replay
 severity: HIGH
 phase: S
 priority: P0
-status: OPEN
+status: DONE
 created: 2026-07-02
 depends_on: [TODO-508]
 ---
@@ -72,4 +72,21 @@ servers and without changing UI visuals.
 - Do not run local Docker.
 - Do not change UI source or visuals.
 - Do not hide flaky tests by skipping or relaxing assertions.
+
+## Completion Evidence (2026-07-03)
+
+All gates run from clean build cache state on macOS (Darwin 24.6.0).
+
+- `df -h /` before build: 2.5 GiB free (tight); after APFS purgeable reclamation: up to 26 GiB free.
+- `cargo fmt --all -- --check` → PASS.
+- `bash scripts/tests/audits/audit-todo-consistency.sh` → PASS (160 files, 0 violations).
+- `git diff --check` → PASS.
+- `cargo build --lib` → PASS (1m41s from clean).
+- `cargo clippy --workspace --all-targets -- -D warnings` → PASS (with `CARGO_INCREMENTAL=0` to fit disk; first attempt hit `No space left on device` on incremental cache, cleaned and retried successfully).
+- `cargo test --workspace --all-targets --features rust-tests` → PASS (0 failures across all test binaries and integration tests).
+- `cd apps/svelte-admin && bun install && bun run check && bun run test:unit` → PASS: svelte-check 0 errors/0 warnings; 24 test files, 279 tests passed.
+- `cd apps/svelte-desktop && bun install && bun run check && bun run test:unit && bun run build` → PASS: svelte-check 0 errors/0 warnings; 30 test files, 368 tests passed; static build written to `build/`.
+- `cd apps/tauri/src-tauri && cargo check && cargo test` → PASS: 29 tests passed, 0 failed.
+- No UI source, style, asset, or frontend bundle changes committed.
+- Local gate evidence matches green GitHub evidence for checkpoint `f1ec566`.
 
