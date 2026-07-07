@@ -64,7 +64,7 @@ production-ready deployment path.
 |---------|-----------------|
 | `docker build -t quicfuscate/server:ci .` | PASS in CI or approved remote environment |
 | `docker image inspect quicfuscate/server:ci` | image size recorded |
-| `docker run --rm quicfuscate/server:ci --help` | PASS |
+| `docker run --rm quicfuscate/server:ci sh -lc 'quicfuscate --help'` | PASS (binary reports Usage) |
 | `docker run --rm quicfuscate/server:ci sh -lc 'command -v iptables && command -v nft && command -v ip'` | PASS |
 | static secret scan over image/exported layers | no committed secrets |
 
@@ -81,7 +81,7 @@ production-ready deployment path.
 - `.github/workflows/docker-validation.yml` created with 6 validation steps:
   1. `docker build -t quicfuscate/server:ci .` — image build
   2. `docker image inspect` — image size recorded to GITHUB_STEP_SUMMARY
-  3. `docker run --rm quicfuscate/server:ci --help` — binary starts, reports Usage
+  3. `docker run --rm quicfuscate/server:ci sh -lc 'quicfuscate --help'` — binary starts, reports Usage (must use `sh -lc` because the Dockerfile ENTRYPOINT is `tini --`, so `--help` as a direct arg would replace CMD and produce `tini -- --help` which fails)
   4. `docker run --rm ... command -v iptables && command -v nft && command -v ip` — networking tools present
   5. Static secret scan — checks for .pem/.key/.env files in image layers
   6. Default config template verification — confirms `/etc/quicfuscate/quicfuscate.toml.default` exists
