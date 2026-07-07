@@ -75,16 +75,19 @@ FROM debian:bookworm-slim AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive \
     RUST_LOG=info \
-    QUICFUSCATE_CONFIG=/etc/quicfuscate/quicfuscate.toml
+    QUICFUSCATE_CONFIG=/etc/quicfuscate/quicfuscate.toml \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Runtime dependencies:
 #   iptables   - firewall/NAT rules for the TUN bridge
+#   nftables   - nft backend for firewall rules (iptables-nft wrapper + nft binary)
 #   iproute2   - ip/link/route configuration for the quicfuse0 interface
 #   libssl3    - rustls native CA store + TLS runtime support
 #   ca-certificates - system trust store for peer certificate validation
 #   libgcc-s1  - GCC runtime required by the Rust binary
 RUN apt-get update && apt-get install -y --no-install-recommends \
         iptables \
+        nftables \
         iproute2 \
         libssl3 \
         libgcc-s1 \
