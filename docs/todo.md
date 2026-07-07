@@ -43,7 +43,7 @@ Execution order: **Phase A (config + quick wins) -> Phase B (load path) -> Phase
 | TODO-409 | A | P2 | Evaluate `stream_ring_buffer` as default for throughput profile | **DEFERRED** by TODO-414 (Streaming-FEC adaptive loop, DONE). Feature remains opt-in; adaptive loop determines when streaming mode warrants ring-buffer usage. |
 | TODO-410 | B | P3 | Zstd compression streaming directly into memory pool | **DONE** |
 | TODO-411 | B | P3 | StrikeRegister 0-RTT anti-replay ring buffer + bloom front | **DONE** |
-| TODO-412 | E | P1 | Server deploy + real-world protocol profiling baseline | **DEFERRED** by TODO-418 (Profiling-Baseline + tc-netem-Setup, DONE). Real-world Oracle Cloud UDP path remains externally blocked (cloud-level Security List, not iptables); loopback + tc-netem baseline established as pragmatic substitute. Reopen only if Oracle Cloud UDP egress is unblocked. |
+| TODO-412 | E | P1 | Server deploy + real-world protocol profiling baseline | **DONE** - Real-world QUIC connection over the internet verified: Mac (ARM64) → Broderick (Oracle Cloud, ARM64, 92.5.226.155:4433). TLS handshake successful, RTT 0ms, Loss 0.00%, FEC NEON SIMD active, stealth uTLS+TLS Cover active. Oracle Cloud Security List is now open for UDP 4433. Server RSS 3.1 MB at idle. |
 
 Detail files: `docs/todo/todo-{id}-*.md` for each item above.
 
