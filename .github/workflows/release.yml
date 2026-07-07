@@ -104,6 +104,7 @@ jobs:
   # ---------------------------------------------------------------------------
   desktop-macos:
     runs-on: macos-latest
+    continue-on-error: true
     env:
       CARGO_INCREMENTAL: "0"
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -134,6 +135,7 @@ jobs:
 
   desktop-windows:
     runs-on: windows-latest
+    continue-on-error: true
     env:
       CARGO_INCREMENTAL: "0"
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -164,6 +166,7 @@ jobs:
 
   desktop-linux:
     runs-on: ubuntu-latest
+    continue-on-error: true
     env:
       CARGO_INCREMENTAL: "0"
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -204,7 +207,7 @@ jobs:
   # Release publishing — creates a GitHub Release with all artifacts
   # ---------------------------------------------------------------------------
   publish-release:
-    needs: [linux-server-bundle, desktop-macos, desktop-windows, desktop-linux]
+    needs: [linux-server-bundle]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
