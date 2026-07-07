@@ -42,7 +42,7 @@ QuicFuscate requires:
 4. `iproute2` (`ip` command) - `detect_wan_interface()` uses `ip route show default`
 
 ### Admin HTTP server
-The server has an admin HTTP interface (configured via `--admin-web` in the install script, default `127.0.0.1:9000`). Docker health checks can probe the unauthenticated root route until a dedicated unauthenticated health endpoint exists.
+The server has an admin HTTP interface (configured via `--admin-web` in the install script, default `127.0.0.1:9000`). The Dockerfile HEALTHCHECK probes the unauthenticated `/api/health` endpoint, which returns `{"status":"ok"}` with HTTP 200 and requires no session.
 
 ## Problem Analysis
 
@@ -157,7 +157,7 @@ Stale deployment manifests are intentionally removed from the active repository.
 Support `CONFIG_FILE` env var and all config via env vars for 12-factor compliance. The existing `QUICFUSCATE_*` env var pattern (used in `limits.rs:46-50`) should be extended to all config sections.
 
 ### Step 8: Health checks
-Docker health checks should probe the admin HTTP root route (`GET /`) because it currently serves the web-admin index with HTTP 200 and does not require authentication. A dedicated unauthenticated `/api/health` endpoint is still preferable before switching the Dockerfile health check away from `/`.
+DONE. The Dockerfile HEALTHCHECK probes the unauthenticated `/api/health` endpoint (`GET /api/health` → `{"status":"ok"}` with HTTP 200, no session required). The endpoint is implemented in `src/implementations/server/admin_http.rs` alongside `/api/login` and `/api/logout`, and is covered by 2 unit tests (`health_endpoint_returns_ok_without_auth` with auth-enabled server, `health_endpoint_rejects_non_get`).
 
 ### Step 9: Runtime sizing
 Docker runtime sizing should be validated by CI or a dedicated Linux host because local Docker is not required on the development Mac. The retained target is a small server image with explicit TUN, firewall, state, and logging requirements, not a cluster scaling profile.
@@ -172,7 +172,7 @@ Docker runtime sizing should be validated by CI or a dedicated Linux host becaus
 | Alternative: distroless | Rejected | No shell, no iptables/nft/ip command - required for routing/kill switch |
 | Container orchestration | Docker-only retained scope | Stale manifest artifacts are removed from the active repository |
 | Config management | Bind mounts + environment variables | Keep config/certs/state external to the image; never bake secrets |
-| Health checks | Admin HTTP root route for now | `/api/health` is still a follow-up before switching probes |
+| Health checks | `/api/health` unauthenticated endpoint | Dockerfile HEALTHCHECK probes `GET /api/health` → `{"status":"ok"}` |
 | State persistence | Volume mounts | `/var/lib/quicfuscate` for qkeys.json; `/etc/quicfuscate/certs` for TLS |
 | TUN device access | Docker `--device /dev/net/tun` | Host must provide TUN; container gets only the explicit device/caps |
 

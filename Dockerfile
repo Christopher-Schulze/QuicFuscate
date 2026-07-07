@@ -135,11 +135,8 @@ CMD ["sh", "-c", "exec quicfuscate server \
     --admin-web-user ${QUICFUSCATE_ADMIN_USER:-admin} \
     --admin-web-password ${QUICFUSCATE_ADMIN_PASSWORD}"]
 
-# Health check probes the admin HTTP server. The root path (GET /) serves the
-# web-admin index.html with HTTP 200 and requires no authentication, making it
-# a reliable liveness signal. A dedicated unauthenticated /api/health endpoint
-# does not yet exist (all /api/* routes except /api/login and /api/logout
-# require session auth and return 401). TODO: add /api/health to
-# admin_http.rs and switch this probe to it.
+# Health check probes the unauthenticated /api/health endpoint, which returns
+# {"status":"ok"} with HTTP 200 and requires no session. This is the canonical
+# liveness signal for Docker HEALTHCHECK and Kubernetes probes.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:8080/ || exit 1
+    CMD curl -fsS http://127.0.0.1:8080/api/health || exit 1

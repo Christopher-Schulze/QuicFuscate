@@ -759,6 +759,15 @@ async fn handle_request(
         if req.path == "/api/logout" {
             return handle_logout(&req, auth.as_ref(), &sessions, peer);
         }
+        // Unauthenticated health probe for container orchestration
+        // (Docker HEALTHCHECK, Kubernetes liveness/readiness).
+        // Returns a minimal JSON body with no sensitive information.
+        if req.path == "/api/health" {
+            if req.method != "GET" {
+                return text_response(405, "Method Not Allowed");
+            }
+            return json_response(200, &serde_json::json!({"status": "ok"}));
+        }
         if !authorize(&req, auth.as_ref(), &sessions) {
             return json_response(401, &AdminResponse::error("Unauthorized"));
         }
@@ -1942,6 +1951,35 @@ mod tests {
         let json = send_req(addr, "GET /api/metrics/json HTTP/1.1\r\nHost: localhost\r\n\r\n");
         assert_eq!(parse_status(&json), 200);
         assert!(json.contains("\"metrics\""));
+    }
+
+    #[test]
+    fn health_endpoint_returns_ok_without_auth() {
+        // The health endpoint must be accessible without authentication
+        // so it can be used by Docker HEALTHCHECK and Kubernetes probes.
+        let web_root = std::env::temp_dir();
+        // Use an auth-enabled server to prove the endpoint is unauthenticated.
+        let (addr, _thr) = start_auth_server(1, web_root, "secret-pw", false, 5);
+
+        let resp = send_req(addr, "GET /api/health HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        assert_eq!(parse_status(&resp), 200);
+        assert!(resp.contains("\"status\""));
+        assert!(resp.contains("\"ok\""));
+    }
+
+    #[test]
+    fn health_endpoint_rejects_non_get() {
+        let web_root = std::env::temp_dir();
+        let (addr, _thr) = start_unauth_server(2, web_root);
+
+        let post = send_req(
+            addr,
+            "POST /api/health HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+        );
+        assert_eq!(parse_status(&post), 405);
+
+        let get = send_req(addr, "GET /api/health HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        assert_eq!(parse_status(&get), 200);
     }
 
     #[test]

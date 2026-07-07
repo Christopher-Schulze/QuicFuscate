@@ -2517,6 +2517,7 @@ Admin HTTP contract notes:
 - `QUICFUSCATE_TRUST_PROXY=1|true` makes admin HTTP resolve client IPs from `X-Forwarded-For`/`X-Real-Ip`; default remains socket peer address.
 - Oversized admin HTTP payloads are rejected with 413.
 - Auth uses `POST /api/login` to issue a session cookie and `POST /api/logout` to clear it.
+- `/api/health` (`GET`): unauthenticated health probe returning `{"status":"ok"}` with HTTP 200. Used by the Dockerfile HEALTHCHECK and suitable for Kubernetes liveness/readiness probes. No session required, no sensitive information exposed.
 - Install/update endpoints are not exposed in the admin HTTP API.
 
 #### Stack (`apps/svelte-admin/`):
