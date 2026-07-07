@@ -2261,8 +2261,7 @@ async fn run_server(
                 .store(engine_cfg.telemetry.collect_stream_stats, Ordering::Relaxed);
             COLLECT_CONGESTION_STATS
                 .store(engine_cfg.telemetry.collect_congestion_stats, Ordering::Relaxed);
-            COLLECT_FEC_STATS
-                .store(engine_cfg.telemetry.collect_fec_stats, Ordering::Relaxed);
+            COLLECT_FEC_STATS.store(engine_cfg.telemetry.collect_fec_stats, Ordering::Relaxed);
             COLLECT_STEALTH_STATS
                 .store(engine_cfg.telemetry.collect_stealth_stats, Ordering::Relaxed);
         }

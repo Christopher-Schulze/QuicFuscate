@@ -20,14 +20,124 @@ use crate::fec::KalmanFilter;
 use crate::transport::{Connection, TransportObserver};
 
 // ===== Global Hints (optional) =================================================
-// Transport can consult these atomics to adapt FEC and timing without creating
-// hard dependencies on Brain internals.
-/// Brain-suggested FEC interval in packets (0 = no hint from brain).
-pub(crate) static FEC_INTERVAL_HINT_PKTS: AtomicU64 = AtomicU64::new(0);
+// Transport can consult these hint channels to adapt FEC and timing without
+// creating hard dependencies on Brain internals. Each channel is a lock-free
+// `Relaxed` atomic with an explicit writer/reader contract captured at the
+// declaration site, so the cross-subsystem data flow is greppable and
+// self-describing instead of implicit.
+
+/// Atomic primitive backing a `HintChannel`. Implementors forward to a single
+/// `Relaxed` load/store so the channel stays lock-free and zero-cost after
+/// inlining on hot paths.
+pub(crate) trait HintAtomic: Send + Sync {
+    type Value: Copy + Default;
+    fn load_relaxed(&self) -> Self::Value;
+    fn store_relaxed(&self, v: Self::Value);
+}
+
+impl HintAtomic for AtomicU64 {
+    type Value = u64;
+    #[inline(always)]
+    fn load_relaxed(&self) -> u64 {
+        self.load(Ordering::Relaxed)
+    }
+    #[inline(always)]
+    fn store_relaxed(&self, v: u64) {
+        self.store(v, Ordering::Relaxed)
+    }
+}
+
+impl HintAtomic for AtomicU32 {
+    type Value = u32;
+    #[inline(always)]
+    fn load_relaxed(&self) -> u32 {
+        self.load(Ordering::Relaxed)
+    }
+    #[inline(always)]
+    fn store_relaxed(&self, v: u32) {
+        self.store(v, Ordering::Relaxed)
+    }
+}
+
+/// Lock-free single-writer/multi-reader hint channel with an explicit
+/// writer-reader contract. Backed by a `Relaxed` atomic load/store, so reads on
+/// hot paths remain a single instruction after inlining.
+///
+/// The `name` and `contract` strings make the implicit cross-subsystem data
+/// flow self-describing at the declaration site: a reader seeing
+/// `FEC_INTERVAL_HINT_PKTS.load()` in `src/fec/mod.rs` can jump straight to the
+/// declaration in `src/brain.rs` to learn the units, sentinel, writers, and
+/// readers without a codebase grep.
+pub(crate) struct HintChannel<A: HintAtomic> {
+    atomic: A,
+    // `name`/`contract` are diagnostic metadata that make the cross-subsystem
+    // writer/reader relationship self-describing at the declaration site. They
+    // are consumed by the `hint_channel_tests` gate and are available for
+    // future telemetry; they carry no runtime cost on the load/store hot path.
+    #[allow(dead_code)]
+    name: &'static str,
+    #[allow(dead_code)]
+    contract: &'static str,
+}
+
+impl<A: HintAtomic> HintChannel<A> {
+    /// Construct a named, documented hint channel. `const`-evaluable so it can
+    /// back a `static` declaration; the body only moves fields, it never calls
+    /// trait methods.
+    pub(crate) const fn new(atomic: A, name: &'static str, contract: &'static str) -> Self {
+        Self { atomic, name, contract }
+    }
+    /// Read the current hint value (`Relaxed`).
+    #[inline(always)]
+    pub(crate) fn load(&self) -> A::Value {
+        self.atomic.load_relaxed()
+    }
+    /// Publish a new hint value (`Relaxed`).
+    #[inline(always)]
+    pub(crate) fn store(&self, v: A::Value) {
+        self.atomic.store_relaxed(v)
+    }
+    /// Channel name, for diagnostics and grep-traceability.
+    #[inline(always)]
+    #[allow(dead_code)]
+    pub(crate) fn name(&self) -> &'static str {
+        self.name
+    }
+    /// Human-readable writer/reader contract.
+    #[inline(always)]
+    #[allow(dead_code)]
+    pub(crate) fn contract(&self) -> &'static str {
+        self.contract
+    }
+}
+
+/// Brain-suggested FEC send interval in packets (0 = no hint).
+/// Writers: `StealthBrain::new` (default 8), `emit_probe_if_due` (varies ±1),
+/// `apply_policy` actuators. Readers: `FecTransportObserver::compute_interval`
+/// blending in `fec/mod.rs`, `emit_probe_if_due` read-back.
+pub(crate) static FEC_INTERVAL_HINT_PKTS: HintChannel<AtomicU64> = HintChannel::new(
+    AtomicU64::new(0),
+    "FEC_INTERVAL_HINT_PKTS",
+    "FEC send interval in packets; 0 = no hint. Writer: StealthBrain. Reader: fec/mod.rs interval blending.",
+);
 /// Brain-suggested FEC redundancy in parts-per-million (0 = no hint).
-pub(crate) static FEC_REDUNDANCY_PPM: AtomicU32 = AtomicU32::new(0);
-/// Intelligent stealth level: 0 = performance, 1 = stealth, 2 = anti-dpi.
-pub(crate) static INTELLIGENT_STEALTH_LEVEL_HINT: AtomicU32 = AtomicU32::new(0);
+/// Writers: `StealthBrain::new` (default 100_000), `apply_policy` actuators.
+/// Reader: `FecTransportObserver::sync_runtime_hints` in `fec/mod.rs`.
+pub(crate) static FEC_REDUNDANCY_PPM: HintChannel<AtomicU32> = HintChannel::new(
+    AtomicU32::new(0),
+    "FEC_REDUNDANCY_PPM",
+    "FEC redundancy in parts-per-million; 0 = no hint. Writer: StealthBrain. Reader: fec/mod.rs sync_runtime_hints.",
+);
+/// Intelligent stealth escalation level: 0 = performance, 1 = stealth, 2 = anti-dpi.
+/// Writers: `StealthBrain::apply_policy` (effective_level), `EscalationState`
+/// escalation/de-escalation in `stealth/mod.rs`. Readers:
+/// `intelligent_stealth_level_hint()` accessor → `StealthManager::intelligent_runtime_level`
+/// + `sync_intelligent_level`.
+pub(crate) static INTELLIGENT_STEALTH_LEVEL_HINT: HintChannel<AtomicU32> = HintChannel::new(
+    AtomicU32::new(0),
+    "INTELLIGENT_STEALTH_LEVEL_HINT",
+    "Intelligent stealth level 0/1/2; 0 = performance baseline. Writers: StealthBrain + EscalationState. Readers: intelligent_stealth_level_hint() accessor.",
+);
 
 /// Thin aggregator that forwards `TransportObserver` calls to multiple observers.
 pub(crate) struct CombinedObserver {
@@ -66,15 +176,15 @@ impl crate::transport::TransportObserver for CombinedObserver {
 
 /// Returns Intelligent mode level hint: 0=performance baseline, 1=stealth, 2=anti-dpi.
 pub(crate) fn intelligent_stealth_level_hint() -> u32 {
-    INTELLIGENT_STEALTH_LEVEL_HINT.load(Ordering::Relaxed)
+    INTELLIGENT_STEALTH_LEVEL_HINT.load()
 }
 
-/// Resets all global brain hint atomics to zero (test-only).
+/// Resets all global brain hint channels to zero (test-only).
 #[cfg(test)]
 pub(crate) fn clear_runtime_hints_for_test() {
-    FEC_INTERVAL_HINT_PKTS.store(0, Ordering::Relaxed);
-    FEC_REDUNDANCY_PPM.store(0, Ordering::Relaxed);
-    INTELLIGENT_STEALTH_LEVEL_HINT.store(0, Ordering::Relaxed);
+    FEC_INTERVAL_HINT_PKTS.store(0);
+    FEC_REDUNDANCY_PPM.store(0);
+    INTELLIGENT_STEALTH_LEVEL_HINT.store(0);
 }
 
 #[inline]
@@ -529,8 +639,8 @@ impl StealthBrain {
             #[cfg(any(test, feature = "rust-tests"))]
             bandwidth_bps: AtomicU64::new(0),
         });
-        FEC_INTERVAL_HINT_PKTS.store(8, Ordering::Relaxed);
-        FEC_REDUNDANCY_PPM.store(100_000, Ordering::Relaxed);
+        FEC_INTERVAL_HINT_PKTS.store(8);
+        FEC_REDUNDANCY_PPM.store(100_000);
         brain
     }
     /// Creates a brain with environment-derived defaults.
@@ -595,10 +705,10 @@ impl StealthBrain {
         }
         // Side-effect free in MVP: only adjust hints, no active packet crafting here.
         // We vary the FEC interval hint slightly to observe CE/Drops reaction.
-        let hint = FEC_INTERVAL_HINT_PKTS.load(Ordering::Relaxed);
+        let hint = FEC_INTERVAL_HINT_PKTS.load();
         let varied =
             if hint > 0 { (hint as i64 + 1 - ((hint & 1) as i64 * 2)).max(1) as u64 } else { 8 };
-        FEC_INTERVAL_HINT_PKTS.store(varied, Ordering::Relaxed);
+        FEC_INTERVAL_HINT_PKTS.store(varied);
         st.probe_tokens -= 1;
         st.last_policy_change = crate::time_source::now_instant();
         trace!("brain: emitted probe; fec_interval_hint={} pkts", varied);
@@ -884,7 +994,7 @@ impl TransportObserver for StealthBrain {
                     .observe();
                 }
             }
-            INTELLIGENT_STEALTH_LEVEL_HINT.store(effective_level as u32, Ordering::Relaxed);
+            INTELLIGENT_STEALTH_LEVEL_HINT.store(effective_level as u32);
             if can_toggle && st.last_masque_hint != prefer_masque_brain {
                 st.last_masque_hint = prefer_masque_brain;
                 st.last_masque_hint_change = now;
@@ -1075,10 +1185,10 @@ impl TransportObserver for StealthBrain {
             }
         };
         if let Some(interval) = actuators.fec_hint_interval {
-            FEC_INTERVAL_HINT_PKTS.store(interval, Ordering::Relaxed);
+            FEC_INTERVAL_HINT_PKTS.store(interval);
         }
         if let Some(ppm) = actuators.fec_hint_ppm {
-            FEC_REDUNDANCY_PPM.store(ppm, Ordering::Relaxed);
+            FEC_REDUNDANCY_PPM.store(ppm);
         }
         let ce_scaled = (actuators.ce_ratio_recent * 1000.0).clamp(0.0, 1000.0) as u32;
         self.loss_rate.store(ce_scaled, Ordering::Relaxed);
@@ -1359,6 +1469,68 @@ mod intelligent_hysteresis_tests {
         let expected_total: u64 = state.size.bins.iter().copied().sum();
         assert_eq!(state.size.total, expected_total);
         assert_eq!(state.size.total, 8);
+    }
+}
+
+#[cfg(test)]
+mod hint_channel_tests {
+    use super::HintChannel;
+    use std::sync::atomic::{AtomicU32, AtomicU64};
+
+    #[test]
+    fn u64_channel_round_trip_and_zero_default() {
+        let chan: HintChannel<AtomicU64> =
+            HintChannel::new(AtomicU64::new(0), "test_u64", "u64 round-trip contract");
+        // Default is zero (sentinel = no hint).
+        assert_eq!(chan.load(), 0);
+        chan.store(42);
+        assert_eq!(chan.load(), 42);
+        chan.store(0);
+        assert_eq!(chan.load(), 0);
+    }
+
+    #[test]
+    fn u32_channel_round_trip_and_zero_default() {
+        let chan: HintChannel<AtomicU32> =
+            HintChannel::new(AtomicU32::new(0), "test_u32", "u32 round-trip contract");
+        assert_eq!(chan.load(), 0);
+        chan.store(180_000);
+        assert_eq!(chan.load(), 180_000);
+    }
+
+    #[test]
+    fn contract_metadata_is_greppable() {
+        let chan: HintChannel<AtomicU32> = HintChannel::new(
+            AtomicU32::new(0),
+            "INTELLIGENT_STEALTH_LEVEL_HINT",
+            "Intelligent stealth level 0/1/2; 0 = performance baseline.",
+        );
+        // The name and contract strings make the cross-subsystem data flow
+        // self-describing at the declaration site — a reviewer reading a
+        // `.load()` call in another module can jump to the declaration and
+        // learn the units, sentinel, writers, and readers without grep.
+        assert_eq!(chan.name(), "INTELLIGENT_STEALTH_LEVEL_HINT");
+        assert!(chan.contract().contains("performance baseline"));
+    }
+
+    #[test]
+    fn production_hint_channels_expose_contracts() {
+        // The 3 production hint channels must carry non-empty, descriptive
+        // contracts so the writer/reader relationship is explicit at the
+        // declaration site. This guards against regressions that strip the
+        // documentation when someone reverts to a raw atomic.
+        use super::{FEC_INTERVAL_HINT_PKTS, FEC_REDUNDANCY_PPM, INTELLIGENT_STEALTH_LEVEL_HINT};
+        for (name, contract) in [
+            (FEC_INTERVAL_HINT_PKTS.name(), FEC_INTERVAL_HINT_PKTS.contract()),
+            (FEC_REDUNDANCY_PPM.name(), FEC_REDUNDANCY_PPM.contract()),
+            (INTELLIGENT_STEALTH_LEVEL_HINT.name(), INTELLIGENT_STEALTH_LEVEL_HINT.contract()),
+        ] {
+            assert!(!name.is_empty(), "hint channel name must be non-empty");
+            assert!(
+                contract.contains("Writer") && contract.contains("Reader"),
+                "hint channel {name} contract must name a Writer and a Reader"
+            );
+        }
     }
 }
 

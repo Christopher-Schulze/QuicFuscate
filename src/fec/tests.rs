@@ -1193,7 +1193,7 @@ fn test_observer_sync_runtime_hints_only_pushes_fec_owned_deltas() {
 
     conn.set_ack_eliciting_threshold(9);
     conn.set_external_pacing_for_test(true);
-    crate::brain::FEC_REDUNDANCY_PPM.store(180_000, std::sync::atomic::Ordering::Relaxed);
+    crate::brain::FEC_REDUNDANCY_PPM.store(180_000);
 
     observer.sync_runtime_hints(&mut conn);
     let delta = conn.take_fec_control_delta();

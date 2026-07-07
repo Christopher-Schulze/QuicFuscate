@@ -3875,7 +3875,7 @@ Global atomics provide lock-free, zero-overhead cross-module coordination for a 
 | Module | Count | Category | Purpose |
 |---|---|---|---|
 | `src/optimize/telemetry.rs` | 97 | Metrics/Counters | Telemetry counters for H3, stealth, FEC, SIMD usage, memory pool, io_uring, CPU features, I/O driver stats. Read-only observation surface for dashboards and diagnostics. |
-| `src/brain.rs` | 3 | Hint channels | Cross-subsystem coordination hints: `FEC_INTERVAL_HINT_PKTS`, `FEC_REDUNDANCY_PPM`, `INTELLIGENT_STEALTH_LEVEL_HINT`. Written by StealthBrain and read by FEC/stealth runtime coordination paths. |
+| `src/brain.rs` | 3 | Hint channels | Cross-subsystem coordination hints wrapped in a `HintChannel<A>` newtype with an explicit writer/reader contract at the declaration site (TODO-517): `FEC_INTERVAL_HINT_PKTS`, `FEC_REDUNDANCY_PPM`, `INTELLIGENT_STEALTH_LEVEL_HINT`. Written by StealthBrain/EscalationState and read by FEC/stealth runtime coordination paths via `.load()`/`.store()` (lock-free `Relaxed`). |
 | `src/optimize/` | 6 | Runtime config | NUMA round-robin node, NUMA node count, profile override, TLS limit, `LOCK_BLOCKS` (mlock gate for MemoryPool blocks, TODO-516). Hardware-adaptive runtime state. |
 | `src/transport/batch.rs` | 3 | Metrics | Batch send/recv/packet counters for transport telemetry. |
 | `src/crypto/` | 2 | Runtime config | `DATA_AEAD_OVERRIDE_MODE` (AEAD selection), `ARM_AES_OK` (ARM AES capability cache). |
@@ -3889,17 +3889,17 @@ Global atomics provide lock-free, zero-overhead cross-module coordination for a 
 
 **Performance benefit**: Zero-cost reads on hot paths. No lock contention. No allocation. Compiler can optimize `Relaxed` loads into single instructions.
 
-**Coupling cost**: Implicit data flow between subsystems. A writer in `src/brain.rs` affects behavior in `src/fec/` without an explicit interface contract. Grep is required to trace data flow. Testing individual modules in isolation requires awareness of global state.
+**Coupling cost**: Implicit data flow between subsystems. A writer in `src/brain.rs` affects behavior in `src/fec/` without an explicit interface contract. The 3 brain.rs hint channels now carry an explicit writer/reader contract at the declaration site (TODO-517), so they no longer require grep to trace; the remaining globals still do. Testing individual modules in isolation requires awareness of global state.
 
 ### Future Direction
 
 - **Metrics/counters (97 of 116)**: These are read-only observation surfaces and are appropriate as globals. No change planned.
-- **Hint channels (4 in brain.rs)**: Candidates for a structured `HintChannel<T>` abstraction that makes the writer-reader contract explicit while preserving lock-free performance.
+- **Hint channels (3 in brain.rs)**: DONE (TODO-517). The 3 brain.rs hint atomics (`FEC_INTERVAL_HINT_PKTS`, `FEC_REDUNDANCY_PPM`, `INTELLIGENT_STEALTH_LEVEL_HINT`) are now wrapped in a `HintChannel<A: HintAtomic>` newtype with an explicit writer/reader contract string at the declaration site. Call sites use `.load()`/`.store()`; the raw `Ordering::Relaxed` is encapsulated inside the primitive and compiles to the same single instruction after inlining.
 - **Runtime config (7 across optimize/, crypto/, qftls.rs)**: Could migrate to a shared `RuntimeConfig` struct passed through the call chain, but current usage is stable and well-bounded.
 - **Sequencing (2 in fec/, main.rs)**: Standard pattern for ID generation. No change needed.
 - **Test gates (1 in rng.rs)**: Test-only, acceptable as-is.
 
-The overall approach prioritizes runtime performance over architectural purity. A structured hint/message channel for the 4 brain.rs hint atomics would provide the highest return on coupling reduction without impacting performance.
+The overall approach prioritizes runtime performance over architectural purity. The highest-return coupling-reduction target (the brain.rs hint channels) is now closed; the remaining globals are either read-only metrics, stable runtime config, or standard sequencing/test primitives.
 
 ## Troubleshooting
 

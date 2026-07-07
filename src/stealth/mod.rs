@@ -4475,7 +4475,7 @@ impl EscalationState {
             self.last_escalation_time.store(now, Ordering::Relaxed);
             // Publish the new level to the global hint so the brain and
             // sync_intelligent_level() pick it up.
-            crate::brain::INTELLIGENT_STEALTH_LEVEL_HINT.store(new_level as u32, Ordering::Relaxed);
+            crate::brain::INTELLIGENT_STEALTH_LEVEL_HINT.store(new_level as u32);
             return Some(new_level);
         }
         None
@@ -4506,7 +4506,7 @@ impl EscalationState {
         // Update the last_probe_time so the next de-escalation check waits
         // another full quiet period before dropping further.
         self.last_probe_time.store(now, Ordering::Relaxed);
-        crate::brain::INTELLIGENT_STEALTH_LEVEL_HINT.store(new_level as u32, Ordering::Relaxed);
+        crate::brain::INTELLIGENT_STEALTH_LEVEL_HINT.store(new_level as u32);
         Some(new_level)
     }
 
@@ -6844,7 +6844,7 @@ mod stealth_coverage_tests {
         assert!(!intelligent.cover_header_emission_allowed());
         assert!(intelligent.cover_headers_due().is_none());
 
-        crate::brain::INTELLIGENT_STEALTH_LEVEL_HINT.store(1, std::sync::atomic::Ordering::Relaxed);
+        crate::brain::INTELLIGENT_STEALTH_LEVEL_HINT.store(1);
         assert!(intelligent.cover_header_emission_allowed());
         crate::brain::clear_runtime_hints_for_test();
     }

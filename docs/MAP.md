@@ -67,7 +67,7 @@ Probe-count-based escalation state machine on `StealthManager`.
 - `on_probe_detected` only escalates when `config.dynamic_enabled` is true (Intelligent mode).
 
 ### IntelligentStealthInputs.level_hint (src/stealth/mod.rs)
-Brain reads `INTELLIGENT_STEALTH_LEVEL_HINT` after hysteresis and passes as `level_hint: u8` (0/1/2) to `derive_intelligent_runtime_policy`.
+Brain reads `INTELLIGENT_STEALTH_LEVEL_HINT` (a `HintChannel<AtomicU32>` with an explicit writer/reader contract at the declaration site, TODO-517) after hysteresis and passes as `level_hint: u8` (0/1/2) to `derive_intelligent_runtime_policy`.
 Level 0 (clean path): padding disabled (near-zero Intelligent-mode overhead). Level 1/2: padding active.
 Jitter under pressure (CE>5% or rtt_spike>4): 85% of budget (was wrongly 20% - direction fixed).
 

@@ -196,11 +196,7 @@ impl AuditLog {
         // panicked while holding the lock. The poisoned guard still gives
         // access to the inner data; we just continue with the last known
         // state (which is the correct behavior for a hash chain).
-        let prev_hash = self
-            .last_hash
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let prev_hash = self.last_hash.lock().unwrap_or_else(|e| e.into_inner()).clone();
 
         let mut entry = AuditEntry {
             seq,
@@ -786,13 +782,7 @@ mod tests {
         // audit() must never panic, whether or not the global audit log
         // has been initialized by another test in the same process.
         // This test is deterministic: it does not depend on execution order.
-        audit(
-            AuditEventType::ServerStarted,
-            AuditSeverity::Info,
-            None,
-            None,
-            "Safe-to-call probe",
-        );
+        audit(AuditEventType::ServerStarted, AuditSeverity::Info, None, None, "Safe-to-call probe");
         // Reaching here without panic is the assertion.
     }
 
@@ -802,10 +792,8 @@ mod tests {
         // process-global OnceLock, which cannot be reliably initialized
         // in parallel test execution). This verifies the same code path
         // that init_audit_log() uses internally.
-        let tmp = std::env::temp_dir().join(format!(
-            "quicfuscate_audit_global_test_{}.jsonl",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir()
+            .join(format!("quicfuscate_audit_global_test_{}.jsonl", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
 
         let log = AuditLog::open(tmp.clone()).unwrap();
@@ -821,10 +809,7 @@ mod tests {
 
         let content = std::fs::read_to_string(&tmp).unwrap_or_default();
         assert!(!content.is_empty(), "audit log file should not be empty after emit");
-        assert!(
-            AuditLog::verify_chain(&tmp).is_ok(),
-            "audit chain should be valid after emit"
-        );
+        assert!(AuditLog::verify_chain(&tmp).is_ok(), "audit chain should be valid after emit");
 
         let _ = std::fs::remove_file(&tmp);
     }
@@ -847,10 +832,8 @@ mod tests {
         // the test was not actually proving mode tightening from 0o644.
         use std::os::unix::fs::OpenOptionsExt;
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!(
-            "quicfuscate_audit_secure_test_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir()
+            .join(format!("quicfuscate_audit_secure_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let file_path = dir.join("audit.jsonl");
@@ -889,10 +872,8 @@ mod tests {
         // as root. We cannot easily assert "no chown happened" without root,
         // but we can assert the function returns normally and the parent's
         // ownership is unchanged. This test documents and locks the contract.
-        let parent = std::env::temp_dir().join(format!(
-            "quicfuscate_audit_parent_guard_{}",
-            std::process::id()
-        ));
+        let parent = std::env::temp_dir()
+            .join(format!("quicfuscate_audit_parent_guard_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&parent);
         std::fs::create_dir_all(&parent).unwrap();
         let file_path = parent.join("audit.jsonl");
