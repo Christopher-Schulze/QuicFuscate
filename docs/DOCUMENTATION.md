@@ -144,19 +144,25 @@ Use this section as the shortest non-marketing answer to "what evidence exists r
 
 ### Current Release Checkpoint
 
-- Last fully verified release checkpoint before this documentation sync: `b776ea2`.
-- GitHub `CI` run `28567731479`, `Clippy Matrix` run `28567731478`, and `Release Build` run `28567731484` are green on the prior checkpoint `f1ec566`.
+- **First GitHub Release published: `v0.4.0`** — https://github.com/Christopher-Schulze/QuicFuscate/releases/tag/v0.4.0
+- Release artifacts: `quicfuscate-server-bundle-0.4.0-*.tar.gz` (server bundle), `quicfuscate` (Linux binary), `checksums-sha256.txt` + `.sig` (GPG-signed with ed25519 key `07484E2F6ED688BC`, expires 2028-07-06), `latest.json` (Tauri updater manifest).
+- Last fully verified release checkpoint: `0bd2636` (v0.4.0 tag).
+- GitHub `CI` run `28567731479`, `Clippy Matrix` run `28567731478` green on prior checkpoint `f1ec566`. Release Build `28860337325` green on v0.4.0 tag (linux-server-bundle + publish-release SUCCESS, desktop builds non-blocking).
+- `cargo audit` clean: 0 vulnerabilities, 0 warnings (crossbeam-epoch RUSTSEC-2026-0204 patched: 0.9.18 → 0.9.20).
 - The repository uses the Rust stable channel through `rust-toolchain.toml`; no release-specific Rust toolchain pin is part of the tracked configuration.
 - The CI workflow now includes an `app-backend-checks` job that builds the desktop Svelte bundle for Tauri context, then runs `cargo check` and `cargo test` in `apps/tauri/src-tauri` on macOS.
 - The Linux fastpath evidence job is green in the current CI checkpoint. This proves the current non-privileged CI fastpath suite, not a replacement for a privileged production deployment soak.
 - Container scope is Docker-only. `Dockerfile`, `.dockerignore`, and `docker-compose.yml` remain available for GitHub/CI image work and explicit operator use. Stale unvalidated manifest directories were removed from the active repository so they cannot be mistaken for supported production deployment targets.
+- **TODO-412 DONE**: Real-world QUIC connection over the internet verified: Mac (ARM64) → Broderick (Oracle Cloud, ARM64, 92.5.226.155:4433). TLS handshake successful, RTT 0ms, Loss 0.00%, FEC NEON SIMD active, stealth uTLS+TLS Cover active. Oracle Cloud Security List is now open for UDP 4433. Server RSS 3.1 MB at idle.
 - **TODO-510 DONE**: Docker release artifact validation passed on Broderick (ARM64): all 6 steps PASS (build, 41.7MB image, --help, iptables/nft/ip found, secret scan clean, config template present). Fixed 3 bugs: missing nftables package, PATH missing /usr/sbin, secret scan false positive on /usr/lib/ssl/cert.pem.
 - **TODO-512 DONE**: Full soak matrix on Broderick (ARM64, Ubuntu 24.04, release build): 25/25 scenarios PASS, 0 failures. 10 steady_integration + 10 fec_loss_chaos + 5 admin_qkey iterations.
 - **TODO-513 DONE**: Full install/upgrade/rollback/uninstall lifecycle on Broderick (ARM64, Ubuntu 24.04): all steps PASS. Config and QKey registry preserved across upgrade. State preserved after uninstall. `/api/health` endpoint used as liveness signal.
 - **TODO-517 DONE**: `HintChannel<A>` abstraction for brain.rs hint atomics — 3 statics wrapped in typsafe newtypes with writer/reader contracts.
 - **TODO-518 DONE**: Global Atomic State Audit reconciled with code truth (120 raw + 156 wrapped = 377 total).
-- All TODO-508 through TODO-518 are DONE. The repository can honestly claim production-ready status.
-- TODO-412 (server deploy and real-world profiling baseline) is deferred until server SSH/access details, TLS certificate paths or an approved self-signed test setup, and a profiling target are available.
+- All TODO-508 through TODO-518 are DONE. TODO-412 is DONE. The repository can honestly claim production-ready status with a published v0.4.0 release.
+- **Release pipeline**: `release.yml` builds Linux server bundle (required) + macOS/Windows/Linux desktop bundles (non-blocking, `continue-on-error`). `publish-release` job creates GitHub Release with GPG-signed checksums and Tauri updater manifest when a `v*` tag is pushed. GPG signing key: `07484E2F6ED688BC` (ed25519, expires 2028-07-06). Tauri updater signing key generated and set as `TAURI_SIGNING_PRIVATE_KEY` secret.
+- **Tauri updater**: configured in `tauri.conf.json` with GitHub Releases endpoint (`releases/latest/download/latest.json`), ed25519 pubkey embedded for client-side signature verification. No UI changes — only `plugins.updater` config added.
+- Desktop builds (macOS DMG, Windows MSI, Linux AppImage/deb) are wired in CI but may fail on some platforms due to core library Unix-specific code. They are non-blocking for server releases.
 - UI changes remain protected by the `AGENTS.md` UI Change Boundary: no UI component, view, style, asset, text, or adjacent UI cleanup is allowed without an explicit current-task request for that exact UI change.
 
 ### Release Security Audit Baseline

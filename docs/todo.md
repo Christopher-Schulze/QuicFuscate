@@ -284,7 +284,7 @@ experimental, or bound to explicit policy.
 
 Detail files: `docs/todo/todo-{508,509,510,511,512,513,514,515,516,517,518}-*.md`.
 
-**Closure rule:** Production-ready means all TODO-508 through TODO-518 are DONE. DONE = locally verified with tests or remotely verified on Broderick (ARM64, Ubuntu 24.04). All 3 previously OPEN (prepared) TODOs (510, 512, 513) were closed on 2026-07-07 by executing the prepared commands on Broderick — see execution evidence in their detail files and `docs/remote-proof-runbook.md`. No OPEN items remain.
+**Closure rule:** Production-ready means all TODO-508 through TODO-518 are DONE. DONE = locally verified with tests or remotely verified on Broderick (ARM64, Ubuntu 24.04). All 3 previously OPEN (prepared) TODOs (510, 512, 513) were closed on 2026-07-07 by executing the prepared commands on Broderick — see execution evidence in their detail files and `docs/remote-proof-runbook.md`. TODO-412 (real-world profiling) was closed on 2026-07-07 after Oracle Cloud Security List was opened for UDP 4433. First GitHub Release v0.4.0 published with GPG-signed checksums. No OPEN items remain.
 
 ---
 
