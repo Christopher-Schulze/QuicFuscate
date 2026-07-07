@@ -192,9 +192,9 @@ jobs:
           # apps/tauri/src-tauri/target/ here — that directory never exists.
           path: |
             target/release/bundle/**/*.deb
+            target/release/bundle/**/*.deb.sig
             target/release/bundle/**/*.AppImage
-            target/release/bundle/**/*.AppImage.tar.gz
-            target/release/bundle/**/*.AppImage.tar.gz.sig
+            target/release/bundle/**/*.AppImage.sig
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
@@ -233,11 +233,13 @@ jobs:
 
           # Locate signed updater bundles (if any). The find invocations are
           # safe even if no desktop artifacts were downloaded.
+          # macOS: Tauri generates .app.tar.gz + .app.tar.gz.sig (updater archive)
+          # Linux: Tauri generates .AppImage + .AppImage.sig (signed directly, no archive)
           MACOS_TGZ=$(find release-artifacts -name "*.app.tar.gz" ! -name "*.sig" 2>/dev/null | head -1)
           MACOS_SIG=$(find release-artifacts -name "*.app.tar.gz.sig" 2>/dev/null | head -1)
-          LINUX_TGZ=$(find release-artifacts -name "*.AppImage.tar.gz" ! -name "*.sig" 2>/dev/null | head -1)
-          LINUX_SIG=$(find release-artifacts -name "*.AppImage.tar.gz.sig" 2>/dev/null | head -1)
-          export MACOS_TGZ MACOS_SIG LINUX_TGZ LINUX_SIG
+          LINUX_IMG=$(find release-artifacts -name "*.AppImage" ! -name "*.sig" 2>/dev/null | head -1)
+          LINUX_SIG=$(find release-artifacts -name "*.AppImage.sig" 2>/dev/null | head -1)
+          export MACOS_TGZ MACOS_SIG LINUX_IMG LINUX_SIG
 
           python3 - <<'PYEOF'
           import json
@@ -263,7 +265,7 @@ jobs:
           macos = platform_entry(os.environ.get("MACOS_TGZ", ""), os.environ.get("MACOS_SIG", ""))
           if macos:
               platforms["darwin-aarch64"] = macos
-          linux = platform_entry(os.environ.get("LINUX_TGZ", ""), os.environ.get("LINUX_SIG", ""))
+          linux = platform_entry(os.environ.get("LINUX_IMG", ""), os.environ.get("LINUX_SIG", ""))
           if linux:
               platforms["linux-x86_64"] = linux
 
