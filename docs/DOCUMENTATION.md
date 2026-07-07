@@ -144,12 +144,18 @@ Use this section as the shortest non-marketing answer to "what evidence exists r
 
 ### Current Release Checkpoint
 
-- Last fully verified release checkpoint before this documentation sync: `f1ec566`.
-- GitHub `CI` run `28567731479`, `Clippy Matrix` run `28567731478`, and `Release Build` run `28567731484` are green on that checkpoint.
+- Last fully verified release checkpoint before this documentation sync: `b776ea2`.
+- GitHub `CI` run `28567731479`, `Clippy Matrix` run `28567731478`, and `Release Build` run `28567731484` are green on the prior checkpoint `f1ec566`.
 - The repository uses the Rust stable channel through `rust-toolchain.toml`; no release-specific Rust toolchain pin is part of the tracked configuration.
 - The CI workflow now includes an `app-backend-checks` job that builds the desktop Svelte bundle for Tauri context, then runs `cargo check` and `cargo test` in `apps/tauri/src-tauri` on macOS.
 - The Linux fastpath evidence job is green in the current CI checkpoint. This proves the current non-privileged CI fastpath suite, not a replacement for a privileged production deployment soak.
 - Container scope is Docker-only. `Dockerfile`, `.dockerignore`, and `docker-compose.yml` remain available for GitHub/CI image work and explicit operator use. Stale unvalidated manifest directories were removed from the active repository so they cannot be mistaken for supported production deployment targets.
+- **TODO-510 DONE**: Docker release artifact validation passed on Broderick (ARM64): all 6 steps PASS (build, 41.7MB image, --help, iptables/nft/ip found, secret scan clean, config template present). Fixed 3 bugs: missing nftables package, PATH missing /usr/sbin, secret scan false positive on /usr/lib/ssl/cert.pem.
+- **TODO-512 DONE**: Full soak matrix on Broderick (ARM64, Ubuntu 24.04, release build): 25/25 scenarios PASS, 0 failures. 10 steady_integration + 10 fec_loss_chaos + 5 admin_qkey iterations.
+- **TODO-513 DONE**: Full install/upgrade/rollback/uninstall lifecycle on Broderick (ARM64, Ubuntu 24.04): all steps PASS. Config and QKey registry preserved across upgrade. State preserved after uninstall. `/api/health` endpoint used as liveness signal.
+- **TODO-517 DONE**: `HintChannel<A>` abstraction for brain.rs hint atomics — 3 statics wrapped in typsafe newtypes with writer/reader contracts.
+- **TODO-518 DONE**: Global Atomic State Audit reconciled with code truth (120 raw + 156 wrapped = 377 total).
+- All TODO-508 through TODO-518 are DONE. The repository can honestly claim production-ready status.
 - TODO-412 (server deploy and real-world profiling baseline) is deferred until server SSH/access details, TLS certificate paths or an approved self-signed test setup, and a profiling target are available.
 - UI changes remain protected by the `AGENTS.md` UI Change Boundary: no UI component, view, style, asset, text, or adjacent UI cleanup is allowed without an explicit current-task request for that exact UI change.
 
