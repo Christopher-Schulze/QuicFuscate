@@ -98,12 +98,22 @@ jobs:
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
-  # Desktop builds (Tauri) — macOS, Windows, Linux
+  # Desktop builds (Tauri) — macOS and Linux (non-blocking)
   # ---------------------------------------------------------------------------
-  # These jobs build the Tauri desktop app bundles (DMG/MSI/AppImage/deb)
-  # with updater signing. The frontend (svelte-desktop) is built as part of
-  # the Tauri build process via beforeBuildCommand. No UI changes are made;
-  # these jobs only package the existing frontend into native bundles.
+  # These jobs build the Tauri desktop app bundles with updater signing.
+  # The frontend (svelte-desktop) is built as part of the Tauri build process
+  # via beforeBuildCommand. No UI changes are made; these jobs only package
+  # the existing frontend into native bundles.
+  #
+  # These jobs are non-blocking (continue-on-error): if a desktop build fails,
+  # the server release still publishes. The latest.json generation in
+  # publish-release gracefully omits platforms whose updater bundles are
+  # missing. Desktop artifacts that do succeed are still downloaded and
+  # included in the GitHub Release.
+  #
+  # Windows is not included: the core QUIC library uses Unix-specific syscalls
+  # (libc::iovec, libc::msghdr, std::os::unix) in transport/batch.rs and
+  # other modules that are not yet cfg-gated for Windows. See TODO-519.
   # ---------------------------------------------------------------------------
   desktop-macos:
     runs-on: macos-latest
@@ -131,40 +141,15 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: quicfuscate-desktop-macos
+          # NOTE: .cargo/config.toml sets target-dir = "target" at the repo
+          # root, so the Tauri build output lands in <repo-root>/target/...
+          # even though `cargo tauri build` is invoked with
+          # working-directory: apps/tauri/src-tauri. Do NOT use
+          # apps/tauri/src-tauri/target/ here — that directory never exists.
           path: |
-            apps/tauri/src-tauri/target/aarch64-apple-darwin/release/bundle/**/*.dmg
-            apps/tauri/src-tauri/target/aarch64-apple-darwin/release/bundle/**/*.app
-          if-no-files-found: warn
-
-  desktop-windows:
-    runs-on: windows-latest
-    continue-on-error: true
-    env:
-      CARGO_INCREMENTAL: "0"
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.2.21"
-      - name: Install tauri-cli
-        run: cargo install tauri-cli --version "^2.0.0"
-      - name: Install dependencies
-        run: |
-          cd apps/svelte-desktop; bun install
-          cd ../..; bun install
-      - name: Build Tauri desktop app (Windows)
-        working-directory: apps/tauri/src-tauri
-        run: cargo tauri build
-      - name: Upload Windows bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: quicfuscate-desktop-windows
-          path: |
-            apps/tauri/src-tauri/target/release/bundle/**/*.msi
-            apps/tauri/src-tauri/target/release/bundle/**/*.exe
+            target/aarch64-apple-darwin/release/bundle/**/*.dmg
+            target/aarch64-apple-darwin/release/bundle/**/*.app.tar.gz
+            target/aarch64-apple-darwin/release/bundle/**/*.app.tar.gz.sig
           if-no-files-found: warn
 
   desktop-linux:
@@ -188,7 +173,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev librsvg2-dev \
             patchelf libssl-dev libgtk-3-dev libayatana-appindicator3-dev \
-            libappindicator3-dev 2>/dev/null || true
+            libglib2.0-dev
       - name: Install dependencies
         run: |
           cd apps/svelte-desktop && bun install
@@ -200,17 +185,28 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: quicfuscate-desktop-linux
+          # NOTE: .cargo/config.toml sets target-dir = "target" at the repo
+          # root, so the Tauri build output lands in <repo-root>/target/...
+          # even though `cargo tauri build` is invoked with
+          # working-directory: apps/tauri/src-tauri. Do NOT use
+          # apps/tauri/src-tauri/target/ here — that directory never exists.
           path: |
-            apps/tauri/src-tauri/target/release/bundle/**/*.deb
-            apps/tauri/src-tauri/target/release/bundle/**/*.AppImage
-            apps/tauri/src-tauri/target/release/bundle/**/*.rpm
+            target/release/bundle/**/*.deb
+            target/release/bundle/**/*.AppImage
+            target/release/bundle/**/*.AppImage.tar.gz
+            target/release/bundle/**/*.AppImage.tar.gz.sig
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
   # Release publishing — creates a GitHub Release with all artifacts
   # ---------------------------------------------------------------------------
   publish-release:
-    needs: [linux-server-bundle]
+    # Wait for ALL build jobs so their artifacts are available for download.
+    # The desktop jobs have continue-on-error: true, so a desktop build
+    # failure does NOT block publish-release — the job is treated as
+    # success for needs resolution. This ensures artifacts from successful
+    # desktop builds are present when actions/download-artifact runs.
+    needs: [linux-server-bundle, desktop-macos, desktop-linux]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
@@ -224,25 +220,69 @@ jobs:
       - name: Display structure
         run: find release-artifacts -type f | head -30
       - name: Generate latest.json for Tauri updater
+        # Generate the Tauri updater manifest with python3 so the output is
+        # guaranteed-valid JSON regardless of signature content (minisign sigs
+        # contain newlines) or which desktop builds succeeded. Platforms whose
+        # signed updater bundles are missing are omitted from the manifest.
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
           VERSION="${TAG#v}"
-          # Find the macOS DMG for the updater manifest
-          MACOS_DMG=$(find release-artifacts -name "*.dmg" | head -1)
-          # Generate the Tauri updater manifest
-          cat > latest.json <<EOF
-          {
-            "version": "${VERSION}",
-            "notes": "QuicFuscate ${TAG}",
-            "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "platforms": {
-              "darwin-aarch64": {
-                "signature": "",
-                "url": "https://github.com/Christopher-Schulze/QuicFuscate/releases/download/${TAG}/$(basename "$MACOS_DMG" 2>/dev/null || echo "quicfuscate-desktop-macos.dmg")"
-              }
-            }
+          REPO="Christopher-Schulze/QuicFuscate"
+          BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
+          export TAG VERSION BASE_URL
+
+          # Locate signed updater bundles (if any). The find invocations are
+          # safe even if no desktop artifacts were downloaded.
+          MACOS_TGZ=$(find release-artifacts -name "*.app.tar.gz" ! -name "*.sig" 2>/dev/null | head -1)
+          MACOS_SIG=$(find release-artifacts -name "*.app.tar.gz.sig" 2>/dev/null | head -1)
+          LINUX_TGZ=$(find release-artifacts -name "*.AppImage.tar.gz" ! -name "*.sig" 2>/dev/null | head -1)
+          LINUX_SIG=$(find release-artifacts -name "*.AppImage.tar.gz.sig" 2>/dev/null | head -1)
+          export MACOS_TGZ MACOS_SIG LINUX_TGZ LINUX_SIG
+
+          python3 - <<'PYEOF'
+          import json
+          import os
+          from datetime import datetime, timezone
+
+          tag = os.environ["TAG"]
+          version = os.environ["VERSION"]
+          base_url = os.environ["BASE_URL"]
+
+          def platform_entry(tgz, sig):
+              """Return (url, signature) if both bundle and signature exist, else None."""
+              if not tgz or not sig:
+                  return None
+              if not os.path.isfile(tgz) or not os.path.isfile(sig):
+                  return None
+              url = f"{base_url}/{os.path.basename(tgz)}"
+              with open(sig, "r", encoding="utf-8") as f:
+                  signature = f.read()
+              return {"signature": signature, "url": url}
+
+          platforms = {}
+          macos = platform_entry(os.environ.get("MACOS_TGZ", ""), os.environ.get("MACOS_SIG", ""))
+          if macos:
+              platforms["darwin-aarch64"] = macos
+          linux = platform_entry(os.environ.get("LINUX_TGZ", ""), os.environ.get("LINUX_SIG", ""))
+          if linux:
+              platforms["linux-x86_64"] = linux
+
+          if not platforms:
+              print("::warning::No signed desktop updater bundles found. "
+                    "latest.json will have empty platforms.")
+
+          manifest = {
+              "version": version,
+              "notes": f"QuicFuscate {tag}",
+              "pub_date": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "platforms": platforms,
           }
-          EOF
+
+          with open("latest.json", "w", encoding="utf-8") as f:
+              json.dump(manifest, f, indent=2)
+              f.write("\n")
+          PYEOF
+
           echo "Generated latest.json:"
           cat latest.json
       - name: Create GitHub Release

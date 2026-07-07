@@ -138,16 +138,17 @@ Use this section as the shortest non-marketing answer to "what evidence exists r
 - It does not replace external security review of the retained custom data-plane crypto and SIMD machine room.
 
 ### Release Scope
-- Distribution model: source-first release (open-source code distribution).
-- Signed desktop binaries are not part of the shipped source artifact set.
-- Updater integration exists in code and remains disabled in shipped source builds unless signed artifacts are provided.
+- Distribution model: source-first release (open-source code distribution) plus CI-built binary artifacts published to GitHub Releases.
+- Signed desktop bundles (macOS DMG + `.app.tar.gz` updater, Linux AppImage/deb + `.AppImage.tar.gz` updater) are built in CI with Tauri ed25519 signing when a `v*` tag is pushed. Desktop builds are non-blocking (`continue-on-error`): if a desktop build fails, the server release still publishes and `latest.json` gracefully omits the failed platform.
+- Updater integration is configured in `tauri.conf.json` with `bundle.createUpdaterArtifacts: true`, a GitHub Releases endpoint, and an embedded ed25519 pubkey. The `latest.json` manifest is generated in CI with real minisign signatures from the Tauri build output, including only platforms whose signed updater bundles are present.
+- Windows desktop bundles are not yet built — the core QUIC library requires Unix-specific syscalls that are not yet cfg-gated for Windows (see TODO-519).
 
 ### Current Release Checkpoint
 
 - **First GitHub Release published: `v0.4.0`** — https://github.com/Christopher-Schulze/QuicFuscate/releases/tag/v0.4.0
-- Release artifacts: `quicfuscate-server-bundle-0.4.0-*.tar.gz` (server bundle), `quicfuscate` (Linux binary), `checksums-sha256.txt` + `.sig` (GPG-signed with ed25519 key `07484E2F6ED688BC`, expires 2028-07-06), `latest.json` (Tauri updater manifest).
+- Release artifacts: `quicfuscate-server-bundle-0.4.0-*.tar.gz` (server bundle), `quicfuscate` (Linux binary), `checksums-sha256.txt` + `.sig` (GPG-signed with ed25519 key `07484E2F6ED688BC`, expires 2028-07-06), `latest.json` (Tauri updater manifest). Desktop bundles (macOS DMG + updater, Linux AppImage/deb + updater) are published when the desktop build jobs succeed.
 - Last fully verified release checkpoint: `0bd2636` (v0.4.0 tag).
-- GitHub `CI` run `28567731479`, `Clippy Matrix` run `28567731478` green on prior checkpoint `f1ec566`. Release Build `28860337325` green on v0.4.0 tag (linux-server-bundle + publish-release SUCCESS, desktop builds non-blocking).
+- GitHub `CI` run `28567731479`, `Clippy Matrix` run `28567731478` green on prior checkpoint `f1ec566`.
 - `cargo audit` clean: 0 vulnerabilities, 0 warnings (crossbeam-epoch RUSTSEC-2026-0204 patched: 0.9.18 → 0.9.20).
 - The repository uses the Rust stable channel through `rust-toolchain.toml`; no release-specific Rust toolchain pin is part of the tracked configuration.
 - The CI workflow now includes an `app-backend-checks` job that builds the desktop Svelte bundle for Tauri context, then runs `cargo check` and `cargo test` in `apps/tauri/src-tauri` on macOS.
@@ -160,9 +161,9 @@ Use this section as the shortest non-marketing answer to "what evidence exists r
 - **TODO-517 DONE**: `HintChannel<A>` abstraction for brain.rs hint atomics — 3 statics wrapped in typsafe newtypes with writer/reader contracts.
 - **TODO-518 DONE**: Global Atomic State Audit reconciled with code truth (120 raw + 156 wrapped = 377 total).
 - All TODO-508 through TODO-518 are DONE. TODO-412 is DONE. The repository can honestly claim production-ready status with a published v0.4.0 release.
-- **Release pipeline**: `release.yml` builds Linux server bundle (required) + macOS/Windows/Linux desktop bundles (non-blocking, `continue-on-error`). `publish-release` job creates GitHub Release with GPG-signed checksums and Tauri updater manifest when a `v*` tag is pushed. GPG signing key: `07484E2F6ED688BC` (ed25519, expires 2028-07-06). Tauri updater signing key generated and set as `TAURI_SIGNING_PRIVATE_KEY` secret.
-- **Tauri updater**: configured in `tauri.conf.json` with GitHub Releases endpoint (`releases/latest/download/latest.json`), ed25519 pubkey embedded for client-side signature verification. No UI changes — only `plugins.updater` config added.
-- Desktop builds (macOS DMG, Windows MSI, Linux AppImage/deb) are wired in CI but may fail on some platforms due to core library Unix-specific code. They are non-blocking for server releases.
+- **Release pipeline**: `release.yml` builds Linux server bundle (required for `publish-release`) + macOS and Linux desktop bundles (non-blocking, `continue-on-error`). `publish-release` creates the GitHub Release with GPG-signed checksums, any successful desktop bundle artifacts, and the Tauri updater manifest when a `v*` tag is pushed. GPG signing key: `07484E2F6ED688BC` (ed25519, expires 2028-07-06). Tauri updater signing key generated and set as `TAURI_SIGNING_PRIVATE_KEY` secret.
+- **Tauri updater**: configured in `tauri.conf.json` with `bundle.createUpdaterArtifacts: true` (required for Tauri to generate `.app.tar.gz` / `.AppImage.tar.gz` updater bundles and their `.sig` signature files), a GitHub Releases endpoint (`releases/latest/download/latest.json`), and an ed25519 pubkey embedded for client-side signature verification. The `latest.json` manifest is generated in CI with real minisign signatures read from the Tauri build output and proper artifact URLs for each platform. Platforms whose updater bundles are missing (e.g. due to a failed desktop build) are omitted from the manifest. No UI changes — only `plugins.updater` and `bundle.createUpdaterArtifacts` config added.
+- **Desktop platforms**: macOS (aarch64 DMG + `.app.tar.gz` updater bundle) and Linux (x86_64 AppImage/deb + `.AppImage.tar.gz` updater bundle) are built in CI as non-blocking jobs. Windows is not yet supported — the core QUIC library uses Unix-specific syscalls (`libc::iovec`, `libc::msghdr`, `std::os::unix`) in `transport/batch.rs` and other modules that are not yet cfg-gated for Windows. See TODO-519 for Windows desktop porting.
 - UI changes remain protected by the `AGENTS.md` UI Change Boundary: no UI component, view, style, asset, text, or adjacent UI cleanup is allowed without an explicit current-task request for that exact UI change.
 
 ### Release Security Audit Baseline
