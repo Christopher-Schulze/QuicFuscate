@@ -49,7 +49,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: quicfuscate-server-linux
-          path: scripts/out/build/
+          path: |
+            scripts/out/build/*.tar.gz
+            scripts/out/build/checksums-sha256.txt
+            scripts/out/build/checksums-sha256.txt.sig
           if-no-files-found: error
 
       - name: Upload release binary
@@ -249,7 +252,13 @@ jobs:
           TAG="${GITHUB_REF#refs/tags/}"
           # Upload latest.json alongside other artifacts
           cp latest.json release-artifacts/
+          # Only upload files (not directories). The server bundle artifact
+          # contains a staging directory alongside the tarball; gh release
+          # create cannot upload directories.
+          FILES=$(find release-artifacts -type f)
+          echo "Uploading files:"
+          echo "$FILES"
           gh release create "$TAG" \
             --title "QuicFuscate $TAG" \
             --generate-notes \
-            release-artifacts/**/*
+            $FILES
