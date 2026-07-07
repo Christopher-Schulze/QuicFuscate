@@ -40,12 +40,18 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 # Build dependencies for native crates (e.g. ring, zstd-sys). pkg-config and
 # libssl-dev are required for the rustls-native-certs and openssl-sys paths.
+# Bun is installed to build the Svelte web-admin UI (adapter-static output
+# is copied into assets/web-admin/ by build-web-admin.sh).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config \
         libssl-dev \
         ca-certificates \
         make \
-    && rm -rf /var/lib/apt/lists/*
+        unzip \
+        curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL https://bun.sh/install | bash \
+    && ln -s /root/.bun/bin/bun /usr/local/bin/bun
 
 WORKDIR /build
 
@@ -59,6 +65,14 @@ COPY scripts/ ./scripts/
 COPY config/ ./config/
 COPY apps/ ./apps/
 COPY packages/ ./packages/
+COPY bun.lock package.json ./
+
+# Build the Svelte web-admin UI (output → assets/web-admin/).
+# This runs before the Rust build so the web assets are available for
+# the server bundle. The workspace root bun.lock is installed first to
+# resolve @quicfuscate/theme and @quicfuscate/ui from packages/.
+RUN bun install --no-progress \
+    && bash scripts/build/build-web-admin.sh
 
 # Build the release binary with the default feature set
 # (client + server + rate_limiter). LTO=thin + codegen-units=1 are already
