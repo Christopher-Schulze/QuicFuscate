@@ -44,7 +44,12 @@ jobs:
 
       - name: Verify binary starts and reports help
         run: |
-          docker run --rm quicfuscate/server:ci --help > help-output.txt 2>&1
+          # The Dockerfile uses ENTRYPOINT ["/usr/bin/tini", "--"] with a CMD
+          # that runs "quicfuscate server ...".  Passing --help directly to
+          # `docker run` would replace the CMD (not the ENTRYPOINT), producing
+          # `tini -- --help` which fails because --help is not a command.
+          # We must invoke the binary explicitly via sh.
+          docker run --rm quicfuscate/server:ci sh -lc 'quicfuscate --help' > help-output.txt 2>&1
           grep -q "Usage" help-output.txt || {
             echo "ERROR: --help output does not contain 'Usage'"
             cat help-output.txt
