@@ -3864,7 +3864,7 @@ These checks are deterministic, offline, and fast, designed to integrate into an
 
 ## Global Atomic State Audit
 
-The codebase uses approximately 117 global `AtomicU64`/`AtomicU32`/`AtomicBool`/`AtomicUsize`/`AtomicI64` instances across modules. This section documents the rationale, ownership, and future direction.
+The codebase uses 120 global `AtomicU64`/`AtomicU32`/`AtomicBool`/`AtomicUsize`/`AtomicI64`/`AtomicU8` instances across modules, plus 156 `SafeGauge(AtomicI64)` and `Counter(AtomicU64)` newtype-wrapped atomics in `src/optimize/telemetry.rs` (377 total global atomic-backed state surfaces). The wrapped counters are the preferred pattern for new metrics: they encapsulate the atomic and provide a type-safe `inc()`/`read()` interface. This section documents the rationale, ownership, and future direction of the raw atomics; the wrapped counters are all read-only metrics and are covered by the same coupling analysis.
 
 ### Why Global Atomics
 
