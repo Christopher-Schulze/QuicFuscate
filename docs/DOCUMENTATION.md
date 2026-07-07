@@ -3874,16 +3874,18 @@ Global atomics provide lock-free, zero-overhead cross-module coordination for a 
 
 | Module | Count | Category | Purpose |
 |---|---|---|---|
-| `src/optimize/telemetry.rs` | 97 | Metrics/Counters | Telemetry counters for H3, stealth, FEC, SIMD usage, memory pool, io_uring, CPU features, I/O driver stats. Read-only observation surface for dashboards and diagnostics. |
+| `src/optimize/telemetry.rs` | 101 | Metrics/Counters + Runtime config | 95 telemetry counters (H3, stealth, FEC, SIMD, memory pool, io_uring, CPU features, I/O driver) + 6 runtime config gates (`COLLECT_PACKET_STATS`, `COLLECT_STREAM_STATS`, `COLLECT_CONGESTION_STATS`, `COLLECT_FEC_STATS`, `COLLECT_STEALTH_STATS`, `TELEMETRY_ENABLED`). Read-only observation surface for dashboards and diagnostics, plus collection on/off gates. |
 | `src/brain.rs` | 3 | Hint channels | Cross-subsystem coordination hints wrapped in a `HintChannel<A>` newtype with an explicit writer/reader contract at the declaration site (TODO-517): `FEC_INTERVAL_HINT_PKTS`, `FEC_REDUNDANCY_PPM`, `INTELLIGENT_STEALTH_LEVEL_HINT`. Written by StealthBrain/EscalationState and read by FEC/stealth runtime coordination paths via `.load()`/`.store()` (lock-free `Relaxed`). |
-| `src/optimize/` | 6 | Runtime config | NUMA round-robin node, NUMA node count, profile override, TLS limit, `LOCK_BLOCKS` (mlock gate for MemoryPool blocks, TODO-516). Hardware-adaptive runtime state. |
+| `src/optimize/` | 5 | Runtime config | `RR_NODE` (NUMA round-robin), `NUMA_NODES` (node count), `PROFILE_OVERRIDE` (profile override), `TLS_LIMIT_RUNTIME` (TLS limit), `LOCK_BLOCKS` (mlock gate for MemoryPool blocks, TODO-516). Hardware-adaptive runtime state. |
 | `src/transport/batch.rs` | 3 | Metrics | Batch send/recv/packet counters for transport telemetry. |
 | `src/crypto/` | 2 | Runtime config | `DATA_AEAD_OVERRIDE_MODE` (AEAD selection), `ARM_AES_OK` (ARM AES capability cache). |
 | `src/fec/` | 1 | Sequencing | `REPAIR_ID_COUNTER` - monotonic repair packet ID generator. |
 | `src/stealth/` | 1 | Round-robin | `DOH_PROVIDER_INDEX` - DoH provider rotation index. |
-| `src/qftls.rs` | 1 | Runtime gate | `TLS_OVERRIDE_REQUIRED` - TLS cover override flag. |
+| `src/qftls.rs` | 2 | Runtime gate | `TLS_OVERRIDE_REQUIRED` (TLS cover override flag), `MAX_EARLY_DATA_SIZE` (0-RTT data limit). |
 | `src/rng.rs` | 1 | Test gate | `TEST_FORCE_SECURE_ENTROPY_FAILURE` - test-only entropy failure injection. |
 | `src/main.rs` | 1 | Sequencing | `NEXT_ID` - connection ID generator. |
+
+**Total: 120 atomic statics** (recounted 2026-07-07, TODO-518). Previous count of 116 had drifted due to 6 uncounted telemetry config gates, an overcount in `optimize/`, and a missing `MAX_EARLY_DATA_SIZE` in `qftls.rs`.
 
 ### Trade-offs
 
@@ -3893,13 +3895,14 @@ Global atomics provide lock-free, zero-overhead cross-module coordination for a 
 
 ### Future Direction
 
-- **Metrics/counters (97 of 116)**: These are read-only observation surfaces and are appropriate as globals. No change planned.
+- **Metrics/counters (98 of 120)**: These are read-only observation surfaces (95 in `telemetry.rs` + 3 in `transport/batch.rs`) and are appropriate as globals. No change planned.
 - **Hint channels (3 in brain.rs)**: DONE (TODO-517). The 3 brain.rs hint atomics (`FEC_INTERVAL_HINT_PKTS`, `FEC_REDUNDANCY_PPM`, `INTELLIGENT_STEALTH_LEVEL_HINT`) are now wrapped in a `HintChannel<A: HintAtomic>` newtype with an explicit writer/reader contract string at the declaration site. Call sites use `.load()`/`.store()`; the raw `Ordering::Relaxed` is encapsulated inside the primitive and compiles to the same single instruction after inlining.
-- **Runtime config (7 across optimize/, crypto/, qftls.rs)**: Could migrate to a shared `RuntimeConfig` struct passed through the call chain, but current usage is stable and well-bounded.
+- **Runtime config (15 across telemetry.rs, optimize/, crypto/, qftls.rs)**: 6 telemetry collection gates + 5 optimize/ hardware-adaptive + 2 crypto/ AEAD/AES + 2 qftls/ TLS gates. Could migrate to a shared `RuntimeConfig` struct passed through the call chain, but current usage is stable and well-bounded.
 - **Sequencing (2 in fec/, main.rs)**: Standard pattern for ID generation. No change needed.
+- **Round-robin (1 in stealth/)**: Standard pattern for DoH provider rotation. No change needed.
 - **Test gates (1 in rng.rs)**: Test-only, acceptable as-is.
 
-The overall approach prioritizes runtime performance over architectural purity. The highest-return coupling-reduction target (the brain.rs hint channels) is now closed; the remaining globals are either read-only metrics, stable runtime config, or standard sequencing/test primitives.
+The overall approach prioritizes runtime performance over architectural purity. The highest-return coupling-reduction target (the brain.rs hint channels) is now closed; the remaining globals are either read-only metrics, stable runtime config, or standard sequencing/round-robin/test primitives.
 
 ## Troubleshooting
 
