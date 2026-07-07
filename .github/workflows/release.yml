@@ -93,3 +93,129 @@ jobs:
             scripts/out/build/checksums-sha256.txt
             scripts/out/build/checksums-sha256.txt.sig
           if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Desktop builds (Tauri) — macOS, Windows, Linux
+  # ---------------------------------------------------------------------------
+  # These jobs build the Tauri desktop app bundles (DMG/MSI/AppImage/deb)
+  # with updater signing. The frontend (svelte-desktop) is built as part of
+  # the Tauri build process via beforeBuildCommand. No UI changes are made;
+  # these jobs only package the existing frontend into native bundles.
+  # ---------------------------------------------------------------------------
+  desktop-macos:
+    runs-on: macos-latest
+    env:
+      CARGO_INCREMENTAL: "0"
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.21"
+      - name: Install dependencies
+        run: |
+          cd apps/svelte-desktop && bun install
+          cd ../../ && bun install
+      - name: Build Tauri desktop app (macOS)
+        working-directory: apps/tauri/src-tauri
+        run: cargo tauri build --target aarch64-apple-darwin
+      - name: Upload macOS bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: quicfuscate-desktop-macos
+          path: |
+            apps/tauri/src-tauri/target/aarch64-apple-darwin/release/bundle/**/*.dmg
+            apps/tauri/src-tauri/target/aarch64-apple-darwin/release/bundle/**/*.app
+          if-no-files-found: warn
+
+  desktop-windows:
+    runs-on: windows-latest
+    env:
+      CARGO_INCREMENTAL: "0"
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.21"
+      - name: Install dependencies
+        run: |
+          cd apps/svelte-desktop; bun install
+          cd ../..; bun install
+      - name: Build Tauri desktop app (Windows)
+        working-directory: apps/tauri/src-tauri
+        run: cargo tauri build
+      - name: Upload Windows bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: quicfuscate-desktop-windows
+          path: |
+            apps/tauri/src-tauri/target/release/bundle/**/*.msi
+            apps/tauri/src-tauri/target/release/bundle/**/*.exe
+          if-no-files-found: warn
+
+  desktop-linux:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: "0"
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.21"
+      - name: Install Linux desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
+            patchelf libssl-dev libgtk-3-dev libayatana-appindicator3-dev
+      - name: Install dependencies
+        run: |
+          cd apps/svelte-desktop && bun install
+          cd ../../ && bun install
+      - name: Build Tauri desktop app (Linux)
+        working-directory: apps/tauri/src-tauri
+        run: cargo tauri build
+      - name: Upload Linux bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: quicfuscate-desktop-linux
+          path: |
+            apps/tauri/src-tauri/target/release/bundle/**/*.deb
+            apps/tauri/src-tauri/target/release/bundle/**/*.AppImage
+            apps/tauri/src-tauri/target/release/bundle/**/*.rpm
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Release publishing — creates a GitHub Release with all artifacts
+  # ---------------------------------------------------------------------------
+  publish-release:
+    needs: [linux-server-bundle, desktop-macos, desktop-windows, desktop-linux]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+      - name: Display structure
+        run: find release-artifacts -type f | head -30
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          gh release create "$TAG" \
+            --title "QuicFuscate $TAG" \
+            --generate-notes \
+            release-artifacts/**/*
