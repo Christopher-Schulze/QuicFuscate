@@ -114,6 +114,8 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.2.21"
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2.0.0"
       - name: Install dependencies
         run: |
           cd apps/svelte-desktop && bun install
@@ -142,6 +144,8 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.2.21"
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2.0.0"
       - name: Install dependencies
         run: |
           cd apps/svelte-desktop; bun install
@@ -170,6 +174,8 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.2.21"
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2.0.0"
       - name: Install Linux desktop dependencies
         run: |
           sudo apt-get update
@@ -210,11 +216,35 @@ jobs:
           path: release-artifacts
       - name: Display structure
         run: find release-artifacts -type f | head -30
+      - name: Generate latest.json for Tauri updater
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          # Find the macOS DMG for the updater manifest
+          MACOS_DMG=$(find release-artifacts -name "*.dmg" | head -1)
+          # Generate the Tauri updater manifest
+          cat > latest.json <<EOF
+          {
+            "version": "${VERSION}",
+            "notes": "QuicFuscate ${TAG}",
+            "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "platforms": {
+              "darwin-aarch64": {
+                "signature": "",
+                "url": "https://github.com/Christopher-Schulze/QuicFuscate/releases/download/${TAG}/$(basename "$MACOS_DMG" 2>/dev/null || echo "quicfuscate-desktop-macos.dmg")"
+              }
+            }
+          }
+          EOF
+          echo "Generated latest.json:"
+          cat latest.json
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
+          # Upload latest.json alongside other artifacts
+          cp latest.json release-artifacts/
           gh release create "$TAG" \
             --title "QuicFuscate $TAG" \
             --generate-notes \
