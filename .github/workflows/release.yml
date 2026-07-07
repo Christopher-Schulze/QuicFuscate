@@ -64,12 +64,16 @@ jobs:
         # file before glob expansion, so `*` would include it and produce a
         # self-referential entry that fails `sha256sum -c` verification.
         # We therefore write to a temp file and move it into place after.
+        # Also, build-server-bundle.sh leaves a staging directory alongside
+        # the tarball; sha256sum cannot hash directories, so we only hash
+        # files (*.tar.gz, not the unpacked staging dir).
         run: |
           cd scripts/out/build/
-          # SHA-256 checksums for all bundle artifacts (excluding the
-          # checksum file itself, which doesn't exist yet during globbing).
+          # SHA-256 checksums for all bundle artifacts (files only, excluding
+          # the checksum file itself, which doesn't exist yet during globbing,
+          # and excluding staging directories left by build-server-bundle.sh).
           tmp=$(mktemp)
-          sha256sum * > "$tmp"
+          find . -maxdepth 1 -type f ! -name 'checksums-sha256.txt' -exec sha256sum {} + > "$tmp"
           mv "$tmp" checksums-sha256.txt
           # GPG signature if signing key is configured (optional)
           if [ -n "${{ secrets.RELEASE_GPG_KEY_ID }}" ]; then
