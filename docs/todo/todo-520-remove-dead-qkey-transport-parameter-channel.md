@@ -35,7 +35,7 @@ The current code is therefore not a proven live credential disclosure. It is dea
 - [x] Remove the dead client transport-parameter bearer path and retain encrypted HTTP/3 authentication.
 - [x] Prove invalid and missing credentials fail closed before protected data forwarding.
 - [x] Reconcile TODO-415 and current architecture/security documentation with protocol truth.
-- [ ] Run local, cross-target, CI, and Omega authentication proof.
+- [~] Run local, cross-target, CI, and Omega authentication proof.
 
 ## Notes
 
@@ -45,6 +45,7 @@ The current code is therefore not a proven live credential disclosure. It is dea
 - The dead trait methods, provider fields, parser/encoder, connection wrappers, unreachable server authentication branch, and four obsolete transport-parameter tests are removed. The real H3 injection tests now call the production helper instead of a duplicated stub.
 - Two table-driven regressions cover the complete H3 authentication outcome matrix and the shared fail-closed payload gate used by MASQUE and stream delivery. The runtime guardrail now fails on any reintroduced QKey transport-parameter producer, parser, accessor, server branch, or confidentiality overclaim.
 - Targeted local QKey validation passes 60/60 tests after removal. The full workspace gate passes with 1,671/1,671 library tests plus every binary, integration, runtime, parity, security, and example target; `qkey_auth_integration` proves valid encrypted H3 authentication succeeds and invalid authentication fails. Workspace Clippy passes with warnings denied. Windows GNU library check, feature-enabled test compilation/link, and feature-enabled Clippy with warnings denied also pass. Native CI and Omega proofs remain open.
+- Native Windows CI and the Clippy matrix passed on commit `eb283d2`. The first Omega deployment probe exposed a real release gap: the existing Linux server bundle is x86_64 while Omega is AArch64. The release workflow now builds a separate native `linux-arm64` server bundle on GitHub's ARM64 runner and blocks tagged publication on that artifact. Omega proof must use that exact native artifact rather than installing a Rust toolchain on the server.
 - No UI change is required or allowed.
 
 ## Deviations

@@ -112,6 +112,59 @@ jobs:
             scripts/out/build/checksums-sha256.txt.sig
           if-no-files-found: warn
 
+  linux-server-bundle-arm64:
+    needs: release-version-contract
+    runs-on: ubuntu-24.04-arm
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.21"
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-linux-arm64-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build native ARM64 release binary
+        run: cargo build --release
+
+      - name: Build admin web assets
+        run: |
+          bun install
+          bash scripts/build/build-web-admin.sh
+
+      - name: Create native ARM64 server bundle
+        run: |
+          bash scripts/build/build-server-bundle.sh \
+            --binary ./target/release/quicfuscate \
+            --assets ./assets/web-admin \
+            --name quicfuscate-server-bundle-linux-arm64
+          bundle=$(find scripts/out/build -maxdepth 1 -type f \
+            -name 'quicfuscate-server-bundle-linux-arm64-*.tar.gz' -print -quit)
+          test -n "$bundle"
+          sha256sum "$bundle" > "${bundle}.sha256"
+
+      - name: Upload native ARM64 server bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: quicfuscate-server-linux-arm64
+          path: |
+            scripts/out/build/quicfuscate-server-bundle-linux-arm64-*.tar.gz
+            scripts/out/build/quicfuscate-server-bundle-linux-arm64-*.tar.gz.sha256
+          if-no-files-found: error
+
   # ---------------------------------------------------------------------------
   # Desktop builds (Tauri) - macOS, Linux, and Windows
   # ---------------------------------------------------------------------------
@@ -260,9 +313,17 @@ jobs:
   # ---------------------------------------------------------------------------
   publish-release:
     # Wait for ALL build jobs so their artifacts are available for download.
-    # macOS and Linux are optional through continue-on-error. Windows is a
-    # required dependency, so a tag cannot publish without the signed MSI.
-    needs: [linux-server-bundle, desktop-macos, desktop-linux, desktop-windows]
+    # macOS and Linux desktop builds are optional through continue-on-error.
+    # Both server architectures and Windows are required dependencies, so a
+    # tag cannot publish without native server bundles and the signed MSI.
+    needs:
+      [
+        linux-server-bundle,
+        linux-server-bundle-arm64,
+        desktop-macos,
+        desktop-linux,
+        desktop-windows,
+      ]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
