@@ -32,7 +32,8 @@ pub fn decay_histogram(bins: &mut [u64], decay: f64) {
     {
         let has_avx512 = detector.has_feature(CpuFeature::AVX512F)
             && detector.has_feature(CpuFeature::AVX512BW)
-            && detector.has_feature(CpuFeature::AVX512DQ);
+            && detector.has_feature(CpuFeature::AVX512DQ)
+            && detector.has_feature(CpuFeature::AVX2);
         if has_avx512 {
             telemetry::BRAIN_HISTOGRAM_AVX512_OPS.inc();
             unsafe {
@@ -99,7 +100,8 @@ pub fn jensen_shannon_divergence(bins: &[u64], total: u64, target: &[f64]) -> f6
     {
         let has_avx512 = detector.has_feature(CpuFeature::AVX512F)
             && detector.has_feature(CpuFeature::AVX512BW)
-            && detector.has_feature(CpuFeature::AVX512DQ);
+            && detector.has_feature(CpuFeature::AVX512DQ)
+            && detector.has_feature(CpuFeature::AVX2);
         if has_avx512 {
             telemetry::BRAIN_HISTOGRAM_AVX512_OPS.inc();
             return unsafe { jensen_shannon_avx512(bins, total, target, len) };
@@ -209,14 +211,14 @@ unsafe fn u64x8_to_f64x8(v: std::arch::x86_64::__m512i) -> std::arch::x86_64::__
 unsafe fn f64x2_to_u64x2(v: std::arch::x86_64::__m128d) -> std::arch::x86_64::__m128i {
     use std::arch::x86_64::*;
 
-    let two_pow_63 = _mm_set1_pd(9_223_372_036_854_775_808.0f64);
-    let ge_mask_pd = _mm_cmpge_pd(v, two_pow_63);
-    let adjust = _mm_and_pd(ge_mask_pd, two_pow_63);
-    let adjusted = _mm_sub_pd(v, adjust);
-    let truncated = _mm_cvttpd_epi64(adjusted);
-    let hi_bias = _mm_set1_epi64x(0x8000_0000_0000_0000u64 as i64);
-    let ge_mask = _mm_castpd_si128(ge_mask_pd);
-    _mm_add_epi64(truncated, _mm_and_si128(ge_mask, hi_bias))
+    // `_mm_cvttpd_epi64` requires AVX-512DQ and AVX-512VL despite its 128-bit
+    // shape. Scalar lane casts preserve Rust's saturating `f64 as u64`
+    // semantics without injecting AVX-512 instructions into SSE4.1/AVX2 paths.
+    let mut lanes = [0.0f64; 2];
+    _mm_storeu_pd(lanes.as_mut_ptr(), v);
+    let low = lanes[0] as u64;
+    let high = lanes[1] as u64;
+    _mm_set_epi64x(high as i64, low as i64)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -248,7 +250,7 @@ unsafe fn f64x8_to_u64x8(v: std::arch::x86_64::__m512d) -> std::arch::x86_64::__
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f")]
+#[target_feature(enable = "avx2,avx512f,avx512dq")]
 unsafe fn decay_histogram_avx512(bins: &mut [u64], decay: f64) {
     use std::arch::x86_64::*;
 
@@ -329,7 +331,7 @@ unsafe fn decay_histogram_sse41(bins: &mut [u64], decay: f64) {
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f")]
+#[target_feature(enable = "avx2,avx512f,avx512dq")]
 unsafe fn jensen_shannon_avx512(bins: &[u64], total: u64, target: &[f64], len: usize) -> f64 {
     use std::arch::x86_64::*;
 
@@ -1708,6 +1710,33 @@ mod tests {
             }
             decay_histogram(&mut bins, decay);
             assert_eq!(bins, expected, "mismatch at len={len}");
+        }
+    }
+
+    #[test]
+    fn test_decay_histogram_matches_scalar_across_u64_range() {
+        let original = vec![
+            0,
+            1,
+            u32::MAX as u64,
+            1u64 << 32,
+            (1u64 << 53) - 1,
+            1u64 << 53,
+            (1u64 << 53) + 1,
+            (1u64 << 63) - 1,
+            1u64 << 63,
+            u64::MAX - 1,
+            u64::MAX,
+        ];
+
+        for decay in [0.5, 0.75, f64::from_bits(1.0f64.to_bits() - 1)] {
+            let expected: Vec<u64> =
+                original.iter().map(|&bin| ((bin as f64) * decay).floor() as u64).collect();
+            let mut actual = original.clone();
+
+            decay_histogram(&mut actual, decay);
+
+            assert_eq!(actual, expected, "mismatch for decay={decay}");
         }
     }
 
