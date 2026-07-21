@@ -6,12 +6,13 @@ use quicfuscate::engine::qkey;
 use quicfuscate::error::ConnectionError;
 use quicfuscate::fec::FecConfig;
 use quicfuscate::implementations::server::qkey_registry::{
-    qkey_id as registry_qkey_id, token_matches_hash, token_sha256_hex_from_token_hex, QKeyRegistry,
+    qkey_id as registry_qkey_id, token_sha256_hex_from_token_hex, QKeyRegistry,
 };
+use quicfuscate::implementations::server::{evaluate_qkey_http3_headers, QKeyHeaderAuthOutcome};
 use quicfuscate::optimize::OptimizeConfig;
 use quicfuscate::stealth::StealthConfig;
 use quicfuscate::transport::packet::PacketType;
-use quicfuscate::transport::{Config, ConnectionId, RecvInfo, PROTOCOL_VERSION};
+use quicfuscate::transport::{Config, ConnectionId, PROTOCOL_VERSION};
 
 struct ScopedEnvVar {
     key: &'static str,
@@ -22,6 +23,12 @@ impl ScopedEnvVar {
     fn set(key: &'static str, value: &str) -> Self {
         let previous = std::env::var(key).ok();
         std::env::set_var(key, value);
+        Self { key, previous }
+    }
+
+    fn remove(key: &'static str) -> Self {
+        let previous = std::env::var(key).ok();
+        std::env::remove_var(key);
         Self { key, previous }
     }
 }
@@ -48,6 +55,7 @@ fn mk_qkey(remote: &str, sni: &str, token_hex: &str) -> String {
     qkey::generate(&cfg)
 }
 
+#[derive(Debug)]
 struct SimResult {
     authed: bool,
     server_closed: bool,
@@ -90,11 +98,10 @@ fn simulate_qkey_http3_auth(
     // Tests run in-memory without real pacing. Use a large CWND to avoid artificial stalls.
     client_transport.set_initial_congestion_window_packets(10_000);
 
-    // Keep this test deterministic and focused on QKey auth, not masquerade cover traffic.
-    // Masquerade headers can be very large and are tested separately.
-    let mut stealth_config = StealthConfig::performance();
-    stealth_config.enable_http3_masquerading = false;
-    let fec_config = FecConfig::default();
+    // Exercise the product-default H3 masquerade and QPACK header path. A reduced
+    // non-masquerading configuration cannot prove the real CLI authentication path.
+    let stealth_config = StealthConfig::default();
+    let fec_config = FecConfig::product_default();
     let opt_config = OptimizeConfig::default();
 
     let sni = if qkey_cfg.sni.trim().is_empty() {
@@ -123,9 +130,6 @@ fn simulate_qkey_http3_auth(
 
     let mut out_client = vec![0u8; 262_144];
     let mut out_server = vec![0u8; 262_144];
-
-    let recv_info_c2s = RecvInfo { from: client_addr, to: server_addr, ecn: None };
-    let recv_info_s2c = RecvInfo { from: server_addr, to: client_addr, ecn: None };
 
     let deadline = Instant::now() + Duration::from_secs(8);
     let mut http3_sent = false;
@@ -167,8 +171,8 @@ fn simulate_qkey_http3_auth(
 
         // Create server upon first client packet.
         if server.is_none() {
-            match client.conn.send(&mut out_client) {
-                Ok((len, _)) if len > 0 => {
+            match client.send(&mut out_client) {
+                Ok(len) if len > 0 => {
                     let (hdr, _) =
                         quicfuscate::transport::packet::parse_header(&out_client[..len], 0)
                             .map_err(|e| format!("parse header failed: {e:?}"))?;
@@ -197,7 +201,7 @@ fn simulate_qkey_http3_auth(
                     )?;
 
                     // Feed first packet into server.
-                    match srv.conn.recv(&mut out_client[..len], &recv_info_c2s) {
+                    match srv.recv(&out_client[..len]) {
                         Ok(_) => {}
                         Err(ConnectionError::Done) => {}
                         Err(e) => return Err(format!("server recv failed: {e:?}")),
@@ -212,7 +216,7 @@ fn simulate_qkey_http3_auth(
 
         // Drive client -> server
         for _ in 0..16 {
-            let (len, _) = match client.conn.send(&mut out_client) {
+            let len = match client.send(&mut out_client) {
                 Ok(v) => v,
                 Err(ConnectionError::Done) => break,
                 Err(e) => return Err(format!("client send failed: {e:?}")),
@@ -222,7 +226,7 @@ fn simulate_qkey_http3_auth(
             }
             if let Some(ref mut srv) = server {
                 c2s_sent = c2s_sent.saturating_add(1);
-                match srv.conn.recv(&mut out_client[..len], &recv_info_c2s) {
+                match srv.recv(&out_client[..len]) {
                     Ok(_) => {}
                     Err(ConnectionError::Done) => {}
                     Err(e) => return Err(format!("server recv failed: {e:?}")),
@@ -233,7 +237,7 @@ fn simulate_qkey_http3_auth(
         // Drive server -> client
         if let Some(ref mut srv) = server {
             for _ in 0..16 {
-                let (len, _) = match srv.conn.send(&mut out_server) {
+                let len = match srv.send(&mut out_server) {
                     Ok(v) => v,
                     Err(ConnectionError::Done) => break,
                     Err(e) => return Err(format!("server send failed: {e:?}")),
@@ -242,7 +246,7 @@ fn simulate_qkey_http3_auth(
                     break;
                 }
                 s2c_sent = s2c_sent.saturating_add(1);
-                match client.conn.recv(&mut out_server[..len], &recv_info_s2c) {
+                match client.recv(&out_server[..len]) {
                     Ok(_) => {}
                     Err(ConnectionError::Done) => {}
                     Err(e) => return Err(format!("client recv failed: {e:?}")),
@@ -253,7 +257,7 @@ fn simulate_qkey_http3_auth(
         // Flush client ACKs / responses generated by the server->client flight above.
         if let Some(ref mut srv) = server {
             for _ in 0..16 {
-                let (len, _) = match client.conn.send(&mut out_client) {
+                let len = match client.send(&mut out_client) {
                     Ok(v) => v,
                     Err(ConnectionError::Done) => break,
                     Err(e) => return Err(format!("client send failed: {e:?}")),
@@ -262,7 +266,7 @@ fn simulate_qkey_http3_auth(
                     break;
                 }
                 c2s_sent = c2s_sent.saturating_add(1);
-                match srv.conn.recv(&mut out_client[..len], &recv_info_c2s) {
+                match srv.recv(&out_client[..len]) {
                     Ok(_) => {}
                     Err(ConnectionError::Done) => {}
                     Err(e) => return Err(format!("server recv failed: {e:?}")),
@@ -270,7 +274,17 @@ fn simulate_qkey_http3_auth(
             }
         }
 
-        if server.is_some() && !http3_sent && c2s_sent > 0 && s2c_sent > 0 {
+        if client.conn.is_established() && !client.conn.tls_handshake_complete() {
+            return Err("client reported established before TLS completed".to_string());
+        }
+        if server
+            .as_ref()
+            .is_some_and(|srv| srv.conn.is_established() && !srv.conn.tls_handshake_complete())
+        {
+            return Err("server reported established before TLS completed".to_string());
+        }
+
+        if server.is_some() && !http3_sent && client.conn.is_established() {
             match client.send_http3_request("/auth-check") {
                 Ok(_) => http3_sent = true,
                 Err(e) => last_h3_err = Some(format!("{e:?}")),
@@ -286,28 +300,10 @@ fn simulate_qkey_http3_auth(
                     if authed.get() {
                         return;
                     }
-                    let mut provided: Option<&[u8]> = None;
-                    for h in headers {
-                        if h.name().eq_ignore_ascii_case(b"x-qf-auth") {
-                            provided = Some(h.value());
-                            break;
-                        }
-                    }
-                    let Some(provided) = provided else {
-                        should_close.set(Some(b"missing_qkey_auth"));
-                        return;
-                    };
-                    let provided = match std::str::from_utf8(provided) {
-                        Ok(s) => s.trim(),
-                        Err(_) => {
-                            should_close.set(Some(b"invalid_qkey_auth"));
-                            return;
-                        }
-                    };
-                    if token_matches_hash(provided, expected.trim()) {
-                        authed.set(true);
-                    } else {
-                        should_close.set(Some(b"invalid_qkey_auth"));
+                    match evaluate_qkey_http3_headers(headers, Some(expected.trim()), false) {
+                        QKeyHeaderAuthOutcome::Authenticated => authed.set(true),
+                        QKeyHeaderAuthOutcome::Reject(reason) => should_close.set(Some(reason)),
+                        QKeyHeaderAuthOutcome::Unchanged => {}
                     }
                 },
                 |_sid, _data| {
@@ -343,6 +339,10 @@ fn simulate_qkey_http3_auth(
             });
         }
 
+        client.update_state();
+        if let Some(ref mut srv) = server {
+            srv.update_state();
+        }
         std::thread::sleep(Duration::from_millis(5));
     }
 }
@@ -357,11 +357,22 @@ fn qkey_http3_auth_accepts_valid_and_rejects_invalid_token() {
         .name("qkey_auth_integration".to_string())
         .stack_size(32 * 1024 * 1024)
         .spawn(|| {
-            let _allow_invalid_guard = ScopedEnvVar::set("QUICFUSCATE_ALLOW_INVALID_CERTS", "1");
             let good_token = mk_hex('a');
             let bad_token = mk_hex('b');
 
             let qkey_value = mk_qkey("127.0.0.1:4433", "example.com", &good_token);
+
+            {
+                let _verify_guard = ScopedEnvVar::remove("QUICFUSCATE_ALLOW_INVALID_CERTS");
+                let error = simulate_qkey_http3_auth(&qkey_value, &good_token, &good_token)
+                    .expect_err("untrusted server certificate must fail before HTTP/3 auth");
+                assert!(
+                    error.contains("invalid peer certificate"),
+                    "unexpected certificate failure: {error}"
+                );
+            }
+
+            let _allow_invalid_guard = ScopedEnvVar::set("QUICFUSCATE_ALLOW_INVALID_CERTS", "1");
 
             // Valid
             let ok = simulate_qkey_http3_auth(&qkey_value, &good_token, &good_token)

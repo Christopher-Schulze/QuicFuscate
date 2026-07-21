@@ -161,12 +161,13 @@ Use this section as the shortest non-marketing answer to "what evidence exists r
 - **TODO-513 DONE**: Full install/upgrade/rollback/uninstall lifecycle on Broderick (ARM64, Ubuntu 24.04): all steps PASS. Config and QKey registry preserved across upgrade. State preserved after uninstall. `/api/health` endpoint used as liveness signal.
 - **TODO-517 DONE**: `HintChannel<A>` abstraction for brain.rs hint atomics — 3 statics wrapped in typsafe newtypes with writer/reader contracts.
 - **TODO-518 DONE**: Global Atomic State Audit reconciled with code truth (120 raw + 156 wrapped = 377 total).
-- All TODO-508 through TODO-519 and TODO-412 are DONE. Current end-to-end production readiness is open only for TODO-520's CI and live Omega authentication closure.
+- All TODO-508 through TODO-519 and TODO-412 are DONE. Current end-to-end production readiness is open only for TODO-520's post-fix native gates, CI, and repeated live Omega authentication closure.
 - **Release pipeline**: `release.yml` first rejects any mismatch between the release tag, root product version, and Tauri bundle version through `scripts/audits/verify-release-version.sh`, then builds required native x86_64 and ARM64 Linux server bundles, optional macOS/Linux desktop bundles, and a required Windows MSI bundle. `publish-release` cannot publish a `v*` tag unless both server-architecture jobs and the Windows job succeed; it then creates the GitHub Release with checksums, available desktop artifacts, and `latest.json`. GPG signing key: `07484E2F6ED688BC` (ed25519, expires 2028-07-06). Tauri updater signing uses the `TAURI_SIGNING_PRIVATE_KEY` secret.
 - **Tauri updater**: `bundle.createUpdaterArtifacts: true` produces platform-specific updater artifacts: macOS `.app.tar.gz` plus `.sig`, Linux `.AppImage` plus `.sig`, and Windows `.msi` plus `.sig`. The workflow reads those signature files directly into `latest.json`, with release URLs for `darwin-aarch64`, `linux-x86_64`, and `windows-x86_64` when the corresponding pair exists. macOS/Linux may be omitted after optional job failure; Windows is required for tagged publication. This tracked contract still requires a live tag proof.
 - **Desktop platforms**: macOS and Linux remain optional release jobs. Windows is required and proven by native parallel MSVC CI plus the signed `v0.4.3` MSI and updater-manifest evidence under TODO-519.
 - **Current native Windows evidence**: CI run `29852866537`, job `88709840367`, passes check, all 1,673 tests in normal parallel execution, and Clippy with warnings denied.
 - **TODO-519 local regression evidence**: macOS root check/Clippy, 1,664 `rust-tests` library tests, `cargo test --workspace --all-targets --features rust-tests` including the integration harnesses, and `cargo clippy --workspace --all-targets --features rust-tests -- -D warnings` pass. TODO consistency passes across 165 detail files with zero violations, and runtime guardrails pass with zero critical findings and zero warnings. The native Tauri host passes check, 29/29 tests, and all-target Clippy through a temporary `TAURI_CONFIG` `frontendDist` URL override, which avoids generating or modifying the protected Svelte bundle and does not count as Windows packaging proof.
+- **TODO-520 post-fix local evidence**: 1,673/1,673 library tests and every workspace target pass with `rust-tests`; workspace all-target Clippy passes with warnings denied; TODO consistency passes across 166 detail files; runtime guardrails report zero critical findings and zero warnings. Real UDP CLI proof records `client_authenticated` only after a CA-verified TLS handshake and exits immediately with `UnknownIssuer` when the same CA is omitted.
 - UI changes remain protected by the `AGENTS.md` UI Change Boundary: no UI component, view, style, asset, text, or adjacent UI cleanup is allowed without an explicit current-task request for that exact UI change.
 
 ### Release Security Audit Baseline
@@ -268,7 +269,7 @@ Server hardening baseline:
 - Restrict `config/` and persistent state paths to owner-only access.
 - Configure log rotation and retention; avoid logging sensitive token material.
 - Back up config and QKey registry on controlled intervals with encrypted storage.
-- Enable memory locking (`[security] lock_memory = true`, `lock_blocks = true`) to prevent key material and crypto buffers from being swapped to disk. Requires `LimitMEMLOCK=infinity` in systemd or `CAP_IPC_LOCK`.
+- Enable memory locking (`[security] lock_memory = true`, `lock_blocks = true`) to prevent key material and crypto buffers from being swapped to disk. `LimitMEMLOCK=infinity` in systemd or `CAP_IPC_LOCK` enables current-and-future process locking; finite limits safely lock current pages only and retain best-effort per-block locking.
 - Enable tamper-evident audit logging via `--audit-log <path>` to record all security-relevant events (auth, QKey lifecycle, admin actions, privilege drops) in a hash-chained NDJSON file with mode 0o600.
 
 Admin UI hardening baseline:
@@ -316,7 +317,7 @@ The server runtime emits tamper-evident audit events to a hash-chained NDJSON lo
 - `AdminAction` - admin kick, failed config reload
 - `ConfigReloaded` - successful config reload
 
-**Memory locking (TODO-516):** When `[security] lock_memory = true` (default), the server calls `mlockall(MCL_CURRENT | MCL_FUTURE)` before loading key material, pinning all current and future pages against swap. When `lock_blocks = true` (default), each `MemoryPool` block is individually `mlock`ed on allocation via `MemoryPool::set_lock_blocks()`. Both require `LimitMEMLOCK=infinity` in systemd or `CAP_IPC_LOCK`. Failures are logged as warnings but do not abort startup (best-effort).
+**Memory locking (TODO-516):** When `[security] lock_memory = true` (default), the server reads `RLIMIT_MEMLOCK` before loading key material. An unlimited budget uses `mlockall(MCL_CURRENT | MCL_FUTURE)`; a finite or unreadable budget uses `MCL_CURRENT` so a successful call cannot make later allocations fail with `ENOMEM`. When `lock_blocks = true` (default), each `MemoryPool` block is individually `mlock`ed on allocation via `MemoryPool::set_lock_blocks()`. `LimitMEMLOCK=infinity` in the systemd unit preserves full current-and-future protection. Failures are warnings and block locking remains best-effort.
 
 ## Introduction & Purpose
 QuicFuscate is a forked stealth transport and VPN runtime built around a custom QUIC-like transport/data-plane posture, hybrid adaptive FEC, and a cohesive stealth stack. The canonical runtime is designed for strong censorship resilience and high-throughput operation under this forked protocol contract. It is not a drop-in upstream QUIC implementation.
@@ -413,7 +414,7 @@ The intended result is a homogeneous, believable fingerprint: normal QUIC crypto
 - `sec-ch-ua` major versions are derived from the active `User-Agent` to maintain internal consistency per browser/OS profile.
 
 ### TLS Boundary: rustls protocol with optional cover overlay
-- Real TLS: implemented via rustls in `src/qftls.rs` with `CombinedProvider` orchestrating a rustls protocol stack plus optional TLS Cover overlay - supports `--verify-peer`, `--ca-file`, and ALPN negotiation for HTTP/3.
+- Real TLS: implemented via rustls in `src/qftls.rs` with `CombinedProvider` orchestrating a rustls protocol stack plus optional TLS Cover overlay. Client certificate verification is enabled by default and mandatory in release builds; `--verify-peer` is retained as a compatibility flag, `--ca-file` adds a private trust anchor, and negotiated HTTP/3 is unavailable until rustls completes.
 - TLS Cover: cover provider in `qftls::CombinedProvider` is enabled by default and can be disabled with `QUICFUSCATE_TLS_COVER=0`. Generates synthetic QUIC `CRYPTO` frames during the TLS handshake phase only (correct QUIC behavior per RFC 9001 - CRYPTO frames do not appear post-handshake in real QUIC). Post-handshake cover is provided by three layers: Cover PINGs (QUIC PING frames at configurable intervals), Cover Stream injection (fake APPLICATION_DATA on stream 248), and Server Push Cover Traffic / TrafficPadding. The canonical runtime cover mode now comes from the active `StealthManager::runtime_tls_profile(...)`: `off`, `performance`, and `intelligent` drive the cover layer into performance mode, while stealth-heavy modes keep timing/jitter enabled. `StealthConfig.use_tls_cover` (TOML alias: `use_tls_cover_extras`) enables TLS Cover extras in the stealth manager (ticket manager and cert chain emulator) but does not control the cover provider itself. Cipher selection is automatic (`auto`) and prefers AES-128-GCM when hardware AES (AESNI/VAES/SVE AES) is available, otherwise falls back to ChaCha20-Poly1305. On x86 the ChaCha keystream dispatches AVX-512 -> AVX2 -> AVX -> SSE4.1/SSSE3 -> Scalar with telemetry (`CHACHA20_X4_AVX2_OPS`, `CHACHA20_X4_AVX_OPS`, `CHACHA20_X4_SSE41_OPS`, `CHACHA20_X4_SCALAR_OPS`). Override via `QUICFUSCATE_TLS_COVER_CIPHER=auto|chacha|aes`.
 - Ownership split: `qftls::CombinedProvider` provides a single runtime interface that keeps rustls as the security-critical protocol owner and composes the cover layer for observable mimicry behavior where enabled.
 - Fork boundary: rustls/TLS Cover governs the TLS-visible handshake story only. The custom 1-RTT data-plane AEAD posture in `src/crypto/` and `src/transport/*` is a separate fork-specific transport decision, valid only under the explicit full-fork assumption, and must not be interpreted as a TLS cipher-suite or upstream interoperability claim.
@@ -2670,7 +2671,7 @@ Global CLI flags (all commands):
 Note: TLS provider selection and fingerprinting are internal.
 
 **TLS/Debug (client only):**
-- `--verify-peer` - validate server certificate
+- `--verify-peer` - compatibility flag; server certificate validation is already enabled
 - `--ca-file <PATH>` - CA file for verification
 - `--no-utls` - disable uTLS and use standard TLS
 - `--debug-tls` - enable additional TLS trace diagnostics through the `QUICFUSCATE_TRACE_TLS` path; transport keylog export is not wired in this fork
@@ -3932,13 +3933,13 @@ The overall approach prioritizes runtime performance over architectural purity. 
 
 **Common causes:**
 - Certificate mismatch between client SNI and server certificate CN/SAN
-- Expired or self-signed certificate without `verify_peer = false` on the client
+- Expired, untrusted, CA-marked end-entity, or SNI-mismatched server certificate
 - ALPN protocol mismatch
 
 **Fixes:**
 1. Verify certificate validity: `openssl x509 -in server.crt -noout -dates`
 2. Check SNI matches: ensure `connection.sni` in client config matches the server certificate
-3. For testing, set `connection.verify_peer = false` in client config
+3. For debug-build testing only, set `connection.verify_peer = false` or `QUICFUSCATE_ALLOW_INVALID_CERTS=1`; release builds always verify
 4. Verify ALPN alignment between client and server `connection.alpn` arrays
 
 #### Connection Timeout

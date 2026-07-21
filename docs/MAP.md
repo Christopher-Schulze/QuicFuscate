@@ -122,7 +122,7 @@ Uses `StealthConfig::from_mode(runtime_mode)` - was silently using `..Default::d
 ## Critical Wiring Paths
 
 1. Client CLI -> runtime init: `src/main.rs` -> `src/core.rs` -> `src/transport/connection.rs`
-2. TLS handshake path: `src/qftls.rs` (`CombinedProvider`) -> rustls keys -> `src/transport/packet.rs`
+2. TLS handshake path: `src/qftls.rs` (`CombinedProvider`, release verification mandatory) -> rustls keys/errors -> `src/transport/connection.rs` TLS-bound application readiness -> `src/core.rs` terminal error propagation -> `src/transport/packet.rs`
 3. Stealth shaping path: `src/stealth/` (`StealthManager`) -> `src/transport/config.rs` -> `src/transport/connection.rs`
 4. FEC encode/decode path: `src/fec/` (`AdaptiveFec`) -> transport observer hooks -> packet egress/ingress
 5. Linux client zero-copy inbound path: `src/implementations/client/io_driver.rs` -> pool-backed `src/optimize/uring_batch.rs` `UringRecvBatch` -> `src/core.rs` `recv_pooled_block()` -> `src/fec/mod.rs` -> `src/transport/connection.rs`
@@ -140,7 +140,7 @@ Uses `StealthConfig::from_mode(runtime_mode)` - was silently using `..Default::d
 17. GitHub CI app backend gate: `.github/workflows/ci.yml` `app-backend-checks` -> `apps/svelte-desktop` build output -> `apps/tauri/src-tauri` `cargo check` / `cargo test`
 18. NAT traversal path discovery: `src/engine/config.rs` `[nat_traversal]` -> `src/transport/config.rs` `NatTraversalConfig` -> `src/transport/nat.rs` `NatPathDiscovery` -> path-management consumers when policy permits discovery.
 19. Audit logging path: `src/main.rs::run_server()` `--audit-log <path>` -> `src/audit/mod.rs::init_audit_log()` (global `OnceLock<Arc<AuditLog>>`) -> `crate::audit::audit()` calls at server start/stop, privilege drop, auth success/failure, QKey issued/revoked, admin actions, config reload.
-20. Memory locking path: `src/engine/config.rs` `[security] lock_memory/lock_blocks` -> `src/main.rs::run_server()` `mlockall(MCL_CURRENT | MCL_FUTURE)` -> `src/optimize/mod.rs` `MemoryPool::set_lock_blocks()` -> `mlock_block()` in `alloc_numa_block()`.
+20. Memory locking path: `src/engine/config.rs` `[security] lock_memory/lock_blocks` -> `src/main.rs::run_server()` `RLIMIT_MEMLOCK` gate -> unlimited `mlockall(MCL_CURRENT | MCL_FUTURE)` or finite-limit `MCL_CURRENT` -> `src/optimize/mod.rs` `MemoryPool::set_lock_blocks()` -> best-effort `mlock_block()` in `alloc_numa_block()`.
 21. Windows core CI gate: `.github/workflows/ci.yml` `windows-core-checks` -> native `windows-latest` `cargo check --lib` -> serial `cargo test --lib --features rust-tests -- --test-threads=1 --nocapture` -> `cargo clippy --lib --features rust-tests -- -D warnings`.
 22. Windows signed release path: `scripts/audits/verify-release-version.sh` -> `.github/workflows/release.yml` `release-version-contract` -> `desktop-windows` Tauri MSI build -> `.msi` plus `.msi.sig` verification -> required `publish-release` dependency -> `latest.json` `windows-x86_64` entry.
 

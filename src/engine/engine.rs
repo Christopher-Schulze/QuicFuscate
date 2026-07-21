@@ -127,11 +127,16 @@ fn build_runtime_transport_config(config: &EngineConfig) -> Result<Config, Engin
 
     if !config.connection.ca_file.trim().is_empty() {
         let ca_file = Path::new(&config.connection.ca_file);
-        let _ = transport
-            .load_verify_locations_from_file(ca_file.to_str().unwrap_or_default())
-            .map_err(|error| {
-                log::warn!("failed to load CA file '{}': {error}", ca_file.to_string_lossy());
-            });
+        let ca_path = ca_file.to_str().ok_or_else(|| {
+            EngineError::Config(format!(
+                "CA file path is not valid UTF-8: {}",
+                ca_file.to_string_lossy()
+            ))
+        })?;
+        transport.load_verify_locations_from_file(ca_path).map_err(|error| {
+            EngineError::Config(format!("failed to load CA file '{}': {error}", ca_path))
+        })?;
+        crate::qftls::set_tls_ca_path(ca_path);
     }
 
     if !config.connection.cert_file.trim().is_empty()
@@ -1449,6 +1454,21 @@ mod tests {
         let disabled_transport =
             build_runtime_transport_config(&disabled).expect("transport config");
         assert!(disabled_transport.disable_active_migration);
+    }
+
+    #[test]
+    fn test_runtime_transport_config_rejects_missing_ca_file() {
+        let mut config = EngineConfig::default();
+        config.connection.ca_file = std::env::temp_dir()
+            .join(format!("quicfuscate-missing-engine-ca-{}.pem", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+
+        let error = match build_runtime_transport_config(&config) {
+            Err(error) => error,
+            Ok(_) => panic!("a configured CA path must fail closed when it cannot be loaded"),
+        };
+        assert!(matches!(error, EngineError::Config(_)));
     }
 
     #[test]

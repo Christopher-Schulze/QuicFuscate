@@ -980,6 +980,7 @@ impl QuicFuscateConnection {
             )));
         }
 
+        let mut terminal_receive_error = None;
         for mut packet in recovered_packets.drain(..) {
             // payload_mut_unique() returns None when the FEC decoder still
             // holds an Arc clone of the shared buffer. In that case, copy the
@@ -992,8 +993,17 @@ impl QuicFuscateConnection {
                     to: self.local_addr,
                     ecn: None,
                 };
-                if let Err(e) = self.conn.recv(data, &recv_info) {
-                    debug!("transport::recv failed (possible probe): {}", e);
+                if let Err(error) = self.conn.recv(data, &recv_info) {
+                    if matches!(
+                        error,
+                        crate::error::ConnectionError::TlsError(_)
+                            | crate::error::ConnectionError::TlsAlert(_)
+                            | crate::error::ConnectionError::PeerCertificateUnsupported
+                    ) {
+                        terminal_receive_error = Some(error);
+                        break;
+                    }
+                    debug!("transport::recv failed (possible probe): {}", error);
                     self.stealth_manager.handle_fallback(data, self.peer_addr);
                 }
             } else if let Some(slice) = packet.payload_slice() {
@@ -1007,14 +1017,28 @@ impl QuicFuscateConnection {
                     to: self.local_addr,
                     ecn: None,
                 };
-                if let Err(e) = self.conn.recv(data, &recv_info) {
-                    debug!("transport::recv failed (possible probe): {}", e);
+                if let Err(error) = self.conn.recv(data, &recv_info) {
+                    if matches!(
+                        error,
+                        crate::error::ConnectionError::TlsError(_)
+                            | crate::error::ConnectionError::TlsAlert(_)
+                            | crate::error::ConnectionError::PeerCertificateUnsupported
+                    ) {
+                        terminal_receive_error = Some(error);
+                        self.optimization_manager.free_block(buf);
+                        break;
+                    }
+                    debug!("transport::recv failed (possible probe): {}", error);
                     self.stealth_manager.handle_fallback(data, self.peer_addr);
                 }
                 self.optimization_manager.free_block(buf);
             }
         }
         self.fec_receive_scratch = recovered_packets;
+
+        if let Some(error) = terminal_receive_error {
+            return Err(error);
+        }
 
         self.conn
             .do_tls_handshake(self.tls_ch_override_template.as_deref())

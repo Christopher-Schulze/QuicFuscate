@@ -446,7 +446,7 @@ Important flags (selection):
 
 ```
   --no-utls               Disable uTLS and use regular TLS
-  --verify-peer           Validate the server certificate
+  --verify-peer           Compatibility flag; certificate validation is already enabled
   --ca-file <path>        CA file for verification (client only)
   --debug-tls             Enable TLS trace diagnostics (via QUICFUSCATE_TRACE_TLS; keylog export is not available)
   --list-fingerprints     List built-in browser/OS fingerprint profiles (runtime-ready, no external dump required)

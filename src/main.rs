@@ -833,7 +833,7 @@ enum Commands {
         /// List available browser fingerprints
         #[clap(long)]
         list_fingerprints: bool,
-        /// Enable certificate validation when connecting to the server
+        /// Compatibility flag; certificate validation is always enabled
         #[clap(long)]
         verify_peer: bool,
         /// QKey string used to authenticate with the server (provides the
@@ -1587,7 +1587,10 @@ async fn run_client(
         }
     };
     apply_runtime_transport_defaults(&mut config, cc_algorithm);
-    config.verify_peer(verify_peer);
+    config.verify_peer(true);
+    if verify_peer {
+        log::debug!("--verify-peer is retained for compatibility; verification is already enabled");
+    }
     if debug_tls {
         warn!(
             "--debug-tls currently relies on QUICFUSCATE_TRACE_TLS tracing paths; transport keylog emission is not wired in this fork"
@@ -1802,6 +1805,7 @@ async fn run_client(
     };
     let mut housekeeping = interval(Duration::from_millis(5));
     housekeeping.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut next_stats_log = tokio::time::Instant::now();
 
     loop {
         tokio::select! {
@@ -1821,12 +1825,21 @@ async fn run_client(
                 match recv_res {
                     Ok(len) => {
                         telemetry!(quicfuscate::telemetry::BYTES_RECEIVED.inc_by(len as u64));
-                        if let Err(e) = conn.recv(&buf[..len]) {
-                            error!("QUIC recv failed: {:?}", e);
-                        } else if let Err(e) =
-                            flush_connected_outgoing(&socket, &mut conn, &mut out).await
-                        {
-                            warn!("Failed to send response packet: {}", e);
+                        match conn.recv(&buf[..len]) {
+                            Err(error @ (quicfuscate::error::ConnectionError::TlsError(_)
+                                | quicfuscate::error::ConnectionError::TlsAlert(_)
+                                | quicfuscate::error::ConnectionError::PeerCertificateUnsupported)) => {
+                                error!("TLS handshake failed: {}", error);
+                                return Err(std::io::Error::other(error.to_string()));
+                            }
+                            Err(error) => error!("QUIC recv failed: {:?}", error),
+                            Ok(_) => {
+                                if let Err(error) =
+                                    flush_connected_outgoing(&socket, &mut conn, &mut out).await
+                                {
+                                    warn!("Failed to send response packet: {}", error);
+                                }
+                            }
                         }
                         // TUN uplink: forward frames from the TUN reader channel
                         // to the MASQUE data plane. This is done here (in the recv
@@ -1940,11 +1953,15 @@ async fn run_client(
                 }
 
                 conn.update_state();
-                info!(
-                    "client stats: RTT {:.0} ms, Loss {:.2}%",
-                    conn.rtt_ms(),
-                    conn.loss_rate() * 100.0
-                );
+                let now = tokio::time::Instant::now();
+                if now >= next_stats_log {
+                    info!(
+                        "client stats: RTT {:.0} ms, Loss {:.2}%",
+                        conn.rtt_ms(),
+                        conn.loss_rate() * 100.0
+                    );
+                    next_stats_log = now + Duration::from_secs(1);
+                }
                 // Only drive the idle timeout when the connection has actually been
                 // idle; calling it every tick collapses cwnd and inflates loss.
                 if conn.conn.idle_timeout_elapsed() {
@@ -2182,6 +2199,41 @@ mtu = 100
     }
 }
 
+#[cfg(unix)]
+fn mlockall_flags_for_limit(current_limit: libc::rlim_t) -> libc::c_int {
+    if current_limit == libc::RLIM_INFINITY {
+        libc::MCL_CURRENT | libc::MCL_FUTURE
+    } else {
+        libc::MCL_CURRENT
+    }
+}
+
+#[cfg(unix)]
+fn current_memlock_limit() -> std::io::Result<libc::rlim_t> {
+    let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+    // SAFETY: getrlimit initializes the pointed-to rlimit structure on success.
+    let result = unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, limit.as_mut_ptr()) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: a zero return from getrlimit guarantees the structure was initialized.
+    Ok(unsafe { limit.assume_init() }.rlim_cur)
+}
+
+#[cfg(all(test, unix))]
+mod memory_lock_tests {
+    use super::*;
+
+    #[test]
+    fn finite_memlock_limit_never_enables_future_allocation_locking() {
+        assert_eq!(mlockall_flags_for_limit(8 * 1024 * 1024), libc::MCL_CURRENT);
+        assert_eq!(
+            mlockall_flags_for_limit(libc::RLIM_INFINITY),
+            libc::MCL_CURRENT | libc::MCL_FUTURE
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_server(
     listen_addr: &str,
@@ -2303,9 +2355,27 @@ async fn run_server(
     if lock_memory {
         #[cfg(unix)]
         {
-            // SAFETY: mlockall with MCL_CURRENT | MCL_FUTURE pins all current
-            // and future pages. Requires CAP_IPC_LOCK or RLIMIT_MEMLOCK=infinity.
-            let flags = libc::MCL_CURRENT | libc::MCL_FUTURE;
+            let flags = match current_memlock_limit() {
+                Ok(limit) => {
+                    let flags = mlockall_flags_for_limit(limit);
+                    if flags == libc::MCL_CURRENT {
+                        log::warn!(
+                            "RLIMIT_MEMLOCK is finite ({} bytes); locking current pages only to avoid future allocation failures. Set LimitMEMLOCK=infinity for full process locking.",
+                            limit
+                        );
+                    }
+                    flags
+                }
+                Err(error) => {
+                    log::warn!(
+                        "RLIMIT_MEMLOCK query failed: {}. Locking current pages only to avoid future allocation failures.",
+                        error
+                    );
+                    libc::MCL_CURRENT
+                }
+            };
+            // SAFETY: flags contain only MCL_CURRENT and, when the process has an
+            // unlimited memlock budget, MCL_FUTURE.
             if unsafe { libc::mlockall(flags) } != 0 {
                 let err = std::io::Error::last_os_error();
                 log::warn!(
@@ -2314,7 +2384,7 @@ async fn run_server(
                     err
                 );
             } else {
-                info!("Process memory locked against swap (mlockall MCL_CURRENT | MCL_FUTURE)");
+                info!("Process memory locked against swap (mlockall flags={flags})");
             }
         }
         #[cfg(not(unix))]

@@ -2033,6 +2033,24 @@ pub struct LiveClientDatagramResult {
     pub remove_auth_conn_id: Option<Vec<u8>>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QKeyDatagramAuthProgress {
+    Pending,
+    Authenticated,
+    Rejected,
+}
+
+fn qkey_datagram_auth_result(
+    conn_id: &[u8],
+    progress: QKeyDatagramAuthProgress,
+) -> Option<(Vec<u8>, bool)> {
+    match progress {
+        QKeyDatagramAuthProgress::Pending => None,
+        QKeyDatagramAuthProgress::Authenticated => Some((conn_id.to_vec(), true)),
+        QKeyDatagramAuthProgress::Rejected => Some((conn_id.to_vec(), false)),
+    }
+}
+
 #[cfg(unix)]
 pub async fn send_live_datagram_to(
     socket: &tokio::net::UdpSocket,
@@ -2213,6 +2231,7 @@ pub async fn process_live_server_client_datagram(
     let expected_token_sha256 = qkey_auth.as_ref().map(|state| state.expected_token_sha256.clone());
     let auth_gate =
         Arc::new(AtomicBool::new(qkey_auth.as_ref().map(|state| state.authed).unwrap_or(true)));
+    let auth_progress = Cell::new(QKeyDatagramAuthProgress::Pending);
     let should_close: Cell<Option<&'static [u8]>> = Cell::new(None);
 
     // Install the MASQUE→TUN sink when TUN bridging is active. Decoded MASQUE
@@ -2277,8 +2296,10 @@ pub async fn process_live_server_client_datagram(
             QKeyHeaderAuthOutcome::Unchanged => {}
             QKeyHeaderAuthOutcome::Authenticated => {
                 auth_gate.store(true, AtomicOrdering::Relaxed);
+                auth_progress.set(QKeyDatagramAuthProgress::Authenticated);
             }
             QKeyHeaderAuthOutcome::Reject(reason) => {
+                auth_progress.set(QKeyDatagramAuthProgress::Rejected);
                 should_close.set(Some(reason));
             }
         },
@@ -2319,8 +2340,7 @@ pub async fn process_live_server_client_datagram(
     // loop was either redundant (datagrams already drained) or wrote corrupted
     // bytes (MASQUE flow-id varint prefix not stripped) and has been removed.
 
-    let auth_result =
-        require_auth.then(|| (conn_id.clone(), auth_gate.load(AtomicOrdering::Relaxed)));
+    let auth_result = qkey_datagram_auth_result(&conn_id, auth_progress.get());
     let mut remove_auth_conn_id = None;
     if let Some(reason) = should_close.get() {
         close_live_client_for_qkey_auth_failure(conn, metrics, addr, reason);
@@ -6591,6 +6611,21 @@ mod tests {
             connected_at: Instant::now(),
         };
         assert!(!state.is_expired());
+    }
+
+    #[test]
+    fn qkey_datagram_auth_result_preserves_pending_state() {
+        let conn_id = b"pending-auth";
+
+        assert_eq!(qkey_datagram_auth_result(conn_id, QKeyDatagramAuthProgress::Pending), None);
+        assert_eq!(
+            qkey_datagram_auth_result(conn_id, QKeyDatagramAuthProgress::Authenticated),
+            Some((conn_id.to_vec(), true))
+        );
+        assert_eq!(
+            qkey_datagram_auth_result(conn_id, QKeyDatagramAuthProgress::Rejected),
+            Some((conn_id.to_vec(), false))
+        );
     }
 
     #[test]

@@ -629,7 +629,15 @@ pub fn create_provider(
     is_server: bool,
     crypto: Arc<RwLock<CryptoContext>>,
 ) -> Result<Box<dyn QuicTlsProvider>, ConnectionError> {
-    Ok(Box::new(CombinedProvider::new(is_server, crypto)?))
+    create_provider_with_peer_verification(is_server, crypto, true)
+}
+
+pub(crate) fn create_provider_with_peer_verification(
+    is_server: bool,
+    crypto: Arc<RwLock<CryptoContext>>,
+    verify_peer: bool,
+) -> Result<Box<dyn QuicTlsProvider>, ConnectionError> {
+    Ok(Box::new(CombinedProvider::new(is_server, crypto, verify_peer)?))
 }
 
 // ===============================
@@ -652,8 +660,9 @@ impl CombinedProvider {
     pub fn new(
         is_server: bool,
         crypto: Arc<RwLock<CryptoContext>>,
+        verify_peer: bool,
     ) -> Result<Self, ConnectionError> {
-        let rustls = RustlsProvider::new(is_server, crypto.clone())?;
+        let rustls = RustlsProvider::new(is_server, crypto.clone(), verify_peer)?;
         // Cover is optional and intentionally separated from TLS protocol semantics.
         // It can be disabled via ENV QUICFUSCATE_TLS_COVER=0.
         // In base/performance mode, cover keeps traffic shape with reduced timing overhead.
@@ -841,6 +850,8 @@ mod rustls_provider {
         pub crypto: Arc<RwLock<CryptoContext>>,
         /// True if this is a server-side provider.
         pub is_server: bool,
+        /// Whether the client verifies the server certificate.
+        pub verify_peer: bool,
         /// Whether the TLS handshake has completed.
         pub handshake_complete: bool,
         /// Current write-side encryption level.
@@ -970,16 +981,18 @@ mod rustls_provider {
         pub fn new(
             is_server: bool,
             crypto: Arc<RwLock<CryptoContext>>,
+            verify_peer: bool,
         ) -> Result<Self, ConnectionError> {
             let connection = if is_server {
                 Self::create_server_connection()?
             } else {
-                Self::create_client_connection()?
+                Self::create_client_connection(verify_peer)?
             };
             let this = Self {
                 connection,
                 crypto,
                 is_server,
+                verify_peer,
                 handshake_complete: false,
                 write_level: super::Level::Initial,
                 alpn: None,
@@ -1147,7 +1160,11 @@ mod rustls_provider {
             Ok(roots)
         }
 
-        fn create_client_connection() -> Result<rustls::quic::Connection, ConnectionError> {
+        fn create_client_connection(
+            verify_peer: bool,
+        ) -> Result<rustls::quic::Connection, ConnectionError> {
+            #[cfg(not(debug_assertions))]
+            let _ = verify_peer;
             let roots = Self::build_client_root_store()?;
 
             let builder = ClientConfig::builder_with_provider(Arc::new(
@@ -1156,14 +1173,12 @@ mod rustls_provider {
             .with_protocol_versions(&[&rustls::version::TLS13])
             .map_err(|e| ConnectionError::TlsError(format!("Protocol version error: {}", e)))?;
             #[cfg(debug_assertions)]
-            let allow_invalid =
-                crate::env_utils::env_flag("QUICFUSCATE_ALLOW_INVALID_CERTS", false);
+            let allow_invalid = !verify_peer
+                || crate::env_utils::env_flag("QUICFUSCATE_ALLOW_INVALID_CERTS", false);
             #[cfg(not(debug_assertions))]
             let allow_invalid = false;
             let config = if allow_invalid {
-                log::warn!(
-                    "QUICFUSCATE_ALLOW_INVALID_CERTS is enabled; TLS certificate verification is disabled (debug build only)"
-                );
+                log::warn!("TLS certificate verification is disabled for this debug build");
                 #[cfg(debug_assertions)]
                 {
                     builder
@@ -1386,14 +1401,12 @@ mod rustls_provider {
             .with_protocol_versions(&[&rustls::version::TLS13])
             .map_err(|e| ConnectionError::TlsError(format!("Protocol version error: {}", e)))?;
             #[cfg(debug_assertions)]
-            let allow_invalid =
-                crate::env_utils::env_flag("QUICFUSCATE_ALLOW_INVALID_CERTS", false);
+            let allow_invalid = !self.verify_peer
+                || crate::env_utils::env_flag("QUICFUSCATE_ALLOW_INVALID_CERTS", false);
             #[cfg(not(debug_assertions))]
             let allow_invalid = false;
             let cfg = if allow_invalid {
-                log::warn!(
-                    "QUICFUSCATE_ALLOW_INVALID_CERTS is enabled; TLS certificate verification is disabled (debug build only)"
-                );
+                log::warn!("TLS certificate verification is disabled for this debug build");
                 #[cfg(debug_assertions)]
                 {
                     builder
@@ -1811,8 +1824,9 @@ mod rustls_provider {
     pub(super) fn make(
         is_server: bool,
         crypto: Arc<RwLock<CryptoContext>>,
+        verify_peer: bool,
     ) -> Result<RustlsProviderImpl, ConnectionError> {
-        RustlsProviderImpl::new(is_server, crypto)
+        RustlsProviderImpl::new(is_server, crypto, verify_peer)
     }
 }
 
@@ -1824,8 +1838,9 @@ impl RustlsProvider {
     pub fn new(
         is_server: bool,
         crypto: Arc<RwLock<CryptoContext>>,
+        verify_peer: bool,
     ) -> Result<Self, ConnectionError> {
-        Ok(Self(rustls_provider::make(is_server, crypto)?))
+        Ok(Self(rustls_provider::make(is_server, crypto, verify_peer)?))
     }
 }
 

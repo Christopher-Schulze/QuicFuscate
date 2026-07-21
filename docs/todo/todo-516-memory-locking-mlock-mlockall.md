@@ -81,7 +81,9 @@ across reboots and can be recovered by an attacker with disk access.
   `LOCK_BLOCKS` is true.
 - `run_server()` in `src/main.rs` reads `security.lock_memory` and
   `security.lock_blocks` from the EngineConfig TOML and:
-  - Calls `mlockall(MCL_CURRENT | MCL_FUTURE)` before key material is loaded.
+  - Reads `RLIMIT_MEMLOCK` before key material is loaded.
+  - Calls `mlockall(MCL_CURRENT | MCL_FUTURE)` only for an unlimited budget.
+  - Uses `MCL_CURRENT` for finite or unreadable limits so future allocations cannot fail with `ENOMEM` after a superficially successful lock.
   - Calls `MemoryPool::set_lock_blocks(lock_blocks)` before pool creation.
 - `scripts/install/quicfuscate-server.service` already has
   `LimitMEMLOCK=infinity` (added during TODO-511).
@@ -92,3 +94,4 @@ across reboots and can be recovered by an attacker with disk access.
   `cargo test --workspace --all-targets --features rust-tests` PASS (0 failures).
 - `rg 'mlockall|mlock\b' src` now returns matches in `src/main.rs` (mlockall)
   and `src/optimize/mod.rs` (mlock_block, munlock_block, LOCK_BLOCKS).
+- TODO-520 live proof added a finite-limit regression for flag selection after Omega exposed the future-allocation hazard. The systemd path remains fully locked through `LimitMEMLOCK=infinity`; standalone finite-limit runs degrade safely.

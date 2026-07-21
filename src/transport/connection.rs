@@ -908,7 +908,11 @@ impl Connection {
         let crypto_arc = self.crypto.clone();
 
         // Create the TLS composition stack (rustls + optional TLS Cover).
-        let provider = crate::qftls::create_provider(self.is_server, crypto_arc.clone())?;
+        let provider = crate::qftls::create_provider_with_peer_verification(
+            self.is_server,
+            crypto_arc.clone(),
+            self.config.verify_peer,
+        )?;
 
         // Store provider
         self.tls_provider = Some(provider);
@@ -1117,12 +1121,20 @@ impl Connection {
             }
 
             for chunk in chunks {
-                provider.provide_quic_data(level, &chunk)?;
+                if let Err(error) = provider.provide_quic_data(level, &chunk) {
+                    self.local_error = Some(error.clone());
+                    self.is_closed = true;
+                    return Err(error);
+                }
             }
             // Install any newly derived secrets into the shared CryptoContext.
             // Without this, the transport would never transition to 1-RTT and application streams
             // (including HTTP/3 HEADERS carrying x-qf-auth) would stall behind the handshake gate.
-            provider.poll_secrets_and_install(&self.crypto)?;
+            if let Err(error) = provider.poll_secrets_and_install(&self.crypto) {
+                self.local_error = Some(error.clone());
+                self.is_closed = true;
+                return Err(error);
+            }
             self.refresh_short_header_tag_reserve();
         } else {
             // Store in crypto stream for later processing
@@ -3115,6 +3127,12 @@ impl Connection {
     /// Returns true if the connection is established
     pub fn is_established(&self) -> bool {
         self.is_established
+            && !self.is_closed
+            && self
+                .tls_provider
+                .as_ref()
+                .map(|provider| provider.handshake_complete())
+                .unwrap_or(true)
     }
 
     /// Returns true if the connection is closed
