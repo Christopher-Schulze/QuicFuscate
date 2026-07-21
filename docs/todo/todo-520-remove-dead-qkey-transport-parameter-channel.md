@@ -4,7 +4,7 @@ title: Remove dead QKey transport-parameter channel and false confidentiality cl
 severity: HIGH
 phase: S
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-07-21
 depends_on: [TODO-415]
 supersedes: []
@@ -39,8 +39,8 @@ The current code is therefore not a proven live credential disclosure. It is dea
 - [x] Reconcile TODO-415 and current architecture/security documentation with protocol truth.
 - [x] Fail closed on TLS verification errors and bind application readiness to rustls completion.
 - [x] Harden finite-limit memory locking and rate-limit client statistics logging found during live proof.
-- [~] Preserve one signal listener for the server/client runtime lifetime and rate-limit server statistics logging.
-- [ ] Re-run full local, cross-target, CI, and Omega authentication and graceful-shutdown proof.
+- [x] Preserve one signal listener for the server/client runtime lifetime and rate-limit server statistics logging.
+- [x] Re-run full local, cross-target, CI, and Omega authentication and graceful-shutdown proof.
 
 ## Notes
 
@@ -56,6 +56,8 @@ The current code is therefore not a proven live credential disclosure. It is dea
 - Live proof also exposed 5 ms info-log spam and a finite-`RLIMIT_MEMLOCK` hazard. Client statistics are now emitted at most once per second. `MCL_FUTURE` is enabled only with an unlimited memlock budget; finite or unreadable limits use `MCL_CURRENT`, while per-block locking remains best-effort. This preserves full systemd protection with `LimitMEMLOCK=infinity` without allowing a standalone server's future allocations to fail with `ENOMEM`.
 - The second native ARM64 Omega proof completed TLS in 10.8 ms, sent HTTP/3 immediately, recorded `client_authenticated`, exposed exactly one client through the admin API, and held loss at 0.00%. Missing QKey traffic never established TLS or appeared as a second admin client; an untrusted certificate exited status 1 with `UnknownIssuer`.
 - The same proof exposed two additional runtime defects: server-side client statistics still logged every 5 ms, and a signal listener recreated inside the busy `tokio::select!` loop could be absent when SIGTERM or SIGINT arrived. Both signals left the server alive and required SIGKILL. Completion now requires persistent one-shot signal registration, server-side log rate limiting, and a repeated Omega shutdown proof.
+- Commit `da36a44` preserves one pinned signal listener for each server/client runtime and limits server client-stat lines to at most once per second. Local authenticated TLS/H3 proof logged one server stats line per second, accepted SIGTERM under load, and exited cleanly with `Server stopped`; the client also exited on SIGINT.
+- Native ARM64 release job `88755477168` produced bundle SHA-256 `b15ce68b28919c3bf25dad47123c1c744934e4eb4cd7154a7ad8fed936658464` and binary SHA-256 `26e28ab069d9b5376ec5e4757f78b2e627e7ec5e251333bcdc88da6a28a00e55`. Omega TLS completed in 10.3 ms, sent HTTP/3, emitted `client_authenticated`, held loss at 0.00%, kept server statistics near 1 Hz, rejected an untrusted CA with status 1 and `UnknownIssuer`, timed out a missing-QKey pending session without protected forwarding, and stopped the loaded server on SIGTERM in 108 ms. Full CI `29866349165`, Clippy Matrix `29866348616`, and Release Build `29866348442` all pass on commit `da36a44`; the release includes signed Windows MSI plus Linux, macOS, x86_64 server, and native ARM64 server artifacts.
 - No UI change is required or allowed.
 
 ## Deviations

@@ -4,7 +4,7 @@ title: Graceful shutdown (SIGTERM, SIGHUP reload, drain mode, systemd notify)
 severity: HIGH
 phase: "I"
 priority: P1
-status: DONE
+status: OPEN
 created: 2026-06-30
 depends_on: ["TODO-446"]
 ---
@@ -99,6 +99,12 @@ With `Type=notify` in a systemd unit, systemd:
   no graceful stop signaling)
 
 ## Goal
+
+### 2026-07-21 Reality Check
+
+TODO-448 was previously marked DONE after SIGTERM/SIGINT handling was added, but its broader acceptance contract was never implemented. Native ARM64 Omega proof on commit `7e335d3` showed that a listener recreated inside the busy runtime loop could miss both signals and require SIGKILL. Commit `da36a44` fixes that cancellation gap by preserving one pinned listener for the runtime lifetime; the repeated Omega proof stopped an authenticated, loaded server in 108 ms and logged `SIGTERM received` plus `Server stopped`.
+
+The current runtime still closes all clients immediately through `shutdown_live()`. It has no `Running -> Draining -> Stopped` lifecycle, configurable grace period, SIGHUP reload, admin drain/status API, or live wiring for the existing systemd notifier. This TODO is reopened for those original unmet acceptance criteria. The verified signal-delivery fix remains complete and must not regress.
 
 1. **SIGTERM handler** — graceful shutdown on SIGTERM, identical to ctrl_c but
    with proper drain semantics.
