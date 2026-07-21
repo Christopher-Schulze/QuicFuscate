@@ -20,21 +20,20 @@ pub mod core {
         SimdDispatch::popcnt(data)
     }
 
-    /// Ultra-fast CRC32 computation with hardware acceleration
+    /// IEEE CRC-32 computation with hardware acceleration where the polynomial matches.
     #[inline(always)]
     pub fn crc32(data: &[u8], initial: u32) -> u32 {
-        let features = FeatureDetector::instance().features_full();
-
-        #[cfg(target_arch = "x86_64")]
-        if features.sse42 {
-            return unsafe { crc32_sse42(data, initial) };
-        }
-
         #[cfg(target_arch = "aarch64")]
-        if features.crc32 {
-            return unsafe { crc32_armv8(data, initial) };
+        {
+            let features = FeatureDetector::instance().features_full();
+            if features.crc32 {
+                // SAFETY: Runtime feature detection matches the callee's target feature.
+                // ARM's CRC32 instructions implement the IEEE polynomial used here.
+                return unsafe { crc32_armv8(data, initial) };
+            }
         }
 
+        // x86 SSE4.2 CRC instructions implement CRC32C (Castagnoli), not IEEE CRC-32.
         crc32_scalar(data, initial)
     }
 
@@ -368,50 +367,6 @@ pub mod core {
                 idx = 0;
             }
         }
-    }
-
-    /// Ultra-fast CRC32 with SSE4.2 hardware acceleration (x86_64)
-    #[cfg(target_arch = "x86_64")]
-    #[target_feature(enable = "sse4.2")]
-    #[inline]
-    unsafe fn crc32_sse42(data: &[u8], mut crc: u32) -> u32 {
-        use std::arch::x86_64::*;
-
-        crc = !crc; // CRC32 uses inverted initial value
-        let mut i = 0;
-        let len = data.len();
-
-        // Process 8 bytes at a time with CRC32 instruction
-        while i + 8 <= len {
-            let chunk = u64::from_le_bytes([
-                data[i],
-                data[i + 1],
-                data[i + 2],
-                data[i + 3],
-                data[i + 4],
-                data[i + 5],
-                data[i + 6],
-                data[i + 7],
-            ]);
-            crc = _mm_crc32_u64(crc as u64, chunk) as u32;
-            i += 8;
-        }
-
-        // Process 4 bytes
-        if i + 4 <= len {
-            let chunk = u32::from_le_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
-            crc = _mm_crc32_u32(crc, chunk);
-            i += 4;
-        }
-
-        // Process remaining bytes
-        while i < len {
-            crc = _mm_crc32_u8(crc, data[i]);
-            i += 1;
-        }
-
-        telemetry::CRC32_SSE42_OPS.inc();
-        !crc // Return with final inversion
     }
 
     /// Ultra-fast CRC32 with ARMv8 CRC32 instructions (aarch64)
@@ -2218,6 +2173,11 @@ mod tests {
         let crc1 = core::crc32(data, 0);
         let crc2 = core::crc32(data, 0);
         assert_eq!(crc1, crc2);
+    }
+
+    #[test]
+    fn test_crc32_ieee_known_vector() {
+        assert_eq!(core::crc32(b"123456789", 0), 0xCBF4_3926);
     }
 
     #[test]

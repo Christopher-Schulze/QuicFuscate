@@ -63,7 +63,7 @@ fn decrypt_payload(data: &[u8], key: &[u8; 32]) -> Option<Vec<u8>> {
         return None; // Too short to be encrypted
     }
     if &data[..ENC_MAGIC.len()] != ENC_MAGIC {
-        return None; // Not encrypted — plaintext file
+        return None; // Not encrypted - plaintext file
     }
 
     use crate::crypto::aead::AeadOpen;
@@ -200,9 +200,9 @@ impl QKeyRegistry {
         let plaintext = match load_enc_key() {
             Some(key) => match decrypt_payload(&bytes, &key) {
                 Some(decrypted) => decrypted,
-                None => bytes, // Not encrypted or decryption failed — try plaintext
+                None => bytes, // Not encrypted or decryption failed - try plaintext
             },
-            None => bytes, // No key configured — read as plaintext
+            None => bytes, // No key configured - read as plaintext
         };
 
         let mut entries: Vec<QKeyRecord> = match serde_json::from_slice(&plaintext) {
@@ -430,7 +430,7 @@ impl QKeyRegistry {
                     payload
                 }
             },
-            None => payload, // No key — write plaintext (backward compatible)
+            None => payload, // No key - write plaintext (backward compatible)
         };
 
         if let Err(e) = super::fsutil::atomic_write_file(
@@ -496,14 +496,14 @@ fn policy_from_parsed_qkey(
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_ascii_lowercase())
-        .and_then(|s| if s == "auto" { None } else { Some(s) });
+        .filter(|s| s != "auto");
     let fec = cfg
         .fec
         .as_deref()
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_ascii_lowercase())
-        .and_then(|s| if s == "auto" { None } else { Some(s) });
+        .filter(|s| s != "auto");
     (stealth, fec)
 }
 

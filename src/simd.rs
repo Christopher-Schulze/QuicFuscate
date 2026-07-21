@@ -931,14 +931,6 @@ pub(crate) mod arm {
         scalar::aes_encrypt_block(state, key)
     }
     #[inline(always)]
-    pub(super) unsafe fn ghash_pmull(h: &[u8; 16], data: &[u8], tag: &mut [u8; 16]) {
-        // Delegate to crypto::gcm::ghash which performs runtime PMULL/VPCLMUL selection.
-        // This ensures ARM PMULL acceleration is actually used when available.
-        let t = crate::crypto::gcm::ghash(*h, &[], data);
-        tag.copy_from_slice(&t);
-    }
-
-    #[inline(always)]
     unsafe fn compress_sha_blocks(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
         #[cfg(not(windows))]
         sha2_asm::compress256(state, blocks);
@@ -1879,23 +1871,20 @@ pub mod core {
         scalar::xor_blocks(dst, src)
     }
 
-    /// CRC32 with hardware acceleration
+    /// IEEE CRC-32 with hardware acceleration where the instruction polynomial matches.
     #[inline(always)]
     pub fn crc32(data: &[u8], initial: u32) -> u32 {
-        let features = FeatureDetector::instance();
-
-        // SAFETY: Runtime feature check matches the callee's `#[target_feature]`.
-        // Both callees only read `data` and return a scalar - no pointer invariants.
-        #[cfg(target_arch = "x86_64")]
-        if features.has_feature(CpuFeature::SSE42) {
-            return unsafe { super::x86::crc32_sse42(data, initial) };
-        }
-
         #[cfg(target_arch = "aarch64")]
-        if features.has_feature(CpuFeature::CRC32) {
-            return unsafe { arm::crc32_arm(data, initial) };
+        {
+            let features = FeatureDetector::instance();
+            if features.has_feature(CpuFeature::CRC32) {
+                // SAFETY: Runtime feature detection matches the callee's target feature.
+                // The ARM CRC32 instructions implement the IEEE polynomial used here.
+                return unsafe { arm::crc32_arm(data, initial) };
+            }
         }
 
+        // x86 SSE4.2 CRC instructions implement CRC32C (Castagnoli), not IEEE CRC-32.
         scalar::crc32(data, initial)
     }
 
@@ -2345,33 +2334,7 @@ pub mod crypto {
     /// GHASH for GCM mode
     #[inline(always)]
     pub fn ghash(h: &[u8; 16], data: &[u8], tag: &mut [u8; 16]) {
-        let features = FeatureDetector::instance();
-
-        // SAFETY: Each branch is guarded by runtime feature detection matching
-        // the callee's `#[target_feature]`. `h` and `tag` are fixed-size [u8; 16]
-        // arrays. Callees process `data` in 16-byte chunks with remainder handling,
-        // so no out-of-bounds access occurs.
-        #[cfg(target_arch = "x86_64")]
-        {
-            if features.has_feature(CpuFeature::VPCLMULQDQ)
-                && features.has_feature(CpuFeature::AVX512F)
-                && features.has_feature(CpuFeature::AVX512VL)
-            {
-                return unsafe { super::x86::ghash_vpclmulqdq(h, data, tag) };
-            }
-            if features.has_feature(CpuFeature::PCLMULQDQ) {
-                return unsafe { super::x86::ghash_pclmulqdq(h, data, tag) };
-            }
-        }
-
-        #[cfg(target_arch = "aarch64")]
-        {
-            if features.has_feature(CpuFeature::PMULL) {
-                return unsafe { arm::ghash_pmull(h, data, tag) };
-            }
-        }
-
-        scalar::ghash(h, data, tag)
+        tag.copy_from_slice(&crate::crypto::gcm::ghash(*h, &[], data));
     }
 
     #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -2559,14 +2522,13 @@ pub mod qpack {
 mod x86 {
     use super::scalar;
     use std::arch::x86_64::*;
-    use std::sync::Once;
 
     pub(super) use super::x86_extended::{
         encode_varint_avx2, encode_varint_avx512, encode_varint_sse2, pack_bits_bmi2,
-        qpack_decode_avx2, qpack_decode_ssse3, qpack_encode_ssse3, reed_solomon_decode_avx2,
-        reed_solomon_decode_gfni, reed_solomon_encode_avx2, reed_solomon_encode_gfni,
-        string_compare_avx2, string_compare_sse42, unpack_bits_bmi2, validate_header_avx2,
-        validate_header_sse2, varint_decode_bmi2,
+        qpack_decode_avx2, qpack_decode_ssse3, qpack_encode_avx2, qpack_encode_ssse3,
+        reed_solomon_decode_avx2, reed_solomon_decode_gfni, reed_solomon_encode_avx2,
+        reed_solomon_encode_gfni, string_compare_avx2, string_compare_sse42, unpack_bits_bmi2,
+        validate_header_avx2, validate_header_sse2, varint_decode_bmi2,
     };
 
     #[target_feature(enable = "avx512f,avx512bw,avx512vbmi2")]
@@ -2609,26 +2571,6 @@ mod x86 {
             out += a[i] * b[i];
         }
         out
-    }
-
-    // Once-initialized u32 view of HUFF_LENS for AVX2 gathers (safe: avoids OOB on byte-gather)
-    static INIT_LENS32: Once = Once::new();
-    static mut LENS32: [i32; 257] = [0; 257];
-
-    // SAFETY: `LENS32` is a file-scope `static mut` that is written exactly once
-    // inside `call_once`. After `call_once` returns, `LENS32` is immutable for the
-    // rest of the program. The returned pointer is only used for SIMD gather reads
-    // which require the data to remain stable - satisfied because `call_once` ensures
-    // single-writer initialization. This is the standard `Once`-guard pattern for
-    // static-mut initialization.
-    #[inline(always)]
-    unsafe fn lens32_ptr() -> *const i32 {
-        INIT_LENS32.call_once(|| {
-            for i in 0..257 {
-                LENS32[i] = crate::transport::h3::qpack::HUFF_LENS[i] as i32;
-            }
-        });
-        LENS32.as_ptr()
     }
 
     #[inline(always)]
@@ -2758,44 +2700,6 @@ mod x86 {
 
         // Avoid AVX->SSE transition penalty
         _mm256_zeroupper();
-    }
-    /// CRC32 with SSE4.2 hardware acceleration
-    #[target_feature(enable = "sse4.2")]
-    pub(super) unsafe fn crc32_sse42(data: &[u8], mut crc: u32) -> u32 {
-        crc = !crc; // CRC32 uses inverted initial value
-        let mut i = 0;
-        let len = data.len();
-
-        // Process 8 bytes at a time with CRC32 instruction
-        while i + 8 <= len {
-            let chunk = u64::from_le_bytes([
-                data[i],
-                data[i + 1],
-                data[i + 2],
-                data[i + 3],
-                data[i + 4],
-                data[i + 5],
-                data[i + 6],
-                data[i + 7],
-            ]);
-            crc = _mm_crc32_u64(crc as u64, chunk) as u32;
-            i += 8;
-        }
-
-        // Process 4 bytes
-        if i + 4 <= len {
-            let chunk = u32::from_le_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
-            crc = _mm_crc32_u32(crc, chunk);
-            i += 4;
-        }
-
-        // Process remaining bytes
-        while i < len {
-            crc = _mm_crc32_u8(crc, data[i]);
-            i += 1;
-        }
-
-        !crc // Return with final inversion
     }
     /// Population count using POPCNT on x86_64
     #[target_feature(enable = "popcnt")]
@@ -3005,171 +2909,6 @@ mod x86 {
 
         _mm_storeu_si128(state.as_mut_ptr() as *mut __m128i, block);
     }
-    /// GHASH with VPCLMULQDQ - AVX-VL (256-bit) carryless multiplication
-    #[target_feature(enable = "avx512f", enable = "vpclmulqdq", enable = "avx512vl")]
-    pub(super) unsafe fn ghash_vpclmulqdq(h: &[u8; 16], data: &[u8], tag: &mut [u8; 16]) {
-        use std::arch::x86_64::*;
-
-        let shuf = _mm_set_epi8(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
-        let h_be = _mm_loadu_si128(h.as_ptr() as *const __m128i);
-        let h_le = _mm_shuffle_epi8(h_be, shuf);
-
-        let mut y_be = _mm_shuffle_epi8(_mm_loadu_si128(tag.as_ptr() as *const __m128i), shuf);
-
-        let mut i = 0usize;
-        while i + 16 <= data.len() {
-            let block =
-                _mm_shuffle_epi8(_mm_loadu_si128(data.as_ptr().add(i) as *const __m128i), shuf);
-            y_be = ghash_block_vpclmul(h_le, y_be, block);
-            i += 16;
-        }
-
-        if i < data.len() {
-            let mut tmp = [0u8; 16];
-            tmp[..data.len() - i].copy_from_slice(&data[i..]);
-            let block = _mm_shuffle_epi8(_mm_loadu_si128(tmp.as_ptr() as *const __m128i), shuf);
-            y_be = ghash_block_vpclmul(h_le, y_be, block);
-        }
-
-        let out = _mm_shuffle_epi8(y_be, shuf);
-        _mm_storeu_si128(tag.as_mut_ptr() as *mut __m128i, out);
-    }
-
-    /// GHASH with PCLMULQDQ - carryless multiplication for GCM
-    #[target_feature(enable = "pclmulqdq", enable = "sse2")]
-    pub(super) unsafe fn ghash_pclmulqdq(h: &[u8; 16], data: &[u8], tag: &mut [u8; 16]) {
-        use std::arch::x86_64::*;
-
-        let shuf = _mm_set_epi8(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
-        let h_be = _mm_loadu_si128(h.as_ptr() as *const __m128i);
-        let h_le = _mm_shuffle_epi8(h_be, shuf);
-        let mut y_be = _mm_shuffle_epi8(_mm_loadu_si128(tag.as_ptr() as *const __m128i), shuf);
-
-        let mut i = 0usize;
-        while i + 16 <= data.len() {
-            let block =
-                _mm_shuffle_epi8(_mm_loadu_si128(data.as_ptr().add(i) as *const __m128i), shuf);
-            y_be = ghash_block_pclmul(h_le, y_be, block);
-            i += 16;
-        }
-
-        if i < data.len() {
-            let mut tmp = [0u8; 16];
-            tmp[..data.len() - i].copy_from_slice(&data[i..]);
-            let block = _mm_shuffle_epi8(_mm_loadu_si128(tmp.as_ptr() as *const __m128i), shuf);
-            y_be = ghash_block_pclmul(h_le, y_be, block);
-        }
-
-        let out = _mm_shuffle_epi8(y_be, shuf);
-        _mm_storeu_si128(tag.as_mut_ptr() as *mut __m128i, out);
-    }
-
-    #[target_feature(enable = "avx512f", enable = "vpclmulqdq", enable = "avx512vl")]
-    #[inline]
-    unsafe fn ghash_block_vpclmul(
-        h_le: std::arch::x86_64::__m128i,
-        y_be: std::arch::x86_64::__m128i,
-        x_be: std::arch::x86_64::__m128i,
-    ) -> std::arch::x86_64::__m128i {
-        use std::arch::x86_64::*;
-
-        let w_be = _mm_xor_si128(y_be, x_be);
-        let shuf = _mm_set_epi8(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
-        let w_le = _mm_shuffle_epi8(w_be, shuf);
-
-        let x0 = _mm_clmulepi64_si128(w_le, h_le, 0x00);
-        let x1 = _mm_clmulepi64_si128(w_le, h_le, 0x10);
-        let x2 = _mm_clmulepi64_si128(w_le, h_le, 0x01);
-        let x3 = _mm_clmulepi64_si128(w_le, h_le, 0x11);
-
-        let t = _mm_xor_si128(x1, x2);
-        let t_lo = _mm_slli_si128(t, 8);
-        let t_hi = _mm_srli_si128(t, 8);
-        let mut lo = _mm_xor_si128(x0, t_lo);
-        let hi = _mm_xor_si128(x3, t_hi);
-
-        let hi_sl1 = _mm_slli_epi64(hi, 1);
-        let hi_sl2 = _mm_slli_epi64(hi, 2);
-        let hi_sl7 = _mm_slli_epi64(hi, 7);
-        let hi_sr63 = _mm_srli_epi64(hi, 63);
-        let hi_sr62 = _mm_srli_epi64(hi, 62);
-        let hi_sr57 = _mm_srli_epi64(hi, 57);
-
-        let fold1 = _mm_xor_si128(_mm_xor_si128(hi_sl1, hi_sl2), hi_sl7);
-        let carry1 = _mm_xor_si128(_mm_xor_si128(hi_sr63, hi_sr62), hi_sr57);
-        lo = _mm_xor_si128(lo, fold1);
-        lo = _mm_xor_si128(lo, _mm_slli_si128(carry1, 8));
-
-        let lo_hi = _mm_srli_si128(lo, 8);
-        let final_fold = _mm_xor_si128(
-            _mm_xor_si128(_mm_slli_epi64(lo_hi, 1), _mm_slli_epi64(lo_hi, 2)),
-            _mm_slli_epi64(lo_hi, 7),
-        );
-        let final_carry = _mm_xor_si128(
-            _mm_xor_si128(_mm_srli_epi64(lo_hi, 63), _mm_srli_epi64(lo_hi, 62)),
-            _mm_srli_epi64(lo_hi, 57),
-        );
-
-        let lo_masked = _mm_and_si128(lo, _mm_set_epi64x(-1i64, 0));
-        let reduced =
-            _mm_xor_si128(_mm_xor_si128(lo_masked, final_fold), _mm_slli_si128(final_carry, 8));
-
-        _mm_shuffle_epi8(reduced, shuf)
-    }
-
-    #[target_feature(enable = "pclmulqdq", enable = "sse2")]
-    #[inline]
-    unsafe fn ghash_block_pclmul(
-        h_le: std::arch::x86_64::__m128i,
-        y_be: std::arch::x86_64::__m128i,
-        x_be: std::arch::x86_64::__m128i,
-    ) -> std::arch::x86_64::__m128i {
-        use std::arch::x86_64::*;
-
-        let w_be = _mm_xor_si128(y_be, x_be);
-        let shuf = _mm_set_epi8(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
-        let w_le = _mm_shuffle_epi8(w_be, shuf);
-
-        let x0 = _mm_clmulepi64_si128(w_le, h_le, 0x00);
-        let x1 = _mm_clmulepi64_si128(w_le, h_le, 0x10);
-        let x2 = _mm_clmulepi64_si128(w_le, h_le, 0x01);
-        let x3 = _mm_clmulepi64_si128(w_le, h_le, 0x11);
-
-        let t = _mm_xor_si128(x1, x2);
-        let t_lo = _mm_slli_si128(t, 8);
-        let t_hi = _mm_srli_si128(t, 8);
-        let mut lo = _mm_xor_si128(x0, t_lo);
-        let hi = _mm_xor_si128(x3, t_hi);
-
-        let hi_sl1 = _mm_slli_epi64(hi, 1);
-        let hi_sl2 = _mm_slli_epi64(hi, 2);
-        let hi_sl7 = _mm_slli_epi64(hi, 7);
-        let hi_sr63 = _mm_srli_epi64(hi, 63);
-        let hi_sr62 = _mm_srli_epi64(hi, 62);
-        let hi_sr57 = _mm_srli_epi64(hi, 57);
-
-        let fold1 = _mm_xor_si128(_mm_xor_si128(hi_sl1, hi_sl2), hi_sl7);
-        let carry1 = _mm_xor_si128(_mm_xor_si128(hi_sr63, hi_sr62), hi_sr57);
-        lo = _mm_xor_si128(lo, fold1);
-        lo = _mm_xor_si128(lo, _mm_slli_si128(carry1, 8));
-
-        let lo_hi = _mm_srli_si128(lo, 8);
-        let final_fold = _mm_xor_si128(
-            _mm_xor_si128(_mm_slli_epi64(lo_hi, 1), _mm_slli_epi64(lo_hi, 2)),
-            _mm_slli_epi64(lo_hi, 7),
-        );
-        let final_carry = _mm_xor_si128(
-            _mm_xor_si128(_mm_srli_epi64(lo_hi, 63), _mm_srli_epi64(lo_hi, 62)),
-            _mm_srli_epi64(lo_hi, 57),
-        );
-
-        let lo_masked = _mm_and_si128(lo, _mm_set_epi64x(-1i64, 0));
-        let reduced =
-            _mm_xor_si128(_mm_xor_si128(lo_masked, final_fold), _mm_slli_si128(final_carry, 8));
-
-        _mm_shuffle_epi8(reduced, shuf)
-    }
-
     /// SHA-256 with SHA Extensions hardware acceleration
     #[target_feature(enable = "sha", enable = "sse2")]
     pub(super) unsafe fn sha256_hw(data: &[u8]) -> [u8; 32] {
@@ -3228,125 +2967,6 @@ mod x86 {
         // Avoid AVX->SSE transition penalty
         _mm256_zeroupper();
         hist
-    }
-
-    /// QPACK Huffman encoding with AVX2 - vectorized symbol lookup
-    #[target_feature(enable = "avx2")]
-    pub(super) unsafe fn qpack_encode_avx2(input: &[u8], output: &mut [u8]) -> usize {
-        use crate::transport::h3::qpack::HUFF_CODES;
-
-        let mut acc: u128 = 0;
-        let mut bits: usize = 0;
-        let mut written: usize = 0;
-        let mut i = 0usize;
-
-        // Process 8 bytes at a time with AVX2
-        while i + 8 <= input.len() {
-            // Load 8 bytes and expand to i32 indices
-            let chunk = _mm_loadl_epi64(input.as_ptr().add(i) as *const __m128i);
-            let idx = _mm256_cvtepu8_epi32(chunk); // 8 u32 indices
-                                                   // Compute byte offsets (index * 4) for i32 gathers
-            let offsets = _mm256_slli_epi32(idx, 2);
-
-            // Gather codes (u32) and lens (i32) from tables
-            let codes_v = _mm256_i32gather_epi32(HUFF_CODES.as_ptr() as *const i32, offsets, 1);
-            let lens_v = _mm256_i32gather_epi32(lens32_ptr(), offsets, 1);
-
-            // Move to arrays for serial bit packing
-            let mut codes: [i32; 8] = core::mem::zeroed();
-            let mut lens: [i32; 8] = core::mem::zeroed();
-            _mm256_storeu_si256(codes.as_mut_ptr() as *mut __m256i, codes_v);
-            _mm256_storeu_si256(lens.as_mut_ptr() as *mut __m256i, lens_v);
-
-            for j in 0..8 {
-                let code = codes[j] as u128;
-                let clen = lens[j] as usize;
-
-                // Flush accumulator if near overflow
-                if bits + clen > 120 {
-                    while bits >= 8 {
-                        let shift = bits - 8;
-                        if written >= output.len() {
-                            return written;
-                        }
-                        let byte = ((acc >> shift) & 0xff) as u8;
-                        output[written] = byte;
-                        written += 1;
-                        bits -= 8;
-                        acc &= (1u128 << shift) - 1;
-                    }
-                }
-
-                acc = (acc << clen) | code;
-                bits += clen;
-
-                while bits >= 8 {
-                    let shift = bits - 8;
-                    if written >= output.len() {
-                        return written;
-                    }
-                    let byte = ((acc >> shift) & 0xff) as u8;
-                    output[written] = byte;
-                    written += 1;
-                    bits -= 8;
-                    acc &= (1u128 << shift) - 1;
-                }
-            }
-
-            i += 8;
-        }
-
-        // Scalar tail
-        while i < input.len() {
-            let sym = input[i] as usize;
-            let code = HUFF_CODES[sym] as u128;
-            let clen = crate::transport::h3::qpack::HUFF_LENS[sym] as usize;
-
-            if bits + clen > 120 {
-                while bits >= 8 {
-                    let shift = bits - 8;
-                    if written >= output.len() {
-                        return written;
-                    }
-                    let byte = ((acc >> shift) & 0xff) as u8;
-                    output[written] = byte;
-                    written += 1;
-                    bits -= 8;
-                    acc &= (1u128 << shift) - 1;
-                }
-            }
-
-            acc = (acc << clen) | code;
-            bits += clen;
-
-            while bits >= 8 {
-                let shift = bits - 8;
-                if written >= output.len() {
-                    return written;
-                }
-                let byte = ((acc >> shift) & 0xff) as u8;
-                output[written] = byte;
-                written += 1;
-                bits -= 8;
-                acc &= (1u128 << shift) - 1;
-            }
-
-            i += 1;
-        }
-
-        // Flush remaining bits with EOS padding
-        if bits > 0 {
-            if written >= output.len() {
-                return written;
-            }
-            let pad_mask = (1u128 << (8 - bits)) - 1;
-            let byte = ((acc << (8 - bits)) | pad_mask) as u8;
-            output[written] = byte;
-            written += 1;
-        }
-
-        _mm256_zeroupper();
-        written
     }
 
     /// Histogram with AVX2 - gather/scatter for histogram
@@ -3660,6 +3280,10 @@ pub mod bitstream {
     /// Pack bits with BMI2 acceleration when available.
     #[inline(always)]
     pub fn pack_bits(src: &[u8], bit_width: u8, dst: &mut [u8]) -> usize {
+        if !(1..=8).contains(&bit_width) {
+            return 0;
+        }
+
         let features = FeatureDetector::instance();
 
         // SAFETY: Each branch is guarded by runtime feature detection matching the
@@ -3688,6 +3312,10 @@ pub mod bitstream {
     /// Unpack bits with BMI2 acceleration when available.
     #[inline(always)]
     pub fn unpack_bits(src: &[u8], bit_width: u8, dst: &mut [u8]) -> usize {
+        if !(1..=8).contains(&bit_width) {
+            return 0;
+        }
+
         let features = FeatureDetector::instance();
 
         // SAFETY: Each branch is guarded by runtime feature detection matching the
@@ -4534,12 +4162,11 @@ mod x86_extended {
         let first_byte = _mm256_and_si256(data, fixed_bit_mask);
         let fixed_check = _mm256_cmpeq_epi8(first_byte, fixed_bit_mask);
 
-        let first = _mm256_extract_epi8(fixed_check, 0);
-        if first == 0 {
+        if _mm256_extract_epi8(fixed_check, 0) == 0 {
             return false;
         }
 
-        true
+        (header[0] & 0x80) != 0 || (header[0] & 0x18) == 0
     }
 
     /// Packet header validation with SSE2 when available.
@@ -4581,6 +4208,10 @@ mod x86_extended {
     pub(super) unsafe fn pack_bits_bmi2(src: &[u8], bit_width: u8, dst: &mut [u8]) -> usize {
         use std::arch::x86_64::*;
 
+        if !(1..=8).contains(&bit_width) {
+            return 0;
+        }
+
         let mut src_idx = 0;
         let mut dst_idx = 0;
         let mut bit_buffer: u64 = 0;
@@ -4595,6 +4226,9 @@ mod x86_extended {
             bits_in_buffer += bit_width as u32;
 
             while bits_in_buffer >= 8 {
+                if dst_idx >= dst.len() {
+                    return dst_idx;
+                }
                 dst[dst_idx] = bit_buffer as u8;
                 dst_idx += 1;
                 bit_buffer >>= 8;
@@ -4604,7 +4238,7 @@ mod x86_extended {
             src_idx += 1;
         }
 
-        if bits_in_buffer > 0 {
+        if bits_in_buffer > 0 && dst_idx < dst.len() {
             dst[dst_idx] = bit_buffer as u8;
             dst_idx += 1;
         }
@@ -4617,6 +4251,10 @@ mod x86_extended {
     pub(super) unsafe fn unpack_bits_bmi2(src: &[u8], bit_width: u8, dst: &mut [u8]) -> usize {
         use std::arch::x86_64::*;
 
+        if !(1..=8).contains(&bit_width) {
+            return 0;
+        }
+
         let mut src_idx = 0;
         let mut dst_idx = 0;
         let mut bit_buffer: u64 = 0;
@@ -4625,7 +4263,7 @@ mod x86_extended {
         let bw = bit_width as u32;
         let mask = (1u64 << bit_width) - 1;
 
-        while dst_idx < dst.len() && src_idx < src.len() {
+        while dst_idx < dst.len() {
             while bits_in_buffer < bw && src_idx < src.len() {
                 bit_buffer |= (src[src_idx] as u64) << bits_in_buffer;
                 src_idx += 1;
@@ -4743,43 +4381,6 @@ mod x86_extended {
         }
 
         count
-    }
-
-    /// Batch CRC32 with PCLMULQDQ when available.
-    #[target_feature(enable = "pclmulqdq", enable = "sse4.2")]
-    pub(super) unsafe fn batch_crc32_pclmul(data: &[&[u8]], initial: u32) -> Vec<u32> {
-        use std::arch::x86_64::*;
-
-        let mut results = Vec::with_capacity(data.len());
-
-        for chunk in data {
-            let mut crc = !initial;
-            let mut i = 0;
-
-            while i + 8 <= chunk.len() {
-                let val = u64::from_le_bytes([
-                    chunk[i],
-                    chunk[i + 1],
-                    chunk[i + 2],
-                    chunk[i + 3],
-                    chunk[i + 4],
-                    chunk[i + 5],
-                    chunk[i + 6],
-                    chunk[i + 7],
-                ]);
-                crc = _mm_crc32_u64(crc as u64, val) as u32;
-                i += 8;
-            }
-
-            while i < chunk.len() {
-                crc = _mm_crc32_u8(crc, chunk[i]);
-                i += 1;
-            }
-
-            results.push(!crc);
-        }
-
-        results
     }
 
     /// Reed-Solomon encoding with AVX-512 GFNI when available.
@@ -5115,7 +4716,7 @@ mod x86_extended {
 
             for lane in 0..8 {
                 let sym = idx_arr[lane] as usize;
-                let code = code_arr[lane] as u128;
+                let code = code_arr[lane] as u32 as u128;
                 let clen = HUFF_LENS[sym] as usize;
 
                 if bits + clen > 120 {
@@ -5212,7 +4813,12 @@ mod x86_extended {
         let mut i = 0usize;
 
         while i + 4 <= input.len() {
-            let chunk = _mm_cvtsi32_si128(*(input.as_ptr().add(i) as *const i32));
+            let chunk = _mm_cvtsi32_si128(i32::from_le_bytes([
+                input[i],
+                input[i + 1],
+                input[i + 2],
+                input[i + 3],
+            ]));
             let idx_vec = _mm_cvtepu8_epi32(chunk);
             let mut idx_arr = [0i32; 4];
             _mm_storeu_si128(idx_arr.as_mut_ptr() as *mut __m128i, idx_vec);
@@ -5329,7 +4935,6 @@ mod x86_extended {
     #[cfg(all(test, target_arch = "x86_64"))]
     mod tests {
         use super::*;
-        use crate::simd::x86::{ghash_pclmulqdq, ghash_vpclmulqdq};
         use crate::transport::h3::qpack;
         use std::is_x86_feature_detected;
 
@@ -5346,7 +4951,11 @@ mod x86_extended {
                 return;
             }
 
-            for sample in SAMPLES {
+            let mut all_symbols_storage = vec![0xAA];
+            all_symbols_storage.extend(0..=u8::MAX);
+            let all_symbols = &all_symbols_storage[1..];
+
+            for sample in SAMPLES.iter().copied().chain(std::iter::once(all_symbols)) {
                 let mut scalar_buf = vec![0u8; qpack::huff_estimate_len(sample) + 8];
                 let scalar_len = qpack::huff_encode_into(sample, &mut scalar_buf);
                 scalar_buf.truncate(scalar_len);
@@ -5359,7 +4968,7 @@ mod x86_extended {
 
                 let mut decode_buf = vec![0u8; sample.len() + 8];
                 let decoded = unsafe { qpack_decode_avx2(&avx_buf, &mut decode_buf) };
-                assert_eq!(&decode_buf[..decoded], *sample);
+                assert_eq!(&decode_buf[..decoded], sample);
             }
         }
 
@@ -5369,7 +4978,11 @@ mod x86_extended {
                 return;
             }
 
-            for sample in SAMPLES {
+            let mut all_symbols_storage = vec![0xAA];
+            all_symbols_storage.extend(0..=u8::MAX);
+            let all_symbols = &all_symbols_storage[1..];
+
+            for sample in SAMPLES.iter().copied().chain(std::iter::once(all_symbols)) {
                 let mut scalar_buf = vec![0u8; qpack::huff_estimate_len(sample) + 8];
                 let scalar_len = qpack::huff_encode_into(sample, &mut scalar_buf);
                 scalar_buf.truncate(scalar_len);
@@ -5382,47 +4995,8 @@ mod x86_extended {
 
                 let mut decode_buf = vec![0u8; sample.len() + 8];
                 let decoded = unsafe { qpack_decode_ssse3(&sse_buf, &mut decode_buf) };
-                assert_eq!(&decode_buf[..decoded], *sample);
+                assert_eq!(&decode_buf[..decoded], sample);
             }
-        }
-
-        #[test]
-        fn ghash_pclmul_matches_scalar() {
-            if !is_x86_feature_detected!("pclmulqdq") {
-                return;
-            }
-
-            let h = [0x13u8; 16];
-            let data = b"example ghash payload block";
-
-            let mut pclmul_tag = [0u8; 16];
-            unsafe { ghash_pclmulqdq(&h, data, &mut pclmul_tag) };
-
-            let mut scalar_tag = [0u8; 16];
-            super::super::scalar::ghash(&h, data, &mut scalar_tag);
-
-            assert_eq!(pclmul_tag, scalar_tag);
-        }
-
-        #[test]
-        fn ghash_vpclmul_matches_scalar() {
-            if !(is_x86_feature_detected!("avx512f")
-                && is_x86_feature_detected!("vpclmulqdq")
-                && is_x86_feature_detected!("avx512vl"))
-            {
-                return;
-            }
-
-            let h = [0x42u8; 16];
-            let data = b"double block ghash data stream";
-
-            let mut vpclmul_tag = [0u8; 16];
-            unsafe { ghash_vpclmulqdq(&h, data, &mut vpclmul_tag) };
-
-            let mut scalar_tag = [0u8; 16];
-            super::super::scalar::ghash(&h, data, &mut scalar_tag);
-
-            assert_eq!(vpclmul_tag, scalar_tag);
         }
     }
 }
@@ -5853,13 +5427,13 @@ pub mod scalar {
         len
     }
 
-    /// Validate QUIC packet header fixed-bit constraint (scalar fallback).
+    /// Validate QUIC fixed-bit and short-header reserved-bit constraints.
     pub fn validate_header(header: &[u8]) -> bool {
         if header.is_empty() {
             return false;
         }
-        // QUIC fixed bit must be set
-        (header[0] & 0x40) != 0
+        let first = header[0];
+        (first & 0x40) != 0 && ((first & 0x80) != 0 || (first & 0x18) == 0)
     }
 
     /// Pack values into a bitstream at the given bit width (scalar fallback).
@@ -6294,6 +5868,16 @@ mod tests_dispatched {
         assert_eq!(mac, expected, "HMAC-SHA256 RFC4231 test case 2 mismatch");
     }
 
+    #[test]
+    fn ghash_matches_canonical_gcm_for_partial_and_full_blocks() {
+        let h = [0x42u8; 16];
+        for data in [b"".as_slice(), b"partial", b"two complete blocks of payload!!"] {
+            let mut tag = [0u8; 16];
+            crypto::ghash(&h, data, &mut tag);
+            assert_eq!(tag, crate::crypto::gcm::ghash(h, &[], data));
+        }
+    }
+
     // ===================== XOR blocks =====================
 
     #[test]
@@ -6337,16 +5921,36 @@ mod tests_dispatched {
 
     #[test]
     fn bitstream_pack_unpack_roundtrip_all_widths() {
-        let src: Vec<u8> = (0..64).collect();
-        for bw in 1u8..=8 {
-            let mask = (1u16 << bw) - 1;
-            let masked_src: Vec<u8> = src.iter().map(|&v| v & (mask as u8)).collect();
-            let mut packed = vec![0u8; 128];
-            let packed_len = bitstream::pack_bits(&masked_src, bw, &mut packed);
-            let mut unpacked = vec![0u8; masked_src.len()];
-            bitstream::unpack_bits(&packed[..packed_len], bw, &mut unpacked);
-            assert_eq!(unpacked, masked_src, "pack/unpack roundtrip failed for bit_width={bw}");
+        for len in [0usize, 1, 2, 7, 8, 9, 63, 64, 65] {
+            let src: Vec<u8> = (0..len).map(|value| (value as u8).wrapping_mul(37)).collect();
+            for bit_width in 1u8..=8 {
+                let mask = (1u16 << bit_width) - 1;
+                let masked_src: Vec<u8> = src.iter().map(|&value| value & mask as u8).collect();
+                let expected_packed_len = (len * bit_width as usize).div_ceil(8);
+                let mut packed = vec![0u8; expected_packed_len];
+                let packed_len = bitstream::pack_bits(&masked_src, bit_width, &mut packed);
+                assert_eq!(packed_len, expected_packed_len);
+
+                let mut unpacked = vec![0u8; masked_src.len()];
+                let unpacked_len =
+                    bitstream::unpack_bits(&packed[..packed_len], bit_width, &mut unpacked);
+                assert_eq!(unpacked_len, masked_src.len());
+                assert_eq!(
+                    unpacked, masked_src,
+                    "pack/unpack roundtrip failed for len={len}, bit_width={bit_width}"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn bitstream_rejects_invalid_widths_and_bounds_output() {
+        let mut output = [0u8; 1];
+        assert_eq!(bitstream::pack_bits(&[0xFF; 32], 0, &mut output), 0);
+        assert_eq!(bitstream::pack_bits(&[0xFF; 32], 9, &mut output), 0);
+        assert_eq!(bitstream::unpack_bits(&[0xFF], 0, &mut output), 0);
+        assert_eq!(bitstream::unpack_bits(&[0xFF], 9, &mut output), 0);
+        assert_eq!(bitstream::pack_bits(&[0xFF; 32], 8, &mut output), 1);
     }
 
     // ===================== Header validation =====================
@@ -6379,6 +5983,22 @@ mod tests_dispatched {
     fn validate_header_no_fixed_bit() {
         assert!(!fec::validate_header(&[0x00, 0, 0, 0, 0]));
         assert!(!fec::validate_header(&[0x80, 0, 0, 0, 0])); // long but no fixed bit
+    }
+
+    #[test]
+    fn validate_header_dispatch_matches_quic_constraints_for_all_first_bytes() {
+        for len in [5usize, 32, 64] {
+            let mut header = vec![0u8; len];
+            for first in 0..=u8::MAX {
+                header[0] = first;
+                let expected = (first & 0x40) != 0 && ((first & 0x80) != 0 || (first & 0x18) == 0);
+                assert_eq!(
+                    fec::validate_header(&header),
+                    expected,
+                    "header mismatch for len={len}, first={first:#04x}"
+                );
+            }
+        }
     }
 
     // ===================== Scalar fallback parity =====================

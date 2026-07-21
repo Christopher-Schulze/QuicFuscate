@@ -231,11 +231,8 @@ impl KeyRotationManager {
         // Generate new key.
         let new_key_id = {
             let cb = self.generate_callback.lock().unwrap();
-            if let Some(callback) = cb.as_ref() {
-                callback()
-            } else {
-                return None;
-            }
+            let callback = cb.as_ref()?;
+            callback()
         };
 
         // Schedule revocation of the old key after the overlap window.
