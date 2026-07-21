@@ -220,7 +220,7 @@ jobs:
         run: cargo check --lib
 
       - name: Test Windows core library
-        run: cargo test --lib --features rust-tests -- --test-threads=1 --nocapture
+        run: cargo test --lib --features rust-tests
 
       - name: Lint Windows core library
         run: cargo clippy --lib --features rust-tests -- -D warnings
