@@ -670,7 +670,9 @@ pub struct FeatureDetector {
 static DETECTOR: std::sync::OnceLock<FeatureDetector> = std::sync::OnceLock::new();
 
 #[cfg(any(test, feature = "rust-tests"))]
-static PROFILE_OVERRIDE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+std::thread_local! {
+    static PROFILE_OVERRIDE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 #[cfg(any(test, feature = "rust-tests"))]
 static PROFILE_OVERRIDE_ENV: std::sync::OnceLock<Option<CpuProfile>> = std::sync::OnceLock::new();
 
@@ -1209,7 +1211,7 @@ impl FeatureDetector {
 
     #[cfg(any(test, feature = "rust-tests"))]
     fn profile_override(&self) -> Option<CpuProfile> {
-        let requested = match PROFILE_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed) {
+        let requested = match PROFILE_OVERRIDE.with(std::cell::Cell::get) {
             0 => *PROFILE_OVERRIDE_ENV.get_or_init(parse_profile_override_env),
             value => profile_override_from_u64(value),
         };
@@ -1425,14 +1427,14 @@ pub fn set_profile_override_for_tests(profile: CpuProfile) -> bool {
     if profile != CpuProfile::Scalar && !detector.profile_override_supported(profile) {
         return false;
     }
-    PROFILE_OVERRIDE.store(profile_override_to_u64(profile), std::sync::atomic::Ordering::Relaxed);
+    PROFILE_OVERRIDE.with(|value| value.set(profile_override_to_u64(profile)));
     true
 }
 
 /// Clears any active CPU profile override, restoring auto-detection.
 #[cfg(any(test, feature = "rust-tests"))]
 pub fn clear_profile_override_for_tests() {
-    PROFILE_OVERRIDE.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROFILE_OVERRIDE.with(|value| value.set(0));
 }
 
 // ============================================================================
@@ -1894,13 +1896,16 @@ where
 static FEC_KERNEL_OVERRIDE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 
 #[cfg(test)]
-static TEST_FEC_KERNEL_OVERRIDE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+std::thread_local! {
+    static TEST_FEC_KERNEL_OVERRIDE: RefCell<Option<String>> = const { RefCell::new(None) };
+}
 
 /// Test-only: overrides the FEC kernel SIMD dispatch policy.
 #[cfg(test)]
 pub fn __test_set_fec_kernel_override(val: Option<&str>) {
-    let mut g = TEST_FEC_KERNEL_OVERRIDE.lock().unwrap();
-    *g = val.map(|s| s.to_lowercase());
+    TEST_FEC_KERNEL_OVERRIDE.with(|value| {
+        *value.borrow_mut() = val.map(str::to_lowercase);
+    });
 }
 
 pub(crate) fn dispatch_bitslice<F, R>(mut f: F) -> R
@@ -1913,7 +1918,7 @@ where
     let ov: Option<String> = {
         #[cfg(test)]
         {
-            if let Some(s) = TEST_FEC_KERNEL_OVERRIDE.lock().unwrap().clone() {
+            if let Some(s) = TEST_FEC_KERNEL_OVERRIDE.with(|value| value.borrow().clone()) {
                 Some(s)
             } else {
                 FEC_KERNEL_OVERRIDE
@@ -2043,17 +2048,70 @@ fn bitslice_policy_tag(p: &dyn SimdPolicy) -> &'static str {
 
 #[cfg(test)]
 fn with_override<T>(val: Option<&str>, f: impl FnOnce() -> T) -> T {
-    __test_set_fec_kernel_override(val);
-    let out = f();
-    __test_set_fec_kernel_override(None);
-    out
+    struct OverrideGuard(Option<String>);
+
+    impl Drop for OverrideGuard {
+        fn drop(&mut self) {
+            TEST_FEC_KERNEL_OVERRIDE.with(|value| {
+                *value.borrow_mut() = self.0.take();
+            });
+        }
+    }
+
+    let previous = TEST_FEC_KERNEL_OVERRIDE
+        .with(|value| std::mem::replace(&mut *value.borrow_mut(), val.map(str::to_lowercase)));
+    let _guard = OverrideGuard(previous);
+    f()
 }
 
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
-    use super::{bitslice_policy_tag, dispatch_bitslice, with_override};
+    use super::{
+        bitslice_policy_tag, dispatch_bitslice, with_override, PROFILE_OVERRIDE,
+        TEST_FEC_KERNEL_OVERRIDE,
+    };
     use crate::simd::{CpuFeature, FeatureDetector};
+    use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn test_dispatch_overrides_are_thread_local() {
+        let barrier = Arc::new(Barrier::new(3));
+        let first_barrier = Arc::clone(&barrier);
+        let first = std::thread::spawn(move || {
+            with_override(Some("ref"), || {
+                first_barrier.wait();
+                TEST_FEC_KERNEL_OVERRIDE.with(|value| value.borrow().clone())
+            })
+        });
+        let second_barrier = Arc::clone(&barrier);
+        let second = std::thread::spawn(move || {
+            with_override(Some("avx2"), || {
+                second_barrier.wait();
+                TEST_FEC_KERNEL_OVERRIDE.with(|value| value.borrow().clone())
+            })
+        });
+
+        barrier.wait();
+        assert_eq!(first.join().expect("first override thread"), Some("ref".to_string()));
+        assert_eq!(second.join().expect("second override thread"), Some("avx2".to_string()));
+        assert_eq!(TEST_FEC_KERNEL_OVERRIDE.with(|value| value.borrow().clone()), None);
+    }
+
+    #[test]
+    fn test_profile_override_is_thread_local() {
+        let barrier = Arc::new(Barrier::new(2));
+        let child_barrier = Arc::clone(&barrier);
+        let child = std::thread::spawn(move || {
+            assert!(super::set_profile_override_for_tests(crate::simd::CpuProfile::Scalar));
+            child_barrier.wait();
+            FeatureDetector::instance().profile()
+        });
+
+        barrier.wait();
+        assert_eq!(PROFILE_OVERRIDE.with(std::cell::Cell::get), 0);
+        assert_eq!(child.join().expect("profile override thread"), crate::simd::CpuProfile::Scalar);
+    }
 
     #[test]
     fn override_ref_selects_scalar() {
