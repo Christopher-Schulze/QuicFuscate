@@ -39,7 +39,8 @@ The current code is therefore not a proven live credential disclosure. It is dea
 - [x] Reconcile TODO-415 and current architecture/security documentation with protocol truth.
 - [x] Fail closed on TLS verification errors and bind application readiness to rustls completion.
 - [x] Harden finite-limit memory locking and rate-limit client statistics logging found during live proof.
-- [~] Run local, cross-target, CI, and Omega authentication proof.
+- [~] Preserve one signal listener for the server/client runtime lifetime and rate-limit server statistics logging.
+- [ ] Re-run full local, cross-target, CI, and Omega authentication and graceful-shutdown proof.
 
 ## Notes
 
@@ -53,6 +54,8 @@ The current code is therefore not a proven live credential disclosure. It is dea
 - The first native ARM64 Omega probe exposed three real runtime defects rather than a QKey cryptographic failure: pre-header packets were committed as `auth_failed`, transport liveness was exposed as application readiness before rustls completed, and TLS verification errors were swallowed as possible probe traffic. QKey datagram authentication now has explicit Pending/Authenticated/Rejected progress, `Connection::is_established()` requires rustls completion, and terminal TLS errors propagate through Core to the CLI.
 - Local UDP CLI proof uses a CA-signed `CA:FALSE` P-256 leaf for `cloudflare-dns.com`. The trusted run completes TLS in 17.6 ms, sends HTTP/3 immediately, and records `client_authenticated`; the same server without the CA exits status 1 with `UnknownIssuer` before HTTP/3. The integration harness now also proves that an untrusted certificate fails before QKey authentication and that public establishment never precedes TLS completion.
 - Live proof also exposed 5 ms info-log spam and a finite-`RLIMIT_MEMLOCK` hazard. Client statistics are now emitted at most once per second. `MCL_FUTURE` is enabled only with an unlimited memlock budget; finite or unreadable limits use `MCL_CURRENT`, while per-block locking remains best-effort. This preserves full systemd protection with `LimitMEMLOCK=infinity` without allowing a standalone server's future allocations to fail with `ENOMEM`.
+- The second native ARM64 Omega proof completed TLS in 10.8 ms, sent HTTP/3 immediately, recorded `client_authenticated`, exposed exactly one client through the admin API, and held loss at 0.00%. Missing QKey traffic never established TLS or appeared as a second admin client; an untrusted certificate exited status 1 with `UnknownIssuer`.
+- The same proof exposed two additional runtime defects: server-side client statistics still logged every 5 ms, and a signal listener recreated inside the busy `tokio::select!` loop could be absent when SIGTERM or SIGINT arrived. Both signals left the server alive and required SIGKILL. Completion now requires persistent one-shot signal registration, server-side log rate limiting, and a repeated Omega shutdown proof.
 - No UI change is required or allowed.
 
 ## Deviations

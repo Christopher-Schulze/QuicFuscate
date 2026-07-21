@@ -1806,10 +1806,12 @@ async fn run_client(
     let mut housekeeping = interval(Duration::from_millis(5));
     housekeeping.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut next_stats_log = tokio::time::Instant::now();
+    let shutdown_signal = wait_shutdown_signal();
+    tokio::pin!(shutdown_signal);
 
     loop {
         tokio::select! {
-            _ = wait_shutdown_signal() => {
+            _ = &mut shutdown_signal => {
                 if let Err(e) = conn.conn.close(true, 0x0, b"shutdown") {
                     warn!("Client close on shutdown failed: {:?}", e);
                 }

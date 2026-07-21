@@ -90,6 +90,8 @@ use crate::stealth::{
     StealthConfig, StealthMode,
 };
 
+const SERVER_STATS_LOG_INTERVAL: Duration = Duration::from_secs(1);
+
 fn env_string(name: &str) -> Option<String> {
     std::env::var(name).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
 }
@@ -2377,6 +2379,7 @@ pub struct LiveServerState {
     revocation_manager: Arc<crate::implementations::server::revocation::RevocationManager>,
     qkey_tracker: Arc<crate::implementations::server::revocation::QKeyConnectionTracker>,
     key_rotation_manager: crate::implementations::server::revocation::KeyRotationManager,
+    next_stats_log: Instant,
     /// Last time the external blacklist feed sync was *started*. Used by
     /// `run_housekeeping_tick` to trigger periodic re-syncs at the
     /// configured `sync_interval`. `None` = sync never started yet.
@@ -2775,6 +2778,7 @@ impl LiveServerState {
             revocation_manager,
             qkey_tracker,
             key_rotation_manager,
+            next_stats_log: Instant::now(),
             #[cfg(feature = "rate_limiter")]
             last_blacklist_sync: Arc::new(parking_lot::Mutex::new(None)),
         }
@@ -2970,6 +2974,11 @@ impl LiveServerState {
         metrics: &Metrics,
         accept_loop: &AcceptLoop,
     ) {
+        let now = Instant::now();
+        let log_client_stats = now >= self.next_stats_log;
+        if log_client_stats {
+            self.next_stats_log = now + SERVER_STATS_LOG_INTERVAL;
+        }
         #[cfg(feature = "rate_limiter")]
         {
             self.prune_rate_limits_if_due();
@@ -3011,12 +3020,14 @@ impl LiveServerState {
                     log::warn!("Failed to flush packets to {}: {}", addr, error);
                 }
                 conn.update_state();
-                log::info!(
-                    "client {} stats: RTT {:.0} ms, Loss {:.2}%",
-                    addr,
-                    conn.rtt_ms(),
-                    conn.loss_rate() * 100.0
-                );
+                if log_client_stats {
+                    log::info!(
+                        "client {} stats: RTT {:.0} ms, Loss {:.2}%",
+                        addr,
+                        conn.rtt_ms(),
+                        conn.loss_rate() * 100.0
+                    );
+                }
                 // Only drive the idle timeout when the connection has actually been
                 // idle; calling it every tick collapses cwnd and inflates loss.
                 if conn.conn.idle_timeout_elapsed() {
@@ -5074,6 +5085,9 @@ impl ServerRuntime {
             }
         }
 
+        let shutdown_signal = wait_shutdown_signal();
+        tokio::pin!(shutdown_signal);
+
         loop {
             tokio::select! {
                     Some(action) = admin_actions_rx.recv() => {
@@ -5086,7 +5100,7 @@ impl ServerRuntime {
                             break;
                         }
                     }
-                    _ = wait_shutdown_signal() => {
+                    _ = &mut shutdown_signal => {
                         self.shutdown_live(b"shutdown");
                         break;
                     }
