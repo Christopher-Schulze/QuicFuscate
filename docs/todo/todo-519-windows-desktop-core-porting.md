@@ -4,8 +4,9 @@ title: "Windows desktop build: cfg-gate Unix-specific core library code for Wind
 severity: HIGH
 phase: "I"
 priority: P2
-status: OPEN
+status: DONE
 created: 2026-07-07
+resolved: 2026-07-21
 depends_on: []
 ---
 
@@ -63,13 +64,13 @@ The Tauri desktop app (`apps/tauri/src-tauri/Cargo.toml`) depends on `quicfuscat
 
 ## Completion Criteria
 
-- [ ] `cargo check --lib --target x86_64-pc-windows-msvc` succeeds on Windows
-- [ ] `cargo test --lib --features rust-tests` succeeds on Windows, including real destination-preserving batch UDP coverage
-- [ ] `cargo clippy --lib --features rust-tests --target x86_64-pc-windows-msvc -- -D warnings` is clean
-- [ ] `cargo tauri build` succeeds on `windows-latest` CI runner
-- [ ] Windows MSI bundle is uploaded as a release artifact
-- [ ] `latest.json` includes `windows-x86_64` platform entry with valid signature
-- [ ] No regressions on Linux/macOS builds
+- [x] `cargo check --lib --target x86_64-pc-windows-msvc` succeeds on Windows
+- [x] `cargo test --lib --features rust-tests` succeeds on Windows, including real destination-preserving batch UDP coverage
+- [x] `cargo clippy --lib --features rust-tests --target x86_64-pc-windows-msvc -- -D warnings` is clean
+- [x] `cargo tauri build` succeeds on `windows-latest` CI runner
+- [x] Windows MSI bundle is uploaded as a release artifact
+- [x] `latest.json` includes `windows-x86_64` platform entry with valid signature
+- [x] No regressions on Linux/macOS builds
 
 ## Notes
 
@@ -105,3 +106,5 @@ The Tauri desktop app (`apps/tauri/src-tauri/Cargo.toml`) depends on `quicfuscat
 - Native CI run `29849959474` job `88700020924` proves the corrected MSVC runtime paths: Windows core check passed, the serial native suite passed 1,671/1,671 tests in 124.28 seconds, and feature-enabled Clippy passed with warnings denied. The diagnostic `--test-threads=1 --nocapture` arguments are now removed; the unchanged suite must pass under Cargo's normal parallel test execution before the Windows core gate is considered final.
 - Native parallel CI run `29851593874` job `88705562276` passed the MSVC library check but exposed a test-isolation defect: 1,661 tests passed and 10 failed while the FEC kernel override was shared process-wide across parallel tests. Concurrent override cases selected incompatible policies inside unrelated FEC work, including an AVX-512 Wiedemann index underflow. The CPU profile and FEC kernel test overrides are now thread-local, and the scoped FEC override restores prior state even after a panic. This preserves immutable process-wide production environment selection while making per-test dispatch deterministic. Parallel local and native MSVC revalidation remain required.
 - Local parallel revalidation of the isolation correction is green: Rosetta x86_64 passed 1,670/1,670 tests and native ARM64 passed 1,676/1,676 tests under Cargo's normal parallel execution. Two explicit concurrency regressions prove that FEC-kernel and CPU-profile overrides remain isolated across threads. Windows GNU library check, feature-enabled test compilation/link, and feature-enabled Clippy with warnings denied also pass. Native parallel MSVC execution remains the final core-gate proof.
+- Native CI run `29852866537` job `88709840367` closes the Windows core gate under normal parallel execution: MSVC check passed, 1,673/1,673 tests passed in 89.48 seconds, and feature-enabled Clippy passed with warnings denied. No serializing arguments, skipped tests, or weakened assertions remain. Only the tagged signed MSI and updater-manifest acceptance items remain open.
+- Tagged release run `29854481540` closes the desktop and publication gates: Windows, Linux, macOS, server-bundle, and publish jobs all passed. GitHub release `v0.4.3` contains `QuicFuscate_0.4.3_x64_en-US.msi` (10,727,424 bytes, SHA-256 `44598af11e65caf66e320f4012aaa972d3876133f7319ceb0de246ba67a6e236`) and its 424-byte signature. Published `latest.json` has version `0.4.3`, maps `windows-x86_64` to that exact MSI URL, and its signature value exactly matches the published `.msi.sig` content. The release is public, non-draft, and non-prerelease.
