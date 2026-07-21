@@ -193,6 +193,38 @@ jobs:
             target/release/*.dylib
             target/release/*.so
 
+  windows-core-checks:
+    runs-on: windows-latest
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-core-${{ hashFiles('Cargo.lock') }}
+
+      - name: Check Windows core library
+        run: cargo check --lib
+
+      - name: Test Windows core library
+        run: cargo test --lib --features rust-tests
+
+      - name: Lint Windows core library
+        run: cargo clippy --lib --features rust-tests -- -D warnings
+
   feature-matrix:
     runs-on: ${{ matrix.os }}
     strategy:

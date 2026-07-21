@@ -40,11 +40,13 @@ pub use accept::{
     AcceptConfig, AcceptDecision, AcceptLoop, AcceptStats, AcceptStatsSnapshot,
     IpConnectionTracker, RejectReason, DEFAULT_MAX_CONNECTIONS_PER_IP,
 };
+#[cfg(unix)]
+pub use admin::AdminServer;
 #[cfg(any(test, feature = "rust-tests"))]
 pub use admin::DefaultAdminHandler;
 pub use admin::{
-    snapshots_to_client_info, AdminCommand, AdminHandler, AdminResponse, AdminServer,
-    ClientIdentity, ClientInfo, ClientSnapshot,
+    snapshots_to_client_info, AdminCommand, AdminHandler, AdminResponse, ClientIdentity,
+    ClientInfo, ClientSnapshot,
 };
 pub use admin_http::{AdminHttpHandler, AdminHttpServer};
 pub use bandwidth::{BandwidthLimiter, BandwidthStats, PerClientBandwidthManager, QuotaTracker};
@@ -2096,7 +2098,7 @@ pub async fn send_live_datagram_to(
 
     loop {
         socket.ready(Interest::WRITABLE).await?;
-        match socket.try_send_to(data, addr) {
+        match socket.try_send_to(data, *addr) {
             Ok(len) if len == data.len() => return Ok(()),
             Ok(_) => {
                 return Err(std::io::Error::new(
@@ -4502,9 +4504,9 @@ pub(crate) async fn recv_datagram_from(
     loop {
         socket.ready(Interest::READABLE).await?;
         match socket.try_recv_from(buf) {
-            Ok(result) => Ok(result),
+            Ok(result) => return Ok(result),
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
-            Err(e) => Err(e),
+            Err(e) => return Err(e),
         }
     }
 }

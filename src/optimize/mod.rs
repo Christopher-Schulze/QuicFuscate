@@ -96,7 +96,9 @@ fn resolve_numa_policy() -> NumaPolicy {
 #[cfg(target_os = "linux")]
 static RR_NODE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 #[cfg(windows)]
-use windows_sys::Win32::Networking::WinSock::{WSARecvMsg, WSASendMsg, WSABUF, WSAMSG};
+use windows_sys::Win32::Networking::WinSock::{
+    WSAGetLastError, WSARecv, WSARecvFrom, WSASend, WSASendTo, WSABUF,
+};
 
 #[cfg(target_os = "linux")]
 mod numa {
@@ -127,9 +129,11 @@ impl<const N: usize> Default for ConstBuffer<N> {
 #[cfg(target_os = "windows")]
 mod numa {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use windows_sys::Win32::System::SystemInformation::{
-        GetCurrentThread, GetNumaHighestNodeNumber, GetNumaNodeProcessorMaskEx,
-        SetThreadGroupAffinity, GROUP_AFFINITY,
+    use windows_sys::Win32::System::Kernel::PROCESSOR_NUMBER;
+    use windows_sys::Win32::System::SystemInformation::GROUP_AFFINITY;
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcessorNumberEx, GetCurrentThread, GetNumaHighestNodeNumber,
+        GetNumaNodeProcessorMaskEx, GetNumaProcessorNodeEx, SetThreadGroupAffinity,
     };
 
     static NUMA_NODES: AtomicUsize = AtomicUsize::new(0);
@@ -147,9 +151,16 @@ mod numa {
     }
 
     pub fn bind_to_node(node: usize) -> Result<(), std::io::Error> {
+        let node = u16::try_from(node).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "NUMA node index exceeds the Windows API range",
+            )
+        })?;
+
         unsafe {
             let mut affinity: GROUP_AFFINITY = std::mem::zeroed();
-            if GetNumaNodeProcessorMaskEx(node as u8, &mut affinity) == 0 {
+            if GetNumaNodeProcessorMaskEx(node, &mut affinity) == 0 {
                 return Err(std::io::Error::last_os_error());
             }
 
@@ -169,6 +180,20 @@ mod numa {
             NUMA_NODES.load(Ordering::Relaxed)
         } else {
             1
+        }
+    }
+
+    pub fn current_node() -> usize {
+        unsafe {
+            let mut processor: PROCESSOR_NUMBER = std::mem::zeroed();
+            GetCurrentProcessorNumberEx(&mut processor);
+
+            let mut node = 0u16;
+            if GetNumaProcessorNodeEx(&processor, &mut node) != 0 && node != u16::MAX {
+                node as usize
+            } else {
+                0
+            }
         }
     }
 }
@@ -2895,7 +2920,7 @@ pub mod zc_batch {
     }
 }
 
-/// A buffer for zero-copy vectored I/O using Windows WSASendMsg/WSARecvMsg.
+/// A buffer for scatter/gather I/O using Windows Winsock.
 #[cfg(windows)]
 pub struct ZeroCopyBuffer<'a> {
     bufs: Vec<WSABUF>,
@@ -2908,7 +2933,7 @@ impl<'a> ZeroCopyBuffer<'a> {
     pub fn new(buffers: &[&'a [u8]]) -> Self {
         let bufs = buffers
             .iter()
-            .map(|b| WSABUF { len: b.len() as u32, buf: b.as_ptr() as *mut i8 })
+            .map(|b| WSABUF { len: b.len() as u32, buf: b.as_ptr() as *mut u8 })
             .collect();
         Self { bufs, _marker: std::marker::PhantomData }
     }
@@ -2917,27 +2942,33 @@ impl<'a> ZeroCopyBuffer<'a> {
     pub fn new_mut(buffers: &mut [&'a mut [u8]]) -> Self {
         let bufs = buffers
             .iter_mut()
-            .map(|b| WSABUF { len: b.len() as u32, buf: b.as_mut_ptr() as *mut i8 })
+            .map(|b| WSABUF { len: b.len() as u32, buf: b.as_mut_ptr() })
             .collect();
         Self { bufs, _marker: std::marker::PhantomData }
     }
 
-    /// Sends data via WSASendMsg for zero-copy transmission.
+    /// Sends all registered buffers through a connected socket.
     pub fn send(&self, sock: windows_sys::Win32::Networking::WinSock::SOCKET) -> i32 {
-        let mut msg = WSAMSG {
-            name: core::ptr::null_mut(),
-            namelen: 0,
-            lpBuffers: self.bufs.as_ptr() as *mut _,
-            dwBufferCount: self.bufs.len() as u32,
-            Control: WSABUF { len: 0, buf: core::ptr::null_mut() },
-            dwFlags: 0,
-        };
         let mut sent: u32 = 0;
-        unsafe { WSASendMsg(sock, &msg, 0, &mut sent, core::ptr::null_mut(), None) };
-        sent as i32
+        let result = unsafe {
+            WSASend(
+                sock,
+                self.bufs.as_ptr(),
+                self.bufs.len() as u32,
+                &mut sent,
+                0,
+                core::ptr::null_mut(),
+                None,
+            )
+        };
+        if result == 0 {
+            sent as i32
+        } else {
+            result
+        }
     }
 
-    /// Sends data to the specified address via WSASendMsg.
+    /// Sends all registered buffers to the specified address.
     pub fn send_to(
         &self,
         sock: windows_sys::Win32::Networking::WinSock::SOCKET,
@@ -2945,32 +2976,47 @@ impl<'a> ZeroCopyBuffer<'a> {
     ) -> i32 {
         use socket2::SockAddr;
         let sockaddr = SockAddr::from(addr);
-        let mut msg = WSAMSG {
-            name: sockaddr.as_ptr() as *mut _,
-            namelen: sockaddr.len(),
-            lpBuffers: self.bufs.as_ptr() as *mut _,
-            dwBufferCount: self.bufs.len() as u32,
-            Control: WSABUF { len: 0, buf: core::ptr::null_mut() },
-            dwFlags: 0,
-        };
         let mut sent: u32 = 0;
-        unsafe { WSASendMsg(sock, &msg, 0, &mut sent, core::ptr::null_mut(), None) };
-        sent as i32
+        let result = unsafe {
+            WSASendTo(
+                sock,
+                self.bufs.as_ptr(),
+                self.bufs.len() as u32,
+                &mut sent,
+                0,
+                sockaddr.as_ptr().cast(),
+                sockaddr.len(),
+                core::ptr::null_mut(),
+                None,
+            )
+        };
+        if result == 0 {
+            sent as i32
+        } else {
+            result
+        }
     }
 
-    /// Receives data via WSARecvMsg into the buffers.
+    /// Receives data from a connected socket into the registered buffers.
     pub fn recv(&mut self, sock: windows_sys::Win32::Networking::WinSock::SOCKET) -> i32 {
-        let mut msg = WSAMSG {
-            name: core::ptr::null_mut(),
-            namelen: 0,
-            lpBuffers: self.bufs.as_mut_ptr(),
-            dwBufferCount: self.bufs.len() as u32,
-            Control: WSABUF { len: 0, buf: core::ptr::null_mut() },
-            dwFlags: 0,
-        };
         let mut recvd: u32 = 0;
-        unsafe { WSARecvMsg(sock, &mut msg, &mut recvd, core::ptr::null_mut(), None) };
-        recvd as i32
+        let mut flags = 0u32;
+        let result = unsafe {
+            WSARecv(
+                sock,
+                self.bufs.as_ptr(),
+                self.bufs.len() as u32,
+                &mut recvd,
+                &mut flags,
+                core::ptr::null_mut(),
+                None,
+            )
+        };
+        if result == 0 {
+            recvd as i32
+        } else {
+            result
+        }
     }
 
     /// Receives data and returns the sender address.
@@ -2979,34 +3025,32 @@ impl<'a> ZeroCopyBuffer<'a> {
         sock: windows_sys::Win32::Networking::WinSock::SOCKET,
     ) -> io::Result<(i32, SocketAddr)> {
         use socket2::SockAddr;
-        use windows_sys::Win32::Networking::WinSock::SOCKADDR_STORAGE;
-        let mut storage: SOCKADDR_STORAGE = unsafe { core::mem::zeroed() };
-        let mut msg = WSAMSG {
-            name: &mut storage as *mut _ as *mut _,
-            namelen: core::mem::size_of::<SOCKADDR_STORAGE>() as u32,
-            lpBuffers: self.bufs.as_mut_ptr(),
-            dwBufferCount: self.bufs.len() as u32,
-            Control: WSABUF { len: 0, buf: core::ptr::null_mut() },
-            dwFlags: 0,
-        };
         let mut recvd: u32 = 0;
-        let ret = unsafe { WSARecvMsg(sock, &mut msg, &mut recvd, core::ptr::null_mut(), None) };
-        if ret == 0 {
-            let addr = unsafe {
-                match SockAddr::from_raw_parts(&storage as *const _ as *const _, msg.namelen)
-                    .as_socket()
-                {
-                    Some(a) => a,
-                    None => {
-                        error!("WSARecvMsg returned no socket address - using unspecified address");
-                        std::net::SocketAddr::from(([0, 0, 0, 0], 0))
-                    }
+        let mut flags = 0u32;
+        let (received, sockaddr) = unsafe {
+            SockAddr::try_init(|storage, storage_len| {
+                let result = WSARecvFrom(
+                    sock,
+                    self.bufs.as_ptr(),
+                    self.bufs.len() as u32,
+                    &mut recvd,
+                    &mut flags,
+                    storage.cast(),
+                    storage_len,
+                    core::ptr::null_mut(),
+                    None,
+                );
+                if result == 0 {
+                    Ok(recvd as i32)
+                } else {
+                    Err(io::Error::from_raw_os_error(WSAGetLastError()))
                 }
-            };
-            Ok((recvd as i32, addr))
-        } else {
-            Err(io::Error::last_os_error())
-        }
+            })
+        }?;
+        let addr = sockaddr.as_socket().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "Winsock returned a non-IP address")
+        })?;
+        Ok((received, addr))
     }
 
     /// Returns the total byte length across all WSABUF entries.

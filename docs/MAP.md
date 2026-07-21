@@ -21,7 +21,7 @@ It is maintained as the current architecture and repository index, with a curate
 - Memory locking wiring (TODO-516): `src/main.rs::run_server()` calls `mlockall(MCL_CURRENT | MCL_FUTURE)` when `[security] lock_memory = true` (default) before key material is loaded. `src/optimize/mod.rs` `MemoryPool::set_lock_blocks()` gates per-block `mlock()` in `alloc_numa_block()` when `lock_blocks = true` (default). Both require `LimitMEMLOCK=infinity` in systemd or `CAP_IPC_LOCK`.
 - Control plane wiring: CLI + engine + admin surfaces + metrics/telemetry endpoints.
 - UI wiring: `apps/svelte-desktop` (Svelte 5 desktop frontend) and `apps/svelte-admin` (SvelteKit/Svelte 5 admin frontend) are the active UI surfaces. The retained native desktop host/runtime bridge lives in `apps/tauri/src-tauri`. Shared UI primitives live in `packages/ui` (Svelte components) and `packages/theme` (CSS).
-- Automation wiring: scripts in `scripts/` orchestrate build/test/benchmark/audit tasks; generated local artifact directories are intentionally outside this map.
+- Automation wiring: scripts in `scripts/` orchestrate build/test/benchmark/audit tasks; GitHub workflows own cross-platform core checks and signed release packaging; generated local artifact directories are intentionally outside this map.
 
 ## Stealth Mode Architecture Notes (Session 22)
 
@@ -141,6 +141,8 @@ Uses `StealthConfig::from_mode(runtime_mode)` - was silently using `..Default::d
 18. NAT traversal path discovery: `src/engine/config.rs` `[nat_traversal]` -> `src/transport/config.rs` `NatTraversalConfig` -> `src/transport/nat.rs` `NatPathDiscovery` -> path-management consumers when policy permits discovery.
 19. Audit logging path: `src/main.rs::run_server()` `--audit-log <path>` -> `src/audit/mod.rs::init_audit_log()` (global `OnceLock<Arc<AuditLog>>`) -> `crate::audit::audit()` calls at server start/stop, privilege drop, auth success/failure, QKey issued/revoked, admin actions, config reload.
 20. Memory locking path: `src/engine/config.rs` `[security] lock_memory/lock_blocks` -> `src/main.rs::run_server()` `mlockall(MCL_CURRENT | MCL_FUTURE)` -> `src/optimize/mod.rs` `MemoryPool::set_lock_blocks()` -> `mlock_block()` in `alloc_numa_block()`.
+21. Windows core CI gate: `.github/workflows/ci.yml` `windows-core-checks` -> native `windows-latest` `cargo check --lib` -> `cargo test --lib --features rust-tests` -> `cargo clippy --lib --features rust-tests -- -D warnings`.
+22. Windows signed release path: `.github/workflows/release.yml` `desktop-windows` -> Tauri MSI build -> `.msi` plus `.msi.sig` verification -> required `publish-release` dependency -> `latest.json` `windows-x86_64` entry.
 
 ## ASCII Repository Tree (curated tracked-source snapshot)
 
@@ -155,7 +157,8 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 |-- .github
 |   `-- workflows
 |       |-- ci.yml
-|       `-- clippy-matrix.yml
+|       |-- clippy-matrix.yml
+|       `-- release.yml
 |-- .gitignore
 |-- AGENTS.md
 |-- Cargo.lock

@@ -139,9 +139,9 @@ Use this section as the shortest non-marketing answer to "what evidence exists r
 
 ### Release Scope
 - Distribution model: source-first release (open-source code distribution) plus CI-built binary artifacts published to GitHub Releases.
-- Signed desktop bundles (macOS DMG + `.app.tar.gz` updater, Linux AppImage/deb + `.AppImage.tar.gz` updater) are built in CI with Tauri ed25519 signing when a `v*` tag is pushed. Desktop builds are non-blocking (`continue-on-error`): if a desktop build fails, the server release still publishes and `latest.json` gracefully omits the failed platform.
+- `.github/workflows/release.yml` is configured to build Tauri ed25519-signed desktop artifacts for macOS (DMG plus `.app.tar.gz` updater), Linux (deb plus directly signed `.AppImage`), and Windows (directly signed MSI). macOS and Linux remain non-blocking; Windows is a required dependency of tagged release publication.
 - Updater integration is configured in `tauri.conf.json` with `bundle.createUpdaterArtifacts: true`, a GitHub Releases endpoint, and an embedded ed25519 pubkey. The `latest.json` manifest is generated in CI with real minisign signatures from the Tauri build output, including only platforms whose signed updater bundles are present.
-- Windows desktop bundles are not yet built — the core QUIC library requires Unix-specific syscalls that are not yet cfg-gated for Windows (see TODO-519).
+- TODO-519 has green local Windows GNU cross-target check, feature-enabled Clippy, and full library-test compilation proof, and the required Windows CI/MSI path is tracked. Native MSVC CI/test execution, MSI/signature production, and a tagged `latest.json` `windows-x86_64` entry remain unverified, so Windows release readiness is still open.
 
 ### Current Release Checkpoint
 
@@ -160,10 +160,11 @@ Use this section as the shortest non-marketing answer to "what evidence exists r
 - **TODO-513 DONE**: Full install/upgrade/rollback/uninstall lifecycle on Broderick (ARM64, Ubuntu 24.04): all steps PASS. Config and QKey registry preserved across upgrade. State preserved after uninstall. `/api/health` endpoint used as liveness signal.
 - **TODO-517 DONE**: `HintChannel<A>` abstraction for brain.rs hint atomics — 3 statics wrapped in typsafe newtypes with writer/reader contracts.
 - **TODO-518 DONE**: Global Atomic State Audit reconciled with code truth (120 raw + 156 wrapped = 377 total).
-- All TODO-508 through TODO-518 are DONE. TODO-412 is DONE. The repository can honestly claim production-ready status with a published v0.4.0 release.
-- **Release pipeline**: `release.yml` builds Linux server bundle (required for `publish-release`) + macOS and Linux desktop bundles (non-blocking, `continue-on-error`). `publish-release` creates the GitHub Release with GPG-signed checksums, any successful desktop bundle artifacts, and the Tauri updater manifest when a `v*` tag is pushed. GPG signing key: `07484E2F6ED688BC` (ed25519, expires 2028-07-06). Tauri updater signing key generated and set as `TAURI_SIGNING_PRIVATE_KEY` secret.
-- **Tauri updater**: configured in `tauri.conf.json` with `bundle.createUpdaterArtifacts: true` (required for Tauri to generate `.app.tar.gz` / `.AppImage.tar.gz` updater bundles and their `.sig` signature files), a GitHub Releases endpoint (`releases/latest/download/latest.json`), and an ed25519 pubkey embedded for client-side signature verification. The `latest.json` manifest is generated in CI with real minisign signatures read from the Tauri build output and proper artifact URLs for each platform. Platforms whose updater bundles are missing (e.g. due to a failed desktop build) are omitted from the manifest. No UI changes — only `plugins.updater` and `bundle.createUpdaterArtifacts` config added.
-- **Desktop platforms**: macOS (aarch64 DMG + `.app.tar.gz` updater bundle) and Linux (x86_64 AppImage/deb + `.AppImage.tar.gz` updater bundle) are built in CI as non-blocking jobs. Windows is not yet supported — the core QUIC library uses Unix-specific syscalls (`libc::iovec`, `libc::msghdr`, `std::os::unix`) in `transport/batch.rs` and other modules that are not yet cfg-gated for Windows. See TODO-519 for Windows desktop porting.
+- All TODO-508 through TODO-518 and TODO-412 are DONE for the published v0.4.0 checkpoint. Current end-to-end production readiness is reopened by TODO-519 until its native Windows and signed-release acceptance evidence is green.
+- **Release pipeline**: `release.yml` builds the Linux server bundle, optional macOS/Linux desktop bundles, and a required Windows MSI bundle. `publish-release` cannot publish a `v*` tag unless the Windows job succeeds and uploads both `.msi` and `.msi.sig`; it then creates the GitHub Release with GPG-signed checksums, available desktop artifacts, and `latest.json`. GPG signing key: `07484E2F6ED688BC` (ed25519, expires 2028-07-06). Tauri updater signing uses the `TAURI_SIGNING_PRIVATE_KEY` secret.
+- **Tauri updater**: `bundle.createUpdaterArtifacts: true` produces platform-specific updater artifacts: macOS `.app.tar.gz` plus `.sig`, Linux `.AppImage` plus `.sig`, and Windows `.msi` plus `.sig`. The workflow reads those signature files directly into `latest.json`, with release URLs for `darwin-aarch64`, `linux-x86_64`, and `windows-x86_64` when the corresponding pair exists. macOS/Linux may be omitted after optional job failure; Windows is required for tagged publication. This tracked contract still requires a live tag proof.
+- **Desktop platforms**: macOS and Linux remain optional release jobs. The core Windows source now passes local GNU cross-target check, full library-test compilation, and feature-enabled Clippy; `ci.yml` contains required native Windows core checks/tests, and `release.yml` contains a required signed MSI job. Native MSVC test execution, MSI upload, and updater-manifest verification remain open under TODO-519.
+- **TODO-519 local regression evidence**: macOS root check/Clippy, 1,664 `rust-tests` library tests, `cargo test --workspace --all-targets --features rust-tests` including the integration harnesses, and `cargo clippy --workspace --all-targets --features rust-tests -- -D warnings` pass. TODO consistency passes across 165 detail files with zero violations, and runtime guardrails pass with zero critical findings and zero warnings. The native Tauri host passes check, 29/29 tests, and all-target Clippy through a temporary `TAURI_CONFIG` `frontendDist` URL override, which avoids generating or modifying the protected Svelte bundle and does not count as Windows packaging proof.
 - UI changes remain protected by the `AGENTS.md` UI Change Boundary: no UI component, view, style, asset, text, or adjacent UI cleanup is allowed without an explicit current-task request for that exact UI change.
 
 ### Release Security Audit Baseline
@@ -215,11 +216,11 @@ Security findings table:
 |---|---|---|---|---|
 | medium | Comprehensive audit script reports many `unsafe` blocks | higher review burden for memory-sensitive paths | accepted with controls | core runtime |
 | medium | Comprehensive audit script reports many `unwrap` call sites | potential panic if assumptions are broken | accepted with controls | core runtime |
-| low | Updater/signature enforcement not active in source-first release | no binary auto-update trust chain in shipped source artifacts | out of current artifact scope | desktop release |
+| low | Windows updater/signature path is tracked but not yet native/tag-proven | Windows binary update trust cannot be claimed until MSI and manifest evidence exists | open (TODO-519) | desktop release |
 
 Current release constraints:
-- No signed desktop binaries are provided.
-- Updater runtime is integrated but disabled in shipped source builds without signing.
+- v0.4.0 remains the last published checkpoint; this task has not yet produced or verified a new signed Windows desktop binary.
+- The tracked future tag path fails closed on the required Windows MSI/signature job, but native CI and tagged updater-manifest evidence are still pending.
 
 ### Threat Model
 
@@ -254,7 +255,7 @@ Threat to mitigation mapping:
 
 Residual threat profile:
 - False positives in probe-detection paths under extreme jitter/loss remain part of the validation stream.
-- Signed update-channel threats are outside the current source-first artifact scope.
+- Signed Windows update-channel threats remain partially open until native MSI/signature and tagged manifest verification completes.
 
 ### Deployment Hardening Guide
 
@@ -275,7 +276,7 @@ Admin UI hardening baseline:
 - Operate IP blocklist with explicit review and rollback procedure.
 
 Desktop hardening baseline:
-- Keep updater disabled for source-first builds.
+- Keep updater disabled for source-first or unsigned builds; enable delivery only for artifacts covered by the signed updater manifest.
 - Store secrets in OS keychain path where available.
 - Keep local state sanitized on load and persist only normalized structures.
 - Prefer fixed window constraints and explicit close behavior for predictable UX.
@@ -1870,8 +1871,9 @@ Benchmarks
 #### Automated Build and CI/CD
 - The general CI workflow `ci.yml` runs frontend checks, frontend E2E, security audit, TODO consistency, app backend checks, release build/test, fuzz target checks, feature-matrix tests, benchmark regression checks on pull requests, and Linux fastpath evidence.
 - The `app-backend-checks` job validates the native desktop backend without UI source edits: it builds the existing `apps/svelte-desktop` bundle for Tauri context, then runs `cargo check` and `cargo test` in `apps/tauri/src-tauri`.
+- The `windows-core-checks` job runs `cargo check --lib`, `cargo test --lib --features rust-tests`, and `cargo clippy --lib --features rust-tests -- -D warnings` on `windows-latest`; its first native green run remains TODO-519 acceptance evidence rather than an already-proven checkpoint.
 - `.github/workflows/clippy-matrix.yml` runs the Rust clippy feature matrix on stable Rust with `-D warnings`.
-- `.github/workflows/release.yml` builds the release server binary, builds admin web assets, creates the server bundle, and uploads release artifacts.
+- `.github/workflows/release.yml` builds the release server bundle, optional signed macOS/Linux desktop artifacts, and a required signed Windows MSI. Tagged publication requires the Windows artifact and maps its `.msi.sig` into `latest.json` as `windows-x86_64`.
 - Latest green main checkpoint: `f1ec566`; CI `28567731479`, Clippy Matrix `28567731478`, Release Build `28567731484`.
 
 #### Local Development Workflow
@@ -2491,9 +2493,10 @@ GitHub CI validates the native desktop backend through the `app-backend-checks` 
 - Auto-connect-on-launch reads persisted desktop settings and attempts connection on startup when enabled.
 - Start-at-login persists user preference and is wired to OS auto-start registration via the desktop runtime plugin.
 
-**Updater Integration (source-first):**
+**Updater Integration (source-first and signed-release boundary):**
 - Updater plugin path is integrated but runtime-gated behind `QUICFUSCATE_DESKTOP_UPDATER_ACTIVE`.
-- Default is disabled; signed artifacts are required before enabling update delivery in shipped binaries.
+- Default is disabled for source-first or unsigned builds; signed artifacts and a matching manifest entry are required before enabling update delivery in shipped binaries.
+- The tracked release workflow now includes a required signed Windows MSI path, but native MSI and tagged manifest proof remain open under TODO-519.
 - Desktop UI includes updater policy/status so no-update, available, download/install, and signature-failure states are explicit.
 
 **Verification (frontend):**

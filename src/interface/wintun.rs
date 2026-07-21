@@ -62,6 +62,7 @@ mod imp {
 
     /// Dynamically loaded Wintun library bundling a module handle and all
     /// resolved entry points. Dropping is handled by the owning `WintunDevice`.
+    #[derive(Debug)]
     struct WintunLib {
         handle: HMODULE,
         create_adapter: WintunCreateAdapterFn,

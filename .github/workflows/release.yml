@@ -98,22 +98,18 @@ jobs:
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
-  # Desktop builds (Tauri) — macOS and Linux (non-blocking)
+  # Desktop builds (Tauri) - macOS, Linux, and Windows
   # ---------------------------------------------------------------------------
   # These jobs build the Tauri desktop app bundles with updater signing.
   # The frontend (svelte-desktop) is built as part of the Tauri build process
   # via beforeBuildCommand. No UI changes are made; these jobs only package
   # the existing frontend into native bundles.
   #
-  # These jobs are non-blocking (continue-on-error): if a desktop build fails,
-  # the server release still publishes. The latest.json generation in
-  # publish-release gracefully omits platforms whose updater bundles are
-  # missing. Desktop artifacts that do succeed are still downloaded and
-  # included in the GitHub Release.
+  # macOS and Linux remain non-blocking. Windows is required because its MSI
+  # and updater signature are part of the restored TODO-519 release contract.
+  # The latest.json generator omits only optional platforms whose signed
+  # updater bundles are unavailable.
   #
-  # Windows is not included: the core QUIC library uses Unix-specific syscalls
-  # (libc::iovec, libc::msghdr, std::os::unix) in transport/batch.rs and
-  # other modules that are not yet cfg-gated for Windows. See TODO-519.
   # ---------------------------------------------------------------------------
   desktop-macos:
     runs-on: macos-latest
@@ -197,16 +193,58 @@ jobs:
             target/release/bundle/**/*.AppImage.sig
           if-no-files-found: warn
 
+  desktop-windows:
+    runs-on: windows-latest
+    env:
+      CARGO_INCREMENTAL: "0"
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.21"
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2.0.0"
+      - name: Install workspace dependencies
+        run: bun install
+      - name: Install desktop frontend dependencies
+        working-directory: apps/svelte-desktop
+        run: bun install
+      - name: Build signed Tauri MSI (Windows)
+        working-directory: apps/tauri/src-tauri
+        run: cargo tauri build --bundles msi --ci
+      - name: Verify signed MSI updater artifacts
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem -Path "target/release/bundle" -Recurse -File -Filter "*.msi")
+          if ($installers.Count -eq 0) {
+            throw "Tauri produced no Windows MSI installer"
+          }
+          foreach ($installer in $installers) {
+            $signature = "$($installer.FullName).sig"
+            if (-not (Test-Path -LiteralPath $signature -PathType Leaf)) {
+              throw "Missing updater signature for $($installer.Name)"
+            }
+          }
+      - name: Upload Windows MSI bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: quicfuscate-desktop-windows
+          path: |
+            target/release/bundle/**/*.msi
+            target/release/bundle/**/*.msi.sig
+          if-no-files-found: error
+
   # ---------------------------------------------------------------------------
-  # Release publishing — creates a GitHub Release with all artifacts
+  # Release publishing - creates a GitHub Release with all artifacts
   # ---------------------------------------------------------------------------
   publish-release:
     # Wait for ALL build jobs so their artifacts are available for download.
-    # The desktop jobs have continue-on-error: true, so a desktop build
-    # failure does NOT block publish-release — the job is treated as
-    # success for needs resolution. This ensures artifacts from successful
-    # desktop builds are present when actions/download-artifact runs.
-    needs: [linux-server-bundle, desktop-macos, desktop-linux]
+    # macOS and Linux are optional through continue-on-error. Windows is a
+    # required dependency, so a tag cannot publish without the signed MSI.
+    needs: [linux-server-bundle, desktop-macos, desktop-linux, desktop-windows]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
@@ -235,11 +273,17 @@ jobs:
           # safe even if no desktop artifacts were downloaded.
           # macOS: Tauri generates .app.tar.gz + .app.tar.gz.sig (updater archive)
           # Linux: Tauri generates .AppImage + .AppImage.sig (signed directly, no archive)
+          # Windows: Tauri v2 signs the MSI directly as .msi.sig
           MACOS_TGZ=$(find release-artifacts -name "*.app.tar.gz" ! -name "*.sig" 2>/dev/null | head -1)
           MACOS_SIG=$(find release-artifacts -name "*.app.tar.gz.sig" 2>/dev/null | head -1)
           LINUX_IMG=$(find release-artifacts -name "*.AppImage" ! -name "*.sig" 2>/dev/null | head -1)
           LINUX_SIG=$(find release-artifacts -name "*.AppImage.sig" 2>/dev/null | head -1)
-          export MACOS_TGZ MACOS_SIG LINUX_IMG LINUX_SIG
+          WINDOWS_MSI=$(find release-artifacts -name "*.msi" 2>/dev/null | head -1)
+          WINDOWS_SIG=""
+          if [ -n "$WINDOWS_MSI" ]; then
+            WINDOWS_SIG="${WINDOWS_MSI}.sig"
+          fi
+          export MACOS_TGZ MACOS_SIG LINUX_IMG LINUX_SIG WINDOWS_MSI WINDOWS_SIG
 
           python3 - <<'PYEOF'
           import json
@@ -250,13 +294,13 @@ jobs:
           version = os.environ["VERSION"]
           base_url = os.environ["BASE_URL"]
 
-          def platform_entry(tgz, sig):
+          def platform_entry(bundle, sig):
               """Return (url, signature) if both bundle and signature exist, else None."""
-              if not tgz or not sig:
+              if not bundle or not sig:
                   return None
-              if not os.path.isfile(tgz) or not os.path.isfile(sig):
+              if not os.path.isfile(bundle) or not os.path.isfile(sig):
                   return None
-              url = f"{base_url}/{os.path.basename(tgz)}"
+              url = f"{base_url}/{os.path.basename(bundle)}"
               with open(sig, "r", encoding="utf-8") as f:
                   signature = f.read()
               return {"signature": signature, "url": url}
@@ -268,6 +312,11 @@ jobs:
           linux = platform_entry(os.environ.get("LINUX_IMG", ""), os.environ.get("LINUX_SIG", ""))
           if linux:
               platforms["linux-x86_64"] = linux
+          windows = platform_entry(
+              os.environ.get("WINDOWS_MSI", ""), os.environ.get("WINDOWS_SIG", "")
+          )
+          if windows:
+              platforms["windows-x86_64"] = windows
 
           if not platforms:
               print("::warning::No signed desktop updater bundles found. "

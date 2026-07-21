@@ -23,7 +23,7 @@ license.workspace = true
 
 [dependencies]
 aligned_box = "0.2"
-rustls = { version = "0.23", features = ["ring", "tls12", "logging", "std"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "logging", "std"] }
 rustls-native-certs = "0.8"
 rcgen = { version = "0.13", optional = true }
 time = { version = "0.3", optional = true }
@@ -75,10 +75,15 @@ io-uring = { version = "0.7", optional = true }
 sha2-asm = "0.6.4"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.59", optional = true, features = [
+windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
+    "Win32_Networking_WinSock",
+    "Win32_System_IO",
+    "Win32_System_Kernel",
     "Win32_System_LibraryLoader",
+    "Win32_System_SystemInformation",
     "Win32_System_SystemServices",
+    "Win32_System_Threading",
 ] }
 
 [dev-dependencies]
@@ -123,7 +128,7 @@ zero_copy_dgram = []
 dev-certs = ["rcgen", "time"]
 
 # --- Platform features ---
-tun-windows = ["dep:windows-sys"]
+tun-windows = []
 tun-ios = []
 
 # --- Internal / experimental features ---

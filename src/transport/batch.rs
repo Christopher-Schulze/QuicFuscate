@@ -388,23 +388,19 @@ impl BatchProcessor {
     #[cfg(target_os = "windows")]
     pub fn batch_send(
         &mut self,
-        socket: i32,
+        socket: std::os::windows::io::RawSocket,
         packets: &[(&[u8], SocketAddr)],
     ) -> std::io::Result<usize> {
         use std::os::windows::io::FromRawSocket;
-        use std::os::windows::io::IntoRawSocket;
-        use windows_sys::Win32::Networking::WinSock::SOCKET;
-        // SAFETY: `socket` is a valid, open SOCKET handle provided by the caller, cast
-        // to the platform-native `SOCKET` type. `into_raw_socket()` is called on all
-        // exit paths so the handle is not closed when `sock` is dropped; the caller
-        // retains ownership of the socket handle.
-        let sock = unsafe { UdpSocket::from_raw_socket(socket as SOCKET) };
+        // SAFETY: `socket` is a valid, open RawSocket provided by the caller.
+        // ManuallyDrop prevents the temporary UdpSocket view from closing the
+        // caller-owned handle on either success or an early send error.
+        let sock = std::mem::ManuallyDrop::new(unsafe { UdpSocket::from_raw_socket(socket) });
         let mut sent = 0usize;
         for (data, addr) in packets {
             sock.send_to(data, addr)?;
             sent += 1;
         }
-        let _ = sock.into_raw_socket();
         Ok(sent)
     }
 
@@ -489,5 +485,63 @@ mod tests {
         let mut bp = BatchProcessor::new();
         // init_acceleration may fail on some platforms but should not panic
         let _ = bp.init_acceleration(&socket);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_windows_batch_send_preserves_destinations_and_socket_ownership() {
+        use std::os::windows::io::AsRawSocket;
+
+        let first_receiver = UdpSocket::bind("127.0.0.1:0").expect("bind first receiver");
+        let second_receiver = UdpSocket::bind("127.0.0.1:0").expect("bind second receiver");
+        first_receiver
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("set first receiver timeout");
+        second_receiver
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("set second receiver timeout");
+
+        let sender = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+        let first_payload = b"first-destination";
+        let second_payload = b"second-destination";
+        let packets = [
+            (
+                first_payload.as_slice(),
+                first_receiver.local_addr().expect("first receiver address"),
+            ),
+            (
+                second_payload.as_slice(),
+                second_receiver.local_addr().expect("second receiver address"),
+            ),
+        ];
+
+        let mut batch = BatchProcessor::new();
+        let sent = batch.batch_send(sender.as_raw_socket(), &packets).expect("batch send");
+        assert_eq!(sent, packets.len());
+
+        let mut receive_buffer = [0u8; 64];
+        let (first_len, _) =
+            first_receiver.recv_from(&mut receive_buffer).expect("receive first payload");
+        assert_eq!(&receive_buffer[..first_len], first_payload);
+        let (second_len, _) =
+            second_receiver.recv_from(&mut receive_buffer).expect("receive second payload");
+        assert_eq!(&receive_buffer[..second_len], second_payload);
+
+        let oversized_payload = vec![0u8; MAX_UDP_DATAGRAM_SIZE];
+        let oversized_packets = [(oversized_payload.as_slice(), packets[0].1)];
+        batch
+            .batch_send(sender.as_raw_socket(), &oversized_packets)
+            .expect_err("oversized UDP payload must fail");
+        assert!(sender.local_addr().is_ok(), "batch send closed the caller-owned socket");
+
+        let recovery_payload = b"after-send-error";
+        let recovery_packets = [(recovery_payload.as_slice(), packets[0].1)];
+        assert_eq!(
+            batch.batch_send(sender.as_raw_socket(), &recovery_packets).expect("recovery send"),
+            1
+        );
+        let (recovery_len, _) =
+            first_receiver.recv_from(&mut receive_buffer).expect("receive recovery payload");
+        assert_eq!(&receive_buffer[..recovery_len], recovery_payload);
     }
 }

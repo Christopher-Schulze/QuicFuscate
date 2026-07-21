@@ -240,6 +240,7 @@ impl ServiceConfig {
 }
 
 /// Systemd notify interface.
+#[cfg(unix)]
 pub mod notify {
     use std::os::unix::net::UnixDatagram;
 

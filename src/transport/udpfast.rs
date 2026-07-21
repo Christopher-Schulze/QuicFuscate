@@ -382,38 +382,12 @@ impl UdpFastPath {
 
     #[cfg(target_os = "windows")]
     pub fn send_batch(&mut self, packets: &[(&[u8], SocketAddr)]) -> io::Result<usize> {
-        // Windows: Use WSASend with WSABUF arrays for vectorized I/O
-        use std::os::windows::io::AsRawSocket;
-        use windows_sys::Win32::Networking::WinSock::{
-            WSASend, SOCKET, WSABUF, WSAOVERLAPPED, WSA_IO_PENDING,
-        };
-
-        let socket = self.socket.as_raw_socket() as SOCKET;
-        let mut total_sent = 0;
-
-        for (data, _addr) in packets {
-            let mut wsabuf = WSABUF { len: data.len() as u32, buf: data.as_ptr() as *mut u8 };
-
-            let mut bytes_sent = 0u32;
-            let result = unsafe {
-                WSASend(
-                    socket,
-                    &mut wsabuf,
-                    1,
-                    &mut bytes_sent,
-                    0,
-                    std::ptr::null_mut::<WSAOVERLAPPED>(),
-                    None,
-                )
-            };
-
-            if result == 0
-                || unsafe { windows_sys::Win32::Foundation::GetLastError() } == WSA_IO_PENDING
-            {
-                total_sent += 1;
-            }
+        let mut sent = 0usize;
+        for &(data, addr) in packets {
+            self.send_single(data, addr)?;
+            sent += 1;
         }
-        Ok(total_sent)
+        Ok(sent)
     }
 
     #[cfg(not(any(

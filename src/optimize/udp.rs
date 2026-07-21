@@ -1,7 +1,9 @@
+#[cfg(unix)]
 use libc::{c_void, iovec, msghdr, sockaddr_storage, socklen_t};
 #[cfg(target_os = "linux")]
 use smallvec::SmallVec;
 use std::net::{SocketAddr, UdpSocket};
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 #[cfg(target_os = "linux")]
 use std::os::unix::io::RawFd;
@@ -389,6 +391,23 @@ pub fn send_batch(sock: &UdpSocket, packets: &[(&[u8], SocketAddr)]) -> std::io:
         let rc = unsafe { libc::sendmsg(fd, msg as *const _ as *const _, flags) };
         if rc < 0 {
             return Err(std::io::Error::last_os_error());
+        }
+        sent += 1;
+    }
+    Ok(sent)
+}
+
+/// Portable batched UDP fallback for platforms without a multi-message syscall.
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
+pub fn send_batch(sock: &UdpSocket, packets: &[(&[u8], SocketAddr)]) -> std::io::Result<usize> {
+    let mut sent = 0usize;
+    for &(data, addr) in packets {
+        let bytes = sock.send_to(data, addr)?;
+        if bytes != data.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "partial UDP datagram send",
+            ));
         }
         sent += 1;
     }

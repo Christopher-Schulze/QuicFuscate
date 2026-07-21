@@ -2485,15 +2485,15 @@ pub mod crypto {
     pub fn sha256(data: &[u8]) -> [u8; 32] {
         let backend = sha256_plan().backend;
         match backend {
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", not(windows)))]
             Sha256Backend::Avx2 => crate::optimize::telemetry::SHA256_AVX2_OPS.inc(),
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", not(windows)))]
             Sha256Backend::Vnni => crate::optimize::telemetry::SHA256_VNNI_OPS.inc(),
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", not(windows)))]
             Sha256Backend::ShaNi => crate::optimize::telemetry::SHA256_SHA_OPS.inc(),
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(all(target_arch = "aarch64", not(windows)))]
             Sha256Backend::Neon => crate::optimize::telemetry::SHA256_NEON_OPS.inc(),
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(all(target_arch = "aarch64", not(windows)))]
             Sha256Backend::Sve2 => crate::optimize::telemetry::SHA256_SVE2_OPS.inc(),
             Sha256Backend::Scalar => crate::optimize::telemetry::SHA256_SCALAR_OPS.inc(),
         }
@@ -2505,15 +2505,15 @@ pub mod crypto {
     pub fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
         let backend = sha256_plan().backend;
         match backend {
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", not(windows)))]
             Sha256Backend::Avx2 => crate::optimize::telemetry::HMAC_SHA256_AVX2_OPS.inc(),
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", not(windows)))]
             Sha256Backend::Vnni => crate::optimize::telemetry::HMAC_SHA256_VNNI_OPS.inc(),
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", not(windows)))]
             Sha256Backend::ShaNi => crate::optimize::telemetry::HMAC_SHA256_SHA_OPS.inc(),
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(all(target_arch = "aarch64", not(windows)))]
             Sha256Backend::Neon => crate::optimize::telemetry::HMAC_SHA256_NEON_OPS.inc(),
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(all(target_arch = "aarch64", not(windows)))]
             Sha256Backend::Sve2 => crate::optimize::telemetry::HMAC_SHA256_SVE2_OPS.inc(),
             Sha256Backend::Scalar => crate::optimize::telemetry::HMAC_SHA256_SCALAR_OPS.inc(),
         }
