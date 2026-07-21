@@ -599,15 +599,6 @@ pub trait QuicTlsProvider: Send + Sync {
     fn get_quic_transport_params(&self) -> Vec<u8>;
     /// Set peer's transport parameters
     fn set_peer_transport_params(&mut self, params: &[u8]) -> Result<(), ConnectionError>;
-    /// Set QKey auth token to inject into transport parameters (client side).
-    /// Carried in TLS EncryptedExtensions — encrypted, invisible to DPI.
-    /// Default: no-op (providers without QKey support ignore it).
-    fn set_qkey_auth_token(&mut self, _token: &[u8]) {}
-    /// Get QKey auth token extracted from peer's transport parameters (server side).
-    /// Default: None (providers without QKey support).
-    fn peer_qkey_auth_token(&self) -> Option<&[u8]> {
-        None
-    }
     /// Initiate key update
     fn key_update(&mut self) -> Result<(), ConnectionError>;
     /// Advance read-side 1-RTT keys only.
@@ -793,12 +784,6 @@ impl QuicTlsProvider for CombinedProvider {
     fn set_peer_transport_params(&mut self, params: &[u8]) -> Result<(), ConnectionError> {
         self.rustls.set_peer_transport_params(params)
     }
-    fn set_qkey_auth_token(&mut self, token: &[u8]) {
-        self.rustls.set_qkey_auth_token(token.to_vec());
-    }
-    fn peer_qkey_auth_token(&self) -> Option<&[u8]> {
-        self.rustls.peer_qkey_auth_token()
-    }
     fn key_update(&mut self) -> Result<(), ConnectionError> {
         self.rustls.key_update()
     }
@@ -870,11 +855,6 @@ mod rustls_provider {
         pub transport_params: Vec<u8>,
         /// Peer's QUIC transport parameters (received during handshake).
         pub peer_transport_params: Option<Vec<u8>>,
-        /// QKey auth token to inject into transport parameters (client side).
-        /// Carried in TLS EncryptedExtensions — encrypted, invisible to DPI.
-        pub qkey_auth_token: Option<Vec<u8>>,
-        /// QKey auth token extracted from peer's transport parameters (server side).
-        pub peer_qkey_auth_token: Option<Vec<u8>>,
         /// Active TLS profile configuration.
         pub profile: Option<TlsProfile>,
         /// Next 1-RTT secrets for key update.
@@ -1007,8 +987,6 @@ mod rustls_provider {
                 zero_rtt_enabled: false,
                 transport_params: Self::default_transport_params(),
                 peer_transport_params: None,
-                qkey_auth_token: None,
-                peer_qkey_auth_token: None,
                 profile: None,
                 next_1rtt_secrets: None,
                 pending_local_1rtt: VecDeque::new(),
@@ -1474,7 +1452,6 @@ mod rustls_provider {
             self.handshake_complete = false;
             self.alpn = None;
             self.peer_cert = None;
-            self.peer_qkey_auth_token = None;
             self.bytes_sent = 0;
             self.bytes_received = 0;
             self.frame_buffer.clear();
@@ -1799,22 +1776,9 @@ mod rustls_provider {
                 })
         }
         fn get_quic_transport_params(&self) -> Vec<u8> {
-            // If a QKey auth token is set, inject it into the transport
-            // parameters. This carries the token in the TLS EncryptedExtensions
-            // message, which is encrypted at the Handshake level — invisible
-            // to DPI (TODO-415 Phase 2: QKey auth in encrypted extension).
-            if let Some(ref token) = self.qkey_auth_token {
-                let mut params = self.transport_params.clone();
-                super::inject_qkey_auth_into_tp(&mut params, token);
-                params
-            } else {
-                self.transport_params.clone()
-            }
+            self.transport_params.clone()
         }
         fn set_peer_transport_params(&mut self, params: &[u8]) -> Result<(), ConnectionError> {
-            // Extract QKey auth token from peer's transport parameters if present
-            // (TODO-415 Phase 2: server extracts client's QKey from encrypted extension).
-            self.peer_qkey_auth_token = super::extract_qkey_auth_from_tp(params);
             self.peer_transport_params = Some(params.to_vec());
             Ok(())
         }
@@ -1919,12 +1883,6 @@ impl QuicTlsProvider for RustlsProvider {
     fn set_peer_transport_params(&mut self, params: &[u8]) -> Result<(), ConnectionError> {
         self.0.set_peer_transport_params(params)
     }
-    fn set_qkey_auth_token(&mut self, token: &[u8]) {
-        self.0.qkey_auth_token = Some(token.to_vec());
-    }
-    fn peer_qkey_auth_token(&self) -> Option<&[u8]> {
-        self.0.peer_qkey_auth_token.as_deref()
-    }
     fn key_update(&mut self) -> Result<(), ConnectionError> {
         self.0.key_update()
     }
@@ -1939,105 +1897,6 @@ impl QuicTlsProvider for RustlsProvider {
     }
     fn supports_ch_override(&self) -> bool {
         self.0.supports_ch_override()
-    }
-}
-
-// =============================================================================
-// QKey auth transport parameter (TODO-415 Phase 2)
-// =============================================================================
-
-/// QUIC transport parameter ID for QKey auth token (private-use range 0x30).
-/// Carried in TLS EncryptedExtensions — encrypted at Handshake level, invisible to DPI.
-/// Format: [id:varint][len:varint][token_bytes...]
-pub const QKEY_AUTH_TP_ID: u64 = 0x30;
-
-/// Inject a QKey auth token into QUIC transport parameters.
-/// The token is carried in the TLS EncryptedExtensions message,
-/// which is encrypted at the Handshake level — invisible to DPI.
-pub fn inject_qkey_auth_into_tp(params: &mut Vec<u8>, token: &[u8]) {
-    params.push(QKEY_AUTH_TP_ID as u8);
-    write_varint_tp(token.len() as u64, params);
-    params.extend_from_slice(token);
-}
-
-/// Extract a QKey auth token from peer QUIC transport parameters.
-/// Returns None if the parameter is not present.
-pub fn extract_qkey_auth_from_tp(params: &[u8]) -> Option<Vec<u8>> {
-    let mut off = 0usize;
-    while off < params.len() {
-        let (id, id_len) = read_varint_tp(&params[off..])?;
-        off += id_len;
-        if off >= params.len() {
-            return None;
-        }
-        let (len, len_bytes) = read_varint_tp(&params[off..])?;
-        off += len_bytes;
-        let len = len as usize;
-        if off + len > params.len() {
-            return None;
-        }
-        if id == QKEY_AUTH_TP_ID {
-            return Some(params[off..off + len].to_vec());
-        }
-        off += len;
-    }
-    None
-}
-
-fn write_varint_tp(value: u64, out: &mut Vec<u8>) {
-    if value < 0x40 {
-        out.push(value as u8);
-    } else if value < 0x4000 {
-        out.push(0x40 | ((value >> 8) as u8));
-        out.push(value as u8);
-    } else if value < 0x4000_0000 {
-        out.push(0x80 | ((value >> 24) as u8));
-        out.push((value >> 16) as u8);
-        out.push((value >> 8) as u8);
-        out.push(value as u8);
-    } else {
-        out.push(0xC0 | ((value >> 56) as u8));
-        for shift in (0..56).step_by(8).rev() {
-            out.push((value >> shift) as u8);
-        }
-    }
-}
-
-fn read_varint_tp(buf: &[u8]) -> Option<(u64, usize)> {
-    if buf.is_empty() {
-        return None;
-    }
-    let tag = buf[0];
-    let prefix = tag >> 6;
-    match prefix {
-        0 => Some((tag as u64, 1)),
-        1 => {
-            if buf.len() < 2 {
-                return None;
-            }
-            Some((((tag & 0x3F) as u64) << 8 | buf[1] as u64, 2))
-        }
-        2 => {
-            if buf.len() < 4 {
-                return None;
-            }
-            let val = ((tag & 0x3F) as u64) << 24
-                | (buf[1] as u64) << 16
-                | (buf[2] as u64) << 8
-                | buf[3] as u64;
-            Some((val, 4))
-        }
-        3 => {
-            if buf.len() < 8 {
-                return None;
-            }
-            let mut val = (tag & 0x3F) as u64;
-            for &byte in buf.iter().take(8).skip(1) {
-                val = (val << 8) | byte as u64;
-            }
-            Some((val, 8))
-        }
-        _ => unreachable!(),
     }
 }
 
@@ -2056,61 +1915,6 @@ impl RustlsProvider {
                     }
                 }
             }
-        }
-    }
-
-    /// Set the QKey auth token to inject into transport parameters (client side).
-    /// The token is carried in TLS EncryptedExtensions — encrypted, invisible to DPI.
-    pub fn set_qkey_auth_token(&mut self, token: Vec<u8>) {
-        self.0.qkey_auth_token = Some(token);
-    }
-
-    /// Get the QKey auth token extracted from peer's transport parameters (server side).
-    /// Returns None if the peer did not send a QKey auth parameter.
-    pub fn peer_qkey_auth_token(&self) -> Option<&[u8]> {
-        self.0.peer_qkey_auth_token.as_deref()
-    }
-}
-
-#[cfg(test)]
-mod qkey_tp_tests {
-    use super::*;
-
-    #[test]
-    fn inject_and_extract_qkey_auth_roundtrip() {
-        let mut params = vec![0x01, 0x02, 0x75, 0x30]; // existing TP
-        let token = b"deadbeef_token_1234567890";
-        inject_qkey_auth_into_tp(&mut params, token);
-        let extracted = extract_qkey_auth_from_tp(&params);
-        assert_eq!(extracted.as_deref(), Some(token.as_slice()));
-    }
-
-    #[test]
-    fn extract_returns_none_when_no_qkey_param() {
-        let params = vec![0x01, 0x02, 0x75, 0x30];
-        assert!(extract_qkey_auth_from_tp(&params).is_none());
-    }
-
-    #[test]
-    fn inject_preserves_existing_params() {
-        let mut params = vec![0x01, 0x02, 0x75, 0x30, 0x03, 0x02, 0x05, 0xc0];
-        let original = params.clone();
-        inject_qkey_auth_into_tp(&mut params, b"token");
-        // Existing params should still be at the front
-        assert_eq!(&params[..original.len()], &original[..]);
-        // QKey param should be extractable
-        assert_eq!(extract_qkey_auth_from_tp(&params).as_deref(), Some(b"token".as_slice()));
-    }
-
-    #[test]
-    fn varint_roundtrip_all_sizes() {
-        let values = [0u64, 1, 63, 64, 16383, 16384, 1073741823, 1073741824];
-        for &val in &values {
-            let mut buf = Vec::new();
-            write_varint_tp(val, &mut buf);
-            let (decoded, consumed) = read_varint_tp(&buf).expect("must decode");
-            assert_eq!(val, decoded);
-            assert_eq!(consumed, buf.len());
         }
     }
 }

@@ -1970,33 +1970,9 @@ pub fn evaluate_qkey_http3_headers(
     }
 }
 
-pub fn evaluate_qkey_transport_token(
-    token: Option<&[u8]>,
-    expected_token_sha256: Option<&str>,
-    already_authed: bool,
-) -> QKeyHeaderAuthOutcome {
-    let Some(expected) = expected_token_sha256 else {
-        return QKeyHeaderAuthOutcome::Unchanged;
-    };
-    if already_authed {
-        return QKeyHeaderAuthOutcome::Authenticated;
-    }
-    let Some(token) = token else {
-        return QKeyHeaderAuthOutcome::Unchanged;
-    };
-    let provided = match std::str::from_utf8(token) {
-        Ok(value) => value.trim(),
-        Err(_) => return QKeyHeaderAuthOutcome::Reject(b"invalid_qkey_auth"),
-    };
-    if provided.is_empty() {
-        return QKeyHeaderAuthOutcome::Unchanged;
-    }
-    if crate::implementations::server::qkey_registry::token_matches_hash(provided, expected.trim())
-    {
-        QKeyHeaderAuthOutcome::Authenticated
-    } else {
-        QKeyHeaderAuthOutcome::Reject(b"invalid_qkey_auth")
-    }
+#[inline]
+fn qkey_payload_allowed(require_auth: bool, authenticated: bool) -> bool {
+    !require_auth || authenticated
 }
 
 pub fn close_live_client_for_qkey_auth_failure(
@@ -2238,19 +2214,6 @@ pub async fn process_live_server_client_datagram(
     let auth_gate =
         Arc::new(AtomicBool::new(qkey_auth.as_ref().map(|state| state.authed).unwrap_or(true)));
     let should_close: Cell<Option<&'static [u8]>> = Cell::new(None);
-    match evaluate_qkey_transport_token(
-        conn.conn.peer_qkey_auth_token(),
-        expected_token_sha256.as_deref(),
-        auth_gate.load(AtomicOrdering::Relaxed),
-    ) {
-        QKeyHeaderAuthOutcome::Unchanged => {}
-        QKeyHeaderAuthOutcome::Authenticated => {
-            auth_gate.store(true, AtomicOrdering::Relaxed);
-        }
-        QKeyHeaderAuthOutcome::Reject(reason) => {
-            should_close.set(Some(reason));
-        }
-    }
 
     // Install the MASQUE→TUN sink when TUN bridging is active. Decoded MASQUE
     // CONNECT-UDP datagram payloads (raw IP packets) are written to the server
@@ -2275,7 +2238,10 @@ pub async fn process_live_server_client_datagram(
             let datagram_auth_gate = Arc::clone(&auth_gate);
             conn.set_masque_datagram_cb(Arc::new(std::sync::Mutex::new(Box::new(
                 move |payload: &[u8]| {
-                    if require_auth && !datagram_auth_gate.load(AtomicOrdering::Relaxed) {
+                    if !qkey_payload_allowed(
+                        require_auth,
+                        datagram_auth_gate.load(AtomicOrdering::Relaxed),
+                    ) {
                         return;
                     }
                     if spawn_dns_intercept(
@@ -2317,7 +2283,7 @@ pub async fn process_live_server_client_datagram(
             }
         },
         |_sid, data| {
-            if require_auth && !auth_gate.load(AtomicOrdering::Relaxed) {
+            if !qkey_payload_allowed(require_auth, auth_gate.load(AtomicOrdering::Relaxed)) {
                 return;
             }
             if tun_enable {
@@ -6627,50 +6593,84 @@ mod tests {
         assert!(!state.is_expired());
     }
 
-    fn sha256_hex_for_qkey_token(token_hex: &str) -> String {
-        use sha2::{Digest, Sha256};
-        let bytes = hex::decode(token_hex).unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&bytes);
-        format!("{:x}", hasher.finalize())
+    #[test]
+    fn qkey_http3_authentication_is_fail_closed() {
+        let valid_token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let expected = qkey_registry::token_sha256_hex_from_token_hex(valid_token)
+            .expect("valid QKey token must hash");
+        let cases = [
+            ("auth disabled", Vec::new(), None, false, QKeyHeaderAuthOutcome::Unchanged),
+            (
+                "already authenticated",
+                Vec::new(),
+                Some(expected.as_str()),
+                true,
+                QKeyHeaderAuthOutcome::Authenticated,
+            ),
+            (
+                "missing header",
+                Vec::new(),
+                Some(expected.as_str()),
+                false,
+                QKeyHeaderAuthOutcome::Reject(b"missing_qkey_auth"),
+            ),
+            (
+                "invalid UTF-8",
+                vec![crate::transport::h3::Header::new(b"x-qf-auth", &[0xff])],
+                Some(expected.as_str()),
+                false,
+                QKeyHeaderAuthOutcome::Reject(b"invalid_qkey_auth"),
+            ),
+            (
+                "wrong bearer",
+                vec![crate::transport::h3::Header::new(
+                    b"x-qf-auth",
+                    b"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                )],
+                Some(expected.as_str()),
+                false,
+                QKeyHeaderAuthOutcome::Reject(b"invalid_qkey_auth"),
+            ),
+            (
+                "valid bearer",
+                vec![crate::transport::h3::Header::new(
+                    b"X-QF-AUTH",
+                    format!("  {}  ", valid_token).as_bytes(),
+                )],
+                Some(expected.as_str()),
+                false,
+                QKeyHeaderAuthOutcome::Authenticated,
+            ),
+        ];
+
+        for (name, headers, expected_hash, already_authed, expected_outcome) in cases {
+            let outcome = evaluate_qkey_http3_headers(&headers, expected_hash, already_authed);
+            match (outcome, expected_outcome) {
+                (QKeyHeaderAuthOutcome::Unchanged, QKeyHeaderAuthOutcome::Unchanged)
+                | (QKeyHeaderAuthOutcome::Authenticated, QKeyHeaderAuthOutcome::Authenticated) => {}
+                (
+                    QKeyHeaderAuthOutcome::Reject(actual),
+                    QKeyHeaderAuthOutcome::Reject(expected),
+                ) => {
+                    assert_eq!(actual, expected, "{name}");
+                }
+                _ => panic!("unexpected QKey auth outcome for {name}"),
+            }
+        }
     }
 
     #[test]
-    fn test_evaluate_qkey_transport_token_authenticates_valid_token() {
-        let token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let expected = sha256_hex_for_qkey_token(token);
+    fn qkey_payload_gate_blocks_every_protected_path_until_authentication() {
+        let cases = [
+            ("auth disabled", false, false, true),
+            ("auth disabled and authenticated", false, true, true),
+            ("auth required but pending", true, false, false),
+            ("auth required and complete", true, true, true),
+        ];
 
-        let outcome =
-            evaluate_qkey_transport_token(Some(token.as_bytes()), Some(expected.as_str()), false);
-
-        assert!(matches!(outcome, QKeyHeaderAuthOutcome::Authenticated));
-    }
-
-    #[test]
-    fn test_evaluate_qkey_transport_token_missing_allows_http3_fallback() {
-        let expected = sha256_hex_for_qkey_token(
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        );
-
-        let outcome = evaluate_qkey_transport_token(None, Some(expected.as_str()), false);
-
-        assert!(matches!(outcome, QKeyHeaderAuthOutcome::Unchanged));
-    }
-
-    #[test]
-    fn test_evaluate_qkey_transport_token_rejects_invalid_token() {
-        let expected = sha256_hex_for_qkey_token(
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        );
-        let invalid_token = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-
-        let outcome = evaluate_qkey_transport_token(
-            Some(invalid_token.as_bytes()),
-            Some(expected.as_str()),
-            false,
-        );
-
-        assert!(matches!(outcome, QKeyHeaderAuthOutcome::Reject(b"invalid_qkey_auth")));
+        for (name, require_auth, authenticated, expected) in cases {
+            assert_eq!(qkey_payload_allowed(require_auth, authenticated), expected, "{name}");
+        }
     }
 
     // --- Logging mode tests ---

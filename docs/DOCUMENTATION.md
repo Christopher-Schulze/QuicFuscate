@@ -3109,7 +3109,7 @@ QuicFuscate can bridge a TUN interface by encapsulating frames in HTTP/3 streams
 - Client: when `--tun` is set, a blocking reader thread forwards frames into an H3 stream; zero-copy pool integration minimizes allocations.
 - Server: with `--tun`, authenticated MASQUE CONNECT-UDP datagrams carrying raw IP packets are written to a TUN interface (when available on the platform). Standalone server mode derives `ServerConfig.server_ip`, `server_netmask`, and the client IPv4 pool from explicit `--tun-ip` / `--tun-netmask`, so runtime session routing and OS TUN addressing stay aligned.
 - Server hotpath: after a TUN packet is queued as MASQUE downlink for one session, only that target client's connection is flushed. The server does not scan and flush all clients per TUN packet.
-- Authentication: the client injects QKey auth into both encrypted QUIC transport parameters and the H3/MASQUE CONNECT-UDP header path. The server accepts either valid proof and gates MASQUE DATAGRAM-to-TUN delivery on the current authenticated state.
+- Authentication: the public QKey ID in the QUIC Initial selects the server-side record. The client sends the bearer only after 1-RTT encryption through the H3/MASQUE `x-qf-auth` header. The server gates MASQUE DATAGRAM-to-TUN delivery on the current authenticated state and closes missing or invalid authentication attempts.
 - Platform support (interface.rs):
   - Linux/Android: `/dev/net/tun` via `TUNSETIFF` (IFF_TUN | IFF_NO_PI)
   - macOS: `utun` (PF_SYSTEM/SYSPROTO_CONTROL), 4-byte AF header using readv/writev
@@ -3755,7 +3755,7 @@ Engine server-mode stats now treat RTT and loss as unavailable unless a truthful
 For rejected/auth-failed/rate-limited events and ingress/egress traffic, those standalone `Metrics` producers now also mirror the event into `crate::instrumentation::global()` so the optional global instrumentation export does not drift away from the standalone server metrics story.
 That mirror contract is covered by a dedicated regression test in `src/implementations/server/metrics.rs`.
 QKey auth failures now route through one canonical rejection producer, so `quicfuscate_auth_failed_total` reflects:
-- missing or invalid initial QKey auth material
+- missing or invalid public Initial QKey ID lookup
 - live HTTP/3 `x-qf-auth` rejects
 - QKey auth timeout closes
 Global server lifecycle metrics now keep accepted-connection ownership separate from session/client lifecycle: `connections_accepted` remains an explicit accept event, while `client_connected()` only reflects active/total client lifecycle. The runtime audit suite enforces that split.
@@ -3957,7 +3957,7 @@ The overall approach prioritizes runtime performance over architectural purity. 
 1. Verify `qkey_id` is exactly 12 hex characters
 2. Verify `qkey_token` matches what was registered on the server
 3. Check the QKey has not been revoked on the server
-4. For TUN/MASQUE failures, check both auth layers: the encrypted QUIC transport parameter and the H3 `x-qf-auth` CONNECT-UDP header. MASQUE DATAGRAM delivery to TUN is intentionally blocked until one current auth proof has validated.
+4. For TUN/MASQUE failures, verify the public Initial QKey ID resolves to the intended server record and the encrypted H3 `x-qf-auth` CONNECT-UDP header carries the matching bearer. MASQUE DATAGRAM delivery to TUN is intentionally blocked until that proof validates.
 
 ### DNS Leak Detection and Prevention
 

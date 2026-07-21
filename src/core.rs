@@ -350,17 +350,6 @@ impl QuicFuscateConnection {
             warn!("Failed to configure TLS profile for SNI {}: {:?}", sni_str, e);
         }
 
-        // TODO-415 Phase 2: Inject QKey auth token into QUIC transport parameters.
-        // The token is carried in TLS EncryptedExtensions - encrypted at the
-        // Handshake level, invisible to DPI. This supplements the existing
-        // x-qf-auth HTTP/3 header mechanism with a TLS-layer auth channel.
-        if let Some(ref token) = s.qkey_auth_token_hex {
-            let token = token.trim();
-            if !token.is_empty() {
-                s.conn.set_qkey_auth_token(token.as_bytes());
-            }
-        }
-
         // Initialize DeepIntegrationOrchestrator if feature enabled
         #[cfg(feature = "orchestrator")]
         {
@@ -391,8 +380,11 @@ impl QuicFuscateConnection {
         s
     }
 
-    fn inject_qkey_auth_header(&self, headers: &mut Vec<crate::transport::h3::Header>) {
-        let Some(token) = self.qkey_auth_token_hex.as_deref() else {
+    fn inject_qkey_auth_header(
+        token: Option<&str>,
+        headers: &mut Vec<crate::transport::h3::Header>,
+    ) {
+        let Some(token) = token else {
             return;
         };
         let token = token.trim();
@@ -451,7 +443,7 @@ impl QuicFuscateConnection {
 
         let target = format!("{}:443", host);
         let mut extra_headers = Vec::new();
-        self.inject_qkey_auth_header(&mut extra_headers);
+        Self::inject_qkey_auth_header(self.qkey_auth_token_hex.as_deref(), &mut extra_headers);
         let Some(ref mut h3) = self.h3_conn else {
             return Ok(None);
         };
@@ -625,7 +617,7 @@ impl QuicFuscateConnection {
         headers.insert(0, crate::transport::h3::Header::new(b":authority", host.as_bytes()));
         headers.insert(0, crate::transport::h3::Header::new(b":scheme", b"https"));
         headers.insert(0, crate::transport::h3::Header::new(b":method", method));
-        self.inject_qkey_auth_header(&mut headers);
+        Self::inject_qkey_auth_header(self.qkey_auth_token_hex.as_deref(), &mut headers);
         headers
     }
 
@@ -1658,9 +1650,8 @@ mod tests {
 
     #[test]
     fn inject_qkey_auth_header_adds_header() {
-        let conn_stub = ConnectionStatsOnlyStub { qkey_auth_token_hex: Some("abc123".to_string()) };
         let mut headers = vec![];
-        conn_stub.inject_qkey_auth(&mut headers);
+        QuicFuscateConnection::inject_qkey_auth_header(Some("abc123"), &mut headers);
         assert_eq!(headers.len(), 1);
         assert_eq!(headers[0].name(), b"x-qf-auth");
         assert_eq!(headers[0].value(), b"abc123");
@@ -1668,21 +1659,18 @@ mod tests {
 
     #[test]
     fn inject_qkey_auth_header_skips_empty_token() {
-        let conn_stub = ConnectionStatsOnlyStub { qkey_auth_token_hex: Some("  ".to_string()) };
         let mut headers = vec![];
-        conn_stub.inject_qkey_auth(&mut headers);
+        QuicFuscateConnection::inject_qkey_auth_header(Some("  "), &mut headers);
         assert!(headers.is_empty());
     }
 
     #[test]
     fn inject_qkey_auth_header_replaces_existing() {
-        let conn_stub =
-            ConnectionStatsOnlyStub { qkey_auth_token_hex: Some("new_token".to_string()) };
         let mut headers = vec![
             crate::transport::h3::Header::new(b"x-qf-auth", b"old"),
             crate::transport::h3::Header::new(b"content-type", b"text"),
         ];
-        conn_stub.inject_qkey_auth(&mut headers);
+        QuicFuscateConnection::inject_qkey_auth_header(Some("new_token"), &mut headers);
         assert_eq!(headers.len(), 2);
         let auth = headers.iter().find(|h| h.name() == b"x-qf-auth").unwrap();
         assert_eq!(auth.value(), b"new_token");
@@ -1690,9 +1678,8 @@ mod tests {
 
     #[test]
     fn inject_qkey_auth_header_noop_without_token() {
-        let conn_stub = ConnectionStatsOnlyStub::default();
         let mut headers = vec![crate::transport::h3::Header::new(b"host", b"example.com")];
-        conn_stub.inject_qkey_auth(&mut headers);
+        QuicFuscateConnection::inject_qkey_auth_header(None, &mut headers);
         assert_eq!(headers.len(), 1);
     }
 
@@ -1722,25 +1709,5 @@ mod tests {
     fn outbound_stealth_release_none_when_no_delays() {
         let now = Instant::now();
         assert!(QuicFuscateConnection::compute_outbound_stealth_release(now, None, None).is_none());
-    }
-
-    /// Minimal stub to test inject_qkey_auth_header without full QuicFuscateConnection
-    #[derive(Default)]
-    struct ConnectionStatsOnlyStub {
-        qkey_auth_token_hex: Option<String>,
-    }
-
-    impl ConnectionStatsOnlyStub {
-        fn inject_qkey_auth(&self, headers: &mut Vec<crate::transport::h3::Header>) {
-            let Some(token) = self.qkey_auth_token_hex.as_deref() else {
-                return;
-            };
-            let token = token.trim();
-            if token.is_empty() {
-                return;
-            }
-            headers.retain(|h| h.name() != b"x-qf-auth");
-            headers.push(crate::transport::h3::Header::new(b"x-qf-auth", token.as_bytes()));
-        }
     }
 }

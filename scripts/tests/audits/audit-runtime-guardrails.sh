@@ -511,6 +511,25 @@ else
   append_item "rng_aarch64_contract_test_surface" "fail" "rt-random-aes-ctr coverage missing or incomplete"
 fi
 
+# 11d) QKey bearers must stay out of the pre-handshake QUIC transport-parameter surface.
+QKEY_TRANSPORT_PARAMETER_REFS=$(rg -n --no-messages 'QKEY_AUTH_TP_ID|inject_qkey_auth_into_tp|extract_qkey_auth_from_tp|set_qkey_auth_token|peer_qkey_auth_token|evaluate_qkey_transport_token|QKey auth transport parameter' src || true)
+if [[ -z "$QKEY_TRANSPORT_PARAMETER_REFS" ]]; then
+  pass "QKey bearer transport-parameter channel stays removed"
+  append_item "qkey_transport_parameter_channel_removed" "ok" "no QKey bearer transport-parameter producer, parser, accessor, or server branch remains"
+else
+  fail_critical "QKey bearer transport-parameter channel reappeared"
+  append_item "qkey_transport_parameter_channel_removed" "fail" "$QKEY_TRANSPORT_PARAMETER_REFS"
+fi
+
+QKEY_CONFIDENTIALITY_OVERCLAIMS=$(rg -n --no-messages 'QKey.*(transport parameters|transport-parameter).*(EncryptedExtensions|invisible to DPI)|QKey-in-Encrypted-Extension' src docs/DOCUMENTATION.md docs/MAP.md docs/todo/todo-415-reality-grade-tls-mimikry.md || true)
+if [[ -z "$QKEY_CONFIDENTIALITY_OVERCLAIMS" ]]; then
+  pass "QKey authentication documentation matches the encrypted HTTP/3 runtime path"
+  append_item "qkey_auth_documentation_truth" "ok" "no false QKey transport-parameter confidentiality claim remains"
+else
+  fail_critical "QKey authentication documentation still overclaims transport-parameter confidentiality"
+  append_item "qkey_auth_documentation_truth" "fail" "$QKEY_CONFIDENTIALITY_OVERCLAIMS"
+fi
+
 # 12) Detect acceleration exports with no runtime references outside their defining module.
 DEAD_ACCEL_EXPORTS=(
 )

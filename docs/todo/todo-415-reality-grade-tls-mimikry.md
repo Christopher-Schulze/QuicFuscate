@@ -61,7 +61,7 @@ This is a **3-phase incremental** task. Each phase is independently shippable.
 3. Captures: ServerHello, EncryptedExtensions, Certificate, CertificateVerify, Finished — the full server-side handshake material.
 4. Caches material in memory (with TTL refresh).
 5. When a QuicFuscate client connects, server responds with the **cached** cover-site ServerHello (not a synthetic one).
-6. Client authentication: QKey token embedded in a TLS extension or session ticket field that is **encrypted** and invisible to DPI.
+6. Client authentication: QKey token carried only after handshake confidentiality in the `x-qf-auth` HTTP/3 header.
 7. Active probes receive the cached cover-site response — indistinguishable from real cover site.
 8. **Fallback**: if cover host is unreachable, fall back to synthetic `TlsClientHelloSpoofer` (current behavior) with a logged warning.
 
@@ -207,14 +207,13 @@ on `StealthManager` construction. `handle_fallback` checks
 cached ServerHello bytes directly to probes via
 `RealityProxy::send_cached_response`, bypassing the upstream relay.
 
-**Phase 2 (ClientHello-Mirror + QKey-in-Encrypted-Extension) — DONE:**
+**Phase 2 (ClientHello-Mirror + encrypted QKey authentication) - DONE:**
 - `CapturingStream` extended to capture both inbound (server flight) and outbound (client ClientHello) bytes.
-- `CoverMaterial` now includes `client_hello` field — the raw ClientHello bytes sent to the cover site during capture.
-- QKey auth token injected into QUIC transport parameters (private-use ID 0x30), carried in TLS EncryptedExtensions — encrypted at Handshake level, invisible to DPI.
-- `QuicTlsProvider` trait extended with `set_qkey_auth_token` / `peer_qkey_auth_token` methods.
-- Client-side: `QuicFuscateConnection::new()` injects QKey token into TLS provider after `enable_tls()`.
-- Server-side: `RustlsProviderImpl::set_peer_transport_params()` extracts QKey from peer's transport parameters.
-- 4 unit tests for QKey-TP inject/extract roundtrip, varint encoding, and preservation of existing params.
+- `CoverMaterial` now includes `client_hello` field - the raw ClientHello bytes sent to the cover site during capture.
+- QKey authentication uses the `x-qf-auth` HTTP/3 header after 1-RTT encryption.
+- Client request builders inject exactly one trimmed authentication header.
+- Server-side authentication rejects missing or invalid headers and keeps MASQUE, TUN, and application forwarding closed until validation succeeds.
+- TODO-520 removed the inert provider-local transport-parameter copy and corrected the former false `EncryptedExtensions` confidentiality claim.
 
 **Phase 3 (Probe-Resistenz mit echtem Material) — DONE:**
 - `CoverMaterial` now includes `raw_flight` field — the full raw TLS flight (ServerHello + encrypted flight) as captured from the cover site.
