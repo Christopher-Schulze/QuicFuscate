@@ -11,72 +11,38 @@ pub fn __test_set_ghash_override(val: Option<&str>) {
     *guard = val.map(|s| s.to_lowercase());
 }
 
-fn be_bytes_to_u128(b: &[u8; 16]) -> u128 {
-    u128::from_be_bytes(*b)
-}
-fn u128_to_be_bytes(x: u128) -> [u8; 16] {
-    x.to_be_bytes()
-}
-
-// Multiply by x in GF(2^128) with reduction by the GCM polynomial
-#[inline(always)]
-fn mul_x(mut v: u128) -> u128 {
-    let carry = (v & 0x8000_0000_0000_0000_0000_0000_0000_0000u128) != 0;
-    v <<= 1;
-    if carry {
-        v ^= 0x87;
-    }
-    v
-}
+const GHASH_REDUCTION: u128 = 0xe100_0000_0000_0000_0000_0000_0000_0000;
 
 #[inline(always)]
-fn mul_x4(mut v: u128) -> u128 {
-    v = mul_x(v);
-    v = mul_x(v);
-    v = mul_x(v);
-    mul_x(v)
-}
+fn ghash_multiply(x: u128, h: u128) -> u128 {
+    let mut product = 0u128;
+    let mut factor = h;
 
-// Precompute H * n for 4-bit n (0..15)
-fn precompute_h4(h: u128) -> [u128; 16] {
-    let mut t = [0u128; 16];
-    t[0] = 0;
-    t[1] = h;
-    // compute x^1..x^3 shifts of H
-    let h_x1 = mul_x(h);
-    let h_x2 = mul_x(h_x1);
-    let h_x3 = mul_x(h_x2);
-    // now combine for all nibbles by XOR of present bits
-    for n in 2..16 {
-        let mut acc = 0u128;
-        if (n & 0x1) != 0 {
-            acc ^= h;
-        }
-        if (n & 0x2) != 0 {
-            acc ^= h_x1;
-        }
-        if (n & 0x4) != 0 {
-            acc ^= h_x2;
-        }
-        if (n & 0x8) != 0 {
-            acc ^= h_x3;
-        }
-        t[n as usize] = acc;
+    for bit in (0..128).rev() {
+        let x_mask = 0u128.wrapping_sub((x >> bit) & 1);
+        product ^= factor & x_mask;
+
+        let reduction_mask = 0u128.wrapping_sub(factor & 1);
+        factor = (factor >> 1) ^ (GHASH_REDUCTION & reduction_mask);
     }
-    t
+
+    product
 }
 
-// Single-block GHASH update using 4-bit nibble method with precomputed table
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[inline(always)]
-fn ghash_block_precomputed(table: &[u128; 16], mut y: u128, x: u128) -> u128 {
-    let w = y ^ x;
-    for i in 0..32 {
-        let shift = 124 - 4 * i;
-        let nib = ((w >> shift) & 0xF) as usize;
-        y = mul_x4(y);
-        y ^= table[nib];
+fn reduce_natural_gf128_product(mut low: u128, mut high: u128) -> u128 {
+    for shift in (0..128).rev() {
+        let coefficient_mask = 0u128.wrapping_sub((high >> shift) & 1);
+        high ^= (1u128 << shift) & coefficient_mask;
+        low ^= (0x87u128 << shift) & coefficient_mask;
+        if shift > 120 {
+            high ^= (0x87u128 >> (128 - shift)) & coefficient_mask;
+        }
     }
-    y
+
+    debug_assert_eq!(high, 0);
+    low
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -104,7 +70,12 @@ pub fn ghash(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
             match mode.as_str() {
                 "auto" => {}
                 "vpclmul" => {
-                    if detector.has_feature(CpuFeature::VPCLMULQDQ) {
+                    if detector.has_feature(CpuFeature::VPCLMULQDQ)
+                        && detector.has_feature(CpuFeature::PCLMULQDQ)
+                        && detector.has_feature(CpuFeature::SSSE3)
+                        && detector.has_feature(CpuFeature::AVX512F)
+                        && detector.has_feature(CpuFeature::AVX512VL)
+                    {
                         crate::optimize::telemetry::GHASH_VPCLMUL_OPS.inc();
                         return ghash_hw_vpclmul(h, aad, ct);
                     }
@@ -143,7 +114,12 @@ pub fn ghash(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
             }
         }
 
-        if detector.has_feature(CpuFeature::VPCLMULQDQ) {
+        if detector.has_feature(CpuFeature::VPCLMULQDQ)
+            && detector.has_feature(CpuFeature::PCLMULQDQ)
+            && detector.has_feature(CpuFeature::SSSE3)
+            && detector.has_feature(CpuFeature::AVX512F)
+            && detector.has_feature(CpuFeature::AVX512VL)
+        {
             crate::optimize::telemetry::GHASH_VPCLMUL_OPS.inc();
             return ghash_hw_vpclmul(h, aad, ct);
         }
@@ -221,31 +197,16 @@ pub fn ghash(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
 unsafe fn ghash_hw_sse(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
     use core::{arch::x86_64::*, mem::MaybeUninit};
 
-    let h128 = be_bytes_to_u128(&h);
-    let table_raw = precompute_h4(h128);
-
-    // Precompute H multiples for all 32 nibbles (most-significant first) to eliminate
-    // per-byte mul_x4 work at runtime.
-    let mut nib_tables = [[0u128; 16]; 32];
-    let mut current = table_raw;
-    for pos in (0..32).rev() {
-        nib_tables[pos] = current;
-        if pos > 0 {
-            for val in current.iter_mut() {
-                *val = mul_x4(*val);
-            }
-        }
-    }
+    let h128 = u128::from_be_bytes(h);
 
     // Collapse nibble tables into per-byte lookup tables (16 byte positions x 256 values).
     let mut byte_tables_uninit = MaybeUninit::<[__m128i; 16 * 256]>::uninit();
     let byte_tables_ptr = byte_tables_uninit.as_mut_ptr() as *mut __m128i;
     for byte_idx in 0..16 {
         for byte_val in 0..256 {
-            let hi = (byte_val >> 4) as usize;
-            let lo = (byte_val & 0x0F) as usize;
-            let contrib = nib_tables[byte_idx * 2][hi] ^ nib_tables[byte_idx * 2 + 1][lo];
-            let bytes = u128_to_be_bytes(contrib);
+            let shift = 120 - byte_idx * 8;
+            let input = (byte_val as u128) << shift;
+            let bytes = ghash_multiply(input, h128).to_be_bytes();
             let vec = _mm_loadu_si128(bytes.as_ptr() as *const __m128i);
             byte_tables_ptr.add(byte_idx * 256 + byte_val).write(vec);
         }
@@ -384,40 +345,39 @@ pub fn aes_gcm_open(
 }
 
 fn ghash_software(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
-    let h128 = be_bytes_to_u128(&h);
-    let table = precompute_h4(h128);
+    let h128 = u128::from_be_bytes(h);
     let mut y: u128 = 0;
     let mut i = 0usize;
     while i + 16 <= aad.len() {
         let mut blk = [0u8; 16];
         blk.copy_from_slice(&aad[i..i + 16]);
-        y = ghash_block_precomputed(&table, y, be_bytes_to_u128(&blk));
+        y = ghash_multiply(y ^ u128::from_be_bytes(blk), h128);
         i += 16;
     }
     if i < aad.len() {
         let mut blk = [0u8; 16];
         blk[..aad.len() - i].copy_from_slice(&aad[i..]);
-        y = ghash_block_precomputed(&table, y, be_bytes_to_u128(&blk));
+        y = ghash_multiply(y ^ u128::from_be_bytes(blk), h128);
     }
     let mut j = 0usize;
     while j + 16 <= ct.len() {
         let mut blk = [0u8; 16];
         blk.copy_from_slice(&ct[j..j + 16]);
-        y = ghash_block_precomputed(&table, y, be_bytes_to_u128(&blk));
+        y = ghash_multiply(y ^ u128::from_be_bytes(blk), h128);
         j += 16;
     }
     if j < ct.len() {
         let mut blk = [0u8; 16];
         blk[..ct.len() - j].copy_from_slice(&ct[j..]);
-        y = ghash_block_precomputed(&table, y, be_bytes_to_u128(&blk));
+        y = ghash_multiply(y ^ u128::from_be_bytes(blk), h128);
     }
     let aad_bits = (aad.len() as u128) * 8;
     let ct_bits = (ct.len() as u128) * 8;
     let mut lenblk = [0u8; 16];
     lenblk[..8].copy_from_slice(&(aad_bits as u64).to_be_bytes());
     lenblk[8..].copy_from_slice(&(ct_bits as u64).to_be_bytes());
-    y = ghash_block_precomputed(&table, y, be_bytes_to_u128(&lenblk));
-    u128_to_be_bytes(y)
+    y = ghash_multiply(y ^ u128::from_be_bytes(lenblk), h128);
+    y.to_be_bytes()
 }
 
 #[cfg(test)]
@@ -466,6 +426,26 @@ mod tests {
             0x45, 0x5A,
         ];
         assert_eq!(tag, expected);
+    }
+
+    #[test]
+    fn aes_gcm_nonempty_nist_vector() {
+        let key = [0u8; 16];
+        let iv = [0u8; 12];
+        let plaintext = [0u8; 16];
+        let expected_ciphertext = [
+            0x03, 0x88, 0xda, 0xce, 0x60, 0xb6, 0xa3, 0x92, 0xf3, 0x28, 0xc2, 0xb9, 0x71, 0xb2,
+            0xfe, 0x78,
+        ];
+        let expected_tag = [
+            0xab, 0x6e, 0x47, 0xd4, 0x2c, 0xec, 0x13, 0xbd, 0xf5, 0x3a, 0x67, 0xb2, 0x12, 0x57,
+            0xbd, 0xdf,
+        ];
+
+        let (ciphertext, tag) = aes_gcm_seal(&key, &iv, &[], &plaintext);
+        assert_eq!(ciphertext, expected_ciphertext);
+        assert_eq!(tag, expected_tag);
+        assert_eq!(aes_gcm_open(&key, &iv, &[], &ciphertext, &tag), Some(plaintext.to_vec()));
     }
 
     #[test]
@@ -588,18 +568,14 @@ mod tests {
 
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-// SAFETY: requires PCLMULQDQ + SSSE3 (runtime-checked by caller). h is [u8; 16];
+// SAFETY: requires PCLMULQDQ (runtime-checked by caller). h is [u8; 16];
 // _mm_loadu_si128 reads exactly 16 bytes. aad/ct processed in 16-byte blocks via
-// copy_from_slice into stack-owned [u8; 16] before loading. _mm_shuffle_epi8 for
-// BE/LE conversion. _mm_clmulepi64_si128 in ghash_block_pclmul is register-only.
+// copy_from_slice into stack-owned [u8; 16] before loading. CLMUL operations in
+// ghash_block_pclmul are register-only.
 // out is stack-owned [u8; 16]; _mm_storeu_si128 writes exactly 16 bytes.
 unsafe fn ghash_hw_pclmul(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
     use core::arch::x86_64::*;
-    // Byte-swap mask for BE<->LE
-    // Load H and convert to LE polynomial domain
     let h_be = _mm_loadu_si128(h.as_ptr() as *const __m128i);
-    let h_le =
-        _mm_shuffle_epi8(h_be, _mm_set_epi8(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0));
     let mut y_be = _mm_setzero_si128();
     // Process AAD
     let mut i = 0usize;
@@ -607,14 +583,14 @@ unsafe fn ghash_hw_pclmul(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
         let mut blk = [0u8; 16];
         blk.copy_from_slice(&aad[i..i + 16]);
         let x_be = _mm_loadu_si128(blk.as_ptr() as *const __m128i);
-        y_be = ghash_block_pclmul(h_le, y_be, x_be);
+        y_be = ghash_block_pclmul(h_be, y_be, x_be);
         i += 16;
     }
     if i < aad.len() {
         let mut blk = [0u8; 16];
         blk[..(aad.len() - i)].copy_from_slice(&aad[i..]);
         let x_be = _mm_loadu_si128(blk.as_ptr() as *const __m128i);
-        y_be = ghash_block_pclmul(h_le, y_be, x_be);
+        y_be = ghash_block_pclmul(h_be, y_be, x_be);
     }
     // Process CT
     let mut j = 0usize;
@@ -622,14 +598,14 @@ unsafe fn ghash_hw_pclmul(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
         let mut blk = [0u8; 16];
         blk.copy_from_slice(&ct[j..j + 16]);
         let x_be = _mm_loadu_si128(blk.as_ptr() as *const __m128i);
-        y_be = ghash_block_pclmul(h_le, y_be, x_be);
+        y_be = ghash_block_pclmul(h_be, y_be, x_be);
         j += 16;
     }
     if j < ct.len() {
         let mut blk = [0u8; 16];
         blk[..(ct.len() - j)].copy_from_slice(&ct[j..]);
         let x_be = _mm_loadu_si128(blk.as_ptr() as *const __m128i);
-        y_be = ghash_block_pclmul(h_le, y_be, x_be);
+        y_be = ghash_block_pclmul(h_be, y_be, x_be);
     }
     // Length block
     let aad_bits = (aad.len() as u128) * 8;
@@ -638,7 +614,7 @@ unsafe fn ghash_hw_pclmul(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
     lenblk[..8].copy_from_slice(&(aad_bits as u64).to_be_bytes());
     lenblk[8..].copy_from_slice(&(ct_bits as u64).to_be_bytes());
     let x_be = _mm_loadu_si128(lenblk.as_ptr() as *const __m128i);
-    y_be = ghash_block_pclmul(h_le, y_be, x_be);
+    y_be = ghash_block_pclmul(h_be, y_be, x_be);
     // Return BE bytes
     let mut out = [0u8; 16];
     _mm_storeu_si128(out.as_mut_ptr() as *mut __m128i, y_be);
@@ -647,12 +623,12 @@ unsafe fn ghash_hw_pclmul(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
 
 /// Ultra-fast GHASH implementation using VPCLMULQDQ (AVX-512 vector PCLMUL)
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f,vpclmulqdq,avx512vl")]
+#[target_feature(enable = "avx512f,vpclmulqdq,avx512vl,pclmulqdq,ssse3")]
 #[inline]
-// SAFETY: target_feature gates ensure AVX-512F + VPCLMULQDQ + AVX-512VL. Same
-// pattern as ghash_hw_pclmul: h is [u8; 16], aad/ct copied into stack-owned
-// blocks before _mm_loadu_si128. 4-block vectorized loop processes 64-byte
-// chunks with i+64 <= len guard. ghash_block_vpclmul uses register-only CLMUL.
+// SAFETY: target_feature gates ensure AVX-512F, VPCLMULQDQ, AVX-512VL,
+// PCLMULQDQ, and SSSE3. Same pattern as ghash_hw_pclmul: h is [u8; 16], aad/ct
+// copied into stack-owned blocks before _mm_loadu_si128. The 4-block loop
+// processes 64-byte chunks with i+64 <= len. ghash_block_vpclmul is register-only.
 unsafe fn ghash_hw_vpclmul(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
     use core::arch::x86_64::*;
 
@@ -754,11 +730,11 @@ unsafe fn ghash_hw_vpclmul(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
 
 /// Ultra-fast GHASH block processing with VPCLMULQDQ
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f,vpclmulqdq,avx512vl")]
+#[target_feature(enable = "avx512f,vpclmulqdq,avx512vl,pclmulqdq,ssse3")]
 #[inline]
-// SAFETY: target_feature gates ensure AVX-512F + VPCLMULQDQ + AVX-512VL. All
-// inputs are by-value __m128i. All operations are register-to-register:
-// _mm_shuffle_epi8, _mm_xor_si128, _mm_clmulepi64_si128, shift/and. No memory.
+// SAFETY: target_feature gates ensure AVX-512F, VPCLMULQDQ, AVX-512VL,
+// PCLMULQDQ, and SSSE3. Inputs are by-value __m128i. The local shuffle is
+// register-only; ghash_block_pclmul owns its bounded stack stores and loads.
 unsafe fn ghash_block_vpclmul(
     h_le: core::arch::x86_64::__m128i,
     y_be: core::arch::x86_64::__m128i,
@@ -766,102 +742,55 @@ unsafe fn ghash_block_vpclmul(
 ) -> core::arch::x86_64::__m128i {
     use core::arch::x86_64::*;
 
-    // Convert BE inputs to LE polynomial domain for CLMUL
     let shuf = _mm_set_epi8(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
-    let w_be = _mm_xor_si128(y_be, x_be);
-    let w_le = _mm_shuffle_epi8(w_be, shuf);
+    let h_be = _mm_shuffle_epi8(h_le, shuf);
 
-    // Use VPCLMULQDQ for enhanced carry-less multiplication with better throughput
-    let x0 = _mm_clmulepi64_si128(w_le, h_le, 0x00);
-    let x1 = _mm_clmulepi64_si128(w_le, h_le, 0x10);
-    let x2 = _mm_clmulepi64_si128(w_le, h_le, 0x01);
-    let x3 = _mm_clmulepi64_si128(w_le, h_le, 0x11);
-
-    // Karatsuba combination with optimized scheduling for VPCLMUL
-    let t = _mm_xor_si128(x1, x2);
-    let t_lo = _mm_slli_si128(t, 8);
-    let t_hi = _mm_srli_si128(t, 8);
-    let mut lo = _mm_xor_si128(x0, t_lo);
-    let hi = _mm_xor_si128(x3, t_hi);
-
-    // Optimized reduction modulo x^128 + x^7 + x^2 + x + 1 using VPCLMUL throughput
-    let hi_sl1 = _mm_slli_epi64(hi, 1);
-    let hi_sl2 = _mm_slli_epi64(hi, 2);
-    let hi_sl7 = _mm_slli_epi64(hi, 7);
-    let hi_sr63 = _mm_srli_epi64(hi, 63);
-    let hi_sr62 = _mm_srli_epi64(hi, 62);
-    let hi_sr57 = _mm_srli_epi64(hi, 57);
-
-    // First reduction step
-    let fold1 = _mm_xor_si128(_mm_xor_si128(hi_sl1, hi_sl2), hi_sl7);
-    let carry1 = _mm_xor_si128(_mm_xor_si128(hi_sr63, hi_sr62), hi_sr57);
-    lo = _mm_xor_si128(lo, fold1);
-    let carry1_shifted = _mm_slli_si128(carry1, 8);
-    lo = _mm_xor_si128(lo, carry1_shifted);
-
-    // Second reduction step for remaining high bits
-    let lo_hi = _mm_srli_si128(lo, 8);
-    let final_fold = _mm_xor_si128(
-        _mm_xor_si128(_mm_slli_epi64(lo_hi, 1), _mm_slli_epi64(lo_hi, 2)),
-        _mm_slli_epi64(lo_hi, 7),
-    );
-    let final_carry = _mm_xor_si128(
-        _mm_xor_si128(_mm_srli_epi64(lo_hi, 63), _mm_srli_epi64(lo_hi, 62)),
-        _mm_srli_epi64(lo_hi, 57),
-    );
-
-    let lo_masked = _mm_and_si128(lo, _mm_set_epi64x(-1i64, 0));
-    let reduced =
-        _mm_xor_si128(_mm_xor_si128(lo_masked, final_fold), _mm_slli_si128(final_carry, 8));
-
-    // Convert back to BE
-    _mm_shuffle_epi8(reduced, shuf)
+    ghash_block_pclmul(h_be, y_be, x_be)
 }
 
 #[cfg(target_arch = "x86_64")]
-#[inline(always)]
-// SAFETY: requires PCLMULQDQ + SSSE3 (caller ensures). All inputs are by-value
-// __m128i. All operations are register-to-register: _mm_shuffle_epi8,
-// _mm_xor_si128, _mm_clmulepi64_si128, shift. No memory access.
+#[target_feature(enable = "pclmulqdq")]
+#[inline]
+// SAFETY: requires PCLMULQDQ (caller ensures). Stack stores and loads cover
+// exactly 16-byte vectors. CLMUL operands are register-only.
 unsafe fn ghash_block_pclmul(
-    h_le: core::arch::x86_64::__m128i,
+    h_be: core::arch::x86_64::__m128i,
     y_be: core::arch::x86_64::__m128i,
     x_be: core::arch::x86_64::__m128i,
 ) -> core::arch::x86_64::__m128i {
     use core::arch::x86_64::*;
-    // Convert BE inputs to LE polynomial domain for CLMUL
-    let shuf = _mm_set_epi8(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
-    let w_be = _mm_xor_si128(y_be, x_be);
-    let w_le = _mm_shuffle_epi8(w_be, shuf);
-    // Karatsuba 128x128 carry-less multiplication
-    let x0 = _mm_clmulepi64_si128(w_le, h_le, 0x00);
-    let x1 = _mm_clmulepi64_si128(w_le, h_le, 0x10);
-    let x2 = _mm_clmulepi64_si128(w_le, h_le, 0x01);
-    let x3 = _mm_clmulepi64_si128(w_le, h_le, 0x11);
-    let t = _mm_xor_si128(x1, x2);
-    let t_lo = _mm_slli_si128(t, 8);
-    let t_hi = _mm_srli_si128(t, 8);
-    let mut lo = _mm_xor_si128(x0, t_lo);
-    let hi = _mm_xor_si128(x3, t_hi);
-    // Reduction modulo x^128 + x^7 + x^2 + x + 1
-    // Fold hi into lo: lo ^= (hi<<1) ^ (hi<<2) ^ (hi<<7) with cross-limb carries
-    let hi_sl1 = _mm_slli_epi64(hi, 1);
-    let hi_sl2 = _mm_slli_epi64(hi, 2);
-    let hi_sl7 = _mm_slli_epi64(hi, 7);
-    let hi_sr63 = _mm_srli_epi64(hi, 63);
-    let hi_sr62 = _mm_srli_epi64(hi, 62);
-    let hi_sr57 = _mm_srli_epi64(hi, 57);
-    let carry1 = _mm_slli_si128(hi_sr63, 8);
-    let carry2 = _mm_slli_si128(hi_sr62, 8);
-    let carry7 = _mm_slli_si128(hi_sr57, 8);
-    let mut fold = _mm_xor_si128(hi_sl1, hi_sl2);
-    fold = _mm_xor_si128(fold, hi_sl7);
-    fold = _mm_xor_si128(fold, carry1);
-    fold = _mm_xor_si128(fold, carry2);
-    fold = _mm_xor_si128(fold, carry7);
-    lo = _mm_xor_si128(lo, fold);
-    // Convert back to BE
-    _mm_shuffle_epi8(lo, shuf)
+
+    let mut h_bytes = [0u8; 16];
+    let mut y_bytes = [0u8; 16];
+    let mut x_bytes = [0u8; 16];
+    _mm_storeu_si128(h_bytes.as_mut_ptr() as *mut __m128i, h_be);
+    _mm_storeu_si128(y_bytes.as_mut_ptr() as *mut __m128i, y_be);
+    _mm_storeu_si128(x_bytes.as_mut_ptr() as *mut __m128i, x_be);
+
+    let left = (u128::from_be_bytes(y_bytes) ^ u128::from_be_bytes(x_bytes)).reverse_bits();
+    let right = u128::from_be_bytes(h_bytes).reverse_bits();
+    let left_vector = _mm_set_epi64x((left >> 64) as i64, left as u64 as i64);
+    let right_vector = _mm_set_epi64x((right >> 64) as i64, right as u64 as i64);
+
+    let product_00 = _mm_clmulepi64_si128(left_vector, right_vector, 0x00);
+    let product_01 = _mm_clmulepi64_si128(left_vector, right_vector, 0x01);
+    let product_10 = _mm_clmulepi64_si128(left_vector, right_vector, 0x10);
+    let product_11 = _mm_clmulepi64_si128(left_vector, right_vector, 0x11);
+    let cross = _mm_xor_si128(product_01, product_10);
+    let mut product_00_words = [0u64; 2];
+    let mut product_11_words = [0u64; 2];
+    let mut cross_words = [0u64; 2];
+    _mm_storeu_si128(product_00_words.as_mut_ptr() as *mut __m128i, product_00);
+    _mm_storeu_si128(product_11_words.as_mut_ptr() as *mut __m128i, product_11);
+    _mm_storeu_si128(cross_words.as_mut_ptr() as *mut __m128i, cross);
+
+    let low =
+        (product_00_words[0] as u128) | (((product_00_words[1] ^ cross_words[0]) as u128) << 64);
+    let high =
+        ((product_11_words[0] ^ cross_words[1]) as u128) | ((product_11_words[1] as u128) << 64);
+    let result = reduce_natural_gf128_product(low, high).reverse_bits().to_be_bytes();
+
+    _mm_loadu_si128(result.as_ptr() as *const __m128i)
 }
 
 /// Ultra-optimized ARM PMULL GHASH with efficient unaligned/partial block handling
@@ -1038,83 +967,36 @@ unsafe fn ghash_hw_neon(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
 // reads exactly 16 bytes from the stack-owned byte array.
 unsafe fn precompute_h4_neon(h: [u8; 16]) -> [core::arch::aarch64::uint8x16_t; 16] {
     use core::arch::aarch64::*;
-    let h128 = u128::from_be_bytes(h);
-    let table = precompute_h4(h128);
     let mut vecs = [vdupq_n_u8(0); 16];
-    for (i, entry) in table.iter().enumerate() {
-        let bytes = entry.to_be_bytes();
-        vecs[i] = vld1q_u8(bytes.as_ptr());
-    }
+    vecs[1] = vld1q_u8(h.as_ptr());
     vecs
 }
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-// SAFETY: target_feature gate ensures NEON. table is &[uint8x16_t; 16]; nibble
-// index is (w >> shift) & 0xF, so nib in 0..15, within array bounds. vst1q_u8
-// writes 16 bytes into stack-owned [u8; 16]. neon_mul_x4 / veorq_u8 are
-// register-to-register.
+// SAFETY: target_feature gate ensures NEON. Stack stores and loads cover exactly
+// 16-byte vectors. table[1] is initialized with H by precompute_h4_neon.
 unsafe fn neon_ghash_block(
     table: &[core::arch::aarch64::uint8x16_t; 16],
-    mut y: core::arch::aarch64::uint8x16_t,
+    y: core::arch::aarch64::uint8x16_t,
     x: core::arch::aarch64::uint8x16_t,
 ) -> core::arch::aarch64::uint8x16_t {
     use core::arch::aarch64::*;
 
+    let mut h_bytes = [0u8; 16];
     let mut y_bytes = [0u8; 16];
     let mut x_bytes = [0u8; 16];
+    vst1q_u8(h_bytes.as_mut_ptr(), table[1]);
     vst1q_u8(y_bytes.as_mut_ptr(), y);
     vst1q_u8(x_bytes.as_mut_ptr(), x);
 
-    let mut xor_bytes = [0u8; 16];
-    for i in 0..16 {
-        xor_bytes[i] = y_bytes[i] ^ x_bytes[i];
-    }
-    let w_scalar = u128::from_be_bytes(xor_bytes);
+    let product = ghash_multiply(
+        u128::from_be_bytes(y_bytes) ^ u128::from_be_bytes(x_bytes),
+        u128::from_be_bytes(h_bytes),
+    )
+    .to_be_bytes();
 
-    for i in 0..32 {
-        let shift = 124 - 4 * i;
-        let nib = ((w_scalar >> shift) & 0xF) as usize;
-        y = neon_mul_x4(y);
-        y = veorq_u8(y, table[nib]);
-    }
-
-    y
-}
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-// SAFETY: target_feature gate ensures NEON. Applies neon_mul_x four times.
-// All operations are register-to-register on by-value uint8x16_t.
-unsafe fn neon_mul_x4(v: core::arch::aarch64::uint8x16_t) -> core::arch::aarch64::uint8x16_t {
-    let v = neon_mul_x(v);
-    let v = neon_mul_x(v);
-    let v = neon_mul_x(v);
-    neon_mul_x(v)
-}
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-// SAFETY: target_feature gate ensures NEON. All operations are register-to-register
-// on by-value uint8x16_t/uint64x2_t: vreinterpretq, vshlq, vshrq, vcombine,
-// vorrq, vgetq_lane, vsetq_lane, veorq. No memory access.
-unsafe fn neon_mul_x(v: core::arch::aarch64::uint8x16_t) -> core::arch::aarch64::uint8x16_t {
-    use core::arch::aarch64::*;
-
-    let val = vreinterpretq_u64_u8(v);
-    let shifted = vshlq_n_u64(val, 1);
-    let carry = vshrq_n_u64(val, 63);
-    let carry_into_high = vcombine_u64(vdup_n_u64(0), vget_low_u64(carry));
-    let combined = vorrq_u64(shifted, carry_into_high);
-    let mut result = vreinterpretq_u8_u64(combined);
-
-    let msb = (vgetq_lane_u64(carry, 1) & 1) as u8;
-    if msb != 0 {
-        let mask = vsetq_lane_u8(0x87, vdupq_n_u8(0), 15);
-        result = veorq_u8(result, mask);
-    }
-
-    result
+    vld1q_u8(product.as_ptr())
 }
 
 #[cfg(all(target_arch = "aarch64", target_feature = "sve2"))]
@@ -1138,69 +1020,49 @@ unsafe fn ghash_hw_sve_pmull(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
 #[cfg(target_arch = "aarch64")]
 #[inline]
 #[target_feature(enable = "neon,aes")]
-// SAFETY: requires NEON + PMULL (caller ensures). All inputs are by-value
-// uint8x16_t. Operations: veorq, vrev64q, vextq (register byte-reverse),
-// vreinterpretq (zero-cost reinterpret), vmull_p64 (carry-less multiply),
-// vshlq, vshrq, vdupq (register-to-register). No memory access.
+// SAFETY: requires NEON + PMULL (caller ensures). Stack stores and loads cover
+// exactly 16-byte vectors. PMULL operands are register-only.
 unsafe fn ghash_block_pmull(
     h_le: core::arch::aarch64::uint8x16_t,
     y_be: core::arch::aarch64::uint8x16_t,
     x_be: core::arch::aarch64::uint8x16_t,
 ) -> core::arch::aarch64::uint8x16_t {
     use core::arch::aarch64::*;
-    // Reverse 16 bytes helper (rev64 + lane swap)
-    #[inline]
-    // SAFETY: requires NEON. Register-to-register ops (vrev64q_u8, vextq_u8).
-    unsafe fn rev16(x: uint8x16_t) -> uint8x16_t {
-        let t = vrev64q_u8(x);
-        vextq_u8(t, t, 8)
-    }
-    // Convert to LE poly domain
-    let w_be = veorq_u8(y_be, x_be);
-    let w_le = rev16(w_be);
-    // 128x128 carry-less multiply via 64-bit Karatsuba using vmull_p64
-    let w64 = vreinterpretq_p64_u8(w_le);
-    let h64 = vreinterpretq_p64_u8(h_le);
-    // After full 16-byte reversal, x86 lane0 (low 64) corresponds to NEON lane1.
-    // Align lane semantics with x86 by swapping indices here.
-    let wl = vgetq_lane_p64(w64, 1);
-    let wh = vgetq_lane_p64(w64, 0);
-    let hl = vgetq_lane_p64(h64, 1);
-    let hh = vgetq_lane_p64(h64, 0);
-    let x0 = vmull_p64(wl, hl);
-    let x3 = vmull_p64(wh, hh);
-    let x1 = vmull_p64(wh, hl);
-    let x2 = vmull_p64(wl, hh);
+
+    let mut h_bytes = [0u8; 16];
+    let mut y_bytes = [0u8; 16];
+    let mut x_bytes = [0u8; 16];
+    vst1q_u8(h_bytes.as_mut_ptr(), h_le);
+    vst1q_u8(y_bytes.as_mut_ptr(), y_be);
+    vst1q_u8(x_bytes.as_mut_ptr(), x_be);
+
+    let left = (u128::from_be_bytes(y_bytes) ^ u128::from_be_bytes(x_bytes)).reverse_bits();
+    let right = u128::from_le_bytes(h_bytes).reverse_bits();
+    let left_words = [left as u64, (left >> 64) as u64];
+    let right_words = [right as u64, (right >> 64) as u64];
+    let left_polynomial = vreinterpretq_p64_u64(vld1q_u64(left_words.as_ptr()));
+    let right_polynomial = vreinterpretq_p64_u64(vld1q_u64(right_words.as_ptr()));
+    let left_low = vgetq_lane_p64::<0>(left_polynomial);
+    let left_high = vgetq_lane_p64::<1>(left_polynomial);
+    let right_low = vgetq_lane_p64::<0>(right_polynomial);
+    let right_high = vgetq_lane_p64::<1>(right_polynomial);
+
+    let x0 = vmull_p64(left_low, right_low);
+    let x1 = vmull_p64(left_low, right_high);
+    let x2 = vmull_p64(left_high, right_low);
+    let x3 = vmull_p64(left_high, right_high);
     let x0v = vreinterpretq_u64_p128(x0);
     let x3v = vreinterpretq_u64_p128(x3);
     let x1v = vreinterpretq_u64_p128(x1);
     let x2v = vreinterpretq_u64_p128(x2);
-    let tv = veorq_u64(x1v, x2v);
-    let zero = vdupq_n_u64(0);
-    let t_lo = vextq_u64(zero, tv, 1); // << 64
-    let t_hi = vextq_u64(tv, zero, 1); // >> 64
-    let mut lo = veorq_u64(x0v, t_lo);
-    let hi = veorq_u64(x3v, t_hi);
-    // Reduction modulo x^128 + x^7 + x^2 + x + 1
-    let hi_sl1 = vshlq_n_u64(hi, 1);
-    let hi_sl2 = vshlq_n_u64(hi, 2);
-    let hi_sl7 = vshlq_n_u64(hi, 7);
-    let hi_sr63 = vshrq_n_u64(hi, 63);
-    let hi_sr62 = vshrq_n_u64(hi, 62);
-    let hi_sr57 = vshrq_n_u64(hi, 57);
-    let carry1 = vextq_u64(zero, hi_sr63, 1);
-    let carry2 = vextq_u64(zero, hi_sr62, 1);
-    let carry7 = vextq_u64(zero, hi_sr57, 1);
-    let mut fold = veorq_u64(hi_sl1, hi_sl2);
-    fold = veorq_u64(fold, hi_sl7);
-    fold = veorq_u64(fold, carry1);
-    fold = veorq_u64(fold, carry2);
-    fold = veorq_u64(fold, carry7);
-    lo = veorq_u64(lo, fold);
-    // Convert back to BE bytes
-    let lo_u8 = vreinterpretq_u8_u64(lo);
-    let t = vrev64q_u8(lo_u8);
-    vextq_u8(t, t, 8)
+    let cross = veorq_u64(x1v, x2v);
+    let low = (vgetq_lane_u64(x0v, 0) as u128)
+        | (((vgetq_lane_u64(x0v, 1) ^ vgetq_lane_u64(cross, 0)) as u128) << 64);
+    let high = ((vgetq_lane_u64(x3v, 0) ^ vgetq_lane_u64(cross, 1)) as u128)
+        | ((vgetq_lane_u64(x3v, 1) as u128) << 64);
+    let result = reduce_natural_gf128_product(low, high).reverse_bits().to_be_bytes();
+
+    vld1q_u8(result.as_ptr())
 }
 /// Compute an AES-GCM tag over AAD only (no ciphertext), used for header protection.
 pub fn aes_gcm_tag_aad_only(aes_key: &[u8; 16], iv: &[u8; 12], aad: &[u8]) -> [u8; 16] {

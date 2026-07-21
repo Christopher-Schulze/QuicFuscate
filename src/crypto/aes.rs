@@ -300,6 +300,19 @@ mod legacy_simd_tests {
     }
 
     #[test]
+    fn context_matches_zero_key_counter_vector() {
+        let key = [0u8; 16];
+        let mut block = [0u8; 16];
+        block[15] = 2;
+        let context = super::Aes128Ctx::new(&key);
+
+        assert_eq!(
+            context.encrypt_block(&block),
+            decode_hex_block("0388dace60b6a392f328c2b971b2fe78")
+        );
+    }
+
+    #[test]
     fn tables_match_scalar_multiple_inputs() {
         let key = decode_hex_block("603deb1015ca71be2b73aef0857d7781");
         let mut block = decode_hex_block("6bc1bee22e409f96e93d7e117393172a");
@@ -940,13 +953,12 @@ unsafe fn shift_rows_ssse3(state: core::arch::x86_64::__m128i) -> core::arch::x8
 // register-to-register on by-value __m128i; no memory access.
 unsafe fn xtime_ssse3(x: core::arch::x86_64::__m128i) -> core::arch::x86_64::__m128i {
     use core::arch::x86_64::{
-        _mm_and_si128, _mm_cmplt_epi8, _mm_set1_epi16, _mm_set1_epi8, _mm_setzero_si128,
-        _mm_slli_epi16, _mm_xor_si128,
+        _mm_add_epi8, _mm_and_si128, _mm_cmplt_epi8, _mm_set1_epi8, _mm_setzero_si128,
+        _mm_xor_si128,
     };
-    let shifted = _mm_and_si128(_mm_slli_epi16(x, 1), _mm_set1_epi16(0x00fe));
+    let shifted = _mm_add_epi8(x, x);
     let mask = _mm_cmplt_epi8(x, _mm_setzero_si128());
     let reduction = _mm_and_si128(mask, _mm_set1_epi8(0x1b));
-    // `shifted` already contains the modulo-reduced left shift; XOR with reduction term.
     _mm_xor_si128(shifted, reduction)
 }
 
@@ -973,30 +985,8 @@ unsafe fn mix_columns_ssse3(state: core::arch::x86_64::__m128i) -> core::arch::x
 
     let maj = _mm_xor_si128(state, _mm_xor_si128(rot1, _mm_xor_si128(rot2, rot3)));
 
-    let ab = xtime_ssse3(_mm_xor_si128(state, rot1));
-    let bc = xtime_ssse3(_mm_xor_si128(rot1, rot2));
-    let cd = xtime_ssse3(_mm_xor_si128(rot2, rot3));
-    let da = xtime_ssse3(_mm_xor_si128(rot3, state));
-
-    let res_a = _mm_xor_si128(_mm_xor_si128(state, maj), ab);
-    let res_b = _mm_xor_si128(_mm_xor_si128(rot1, maj), bc);
-    let res_c = _mm_xor_si128(_mm_xor_si128(rot2, maj), cd);
-    let res_d = _mm_xor_si128(_mm_xor_si128(rot3, maj), da);
-
-    let res_b = _mm_shuffle_epi8(
-        res_b,
-        _mm_setr_epi8(13, 14, 15, 12, 1, 2, 3, 0, 5, 6, 7, 4, 9, 10, 11, 8),
-    );
-    let res_c = _mm_shuffle_epi8(
-        res_c,
-        _mm_setr_epi8(10, 11, 8, 9, 14, 15, 12, 13, 2, 3, 0, 1, 6, 7, 4, 5),
-    );
-    let res_d = _mm_shuffle_epi8(
-        res_d,
-        _mm_setr_epi8(7, 4, 5, 6, 11, 8, 9, 10, 15, 12, 13, 14, 3, 0, 1, 2),
-    );
-
-    _mm_xor_si128(res_a, _mm_xor_si128(res_b, _mm_xor_si128(res_c, res_d)))
+    let adjacent = xtime_ssse3(_mm_xor_si128(state, rot1));
+    _mm_xor_si128(_mm_xor_si128(state, maj), adjacent)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -1104,19 +1094,16 @@ unsafe fn aesni_encrypt4_round_keys(
 unsafe fn aes128_encrypt_block_aese(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
     use core::arch::aarch64::*;
     let rk = key_expansion(key);
-    // Load state and first round key
     let mut s = vld1q_u8(block.as_ptr());
-    let k0 = vld1q_u8(rk[0..16].as_ptr());
-    s = veorq_u8(s, k0);
-    // 9 rounds of AESE+AESMC with per-round keys
-    for r in 1..10 {
+    for r in 0..9 {
         let kr = vld1q_u8(rk[16 * r..16 * (r + 1)].as_ptr());
         s = vaeseq_u8(s, kr);
         s = vaesmcq_u8(s);
     }
-    // Final round: AESE with last round key (no AESMC in final)
+    let k9 = vld1q_u8(rk[144..160].as_ptr());
+    s = vaeseq_u8(s, k9);
     let kf = vld1q_u8(rk[160..176].as_ptr());
-    s = vaeseq_u8(s, kf);
+    s = veorq_u8(s, kf);
     let mut out = [0u8; 16];
     vst1q_u8(out.as_mut_ptr(), s);
     out
@@ -1125,7 +1112,7 @@ unsafe fn aes128_encrypt_block_aese(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "aes")]
 // SAFETY: target_feature gate ensures ARM AES. `round_keys` is &[[u8; 16]; 11];
-// iterator skip(1).take(10) accesses indices 1..=10, within bounds. vld1q_u8
+// iterator take(9) accesses indices 0..=8, within bounds. vld1q_u8
 // reads 16 bytes from each [u8; 16] subarray pointer. `block` is &[u8; 16].
 // `out` is stack-owned [u8; 16]; vst1q_u8 writes exactly 16 bytes.
 unsafe fn aes128_encrypt_block_aese_round_keys(
@@ -1134,15 +1121,15 @@ unsafe fn aes128_encrypt_block_aese_round_keys(
 ) -> [u8; 16] {
     use core::arch::aarch64::*;
     let mut s = vld1q_u8(block.as_ptr());
-    let k0 = vld1q_u8(round_keys[0].as_ptr());
-    s = veorq_u8(s, k0);
-    for rk in round_keys.iter().skip(1).take(10) {
+    for rk in round_keys.iter().take(9) {
         let kr = vld1q_u8(rk.as_ptr());
         s = vaeseq_u8(s, kr);
         s = vaesmcq_u8(s);
     }
-    let kf = vld1q_u8(round_keys[10].as_ptr());
-    s = vaeseq_u8(s, kf);
+    let k9 = vld1q_u8(round_keys[9].as_ptr());
+    s = vaeseq_u8(s, k9);
+    let k10 = vld1q_u8(round_keys[10].as_ptr());
+    s = veorq_u8(s, k10);
     let mut out = [0u8; 16];
     vst1q_u8(out.as_mut_ptr(), s);
     out
@@ -1152,7 +1139,7 @@ unsafe fn aes128_encrypt_block_aese_round_keys(
 #[inline]
 #[target_feature(enable = "sve2")]
 // SAFETY: target_feature gate ensures SVE2 (implies AES). `round_keys` is
-// &[[u8; 16]; 11]; take(10).skip(1) accesses 1..=9, index [10] is the final.
+// &[[u8; 16]; 11]; take(9) accesses 0..=8, indices [9] and [10] are explicit.
 // svptrue_b8 creates an all-true predicate for 128-bit vectors. svld1_u8 and
 // svst1_u8 read/write 16 bytes under the predicate from valid [u8; 16] pointers.
 // `out` is stack-owned [u8; 16].
@@ -1164,17 +1151,16 @@ unsafe fn aes128_encrypt_block_sve_round_keys(
     let pg = svptrue_b8();
     let mut state = svld1_u8(pg, block.as_ptr());
 
-    let rk0 = svld1_u8(pg, round_keys[0].as_ptr());
-    state = sveor_u8_x(pg, state, rk0);
-
-    for rk in round_keys.iter().take(10).skip(1) {
+    for rk in round_keys.iter().take(9) {
         let round = svld1_u8(pg, rk.as_ptr());
         state = svaeseq_u8(pg, state, round);
         state = svaesmcq_u8(pg, state);
     }
 
-    let rk_last = svld1_u8(pg, round_keys[10].as_ptr());
-    state = svaeseq_u8(pg, state, rk_last);
+    let rk9 = svld1_u8(pg, round_keys[9].as_ptr());
+    state = svaeseq_u8(pg, state, rk9);
+    let rk10 = svld1_u8(pg, round_keys[10].as_ptr());
+    state = sveor_u8_x(pg, state, rk10);
 
     let mut out = [0u8; 16];
     svst1_u8(pg, out.as_mut_ptr(), state);
@@ -1184,6 +1170,48 @@ unsafe fn aes128_encrypt_block_sve_round_keys(
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests_ssse3_aes {
     use super::*;
+
+    #[test]
+    fn ssse3_round_transforms_match_scalar() {
+        if !std::is_x86_feature_detected!("ssse3") {
+            return;
+        }
+
+        for seed in 0u8..=u8::MAX {
+            let input = core::array::from_fn(|index| {
+                seed.wrapping_mul(17).wrapping_add((index as u8).wrapping_mul(29))
+            });
+
+            let mut expected_sub_bytes = input;
+            sub_bytes(&mut expected_sub_bytes);
+            let mut expected_shift_rows = input;
+            shift_rows(&mut expected_shift_rows);
+            let mut expected_mix_columns = input;
+            mix_columns(&mut expected_mix_columns);
+
+            let mut actual_sub_bytes = [0u8; 16];
+            let mut actual_shift_rows = [0u8; 16];
+            let mut actual_mix_columns = [0u8; 16];
+
+            // SAFETY: SSSE3 was checked above. Every load and store accesses one
+            // complete stack-owned [u8; 16] value.
+            unsafe {
+                use core::arch::x86_64::{_mm_loadu_si128, _mm_storeu_si128};
+
+                let state = _mm_loadu_si128(input.as_ptr() as *const _);
+                _mm_storeu_si128(actual_sub_bytes.as_mut_ptr() as *mut _, sub_bytes_ssse3(state));
+                _mm_storeu_si128(actual_shift_rows.as_mut_ptr() as *mut _, shift_rows_ssse3(state));
+                _mm_storeu_si128(
+                    actual_mix_columns.as_mut_ptr() as *mut _,
+                    mix_columns_ssse3(state),
+                );
+            }
+
+            assert_eq!(expected_sub_bytes, actual_sub_bytes, "seed {seed}");
+            assert_eq!(expected_shift_rows, actual_shift_rows, "seed {seed}");
+            assert_eq!(expected_mix_columns, actual_mix_columns, "seed {seed}");
+        }
+    }
 
     #[test]
     fn aes128_ssse3_matches_scalar() {
@@ -1289,7 +1317,7 @@ mod tests_sve {
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "aes")]
 // SAFETY: target_feature gate ensures ARM AES. `round_keys` is &[[u8; 16]; 11];
-// take(10).skip(1) accesses indices 1..=9, index [0] and [10] are explicit.
+// take(9) accesses indices 0..=8, indices [9] and [10] are explicit.
 // vld1q_u8 reads 16 bytes from each [u8; 16] subarray pointer. `blocks` is
 // by-value [uint8x16_t; 4]; iter_mut bounded to 4 lanes. Returns owned array.
 unsafe fn aese_encrypt4_round_keys(
@@ -1297,11 +1325,7 @@ unsafe fn aese_encrypt4_round_keys(
     mut blocks: [core::arch::aarch64::uint8x16_t; 4],
 ) -> [core::arch::aarch64::uint8x16_t; 4] {
     use core::arch::aarch64::*;
-    let rk0 = vld1q_u8(round_keys[0].as_ptr());
-    for lane in blocks.iter_mut() {
-        *lane = veorq_u8(*lane, rk0);
-    }
-    for rk in round_keys.iter().take(10).skip(1) {
+    for rk in round_keys.iter().take(9) {
         let kr = vld1q_u8(rk.as_ptr());
         for lane in blocks.iter_mut() {
             *lane = vaeseq_u8(*lane, kr);
@@ -1310,9 +1334,13 @@ unsafe fn aese_encrypt4_round_keys(
             *lane = vaesmcq_u8(*lane);
         }
     }
-    let kf = vld1q_u8(round_keys[10].as_ptr());
+    let k9 = vld1q_u8(round_keys[9].as_ptr());
     for lane in blocks.iter_mut() {
-        *lane = vaeseq_u8(*lane, kf);
+        *lane = vaeseq_u8(*lane, k9);
+    }
+    let k10 = vld1q_u8(round_keys[10].as_ptr());
+    for lane in blocks.iter_mut() {
+        *lane = veorq_u8(*lane, k10);
     }
     blocks
 }

@@ -4310,23 +4310,21 @@ unsafe fn gf16_mul_slice_sve2(coeff: u16, src: &[u16], dst: &mut [u16], len: usi
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,pclmulqdq")]
-unsafe fn gf16_mul_avx2(a: u16, b: u16) -> u16 {
+#[target_feature(enable = "pclmulqdq")]
+unsafe fn gf16_mul_pclmul(a: u16, b: u16) -> u16 {
     use std::arch::x86_64::*;
-    // Carryless multiplication for GF(2^16)
-    let a_vec = _mm_set1_epi16(a as i16);
-    let b_vec = _mm_set1_epi16(b as i16);
+    let a_vec = _mm_cvtsi32_si128(a as i32);
+    let b_vec = _mm_cvtsi32_si128(b as i32);
+    let product = _mm_clmulepi64_si128(a_vec, b_vec, 0x00);
+    let mut reduced = _mm_cvtsi128_si64(product) as u32;
 
-    // Perform carryless multiplication
-    let lo = _mm_clmulepi64_si128(a_vec, b_vec, 0x00);
-    let hi = _mm_clmulepi64_si128(a_vec, b_vec, 0x11);
+    for shift in (0..=14).rev() {
+        let coefficient = (reduced >> (shift + 16)) & 1;
+        let mask = 0u32.wrapping_sub(coefficient);
+        reduced ^= (0x1_100B_u32 << shift) & mask;
+    }
 
-    // Reduction modulo x^16 + x^12 + x^3 + x + 1
-    let poly = _mm_set1_epi16(0x100B);
-    let red1 = _mm_clmulepi64_si128(hi, poly, 0x00);
-    let result = _mm_xor_si128(lo, red1);
-
-    _mm_extract_epi16(result, 0) as u16
+    reduced as u16
 }
 
 // Removed gf16_mul_neon scalar shim; NEON paths use slice/vector kernels above.

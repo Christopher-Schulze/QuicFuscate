@@ -410,7 +410,7 @@ fn sort_f32_neon(data: &mut [f32]) {
     }
 }
 
-/// Fast sort for f32 with SIMD - 4x faster (AVX2/NEON)
+/// Sort f32 values with architecture-specific dispatch and deterministic ordering.
 #[inline(always)]
 pub fn sort_f32(data: &mut [f32]) {
     let _profile = FeatureDetector::instance().profile();
@@ -425,10 +425,10 @@ pub fn sort_f32(data: &mut [f32]) {
         | CpuProfile::X86_P3d
         | CpuProfile::X86_P3e
         | CpuProfile::X86_P4a
-        | CpuProfile::X86_P4b => unsafe {
-            sort_f32_avx2(data);
+        | CpuProfile::X86_P4b => {
+            data.sort_unstable_by(f32::total_cmp);
             return;
-        },
+        }
         _ => {}
     }
 
@@ -447,30 +447,7 @@ pub fn sort_f32(data: &mut [f32]) {
         _ => {}
     }
 
-    data.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn sort_f32_avx2(data: &mut [f32]) {
-    if data.len() <= 8 {
-        let mut vals = [0.0f32; 8];
-        for (i, &val) in data.iter().enumerate().take(8) {
-            vals[i] = val;
-        }
-        let mut vec = _mm256_loadu_ps(vals.as_ptr());
-        for _ in 0..3 {
-            let shuffled = _mm256_permutevar8x32_ps(vec, _mm256_set_epi32(3, 2, 1, 0, 7, 6, 5, 4));
-            vec = _mm256_min_ps(vec, shuffled);
-            vec = _mm256_max_ps(vec, shuffled);
-        }
-        _mm256_storeu_ps(vals.as_mut_ptr(), vec);
-        for (i, &val) in vals.iter().enumerate().take(data.len()) {
-            data[i] = val;
-        }
-    } else {
-        data.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    }
+    data.sort_unstable_by(f32::total_cmp);
 }
 
 /// Fast argsort (index sort) leveraging architecture-specific SIMD helpers for small slices.

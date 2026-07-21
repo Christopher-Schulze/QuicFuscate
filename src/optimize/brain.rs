@@ -152,30 +152,15 @@ fn scalar_jensen_shannon(bins: &[u64], total: u64, target: &[f64]) -> f64 {
 
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-unsafe fn convert_u32_to_pd_unsigned(v: std::arch::x86_64::__m128i) -> std::arch::x86_64::__m128d {
-    use std::arch::x86_64::*;
-
-    let signed = _mm_cvtepi32_pd(v);
-    let negative_mask = _mm_cmplt_epi32(v, _mm_setzero_si128());
-    let bias = _mm_set1_pd(4_294_967_296.0f64);
-    let adjust = _mm_and_pd(_mm_castsi128_pd(negative_mask), bias);
-    _mm_add_pd(signed, adjust)
-}
-
-#[cfg(target_arch = "x86_64")]
-#[inline(always)]
 unsafe fn u64x2_to_f64x2(v: std::arch::x86_64::__m128i) -> std::arch::x86_64::__m128d {
     use std::arch::x86_64::*;
 
-    const PACK_LOHI: i32 = 0x88;
-    let low_mask = _mm_set1_epi64x(0xFFFF_FFFFu64 as i64);
-    let lo = _mm_shuffle_epi32(_mm_and_si128(v, low_mask), PACK_LOHI);
-    let hi = _mm_shuffle_epi32(_mm_srli_epi64(v, 32), PACK_LOHI);
-
-    let lo_pd = convert_u32_to_pd_unsigned(lo);
-    let hi_pd = convert_u32_to_pd_unsigned(hi);
-    let scale = _mm_set1_pd(4_294_967_296.0f64);
-    _mm_add_pd(_mm_mul_pd(hi_pd, scale), lo_pd)
+    // Store and cast each lane exactly as Rust's scalar `u64 as f64` conversion.
+    // Splitting into high/low u32 halves introduces a second rounding step for
+    // values above 2^53 and diverges at the upper u64 boundaries.
+    let mut lanes = [0u64; 2];
+    _mm_storeu_si128(lanes.as_mut_ptr().cast(), v);
+    _mm_set_pd(lanes[1] as f64, lanes[0] as f64)
 }
 
 #[cfg(target_arch = "x86_64")]

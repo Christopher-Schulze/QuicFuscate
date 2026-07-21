@@ -632,9 +632,9 @@ pub(crate) fn gf16_mul(a: u16, b: u16) -> u16 {
     optimize::dispatch(|policy| {
         #[cfg(target_arch = "x86_64")]
         {
-            if policy.as_any().is::<optimize::Avx2>() {
-                // AVX2 scalar carryless multiply with reduction
-                return unsafe { super::gf16_mul_avx2(a, b) };
+            let _ = policy;
+            if optimize::FeatureDetector::instance().has_feature(optimize::CpuFeature::PCLMULQDQ) {
+                return unsafe { super::gf16_mul_pclmul(a, b) };
             }
         }
         #[cfg(target_arch = "aarch64")]

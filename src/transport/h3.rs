@@ -1151,12 +1151,12 @@ pub(crate) mod qpack {
         0x1fffe3, 0x3ffffe6, 0x7ffffe0, 0x7ffffe1, 0x3ffffe7, 0x7ffffe2, 0xfffff2, 0x1fffe4,
         0x1fffe5, 0x3ffffe8, 0x3ffffe9, 0xffffffd, 0x7ffffe3, 0x7ffffe4, 0x7ffffe5,
         // 224..255
-        0xfffec, 0xfffff3, 0xfffed, 0x1fffe6, 0x3ffffea, 0x7ffffe6, 0x3ffffeb, 0x7ffffe7, 0xfffff4,
-        0x1fffe7, 0x1fffe8, 0x7ffffe8, 0x7ffffe9, 0x1fffe9, 0x3ffffec, 0x3ffffed, 0x7ffffea,
-        0x7ffffeb, 0xffffffe, 0x7ffffec, 0x7ffffed, 0x7ffffee, 0x7ffffef, 0x7fffff0, 0x3ffffee,
-        0x3ffffef, 0x7fffff1, 0x3fffff0, 0x3fffff1, 0xfffffff, 0x3fffff2, 0x3fffff3,
+        0xfffec, 0xfffff3, 0xfffed, 0x1fffe6, 0x3fffe9, 0x1fffe7, 0x1fffe8, 0x7ffff3, 0x3fffea,
+        0x3fffeb, 0x1ffffee, 0x1ffffef, 0xfffff4, 0xfffff5, 0x3ffffea, 0x7ffff4, 0x3ffffeb,
+        0x7ffffe6, 0x3ffffec, 0x3ffffed, 0x7ffffe7, 0x7ffffe8, 0x7ffffe9, 0x7ffffea, 0x7ffffeb,
+        0xffffffe, 0x7ffffec, 0x7ffffed, 0x7ffffee, 0x7ffffef, 0x7fffff0, 0x3ffffee,
         // EOS 256
-        0x3fffff4,
+        0x3fffffff,
     ];
     pub(crate) const HUFF_LENS: [u8; 257] = [
         13, 23, 28, 28, 28, 28, 28, 28, 28, 24, 30, 28, 28, 30, 28, 28, 28, 28, 28, 28, 28, 28, 30,
@@ -1168,8 +1168,8 @@ pub(crate) mod qpack {
         22, 23, 23, 24, 22, 21, 20, 22, 22, 23, 23, 21, 23, 22, 22, 24, 21, 22, 23, 23, 21, 21, 22,
         21, 23, 22, 23, 23, 20, 22, 22, 22, 23, 22, 22, 23, 26, 26, 20, 19, 22, 23, 22, 25, 26, 26,
         26, 27, 27, 26, 24, 25, 19, 21, 26, 27, 27, 26, 27, 24, 21, 21, 26, 26, 28, 27, 27, 27, 20,
-        24, 20, 21, 26, 27, 26, 27, 24, 21, 21, 27, 27, 21, 26, 26, 27, 27, 28, 27, 27, 27, 27, 27,
-        26, 26, 27, 26, 26, 28, 26, 26, 26,
+        24, 20, 21, 22, 21, 21, 23, 22, 22, 25, 25, 24, 24, 26, 23, 26, 27, 26, 26, 27, 27, 27, 27,
+        27, 28, 27, 27, 27, 27, 27, 26, 30,
     ];
 
     #[inline]
@@ -1243,18 +1243,22 @@ pub(crate) mod qpack {
         let trie = TRIE.get_or_init(build_trie);
         let mut idx = 0usize;
         let mut written = 0usize;
+        let mut pending_bits = 0usize;
+        let mut pending_value = 0u8;
         for &byte in data {
             for i in (0..8).rev() {
                 let bit = ((byte >> i) & 1) as usize;
+                pending_bits += 1;
+                pending_value = (pending_value << 1) | bit as u8;
                 let next = trie[idx].next[bit];
                 if next < 0 {
-                    return Err(Error::InternalError);
+                    return Err(Error::QpackDecompressionFailed);
                 }
                 idx = next as usize;
                 let sym = trie[idx].sym;
                 if sym >= 0 {
                     if sym == 256 {
-                        return Ok(written);
+                        return Err(Error::QpackDecompressionFailed);
                     }
                     if written >= out.len() {
                         return Err(Error::BufferTooShort);
@@ -1262,10 +1266,16 @@ pub(crate) mod qpack {
                     out[written] = sym as u8;
                     written += 1;
                     idx = 0;
+                    pending_bits = 0;
+                    pending_value = 0;
                 }
             }
         }
-        Ok(written)
+        if idx == 0 || (pending_bits <= 7 && pending_value == ((1u16 << pending_bits) - 1) as u8) {
+            Ok(written)
+        } else {
+            Err(Error::QpackDecompressionFailed)
+        }
     }
 
     fn huff_decode(data: &[u8]) -> Result<Vec<u8>, Error> {
@@ -2451,6 +2461,42 @@ mod tests {
         let dec_len =
             qpack::huff_decode_into(&encoded[..enc_len], &mut decoded).expect("huff decode");
         assert_eq!(&decoded[..dec_len], input);
+    }
+
+    #[test]
+    fn huffman_all_byte_values_roundtrip() {
+        let input: Vec<u8> = (0u8..=u8::MAX).collect();
+        let mut encoded = vec![0u8; qpack::huff_estimate_len(&input)];
+        let enc_len = qpack::huff_encode_into(&input, &mut encoded);
+        assert_eq!(enc_len, encoded.len());
+
+        let mut decoded = vec![0u8; input.len()];
+        let dec_len = qpack::huff_decode_into(&encoded, &mut decoded).expect("huff decode");
+        assert_eq!(dec_len, input.len());
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn huffman_rfc_tail_symbols_encode_exactly() {
+        let mut encoded = [0u8; 8];
+        let len_228 = qpack::huff_encode_into(&[228], &mut encoded);
+        assert_eq!(&encoded[..len_228], &[0xff, 0xff, 0xa7]);
+
+        let len_255 = qpack::huff_encode_into(&[255], &mut encoded);
+        assert_eq!(&encoded[..len_255], &[0xff, 0xff, 0xfb, 0xbf]);
+    }
+
+    #[test]
+    fn huffman_rejects_eos_and_invalid_padding() {
+        let mut decoded = [0u8; 16];
+        assert!(matches!(
+            qpack::huff_decode_into(&[0xff, 0xff, 0xff, 0xff], &mut decoded),
+            Err(Error::QpackDecompressionFailed)
+        ));
+        assert!(matches!(
+            qpack::huff_decode_into(&[0x1e], &mut decoded),
+            Err(Error::QpackDecompressionFailed)
+        ));
     }
 
     #[test]

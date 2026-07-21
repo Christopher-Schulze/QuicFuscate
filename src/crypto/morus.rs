@@ -191,42 +191,17 @@ impl Morus1280State {
 
     #[cfg(target_arch = "x86_64")]
     #[inline]
-    #[target_feature(enable = "sse4.1")]
-    // SAFETY: target_feature gate ensures SSE4.1 intrinsics (_mm_blend_epi16) are
-    // available. All inputs are by-value __m128i registers; no memory operations.
+    #[target_feature(enable = "ssse3,sse4.1")]
+    // SAFETY: target_feature gate ensures SSSE3 and SSE4.1 are available. All
+    // inputs are by-value __m128i registers; no memory operations.
     unsafe fn rotl_words_pair_sse41(lo: __m128i, hi: __m128i, k: i32) -> (__m128i, __m128i) {
-        use core::arch::x86_64::*;
-        match k & 3 {
-            0 => (lo, hi),
-            1 => {
-                let lo_shift = _mm_slli_si128(lo, 8);
-                let hi_carry = _mm_srli_si128(hi, 8);
-                let new_lo = _mm_blend_epi16(lo_shift, hi_carry, 0b1111_0000);
-
-                let hi_shift = _mm_slli_si128(hi, 8);
-                let lo_carry = _mm_srli_si128(lo, 8);
-                let new_hi = _mm_blend_epi16(hi_shift, lo_carry, 0b1111_0000);
-                (new_lo, new_hi)
-            }
-            2 => (hi, lo),
-            3 => {
-                let lo_shift = _mm_srli_si128(lo, 8);
-                let hi_carry = _mm_slli_si128(hi, 8);
-                let new_lo = _mm_blend_epi16(lo_shift, hi_carry, 0b1111_0000);
-
-                let hi_shift = _mm_srli_si128(hi, 8);
-                let lo_carry = _mm_slli_si128(lo, 8);
-                let new_hi = _mm_blend_epi16(hi_shift, lo_carry, 0b1111_0000);
-                (new_lo, new_hi)
-            }
-            _ => (lo, hi),
-        }
+        Self::rotl_words_pair_ssse3(lo, hi, k)
     }
 
     #[cfg(target_arch = "x86_64")]
     #[inline]
-    #[target_feature(enable = "sse4.1")]
-    // SAFETY: target_feature gate ensures SSE4.1 is available. `self.s` is
+    #[target_feature(enable = "ssse3,sse4.1")]
+    // SAFETY: target_feature gate ensures SSSE3 and SSE4.1 are available. `self.s` is
     // [[u64;4];5] providing valid aligned storage for SIMD load/store intrinsics.
     // `m` is by-value [u64;4]. All pointer arithmetic stays within array bounds.
     unsafe fn update_simd_sse41(&mut self, m: [u64; 4]) {
@@ -292,8 +267,8 @@ impl Morus1280State {
     // SSE4.2 uses same code as SSE4.1 (no new bit-manipulation instructions needed for MORUS)
     #[cfg(target_arch = "x86_64")]
     #[inline]
-    #[target_feature(enable = "sse4.2")]
-    // SAFETY: target_feature gate ensures SSE4.2 is available. Delegates to
+    #[target_feature(enable = "ssse3,sse4.1,sse4.2")]
+    // SAFETY: target_feature gate ensures SSSE3 through SSE4.2 are available. Delegates to
     // update_simd_sse41 which has its own safety invariants for state access.
     unsafe fn update_simd_sse42(&mut self, m: [u64; 4]) {
         self.update_simd_sse41(m)
@@ -493,14 +468,14 @@ impl Morus1280State {
         // Order: SSE4.2 (newest) -> SSE4.1 -> SSSE3 -> SSE2 (oldest)
         #[cfg(target_arch = "x86_64")]
         {
-            if is_x86_feature_detected!("sse4.2") {
+            if is_x86_feature_detected!("sse4.2") && is_x86_feature_detected!("ssse3") {
                 // SAFETY: runtime feature detection guarantees SSE4.2; `self.s` is a
                 // stack-owned `[[u64;4];5]` providing valid aligned memory for the
                 // SIMD load/store intrinsics; `m` is a by-value `[u64;4]`.
                 unsafe { self.update_simd_sse42(m) }
                 return;
             }
-            if is_x86_feature_detected!("sse4.1") {
+            if is_x86_feature_detected!("sse4.1") && is_x86_feature_detected!("ssse3") {
                 // SAFETY: same as SSE4.2 path - runtime detection gates SSE4.1 intrinsics;
                 // all data is stack-owned with valid alignment and lifetime.
                 unsafe { self.update_simd_sse41(m) }
@@ -1359,7 +1334,7 @@ impl MorusAead {
     }
 
     #[cfg(target_arch = "x86_64")]
-    #[target_feature(enable = "sse4.1")]
+    #[target_feature(enable = "ssse3,sse4.1")]
     unsafe fn encrypt_morus1280_sse41_inner(
         &self,
         buffer: &mut [u8],
@@ -1402,7 +1377,7 @@ impl MorusAead {
     }
 
     #[cfg(target_arch = "x86_64")]
-    #[target_feature(enable = "sse4.1")]
+    #[target_feature(enable = "ssse3,sse4.1")]
     unsafe fn decrypt_morus1280_sse41_inner(
         &self,
         buffer: &mut [u8],
@@ -1450,7 +1425,7 @@ impl MorusAead {
     }
 
     #[cfg(target_arch = "x86_64")]
-    #[target_feature(enable = "sse4.2")]
+    #[target_feature(enable = "ssse3,sse4.1,sse4.2")]
     unsafe fn encrypt_morus1280_sse42_inner(
         &self,
         buffer: &mut [u8],
@@ -1493,7 +1468,7 @@ impl MorusAead {
     }
 
     #[cfg(target_arch = "x86_64")]
-    #[target_feature(enable = "sse4.2")]
+    #[target_feature(enable = "ssse3,sse4.1,sse4.2")]
     unsafe fn decrypt_morus1280_sse42_inner(
         &self,
         buffer: &mut [u8],

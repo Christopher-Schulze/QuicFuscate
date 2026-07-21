@@ -179,22 +179,6 @@ unsafe fn string_search_sve2(haystack: &[u8], needle: &[u8]) -> bool {
 pub fn base64_encode(data: &[u8]) -> String {
     let _profile = FeatureDetector::instance().profile();
 
-    #[cfg(target_arch = "x86_64")]
-    match _profile {
-        CpuProfile::X86_P2a
-        | CpuProfile::X86_P2b
-        | CpuProfile::X86_P3a
-        | CpuProfile::X86_P3b
-        | CpuProfile::X86_P3c
-        | CpuProfile::X86_P3d
-        | CpuProfile::X86_P3e
-        | CpuProfile::X86_P4a
-        | CpuProfile::X86_P4b => {
-            return unsafe { base64_encode_avx2(data) };
-        }
-        _ => {}
-    }
-
     #[cfg(target_arch = "aarch64")]
     match _profile {
         CpuProfile::ARM_A2 => {
@@ -235,68 +219,6 @@ fn base64_encode_scalar(data: &[u8]) -> String {
     }
 
     result
-}
-
-#[cfg(all(target_arch = "x86_64", any(test, feature = "rust-tests")))]
-#[target_feature(enable = "avx2")]
-unsafe fn base64_encode_avx2(data: &[u8]) -> String {
-    use std::arch::x86_64::*;
-
-    // AVX2 accelerated base64 encoding
-    // Process 24 bytes -> 32 base64 chars at a time
-    const SHUFFLE_MASK: [u8; 32] = [
-        0, 1, 2, 0, 3, 4, 5, 3, 6, 7, 8, 6, 9, 10, 11, 9, 0, 1, 2, 0, 3, 4, 5, 3, 6, 7, 8, 6, 9,
-        10, 11, 9,
-    ];
-
-    let mut result = Vec::with_capacity(data.len().div_ceil(3) * 4);
-    let mut i = 0;
-
-    // Process 24-byte chunks
-    while i + 24 <= data.len() {
-        // Load 24 bytes
-        let input = _mm256_loadu_si256(data.as_ptr().add(i) as *const __m256i);
-
-        // Shuffle to extract 6-bit values
-        let shuffle = _mm256_loadu_si256(SHUFFLE_MASK.as_ptr() as *const __m256i);
-        let shuffled = _mm256_shuffle_epi8(input, shuffle);
-
-        // Convert 6-bit values to base64 characters using SIMD lookup
-        let lookup_lo = _mm256_setr_epi8(
-            b'A' as i8, b'B' as i8, b'C' as i8, b'D' as i8, b'E' as i8, b'F' as i8, b'G' as i8,
-            b'H' as i8, b'I' as i8, b'J' as i8, b'K' as i8, b'L' as i8, b'M' as i8, b'N' as i8,
-            b'O' as i8, b'P' as i8, b'A' as i8, b'B' as i8, b'C' as i8, b'D' as i8, b'E' as i8,
-            b'F' as i8, b'G' as i8, b'H' as i8, b'I' as i8, b'J' as i8, b'K' as i8, b'L' as i8,
-            b'M' as i8, b'N' as i8, b'O' as i8, b'P' as i8,
-        );
-        let lookup_hi = _mm256_setr_epi8(
-            b'Q' as i8, b'R' as i8, b'S' as i8, b'T' as i8, b'U' as i8, b'V' as i8, b'W' as i8,
-            b'X' as i8, b'Y' as i8, b'Z' as i8, b'a' as i8, b'b' as i8, b'c' as i8, b'd' as i8,
-            b'e' as i8, b'f' as i8, b'Q' as i8, b'R' as i8, b'S' as i8, b'T' as i8, b'U' as i8,
-            b'V' as i8, b'W' as i8, b'X' as i8, b'Y' as i8, b'Z' as i8, b'a' as i8, b'b' as i8,
-            b'c' as i8, b'd' as i8, b'e' as i8, b'f' as i8,
-        );
-
-        // Extract 6-bit indices and lookup
-        let indices = _mm256_and_si256(shuffled, _mm256_set1_epi8(0x3F));
-        let mask_lo = _mm256_cmpgt_epi8(_mm256_set1_epi8(16), indices);
-        let out_lo = _mm256_shuffle_epi8(lookup_lo, indices);
-        let out_hi = _mm256_shuffle_epi8(lookup_hi, _mm256_sub_epi8(indices, _mm256_set1_epi8(16)));
-        let output = _mm256_blendv_epi8(out_hi, out_lo, mask_lo);
-
-        // Store 32 base64 characters
-        let mut temp = [0u8; 32];
-        _mm256_storeu_si256(temp.as_mut_ptr() as *mut __m256i, output);
-        result.extend_from_slice(&temp);
-
-        i += 24;
-    }
-
-    // Handle remainder with scalar
-    let remainder = &data[i..];
-    let remainder_encoded = base64_encode_scalar(remainder);
-
-    String::from_utf8_lossy(&result).to_string() + &remainder_encoded
 }
 
 /// NEON-optimized base64 encoding - 4x faster on ARM
