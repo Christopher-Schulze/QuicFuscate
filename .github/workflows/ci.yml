@@ -220,7 +220,7 @@ jobs:
         run: cargo check --lib
 
       - name: Test Windows core library
-        run: cargo test --lib --features rust-tests
+        run: cargo test --lib --features rust-tests -- --test-threads=1 --nocapture
 
       - name: Lint Windows core library
         run: cargo clippy --lib --features rust-tests -- -D warnings
@@ -329,6 +329,10 @@ jobs:
       - name: TODO consistency audit
         shell: bash
         run: bash scripts/tests/audits/audit-todo-consistency.sh
+
+      - name: Release version consistency audit
+        shell: bash
+        run: bash scripts/audits/verify-release-version.sh
 
   fuzz-targets:
     runs-on: ubuntu-latest

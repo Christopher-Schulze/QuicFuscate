@@ -7,7 +7,22 @@ on:
   workflow_dispatch:
 
 jobs:
+  release-version-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify release version contract
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            bash scripts/audits/verify-release-version.sh --tag "$GITHUB_REF_NAME"
+          else
+            bash scripts/audits/verify-release-version.sh
+          fi
+
   linux-server-bundle:
+    needs: release-version-contract
     runs-on: ubuntu-latest
     env:
       CARGO_INCREMENTAL: "0"
@@ -112,6 +127,7 @@ jobs:
   #
   # ---------------------------------------------------------------------------
   desktop-macos:
+    needs: release-version-contract
     runs-on: macos-latest
     continue-on-error: true
     env:
@@ -149,6 +165,7 @@ jobs:
           if-no-files-found: warn
 
   desktop-linux:
+    needs: release-version-contract
     runs-on: ubuntu-latest
     continue-on-error: true
     env:
@@ -194,6 +211,7 @@ jobs:
           if-no-files-found: warn
 
   desktop-windows:
+    needs: release-version-contract
     runs-on: windows-latest
     env:
       CARGO_INCREMENTAL: "0"

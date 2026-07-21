@@ -141,8 +141,8 @@ Uses `StealthConfig::from_mode(runtime_mode)` - was silently using `..Default::d
 18. NAT traversal path discovery: `src/engine/config.rs` `[nat_traversal]` -> `src/transport/config.rs` `NatTraversalConfig` -> `src/transport/nat.rs` `NatPathDiscovery` -> path-management consumers when policy permits discovery.
 19. Audit logging path: `src/main.rs::run_server()` `--audit-log <path>` -> `src/audit/mod.rs::init_audit_log()` (global `OnceLock<Arc<AuditLog>>`) -> `crate::audit::audit()` calls at server start/stop, privilege drop, auth success/failure, QKey issued/revoked, admin actions, config reload.
 20. Memory locking path: `src/engine/config.rs` `[security] lock_memory/lock_blocks` -> `src/main.rs::run_server()` `mlockall(MCL_CURRENT | MCL_FUTURE)` -> `src/optimize/mod.rs` `MemoryPool::set_lock_blocks()` -> `mlock_block()` in `alloc_numa_block()`.
-21. Windows core CI gate: `.github/workflows/ci.yml` `windows-core-checks` -> native `windows-latest` `cargo check --lib` -> `cargo test --lib --features rust-tests` -> `cargo clippy --lib --features rust-tests -- -D warnings`.
-22. Windows signed release path: `.github/workflows/release.yml` `desktop-windows` -> Tauri MSI build -> `.msi` plus `.msi.sig` verification -> required `publish-release` dependency -> `latest.json` `windows-x86_64` entry.
+21. Windows core CI gate: `.github/workflows/ci.yml` `windows-core-checks` -> native `windows-latest` `cargo check --lib` -> serial `cargo test --lib --features rust-tests -- --test-threads=1 --nocapture` -> `cargo clippy --lib --features rust-tests -- -D warnings`.
+22. Windows signed release path: `scripts/audits/verify-release-version.sh` -> `.github/workflows/release.yml` `release-version-contract` -> `desktop-windows` Tauri MSI build -> `.msi` plus `.msi.sig` verification -> required `publish-release` dependency -> `latest.json` `windows-x86_64` entry.
 
 ## ASCII Repository Tree (curated tracked-source snapshot)
 
@@ -410,6 +410,8 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 |   |   |   |-- bench-retained-crypto-backends.sh
 |   |   |   |-- bench-stealth.sh
 |   |   |   `-- bench-transport.sh
+|   |-- audits
+|   |   `-- verify-release-version.sh
 |   |-- build
 |   |   |-- build-pgo-release.sh
 |   |   |-- build-server-bundle.sh
