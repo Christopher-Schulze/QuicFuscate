@@ -50,9 +50,8 @@ impl MockServer {
         self.packets_sent.load(Ordering::Relaxed)
     }
 
-    /// Run the echo server (UDP level, for testing network layer).
-    pub async fn run_echo(&self) -> std::io::Result<()> {
-        let socket = UdpSocket::bind(self.bind_addr).await?;
+    /// Run the echo server on a socket that is already bound and ready.
+    pub async fn run_echo(&self, socket: UdpSocket) -> std::io::Result<()> {
         log::info!("Mock server listening on {}", socket.local_addr()?);
 
         let mut buf = vec![0u8; 65535];
@@ -146,20 +145,17 @@ pub struct TestHarness {
 }
 
 impl TestHarness {
-    /// Create and start a new test harness.
+    /// Create a new test harness.
     pub async fn new() -> std::io::Result<Self> {
-        // We need to bind first to get the actual port
-        let socket = UdpSocket::bind("127.0.0.1:0").await?;
-        let actual_addr = socket.local_addr()?;
-        drop(socket);
-
-        let server = MockServer::new(actual_addr);
+        let server = MockServer::new(SocketAddr::from(([127, 0, 0, 1], 0)));
 
         Ok(Self { server, server_handle: None })
     }
 
     /// Start the server.
-    pub fn start(&mut self) {
+    pub async fn start(&mut self) -> std::io::Result<()> {
+        let socket = UdpSocket::bind(self.server.bind_addr).await?;
+        self.server.bind_addr = socket.local_addr()?;
         let shutdown = self.server.shutdown_signal();
         let packets_recv = self.server.packets_received.clone();
         let packets_sent = self.server.packets_sent.clone();
@@ -168,8 +164,9 @@ impl TestHarness {
         self.server_handle = Some(tokio::spawn(async move {
             let server =
                 MockServer { bind_addr, shutdown, packets_received: packets_recv, packets_sent };
-            server.run_echo().await
+            server.run_echo(socket).await
         }));
+        Ok(())
     }
 
     /// Create a test client.
@@ -198,10 +195,7 @@ mod tests {
     #[tokio::test]
     async fn test_mock_server_echo() {
         let mut harness = TestHarness::new().await.unwrap();
-        harness.start();
-
-        // Give server time to start
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        harness.start().await.unwrap();
 
         let client = harness.client();
 
@@ -223,9 +217,7 @@ mod tests {
     #[tokio::test]
     async fn test_multiple_packets() {
         let mut harness = TestHarness::new().await.unwrap();
-        harness.start();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        harness.start().await.unwrap();
 
         let client = harness.client();
 
@@ -245,9 +237,7 @@ mod tests {
     #[tokio::test]
     async fn test_large_packet() {
         let mut harness = TestHarness::new().await.unwrap();
-        harness.start();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        harness.start().await.unwrap();
 
         let client = harness.client();
 
