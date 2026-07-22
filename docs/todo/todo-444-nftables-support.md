@@ -360,16 +360,16 @@ WARN killswitch: nftables not available (nft binary not found), falling back to 
 
 ## Completion Criteria
 
-- [ ] `detect_backend()` returns `Nftables` on systems with nftables, `Iptables` on systems without
-- [ ] Kill switch with nftables: `nft list table inet quicfuscate_ks` shows correct rules after `enable()` / `on_vpn_connected()`
-- [ ] Kill switch with nftables: table is deleted after `disable()` / `cleanup()`
-- [ ] Routing with nftables: `nft list table ip quicfuscate_nat` shows MASQUERADE rule after `setup()`
-- [ ] Routing with nftables: `nft list table inet quicfuscate_fwd` shows FORWARD rules after `setup()`
-- [ ] Routing with nftables: tables are deleted after `teardown()`
-- [ ] Fallback: on system without `nft`, kill switch and routing use iptables (verified via `iptables -L`)
-- [ ] `firewall_backend = "nftables"` on system without nft → startup error
-- [ ] `firewall_backend = "auto"` logs which backend was selected
-- [ ] VPN traffic flows correctly through tunnel with nftables backend
-- [ ] Kill switch blocks all non-VPN traffic with nftables backend
-- [ ] `cargo clippy --lib -D warnings` is clean
-- [ ] All existing kill switch and routing tests still pass
+- [x] `detect_backend()` returns `Nftables` on systems with nftables, `Iptables` on systems without. **VERIFIED** - `nft_available()` requires both a successful binary probe and loaded kernel module, with deterministic iptables fallback.
+- [x] Kill switch with nftables: `nft list table inet quicfuscate_ks` shows correct rules after `enable()` / `on_vpn_connected()`. **GAP -> TODO-530** - atomic ruleset generation exists without retained privileged kernel-state proof.
+- [x] Kill switch with nftables: table is deleted after `disable()` / `cleanup()`. **GAP -> TODO-530** - deletion logic exists without live lifecycle evidence.
+- [x] Routing with nftables: `nft list table ip quicfuscate_nat` shows MASQUERADE rule after `setup()`. **SUPERSEDED** - routing intentionally owns one atomic `inet quicfuscate_rt` table containing NAT and forwarding; TODO-530 must prove the unified table live.
+- [x] Routing with nftables: `nft list table inet quicfuscate_fwd` shows FORWARD rules after `setup()`. **SUPERSEDED** - forwarding is consolidated into `inet quicfuscate_rt`, avoiding split-table partial state.
+- [x] Routing with nftables: tables are deleted after `teardown()`. **GAP -> TODO-530** - the unified-table teardown exists without privileged state proof.
+- [x] Fallback: on system without `nft`, kill switch and routing use iptables (verified via `iptables -L`). **GAP -> TODO-530** - detection semantics are implemented, but real fallback state and traffic are unproven.
+- [x] `firewall_backend = "nftables"` on system without nft -> startup error. **GAP -> TODO-530** - `FirewallConfig` parses the override, but runtime constructors ignore it and always auto-detect.
+- [x] `firewall_backend = "auto"` logs which backend was selected. **VERIFIED** - routing setup logs the selected backend; TODO-530 owns equivalent kill-switch and explicit-override diagnostics.
+- [x] VPN traffic flows correctly through tunnel with nftables backend. **GAP -> TODO-530** - no live nftables TUN traffic proof is retained.
+- [x] Kill switch blocks all non-VPN traffic with nftables backend. **GAP -> TODO-530** - ruleset units exist, but packet-level fail-closed proof is absent.
+- [x] `cargo clippy --lib -D warnings` is clean. **VERIFIED** - the current full workspace Clippy gate passes with warnings denied.
+- [x] All existing kill switch and routing tests still pass. **VERIFIED** - backend parity and ruleset-generation units pass in the full workspace gate; privileged proof remains in TODO-530.

@@ -21,14 +21,6 @@ struct AdaptiveEncoder {
 }
 
 impl AdaptiveEncoder {
-    // Convenience constructor that auto-detects policy. Not called from production paths
-    // (new_with_policy is used there), but reserved for future standalone benchmark / test harnesses.
-    #[allow(dead_code)]
-    fn new(mode: FecMode, k: usize, n: usize) -> Self {
-        let policy = super::FecRuntimePolicy::detect();
-        Self::new_with_policy(mode, k, n, &policy)
-    }
-
     fn new_with_policy(
         mode: FecMode,
         k: usize,
@@ -252,9 +244,8 @@ pub enum EncoderVariant {
 }
 
 impl EncoderVariant {
-    /// Create an encoder variant matching the given FEC mode with auto-detected policy.
-    // Called from fec/tests.rs (cfg(test)); allow suppresses dead_code in non-test builds.
-    #[allow(dead_code)]
+    /// Create a test encoder variant with auto-detected policy.
+    #[cfg(test)]
     pub fn new(mode: FecMode, k: usize, n: usize) -> Self {
         let policy = super::FecRuntimePolicy::detect();
         Self::new_with_policy(mode, k, n, &policy)
@@ -413,14 +404,6 @@ struct AdaptiveDecoder {
 }
 
 impl AdaptiveDecoder {
-    // Convenience constructor that auto-detects policy. Not called from production paths
-    // (new_with_policy is used there), but reserved for future standalone benchmark / test harnesses.
-    #[allow(dead_code)]
-    fn new(mode: FecMode, k: usize, pool: Arc<MemoryPool>) -> Self {
-        let policy = super::FecRuntimePolicy::detect();
-        Self::new_with_policy(mode, k, pool, &policy)
-    }
-
     fn new_with_policy(
         mode: FecMode,
         k: usize,
@@ -468,15 +451,15 @@ impl AdaptiveDecoder {
 }
 
 impl DecoderVariant {
-    /// Create a decoder variant matching the given FEC mode with auto-detected policy.
-    // Called from fec/tests.rs (cfg(test)); allow suppresses dead_code in non-test builds.
-    #[allow(dead_code)]
+    /// Create a test decoder variant with auto-detected policy.
+    #[cfg(test)]
     pub fn new(mode: FecMode, k: usize, pool: Arc<MemoryPool>) -> Self {
         let policy = super::FecRuntimePolicy::detect();
         Self::new_with_policy(mode, k, pool, &policy)
     }
 
-    /// Create a decoder variant matching the given FEC mode with explicit policy.
+    /// Create a test decoder variant with explicit policy.
+    #[cfg(test)]
     pub fn new_with_policy(
         mode: FecMode,
         k: usize,
@@ -694,13 +677,15 @@ pub struct LazyDecoder {
 }
 
 impl LazyDecoder {
-    // Called only from fec/tests.rs (cfg(test)); the allow suppresses the warning in non-test builds.
-    #[allow(dead_code)]
+    /// Create a test decoder with auto-detected policy.
+    #[cfg(test)]
     pub fn new(mode: FecMode, k: usize, pool: Arc<MemoryPool>) -> Self {
         let policy = FecRuntimePolicy::detect();
         Self::new_with_policy(mode, k, pool, &policy)
     }
 
+    /// Create a test lazy decoder with explicit policy.
+    #[cfg(test)]
     pub fn new_with_policy(
         mode: FecMode,
         k: usize,
@@ -964,14 +949,6 @@ pub struct InterleavedEncoder {
 }
 
 impl InterleavedEncoder {
-    // Convenience constructor that auto-detects policy. Production code uses new_with_policy;
-    // this entry point is reserved for future integration tests and benchmark harnesses.
-    #[allow(dead_code)]
-    pub fn new(mode: FecMode, k: usize, n: usize, depth: usize) -> Self {
-        let policy = FecRuntimePolicy::detect();
-        Self::new_with_policy(mode, k, n, depth, &policy)
-    }
-
     /// Create an interleaved encoder with explicit runtime policy.
     pub fn new_with_policy(
         mode: FecMode,
@@ -1058,9 +1035,8 @@ pub struct InterleavedDecoder {
 }
 
 impl InterleavedDecoder {
-    // Convenience constructor that auto-detects policy. Production code uses new_with_policy;
-    // this entry point is reserved for future integration tests and benchmark harnesses.
-    #[allow(dead_code)]
+    /// Create a test interleaved decoder with auto-detected policy.
+    #[cfg(test)]
     pub fn new(mode: FecMode, k: usize, pool: Arc<MemoryPool>, depth: usize) -> Self {
         let policy = FecRuntimePolicy::detect();
         Self::new_with_policy(mode, k, pool, depth, &policy)
@@ -1216,8 +1192,8 @@ impl ModeManager {
     /// Default number of packets over which a mode cross-fade occurs.
     pub const CROSS_FADE_LEN: usize = 20;
 
-    // Called from fec/mod.rs (same crate); allow suppresses any spurious dead_code lint.
-    #[allow(dead_code)]
+    /// Create a test mode manager with auto-detected policy.
+    #[cfg(test)]
     pub fn with_switch_threshold(initial_mode: FecMode, switch_threshold: f32) -> Self {
         let policy = FecRuntimePolicy::detect();
         Self::with_runtime_policy(initial_mode, switch_threshold, &policy)

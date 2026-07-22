@@ -219,6 +219,37 @@ fn tls_cover_resolve_cipher_explicit_aes() {
 }
 
 #[test]
+fn tls_cover_material_derivation_is_domain_separated() {
+    use super::TlsCoverProvider;
+
+    let entropy = [0xA5u8; 32];
+    let chrome_client =
+        TlsCoverProvider::derive_tls_cover_material_from_entropy("chrome", false, &entropy);
+    let chrome_server =
+        TlsCoverProvider::derive_tls_cover_material_from_entropy("chrome", true, &entropy);
+    let firefox_client =
+        TlsCoverProvider::derive_tls_cover_material_from_entropy("firefox", false, &entropy);
+
+    assert_ne!(chrome_client, chrome_server, "client and server material must differ");
+    assert_ne!(chrome_client, firefox_client, "profile rotation must derive fresh material");
+    assert_eq!(
+        chrome_client,
+        TlsCoverProvider::derive_tls_cover_material_from_entropy("chrome", false, &entropy),
+        "fixed entropy and context must remain deterministic"
+    );
+}
+
+#[test]
+fn tls_cover_material_is_fresh_for_each_provider_connection() {
+    use super::TlsCoverProvider;
+
+    let first = TlsCoverProvider::derive_tls_cover_material("chrome", false).expect("first derive");
+    let second =
+        TlsCoverProvider::derive_tls_cover_material("chrome", false).expect("second derive");
+    assert_ne!(first, second, "independent connections must not reuse key and IV material");
+}
+
+#[test]
 fn tls_cover_client_hello_is_valid_tls_record() {
     use super::{tls_cover::TlsCover, BrowserProfile, OsProfile};
     for browser in [

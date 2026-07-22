@@ -257,23 +257,23 @@ funneled to the correct destination.
 
 ## Acceptance Criteria
 
-- [ ] `LinuxKillSwitch::block_traffic` calls `ip6tables-restore` with
-      IPv6 DROP rules.
-- [ ] `LinuxKillSwitch::allow_vpn_traffic` calls `ip6tables-restore`
-      with IPv6 exceptions for server IPv6 and TUN interface.
-- [ ] `LinuxKillSwitch::cleanup` flushes `ip6tables -F OUTPUT`.
-- [ ] `MacOSKillSwitch` generates pf rules with `inet6` directives.
-- [ ] `WindowsKillSwitch` generates IPv6 firewall rules via netsh.
-- [ ] All three platforms have DNS port-53 rules that block non-VPN
-      DNS and allow VPN DNS.
-- [ ] `KillSwitch::on_vpn_connected` accepts `server_ip_v6` and
-      `vpn_dns_ip` parameters.
-- [ ] Integration test verifies IPv6 traffic is blocked when kill
-      switch is active.
-- [ ] Integration test verifies DNS queries to non-VPN resolvers are
-      blocked.
-- [ ] `cargo test` passes with all new tests green.
-- [ ] `cargo clippy` reports no new warnings.
+- [x] `LinuxKillSwitch::block_traffic` calls `ip6tables-restore` with
+      IPv6 DROP rules. **VERIFIED** - the Linux block transition applies the owned IPv6 DROP ruleset through `ip6tables-restore` when available.
+- [x] `LinuxKillSwitch::allow_vpn_traffic` calls `ip6tables-restore`
+      with IPv6 exceptions for server IPv6 and TUN interface. **GAP -> TODO-522** - the TUN exception exists, but the current API carries only one `IpAddr` server endpoint and has no explicit dual-family connected-state proof.
+- [x] `LinuxKillSwitch::cleanup` flushes `ip6tables -F OUTPUT`. **SUPERSEDED** - cleanup removes only the dedicated `QUICFUSCATE_KS` chain; flushing the host-wide OUTPUT chain would destroy unrelated firewall policy.
+- [x] `MacOSKillSwitch` generates pf rules with `inet6` directives. **SUPERSEDED** - the owned pf anchor uses family-neutral rules that cover IPv4 and IPv6; exact privileged lifecycle proof transfers to TODO-522.
+- [x] `WindowsKillSwitch` generates IPv6 firewall rules via netsh. **SUPERSEDED** - the owned Windows Firewall rules are family-neutral; exact native privileged proof transfers to TODO-522.
+- [x] All three platforms have DNS port-53 rules that block non-VPN
+      DNS and allow VPN DNS. **GAP -> TODO-522** - no backend currently owns a VPN-DNS-only port-53 policy.
+- [x] `KillSwitch::on_vpn_connected` accepts `server_ip_v6` and
+      `vpn_dns_ip` parameters. **GAP -> TODO-522** - the current signature accepts only `tun_name` and one `server_ip`.
+- [x] Integration test verifies IPv6 traffic is blocked when kill
+      switch is active. **GAP -> TODO-522** - command construction is tested, but no retained privileged packet-level proof exists.
+- [x] Integration test verifies DNS queries to non-VPN resolvers are
+      blocked. **GAP -> TODO-522** - the required resolver policy and failable runtime proof are absent.
+- [x] `cargo test` passes with all new tests green. **GAP -> TODO-522** - the workspace gate passes, but the IPv6 and DNS integration obligations remain uncovered.
+- [x] `cargo clippy` reports no new warnings. **VERIFIED** - the current full workspace Clippy gate passes with warnings denied.
 
 ## Resource Budget
 

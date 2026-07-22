@@ -531,25 +531,25 @@ bursts (cwnd worth of packets at once), which can cause bufferbloat. The
 
 ## Completion Criteria
 
-- [ ] `set_cc_algorithm_name("cubic")` succeeds and sets `Cubic` algorithm.
-- [ ] `cc_algorithm()` returns `Cubic` after setting.
-- [ ] CUBIC slow start: cwnd grows by acked_bytes per ACK until ssthresh.
-- [ ] CUBIC loss response: cwnd reduces by factor 0.7 (beta); `w_max` captures
-      pre-loss cwnd; `ssthresh = new_cwnd`; exits slow start.
-- [ ] CUBIC window function: `W(t) = C(t-K)^3 + W_max` computed correctly
-      (verified against known test vectors from RFC 9438).
-- [ ] TCP friendliness: in concave region, CUBIC cwnd ≥ TCP Reno estimate.
-- [ ] Fast convergence: on consecutive losses with `w_max < w_last_max`,
-      `w_max` is reduced further.
-- [ ] Hybrid slow start: exits slow start when RTT increases > 8%.
-- [ ] Minimum window: cwnd never goes below 2 * MSS.
-- [ ] `pacing_rate()` returns `None` (CUBIC has no built-in pacing).
-- [ ] CUBIC + Reno fairness: Jain's fairness index > 0.8 on shared bottleneck.
-- [ ] CUBIC under 5% random loss: throughput > 50% of loss-free throughput.
-- [ ] `StealthShaper<Cubic>` works (stealth shaping wraps CUBIC correctly).
-- [ ] `set_stealth_mode(true, profile)` wraps CUBIC in `StealthCubic`.
-- [ ] No regression in BBR2/BBR3/Reno tests.
-- [ ] Unit tests for all CUBIC algorithm paths (slow start, loss, K, W(t),
-      TCP friendliness, fast convergence, HyStart, minimum window).
-- [ ] K calculation precision: < 1e-6 relative error.
-- [ ] Memory overhead vs Reno: < 200 bytes extra.
+- [x] `set_cc_algorithm_name("cubic")` succeeds and sets `Cubic` algorithm. **VERIFIED** - config dispatch and its unit test cover the exact name.
+- [x] `cc_algorithm()` returns `Cubic` after setting. **VERIFIED** - the config unit asserts the returned enum variant.
+- [x] CUBIC slow start: cwnd grows by acked_bytes per ACK until ssthresh. **VERIFIED** - implementation and boundary units cover growth and clamp at ssthresh.
+- [x] CUBIC loss response: cwnd reduces by factor 0.7 (beta); `w_max` captures
+      pre-loss cwnd; `ssthresh = new_cwnd`; exits slow start. **VERIFIED** - direct loss units assert beta, window capture, and the congestion-avoidance boundary.
+- [x] CUBIC window function: `W(t) = C(t-K)^3 + W_max` computed correctly
+      (verified against known test vectors from RFC 9438). **GAP -> TODO-535** - internal shape tests exist, but no independent RFC vector proof exists.
+- [x] TCP friendliness: in concave region, CUBIC cwnd >= TCP Reno estimate. **VERIFIED** - target selection takes the maximum and units cover the TCP estimate and congestion-avoidance growth.
+- [x] Fast convergence: on consecutive losses with `w_max < w_last_max`,
+      `w_max` is reduced further. **VERIFIED** - the fast-convergence branch and exact expected value have a unit.
+- [x] Hybrid slow start: exits slow start when RTT increases > 8%. **VERIFIED** - `hystart_exits_slow_start_on_rtt_increase` exercises the threshold path.
+- [x] Minimum window: cwnd never goes below 2 * MSS. **VERIFIED** - loss and direct setter paths clamp to two MSS and the repeated-loss unit proves it.
+- [x] `pacing_rate()` returns `None` (CUBIC has no built-in pacing). **SUPERSEDED** - canonical QuicFuscate recovery expects an explicit pacing rate; CUBIC now derives cwnd/RTT and tests it.
+- [x] CUBIC + Reno fairness: Jain's fairness index > 0.8 on shared bottleneck. **GAP -> TODO-535** - no shared-bottleneck experiment exists.
+- [x] CUBIC under 5% random loss: throughput > 50% of loss-free throughput. **GAP -> TODO-535** - no real loss comparison exists.
+- [x] `StealthShaper<Cubic>` works (stealth shaping wraps CUBIC correctly). **VERIFIED** - enum dispatch includes `StealthCubic` through the generic shaper.
+- [x] `set_stealth_mode(true, profile)` wraps CUBIC in `StealthCubic`. **VERIFIED** - recovery has the explicit conversion arm and dispatch coverage.
+- [x] No regression in BBR2/BBR3/Reno tests. **VERIFIED** - the current full Rust suite remains green after CUBIC integration.
+- [x] Unit tests for all CUBIC algorithm paths (slow start, loss, K, W(t),
+      TCP friendliness, fast convergence, HyStart, minimum window). **VERIFIED** - `cubic.rs` contains failable units for every named path.
+- [x] K calculation precision: < 1e-6 relative error. **GAP -> TODO-535** - the current unit uses a 0.001 absolute tolerance.
+- [x] Memory overhead vs Reno: < 200 bytes extra. **GAP -> TODO-535** - no size assertion or measurement exists.

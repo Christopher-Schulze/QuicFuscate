@@ -4,10 +4,11 @@ title: "Update stale test counts in retired local worklog and todo.md"
 severity: "MODERATE"
 phase: legacy
 priority: legacy
-status: DEFERRED
+status: SCRAP
 created: 2026-03-27
 backfilled: 2026-07-23
 defer_reason: "Local worklog files were removed; docs/todo.md is the active task truth."
+resolved: 2026-07-22
 ---
 
 # TODO-356: Update stale test counts in retired local worklog and todo.md
@@ -24,3 +25,7 @@ defer_reason: "Local worklog files were removed; docs/todo.md is the active task
 
 ## Files to Modify
 - docs/todo.md
+
+## Resolution
+
+Scrapped during TODO-521 reconciliation. Exact test totals are volatile gate output, not durable task truth, and the retired worklog must not be recreated. Current gates report their own counts.

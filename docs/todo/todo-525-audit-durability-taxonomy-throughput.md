@@ -1,0 +1,43 @@
+---
+id: TODO-525
+title: Complete audit durability, taxonomy, and throughput contract
+severity: CRITICAL
+phase: S
+priority: P0
+status: OPEN
+created: 2026-07-22
+depends_on: [TODO-439, TODO-515, TODO-521]
+---
+
+# TODO-525: Complete Audit Durability, Taxonomy, and Throughput Contract
+
+## Why
+
+The retained audit log is append-only NDJSON with file permissions, a hash chain, a production verification CLI, and real authentication, connection, admin, and firewall events. Its caller still performs synchronous mutex-protected write plus flush, the file grows without bound, tail deletion cannot be proven without an external checkpoint, and the event taxonomy omits required security outcomes.
+
+## Acceptance
+
+- Move serialization, hash chaining, file I/O, and durability flushes behind one bounded worker with non-blocking producers and an explicit dropped-event counter.
+- Preserve total event order and chain integrity under concurrent producers, shutdown, I/O failure, queue saturation, and process restart.
+- Add configurable bounded rotation and retention with verifiable chain continuity across every retained segment; do not silently delete the only proof anchor.
+- Extend verification to ordered segment sets, mutation, interior deletion, reordering, truncation, and tail-deletion detection through a durable checkpoint contract.
+- Complete typed auth, QKey, connection, admin, config, firewall/routing, privilege, and system event coverage with actor, target, outcome, and reason fields where applicable.
+- Sustain 10,000 accepted events per second without producer-side file I/O or unbounded memory growth, with deterministic saturation and shutdown tests.
+- Keep RFC 5424 and CEF transport outside the process; document canonical NDJSON collector integration instead.
+- Pass full local Rust gates, relevant native CI, live Omega lifecycle proof, documentation/MAP/TODO truth, and preserve protected UI files.
+
+## Sub-Tasks
+
+- [ ] Define the ordered queue, flush, failure, checkpoint, and shutdown contracts before editing.
+- [ ] Implement bounded asynchronous persistence and rotation without parallel audit owners.
+- [ ] Complete event taxonomy and runtime call sites.
+- [ ] Add integrity, saturation, failure, restart, rotation, and throughput gates.
+- [ ] Execute local, native, and Omega evidence and flush documentation.
+
+## Notes
+
+- Created from TODO-439 reconciliation. Syslog and CEF conversion remain external collector responsibilities.
+
+## Deviations
+
+None.

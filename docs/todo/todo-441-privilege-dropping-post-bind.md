@@ -367,21 +367,21 @@ This order ensures that each step has the permissions needed for the next.
 
 ## Completion Criteria
 
-- [ ] `CapabilityChecker::check()` detects root/non-root, Linux capabilities, and target user existence at startup
-- [ ] `drop_privileges()` performs setgid → setuid → capability drop in correct order
-- [ ] Supplementary groups are cleared before setgid
-- [ ] `PR_SET_NO_NEW_PRIVS` is set to prevent future privilege escalation
-- [ ] All capabilities are cleared from effective, permitted, and inheritable sets
-- [ ] Post-drop verification: `getuid() != 0`, `geteuid() != 0`
-- [ ] Server startup is restructured: privileged init → drop → unprivileged run
-- [ ] TUN fd and UDP socket remain valid after privilege drop
-- [ ] Server accepts connections and processes traffic normally after privilege drop
-- [ ] `quicfuscate capabilities` subcommand shows runtime capability report (not just compile-time features)
-- [ ] `--drop-privileges` / `--drop-user` / `--drop-uid` / `--drop-gid` CLI flags work
-- [ ] `--chroot` option creates chroot jail after privilege drop
-- [ ] macOS sandbox profile support via `--sandbox-profile`
-- [ ] All firewall/routing/TUN setup happens BEFORE privilege drop
-- [ ] Audit event logged on privilege drop (TODO-439)
-- [ ] Clear error messages when required capabilities are missing
-- [ ] Documentation: setup guide for creating `quicfuscate` user, `setcap` instructions
-- [ ] All unit, integration, and E2E tests pass
+- [x] `CapabilityChecker::check()` detects root/non-root, Linux capabilities, and target user existence at startup. **GAP -> TODO-527** - `check_capabilities()` reads effective network capabilities but does not report UID/GID or target-user existence.
+- [x] `drop_privileges()` performs setgid -> setuid -> capability drop in correct order. **GAP -> TODO-527** - setgid precedes setuid, but no explicit capability-clearing boundary exists.
+- [x] Supplementary groups are cleared before setgid. **GAP -> TODO-527** - `setgroups([])` is absent.
+- [x] `PR_SET_NO_NEW_PRIVS` is set to prevent future privilege escalation. **GAP -> TODO-527** - no `prctl` call exists.
+- [x] All capabilities are cleared from effective, permitted, and inheritable sets. **GAP -> TODO-527** - the process relies on setuid semantics without verifying every capability set.
+- [x] Post-drop verification: `getuid() != 0`, `geteuid() != 0`. **GAP -> TODO-527** - only effective UID is checked; real UID, GID, supplementary groups, and capability state are not verified.
+- [x] Server startup is restructured: privileged init -> drop -> unprivileged run. **VERIFIED** - transport, TUN, routing, and launch preparation complete before the drop boundary and run loop.
+- [x] TUN fd and UDP socket remain valid after privilege drop. **GAP -> TODO-527** - source ordering is correct, but no privileged runtime proof exercises both descriptors after the drop.
+- [x] Server accepts connections and processes traffic normally after privilege drop. **GAP -> TODO-527** - no retained root-start to unprivileged data-plane E2E exists.
+- [x] `quicfuscate capabilities` subcommand shows runtime capability report (not just compile-time features). **GAP -> TODO-527** - it still reports compile-time benchmark features only.
+- [x] `--drop-privileges` / `--drop-user` / `--drop-uid` / `--drop-gid` CLI flags work. **GAP -> TODO-527** - only the inverse `--no-drop-privileges` switch exists and the target identity is hard-coded.
+- [x] `--chroot` option creates chroot jail after privilege drop. **NON-GOAL** - filesystem confinement is delegated to the service manager; the process contract remains capability and UID/GID reduction.
+- [x] macOS sandbox profile support via `--sandbox-profile`. **NON-GOAL** - macOS confinement is delegated to launchd and platform policy rather than an application-owned deprecated sandbox profile API.
+- [x] All firewall/routing/TUN setup happens BEFORE privilege drop. **VERIFIED** - `ServerRuntime::new_initialized_standalone_default()` completes the privileged setup before `drop_privileges()`.
+- [x] Audit event logged on privilege drop (TODO-439). **VERIFIED** - success and failure emit distinct audit events.
+- [x] Clear error messages when required capabilities are missing. **GAP -> TODO-527** - runtime capability requirements are not preflighted before privileged initialization.
+- [x] Documentation: setup guide for creating `quicfuscate` user, `setcap` instructions. **VERIFIED** - canonical deployment documentation covers the service user and ambient capability setup.
+- [x] All unit, integration, and E2E tests pass. **GAP -> TODO-527** - helper units pass, but the destructive privilege boundary and post-drop live traffic have no failable integration proof.

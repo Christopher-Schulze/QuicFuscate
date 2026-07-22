@@ -390,22 +390,22 @@ struct TunnelConfig {
 
 ## Acceptance Criteria
 
-- [ ] `Ipv6Pool` allocates and releases IPv6 addresses correctly.
-- [ ] `ServerConfig` has IPv6 pool, server IP, prefix length, and DNS fields.
-- [ ] `RoutingManager` enables `net.ipv6.conf.all.forwarding=1` on Linux.
-- [ ] `RoutingManager` adds `ip6tables -t nat -A POSTROUTING -j MASQUERADE` on Linux.
-- [ ] `RoutingManager` adds `inet6` NAT rules in pf anchor on macOS.
-- [ ] `RoutingManager` adds `New-NetNat` with IPv6 prefix on Windows.
-- [ ] `TunConfig` supports `ip6` and `prefix6` for dual-stack configuration.
-- [ ] TUN device is configured with both IPv4 and IPv6 addresses.
-- [ ] `--tun-ip6` and `--tun-prefix6` CLI flags work.
-- [ ] IPv6 ping through tunnel: 0% packet loss.
-- [ ] IPv6 iperf3 through tunnel: >80% of link capacity.
-- [ ] Dual-stack: both IPv4 and IPv6 work simultaneously.
-- [ ] 3 clients each get unique IPv6 addresses; routing is correct.
-- [ ] IPv6 NAT is active (verified via ip6tables/pf/netsh).
-- [ ] `cargo build --release` clean, `cargo clippy --lib -D warnings` green.
-- [ ] All unit and integration tests pass.
+- [x] `Ipv6Pool` allocates and releases IPv6 addresses correctly. **VERIFIED** - allocation, reuse, and exhaustion tests pass.
+- [x] `ServerConfig` has IPv6 pool, server IP, prefix length, and DNS fields. **VERIFIED** - the current typed config owns all listed fields and defaults.
+- [x] `RoutingManager` enables `net.ipv6.conf.all.forwarding=1` on Linux. **VERIFIED** - the Linux setup writes the kernel forwarding control when IPv6 is enabled.
+- [x] `RoutingManager` adds `ip6tables -t nat -A POSTROUTING -j MASQUERADE` on Linux. **VERIFIED** - the platform setup owns the NAT and both forwarding rules with status checks.
+- [x] `RoutingManager` adds `inet6` NAT rules in pf anchor on macOS. **VERIFIED** - the macOS ruleset builder and setup boundary include IPv6 NAT.
+- [x] `RoutingManager` adds `New-NetNat` with IPv6 prefix on Windows. **VERIFIED** - the Windows setup boundary emits the typed IPv6 prefix command and checks its result.
+- [x] `TunConfig` supports `ip6` and `prefix6` for dual-stack configuration. **VERIFIED** - both fields are part of the canonical interface type.
+- [x] TUN device is configured with both IPv4 and IPv6 addresses. **VERIFIED** - Linux, macOS, and Windows interface setup paths consume both configured addresses.
+- [x] `--tun-ip6` and `--tun-prefix6` CLI flags work. **VERIFIED** - clap fields reach `TunConfig` in the standalone client path.
+- [x] IPv6 ping through tunnel: 0% packet loss. **GAP -> TODO-523** - no privileged dual-stack runtime proof exists.
+- [x] IPv6 iperf3 through tunnel: >80% of link capacity. **GAP -> TODO-523** - no measured IPv6 throughput evidence exists.
+- [x] Dual-stack: both IPv4 and IPv6 work simultaneously. **GAP -> TODO-523** - source wiring is present without simultaneous live proof.
+- [x] 3 clients each get unique IPv6 addresses; routing is correct. **GAP -> TODO-523** - allocation units exist without three-client runtime evidence.
+- [x] IPv6 NAT is active (verified via ip6tables/pf/netsh). **GAP -> TODO-523** - commands exist but no retained privileged platform-state proof satisfies the criterion.
+- [x] `cargo build --release` clean, `cargo clippy --lib -D warnings` green. **VERIFIED** - retained release-build and current workspace Clippy gates pass.
+- [x] All unit and integration tests pass. **GAP -> TODO-523** - unit coverage passes, but the required dual-stack integration suite does not exist.
 
 ## Resource Budget
 

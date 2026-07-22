@@ -268,27 +268,27 @@ module), `tests/auth_rate_limit_test.rs` (new)
 
 ## Acceptance Criteria
 
-- [ ] `AuthRateLimiter` struct exists in `limits.rs` with
-      `check_attempt`, `record_result`, and `prune_idle` methods.
-- [ ] `AuthFailureTracker` implements exponential backoff (1s, 2s, 4s,
-      8s, 16s, 32s, 60s cap).
-- [ ] Default config: 10 attempts/min, block after 5 consecutive
-      failures, 60s block duration, 15min idle prune.
-- [ ] `QUICFUSCATE_AUTH_RATE_LIMIT_PER_MIN` env var overrides the
-      per-minute attempt limit.
-- [ ] QKey auth check path in `mod.rs` calls `check_attempt` before
-      `token_matches_hash` and `record_result` after.
-- [ ] Rate-limited and blocked connections are closed with distinct
-      reasons (`b"auth_rate_limited"`, `b"auth_blocked"`).
-- [ ] Idle tracker entries are pruned periodically.
-- [ ] Instrumentation counters increment on rate-limit and block
-      events.
-- [ ] Test: 100 rapid auth attempts from one IP → first 10 allowed,
-      rest rate-limited, IP blocked after 5 consecutive failures.
-- [ ] Test: a second IP is unaffected by the first IP's failures.
-- [ ] Test: IP is unblocked after `block_duration` elapses.
-- [ ] `cargo test` passes with all new tests green.
-- [ ] `cargo clippy` reports no new warnings.
+- [x] `AuthRateLimiter` struct exists in `limits.rs` with
+      `check_attempt`, `record_result`, and `prune_idle` methods. **GAP -> TODO-538** - a simpler failed-attempt window exists with `is_allowed`, `record_failure`, `clear`, and `prune_expired`, not the required stateful contract.
+- [x] `AuthFailureTracker` implements exponential backoff (1s, 2s, 4s,
+      8s, 16s, 32s, 60s cap). **GAP -> TODO-538** - no failure tracker or backoff exists.
+- [x] Default config: 10 attempts/min, block after 5 consecutive
+      failures, 60s block duration, 15min idle prune. **GAP -> TODO-538** - only ten failures per 60-second window is hard-coded; block threshold, block duration, and 15-minute idle policy are absent.
+- [x] `QUICFUSCATE_AUTH_RATE_LIMIT_PER_MIN` env var overrides the
+      per-minute attempt limit. **GAP -> TODO-538** - the live limiter is constructed with literals.
+- [x] QKey auth check path in `mod.rs` calls `check_attempt` before
+      `token_matches_hash` and `record_result` after. **VERIFIED** - the runtime checks `is_allowed` before QKey lookup, records failure on rejection, and clears state after successful initial auth.
+- [x] Rate-limited and blocked connections are closed with distinct
+      reasons (`b"auth_rate_limited"`, `b"auth_blocked"`). **GAP -> TODO-538** - pre-connection rejection has no distinct block state or close reason.
+- [x] Idle tracker entries are pruned periodically. **GAP -> TODO-538** - `prune_expired()` exists but has no production caller.
+- [x] Instrumentation counters increment on rate-limit and block
+      events. **GAP -> TODO-538** - generic rejection metrics exist, but distinct auth rate/block counters do not.
+- [x] Test: 100 rapid auth attempts from one IP -> first 10 allowed,
+      rest rate-limited, IP blocked after 5 consecutive failures. **GAP -> TODO-538** - units cover a small threshold only and no block state exists.
+- [x] Test: a second IP is unaffected by the first IP's failures. **VERIFIED** - `test_auth_rate_limiter_ips_are_isolated` covers the invariant.
+- [x] Test: IP is unblocked after `block_duration` elapses. **SUPERSEDED** - current sliding-window limiter permits attempts after expiry; TODO-538 must add and prove the explicit block-plus-backoff lifecycle.
+- [x] `cargo test` passes with all new tests green. **VERIFIED** - the current full Rust suite passes.
+- [x] `cargo clippy` reports no new warnings. **VERIFIED** - the current denied-warning Clippy gate passes.
 
 ## Resource Budget
 

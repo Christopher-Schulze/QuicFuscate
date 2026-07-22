@@ -4,9 +4,10 @@ title: FEC encoder/decoder mutex contention
 severity: MEDIUM
 phase: B
 priority: P2
-status: DEFERRED
+status: SCRAP
 superseded_by: TODO-417
 created: 2026-06-05
+resolved: 2026-07-22
 ---
 
 # TODO-397: FEC Mutex Contention Reduction

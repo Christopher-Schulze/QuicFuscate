@@ -961,6 +961,109 @@ mod tests {
             assert_eq!(&buf[..pt.len()], pt);
         }
     }
+
+    #[test]
+    fn tls_cover_same_material_reinstall_preserves_counters() {
+        let mut crypto = CryptoContext::default();
+        let key = [0x11u8; 32];
+        let iv = [0x22u8; 12];
+        let material = TlsCoverKeyMaterial::ChaCha20Poly1305 { key: &key, iv: &iv };
+        assert_eq!(
+            crypto.install_tls_cover_cipher(material),
+            Ok(TlsCoverInstallOutcome::Installed)
+        );
+
+        let plaintext = b"partial-session";
+        let aad = b"tls-cover-aad";
+        let mut ciphertext = crypto.encrypt_tls_cover_record(aad, plaintext).expect("seal");
+        crypto.decrypt_tls_cover_record(aad, &mut ciphertext).expect("open");
+        assert_eq!((crypto.tls_cover_write_seq, crypto.tls_cover_read_seq), (1, 1));
+
+        assert_eq!(
+            crypto.install_tls_cover_cipher(material),
+            Ok(TlsCoverInstallOutcome::Unchanged)
+        );
+        assert_eq!((crypto.tls_cover_write_seq, crypto.tls_cover_read_seq), (1, 1));
+    }
+
+    #[test]
+    fn tls_cover_fresh_material_rotation_resets_state_and_retires_old_material() {
+        let mut crypto = CryptoContext::default();
+        let chacha_key = [0x31u8; 32];
+        let aes_key = [0x42u8; 16];
+        let first_iv = [0x53u8; 12];
+        let second_iv = [0x64u8; 12];
+        let first = TlsCoverKeyMaterial::ChaCha20Poly1305 { key: &chacha_key, iv: &first_iv };
+        let second = TlsCoverKeyMaterial::Aes128Gcm { key: &aes_key, iv: &second_iv };
+        crypto.install_tls_cover_cipher(first).expect("initial install");
+        crypto.encrypt_tls_cover_record(b"aad", b"record").expect("partial use");
+
+        assert_eq!(crypto.install_tls_cover_cipher(second), Ok(TlsCoverInstallOutcome::Installed));
+        assert_eq!(crypto.tls_cover_cipher_kind(), Some(TlsCoverCipherKind::Aes128Gcm));
+        assert_eq!((crypto.tls_cover_write_seq, crypto.tls_cover_read_seq), (0, 0));
+        assert_eq!(crypto.retired_tls_cover_identities.len(), 1);
+        assert_eq!(crypto.install_tls_cover_cipher(first), Err(ConnectionError::KeyUpdateError));
+    }
+
+    #[test]
+    fn tls_cover_repeated_rotation_never_reactivates_retired_material() {
+        let mut crypto = CryptoContext::default();
+        let key_a = [0x71u8; 32];
+        let key_b = [0x72u8; 16];
+        let key_c = [0x73u8; 32];
+        let iv_a = [0x81u8; 12];
+        let iv_b = [0x82u8; 12];
+        let iv_c = [0x83u8; 12];
+        let material_a = TlsCoverKeyMaterial::ChaCha20Poly1305 { key: &key_a, iv: &iv_a };
+        let material_b = TlsCoverKeyMaterial::Aes128Gcm { key: &key_b, iv: &iv_b };
+        let material_c = TlsCoverKeyMaterial::ChaCha20Poly1305 { key: &key_c, iv: &iv_c };
+
+        crypto.install_tls_cover_cipher(material_a).expect("install A");
+        crypto.install_tls_cover_cipher(material_b).expect("rotate to B");
+        crypto.install_tls_cover_cipher(material_c).expect("rotate to C");
+        assert_eq!(crypto.retired_tls_cover_identities.len(), 2);
+        assert_eq!(
+            crypto.install_tls_cover_cipher(material_a),
+            Err(ConnectionError::KeyUpdateError)
+        );
+        assert_eq!(
+            crypto.install_tls_cover_cipher(material_b),
+            Err(ConnectionError::KeyUpdateError)
+        );
+        assert_eq!(
+            crypto.install_tls_cover_cipher(material_c),
+            Ok(TlsCoverInstallOutcome::Unchanged)
+        );
+
+        let mut reconnect = CryptoContext::default();
+        assert_eq!(
+            reconnect.install_tls_cover_cipher(material_a),
+            Ok(TlsCoverInstallOutcome::Installed),
+            "a fresh connection owns an independent sequence space"
+        );
+    }
+
+    #[test]
+    fn tls_cover_sequence_exhaustion_fails_closed() {
+        let mut crypto = CryptoContext::default();
+        let key = [0x91u8; 32];
+        let iv = [0x92u8; 12];
+        crypto
+            .install_tls_cover_cipher(TlsCoverKeyMaterial::ChaCha20Poly1305 { key: &key, iv: &iv })
+            .expect("install");
+
+        crypto.tls_cover_write_seq = u64::MAX;
+        assert_eq!(
+            crypto.encrypt_tls_cover_record(b"aad", b"record"),
+            Err(ConnectionError::AeadLimitReached)
+        );
+        crypto.tls_cover_read_seq = u64::MAX;
+        let mut ciphertext = [0u8; 16];
+        assert_eq!(
+            crypto.decrypt_tls_cover_record(b"aad", &mut ciphertext),
+            Err(ConnectionError::AeadLimitReached)
+        );
+    }
 }
 
 /// Applies header protection to an outgoing packet (masks first byte and PN).
@@ -1469,6 +1572,63 @@ pub enum TlsCoverCipherKind {
     Aes128Gcm,
 }
 
+/// Borrowed TLS Cover key material accepted by the single installation contract.
+///
+/// Reinstalling the active material is an idempotent no-op that preserves record
+/// sequence numbers. Installing fresh material retires the previous identity and
+/// resets both directions. A retired identity cannot be installed again in the
+/// same context, which prevents nonce reuse after profile or cipher rotation.
+#[derive(Clone, Copy)]
+pub enum TlsCoverKeyMaterial<'a> {
+    /// ChaCha20-Poly1305 with a 256-bit key and 96-bit base IV.
+    ChaCha20Poly1305 { key: &'a [u8; 32], iv: &'a [u8; 12] },
+    /// AES-128-GCM with a 128-bit key and 96-bit base IV.
+    Aes128Gcm { key: &'a [u8; 16], iv: &'a [u8; 12] },
+}
+
+impl TlsCoverKeyMaterial<'_> {
+    fn identity(self) -> [u8; 32] {
+        let mut encoded = [0u8; 45];
+        let encoded_len = match self {
+            Self::ChaCha20Poly1305 { key, iv } => {
+                encoded[0] = 1;
+                encoded[1..33].copy_from_slice(key);
+                encoded[33..45].copy_from_slice(iv);
+                45
+            }
+            Self::Aes128Gcm { key, iv } => {
+                encoded[0] = 2;
+                encoded[1..17].copy_from_slice(key);
+                encoded[17..29].copy_from_slice(iv);
+                29
+            }
+        };
+        crate::crypto::hkdf::sha256(&encoded[..encoded_len])
+    }
+
+    fn cipher_pair(self) -> (TlsCoverCipher, TlsCoverCipher) {
+        match self {
+            Self::ChaCha20Poly1305 { key, iv } => (
+                TlsCoverCipher::ChaCha(ChaCha20Poly1305::new(key, iv)),
+                TlsCoverCipher::ChaCha(ChaCha20Poly1305::new(key, iv)),
+            ),
+            Self::Aes128Gcm { key, iv } => (
+                TlsCoverCipher::AesGcm(AesGcm128::new(key, iv)),
+                TlsCoverCipher::AesGcm(AesGcm128::new(key, iv)),
+            ),
+        }
+    }
+}
+
+/// Result of a TLS Cover key installation request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TlsCoverInstallOutcome {
+    /// Fresh key material replaced the active cipher pair.
+    Installed,
+    /// The exact active key material was already installed; counters were preserved.
+    Unchanged,
+}
+
 pub(crate) enum TlsCoverCipher {
     ChaCha(ChaCha20Poly1305),
     AesGcm(AesGcm128),
@@ -1594,6 +1754,8 @@ pub struct CryptoContext {
     previous_read_1rtt: VecDeque<PreviousRead1RttKey>,
     seal_tls_cover: Option<TlsCoverCipher>,
     open_tls_cover: Option<TlsCoverCipher>,
+    active_tls_cover_identity: Option<[u8; 32]>,
+    retired_tls_cover_identities: Vec<[u8; 32]>,
     /// TLS Cover write sequence number.
     pub tls_cover_write_seq: u64,
     /// TLS Cover read sequence number.
@@ -1629,20 +1791,28 @@ impl CryptoContext {
         self.zero_rtt_enabled = enabled;
     }
 
-    /// Install ChaCha20-Poly1305 specifically for TLS Cover traffic.
-    pub fn install_tls_cover_chacha(&mut self, key: &[u8; 32], iv: &[u8; 12]) {
-        self.seal_tls_cover = Some(TlsCoverCipher::ChaCha(ChaCha20Poly1305::new(key, iv)));
-        self.open_tls_cover = Some(TlsCoverCipher::ChaCha(ChaCha20Poly1305::new(key, iv)));
-        self.tls_cover_write_seq = 0;
-        self.tls_cover_read_seq = 0;
-    }
+    /// Install or rotate the TLS Cover cipher without permitting counter reuse.
+    pub fn install_tls_cover_cipher(
+        &mut self,
+        material: TlsCoverKeyMaterial<'_>,
+    ) -> Result<TlsCoverInstallOutcome, ConnectionError> {
+        let identity = material.identity();
+        if self.active_tls_cover_identity == Some(identity) {
+            return Ok(TlsCoverInstallOutcome::Unchanged);
+        }
+        if self.retired_tls_cover_identities.contains(&identity) {
+            return Err(ConnectionError::KeyUpdateError);
+        }
 
-    /// Install AES-128-GCM specifically for TLS Cover traffic.
-    pub fn install_tls_cover_aes_gcm(&mut self, key: &[u8; 16], iv: &[u8; 12]) {
-        self.seal_tls_cover = Some(TlsCoverCipher::AesGcm(AesGcm128::new(key, iv)));
-        self.open_tls_cover = Some(TlsCoverCipher::AesGcm(AesGcm128::new(key, iv)));
+        let (seal, open) = material.cipher_pair();
+        if let Some(active_identity) = self.active_tls_cover_identity.replace(identity) {
+            self.retired_tls_cover_identities.push(active_identity);
+        }
+        self.seal_tls_cover = Some(seal);
+        self.open_tls_cover = Some(open);
         self.tls_cover_write_seq = 0;
         self.tls_cover_read_seq = 0;
+        Ok(TlsCoverInstallOutcome::Installed)
     }
 
     #[inline]
@@ -1663,7 +1833,7 @@ impl CryptoContext {
             .ok_or(ConnectionError::CryptoError("crypto failure".into()))?;
 
         let seq = self.tls_cover_write_seq;
-        self.tls_cover_write_seq = self.tls_cover_write_seq.wrapping_add(1);
+        self.tls_cover_write_seq = seq.checked_add(1).ok_or(ConnectionError::AeadLimitReached)?;
 
         let mut buffer = Vec::with_capacity(plaintext.len() + 16);
         buffer.extend_from_slice(plaintext);
@@ -1695,7 +1865,7 @@ impl CryptoContext {
             .ok_or(ConnectionError::CryptoError("crypto failure".into()))?;
 
         let seq = self.tls_cover_read_seq;
-        self.tls_cover_read_seq = self.tls_cover_read_seq.wrapping_add(1);
+        self.tls_cover_read_seq = seq.checked_add(1).ok_or(ConnectionError::AeadLimitReached)?;
 
         cipher.open(seq, aad, ciphertext).inspect_err(|_| telemetry::FAKETLS_CIPHER_FAILURES.inc())
     }

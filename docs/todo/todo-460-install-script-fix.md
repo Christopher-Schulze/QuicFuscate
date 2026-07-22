@@ -277,28 +277,28 @@ test harness.
 
 ## Acceptance Criteria
 
-- [ ] `ensure_group "quicfuscate"` creates a system group named
-      `quicfuscate` via `groupadd` or `addgroup`.
-- [ ] `ensure_user "quicfuscate"` creates a system user with primary group
+- [x] `ensure_group "quicfuscate"` creates a system group named
+      `quicfuscate` via `groupadd` or `addgroup`. **VERIFIED** - both guarded branches are implemented and syntax validation passes.
+- [x] `ensure_user "quicfuscate"` creates a system user with primary group
       `quicfuscate`, home `/var/lib/quicfuscate`, shell `/usr/sbin/nologin`,
-      no home directory creation — on both `useradd` and `adduser` distros.
-- [ ] Re-running the installer does not error when the user/group already
-      exist.
-- [ ] `/var/lib/quicfuscate` is created with mode `0700`, owner
-      `quicfuscate:quicfuscate`.
-- [ ] `/etc/quicfuscate` is created with mode `0750`, owner
-      `root:quicfuscate`.
-- [ ] `/var/log/quicfuscate` is created with mode `0750`, owner
-      `quicfuscate:quicfuscate`.
-- [ ] `validate_prerequisites` aborts the install with a clear message when
-      `iptables` or `ip` is missing.
-- [ ] The default config is copied and (when `python3` is available)
-      validated as parseable TOML.
-- [ ] After `systemctl enable --now`, the script verifies the service is
-      `active` and prints the journal on failure.
-- [ ] Fresh-install test passes on a clean container (Debian + RHEL).
-- [ ] Idempotent re-run test passes.
-- [ ] Missing-prerequisite test exits non-zero with an actionable message.
+      no home directory creation - on both `useradd` and `adduser` distros. **VERIFIED** - both command signatures set the required identity, group, home, shell, and no-create behavior.
+- [x] Re-running the installer does not error when the user/group already
+      exist. **GAP -> TODO-541** - source guards exist, but no privileged idempotent rerun proof exists.
+- [x] `/var/lib/quicfuscate` is created with mode `0700`, owner
+      `quicfuscate:quicfuscate`. **VERIFIED** - installer applies exact owner and mode.
+- [x] `/etc/quicfuscate` is created with mode `0750`, owner
+      `root:quicfuscate`. **VERIFIED** - installer applies exact owner and mode.
+- [x] `/var/log/quicfuscate` is created with mode `0750`, owner
+      `quicfuscate:quicfuscate`. **VERIFIED** - installer applies exact owner and mode.
+- [x] `validate_prerequisites` aborts the install with a clear message when
+      `iptables` or `ip` is missing. **VERIFIED** - validation runs before installation mutations and reports distro-specific remediation.
+- [x] The default config is copied and (when `python3` is available)
+      validated as parseable TOML. **VERIFIED** - copy-if-absent and `tomllib` validation are wired.
+- [x] After `systemctl enable --now`, the script verifies the service is
+      `active` and prints the journal on failure. **VERIFIED** - active check, status, journal, and nonzero exit are implemented.
+- [x] Fresh-install test passes on a clean container (Debian + RHEL). **GAP -> TODO-541** - no clean Debian/RHEL execution evidence exists.
+- [x] Idempotent re-run test passes. **GAP -> TODO-541** - no system-level rerun test exists.
+- [x] Missing-prerequisite test exits non-zero with an actionable message. **GAP -> TODO-541** - the branch is source-verified but lacks an executable sandbox test.
 
 ## Resource Budget
 

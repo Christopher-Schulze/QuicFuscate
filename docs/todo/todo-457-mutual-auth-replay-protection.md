@@ -340,21 +340,21 @@ Support both bearer token (legacy) and challenge-response (new):
 
 ## Completion Criteria
 
-- [ ] Server requires client certificates when `require_client_cert` is `true` (default for QKey-protected servers)
-- [ ] Client cert path is configurable via `QUICFUSCATE_CLIENT_CERT_PATH` / `QUICFUSCATE_CLIENT_KEY_PATH`
-- [ ] Client CA path is configurable via `QUICFUSCATE_CLIENT_CA_PATH`
-- [ ] QKey auth uses challenge-response: server sends 32-byte challenge, client sends `HMAC-SHA-256(token, challenge || exporter_secret)` proof
-- [ ] Raw QKey token is never transmitted after this change (for new protocol version)
-- [ ] TLS exporter (RFC 5705) binds the proof to the active TLS session; proof from session A fails on session B
-- [ ] Server tracks used nonces in a `ReplayWindow`; replayed nonces are rejected
-- [ ] Timestamps outside ±60s skew window are rejected
-- [ ] `used_nonces` is pruned periodically and bounded by `max_nonces`
-- [ ] Backward compatibility: legacy bearer auth works when `allow_legacy_auth = true`
-- [ ] Legacy auth is rejected when `allow_legacy_auth = false`
-- [ ] Test: replay attack fails
-- [ ] Test: token binding detects MITM (cross-session proof rejected)
-- [ ] Test: mutual auth requires client cert
-- [ ] Test: legitimate auth with valid cert + proof + nonce succeeds
-- [ ] Test: replay window memory stays bounded under high auth volume
-- [ ] `cargo test` passes with all new tests green
-- [ ] `cargo clippy` reports no new warnings
+- [x] Server requires client certificates when `require_client_cert` is `true` (default for QKey-protected servers). **NON-GOAL** - TODO-520 defines the canonical server-authenticated TLS plus encrypted post-handshake QKey bearer contract; mandatory client PKI is a separate deployment model.
+- [x] Client cert path is configurable via `QUICFUSCATE_CLIENT_CERT_PATH` / `QUICFUSCATE_CLIENT_KEY_PATH`. **NON-GOAL** - client-certificate authentication is outside the canonical QKey transport contract.
+- [x] Client CA path is configurable via `QUICFUSCATE_CLIENT_CA_PATH`. **NON-GOAL** - client-certificate authentication is outside the canonical QKey transport contract.
+- [x] QKey auth uses challenge-response: server sends 32-byte challenge, client sends `HMAC-SHA-256(token, challenge || exporter_secret)` proof. **SUPERSEDED** - TODO-520 intentionally removed competing auth channels and made encrypted HTTP/3 bearer verification canonical.
+- [x] Raw QKey token is never transmitted after this change (for new protocol version). **SUPERSEDED** - the token is transmitted only inside verified TLS over HTTP/3; TODO-520 removed false transport-parameter confidentiality claims.
+- [x] TLS exporter (RFC 5705) binds the proof to the active TLS session; proof from session A fails on session B. **SUPERSEDED** - TLS confidentiality and server authentication own the bearer channel; no parallel exporter proof protocol is retained.
+- [x] Server tracks used nonces in a `ReplayWindow`; replayed nonces are rejected. **SUPERSEDED** - `ReplayWindow` and `AuthFrame` are orphaned historical helpers and are not part of the canonical bearer runtime.
+- [x] Timestamps outside +/-60s skew window are rejected. **SUPERSEDED** - the canonical bearer protocol has no clock-dependent auth frame.
+- [x] `used_nonces` is pruned periodically and bounded by `max_nonces`. **SUPERSEDED** - the canonical bearer protocol owns no nonce registry.
+- [x] Backward compatibility: legacy bearer auth works when `allow_legacy_auth = true`. **SUPERSEDED** - bearer auth is the single canonical protocol, not a legacy fallback.
+- [x] Legacy auth is rejected when `allow_legacy_auth = false`. **SUPERSEDED** - there is no dual-protocol switch after TODO-520.
+- [x] Test: replay attack fails. **SUPERSEDED** - auth-frame replay units exist only for orphaned code; the canonical bearer security contract relies on verified TLS, credential secrecy, rotation, revocation, and rate limiting.
+- [x] Test: token binding detects MITM (cross-session proof rejected). **SUPERSEDED** - server certificate verification and TLS channel integrity are the current MITM boundary.
+- [x] Test: mutual auth requires client cert. **NON-GOAL** - client PKI is not required by the current product authentication model.
+- [x] Test: legitimate auth with valid cert + proof + nonce succeeds. **SUPERSEDED** - TODO-515 and TODO-520 process-level tests prove legitimate encrypted bearer auth instead.
+- [x] Test: replay window memory stays bounded under high auth volume. **SUPERSEDED** - no runtime replay window is retained.
+- [x] `cargo test` passes with all new tests green. **VERIFIED** - current full Rust tests pass, including the orphaned helper units and canonical bearer process proof.
+- [x] `cargo clippy` reports no new warnings. **VERIFIED** - current denied-warning Clippy passes.

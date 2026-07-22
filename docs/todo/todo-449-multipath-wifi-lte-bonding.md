@@ -423,26 +423,26 @@ Per-path PN spaces require per-path AEAD nonce computation. The nonce is
 
 ## Completion Criteria
 
-- [ ] Two paths (WiFi + simulated LTE via tc-netem on two loopback aliases) can
-      be active simultaneously on one connection.
-- [ ] Traffic is distributed across both paths (verifiable by per-path byte
-      counters in `Stats`).
-- [ ] When one path drops (interface removed / 100% loss), the connection
-      survives using the remaining path with no disconnect.
-- [ ] `lowest-rtt` strategy preferentially uses the lower-RTT path.
-- [ ] `weighted` strategy distributes bytes proportional to configured weights.
-- [ ] `redundant` strategy sends duplicate packets on all active paths.
-- [ ] `single-path` stealth mode sends only on primary; standby paths carry no
-      traffic; failover to standby is immediate on primary failure.
-- [ ] Per-path cwnd is independent — losing packets on one path does not reduce
-      cwnd on the other.
-- [ ] `multipath_enabled = false` preserves current single-path behavior exactly
-      (no regression in existing migration tests).
-- [ ] `initial_max_path_id` transport parameter is negotiated correctly.
-- [ ] PATH_NEW, PATH_ABANDON, PATH_STATUS, ACK_MP frames encode/decode correctly.
-- [ ] Unit tests for `PacketScheduler` strategy selection logic (all 5).
-- [ ] Unit tests for `Path` state transitions (Probing→Active→Standby→Failed).
-- [ ] Unit tests for `PathManager` add/remove/validate/promote operations.
-- [ ] Per-path nonce computation test vectors (path_id * 2^62 + pn).
-- [ ] Dual-path throughput ≥ 1.5× single-path throughput.
-- [ ] Failover latency < 100ms when standby path is pre-validated.
+- [x] Two paths (WiFi + simulated LTE via tc-netem on two loopback aliases) can
+      be active simultaneously on one connection. **GAP -> TODO-532** - `PathManager` has no production `Connection` owner or caller.
+- [x] Traffic is distributed across both paths (verifiable by per-path byte
+      counters in `Stats`). **GAP -> TODO-532** - the production send path never invokes `PathScheduler` and exposes no per-path counters.
+- [x] When one path drops (interface removed / 100% loss), the connection
+      survives using the remaining path with no disconnect. **GAP -> TODO-532** - no multipath failure detector or live failover path is wired.
+- [x] `lowest-rtt` strategy preferentially uses the lower-RTT path. **GAP -> TODO-532** - deterministic helper units pass, but the strategy is not selectable or invoked at runtime.
+- [x] `weighted` strategy distributes bytes proportional to configured weights. **GAP -> TODO-532** - the helper weights by cached cwnd rather than operator weights and is not runtime-wired.
+- [x] `redundant` strategy sends duplicate packets on all active paths. **GAP -> TODO-532** - no redundant strategy exists.
+- [x] `single-path` stealth mode sends only on primary; standby paths carry no
+      traffic; failover to standby is immediate on primary failure. **GAP -> TODO-532** - no standby state or runtime strategy exists.
+- [x] Per-path cwnd is independent - losing packets on one path does not reduce
+      cwnd on the other. **GAP -> TODO-532** - `PathState` owns an independent CC in isolation, but production recovery remains connection-global.
+- [x] `multipath_enabled = false` preserves current single-path behavior exactly
+      (no regression in existing migration tests). **VERIFIED** - the flag defaults false, the unintegrated multipath helpers cannot alter the current single-path connection, and migration regression units remain present.
+- [x] `initial_max_path_id` transport parameter is negotiated correctly. **GAP -> TODO-532** - the parameter is absent.
+- [x] PATH_NEW, PATH_ABANDON, PATH_STATUS, ACK_MP frames encode/decode correctly. **GAP -> TODO-532** - these wire frames are absent.
+- [x] Unit tests for `PacketScheduler` strategy selection logic (all 5). **GAP -> TODO-532** - `PathScheduler` tests cover only round-robin, lowest-latency, and cwnd-weighted selection.
+- [x] Unit tests for `Path` state transitions (Probing->Active->Standby->Failed). **GAP -> TODO-532** - `PathState` has a validation boolean, not the required lifecycle.
+- [x] Unit tests for `PathManager` add/remove/validate/promote operations. **GAP -> TODO-532** - add/remove and selection have units, but validation and promotion operations do not exist.
+- [x] Per-path nonce computation test vectors (path_id * 2^62 + pn). **GAP -> TODO-532** - packet-number spaces and AEAD nonces remain connection-global.
+- [x] Dual-path throughput >= 1.5x single-path throughput. **GAP -> TODO-532** - no live bonded data plane exists.
+- [x] Failover latency < 100ms when standby path is pre-validated. **GAP -> TODO-532** - no standby failover implementation or runtime evidence exists.

@@ -576,28 +576,28 @@ No checksum recomputation is needed — the AEAD tag covers the padded plaintext
 
 ## Completion Criteria
 
-- [ ] `PaddingMode` enum supports `Off`, `RateLimited`, `Full` with config validation.
-- [ ] **Full padding mode**: every 1-RTT packet is padded to `padding_size`. Verified
-      by tcpdump — all packets have identical UDP payload length (±0 bytes).
-- [ ] **Rate-limited mode** (existing): unchanged behavior, no regression.
-- [ ] **Off mode**: no padding applied, packets have natural sizes.
-- [ ] **Chaffing**: with `chaff_rate_pps = 10`, dummy packets injected at ~10 pps
-      during idle. Verified by tcpdump — packets present during idle.
-- [ ] Chaff packets are indistinguishable from real packets (same size, same
-      encryption, same header structure, sequential packet numbers).
-- [ ] Chaff soft-stop: after `chaff_idle_timeout_ms` of no real traffic, chaff rate
-      ramps down to zero over `chaff_ramp_down_ms`.
-- [ ] **Constant-rate mode**: with `constant_rate_pps = 100`, inter-packet intervals
-      are ~10ms (±1ms). Chaff emitted during idle. ACK-only packets bypass shaper.
-- [ ] Constant-rate mode is opt-in only with bandwidth warning.
-- [ ] Chaff and constant-rate packets respect congestion control (deferred when cwnd
-      exhausted).
-- [ ] TLS blend mode: `padding_blend_tls = true` pads to standard TLS record sizes.
-- [ ] Per-QKey traffic analysis policy is applied at handshake completion.
-- [ ] Escalation system (TODO-416) wires to new modes (level 0 = RateLimited, level 2
-      = Full + chaffing).
-- [ ] No regression in existing stealth padding / timing / CC tests.
-- [ ] `cargo test` passes; `cargo clippy` reports no new warnings.
-- [ ] Integration test: 10s capture in full+chaff+constant-rate mode verifies (a) all
-      packets same size, (b) no inter-packet gap > 2× target interval, (c) packets
-      present during idle.
+- [x] `PaddingMode` enum supports `Off`, `RateLimited`, `Full` with config validation. **SUPERSEDED** - the canonical enum is `TrafficAnalysisDefense::{Off, FullPadding, ConstantRate}`; legacy probabilistic padding remains the `Off` behavior.
+- [x] **Full padding mode**: every 1-RTT packet is padded to `padding_size`. Verified
+      by tcpdump - all packets have identical UDP payload length (+/-0 bytes). **GAP -> TODO-537** - unconditional padding is source-tested, but exact wire length has no capture proof.
+- [x] **Rate-limited mode** (existing): unchanged behavior, no regression. **VERIFIED** - `Off` retains the legacy strategy and probability path and its units.
+- [x] **Off mode**: no padding applied, packets have natural sizes. **SUPERSEDED** - `Off` intentionally preserves operator-configured legacy probabilistic padding rather than forcibly disabling every padding mechanism.
+- [x] **Chaffing**: with `chaff_rate_pps = 10`, dummy packets injected at ~10 pps
+      during idle. Verified by tcpdump - packets present during idle. **GAP -> TODO-537** - generator timing units exist, but injection is only polled from `Connection::send()` and has no idle wakeup/capture proof.
+- [x] Chaff packets are indistinguishable from real packets (same size, same
+      encryption, same header structure, sequential packet numbers). **GAP -> TODO-537** - frames enter the normal sealing path, but no decrypted/wire comparison proves the complete contract.
+- [x] Chaff soft-stop: after `chaff_idle_timeout_ms` of no real traffic, chaff rate
+      ramps down to zero over `chaff_ramp_down_ms`. **GAP -> TODO-537** - the generator records real-traffic time but implements no idle timeout or ramp-down.
+- [x] **Constant-rate mode**: with `constant_rate_pps = 100`, inter-packet intervals
+      are ~10ms (+/-1ms). Chaff emitted during idle. ACK-only packets bypass shaper. **GAP -> TODO-537** - there is no timer-owned constant-rate queue or release shaper.
+- [x] Constant-rate mode is opt-in only with bandwidth warning. **GAP -> TODO-537** - it is opt-in, but no effective bandwidth warning is emitted.
+- [x] Chaff and constant-rate packets respect congestion control (deferred when cwnd
+      exhausted). **VERIFIED** - chaff injection occurs after the connection congestion gate and cannot bypass cwnd.
+- [x] TLS blend mode: `padding_blend_tls = true` pads to standard TLS record sizes. **NON-GOAL** - QUIC datagrams are bounded by path MTU; pretending that UDP datagrams are 16 KiB TLS records is not a valid wire contract.
+- [x] Per-QKey traffic analysis policy is applied at handshake completion. **GAP -> TODO-537** - QKey policy does not carry or apply traffic-analysis settings.
+- [x] Escalation system (TODO-416) wires to new modes (level 0 = RateLimited, level 2
+      = Full + chaffing). **GAP -> TODO-537** - escalation controls legacy padding/timing, not the new defense enum and chaff lifecycle.
+- [x] No regression in existing stealth padding / timing / CC tests. **VERIFIED** - retained Rust suites pass with the new enum and generator units.
+- [x] `cargo test` passes; `cargo clippy` reports no new warnings. **VERIFIED** - current full Rust test and denied-warning Clippy gates pass.
+- [x] Integration test: 10s capture in full+chaff+constant-rate mode verifies (a) all
+      packets same size, (b) no inter-packet gap > 2x target interval, (c) packets
+      present during idle. **GAP -> TODO-537** - no capture harness or evidence exists.

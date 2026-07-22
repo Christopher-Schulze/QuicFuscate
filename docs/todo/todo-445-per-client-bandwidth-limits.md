@@ -373,17 +373,17 @@ Applied in the TUN→client forwarding loop when multiple clients have pending p
 
 ## Completion Criteria
 
-- [ ] Client with `per_client_rate_limit_bps = 10_000_000`: iperf throughput ≤ 10 Mbit/s (±5%)
-- [ ] Client with `per_client_rate_limit_bps = 0`: throughput not constrained
-- [ ] Client with `per_client_burst_bytes = 1_048_576`: initial burst exceeds rate, then settles
-- [ ] Client with `per_client_quota_mb_daily = 100`: after 100 MB, packets blocked (or throttled/disconnected)
-- [ ] Quota resets at UTC midnight (daily) and 1st of month (monthly)
-- [ ] Admin API `GET /api/clients/<ip>/bandwidth` returns current limits + usage
-- [ ] Admin API `POST /api/clients/<ip>/bandwidth` updates limits in real-time (no restart)
-- [ ] Admin API `POST /api/clients/<ip>/quota/reset` resets counters to zero
-- [ ] Fair scheduler: 3 equal-weight clients on 30 Mbit uplink → each gets ~10 Mbit (±10%)
-- [ ] Fair scheduler: 3 clients (weights 1:2:1) on 40 Mbit uplink → 10/20/10 Mbit
-- [ ] QKey override takes precedence over global default
-- [ ] No memory leak: bandwidth state cleaned up on session removal
-- [ ] `cargo clippy --lib -D warnings` is clean
-- [ ] Unit tests pass: token bucket correctness, quota tracker, fair scheduler
+- [x] Client with `per_client_rate_limit_bps = 10_000_000`: iperf throughput <= 10 Mbit/s (+/-5%). **GAP -> TODO-529** - the standalone bandwidth manager has no production caller or throughput proof.
+- [x] Client with `per_client_rate_limit_bps = 0`: throughput not constrained. **GAP -> TODO-529** - unlimited helper behavior is unit-tested but not wired or measured end-to-end.
+- [x] Client with `per_client_burst_bytes = 1_048_576`: initial burst exceeds rate, then settles. **GAP -> TODO-529** - burst arithmetic exists only in helper tests.
+- [x] Client with `per_client_quota_mb_daily = 100`: after 100 MB, packets blocked (or throttled/disconnected). **GAP -> TODO-529** - quota tracking is not owned by sessions or forwarding boundaries.
+- [x] Quota resets at UTC midnight (daily) and 1st of month (monthly). **GAP -> TODO-529** - the helper uses elapsed `Duration`, not calendar daily/monthly policy.
+- [x] Admin API `GET /api/clients/<ip>/bandwidth` returns current limits + usage. **GAP -> TODO-529** - no bandwidth admin routes exist.
+- [x] Admin API `POST /api/clients/<ip>/bandwidth` updates limits in real-time (no restart). **GAP -> TODO-529** - no runtime control-plane integration exists.
+- [x] Admin API `POST /api/clients/<ip>/quota/reset` resets counters to zero. **GAP -> TODO-529** - no quota reset route exists.
+- [x] Fair scheduler: 3 equal-weight clients on 30 Mbit uplink -> each gets about 10 Mbit (+/-10%). **GAP -> TODO-529** - no fair scheduler exists in the production downlink owner.
+- [x] Fair scheduler: 3 clients (weights 1:2:1) on 40 Mbit uplink -> 10/20/10 Mbit. **GAP -> TODO-529** - weighted scheduling is absent.
+- [x] QKey override takes precedence over global default. **GAP -> TODO-529** - QKey records carry no bandwidth or quota policy.
+- [x] No memory leak: bandwidth state cleaned up on session removal. **GAP -> TODO-529** - the helper map has removal units, but no live session owns that state.
+- [x] `cargo clippy --lib -D warnings` is clean. **VERIFIED** - the current full workspace Clippy gate passes with warnings denied.
+- [x] Unit tests pass: token bucket correctness, quota tracker, fair scheduler. **GAP -> TODO-529** - token-bucket and quota units pass, but the required fair scheduler and production-boundary tests do not exist.

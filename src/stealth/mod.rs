@@ -193,17 +193,6 @@ impl TlsCoverCipherSuite {
             TlsCoverCipherSuite::Aes128Gcm => 0x1301,
         }
     }
-
-    fn kind(&self) -> crate::transport::packet::TlsCoverCipherKind {
-        match self {
-            TlsCoverCipherSuite::ChaCha20Poly1305 => {
-                crate::transport::packet::TlsCoverCipherKind::ChaCha20Poly1305
-            }
-            TlsCoverCipherSuite::Aes128Gcm => {
-                crate::transport::packet::TlsCoverCipherKind::Aes128Gcm
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,9 +225,6 @@ pub(crate) struct TlsCoverProvider {
     ch_template: Vec<u8>,
     performance_mode: bool, // When true, disable padding/jitter/timing features
     fingerprint_profile: String,
-    tls_cover_key: [u8; 32],
-    tls_cover_iv: [u8; 12],
-    cipher_suite: TlsCoverCipherSuite,
 }
 
 impl TlsCoverProvider {
@@ -302,7 +288,7 @@ impl TlsCoverProvider {
         // Load profile from ENV
         let profile = Self::tls_cover_profile_name();
 
-        let (tls_cover_key, tls_cover_iv) = Self::derive_tls_cover_material(&profile, is_server);
+        let (tls_cover_key, tls_cover_iv) = Self::derive_tls_cover_material(&profile, is_server)?;
 
         let cipher_preference = Self::cipher_preference_from_env();
         let cipher_suite = Self::resolve_cipher_suite(cipher_preference);
@@ -311,12 +297,22 @@ impl TlsCoverProvider {
             let mut ctx = crypto.write();
             match cipher_suite {
                 TlsCoverCipherSuite::ChaCha20Poly1305 => {
-                    ctx.install_tls_cover_chacha(&tls_cover_key, &tls_cover_iv);
+                    ctx.install_tls_cover_cipher(
+                        crate::transport::packet::TlsCoverKeyMaterial::ChaCha20Poly1305 {
+                            key: &tls_cover_key,
+                            iv: &tls_cover_iv,
+                        },
+                    )?;
                 }
                 TlsCoverCipherSuite::Aes128Gcm => {
                     let mut aes_key = [0u8; 16];
                     aes_key.copy_from_slice(&tls_cover_key[..16]);
-                    ctx.install_tls_cover_aes_gcm(&aes_key, &tls_cover_iv);
+                    ctx.install_tls_cover_cipher(
+                        crate::transport::packet::TlsCoverKeyMaterial::Aes128Gcm {
+                            key: &aes_key,
+                            iv: &tls_cover_iv,
+                        },
+                    )?;
                 }
             }
         }
@@ -346,9 +342,6 @@ impl TlsCoverProvider {
             ch_template,
             performance_mode: false,
             fingerprint_profile: profile,
-            tls_cover_key,
-            tls_cover_iv,
-            cipher_suite,
         })
     }
 
@@ -364,20 +357,43 @@ impl TlsCoverProvider {
         }
     }
 
-    fn derive_tls_cover_material(profile: &str, is_server: bool) -> ([u8; 32], [u8; 12]) {
-        let salt = "quicfuscate:tls-cover:salt:v1".to_string();
-        let ikm = format!(
+    fn derive_tls_cover_material(
+        profile: &str,
+        is_server: bool,
+    ) -> Result<([u8; 32], [u8; 12]), crate::error::ConnectionError> {
+        use zeroize::Zeroize;
+
+        let mut entropy = [0u8; 32];
+        crate::rng::fill_secure(&mut entropy).map_err(|_| {
+            crate::error::ConnectionError::CryptoError(
+                "TLS cover entropy source unavailable".to_string(),
+            )
+        })?;
+        let result = Self::derive_tls_cover_material_from_entropy(profile, is_server, &entropy);
+        entropy.zeroize();
+        Ok(result)
+    }
+
+    fn derive_tls_cover_material_from_entropy(
+        profile: &str,
+        is_server: bool,
+        entropy: &[u8; 32],
+    ) -> ([u8; 32], [u8; 12]) {
+        use zeroize::Zeroize;
+
+        let mut prk = hkdf_extract(b"quicfuscate:tls-cover:salt:v2", entropy);
+        let info = format!(
             "quicfuscate:tls-cover:{}:{}",
             profile,
             if is_server { "server" } else { "client" }
         );
-        let prk = hkdf_extract(salt.as_bytes(), ikm.as_bytes());
-        let info = format!("quicfuscate:tls-cover:info:{}", profile);
-        let okm = hkdf_expand(&prk, info.as_bytes(), 44);
+        let mut okm = hkdf_expand(&prk, info.as_bytes(), 44);
         let mut key = [0u8; 32];
         let mut iv = [0u8; 12];
         key.copy_from_slice(&okm[..32]);
         iv.copy_from_slice(&okm[32..44]);
+        prk.zeroize();
+        okm.zeroize();
         (key, iv)
     }
 
@@ -861,39 +877,10 @@ impl TlsCoverProvider {
             header[3..5].copy_from_slice(&(cipher_len as u16).to_be_bytes());
         }
 
-        // SAFETY (cipher reinstallation - TODO-269 audit):
-        //
-        // This block lazily installs the TLS cover cipher into the shared CryptoContext
-        // when the context's current cipher kind does not match self.cipher_suite.
-        //
-        // This is safe because:
-        // 1. self.cipher_suite is immutable after TlsCoverProvider construction - it is
-        //    set once in resolve_cipher_suite() during init and never mutated.
-        // 2. Reinstallation therefore only happens on the FIRST call (or if the context
-        //    was reset externally), never mid-session during active traffic.
-        // 3. The CryptoContext write lock serializes all access, so concurrent callers
-        //    cannot observe a half-installed cipher state.
-        // 4. Key material (tls_cover_key, tls_cover_iv) is likewise fixed at construction.
-        //
-        // If cipher_suite ever becomes mutable at runtime, this block must be guarded by
-        // a session-lifetime lock or moved to a one-shot initialization path.
-        let ciphertext = {
-            let mut ctx = self.crypto.write();
-            let needs_reinstall = ctx.tls_cover_cipher_kind() != Some(self.cipher_suite.kind());
-            if needs_reinstall {
-                match self.cipher_suite {
-                    TlsCoverCipherSuite::ChaCha20Poly1305 => {
-                        ctx.install_tls_cover_chacha(&self.tls_cover_key, &self.tls_cover_iv);
-                    }
-                    TlsCoverCipherSuite::Aes128Gcm => {
-                        let mut aes_key = [0u8; 16];
-                        aes_key.copy_from_slice(&self.tls_cover_key[..16]);
-                        ctx.install_tls_cover_aes_gcm(&aes_key, &self.tls_cover_iv);
-                    }
-                }
-            }
-            ctx.encrypt_tls_cover_record(&header, &payload)
-        };
+        // Installation is constructor-owned. If the shared context is cleared or
+        // replaced unexpectedly, encryption fails closed instead of reinstalling
+        // session material and risking sequence-number reuse.
+        let ciphertext = self.crypto.write().encrypt_tls_cover_record(&header, &payload);
 
         let mut frame_out = header;
         match ciphertext {

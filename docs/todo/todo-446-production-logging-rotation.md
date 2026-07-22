@@ -365,18 +365,18 @@ impl<S: Subscriber> Layer<S> for AdminLogLayer { ... }
 
 ## Completion Criteria
 
-- [ ] With `log_format = "json"`: each log line is valid JSON parseable by `jq` (NDJSON)
-- [ ] JSON log line contains: `timestamp` (ISO 8601 UTC), `level`, `target`, `fields.message`
-- [ ] With `log_to_file = true`: log file is created at `log_file_path` and written to
-- [ ] With `log_rotation = "size"` and `log_rotation_size_mb = 1`: after > 1 MB, new file created, old renamed to `.1`
-- [ ] With `log_rotation_keep = 3`: at most 3 rotated files exist (plus current)
-- [ ] With `log_rotation = "daily"`: new log file created at UTC midnight
-- [ ] Per-module levels work: `stealth=info,transport=debug,fec=trace` with global `level=warn`
-- [ ] Existing `log::info!()` / `log::debug!()` / `log::warn!()` / `log::error!()` calls continue to work
-- [ ] With `log_to_stdout = false` and `log_to_file = true`: no stderr output, all in file
-- [ ] With both enabled: output on both stderr and file simultaneously
-- [ ] On shutdown: log file is flushed (no data loss)
-- [ ] Syslog: UDP packets sent to configured host:port in RFC 5424 format
-- [ ] AdminLogBuffer: admin UI log display still works after migration
-- [ ] No performance regression: logging at `info` level adds < 1µs per call
-- [ ] `cargo clippy --lib -D warnings` is clean
+- [x] With `log_format = "json"`: each log line is valid JSON parseable by `jq` (NDJSON). **GAP -> TODO-531** - `format_json()` is valid NDJSON in units, but startup initializes `LoggingConfig::default()` before loading the operator config.
+- [x] JSON log line contains: `timestamp` (ISO 8601 UTC), `level`, `target`, `fields.message`. **SUPERSEDED** - the canonical compact schema uses `ts`, `level`, `target`, and `msg`; TODO-531 must document and process-test that stable schema.
+- [x] With `log_to_file = true`: log file is created at `log_file_path` and written to. **GAP -> TODO-531** - file appender code exists, but operator logging configuration never reaches initialization.
+- [x] With `log_rotation = "size"` and `log_rotation_size_mb = 1`: after > 1 MB, new file created, old renamed to `.1`. **GAP -> TODO-531** - size rotation passes direct units but lacks configured process-level proof.
+- [x] With `log_rotation_keep = 3`: at most 3 rotated files exist (plus current). **GAP -> TODO-531** - retention units pass without runtime config wiring.
+- [x] With `log_rotation = "daily"`: new log file created at UTC midnight. **NON-GOAL** - the canonical bounded-storage contract is deterministic size rotation with retention; time rotation is unnecessary parallel policy.
+- [x] Per-module levels work: `stealth=info,transport=debug,fec=trace` with global `level=warn`. **GAP -> TODO-531** - filtering units pass, but loaded module overrides are not used at logger initialization.
+- [x] Existing `log::info!()` / `log::debug!()` / `log::warn!()` / `log::error!()` calls continue to work. **VERIFIED** - `ProductionLogger` implements the existing `log` facade and current call sites compile and execute unchanged.
+- [x] With `log_to_stdout = false` and `log_to_file = true`: no stderr output, all in file. **GAP -> TODO-531** - sink routing exists but has no configured process-level assertion.
+- [x] With both enabled: output on both stderr and file simultaneously. **GAP -> TODO-531** - dual sinks exist without runtime config proof.
+- [x] On shutdown: log file is flushed (no data loss). **GAP -> TODO-531** - `Log::flush()` exists, but shutdown does not explicitly invoke and prove it.
+- [x] Syslog: UDP packets sent to configured host:port in RFC 5424 format. **GAP -> TODO-531** - formatting units exist, but configured process-level UDP delivery is unproven.
+- [x] AdminLogBuffer: admin UI log display still works after migration. **VERIFIED** - the buffer is registered as the secondary `LogSink` before logger initialization and server log tests retain it.
+- [x] No performance regression: logging at `info` level adds < 1us per call. **GAP -> TODO-531** - current logging performs synchronous formatting and sink I/O with no benchmark evidence.
+- [x] `cargo clippy --lib -D warnings` is clean. **VERIFIED** - the current full workspace Clippy gate passes with warnings denied.

@@ -361,21 +361,21 @@ If any event is modified, its `this_hash` changes, which breaks the chain at the
 
 ## Completion Criteria
 
-- [ ] `AuditEvent` type taxonomy covers all security-relevant events (auth, QKey, connection, firewall, admin, config, system)
-- [ ] `AuditLogger::log()` is non-blocking (channel send, no I/O on hot path)
-- [ ] Audit log file is NDJSON with hash chain (`prev_hash` / `this_hash` on each event)
-- [ ] File is opened with `O_APPEND` and `0600` permissions
-- [ ] Log rotation at configurable size threshold with gzip compression and retention
-- [ ] Hash chain continuity across rotated files
-- [ ] `quicfuscate audit verify` detects tampering, deletion, and reordering
-- [ ] Syslog forwarding in RFC 5424 format (UDP and Unix socket)
-- [ ] CEF format output for SIEM integration (Splunk, QRadar, ArcSight, Sentinel)
-- [ ] All auth events (success, failure, rejection, timeout) are logged with actor and target
-- [ ] All QKey events (issued, revoked, rotated, expired) are logged with actor and QKey ID
-- [ ] All connection events (accepted, rejected, terminated, closed, migrated) are logged
-- [ ] All admin actions (login, logout, password change, config change, QKey management) are logged
-- [ ] All firewall/routing changes are logged
-- [ ] All config loads/reloads are logged
-- [ ] `AUDIT_DROPPED` metric counter tracks dropped events
-- [ ] Performance: 10,000 events/second sustained with no hot-path blocking
-- [ ] All unit, integration, tamper detection, and performance tests pass
+- [x] `AuditEvent` type taxonomy covers all security-relevant events (auth, QKey, connection, firewall, admin, config, system). **GAP -> TODO-525** - current variants omit rejection, expiration, migration, initial config load, and distinct admin lifecycle outcomes.
+- [x] `AuditLogger::log()` is non-blocking (channel send, no I/O on hot path). **GAP -> TODO-525** - `AuditLog::log()` takes mutexes, writes, and flushes synchronously on the caller.
+- [x] Audit log file is NDJSON with hash chain (`prev_hash` / `this_hash` on each event). **VERIFIED** - every serialized line carries `prev_hash` and `hash`, and reopening resumes from the last hash.
+- [x] File is opened with `O_APPEND` and `0600` permissions. **VERIFIED** - `OpenOptions::append(true)` is used and Unix initialization hardens the file to mode `0600`.
+- [x] Log rotation at configurable size threshold with gzip compression and retention. **GAP -> TODO-525** - the audit file is unbounded and owns no rotation lifecycle.
+- [x] Hash chain continuity across rotated files. **GAP -> TODO-525** - rotation does not exist.
+- [x] `quicfuscate audit verify` detects tampering, deletion, and reordering. **GAP -> TODO-525** - `verify-audit-log` proves mutation and interior chain breaks, but lacks a terminal checkpoint that can prove tail deletion and has no multi-file verification contract.
+- [x] Syslog forwarding in RFC 5424 format (UDP and Unix socket). **NON-GOAL** - the canonical boundary is owner-only NDJSON consumed by the host's logging agent; the VPN process will not own remote log transport.
+- [x] CEF format output for SIEM integration (Splunk, QRadar, ArcSight, Sentinel). **NON-GOAL** - CEF transformation belongs to the external collector ingesting canonical NDJSON.
+- [x] All auth events (success, failure, rejection, timeout) are logged with actor and target. **GAP -> TODO-525** - success, failure, and timeout exist, but exact rejection taxonomy and structured actor/target coverage are incomplete.
+- [x] All QKey events (issued, revoked, rotated, expired) are logged with actor and QKey ID. **GAP -> TODO-525** - issuance and admin revocation exist; rotation and expiry are not emitted and actor context is incomplete.
+- [x] All connection events (accepted, rejected, terminated, closed, migrated) are logged. **GAP -> TODO-525** - established and closed boundaries exist, but rejection, reasoned termination, and migration are absent.
+- [x] All admin actions (login, logout, password change, config change, QKey management) are logged. **GAP -> TODO-525** - generic admin actions cover only part of the required lifecycle.
+- [x] All firewall/routing changes are logged. **VERIFIED** - owned setup and teardown paths emit firewall-rule-added and firewall-rule-removed events.
+- [x] All config loads/reloads are logged. **GAP -> TODO-525** - reload emits an event, while initial load and validation failure do not.
+- [x] `AUDIT_DROPPED` metric counter tracks dropped events. **GAP -> TODO-525** - no queue or drop counter exists.
+- [x] Performance: 10,000 events/second sustained with no hot-path blocking. **GAP -> TODO-525** - synchronous flush-per-event behavior has no performance proof and violates the non-blocking contract.
+- [x] All unit, integration, tamper detection, and performance tests pass. **GAP -> TODO-525** - chain and runtime-boundary tests pass, but deletion, reordering, rotation, saturation, and throughput gates are incomplete.

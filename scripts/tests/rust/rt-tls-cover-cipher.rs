@@ -1,7 +1,7 @@
 #![cfg(feature = "rust-tests")]
 use quicfuscate::crypto::aes::Aes128Ctx;
 use quicfuscate::optimize::telemetry;
-use quicfuscate::transport::packet::CryptoContext;
+use quicfuscate::transport::packet::{CryptoContext, TlsCoverKeyMaterial};
 
 fn poly1305_total_ops() -> u64 {
     telemetry::POLY1305_AVX512_OPS.get()
@@ -32,7 +32,8 @@ fn tls_cover_chacha_roundtrip() {
     let mut ctx = CryptoContext::default();
     let key = [0x42u8; 32];
     let iv = [0x24u8; 12];
-    ctx.install_tls_cover_chacha(&key, &iv);
+    ctx.install_tls_cover_cipher(TlsCoverKeyMaterial::ChaCha20Poly1305 { key: &key, iv: &iv })
+        .expect("install ChaCha20-Poly1305 TLS cover cipher");
 
     let aad = sample_aad();
     let plaintext = sample_plaintext();
@@ -60,7 +61,8 @@ fn tls_cover_aes_gcm_roundtrip() {
         *byte = idx as u8;
     }
     let iv = [0x11u8; 12];
-    ctx.install_tls_cover_aes_gcm(&aes_key, &iv);
+    ctx.install_tls_cover_cipher(TlsCoverKeyMaterial::Aes128Gcm { key: &aes_key, iv: &iv })
+        .expect("install AES-128-GCM TLS cover cipher");
 
     let aad = sample_aad();
     let plaintext = sample_plaintext();

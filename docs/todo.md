@@ -27,9 +27,9 @@ Execution order: **Phase A (config + quick wins) -> Phase B (load path) -> Phase
 | TODO-393 | A | P1 | Reuse AEGIS cipher state across packets (avoid per-PN init) | **DONE** (state stored persistently in AEAD struct; `new` only on first packet, `reinit` reuses allocation thereafter; differential test proves reinit output byte-identical to fresh-new per packet across 64 counters) |
 | TODO-394 | B | P1 | Replace `sent_bytes_by_pn` full-scan ACK accounting | **DONE** |
 | TODO-395 | B | P1 | MORUS seal/open in-place on trait path (remove `to_vec` copies) | **DONE** (trait path already calls encrypt/decrypt_in_place_optimized directly on caller buffer; SIMD _inner fns write in-place via chunks_exact_mut; to_vec only in test/allocating convenience methods; added trait-path differential + forgery regression test) |
-| TODO-396 | B | P2 | Brain `apply_policy` lock coalescing and histogram reuse | **DEFERRED** by TODO-417 (Hot-Path-Lock-Elimination, DONE). Bundled into ArcSwap + lock-free 1-RTT path. |
-| TODO-397 | B | P2 | FEC encoder/decoder Mutex contention reduction | **DEFERRED** by TODO-417 (Hot-Path-Lock-Elimination, DONE). |
-| TODO-398 | B | P2 | CryptoContext RwLock scope reduction on 1-RTT hot path | **DEFERRED** by TODO-417 (Hot-Path-Lock-Elimination, DONE). ArcSwap lock-free 1-RTT path eliminates per-packet RwLock. |
+| TODO-396 | B | P2 | Brain `apply_policy` lock coalescing and histogram reuse | **SCRAP** - superseded and completed by TODO-417. |
+| TODO-397 | B | P2 | FEC encoder/decoder Mutex contention reduction | **SCRAP** - superseded and completed by TODO-417. |
+| TODO-398 | B | P2 | CryptoContext RwLock scope reduction on 1-RTT hot path | **SCRAP** - superseded and completed by TODO-417. |
 | TODO-399 | C | P1 | Criterion bench: `Connection` 1-RTT send/recv loop | **DONE** (`connection_1rtt_send_recv` group in ci_regression.rs, 3 payload sizes, mock paired 1-RTT connections; wired into bench-ci-regression.sh + ci.yml benchmarks job with critcmp baseline) |
 | TODO-400 | C | P1 | Criterion bench: ACK processing under N in-flight PNs | **DONE** (`ack_sent_byte_accounting` group: 32/128/512/1024/2048/10240 inflight, ack_all/ack_half/ack_sparse variants; wired into ci_regression + ci.yml benchmarks job) |
 | TODO-401 | C | P2 | CI regression: stealth-on vs stealth-off same workload | **DONE** (`connection_1rtt_stealth_compare` group runs stealth_off/stealth_on on identical 1-RTT workload; ci.yml benchmarks job applies 15% warn / 30% error thresholds via bench-ci-regression.sh) |
@@ -40,7 +40,7 @@ Execution order: **Phase A (config + quick wins) -> Phase B (load path) -> Phase
 | TODO-406 | B | P2 | Consolidate dual stealth timing gates (core + connection) | **DONE** |
 | TODO-407 | B | P3 | Replace `Box<dyn Aead>` with enum dispatch in `CryptoContext` | **DONE** |
 | TODO-408 | B | P3 | Fix VNNI `aggregate_congestion` per-call heap allocations | **DONE** |
-| TODO-409 | A | P2 | Evaluate `stream_ring_buffer` as default for throughput profile | **DEFERRED** by TODO-414 (Streaming-FEC adaptive loop, DONE). Feature remains opt-in; adaptive loop determines when streaming mode warrants ring-buffer usage. |
+| TODO-409 | A | P2 | Evaluate `stream_ring_buffer` as default for throughput profile | **SCRAP** - superseded and completed by TODO-414; throughput feature explicitly enables the ring buffer. |
 | TODO-410 | B | P3 | Zstd compression streaming directly into memory pool | **DONE** |
 | TODO-411 | B | P3 | StrikeRegister 0-RTT anti-replay ring buffer + bloom front | **DONE** |
 | TODO-412 | E | P1 | Server deploy + real-world protocol profiling baseline | **DONE** - Real-world QUIC connection over the internet verified: Mac (ARM64) → Broderick (Oracle Cloud, ARM64, 92.5.226.155:4433). TLS handshake successful, RTT 0ms, Loss 0.00%, FEC NEON SIMD active, stealth uTLS+TLS Cover active. Oracle Cloud Security List is now open for UDP 4433. Server RSS 3.1 MB at idle. |
@@ -160,7 +160,7 @@ closes every gap to reach a complete, production-ready VPN protocol.
 | TODO-444 | I | P1 | nftables support (modern Linux firewall) | **DONE** - `src/firewall/mod.rs`: `FirewallBackend` enum (Iptables/Nftables), `detect_backend()` auto-detection, `nft_available()` check, `FirewallOps` trait, `NftablesKillSwitch` (inet table, default DROP), server routing nftables path. | TODO-429 |
 | TODO-445 | I | P1 | Per-client bandwidth limits & quotas | **DONE** - `src/implementations/server/bandwidth.rs`: `BandwidthLimiter` (token bucket, bytes/sec), `QuotaTracker` (cumulative quota per billing period), `PerClientBandwidthManager` (per-client limits + quotas), `BandwidthStats`, wired into `SessionManager`. | TODO-430 |
 | TODO-446 | I | P1 | Production logging (rotation, structured JSON, file output) | **DONE** - `src/logging.rs`: `SizeRotatingAppender` (100MB default, 5 files), JSON NDJSON format, syslog RFC 5424, `log::Log` trait impl, `LoggingConfig` with module-level overrides, file output with restrictive permissions. | - |
-| TODO-447 | I | P1 | Container deployment (Docker only; stale manifests removed) | **DEFERRED** - Docker artifacts are retained for GitHub/CI image work, but stale manifest directories are no longer active surfaces in this repository. They were removed to avoid false production-readiness signals. Local Docker is not required. | - |
+| TODO-447 | I | P1 | Container deployment (Docker only; stale manifests removed) | **DONE** - retained CI/release image scope is proven by TODO-510; privileged container VPN runtime and stale manifests are explicit non-goals. | - |
 | TODO-448 | I | P1 | Graceful shutdown (SIGTERM, drain mode, connection handoff) | **DONE** - Shared drain lifecycle, existing `engine.shutdown_timeout_ms` grace control, persistent SIGINT/SIGTERM/SIGHUP handling, admin drain/status, bounded close-frame flush, and systemd notify wiring pass local full gates, GitHub CI/Clippy, native ARM64 release artifact creation, and the exact two-client Omega lifecycle proof in 5118 ms on `bef00fe`. | - |
 | TODO-459 | I | P1 | DDoS protection hardening | **DONE** - Default per-IP rate limit lowered to 1,000 PPS (from 10,000). `RateLimitConfig.burst_size` decouples burst from steady-state. `GlobalRateLimiter` caps aggregate server-wide PPS (50,000 default) with PPS estimation. `EwmaAnomalyDetector` (EWMA spike detection, 3× threshold, auto-clear) wired into `allow_incoming_datagram()` - halves per-IP limits during anomalies. `GeoIpBlocker` (stub, graceful degradation without maxminddb) and `BlacklistSync` (TTL-based IP blocklist with manual/feed sync) wired into packet acceptance path. `prune_rate_limits_if_due()` feeds PPS to detector and prunes blacklist. | - |
 | TODO-460 | I | P1 | Install script fix (user creation, directory permissions) | **DONE** - `ensure_group()` + `ensure_user()` with dedicated group, `validate_prerequisites()` (iptables/ip/systemctl), `/var/log/quicfuscate` dir creation, `chmod 0700` state dir, `chmod 0750` config/log dirs, TOML validation via python3, post-start `systemctl is-active` verification. | - |
@@ -284,8 +284,32 @@ experimental, or bound to explicit policy.
 | TODO-519 | I | P2 | Windows desktop build: cfg-gate Unix-specific core library code | **DONE** - Native parallel MSVC check, 1,673-test execution, and Clippy pass. Tagged release run `29854481540` built and published the signed 10,727,424-byte Windows MSI, Linux and macOS bundles passed, and `v0.4.3/latest.json` maps `windows-x86_64` to the exact MSI with the matching published signature. | - |
 | TODO-520 | S | P1 | Remove dead QKey transport-parameter channel and false confidentiality claims | **DONE** - Dead transport-parameter auth is removed; QKey authentication is confined to encrypted HTTP/3 after verified TLS. Local full gates, CI `29866349165`, Clippy Matrix `29866348616`, Release Build `29866348442`, and native ARM64 Omega proof all pass. Omega recorded `client_authenticated`, 0.00% loss, fail-closed missing/untrusted credentials, 1 Hz statistics, and 108 ms SIGTERM shutdown on commit `da36a44`. | TODO-415 |
 | TODO-521 | S | P0 | Reconcile legacy DONE acceptance contracts with production truth | **OPEN** - 31 `DONE` detail files contain 441 unclassified unchecked acceptance items. Direct source checks already show a superseded TODO-457 auth contract and an unintegrated TODO-449 multipath contract. Full classification and follow-up closure are required before restoring the global production-readiness claim. | TODO-448, TODO-520 |
+| TODO-522 | S | P0 | Close kill-switch automatic-loss handling and privileged runtime proof | **OPEN** - TODO-429 reconciliation found that `check_heartbeat()` has no runtime caller and the required privileged firewall lifecycle proofs are absent. | TODO-429, TODO-521 |
+| TODO-523 | S | P0 | Complete multi-client dual-stack TUN and ICMP runtime contract | **OPEN** - TODO-430/431/432 reconciliation found missing broadcast, PTB, TTL, ICMPv6, metrics, three-client isolation, dual-stack, NAT, and throughput evidence. | TODO-430, TODO-431, TODO-432, TODO-521 |
+| TODO-524 | S | P0 | Prove interleaved FEC mapping and random plus burst recovery | **OPEN** - depth-aware decoder mapping exists, but exact 1,000-packet random/burst integrity evidence with interleaving enabled is absent. | TODO-433, TODO-521 |
+| TODO-525 | S | P0 | Complete audit durability, taxonomy, and throughput contract | **OPEN** - synchronous flush-per-event I/O, unbounded storage, incomplete taxonomy, incomplete deletion proof, and missing saturation/performance evidence remain after TODO-515. | TODO-439, TODO-515, TODO-521 |
+| TODO-526 | S | P0 | Close retained secret erasure boundaries | **OPEN** - AEGIS derived state and raw QKey token allocations lack complete zeroizing ownership and failable erasure proof. | TODO-440, TODO-516, TODO-521 |
+| TODO-527 | S | P0 | Complete irreversible privilege reduction and post-drop proof | **OPEN** - supplementary groups, no-new-privileges, explicit capability clearing, runtime diagnostics, and root-start post-drop TUN proof are absent. | TODO-441, TODO-515, TODO-521 |
+| TODO-528 | S | P0 | Prove Wintun native adapter and data-plane lifecycle | **OPEN** - native core/MSI proof does not create a Wintun adapter, transfer packets, exercise firewall integration, or stress concurrent close/read. | TODO-442, TODO-519, TODO-521 |
+| TODO-529 | S | P0 | Wire per-client bandwidth, quota, and fairness enforcement | **OPEN** - bandwidth helpers are orphaned from sessions, forwarding, QKey policy, admin routes, and real throughput. | TODO-445, TODO-523, TODO-521 |
+| TODO-530 | S | P0 | Wire firewall backend override and privileged nftables proof | **OPEN** - parsed backend configuration is ignored and nftables/fallback state plus packet behavior lack privileged evidence. | TODO-444, TODO-522, TODO-523, TODO-521 |
+| TODO-531 | S | P0 | Wire production logging configuration and lifecycle proof | **OPEN** - logger primitives exist, but startup uses defaults instead of operator config and shutdown/performance proofs are absent. | TODO-446, TODO-521 |
+| TODO-532 | S | P0 | Complete negotiated multipath wire and data-plane runtime | **OPEN** - multipath path/scheduler helpers are isolated from `Connection`; negotiated frames, per-path packet spaces/recovery, runtime strategies, failover, counters, and live bonding proof are absent. | TODO-449, TODO-521 |
+| TODO-533 | S | P0 | Complete configurable migration and CC path adaptation | **OPEN** - migration currently applies a hard-coded half-window through generic `set_cwnd`; configurable policy, path RTT transfer, CC-specific state, preservation assertions, and live recovery proof are absent. | TODO-450, TODO-521 |
+| TODO-534 | S | P0 | Complete DPLPMTUD bounds, TUN coupling, and runtime proof | **OPEN** - DPLPMTUD is wired but capped at 1400 with fixed policy, no TUN MTU propagation, incomplete transition proof, and no privileged black-hole or throughput evidence. | TODO-451, TODO-521 |
+| TODO-535 | S | P0 | Prove CUBIC conformance, fairness, and loss performance | **OPEN** - CUBIC integration and algorithm units exist, but independent RFC vectors, precision/size bounds, shared-bottleneck fairness, and real 5% loss throughput evidence are absent. | TODO-452, TODO-521 |
+| TODO-536 | S | P0 | Wire QUIC v2 and version negotiation end to end | **OPEN** - v2 constants, config, and standalone VN helpers exist without connection state, v2 packet/crypto support, downgrade protection, greasing, or real interop proof. | TODO-453, TODO-521 |
+| TODO-537 | S | P0 | Complete timer-owned traffic-analysis defense proof | **OPEN** - full padding and chaff primitives exist, but idle emission, soft stop, constant-rate scheduling, QKey/escalation policy, warnings, and capture proof are absent. | TODO-455, TODO-521 |
+| TODO-538 | S | P0 | Complete QKey auth backoff and block lifecycle | **OPEN** - live auth has a simple failed-attempt window, but no configured exponential backoff, explicit block state/reasons, periodic prune, dedicated metrics, or exact flood proof. | TODO-456, TODO-521 |
+| TODO-539 | S | P0 | Make QKey registry encryption fail closed | **OPEN** - registry AEAD exists but wrong/missing keys and encryption failures fall back ambiguously or to plaintext; KDF, file source, migration, rotation, zeroization, and tests are absent. | TODO-458, TODO-521 |
+| TODO-540 | S | P0 | Complete sustained DDoS policy and live proof | **OPEN** - global/per-IP/GeoIP/blacklist primitives are wired, but anomaly timing, PPS sampling, retry enforcement, unified config, cache durability, positive GeoIP, and false-positive proof are incomplete. | TODO-459, TODO-521 |
+| TODO-541 | S | P0 | Prove Linux installer across clean distro lifecycles | **OPEN** - installer source owns identity, permissions, prerequisites, config validation, and service checks, but clean Debian/RHEL, rerun, and missing-dependency executions are absent. | TODO-460, TODO-521 |
+| TODO-542 | S | P0 | Complete owned TUN and firewall cleanup lifecycle | **OPEN** - server routing retries and startup cleanup are partial; post-cleanup verification, client symmetry, exact owned fallback, injected failure tests, and crash/restart proof are absent. | TODO-461, TODO-521 |
+| TODO-543 | S | P0 | Complete TCP and ICMP fingerprint runtime proof | **OPEN** - field normalizers and checksum units exist, but live data paths apply only IPv4 normalization; passthrough, TCP, ICMP policy, rotation coupling, p0f/nmap, allocation, and throughput proof are absent. | TODO-462, TODO-521 |
+| TODO-544 | S | P0 | Complete RFC loss detection and network proof | **OPEN** - RTT EWMA exists, but PTO is incorrect and time/RACK loss state, event-loop deadlines, BBR variance, Reno pacing, benchmarks, and netem comparisons are absent. | TODO-463, TODO-521 |
+| TODO-545 | S | P0 | Prove cipher reinstallation state safety | **OPEN** - a retained TODO-269 safety note asserts reset-before-reinstall invariants without a dedicated adversarial proof across every cipher state transition. | TODO-378, TODO-521 |
 
-Detail files: `docs/todo/todo-{508,509,510,511,512,513,514,515,516,517,518,519,520,521}-*.md`.
+Detail files: `docs/todo/todo-{508,509,510,511,512,513,514,515,516,517,518,519,520,521,522,523,524}-*.md`.
 
 **Closure rule:** The v0.4.0 readiness wave required TODO-508 through TODO-518 and TODO-412 to be DONE through local or Broderick evidence. TODO-519, TODO-520, and TODO-448 retain their own native and live completion evidence. Global production readiness is reopened by TODO-521 and cannot close while any legacy `DONE` acceptance item remains unclassified or any resulting production gap remains open. Documentation claims alone are never completion evidence.
 
@@ -344,7 +368,7 @@ Details: `docs/todo/todo-{id}.md` for each item.
 
 | ID | Severity | Title | Status |
 |----|----------|-------|--------|
-| TODO-356 | MODERATE | retired local worklog + todo.md stale test counts (852->916, 1522->1587) | **DEFERRED** - local worklog removed; todo.md is current task truth |
+| TODO-356 | MODERATE | retired local worklog + todo.md stale test counts (852->916, 1522->1587) | **SCRAP** - volatile test totals belong to live gate output; retired worklogs remain absent. |
 | TODO-357 | MODERATE | CONTRIBUTING.md Rust toolchain wording drift | **DONE** - CONTRIBUTING.md now says Rust stable selected by rust-toolchain.toml |
 | TODO-363 | MODERATE | Stealth env var QUICFUSCATE_STEALTH_MODE=auto silently rejected | **DONE** - added "auto" alias in apply_env_overrides() |
 | TODO-364 | MODERATE | Dual 0-RTT config fields (enable_0rtt vs enable_early_data) undocumented | **DONE** - added clarifying comments in quicfuscate.toml |
@@ -356,11 +380,11 @@ Details: `docs/todo/todo-{id}.md` for each item.
 
 | ID | Severity | Title | Status |
 |----|----------|-------|--------|
-| TODO-358 | MODERATE | 4 dead PQ trait methods in qftls.rs + stale doc strings | **DEFERRED** - `cargo dead`/`cargo udeps` covers this |
+| TODO-358 | MODERATE | 4 dead PQ trait methods in qftls.rs + stale doc strings | **DONE** - methods, stale claim, and tombstones are absent; Rust and Clippy gates pass. |
 | TODO-359 | MODERATE | ~25 unsafe blocks missing SAFETY comments (5 files) | **DONE** - 30 SAFETY comments across batch.rs, linux.rs, macos.rs, io_driver.rs, connection.rs |
 | TODO-360 | MODERATE | eprintln! in transport hot path (connection.rs:1298) | **DONE** - changed to log::warn! |
 | TODO-361 | MODERATE | hkdf_expand panics on out_len > 8160 instead of Result | **DONE** - explicit assert with RFC 5869 reference |
-| TODO-362 | MODERATE | 8x #[allow(dead_code)] in fec/internal.rs - audit needed | **DEFERRED** - `cargo dead`/`cargo udeps` covers this |
+| TODO-362 | S | P0 | Audit retained `#[allow(dead_code)]` in FEC internals | **OPEN** - eight suppressions remain without exact production/feature/test/dead ownership classification. | TODO-521 |
 | TODO-366 | MODERATE | Switch.svelte + Select.svelte duplicated between apps (~80% identical) | **DONE** - extracted to packages/ui, deleted from both apps |
 | TODO-367 | MODERATE | cn() import inconsistency: desktop $lib/format vs admin @quicfuscate/ui | **DONE** - desktop now imports cn from @quicfuscate/ui |
 
@@ -376,7 +400,7 @@ Details: `docs/todo/todo-{id}.md` for each item.
 | TODO-375 | LOW | quicfuscate-ctl.rs unwrap() on JSON - crashes on malformed responses | **DONE** - proper error messages |
 | TODO-376 | LOW | CI: simd-selfcheck only tested on Linux, not macOS/Windows | **DONE** - added macOS entry in feature-matrix |
 | TODO-377 | LOW | Desktop +error.svelte page has no test (admin equivalent IS tested) | **SCRAP** - UI OFF LIMITS per AGENTS.md |
-| TODO-378 | LOW | 7 TODO markers in Rust src/ - review and cleanup | **DEFERRED** - `grep -rn "TODO" src/` is not a task |
+| TODO-378 | LOW | 7 TODO markers in Rust src/ - review and cleanup | **SCRAP** - marker count is not a deliverable; remaining cipher safety obligation moved to TODO-545. |
 
 #### COVERAGE - Rust Test Gaps (10 items) - ALL SCRAP (replaced by `cargo tarpaulin`)
 

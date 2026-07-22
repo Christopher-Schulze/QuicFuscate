@@ -4,9 +4,10 @@ title: stream_ring_buffer throughput profile evaluation
 severity: MEDIUM
 phase: A
 priority: P2
-status: DEFERRED
+status: SCRAP
 superseded_by: TODO-414
 created: 2026-06-05
+resolved: 2026-07-22
 ---
 
 # TODO-409: Evaluate `stream_ring_buffer` for Throughput Builds

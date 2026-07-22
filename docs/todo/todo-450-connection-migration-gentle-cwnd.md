@@ -433,28 +433,28 @@ the new path's bottleneck, causing loss and further cwnd reduction.
 
 ## Completion Criteria
 
-- [ ] On migration during active data transfer, throughput drops by < 50% (not
-      100% as with the current reset-to-initial).
-- [ ] Throughput recovers to 90% of pre-migration levels within 2 seconds.
-- [ ] `bytes_in_flight` is preserved across migration (not zeroed) — verified
+- [x] On migration during active data transfer, throughput drops by < 50% (not
+      100% as with the current reset-to-initial). **GAP -> TODO-533** - the source halves cwnd, but no active-transfer measurement proves the throughput bound.
+- [x] Throughput recovers to 90% of pre-migration levels within 2 seconds. **GAP -> TODO-533** - no runtime recovery proof exists.
+- [x] `bytes_in_flight` is preserved across migration (not zeroed) - verified
       by asserting `bytes_in_flight > 0` immediately after
-      `commit_path_validation`.
-- [ ] `cwnd` after migration equals `old_cwnd * migration_cwnd_reduction_factor`
-      (clamped to `INITIAL_WINDOW` minimum).
-- [ ] `ssthresh == cwnd` after migration (enters congestion avoidance, no
-      slow-start overshoot).
-- [ ] `migration_cooldown_ms` is configurable and respected (0 = immediate,
-      5000 = 5s block).
-- [ ] The path-probe phase restores cwnd to `path_probe_target_cwnd` within
-      `3 × smoothed_RTT`.
-- [ ] PATH_CHALLENGE RTT is captured and used as initial RTT for the new path.
-- [ ] `on_path_change()` is called on the CC instance during migration.
-- [ ] BBR3: `min_rtt` is reset to new path RTT after migration.
-- [ ] Reno: `ssthresh = cwnd * 0.5` and slow-start exit after migration.
-- [ ] `pto_count` is reset to 0 on migration.
-- [ ] No regression in existing migration tests (path validation still works,
-      PATH_CHALLENGE/RESPONSE still required).
-- [ ] Unit test: migrate with `cwnd = 100_000`, verify `cwnd == 50_000`.
-- [ ] Unit test: migrate with factor `0.25`, verify `cwnd == 25_000`.
-- [ ] Unit test: migrate with factor `1.0`, verify `cwnd == 100_000`.
-- [ ] Unit test: `bytes_in_flight > 0` immediately after migration.
+      `commit_path_validation`. **GAP -> TODO-533** - `Recovery::on_path_change()` preserves the field, but the migration boundary lacks the stated assertion.
+- [x] `cwnd` after migration equals `old_cwnd * migration_cwnd_reduction_factor`
+      (clamped to `INITIAL_WINDOW` minimum). **GAP -> TODO-533** - reduction is hard-coded to 0.5 and clamped to two MSS, not configured policy.
+- [x] `ssthresh == cwnd` after migration (enters congestion avoidance, no
+      slow-start overshoot). **VERIFIED** - `Recovery::on_path_change()` assigns both to the same reduced window before synchronizing the CC.
+- [x] `migration_cooldown_ms` is configurable and respected (0 = immediate,
+      5000 = 5s block). **GAP -> TODO-533** - the cooldown is a fixed 750 ms constant.
+- [x] The path-probe phase restores cwnd to `path_probe_target_cwnd` within
+      `3 x smoothed_RTT`. **GAP -> TODO-533** - no path-probe phase or target exists.
+- [x] PATH_CHALLENGE RTT is captured and used as initial RTT for the new path. **GAP -> TODO-533** - validation records issuance time but never derives a path RTT sample.
+- [x] `on_path_change()` is called on the CC instance during migration. **GAP -> TODO-533** - migration calls `Recovery::on_path_change()`, while the CC trait exposes only `set_cwnd()`.
+- [x] BBR3: `min_rtt` is reset to new path RTT after migration. **GAP -> TODO-533** - `set_cwnd()` resets BBR path state without receiving the measured new-path RTT.
+- [x] Reno: `ssthresh = cwnd * 0.5` and slow-start exit after migration. **SUPERSEDED** - the canonical recovery layer applies one gentle 0.5 reduction and enters congestion avoidance for every CC; TODO-533 must make that policy explicit and CC-aware without a second Reno-only reduction.
+- [x] `pto_count` is reset to 0 on migration. **VERIFIED** - `Recovery::on_path_change()` sets it to zero.
+- [x] No regression in existing migration tests (path validation still works,
+      PATH_CHALLENGE/RESPONSE still required). **VERIFIED** - the path validation suite retains challenge matching, anti-amplification, timeout, and migration coverage.
+- [x] Unit test: migrate with `cwnd = 100_000`, verify `cwnd == 50_000`. **GAP -> TODO-533** - the current unit grows a window implicitly and checks generic halving, not this exact vector.
+- [x] Unit test: migrate with factor `0.25`, verify `cwnd == 25_000`. **GAP -> TODO-533** - configurable factor support is absent.
+- [x] Unit test: migrate with factor `1.0`, verify `cwnd == 100_000`. **GAP -> TODO-533** - configurable factor support is absent.
+- [x] Unit test: `bytes_in_flight > 0` immediately after migration. **GAP -> TODO-533** - no migration-boundary unit asserts this invariant.

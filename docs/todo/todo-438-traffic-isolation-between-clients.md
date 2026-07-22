@@ -286,17 +286,17 @@ Three isolation approaches were evaluated (see Technology Choices). The chosen a
 
 ## Completion Criteria
 
-- [ ] Source IP validation drops packets with mismatched source IP before TUN write
-- [ ] iptables FORWARD rule drops all TUN→TUN (client-to-client) traffic
-- [ ] iptables FORWARD rules drop broadcast and multicast from TUN
-- [ ] Per-client FORWARD rules allow only assigned IP to send outbound traffic
-- [ ] Per-client FORWARD rules allow only ESTABLISHED return traffic to assigned IP
-- [ ] Client A cannot ping, port-scan, or connect to Client B's TUN IP
-- [ ] Client A cannot send packets with Client B's source IP
-- [ ] Client A cannot send broadcast traffic to all clients
-- [ ] Per-client rules are installed on session create and removed on session expire
-- [ ] Stale rules are cleaned up on server restart (cleanup_stale)
-- [ ] IPv6 isolation mirrors IPv4 (ip6tables)
-- [ ] Metrics: spoofed source drops, client-to-client drops, active isolation rules
-- [ ] All unit, integration, and E2E tests pass
-- [ ] No impact on legitimate client-to-internet traffic
+- [x] Source IP validation drops packets with mismatched source IP before TUN write. **GAP -> TODO-523** - `ClientIsolationManager::check_packet()` exists only in its module and has no production TUN or MASQUE caller.
+- [x] iptables FORWARD rule drops all TUN-to-TUN (client-to-client) traffic. **GAP -> TODO-523** - the helper generates a command string, but `RoutingManager` never installs it.
+- [x] iptables FORWARD rules drop broadcast and multicast from TUN. **GAP -> TODO-523** - no owned production rules or typed forwarding policy enforce these destinations.
+- [x] Per-client FORWARD rules allow only assigned IP to send outbound traffic. **GAP -> TODO-523** - generated strings are not executed or bound to session ownership.
+- [x] Per-client FORWARD rules allow only ESTABLISHED return traffic to assigned IP. **GAP -> TODO-523** - current routing retains a blanket established-return rule.
+- [x] Client A cannot ping, port-scan, or connect to Client B's TUN IP. **GAP -> TODO-523** - default isolation has neither runtime wiring nor three-client packet proof.
+- [x] Client A cannot send packets with Client B's source IP. **GAP -> TODO-523** - the validator is not called before production TUN writes.
+- [x] Client A cannot send broadcast traffic to all clients. **GAP -> TODO-523** - the broadcast policy remains unimplemented.
+- [x] Per-client rules are installed on session create and removed on session expire. **GAP -> TODO-523** - session lifecycle has no isolation-manager or firewall-rule ownership.
+- [x] Stale rules are cleaned up on server restart (cleanup_stale). **GAP -> TODO-523** - no isolation stale-cleanup boundary exists.
+- [x] IPv6 isolation mirrors IPv4 (ip6tables). **GAP -> TODO-523** - neither the in-process caller nor an installed IPv6 rule lifecycle exists.
+- [x] Metrics: spoofed source drops, client-to-client drops, active isolation rules. **GAP -> TODO-523** - module-local atomics are not exported through the production metrics surface.
+- [x] All unit, integration, and E2E tests pass. **GAP -> TODO-523** - helper units pass, but production integration and E2E isolation tests are absent.
+- [x] No impact on legitimate client-to-internet traffic. **GAP -> TODO-523** - no real default-deny isolation runtime exists to measure against legitimate traffic.

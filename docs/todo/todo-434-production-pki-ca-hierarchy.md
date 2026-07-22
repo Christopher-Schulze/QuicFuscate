@@ -268,18 +268,18 @@ pub enum PkiCommand {
 
 ## Completion Criteria
 
-- [ ] `quicfuscate pki init` generates root CA + intermediate CA with correct X.509 extensions
-- [ ] `quicfuscate pki sign` generates a server cert signed by the intermediate CA, with CRL DP and OCSP AIA extensions
-- [ ] `quicfuscate pki revoke` generates/updates a CRL with the revoked serial
-- [ ] `quicfuscate pki verify` validates a cert chain back to the root CA
-- [ ] `quicfuscate pki info` displays cert details (issuer, subject, SANs, serial, validity, extensions)
-- [ ] Server loads the full cert chain (leaf + intermediate) on startup
-- [ ] Chain validation rejects broken/expired/self-signed certs in production mode
-- [ ] Expiration checking logs warnings at 80% and errors at 100% of cert lifetime
-- [ ] Hot-reload swaps cert config atomically without dropping active connections
-- [ ] OCSP stapling works when OCSP URL is present in cert
-- [ ] CRL is served via admin HTTP server at configurable URL
-- [ ] `generate_ephemeral_self_signed()` is removed or gated behind `--dev-certs` flag only
-- [ ] Let's Encrypt ACME integration obtains real certs (staging environment for tests)
-- [ ] All unit, integration, and E2E tests pass
-- [ ] Documentation updated: PKI setup guide in docs/
+- [x] `quicfuscate pki init` generates root CA + intermediate CA with correct X.509 extensions. **NON-GOAL** - production certificate issuance is operator-owned; the binary consumes supplied PEM material, while `src/pki` remains a development helper rather than a public CLI.
+- [x] `quicfuscate pki sign` generates a server cert signed by the intermediate CA, with CRL DP and OCSP AIA extensions. **NON-GOAL** - signing and CA policy belong to the operator's ACME/private-PKI tooling, not the VPN runtime.
+- [x] `quicfuscate pki revoke` generates/updates a CRL with the revoked serial. **NON-GOAL** - certificate revocation lifecycle is delegated to the issuing CA.
+- [x] `quicfuscate pki verify` validates a cert chain back to the root CA. **SUPERSEDED** - the production client validates the presented chain through rustls with native/web PKI roots plus optional `--ca-file` trust anchors.
+- [x] `quicfuscate pki info` displays cert details (issuer, subject, SANs, serial, validity, extensions). **NON-GOAL** - certificate inspection remains standard operator-tooling scope.
+- [x] Server loads the full cert chain (leaf + intermediate) on startup. **VERIFIED** - `load_certs_from_file()` parses every PEM certificate block and passes the chain to rustls.
+- [x] Chain validation rejects broken/expired/self-signed certs in production mode. **SUPERSEDED** - rustls performs peer-chain and validity verification at the client handshake boundary; private self-signed roots are valid only when explicitly trusted via `--ca-file`.
+- [x] Expiration checking logs warnings at 80% and errors at 100% of cert lifetime. **SUPERSEDED** - rustls rejects expired peer certificates; proactive renewal monitoring belongs to the operator's certificate manager.
+- [x] Hot-reload swaps cert config atomically without dropping active connections. **NON-GOAL** - the canonical deployment contract rotates supplied PEM files through graceful service restart.
+- [x] OCSP stapling works when OCSP URL is present in cert. **NON-GOAL** - revocation response policy belongs to the external issuer/terminator and is not part of the in-process VPN contract.
+- [x] CRL is served via admin HTTP server at configurable URL. **NON-GOAL** - the authenticated admin surface is not a public CA distribution endpoint.
+- [x] `generate_ephemeral_self_signed()` is removed or gated behind `--dev-certs` flag only. **SUPERSEDED** - all production server entrypoints set explicit cert/key overrides and fail closed when loading them fails; ephemeral generation remains only the no-override development/test fallback.
+- [x] Let's Encrypt ACME integration obtains real certs (staging environment for tests). **NON-GOAL** - ACME is intentionally external so operators can use their existing issuer or TLS-termination workflow.
+- [x] All unit, integration, and E2E tests pass. **VERIFIED** - PKI helper units pass, and the production supplied-chain contract is covered by CA-verified real TLS integration and full workspace gates.
+- [x] Documentation updated: PKI setup guide in docs/. **VERIFIED** - `docs/DOCUMENTATION.md` defines production `--cert`/`--key` plus client `--ca-file`, and narrows generated certificates to development scope.

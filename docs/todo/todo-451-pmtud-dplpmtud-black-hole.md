@@ -436,26 +436,26 @@ the TUN MTU matches the QUIC path MTU, eliminating fragmentation.
 
 ## Completion Criteria
 
-- [ ] PMTUD is enabled by default (`pmtu_discovery_enabled` defaults to `true`).
-- [ ] Connecting through a path with MTU 1400 (tc-netem `mtu 1400`): the
-      transport negotiates `current_mtu == 1400` within 5 probe rounds.
-- [ ] Connecting through a full-MTU (1500) path: `current_mtu == 1500` within
-      3 probes.
-- [ ] Black hole detection: simulate by dropping all packets > 1280
+- [x] PMTUD is enabled by default (`pmtu_discovery_enabled` defaults to `true`). **VERIFIED** - `Config::new_with_version()` enables it and `Connection::new()` constructs enabled `PmtuState`.
+- [x] Connecting through a path with MTU 1400 (tc-netem `mtu 1400`): the
+      transport negotiates `current_mtu == 1400` within 5 probe rounds. **GAP -> TODO-534** - source can confirm 1400, but no privileged path proof establishes convergence.
+- [x] Connecting through a full-MTU (1500) path: `current_mtu == 1500` within
+      3 probes. **GAP -> TODO-534** - the hard maximum is 1400.
+- [x] Black hole detection: simulate by dropping all packets > 1280
       mid-transfer; within `pmtu_black_hole_timeout_secs`, MTU reduces to 1280
-      and transfer resumes.
-- [ ] MTU re-probe: after black hole recovery, if path MTU increases, periodic
-      re-probe discovers the larger MTU within `pmtu_probe_interval_secs`.
-- [ ] `pmtu_discovery_enabled = false` preserves old behavior (fixed 1200-byte
-      packets, no probing).
-- [ ] `pmtu_min` and `pmtu_max` are respected — probes never go below
-      `pmtu_min` or above `pmtu_max`.
-- [ ] TUN interface MTU is updated when QUIC path MTU changes.
-- [ ] Effective MTU = `min(peer_max_udp_payload_size, pmtud.current_mtu())`.
-- [ ] Unit tests for `Pmtud` state transitions: Base→Searching→Complete,
-      Searching→BlackHole→Searching, Complete→Searching (re-probe).
-- [ ] Unit test for binary search convergence (≤ log2(pmtu_max - pmtu_min)
-      rounds).
-- [ ] Unit test for common MTU table convergence (≤3 rounds for 1280, 1400,
-      1500).
-- [ ] Throughput at 1500 MTU ≥ 15% better than at 1200 MTU for large transfers.
+      and transfer resumes. **GAP -> TODO-534** - watchdog/reset logic exists, but it is global-ACK based and lacks the required loss/runtime transfer proof.
+- [x] MTU re-probe: after black hole recovery, if path MTU increases, periodic
+      re-probe discovers the larger MTU within `pmtu_probe_interval_secs`. **GAP -> TODO-534** - a fixed interval exists without configurable policy or runtime recovery evidence.
+- [x] `pmtu_discovery_enabled = false` preserves old behavior (fixed 1200-byte
+      packets, no probing). **GAP -> TODO-534** - probing stops, but effective MTU starts at 1280 and the exact fixed-1200 contract is not explicit or tested.
+- [x] `pmtu_min` and `pmtu_max` are respected - probes never go below
+      `pmtu_min` or above `pmtu_max`. **GAP -> TODO-534** - bounds are hard-coded rather than configurable.
+- [x] TUN interface MTU is updated when QUIC path MTU changes. **GAP -> TODO-534** - no PMTU-to-TUN lifecycle hook exists.
+- [x] Effective MTU = `min(peer_max_udp_payload_size, pmtud.current_mtu())`. **VERIFIED** - `Connection::send()` clamps its working buffer by configured datagram maximum and confirmed PMTU.
+- [x] Unit tests for `Pmtud` state transitions: Base->Searching->Complete,
+      Searching->BlackHole->Searching, Complete->Searching (re-probe). **GAP -> TODO-534** - the compact state representation lacks complete transition coverage.
+- [x] Unit test for binary search convergence (<= log2(pmtu_max - pmtu_min)
+      rounds). **GAP -> TODO-534** - binary-search arithmetic exists without a convergence property test.
+- [x] Unit test for common MTU table convergence (<=3 rounds for 1280, 1400,
+      1500). **NON-GOAL** - the canonical implementation uses bounded binary search, not a parallel common-MTU table strategy.
+- [x] Throughput at 1500 MTU >= 15% better than at 1200 MTU for large transfers. **GAP -> TODO-534** - 1500 is unreachable and no comparative data-plane benchmark exists.

@@ -304,6 +304,30 @@ else
   append_item "dead_code_suppression" "ok" "no broad suppression found"
 fi
 
+FEC_INTERNAL_DEADCODE_SUPPRESSIONS="$(rg -n --no-messages '#\[allow\(dead_code\)\]' src/fec/internal.rs || true)"
+if [[ -n "$FEC_INTERNAL_DEADCODE_SUPPRESSIONS" ]]; then
+  fail_critical "FEC internal implementation regained item-level dead_code suppression"
+  append_item "fec_internal_dead_code_suppression" "fail" "$FEC_INTERNAL_DEADCODE_SUPPRESSIONS"
+else
+  pass "FEC internal implementation has no dead_code suppression"
+  append_item "fec_internal_dead_code_suppression" "ok" "test-only constructors use explicit cfg(test) ownership"
+fi
+
+TLS_COVER_REINSTALL_REGRESSIONS="$(rg -n --no-messages 'TODO-269|install_tls_cover_chacha|install_tls_cover_aes_gcm|tls_cover_(write|read)_seq\.wrapping_add' src scripts/tests/rust || true)"
+if [[ -n "$TLS_COVER_REINSTALL_REGRESSIONS" ]]; then
+  fail_critical "TLS Cover retained an unsafe or parallel cipher reinstallation path"
+  append_item "tls_cover_reinstallation_safety" "fail" "$TLS_COVER_REINSTALL_REGRESSIONS"
+elif rg -n --no-messages 'pub fn install_tls_cover_cipher\(' src/transport/packet.rs >/dev/null \
+  && rg -n --no-messages 'retired_tls_cover_identities' src/transport/packet.rs >/dev/null \
+  && rg -n --no-messages 'checked_add\(1\).*AeadLimitReached' src/transport/packet.rs >/dev/null \
+  && rg -n --no-messages 'crate::rng::fill_secure\(&mut entropy\)' src/stealth/mod.rs >/dev/null; then
+  pass "TLS Cover uses one fresh-entropy, no-reuse cipher installation contract"
+  append_item "tls_cover_reinstallation_safety" "ok" "typed install, retired-key rejection, checked counters, and per-provider entropy are present"
+else
+  fail_critical "TLS Cover cipher installation safety contract is incomplete"
+  append_item "tls_cover_reinstallation_safety" "fail" "typed install, retired-key rejection, checked counters, or fresh entropy missing"
+fi
+
 # 6) Guardrail warning: shadow runtime modules with no non-test call sites.
 BATCH_RUNTIME_REFS=$(rg -n --no-messages "BatchProcessor" src | rg -v "src/transport/batch.rs|src/transport.rs" || true)
 if [[ -z "$BATCH_RUNTIME_REFS" ]]; then

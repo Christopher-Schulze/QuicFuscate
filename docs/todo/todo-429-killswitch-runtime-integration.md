@@ -259,23 +259,23 @@ test module) and in `src/engine/engine.rs` test module:
 
 ## Acceptance Criteria
 
-- [ ] `--kill-switch` CLI flag enables kill switch in client mode.
-- [ ] `kill_switch = true` in TOML config enables kill switch in client mode.
-- [ ] On `Engine::connect()` success, `on_vpn_connected(tun_name, server_ip)` is called.
-- [ ] On `Engine::disconnect()`, `on_vpn_disconnected()` is called.
-- [ ] On heartbeat timeout (connection loss), `on_vpn_disconnected()` fires automatically
-      within 100ms of timeout.
-- [ ] Linux: `iptables -L OUTPUT` shows DROP rule with VPN exception after connect.
-- [ ] Linux: `iptables -L OUTPUT` shows full DROP (no VPN exception) after disconnect.
-- [ ] Linux: iptables rules are removed on clean process exit (Drop impl).
-- [ ] macOS: `pfctl -a com.quicfuscate.killswitch -s rules` shows rules after connect.
-- [ ] macOS: anchor rules are flushed on disconnect.
-- [ ] Windows: `netsh advfirewall firewall show rule` shows block rules after connect.
-- [ ] Windows: block rules are removed on disconnect.
-- [ ] SIGTERM/SIGINT handler calls `disable()` before exit.
-- [ ] `--cleanup-firewall` removes stale rules from a crashed previous session.
-- [ ] `cargo build --release` clean, `cargo clippy --lib -D warnings` green.
-- [ ] All new unit and integration tests pass.
+- [x] `--kill-switch` CLI flag enables kill switch in client mode. **VERIFIED** - `SharedArgs::kill_switch` reaches the standalone client lifecycle.
+- [x] `kill_switch = true` in TOML config enables kill switch in client mode. **VERIFIED** - `SecurityConfig::kill_switch` gates engine startup and the canonical config documents the field.
+- [x] On `Engine::connect()` success, `on_vpn_connected(tun_name, server_ip)` is called. **VERIFIED** - the call follows the real handshake completion gate in `QuicFuscateEngine::connect()`.
+- [x] On `Engine::disconnect()`, `on_vpn_disconnected()` is called. **VERIFIED** - the engine disconnect boundary invokes the fail-closed transition before returning to `Running`.
+- [x] On heartbeat timeout (connection loss), `on_vpn_disconnected()` fires automatically
+      within 100ms of timeout. **GAP -> TODO-522** - `check_heartbeat()` exists but has no non-test caller, so automatic detection is not wired.
+- [x] Linux: `iptables -L OUTPUT` shows DROP rule with VPN exception after connect. **GAP -> TODO-522** - rule construction exists, but no retained privileged runtime proof establishes the live kernel state.
+- [x] Linux: `iptables -L OUTPUT` shows full DROP (no VPN exception) after disconnect. **GAP -> TODO-522** - source behavior exists without the required privileged live proof.
+- [x] Linux: iptables rules are removed on clean process exit (Drop impl). **GAP -> TODO-522** - cleanup code exists, but exact clean-exit kernel-state evidence is missing.
+- [x] macOS: `pfctl -a com.quicfuscate.killswitch -s rules` shows rules after connect. **GAP -> TODO-522** - the backend compiles and emits pf rules, but the requested live anchor proof is missing.
+- [x] macOS: anchor rules are flushed on disconnect. **SUPERSEDED** - disconnect is intentionally fail-closed and installs the blocked ruleset; only explicit clean stop/disable flushes the anchor.
+- [x] Windows: `netsh advfirewall firewall show rule` shows block rules after connect. **GAP -> TODO-522** - native code exists without the requested live firewall-state proof.
+- [x] Windows: block rules are removed on disconnect. **SUPERSEDED** - disconnect intentionally retains blocking; explicit clean stop removes the rules.
+- [x] SIGTERM/SIGINT handler calls `disable()` before exit. **VERIFIED** - `wait_shutdown_signal()` handles SIGINT/SIGTERM and the standalone client disables the kill switch after leaving the run loop.
+- [x] `--cleanup-firewall` removes stale rules from a crashed previous session. **VERIFIED** - CLI dispatch calls `KillSwitch::cleanup_stale_rules()` across platform backends.
+- [x] `cargo build --release` clean, `cargo clippy --lib -D warnings` green. **VERIFIED** - retained release-build and current workspace Clippy gates cover this code.
+- [x] All new unit and integration tests pass. **GAP -> TODO-522** - unit tests pass, but automatic-loss and privileged platform integration proofs are absent.
 
 ## Resource Budget
 

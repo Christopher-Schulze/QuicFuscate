@@ -4,10 +4,11 @@ title: "Review and resolve 7 TODO markers in Rust source code"
 severity: "LOW"
 phase: legacy
 priority: legacy
-status: DEFERRED
+status: SCRAP
 created: 2026-03-27
 backfilled: 2026-07-23
 defer_reason: "Code TODO-markers — grep -rn TODO src/ is not a task"
+resolved: 2026-07-22
 ---
 
 # TODO-378: Review and resolve 7 TODO markers in Rust source code
@@ -36,3 +37,7 @@ Items 1, 3 are informational references to completed TODOs.
 ## Files to Modify
 - Covered by TODO-358 for items 4-7
 - src/stealth/mod.rs for item 2 (independent review)
+
+## Resolution
+
+Scrapped during TODO-521 reconciliation because source marker count is not a deliverable. PQ tombstones are gone, informational task references are valid, and the remaining cipher-reinstallation security obligation moved to TODO-545.

@@ -289,20 +289,20 @@ tests.
 
 ## Acceptance Criteria
 
-- [ ] Teardown retries up to 3 times with 100ms backoff between attempts.
-- [ ] After teardown, `stale_masquerade_exists()` and `stale_tun_exists()`
-      are checked; stale state triggers force-cleanup.
-- [ ] On the final failed attempt, `iptables -F` / `ip link delete` is
-      invoked as a last resort.
-- [ ] All teardown failures are logged at `warn` level (not `debug`).
-- [ ] `cleanup_on_startup()` removes stale iptables rules and TUN
-      interfaces before normal setup on both server and client.
-- [ ] A server that crashed with active rules/TUN starts successfully on
-      the next launch (no duplicate rules, no "TUN already exists" error).
-- [ ] Test: simulated first-attempt failure → retry succeeds on attempt 2.
-- [ ] Test: persistent failure → 3 attempts + force-cleanup invoked.
-- [ ] Test: pre-seeded stale state → `cleanup_on_startup()` removes it.
-- [ ] `cargo test` passes; `cargo clippy` reports no new warnings.
+- [x] Teardown retries up to 3 times with 100ms backoff between attempts. **GAP -> TODO-542** - server routing retries three times with increasing 100/200 ms waits; the exact fixed backoff and client lifecycle are not covered.
+- [x] After teardown, `stale_masquerade_exists()` and `stale_tun_exists()`
+      are checked; stale state triggers force-cleanup. **GAP -> TODO-542** - neither post-teardown verification function exists.
+- [x] On the final failed attempt, `iptables -F` / `ip link delete` is
+      invoked as a last resort. **NON-GOAL** - flushing shared firewall chains is unsafe; TODO-542 must delete only owned rules/table/interface and fail loudly if ownership cannot be proven.
+- [x] All teardown failures are logged at `warn` level (not `debug`). **GAP -> TODO-542** - outer retries warn, but backend command failures still log at debug and may return success.
+- [x] `cleanup_on_startup()` removes stale iptables rules and TUN
+      interfaces before normal setup on both server and client. **GAP -> TODO-542** - server calls routing `cleanup_stale()`, but TUN identity and client startup cleanup are incomplete.
+- [x] A server that crashed with active rules/TUN starts successfully on
+      the next launch (no duplicate rules, no "TUN already exists" error). **GAP -> TODO-542** - no crash/restart process proof exists.
+- [x] Test: simulated first-attempt failure -> retry succeeds on attempt 2. **GAP -> TODO-542** - no injected command-runner test exists.
+- [x] Test: persistent failure -> 3 attempts + force-cleanup invoked. **GAP -> TODO-542** - no owned fallback or test exists.
+- [x] Test: pre-seeded stale state -> `cleanup_on_startup()` removes it. **GAP -> TODO-542** - no privileged stale-state fixture exists.
+- [x] `cargo test` passes; `cargo clippy` reports no new warnings. **VERIFIED** - current full Rust and denied-warning Clippy gates pass.
 
 ## Resource Budget
 

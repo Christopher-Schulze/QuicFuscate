@@ -358,16 +358,16 @@ windows-check:
 
 ## Completion Criteria
 
-- [ ] `cargo build --release --features tun-windows --target x86_64-pc-windows-gnu` succeeds
-- [ ] `cargo clippy --lib --features tun-windows -- -D warnings` is clean
-- [ ] On Windows 10/11 with `wintun.dll` present: `open_platform_tun(&cfg)` returns a `WindowsTun` instance
-- [ ] `WindowsTun::name()` returns the configured adapter name
-- [ ] `WindowsTun::mtu()` returns the configured MTU
-- [ ] `WindowsTun::read()` returns IP packets from the Wintun session
-- [ ] `WindowsTun::write()` sends IP packets through the Wintun session
-- [ ] `ipconfig` shows the adapter with correct IP/netmask
-- [ ] `ping <server-tun-ip>` through the tunnel succeeds (end-to-end with a running server)
-- [ ] `tun_capabilities().built_in == true` on Windows when `tun-windows` feature is enabled
-- [ ] Kill switch blocks non-VPN traffic, allows VPN traffic through Wintun adapter
-- [ ] No panics, no unsafe UB (wintun crate's own unsafe is encapsulated)
-- [ ] Drop cleans up adapter and joins receive thread
+- [x] `cargo build --release --features tun-windows --target x86_64-pc-windows-gnu` succeeds. **GAP -> TODO-528** - TODO-519 proves native Windows core and release builds, but the explicit Wintun-enabled release gate is not retained.
+- [x] `cargo clippy --lib --features tun-windows -- -D warnings` is clean. **GAP -> TODO-528** - native Clippy is green for the canonical feature set, not the exact Wintun-enabled surface.
+- [x] On Windows 10/11 with `wintun.dll` present: `open_platform_tun(&cfg)` returns a `WindowsTun` instance. **GAP -> TODO-528** - the dynamic loader and constructor exist without a native privileged adapter-creation proof.
+- [x] `WindowsTun::name()` returns the configured adapter name. **VERIFIED** - `WintunDevice` retains the configured name and its `TunDevice` implementation returns it.
+- [x] `WindowsTun::mtu()` returns the configured MTU. **VERIFIED** - the constructor stores `TunConfig::mtu` and the trait implementation returns the stored value.
+- [x] `WindowsTun::read()` returns IP packets from the Wintun session. **GAP -> TODO-528** - the ring copy path exists but has no native packet proof or closed-session termination gate.
+- [x] `WindowsTun::write()` sends IP packets through the Wintun session. **GAP -> TODO-528** - the send-ring path exists without native packet delivery proof.
+- [x] `ipconfig` shows the adapter with correct IP/netmask. **GAP -> TODO-528** - `netsh` assignment exists, but native state was never asserted.
+- [x] `ping <server-tun-ip>` through the tunnel succeeds (end-to-end with a running server). **GAP -> TODO-528** - no Windows Wintun data-plane E2E exists.
+- [x] `tun_capabilities().built_in == true` on Windows when `tun-windows` feature is enabled. **VERIFIED** - the capability expression explicitly gates Windows built-in support on that feature.
+- [x] Kill switch blocks non-VPN traffic, allows VPN traffic through Wintun adapter. **GAP -> TODO-528** - source paths coexist but no native firewall plus Wintun packet proof exists.
+- [x] No panics, no unsafe UB (wintun crate's own unsafe is encapsulated). **GAP -> TODO-528** - the hand-written FFI owns unsafe Send/Sync and close/read races; native stress and shutdown evidence are required.
+- [x] Drop cleans up adapter and joins receive thread. **SUPERSEDED** - the retained implementation has no separate receive thread; `Drop` idempotently ends the Wintun session, closes the adapter, and unloads the DLL. TODO-528 must prove blocked reads terminate safely.

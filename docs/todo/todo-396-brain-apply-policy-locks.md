@@ -4,9 +4,10 @@ title: Brain apply_policy lock coalescing
 severity: MEDIUM
 phase: B
 priority: P2
-status: DEFERRED
+status: SCRAP
 superseded_by: TODO-417
 created: 2026-06-05
+resolved: 2026-07-22
 ---
 
 # TODO-396: Brain `apply_policy` Lock Coalescing

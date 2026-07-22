@@ -101,6 +101,7 @@ All 15 stealth technologies in `src/stealth/mod.rs` have unit test coverage in `
 - ServerPushState: observe_server_push_burst resets interval, disabled=None plan
 - FlowShaper: jitter range, min-clamp, variation (existing)
 - TlsCover: ClientHello structure, Firefox no-session-id, Chrome session-id (existing)
+- TLS Cover key lifecycle: `TlsCoverProvider` fresh OS entropy -> profile/role-domain-separated HKDF -> `CryptoContext::install_tls_cover_cipher` -> active/retired material identity and monotonic per-direction record counters; cover generation encrypts only through the constructor-installed state and fails closed if it is absent.
 - CoverPing: interval gate, disabled preset (existing)
 - CoverStream: disabled_when_cover_ping_off, disabled_when_interval_zero, fires_once_then_suppressed, data_length_in_range (Session 31)
 - PaddingStrategy: PacketNormalize distinct, serde roundtrip, defaults-per-mode (existing)

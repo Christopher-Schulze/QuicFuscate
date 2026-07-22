@@ -336,21 +336,21 @@ Spawn background tasks for blacklist sync and DDoS detector sampling on server s
 
 ## Completion Criteria
 
-- [ ] Default per-IP PPS is 1,000 (down from 10,000)
-- [ ] `RateLimitConfig` has a `burst_size` field (default 100); `TokenBucket` separates burst capacity from refill rate
-- [ ] `GlobalRateLimiter` caps server-wide PPS (default 50,000)
-- [ ] `DdosDetector` triggers enhanced mode when PPS > 5× EWMA for 10s; auto-clears when PPS < 2× EWMA for 30s
-- [ ] Enhanced mode halves per-IP limits and enables QUIC retry tokens
-- [ ] `GeoIpBlocker` blocks configured countries using a MaxMindDB database
-- [ ] `GeoIpBlocker` gracefully degrades when no database is present
-- [ ] `BlacklistSync` fetches an external blacklist hourly and caches locally; blocks blacklisted IPs
-- [ ] All features are configurable via `DdosProtectionConfig` and env vars; all can be disabled
-- [ ] Test: 10,000 PPS from one IP is blocked (only 1,100 accepted)
-- [ ] Test: global limit triggers at server level
-- [ ] Test: GeoIP blocks configured countries
-- [ ] Test: blacklist sync fetches and applies
-- [ ] Test: DDoS detection activates and clears correctly
-- [ ] Test: burst size allows initial burst then enforces steady rate
-- [ ] Test: legitimate users are not blocked during normal traffic
-- [ ] `cargo test` passes with all new tests green
-- [ ] `cargo clippy` reports no new warnings
+- [x] Default per-IP PPS is 1,000 (down from 10,000). **VERIFIED** - `RateLimitConfig::default()` and its unit assert 1000.
+- [x] `RateLimitConfig` has a `burst_size` field (default 100); `TokenBucket` separates burst capacity from refill rate. **SUPERSEDED** - capacity and refill are separated; the canonical zero value resolves to a 2x sustained burst while operators can set an explicit burst.
+- [x] `GlobalRateLimiter` caps server-wide PPS (default 50,000). **VERIFIED** - the lock-free limiter is first in the live ingress policy and has default/aggregate units.
+- [x] `DdosDetector` triggers enhanced mode when PPS > 5x EWMA for 10s; auto-clears when PPS < 2x EWMA for 30s. **GAP -> TODO-540** - the helper uses 3x instantaneous activation and 1.5x instantaneous clear with no duration state; PPS snapshot arithmetic is not a valid interval delta.
+- [x] Enhanced mode halves per-IP limits and enables QUIC retry tokens. **GAP -> TODO-540** - it drops alternating global packets and does not enable retry tokens or adjust per-IP policy coherently.
+- [x] `GeoIpBlocker` blocks configured countries using a MaxMindDB database. **GAP -> TODO-540** - reader/config/runtime wiring exists, but no real database fixture or live blocked-country proof exists.
+- [x] `GeoIpBlocker` gracefully degrades when no database is present. **VERIFIED** - missing/disabled database paths allow traffic and have units.
+- [x] `BlacklistSync` fetches an external blacklist hourly and caches locally; blocks blacklisted IPs. **GAP -> TODO-540** - bounded HTTPS sync and runtime scheduling exist, but no durable local cache load/store and no real feed-process proof exist.
+- [x] All features are configurable via `DdosProtectionConfig` and env vars; all can be disabled. **GAP -> TODO-540** - configuration is split across hard-coded global/detector defaults, rate-limit env, and server GeoIP/blacklist env with no single disable switch.
+- [x] Test: 10,000 PPS from one IP is blocked (only 1,100 accepted). **GAP -> TODO-540** - no exact ingress/process test exists and the default burst contract is 2000, not 100.
+- [x] Test: global limit triggers at server level. **VERIFIED** - aggregate limiter units prove exhaustion independently of IP identity and production checks it first.
+- [x] Test: GeoIP blocks configured countries. **GAP -> TODO-540** - missing-database units cannot prove a positive country lookup.
+- [x] Test: blacklist sync fetches and applies. **VERIFIED** - async parser/fetch coverage populates the live block set, with response-size bounds.
+- [x] Test: DDoS detection activates and clears correctly. **GAP -> TODO-540** - helper units prove current instantaneous semantics, not the required sustained-duration contract.
+- [x] Test: burst size allows initial burst then enforces steady rate. **VERIFIED** - token-bucket units exercise initial capacity and refill separation.
+- [x] Test: legitimate users are not blocked during normal traffic. **GAP -> TODO-540** - no process-level false-positive workload proof exists.
+- [x] `cargo test` passes with all new tests green. **VERIFIED** - current full Rust tests pass.
+- [x] `cargo clippy` reports no new warnings. **VERIFIED** - current denied-warning Clippy passes.

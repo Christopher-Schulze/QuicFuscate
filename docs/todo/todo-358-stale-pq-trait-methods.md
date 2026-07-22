@@ -4,10 +4,11 @@ title: "Remove 4 dead PQ trait methods from qftls.rs"
 severity: "MODERATE"
 phase: legacy
 priority: legacy
-status: DEFERRED
+status: DONE
 created: 2026-03-27
 backfilled: 2026-07-23
 defer_reason: "Dead-code — cargo dead / cargo udeps covers this"
+resolved: 2026-07-22
 ---
 
 # TODO-358: Remove 4 dead PQ trait methods from qftls.rs
@@ -38,3 +39,7 @@ Also: Comment tombstones at qftls.rs:896, :1801 and crypto/mod.rs:347, :904-906.
 - src/qftls.rs
 - src/lib.rs
 - src/crypto/mod.rs
+
+## Resolution
+
+Verified during TODO-521 reconciliation: all four PQ trait methods, the stale public post-quantum claim, and the listed PQ tombstone comments are absent. Current Rust and Clippy gates pass.

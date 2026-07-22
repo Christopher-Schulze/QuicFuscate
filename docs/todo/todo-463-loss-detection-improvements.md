@@ -706,33 +706,33 @@ BBR-level performance.
 
 ## Completion Criteria
 
-- [ ] EWMA SRTT and RTTVAR are tracked per RFC 6298 / RFC 9002 §5.1 (α=0.125, β=0.25).
-- [ ] First RTT sample initializes SRTT = R, RTTVAR = R/2 (RFC 6298 §2.2).
-- [ ] PTO formula uses `SRTT + max(4*RTTVAR, kGranularity) + max_ack_delay` (RFC 9002
-      §6.2.1).
-- [ ] Time-based loss detection declares a packet lost when a later packet is acked
+- [x] EWMA SRTT and RTTVAR are tracked per RFC 6298 / RFC 9002 Section 5.1 (alpha=0.125, beta=0.25). **VERIFIED** - `Recovery::update_rtt()` implements the exact first/subsequent sample equations and smoothing units.
+- [x] First RTT sample initializes SRTT = R, RTTVAR = R/2 (RFC 6298 Section 2.2). **VERIFIED** - exact code and unit assertions cover initialization.
+- [x] PTO formula uses `SRTT + max(4*RTTVAR, kGranularity) + max_ack_delay` (RFC 9002
+      Section 6.2.1). **GAP -> TODO-544** - current PTO uses only one RTTVAR.
+- [x] Time-based loss detection declares a packet lost when a later packet is acked
       and the unacked packet was sent > `loss_delay` ago, where
-      `loss_delay = max(9/8 * SRTT, 1ms)` (RFC 9002 §6.1.2).
-- [ ] RACK tracks the highest acked packet number + send time and declares unacked
-      packets sent before `rack_xmit_ts - rack_rtt - reo_wnd` lost (RFC 8985).
-- [ ] RACK reordering window = `min_RTT / 4` (configurable to static).
-- [ ] RTT variance is propagated to BBR2/BBR3 via `update_rtt_var`.
-- [ ] BBR3 ProbeRTT window adapts to RTT variance (longer window on jittery paths).
-- [ ] Reno tracks delivery rate and exposes a non-None `pacing_rate()` after steady
-      ACKs.
-- [ ] `Recovery::on_ack` receives `largest_acked` and `largest_acked_sent_time` from
-      the connection layer.
-- [ ] Loss detection timer (`loss_detection_deadline`) is available for event loop
-      integration.
-- [ ] On a `tc netem loss 5%` loopback, loss-detection latency is lower with RACK +
-      time-based detection than with PTO-only (measured).
-- [ ] On a `tc netem reorder 10%` loopback, spurious retransmissions are fewer with
-      RACK than with packet-threshold-only (measured).
-- [ ] RTT variance improves BBR probing on jittery paths (no spurious retransmissions
-      when variance is high).
-- [ ] Reno bandwidth estimation improves throughput on a high-BDP simulation by > 20%
-      (measured vs. ACK-clocking-only baseline).
-- [ ] No regression in existing recovery/CC/BBR3 unit tests.
-- [ ] Loss detection scan per ACK is < 5µs for 100 in-flight packets.
-- [ ] `cargo test` passes with all new tests green; `cargo clippy` reports no new
-      warnings.
+      `loss_delay = max(9/8 * SRTT, 1ms)` (RFC 9002 Section 6.1.2). **GAP -> TODO-544** - deadline arithmetic exists as a helper but does not own sent packets or declare losses.
+- [x] RACK tracks the highest acked packet number + send time and declares unacked
+      packets sent before `rack_xmit_ts - rack_rtt - reo_wnd` lost (RFC 8985). **GAP -> TODO-544** - current `rack_is_lost()` is only an SRTT-plus-RTTVAR age predicate with no RACK state.
+- [x] RACK reordering window = `min_RTT / 4` (configurable to static). **GAP -> TODO-544** - no reordering-window state or config exists.
+- [x] RTT variance is propagated to BBR2/BBR3 via `update_rtt_var`. **GAP -> TODO-544** - the CC trait exposes no variance callback.
+- [x] BBR3 ProbeRTT window adapts to RTT variance (longer window on jittery paths). **GAP -> TODO-544** - adaptive ProbeRTT variance policy is absent.
+- [x] Reno tracks delivery rate and exposes a non-None `pacing_rate()` after steady
+      ACKs. **GAP -> TODO-544** - Reno still returns `None` and explicitly tests that behavior.
+- [x] `Recovery::on_ack` receives `largest_acked` and `largest_acked_sent_time` from
+      the connection layer. **GAP -> TODO-544** - recovery receives only aggregated acknowledged bytes and time.
+- [x] Loss detection timer (`loss_detection_deadline`) is available for event loop
+      integration. **GAP -> TODO-544** - only a per-packet `time_loss_deadline(sent_at)` helper exists and no event loop consumes it.
+- [x] On a `tc netem loss 5%` loopback, loss-detection latency is lower with RACK +
+      time-based detection than with PTO-only (measured). **GAP -> TODO-544** - no real netem comparison exists.
+- [x] On a `tc netem reorder 10%` loopback, spurious retransmissions are fewer with
+      RACK than with packet-threshold-only (measured). **GAP -> TODO-544** - no real reorder comparison exists.
+- [x] RTT variance improves BBR probing on jittery paths (no spurious retransmissions
+      when variance is high). **GAP -> TODO-544** - variance is not propagated to BBR.
+- [x] Reno bandwidth estimation improves throughput on a high-BDP simulation by > 20%
+      (measured vs. ACK-clocking-only baseline). **GAP -> TODO-544** - Reno delivery-rate estimation and measurement are absent.
+- [x] No regression in existing recovery/CC/BBR3 unit tests. **VERIFIED** - current recovery and CC suites pass.
+- [x] Loss detection scan per ACK is < 5us for 100 in-flight packets. **GAP -> TODO-544** - the integrated scan does not exist and no benchmark proves the bound.
+- [x] `cargo test` passes with all new tests green; `cargo clippy` reports no new
+      warnings. **VERIFIED** - current full Rust and denied-warning Clippy gates pass.

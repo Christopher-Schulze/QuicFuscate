@@ -463,34 +463,34 @@ be avoided for reconnects (use 0-RTT + compatible VN instead).
 
 ## Completion Criteria
 
-- [ ] Client (v1 only) connects to server (v1 + v2): connection uses v1, no VN
-      packet needed.
-- [ ] Client (v2 only) connects to server (v1 + v2): connection uses v2.
-- [ ] Client (v1 + v2, prefers v2) connects to server (v1 + v2): connection
-      uses v2 (highest-priority mutual).
-- [ ] Client (v1 + v2, prefers v1) connects to server (v2 only): client
-      receives VN, falls back to v2, connection succeeds.
-- [ ] Client (v1 only) connects to server (v2 only): client receives VN, no
-      overlap, connection fails with `VersionMismatch`.
-- [ ] Server sends VN packet with correct wire format (version=0, DCID echoed,
-      SCID present, supported versions list).
-- [ ] Client discards VN packet if DCID doesn't match its SCID (RFC 9000
-      §17.2.1.1).
-- [ ] v2 connections use the v2 initial salt for key derivation.
-- [ ] v2 long-header type bits are correctly mapped (swapped from v1).
-- [ ] `supported_versions` config is respected — server only offers configured
-      versions in VN packets.
-- [ ] Custom version mode: client and server with same custom version + salt
-      connect successfully; version field is the custom value.
-- [ ] Version greasing: VN packet includes grease versions; client ignores
-      them; negotiation still works.
-- [ ] `version_information` transport parameter is sent and validated by both
-      endpoints.
-- [ ] Downgrade attack: chosen version not in peer's supported list →
-      `TRANSPORT_PARAMETER_ERROR`.
-- [ ] `set_cc_algorithm_name` and other config methods still work with v2.
-- [ ] Unit tests for VN packet build + parse round-trip.
-- [ ] Unit test for version selection logic (all priority permutations).
-- [ ] Unit test for version-aware type bit mapping (v1 and v2).
-- [ ] Unit test for `version_salt()` (v1, v2, custom).
-- [ ] No regression in v1-only connections.
+- [x] Client (v1 only) connects to server (v1 + v2): connection uses v1, no VN
+      packet needed. **GAP -> TODO-536** - supported-version config is not consumed by the connection runtime.
+- [x] Client (v2 only) connects to server (v1 + v2): connection uses v2. **GAP -> TODO-536** - the v2 constant is not wired into parsing, crypto, or handshake state.
+- [x] Client (v1 + v2, prefers v2) connects to server (v1 + v2): connection
+      uses v2 (highest-priority mutual). **GAP -> TODO-536** - selection exists only as a standalone packet helper.
+- [x] Client (v1 + v2, prefers v1) connects to server (v2 only): client
+      receives VN, falls back to v2, connection succeeds. **GAP -> TODO-536** - no client VN restart state machine exists.
+- [x] Client (v1 only) connects to server (v2 only): client receives VN, no
+      overlap, connection fails with `VersionMismatch`. **GAP -> TODO-536** - no runtime no-overlap path exists.
+- [x] Server sends VN packet with correct wire format (version=0, DCID echoed,
+      SCID present, supported versions list). **GAP -> TODO-536** - the packet builder has round-trip units but no server caller.
+- [x] Client discards VN packet if DCID doesn't match its SCID (RFC 9000
+      Section 17.2.1.1). **GAP -> TODO-536** - the parser returns only versions and cannot validate connection IDs.
+- [x] v2 connections use the v2 initial salt for key derivation. **GAP -> TODO-536** - version-specific initial crypto is absent.
+- [x] v2 long-header type bits are correctly mapped (swapped from v1). **GAP -> TODO-536** - packet type mapping remains v1-only.
+- [x] `supported_versions` config is respected - server only offers configured
+      versions in VN packets. **GAP -> TODO-536** - setters validate data but no runtime caller reads it.
+- [x] Custom version mode: client and server with same custom version + salt
+      connect successfully; version field is the custom value. **NON-GOAL** - production scope is standards-compliant QUIC v1/v2 negotiation; private wire versions would create a separate protocol and key-management surface.
+- [x] Version greasing: VN packet includes grease versions; client ignores
+      them; negotiation still works. **GAP -> TODO-536** - greasing is absent from the standalone builder and runtime.
+- [x] `version_information` transport parameter is sent and validated by both
+      endpoints. **GAP -> TODO-536** - compatible-version downgrade protection is absent.
+- [x] Downgrade attack: chosen version not in peer's supported list ->
+      `TRANSPORT_PARAMETER_ERROR`. **GAP -> TODO-536** - the validation path is absent.
+- [x] `set_cc_algorithm_name` and other config methods still work with v2. **GAP -> TODO-536** - ordinary config units pass, but no v2 connection exists to prove integration.
+- [x] Unit tests for VN packet build + parse round-trip. **VERIFIED** - packet tests cover valid round-trip and malformed inputs.
+- [x] Unit test for version selection logic (all priority permutations). **VERIFIED** - helper units cover preference, v2-only, and no-overlap selection.
+- [x] Unit test for version-aware type bit mapping (v1 and v2). **GAP -> TODO-536** - the version-aware mapping does not exist.
+- [x] Unit test for `version_salt()` (v1, v2, custom). **SUPERSEDED** - TODO-536 retains standards-based v1/v2 salt proof; custom versions are not a product goal.
+- [x] No regression in v1-only connections. **VERIFIED** - current production runtime remains v1-only and the full Rust suite passes.

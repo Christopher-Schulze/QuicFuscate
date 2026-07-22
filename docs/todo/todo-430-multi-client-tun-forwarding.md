@@ -273,16 +273,16 @@ Add counters to `Metrics`:
 
 ## Acceptance Criteria
 
-- [ ] `parse_ipv4_dest` correctly extracts destination IP from valid IPv4 packets.
-- [ ] TUN packets are routed to the client whose assigned TUN IP matches the dest IP.
-- [ ] 3 clients connected simultaneously each receive only their own traffic.
-- [ ] Client-to-client traffic (A pings B's TUN IP) routes through the server correctly.
-- [ ] Broadcast packets are sent to all connected clients.
-- [ ] Packets to server TUN IP (10.8.0.1) are handled locally, not forwarded.
-- [ ] Packets to unknown TUN IPs are dropped with a trace log and metric increment.
-- [ ] No cross-talk between clients (verified with tcpdump in netns).
-- [ ] `cargo build --release` clean, `cargo clippy --lib -D warnings` green.
-- [ ] All unit and integration tests pass.
+- [x] `parse_ipv4_dest` correctly extracts destination IP from valid IPv4 packets. **VERIFIED** - focused valid, short, wrong-version, options, and invalid-IHL tests cover the parser.
+- [x] TUN packets are routed to the client whose assigned TUN IP matches the dest IP. **VERIFIED** - the production TUN downlink resolves destination IP through `SessionManager` and flushes only the owning connection.
+- [x] 3 clients connected simultaneously each receive only their own traffic. **GAP -> TODO-523** - no three-client netns proof exists.
+- [x] Client-to-client traffic (A pings B's TUN IP) routes through the server correctly. **GAP -> TODO-523** - the source path exists without a real two-client TUN proof.
+- [x] Broadcast packets are sent to all connected clients. **GAP -> TODO-523** - the current lookup treats broadcast as an unknown destination and does not fan it out.
+- [x] Packets to server TUN IP (10.8.0.1) are handled locally, not forwarded. **VERIFIED** - the production loop intercepts server-local IPv4 ICMP before session routing.
+- [x] Packets to unknown TUN IPs are dropped with a trace log and metric increment. **SUPERSEDED** - the current fail-fast contract returns ICMP Host Unreachable instead of a silent drop; missing ICMP metrics remain in TODO-523.
+- [x] No cross-talk between clients (verified with tcpdump in netns). **GAP -> TODO-523** - no retained multi-client capture proves isolation.
+- [x] `cargo build --release` clean, `cargo clippy --lib -D warnings` green. **VERIFIED** - retained release-build and current workspace Clippy gates pass.
+- [x] All unit and integration tests pass. **GAP -> TODO-523** - parser/session units pass, but the specified multi-client integration matrix is missing.
 
 ## Resource Budget
 

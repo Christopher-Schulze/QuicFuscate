@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# Description: Audit TODO system consistency — validates YAML frontmatter
+# Description: Audit TODO system consistency - validates YAML frontmatter
 # in docs/todo/todo-*.md and cross-checks against docs/todo.md master index.
 #
 # Checks:
 #   1. Every docs/todo/todo-*.md has YAML frontmatter with a status: field.
 #   2. Every status: value is one of: OPEN, DONE, DEFERRED, SCRAP.
 #   3. The status in each detail file matches the status in docs/todo.md.
+#   4. DONE detail files have no unchecked acceptance criteria.
 #
 # Exit codes:
-#   0 — all checks pass
-#   1 — one or more violations found
+#   0 - all checks pass
+#   1 - one or more violations found
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,6 +54,7 @@ echo
 echo "--- Check 1 & 2: YAML frontmatter + valid status ---"
 
 declare -A DETAIL_STATUS_MAP
+DONE_DETAIL_FILES=()
 
 for f in docs/todo/todo-*.md; do
   [[ -f "$f" ]] || continue
@@ -62,7 +64,7 @@ for f in docs/todo/todo-*.md; do
   frontmatter=$(awk '/^---$/{n++; if(n==2) exit} n==1' "$f" 2>/dev/null)
 
   if [[ -z "$frontmatter" ]]; then
-    echo "VIOLATION: $f — no YAML frontmatter found"
+    echo "VIOLATION: $f - no YAML frontmatter found"
     violations=$((violations + 1))
     continue
   fi
@@ -71,7 +73,7 @@ for f in docs/todo/todo-*.md; do
   status=$(echo "$frontmatter" | grep -E '^status:' | sed 's/^status:[[:space:]]*//' | tr -d '"' | tr -d "'")
 
   if [[ -z "$status" ]]; then
-    echo "VIOLATION: $f — no status: field in YAML frontmatter"
+    echo "VIOLATION: $f - no status: field in YAML frontmatter"
     violations=$((violations + 1))
     continue
   fi
@@ -86,7 +88,7 @@ for f in docs/todo/todo-*.md; do
   done
 
   if [[ $valid -eq 0 ]]; then
-    echo "VIOLATION: $f — invalid status value '$status' (must be one of: $VALID_STATUSES)"
+    echo "VIOLATION: $f - invalid status value '$status' (must be one of: $VALID_STATUSES)"
     violations=$((violations + 1))
     continue
   fi
@@ -96,6 +98,10 @@ for f in docs/todo/todo-*.md; do
   todo_id=$(basename "$f" | grep -oE 'todo-[0-9]+' | grep -oE '[0-9]+')
   if [[ -n "$todo_id" ]]; then
     DETAIL_STATUS_MAP["TODO-$todo_id"]="$status"
+  fi
+
+  if [[ "$status" == "DONE" ]]; then
+    DONE_DETAIL_FILES+=("$f")
   fi
 done
 
@@ -131,11 +137,35 @@ else
     fi
 
     if [[ "$detail_status" != "$md_status" ]]; then
-      echo "VIOLATION: $todo_id — todo.md says '$md_status' but detail file says '$detail_status'"
+      echo "VIOLATION: $todo_id - todo.md says '$md_status' but detail file says '$detail_status'"
       violations=$((violations + 1))
     fi
   done < <(grep -E '^\|.*TODO-[0-9]+.*\*\*[A-Z]+\*\*' "$TODO_MD")
 fi
+
+echo
+echo "--- Check 4: DONE acceptance criteria are fully classified ---"
+
+for f in "${DONE_DETAIL_FILES[@]}"; do
+  while IFS= read -r open_item; do
+    [[ -z "$open_item" ]] && continue
+    echo "VIOLATION: $f:$open_item"
+    violations=$((violations + 1))
+  done < <(
+    awk '
+      /^## (Acceptance|Acceptance Criteria|Completion Criteria)$/ {
+        in_acceptance = 1
+        next
+      }
+      /^## / {
+        in_acceptance = 0
+      }
+      in_acceptance && /^[[:space:]]*-[[:space:]]+\[ \]/ {
+        printf "%d - unchecked acceptance criterion: %s\n", FNR, $0
+      }
+    ' "$f"
+  )
+done
 
 echo
 echo "=== Summary ==="
@@ -144,9 +174,9 @@ echo "Total violations:   $violations"
 echo
 
 if [[ $violations -gt 0 ]]; then
-  echo "RESULT: FAIL — $violations violation(s) found"
+  echo "RESULT: FAIL - $violations violation(s) found"
   exit 1
 else
-  echo "RESULT: PASS — all TODO files are consistent"
+  echo "RESULT: PASS - all TODO files are consistent"
   exit 0
 fi

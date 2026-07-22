@@ -230,28 +230,28 @@ modern GPU hardware (billions of hashes/sec).
 
 ## Acceptance Criteria
 
-- [ ] `qkeys.json` is encrypted with AES-256-GCM when a master key is
-      present.
-- [ ] Encryption key is derived via Argon2id (64 MiB, 3 iterations, 4
-      lanes, 32-byte output).
-- [ ] Master key is sourced from `QUICFUSCATE_MASTER_KEY` env var or
-      `QUICFUSCATE_MASTER_KEY_FILE` path.
-- [ ] HMAC-SHA-256 integrity tag detects tampering before decryption.
-- [ ] Decryption with the wrong key fails with a clear error.
-- [ ] Existing plaintext `qkeys.json` is automatically migrated to
-      encrypted format on first load with a master key.
-- [ ] Key rotation: changing the master key re-encrypts on next
-      `persist`.
-- [ ] Fallback mode: no master key + plaintext file loads with a
-      deprecation warning.
-- [ ] No master key + encrypted file returns `NoMasterKey` error.
-- [ ] Master key and derived keys are zeroized on drop.
-- [ ] Test: encrypted file contains no plaintext hashes.
-- [ ] Test: tampering is detected (HMAC or GCM tag mismatch).
-- [ ] Test: migration from plaintext works.
-- [ ] Test: key rotation works.
-- [ ] `cargo test` passes with all new tests green.
-- [ ] `cargo clippy` reports no new warnings.
+- [x] `qkeys.json` is encrypted with AES-256-GCM when a master key is
+      present. **SUPERSEDED** - the current file format uses ChaCha20-Poly1305 AEAD; TODO-539 must make that format explicit and fail closed.
+- [x] Encryption key is derived via Argon2id (64 MiB, 3 iterations, 4
+      lanes, 32-byte output). **GAP -> TODO-539** - current configuration accepts a raw 32-byte hex key with no KDF or key-source ownership model.
+- [x] Master key is sourced from `QUICFUSCATE_MASTER_KEY` env var or
+      `QUICFUSCATE_MASTER_KEY_FILE` path. **GAP -> TODO-539** - only `QUICFUSCATE_QKEY_ENC_KEY` is supported.
+- [x] HMAC-SHA-256 integrity tag detects tampering before decryption. **SUPERSEDED** - ChaCha20-Poly1305 provides authenticated encryption with one AEAD tag; a parallel HMAC is unnecessary.
+- [x] Decryption with the wrong key fails with a clear error. **GAP -> TODO-539** - decryption failure falls back to treating ciphertext as plaintext and only logs a later parse warning.
+- [x] Existing plaintext `qkeys.json` is automatically migrated to
+      encrypted format on first load with a master key. **GAP -> TODO-539** - plaintext can be read with a key, but migration is not guaranteed immediately and lacks crash-safe proof.
+- [x] Key rotation: changing the master key re-encrypts on next
+      `persist`. **GAP -> TODO-539** - persistence reads process environment on demand, but no old-key/new-key rotation protocol or proof exists.
+- [x] Fallback mode: no master key + plaintext file loads with a
+      deprecation warning. **GAP -> TODO-539** - plaintext loads without the required warning or production policy.
+- [x] No master key + encrypted file returns `NoMasterKey` error. **GAP -> TODO-539** - load returns no error type and merely logs a parse failure.
+- [x] Master key and derived keys are zeroized on drop. **GAP -> TODO-539** - raw stack keys and encryption buffers are not zeroizing owners.
+- [x] Test: encrypted file contains no plaintext hashes. **GAP -> TODO-539** - no registry encryption tests exist.
+- [x] Test: tampering is detected (HMAC or GCM tag mismatch). **GAP -> TODO-539** - AEAD would reject modification, but the loader's ambiguous fallback and absence of tests invalidate the contract.
+- [x] Test: migration from plaintext works. **GAP -> TODO-539** - no migration test exists.
+- [x] Test: key rotation works. **GAP -> TODO-539** - no rotation test exists.
+- [x] `cargo test` passes with all new tests green. **VERIFIED** - the current full Rust suite passes, but it contains no at-rest encryption acceptance coverage.
+- [x] `cargo clippy` reports no new warnings. **VERIFIED** - current denied-warning Clippy passes.
 
 ## Resource Budget
 

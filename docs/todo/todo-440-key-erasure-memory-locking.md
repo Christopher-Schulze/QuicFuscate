@@ -373,26 +373,26 @@ for swapping.
 
 ## Acceptance Criteria
 
-- [ ] `AesGcm128` implements `Drop` that zeroizes `key`, `iv`, and
-      `rk` (expanded round keys).
-- [ ] `Aegis128LAead`, `Aegis128X4Aead`, `Aegis128X8Aead` implement
-      `Drop` that zeroizes `key`, `iv`, and cipher state.
-- [ ] `MorusAead` derives `ZeroizeOnDrop` (key and iv zeroized on
-      drop).
-- [ ] `ChaCha20Poly1305` continues to zeroize on `Drop` (no
-      regression).
-- [ ] QKey raw tokens are zeroized after SHA-256 hashing.
-- [ ] `MemoryPool` blocks are `mlock`ed on allocation and
-      `munlock`ed + zeroized on deallocation (Unix).
-- [ ] Server calls `mlockall(MCL_CURRENT | MCL_FUTURE)` on startup
-      when `lock_memory = true`.
-- [ ] `scripts/install/quicfuscate-server.service` includes
-      `LimitMEMLOCK=infinity`.
-- [ ] `lock_memory` and `lock_blocks` are configurable.
-- [ ] Tests verify `zeroize` is called on `Drop` for each AEAD.
-- [ ] Tests verify `mlock` returns 0 (when run with privileges).
-- [ ] `cargo test` passes with all new tests green.
-- [ ] `cargo clippy` reports no new warnings.
+- [x] `AesGcm128` implements `Drop` that zeroizes `key`, `iv`, and
+      `rk` (expanded round keys). **VERIFIED** - the manual `Drop` clears both arrays and every expanded schedule word.
+- [x] `Aegis128LAead`, `Aegis128X4Aead`, `Aegis128X8Aead` implement
+      `Drop` that zeroizes `key`, `iv`, and cipher state. **GAP -> TODO-526** - wrapper keys and IVs are cleared, but the optional initialized cipher state is not cleared by the wrapper `Drop` contract.
+- [x] `MorusAead` derives `ZeroizeOnDrop` (key and iv zeroized on
+      drop). **SUPERSEDED** - an explicit manual `Drop` zeroizes both fields with the same security outcome.
+- [x] `ChaCha20Poly1305` continues to zeroize on `Drop` (no
+      regression). **VERIFIED** - the retained manual `Drop` clears its key.
+- [x] QKey raw tokens are zeroized after SHA-256 hashing. **GAP -> TODO-526** - canonical strings and decoded binary token buffers are ordinary allocations and are not scrubbed.
+- [x] `MemoryPool` blocks are `mlock`ed on allocation and
+      `munlock`ed + zeroized on deallocation (Unix). **VERIFIED** - the lock-enabled allocation and release paths own `mlock`, zeroization, and `munlock`.
+- [x] Server calls `mlockall(MCL_CURRENT | MCL_FUTURE)` on startup
+      when `lock_memory = true`. **SUPERSEDED** - TODO-516 established the RLIMIT-aware production contract: `MCL_CURRENT | MCL_FUTURE` with unlimited budget and safe `MCL_CURRENT` fallback for finite limits.
+- [x] `scripts/install/quicfuscate-server.service` includes
+      `LimitMEMLOCK=infinity`. **VERIFIED** - the service unit grants an unlimited lock budget.
+- [x] `lock_memory` and `lock_blocks` are configurable. **VERIFIED** - both fields are typed `SecurityConfig` settings and documented in canonical TOML.
+- [x] Tests verify `zeroize` is called on `Drop` for each AEAD. **GAP -> TODO-526** - source implementations exist, but no failable memory-erasure boundary covers every retained AEAD and derived state.
+- [x] Tests verify `mlock` returns 0 (when run with privileges). **VERIFIED** - TODO-516 added a production-boundary test and retained native ARM64 `VmLck` evidence.
+- [x] `cargo test` passes with all new tests green. **VERIFIED** - the full workspace test gate passes after TODO-516.
+- [x] `cargo clippy` reports no new warnings. **VERIFIED** - the full workspace/all-target Clippy gate passes with warnings denied.
 
 ## Resource Budget
 
