@@ -313,6 +313,30 @@ else
   append_item "fec_internal_dead_code_suppression" "ok" "test-only constructors use explicit cfg(test) ownership"
 fi
 
+FEC_RECOVERY_INTEGRITY_REGRESSIONS="$(rg -n --no-messages 'norm_base|base_id\.wrapping_add\(j as u64\)|return self\.try_eliminate_wiedemann\(\)' src/fec/mod.rs || true)"
+if [[ -n "$FEC_RECOVERY_INTEGRITY_REGRESSIONS" ]]; then
+  fail_critical "FEC decoder regained ambiguous anchors, forward GF4 mapping, or unvalidated auto-Wiedemann recovery"
+  append_item "fec_recovery_integrity" "fail" "$FEC_RECOVERY_INTEGRITY_REGRESSIONS"
+elif rg -n --no-messages 'valid\.then_some\(solution\)' src/fec/mod.rs >/dev/null \
+  && rg -n --no-messages 'test_fec_e2e_default_interleave_recovers_1000_packets_at_5pct_random_loss' src/fec/e2e_tests.rs >/dev/null \
+  && rg -n --no-messages 'test_fec_e2e_default_interleave_recovers_four_consecutive_losses_per_sixteen' src/fec/e2e_tests.rs >/dev/null; then
+  pass "FEC recovery keeps exact anchors, validated solver output, and deterministic interleaved integrity gates"
+  append_item "fec_recovery_integrity" "ok" "exact anchors, solver validation, and 1000-packet random/burst gates are present"
+else
+  fail_critical "FEC recovery integrity contract is incomplete"
+  append_item "fec_recovery_integrity" "fail" "solver validation or deterministic interleaved recovery gates missing"
+fi
+
+FEC_WRONG_FIELD_GFNI_CALLS="$(rg -n --no-messages '_mm512_gf2p8mul_epi8\(' src/fec/gf_tables.rs src/fec/mod.rs || true)"
+if [[ -z "$FEC_WRONG_FIELD_GFNI_CALLS" ]] \
+  && rg -n --no-messages 'IRREDUCIBLE_POLY: u16 = 0x11D' src/fec/gf_tables.rs >/dev/null; then
+  pass "FEC GF8 kernels preserve the canonical 0x11D wire field"
+  append_item "fec_gf8_polynomial" "ok" "no raw Intel GFNI 0x11B multiply remains in canonical FEC kernels"
+else
+  fail_critical "FEC GF8 polynomial contract is missing or raw Intel GFNI multiplication returned"
+  append_item "fec_gf8_polynomial" "fail" "${FEC_WRONG_FIELD_GFNI_CALLS:-canonical 0x11D polynomial declaration missing}"
+fi
+
 TLS_COVER_REINSTALL_REGRESSIONS="$(rg -n --no-messages 'TODO-269|install_tls_cover_chacha|install_tls_cover_aes_gcm|tls_cover_(write|read)_seq\.wrapping_add' src scripts/tests/rust || true)"
 if [[ -n "$TLS_COVER_REINSTALL_REGRESSIONS" ]]; then
   fail_critical "TLS Cover retained an unsafe or parallel cipher reinstallation path"

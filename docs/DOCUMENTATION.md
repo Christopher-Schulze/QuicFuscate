@@ -1203,10 +1203,11 @@ pub struct MacTun {
 - Bit-sliced implementation for cache efficiency
 - SIMD-accelerated multiply-accumulate
 - Large-window sparse solver support
+- Block repairs use deterministic Cauchy coefficient rows whenever the block fits the GF(256) symbol space, giving the Normal interleaved path an MDS repair matrix instead of rank-deficient arithmetic rows.
 - Lookup tables for small operations
-- SSSE3 nibble LUT slice multiply covers x86 SSSE3 profiles (`FEC_SSSE3_OPS` telemetry); AVX2/GFNI paths record `FEC_AVX2_GF_OPS`/`FEC_GFNI_OPS`.
+- SSSE3 and AVX2 nibble-LUT slice multiplication preserve the codec's canonical GF(256)/0x11D field and record `FEC_SSSE3_OPS` / `FEC_AVX2_GF_OPS`. Intel GFNI's byte multiply is fixed to the AES 0x11B field, so it is never used for this FEC wire contract.
 - VBMI2 nibble gather kernel (`gf16_mul_slice_vbmi2`) drives `FEC_GF16_VBMI2_OPS`; processes 32xu16 per iteration via `_mm512_permutex2var_epi16` tables. Planner selects it for `X86_P3c+`; scalar fallback remains for residual CPUs. Throughput characteristics remain hardware-dependent and are validated on target systems.
-- AVX-512 GFNI matrix multiply (`matrix_multiply_avx512`) now streams 64-byte stripes via `_mm512_gf2p8mul_epi8`, recording `FEC_GFNI_OPS`; CPUs without GFNI fall back automatically to the AVX2 FMA kernel.
+- Matrix multiplication delegates coefficient application to the same canonical 0x11D slice kernel; raw AVX-512 GFNI multiplication is excluded because its 0x11B polynomial is wire-incompatible.
 - NEON and SVE2 slice kernels share nibble tables with adaptive prefetch; `FEC_NEON_OPS` and `FEC_SVE2_OPS` counters expose runtime usage.
 
 **GF(2^16) - 16-bit Galois Field:**
@@ -1222,11 +1223,12 @@ pub struct MacTun {
 - Early repair detection
 - Progressive decoding support
 - Memory-efficient sparse matrices
+- Recovery is fail-closed on deficient rank. A decoder materializes no unknown source unless every unknown column has a pivot, and fully solved equation sets are retired instead of accumulating across windows.
 
 **Large-window sparse solver (internal strategy):**
 - Internal block-iterative solver for large GF(2^8) recovery systems.
 - Parallel per-byte solving via Rayon.
-- Falls back to Gaussian elimination when the large-window strategy does not converge.
+- Every candidate is checked against every original row before materialization; missing or invalid byte solutions fall back to Gaussian elimination.
 
 **Public contract vs internal machinery:**
 - The canonical FEC runtime surface is intentionally narrow: `FecConfig`, `FecMode`, `FecPacket`, and `AdaptiveFec` runtime operations.
@@ -3684,6 +3686,7 @@ Notes:
 - Lazy receive polling is gated by `recovery_needed()` and `full_recovery_needed()`: clean blocks return systematic packets without polling heavy recovery, gap-only systematic arrivals stay lazy while retaining bounded source context, flushed repairs or tail-loss repair availability replay buffered sources into the heavy decoder and trigger full recovery, and clean complete blocks prune their sequence tracker and source buffer so long-running stable links do not retain unbounded FEC source IDs.
 - Interleaved lazy gap tracking is depth-aware: each lazy block normalizes source sequence numbers by interleave depth before gap detection, so clean streams such as `0,4,8,12` at depth `4` do not trigger false recovery polling.
 - Interleaved full recovery is lane-scoped: `InterleavedDecoder::get_result()` runs full recovery only for blocks whose lazy decoder reports `full_recovery_needed()`, drains partial results only from recovery-active blocks, and leaves idle clean-lane repair buffers lazy. Broderick streaming decode improved from about `220.83 us` to `180.48 us` for clean 128-packet batches and from about `499.58 us` to `256.97 us` for deterministic 10% source loss.
+- Repair `id` is the authoritative maximum source ID for its encoder lane and coefficient positions map backward from that anchor with the configured interleave stride. Decoders do not synthesize alternate anchors. Deterministic transport-roundtrip gates cover 1,000 contract packets at 5% seeded random packet loss and four consecutive systematic losses per sixteen, asserting 1,000 unique byte-exact deliveries, zero duplicates, and at most 63 source sends of recovery latency after a 24-packet tail flush.
 - Zero-mode receive bypasses decoder retention entirely while no transition is active, preserving unique ownership of pooled payloads for in-place QUIC processing. Recovery-capable modes still retain decoder state as required for source reconstruction.
 - Send-side hot paths should call `AdaptiveFec::on_send_into(packet, output)` with a reused output buffer. `AdaptiveFec::on_send(packet)` remains a compatibility wrapper, but `QuicFuscateConnection` and the Engine `FecCodec` use per-instance scratch vectors so clean-link sends do not allocate a fresh FEC output vector per packet.
 - Send-side repair telemetry tracks only emitted repair packets for uniqueness and order-depth diagnostics. Systematic-only sends avoid HashSet/VecDeque repair-history maintenance while `FEC_EMITTED_QUEUE` continues to report non-zero-mode output queue depth.

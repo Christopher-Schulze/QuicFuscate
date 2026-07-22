@@ -594,67 +594,9 @@ const STREAM_ADJUST_MIN_MS: u64 = 150;
 #[target_feature(enable = "avx512f", enable = "avx512bw", enable = "avx512vl", enable = "gfni")]
 #[allow(dead_code)]
 unsafe fn matrix_multiply_avx512(a: &[Vec<u8>], b: &[Vec<u8>], result: &mut [Vec<u8>]) {
-    use std::arch::x86_64::*;
-
-    let m = a.len();
-    let k = if m > 0 { a[0].len() } else { 0 };
-    let n = if !b.is_empty() { b[0].len() } else { 0 };
-
-    for row in result.iter_mut() {
-        row.clear();
-        row.resize(n, 0);
-    }
-
-    if m == 0 || n == 0 || k == 0 {
-        return;
-    }
-
-    for (i, res_row) in result.iter_mut().enumerate().take(m) {
-        let a_row = &a[i];
-        for (kk, b_row) in b.iter().enumerate().take(k) {
-            let coeff = *a_row.get(kk).unwrap_or(&0);
-            if coeff == 0 {
-                continue;
-            }
-
-            let len = b_row.len().min(n);
-            if len == 0 {
-                continue;
-            }
-
-            let coeff_vec = _mm512_set1_epi8(coeff as i8);
-            let mut offset = 0usize;
-
-            while offset + 64 <= len {
-                let src = _mm512_loadu_si512(b_row.as_ptr().add(offset) as *const _);
-                let prod = _mm512_gf2p8mul_epi8(coeff_vec, src);
-                let acc = _mm512_loadu_si512(res_row.as_ptr().add(offset) as *const _);
-                let updated = _mm512_xor_si512(acc, prod);
-                _mm512_storeu_si512(res_row.as_mut_ptr().add(offset) as *mut _, updated);
-                offset += 64;
-            }
-
-            if offset < len {
-                let remaining = (len - offset) as u32;
-                let mask: __mmask64 =
-                    if remaining == 64 { !0u64 } else { (1u64 << remaining) - 1 } as __mmask64;
-
-                let src_tail =
-                    _mm512_maskz_loadu_epi8(mask, b_row.as_ptr().add(offset) as *const _);
-                let prod_tail = _mm512_gf2p8mul_epi8(coeff_vec, src_tail);
-                let acc_tail =
-                    _mm512_maskz_loadu_epi8(mask, res_row.as_ptr().add(offset) as *const _);
-                let updated_tail = _mm512_xor_si512(acc_tail, prod_tail);
-                _mm512_mask_storeu_epi8(
-                    res_row.as_mut_ptr().add(offset) as *mut _,
-                    mask,
-                    updated_tail,
-                );
-            }
-
-            crate::telemetry::FEC_GFNI_OPS.inc();
-        }
-    }
+    // `_mm512_gf2p8mul_epi8` is fixed to polynomial 0x11B and cannot
+    // implement this codec's GF(256)/0x11D wire contract directly.
+    matrix_multiply_accumulate(a, b, result);
 }
 
 /// Fast XOR helper with centralized SIMD dispatch from optimize.rs.
@@ -1628,9 +1570,15 @@ impl Encoder<GF8> {
         }
         let wlen = self.window.len().min(self.k);
         for j in 0..wlen {
-            // Simple non-zero deterministic pattern
-            let c =
-                1u8 + (((idx as u8).wrapping_add(1)).wrapping_mul((j as u8).wrapping_add(1)) % 255);
+            // A Cauchy row is MDS while all x/y coordinates are distinct.
+            // Normal production blocks stay well below the GF(256) symbol limit.
+            let c = self.k.checked_add(idx).filter(|&y| y < 256 && j < 256).map_or_else(
+                || {
+                    1u8 + (((idx as u8).wrapping_add(1)).wrapping_mul((j as u8).wrapping_add(1))
+                        % 255)
+                },
+                |y| gf_tables::gf_inv8((j as u8) ^ (y as u8)),
+            );
             coeff_box[j] = c;
         }
 
@@ -2017,61 +1965,24 @@ impl Decoder8 {
         } else {
             // Incoming repair equation
             if let Some(ref coeffs) = p.coefficients {
-                let orig_base = p.id;
-                let norm_base = if self.known.is_empty() {
-                    p.id
-                } else {
-                    self.known.keys().copied().max().unwrap_or(p.id).saturating_add(1)
-                };
-
                 let len = p.data_len;
-                // Prepare two independent data buffers for fair attempts
-                let mut data_buf1 = self.mem_pool.alloc();
-                let mut data_buf2 = self.mem_pool.alloc();
-                let n1 = len.min(data_buf1.len());
-                let n2 = len.min(data_buf2.len());
+                let mut data_buf = self.mem_pool.alloc();
+                let data_len = len.min(data_buf.len());
                 if let Some(d) = p.payload_slice() {
-                    data_buf1[..n1].copy_from_slice(&d[..n1]);
-                    data_buf2[..n2].copy_from_slice(&d[..n2]);
+                    data_buf[..data_len].copy_from_slice(&d[..data_len]);
                 }
 
-                let mut eq_orig = Equation8 {
-                    base_id: orig_base,
+                let mut equation = Equation8 {
+                    base_id: p.id,
                     coeffs: coeffs[..p.coeff_len].to_vec(),
-                    data: data_buf1,
-                    len: n1,
+                    data: data_buf,
+                    len: data_len,
                 };
-                let known_before = self.known.len();
-                if self.try_solve_equation(&mut eq_orig) {
+                if self.try_solve_equation(&mut equation) {
                     self.try_peel_all();
                     return;
                 }
-                let progress_orig = self.known.len() > known_before;
-
-                // Try normalized anchor fallback
-                let mut eq_norm = Equation8 {
-                    base_id: norm_base,
-                    coeffs: coeffs[..p.coeff_len].to_vec(),
-                    data: data_buf2,
-                    len: n2,
-                };
-                let known_mid = self.known.len();
-                if self.try_solve_equation(&mut eq_norm) {
-                    self.try_peel_all();
-                    return;
-                }
-                let progress_norm = self.known.len() > known_mid;
-
-                // Choose the equation variant with fewer unknowns (fallback if tie to original)
-                let unk_orig = self.unknown_ids_for(eq_orig.base_id, &eq_orig.coeffs).len();
-                let unk_norm = self.unknown_ids_for(eq_norm.base_id, &eq_norm.coeffs).len();
-                let choose_norm = (!progress_orig && progress_norm) || (unk_norm < unk_orig);
-
-                if choose_norm {
-                    self.equations.push(eq_norm);
-                } else {
-                    self.equations.push(eq_orig);
-                }
+                self.equations.push(equation);
                 let _ = self.try_eliminate();
             }
         }
@@ -2193,8 +2104,8 @@ impl Decoder8 {
             }
             "gauss" => { /* force Gaussian below */ }
             _ => {
-                if self.equations.len() > 32 {
-                    return self.try_eliminate_wiedemann();
+                if self.equations.len() > 32 && self.try_eliminate_wiedemann() {
+                    return true;
                 }
             }
         }
@@ -2314,10 +2225,11 @@ impl Decoder8 {
 
             // Extract solutions where pivot exists
             for (col, &r) in piv_row_for_col.iter().enumerate().take(u) {
-                if r != usize::MAX {
-                    recon[col][b] = yb[r];
-                    solved_any = true;
+                if r == usize::MAX {
+                    return false;
                 }
+                recon[col][b] = yb[r];
+                solved_any = true;
             }
         }
 
@@ -2340,6 +2252,7 @@ impl Decoder8 {
                 FecPacket::new(*sid, Some(buf2), n, true, None, 0, Arc::clone(&self.mem_pool));
             self.emit_q.push_back(pkt);
         }
+        self.equations.clear();
         true
     }
 
@@ -2412,22 +2325,23 @@ impl Decoder8 {
                 }
 
                 // Wiedemann solver with Berlekamp-Massey
-                self.solve_wiedemann_system(&matrix, &rhs, n)
+                let solution = self.solve_wiedemann_system(&matrix, &rhs, n)?;
+                let valid = matrix.iter().zip(&rhs).all(|(row, expected)| {
+                    row.iter().zip(&solution).fold(0u8, |acc, (&coefficient, &value)| {
+                        acc ^ gf_tables::gf_mul_table(coefficient, value)
+                    }) == *expected
+                });
+                valid.then_some(solution)
             })
             .collect();
 
-        let mut any_solved = false;
-        for (byte_idx, col) in byte_solutions.into_iter().enumerate() {
-            if let Some(sol) = col {
-                any_solved = true;
-                for (j, &val) in sol.iter().enumerate() {
-                    solutions[j][byte_idx] = val;
-                }
+        for (byte_idx, column) in byte_solutions.into_iter().enumerate() {
+            let Some(solution) = column.filter(|values| values.len() == n) else {
+                return false;
+            };
+            for (j, &value) in solution.iter().enumerate() {
+                solutions[j][byte_idx] = value;
             }
-        }
-
-        if !any_solved {
-            return false;
         }
 
         // Store solved unknowns
@@ -2454,6 +2368,7 @@ impl Decoder8 {
                 }
             }
         }
+        self.equations.clear();
         true
     }
 
@@ -2703,7 +2618,7 @@ impl Decoder4 {
         if self.depth > 1 {
             base_id.saturating_sub((self.k as u64 - 1 - j as u64) * self.depth as u64)
         } else {
-            base_id.wrapping_add(j as u64)
+            base_id.saturating_sub(self.k as u64 - 1) + j as u64
         }
     }
 
@@ -2931,49 +2846,18 @@ impl Decoder16 {
                 j += 1;
             }
             let len = p.data_len;
-            // Two buffers
-            let mut db1 = self.mem_pool.alloc();
-            let mut db2 = self.mem_pool.alloc();
-            let n1 = len.min(db1.len());
-            let n2 = len.min(db2.len());
+            let mut data_buf = self.mem_pool.alloc();
+            let data_len = len.min(data_buf.len());
             if let Some(d) = p.payload_slice() {
-                db1[..n1].copy_from_slice(&d[..n1]);
-                db2[..n2].copy_from_slice(&d[..n2]);
+                data_buf[..data_len].copy_from_slice(&d[..data_len]);
             }
-            let orig_base = p.id;
-            let norm_base = if self.known.is_empty() {
-                p.id
-            } else {
-                self.known.keys().copied().max().unwrap_or(p.id).saturating_add(1)
-            };
-
-            let mut eq_orig =
-                Equation16 { base_id: orig_base, coeffs: coeffs16.clone(), data: db1, len: n1 };
-            let known_before = self.known.len();
-            if self.try_solve_equation(&mut eq_orig) {
+            let mut equation =
+                Equation16 { base_id: p.id, coeffs: coeffs16, data: data_buf, len: data_len };
+            if self.try_solve_equation(&mut equation) {
                 self.try_peel_all();
                 return;
             }
-            let progress_orig = self.known.len() > known_before;
-
-            let mut eq_norm =
-                Equation16 { base_id: norm_base, coeffs: coeffs16, data: db2, len: n2 };
-            let known_mid = self.known.len();
-            if self.try_solve_equation(&mut eq_norm) {
-                self.try_peel_all();
-                return;
-            }
-            let progress_norm = self.known.len() > known_mid;
-
-            let unk_orig = self.unknown_ids_for(eq_orig.base_id, &eq_orig.coeffs).len();
-            let unk_norm = self.unknown_ids_for(eq_norm.base_id, &eq_norm.coeffs).len();
-            let choose_norm = (!progress_orig && progress_norm) || (unk_norm < unk_orig);
-
-            if choose_norm {
-                self.equations.push(eq_norm);
-            } else {
-                self.equations.push(eq_orig);
-            }
+            self.equations.push(equation);
             let _ = self.try_eliminate();
         }
     }
@@ -3141,6 +3025,7 @@ impl Decoder16 {
             }
             // Gaussian elimination in GF(2^16)
             let mut row = 0usize;
+            let mut pivot_rows = vec![usize::MAX; u];
             for col in 0..u {
                 // find pivot
                 let mut pivot = None;
@@ -3159,6 +3044,7 @@ impl Decoder16 {
                 } else {
                     continue;
                 }
+                pivot_rows[col] = row;
                 let inv = gf_tables::gf16_inv(a[row][col]);
                 // scale
                 for cell in a[row].iter_mut().take(u) {
@@ -3182,14 +3068,13 @@ impl Decoder16 {
                     break;
                 }
             }
-            // back substitution yields y entries as solution (since reduced to identity on columns with pivots)
-            // Extract solution per column where pivotized
-            // We assume full rank on first u rows after elimination
+            if pivot_rows.contains(&usize::MAX) {
+                return false;
+            }
+            // Reduced rows hold the solution for their corresponding pivot columns.
             for col in 0..u {
-                if col < m {
-                    solutions[col].push(y[col]);
-                    solved_any = true;
-                }
+                solutions[col].push(y[pivot_rows[col]]);
+                solved_any = true;
             }
         }
 
@@ -3214,6 +3099,7 @@ impl Decoder16 {
                 FecPacket::new(sid, Some(buf2), sl, true, None, 0, Arc::clone(&self.mem_pool));
             self.emit_q.push_back(pkt);
         }
+        self.equations.clear();
         true
     }
 }

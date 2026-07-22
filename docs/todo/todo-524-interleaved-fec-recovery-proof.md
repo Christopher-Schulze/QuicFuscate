@@ -26,15 +26,22 @@ All decoder families now use depth-aware coefficient-to-source-ID arithmetic, bu
 
 ## Sub-Tasks
 
-- [ ] Verify encoder/decoder window and ID invariants before editing.
-- [ ] Add exact family-level mapping and integrity tests.
-- [ ] Add deterministic random/burst E2E recovery gates.
-- [ ] Execute local, native, and Omega performance/correctness evidence.
+- [x] Verify encoder/decoder window and ID invariants before editing.
+- [x] Add exact family-level mapping and integrity tests.
+- [x] Add deterministic random/burst E2E recovery gates.
+- [~] Execute local, native, and Omega performance/correctness evidence.
 - [ ] Flush documentation and close only with exact evidence.
 
 ## Notes
 
 - Created from TODO-433 reconciliation. No product code changed during classification.
+- Verified the encoder invariant: GF4, GF8, and GF16 repairs carry the maximum source ID in the block window as `id`; interleaving spaces source IDs by `depth` and tags the lane in repair `seq`.
+- Found a residual non-interleaved GF4 defect: `Decoder4::source_id_for()` mapped forward from the maximum window anchor instead of mapping the preceding `k` source IDs like GF8/GF16.
+- The first exact gates exposed silent GF8 corruption: arithmetic repair rows were rank-deficient for the four-of-sixteen loss pattern, and more than 32 retained equations selected an unvalidated Wiedemann result that materialized zero-filled sources.
+- GF8 bounded blocks now use Cauchy repair rows; GF8/GF16 removed the ambiguous normalized-anchor fallback, require full-rank pivots, retire solved equations, and validate every Wiedemann byte solution against the original system before Gaussian fallback.
+- Native Windows CI exposed a second integrity defect: the x86 GFNI slice path multiplied in Intel's fixed AES 0x11B field while the FEC wire contract uses 0x11D. Canonical GF8 now excludes raw GFNI multiplication and retains the 0x11D nibble-LUT/scalar paths; the runtime guard rejects its return.
+- Local targeted evidence: all three family mapping tests pass; the repeated ten-window lane test passes; the repeated interleaved 640-packet burst test passes; both 1,000-packet exact E2E gates pass; the complete `fec::e2e_tests` module passes 19/19.
+- Local full evidence: workspace all-target Clippy with `rust-tests` and warnings denied passes; workspace all-target tests pass with 1,691 library tests and every integration/example target green; the complete FEC module passes 187/187; TODO consistency reports 192 files and zero violations; runtime guardrails report zero critical findings and zero warnings. The Criterion GF(256) matrix benchmark reports 1.1030 us for 4x4, 4.6060-4.6078 us for 8x8, and 18.016-18.423 us for 16x16 on this Apple Silicon host. The bench-only build emits one pre-existing release-only dead-field warning for `RustlsProviderImpl::verify_peer`, outside this FEC change.
 
 ## Deviations
 

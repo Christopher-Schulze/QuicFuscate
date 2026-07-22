@@ -93,17 +93,6 @@ pub(crate) fn gf_inv8(x: u8) -> u8 {
 // Removed gf_div8 (not used).
 
 #[cfg(target_arch = "x86_64")]
-pub(crate) unsafe fn gf_mul_gfni(a: u8, b: u8) -> u8 {
-    use std::arch::x86_64::*;
-    // AVX512GFNI provides native GF(2^8) multiplication!
-    let a_vec = _mm512_set1_epi8(a as i8);
-    let b_vec = _mm512_set1_epi8(b as i8);
-    // _mm512_gf2p8mul_epi8 performs GF(2^8) multiplication with polynomial 0x11B
-    let result = _mm512_gf2p8mul_epi8(a_vec, b_vec);
-    _mm512_cvtsi512_si32(result) as u8
-}
-
-#[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 pub(crate) unsafe fn gf_mul_bitsliced_avx512(a: u8, b: u8) -> u8 {
     use std::arch::x86_64::*;
@@ -309,14 +298,8 @@ pub(crate) fn gf_mul_scalar_slice(coeff: u8, src: &[u8], out_xor: &mut [u8]) {
 
     #[cfg(target_arch = "x86_64")]
     {
-        if policy.has_feature(optimize::CpuFeature::AVX512F)
-            && policy.has_feature(optimize::CpuFeature::GFNI)
-        {
-            unsafe {
-                gf_mul_scalar_slice_gfni(coeff, &src[..len], &mut out_xor[..len]);
-            }
-            return;
-        }
+        // Intel GFNI multiplies in the AES 0x11B field, while this codec's
+        // wire contract is GF(256)/0x11D. Use the 0x11D nibble-table path.
         if policy.has_feature(optimize::CpuFeature::AVX2) {
             unsafe {
                 gf_mul_scalar_slice_avx2(coeff, &src[..len], &mut out_xor[..len]);
@@ -415,31 +398,6 @@ pub(crate) fn gf_mul_scalar_slice(coeff: u8, src: &[u8], out_xor: &mut [u8]) {
 }
 
 // --- SIMD scalar x vector mul-add (GF(2^8)) specialized paths ---
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f,gfni")]
-unsafe fn gf_mul_scalar_slice_gfni(coeff: u8, src: &[u8], out_xor: &mut [u8]) {
-    use std::arch::x86_64::*;
-    debug_assert_eq!(src.len(), out_xor.len());
-    let coeff_vec = _mm512_set1_epi8(coeff as i8);
-    let mut i = 0;
-    // Process 64 bytes at a time
-    while i + 64 <= src.len() {
-        let src_vec = _mm512_loadu_si512(src.as_ptr().add(i) as *const _);
-        let prod = _mm512_gf2p8mul_epi8(coeff_vec, src_vec);
-        let dst_vec = _mm512_loadu_si512(out_xor.as_ptr().add(i) as *const _);
-        let result = _mm512_xor_si512(dst_vec, prod);
-        _mm512_storeu_si512(out_xor.as_mut_ptr().add(i) as *mut _, result);
-        i += 64;
-    }
-    // Handle remainder
-    while i < src.len() {
-        out_xor[i] ^= gf_mul_gfni(coeff, src[i]);
-        i += 1;
-    }
-
-    crate::telemetry::FEC_GFNI_OPS.inc();
-}
-
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn gf_mul_scalar_slice_avx2(coeff: u8, src: &[u8], out_xor: &mut [u8]) {

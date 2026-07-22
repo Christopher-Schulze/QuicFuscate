@@ -12,8 +12,8 @@
 
 use super::test_support::*;
 use super::*;
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, MutexGuard};
 
 // ---------------------------------------------------------------------------
 // Deterministic drop channel — simulates tc-netem loss at the transport layer.
@@ -82,34 +82,62 @@ struct TransportSim {
     delivered: Vec<u64>,
     /// Set of delivered ids for dedup checking.
     delivered_set: HashSet<u64>,
+    /// First payload delivered for each source ID.
+    delivered_payloads: HashMap<u64, Vec<u8>>,
+    /// Source-send count when each source ID was first delivered.
+    delivered_at: HashMap<u64, usize>,
+    /// Number of repeated systematic deliveries observed before deduplication.
+    duplicate_count: usize,
+    /// Systematic packet IDs dropped by the transport.
+    dropped_source_ids: HashSet<u64>,
+    /// Repair anchor and first coefficient for repair packets dropped by the transport.
+    dropped_repairs: Vec<(u64, u8)>,
     /// Count of source packets sent.
     sent_count: usize,
     /// Count of repair packets sent.
     repair_count: usize,
     /// Count of packets dropped in transit.
     dropped_count: usize,
-    /// Held for the lifetime of the sim to keep env vars active.
+    /// Held for the lifetime of the sim to keep the production interleave policy active.
     _env_guards: Vec<EnvGuard>,
+    /// Serializes process-global FEC environment overrides across tests.
+    _env_lock: MutexGuard<'static, ()>,
 }
 
 impl TransportSim {
     fn new(loss_rate: f32, seed: u64) -> Self {
-        let _guard = acquire_env_lock();
-        // Interleaving is now fixed (TODO-433): the decoder uses source_id_map
-        // to correctly map coefficients to non-consecutive source packet IDs.
+        Self::with_channel(DropChannel::new(seed, loss_rate))
+    }
+
+    fn with_targeted_drops(drop_ids: HashSet<u64>) -> Self {
+        Self::with_channel(DropChannel::with_targeted_drops(drop_ids))
+    }
+
+    fn with_channel(channel: DropChannel) -> Self {
+        let env_lock = acquire_env_lock();
+        // Interleaving is fixed (TODO-433): every decoder family maps repair
+        // coefficients with the configured source-ID stride.
         // Tests run with the production default (interleave enabled).
-        // Use Normal mode as initial — this is the production "Auto" default.
+        // Use Normal mode as initial because this is the production "Auto" default.
+        let interleave_on = EnvGuard::set("QUICFUSCATE_FEC_INTERLEAVE", "1");
+        let default_depth = EnvGuard::unset("QUICFUSCATE_FEC_INTERLEAVE_DEPTH");
         let config = FecConfig { initial_mode: FecMode::Normal, ..FecConfig::default() };
         Self {
             sender: AdaptiveFec::new(config.clone()),
             receiver: AdaptiveFec::new(config),
-            channel: DropChannel::new(seed, loss_rate),
+            channel,
             delivered: Vec::new(),
             delivered_set: HashSet::new(),
+            delivered_payloads: HashMap::new(),
+            delivered_at: HashMap::new(),
+            duplicate_count: 0,
+            dropped_source_ids: HashSet::new(),
+            dropped_repairs: Vec::new(),
             sent_count: 0,
             repair_count: 0,
             dropped_count: 0,
-            _env_guards: vec![],
+            _env_guards: vec![interleave_on, default_depth],
+            _env_lock: env_lock,
         }
     }
 
@@ -133,6 +161,17 @@ impl TransportSim {
         for pkt in output {
             let wire = to_wire(&pkt);
             if self.channel.should_drop(&pkt) {
+                if pkt.is_systematic {
+                    self.dropped_source_ids.insert(pkt.id);
+                } else {
+                    self.dropped_repairs.push((
+                        pkt.id,
+                        pkt.coefficients
+                            .as_ref()
+                            .and_then(|coefficients| coefficients.first().copied())
+                            .unwrap_or(0),
+                    ));
+                }
                 self.dropped_count += 1;
                 continue;
             }
@@ -142,9 +181,19 @@ impl TransportSim {
             for p in recovered {
                 // Only track source packets (systematic). Repair packets have
                 // id = window_anchor_id which collides with source packet ids.
-                if p.is_systematic && !self.delivered_set.contains(&p.id) {
-                    self.delivered_set.insert(p.id);
-                    self.delivered.push(p.id);
+                if p.is_systematic {
+                    if self.delivered_set.insert(p.id) {
+                        self.delivered.push(p.id);
+                        self.delivered_at.insert(p.id, self.sent_count);
+                        self.delivered_payloads.insert(
+                            p.id,
+                            p.payload_slice()
+                                .expect("systematic packet must carry payload")
+                                .to_vec(),
+                        );
+                    } else {
+                        self.duplicate_count += 1;
+                    }
                 }
             }
         }
@@ -175,7 +224,197 @@ impl TransportSim {
 
     /// Verify no duplicate ids were delivered.
     fn verify_no_duplicates(&self) -> bool {
-        self.delivered.len() == self.delivered_set.len()
+        self.duplicate_count == 0 && self.delivered.len() == self.delivered_set.len()
+    }
+
+    fn assert_exact_delivery(&self, packet_count: u64, payload_len: usize, max_latency: usize) {
+        let delivered_contract_count =
+            self.delivered_set.iter().filter(|&&id| id < packet_count).count();
+        assert_eq!(
+            delivered_contract_count, packet_count as usize,
+            "expected {packet_count}/{packet_count} unique contract deliveries"
+        );
+        assert_eq!(self.duplicate_count, 0, "decoder emitted duplicate source packets");
+
+        for id in 0..packet_count {
+            let payload =
+                self.delivered_payloads.get(&id).expect("source payload must be delivered");
+            assert_eq!(payload.len(), payload_len, "payload length mismatch for source {id}");
+            assert!(
+                payload
+                    .iter()
+                    .enumerate()
+                    .all(|(index, byte)| *byte == (id as u8).wrapping_add(index as u8)),
+                "payload corruption for source {id}: dropped={}, window_drops={:?}, window_repair_drops={:?}, delivered_at={:?}, actual={:?}, expected={:?}",
+                self.dropped_source_ids.contains(&id),
+                self.dropped_source_ids
+                    .iter()
+                    .copied()
+                    .filter(|dropped| dropped / 64 == id / 64)
+                    .collect::<Vec<_>>(),
+                self.dropped_repairs
+                    .iter()
+                    .copied()
+                    .filter(|(anchor, _)| anchor / 64 == id / 64)
+                    .collect::<Vec<_>>(),
+                self.delivered_at.get(&id),
+                &payload[..payload.len().min(16)],
+                (0..payload.len().min(16))
+                    .map(|index| (id as u8).wrapping_add(index as u8))
+                    .collect::<Vec<_>>()
+            );
+
+            let delivered_at = self.delivered_at.get(&id).copied().expect("delivery time recorded");
+            let latency = delivered_at.saturating_sub(id as usize + 1);
+            assert!(
+                latency <= max_latency,
+                "source {id} recovery latency {latency} exceeded {max_latency} source sends"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_decoder8_source_id_mapping_is_exact_for_both_depths() {
+    let pool = crate::optimize::global_pool();
+    let policy = FecRuntimePolicy::detect();
+    let plain = Decoder8::new_with_depth(4, Arc::clone(&pool), &policy, 1);
+    let interleaved = Decoder8::new_with_depth(4, pool, &policy, 4);
+
+    assert_eq!((0..4).map(|j| plain.source_id_for(15, j)).collect::<Vec<_>>(), [12, 13, 14, 15]);
+    assert_eq!(
+        (0..4).map(|j| interleaved.source_id_for(15, j)).collect::<Vec<_>>(),
+        [3, 7, 11, 15]
+    );
+}
+
+#[test]
+fn test_decoder16_source_id_mapping_is_exact_for_both_depths() {
+    let pool = crate::optimize::global_pool();
+    let plain = Decoder16::new(4, Arc::clone(&pool));
+    let interleaved = Decoder16::new_with_depth(4, pool, 4);
+
+    assert_eq!((0..4).map(|j| plain.source_id_for(15, j)).collect::<Vec<_>>(), [12, 13, 14, 15]);
+    assert_eq!(
+        (0..4).map(|j| interleaved.source_id_for(15, j)).collect::<Vec<_>>(),
+        [3, 7, 11, 15]
+    );
+}
+
+#[test]
+fn test_decoder4_source_id_mapping_is_exact_for_both_depths() {
+    let pool = crate::optimize::global_pool();
+    let plain = Decoder4::new(4, Arc::clone(&pool));
+    let interleaved = Decoder4::new_with_depth(4, pool, 4);
+
+    assert_eq!((0..4).map(|j| plain.source_id_for(15, j)).collect::<Vec<_>>(), [12, 13, 14, 15]);
+    assert_eq!(
+        (0..4).map(|j| interleaved.source_id_for(15, j)).collect::<Vec<_>>(),
+        [3, 7, 11, 15]
+    );
+}
+
+#[test]
+fn test_decoder8_recovers_interleaved_sources_byte_exactly() {
+    let pool = crate::optimize::global_pool();
+    let policy = FecRuntimePolicy::detect();
+    let mut decoder = Decoder8::new_with_depth(16, Arc::clone(&pool), &policy, 4);
+    for window in 0..10u64 {
+        let base_id = window * 64;
+        let missing = HashSet::from([base_id + 4, base_id + 36]);
+        let mut encoder = Encoder8::new(16, 20);
+
+        for id in (base_id..base_id + 64).step_by(4) {
+            encoder.take_packet(mk_src_packet(id, 1024, &pool));
+            if !missing.contains(&id) {
+                decoder.take_packet(mk_src_packet(id, 1024, &pool));
+            }
+        }
+        for repair_index in 0..4 {
+            let repair = encoder
+                .generate_repair_packet(repair_index, &pool)
+                .expect("full block must emit repair");
+            let first_coefficient = repair
+                .coefficients
+                .as_ref()
+                .and_then(|coefficients| coefficients.first().copied())
+                .expect("repair coefficient");
+            if first_coefficient != 88 {
+                decoder.take_packet(from_wire(&to_wire(&repair), &pool));
+            }
+        }
+
+        let recovered =
+            decoder.get_result().expect("two independent repairs must recover both gaps");
+        let recovered: HashMap<u64, Vec<u8>> = recovered
+            .into_iter()
+            .map(|packet| {
+                (packet.id, packet.payload_slice().expect("recovered source payload").to_vec())
+            })
+            .collect();
+        for id in missing {
+            let payload = recovered.get(&id).expect("missing source must be recovered");
+            assert!(
+                payload
+                    .iter()
+                    .enumerate()
+                    .all(|(index, byte)| *byte == (id as u8).wrapping_add(index as u8)),
+                "recovered source {id} must be byte exact in window {window}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_interleaved_decoder_recovers_repeated_burst_windows_byte_exactly() {
+    let pool = crate::optimize::global_pool();
+    let policy = FecRuntimePolicy::detect();
+    let mut encoder =
+        internal::InterleavedEncoder::new_with_policy(FecMode::Normal, 64, 80, 4, &policy);
+    let mut decoder = internal::InterleavedDecoder::new_with_policy(
+        FecMode::Normal,
+        64,
+        pool.clone(),
+        4,
+        &policy,
+    );
+    let mut recovered = HashMap::new();
+
+    for id in 0..640u64 {
+        encoder.take_packet(mk_src_packet(id, 1024, &pool));
+        if id % 16 >= 4 {
+            decoder.take_packet(from_wire(&to_wire(&mk_src_packet(id, 1024, &pool)), &pool));
+        }
+        if (id + 1).is_multiple_of(64) {
+            for repair_index in 0..16 {
+                let repair = encoder
+                    .generate_repair_packet(repair_index, &pool)
+                    .expect("full interleaved block must emit repair");
+                decoder.take_packet(from_wire(&to_wire(&repair), &pool));
+                if decoder.full_recovery_needed() {
+                    if let Some(packets) = decoder.get_result() {
+                        for packet in packets {
+                            recovered.insert(
+                                packet.id,
+                                packet.payload_slice().expect("recovered source payload").to_vec(),
+                            );
+                        }
+                    }
+                }
+            }
+            encoder.clear_window();
+        }
+    }
+
+    for id in (0..640u64).filter(|id| id % 16 < 4) {
+        let payload = recovered.get(&id).expect("burst-lost source must be recovered");
+        assert!(
+            payload
+                .iter()
+                .enumerate()
+                .all(|(index, byte)| *byte == (id as u8).wrapping_add(index as u8)),
+            "recovered source {id} must be byte exact"
+        );
     }
 }
 
@@ -208,7 +447,7 @@ fn test_fec_e2e_single_loss_recovered() {
     // and repair packets have been generated. We send 2 full windows (128
     // packets, k=64 per window) and drop one systematic packet from the
     // second window. The repairs for that window contain linear combinations
-    // of all 64 source packets, enabling recovery of the dropped one.
+    // of all 64 source packets across four interleave lanes, enabling recovery.
     let _guard = acquire_env_lock();
     let config = FecConfig { initial_mode: FecMode::Normal, ..FecConfig::default() };
     let drop_id: u64 = 70;
@@ -218,10 +457,16 @@ fn test_fec_e2e_single_loss_recovered() {
         channel: DropChannel::with_targeted_drops(vec![drop_id].into_iter().collect()),
         delivered: Vec::new(),
         delivered_set: HashSet::new(),
+        delivered_payloads: HashMap::new(),
+        delivered_at: HashMap::new(),
+        duplicate_count: 0,
+        dropped_source_ids: HashSet::new(),
+        dropped_repairs: Vec::new(),
         sent_count: 0,
         repair_count: 0,
         dropped_count: 0,
         _env_guards: vec![],
+        _env_lock: _guard,
     };
 
     // Send 128 packets (2 windows). Packet 70 will be dropped by the channel.
@@ -247,9 +492,8 @@ fn test_fec_e2e_single_loss_recovered() {
 #[test]
 fn test_fec_e2e_burst_loss_recovered() {
     // Send 3 windows (192 packets). Drop 3 consecutive systematic packets
-    // from the third window (130, 131, 132). With no interleaving (depth=1),
-    // all 3 lost packets are in the same window and can be recovered from
-    // the 16 repair packets for that window.
+    // from the third window (130, 131, 132). Production interleaving distributes
+    // the burst across separate lanes and each lane's repair symbols recover it.
     let _guard = acquire_env_lock();
     let config = FecConfig { initial_mode: FecMode::Normal, ..FecConfig::default() };
     let drop_ids: HashSet<u64> = vec![130, 131, 132].into_iter().collect();
@@ -259,10 +503,16 @@ fn test_fec_e2e_burst_loss_recovered() {
         channel: DropChannel::with_targeted_drops(drop_ids.clone()),
         delivered: Vec::new(),
         delivered_set: HashSet::new(),
+        delivered_payloads: HashMap::new(),
+        delivered_at: HashMap::new(),
+        duplicate_count: 0,
+        dropped_source_ids: HashSet::new(),
+        dropped_repairs: Vec::new(),
         sent_count: 0,
         repair_count: 0,
         dropped_count: 0,
         _env_guards: vec![],
+        _env_lock: _guard,
     };
 
     // Send 192 packets (3 windows). Packets 130, 131, 132 will be dropped.
@@ -306,6 +556,43 @@ fn test_fec_e2e_random_10pct_loss_high_recovery() {
         sim.sent_count
     );
     assert!(sim.verify_no_duplicates(), "no duplicate packets");
+}
+
+#[test]
+fn test_fec_e2e_default_interleave_recovers_1000_packets_at_5pct_random_loss() {
+    const CONTRACT_PACKETS: u64 = 1000;
+    const WINDOW_FLUSH_PACKETS: u64 = 24;
+    const PAYLOAD_LEN: usize = 1024;
+    const MAX_RECOVERY_LATENCY: usize = 63;
+
+    let mut sim = TransportSim::new(0.05, 0x5245_0001);
+    for id in 0..CONTRACT_PACKETS + WINDOW_FLUSH_PACKETS {
+        sim.send_source(id, PAYLOAD_LEN);
+    }
+
+    let contract_drops = sim.dropped_source_ids.iter().filter(|&&id| id < CONTRACT_PACKETS).count();
+    assert!(
+        (30..=70).contains(&contract_drops),
+        "deterministic 5% channel must exercise representative source loss, got {contract_drops}/1000"
+    );
+    sim.assert_exact_delivery(CONTRACT_PACKETS, PAYLOAD_LEN, MAX_RECOVERY_LATENCY);
+}
+
+#[test]
+fn test_fec_e2e_default_interleave_recovers_four_consecutive_losses_per_sixteen() {
+    const CONTRACT_PACKETS: u64 = 1000;
+    const WINDOW_FLUSH_PACKETS: u64 = 24;
+    const PAYLOAD_LEN: usize = 1024;
+    const MAX_RECOVERY_LATENCY: usize = 63;
+
+    let drop_ids: HashSet<u64> = (0..CONTRACT_PACKETS).filter(|id| id % 16 < 4).collect();
+    let mut sim = TransportSim::with_targeted_drops(drop_ids.clone());
+    for id in 0..CONTRACT_PACKETS + WINDOW_FLUSH_PACKETS {
+        sim.send_source(id, PAYLOAD_LEN);
+    }
+
+    assert_eq!(sim.dropped_source_ids, drop_ids, "burst injector must drop the exact pattern");
+    sim.assert_exact_delivery(CONTRACT_PACKETS, PAYLOAD_LEN, MAX_RECOVERY_LATENCY);
 }
 
 #[test]
@@ -420,10 +707,16 @@ fn test_fec_e2e_zero_mode_passthrough_no_repairs() {
         channel: DropChannel::new(900, 0.0),
         delivered: Vec::new(),
         delivered_set: HashSet::new(),
+        delivered_payloads: HashMap::new(),
+        delivered_at: HashMap::new(),
+        duplicate_count: 0,
+        dropped_source_ids: HashSet::new(),
+        dropped_repairs: Vec::new(),
         sent_count: 0,
         repair_count: 0,
         dropped_count: 0,
         _env_guards: vec![],
+        _env_lock: _guard,
     };
 
     // Send 100 packets in Zero mode — no repairs should be generated
