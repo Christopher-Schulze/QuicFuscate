@@ -70,7 +70,7 @@ use std::net::IpAddr;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::Interest;
@@ -91,6 +91,13 @@ use crate::stealth::{
 };
 
 const SERVER_STATS_LOG_INTERVAL: Duration = Duration::from_secs(1);
+
+#[cfg(unix)]
+fn record_systemd_notification(state: &str, result: std::io::Result<()>) {
+    if let Err(error) = result {
+        log::debug!("systemd notification {} failed: {}", state, error);
+    }
+}
 
 fn env_string(name: &str) -> Option<String> {
     std::env::var(name).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
@@ -906,6 +913,8 @@ pub struct ServerRuntime {
     shutdown: Arc<AtomicBool>,
     /// Server state
     state: ServerState,
+    /// Shared graceful-shutdown state exposed to control planes.
+    graceful_shutdown: Arc<GracefulShutdown>,
     /// Statistics
     stats: Arc<ServerStats>,
     /// Optional standalone live UDP runtime state.
@@ -918,7 +927,106 @@ pub enum ServerState {
     Stopped,
     Starting,
     Running,
+    Draining,
     Stopping,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ShutdownLifecycle {
+    Stopped = 0,
+    Running = 1,
+    Draining = 2,
+}
+
+impl ShutdownLifecycle {
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Running,
+            2 => Self::Draining,
+            _ => Self::Stopped,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Stopped => "stopped",
+            Self::Running => "running",
+            Self::Draining => "draining",
+        }
+    }
+}
+
+struct GracefulShutdown {
+    lifecycle: AtomicU8,
+    grace_ms: AtomicU64,
+    drain_started: parking_lot::RwLock<Option<Instant>>,
+}
+
+impl GracefulShutdown {
+    fn new(grace_ms: u64) -> Self {
+        Self {
+            lifecycle: AtomicU8::new(ShutdownLifecycle::Stopped as u8),
+            grace_ms: AtomicU64::new(grace_ms),
+            drain_started: parking_lot::RwLock::new(None),
+        }
+    }
+
+    fn lifecycle(&self) -> ShutdownLifecycle {
+        ShutdownLifecycle::from_u8(self.lifecycle.load(Ordering::Acquire))
+    }
+
+    fn set_running(&self) {
+        *self.drain_started.write() = None;
+        self.lifecycle.store(ShutdownLifecycle::Running as u8, Ordering::Release);
+    }
+
+    fn begin_drain(&self) -> bool {
+        if self
+            .lifecycle
+            .compare_exchange(
+                ShutdownLifecycle::Running as u8,
+                ShutdownLifecycle::Draining as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return false;
+        }
+        *self.drain_started.write() = Some(Instant::now());
+        true
+    }
+
+    fn set_stopped(&self) {
+        *self.drain_started.write() = None;
+        self.lifecycle.store(ShutdownLifecycle::Stopped as u8, Ordering::Release);
+    }
+
+    fn grace(&self) -> Duration {
+        Duration::from_millis(self.grace_ms.load(Ordering::Acquire))
+    }
+
+    fn set_grace_ms(&self, grace_ms: u64) {
+        self.grace_ms.store(grace_ms, Ordering::Release);
+    }
+
+    fn elapsed(&self) -> Duration {
+        self.drain_started.read().as_ref().map(|started| started.elapsed()).unwrap_or_default()
+    }
+
+    fn deadline_reached(&self) -> bool {
+        self.lifecycle() == ShutdownLifecycle::Draining && self.elapsed() >= self.grace()
+    }
+
+    fn status_json(&self, active_connections: u64) -> serde_json::Value {
+        serde_json::json!({
+            "state": self.lifecycle().as_str(),
+            "active_connections": active_connections,
+            "grace_period_ms": self.grace().as_millis() as u64,
+            "drain_elapsed_ms": self.elapsed().as_millis() as u64,
+        })
+    }
 }
 
 /// Server statistics.
@@ -948,6 +1056,7 @@ pub enum AdminAction {
     Kick(String),
     RevokeQKey(String),
     Reload,
+    Drain,
     Shutdown,
 }
 
@@ -1266,29 +1375,32 @@ impl SharedServerDomain {
 }
 
 #[derive(Clone)]
-pub struct ServerAdminCore {
-    metrics: Arc<Metrics>,
-    blocked_ips: Arc<parking_lot::RwLock<std::collections::HashSet<String>>>,
-    client_snapshots: Arc<std::sync::Mutex<std::collections::HashMap<SocketAddr, ClientSnapshot>>>,
+struct ServerAdminControlPlane {
     actions: mpsc::UnboundedSender<AdminAction>,
     listen_addr: String,
     front_domain: Vec<String>,
     qkeys: Arc<std::sync::Mutex<QKeyRegistry>>,
+    graceful_shutdown: Arc<GracefulShutdown>,
+}
+
+#[derive(Clone)]
+pub struct ServerAdminCore {
+    metrics: Arc<Metrics>,
+    blocked_ips: Arc<parking_lot::RwLock<std::collections::HashSet<String>>>,
+    client_snapshots: Arc<std::sync::Mutex<std::collections::HashMap<SocketAddr, ClientSnapshot>>>,
+    control_plane: ServerAdminControlPlane,
 }
 
 impl ServerAdminCore {
-    pub fn new(
+    fn new(
         metrics: Arc<Metrics>,
         blocked_ips: Arc<parking_lot::RwLock<std::collections::HashSet<String>>>,
         client_snapshots: Arc<
             std::sync::Mutex<std::collections::HashMap<SocketAddr, ClientSnapshot>>,
         >,
-        actions: mpsc::UnboundedSender<AdminAction>,
-        listen_addr: String,
-        front_domain: Vec<String>,
-        qkeys: Arc<std::sync::Mutex<QKeyRegistry>>,
+        control_plane: ServerAdminControlPlane,
     ) -> Self {
-        Self { metrics, blocked_ips, client_snapshots, actions, listen_addr, front_domain, qkeys }
+        Self { metrics, blocked_ips, client_snapshots, control_plane }
     }
 
     pub fn metrics(&self) -> &Arc<Metrics> {
@@ -1300,11 +1412,11 @@ impl ServerAdminCore {
     }
 
     pub fn listen_addr(&self) -> &str {
-        self.listen_addr.as_str()
+        self.control_plane.listen_addr.as_str()
     }
 
     pub fn qkeys(&self) -> &Arc<std::sync::Mutex<QKeyRegistry>> {
-        &self.qkeys
+        &self.control_plane.qkeys
     }
 
     pub fn base_status_json(&self) -> serde_json::Value {
@@ -1321,6 +1433,18 @@ impl ServerAdminCore {
         })
     }
 
+    pub fn drain(&self) -> AdminResponse {
+        self.dispatch_action(AdminAction::Drain, "Drain scheduled".to_string())
+    }
+
+    pub fn drain_status(&self) -> AdminResponse {
+        AdminResponse::ok_with_data(
+            self.control_plane
+                .graceful_shutdown
+                .status_json(self.metrics.clients_active.load(Ordering::Relaxed)),
+        )
+    }
+
     pub fn list_clients(&self) -> Vec<ClientInfo> {
         let guard = match self.client_snapshots.lock() {
             Ok(g) => g,
@@ -1330,7 +1454,7 @@ impl ServerAdminCore {
     }
 
     pub fn dispatch_action(&self, action: AdminAction, ok_message: String) -> AdminResponse {
-        match self.actions.send(action) {
+        match self.control_plane.actions.send(action) {
             Ok(()) => AdminResponse::ok_with_message(ok_message),
             Err(_) => AdminResponse::error("Admin action channel unavailable"),
         }
@@ -1352,7 +1476,10 @@ impl ServerAdminCore {
     }
 
     pub fn request_reload_after_write(&self) -> Result<(), &'static str> {
-        self.actions.send(AdminAction::Reload).map_err(|_| "admin action channel unavailable")
+        self.control_plane
+            .actions
+            .send(AdminAction::Reload)
+            .map_err(|_| "admin action channel unavailable")
     }
 
     pub fn block_ip(&self, ip: &str) -> AdminResponse {
@@ -1375,8 +1502,12 @@ impl ServerAdminCore {
     }
 
     pub fn issue_unix_qkey(&self) -> String {
-        let mut registry = self.qkeys.lock().unwrap_or_else(|e| e.into_inner());
-        match issue_unix_admin_qkey(&mut registry, &self.listen_addr, &self.front_domain) {
+        let mut registry = self.control_plane.qkeys.lock().unwrap_or_else(|e| e.into_inner());
+        match issue_unix_admin_qkey(
+            &mut registry,
+            &self.control_plane.listen_addr,
+            &self.control_plane.front_domain,
+        ) {
             Ok(qkey) => qkey,
             Err(e) => {
                 log::warn!("QKey issuance failed: {}", e);
@@ -1386,11 +1517,11 @@ impl ServerAdminCore {
     }
 
     pub fn issue_http_qkey(&self, req: &IssueQKeyRequest) -> AdminResponse {
-        let mut registry = self.qkeys.lock().unwrap_or_else(|e| e.into_inner());
+        let mut registry = self.control_plane.qkeys.lock().unwrap_or_else(|e| e.into_inner());
         let issued = match issue_http_admin_qkey(
             &mut registry,
-            &self.listen_addr,
-            &self.front_domain,
+            &self.control_plane.listen_addr,
+            &self.control_plane.front_domain,
             req,
         ) {
             Ok(issued) => issued,
@@ -1404,12 +1535,12 @@ impl ServerAdminCore {
     }
 
     pub fn revoke_http_qkey(&self, id: &str) -> AdminResponse {
-        let mut registry = self.qkeys.lock().unwrap_or_else(|e| e.into_inner());
+        let mut registry = self.control_plane.qkeys.lock().unwrap_or_else(|e| e.into_inner());
         if !registry.revoke(id) {
             return AdminResponse::error("QKey not found");
         }
         drop(registry);
-        match self.actions.send(AdminAction::RevokeQKey(id.to_string())) {
+        match self.control_plane.actions.send(AdminAction::RevokeQKey(id.to_string())) {
             Ok(()) => AdminResponse::ok_with_message("QKey revoked"),
             Err(_) => {
                 AdminResponse::error("QKey revoked in registry but runtime channel is unavailable")
@@ -1529,6 +1660,14 @@ impl AdminHttpHandler for ServerAdminHttpRuntimeHandler {
 
     fn handle_reload(&self) -> AdminResponse {
         self.core.reload()
+    }
+
+    fn handle_drain(&self) -> AdminResponse {
+        self.core.drain()
+    }
+
+    fn handle_drain_status(&self) -> AdminResponse {
+        self.core.drain_status()
     }
 
     fn handle_qkey(&self, req: IssueQKeyRequest) -> AdminResponse {
@@ -2119,6 +2258,7 @@ pub async fn flush_live_server_outgoing(
     session_stats: Option<Arc<SessionStats>>,
     session_id: Option<SessionId>,
 ) -> std::io::Result<(u64, u64)> {
+    const MAX_DATAGRAMS_PER_FLUSH: usize = 256;
     let mut bytes_sent = 0u64;
     let mut packets_sent = 0u64;
 
@@ -2126,7 +2266,7 @@ pub async fn flush_live_server_outgoing(
     // This lets us submit them as a single io_uring batch (one io_uring_enter
     // syscall instead of one sendmsg per packet).
     let mut staging: Vec<Vec<u8>> = Vec::new();
-    loop {
+    while staging.len() < MAX_DATAGRAMS_PER_FLUSH {
         match conn.send(out) {
             Ok(len) if len > 0 => {
                 crate::telemetry::BYTES_SENT.inc_by(len as u64);
@@ -2144,6 +2284,13 @@ pub async fn flush_live_server_outgoing(
                 break;
             }
         }
+    }
+    if staging.len() == MAX_DATAGRAMS_PER_FLUSH {
+        log::debug!(
+            "Outgoing flush for {} reached the {} datagram burst limit",
+            addr,
+            MAX_DATAGRAMS_PER_FLUSH
+        );
     }
 
     if !staging.is_empty() {
@@ -3177,6 +3324,43 @@ impl LiveServerState {
         }
     }
 
+    pub fn client_count(&self) -> usize {
+        self.clients.len()
+    }
+
+    pub async fn force_close_and_flush(
+        &mut self,
+        socket: &tokio::net::UdpSocket,
+        out: &mut [u8],
+        metrics: &Metrics,
+        accept_loop: &AcceptLoop,
+        reason: &'static [u8],
+    ) {
+        self.shutdown_all(reason);
+        let client_snapshots = Arc::clone(self.domain.client_snapshots());
+        for addr in self.key_addrs() {
+            let session_stats = self.domain.session_stats_by_remote(addr);
+            let session_id = self.domain.session_id_by_remote(addr);
+            if let Some(conn) = self.get_mut(&addr) {
+                if let Err(error) = flush_live_server_outgoing(
+                    socket,
+                    addr,
+                    conn,
+                    out,
+                    metrics,
+                    &client_snapshots,
+                    session_stats,
+                    session_id,
+                )
+                .await
+                {
+                    log::warn!("Failed to flush shutdown frame to {}: {}", addr, error);
+                }
+            }
+        }
+        self.reconcile(accept_loop, metrics);
+    }
+
     pub fn reconcile(&mut self, accept_loop: &AcceptLoop, metrics: &Metrics) {
         let closed_addrs =
             reconcile_live_clients(&mut self.clients, &mut self.qkey_auth, accept_loop, metrics);
@@ -3374,6 +3558,7 @@ impl StandaloneServiceSignals {
 }
 
 pub const QKEY_AUTH_TIMEOUT: Duration = Duration::from_secs(5);
+const FINAL_CLOSE_FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
 pub const DF_SNI_MODE_FIXED: &str = "fixed";
 pub const DF_SNI_MODE_AUTO_ROTATING: &str = "auto_rotating";
 
@@ -4434,36 +4619,59 @@ pub(crate) fn open_server_tun(
     TunInterface::open(tun_config, pool).map_err(|e| format!("{:?}", e))
 }
 
-/// Wait for a shutdown signal (SIGINT/SIGTERM on Unix, Ctrl+C on Windows).
-///
-/// This unifies signal handling so that `systemctl stop` (SIGTERM),
-/// `docker stop` (SIGTERM), and Ctrl+C (SIGINT) all trigger graceful
-/// shutdown with the same cleanup path.
-pub(crate) async fn wait_shutdown_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut sigterm = match signal(SignalKind::terminate()) {
-            Ok(s) => s,
-            Err(e) => {
-                log::warn!("Failed to install SIGTERM handler: {}, falling back to ctrl_c only", e);
-                let _ = tokio::signal::ctrl_c().await;
-                return;
-            }
-        };
+enum ServerSignalEvent {
+    Shutdown(&'static [u8]),
+    Reload,
+}
+
+#[cfg(unix)]
+struct ServerSignals {
+    sigint: tokio::signal::unix::Signal,
+    sigterm: tokio::signal::unix::Signal,
+    sighup: tokio::signal::unix::Signal,
+}
+
+#[cfg(unix)]
+impl ServerSignals {
+    fn install() -> std::io::Result<Self> {
+        Ok(Self {
+            sigint: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?,
+            sigterm: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?,
+            sighup: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?,
+        })
+    }
+
+    async fn recv(&mut self) -> ServerSignalEvent {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
+            _ = self.sigint.recv() => {
                 log::info!("SIGINT received");
+                ServerSignalEvent::Shutdown(b"sigint")
             }
-            _ = sigterm.recv() => {
+            _ = self.sigterm.recv() => {
                 log::info!("SIGTERM received");
+                ServerSignalEvent::Shutdown(b"sigterm")
+            }
+            _ = self.sighup.recv() => {
+                log::info!("SIGHUP received");
+                ServerSignalEvent::Reload
             }
         }
     }
-    #[cfg(not(unix))]
-    {
+}
+
+#[cfg(not(unix))]
+struct ServerSignals;
+
+#[cfg(not(unix))]
+impl ServerSignals {
+    fn install() -> std::io::Result<Self> {
+        Ok(Self)
+    }
+
+    async fn recv(&mut self) -> ServerSignalEvent {
         let _ = tokio::signal::ctrl_c().await;
         log::info!("Shutdown signal received");
+        ServerSignalEvent::Shutdown(b"shutdown")
     }
 }
 
@@ -4526,6 +4734,9 @@ impl ServerRuntime {
         let domain = SharedServerDomain::new(&server_config);
 
         Ok(Self {
+            graceful_shutdown: Arc::new(GracefulShutdown::new(
+                engine_config.engine.shutdown_timeout_ms,
+            )),
             engine_config,
             server_config,
             pool,
@@ -4722,6 +4933,7 @@ impl ServerRuntime {
         }
 
         self.state = ServerState::Running;
+        self.graceful_shutdown.set_running();
 
         Ok(())
     }
@@ -4745,6 +4957,7 @@ impl ServerRuntime {
         }
 
         self.state = ServerState::Stopped;
+        self.graceful_shutdown.set_stopped();
         log::info!("Server stopped");
 
         Ok(())
@@ -4888,14 +5101,18 @@ impl ServerRuntime {
             self.standalone_metrics(),
             self.blocked_ips().clone(),
             self.live_client_snapshots().clone(),
-            self.admin_actions_sender(),
-            self.local_addr().to_string(),
-            self.live()
-                .standalone_runtime_metadata
-                .as_ref()
-                .map(|metadata| metadata.front_domain.clone())
-                .unwrap_or_default(),
-            self.qkey_registry().clone(),
+            ServerAdminControlPlane {
+                actions: self.admin_actions_sender(),
+                listen_addr: self.local_addr().to_string(),
+                front_domain: self
+                    .live()
+                    .standalone_runtime_metadata
+                    .as_ref()
+                    .map(|metadata| metadata.front_domain.clone())
+                    .unwrap_or_default(),
+                qkeys: self.qkey_registry().clone(),
+                graceful_shutdown: self.graceful_shutdown.clone(),
+            },
         )
     }
 
@@ -5085,266 +5302,322 @@ impl ServerRuntime {
             }
         }
 
-        let shutdown_signal = wait_shutdown_signal();
-        tokio::pin!(shutdown_signal);
+        let mut server_signals = match ServerSignals::install() {
+            Ok(signals) => signals,
+            Err(error) => {
+                let live = self.live_mut();
+                live.admin_actions_rx = Some(admin_actions_rx);
+                live.service_signals.shutdown_all();
+                if let Err(stop_error) = self.stop() {
+                    log::warn!(
+                        "Server cleanup after signal handler installation failure failed: {}",
+                        stop_error
+                    );
+                }
+                return Err(error);
+            }
+        };
+
+        #[cfg(unix)]
+        {
+            record_systemd_notification("READY=1", self::systemd::notify::ready());
+            record_systemd_notification(
+                "STATUS=Accepting connections",
+                self::systemd::notify::status("Accepting connections"),
+            );
+        }
+        #[cfg(unix)]
+        let watchdog_interval = self::systemd::notify::watchdog_interval();
+        #[cfg(unix)]
+        let mut next_watchdog = watchdog_interval.map(|interval| Instant::now() + interval);
 
         loop {
             tokio::select! {
-                    Some(action) = admin_actions_rx.recv() => {
-                        let should_shutdown = self.handle_admin_action_with_runtime_reload(
-                            action,
-                            &metrics,
-                            runtime_config,
-                        );
-                        if should_shutdown {
-                            break;
+                Some(action) = admin_actions_rx.recv() => {
+                    self.handle_admin_action_with_runtime_reload(
+                        action,
+                        &metrics,
+                        runtime_config,
+                    );
+                }
+                signal = server_signals.recv() => {
+                    match signal {
+                        ServerSignalEvent::Shutdown(reason) => {
+                            self.initiate_drain(reason);
                         }
-                    }
-                    _ = &mut shutdown_signal => {
-                        self.shutdown_live(b"shutdown");
-                        break;
-                    }
-                    recv_res = recv_datagram_from(&socket, &mut buf) => {
-                        match recv_res {
-                            Ok((len, from)) => {
-                                crate::telemetry!(crate::telemetry::BYTES_RECEIVED.inc_by(len as u64));
-                                metrics.record_ingress_datagram(len);
-
-                                let ip_str = from.ip().to_string();
-                                if blocked_ips.read().contains(&ip_str) {
-                                    metrics.record_connection_rejected();
-                                    continue;
-                                }
-                                #[cfg(feature = "rate_limiter")]
-                                {
-                                    if !self.allow_incoming_datagram(from, len) {
-                                        metrics.record_rate_limited();
-                                        continue;
-                                    }
-                                }
-
-                                let runtime_parts = self.live_parts();
-                                let client_snapshots = runtime_parts.live_state.client_snapshots().clone();
-                                let auth_rate_limiter = runtime_parts.live_state.auth_rate_limiter.clone();
-                                let revocation_manager =
-                                    Arc::clone(&runtime_parts.live_state.revocation_manager);
-                                let stealth_config = runtime_config.stealth_config.clone();
-                                let fec_cfg_shared = runtime_config.fec_cfg_shared.clone();
-                                let opt_params_shared = runtime_config.opt_params_shared.clone();
-                                let transport = &mut runtime_config.transport;
-                                let runtime_client = match runtime_parts.live_state.acquire_runtime_client_with(
-                                    from,
-                                    &buf[..len],
-                                    runtime_parts.accept_loop,
-                                    runtime_parts.accept_max_clients,
-                                    &metrics,
-                                    || {
-                                        build_live_server_client_init(
-                                            LiveClientBuildRequest {
-                                                packet: &buf[..len],
-                                                local_addr,
-                                                remote_addr: from,
-                                                qkey_registry: qkey_registry.as_ref(),
-                                                revocation_manager: revocation_manager.as_ref(),
-                                                metrics: &metrics,
-                                                stealth_config: &stealth_config,
-                                                fec_cfg_shared: &fec_cfg_shared,
-                                                opt_params_shared: &opt_params_shared,
-                                            transport_config: transport,
-                                            profile,
-                                            os,
-                                            disable_doh,
-                                            auth_rate_limiter: auth_rate_limiter.clone(),
-                                            doh_provider: doh_provider.as_str(),
-                                            disable_fronting,
-                                            front_domain: &front_domain,
-                                            disable_http3,
-                                        },
-                                    )
-                                },
-                                ) {
-                                    LiveClientAcquire::Ready(v) => {
-                                        v
-                                    },
-                                    LiveClientAcquire::Backpressure => {
-                                        tokio::time::sleep(runtime_parts.accept_loop.backpressure_delay()).await;
-                                        continue;
-                                    }
-                                    LiveClientAcquire::Rejected => {
-                                        continue;
-                                    }
-                                };
-
-                                let datagram_result = match process_live_server_client_datagram(
-                                    &socket,
-                                    from,
-                                    runtime_client,
-                                    &buf[..len],
-                                    &mut out,
-                                    &metrics,
-                                    &client_snapshots,
-                                    runtime_parts.server_tun,
-                                    tun_enable,
-                                    transport.fingerprint_profile(),
-                                    Arc::clone(&dns_upstream_resolvers),
-                                ).await {
-                                    Ok(result) => result,
-                                    Err(e) => {
-                                        log::warn!("Failed to process live packet for {}: {}", from, e);
-                                        LiveClientDatagramResult {
-                                            auth_result: None,
-                                            remove_auth_conn_id: None,
-                                        }
-                                    }
-                                };
-                                runtime_parts.live_state.commit_qkey_auth_result(
-                                    datagram_result.remove_auth_conn_id,
-                                    datagram_result.auth_result,
-                                    runtime_parts.accept_loop,
-                                    &metrics,
-                                );
-                            }
-                            Err(e) => {
-                                log::error!("Failed to read from socket: {}", e);
-                            }
+                        ServerSignalEvent::Reload => {
+                            self.reload_standalone_runtime(runtime_config, "SIGHUP");
                         }
-                    }
-                    _ = housekeeping.tick() => {
-                                let runtime_parts = self.live_parts();
-                        runtime_parts.live_state
-                            .run_housekeeping_tick(
-                                &socket,
-                                &mut out,
-                                &metrics,
-                                runtime_parts.accept_loop,
-                            )
-                            .await;
-                        // Forward TUN→client: drain any packets from the TUN reader thread
-                        // and route them to the correct client based on the destination IP
-                        // in the IP packet header. Each client has a unique TUN IP from the
-                        // server's IP pool, and we look up the session by client_ip to find
-                        // the corresponding SocketAddr.
-                        if let Some(ref rx) = tun_rx {
-                            for _ in 0..32 {
-                                match rx.try_recv() {
-                                    Ok(pkt) => {
-                                        let live = self.live_mut();
-                                        let server_tun_ip = live.server_tun_ip;
-                                        let server_tun = live.server_tun.clone();
-
-                                        // Check if this is an ICMP packet destined for the server's own TUN IP.
-                                        // If so, handle it locally (echo reply) instead of forwarding.
-                                        if let Some(server_ip) = server_tun_ip {
-                                            if pkt.len() >= 20 && (pkt[0] >> 4) == 4 {
-                                                let dest = Ipv4Addr::new(pkt[16], pkt[17], pkt[18], pkt[19]);
-                                                if dest == server_ip {
-                                                    let ihl = ((pkt[0] & 0x0F) as usize) * 4;
-                                                    if let Some(icmp) = icmp::parse_icmpv4(ihl, &pkt) {
-                                                        if icmp.icmp_type == icmp::icmp_type::ECHO_REQUEST {
-                                                            // Use the target OS profile's TTL for the echo
-                                                            // reply so that ICMP fingerprinting also matches
-                                                            // the configured profile (TODO-462).
-                                                            let reply = icmp::build_echo_reply_with_ttl(
-                                                                &pkt,
-                                                                fingerprint_profile.ttl(),
-                                                            );
-                                                            if let Some(ref tun) = server_tun {
-                                                                if let Err(e) = tun.write(&reply) {
-                                                                    log::warn!("ICMP echo reply write to TUN failed: {:?}", e);
-                                                                }
-                                                            }
-                                                            // Skip forwarding - handled locally
-                                                            continue;
-                                                        }
-                                                        // Other ICMP types to server IP: ignore
-                                                        continue;
-                                                    }
-                                                    // Non-ICMP packet to server IP: ignore (no local TCP/UDP stack)
-                                                    continue;
-                                                }
-                                            }
-                                        }
-
-                                        // Parse the destination IP address (IPv4 or IPv6)
-                                        // from the packet and route to the matching client.
-                                        let target_addr = parse_ip_dest(&pkt)
-                                            .and_then(|dest_ip| {
-                                                let sessions = live.live_state.domain.shared.sessions.read();
-                                                match dest_ip {
-                                                    std::net::IpAddr::V4(v4) => {
-                                                        sessions.get_by_client_ip(v4)
-                                                            .map(|s| s.remote_addr())
-                                                    }
-                                                    std::net::IpAddr::V6(v6) => {
-                                                        sessions.get_by_client_ipv6(v6)
-                                                            .map(|s| s.remote_addr())
-                                                    }
-                                                }
-                                            });
-
-                                        let mut queued_target_addr = None;
-                                        if let Some(addr) = target_addr {
-                                            // Route to the specific client that owns this IP
-                                            if let Some(conn) = live.live_state.clients.get_mut(&addr) {
-                                                if let Err(e) = conn.send_masque_downlink(&pkt) {
-                                                    log::debug!("TUN→MASQUE send to {}: {:?}", addr, e);
-                                                } else {
-                                                    queued_target_addr = Some(addr);
-                                                }
-                                            }
-                                        } else {
-                                            // No matching client session - send ICMP Destination Unreachable
-                                            // (Host Unreachable) back to the source, so the sender gets
-                                            // immediate feedback instead of waiting for TCP timeout.
-                                            if pkt.len() >= 20 && (pkt[0] >> 4) == 4 {
-                                                let unreachable = icmp::build_icmp_unreachable(
-                                                    &pkt,
-                                                    icmp::icmp_type::DESTINATION_UNREACHABLE,
-                                                    icmp::icmp_code::HOST_UNREACHABLE,
-                                                    None,
-                                                );
-                                                if !unreachable.is_empty() {
-                                                    if let Some(ref tun) = server_tun {
-                                                        let _ = tun.write(&unreachable);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        // Flush only the client that received queued MASQUE downlink
-                                        // data. The previous all-client sweep was O(client_count) per
-                                        // TUN packet even though only one connection had new output.
-                                        if let Some(addr) = queued_target_addr {
-                                            let live = self.live_mut();
-                                            if let Some(conn) = live.live_state.clients.get_mut(&addr) {
-                                                loop {
-                                                    let written = match conn.send(&mut out) {
-                                                        Ok(0) => break,
-                                                        Ok(n) => n,
-                                                        Err(_) => break,
-                                                    };
-                                                    if let Err(e) = socket.try_send_to(&out[..written], addr) {
-                                                        log::debug!("TUN→socket send to {}: {:?}", addr, e);
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                                        tun_rx = None;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        // Sweep expired entries from 0-RTT anti-replay strike register.
-                        if let Some(ref sr) = runtime_config.strike_register {
-                            sr.cleanup(std::time::Instant::now());
-                        }
-            tokio::task::yield_now().await;
                     }
                 }
+                recv_res = recv_datagram_from(&socket, &mut buf) => {
+                    match recv_res {
+                        Ok((len, from)) => {
+                            crate::telemetry!(crate::telemetry::BYTES_RECEIVED.inc_by(len as u64));
+                            metrics.record_ingress_datagram(len);
+
+                            let ip_str = from.ip().to_string();
+                            if blocked_ips.read().contains(&ip_str) {
+                                metrics.record_connection_rejected();
+                                continue;
+                            }
+                            #[cfg(feature = "rate_limiter")]
+                            {
+                                if !self.allow_incoming_datagram(from, len) {
+                                    metrics.record_rate_limited();
+                                    continue;
+                                }
+                            }
+
+                            let runtime_parts = self.live_parts();
+                            let client_snapshots = runtime_parts.live_state.client_snapshots().clone();
+                            let auth_rate_limiter = runtime_parts.live_state.auth_rate_limiter.clone();
+                            let revocation_manager =
+                                Arc::clone(&runtime_parts.live_state.revocation_manager);
+                            let stealth_config = runtime_config.stealth_config.clone();
+                            let fec_cfg_shared = runtime_config.fec_cfg_shared.clone();
+                            let opt_params_shared = runtime_config.opt_params_shared.clone();
+                            let transport = &mut runtime_config.transport;
+                            let runtime_client = match runtime_parts.live_state.acquire_runtime_client_with(
+                                from,
+                                &buf[..len],
+                                runtime_parts.accept_loop,
+                                runtime_parts.accept_max_clients,
+                                &metrics,
+                                || {
+                                    build_live_server_client_init(
+                                        LiveClientBuildRequest {
+                                            packet: &buf[..len],
+                                            local_addr,
+                                            remote_addr: from,
+                                            qkey_registry: qkey_registry.as_ref(),
+                                            revocation_manager: revocation_manager.as_ref(),
+                                            metrics: &metrics,
+                                            stealth_config: &stealth_config,
+                                            fec_cfg_shared: &fec_cfg_shared,
+                                            opt_params_shared: &opt_params_shared,
+                                        transport_config: transport,
+                                        profile,
+                                        os,
+                                        disable_doh,
+                                        auth_rate_limiter: auth_rate_limiter.clone(),
+                                        doh_provider: doh_provider.as_str(),
+                                        disable_fronting,
+                                        front_domain: &front_domain,
+                                        disable_http3,
+                                    },
+                                )
+                            },
+                            ) {
+                                LiveClientAcquire::Ready(v) => {
+                                    v
+                                },
+                                LiveClientAcquire::Backpressure => {
+                                    tokio::time::sleep(runtime_parts.accept_loop.backpressure_delay()).await;
+                                    continue;
+                                }
+                                LiveClientAcquire::Rejected => {
+                                    continue;
+                                }
+                            };
+
+                            let datagram_result = match process_live_server_client_datagram(
+                                &socket,
+                                from,
+                                runtime_client,
+                                &buf[..len],
+                                &mut out,
+                                &metrics,
+                                &client_snapshots,
+                                runtime_parts.server_tun,
+                                tun_enable,
+                                transport.fingerprint_profile(),
+                                Arc::clone(&dns_upstream_resolvers),
+                            ).await {
+                                Ok(result) => result,
+                                Err(e) => {
+                                    log::warn!("Failed to process live packet for {}: {}", from, e);
+                                    LiveClientDatagramResult {
+                                        auth_result: None,
+                                        remove_auth_conn_id: None,
+                                    }
+                                }
+                            };
+                            runtime_parts.live_state.commit_qkey_auth_result(
+                                datagram_result.remove_auth_conn_id,
+                                datagram_result.auth_result,
+                                runtime_parts.accept_loop,
+                                &metrics,
+                            );
+                        }
+                        Err(e) => {
+                            log::error!("Failed to read from socket: {}", e);
+                        }
+                    }
+                }
+                _ = housekeeping.tick() => {
+                            let runtime_parts = self.live_parts();
+                    runtime_parts.live_state
+                        .run_housekeeping_tick(
+                            &socket,
+                            &mut out,
+                            &metrics,
+                            runtime_parts.accept_loop,
+                        )
+                        .await;
+                    // Forward TUN→client: drain any packets from the TUN reader thread
+                    // and route them to the correct client based on the destination IP
+                    // in the IP packet header. Each client has a unique TUN IP from the
+                    // server's IP pool, and we look up the session by client_ip to find
+                    // the corresponding SocketAddr.
+                    if let Some(ref rx) = tun_rx {
+                        for _ in 0..32 {
+                            match rx.try_recv() {
+                                Ok(pkt) => {
+                                    let live = self.live_mut();
+                                    let server_tun_ip = live.server_tun_ip;
+                                    let server_tun = live.server_tun.clone();
+
+                                    // Check if this is an ICMP packet destined for the server's own TUN IP.
+                                    // If so, handle it locally (echo reply) instead of forwarding.
+                                    if let Some(server_ip) = server_tun_ip {
+                                        if pkt.len() >= 20 && (pkt[0] >> 4) == 4 {
+                                            let dest = Ipv4Addr::new(pkt[16], pkt[17], pkt[18], pkt[19]);
+                                            if dest == server_ip {
+                                                let ihl = ((pkt[0] & 0x0F) as usize) * 4;
+                                                if let Some(icmp) = icmp::parse_icmpv4(ihl, &pkt) {
+                                                    if icmp.icmp_type == icmp::icmp_type::ECHO_REQUEST {
+                                                        // Use the target OS profile's TTL for the echo
+                                                        // reply so that ICMP fingerprinting also matches
+                                                        // the configured profile (TODO-462).
+                                                        let reply = icmp::build_echo_reply_with_ttl(
+                                                            &pkt,
+                                                            fingerprint_profile.ttl(),
+                                                        );
+                                                        if let Some(ref tun) = server_tun {
+                                                            if let Err(e) = tun.write(&reply) {
+                                                                log::warn!("ICMP echo reply write to TUN failed: {:?}", e);
+                                                            }
+                                                        }
+                                                        // Skip forwarding - handled locally
+                                                        continue;
+                                                    }
+                                                    // Other ICMP types to server IP: ignore
+                                                    continue;
+                                                }
+                                                // Non-ICMP packet to server IP: ignore (no local TCP/UDP stack)
+                                                continue;
+                                            }
+                                        }
+                                    }
+
+                                    // Parse the destination IP address (IPv4 or IPv6)
+                                    // from the packet and route to the matching client.
+                                    let target_addr = parse_ip_dest(&pkt)
+                                        .and_then(|dest_ip| {
+                                            let sessions = live.live_state.domain.shared.sessions.read();
+                                            match dest_ip {
+                                                std::net::IpAddr::V4(v4) => {
+                                                    sessions.get_by_client_ip(v4)
+                                                        .map(|s| s.remote_addr())
+                                                }
+                                                std::net::IpAddr::V6(v6) => {
+                                                    sessions.get_by_client_ipv6(v6)
+                                                        .map(|s| s.remote_addr())
+                                                }
+                                            }
+                                        });
+
+                                    let mut queued_target_addr = None;
+                                    if let Some(addr) = target_addr {
+                                        // Route to the specific client that owns this IP
+                                        if let Some(conn) = live.live_state.clients.get_mut(&addr) {
+                                            if let Err(e) = conn.send_masque_downlink(&pkt) {
+                                                log::debug!("TUN→MASQUE send to {}: {:?}", addr, e);
+                                            } else {
+                                                queued_target_addr = Some(addr);
+                                            }
+                                        }
+                                    } else {
+                                        // No matching client session - send ICMP Destination Unreachable
+                                        // (Host Unreachable) back to the source, so the sender gets
+                                        // immediate feedback instead of waiting for TCP timeout.
+                                        if pkt.len() >= 20 && (pkt[0] >> 4) == 4 {
+                                            let unreachable = icmp::build_icmp_unreachable(
+                                                &pkt,
+                                                icmp::icmp_type::DESTINATION_UNREACHABLE,
+                                                icmp::icmp_code::HOST_UNREACHABLE,
+                                                None,
+                                            );
+                                            if !unreachable.is_empty() {
+                                                if let Some(ref tun) = server_tun {
+                                                    let _ = tun.write(&unreachable);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // Flush only the client that received queued MASQUE downlink
+                                    // data. The previous all-client sweep was O(client_count) per
+                                    // TUN packet even though only one connection had new output.
+                                    if let Some(addr) = queued_target_addr {
+                                        let live = self.live_mut();
+                                        if let Some(conn) = live.live_state.clients.get_mut(&addr) {
+                                            loop {
+                                                let written = match conn.send(&mut out) {
+                                                    Ok(0) => break,
+                                                    Ok(n) => n,
+                                                    Err(_) => break,
+                                                };
+                                                if let Err(e) = socket.try_send_to(&out[..written], addr) {
+                                                    log::debug!("TUN→socket send to {}: {:?}", addr, e);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                    tun_rx = None;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    // Sweep expired entries from 0-RTT anti-replay strike register.
+                    if let Some(ref sr) = runtime_config.strike_register {
+                        sr.cleanup(std::time::Instant::now());
+                    }
+                    #[cfg(unix)]
+                    if let (Some(interval), Some(deadline)) =
+                        (watchdog_interval, next_watchdog)
+                    {
+                        if Instant::now() >= deadline {
+                            record_systemd_notification(
+                                "WATCHDOG=1",
+                                self::systemd::notify::watchdog(),
+                            );
+                            next_watchdog = Some(Instant::now() + interval);
+                        }
+                    }
+                    if self.drain_complete() {
+                        log::info!(
+                            "Server drain complete (active_clients={}, elapsed_ms={})",
+                            self.live().live_state.client_count(),
+                            self.graceful_shutdown.elapsed().as_millis()
+                        );
+                        self.finish_drain(
+                            &socket,
+                            &mut out,
+                            &metrics,
+                            b"server_shutdown",
+                        )
+                        .await;
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }
         }
 
         self.live_mut().admin_actions_rx = Some(admin_actions_rx);
@@ -5431,6 +5704,18 @@ impl ServerRuntime {
                 }
                 false
             }
+            AdminAction::Drain => {
+                log::info!("Admin drain requested");
+                crate::audit::audit(
+                    crate::audit::AuditEventType::AdminAction,
+                    crate::audit::AuditSeverity::Warning,
+                    None,
+                    None,
+                    "Admin requested server drain",
+                );
+                self.initiate_drain(b"admin_drain");
+                false
+            }
             AdminAction::Shutdown => {
                 log::info!("Admin shutdown requested");
                 crate::audit::audit(
@@ -5440,8 +5725,8 @@ impl ServerRuntime {
                     None,
                     "Admin requested server shutdown",
                 );
-                self.shutdown_live(b"admin_shutdown");
-                true
+                self.initiate_drain(b"admin_shutdown");
+                false
             }
         }
     }
@@ -5451,17 +5736,46 @@ impl ServerRuntime {
         action: AdminAction,
         metrics: &Arc<Metrics>,
         runtime_config: &mut PreparedStandaloneRuntimeConfig,
-    ) -> bool {
+    ) {
+        if matches!(&action, AdminAction::Reload) {
+            self.reload_standalone_runtime(runtime_config, "admin");
+            return;
+        }
+        self.handle_admin_action(action, metrics, || Ok(()));
+    }
+
+    fn reload_standalone_runtime(
+        &mut self,
+        runtime_config: &mut PreparedStandaloneRuntimeConfig,
+        origin: &str,
+    ) {
+        if self.graceful_shutdown.lifecycle() != ShutdownLifecycle::Running {
+            log::warn!("Config reload ignored during server drain ({})", origin);
+            return;
+        }
+        #[cfg(unix)]
+        {
+            record_systemd_notification("RELOADING=1", self::systemd::notify::reloading());
+            record_systemd_notification(
+                "STATUS=Reloading configuration",
+                self::systemd::notify::status("Reloading configuration"),
+            );
+        }
+
         let runtime_metadata = self.live().standalone_runtime_metadata.clone();
-        self.handle_admin_action(action, metrics, || {
-            let Some(runtime_metadata) = runtime_metadata.as_ref() else {
-                return Err(
-                    "Config reload requested but runtime metadata is unavailable".to_string()
-                );
-            };
-            let Some(cfg_path) = runtime_metadata.config_path.as_deref() else {
-                return Err("Config reload requested but no config path is set".to_string());
-            };
+        let result: Result<(), String> = (|| {
+            let runtime_metadata = runtime_metadata.as_ref().ok_or_else(|| {
+                "Config reload requested but runtime metadata is unavailable".to_string()
+            })?;
+            let cfg_path = runtime_metadata
+                .config_path
+                .as_deref()
+                .ok_or_else(|| "Config reload requested but no config path is set".to_string())?;
+            let engine_config = EngineConfig::from_file(cfg_path)
+                .map_err(|error| format!("Engine config parse failed: {error}"))?;
+            engine_config
+                .validate()
+                .map_err(|error| format!("Engine config validation failed: {error}"))?;
             apply_runtime_config_reload(
                 cfg_path,
                 runtime_metadata.reload_policy.fec_mode_override,
@@ -5470,15 +5784,103 @@ impl ServerRuntime {
                 &runtime_config.opt_params_shared,
                 &runtime_config.stealth_config,
                 runtime_metadata.reload_policy.stealth_policy.as_runtime_policy(),
-            )
-        })
+            )?;
+            self.engine_config.engine.shutdown_timeout_ms =
+                engine_config.engine.shutdown_timeout_ms;
+            self.graceful_shutdown.set_grace_ms(engine_config.engine.shutdown_timeout_ms);
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                log::info!("Configuration reloaded successfully ({})", origin);
+                crate::audit::audit(
+                    crate::audit::AuditEventType::ConfigReloaded,
+                    crate::audit::AuditSeverity::Info,
+                    None,
+                    None,
+                    &format!("{origin} triggered config reload"),
+                );
+            }
+            Err(error) => {
+                log::warn!("Config reload failed ({}): {}", origin, error);
+                crate::audit::audit(
+                    crate::audit::AuditEventType::AdminAction,
+                    crate::audit::AuditSeverity::Warning,
+                    None,
+                    None,
+                    &format!("Config reload failed ({origin}): {error}"),
+                );
+            }
+        }
+        #[cfg(unix)]
+        {
+            record_systemd_notification("READY=1", self::systemd::notify::ready());
+            record_systemd_notification(
+                "STATUS=Accepting connections",
+                self::systemd::notify::status("Accepting connections"),
+            );
+        }
+    }
+
+    pub fn initiate_drain(&mut self, reason: &'static [u8]) -> bool {
+        if !self.graceful_shutdown.begin_drain() {
+            return false;
+        }
+        self.state = ServerState::Draining;
+        let grace_ms = self.graceful_shutdown.grace().as_millis();
+        let live = self.live_mut();
+        live.accept_loop.shutdown();
+        log::info!(
+            "Server drain started (reason={}, grace_ms={})",
+            String::from_utf8_lossy(reason),
+            grace_ms
+        );
+        #[cfg(unix)]
+        {
+            record_systemd_notification("STOPPING=1", self::systemd::notify::stopping());
+            record_systemd_notification(
+                "STATUS=Draining active connections",
+                self::systemd::notify::status("Draining active connections"),
+            );
+        }
+        true
+    }
+
+    fn drain_complete(&self) -> bool {
+        self.graceful_shutdown.lifecycle() == ShutdownLifecycle::Draining
+            && (self.live().live_state.client_count() == 0
+                || self.graceful_shutdown.deadline_reached())
+    }
+
+    async fn finish_drain(
+        &mut self,
+        socket: &tokio::net::UdpSocket,
+        out: &mut [u8],
+        metrics: &Metrics,
+        reason: &'static [u8],
+    ) {
+        let live = self.live_mut();
+        if tokio::time::timeout(
+            FINAL_CLOSE_FLUSH_TIMEOUT,
+            live.live_state.force_close_and_flush(socket, out, metrics, &live.accept_loop, reason),
+        )
+        .await
+        .is_err()
+        {
+            log::warn!(
+                "Final shutdown frame flush exceeded {} ms; continuing teardown",
+                FINAL_CLOSE_FLUSH_TIMEOUT.as_millis()
+            );
+        }
+        live.service_signals.shutdown_all();
     }
 
     pub fn shutdown_live(&mut self, reason: &'static [u8]) {
+        let _ = self.initiate_drain(reason);
         let live = self.live_mut();
-        live.service_signals.shutdown_all();
-        live.accept_loop.shutdown();
         live.live_state.shutdown_all(reason);
+        live.service_signals.shutdown_all();
     }
 }
 
@@ -5523,6 +5925,7 @@ impl From<SessionError> for AcceptError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write as _;
 
     #[test]
     fn test_server_config_default() {
@@ -5935,6 +6338,114 @@ mod tests {
         assert!(admin.load(Ordering::SeqCst));
         assert!(admin_web.load(Ordering::SeqCst));
         assert!(metrics.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_standalone_runtime_drain_rejects_new_clients_and_reports_lifecycle() {
+        let engine_config = EngineConfig {
+            engine: crate::engine::EngineSection {
+                shutdown_timeout_ms: 250,
+                ..crate::engine::EngineSection::default()
+            },
+            ..EngineConfig::default()
+        };
+        let server_config =
+            ServerConfig { listen: "127.0.0.1:0".parse().unwrap(), ..ServerConfig::default() };
+        let blocked_ips = Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new()));
+        let qkey_registry = Arc::new(std::sync::Mutex::new(QKeyRegistry::new(16, None, None)));
+        let mut runtime = ServerRuntime::new_standalone_default(
+            engine_config,
+            server_config,
+            None,
+            crate::optimize::OptimizeConfig::default(),
+            blocked_ips,
+            qkey_registry,
+            StandaloneAdminWebBootstrap::default(),
+        )
+        .unwrap();
+
+        runtime.start().unwrap();
+        assert!(runtime.initiate_drain(b"test_drain"));
+        assert!(!runtime.initiate_drain(b"duplicate_drain"));
+        assert_eq!(runtime.state(), ServerState::Draining);
+        assert_eq!(runtime.graceful_shutdown.lifecycle(), ShutdownLifecycle::Draining);
+        assert_eq!(runtime.graceful_shutdown.grace(), Duration::from_millis(250));
+        assert!(runtime.live().accept_loop.is_shutdown());
+        assert_eq!(
+            runtime.live().accept_loop.should_accept(
+                "127.0.0.1:54321".parse().unwrap(),
+                0,
+                runtime.live().accept_max_clients,
+            ),
+            AcceptDecision::Reject(RejectReason::Shutdown)
+        );
+        let status = runtime.graceful_shutdown.status_json(3);
+        assert_eq!(status["state"], "draining");
+        assert_eq!(status["active_connections"], 3);
+        assert_eq!(status["grace_period_ms"], 250);
+
+        runtime.stop().unwrap();
+        assert_eq!(runtime.graceful_shutdown.lifecycle(), ShutdownLifecycle::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_runtime_reload_updates_shutdown_grace_without_stopping_server() {
+        static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let config_path = std::env::temp_dir().join(format!(
+            "quicfuscate-reload-grace-{}-{}.toml",
+            std::process::id(),
+            TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut config_file =
+            std::fs::OpenOptions::new().write(true).create_new(true).open(&config_path).unwrap();
+        config_file.write_all(b"[engine]\nshutdown_timeout_ms = 175\n").unwrap();
+        drop(config_file);
+
+        let server_config =
+            ServerConfig { listen: "127.0.0.1:0".parse().unwrap(), ..ServerConfig::default() };
+        let blocked_ips = Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new()));
+        let qkey_registry = Arc::new(std::sync::Mutex::new(QKeyRegistry::new(16, None, None)));
+        let mut runtime = ServerRuntime::new_standalone_default(
+            EngineConfig::default(),
+            server_config,
+            None,
+            crate::optimize::OptimizeConfig::default(),
+            blocked_ips,
+            qkey_registry,
+            StandaloneAdminWebBootstrap::default(),
+        )
+        .unwrap();
+        let transport =
+            crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION).unwrap();
+        let mut runtime_config = PreparedStandaloneRuntimeConfig::new(
+            Some(config_path.clone()),
+            transport,
+            FecConfig::default(),
+            OptimizeConfig::default(),
+            StealthConfig::default(),
+            None,
+            vec![FingerprintProfile::new(BrowserProfile::Chrome, OsProfile::Linux)],
+            0,
+            OwnedRuntimeStealthPolicy::from_runtime_policy(RuntimeStealthPolicy {
+                profile: BrowserProfile::Chrome,
+                os: OsProfile::Linux,
+                disable_doh: true,
+                doh_provider: "",
+                disable_fronting: true,
+                front_domain: &[],
+                disable_http3: true,
+            }),
+            false,
+        );
+        runtime.sync_standalone_runtime_metadata(&runtime_config.standalone_runtime_metadata);
+        runtime.start().unwrap();
+
+        runtime.reload_standalone_runtime(&mut runtime_config, "test");
+
+        assert_eq!(runtime.state(), ServerState::Running);
+        assert_eq!(runtime.graceful_shutdown.grace(), Duration::from_millis(175));
+        runtime.stop().unwrap();
+        std::fs::remove_file(config_path).unwrap();
     }
 
     #[test]
@@ -6439,10 +6950,13 @@ mod tests {
             metrics,
             blocked_ips.clone(),
             client_snapshots,
-            tx,
-            "127.0.0.1:4433".to_string(),
-            vec![],
-            qkeys,
+            ServerAdminControlPlane {
+                actions: tx,
+                listen_addr: "127.0.0.1:4433".to_string(),
+                front_domain: vec![],
+                qkeys,
+                graceful_shutdown: Arc::new(GracefulShutdown::new(5_000)),
+            },
         );
 
         let resp = core.block_ip("10.0.0.1");
@@ -6469,10 +6983,13 @@ mod tests {
             metrics,
             blocked_ips,
             client_snapshots,
-            tx,
-            "127.0.0.1:4433".to_string(),
-            vec![],
-            qkeys,
+            ServerAdminControlPlane {
+                actions: tx,
+                listen_addr: "127.0.0.1:4433".to_string(),
+                front_domain: vec![],
+                qkeys,
+                graceful_shutdown: Arc::new(GracefulShutdown::new(5_000)),
+            },
         );
 
         core.block_ip("10.0.0.3");

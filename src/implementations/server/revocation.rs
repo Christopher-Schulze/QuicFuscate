@@ -135,10 +135,11 @@ impl QKeyConnectionTracker {
     /// Remove a connection association (on disconnect).
     pub fn dissociate(&self, conn_id: u64) {
         if let Some(key_id) = self.by_conn.write().unwrap().remove(&conn_id) {
-            if let Some(conns) = self.by_key.write().unwrap().get_mut(&key_id) {
+            let mut by_key = self.by_key.write().unwrap();
+            if let Some(conns) = by_key.get_mut(&key_id) {
                 conns.remove(&conn_id);
                 if conns.is_empty() {
-                    self.by_key.write().unwrap().remove(&key_id);
+                    by_key.remove(&key_id);
                 }
             }
         }
@@ -366,6 +367,10 @@ mod tests {
         assert_eq!(conns.len(), 1);
         assert!(conns.contains(&2));
         assert_eq!(tracker.key_for_connection(1), None);
+
+        tracker.dissociate(2);
+        assert!(tracker.connections_for_key("keyA").is_empty());
+        assert_eq!(tracker.key_for_connection(2), None);
     }
 
     #[test]

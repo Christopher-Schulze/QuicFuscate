@@ -74,6 +74,19 @@ impl AdminHttpHandler for DummyHandler {
         AdminResponse::ok_with_message("reloaded")
     }
 
+    fn handle_drain(&self) -> AdminResponse {
+        AdminResponse::ok_with_message("drain scheduled")
+    }
+
+    fn handle_drain_status(&self) -> AdminResponse {
+        AdminResponse::ok_with_data(serde_json::json!({
+            "state": "draining",
+            "active_connections": 1,
+            "grace_period_ms": 5000,
+            "drain_elapsed_ms": 250,
+        }))
+    }
+
     fn handle_qkey(&self, req: IssueQKeyRequest) -> AdminResponse {
         let expires_at = req.ttl_seconds.map(|ttl| 1_000_000u64.saturating_add(ttl));
         AdminResponse::ok_with_data(serde_json::json!({
@@ -442,6 +455,14 @@ fn admin_http_contracts() {
     let resp: AdminResponse = serde_json::from_str(&body).expect("status response");
     assert!(resp.success);
     assert!(resp.data.is_some());
+
+    let (status, body, _) = http_request(local_addr, "GET", "/api/drain/status", Some(&cookie), "");
+    assert_eq!(status, 200);
+    let resp: AdminResponse = serde_json::from_str(&body).expect("drain status response");
+    assert!(resp.success);
+    let data = resp.data.expect("drain status data");
+    assert_eq!(data.get("state").and_then(|value| value.as_str()), Some("draining"));
+    assert_eq!(data.get("active_connections").and_then(|value| value.as_u64()), Some(1));
 
     let (status, body, _) = http_request(local_addr, "GET", "/api/config", Some(&cookie), "");
     assert_eq!(status, 200);

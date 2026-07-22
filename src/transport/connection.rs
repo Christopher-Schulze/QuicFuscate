@@ -1591,7 +1591,10 @@ impl Connection {
                             });
                             s.max_stream_data_tx = max;
                         }
-                        Frame::ConnectionClose { .. } => {}
+                        Frame::ConnectionClose { .. } | Frame::ApplicationClose { .. } => {
+                            self.is_closed = true;
+                            self.is_draining = true;
+                        }
                         Frame::PathChallenge { data } => {
                             ack_eliciting = true;
                             self.stats.path_challenge_rx_count =
@@ -4053,7 +4056,7 @@ impl Connection {
     }
 }
 
-#[cfg(feature = "benches")]
+#[cfg(any(test, feature = "benches"))]
 /// Client/server transport pair with 1-RTT keys installed for criterion benches.
 pub struct BenchConnectionPair {
     pub client: Connection,
@@ -4061,13 +4064,13 @@ pub struct BenchConnectionPair {
     pub recv_info: RecvInfo,
 }
 
-#[cfg(feature = "benches")]
+#[cfg(any(test, feature = "benches"))]
 /// Build a matched client/server pair ready for 1-RTT send/recv micro-benchmarks.
 pub fn bench_paired_1rtt_connections() -> BenchConnectionPair {
     bench_paired_1rtt_connections_stealth(false)
 }
 
-#[cfg(feature = "benches")]
+#[cfg(any(test, feature = "benches"))]
 /// Build a matched client/server pair for 1-RTT benches with stealth knobs toggled.
 pub fn bench_paired_1rtt_connections_stealth(stealth_on: bool) -> BenchConnectionPair {
     use std::net::{Ipv4Addr, SocketAddr};
@@ -4769,6 +4772,21 @@ mod tests {
                 assert_eq!(reason.as_ref(), b"test reason");
             }
             _ => panic!("expected ApplicationClose frame"),
+        }
+    }
+
+    #[test]
+    fn peer_close_frames_transition_connection_to_closed() {
+        for app_close in [false, true] {
+            let mut pair = bench_paired_1rtt_connections();
+            pair.client.close(app_close, 42, b"peer shutdown").unwrap();
+
+            let mut packet = [0u8; 1500];
+            let (packet_len, _) = pair.client.send(&mut packet).unwrap();
+            pair.server.recv(&mut packet[..packet_len], &pair.recv_info).unwrap();
+
+            assert!(pair.server.is_closed(), "peer close frame must close the connection");
+            assert!(pair.server.is_draining(), "peer close frame must enter draining state");
         }
     }
 

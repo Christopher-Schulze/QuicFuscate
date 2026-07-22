@@ -350,6 +350,8 @@ pub trait AdminHttpHandler: Send + Sync {
     fn handle_unblock(&self, ip: &str) -> AdminResponse;
     fn handle_list_blocked_ips(&self) -> AdminResponse;
     fn handle_reload(&self) -> AdminResponse;
+    fn handle_drain(&self) -> AdminResponse;
+    fn handle_drain_status(&self) -> AdminResponse;
     fn handle_qkey(&self, req: IssueQKeyRequest) -> AdminResponse;
     fn handle_list_qkeys(&self) -> AdminResponse;
     fn handle_revoke_qkey(&self, id: &str) -> AdminResponse;
@@ -431,13 +433,15 @@ impl AdminHttpServer {
             if self.shutdown.load(Ordering::Relaxed) {
                 break;
             }
-            let (stream, peer_addr) = match listener.accept().await {
-                Ok(conn) => conn,
-                Err(e) => {
-                    log::warn!("admin web accept error: {}", e);
-                    continue;
-                }
-            };
+            let (stream, peer_addr) =
+                match tokio::time::timeout(Duration::from_millis(100), listener.accept()).await {
+                    Ok(Ok(conn)) => conn,
+                    Ok(Err(e)) => {
+                        log::warn!("admin web accept error: {}", e);
+                        continue;
+                    }
+                    Err(_) => continue,
+                };
             if self.shutdown.load(Ordering::Relaxed) {
                 break;
             }
@@ -1255,6 +1259,12 @@ mod tests {
         }
         fn handle_reload(&self) -> AdminResponse {
             AdminResponse::ok()
+        }
+        fn handle_drain(&self) -> AdminResponse {
+            AdminResponse::ok()
+        }
+        fn handle_drain_status(&self) -> AdminResponse {
+            AdminResponse::ok_with_data(serde_json::json!({ "state": "running" }))
         }
         fn handle_qkey(&self, _req: IssueQKeyRequest) -> AdminResponse {
             AdminResponse::ok()
@@ -2651,6 +2661,28 @@ mod tests {
         assert_eq!(normalize_qkey_id("a1b2c3d4e5f6aa"), None);
         assert_eq!(normalize_qkey_id("a1b2c3d4e5g6"), None);
     }
+
+    #[tokio::test]
+    async fn idle_admin_server_observes_shutdown_without_new_connection() {
+        let server = AdminHttpServer::new(
+            "127.0.0.1:0".parse().unwrap(),
+            std::env::temp_dir(),
+            None,
+            None,
+            test_handler(),
+        );
+        let shutdown = server.shutdown_signal();
+        let task = tokio::spawn(async move { server.run().await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        shutdown.store(true, Ordering::Relaxed);
+
+        let result = tokio::time::timeout(Duration::from_millis(500), task)
+            .await
+            .expect("idle admin server must observe shutdown promptly")
+            .expect("admin server task must not panic");
+        assert!(result.is_ok(), "admin server shutdown must be clean: {result:?}");
+    }
 }
 
 fn handle_api(
@@ -2735,6 +2767,15 @@ fn handle_api(
             log_action(peer, "reload", "-", resp.success);
             admin_json_response(&resp)
         }
+        ("POST", "/api/drain") => {
+            if !admin_shutdown_enabled() {
+                return text_response(404, "Not Found");
+            }
+            let resp = handler.handle_drain();
+            log_action(peer, "drain", "-", resp.success);
+            admin_json_response(&resp)
+        }
+        ("GET", "/api/drain/status") => admin_json_response(&handler.handle_drain_status()),
         ("POST", "/api/qkey") => {
             let payload: QKeyCreatePayload = if req.body.is_empty() {
                 QKeyCreatePayload {

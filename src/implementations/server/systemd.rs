@@ -142,7 +142,11 @@ impl ServiceConfig {
         // [Service] section
         content.push_str("[Service]\n");
         content.push_str("Type=notify\n");
+        content.push_str("NotifyAccess=main\n");
         content.push_str(&format!("ExecStart={}\n", self.exec_start));
+        content.push_str("ExecReload=/bin/kill -HUP $MAINPID\n");
+        content.push_str("KillSignal=SIGTERM\n");
+        content.push_str("TimeoutStopSec=10s\n");
 
         if let Some(ref wd) = self.working_directory {
             content.push_str(&format!("WorkingDirectory={}\n", wd));
@@ -243,6 +247,7 @@ impl ServiceConfig {
 #[cfg(unix)]
 pub mod notify {
     use std::os::unix::net::UnixDatagram;
+    use std::time::Duration;
 
     /// Notify systemd that service is ready.
     pub fn ready() -> std::io::Result<()> {
@@ -269,6 +274,20 @@ pub mod notify {
         send_state("RELOADING=1")
     }
 
+    /// Return half of systemd's watchdog interval so heartbeats arrive with margin.
+    pub fn watchdog_interval() -> Option<Duration> {
+        let watchdog_usec = std::env::var("WATCHDOG_USEC").ok()?.parse::<u64>().ok()?;
+        if watchdog_usec == 0 {
+            return None;
+        }
+        if let Ok(expected_pid) = std::env::var("WATCHDOG_PID") {
+            if expected_pid.parse::<u32>().ok()? != std::process::id() {
+                return None;
+            }
+        }
+        Some(Duration::from_micros((watchdog_usec / 2).max(1)))
+    }
+
     fn send_state(state: &str) -> std::io::Result<()> {
         let socket_path = match std::env::var("NOTIFY_SOCKET") {
             Ok(path) => path,
@@ -277,14 +296,24 @@ pub mod notify {
 
         let socket = UnixDatagram::unbound()?;
 
-        // Handle abstract socket (starts with @)
-        let path = if let Some(stripped) = socket_path.strip_prefix('@') {
-            format!("\0{}", stripped)
+        if socket_path.starts_with('@') {
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::linux::net::SocketAddrExt;
+                let abstract_name = socket_path.strip_prefix('@').unwrap_or_default();
+                let address = std::os::unix::net::SocketAddr::from_abstract_name(abstract_name)?;
+                socket.send_to_addr(state.as_bytes(), &address)?;
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "abstract Unix sockets are unsupported on this platform",
+                ));
+            }
         } else {
-            socket_path
-        };
-
-        socket.send_to(state.as_bytes(), path)?;
+            socket.send_to(state.as_bytes(), socket_path)?;
+        }
         Ok(())
     }
 }
@@ -429,6 +458,10 @@ mod tests {
         assert!(content.contains("[Service]"));
         assert!(content.contains("[Install]"));
         assert!(content.contains("Type=notify"));
+        assert!(content.contains("NotifyAccess=main"));
+        assert!(content.contains("ExecReload=/bin/kill -HUP $MAINPID"));
+        assert!(content.contains("KillSignal=SIGTERM"));
+        assert!(content.contains("TimeoutStopSec=10s"));
         assert!(content.contains("WantedBy=multi-user.target"));
     }
 

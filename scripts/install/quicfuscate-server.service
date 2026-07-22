@@ -4,7 +4,8 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 User=quicfuscate
 Group=quicfuscate
 
@@ -20,9 +21,12 @@ ExecStart=/usr/local/bin/quicfuscate server \
   --admin-web-root ${QUICFUSCATE_ADMIN_WEB_ROOT} \
   --qkey-store ${QUICFUSCATE_QKEY_STORE} \
   --qkey-ttl-secs ${QUICFUSCATE_QKEY_TTL_SECS}
+ExecReload=/bin/kill -HUP $MAINPID
 
 Restart=on-failure
 RestartSec=2
+KillSignal=SIGTERM
+TimeoutStopSec=10s
 
 # Basic hardening. The admin panel needs to write /etc/quicfuscate when you use the
 # in-panel config editor.

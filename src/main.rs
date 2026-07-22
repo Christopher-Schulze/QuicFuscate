@@ -1815,11 +1815,8 @@ async fn run_client(
                 if let Err(e) = conn.conn.close(true, 0x0, b"shutdown") {
                     warn!("Client close on shutdown failed: {:?}", e);
                 }
-                // Disable kill switch on clean shutdown
-                if let Some(ref ks) = kill_switch {
-                    if let Err(e) = ks.disable() {
-                        warn!("Kill switch disable on shutdown failed: {}", e);
-                    }
+                if let Err(e) = flush_connected_outgoing(&socket, &mut conn, &mut out).await {
+                    warn!("Client shutdown frame flush failed: {}", e);
                 }
                 break;
             }
@@ -1868,6 +1865,10 @@ async fn run_client(
                             if let Err(e) = flush_connected_outgoing(&socket, &mut conn, &mut out).await {
                                 warn!("Failed to flush TUN uplink packets: {}", e);
                             }
+                        }
+                        if conn.conn.is_closed() {
+                            info!("Server closed the connection");
+                            break;
                         }
                     }
                     Err(e) => {
@@ -1971,6 +1972,12 @@ async fn run_client(
                 }
                 tokio::task::yield_now().await;
             }
+        }
+    }
+
+    if let Some(ref ks) = kill_switch {
+        if let Err(e) = ks.disable() {
+            warn!("Kill switch disable on shutdown failed: {}", e);
         }
     }
 
@@ -2462,8 +2469,9 @@ async fn run_server(
     } else {
         None
     };
+    let runtime_engine_config = engine_cfg_opt.unwrap_or_default();
     let mut runtime = ServerRuntime::new_initialized_standalone_default(
-        quicfuscate::engine::EngineConfig::default(),
+        runtime_engine_config,
         server_config,
         standalone_tun_config,
         opt_params,

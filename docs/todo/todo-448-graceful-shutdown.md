@@ -106,6 +106,18 @@ TODO-448 was previously marked DONE after SIGTERM/SIGINT handling was added, but
 
 The current runtime still closes all clients immediately through `shutdown_live()`. It has no `Running -> Draining -> Stopped` lifecycle, configurable grace period, SIGHUP reload, admin drain/status API, or live wiring for the existing systemd notifier. This TODO is reopened for those original unmet acceptance criteria. The verified signal-delivery fix remains complete and must not regress.
 
+### 2026-07-21 Implementation Checkpoint
+
+The active implementation uses the existing canonical `[engine] shutdown_timeout_ms` setting instead of introducing a duplicate `shutdown_grace_secs` field. Shutdown now enters a shared `Running -> Draining -> Stopped` lifecycle, rejects new clients through the existing accept gate, lets established sessions close until the configured deadline, then queues and flushes QUIC CONNECTION_CLOSE before resource teardown. Authenticated `POST /api/drain` and `GET /api/drain/status` use the same state owner as SIGINT, SIGTERM, and admin shutdown. SIGHUP reuses the validated runtime reload path and refreshes the grace timeout. The existing systemd notifier is wired for READY, RELOADING, STOPPING, STATUS, and watchdog messages; Linux abstract notification sockets use `SocketAddrExt` rather than a pathname containing a NUL byte. The client shutdown branch now flushes its queued CONNECTION_CLOSE datagram before disabling the kill switch and exiting.
+
+Client SIGHUP hot-reload is intentionally excluded from the final contract. Established client connections freeze TLS, QUIC transport parameters, FEC ownership, and fingerprint identity for session coherence, so mutating the original config in place would produce a split-brain session. Client SIGINT/SIGTERM graceful close remains required and live-proven. A future client reload must be a separately specified make-before-break reconnection workflow, not a false in-place reload claim.
+
+### 2026-07-22 Local Verification Checkpoint
+
+The live-process regression harness `scripts/tests/suites/test-graceful-shutdown.sh` now proves two QKey-authenticated TLS clients, SIGHUP reload without restart, immediate rejection of a new connection while draining, active-client reconciliation from two to one after client SIGTERM, deadline force-close, peer close-frame handling by the remaining client, auxiliary-service shutdown, and clean server exit. The configured 5000 ms grace completed in 5118 ms. The proof also exposed and fixed a final-association self-deadlock in `QKeyConnectionTracker::dissociate()`; the tracker now holds one `by_key` write guard through mutation and removal.
+
+Local gates are green: `cargo fmt --all -- --check`; `cargo check --workspace --all-targets --all-features`; `cargo clippy --workspace --all-targets --all-features -- -D warnings`; and `cargo test --features rust-tests` with 1677 library tests plus all integration and documentation targets passing. CI artifact validation and native Omega lifecycle proof remain before closure.
+
 1. **SIGTERM handler** — graceful shutdown on SIGTERM, identical to ctrl_c but
    with proper drain semantics.
 
@@ -532,14 +544,14 @@ Update the client (`src/main.rs:1634-1640`) to handle SIGTERM:
 - `POST /api/drain` initiates drain mode without a signal
 - `GET /api/drain/status` returns current state, active connection count,
   elapsed drain time
-- With `shutdown_grace_secs = 5`: drain completes within 5-6 seconds
+- With `[engine] shutdown_timeout_ms = 5000`: drain completes within 5-6 seconds
 - With all connections closed before grace period: drain completes immediately
   (doesn't wait full grace period)
 - With `systemd` feature: `sd_notify("READY=1")` is sent after startup
 - With `systemd` feature: `sd_notify("STOPPING=1")` is sent on drain initiation
 - With `systemd` feature: `sd_notify("RELOADING=1")` is sent on SIGHUP reload
 - Client handles SIGTERM: sends CONNECTION_CLOSE, exits cleanly
-- Client handles SIGHUP: reloads config without disconnecting
+- Client SIGHUP in-place reload is explicitly excluded; a future implementation must use make-before-break reconnection
 - Docker `docker stop` (sends SIGTERM): server drains gracefully within
   Docker's grace period
 - Orchestrated container termination: server drains within the configured grace period
