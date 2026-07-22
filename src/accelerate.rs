@@ -13,7 +13,7 @@ pub(crate) use crate::optimize::compress;
 #[cfg(not(any(test, feature = "rust-tests")))]
 pub(crate) use crate::optimize::udp as transport_io;
 #[cfg(not(any(test, feature = "rust-tests")))]
-pub(crate) use crate::optimize::{brain, compress, iter, stealth, string, transport};
+pub(crate) use crate::optimize::{brain, compress, stealth, string, transport};
 #[cfg(any(test, feature = "rust-tests"))]
 pub use crate::optimize::{
     brain, iter, memory, random, sort, stealth, string, transport, udp as transport_io,
