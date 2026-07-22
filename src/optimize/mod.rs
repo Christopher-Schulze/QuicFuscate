@@ -2126,7 +2126,7 @@ mod tests {
         let tag = with_override(Some("definitely-not-a-kernel"), || {
             dispatch_bitslice(|p| bitslice_policy_tag(p).to_string())
         });
-        let allowed = ["avx512", "avx2", "sse2", "sve2", "neon", "scalar"];
+        let allowed = ["avx512vbmi2", "avx512", "avx2", "sse2", "sve2", "neon", "scalar"];
         assert!(allowed.contains(&tag.as_str()), "unexpected policy tag: {}", tag);
     }
 
@@ -2139,7 +2139,7 @@ mod tests {
         if det.has_feature(CpuFeature::AVX2) && det.has_feature(CpuFeature::PCLMULQDQ) {
             assert_eq!(tag, "avx2");
         } else {
-            let allowed = ["avx512", "avx2", "sse2", "sve2", "neon", "scalar"];
+            let allowed = ["avx512vbmi2", "avx512", "avx2", "sse2", "sve2", "neon", "scalar"];
             assert!(allowed.contains(&tag.as_str()));
         }
     }
@@ -2156,7 +2156,7 @@ mod tests {
         {
             assert_eq!(tag, "avx512");
         } else {
-            let allowed = ["avx512", "avx2", "sse2", "sve2", "neon", "scalar"];
+            let allowed = ["avx512vbmi2", "avx512", "avx2", "sse2", "sve2", "neon", "scalar"];
             assert!(allowed.contains(&tag.as_str()));
         }
     }
@@ -2170,7 +2170,7 @@ mod tests {
         if det.has_feature(CpuFeature::NEON) && det.has_feature(CpuFeature::NEON_CRYPTO) {
             assert_eq!(tag, "neon");
         } else {
-            let allowed = ["avx512", "avx2", "sse2", "sve2", "neon", "scalar"];
+            let allowed = ["avx512vbmi2", "avx512", "avx2", "sse2", "sve2", "neon", "scalar"];
             assert!(allowed.contains(&tag.as_str()));
         }
     }
@@ -2184,7 +2184,7 @@ mod tests {
         if det.has_feature(CpuFeature::SVE2) {
             assert_eq!(tag, "sve2");
         } else {
-            let allowed = ["avx512", "avx2", "sse2", "sve2", "neon", "scalar"];
+            let allowed = ["avx512vbmi2", "avx512", "avx2", "sse2", "sve2", "neon", "scalar"];
             assert!(allowed.contains(&tag.as_str()));
         }
     }

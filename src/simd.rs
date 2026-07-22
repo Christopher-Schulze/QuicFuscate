@@ -3123,7 +3123,7 @@ mod x86 {
 pub mod fec {
     use super::*;
 
-    /// Berlekamp-Massey with AVX-512 GFNI acceleration when available.
+    /// Berlekamp-Massey with feature-routed, scalar-verified backends.
     #[inline(always)]
     fn _decode_varint_profile_router_removed(_buf: &[u8]) -> Option<(u64, usize)> {
         let features = FeatureDetector::instance();
@@ -3741,102 +3741,13 @@ mod x86_extended {
     use super::*;
     use std::arch::x86_64::*;
 
-    /// Berlekamp-Massey with AVX-512 GFNI acceleration when available.
+    /// AVX-512/GFNI feature boundary using the canonical scalar algorithm.
     #[target_feature(enable = "avx512f", enable = "gfni")]
     pub(super) unsafe fn berlekamp_massey_gfni(syndrome: &[u8], len: usize) -> Vec<u8> {
-        let mut error_locator = vec![0u8; len + 1];
-        error_locator[0] = 1;
-        let mut old_locator = vec![0u8; len + 1];
-        old_locator[0] = 1;
-
-        let mut syndrome_shift = 0;
-        let mut error_degree = 0;
-        let mut old_degree = 1;
-
-        // Process syndrome bytes with SIMD
-        for i in 0..len {
-            let mut discrepancy = syndrome[i];
-
-            // Calculate discrepancy using GFNI
-            if error_degree > 0 {
-                let mut j = 1;
-
-                while j <= error_degree && j + 64 <= len {
-                    // Load 64 coefficients at once
-                    let coeff = _mm512_loadu_si512(error_locator[j..].as_ptr() as *const __m512i);
-                    let synd = _mm512_loadu_si512(syndrome[i - j..].as_ptr() as *const __m512i);
-
-                    // GF(256) multiplication with GFNI
-                    let prod = _mm512_gf2p8mul_epi8(coeff, synd);
-
-                    // XOR reduce to get discrepancy contribution
-                    let mask = _mm512_cmpneq_epi8_mask(coeff, _mm512_setzero_si512());
-                    // XOR reduce manually - _mm512_mask_reduce_xor_epi8 doesn't exist
-                    // Store and reduce in scalar
-                    let mut temp = [0u8; 64];
-                    _mm512_mask_storeu_epi8(temp.as_mut_ptr() as *mut i8, mask, prod);
-                    for t in temp.iter().take(64) {
-                        discrepancy ^= t;
-                    }
-
-                    j += 64;
-                }
-
-                // Handle remainder
-                for j in j..=error_degree.min(i) {
-                    discrepancy ^= scalar::gf_mul_byte(error_locator[j], syndrome[i - j]);
-                }
-            }
-
-            if discrepancy != 0 {
-                // Update error locator polynomial
-                let mut new_locator = error_locator.clone();
-
-                // Vectorized polynomial update
-                let inv_disc = scalar::gf_inv(syndrome_shift);
-                let factor = _mm512_set1_epi8(scalar::gf_mul_byte(discrepancy, inv_disc) as i8);
-
-                let mut j = 0;
-                while j + 64 <= len {
-                    let old = _mm512_loadu_si512(old_locator[j..].as_ptr() as *const __m512i);
-                    let curr = _mm512_loadu_si512(
-                        error_locator[j + i - old_degree + 1..].as_ptr() as *const __m512i
-                    );
-
-                    // GF multiply and XOR
-                    let prod = _mm512_gf2p8mul_epi8(factor, old);
-                    let result = _mm512_xor_si512(curr, prod);
-
-                    _mm512_storeu_si512(
-                        new_locator[j + i - old_degree + 1..].as_mut_ptr() as *mut __m512i,
-                        result,
-                    );
-                    j += 64;
-                }
-
-                // Handle remainder
-                for j in j..=old_degree {
-                    if j + i >= old_degree {
-                        new_locator[j + i - old_degree + 1] ^= scalar::gf_mul_byte(
-                            scalar::gf_mul_byte(discrepancy, inv_disc),
-                            old_locator[j],
-                        );
-                    }
-                }
-
-                if 2 * error_degree <= i {
-                    old_locator = error_locator.clone();
-                    old_degree = error_degree;
-                    syndrome_shift = discrepancy;
-                    error_degree = i + 1 - error_degree;
-                }
-
-                error_locator = new_locator;
-            }
-        }
-
-        error_locator.truncate(error_degree + 1);
-        error_locator
+        // The removed vector loop indexed before the syndrome start for short
+        // prefixes and updated overlapping polynomial lanes incorrectly. Keep
+        // this feature-gated boundary fail-closed on the canonical algorithm.
+        scalar::berlekamp_massey(syndrome, len)
     }
 
     /// Berlekamp-Massey with AVX2 acceleration when available.
@@ -6028,6 +5939,19 @@ mod tests_dispatched {
         let scalar = scalar::sha256(data);
         let dispatched = crypto::sha256(data);
         assert_eq!(scalar, dispatched);
+    }
+
+    #[test]
+    fn berlekamp_massey_boundary_lengths_match_scalar() {
+        for len in [0usize, 1, 2, 31, 48, 63, 64, 65, 127, 128] {
+            let syndrome: Vec<u8> =
+                (0..len).map(|index| (index as u8).wrapping_mul(37).wrapping_add(11)).collect();
+            assert_eq!(
+                fec::berlekamp_massey_gf256(&syndrome, len),
+                scalar::berlekamp_massey(&syndrome, len),
+                "Berlekamp-Massey mismatch at length {len}"
+            );
+        }
     }
 }
 

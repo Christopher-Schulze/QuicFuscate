@@ -952,9 +952,8 @@ heuristics. It is seeded once from secure transport entropy per thread, then use
 SplitMix64 stream to avoid repeated OS RNG calls in per-packet padding and jitter decisions.
 
 ##### Sorting Acceleration (sort submodule)
-- **AVX2/AVX512 sorting networks**: 5x faster u32/f32 sorting with SIMD
-- **Radix sort for large arrays**: Optimized for performance
-- **Fast argsort**: Index-based sorting 3x faster
+- **Sorting parity helpers**: `u32` uses Rust's canonical `sort_unstable`; architecture-specific `f32` and argsort helpers retain explicit parity coverage. The removed x86 `u32` kernels shifted bits inside values instead of permuting lanes and were not valid sorting networks.
+- **Argsort**: Index-based sorting retains architecture-specific small-slice helpers and a canonical fallback.
 
 These sorting helpers are retained only for `rust-tests`/test parity coverage. They are not part
 of the normal product-facing API surface.

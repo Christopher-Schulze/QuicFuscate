@@ -337,6 +337,18 @@ else
   append_item "fec_gf8_polynomial" "fail" "${FEC_WRONG_FIELD_GFNI_CALLS:-canonical 0x11D polynomial declaration missing}"
 fi
 
+BROKEN_U32_SORT_BACKENDS="$(rg -n --no-messages 'sort_u32_(avx512|avx2|neon)|sort_small_avx(512|2)|partition_avx512' src/optimize/sort.rs || true)"
+if [[ -z "$BROKEN_U32_SORT_BACKENDS" ]] \
+  && rg -n --no-messages 'pub fn sort_u32\(data: &mut \[u32\]\).*' src/optimize/sort.rs >/dev/null \
+  && rg -n --no-messages 'data\.sort_unstable\(\)' src/optimize/sort.rs >/dev/null \
+  && rg -n --no-messages 'berlekamp_massey_boundary_lengths_match_scalar' src/simd.rs >/dev/null; then
+  pass "Windows SIMD parity paths reject the corrupt u32 sorters and cover Berlekamp boundaries"
+  append_item "windows_simd_parity" "ok" "canonical u32 sort and Berlekamp boundary parity gate are present"
+else
+  fail_critical "Windows SIMD parity contract regressed"
+  append_item "windows_simd_parity" "fail" "${BROKEN_U32_SORT_BACKENDS:-canonical sort or Berlekamp boundary gate missing}"
+fi
+
 TLS_COVER_REINSTALL_REGRESSIONS="$(rg -n --no-messages 'TODO-269|install_tls_cover_chacha|install_tls_cover_aes_gcm|tls_cover_(write|read)_seq\.wrapping_add' src scripts/tests/rust || true)"
 if [[ -n "$TLS_COVER_REINSTALL_REGRESSIONS" ]]; then
   fail_critical "TLS Cover retained an unsafe or parallel cipher reinstallation path"
