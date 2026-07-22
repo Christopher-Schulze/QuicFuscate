@@ -4,7 +4,7 @@ title: Wire AuditLogger into server runtime so security events are actually emit
 severity: CRITICAL
 phase: S
 priority: P0
-status: OPEN
+status: DONE
 created: 2026-07-03
 depends_on: [TODO-439, TODO-511]
 ---
@@ -55,15 +55,15 @@ audit logging is currently unsupported.
 
 ## Acceptance Criteria
 
-- [ ] `rg 'audit::|AuditLog::|audit_log' src/implementations/server`
+- [x] `rg 'audit::|AuditLog::|audit_log' src/implementations/server`
       returns matches at the integration points listed above.
-- [ ] At least one integration test writes an audit log file and
+- [x] At least one integration test writes an audit log file and
       verifies `AuditLog::verify_chain` succeeds after triggering
       auth and admin events.
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes.
-- [ ] `cargo test --workspace --all-targets --features rust-tests`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` passes.
+- [x] `cargo test --workspace --all-targets --features rust-tests`
       passes.
-- [ ] `docs/DOCUMENTATION.md` security-audit section reflects the
+- [x] `docs/DOCUMENTATION.md` security-audit section reflects the
       wired state, not just the module existence.
 
 ## Non-Goals
@@ -103,3 +103,20 @@ audit logging is currently unsupported.
 ## 2026-07-22 Acceptance Reconciliation
 
 TODO-521 reopened this task because the final completion sentence is broader than the runtime evidence. Current emitters cover server start, privilege-drop outcomes, authentication success/failure, QKey issuance/revocation, selected admin actions, config reload, drain, and shutdown. They do not cover authentication timeout, connection acceptance/termination/reconciliation, or firewall rule add/remove events required by this task. The existing tests exercise the audit primitive and hash chain but do not trigger both a real server authentication event and a real admin event through an integration boundary. The unchecked acceptance criteria therefore remain genuine gaps.
+
+## 2026-07-22 Final Closure Evidence
+
+- Added explicit `AuthTimeout`, `FirewallRuleAdded`, and `FirewallRuleRemoved` event types with hash-chain parser support.
+- Added connection-open and connection-close emitters to live and standalone server session boundaries, including expiry reconciliation.
+- Added authentication-timeout emission at the QKey timeout enforcement boundary.
+- Added firewall mutation emitters after successful platform setup and during platform teardown.
+- Added the public `verify-audit-log <PATH>` CLI boundary and CLI-help regression coverage.
+- Extended the graceful-shutdown integration harness to start the real server with an audit log, authenticate two real clients, trigger a real admin action and reload, verify required event counts, and verify the final chain through the production CLI.
+- `cargo fmt --all -- --check`, ShellCheck for the extended live harness, and `git diff --check` pass.
+- All 11 audit unit tests pass, including hash-chain roundtrip coverage for every newly added runtime-boundary event.
+- The CLI integration target passes 2/2 tests with `rust-tests`, proving command discovery and its required path argument.
+- The real graceful-shutdown harness passes with two authenticated clients, authenticated admin drain, SIGHUP reload, connection close, minimum audit-event counts, and `audit_chain=valid` through `quicfuscate verify-audit-log`.
+- `cargo clippy --workspace --all-targets --features rust-tests -- -D warnings` passes.
+- `cargo test --workspace --all-targets --features rust-tests --quiet` passes, including 1,678/1,678 library tests and every workspace integration/runtime target.
+- TODO consistency passes across 167 detail files with zero violations; runtime guardrails pass with zero critical findings and zero warnings.
+- `docs/DOCUMENTATION.md` and `docs/MAP.md` now describe the full verified emitter and operator-verification contract. No protected UI file changed.

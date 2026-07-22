@@ -24,6 +24,7 @@ fn cli_help_lists_core_subcommands() {
     let help = run_help(&["--help"]);
     assert!(help.contains("client"), "missing client subcommand in help");
     assert!(help.contains("server"), "missing server subcommand in help");
+    assert!(help.contains("verify-audit-log"), "missing audit verification subcommand in help");
 }
 
 #[test]
@@ -33,4 +34,7 @@ fn cli_subcommand_help_is_available() {
 
     let server_help = run_help(&["server", "--help"]);
     assert!(server_help.contains("--listen"), "server help missing --listen");
+
+    let audit_help = run_help(&["verify-audit-log", "--help"]);
+    assert!(audit_help.contains("PATH"), "audit verification help missing path argument");
 }

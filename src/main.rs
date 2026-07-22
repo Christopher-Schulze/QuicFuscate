@@ -900,6 +900,12 @@ enum Commands {
         #[clap(long = "audit-log", value_name = "PATH")]
         audit_log: Option<PathBuf>,
     },
+    /// Verify the hash chain of an audit NDJSON file
+    VerifyAuditLog {
+        /// Audit log path to verify
+        #[clap(value_name = "PATH")]
+        path: PathBuf,
+    },
     #[clap(hide = true)]
     CrossFadeSim {},
     #[clap(hide = true)]
@@ -1201,6 +1207,11 @@ async fn async_main() -> std::io::Result<()> {
                 audit_log,
             )
             .await?;
+        }
+        Commands::VerifyAuditLog { path } => {
+            quicfuscate::audit::AuditLog::verify_chain(&path)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            println!("Audit log chain valid: {}", path.display());
         }
         Commands::CrossFadeSim {} => {
             run_crossfade_sim()?;

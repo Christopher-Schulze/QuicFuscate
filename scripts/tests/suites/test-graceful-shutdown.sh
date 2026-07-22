@@ -101,6 +101,7 @@ SERVER_LOG="$PROOF_DIR/server.log"
 CLIENT_A_LOG="$PROOF_DIR/client-a.log"
 CLIENT_B_LOG="$PROOF_DIR/client-b.log"
 COOKIE_JAR="$PROOF_DIR/cookies"
+AUDIT_LOG="$PROOF_DIR/audit.ndjson"
 ADMIN_USER="proof-admin"
 ADMIN_PASSWORD="ProofOnly_448_Strong_29"
 
@@ -131,6 +132,7 @@ QUICFUSCATE_ENABLE_ADMIN_SHUTDOWN=1 RUST_LOG=info QUICFUSCATE_BRAIN=0 "$BINARY" 
   --admin-web-user "$ADMIN_USER" \
   --admin-web-password "$ADMIN_PASSWORD" \
   --qkey-store "$PROOF_DIR/qkeys.json" \
+  --audit-log "$AUDIT_LOG" \
   --config "$CONFIG" >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 
@@ -267,4 +269,7 @@ if grep -q 'Client shutdown frame flush failed' "$CLIENT_A_LOG"; then
   exit 1
 fi
 
-printf 'PASS: authenticated_clients=2 reload=SIGHUP drain=running-to-draining-to-stopped rejected_new_connection=1 client_close=2-to-1 grace_ms=5000 elapsed_ms=%s close_flush=clean\n' "$DRAIN_ELAPSED_MS"
+"$BINARY" verify-audit-log "$AUDIT_LOG" >"$PROOF_DIR/audit-verify.log"
+python3 -c 'import json,sys; events=[json.loads(line)["event"] for line in open(sys.argv[1]) if line.strip()]; required={"client_authenticated":2,"admin_action":1,"config_reloaded":1,"connection_established":2,"connection_closed":1}; missing={event:minimum for event,minimum in required.items() if events.count(event)<minimum}; assert not missing,(missing,events)' "$AUDIT_LOG"
+
+printf 'PASS: authenticated_clients=2 reload=SIGHUP drain=running-to-draining-to-stopped rejected_new_connection=1 client_close=2-to-1 grace_ms=5000 elapsed_ms=%s close_flush=clean audit_chain=valid\n' "$DRAIN_ELAPSED_MS"

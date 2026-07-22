@@ -2688,6 +2688,15 @@ impl LiveServerDomain {
         remote_addr: SocketAddr,
     ) -> Result<(SessionId, Arc<SessionStats>), AcceptError> {
         let (session_id, stats, _) = self.shared.accept(remote_addr)?;
+        let source_ip = remote_addr.ip().to_string();
+        let client_id = session_id.as_u64().to_string();
+        crate::audit::audit(
+            crate::audit::AuditEventType::ConnectionEstablished,
+            crate::audit::AuditSeverity::Info,
+            Some(&source_ip),
+            Some(&client_id),
+            "Client connection accepted",
+        );
         Ok((session_id, stats))
     }
 
@@ -2699,6 +2708,15 @@ impl LiveServerDomain {
             self.remove_remote_snapshot(remote_addr);
             return;
         };
+        let source_ip = remote_addr.ip().to_string();
+        let client_id = session_id.as_u64().to_string();
+        crate::audit::audit(
+            crate::audit::AuditEventType::ConnectionClosed,
+            crate::audit::AuditSeverity::Info,
+            Some(&source_ip),
+            Some(&client_id),
+            "Client session removed",
+        );
         self.shared.remove(session_id);
         #[cfg(feature = "rate_limiter")]
         self.shared.remove_rate_limited_ip(remote_addr.ip());
@@ -2744,11 +2762,19 @@ impl LiveServerDomain {
     }
 
     fn reap_expired_remotes(&self) -> Vec<(SocketAddr, SessionId)> {
-        self.shared
-            .reap_expired()
-            .into_iter()
-            .map(|session| (session.remote_addr(), session.id()))
-            .collect()
+        let expired = self.shared.reap_expired();
+        for session in &expired {
+            let source_ip = session.remote_addr().ip().to_string();
+            let client_id = session.id().as_u64().to_string();
+            crate::audit::audit(
+                crate::audit::AuditEventType::ConnectionClosed,
+                crate::audit::AuditSeverity::Info,
+                Some(&source_ip),
+                Some(&client_id),
+                "Client session expired",
+            );
+        }
+        expired.into_iter().map(|session| (session.remote_addr(), session.id())).collect()
     }
 
     fn client_snapshots(
@@ -3404,6 +3430,10 @@ impl LiveServerState {
             .filter_map(|(conn_id, state)| state.is_expired().then_some(conn_id.clone()))
             .collect();
         for conn_id in timed_out_conn_ids {
+            let key_id = self.qkey_auth.get(&conn_id).map(|state| state.key_id.clone());
+            let remote_addr = self.clients.iter().find_map(|(addr, conn)| {
+                (conn.conn.source_id().as_ref() == conn_id.as_slice()).then_some(*addr)
+            });
             for conn in self.values_mut() {
                 if conn.conn.source_id().as_ref() == conn_id.as_slice() {
                     record_qkey_auth_rejection(metrics);
@@ -3413,6 +3443,14 @@ impl LiveServerState {
                     break;
                 }
             }
+            let source_ip = remote_addr.map(|addr| addr.ip().to_string());
+            crate::audit::audit(
+                crate::audit::AuditEventType::AuthTimeout,
+                crate::audit::AuditSeverity::Warning,
+                source_ip.as_deref(),
+                key_id.as_deref(),
+                "QKey authentication timed out",
+            );
             let session_id = self.session_id_for_conn_id(&conn_id);
             self.dissociate_qkey_for_session(session_id);
             self.remove_qkey_auth(&conn_id);
@@ -4979,6 +5017,15 @@ impl ServerRuntime {
         self.stats.active_connections.fetch_add(1, Ordering::Relaxed);
 
         log::info!("Client connected: {} -> {}", remote_addr, client_ip);
+        let source_ip = remote_addr.ip().to_string();
+        let client_id = session_id.as_u64().to_string();
+        crate::audit::audit(
+            crate::audit::AuditEventType::ConnectionEstablished,
+            crate::audit::AuditSeverity::Info,
+            Some(&source_ip),
+            Some(&client_id),
+            "Client connection accepted",
+        );
 
         Ok(session_id)
     }
@@ -4989,6 +5036,16 @@ impl ServerRuntime {
 
         if let Some(session) = session {
             self.stats.active_connections.fetch_sub(1, Ordering::Relaxed);
+
+            let source_ip = session.remote_addr().ip().to_string();
+            let client_id = session.id().as_u64().to_string();
+            crate::audit::audit(
+                crate::audit::AuditEventType::ConnectionClosed,
+                crate::audit::AuditSeverity::Info,
+                Some(&source_ip),
+                Some(&client_id),
+                "Client session removed",
+            );
 
             log::info!(
                 "Client disconnected: {} (IP: {})",

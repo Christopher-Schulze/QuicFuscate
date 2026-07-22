@@ -133,6 +133,14 @@ impl RoutingManager {
             }
         }
 
+        crate::audit::audit(
+            crate::audit::AuditEventType::FirewallRuleAdded,
+            crate::audit::AuditSeverity::Info,
+            None,
+            None,
+            "Linux VPN routing and firewall rules installed",
+        );
+
         Ok(())
     }
 
@@ -157,6 +165,14 @@ impl RoutingManager {
             );
         }
 
+        crate::audit::audit(
+            crate::audit::AuditEventType::FirewallRuleAdded,
+            crate::audit::AuditSeverity::Info,
+            None,
+            None,
+            "macOS VPN routing and firewall rules installed",
+        );
+
         Ok(())
     }
 
@@ -178,6 +194,14 @@ impl RoutingManager {
                 self.wan_interface
             );
         }
+
+        crate::audit::audit(
+            crate::audit::AuditEventType::FirewallRuleAdded,
+            crate::audit::AuditSeverity::Info,
+            None,
+            None,
+            "Windows VPN routing and firewall rules installed",
+        );
 
         Ok(())
     }
@@ -307,6 +331,13 @@ impl RoutingManager {
         }
 
         log::info!("Routing rules removed");
+        crate::audit::audit(
+            crate::audit::AuditEventType::FirewallRuleRemoved,
+            crate::audit::AuditSeverity::Info,
+            None,
+            None,
+            "Linux VPN routing and firewall rules removed",
+        );
         Ok(())
     }
 
@@ -404,6 +435,13 @@ impl RoutingManager {
         ) {
             log::debug!("pfctl teardown anchor flush failed: {}", e);
         }
+        crate::audit::audit(
+            crate::audit::AuditEventType::FirewallRuleRemoved,
+            crate::audit::AuditSeverity::Info,
+            None,
+            None,
+            "macOS VPN routing and firewall rules removed",
+        );
         Ok(())
     }
 
@@ -418,6 +456,13 @@ impl RoutingManager {
         if let Err(e) = self.run_powershell(&script, "Remove-NetNat") {
             log::debug!("Windows teardown Remove-NetNat failed: {}", e);
         }
+        crate::audit::audit(
+            crate::audit::AuditEventType::FirewallRuleRemoved,
+            crate::audit::AuditSeverity::Info,
+            None,
+            None,
+            "Windows VPN routing and firewall rules removed",
+        );
         Ok(())
     }
 

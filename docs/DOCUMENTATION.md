@@ -270,7 +270,8 @@ Server hardening baseline:
 - Configure log rotation and retention; avoid logging sensitive token material.
 - Back up config and QKey registry on controlled intervals with encrypted storage.
 - Enable memory locking (`[security] lock_memory = true`, `lock_blocks = true`) to prevent key material and crypto buffers from being swapped to disk. `LimitMEMLOCK=infinity` in systemd or `CAP_IPC_LOCK` enables current-and-future process locking; finite limits safely lock current pages only and retain best-effort per-block locking.
-- Enable tamper-evident audit logging via `--audit-log <path>` to record all security-relevant events (auth, QKey lifecycle, admin actions, privilege drops) in a hash-chained NDJSON file with mode 0o600.
+- Enable tamper-evident audit logging via `--audit-log <path>` to record security-relevant authentication, connection, QKey, admin, privilege, configuration, firewall, and lifecycle events in a hash-chained NDJSON file with mode `0o600`.
+- Verify the complete persisted chain with `quicfuscate verify-audit-log <path>` before trusting or archiving an audit file.
 
 Admin UI hardening baseline:
 - Put admin UI behind HTTPS termination in production.
@@ -302,20 +303,24 @@ Verification commands:
 
 The server runtime emits tamper-evident audit events to a hash-chained NDJSON log file when `--audit-log <path>` is provided. The audit log is initialized once during server startup via a global `OnceLock<Arc<AuditLog>>` accessor (same pattern as `ADMIN_LOG_BUFFER`), before privilege dropping.
 
-**File security:** The audit log file is created with mode `0o600` (owner read/write only). When running as root, the file is chowned to the `quicfuscate` user/group so that audit logging survives the root-to-unprivileged privilege drop. The parent directory is chowned only if the server created it — pre-existing system directories (e.g. `/var/log`) are never re-owned, which would be a privilege-escalation vector.
+**File security:** The audit log file is created with mode `0o600` (owner read/write only). When running as root, the file is chowned to the `quicfuscate` user/group so that audit logging survives the root-to-unprivileged privilege drop. The parent directory is chowned only if the server created it. Pre-existing system directories such as `/var/log` are never re-owned, which would be a privilege-escalation vector.
 
 **Mutex poisoning resilience:** The audit logger recovers from mutex poisoning rather than panicking. If another thread panicked while holding the `last_hash` or `writer` mutex, the audit logger continues with the last known state via `unwrap_or_else(|e| e.into_inner())`. A security audit logger must never crash the server because of an unrelated thread panic.
 
-**Hash chaining:** Each audit entry includes a SHA-256 hash computed over the canonical form `seq|timestamp|event_type|severity|source_ip|client_id|message|prev_hash`. The chain is verifiable via `AuditLog::verify_chain()`. Tampering with any entry breaks the chain.
+**Hash chaining:** Each audit entry includes a SHA-256 hash computed over the canonical form `seq|timestamp|event_type|severity|source_ip|client_id|message|prev_hash`. Libraries can call `AuditLog::verify_chain()`, while operators can run `quicfuscate verify-audit-log <path>`. Tampering with any entry breaks the chain.
 
 **Event types emitted at runtime:**
 - `ServerStarted` / `ServerStopped` - server lifecycle
 - `PrivilegesDropped` / `PrivilegeDropFailed` - privilege drop outcome
-- `ClientAuthenticated` / `AuthFailed` - QKey authentication result in `commit_qkey_auth_result`
+- `ClientAuthenticated` / `AuthFailed` / `AuthTimeout` - QKey authentication result or deadline expiry
 - `QkeyIssued` - QKey issued in `QKeyRegistry::insert_with_ttl`
 - `QkeyRevoked` - admin revoked a QKey
 - `AdminAction` - admin kick, failed config reload
 - `ConfigReloaded` - successful config reload
+- `ConnectionEstablished` / `ConnectionClosed` - live and standalone session acceptance, removal, and expiry reconciliation
+- `FirewallRuleAdded` / `FirewallRuleRemoved` - platform routing/firewall setup and idempotent teardown boundaries
+
+**Runtime proof:** `scripts/tests/suites/test-graceful-shutdown.sh` starts a real server with `--audit-log`, authenticates two real clients, performs authenticated admin drain and config reload operations, observes connection closure, enforces minimum event counts, and validates the persisted chain through `verify-audit-log`.
 
 **Memory locking (TODO-516):** When `[security] lock_memory = true` (default), the server reads `RLIMIT_MEMLOCK` before loading key material. An unlimited budget uses `mlockall(MCL_CURRENT | MCL_FUTURE)`; a finite or unreadable budget uses `MCL_CURRENT` so a successful call cannot make later allocations fail with `ENOMEM`. When `lock_blocks = true` (default), each `MemoryPool` block is individually `mlock`ed on allocation via `MemoryPool::set_lock_blocks()`. `LimitMEMLOCK=infinity` in the systemd unit enables full current-and-future protection. The production boundary test proves real locking where supported and explicit graceful degradation otherwise; native ARM64 Omega evidence recorded `VmLck: 967860 kB` with flags 3. Failures remain warnings and block locking remains best-effort.
 
@@ -1397,7 +1402,7 @@ Server implementation (`src/implementations/server/`):
 - `src/implementations/server/systemd.rs` - systemd-oriented service/unit integration helpers.
 
 Audit module (`src/audit/`):
-- `src/audit/mod.rs` - tamper-evident NDJSON audit log with SHA-256 hash chaining and a global `OnceLock<Arc<AuditLog>>` accessor initialized via `--audit-log <path>`. Current runtime emitters cover server start, privilege-drop outcomes, auth success/failure, QKey issuance/revocation, selected admin actions, config reload, drain, and shutdown. TODO-515 is reopened for auth-timeout, connection-lifecycle, firewall-mutation, and real integration-test coverage. The file is created with mode 0o600 and chowned to the runtime user before privilege drop.
+- `src/audit/mod.rs` - tamper-evident NDJSON audit log with SHA-256 hash chaining and a global `OnceLock<Arc<AuditLog>>` accessor initialized via `--audit-log <path>`. Runtime emitters cover server lifecycle, privilege-drop outcomes, authentication success/failure/timeout, QKey issuance/revocation, selected admin actions, config reload, connection lifecycle, and platform firewall setup/teardown. The production `verify-audit-log <path>` command verifies a persisted chain. The file is created with mode `0o600` and chowned to the runtime user before privilege drop.
 
 Optimize submodules (`src/optimize/`):
 - `src/optimize/brain.rs` - optimize helpers used by brain/statistical hotpaths.
@@ -2335,6 +2340,12 @@ Server Options (selected):
                             Must be set before privilege drop; file is chowned to
                             the runtime user so logging survives root->unprivileged drop.
     --no-drop-privileges    Skip privilege dropping (debugging only, never use in production)
+```
+
+Verify a persisted audit chain without starting a client or server:
+
+```text
+quicfuscate verify-audit-log <path>
 ```
 
 ### Admin CLI (quicfuscate-ctl)

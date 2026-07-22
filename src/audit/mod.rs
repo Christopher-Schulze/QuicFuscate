@@ -27,6 +27,8 @@ pub enum AuditEventType {
     ClientAuthenticated,
     /// Client authentication failed.
     AuthFailed,
+    /// Client did not authenticate before the configured deadline.
+    AuthTimeout,
     /// QKey issued to a client.
     QkeyIssued,
     /// QKey revoked.
@@ -53,6 +55,10 @@ pub enum AuditEventType {
     ConnectionEstablished,
     /// Connection closed.
     ConnectionClosed,
+    /// Firewall or routing rules were installed.
+    FirewallRuleAdded,
+    /// Firewall or routing rules were removed.
+    FirewallRuleRemoved,
     /// Configuration reloaded.
     ConfigReloaded,
     /// Server started.
@@ -66,6 +72,7 @@ impl AuditEventType {
         match self {
             Self::ClientAuthenticated => "client_authenticated",
             Self::AuthFailed => "auth_failed",
+            Self::AuthTimeout => "auth_timeout",
             Self::QkeyIssued => "qkey_issued",
             Self::QkeyRevoked => "qkey_revoked",
             Self::QkeyRotated => "qkey_rotated",
@@ -79,6 +86,8 @@ impl AuditEventType {
             Self::PrivilegeDropFailed => "privilege_drop_failed",
             Self::ConnectionEstablished => "connection_established",
             Self::ConnectionClosed => "connection_closed",
+            Self::FirewallRuleAdded => "firewall_rule_added",
+            Self::FirewallRuleRemoved => "firewall_rule_removed",
             Self::ConfigReloaded => "config_reloaded",
             Self::ServerStarted => "server_started",
             Self::ServerStopped => "server_stopped",
@@ -473,6 +482,7 @@ fn parse_entry(line: &str) -> Option<AuditEntry> {
     let event_type = match event_str.as_str() {
         "client_authenticated" => AuditEventType::ClientAuthenticated,
         "auth_failed" => AuditEventType::AuthFailed,
+        "auth_timeout" => AuditEventType::AuthTimeout,
         "qkey_issued" => AuditEventType::QkeyIssued,
         "qkey_revoked" => AuditEventType::QkeyRevoked,
         "qkey_rotated" => AuditEventType::QkeyRotated,
@@ -486,6 +496,8 @@ fn parse_entry(line: &str) -> Option<AuditEntry> {
         "privilege_drop_failed" => AuditEventType::PrivilegeDropFailed,
         "connection_established" => AuditEventType::ConnectionEstablished,
         "connection_closed" => AuditEventType::ConnectionClosed,
+        "firewall_rule_added" => AuditEventType::FirewallRuleAdded,
+        "firewall_rule_removed" => AuditEventType::FirewallRuleRemoved,
         "config_reloaded" => AuditEventType::ConfigReloaded,
         "server_started" => AuditEventType::ServerStarted,
         "server_stopped" => AuditEventType::ServerStopped,
@@ -712,6 +724,36 @@ mod tests {
         drop(log);
 
         // Chain should be intact.
+        assert!(AuditLog::verify_chain(&tmp).is_ok());
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_runtime_boundary_events_round_trip_through_chain_verification() {
+        let tmp = std::env::temp_dir()
+            .join(format!("quicfuscate_audit_runtime_boundaries_{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        let log = AuditLog::open(tmp.clone()).unwrap();
+        let events = [
+            AuditEventType::AuthTimeout,
+            AuditEventType::ConnectionEstablished,
+            AuditEventType::ConnectionClosed,
+            AuditEventType::FirewallRuleAdded,
+            AuditEventType::FirewallRuleRemoved,
+        ];
+
+        for event in events {
+            log.log(
+                event,
+                AuditSeverity::Info,
+                Some("192.0.2.1"),
+                Some("client-001"),
+                "Runtime boundary event",
+            )
+            .unwrap();
+        }
+        drop(log);
+
         assert!(AuditLog::verify_chain(&tmp).is_ok());
         let _ = std::fs::remove_file(&tmp);
     }
