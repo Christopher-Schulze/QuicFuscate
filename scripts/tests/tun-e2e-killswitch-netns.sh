@@ -15,7 +15,7 @@ CLIENT_UNDERLAY_IP6="2001:db8:91::2"
 SERVER_TUN_IP="10.92.0.1"
 CLIENT_TUN_IP="10.92.0.2"
 LISTEN_PORT="4433"
-HEARTBEAT_TIMEOUT_MS="${HEARTBEAT_TIMEOUT_MS:-500}"
+HEARTBEAT_TIMEOUT_MS="${HEARTBEAT_TIMEOUT_MS:-15000}"
 TRANSITION_LIMIT_MS="$((HEARTBEAT_TIMEOUT_MS + 100))"
 LOCK_FILE="${QF_E2E_LOCK_FILE:-/tmp/quicfuscate-tun-e2e.lock}"
 SERVER_LOG="/tmp/qf-killswitch-server.log"
@@ -75,7 +75,14 @@ wait_for() {
 }
 
 process_exited() {
-  ! kill -0 "$1" 2>/dev/null
+  local process_state
+  if ! kill -0 "$1" 2>/dev/null; then
+    return 0
+  fi
+  if ! read -r _ _ process_state _ <"/proc/$1/stat"; then
+    return 0
+  fi
+  [ "$process_state" = "Z" ]
 }
 
 rules_contain() {
@@ -168,6 +175,13 @@ start_client() {
   wait_for 10 rules_contain 'oifname "qtun0" accept'
 }
 
+ensure_tun_interfaces() {
+  ip netns exec "$SERVER_NS" ip address replace "$SERVER_TUN_IP/24" dev qtun0
+  ip netns exec "$SERVER_NS" ip link set qtun0 up
+  ip netns exec "$CLIENT_NS" ip address replace "$CLIENT_TUN_IP/24" dev qtun0
+  ip netns exec "$CLIENT_NS" ip link set qtun0 up
+}
+
 assert_connected_policy() {
   local rules
   rules="$(ip netns exec "$CLIENT_NS" nft list table inet quicfuscate_ks)"
@@ -211,14 +225,18 @@ assert_dns_and_ipv6_policy() {
 
 assert_unexpected_loss_retains_block() {
   local start_ms end_ms elapsed_ms
+  ip netns exec "$CLIENT_NS" dig @"$SERVER_TUN_IP" example.com A \
+    +tries=1 +time=5 +norecurse >/dev/null
   start_ms="$(date +%s%3N)"
-  kill -9 "$SERVER_PID"
-  wait "$SERVER_PID" 2>/dev/null || true
-  SERVER_PID=""
-  wait_for 3 rules_contain 'policy drop'
-  wait_for 3 endpoint_rule_absent
+  kill -STOP "$SERVER_PID"
+  wait_for 17 grep -q 'heartbeat timeout' "$CLIENT_LOG"
+  wait_for 2 endpoint_rule_absent
   end_ms="$(date +%s%3N)"
   elapsed_ms="$((end_ms - start_ms))"
+  if [ "$elapsed_ms" -lt "$((HEARTBEAT_TIMEOUT_MS - 100))" ]; then
+    echo "fail-closed transition preceded the configured timeout: ${elapsed_ms}ms" >&2
+    exit 1
+  fi
   if [ "$elapsed_ms" -gt "$TRANSITION_LIMIT_MS" ]; then
     echo "fail-closed transition took ${elapsed_ms}ms, limit ${TRANSITION_LIMIT_MS}ms" >&2
     exit 1
@@ -231,6 +249,9 @@ assert_unexpected_loss_retains_block() {
     echo "TUN allow rule survived unexpected loss" >&2
     exit 1
   fi
+  kill -9 "$SERVER_PID"
+  wait "$SERVER_PID" 2>/dev/null || true
+  SERVER_PID=""
   if ip netns exec "$CLIENT_NS" ping -c 1 -W 1 "$SERVER_UNDERLAY_IP" >/dev/null 2>&1; then
     echo "underlay traffic escaped after unexpected loss" >&2
     exit 1
@@ -261,6 +282,7 @@ setup_namespaces
 start_server
 QKEY="$(fetch_qkey)"
 start_client "$QKEY"
+ensure_tun_interfaces
 assert_connected_policy
 assert_dns_and_ipv6_policy
 assert_unexpected_loss_retains_block

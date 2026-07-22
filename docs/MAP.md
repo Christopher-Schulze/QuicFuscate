@@ -854,23 +854,23 @@ This snapshot intentionally excludes gitignored paths and local generated direct
   - Client: `--tun-ip6` / `--tun-prefix6` → `TunConfig.ip6` / `TunConfig.prefix6`.
   - Standalone server: `TunConfig` populated from `ServerConfig.ipv6_server_ip` / `ipv6_prefix_len`.
 
-## Kill Switch Architecture (Review Fix Session)
+## Kill Switch Architecture
 
-### Linux Dedicated Chain
-- Chain name: `QUICFUSCATE_KS` (constant in `src/implementations/client/killswitch.rs`).
-- `ensure_chain()`: Creates chain + jump rule from OUTPUT (idempotent).
-- `block_traffic()` / `allow_vpn_traffic()`: Apply rules into `QUICFUSCATE_KS` via `iptables-restore`.
-- `cleanup()`: Flushes only `QUICFUSCATE_KS`.
-- `cleanup_stale()`: Flushes `QUICFUSCATE_KS`, removes jump rule, deletes chain. **Never touches user's OUTPUT rules.**
+### Policy and Platform Boundary
+- `VpnFirewallPolicy` (`src/implementations/client/killswitch.rs`): Validates one TUN name, the exact primary VPN UDP endpoint, an optional opposite-family endpoint, and up to eight deduplicated VPN DNS addresses.
+- `KillSwitch`: Owns four states: disabled, block-only, endpoint-only connecting, and connected TUN/DNS policy. `Drop` deliberately retains enabled rules; explicit shutdown or stale cleanup removes them.
+- Linux nftables: `inet quicfuscate_ks` is replaced with one `nft -f -` transaction. The output chain permits loopback, exact endpoint, selected TUN DNS, and TUN traffic in that order under a default-drop policy.
+- Linux iptables: Dedicated `QUICFUSCATE_KS` chains and OUTPUT jumps exist for IPv4 and IPv6. Cleanup removes only owned jumps/chains. TODO-530 owns explicit backend wiring and a fully atomic fallback replacement.
+- macOS: PF policy is available only when the main ruleset exposes the QuicFuscate anchor. TODO-548 owns managed installation and privileged proof.
+- Windows: Runtime activation fails with `NotSupported`; stale legacy rule cleanup remains. TODO-528 owns a WFP-backed implementation because broad `netsh` block rules cannot be safely overridden by endpoint/TUN allow rules.
 
-### Heartbeat Watchdog
-- `Connection::last_activity_elapsed()` (`src/transport/connection.rs`): Exposes time since last inbound packet.
-- `ClientConnection::last_activity_elapsed()` (`src/implementations/client/connection.rs`): Wrapper.
-- `QuicFuscateEngine::check_heartbeat()` (`src/engine/engine.rs`):
-  - Checks `security.heartbeat_timeout_ms` (default 30000, 0=disabled).
-  - When elapsed ≥ timeout and state == Connected: calls `handle_connection_loss(Timeout)`.
-  - `handle_connection_loss()` activates kill switch, disconnects client runtime, transitions to Running.
-  - Intended to be called periodically (1–5s) from the engine run loop.
+### Automatic Loss Ownership
+- `Connection::last_activity_elapsed()` (`src/transport/connection.rs`): Exposes time since the last inbound datagram.
+- `ClientRuntime::start_loss_watchdog()` (`src/implementations/client/mod.rs`): Owns one 50 ms remote-close/inactivity loop, records the first `DisconnectReason`, stops the I/O driver, and invokes the loss transition callback once.
+- `QuicFuscateEngine::connect()` (`src/engine/engine.rs`): Applies endpoint-only policy before handshake, connected policy after handshake, and installs the runtime watchdog. Callback and event snapshots avoid holding callback locks during user code.
+- `run_client()` (`src/main.rs`): Owns the standalone select-loop equivalent and distinguishes clean signal shutdown from remote close, socket failure, and heartbeat timeout.
+- `QuicFuscateEngine::check_heartbeat()`: Compatibility query only; it never drives a duplicate watchdog.
+- `scripts/tests/tun-e2e-killswitch-netns.sh`: Privileged Linux process proof for nftables state, selected VPN DNS, direct DNS and IPv6 leakage, timeout latency, retained fail-closed state, stale cleanup, and clean SIGTERM cleanup.
 
 ## ICMP Server Architecture (Review Fix Session)
 - `build_echo_reply()` (`src/implementations/server/icmp.rs`): Sets fresh TTL=64 for locally-originated echo replies (RFC 1812 §5.3.1), not decremented from original request.

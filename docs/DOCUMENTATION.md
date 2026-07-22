@@ -4011,7 +4011,8 @@ Enable kill-switch to prevent any traffic outside the tunnel.
 - Verify no conflicting firewall manager (ufw, firewalld) is resetting rules
 
 **Traffic leaks during connect/disconnect:**
-- Atomic iptables-restore is used for rule application into a dedicated `QUICFUSCATE_KS` chain. If you still experience leaks, check that iptables-restore is available on your system and that no other firewall manager is interfering.
+- nftables is the preferred automatic backend. It replaces the dedicated `inet quicfuscate_ks` table in one `nft -f -` transaction and covers IPv4 plus IPv6.
+- The iptables fallback applies strict IPv4 and IPv6 rules through `iptables-restore` and `ip6tables-restore`, but replacement currently flushes the owned chain before repopulation. TODO-530 owns explicit backend selection, fallback atomicity, and live fallback proof.
 
 **Stale rules from crashed session:**
 - Run `quicfuscate client --cleanup-firewall` to remove stale kill-switch rules
@@ -4021,21 +4022,18 @@ Enable kill-switch to prevent any traffic outside the tunnel.
 **pf rules not loading:**
 - Check pf status: `sudo pfctl -s info`
 - Verify rules file: `sudo pfctl -s rules`
-- If pf was already enabled, the enable command may fail silently; check system pf state before enabling
+- QuicFuscate refuses to claim kill-switch support unless the main PF ruleset references `com.quicfuscate.killswitch` or a matching wildcard anchor. A managed anchor installation and privileged lifecycle proof remain TODO-548.
 
 **Temp file conflicts:**
 - Kill-switch config uses PID-scoped temp files (`/tmp/quicfuscate_killswitch_<pid>.conf`) to avoid multi-instance conflicts
 - Stale rules can be cleaned with `quicfuscate client --cleanup-firewall`
 
 #### Windows
-**Firewall rules accumulate:**
-- Old rules may not be cleaned up on disconnect; run periodic cleanup
-- Manual cleanup: `netsh advfirewall firewall show rule name=all | findstr QuicFuscate`
-- Delete stale rules: `netsh advfirewall firewall delete rule name="QuicFuscate*"`
+The production kill switch is currently unavailable on Windows and returns a hard `NotSupported` error. The former `netsh advfirewall` design could not safely combine broad block rules with narrower endpoint and Wintun exceptions because Windows Firewall block rules override allow rules. Stale legacy QuicFuscate rules can still be removed with `quicfuscate client --cleanup-firewall`. TODO-528 owns a native WFP-backed replacement and privileged packet proof.
 
 ### Heartbeat Watchdog
 
-The engine includes a heartbeat watchdog that detects connection loss when no data is received from the server for a configurable timeout period. When triggered, it activates the kill switch (if enabled) and transitions the engine back to `Running` state.
+The client runtime owns one automatic 50 ms watchdog. It detects an explicit remote close at every setting and detects inbound inactivity when `heartbeat_timeout_ms` is nonzero. Unexpected remote close, socket failure, or heartbeat timeout atomically reapplies the block-only firewall policy and retains it across process exit. Explicit signal or engine shutdown removes owned rules; `--cleanup-firewall` removes rules retained after a crash or unexpected loss.
 
 **Configuration:**
 ```toml
@@ -4045,7 +4043,7 @@ heartbeat_timeout_ms = 30000    # 30s default; 0 to disable
 cleanup_firewall_on_start = false  # Clean stale rules on startup
 ```
 
-**Usage:** Call `engine.check_heartbeat()` periodically (every 1–5 seconds) from your run loop. It returns `true` if connection loss was detected and handled.
+`engine.check_heartbeat()` is now a compatibility probe only. It reports a loss already handled by the runtime-owned watchdog and must not be driven as a second polling loop. The standalone client exposes `--heartbeat-timeout-ms` and `--vpn-dns`; connected policy permits only the exact VPN UDP endpoint, selected VPN resolvers on TCP/UDP port 53 through the TUN interface, and remaining traffic through that TUN. Every other IPv4/IPv6 DNS destination is dropped before the general TUN allowance.
 
 ### IPv6 Dual-Stack Support
 

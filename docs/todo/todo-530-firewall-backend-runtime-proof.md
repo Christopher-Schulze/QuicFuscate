@@ -36,6 +36,7 @@ Auto-detection, nftables kill-switch/routing transactions, iptables fallback, an
 ## Notes
 
 - Created from TODO-444 reconciliation. The canonical routing table is `inet quicfuscate_rt`.
+- TODO-522 now provides privileged Omega proof for automatic nftables kill-switch selection: exact endpoint-only and connected rules, selected VPN DNS, direct DNS/IPv6 blocking with zero captured leaks, block-only timeout transition, retained post-exit rules, stale cleanup, and SIGTERM cleanup. This task remains open for the single configured backend owner, unified routing-table proof, explicit nftables failure behavior, and real iptables fallback/atomicity proof.
 
 ## Deviations
 

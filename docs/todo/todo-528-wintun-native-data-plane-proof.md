@@ -36,6 +36,7 @@ Windows core and MSI production are native-proven, and the Wintun backend dynami
 ## Notes
 
 - Created from TODO-442 reconciliation. TODO-519 remains closed for core/MSI portability.
+- TODO-522 removed the unsafe Windows `netsh` activation path from production use: broad Windows Firewall block rules override narrower endpoint and interface allow rules, so activation now fails closed with `NotSupported` instead of claiming protection. This task must implement the replacement through WFP and prove it on native privileged Windows before restoring the support claim.
 
 ## Deviations
 

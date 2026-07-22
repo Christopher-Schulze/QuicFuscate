@@ -32,8 +32,8 @@ TODO-521 confirmed that the kill-switch backends and explicit connect/disconnect
 - [x] Identify the canonical owner and lifecycle contract for engine and standalone client loss detection.
 - [x] Implement automatic fail-closed transitions without duplicate watchdogs.
 - [x] Add process and platform-boundary tests.
-- [~] Execute privileged Linux and available native platform proofs.
-- [ ] Flush documentation and close only with exact evidence.
+- [x] Execute privileged Linux and available native platform proofs.
+- [~] Flush documentation and close only with exact evidence.
 
 ## Notes
 
@@ -44,6 +44,9 @@ TODO-521 confirmed that the kill-switch backends and explicit connect/disconnect
 - The privileged process gate `scripts/tests/tun-e2e-killswitch-netns.sh` exercises real TLS/TUN establishment, nftables kernel state, VPN DNS, direct DNS and IPv6 capture, server-kill timing, retained rules after process loss, explicit stale cleanup, and SIGTERM cleanup. Local `bash -n` and ShellCheck pass; execution awaits the exact native Linux artifact.
 - Local full evidence after implementation: workspace all-target tests with `rust-tests` pass 1,720 library tests plus every integration, binary, and example target; workspace all-target check, strict Clippy, `cargo fmt --check`, `git diff --check`, Bash syntax, ShellCheck, TODO consistency (193 files, zero violations), and runtime guardrails (zero critical findings, zero warnings) pass. The final watchdog review also proves that `heartbeat_timeout_ms=0` disables only the inactivity deadline while preserving automatic remote-close detection.
 - Local macOS PF access is unavailable: the native stale-cleanup test reaches `pfctl` but receives `/dev/pf: Permission denied`. No privileged state mutation was attempted; the support claim remains conditional on a managed PF anchor until native privileged proof exists.
+- Commit `2735a23` passes CI `29921238645`, Clippy Matrix `29921238690`, native Windows core check/test/Clippy, and the ARM64 release-bundle job. The exact ARM64 bundle SHA-256 is `d41764e90d9cc6d9abd2812b0c17f35679c2d4a1dcdbd4ed86ace90dc40a7abf`; its binary SHA-256 is `c285dbcbb53fc6355aec182f99a7f5ec4a409bf93af1874cd4ae8556b6a92e60`.
+- Privileged Omega run 9 passes against that binary: selected VPN DNS returns a real response; direct underlay DNS and IPv6 attempts fail with zero matching packets captured; a silent `SIGSTOP` server drives block-only nftables state in 15,005 ms for a 15,000 ms configured timeout; endpoint and TUN allowances are absent; rules persist after client exit; explicit stale cleanup removes them; and a separate SIGTERM lifecycle removes them cleanly. Early diagnostic runs exposed and fixed only harness defects: missing explicit namespace TUN address activation, a timeout shorter than the leak checks, zombie process detection, and `SIGKILL` exercising remote-close instead of inactivity timeout.
+- Windows activation now returns `NotSupported` because the previous broad `netsh` block rules override narrower allow rules and cannot provide the claimed policy. Native production replacement remains in TODO-528. The macOS managed PF anchor lifecycle is isolated in TODO-548. The remaining configured backend and iptables fallback matrix stays in TODO-530.
 
 ## Deviations
 
