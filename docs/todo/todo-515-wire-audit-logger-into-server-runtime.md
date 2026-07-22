@@ -4,7 +4,7 @@ title: Wire AuditLogger into server runtime so security events are actually emit
 severity: CRITICAL
 phase: S
 priority: P0
-status: DONE
+status: OPEN
 created: 2026-07-03
 depends_on: [TODO-439, TODO-511]
 ---
@@ -99,3 +99,7 @@ audit logging is currently unsupported.
   `cargo test --workspace --all-targets --features rust-tests` PASS (0 failures).
 - `rg 'audit::|AuditLog::|audit_log|crate::audit::audit' src/implementations/server src/main.rs`
   now returns matches at all integration points listed above.
+
+## 2026-07-22 Acceptance Reconciliation
+
+TODO-521 reopened this task because the final completion sentence is broader than the runtime evidence. Current emitters cover server start, privilege-drop outcomes, authentication success/failure, QKey issuance/revocation, selected admin actions, config reload, drain, and shutdown. They do not cover authentication timeout, connection acceptance/termination/reconciliation, or firewall rule add/remove events required by this task. The existing tests exercise the audit primitive and hash chain but do not trigger both a real server authentication event and a real admin event through an integration boundary. The unchecked acceptance criteria therefore remain genuine gaps.

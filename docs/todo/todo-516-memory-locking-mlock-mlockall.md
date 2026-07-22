@@ -4,7 +4,7 @@ title: Implement mlock/mlockall for key material and memory pools
 severity: HIGH
 phase: S
 priority: P1
-status: DONE
+status: OPEN
 created: 2026-07-03
 depends_on: [TODO-440, TODO-511]
 ---
@@ -95,3 +95,7 @@ across reboots and can be recovered by an attacker with disk access.
 - `rg 'mlockall|mlock\b' src` now returns matches in `src/main.rs` (mlockall)
   and `src/optimize/mod.rs` (mlock_block, munlock_block, LOCK_BLOCKS).
 - TODO-520 live proof added a finite-limit regression for flag selection after Omega exposed the future-allocation hazard. The systemd path remains fully locked through `LimitMEMLOCK=infinity`; standalone finite-limit runs degrade safely.
+
+## 2026-07-22 Acceptance Reconciliation
+
+TODO-521 reopened this task because the implementation tests cover flag selection and best-effort pool allocation only. No test invokes the production `mlockall` boundary and proves `VmLck > 0` with sufficient privileges or explicitly exercises the documented graceful-skip path. The runtime wiring remains implemented, but the task's required operating-system evidence is missing.

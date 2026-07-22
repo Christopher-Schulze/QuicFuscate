@@ -317,7 +317,7 @@ The server runtime emits tamper-evident audit events to a hash-chained NDJSON lo
 - `AdminAction` - admin kick, failed config reload
 - `ConfigReloaded` - successful config reload
 
-**Memory locking (TODO-516):** When `[security] lock_memory = true` (default), the server reads `RLIMIT_MEMLOCK` before loading key material. An unlimited budget uses `mlockall(MCL_CURRENT | MCL_FUTURE)`; a finite or unreadable budget uses `MCL_CURRENT` so a successful call cannot make later allocations fail with `ENOMEM`. When `lock_blocks = true` (default), each `MemoryPool` block is individually `mlock`ed on allocation via `MemoryPool::set_lock_blocks()`. `LimitMEMLOCK=infinity` in the systemd unit preserves full current-and-future protection. Failures are warnings and block locking remains best-effort.
+**Memory locking (TODO-516):** When `[security] lock_memory = true` (default), the server reads `RLIMIT_MEMLOCK` before loading key material. An unlimited budget uses `mlockall(MCL_CURRENT | MCL_FUTURE)`; a finite or unreadable budget uses `MCL_CURRENT` so a successful call cannot make later allocations fail with `ENOMEM`. When `lock_blocks = true` (default), each `MemoryPool` block is individually `mlock`ed on allocation via `MemoryPool::set_lock_blocks()`. `LimitMEMLOCK=infinity` in the systemd unit enables the intended current-and-future protection, but TODO-516 is reopened until an operating-system-level test proves the production `mlockall` boundary or its explicit graceful-skip path. Failures are warnings and block locking remains best-effort.
 
 ## Introduction & Purpose
 QuicFuscate is a forked stealth transport and VPN runtime built around a custom QUIC-like transport/data-plane posture, hybrid adaptive FEC, and a cohesive stealth stack. The canonical runtime is designed for strong censorship resilience and high-throughput operation under this forked protocol contract. It is not a drop-in upstream QUIC implementation.
@@ -1397,7 +1397,7 @@ Server implementation (`src/implementations/server/`):
 - `src/implementations/server/systemd.rs` - systemd-oriented service/unit integration helpers.
 
 Audit module (`src/audit/`):
-- `src/audit/mod.rs` - tamper-evident NDJSON audit log with SHA-256 hash chaining, global `OnceLock<Arc<AuditLog>>` accessor (initialized via `--audit-log <path>`), and security event emission at all key integration points (server start/stop, privilege drop, auth success/failure, QKey issued/revoked, admin actions, config reload). File is created with mode 0o600 and chowned to the runtime user before privilege drop.
+- `src/audit/mod.rs` - tamper-evident NDJSON audit log with SHA-256 hash chaining and a global `OnceLock<Arc<AuditLog>>` accessor initialized via `--audit-log <path>`. Current runtime emitters cover server start, privilege-drop outcomes, auth success/failure, QKey issuance/revocation, selected admin actions, config reload, drain, and shutdown. TODO-515 is reopened for auth-timeout, connection-lifecycle, firewall-mutation, and real integration-test coverage. The file is created with mode 0o600 and chowned to the runtime user before privilege drop.
 
 Optimize submodules (`src/optimize/`):
 - `src/optimize/brain.rs` - optimize helpers used by brain/statistical hotpaths.

@@ -50,7 +50,8 @@ Global production-readiness cannot remain closed until every affected acceptance
 
 - Initial inventory: 166 detail files total; 139 `DONE`, 18 `SCRAP`, 9 `DEFERRED`; 31 `DONE` files contain 441 unchecked items; TODO-447 adds 12 unchecked historical Docker items.
 - The discovery occurred after TODO-448 closure commit `90db0835c7ad5f0a29541e04dbfcfdc7227dac17` and invalidates only the global closure claim, not TODO-448's verified lifecycle result.
-- This is a scope expansion larger than the completed graceful-shutdown task. Product code changes are paused until the canonical treatment of superseded historical criteria is confirmed.
+- Current architecture contracts are canonical. Historical criteria must be marked with an explicit successor when superseded; otherwise they remain binding evidence requirements.
+- First classified gaps: TODO-515 lacks required audit event coverage and real integration evidence; TODO-516 lacks operating-system-level proof for the production memory-lock boundary. Both source tasks are reopened rather than replaced.
 
 ## Deviations
 
