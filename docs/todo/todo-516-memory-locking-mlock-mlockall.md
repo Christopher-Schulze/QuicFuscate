@@ -4,7 +4,7 @@ title: Implement mlock/mlockall for key material and memory pools
 severity: HIGH
 phase: S
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-07-03
 depends_on: [TODO-440, TODO-511]
 ---
@@ -47,18 +47,18 @@ across reboots and can be recovered by an attacker with disk access.
 
 ## Acceptance Criteria
 
-- [ ] `rg 'mlockall|mlock\b' src` returns matches in the server
+- [x] `rg 'mlockall|mlock\b' src` returns matches in the server
       startup path and in `MemoryPool` allocation/deallocation.
-- [ ] `src/engine/config.rs` has `lock_memory` and `lock_blocks`
+- [x] `src/engine/config.rs` has `lock_memory` and `lock_blocks`
       fields with sensible defaults.
-- [ ] `scripts/install/quicfuscate-server.service` retains
+- [x] `scripts/install/quicfuscate-server.service` retains
       `LimitMEMLOCK=infinity`.
-- [ ] At least one test verifies `mlockall` succeeds when run with
+- [x] At least one test verifies `mlockall` succeeds when run with
       sufficient privileges, or is gracefully skipped otherwise.
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes.
-- [ ] `cargo test --workspace --all-targets --features rust-tests`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` passes.
+- [x] `cargo test --workspace --all-targets --features rust-tests`
       passes.
-- [ ] `docs/DOCUMENTATION.md` key-erasure section reflects the wired
+- [x] `docs/DOCUMENTATION.md` key-erasure section reflects the wired
       state, not just zeroization.
 
 ## Non-Goals
@@ -99,3 +99,9 @@ across reboots and can be recovered by an attacker with disk access.
 ## 2026-07-22 Acceptance Reconciliation
 
 TODO-521 reopened this task because the implementation tests cover flag selection and best-effort pool allocation only. No test invokes the production `mlockall` boundary and proves `VmLck > 0` with sufficient privileges or explicitly exercises the documented graceful-skip path. The runtime wiring remains implemented, but the task's required operating-system evidence is missing.
+
+The production boundary is now isolated in `lock_process_memory()` and used unchanged by `run_server()`. Its unit test invokes that exact boundary, asserts `VmLck > 0` when the operating system succeeds, releases the process lock through `munlockall()`, and accepts only documented resource/permission/unsupported errors when the host cannot lock. macOS returned `ENOSYS` and passed the explicit graceful-degradation branch.
+
+Native ARM64 Omega proof used a transient systemd unit with `LimitMEMLOCK=infinity` and the retained release artifact under `/home/ubuntu/SOFTWARE/QuicFuscate/runtime-bef00fe`. The live process reported `VmLck: 967860 kB`, logged `Process memory locked against swap (mlockall flags=3)`, and listened on isolated loopback UDP port 54433. The unit stopped cleanly, `MainPID=0`, the port was closed, and all generated certificate/key files plus the temporary proof directory were removed.
+
+Final local verification passes `cargo fmt --all -- --check`, workspace all-target Clippy with `rust-tests` and warnings denied, the two memory-lock tests, and `cargo test --workspace --all-targets --features rust-tests` with 1677 library tests, 16 binary tests, and every integration/runtime target green. TODO-516 is closed again on direct OS evidence rather than implementation presence alone.

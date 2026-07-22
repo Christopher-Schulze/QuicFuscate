@@ -2229,6 +2229,27 @@ fn current_memlock_limit() -> std::io::Result<libc::rlim_t> {
     Ok(unsafe { limit.assume_init() }.rlim_cur)
 }
 
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MemoryLockOutcome {
+    flags: libc::c_int,
+    current_limit: Option<libc::rlim_t>,
+}
+
+#[cfg(unix)]
+fn lock_process_memory() -> std::io::Result<MemoryLockOutcome> {
+    let current_limit = current_memlock_limit().ok();
+    let flags = current_limit.map(mlockall_flags_for_limit).unwrap_or(libc::MCL_CURRENT);
+
+    // SAFETY: flags contain only MCL_CURRENT and, when the process has an
+    // unlimited memlock budget, MCL_FUTURE.
+    if unsafe { libc::mlockall(flags) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    Ok(MemoryLockOutcome { flags, current_limit })
+}
+
 #[cfg(all(test, unix))]
 mod memory_lock_tests {
     use super::*;
@@ -2240,6 +2261,38 @@ mod memory_lock_tests {
             mlockall_flags_for_limit(libc::RLIM_INFINITY),
             libc::MCL_CURRENT | libc::MCL_FUTURE
         );
+    }
+
+    #[test]
+    fn production_memory_lock_boundary_locks_pages_or_reports_supported_limit_error() {
+        match lock_process_memory() {
+            Ok(outcome) => {
+                assert_ne!(outcome.flags & libc::MCL_CURRENT, 0);
+
+                #[cfg(target_os = "linux")]
+                {
+                    let status = std::fs::read_to_string("/proc/self/status")
+                        .expect("read current process status after mlockall");
+                    let locked_kib = status
+                        .lines()
+                        .find_map(|line| line.strip_prefix("VmLck:"))
+                        .and_then(|value| value.split_whitespace().next())
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .expect("parse VmLck from /proc/self/status");
+                    assert!(locked_kib > 0, "mlockall succeeded but VmLck stayed zero");
+                }
+
+                // SAFETY: this test owns the process-wide lock it just acquired.
+                assert_eq!(unsafe { libc::munlockall() }, 0, "munlockall failed");
+            }
+            Err(error) => {
+                let raw_error = error.raw_os_error();
+                assert!(
+                    matches!(raw_error, Some(code) if code == libc::EPERM || code == libc::ENOMEM || code == libc::EAGAIN || code == libc::ENOSYS),
+                    "unexpected mlockall failure: {error}"
+                );
+            }
+        }
     }
 }
 
@@ -2364,36 +2417,31 @@ async fn run_server(
     if lock_memory {
         #[cfg(unix)]
         {
-            let flags = match current_memlock_limit() {
-                Ok(limit) => {
-                    let flags = mlockall_flags_for_limit(limit);
-                    if flags == libc::MCL_CURRENT {
-                        log::warn!(
-                            "RLIMIT_MEMLOCK is finite ({} bytes); locking current pages only to avoid future allocation failures. Set LimitMEMLOCK=infinity for full process locking.",
-                            limit
-                        );
+            match lock_process_memory() {
+                Ok(outcome) => {
+                    match outcome.current_limit {
+                        Some(limit) if outcome.flags == libc::MCL_CURRENT => {
+                            log::warn!(
+                                "RLIMIT_MEMLOCK is finite ({} bytes); locking current pages only to avoid future allocation failures. Set LimitMEMLOCK=infinity for full process locking.",
+                                limit
+                            );
+                        }
+                        None => {
+                            log::warn!(
+                                "RLIMIT_MEMLOCK query failed. Locked current pages only to avoid future allocation failures."
+                            );
+                        }
+                        _ => {}
                     }
-                    flags
+                    info!("Process memory locked against swap (mlockall flags={})", outcome.flags);
                 }
                 Err(error) => {
                     log::warn!(
-                        "RLIMIT_MEMLOCK query failed: {}. Locking current pages only to avoid future allocation failures.",
+                        "mlockall failed: {}. Process memory may be swapped to disk. \
+                         Set LimitMEMLOCK=infinity in systemd or run with CAP_IPC_LOCK.",
                         error
                     );
-                    libc::MCL_CURRENT
                 }
-            };
-            // SAFETY: flags contain only MCL_CURRENT and, when the process has an
-            // unlimited memlock budget, MCL_FUTURE.
-            if unsafe { libc::mlockall(flags) } != 0 {
-                let err = std::io::Error::last_os_error();
-                log::warn!(
-                    "mlockall failed: {}. Process memory may be swapped to disk. \
-                     Set LimitMEMLOCK=infinity in systemd or run with CAP_IPC_LOCK.",
-                    err
-                );
-            } else {
-                info!("Process memory locked against swap (mlockall flags={flags})");
             }
         }
         #[cfg(not(unix))]
