@@ -4,7 +4,7 @@ title: Graceful shutdown (SIGTERM, SIGHUP reload, drain mode, systemd notify)
 severity: HIGH
 phase: "I"
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-06-30
 depends_on: ["TODO-446"]
 ---
@@ -116,7 +116,17 @@ Client SIGHUP hot-reload is intentionally excluded from the final contract. Esta
 
 The live-process regression harness `scripts/tests/suites/test-graceful-shutdown.sh` now proves two QKey-authenticated TLS clients, SIGHUP reload without restart, immediate rejection of a new connection while draining, active-client reconciliation from two to one after client SIGTERM, deadline force-close, peer close-frame handling by the remaining client, auxiliary-service shutdown, and clean server exit. The configured 5000 ms grace completed in 5118 ms. The proof also exposed and fixed a final-association self-deadlock in `QKeyConnectionTracker::dissociate()`; the tracker now holds one `by_key` write guard through mutation and removal.
 
-Local gates are green: `cargo fmt --all -- --check`; `cargo check --workspace --all-targets --all-features`; `cargo clippy --workspace --all-targets --all-features -- -D warnings`; and `cargo test --features rust-tests` with 1677 library tests plus all integration and documentation targets passing. CI artifact validation and native Omega lifecycle proof remain before closure.
+Local gates are green: `cargo fmt --all -- --check`; `cargo check --workspace --all-targets --all-features`; `cargo clippy --workspace --all-targets --all-features -- -D warnings`; and `cargo test --features rust-tests` with 1677 library tests plus all integration and documentation targets passing. The subsequent CI and Omega closure proof is recorded below.
+
+### 2026-07-22 Final Closure Evidence
+
+Commit `bef00fe6501baa1d5fc99ad25f5e8e89c9b6d4a3` is pushed to `main`. GitHub CI run `29880712890` and Clippy Matrix run `29880712914` pass. Release Build run `29880712908` produced the native `linux-server-bundle-arm64` artifact in successful job `88800780673`; bundle `quicfuscate-server-bundle-linux-arm64-0.4.3-20260722_003900.tar.gz` has SHA-256 `732290b8a2995ed7d08f52cabfd1ed106dd018ecb915fb01c21a17bb1ae87bd8`.
+
+The exact release artifact was extracted and tested only under `/home/ubuntu/SOFTWARE/QuicFuscate/runtime-bef00fe` on Omega. Its AArch64 binary completed the same two-client lifecycle proof as local:
+
+`PASS: authenticated_clients=2 reload=SIGHUP drain=running-to-draining-to-stopped rejected_new_connection=1 client_close=2-to-1 grace_ms=5000 elapsed_ms=5118 close_flush=clean`
+
+After the proof, no QuicFuscate process and no `/tmp/quicfuscate-todo448.*` test state remained on Omega. All acceptance criteria are satisfied without changing the protected Svelte/Tauri UI.
 
 1. **SIGTERM handler** — graceful shutdown on SIGTERM, identical to ctrl_c but
    with proper drain semantics.
