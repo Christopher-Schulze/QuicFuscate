@@ -48,8 +48,8 @@ pub fn open_platform_tun(_cfg: &TunConfig) -> Result<Box<dyn TunDevice>, TunErro
 ### tun_capabilities()
 `src/interface.rs:229-239` — reports `built_in: false` on Windows. `validate_tun_runtime_requirements()` (`src/interface.rs:243-251`) rejects TUN operations unless an external factory is registered via `register_tun_factory`.
 
-### Windows kill switch already exists
-`src/implementations/client/killswitch.rs:596-694` — `WindowsKillSwitch` uses `netsh advfirewall` to add/delete block and allow rules. This is functional and must coexist with the Wintun TUN adapter (the kill switch allows VPN server IP + TUN interface, blocks everything else).
+### Windows kill-switch boundary (superseded)
+TODO-522 proved that the former `netsh advfirewall` design was not a functional fail-closed policy: broad block rules override narrower endpoint and interface allow rules. Production activation now returns `NotSupported`; TODO-528 owns the native WFP replacement and its Wintun packet proof.
 
 ### Server routing on Windows
 `src/implementations/server/routing.rs:138-139` — `RoutingManager::setup()` on Windows uses PowerShell `New-NetNat` for NAT. The TUN interface name from Wintun must be passed correctly to `RoutingManager`.
@@ -279,7 +279,7 @@ pub wintun_ring_capacity: Option<u32>,
 The server's `RoutingManager` (`src/implementations/server/routing.rs:138-139`) already has a Windows `setup()` path that uses `New-NetNat` for NAT. The Wintun adapter name returned by `WindowsTun::name()` must be passed to `RoutingManager::new()` as `tun_name`. No changes to `RoutingManager` are needed — it already works with any interface name.
 
 ### Step 7: Kill switch integration
-The existing `WindowsKillSwitch` (`src/implementations/client/killswitch.rs:596-694`) uses `netsh advfirewall` to block/allow traffic. The `allow_vpn_traffic` method takes `tun_name` and `server_ip` — the Wintun adapter name is passed as `tun_name`. No changes needed to the kill switch; it already works with any adapter name.
+This historical integration plan is superseded. TODO-528 must implement WFP-owned filters that permit the exact VPN endpoint and Wintun traffic while retaining a real default-deny policy; adapter creation alone cannot restore the support claim.
 
 ### Step 8: CI cross-compilation
 Add a Windows cross-compilation check to CI:
@@ -311,7 +311,7 @@ windows-check:
 - **No hot-path allocation**: The receive thread allocates a `Vec<u8>` per packet. For zero-copy optimization, consider a pre-allocated packet pool and `bytes::Bytes` for channel transfer. This is a future optimization (TODO-403 zero-copy recv).
 - **DLL footprint**: `wintun.dll` is ~140 KB. Bundle alongside the binary — no system installation required.
 - **Stealth impact**: Wintun creates a visible network adapter in `ipconfig` output. The adapter name is configurable via `TunConfig.name`. For stealth, use a generic name like "Ethernet 2" rather than "quicfuscate".
-- **Kill switch coexistence**: The Windows Firewall rules from `WindowsKillSwitch` are independent of the Wintun adapter. The kill switch allows traffic to the VPN server IP and through the TUN adapter, blocking everything else — this works seamlessly with Wintun.
+- **Kill-switch coexistence**: Native WFP filter ownership, packet outcomes, and Wintun lifecycle remain required in TODO-528. The former `netsh` rule set is not a valid production boundary.
 - **CPU idle**: When no traffic flows, the receive thread parks on `receive_blocking()` — zero CPU usage.
 
 ## Testing Plan

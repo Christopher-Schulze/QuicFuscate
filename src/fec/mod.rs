@@ -3892,10 +3892,10 @@ unsafe fn gf16_mul_slice_vbmi2(coeff: u16, src: &[u16], dst: &mut [u16], len: us
         let idx2 = _mm512_add_epi16(nib2, offset32);
         let idx3 = _mm512_add_epi16(nib3, offset32);
 
-        let contrib0 = _mm512_permutex2var_epi16(nib0, tbl0_a, tbl0_b);
-        let contrib1 = _mm512_permutex2var_epi16(idx1, tbl1_a, tbl1_b);
-        let contrib2 = _mm512_permutex2var_epi16(idx2, tbl2_a, tbl2_b);
-        let contrib3 = _mm512_permutex2var_epi16(idx3, tbl3_a, tbl3_b);
+        let contrib0 = _mm512_permutex2var_epi16(tbl0_a, nib0, tbl0_b);
+        let contrib1 = _mm512_permutex2var_epi16(tbl1_a, idx1, tbl1_b);
+        let contrib2 = _mm512_permutex2var_epi16(tbl2_a, idx2, tbl2_b);
+        let contrib3 = _mm512_permutex2var_epi16(tbl3_a, idx3, tbl3_b);
 
         let partial = _mm512_xor_si512(_mm512_xor_si512(contrib0, contrib1), contrib2);
         let prod = _mm512_xor_si512(partial, contrib3);
