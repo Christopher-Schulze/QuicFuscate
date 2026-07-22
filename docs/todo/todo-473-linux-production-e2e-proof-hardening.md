@@ -38,6 +38,10 @@ All commands were run on `broderick` from `/root/QuicFuscate-git` after `cargo b
 | FEC transition netns | PASS | `1 passed, 0 failed`; clean 0%, loss phase 22%, recovered 0% |
 | FEC netem adversity | PASS | `25 passed, 0 failed, 0 skipped`; loss sweep through 50%, jitter through 500ms, bandwidth through 1Mbit, RTT through 300ms + 5% loss, mobile adversity, and clean-loss-clean recovery |
 
+## Omega FEC Proof Refresh (2026-07-22)
+
+The exact native ARM64 release artifact for `15570abf772766c76959f6aae6ba16b2b9c26fd7` was verified in the new isolated directory `/home/ubuntu/SOFTWARE/QuicFuscate/runtime-15570ab`. Bundle SHA-256 is `5406170b4175d91722d2169c8c21adc9721e61fe995a513299fc4f52eff9d8fe`; binary SHA-256 is `9b4144a85e452ef37102ac255b0c8c976f1145ad04941c594d07d4fc6130cf5b`. The original uniform-loss gate passes `4/4` at 1,000 packets per loss level, and the original correlated-burst gate passes `2/2` at 1,000 packets per scenario. Historical runtime directories were not modified; no QuicFuscate process or test namespace remains after cleanup.
+
 ## Notes
 
 - TCP iperf3 to `10.0.1.1` is not a valid server-local TUN proof today because the live server intentionally handles ICMP to its own TUN IP locally and ignores non-ICMP packets addressed to the server TUN IP. The optional iperf3 section is retained only as a future canary and must not be counted as production evidence unless throughput is actually measurable.

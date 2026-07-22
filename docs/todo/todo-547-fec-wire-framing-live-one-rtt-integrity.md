@@ -4,7 +4,7 @@ title: Restore FEC wire framing and live 1-RTT integrity
 severity: CRITICAL
 phase: S
 priority: P0
-status: OPEN
+status: DONE
 created: 2026-07-22
 depends_on: [TODO-422, TODO-473, TODO-524, TODO-521]
 ---
@@ -34,8 +34,8 @@ The exact ARM64 release artifact reaches a completed rustls handshake on Omega, 
 - [x] Exclude TLS Cover, TUN ownership, and rustls directional keys as root causes.
 - [x] Trace the live 1-RTT boundary and prove FEC-off success on the otherwise identical Omega path.
 - [x] Replace the insufficient legacy envelope with a versioned, MTU-bounded FEC wire contract and adversarial regression coverage.
-- [~] Run local, native, and Omega end-to-end evidence.
-- [ ] Flush documentation and close only with exact evidence.
+- [x] Run local, native, and Omega end-to-end evidence.
+- [x] Flush documentation and close only with exact evidence.
 
 ## Notes
 
@@ -61,10 +61,12 @@ The exact ARM64 release artifact reaches a completed rustls handshake on Omega, 
 - GF4 product mode is mathematically bounded to a 15-source/16-total MDS block with exactly one repair, matching the 16 elements available in GF(2^4). Adaptive extra repairs are disabled in this tier because a second all-source repair cannot extend a length-16 MDS code; rising loss instead promotes the codec. A compile-time multiplication table plus fused scalar/AVX2/NEON multiply-XOR removes the temporary repair buffer. Apple Silicon Criterion measures about `6.69 us` median and `199.45 MiB/s`, a further 22% median-time improvement over the preceding two-repair GF4 policy and about 43% lower median time than the measured GF8 k=16 baseline.
 - The FEC Criterion surface now measures the production v1 envelope directly: 1,400-byte wire write about `29.73 ns`, parse about `12.83 ns`, and deterministic GF8 k=16 repair-row derivation about `22.75 ns` on Apple Silicon.
 - `scripts/tests/suites/test-fec-simulation.sh` still carries legacy environment axes that the production controller does not read. It is excluded from TODO-547 evidence; the failable wire, codec, rustls, full-workspace, native, and Omega gates own acceptance instead.
-- Focused evidence currently passes: 17 wire tests cover framing, validation/resource bounds, MTU bounds, retained-epoch consistency, coefficient regeneration, the exact GF4 field row, exact variable-length GF4/GF8/GF16 recovery, partial-window streaming recovery, and multi-loss Fountain rescue; the full 206-test FEC scope passes after the fused GF4 SIMD and single-repair policy changes. Earlier focused evidence also includes 23 internal FEC tests, 21 Fountain tests, the block-boundary profile test, the pending-handshake-flight regressions, and the generated-CA QKey/rustls test with authenticated HTTP/3 plus observed source and repair envelopes. The integration test rejects any emitted datagram larger than the active transport path-MTU cap. Full repository and live Omega gates remain open.
-- Final local deterministic gates pass after the one-repair policy: `cargo test --workspace --all-targets --features rust-tests -- --test-threads=1` runs 1,717 library tests plus every integration/binary target with zero failures; strict workspace/all-target Clippy with `-D warnings`, formatting, `git diff --check`, runtime-guardrail audit, and TODO-consistency audit are green. Native CI and live Omega gates remain open.
+- Focused evidence passes: 17 wire tests cover framing, validation/resource bounds, MTU bounds, retained-epoch consistency, coefficient regeneration, the exact GF4 field row, exact variable-length GF4/GF8/GF16 recovery, partial-window streaming recovery, and multi-loss Fountain rescue; the full 206-test FEC scope passes after the fused GF4 SIMD and single-repair policy changes. Earlier focused evidence also includes 23 internal FEC tests, 21 Fountain tests, the block-boundary profile test, the pending-handshake-flight regressions, and the generated-CA QKey/rustls test with authenticated HTTP/3 plus observed source and repair envelopes. The integration test rejects any emitted datagram larger than the active transport path-MTU cap.
+- Final local deterministic gates pass after the one-repair policy: `cargo test --workspace --all-targets --features rust-tests -- --test-threads=1` runs 1,717 library tests plus every integration/binary target with zero failures; strict workspace/all-target Clippy with `-D warnings`, formatting, `git diff --check`, runtime-guardrail audit, and TODO-consistency audit are green.
 - Native CI exposed two independent gate defects after the FEC implementation commit: the production-only acceleration re-export still exposed test-only `iter`, and the client integration harness dropped its ephemeral UDP reservation before the server task rebound it. The re-export is now exact for production, while the harness binds once and hands the already-ready socket to the spawned echo task; the focused echo test passes 50 consecutive local runs and production-feature Clippy remains warning-free.
-- Provisional exact-artifact Omega proof on commit `af7a0a92ab8a516307d324784b7835a7a5351e8e` uses native ARM64 bundle SHA-256 `f846e0c9aeed2880c207bd722c4b95eafc29dc6d430b23433cec3566a7178a91` in new directory `/home/ubuntu/SOFTWARE/QuicFuscate/runtime-af7a0a9`. The repeated 1,000-packet uniform matrix passes all 0%, 5%, 10%, and 25% gates; the 10% case then passes five consecutive 1,000-packet stress repetitions; the 1,000-packet burst matrix passes at 2% residual loss for 10%/25% correlation and 4% residual loss for 20%/50% correlation. One initial 10% matrix cell produced 98.9% loss without retained peer logs, so this evidence remains provisional until the final post-CI artifact repeats the gates and preserves both peer logs.
+- Final proof commit `15570abf772766c76959f6aae6ba16b2b9c26fd7` passes the complete local workspace/all-target `rust-tests` gate with 1,717 library tests plus every integration, binary, and example target green. GitHub CI `29915916296` and Clippy Matrix `29915916332` are green; Release Build `29915916301` produced the exact native ARM64 artifact used below.
+- The native ARM64 bundle SHA-256 is `5406170b4175d91722d2169c8c21adc9721e61fe995a513299fc4f52eff9d8fe`; its stripped AArch64 binary SHA-256 is `9b4144a85e452ef37102ac255b0c8c976f1145ad04941c594d07d4fc6130cf5b`. Omega verification is isolated under `/home/ubuntu/SOFTWARE/QuicFuscate/runtime-15570ab`; historical runtime directories are untouched.
+- The final 1,000-packet uniform matrix passes `4 passed, 0 failed`: residual tunnel loss is 0% at 0% netem, 9% at 5%, 11% at 10%, and 26% at 25%. The final correlated-burst matrix passes `2 passed, 0 failed`: residual loss is 2% for both 10%/25% correlation and 20%/50% correlation. Both retained peer-log pairs prove completed TLS, H3/MASQUE flow establishment, and NEON FEC with no AEAD, decrypt, or panic error. An earlier isolated 10% anomaly did not recur in the full final matrix, the isolated retry, or five consecutive 1,000-packet stress repetitions.
 
 ## Deviations
 

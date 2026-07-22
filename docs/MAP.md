@@ -58,6 +58,14 @@ Padding and timing rates flow through `StealthRuntimePolicy` → `StealthRuntime
 - `scripts/tests/tun-e2e-fec-transition-netns.sh`: clean -> lossy -> recovered live transition gate passes.
 - `scripts/tests/tun-e2e-fec-netem-adversity.sh`: broad adversity matrix passes with 25 passed, 0 failed.
 
+### Omega FEC Wire Integrity Evidence (2026-07-22)
+
+- Exact proof source: `15570abf772766c76959f6aae6ba16b2b9c26fd7`; native ARM64 bundle SHA-256 `5406170b4175d91722d2169c8c21adc9721e61fe995a513299fc4f52eff9d8fe`; binary SHA-256 `9b4144a85e452ef37102ac255b0c8c976f1145ad04941c594d07d4fc6130cf5b`.
+- Isolated runtime: `/home/ubuntu/SOFTWARE/QuicFuscate/runtime-15570ab`; historical runtime directories remain untouched and test cleanup leaves no process or network namespace behind.
+- `scripts/tests/tun-e2e-fec-netns.sh`: 1,000 packets at each 0/5/10/25% uniform-loss level, `4 passed, 0 failed`.
+- `scripts/tests/tun-e2e-fec-burst-netns.sh`: 1,000 packets in each correlated-burst scenario, `2 passed, 0 failed`; both 10%/25%-correlation and 20%/50%-correlation cases finish with 2% residual tunnel loss.
+- Retained client/server logs prove TLS, H3/MASQUE, and NEON FEC without AEAD, decrypt, or panic errors. Local deterministic tests separately prove 1,000/1,000 unique byte-exact interleaved recovery with zero duplicates and bounded latency.
+
 ### EscalationState (src/stealth/mod.rs) - TODO-416
 Probe-count-based escalation state machine on `StealthManager`.
 - `record_probe()`: records timestamp, checks thresholds (≥3 in 60s → L1, ≥8 in 120s → L2).
@@ -144,7 +152,7 @@ Uses `StealthConfig::from_mode(runtime_mode)` - was silently using `..Default::d
 18. NAT traversal path discovery: `src/engine/config.rs` `[nat_traversal]` -> `src/transport/config.rs` `NatTraversalConfig` -> `src/transport/nat.rs` `NatPathDiscovery` -> path-management consumers when policy permits discovery.
 19. Audit logging path: `src/main.rs::run_server()` `--audit-log <path>` -> `src/audit/mod.rs::init_audit_log()` (global `OnceLock<Arc<AuditLog>>`) -> `crate::audit::audit()` calls at lifecycle, privilege, authentication, QKey, admin, connection, configuration, and firewall boundaries -> `src/main.rs` `verify-audit-log <path>` -> `AuditLog::verify_chain()`.
 20. Memory locking path: `src/engine/config.rs` `[security] lock_memory/lock_blocks` -> `src/main.rs::run_server()` `RLIMIT_MEMLOCK` gate -> unlimited `mlockall(MCL_CURRENT | MCL_FUTURE)` or finite-limit `MCL_CURRENT` -> `src/optimize/mod.rs` `MemoryPool::set_lock_blocks()` -> best-effort `mlock_block()` in `alloc_numa_block()`.
-21. Windows core CI gate: `.github/workflows/ci.yml` `windows-core-checks` -> native `windows-latest` `cargo check --lib` -> parallel `cargo test --lib --features rust-tests` -> `cargo clippy --lib --features rust-tests -- -D warnings`.
+21. Windows core CI gate: `.github/workflows/ci.yml` `windows-core-checks` -> native `windows-latest` `cargo check --lib` -> parallel `cargo test --lib --features rust-tests` -> `cargo clippy --lib --features rust-tests -- -D warnings`; exact proof job `88909613077` is green on `15570abf772766c76959f6aae6ba16b2b9c26fd7`.
 22. Windows signed release path: `scripts/audits/verify-release-version.sh` -> `.github/workflows/release.yml` `release-version-contract` -> `desktop-windows` Tauri MSI build -> `.msi` plus `.msi.sig` verification -> required `publish-release` dependency -> `latest.json` `windows-x86_64` entry.
 
 ## ASCII Repository Tree (curated tracked-source snapshot)

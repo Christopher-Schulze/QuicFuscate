@@ -4,7 +4,7 @@ title: Prove interleaved FEC mapping and random plus burst recovery
 severity: CRITICAL
 phase: S
 priority: P0
-status: OPEN
+status: DONE
 created: 2026-07-22
 depends_on: [TODO-433, TODO-521]
 ---
@@ -29,8 +29,8 @@ All decoder families now use depth-aware coefficient-to-source-ID arithmetic, bu
 - [x] Verify encoder/decoder window and ID invariants before editing.
 - [x] Add exact family-level mapping and integrity tests.
 - [x] Add deterministic random/burst E2E recovery gates.
-- [~] Execute local, native, and Omega performance/correctness evidence.
-- [ ] Flush documentation and close only with exact evidence.
+- [x] Execute local, native, and Omega performance/correctness evidence.
+- [x] Flush documentation and close only with exact evidence.
 
 ## Notes
 
@@ -42,6 +42,7 @@ All decoder families now use depth-aware coefficient-to-source-ID arithmetic, bu
 - Native Windows CI exposed a second integrity defect: the x86 GFNI slice path multiplied in Intel's fixed AES 0x11B field while the FEC wire contract uses 0x11D. Canonical GF8 now excludes raw GFNI multiplication and retains the 0x11D nibble-LUT/scalar paths; the runtime guard rejects its return.
 - Local targeted evidence: all three family mapping tests pass; the repeated ten-window lane test passes; the repeated interleaved 640-packet burst test passes; both 1,000-packet exact E2E gates pass; the complete `fec::e2e_tests` module passes 19/19.
 - Local full evidence: workspace all-target Clippy with `rust-tests` and warnings denied passes; workspace all-target tests pass with 1,691 library tests and every integration/example target green; the complete FEC module passes 187/187; TODO consistency reports 192 files and zero violations; runtime guardrails report zero critical findings and zero warnings. The Criterion GF(256) matrix benchmark reports 1.1030 us for 4x4, 4.6060-4.6078 us for 8x8, and 18.016-18.423 us for 16x16 on this Apple Silicon host. The bench-only build emits one pre-existing release-only dead-field warning for `RustlsProviderImpl::verify_peer`, outside this FEC change.
+- Closure evidence on `15570abf772766c76959f6aae6ba16b2b9c26fd7`: both deterministic 1,000-packet interleaved gates pass inside the 1,717-test full workspace run with unique byte-exact delivery, zero duplicates, and bounded latency. The exact native ARM64 artifact then passes Omega's 1,000-packet uniform 0/5/10/25% netem matrix (`4 passed, 0 failed`) and the 1,000-packet correlated-burst matrix (`2 passed, 0 failed`), with final residual burst loss of 2% in both scenarios. CI `29915916296`, Clippy Matrix `29915916332`, and native artifact job `88909647690` are green; protected UI files remain unchanged.
 
 ## Deviations
 

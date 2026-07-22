@@ -35,6 +35,10 @@ injected at the network layer (tc-netem), verifying end-to-end recovery.
 
 TODO-473 refreshed this proof on `broderick` with the hardened `scripts/tests/tun-e2e-fec-netns.sh` gate. `PING_COUNT=20 LOSS_LEVELS="0 5 10"` passed the hard ping gates with `3 passed`, `0 failed`, and `2 skipped` optional iperf3 probes. The iperf3 probes are intentionally not counted as PASS unless real throughput is measurable.
 
+## Proof Refresh (2026-07-22)
+
+TODO-547 replaced the broken payload-only active-FEC boundary with the versioned wire v1 contract and refreshed the original gates on Omega using the exact native ARM64 artifact from `15570abf772766c76959f6aae6ba16b2b9c26fd7`. The 1,000-packet uniform 0/5/10/25% matrix passes `4 passed, 0 failed`; the 1,000-packet 10%/25%-correlation and 20%/50%-correlation burst matrix passes `2 passed, 0 failed`, with 2% residual loss in both burst cases. Retained client/server logs prove TLS, H3/MASQUE, and NEON FEC without AEAD, decrypt, or panic errors.
+
 ## Implementation Plan
 
 ### 1. netns + tc-netem FEC E2E test (`scripts/tests/tun-e2e-fec-netns.sh`)

@@ -4,7 +4,7 @@ title: Restore Windows SIMD dispatch and native core gate
 severity: CRITICAL
 phase: S
 priority: P0
-status: OPEN
+status: DONE
 created: 2026-07-22
 depends_on: [TODO-519, TODO-521]
 ---
@@ -29,8 +29,8 @@ Native Windows CI run `29885372108`, job `88814739708`, contradicted the prior n
 - [x] Reproduce and map every remaining Windows failure to its exact dispatch path.
 - [x] Repair Berlekamp and sort correctness with adversarial parity tests.
 - [x] Verify thread-local override state and align the documented workflow contract.
-- [ ] Run local, Windows-native, and Linux regression evidence.
-- [ ] Flush documentation and close only with exact evidence.
+- [x] Run local, Windows-native, and Linux regression evidence.
+- [x] Flush documentation and close only with exact evidence.
 
 ## Notes
 
@@ -39,6 +39,7 @@ Native Windows CI run `29885372108`, job `88814739708`, contradicted the prior n
 - Source verification corrected the initial race hypothesis: `PROFILE_OVERRIDE` and `TEST_FEC_KERNEL_OVERRIDE` are thread-local and have explicit concurrent isolation tests. The failed best-effort assertions omitted the valid `avx512vbmi2` auto-selection tag.
 - The removed x86 u32 small-sort kernels used per-element bit shifts instead of cross-lane permutations. The AVX-512 partition path also overwrote unselected elements while compacting in place. `sort_u32` is parity/test-only, so the smallest correct surface is Rust's canonical `sort_unstable`, not another unproven private sorter.
 - Local evidence: eight u32 sort tests pass, including adversarial lengths 0 through 128 and 255/256/257/1023/1024/1025; Berlekamp-Massey parity passes at 0/1/2/31/48/63/64/65/127/128; the Wiedemann telemetry regression passes; workspace all-target Clippy with `rust-tests` and warnings denied passes; the complete workspace all-target `rust-tests` suite passes with 1,693 library tests plus every integration and example target. A local MSVC cross-check is blocked before project compilation because `ring` cannot find the Windows CRT `assert.h` from macOS, so native `windows-latest` remains authoritative.
+- Closure evidence on `15570abf772766c76959f6aae6ba16b2b9c26fd7`: GitHub CI `29915916296` is fully green. Native Windows job `88909613077` passes `cargo check --lib`, parallel `cargo test --lib --features rust-tests`, and `cargo clippy --lib --features rust-tests -- -D warnings`; Linux fastpath, Ubuntu SIMD self-check, macOS feature matrices, fuzz, security, frontend, and app-backend jobs also pass. Clippy Matrix `29915916332` passes, and the refreshed local full workspace run passes 1,717 library tests plus every integration, binary, and example target. Protected UI files remain unchanged.
 
 ## Deviations
 
