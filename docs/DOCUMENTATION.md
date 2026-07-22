@@ -1282,64 +1282,68 @@ quicfuscate server --listen 0.0.0.0:4433 --cc-algorithm reno
 
 ### FEC Modes & Algorithms (Current)
 - Modes: `Zero`, `Light`, `Normal`, `Medium`, `Strong`, `Extreme`, `Ultra`, `Fountain`, `Streaming`.
-- RLNC (GF(2^8)/GF(2^16))
-  - Encoder: sliding window, systematic; repair generation via linear combinations with non-zero deterministic coefficients.
-  - GF(2^16) path uses nibble (4-bit) operations; coefficients stored big-endian (2 bytes each); Cauchy-style matrix ensures invertibility.
+- Active codec cascade
+  - `Zero`: raw QUIC datagrams with no FEC framing or compute overhead.
+  - `Light`: GF(2^4) with a 15-source/16-total MDS block and one repair. The fused scalar/AVX2/NEON multiply-XOR kernel avoids temporary repair buffers.
+  - Block modes through 255 sources per interleave lane: GF(2^8) with deterministic Cauchy repair rows.
+  - Block modes above 255 sources per lane: GF(2^16) with deterministic Cauchy repair rows and exact odd-length recovery.
+  - `Streaming`: partial-window GF(2^8) repairs with explicit coverage anchors.
+  - `Fountain`: deterministic LT source sets, reserved for explicit severe-loss rescue rather than the normal efficiency path.
 - Internal large-window decoder strategy
   - Bitsliced multi-lane MatVec with internal heuristics for projection/lanes.
   - Verification path checks `A_k * X == B` on a small sample and falls back to Gauss on mismatch.
 - Streaming (Tetrys-like)
   - Emits 1 repair per `N` sources; `QUICFUSCATE_FEC_STREAM_EVERY` overrides cadence (min 1; default computed from CPU profile).
-- Seamless transitions
-  - Cross-fade over `cross_fade_packets` with a `transition_buffer`; maintains continuity while changing `k`/mode.
+- Atomic transitions
+  - Pending codec/window changes commit only at complete source-block boundaries. Each committed shape change advances the wire epoch; retained inbound epochs are decoded independently.
 
 SIMD & Parallelism
 - SIMD levels auto-detected: `SSE2`, `AVX2`, `AVX512`, `NEON` (fallback: scalar). Parallel chunking for large payloads.
 - Runtime overrides are documented in the FEC Operations Guide.
 
-Wire Format (DATAGRAM)
+Wire Format v1 (active 1-RTT DATAGRAM)
 ```text
-[0xF1, 0xEC][is_systematic:1][base_id:8][coeff_len:2][coeffs:..][payload:..]
+[magic:2][version:1][flags:1][codec:1][depth:1][lane:1][reserved:1]
+[epoch:4][window:4][sequence:8][source_count:2][total_count:2]
+[repair_index:2][payload_len:2][payload:..]
 ```
-Coefficients encode GF width (1 byte for GF(2^8), 2 bytes for GF(2^16)); all buffers come from `MemoryPool` and are returned on drop.
+The fixed header is 32 bytes. Systematic symbols additionally protect their original QUIC length in a two-byte coded prefix, making the maximum active-FEC overhead exactly 34 bytes. Repair coefficient vectors are never transmitted: codec, block width, lane, and repair ordinal deterministically regenerate GF rows, while Fountain source sets regenerate from the repair seed. Core reserves the full overhead before QUIC serialization, so the outer UDP datagram cannot exceed the active path MTU.
 
 Mode Selection & Hysteresis
 - Selection heuristic (loss-driven):
   - avg_loss < 0.001 -> Zero (ZeroEncoder: absolute zero overhead, counter only, ~2ns/packet)
-  - < 0.02 -> Light (GF4: ~4x faster than GF8, ~5% overhead)
+  - < 0.02 -> Light (GF4, 15-source product window, one repair, 6.67% wire redundancy)
   - < 0.10 -> Normal (GF8: balanced)
-  - < 0.25 -> Strong (AdaptRS)
-  - < 0.50 -> Extreme (GF16)
-  - else -> Fountain (LT Codes)
+  - < 0.22 -> Strong (GF8 through 255 sources per lane, otherwise GF16)
+  - < 0.25 -> Extreme (GF8/GF16 selected by block width)
+  - >= 0.25 -> Fountain (explicit LT rescue tier)
+  - Measured burst loss may select Streaming instead of the corresponding block tier
 - Hysteresis & stability:
   - Minimum dwell time between switches (`~200 ms` except for fast paths like Streaming/Normal)
   - Switch only if `|avg_loss - last_avg| >= switch_threshold` (relaxes for Streaming/Normal)
-  - Cross-fade transitions over `cross_fade_packets` with a `transition_buffer` to preserve continuity
+  - Commit pending targets only after the current source block is complete; decode retained inbound epochs independently
 
 #### Transport Integration (DATAGRAM Ingress/Egress)
-- Repairs are transported over QUIC DATAGRAM frames (`Frame::Datagram`) using a compact, self-describing wire format:
-
-  ````text
-  [0xF1, 0xEC]        // Magic for demultiplexing FEC payloads
-  [is_systematic:1]   // 1 byte: 1=systematic, 0=repair
-  [base_id:8]         // u64 BE: sender's current window anchor (e.g., last source id)
-  [coeff_len:2]       // u16 BE: bytes following as coefficients
-  [coeffs:coeff_len]  // optional, present iff coeff_len>0 (GF(2^8): k bytes; GF(2^16): 2*k bytes)
-  [payload:..]        // raw packet payload (length = datagram_len - header)
-  ````
+- Active 1-RTT sources and repairs are transported over UDP using the versioned FEC v1 envelope above. Initial, Handshake, and stable `Zero` datagrams remain raw QUIC.
 
 - Egress
-  - The encoder serializes repairs via `FecPacket::to_stream_raw()` and enqueues them as DATAGRAMs if size <= `dgram_send_max_size`.
+  - Core polls rustls and the actual Initial/Handshake CRYPTO queues before enabling active 1-RTT framing, so a pending Finished flight cannot be wrapped as FEC application data.
+  - `Connection::send_with_datagram_overhead()` reserves 34 bytes against the minimum of output capacity, configured MTU, and discovered path MTU. Core writes the protected source-length prefix before FEC encoding and serializes sources/repairs with `fec::wire::write_packet()`.
   - Emission policy is adaptive: base interval from `QUICFUSCATE_FEC_STREAM_EVERY` (default computed from CPU profile), escalation under loss and ECN-CE.
 
 - Ingress
-  - The receiver recognizes FEC DATAGRAMs by the 2-byte Magic. Parsing uses `FecPacket::from_stream_raw()` with zero-copy buffers from the global `MemoryPool`.
-  - Parsed packets are fed into the streaming decoder; reconstructed systematics are surfaced to the application as regular DATAGRAMs.
-  - `FecMode::Zero` receive is a true ownership-preserving passthrough when no transition is active: the decoder does not retain an `Arc` clone of the pooled payload, allowing the QUIC core to decrypt and remove header protection in place without an extra copy.
+  - Core recognizes the two-byte magic, validates the complete header before decoder-window allocation, and dispatches by transmitted epoch/profile rather than local receive-side loss estimates.
+  - Receiver state retains at most four windows, bounds source blocks to 2,048 symbols and total codewords to 12,288 symbols, rejects profile mutation within a retained epoch, and suppresses duplicate repairs.
+  - Only recovered systematic payloads have their protected source length removed and enter QUIC decryption. Repairs can never enter header protection or AEAD processing.
+  - Malformed, unsupported, or resource-exhausting FEC envelopes are dropped without terminating the authenticated QUIC connection. Recovered QUIC datagrams still pass normal header protection and AEAD authentication.
+  - `FecMode::Zero` remains a raw ownership-preserving passthrough, allowing the QUIC core to decrypt and remove header protection in place without an extra copy.
 
 - Semantics & Safety
-  - `base_id` stabilizes window alignment across ends; `coeff_len` encodes bytes (GF-specific width must be respected by producers/consumers).
-  - All buffers are owned and returned to the pool on drop; the transport avoids moving out of pooled buffers in hot paths (borrow-safe).
+  - `epoch`, `window`, `sequence`, `source_count`, `total_count`, `interleave_depth`, `block_index`, and `repair_index` fully define decoder ownership and deterministic repair reconstruction.
+  - All payload and coefficient buffers are bounded by the `MemoryPool` block size and returned to the pool on drop.
+  - The retained `FecPacket::to_stream_raw()` / `from_stream_raw()` format is a legacy internal compatibility/test surface and is not used by Core transport framing.
+
+Performance evidence on Apple Silicon for the product-window repair burst: optimized single-repair GF4 k=15 reaches about `6.69 us` median and `199.45 MiB/s`, versus the measured GF8 k=16 baseline at about `11.67 us` and `114.44 MiB/s`. The exact one-repair policy improves its preceding two-repair GF4 result by about 22% in median time. The v1 envelope itself measures about `29.73 ns` to write and `12.83 ns` to parse at a 1,400-byte outer MTU; deterministic GF8 k=16 row derivation measures about `22.75 ns`.
 
 ### Code Layout
 QuicFuscate uses a consolidated Rust layout that keeps hot paths explicit and auditable while optimizing safety, performance, and maintainability.
@@ -1583,7 +1587,8 @@ let text = telemetry::export_telemetry_text();
 - `src/accelerate.rs`
   - Thin re-export of `src/optimize/*` (transport_io, random, iter, sort, string, compress, brain, stealth, transport, memory). Implementations and telemetry live in optimize modules; accelerate paths remain stable.
 - `src/fec/`
-  - RLNC/Streaming encoders/decoders using `simd::galois` (GFNI/AVX2/NEON/SVE2/SSSE3)
+  - Versioned active-1-RTT framing in `wire.rs`; bounded receiver-owned epoch/window state and deterministic repair reconstruction
+  - RLNC/Streaming encoders/decoders using scalar/AVX2/NEON/SVE2/SSSE3 kernels; GF4 uses a fused multiply-XOR path and GF16 uses carryless polynomial multiplication
   - Adaptive decoder policy: Gaussian elimination for small systems (<32 equations), Wiedemann for larger sparse systems with Gauss fallback
   - Wiedemann/Berlekamp-Massey and bitsliced GF multiplication on ARM NEON are always available (feature `internal_wiedemann` enables Wiedemann test coverage); Berlekamp-Massey has a VL-aware SVE2 path (`FEC_BERLEKAMP_SVE2_OPS` telemetry), otherwise falls back to NEON/scalar.
   - SVE2-aware matrix multiply uses real VL-SVE2 XOR-stores; SSSE3 dispatch added (`matrix_multiply_ssse3`) falling back to scalar only for `X86_P0a`.
@@ -2722,7 +2727,7 @@ The user-facing FEC contract is `auto` / `off`. Any other value is a hard error.
 **Other options mirror the client subcommand**
 
 #### Hidden Diagnostic Subcommands  
-- **`cross-fade-sim`** - cross-fade simulation for FEC mode transitions
+- **`cross-fade-sim`** - legacy command name for block-boundary FEC transition simulation
 - **`high-loss-sim`** - High packet loss simulation for testing resilience
 - **`optimize-probe`** - Internal capability probe for system diagnostics
 - **`capabilities`** - System capability detection and feature availability
@@ -3665,9 +3670,6 @@ The constructor/runtime boundary is explicit:
 - `QUICFUSCATE_FEC_FOUNTAIN_WINDOW`: integer - window size when switching to Fountain (default: `2048`).
 - `QUICFUSCATE_FEC_EXTREME_WINDOW`: integer - window size for extreme loss escalation (default: `1024`).
 - `QUICFUSCATE_FOUNTAIN_SYMBOL`: integer bytes - fountain symbol size (default: `MTU_HINT-80`, fallback `1500`, clamp `600..16384`).
-- `QUICFUSCATE_RS_LOSS`: float - loss hint for AdaptiveRS (default: `0.0`).
-- `QUICFUSCATE_RS_LATENCY_MS`: float - latency hint for AdaptiveRS (default: `5.0`).
-- `QUICFUSCATE_RS_BW_MBPS`: float - bandwidth hint for AdaptiveRS (default: `1000.0`).
 - `QUICFUSCATE_KALMAN_Q`: float - process noise override (default: `0.001`).
 - `QUICFUSCATE_KALMAN_R`: float - measurement noise override (default: `0.01`).
 - `QUICFUSCATE_PROFILE`: `mobile|server|desktop` - transport profile override for FEC observer.
@@ -3678,7 +3680,7 @@ The constructor/runtime boundary is explicit:
 Notes:
 - The runtime may set `QUICFUSCATE_FEC_STREAM_BURST`, `QUICFUSCATE_FEC_PARALLEL`, `QUICFUSCATE_WM_BITSLICE`, `QUICFUSCATE_WM_LANE_PAR`, `QUICFUSCATE_WM_LANES`, and `QUICFUSCATE_WM_U` internally during auto tuning; there is no manual override read path in the current code.
 - `QUICFUSCATE_FEC_DECODER` and `QUICFUSCATE_FEC_WIEDEMANN_K` are advanced/internal controls for diagnostics and compatibility. They do not widen the canonical product contract.
-- Fountain symbol sizing, AdaptiveRS runtime hints, and Rayon thread-pool setup now also follow explicit owner boundaries: they are snapshotted or initialized during construction instead of being repeatedly resolved inside live adaptation logic.
+- Fountain symbol sizing and Rayon thread-pool setup follow explicit owner boundaries: they are snapshotted or initialized during construction instead of being repeatedly resolved inside live adaptation logic.
 - Rayon thread-pool setup is now represented explicitly as FEC global-resource policy (`Default` or `ThreadCap(n)`) before initialization, rather than a hidden optional env parse embedded in the side effect itself.
 - Constructor and observer ambient policy is now centralized: `AdaptiveFec::new()` resolves explicit FEC ambient/runtime inputs once, stores the resulting `FecRuntimePolicy` on the instance, and reuses that same snapshot for internal runtime/transition builders; `FecTransportObserver` snapshots its profile/base-stream inputs once; its retained transport-profile heuristic is represented explicitly as observer policy (`Explicit(profile)` or `Ambient(profile)`); the remaining FEC mode-policy env overrides are read through one `FecRuntimePolicy` snapshot instead of scattered per-call environment reads.
 - Deterministic regression coverage exists for the remaining allowed ambient FEC controls: stream cadence stays stable per `AdaptiveFec` instance, `FecTransportObserver` stream policy snapshots per observer instance, decoder policy snapshots per `Decoder8` instance, and Fountain symbol size snapshots per Fountain encoder/decoder construction.
@@ -3689,7 +3691,7 @@ Notes:
 - Zero-mode receive bypasses decoder retention entirely while no transition is active, preserving unique ownership of pooled payloads for in-place QUIC processing. Recovery-capable modes still retain decoder state as required for source reconstruction.
 - Send-side hot paths should call `AdaptiveFec::on_send_into(packet, output)` with a reused output buffer. `AdaptiveFec::on_send(packet)` remains a compatibility wrapper, but `QuicFuscateConnection` and the Engine `FecCodec` use per-instance scratch vectors so clean-link sends do not allocate a fresh FEC output vector per packet.
 - Send-side repair telemetry tracks only emitted repair packets for uniqueness and order-depth diagnostics. Systematic-only sends avoid HashSet/VecDeque repair-history maintenance while `FEC_EMITTED_QUEUE` continues to report non-zero-mode output queue depth.
-- Strong/AdaptiveRS GF16 repair bursts precompute Cauchy coefficient rows per encoder. Generated repair packets still carry the same coefficient bytes (`gf16_inv(j ^ (k + repair_idx))`); the optimization removes repeated coefficient-row construction and reserves output capacity before burst emission.
+- Block repair rows are deterministic from the active codec, block width, and repair ordinal. Encoders may cache those rows internally, but the v1 transport envelope never transmits coefficient vectors.
 - Receive-side hot paths should call `AdaptiveFec::on_receive_into(packet, output)` with a reused output buffer. `AdaptiveFec::on_receive(packet)` remains a compatibility wrapper and keeps the direct zero-mode passthrough fast path, while `QuicFuscateConnection` and the Engine `FecCodec` reuse per-instance receive scratch vectors.
 
 Examples (manual tuning):
@@ -3829,7 +3831,6 @@ These env vars are only read under `#[cfg(test)]` or with the `rust-tests` featu
 - `QUICFUSCATE_MORUS` - force MORUS plan selection.
 - `QUICFUSCATE_PROFILE_OVERRIDE` - override CPU profile selection in tests.
 - `QUICFUSCATE_GF16_TEST_ITERS` - iteration count for GF16 consistency tests.
-- `QUICFUSCATE_FEC_ADAPT_RS` - toggles adaptive RS fixtures in tests; no runtime read path.
 - `QUICFUSCATE_TEST_UNSET` - used only by EnvGuard tests.
 
 ## Governance (Canonical)

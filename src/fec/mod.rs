@@ -1,6 +1,7 @@
 #![allow(clippy::module_inception)]
 #![cfg_attr(any(test, feature = "rust-tests"), allow(unused_variables))]
 
+#[cfg(test)]
 use crate::accelerate;
 use crate::brain::{FEC_INTERVAL_HINT_PKTS, FEC_REDUNDANCY_PPM};
 #[cfg(target_arch = "x86_64")]
@@ -16,6 +17,7 @@ use std::time::{Duration, Instant};
 
 // Global repair ID counter for fountain codes
 static REPAIR_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+const GF4_LIGHT_REDUNDANCY: f32 = 16.0 / 15.0;
 
 fn next_repair_id() -> u64 {
     REPAIR_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
@@ -73,9 +75,6 @@ struct FecRuntimePolicy {
     fountain_window: usize,
     extreme_window: usize,
     fountain_symbol_size: usize,
-    rs_loss_hint: f32,
-    rs_latency_ms_hint: f32,
-    rs_bw_mbps_hint: f32,
     stream_every_override: Option<usize>,
     interleave_depth_override: Option<usize>,
     partial_enabled: bool,
@@ -99,9 +98,6 @@ impl FecRuntimePolicy {
             fountain_window: env_parse::<usize>("QUICFUSCATE_FEC_FOUNTAIN_WINDOW").unwrap_or(2048),
             extreme_window: env_parse::<usize>("QUICFUSCATE_FEC_EXTREME_WINDOW").unwrap_or(1024),
             fountain_symbol_size: resolve_fountain_symbol_size(),
-            rs_loss_hint: env_parse::<f32>("QUICFUSCATE_RS_LOSS").unwrap_or(0.0),
-            rs_latency_ms_hint: env_parse::<f32>("QUICFUSCATE_RS_LATENCY_MS").unwrap_or(5.0),
-            rs_bw_mbps_hint: env_parse::<f32>("QUICFUSCATE_RS_BW_MBPS").unwrap_or(1000.0),
             stream_every_override: env_parse::<usize>("QUICFUSCATE_FEC_STREAM_EVERY")
                 .map(|value| value.max(1)),
             interleave_depth_override: env_parse::<usize>("QUICFUSCATE_FEC_INTERLEAVE_DEPTH"),
@@ -185,7 +181,7 @@ fn mode_for_target(target: FecProtectionTarget, auto_gf4: bool) -> FecMode {
     match target.family {
         FecBackendFamily::Zero => FecMode::Zero,
         FecBackendFamily::LowCostBlock => {
-            if auto_gf4 && target.effective_window <= 16 && target.redundancy <= 1.10 {
+            if auto_gf4 && target.effective_window <= 15 && target.redundancy <= 1.10 {
                 FecMode::Light
             } else {
                 FecMode::Normal
@@ -213,7 +209,7 @@ fn target_from_mode(mode: FecMode, default_window: usize) -> FecProtectionTarget
     } else {
         match mode {
             FecMode::Zero => 0,
-            FecMode::Light => 16,
+            FecMode::Light => 15,
             FecMode::Normal | FecMode::Streaming => 64,
             FecMode::Medium => 128,
             FecMode::Strong => 128,
@@ -232,7 +228,7 @@ fn target_from_mode(mode: FecMode, default_window: usize) -> FecProtectionTarget
         family: fec_backend_family(mode),
         redundancy: match mode {
             FecMode::Zero => 1.0,
-            FecMode::Light => 1.1,
+            FecMode::Light => GF4_LIGHT_REDUNDANCY,
             FecMode::Normal => 1.25,
             FecMode::Medium => 1.5,
             FecMode::Strong => 2.0,
@@ -249,18 +245,7 @@ fn target_from_mode(mode: FecMode, default_window: usize) -> FecProtectionTarget
 fn low_cost_block_uses_gf4(target: FecProtectionTarget) -> bool {
     target.family == FecBackendFamily::LowCostBlock
         && target.redundancy <= 1.10
-        && target.effective_window <= 16
-}
-
-fn heavy_block_uses_adaptive_rs(target: FecProtectionTarget) -> bool {
-    target.family == FecBackendFamily::HeavyBlock
-        && target.redundancy <= 2.0
-        && target.effective_window <= 128
-}
-
-fn adaptive_rs_uses_gf16(target: FecProtectionTarget) -> bool {
-    target.family == FecBackendFamily::HeavyBlock
-        && (target.redundancy >= 2.0 || target.effective_window > 64)
+        && target.effective_window <= 15
 }
 
 fn target_rank(target: FecProtectionTarget) -> u8 {
@@ -324,7 +309,7 @@ fn continuous_fec_target(
         FecBackendFamily::Zero => 1.0,
         FecBackendFamily::LowCostBlock => {
             if pressure.total < 0.02 {
-                1.10
+                GF4_LIGHT_REDUNDANCY
             } else {
                 1.25
             }
@@ -346,7 +331,7 @@ fn continuous_fec_target(
         FecBackendFamily::Zero => 0,
         FecBackendFamily::LowCostBlock => {
             if pressure.total < 0.02 && auto_gf4 {
-                16
+                15
             } else {
                 64
             }
@@ -1301,7 +1286,8 @@ impl FecPacket {
     }
 
     /// Copy only the payload into `buf` (no headers). This is NOT the
-    /// streaming DATAGRAM format - for transport, use `to_stream_raw()`.
+    /// Legacy streaming format retained for compatibility tests. Production
+    /// transport framing uses [`wire::write_packet`].
     pub fn to_raw(&self, buf: &mut [u8]) -> Result<usize, String> {
         if let Some(data) = self.payload_slice() {
             let len = data.len().min(buf.len());
@@ -1568,19 +1554,12 @@ impl Encoder<GF8> {
         if coeff_box.len() < self.k {
             return None;
         }
+        let block_source_count = u16::try_from(self.k).ok()?;
+        let repair_index = u16::try_from(idx).ok()?;
+        wire::WireCodec::Gf8
+            .write_repair_coefficients(block_source_count, repair_index, &mut coeff_box)
+            .ok()?;
         let wlen = self.window.len().min(self.k);
-        for j in 0..wlen {
-            // A Cauchy row is MDS while all x/y coordinates are distinct.
-            // Normal production blocks stay well below the GF(256) symbol limit.
-            let c = self.k.checked_add(idx).filter(|&y| y < 256 && j < 256).map_or_else(
-                || {
-                    1u8 + (((idx as u8).wrapping_add(1)).wrapping_mul((j as u8).wrapping_add(1))
-                        % 255)
-                },
-                |y| gf_tables::gf_inv8((j as u8) ^ (y as u8)),
-            );
-            coeff_box[j] = c;
-        }
 
         // Apply coefficients to data using optimized matrix helper
         // row is 1xK (one repair packet depends on K source packets)
@@ -1656,41 +1635,18 @@ impl Encoder<GF4> {
         // Coefficients (GF(2^4))
         // We store them as u8 (1..15)
         let mut coeff_box = pool.alloc();
+        let block_source_count = u16::try_from(self.k).ok()?;
+        let repair_index = u16::try_from(idx).ok()?;
+        wire::WireCodec::Gf4
+            .write_repair_coefficients(block_source_count, repair_index, &mut coeff_box)
+            .ok()?;
         let wlen = self.window.len().min(self.k);
-        for j in 0..wlen {
-            // Simple non-zero deterministic pattern for GF(2^4)
-            // (idx+1)*(j+1) mod 15, then +1 to be in [1..15]
-            let mut c = (idx.wrapping_add(1).wrapping_mul(j.wrapping_add(1))) as u8;
-            c %= 15;
-            c += 1;
-            coeff_box[j] = c;
-        }
-
-        // Manual row accumulation with chunking for SIMD
-        const CHUNK_SIZE: usize = 128;
 
         for (j, pkt) in self.window.iter().enumerate().take(wlen) {
             if let Some(data) = pkt.payload_slice() {
                 let len = data.len().min(max_len);
                 let c = coeff_box[j];
-
-                // Accumulate: out ^= c * data (GF4)
-                let mut i = 0;
-                while i < len {
-                    let chunk_len = (len - i).min(CHUNK_SIZE);
-                    // Stack buffer for temp result
-                    let mut tmp = [0u8; CHUNK_SIZE];
-
-                    // Multiply src * c -> tmp
-                    // Safety: gf4_mul uses SIMD/tables
-                    crate::simd::galois::gf4_mul(&data[i..i + chunk_len], c, &mut tmp[..chunk_len]);
-
-                    // XOR tmp -> out
-                    for k in 0..chunk_len {
-                        out[i + k] ^= tmp[k];
-                    }
-                    i += chunk_len;
-                }
+                crate::simd::galois::gf4_mul_xor(&data[..len], c, &mut out[..len]);
             }
         }
 
@@ -1735,45 +1691,57 @@ impl Encoder16 {
     fn prepare_coeff_rows(&mut self, repair_rows: usize) {
         let stride = 2 * self.inner.k;
         self.coeff_stride = stride;
-        if stride == 0 || repair_rows == 0 {
+        let Ok(block_source_count) = u16::try_from(self.inner.k) else {
+            self.coeff_rows.clear();
+            return;
+        };
+        if stride == 0 || repair_rows == 0 || repair_rows > u16::MAX as usize {
             self.coeff_rows.clear();
             return;
         }
         self.coeff_rows.resize(repair_rows * stride, 0);
         for idx in 0..repair_rows {
             let row = &mut self.coeff_rows[idx * stride..(idx + 1) * stride];
-            let y: u16 = (self.inner.k as u16).wrapping_add(idx as u16);
-            for j in 0..self.inner.k {
-                let c: u16 = gf_tables::gf16_inv((j as u16) ^ y);
-                let be = c.to_be_bytes();
-                row[2 * j] = be[0];
-                row[2 * j + 1] = be[1];
-            }
+            let result = wire::WireCodec::Gf16.write_repair_coefficients(
+                block_source_count,
+                idx as u16,
+                row,
+            );
+            debug_assert_eq!(result, Ok(stride));
         }
     }
 
-    fn ensure_coeff_row(&mut self, idx: usize) {
+    fn ensure_coeff_row(&mut self, idx: usize) -> bool {
         if self.coeff_stride != 2 * self.inner.k {
             self.prepare_coeff_rows(idx.saturating_add(1));
-            return;
+            return self.coeff_rows.len()
+                >= idx.saturating_add(1).saturating_mul(self.coeff_stride);
         }
         let rows = self.coeff_rows.len().checked_div(self.coeff_stride).unwrap_or(0);
         if rows <= idx {
             let old_len = self.coeff_rows.len();
             self.coeff_rows.resize((idx + 1) * self.coeff_stride, 0);
+            let Ok(block_source_count) = u16::try_from(self.inner.k) else {
+                self.coeff_rows.clear();
+                return false;
+            };
             for row_idx in rows..=idx {
+                let Ok(repair_index) = u16::try_from(row_idx) else {
+                    self.coeff_rows.clear();
+                    return false;
+                };
                 let start = row_idx * self.coeff_stride;
                 let row = &mut self.coeff_rows[start..start + self.coeff_stride];
-                let y: u16 = (self.inner.k as u16).wrapping_add(row_idx as u16);
-                for j in 0..self.inner.k {
-                    let c: u16 = gf_tables::gf16_inv((j as u16) ^ y);
-                    let be = c.to_be_bytes();
-                    row[2 * j] = be[0];
-                    row[2 * j + 1] = be[1];
-                }
+                let result = wire::WireCodec::Gf16.write_repair_coefficients(
+                    block_source_count,
+                    repair_index,
+                    row,
+                );
+                debug_assert_eq!(result, Ok(self.coeff_stride));
             }
             debug_assert_eq!(old_len % self.coeff_stride, 0);
         }
+        true
     }
 
     fn generate_repair_packet(&mut self, idx: usize, pool: &Arc<MemoryPool>) -> Option<FecPacket> {
@@ -1784,8 +1752,9 @@ impl Encoder16 {
         if max_len == 0 {
             return None;
         }
-        // Ensure even length for GF16 pairing
-        let max_len_even = if max_len % 2 == 0 { max_len } else { max_len - 1 };
+        // Pad the final GF16 word instead of truncating an odd source byte.
+        // The protected source-length prefix removes this zero padding after recovery.
+        let max_len_even = max_len.saturating_add(max_len % 2);
         if max_len_even == 0 {
             return None;
         }
@@ -1803,7 +1772,9 @@ impl Encoder16 {
         if coeff_box.len() < coeff_bytes {
             return None;
         }
-        self.ensure_coeff_row(idx);
+        if !self.ensure_coeff_row(idx) {
+            return None;
+        }
         let row_start = idx * self.coeff_stride;
         coeff_box[..coeff_bytes]
             .copy_from_slice(&self.coeff_rows[row_start..row_start + coeff_bytes]);
@@ -1838,10 +1809,10 @@ impl Encoder16 {
                                         coeff_box[2 * j],
                                         coeff_box[2 * j + 1],
                                     ]);
-                                    gf16_mul_scalar_slice_u16(
+                                    gf16_mul_scalar_slice_padded(
                                         c,
                                         &data[start..start + len],
-                                        &mut acc[..len],
+                                        &mut acc[..],
                                     );
                                 }
                             }
@@ -1865,7 +1836,7 @@ impl Encoder16 {
                         continue;
                     }
                     let c = u16::from_be_bytes([coeff_box[2 * j], coeff_box[2 * j + 1]]);
-                    gf16_mul_scalar_slice_u16(c, &data[..s_len], &mut out[..s_len]);
+                    gf16_mul_scalar_slice_padded(c, &data[..s_len], &mut out[..max_len_even]);
                 }
             }
         }
@@ -2653,26 +2624,23 @@ impl Decoder4 {
     }
 
     fn try_peel_all(&mut self) {
-        if self.equations.is_empty() {
-            return;
-        }
         let mut progress = true;
         while progress {
             progress = false;
-            let mut i = self.equations.len();
-            while i > 0 {
-                i -= 1;
-                let solved = self.try_solve_equation(i);
-                if solved {
+            let mut i = 0;
+            while i < self.equations.len() {
+                let mut equation = self.equations.remove(i);
+                if self.try_solve_equation(&mut equation) {
                     progress = true;
-                    self.equations.swap_remove(i);
+                } else {
+                    self.equations.insert(i, equation);
+                    i += 1;
                 }
             }
         }
     }
 
-    fn try_solve_equation(&mut self, eq_idx: usize) -> bool {
-        let mut eq = self.equations.swap_remove(eq_idx);
+    fn try_solve_equation(&mut self, eq: &mut Equation4) -> bool {
         let mut unknown_idx = None;
         let mut unknown_cnt = 0;
         let mut j = 0;
@@ -2689,16 +2657,7 @@ impl Decoder4 {
             if let Some((kdata, len)) = self.known.get(&pid) {
                 let sl = eq.len.min(*len);
                 if sl > 0 {
-                    let mut tmp = [0u8; 128];
-                    let mut k = 0;
-                    while k < sl {
-                        let chunk = (sl - k).min(128);
-                        crate::simd::galois::gf4_mul(&kdata[k..k + chunk], c, &mut tmp[..chunk]);
-                        for (x, val) in tmp[..chunk].iter().enumerate() {
-                            eq.data[k + x] ^= *val;
-                        }
-                        k += chunk;
-                    }
+                    crate::simd::galois::gf4_mul_xor(&kdata[..sl], c, &mut eq.data[..sl]);
                 }
                 eq.coeffs[j] = 0;
             } else {
@@ -2748,11 +2707,6 @@ impl Decoder4 {
             return true;
         }
 
-        let len_after_pop = self.equations.len();
-        self.equations.push(eq);
-        if eq_idx < len_after_pop {
-            self.equations.swap(eq_idx, len_after_pop);
-        }
         false
     }
 
@@ -2792,6 +2746,7 @@ struct Decoder16 {
 }
 
 impl Decoder16 {
+    #[cfg(test)]
     fn new(k: usize, pool: Arc<MemoryPool>) -> Self {
         Self {
             k,
@@ -2914,9 +2869,13 @@ impl Decoder16 {
             }
             let sid = self.source_id_for(eq.base_id, j);
             if let Some((ref kdata, klen)) = self.known.get(&sid) {
-                let sl = core::cmp::min(eq.len & !1, *klen & !1); // even length
-                if sl >= 2 {
-                    gf16_mul_scalar_slice_u16(*coeff, &kdata[..sl], &mut eq.data[..sl]);
+                let source_len = core::cmp::min(eq.len, *klen);
+                if source_len > 0 {
+                    gf16_mul_scalar_slice_padded(
+                        *coeff,
+                        &kdata[..source_len],
+                        &mut eq.data[..eq.len],
+                    );
                 }
                 *coeff = 0;
             }
@@ -3106,6 +3065,8 @@ impl Decoder16 {
 
 mod internal;
 
+pub mod wire;
+
 // Forward declare types - will be defined in internal module below
 
 /// Adaptive FEC controller with seamless mode transitions and burst-loss protection.
@@ -3117,9 +3078,7 @@ pub struct AdaptiveFec {
     active_mode: FecMode,
     mode_manager: Arc<Mutex<internal::ModeManager>>,
     mem_pool: Arc<MemoryPool>,
-    transition_encoder: Option<Arc<Mutex<internal::InterleavedEncoder>>>,
-    transition_decoder: Option<Arc<Mutex<internal::InterleavedDecoder>>>,
-    transition_left: usize,
+    pending_target: Option<FecProtectionTarget>,
     window_complete: bool,
     stream_every: usize,
     _stream_every_base: usize,
@@ -3137,12 +3096,8 @@ pub struct AdaptiveFec {
     force_on: bool,
     simd_enabled: bool,
     simd_level: SimdLevel,
-    /// **NEW**: Seamless mode transition management
-    transition_buffer: VecDeque<FecPacket>,
     /// Reused queue for streaming repair emission to avoid per-packet allocations
     stream_repair_scratch: VecDeque<FecPacket>,
-    transition_progress: f32,  // 0.0 = old mode, 1.0 = new mode
-    cross_fade_packets: usize, // Number of packets to cross-fade over
     red_ppm_hint: u32,
     /// Interleave depth (default 4 for burst protection)
     interleave_depth: usize,
@@ -3151,9 +3106,6 @@ pub struct AdaptiveFec {
     /// Current RTT estimate in milliseconds (0 = unknown/unset).
     /// Fed by transport via `set_rtt_hint()` and used to scale `stream_every`.
     rtt_ms: u32,
-    /// Cross-fade window size in packets (default 32). During mode transitions,
-    /// both old and new repair symbols are emitted for this many packets.
-    cross_fade_window: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -3269,7 +3221,6 @@ struct FecRuntimePlan {
     interleave_depth: usize,
     partial_enabled: bool,
     runtime_policy: FecRuntimePolicy,
-    initial_cross_fade: usize,
     loss_estimator: LossEstimator,
     fountain_window: usize,
     extreme_window: usize,
@@ -3322,10 +3273,13 @@ impl FecRuntimePlan {
         let stream_every_override =
             ambient.stream_every_override.or(config.configured_stream_every);
         let stream_every = stream_every_override.unwrap_or(base_stream_every);
-        let initial_cross_fade =
-            AdaptiveFec::compute_cross_fade_target_len(initial_target, initial_target, k, k);
-        let _ = internal::ModeManager::CROSS_FADE_LEN;
-        let base_interleave_depth = if k > 16 { 4 } else { 1 };
+        let base_interleave_depth = if mode == FecMode::Fountain {
+            1
+        } else if k > 16 {
+            4
+        } else {
+            1
+        };
         let interleave_depth =
             ambient.interleave_depth_override.unwrap_or(base_interleave_depth).clamp(1, 8);
         let partial_enabled = ambient.partial_enabled;
@@ -3346,7 +3300,6 @@ impl FecRuntimePlan {
             interleave_depth,
             partial_enabled,
             runtime_policy,
-            initial_cross_fade,
             loss_estimator,
             fountain_window,
             extreme_window,
@@ -3377,7 +3330,6 @@ impl AdaptiveFec {
             interleave_depth,
             partial_enabled,
             runtime_policy,
-            initial_cross_fade,
             loss_estimator,
             fountain_window,
             extreme_window,
@@ -3407,9 +3359,7 @@ impl AdaptiveFec {
                 &runtime_policy,
             ))),
             mem_pool,
-            transition_encoder: None,
-            transition_decoder: None,
-            transition_left: 0,
+            pending_target: None,
             window_complete: false,
             stream_every,
             _stream_every_base: base_stream_every,
@@ -3427,17 +3377,12 @@ impl AdaptiveFec {
             force_on,
             simd_enabled: false,
             simd_level: SimdLevel::None,
-            transition_buffer: VecDeque::new(),
             stream_repair_scratch: VecDeque::with_capacity(16),
-            transition_progress: 1.0, // Start fully in current mode
-            cross_fade_packets: initial_cross_fade,
             red_ppm_hint: 0,
             interleave_depth,
             fountain_window,
             extreme_window,
             rtt_ms: 0,
-            cross_fade_window: env_parse::<usize>("QUICFUSCATE_FEC_CROSS_FADE_WINDOW")
-                .unwrap_or(32),
         }
     }
 
@@ -3459,20 +3404,16 @@ impl AdaptiveFec {
     /// packet emission semantics of [`AdaptiveFec::on_send`].
     pub fn on_send_into(&mut self, packet: FecPacket, output: &mut Vec<FecPacket>) {
         output.clear();
+        self.commit_pending_target_if_ready();
 
         // **ZERO-CPU FAST PATH**: Ultra-optimized pass-through
         let mode = self.active_mode;
-        if mode == FecMode::Zero && self.transition_left == 0 {
+        if mode == FecMode::Zero {
             // Absolute zero overhead: direct return without any processing
             output.push(packet);
             return;
         }
 
-        // **TRANSITION HANDLING**: Blend old and new modes during cross-fade
-        if self.transition_left > 0 {
-            self.handle_transition_packet_into(packet, output);
-            return;
-        }
         // Normal path: forward systematic and feed encoder
         output.push(packet.clone());
         let mut encoder = self.encoder.lock();
@@ -3484,7 +3425,9 @@ impl AdaptiveFec {
             let base = n.saturating_sub(k);
             if base > 0 {
                 // Extra repairs scale with redundancy hint (ppm)
-                let extra = if self.red_ppm_hint > 120_000 {
+                let extra = if mode == FecMode::Light {
+                    0
+                } else if self.red_ppm_hint > 120_000 {
                     ((self.red_ppm_hint - 120_000) / 50_000) as usize
                 } else {
                     0
@@ -3494,14 +3437,18 @@ impl AdaptiveFec {
                 if free < total {
                     output.reserve_exact(total - free);
                 }
-                for i in 0..total {
-                    let idx = i % base;
-                    if let Some(repair) = encoder.generate_repair_packet(idx, &self.mem_pool) {
+                for repair_index in 0..total {
+                    if let Some(repair) =
+                        encoder.generate_repair_packet(repair_index, &self.mem_pool)
+                    {
                         output.push(repair);
                     }
                 }
             }
             encoder.clear_window();
+            if mode == FecMode::Streaming {
+                self.stream_idx = 0;
+            }
             self.window_complete = true;
         }
         drop(encoder);
@@ -3547,7 +3494,7 @@ impl AdaptiveFec {
     /// should prefer [`AdaptiveFec::on_receive_into`] and reuse their output allocation.
     #[inline]
     pub fn on_receive(&mut self, packet: FecPacket) -> Result<Vec<FecPacket>, String> {
-        if self.active_mode == FecMode::Zero && self.transition_left == 0 {
+        if self.active_mode == FecMode::Zero {
             return Ok(vec![packet]);
         }
 
@@ -3575,7 +3522,7 @@ impl AdaptiveFec {
         // passthrough so the QUIC core can decrypt/header-unprotect in place
         // instead of falling back to a copy because the decoder retained an Arc
         // clone of the pooled buffer.
-        if self.active_mode == FecMode::Zero && self.transition_left == 0 {
+        if self.active_mode == FecMode::Zero {
             output.push(packet);
             return Ok(());
         }
@@ -3641,84 +3588,6 @@ impl AdaptiveFec {
     fn stream_repair_scratch_len(&self) -> usize {
         self.stream_repair_scratch.len()
     }
-    /// Handle packet during mode cross-fade using a caller-owned output buffer.
-    fn handle_transition_packet_into(&mut self, packet: FecPacket, output: &mut Vec<FecPacket>) {
-        // Update transition progress (smooth interpolation)
-        self.transition_progress =
-            1.0 - (self.transition_left as f32 / self.cross_fade_packets as f32);
-
-        // Process with both old and new encoders, blend outputs
-        let old_weight = 1.0 - self.transition_progress;
-        let new_weight = self.transition_progress;
-
-        // Always forward systematic packet
-        output.push(packet.clone());
-
-        // Process with current encoder (old mode)
-        if old_weight > 0.0 {
-            let mut encoder = self.encoder.lock();
-            encoder.take_packet(packet.clone());
-
-            let (k, n) = encoder.params();
-            if encoder.packets_in_window() >= k {
-                let base = n.saturating_sub(k);
-                let repair_count = (base as f32 * old_weight).ceil() as usize;
-                for i in 0..repair_count.min(base) {
-                    if let Some(repair) = encoder.generate_repair_packet(i, &self.mem_pool) {
-                        output.push(repair);
-                    }
-                }
-                if old_weight < 0.5 {
-                    // Only clear when mostly transitioned
-                    encoder.clear_window();
-                }
-            }
-        }
-
-        // Process with transition encoder (new mode)
-        if new_weight > 0.0 && self.transition_encoder.is_some() {
-            if let Some(ref transition_enc) = self.transition_encoder {
-                let mut encoder = transition_enc.lock();
-                encoder.take_packet(packet);
-
-                let (k, n) = encoder.params();
-                if encoder.packets_in_window() >= k {
-                    let base = n.saturating_sub(k);
-                    let repair_count = (base as f32 * new_weight).ceil() as usize;
-                    let repair_count = repair_count.min(base);
-                    let free = output.capacity().saturating_sub(output.len());
-                    if free < repair_count {
-                        output.reserve_exact(repair_count - free);
-                    }
-                    for i in 0..repair_count {
-                        if let Some(repair) = encoder.generate_repair_packet(i, &self.mem_pool) {
-                            output.push(repair);
-                        }
-                    }
-                    if new_weight > 0.5 {
-                        // Clear when mostly in new mode
-                        encoder.clear_window();
-                    }
-                }
-            }
-        }
-
-        // Decrement transition counter
-        self.transition_left -= 1;
-        if self.transition_left == 0 {
-            // Transition complete, swap encoders seamlessly
-            if let Some(new_encoder) = self.transition_encoder.take() {
-                self.encoder = new_encoder;
-            }
-            if let Some(new_decoder) = self.transition_decoder.take() {
-                self.decoder = new_decoder;
-            }
-            self.window_complete = false;
-            self.transition_progress = 1.0;
-            self.transition_buffer.clear();
-        }
-    }
-
     fn stream_interval_target(&self, estimated_loss: f32) -> usize {
         let target = continuous_fec_target(
             estimated_loss,
@@ -3753,57 +3622,46 @@ impl AdaptiveFec {
         }
     }
 
-    /// **GRADUAL MODE SWITCHING**: Initiate seamless transition to new controller target
+    /// Queue an adaptive target and commit it only between complete source blocks.
     fn transition_to_target(&mut self, target: FecProtectionTarget) {
-        let (current, current_window) = {
-            let mode_mgr = self.mode_manager.lock();
-            (mode_mgr.current_mode(), mode_mgr.current_window())
+        self.pending_target = Some(target);
+        self.commit_pending_target_if_ready();
+    }
+
+    fn commit_pending_target_if_ready(&mut self) {
+        let Some(target) = self.pending_target else {
+            return;
         };
-        let (resolved_mode, k, n) = internal::ModeManager::params_for_target(
-            target,
-            current_window.max(64),
-            self.runtime_policy.auto_gf4_enabled,
-        );
-        if (current == resolved_mode && current_window == k) || self.transition_left > 0 {
-            return; // Already in target mode or transitioning
+        if self.encoder.lock().packets_in_window() != 0 {
+            return;
         }
-
-        // Create new encoder/decoder for transition
-        self.transition_encoder =
-            Some(Arc::new(Mutex::new(internal::InterleavedEncoder::new_with_policy(
-                resolved_mode,
-                k,
-                n,
-                self.interleave_depth,
-                &self.runtime_policy,
-            ))));
-        self.transition_decoder =
-            Some(Arc::new(Mutex::new(internal::InterleavedDecoder::new_with_policy(
-                resolved_mode,
-                k,
-                Arc::clone(&self.mem_pool),
-                self.interleave_depth,
-                &self.runtime_policy,
-            ))));
-
-        // Start cross-fade transition
-        let old_target = target_from_mode(current, current_window);
-        self.cross_fade_packets = Self::compute_cross_fade_target_len_capped(
-            old_target,
+        let current_window = self.mode_manager.lock().current_window().max(1);
+        let (mode, k, n) = internal::ModeManager::params_for_target(
             target,
             current_window,
-            k,
-            self.cross_fade_window,
+            self.runtime_policy.auto_gf4_enabled,
         );
-        self.transition_left = self.cross_fade_packets;
-        self.transition_progress = 0.0;
-
-        // Update streaming mode flag
-        self.streaming_mode = matches!(resolved_mode, FecMode::Streaming);
-        self.active_mode = resolved_mode;
-
-        let mut mode_mgr = self.mode_manager.lock();
-        mode_mgr.force_state(resolved_mode, k);
+        let depth = if mode == FecMode::Fountain { 1 } else { self.interleave_depth.min(k.max(1)) };
+        self.encoder = Arc::new(Mutex::new(internal::InterleavedEncoder::new_with_policy(
+            mode,
+            k,
+            n,
+            depth,
+            &self.runtime_policy,
+        )));
+        self.decoder = Arc::new(Mutex::new(internal::InterleavedDecoder::new_with_policy(
+            mode,
+            k,
+            Arc::clone(&self.mem_pool),
+            depth,
+            &self.runtime_policy,
+        )));
+        self.pending_target = None;
+        self.active_mode = mode;
+        self.streaming_mode = mode == FecMode::Streaming;
+        self.window_complete = false;
+        let mut mode_manager = self.mode_manager.lock();
+        mode_manager.force_state(mode, k);
     }
 
     /// **GRADUAL MODE SWITCHING**: Initiate seamless transition to new mode
@@ -3855,60 +3713,11 @@ impl AdaptiveFec {
             log::debug!("FEC: adjusted stream interval to every {} packets", new_every);
         }
     }
-
-    fn compute_cross_fade_target_len(
-        old_target: FecProtectionTarget,
-        new_target: FecProtectionTarget,
-        old_k: usize,
-        new_k: usize,
-    ) -> usize {
-        if old_target.family == new_target.family {
-            let delta = (old_target.redundancy - new_target.redundancy).abs();
-            let base = if delta < 0.35 { 10 } else { 14 };
-            let k_factor = (old_k.abs_diff(new_k) / 32).min(6);
-            return (base + k_factor).clamp(5, 32);
-        }
-
-        let k_delta = old_k.abs_diff(new_k);
-        // Cross-fade window sizes: Fountain transitions get the largest window
-        // to avoid throughput cliffs at mode boundaries.
-        let base = match (old_target.family, new_target.family) {
-            (FecBackendFamily::Zero, FecBackendFamily::LowCostBlock)
-            | (FecBackendFamily::LowCostBlock, FecBackendFamily::Zero) => 8,
-            (FecBackendFamily::Streaming, FecBackendFamily::HeavyBlock)
-            | (FecBackendFamily::HeavyBlock, FecBackendFamily::Streaming) => 12,
-            // Fountain cross-fade: emit both block repairs AND fountain symbols
-            // for the cross-fade window to avoid throughput cliff at boundary.
-            (_, FecBackendFamily::Fountain) | (FecBackendFamily::Fountain, _) => 24,
-            (FecBackendFamily::Zero, FecBackendFamily::Streaming)
-            | (FecBackendFamily::Streaming, FecBackendFamily::Zero) => 10,
-            _ => 16,
-        };
-        let k_factor = (k_delta / 16).min(8);
-        (base + k_factor).min(40)
-    }
-
-    /// Compute cross-fade length with configurable maximum from `cross_fade_window`.
-    /// This allows operators to tune the cross-fade duration via
-    /// `QUICFUSCATE_FEC_CROSS_FADE_WINDOW` env var.
-    fn compute_cross_fade_target_len_capped(
-        old_target: FecProtectionTarget,
-        new_target: FecProtectionTarget,
-        old_k: usize,
-        new_k: usize,
-        cap: usize,
-    ) -> usize {
-        let len = Self::compute_cross_fade_target_len(old_target, new_target, old_k, new_k);
-        if cap > 0 {
-            len.min(cap)
-        } else {
-            len
-        }
-    }
 }
 
 mod fountain_codes;
 
+#[cfg(test)]
 mod adaptive_reed_solomon;
 
 mod gf_tables;
@@ -3982,6 +3791,21 @@ pub(crate) fn gf16_mul_scalar_slice_u16(coeff: u16, src: &[u8], out_xor: &mut [u
             out_xor[j + 1] = b[1];
             j += 2;
         }
+    }
+}
+
+#[inline]
+fn gf16_mul_scalar_slice_padded(coeff: u16, src: &[u8], out_xor: &mut [u8]) {
+    let source_len = src.len().min(out_xor.len());
+    let even_len = source_len & !1;
+    if even_len > 0 {
+        gf16_mul_scalar_slice_u16(coeff, &src[..even_len], &mut out_xor[..even_len]);
+    }
+    if source_len != even_len && even_len + 1 < out_xor.len() {
+        let product = gf_tables::gf16_mul(coeff, u16::from_be_bytes([src[even_len], 0]));
+        let bytes = product.to_be_bytes();
+        out_xor[even_len] ^= bytes[0];
+        out_xor[even_len + 1] ^= bytes[1];
     }
 }
 
@@ -4123,27 +3947,25 @@ unsafe fn gf16_mul_slice_sse2(coeff: u16, src: &[u16], dst: &mut [u16], len: usi
 #[target_feature(enable = "neon")]
 unsafe fn gf16_mul_slice_neon(coeff: u16, src: &[u16], dst: &mut [u16], len: usize) {
     use std::arch::aarch64::*;
-    let coeff_vec = vdupq_n_u16(coeff);
-    let poly = vdupq_n_u16(0x000b);
+    let one = vdupq_n_u16(1);
+    let poly = vdupq_n_u16(0x100b);
     let mut i = 0;
 
     while i + 8 <= len {
-        let src_vec = vld1q_u16(src.as_ptr().add(i));
+        let mut multiplicand = vld1q_u16(src.as_ptr().add(i));
+        let mut factor = vdupq_n_u16(coeff);
+        let mut product = vdupq_n_u16(0);
         let dst_vec = vld1q_u16(dst.as_ptr().add(i));
 
-        let lo = vmulq_u16(coeff_vec, src_vec);
-        let wide = vmull_u16(vget_low_u16(coeff_vec), vget_low_u16(src_vec));
-        let hi = vshrn_n_u32(wide, 16);
-        let red = vmul_u16(hi, vget_low_u16(poly));
-        let prod_low = veor_u16(vget_low_u16(lo), red);
+        for _ in 0..16 {
+            let factor_mask = vceqq_u16(vandq_u16(factor, one), one);
+            product = veorq_u16(product, vandq_u16(multiplicand, factor_mask));
+            let carry_mask = vceqq_u16(vshrq_n_u16(multiplicand, 15), one);
+            multiplicand = veorq_u16(vshlq_n_u16(multiplicand, 1), vandq_u16(poly, carry_mask));
+            factor = vshrq_n_u16(factor, 1);
+        }
 
-        let wide_hi = vmull_u16(vget_high_u16(coeff_vec), vget_high_u16(src_vec));
-        let hi_hi = vshrn_n_u32(wide_hi, 16);
-        let red_hi = vmul_u16(hi_hi, vget_high_u16(poly));
-        let prod_high = veor_u16(vget_high_u16(lo), red_hi);
-
-        let prod = vcombine_u16(prod_low, prod_high);
-        let result = veorq_u16(dst_vec, prod);
+        let result = veorq_u16(dst_vec, product);
         vst1q_u16(dst.as_mut_ptr().add(i), result);
         i += 8;
     }
@@ -4323,9 +4145,34 @@ impl AdaptiveFec {
         self.active_mode
     }
 
-    /// Returns true if a cross-fade mode transition is currently in progress.
+    pub fn wire_profile(&mut self, epoch: u32) -> Result<wire::WireProfile, wire::WireError> {
+        self.commit_pending_target_if_ready();
+        let encoder = self.encoder.lock();
+        let (source_count, configured_total_count) = encoder.params();
+        let interleave_depth = encoder.depth();
+        let block_source_count = source_count / interleave_depth.max(1);
+        let codec = wire::WireCodec::for_mode(self.active_mode, block_source_count)?;
+        let total_count = match codec {
+            wire::WireCodec::Gf4 => configured_total_count,
+            wire::WireCodec::StreamingGf8 => configured_total_count.saturating_add(source_count),
+            _ => configured_total_count.saturating_add(4),
+        };
+        let profile = wire::WireProfile {
+            epoch,
+            codec,
+            source_count: u16::try_from(source_count)
+                .map_err(|_| wire::WireError::InvalidSourceCount)?,
+            total_count: u16::try_from(total_count)
+                .map_err(|_| wire::WireError::InvalidTotalCount)?,
+            interleave_depth: u8::try_from(interleave_depth)
+                .map_err(|_| wire::WireError::InvalidInterleaveDepth)?,
+        };
+        profile.validate()
+    }
+
+    /// Returns true while a target is waiting for the current source block to complete.
     pub fn is_transitioning(&self) -> bool {
-        self.transition_left > 0
+        self.pending_target.is_some()
     }
 
     /// Force a specific FEC mode for testing (bypasses adaptive controller).
@@ -4345,8 +4192,6 @@ impl AdaptiveFec {
             (prev, cur_mode, cur_window)
         };
         // Derive target mode/window from mode manager and apply policy overrides.
-        let mut old_mode = prev.map(|(m, _)| m).unwrap_or(current_mode);
-        let mut old_window = prev.map(|(_, w)| w).unwrap_or(current_window);
         let mut switched = prev.is_some();
         let mut reason = FecSwitchReason::Adaptive;
         let desired_target = continuous_fec_target(
@@ -4366,31 +4211,19 @@ impl AdaptiveFec {
 
         // Policy guard: "FEC On" must never downshift to Zero.
         if self.force_on && desired_target.family == FecBackendFamily::Zero {
-            if !switched {
-                old_mode = current_mode;
-                old_window = current_window;
-            }
             controller_target = target_from_mode(FecMode::Normal, 64);
             reason = FecSwitchReason::ForceOnPolicy;
         }
         // Ultra-loss policy: route to Fountain for extreme loss
         if estimated_loss >= 0.25 {
-            if !switched {
-                old_mode = current_mode;
-                old_window = current_window;
-            }
             controller_target = target_from_mode(FecMode::Fountain, self.fountain_window);
             reason = FecSwitchReason::ExtremeLossPolicy;
         } else if self.loss_estimator.disturbance_detected() && estimated_loss >= 0.15 {
-            if !switched {
-                old_mode = current_mode;
-                old_window = current_window;
-            }
             controller_target = target_from_mode(FecMode::Streaming, self.extreme_window)
                 .with_window(self.extreme_window);
             reason = FecSwitchReason::DisturbancePolicy;
         }
-        let (new_mode, new_window, n) = internal::ModeManager::params_for_target(
+        let (new_mode, new_window, _n) = internal::ModeManager::params_for_target(
             controller_target,
             current_window,
             self.runtime_policy.auto_gf4_enabled,
@@ -4401,7 +4234,6 @@ impl AdaptiveFec {
         if switched {
             let mut mode_mgr = self.mode_manager.lock();
             mode_mgr.force_state(new_mode, new_window);
-            self.active_mode = new_mode;
         }
 
         // Telemetry: track mode and window
@@ -4424,61 +4256,7 @@ impl AdaptiveFec {
         }
 
         if switched {
-            let (_ok, _on) = internal::ModeManager::params_for(old_mode, old_window);
-            let old_target = target_from_mode(old_mode, old_window);
-            self.cross_fade_packets = Self::compute_cross_fade_target_len_capped(
-                old_target,
-                controller_target,
-                old_window,
-                k,
-                self.cross_fade_window,
-            );
-
-            // CRITICAL: Drain ZeroDecoder buffers BEFORE creating new decoder
-            // This ensures no packet loss during Zero->Real FEC transitions
-            let zero_buffers = if old_mode == FecMode::Zero {
-                let mut decoder = self.decoder.lock();
-                let buffers = decoder.drain_zero_buffers();
-                crate::telemetry::ZERO_MODE_UPGRADES
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                log::info!("Zero-mode upgrade: replaying {} buffered packets", buffers.len());
-                buffers
-            } else {
-                VecDeque::new()
-            };
-
-            self.transition_encoder =
-                Some(Arc::new(Mutex::new(internal::InterleavedEncoder::new_with_policy(
-                    new_mode,
-                    k,
-                    n,
-                    self.interleave_depth,
-                    &self.runtime_policy,
-                ))));
-            self.transition_decoder =
-                Some(Arc::new(Mutex::new(internal::InterleavedDecoder::new_with_policy(
-                    new_mode,
-                    k,
-                    Arc::clone(&self.mem_pool),
-                    self.interleave_depth,
-                    &self.runtime_policy,
-                ))));
-
-            // Replay ZeroDecoder buffers into the new transition decoder
-            // This preserves all in-flight packets during Zero->Real FEC upgrade
-            if !zero_buffers.is_empty() {
-                if let Some(ref trans_dec) = self.transition_decoder {
-                    let mut dec = trans_dec.lock();
-                    for pkt in zero_buffers {
-                        dec.take_packet(pkt);
-                    }
-                }
-            }
-
-            self.transition_left = self.cross_fade_packets;
-            self.window_complete = false;
-        } else {
-            // No change in mode/window; keep current encoder/decoder to preserve streaming/sliding window state.
+            self.transition_to_target(controller_target);
         }
     }
 
@@ -4671,7 +4449,7 @@ impl FecConfig {
         use FecMode::*;
         let mut m = HashMap::new();
         m.insert(Zero, 0);
-        m.insert(Light, 16);
+        m.insert(Light, 15);
         m.insert(Normal, 64);
         m.insert(Medium, 128);
         m.insert(Strong, 512);

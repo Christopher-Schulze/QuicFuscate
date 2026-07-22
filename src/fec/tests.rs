@@ -7,11 +7,10 @@ fn has_amx_runtime() -> bool {
 
 use super::test_support::*;
 use super::{
-    adaptive_rs_uses_gf16, continuous_fec_target, heavy_block_uses_adaptive_rs,
-    low_cost_block_uses_gf4, mode_for_target, target_from_mode, target_rank, AdaptiveFec,
-    CpuProfile, Decoder8, FecAmbientInputs, FecBackendFamily, FecComputeProfile, FecConfig,
-    FecMode, FecObserverPlatformHints, FecObserverProfilePolicy, FecPacket, FecRuntimePlan,
-    FecRuntimePolicy, FecTransportObserver, SimdLevel, TransportProfile,
+    continuous_fec_target, low_cost_block_uses_gf4, mode_for_target, target_from_mode, target_rank,
+    AdaptiveFec, CpuProfile, Decoder8, FecAmbientInputs, FecBackendFamily, FecComputeProfile,
+    FecConfig, FecMode, FecObserverPlatformHints, FecObserverProfilePolicy, FecPacket,
+    FecRuntimePlan, FecRuntimePolicy, FecTransportObserver, SimdLevel, TransportProfile,
 };
 #[cfg(target_arch = "x86_64")]
 use super::{matrix_multiply_avx512, matrix_multiply_scalar};
@@ -252,12 +251,13 @@ fn test_stream_interval_target_tracks_controller_target() {
 
 #[test]
 fn test_backend_family_mapping_preserves_low_cost_gf4_path() {
-    let target = target_from_mode(FecMode::Light, 16);
+    let target = target_from_mode(FecMode::Light, 15);
     assert!(low_cost_block_uses_gf4(target));
-    let encoder = super::internal::EncoderVariant::new(FecMode::Light, 16, 18);
+    assert_eq!(super::internal::ModeManager::params_for(FecMode::Light, 15), (15, 16));
+    let encoder = super::internal::EncoderVariant::new(FecMode::Light, 15, 16);
     let decoder = super::internal::DecoderVariant::new(
         FecMode::Light,
-        16,
+        15,
         Arc::clone(&crate::optimize::global_pool()),
     );
     assert!(matches!(encoder, super::internal::EncoderVariant::GF4(_)));
@@ -265,17 +265,30 @@ fn test_backend_family_mapping_preserves_low_cost_gf4_path() {
 }
 
 #[test]
-fn test_backend_family_mapping_preserves_heavy_block_adaptive_rs_path() {
-    let target = target_from_mode(FecMode::Strong, 128);
-    assert!(heavy_block_uses_adaptive_rs(target));
+fn test_light_wire_profile_advertises_exact_single_repair_capacity() {
+    let _env_lock = acquire_env_lock();
+    let _interleave = EnvGuard::set("QUICFUSCATE_FEC_INTERLEAVE", "0");
+    let config = FecConfig { initial_mode: FecMode::Light, ..FecConfig::default() };
+    let mut fec = AdaptiveFec::new(config);
+
+    let profile = fec.wire_profile(9).expect("Light wire profile");
+
+    assert_eq!(profile.codec, super::wire::WireCodec::Gf4);
+    assert_eq!(profile.source_count, 15);
+    assert_eq!(profile.total_count, 16);
+    assert_eq!(profile.interleave_depth, 1);
+}
+
+#[test]
+fn test_backend_family_mapping_uses_gf8_for_sub_256_heavy_blocks() {
     let encoder = super::internal::EncoderVariant::new(FecMode::Strong, 128, 256);
     let decoder = super::internal::DecoderVariant::new(
         FecMode::Strong,
         128,
         Arc::clone(&crate::optimize::global_pool()),
     );
-    assert_eq!(encoder.backend_kind(), "adaptive-rs");
-    assert_eq!(decoder.backend_kind(), "adaptive-rs");
+    assert_eq!(encoder.backend_kind(), "gf8");
+    assert_eq!(decoder.backend_kind(), "gf8");
 }
 
 #[test]
@@ -366,12 +379,15 @@ fn test_runtime_plan_force_on_promotes_zero_target() {
 }
 
 #[test]
-fn test_adaptive_rs_gf16_selection_comes_from_target_truth() {
-    let medium_target = target_from_mode(FecMode::Medium, 64);
-    let strong_target = target_from_mode(FecMode::Strong, 128);
-
-    assert!(!adaptive_rs_uses_gf16(medium_target));
-    assert!(adaptive_rs_uses_gf16(strong_target));
+fn test_wire_codec_selection_comes_from_block_width() {
+    assert_eq!(
+        super::wire::WireCodec::for_mode(FecMode::Strong, 128),
+        Ok(super::wire::WireCodec::Gf8)
+    );
+    assert_eq!(
+        super::wire::WireCodec::for_mode(FecMode::Ultra, 256),
+        Ok(super::wire::WireCodec::Gf16)
+    );
 }
 
 #[test]
@@ -1318,9 +1334,8 @@ fn test_transition_decoder_uses_instance_policy_snapshot() {
     let _g3 = EnvGuard::set("QUICFUSCATE_FEC_DECODER", "auto");
     fec.transition_to_mode(FecMode::Normal);
 
-    let transition_decoder =
-        fec.transition_decoder.as_ref().expect("transition decoder must exist").lock();
-    assert_eq!(transition_decoder.first_block_decoder_policy(), Some("gauss"));
+    let decoder = fec.decoder.lock();
+    assert_eq!(decoder.first_block_decoder_policy(), Some("gauss"));
 }
 
 #[test]
@@ -1334,13 +1349,45 @@ fn test_transition_fountain_uses_instance_policy_snapshot() {
     let _g3 = EnvGuard::set("QUICFUSCATE_FOUNTAIN_SYMBOL", "900");
     fec.transition_to_mode(FecMode::Fountain);
 
-    let transition_encoder =
-        fec.transition_encoder.as_ref().expect("transition encoder must exist").lock();
-    assert_eq!(transition_encoder.first_block_fountain_symbol_size(), Some(1200));
+    let encoder = fec.encoder.lock();
+    assert_eq!(encoder.first_block_fountain_symbol_size(), Some(1200));
 
-    let transition_decoder =
-        fec.transition_decoder.as_ref().expect("transition decoder must exist").lock();
-    assert_eq!(transition_decoder.first_block_fountain_symbol_size(), Some(1200));
+    let decoder = fec.decoder.lock();
+    assert_eq!(decoder.first_block_fountain_symbol_size(), Some(1200));
+}
+
+#[test]
+fn test_wire_profile_switch_commits_only_after_source_block_boundary() {
+    let pool = make_pool();
+    let mut windows = HashMap::new();
+    windows.insert(FecMode::Normal, 4);
+    let mut fec = AdaptiveFec::new(FecConfig {
+        initial_mode: FecMode::Normal,
+        window_sizes: windows,
+        ..Default::default()
+    });
+    let initial_profile = fec.wire_profile(1).expect("initial wire profile");
+    assert_eq!(initial_profile.source_count, 4);
+
+    for id in 0..2 {
+        let _ = fec.on_send(mk_src_packet(id, 64, &pool));
+    }
+    fec.transition_to_target(target_from_mode(FecMode::Strong, 8));
+    assert!(fec.is_transitioning());
+    assert_eq!(fec.current_mode(), FecMode::Normal);
+    assert_eq!(fec.wire_profile(1).expect("old wire profile"), initial_profile);
+
+    let _ = fec.on_send(mk_src_packet(2, 64, &pool));
+    let boundary_output = fec.on_send(mk_src_packet(3, 64, &pool));
+    assert!(boundary_output.iter().all(|packet| {
+        packet.is_systematic || packet.coeff_len == initial_profile.block_source_count() as usize
+    }));
+
+    let next_profile = fec.wire_profile(2).expect("next wire profile");
+    assert!(!fec.is_transitioning());
+    assert_eq!(fec.current_mode(), FecMode::Strong);
+    assert_eq!(next_profile.source_count, 8);
+    assert_eq!(next_profile.epoch, 2);
 }
 
 #[test]
@@ -1410,7 +1457,7 @@ fn test_batch_normal_par_counts() {
 }
 
 #[test]
-fn test_batch_extreme_gf16_coeff_len() {
+fn test_batch_extreme_uses_gf8_for_small_block() {
     // QUICFUSCATE_FEC_PARALLEL is read during AdaptiveFec::new
     let _env_lock = acquire_env_lock();
     let _gp = EnvGuard::set("QUICFUSCATE_FEC_PARALLEL", "0");
@@ -1438,7 +1485,7 @@ fn test_batch_extreme_gf16_coeff_len() {
     for rp in repairs {
         assert!(!rp.is_systematic);
         assert!(rp.coefficients.is_some());
-        assert_eq!(rp.coeff_len, 2 * k, "GF16 coeff len == 2*k in Extreme mode");
+        assert_eq!(rp.coeff_len, k, "GF8 coeff len == k for sub-256 Extreme blocks");
     }
 }
 

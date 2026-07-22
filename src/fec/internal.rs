@@ -7,113 +7,6 @@ pub type FountainEncoder = fountain_codes::LTEncoder;
 /// LT fountain decoder alias for internal FEC variant dispatch.
 pub type FountainDecoder = fountain_codes::LTDecoder;
 
-/// Adaptive RS wrapper: chooses between GF8 and GF16 encoders based on
-/// adaptive parameters and delegates all operations accordingly.
-struct AdaptiveEncoder {
-    rs: super::adaptive_reed_solomon::AdaptiveRSEncoder,
-    inner_gf8: Encoder<GF8>,
-    inner_gf16: Encoder16,
-    use_gf16: bool,
-    adapt_ctr: usize,
-    rs_loss_hint: f32,
-    rs_latency_ms_hint: f32,
-    rs_bw_mbps_hint: f32,
-}
-
-impl AdaptiveEncoder {
-    fn new_with_policy(
-        mode: FecMode,
-        k: usize,
-        n: usize,
-        policy: &super::FecRuntimePolicy,
-    ) -> Self {
-        let rs = super::adaptive_reed_solomon::AdaptiveRSEncoder::new(k, n);
-        let target = super::target_from_mode(mode, k);
-        let use_gf16 = super::adaptive_rs_uses_gf16(target);
-        Self {
-            rs,
-            inner_gf8: Encoder::<GF8>::new(k, n),
-            inner_gf16: Encoder16::new(k, n),
-            use_gf16,
-            adapt_ctr: 0,
-            rs_loss_hint: policy.rs_loss_hint,
-            rs_latency_ms_hint: policy.rs_latency_ms_hint,
-            rs_bw_mbps_hint: policy.rs_bw_mbps_hint,
-        }
-    }
-
-    #[inline]
-    fn packets_in_window(&self) -> usize {
-        if self.use_gf16 {
-            self.inner_gf16.packets_in_window()
-        } else {
-            self.inner_gf8.packets_in_window()
-        }
-    }
-
-    fn maybe_adapt(&mut self) {
-        self.adapt_ctr = self.adapt_ctr.wrapping_add(1);
-        if !self.adapt_ctr.is_multiple_of(32) {
-            return;
-        }
-        self.rs.adapt_parameters(self.rs_loss_hint, self.rs_latency_ms_hint, self.rs_bw_mbps_hint);
-        let (k, n, gf_size) = self.rs.current_parameters();
-        let want_gf16 = gf_size >= 65536;
-        // Reconfigure only when windows are empty to avoid state loss
-        let can_switch =
-            self.inner_gf8.packets_in_window() == 0 && self.inner_gf16.packets_in_window() == 0;
-        if can_switch {
-            if want_gf16 {
-                // Recreate encoders with new params
-                self.inner_gf16 = Encoder16::new(k, n);
-            } else {
-                self.inner_gf8 = Encoder::<GF8>::new(k, n);
-            }
-            self.use_gf16 = want_gf16;
-        }
-    }
-
-    fn take_packet(&mut self, p: FecPacket) {
-        self.maybe_adapt();
-        if self.use_gf16 {
-            self.inner_gf16.take_packet(p)
-        } else {
-            self.inner_gf8.take_packet(p)
-        }
-    }
-
-    fn generate_repair_packet(&mut self, i: usize, pool: &Arc<MemoryPool>) -> Option<FecPacket> {
-        self.maybe_adapt();
-        let t0 = std::time::Instant::now();
-        let out = if self.use_gf16 {
-            self.inner_gf16.generate_repair_packet(i, pool)
-        } else {
-            self.inner_gf8.generate_repair_packet(i, pool)
-        };
-        let dt = t0.elapsed().as_nanos() as u64;
-        crate::telemetry::RS_ENC_TIME_NS.fetch_add(dt, std::sync::atomic::Ordering::Relaxed);
-        if out.is_some() {
-            crate::telemetry::RS_REPAIR_EMITTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-        // Window/overhead snapshot
-        let (k, n, gf) = self.rs.current_parameters();
-        crate::telemetry::RS_WINDOW_K.store(k as u64, std::sync::atomic::Ordering::Relaxed);
-        crate::telemetry::RS_WINDOW_N.store(n as u64, std::sync::atomic::Ordering::Relaxed);
-        crate::telemetry::RS_GF_SIZE.store(gf as u64, std::sync::atomic::Ordering::Relaxed);
-        if k > 0 && n >= k {
-            let overhead_ppm = ((n - k) as u128) * 1_000_000u128 / (k as u128);
-            crate::telemetry::RS_OVERHEAD_PPM
-                .store(overhead_ppm as u64, std::sync::atomic::Ordering::Relaxed);
-        }
-        out
-    }
-
-    fn clear_window(&mut self) {
-        self.inner_gf8.clear_window();
-        self.inner_gf16.clear_window();
-    }
-}
-
 // ===========================================================================================
 // ULTRA-ZERO-MODE: Absolute Zero-Overhead FEC
 // ===========================================================================================
@@ -239,8 +132,6 @@ pub enum EncoderVariant {
     GF4(Encoder4),
     /// LT fountain rateless encoder for extreme loss.
     Fountain(FountainEncoder),
-    /// Adaptive RS encoder that switches between GF(2^8) and GF(2^16).
-    AdaptiveRS(AdaptiveEncoder),
 }
 
 impl EncoderVariant {
@@ -269,15 +160,15 @@ impl EncoderVariant {
             // ULTRA-ZERO-MODE: Absolute zero overhead - no repairs, no matrices
             super::FecBackendFamily::Zero => EncoderVariant::Zero(ZeroEncoder::new(k, n)),
             super::FecBackendFamily::LowCostBlock => {
-                if super::low_cost_block_uses_gf4(target) {
+                if super::low_cost_block_uses_gf4(target) && k <= 15 {
                     EncoderVariant::GF4(Encoder4::new(k, n))
                 } else {
                     EncoderVariant::GF8(Encoder::<GF8>::new(k, n))
                 }
             }
             super::FecBackendFamily::HeavyBlock => {
-                if super::heavy_block_uses_adaptive_rs(target) {
-                    EncoderVariant::AdaptiveRS(AdaptiveEncoder::new_with_policy(mode, k, n, policy))
+                if k <= 255 {
+                    EncoderVariant::GF8(Encoder::<GF8>::new(k, n))
                 } else {
                     EncoderVariant::GF16(Encoder16::new(k, n))
                 }
@@ -299,7 +190,6 @@ impl EncoderVariant {
                     e.add_source_symbol(data.to_vec());
                 }
             }
-            EncoderVariant::AdaptiveRS(a) => a.take_packet(p),
         }
     }
 
@@ -330,14 +220,13 @@ impl EncoderVariant {
                 Some(FecPacket::new(
                     symbol_id,
                     Some(pool.alloc_from_slice(&encoded_data)),
-                    enc.symbol_size(),
+                    encoded_data.len(),
                     false,
                     Some(coeff_block),
                     take * 4,
                     Arc::clone(pool),
                 ))
             }
-            EncoderVariant::AdaptiveRS(a) => a.generate_repair_packet(i, pool),
         }
     }
 
@@ -349,7 +238,6 @@ impl EncoderVariant {
             EncoderVariant::GF8(_) => "gf8",
             EncoderVariant::GF16(_) => "gf16",
             EncoderVariant::Fountain(_) => "fountain",
-            EncoderVariant::AdaptiveRS(_) => "adaptive-rs",
         }
     }
 
@@ -364,7 +252,6 @@ impl EncoderVariant {
                 // Clear source symbols for new window
                 e.clear_window();
             }
-            EncoderVariant::AdaptiveRS(a) => a.clear_window(),
         }
     }
 
@@ -376,7 +263,6 @@ impl EncoderVariant {
             EncoderVariant::GF16(e) => e.packets_in_window(),
             EncoderVariant::GF4(e) => e.packets_in_window(),
             EncoderVariant::Fountain(e) => e.packets_in_window(),
-            EncoderVariant::AdaptiveRS(a) => a.packets_in_window(),
         }
     }
 }
@@ -393,64 +279,30 @@ pub enum DecoderVariant {
     GF4(Decoder4),
     /// LT fountain rateless decoder for extreme loss recovery.
     Fountain(FountainDecoder),
-    /// Adaptive RS decoder that switches between GF(2^8) and GF(2^16).
-    AdaptiveRS(AdaptiveDecoder),
-}
-
-struct AdaptiveDecoder {
-    inner_gf8: Decoder8,
-    inner_gf16: Decoder16,
-    use_gf16: bool,
-}
-
-impl AdaptiveDecoder {
-    fn new_with_policy(
-        mode: FecMode,
-        k: usize,
-        pool: Arc<MemoryPool>,
-        policy: &super::FecRuntimePolicy,
-    ) -> Self {
-        let target = super::target_from_mode(mode, k);
-        let use_gf16 = super::adaptive_rs_uses_gf16(target);
-        Self {
-            inner_gf8: Decoder8::new_with_policy(k, Arc::clone(&pool), policy),
-            inner_gf16: Decoder16::new(k, pool),
-            use_gf16,
-        }
-    }
-    #[inline]
-    fn take_packet(&mut self, p: FecPacket) {
-        if self.use_gf16 {
-            self.inner_gf16.take_packet(p)
-        } else {
-            self.inner_gf8.take_packet(p)
-        }
-    }
-    #[inline]
-    fn get_result(&mut self) -> Option<VecDeque<FecPacket>> {
-        let t0 = std::time::Instant::now();
-        let res =
-            if self.use_gf16 { self.inner_gf16.get_result() } else { self.inner_gf8.get_result() };
-        let dt = t0.elapsed().as_nanos() as u64;
-        crate::telemetry::RS_DEC_TIME_NS.fetch_add(dt, std::sync::atomic::Ordering::Relaxed);
-        if let Some(ref r) = res {
-            crate::telemetry::RS_RECOVERED
-                .fetch_add(r.len() as u64, std::sync::atomic::Ordering::Relaxed);
-        }
-        res
-    }
-    #[inline]
-    fn get_partial_result(&mut self) -> VecDeque<FecPacket> {
-        if self.use_gf16 {
-            self.inner_gf16.get_partial_result()
-        } else {
-            self.inner_gf8.get_partial_result()
-        }
-    }
-    // is_complete removed; partial/get_result drive completion
 }
 
 impl DecoderVariant {
+    fn new_for_wire(
+        codec: wire::WireCodec,
+        k: usize,
+        pool: Arc<MemoryPool>,
+        policy: &super::FecRuntimePolicy,
+        depth: usize,
+    ) -> Self {
+        match codec {
+            wire::WireCodec::Gf4 => DecoderVariant::GF4(Decoder4::new_with_depth(k, pool, depth)),
+            wire::WireCodec::Gf8 | wire::WireCodec::StreamingGf8 => {
+                DecoderVariant::GF8(Decoder8::new_with_depth(k, pool, policy, depth))
+            }
+            wire::WireCodec::Gf16 => {
+                DecoderVariant::GF16(Decoder16::new_with_depth(k, pool, depth))
+            }
+            wire::WireCodec::Fountain => {
+                DecoderVariant::Fountain(FountainDecoder::new(k, policy.fountain_symbol_size, pool))
+            }
+        }
+    }
+
     /// Create a test decoder variant with auto-detected policy.
     #[cfg(test)]
     pub fn new(mode: FecMode, k: usize, pool: Arc<MemoryPool>) -> Self {
@@ -489,17 +341,15 @@ impl DecoderVariant {
             // ULTRA-ZERO-MODE: Absolute zero overhead - no decoding, gap detection only
             super::FecBackendFamily::Zero => DecoderVariant::Zero(ZeroDecoder::new(k, pool)),
             super::FecBackendFamily::LowCostBlock => {
-                if super::low_cost_block_uses_gf4(target) {
+                if super::low_cost_block_uses_gf4(target) && k <= 15 {
                     DecoderVariant::GF4(Decoder4::new_with_depth(k, pool, depth))
                 } else {
                     DecoderVariant::GF8(Decoder8::new_with_depth(k, pool, policy, depth))
                 }
             }
             super::FecBackendFamily::HeavyBlock => {
-                if super::heavy_block_uses_adaptive_rs(target) {
-                    DecoderVariant::AdaptiveRS(AdaptiveDecoder::new_with_policy(
-                        mode, k, pool, policy,
-                    ))
+                if k <= 255 {
+                    DecoderVariant::GF8(Decoder8::new_with_depth(k, pool, policy, depth))
                 } else {
                     DecoderVariant::GF16(Decoder16::new_with_depth(k, pool, depth))
                 }
@@ -518,24 +368,16 @@ impl DecoderVariant {
             DecoderVariant::GF16(d) => d.take_packet(p),
             DecoderVariant::GF4(d) => d.take_packet(p),
             DecoderVariant::Fountain(d) => {
-                // Add received symbol to LT decoder, use indices if available
                 if let Some(data) = p.payload_slice() {
                     let payload = data.to_vec();
-                    if let Some(ref coeffs) = p.coefficients {
-                        let mut set = std::collections::HashSet::new();
-                        let bytes = &coeffs[..p.coeff_len.min(coeffs.len())];
-                        for chunk in bytes.chunks_exact(4) {
-                            let idx = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
-                                as usize;
-                            set.insert(idx);
-                        }
-                        let _ = d.add_encoded_symbol(p.id, payload, set);
+                    if p.is_systematic {
+                        let _ = d.add_source_symbol(p.id as usize, payload);
                     } else {
-                        d.add_received_symbol(p.id, payload);
+                        let source_indices = d.source_indices(p.id);
+                        let _ = d.add_encoded_symbol(p.id, payload, source_indices);
                     }
                 }
             }
-            DecoderVariant::AdaptiveRS(d) => d.take_packet(p),
         }
     }
 
@@ -550,16 +392,15 @@ impl DecoderVariant {
                 // Run BP to completion if possible
                 let _ = d.belief_propagation_decode();
                 // Convert decoded symbols to FecPackets
-                if let Some(symbols) = d.get_decoded_symbols() {
+                if let Some(symbols) = d.get_decoded_indexed() {
                     // Telemetry: completed
                     crate::telemetry::FOUNTAIN_PROGRESS
                         .store(1_000_000, std::sync::atomic::Ordering::Relaxed);
                     let mut packets = VecDeque::new();
-                    for symbol in symbols.into_iter() {
+                    for (source_index, symbol) in symbols {
                         let pool = Arc::clone(&d.mem_pool);
-                        let new_id = next_repair_id();
                         let packet = FecPacket::new(
-                            new_id,
+                            source_index as u64,
                             Some(pool.alloc_from_slice(&symbol)),
                             symbol.len(),
                             true,
@@ -578,7 +419,6 @@ impl DecoderVariant {
                     None
                 }
             }
-            DecoderVariant::AdaptiveRS(d) => d.get_result(),
         }
     }
 
@@ -590,7 +430,6 @@ impl DecoderVariant {
             DecoderVariant::GF8(_) => "gf8",
             DecoderVariant::GF16(_) => "gf16",
             DecoderVariant::Fountain(_) => "fountain",
-            DecoderVariant::AdaptiveRS(_) => "adaptive-rs",
         }
     }
 
@@ -605,11 +444,10 @@ impl DecoderVariant {
                 let _ = d.belief_propagation_step();
                 // Return partial decoding progress
                 let mut partial = VecDeque::new();
-                for symbol in d.get_partial().into_iter() {
+                for (source_index, symbol) in d.get_partial_indexed() {
                     let pool = Arc::clone(&d.mem_pool);
-                    let id = symbol.len() as u64;
                     let packet = FecPacket::new(
-                        id,
+                        source_index as u64,
                         Some(pool.alloc_from_slice(&symbol)),
                         symbol.len(),
                         true,
@@ -625,7 +463,6 @@ impl DecoderVariant {
                     .store(prog, std::sync::atomic::Ordering::Relaxed);
                 partial
             }
-            DecoderVariant::AdaptiveRS(d) => d.get_partial_result(),
         }
     }
 
@@ -665,6 +502,9 @@ pub struct LazyDecoder {
     /// Those early repairs are not tail-loss evidence and must not wake the
     /// heavy decoder unless a real sequence gap exists.
     streaming_mode: bool,
+    /// Wire v1 pre-filters clean streaming coverage. Repairs reaching this
+    /// decoder are therefore explicit loss evidence.
+    wire_streaming_loss_signaled: bool,
     /// Telemetry: repairs skipped (no loss)
     repairs_skipped: u64,
     /// A repair was flushed into the heavy decoder and should trigger a full
@@ -677,6 +517,31 @@ pub struct LazyDecoder {
 }
 
 impl LazyDecoder {
+    fn new_for_wire(
+        codec: wire::WireCodec,
+        k: usize,
+        pool: Arc<MemoryPool>,
+        policy: &FecRuntimePolicy,
+        depth: usize,
+    ) -> Self {
+        Self {
+            inner: DecoderVariant::new_for_wire(codec, k, pool, policy, depth),
+            pending_sources: VecDeque::with_capacity(k.max(1)),
+            pending_repairs: VecDeque::with_capacity(32),
+            seen_seqs: std::collections::BTreeSet::new(),
+            k,
+            depth: depth.max(1),
+            expected_seq: 0,
+            max_pending: 64,
+            lazy_enabled: policy.lazy_enabled,
+            streaming_mode: codec == wire::WireCodec::StreamingGf8,
+            wire_streaming_loss_signaled: codec == wire::WireCodec::StreamingGf8,
+            repairs_skipped: 0,
+            full_recovery_pending: false,
+            partial_recovery_pending: false,
+        }
+    }
+
     /// Create a test decoder with auto-detected policy.
     #[cfg(test)]
     pub fn new(mode: FecMode, k: usize, pool: Arc<MemoryPool>) -> Self {
@@ -716,6 +581,7 @@ impl LazyDecoder {
             max_pending: 64,
             lazy_enabled,
             streaming_mode,
+            wire_streaming_loss_signaled: false,
             repairs_skipped: 0,
             full_recovery_pending: false,
             partial_recovery_pending: false,
@@ -808,6 +674,16 @@ impl LazyDecoder {
                 }
             }
         } else {
+            if self.wire_streaming_loss_signaled {
+                // The wire receiver filters clean coverage before dispatch.
+                // A streaming repair reaching this layer therefore proves a
+                // missing source inside the repair's explicit coverage span.
+                self.pending_repairs.push_back(p);
+                if self.flush_to_decoder() {
+                    self.full_recovery_pending = true;
+                }
+                return;
+            }
             // Repair packet - buffer it
             if !self.lazy_enabled {
                 self.inner.take_packet(p);
@@ -880,15 +756,6 @@ impl LazyDecoder {
         let result = self.inner.get_partial_result();
         self.partial_recovery_pending = false;
         result
-    }
-
-    /// Drain buffered packets from ZeroDecoder for seamless mode transition.
-    /// Returns packets to be replayed into the new decoder after mode switch.
-    pub fn drain_zero_buffers(&mut self) -> VecDeque<FecPacket> {
-        match &mut self.inner {
-            DecoderVariant::Zero(z) => z.get_partial_result(),
-            _ => VecDeque::new(),
-        }
     }
 
     #[cfg(test)]
@@ -977,6 +844,10 @@ impl InterleavedEncoder {
         (self.k, self.n)
     }
 
+    pub fn depth(&self) -> usize {
+        self.depth
+    }
+
     /// Distribute a source packet round-robin across interleaved blocks.
     pub fn take_packet(&mut self, p: FecPacket) {
         // Distribute packets round-robin across blocks
@@ -997,8 +868,9 @@ impl InterleavedEncoder {
             if let Some(mut repair) =
                 self.blocks[block_idx].generate_repair_packet(repair_idx, pool)
             {
-                // Tag repair with interleave block index
-                repair.seq = (repair.seq << 4) | (block_idx as u64);
+                // The high bits carry the repair ordinal. Coefficients can then
+                // be regenerated from compact wire metadata at the receiver.
+                repair.seq = ((repair_idx as u64) << 4) | (block_idx as u64);
                 return Some(repair);
             }
         }
@@ -1035,6 +907,21 @@ pub struct InterleavedDecoder {
 }
 
 impl InterleavedDecoder {
+    pub(crate) fn new_for_wire(
+        profile: wire::WireProfile,
+        pool: Arc<MemoryPool>,
+        policy: &FecRuntimePolicy,
+    ) -> Self {
+        let depth = profile.interleave_depth as usize;
+        let block_k = profile.block_source_count() as usize;
+        let blocks = (0..depth)
+            .map(|_| {
+                LazyDecoder::new_for_wire(profile.codec, block_k, Arc::clone(&pool), policy, depth)
+            })
+            .collect();
+        Self { blocks, depth }
+    }
+
     /// Create a test interleaved decoder with auto-detected policy.
     #[cfg(test)]
     pub fn new(mode: FecMode, k: usize, pool: Arc<MemoryPool>, depth: usize) -> Self {
@@ -1146,18 +1033,6 @@ impl InterleavedDecoder {
         self.blocks.get(block_idx).map(LazyDecoder::pending_repairs_len)
     }
 
-    /// Drain all buffered packets from ZeroDecoders for seamless mode transition.
-    /// Called before switching from Zero mode to preserve in-flight packets.
-    pub fn drain_zero_buffers(&mut self) -> VecDeque<FecPacket> {
-        let mut combined = VecDeque::new();
-        for block in &mut self.blocks {
-            for pkt in block.drain_zero_buffers() {
-                combined.push_back(pkt);
-            }
-        }
-        combined
-    }
-
     #[cfg(test)]
     pub fn first_block_decoder_policy(&self) -> Option<&str> {
         match &self.blocks.first()?.inner {
@@ -1189,9 +1064,6 @@ pub struct ModeManager {
 }
 
 impl ModeManager {
-    /// Default number of packets over which a mode cross-fade occurs.
-    pub const CROSS_FADE_LEN: usize = 20;
-
     /// Create a test mode manager with auto-detected policy.
     #[cfg(test)]
     pub fn with_switch_threshold(initial_mode: FecMode, switch_threshold: f32) -> Self {
@@ -1291,9 +1163,10 @@ impl ModeManager {
         // Determine target mode based on loss (Auto includes Streaming for low loss)
         // GF4 auto-selection for ultra-low loss (<2%) - 4x faster than GF8
         let auto_gf4 = self.auto_gf4_enabled;
-        // CONSOLIDATED AUTO-SWITCH: 6 logical modes
-        // Zero (<0.1%) -> Light (0.1-2%) -> Normal (2-10%) -> Strong (10-25%) -> Extreme (25-50%) -> Fountain (>50%)
-        // Streaming/Medium/Ultra enum variants are valid but not auto-selected by the controller
+        // Consolidated auto cascade: Zero below 0.1%, Light below 2%, Normal below
+        // 10%, Strong below 22%, Extreme below 25%, then Fountain rescue. Streaming
+        // replaces the block tier for measured burst loss. Medium/Ultra remain valid
+        // explicit modes but are not selected by the automatic controller.
         let current_target = target_from_mode(self.current_mode, self.window_size);
         let target = Self::target_for_loss(avg_loss, auto_gf4);
         let target_mode = mode_for_target(target, auto_gf4);
@@ -1404,9 +1277,6 @@ mod tests {
             fountain_window: 2048,
             extreme_window: 1024,
             fountain_symbol_size: 1500,
-            rs_loss_hint: 0.0,
-            rs_latency_ms_hint: 5.0,
-            rs_bw_mbps_hint: 1000.0,
             stream_every_override: None,
             interleave_depth_override: None,
             partial_enabled: true,
@@ -1769,35 +1639,49 @@ mod tests {
     }
 
     #[test]
-    fn test_lazy_decoder_streaming_repair_before_block_end_stays_lazy() {
+    fn test_lazy_decoder_streaming_repair_requests_immediate_recovery() {
         let pool = make_pool();
         let mut policy = test_policy();
         policy.lazy_enabled = true;
 
-        let mut dec = LazyDecoder::new_with_policy(FecMode::Streaming, 4, pool.clone(), &policy);
+        let profile = wire::WireProfile {
+            epoch: 1,
+            codec: wire::WireCodec::StreamingGf8,
+            source_count: 4,
+            total_count: 8,
+            interleave_depth: 1,
+        };
+        let mut dec = LazyDecoder::new_for_wire(
+            profile.codec,
+            profile.block_source_count() as usize,
+            pool.clone(),
+            &policy,
+            profile.interleave_depth as usize,
+        );
 
-        for seq in 1..=2u64 {
+        {
+            let seq = 0_u64;
             let mut src = mk_src_packet(seq, 100, &pool);
             src.is_systematic = true;
             src.seq = seq;
             dec.take_packet(src);
         }
-        assert_eq!(dec.pending_sources_len(), 2);
+        assert_eq!(dec.pending_sources_len(), 1);
 
-        let mut repair = mk_src_packet(100, 50, &pool);
+        let mut repair = mk_src_packet(1, 50, &pool);
         repair.is_systematic = false;
-        repair.seq = 100;
+        repair.seq = 0;
         dec.take_packet(repair);
 
-        assert_eq!(dec.pending_repairs_len(), 1);
-        assert_eq!(dec.pending_sources_len(), 2);
+        assert_eq!(dec.pending_repairs_len(), 0);
+        assert_eq!(dec.pending_sources_len(), 0);
         assert!(
-            !dec.full_recovery_pending(),
-            "streaming repairs are emitted before block end and must not look like tail loss"
+            dec.full_recovery_pending(),
+            "wire-filtered streaming repair must request immediate recovery"
         );
         assert!(
-            !dec.recovery_needed(),
-            "clean streaming repair before any gap must keep the lazy decoder asleep"
+            dec.recovery_needed(),
+            "streaming loss evidence must wake the decoder without waiting for block end"
         );
     }
 

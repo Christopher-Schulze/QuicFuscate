@@ -1064,6 +1064,20 @@ mod tests {
             Err(ConnectionError::AeadLimitReached)
         );
     }
+
+    #[test]
+    fn pending_handshake_send_tracks_only_unsent_handshake_flights() {
+        let mut crypto = CryptoContext::default();
+        assert!(!crypto.has_pending_handshake_send());
+
+        crypto.crypto_handshake.send(b"client-finished");
+        assert!(crypto.has_pending_handshake_send());
+
+        let (_, bytes) =
+            crypto.crypto_handshake.next_crypto_frame(usize::MAX).expect("queued handshake flight");
+        assert_eq!(bytes, b"client-finished");
+        assert!(!crypto.has_pending_handshake_send());
+    }
 }
 
 /// Applies header protection to an outgoing packet (masks first byte and PN).
@@ -1512,6 +1526,11 @@ impl CryptoStream {
         Some((offset, data))
     }
 
+    /// Returns true while unsent CRYPTO bytes remain at this encryption level.
+    pub fn has_pending_send(&self) -> bool {
+        !self.send_buf.is_empty()
+    }
+
     /// Receive a CRYPTO frame (may be out of order)
     pub fn recv(&mut self, offset: u64, data: Vec<u8>) -> Result<(), ConnectionError> {
         if offset + data.len() as u64 > self.recv_max + 65536 {
@@ -1771,6 +1790,11 @@ pub struct CryptoContext {
 }
 
 impl CryptoContext {
+    /// Returns true while an Initial or Handshake flight still needs transmission.
+    pub fn has_pending_handshake_send(&self) -> bool {
+        self.crypto_initial.has_pending_send() || self.crypto_handshake.has_pending_send()
+    }
+
     /// Installs 0-RTT read and write keys from the given TLS secrets.
     pub fn install_0rtt_keys(&mut self, read_secret: &[u8], write_secret: &[u8]) {
         self.zero_rtt_enabled = true;

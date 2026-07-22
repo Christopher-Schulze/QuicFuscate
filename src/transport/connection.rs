@@ -2281,10 +2281,24 @@ impl Connection {
         &mut self,
         out: &mut [u8],
     ) -> Result<(usize, SendInfo), crate::error::ConnectionError> {
+        self.send_with_datagram_overhead(out, 0)
+    }
+
+    /// Generates an outgoing packet while reserving bytes for an outer datagram
+    /// envelope. Non-zero overhead is valid only after the QUIC handshake.
+    #[inline(always)]
+    pub fn send_with_datagram_overhead(
+        &mut self,
+        out: &mut [u8],
+        datagram_overhead: usize,
+    ) -> Result<(usize, SendInfo), crate::error::ConnectionError> {
         use crate::error::ConnectionError;
         use udpfast::unlikely;
         if unlikely(out.len() < MIN_CLIENT_INITIAL_LEN) {
             return Err(ConnectionError::BufferTooShort);
+        }
+        if unlikely(datagram_overhead != 0 && !self.post_handshake_datagram_ready()?) {
+            return Err(ConnectionError::InvalidState);
         }
         // Never emit a QUIC packet larger than the negotiated max UDP payload size.
         // The caller's buffer may be larger than the path MTU (e.g. a pooled 2 KiB block),
@@ -2297,10 +2311,14 @@ impl Connection {
         // than the configured max. Probe packets are sized separately below.
         let now = Instant::now();
         let pmtu = self.pmtu.effective_mtu();
-        let mtu_cap = out
+        let outer_mtu_cap = out
             .len()
             .min(self.dgram_send_max_size.max(MIN_CLIENT_INITIAL_LEN))
             .min(pmtu.max(MIN_CLIENT_INITIAL_LEN));
+        let mtu_cap = outer_mtu_cap.saturating_sub(datagram_overhead);
+        if unlikely(mtu_cap == 0) {
+            return Err(ConnectionError::BufferTooShort);
+        }
         let out = &mut out[..mtu_cap];
         // Black-hole detection: if no ACKs have arrived for an extended period,
         // reset the PMTU to the minimum and let the probe loop re-discover.
@@ -3136,6 +3154,19 @@ impl Connection {
                 .as_ref()
                 .map(|provider| provider.handshake_complete())
                 .unwrap_or(true)
+    }
+
+    /// Returns true only when an outer data-plane envelope cannot capture a
+    /// pending Initial or Handshake packet.
+    pub fn post_handshake_datagram_ready(&mut self) -> Result<bool, crate::error::ConnectionError> {
+        if let Some(provider) = &mut self.tls_provider {
+            provider.poll_secrets_and_install(&self.crypto)?;
+        }
+        self.refresh_short_header_tag_reserve();
+        if !self.is_established() {
+            return Ok(false);
+        }
+        Ok(!self.crypto.read().has_pending_handshake_send())
     }
 
     /// Returns true if the connection is closed
@@ -4389,6 +4420,21 @@ mod tests {
         assert!(!c.is_established(), "fresh connection must not be established");
         assert!(!c.is_closed(), "fresh connection must not be closed");
         assert!(!c.is_draining, "fresh connection must not be draining");
+    }
+
+    #[test]
+    fn post_handshake_envelope_waits_for_pending_handshake_flight() {
+        let mut c = make_conn();
+        c.is_established = true;
+        c.crypto.write().crypto_handshake.send(b"client-finished");
+
+        assert!(!c.post_handshake_datagram_ready().expect("readiness probe"));
+
+        let (_, flight) = c
+            .next_crypto_frame(crate::qftls::Level::Handshake, usize::MAX)
+            .expect("pending handshake flight");
+        assert_eq!(flight, b"client-finished");
+        assert!(c.post_handshake_datagram_ready().expect("readiness probe"));
     }
 
     #[test]

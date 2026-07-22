@@ -139,7 +139,7 @@ fn test_fec_memory_scales_with_load_not_unbounded() {
     let delta = mem_after.saturating_sub(mem_baseline);
     // Normal mode k=64: decoder holds up to k=64 source packets per recovery
     // block. 5k packets / 64 = ~79 blocks, each holding up to 64 buffers.
-    // Allow generous headroom for encoder repair queues and cross-fade buffers.
+    // Allow generous headroom for encoder repair queues and retained decoder state.
     assert!(
         delta < 10_000,
         "Normal mode memory delta unbounded: {} blocks (baseline={}, after={})",
@@ -164,15 +164,14 @@ fn test_fec_buffer_recycling_rate() {
     let mut receiver = AdaptiveFec::new(config);
 
     // Feed 5k packets through on_send + on_receive cycle
-    // Note: on_receive has a known swap_remove bug when processing repair
-    // packets in certain modes. We only feed systematic packets to avoid
-    // triggering it. This is tracked as a separate TODO.
+    // Feed only systematic packets so this test isolates source-buffer ownership
+    // and pool recycling rather than recovery behavior.
     let mut max_in_use: u64 = 0;
     for id in 0..5_000u64 {
         let pkt = mk_src_packet(id, 1400, &pool);
         let output = sender.on_send(pkt);
         for p in output {
-            // Only feed systematic packets to receiver (avoid swap_remove bug)
+            // Keep this test scoped to systematic source-buffer ownership.
             if p.is_systematic {
                 let _ = receiver.on_receive(p);
             }
@@ -184,7 +183,7 @@ fn test_fec_buffer_recycling_rate() {
     }
 
     // pool in_use should stay bounded - the pool recycles buffers.
-    // Light mode k=16: decoder holds up to k=16 source packets per block.
+    // Light mode k=15: decoder holds up to k=15 source packets per block.
     // Allow generous headroom.
     assert!(
         max_in_use < 10_000,
@@ -232,7 +231,7 @@ fn test_fec_mode_transition_no_memory_leak() {
     let mem_after = MEM_POOL_IN_USE.load(Ordering::Relaxed);
 
     // Memory delta should be small (no leak from transition_encoder/decoder)
-    // Allow generous headroom for cross-fade buffers
+    // Allow generous headroom for retained transition decoder state.
     let delta = mem_after.saturating_sub(mem_before);
     assert!(
         delta < 500,

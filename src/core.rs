@@ -13,6 +13,7 @@ use crate::accelerate::transport::{self as transport_accel, CongestionSample};
 use crate::brain::DeepIntegrationOrchestrator;
 use crate::brain::{CombinedObserver, StealthBrain};
 use crate::crypto::CryptoManager;
+use crate::fec::wire::{self, WireFecReceiver, WirePacketMeta, WireProfile};
 use crate::fec::{AdaptiveFec, FecConfig, FecPacket, FecTransportObserver};
 use crate::optimize::{AlignedBox, MemoryPool, OptimizationManager, OptimizeConfig};
 use crate::stealth::{StealthConfig, StealthManager, StealthMode};
@@ -38,6 +39,26 @@ struct Http3PollBindings {
     masque_control_cb: Option<CapsuleHandler>,
     masque_cb: Option<CapsuleHandler>,
     memory_pool: Arc<crate::optimize::MemoryPool>,
+}
+
+struct OutgoingFecPacket {
+    packet: FecPacket,
+    wire_meta: Option<WirePacketMeta>,
+}
+
+impl OutgoingFecPacket {
+    fn write_to(&self, buf: &mut [u8]) -> Result<usize, String> {
+        let Some(meta) = self.wire_meta else {
+            return self.packet.to_raw(buf);
+        };
+        let symbol = self.packet.payload_slice().ok_or_else(|| "No data available".to_string())?;
+        let payload = if meta.systematic {
+            wire::source_symbol_payload(symbol).map_err(|error| error.to_string())?
+        } else {
+            symbol
+        };
+        wire::write_packet(meta, payload, buf).map_err(|error| error.to_string())
+    }
 }
 
 /// Parameters for creating a new QuicFuscateConnection.
@@ -82,13 +103,19 @@ pub struct QuicFuscateConnection {
     // State
     stats: ConnectionStats,
     packet_id_counter: u64,
-    // The outgoing buffer now holds fully formed FEC packets, ready for direct sending.
-    // This eliminates the serialization overhead entirely.
-    outgoing_fec_packets: VecDeque<FecPacket>,
+    // Each queued packet retains the wire contract selected when it was encoded.
+    // Mode transitions can occur before the queue drains, so framing cannot be
+    // derived at dequeue time.
+    outgoing_fec_packets: VecDeque<OutgoingFecPacket>,
     // Reused FEC emission scratch to avoid allocating a Vec for every packet on the send path.
     fec_send_scratch: Vec<FecPacket>,
     // Reused FEC recovery scratch to avoid allocating a Vec for every packet on the receive path.
     fec_receive_scratch: Vec<FecPacket>,
+    fec_wire_receiver: WireFecReceiver,
+    fec_tx_profile: Option<WireProfile>,
+    fec_tx_epoch: u32,
+    fec_tx_sequence: u64,
+    fec_tx_active: bool,
     h3_conn: Option<crate::transport::h3::Connection>,
     last_telemetry: std::time::Instant,
     // Observer for transport telemetry -> FEC/ACK policy coupling.
@@ -288,6 +315,7 @@ impl QuicFuscateConnection {
 
     fn new(params: ConnectionParams) -> Self {
         let obs = FecTransportObserver::new();
+        let fec_mem_pool = params.optimization_manager.memory_pool().clone();
         let mut s = Self {
             conn: params.conn,
             peer_addr: params.peer_addr,
@@ -302,6 +330,11 @@ impl QuicFuscateConnection {
             outgoing_fec_packets: VecDeque::new(),
             fec_send_scratch: Vec::with_capacity(1),
             fec_receive_scratch: Vec::with_capacity(1),
+            fec_wire_receiver: WireFecReceiver::new(fec_mem_pool),
+            fec_tx_profile: None,
+            fec_tx_epoch: 0,
+            fec_tx_sequence: 0,
+            fec_tx_active: false,
             h3_conn: None,
             last_telemetry: std::time::Instant::now(),
             transport_observer: obs.clone(),
@@ -959,25 +992,29 @@ impl QuicFuscateConnection {
             return Err(crate::error::ConnectionError::BufferTooShort);
         }
 
-        let fec_packet = FecPacket::new(
-            self.packet_id_counter,
-            Some(block),
-            len,
-            true,
-            None,
-            0,
-            self.optimization_manager.memory_pool().clone(),
-        );
-        // Ensure unique IDs for subsequent packets
-        self.packet_id_counter = self.packet_id_counter.wrapping_add(1);
-
+        let wire_framed = wire::is_framed(&block[..len]);
         let mut recovered_packets = std::mem::take(&mut self.fec_receive_scratch);
-        if let Err(e) = self.fec.on_receive_into(fec_packet, &mut recovered_packets) {
-            self.fec_receive_scratch = recovered_packets;
-            return Err(crate::error::ConnectionError::Transport(format!(
-                "FEC decoding failed: {}",
-                e
-            )));
+        if wire_framed {
+            let result = self.fec_wire_receiver.receive(&block[..len], &mut recovered_packets);
+            self.optimization_manager.free_block(block);
+            if let Err(error) = result {
+                debug!("dropping malformed or unsupported FEC wire datagram: {error}");
+                self.fec_receive_scratch = recovered_packets;
+                return Ok(len);
+            }
+        } else {
+            let packet = FecPacket::new(
+                self.packet_id_counter,
+                Some(block),
+                len,
+                true,
+                None,
+                0,
+                self.optimization_manager.memory_pool().clone(),
+            );
+            self.packet_id_counter = self.packet_id_counter.wrapping_add(1);
+            recovered_packets.clear();
+            recovered_packets.push(packet);
         }
 
         let mut terminal_receive_error = None;
@@ -1052,14 +1089,49 @@ impl QuicFuscateConnection {
         self.optimization_manager.memory_pool().clone()
     }
 
+    fn prepare_fec_wire_profile(
+        &mut self,
+    ) -> Result<Option<WireProfile>, crate::error::ConnectionError> {
+        let candidate = match self.fec.wire_profile(self.fec_tx_epoch.max(1)) {
+            Ok(profile) => profile,
+            Err(wire::WireError::ZeroModeMustRemainRaw) => {
+                self.fec_tx_active = false;
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(crate::error::ConnectionError::Transport(error.to_string()));
+            }
+        };
+        let shape_changed = self.fec_tx_profile.is_some_and(|previous| {
+            previous.codec != candidate.codec
+                || previous.source_count != candidate.source_count
+                || previous.total_count != candidate.total_count
+                || previous.interleave_depth != candidate.interleave_depth
+        });
+        let window_space_exhausted =
+            self.fec_tx_sequence / candidate.source_count as u64 > u32::MAX as u64;
+        if !self.fec_tx_active || shape_changed || window_space_exhausted {
+            self.fec_tx_epoch = self.fec_tx_epoch.wrapping_add(1).max(1);
+            self.fec_tx_sequence = 0;
+        }
+        self.fec_tx_active = true;
+        let profile = WireProfile { epoch: self.fec_tx_epoch, ..candidate };
+        self.fec_tx_profile = Some(profile);
+        Ok(Some(profile))
+    }
+
     /// Prepares QUIC packets for sending, wraps them in FEC, and buffers them.
     /// This has been completely refactored to eliminate serialization and copies.
     pub fn send(&mut self, buf: &mut [u8]) -> Result<usize, crate::error::ConnectionError> {
         let now = Instant::now();
-        let established = self.conn.is_established();
         self.conn
             .do_tls_handshake(self.tls_ch_override_template.as_deref())
             .map_err(|e| crate::error::ConnectionError::Transport(e.to_string()))?;
+        let established = self.conn.is_established();
+        let fec_wire_ready = self
+            .conn
+            .post_handshake_datagram_ready()
+            .map_err(|error| crate::error::ConnectionError::Transport(error.to_string()))?;
 
         // --- REALITY FALLBACK RESPONSE POLLING ---
         // Check if there are any responses from upstream to send back (bypass stealth scheduler)
@@ -1097,7 +1169,7 @@ impl QuicFuscateConnection {
             self.conn.writable_streams_count() > 0 || self.conn.dgram_send_queue_len() > 0;
         if !has_pending_app_data {
             if let Some(packet) = self.outgoing_fec_packets.pop_front() {
-                let len = packet.to_raw(buf)?;
+                let len = packet.write_to(buf)?;
                 // Drop handles pool recycling automatically.
                 return Ok(len);
             }
@@ -1121,9 +1193,22 @@ impl QuicFuscateConnection {
             let _ = self.conn.stream_send(StealthManager::COVER_STREAM_ID, &data, false);
         }
 
+        let wire_profile = if fec_wire_ready { self.prepare_fec_wire_profile()? } else { None };
+
         // Otherwise, generate a new QUIC packet using a pooled buffer.
         let mut send_buffer = self.optimization_manager.alloc_block();
-        let (write, _send_info) = match self.conn.send(&mut send_buffer) {
+        let send_result = if wire_profile.is_some() {
+            if send_buffer.len() <= wire::SOURCE_LENGTH_LEN {
+                return Err(crate::error::ConnectionError::BufferTooShort);
+            }
+            self.conn.send_with_datagram_overhead(
+                &mut send_buffer[wire::SOURCE_LENGTH_LEN..],
+                wire::MAX_DATAGRAM_OVERHEAD,
+            )
+        } else {
+            self.conn.send(&mut send_buffer)
+        };
+        let (write, _send_info) = match send_result {
             Ok(v) => v,
             Err(crate::error::ConnectionError::Done) => {
                 // No packet currently pending is a normal state for polling loops.
@@ -1153,26 +1238,78 @@ impl QuicFuscateConnection {
 
         // Obfuscate payload if enabled (includes timing/flow shaping)
         // NON-BLOCKING: If delay needed, we schedule it and yield zero bytes.
-        let delay_opt = self.stealth_manager.process_outgoing_packet(&mut send_buffer[..write]);
+        let quic_range = if wire_profile.is_some() {
+            wire::SOURCE_LENGTH_LEN..wire::SOURCE_LENGTH_LEN + write
+        } else {
+            0..write
+        };
+        let delay_opt =
+            self.stealth_manager.process_outgoing_packet(&mut send_buffer[quic_range.clone()]);
+
+        let (packet_id, fec_data_len) = if wire_profile.is_some() {
+            let source_len =
+                u16::try_from(write).map_err(|_| crate::error::ConnectionError::BufferTooShort)?;
+            send_buffer[..wire::SOURCE_LENGTH_LEN].copy_from_slice(&source_len.to_be_bytes());
+            (self.fec_tx_sequence, write + wire::SOURCE_LENGTH_LEN)
+        } else {
+            (self.packet_id_counter, write)
+        };
 
         // Create a source (systematic) FEC packet, passing ownership of the buffer.
-        let fec_packet = FecPacket::new(
-            self.packet_id_counter,
+        let mut fec_packet = FecPacket::new(
+            packet_id,
             Some(send_buffer),
-            write,
+            fec_data_len,
             true,
             None,
             0,
             // Use the same pool the buffer was allocated from to avoid cross-pool leaks
             self.optimization_manager.memory_pool().clone(),
         );
-        self.packet_id_counter += 1;
+        fec_packet.seq = packet_id;
 
-        // Pass to FEC encoder to get original + repair packets.
-        // Reuse the scratch Vec so the common Zero/no-repair path stays allocation-free.
-        self.fec.on_send_into(fec_packet, &mut self.fec_send_scratch);
-        for pkt in self.fec_send_scratch.drain(..) {
-            self.outgoing_fec_packets.push_back(pkt);
+        // Initial and Handshake datagrams must remain raw because the server parses
+        // the first Initial before a Core connection exists. FEC starts only after
+        // this endpoint has entered 1-RTT. Zero mode retains raw zero-overhead output.
+        if let Some(profile) = wire_profile {
+            let source_sequence = self.fec_tx_sequence;
+            let window = (source_sequence / profile.source_count as u64) as u32;
+            self.fec.on_send_into(fec_packet, &mut self.fec_send_scratch);
+            for packet in self.fec_send_scratch.drain(..) {
+                let (sequence, repair_index, block_index) = if packet.is_systematic {
+                    (
+                        source_sequence,
+                        wire::SYSTEMATIC_REPAIR_INDEX,
+                        (source_sequence % profile.interleave_depth as u64) as u8,
+                    )
+                } else {
+                    (
+                        packet.id,
+                        u16::try_from(packet.seq >> 4).map_err(|_| {
+                            crate::error::ConnectionError::Transport(
+                                "FEC repair ordinal exceeds wire range".to_string(),
+                            )
+                        })?,
+                        (packet.seq & 0x0F) as u8,
+                    )
+                };
+                self.outgoing_fec_packets.push_back(OutgoingFecPacket {
+                    wire_meta: Some(WirePacketMeta {
+                        profile,
+                        window,
+                        sequence,
+                        repair_index,
+                        block_index,
+                        systematic: packet.is_systematic,
+                    }),
+                    packet,
+                });
+            }
+            self.fec_tx_sequence = self.fec_tx_sequence.wrapping_add(1);
+        } else {
+            self.packet_id_counter = self.packet_id_counter.wrapping_add(1);
+            self.outgoing_fec_packets
+                .push_back(OutgoingFecPacket { packet: fec_packet, wire_meta: None });
         }
 
         // Single outbound stealth timing owner: core merges StealthManager shaping delay
@@ -1190,7 +1327,7 @@ impl QuicFuscateConnection {
 
         // Pop the first packet from the buffer to send it now.
         if let Some(packet) = self.outgoing_fec_packets.pop_front() {
-            let len = packet.to_raw(buf)?;
+            let len = packet.write_to(buf)?;
             // Drop handles pool recycling automatically.
             Ok(len)
         } else {
@@ -1616,6 +1753,22 @@ impl QuicFuscateConnection {
 mod tests {
     use super::*;
 
+    fn fec_packet(id: u64, payload: &[u8], coefficients: Option<&[u8]>) -> FecPacket {
+        let pool = crate::optimize::global_pool();
+        let data = pool.alloc_from_slice(payload);
+        let coeff_len = coefficients.map_or(0, <[u8]>::len);
+        let coeffs = coefficients.map(|values| pool.alloc_from_slice(values));
+        FecPacket::new(
+            id,
+            Some(data),
+            payload.len(),
+            coefficients.is_none(),
+            coeffs,
+            coeff_len,
+            pool,
+        )
+    }
+
     #[test]
     fn connection_stats_default_zeroed() {
         let stats = ConnectionStats::default();
@@ -1629,6 +1782,48 @@ mod tests {
         assert_eq!(stats.congestion_lost, 0);
         assert_eq!(stats.congestion_score, 0);
         assert!(stats.congestion_samples.is_empty());
+    }
+
+    #[test]
+    fn outgoing_zero_mode_packet_preserves_raw_quic_datagram() {
+        let payload = [0x40, 0x11, 0x22, 0x33];
+        let outgoing = OutgoingFecPacket { packet: fec_packet(7, &payload, None), wire_meta: None };
+        let mut wire = [0u8; 64];
+
+        let written = outgoing.write_to(&mut wire).expect("raw packet must serialize");
+
+        assert_eq!(&wire[..written], &payload);
+    }
+
+    #[test]
+    fn outgoing_repair_packet_preserves_fec_wire_metadata() {
+        let payload = [0x91, 0x82, 0x73, 0x64];
+        let coefficients = [1, 3, 5, 7];
+        let mut packet = fec_packet(43, &payload, Some(&coefficients));
+        packet.seq = 2 << 4;
+        let meta = WirePacketMeta {
+            profile: WireProfile {
+                epoch: 1,
+                codec: wire::WireCodec::Gf8,
+                source_count: 4,
+                total_count: 7,
+                interleave_depth: 1,
+            },
+            window: 10,
+            sequence: 43,
+            repair_index: 2,
+            block_index: 0,
+            systematic: false,
+        };
+        let outgoing = OutgoingFecPacket { packet, wire_meta: Some(meta) };
+        let mut wire = [0u8; 128];
+
+        let written = outgoing.write_to(&mut wire).expect("FEC packet must serialize");
+        let decoded = wire::parse_packet(&wire[..written]).expect("FEC packet must parse");
+
+        assert_eq!(written, wire::HEADER_LEN + payload.len());
+        assert_eq!(decoded.meta, meta);
+        assert_eq!(decoded.payload, payload);
     }
 
     #[test]

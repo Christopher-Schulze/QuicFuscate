@@ -1,7 +1,7 @@
 // FEC mode transition tests under active load (TODO-427).
 //
-// Verifies FEC mode transitions are seamless under real load — zero packet
-// loss, zero duplication, correct cross-fade blending, and no flapping under
+// Verifies FEC mode transitions are seamless under real load - zero packet
+// loss, zero duplication, block-boundary switching, and no flapping under
 // rapid condition changes.
 //
 // Tests:
@@ -28,7 +28,7 @@ fn run_transition_test(from_mode: FecMode, to_mode: FecMode) {
     // Phase 1: Fill window in from_mode
     let k = match from_mode {
         FecMode::Zero => 10,
-        FecMode::Light => 16,
+        FecMode::Light => 15,
         FecMode::Normal => 64,
         FecMode::Medium => 128,
         FecMode::Strong => 128,  // Reduced from 512 for speed
@@ -66,7 +66,7 @@ fn run_transition_test(from_mode: FecMode, to_mode: FecMode) {
     };
     fec.report_loss(target_loss, 100);
 
-    // Phase 3: Feed cross-fade packets during transition
+    // Phase 3: Feed packets while the block-boundary transition is pending
     for id in k as u64..(k + 64) as u64 {
         let pkt = mk_src_packet(id, 1400, &pool);
         let output = fec.on_send(pkt);

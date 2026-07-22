@@ -114,9 +114,7 @@ fn test_zero_cpu_fast_path() {
 }
 
 #[test]
-fn test_adaptive_rs_env_activation() {
-    let _env_lock = acquire_env_lock();
-    let _g = EnvGuard::set("QUICFUSCATE_FEC_ADAPT_RS", "1");
+fn test_normal_block_encoder_emits_repairs() {
     let pool = make_pool();
 
     let mut windows = HashMap::new();
@@ -126,7 +124,7 @@ fn test_adaptive_rs_env_activation() {
         FecConfig { initial_mode: FecMode::Normal, window_sizes: windows, ..Default::default() };
     let mut fec = AdaptiveFec::new(cfg);
 
-    // Verify AdaptiveRS is active by checking behavior
+    // Verify the production GF8 block encoder emits repair symbols.
     let mut q = VecDeque::new();
     for i in 0..8u64 {
         let pkt = mk_src_packet(100 + i, 100, &pool);
@@ -136,7 +134,7 @@ fn test_adaptive_rs_env_activation() {
     }
 
     let repairs = drain_repairs(&mut q);
-    assert!(!repairs.is_empty(), "AdaptiveRS should generate repairs");
+    assert!(!repairs.is_empty(), "Normal block mode should generate repairs");
     for rp in repairs {
         assert!(!rp.is_systematic);
         assert!(rp.coefficients.is_some());
@@ -144,10 +142,7 @@ fn test_adaptive_rs_env_activation() {
 }
 
 #[test]
-fn test_adaptive_rs_gf16_switch_on_high_loss() {
-    let _env_lock = acquire_env_lock();
-    let _g1 = EnvGuard::set("QUICFUSCATE_FEC_ADAPT_RS", "1");
-    let _g2 = EnvGuard::set("QUICFUSCATE_RS_LOSS", "0.6"); // High loss triggers GF16
+fn test_medium_block_encoder_emits_repairs() {
     let pool = make_pool();
 
     let mut windows = HashMap::new();
@@ -157,7 +152,7 @@ fn test_adaptive_rs_gf16_switch_on_high_loss() {
         FecConfig { initial_mode: FecMode::Medium, window_sizes: windows, ..Default::default() };
     let mut fec = AdaptiveFec::new(cfg);
 
-    // Send packets to trigger adaptation (every 32 packets)
+    // Send multiple complete source blocks.
     let mut q = VecDeque::new();
     for batch in 0..2 {
         for i in 0..32u64 {
@@ -169,18 +164,11 @@ fn test_adaptive_rs_gf16_switch_on_high_loss() {
     }
 
     let repairs = drain_repairs(&mut q);
-    // High loss should eventually trigger GF16 usage
-    // We can't directly inspect internal state, but repairs should be generated
-    assert!(!repairs.is_empty(), "High loss should generate repairs");
+    assert!(!repairs.is_empty(), "Medium block mode should generate repairs");
 }
 
 #[test]
-fn test_adaptive_rs_parameter_adaptation() {
-    let _env_lock = acquire_env_lock();
-    let _g1 = EnvGuard::set("QUICFUSCATE_FEC_ADAPT_RS", "1");
-    let _g2 = EnvGuard::set("QUICFUSCATE_RS_LOSS", "0.1");
-    let _g3 = EnvGuard::set("QUICFUSCATE_RS_LATENCY_MS", "20.0");
-    let _g4 = EnvGuard::set("QUICFUSCATE_RS_BW_MBPS", "50.0");
+fn test_strong_block_repair_structure() {
     let pool = make_pool();
 
     let mut windows = HashMap::new();
@@ -190,7 +178,7 @@ fn test_adaptive_rs_parameter_adaptation() {
         FecConfig { initial_mode: FecMode::Strong, window_sizes: windows, ..Default::default() };
     let mut fec = AdaptiveFec::new(cfg);
 
-    // Send enough packets to trigger multiple adaptations
+    // Send multiple complete source blocks.
     let mut q = VecDeque::new();
     for i in 0..64u64 {
         let pkt = mk_src_packet(200 + i, 100, &pool);
@@ -200,7 +188,7 @@ fn test_adaptive_rs_parameter_adaptation() {
     }
 
     let repairs = drain_repairs(&mut q);
-    assert!(!repairs.is_empty(), "Parameter adaptation should generate repairs");
+    assert!(!repairs.is_empty(), "Strong block mode should generate repairs");
 
     // Verify repairs have proper structure
     for rp in repairs {
@@ -211,9 +199,7 @@ fn test_adaptive_rs_parameter_adaptation() {
 }
 
 #[test]
-fn test_adaptive_rs_decoder_compatibility() {
-    let _env_lock = acquire_env_lock();
-    let _g = EnvGuard::set("QUICFUSCATE_FEC_ADAPT_RS", "1");
+fn test_normal_block_decoder_compatibility() {
     let pool = make_pool();
 
     let mut windows = HashMap::new();
@@ -266,5 +252,5 @@ fn test_adaptive_rs_decoder_compatibility() {
 
     // Verify recovery of missing packet
     let has_missing = recovered.iter().any(|p| p.id == missing_id);
-    assert!(has_missing, "AdaptiveRS decoder should recover missing packet {}", missing_id);
+    assert!(has_missing, "GF8 decoder should recover missing packet {}", missing_id);
 }

@@ -1998,31 +1998,82 @@ pub mod galois {
         gf4_mul_scalar(a, b_lo, dst)
     }
 
+    /// Multiply packed GF(2^4) nibbles and XOR the result into `dst`.
+    #[inline(always)]
+    pub fn gf4_mul_xor(a: &[u8], b: u8, dst: &mut [u8]) {
+        let features = FeatureDetector::instance();
+        let b_lo = b & 0x0F;
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            if features.has_feature(CpuFeature::AVX2) {
+                unsafe { gf4_mul_xor_avx2(a, b_lo, dst) };
+                crate::optimize::telemetry::FEC_AVX2_OPS.inc();
+                return;
+            }
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            if features.has_feature(CpuFeature::NEON) {
+                unsafe { gf4_mul_xor_neon(a, b_lo, dst) };
+                crate::optimize::telemetry::FEC_NEON_OPS.inc();
+                return;
+            }
+        }
+
+        gf4_mul_xor_scalar(a, b_lo, dst)
+    }
+
     /// Scalar GF(2^4) multiplication
     #[inline]
     fn gf4_mul_scalar(a: &[u8], b: u8, dst: &mut [u8]) {
         let len = a.len().min(dst.len());
+        let table = &GF4_MUL_TABLE[(b & 0x0F) as usize];
         for i in 0..len {
-            // Low nibble
             let a_lo = a[i] & 0x0F;
             let a_hi = (a[i] >> 4) & 0x0F;
-
-            // GF(2^4) Russian peasant multiply
-            let r_lo = gf4_mul_byte(a_lo, b);
-            let r_hi = gf4_mul_byte(a_hi, b);
-
+            let r_lo = table[a_lo as usize];
+            let r_hi = table[a_hi as usize];
             dst[i] = r_lo | (r_hi << 4);
         }
     }
 
+    #[inline]
+    fn gf4_mul_xor_scalar(a: &[u8], b: u8, dst: &mut [u8]) {
+        let len = a.len().min(dst.len());
+        let table = &GF4_MUL_TABLE[(b & 0x0F) as usize];
+        for i in 0..len {
+            let byte = a[i];
+            dst[i] ^= table[(byte & 0x0F) as usize] | (table[(byte >> 4) as usize] << 4);
+        }
+    }
+
+    const fn build_gf4_table() -> [[u8; 16]; 16] {
+        let mut table = [[0u8; 16]; 16];
+        let mut b = 0;
+        while b < 16 {
+            let mut a = 0;
+            while a < 16 {
+                table[b][a] = gf4_mul_byte_const(a as u8, b as u8);
+                a += 1;
+            }
+            b += 1;
+        }
+        table
+    }
+
+    const GF4_MUL_TABLE: [[u8; 16]; 16] = build_gf4_table();
+
     /// Single GF(2^4) byte multiply with reduction x^4+x+1
     #[inline(always)]
-    fn gf4_mul_byte(a: u8, b: u8) -> u8 {
+    const fn gf4_mul_byte_const(a: u8, b: u8) -> u8 {
         let mut result = 0u8;
         let mut aa = a & 0x0F;
         let mut bb = b & 0x0F;
 
-        for _ in 0..4 {
+        let mut bit = 0;
+        while bit < 4 {
             if bb & 1 != 0 {
                 result ^= aa;
             }
@@ -2033,6 +2084,7 @@ pub mod galois {
             }
             aa &= 0x0F;
             bb >>= 1;
+            bit += 1;
         }
         result & 0x0F
     }
@@ -2045,11 +2097,7 @@ pub mod galois {
 
         let len = a.len().min(dst.len());
 
-        // Build 16-entry lookup table for GF(2^4) multiply by b
-        let mut table = [0u8; 16];
-        for (i, slot) in table.iter_mut().enumerate() {
-            *slot = gf4_mul_byte(i as u8, b);
-        }
+        let table = &GF4_MUL_TABLE[(b & 0x0F) as usize];
         let lut = _mm256_broadcastsi128_si256(_mm_loadu_si128(table.as_ptr() as *const _));
         let mask_lo = _mm256_set1_epi8(0x0F);
 
@@ -2080,6 +2128,36 @@ pub mod galois {
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn gf4_mul_xor_avx2(a: &[u8], b: u8, dst: &mut [u8]) {
+        use std::arch::x86_64::*;
+
+        let len = a.len().min(dst.len());
+        let table = &GF4_MUL_TABLE[(b & 0x0F) as usize];
+        let lut = _mm256_broadcastsi128_si256(_mm_loadu_si128(table.as_ptr() as *const _));
+        let mask_lo = _mm256_set1_epi8(0x0F);
+        let mut i = 0;
+        while i + 32 <= len {
+            let source = _mm256_loadu_si256(a.as_ptr().add(i) as *const _);
+            let current = _mm256_loadu_si256(dst.as_ptr().add(i) as *const _);
+            let lo = _mm256_and_si256(source, mask_lo);
+            let hi = _mm256_and_si256(_mm256_srli_epi16(source, 4), mask_lo);
+            let product = _mm256_or_si256(
+                _mm256_shuffle_epi8(lut, lo),
+                _mm256_slli_epi16(_mm256_shuffle_epi8(lut, hi), 4),
+            );
+            _mm256_storeu_si256(
+                dst.as_mut_ptr().add(i) as *mut _,
+                _mm256_xor_si256(current, product),
+            );
+            i += 32;
+        }
+        if i < len {
+            gf4_mul_xor_scalar(&a[i..], b, &mut dst[i..]);
+        }
+    }
+
     /// NEON GF(2^4) multiplication
     #[cfg(target_arch = "aarch64")]
     #[target_feature(enable = "neon")]
@@ -2088,11 +2166,7 @@ pub mod galois {
 
         let len = a.len().min(dst.len());
 
-        // Build 16-entry lookup table
-        let mut table = [0u8; 16];
-        for (i, slot) in table.iter_mut().enumerate() {
-            *slot = gf4_mul_byte(i as u8, b);
-        }
+        let table = &GF4_MUL_TABLE[(b & 0x0F) as usize];
         let lut = vld1q_u8(table.as_ptr());
         let mask_lo = vdupq_n_u8(0x0F);
 
@@ -2117,6 +2191,30 @@ pub mod galois {
         // Tail
         if i < len {
             gf4_mul_scalar(&a[i..], b, &mut dst[i..]);
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "neon")]
+    unsafe fn gf4_mul_xor_neon(a: &[u8], b: u8, dst: &mut [u8]) {
+        use ::core::arch::aarch64::*;
+
+        let len = a.len().min(dst.len());
+        let table = &GF4_MUL_TABLE[(b & 0x0F) as usize];
+        let lut = vld1q_u8(table.as_ptr());
+        let mask_lo = vdupq_n_u8(0x0F);
+        let mut i = 0;
+        while i + 16 <= len {
+            let source = vld1q_u8(a.as_ptr().add(i));
+            let current = vld1q_u8(dst.as_ptr().add(i));
+            let lo = vandq_u8(source, mask_lo);
+            let hi = vandq_u8(vshrq_n_u8(source, 4), mask_lo);
+            let product = vorrq_u8(vqtbl1q_u8(lut, lo), vshlq_n_u8(vqtbl1q_u8(lut, hi), 4));
+            vst1q_u8(dst.as_mut_ptr().add(i), veorq_u8(current, product));
+            i += 16;
+        }
+        if i < len {
+            gf4_mul_xor_scalar(&a[i..], b, &mut dst[i..]);
         }
     }
 
@@ -5579,6 +5677,20 @@ mod tests_dispatched {
         galois::gf4_mul(&input, 0, &mut dst_zero);
         assert_eq!(dst_one, input, "gf4 multiply by 1 should be identity");
         assert_eq!(dst_zero, [0u8; 8], "gf4 multiply by 0 should be zero");
+    }
+
+    #[test]
+    fn gf4_mul_xor_matches_separate_multiply_and_xor() {
+        let input = [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0];
+        let initial = [0xA5, 0x5A, 0xC3, 0x3C, 0x96, 0x69, 0xF0, 0x0F];
+        let mut product = [0u8; 8];
+        let mut fused = initial;
+        galois::gf4_mul(&input, 7, &mut product);
+        galois::gf4_mul_xor(&input, 7, &mut fused);
+
+        for index in 0..initial.len() {
+            assert_eq!(fused[index], initial[index] ^ product[index]);
+        }
     }
 
     // ===================== GF(2^16) operations =====================

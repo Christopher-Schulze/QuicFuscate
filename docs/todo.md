@@ -309,8 +309,9 @@ experimental, or bound to explicit policy.
 | TODO-544 | S | P0 | Complete RFC loss detection and network proof | **OPEN** - RTT EWMA exists, but PTO is incorrect and time/RACK loss state, event-loop deadlines, BBR variance, Reno pacing, benchmarks, and netem comparisons are absent. | TODO-463, TODO-521 |
 | TODO-545 | S | P0 | Prove cipher reinstallation state safety | **OPEN** - a retained TODO-269 safety note asserts reset-before-reinstall invariants without a dedicated adversarial proof across every cipher state transition. | TODO-378, TODO-521 |
 | TODO-546 | S | P0 | Restore Windows SIMD dispatch and native core gate | **OPEN** - native Windows CI found AVX-512 Berlekamp underflow, corrupt x86 u32 sorting helpers, and stale policy expectations after the FEC polynomial defect was isolated under TODO-524. | TODO-519, TODO-521 |
+| TODO-547 | S | P0 | Restore FEC wire framing and live 1-RTT integrity | **OPEN** - the versioned, MTU-bounded, epoch-driven codec cascade is implemented locally with deterministic repair metadata, optimized GF4/GF8/GF16 selection, and Fountain reserved for rescue. Full native and Omega runtime proof remains required. | TODO-422, TODO-473, TODO-524, TODO-521 |
 
-Detail files: `docs/todo/todo-{508,509,510,511,512,513,514,515,516,517,518,519,520,521,522,523,524,525,526,527,528,529,530,531,532,533,534,535,536,537,538,539,540,541,542,543,544,545,546}-*.md`.
+Detail files: `docs/todo/todo-{508,509,510,511,512,513,514,515,516,517,518,519,520,521,522,523,524,525,526,527,528,529,530,531,532,533,534,535,536,537,538,539,540,541,542,543,544,545,546,547}-*.md`.
 
 **Closure rule:** The v0.4.0 readiness wave required TODO-508 through TODO-518 and TODO-412 to be DONE through local or Broderick evidence. TODO-519, TODO-520, and TODO-448 retain their own native and live completion evidence. Global production readiness is reopened by TODO-521 and cannot close while any legacy `DONE` acceptance item remains unclassified or any resulting production gap remains open. Documentation claims alone are never completion evidence.
 

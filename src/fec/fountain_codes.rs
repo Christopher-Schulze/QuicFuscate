@@ -2,6 +2,37 @@ use super::MemoryPool;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+const RNG_SEED: u64 = 12_345;
+
+fn deterministic_source_indices(
+    symbol_count: usize,
+    degree_dist: &[f64],
+    rng_seed: u64,
+    symbol_id: u64,
+) -> Vec<usize> {
+    if symbol_count == 0 {
+        return Vec::new();
+    }
+    let mut rng_state = rng_seed.wrapping_mul(symbol_id).wrapping_add(0x9e3779b9);
+    let random = (rng_state as f64) / (u64::MAX as f64);
+    rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
+    let degree = degree_dist
+        .iter()
+        .enumerate()
+        .find_map(|(degree, &cumulative)| (random <= cumulative).then_some(degree.max(1)))
+        .unwrap_or(symbol_count);
+    let mut selected = HashSet::with_capacity(degree);
+    let mut indices = Vec::with_capacity(degree);
+    for _ in 0..degree {
+        let index = (rng_state % symbol_count as u64) as usize;
+        rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
+        if selected.insert(index) {
+            indices.push(index);
+        }
+    }
+    indices
+}
+
 /// **LT (Luby Transform) Fountain Code** - Rateless erasure coding
 pub struct LTEncoder {
     k: usize,              // Number of source symbols
@@ -15,13 +46,7 @@ impl LTEncoder {
     /// Create a new LT encoder with `k` source symbols and fixed symbol size.
     pub fn new(k: usize, symbol_size: usize) -> Self {
         let degree_dist = Self::robust_soliton_distribution(k);
-        Self {
-            k,
-            symbols: Vec::with_capacity(k),
-            degree_dist,
-            rng_seed: 12345, // Fixed seed for reproducibility
-            symbol_size,
-        }
+        Self { k, symbols: Vec::with_capacity(k), degree_dist, rng_seed: RNG_SEED, symbol_size }
     }
 
     /// **Robust Soliton Distribution** - Optimal degree distribution for LT codes
@@ -72,41 +97,25 @@ impl LTEncoder {
             return (vec![0; self.symbol_size], Vec::new());
         }
 
-        // Deterministic random number generator based on symbol_id
-        let mut rng_state = self.rng_seed.wrapping_mul(symbol_id).wrapping_add(0x9e3779b9);
-
-        // Select degree using robust soliton distribution
-        let degree = self.select_degree(&mut rng_state);
-
-        // Select source symbols to XOR
-        let mut encoded = vec![0u8; self.symbol_size];
-        let mut selected = HashSet::new();
-        let mut used_indices = Vec::with_capacity(degree);
-
-        for _ in 0..degree {
-            let idx = (rng_state % self.symbols.len() as u64) as usize;
-            rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
-
-            if selected.insert(idx) && idx < self.symbols.len() {
-                // SIMD-accelerated XOR combine
-                super::fast_xor_inplace(&self.symbols[idx][..], &mut encoded[..]);
-                used_indices.push(idx);
-            }
+        let used_indices = self.source_indices(symbol_id);
+        let encoded_len =
+            self.symbols.iter().map(Vec::len).max().unwrap_or(0).min(self.symbol_size);
+        let mut encoded = vec![0u8; encoded_len];
+        for &index in &used_indices {
+            let source = &self.symbols[index];
+            let len = source.len().min(encoded.len());
+            super::fast_xor_inplace(&source[..len], &mut encoded[..len]);
         }
-
         (encoded, used_indices)
     }
 
-    fn select_degree(&self, rng_state: &mut u64) -> usize {
-        let r = (*rng_state as f64) / (u64::MAX as f64);
-        *rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
-
-        for (degree, &cum_prob) in self.degree_dist.iter().enumerate() {
-            if r <= cum_prob {
-                return degree.max(1);
-            }
-        }
-        self.k() // Fallback to maximum degree
+    fn source_indices(&self, symbol_id: u64) -> Vec<usize> {
+        deterministic_source_indices(
+            self.symbols.len(),
+            &self.degree_dist,
+            self.rng_seed,
+            symbol_id,
+        )
     }
 
     /// Add a source symbol to the encoder's symbol buffer.
@@ -117,6 +126,7 @@ impl LTEncoder {
     }
 
     /// Return the fixed symbol size in bytes.
+    #[cfg(test)]
     pub fn symbol_size(&self) -> usize {
         self.symbol_size
     }
@@ -137,34 +147,62 @@ impl LTEncoder {
 /// **Belief Propagation Decoder** for LT codes
 pub struct LTDecoder {
     k: usize,
+    #[cfg(test)]
     symbol_size: usize,
     received_symbols: HashMap<u64, Vec<u8>>,
     decoded_symbols: Vec<Option<Vec<u8>>>,
     symbol_degrees: HashMap<u64, HashSet<usize>>,
     degree_one_queue: Vec<u64>,
+    degree_dist: Vec<f64>,
+    rng_seed: u64,
     pub(crate) mem_pool: Arc<MemoryPool>,
 }
 
 impl LTDecoder {
     /// Return the fixed symbol size in bytes.
     #[inline]
+    #[cfg(test)]
     pub fn symbol_size(&self) -> usize {
         self.symbol_size
     }
     /// Create a new LT decoder expecting `k` source symbols.
     pub fn new(k: usize, symbol_size: usize, mem_pool: Arc<MemoryPool>) -> Self {
+        #[cfg(not(test))]
+        let _ = symbol_size;
         Self {
             k,
+            #[cfg(test)]
             symbol_size,
             received_symbols: HashMap::new(),
             decoded_symbols: vec![None; k],
             symbol_degrees: HashMap::new(),
             degree_one_queue: Vec::new(),
+            degree_dist: LTEncoder::robust_soliton_distribution(k),
+            rng_seed: RNG_SEED,
             mem_pool,
         }
     }
 
+    pub fn add_source_symbol(&mut self, source_index: usize, data: Vec<u8>) -> bool {
+        if source_index >= self.k {
+            return false;
+        }
+        if self.decoded_symbols[source_index].is_some() {
+            return false;
+        }
+        self.decoded_symbols[source_index] = Some(data.clone());
+        self.propagate_decoded_symbol(source_index, &data);
+        true
+    }
+
+    pub fn source_indices(&self, symbol_id: u64) -> HashSet<usize> {
+        deterministic_source_indices(self.k, &self.degree_dist, self.rng_seed, symbol_id)
+            .into_iter()
+            .collect()
+    }
+
     /// Add received symbol for decoding (no degree info available)
+    #[cfg(test)]
     pub fn add_received_symbol(&mut self, symbol_id: u64, data: Vec<u8>) {
         self.received_symbols.insert(symbol_id, data);
         // Without source index set we cannot peel immediately. We rely on
@@ -221,10 +259,19 @@ impl LTDecoder {
     }
 
     /// Return all successfully decoded source symbols (partial results).
+    #[cfg(test)]
     pub fn get_partial(&mut self) -> Vec<Vec<u8>> {
         // Touch symbol_size to ensure compiler understands it is used
         let _sz = self.symbol_size();
         self.decoded_symbols.iter().filter_map(|s| s.clone()).collect()
+    }
+
+    pub fn get_partial_indexed(&self) -> Vec<(usize, Vec<u8>)> {
+        self.decoded_symbols
+            .iter()
+            .enumerate()
+            .filter_map(|(index, symbol)| symbol.clone().map(|data| (index, data)))
+            .collect()
     }
 
     // Removed is_complete; use decoding_progress() or get_decoded_symbols()
@@ -264,6 +311,11 @@ impl LTDecoder {
             out.push(data.clone());
         }
         Some(out)
+    }
+
+    pub fn get_decoded_indexed(&self) -> Option<Vec<(usize, Vec<u8>)>> {
+        let symbols = self.get_decoded_symbols()?;
+        Some(symbols.into_iter().enumerate().collect())
     }
 
     /// Return fraction of source symbols decoded (0.0 to 1.0).

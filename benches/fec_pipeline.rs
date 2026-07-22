@@ -4,15 +4,16 @@
 // these benchmarks measure the real AdaptiveFec hot paths:
 //   - on_send()/on_send_into() pipeline (ingest -> window fill -> repair generation -> output)
 //   - on_receive() pipeline (ingest → decoder → recovery → output)
-//   - Mode transition overhead (cross-fade cost)
+//   - Block-boundary mode transition overhead
 //   - Streaming repair emission
 //   - Lazy decoder fast path (zero-loss skip)
+//   - Versioned wire envelope write/parse and coefficient regeneration
 //
 // Run with: cargo bench --features benches -- fec_pipeline
 
 use aligned_box::AlignedBox;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use quicfuscate::fec::{AdaptiveFec, FecConfig, FecMode, FecPacket};
+use quicfuscate::fec::{wire, AdaptiveFec, FecConfig, FecMode, FecPacket};
 use quicfuscate::optimize::global_pool;
 use std::sync::Arc;
 
@@ -305,7 +306,7 @@ fn bench_fec_decode_compat_alloc(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Mode transition overhead: measure cross-fade cost
+// 3. Mode transition overhead: measure block-boundary switch cost
 // ---------------------------------------------------------------------------
 
 fn bench_fec_mode_transition(c: &mut Criterion) {
@@ -540,6 +541,67 @@ fn bench_fec_window_fill_burst(c: &mut Criterion) {
     group.finish();
 }
 
+// ---------------------------------------------------------------------------
+// 7. Active-FEC wire envelope: MTU-sized write/parse and repair derivation
+// ---------------------------------------------------------------------------
+
+fn bench_fec_wire_envelope(c: &mut Criterion) {
+    const OUTER_MTU: usize = 1400;
+    const INNER_QUIC_LEN: usize = OUTER_MTU - wire::MAX_DATAGRAM_OVERHEAD;
+    let profile = wire::WireProfile {
+        epoch: 1,
+        codec: wire::WireCodec::Gf8,
+        source_count: 64,
+        total_count: 80,
+        interleave_depth: 4,
+    };
+    let meta = wire::WirePacketMeta {
+        profile,
+        window: 0,
+        sequence: 0,
+        repair_index: wire::SYSTEMATIC_REPAIR_INDEX,
+        block_index: 0,
+        systematic: true,
+    };
+    let payload = vec![0xA5; INNER_QUIC_LEN];
+    let mut encoded = vec![0u8; OUTER_MTU];
+    let encoded_len =
+        wire::write_packet(meta, &payload, &mut encoded).expect("benchmark envelope must encode");
+
+    let mut group = c.benchmark_group("fec_wire_envelope");
+    group.throughput(Throughput::Bytes(INNER_QUIC_LEN as u64));
+    group.bench_function("write_mtu1400", |b| {
+        let mut output = vec![0u8; OUTER_MTU];
+        b.iter(|| {
+            let written = wire::write_packet(meta, black_box(&payload), &mut output)
+                .expect("benchmark envelope must encode");
+            black_box(&output[..written]);
+        });
+    });
+    group.bench_function("parse_mtu1400", |b| {
+        b.iter(|| {
+            let parsed = wire::parse_packet(black_box(&encoded[..encoded_len]))
+                .expect("benchmark envelope must parse");
+            black_box(parsed);
+        });
+    });
+    group.throughput(Throughput::Elements(profile.block_source_count() as u64));
+    group.bench_function("derive_gf8_k16_repair_row", |b| {
+        let mut coefficients = [0u8; 16];
+        b.iter(|| {
+            let written = wire::WireCodec::Gf8
+                .write_repair_coefficients(
+                    profile.block_source_count(),
+                    black_box(3),
+                    &mut coefficients,
+                )
+                .expect("benchmark coefficients must derive");
+            black_box(&coefficients[..written]);
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     fec_pipeline_benches,
     bench_fec_encode_pipeline,
@@ -551,6 +613,7 @@ criterion_group!(
     bench_fec_streaming_repair,
     bench_fec_lazy_fast_path,
     bench_fec_window_fill_burst,
+    bench_fec_wire_envelope,
 );
 
 criterion_main!(fec_pipeline_benches);

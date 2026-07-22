@@ -1,10 +1,11 @@
 use std::cell::Cell;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use quicfuscate::core::QuicFuscateConnection;
 use quicfuscate::engine::qkey;
 use quicfuscate::error::ConnectionError;
-use quicfuscate::fec::FecConfig;
+use quicfuscate::fec::{wire, FecConfig, FecMode};
 use quicfuscate::implementations::server::qkey_registry::{
     qkey_id as registry_qkey_id, token_sha256_hex_from_token_hex, QKeyRegistry,
 };
@@ -20,12 +21,6 @@ struct ScopedEnvVar {
 }
 
 impl ScopedEnvVar {
-    fn set(key: &'static str, value: &str) -> Self {
-        let previous = std::env::var(key).ok();
-        std::env::set_var(key, value);
-        Self { key, previous }
-    }
-
     fn remove(key: &'static str) -> Self {
         let previous = std::env::var(key).ok();
         std::env::remove_var(key);
@@ -40,6 +35,52 @@ impl Drop for ScopedEnvVar {
         } else {
             std::env::remove_var(self.key);
         }
+    }
+}
+
+struct TestTlsFiles {
+    directory: PathBuf,
+}
+
+impl TestTlsFiles {
+    fn install() -> Result<Self, String> {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| format!("clock failed: {error}"))?
+            .as_nanos();
+        let directory = std::env::temp_dir()
+            .join(format!("quicfuscate-qkey-tls-{}-{unique}", std::process::id()));
+        std::fs::create_dir(&directory)
+            .map_err(|error| format!("TLS fixture directory failed: {error}"))?;
+
+        let cert_path = directory.join("server.crt");
+        let key_path = directory.join("server.key");
+        let ca_path = directory.join("ca.crt");
+        let mut hierarchy = quicfuscate::pki::generate_hierarchy("example.com", "QuicFuscate Test")
+            .map_err(|error| format!("TLS hierarchy failed: {error}"))?;
+        quicfuscate::pki::write_cert_chain_pem(
+            &hierarchy.server_leaf.cert_der,
+            &hierarchy.intermediate_ca.cert_der,
+            &cert_path,
+        )
+        .map_err(|error| format!("TLS certificate write failed: {error}"))?;
+        quicfuscate::pki::write_key_pem(&mut hierarchy.server_leaf.key_der, &key_path)
+            .map_err(|error| format!("TLS key write failed: {error}"))?;
+        quicfuscate::pki::write_ca_cert_pem(&hierarchy.root_ca.cert_der, &ca_path)
+            .map_err(|error| format!("TLS CA write failed: {error}"))?;
+
+        quicfuscate::qftls::set_tls_cert_key_paths(
+            cert_path.to_str().ok_or("non-UTF-8 certificate path")?,
+            key_path.to_str().ok_or("non-UTF-8 key path")?,
+        );
+        quicfuscate::qftls::set_tls_ca_path(ca_path.to_str().ok_or("non-UTF-8 CA path")?);
+        Ok(Self { directory })
+    }
+}
+
+impl Drop for TestTlsFiles {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.directory);
     }
 }
 
@@ -101,7 +142,11 @@ fn simulate_qkey_http3_auth(
     // Exercise the product-default H3 masquerade and QPACK header path. A reduced
     // non-masquerading configuration cannot prove the real CLI authentication path.
     let stealth_config = StealthConfig::default();
-    let fec_config = FecConfig::product_default();
+    let mut fec_config = FecConfig::product_default();
+    // Keep the production controller and codec selection, but shorten the
+    // initial block so this bounded in-memory handshake necessarily emits and
+    // authenticates real source plus repair envelopes.
+    fec_config.window_sizes.insert(FecMode::Normal, 16);
     let opt_config = OptimizeConfig::default();
 
     let sni = if qkey_cfg.sni.trim().is_empty() {
@@ -136,6 +181,12 @@ fn simulate_qkey_http3_auth(
     let authed = Cell::new(false);
     let mut c2s_sent = 0u64;
     let mut s2c_sent = 0u64;
+    let mut fec_probe_queued = 0u64;
+    let mut fec_systematic_seen = 0u64;
+    let mut fec_repair_seen = 0u64;
+    let mut fec_profile_seen = None;
+    let mut fec_parse_error = None;
+    let mut fec_source_sequences = std::collections::BTreeSet::new();
     let mut last_h3_err: Option<String> = None;
 
     loop {
@@ -150,10 +201,16 @@ fn simulate_qkey_http3_auth(
             let cli_tls = client.conn.tls_handshake_complete();
             let srv_tls = server.as_ref().map(|s| s.conn.tls_handshake_complete()).unwrap_or(false);
             return Err(format!(
-                "timeout (server_created={}, c2s_sent={}, s2c_sent={}, http3_sent={}, authed={}, client_established={}, server_established={}, client_tls={}, server_tls={}, client_closed={}, server_closed={}, cli_writable={}, cli_readable={}, srv_readable={}, last_h3_err={})",
+                "timeout (server_created={}, c2s_sent={}, s2c_sent={}, fec_probe_queued={}, fec_systematic_seen={}, fec_repair_seen={}, fec_profile_seen={:?}, fec_parse_error={:?}, fec_source_sequences={:?}, http3_sent={}, authed={}, client_established={}, server_established={}, client_tls={}, server_tls={}, client_closed={}, server_closed={}, cli_writable={}, cli_readable={}, srv_readable={}, last_h3_err={})",
                 server.is_some(),
                 c2s_sent,
                 s2c_sent,
+                fec_probe_queued,
+                fec_systematic_seen,
+                fec_repair_seen,
+                fec_profile_seen,
+                fec_parse_error,
+                fec_source_sequences,
                 http3_sent,
                 authed.get(),
                 cli_est,
@@ -167,6 +224,13 @@ fn simulate_qkey_http3_auth(
                 srv_readable,
                 last_h3_err.as_deref().unwrap_or("<none>")
             ));
+        }
+
+        if client.conn.is_established() && fec_probe_queued < 80 {
+            let probe = [fec_probe_queued as u8; 900];
+            if client.conn.dgram_send(&probe).is_ok() {
+                fec_probe_queued = fec_probe_queued.saturating_add(1);
+            }
         }
 
         // Create server upon first client packet.
@@ -224,13 +288,35 @@ fn simulate_qkey_http3_auth(
             if len == 0 {
                 break;
             }
+            if len > client.conn.max_send_udp_payload_size() {
+                return Err(format!(
+                    "client datagram exceeded path MTU: {len} > {}",
+                    client.conn.max_send_udp_payload_size()
+                ));
+            }
             if let Some(ref mut srv) = server {
                 c2s_sent = c2s_sent.saturating_add(1);
+                match wire::parse_packet(&out_client[..len]) {
+                    Ok(parsed) => {
+                        fec_profile_seen = Some(parsed.meta.profile);
+                        if parsed.meta.systematic {
+                            fec_systematic_seen = fec_systematic_seen.saturating_add(1);
+                            fec_source_sequences.insert(parsed.meta.sequence);
+                        } else {
+                            fec_repair_seen = fec_repair_seen.saturating_add(1);
+                        }
+                    }
+                    Err(error) if wire::is_framed(&out_client[..len]) => {
+                        fec_parse_error = Some(error);
+                    }
+                    Err(_) => {}
+                }
                 match srv.recv(&out_client[..len]) {
                     Ok(_) => {}
                     Err(ConnectionError::Done) => {}
                     Err(e) => return Err(format!("server recv failed: {e:?}")),
                 }
+                while srv.conn.dgram_recv_vec().is_ok() {}
             }
         }
 
@@ -244,6 +330,12 @@ fn simulate_qkey_http3_auth(
                 };
                 if len == 0 {
                     break;
+                }
+                if len > srv.conn.max_send_udp_payload_size() {
+                    return Err(format!(
+                        "server datagram exceeded path MTU: {len} > {}",
+                        srv.conn.max_send_udp_payload_size()
+                    ));
                 }
                 s2c_sent = s2c_sent.saturating_add(1);
                 match client.recv(&out_server[..len]) {
@@ -265,7 +357,28 @@ fn simulate_qkey_http3_auth(
                 if len == 0 {
                     break;
                 }
+                if len > client.conn.max_send_udp_payload_size() {
+                    return Err(format!(
+                        "client datagram exceeded path MTU: {len} > {}",
+                        client.conn.max_send_udp_payload_size()
+                    ));
+                }
                 c2s_sent = c2s_sent.saturating_add(1);
+                match wire::parse_packet(&out_client[..len]) {
+                    Ok(parsed) => {
+                        fec_profile_seen = Some(parsed.meta.profile);
+                        if parsed.meta.systematic {
+                            fec_systematic_seen = fec_systematic_seen.saturating_add(1);
+                            fec_source_sequences.insert(parsed.meta.sequence);
+                        } else {
+                            fec_repair_seen = fec_repair_seen.saturating_add(1);
+                        }
+                    }
+                    Err(error) if wire::is_framed(&out_client[..len]) => {
+                        fec_parse_error = Some(error);
+                    }
+                    Err(_) => {}
+                }
                 match srv.recv(&out_client[..len]) {
                     Ok(_) => {}
                     Err(ConnectionError::Done) => {}
@@ -286,7 +399,13 @@ fn simulate_qkey_http3_auth(
 
         if server.is_some() && !http3_sent && client.conn.is_established() {
             match client.send_http3_request("/auth-check") {
-                Ok(_) => http3_sent = true,
+                Ok(_) => match client.open_http3_stream_post("/tun") {
+                    Ok(_) => {
+                        let _ = client.poll_http3();
+                        http3_sent = true;
+                    }
+                    Err(error) => last_h3_err = Some(format!("tun_stream_open_failed: {error:?}")),
+                },
                 Err(e) => last_h3_err = Some(format!("{e:?}")),
             }
         }
@@ -319,7 +438,7 @@ fn simulate_qkey_http3_auth(
             }
         }
 
-        if authed.get() {
+        if authed.get() && fec_repair_seen > 0 {
             let srv_closed = server.as_ref().map(|s| s.conn.is_closed()).unwrap_or(false);
             let cli_closed = client.conn.is_closed();
             return Ok(SimResult {
@@ -362,6 +481,7 @@ fn qkey_http3_auth_accepts_valid_and_rejects_invalid_token() {
 
             let qkey_value = mk_qkey("127.0.0.1:4433", "example.com", &good_token);
 
+            #[cfg(debug_assertions)]
             {
                 let _verify_guard = ScopedEnvVar::remove("QUICFUSCATE_ALLOW_INVALID_CERTS");
                 let error = simulate_qkey_http3_auth(&qkey_value, &good_token, &good_token)
@@ -372,7 +492,8 @@ fn qkey_http3_auth_accepts_valid_and_rejects_invalid_token() {
                 );
             }
 
-            let _allow_invalid_guard = ScopedEnvVar::set("QUICFUSCATE_ALLOW_INVALID_CERTS", "1");
+            let _tls_files = TestTlsFiles::install().expect("verified TLS fixture must install");
+            let _verify_guard = ScopedEnvVar::remove("QUICFUSCATE_ALLOW_INVALID_CERTS");
 
             // Valid
             let ok = simulate_qkey_http3_auth(&qkey_value, &good_token, &good_token)

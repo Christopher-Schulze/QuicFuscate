@@ -14,7 +14,7 @@ It is maintained as the current architecture and repository index, with a curate
 - TUN downlink hotpath: after one MASQUE downlink packet is queued, the server flushes only the owning client connection rather than sweeping all connected clients.
 - MASQUE observability: CONNECT-UDP lifecycle and peer-flow registration stay at `info`; per-packet MASQUE TX/downlink TX lines are `debug` to avoid production log amplification.
 - Packet crypto wiring: Initial/Handshake use boxed AES-GCM compatibility keys; normal 0-RTT/1-RTT data-plane AEAD uses `DataAead` enum dispatch; Rustls packet-key integrations use the explicit dynamic packet wrapper arm.
-- FEC recovery wiring: `InterleavedEncoder` assigns each source to one of four default lanes, repair `id` remains the lane's maximum source ID, `InterleavedDecoder` restores the lane tag from repair `seq`, and GF4/GF8/GF16 decoders map coefficient positions with the exact lane stride. GF8 uses Cauchy repair rows for bounded blocks; Gaussian and Wiedemann recovery materialize only full-rank, equation-validated results. GF8 arithmetic is the wire-canonical GF(256)/0x11D field; x86 nibble-LUT kernels preserve it, while raw Intel GFNI 0x11B multiplication is excluded.
+- FEC recovery wiring: Initial, Handshake, and stable Zero datagrams remain raw. Active 1-RTT output reserves the exact 34-byte maximum FEC overhead before QUIC serialization, then `src/fec/wire.rs` carries a fixed 32-byte versioned header plus the protected two-byte source length. The receiver validates transmitted epoch, window, codec, source/total counts, interleave lane, sequence, and repair ordinal before bounded decoder allocation; it reconstructs GF4/GF8/GF16 rows or Fountain source sets deterministically instead of receiving coefficient vectors. `InterleavedEncoder` assigns source/repair symbols to lanes and complete-block transitions advance the wire epoch. Only reconstructed systematic datagrams enter QUIC header protection and AEAD processing. GF8 remains the wire-canonical GF(256)/0x11D field; GF4 uses fused scalar/AVX2/NEON multiply-XOR, and GF16 uses carryless polynomial multiplication with exact odd-length recovery.
 - Compression wiring: `src/compress.rs` writes safe-path zstd output directly into `MemoryPool` / body-pool blocks via `compress_to_buffer`; H3 compression semantics and `0x5A` / `0x5D` frame headers remain unchanged.
 - Client packet I/O is owned by `src/implementations/client/io_driver.rs` plus `src/core.rs`; `src/implementations/client/pipeline.rs` is not part of the production module graph.
 - Audit logging wiring (TODO-515): `src/audit/mod.rs` exposes a global `OnceLock<Arc<AuditLog>>` accessor initialized via `--audit-log <path>` in `run_server()`. Emitters cover server lifecycle and privilege drop in `src/main.rs`; QKey auth results and timeout, live/standalone connection acceptance, removal, and expiry, and admin actions in `src/implementations/server/`; QKey issuance in `qkey_registry.rs`; and routing/firewall setup and teardown in `routing.rs`. `verify-audit-log <path>` exposes hash-chain verification at the production CLI boundary. The audit file is mode `0o600`, chowned to the runtime user before privilege drop; its parent is chowned only if newly created. Mutex poisoning is recovered via `unwrap_or_else(|e| e.into_inner())` rather than panicking.
@@ -127,7 +127,7 @@ Uses `StealthConfig::from_mode(runtime_mode)` - was silently using `..Default::d
 1. Client CLI -> runtime init: `src/main.rs` -> `src/core.rs` -> `src/transport/connection.rs`
 2. TLS handshake path: `src/qftls.rs` (`CombinedProvider`, release verification mandatory) -> rustls keys/errors -> `src/transport/connection.rs` TLS-bound application readiness -> `src/core.rs` terminal error propagation -> `src/transport/packet.rs`
 3. Stealth shaping path: `src/stealth/` (`StealthManager`) -> `src/transport/config.rs` -> `src/transport/connection.rs`
-4. FEC encode/decode path: `src/fec/` (`AdaptiveFec`) -> `InterleavedEncoder` lane distribution -> transport packet loss -> `InterleavedDecoder` lane routing -> rank-checked and byte-validated recovery -> transport observer hooks
+4. FEC encode/decode path: `src/core.rs` raw handshake/Zero gate -> `src/fec/` (`AdaptiveFec`) -> `InterleavedEncoder` lane distribution -> `src/fec/wire.rs` versioned MTU-bounded envelope -> packet loss -> receiver-owned epoch/window decoder -> `InterleavedDecoder` lane routing -> rank-checked and byte-validated systematic recovery -> `src/transport/connection.rs` authenticated QUIC receive -> transport observer hooks
 5. Linux client zero-copy inbound path: `src/implementations/client/io_driver.rs` -> pool-backed `src/optimize/uring_batch.rs` `UringRecvBatch` -> `src/core.rs` `recv_pooled_block()` -> `src/fec/mod.rs` -> `src/transport/connection.rs`
 6. Packet-number decode path: `src/transport/packet.rs` header-protection removal -> `src/optimize/transport.rs` `decode_packet_number()` -> BMI2/SVE2/NEON/scalar dispatch
 7. Compression pool path: `src/transport/h3.rs` payload policy -> `src/compress.rs` direct zstd `compress_to_buffer` into `MemoryPool` / body-pool blocks -> H3 compressed body bytes
@@ -724,7 +724,9 @@ This snapshot intentionally excludes gitignored paths and local generated direct
     |   |-- internal.rs
     |   |-- mod.rs
     |   |-- test_support.rs
-    |   `-- tests.rs
+    |   |-- tests.rs
+    |   |-- transition_tests.rs
+    |   `-- wire.rs
     |-- env_utils.rs
     |-- harness.rs
     |-- implementations
