@@ -2,7 +2,81 @@
 //!
 //! Blocks all network traffic when VPN is not connected.
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Typed firewall exceptions for one VPN connection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VpnFirewallPolicy {
+    tun_name: String,
+    server_ipv4: Option<(Ipv4Addr, u16)>,
+    server_ipv6: Option<(Ipv6Addr, u16)>,
+    dns_servers: Vec<IpAddr>,
+}
+
+impl VpnFirewallPolicy {
+    /// Build and validate the firewall policy used while connecting and connected.
+    pub fn new(
+        tun_name: impl Into<String>,
+        server: SocketAddr,
+        alternate_server_ip: Option<IpAddr>,
+        dns_servers: impl IntoIterator<Item = IpAddr>,
+    ) -> Result<Self, KillSwitchError> {
+        let tun_name = tun_name.into();
+        if tun_name.is_empty()
+            || tun_name.len() > 64
+            || !tun_name.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+        {
+            return Err(KillSwitchError::InvalidPolicy(
+                "TUN interface name must contain only ASCII letters, digits, '.', '-', or '_'"
+                    .to_string(),
+            ));
+        }
+
+        let mut server_ipv4 = None;
+        let mut server_ipv6 = None;
+        match server.ip() {
+            IpAddr::V4(ip) => server_ipv4 = Some((ip, server.port())),
+            IpAddr::V6(ip) => server_ipv6 = Some((ip, server.port())),
+        }
+        match alternate_server_ip {
+            Some(IpAddr::V4(ip)) if server_ipv4.is_none() => {
+                server_ipv4 = Some((ip, server.port()));
+            }
+            Some(IpAddr::V6(ip)) if server_ipv6.is_none() => {
+                server_ipv6 = Some((ip, server.port()));
+            }
+            _ => {}
+        }
+
+        let mut dns_servers: Vec<IpAddr> = dns_servers.into_iter().collect();
+        dns_servers.sort_unstable();
+        dns_servers.dedup();
+        if dns_servers.len() > 8 {
+            return Err(KillSwitchError::InvalidPolicy(
+                "at most eight VPN DNS servers are supported".to_string(),
+            ));
+        }
+
+        Ok(Self { tun_name, server_ipv4, server_ipv6, dns_servers })
+    }
+
+    fn tun_name(&self) -> &str {
+        &self.tun_name
+    }
+
+    fn server_ipv4(&self) -> Option<(Ipv4Addr, u16)> {
+        self.server_ipv4
+    }
+
+    fn server_ipv6(&self) -> Option<(Ipv6Addr, u16)> {
+        self.server_ipv6
+    }
+
+    fn dns_servers(&self) -> &[IpAddr] {
+        &self.dns_servers
+    }
+}
 
 /// Kill switch manager.
 pub struct KillSwitch {
@@ -52,12 +126,12 @@ impl KillSwitch {
 
     /// Enable the kill switch.
     pub fn enable(&self) -> Result<(), KillSwitchError> {
+        // Mark enabled before touching the firewall so a partial backend
+        // failure can never trigger Drop-based cleanup of already-installed
+        // fail-closed rules.
         self.enabled.store(true, Ordering::SeqCst);
-
-        // If VPN is not connected, activate blocking
-        if !self.vpn_connected.load(Ordering::SeqCst) {
-            self.backend.block_traffic()?;
-        }
+        self.backend.block_traffic()?;
+        self.vpn_connected.store(false, Ordering::SeqCst);
 
         log::info!("Kill switch enabled");
         Ok(())
@@ -65,8 +139,9 @@ impl KillSwitch {
 
     /// Disable the kill switch.
     pub fn disable(&self) -> Result<(), KillSwitchError> {
-        self.enabled.store(false, Ordering::SeqCst);
         self.backend.allow_traffic()?;
+        self.vpn_connected.store(false, Ordering::SeqCst);
+        self.enabled.store(false, Ordering::SeqCst);
         log::info!("Kill switch disabled");
         Ok(())
     }
@@ -76,14 +151,21 @@ impl KillSwitch {
         self.enabled.load(Ordering::SeqCst)
     }
 
-    /// Notify that VPN connected.
-    pub fn on_vpn_connected(&self, tun_name: &str, server_ip: &str) -> Result<(), KillSwitchError> {
-        self.vpn_connected.store(true, Ordering::SeqCst);
-
+    /// Allow only the remote VPN endpoint while the tunnel handshake is in progress.
+    pub fn on_vpn_connecting(&self, policy: &VpnFirewallPolicy) -> Result<(), KillSwitchError> {
         if self.enabled.load(Ordering::SeqCst) {
-            self.backend.allow_vpn_traffic(tun_name, server_ip)?;
+            self.backend.allow_vpn_connecting(policy)?;
         }
+        self.vpn_connected.store(false, Ordering::SeqCst);
+        Ok(())
+    }
 
+    /// Allow the VPN endpoint, selected tunnel DNS, and traffic through the TUN interface.
+    pub fn on_vpn_connected(&self, policy: &VpnFirewallPolicy) -> Result<(), KillSwitchError> {
+        if self.enabled.load(Ordering::SeqCst) {
+            self.backend.allow_vpn_traffic(policy)?;
+        }
+        self.vpn_connected.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -101,9 +183,8 @@ impl KillSwitch {
     /// Remove stale firewall rules from a crashed previous session.
     ///
     /// This is a static method that can be called on startup before
-    /// creating a new KillSwitch instance. It flushes any leftover
-    /// iptables/pf/netsh rules that may persist from a process that
-    /// was killed before its Drop impl could run.
+    /// creating a new KillSwitch instance. It flushes rules deliberately
+    /// retained after an unexpected process exit.
     pub fn cleanup_stale_rules() -> Result<(), KillSwitchError> {
         log::info!("Cleaning up stale kill switch firewall rules");
         #[cfg(target_os = "linux")]
@@ -133,9 +214,10 @@ impl Default for KillSwitch {
 
 impl Drop for KillSwitch {
     fn drop(&mut self) {
-        // Always clean up on drop
-        if let Err(e) = self.backend.cleanup() {
-            log::warn!("Kill switch cleanup on drop failed: {}", e);
+        if self.enabled.load(Ordering::SeqCst) {
+            log::warn!(
+                "Kill switch dropped while enabled; retaining fail-closed firewall rules for explicit cleanup"
+            );
         }
     }
 }
@@ -144,6 +226,7 @@ impl Drop for KillSwitch {
 #[derive(Debug)]
 pub enum KillSwitchError {
     CommandFailed(String),
+    InvalidPolicy(String),
     PermissionDenied,
     NotSupported,
 }
@@ -152,6 +235,7 @@ impl std::fmt::Display for KillSwitchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::CommandFailed(s) => write!(f, "Command failed: {}", s),
+            Self::InvalidPolicy(s) => write!(f, "Invalid firewall policy: {}", s),
             Self::PermissionDenied => write!(f, "Permission denied"),
             Self::NotSupported => write!(f, "Kill switch not supported on this platform"),
         }
@@ -204,10 +288,17 @@ impl LinuxKillSwitch {
         }
     }
 
-    fn allow_vpn_traffic(&self, tun_name: &str, server_ip: &str) -> Result<(), KillSwitchError> {
+    fn allow_vpn_connecting(&self, policy: &VpnFirewallPolicy) -> Result<(), KillSwitchError> {
         match self {
-            Self::Iptables(i) => i.allow_vpn_traffic(tun_name, server_ip),
-            Self::Nftables(n) => n.allow_vpn_traffic(tun_name, server_ip),
+            Self::Iptables(i) => i.allow_vpn_connecting(policy),
+            Self::Nftables(n) => n.allow_vpn_connecting(policy),
+        }
+    }
+
+    fn allow_vpn_traffic(&self, policy: &VpnFirewallPolicy) -> Result<(), KillSwitchError> {
+        match self {
+            Self::Iptables(i) => i.allow_vpn_traffic(policy),
+            Self::Nftables(n) => n.allow_vpn_traffic(policy),
         }
     }
 
@@ -219,10 +310,17 @@ impl LinuxKillSwitch {
     }
 
     fn cleanup_stale() -> Result<(), KillSwitchError> {
-        // Clean up both backends — a previous session may have used either.
-        IptablesKillSwitch::cleanup_stale()?;
-        NftablesKillSwitch::cleanup_stale()?;
-        Ok(())
+        // Attempt both backends because a previous session may have selected
+        // either one. Never let one cleanup failure suppress the other attempt.
+        let iptables_result = IptablesKillSwitch::cleanup_stale();
+        let nftables_result = NftablesKillSwitch::cleanup_stale();
+        match (iptables_result, nftables_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(iptables_error), Err(nftables_error)) => Err(KillSwitchError::CommandFailed(
+                format!("iptables cleanup: {iptables_error}; nftables cleanup: {nftables_error}"),
+            )),
+        }
     }
 }
 
@@ -254,47 +352,40 @@ impl IptablesKillSwitch {
     /// Applies to both iptables (IPv4) and ip6tables (IPv6) to prevent
     /// IPv6 traffic leaks when the kill switch is active.
     fn ensure_chain() -> Result<(), KillSwitchError> {
-        use std::process::Command;
+        Self::ensure_family("iptables")?;
+        Self::ensure_family("ip6tables")?;
+        Ok(())
+    }
 
-        // Create chain (ignore error if it already exists) — IPv4
-        let _ = Command::new("iptables").args(["-N", KS_CHAIN]).status();
-        // IPv6 — prevents IPv6 traffic bypass when kill switch is active
-        let _ = Command::new("ip6tables").args(["-N", KS_CHAIN]).status();
+    fn ensure_family(program: &str) -> Result<(), KillSwitchError> {
+        use std::process::{Command, Stdio};
 
-        // Add jump from OUTPUT to our chain (idempotent: check first) — IPv4
-        let output_rules = Command::new("iptables")
-            .args(["-S", "OUTPUT"])
-            .output()
-            .map_err(|e| KillSwitchError::CommandFailed(e.to_string()))?;
-        let rules_str = String::from_utf8_lossy(&output_rules.stdout);
-        let jump_rule = format!("-j {}", KS_CHAIN);
-        if !rules_str.contains(&jump_rule) {
-            let _ = Command::new("iptables").args(["-A", "OUTPUT", "-j", KS_CHAIN]).status();
+        let chain_exists = Command::new(program)
+            .args(["-S", KS_CHAIN])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|error| KillSwitchError::CommandFailed(format!("{program}: {error}")))?
+            .success();
+        if !chain_exists {
+            Self::checked_status(program, &["-N", KS_CHAIN])?;
         }
 
-        // IPv6 — add jump from OUTPUT to our chain (idempotent: check first)
-        let output_rules_v6 = Command::new("ip6tables")
-            .args(["-S", "OUTPUT"])
-            .output()
-            .map_err(|e| KillSwitchError::CommandFailed(e.to_string()))?;
-        let rules_str_v6 = String::from_utf8_lossy(&output_rules_v6.stdout);
-        if !rules_str_v6.contains(&jump_rule) {
-            let _ = Command::new("ip6tables").args(["-A", "OUTPUT", "-j", KS_CHAIN]).status();
+        let jump_exists = Command::new(program)
+            .args(["-C", "OUTPUT", "-j", KS_CHAIN])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|error| KillSwitchError::CommandFailed(format!("{program}: {error}")))?
+            .success();
+        if !jump_exists {
+            Self::checked_status(program, &["-I", "OUTPUT", "1", "-j", KS_CHAIN])?;
         }
         Ok(())
     }
 
     fn block_traffic(&self) -> Result<(), KillSwitchError> {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
-
         Self::ensure_chain()?;
-
-        // Flush our chain and apply block rules into it — IPv4
-        let _ = Command::new("iptables").args(["-F", KS_CHAIN]).status();
-        // IPv6
-        let _ = Command::new("ip6tables").args(["-F", KS_CHAIN]).status();
-
         let rules = format!(
             "*filter\n\
              :{} - [0:0]\n\
@@ -303,40 +394,11 @@ impl IptablesKillSwitch {
              COMMIT\n",
             KS_CHAIN, KS_CHAIN, KS_CHAIN
         );
-
-        // Apply to iptables (IPv4)
-        let mut child = Command::new("iptables-restore")
-            .arg("--noflush")
-            .stdin(Stdio::piped())
-            .spawn()
-            .map_err(|e| KillSwitchError::CommandFailed(e.to_string()))?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(rules.as_bytes())
-                .map_err(|e| KillSwitchError::CommandFailed(e.to_string()))?;
-        }
-
-        let status = child.wait().map_err(|e| KillSwitchError::CommandFailed(e.to_string()))?;
-        if !status.success() {
-            return Err(KillSwitchError::CommandFailed(
-                "iptables-restore failed to apply block rules".to_string(),
-            ));
-        }
-
-        // Apply to ip6tables (IPv6) — best effort, don't fail if ip6tables
-        // is unavailable (some systems disable IPv6 entirely)
-        if let Ok(mut child) =
-            Command::new("ip6tables-restore").arg("--noflush").stdin(Stdio::piped()).spawn()
-        {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(rules.as_bytes());
-            }
-            let _ = child.wait();
-        }
+        Self::apply_restore("iptables", "iptables-restore", &rules)?;
+        Self::apply_restore("ip6tables", "ip6tables-restore", &rules)?;
 
         self.rules_active.store(true, Ordering::SeqCst);
-        log::debug!("Kill switch: traffic blocked (atomic, dedicated chain, IPv4+IPv6)");
+        log::debug!("Kill switch: traffic blocked (dedicated chain, IPv4+IPv6)");
         Ok(())
     }
 
@@ -344,161 +406,173 @@ impl IptablesKillSwitch {
         self.cleanup()
     }
 
-    fn allow_vpn_traffic(&self, tun_name: &str, server_ip: &str) -> Result<(), KillSwitchError> {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
-
+    fn apply_policy(
+        &self,
+        policy: &VpnFirewallPolicy,
+        connected: bool,
+    ) -> Result<(), KillSwitchError> {
         Self::ensure_chain()?;
-
-        // Flush our chain first — IPv4 and IPv6
-        let _ = Command::new("iptables").args(["-F", KS_CHAIN]).status();
-        let _ = Command::new("ip6tables").args(["-F", KS_CHAIN]).status();
-
-        // Apply VPN-allow ruleset into our dedicated chain — IPv4
-        let rules = format!(
-            "*filter\n\
-             :{} - [0:0]\n\
-             -A {} -o lo -j ACCEPT\n\
-             -A {} -d {} -j ACCEPT\n\
-             -A {} -o {} -j ACCEPT\n\
-             -A {} -j DROP\n\
-             COMMIT\n",
-            KS_CHAIN, KS_CHAIN, KS_CHAIN, server_ip, KS_CHAIN, tun_name, KS_CHAIN
-        );
-
-        let mut child = Command::new("iptables-restore")
-            .arg("--noflush")
-            .stdin(Stdio::piped())
-            .spawn()
-            .map_err(|e| KillSwitchError::CommandFailed(e.to_string()))?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(rules.as_bytes())
-                .map_err(|e| KillSwitchError::CommandFailed(e.to_string()))?;
-        }
-
-        let status = child.wait().map_err(|e| KillSwitchError::CommandFailed(e.to_string()))?;
-        if !status.success() {
-            return Err(KillSwitchError::CommandFailed(
-                "iptables-restore failed to apply VPN allow rules".to_string(),
-            ));
-        }
-
-        // IPv6: block all except loopback and tun interface.
-        // server_ip is typically an IPv4 literal; for IPv6 we allow traffic
-        // through the tun interface only and drop everything else.
-        let rules_v6 = format!(
-            "*filter\n\
-             :{} - [0:0]\n\
-             -A {} -o lo -j ACCEPT\n\
-             -A {} -o {} -j ACCEPT\n\
-             -A {} -j DROP\n\
-             COMMIT\n",
-            KS_CHAIN, KS_CHAIN, KS_CHAIN, tun_name, KS_CHAIN
-        );
-
-        // Apply to ip6tables (IPv6) — best effort
-        if let Ok(mut child) =
-            Command::new("ip6tables-restore").arg("--noflush").stdin(Stdio::piped()).spawn()
-        {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(rules_v6.as_bytes());
-            }
-            let _ = child.wait();
-        }
+        let rules = Self::policy_rules(policy, false, connected);
+        let rules_v6 = Self::policy_rules(policy, true, connected);
+        Self::apply_restore("iptables", "iptables-restore", &rules)?;
+        Self::apply_restore("ip6tables", "ip6tables-restore", &rules_v6)?;
 
         self.rules_active.store(true, Ordering::SeqCst);
-        log::debug!(
-            "Kill switch: VPN traffic allowed, rest blocked (atomic, dedicated chain, IPv4+IPv6)"
-        );
+        log::debug!("Kill switch: VPN policy applied (dedicated chain, IPv4+IPv6)");
         Ok(())
     }
 
-    fn cleanup(&self) -> Result<(), KillSwitchError> {
-        use std::process::Command;
+    fn apply_restore(
+        table_program: &str,
+        restore_program: &str,
+        rules: &str,
+    ) -> Result<(), KillSwitchError> {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
 
+        Self::checked_status(table_program, &["-F", KS_CHAIN])?;
+        let mut child =
+            Command::new(restore_program).arg("--noflush").stdin(Stdio::piped()).spawn().map_err(
+                |error| KillSwitchError::CommandFailed(format!("{restore_program}: {error}")),
+            )?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| {
+                KillSwitchError::CommandFailed(format!("{restore_program} did not expose stdin"))
+            })?
+            .write_all(rules.as_bytes())
+            .map_err(|error| {
+                KillSwitchError::CommandFailed(format!("{restore_program} stdin: {error}"))
+            })?;
+        let status = child.wait().map_err(|error| {
+            KillSwitchError::CommandFailed(format!("{restore_program}: {error}"))
+        })?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(KillSwitchError::CommandFailed(format!(
+                "{} returned status {}",
+                restore_program, status
+            )))
+        }
+    }
+
+    fn allow_vpn_connecting(&self, policy: &VpnFirewallPolicy) -> Result<(), KillSwitchError> {
+        self.apply_policy(policy, false)
+    }
+
+    fn allow_vpn_traffic(&self, policy: &VpnFirewallPolicy) -> Result<(), KillSwitchError> {
+        self.apply_policy(policy, true)
+    }
+
+    fn policy_rules(policy: &VpnFirewallPolicy, ipv6: bool, connected: bool) -> String {
+        let mut rules =
+            format!("*filter\n:{} - [0:0]\n-A {} -o lo -j ACCEPT\n", KS_CHAIN, KS_CHAIN);
+        match (ipv6, policy.server_ipv4(), policy.server_ipv6()) {
+            (false, Some((ip, port)), _) => rules.push_str(&format!(
+                "-A {} -d {} -p udp --dport {} -j ACCEPT\n",
+                KS_CHAIN, ip, port
+            )),
+            (true, _, Some((ip, port))) => rules.push_str(&format!(
+                "-A {} -d {} -p udp --dport {} -j ACCEPT\n",
+                KS_CHAIN, ip, port
+            )),
+            _ => {}
+        }
+        if connected {
+            for dns in policy.dns_servers().iter().filter(|ip| ip.is_ipv6() == ipv6) {
+                rules.push_str(&format!(
+                    "-A {} -o {} -d {} -p udp --dport 53 -j ACCEPT\n\
+                     -A {} -o {} -d {} -p tcp --dport 53 -j ACCEPT\n",
+                    KS_CHAIN,
+                    policy.tun_name(),
+                    dns,
+                    KS_CHAIN,
+                    policy.tun_name(),
+                    dns
+                ));
+            }
+            rules.push_str(&format!(
+                "-A {} -p udp --dport 53 -j DROP\n\
+                 -A {} -p tcp --dport 53 -j DROP\n\
+                 -A {} -o {} -j ACCEPT\n",
+                KS_CHAIN,
+                KS_CHAIN,
+                KS_CHAIN,
+                policy.tun_name()
+            ));
+        }
+        rules.push_str(&format!("-A {} -j DROP\nCOMMIT\n", KS_CHAIN));
+        rules
+    }
+
+    fn cleanup(&self) -> Result<(), KillSwitchError> {
         if !self.rules_active.load(Ordering::SeqCst) {
             return Ok(());
         }
-
-        // Only flush our dedicated chain — never touch OUTPUT directly
-        // IPv4
-        match Command::new("iptables").args(["-F", KS_CHAIN]).status() {
-            Ok(status) if status.success() => {}
-            Ok(status) => {
-                log::debug!(
-                    "Kill switch cleanup: flush {} (iptables) returned status {}",
-                    KS_CHAIN,
-                    status
-                );
-            }
-            Err(e) => {
-                log::debug!("Kill switch cleanup: flush {} (iptables) failed: {}", KS_CHAIN, e);
-            }
-        }
-        // IPv6
-        match Command::new("ip6tables").args(["-F", KS_CHAIN]).status() {
-            Ok(status) if status.success() => {}
-            Ok(status) => {
-                log::debug!(
-                    "Kill switch cleanup: flush {} (ip6tables) returned status {}",
-                    KS_CHAIN,
-                    status
-                );
-            }
-            Err(e) => {
-                log::debug!("Kill switch cleanup: flush {} (ip6tables) failed: {}", KS_CHAIN, e);
-            }
-        }
-
+        Self::cleanup_stale()?;
         self.rules_active.store(false, Ordering::SeqCst);
-        log::debug!("Kill switch: rules cleaned up (dedicated chain, IPv4+IPv6)");
+        log::debug!("Kill switch: owned chains and jumps removed (IPv4+IPv6)");
         Ok(())
     }
 
     fn cleanup_stale() -> Result<(), KillSwitchError> {
-        use std::process::Command;
-        // Only flush our dedicated chain and remove the jump rule from OUTPUT.
-        // This is safe — it never touches unrelated user firewall rules.
+        Self::cleanup_family("iptables")?;
+        Self::cleanup_family("ip6tables")?;
+        log::info!("Owned kill switch chains removed ({}, IPv4+IPv6)", KS_CHAIN);
+        Ok(())
+    }
 
-        // IPv4
-        let chain_flushed = match Command::new("iptables").args(["-F", KS_CHAIN]).status() {
-            Ok(status) if status.success() => true,
-            Ok(status) => {
-                log::debug!(
-                    "cleanup_stale: flush {} (iptables) returned status {} (chain may not exist)",
-                    KS_CHAIN,
-                    status
-                );
-                false
-            }
-            Err(e) => {
-                log::debug!(
-                    "cleanup_stale: flush {} (iptables) failed: {} (chain may not exist)",
-                    KS_CHAIN,
-                    e
-                );
-                false
+    fn cleanup_family(program: &str) -> Result<(), KillSwitchError> {
+        use std::process::{Command, Stdio};
+
+        let exists = match Command::new(program)
+            .args(["-S", KS_CHAIN])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+        {
+            Ok(status) => status.success(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(KillSwitchError::CommandFailed(format!("{program}: {error}")));
             }
         };
-
-        // Remove the jump rule from OUTPUT (idempotent) — IPv4
-        let _ = Command::new("iptables").args(["-D", "OUTPUT", "-j", KS_CHAIN]).status();
-        // Delete the chain itself (only succeeds if empty and no references) — IPv4
-        let _ = Command::new("iptables").args(["-X", KS_CHAIN]).status();
-
-        // IPv6 — best effort cleanup
-        let _ = Command::new("ip6tables").args(["-F", KS_CHAIN]).status();
-        let _ = Command::new("ip6tables").args(["-D", "OUTPUT", "-j", KS_CHAIN]).status();
-        let _ = Command::new("ip6tables").args(["-X", KS_CHAIN]).status();
-
-        if chain_flushed {
-            log::info!("Stale kill switch rules cleaned (dedicated chain {}, IPv4+IPv6)", KS_CHAIN);
-        } else {
-            log::info!("Stale kill switch cleanup attempted (chain may not have existed)");
+        if !exists {
+            return Ok(());
         }
-        Ok(())
+
+        while Command::new(program)
+            .args(["-C", "OUTPUT", "-j", KS_CHAIN])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            Self::checked_status(program, &["-D", "OUTPUT", "-j", KS_CHAIN])?;
+        }
+        Self::checked_status(program, &["-F", KS_CHAIN])?;
+        Self::checked_status(program, &["-X", KS_CHAIN])
+    }
+
+    fn checked_status(program: &str, args: &[&str]) -> Result<(), KillSwitchError> {
+        use std::process::Command;
+
+        let status = Command::new(program)
+            .args(args)
+            .status()
+            .map_err(|error| KillSwitchError::CommandFailed(format!("{program}: {error}")))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(KillSwitchError::CommandFailed(format!(
+                "{} {} returned status {}",
+                program,
+                args.join(" "),
+                status
+            )))
+        }
     }
 }
 
@@ -526,8 +600,6 @@ struct NftablesKillSwitch {
     server_addr: std::sync::Mutex<Option<String>>,
     /// TUN interface name (set when `allow_vpn_traffic` is called).
     tun_iface: std::sync::Mutex<Option<String>>,
-    /// Optional VPN server UDP port (restricts the allow rule when set).
-    server_port: std::sync::Mutex<Option<u16>>,
 }
 
 #[cfg(target_os = "linux")]
@@ -537,7 +609,6 @@ impl NftablesKillSwitch {
             rules_active: AtomicBool::new(false),
             server_addr: std::sync::Mutex::new(None),
             tun_iface: std::sync::Mutex::new(None),
-            server_port: std::sync::Mutex::new(None),
         }
     }
 
@@ -553,12 +624,6 @@ impl NftablesKillSwitch {
         ks
     }
 
-    /// Set the VPN server UDP port for the allow rule.
-    #[cfg(test)]
-    fn set_server_port(&self, port: u16) {
-        *self.server_port.lock().unwrap() = Some(port);
-    }
-
     /// Build the nftables ruleset for the block-all state.
     ///
     /// Only loopback traffic is allowed; everything else is dropped by the
@@ -568,37 +633,47 @@ impl NftablesKillSwitch {
             "table inet {table} {{\n\
              \x20   chain output {{\n\
              \x20       type filter hook output priority 0; policy drop;\n\
-             \x20       iifname \"lo\" accept\n\
+             \x20       oifname \"lo\" accept\n\
              \x20   }}\n\
              }}\n",
             table = KS_NFT_TABLE
         )
     }
 
-    /// Build the nftables ruleset for the VPN-allowed state.
-    ///
-    /// Allows loopback, traffic to the VPN server (optionally restricted to a
-    /// specific UDP port), and traffic through the TUN interface. Everything
-    /// else is dropped by the default-drop policy.
-    fn allow_ruleset(&self, tun_name: &str, server_ip: &str) -> String {
-        let port = self.server_port.lock().unwrap();
-        let server_rule = match *port {
-            Some(p) => format!("ip daddr {} udp dport {} accept", server_ip, p),
-            None => format!("ip daddr {} accept", server_ip),
-        };
-        format!(
+    /// Build the nftables ruleset for connecting or connected VPN state.
+    fn policy_ruleset(&self, policy: &VpnFirewallPolicy, connected: bool) -> String {
+        let mut rules = format!(
             "table inet {table} {{\n\
              \x20   chain output {{\n\
              \x20       type filter hook output priority 0; policy drop;\n\
-             \x20       iifname \"lo\" accept\n\
-             \x20       {server_rule}\n\
-             \x20       oifname \"{tun}\" accept\n\
-             \x20   }}\n\
-             }}\n",
-            table = KS_NFT_TABLE,
-            server_rule = server_rule,
-            tun = tun_name
-        )
+             \x20       oifname \"lo\" accept\n",
+            table = KS_NFT_TABLE
+        );
+        if let Some((ip, port)) = policy.server_ipv4() {
+            rules.push_str(&format!("        ip daddr {ip} udp dport {port} accept\n"));
+        }
+        if let Some((ip, port)) = policy.server_ipv6() {
+            rules.push_str(&format!("        ip6 daddr {ip} udp dport {port} accept\n"));
+        }
+        if connected {
+            for dns in policy.dns_servers() {
+                let family = if dns.is_ipv4() { "ip" } else { "ip6" };
+                rules.push_str(&format!(
+                    "        oifname \"{}\" {} daddr {} udp dport 53 accept\n\
+                     \x20       oifname \"{}\" {} daddr {} tcp dport 53 accept\n",
+                    policy.tun_name(),
+                    family,
+                    dns,
+                    policy.tun_name(),
+                    family,
+                    dns
+                ));
+            }
+            rules.push_str("        udp dport 53 drop\n        tcp dport 53 drop\n");
+            rules.push_str(&format!("        oifname \"{}\" accept\n", policy.tun_name()));
+        }
+        rules.push_str("    }\n}\n");
+        rules
     }
 
     /// Apply a complete ruleset atomically via `nft -f -` (stdin).
@@ -610,8 +685,18 @@ impl NftablesKillSwitch {
         use std::io::Write;
         use std::process::{Command, Stdio};
 
-        // Delete any existing table first (idempotent — ignore failure).
-        let _ = Command::new("nft").args(["delete", "table", "inet", KS_NFT_TABLE]).status();
+        let table_exists = Command::new("nft")
+            .args(["list", "table", "inet", KS_NFT_TABLE])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|error| KillSwitchError::CommandFailed(format!("nft inspect: {error}")))?
+            .success();
+        let transaction = if table_exists {
+            format!("flush table inet {}\n{}", KS_NFT_TABLE, ruleset)
+        } else {
+            ruleset.to_string()
+        };
 
         let mut child = Command::new("nft")
             .arg("-f")
@@ -624,7 +709,7 @@ impl NftablesKillSwitch {
 
         if let Some(mut stdin) = child.stdin.take() {
             stdin
-                .write_all(ruleset.as_bytes())
+                .write_all(transaction.as_bytes())
                 .map_err(|e| KillSwitchError::CommandFailed(format!("nft stdin: {}", e)))?;
         }
 
@@ -654,18 +739,33 @@ impl NftablesKillSwitch {
         self.cleanup()
     }
 
-    fn allow_vpn_traffic(&self, tun_name: &str, server_ip: &str) -> Result<(), KillSwitchError> {
-        // Store the parameters for potential re-application.
-        *self.server_addr.lock().unwrap() = Some(server_ip.to_string());
-        *self.tun_iface.lock().unwrap() = Some(tun_name.to_string());
+    fn allow_vpn_connecting(&self, policy: &VpnFirewallPolicy) -> Result<(), KillSwitchError> {
+        self.apply_policy(policy, false)
+    }
 
-        let ruleset = self.allow_ruleset(tun_name, server_ip);
+    fn allow_vpn_traffic(&self, policy: &VpnFirewallPolicy) -> Result<(), KillSwitchError> {
+        self.apply_policy(policy, true)
+    }
+
+    fn apply_policy(
+        &self,
+        policy: &VpnFirewallPolicy,
+        connected: bool,
+    ) -> Result<(), KillSwitchError> {
+        // Store the parameters for potential re-application.
+        *self.server_addr.lock().unwrap() = policy
+            .server_ipv4()
+            .map(|(ip, _)| ip.to_string())
+            .or_else(|| policy.server_ipv6().map(|(ip, _)| ip.to_string()));
+        *self.tun_iface.lock().unwrap() = Some(policy.tun_name().to_string());
+
+        let ruleset = self.policy_ruleset(policy, connected);
         self.apply_ruleset(&ruleset)?;
         self.rules_active.store(true, Ordering::SeqCst);
         log::debug!(
-            "Kill switch (nftables): VPN traffic allowed via {}, server {} (rest blocked)",
-            tun_name,
-            server_ip
+            "Kill switch (nftables): VPN policy applied via {} (connected={})",
+            policy.tun_name(),
+            connected
         );
         Ok(())
     }
@@ -678,17 +778,15 @@ impl NftablesKillSwitch {
             return Ok(());
         }
 
-        match Command::new("nft").args(["delete", "table", "inet", KS_NFT_TABLE]).status() {
-            Ok(status) if status.success() => {}
-            Ok(status) => {
-                log::debug!(
-                    "Kill switch cleanup (nftables): delete table returned status {} (table may not exist)",
-                    status
-                );
-            }
-            Err(e) => {
-                log::debug!("Kill switch cleanup (nftables): delete table failed: {}", e);
-            }
+        let status = Command::new("nft")
+            .args(["delete", "table", "inet", KS_NFT_TABLE])
+            .status()
+            .map_err(|error| KillSwitchError::CommandFailed(error.to_string()))?;
+        if !status.success() {
+            return Err(KillSwitchError::CommandFailed(format!(
+                "nft delete table returned status {}",
+                status
+            )));
         }
 
         self.rules_active.store(false, Ordering::SeqCst);
@@ -726,11 +824,12 @@ impl NftablesKillSwitch {
                 log::info!("Stale nftables kill switch table deleted (inet {})", KS_NFT_TABLE);
             }
             Ok(status) => {
-                log::debug!("cleanup_stale (nftables): delete table returned status {}", status);
+                return Err(KillSwitchError::CommandFailed(format!(
+                    "nft stale table delete returned status {}",
+                    status
+                )));
             }
-            Err(e) => {
-                log::debug!("cleanup_stale (nftables): delete table failed: {}", e);
-            }
+            Err(e) => return Err(KillSwitchError::CommandFailed(e.to_string())),
         }
         Ok(())
     }
@@ -778,6 +877,15 @@ impl MacOSKillSwitch {
     fn ensure_pf_enabled(&self) -> Result<(), KillSwitchError> {
         use std::process::Command;
 
+        let rules = Command::new("pfctl")
+            .args(["-sr"])
+            .output()
+            .map_err(|e| KillSwitchError::CommandFailed(e.to_string()))?;
+        let rules = String::from_utf8_lossy(&rules.stdout);
+        if !rules.contains(&self.anchor_name) && !rules.contains("com.quicfuscate/*") {
+            return Err(KillSwitchError::NotSupported);
+        }
+
         if self.is_pf_enabled() {
             self.pf_enabled_by_us.store(false, Ordering::SeqCst);
             log::debug!("Kill switch: pf already enabled, skipping pfctl -e");
@@ -820,16 +928,40 @@ impl MacOSKillSwitch {
         self.cleanup()
     }
 
-    fn allow_vpn_traffic(&self, tun_name: &str, server_ip: &str) -> Result<(), KillSwitchError> {
+    fn allow_vpn_connecting(&self, policy: &VpnFirewallPolicy) -> Result<(), KillSwitchError> {
+        self.apply_policy(policy, false)
+    }
+
+    fn allow_vpn_traffic(&self, policy: &VpnFirewallPolicy) -> Result<(), KillSwitchError> {
+        self.apply_policy(policy, true)
+    }
+
+    fn apply_policy(
+        &self,
+        policy: &VpnFirewallPolicy,
+        connected: bool,
+    ) -> Result<(), KillSwitchError> {
         use std::process::Command;
 
-        let rules = format!(
-            "pass out on {}\n\
-             pass out to {}\n\
-             pass out on lo0\n\
-             block out all\n",
-            tun_name, server_ip
-        );
+        let mut rules = "pass out quick on lo0\n".to_string();
+        if let Some((ip, port)) = policy.server_ipv4() {
+            rules.push_str(&format!("pass out quick proto udp to {ip} port {port}\n"));
+        }
+        if let Some((ip, port)) = policy.server_ipv6() {
+            rules.push_str(&format!("pass out quick inet6 proto udp to {ip} port {port}\n"));
+        }
+        if connected {
+            for dns in policy.dns_servers() {
+                rules.push_str(&format!(
+                    "pass out quick on {} proto {{ udp tcp }} to {} port 53\n",
+                    policy.tun_name(),
+                    dns
+                ));
+            }
+            rules.push_str("block out quick proto { udp tcp } to any port 53\n");
+            rules.push_str(&format!("pass out quick on {}\n", policy.tun_name()));
+        }
+        rules.push_str("block out all\n");
 
         // Write to PID-scoped temp file
         std::fs::write(&self.config_path, &rules)
@@ -928,43 +1060,18 @@ impl WindowsKillSwitch {
     }
 
     fn block_traffic(&self) -> Result<(), KillSwitchError> {
-        use std::process::Command;
-
-        // Remove any existing block rules to prevent accumulation
-        Command::new("netsh")
-            .args([
-                "advfirewall",
-                "firewall",
-                "delete",
-                "rule",
-                "name=QuicFuscate-KillSwitch-Block",
-            ])
-            .status()
-            .ok();
-
-        // Add blocking rule
-        Command::new("netsh")
-            .args([
-                "advfirewall",
-                "firewall",
-                "add",
-                "rule",
-                "name=QuicFuscate-KillSwitch-Block",
-                "dir=out",
-                "action=block",
-            ])
-            .status()
-            .map_err(|e| KillSwitchError::CommandFailed(e.to_string()))?;
-
-        self.rules_active.store(true, Ordering::SeqCst);
-        Ok(())
+        Err(KillSwitchError::NotSupported)
     }
 
     fn allow_traffic(&self) -> Result<(), KillSwitchError> {
         self.cleanup()
     }
 
-    fn allow_vpn_traffic(&self, _tun_name: &str, server_ip: &str) -> Result<(), KillSwitchError> {
+    fn allow_vpn_connecting(&self, policy: &VpnFirewallPolicy) -> Result<(), KillSwitchError> {
+        self.allow_vpn_traffic(policy)
+    }
+
+    fn allow_vpn_traffic(&self, policy: &VpnFirewallPolicy) -> Result<(), KillSwitchError> {
         use std::process::Command;
 
         self.cleanup()?;
@@ -985,7 +1092,16 @@ impl WindowsKillSwitch {
                 "name=QuicFuscate-KillSwitch-VPN",
                 "dir=out",
                 "action=allow",
-                &format!("remoteip={}", server_ip),
+                &format!(
+                    "remoteip={}",
+                    policy
+                        .server_ipv4()
+                        .map(|(ip, _)| ip.to_string())
+                        .or_else(|| policy.server_ipv6().map(|(ip, _)| ip.to_string()))
+                        .ok_or_else(|| KillSwitchError::InvalidPolicy(
+                            "at least one VPN server address is required".to_string()
+                        ))?
+                ),
             ])
             .status()
             .map_err(|e| KillSwitchError::CommandFailed(e.to_string()))?;
@@ -1084,10 +1200,55 @@ impl WindowsKillSwitch {
 mod tests {
     use super::*;
 
+    fn test_policy() -> VpnFirewallPolicy {
+        VpnFirewallPolicy::new(
+            "tun0",
+            "198.51.100.1:4433".parse().unwrap(),
+            Some("2001:db8::1".parse().unwrap()),
+            ["10.8.0.53".parse().unwrap(), "fd00::53".parse().unwrap()],
+        )
+        .unwrap()
+    }
+
     #[test]
     fn test_kill_switch_new() {
         let ks = KillSwitch::new();
         assert!(!ks.is_enabled());
+    }
+
+    #[test]
+    fn firewall_policy_rejects_rule_injection_and_bounds_dns_state() {
+        let invalid = VpnFirewallPolicy::new(
+            "tun0\nflush ruleset",
+            "198.51.100.1:4433".parse().unwrap(),
+            None,
+            [],
+        );
+        assert!(matches!(invalid, Err(KillSwitchError::InvalidPolicy(_))));
+
+        let too_many_dns: Vec<IpAddr> =
+            (1..=9).map(|last| IpAddr::V4(Ipv4Addr::new(10, 0, 0, last))).collect();
+        let invalid = VpnFirewallPolicy::new(
+            "tun0",
+            "198.51.100.1:4433".parse().unwrap(),
+            None,
+            too_many_dns,
+        );
+        assert!(matches!(invalid, Err(KillSwitchError::InvalidPolicy(_))));
+    }
+
+    #[test]
+    fn firewall_policy_deduplicates_dns_and_retains_dual_stack_endpoint() {
+        let policy = VpnFirewallPolicy::new(
+            "tun0",
+            "198.51.100.1:4433".parse().unwrap(),
+            Some("2001:db8::1".parse().unwrap()),
+            ["10.8.0.53".parse().unwrap(), "10.8.0.53".parse().unwrap()],
+        )
+        .unwrap();
+        assert_eq!(policy.dns_servers(), &["10.8.0.53".parse::<IpAddr>().unwrap()]);
+        assert_eq!(policy.server_ipv4(), Some(("198.51.100.1".parse().unwrap(), 4433)));
+        assert_eq!(policy.server_ipv6(), Some(("2001:db8::1".parse().unwrap(), 4433)));
     }
 
     #[test]
@@ -1108,7 +1269,7 @@ mod tests {
         assert!(!ks.is_enabled());
         // on_vpn_connected/on_vpn_disconnected require root, test state only
         // The key invariant: without enable(), these are no-ops
-        let _ = ks.on_vpn_connected("tun0", "1.2.3.4");
+        let _ = ks.on_vpn_connected(&test_policy());
         let _ = ks.on_vpn_disconnected();
         assert!(!ks.is_enabled());
     }
@@ -1134,18 +1295,23 @@ mod tests {
         // The output chain must hook at filter priority with default drop.
         assert!(ruleset.contains("type filter hook output priority 0; policy drop;"));
         // Loopback must be allowed.
-        assert!(ruleset.contains("iifname \"lo\" accept"));
+        assert!(ruleset.contains("oifname \"lo\" accept"));
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn test_nftables_allow_ruleset_includes_server_and_tun() {
         let ks = NftablesKillSwitch::new_nftables("198.51.100.1", "tun0");
-        let ruleset = ks.allow_ruleset("tun0", "198.51.100.1");
+        let ruleset = ks.policy_ruleset(&test_policy(), true);
 
-        assert!(ruleset.contains("iifname \"lo\" accept"));
-        assert!(ruleset.contains("ip daddr 198.51.100.1 accept"));
+        assert!(ruleset.contains("oifname \"lo\" accept"));
+        assert!(ruleset.contains("ip daddr 198.51.100.1 udp dport 4433 accept"));
+        assert!(ruleset.contains("ip6 daddr 2001:db8::1 udp dport 4433 accept"));
         assert!(ruleset.contains("oifname \"tun0\" accept"));
+        assert!(ruleset.contains("ip daddr 10.8.0.53 udp dport 53 accept"));
+        assert!(ruleset.contains("ip6 daddr fd00::53 tcp dport 53 accept"));
+        assert!(ruleset.contains("udp dport 53 drop"));
+        assert!(ruleset.contains("tcp dport 53 drop"));
         assert!(ruleset.contains("policy drop;"));
     }
 
@@ -1153,10 +1319,11 @@ mod tests {
     #[test]
     fn test_nftables_allow_ruleset_with_port_restricts_udp() {
         let ks = NftablesKillSwitch::new_nftables("198.51.100.1", "tun0");
-        ks.set_server_port(4433);
-        let ruleset = ks.allow_ruleset("tun0", "198.51.100.1");
+        let ruleset = ks.policy_ruleset(&test_policy(), false);
 
         assert!(ruleset.contains("ip daddr 198.51.100.1 udp dport 4433 accept"));
+        assert!(!ruleset.contains("oifname \"tun0\" accept"));
+        assert!(!ruleset.contains("dport 53 drop"));
     }
 
     #[cfg(target_os = "linux")]
@@ -1173,7 +1340,6 @@ mod tests {
         let ks = NftablesKillSwitch::new();
         assert!(ks.server_addr.lock().unwrap().is_none());
         assert!(ks.tun_iface.lock().unwrap().is_none());
-        assert!(ks.server_port.lock().unwrap().is_none());
     }
 
     #[cfg(target_os = "linux")]
@@ -1181,7 +1347,7 @@ mod tests {
     fn test_nftables_block_and_allow_rulesets_share_table_name() {
         let ks = NftablesKillSwitch::new();
         let block = ks.block_ruleset();
-        let allow = ks.allow_ruleset("tun0", "1.2.3.4");
+        let allow = ks.policy_ruleset(&test_policy(), true);
 
         // Both must reference the same inet table.
         assert!(block.contains("table inet quicfuscate_ks"));
@@ -1208,36 +1374,24 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn test_iptables_and_nftables_killswitch_produce_equivalent_rules() {
-        let server_ip = "198.51.100.1";
-        let tun_name = "tun0";
-
-        // iptables ruleset (from the existing allow_vpn_traffic impl)
-        let iptables_rules = format!(
-            "*filter\n\
-             :{} - [0:0]\n\
-             -A {} -o lo -j ACCEPT\n\
-             -A {} -d {} -j ACCEPT\n\
-             -A {} -o {} -j ACCEPT\n\
-             -A {} -j DROP\n\
-             COMMIT\n",
-            KS_CHAIN, KS_CHAIN, KS_CHAIN, server_ip, KS_CHAIN, tun_name, KS_CHAIN
-        );
+        let policy = test_policy();
+        let iptables_rules = IptablesKillSwitch::policy_rules(&policy, false, true);
 
         // nftables ruleset
-        let nft_ks = NftablesKillSwitch::new_nftables(server_ip, tun_name);
-        let nft_rules = nft_ks.allow_ruleset(tun_name, server_ip);
+        let nft_ks = NftablesKillSwitch::new_nftables("198.51.100.1", "tun0");
+        let nft_rules = nft_ks.policy_ruleset(&policy, true);
 
         // Both must allow loopback.
         assert!(iptables_rules.contains("-o lo -j ACCEPT"));
-        assert!(nft_rules.contains("iifname \"lo\" accept"));
+        assert!(nft_rules.contains("oifname \"lo\" accept"));
 
         // Both must allow traffic to the VPN server.
-        assert!(iptables_rules.contains(&format!("-d {} -j ACCEPT", server_ip)));
-        assert!(nft_rules.contains(&format!("ip daddr {} accept", server_ip)));
+        assert!(iptables_rules.contains("-d 198.51.100.1 -p udp --dport 4433 -j ACCEPT"));
+        assert!(nft_rules.contains("ip daddr 198.51.100.1 udp dport 4433 accept"));
 
         // Both must allow traffic through the TUN interface.
-        assert!(iptables_rules.contains(&format!("-o {} -j ACCEPT", tun_name)));
-        assert!(nft_rules.contains(&format!("oifname \"{}\" accept", tun_name)));
+        assert!(iptables_rules.contains("-o tun0 -j ACCEPT"));
+        assert!(nft_rules.contains("oifname \"tun0\" accept"));
 
         // Both must drop all other traffic.
         assert!(iptables_rules.contains("-j DROP"));

@@ -29,7 +29,7 @@ mod subsystems;
 pub use backend::*;
 pub use connection::*;
 pub use io_driver::*;
-pub use killswitch::KillSwitch;
+pub use killswitch::{KillSwitch, VpnFirewallPolicy};
 pub use profile::{Profile, ProfileError, ProfileManager};
 pub use quality::{BandwidthTracker, Quality, QualityTracker};
 pub use runtime::*;
@@ -40,7 +40,7 @@ use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
 
-use crate::engine::{EngineConfig, EngineError, EngineState};
+use crate::engine::{DisconnectReason, EngineConfig, EngineError, EngineState};
 use crate::interface::{TunConfig, TunInterface};
 use crate::optimize::MemoryPool;
 
@@ -73,6 +73,8 @@ pub struct ClientRuntime {
     state: ClientState,
     /// Event-driven handshake completion notification (replaces polling loop).
     handshake_event: Arc<(parking_lot::Mutex<bool>, parking_lot::Condvar)>,
+    /// First automatically detected connection-loss reason for the active session.
+    loss_reason: Arc<parking_lot::Mutex<Option<DisconnectReason>>>,
 }
 
 /// Client subsystem handles (initialized during start).
@@ -189,6 +191,7 @@ impl ClientRuntime {
                 parking_lot::Mutex::new(false),
                 parking_lot::Condvar::new(),
             )),
+            loss_reason: Arc::new(parking_lot::Mutex::new(None)),
         })
     }
 
@@ -305,6 +308,8 @@ impl ClientRuntime {
             return Err(EngineError::InvalidState(self.state.into(), "connect (must be running)"));
         }
 
+        *self.loss_reason.lock() = None;
+
         // Create QUIC connection
         let conn = ClientConnection::connect(&self.config)?;
         let local_addr = conn.local_addr();
@@ -390,6 +395,66 @@ impl ClientRuntime {
         Ok(())
     }
 
+    /// Start the single owner for remote-close and heartbeat-loss detection.
+    ///
+    /// The watchdog samples every 50 ms, so a timeout transition reaches the
+    /// firewall no later than 50 ms after the configured deadline under a
+    /// normally scheduled runtime.
+    pub fn start_loss_watchdog(
+        &mut self,
+        timeout: std::time::Duration,
+        on_loss: Arc<dyn Fn(DisconnectReason) + Send + Sync>,
+    ) -> Result<(), EngineError> {
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| EngineError::Internal("Runtime not initialized".to_string()))?
+            .clone();
+        let connection = self
+            .connection
+            .as_ref()
+            .ok_or_else(|| EngineError::Connection("Connection not initialized".to_string()))?
+            .shared();
+        let io_driver = self
+            .io_driver
+            .as_ref()
+            .ok_or_else(|| EngineError::Internal("I/O driver not initialized".to_string()))?
+            .clone();
+        let loss_reason = self.loss_reason.clone();
+
+        let watchdog = runtime.spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_millis(50));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let detected = {
+                    let guard = connection.lock();
+                    classify_connection_loss(
+                        guard.conn.is_closed(),
+                        guard.conn.last_activity_elapsed(),
+                        timeout,
+                    )
+                };
+                let Some(reason) = detected else {
+                    continue;
+                };
+                {
+                    let mut stored = loss_reason.lock();
+                    if stored.is_some() {
+                        break;
+                    }
+                    *stored = Some(reason.clone());
+                }
+                io_driver.shutdown();
+                on_loss(reason);
+                break;
+            }
+        });
+        self.io_handles.push(watchdog);
+        Ok(())
+    }
+
     /// Disconnect from the server.
     pub fn disconnect(&mut self) -> Result<(), EngineError> {
         if self.state != ClientState::Connected {
@@ -466,6 +531,11 @@ impl ClientRuntime {
         self.connection.as_ref()
     }
 
+    /// Return the automatic connection-loss reason, if the watchdog fired.
+    pub fn connection_loss_reason(&self) -> Option<DisconnectReason> {
+        self.loss_reason.lock().clone()
+    }
+
     /// Get mutable connection reference.
     pub fn connection_mut(&mut self) -> Option<&mut ClientConnection> {
         self.connection.as_mut()
@@ -507,6 +577,20 @@ impl ClientRuntime {
     }
 }
 
+fn classify_connection_loss(
+    remote_closed: bool,
+    idle: std::time::Duration,
+    timeout: std::time::Duration,
+) -> Option<DisconnectReason> {
+    if remote_closed {
+        Some(DisconnectReason::RemoteClosed)
+    } else if !timeout.is_zero() && idle >= timeout {
+        Some(DisconnectReason::Timeout)
+    } else {
+        None
+    }
+}
+
 impl Drop for ClientRuntime {
     fn drop(&mut self) {
         if self.state != ClientState::Stopped {
@@ -526,6 +610,38 @@ mod tests {
         let config = EngineConfig::default();
         let runtime = ClientRuntime::new(config);
         assert!(runtime.is_ok());
+    }
+
+    #[test]
+    fn loss_detector_prioritizes_remote_close_and_honors_timeout_boundary() {
+        assert!(matches!(
+            classify_connection_loss(
+                true,
+                std::time::Duration::ZERO,
+                std::time::Duration::from_secs(30)
+            ),
+            Some(DisconnectReason::RemoteClosed)
+        ));
+        assert!(classify_connection_loss(
+            false,
+            std::time::Duration::from_millis(999),
+            std::time::Duration::from_secs(1)
+        )
+        .is_none());
+        assert!(classify_connection_loss(
+            false,
+            std::time::Duration::from_secs(86_400),
+            std::time::Duration::ZERO
+        )
+        .is_none());
+        assert!(matches!(
+            classify_connection_loss(
+                false,
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(1)
+            ),
+            Some(DisconnectReason::Timeout)
+        ));
     }
 
     // Note: TUN tests require root/admin privileges

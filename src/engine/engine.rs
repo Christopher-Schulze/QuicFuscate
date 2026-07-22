@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 
 use super::config::{ConfigError, EngineConfig, EngineMode};
-use crate::implementations::client::{ClientRuntime, KillSwitch};
+use crate::implementations::client::{ClientRuntime, KillSwitch, VpnFirewallPolicy};
 use crate::implementations::server::{
     metrics::Metrics, normalize_runtime_optimize_config, AdminAction, PreparedStandaloneLaunch,
     ServerRuntime,
@@ -248,7 +248,7 @@ pub struct QuicFuscateEngine {
     /// Statistics
     stats: Arc<EngineStats>,
     /// Registered callbacks
-    callbacks: Vec<Box<dyn EngineCallback>>,
+    callbacks: Arc<Mutex<Vec<Arc<dyn EngineCallback>>>>,
     /// Central event sinks for control-plane integrations.
     event_sinks: Arc<Mutex<Vec<mpsc::Sender<EngineEvent>>>>,
     /// Client runtime (client mode)
@@ -568,7 +568,7 @@ impl QuicFuscateEngine {
             config,
             state: EngineState::Created,
             stats: Arc::new(EngineStats::default()),
-            callbacks: Vec::new(),
+            callbacks: Arc::new(Mutex::new(Vec::new())),
             event_sinks: Arc::new(Mutex::new(Vec::new())),
             client_runtime: None,
             server_loop_handle: None,
@@ -583,7 +583,16 @@ impl QuicFuscateEngine {
 
     /// Get the current engine state.
     pub fn state(&self) -> EngineState {
-        self.state
+        if self.state == EngineState::Connected
+            && self
+                .client_runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.connection_loss_reason().is_some())
+        {
+            EngineState::Running
+        } else {
+            self.state
+        }
     }
 
     /// Get a reference to the configuration.
@@ -601,12 +610,12 @@ impl QuicFuscateEngine {
 
     /// Add an event callback.
     pub fn add_callback(&mut self, callback: impl EngineCallback + 'static) {
-        self.callbacks.push(Box::new(callback));
+        self.callbacks.lock().push(Arc::new(callback));
     }
 
     /// Remove all callbacks.
     pub fn clear_callbacks(&mut self) {
-        self.callbacks.clear();
+        self.callbacks.lock().clear();
     }
 
     /// Subscribe to structured engine events for control-plane integration.
@@ -679,14 +688,15 @@ impl QuicFuscateEngine {
     /// `Ok(())` if started successfully, or an error.
     pub fn start(&mut self) -> Result<(), EngineError> {
         // Validate state
-        match self.state {
+        let state = self.state();
+        match state {
             EngineState::Created | EngineState::Stopped => {}
             _ => {
-                return Err(EngineError::InvalidState(self.state, "start"));
+                return Err(EngineError::InvalidState(state, "start"));
             }
         }
 
-        let old_state = self.state;
+        let old_state = state;
         self.set_state(EngineState::Starting);
         self.start_time = Some(Instant::now());
 
@@ -824,24 +834,25 @@ impl QuicFuscateEngine {
     /// `Ok(())` if stopped successfully, or an error.
     pub fn stop(&mut self) -> Result<(), EngineError> {
         // Validate state
-        match self.state {
+        let state = self.state();
+        match state {
             EngineState::Running
             | EngineState::Connecting
             | EngineState::Connected
             | EngineState::Error => {}
             EngineState::Stopped => return Ok(()), // Already stopped
             _ => {
-                return Err(EngineError::InvalidState(self.state, "stop"));
+                return Err(EngineError::InvalidState(state, "stop"));
             }
         }
 
-        if self.state == EngineState::Connected {
+        if state == EngineState::Connected {
             if let Err(e) = self.disconnect() {
                 log::warn!("Engine disconnect during stop failed: {}", e);
             }
         }
 
-        let old_state = self.state;
+        let old_state = state;
         self.set_state(EngineState::Stopping);
 
         if let Some(mut runtime) = self.client_runtime.take() {
@@ -900,11 +911,12 @@ impl QuicFuscateEngine {
         }
 
         // Validate state
-        if self.state != EngineState::Running {
-            return Err(EngineError::InvalidState(self.state, "connect"));
+        let state = self.state();
+        if state != EngineState::Running {
+            return Err(EngineError::InvalidState(state, "connect"));
         }
 
-        let old_state = self.state;
+        let old_state = state;
 
         // Resolve remote address for validation
         let remote: SocketAddr = self.config.connection.remote.parse().map_err(|e| {
@@ -913,6 +925,23 @@ impl QuicFuscateEngine {
                 self.config.connection.remote, e
             ))
         })?;
+        let firewall_policy = VpnFirewallPolicy::new(
+            if self.config.interface.tun_name.is_empty() {
+                "tun0"
+            } else {
+                &self.config.interface.tun_name
+            },
+            remote,
+            None,
+            self.config.interface.dns_servers.iter().copied(),
+        )
+        .map_err(|error| EngineError::Config(error.to_string()))?;
+
+        if let Some(ref kill_switch) = self.kill_switch {
+            kill_switch
+                .on_vpn_connecting(&firewall_policy)
+                .map_err(|error| EngineError::Internal(error.to_string()))?;
+        }
 
         self.set_state(EngineState::Connecting);
         self.notify_state_change(old_state, EngineState::Connecting);
@@ -921,6 +950,10 @@ impl QuicFuscateEngine {
             .client_runtime
             .as_mut()
             .ok_or_else(|| EngineError::Internal("Client runtime not initialized".to_string()))?;
+
+        if runtime.is_connected() && runtime.connection_loss_reason().is_some() {
+            runtime.disconnect()?;
+        }
 
         match runtime.connect() {
             Ok(_) => {}
@@ -951,20 +984,65 @@ impl QuicFuscateEngine {
 
         // Notify kill switch that VPN is connected
         if let Some(ref ks) = self.kill_switch {
-            let tun_name = if self.config.interface.tun_name.is_empty() {
-                "tun0"
-            } else {
-                &self.config.interface.tun_name
-            };
-            ks.on_vpn_connected(tun_name, &remote.ip().to_string()).map_err(|e| {
-                EngineError::Internal(format!("Kill switch VPN-connected failed: {}", e))
-            })?;
+            if let Err(error) = ks.on_vpn_connected(&firewall_policy) {
+                if let Err(disconnect_error) = runtime.disconnect() {
+                    log::warn!(
+                        "Client runtime cleanup after kill-switch policy failure failed: {}",
+                        disconnect_error
+                    );
+                }
+                self.set_state(EngineState::Running);
+                self.notify_state_change(EngineState::Connecting, EngineState::Running);
+                return Err(EngineError::Internal(format!(
+                    "Kill switch VPN-connected failed: {}",
+                    error
+                )));
+            }
             log::info!("Kill switch: VPN traffic allowed, non-VPN traffic blocked");
         }
 
         self.set_state(EngineState::Connected);
         self.notify_state_change(EngineState::Connecting, EngineState::Connected);
         self.notify_connected(remote);
+
+        let kill_switch = self.kill_switch.clone();
+        let callbacks = self.callbacks.clone();
+        let event_sinks = self.event_sinks.clone();
+        let on_loss = Arc::new(move |reason: DisconnectReason| {
+            if let Some(ref kill_switch) = kill_switch {
+                if let Err(error) = kill_switch.on_vpn_disconnected() {
+                    log::error!("Kill switch activation on connection loss failed: {}", error);
+                }
+            }
+            {
+                let mut sinks = event_sinks.lock();
+                sinks.retain(|sink| {
+                    sink.send(EngineEvent::StateChanged {
+                        old: EngineState::Connected,
+                        new: EngineState::Running,
+                    })
+                    .is_ok()
+                        && sink.send(EngineEvent::Disconnected { reason: reason.clone() }).is_ok()
+                });
+            }
+            let callback_snapshot = callbacks.lock().clone();
+            for callback in callback_snapshot {
+                callback.on_state_change(EngineState::Connected, EngineState::Running);
+                callback.on_disconnected(reason.clone());
+            }
+        });
+        let watchdog_result = self
+            .client_runtime
+            .as_mut()
+            .ok_or_else(|| EngineError::Internal("Client runtime not initialized".to_string()))?
+            .start_loss_watchdog(
+                Duration::from_millis(self.config.security.heartbeat_timeout_ms),
+                on_loss,
+            );
+        if let Err(error) = watchdog_result {
+            self.handle_connection_loss(DisconnectReason::Error(error.to_string()));
+            return Err(error);
+        }
 
         Ok(())
     }
@@ -976,11 +1054,12 @@ impl QuicFuscateEngine {
     /// `Ok(())` if disconnected successfully, or an error.
     pub fn disconnect(&mut self) -> Result<(), EngineError> {
         // Validate state
-        if self.state != EngineState::Connected {
-            return Err(EngineError::InvalidState(self.state, "disconnect"));
+        let state = self.state();
+        if state != EngineState::Connected {
+            return Err(EngineError::InvalidState(state, "disconnect"));
         }
 
-        let old_state = self.state;
+        let old_state = state;
 
         if let Some(runtime) = self.client_runtime.as_mut() {
             runtime.disconnect()?;
@@ -1007,7 +1086,7 @@ impl QuicFuscateEngine {
     ///
     /// This is equivalent to calling `disconnect()` followed by `connect()`.
     pub fn reconnect(&mut self) -> Result<(), EngineError> {
-        if self.state == EngineState::Connected {
+        if self.state() == EngineState::Connected {
             self.disconnect()?;
         }
         self.connect()
@@ -1018,7 +1097,7 @@ impl QuicFuscateEngine {
     /// Activates the kill switch immediately if enabled, transitions to Running state,
     /// and emits a disconnected event with the given reason.
     pub fn handle_connection_loss(&mut self, reason: DisconnectReason) {
-        if self.state != EngineState::Connected {
+        if self.state() != EngineState::Connected {
             return;
         }
         log::warn!("Connection loss detected: {:?}, activating kill switch", reason);
@@ -1035,7 +1114,7 @@ impl QuicFuscateEngine {
             }
         }
 
-        let old_state = self.state;
+        let old_state = self.state();
         self.set_state(EngineState::Running);
         self.notify_state_change(old_state, EngineState::Running);
         self.notify_disconnected(reason);
@@ -1046,44 +1125,15 @@ impl QuicFuscateEngine {
         self.kill_switch.as_ref().map(|ks| ks.is_enabled()).unwrap_or(false)
     }
 
-    /// Check the heartbeat watchdog and trigger connection-loss handling if the
-    /// heartbeat timeout has been exceeded.
+    /// Compatibility probe for the runtime-owned automatic loss watchdog.
     ///
-    /// This method should be called periodically (e.g., every 1–5 seconds) by
-    /// the engine's run loop or an external monitor. When the time since the
-    /// last received packet exceeds `security.heartbeat_timeout_ms`, it calls
-    /// `handle_connection_loss(Timeout)`, which activates the kill switch and
-    /// transitions the engine back to `Running` state.
-    ///
-    /// Returns `true` if connection loss was detected and handled, `false` otherwise.
+    /// Loss detection and firewall activation are automatic. This method no
+    /// longer drives a second polling loop; it only reports whether the runtime
+    /// watchdog has already handled a loss.
     pub fn check_heartbeat(&mut self) -> bool {
-        // Only check when connected and heartbeat is enabled
-        if self.state != EngineState::Connected {
-            return false;
-        }
-        let timeout_ms = self.config.security.heartbeat_timeout_ms;
-        if timeout_ms == 0 {
-            return false; // Heartbeat watchdog disabled
-        }
-
-        // Get elapsed time since last inbound packet
-        let elapsed = self
-            .client_runtime
+        self.client_runtime
             .as_ref()
-            .and_then(|rt| rt.connection())
-            .map(|conn| conn.last_activity_elapsed())
-            .unwrap_or(Duration::ZERO);
-
-        if elapsed >= Duration::from_millis(timeout_ms) {
-            log::warn!(
-                "Heartbeat timeout: {}ms elapsed (threshold: {}ms) - triggering connection loss",
-                elapsed.as_millis(),
-                timeout_ms
-            );
-            self.handle_connection_loss(DisconnectReason::Timeout);
-            return true;
-        }
-        false
+            .is_some_and(|runtime| runtime.connection_loss_reason().is_some())
     }
 
     // ========================================================================
@@ -1242,13 +1292,13 @@ impl QuicFuscateEngine {
 
     /// Check if the engine is currently connected (client mode only).
     pub fn is_connected(&self) -> bool {
-        self.state == EngineState::Connected
+        self.state() == EngineState::Connected
     }
 
     /// Check if the engine is running (ready for connections).
     pub fn is_running(&self) -> bool {
         matches!(
-            self.state,
+            self.state(),
             EngineState::Running | EngineState::Connecting | EngineState::Connected
         )
     }
@@ -1317,42 +1367,42 @@ impl QuicFuscateEngine {
 
     fn notify_state_change(&self, old: EngineState, new: EngineState) {
         self.emit_event(EngineEvent::StateChanged { old, new });
-        for cb in &self.callbacks {
+        for cb in self.callbacks.lock().clone() {
             cb.on_state_change(old, new);
         }
     }
 
     fn notify_connected(&self, remote: SocketAddr) {
         self.emit_event(EngineEvent::Connected { remote });
-        for cb in &self.callbacks {
+        for cb in self.callbacks.lock().clone() {
             cb.on_connected(remote);
         }
     }
 
     fn notify_disconnected(&self, reason: DisconnectReason) {
         self.emit_event(EngineEvent::Disconnected { reason: reason.clone() });
-        for cb in &self.callbacks {
+        for cb in self.callbacks.lock().clone() {
             cb.on_disconnected(reason.clone());
         }
     }
 
     fn notify_stats_update(&self, stats: &StatsSnapshot) {
         self.emit_event(EngineEvent::StatsUpdated { stats: stats.clone() });
-        for cb in &self.callbacks {
+        for cb in self.callbacks.lock().clone() {
             cb.on_stats_update(stats);
         }
     }
 
     fn notify_stealth_escalation(&self, from: u8, to: u8) {
         self.emit_event(EngineEvent::StealthEscalated { from, to });
-        for cb in &self.callbacks {
+        for cb in self.callbacks.lock().clone() {
             cb.on_stealth_escalation(from, to);
         }
     }
 
     fn notify_error(&self, error: &EngineError) {
         self.emit_event(EngineEvent::Error { error: error.clone() });
-        for cb in &self.callbacks {
+        for cb in self.callbacks.lock().clone() {
             cb.on_error(error);
         }
     }

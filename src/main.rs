@@ -19,7 +19,7 @@ use quicfuscate::stealth::{BrowserProfile, FingerprintProfile, OsProfile};
 use quicfuscate::telemetry;
 #[cfg(feature = "benches")]
 use std::collections::VecDeque;
-use std::net::{Ipv4Addr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -800,6 +800,14 @@ struct SharedArgs {
     /// Cleanup stale firewall rules from a crashed previous session, then exit
     #[clap(long)]
     cleanup_firewall: bool,
+
+    /// VPN DNS server allowed on port 53 while the tunnel is connected
+    #[clap(long, value_delimiter = ',')]
+    vpn_dns: Vec<IpAddr>,
+
+    /// Maximum inbound silence before fail-closed tunnel-loss handling
+    #[clap(long, default_value_t = 30_000)]
+    heartbeat_timeout_ms: u64,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1151,6 +1159,8 @@ async fn async_main() -> std::io::Result<()> {
                 qkey.as_deref(),
                 shared.kill_switch,
                 shared.cleanup_firewall,
+                &shared.vpn_dns,
+                shared.heartbeat_timeout_ms,
             )
             .await?;
         }
@@ -1532,7 +1542,16 @@ async fn run_client(
     qkey: Option<&str>,
     kill_switch_enabled: bool,
     cleanup_firewall: bool,
+    vpn_dns: &[IpAddr],
+    heartbeat_timeout_ms: u64,
 ) -> std::io::Result<()> {
+    enum ExitReason {
+        CleanShutdown,
+        RemoteClosed,
+        HeartbeatTimeout,
+        SocketError(String),
+    }
+
     let config_path = config.as_ref();
 
     // Handle --cleanup-firewall: remove stale rules from crashed session, then exit
@@ -1553,9 +1572,14 @@ async fn run_client(
         return Ok(());
     }
 
-    let server_addr = remote_addr_str.to_socket_addrs()?.next().ok_or_else(|| {
+    let resolved_servers: Vec<_> = remote_addr_str.to_socket_addrs()?.collect();
+    let server_addr = resolved_servers.first().copied().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "Server address not found")
     })?;
+    let alternate_server_ip = resolved_servers
+        .iter()
+        .map(|address| address.ip())
+        .find(|ip| ip.is_ipv4() != server_addr.ip().is_ipv4());
 
     let local_addr = local_addr_str.to_socket_addrs()?.next().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "Local address invalid")
@@ -1568,19 +1592,26 @@ async fn run_client(
 
     info!("Client connecting to {}", server_addr);
 
+    let tun_name_str = tun_name.clone().unwrap_or_else(|| "tun0".to_string());
+    let firewall_policy = quicfuscate::implementations::client::VpnFirewallPolicy::new(
+        tun_name_str.clone(),
+        server_addr,
+        alternate_server_ip,
+        vpn_dns.iter().copied(),
+    )
+    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string()))?;
+
     // Initialize kill switch if enabled
     let kill_switch = if kill_switch_enabled {
         let ks = std::sync::Arc::new(quicfuscate::implementations::client::KillSwitch::new());
-        match ks.enable() {
-            Ok(()) => {
-                info!("Kill switch enabled (firewall blocking until VPN connects)");
-                Some(ks)
-            }
-            Err(e) => {
-                warn!("Kill switch enable failed (need root?): {}", e);
-                None
-            }
-        }
+        ks.enable().map_err(|error| {
+            std::io::Error::other(format!("kill switch enable failed: {error}"))
+        })?;
+        ks.on_vpn_connecting(&firewall_policy).map_err(|error| {
+            std::io::Error::other(format!("kill switch connecting policy failed: {error}"))
+        })?;
+        info!("Kill switch enabled with VPN-endpoint-only connecting policy");
+        Some(ks)
     } else {
         None
     };
@@ -1739,7 +1770,6 @@ async fn run_client(
     let mut kill_switch_connected = false;
 
     // Optional TUN bridging setup
-    let tun_name_str = tun_name.clone().unwrap_or_else(|| "tun0".to_string());
     #[allow(clippy::type_complexity)]
     let (tun_rx, tun_writer, mut h3_stream_id): (
         Option<std::sync::mpsc::Receiver<Vec<u8>>>,
@@ -1820,7 +1850,7 @@ async fn run_client(
     let shutdown_signal = wait_shutdown_signal();
     tokio::pin!(shutdown_signal);
 
-    loop {
+    let exit_reason = loop {
         tokio::select! {
             _ = &mut shutdown_signal => {
                 if let Err(e) = conn.conn.close(true, 0x0, b"shutdown") {
@@ -1829,7 +1859,7 @@ async fn run_client(
                 if let Err(e) = flush_connected_outgoing(&socket, &mut conn, &mut out).await {
                     warn!("Client shutdown frame flush failed: {}", e);
                 }
-                break;
+                break ExitReason::CleanShutdown;
             }
             recv_res = recv_connected_datagram(&socket, &mut buf) => {
                 match recv_res {
@@ -1879,11 +1909,12 @@ async fn run_client(
                         }
                         if conn.conn.is_closed() {
                             info!("Server closed the connection");
-                            break;
+                            break ExitReason::RemoteClosed;
                         }
                     }
                     Err(e) => {
                         error!("Failed to read from socket: {}", e);
+                        break ExitReason::SocketError(e.to_string());
                     }
                 }
             }
@@ -1901,14 +1932,15 @@ async fn run_client(
 
                 // Activate kill switch VPN-allow rules once connection is established
                 if conn.conn.is_established() && !kill_switch_connected {
-                    kill_switch_connected = true;
                     if let Some(ref ks) = kill_switch {
-                        let server_ip = server_addr.ip().to_string();
-                        match ks.on_vpn_connected(&tun_name_str, &server_ip) {
-                            Ok(()) => info!("Kill switch: VPN traffic allowed, non-VPN blocked"),
-                            Err(e) => warn!("Kill switch on_vpn_connected failed: {}", e),
+                        if let Err(error) = ks.on_vpn_connected(&firewall_policy) {
+                            break ExitReason::SocketError(format!(
+                                "kill switch connected policy failed: {error}"
+                            ));
                         }
+                        info!("Kill switch: VPN traffic allowed, non-VPN blocked");
                     }
+                    kill_switch_connected = true;
                 }
 
                 if tun_enable {
@@ -1981,18 +2013,58 @@ async fn run_client(
                 if conn.conn.idle_timeout_elapsed() {
                     conn.conn.on_timeout();
                 }
+                if conn.conn.is_established()
+                    && heartbeat_timeout_ms > 0
+                    && conn.conn.last_activity_elapsed()
+                        >= Duration::from_millis(heartbeat_timeout_ms)
+                {
+                    warn!(
+                        "Client heartbeat timeout after {}ms; activating fail-closed firewall state",
+                        heartbeat_timeout_ms
+                    );
+                    break ExitReason::HeartbeatTimeout;
+                }
+                if conn.conn.is_closed() {
+                    break ExitReason::RemoteClosed;
+                }
                 tokio::task::yield_now().await;
+            }
+        }
+    };
+
+    if let Some(ref ks) = kill_switch {
+        match &exit_reason {
+            ExitReason::CleanShutdown => {
+                ks.disable().map_err(|error| {
+                    std::io::Error::other(format!(
+                        "kill switch cleanup on clean shutdown failed: {error}"
+                    ))
+                })?;
+            }
+            _ => {
+                ks.on_vpn_disconnected().map_err(|error| {
+                    std::io::Error::other(format!(
+                        "kill switch fail-closed transition failed: {error}"
+                    ))
+                })?;
             }
         }
     }
 
-    if let Some(ref ks) = kill_switch {
-        if let Err(e) = ks.disable() {
-            warn!("Kill switch disable on shutdown failed: {}", e);
-        }
+    match exit_reason {
+        ExitReason::CleanShutdown => Ok(()),
+        ExitReason::RemoteClosed => Err(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "VPN server closed the connection; firewall remains fail-closed",
+        )),
+        ExitReason::HeartbeatTimeout => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "VPN heartbeat timed out; firewall remains fail-closed",
+        )),
+        ExitReason::SocketError(error) => Err(std::io::Error::other(format!(
+            "VPN socket failed; firewall remains fail-closed: {error}"
+        ))),
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
