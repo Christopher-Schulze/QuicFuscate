@@ -355,6 +355,29 @@ mod tests {
     }
 
     #[test]
+    fn v2_provider_carries_version_information_transport_parameter() {
+        let crypto = Arc::new(RwLock::new(CryptoContext::default()));
+        let information = crate::transport::version::VersionInformation {
+            chosen: crate::transport::PROTOCOL_VERSION_V2,
+            available: vec![
+                crate::transport::PROTOCOL_VERSION_V2,
+                crate::transport::PROTOCOL_VERSION,
+            ],
+        }
+        .encode_parameter()
+        .unwrap();
+        let provider = create_provider_for_version(
+            false,
+            crypto,
+            false,
+            crate::transport::PROTOCOL_VERSION_V2,
+            &information,
+        )
+        .expect("create v2 provider");
+        assert!(provider.get_quic_transport_params().ends_with(&information));
+    }
+
+    #[test]
     fn profile_from_fp_is_deterministic_for_same_input() {
         let fp = crate::stealth::FingerprintProfile::new(
             crate::stealth::BrowserProfile::Firefox,
@@ -599,6 +622,8 @@ pub trait QuicTlsProvider: Send + Sync {
     fn get_quic_transport_params(&self) -> Vec<u8>;
     /// Set peer's transport parameters
     fn set_peer_transport_params(&mut self, params: &[u8]) -> Result<(), ConnectionError>;
+    /// Returns authenticated peer transport parameters once rustls exposes them.
+    fn peer_quic_transport_params(&self) -> Option<Vec<u8>>;
     /// Initiate key update
     fn key_update(&mut self) -> Result<(), ConnectionError>;
     /// Advance read-side 1-RTT keys only.
@@ -637,7 +662,29 @@ pub(crate) fn create_provider_with_peer_verification(
     crypto: Arc<RwLock<CryptoContext>>,
     verify_peer: bool,
 ) -> Result<Box<dyn QuicTlsProvider>, ConnectionError> {
-    Ok(Box::new(CombinedProvider::new(is_server, crypto, verify_peer)?))
+    create_provider_for_version(
+        is_server,
+        crypto,
+        verify_peer,
+        crate::transport::PROTOCOL_VERSION,
+        &[],
+    )
+}
+
+pub(crate) fn create_provider_for_version(
+    is_server: bool,
+    crypto: Arc<RwLock<CryptoContext>>,
+    verify_peer: bool,
+    version: u32,
+    version_information_parameter: &[u8],
+) -> Result<Box<dyn QuicTlsProvider>, ConnectionError> {
+    Ok(Box::new(CombinedProvider::new(
+        is_server,
+        crypto,
+        verify_peer,
+        version,
+        version_information_parameter,
+    )?))
 }
 
 // ===============================
@@ -661,8 +708,16 @@ impl CombinedProvider {
         is_server: bool,
         crypto: Arc<RwLock<CryptoContext>>,
         verify_peer: bool,
+        version: u32,
+        version_information_parameter: &[u8],
     ) -> Result<Self, ConnectionError> {
-        let rustls = RustlsProvider::new(is_server, crypto.clone(), verify_peer)?;
+        let rustls = RustlsProvider::new(
+            is_server,
+            crypto.clone(),
+            verify_peer,
+            version,
+            version_information_parameter,
+        )?;
         // Cover is optional and intentionally separated from TLS protocol semantics.
         // It can be disabled via ENV QUICFUSCATE_TLS_COVER=0.
         // In base/performance mode, cover keeps traffic shape with reduced timing overhead.
@@ -793,6 +848,9 @@ impl QuicTlsProvider for CombinedProvider {
     fn set_peer_transport_params(&mut self, params: &[u8]) -> Result<(), ConnectionError> {
         self.rustls.set_peer_transport_params(params)
     }
+    fn peer_quic_transport_params(&self) -> Option<Vec<u8>> {
+        self.rustls.peer_quic_transport_params()
+    }
     fn key_update(&mut self) -> Result<(), ConnectionError> {
         self.rustls.key_update()
     }
@@ -833,7 +891,6 @@ mod rustls_provider {
     #[cfg(debug_assertions)]
     use rustls::pki_types::UnixTime;
     use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer, ServerName};
-    use rustls::quic::{self};
     #[cfg(debug_assertions)]
     use rustls::DigitallySignedStruct;
     use rustls::{ClientConfig, RootCertStore, ServerConfig};
@@ -865,6 +922,8 @@ mod rustls_provider {
         pub zero_rtt_enabled: bool,
         /// QUIC transport parameters to send to the peer.
         pub transport_params: Vec<u8>,
+        /// QUIC wire version used by rustls for TLS-derived packet protection.
+        pub quic_version: rustls::quic::Version,
         /// Peer's QUIC transport parameters (received during handshake).
         pub peer_transport_params: Option<Vec<u8>>,
         /// Active TLS profile configuration.
@@ -983,11 +1042,16 @@ mod rustls_provider {
             is_server: bool,
             crypto: Arc<RwLock<CryptoContext>>,
             verify_peer: bool,
+            version: u32,
+            version_information_parameter: &[u8],
         ) -> Result<Self, ConnectionError> {
+            let quic_version = Self::map_quic_version(version)?;
+            let mut transport_params = Self::default_transport_params();
+            transport_params.extend_from_slice(version_information_parameter);
             let connection = if is_server {
-                Self::create_server_connection()?
+                Self::create_server_connection(quic_version, transport_params.clone())?
             } else {
-                Self::create_client_connection(verify_peer)?
+                Self::create_client_connection(verify_peer, quic_version, transport_params.clone())?
             };
             let this = Self {
                 connection,
@@ -1000,7 +1064,8 @@ mod rustls_provider {
                 alpn: None,
                 peer_cert: None,
                 zero_rtt_enabled: false,
-                transport_params: Self::default_transport_params(),
+                transport_params,
+                quic_version,
                 peer_transport_params: None,
                 profile: None,
                 next_1rtt_secrets: None,
@@ -1015,6 +1080,14 @@ mod rustls_provider {
             };
 
             Ok(this)
+        }
+
+        fn map_quic_version(version: u32) -> Result<rustls::quic::Version, ConnectionError> {
+            match version {
+                crate::transport::PROTOCOL_VERSION => Ok(rustls::quic::Version::V1),
+                crate::transport::PROTOCOL_VERSION_V2 => Ok(rustls::quic::Version::V2),
+                _ => Err(ConnectionError::VersionMismatch),
+            }
         }
 
         fn queue_crypto_bytes(&mut self, level: super::Level, data: &[u8]) {
@@ -1164,6 +1237,8 @@ mod rustls_provider {
 
         fn create_client_connection(
             verify_peer: bool,
+            quic_version: rustls::quic::Version,
+            transport_params: Vec<u8>,
         ) -> Result<rustls::quic::Connection, ConnectionError> {
             #[cfg(not(debug_assertions))]
             let _ = verify_peer;
@@ -1210,9 +1285,9 @@ mod rustls_provider {
             Ok(rustls::quic::Connection::Client(
                 rustls::quic::ClientConnection::new(
                     Arc::new(config),
-                    quic::Version::V1,
+                    quic_version,
                     server_name,
-                    Vec::<u8>::new(),
+                    transport_params,
                 )
                 .map_err(|e| {
                     ConnectionError::TlsError(format!("Client connection error: {}", e))
@@ -1220,7 +1295,10 @@ mod rustls_provider {
             ))
         }
 
-        fn create_server_connection() -> Result<rustls::quic::Connection, ConnectionError> {
+        fn create_server_connection(
+            quic_version: rustls::quic::Version,
+            transport_params: Vec<u8>,
+        ) -> Result<rustls::quic::Connection, ConnectionError> {
             let certs_res = Self::load_certs_from_file();
             let key_res = Self::load_private_key();
             let (certs, key) = match (certs_res, key_res) {
@@ -1261,8 +1339,8 @@ mod rustls_provider {
             Ok(rustls::quic::Connection::Server(
                 rustls::quic::ServerConnection::new(
                     Arc::new(config),
-                    quic::Version::V1,
-                    Vec::<u8>::new(),
+                    quic_version,
+                    transport_params,
                 )
                 .map_err(|e| {
                     ConnectionError::TlsError(format!("Server connection error: {}", e))
@@ -1437,9 +1515,9 @@ mod rustls_provider {
             self.connection = rustls::quic::Connection::Client(
                 rustls::quic::ClientConnection::new(
                     Arc::new(cfg),
-                    quic::Version::V1,
+                    self.quic_version,
                     server_name,
-                    Vec::<u8>::new(),
+                    self.transport_params.clone(),
                 )
                 .map_err(|e| {
                     ConnectionError::TlsError(format!("Client connection error: {}", e))
@@ -1644,6 +1722,10 @@ mod rustls_provider {
             _crypto: &Arc<RwLock<CryptoContext>>,
         ) -> Result<(), ConnectionError> {
             self.flush_handshake_io()?;
+            if self.peer_transport_params.is_none() {
+                self.peer_transport_params =
+                    self.connection.quic_transport_parameters().map(<[u8]>::to_vec);
+            }
             let have_1rtt = {
                 let crypto = self.crypto.read();
                 crypto.open_1rtt.is_some() && crypto.seal_1rtt.is_some()
@@ -1651,7 +1733,11 @@ mod rustls_provider {
             if !self.handshake_complete && !self.connection.is_handshaking() && have_1rtt {
                 self.handshake_complete = true;
                 let duration = self.handshake_start.elapsed();
-                log::info!("TLS handshake complete in {:?}", duration);
+                log::info!(
+                    "TLS handshake complete in {:?} with QUIC {:?}",
+                    duration,
+                    self.quic_version
+                );
                 if let Some(alpn) = self.connection.alpn_protocol() {
                     self.alpn = Some(String::from_utf8_lossy(alpn).to_string());
                 }
@@ -1797,6 +1883,9 @@ mod rustls_provider {
             self.peer_transport_params = Some(params.to_vec());
             Ok(())
         }
+        fn peer_quic_transport_params(&self) -> Option<Vec<u8>> {
+            self.peer_transport_params.clone()
+        }
         fn key_update(&mut self) -> Result<(), ConnectionError> {
             self.key_update_write()?;
             self.key_update_read()
@@ -1827,8 +1916,16 @@ mod rustls_provider {
         is_server: bool,
         crypto: Arc<RwLock<CryptoContext>>,
         verify_peer: bool,
+        version: u32,
+        version_information_parameter: &[u8],
     ) -> Result<RustlsProviderImpl, ConnectionError> {
-        RustlsProviderImpl::new(is_server, crypto, verify_peer)
+        RustlsProviderImpl::new(
+            is_server,
+            crypto,
+            verify_peer,
+            version,
+            version_information_parameter,
+        )
     }
 }
 
@@ -1841,8 +1938,16 @@ impl RustlsProvider {
         is_server: bool,
         crypto: Arc<RwLock<CryptoContext>>,
         verify_peer: bool,
+        version: u32,
+        version_information_parameter: &[u8],
     ) -> Result<Self, ConnectionError> {
-        Ok(Self(rustls_provider::make(is_server, crypto, verify_peer)?))
+        Ok(Self(rustls_provider::make(
+            is_server,
+            crypto,
+            verify_peer,
+            version,
+            version_information_parameter,
+        )?))
     }
 }
 
@@ -1899,6 +2004,9 @@ impl QuicTlsProvider for RustlsProvider {
     }
     fn set_peer_transport_params(&mut self, params: &[u8]) -> Result<(), ConnectionError> {
         self.0.set_peer_transport_params(params)
+    }
+    fn peer_quic_transport_params(&self) -> Option<Vec<u8>> {
+        self.0.peer_quic_transport_params()
     }
     fn key_update(&mut self) -> Result<(), ConnectionError> {
         self.0.key_update()

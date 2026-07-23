@@ -37,6 +37,8 @@ pub mod pn;
 pub mod recovery;
 /// High-performance UDP send/recv with GSO/GRO and batch I/O.
 pub mod udpfast;
+/// QUIC version mapping, negotiation state, downgrade protection, and greasing.
+pub mod version;
 mod xdp;
 
 pub use anti_replay::{AntiReplayConfig, StrikeRegister};

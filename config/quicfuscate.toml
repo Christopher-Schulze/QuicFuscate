@@ -290,6 +290,9 @@ stream_every = 5
 # ==============================================================================
 
 [transport]
+# Ordered usable QUIC versions. Reserved grease versions are generated separately.
+quic_versions = ["v2", "v1"]
+
 # Congestion control algorithm
 # Congestion control algorithm.
 # Options: "reno" (RFC 6582), "cubic" (RFC 9438 + RFC 9406 HyStart++), "bbr2" (IETF draft, interim BBR3 fallback), "bbr3" (stealth, recommended)

@@ -190,6 +190,14 @@ impl ClientConnection {
     ) -> Result<crate::transport::Config, EngineError> {
         let mut tc = crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION)
             .map_err(|e| EngineError::Config(format!("Transport config error: {:?}", e)))?;
+        let versions = config
+            .transport
+            .quic_versions
+            .iter()
+            .map(|version| version.wire_version())
+            .collect::<Vec<_>>();
+        tc.set_supported_versions(versions)
+            .map_err(|e| EngineError::Config(format!("QUIC version config error: {e}")))?;
 
         tc.set_max_idle_timeout(config.transport.max_idle_timeout);
         tc.set_initial_max_data(config.transport.initial_max_data);
@@ -331,6 +339,12 @@ mod tests {
 
         let tc = ClientConnection::build_transport_config(&config);
         assert!(tc.is_ok());
+        let tc = tc.unwrap();
+        assert_eq!(tc.version(), crate::transport::PROTOCOL_VERSION_V2);
+        assert_eq!(
+            tc.supported_versions(),
+            &[crate::transport::PROTOCOL_VERSION_V2, crate::transport::PROTOCOL_VERSION]
+        );
 
         let sc = ClientConnection::build_stealth_config(&config);
         assert!(sc.max_padding_size > 0);

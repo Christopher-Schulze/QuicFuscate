@@ -37,6 +37,15 @@ fn build_runtime_transport_config(config: &EngineConfig) -> Result<Config, Engin
         transport::Config::new_with_version(transport::PROTOCOL_VERSION).map_err(|error| {
             EngineError::Transport(format!("transport config init failed: {error}"))
         })?;
+    let versions = config
+        .transport
+        .quic_versions
+        .iter()
+        .map(|version| version.wire_version())
+        .collect::<Vec<_>>();
+    transport.set_supported_versions(versions).map_err(|error| {
+        EngineError::Transport(format!("QUIC version configuration failed: {error}"))
+    })?;
 
     transport.set_cc_algorithm(map_server_cc_algorithm(config.transport.cc_algorithm));
 

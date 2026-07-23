@@ -1,4 +1,4 @@
-use super::{is_supported_version, CongestionControlAlgorithm, PROTOCOL_VERSION};
+use super::{is_supported_version, CongestionControlAlgorithm};
 use crate::stealth::OsFingerprintProfile;
 use rustls::pki_types::pem::PemObject;
 
@@ -200,9 +200,10 @@ impl NatTraversalConfig {
 pub struct Config {
     pub(crate) version: u32,
     /// Ordered list of QUIC versions this endpoint will advertise and accept.
-    /// The first entry is the preferred version. Defaults to `[PROTOCOL_VERSION]`
-    /// (v1). When v2 (RFC 9369) is included, Version Negotiation and initial
-    /// salt selection honour it. See TODO-453.
+    /// The first entry is the preferred version. It is initialized to the
+    /// version passed to `new_with_version`; Engine runtime defaults to v2,
+    /// then v1. When v2 (RFC 9369) is included, Version Negotiation and initial
+    /// salt selection honor it.
     pub(crate) supported_versions: Vec<u32>,
     pub(crate) cc_algorithm: CongestionControlAlgorithm,
     pub(crate) application_protos: Vec<Vec<u8>>,
@@ -369,7 +370,7 @@ impl PmtuPolicy {
 impl Config {
     /// Creates a new config with the given version
     pub fn new_with_version(version: u32) -> Result<Self, crate::error::ConnectionError> {
-        if version != PROTOCOL_VERSION {
+        if !is_supported_version(version) {
             return Err(crate::error::ConnectionError::VersionMismatch);
         }
 
@@ -523,6 +524,11 @@ impl Config {
                 return Err(crate::error::ConnectionError::VersionMismatch);
             }
         }
+        let mut unique = std::collections::HashSet::with_capacity(versions.len());
+        if versions.iter().any(|version| !unique.insert(*version)) {
+            return Err(crate::error::ConnectionError::InvalidState);
+        }
+        self.version = versions[0];
         self.supported_versions = versions;
         Ok(())
     }
@@ -530,6 +536,23 @@ impl Config {
     /// Returns the ordered list of supported QUIC versions (preferred first).
     pub fn supported_versions(&self) -> &[u32] {
         &self.supported_versions
+    }
+
+    /// Selects one configured version for a concrete connection attempt.
+    pub(crate) fn select_version(
+        &mut self,
+        version: u32,
+    ) -> Result<(), crate::error::ConnectionError> {
+        if !self.supported_versions.contains(&version) {
+            return Err(crate::error::ConnectionError::VersionMismatch);
+        }
+        self.version = version;
+        Ok(())
+    }
+
+    /// Returns the version selected for this concrete connection attempt.
+    pub fn version(&self) -> u32 {
+        self.version
     }
 
     /// Sets the maximum idle timeout
@@ -1208,6 +1231,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::PROTOCOL_VERSION;
 
     fn default_config() -> Config {
         Config::new_with_version(PROTOCOL_VERSION).expect("default config should succeed")

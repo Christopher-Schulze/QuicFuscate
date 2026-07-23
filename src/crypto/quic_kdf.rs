@@ -1,5 +1,23 @@
 use super::hkdf::{hkdf_expand, hkdf_extract};
 
+fn hkdf_expand_label(prk: &[u8; 32], label: &[u8], out_len: usize) -> Vec<u8> {
+    let full_label_len = b"tls13 ".len() + label.len();
+    let mut info = Vec::with_capacity(2 + 1 + full_label_len + 1);
+    info.extend_from_slice(&(out_len as u16).to_be_bytes());
+    info.push(full_label_len as u8);
+    info.extend_from_slice(b"tls13 ");
+    info.extend_from_slice(label);
+    info.push(0);
+    hkdf_expand(prk, &info, out_len)
+}
+
+fn packet_labels(version: u32) -> (&'static [u8], &'static [u8], &'static [u8], &'static [u8]) {
+    match version {
+        0x6b3343cf => (b"quicv2 key", b"quicv2 iv", b"quicv2 hp", b"quicv2 ku"),
+        _ => (b"quic key", b"quic iv", b"quic hp", b"quic ku"),
+    }
+}
+
 /// QUIC version 1 initial salt (RFC 9001, Section 5.2)
 pub const INITIAL_SALT_V1: [u8; 20] = [
     0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3, 0x4d, 0x17, 0x9a, 0xe6, 0xa4, 0xc8, 0x0c, 0xad,
@@ -34,7 +52,7 @@ pub fn derive_client_initial_secret(initial_secret: &[u8]) -> Vec<u8> {
             .copy_from_slice(&initial_secret[..initial_secret.len().min(32)]);
         arr
     };
-    hkdf_expand(&prk, b"tls13 client in", 32)
+    hkdf_expand_label(&prk, b"client in", 32)
 }
 
 /// Derive server initial secret from initial secret
@@ -49,11 +67,16 @@ pub fn derive_server_initial_secret(initial_secret: &[u8]) -> Vec<u8> {
             .copy_from_slice(&initial_secret[..initial_secret.len().min(32)]);
         arr
     };
-    hkdf_expand(&prk, b"tls13 server in", 32)
+    hkdf_expand_label(&prk, b"server in", 32)
 }
 
 /// Derive packet protection key from secret
 pub fn derive_pkt_key(secret: &[u8], key_len: usize) -> Vec<u8> {
+    derive_pkt_key_for_version(secret, key_len, 0x00000001)
+}
+
+/// Derive a version-specific QUIC packet protection key.
+pub fn derive_pkt_key_for_version(secret: &[u8], key_len: usize, version: u32) -> Vec<u8> {
     let prk = if secret.len() == 32 {
         let mut arr = [0u8; 32];
         arr.copy_from_slice(secret);
@@ -63,11 +86,16 @@ pub fn derive_pkt_key(secret: &[u8], key_len: usize) -> Vec<u8> {
         arr[..secret.len().min(32)].copy_from_slice(&secret[..secret.len().min(32)]);
         arr
     };
-    hkdf_expand(&prk, b"tls13 quic key", key_len)
+    hkdf_expand_label(&prk, packet_labels(version).0, key_len)
 }
 
 /// Derive packet protection IV from secret
 pub fn derive_pkt_iv(secret: &[u8], iv_len: usize) -> Vec<u8> {
+    derive_pkt_iv_for_version(secret, iv_len, 0x00000001)
+}
+
+/// Derive a version-specific QUIC packet protection IV.
+pub fn derive_pkt_iv_for_version(secret: &[u8], iv_len: usize, version: u32) -> Vec<u8> {
     let prk = if secret.len() == 32 {
         let mut arr = [0u8; 32];
         arr.copy_from_slice(secret);
@@ -77,11 +105,16 @@ pub fn derive_pkt_iv(secret: &[u8], iv_len: usize) -> Vec<u8> {
         arr[..secret.len().min(32)].copy_from_slice(&secret[..secret.len().min(32)]);
         arr
     };
-    hkdf_expand(&prk, b"tls13 quic iv", iv_len)
+    hkdf_expand_label(&prk, packet_labels(version).1, iv_len)
 }
 
 /// Derive header protection key from secret
 pub fn derive_hdr_key(secret: &[u8], key_len: usize) -> Vec<u8> {
+    derive_hdr_key_for_version(secret, key_len, 0x00000001)
+}
+
+/// Derive a version-specific QUIC header protection key.
+pub fn derive_hdr_key_for_version(secret: &[u8], key_len: usize, version: u32) -> Vec<u8> {
     let prk = if secret.len() == 32 {
         let mut arr = [0u8; 32];
         arr.copy_from_slice(secret);
@@ -91,11 +124,16 @@ pub fn derive_hdr_key(secret: &[u8], key_len: usize) -> Vec<u8> {
         arr[..secret.len().min(32)].copy_from_slice(&secret[..secret.len().min(32)]);
         arr
     };
-    hkdf_expand(&prk, b"tls13 quic hp", key_len)
+    hkdf_expand_label(&prk, packet_labels(version).2, key_len)
 }
 
 /// Derive next secret for key update (RFC 9001, Section 6)
 pub fn derive_next_secret(secret: &[u8]) -> Vec<u8> {
+    derive_next_secret_for_version(secret, 0x00000001)
+}
+
+/// Derive the next traffic secret with the version-specific QUIC label.
+pub fn derive_next_secret_for_version(secret: &[u8], version: u32) -> Vec<u8> {
     let prk = if secret.len() == 32 {
         let mut arr = [0u8; 32];
         arr.copy_from_slice(secret);
@@ -105,7 +143,7 @@ pub fn derive_next_secret(secret: &[u8]) -> Vec<u8> {
         arr[..secret.len().min(32)].copy_from_slice(&secret[..secret.len().min(32)]);
         arr
     };
-    hkdf_expand(&prk, b"quic ku", 32)
+    hkdf_expand_label(&prk, packet_labels(version).3, 32)
 }
 
 /// Helper to derive all keys from a secret at once
@@ -161,29 +199,22 @@ mod tests {
 
     #[test]
     fn client_initial_secret_deterministic_snapshot() {
-        // Note: this implementation uses simplified HKDF-Expand labels
-        // ("tls13 client in" raw bytes) rather than the full TLS 1.3
-        // HKDF-Expand-Label encoding, so output differs from RFC 9001 A.1.
-        // This test pins the deterministic output for regression detection.
         let initial_secret = derive_initial_secret(&RFC9001_DCID, 0x00000001);
         let client_secret = derive_client_initial_secret(&initial_secret);
-        assert_eq!(client_secret.len(), 32);
-        assert_ne!(client_secret.as_slice(), &[0u8; 32], "client secret must not be all zeros");
-
-        // Pin: calling again must produce identical output
-        let client_secret2 = derive_client_initial_secret(&initial_secret);
-        assert_eq!(client_secret, client_secret2, "client secret derivation must be deterministic");
+        assert_eq!(
+            hex::encode(client_secret),
+            "c00cf151ca5be075ed0ebfb5c80323c42d6b7db67881289af4008f1f6c357aea"
+        );
     }
 
     #[test]
     fn server_initial_secret_deterministic_snapshot() {
         let initial_secret = derive_initial_secret(&RFC9001_DCID, 0x00000001);
         let server_secret = derive_server_initial_secret(&initial_secret);
-        assert_eq!(server_secret.len(), 32);
-        assert_ne!(server_secret.as_slice(), &[0u8; 32], "server secret must not be all zeros");
-
-        let server_secret2 = derive_server_initial_secret(&initial_secret);
-        assert_eq!(server_secret, server_secret2, "server secret derivation must be deterministic");
+        assert_eq!(
+            hex::encode(server_secret),
+            "3c199828fd139efd216c155ad844cc81fb82fa8d7446fa7d78be803acdda951b"
+        );
     }
 
     #[test]
@@ -222,6 +253,49 @@ mod tests {
         let v1 = derive_initial_secret(&RFC9001_DCID, 0x00000001);
         let v2 = derive_initial_secret(&RFC9001_DCID, 0x6b3343cf);
         assert_ne!(v1, v2, "v2 (0x6b3343cf) must use the v2 salt, not v1");
+    }
+
+    #[test]
+    fn v2_initial_material_matches_rfc9369_appendix_a() {
+        let initial = derive_initial_secret(&RFC9001_DCID, 0x6b3343cf);
+        assert_eq!(
+            hex::encode(initial),
+            "2062e8b3cd8d52092614b8071d0aa1fb7c2e3ac193f78b280e72d8f5751f6aba"
+        );
+        let client = derive_client_initial_secret(&initial);
+        let server = derive_server_initial_secret(&initial);
+        assert_eq!(
+            hex::encode(&client),
+            "14ec9d6eb9fd7af83bf5a668bc17a7e283766aade7ecd0891f70f9ff7f4bf47b"
+        );
+        assert_eq!(
+            hex::encode(derive_pkt_key_for_version(&client, 16, 0x6b3343cf)),
+            "8b1a0bc121284290a29e0971b5cd045d"
+        );
+        assert_eq!(
+            hex::encode(derive_pkt_iv_for_version(&client, 12, 0x6b3343cf)),
+            "91f73e2351d8fa91660e909f"
+        );
+        assert_eq!(
+            hex::encode(derive_hdr_key_for_version(&client, 16, 0x6b3343cf)),
+            "45b95e15235d6f45a6b19cbcb0294ba9"
+        );
+        assert_eq!(
+            hex::encode(&server),
+            "0263db1782731bf4588e7e4d93b7463907cb8cd8200b5da55a8bd488eafc37c1"
+        );
+        assert_eq!(
+            hex::encode(derive_pkt_key_for_version(&server, 16, 0x6b3343cf)),
+            "82db637861d55e1d011f19ea71d5d2a7"
+        );
+        assert_eq!(
+            hex::encode(derive_pkt_iv_for_version(&server, 12, 0x6b3343cf)),
+            "dd13c276499c0249d3310652"
+        );
+        assert_eq!(
+            hex::encode(derive_hdr_key_for_version(&server, 16, 0x6b3343cf)),
+            "edf6d05c83121201b436e16877593c3a"
+        );
     }
 
     // ---------------------------------------------------------------
@@ -385,18 +459,13 @@ mod tests {
     }
 
     #[test]
-    fn longer_key_extends_shorter_key() {
-        // HKDF-Expand is a streaming PRF: the first N bytes of a longer
-        // expansion equal the N-byte expansion. Verify this property holds
-        // and that the extra bytes in the 32-byte key are not all zeros.
+    fn hkdf_expand_label_binds_output_length() {
+        // TLS 1.3 encodes the requested output length in HkdfLabel, so the
+        // 16-byte and 32-byte derivations intentionally use different info.
         let secret = [0xCCu8; 32];
         let key16 = derive_pkt_key(&secret, 16);
         let key32 = derive_pkt_key(&secret, 32);
-        assert_eq!(
-            &key32[..16],
-            key16.as_slice(),
-            "HKDF-Expand prefix must be identical for same info"
-        );
+        assert_ne!(&key32[..16], key16.as_slice());
         assert_ne!(&key32[16..], &[0u8; 16], "extended key material must not be all zeros");
     }
 

@@ -8,7 +8,12 @@ use std::sync::Arc;
 
 /// Derive 16-byte header protection key from TLS secret (RFC 9001 compliant)
 pub fn derive_hp_key(secret: &[u8]) -> [u8; 16] {
-    let hp_vec = crate::crypto::kdf::derive_hdr_key(secret, 16);
+    derive_hp_key_for_version(secret, crate::transport::PROTOCOL_VERSION)
+}
+
+/// Derives a version-specific 16-byte header protection key.
+pub fn derive_hp_key_for_version(secret: &[u8], version: u32) -> [u8; 16] {
+    let hp_vec = crate::crypto::kdf::derive_hdr_key_for_version(secret, 16, version);
     let mut hp = [0u8; 16];
     hp.copy_from_slice(&hp_vec[..16]);
     hp
@@ -16,7 +21,7 @@ pub fn derive_hp_key(secret: &[u8]) -> [u8; 16] {
 
 /// Long header form bit (0x80) - set for long headers, clear for short headers.
 pub const FORM_BIT: u8 = 0x80;
-/// Fixed bit (0x40) - must be set in all QUIC packets except Version Negotiation.
+/// Fixed bit (0x40) - set on regular QUIC packets; ignored for Version Negotiation.
 pub const FIXED_BIT: u8 = 0x40;
 /// Key phase bit (0x04) in short header first byte.
 pub const KEY_PHASE_BIT: u8 = 0x04;
@@ -243,12 +248,7 @@ pub fn parse_header(buf: &[u8], short_dcid_len: usize) -> Result<(Header, usize)
         return Err(ConnectionError::BufferTooShort);
     }
     let version = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]);
-    if version == 0 {
-        // Version Negotiation must clear the fixed bit.
-        if unlikely((first & crate::transport::packet::FIXED_BIT) != 0) {
-            return Err(ConnectionError::InvalidPacket);
-        }
-    } else if unlikely((first & crate::transport::packet::FIXED_BIT) == 0) {
+    if version != 0 && unlikely((first & crate::transport::packet::FIXED_BIT) == 0) {
         return Err(ConnectionError::InvalidPacket);
     }
     let mut off = 5;
@@ -257,6 +257,12 @@ pub fn parse_header(buf: &[u8], short_dcid_len: usize) -> Result<(Header, usize)
     }
     let dcid_len = buf[off] as usize;
     off += 1;
+    if version != 0
+        && crate::transport::is_supported_version(version)
+        && dcid_len > crate::transport::MAX_CONN_ID_LEN
+    {
+        return Err(ConnectionError::InvalidPacket);
+    }
     if buf.len() < off + dcid_len + 1 {
         return Err(ConnectionError::BufferTooShort);
     }
@@ -264,22 +270,34 @@ pub fn parse_header(buf: &[u8], short_dcid_len: usize) -> Result<(Header, usize)
     off += dcid_len;
     let scid_len = buf[off] as usize;
     off += 1;
+    if version != 0
+        && crate::transport::is_supported_version(version)
+        && scid_len > crate::transport::MAX_CONN_ID_LEN
+    {
+        return Err(ConnectionError::InvalidPacket);
+    }
     if buf.len() < off + scid_len {
         return Err(ConnectionError::BufferTooShort);
     }
     let scid = buf[off..off + scid_len].to_vec();
     off += scid_len;
     let ty_bits = first & crate::transport::packet::TYPE_MASK;
-    let ty = match (version, ty_bits) {
-        (0, _) => PacketType::VersionNegotiation,
-        (_, 0x00) => PacketType::Initial,
-        (_, 0x10) => PacketType::ZeroRTT,
-        (_, 0x20) => PacketType::Handshake,
-        (_, 0x30) => PacketType::Retry,
-        _ => PacketType::Initial,
-    };
+    let ty = crate::transport::version::packet_type_from_long_header(version, ty_bits)?;
     let mut token = None;
-    if ty == PacketType::Initial {
+    let mut versions = None;
+    if ty == PacketType::VersionNegotiation {
+        let remaining = buf.len().saturating_sub(off);
+        if remaining == 0 || !remaining.is_multiple_of(4) {
+            return Err(ConnectionError::InvalidPacket);
+        }
+        versions = Some(
+            buf[off..]
+                .chunks_exact(4)
+                .map(|bytes| u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+                .collect(),
+        );
+        off = buf.len();
+    } else if ty == PacketType::Initial {
         let (tok_len, used) = crate::transport::varint::read_varint(&buf[off..])?;
         let tok_len = tok_len as usize;
         off += used;
@@ -308,7 +326,7 @@ pub fn parse_header(buf: &[u8], short_dcid_len: usize) -> Result<(Header, usize)
         pkt_num: 0,
         pkt_num_len: 0,
         token,
-        versions: None,
+        versions,
         key_phase: false,
     };
     Ok((hdr, off))
@@ -357,14 +375,10 @@ pub fn format_header(h: &Header, out: &mut [u8]) -> Result<usize, ConnectionErro
             out[1..1 + h.dcid.len()].copy_from_slice(&h.dcid);
             Ok(1 + h.dcid.len())
         }
-        PacketType::Initial | PacketType::Handshake => {
+        PacketType::Initial | PacketType::Handshake | PacketType::ZeroRTT | PacketType::Retry => {
             // Long header: [first][version:4][dcid_len:1][dcid][scid_len:1][scid]
             let mut first = FORM_BIT | FIXED_BIT; // long header with fixed bit
-            first |= match h.ty {
-                PacketType::Initial => 0x00,
-                PacketType::Handshake => 0x20,
-                _ => 0x00,
-            };
+            first |= crate::transport::version::long_header_type_bits(h.version, h.ty)?;
             out[0] = first;
             if out.len() < 1 + 4 {
                 return Err(ConnectionError::BufferTooShort);
@@ -394,6 +408,13 @@ pub fn format_header(h: &Header, out: &mut [u8]) -> Result<usize, ConnectionErro
             if h.ty == PacketType::Initial {
                 let token = h.token.as_deref().unwrap_or(&[]);
                 off += crate::transport::varint::write_varint(token.len() as u64, &mut out[off..])?;
+                if out.len() < off + token.len() {
+                    return Err(ConnectionError::BufferTooShort);
+                }
+                out[off..off + token.len()].copy_from_slice(token);
+                off += token.len();
+            } else if h.ty == PacketType::Retry {
+                let token = h.token.as_deref().unwrap_or(&[]);
                 if out.len() < off + token.len() {
                     return Err(ConnectionError::BufferTooShort);
                 }
@@ -679,7 +700,7 @@ mod tests {
     }
 
     #[test]
-    fn version_negotiation_clears_fixed_bit_and_parses() {
+    fn version_negotiation_sets_recommended_fixed_bit_and_parses() {
         let pkt = generate_version_negotiation_packet(
             &[crate::transport::PROTOCOL_VERSION],
             &[crate::transport::PROTOCOL_VERSION],
@@ -687,13 +708,13 @@ mod tests {
             &[0x11], // scid (echoes client DCID)
         );
         assert_eq!(pkt[0] & FORM_BIT, FORM_BIT);
-        assert_eq!(pkt[0] & FIXED_BIT, 0);
+        assert_eq!(pkt[0] & FIXED_BIT, FIXED_BIT);
         let (parsed, _) = parse_header(&pkt, 0).expect("parse vn");
         assert_eq!(parsed.ty, PacketType::VersionNegotiation);
     }
 
     #[test]
-    fn version_negotiation_with_fixed_bit_set_is_rejected() {
+    fn version_negotiation_ignores_non_form_bits() {
         let mut pkt = vec![
             FORM_BIT | FIXED_BIT,
             0x00,
@@ -706,10 +727,11 @@ mod tests {
             0x22, // scid
         ];
         pkt.extend_from_slice(&crate::transport::PROTOCOL_VERSION.to_be_bytes());
-        assert!(matches!(parse_header(&pkt, 0), Err(ConnectionError::InvalidPacket)));
+        let (parsed, _) = parse_header(&pkt, 0).expect("VN fixed bit is not invariant");
+        assert_eq!(parsed.ty, PacketType::VersionNegotiation);
     }
 
-    // --- QUIC version negotiation (TODO-453) ---
+    // --- QUIC version negotiation ---
 
     #[test]
     fn vn_packet_generation_and_parsing_roundtrip() {
@@ -727,8 +749,10 @@ mod tests {
 
     #[test]
     fn vn_packet_parse_rejects_non_vn_packets() {
-        // Fixed bit set => not a VN packet.
+        // Missing form bit => not a VN packet.
         let bad = vec![FORM_BIT | FIXED_BIT, 0, 0, 0, 0, 0, 0, 0];
+        let mut bad = bad;
+        bad[0] &= !FORM_BIT;
         assert!(parse_version_negotiation(&bad).is_none());
         // Non-zero version field => not a VN packet.
         let bad2 = vec![FORM_BIT, 0, 0, 0, 1, 0, 0];
@@ -804,6 +828,42 @@ mod tests {
     }
 
     #[test]
+    fn stateless_vn_swaps_connection_ids_and_adds_non_selectable_grease() {
+        let client_dcid = [0x11, 0x12, 0x13, 0x14];
+        let client_scid = [0x21, 0x22, 0x23];
+        let mut packet = vec![FORM_BIT | FIXED_BIT];
+        packet.extend_from_slice(&0xdead_beefu32.to_be_bytes());
+        packet.push(client_dcid.len() as u8);
+        packet.extend_from_slice(&client_dcid);
+        packet.push(client_scid.len() as u8);
+        packet.extend_from_slice(&client_scid);
+        packet.resize(crate::transport::MIN_CLIENT_INITIAL_LEN, 0);
+
+        let response = server_version_negotiation_response(
+            &packet,
+            &[crate::transport::PROTOCOL_VERSION_V2, crate::transport::PROTOCOL_VERSION],
+        )
+        .expect("valid unsupported Initial")
+        .expect("VN response");
+        let (header, _) = parse_header(&response, 0).expect("parse VN response");
+        assert_eq!(header.dcid, client_scid);
+        assert_eq!(header.scid, client_dcid);
+        let versions = header.versions.expect("VN version list");
+        assert_eq!(versions[0], crate::transport::PROTOCOL_VERSION_V2);
+        assert_eq!(versions[1], crate::transport::PROTOCOL_VERSION);
+        assert!(crate::transport::version::is_reserved_version(versions[2]));
+        assert!(!crate::transport::is_supported_version(versions[2]));
+
+        packet[1..5].copy_from_slice(&crate::transport::PROTOCOL_VERSION_V2.to_be_bytes());
+        assert!(server_version_negotiation_response(
+            &packet,
+            &[crate::transport::PROTOCOL_VERSION]
+        )
+        .expect("known but disabled version")
+        .is_some());
+    }
+
+    #[test]
     fn retry_header_parses_token_payload() {
         let mut pkt = vec![
             FORM_BIT | FIXED_BIT | 0x30, // Retry
@@ -823,6 +883,74 @@ mod tests {
         assert_eq!(parsed.ty, PacketType::Retry);
         assert_eq!(parsed.scid, vec![0xbb]);
         assert_eq!(parsed.token, Some(vec![0x01, 0x02]));
+    }
+
+    #[test]
+    fn retry_integrity_roundtrips_for_v1_and_v2() {
+        let odcid = [0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
+        for version in [crate::transport::PROTOCOL_VERSION, crate::transport::PROTOCOL_VERSION_V2] {
+            let header = Header {
+                ty: PacketType::Retry,
+                version,
+                dcid: vec![0xaa],
+                scid: vec![0xbb],
+                pkt_num: 0,
+                pkt_num_len: 0,
+                token: Some(vec![0x01, 0x02, 0x03]),
+                versions: None,
+                key_phase: false,
+            };
+            let mut storage = [0u8; 64];
+            let header_len = format_header(&header, &mut storage).expect("format Retry");
+            let mut packet = storage[..header_len].to_vec();
+            append_retry_tag(&mut packet, &odcid, version).expect("append Retry tag");
+            verify_retry_tag(&packet, &odcid, version).expect("verify Retry tag");
+            let (parsed, _) = parse_header(&packet, 0).expect("parse Retry");
+            assert_eq!(parsed.version, version);
+            assert_eq!(parsed.ty, PacketType::Retry);
+            assert_eq!(parsed.token, header.token);
+
+            packet[header_len] ^= 1;
+            assert!(verify_retry_tag(&packet, &odcid, version).is_err());
+        }
+    }
+
+    #[test]
+    fn v2_long_header_types_roundtrip_with_rfc9369_mapping() {
+        for packet_type in [PacketType::Initial, PacketType::ZeroRTT, PacketType::Handshake] {
+            let header = Header {
+                ty: packet_type,
+                version: crate::transport::PROTOCOL_VERSION_V2,
+                dcid: vec![0xaa],
+                scid: vec![0xbb],
+                pkt_num: 0,
+                pkt_num_len: 0,
+                token: None,
+                versions: None,
+                key_phase: false,
+            };
+            let mut packet = [0u8; 64];
+            let len = format_header(&header, &mut packet).expect("format v2 header");
+            let (parsed, _) = parse_header(&packet[..len], 0).expect("parse v2 header");
+            assert_eq!(parsed.ty, packet_type);
+            assert_eq!(parsed.version, crate::transport::PROTOCOL_VERSION_V2);
+        }
+    }
+
+    #[test]
+    fn supported_versions_reject_oversized_connection_ids() {
+        for version in [crate::transport::PROTOCOL_VERSION, crate::transport::PROTOCOL_VERSION_V2] {
+            let type_bits =
+                crate::transport::version::long_header_type_bits(version, PacketType::Initial)
+                    .expect("Initial type bits");
+            let mut packet = vec![FORM_BIT | FIXED_BIT | type_bits];
+            packet.extend_from_slice(&version.to_be_bytes());
+            packet.push((crate::transport::MAX_CONN_ID_LEN + 1) as u8);
+            packet.resize(6 + crate::transport::MAX_CONN_ID_LEN + 1, 0xaa);
+            packet.push(0);
+            packet.push(0);
+            assert_eq!(parse_header(&packet, 0), Err(ConnectionError::InvalidPacket));
+        }
     }
 
     #[test]
@@ -1211,8 +1339,8 @@ pub fn open_data_aead_batch(
 ///
 /// Iterates `server_versions` in preference order and returns the first entry
 /// that also appears in `client_versions`. Returns `None` when no common
-/// version exists — in that case the caller should emit a Version Negotiation
-/// packet via [`generate_version_negotiation_packet`]. See TODO-453.
+/// version exists. In that case, the caller should emit a Version Negotiation
+/// packet via [`generate_version_negotiation_packet`].
 pub fn negotiate_version(client_versions: &[u32], server_versions: &[u32]) -> Option<u32> {
     server_versions.iter().find(|&&sv| client_versions.contains(&sv)).copied()
 }
@@ -1221,10 +1349,10 @@ pub fn negotiate_version(client_versions: &[u32], server_versions: &[u32]) -> Op
 ///
 /// Per RFC 9000 Section 17.2.1, the VN packet's DCID echoes the client's SCID
 /// and its SCID echoes the client's DCID; the caller is responsible for passing
-/// the already-swapped connection IDs in `dcid` / `scid`. The form bit is set
-/// and the fixed bit is cleared, as required for VN packets. The `client_versions`
-/// argument is accepted for API symmetry but is not encoded — only the server's
-/// supported versions appear in the packet body. See TODO-453.
+/// the already-swapped connection IDs in `dcid` / `scid`. The form bit is set,
+/// while all other first-byte bits are non-invariant. The `client_versions`
+/// argument is accepted for API symmetry but is not encoded; only the server's
+/// supported versions appear in the packet body.
 pub fn generate_version_negotiation_packet(
     _client_versions: &[u32],
     server_versions: &[u32],
@@ -1233,8 +1361,9 @@ pub fn generate_version_negotiation_packet(
 ) -> Vec<u8> {
     let mut pkt =
         Vec::with_capacity(1 + 4 + 1 + dcid.len() + 1 + scid.len() + server_versions.len() * 4);
-    // First byte: form bit set, fixed bit cleared, remaining bits random.
-    let first = (crate::transport::rand::rand_u8() | FORM_BIT) & !FIXED_BIT;
+    // Only the form bit is invariant. RFC 9000 recommends setting the fixed-bit
+    // position so VN packets resemble other QUIC packets on multiplexed ports.
+    let first = crate::transport::rand::rand_u8() | FORM_BIT | FIXED_BIT;
     pkt.push(first);
     // Version field is 0x00000000 for VN packets.
     pkt.extend_from_slice(&0u32.to_be_bytes());
@@ -1254,15 +1383,15 @@ pub fn generate_version_negotiation_packet(
 /// Extracts the version list from a Version Negotiation packet.
 ///
 /// Returns `Some(versions)` when `pkt` is a well-formed VN packet (form bit set,
-/// fixed bit clear, version field zero, and a whole number of 4-byte version
-/// entries). Returns `None` otherwise. See TODO-453.
+/// version field zero, and a whole number of 4-byte version
+/// entries). Returns `None` otherwise.
 pub fn parse_version_negotiation(pkt: &[u8]) -> Option<Vec<u32>> {
     if pkt.is_empty() {
         return None;
     }
     let first = pkt[0];
-    // VN packets set the form bit and clear the fixed bit.
-    if (first & FORM_BIT) == 0 || (first & FIXED_BIT) != 0 {
+    // Only the form bit is defined for VN; the remaining seven bits are ignored.
+    if (first & FORM_BIT) == 0 {
         return None;
     }
     if pkt.len() < 5 {
@@ -1307,29 +1436,97 @@ pub fn parse_version_negotiation(pkt: &[u8]) -> Option<Vec<u32>> {
     Some(versions)
 }
 
-/// Appends a Retry Integrity Tag to a Retry packet buffer (RFC 9001 Section 5.8).
-pub fn append_retry_tag(buf: &mut Vec<u8>, _odcid: &[u8], _version: u32) {
-    let hdr_len = buf.len();
-    let mut pseudo = Vec::with_capacity(1 + _odcid.len() + hdr_len);
-    pseudo.push(_odcid.len() as u8);
-    pseudo.extend_from_slice(_odcid);
-    pseudo.extend_from_slice(&buf[..hdr_len]);
-    const RETRY_INTEGRITY_KEY_V1: [u8; 16] = [
+/// Builds a stateless server VN response for an unsupported long-header packet.
+///
+/// The response is emitted before allocating connection state. Supported
+/// versions retain endpoint preference order; one reserved grease value is
+/// appended but is never considered selectable.
+pub fn server_version_negotiation_response(
+    packet: &[u8],
+    supported_versions: &[u32],
+) -> Result<Option<Vec<u8>>, ConnectionError> {
+    if packet.len() < crate::transport::MIN_CLIENT_INITIAL_LEN
+        || packet.first().is_none_or(|first| first & FORM_BIT == 0)
+        || packet.len() < 7
+    {
+        return Ok(None);
+    }
+    let version =
+        u32::from_be_bytes(packet[1..5].try_into().map_err(|_| ConnectionError::InvalidPacket)?);
+    if version == 0 || supported_versions.contains(&version) {
+        return Ok(None);
+    }
+
+    let mut offset = 5usize;
+    let dcid_len = usize::from(packet[offset]);
+    offset += 1;
+    let dcid_end = offset.checked_add(dcid_len).ok_or(ConnectionError::InvalidPacket)?;
+    if dcid_end >= packet.len() {
+        return Err(ConnectionError::InvalidPacket);
+    }
+    let dcid = &packet[offset..dcid_end];
+    offset = dcid_end;
+    let scid_len = usize::from(packet[offset]);
+    offset += 1;
+    let scid_end = offset.checked_add(scid_len).ok_or(ConnectionError::InvalidPacket)?;
+    if scid_end > packet.len() {
+        return Err(ConnectionError::InvalidPacket);
+    }
+    let scid = &packet[offset..scid_end];
+
+    let mut offered = supported_versions
+        .iter()
+        .copied()
+        .filter(|version| crate::transport::is_supported_version(*version))
+        .collect::<Vec<_>>();
+    if offered.is_empty() {
+        return Err(ConnectionError::InvalidState);
+    }
+    offered.push(crate::transport::version::generate_reserved_version());
+    Ok(Some(generate_version_negotiation_packet(&[], &offered, scid, dcid)))
+}
+
+fn retry_integrity_material(
+    version: u32,
+) -> Result<(&'static [u8; 16], &'static [u8; 12]), ConnectionError> {
+    const KEY_V1: [u8; 16] = [
         0xbe, 0x0c, 0x69, 0x0b, 0x9f, 0x66, 0x57, 0x5a, 0x1d, 0x76, 0x6b, 0x54, 0xe3, 0x68, 0xc8,
         0x4e,
     ];
-    const RETRY_INTEGRITY_NONCE_V1: [u8; 12] =
+    const NONCE_V1: [u8; 12] =
         [0x46, 0x15, 0x99, 0xd3, 0x5d, 0x63, 0x2b, 0xf2, 0x23, 0x98, 0x25, 0xbb];
-    let tag = crate::crypto::gcm::aes_gcm_tag_aad_only(
-        &RETRY_INTEGRITY_KEY_V1,
-        &RETRY_INTEGRITY_NONCE_V1,
-        &pseudo,
-    );
+    const KEY_V2: [u8; 16] = [
+        0x8f, 0xb4, 0xb0, 0x1b, 0x56, 0xac, 0x48, 0xe2, 0x60, 0xfb, 0xcb, 0xce, 0xad, 0x7c, 0xcc,
+        0x92,
+    ];
+    const NONCE_V2: [u8; 12] =
+        [0xd8, 0x69, 0x69, 0xbc, 0x2d, 0x7c, 0x6d, 0x99, 0x90, 0xef, 0xb0, 0x4a];
+    match version {
+        crate::transport::PROTOCOL_VERSION => Ok((&KEY_V1, &NONCE_V1)),
+        crate::transport::PROTOCOL_VERSION_V2 => Ok((&KEY_V2, &NONCE_V2)),
+        _ => Err(ConnectionError::VersionMismatch),
+    }
+}
+
+/// Appends a Retry Integrity Tag using the version-specific RFC key and nonce.
+pub fn append_retry_tag(
+    buf: &mut Vec<u8>,
+    odcid: &[u8],
+    version: u32,
+) -> Result<(), ConnectionError> {
+    let hdr_len = buf.len();
+    let mut pseudo = Vec::with_capacity(1 + odcid.len() + hdr_len);
+    pseudo.push(odcid.len() as u8);
+    pseudo.extend_from_slice(odcid);
+    pseudo.extend_from_slice(&buf[..hdr_len]);
+    let (key, nonce) = retry_integrity_material(version)?;
+    let tag = crate::crypto::gcm::aes_gcm_tag_aad_only(key, nonce, &pseudo);
     buf.extend_from_slice(&tag);
+    Ok(())
 }
 
 /// Verifies the Retry Integrity Tag of a received Retry packet.
-pub fn verify_retry_tag(packet: &[u8], odcid: &[u8], _version: u32) -> Result<(), ConnectionError> {
+pub fn verify_retry_tag(packet: &[u8], odcid: &[u8], version: u32) -> Result<(), ConnectionError> {
     if packet.len() < 16 {
         return Err(ConnectionError::BufferTooShort);
     }
@@ -1339,17 +1536,8 @@ pub fn verify_retry_tag(packet: &[u8], odcid: &[u8], _version: u32) -> Result<()
     pseudo.push(odcid.len() as u8);
     pseudo.extend_from_slice(odcid);
     pseudo.extend_from_slice(&packet[..hdr_len]);
-    const RETRY_INTEGRITY_KEY_V1: [u8; 16] = [
-        0xbe, 0x0c, 0x69, 0x0b, 0x9f, 0x66, 0x57, 0x5a, 0x1d, 0x76, 0x6b, 0x54, 0xe3, 0x68, 0xc8,
-        0x4e,
-    ];
-    const RETRY_INTEGRITY_NONCE_V1: [u8; 12] =
-        [0x46, 0x15, 0x99, 0xd3, 0x5d, 0x63, 0x2b, 0xf2, 0x23, 0x98, 0x25, 0xbb];
-    let tag = crate::crypto::gcm::aes_gcm_tag_aad_only(
-        &RETRY_INTEGRITY_KEY_V1,
-        &RETRY_INTEGRITY_NONCE_V1,
-        &pseudo,
-    );
+    let (key, nonce) = retry_integrity_material(version)?;
+    let tag = crate::crypto::gcm::aes_gcm_tag_aad_only(key, nonce, &pseudo);
     let mut diff = 0u8;
     for i in 0..16 {
         diff |= tag[i] ^ tag_in[i];
@@ -1363,8 +1551,13 @@ pub fn verify_retry_tag(packet: &[u8], odcid: &[u8], _version: u32) -> Result<()
 
 /// HKDF-based key/iv derivation for AEAD from TLS secrets (RFC 9001 compliant)
 pub fn derive_key_iv(secret: &[u8]) -> ([u8; 32], [u8; 12]) {
-    let key_vec = crate::crypto::kdf::derive_pkt_key(secret, 32);
-    let iv_vec = crate::crypto::kdf::derive_pkt_iv(secret, 12);
+    derive_key_iv_for_version(secret, crate::transport::PROTOCOL_VERSION)
+}
+
+/// Derives version-specific packet key and IV material.
+pub fn derive_key_iv_for_version(secret: &[u8], version: u32) -> ([u8; 32], [u8; 12]) {
+    let key_vec = crate::crypto::kdf::derive_pkt_key_for_version(secret, 32, version);
+    let iv_vec = crate::crypto::kdf::derive_pkt_iv_for_version(secret, 12, version);
     let mut key = [0u8; 32];
     key.copy_from_slice(&key_vec[..32]);
     let mut iv = [0u8; 12];
@@ -1896,14 +2089,24 @@ impl CryptoContext {
 
     /// Install AES-GCM for Initial packets (compatibility path).
     /// QUIC initial keys are direction-specific, so we accept read/write secrets separately.
-    pub fn install_aes_gcm_initial(&mut self, read_secret: &[u8], write_secret: &[u8]) {
-        let (rkey, riv) = derive_key_iv(read_secret);
-        let (wkey, wiv) = derive_key_iv(write_secret);
+    pub fn install_aes_gcm_initial(
+        &mut self,
+        read_secret: &[u8],
+        write_secret: &[u8],
+        version: u32,
+    ) {
+        let rkey = crate::crypto::kdf::derive_pkt_key_for_version(read_secret, 16, version);
+        let wkey = crate::crypto::kdf::derive_pkt_key_for_version(write_secret, 16, version);
+        let riv = crate::crypto::kdf::derive_pkt_iv_for_version(read_secret, 12, version);
+        let wiv = crate::crypto::kdf::derive_pkt_iv_for_version(write_secret, 12, version);
         let mut k16 = [0u8; 16];
-        k16.copy_from_slice(&wkey[..16]);
-        self.seal_initial = Some(Box::new(AesGcm128::new(&k16, &wiv)));
-        k16.copy_from_slice(&rkey[..16]);
-        self.open_initial = Some(Box::new(AesGcm128::new(&k16, &riv)));
+        let mut iv12 = [0u8; 12];
+        k16.copy_from_slice(&wkey);
+        iv12.copy_from_slice(&wiv);
+        self.seal_initial = Some(Box::new(AesGcm128::new(&k16, &iv12)));
+        k16.copy_from_slice(&rkey);
+        iv12.copy_from_slice(&riv);
+        self.open_initial = Some(Box::new(AesGcm128::new(&k16, &iv12)));
         // HP can be installed later when header protection keys are derived
     }
 
@@ -1921,9 +2124,9 @@ impl CryptoContext {
 
     /// Install AES-based Header Protection for Initial packets.
     /// QUIC header protection is direction-specific, so we accept read/write secrets separately.
-    pub fn install_hp_initial(&mut self, read_secret: &[u8], write_secret: &[u8]) {
-        let hp_key_w = derive_hp_key(write_secret);
-        let hp_key_r = derive_hp_key(read_secret);
+    pub fn install_hp_initial(&mut self, read_secret: &[u8], write_secret: &[u8], version: u32) {
+        let hp_key_w = derive_hp_key_for_version(write_secret, version);
+        let hp_key_r = derive_hp_key_for_version(read_secret, version);
         self.hp_initial = Some(Box::new(crate::crypto::aead::AesHp::new(&hp_key_w)));
         self.hp_initial_open = Some(Box::new(crate::crypto::aead::AesHp::new(&hp_key_r)));
     }

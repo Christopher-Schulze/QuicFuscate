@@ -2,7 +2,7 @@ use super::{
     cid, config::Config, config::PmtuPolicy, config::TrafficAnalysisDefense, frames, packet,
     pnspace, recovery, udpfast, ConnectionId, EcnCounts, EcnMark, FecControlDelta, Frame,
     PacketType, PathStats, RecvInfo, SendInfo, Stats, Stream, TransportObserver, INITIAL_WINDOW,
-    MAX_STREAM_SIZE, MIN_CLIENT_INITIAL_LEN, PROTOCOL_VERSION,
+    MAX_STREAM_SIZE, MIN_CLIENT_INITIAL_LEN,
 };
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -325,6 +325,7 @@ pub struct Connection {
     is_established: bool,
     is_closed: bool,
     is_draining: bool,
+    received_non_vn_packet: bool,
     /// Stream storage. HashMap provides O(1) amortized lookup but poor cache locality
     /// at high stream counts (>10k). Hash table entries scatter across memory, causing
     /// L1/L2 cache misses during iteration and lookup. Consider replacing with a slot map
@@ -334,6 +335,7 @@ pub struct Connection {
     local_addr: SocketAddr,
     peer_addr: SocketAddr,
     config: Config,
+    version_negotiation: super::version::VersionNegotiationState,
     stats: Stats,
     #[cfg(not(feature = "zero_copy_dgram"))]
     dgram_recv_queue: VecDeque<Vec<u8>>,
@@ -380,6 +382,7 @@ pub struct Connection {
 
     // Unified TLS provider (rustls + optional TLS Cover)
     tls_provider: Option<Box<dyn crate::qftls::QuicTlsProvider>>,
+    tls_profile: Option<crate::qftls::TlsProfile>,
     conn_bytes_sent: u64,
     pending_control: VecDeque<Frame<'static>>,
     // Crypto context (AEAD/HP) hooks for header and payload processing
@@ -546,6 +549,7 @@ impl Connection {
         let initial_max_data = config.initial_max_data;
         let pmtu_enabled = config.pmtu_discovery_enabled();
         let pmtu_policy = config.pmtu_policy();
+        let version_negotiation = super::version::VersionNegotiationState::new(config.version);
         let mut conn = Self {
             scid: ConnectionId::from_vec(scid.to_vec()),
             dcid: ConnectionId::default(),
@@ -554,10 +558,12 @@ impl Connection {
             is_established: false,
             is_closed: false,
             is_draining: false,
+            received_non_vn_packet: false,
             streams: HashMap::new(),
             local_addr: local,
             peer_addr: peer,
             config,
+            version_negotiation,
             stats: Stats::default(),
             #[cfg(not(feature = "zero_copy_dgram"))]
             dgram_recv_queue: VecDeque::new(),
@@ -599,6 +605,7 @@ impl Connection {
             conn_bytes_recvd: 0,
             peer_max_data: initial_max_data,
             tls_provider: None,
+            tls_profile: None,
             conn_bytes_sent: 0,
             pending_control: VecDeque::new(),
             crypto: Arc::new(parking_lot::RwLock::new(packet::CryptoContext::default())),
@@ -1285,12 +1292,21 @@ impl Connection {
         // TLS provider must operate on the same CryptoContext as the transport,
         // otherwise secrets would never be installed into the packet protection keys.
         let crypto_arc = self.crypto.clone();
+        let mut available_versions = self.config.supported_versions.clone();
+        available_versions.push(self.version_negotiation.grease);
+        let version_information = super::version::VersionInformation {
+            chosen: self.config.version,
+            available: available_versions,
+        }
+        .encode_parameter()?;
 
         // Create the TLS composition stack (rustls + optional TLS Cover).
-        let provider = crate::qftls::create_provider_with_peer_verification(
+        let provider = crate::qftls::create_provider_for_version(
             self.is_server,
             crypto_arc.clone(),
             self.config.verify_peer,
+            self.config.version,
+            &version_information,
         )?;
 
         // Store provider
@@ -1322,8 +1338,8 @@ impl Connection {
                 (server_secret.as_slice(), client_secret.as_slice())
             };
             let mut crypto = self.crypto.write();
-            crypto.install_aes_gcm_initial(read_secret, write_secret);
-            crypto.install_hp_initial(read_secret, write_secret);
+            crypto.install_aes_gcm_initial(read_secret, write_secret, self.config.version);
+            crypto.install_hp_initial(read_secret, write_secret, self.config.version);
         }
 
         Ok(())
@@ -1344,6 +1360,7 @@ impl Connection {
             effective.sni = Some(sni.to_string());
         }
         provider.configure(&effective)?;
+        self.tls_profile = Some(effective);
         // Optionally enable 0-RTT when desired.
         if let Err(e) = provider.enable_0rtt() {
             log::debug!("TLS provider 0-RTT enablement failed: {:?}", e);
@@ -1477,7 +1494,7 @@ impl Connection {
         offset: u64,
         data: Cow<'_, [u8]>,
     ) -> Result<(), crate::error::ConnectionError> {
-        if let Some(provider) = &mut self.tls_provider {
+        if self.tls_provider.is_some() {
             // CRYPTO frames can arrive out-of-order. Buffer and drain contiguous handshake bytes
             // before feeding into the TLS provider.
             let mut chunks: Vec<Vec<u8>> = Vec::new();
@@ -1499,22 +1516,23 @@ impl Connection {
                 }
             }
 
-            for chunk in chunks {
-                if let Err(error) = provider.provide_quic_data(level, &chunk) {
-                    self.local_error = Some(error.clone());
-                    self.is_closed = true;
-                    return Err(error);
+            if let Some(provider) = &mut self.tls_provider {
+                for chunk in chunks {
+                    if let Err(error) = provider.provide_quic_data(level, &chunk) {
+                        self.local_error = Some(error.clone());
+                        self.is_closed = true;
+                        return Err(error);
+                    }
                 }
             }
             // Install any newly derived secrets into the shared CryptoContext.
             // Without this, the transport would never transition to 1-RTT and application streams
             // (including HTTP/3 HEADERS carrying x-qf-auth) would stall behind the handshake gate.
-            if let Err(error) = provider.poll_secrets_and_install(&self.crypto) {
+            if let Err(error) = self.poll_tls_and_validate_versions() {
                 self.local_error = Some(error.clone());
                 self.is_closed = true;
                 return Err(error);
             }
-            self.refresh_short_header_tag_reserve();
         } else {
             // Store in crypto stream for later processing
             let mut crypto = self.crypto.write();
@@ -1527,6 +1545,109 @@ impl Connection {
         }
 
         Ok(())
+    }
+
+    fn poll_tls_and_validate_versions(&mut self) -> Result<(), crate::error::ConnectionError> {
+        let peer_parameters = {
+            let Some(provider) = &mut self.tls_provider else {
+                return Ok(());
+            };
+            provider.poll_secrets_and_install(&self.crypto)?;
+            provider.peer_quic_transport_params()
+        };
+        self.refresh_short_header_tag_reserve();
+        self.validate_peer_version_information(peer_parameters)
+    }
+
+    fn validate_peer_version_information(
+        &mut self,
+        peer_parameters: Option<Vec<u8>>,
+    ) -> Result<(), crate::error::ConnectionError> {
+        if self.version_negotiation.peer_information_validated {
+            return Ok(());
+        }
+        let Some(peer_parameters) = peer_parameters else {
+            return Ok(());
+        };
+        let information = match super::version::find_version_information(&peer_parameters) {
+            Ok(information) => information,
+            Err(_) => {
+                return Err(self.fail_version_negotiation(
+                    super::version::TRANSPORT_PARAMETER_ERROR_CODE,
+                    "malformed version_information transport parameter",
+                ));
+            }
+        };
+        let required = !self.is_server
+            && (self.config.version == super::PROTOCOL_VERSION_V2
+                || self.version_negotiation.reacted_to_vn);
+        let information = match information {
+            Some(information) => information,
+            None if !self.is_server
+                && self.version_negotiation.reacted_to_vn
+                && self.config.version == super::PROTOCOL_VERSION =>
+            {
+                super::version::VersionInformation {
+                    chosen: super::PROTOCOL_VERSION,
+                    available: vec![super::PROTOCOL_VERSION],
+                }
+            }
+            None => {
+                if required {
+                    return Err(self.fail_version_negotiation(
+                        super::version::VERSION_NEGOTIATION_ERROR_CODE,
+                        "required version_information transport parameter missing",
+                    ));
+                }
+                self.version_negotiation.peer_information_validated = true;
+                return Ok(());
+            }
+        };
+
+        if self.is_server && !information.available.contains(&information.chosen) {
+            return Err(self.fail_version_negotiation(
+                super::version::TRANSPORT_PARAMETER_ERROR_CODE,
+                "client chosen version missing from available versions",
+            ));
+        }
+        let valid_choice = information.chosen == self.config.version
+            && self.config.supported_versions.contains(&information.chosen);
+        let negotiated_preference_matches = if self.version_negotiation.reacted_to_vn
+            && !self.is_server
+        {
+            if information.available.is_empty() {
+                false
+            } else {
+                self.config
+                    .supported_versions
+                    .iter()
+                    .find(|version| {
+                        **version == self.config.version || information.available.contains(version)
+                    })
+                    .is_some_and(|version| *version == self.config.version)
+            }
+        } else {
+            true
+        };
+        if !valid_choice || !negotiated_preference_matches {
+            return Err(self.fail_version_negotiation(
+                super::version::VERSION_NEGOTIATION_ERROR_CODE,
+                "authenticated version_information rejected negotiated version",
+            ));
+        }
+        self.version_negotiation.peer_information_validated = true;
+        Ok(())
+    }
+
+    fn fail_version_negotiation(
+        &mut self,
+        error_code: u64,
+        reason: &'static str,
+    ) -> crate::error::ConnectionError {
+        let error = crate::error::ConnectionError::Transport(reason.to_string());
+        let _ = self.close(false, error_code, reason.as_bytes());
+        self.local_error = Some(error.clone());
+        error
     }
 
     /// Get next CRYPTO frame to send
@@ -1551,6 +1672,105 @@ impl Connection {
     // ============================================================================
     // Packet Processing Methods
     // ============================================================================
+
+    fn handle_version_negotiation_packet(
+        &mut self,
+        header: &packet::Header,
+        packet_len: usize,
+    ) -> Result<usize, crate::error::ConnectionError> {
+        use crate::error::ConnectionError;
+
+        let valid_context = !self.is_server
+            && !self.received_non_vn_packet
+            && header.dcid.as_slice() == self.scid.as_ref()
+            && header.scid.as_slice() == self.initial_dcid.as_ref();
+        if !valid_context {
+            return Ok(packet_len);
+        }
+        let peer_versions = header.versions.as_deref().unwrap_or_default();
+        let selected = match self
+            .version_negotiation
+            .select_from_vn(&self.config.supported_versions, peer_versions)
+        {
+            Ok(version) => version,
+            Err(ConnectionError::Done) => return Ok(packet_len),
+            Err(ConnectionError::VersionMismatch) => {
+                self.is_closed = true;
+                self.local_error = Some(ConnectionError::VersionMismatch);
+                return Err(ConnectionError::VersionMismatch);
+            }
+            Err(error) => return Err(error),
+        };
+
+        self.config.select_version(selected)?;
+        self.version_negotiation.peer_information_validated = false;
+        let mut scid = [0u8; super::MAX_CONN_ID_LEN];
+        let mut dcid = [0u8; super::MAX_CONN_ID_LEN];
+        super::rand::rand_bytes(&mut scid);
+        super::rand::rand_bytes(&mut dcid);
+        self.scid = ConnectionId::from_vec(scid.to_vec());
+        self.initial_dcid = ConnectionId::from_vec(dcid.to_vec());
+        self.dcid = self.initial_dcid.clone();
+        self.dest_cids = cid::ConnectionIdSet::new();
+        self.dest_cids.insert(&self.dcid);
+        self.is_established = false;
+        self.is_closed = false;
+        self.is_draining = false;
+        self.local_error = None;
+        self.pkt_spaces = [
+            pnspace::PktNumSpace::default(),
+            pnspace::PktNumSpace::default(),
+            pnspace::PktNumSpace::default(),
+        ];
+        self.next_send_pn_by_space = [0, 0, 0];
+        self.pending_control.clear();
+        self.sent_packets_by_pn.clear();
+        self.stream_transmission_by_pn.clear();
+        self.lost_stream_transmission_by_pn.clear();
+        self.stream_retransmit_queue.clear();
+        for (transmission_id, transmission) in &mut self.stream_transmissions {
+            transmission.queued = true;
+            transmission.active_packet = None;
+            transmission.lost_packets.clear();
+            self.stream_retransmit_queue.push_back(*transmission_id);
+        }
+        self.bytes_in_flight = 0;
+        self.bytes_in_flight_started = None;
+        self.cwnd = INITIAL_WINDOW;
+        self.rtt = Duration::ZERO;
+        self.timeout_count = 0;
+        self.last_activity = Instant::now();
+        self.congestion_blocked_since = None;
+        self.conn_bytes_sent = 0;
+        self.conn_bytes_recvd = 0;
+        self.peer_max_data = self.config.initial_max_data;
+        self.h3 = None;
+        self.pmtu_probe_pn = None;
+        self.pmtu_above_floor_pns.clear();
+        self.recovery = recovery::Recovery::new(INITIAL_WINDOW, self.dgram_send_max_size);
+        if self.config.initial_rtt_ms != 100 {
+            self.recovery.set_initial_rtt(Duration::from_millis(self.config.initial_rtt_ms));
+        }
+        self.install_recovery_fec_callbacks();
+        self.crypto = Arc::new(parking_lot::RwLock::new(packet::CryptoContext::default()));
+        self.crypto_1rtt.store(None);
+        self.short_header_tag_reserve = 0;
+        let tls_was_enabled = self.tls_provider.is_some();
+        self.tls_provider = None;
+
+        if tls_was_enabled {
+            let profile = self.tls_profile.clone();
+            self.enable_tls("version-negotiation-restart")?;
+            if let Some(profile) = profile {
+                let sni = profile.sni.clone().unwrap_or_default();
+                self.configure_tls(&profile, &sni)?;
+            }
+        }
+
+        self.stats.recv = self.stats.recv.saturating_add(1);
+        self.stats.recv_bytes = self.stats.recv_bytes.saturating_add(packet_len as u64);
+        Ok(packet_len)
+    }
 
     /// Processes incoming packet
     #[inline(always)]
@@ -1585,8 +1805,21 @@ impl Connection {
                 Err(_) => (PacketType::Short, 0, None),
             };
 
+        if pre_ty == PacketType::VersionNegotiation {
+            let Some((header, _)) = pre_parsed_hdr.as_ref() else {
+                return Ok(buf.len());
+            };
+            return self.handle_version_negotiation_packet(header, buf.len());
+        }
+
         // Retry verification (no payload decrypt)
         if let PacketType::Retry = pre_ty {
+            let retry_version_matches = pre_parsed_hdr
+                .as_ref()
+                .is_some_and(|(header, _)| header.version == self.version_negotiation.chosen);
+            if self.is_server || !retry_version_matches {
+                return Ok(buf.len());
+            }
             let odcid = if !self.initial_dcid.is_empty() {
                 self.initial_dcid.as_ref()
             } else {
@@ -1613,8 +1846,8 @@ impl Connection {
                     let (read_secret, write_secret) =
                         (server_secret.as_slice(), client_secret.as_slice());
                     let mut crypto = self.crypto.write();
-                    crypto.install_aes_gcm_initial(read_secret, write_secret);
-                    crypto.install_hp_initial(read_secret, write_secret);
+                    crypto.install_aes_gcm_initial(read_secret, write_secret, self.config.version);
+                    crypto.install_hp_initial(read_secret, write_secret, self.config.version);
                     drop(crypto);
                     self.refresh_short_header_tag_reserve();
                     self.next_send_pn_by_space[0] = 0;
@@ -1622,6 +1855,7 @@ impl Connection {
                 }
             }
             // For Retry we do not parse further.
+            self.received_non_vn_packet = true;
             self.stats.recv += 1;
             self.stats.recv_bytes += buf.len() as u64;
             return Ok(buf.len());
@@ -1694,6 +1928,7 @@ impl Connection {
             }
         };
         let pkt_ty = hdr_native.ty;
+        self.received_non_vn_packet = true;
 
         // Learn peer CID from the first long-header packets.
         // - Server: outgoing DCID must be the client's SCID.
@@ -2829,10 +3064,7 @@ impl Connection {
 
         // TLS provider may derive new secrets during write-side progression. Poll here so
         // handshake completion and key installation are not dependent on receiving more CRYPTO.
-        if let Some(provider) = &mut self.tls_provider {
-            provider.poll_secrets_and_install(&self.crypto)?;
-            self.refresh_short_header_tag_reserve();
-        }
+        self.poll_tls_and_validate_versions()?;
 
         let handshake_incomplete =
             self.tls_provider.as_ref().map(|p| !p.handshake_complete()).unwrap_or(false);
@@ -2866,7 +3098,7 @@ impl Connection {
                 };
                 let base_hdr = packet::Header {
                     ty: pkt_ty,
-                    version: PROTOCOL_VERSION,
+                    version: self.config.version,
                     dcid: self.dcid.to_vec(),
                     scid: self.scid.to_vec(),
                     pkt_num: 0,
@@ -3676,10 +3908,7 @@ impl Connection {
     /// Returns true only when an outer data-plane envelope cannot capture a
     /// pending Initial or Handshake packet.
     pub fn post_handshake_datagram_ready(&mut self) -> Result<bool, crate::error::ConnectionError> {
-        if let Some(provider) = &mut self.tls_provider {
-            provider.poll_secrets_and_install(&self.crypto)?;
-        }
-        self.refresh_short_header_tag_reserve();
+        self.poll_tls_and_validate_versions()?;
         if !self.is_established() {
             return Ok(false);
         }
@@ -4684,7 +4913,8 @@ pub fn bench_paired_1rtt_connections_stealth(stealth_on: bool) -> BenchConnectio
     let local_server = peer_client;
     let peer_server = local_client;
 
-    let mut config = Config::new_with_version(PROTOCOL_VERSION).expect("bench config");
+    let mut config =
+        Config::new_with_version(crate::transport::PROTOCOL_VERSION).expect("bench config");
     config.stealth_timing_enabled = stealth_on;
     config.stealth_timing_max_jitter_us = if stealth_on { 2_500 } else { 0 };
     config.stealth_padding_enabled = stealth_on;
@@ -4786,13 +5016,18 @@ impl Connection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ConnectionError;
     use crate::transport::config::Config;
+    use crate::transport::PROTOCOL_VERSION;
 
     fn local() -> std::net::SocketAddr {
         "127.0.0.1:10000".parse().unwrap()
     }
     fn peer() -> std::net::SocketAddr {
         "127.0.0.1:10001".parse().unwrap()
+    }
+    fn recv_info() -> RecvInfo {
+        RecvInfo { from: peer(), to: local(), ecn: None }
     }
 
     /// Minimal connection used across tests; does not require TLS or sockets.
@@ -4810,6 +5045,146 @@ mod tests {
     /// key_phase without a real TLS handshake.
     fn install_write_secret(c: &mut Connection) {
         c.crypto.write().write_secret_1rtt = Some(vec![0u8; 32]);
+    }
+
+    fn make_v2_client() -> Connection {
+        let mut config = Config::new_with_version(crate::transport::PROTOCOL_VERSION_V2).unwrap();
+        config
+            .set_supported_versions(vec![crate::transport::PROTOCOL_VERSION_V2, PROTOCOL_VERSION])
+            .unwrap();
+        let mut connection =
+            Connection::new_with_role(b"client-scid", local(), peer(), config, false);
+        connection.set_initial_dcid(ConnectionId::from_vec(b"client-dcid".to_vec()));
+        connection
+    }
+
+    #[test]
+    fn valid_vn_restarts_once_with_preferred_common_version_and_fresh_cids() {
+        let mut client = make_v2_client();
+        let original_scid = client.scid.clone();
+        let original_dcid = client.initial_dcid.clone();
+        client.sent_packets_by_pn.insert(0, (1200, Instant::now()));
+        client.bytes_in_flight = 1200;
+        let mut vn = packet::generate_version_negotiation_packet(
+            &[],
+            &[PROTOCOL_VERSION, super::super::version::generate_reserved_version()],
+            original_scid.as_ref(),
+            original_dcid.as_ref(),
+        );
+        assert_eq!(client.recv(&mut vn, &recv_info()), Ok(vn.len()));
+        assert_eq!(client.config.version(), PROTOCOL_VERSION);
+        assert!(client.version_negotiation.reacted_to_vn);
+        assert_ne!(client.scid, original_scid);
+        assert_ne!(client.initial_dcid, original_dcid);
+        assert!(client.sent_packets_by_pn.is_empty());
+        assert_eq!(client.bytes_in_flight, 0);
+
+        let selected_scid = client.scid.clone();
+        let selected_dcid = client.initial_dcid.clone();
+        let mut second = packet::generate_version_negotiation_packet(
+            &[],
+            &[crate::transport::PROTOCOL_VERSION_V2],
+            selected_scid.as_ref(),
+            selected_dcid.as_ref(),
+        );
+        assert_eq!(client.recv(&mut second, &recv_info()), Ok(second.len()));
+        assert_eq!(client.config.version(), PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn spoofed_or_original_version_vn_is_ignored() {
+        let mut client = make_v2_client();
+        let original_dcid = client.initial_dcid.clone();
+        let mut wrong_cid = packet::generate_version_negotiation_packet(
+            &[],
+            &[PROTOCOL_VERSION],
+            b"wrong",
+            original_dcid.as_ref(),
+        );
+        assert_eq!(client.recv(&mut wrong_cid, &recv_info()), Ok(wrong_cid.len()));
+        assert!(!client.version_negotiation.reacted_to_vn);
+
+        let mut injected = packet::generate_version_negotiation_packet(
+            &[],
+            &[crate::transport::PROTOCOL_VERSION_V2, PROTOCOL_VERSION],
+            client.scid.as_ref(),
+            original_dcid.as_ref(),
+        );
+        assert_eq!(client.recv(&mut injected, &recv_info()), Ok(injected.len()));
+        assert!(!client.version_negotiation.reacted_to_vn);
+        assert_eq!(client.config.version(), crate::transport::PROTOCOL_VERSION_V2);
+    }
+
+    #[test]
+    fn vn_without_common_version_terminates_connection() {
+        let mut client = make_v2_client();
+        let mut vn = packet::generate_version_negotiation_packet(
+            &[],
+            &[super::super::version::generate_reserved_version()],
+            client.scid.as_ref(),
+            client.initial_dcid.as_ref(),
+        );
+        assert_eq!(client.recv(&mut vn, &recv_info()), Err(ConnectionError::VersionMismatch));
+        assert!(client.is_closed);
+    }
+
+    #[test]
+    fn authenticated_version_information_rejects_injected_downgrade() {
+        let mut client = make_v2_client();
+        client.config.select_version(PROTOCOL_VERSION).unwrap();
+        client.version_negotiation.chosen = PROTOCOL_VERSION;
+        client.version_negotiation.negotiated = PROTOCOL_VERSION;
+        client.version_negotiation.reacted_to_vn = true;
+        let parameters = super::super::version::VersionInformation {
+            chosen: PROTOCOL_VERSION,
+            available: vec![crate::transport::PROTOCOL_VERSION_V2, PROTOCOL_VERSION],
+        }
+        .encode_parameter()
+        .unwrap();
+
+        assert!(client.validate_peer_version_information(Some(parameters)).is_err());
+        assert!(client.pending_control.iter().any(|frame| matches!(
+            frame,
+            Frame::ConnectionClose { error_code, .. }
+                if *error_code == super::super::version::VERSION_NEGOTIATION_ERROR_CODE
+        )));
+    }
+
+    #[test]
+    fn v2_requires_authenticated_version_information() {
+        let mut client = make_v2_client();
+        assert!(client.validate_peer_version_information(Some(Vec::new())).is_err());
+        assert!(client.is_closed);
+    }
+
+    #[test]
+    fn server_may_accept_missing_version_information_and_client_accepts_retiring_choice() {
+        let mut config = Config::new_with_version(crate::transport::PROTOCOL_VERSION_V2).unwrap();
+        config
+            .set_supported_versions(vec![crate::transport::PROTOCOL_VERSION_V2, PROTOCOL_VERSION])
+            .unwrap();
+        let mut server = Connection::new_with_role(b"server-scid", local(), peer(), config, true);
+        assert_eq!(server.validate_peer_version_information(Some(Vec::new())), Ok(()));
+
+        let mut client = make_v2_client();
+        let parameters = super::super::version::VersionInformation {
+            chosen: crate::transport::PROTOCOL_VERSION_V2,
+            available: vec![PROTOCOL_VERSION],
+        }
+        .encode_parameter()
+        .unwrap();
+        assert_eq!(client.validate_peer_version_information(Some(parameters)), Ok(()));
+    }
+
+    #[test]
+    fn v1_fallback_accepts_legacy_server_without_version_information() {
+        let mut client = make_v2_client();
+        client.config.select_version(PROTOCOL_VERSION).unwrap();
+        client.version_negotiation.chosen = PROTOCOL_VERSION;
+        client.version_negotiation.negotiated = PROTOCOL_VERSION;
+        client.version_negotiation.reacted_to_vn = true;
+        assert_eq!(client.validate_peer_version_information(Some(Vec::new())), Ok(()));
+        assert!(client.version_negotiation.peer_information_validated);
     }
 
     // ---- Priority 1: Flow Control ----------------------------------------

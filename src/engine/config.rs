@@ -260,10 +260,31 @@ impl ConnectionConfig {
 // TRANSPORT SECTION
 // ============================================================================
 
+/// Standards-based QUIC wire version.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum QuicVersion {
+    /// QUIC version 2 (RFC 9369).
+    V2,
+    /// QUIC version 1 (RFC 9000).
+    V1,
+}
+
+impl QuicVersion {
+    pub(crate) fn wire_version(self) -> u32 {
+        match self {
+            Self::V2 => crate::transport::PROTOCOL_VERSION_V2,
+            Self::V1 => crate::transport::PROTOCOL_VERSION,
+        }
+    }
+}
+
 /// Transport layer configuration.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct TransportConfig {
+    /// Ordered usable QUIC versions, preferred first.
+    pub quic_versions: Vec<QuicVersion>,
     /// Congestion control algorithm
     pub cc_algorithm: CcAlgorithm,
     /// Maximum Transmission Unit
@@ -309,6 +330,7 @@ pub struct TransportConfig {
 impl Default for TransportConfig {
     fn default() -> Self {
         Self {
+            quic_versions: vec![QuicVersion::V2, QuicVersion::V1],
             cc_algorithm: CcAlgorithm::Bbr3,
             mtu: 1500,
             max_udp_payload: 1500,
@@ -335,6 +357,15 @@ impl Default for TransportConfig {
 
 impl TransportConfig {
     fn validate(&self) -> Result<(), ConfigError> {
+        if self.quic_versions.is_empty() {
+            return Err(ConfigError::Validation("quic_versions must not be empty".into()));
+        }
+        let mut unique_versions = std::collections::HashSet::new();
+        if self.quic_versions.iter().any(|version| !unique_versions.insert(*version)) {
+            return Err(ConfigError::Validation(
+                "quic_versions must not contain duplicates".into(),
+            ));
+        }
         if self.mtu < 1200 {
             return Err(ConfigError::Validation(format!(
                 "MTU must be at least 1200, got {}",
@@ -1242,8 +1273,18 @@ mod tests {
     fn test_default_config() {
         let config = EngineConfig::default();
         assert_eq!(config.engine.mode, EngineMode::Client);
+        assert_eq!(config.transport.quic_versions, [QuicVersion::V2, QuicVersion::V1]);
         assert_eq!(config.transport.cc_algorithm, CcAlgorithm::Bbr3);
         assert_eq!(config.crypto.aead_preference, AeadPreference::Auto);
+    }
+
+    #[test]
+    fn transport_rejects_empty_or_duplicate_quic_versions() {
+        let mut transport = TransportConfig::default();
+        transport.quic_versions.clear();
+        assert!(transport.validate().is_err());
+        transport.quic_versions = vec![QuicVersion::V2, QuicVersion::V2];
+        assert!(transport.validate().is_err());
     }
 
     #[test]

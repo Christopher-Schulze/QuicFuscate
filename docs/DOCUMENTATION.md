@@ -331,6 +331,7 @@ This document provides comprehensive technical documentation for the system arch
 
 ### Quick Index (Fast Paths)
 - Runtime architecture and module map: [Architecture at a Glance](#architecture-at-a-glance)
+- QUIC version policy and downgrade protection: [QUIC v1/v2 Version Negotiation](#quic-v1v2-version-negotiation)
 - Stealth behavior and mode matrix: [Obfuscation-Modes Overview](#obfuscation-modes-overview)
 - TLS boundary and controls: [TLS Boundary: rustls protocol with optional cover overlay](#tls-boundary-rustls-protocol-with-optional-cover-overlay)
 - FEC runtime controls and tuning: [FEC Operations Guide](#fec-operations-guide)
@@ -347,7 +348,7 @@ This document provides comprehensive technical documentation for the system arch
 - `src/stealth/`: DoH, HTTP/3 masquerading, TLS Cover, domain fronting, QPACK helpers, active probe detection, runtime Server Push cover coordination
   - `src/reality.rs`: Reality Fallback (Xray-style reverse proxy for active probe mitigation)
   - `src/interface.rs`: Cross-platform TUN interface
-  - `src/transport.rs`: Transport module root with focused submodules in `src/transport/` (packet, recovery, frames, h3, xdp, udpfast, connection)
+  - `src/transport.rs`: Transport module root with focused submodules in `src/transport/` (packet, version, recovery, frames, h3, xdp, udpfast, connection)
   - HTTP/3 streams: `fin_received` flag tracks stream completion for deterministic GC in `poll()`
   - UDP fast paths: runtime-owned sendmmsg/recvmmsg batching in `src/optimize/udp.rs`, narrowed `udpfast` compatibility coverage, and sendmsg_x batching (macOS)
 - `src/brain.rs`: StealthBrain adaptive policy engine (ACK/FEC hints plus compatibility-only MASQUE hint channel), sensor-fusion logic, and Intelligent-mode runtime-policy delta emitter
@@ -377,6 +378,14 @@ This document provides comprehensive technical documentation for the system arch
 - Standalone runtime config reload: the server module now also owns runtime reload normalization for stealth overrides, optimize normalization, and `transport.*` TOML overrides. `main.rs` only forwards reload intent and transport state into that server-owned path.
 - Server listen-address normalization: standalone CLI and embedded `EngineMode::Server` now derive `ServerConfig.listen` through the same server-owned resolver, so both entry surfaces share one canonical listen-address interpretation for runtime ownership.
 - Desktop: imports QKeys (paste/import), persists them per tunnel locally, and uses them for connect/disconnect. Existing tunnel shells can be upgraded in-place through `Set QKey` / `Change QKey`. The desktop UI does not generate server-issued QKeys and does not render them after import.
+
+### QUIC v1/v2 Version Negotiation
+
+The canonical Engine and standalone CLI runtimes support only standardized QUIC v2 (`0x6b3343cf`) and v1 (`0x00000001`), ordered by `[transport].quic_versions`; the default is `["v2", "v1"]`. `src/transport/version.rs` owns the usable-version state, v1/v2 long-header type mapping, reserved-version greasing, and RFC 9368 Version Information transport parameter. Grease values are advertised only on the wire and never become selectable runtime versions.
+
+`src/transport/packet.rs` owns version-specific Initial key labels and salts, Retry integrity material, invariant Version Negotiation parsing, and stateless server VN replies before connection allocation. A client accepts a VN packet only before any other server packet, with DCID equal to its current SCID, SCID equal to its original DCID, and without its original version in the offered list. At most one restart is allowed; the restart chooses the first locally preferred common version, generates fresh connection IDs, and resets packet-number, recovery, crypto, TLS, H3, flow-control, and retained-stream transmission state.
+
+Both peers authenticate the result through `version_information` during the rustls handshake. Malformed or duplicate parameters fail with `TRANSPORT_PARAMETER_ERROR`; inconsistent choices, missing required v2 information, and downgrade attempts fail with `VERSION_NEGOTIATION_ERROR`. A server may accept a legacy peer without Version Information, and a client that explicitly falls back to v1 after VN applies RFC 9368's synthetic v1 compatibility rule. QUIC v2 uses the RFC 9369 packet type bits, Initial salt, `quicv2 key`/`iv`/`hp`/`ku` labels, and Retry key/nonce.
 
 #### Engine Control Plane (embedded orchestration)
 `quicfuscate::engine::QuicFuscateEngine` is the canonical embedding entrypoint for non-CLI integrations. It owns the aggregated `EngineConfig`, selects `ClientRuntime` or `ServerRuntime` via `engine.mode`, tracks lifecycle in `EngineState`, and emits `EngineStats` snapshots for host applications.

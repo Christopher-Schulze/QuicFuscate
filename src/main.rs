@@ -1436,6 +1436,18 @@ fn apply_runtime_transport_defaults(
     config.set_initial_max_streams_uni(100);
 }
 
+fn new_runtime_transport_config(
+) -> Result<quicfuscate::transport::Config, quicfuscate::error::ConnectionError> {
+    let mut config = quicfuscate::transport::Config::new_with_version(
+        quicfuscate::transport::PROTOCOL_VERSION_V2,
+    )?;
+    config.set_supported_versions(vec![
+        quicfuscate::transport::PROTOCOL_VERSION_V2,
+        quicfuscate::transport::PROTOCOL_VERSION,
+    ])?;
+    Ok(config)
+}
+
 fn runtime_optimize_config(
     config_path: Option<&PathBuf>,
     opt_cfg: OptimizeConfig,
@@ -1759,9 +1771,7 @@ async fn run_client(
     let (fec_cfg, mut stealth_config, opt_cfg, _) =
         load_runtime_profiles(config_path, fec_config, fec_mode);
 
-    let mut config = match quicfuscate::transport::Config::new_with_version(
-        quicfuscate::transport::PROTOCOL_VERSION,
-    ) {
+    let mut config = match new_runtime_transport_config() {
         Ok(c) => c,
         Err(e) => {
             error!("Failed to create transport config: {}", e);
@@ -2291,6 +2301,20 @@ mod runtime_reload_tests {
     }
 
     #[test]
+    fn runtime_transport_defaults_prefer_v2_with_v1_fallback() {
+        let transport = new_runtime_transport_config().expect("runtime transport config");
+
+        assert_eq!(transport.version(), quicfuscate::transport::PROTOCOL_VERSION_V2);
+        assert_eq!(
+            transport.supported_versions(),
+            &[
+                quicfuscate::transport::PROTOCOL_VERSION_V2,
+                quicfuscate::transport::PROTOCOL_VERSION
+            ]
+        );
+    }
+
+    #[test]
     fn load_runtime_profiles_applies_non_zero_fec_mode_without_config_file() {
         let (fec, stealth, optimize, _) = load_runtime_profiles(None, &None, None);
         let default_stealth = StealthConfig::default();
@@ -2762,9 +2786,7 @@ async fn run_server(
     }
     quicfuscate::optimize::MemoryPool::set_lock_blocks(lock_blocks);
 
-    let mut config = match quicfuscate::transport::Config::new_with_version(
-        quicfuscate::transport::PROTOCOL_VERSION,
-    ) {
+    let mut config = match new_runtime_transport_config() {
         Ok(c) => c,
         Err(e) => {
             error!("Failed to create server transport config: {}", e);

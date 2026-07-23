@@ -7,6 +7,7 @@ It is maintained as the current architecture and repository index, with a curate
 
 - Runtime core: Rust crate under `src/` with entrypoints in `src/main.rs` and `src/lib.rs`.
 - Data path wiring: app or TUN ingress -> core/transport -> stealth shaping -> crypto -> FEC -> network I/O.
+- QUIC version wiring: Engine and standalone CLI config default to ordered v2/v1 support; `transport::version` owns selection, greasing, type mapping, and authenticated Version Information; `transport::packet` owns v1/v2 Initial and Retry material plus stateless VN; `transport::Connection` owns strict CID validation and one bounded fresh-state restart.
 - Production VPN carrier: authenticated Core H3/MASQUE CONNECT-UDP carries TUN IP packets. The public QKey ID in the QUIC Initial selects the server record; the bearer is presented only through the encrypted H3 `x-qf-auth` header. The server gates MASQUE DATAGRAM-to-TUN delivery on the current authenticated state.
 - Tunnel MTU ownership: `transport::PmtuState` discovers a validated 1280-1500 outer packetization budget; `core::QuicFuscateConnection` derives the FEC/QUIC/MASQUE datagram payload and a separate IPv6-safe inner tunnel MTU. The client applies live TUN MTU changes and returns local IPv4/IPv6 PTB above that boundary.
 - Oversized tunnel carrier: raw IP packets within the effective tunnel MTU but above the MASQUE datagram payload use bounded `QFT1` length framing on the `/tun` HTTP/3 stream. `core.rs` reassembles arbitrary DATA-read segmentation per stream and rejects invalid magic, empty frames, non-IP payloads, and unbounded pending data.
@@ -183,6 +184,7 @@ Uses `StealthConfig::from_mode(runtime_mode)` - was silently using `..Default::d
 21. Windows core CI gate: `.github/workflows/ci.yml` `windows-core-checks` -> native `windows-latest` `cargo check --lib` -> parallel `cargo test --lib --features rust-tests` -> `cargo clippy --lib --features rust-tests -- -D warnings`; exact proof job `88909613077` is green on `15570abf772766c76959f6aae6ba16b2b9c26fd7`.
 22. Windows signed release path: `scripts/audits/verify-release-version.sh` -> `.github/workflows/release.yml` `release-version-contract` -> `desktop-windows` Tauri MSI build -> `.msi` plus `.msi.sig` verification -> required `publish-release` dependency -> `latest.json` `windows-x86_64` entry.
 23. Reliable tunnel fallback path: `src/core.rs` `QFT1` packet framing -> `src/transport/connection.rs` immutable STREAM ledger -> confirmed-PMTU packetization -> centralized `OutboundPacer` -> ACK/loss/PTO retirement and requeue -> byte-exact PMTU fallback splitting -> peer `core.rs` bounded packet reassembly.
+24. QUIC version negotiation path: `src/engine/config.rs` or `src/main.rs` ordered v2/v1 policy -> `src/transport/version.rs` selectable versions and grease -> `src/transport/packet.rs` stateless server VN -> `src/transport/connection.rs` strict CID/original-version gate and single restart -> `src/qftls.rs` version-matched rustls handshake plus authenticated Version Information downgrade validation.
 
 ## ASCII Repository Tree (curated tracked-source snapshot)
 
@@ -859,6 +861,7 @@ This snapshot intentionally excludes gitignored paths and local generated direct
     |   |-- pn.rs
     |   |-- recovery.rs
     |   |-- udpfast.rs
+    |   |-- version.rs
     |   `-- xdp.rs
     `-- transport.rs
 ```

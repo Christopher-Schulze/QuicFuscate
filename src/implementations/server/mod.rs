@@ -2013,6 +2013,7 @@ pub fn record_qkey_auth_rejection(metrics: &Metrics) {
 
 pub struct LiveInitialAuthContext {
     pub odcid: crate::transport::ConnectionId,
+    pub version: u32,
     pub qkey_record: Option<QKeyRecord>,
     pub pending_qkey_auth: Option<QKeyAuthState>,
 }
@@ -2035,6 +2036,7 @@ pub fn parse_live_server_initial_auth(
         return None;
     }
 
+    let version = initial_hdr.version;
     let odcid = crate::transport::ConnectionId::from_vec(std::mem::take(&mut initial_hdr.dcid));
     let initial_token = initial_hdr.token.take();
     let require_qkey = require_qkey_for_new_clients();
@@ -2070,7 +2072,7 @@ pub fn parse_live_server_initial_auth(
         qkey_record = Some(record);
     }
 
-    Some(LiveInitialAuthContext { odcid, qkey_record, pending_qkey_auth })
+    Some(LiveInitialAuthContext { odcid, version, qkey_record, pending_qkey_auth })
 }
 
 pub fn apply_qkey_policy_overrides(
@@ -2879,10 +2881,16 @@ pub fn build_live_server_client_init(
         Ok(guard) => *guard,
         Err(poisoned) => *poisoned.into_inner(),
     };
+    let mut selected_transport = request.transport_config.clone();
+    if let Err(error) = selected_transport.select_version(initial_ctx.version) {
+        log::warn!("refusing unsupported QUIC version {:#010x}: {}", initial_ctx.version, error);
+        request.metrics.record_connection_rejected();
+        return None;
+    }
     match create_live_server_connection(
         request.local_addr,
         request.remote_addr,
-        request.transport_config,
+        &mut selected_transport,
         conn_stealth_cfg,
         conn_fec_cfg,
         opt_params,
@@ -4505,6 +4513,7 @@ fn hex_from_bytes(bytes: &[u8]) -> String {
 
 #[derive(Default)]
 struct TransportOverrides {
+    quic_versions: Option<Vec<u32>>,
     cc_algorithm: Option<crate::transport::CongestionControlAlgorithm>,
     mtu: Option<usize>,
     max_udp_payload: Option<usize>,
@@ -4576,6 +4585,36 @@ fn parse_transport_overrides_from_toml(contents: &str) -> Result<TransportOverri
     };
 
     let mut out = TransportOverrides::default();
+
+    if let Some(value) = tbl.get("quic_versions") {
+        let versions = value
+            .as_array()
+            .ok_or_else(|| "transport.quic_versions must be an array".to_string())?;
+        if versions.is_empty() {
+            return Err("transport.quic_versions must not be empty".to_string());
+        }
+        let mut parsed = Vec::with_capacity(versions.len());
+        for value in versions {
+            let name = value
+                .as_str()
+                .ok_or_else(|| "transport.quic_versions entries must be strings".to_string())?;
+            let version = match name.trim().to_ascii_lowercase().as_str() {
+                "v2" => crate::transport::PROTOCOL_VERSION_V2,
+                "v1" => crate::transport::PROTOCOL_VERSION,
+                _ => {
+                    return Err(format!(
+                        "transport.quic_versions entry '{}' is not supported",
+                        name
+                    ));
+                }
+            };
+            if parsed.contains(&version) {
+                return Err("transport.quic_versions must not contain duplicates".to_string());
+            }
+            parsed.push(version);
+        }
+        out.quic_versions = Some(parsed);
+    }
 
     if let Some(v) = tbl.get("cc_algorithm") {
         let raw =
@@ -4738,6 +4777,11 @@ pub(crate) fn apply_transport_overrides_from_toml(
         }
     };
 
+    if let Some(versions) = overrides.quic_versions {
+        if let Err(error) = transport.set_supported_versions(versions) {
+            log::warn!("transport QUIC version override ignored: {error}");
+        }
+    }
     if let Some(algo) = overrides.cc_algorithm {
         transport.set_cc_algorithm(algo);
     }
@@ -6057,6 +6101,24 @@ impl ServerRuntime {
                                     metrics.record_rate_limited();
                                     continue;
                                 }
+                            }
+                            if let Ok(Some(response)) =
+                                crate::transport::packet::server_version_negotiation_response(
+                                    &buf[..len],
+                                    runtime_config.transport.supported_versions(),
+                                )
+                            {
+                                match socket.send_to(&response, from).await {
+                                    Ok(sent) => metrics.record_egress_datagram(sent),
+                                    Err(error) => {
+                                        log::warn!(
+                                            "failed to send version negotiation to {}: {}",
+                                            from,
+                                            error
+                                        );
+                                    }
+                                }
+                                continue;
                             }
 
                             let runtime_parts = self.live_parts();
@@ -8129,6 +8191,32 @@ cc_algorithm = "{algorithm}"
 cc_algorithm = "not-a-controller"
 "#;
         assert!(validate_transport_overrides_from_toml(toml_str).is_err());
+    }
+
+    #[test]
+    fn test_transport_overrides_apply_ordered_quic_versions() {
+        let mut transport =
+            crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION).unwrap();
+        let contents = r#"
+[transport]
+quic_versions = ["v2", "v1"]
+"#;
+
+        apply_transport_overrides_from_toml(
+            std::path::Path::new("test.toml"),
+            contents,
+            &mut transport,
+        );
+
+        assert_eq!(transport.version(), crate::transport::PROTOCOL_VERSION_V2);
+        assert_eq!(
+            transport.supported_versions(),
+            &[crate::transport::PROTOCOL_VERSION_V2, crate::transport::PROTOCOL_VERSION]
+        );
+        assert!(validate_transport_overrides_from_toml(
+            "[transport]\nquic_versions = [\"v2\", \"v2\"]"
+        )
+        .is_err());
     }
 
     #[test]

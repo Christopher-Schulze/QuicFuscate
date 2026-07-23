@@ -21,6 +21,14 @@ CERT_DIR="$PROJECT_ROOT/config/local"
 KEEP_ON_FAIL="${QF_E2E_KEEP_ON_FAIL:-0}"
 LOCK_FILE="${QF_E2E_LOCK_FILE:-/tmp/quicfuscate-tun-e2e.lock}"
 LOCK_TIMEOUT="${QF_E2E_LOCK_TIMEOUT:-300}"
+SERVER_CONFIG_ARGS=()
+CLIENT_CONFIG_ARGS=()
+if [ -n "${QF_E2E_SERVER_CONFIG:-}" ]; then
+  SERVER_CONFIG_ARGS=(--config "$QF_E2E_SERVER_CONFIG")
+fi
+if [ -n "${QF_E2E_CLIENT_CONFIG:-}" ]; then
+  CLIENT_CONFIG_ARGS=(--config "$QF_E2E_CLIENT_CONFIG")
+fi
 
 exec 9>"$LOCK_FILE"
 if ! flock -w "$LOCK_TIMEOUT" 9; then
@@ -58,7 +66,7 @@ fail() {
 }
 
 # --- ensure server cert valid for the client's hardcoded validation SNI ---
-cd "$CERT_DIR"
+cd "$CERT_DIR" || fail "could not enter certificate directory"
 cat > /tmp/leaf-ext.cnf <<EOF
 basicConstraints=critical,CA:FALSE
 keyUsage=digitalSignature,keyEncipherment
@@ -68,7 +76,7 @@ EOF
 openssl req -newkey rsa:2048 -keyout server.key -out /tmp/s.csr -nodes -subj "/CN=cdn.cloudflare.com" 2>/dev/null
 openssl x509 -req -in /tmp/s.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out /tmp/leaf.crt -days 365 -extfile /tmp/leaf-ext.cnf 2>/dev/null
 cat /tmp/leaf.crt ca.crt > server.crt
-cd "$PROJECT_ROOT"
+cd "$PROJECT_ROOT" || fail "could not return to project root"
 
 # --- cleanup ---
 cleanup
@@ -83,6 +91,7 @@ ip link set veth-cli netns ns-cli
 ip netns exec ns-srv ip addr add 10.10.0.1/24 dev veth-srv
 ip netns exec ns-srv ip link set veth-srv up
 ip netns exec ns-srv ip link set lo up
+ip netns exec ns-srv ip route add default dev veth-srv
 ip netns exec ns-cli ip addr add 10.10.0.2/24 dev veth-cli
 ip netns exec ns-cli ip link set veth-cli up
 ip netns exec ns-cli ip link set lo up
@@ -98,7 +107,7 @@ ip netns exec ns-cli ping -c1 -W2 10.10.0.1 2>&1 | grep -E "bytes from|packet lo
 ip netns exec ns-srv "$B" server --cert "$CERT" --key "$KEY" \
   --listen 10.10.0.1:4433 --admin-socket /tmp/qf-admin.sock \
   --tun --tun-name qtun0 --tun-ip 10.0.1.1 --tun-netmask 255.255.255.0 \
-  --no-drop-privileges -v \
+  --no-drop-privileges -v "${SERVER_CONFIG_ARGS[@]}" \
   > /tmp/ns-srv.log 2>&1 &
 sleep 3
 
@@ -113,6 +122,7 @@ fi
 ip netns exec ns-cli "$B" client --remote 10.10.0.1:4433 --url https://10.10.0.1/ \
   --qkey "$QKEY" --ca-file "$CA" --verify-peer \
   --tun --tun-name qtun0 --tun-ip 10.0.1.2 --tun-netmask 255.255.255.0 --no-utls -v \
+  "${CLIENT_CONFIG_ARGS[@]}" \
   > /tmp/ns-cli.log 2>&1 &
 sleep 4
 
