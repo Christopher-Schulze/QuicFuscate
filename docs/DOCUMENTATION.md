@@ -3496,10 +3496,10 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `test-fec-all.sh` - Dispatcher: runs all FEC suites (test-fec, test-fec-simulation, test-fec-e2e-loss, auto-controller)
 - `test-fec-auto-controller-scenarios.sh` - FEC auto-controller scenario-driven tests
 - `test-fec-auto-controller-proof.sh` - FEC auto-controller proof orchestration
-- `tun-e2e-fec-netns.sh` - Linux netns FEC smoke over the real tunnel with tc-netem loss. Ping gates are hard pass/fail; optional iperf3 TCP probes are skipped unless real throughput is measured.
-- `tun-e2e-fec-burst-netns.sh` - Linux netns burst-loss FEC proof using correlated tc-netem loss patterns.
-- `tun-e2e-fec-transition-netns.sh` - Linux netns live FEC mode transition proof across clean, lossy, and recovered phases.
-- `tun-e2e-fec-netem-adversity.sh` - Linux netns broad adversity matrix: loss sweep, jitter, bandwidth, RTT+loss, mobile-network mix, and recovery.
+- `tun-e2e-fec-netns.sh` - Linux netns FEC smoke over the real tunnel with tc-netem loss. Current hard gates cover authenticated tunnel establishment, ping liveness/loss bounds, panic absence, and cleanup; quantitative FEC benefit, telemetry, and iperf validity are pending TODO-557.
+- `tun-e2e-fec-burst-netns.sh` - Linux netns correlated burst-loss ping/liveness proof. Comparative FEC recovery benefit is pending TODO-557.
+- `tun-e2e-fec-transition-netns.sh` - Linux netns clean, lossy, and recovered phase liveness proof. Executable mode-transition telemetry is pending TODO-557.
+- `tun-e2e-fec-netem-adversity.sh` - Linux netns ping/liveness matrix for loss, jitter, bandwidth, RTT+loss, mobile-network mix, and recovery. Quantitative throughput, overhead, mode-stability, and recovery-latency acceptance is pending TODO-557.
 - `test-runtime-soak-chaos.sh` - Runtime soak/chaos (delegates to E2E, FEC loss, admin web)
 - `test-security.sh` - Security suite (rt-security-suite + rt-property-suite)
 > Note: `test-all.sh` was archived; run suites sequentially or use `util-run-full-suite.sh` which delegates to the individual suite scripts.

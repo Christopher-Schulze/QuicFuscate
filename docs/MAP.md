@@ -56,14 +56,15 @@ Padding and timing rates flow through `StealthRuntimePolicy` → `StealthRuntime
 
 ### Linux Production E2E Evidence (2026-06-30)
 - `broderick` release build: `cargo build --release --bin quicfuscate` passes on Linux.
-- All TUN/netns E2E scripts acquire a shared `flock` guard (`/tmp/quicfuscate-tun-e2e.lock` by default) because they intentionally reuse namespace and veth names. The base and specialized FEC/loss harnesses capture and reap only exact child PIDs, track namespace/link/qdisc ownership, refuse pre-existing product processes or colliding network resources, and keep generated certificates, QKey stores, admin sockets, and logs inside guarded per-run runtime directories. `scripts/tests/test-specialized-tun-e2e-ownership.sh` owns the exit/signal/keep-on-failure and unrelated-resource survival regression; TODO-555 retains the exact-artifact live closure gate.
+- All TUN/netns E2E scripts acquire a shared `flock` guard (`/tmp/quicfuscate-tun-e2e.lock` by default) because they intentionally reuse namespace and veth names. The base and specialized FEC/loss harnesses capture and reap only exact child PIDs, track namespace/link/qdisc ownership, refuse pre-existing product processes or colliding network resources, and keep generated certificates, QKey stores, admin sockets, and logs inside guarded per-run runtime directories. `scripts/tests/test-specialized-tun-e2e-ownership.sh` owns the exit/signal/keep-on-failure and unrelated-resource survival regression. TODO-555 closed this lifecycle boundary; TODO-557 owns the remaining quantitative FEC acceptance and telemetry contract.
 - `scripts/tests/tun-e2e-netns.sh`: real server/client netns TUN over authenticated H3/MASQUE, 5/5 ping, 0% tunnel loss, exit-scoped owned-PID cleanup, and fail-closed pre-existing-runtime isolation.
 - `scripts/tests/tun-e2e-multi-client-dual-stack-netns.sh`: isolated three-client IPv4/IPv6 routing, source ownership, spoof rejection, fan-out, PTB, NAT, throughput, and explicit client-to-client policy proof.
 - `scripts/tests/tun-e2e-dns-leak-netns.sh`: DNS query through server TUN IP returns a response and tcpdump observes `raw_port_53_packets=0` on the client underlay.
-- `scripts/tests/tun-e2e-fec-netns.sh`: 0%, 5%, and 10% loss ping gates pass; optional iperf3 TCP-to-server-TUN probes skip unless real throughput is measured.
-- `scripts/tests/tun-e2e-fec-burst-netns.sh`: correlated burst-loss gates pass.
-- `scripts/tests/tun-e2e-fec-transition-netns.sh`: clean -> lossy -> recovered live transition gate passes.
-- `scripts/tests/tun-e2e-fec-netem-adversity.sh`: broad adversity matrix passes with 25 passed, 0 failed.
+- `scripts/tests/tun-e2e-fec-netns.sh`: exact-artifact 1,000-packet 0/5/10/25% ping gates and retained iperf sub-runs complete; quantitative FEC benefit, telemetry, and iperf validity remain under TODO-557.
+- `scripts/tests/tun-e2e-fec-burst-netns.sh`: exact-artifact 1,000-packet correlated burst-loss gates pass; comparative benefit remains under TODO-557.
+- `scripts/tests/tun-e2e-fec-transition-netns.sh`: exact-artifact clean -> lossy -> recovered liveness gate passes; executable mode-transition telemetry remains under TODO-557.
+- `scripts/tests/tun-e2e-fec-netem-adversity.sh`: the exact-artifact 25-scenario ping/liveness matrix passes; throughput, overhead, mode-stability, and recovery-latency claims remain under TODO-557.
+- TODO-555 final evidence: commit `222ebdc0c91a887e480dc6697f82e45e4c9d417c`, native ARM64 artifact `8571739901`, bundle SHA-256 `5bf7ce43748301a7720520590db9c61e0cb0660ced4e6eb464b9869f217d551f`, binary SHA-256 `8b6ff22e0f410ac6cd5c553786bd5c7584d99c6da0f346a46d9e8839a9e1c2b1`, and isolated Omega root `/home/ubuntu/SOFTWARE/QuicFuscate/runtime-todo555-222ebdc`.
 
 ### Omega DPLPMTUD and Multi-Client Evidence (2026-07-23)
 

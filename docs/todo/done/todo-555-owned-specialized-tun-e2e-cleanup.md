@@ -4,7 +4,7 @@ title: Replace broad process reapers in specialized TUN E2E harnesses
 severity: CRITICAL
 phase: S
 priority: P0
-status: OPEN
+status: DONE
 created: 2026-07-23
 depends_on: [TODO-554]
 ---
@@ -37,8 +37,8 @@ The base harness defect isolated by TODO-554 also exists in the specialized FEC 
 - [x] Read and map all four harness lifecycle surfaces.
 - [x] Reuse the proven TODO-554 ownership pattern without shared global cleanup.
 - [x] Add static and failure-path regression coverage.
-- [~] Run the exact-artifact specialized Omega matrices.
-- [ ] Flush documentation and close only with exact evidence.
+- [x] Run the exact-artifact specialized Omega matrices.
+- [x] Flush documentation and close only with exact evidence.
 
 ## Notes
 
@@ -54,7 +54,12 @@ The base harness defect isolated by TODO-554 also exists in the specialized FEC 
 - The Linux lifecycle regression passes on Omega from `/home/ubuntu/SOFTWARE/QuicFuscate/runtime-todo555-ownership-preflight-376f347`. The unrelated `quicfuscate-sentinel` process, unowned namespace, and unowned veth refusal paths pass, and the regression leaves no sentinel process, `ns-srv`, `ns-cli`, `veth-srv`, or `veth-cli` residue.
 - Acceptance review found pre-existing divergence between several harness header claims and their executable thresholds or measurements. That independent evidence-contract gap is registered directly as TODO-557; TODO-555 remains limited to exact resource ownership and does not silently weaken or overclaim FEC behavior.
 - The first exact-artifact matrix on `cac98367aa292b52b4c82deda58b5903d5d050b3` failed before QKey issuance because each specialized server namespace lacked the default route already present in the proven base harness. The current server correctly rejected the nonexistent default `eth0` and could not auto-detect a WAN interface. All four specialized namespace setups now add the owned `default dev veth-srv` route and fail closed if it cannot be installed; namespace teardown owns its removal.
-- The isolated route-correction preflight under `/home/ubuntu/SOFTWARE/QuicFuscate/runtime-todo555-route-preflight-candidate` passes TLS, MASQUE, 20/20 clean-link pings, both retained iperf sub-runs, unrelated-sentinel survival, exact sentinel stop, and zero owned process, namespace, link, qdisc, or temporary-runtime residue. Exact-commit native and full-matrix proof remains pending.
+- The isolated route-correction preflight under `/home/ubuntu/SOFTWARE/QuicFuscate/runtime-todo555-route-preflight-candidate` passes TLS, MASQUE, 20/20 clean-link pings, both retained iperf sub-runs, unrelated-sentinel survival, exact sentinel stop, and zero owned process, namespace, link, qdisc, or temporary-runtime residue.
+- Final proof commit `222ebdc0c91a887e480dc6697f82e45e4c9d417c` passes CI run `30026950003`, all eight jobs in Clippy Matrix run `30026949943`, and the required jobs in Release Build run `30026949922`, including native ARM64 and signed Windows packaging.
+- Exact artifact `8571739901` contains `quicfuscate-server-bundle-linux-arm64-0.4.3-20260723_165439.tar.gz`. Source archive SHA-256 is `1f1741e49d861f38bda0150d56ea1ee968d873c8913aca8d84b7be619b3e91df`, bundle SHA-256 is `5bf7ce43748301a7720520590db9c61e0cb0660ced4e6eb464b9869f217d551f`, and packaged binary SHA-256 is `8b6ff22e0f410ac6cd5c553786bd5c7584d99c6da0f346a46d9e8839a9e1c2b1`.
+- Omega evidence is isolated under `/home/ubuntu/SOFTWARE/QuicFuscate/runtime-todo555-222ebdc/evidence`. The exact artifact passes the 1,000-packet uniform matrix with `6 passed, 0 failed, 0 skipped` and residual ping loss of 0%, 4%, 9%, and 22%; the 1,000-packet correlated-burst matrix with `2 passed, 0 failed` and residual loss of 1% and 3%; the transition matrix with `0% -> 14% -> 0%`; and the full adversity matrix with `25 passed, 0 failed, 0 skipped`.
+- One unrelated `quicfuscate-sentinel` process survived every exact-artifact matrix and was then stopped by its exact PID. Final postconditions prove no product process, test namespace, veth, qdisc, or specialized harness runtime directory remains. Evidence logs contain no panic, decrypt, or AEAD failure marker.
+- The protected UI diff from `376f34739ef411ab8190e7ad7b0819459fe69c4f` through the final proof commit is empty. TODO-557 remains open for the independently discovered quantitative FEC acceptance and telemetry truth gap.
 
 ## Deviations
 
