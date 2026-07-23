@@ -56,8 +56,8 @@ Padding and timing rates flow through `StealthRuntimePolicy` → `StealthRuntime
 
 ### Linux Production E2E Evidence (2026-06-30)
 - `broderick` release build: `cargo build --release --bin quicfuscate` passes on Linux.
-- All TUN/netns E2E scripts acquire a shared `flock` guard (`/tmp/quicfuscate-tun-e2e.lock` by default) because they intentionally share namespace names, process cleanup, logs, admin sockets, and generated config/cert state.
-- `scripts/tests/tun-e2e-netns.sh`: real server/client netns TUN over authenticated H3/MASQUE, 5/5 ping, 0% tunnel loss.
+- All TUN/netns E2E scripts acquire a shared `flock` guard (`/tmp/quicfuscate-tun-e2e.lock` by default) because they intentionally share namespace names, logs, admin sockets, and generated config/cert state. The base harness captures and reaps only its exact server/client child PIDs and refuses pre-existing product processes or test namespaces; TODO-555 owns the same migration for the specialized FEC/loss harnesses.
+- `scripts/tests/tun-e2e-netns.sh`: real server/client netns TUN over authenticated H3/MASQUE, 5/5 ping, 0% tunnel loss, exit-scoped owned-PID cleanup, and fail-closed pre-existing-runtime isolation.
 - `scripts/tests/tun-e2e-multi-client-dual-stack-netns.sh`: isolated three-client IPv4/IPv6 routing, source ownership, spoof rejection, fan-out, PTB, NAT, throughput, and explicit client-to-client policy proof.
 - `scripts/tests/tun-e2e-dns-leak-netns.sh`: DNS query through server TUN IP returns a response and tcpdump observes `raw_port_53_packets=0` on the client underlay.
 - `scripts/tests/tun-e2e-fec-netns.sh`: 0%, 5%, and 10% loss ping gates pass; optional iperf3 TCP-to-server-TUN probes skip unless real throughput is measured.
@@ -185,6 +185,7 @@ Uses `StealthConfig::from_mode(runtime_mode)` - was silently using `..Default::d
 22. Windows signed release path: `scripts/audits/verify-release-version.sh` -> `.github/workflows/release.yml` `release-version-contract` -> `desktop-windows` Tauri MSI build -> `.msi` plus `.msi.sig` verification -> required `publish-release` dependency -> `latest.json` `windows-x86_64` entry.
 23. Reliable tunnel fallback path: `src/core.rs` `QFT1` packet framing -> `src/transport/connection.rs` immutable STREAM ledger -> confirmed-PMTU packetization -> centralized `OutboundPacer` -> ACK/loss/PTO retirement and requeue -> byte-exact PMTU fallback splitting -> peer `core.rs` bounded packet reassembly.
 24. QUIC version negotiation path: `src/engine/config.rs` or `src/main.rs` ordered v2/v1 policy -> `src/transport/version.rs` selectable versions and grease -> `src/transport/packet.rs` stateless server VN -> `src/transport/connection.rs` strict CID/original-version gate and single restart -> `src/qftls.rs` version-matched rustls handshake plus authenticated Version Information downgrade validation.
+25. Base Linux TUN proof lifecycle: `scripts/tests/tun-e2e-netns.sh` shared `flock` -> fail-closed pre-existing process/namespace check -> exact server/client PID capture -> TLS/H3/MASQUE TUN assertions -> exact child reap and owned namespace teardown; `scripts/tests/audits/audit-runtime-guardrails.sh` rejects global product-name process reapers on this path.
 
 ## ASCII Repository Tree (curated tracked-source snapshot)
 

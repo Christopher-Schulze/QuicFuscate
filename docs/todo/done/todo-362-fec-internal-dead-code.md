@@ -4,7 +4,7 @@ title: "Audit 8 #[allow(dead_code)] markers in fec/internal.rs"
 severity: "HIGH"
 phase: S
 priority: P0
-status: OPEN
+status: DONE
 created: 2026-03-27
 backfilled: 2026-07-23
 depends_on: []
@@ -53,8 +53,8 @@ This includes `AdaptiveEncoder::new()` and multiple internal helpers. Either:
 - [x] Read every annotated item and all direct callers.
 - [x] Classify runtime and feature ownership before editing.
 - [x] Apply minimal removals or narrow justifications.
-- [~] Run full local and native evidence.
-- [ ] Flush documentation and close only with exact evidence.
+- [x] Run full local and native evidence.
+- [x] Flush documentation and close only with exact evidence.
 
 ## Notes
 
@@ -62,7 +62,10 @@ This includes `AdaptiveEncoder::new()` and multiple internal helpers. Either:
 - Exact disposition: `AdaptiveEncoder::new`, `AdaptiveDecoder::new`, and `InterleavedEncoder::new` had no callers and were removed. `EncoderVariant::new`, `DecoderVariant::new`, `LazyDecoder::new`, `InterleavedDecoder::new`, and `ModeManager::with_switch_threshold` are called only by the in-module `#[cfg(test)]` suite and now carry that explicit ownership instead of warning suppression. Production continues to use the corresponding explicit-policy constructors.
 - The first all-target Clippy replay exposed `DecoderVariant::new_with_policy` and `LazyDecoder::new_with_policy` as two more unit-test-only intermediates after their callers were narrowed. Exact caller search found only the internal test module, so both now carry the same explicit `#[cfg(test)]` ownership; production already calls `new_with_depth` directly.
 - The runtime guardrail audit now fails critically if any item-level `#[allow(dead_code)]` returns to `src/fec/internal.rs`. No runtime behavior, public contract, protected UI, or architecture wiring changed, so `docs/DOCUMENTATION.md` and `docs/MAP.md` require no semantic update for this removal.
-- Local evidence: `cargo fmt --all -- --check` passes; workspace all-target Clippy with `rust-tests` and warnings denied passes; workspace all-target tests with `rust-tests` pass with 1,684 library tests and zero failures; runtime guardrails pass with zero critical findings and zero warnings; TODO consistency and `git diff --check` pass. Native CI remains the open closure gate.
+- Local evidence: `cargo fmt --all -- --check` passes; workspace all-target Clippy with `rust-tests` and warnings denied passes; workspace all-target tests with `rust-tests` pass with 1,795 library tests and zero failures; runtime guardrails pass with zero critical findings and zero warnings; TODO consistency and `git diff --check` pass.
+- Exact implementation checkpoint `f5d1f69` passed CI run `30014194010`, all eight Clippy Matrix jobs in run `30014194240`, and required Release Build jobs in run `30014193928`. Security, macOS, Windows, Linux fastpath, feature, fuzz, frontend, and application-backend jobs all completed successfully.
+- Fresh ARM64 artifact `8566431013` passed adjacent checksum verification and links the audited source to packaged binary SHA-256 `8b6ff22e0f410ac6cd5c553786bd5c7584d99c6da0f346a46d9e8839a9e1c2b1`. The later `f7af807` bundle independently retained the same binary hash and passed two isolated Omega TLS/H3/MASQUE TUN runs with clean product teardown.
+- No runtime API or architecture ownership changed. `docs/MAP.md` and `docs/DOCUMENTATION.md` therefore require no FEC architecture change; this detail file and the runtime guardrail own the final audit truth.
 
 ## Deviations
 
