@@ -1247,23 +1247,24 @@ This is the convergence point where transport feedback, StealthBrain hints, and 
 
 #### Congestion Control Architecture
 
-QuicFuscate uses a pluggable congestion control framework in `src/transport/cc/`. Three algorithms are available, all implemented in-tree with zero external dependencies:
+QuicFuscate uses a pluggable congestion control framework in `src/transport/cc/`. Four algorithms are available, all implemented in-tree with zero external dependencies:
 
 | Algorithm | File | Description |
 |-----------|------|-------------|
 | **Reno** | `cc/reno.rs` | TCP New Reno (RFC 6582). Conservative AIMD baseline. No pacing. |
+| **CUBIC** | `cc/cubic.rs` | RFC 9438 CUBIC with stateful Reno-friendly growth, one reduction per recovery episode, application-limited epoch suspension, explicit pacing, and RFC 9406 HyStart++. |
 | **BBR2** | `cc/bbr2.rs` | BBR v2 (IETF draft-ietf-ccwg-bbr). Loss-aware model-based CC with 4-state machine (Startup/Drain/ProbeBW/ProbeRTT), windowed bandwidth estimation, and pacing. |
 | **BBR3** | `cc/bbr3.rs` | Stealth-optimized BBR v3. Same state machine as BBR2 but with overridable gain tables for browser-profile shaping. Default and recommended. |
 
-All three implement the `CongestionController` trait (`cc/mod.rs`). Dispatch uses an enum wrapper (`CcImpl`) with six variants for zero-vtable hot-path performance: `Reno`, `Bbr2`, `Bbr3` (base variants created at startup) and `StealthReno`, `StealthBbr2`, `StealthBbr3` (stealth-wrapped variants, activated at runtime by `Recovery::set_stealth_mode()`). The macro `cc_dispatch!` handles all six uniformly.
+All four implement the `CongestionController` trait (`cc/mod.rs`). Dispatch uses an enum wrapper (`CcImpl`) with eight variants for zero-vtable hot-path performance: `Reno`, `Cubic`, `Bbr2`, `Bbr3` (base variants created at startup) and `StealthReno`, `StealthCubic`, `StealthBbr2`, `StealthBbr3` (stealth-wrapped variants, activated at runtime by `Recovery::set_stealth_mode()`). The macro `cc_dispatch!` handles all eight uniformly.
 
 **CLI Usage:**
 ```bash
 quicfuscate client --remote server:4433 --cc-algorithm bbr3
-quicfuscate server --listen 0.0.0.0:4433 --cc-algorithm reno
+quicfuscate server --listen 0.0.0.0:4433 --cc-algorithm cubic
 ```
 
-**Default:** `bbr3`. Only `reno`, `bbr2`, and `bbr3` are accepted; any other value is rejected.
+**Default:** `bbr3`. Only `reno`, `cubic`, `bbr2`, and `bbr3` are accepted; any other value is rejected.
 
 #### StealthShaper Wrapper
 
@@ -1277,9 +1278,10 @@ quicfuscate server --listen 0.0.0.0:4433 --cc-algorithm reno
 **Algorithm-specific behavior:**
 - **BBR3 + Stealth:** Full effect - gain table injection + pacing jitter. This is the recommended stealth configuration.
 - **BBR2 + Stealth:** Pacing jitter only (BBR2 uses its own gain cycle, not overridable). Still effective for timing obfuscation.
+- **CUBIC + Stealth:** CUBIC keeps its explicit cwnd/RTT pacing contract; the wrapper applies bounded profile jitter and optional 2% flow dampening after ACK processing.
 - **Reno + Stealth:** No effect - Reno does not pace, so there is no pacing rate to jitter. Other stealth features (TLS Cover, HTTP/3 masquerading, domain fronting, DoH) still operate independently at the connection layer.
 
-**Lifecycle:** The user selects the CC algorithm (Reno/BBR2/BBR3) and the stealth mode (Off/Performance/Stealth/AntiDPI/Intelligent/Manual) independently. When stealth mode activates, `Recovery::set_stealth_mode(true, profile)` uses `std::mem::replace` to swap the current `CcImpl` variant in place - e.g. `CcImpl::Bbr3` becomes `CcImpl::StealthBbr3(StealthShaper::new(inner, profile))`. This is a zero-cost enum replacement, not an outer wrapper layer. When stealth mode deactivates, the shaper variant is swapped back to the base variant. No manual configuration needed.
+**Lifecycle:** The user selects the CC algorithm (Reno/CUBIC/BBR2/BBR3) and the stealth mode (Off/Performance/Stealth/AntiDPI/Intelligent/Manual) independently. When stealth mode first activates, `Recovery::set_stealth_mode(true, profile)` uses `std::mem::replace` to swap the current `CcImpl` variant in place - e.g. `CcImpl::Cubic` becomes `CcImpl::StealthCubic(StealthShaper::new(inner, profile))`. Later activation changes update that monomorphic wrapper in place. Deactivation disables its shaping and clears any CUBIC pacing override while preserving the enum variant. No manual configuration is needed.
 
 ### FEC Modes & Algorithms (Current)
 - Modes: `Zero`, `Light`, `Normal`, `Medium`, `Strong`, `Extreme`, `Ultra`, `Fountain`, `Streaming`.
@@ -2386,7 +2388,7 @@ Profile rotation allows QuicFuscate to periodically switch the active browser/OS
 ### Performance Options
 
 ```
-    --cc-algorithm <alg>    Congestion control: reno|bbr2|bbr3 (default: bbr3)
+    --cc-algorithm <alg>    Congestion control: reno|cubic|bbr2|bbr3 (default: bbr3)
 ```
 
 ### Client Options
@@ -2675,7 +2677,7 @@ Global CLI flags (all commands):
 **Network Options:**
 - `--local`: Local UDP address (default: 0.0.0.0:0)
 - `--url`: URL to request (default: https://cloudflare-dns.com/)
-- `--cc-algorithm`: Congestion control (reno, bbr2, bbr3) [default: bbr3]
+- `--cc-algorithm`: Congestion control (reno, cubic, bbr2, bbr3) [default: bbr3]
 
 **Stealth Options:**
 - `--profile`: Browser fingerprint (chrome, firefox, safari, edge) [default: chrome]
@@ -2725,7 +2727,7 @@ The user-facing FEC contract is `auto` / `off`. Any other value is a hard error.
 
 **Network Options:**
 - `--listen`: Listen address (default: 127.0.0.1:4433)
-- `--cc-algorithm`: Congestion control (reno, bbr2, bbr3) [default: bbr3]
+- `--cc-algorithm`: Congestion control (reno, cubic, bbr2, bbr3) [default: bbr3]
 
 **Other options mirror the client subcommand**
 
@@ -3145,6 +3147,12 @@ QuicFuscate bridges a TUN interface through an adaptive MASQUE/HTTP/3 carrier:
   - All use the shared `MemoryPool` for zero-copy slices where possible.
 
 Exact ARM64 run35 evidence uses source archive SHA-256 `b3140e9c14300af3416d021de6e81476ec41e3b57b775c7b1605a9fcaaf2ce3e` and binary SHA-256 `d985c254fb55792afc9d2e1bc88d14b68b8737a3bfcb7507961fc8b1a1c09888`. Local and native full tests plus strict all-target/all-feature Clippy pass. The isolated three-client run proves dual-stack allocation/routing/NAT, source ownership, spoof rejection, default-deny and explicit opt-in client unicast, authenticated fan-out, client/server IPv4 and IPv6 PTB, DPLPMTUD 1280-to-1500 discovery, black-hole fallback to 1280, and bounded re-confirmation to 1500. Each regular five-second throughput trial contains exactly five positive intervals; the 1280 median is 6.454 Mbit/s, the 1500 median is 8.961 Mbit/s, and the measured gain is 38.85%. Cleanup leaves no product process or network namespace.
+
+### CUBIC Conformance and Runtime Evidence
+
+The CUBIC controller follows RFC 9438 epoch math, including `K = cbrt((W_max - cwnd_epoch) / C)`, bounded `W_cubic(t + RTT)` targeting, a stateful Reno-friendly estimate, one multiplicative decrease per QUIC recovery episode, and application-limited epoch suspension. RFC 9406 HyStart++ uses round minima, at least eight RTT samples, a 4-16 ms delay threshold, Conservative Slow Start at one-quarter growth, spurious-exit recovery, and five CSS rounds. Precision vectors keep relative error below `1e-6`, and the CUBIC controller remains less than 200 bytes larger than Reno on supported architectures.
+
+The deterministic shared drop-tail test records CUBIC `13,389,600` bytes, Reno `14,367,600` bytes, and Jain fairness `0.998760`. Exact Omega run06 uses build-source archive SHA-256 `df1aed74696ed45ca1bb66e06556cf39b8298620fc60878570427dbcda4d0837`, compile-input digest `423cb07e9b4f64c3605ba28034257edcfb4124a4e5ccd86850908d6c5109a680`, and native AArch64 binary SHA-256 `2dc42fd87b77f50eaef96c0244a15adf8126f19d4593c5497f26acdb048483eb`. On the shared 2 Mbit/s bottleneck, CUBIC reaches 0.961 Mbit/s, Reno reaches 0.951 Mbit/s, and Jain fairness is `0.999974`. Across three clean and three `netem loss random 5%` CUBIC trials on a 5 Mbit/s bottleneck, median throughput is 3.001 Mbit/s clean and 2.862 Mbit/s under loss, retaining 95.38%. Local and native full Rust tests and strict all-target/all-feature Clippy pass. Evidence is retained at `/home/ubuntu/SOFTWARE/QuicFuscate/target/todo535/evidence/run06`; cleanup leaves no product process, network namespace, or test qdisc.
 
 ### Real TLS Fingerprints
 
@@ -4101,14 +4109,14 @@ initial_max_stream_data_bidi_local = 1000000
 ```
 
 #### Congestion Control
-Three algorithms are available: Reno (conservative AIMD), BBR2 (loss-aware model-based), BBR3 (stealth-optimized, default). All are real implementations, selectable via CLI, config, or admin UI.
+Four algorithms are available: Reno (conservative AIMD), CUBIC (RFC 9438 plus RFC 9406 HyStart++), BBR2 (loss-aware model-based), and BBR3 (stealth-optimized, default). All are real implementations, selectable through the CLI and canonical runtime configuration. Protected UI selectors remain unchanged.
 
 ```toml
 [transport]
-cc_algorithm = "bbr3"   # Options: "reno", "bbr2", "bbr3"
+cc_algorithm = "bbr3"   # Options: "reno", "cubic", "bbr2", "bbr3"
 ```
 
-When stealth mode is active, the StealthShaper automatically wraps BBR2/BBR3 with pacing jitter. Reno has no pacing and is unaffected by stealth shaping.
+When stealth mode is active, the StealthShaper automatically wraps paced CUBIC, BBR2, and BBR3 with bounded pacing jitter. CUBIC and BBR2 can additionally apply optional 2% dampening. Reno has no pacing and is unaffected by stealth shaping.
 
 #### CPU Affinity and Thread Count
 ```toml

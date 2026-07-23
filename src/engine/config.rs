@@ -469,6 +469,8 @@ impl NatTraversalSection {
 pub enum CcAlgorithm {
     /// TCP New Reno (RFC 6582) - conservative AIMD baseline.
     Reno,
+    /// Paced CUBIC (RFC 9438) with HyStart++ (RFC 9406).
+    Cubic,
     /// BBR v2 (IETF draft-ietf-ccwg-bbr) - loss-aware model-based CC.
     Bbr2,
     /// BBR v3 with stealth browser-profile shaping (default, recommended).
@@ -1242,6 +1244,15 @@ mod tests {
         assert_eq!(config.engine.mode, EngineMode::Client);
         assert_eq!(config.transport.cc_algorithm, CcAlgorithm::Bbr3);
         assert_eq!(config.crypto.aead_preference, AeadPreference::Auto);
+    }
+
+    #[test]
+    fn test_cubic_transport_config_roundtrip() {
+        let mut config = EngineConfig::default();
+        config.transport.cc_algorithm = CcAlgorithm::Cubic;
+        let encoded = toml::to_string(&config).expect("serialize cubic config");
+        let decoded: EngineConfig = toml::from_str(&encoded).expect("deserialize cubic config");
+        assert_eq!(decoded.transport.cc_algorithm, CcAlgorithm::Cubic);
     }
 
     #[test]

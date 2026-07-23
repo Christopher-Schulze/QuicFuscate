@@ -113,6 +113,8 @@ impl Recovery {
                 shaper.set_enabled(enabled);
                 if enabled {
                     shaper.set_profile(profile);
+                } else {
+                    shaper.inner_mut().clear_pacing_rate_override();
                 }
             }
             CcImpl::StealthBbr2(ref mut shaper) => {
@@ -209,9 +211,17 @@ impl Recovery {
         match &mut self.cc {
             CcImpl::StealthBbr3(shaper) => shaper.apply_stealth_post_ack(),
             CcImpl::StealthBbr2(shaper) => shaper.apply_stealth_post_ack(),
+            CcImpl::StealthCubic(shaper) => shaper.apply_stealth_post_ack(),
             _ => {}
         }
         self.sync_from_cc();
+    }
+
+    /// Applies the RTT sample before the ACK so HyStart++ observes the same
+    /// newly acknowledged flight as the sample that produced it.
+    pub fn on_ack_with_rtt(&mut self, acked_bytes: usize, rtt: Duration, now: Instant) {
+        self.update_rtt(rtt);
+        self.on_ack(acked_bytes, now);
     }
 
     /// Records a loss event (packet number unknown).

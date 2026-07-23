@@ -4583,6 +4583,7 @@ fn parse_transport_overrides_from_toml(contents: &str) -> Result<TransportOverri
         let name = raw.trim().to_lowercase();
         let algo = match name.as_str() {
             "reno" => Some(crate::transport::CongestionControlAlgorithm::Reno),
+            "cubic" => Some(crate::transport::CongestionControlAlgorithm::Cubic),
             "bbr2" => Some(crate::transport::CongestionControlAlgorithm::BBR2),
             "bbr3" => Some(crate::transport::CongestionControlAlgorithm::BBR3),
             _ => None,
@@ -8110,18 +8111,22 @@ mod tests {
 
     #[test]
     fn test_validate_transport_overrides_valid_cc_algorithm() {
-        let toml_str = r#"
+        for algorithm in ["reno", "cubic", "bbr2", "bbr3"] {
+            let toml_str = format!(
+                r#"
 [transport]
-cc_algorithm = "bbr3"
-"#;
-        assert!(validate_transport_overrides_from_toml(toml_str).is_ok());
+cc_algorithm = "{algorithm}"
+"#
+            );
+            assert!(validate_transport_overrides_from_toml(&toml_str).is_ok());
+        }
     }
 
     #[test]
     fn test_validate_transport_overrides_invalid_cc_algorithm() {
         let toml_str = r#"
 [transport]
-cc_algorithm = "cubic"
+cc_algorithm = "not-a-controller"
 "#;
         assert!(validate_transport_overrides_from_toml(toml_str).is_err());
     }

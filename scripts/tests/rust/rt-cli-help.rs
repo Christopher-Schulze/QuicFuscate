@@ -31,9 +31,11 @@ fn cli_help_lists_core_subcommands() {
 fn cli_subcommand_help_is_available() {
     let client_help = run_help(&["client", "--help"]);
     assert!(client_help.contains("--remote"), "client help missing --remote");
+    assert!(client_help.contains("cubic"), "client help missing CUBIC selection");
 
     let server_help = run_help(&["server", "--help"]);
     assert!(server_help.contains("--listen"), "server help missing --listen");
+    assert!(server_help.contains("cubic"), "server help missing CUBIC selection");
 
     let audit_help = run_help(&["verify-audit-log", "--help"]);
     assert!(audit_help.contains("PATH"), "audit verification help missing path argument");

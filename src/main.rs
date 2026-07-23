@@ -670,6 +670,8 @@ fn run_net_bench(
 enum CcAlgorithm {
     #[clap(name = "reno")]
     Reno,
+    #[clap(name = "cubic")]
+    Cubic,
     #[clap(name = "bbr2")]
     Bbr2,
     #[clap(name = "bbr3")]
@@ -695,6 +697,7 @@ impl From<CcAlgorithm> for quicfuscate::transport::CongestionControlAlgorithm {
     fn from(cc: CcAlgorithm) -> Self {
         match cc {
             CcAlgorithm::Reno => quicfuscate::transport::CongestionControlAlgorithm::Reno,
+            CcAlgorithm::Cubic => quicfuscate::transport::CongestionControlAlgorithm::Cubic,
             CcAlgorithm::Bbr2 => quicfuscate::transport::CongestionControlAlgorithm::BBR2,
             CcAlgorithm::Bbr3 => quicfuscate::transport::CongestionControlAlgorithm::BBR3,
         }

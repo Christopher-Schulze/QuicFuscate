@@ -4570,7 +4570,12 @@ impl Connection {
             }
         }
         if acked_total > 0 {
-            self.recovery.on_ack(acked_total, now);
+            if let Some(sample) = rtt_sample.filter(|sample| *sample > Duration::ZERO) {
+                self.rtt = sample;
+                self.recovery.on_ack_with_rtt(acked_total, sample, now);
+            } else {
+                self.recovery.on_ack(acked_total, now);
+            }
             self.stats.acked_bytes = self.stats.acked_bytes.saturating_add(acked_total as u64);
             self.cwnd = self.recovery.cwnd;
             // Only a packet above the safe floor proves that the discovered
@@ -4594,8 +4599,14 @@ impl Connection {
                     self.pmtu_probe_pn = Some(probe_pn);
                 }
             }
-        } else if lost_total > 0 {
-            self.cwnd = self.recovery.cwnd;
+        } else {
+            if let Some(sample) = rtt_sample.filter(|sample| *sample > Duration::ZERO) {
+                self.rtt = sample;
+                self.recovery.update_rtt(sample);
+            }
+            if lost_total > 0 {
+                self.cwnd = self.recovery.cwnd;
+            }
         }
 
         // DPLPMTUD probe loss: if the probe PN fell below the loss threshold,
@@ -4612,15 +4623,8 @@ impl Connection {
             !acknowledged && !declared_lost
         });
 
-        // Apply RTT sample to connection + recovery (RFC 9000 §5).
-        // This is the ONLY path that should update self.rtt with real measurements.
-        // The timeout path uses exponential backoff, not additive growth.
-        if let Some(sample) = rtt_sample {
-            if sample > Duration::ZERO {
-                self.rtt = sample;
-                self.recovery.update_rtt(sample);
-            }
-        }
+        // ACK handling above applies the largest-acked RTT sample before its
+        // congestion-control update. The timeout path never inflates RTT.
     }
 
     fn drain_sent_packet_range(&mut self, start: u64, end: u64) -> BTreeMap<u64, (usize, Instant)> {

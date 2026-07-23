@@ -234,6 +234,9 @@ impl ClientConnection {
             crate::engine::CcAlgorithm::Reno => {
                 tc.set_cc_algorithm(crate::transport::CongestionControlAlgorithm::Reno)
             }
+            crate::engine::CcAlgorithm::Cubic => {
+                tc.set_cc_algorithm(crate::transport::CongestionControlAlgorithm::Cubic)
+            }
             crate::engine::CcAlgorithm::Bbr2 => {
                 tc.set_cc_algorithm(crate::transport::CongestionControlAlgorithm::BBR2)
             }

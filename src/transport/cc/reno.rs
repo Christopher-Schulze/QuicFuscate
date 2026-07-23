@@ -20,6 +20,8 @@ pub struct Reno {
     loss_acked: f32,
     loss_lost: f32,
     loss_alpha: f32,
+    largest_sent_packet: u64,
+    recovery_end_packet: Option<u64>,
     fec_on_sent: Option<Arc<dyn Fn(u64, usize) + Send + Sync>>,
     fec_on_lost: Option<Arc<dyn Fn(u64, usize) + Send + Sync>>,
 }
@@ -36,6 +38,8 @@ impl Reno {
             loss_acked: 0.0,
             loss_lost: 0.0,
             loss_alpha: 0.1,
+            largest_sent_packet: 0,
+            recovery_end_packet: None,
             fec_on_sent: None,
             fec_on_lost: None,
         }
@@ -49,6 +53,7 @@ impl Reno {
 impl CongestionController for Reno {
     fn on_packet_sent(&mut self, pkt_num: u64, sent_bytes: usize, _now: Instant) {
         self.bytes_in_flight += sent_bytes;
+        self.largest_sent_packet = self.largest_sent_packet.max(pkt_num);
         if let Some(ref cb) = self.fec_on_sent {
             cb(pkt_num, sent_bytes);
         }
@@ -87,9 +92,13 @@ impl CongestionController for Reno {
             cb(packet_num, lost_bytes);
         }
 
-        // Multiplicative decrease: halve cwnd, set ssthresh
-        self.ssthresh = (self.cwnd / 2).max(self.mss * 2);
-        self.cwnd = self.ssthresh;
+        let starts_recovery = packet_num == 0
+            || self.recovery_end_packet.is_none_or(|recovery_end| packet_num > recovery_end);
+        if starts_recovery {
+            self.ssthresh = (self.cwnd / 2).max(self.mss * 2);
+            self.cwnd = self.ssthresh;
+            self.recovery_end_packet = Some(self.largest_sent_packet);
+        }
 
         let decay = 1.0 - self.loss_alpha;
         self.loss_acked *= decay;
@@ -173,6 +182,25 @@ mod tests {
         reno.on_loss(mss, now);
         assert_eq!(reno.cwnd(), mss * 5); // halved
         assert_eq!(reno.ssthresh, mss * 5);
+    }
+
+    #[test]
+    fn packet_losses_reduce_once_per_recovery_episode() {
+        let mss = 1200;
+        let mut reno = Reno::new(mss * 10, mss);
+        let now = Instant::now();
+        for packet_num in 1..=10 {
+            reno.on_packet_sent(packet_num, mss, now);
+        }
+        reno.on_loss_packet(2, mss, now);
+        let reduced = reno.cwnd();
+        reno.on_loss_packet(3, mss, now);
+        reno.on_loss_packet(4, mss, now);
+        assert_eq!(reno.cwnd(), reduced);
+
+        reno.on_packet_sent(11, mss, now);
+        reno.on_loss_packet(11, mss, now);
+        assert!(reno.cwnd() < reduced);
     }
 
     #[test]

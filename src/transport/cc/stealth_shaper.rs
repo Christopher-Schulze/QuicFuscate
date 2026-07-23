@@ -272,11 +272,28 @@ impl StealthShaper<super::bbr2::Bbr2> {
     }
 }
 
+/// Specialized stealth integration for paced CUBIC.
+impl StealthShaper<super::cubic::Cubic> {
+    /// Apply browser-profile jitter and optional dampening to CUBIC pacing.
+    pub fn apply_stealth_post_ack(&mut self) {
+        if !self.enabled {
+            self.inner.clear_pacing_rate_override();
+            return;
+        }
+        let base = self.inner.raw_pacing_rate();
+        let dampened =
+            if self.flow_shaper_active { (base as f64 * 0.98).max(1.0) as u64 } else { base };
+        let final_rate = self.jitter_rate(dampened);
+        self.inner.set_pacing_rate_override(final_rate);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::transport::cc::bbr2::Bbr2;
     use crate::transport::cc::bbr3::Bbr3;
+    use crate::transport::cc::cubic::Cubic;
     use crate::transport::cc::reno::Reno;
 
     #[test]
@@ -309,6 +326,18 @@ mod tests {
         stealth.on_ack(1200, now);
         stealth.apply_stealth_post_ack();
         assert!(stealth.cwnd() > 0);
+    }
+
+    #[test]
+    fn stealth_wraps_paced_cubic() {
+        let cubic = Cubic::new(12_000, 1200);
+        let mut stealth = StealthShaper::new(cubic, BrowserProfile::Chrome);
+        let now = Instant::now();
+        stealth.update_rtt(Duration::from_millis(100));
+        stealth.on_packet_sent(1, 1200, now);
+        stealth.on_ack(1200, now + Duration::from_millis(100));
+        stealth.apply_stealth_post_ack();
+        assert!(stealth.pacing_rate().is_some_and(|rate| rate > 0));
     }
 
     #[test]
@@ -387,6 +416,18 @@ mod tests {
     }
 
     #[test]
+    fn flow_shaper_reduces_cubic_pacing_rate_by_two_percent() {
+        let cubic = Cubic::new(50_000, 1200);
+        let mut stealth = StealthShaper::new(cubic, BrowserProfile::Chrome);
+        stealth.inner_mut().update_rtt(Duration::from_millis(100));
+        let raw = stealth.inner_mut().raw_pacing_rate();
+        stealth.set_flow_shaper(true);
+        stealth.timing_jitter_us = 0;
+        stealth.apply_stealth_post_ack();
+        assert_eq!(stealth.pacing_rate(), Some((raw as f64 * 0.98) as u64));
+    }
+
+    #[test]
     fn apply_stealth_post_ack_disabled_is_noop_bbr3() {
         let bbr = Bbr3::new(12_000, 1200);
         let mut stealth = StealthShaper::new(bbr, BrowserProfile::Chrome);
@@ -407,6 +448,18 @@ mod tests {
         stealth.set_flow_shaper(true);
         stealth.apply_stealth_post_ack();
         assert_eq!(stealth.inner_mut().raw_pacing_rate(), 500_000);
+    }
+
+    #[test]
+    fn disabling_stealth_restores_cubic_pacing() {
+        let cubic = Cubic::new(50_000, 1200);
+        let mut stealth = StealthShaper::new(cubic, BrowserProfile::Chrome);
+        stealth.inner_mut().update_rtt(Duration::from_millis(100));
+        let raw = stealth.inner_mut().raw_pacing_rate();
+        stealth.inner_mut().set_pacing_rate_override(raw / 2);
+        stealth.set_enabled(false);
+        stealth.apply_stealth_post_ack();
+        assert_eq!(stealth.pacing_rate(), Some(raw));
     }
 
     #[test]

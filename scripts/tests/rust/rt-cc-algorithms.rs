@@ -5,6 +5,7 @@
 
 use quicfuscate::transport::cc::stealth_shaper::BrowserProfile;
 use quicfuscate::transport::recovery::Recovery;
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
@@ -22,6 +23,13 @@ fn recovery_default_is_bbr3() {
 fn recovery_reno_selectable() {
     let r = Recovery::with_algorithm(12_000, 1200, quicfuscate::transport::cc::Algorithm::Reno);
     assert_eq!(r.cwnd, 12_000);
+}
+
+#[test]
+fn recovery_cubic_selectable_and_paced() {
+    let r = Recovery::with_algorithm(12_000, 1200, quicfuscate::transport::cc::Algorithm::Cubic);
+    assert_eq!(r.cwnd, 12_000);
+    assert!(r.get_pacing_rate().is_some());
 }
 
 #[test]
@@ -117,6 +125,7 @@ fn bbr3_cwnd_stays_above_minimum() {
 fn stealth_wrapping_works_for_all_algorithms() {
     for algo in [
         quicfuscate::transport::cc::Algorithm::Reno,
+        quicfuscate::transport::cc::Algorithm::Cubic,
         quicfuscate::transport::cc::Algorithm::Bbr2,
         quicfuscate::transport::cc::Algorithm::Bbr3,
     ] {
@@ -171,6 +180,7 @@ fn fec_callbacks_work_with_all_algorithms() {
 
     for algo in [
         quicfuscate::transport::cc::Algorithm::Reno,
+        quicfuscate::transport::cc::Algorithm::Cubic,
         quicfuscate::transport::cc::Algorithm::Bbr2,
         quicfuscate::transport::cc::Algorithm::Bbr3,
     ] {
@@ -301,4 +311,93 @@ fn bbr3_convergence_synthetic_link() {
         pacing >= CONVERGENCE_THRESHOLD,
         "BBR3 did not converge: pacing_rate={pacing} bytes/sec < threshold={CONVERGENCE_THRESHOLD}"
     );
+}
+
+struct BottleneckFlow {
+    recovery: Recovery,
+    next_packet: u64,
+    delivered: u64,
+}
+
+impl BottleneckFlow {
+    fn new(algorithm: quicfuscate::transport::cc::Algorithm, rtt: Duration) -> Self {
+        let mut recovery = Recovery::with_algorithm(12_000, 1200, algorithm);
+        recovery.set_initial_rtt(rtt);
+        Self { recovery, next_packet: 1, delivered: 0 }
+    }
+
+    fn offer(&mut self, now: Instant) -> VecDeque<u64> {
+        let packet_count = (self.recovery.cwnd / 1200).clamp(1, 128);
+        (0..packet_count)
+            .map(|_| {
+                let packet = self.next_packet;
+                self.next_packet += 1;
+                self.recovery.on_packet_sent(packet, 1200, now);
+                packet
+            })
+            .collect()
+    }
+}
+
+fn run_shared_bottleneck_round(
+    flows: &mut [BottleneckFlow; 2],
+    round: usize,
+    now: Instant,
+    rtt: Duration,
+) -> [usize; 2] {
+    let mut offered = [flows[0].offer(now), flows[1].offer(now)];
+    let mut arrivals = Vec::new();
+    while !offered[0].is_empty() || !offered[1].is_empty() {
+        for flow in [round % 2, 1 - round % 2] {
+            if let Some(packet) = offered[flow].pop_front() {
+                arrivals.push((flow, packet));
+            }
+        }
+    }
+
+    let mut delivered = [0usize; 2];
+    for (position, (flow, packet)) in arrivals.into_iter().enumerate() {
+        if position < 64 {
+            delivered[flow] += 1;
+        } else {
+            flows[flow].recovery.on_loss_packet(packet, 1200, now + rtt);
+        }
+    }
+    for flow in 0..2 {
+        let bytes = delivered[flow] * 1200;
+        if bytes > 0 {
+            flows[flow].recovery.on_ack_with_rtt(bytes, rtt, now + rtt);
+        }
+    }
+    delivered
+}
+
+#[test]
+fn cubic_and_reno_share_a_drop_tail_bottleneck_without_starvation() {
+    const RTT: Duration = Duration::from_millis(40);
+    let start = Instant::now();
+    let mut flows = [
+        BottleneckFlow::new(quicfuscate::transport::cc::Algorithm::Cubic, RTT),
+        BottleneckFlow::new(quicfuscate::transport::cc::Algorithm::Reno, RTT),
+    ];
+
+    for round in 0..500 {
+        let delivered =
+            run_shared_bottleneck_round(&mut flows, round, start + RTT * round as u32, RTT);
+        if round >= 100 {
+            for flow in 0..2 {
+                flows[flow].delivered += delivered[flow] as u64 * 1200;
+            }
+        }
+    }
+
+    let cubic = flows[0].delivered as f64;
+    let reno = flows[1].delivered as f64;
+    let jain = (cubic + reno).powi(2) / (2.0 * (cubic.powi(2) + reno.powi(2)));
+    println!(
+        "CUBIC_RENO_JAIN cubic_bytes={} reno_bytes={} jain={jain:.6}",
+        flows[0].delivered, flows[1].delivered
+    );
+    assert!(cubic > 0.0 && reno > 0.0, "neither flow may starve");
+    assert!(jain > 0.8, "CUBIC/Reno Jain fairness {jain:.6} must exceed 0.8");
 }

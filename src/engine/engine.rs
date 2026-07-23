@@ -179,6 +179,7 @@ fn build_runtime_transport_config(config: &EngineConfig) -> Result<Config, Engin
 fn map_server_cc_algorithm(cc: super::config::CcAlgorithm) -> CongestionControlAlgorithm {
     match cc {
         super::config::CcAlgorithm::Reno => CongestionControlAlgorithm::Reno,
+        super::config::CcAlgorithm::Cubic => CongestionControlAlgorithm::Cubic,
         super::config::CcAlgorithm::Bbr2 => CongestionControlAlgorithm::BBR2,
         super::config::CcAlgorithm::Bbr3 => CongestionControlAlgorithm::BBR3,
     }
