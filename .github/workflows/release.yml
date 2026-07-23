@@ -95,12 +95,12 @@ jobs:
           mv "$tmp" checksums-sha256.txt
           # GPG signature if signing key is configured (optional)
           if [ -n "${{ secrets.RELEASE_GPG_KEY_ID }}" ]; then
-            echo "GPG signing key configured — signing checksums"
+            echo "GPG signing key configured - signing checksums"
             echo "${{ secrets.RELEASE_GPG_PRIVATE_KEY }}" | gpg --import
             gpg --detach-sign --local-user "${{ secrets.RELEASE_GPG_KEY_ID }}" \
               --output checksums-sha256.txt.sig checksums-sha256.txt
           else
-            echo "No GPG signing key configured — checksums only (no signature)"
+            echo "No GPG signing key configured - checksums only (no signature)"
           fi
 
       - name: Upload checksums
@@ -154,7 +154,12 @@ jobs:
           bundle=$(find scripts/out/build -maxdepth 1 -type f \
             -name 'quicfuscate-server-bundle-linux-arm64-*.tar.gz' -print -quit)
           test -n "$bundle"
-          sha256sum "$bundle" > "${bundle}.sha256"
+          bundle_dir=$(dirname "$bundle")
+          bundle_name=$(basename "$bundle")
+          (
+            cd "$bundle_dir"
+            sha256sum "$bundle_name" > "${bundle_name}.sha256"
+          )
 
       - name: Upload native ARM64 server bundle
         uses: actions/upload-artifact@v4
@@ -210,7 +215,7 @@ jobs:
           # root, so the Tauri build output lands in <repo-root>/target/...
           # even though `cargo tauri build` is invoked with
           # working-directory: apps/tauri/src-tauri. Do NOT use
-          # apps/tauri/src-tauri/target/ here — that directory never exists.
+          # apps/tauri/src-tauri/target/ here - that directory never exists.
           path: |
             target/aarch64-apple-darwin/release/bundle/**/*.dmg
             target/aarch64-apple-darwin/release/bundle/**/*.app.tar.gz
@@ -255,7 +260,7 @@ jobs:
           # root, so the Tauri build output lands in <repo-root>/target/...
           # even though `cargo tauri build` is invoked with
           # working-directory: apps/tauri/src-tauri. Do NOT use
-          # apps/tauri/src-tauri/target/ here — that directory never exists.
+          # apps/tauri/src-tauri/target/ here - that directory never exists.
           path: |
             target/release/bundle/**/*.deb
             target/release/bundle/**/*.deb.sig
