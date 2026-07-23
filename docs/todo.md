@@ -260,37 +260,39 @@ experimental, or bound to explicit policy.
 
 **Motivation:** The remaining work is a finite set of implementation and proof contracts. Ordering is based on dependency ownership and rework avoidance, not task number.
 
-**Execution strategy:** Evidence-only closures -> secret/auth/rate-policy foundations -> privilege/observability/firewall lifecycle -> transport recovery/migration/multipath/shaping -> Dioxus parity against stable contracts.
+**Execution strategy:** Harness process ownership and evidence-only closures -> secret/auth/rate-policy foundations -> privilege/observability/firewall lifecycle -> transport recovery/migration/multipath/shaping -> Dioxus parity against stable contracts.
 
 ### Ordered Active Queue
 
 | Order | ID | Cluster | Title | Status | Depends On |
 |---:|---|---|---|---|---|
-| 1 | TODO-553 | Release | Make ARM64 release checksum sidecars relocatable | **OPEN** - the bundle builds, but its downloaded sidecar references a CI-internal path and fails direct verification. | - |
-| 2 | TODO-362 | Evidence | Audit retained FEC dead-code suppressions | **OPEN** - source cleanup and local gates are complete; native CI and exact artifact evidence remain. | - |
-| 3 | TODO-545 | Evidence | Prove cipher reinstallation state safety | **OPEN** - adversarial implementation and local gates are complete; native security and release evidence remain. | - |
-| 4 | TODO-526 | Secrets | Close retained secret erasure boundaries | **OPEN** - AEGIS derived state and raw QKey allocations still need zeroizing ownership and failable erasure proof. | TODO-440, TODO-516 |
-| 5 | TODO-539 | Secrets | Make QKey registry encryption fail closed | **OPEN** - key ownership, envelope, migration, rotation, corruption, and failure atomicity remain. | TODO-458, TODO-526 |
-| 6 | TODO-529 | Policy | Wire per-client bandwidth, quota, and fairness enforcement | **OPEN** - helper state is not owned by live sessions or forwarding. | TODO-445, TODO-523 |
-| 7 | TODO-538 | Policy | Complete QKey auth backoff and block lifecycle | **OPEN** - configurable exponential backoff, typed blocks, pruning, metrics, and flood proof remain. | TODO-456 |
-| 8 | TODO-540 | Policy | Complete sustained DDoS policy and live proof | **OPEN** - interval-correct sampling, Retry enforcement, cache durability, and false-positive proof remain. | TODO-459, TODO-529, TODO-538 |
-| 9 | TODO-527 | Runtime | Complete irreversible privilege reduction and post-drop proof | **OPEN** - groups, no-new-privileges, capability clearing, diagnostics, and root-start traffic proof remain. | TODO-441, TODO-515 |
-| 10 | TODO-531 | Runtime | Wire production logging configuration and lifecycle proof | **OPEN** - operator configuration, bounded failure behavior, flush, and performance proof remain. | TODO-446, TODO-527 |
-| 11 | TODO-525 | Runtime | Complete audit durability, taxonomy, and throughput contract | **OPEN** - bounded asynchronous persistence, rotation, checkpoints, taxonomy, and saturation proof remain. | TODO-439, TODO-515, TODO-527, TODO-531 |
-| 12 | TODO-530 | Firewall | Wire firewall backend override and privileged nftables proof | **OPEN** - one backend owner, explicit failure, fallback, atomicity, and unified table proof remain. | TODO-444, TODO-522, TODO-523, TODO-527 |
-| 13 | TODO-542 | Firewall | Complete owned TUN and firewall cleanup lifecycle | **OPEN** - typed ownership, postconditions, client symmetry, injected failures, and crash cleanup remain. | TODO-461, TODO-530 |
-| 14 | TODO-541 | Deployment | Prove Linux installer across clean distro lifecycles | **OPEN** - clean Debian/RHEL, rerun, prerequisite failure, and final runtime contract proof remain. | TODO-460, TODO-527, TODO-530, TODO-531, TODO-542 |
-| 15 | TODO-548 | Platform | Install and prove the managed macOS PF kill-switch anchor | **OPEN** - reversible anchor ownership and privileged coexistence/packet proof remain. | TODO-522, TODO-530, TODO-542 |
-| 16 | TODO-528 | Platform | Prove Wintun native adapter and data-plane lifecycle | **OPEN** - real adapter, WFP, packet transfer, close/read safety, and privileged native proof remain. | TODO-442, TODO-519, TODO-530, TODO-542 |
-| 17 | TODO-544 | Transport | Complete RFC loss detection and network proof | **OPEN** - canonical sent-packet ownership, deadlines, PTO/loss correctness, CC propagation, and netem proof remain. | TODO-463 |
-| 18 | TODO-533 | Transport | Complete configurable migration and CC path adaptation | **OPEN** - typed path-change policy, validation RTT, CC-specific state, and active-transfer proof remain. | TODO-450, TODO-544 |
-| 19 | TODO-532 | Transport | Complete negotiated multipath wire and data-plane runtime | **OPEN** - negotiated per-path packet/recovery state, scheduling, failover, and bonding proof remain. | TODO-449, TODO-533, TODO-544 |
-| 20 | TODO-537 | Transport | Complete timer-owned traffic-analysis defense proof | **OPEN** - lifecycle timer/slot scheduling, bounded cadence, authenticated policy, warning, and capture proof remain. | TODO-455, TODO-532, TODO-544 |
-| 21 | TODO-543 | Transport | Complete TCP and ICMP fingerprint runtime proof | **OPEN** - full egress wiring, profile coupling, PMTUD-safe behavior, tool, allocation, and throughput proof remain. | TODO-462, TODO-534, TODO-544 |
-| 22 | TODO-549 | Dioxus | Lock the parity reference and build the shared Dioxus component system | **OPEN** - no active Dioxus parity surface exists. | TODO-529, TODO-531, TODO-538, TODO-539, TODO-540 |
-| 23 | TODO-550 | Dioxus | Rebuild the web admin in Dioxus with exact parity | **OPEN** - Dioxus web-admin implementation and proof do not exist. | TODO-525, TODO-529, TODO-531, TODO-538, TODO-539, TODO-540, TODO-549 |
-| 24 | TODO-551 | Dioxus | Rebuild the desktop client in Dioxus with exact parity | **OPEN** - direct Rust desktop integration and parity proof do not exist. | TODO-527, TODO-528, TODO-530, TODO-532, TODO-533, TODO-537, TODO-541, TODO-542, TODO-543, TODO-544, TODO-545, TODO-548, TODO-549 |
-| 25 | TODO-552 | Dioxus | Certify and package Dioxus web and desktop parity | **OPEN** - cross-surface fidelity, accessibility, performance, packaging, and release evidence do not exist. | TODO-550, TODO-551 |
+| 1 | TODO-554 | Evidence | Make the base TUN E2E harness own its process cleanup | **OPEN** - exact-artifact traffic passes, but global name-based cleanup kills the runner and could terminate unrelated runtimes. | - |
+| 2 | TODO-553 | Release | Make ARM64 release checksum sidecars relocatable | **OPEN** - the basename-only sidecar passes direct verification; final exact-commit native and live evidence remain. | - |
+| 3 | TODO-362 | Evidence | Audit retained FEC dead-code suppressions | **OPEN** - source cleanup and local gates are complete; native CI and exact artifact evidence remain. | - |
+| 4 | TODO-545 | Evidence | Prove cipher reinstallation state safety | **OPEN** - adversarial implementation and local gates are complete; native security and release evidence remain. | - |
+| 5 | TODO-555 | Evidence | Replace broad process reapers in specialized TUN E2E harnesses | **OPEN** - four FEC/loss harnesses retain unsafe global product-name cleanup. | TODO-554 |
+| 6 | TODO-526 | Secrets | Close retained secret erasure boundaries | **OPEN** - AEGIS derived state and raw QKey allocations still need zeroizing ownership and failable erasure proof. | TODO-440, TODO-516 |
+| 7 | TODO-539 | Secrets | Make QKey registry encryption fail closed | **OPEN** - key ownership, envelope, migration, rotation, corruption, and failure atomicity remain. | TODO-458, TODO-526 |
+| 8 | TODO-529 | Policy | Wire per-client bandwidth, quota, and fairness enforcement | **OPEN** - helper state is not owned by live sessions or forwarding. | TODO-445, TODO-523 |
+| 9 | TODO-538 | Policy | Complete QKey auth backoff and block lifecycle | **OPEN** - configurable exponential backoff, typed blocks, pruning, metrics, and flood proof remain. | TODO-456 |
+| 10 | TODO-540 | Policy | Complete sustained DDoS policy and live proof | **OPEN** - interval-correct sampling, Retry enforcement, cache durability, and false-positive proof remain. | TODO-459, TODO-529, TODO-538 |
+| 11 | TODO-527 | Runtime | Complete irreversible privilege reduction and post-drop proof | **OPEN** - groups, no-new-privileges, capability clearing, diagnostics, and root-start traffic proof remain. | TODO-441, TODO-515 |
+| 12 | TODO-531 | Runtime | Wire production logging configuration and lifecycle proof | **OPEN** - operator configuration, bounded failure behavior, flush, and performance proof remain. | TODO-446, TODO-527 |
+| 13 | TODO-525 | Runtime | Complete audit durability, taxonomy, and throughput contract | **OPEN** - bounded asynchronous persistence, rotation, checkpoints, taxonomy, and saturation proof remain. | TODO-439, TODO-515, TODO-527, TODO-531 |
+| 14 | TODO-530 | Firewall | Wire firewall backend override and privileged nftables proof | **OPEN** - one backend owner, explicit failure, fallback, atomicity, and unified table proof remain. | TODO-444, TODO-522, TODO-523, TODO-527 |
+| 15 | TODO-542 | Firewall | Complete owned TUN and firewall cleanup lifecycle | **OPEN** - typed ownership, postconditions, client symmetry, injected failures, and crash cleanup remain. | TODO-461, TODO-530 |
+| 16 | TODO-541 | Deployment | Prove Linux installer across clean distro lifecycles | **OPEN** - clean Debian/RHEL, rerun, prerequisite failure, and final runtime contract proof remain. | TODO-460, TODO-527, TODO-530, TODO-531, TODO-542 |
+| 17 | TODO-548 | Platform | Install and prove the managed macOS PF kill-switch anchor | **OPEN** - reversible anchor ownership and privileged coexistence/packet proof remain. | TODO-522, TODO-530, TODO-542 |
+| 18 | TODO-528 | Platform | Prove Wintun native adapter and data-plane lifecycle | **OPEN** - real adapter, WFP, packet transfer, close/read safety, and privileged native proof remain. | TODO-442, TODO-519, TODO-530, TODO-542 |
+| 19 | TODO-544 | Transport | Complete RFC loss detection and network proof | **OPEN** - canonical sent-packet ownership, deadlines, PTO/loss correctness, CC propagation, and netem proof remain. | TODO-463 |
+| 20 | TODO-533 | Transport | Complete configurable migration and CC path adaptation | **OPEN** - typed path-change policy, validation RTT, CC-specific state, and active-transfer proof remain. | TODO-450, TODO-544 |
+| 21 | TODO-532 | Transport | Complete negotiated multipath wire and data-plane runtime | **OPEN** - negotiated per-path packet/recovery state, scheduling, failover, and bonding proof remain. | TODO-449, TODO-533, TODO-544 |
+| 22 | TODO-537 | Transport | Complete timer-owned traffic-analysis defense proof | **OPEN** - lifecycle timer/slot scheduling, bounded cadence, authenticated policy, warning, and capture proof remain. | TODO-455, TODO-532, TODO-544 |
+| 23 | TODO-543 | Transport | Complete TCP and ICMP fingerprint runtime proof | **OPEN** - full egress wiring, profile coupling, PMTUD-safe behavior, tool, allocation, and throughput proof remain. | TODO-462, TODO-534, TODO-544 |
+| 24 | TODO-549 | Dioxus | Lock the parity reference and build the shared Dioxus component system | **OPEN** - no active Dioxus parity surface exists. | TODO-529, TODO-531, TODO-538, TODO-539, TODO-540 |
+| 25 | TODO-550 | Dioxus | Rebuild the web admin in Dioxus with exact parity | **OPEN** - Dioxus web-admin implementation and proof do not exist. | TODO-525, TODO-529, TODO-531, TODO-538, TODO-539, TODO-540, TODO-549 |
+| 26 | TODO-551 | Dioxus | Rebuild the desktop client in Dioxus with exact parity | **OPEN** - direct Rust desktop integration and parity proof do not exist. | TODO-527, TODO-528, TODO-530, TODO-532, TODO-533, TODO-537, TODO-541, TODO-542, TODO-543, TODO-544, TODO-545, TODO-548, TODO-549 |
+| 27 | TODO-552 | Dioxus | Certify and package Dioxus web and desktop parity | **OPEN** - cross-surface fidelity, accessibility, performance, packaging, and release evidence do not exist. | TODO-550, TODO-551 |
 
 ### Completed Evidence Base
 

@@ -364,6 +364,24 @@ else
   append_item "tls_cover_reinstallation_safety" "fail" "typed install, retired-key rejection, checked counters, or fresh entropy missing"
 fi
 
+TUN_E2E_GLOBAL_PROCESS_REAPER="$(rg -n --no-messages 'pkill.*quicfuscate|killall.*quicfuscate' scripts/tests/tun-e2e-netns.sh || true)"
+if [[ -n "$TUN_E2E_GLOBAL_PROCESS_REAPER" ]]; then
+  fail_critical "Base TUN E2E harness retained a global QuicFuscate process reaper"
+  append_item "tun_e2e_owned_process_cleanup" "fail" "$TUN_E2E_GLOBAL_PROCESS_REAPER"
+elif rg -n --no-messages '^SERVER_PID=\$!$' scripts/tests/tun-e2e-netns.sh >/dev/null \
+  && rg -n --no-messages '^CLIENT_PID=\$!$' scripts/tests/tun-e2e-netns.sh >/dev/null \
+  && rg -n --no-messages 'stop_owned_process "\$CLIENT_PID"' scripts/tests/tun-e2e-netns.sh >/dev/null \
+  && rg -n --no-messages 'stop_owned_process "\$SERVER_PID"' scripts/tests/tun-e2e-netns.sh >/dev/null \
+  && rg -n --no-messages '^trap cleanup_on_exit EXIT$' scripts/tests/tun-e2e-netns.sh >/dev/null \
+  && rg -n --no-messages 'pgrep -x quicfuscate' scripts/tests/tun-e2e-netns.sh >/dev/null \
+  && rg -n --no-messages 'NAMESPACES_CREATED' scripts/tests/tun-e2e-netns.sh >/dev/null; then
+  pass "Base TUN E2E harness owns exact child PIDs and refuses broad process cleanup"
+  append_item "tun_e2e_owned_process_cleanup" "ok" "exact child PID cleanup, exit trap, and pre-existing runtime refusal are present"
+else
+  fail_critical "Base TUN E2E harness process-ownership contract is incomplete"
+  append_item "tun_e2e_owned_process_cleanup" "fail" "child PID capture, scoped cleanup, exit trap, or pre-existing runtime refusal missing"
+fi
+
 # 6) Guardrail warning: shadow runtime modules with no non-test call sites.
 BATCH_RUNTIME_REFS=$(rg -n --no-messages "BatchProcessor" src | rg -v "src/transport/batch.rs|src/transport.rs" || true)
 if [[ -z "$BATCH_RUNTIME_REFS" ]]; then

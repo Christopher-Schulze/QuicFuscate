@@ -7,7 +7,7 @@
 #   - Both sides log "TLS handshake complete"; no panics
 #   - MASQUE_BYTES_RECEIVED counters increment on both ends
 #
-# Requirements: root, Linux, iproute2, openssl, python3, nc (openbsd-netcat).
+# Requirements: root, Linux, iproute2, procps, openssl, python3, nc (openbsd-netcat).
 # Run on the target server (e.g. broderick). Single-host loopback short-circuits
 # TUN routing, so netns + veth is mandatory.
 set -u
@@ -23,6 +23,9 @@ LOCK_FILE="${QF_E2E_LOCK_FILE:-/tmp/quicfuscate-tun-e2e.lock}"
 LOCK_TIMEOUT="${QF_E2E_LOCK_TIMEOUT:-300}"
 SERVER_CONFIG_ARGS=()
 CLIENT_CONFIG_ARGS=()
+SERVER_PID=""
+CLIENT_PID=""
+NAMESPACES_CREATED=0
 if [ -n "${QF_E2E_SERVER_CONFIG:-}" ]; then
   SERVER_CONFIG_ARGS=(--config "$QF_E2E_SERVER_CONFIG")
 fi
@@ -36,10 +39,35 @@ if ! flock -w "$LOCK_TIMEOUT" 9; then
   exit 2
 fi
 
+stop_owned_process() {
+  local pid="$1"
+  if [ -z "$pid" ]; then
+    return
+  fi
+
+  kill -9 "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
 cleanup() {
-  pkill -9 -f quicfuscate 2>/dev/null
-  ip netns del ns-srv 2>/dev/null
-  ip netns del ns-cli 2>/dev/null
+  stop_owned_process "$CLIENT_PID"
+  CLIENT_PID=""
+  stop_owned_process "$SERVER_PID"
+  SERVER_PID=""
+
+  if [ "$NAMESPACES_CREATED" = "1" ]; then
+    ip netns del ns-srv 2>/dev/null
+    ip netns del ns-cli 2>/dev/null
+    NAMESPACES_CREATED=0
+  fi
+}
+
+# Invoked by the EXIT trap below.
+# shellcheck disable=SC2329
+cleanup_on_exit() {
+  if [ "$KEEP_ON_FAIL" != "1" ]; then
+    cleanup
+  fi
 }
 
 dump_diagnostics() {
@@ -59,11 +87,20 @@ fail() {
   dump_diagnostics
   if [ "$KEEP_ON_FAIL" = "1" ]; then
     echo "QF_E2E_KEEP_ON_FAIL=1: leaving namespaces and processes alive for inspection" >&2
-  else
-    cleanup
   fi
   exit 1
 }
+
+# --- fail closed before touching certificates or runtime resources ---
+if pgrep -x quicfuscate >/dev/null; then
+  echo "FAIL: a pre-existing quicfuscate process is running; refusing broad cleanup" >&2
+  exit 2
+fi
+if ip netns list | grep -Eq '^(ns-srv|ns-cli)([[:space:]]|$)'; then
+  echo "FAIL: ns-srv or ns-cli already exists; refusing to delete an unowned namespace" >&2
+  exit 2
+fi
+trap cleanup_on_exit EXIT
 
 # --- ensure server cert valid for the client's hardcoded validation SNI ---
 cd "$CERT_DIR" || fail "could not enter certificate directory"
@@ -78,12 +115,9 @@ openssl x509 -req -in /tmp/s.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out /
 cat /tmp/leaf.crt ca.crt > server.crt
 cd "$PROJECT_ROOT" || fail "could not return to project root"
 
-# --- cleanup ---
-cleanup
-sleep 1
-
 # --- netns + veth ---
 ip netns add ns-srv
+NAMESPACES_CREATED=1
 ip netns add ns-cli
 ip link add veth-srv type veth peer name veth-cli
 ip link set veth-srv netns ns-srv
@@ -109,6 +143,7 @@ ip netns exec ns-srv "$B" server --cert "$CERT" --key "$KEY" \
   --tun --tun-name qtun0 --tun-ip 10.0.1.1 --tun-netmask 255.255.255.0 \
   --no-drop-privileges -v "${SERVER_CONFIG_ARGS[@]}" \
   > /tmp/ns-srv.log 2>&1 &
+SERVER_PID=$!
 sleep 3
 
 QKEY=$(echo '{"cmd":"qkey"}' | nc -U /tmp/qf-admin.sock 2>/dev/null | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["data"]["qkey"])' 2>/dev/null)
@@ -124,6 +159,7 @@ ip netns exec ns-cli "$B" client --remote 10.10.0.1:4433 --url https://10.10.0.1
   --tun --tun-name qtun0 --tun-ip 10.0.1.2 --tun-netmask 255.255.255.0 --no-utls -v \
   "${CLIENT_CONFIG_ARGS[@]}" \
   > /tmp/ns-cli.log 2>&1 &
+CLIENT_PID=$!
 sleep 4
 
 # --- ensure TUN up + ip + route in each netns ---
@@ -162,4 +198,5 @@ grep -iE "tun|error|warn|panic|MASQUE" /tmp/ns-cli.log | grep -vE "rate limiter|
 
 # cleanup
 cleanup
+trap - EXIT
 exit 0
