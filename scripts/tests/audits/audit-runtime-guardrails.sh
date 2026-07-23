@@ -410,6 +410,7 @@ for harness in "${SPECIALIZED_TUN_E2E_HARNESSES[@]}"; do
     || ! rg -n --no-messages "^trap 'exit 130' INT$" "$harness" >/dev/null \
     || ! rg -n --no-messages 'pgrep -x quicfuscate' "$harness" >/dev/null \
     || ! rg -n --no-messages 'SERVER_NAMESPACE_CREATED|CLIENT_NAMESPACE_CREATED|VETH_CREATED|QDISC_CREATED' "$harness" >/dev/null \
+    || ! rg -n --no-messages 'ip netns exec ns-srv ip route add default dev veth-srv' "$harness" >/dev/null \
     || ! rg -n --no-messages 'mktemp -d /tmp/quicfuscate-' "$harness" >/dev/null \
     || ! rg -n --no-messages -- '--qkey-store "\$QKEY_STORE"' "$harness" >/dev/null \
     || ! rg -n --no-messages 'preserve_failure_if_requested' "$harness" >/dev/null \
@@ -435,7 +436,7 @@ elif [[ "$(rg -c --no-messages '^[[:space:]]*IPERF_SERVER_PID=\$!$' \
   append_item "specialized_tun_e2e_owned_cleanup" "fail" "iperf3 server PID ownership missing"
 else
   pass "Specialized TUN/FEC E2E harnesses own exact processes, namespaces, qdiscs, and runtime artifacts"
-  append_item "specialized_tun_e2e_owned_cleanup" "ok" "four harnesses use exact child ownership, isolated runtime paths, and fail-closed resource preflights"
+  append_item "specialized_tun_e2e_owned_cleanup" "ok" "four harnesses use exact child ownership, isolated runtime paths, owned server routes, and fail-closed resource preflights"
 fi
 
 SPECIALIZED_TUN_E2E_REGRESSION="scripts/tests/test-specialized-tun-e2e-ownership.sh"

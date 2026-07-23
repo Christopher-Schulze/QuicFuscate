@@ -263,6 +263,7 @@ setup_netns() {
     ip netns exec ns-srv ip addr add 10.10.0.1/24 dev veth-srv || fatal "could not address server veth"
     ip netns exec ns-srv ip link set veth-srv up || fatal "could not activate server veth"
     ip netns exec ns-srv ip link set lo up || fatal "could not activate server loopback"
+    ip netns exec ns-srv ip route add default dev veth-srv || fatal "could not add server default route"
     ip netns exec ns-cli ip addr add 10.10.0.2/24 dev veth-cli || fatal "could not address client veth"
     ip netns exec ns-cli ip link set veth-cli up || fatal "could not activate client veth"
     ip netns exec ns-cli ip link set lo up || fatal "could not activate client loopback"
