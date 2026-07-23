@@ -3,7 +3,7 @@
 #
 # Verifies FEC mode transitions are seamless under real transport load:
 #   Phase 1: 0% loss for 5s → FEC in Zero/Light
-#   Phase 2: 20% loss for 5s → FEC escalates to Strong/Extreme (live transition)
+#   Phase 2: moderate (20%) or severe (40%) loss → live policy behavior
 #   Phase 3: 0% loss for 5s → FEC de-escalates (live transition)
 #
 # Acceptance: Auto transitions without liveness loss; Off remains Zero with no repairs or switches.
@@ -18,6 +18,23 @@ LOCK_FILE="${QF_E2E_LOCK_FILE:-/tmp/quicfuscate-tun-e2e.lock}"
 LOCK_TIMEOUT="${QF_E2E_LOCK_TIMEOUT:-300}"
 FEC_MODE="${FEC_MODE:-auto}"
 TELEMETRY_PORT="${QF_FEC_TELEMETRY_PORT:-9898}"
+LOSS_PROFILE="${QF_FEC_LOSS_PROFILE:-moderate}"
+EVIDENCE_DIR="${QF_E2E_ARTIFACT_DIR:-}"
+
+case "$LOSS_PROFILE" in
+    moderate)
+        LOSS_PERCENT=20
+        MAX_TUNNEL_LOSS_PERCENT=35
+        ;;
+    severe)
+        LOSS_PERCENT=40
+        MAX_TUNNEL_LOSS_PERCENT=60
+        ;;
+    *)
+        echo "FAIL: QF_FEC_LOSS_PROFILE must be 'moderate' or 'severe'" >&2
+        exit 2
+        ;;
+esac
 
 PASS=0
 FAIL=0
@@ -133,6 +150,42 @@ remove_runtime_dir() {
     RUNTIME_DIR=""
 }
 
+preserve_evidence() {
+    local clean_loss="$1"
+    local impaired_loss="$2"
+    local recovered_loss="$3"
+    local panic_count
+    if [ -z "$EVIDENCE_DIR" ]; then
+        return
+    fi
+    if [ -e "$EVIDENCE_DIR" ]; then
+        fatal "refusing to overwrite existing evidence path: $EVIDENCE_DIR"
+    fi
+    if [ ! -d "$(dirname "$EVIDENCE_DIR")" ]; then
+        fatal "evidence parent directory does not exist: $(dirname "$EVIDENCE_DIR")"
+    fi
+    mkdir "$EVIDENCE_DIR" || fatal "could not create evidence directory: $EVIDENCE_DIR"
+    cp -- "$CURRENT_SCENARIO_DIR"/*.telemetry "$EVIDENCE_DIR/" \
+        || fatal "could not preserve telemetry evidence"
+    panic_count=$(grep -ci 'panic' "$SERVER_LOG" "$CLIENT_LOG" 2>/dev/null \
+        | awk -F: '{ sum += $NF } END { print sum + 0 }')
+    {
+        printf 'policy=%s\n' "$FEC_MODE"
+        printf 'loss_profile=%s\n' "$LOSS_PROFILE"
+        printf 'netem_loss_percent=%s\n' "$LOSS_PERCENT"
+        printf 'max_tunnel_loss_percent=%s\n' "$MAX_TUNNEL_LOSS_PERCENT"
+        printf 'clean_tunnel_loss_percent=%s\n' "$clean_loss"
+        printf 'impaired_tunnel_loss_percent=%s\n' "$impaired_loss"
+        printf 'recovered_tunnel_loss_percent=%s\n' "$recovered_loss"
+        printf 'server_handshakes=%s\n' "$(grep -c 'TLS handshake complete' "$SERVER_LOG")"
+        printf 'client_handshakes=%s\n' "$(grep -c 'TLS handshake complete' "$CLIENT_LOG")"
+        printf 'panic_count=%s\n' "$panic_count"
+        printf 'binary_sha256=%s\n' "$(sha256sum "$B" | awk '{print $1}')"
+    } > "$EVIDENCE_DIR/run-manifest.txt" \
+        || fatal "could not preserve evidence manifest"
+    echo "Evidence: $EVIDENCE_DIR"
+}
+
 # Invoked by the EXIT trap below.
 # shellcheck disable=SC2329
 cleanup_on_exit() {
@@ -193,6 +246,22 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 if [ "$FEC_MODE" != "off" ] && [ "$FEC_MODE" != "auto" ]; then
     echo "FAIL: FEC_MODE must be 'off' or 'auto'" >&2
+    exit 2
+fi
+if [ -n "$EVIDENCE_DIR" ] && [ "${EVIDENCE_DIR#/}" = "$EVIDENCE_DIR" ]; then
+    echo "FAIL: QF_E2E_ARTIFACT_DIR must be an absolute path" >&2
+    exit 2
+fi
+if [ -n "$EVIDENCE_DIR" ] && [ -e "$EVIDENCE_DIR" ]; then
+    echo "FAIL: refusing to overwrite existing evidence path: $EVIDENCE_DIR" >&2
+    exit 2
+fi
+if [ -n "$EVIDENCE_DIR" ] && [ ! -d "$(dirname "$EVIDENCE_DIR")" ]; then
+    echo "FAIL: evidence parent directory does not exist: $(dirname "$EVIDENCE_DIR")" >&2
+    exit 2
+fi
+if ! command -v sha256sum >/dev/null 2>&1; then
+    echo "FAIL: required command not found: sha256sum" >&2
     exit 2
 fi
 if pgrep -x quicfuscate >/dev/null; then
@@ -396,6 +465,7 @@ ping_phase() {
 
 echo "=== FEC Policy/Transition E2E Test (TODO-427, TODO-558) ==="
 echo "Policy: $FEC_MODE"
+echo "Loss profile: $LOSS_PROFILE (${LOSS_PERCENT}%)"
 
 prepare_scenario_runtime "transition"
 setup_netns
@@ -412,12 +482,12 @@ echo "Phase 1: Clean link (0% loss)..."
 loss1=$(ping_phase 50 "1")
 capture_telemetry_phase "clean"
 
-# Phase 2: Inject 20% loss - FEC escalates (live transition)
-echo "Phase 2: Inject 20% loss (FEC escalates)..."
-if ip netns exec ns-cli tc qdisc add dev veth-cli root netem loss 20%; then
+# Phase 2: Inject the selected loss profile and observe the live policy.
+echo "Phase 2: Inject ${LOSS_PERCENT}% ${LOSS_PROFILE} loss..."
+if ip netns exec ns-cli tc qdisc add dev veth-cli root netem loss "${LOSS_PERCENT}%"; then
     QDISC_CREATED=1
 else
-    fatal "could not apply 20% netem loss"
+    fatal "could not apply ${LOSS_PERCENT}% netem loss"
 fi
 sleep 2  # Let FEC detect loss and start transition
 loss2=$(ping_phase 50 "2")
@@ -434,7 +504,7 @@ capture_telemetry_phase "recovered"
 echo ""
 echo "Results:"
 echo "  Phase 1 (clean):     ${loss1}% loss"
-echo "  Phase 2 (20% loss):  ${loss2}% loss"
+echo "  Phase 2 (${LOSS_PROFILE}, ${LOSS_PERCENT}% loss): ${loss2}% loss"
 echo "  Phase 3 (recovered): ${loss3}% loss"
 
 ok=true
@@ -442,8 +512,8 @@ if [ "$loss1" -gt 5 ]; then
     echo "FAIL: Phase 1 loss >5%"
     ok=false
 fi
-if [ "$loss2" -gt 35 ]; then
-    echo "FAIL: Phase 2 loss >35% (FEC should recover some)"
+if [ "$loss2" -gt "$MAX_TUNNEL_LOSS_PERCENT" ]; then
+    echo "FAIL: Phase 2 loss >${MAX_TUNNEL_LOSS_PERCENT}%"
     ok=false
 fi
 if [ "$loss3" -gt 10 ]; then
@@ -492,6 +562,7 @@ fi
 
 preserve_failure_if_requested
 cleanup_owned_resources || fatal "could not clean final owned resources"
+preserve_evidence "$loss1" "$loss2" "$loss3"
 
 echo ""
 echo "=========================================="

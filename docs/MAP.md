@@ -62,7 +62,7 @@ Padding and timing rates flow through `StealthRuntimePolicy` → `StealthRuntime
 - `scripts/tests/tun-e2e-dns-leak-netns.sh`: DNS query through server TUN IP returns a response and tcpdump observes `raw_port_53_packets=0` on the client underlay.
 - `scripts/tests/tun-e2e-fec-netns.sh`: exact-artifact 1,000-packet 0/5/10/25% ping gates and retained iperf sub-runs complete; quantitative FEC benefit, telemetry, and iperf validity remain under TODO-557.
 - `scripts/tests/tun-e2e-fec-burst-netns.sh`: exact-artifact 1,000-packet correlated burst-loss gates pass; comparative benefit remains under TODO-557.
-- `scripts/tests/tun-e2e-fec-transition-netns.sh`: exact-artifact clean -> lossy -> recovered liveness gate passes; executable mode-transition telemetry remains under TODO-557.
+- `scripts/tests/tun-e2e-fec-transition-netns.sh`: exact-artifact clean -> moderate/severe loss -> recovered policy gate exports client/server telemetry; Off is required to remain Zero with no repairs or switches and Auto is required to produce repair and committed-transition evidence. Comparative and statistical transition acceptance remains under TODO-557.
 - `scripts/tests/tun-e2e-fec-netem-adversity.sh`: the exact-artifact 25-scenario ping/liveness matrix passes; throughput, overhead, mode-stability, and recovery-latency claims remain under TODO-557.
 - TODO-555 final evidence: commit `222ebdc0c91a887e480dc6697f82e45e4c9d417c`, native ARM64 artifact `8571739901`, bundle SHA-256 `5bf7ce43748301a7720520590db9c61e0cb0660ced4e6eb464b9869f217d551f`, binary SHA-256 `8b6ff22e0f410ac6cd5c553786bd5c7584d99c6da0f346a46d9e8839a9e1c2b1`, and isolated Omega root `/home/ubuntu/SOFTWARE/QuicFuscate/runtime-todo555-222ebdc`.
 
