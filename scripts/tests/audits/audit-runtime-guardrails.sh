@@ -382,6 +382,75 @@ else
   append_item "tun_e2e_owned_process_cleanup" "fail" "child PID capture, scoped cleanup, exit trap, or pre-existing runtime refusal missing"
 fi
 
+SPECIALIZED_TUN_E2E_HARNESSES=(
+  scripts/tests/tun-e2e-fec-netns.sh
+  scripts/tests/tun-e2e-fec-burst-netns.sh
+  scripts/tests/tun-e2e-fec-transition-netns.sh
+  scripts/tests/tun-e2e-fec-netem-adversity.sh
+)
+SPECIALIZED_TUN_E2E_GLOBAL_REAPERS="$(
+  rg -n --no-messages 'pkill.*quicfuscate|killall.*quicfuscate' \
+    "${SPECIALIZED_TUN_E2E_HARNESSES[@]}" || true
+)"
+SPECIALIZED_TUN_E2E_SHARED_RUNTIME_REFS="$(
+  rg -n --no-messages \
+    '/tmp/(ns-srv\.log|ns-cli\.log|qf-admin\.sock|iperf-srv\.log|leaf-ext\.cnf|s\.csr|leaf\.crt)|config/local/server\.(crt|key)' \
+    "${SPECIALIZED_TUN_E2E_HARNESSES[@]}" || true
+)"
+SPECIALIZED_TUN_E2E_INCOMPLETE=()
+for harness in "${SPECIALIZED_TUN_E2E_HARNESSES[@]}"; do
+  SPECIALIZED_SERVER_PID_CAPTURES="$(rg -c --no-messages '^[[:space:]]*SERVER_PID=\$!$' "$harness" || true)"
+  SPECIALIZED_CLIENT_PID_CAPTURES="$(rg -c --no-messages '^[[:space:]]*CLIENT_PID=\$!$' "$harness" || true)"
+  if [[ "${SPECIALIZED_SERVER_PID_CAPTURES:-0}" -lt 2 ]] \
+    || [[ "${SPECIALIZED_CLIENT_PID_CAPTURES:-0}" -lt 2 ]] \
+    || ! rg -n --no-messages 'stop_owned_process "\$CLIENT_PID"' "$harness" >/dev/null \
+    || ! rg -n --no-messages 'stop_owned_process "\$SERVER_PID"' "$harness" >/dev/null \
+    || ! rg -n --no-messages '^trap cleanup_on_exit EXIT$' "$harness" >/dev/null \
+    || ! rg -n --no-messages "^trap 'exit 143' TERM$" "$harness" >/dev/null \
+    || ! rg -n --no-messages "^trap 'exit 130' INT$" "$harness" >/dev/null \
+    || ! rg -n --no-messages 'pgrep -x quicfuscate' "$harness" >/dev/null \
+    || ! rg -n --no-messages 'SERVER_NAMESPACE_CREATED|CLIENT_NAMESPACE_CREATED|VETH_CREATED|QDISC_CREATED' "$harness" >/dev/null \
+    || ! rg -n --no-messages 'mktemp -d /tmp/quicfuscate-' "$harness" >/dev/null \
+    || ! rg -n --no-messages -- '--qkey-store "\$QKEY_STORE"' "$harness" >/dev/null \
+    || ! rg -n --no-messages 'preserve_failure_if_requested' "$harness" >/dev/null \
+    || ! rg -n --no-messages 'QF_E2E_OWNERSHIP_SELF_TEST' "$harness" >/dev/null; then
+    SPECIALIZED_TUN_E2E_INCOMPLETE+=("$harness")
+  fi
+done
+
+if [[ -n "$SPECIALIZED_TUN_E2E_GLOBAL_REAPERS" ]]; then
+  fail_critical "Specialized TUN/FEC E2E harnesses retained a global QuicFuscate process reaper"
+  append_item "specialized_tun_e2e_owned_cleanup" "fail" "$SPECIALIZED_TUN_E2E_GLOBAL_REAPERS"
+elif [[ -n "$SPECIALIZED_TUN_E2E_SHARED_RUNTIME_REFS" ]]; then
+  fail_critical "Specialized TUN/FEC E2E harnesses retained shared mutable runtime paths"
+  append_item "specialized_tun_e2e_owned_cleanup" "fail" "$SPECIALIZED_TUN_E2E_SHARED_RUNTIME_REFS"
+elif [[ "${#SPECIALIZED_TUN_E2E_INCOMPLETE[@]}" -gt 0 ]]; then
+  fail_critical "Specialized TUN/FEC E2E ownership contract is incomplete"
+  append_item "specialized_tun_e2e_owned_cleanup" "fail" "incomplete harnesses: ${SPECIALIZED_TUN_E2E_INCOMPLETE[*]}"
+elif [[ "$(rg -c --no-messages '^[[:space:]]*IPERF_SERVER_PID=\$!$' \
+    scripts/tests/tun-e2e-fec-netns.sh || true)" -lt 2 ]] \
+  || ! rg -n --no-messages 'stop_owned_process "\$IPERF_SERVER_PID"' \
+    scripts/tests/tun-e2e-fec-netns.sh >/dev/null; then
+  fail_critical "Specialized FEC netns harness does not own its iperf3 server PID"
+  append_item "specialized_tun_e2e_owned_cleanup" "fail" "iperf3 server PID ownership missing"
+else
+  pass "Specialized TUN/FEC E2E harnesses own exact processes, namespaces, qdiscs, and runtime artifacts"
+  append_item "specialized_tun_e2e_owned_cleanup" "ok" "four harnesses use exact child ownership, isolated runtime paths, and fail-closed resource preflights"
+fi
+
+SPECIALIZED_TUN_E2E_REGRESSION="scripts/tests/test-specialized-tun-e2e-ownership.sh"
+if rg -n --no-messages 'quicfuscate-sentinel' "$SPECIALIZED_TUN_E2E_REGRESSION" >/dev/null \
+  && rg -n --no-messages 'QF_E2E_OWNERSHIP_SELF_TEST_MODE' "$SPECIALIZED_TUN_E2E_REGRESSION" >/dev/null \
+  && rg -n --no-messages 'unowned namespace' "$SPECIALIZED_TUN_E2E_REGRESSION" >/dev/null \
+  && rg -n --no-messages 'unowned link' "$SPECIALIZED_TUN_E2E_REGRESSION" >/dev/null \
+  && ! rg -n --no-messages 'pkill|killall' "$SPECIALIZED_TUN_E2E_REGRESSION" >/dev/null; then
+  pass "Specialized TUN/FEC ownership regression covers unrelated process, namespace, link, exit, signal, and keep-on-failure paths"
+  append_item "specialized_tun_e2e_ownership_regression" "ok" "failable lifecycle and unrelated-resource survival regression is present"
+else
+  fail_critical "Specialized TUN/FEC ownership regression is missing or unsafe"
+  append_item "specialized_tun_e2e_ownership_regression" "fail" "sentinel, lifecycle mode, namespace/link refusal, or exact cleanup coverage missing"
+fi
+
 # 6) Guardrail warning: shadow runtime modules with no non-test call sites.
 BATCH_RUNTIME_REFS=$(rg -n --no-messages "BatchProcessor" src | rg -v "src/transport/batch.rs|src/transport.rs" || true)
 if [[ -z "$BATCH_RUNTIME_REFS" ]]; then
