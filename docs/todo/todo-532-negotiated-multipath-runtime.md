@@ -6,7 +6,7 @@ phase: S
 priority: P0
 status: OPEN
 created: 2026-07-22
-depends_on: [TODO-449, TODO-521]
+depends_on: [TODO-449, TODO-533, TODO-544]
 ---
 
 # TODO-532: Complete Negotiated Multipath Wire and Data-Plane Runtime
@@ -23,6 +23,13 @@ depends_on: [TODO-449, TODO-521]
 - Prove simultaneous dual-path transfer, per-path accounting, loss isolation, no-disconnect failover under 100 ms, and at least 1.5x aggregate throughput on controlled WiFi/LTE-like paths.
 - Add exhaustive failable units for frame codecs, negotiation, all strategies, state transitions, manager operations, nonce vectors, and failure handling.
 - Pass local Rust gates, native CI, privileged Omega dual-interface proof, documentation/MAP/TODO truth, and preserve protected UI files.
+
+## Completion Gates
+
+- Standards gate: the exact current primary multipath draft, versioned wire choices, negotiation, downgrade, frame codecs, and peer-validation rules are recorded and covered by vectors.
+- Isolation gate: deterministic tests prove independent per-path packet number, nonce, RTT, recovery, congestion, anti-amplification, and byte state with no reuse or cross-path corruption.
+- Network gate: controlled dual-interface matrices prove all schedulers, simultaneous transfer, loss isolation, failover under 100 ms, and at least 1.5x aggregate throughput while disabled mode remains compatible.
+- Release gate: local Rust gates, native CI, exact-artifact Omega proof, SHA-256, teardown/residue inspection, protected UI diff, and owning-doc updates all pass.
 
 ## Sub-Tasks
 

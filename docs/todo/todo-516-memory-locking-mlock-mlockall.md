@@ -98,7 +98,7 @@ across reboots and can be recovered by an attacker with disk access.
 
 ## 2026-07-22 Acceptance Reconciliation
 
-TODO-521 reopened this task because the implementation tests cover flag selection and best-effort pool allocation only. No test invokes the production `mlockall` boundary and proves `VmLck > 0` with sufficient privileges or explicitly exercises the documented graceful-skip path. The runtime wiring remains implemented, but the task's required operating-system evidence is missing.
+The exhaustive acceptance reconciliation reopened this task because the implementation tests covered flag selection and best-effort pool allocation only. No test invoked the production `mlockall` boundary and proved `VmLck > 0` with sufficient privileges or explicitly exercised the documented graceful-skip path. The runtime wiring remained implemented, but the task's required operating-system evidence was missing.
 
 The production boundary is now isolated in `lock_process_memory()` and used unchanged by `run_server()`. Its unit test invokes that exact boundary, asserts `VmLck > 0` when the operating system succeeds, releases the process lock through `munlockall()`, and accepts only documented resource/permission/unsupported errors when the host cannot lock. macOS returned `ENOSYS` and passed the explicit graceful-degradation branch.
 

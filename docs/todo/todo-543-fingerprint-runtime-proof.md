@@ -6,7 +6,7 @@ phase: S
 priority: P0
 status: OPEN
 created: 2026-07-22
-depends_on: [TODO-462, TODO-521]
+depends_on: [TODO-462, TODO-534, TODO-544]
 ---
 
 # TODO-543: Complete TCP and ICMP Fingerprint Runtime Proof
@@ -23,6 +23,13 @@ The packet normalizer has field/checksum units, but live TUN and MASQUE paths ca
 - Rotate TLS and network-stack profile atomically or keep both fixed; no observable mismatch window is allowed.
 - Prove checksums by capture, p0f and active fingerprint results, pure passthrough, zero hot-path allocation, and at least 900 Mbps on the retained benchmark host.
 - Pass local Rust gates, native CI, privileged Omega capture/tool proof, documentation/MAP/TODO truth, and preserve protected UI files.
+
+## Completion Gates
+
+- Wiring gate: every TUN/MASQUE raw-IP egress path reaches one normalizer exactly once and disabled mode is proven byte-for-byte passthrough.
+- Correctness gate: profile vectors and captures prove IPv4/TCP checksums, SYN-only fields, ICMP unreachable/echo behavior, Packet Too Big preservation, and atomic TLS/network-profile rotation.
+- Tool and performance gate: p0f plus active fingerprint results match each profile, allocation instrumentation reports zero hot-path allocation, and retained-host throughput is at least 900 Mbps.
+- Release gate: local Rust gates, native CI, exact-artifact privileged Omega capture/tool proof, SHA-256, cleanup, protected UI diff, and owning-doc updates all pass.
 
 ## Sub-Tasks
 

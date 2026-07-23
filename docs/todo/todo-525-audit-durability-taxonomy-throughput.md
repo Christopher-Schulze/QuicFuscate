@@ -6,7 +6,7 @@ phase: S
 priority: P0
 status: OPEN
 created: 2026-07-22
-depends_on: [TODO-439, TODO-515, TODO-521]
+depends_on: [TODO-439, TODO-515, TODO-527, TODO-531]
 ---
 
 # TODO-525: Complete Audit Durability, Taxonomy, and Throughput Contract
@@ -25,6 +25,13 @@ The retained audit log is append-only NDJSON with file permissions, a hash chain
 - Sustain 10,000 accepted events per second without producer-side file I/O or unbounded memory growth, with deterministic saturation and shutdown tests.
 - Keep RFC 5424 and CEF transport outside the process; document canonical NDJSON collector integration instead.
 - Pass full local Rust gates, relevant native CI, live Omega lifecycle proof, documentation/MAP/TODO truth, and preserve protected UI files.
+
+## Completion Gates
+
+- Integrity gate: mutation, deletion, reordering, truncation, tail loss, rotation, restart, and checkpoint tests all fail on invalid chains and pass on valid ordered segment sets.
+- Load gate: a measured 10,000 accepted events per second produces no producer-side file I/O, unbounded queue growth, order loss, or silent loss; any dropped event is counted and observable.
+- Lifecycle gate: I/O failure, saturation, rotation, retention, and shutdown preserve the declared durability contract and final accepted records.
+- Release gate: full Rust gates, relevant native CI, exact-artifact SHA-256, Omega process/restart/collector proof, clean teardown, protected UI diff, and owning-doc updates all pass.
 
 ## Sub-Tasks
 

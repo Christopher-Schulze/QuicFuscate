@@ -42,4 +42,4 @@ Also: Comment tombstones at qftls.rs:896, :1801 and crypto/mod.rs:347, :904-906.
 
 ## Resolution
 
-Verified during TODO-521 reconciliation: all four PQ trait methods, the stale public post-quantum claim, and the listed PQ tombstone comments are absent. Current Rust and Clippy gates pass.
+Verified during the exhaustive acceptance reconciliation: all four PQ trait methods, the stale public post-quantum claim, and the listed PQ tombstone comments are absent. Current Rust and Clippy gates pass.

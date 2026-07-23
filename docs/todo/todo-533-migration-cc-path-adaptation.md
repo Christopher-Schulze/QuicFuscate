@@ -6,7 +6,7 @@ phase: S
 priority: P0
 status: OPEN
 created: 2026-07-22
-depends_on: [TODO-450, TODO-521]
+depends_on: [TODO-450, TODO-544]
 ---
 
 # TODO-533: Complete Configurable Migration and CC Path Adaptation
@@ -22,6 +22,13 @@ Validated migration preserves in-flight bytes and halves cwnd, but the factor an
 - Preserve bytes in flight, reset PTO/loss timers deliberately, set the canonical congestion-avoidance boundary, and prove exact 100000-byte window vectors for factors 0.5, 0.25, and 1.0.
 - Prove challenge/response validation remains mandatory and migration during active transfer loses less than 50% throughput and recovers to 90% within two seconds.
 - Pass local Rust gates, native CI, Omega live migration proof, documentation/MAP/TODO truth, and preserve protected UI files.
+
+## Completion Gates
+
+- Policy gate: bounds, precedence, disabled behavior, zero/one-factor behavior, cooldown, and probe targets pass typed configuration and negative tests.
+- Controller gate: exact 100000-byte vectors plus every congestion-controller path prove validation RTT, epoch, pacing, slow start, bytes-in-flight, loss/PTO, and avoidance-boundary transitions.
+- Migration gate: active authenticated traffic cannot migrate before challenge/response validation and the controlled path-switch matrix loses under 50% throughput and returns to 90% within two seconds.
+- Release gate: local Rust gates, native CI, exact-artifact Omega migration proof, SHA-256, cleanup, protected UI diff, and owning-doc updates all pass.
 
 ## Sub-Tasks
 

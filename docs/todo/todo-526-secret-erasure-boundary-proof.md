@@ -6,7 +6,7 @@ phase: S
 priority: P0
 status: OPEN
 created: 2026-07-22
-depends_on: [TODO-440, TODO-516, TODO-521]
+depends_on: [TODO-440, TODO-516]
 ---
 
 # TODO-526: Close Retained Secret Erasure Boundaries
@@ -23,6 +23,13 @@ AEAD wrapper keys, AES-GCM schedules, MORUS fields, locked memory-pool blocks, a
 - Add failable erasure tests that observe the owned memory before deallocation without reading freed memory or relying on allocator reuse.
 - Preserve constant-time authentication comparison, full crypto correctness, TODO-516 memory-lock evidence, and benchmark guardrails.
 - Pass full local Rust gates, native CI, documentation/MAP/TODO truth, and preserve protected UI files.
+
+## Completion Gates
+
+- Ownership gate: every touched raw secret and derived cipher state has one explicit zeroizing owner from creation through drop, with no unwrapped duplicate identified by the final audit.
+- Erasure gate: failable pre-deallocation observations prove key, IV, decoded QKey, and derived-state clearing on normal, error, replacement, and partial-initialization paths.
+- Regression gate: crypto vectors, constant-time authentication behavior, SIMD dispatch, memory-lock evidence, and retained performance baselines remain green.
+- Release gate: full Rust gates, required native CI, exact-artifact SHA-256, protected UI diff, and documentation/MAP/TODO evidence all pass.
 
 ## Sub-Tasks
 

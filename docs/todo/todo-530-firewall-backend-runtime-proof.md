@@ -6,7 +6,7 @@ phase: S
 priority: P0
 status: OPEN
 created: 2026-07-22
-depends_on: [TODO-444, TODO-522, TODO-523, TODO-521]
+depends_on: [TODO-444, TODO-522, TODO-523, TODO-527]
 ---
 
 # TODO-530: Wire Firewall Backend Override and Privileged nftables Proof
@@ -24,6 +24,13 @@ Auto-detection, nftables kill-switch/routing transactions, iptables fallback, an
 - Prove iptables fallback on a controlled no-nft environment with real state and traffic rather than mocked process output.
 - Coordinate TODO-522 kill-switch and TODO-523 isolation rules so backend ownership never creates parallel or contradictory policies.
 - Pass full local Rust gates, native CI, Omega proof, documentation/MAP/TODO truth, and preserve protected UI files.
+
+## Completion Gates
+
+- Selection gate: explicit nftables, explicit iptables, and auto branches have deterministic process-level tests proving one resolved owner, exact diagnostics, and no later re-detection.
+- Lifecycle gate: setup, repeated setup, clean teardown, partial failure, stale startup, and crash recovery touch only dedicated QuicFuscate objects and satisfy verified postconditions.
+- Traffic gate: privileged nftables and controlled iptables-fallback matrices prove blocked/connected TUN traffic, NAT/forwarding, client isolation, IPv4/IPv6, and cleanup through real packet outcomes.
+- Release gate: full Rust gates, native CI, exact-artifact Omega proof, SHA-256, zero unrelated firewall delta, protected UI diff, and owning-doc updates all pass.
 
 ## Sub-Tasks
 

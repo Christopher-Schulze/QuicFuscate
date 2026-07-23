@@ -6,7 +6,7 @@ phase: S
 priority: P0
 status: DONE
 created: 2026-07-22
-depends_on: [TODO-451, TODO-521]
+depends_on: [TODO-451]
 ---
 
 # TODO-534: Complete DPLPMTUD Bounds, TUN Coupling, and Runtime Proof

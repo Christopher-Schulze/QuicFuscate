@@ -6,7 +6,7 @@ phase: S
 priority: P0
 status: DONE
 created: 2026-07-22
-depends_on: [TODO-433, TODO-521]
+depends_on: [TODO-433]
 ---
 
 # TODO-524: Prove Interleaved FEC Mapping and Random Plus Burst Recovery

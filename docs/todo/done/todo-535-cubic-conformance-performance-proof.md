@@ -6,7 +6,7 @@ phase: S
 priority: P0
 status: DONE
 created: 2026-07-22
-depends_on: [TODO-452, TODO-521]
+depends_on: [TODO-452]
 ---
 
 # TODO-535: Prove CUBIC Conformance, Fairness, and Loss Performance

@@ -102,7 +102,7 @@ audit logging is currently unsupported.
 
 ## 2026-07-22 Acceptance Reconciliation
 
-TODO-521 reopened this task because the final completion sentence is broader than the runtime evidence. Current emitters cover server start, privilege-drop outcomes, authentication success/failure, QKey issuance/revocation, selected admin actions, config reload, drain, and shutdown. They do not cover authentication timeout, connection acceptance/termination/reconciliation, or firewall rule add/remove events required by this task. The existing tests exercise the audit primitive and hash chain but do not trigger both a real server authentication event and a real admin event through an integration boundary. The unchecked acceptance criteria therefore remain genuine gaps.
+The exhaustive acceptance reconciliation reopened this task because the final completion sentence was broader than the runtime evidence. Current emitters covered server start, privilege-drop outcomes, authentication success/failure, QKey issuance/revocation, selected admin actions, config reload, drain, and shutdown. They did not cover authentication timeout, connection acceptance/termination/reconciliation, or firewall rule add/remove events required by this task. The existing tests exercised the audit primitive and hash chain but did not trigger both a real server authentication event and a real admin event through an integration boundary. The unchecked acceptance criteria therefore remained genuine gaps.
 
 ## 2026-07-22 Final Closure Evidence
 

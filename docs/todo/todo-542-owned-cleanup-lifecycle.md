@@ -6,7 +6,7 @@ phase: S
 priority: P0
 status: OPEN
 created: 2026-07-22
-depends_on: [TODO-461, TODO-521]
+depends_on: [TODO-461, TODO-530]
 ---
 
 # TODO-542: Complete Owned TUN and Firewall Cleanup Lifecycle
@@ -23,6 +23,13 @@ Server startup invokes routing cleanup and server shutdown retries routing teard
 - Run startup cleanup before setup on server and client; make teardown idempotent under partial setup, repeated shutdown, and crash residue.
 - Prove first-failure recovery, persistent failure reporting, preseeded residue cleanup, crash/restart success, and zero unrelated firewall changes.
 - Pass local Rust gates, native platform CI, privileged Omega proof, documentation/MAP/TODO truth, and preserve protected UI files.
+
+## Completion Gates
+
+- Ownership gate: every created interface, route, rule, table, anchor, NAT object, and process resource has a typed identity, creator, cleanup owner, and verified postcondition.
+- Failure gate: injected transient, permanent, partial-setup, repeated-shutdown, and command-output failures prove bounded retry, exact reporting, idempotence, and target-only fallback.
+- Native lifecycle gate: Linux, macOS, and Windows tests prove stale startup cleanup, crash/restart recovery, client/server symmetry, zero owned residue, and zero unrelated firewall or route delta.
+- Release gate: local Rust gates, native platform CI, exact-artifact privileged Omega proof, SHA-256, residue manifest, protected UI diff, and owning-doc updates all pass.
 
 ## Sub-Tasks
 

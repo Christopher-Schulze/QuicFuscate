@@ -6,7 +6,7 @@ phase: S
 priority: P0
 status: OPEN
 created: 2026-07-22
-depends_on: [TODO-446, TODO-521]
+depends_on: [TODO-446, TODO-527]
 ---
 
 # TODO-531: Wire Production Logging Configuration and Lifecycle Proof
@@ -25,6 +25,13 @@ The production logger has compact JSON/text formatting, size rotation, retention
 - Benchmark enabled `info` logging and either meet the retained 1us producer budget or replace synchronous sinks with a bounded worker that does.
 - Keep deterministic size rotation as the only application-owned rotation policy; daily rotation remains outside scope.
 - Pass full local Rust gates, native CI, Omega process proof, documentation/MAP/TODO truth, and preserve protected UI files.
+
+## Completion Gates
+
+- Configuration gate: process tests prove file-only, stderr-only, dual-output, per-module filters, admin buffer, RFC 5424 delivery, invalid configuration, and single logger ownership.
+- Durability gate: rotation, retention, file/syslog failure, recursion prevention, and clean shutdown prove bounded behavior and final-record persistence with the stable NDJSON schema.
+- Performance gate: measured `info` producer cost meets 1 microsecond or the implementation uses one proven bounded worker with explicit saturation behavior.
+- Release gate: full Rust gates, native CI, exact-artifact Omega sink/rotation/restart proof, SHA-256, cleanup, protected UI diff, and owning-doc updates all pass.
 
 ## Sub-Tasks
 

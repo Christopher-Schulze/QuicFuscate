@@ -6,7 +6,7 @@ phase: S
 priority: P0
 status: OPEN
 created: 2026-07-22
-depends_on: [TODO-441, TODO-515, TODO-521]
+depends_on: [TODO-441, TODO-515]
 ---
 
 # TODO-527: Complete Irreversible Privilege Reduction and Post-Drop Proof
@@ -25,6 +25,13 @@ Server startup performs TUN, routing, socket, and audit initialization before sw
 - Keep application-owned chroot and deprecated macOS sandbox profiles outside scope; document service-manager confinement as the platform contract.
 - Add unit and privileged subprocess tests that cannot mutate the parent test process identity.
 - Pass full local Rust gates, native CI, Omega proof, documentation/MAP/TODO truth, and preserve protected UI files.
+
+## Completion Gates
+
+- State gate: subprocess evidence proves target UID/GID, empty expected supplementary groups, `no_new_privs`, cleared capability sets, and inability to regain privilege after initialization.
+- Failure gate: unknown identities, missing capabilities, wrong syscall order, and partial initialization fail before service exposure with exact diagnostics and no parent-process mutation.
+- Runtime gate: an exact-artifact root-started Omega server drops irreversibly, accepts an authenticated client, and carries bidirectional TUN traffic through retained descriptors.
+- Release gate: full Rust gates, Linux native CI, artifact SHA-256, service teardown/residue inspection, protected UI diff, and owning-doc updates all pass.
 
 ## Sub-Tasks
 

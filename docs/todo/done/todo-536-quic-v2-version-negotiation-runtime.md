@@ -6,7 +6,7 @@ phase: S
 priority: P0
 status: DONE
 created: 2026-07-22
-depends_on: [TODO-453, TODO-521]
+depends_on: [TODO-453]
 ---
 
 # TODO-536: Wire QUIC v2 and Version Negotiation End to End

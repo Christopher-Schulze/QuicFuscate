@@ -6,14 +6,14 @@ phase: S
 priority: P0
 status: DONE
 created: 2026-07-22
-depends_on: [TODO-429, TODO-521]
+depends_on: [TODO-429]
 ---
 
 # TODO-522: Close Kill-Switch Automatic-Loss Handling and Privileged Runtime Proof
 
 ## Why
 
-TODO-521 confirmed that the kill-switch backends and explicit connect/disconnect hooks exist, but `QuicFuscateEngine::check_heartbeat()` has no non-test caller. The standalone client also exits through clean disable after remote closure, so current evidence does not prove that unexpected loss enters and retains the fail-closed firewall state. Privileged Linux, macOS, and Windows state assertions from TODO-429 were never retained.
+The exhaustive acceptance reconciliation confirmed that the kill-switch backends and explicit connect/disconnect hooks existed, but `QuicFuscateEngine::check_heartbeat()` had no non-test caller. The standalone client also exited through clean disable after remote closure, so the retained evidence did not prove that unexpected loss entered and retained the fail-closed firewall state. Privileged Linux, macOS, and Windows state assertions from TODO-429 had not been retained.
 
 ## Acceptance
 

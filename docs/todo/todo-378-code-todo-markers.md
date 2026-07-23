@@ -40,4 +40,4 @@ Items 1, 3 are informational references to completed TODOs.
 
 ## Resolution
 
-Scrapped during TODO-521 reconciliation because source marker count is not a deliverable. PQ tombstones are gone, informational task references are valid, and the remaining cipher-reinstallation security obligation moved to TODO-545.
+Scrapped during the exhaustive acceptance reconciliation because source marker count is not a deliverable. PQ tombstones are gone, informational task references are valid, and the remaining cipher-reinstallation security obligation moved to TODO-545.

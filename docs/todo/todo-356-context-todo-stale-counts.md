@@ -28,4 +28,4 @@ resolved: 2026-07-22
 
 ## Resolution
 
-Scrapped during TODO-521 reconciliation. Exact test totals are volatile gate output, not durable task truth, and the retired worklog must not be recreated. Current gates report their own counts.
+Scrapped during the exhaustive acceptance reconciliation. Exact test totals are volatile gate output, not durable task truth, and the retired worklog must not be recreated. Current gates report their own counts.

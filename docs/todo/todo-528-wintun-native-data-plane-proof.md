@@ -6,7 +6,7 @@ phase: S
 priority: P0
 status: OPEN
 created: 2026-07-22
-depends_on: [TODO-442, TODO-519, TODO-521]
+depends_on: [TODO-442, TODO-519, TODO-530, TODO-542]
 ---
 
 # TODO-528: Prove Wintun Native Adapter and Data-Plane Lifecycle
@@ -24,6 +24,13 @@ Windows core and MSI production are native-proven, and the Wintun backend dynami
 - Prove Windows Firewall fail-closed and connected exceptions against real packet outcomes.
 - Make close/read concurrency bounded and race-safe; adapter, session, and DLL handles must release once with no busy loop, use-after-close, panic, or leaked adapter.
 - Pass full local Rust gates, native Windows CI, documentation/MAP/TODO truth, and preserve protected UI files.
+
+## Completion Gates
+
+- Supply-chain gate: the exact upstream Wintun artifact, source URL, version, hash, loading contract, and non-redistribution decision are documented and integrity-checked.
+- Native data-plane gate: Windows 10 and 11 evidence proves adapter configuration, IPv4/IPv6 packets, authenticated server traffic, firewall block/allow outcomes, and exact capability reporting.
+- Concurrency gate: forced close during blocked read, repeated open/close, failure injection, and process exit complete without race, busy loop, double close, use-after-close, panic, or leaked adapter.
+- Release gate: `tun-windows` format, Clippy, tests, signed native artifact, exact SHA-256, cleanup inspection, protected UI diff, and owning-doc updates all pass.
 
 ## Sub-Tasks
 

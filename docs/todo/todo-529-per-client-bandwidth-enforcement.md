@@ -6,7 +6,7 @@ phase: S
 priority: P0
 status: OPEN
 created: 2026-07-22
-depends_on: [TODO-445, TODO-523, TODO-521]
+depends_on: [TODO-445, TODO-523]
 ---
 
 # TODO-529: Wire Per-Client Bandwidth, Quota, and Fairness Enforcement
@@ -24,6 +24,13 @@ Token-bucket, quota, statistics, and client-map helpers exist with unit tests bu
 - Extend QKey policy and authenticated admin routes for read, update, and reset operations with exact precedence over global defaults.
 - Prove unlimited, 10 Mbit/s, burst, quota, equal-weight, and 1:2:1 cases with three real clients and measured throughput on Omega.
 - Pass full local Rust gates, native CI, Omega proof, documentation/MAP/TODO truth, and preserve protected UI files.
+
+## Completion Gates
+
+- Ownership gate: authenticated session creation, update, expiry, disconnect, and cleanup tests prove exactly one independent rate/quota owner per client.
+- Correctness gate: byte accounting, UTC period rollover, burst, quota outcomes, precedence, admin mutation, and audit/metric assertions pass without cross-client leakage or packet reordering.
+- Fairness gate: controlled three-client unlimited, 10 Mbit/s, equal-weight, and 1:2:1 matrices meet documented tolerance with no starvation or unbounded queue.
+- Release gate: full Rust gates, native CI, exact-artifact Omega throughput proof, SHA-256, cleanup/residue checks, protected UI diff, and owning-doc updates all pass.
 
 ## Sub-Tasks
 

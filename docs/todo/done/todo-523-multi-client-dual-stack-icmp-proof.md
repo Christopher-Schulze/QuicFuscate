@@ -6,7 +6,7 @@ phase: S
 priority: P0
 status: DONE
 created: 2026-07-22
-depends_on: [TODO-430, TODO-431, TODO-432, TODO-534, TODO-521]
+depends_on: [TODO-430, TODO-431, TODO-432, TODO-534]
 ---
 
 # TODO-523: Complete Multi-Client Dual-Stack TUN and ICMP Runtime Contract

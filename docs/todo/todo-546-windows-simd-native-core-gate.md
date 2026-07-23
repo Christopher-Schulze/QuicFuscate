@@ -6,7 +6,7 @@ phase: S
 priority: P0
 status: DONE
 created: 2026-07-22
-depends_on: [TODO-519, TODO-521]
+depends_on: [TODO-519]
 ---
 
 # TODO-546: Restore Windows SIMD Dispatch and Native Core Gate

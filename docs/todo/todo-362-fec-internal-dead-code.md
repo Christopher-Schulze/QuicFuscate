@@ -7,7 +7,7 @@ priority: P0
 status: OPEN
 created: 2026-03-27
 backfilled: 2026-07-23
-depends_on: [TODO-521]
+depends_on: []
 ---
 
 # TODO-362: Audit 8 #[allow(dead_code)] markers in fec/internal.rs
@@ -41,6 +41,13 @@ This includes `AdaptiveEncoder::new()` and multiple internal helpers. Either:
 - Give retained compatibility/test-only items explicit narrow ownership and runtime guardrail coverage.
 - Pass full local Rust gates, native CI, documentation/MAP/TODO truth, and preserve protected UI files.
 
+## Completion Gates
+
+- Ownership gate: every original suppression has a recorded caller classification and every retained suppression is narrower than module-wide scope with a failable guardrail.
+- Source gate: no production behavior or test strength is removed, no unclassified FEC suppression remains, and the exact touched source diff matches the recorded classification.
+- Evidence gate: the already-green local format, Clippy, test, and runtime-guardrail results remain reproducible; required native CI completes for the exact reviewed commit.
+- Artifact and truth gate: the exact release artifact is linked to that commit by SHA-256, protected UI paths have no diff, and documentation/MAP/TODO truth contains the commands and results before closure.
+
 ## Sub-Tasks
 
 - [x] Read every annotated item and all direct callers.
@@ -51,7 +58,7 @@ This includes `AdaptiveEncoder::new()` and multiple internal helpers. Either:
 
 ## Notes
 
-- Reopened by TODO-521 because eight current suppressions remain and no completed dead-code audit proves their disposition.
+- Reopened by the exhaustive acceptance reconciliation because eight current suppressions remained without a completed dead-code audit.
 - Exact disposition: `AdaptiveEncoder::new`, `AdaptiveDecoder::new`, and `InterleavedEncoder::new` had no callers and were removed. `EncoderVariant::new`, `DecoderVariant::new`, `LazyDecoder::new`, `InterleavedDecoder::new`, and `ModeManager::with_switch_threshold` are called only by the in-module `#[cfg(test)]` suite and now carry that explicit ownership instead of warning suppression. Production continues to use the corresponding explicit-policy constructors.
 - The first all-target Clippy replay exposed `DecoderVariant::new_with_policy` and `LazyDecoder::new_with_policy` as two more unit-test-only intermediates after their callers were narrowed. Exact caller search found only the internal test module, so both now carry the same explicit `#[cfg(test)]` ownership; production already calls `new_with_depth` directly.
 - The runtime guardrail audit now fails critically if any item-level `#[allow(dead_code)]` returns to `src/fec/internal.rs`. No runtime behavior, public contract, protected UI, or architecture wiring changed, so `docs/DOCUMENTATION.md` and `docs/MAP.md` require no semantic update for this removal.

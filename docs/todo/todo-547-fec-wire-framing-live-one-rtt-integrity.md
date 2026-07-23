@@ -6,7 +6,7 @@ phase: S
 priority: P0
 status: DONE
 created: 2026-07-22
-depends_on: [TODO-422, TODO-473, TODO-524, TODO-521]
+depends_on: [TODO-422, TODO-473, TODO-524]
 ---
 
 # TODO-547: Restore FEC Wire Framing and Live 1-RTT Integrity

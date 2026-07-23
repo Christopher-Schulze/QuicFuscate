@@ -6,7 +6,7 @@ phase: S
 priority: P0
 status: OPEN
 created: 2026-07-22
-depends_on: [TODO-459, TODO-521]
+depends_on: [TODO-459, TODO-529, TODO-538]
 ---
 
 # TODO-540: Complete Sustained DDoS Policy and Live Proof
@@ -23,6 +23,13 @@ Global and per-IP token buckets, GeoIP, blacklist sync, and an EWMA helper exist
 - Persist and load last-known-good blacklist cache atomically with size, format, URL, timeout, and failure bounds.
 - Prove positive GeoIP lookup, external blacklist, exact burst/steady/global limits, activation/clear timing, Retry behavior, normal-traffic false positives, and recovery under a controlled flood.
 - Pass local Rust gates, native CI, privileged Omega traffic proof, documentation/MAP/TODO truth, and preserve protected UI files.
+
+## Completion Gates
+
+- Policy gate: deterministic time-driven tests prove interval-correct PPS, activation/clear hysteresis, disable semantics, exact burst/steady/global limits, and one coherent enforcement order.
+- Cache gate: valid, stale, oversized, malformed, unavailable, interrupted-write, and restart cases prove bounded last-known-good blacklist behavior without unsafe replacement.
+- Traffic gate: controlled exact-artifact flood matrices prove QUIC Retry, GeoIP/blacklist decisions, established-client continuity, legitimate-client false-positive bounds, metrics, audit, and recovery.
+- Release gate: local Rust gates, native CI, privileged Omega proof, SHA-256, teardown/residue inspection, protected UI diff, and owning-doc updates all pass.
 
 ## Sub-Tasks
 

@@ -6,7 +6,7 @@ phase: S
 priority: P0
 status: OPEN
 created: 2026-07-22
-depends_on: [TODO-460, TODO-521]
+depends_on: [TODO-460, TODO-527, TODO-530, TODO-531, TODO-542]
 ---
 
 # TODO-541: Prove Linux Installer Across Clean Distro Lifecycles
@@ -22,6 +22,13 @@ The installer source creates the service identity and directories, validates pre
 - Prove second-run idempotence preserves operator-owned config and credentials.
 - Prove missing `iptables`, `ip`, and required service-manager paths fail before install mutations with actionable messages.
 - Pass shell/static checks, local disposable tests, native CI, Omega clean-host-equivalent proof, documentation/MAP/TODO truth, and preserve protected UI files.
+
+## Completion Gates
+
+- Clean-install gate: supported Debian-family and RHEL-family disposable environments prove identities, paths, modes, ownership, configuration, credentials, unit state, startup, and actionable journal output.
+- Idempotence gate: a second run preserves operator-owned configuration and credentials while converging every installer-owned resource without duplicate or widened permissions.
+- Preflight gate: every missing prerequisite and unsupported environment fails before the first persistent mutation, with a test proving the filesystem and service-manager baseline is unchanged.
+- Release gate: shell/static checks, disposable tests, native CI, exact-artifact Omega clean-host-equivalent lifecycle, SHA-256, uninstall/residue inspection, protected UI diff, and owning-doc updates all pass.
 
 ## Sub-Tasks
 

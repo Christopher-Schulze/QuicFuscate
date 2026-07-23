@@ -6,7 +6,7 @@ phase: S
 priority: P0
 status: OPEN
 created: 2026-07-22
-depends_on: [TODO-378, TODO-521]
+depends_on: []
 ---
 
 # TODO-545: Prove Cipher Reinstallation State Safety
@@ -22,6 +22,13 @@ depends_on: [TODO-378, TODO-521]
 - Add adversarial tests for same-key reinstall, different-key reinstall, partial use, boundary counters, profile rotation, reconnect, and repeated transitions.
 - Remove the unresolved source marker only after the invariant is proven and documented at the owning API.
 - Pass full local Rust gates, native CI, security audit evidence, documentation/MAP/TODO truth, and preserve protected UI files.
+
+## Completion Gates
+
+- Inventory gate: every retained cipher, installer, caller, mutable counter/keystream state, reconnect, rotation, and key-update path is mapped with no unclassified reinstall route.
+- Adversarial gate: same-key, different-key, partial-use, boundary-counter, profile-rotation, reconnect, repeated-transition, and failure-path tests prove no nonce, counter, keystream, buffer, or prior-key reuse.
+- Evidence gate: the already-green local format, Clippy, test, and runtime-guardrail results remain reproducible; required native security CI and independent source audit complete for the exact commit.
+- Artifact and truth gate: exact release artifact SHA-256, protected UI diff, owning API documentation, MAP/TODO evidence, and removal of the resolved marker all pass before closure.
 
 ## Sub-Tasks
 

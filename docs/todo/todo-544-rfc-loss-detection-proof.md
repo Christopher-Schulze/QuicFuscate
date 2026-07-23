@@ -6,7 +6,7 @@ phase: S
 priority: P0
 status: OPEN
 created: 2026-07-22
-depends_on: [TODO-463, TODO-521]
+depends_on: [TODO-463]
 ---
 
 # TODO-544: Complete RFC Loss Detection and Network Proof
@@ -23,6 +23,13 @@ Recovery tracks correct RTT EWMA, but PTO uses one rather than four RTTVAR. Time
 - Propagate required RTT variance to BBR behavior and add bounded Reno delivery-rate pacing only with correctness and regression evidence.
 - Prove 5% loss latency, 10% reordering spurious retransmissions, jitter behavior, high-BDP Reno throughput, 100-packet scan cost, and memory bounds against explicit baselines.
 - Pass local Rust gates, native CI, privileged Omega netem proof, documentation/MAP/TODO truth, and preserve protected UI files.
+
+## Completion Gates
+
+- Standards gate: every implemented packet/time threshold, PTO, ACK range, RTT, reordering, timer, cancellation, and migration rule maps to current primary QUIC recovery requirements.
+- State-machine gate: deterministic clock tests prove one canonical sent-packet owner, earliest-deadline exposure, ACK/loss/PTO transitions, CC propagation, shutdown cancellation, and bounded memory/scan cost.
+- Network and performance gate: controlled 5% loss, 10% reordering, jitter, high-BDP Reno, and 100-packet matrices meet recorded latency, spurious-retransmission, throughput, CPU, and memory thresholds.
+- Release gate: local Rust gates, native CI, exact-artifact privileged Omega netem proof, SHA-256, teardown/residue inspection, protected UI diff, and owning-doc updates all pass.
 
 ## Sub-Tasks
 
