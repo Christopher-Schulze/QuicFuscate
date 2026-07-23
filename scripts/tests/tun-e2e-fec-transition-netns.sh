@@ -431,7 +431,7 @@ capture_telemetry_phase() {
     done
 }
 
-assert_off_snapshot() {
+assert_zero_no_repair_snapshot() {
     local file="$1"
     local zero_active repairs switches nonzero_active
     zero_active=$(metric_value "$file" \
@@ -530,21 +530,54 @@ if [ "$FEC_MODE" = "off" ]; then
         "$CURRENT_SCENARIO_DIR/server-recovered.telemetry" \
         "$CURRENT_SCENARIO_DIR/client-recovered.telemetry"
     do
-        if ! assert_off_snapshot "$snapshot"; then
+        if ! assert_zero_no_repair_snapshot "$snapshot"; then
             echo "FAIL: Off policy emitted repairs, switched mode, or left Zero in $snapshot"
             ok=false
         fi
     done
 else
+    for snapshot in \
+        "$CURRENT_SCENARIO_DIR/server-clean.telemetry" \
+        "$CURRENT_SCENARIO_DIR/client-clean.telemetry"
+    do
+        if ! assert_zero_no_repair_snapshot "$snapshot"; then
+            echo "FAIL: Auto policy spent FEC work or left Zero on the clean link in $snapshot"
+            ok=false
+        fi
+    done
+
+    client_nonzero_active=$(awk '
+        /^quicfuscate_fec_active_connections\{mode=/ &&
+        $1 !~ /mode="zero"/ { sum += $2 }
+        END { print sum + 0 }
+    ' "$CURRENT_SCENARIO_DIR/client-lossy.telemetry")
     client_repairs=$(metric_value \
-        "$CURRENT_SCENARIO_DIR/client-lossy.telemetry" \
+        "$CURRENT_SCENARIO_DIR/client-recovered.telemetry" \
         "quicfuscate_fec_repair_packets_sent_total") || client_repairs=0
     client_switches=$(metric_value \
         "$CURRENT_SCENARIO_DIR/client-lossy.telemetry" \
         "quicfuscate_fec_mode_switches_total") || client_switches=0
-    if [ "$client_repairs" -le 0 ] || [ "$client_switches" -le 0 ]; then
-        echo "FAIL: Auto policy produced no client repair or committed transition under loss"
+    if [ "$client_nonzero_active" -le 0 ] || [ "$client_switches" -le 0 ]; then
+        echo "FAIL: Auto policy committed no non-Zero client adaptation under loss"
         ok=false
+    fi
+    if [ "$client_repairs" -le 0 ]; then
+        echo "FAIL: Auto policy produced no client repair by the end of the run"
+        ok=false
+    fi
+
+    if [ "$LOSS_PROFILE" = "moderate" ]; then
+        client_fountain_active=$(metric_value \
+            "$CURRENT_SCENARIO_DIR/client-lossy.telemetry" \
+            'quicfuscate_fec_active_connections{mode="fountain",mode_id="7"}') \
+            || client_fountain_active=0
+        client_extreme_switches=$(metric_value \
+            "$CURRENT_SCENARIO_DIR/client-recovered.telemetry" \
+            "quicfuscate_fec_switch_reason_extreme_total") || client_extreme_switches=0
+        if [ "$client_fountain_active" -gt 0 ] || [ "$client_extreme_switches" -gt 0 ]; then
+            echo "FAIL: moderate loss incorrectly selected the Fountain rescue tier"
+            ok=false
+        fi
     fi
 fi
 
