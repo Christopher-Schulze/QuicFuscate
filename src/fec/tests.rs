@@ -393,7 +393,7 @@ fn test_wire_codec_selection_comes_from_block_width() {
 #[test]
 fn test_product_fec_default_is_auto_and_stream_every_is_explicit() {
     let cfg = FecConfig::product_default();
-    assert_eq!(cfg.initial_mode, FecMode::Normal);
+    assert_eq!(cfg.initial_mode, FecMode::Zero);
     assert_eq!(cfg.window_sizes.get(&FecMode::Zero), Some(&0));
     assert_eq!(cfg.configured_stream_every, Some(5));
 }

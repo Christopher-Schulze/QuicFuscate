@@ -1249,6 +1249,12 @@ pub fn fec_observe_loss(lost_packets: u64, observed_packets: u64) {
     FEC_OBSERVED_PACKETS.inc_by(observed_packets);
 }
 
+/// Add independently timed transport send/loss callback deltas to the process aggregate.
+pub fn fec_observe_transport_loss(lost_packets: u64, sent_packets: u64) {
+    FEC_OBSERVED_LOST_PACKETS.inc_by(lost_packets);
+    FEC_OBSERVED_PACKETS.inc_by(sent_packets);
+}
+
 /// Record one datagram only after the network-facing serializer accepts it.
 pub fn fec_observe_wire_send(systematic: bool, source_payload_bytes: u64, wire_bytes: u64) {
     if systematic {

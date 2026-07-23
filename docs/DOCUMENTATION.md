@@ -1323,15 +1323,17 @@ The fixed header is 32 bytes. Systematic symbols additionally protect their orig
 
 Mode Selection & Hysteresis
 - Selection heuristic (loss-driven):
+  - Product `Auto` starts in Zero and spends no FEC wire or codec work until measured loss justifies protection.
   - avg_loss < 0.001 -> Zero (ZeroEncoder: absolute zero overhead, counter only, ~2ns/packet)
   - < 0.02 -> Light (GF4, 15-source product window, one repair, 6.67% wire redundancy)
   - < 0.10 -> Normal (GF8: balanced)
   - < 0.22 -> Strong (GF8 through 255 sources per lane, otherwise GF16)
   - < 0.25 -> Extreme (GF8/GF16 selected by block width)
-  - >= 0.25 -> Fountain (explicit LT rescue tier)
+  - >= 0.25 -> Fountain only after at least 32 transport observations and agreement between the EMA and populated recent-loss window; otherwise the controller remains below the Fountain tier
   - Measured burst loss may select Streaming instead of the corresponding block tier
 - Hysteresis & stability:
-  - Minimum dwell time between switches (`~200 ms` except for fast paths like Streaming/Normal)
+  - Transport adaptation consumes the congestion controller's smoothed loss signal. Independently timed send and delayed loss callbacks provide exact counts but are never interpreted as standalone loss-ratio batches.
+  - Minimum dwell time between switches (default `120 ms` upward and `450 ms` downward; Zero may escalate immediately after sufficient evidence)
   - Switch only if `|avg_loss - last_avg| >= switch_threshold` (relaxes for Streaming/Normal)
   - Commit pending targets only after the current source block is complete; decode retained inbound epochs independently
 
@@ -3707,7 +3709,8 @@ The constructor/runtime boundary is explicit:
 - `QUICFUSCATE_FEC_KERNEL`: `scalar|avx512vbmi2|avx512|avx2|neon|sve2` - override SIMD kernel selection for GF16 bitslice.
 
 Notes:
-- Operator policy is independent from codec state. Engine/CLI `FecMode::Off` maps to `FecControlPolicy::Off`, forces the initial and lifetime codec to `Zero`, rejects adaptive transitions and streaming/redundancy hints, emits no repairs, and retains no encoder window state. `FecControlPolicy::Auto` owns the adaptive Zero -> GF4/GF8/GF16 -> Fountain/Streaming cascade.
+- Operator policy is independent from codec state. Engine/CLI `FecMode::Off` maps to `FecControlPolicy::Off`, forces the initial and lifetime codec to `Zero`, rejects adaptive transitions and streaming/redundancy hints, emits no repairs, and retains no encoder window state. `FecControlPolicy::Auto` also bootstraps in `Zero`, then owns the adaptive Zero -> GF4/GF8/GF16 -> Fountain/Streaming cascade.
+- Transport loss ownership is split deliberately: recovery send/loss callbacks produce independent exact packet counters, while the active congestion controller produces the smoothed ratio that drives adaptation. The FEC estimator retains the recent observation weight and requires both its EMA and populated recent-loss window to confirm the Fountain threshold. A delayed loss callback can therefore update loss evidence without masquerading as a `1/1` sample.
 - The runtime may set `QUICFUSCATE_FEC_STREAM_BURST`, `QUICFUSCATE_FEC_PARALLEL`, `QUICFUSCATE_WM_BITSLICE`, `QUICFUSCATE_WM_LANE_PAR`, `QUICFUSCATE_WM_LANES`, and `QUICFUSCATE_WM_U` internally during auto tuning; there is no manual override read path in the current code.
 - `QUICFUSCATE_FEC_DECODER` and `QUICFUSCATE_FEC_WIEDEMANN_K` are advanced/internal controls for diagnostics and compatibility. They do not widen the canonical product contract.
 - Fountain symbol sizing and Rayon thread-pool setup follow explicit owner boundaries: they are snapshotted or initialized during construction instead of being repeatedly resolved inside live adaptation logic.
@@ -3780,7 +3783,7 @@ Exported telemetry metrics (via `telemetry::export_telemetry_text()`):
   - `quicfuscate_fec_active_connections{mode="<name>",mode_id="<0..8>"}` for every stable mapping: `0=zero`, `1=light`, `2=normal`, `3=medium`, `4=strong`, `5=extreme`, `6=ultra`, `7=fountain`, `8=streaming`
   - `quicfuscate_fec_active_connections_total`
   - `quicfuscate_fec_effective_window_source_packets_sum`
-  - `quicfuscate_fec_observed_packets_total`, `quicfuscate_fec_observed_lost_packets_total`, `quicfuscate_fec_observed_loss_ppm`
+  - `quicfuscate_fec_observed_packets_total`, `quicfuscate_fec_observed_lost_packets_total`, `quicfuscate_fec_observed_loss_ppm`: process-wide exact transport send callbacks, the lost subset reported independently when recovery declares loss, and their cumulative ratio
   - `quicfuscate_fec_mode_switches_total`, `quicfuscate_fec_switch_reason_{adaptive,force_on,extreme,disturbance,streaming_hint}_total`
   - `quicfuscate_fec_{source,repair}_packets_{sent,received}_total`
   - `quicfuscate_fec_source_payload_bytes_{sent,received}_total`

@@ -2315,11 +2315,11 @@ mod runtime_reload_tests {
     }
 
     #[test]
-    fn load_runtime_profiles_applies_non_zero_fec_mode_without_config_file() {
+    fn load_runtime_profiles_bootstraps_auto_fec_in_zero_without_config_file() {
         let (fec, stealth, optimize, _) = load_runtime_profiles(None, &None, None);
         let default_stealth = StealthConfig::default();
         let default_optimize = OptimizeConfig::default();
-        assert_eq!(fec.initial_mode, quicfuscate::fec::FecMode::Normal);
+        assert_eq!(fec.initial_mode, quicfuscate::fec::FecMode::Zero);
         assert_eq!(stealth.initial_browser, default_stealth.initial_browser);
         assert_eq!(stealth.initial_os, default_stealth.initial_os);
         assert_eq!(stealth.enable_http3_masquerading, default_stealth.enable_http3_masquerading);
@@ -2466,7 +2466,7 @@ enable_pacing = false
         .expect("reload ok");
 
         let fec = fec_shared.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        assert_eq!(fec.initial_mode, quicfuscate::fec::FecMode::Normal);
+        assert_eq!(fec.initial_mode, quicfuscate::fec::FecMode::Zero);
 
         let opt = *opt_shared.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(opt.pool_capacity, 111);

@@ -118,7 +118,7 @@ impl TransportSim {
         // Interleaving is fixed (TODO-433): every decoder family maps repair
         // coefficients with the configured source-ID stride.
         // Tests run with the production default (interleave enabled).
-        // Use Normal mode as initial because this is the production "Auto" default.
+        // Start explicitly in Normal so the transport simulator exercises block FEC immediately.
         let interleave_on = EnvGuard::set("QUICFUSCATE_FEC_INTERLEAVE", "1");
         let default_depth = EnvGuard::unset("QUICFUSCATE_FEC_INTERLEAVE_DEPTH");
         let config = FecConfig { initial_mode: FecMode::Normal, ..FecConfig::default() };

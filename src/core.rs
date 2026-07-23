@@ -1985,29 +1985,33 @@ impl QuicFuscateConnection {
             self.fec.set_redundancy_ppm(ppm);
         }
 
-        // Drive AdaptiveFec loss estimator using callback feedback first, then transport deltas.
+        // Drive AdaptiveFec from exact callback counts and the congestion controller's
+        // smoothed signal. Send and loss callbacks are temporally independent, so a
+        // delayed loss callback must not be interpreted as a self-contained 1/1 sample.
         let (cb_sent_pkts, cb_lost_pkts, _cb_sent_bytes, _cb_lost_bytes) =
             self.conn.take_fec_callback_feedback();
+        let transport_loss_rate = self.conn.recovery_loss_rate();
+        let sent_total = self.stats.packets_sent;
+        let lost_total = self.stats.packets_lost;
         if cb_sent_pkts > 0 || cb_lost_pkts > 0 {
-            let total_obs = cb_sent_pkts.saturating_add(cb_lost_pkts).max(cb_lost_pkts);
-            self.fec.report_loss(
+            self.fec.report_transport_loss(
+                cb_sent_pkts.min(usize::MAX as u64) as usize,
                 cb_lost_pkts.min(usize::MAX as u64) as usize,
-                total_obs.min(usize::MAX as u64) as usize,
+                transport_loss_rate,
             );
         } else {
-            let sent_total = self.stats.packets_sent;
-            let lost_total = self.stats.packets_lost;
             let sent_delta = sent_total.saturating_sub(self.fec_last_report_sent);
             let lost_delta = lost_total.saturating_sub(self.fec_last_report_lost);
-            if sent_delta > 0 {
-                self.fec.report_loss(
-                    lost_delta.min(usize::MAX as u64) as usize,
+            if sent_delta > 0 || lost_delta > 0 {
+                self.fec.report_transport_loss(
                     sent_delta.min(usize::MAX as u64) as usize,
+                    lost_delta.min(usize::MAX as u64) as usize,
+                    transport_loss_rate,
                 );
-                self.fec_last_report_sent = sent_total;
-                self.fec_last_report_lost = lost_total;
             }
         }
+        self.fec_last_report_sent = sent_total;
+        self.fec_last_report_lost = lost_total;
 
         // Feed RTT estimate to FEC controller for stream_every scaling.
         let rtt_ms = self.stats.rtt.max(0.0) as u32;

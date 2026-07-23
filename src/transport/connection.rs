@@ -3971,6 +3971,11 @@ impl Connection {
         &self.stats
     }
 
+    /// Smoothed packet-loss signal owned by the active congestion controller.
+    pub(crate) fn recovery_loss_rate(&self) -> f32 {
+        self.recovery.get_loss_rate()
+    }
+
     /// Lightweight telemetry: ECN counters since last ACK emission
     #[cfg(any(test, feature = "rust-tests"))]
     pub fn ecn_counts(&self) -> (u64, u64, u64) {

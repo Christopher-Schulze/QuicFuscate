@@ -1,4 +1,4 @@
-use super::test_support::{acquire_env_lock, mk_src_packet};
+use super::test_support::{acquire_env_lock, mk_src_packet, EnvGuard};
 use super::{target_from_mode, AdaptiveFec, FecConfig, FecControlPolicy, FecMode, FecSwitchReason};
 use crate::fec::wire::{WireError, WireReceiveReport};
 
@@ -40,7 +40,7 @@ fn engine_mode_sets_policy_independently_from_codec_bootstrap() {
 
     config.apply_engine_mode(crate::engine::FecMode::Auto);
     assert_eq!(config.control_policy, FecControlPolicy::Auto);
-    assert_eq!(config.initial_mode, FecMode::Normal);
+    assert_eq!(config.initial_mode, FecMode::Zero);
 }
 
 #[test]
@@ -101,6 +101,36 @@ fn auto_policy_still_escalates_from_zero_under_severe_loss() {
 
     assert_eq!(fec.control_policy(), FecControlPolicy::Auto);
     assert_ne!(fec.current_mode(), FecMode::Zero);
+}
+
+#[test]
+fn auto_transport_feedback_rejects_delayed_loss_as_fountain_evidence() {
+    let _env_lock = acquire_env_lock();
+    let mut fec = AdaptiveFec::new(FecConfig::product_default());
+    fec.telemetry.enabled = true;
+
+    fec.report_transport_loss(160, 2, 0.02);
+    fec.report_transport_loss(0, 1, 0.10);
+
+    let snapshot = fec.telemetry_snapshot();
+    assert_eq!(snapshot.observed_packets, 160);
+    assert_eq!(snapshot.observed_lost_packets, 3);
+    assert_ne!(fec.current_mode(), FecMode::Fountain);
+}
+
+#[test]
+fn auto_transport_feedback_enters_fountain_only_after_sustained_extreme_loss() {
+    let _env_lock = acquire_env_lock();
+    let _g_up = EnvGuard::set("QUICFUSCATE_FEC_SWITCH_MIN_UP_MS", "0");
+    let mut fec = AdaptiveFec::new(FecConfig::product_default());
+
+    fec.report_transport_loss(1, 1, 1.0);
+    assert_ne!(fec.current_mode(), FecMode::Fountain);
+
+    for _ in 0..12 {
+        fec.report_transport_loss(32, 16, 0.50);
+    }
+    assert_eq!(fec.current_mode(), FecMode::Fountain);
 }
 
 #[test]

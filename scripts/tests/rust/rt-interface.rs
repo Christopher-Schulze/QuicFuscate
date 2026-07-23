@@ -60,7 +60,7 @@ fn app_config_parses_canonical_quicfuscate_toml() {
     let cfg = AppConfig::from_toml(&contents).expect("parse canonical config");
     cfg.validate().expect("validate canonical config");
 
-    assert_eq!(cfg.fec.initial_mode, FecMode::Normal);
+    assert_eq!(cfg.fec.initial_mode, FecMode::Zero);
     assert_eq!(cfg.stealth.mode, StealthMode::Intelligent);
     assert!(cfg.stealth.use_tls_cover);
     assert!(cfg.optimize.pool_capacity > 0);

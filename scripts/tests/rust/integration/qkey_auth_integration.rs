@@ -143,9 +143,10 @@ fn simulate_qkey_http3_auth(
     // non-masquerading configuration cannot prove the real CLI authentication path.
     let stealth_config = StealthConfig::default();
     let mut fec_config = FecConfig::product_default();
-    // Keep the production controller and codec selection, but shorten the
-    // initial block so this bounded in-memory handshake necessarily emits and
-    // authenticates real source plus repair envelopes.
+    // This auth integration also owns one explicit FEC-envelope proof. Product
+    // Auto correctly starts in Zero, so select Normal deliberately and shorten
+    // its initial block to emit authenticated source plus repair envelopes.
+    fec_config.initial_mode = FecMode::Normal;
     fec_config.window_sizes.insert(FecMode::Normal, 16);
     let opt_config = OptimizeConfig::default();
 

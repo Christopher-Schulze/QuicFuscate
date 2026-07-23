@@ -18,6 +18,8 @@ use std::time::{Duration, Instant};
 // Global repair ID counter for fountain codes
 static REPAIR_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 const GF4_LIGHT_REDUNDANCY: f32 = 16.0 / 15.0;
+const FOUNTAIN_LOSS_THRESHOLD: f32 = 0.25;
+const FOUNTAIN_MIN_RECENT_OBSERVATIONS: u64 = 32;
 
 fn next_repair_id() -> u64 {
     REPAIR_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
@@ -319,7 +321,7 @@ fn continuous_fec_target(
     // StreamingAdaptive: select Streaming for moderate burst-loss (5-15%)
     // when burst variance is high (indicating bursty rather than uniform loss).
     // Falls back to LowCostBlock for uniform loss, escalates to HeavyBlock above 15%.
-    let family = if pressure.loss >= 0.25 {
+    let family = if pressure.loss >= FOUNTAIN_LOSS_THRESHOLD {
         FecBackendFamily::Fountain
     } else if disturbance && pressure.loss >= 0.15 {
         FecBackendFamily::Streaming
@@ -1049,7 +1051,21 @@ impl LossEstimator {
         if total == 0 {
             return;
         }
-        let mut loss_now = lost as f32 / total as f32;
+        let loss_now = lost.min(total) as f32 / total as f32;
+        self.report_rate(loss_now, total, lost.min(total));
+    }
+
+    /// Report a pre-smoothed transport loss signal with its real observation weight.
+    fn report_smoothed_rate(&mut self, loss_rate: f32, observation_weight: usize) {
+        if observation_weight == 0 {
+            return;
+        }
+        let loss_rate = loss_rate.clamp(0.0, 1.0);
+        let estimated_lost = (loss_rate * observation_weight as f32).round() as usize;
+        self.report_rate(loss_rate, observation_weight, estimated_lost);
+    }
+
+    fn report_rate(&mut self, mut loss_now: f32, total: usize, lost: usize) {
         if let Some(kf) = self.kalman.as_mut() {
             // Lightweight Kalman usage: treat measurement as scalar
             // (KalmanFilter provides update(measurement) -> smoothed)
@@ -1109,13 +1125,22 @@ impl LossEstimator {
 
     /// Return smoothed point estimate; conservative: max(EMA, recent-burst-rate)
     pub fn smoothed_loss(&self) -> f32 {
-        let burst_rate = if self.burst_window.is_empty() {
+        self.ema_loss_rate.max(self.recent_loss_rate())
+    }
+
+    fn recent_loss_rate(&self) -> f32 {
+        if self.burst_window.is_empty() {
             0.0
         } else {
             let l = self.burst_window.iter().filter(|&&b| b).count();
             l as f32 / self.burst_window.len() as f32
-        };
-        self.ema_loss_rate.max(burst_rate)
+        }
+    }
+
+    fn fountain_ready(&self) -> bool {
+        self.total_seen >= FOUNTAIN_MIN_RECENT_OBSERVATIONS
+            && self.ema_loss_rate >= FOUNTAIN_LOSS_THRESHOLD
+            && self.recent_loss_rate() >= FOUNTAIN_LOSS_THRESHOLD
     }
 
     /// Returns true if a significant change/burst was detected recently.
@@ -4382,11 +4407,34 @@ impl AdaptiveFec {
         // Update estimator with current observation and drive mode via smoothed loss
         self.loss_estimator.report(lost, total);
         let estimated_loss = self.loss_estimator.smoothed_loss();
-        let instant_loss =
-            if total > 0 { (lost as f32 / total as f32).clamp(0.0, 1.0) } else { 0.0 };
-        let driving_loss = estimated_loss.max(instant_loss);
-        self.update_mode(driving_loss);
-        self.update_stream_interval(driving_loss);
+        self.update_mode(estimated_loss);
+        self.update_stream_interval(self.policy_loss_estimate(estimated_loss));
+    }
+
+    /// Consume transport-owned counters and its congestion controller's smoothed loss signal.
+    pub(crate) fn report_transport_loss(
+        &mut self,
+        sent_packets: usize,
+        lost_packets: usize,
+        smoothed_loss: f32,
+    ) {
+        let observed_total = sent_packets as u64;
+        let observed_lost = lost_packets as u64;
+        if self.telemetry.enabled {
+            self.telemetry.observed_packets =
+                self.telemetry.observed_packets.saturating_add(observed_total);
+            self.telemetry.observed_lost_packets =
+                self.telemetry.observed_lost_packets.saturating_add(observed_lost);
+            crate::telemetry::fec_observe_transport_loss(observed_lost, observed_total);
+        }
+        if self.control_policy == FecControlPolicy::Off {
+            return;
+        }
+        let observation_weight = sent_packets.max(lost_packets);
+        self.loss_estimator.report_smoothed_rate(smoothed_loss, observation_weight);
+        let estimated_loss = self.loss_estimator.smoothed_loss();
+        self.update_mode(estimated_loss);
+        self.update_stream_interval(self.policy_loss_estimate(estimated_loss));
     }
 
     /// Return the currently active FEC protection mode.
@@ -4516,6 +4564,7 @@ impl AdaptiveFec {
     }
 
     fn update_mode(&mut self, estimated_loss: f32) {
+        let estimated_loss = self.policy_loss_estimate(estimated_loss);
         let (prev, current_mode, current_window) = {
             let mut mode_mgr = self.mode_manager.lock();
             let prev = mode_mgr.update(estimated_loss);
@@ -4547,7 +4596,7 @@ impl AdaptiveFec {
             reason = FecSwitchReason::ForceOnPolicy;
         }
         // Ultra-loss policy: route to Fountain for extreme loss
-        if estimated_loss >= 0.25 {
+        if estimated_loss >= FOUNTAIN_LOSS_THRESHOLD {
             controller_target = target_from_mode(FecMode::Fountain, self.fountain_window);
             reason = FecSwitchReason::ExtremeLossPolicy;
         } else if self.loss_estimator.disturbance_detected() && estimated_loss >= 0.15 {
@@ -4579,6 +4628,14 @@ impl AdaptiveFec {
 
         if switched {
             self.transition_to_target_with_reason(controller_target, reason);
+        }
+    }
+
+    fn policy_loss_estimate(&self, estimated_loss: f32) -> f32 {
+        if estimated_loss < FOUNTAIN_LOSS_THRESHOLD || self.loss_estimator.fountain_ready() {
+            estimated_loss
+        } else {
+            FOUNTAIN_LOSS_THRESHOLD - f32::EPSILON
         }
     }
 
@@ -4811,7 +4868,7 @@ impl FecConfig {
     pub fn from_engine_section(section: &crate::engine::FecSection) -> Self {
         let initial_mode = match section.mode {
             crate::engine::FecMode::Off => FecMode::Zero,
-            crate::engine::FecMode::Auto => FecMode::Normal,
+            crate::engine::FecMode::Auto => FecMode::Zero,
         };
 
         Self {
@@ -4841,7 +4898,7 @@ impl FecConfig {
     pub fn apply_engine_mode(&mut self, mode: crate::engine::FecMode) {
         (self.control_policy, self.initial_mode) = match mode {
             crate::engine::FecMode::Off => (FecControlPolicy::Off, FecMode::Zero),
-            crate::engine::FecMode::Auto => (FecControlPolicy::Auto, FecMode::Normal),
+            crate::engine::FecMode::Auto => (FecControlPolicy::Auto, FecMode::Zero),
         };
         self.force_on = false;
     }
@@ -4893,7 +4950,7 @@ impl FecConfig {
         let initial_mode = af.initial_mode.as_deref().unwrap_or("auto").trim().to_lowercase();
         let initial_mode = match initial_mode.as_str() {
             "zero" | "off" => FecMode::Zero,
-            "auto" => FecMode::Normal,
+            "auto" => FecMode::Zero,
             "light" => FecMode::Light,
             "normal" | "on" => FecMode::Normal,
             "medium" => FecMode::Medium,
