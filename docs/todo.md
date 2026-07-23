@@ -266,7 +266,7 @@ experimental, or bound to explicit policy.
 
 | Order | ID | Cluster | Title | Status | Depends On |
 |---:|---|---|---|---|---|
-| 1 | TODO-558 | FEC | Make FEC-off control and live observability truthful | **OPEN** - local policy, producer, telemetry, test, Clippy, and full Rust gates are green; native artifact and Omega Off/Auto proof remain. | TODO-424, TODO-547, TODO-555 |
+| 1 | TODO-558 | FEC | Make FEC-off control and live observability truthful | **OPEN** - policy, telemetry, Rust gates, exact-artifact Off/Auto adaptation, and a supplemental bounded de-escalation probe are green; the hardened exact-commit artifact matrix remains. | TODO-424, TODO-547, TODO-555 |
 | 2 | TODO-544 | Transport | Complete RFC loss detection and network proof | **OPEN** - canonical sent-packet ownership, deadlines, PTO/loss correctness, CC propagation, and netem proof remain. | TODO-463 |
 | 3 | TODO-559 | Data plane | Make TUN/MASQUE sustained throughput backpressure-safe | **OPEN** - transient DATAGRAM pressure is erased into InternalError and consumed TUN frames can be lost before carrier acceptance. | TODO-422, TODO-534, TODO-544, TODO-555 |
 | 4 | TODO-560 | FEC | Make active-connection FEC policy changes truthful | **OPEN** - Engine runtime setters and server reload update configuration or stats without a proven active-connection policy transition. | TODO-558, TODO-559 |

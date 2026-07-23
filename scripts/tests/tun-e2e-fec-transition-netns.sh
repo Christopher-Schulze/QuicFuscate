@@ -2,11 +2,11 @@
 # FEC policy and mode transition E2E test via tc-netem (TODO-427, TODO-558).
 #
 # Verifies FEC mode transitions are seamless under real transport load:
-#   Phase 1: 0% loss for 5s → FEC in Zero/Light
+#   Phase 1: 0% loss for 5s → FEC in Zero
 #   Phase 2: moderate (20%) or severe (40%) loss → live policy behavior
-#   Phase 3: 0% loss for 5s → FEC de-escalates (live transition)
+#   Phase 3: 0% loss for 35s → Auto returns to Zero (live transition)
 #
-# Acceptance: Auto transitions without liveness loss; Off remains Zero with no repairs or switches.
+# Acceptance: Auto adapts then returns to Zero; Off remains Zero with no repairs or switches.
 set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
@@ -20,6 +20,8 @@ FEC_MODE="${FEC_MODE:-auto}"
 TELEMETRY_PORT="${QF_FEC_TELEMETRY_PORT:-9898}"
 LOSS_PROFILE="${QF_FEC_LOSS_PROFILE:-moderate}"
 EVIDENCE_DIR="${QF_E2E_ARTIFACT_DIR:-}"
+RECOVERY_SETTLE_SECONDS=10
+RECOVERY_PING_COUNT=250
 
 case "$LOSS_PROFILE" in
     moderate)
@@ -174,6 +176,8 @@ preserve_evidence() {
         printf 'loss_profile=%s\n' "$LOSS_PROFILE"
         printf 'netem_loss_percent=%s\n' "$LOSS_PERCENT"
         printf 'max_tunnel_loss_percent=%s\n' "$MAX_TUNNEL_LOSS_PERCENT"
+        printf 'recovery_settle_seconds=%s\n' "$RECOVERY_SETTLE_SECONDS"
+        printf 'recovery_ping_count=%s\n' "$RECOVERY_PING_COUNT"
         printf 'clean_tunnel_loss_percent=%s\n' "$clean_loss"
         printf 'impaired_tunnel_loss_percent=%s\n' "$impaired_loss"
         printf 'recovered_tunnel_loss_percent=%s\n' "$recovered_loss"
@@ -452,6 +456,21 @@ assert_zero_no_repair_snapshot() {
     [ "$switches" -eq 0 ] || return 1
 }
 
+assert_zero_mode_snapshot() {
+    local file="$1"
+    local zero_active nonzero_active
+    zero_active=$(metric_value "$file" \
+        'quicfuscate_fec_active_connections{mode="zero",mode_id="0"}') \
+        || fatal "missing Zero mode bucket"
+    nonzero_active=$(awk '
+        /^quicfuscate_fec_active_connections\{mode=/ &&
+        $1 !~ /mode="zero"/ { sum += $2 }
+        END { print sum + 0 }
+    ' "$file")
+    [ "$zero_active" -ge 1 ] || return 1
+    [ "$nonzero_active" -eq 0 ] || return 1
+}
+
 ping_phase() {
     local count="$1"
     local label="$2"
@@ -496,8 +515,8 @@ remove_qdisc || fatal "could not remove transition netem loss"
 
 # Phase 3: Remove loss - FEC de-escalates (live transition)
 echo "Phase 3: Remove loss (FEC de-escalates)..."
-sleep 3  # Wait for de-escalation
-loss3=$(ping_phase 50 "3")
+sleep "$RECOVERY_SETTLE_SECONDS"
+loss3=$(ping_phase "$RECOVERY_PING_COUNT" "3")
 capture_telemetry_phase "recovered"
 
 # Acceptance criteria
@@ -563,6 +582,10 @@ else
     fi
     if [ "$client_repairs" -le 0 ]; then
         echo "FAIL: Auto policy produced no client repair by the end of the run"
+        ok=false
+    fi
+    if ! assert_zero_mode_snapshot "$CURRENT_SCENARIO_DIR/client-recovered.telemetry"; then
+        echo "FAIL: Auto policy did not return to Zero within the bounded recovery phase"
         ok=false
     fi
 
