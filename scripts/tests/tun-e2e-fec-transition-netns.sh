@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# FEC mode transition E2E test via tc-netem (TODO-427, test 7).
+# FEC policy and mode transition E2E test via tc-netem (TODO-427, TODO-558).
 #
 # Verifies FEC mode transitions are seamless under real transport load:
 #   Phase 1: 0% loss for 5s → FEC in Zero/Light
 #   Phase 2: 20% loss for 5s → FEC escalates to Strong/Extreme (live transition)
 #   Phase 3: 0% loss for 5s → FEC de-escalates (live transition)
 #
-# Acceptance: 0% ping loss DURING transitions (not just before/after).
+# Acceptance: Auto transitions without liveness loss; Off remains Zero with no repairs or switches.
 set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
@@ -16,6 +16,8 @@ CA_KEY="$PROJECT_ROOT/config/local/ca.key"
 KEEP_ON_FAIL="${QF_E2E_KEEP_ON_FAIL:-0}"
 LOCK_FILE="${QF_E2E_LOCK_FILE:-/tmp/quicfuscate-tun-e2e.lock}"
 LOCK_TIMEOUT="${QF_E2E_LOCK_TIMEOUT:-300}"
+FEC_MODE="${FEC_MODE:-auto}"
+TELEMETRY_PORT="${QF_FEC_TELEMETRY_PORT:-9898}"
 
 PASS=0
 FAIL=0
@@ -29,6 +31,8 @@ RUNTIME_DIR=""
 CURRENT_SCENARIO_DIR=""
 SERVER_LOG=""
 CLIENT_LOG=""
+SERVER_TELEMETRY=""
+CLIENT_TELEMETRY=""
 ADMIN_SOCKET=""
 QKEY_STORE=""
 CERT=""
@@ -187,6 +191,10 @@ if [ "$(id -u)" -ne 0 ]; then
     echo "FAIL: this harness requires root" >&2
     exit 2
 fi
+if [ "$FEC_MODE" != "off" ] && [ "$FEC_MODE" != "auto" ]; then
+    echo "FAIL: FEC_MODE must be 'off' or 'auto'" >&2
+    exit 2
+fi
 if pgrep -x quicfuscate >/dev/null; then
     echo "FAIL: a pre-existing quicfuscate process is running; refusing broad cleanup" >&2
     exit 2
@@ -264,11 +272,12 @@ setup_netns() {
 }
 
 start_tunnel() {
-    ip netns exec ns-srv "$B" server --cert "$CERT" --key "$KEY" \
+    ip netns exec ns-srv env QUICFUSCATE_METRICS_ADDR="127.0.0.1:${TELEMETRY_PORT}" \
+        "$B" --telemetry server --cert "$CERT" --key "$KEY" \
         --listen 10.10.0.1:4433 --admin-socket "$ADMIN_SOCKET" \
         --qkey-store "$QKEY_STORE" \
         --tun --tun-name qtun0 --tun-ip 10.0.1.1 --tun-netmask 255.255.255.0 \
-        --no-drop-privileges -v \
+        --fec-mode "$FEC_MODE" --no-drop-privileges -v \
         > "$SERVER_LOG" 2>&1 &
     SERVER_PID=$!
     sleep 3
@@ -280,9 +289,11 @@ start_tunnel() {
         fatal "could not get qkey from server"
     fi
 
-    ip netns exec ns-cli "$B" client --remote 10.10.0.1:4433 --url https://10.10.0.1/ \
+    ip netns exec ns-cli env QUICFUSCATE_METRICS_ADDR="127.0.0.1:${TELEMETRY_PORT}" \
+        "$B" --telemetry client --remote 10.10.0.1:4433 --url https://10.10.0.1/ \
         --qkey "$qkey" --ca-file "$CA" --verify-peer \
-        --tun --tun-name qtun0 --tun-ip 10.0.1.2 --tun-netmask 255.255.255.0 --no-utls -v \
+        --tun --tun-name qtun0 --tun-ip 10.0.1.2 --tun-netmask 255.255.255.0 \
+        --fec-mode "$FEC_MODE" --no-utls -v \
         > "$CLIENT_LOG" 2>&1 &
     CLIENT_PID=$!
     sleep 4
@@ -303,6 +314,75 @@ check_handshake() {
     [ "$cli" -gt 0 ] && [ "$srv" -gt 0 ]
 }
 
+fetch_telemetry() {
+    local namespace="$1"
+    local output_path="$2"
+    ip netns exec "$namespace" python3 -c \
+        'import sys,urllib.request; sys.stdout.write(urllib.request.urlopen(sys.argv[1], timeout=3).read().decode())' \
+        "http://127.0.0.1:${TELEMETRY_PORT}/telemetry" > "$output_path" 2>/dev/null
+}
+
+metric_value() {
+    local file="$1"
+    local metric="$2"
+    awk -v metric="$metric" '$1 == metric { print $2; found=1; exit } END { if (!found) exit 1 }' "$file"
+}
+
+capture_telemetry_phase() {
+    local phase="$1"
+    SERVER_TELEMETRY="$CURRENT_SCENARIO_DIR/server-${phase}.telemetry"
+    CLIENT_TELEMETRY="$CURRENT_SCENARIO_DIR/client-${phase}.telemetry"
+    fetch_telemetry ns-srv "$SERVER_TELEMETRY" \
+        || fatal "server telemetry endpoint unavailable in ns-srv during ${phase}"
+    fetch_telemetry ns-cli "$CLIENT_TELEMETRY" \
+        || fatal "client telemetry endpoint unavailable in ns-cli during ${phase}"
+
+    local file mode_id mode_name
+    for file in "$SERVER_TELEMETRY" "$CLIENT_TELEMETRY"; do
+        for mode_id in {0..8}; do
+            case "$mode_id" in
+                0) mode_name="zero" ;;
+                1) mode_name="light" ;;
+                2) mode_name="normal" ;;
+                3) mode_name="medium" ;;
+                4) mode_name="strong" ;;
+                5) mode_name="extreme" ;;
+                6) mode_name="ultra" ;;
+                7) mode_name="fountain" ;;
+                8) mode_name="streaming" ;;
+            esac
+            metric_value "$file" \
+                "quicfuscate_fec_active_connections{mode=\"${mode_name}\",mode_id=\"${mode_id}\"}" \
+                >/dev/null || fatal "missing stable FEC mode mapping ${mode_name}=${mode_id}"
+        done
+        local active
+        active=$(metric_value "$file" "quicfuscate_fec_active_connections_total") \
+            || fatal "missing active FEC connection aggregate"
+        [ "$active" -ge 1 ] || fatal "telemetry endpoint has no active FEC connection"
+    done
+}
+
+assert_off_snapshot() {
+    local file="$1"
+    local zero_active repairs switches nonzero_active
+    zero_active=$(metric_value "$file" \
+        'quicfuscate_fec_active_connections{mode="zero",mode_id="0"}') \
+        || fatal "missing Zero mode bucket"
+    repairs=$(metric_value "$file" "quicfuscate_fec_repair_packets_sent_total") \
+        || fatal "missing repair send counter"
+    switches=$(metric_value "$file" "quicfuscate_fec_mode_switches_total") \
+        || fatal "missing mode switch counter"
+    nonzero_active=$(awk '
+        /^quicfuscate_fec_active_connections\{mode=/ &&
+        $1 !~ /mode="zero"/ { sum += $2 }
+        END { print sum + 0 }
+    ' "$file")
+    [ "$zero_active" -ge 1 ] || return 1
+    [ "$nonzero_active" -eq 0 ] || return 1
+    [ "$repairs" -eq 0 ] || return 1
+    [ "$switches" -eq 0 ] || return 1
+}
+
 ping_phase() {
     local count="$1"
     local label="$2"
@@ -314,7 +394,8 @@ ping_phase() {
     echo "$ping_loss"
 }
 
-echo "=== FEC Mode Transition E2E Test (TODO-427) ==="
+echo "=== FEC Policy/Transition E2E Test (TODO-427, TODO-558) ==="
+echo "Policy: $FEC_MODE"
 
 prepare_scenario_runtime "transition"
 setup_netns
@@ -329,6 +410,7 @@ fi
 # Phase 1: Clean link (0% loss) for 50 pings
 echo "Phase 1: Clean link (0% loss)..."
 loss1=$(ping_phase 50 "1")
+capture_telemetry_phase "clean"
 
 # Phase 2: Inject 20% loss - FEC escalates (live transition)
 echo "Phase 2: Inject 20% loss (FEC escalates)..."
@@ -339,12 +421,14 @@ else
 fi
 sleep 2  # Let FEC detect loss and start transition
 loss2=$(ping_phase 50 "2")
+capture_telemetry_phase "lossy"
 remove_qdisc || fatal "could not remove transition netem loss"
 
 # Phase 3: Remove loss - FEC de-escalates (live transition)
 echo "Phase 3: Remove loss (FEC de-escalates)..."
 sleep 3  # Wait for de-escalation
 loss3=$(ping_phase 50 "3")
+capture_telemetry_phase "recovered"
 
 # Acceptance criteria
 echo ""
@@ -367,8 +451,35 @@ if [ "$loss3" -gt 10 ]; then
     ok=false
 fi
 
+if [ "$FEC_MODE" = "off" ]; then
+    for snapshot in \
+        "$CURRENT_SCENARIO_DIR/server-clean.telemetry" \
+        "$CURRENT_SCENARIO_DIR/client-clean.telemetry" \
+        "$CURRENT_SCENARIO_DIR/server-lossy.telemetry" \
+        "$CURRENT_SCENARIO_DIR/client-lossy.telemetry" \
+        "$CURRENT_SCENARIO_DIR/server-recovered.telemetry" \
+        "$CURRENT_SCENARIO_DIR/client-recovered.telemetry"
+    do
+        if ! assert_off_snapshot "$snapshot"; then
+            echo "FAIL: Off policy emitted repairs, switched mode, or left Zero in $snapshot"
+            ok=false
+        fi
+    done
+else
+    client_repairs=$(metric_value \
+        "$CURRENT_SCENARIO_DIR/client-lossy.telemetry" \
+        "quicfuscate_fec_repair_packets_sent_total") || client_repairs=0
+    client_switches=$(metric_value \
+        "$CURRENT_SCENARIO_DIR/client-lossy.telemetry" \
+        "quicfuscate_fec_mode_switches_total") || client_switches=0
+    if [ "$client_repairs" -le 0 ] || [ "$client_switches" -le 0 ]; then
+        echo "FAIL: Auto policy produced no client repair or committed transition under loss"
+        ok=false
+    fi
+fi
+
 if $ok; then
-    echo "PASS: mode transitions seamless under load"
+    echo "PASS: ${FEC_MODE} policy and telemetry contract held under load"
     PASS=$((PASS + 1))
 else
     FAIL=$((FAIL + 1))

@@ -6,7 +6,7 @@ phase: U
 priority: P0
 status: OPEN
 created: 2026-07-23
-depends_on: [TODO-525, TODO-529, TODO-531, TODO-538, TODO-539, TODO-540, TODO-549]
+depends_on: [TODO-525, TODO-529, TODO-531, TODO-538, TODO-539, TODO-540, TODO-549, TODO-560]
 ---
 
 # TODO-550: Rebuild the web admin in Dioxus with exact parity

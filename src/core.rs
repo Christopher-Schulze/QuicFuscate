@@ -116,6 +116,16 @@ impl OutgoingFecPacket {
         };
         wire::write_packet(meta, payload, buf).map_err(|error| error.to_string())
     }
+
+    fn telemetry_shape(&self) -> (bool, usize) {
+        match self.wire_meta {
+            None => (true, self.packet.data_len),
+            Some(meta) if meta.systematic => {
+                (true, self.packet.data_len.saturating_sub(wire::SOURCE_LENGTH_LEN))
+            }
+            Some(_) => (false, 0),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -1130,13 +1140,16 @@ impl QuicFuscateConnection {
 
         let wire_framed = wire::is_framed(&block[..len]);
         let mut recovered_packets = std::mem::take(&mut self.fec_receive_scratch);
-        if wire_framed {
+        let receive_report = if wire_framed {
             let result = self.fec_wire_receiver.receive(&block[..len], &mut recovered_packets);
             self.optimization_manager.free_block(block);
-            if let Err(error) = result {
-                debug!("dropping malformed or unsupported FEC wire datagram: {error}");
-                self.fec_receive_scratch = recovered_packets;
-                return Ok(len);
+            match result {
+                Ok(report) => report,
+                Err(error) => {
+                    debug!("dropping malformed or unsupported FEC wire datagram: {error}");
+                    self.fec_receive_scratch = recovered_packets;
+                    return Ok(len);
+                }
             }
         } else {
             let packet = FecPacket::new(
@@ -1151,6 +1164,10 @@ impl QuicFuscateConnection {
             self.packet_id_counter = self.packet_id_counter.wrapping_add(1);
             recovered_packets.clear();
             recovered_packets.push(packet);
+            wire::WireReceiveReport::raw_source(len)
+        };
+        if self.fec.telemetry_enabled() {
+            self.fec.observe_wire_receive(receive_report);
         }
 
         let mut terminal_receive_error = None;
@@ -1310,6 +1327,10 @@ impl QuicFuscateConnection {
         if !has_pending_app_data {
             if let Some(packet) = self.outgoing_fec_packets.pop_front() {
                 let len = packet.write_to(buf)?;
+                if self.fec.telemetry_enabled() {
+                    let (systematic, source_payload_bytes) = packet.telemetry_shape();
+                    self.fec.observe_wire_send(systematic, source_payload_bytes, len);
+                }
                 self.record_paced_packet(now, len, packet.congestion_controlled);
                 // Drop handles pool recycling automatically.
                 return Ok(len);
@@ -1473,6 +1494,10 @@ impl QuicFuscateConnection {
         // Pop the first packet from the buffer to send it now.
         if let Some(packet) = self.outgoing_fec_packets.pop_front() {
             let len = packet.write_to(buf)?;
+            if self.fec.telemetry_enabled() {
+                let (systematic, source_payload_bytes) = packet.telemetry_shape();
+                self.fec.observe_wire_send(systematic, source_payload_bytes, len);
+            }
             self.record_paced_packet(now, len, packet.congestion_controlled);
             // Drop handles pool recycling automatically.
             Ok(len)
@@ -2000,6 +2025,11 @@ impl QuicFuscateConnection {
     /// Returns the current estimated packet loss rate in [0.0, 1.0].
     pub fn loss_rate(&self) -> f32 {
         self.stats.loss_rate
+    }
+
+    /// Return exact connection-local FEC policy, mode, and wire evidence.
+    pub fn fec_telemetry_snapshot(&self) -> crate::fec::FecTelemetrySnapshot {
+        self.fec.telemetry_snapshot()
     }
 
     /// Returns current stealth mode for this connection.

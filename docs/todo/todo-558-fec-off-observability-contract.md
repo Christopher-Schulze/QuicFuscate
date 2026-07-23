@@ -40,21 +40,26 @@ The production `--fec-mode off` path currently selects `FecMode::Zero` only as t
 
 ## Sub-Tasks
 
-- [ ] Map engine policy, active mode, observers, transition requests, repair emission, and every exported FEC metric producer.
-- [ ] Design the typed operator-policy and per-runtime observability contract.
-- [ ] Implement immutable Off semantics and preserve adaptive Auto behavior.
-- [ ] Wire or retire every required FEC telemetry producer and publish exact units, scope, and mode mapping.
-- [ ] Add deterministic policy, telemetry, concurrency, and performance regressions.
-- [ ] Run local Rust and telemetry gates.
-- [ ] Run exact-commit native CI/Clippy/Release gates and repeated exact-artifact Omega Off/Auto matrices.
+- [x] Map engine policy, active mode, observers, transition requests, repair emission, and every exported FEC metric producer.
+- [x] Design the typed operator-policy and per-runtime observability contract.
+- [x] Implement immutable Off semantics and preserve adaptive Auto behavior.
+- [x] Wire or retire every required FEC telemetry producer and publish exact units, scope, and mode mapping.
+- [x] Add deterministic policy, telemetry, concurrency, and performance regressions.
+- [x] Run local Rust and telemetry gates.
+- [~] Run exact-commit native CI/Clippy/Release gates and repeated exact-artifact Omega Off/Auto matrices.
 - [ ] Flush documentation and close only with exact evidence.
 
 ## Notes
 
 - Primary policy paths: `src/main.rs`, `src/implementations/server/mod.rs`, and `src/fec/mod.rs`.
-- `FecConfig::apply_engine_mode(Off)` currently sets only `initial_mode=Zero` and `force_on=false`; `AdaptiveFec::new()` still installs `FecControlMode::Auto`.
-- `src/fec/mod.rs` exports the active enum discriminant through `quicfuscate_fec_mode`, but the telemetry documentation does not currently define the exact nine-value mapping.
-- `src/optimize/telemetry.rs` exports `quicfuscate_fec_loss_rate` and FEC packet counters. Their runtime producer and scope must be proven before TODO-557 may consume them.
+- Pre-implementation probe: `FecConfig::apply_engine_mode(Off)` set only `initial_mode=Zero` and `force_on=false`; `AdaptiveFec::new()` still installed automatic control.
+- Pre-implementation probe: telemetry exported an undocumented numeric `quicfuscate_fec_mode`, incomplete loss state, and dead packet counters.
+- The implementation contract separates `FecControlPolicy::{Off, Auto}` from the nine codec modes. Off rejects every non-Zero transition request; Auto retains the current adaptive cascade.
+- Process telemetry owns only explicit aggregates: active-connection counts for every stable mode ID, active-window sum, cumulative lost/observed samples, committed transitions by reason, and actual source/repair/decoded/recovered wire counters. `AdaptiveFec` additionally owns a connection-local snapshot.
+- Send metrics are produced only after `OutgoingFecPacket::write_to()` serializes the complete datagram into the network-facing output buffer. Receive metrics are produced only after `WireFecReceiver` accepts a framed datagram and reports original versus recovered output. Generated, queued, dropped, malformed, and duplicate symbols cannot masquerade as serialized or recovered work.
+- The native performance matrix now has an explicit `fec_off_policy_fast_path` Criterion group comparing lossy hard-Off against the clean Auto/Zero baseline with persistent state and reusable output. The 4,096-packet regression separately proves zero repairs, zero encoder window state, and zero repair-retention growth under sustained total loss.
+- Local evidence is green: `cargo fmt --all`, `git diff --check`, strict all-target Clippy with `rust-tests` and warnings denied, the complete `cargo test --features rust-tests` suite with 1,805 library tests plus every binary/integration/runtime/doc target, 216 FEC tests, 18 wire tests, 12 telemetry tests, 4 server-metric tests, ShellCheck and Bash syntax for the specialized harness, TODO consistency across 195 detail files with zero violations, and runtime guardrails with zero critical findings and zero warnings.
+- `Engine::set_fec_mode()` and server runtime reload still do not prove policy changes on already-active connections. That separate active-control contract is registered as TODO-560 and does not weaken this task's connection-construction and lifetime-Off scope.
 - Exact probe source commit: `222ebdc0c91a887e480dc6697f82e45e4c9d417c`; ARM64 binary SHA-256: `8b6ff22e0f410ac6cd5c553786bd5c7584d99c6da0f346a46d9e8839a9e1c2b1`.
 - This task owns control and observability correctness. Scenario thresholds and comparative acceptance remain TODO-557.
 

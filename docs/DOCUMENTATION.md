@@ -3707,7 +3707,7 @@ The constructor/runtime boundary is explicit:
 - `QUICFUSCATE_FEC_KERNEL`: `scalar|avx512vbmi2|avx512|avx2|neon|sve2` - override SIMD kernel selection for GF16 bitslice.
 
 Notes:
-- Engine-level `FecMode::Off` is not yet a hard runtime disable. `FecConfig::apply_engine_mode(Off)` selects initial Zero mode, but the instantiated controller remains automatic and can escalate after loss feedback. Operators must not use Off as a comparative no-FEC control until TODO-558 closes.
+- Operator policy is independent from codec state. Engine/CLI `FecMode::Off` maps to `FecControlPolicy::Off`, forces the initial and lifetime codec to `Zero`, rejects adaptive transitions and streaming/redundancy hints, emits no repairs, and retains no encoder window state. `FecControlPolicy::Auto` owns the adaptive Zero -> GF4/GF8/GF16 -> Fountain/Streaming cascade.
 - The runtime may set `QUICFUSCATE_FEC_STREAM_BURST`, `QUICFUSCATE_FEC_PARALLEL`, `QUICFUSCATE_WM_BITSLICE`, `QUICFUSCATE_WM_LANE_PAR`, `QUICFUSCATE_WM_LANES`, and `QUICFUSCATE_WM_U` internally during auto tuning; there is no manual override read path in the current code.
 - `QUICFUSCATE_FEC_DECODER` and `QUICFUSCATE_FEC_WIEDEMANN_K` are advanced/internal controls for diagnostics and compatibility. They do not widen the canonical product contract.
 - Fountain symbol sizing and Rayon thread-pool setup follow explicit owner boundaries: they are snapshotted or initialized during construction instead of being repeatedly resolved inside live adaptation logic.
@@ -3776,6 +3776,18 @@ Exported telemetry metrics (via `telemetry::export_telemetry_text()`):
   - `quicfuscate_simd_usage_avx2_total`
   - `quicfuscate_simd_usage_avx512_total`
 
+- FEC policy and process aggregates
+  - `quicfuscate_fec_active_connections{mode="<name>",mode_id="<0..8>"}` for every stable mapping: `0=zero`, `1=light`, `2=normal`, `3=medium`, `4=strong`, `5=extreme`, `6=ultra`, `7=fountain`, `8=streaming`
+  - `quicfuscate_fec_active_connections_total`
+  - `quicfuscate_fec_effective_window_source_packets_sum`
+  - `quicfuscate_fec_observed_packets_total`, `quicfuscate_fec_observed_lost_packets_total`, `quicfuscate_fec_observed_loss_ppm`
+  - `quicfuscate_fec_mode_switches_total`, `quicfuscate_fec_switch_reason_{adaptive,force_on,extreme,disturbance,streaming_hint}_total`
+  - `quicfuscate_fec_{source,repair}_packets_{sent,received}_total`
+  - `quicfuscate_fec_source_payload_bytes_{sent,received}_total`
+  - `quicfuscate_fec_{source,repair}_wire_bytes_{sent,received}_total`
+  - `quicfuscate_fec_wire_overhead_{sent,received}_ppm`
+  - `quicfuscate_fec_decoded_packets_total`, `quicfuscate_fec_recovered_packets_total`, `quicfuscate_fec_recovered_payload_bytes_total`
+
 #### Telemetry HTTP endpoints
 
 Telemetry and metrics endpoints are exposed by different runtime surfaces:
@@ -3796,7 +3808,7 @@ The default server metrics endpoint (`implementations::server::metrics::Metrics:
 - `quicfuscate_fec_packets_encoded`, `quicfuscate_fec_packets_decoded`, `quicfuscate_fec_packets_recovered`
 - `quicfuscate_auth_failed_total`, `quicfuscate_rate_limited_total`
 
-The exported FEC packet counters are not yet accepted as production evidence. TODO-558 must prove one live producer, unit, and scope for each counter or remove/qualify the metric; a constant zero is not evidence of zero repairs or recovery.
+The three legacy server FEC counters are read-only projections of the canonical process telemetry producers, not independent atomics: `encoded` is actual source plus repair datagrams written by the FEC layer, `decoded` is original plus recovered source packets delivered by the FEC layer, and `recovered` is the decoded subset reconstructed from repair data. Their scope is the server process.
 Accepted connections are now produced by the standalone live runtime at the same point that `clients_total` is incremented, so the standalone admin/metrics surfaces report one consistent accept/reject/auth-failure story instead of mixing runtime counts with partial projections.
 The standalone server runtime now also records accepted, rejected, rate-limited, ingress, and egress events through explicit `Metrics` methods rather than scattered raw atomic increments in the live loop and QKey-auth branches.
 Engine server-mode stats now treat RTT and loss as unavailable unless a truthful server-owned producer exists. The engine no longer reuses global client transport RTT/loss instrumentation for embedded server stats.
@@ -3828,8 +3840,9 @@ Telemetry collection/export is runtime-surface driven (`--telemetry` / metrics e
 
 - ACK delay buckets model browser-like ACK timing distributions and can be used to validate profile behavior under different network conditions.
 - Choke counters (`choked_bytes`, `choke_sleep_ms`) quantify pacing pressure and allow correlation with throughput/latency trade-offs.
-- FEC gauges/counters should be interpreted together (`mode`, `window`, `loss_rate`, switch counters) to distinguish stable operation from adaptation churn.
-- Until TODO-558 closes, `quicfuscate_fec_loss_rate` and numeric `quicfuscate_fec_mode` are diagnostic only: the live loss producer is incomplete and the exact nine-value mode mapping is not yet part of the documented stable telemetry contract.
+- FEC telemetry is an explicit process aggregate. Active mode is a nine-bucket connection distribution, effective window is a source-packet sum across active connections, and observed loss is derived from cumulative lost/observed controller samples.
+- Source/repair send counters advance only after network-facing serialization into the connection output buffer succeeds; they measure datagrams emitted by the FEC layer for transmission, not UDP syscall completion. Receive and recovery counters advance only after `WireFecReceiver` accepts the datagram and reports its original versus reconstructed decoder output. Generated, queued, dropped, malformed, and duplicate symbols do not satisfy these metrics.
+- `AdaptiveFec::telemetry_snapshot()` and `QuicFuscateConnection::fec_telemetry_snapshot()` provide exact connection-local policy, committed mode/window, loss, transition, wire, decode, and recovery evidence. Packet collection is snapshotted from `--telemetry` before connection construction.
 - Compression and SIMD counters provide backend-selection and efficiency visibility without changing data-plane behavior.
 
 ### Operational hints
@@ -3838,7 +3851,7 @@ Telemetry collection/export is runtime-surface driven (`--telemetry` / metrics e
   - The constructor now resolves this as an explicit FEC global-resource policy step before initializing the one process-global Rayon pool.
   - There is no runtime toggle for parallel vs sequential in the current code; selection is internal.
   - In async deployments (Tokio), avoid oversubscription: choose `<n>` near the number of physical cores or the Tokio worker count when CPU contention is observed.
-  - Measure with `--telemetry` and watch `quicfuscate_fec_window`, `quicfuscate_fec_mode_switches_total`, and throughput counters when adjusting.
+  - Measure with `--telemetry` and watch the active-mode distribution, effective-window sum, mode switches, wire overhead, and throughput counters when adjusting.
 
 - Hysteresis and loss smoothing (mode stability)
   - `hysteresis` dampens mode flapping; larger values reduce oscillation on jittery links. Typical range: `0.01-0.03`.
@@ -3852,7 +3865,7 @@ Telemetry collection/export is runtime-surface driven (`--telemetry` / metrics e
   - Auto-Mode resets to efficient profiles once stability returns (EMA/variance gates).
 
 - Telemetry for tuning
-  - Enable `--telemetry` and monitor `quicfuscate_fec_mode_switches_total`, `quicfuscate_fec_window`, `quicfuscate_fec_loss_rate`, and switch-reason counters (`quicfuscate_fec_switch_reason_*_total`) during tuning iterations.
+  - Enable `--telemetry` and monitor active-mode buckets, `quicfuscate_fec_mode_switches_total`, `quicfuscate_fec_effective_window_source_packets_sum`, `quicfuscate_fec_observed_loss_ppm`, wire-overhead gauges, and switch-reason counters during tuning iterations.
 
 Notes
 - `QUICFUSCATE_FEC_STREAM_EVERY` is read once per `AdaptiveFec::new`. Use a new instance to pick up changes.

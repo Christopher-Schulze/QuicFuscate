@@ -6,7 +6,7 @@ phase: U
 priority: P0
 status: OPEN
 created: 2026-07-23
-depends_on: [TODO-527, TODO-528, TODO-530, TODO-532, TODO-533, TODO-537, TODO-541, TODO-542, TODO-543, TODO-544, TODO-545, TODO-548, TODO-549]
+depends_on: [TODO-527, TODO-528, TODO-530, TODO-532, TODO-533, TODO-537, TODO-541, TODO-542, TODO-543, TODO-544, TODO-545, TODO-548, TODO-549, TODO-560]
 ---
 
 # TODO-551: Rebuild the desktop client in Dioxus with exact parity

@@ -9,6 +9,33 @@ use tokio::net::TcpListener;
 
 use super::isolation::{UplinkDrop, UplinkRoute};
 
+#[derive(Clone, Copy, Debug)]
+enum FecProcessCounterKind {
+    Emitted,
+    Decoded,
+    Recovered,
+}
+
+/// Read-only adapter from server metrics to the real process-wide FEC producers.
+#[derive(Debug)]
+pub struct FecProcessCounter(FecProcessCounterKind);
+
+impl FecProcessCounter {
+    const fn new(kind: FecProcessCounterKind) -> Self {
+        Self(kind)
+    }
+
+    pub fn load(&self, _ordering: Ordering) -> u64 {
+        match self.0 {
+            FecProcessCounterKind::Emitted => crate::telemetry::FEC_SOURCE_PACKETS_SENT
+                .get()
+                .saturating_add(crate::telemetry::FEC_REPAIR_PACKETS_SENT.get()),
+            FecProcessCounterKind::Decoded => crate::telemetry::FEC_DECODED_PACKETS.get(),
+            FecProcessCounterKind::Recovered => crate::telemetry::FEC_RECOVERED_PACKETS.get(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RoutingOutcome {
     Local,
@@ -57,9 +84,9 @@ pub struct Metrics {
     pub stealth_tls13_active: AtomicU64,
 
     // FEC metrics
-    pub fec_packets_encoded: AtomicU64,
-    pub fec_packets_decoded: AtomicU64,
-    pub fec_packets_recovered: AtomicU64,
+    pub fec_packets_encoded: FecProcessCounter,
+    pub fec_packets_decoded: FecProcessCounter,
+    pub fec_packets_recovered: FecProcessCounter,
 
     // Error metrics
     pub auth_failed: AtomicU64,
@@ -98,9 +125,9 @@ impl Metrics {
             routing_icmpv6: AtomicU64::new(0),
             stealth_http3_active: AtomicU64::new(0),
             stealth_tls13_active: AtomicU64::new(0),
-            fec_packets_encoded: AtomicU64::new(0),
-            fec_packets_decoded: AtomicU64::new(0),
-            fec_packets_recovered: AtomicU64::new(0),
+            fec_packets_encoded: FecProcessCounter::new(FecProcessCounterKind::Emitted),
+            fec_packets_decoded: FecProcessCounter::new(FecProcessCounterKind::Decoded),
+            fec_packets_recovered: FecProcessCounter::new(FecProcessCounterKind::Recovered),
             auth_failed: AtomicU64::new(0),
             rate_limited: AtomicU64::new(0),
             start_time: std::time::Instant::now(),
@@ -294,21 +321,27 @@ impl Metrics {
         ));
 
         // FEC
-        out.push_str("# HELP quicfuscate_fec_packets_encoded FEC encoded packets\n");
+        out.push_str(
+            "# HELP quicfuscate_fec_packets_encoded Process-wide source plus repair datagrams actually written by the FEC layer\n",
+        );
         out.push_str("# TYPE quicfuscate_fec_packets_encoded counter\n");
         out.push_str(&format!(
             "quicfuscate_fec_packets_encoded {}\n\n",
             self.fec_packets_encoded.load(Ordering::Relaxed)
         ));
 
-        out.push_str("# HELP quicfuscate_fec_packets_decoded FEC decoded packets\n");
+        out.push_str(
+            "# HELP quicfuscate_fec_packets_decoded Process-wide original plus recovered source packets delivered by the FEC layer\n",
+        );
         out.push_str("# TYPE quicfuscate_fec_packets_decoded counter\n");
         out.push_str(&format!(
             "quicfuscate_fec_packets_decoded {}\n\n",
             self.fec_packets_decoded.load(Ordering::Relaxed)
         ));
 
-        out.push_str("# HELP quicfuscate_fec_packets_recovered FEC recovered packets\n");
+        out.push_str(
+            "# HELP quicfuscate_fec_packets_recovered Process-wide source packets reconstructed from repair data\n",
+        );
         out.push_str("# TYPE quicfuscate_fec_packets_recovered counter\n");
         out.push_str(&format!(
             "quicfuscate_fec_packets_recovered {}\n\n",
@@ -564,6 +597,22 @@ mod tests {
         assert!(output.contains("quicfuscate_bytes_in_total 1000000"));
         assert!(output.contains("quicfuscate_routing_packets_total{outcome=\"internet\"} 1"));
         assert!(output.contains("quicfuscate_routing_packets_total{outcome=\"drop_malformed\"} 1"));
+    }
+
+    #[test]
+    fn fec_metrics_project_real_process_wire_producers() {
+        let metrics = Metrics::new();
+        let emitted_before = metrics.fec_packets_encoded.load(Ordering::Relaxed);
+        let decoded_before = metrics.fec_packets_decoded.load(Ordering::Relaxed);
+        let recovered_before = metrics.fec_packets_recovered.load(Ordering::Relaxed);
+
+        crate::telemetry::fec_observe_wire_send(true, 100, 100);
+        crate::telemetry::fec_observe_wire_send(false, 0, 132);
+        crate::telemetry::fec_observe_wire_receive(false, 0, 132, 2, 2, 180);
+
+        assert!(metrics.fec_packets_encoded.load(Ordering::Relaxed) >= emitted_before + 2);
+        assert!(metrics.fec_packets_decoded.load(Ordering::Relaxed) >= decoded_before + 2);
+        assert!(metrics.fec_packets_recovered.load(Ordering::Relaxed) >= recovered_before + 2);
     }
 
     #[test]

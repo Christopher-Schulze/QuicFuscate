@@ -183,10 +183,39 @@ pub fn export_telemetry_text() -> String {
     let _ = writeln!(out, "quicfuscate_wiedemann_amx_ops {}", WIEDEMANN_AMX_OPS.get());
     let _ = writeln!(out, "quicfuscate_wiedemann_scalar_ops {}", WIEDEMANN_SCALAR_OPS.get());
     if fec {
-        let _ = writeln!(out, "quicfuscate_fec_mode {}", get(&FEC_MODE));
-        let _ = writeln!(out, "quicfuscate_fec_loss_rate {}", get(&LOSS_RATE));
+        for &(mode_id, mode_name) in &FEC_MODE_MAPPING {
+            let active = FEC_ACTIVE_CONNECTIONS_BY_MODE[mode_id as usize].load(Ordering::Relaxed);
+            let _ = writeln!(
+                out,
+                "quicfuscate_fec_active_connections{{mode=\"{mode_name}\",mode_id=\"{mode_id}\"}} {active}"
+            );
+        }
+        let _ = writeln!(
+            out,
+            "quicfuscate_fec_active_connections_total {}",
+            get(&FEC_ACTIVE_CONNECTIONS)
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_fec_effective_window_source_packets_sum {}",
+            get(&FEC_ACTIVE_WINDOW_SUM)
+        );
+        let observed_packets = FEC_OBSERVED_PACKETS.get();
+        let observed_lost_packets = FEC_OBSERVED_LOST_PACKETS.get();
+        let observed_loss_ppm = if observed_packets == 0 {
+            0
+        } else {
+            ((observed_lost_packets as u128)
+                .saturating_mul(1_000_000)
+                .checked_div(observed_packets as u128)
+                .unwrap_or(0)
+                .min(1_000_000)) as u64
+        };
+        let _ = writeln!(out, "quicfuscate_fec_observed_packets_total {observed_packets}");
+        let _ =
+            writeln!(out, "quicfuscate_fec_observed_lost_packets_total {observed_lost_packets}");
+        let _ = writeln!(out, "quicfuscate_fec_observed_loss_ppm {observed_loss_ppm}");
         let _ = writeln!(out, "quicfuscate_fec_mode_switches_total {}", get(&FEC_MODE_SWITCHES));
-        let _ = writeln!(out, "quicfuscate_fec_window {}", get(&FEC_WINDOW));
         let _ = writeln!(
             out,
             "quicfuscate_fec_switch_reason_adaptive_total {}",
@@ -206,6 +235,84 @@ pub fn export_telemetry_text() -> String {
             out,
             "quicfuscate_fec_switch_reason_disturbance_total {}",
             get(&FEC_SWITCH_REASON_DISTURBANCE)
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_fec_switch_reason_streaming_hint_total {}",
+            get(&FEC_SWITCH_REASON_STREAMING_HINT)
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_fec_source_packets_sent_total {}",
+            FEC_SOURCE_PACKETS_SENT.get()
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_fec_repair_packets_sent_total {}",
+            FEC_REPAIR_PACKETS_SENT.get()
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_fec_source_payload_bytes_sent_total {}",
+            FEC_SOURCE_PAYLOAD_BYTES_SENT.get()
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_fec_source_wire_bytes_sent_total {}",
+            FEC_SOURCE_WIRE_BYTES_SENT.get()
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_fec_repair_wire_bytes_sent_total {}",
+            FEC_REPAIR_WIRE_BYTES_SENT.get()
+        );
+        let sent_source_payload = FEC_SOURCE_PAYLOAD_BYTES_SENT.get();
+        let sent_wire =
+            FEC_SOURCE_WIRE_BYTES_SENT.get().saturating_add(FEC_REPAIR_WIRE_BYTES_SENT.get());
+        let sent_overhead_ppm = fec_wire_overhead_ppm(sent_source_payload, sent_wire);
+        let _ = writeln!(out, "quicfuscate_fec_wire_overhead_sent_ppm {sent_overhead_ppm}");
+        let _ = writeln!(
+            out,
+            "quicfuscate_fec_source_packets_received_total {}",
+            FEC_SOURCE_PACKETS_RECEIVED.get()
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_fec_repair_packets_received_total {}",
+            FEC_REPAIR_PACKETS_RECEIVED.get()
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_fec_source_payload_bytes_received_total {}",
+            FEC_SOURCE_PAYLOAD_BYTES_RECEIVED.get()
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_fec_source_wire_bytes_received_total {}",
+            FEC_SOURCE_WIRE_BYTES_RECEIVED.get()
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_fec_repair_wire_bytes_received_total {}",
+            FEC_REPAIR_WIRE_BYTES_RECEIVED.get()
+        );
+        let received_source_payload = FEC_SOURCE_PAYLOAD_BYTES_RECEIVED.get();
+        let received_wire = FEC_SOURCE_WIRE_BYTES_RECEIVED
+            .get()
+            .saturating_add(FEC_REPAIR_WIRE_BYTES_RECEIVED.get());
+        let received_overhead_ppm = fec_wire_overhead_ppm(received_source_payload, received_wire);
+        let _ = writeln!(out, "quicfuscate_fec_wire_overhead_received_ppm {received_overhead_ppm}");
+        let _ =
+            writeln!(out, "quicfuscate_fec_decoded_packets_total {}", FEC_DECODED_PACKETS.get());
+        let _ = writeln!(
+            out,
+            "quicfuscate_fec_recovered_packets_total {}",
+            FEC_RECOVERED_PACKETS.get()
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_fec_recovered_payload_bytes_total {}",
+            FEC_RECOVERED_PAYLOAD_BYTES.get()
         );
     } // end fec
 
@@ -1013,14 +1120,27 @@ pub static WIEDEMANN_USAGE: Counter = Counter::new();
 pub static WIEDEMANN_AMX_OPS: Counter = Counter::new();
 /// Wiedemann solver operations via scalar fallback.
 pub static WIEDEMANN_SCALAR_OPS: Counter = Counter::new();
-/// Current FEC mode (0=Off, 1=Auto, 2=Extreme, etc.).
-pub static FEC_MODE: AtomicU64 = AtomicU64::new(0);
-/// Current observed packet loss rate (parts per million).
-pub static LOSS_RATE: AtomicU64 = AtomicU64::new(0);
+/// Stable public FEC codec mode mapping used by every telemetry export.
+pub const FEC_MODE_MAPPING: [(u8, &str); 9] = [
+    (0, "zero"),
+    (1, "light"),
+    (2, "normal"),
+    (3, "medium"),
+    (4, "strong"),
+    (5, "extreme"),
+    (6, "ultra"),
+    (7, "fountain"),
+    (8, "streaming"),
+];
+/// Active FEC connections per stable codec mode ID in this process.
+pub static FEC_ACTIVE_CONNECTIONS_BY_MODE: [AtomicU64; FEC_MODE_MAPPING.len()] =
+    [const { AtomicU64::new(0) }; FEC_MODE_MAPPING.len()];
+/// Total active FEC connections in this process.
+pub static FEC_ACTIVE_CONNECTIONS: AtomicU64 = AtomicU64::new(0);
+/// Sum of effective source-window sizes across active FEC connections.
+pub static FEC_ACTIVE_WINDOW_SUM: AtomicU64 = AtomicU64::new(0);
 /// Total FEC mode transitions.
 pub static FEC_MODE_SWITCHES: AtomicU64 = AtomicU64::new(0);
-/// Current FEC encoding window size.
-pub static FEC_WINDOW: AtomicU64 = AtomicU64::new(0);
 /// FEC mode switches triggered by adaptive controller.
 pub static FEC_SWITCH_REASON_ADAPTIVE: AtomicU64 = AtomicU64::new(0);
 /// FEC mode switches triggered by force-on policy.
@@ -1029,6 +1149,141 @@ pub static FEC_SWITCH_REASON_FORCE_ON: AtomicU64 = AtomicU64::new(0);
 pub static FEC_SWITCH_REASON_EXTREME: AtomicU64 = AtomicU64::new(0);
 /// FEC mode switches triggered by network disturbance.
 pub static FEC_SWITCH_REASON_DISTURBANCE: AtomicU64 = AtomicU64::new(0);
+/// FEC mode switches triggered by an explicit streaming hint.
+pub static FEC_SWITCH_REASON_STREAMING_HINT: AtomicU64 = AtomicU64::new(0);
+/// Packets included in process-wide FEC loss observations.
+pub static FEC_OBSERVED_PACKETS: Counter = Counter::new();
+/// Lost packets included in process-wide FEC loss observations.
+pub static FEC_OBSERVED_LOST_PACKETS: Counter = Counter::new();
+/// Source datagrams serialized into the network-facing output buffer.
+pub static FEC_SOURCE_PACKETS_SENT: Counter = Counter::new();
+/// Repair datagrams serialized into the network-facing output buffer.
+pub static FEC_REPAIR_PACKETS_SENT: Counter = Counter::new();
+/// Original QUIC payload bytes represented by sent source datagrams.
+pub static FEC_SOURCE_PAYLOAD_BYTES_SENT: Counter = Counter::new();
+/// Source wire bytes serialized for transmission.
+pub static FEC_SOURCE_WIRE_BYTES_SENT: Counter = Counter::new();
+/// Repair wire bytes serialized for transmission.
+pub static FEC_REPAIR_WIRE_BYTES_SENT: Counter = Counter::new();
+/// Accepted source datagrams received from the network.
+pub static FEC_SOURCE_PACKETS_RECEIVED: Counter = Counter::new();
+/// Accepted repair datagrams received from the network.
+pub static FEC_REPAIR_PACKETS_RECEIVED: Counter = Counter::new();
+/// Original QUIC payload bytes represented by received source datagrams.
+pub static FEC_SOURCE_PAYLOAD_BYTES_RECEIVED: Counter = Counter::new();
+/// Accepted wire bytes received for source datagrams.
+pub static FEC_SOURCE_WIRE_BYTES_RECEIVED: Counter = Counter::new();
+/// Accepted wire bytes received for repair datagrams.
+pub static FEC_REPAIR_WIRE_BYTES_RECEIVED: Counter = Counter::new();
+/// Source packets delivered to the QUIC decoder, originals plus recoveries.
+pub static FEC_DECODED_PACKETS: Counter = Counter::new();
+/// Source packets reconstructed from repair data.
+pub static FEC_RECOVERED_PACKETS: Counter = Counter::new();
+/// Original QUIC payload bytes reconstructed from repair data.
+pub static FEC_RECOVERED_PAYLOAD_BYTES: Counter = Counter::new();
+
+fn atomic_saturating_sub(value: &AtomicU64, decrement: u64) {
+    let _ = value.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_sub(decrement))
+    });
+}
+
+fn fec_wire_overhead_ppm(source_payload_bytes: u64, wire_bytes: u64) -> u64 {
+    if source_payload_bytes == 0 {
+        return 0;
+    }
+    let overhead_bytes = wire_bytes.saturating_sub(source_payload_bytes);
+    (overhead_bytes as u128)
+        .saturating_mul(1_000_000)
+        .checked_div(source_payload_bytes as u128)
+        .unwrap_or(0)
+        .min(u64::MAX as u128) as u64
+}
+
+/// Register one telemetry-enabled FEC connection in the process aggregate.
+pub fn fec_instance_opened(mode_id: u8, effective_window: usize) {
+    let Some(mode_count) = FEC_ACTIVE_CONNECTIONS_BY_MODE.get(mode_id as usize) else {
+        return;
+    };
+    mode_count.fetch_add(1, Ordering::Relaxed);
+    FEC_ACTIVE_CONNECTIONS.fetch_add(1, Ordering::Relaxed);
+    FEC_ACTIVE_WINDOW_SUM.fetch_add(effective_window as u64, Ordering::Relaxed);
+}
+
+/// Remove one telemetry-enabled FEC connection from the process aggregate.
+pub fn fec_instance_closed(mode_id: u8, effective_window: usize) {
+    let Some(mode_count) = FEC_ACTIVE_CONNECTIONS_BY_MODE.get(mode_id as usize) else {
+        return;
+    };
+    atomic_saturating_sub(mode_count, 1);
+    atomic_saturating_sub(&FEC_ACTIVE_CONNECTIONS, 1);
+    atomic_saturating_sub(&FEC_ACTIVE_WINDOW_SUM, effective_window as u64);
+}
+
+/// Move one active connection between exact process-aggregate mode/window buckets.
+pub fn fec_instance_transition(
+    old_mode_id: u8,
+    old_effective_window: usize,
+    new_mode_id: u8,
+    new_effective_window: usize,
+) {
+    let Some(old_mode_count) = FEC_ACTIVE_CONNECTIONS_BY_MODE.get(old_mode_id as usize) else {
+        return;
+    };
+    let Some(new_mode_count) = FEC_ACTIVE_CONNECTIONS_BY_MODE.get(new_mode_id as usize) else {
+        return;
+    };
+    if old_mode_id != new_mode_id {
+        atomic_saturating_sub(old_mode_count, 1);
+        new_mode_count.fetch_add(1, Ordering::Relaxed);
+    }
+    if old_effective_window != new_effective_window {
+        atomic_saturating_sub(&FEC_ACTIVE_WINDOW_SUM, old_effective_window as u64);
+        FEC_ACTIVE_WINDOW_SUM.fetch_add(new_effective_window as u64, Ordering::Relaxed);
+    }
+}
+
+/// Add one loss-controller sample to the process aggregate.
+pub fn fec_observe_loss(lost_packets: u64, observed_packets: u64) {
+    FEC_OBSERVED_LOST_PACKETS.inc_by(lost_packets.min(observed_packets));
+    FEC_OBSERVED_PACKETS.inc_by(observed_packets);
+}
+
+/// Record one datagram only after the network-facing serializer accepts it.
+pub fn fec_observe_wire_send(systematic: bool, source_payload_bytes: u64, wire_bytes: u64) {
+    if systematic {
+        FEC_SOURCE_PACKETS_SENT.inc();
+        FEC_SOURCE_PAYLOAD_BYTES_SENT.inc_by(source_payload_bytes);
+        FEC_SOURCE_WIRE_BYTES_SENT.inc_by(wire_bytes);
+    } else {
+        FEC_REPAIR_PACKETS_SENT.inc();
+        FEC_REPAIR_WIRE_BYTES_SENT.inc_by(wire_bytes);
+    }
+}
+
+/// Record one accepted network datagram and its decoder output.
+#[allow(clippy::too_many_arguments)]
+pub fn fec_observe_wire_receive(
+    systematic: bool,
+    source_payload_bytes: u64,
+    wire_bytes: u64,
+    decoded_packets: u64,
+    recovered_packets: u64,
+    recovered_payload_bytes: u64,
+) {
+    if systematic {
+        FEC_SOURCE_PACKETS_RECEIVED.inc();
+        FEC_SOURCE_PAYLOAD_BYTES_RECEIVED.inc_by(source_payload_bytes);
+        FEC_SOURCE_WIRE_BYTES_RECEIVED.inc_by(wire_bytes);
+    } else {
+        FEC_REPAIR_PACKETS_RECEIVED.inc();
+        FEC_REPAIR_WIRE_BYTES_RECEIVED.inc_by(wire_bytes);
+    }
+    FEC_DECODED_PACKETS.inc_by(decoded_packets);
+    FEC_RECOVERED_PACKETS.inc_by(recovered_packets);
+    FEC_RECOVERED_PAYLOAD_BYTES.inc_by(recovered_payload_bytes);
+}
+
 /// FEC buffer overflow events.
 pub static FEC_OVERFLOWS: AtomicU64 = AtomicU64::new(0);
 /// Total DNS resolution errors.
@@ -1292,12 +1547,6 @@ pub static PACKETS_RECEIVED: Counter = Counter::new();
 pub static PACKETS_LOST: Counter = Counter::new();
 /// Total QUIC connection path migrations.
 pub static PATH_MIGRATIONS: Counter = Counter::new();
-/// Total FEC-encoded packets emitted.
-pub static FEC_PACKETS_ENCODED: Counter = Counter::new();
-/// Total FEC-decoded packets processed.
-pub static FEC_PACKETS_DECODED: Counter = Counter::new();
-/// Total packets recovered via FEC repair.
-pub static FEC_PACKETS_RECOVERED: Counter = Counter::new();
 /// Total stealth-encoded packets produced.
 pub static ENCODED_PACKETS: Counter = Counter::new();
 /// Total stealth-decoded packets consumed.
@@ -1604,5 +1853,37 @@ mod tests {
             let parts: Vec<&str> = line.splitn(2, ' ').collect();
             assert_eq!(parts.len(), 2, "metric line must have 'name value' format: {}", line);
         }
+    }
+
+    #[test]
+    fn fec_export_declares_exact_mode_mapping_and_truthful_units() {
+        let text = export_telemetry_text();
+
+        for &(mode_id, mode_name) in &FEC_MODE_MAPPING {
+            assert!(
+                text.contains(&format!(
+                    "quicfuscate_fec_active_connections{{mode=\"{mode_name}\",mode_id=\"{mode_id}\"}} "
+                )),
+                "missing FEC mode mapping for {mode_name}={mode_id}"
+            );
+        }
+        for metric in [
+            "quicfuscate_fec_observed_packets_total ",
+            "quicfuscate_fec_observed_lost_packets_total ",
+            "quicfuscate_fec_observed_loss_ppm ",
+            "quicfuscate_fec_source_packets_sent_total ",
+            "quicfuscate_fec_repair_packets_sent_total ",
+            "quicfuscate_fec_source_payload_bytes_sent_total ",
+            "quicfuscate_fec_source_wire_bytes_sent_total ",
+            "quicfuscate_fec_repair_wire_bytes_sent_total ",
+            "quicfuscate_fec_wire_overhead_sent_ppm ",
+            "quicfuscate_fec_decoded_packets_total ",
+            "quicfuscate_fec_recovered_packets_total ",
+        ] {
+            assert!(text.contains(metric), "missing FEC metric {metric}");
+        }
+        assert!(!text.contains("quicfuscate_fec_loss_rate "));
+        assert!(!text.contains("quicfuscate_fec_mode "));
+        assert!(!text.contains("quicfuscate_fec_window "));
     }
 }

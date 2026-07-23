@@ -643,6 +643,9 @@ mod transition_tests;
 #[cfg(test)]
 mod adaptive_tests;
 
+#[cfg(test)]
+mod policy_tests;
+
 // ============================================================================
 // Transport Integration: FecTransportObserver
 // Collects lightweight transport telemetry (ACK delay, ECN) and exposes a
@@ -1461,6 +1464,7 @@ impl Clone for FecPacket {
 
 /// Forward error correction operating mode controlling redundancy level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, clap::ValueEnum)]
+#[repr(u8)]
 pub enum FecMode {
     /// No FEC - zero overhead passthrough for loss-free links.
     Zero,
@@ -1482,8 +1486,48 @@ pub enum FecMode {
     Streaming,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FecControlMode {
+impl FecMode {
+    /// Stable public codec-mode order used by telemetry and runtime evidence.
+    pub const ALL: [Self; 9] = [
+        Self::Zero,
+        Self::Light,
+        Self::Normal,
+        Self::Medium,
+        Self::Strong,
+        Self::Extreme,
+        Self::Ultra,
+        Self::Fountain,
+        Self::Streaming,
+    ];
+
+    /// Stable public numeric telemetry ID.
+    pub const fn telemetry_id(self) -> u8 {
+        self as u8
+    }
+
+    /// Stable public telemetry label.
+    pub const fn telemetry_name(self) -> &'static str {
+        match self {
+            Self::Zero => "zero",
+            Self::Light => "light",
+            Self::Normal => "normal",
+            Self::Medium => "medium",
+            Self::Strong => "strong",
+            Self::Extreme => "extreme",
+            Self::Ultra => "ultra",
+            Self::Fountain => "fountain",
+            Self::Streaming => "streaming",
+        }
+    }
+}
+
+/// Operator-owned FEC control policy, independent from the active codec mode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FecControlPolicy {
+    /// Keep the connection in raw Zero mode for its full lifetime.
+    Off,
+    /// Allow the adaptive controller to select the cheapest sufficient codec.
+    #[default]
     Auto,
 }
 
@@ -3105,7 +3149,7 @@ pub struct AdaptiveFec {
     active_mode: FecMode,
     mode_manager: Arc<Mutex<internal::ModeManager>>,
     mem_pool: Arc<MemoryPool>,
-    pending_target: Option<FecProtectionTarget>,
+    pending_transition: Option<PendingFecTransition>,
     window_complete: bool,
     stream_every: usize,
     _stream_every_base: usize,
@@ -3119,7 +3163,7 @@ pub struct AdaptiveFec {
     emitted_ids: std::collections::HashSet<u64>,
     emitted_order: VecDeque<u64>,
     loss_estimator: LossEstimator,
-    control_mode: FecControlMode,
+    control_policy: FecControlPolicy,
     force_on: bool,
     simd_enabled: bool,
     simd_level: SimdLevel,
@@ -3133,6 +3177,7 @@ pub struct AdaptiveFec {
     /// Current RTT estimate in milliseconds (0 = unknown/unset).
     /// Fed by transport via `set_rtt_hint()` and used to scale `stream_every`.
     rtt_ms: u32,
+    telemetry: FecTelemetrySnapshot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -3151,6 +3196,7 @@ enum FecSwitchReason {
     ForceOnPolicy,
     ExtremeLossPolicy,
     DisturbancePolicy,
+    StreamingHint,
 }
 
 impl FecSwitchReason {
@@ -3169,6 +3215,93 @@ impl FecSwitchReason {
             FecSwitchReason::DisturbancePolicy => {
                 crate::telemetry::FEC_SWITCH_REASON_DISTURBANCE.fetch_add(1, Ordering::Relaxed);
             }
+            FecSwitchReason::StreamingHint => {
+                crate::telemetry::FEC_SWITCH_REASON_STREAMING_HINT.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingFecTransition {
+    target: FecProtectionTarget,
+    reason: FecSwitchReason,
+}
+
+/// Connection-local FEC evidence. Packet counters remain zero when runtime
+/// telemetry collection was disabled before the connection was created.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FecTelemetrySnapshot {
+    /// Whether packet-level collection is enabled for this connection.
+    pub enabled: bool,
+    /// Operator-owned control policy.
+    pub control_policy: FecControlPolicy,
+    /// Currently committed codec mode.
+    pub active_mode: FecMode,
+    /// Effective source-packet window for the committed mode.
+    pub effective_window: usize,
+    /// Cumulative packets covered by loss-controller observations.
+    pub observed_packets: u64,
+    /// Cumulative lost packets covered by loss-controller observations.
+    pub observed_lost_packets: u64,
+    /// Committed codec transitions.
+    pub mode_transitions: u64,
+    /// Source datagrams serialized into the network-facing output buffer.
+    pub source_packets_sent: u64,
+    /// Repair datagrams serialized into the network-facing output buffer.
+    pub repair_packets_sent: u64,
+    /// Original QUIC payload bytes represented by sent source datagrams.
+    pub source_payload_bytes_sent: u64,
+    /// Source wire bytes serialized for transmission.
+    pub source_wire_bytes_sent: u64,
+    /// Repair wire bytes serialized for transmission.
+    pub repair_wire_bytes_sent: u64,
+    /// Accepted source datagrams received.
+    pub source_packets_received: u64,
+    /// Accepted repair datagrams received.
+    pub repair_packets_received: u64,
+    /// Original QUIC payload bytes represented by received source datagrams.
+    pub source_payload_bytes_received: u64,
+    /// Accepted source wire bytes received.
+    pub source_wire_bytes_received: u64,
+    /// Accepted repair wire bytes received.
+    pub repair_wire_bytes_received: u64,
+    /// Source packets delivered to QUIC, originals plus recoveries.
+    pub decoded_packets: u64,
+    /// Source packets reconstructed from repair data.
+    pub recovered_packets: u64,
+    /// Original QUIC payload bytes reconstructed from repair data.
+    pub recovered_payload_bytes: u64,
+}
+
+impl FecTelemetrySnapshot {
+    fn new(
+        enabled: bool,
+        control_policy: FecControlPolicy,
+        active_mode: FecMode,
+        effective_window: usize,
+    ) -> Self {
+        Self {
+            enabled,
+            control_policy,
+            active_mode,
+            effective_window,
+            observed_packets: 0,
+            observed_lost_packets: 0,
+            mode_transitions: 0,
+            source_packets_sent: 0,
+            repair_packets_sent: 0,
+            source_payload_bytes_sent: 0,
+            source_wire_bytes_sent: 0,
+            repair_wire_bytes_sent: 0,
+            source_packets_received: 0,
+            repair_packets_received: 0,
+            source_payload_bytes_received: 0,
+            source_wire_bytes_received: 0,
+            repair_wire_bytes_received: 0,
+            decoded_packets: 0,
+            recovered_packets: 0,
+            recovered_payload_bytes: 0,
         }
     }
 }
@@ -3238,6 +3371,7 @@ impl FecAmbientInputs {
 
 struct FecRuntimePlan {
     mode: FecMode,
+    control_policy: FecControlPolicy,
     force_on: bool,
     k: usize,
     n: usize,
@@ -3255,17 +3389,26 @@ struct FecRuntimePlan {
 
 impl FecRuntimePlan {
     fn resolve(config: &FecConfig, ambient: &FecAmbientInputs) -> Self {
+        let control_policy = config.control_policy;
+        let configured_initial_mode = if control_policy == FecControlPolicy::Off {
+            FecMode::Zero
+        } else {
+            config.initial_mode
+        };
         let mut initial_target = target_from_mode(
-            config.initial_mode,
-            config.window_sizes.get(&config.initial_mode).copied().unwrap_or(64),
+            configured_initial_mode,
+            config.window_sizes.get(&configured_initial_mode).copied().unwrap_or(64),
         );
-        if config.force_on && initial_target.family == FecBackendFamily::Zero {
+        if control_policy == FecControlPolicy::Auto
+            && config.force_on
+            && initial_target.family == FecBackendFamily::Zero
+        {
             initial_target = target_from_mode(FecMode::Normal, 64);
         }
-        let force_on = config.force_on;
+        let force_on = control_policy == FecControlPolicy::Auto && config.force_on;
         let (mode, requested_k, requested_n) = internal::ModeManager::params_for_target(
             initial_target,
-            config.window_sizes.get(&config.initial_mode).copied().unwrap_or(64),
+            config.window_sizes.get(&configured_initial_mode).copied().unwrap_or(64),
             ambient.runtime_policy.auto_gf4_enabled,
         );
         let mem_pool = Arc::clone(&ambient.mem_pool);
@@ -3324,6 +3467,7 @@ impl FecRuntimePlan {
 
         Self {
             mode,
+            control_policy,
             force_on,
             k,
             n,
@@ -3354,6 +3498,7 @@ impl AdaptiveFec {
     fn from_runtime_plan(config: FecConfig, plan: FecRuntimePlan) -> Self {
         let FecRuntimePlan {
             mode,
+            control_policy,
             force_on,
             k,
             n,
@@ -3369,7 +3514,9 @@ impl AdaptiveFec {
             extreme_window,
         } = plan;
 
-        Self {
+        let telemetry_enabled =
+            crate::telemetry::TELEMETRY_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
+        let fec = Self {
             // InterleavedEncoder for burst loss protection
             encoder: Arc::new(Mutex::new(internal::InterleavedEncoder::new_with_policy(
                 mode,
@@ -3393,7 +3540,7 @@ impl AdaptiveFec {
                 &runtime_policy,
             ))),
             mem_pool,
-            pending_target: None,
+            pending_transition: None,
             window_complete: false,
             stream_every,
             _stream_every_base: base_stream_every,
@@ -3407,7 +3554,7 @@ impl AdaptiveFec {
             emitted_ids: std::collections::HashSet::new(),
             emitted_order: VecDeque::new(),
             loss_estimator,
-            control_mode: FecControlMode::Auto,
+            control_policy,
             force_on,
             simd_enabled: false,
             simd_level: SimdLevel::None,
@@ -3417,7 +3564,12 @@ impl AdaptiveFec {
             fountain_window,
             extreme_window,
             rtt_ms: 0,
+            telemetry: FecTelemetrySnapshot::new(telemetry_enabled, control_policy, mode, k),
+        };
+        if telemetry_enabled {
+            crate::telemetry::fec_instance_opened(mode.telemetry_id(), k);
         }
+        fec
     }
 
     /// **SEAMLESS** Process outgoing packet through FEC encoder with smooth mode transitions.
@@ -3656,19 +3808,32 @@ impl AdaptiveFec {
         }
     }
 
-    /// Queue an adaptive target and commit it only between complete source blocks.
+    /// Queue a target and commit it only between complete source blocks.
+    #[cfg(test)]
     fn transition_to_target(&mut self, target: FecProtectionTarget) {
-        self.pending_target = Some(target);
+        self.transition_to_target_with_reason(target, FecSwitchReason::Adaptive);
+    }
+
+    fn transition_to_target_with_reason(
+        &mut self,
+        target: FecProtectionTarget,
+        reason: FecSwitchReason,
+    ) {
+        if self.control_policy == FecControlPolicy::Off {
+            return;
+        }
+        self.pending_transition = Some(PendingFecTransition { target, reason });
         self.commit_pending_target_if_ready();
     }
 
     fn commit_pending_target_if_ready(&mut self) {
-        let Some(target) = self.pending_target else {
+        let Some(pending) = self.pending_transition else {
             return;
         };
         if self.encoder.lock().packets_in_window() != 0 {
             return;
         }
+        let target = pending.target;
         let current_window = self.mode_manager.lock().current_window().max(1);
         let (mode, requested_k, requested_n) = internal::ModeManager::params_for_target(
             target,
@@ -3682,6 +3847,12 @@ impl AdaptiveFec {
             self.interleave_depth,
             self.runtime_policy.interleave_enabled,
         );
+        let old_mode = self.active_mode;
+        let old_window = self.telemetry.effective_window;
+        self.pending_transition = None;
+        if old_mode == mode && old_window == k {
+            return;
+        }
         self.encoder = Arc::new(Mutex::new(internal::InterleavedEncoder::new_with_policy(
             mode,
             k,
@@ -3696,12 +3867,28 @@ impl AdaptiveFec {
             depth,
             &self.runtime_policy,
         )));
-        self.pending_target = None;
         self.active_mode = mode;
         self.streaming_mode = mode == FecMode::Streaming;
         self.window_complete = false;
         let mut mode_manager = self.mode_manager.lock();
         mode_manager.force_state(mode, k);
+        drop(mode_manager);
+
+        self.telemetry.active_mode = mode;
+        self.telemetry.effective_window = k;
+        if self.telemetry.enabled {
+            crate::telemetry::fec_instance_transition(
+                old_mode.telemetry_id(),
+                old_window,
+                mode.telemetry_id(),
+                k,
+            );
+        }
+        if old_mode != mode {
+            self.telemetry.mode_transitions = self.telemetry.mode_transitions.saturating_add(1);
+            crate::telemetry::FEC_MODE_SWITCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            pending.reason.observe();
+        }
     }
 
     /// **GRADUAL MODE SWITCHING**: Initiate seamless transition to new mode
@@ -3712,12 +3899,18 @@ impl AdaptiveFec {
 
     /// Adjust streaming repair emission interval (every N systematic packets). Clamped to [1, 32]
     pub(crate) fn set_stream_every(&mut self, every: usize) {
+        if self.control_policy == FecControlPolicy::Off {
+            return;
+        }
         let clamped = every.clamp(1, 32);
         self.stream_every_override = Some(clamped);
         self.set_stream_every_internal(clamped);
     }
     /// Set redundancy hint in parts-per-million (100_000 = 1.0x). Influences streaming burst.
     pub(crate) fn set_redundancy_ppm(&mut self, ppm: u32) {
+        if self.control_policy == FecControlPolicy::Off {
+            return;
+        }
         self.red_ppm_hint = ppm;
     }
 
@@ -4120,6 +4313,10 @@ impl AdaptiveFec {
         cwnd_trend: f32,
         throughput_trend: f32,
     ) {
+        if self.control_policy == FecControlPolicy::Off {
+            self.red_ppm_hint = 0;
+            return;
+        }
         // Combine signals: negative sum = bandwidth scarce, positive = plentiful
         let signal = rtt_trend + cwnd_trend + throughput_trend;
 
@@ -4170,6 +4367,18 @@ impl AdaptiveFec {
 
     /// Report observed packet loss to update the estimator and drive adaptive mode switching.
     pub fn report_loss(&mut self, lost: usize, total: usize) {
+        let observed_lost = lost.min(total) as u64;
+        let observed_total = total as u64;
+        if self.telemetry.enabled {
+            self.telemetry.observed_lost_packets =
+                self.telemetry.observed_lost_packets.saturating_add(observed_lost);
+            self.telemetry.observed_packets =
+                self.telemetry.observed_packets.saturating_add(observed_total);
+            crate::telemetry::fec_observe_loss(observed_lost, observed_total);
+        }
+        if self.control_policy == FecControlPolicy::Off {
+            return;
+        }
         // Update estimator with current observation and drive mode via smoothed loss
         self.loss_estimator.report(lost, total);
         let estimated_loss = self.loss_estimator.smoothed_loss();
@@ -4183,6 +4392,88 @@ impl AdaptiveFec {
     /// Return the currently active FEC protection mode.
     pub fn current_mode(&self) -> FecMode {
         self.active_mode
+    }
+
+    /// Return the immutable operator-owned control policy.
+    pub fn control_policy(&self) -> FecControlPolicy {
+        self.control_policy
+    }
+
+    /// Return exact connection-local FEC evidence.
+    pub fn telemetry_snapshot(&self) -> FecTelemetrySnapshot {
+        self.telemetry
+    }
+
+    pub(crate) fn telemetry_enabled(&self) -> bool {
+        self.telemetry.enabled
+    }
+
+    pub(crate) fn observe_wire_send(
+        &mut self,
+        systematic: bool,
+        source_payload_bytes: usize,
+        wire_bytes: usize,
+    ) {
+        if !self.telemetry.enabled {
+            return;
+        }
+        if systematic {
+            self.telemetry.source_packets_sent =
+                self.telemetry.source_packets_sent.saturating_add(1);
+            self.telemetry.source_payload_bytes_sent = self
+                .telemetry
+                .source_payload_bytes_sent
+                .saturating_add(source_payload_bytes as u64);
+            self.telemetry.source_wire_bytes_sent =
+                self.telemetry.source_wire_bytes_sent.saturating_add(wire_bytes as u64);
+        } else {
+            self.telemetry.repair_packets_sent =
+                self.telemetry.repair_packets_sent.saturating_add(1);
+            self.telemetry.repair_wire_bytes_sent =
+                self.telemetry.repair_wire_bytes_sent.saturating_add(wire_bytes as u64);
+        }
+        crate::telemetry::fec_observe_wire_send(
+            systematic,
+            source_payload_bytes as u64,
+            wire_bytes as u64,
+        );
+    }
+
+    pub(crate) fn observe_wire_receive(&mut self, report: wire::WireReceiveReport) {
+        if !self.telemetry.enabled {
+            return;
+        }
+        if report.systematic {
+            self.telemetry.source_packets_received =
+                self.telemetry.source_packets_received.saturating_add(1);
+            self.telemetry.source_payload_bytes_received = self
+                .telemetry
+                .source_payload_bytes_received
+                .saturating_add(report.source_payload_bytes as u64);
+            self.telemetry.source_wire_bytes_received =
+                self.telemetry.source_wire_bytes_received.saturating_add(report.wire_bytes as u64);
+        } else {
+            self.telemetry.repair_packets_received =
+                self.telemetry.repair_packets_received.saturating_add(1);
+            self.telemetry.repair_wire_bytes_received =
+                self.telemetry.repair_wire_bytes_received.saturating_add(report.wire_bytes as u64);
+        }
+        self.telemetry.decoded_packets =
+            self.telemetry.decoded_packets.saturating_add(report.decoded_packets as u64);
+        self.telemetry.recovered_packets =
+            self.telemetry.recovered_packets.saturating_add(report.recovered_packets as u64);
+        self.telemetry.recovered_payload_bytes = self
+            .telemetry
+            .recovered_payload_bytes
+            .saturating_add(report.recovered_payload_bytes as u64);
+        crate::telemetry::fec_observe_wire_receive(
+            report.systematic,
+            report.source_payload_bytes as u64,
+            report.wire_bytes as u64,
+            report.decoded_packets as u64,
+            report.recovered_packets as u64,
+            report.recovered_payload_bytes as u64,
+        );
     }
 
     pub fn wire_profile(&mut self, epoch: u32) -> Result<wire::WireProfile, wire::WireError> {
@@ -4212,13 +4503,14 @@ impl AdaptiveFec {
 
     /// Returns true while a target is waiting for the current source block to complete.
     pub fn is_transitioning(&self) -> bool {
-        self.pending_target.is_some()
+        self.pending_transition.is_some()
     }
 
     /// Force a specific FEC mode for testing (bypasses adaptive controller).
     #[cfg(test)]
     pub fn force_mode_for_test(&mut self, mode: FecMode) {
         self.active_mode = mode;
+        self.telemetry.active_mode = mode;
         self.mode_manager =
             Arc::new(Mutex::new(internal::ModeManager::with_switch_threshold(mode, 0.02)));
     }
@@ -4276,53 +4568,34 @@ impl AdaptiveFec {
             mode_mgr.force_state(new_mode, new_window);
         }
 
-        // Telemetry: track mode and window
-        crate::telemetry::FEC_MODE.store(new_mode as u64, std::sync::atomic::Ordering::Relaxed);
-        crate::telemetry::FEC_WINDOW.store(new_window as u64, std::sync::atomic::Ordering::Relaxed);
-        if switched {
-            crate::telemetry::FEC_MODE_SWITCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            reason.observe();
-        }
-        // Decoder path telemetry hint
-        // Decoder path hint could be wired into telemetry counters if available
-
         if let Some(stream_every) = controller_target.stream_every {
             self.set_stream_every_internal(stream_every);
         }
 
         // Auto control tuning: set best parameters live (env toggles + cached fields)
-        if self.control_mode == FecControlMode::Auto {
+        if self.control_policy == FecControlPolicy::Auto {
             self.apply_auto_tuning(k, estimated_loss, controller_target);
         }
 
         if switched {
-            self.transition_to_target(controller_target);
+            self.transition_to_target_with_reason(controller_target, reason);
         }
     }
 
     pub(crate) fn force_streaming_mode(&mut self) {
+        if self.control_policy == FecControlPolicy::Off {
+            return;
+        }
         let target = target_from_mode(FecMode::Streaming, 64);
         let target_mode = mode_for_target(target, self.runtime_policy.auto_gf4_enabled);
-        let previous_mode = self.active_mode;
-        self.transition_to_target(target);
+        self.transition_to_target_with_reason(target, FecSwitchReason::StreamingHint);
         if self.active_mode != target_mode {
             log::debug!(
                 "Queued streaming mode until the active FEC source block reaches its boundary"
             );
             return;
         }
-        if previous_mode != target_mode {
-            let (_, k, _n) = internal::ModeManager::params_for_target(
-                target,
-                64,
-                self.runtime_policy.auto_gf4_enabled,
-            );
-            crate::telemetry::FEC_MODE
-                .store(target_mode as u64, std::sync::atomic::Ordering::Relaxed);
-            crate::telemetry::FEC_WINDOW.store(k as u64, std::sync::atomic::Ordering::Relaxed);
-            crate::telemetry::FEC_MODE_SWITCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            log::info!("Forced switch to streaming mode for minimal latency");
-        }
+        log::info!("Forced switch to streaming mode for minimal latency");
     }
 
     fn select_simd_level_from_features<F>(has_feature: F) -> SimdLevel
@@ -4462,11 +4735,24 @@ impl AdaptiveFec {
     }
 }
 
+impl Drop for AdaptiveFec {
+    fn drop(&mut self) {
+        if self.telemetry.enabled {
+            crate::telemetry::fec_instance_closed(
+                self.active_mode.telemetry_id(),
+                self.telemetry.effective_window,
+            );
+        }
+    }
+}
+
 // --- FEC Configuration ---
 
 #[derive(Debug, Clone)]
 /// Configuration for Adaptive FEC behavior and controller settings.
 pub struct FecConfig {
+    /// Operator-owned control policy. This is never inferred from the active codec mode.
+    pub control_policy: FecControlPolicy,
     /// FEC window size per mode (source packets per block).
     pub window_sizes: HashMap<FecMode, usize>,
     /// EMA smoothing factor for loss estimation (0..1).
@@ -4529,6 +4815,10 @@ impl FecConfig {
         };
 
         Self {
+            control_policy: match section.mode {
+                crate::engine::FecMode::Off => FecControlPolicy::Off,
+                crate::engine::FecMode::Auto => FecControlPolicy::Auto,
+            },
             window_sizes: Self::product_windows(section),
             lambda: 0.15,
             burst_window: 16,
@@ -4547,11 +4837,11 @@ impl FecConfig {
         Self::from_engine_section(&crate::engine::FecSection::default())
     }
 
-    /// Override initial mode and force_on flag from the engine-level FEC mode enum.
+    /// Override operator policy and its compatible bootstrap mode.
     pub fn apply_engine_mode(&mut self, mode: crate::engine::FecMode) {
-        self.initial_mode = match mode {
-            crate::engine::FecMode::Off => FecMode::Zero,
-            crate::engine::FecMode::Auto => FecMode::Normal,
+        (self.control_policy, self.initial_mode) = match mode {
+            crate::engine::FecMode::Off => (FecControlPolicy::Off, FecMode::Zero),
+            crate::engine::FecMode::Auto => (FecControlPolicy::Auto, FecMode::Normal),
         };
         self.force_on = false;
     }
@@ -4564,6 +4854,8 @@ impl FecConfig {
         }
         #[derive(serde::Deserialize)]
         struct Adaptive {
+            #[serde(alias = "policy")]
+            control_policy: Option<String>,
             lambda: Option<f32>,
             burst_window: Option<usize>,
             hysteresis: Option<f32>,
@@ -4610,7 +4902,18 @@ impl FecConfig {
             "streaming" => FecMode::Streaming,
             _ => FecMode::Normal,
         };
+        let control_policy = match af.control_policy.as_deref().map(str::trim) {
+            None | Some("") | Some("auto") => FecControlPolicy::Auto,
+            Some("off") => FecControlPolicy::Off,
+            Some(value) => {
+                return Err(format!(
+                    "adaptive_fec.control_policy must be 'off' or 'auto', got '{value}'"
+                )
+                .into());
+            }
+        };
         Ok(FecConfig {
+            control_policy,
             lambda: af.lambda.unwrap_or(0.1),
             burst_window: af.burst_window.unwrap_or(20),
             hysteresis: af.hysteresis.unwrap_or(0.02),
@@ -4634,6 +4937,7 @@ impl FecConfig {
 impl Default for FecConfig {
     fn default() -> Self {
         Self {
+            control_policy: FecControlPolicy::Auto,
             lambda: 0.1,
             burst_window: 20,
             hysteresis: 0.02,
@@ -4651,6 +4955,9 @@ impl Default for FecConfig {
 impl FecConfig {
     /// Validate all configuration parameters, returning an error message on invalid values.
     pub fn validate(&self) -> Result<(), String> {
+        if self.control_policy == FecControlPolicy::Off && self.force_on {
+            return Err("force_on cannot be enabled while FEC control policy is off".into());
+        }
         if !(0.0..=1.0).contains(&self.lambda) {
             return Err("lambda must be between 0 and 1".into());
         }

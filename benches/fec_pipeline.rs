@@ -13,7 +13,7 @@
 
 use aligned_box::AlignedBox;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use quicfuscate::fec::{wire, AdaptiveFec, FecConfig, FecMode, FecPacket};
+use quicfuscate::fec::{wire, AdaptiveFec, FecConfig, FecControlPolicy, FecMode, FecPacket};
 use quicfuscate::optimize::global_pool;
 use std::sync::Arc;
 
@@ -189,6 +189,42 @@ fn bench_fec_send_reuse_hot_path(c: &mut Criterion) {
                 },
             );
         }
+    }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// 1d. Operator-policy fast path: hard Off under loss vs clean Auto/Zero
+// ---------------------------------------------------------------------------
+
+fn bench_fec_off_policy_fast_path(c: &mut Criterion) {
+    let mut group = c.benchmark_group("fec_off_policy_fast_path");
+    group.throughput(Throughput::Bytes(1400));
+
+    for &(name, control_policy, lost) in &[
+        ("auto_zero_clean", FecControlPolicy::Auto, 0usize),
+        ("off_under_total_loss", FecControlPolicy::Off, 1usize),
+    ] {
+        group.bench_function(name, |b| {
+            let pool = global_pool();
+            let config = FecConfig {
+                control_policy,
+                initial_mode: FecMode::Zero,
+                ..FecConfig::product_default()
+            };
+            let mut fec = AdaptiveFec::new(config);
+            let mut output = Vec::with_capacity(1);
+            let mut id = 0u64;
+
+            b.iter(|| {
+                fec.report_loss(lost, 1);
+                let packet = mk_src_packet(id, 1400, &pool);
+                fec.on_send_into(packet, &mut output);
+                black_box(&output);
+                id = id.wrapping_add(1);
+            });
+        });
     }
 
     group.finish();
@@ -607,6 +643,7 @@ criterion_group!(
     bench_fec_encode_pipeline,
     bench_fec_systematic_hot_path,
     bench_fec_send_reuse_hot_path,
+    bench_fec_off_policy_fast_path,
     bench_fec_decode_pipeline,
     bench_fec_decode_compat_alloc,
     bench_fec_mode_transition,

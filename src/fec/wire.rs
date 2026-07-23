@@ -246,6 +246,30 @@ pub struct ParsedWirePacket<'a> {
     pub payload: &'a [u8],
 }
 
+/// Exact accepted-wire and decoder-output facts for one received datagram.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WireReceiveReport {
+    pub systematic: bool,
+    pub source_payload_bytes: usize,
+    pub wire_bytes: usize,
+    pub decoded_packets: usize,
+    pub recovered_packets: usize,
+    pub recovered_payload_bytes: usize,
+}
+
+impl WireReceiveReport {
+    pub fn raw_source(payload_bytes: usize) -> Self {
+        Self {
+            systematic: true,
+            source_payload_bytes: payload_bytes,
+            wire_bytes: payload_bytes,
+            decoded_packets: 1,
+            recovered_packets: 0,
+            recovered_payload_bytes: 0,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WireError {
     BufferTooShort,
@@ -511,21 +535,22 @@ impl ReceiveWindow {
         &mut self,
         packet: FecPacket,
         output: &mut Vec<FecPacket>,
-    ) -> Result<(), WireError> {
+    ) -> Result<Option<usize>, WireError> {
         let global_id = if self.profile.codec == WireCodec::Fountain {
             self.window_start().saturating_add(packet.id)
         } else {
             packet.id
         };
         if !self.delivered.insert(global_id) {
-            return Ok(());
+            return Ok(None);
         }
         let symbol = packet.payload_slice().ok_or(WireError::InvalidSourceSymbolLength)?;
         let payload = source_symbol_payload(symbol)?;
+        let payload_len = payload.len();
         let mut recovered = FecPacket::from_block(global_id, payload, Arc::clone(&self.mem_pool));
         recovered.seq = global_id;
         output.push(recovered);
-        Ok(())
+        Ok(Some(payload_len))
     }
 
     fn streaming_repair_has_missing_source(&self, meta: WirePacketMeta) -> bool {
@@ -549,20 +574,26 @@ impl ReceiveWindow {
         meta: WirePacketMeta,
         payload: &[u8],
         output: &mut Vec<FecPacket>,
-    ) -> Result<(), WireError> {
+    ) -> Result<WireReceiveReport, WireError> {
+        let mut report = WireReceiveReport {
+            systematic: meta.systematic,
+            source_payload_bytes: if meta.systematic { payload.len() } else { 0 },
+            wire_bytes: HEADER_LEN + payload.len(),
+            ..WireReceiveReport::default()
+        };
         let systematic = meta.systematic;
         if systematic && self.delivered.contains(&meta.sequence) {
-            return Ok(());
+            return Ok(report);
         }
         if !systematic
             && meta.profile.codec == WireCodec::StreamingGf8
             && !self.streaming_repair_has_missing_source(meta)
         {
-            return Ok(());
+            return Ok(report);
         }
         let repair_key = (meta.sequence, meta.repair_index, meta.block_index);
         if !systematic && self.seen_repairs.contains(&repair_key) {
-            return Ok(());
+            return Ok(report);
         }
         let packet = if systematic {
             self.source_packet(meta, payload)?
@@ -579,6 +610,7 @@ impl ReceiveWindow {
                 FecPacket::from_block(meta.sequence, payload, Arc::clone(&self.mem_pool));
             original.seq = meta.sequence;
             output.push(original);
+            report.decoded_packets += 1;
         }
 
         if self.decoder.recovery_needed() {
@@ -588,10 +620,14 @@ impl ReceiveWindow {
                 self.decoder.get_partial_result()
             };
             for packet in recovered {
-                self.emit_recovered(packet, output)?;
+                if let Some(payload_len) = self.emit_recovered(packet, output)? {
+                    report.decoded_packets += 1;
+                    report.recovered_packets += 1;
+                    report.recovered_payload_bytes += payload_len;
+                }
             }
         }
-        Ok(())
+        Ok(report)
     }
 }
 
@@ -614,7 +650,7 @@ impl WireFecReceiver {
         &mut self,
         datagram: &[u8],
         output: &mut Vec<FecPacket>,
-    ) -> Result<(), WireError> {
+    ) -> Result<WireReceiveReport, WireError> {
         output.clear();
         let parsed = parse_packet(datagram)?;
         if self.windows.iter().any(|window| {
@@ -876,7 +912,7 @@ mod tests {
         };
         let repair_payload = repair.payload_slice().expect("repair payload");
         let written = write_packet(repair_meta, repair_payload, &mut wire).expect("repair wire");
-        receiver.receive(&wire[..written], &mut decoded).expect("repair receive");
+        let report = receiver.receive(&wire[..written], &mut decoded).expect("repair receive");
         for packet in decoded {
             if packet.id == 1 {
                 recovered = packet.payload_slice().map(<[u8]>::to_vec);
@@ -884,6 +920,55 @@ mod tests {
         }
 
         assert_eq!(recovered, Some(sources[1].clone()));
+        assert!(!report.systematic);
+        assert_eq!(report.wire_bytes, written);
+        assert_eq!(report.decoded_packets, 1);
+        assert_eq!(report.recovered_packets, 1);
+        assert_eq!(report.recovered_payload_bytes, sources[1].len());
+    }
+
+    #[test]
+    fn receiver_report_counts_accepted_source_once_and_duplicate_as_no_output() {
+        let pool = crate::optimize::global_pool();
+        let mut receiver = WireFecReceiver::new(pool);
+        let profile = WireProfile {
+            epoch: 30,
+            codec: WireCodec::Gf8,
+            source_count: 4,
+            total_count: 6,
+            interleave_depth: 1,
+        };
+        let meta = WirePacketMeta {
+            profile,
+            window: 0,
+            sequence: 0,
+            repair_index: SYSTEMATIC_REPAIR_INDEX,
+            block_index: 0,
+            systematic: true,
+        };
+        let payload = [0x40, 0x11, 0x22, 0x33];
+        let mut wire = [0u8; 128];
+        let written = write_packet(meta, &payload, &mut wire).expect("source wire");
+        let mut decoded = Vec::new();
+
+        let first = receiver.receive(&wire[..written], &mut decoded).expect("first source");
+        assert_eq!(
+            first,
+            WireReceiveReport {
+                systematic: true,
+                source_payload_bytes: payload.len(),
+                wire_bytes: written,
+                decoded_packets: 1,
+                recovered_packets: 0,
+                recovered_payload_bytes: 0,
+            }
+        );
+        assert_eq!(decoded.len(), 1);
+
+        let duplicate = receiver.receive(&wire[..written], &mut decoded).expect("duplicate source");
+        assert_eq!(duplicate.decoded_packets, 0);
+        assert_eq!(duplicate.recovered_packets, 0);
+        assert!(decoded.is_empty());
     }
 
     #[test]
