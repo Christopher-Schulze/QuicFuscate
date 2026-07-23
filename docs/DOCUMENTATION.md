@@ -3496,10 +3496,11 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `test-fec-all.sh` - Dispatcher: runs all FEC suites (test-fec, test-fec-simulation, test-fec-e2e-loss, auto-controller)
 - `test-fec-auto-controller-scenarios.sh` - FEC auto-controller scenario-driven tests
 - `test-fec-auto-controller-proof.sh` - FEC auto-controller proof orchestration
-- `tun-e2e-fec-netns.sh` - Linux netns FEC smoke over the real tunnel with tc-netem loss. Current hard gates cover authenticated tunnel establishment, ping liveness/loss bounds, panic absence, and cleanup; quantitative FEC benefit, telemetry, and iperf validity are pending TODO-557.
-- `tun-e2e-fec-burst-netns.sh` - Linux netns correlated burst-loss ping/liveness proof. Comparative FEC recovery benefit is pending TODO-557.
-- `tun-e2e-fec-transition-netns.sh` - Linux netns clean, lossy, and recovered phase liveness proof. Executable mode-transition telemetry is pending TODO-557.
-- `tun-e2e-fec-netem-adversity.sh` - Linux netns ping/liveness matrix for loss, jitter, bandwidth, RTT+loss, mobile-network mix, and recovery. Quantitative throughput, overhead, mode-stability, and recovery-latency acceptance is pending TODO-557.
+- `tun-e2e-fec-netns.sh` - Linux netns FEC smoke over the real tunnel with tc-netem loss. Current hard gates cover authenticated tunnel establishment, ping liveness/loss bounds, panic absence, and cleanup; a truthful Off control, live telemetry, sustained carrier delivery, quantitative FEC benefit, and iperf validity are pending TODO-558, TODO-559, and TODO-557.
+- `tun-e2e-fec-burst-netns.sh` - Linux netns correlated burst-loss ping/liveness proof. Comparative FEC recovery benefit is pending the TODO-558 Off control and TODO-557 acceptance contract.
+- `tun-e2e-fec-transition-netns.sh` - Linux netns clean, lossy, and recovered phase liveness proof. Executable mode-transition telemetry is pending TODO-558 and TODO-557.
+- `tun-e2e-fec-netem-adversity.sh` - Linux netns ping/liveness matrix for loss, jitter, bandwidth, RTT+loss, mobile-network mix, and recovery. Quantitative throughput, overhead, mode-stability, carrier backpressure, and recovery-latency acceptance is pending TODO-558, TODO-559, and TODO-557.
+- Exact TODO-555 artifact inventory for TODO-557 invalidated broader acceptance claims without invalidating the bounded lifecycle proof. Under 20% netem loss, an explicit `--fec-mode off` client reached Streaming mode with 75 switches. The uniform-loss iperf parser reported `1.05 Mbit/s` from a `105 Kbit/s` sender line while the receiver reported zero bytes. Sustained TUN traffic emitted repeated MASQUE and H3 `InternalError` failures, TUN send failures, and a heartbeat timeout. TODO-558 owns hard Off and live observability; TODO-544 owns canonical recovery deadlines; TODO-559 owns carrier backpressure and sustained delivery; TODO-557 consumes those contracts before quantitative closure.
 - `test-runtime-soak-chaos.sh` - Runtime soak/chaos (delegates to E2E, FEC loss, admin web)
 - `test-security.sh` - Security suite (rt-security-suite + rt-property-suite)
 > Note: `test-all.sh` was archived; run suites sequentially or use `util-run-full-suite.sh` which delegates to the individual suite scripts.
@@ -3706,6 +3707,7 @@ The constructor/runtime boundary is explicit:
 - `QUICFUSCATE_FEC_KERNEL`: `scalar|avx512vbmi2|avx512|avx2|neon|sve2` - override SIMD kernel selection for GF16 bitslice.
 
 Notes:
+- Engine-level `FecMode::Off` is not yet a hard runtime disable. `FecConfig::apply_engine_mode(Off)` selects initial Zero mode, but the instantiated controller remains automatic and can escalate after loss feedback. Operators must not use Off as a comparative no-FEC control until TODO-558 closes.
 - The runtime may set `QUICFUSCATE_FEC_STREAM_BURST`, `QUICFUSCATE_FEC_PARALLEL`, `QUICFUSCATE_WM_BITSLICE`, `QUICFUSCATE_WM_LANE_PAR`, `QUICFUSCATE_WM_LANES`, and `QUICFUSCATE_WM_U` internally during auto tuning; there is no manual override read path in the current code.
 - `QUICFUSCATE_FEC_DECODER` and `QUICFUSCATE_FEC_WIEDEMANN_K` are advanced/internal controls for diagnostics and compatibility. They do not widen the canonical product contract.
 - Fountain symbol sizing and Rayon thread-pool setup follow explicit owner boundaries: they are snapshotted or initialized during construction instead of being repeatedly resolved inside live adaptation logic.
@@ -3794,6 +3796,7 @@ The default server metrics endpoint (`implementations::server::metrics::Metrics:
 - `quicfuscate_fec_packets_encoded`, `quicfuscate_fec_packets_decoded`, `quicfuscate_fec_packets_recovered`
 - `quicfuscate_auth_failed_total`, `quicfuscate_rate_limited_total`
 
+The exported FEC packet counters are not yet accepted as production evidence. TODO-558 must prove one live producer, unit, and scope for each counter or remove/qualify the metric; a constant zero is not evidence of zero repairs or recovery.
 Accepted connections are now produced by the standalone live runtime at the same point that `clients_total` is incremented, so the standalone admin/metrics surfaces report one consistent accept/reject/auth-failure story instead of mixing runtime counts with partial projections.
 The standalone server runtime now also records accepted, rejected, rate-limited, ingress, and egress events through explicit `Metrics` methods rather than scattered raw atomic increments in the live loop and QKey-auth branches.
 Engine server-mode stats now treat RTT and loss as unavailable unless a truthful server-owned producer exists. The engine no longer reuses global client transport RTT/loss instrumentation for embedded server stats.
@@ -3826,6 +3829,7 @@ Telemetry collection/export is runtime-surface driven (`--telemetry` / metrics e
 - ACK delay buckets model browser-like ACK timing distributions and can be used to validate profile behavior under different network conditions.
 - Choke counters (`choked_bytes`, `choke_sleep_ms`) quantify pacing pressure and allow correlation with throughput/latency trade-offs.
 - FEC gauges/counters should be interpreted together (`mode`, `window`, `loss_rate`, switch counters) to distinguish stable operation from adaptation churn.
+- Until TODO-558 closes, `quicfuscate_fec_loss_rate` and numeric `quicfuscate_fec_mode` are diagnostic only: the live loss producer is incomplete and the exact nine-value mode mapping is not yet part of the documented stable telemetry contract.
 - Compression and SIMD counters provide backend-selection and efficiency visibility without changing data-plane behavior.
 
 ### Operational hints

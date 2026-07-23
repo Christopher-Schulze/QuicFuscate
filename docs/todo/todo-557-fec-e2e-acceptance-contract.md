@@ -6,7 +6,7 @@ phase: S
 priority: P0
 status: OPEN
 created: 2026-07-23
-depends_on: [TODO-423, TODO-425, TODO-427, TODO-524, TODO-547, TODO-555]
+depends_on: [TODO-423, TODO-425, TODO-427, TODO-524, TODO-547, TODO-555, TODO-558, TODO-559]
 ---
 
 # TODO-557: Make Specialized FEC E2E Acceptance Executable and Truthful
@@ -56,6 +56,8 @@ The specialized Linux FEC harnesses contain acceptance prose that is not fully e
 - The current transition header claims zero loss during transitions, while the executable phase limits are 5%, 35%, and 10%.
 - The adversity header claims throughput degradation, mode monotonicity and flapping, sub-30% overhead, recovery-vs-retransmission latency, 60-second combined stability, and five-second de-escalation. Its current pass/fail paths primarily evaluate ping loss and panic absence.
 - TODO-547 and TODO-524 provide valid wire-integrity and historical 1,000-packet loss evidence, but they do not make the remaining specialized harness descriptions executable.
+- The initial inventory is complete but this task is parked behind TODO-558 and TODO-559. The exact TODO-555 artifact proved that `--fec-mode off` can escalate to Streaming, the uniform-loss iperf parser can report `1.05 Mbit/s` from `105 Kbit/s` while the receiver reports zero bytes, and sustained TUN/MASQUE traffic can hit repeated DATAGRAM/H3 `InternalError` failures and heartbeat timeout.
+- TODO-558 owns the controlled FEC-off baseline and trustworthy telemetry producers. TODO-559 owns sustained carrier backpressure, byte delivery, and throughput validity. This task consumes those contracts instead of duplicating them.
 - This is a direct production-evidence task, not a production-readiness umbrella.
 
 ## Deviations
