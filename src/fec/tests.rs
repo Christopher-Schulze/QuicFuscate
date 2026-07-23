@@ -1391,6 +1391,59 @@ fn test_wire_profile_switch_commits_only_after_source_block_boundary() {
 }
 
 #[test]
+fn test_forced_streaming_wire_profile_waits_for_large_source_block_boundary() {
+    let pool = make_pool();
+    let mut windows = HashMap::new();
+    windows.insert(FecMode::Extreme, 1024);
+    let mut fec = AdaptiveFec::new(FecConfig {
+        initial_mode: FecMode::Extreme,
+        window_sizes: windows,
+        ..Default::default()
+    });
+    let initial_profile = fec.wire_profile(1).expect("initial wire profile");
+    assert_eq!(initial_profile.codec, super::wire::WireCodec::Gf16);
+    assert_eq!(initial_profile.block_source_count(), 256);
+
+    let _ = fec.on_send(mk_src_packet(0, 64, &pool));
+    fec.force_streaming_mode();
+
+    assert!(fec.is_transitioning());
+    assert_eq!(fec.current_mode(), FecMode::Extreme);
+    assert_eq!(fec.wire_profile(1).expect("active block wire profile"), initial_profile);
+
+    fec.encoder.lock().clear_window();
+    let streaming_profile = fec.wire_profile(2).expect("streaming wire profile");
+    assert!(!fec.is_transitioning());
+    assert_eq!(fec.current_mode(), FecMode::Streaming);
+    assert_eq!(streaming_profile.codec, super::wire::WireCodec::StreamingGf8);
+    assert!(streaming_profile.block_source_count() <= 255);
+}
+
+#[test]
+fn test_extreme_disturbance_streaming_target_is_gf8_wire_safe() {
+    let pool = make_pool();
+    let mut windows = HashMap::new();
+    windows.insert(FecMode::Extreme, 1024);
+    let mut fec = AdaptiveFec::new(FecConfig {
+        initial_mode: FecMode::Extreme,
+        window_sizes: windows,
+        ..Default::default()
+    });
+    let _ = fec.on_send(mk_src_packet(0, 64, &pool));
+    fec.transition_to_target(target_from_mode(FecMode::Streaming, 1024).with_window(1024));
+
+    assert!(fec.is_transitioning());
+    fec.encoder.lock().clear_window();
+    let profile = fec.wire_profile(2).expect("bounded streaming wire profile");
+
+    assert_eq!(fec.current_mode(), FecMode::Streaming);
+    assert_eq!(profile.codec, super::wire::WireCodec::StreamingGf8);
+    assert_eq!(profile.source_count, 1020);
+    assert_eq!(profile.interleave_depth, 4);
+    assert_eq!(profile.block_source_count(), 255);
+}
+
+#[test]
 fn test_batch_normal_seq_counts() {
     // QUICFUSCATE_FEC_PARALLEL is set for benchmarking (main.rs run_fec_bench) but
     // not read by AdaptiveFec::new - kept here for env isolation consistency.

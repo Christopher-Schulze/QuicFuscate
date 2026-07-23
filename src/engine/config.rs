@@ -296,14 +296,22 @@ pub struct TransportConfig {
     pub dgram_send_queue_len: usize,
     /// Disable path MTU discovery
     pub disable_pmtud: bool,
+    /// Safe DPLPMTUD floor.
+    pub pmtu_min_mtu: u16,
+    /// Maximum DPLPMTUD probe size.
+    pub pmtu_max_mtu: u16,
+    /// Delay between probe attempts.
+    pub pmtu_probe_interval_ms: u64,
+    /// Large-packet ACK silence before black-hole recovery.
+    pub pmtu_black_hole_timeout_ms: u64,
 }
 
 impl Default for TransportConfig {
     fn default() -> Self {
         Self {
             cc_algorithm: CcAlgorithm::Bbr3,
-            mtu: 1400,
-            max_udp_payload: 1350,
+            mtu: 1500,
+            max_udp_payload: 1500,
             max_idle_timeout: 30000,
             initial_rtt_ms: 100,
             enable_pacing: true,
@@ -317,6 +325,10 @@ impl Default for TransportConfig {
             dgram_recv_queue_len: 1024,
             dgram_send_queue_len: 1024,
             disable_pmtud: false,
+            pmtu_min_mtu: 1280,
+            pmtu_max_mtu: 1500,
+            pmtu_probe_interval_ms: 60_000,
+            pmtu_black_hole_timeout_ms: 10_000,
         }
     }
 }
@@ -331,6 +343,21 @@ impl TransportConfig {
         }
         if self.initial_rtt_ms == 0 {
             return Err(ConfigError::Validation("initial_rtt_ms must be > 0".into()));
+        }
+        if self.pmtu_min_mtu < 1200 || self.pmtu_max_mtu < self.pmtu_min_mtu {
+            return Err(ConfigError::Validation(
+                "pmtu_min_mtu must be >= 1200 and <= pmtu_max_mtu".into(),
+            ));
+        }
+        if self.pmtu_max_mtu > self.mtu {
+            return Err(ConfigError::Validation(
+                "pmtu_max_mtu must not exceed transport.mtu".into(),
+            ));
+        }
+        if self.pmtu_probe_interval_ms == 0 || self.pmtu_black_hole_timeout_ms == 0 {
+            return Err(ConfigError::Validation(
+                "DPLPMTUD probe and black-hole timers must be > 0".into(),
+            ));
         }
         if self.dgram_recv_queue_len == 0 && self.dgram_send_queue_len == 0 {
             return Ok(());

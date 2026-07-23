@@ -8,6 +8,10 @@ It is maintained as the current architecture and repository index, with a curate
 - Runtime core: Rust crate under `src/` with entrypoints in `src/main.rs` and `src/lib.rs`.
 - Data path wiring: app or TUN ingress -> core/transport -> stealth shaping -> crypto -> FEC -> network I/O.
 - Production VPN carrier: authenticated Core H3/MASQUE CONNECT-UDP carries TUN IP packets. The public QKey ID in the QUIC Initial selects the server record; the bearer is presented only through the encrypted H3 `x-qf-auth` header. The server gates MASQUE DATAGRAM-to-TUN delivery on the current authenticated state.
+- Tunnel MTU ownership: `transport::PmtuState` discovers a validated 1280-1500 outer packetization budget; `core::QuicFuscateConnection` derives the FEC/QUIC/MASQUE datagram payload and a separate IPv6-safe inner tunnel MTU. The client applies live TUN MTU changes and returns local IPv4/IPv6 PTB above that boundary.
+- Oversized tunnel carrier: raw IP packets within the effective tunnel MTU but above the MASQUE datagram payload use bounded `QFT1` length framing on the `/tun` HTTP/3 stream. `core.rs` reassembles arbitrary DATA-read segmentation per stream and rejects invalid magic, empty frames, non-IP payloads, and unbounded pending data.
+- Reliable STREAM ownership: `transport::Connection` keeps a 16 MiB immutable range ledger, binds compact transmission IDs to packet numbers, retires exact ACKed ownership, and requeues packet-threshold/PTO loss before new data. A PMTU decrease byte-exactly splits queued transmissions to the new packet budget while late ACKs retire all derived segments once.
+- Outbound pacing: `core::OutboundPacer` centrally gates congestion-controlled transport and FEC emissions from every socket path; ACK-only output is explicitly exempt.
 - Standalone TUN routing: explicit `--tun-ip` / `--tun-netmask` on the server updates `ServerConfig.server_ip`, `server_netmask`, and the client IPv4 pool, keeping Linux namespace deployments and runtime session routing in the same subnet.
 - DNS-through-tunnel: server MASQUE/TUN uplink intercepts IPv4/IPv6 UDP/53 packets before generic TUN egress, resolves through configured server DNS upstreams, and queues rebuilt DNS responses over MASQUE downlink.
 - NAT traversal: optional `NatPathDiscovery` is default-off and reason-gated (`connectivity-fallback`, `roaming`, `mesh`, `always`). It feeds transport path discovery when explicitly enabled; it is not part of the baseline stealth path.
@@ -52,11 +56,21 @@ Padding and timing rates flow through `StealthRuntimePolicy` → `StealthRuntime
 - `broderick` release build: `cargo build --release --bin quicfuscate` passes on Linux.
 - All TUN/netns E2E scripts acquire a shared `flock` guard (`/tmp/quicfuscate-tun-e2e.lock` by default) because they intentionally share namespace names, process cleanup, logs, admin sockets, and generated config/cert state.
 - `scripts/tests/tun-e2e-netns.sh`: real server/client netns TUN over authenticated H3/MASQUE, 5/5 ping, 0% tunnel loss.
+- `scripts/tests/tun-e2e-multi-client-dual-stack-netns.sh`: isolated three-client IPv4/IPv6 routing, source ownership, spoof rejection, fan-out, PTB, NAT, throughput, and explicit client-to-client policy proof.
 - `scripts/tests/tun-e2e-dns-leak-netns.sh`: DNS query through server TUN IP returns a response and tcpdump observes `raw_port_53_packets=0` on the client underlay.
 - `scripts/tests/tun-e2e-fec-netns.sh`: 0%, 5%, and 10% loss ping gates pass; optional iperf3 TCP-to-server-TUN probes skip unless real throughput is measured.
 - `scripts/tests/tun-e2e-fec-burst-netns.sh`: correlated burst-loss gates pass.
 - `scripts/tests/tun-e2e-fec-transition-netns.sh`: clean -> lossy -> recovered live transition gate passes.
 - `scripts/tests/tun-e2e-fec-netem-adversity.sh`: broad adversity matrix passes with 25 passed, 0 failed.
+
+### Omega DPLPMTUD and Multi-Client Evidence (2026-07-23)
+
+- Exact run35 source archive SHA-256: `b3140e9c14300af3416d021de6e81476ec41e3b57b775c7b1605a9fcaaf2ce3e`; exact AArch64 binary SHA-256: `d985c254fb55792afc9d2e1bc88d14b68b8737a3bfcb7507961fc8b1a1c09888`.
+- Local and native full Rust tests and strict all-target/all-feature Clippy pass. Deterministic coverage includes loss/PTO requeue, PMTU-aware 1500-to-1280 retransmission splitting, and late-original-ACK retirement of every derived segment.
+- Three isolated clients prove IPv4/IPv6 allocation, routing/NAT, source ownership, spoof rejection, default-deny and explicit opt-in unicast, authenticated fan-out, client/server PTB, and all six zero-loss ping streams.
+- All three clients and the server discover 1500. The 20-second egress black-hole trial detects failure in 3 seconds, falls back to 1280, transfers 17,039,360 bytes, and re-confirms 1500.
+- Three 1280-floor trials have 6.454 Mbit/s median; three confirmed-1500 trials have 8.961 Mbit/s median. Every regular five-second run has exactly five positive intervals, and the median gain is 38.85%.
+- Evidence root: `/home/ubuntu/SOFTWARE/QuicFuscate/target/todo534/evidence/run35`. Cleanup leaves no product process, heartbeat failure, or network namespace.
 
 ### Omega FEC Wire Integrity Evidence (2026-07-22)
 
@@ -135,7 +149,7 @@ Uses `StealthConfig::from_mode(runtime_mode)` - was silently using `..Default::d
 1. Client CLI -> runtime init: `src/main.rs` -> `src/core.rs` -> `src/transport/connection.rs`
 2. TLS handshake path: `src/qftls.rs` (`CombinedProvider`, release verification mandatory) -> rustls keys/errors -> `src/transport/connection.rs` TLS-bound application readiness -> `src/core.rs` terminal error propagation -> `src/transport/packet.rs`
 3. Stealth shaping path: `src/stealth/` (`StealthManager`) -> `src/transport/config.rs` -> `src/transport/connection.rs`
-4. FEC encode/decode path: `src/core.rs` raw handshake/Zero gate -> `src/fec/` (`AdaptiveFec`) -> `InterleavedEncoder` lane distribution -> `src/fec/wire.rs` versioned MTU-bounded envelope -> packet loss -> receiver-owned epoch/window decoder -> `InterleavedDecoder` lane routing -> rank-checked and byte-validated systematic recovery -> `src/transport/connection.rs` authenticated QUIC receive -> transport observer hooks
+4. FEC encode/decode path: `src/core.rs` raw handshake/Zero gate -> safe block-boundary mode transition -> `src/fec/` (`AdaptiveFec`) -> `InterleavedEncoder` lane distribution -> `src/fec/wire.rs` versioned MTU-bounded envelope -> packet loss -> receiver-owned epoch/window decoder -> `InterleavedDecoder` lane routing -> rank-checked and byte-validated systematic recovery -> `src/transport/connection.rs` authenticated QUIC receive -> transport observer hooks
 5. Linux client zero-copy inbound path: `src/implementations/client/io_driver.rs` -> pool-backed `src/optimize/uring_batch.rs` `UringRecvBatch` -> `src/core.rs` `recv_pooled_block()` -> `src/fec/mod.rs` -> `src/transport/connection.rs`
 6. Packet-number decode path: `src/transport/packet.rs` header-protection removal -> `src/optimize/transport.rs` `decode_packet_number()` -> BMI2/SVE2/NEON/scalar dispatch
 7. Compression pool path: `src/transport/h3.rs` payload policy -> `src/compress.rs` direct zstd `compress_to_buffer` into `MemoryPool` / body-pool blocks -> H3 compressed body bytes
@@ -154,6 +168,7 @@ Uses `StealthConfig::from_mode(runtime_mode)` - was silently using `..Default::d
 20. Memory locking path: `src/engine/config.rs` `[security] lock_memory/lock_blocks` -> `src/main.rs::run_server()` `RLIMIT_MEMLOCK` gate -> unlimited `mlockall(MCL_CURRENT | MCL_FUTURE)` or finite-limit `MCL_CURRENT` -> `src/optimize/mod.rs` `MemoryPool::set_lock_blocks()` -> best-effort `mlock_block()` in `alloc_numa_block()`.
 21. Windows core CI gate: `.github/workflows/ci.yml` `windows-core-checks` -> native `windows-latest` `cargo check --lib` -> parallel `cargo test --lib --features rust-tests` -> `cargo clippy --lib --features rust-tests -- -D warnings`; exact proof job `88909613077` is green on `15570abf772766c76959f6aae6ba16b2b9c26fd7`.
 22. Windows signed release path: `scripts/audits/verify-release-version.sh` -> `.github/workflows/release.yml` `release-version-contract` -> `desktop-windows` Tauri MSI build -> `.msi` plus `.msi.sig` verification -> required `publish-release` dependency -> `latest.json` `windows-x86_64` entry.
+23. Reliable tunnel fallback path: `src/core.rs` `QFT1` packet framing -> `src/transport/connection.rs` immutable STREAM ledger -> confirmed-PMTU packetization -> centralized `OutboundPacer` -> ACK/loss/PTO retirement and requeue -> byte-exact PMTU fallback splitting -> peer `core.rs` bounded packet reassembly.
 
 ## ASCII Repository Tree (curated tracked-source snapshot)
 

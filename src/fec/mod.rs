@@ -272,6 +272,33 @@ fn target_rank(target: FecProtectionTarget) -> u8 {
     }
 }
 
+fn wire_safe_encoder_params(
+    mode: FecMode,
+    source_count: usize,
+    total_count: usize,
+    requested_depth: usize,
+    interleave_enabled: bool,
+) -> (usize, usize, usize) {
+    let depth = if mode == FecMode::Fountain || !interleave_enabled {
+        1
+    } else {
+        requested_depth.clamp(1, 8).min(source_count.max(1))
+    };
+    if mode != FecMode::Streaming || source_count == 0 {
+        return (source_count, total_count, depth);
+    }
+
+    let max_source_count = wire::MAX_GF8_BLOCK_SOURCE_COUNT.saturating_mul(depth);
+    let bounded_source_count = source_count.min(max_source_count);
+    let aligned_source_count = (bounded_source_count / depth).max(1).saturating_mul(depth);
+    let scaled_total_count = aligned_source_count
+        .saturating_mul(total_count)
+        .div_ceil(source_count)
+        .max(aligned_source_count);
+    let aligned_total_count = scaled_total_count.div_ceil(depth).saturating_mul(depth);
+    (aligned_source_count, aligned_total_count, depth)
+}
+
 fn continuous_fec_target(
     avg_loss: f32,
     auto_gf4: bool,
@@ -3236,7 +3263,7 @@ impl FecRuntimePlan {
             initial_target = target_from_mode(FecMode::Normal, 64);
         }
         let force_on = config.force_on;
-        let (mode, k, n) = internal::ModeManager::params_for_target(
+        let (mode, requested_k, requested_n) = internal::ModeManager::params_for_target(
             initial_target,
             config.window_sizes.get(&config.initial_mode).copied().unwrap_or(64),
             ambient.runtime_policy.auto_gf4_enabled,
@@ -3275,13 +3302,20 @@ impl FecRuntimePlan {
         let stream_every = stream_every_override.unwrap_or(base_stream_every);
         let base_interleave_depth = if mode == FecMode::Fountain {
             1
-        } else if k > 16 {
+        } else if requested_k > 16 {
             4
         } else {
             1
         };
-        let interleave_depth =
+        let requested_interleave_depth =
             ambient.interleave_depth_override.unwrap_or(base_interleave_depth).clamp(1, 8);
+        let (k, n, interleave_depth) = wire_safe_encoder_params(
+            mode,
+            requested_k,
+            requested_n,
+            requested_interleave_depth,
+            ambient.runtime_policy.interleave_enabled,
+        );
         let partial_enabled = ambient.partial_enabled;
         let runtime_policy = ambient.runtime_policy.clone();
         let loss_estimator = LossEstimator::from_config(config, ambient);
@@ -3636,12 +3670,18 @@ impl AdaptiveFec {
             return;
         }
         let current_window = self.mode_manager.lock().current_window().max(1);
-        let (mode, k, n) = internal::ModeManager::params_for_target(
+        let (mode, requested_k, requested_n) = internal::ModeManager::params_for_target(
             target,
             current_window,
             self.runtime_policy.auto_gf4_enabled,
         );
-        let depth = if mode == FecMode::Fountain { 1 } else { self.interleave_depth.min(k.max(1)) };
+        let (k, n, depth) = wire_safe_encoder_params(
+            mode,
+            requested_k,
+            requested_n,
+            self.interleave_depth,
+            self.runtime_policy.interleave_enabled,
+        );
         self.encoder = Arc::new(Mutex::new(internal::InterleavedEncoder::new_with_policy(
             mode,
             k,
@@ -4263,20 +4303,26 @@ impl AdaptiveFec {
     pub(crate) fn force_streaming_mode(&mut self) {
         let target = target_from_mode(FecMode::Streaming, 64);
         let target_mode = mode_for_target(target, self.runtime_policy.auto_gf4_enabled);
+        let previous_mode = self.active_mode;
         self.transition_to_target(target);
-        let (_, k, _n) = internal::ModeManager::params_for_target(
-            target,
-            64,
-            self.runtime_policy.auto_gf4_enabled,
-        );
-        let mut mode_mgr = self.mode_manager.lock();
-        mode_mgr.force_state(target_mode, k);
-        self.active_mode = target_mode;
-        self.streaming_mode = true;
-        crate::telemetry::FEC_MODE.store(target_mode as u64, std::sync::atomic::Ordering::Relaxed);
-        crate::telemetry::FEC_WINDOW.store(k as u64, std::sync::atomic::Ordering::Relaxed);
-        crate::telemetry::FEC_MODE_SWITCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        log::info!("Forced switch to streaming mode for minimal latency");
+        if self.active_mode != target_mode {
+            log::debug!(
+                "Queued streaming mode until the active FEC source block reaches its boundary"
+            );
+            return;
+        }
+        if previous_mode != target_mode {
+            let (_, k, _n) = internal::ModeManager::params_for_target(
+                target,
+                64,
+                self.runtime_policy.auto_gf4_enabled,
+            );
+            crate::telemetry::FEC_MODE
+                .store(target_mode as u64, std::sync::atomic::Ordering::Relaxed);
+            crate::telemetry::FEC_WINDOW.store(k as u64, std::sync::atomic::Ordering::Relaxed);
+            crate::telemetry::FEC_MODE_SWITCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            log::info!("Forced switch to streaming mode for minimal latency");
+        }
     }
 
     fn select_simd_level_from_features<F>(has_feature: F) -> SimdLevel

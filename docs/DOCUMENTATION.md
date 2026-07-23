@@ -3126,10 +3126,15 @@ Curated domain sets are defined in `CdnProvider` and `DomainFrontingManager::ult
 
 ### TUN Bridging over HTTP/3
 
-QuicFuscate can bridge a TUN interface by encapsulating frames in HTTP/3 streams:
+QuicFuscate bridges a TUN interface through an adaptive MASQUE/HTTP/3 carrier:
 
-- Client: when `--tun` is set, a blocking reader thread forwards frames into an H3 stream; zero-copy pool integration minimizes allocations.
+- Client fast path: packets within the confirmed MASQUE payload use CONNECT-UDP datagrams. The payload ceiling is derived from confirmed DPLPMTUD, peer/configured UDP bounds, the 34-byte FEC envelope, and the bounded QUIC/MASQUE reserve.
+- Client fallback: IPv6-minimum packets that exceed one MASQUE datagram but remain within the effective tunnel MTU use `QFT1` plus a two-byte packet length on the `/tun` H3 stream. Per-stream bounded reassembly preserves exact IP-packet boundaries across arbitrary H3 DATA segmentation and coalescing.
+- Reliable fallback: transport owns at most 16 MiB of immutable STREAM payload ranges. Exact ACK retirement, packet-threshold loss, and tail PTO requeue lost ranges before new data. A PMTU decrease splits queued transmissions to the new exact packet budget, and a late ACK of the original packet retires every derived segment exactly once.
+- Packetization and pacing: new and retransmitted STREAM frames use the full confirmed PMTU rather than the discovery floor. The core-owned outbound pacer gates every congestion-controlled QUIC/FEC datagram while ACK-only output bypasses pacing.
+- MTU lifecycle: DPLPMTUD policy exposes validated minimum, maximum, probe interval, and black-hole timeout values. The client opens TUN at the lower of the configured ceiling and effective tunnel MTU, then applies confirmed changes through the platform backend. Packets above the live boundary receive local IPv4 Fragmentation Needed or IPv6 Packet Too Big instead of silent loss.
 - Server: with `--tun`, authenticated MASQUE CONNECT-UDP datagrams carrying raw IP packets are written to a TUN interface (when available on the platform). Standalone server mode derives `ServerConfig.server_ip`, `server_netmask`, and the client IPv4 pool from explicit `--tun-ip` / `--tun-netmask`, so runtime session routing and OS TUN addressing stay aligned.
+- Multi-client routing: authenticated source ownership is enforced for both datagram and framed-stream uplink. Owned unicast is destination-routed; IPv4 directed broadcast/multicast and IPv6 multicast use explicit authenticated fan-out; client-to-client unicast remains default-deny unless explicitly enabled.
 - Server hotpath: after a TUN packet is queued as MASQUE downlink for one session, only that target client's connection is flushed. The server does not scan and flush all clients per TUN packet.
 - Authentication: the public QKey ID in the QUIC Initial selects the server-side record. The client sends the bearer only after 1-RTT encryption through the H3/MASQUE `x-qf-auth` header. The server gates MASQUE DATAGRAM-to-TUN delivery on the current authenticated state and closes missing or invalid authentication attempts.
 - Platform support (interface.rs):
@@ -3138,6 +3143,8 @@ QuicFuscate can bridge a TUN interface by encapsulating frames in HTTP/3 streams
   - Windows: pluggable via `register_tun_factory` (feature `tun-windows`)
   - Other Unix: external factory via trait injection
   - All use the shared `MemoryPool` for zero-copy slices where possible.
+
+Exact ARM64 run35 evidence uses source archive SHA-256 `b3140e9c14300af3416d021de6e81476ec41e3b57b775c7b1605a9fcaaf2ce3e` and binary SHA-256 `d985c254fb55792afc9d2e1bc88d14b68b8737a3bfcb7507961fc8b1a1c09888`. Local and native full tests plus strict all-target/all-feature Clippy pass. The isolated three-client run proves dual-stack allocation/routing/NAT, source ownership, spoof rejection, default-deny and explicit opt-in client unicast, authenticated fan-out, client/server IPv4 and IPv6 PTB, DPLPMTUD 1280-to-1500 discovery, black-hole fallback to 1280, and bounded re-confirmation to 1500. Each regular five-second throughput trial contains exactly five positive intervals; the 1280 median is 6.454 Mbit/s, the 1500 median is 8.961 Mbit/s, and the measured gain is 38.85%. Cleanup leaves no product process or network namespace.
 
 ### Real TLS Fingerprints
 
@@ -3465,6 +3472,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `test-performance-regression.sh` - Performance regression with baseline comparison
 - `test-e2e.sh` - End-to-end integration tests with real network scenarios
 - `tun-e2e-netns.sh` - Linux network-namespace production smoke: real server/client TUN over authenticated H3/MASQUE CONNECT-UDP and a hard 0%-loss ping assertion through the tunnel
+- `tun-e2e-multi-client-dual-stack-netns.sh` - Exact-artifact Linux proof for three isolated dual-stack clients, source ownership, fan-out, PTB, DPLPMTUD black-hole recovery, positive-interval throughput, NAT, explicit client-to-client policy, and clean teardown
 - `tun-e2e-dns-leak-netns.sh` - Linux network-namespace DNS leak proof: real server/client TUN over MASQUE, DNS query through the server TUN IP, and tcpdump assertion that the client underlay sees zero raw TCP/UDP port 53 packets
 - `test-e2e-admin-web.sh` - Admin web E2E (login/status/config/qkey + headless QKey connect via `qf-e2e-client` and `qf-e2e-desktop`)
 - `test-desktop-webadmin-rust-integration.sh` - Cross-surface desktop/web-admin/core integration contract checks

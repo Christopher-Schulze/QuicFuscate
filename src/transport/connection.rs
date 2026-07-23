@@ -1,8 +1,8 @@
 use super::{
-    cid, config::Config, config::TrafficAnalysisDefense, frames, packet, pnspace, recovery,
-    udpfast, ConnectionId, EcnCounts, EcnMark, FecControlDelta, Frame, PacketType, PathStats,
-    RecvInfo, SendInfo, Stats, Stream, TransportObserver, INITIAL_WINDOW, MAX_STREAM_SIZE,
-    MIN_CLIENT_INITIAL_LEN, PROTOCOL_VERSION,
+    cid, config::Config, config::PmtuPolicy, config::TrafficAnalysisDefense, frames, packet,
+    pnspace, recovery, udpfast, ConnectionId, EcnCounts, EcnMark, FecControlDelta, Frame,
+    PacketType, PathStats, RecvInfo, SendInfo, Stats, Stream, TransportObserver, INITIAL_WINDOW,
+    MAX_STREAM_SIZE, MIN_CLIENT_INITIAL_LEN, PROTOCOL_VERSION,
 };
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -18,18 +18,18 @@ const PATH_VALIDATION_TIMEOUT: Duration = Duration::from_secs(3);
 const MIGRATION_COOLDOWN: Duration = Duration::from_millis(750);
 const SENT_PACKET_SPLIT_DRAIN_THRESHOLD: u64 = 64;
 const ACK_PREFIX_CLASSIFY_RANGE_THRESHOLD: usize = 8;
+const MAX_STREAM_RETRANSMIT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_STREAM_ORIGINAL_TRANSMISSIONS: usize = 16 * 1024;
+const MAX_STREAM_TRANSMISSIONS: usize = 2 * MAX_STREAM_ORIGINAL_TRANSMISSIONS;
+const MAX_STREAM_LOST_PACKET_HISTORY: usize = 32;
+const MIN_STREAM_PTO: Duration = Duration::from_millis(50);
+const MIN_CONGESTION_BLOCKED_PTO: Duration = Duration::from_millis(500);
 
 /// DPLPMTUD (RFC 8899) state for packetization-layer MTU discovery.
 ///
 /// Probes the path MTU by sending padded PING packets at increasing sizes.
-/// Uses binary search between PMTU_MIN and PMTU_MAX for fast convergence.
-/// Black hole detection: if no ACKs arrive for BLACK_HOLE_TIMEOUT, fall back
-/// to PMTU_MIN.
-const PMTU_MIN: usize = 1280; // IPv6 minimum MTU
-const PMTU_MAX: usize = 1400; // Safe max for QUIC over IPv4 (1500 - IP(20) - UDP(8) - QUIC overhead)
-const PMTU_BLACK_HOLE_TIMEOUT: Duration = Duration::from_secs(10);
-const PMTU_PROBE_INTERVAL: Duration = Duration::from_secs(60);
-
+/// Uses bounded binary search between the configured minimum and maximum.
+/// Black hole detection falls back to the configured safe minimum.
 /// DPLPMTUD probe state machine.
 #[derive(Clone, Debug)]
 pub struct PmtuState {
@@ -41,21 +41,30 @@ pub struct PmtuState {
     probe_in_flight: Option<usize>,
     /// Timestamp of the last probe send.
     last_probe_sent: Option<Instant>,
-    /// Last time we received any ACK (for black hole detection).
-    last_ack_received: Instant,
+    /// First unacknowledged packet above the safe floor. Later sends must not
+    /// move this timestamp or a continuously black-holed path would never age.
+    above_floor_unacked_since: Option<Instant>,
     /// Whether DPLPMTUD is enabled.
     enabled: bool,
+    min_mtu: usize,
+    max_mtu: usize,
+    probe_interval: Duration,
+    black_hole_timeout: Duration,
 }
 
 impl PmtuState {
-    pub fn new(enabled: bool) -> Self {
+    pub fn new(enabled: bool, policy: PmtuPolicy) -> Self {
         Self {
-            confirmed_mtu: PMTU_MIN,
-            probe_target: if enabled { PMTU_MAX } else { PMTU_MIN },
+            confirmed_mtu: policy.min_mtu,
+            probe_target: if enabled { policy.max_mtu } else { policy.min_mtu },
             probe_in_flight: None,
             last_probe_sent: None,
-            last_ack_received: Instant::now(),
+            above_floor_unacked_since: None,
             enabled,
+            min_mtu: policy.min_mtu,
+            max_mtu: policy.max_mtu,
+            probe_interval: policy.probe_interval,
+            black_hole_timeout: policy.black_hole_timeout,
         }
     }
 
@@ -77,7 +86,7 @@ impl PmtuState {
         }
         // Send probe if interval has elapsed since last probe
         match self.last_probe_sent {
-            Some(last) => now.duration_since(last) >= PMTU_PROBE_INTERVAL,
+            Some(last) => now.duration_since(last) >= self.probe_interval,
             None => true, // First probe
         }
     }
@@ -89,45 +98,63 @@ impl PmtuState {
     }
 
     /// Record that a probe was ACKed - confirm the MTU.
-    pub fn on_probe_acked(&mut self, now: Instant) {
+    pub fn on_probe_acked(&mut self, _now: Instant) {
         if let Some(size) = self.probe_in_flight.take() {
             self.confirmed_mtu = size;
             // Next probe: try larger (binary search up)
-            self.probe_target = (size + PMTU_MAX) / 2;
+            self.probe_target = (size + self.max_mtu) / 2;
             if self.probe_target == size {
-                self.probe_target = PMTU_MAX; // Already at max
+                self.probe_target = self.max_mtu; // Already at max
             }
         }
-        self.last_ack_received = now;
+        self.above_floor_unacked_since = None;
     }
 
     /// Record that a probe was lost - reduce probe target.
     pub fn on_probe_lost(&mut self) {
         if let Some(size) = self.probe_in_flight.take() {
             // Binary search down: try midpoint between confirmed and failed size
-            self.probe_target = (self.confirmed_mtu + size) / 2;
-            if self.probe_target <= self.confirmed_mtu {
-                self.probe_target = self.confirmed_mtu; // Can't go lower
-            }
+            let next_target = (self.confirmed_mtu + size) / 2;
+            // Once the search converges at the confirmed floor, retain an
+            // upward target. The probe interval then becomes the quiet period
+            // before a periodic re-probe instead of leaving discovery parked
+            // at the reduced MTU forever.
+            self.probe_target =
+                if next_target <= self.confirmed_mtu { self.max_mtu } else { next_target };
         }
     }
 
     /// Check for black hole (no ACKs for extended period).
     /// Returns true if MTU should be reset to minimum.
     pub fn check_black_hole(&self, now: Instant) -> bool {
-        self.enabled && now.duration_since(self.last_ack_received) > PMTU_BLACK_HOLE_TIMEOUT
+        self.enabled
+            && self.confirmed_mtu > self.min_mtu
+            && self
+                .above_floor_unacked_since
+                .is_some_and(|sent| now.saturating_duration_since(sent) > self.black_hole_timeout)
     }
 
     /// Reset to minimum MTU (black hole detected).
-    pub fn reset_to_minimum(&mut self) {
-        self.confirmed_mtu = PMTU_MIN;
-        self.probe_target = PMTU_MIN + (PMTU_MAX - PMTU_MIN) / 4; // Cautious re-probe
+    pub fn reset_to_minimum(&mut self, now: Instant) {
+        self.confirmed_mtu = self.min_mtu;
+        self.probe_target = self.min_mtu + (self.max_mtu - self.min_mtu) / 4;
         self.probe_in_flight = None;
+        self.last_probe_sent = Some(now);
+        self.above_floor_unacked_since = None;
     }
 
-    /// Record any ACK received (for black hole detection).
-    pub fn on_any_ack(&mut self, now: Instant) {
-        self.last_ack_received = now;
+    /// Records the first packet that exercises capacity above the safe floor.
+    pub fn on_packet_sent(&mut self, packet_size: usize, now: Instant) {
+        if self.confirmed_mtu > self.min_mtu && packet_size > self.min_mtu {
+            self.above_floor_unacked_since.get_or_insert(now);
+        }
+    }
+
+    /// Records only ACKs that prove capacity above the safe floor remains usable.
+    pub fn on_packet_acked(&mut self, packet_size: usize, _now: Instant) {
+        if packet_size > self.min_mtu {
+            self.above_floor_unacked_since = None;
+        }
     }
 
     /// Returns the probe size to send (or None if no probe needed).
@@ -264,6 +291,17 @@ struct PendingPathValidation {
     origin: PathValidationOrigin,
 }
 
+#[derive(Debug)]
+struct StreamTransmission {
+    stream_id: u64,
+    offset: u64,
+    data: Arc<[u8]>,
+    fin: bool,
+    queued: bool,
+    active_packet: Option<u64>,
+    lost_packets: VecDeque<u64>,
+}
+
 impl PendingPathValidation {
     fn matches_path(&self, local_addr: SocketAddr, peer_addr: SocketAddr) -> bool {
         self.local_addr == local_addr && self.peer_addr == peer_addr
@@ -365,8 +403,19 @@ pub struct Connection {
     fec_cb_lost_packets: Arc<std::sync::atomic::AtomicU64>,
     fec_cb_sent_bytes: Arc<std::sync::atomic::AtomicU64>,
     fec_cb_lost_bytes: Arc<std::sync::atomic::AtomicU64>,
-    // Sent packet accounting: PN -> (bytes, send_time) for ACK accounting + RTT sampling
+    // Sent packet accounting: PN -> (bytes, send_time) for ACK accounting + RTT sampling.
     sent_packets_by_pn: BTreeMap<u64, (usize, Instant)>,
+    // Continuous congestion-gate blockage. Unreliable tail packets are only
+    // released after this gate remains closed for a conservative PTO window.
+    congestion_blocked_since: Option<Instant>,
+    // Reliable STREAM ownership. Packet maps hold compact transmission IDs while
+    // payload bytes remain owned exactly once until any packet copy is ACKed.
+    stream_transmissions: HashMap<u64, StreamTransmission>,
+    stream_retransmit_queue: VecDeque<u64>,
+    stream_transmission_by_pn: BTreeMap<u64, u64>,
+    lost_stream_transmission_by_pn: BTreeMap<u64, Vec<u64>>,
+    next_stream_transmission_id: u64,
+    stream_retransmit_bytes: usize,
     // Stealth timing: next eligible send time (if timing obfuscation enabled)
     // Whether Brain may actively steer stealth runtime actuators for this connection.
     intelligent_stealth_runtime: bool,
@@ -383,6 +432,9 @@ pub struct Connection {
     // Packet number of the in-flight DPLPMTUD probe (if any). Used to detect
     // probe ACK/loss in the ACK processing path.
     pmtu_probe_pn: Option<u64>,
+    // Packet numbers whose complete outer datagram exercised capacity above
+    // the configured safe MTU floor.
+    pmtu_above_floor_pns: HashSet<u64>,
     // Chaff (dummy packet) generator for traffic analysis defense (TODO-455).
     // Active only when `traffic_analysis_defense` is `ConstantRate` and
     // `chaff_rate_pps > 0`. The generator is polled on every `send()` call; if
@@ -493,6 +545,7 @@ impl Connection {
         let dgram_send_max_size = config.max_udp_payload_size as usize;
         let initial_max_data = config.initial_max_data;
         let pmtu_enabled = config.pmtu_discovery_enabled();
+        let pmtu_policy = config.pmtu_policy();
         let mut conn = Self {
             scid: ConnectionId::from_vec(scid.to_vec()),
             dcid: ConnectionId::default(),
@@ -562,13 +615,21 @@ impl Connection {
             fec_cb_sent_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             fec_cb_lost_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             sent_packets_by_pn: BTreeMap::new(),
+            congestion_blocked_since: None,
+            stream_transmissions: HashMap::new(),
+            stream_retransmit_queue: VecDeque::new(),
+            stream_transmission_by_pn: BTreeMap::new(),
+            lost_stream_transmission_by_pn: BTreeMap::new(),
+            next_stream_transmission_id: 0,
+            stream_retransmit_bytes: 0,
             intelligent_stealth_runtime: false,
             brain_runtime_permissions: crate::transport::BrainRuntimePermissions::default(),
             observer: None,
             h3: None,
             strike_register: None,
-            pmtu: PmtuState::new(pmtu_enabled),
+            pmtu: PmtuState::new(pmtu_enabled, pmtu_policy),
             pmtu_probe_pn: None,
+            pmtu_above_floor_pns: HashSet::new(),
             chaff: None,
         };
         // Initialize chaff generator when ConstantRate defense is configured
@@ -632,6 +693,324 @@ impl Connection {
         return self.streams.values().map(|s| s.send_buf.len()).sum();
         #[cfg(feature = "stream_ring_buffer")]
         return self.streams.values().map(|s| s.send_ring.len()).sum();
+    }
+
+    #[inline]
+    fn stream_ledger_has_capacity(&self, payload_len: usize) -> bool {
+        self.stream_transmissions.len() < MAX_STREAM_ORIGINAL_TRANSMISSIONS
+            && self.stream_retransmit_bytes.saturating_add(payload_len)
+                <= MAX_STREAM_RETRANSMIT_BYTES
+    }
+
+    fn has_sendable_stream_frame(&self) -> bool {
+        if self.stream_retransmit_queue.iter().any(|transmission_id| {
+            self.stream_transmissions
+                .get(transmission_id)
+                .is_some_and(|transmission| transmission.queued)
+        }) {
+            return true;
+        }
+        let Some(stream_id) = self.writable_streams.front() else {
+            return false;
+        };
+        let Some(stream) = self.streams.get(stream_id) else {
+            return false;
+        };
+        #[cfg(not(feature = "stream_ring_buffer"))]
+        let has_data = !stream.send_buf.is_empty();
+        #[cfg(feature = "stream_ring_buffer")]
+        let has_data = !stream.send_ring.is_empty();
+        if has_data {
+            self.stream_ledger_has_capacity(1)
+        } else {
+            stream.send_fin && self.stream_ledger_has_capacity(0)
+        }
+    }
+
+    fn stage_stream_transmission(
+        &mut self,
+        stream_id: u64,
+        offset: u64,
+        data: Arc<[u8]>,
+        fin: bool,
+    ) -> Result<u64, crate::error::ConnectionError> {
+        if !self.stream_ledger_has_capacity(data.len()) {
+            return Err(crate::error::ConnectionError::Done);
+        }
+
+        let transmission_id = self.allocate_stream_transmission_id()?;
+
+        self.stream_retransmit_bytes = self.stream_retransmit_bytes.saturating_add(data.len());
+        self.stream_transmissions.insert(
+            transmission_id,
+            StreamTransmission {
+                stream_id,
+                offset,
+                data,
+                fin,
+                queued: true,
+                active_packet: None,
+                lost_packets: VecDeque::new(),
+            },
+        );
+        self.stream_retransmit_queue.push_back(transmission_id);
+        Ok(transmission_id)
+    }
+
+    fn allocate_stream_transmission_id(&mut self) -> Result<u64, crate::error::ConnectionError> {
+        let transmission_id = self.next_stream_transmission_id;
+        self.next_stream_transmission_id = self.next_stream_transmission_id.wrapping_add(1);
+        if self.stream_transmissions.contains_key(&transmission_id) {
+            return Err(crate::error::ConnectionError::InvalidState);
+        }
+        Ok(transmission_id)
+    }
+
+    fn split_queued_stream_transmission(
+        &mut self,
+        transmission_id: u64,
+        prefix_len: usize,
+    ) -> Result<(), crate::error::ConnectionError> {
+        let Some(transmission) = self.stream_transmissions.get(&transmission_id) else {
+            return Err(crate::error::ConnectionError::InvalidState);
+        };
+        if !transmission.queued
+            || transmission.active_packet.is_some()
+            || prefix_len == 0
+            || prefix_len >= transmission.data.len()
+        {
+            return Err(crate::error::ConnectionError::InvalidState);
+        }
+        if self.stream_transmissions.len() >= MAX_STREAM_TRANSMISSIONS {
+            return Err(crate::error::ConnectionError::Done);
+        }
+
+        let stream_id = transmission.stream_id;
+        let tail_offset = transmission.offset.saturating_add(prefix_len as u64);
+        let prefix = Arc::<[u8]>::from(&transmission.data[..prefix_len]);
+        let tail = Arc::<[u8]>::from(&transmission.data[prefix_len..]);
+        let tail_fin = transmission.fin;
+        let lost_packets = transmission.lost_packets.clone();
+        let tail_id = self.allocate_stream_transmission_id()?;
+
+        let Some(transmission) = self.stream_transmissions.get_mut(&transmission_id) else {
+            return Err(crate::error::ConnectionError::InvalidState);
+        };
+        transmission.data = prefix;
+        transmission.fin = false;
+        self.stream_transmissions.insert(
+            tail_id,
+            StreamTransmission {
+                stream_id,
+                offset: tail_offset,
+                data: tail,
+                fin: tail_fin,
+                queued: true,
+                active_packet: None,
+                lost_packets: lost_packets.clone(),
+            },
+        );
+        let tail_position = self
+            .stream_retransmit_queue
+            .iter()
+            .position(|id| *id == transmission_id)
+            .map_or(self.stream_retransmit_queue.len(), |position| position + 1);
+        self.stream_retransmit_queue.insert(tail_position, tail_id);
+        for packet_number in lost_packets {
+            let transmission_ids =
+                self.lost_stream_transmission_by_pn.entry(packet_number).or_default();
+            if !transmission_ids.contains(&tail_id) {
+                transmission_ids.push(tail_id);
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_stream_retransmit_queue_entry(&mut self, transmission_id: u64) {
+        if self.stream_retransmit_queue.front() == Some(&transmission_id) {
+            self.stream_retransmit_queue.pop_front();
+        } else {
+            self.stream_retransmit_queue.retain(|id| *id != transmission_id);
+        }
+    }
+
+    fn commit_stream_transmission(&mut self, transmission_id: u64, packet_number: u64) {
+        let Some(transmission) = self.stream_transmissions.get_mut(&transmission_id) else {
+            return;
+        };
+        transmission.queued = false;
+        transmission.active_packet = Some(packet_number);
+        self.remove_stream_retransmit_queue_entry(transmission_id);
+        self.stream_transmission_by_pn.insert(packet_number, transmission_id);
+    }
+
+    fn retire_stream_transmission(&mut self, transmission_id: u64) {
+        let Some(transmission) = self.stream_transmissions.remove(&transmission_id) else {
+            return;
+        };
+        self.stream_retransmit_bytes =
+            self.stream_retransmit_bytes.saturating_sub(transmission.data.len());
+        if let Some(packet_number) = transmission.active_packet {
+            self.stream_transmission_by_pn.remove(&packet_number);
+        }
+        for packet_number in transmission.lost_packets {
+            let remove_packet = if let Some(transmission_ids) =
+                self.lost_stream_transmission_by_pn.get_mut(&packet_number)
+            {
+                transmission_ids.retain(|id| *id != transmission_id);
+                transmission_ids.is_empty()
+            } else {
+                false
+            };
+            if remove_packet {
+                self.lost_stream_transmission_by_pn.remove(&packet_number);
+            }
+        }
+        if transmission.queued {
+            self.remove_stream_retransmit_queue_entry(transmission_id);
+        }
+    }
+
+    fn acknowledge_stream_transmission_packet(&mut self, packet_number: u64) {
+        if let Some(transmission_id) = self.stream_transmission_by_pn.get(&packet_number).copied() {
+            self.retire_stream_transmission(transmission_id);
+            return;
+        }
+        let transmission_ids =
+            self.lost_stream_transmission_by_pn.get(&packet_number).cloned().unwrap_or_default();
+        for transmission_id in transmission_ids {
+            self.retire_stream_transmission(transmission_id);
+        }
+    }
+
+    fn lose_stream_transmission_packet(&mut self, packet_number: u64) {
+        let Some(transmission_id) = self.stream_transmission_by_pn.remove(&packet_number) else {
+            return;
+        };
+
+        let mut evicted_packet = None;
+        if let Some(transmission) = self.stream_transmissions.get_mut(&transmission_id) {
+            if transmission.active_packet == Some(packet_number) {
+                transmission.active_packet = None;
+            }
+            if transmission.lost_packets.len() == MAX_STREAM_LOST_PACKET_HISTORY {
+                evicted_packet = transmission.lost_packets.pop_front();
+            }
+            transmission.lost_packets.push_back(packet_number);
+            if !transmission.queued {
+                transmission.queued = true;
+                self.stream_retransmit_queue.push_back(transmission_id);
+            }
+        }
+        if let Some(evicted_packet) = evicted_packet {
+            let remove_packet = if let Some(transmission_ids) =
+                self.lost_stream_transmission_by_pn.get_mut(&evicted_packet)
+            {
+                transmission_ids.retain(|id| *id != transmission_id);
+                transmission_ids.is_empty()
+            } else {
+                false
+            };
+            if remove_packet {
+                self.lost_stream_transmission_by_pn.remove(&evicted_packet);
+            }
+        }
+        let transmission_ids =
+            self.lost_stream_transmission_by_pn.entry(packet_number).or_default();
+        if !transmission_ids.contains(&transmission_id) {
+            transmission_ids.push(transmission_id);
+        }
+    }
+
+    fn acknowledge_late_stream_packets(&mut self, ranges: &[(u64, u64)]) {
+        let mut transmission_ids = Vec::new();
+        for (start, end) in ranges {
+            transmission_ids.extend(
+                self.lost_stream_transmission_by_pn
+                    .range(*start..*end)
+                    .flat_map(|(_, transmission_ids)| transmission_ids.iter().copied()),
+            );
+        }
+        transmission_ids.sort_unstable();
+        transmission_ids.dedup();
+        for transmission_id in transmission_ids {
+            self.retire_stream_transmission(transmission_id);
+        }
+    }
+
+    fn poll_stream_pto(&mut self, now: Instant) {
+        let pto = (self.recovery.rtt
+            + self.recovery.rtt_var().max(Duration::from_millis(1))
+            + Duration::from_millis(25))
+        .max(MIN_STREAM_PTO);
+        let expired = self
+            .stream_transmission_by_pn
+            .iter()
+            .filter_map(|(packet_number, _)| {
+                self.sent_packets_by_pn
+                    .get(packet_number)
+                    .map(|(packet_size, sent_at)| (*packet_number, *packet_size, *sent_at))
+            })
+            .filter(|(_, _, sent_at)| now.saturating_duration_since(*sent_at) >= pto)
+            .min_by_key(|(_, _, sent_at)| *sent_at)
+            .map(|(packet_number, packet_size, _)| (packet_number, packet_size));
+
+        let Some((packet_number, packet_size)) = expired else {
+            return;
+        };
+        self.sent_packets_by_pn.remove(&packet_number);
+        self.lose_stream_transmission_packet(packet_number);
+        self.recovery.on_loss_packet(packet_number, packet_size, now);
+        self.stats.lost = self.stats.lost.saturating_add(1);
+        self.stats.lost_bytes = self.stats.lost_bytes.saturating_add(packet_size as u64);
+        self.pmtu_above_floor_pns.remove(&packet_number);
+        if self.pmtu_probe_pn == Some(packet_number) {
+            self.pmtu.on_probe_lost();
+            self.pmtu_probe_pn = None;
+        }
+        self.cwnd = self.recovery.cwnd;
+    }
+
+    fn poll_congestion_blocked_datagram_pto(&mut self, now: Instant) {
+        if self.recovery.can_send(self.dgram_send_max_size) {
+            self.congestion_blocked_since = None;
+            return;
+        }
+
+        let blocked_since = *self.congestion_blocked_since.get_or_insert(now);
+        let pto = (self.recovery.rtt
+            + self.recovery.rtt_var().max(Duration::from_millis(1))
+            + Duration::from_millis(25))
+        .max(MIN_CONGESTION_BLOCKED_PTO);
+        if now.saturating_duration_since(blocked_since) < pto {
+            return;
+        }
+
+        let expired = self
+            .sent_packets_by_pn
+            .iter()
+            .filter(|(packet_number, (_, sent_at))| {
+                !self.stream_transmission_by_pn.contains_key(packet_number)
+                    && now.saturating_duration_since(*sent_at) >= pto
+            })
+            .min_by_key(|(_, (_, sent_at))| *sent_at)
+            .map(|(packet_number, (packet_size, _))| (*packet_number, *packet_size));
+        let Some((packet_number, packet_size)) = expired else {
+            return;
+        };
+
+        self.sent_packets_by_pn.remove(&packet_number);
+        self.recovery.on_loss_packet(packet_number, packet_size, now);
+        self.stats.lost = self.stats.lost.saturating_add(1);
+        self.stats.lost_bytes = self.stats.lost_bytes.saturating_add(packet_size as u64);
+        self.pmtu_above_floor_pns.remove(&packet_number);
+        if self.pmtu_probe_pn == Some(packet_number) {
+            self.pmtu.on_probe_lost();
+            self.pmtu_probe_pn = None;
+        }
+        self.congestion_blocked_since = None;
+        self.queue_cover_ping();
+        self.cwnd = self.recovery.cwnd;
     }
 
     fn refresh_path_count(&mut self) {
@@ -1351,11 +1730,7 @@ impl Connection {
                 self.stats.recv_bytes += len as u64;
                 return Ok(len);
             }
-            if !self.pkt_spaces[space_idx].on_packet_recv(
-                hdr_native.pkt_num,
-                self.config.max_ack_delay,
-                self.config.ack_eliciting_threshold,
-            ) {
+            if !self.pkt_spaces[space_idx].on_packet_recv(hdr_native.pkt_num) {
                 // Duplicate or overflow PN - silently discard per RFC 9000 Section 12.3
                 let len = aad_len.saturating_add(pt_len).min(buf.len());
                 self.stats.recv += 1;
@@ -1676,7 +2051,8 @@ impl Connection {
             }
         }
         if ack_eliciting {
-            self.pkt_spaces[space_idx].note_ack_eliciting();
+            self.pkt_spaces[space_idx]
+                .note_ack_eliciting(self.config.max_ack_delay, self.config.ack_eliciting_threshold);
         }
 
         // Update ECN counters for ACK ECN section (per-datagram)
@@ -1845,17 +2221,83 @@ impl Connection {
         Ok(off)
     }
 
-    /// Flushes one writable stream's pending data. Returns `(new_off,
-    /// wrote_ack_eliciting)` - STREAM frames are always ack-eliciting when
-    /// actually emitted (RFC 9000 §19.8).
+    /// Flushes one retransmitted or new STREAM range. Returns `(new_off,
+    /// wrote_ack_eliciting, transmission_id)` - STREAM frames are always
+    /// ack-eliciting when emitted (RFC 9000 §19.8).
+    fn maximum_stream_payload(
+        packet_len: usize,
+        packet_offset: usize,
+        tag_reserve: usize,
+        stream_id: u64,
+        stream_offset: u64,
+        available: usize,
+    ) -> usize {
+        let mut lower = 0usize;
+        let mut upper = available;
+        while lower < upper {
+            let candidate = lower + (upper - lower).div_ceil(2);
+            let wire_len = frames::stream_frame_wire_len(stream_id, stream_offset, candidate);
+            if packet_offset.saturating_add(wire_len).saturating_add(tag_reserve) <= packet_len {
+                lower = candidate;
+            } else {
+                upper = candidate - 1;
+            }
+        }
+        lower
+    }
+
     #[inline(always)]
     fn maybe_flush_one_writable_stream(
         &mut self,
         out: &mut [u8],
         mut off: usize,
-    ) -> Result<(usize, bool), crate::error::ConnectionError> {
+    ) -> Result<(usize, bool, Option<u64>), crate::error::ConnectionError> {
         use crate::error::ConnectionError;
 
+        while let Some(transmission_id) = self.stream_retransmit_queue.front().copied() {
+            let Some(transmission) = self.stream_transmissions.get(&transmission_id) else {
+                self.stream_retransmit_queue.pop_front();
+                continue;
+            };
+            if !transmission.queued {
+                self.stream_retransmit_queue.pop_front();
+                continue;
+            }
+
+            let stream_id = transmission.stream_id;
+            let stream_offset = transmission.offset;
+            let data = Arc::clone(&transmission.data);
+            let fin = transmission.fin;
+            let need = frames::stream_frame_wire_len(stream_id, stream_offset, data.len());
+            let tag_reserve = self.tag_reserve_1rtt();
+            if out.len() < off + need + tag_reserve {
+                let prefix_len = Self::maximum_stream_payload(
+                    out.len(),
+                    off,
+                    tag_reserve,
+                    stream_id,
+                    stream_offset,
+                    data.len(),
+                );
+                if prefix_len == 0 || data.is_empty() {
+                    return Ok((off, false, None));
+                }
+                self.split_queued_stream_transmission(transmission_id, prefix_len)?;
+                continue;
+            }
+            off += frames::write_stream_frame(
+                stream_id,
+                stream_offset,
+                data.as_ref(),
+                fin,
+                &mut out[off..],
+            )?;
+            return Ok((off, true, Some(transmission_id)));
+        }
+
+        let ledger_bytes = self.stream_retransmit_bytes;
+        let ledger_entries = self.stream_transmissions.len();
+        let mut staged_transmission: Option<(u64, u64, Arc<[u8]>, bool)> = None;
         if let Some(stream_id) = self.writable_streams.front().copied() {
             let tag_reserve = self.tag_reserve_1rtt();
             if let Some(s) = self.streams.get_mut(&stream_id) {
@@ -1870,12 +2312,8 @@ impl Connection {
                     }
                 };
                 if available > 0 {
-                    let header_overhead = 1
-                        + crate::transport::varint::varint_len(stream_id)
-                        + crate::transport::varint::varint_len(s.send_off)
-                        + 2;
-                    if off + header_overhead + tag_reserve < out.len() {
-                        let max_body = out.len() - off - header_overhead - tag_reserve;
+                    let header_overhead = frames::stream_frame_wire_len(stream_id, s.send_off, 0);
+                    if off + header_overhead + tag_reserve <= out.len() {
                         let conn_avail =
                             self.peer_max_data.saturating_sub(self.conn_bytes_sent) as usize;
                         let stream_avail = s.max_stream_data_tx.saturating_sub(s.send_off) as usize;
@@ -1889,31 +2327,23 @@ impl Connection {
                             });
                             return Err(ConnectionError::Done);
                         }
-                        let body_len = std::cmp::min(max_body, available.min(send_avail));
-                        #[cfg(not(feature = "stream_ring_buffer"))]
-                        let data_len = {
-                            let data = &s.send_buf[..body_len];
-                            let written = frames::write_stream_frame(
-                                s.id,
-                                s.send_off,
-                                data,
-                                s.send_fin && body_len == available,
-                                &mut out[off..],
-                            )?;
-                            off += written;
-                            data.len()
-                        };
-                        #[cfg(feature = "stream_ring_buffer")]
-                        let data_vec = {
-                            let mut v = vec![0u8; body_len];
-                            let read = s.send_ring.read(&mut v[..]);
-                            if read < body_len {
-                                v.truncate(read);
-                            }
-                            v
-                        };
-                        #[cfg(feature = "stream_ring_buffer")]
-                        let data_len = data_vec.len();
+                        let body_len = Self::maximum_stream_payload(
+                            out.len(),
+                            off,
+                            tag_reserve,
+                            stream_id,
+                            s.send_off,
+                            available.min(send_avail),
+                        );
+                        if body_len == 0 {
+                            return Ok((off, false, None));
+                        }
+                        if ledger_entries >= MAX_STREAM_TRANSMISSIONS
+                            || ledger_bytes.saturating_add(body_len) > MAX_STREAM_RETRANSMIT_BYTES
+                        {
+                            return Ok((off, false, None));
+                        }
+                        let stream_offset = s.send_off;
                         let fin_now = {
                             #[cfg(not(feature = "stream_ring_buffer"))]
                             {
@@ -1921,20 +2351,41 @@ impl Connection {
                             }
                             #[cfg(feature = "stream_ring_buffer")]
                             {
-                                s.send_fin && s.send_ring.is_empty()
+                                s.send_fin && body_len == available
                             }
                         };
-                        #[cfg(feature = "stream_ring_buffer")]
-                        {
-                            let frame = Frame::Stream {
-                                stream_id: s.id,
-                                offset: s.send_off,
-                                data: Cow::Owned(data_vec),
-                                fin: fin_now,
-                            };
-                            let written = frames::to_bytes(&frame, &mut out[off..])?;
+                        #[cfg(not(feature = "stream_ring_buffer"))]
+                        let data = {
+                            let data = Arc::<[u8]>::from(&s.send_buf[..body_len]);
+                            let written = frames::write_stream_frame(
+                                s.id,
+                                stream_offset,
+                                data.as_ref(),
+                                fin_now,
+                                &mut out[off..],
+                            )?;
                             off += written;
-                        }
+                            data
+                        };
+                        #[cfg(feature = "stream_ring_buffer")]
+                        let data = {
+                            let mut v = vec![0u8; body_len];
+                            let read = s.send_ring.read(&mut v[..]);
+                            if read < body_len {
+                                v.truncate(read);
+                            }
+                            let data = Arc::<[u8]>::from(v);
+                            let written = frames::write_stream_frame(
+                                s.id,
+                                stream_offset,
+                                data.as_ref(),
+                                fin_now,
+                                &mut out[off..],
+                            )?;
+                            off += written;
+                            data
+                        };
+                        let data_len = data.len();
                         s.send_off += data_len as u64;
                         #[cfg(not(feature = "stream_ring_buffer"))]
                         {
@@ -1959,8 +2410,7 @@ impl Connection {
                         if emptied && fin_now {
                             self.writable_streams.retain(|&id| id != stream_id);
                         }
-                        // STREAM frames are always ack-eliciting (RFC 9000 §19.8).
-                        return Ok((off, true));
+                        staged_transmission = Some((stream_id, stream_offset, data, fin_now));
                     }
                 } else if s.send_fin {
                     // Stream has no pending data but fin was requested: emit a
@@ -1972,17 +2422,20 @@ impl Connection {
                         + crate::transport::varint::varint_len(s.send_off)
                         + 2;
                     if off + header_overhead + tag_reserve < out.len() {
+                        if ledger_entries >= MAX_STREAM_TRANSMISSIONS {
+                            return Ok((off, false, None));
+                        }
+                        let stream_offset = s.send_off;
                         let written = frames::write_stream_frame(
                             s.id,
-                            s.send_off,
+                            stream_offset,
                             &[],
                             true,
                             &mut out[off..],
                         )?;
                         off += written;
                         self.writable_streams.retain(|&id| id != stream_id);
-                        // fin-only STREAM is still ack-eliciting.
-                        return Ok((off, true));
+                        staged_transmission = Some((stream_id, stream_offset, Arc::from([]), true));
                     }
                 } else {
                     // Stream has no pending data and no fin: remove it from the
@@ -1995,7 +2448,12 @@ impl Connection {
                 }
             }
         }
-        Ok((off, false))
+        if let Some((stream_id, stream_offset, data, fin)) = staged_transmission {
+            let transmission_id =
+                self.stage_stream_transmission(stream_id, stream_offset, data, fin)?;
+            return Ok((off, true, Some(transmission_id)));
+        }
+        Ok((off, false, None))
     }
 
     /// Flushes one DATAGRAM frame. Returns `(new_off, wrote_ack_eliciting)`.
@@ -2263,7 +2721,12 @@ impl Connection {
         off += frames::to_bytes(frame, &mut out[off..])?;
         off = self.seal_short_header_packet(out, pn, pn_off, pn_len, off)?;
 
-        let info = SendInfo { from: send_local, to: send_peer, at: Instant::now() };
+        let info = SendInfo {
+            from: send_local,
+            to: send_peer,
+            at: Instant::now(),
+            congestion_controlled: true,
+        };
         self.mark_unvalidated_path_send(send_local, send_peer, off);
         self.stats.sent += 1;
         self.stats.sent_bytes += off as u64;
@@ -2310,27 +2773,55 @@ impl Connection {
         // DPLPMTUD (TODO-451): when enabled, clamp to the *confirmed* path MTU rather
         // than the configured max. Probe packets are sized separately below.
         let now = Instant::now();
+        // Apply black-hole recovery before deriving this send's packetization
+        // budget so the first recovery packet uses the safe floor immediately.
+        if self.pmtu.check_black_hole(now) {
+            let previous_mtu = self.pmtu.effective_mtu();
+            self.pmtu.reset_to_minimum(now);
+            self.pmtu_above_floor_pns.clear();
+            log::warn!(
+                "DPLPMTUD black hole detected: path MTU {}B -> {}B",
+                previous_mtu,
+                self.pmtu.effective_mtu()
+            );
+        }
         let pmtu = self.pmtu.effective_mtu();
+        let available_probe_target = self.pmtu.probe_target().filter(|target| {
+            self.is_established
+                && self.pmtu.should_send_probe(now)
+                && *target <= self.dgram_send_max_size
+                && *target <= out.len()
+        });
+        let dedicated_pmtu_probe = available_probe_target.is_some();
+        let packetization_mtu = available_probe_target.unwrap_or(pmtu).max(pmtu);
         let outer_mtu_cap = out
             .len()
             .min(self.dgram_send_max_size.max(MIN_CLIENT_INITIAL_LEN))
-            .min(pmtu.max(MIN_CLIENT_INITIAL_LEN));
+            .min(packetization_mtu.max(MIN_CLIENT_INITIAL_LEN));
         let mtu_cap = outer_mtu_cap.saturating_sub(datagram_overhead);
         if unlikely(mtu_cap == 0) {
             return Err(ConnectionError::BufferTooShort);
         }
         let out = &mut out[..mtu_cap];
-        // Black-hole detection: if no ACKs have arrived for an extended period,
-        // reset the PMTU to the minimum and let the probe loop re-discover.
-        if self.pmtu.check_black_hole(now) {
-            self.pmtu.reset_to_minimum();
-        }
+        // Reliable STREAM tails need retransmission even when packet-threshold
+        // loss cannot fire because no higher packet was acknowledged.
+        self.poll_stream_pto(now);
         // Congestion gate: only send if within cwnd budget.
         // ACK-only packets bypass the gate (RFC 9002 §7.2) to prevent
         // congestion-control deadlocks where both sides exhaust their windows
         // and neither can send ACKs to release budget.
-        let congestion_blocked = !self.recovery.can_send(self.dgram_send_max_size);
-        let ack_bypass = congestion_blocked && self.has_pending_application_ack();
+        let mut congestion_blocked = !self.recovery.can_send(self.dgram_send_max_size);
+        let mut ack_bypass = congestion_blocked && self.has_pending_application_ack();
+        if congestion_blocked && !ack_bypass {
+            // DATAGRAM payloads remain unreliable. Release exactly one stale
+            // congestion owner only after the send gate has stayed closed for
+            // a conservative PTO, then send a PING to obtain fresh ACK state.
+            self.poll_congestion_blocked_datagram_pto(now);
+            congestion_blocked = !self.recovery.can_send(self.dgram_send_max_size);
+            ack_bypass = congestion_blocked && self.has_pending_application_ack();
+        } else {
+            self.congestion_blocked_since = None;
+        }
         if congestion_blocked && !ack_bypass {
             return Err(ConnectionError::Done);
         }
@@ -2501,7 +2992,12 @@ impl Connection {
                 }
                 return Ok((
                     used,
-                    SendInfo { at: Instant::now(), from: self.local_addr, to: self.peer_addr },
+                    SendInfo {
+                        at: Instant::now(),
+                        from: self.local_addr,
+                        to: self.peer_addr,
+                        congestion_controlled: true,
+                    },
                 ));
             }
 
@@ -2530,9 +3026,9 @@ impl Connection {
         // the handshake is always complete.
         let has_pending_data = !self.pending_control.is_empty()
             || self.has_pending_application_ack()
-            || !self.writable_streams.is_empty()
+            || self.has_sendable_stream_frame()
             || !self.dgram_send_queue.is_empty();
-        if !has_pending_data && !ack_bypass {
+        if !has_pending_data && !ack_bypass && !dedicated_pmtu_probe {
             return Err(ConnectionError::Done);
         }
         // Outbound stealth timing is owned by core::QuicFuscateConnection (next_packet_release).
@@ -2569,6 +3065,7 @@ impl Connection {
         // CONNECTION_CLOSE, APPLICATION_CLOSE. All others (STREAM, DATAGRAM,
         // CRYPTO, PING, MAX_DATA, NEW_CONNECTION_ID, etc.) are ack-eliciting.
         let mut wrote_ack_eliciting = false;
+        let mut stream_transmission_id = None;
 
         // Post-handshake Application-level CRYPTO (e.g. NewSessionTicket) is not
         // emitted here. The early return above guarantees `handshake_incomplete`
@@ -2577,24 +3074,27 @@ impl Connection {
         // respects flow control and the congestion window. The previous
         // `if handshake_incomplete` block was unreachable dead code.
 
-        let (off_after_ctrl, ctrl_ack_eliciting) =
-            self.flush_pending_control_frames(out, off, ack_bypass)?;
-        off = off_after_ctrl;
-        wrote_ack_eliciting |= ctrl_ack_eliciting;
-        off = self.maybe_emit_application_ack_frame(out, off)?;
-        // When bypassing the congestion gate for ACK-only packets, skip
-        // stream and datagram data - those are congestion-controlled and
-        // must not be sent when the window is exhausted.
-        if !ack_bypass {
-            let (off_after_stream, stream_ack_eliciting) =
-                self.maybe_flush_one_writable_stream(out, off)?;
-            off = off_after_stream;
-            wrote_ack_eliciting |= stream_ack_eliciting;
-            // FEC feed removed (handled by core)
-            let (off_after_dgram, dgram_ack_eliciting) =
-                self.maybe_flush_one_datagram_frame(out, off)?;
-            off = off_after_dgram;
-            wrote_ack_eliciting |= dgram_ack_eliciting;
+        if !dedicated_pmtu_probe {
+            let (off_after_ctrl, ctrl_ack_eliciting) =
+                self.flush_pending_control_frames(out, off, ack_bypass)?;
+            off = off_after_ctrl;
+            wrote_ack_eliciting |= ctrl_ack_eliciting;
+            off = self.maybe_emit_application_ack_frame(out, off)?;
+            // When bypassing the congestion gate for ACK-only packets, skip
+            // stream and datagram data - those are congestion-controlled and
+            // must not be sent when the window is exhausted.
+            if !ack_bypass {
+                let (off_after_stream, stream_ack_eliciting, emitted_transmission_id) =
+                    self.maybe_flush_one_writable_stream(out, off)?;
+                off = off_after_stream;
+                wrote_ack_eliciting |= stream_ack_eliciting;
+                stream_transmission_id = emitted_transmission_id;
+                // FEC feed removed (handled by core)
+                let (off_after_dgram, dgram_ack_eliciting) =
+                    self.maybe_flush_one_datagram_frame(out, off)?;
+                off = off_after_dgram;
+                wrote_ack_eliciting |= dgram_ack_eliciting;
+            }
         }
         // DPLPMTUD probe (TODO-451): when the PMTU state machine requests a
         // probe and the current packet has no ack-eliciting payload (otherwise
@@ -2603,9 +3103,9 @@ impl Connection {
         // the peer's ACK confirms the larger MTU. We only probe when the buffer
         // can hold the probe size (the caller's buffer is typically ≥ PMTU_MAX).
         let mut _pmtu_probe_sent = false;
-        if !wrote_ack_eliciting
-            && self.pmtu.should_send_probe(now)
-            && out.len() >= self.pmtu.probe_target().unwrap_or(0)
+        if dedicated_pmtu_probe
+            && !wrote_ack_eliciting
+            && outer_mtu_cap >= self.pmtu.probe_target().unwrap_or(0)
         {
             if let Some(probe_size) = self.pmtu.probe_size() {
                 // PING frame (ack-eliciting) so the peer ACKs the probe.
@@ -2615,8 +3115,9 @@ impl Connection {
                 wrote_ack_eliciting = true;
                 // Pad the remainder of the probe region with PADDING frames.
                 let tag_reserve = self.tag_reserve_1rtt();
+                let transport_probe_size = probe_size.saturating_sub(datagram_overhead);
                 let avail = out.len().saturating_sub(off + tag_reserve);
-                let needed = probe_size.saturating_sub(off + tag_reserve);
+                let needed = transport_probe_size.saturating_sub(off + tag_reserve);
                 let pad_len = needed.min(avail);
                 if pad_len > 0 {
                     off += crate::transport::frames::write_padding(pad_len, &mut out[off..])?;
@@ -2655,6 +3156,9 @@ impl Connection {
             // next chaff is deferred for one interval.
             chaff.record_real_traffic(now);
         }
+        if off == pn_off + pn_len {
+            return Err(ConnectionError::Done);
+        }
         off = self.maybe_apply_stealth_padding(out, pn_off, pn_len, off)?;
         off = self.seal_short_header_packet(out, pn, pn_off, pn_len, off)?;
 
@@ -2669,7 +3173,12 @@ impl Connection {
 
         // Stealth-friendly: do not force 1200-byte minimum for short-header packets
         let total = off;
-        let info = SendInfo { from: self.local_addr, to: self.peer_addr, at: Instant::now() };
+        let info = SendInfo {
+            from: self.local_addr,
+            to: self.peer_addr,
+            at: Instant::now(),
+            congestion_controlled: wrote_ack_eliciting,
+        };
         self.stats.sent += 1;
         self.stats.sent_bytes += total as u64;
         if !self.is_established && self.stats.recv > 0 && self.stats.sent > 0 {
@@ -2693,6 +3202,14 @@ impl Connection {
             let now = Instant::now();
             self.recovery.on_packet_sent(pn, total, now);
             self.sent_packets_by_pn.insert(pn, (total, now));
+            if let Some(transmission_id) = stream_transmission_id {
+                self.commit_stream_transmission(transmission_id, pn);
+            }
+            let outer_datagram_size = total.saturating_add(datagram_overhead);
+            self.pmtu.on_packet_sent(outer_datagram_size, now);
+            if outer_datagram_size > self.pmtu.min_mtu {
+                self.pmtu_above_floor_pns.insert(pn);
+            }
             self.cwnd = self.recovery.cwnd;
         }
         Ok((total, info))
@@ -3232,9 +3749,24 @@ impl Connection {
     }
 
     /// Current send quantum (bytes) derived from recovery
-    #[cfg(any(test, feature = "rust-tests"))]
     pub fn send_quantum(&self) -> usize {
         self.recovery.send_quantum()
+    }
+
+    /// Active production pacing rate in bytes per second.
+    ///
+    /// A configured maximum caps the congestion controller estimate. Before
+    /// the controller has a delivery sample, the configured value is used as
+    /// the startup rate when present.
+    pub(crate) fn pacing_rate(&self) -> Option<u64> {
+        if !self.config.pacing {
+            return None;
+        }
+        match (self.recovery.get_pacing_rate(), self.config.max_pacing_rate) {
+            (Some(rate), Some(cap)) => Some(rate.min(cap)).filter(|rate| *rate > 0),
+            (Some(rate), None) | (None, Some(rate)) => Some(rate).filter(|rate| *rate > 0),
+            (None, None) => None,
+        }
     }
     /// True if we can send at least one datagram of size `sz` within cwnd
     #[cfg(any(test, feature = "rust-tests"))]
@@ -3245,6 +3777,16 @@ impl Connection {
     /// Current RTT estimate
     pub fn rtt(&self) -> Duration {
         self.rtt
+    }
+
+    /// Confirmed packetization-layer MTU for the active path.
+    pub fn effective_path_mtu(&self) -> usize {
+        self.pmtu.effective_mtu().min(self.dgram_send_max_size)
+    }
+
+    /// Configured upper bound for one outgoing UDP payload.
+    pub fn max_send_udp_payload_size(&self) -> usize {
+        self.dgram_send_max_size
     }
 
     /// Bytes currently considered in flight
@@ -3752,12 +4294,6 @@ impl Connection {
         }
     }
 
-    /// Maximum UDP payload size for outgoing datagrams.
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn max_send_udp_payload_size(&self) -> usize {
-        self.dgram_send_max_size
-    }
-
     /// Path migration
     pub fn migrate(
         &mut self,
@@ -3918,9 +4454,14 @@ impl Connection {
         let now = Instant::now();
         let mut acked_total = 0usize;
         let mut lost_total = 0usize;
+        self.acknowledge_late_stream_packets(ranges);
         let largest_acked =
             ranges.iter().filter_map(|(_, end)| end.checked_sub(1)).max().unwrap_or(0);
         let packet_threshold = 3u64;
+        let above_floor_acked = self
+            .pmtu_above_floor_pns
+            .iter()
+            .any(|pn| ranges.iter().any(|(start, end)| *pn >= *start && *pn < *end));
 
         // RTT sample: look up send_time of the largest acknowledged PN.
         // Per RFC 9000 §5.1, only the largest acked PN yields a valid RTT sample
@@ -3941,12 +4482,14 @@ impl Connection {
                     && pn >= ranges[range_idx].0
                     && pn < ranges[range_idx].1;
                 if is_acked {
+                    self.acknowledge_stream_transmission_packet(pn);
                     if pn == largest_acked {
                         let elapsed = now.saturating_duration_since(send_time);
                         rtt_sample = Some(elapsed.saturating_sub(ack_delay));
                     }
                     acked_total = acked_total.saturating_add(sz);
                 } else {
+                    self.lose_stream_transmission_packet(pn);
                     self.recovery.on_loss_packet(pn, sz, now);
                     lost_total = lost_total.saturating_add(sz);
                     self.stats.lost = self.stats.lost.saturating_add(1);
@@ -3964,6 +4507,7 @@ impl Connection {
                     if span >= SENT_PACKET_SPLIT_DRAIN_THRESHOLD {
                         let acked_packets = self.drain_sent_packet_range(start, *end);
                         for (pn, (sz, send_time)) in acked_packets {
+                            self.acknowledge_stream_transmission_packet(pn);
                             if pn == largest_acked {
                                 let elapsed = now.saturating_duration_since(send_time);
                                 rtt_sample = Some(elapsed.saturating_sub(ack_delay));
@@ -3971,9 +4515,12 @@ impl Connection {
                             acked_total = acked_total.saturating_add(sz);
                         }
                     } else {
-                        for (pn, (sz, send_time)) in
-                            self.sent_packets_by_pn.extract_if(start..*end, |_, _| true)
-                        {
+                        let acked_packets = self
+                            .sent_packets_by_pn
+                            .extract_if(start..*end, |_, _| true)
+                            .collect::<Vec<_>>();
+                        for (pn, (sz, send_time)) in acked_packets {
+                            self.acknowledge_stream_transmission_packet(pn);
                             if pn == largest_acked {
                                 let elapsed = now.saturating_duration_since(send_time);
                                 rtt_sample = Some(elapsed.saturating_sub(ack_delay));
@@ -3989,6 +4536,7 @@ impl Connection {
                 if span >= SENT_PACKET_SPLIT_DRAIN_THRESHOLD {
                     let acked_packets = self.drain_sent_packet_range(*start, *end);
                     for (pn, (sz, send_time)) in acked_packets {
+                        self.acknowledge_stream_transmission_packet(pn);
                         if pn == largest_acked {
                             let elapsed = now.saturating_duration_since(send_time);
                             rtt_sample = Some(elapsed.saturating_sub(ack_delay));
@@ -3996,9 +4544,12 @@ impl Connection {
                         acked_total = acked_total.saturating_add(sz);
                     }
                 } else {
-                    for (pn, (sz, send_time)) in
-                        self.sent_packets_by_pn.extract_if(*start..*end, |_, _| true)
-                    {
+                    let acked_packets = self
+                        .sent_packets_by_pn
+                        .extract_if(*start..*end, |_, _| true)
+                        .collect::<Vec<_>>();
+                    for (pn, (sz, send_time)) in acked_packets {
+                        self.acknowledge_stream_transmission_packet(pn);
                         if pn == largest_acked {
                             let elapsed = now.saturating_duration_since(send_time);
                             rtt_sample = Some(elapsed.saturating_sub(ack_delay));
@@ -4010,6 +4561,7 @@ impl Connection {
             if let Some(loss_cutoff) = loss_cutoff {
                 let lost_packets = self.drain_sent_packets_through(loss_cutoff);
                 for (pn, (sz, _)) in lost_packets {
+                    self.lose_stream_transmission_packet(pn);
                     self.recovery.on_loss_packet(pn, sz, now);
                     lost_total = lost_total.saturating_add(sz);
                     self.stats.lost = self.stats.lost.saturating_add(1);
@@ -4021,12 +4573,22 @@ impl Connection {
             self.recovery.on_ack(acked_total, now);
             self.stats.acked_bytes = self.stats.acked_bytes.saturating_add(acked_total as u64);
             self.cwnd = self.recovery.cwnd;
-            // DPLPMTUD (TODO-451): record any ACK to refresh the black-hole
-            // watchdog, and confirm a probe if its PN was acknowledged.
-            self.pmtu.on_any_ack(now);
+            // Only a packet above the safe floor proves that the discovered
+            // capacity remains usable. Floor-sized ACKs cannot mask a black hole.
+            if above_floor_acked {
+                self.pmtu.on_packet_acked(self.pmtu.effective_mtu(), now);
+            }
             if let Some(probe_pn) = self.pmtu_probe_pn.take() {
                 if ranges.iter().any(|(s, e)| probe_pn >= *s && probe_pn < *e) {
+                    let previous_mtu = self.pmtu.effective_mtu();
                     self.pmtu.on_probe_acked(now);
+                    if self.pmtu.effective_mtu() != previous_mtu {
+                        log::info!(
+                            "DPLPMTUD confirmed path MTU: {}B -> {}B",
+                            previous_mtu,
+                            self.pmtu.effective_mtu()
+                        );
+                    }
                 } else {
                     // Probe not yet acked - keep tracking it.
                     self.pmtu_probe_pn = Some(probe_pn);
@@ -4044,6 +4606,11 @@ impl Connection {
                 self.pmtu_probe_pn = None;
             }
         }
+        self.pmtu_above_floor_pns.retain(|pn| {
+            let acknowledged = ranges.iter().any(|(start, end)| *pn >= *start && *pn < *end);
+            let declared_lost = loss_cutoff.is_some_and(|cutoff| *pn <= cutoff);
+            !acknowledged && !declared_lost
+        });
 
         // Apply RTT sample to connection + recovery (RFC 9000 §5).
         // This is the ONLY path that should update self.rtt with real measurements.
@@ -4653,6 +5220,281 @@ mod tests {
     }
 
     #[test]
+    fn lost_stream_range_is_retransmitted_with_identical_payload_and_offset() {
+        let mut pair = bench_paired_1rtt_connections();
+        pair.client.pmtu = PmtuState::new(false, PmtuPolicy::default());
+        pair.server.pmtu = PmtuState::new(false, PmtuPolicy::default());
+        let payload = b"reliable stream payload across a dropped QUIC packet";
+        pair.client.stream_send(0, payload, false).unwrap();
+        let mut first_packet = [0u8; 1500];
+        let first_pn = pair.client.next_send_pn_by_space[2];
+        pair.client.send(&mut first_packet).unwrap();
+
+        let (first_size, _) = pair.client.sent_packets_by_pn.remove(&first_pn).unwrap();
+        pair.client.lose_stream_transmission_packet(first_pn);
+        pair.client.recovery.on_loss_packet(first_pn, first_size, Instant::now());
+
+        let mut retransmitted_packet = [0u8; 1500];
+        let retransmitted_pn = pair.client.next_send_pn_by_space[2];
+        let (retransmitted_len, _) = pair.client.send(&mut retransmitted_packet).unwrap();
+        pair.server.recv(&mut retransmitted_packet[..retransmitted_len], &pair.recv_info).unwrap();
+
+        let mut received = vec![0u8; payload.len()];
+        let (received_len, fin) = pair.server.stream_recv(0, &mut received).unwrap();
+        assert_eq!(&received[..received_len], payload);
+        assert!(!fin);
+        assert_eq!(pair.client.stream_transmissions.len(), 1);
+        assert!(pair.client.stream_transmission_by_pn.contains_key(&retransmitted_pn));
+    }
+
+    #[test]
+    fn confirmed_pmtu_packets_split_exactly_on_floor_retransmission() {
+        let mut pair = bench_paired_1rtt_connections();
+        pair.client.dgram_send_max_size = 1500;
+        pair.server.dgram_send_max_size = 1500;
+        pair.client.pmtu = PmtuState::new(false, PmtuPolicy::default());
+        pair.client.pmtu.confirmed_mtu = 1500;
+        pair.server.pmtu = PmtuState::new(false, PmtuPolicy::default());
+        let payload = (0..1400).map(|index| (index % 251) as u8).collect::<Vec<_>>();
+        pair.client.stream_send(0, &payload, false).unwrap();
+
+        let mut packet = [0u8; 1500];
+        let original_pn = pair.client.next_send_pn_by_space[2];
+        let (original_len, _) = pair.client.send(&mut packet).unwrap();
+        assert!(original_len > pair.client.pmtu.min_mtu);
+        let (original_size, _) = pair.client.sent_packets_by_pn.remove(&original_pn).unwrap();
+        pair.client.lose_stream_transmission_packet(original_pn);
+        pair.client.recovery.on_loss_packet(original_pn, original_size, Instant::now());
+        pair.client.pmtu.confirmed_mtu = pair.client.pmtu.min_mtu;
+
+        let mut retransmitted_packet_numbers = Vec::new();
+        while !pair.client.stream_retransmit_queue.is_empty() {
+            let packet_number = pair.client.next_send_pn_by_space[2];
+            let (packet_len, _) = pair.client.send(&mut packet).unwrap();
+            assert!(packet_len <= pair.client.pmtu.min_mtu);
+            pair.server.recv(&mut packet[..packet_len], &pair.recv_info).unwrap();
+            retransmitted_packet_numbers.push(packet_number);
+        }
+        assert_eq!(retransmitted_packet_numbers.len(), 2);
+
+        let mut received = vec![0u8; payload.len()];
+        let (received_len, fin) = pair.server.stream_recv(0, &mut received).unwrap();
+        assert_eq!(received_len, payload.len());
+        assert_eq!(received, payload);
+        assert!(!fin);
+
+        for packet_number in retransmitted_packet_numbers {
+            pair.client.account_sent_bytes_for_ack_ranges_with_delay(
+                &[(packet_number, packet_number + 1)],
+                Duration::ZERO,
+            );
+        }
+        assert!(pair.client.stream_transmissions.is_empty());
+        assert_eq!(pair.client.stream_retransmit_bytes, 0);
+    }
+
+    #[test]
+    fn late_ack_of_pre_split_packet_retires_every_retransmission_segment() {
+        let mut pair = bench_paired_1rtt_connections();
+        pair.client.dgram_send_max_size = 1500;
+        pair.client.pmtu = PmtuState::new(false, PmtuPolicy::default());
+        pair.client.pmtu.confirmed_mtu = 1500;
+        pair.client.stream_send(0, &[0xA5; 1400], false).unwrap();
+
+        let mut packet = [0u8; 1500];
+        let original_pn = pair.client.next_send_pn_by_space[2];
+        pair.client.send(&mut packet).unwrap();
+        let (original_size, _) = pair.client.sent_packets_by_pn.remove(&original_pn).unwrap();
+        pair.client.lose_stream_transmission_packet(original_pn);
+        pair.client.recovery.on_loss_packet(original_pn, original_size, Instant::now());
+        pair.client.pmtu.confirmed_mtu = pair.client.pmtu.min_mtu;
+
+        let retransmitted_pn = pair.client.next_send_pn_by_space[2];
+        pair.client.send(&mut packet).unwrap();
+        assert_eq!(pair.client.stream_transmissions.len(), 2);
+        assert_eq!(pair.client.stream_retransmit_queue.len(), 1);
+
+        pair.client.account_sent_bytes_for_ack_ranges_with_delay(
+            &[(original_pn, original_pn + 1)],
+            Duration::ZERO,
+        );
+
+        assert!(pair.client.stream_transmissions.is_empty());
+        assert!(pair.client.stream_retransmit_queue.is_empty());
+        assert!(!pair.client.stream_transmission_by_pn.contains_key(&retransmitted_pn));
+        assert!(!pair.client.lost_stream_transmission_by_pn.contains_key(&original_pn));
+        assert_eq!(pair.client.stream_retransmit_bytes, 0);
+    }
+
+    #[test]
+    fn late_ack_of_lost_copy_retires_active_retransmission_exactly_once() {
+        let mut pair = bench_paired_1rtt_connections();
+        pair.client.pmtu = PmtuState::new(false, PmtuPolicy::default());
+        pair.client.stream_send(0, b"late ACK retirement", false).unwrap();
+        let mut packet = [0u8; 1500];
+        let original_pn = pair.client.next_send_pn_by_space[2];
+        pair.client.send(&mut packet).unwrap();
+
+        pair.client.sent_packets_by_pn.remove(&original_pn);
+        pair.client.lose_stream_transmission_packet(original_pn);
+        let retransmitted_pn = pair.client.next_send_pn_by_space[2];
+        pair.client.send(&mut packet).unwrap();
+        assert_eq!(pair.client.stream_transmissions.len(), 1);
+
+        pair.client.account_sent_bytes_for_ack_ranges_with_delay(
+            &[(original_pn, original_pn + 1)],
+            Duration::ZERO,
+        );
+
+        assert!(pair.client.stream_transmissions.is_empty());
+        assert!(pair.client.stream_retransmit_queue.is_empty());
+        assert!(!pair.client.stream_transmission_by_pn.contains_key(&retransmitted_pn));
+        pair.client.account_sent_bytes_for_ack_ranges_with_delay(
+            &[(retransmitted_pn, retransmitted_pn + 1)],
+            Duration::ZERO,
+        );
+        assert!(pair.client.stream_transmissions.is_empty());
+    }
+
+    #[test]
+    fn send_info_keeps_ack_only_packets_out_of_external_pacing() {
+        let mut pair = bench_paired_1rtt_connections();
+        pair.server.pmtu = PmtuState::new(false, PmtuPolicy::default());
+        assert!(pair.server.pkt_spaces[2].on_packet_recv(7));
+        pair.server.pkt_spaces[2].note_ack_eliciting(0, 1);
+        let bytes_in_flight = pair.server.recovery.bytes_in_flight;
+        let mut packet = [0u8; 1500];
+
+        let (_, send_info) = pair.server.send(&mut packet).expect("ACK must serialize");
+
+        assert!(!send_info.congestion_controlled);
+        assert_eq!(pair.server.recovery.bytes_in_flight, bytes_in_flight);
+    }
+
+    #[test]
+    fn send_info_marks_stream_packets_for_external_pacing() {
+        let mut pair = bench_paired_1rtt_connections();
+        pair.client.pmtu = PmtuState::new(false, PmtuPolicy::default());
+        pair.client.stream_send(0, b"paced stream", false).unwrap();
+        let mut packet = [0u8; 1500];
+
+        let (_, send_info) = pair.client.send(&mut packet).expect("STREAM must serialize");
+
+        assert!(send_info.congestion_controlled);
+    }
+
+    #[test]
+    fn stream_pto_requeues_tail_packet_without_a_higher_ack() {
+        let mut pair = bench_paired_1rtt_connections();
+        pair.client.pmtu = PmtuState::new(false, PmtuPolicy::default());
+        pair.client.stream_send(0, b"tail loss", false).unwrap();
+        let mut packet = [0u8; 1500];
+        let packet_number = pair.client.next_send_pn_by_space[2];
+        pair.client.send(&mut packet).unwrap();
+        let packet_size = pair.client.sent_packets_by_pn[&packet_number].0;
+        pair.client
+            .sent_packets_by_pn
+            .insert(packet_number, (packet_size, Instant::now() - Duration::from_secs(1)));
+
+        pair.client.poll_stream_pto(Instant::now());
+
+        assert!(!pair.client.sent_packets_by_pn.contains_key(&packet_number));
+        assert_eq!(pair.client.stream_retransmit_queue.len(), 1);
+        assert!(pair.client.lost_stream_transmission_by_pn.contains_key(&packet_number));
+    }
+
+    #[test]
+    fn aged_datagram_is_not_lost_while_congestion_gate_is_open() {
+        let mut pair = bench_paired_1rtt_connections();
+        pair.client.pmtu = PmtuState::new(false, PmtuPolicy::default());
+        pair.client.enable_datagrams(16, 16);
+        pair.client.dgram_send(b"unreliable tail").unwrap();
+        let mut packet = [0u8; 1500];
+        let packet_number = pair.client.next_send_pn_by_space[2];
+        pair.client.send(&mut packet).unwrap();
+        let packet_size = pair.client.sent_packets_by_pn[&packet_number].0;
+        let bytes_in_flight_before = pair.client.recovery.bytes_in_flight;
+        pair.client
+            .sent_packets_by_pn
+            .insert(packet_number, (packet_size, Instant::now() - Duration::from_secs(1)));
+
+        pair.client.poll_congestion_blocked_datagram_pto(Instant::now());
+
+        assert!(pair.client.sent_packets_by_pn.contains_key(&packet_number));
+        assert_eq!(pair.client.recovery.bytes_in_flight, bytes_in_flight_before);
+        assert!(pair.client.pending_control.is_empty());
+    }
+
+    #[test]
+    fn datagram_pto_releases_tail_only_after_continuous_congestion_blockage() {
+        let mut pair = bench_paired_1rtt_connections();
+        pair.client.pmtu = PmtuState::new(false, PmtuPolicy::default());
+        pair.client.enable_datagrams(16, 16);
+        pair.client.dgram_send(b"unreliable tail").unwrap();
+        let mut packet = [0u8; 1500];
+        let packet_number = pair.client.next_send_pn_by_space[2];
+        pair.client.send(&mut packet).unwrap();
+        let bytes_in_flight_before = pair.client.recovery.bytes_in_flight;
+        pair.client.recovery.cwnd = bytes_in_flight_before;
+        let blocked_at = Instant::now();
+
+        pair.client.poll_congestion_blocked_datagram_pto(blocked_at);
+        pair.client.poll_congestion_blocked_datagram_pto(
+            blocked_at + MIN_CONGESTION_BLOCKED_PTO - Duration::from_millis(1),
+        );
+
+        assert!(pair.client.sent_packets_by_pn.contains_key(&packet_number));
+        assert_eq!(pair.client.recovery.bytes_in_flight, bytes_in_flight_before);
+
+        pair.client.poll_congestion_blocked_datagram_pto(blocked_at + MIN_CONGESTION_BLOCKED_PTO);
+
+        assert!(!pair.client.sent_packets_by_pn.contains_key(&packet_number));
+        assert!(pair.client.dgram_send_queue.is_empty());
+        assert!(pair.client.stream_retransmit_queue.is_empty());
+        assert!(pair.client.recovery.bytes_in_flight < bytes_in_flight_before);
+        assert!(pair
+            .client
+            .pending_control
+            .iter()
+            .any(|frame| matches!(frame, Frame::Ping { .. })));
+    }
+
+    #[test]
+    fn packet_threshold_loss_requeues_stream_range() {
+        let mut pair = bench_paired_1rtt_connections();
+        pair.client.pmtu = PmtuState::new(false, PmtuPolicy::default());
+        pair.client.stream_send(0, b"packet threshold loss", false).unwrap();
+        let mut packet = [0u8; 1500];
+        let stream_packet_number = pair.client.next_send_pn_by_space[2];
+        pair.client.send(&mut packet).unwrap();
+        let now = Instant::now();
+        for packet_number in 1..=4 {
+            pair.client.sent_packets_by_pn.insert(packet_number, (1200, now));
+        }
+
+        pair.client.account_sent_bytes_for_ack_ranges_with_delay(&[(4, 5)], Duration::ZERO);
+
+        assert_eq!(pair.client.stream_retransmit_queue.len(), 1);
+        assert!(pair.client.lost_stream_transmission_by_pn.contains_key(&stream_packet_number));
+    }
+
+    #[test]
+    fn full_stream_ledger_backpressures_without_emitting_empty_packets() {
+        let mut pair = bench_paired_1rtt_connections();
+        pair.client.pmtu = PmtuState::new(false, PmtuPolicy::default());
+        pair.client.stream_send(0, b"bounded", false).unwrap();
+        pair.client.stream_retransmit_bytes = MAX_STREAM_RETRANSMIT_BYTES;
+        let packet_number = pair.client.next_send_pn_by_space[2];
+        let mut packet = [0u8; 1500];
+
+        let error = pair.client.send(&mut packet).unwrap_err();
+
+        assert_eq!(error, crate::error::ConnectionError::Done);
+        assert_eq!(pair.client.next_send_pn_by_space[2], packet_number);
+        assert!(pair.client.stream_transmissions.is_empty());
+    }
+
+    #[test]
     fn sparse_ack_accounting_removes_acked_and_prunes_packet_threshold_losses() {
         let mut c = make_conn();
         let send_time = Instant::now() - Duration::from_millis(50);
@@ -4932,5 +5774,157 @@ mod tests {
             .transport_stealth_jitter_delay()
             .expect("jitter should be scheduled when gate active");
         assert!(delay <= Duration::from_micros(100));
+    }
+
+    #[test]
+    fn pmtu_policy_reaches_configured_1500_ceiling() {
+        let now = Instant::now();
+        let mut state = PmtuState::new(true, PmtuPolicy::default());
+
+        assert_eq!(state.effective_mtu(), 1280);
+        assert_eq!(state.probe_size(), Some(1500));
+        state.on_probe_sent(1500, now);
+        state.on_probe_acked(now);
+
+        assert_eq!(state.effective_mtu(), 1500);
+        assert_eq!(state.probe_size(), None);
+    }
+
+    #[test]
+    fn connection_emits_dedicated_probe_above_confirmed_mtu() {
+        let mut pair = bench_paired_1rtt_connections();
+        pair.client.dgram_send_max_size = 1500;
+        pair.client.pmtu = PmtuState::new(true, PmtuPolicy::default());
+        pair.client.recovery.cwnd = 64 * 1024;
+        pair.client.recovery.bytes_in_flight = 0;
+        let mut packet = [0u8; 1600];
+
+        let (packet_len, _) = pair.client.send(&mut packet).expect("PMTU probe must serialize");
+
+        assert_eq!(packet_len, 1500);
+        assert!(pair.client.pmtu_probe_pn.is_some());
+    }
+
+    #[test]
+    fn connection_emits_exact_outer_probe_with_datagram_overhead() {
+        const FEC_WIRE_OVERHEAD: usize = 18;
+        let mut pair = bench_paired_1rtt_connections();
+        pair.client.dgram_send_max_size = 1500;
+        pair.client.pmtu = PmtuState::new(true, PmtuPolicy::default());
+        pair.client.recovery.cwnd = 64 * 1024;
+        pair.client.recovery.bytes_in_flight = 0;
+        let mut packet = [0u8; 1600];
+
+        let (packet_len, _) = pair
+            .client
+            .send_with_datagram_overhead(&mut packet, FEC_WIRE_OVERHEAD)
+            .expect("PMTU probe with outer framing must serialize");
+
+        assert_eq!(packet_len + FEC_WIRE_OVERHEAD, 1500);
+        assert!(pair.client.pmtu_probe_pn.is_some());
+    }
+
+    #[test]
+    fn unavailable_probe_capacity_does_not_emit_empty_packet() {
+        let mut pair = bench_paired_1rtt_connections();
+        pair.client.pmtu = PmtuState::new(true, PmtuPolicy::default());
+        let packet_number = pair.client.next_send_pn_by_space[2];
+        let mut packet = [0u8; 1600];
+
+        let error = pair.client.send(&mut packet).unwrap_err();
+
+        assert_eq!(error, crate::error::ConnectionError::Done);
+        assert_eq!(pair.client.next_send_pn_by_space[2], packet_number);
+        assert!(pair.client.pmtu_probe_pn.is_none());
+    }
+
+    #[test]
+    fn pmtu_loss_bisects_configured_bounds() {
+        let now = Instant::now();
+        let mut state = PmtuState::new(true, PmtuPolicy::default());
+
+        state.on_probe_sent(1500, now);
+        state.on_probe_lost();
+
+        assert_eq!(state.probe_size(), Some(1390));
+        assert_eq!(state.effective_mtu(), 1280);
+    }
+
+    #[test]
+    fn smaller_unrelated_ack_does_not_mask_confirmed_mtu_black_hole() {
+        let policy =
+            PmtuPolicy { black_hole_timeout: Duration::from_millis(10), ..PmtuPolicy::default() };
+        let start = Instant::now();
+        let mut state = PmtuState::new(true, policy);
+        state.on_probe_sent(1500, start);
+        state.on_probe_acked(start);
+        let large_send = start + Duration::from_millis(1);
+        state.on_packet_sent(1400, large_send);
+        state.on_packet_acked(1280, start + Duration::from_millis(5));
+
+        assert!(state.check_black_hole(start + Duration::from_millis(12)));
+    }
+
+    #[test]
+    fn repeated_above_floor_sends_do_not_defer_black_hole_timeout() {
+        let policy =
+            PmtuPolicy { black_hole_timeout: Duration::from_millis(10), ..PmtuPolicy::default() };
+        let start = Instant::now();
+        let mut state = PmtuState::new(true, policy);
+        state.on_probe_sent(1500, start);
+        state.on_probe_acked(start);
+        state.on_packet_sent(1400, start + Duration::from_millis(1));
+        state.on_packet_sent(1400, start + Duration::from_millis(9));
+
+        assert!(state.check_black_hole(start + Duration::from_millis(12)));
+    }
+
+    #[test]
+    fn black_hole_reset_recovers_at_floor_then_periodically_reprobes_ceiling() {
+        let probe_interval = Duration::from_millis(10);
+        let policy = PmtuPolicy {
+            probe_interval,
+            black_hole_timeout: Duration::from_millis(5),
+            ..PmtuPolicy::default()
+        };
+        let start = Instant::now();
+        let mut state = PmtuState::new(true, policy);
+        state.on_probe_sent(1500, start);
+        state.on_probe_acked(start);
+        state.on_packet_sent(1500, start + Duration::from_millis(1));
+        let reset_at = start + Duration::from_millis(7);
+
+        assert!(state.check_black_hole(reset_at));
+        state.reset_to_minimum(reset_at);
+        assert_eq!(state.effective_mtu(), 1280);
+        assert!(!state.should_send_probe(reset_at + probe_interval - Duration::from_millis(1)));
+        assert!(state.should_send_probe(reset_at + probe_interval));
+
+        let mut probe_at = reset_at + probe_interval;
+        for _ in 0..8 {
+            let probe_size = state.probe_size().expect("recovery search must retain a target");
+            if probe_size == 1500 {
+                break;
+            }
+            state.on_probe_sent(probe_size, probe_at);
+            state.on_probe_lost();
+            probe_at += probe_interval;
+        }
+
+        assert_eq!(state.probe_size(), Some(1500));
+        assert!(!state.should_send_probe(probe_at - Duration::from_millis(1)));
+        assert!(state.should_send_probe(probe_at));
+        state.on_probe_sent(1500, probe_at);
+        state.on_probe_acked(probe_at);
+        assert_eq!(state.effective_mtu(), 1500);
+    }
+
+    #[test]
+    fn disabled_pmtu_stays_at_configured_floor() {
+        let state = PmtuState::new(false, PmtuPolicy::default());
+
+        assert_eq!(state.effective_mtu(), 1280);
+        assert_eq!(state.probe_size(), None);
+        assert!(!state.enabled());
     }
 }

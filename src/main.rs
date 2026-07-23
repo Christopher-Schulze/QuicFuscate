@@ -19,7 +19,7 @@ use quicfuscate::stealth::{BrowserProfile, FingerprintProfile, OsProfile};
 use quicfuscate::telemetry;
 #[cfg(feature = "benches")]
 use std::collections::VecDeque;
-use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -252,7 +252,7 @@ async fn flush_connected_outgoing(
     conn: &mut QuicFuscateConnection,
     out: &mut [u8],
 ) -> std::io::Result<()> {
-    loop {
+    for _ in 0..quicfuscate::transport::UDP_DATAGRAM_BURST_LIMIT {
         match conn.send(out) {
             Ok(len) if len > 0 => {
                 telemetry!(quicfuscate::telemetry::BYTES_SENT.inc_by(len as u64));
@@ -899,6 +899,10 @@ enum Commands {
         #[clap(long, value_name = "PATH")]
         qkey_store: Option<PathBuf>,
 
+        /// Allow direct unicast between authenticated VPN clients
+        #[clap(long)]
+        allow_client_to_client: bool,
+
         /// Skip privilege dropping after setup (debugging only - never use in production)
         #[clap(long = "no-drop-privileges")]
         no_drop_privileges: bool,
@@ -1177,6 +1181,7 @@ async fn async_main() -> std::io::Result<()> {
             admin_web_password,
             qkey_ttl_secs,
             qkey_store,
+            allow_client_to_client,
             no_drop_privileges,
             audit_log,
         } => {
@@ -1205,6 +1210,8 @@ async fn async_main() -> std::io::Result<()> {
                 shared.tun_mtu,
                 shared.tun_ip,
                 shared.tun_netmask,
+                shared.tun_ip6,
+                shared.tun_prefix6,
                 admin_socket,
                 metrics_port,
                 admin_web,
@@ -1213,6 +1220,7 @@ async fn async_main() -> std::io::Result<()> {
                 admin_web_password,
                 qkey_ttl_secs,
                 qkey_store,
+                allow_client_to_client,
                 no_drop_privileges,
                 audit_log,
             )
@@ -1416,8 +1424,8 @@ fn apply_runtime_transport_defaults(
         warn!("Failed to set application protos: {}", e);
     }
     config.set_max_idle_timeout(30000);
-    config.set_max_recv_udp_payload_size(1460);
-    config.set_max_send_udp_payload_size(1200);
+    config.set_max_recv_udp_payload_size(1500);
+    config.set_max_send_udp_payload_size(1500);
     config.set_initial_max_data(10_000_000);
     config.set_initial_max_stream_data_bidi_local(1_000_000);
     config.set_initial_max_stream_data_bidi_remote(1_000_000);
@@ -1477,33 +1485,151 @@ fn apply_standalone_tun_server_config(
     server_config: &mut quicfuscate::implementations::server::ServerConfig,
     tun_ip: Option<&str>,
     tun_netmask: Option<&str>,
+    tun_ip6: Option<&str>,
+    tun_prefix6: Option<u8>,
 ) -> std::io::Result<()> {
-    let Some(tun_ip) = tun_ip else {
-        return Ok(());
-    };
-    let server_ip = tun_ip.parse::<Ipv4Addr>().map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("invalid --tun-ip: {e}"))
-    })?;
-    let netmask = match tun_netmask {
-        Some(mask) => mask.parse::<Ipv4Addr>().map_err(|e| {
-            std::io::Error::new(
+    if let Some(tun_ip) = tun_ip {
+        let server_ip = tun_ip.parse::<Ipv4Addr>().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("invalid --tun-ip: {e}"))
+        })?;
+        let netmask = match tun_netmask {
+            Some(mask) => mask.parse::<Ipv4Addr>().map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("invalid --tun-netmask: {e}"),
+                )
+            })?,
+            None => server_config.server_netmask,
+        };
+        let Some((pool_start, pool_end)) = derive_client_pool_for_tun(server_ip, netmask) else {
+            return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!("invalid --tun-netmask: {e}"),
-            )
-        })?,
-        None => server_config.server_netmask,
-    };
-    let Some((pool_start, pool_end)) = derive_client_pool_for_tun(server_ip, netmask) else {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("no usable client IP pool for TUN address {server_ip}/{netmask}"),
-        ));
-    };
+                format!("no usable client IP pool for TUN address {server_ip}/{netmask}"),
+            ));
+        };
 
-    server_config.server_ip = server_ip;
-    server_config.server_netmask = netmask;
-    server_config.ip_pool_start = pool_start;
-    server_config.ip_pool_end = pool_end;
+        server_config.server_ip = server_ip;
+        server_config.server_netmask = netmask;
+        server_config.ip_pool_start = pool_start;
+        server_config.ip_pool_end = pool_end;
+    }
+
+    if tun_ip6.is_some() || tun_prefix6.is_some() {
+        let server_ip = match tun_ip6 {
+            Some(value) => value.parse::<Ipv6Addr>().map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("invalid --tun-ip6: {error}"),
+                )
+            })?,
+            None => server_config.ipv6_server_ip.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "--tun-prefix6 requires an IPv6 server address",
+                )
+            })?,
+        };
+        let prefix = tun_prefix6.unwrap_or(server_config.ipv6_prefix_len);
+        let Some((pool_start, pool_end)) = derive_ipv6_client_pool_for_tun(server_ip, prefix)
+        else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("no usable client IPv6 pool for TUN address {server_ip}/{prefix}"),
+            ));
+        };
+        server_config.ipv6_server_ip = Some(server_ip);
+        server_config.ipv6_prefix_len = prefix;
+        server_config.ipv6_pool_start = Some(pool_start);
+        server_config.ipv6_pool_end = Some(pool_end);
+    }
+    Ok(())
+}
+
+fn derive_ipv6_client_pool_for_tun(
+    server_ip: Ipv6Addr,
+    prefix: u8,
+) -> Option<(Ipv6Addr, Ipv6Addr)> {
+    if prefix == 0 || prefix > 128 {
+        return None;
+    }
+    let server = u128::from(server_ip);
+    let mask = u128::MAX << (128 - prefix);
+    let network = server & mask;
+    let last = network | !mask;
+    let first_host = network.checked_add(1)?;
+    if first_host > last || server < network || server > last {
+        return None;
+    }
+
+    if server < last {
+        let start = server.checked_add(1)?;
+        let end = start.saturating_add(252).min(last);
+        return Some((Ipv6Addr::from(start), Ipv6Addr::from(end)));
+    }
+    if server > first_host {
+        let end = server.checked_sub(1)?;
+        let start = end.saturating_sub(252).max(first_host);
+        return Some((Ipv6Addr::from(start), Ipv6Addr::from(end)));
+    }
+    None
+}
+
+fn client_packet_too_big_response(packet: &[u8], tunnel_mtu: usize) -> Vec<u8> {
+    match packet.first().map(|byte| byte >> 4) {
+        Some(4) if packet.len() >= 20 => {
+            let destination = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
+            quicfuscate::implementations::server::icmp::build_icmpv4_error(
+                packet,
+                destination,
+                quicfuscate::implementations::server::icmp::icmp_type::DESTINATION_UNREACHABLE,
+                quicfuscate::implementations::server::icmp::icmp_code::FRAGMENTATION_NEEDED,
+                u16::try_from(tunnel_mtu).ok(),
+            )
+        }
+        Some(6) if packet.len() >= 40 => {
+            let destination =
+                Ipv6Addr::from(<[u8; 16]>::try_from(&packet[24..40]).unwrap_or([0; 16]));
+            quicfuscate::implementations::server::icmp::build_icmpv6_error(
+                packet,
+                destination,
+                quicfuscate::implementations::server::icmp::icmpv6_type::PACKET_TOO_BIG,
+                Some(tunnel_mtu.min(u32::MAX as usize) as u32),
+            )
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn send_client_tun_packet(
+    conn: &mut QuicFuscateConnection,
+    tun: &quicfuscate::interface::TunInterface,
+    stream_id: u64,
+    packet: &[u8],
+) -> Result<(), ConnectionError> {
+    let tunnel_mtu = conn.effective_tunnel_mtu().min(usize::from(tun.mtu()));
+    if packet.len() <= tunnel_mtu {
+        return conn.send_tunnel_packet(stream_id, packet);
+    }
+
+    let response = client_packet_too_big_response(packet, tunnel_mtu);
+    if response.is_empty() {
+        return Err(ConnectionError::BufferTooShort);
+    }
+    tun.write(&response).map_err(|error| ConnectionError::from(error.to_string()))?;
+    Ok(())
+}
+
+fn synchronize_client_tun_mtu(
+    conn: &QuicFuscateConnection,
+    tun: &quicfuscate::interface::TunInterface,
+    configured_ceiling: u16,
+) -> std::io::Result<()> {
+    let target =
+        configured_ceiling.min(u16::try_from(conn.effective_tunnel_mtu()).unwrap_or(u16::MAX));
+    if tun.mtu() != target {
+        tun.set_mtu(target)?;
+        info!("Client TUN MTU updated to {}", target);
+    }
     Ok(())
 }
 
@@ -1586,6 +1712,17 @@ async fn run_client(
     })?;
 
     let std_socket = std::net::UdpSocket::bind(local_addr)?;
+    let socket_ref = socket2::SockRef::from(&std_socket);
+    if let Err(error) =
+        socket_ref.set_recv_buffer_size(quicfuscate::transport::UDP_SOCKET_BUFFER_BYTES)
+    {
+        log::debug!("UDP receive buffer hint rejected: {}", error);
+    }
+    if let Err(error) =
+        socket_ref.set_send_buffer_size(quicfuscate::transport::UDP_SOCKET_BUFFER_BYTES)
+    {
+        log::debug!("UDP send buffer hint rejected: {}", error);
+    }
     std_socket.connect(server_addr)?;
     std_socket.set_nonblocking(true)?;
     let socket = tokio::net::UdpSocket::from_std(std_socket)?;
@@ -1629,6 +1766,12 @@ async fn run_client(
         }
     };
     apply_runtime_transport_defaults(&mut config, cc_algorithm);
+    if let Some(cfg_path) = config_path {
+        quicfuscate::implementations::server::apply_transport_overrides_from_file(
+            cfg_path,
+            &mut config,
+        );
+    }
     config.verify_peer(true);
     if verify_peer {
         log::debug!("--verify-peer is retained for compatibility; verification is already enabled");
@@ -1768,6 +1911,7 @@ async fn run_client(
 
     let mut request_sent = false;
     let mut kill_switch_connected = false;
+    let requested_tun_mtu = tun_mtu.unwrap_or(1500);
 
     // Optional TUN bridging setup
     #[allow(clippy::type_complexity)]
@@ -1776,11 +1920,13 @@ async fn run_client(
         Option<Arc<quicfuscate::interface::TunInterface>>,
         Option<u64>,
     ) = if tun_enable {
+        let effective_tun_mtu =
+            requested_tun_mtu.min(u16::try_from(conn.effective_tunnel_mtu()).unwrap_or(u16::MAX));
         let tcfg = quicfuscate::interface::TunConfig {
             name: tun_name,
             ip: tun_ip.and_then(|s| s.parse().ok()),
             netmask: tun_netmask.and_then(|s| s.parse().ok()),
-            mtu: tun_mtu.unwrap_or(1500),
+            mtu: effective_tun_mtu,
             ip6: tun_ip6.as_ref().and_then(|s| s.parse().ok()),
             prefix6: tun_prefix6,
             ..Default::default()
@@ -1812,7 +1958,9 @@ async fn run_client(
                     },
                 ))));
                 // Spawn a blocking reader thread that forwards TUN frames into a channel
-                let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+                let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(
+                    quicfuscate::interface::TUN_PACKET_QUEUE_CAPACITY,
+                );
                 let tun_for_reader = tun.clone();
                 std::thread::spawn(move || {
                     loop {
@@ -1892,8 +2040,11 @@ async fn run_client(
                                 for _ in 0..16 {
                                     match rx.try_recv() {
                                         Ok(frame) => {
-                                            if let Err(e) = conn.http3_send_body_chunk(sid, &frame, false) {
-                                                warn!("http3_send_body_chunk failed: {:?}", e);
+                                            let Some(tun) = tun_writer.as_ref() else {
+                                                break;
+                                            };
+                                            if let Err(e) = send_client_tun_packet(&mut conn, tun, sid, &frame) {
+                                                warn!("TUN packet send failed: {:?}", e);
                                                 break;
                                             }
                                         }
@@ -1980,8 +2131,11 @@ async fn run_client(
                         for _ in 0..16 {
                             match rx.try_recv() {
                                 Ok(frame) => {
-                                    if let Err(e) = conn.http3_send_body_chunk(sid, &frame, false) {
-                                        warn!("http3_send_body_chunk failed: {:?}", e);
+                                    let Some(tun) = tun_writer.as_ref() else {
+                                        break;
+                                    };
+                                    if let Err(e) = send_client_tun_packet(&mut conn, tun, sid, &frame) {
+                                        warn!("TUN packet send failed: {:?}", e);
                                         break;
                                     }
                                 }
@@ -1999,6 +2153,15 @@ async fn run_client(
                 }
 
                 conn.update_state();
+                if let Some(tun) = tun_writer.as_ref() {
+                    if let Err(error) =
+                        synchronize_client_tun_mtu(&conn, tun, requested_tun_mtu)
+                    {
+                        break ExitReason::SocketError(format!(
+                            "client TUN MTU synchronization failed: {error}"
+                        ));
+                    }
+                }
                 let now = tokio::time::Instant::now();
                 if now >= next_stats_log {
                     info!(
@@ -2073,6 +2236,47 @@ mod runtime_reload_tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
 
+    fn ipv4_packet(len: usize) -> Vec<u8> {
+        let mut packet = vec![0u8; len];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(len as u16).to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 17;
+        packet[12..16].copy_from_slice(&[10, 0, 1, 2]);
+        packet[16..20].copy_from_slice(&[1, 1, 1, 1]);
+        packet
+    }
+
+    fn ipv6_packet(len: usize) -> Vec<u8> {
+        let mut packet = vec![0u8; len];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&((len - 40) as u16).to_be_bytes());
+        packet[6] = 17;
+        packet[7] = 64;
+        packet[8..24].copy_from_slice(&"fd00::2".parse::<Ipv6Addr>().unwrap().octets());
+        packet[24..40].copy_from_slice(&"2001:db8::1".parse::<Ipv6Addr>().unwrap().octets());
+        packet
+    }
+
+    #[test]
+    fn client_ipv4_packet_too_big_response_advertises_tunnel_mtu() {
+        let response = client_packet_too_big_response(&ipv4_packet(1400), 1280);
+
+        assert_eq!(response[20], 3);
+        assert_eq!(response[21], 4);
+        assert_eq!(u16::from_be_bytes([response[26], response[27]]), 1280);
+        assert_eq!(&response[16..20], &[10, 0, 1, 2]);
+    }
+
+    #[test]
+    fn client_ipv6_packet_too_big_response_advertises_tunnel_mtu() {
+        let response = client_packet_too_big_response(&ipv6_packet(1400), 1280);
+
+        assert_eq!(response[40], 2);
+        assert_eq!(u32::from_be_bytes(response[44..48].try_into().unwrap()), 1280);
+        assert_eq!(&response[24..40], &"fd00::2".parse::<Ipv6Addr>().unwrap().octets());
+    }
+
     #[test]
     fn normalize_runtime_optimize_config_preserves_runtime_values() {
         let normalized = quicfuscate::implementations::server::normalize_runtime_optimize_config(
@@ -2132,12 +2336,30 @@ mod runtime_reload_tests {
     #[test]
     fn apply_standalone_tun_server_config_aligns_server_ip_and_pool() {
         let mut config = quicfuscate::implementations::server::ServerConfig::default();
-        apply_standalone_tun_server_config(&mut config, Some("10.0.1.1"), Some("255.255.255.0"))
-            .expect("apply tun config");
+        apply_standalone_tun_server_config(
+            &mut config,
+            Some("10.0.1.1"),
+            Some("255.255.255.0"),
+            None,
+            None,
+        )
+        .expect("apply tun config");
         assert_eq!(config.server_ip, Ipv4Addr::new(10, 0, 1, 1));
         assert_eq!(config.server_netmask, Ipv4Addr::new(255, 255, 255, 0));
         assert_eq!(config.ip_pool_start, Ipv4Addr::new(10, 0, 1, 2));
         assert_eq!(config.ip_pool_end, Ipv4Addr::new(10, 0, 1, 254));
+    }
+
+    #[test]
+    fn apply_standalone_tun_server_config_aligns_ipv6_server_and_dense_pool() {
+        let mut config = quicfuscate::implementations::server::ServerConfig::default();
+        apply_standalone_tun_server_config(&mut config, None, None, Some("fd42:53::1"), Some(64))
+            .expect("apply IPv6 TUN config");
+
+        assert_eq!(config.ipv6_server_ip, Some("fd42:53::1".parse().unwrap()));
+        assert_eq!(config.ipv6_prefix_len, 64);
+        assert_eq!(config.ipv6_pool_start, Some("fd42:53::2".parse().unwrap()));
+        assert_eq!(config.ipv6_pool_end, Some("fd42:53::fe".parse().unwrap()));
     }
 
     fn write_temp_config(contents: &str) -> std::path::PathBuf {
@@ -2404,6 +2626,8 @@ async fn run_server(
     tun_mtu: Option<u16>,
     tun_ip: Option<String>,
     tun_netmask: Option<String>,
+    tun_ip6: Option<String>,
+    tun_prefix6: Option<u8>,
     admin_socket: Option<PathBuf>,
     metrics_port: Option<u16>,
     admin_web: Option<std::net::SocketAddr>,
@@ -2412,6 +2636,7 @@ async fn run_server(
     admin_web_password: Option<String>,
     qkey_ttl_secs: Option<u64>,
     qkey_store: Option<PathBuf>,
+    allow_client_to_client: bool,
     no_drop_privileges: bool,
     audit_log_path: Option<PathBuf>,
 ) -> std::io::Result<()> {
@@ -2556,11 +2781,14 @@ async fn run_server(
     let mut server_config =
         quicfuscate::implementations::server::server_config_from_listen_addr(listen_addr)
             .map_err(std::io::Error::other)?;
+    server_config.allow_client_to_client = allow_client_to_client;
     if tun_enable {
         apply_standalone_tun_server_config(
             &mut server_config,
             tun_ip.as_deref(),
             tun_netmask.as_deref(),
+            tun_ip6.as_deref(),
+            tun_prefix6,
         )?;
     }
     let opt_params = runtime_optimize_config(
@@ -2649,6 +2877,13 @@ async fn run_server(
     if !no_drop_privileges {
         let cap_report = quicfuscate::privilege::check_capabilities();
         if cap_report.is_root {
+            if tun_enable {
+                runtime.stop().map_err(std::io::Error::other)?;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "refusing to drop root after TUN routing setup because shutdown could not remove owned firewall rules; run as the quicfuscate systemd user with AmbientCapabilities or use --no-drop-privileges only in an isolated test environment",
+                ));
+            }
             info!("Dropping root privileges to quicfuscate:quicfuscate");
             match quicfuscate::privilege::drop_privileges("quicfuscate", "quicfuscate") {
                 Ok(()) => {

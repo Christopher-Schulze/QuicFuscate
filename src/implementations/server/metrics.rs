@@ -7,6 +7,19 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+use super::isolation::{UplinkDrop, UplinkRoute};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoutingOutcome {
+    Local,
+    Unicast,
+    Fanout,
+    Unknown,
+    PacketTooBig,
+    TimeExceeded,
+    Icmpv6,
+}
+
 /// Server metrics collector.
 #[derive(Debug)]
 pub struct Metrics {
@@ -21,6 +34,23 @@ pub struct Metrics {
     pub bytes_out: AtomicU64,
     pub packets_in: AtomicU64,
     pub packets_out: AtomicU64,
+
+    // Routing policy metrics
+    pub routing_internet: AtomicU64,
+    pub routing_client: AtomicU64,
+    pub routing_broadcast: AtomicU64,
+    pub routing_multicast: AtomicU64,
+    pub routing_drop_missing_session: AtomicU64,
+    pub routing_drop_malformed: AtomicU64,
+    pub routing_drop_spoofed: AtomicU64,
+    pub routing_drop_inter_client: AtomicU64,
+    pub routing_local: AtomicU64,
+    pub routing_unicast: AtomicU64,
+    pub routing_fanout: AtomicU64,
+    pub routing_unknown: AtomicU64,
+    pub routing_packet_too_big: AtomicU64,
+    pub routing_time_exceeded: AtomicU64,
+    pub routing_icmpv6: AtomicU64,
 
     // Stealth metrics
     pub stealth_http3_active: AtomicU64,
@@ -51,6 +81,21 @@ impl Metrics {
             bytes_out: AtomicU64::new(0),
             packets_in: AtomicU64::new(0),
             packets_out: AtomicU64::new(0),
+            routing_internet: AtomicU64::new(0),
+            routing_client: AtomicU64::new(0),
+            routing_broadcast: AtomicU64::new(0),
+            routing_multicast: AtomicU64::new(0),
+            routing_drop_missing_session: AtomicU64::new(0),
+            routing_drop_malformed: AtomicU64::new(0),
+            routing_drop_spoofed: AtomicU64::new(0),
+            routing_drop_inter_client: AtomicU64::new(0),
+            routing_local: AtomicU64::new(0),
+            routing_unicast: AtomicU64::new(0),
+            routing_fanout: AtomicU64::new(0),
+            routing_unknown: AtomicU64::new(0),
+            routing_packet_too_big: AtomicU64::new(0),
+            routing_time_exceeded: AtomicU64::new(0),
+            routing_icmpv6: AtomicU64::new(0),
             stealth_http3_active: AtomicU64::new(0),
             stealth_tls13_active: AtomicU64::new(0),
             fec_packets_encoded: AtomicU64::new(0),
@@ -101,6 +146,40 @@ impl Metrics {
         let global = crate::instrumentation::global();
         global.transport.record_bytes_out(bytes as u64);
         global.transport.record_packet_out();
+    }
+
+    pub fn record_uplink_route(&self, route: UplinkRoute) {
+        let counter = match route {
+            UplinkRoute::Local { .. } => &self.routing_local,
+            UplinkRoute::Internet { .. } => &self.routing_internet,
+            UplinkRoute::Client { .. } => &self.routing_client,
+            UplinkRoute::Broadcast { .. } => &self.routing_broadcast,
+            UplinkRoute::Multicast { .. } => &self.routing_multicast,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_uplink_drop(&self, drop: UplinkDrop) {
+        let counter = match drop {
+            UplinkDrop::MissingSession => &self.routing_drop_missing_session,
+            UplinkDrop::MalformedPacket => &self.routing_drop_malformed,
+            UplinkDrop::SourceIpSpoofing { .. } => &self.routing_drop_spoofed,
+            UplinkDrop::InterClientTraffic { .. } => &self.routing_drop_inter_client,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_routing_outcome(&self, outcome: RoutingOutcome) {
+        let counter = match outcome {
+            RoutingOutcome::Local => &self.routing_local,
+            RoutingOutcome::Unicast => &self.routing_unicast,
+            RoutingOutcome::Fanout => &self.routing_fanout,
+            RoutingOutcome::Unknown => &self.routing_unknown,
+            RoutingOutcome::PacketTooBig => &self.routing_packet_too_big,
+            RoutingOutcome::TimeExceeded => &self.routing_time_exceeded,
+            RoutingOutcome::Icmpv6 => &self.routing_icmpv6,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Export as Prometheus text format.
@@ -173,6 +252,31 @@ impl Metrics {
             "quicfuscate_packets_out_total {}\n\n",
             self.packets_out.load(Ordering::Relaxed)
         ));
+
+        out.push_str("# HELP quicfuscate_routing_packets_total Packets by typed routing outcome\n");
+        out.push_str("# TYPE quicfuscate_routing_packets_total counter\n");
+        for (outcome, value) in [
+            ("internet", self.routing_internet.load(Ordering::Relaxed)),
+            ("client", self.routing_client.load(Ordering::Relaxed)),
+            ("broadcast", self.routing_broadcast.load(Ordering::Relaxed)),
+            ("multicast", self.routing_multicast.load(Ordering::Relaxed)),
+            ("drop_missing_session", self.routing_drop_missing_session.load(Ordering::Relaxed)),
+            ("drop_malformed", self.routing_drop_malformed.load(Ordering::Relaxed)),
+            ("drop_spoofed", self.routing_drop_spoofed.load(Ordering::Relaxed)),
+            ("drop_inter_client", self.routing_drop_inter_client.load(Ordering::Relaxed)),
+            ("local", self.routing_local.load(Ordering::Relaxed)),
+            ("unicast", self.routing_unicast.load(Ordering::Relaxed)),
+            ("fanout", self.routing_fanout.load(Ordering::Relaxed)),
+            ("unknown", self.routing_unknown.load(Ordering::Relaxed)),
+            ("packet_too_big", self.routing_packet_too_big.load(Ordering::Relaxed)),
+            ("time_exceeded", self.routing_time_exceeded.load(Ordering::Relaxed)),
+            ("icmpv6", self.routing_icmpv6.load(Ordering::Relaxed)),
+        ] {
+            out.push_str(&format!(
+                "quicfuscate_routing_packets_total{{outcome=\"{outcome}\"}} {value}\n"
+            ));
+        }
+        out.push('\n');
 
         // Stealth
         out.push_str("# HELP quicfuscate_stealth_http3_active Clients using HTTP/3 stealth\n");
@@ -446,6 +550,11 @@ mod tests {
         metrics.record_connection_rejected();
         metrics.record_ingress_datagram(1_000_000);
         metrics.clients_active.store(42, Ordering::Relaxed);
+        metrics.record_uplink_route(UplinkRoute::Internet {
+            source: "10.8.0.2".parse().unwrap(),
+            destination: "1.1.1.1".parse().unwrap(),
+        });
+        metrics.record_uplink_drop(UplinkDrop::MalformedPacket);
 
         let output = metrics.export();
         assert!(output.contains("quicfuscate_up 1"));
@@ -453,6 +562,8 @@ mod tests {
         assert!(output.contains("quicfuscate_connections_accepted 1"));
         assert!(output.contains("quicfuscate_connections_rejected 1"));
         assert!(output.contains("quicfuscate_bytes_in_total 1000000"));
+        assert!(output.contains("quicfuscate_routing_packets_total{outcome=\"internet\"} 1"));
+        assert!(output.contains("quicfuscate_routing_packets_total{outcome=\"drop_malformed\"} 1"));
     }
 
     #[test]

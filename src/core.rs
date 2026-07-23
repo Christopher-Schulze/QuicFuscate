@@ -23,7 +23,7 @@ use std::sync::OnceLock;
 // unused on current code path; keep import minimal
 use crate::telemetry;
 use log::{debug, info, warn};
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "orchestrator")]
@@ -33,6 +33,62 @@ use std::net::SocketAddr;
 // Type aliases to simplify handler types
 pub type CapsuleHandler = Arc<std::sync::Mutex<Box<dyn FnMut(u64, &[u8]) + Send>>>;
 pub type DatagramHandler = Arc<std::sync::Mutex<Box<dyn FnMut(&[u8]) + Send>>>;
+
+const H3_TUNNEL_FRAME_MAGIC: &[u8; 4] = b"QFT1";
+const H3_TUNNEL_FRAME_HEADER_LEN: usize = 6;
+const MAX_INNER_IP_PACKET_LEN: usize = u16::MAX as usize;
+const MAX_H3_TUNNEL_PENDING_LEN: usize = 2 * (H3_TUNNEL_FRAME_HEADER_LEN + MAX_INNER_IP_PACKET_LEN);
+const IPV6_MINIMUM_LINK_MTU: usize = 1280;
+
+#[derive(Default)]
+struct H3TunnelFrameDecoder {
+    pending: Vec<u8>,
+}
+
+impl H3TunnelFrameDecoder {
+    fn push<F>(&mut self, data: &[u8], mut on_packet: F) -> Result<(), &'static str>
+    where
+        F: FnMut(&[u8]),
+    {
+        if self.pending.len().saturating_add(data.len()) > MAX_H3_TUNNEL_PENDING_LEN {
+            self.pending.clear();
+            return Err("H3 tunnel frame buffer exceeded its bounded capacity");
+        }
+        self.pending.extend_from_slice(data);
+
+        let mut consumed = 0usize;
+        while self.pending.len().saturating_sub(consumed) >= H3_TUNNEL_FRAME_HEADER_LEN {
+            let header = &self.pending[consumed..consumed + H3_TUNNEL_FRAME_HEADER_LEN];
+            if &header[..H3_TUNNEL_FRAME_MAGIC.len()] != H3_TUNNEL_FRAME_MAGIC {
+                self.pending.clear();
+                return Err("invalid H3 tunnel frame magic");
+            }
+            let packet_len = usize::from(u16::from_be_bytes([header[4], header[5]]));
+            if packet_len == 0 {
+                self.pending.clear();
+                return Err("empty H3 tunnel packet");
+            }
+            let frame_len = H3_TUNNEL_FRAME_HEADER_LEN + packet_len;
+            if self.pending.len() - consumed < frame_len {
+                break;
+            }
+            let packet_start = consumed + H3_TUNNEL_FRAME_HEADER_LEN;
+            let packet_end = consumed + frame_len;
+            let packet = &self.pending[packet_start..packet_end];
+            if !matches!(packet.first().map(|byte| byte >> 4), Some(4 | 6)) {
+                self.pending.clear();
+                return Err("H3 tunnel frame does not contain an IP packet");
+            }
+            on_packet(packet);
+            consumed = packet_end;
+        }
+
+        if consumed > 0 {
+            self.pending.drain(..consumed);
+        }
+        Ok(())
+    }
+}
 
 struct Http3PollBindings {
     masque_datagram_cb: Option<DatagramHandler>,
@@ -44,6 +100,7 @@ struct Http3PollBindings {
 struct OutgoingFecPacket {
     packet: FecPacket,
     wire_meta: Option<WirePacketMeta>,
+    congestion_controlled: bool,
 }
 
 impl OutgoingFecPacket {
@@ -58,6 +115,52 @@ impl OutgoingFecPacket {
             symbol
         };
         wire::write_packet(meta, payload, buf).map_err(|error| error.to_string())
+    }
+}
+
+#[derive(Default)]
+struct OutboundPacer {
+    next_release: Option<Instant>,
+    burst_bytes: usize,
+}
+
+impl OutboundPacer {
+    fn is_blocked(&mut self, now: Instant) -> bool {
+        let Some(release) = self.next_release else {
+            return false;
+        };
+        if now < release {
+            return true;
+        }
+        self.next_release = None;
+        false
+    }
+
+    fn record_send(
+        &mut self,
+        now: Instant,
+        bytes: usize,
+        send_quantum: usize,
+        rate_bytes_per_second: u64,
+    ) {
+        if bytes == 0 || rate_bytes_per_second == 0 {
+            return;
+        }
+        self.burst_bytes = self.burst_bytes.saturating_add(bytes);
+        if self.burst_bytes < send_quantum.max(1) {
+            return;
+        }
+
+        let paced_bytes = std::mem::take(&mut self.burst_bytes);
+        let numerator = (paced_bytes as u128).saturating_mul(1_000_000_000);
+        let denominator = rate_bytes_per_second as u128;
+        let delay_nanos = numerator.div_ceil(denominator).max(1).min(u64::MAX as u128) as u64;
+        self.next_release = Some(now + Duration::from_nanos(delay_nanos));
+    }
+
+    fn reset(&mut self) {
+        self.next_release = None;
+        self.burst_bytes = 0;
     }
 }
 
@@ -117,6 +220,12 @@ pub struct QuicFuscateConnection {
     fec_tx_sequence: u64,
     fec_tx_active: bool,
     h3_conn: Option<crate::transport::h3::Connection>,
+    h3_tunnel_rx: HashMap<u64, H3TunnelFrameDecoder>,
+    h3_tunnel_tx_frame: Vec<u8>,
+    h3_peer_tunnel_stream_id: Option<u64>,
+    h3_tunnel_response_started: HashSet<u64>,
+    h3_tunnel_uplink_fallback_reported: bool,
+    h3_tunnel_downlink_fallback_reported: bool,
     last_telemetry: std::time::Instant,
     // Observer for transport telemetry -> FEC/ACK policy coupling.
     transport_observer: Arc<FecTransportObserver>,
@@ -139,6 +248,7 @@ pub struct QuicFuscateConnection {
 
     // Async Stealth Scheduler State
     next_packet_release: Option<std::time::Instant>,
+    outbound_pacer: OutboundPacer,
 }
 
 /// Tracks performance and reliability metrics for a connection.
@@ -336,6 +446,12 @@ impl QuicFuscateConnection {
             fec_tx_sequence: 0,
             fec_tx_active: false,
             h3_conn: None,
+            h3_tunnel_rx: HashMap::new(),
+            h3_tunnel_tx_frame: Vec::new(),
+            h3_peer_tunnel_stream_id: None,
+            h3_tunnel_response_started: HashSet::new(),
+            h3_tunnel_uplink_fallback_reported: false,
+            h3_tunnel_downlink_fallback_reported: false,
             last_telemetry: std::time::Instant::now(),
             transport_observer: obs.clone(),
             masque_cb: None,
@@ -354,6 +470,7 @@ impl QuicFuscateConnection {
                 "QUICFUSCATE_TLS_CH_OVERRIDE_TEMPLATE",
             ),
             next_packet_release: None,
+            outbound_pacer: OutboundPacer::default(),
         };
         s.fec.enable_simd_acceleration();
         s.conn.set_intelligent_stealth_runtime(s.stealth_manager.is_intelligent_runtime());
@@ -709,6 +826,13 @@ impl QuicFuscateConnection {
                                 .store(1, std::sync::atomic::Ordering::Relaxed);
                             info!("MASQUE peer CONNECT-UDP flow recorded (stream={})", sid);
                         }
+                        if list
+                            .iter()
+                            .any(|header| header.name() == b":path" && header.value() == b"/tun")
+                        {
+                            self.h3_tunnel_rx.entry(sid).or_default();
+                            self.h3_peer_tunnel_stream_id.get_or_insert(sid);
+                        }
                         on_headers(sid, &list);
                     }
                     Ok(Some((sid, crate::transport::h3::Event::Data))) => {
@@ -717,7 +841,13 @@ impl QuicFuscateConnection {
                             if read == 0 {
                                 break;
                             }
-                            on_body(sid, &buf[..read]);
+                            if let Some(decoder) = self.h3_tunnel_rx.get_mut(&sid) {
+                                decoder
+                                    .push(&buf[..read], |packet| on_body(sid, packet))
+                                    .map_err(crate::error::ConnectionError::from)?;
+                            } else {
+                                on_body(sid, &buf[..read]);
+                            }
                         }
                     }
                     Ok(Some((
@@ -753,7 +883,13 @@ impl QuicFuscateConnection {
                             info!("H3 GOAWAY received");
                         }
                     }
-                    Ok(Some((_id, crate::transport::h3::Event::Finished))) => {}
+                    Ok(Some((sid, crate::transport::h3::Event::Finished))) => {
+                        self.h3_tunnel_rx.remove(&sid);
+                        self.h3_tunnel_response_started.remove(&sid);
+                        if self.h3_peer_tunnel_stream_id == Some(sid) {
+                            self.h3_peer_tunnel_stream_id = None;
+                        }
+                    }
                     Ok(Some((
                         _id,
                         crate::transport::h3::Event::PushPromise { push_id, headers },
@@ -1151,12 +1287,16 @@ impl QuicFuscateConnection {
         // makes short-lived clients (like E2E) time out. Stealth timing only applies post-handshake.
         if !established {
             self.next_packet_release = None;
+            self.outbound_pacer.reset();
         } else if let Some(release_time) = self.next_packet_release {
             if now < release_time {
                 return Ok(0); // WouldBlock / Yield
             }
             // Timer expired, clear block and proceed
             self.next_packet_release = None;
+        }
+        if established && self.outbound_pacer.is_blocked(now) {
+            return Ok(0);
         }
 
         // If there are buffered FEC packets, send one directly - but only if
@@ -1170,6 +1310,7 @@ impl QuicFuscateConnection {
         if !has_pending_app_data {
             if let Some(packet) = self.outgoing_fec_packets.pop_front() {
                 let len = packet.write_to(buf)?;
+                self.record_paced_packet(now, len, packet.congestion_controlled);
                 // Drop handles pool recycling automatically.
                 return Ok(len);
             }
@@ -1208,7 +1349,7 @@ impl QuicFuscateConnection {
         } else {
             self.conn.send(&mut send_buffer)
         };
-        let (write, _send_info) = match send_result {
+        let (write, send_info) = match send_result {
             Ok(v) => v,
             Err(crate::error::ConnectionError::Done) => {
                 // No packet currently pending is a normal state for polling loops.
@@ -1303,13 +1444,17 @@ impl QuicFuscateConnection {
                         systematic: packet.is_systematic,
                     }),
                     packet,
+                    congestion_controlled: send_info.congestion_controlled,
                 });
             }
             self.fec_tx_sequence = self.fec_tx_sequence.wrapping_add(1);
         } else {
             self.packet_id_counter = self.packet_id_counter.wrapping_add(1);
-            self.outgoing_fec_packets
-                .push_back(OutgoingFecPacket { packet: fec_packet, wire_meta: None });
+            self.outgoing_fec_packets.push_back(OutgoingFecPacket {
+                packet: fec_packet,
+                wire_meta: None,
+                congestion_controlled: send_info.congestion_controlled,
+            });
         }
 
         // Single outbound stealth timing owner: core merges StealthManager shaping delay
@@ -1328,11 +1473,22 @@ impl QuicFuscateConnection {
         // Pop the first packet from the buffer to send it now.
         if let Some(packet) = self.outgoing_fec_packets.pop_front() {
             let len = packet.write_to(buf)?;
+            self.record_paced_packet(now, len, packet.congestion_controlled);
             // Drop handles pool recycling automatically.
             Ok(len)
         } else {
             Ok(0)
         }
+    }
+
+    fn record_paced_packet(&mut self, now: Instant, bytes: usize, congestion_controlled: bool) {
+        if !congestion_controlled {
+            return;
+        }
+        let Some(rate) = self.conn.pacing_rate() else {
+            return;
+        };
+        self.outbound_pacer.record_send(now, bytes, self.conn.send_quantum(), rate);
     }
 
     /// Merges StealthManager delay and transport jitter into one release instant.
@@ -1428,7 +1584,11 @@ impl QuicFuscateConnection {
         &mut self,
         path: &str,
     ) -> Result<u64, crate::error::ConnectionError> {
-        self.send_http3_request_headers(b"POST", path, false)
+        let stream_id = self.send_http3_request_headers(b"POST", path, false)?;
+        if path == "/tun" {
+            self.h3_tunnel_rx.entry(stream_id).or_default();
+        }
+        Ok(stream_id)
     }
 
     /// Sends a HTTP/3 request body chunk on an existing stream.
@@ -1440,36 +1600,88 @@ impl QuicFuscateConnection {
     ) -> Result<(), crate::error::ConnectionError> {
         let intelligent_level = self.stealth_manager.intelligent_runtime_level();
         self.sync_intelligent_runtime_controls(intelligent_level);
-        // Compatibility-only MASQUE path for UDP-like payload forwarding.
-        if !data.is_empty() {
-            match self.ensure_masque_tunnel_for_send() {
-                Ok(Some(sid)) => {
-                    if let Some(ref mut h3) = self.h3_conn {
-                        match h3.send_masque_datagram(&mut self.conn, sid, data) {
-                            Ok(()) => {
-                                debug!("MASQUE TX: sid={} {}B", sid, data.len());
-                                return Ok(());
-                            }
-                            Err(e) => {
-                                warn!(
-                                    "MASQUE datagram send failed, falling back to H3 body: {:?}",
-                                    e
-                                );
-                            }
-                        }
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => warn!("MASQUE tunnel setup failed, falling back to H3 body: {:?}", e),
-            }
-        }
-
         if let Some(ref mut h3) = self.h3_conn {
             h3.send_body(&mut self.conn, stream_id, data, fin)?;
             Ok(())
         } else {
             Err("h3 not initialized".into())
         }
+    }
+
+    /// Sends one raw IP packet through the fastest safe tunnel carrier.
+    ///
+    /// Packets that fit the confirmed MASQUE datagram budget use the datagram
+    /// fast path. IPv6-minimum packets that do not fit that budget use an
+    /// explicitly length-framed HTTP/3 body so arbitrary stream segmentation
+    /// cannot merge or split IP packets at the receiver.
+    pub fn send_tunnel_packet(
+        &mut self,
+        stream_id: u64,
+        packet: &[u8],
+    ) -> Result<(), crate::error::ConnectionError> {
+        if packet.is_empty()
+            || packet.len() > self.effective_tunnel_mtu()
+            || !matches!(packet.first().map(|byte| byte >> 4), Some(4 | 6))
+        {
+            return Err(crate::error::ConnectionError::BufferTooShort);
+        }
+
+        if packet.len() <= self.effective_masque_mtu() {
+            match self.ensure_masque_tunnel_for_send() {
+                Ok(Some(sid)) => {
+                    if let Some(ref mut h3) = self.h3_conn {
+                        match h3.send_masque_datagram(&mut self.conn, sid, packet) {
+                            Ok(()) => {
+                                debug!("MASQUE TX: sid={} {}B", sid, packet.len());
+                                return Ok(());
+                            }
+                            Err(error) => {
+                                warn!(
+                                    "MASQUE datagram send failed, using framed H3 fallback: {:?}",
+                                    error
+                                );
+                            }
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    warn!("MASQUE setup failed, using framed H3 fallback: {:?}", error);
+                }
+            }
+        }
+
+        self.prepare_h3_tunnel_frame(packet)?;
+        if let Some(ref mut h3) = self.h3_conn {
+            h3.send_body(&mut self.conn, stream_id, &self.h3_tunnel_tx_frame, false)?;
+            if !self.h3_tunnel_uplink_fallback_reported {
+                info!(
+                    "framed H3 tunnel uplink active: sid={} packet={}B masque_limit={}B",
+                    stream_id,
+                    packet.len(),
+                    self.effective_masque_mtu()
+                );
+                self.h3_tunnel_uplink_fallback_reported = true;
+            }
+            debug!("framed H3 tunnel uplink TX: sid={} {}B", stream_id, packet.len());
+            Ok(())
+        } else {
+            Err("h3 not initialized".into())
+        }
+    }
+
+    fn prepare_h3_tunnel_frame(
+        &mut self,
+        packet: &[u8],
+    ) -> Result<(), crate::error::ConnectionError> {
+        let packet_len = u16::try_from(packet.len())
+            .map_err(|_| crate::error::ConnectionError::BufferTooShort)?;
+        self.h3_tunnel_tx_frame.clear();
+        self.h3_tunnel_tx_frame.reserve(H3_TUNNEL_FRAME_HEADER_LEN.saturating_add(packet.len()));
+        self.h3_tunnel_tx_frame.extend_from_slice(H3_TUNNEL_FRAME_MAGIC);
+        self.h3_tunnel_tx_frame.extend_from_slice(&packet_len.to_be_bytes());
+        self.h3_tunnel_tx_frame.extend_from_slice(packet);
+        Ok(())
     }
 
     /// Sends one UDP payload over the active MASQUE DATAGRAM tunnel.
@@ -1490,12 +1702,7 @@ impl QuicFuscateConnection {
         }
     }
 
-    /// Sends a raw IP packet downlink to the peer over the peer-initiated MASQUE
-    /// CONNECT-UDP flow (server side: client opened the flow, we reuse its stream
-    /// id for the datagram flow-id mapping). Returns `Done` if no MASQUE flow has
-    /// been established yet - the packet is dropped, which is acceptable for
-    /// best-effort IP traffic; subsequent packets will succeed once the client's
-    /// CONNECT-UDP request is processed and `masque_peer_stream_id` is set.
+    /// Sends a raw IP packet downlink through the fastest safe peer carrier.
     ///
     /// A bare QUIC datagram fallback was intentionally removed: the client only
     /// drains MASQUE-framed datagrams via `drain_masque_datagrams` and would
@@ -1504,19 +1711,76 @@ impl QuicFuscateConnection {
         &mut self,
         payload: &[u8],
     ) -> Result<(), crate::error::ConnectionError> {
-        if let Some(sid) = self.masque_peer_stream_id {
-            if let Some(ref mut h3) = self.h3_conn {
-                h3.send_masque_datagram(&mut self.conn, sid, payload)?;
-                debug!("MASQUE downlink TX: sid={} {}B", sid, payload.len());
-                return Ok(());
+        if payload.is_empty()
+            || payload.len() > self.effective_tunnel_mtu()
+            || !matches!(payload.first().map(|byte| byte >> 4), Some(4 | 6))
+        {
+            return Err(crate::error::ConnectionError::BufferTooShort);
+        }
+
+        if payload.len() <= self.effective_masque_mtu() {
+            if let Some(sid) = self.masque_peer_stream_id {
+                if let Some(ref mut h3) = self.h3_conn {
+                    match h3.send_masque_datagram(&mut self.conn, sid, payload) {
+                        Ok(()) => {
+                            debug!("MASQUE downlink TX: sid={} {}B", sid, payload.len());
+                            return Ok(());
+                        }
+                        Err(error) => {
+                            warn!("MASQUE downlink failed, using framed H3 fallback: {:?}", error);
+                        }
+                    }
+                }
             }
         }
-        // No MASQUE flow yet - drop the packet. The client's CONNECT-UDP
-        // request is processed asynchronously in poll_http3_event_loop, which
-        // sets masque_peer_stream_id. Retrying is unnecessary: the TUN reader
-        // thread sends the next packet immediately, and IP traffic is
-        // best-effort (lost packets are retransmitted by higher layers).
-        Err(crate::error::ConnectionError::Done)
+
+        let Some(stream_id) = self.h3_peer_tunnel_stream_id else {
+            return Err(crate::error::ConnectionError::Done);
+        };
+        self.prepare_h3_tunnel_frame(payload)?;
+        let response_started = self.h3_tunnel_response_started.contains(&stream_id);
+        let Some(ref mut h3) = self.h3_conn else {
+            return Err(crate::error::ConnectionError::Done);
+        };
+        if !response_started {
+            let headers = [
+                crate::transport::h3::Header::new(b":status", b"200"),
+                crate::transport::h3::Header::new(
+                    b"content-type",
+                    b"application/quicfuscate-tunnel",
+                ),
+            ];
+            h3.send_response(&mut self.conn, stream_id, &headers, false)?;
+            self.h3_tunnel_response_started.insert(stream_id);
+        }
+        h3.send_body(&mut self.conn, stream_id, &self.h3_tunnel_tx_frame, false)?;
+        if !self.h3_tunnel_downlink_fallback_reported {
+            info!(
+                "framed H3 tunnel downlink active: sid={} packet={}B masque_limit={}B",
+                stream_id,
+                payload.len(),
+                self.effective_masque_mtu()
+            );
+            self.h3_tunnel_downlink_fallback_reported = true;
+        }
+        debug!("framed H3 tunnel downlink TX: sid={} {}B", stream_id, payload.len());
+        Ok(())
+    }
+
+    /// Maximum raw IP packet that fits the confirmed QUIC/FEC MASQUE path.
+    pub fn effective_masque_mtu(&self) -> usize {
+        const QUIC_AND_MASQUE_OVERHEAD: usize = 64;
+        self.conn
+            .effective_path_mtu()
+            .min(self.conn.max_send_udp_payload_size())
+            .saturating_sub(wire::MAX_DATAGRAM_OVERHEAD + QUIC_AND_MASQUE_OVERHEAD)
+    }
+
+    /// Maximum inner IP packet supported by the complete tunnel carrier set.
+    /// HTTP/3 framing preserves the IPv6 minimum even when the current MASQUE
+    /// datagram payload budget is smaller.
+    pub fn effective_tunnel_mtu(&self) -> usize {
+        self.effective_masque_mtu().max(IPV6_MINIMUM_LINK_MTU)
     }
 
     /// Installs a sink for decoded MASQUE datagram payloads (raw IP packets).
@@ -1753,6 +2017,14 @@ impl QuicFuscateConnection {
 mod tests {
     use super::*;
 
+    fn framed_tunnel_packet(packet: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(H3_TUNNEL_FRAME_HEADER_LEN + packet.len());
+        frame.extend_from_slice(H3_TUNNEL_FRAME_MAGIC);
+        frame.extend_from_slice(&(packet.len() as u16).to_be_bytes());
+        frame.extend_from_slice(packet);
+        frame
+    }
+
     fn fec_packet(id: u64, payload: &[u8], coefficients: Option<&[u8]>) -> FecPacket {
         let pool = crate::optimize::global_pool();
         let data = pool.alloc_from_slice(payload);
@@ -1785,9 +2057,52 @@ mod tests {
     }
 
     #[test]
+    fn h3_tunnel_decoder_reassembles_segmented_packet() {
+        let packet = [0x45, 0, 0, 20, 1, 2, 3, 4];
+        let frame = framed_tunnel_packet(&packet);
+        let mut decoder = H3TunnelFrameDecoder::default();
+        let mut decoded = Vec::new();
+
+        decoder.push(&frame[..3], |value| decoded.push(value.to_vec())).unwrap();
+        decoder.push(&frame[3..7], |value| decoded.push(value.to_vec())).unwrap();
+        decoder.push(&frame[7..], |value| decoded.push(value.to_vec())).unwrap();
+
+        assert_eq!(decoded, vec![packet.to_vec()]);
+        assert!(decoder.pending.is_empty());
+    }
+
+    #[test]
+    fn h3_tunnel_decoder_splits_coalesced_packets() {
+        let ipv4 = [0x45, 0, 0, 20];
+        let ipv6 = [0x60, 0, 0, 0, 0, 0, 59, 64];
+        let mut data = framed_tunnel_packet(&ipv4);
+        data.extend_from_slice(&framed_tunnel_packet(&ipv6));
+        let mut decoder = H3TunnelFrameDecoder::default();
+        let mut decoded = Vec::new();
+
+        decoder.push(&data, |value| decoded.push(value.to_vec())).unwrap();
+
+        assert_eq!(decoded, vec![ipv4.to_vec(), ipv6.to_vec()]);
+        assert!(decoder.pending.is_empty());
+    }
+
+    #[test]
+    fn h3_tunnel_decoder_rejects_unframed_body() {
+        let mut decoder = H3TunnelFrameDecoder::default();
+        let error = decoder.push(&[0x45, 0, 0, 20, 1, 2], |_| {}).unwrap_err();
+
+        assert_eq!(error, "invalid H3 tunnel frame magic");
+        assert!(decoder.pending.is_empty());
+    }
+
+    #[test]
     fn outgoing_zero_mode_packet_preserves_raw_quic_datagram() {
         let payload = [0x40, 0x11, 0x22, 0x33];
-        let outgoing = OutgoingFecPacket { packet: fec_packet(7, &payload, None), wire_meta: None };
+        let outgoing = OutgoingFecPacket {
+            packet: fec_packet(7, &payload, None),
+            wire_meta: None,
+            congestion_controlled: true,
+        };
         let mut wire = [0u8; 64];
 
         let written = outgoing.write_to(&mut wire).expect("raw packet must serialize");
@@ -1815,7 +2130,8 @@ mod tests {
             block_index: 0,
             systematic: false,
         };
-        let outgoing = OutgoingFecPacket { packet, wire_meta: Some(meta) };
+        let outgoing =
+            OutgoingFecPacket { packet, wire_meta: Some(meta), congestion_controlled: true };
         let mut wire = [0u8; 128];
 
         let written = outgoing.write_to(&mut wire).expect("FEC packet must serialize");
@@ -1928,5 +2244,32 @@ mod tests {
     fn outbound_stealth_release_none_when_no_delays() {
         let now = Instant::now();
         assert!(QuicFuscateConnection::compute_outbound_stealth_release(now, None, None).is_none());
+    }
+
+    #[test]
+    fn outbound_pacer_releases_one_quantum_at_estimated_rate() {
+        let now = Instant::now();
+        let mut pacer = OutboundPacer::default();
+
+        pacer.record_send(now, 1500, 4500, 3_000_000);
+        pacer.record_send(now, 1500, 4500, 3_000_000);
+        assert!(!pacer.is_blocked(now));
+
+        pacer.record_send(now, 1500, 4500, 3_000_000);
+        assert!(pacer.is_blocked(now + Duration::from_micros(1499)));
+        assert!(!pacer.is_blocked(now + Duration::from_micros(1500)));
+    }
+
+    #[test]
+    fn outbound_pacer_reset_removes_release_and_partial_burst() {
+        let now = Instant::now();
+        let mut pacer = OutboundPacer::default();
+        pacer.record_send(now, 4500, 4500, 1_000_000);
+
+        pacer.reset();
+
+        assert!(!pacer.is_blocked(now));
+        assert_eq!(pacer.burst_bytes, 0);
+        assert!(pacer.next_release.is_none());
     }
 }

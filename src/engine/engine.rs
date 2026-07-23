@@ -100,6 +100,18 @@ fn build_runtime_transport_config(config: &EngineConfig) -> Result<Config, Engin
     transport.set_initial_max_streams_uni(uni);
     transport.enable_pacing(config.transport.enable_pacing);
     transport.set_initial_rtt_ms(config.transport.initial_rtt_ms);
+    transport
+        .set_pmtu_policy(crate::transport::PmtuPolicy {
+            min_mtu: usize::from(config.transport.pmtu_min_mtu),
+            max_mtu: usize::from(config.transport.pmtu_max_mtu),
+            probe_interval: std::time::Duration::from_millis(
+                config.transport.pmtu_probe_interval_ms,
+            ),
+            black_hole_timeout: std::time::Duration::from_millis(
+                config.transport.pmtu_black_hole_timeout_ms,
+            ),
+        })
+        .map_err(|error| EngineError::Config(format!("DPLPMTUD policy invalid: {error}")))?;
 
     if config.connection.enable_0rtt {
         transport.enable_early_data();

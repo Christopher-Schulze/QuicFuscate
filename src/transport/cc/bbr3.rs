@@ -31,6 +31,7 @@ const DEFAULT_GAINS: [f64; 8] = [1.25, 0.75, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
 pub struct Bbr3 {
     state: State,
     cwnd: usize,
+    min_cwnd: usize,
     mss: usize,
     bytes_in_flight: usize,
     pacing_rate: u64,
@@ -49,6 +50,7 @@ pub struct Bbr3 {
     packet_conservation: bool,
     prior_cwnd: usize,
     full_bw_reached: bool,
+    full_bw: u64,
     full_bw_count: u32,
     cycle_index: usize,
     cycle_stamp: Instant,
@@ -75,10 +77,13 @@ impl Bbr3 {
     /// Create a new BBR3 controller with the given initial window and MSS.
     pub fn new(initial_cwnd: usize, mss: usize) -> Self {
         let now = Instant::now();
+        let mss = mss.max(1);
+        let min_cwnd = initial_cwnd.max(mss * 4);
         Self {
             state: State::Startup,
-            cwnd: initial_cwnd,
-            mss: mss.max(1),
+            cwnd: min_cwnd,
+            min_cwnd,
+            mss,
             bytes_in_flight: 0,
             pacing_rate: 0,
             pacing_gain: 2.77,
@@ -94,6 +99,7 @@ impl Bbr3 {
             packet_conservation: false,
             prior_cwnd: 0,
             full_bw_reached: false,
+            full_bw: 0,
             full_bw_count: 0,
             cycle_index: 0,
             cycle_stamp: now,
@@ -136,7 +142,8 @@ impl Bbr3 {
         // Compute delivery rate BEFORE updating delivered_time so that
         // (now - delivered_time) reflects the actual interval since last event.
         let delivery_rate = if now > self.delivered_time {
-            let elapsed = now.duration_since(self.delivered_time).as_secs_f64();
+            let elapsed =
+                now.duration_since(self.delivered_time).max(Duration::from_millis(1)).as_secs_f64();
             if elapsed > 0.0 {
                 (acked_bytes as f64 / elapsed).max(0.0) as u64
             } else {
@@ -149,26 +156,29 @@ impl Bbr3 {
         // Update delivery tracking AFTER rate computation
         self.delivered += acked_bytes as u64;
         self.delivered_time = now;
-        self.ack_epoch_acked += acked_bytes;
-
+        self.round_start = self.delivered >= self.next_round_delivered;
         if self.round_start {
+            self.round_count = self.round_count.saturating_add(1);
+            self.next_round_delivered = self.delivered.saturating_add(self.cwnd as u64);
             self.epoch_start = true;
+            self.ack_epoch_acked = 0;
         }
+        self.ack_epoch_acked += acked_bytes;
 
         if delivery_rate > self.btlbw {
             self.btlbw = delivery_rate;
-            self.full_bw_count = 0;
-        } else {
-            self.full_bw_count += 1;
-            if self.full_bw_count >= BW_PROBE_UP_ROUNDS as u32 {
-                self.full_bw_reached = true;
-            }
         }
-
-        if matches!(self.state, State::Startup) {
-            let old = self.btlbw.max(1);
-            if (delivery_rate as f64) >= (old as f64) * STARTUP_GROWTH_TARGET {
-                self.round_count = 0;
+        if self.round_start && !self.full_bw_reached {
+            if self.full_bw == 0
+                || (self.btlbw as f64) >= (self.full_bw as f64) * STARTUP_GROWTH_TARGET
+            {
+                self.full_bw = self.btlbw;
+                self.full_bw_count = 0;
+            } else {
+                self.full_bw_count = self.full_bw_count.saturating_add(1);
+                if self.full_bw_count >= BW_PROBE_UP_ROUNDS as u32 {
+                    self.full_bw_reached = true;
+                }
             }
         }
 
@@ -231,7 +241,9 @@ impl Bbr3 {
             target_cwnd = target_cwnd.saturating_add(self.mss);
             self.epoch_start = false;
         }
-        self.cwnd = std::cmp::max(target_cwnd, self.mss * 4);
+        let cwnd_floor =
+            if matches!(self.state, State::ProbeRtt) { self.mss * 4 } else { self.min_cwnd };
+        self.cwnd = std::cmp::max(target_cwnd, cwnd_floor);
 
         // Update pacing rate
         if self.bytes_in_flight == 0 {
@@ -245,18 +257,8 @@ impl Bbr3 {
 }
 
 impl CongestionController for Bbr3 {
-    fn on_packet_sent(&mut self, pkt_num: u64, sent_bytes: usize, now: Instant) {
+    fn on_packet_sent(&mut self, pkt_num: u64, sent_bytes: usize, _now: Instant) {
         self.bytes_in_flight += sent_bytes;
-        self.delivered += sent_bytes as u64;
-        self.delivered_time = now;
-
-        if self.delivered >= self.next_round_delivered {
-            self.round_count += 1;
-            self.round_start = true;
-            self.next_round_delivered = self.delivered + self.cwnd as u64;
-        } else {
-            self.round_start = false;
-        }
 
         if self.bytes_in_flight < self.cwnd / 2 {
             self.app_limited = self.delivered;
@@ -306,6 +308,7 @@ impl CongestionController for Bbr3 {
 
     fn set_cwnd(&mut self, cwnd: usize) {
         self.cwnd = cwnd.max(self.mss * 2);
+        self.min_cwnd = self.cwnd.max(self.mss * 4);
         // On path change, reset min_rtt so the new path gets fresh RTT samples
         self.min_rtt = Duration::MAX;
     }
@@ -407,6 +410,38 @@ mod tests {
     }
 
     #[test]
+    fn send_events_do_not_count_as_delivered_or_reset_delivery_clock() {
+        let mut bbr = Bbr3::new(50_000, 1200);
+        let delivered_before = bbr.delivered;
+        let delivery_clock_before = bbr.delivered_time;
+
+        bbr.on_packet_sent(1, 12_000, delivery_clock_before + Duration::from_millis(100));
+
+        assert_eq!(bbr.delivered, delivered_before);
+        assert_eq!(bbr.delivered_time, delivery_clock_before);
+    }
+
+    #[test]
+    fn send_to_ack_gap_does_not_create_a_false_bandwidth_spike() {
+        let mut bbr = Bbr3::new(50_000, 1200);
+        let start = bbr.delivered_time;
+        bbr.on_packet_sent(1, 1200, start + Duration::from_millis(100));
+        bbr.on_ack(1200, start + Duration::from_millis(101));
+
+        assert!(bbr.btlbw < 100_000, "send timestamp must not become the delivery-rate clock");
+    }
+
+    #[test]
+    fn ordinary_ack_does_not_collapse_below_initial_window() {
+        let mut bbr = Bbr3::new(50_000, 1200);
+        let start = bbr.delivered_time;
+        bbr.on_packet_sent(1, 1200, start);
+        bbr.on_ack(1200, start + Duration::from_millis(100));
+
+        assert_eq!(bbr.cwnd(), 50_000);
+    }
+
+    #[test]
     fn pacing_rate_nonzero_after_convergence() {
         // Pacing rate is btlbw * pacing_gain; both must be > 0 once bandwidth
         // is estimated. Regression guard for the delivered_time ordering bug.
@@ -427,8 +462,9 @@ mod tests {
         let mut bbr = Bbr3::new(50_000, 1200);
         let t0 = Instant::now();
         let rtt = Duration::from_millis(20);
+        bbr.update_rtt(rtt);
         // Send/ACK at constant rate - no growth - should hit plateau after 3+ rounds
-        for i in 0..10_u32 {
+        for i in 0..20_u32 {
             bbr.on_packet_sent(i as u64, 12_000, t0 + rtt * i);
             bbr.on_ack(12_000, t0 + rtt * i + rtt);
         }
@@ -538,8 +574,9 @@ mod tests {
         let mut bbr = Bbr3::new(50_000, 1200);
         let t0 = Instant::now();
         let rtt = Duration::from_millis(20);
+        bbr.update_rtt(rtt);
         // Get out of Startup
-        for i in 0..12_u32 {
+        for i in 0..20_u32 {
             bbr.on_packet_sent(i as u64, 12_000, t0 + rtt * i);
             bbr.on_ack(12_000, t0 + rtt * i + rtt);
         }

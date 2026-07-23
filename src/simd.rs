@@ -2478,12 +2478,16 @@ pub mod crypto {
 
             #[cfg(all(target_arch = "aarch64", not(windows)))]
             {
-                if features.has_feature(CpuFeature::SVE2)
-                    && features.has_feature(CpuFeature::SHA256)
-                {
+                // Linux exposes the Armv8 SHA-256 extension as `sha2` in
+                // /proc/cpuinfo, while Apple and some probes expose `sha256`.
+                // Both names represent the target feature required by
+                // arm::sha256_hw and must select the same backend.
+                let has_sha256 = features.has_feature(CpuFeature::SHA256)
+                    || features.has_feature(CpuFeature::SHA2);
+                if features.has_feature(CpuFeature::SVE2) && has_sha256 {
                     return Sha256Plan { backend: Sha256Backend::Sve2 };
                 }
-                if features.has_feature(CpuFeature::SHA256) {
+                if has_sha256 {
                     return Sha256Plan { backend: Sha256Backend::Neon };
                 }
             }

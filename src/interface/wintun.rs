@@ -198,6 +198,31 @@ mod imp {
         Ok(())
     }
 
+    fn set_interface_mtu(name: &str, mtu: u16) -> io::Result<()> {
+        for family in ["ipv4", "ipv6"] {
+            let status = std::process::Command::new("netsh")
+                .creation_flags(CREATE_NO_WINDOW)
+                .args([
+                    "interface",
+                    family,
+                    "set",
+                    "subinterface",
+                    name,
+                    &format!("mtu={mtu}"),
+                    "store=active",
+                ])
+                .status()
+                .map_err(|error| io::Error::other(format!("netsh spawn failed: {error}")))?;
+            if !status.success() {
+                return Err(io::Error::other(format!(
+                    "netsh {family} MTU update failed for adapter '{name}' with exit {:?}",
+                    status.code()
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Windows TUN device backed by a dynamically loaded Wintun session.
     #[derive(Debug)]
     pub struct WintunDevice {
@@ -315,6 +340,10 @@ mod imp {
 
         fn mtu(&self) -> u16 {
             self.mtu
+        }
+
+        fn set_mtu(&self, mtu: u16) -> io::Result<()> {
+            set_interface_mtu(self.name(), mtu)
         }
 
         fn read(&self, buf: &mut [u8]) -> io::Result<usize> {

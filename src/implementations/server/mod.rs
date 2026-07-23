@@ -51,6 +51,10 @@ pub use admin::{
 pub use admin_http::{AdminHttpHandler, AdminHttpServer};
 pub use bandwidth::{BandwidthLimiter, BandwidthStats, PerClientBandwidthManager, QuotaTracker};
 pub use ip_pool::{IpPool, Ipv6Pool};
+pub use isolation::{
+    AssignedClientIps, ClientIsolationManager, DownlinkRoute, IsolationStats, UplinkDrop,
+    UplinkRoute,
+};
 #[cfg(feature = "rate_limiter")]
 pub use limits::load_rate_limit_config_from_env;
 #[cfg(feature = "rate_limiter")]
@@ -58,7 +62,7 @@ pub use limits::{BlacklistSync, GeoIpBlocker, GeoIpConfig};
 pub use limits::{ConnectionLimiter, GlobalRateLimiter, RateLimitConfig, RateLimiter};
 #[cfg(any(test, feature = "rust-tests"))]
 pub use metrics::GlobalMetricsServer;
-pub use metrics::Metrics;
+pub use metrics::{Metrics, RoutingOutcome};
 pub use routing::{detect_wan_interface, RoutingError, RoutingManager};
 pub use session::{Session, SessionError, SessionId, SessionManager, SessionStats};
 
@@ -91,6 +95,14 @@ use crate::stealth::{
 };
 
 const SERVER_STATS_LOG_INTERVAL: Duration = Duration::from_secs(1);
+const LIVE_UDP_DATAGRAM_BUFFER_SIZE: usize = 65_535;
+const _: () = assert!(LIVE_UDP_DATAGRAM_BUFFER_SIZE >= 1500);
+
+#[derive(Clone, Copy, Debug)]
+struct ServerTunIps {
+    ipv4: Ipv4Addr,
+    ipv6: Option<Ipv6Addr>,
+}
 
 #[cfg(unix)]
 fn record_systemd_notification(state: &str, result: std::io::Result<()>) {
@@ -138,6 +150,8 @@ pub struct ServerConfig {
     pub ipv6_prefix_len: u8,
     /// IPv6 DNS servers to push
     pub ipv6_dns_servers: Vec<Ipv6Addr>,
+    /// Explicit opt-in for direct VPN client-to-client unicast.
+    pub allow_client_to_client: bool,
     /// GeoIP-based source-IP blocking config (TODO-459). When a MaxMindDB
     /// database path and blocked countries are configured, incoming
     /// datagrams from those countries are dropped. Gracefully degrades to
@@ -191,6 +205,7 @@ impl Default for ServerConfig {
                 Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111), // Cloudflare
                 Ipv6Addr::new(0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888), // Google
             ],
+            allow_client_to_client: false,
             #[cfg(feature = "rate_limiter")]
             geoip: limits::GeoIpConfig::default(),
             #[cfg(feature = "rate_limiter")]
@@ -1063,6 +1078,7 @@ pub enum AdminAction {
 #[derive(Clone)]
 struct SharedServerDomain {
     sessions: Arc<RwLock<SessionManager>>,
+    forwarding_policy: Arc<ClientIsolationManager>,
     ip_pool: Arc<parking_lot::Mutex<IpPool>>,
     /// IPv6 address pool (None = IPv6 disabled). Allocated lazily from ServerConfig.
     ipv6_pool: Option<Arc<parking_lot::Mutex<Ipv6Pool>>>,
@@ -1102,6 +1118,66 @@ struct ServerHostResources {
     routing: Option<RoutingManager>,
 }
 
+#[cfg(target_os = "linux")]
+fn configured_routing_manager(
+    tun_name: String,
+    server_config: &ServerConfig,
+) -> Result<RoutingManager, String> {
+    let configured_wan = server_config.wan_interface.trim();
+    let configured_wan_exists = !configured_wan.is_empty()
+        && std::path::Path::new("/sys/class/net").join(configured_wan).exists();
+    let wan_interface = if configured_wan_exists {
+        configured_wan.to_string()
+    } else {
+        detect_wan_interface().ok_or_else(|| {
+            format!(
+                "configured WAN interface {:?} does not exist and no default-route interface was detected",
+                server_config.wan_interface
+            )
+        })?
+    };
+    let routing = if let Some(ipv6_server_ip) = server_config.ipv6_server_ip {
+        RoutingManager::new_dual_stack(
+            tun_name,
+            server_config.server_ip,
+            server_config.server_netmask,
+            wan_interface,
+            ipv6_server_ip,
+            server_config.ipv6_prefix_len,
+        )
+    } else {
+        RoutingManager::new(
+            tun_name,
+            server_config.server_ip,
+            server_config.server_netmask,
+            wan_interface,
+        )
+    };
+    Ok(routing.with_client_to_client(server_config.allow_client_to_client))
+}
+
+fn teardown_routing_with_retries(routing: RoutingManager) {
+    let mut last_error = None;
+    for attempt in 1..=3 {
+        match routing.teardown() {
+            Ok(()) => {
+                last_error = None;
+                break;
+            }
+            Err(error) => {
+                log::warn!("Routing teardown attempt {}/3 failed: {:?}", attempt, error);
+                last_error = Some(error);
+                if attempt < 3 {
+                    std::thread::sleep(Duration::from_millis(100 * attempt as u64));
+                }
+            }
+        }
+    }
+    if let Some(error) = last_error {
+        log::error!("Routing teardown failed after 3 attempts: {:?}", error);
+    }
+}
+
 impl ServerHostResources {
     fn start(
         engine_config: &EngineConfig,
@@ -1126,33 +1202,17 @@ impl ServerHostResources {
 
         #[cfg(target_os = "linux")]
         let routing = {
-            let routing = if let Some(ipv6_server_ip) = server_config.ipv6_server_ip {
-                RoutingManager::new_dual_stack(
-                    "qfserver0".to_string(),
-                    server_config.server_ip,
-                    server_config.server_netmask,
-                    server_config.wan_interface.clone(),
-                    ipv6_server_ip,
-                    server_config.ipv6_prefix_len,
-                )
-            } else {
-                RoutingManager::new(
-                    "qfserver0".to_string(),
-                    server_config.server_ip,
-                    server_config.server_netmask,
-                    server_config.wan_interface.clone(),
-                )
-            };
+            let routing = configured_routing_manager("qfserver0".to_string(), server_config)
+                .map_err(EngineError::Io)?;
 
             // Clean up stale rules from a crashed previous session before setup.
             routing.cleanup_stale();
 
             if let Err(e) = routing.setup() {
-                log::warn!("Failed to setup routing: {:?}", e);
-                None
-            } else {
-                Some(routing)
+                let _ = routing.teardown();
+                return Err(EngineError::Io(format!("server routing setup failed: {e}")));
             }
+            Some(routing)
         };
 
         #[cfg(not(target_os = "linux"))]
@@ -1163,29 +1223,7 @@ impl ServerHostResources {
 
     fn teardown(self) {
         if let Some(routing) = self.routing {
-            // Retry teardown up to 3 times - iptables/pf commands can fail
-            // transiently under load or when the kernel is reaping state.
-            let mut last_err = None;
-            for attempt in 1..=3 {
-                match routing.teardown() {
-                    Ok(()) => {
-                        last_err = None;
-                        break;
-                    }
-                    Err(e) => {
-                        log::warn!("Routing teardown attempt {}/3 failed: {:?}", attempt, e);
-                        last_err = Some(e);
-                        if attempt < 3 {
-                            std::thread::sleep(std::time::Duration::from_millis(
-                                100 * attempt as u64,
-                            ));
-                        }
-                    }
-                }
-            }
-            if let Some(e) = last_err {
-                log::error!("Routing teardown failed after 3 attempts: {:?}", e);
-            }
+            teardown_routing_with_retries(routing);
         }
         log::info!("Closing server TUN: {}", self.tun.name());
         drop(self.tun);
@@ -1203,6 +1241,11 @@ impl SharedServerDomain {
         };
         Self {
             sessions: Arc::new(RwLock::new(SessionManager::new(server_config.max_clients))),
+            forwarding_policy: Arc::new(ClientIsolationManager::with_network(
+                server_config.server_ip,
+                server_config.server_netmask,
+                server_config.allow_client_to_client,
+            )),
             ip_pool: Arc::new(parking_lot::Mutex::new(IpPool::new(
                 server_config.ip_pool_start,
                 server_config.ip_pool_end,
@@ -1240,12 +1283,12 @@ impl SharedServerDomain {
     fn accept(
         &self,
         remote_addr: SocketAddr,
-    ) -> Result<(SessionId, Arc<SessionStats>, Ipv4Addr), AcceptError> {
+    ) -> Result<(SessionId, Arc<SessionStats>, AssignedClientIps), AcceptError> {
         let mut sessions = self.sessions.write();
         let mut pool = self.ip_pool.lock();
         let mut v6_pool = self.ipv6_pool.as_ref().map(|p| p.lock());
         let mut limiter = self.connection_limiter.lock();
-        accept_session_in_domain(
+        let accepted = accept_session_in_domain(
             &mut sessions,
             &mut pool,
             v6_pool.as_deref_mut(),
@@ -1253,7 +1296,11 @@ impl SharedServerDomain {
             remote_addr,
             self.max_clients,
             self.client_timeout_secs,
-        )
+        );
+        if let Ok((session_id, _, addresses)) = accepted.as_ref() {
+            self.forwarding_policy.assign_client(&session_id.as_u64().to_string(), *addresses);
+        }
+        accepted
     }
 
     fn remove(&self, session_id: SessionId) -> Option<Session> {
@@ -1261,13 +1308,20 @@ impl SharedServerDomain {
         let mut pool = self.ip_pool.lock();
         let mut v6_pool = self.ipv6_pool.as_ref().map(|p| p.lock());
         let mut limiter = self.connection_limiter.lock();
-        remove_session_from_domain(
+        let removed = remove_session_from_domain(
             &mut sessions,
             &mut pool,
             v6_pool.as_deref_mut(),
             &mut limiter,
             session_id,
-        )
+        );
+        if let Some(session) = removed.as_ref() {
+            self.forwarding_policy.release_client(AssignedClientIps {
+                ipv4: session.client_ip(),
+                ipv6: session.client_ipv6(),
+            });
+        }
+        removed
     }
 
     fn reap_expired(&self) -> Vec<Session> {
@@ -1275,12 +1329,19 @@ impl SharedServerDomain {
         let mut pool = self.ip_pool.lock();
         let mut v6_pool = self.ipv6_pool.as_ref().map(|p| p.lock());
         let mut limiter = self.connection_limiter.lock();
-        reap_expired_sessions_from_domain(
+        let removed = reap_expired_sessions_from_domain(
             &mut sessions,
             &mut pool,
             v6_pool.as_deref_mut(),
             &mut limiter,
-        )
+        );
+        for session in &removed {
+            self.forwarding_policy.release_client(AssignedClientIps {
+                ipv4: session.client_ip(),
+                ipv6: session.client_ipv6(),
+            });
+        }
+        removed
     }
 
     #[cfg(feature = "rate_limiter")]
@@ -2258,7 +2319,6 @@ pub async fn flush_live_server_outgoing(
     session_stats: Option<Arc<SessionStats>>,
     session_id: Option<SessionId>,
 ) -> std::io::Result<(u64, u64)> {
-    const MAX_DATAGRAMS_PER_FLUSH: usize = 256;
     let mut bytes_sent = 0u64;
     let mut packets_sent = 0u64;
 
@@ -2266,7 +2326,7 @@ pub async fn flush_live_server_outgoing(
     // This lets us submit them as a single io_uring batch (one io_uring_enter
     // syscall instead of one sendmsg per packet).
     let mut staging: Vec<Vec<u8>> = Vec::new();
-    while staging.len() < MAX_DATAGRAMS_PER_FLUSH {
+    while staging.len() < crate::transport::UDP_DATAGRAM_BURST_LIMIT {
         match conn.send(out) {
             Ok(len) if len > 0 => {
                 crate::telemetry::BYTES_SENT.inc_by(len as u64);
@@ -2285,11 +2345,11 @@ pub async fn flush_live_server_outgoing(
             }
         }
     }
-    if staging.len() == MAX_DATAGRAMS_PER_FLUSH {
+    if staging.len() == crate::transport::UDP_DATAGRAM_BURST_LIMIT {
         log::debug!(
             "Outgoing flush for {} reached the {} datagram burst limit",
             addr,
-            MAX_DATAGRAMS_PER_FLUSH
+            crate::transport::UDP_DATAGRAM_BURST_LIMIT
         );
     }
 
@@ -2330,16 +2390,150 @@ pub async fn flush_live_server_outgoing(
     Ok((bytes_sent, packets_sent))
 }
 
+#[derive(Debug)]
+struct ClientFanoutPacket {
+    source: SocketAddr,
+    destination: IpAddr,
+    packet: Vec<u8>,
+}
+
+type ClientFanoutQueue = Arc<std::sync::Mutex<std::collections::VecDeque<ClientFanoutPacket>>>;
+
+fn enqueue_client_fanout(
+    queue: &ClientFanoutQueue,
+    source: SocketAddr,
+    route: UplinkRoute,
+    packet: &[u8],
+) {
+    let destination = match route {
+        UplinkRoute::Broadcast { destination, .. } => IpAddr::V4(destination),
+        UplinkRoute::Multicast { destination, .. } => destination,
+        UplinkRoute::Local { .. } | UplinkRoute::Internet { .. } | UplinkRoute::Client { .. } => {
+            return;
+        }
+    };
+    let pending = ClientFanoutPacket { source, destination, packet: packet.to_vec() };
+    match queue.lock() {
+        Ok(mut queue) => queue.push_back(pending),
+        Err(poisoned) => poisoned.into_inner().push_back(pending),
+    }
+}
+
+#[inline]
+fn allow_client_uplink(
+    forwarding_policy: &ClientIsolationManager,
+    metrics: &Metrics,
+    assigned_ips: Option<AssignedClientIps>,
+    packet: &[u8],
+    server_ips: ServerTunIps,
+    tun_mtu: u16,
+    response_queue: &Arc<std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>>,
+) -> Option<UplinkRoute> {
+    let route = match forwarding_policy.evaluate_uplink(packet, assigned_ips) {
+        Ok(route) => route,
+        Err(reason) => {
+            metrics.record_uplink_drop(reason);
+            log::debug!("Client uplink dropped by forwarding policy: {:?}", reason);
+            return None;
+        }
+    };
+    let route = match route {
+        UplinkRoute::Internet { source, destination }
+            if destination == IpAddr::V4(server_ips.ipv4)
+                || server_ips.ipv6.is_some_and(|ipv6| destination == IpAddr::V6(ipv6)) =>
+        {
+            UplinkRoute::Local { source, destination }
+        }
+        route => route,
+    };
+    metrics.record_uplink_route(route);
+
+    let is_forwarded_unicast =
+        matches!(route, UplinkRoute::Internet { .. } | UplinkRoute::Client { .. });
+    if is_forwarded_unicast && packet.first().is_some_and(|byte| byte >> 4 == 4) && packet[8] <= 1 {
+        let response = icmp::build_icmpv4_error(
+            packet,
+            server_ips.ipv4,
+            icmp::icmp_type::TIME_EXCEEDED,
+            0,
+            None,
+        );
+        enqueue_routing_response(response_queue, response);
+        metrics.record_routing_outcome(RoutingOutcome::TimeExceeded);
+        return None;
+    }
+    if is_forwarded_unicast && packet.first().is_some_and(|byte| byte >> 4 == 6) && packet[7] <= 1 {
+        if let Some(server_ipv6) = server_ips.ipv6 {
+            let response = icmp::build_icmpv6_error(
+                packet,
+                server_ipv6,
+                icmp::icmpv6_type::TIME_EXCEEDED,
+                None,
+            );
+            enqueue_routing_response(response_queue, response);
+            metrics.record_routing_outcome(RoutingOutcome::TimeExceeded);
+            metrics.record_routing_outcome(RoutingOutcome::Icmpv6);
+        }
+        return None;
+    }
+
+    if packet.len() > usize::from(tun_mtu) && packet.first().is_some_and(|byte| byte >> 4 == 4) {
+        let dont_fragment = u16::from_be_bytes([packet[6], packet[7]]) & 0x4000 != 0;
+        if dont_fragment {
+            let response = icmp::build_icmpv4_error(
+                packet,
+                server_ips.ipv4,
+                icmp::icmp_type::DESTINATION_UNREACHABLE,
+                icmp::icmp_code::FRAGMENTATION_NEEDED,
+                Some(tun_mtu),
+            );
+            enqueue_routing_response(response_queue, response);
+            metrics.record_routing_outcome(RoutingOutcome::PacketTooBig);
+            return None;
+        }
+    }
+    if packet.len() > usize::from(tun_mtu) && packet.first().is_some_and(|byte| byte >> 4 == 6) {
+        if let Some(server_ipv6) = server_ips.ipv6 {
+            let response = icmp::build_icmpv6_error(
+                packet,
+                server_ipv6,
+                icmp::icmpv6_type::PACKET_TOO_BIG,
+                Some(u32::from(tun_mtu)),
+            );
+            enqueue_routing_response(response_queue, response);
+            metrics.record_routing_outcome(RoutingOutcome::PacketTooBig);
+            metrics.record_routing_outcome(RoutingOutcome::Icmpv6);
+        }
+        return None;
+    }
+
+    Some(route)
+}
+
+fn enqueue_routing_response(
+    queue: &Arc<std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>>,
+    response: Vec<u8>,
+) {
+    if response.is_empty() {
+        return;
+    }
+    match queue.lock() {
+        Ok(mut pending) => pending.push_back(response),
+        Err(poisoned) => poisoned.into_inner().push_back(response),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-pub async fn process_live_server_client_datagram(
+async fn process_live_server_client_datagram(
     socket: &tokio::net::UdpSocket,
     addr: SocketAddr,
     runtime_client: LiveClientRuntime<'_>,
     packet: &[u8],
     out: &mut [u8],
-    metrics: &Metrics,
+    metrics: &Arc<Metrics>,
     client_snapshots: &Arc<std::sync::Mutex<std::collections::HashMap<SocketAddr, ClientSnapshot>>>,
     server_tun: Option<&Arc<TunInterface>>,
+    server_ips: ServerTunIps,
     tun_enable: bool,
     fingerprint_profile: OsFingerprintProfile,
     dns_upstream_resolvers: Arc<Vec<Ipv4Addr>>,
@@ -2356,7 +2550,15 @@ pub async fn process_live_server_client_datagram(
     let normalizer = std::sync::Arc::new(PacketNormalizer::new(fingerprint_profile));
 
     let LiveClientRuntime {
-        connection: conn, conn_id, qkey_auth, session_stats, session_id, ..
+        connection: conn,
+        conn_id,
+        qkey_auth,
+        session_stats,
+        session_id,
+        assigned_ips,
+        forwarding_policy,
+        fanout_queue,
+        ..
     } = runtime_client;
     record_live_snapshot_bytes_in(
         client_snapshots,
@@ -2399,10 +2601,15 @@ pub async fn process_live_server_client_datagram(
             }
             let tun_sink = Arc::clone(tun);
             let masque_normalizer = std::sync::Arc::clone(&normalizer);
+            let masque_forwarding_policy = Arc::clone(&forwarding_policy);
+            let masque_fanout_queue = Arc::clone(&fanout_queue);
+            let masque_metrics = Arc::clone(metrics);
             let dns_resolvers = Arc::clone(&dns_upstream_resolvers);
             let dns_downlink_queue = conn
                 .masque_downlink_queue()
                 .expect("MASQUE downlink queue installed before callback");
+            let masque_response_queue = Arc::clone(&dns_downlink_queue);
+            let tun_mtu = tun.mtu();
             let datagram_auth_gate = Arc::clone(&auth_gate);
             conn.set_masque_datagram_cb(Arc::new(std::sync::Mutex::new(Box::new(
                 move |payload: &[u8]| {
@@ -2412,6 +2619,17 @@ pub async fn process_live_server_client_datagram(
                     ) {
                         return;
                     }
+                    let Some(route) = allow_client_uplink(
+                        &masque_forwarding_policy,
+                        &masque_metrics,
+                        assigned_ips,
+                        payload,
+                        server_ips,
+                        tun_mtu,
+                        &masque_response_queue,
+                    ) else {
+                        return;
+                    };
                     if spawn_dns_intercept(
                         payload,
                         Arc::clone(&dns_resolvers),
@@ -2425,16 +2643,22 @@ pub async fn process_live_server_client_datagram(
                     if !payload.is_empty() && payload[0] >> 4 == 4 {
                         let mut buf = payload.to_vec();
                         masque_normalizer.normalize_ipv4(&mut buf);
+                        enqueue_client_fanout(&masque_fanout_queue, addr, route, &buf);
                         if let Err(error) = tun_sink.write(&buf) {
                             log::warn!("Server TUN write (MASQUE) failed: {:?}", error);
                         }
-                    } else if let Err(error) = tun_sink.write(payload) {
-                        log::warn!("Server TUN write (MASQUE) failed: {:?}", error);
+                    } else {
+                        enqueue_client_fanout(&masque_fanout_queue, addr, route, payload);
+                        if let Err(error) = tun_sink.write(payload) {
+                            log::warn!("Server TUN write (MASQUE) failed: {:?}", error);
+                        }
                     }
                 },
             ))));
         }
     }
+
+    let stream_response_queue = conn.masque_downlink_queue();
 
     if let Err(error) = conn.poll_http3_with_headers(
         |_sid, headers| match evaluate_qkey_http3_headers(
@@ -2464,16 +2688,34 @@ pub async fn process_live_server_client_datagram(
                     // MASQUE stream, which is not a raw IP packet and would cause
                     // EINVAL on TUN write.
                     if !data.is_empty() && (data[0] >> 4 == 4 || data[0] >> 4 == 6) {
+                        let Some(response_queue) = stream_response_queue.as_ref() else {
+                            return;
+                        };
+                        let Some(route) = allow_client_uplink(
+                            &forwarding_policy,
+                            metrics,
+                            assigned_ips,
+                            data,
+                            server_ips,
+                            tun.mtu(),
+                            response_queue,
+                        ) else {
+                            return;
+                        };
                         // Apply OS fingerprint normalization for IPv4 packets
                         // before writing to TUN (TODO-462).
                         if data[0] >> 4 == 4 {
                             let mut buf = data.to_vec();
                             normalizer.normalize_ipv4(&mut buf);
+                            enqueue_client_fanout(&fanout_queue, addr, route, &buf);
                             if let Err(error) = tun.write(&buf) {
                                 log::warn!("Server TUN write failed: {:?}", error);
                             }
-                        } else if let Err(error) = tun.write(data) {
-                            log::warn!("Server TUN write failed: {:?}", error);
+                        } else {
+                            enqueue_client_fanout(&fanout_queue, addr, route, data);
+                            if let Err(error) = tun.write(data) {
+                                log::warn!("Server TUN write failed: {:?}", error);
+                            }
                         }
                     }
                 }
@@ -2519,6 +2761,7 @@ pub async fn process_live_server_client_datagram(
 
 pub struct LiveServerState {
     clients: std::collections::HashMap<SocketAddr, QuicFuscateConnection>,
+    fanout_queue: ClientFanoutQueue,
     qkey_auth: std::collections::HashMap<Vec<u8>, QKeyAuthState>,
     domain: LiveServerDomain,
     auth_rate_limiter:
@@ -2662,6 +2905,9 @@ pub struct LiveClientRuntime<'a> {
     pub qkey_auth: Option<QKeyAuthState>,
     pub session_id: Option<SessionId>,
     pub session_stats: Option<Arc<SessionStats>>,
+    pub assigned_ips: Option<AssignedClientIps>,
+    pub forwarding_policy: Arc<ClientIsolationManager>,
+    fanout_queue: ClientFanoutQueue,
 }
 
 pub enum LiveClientAcquire<'a> {
@@ -2686,8 +2932,8 @@ impl LiveServerDomain {
     fn accept(
         &self,
         remote_addr: SocketAddr,
-    ) -> Result<(SessionId, Arc<SessionStats>), AcceptError> {
-        let (session_id, stats, _) = self.shared.accept(remote_addr)?;
+    ) -> Result<(SessionId, Arc<SessionStats>, AssignedClientIps), AcceptError> {
+        let (session_id, stats, assigned_ips) = self.shared.accept(remote_addr)?;
         let source_ip = remote_addr.ip().to_string();
         let client_id = session_id.as_u64().to_string();
         crate::audit::audit(
@@ -2697,7 +2943,7 @@ impl LiveServerDomain {
             Some(&client_id),
             "Client connection accepted",
         );
-        Ok((session_id, stats))
+        Ok((session_id, stats, assigned_ips))
     }
 
     fn remove_remote(&self, remote_addr: SocketAddr) {
@@ -2746,6 +2992,12 @@ impl LiveServerDomain {
 
     fn session_id_by_remote(&self, remote_addr: SocketAddr) -> Option<SessionId> {
         self.shared.sessions.read().session_id_by_remote_addr(remote_addr)
+    }
+
+    fn assigned_ips_by_remote(&self, remote_addr: SocketAddr) -> Option<AssignedClientIps> {
+        self.shared.sessions.read().get_by_remote_addr(remote_addr).map(|session| {
+            AssignedClientIps { ipv4: session.client_ip(), ipv6: session.client_ipv6() }
+        })
     }
 
     fn remote_addr_for_identity(&self, identity: &ClientIdentity) -> Option<SocketAddr> {
@@ -2823,7 +3075,7 @@ fn accept_session_in_domain(
     remote_addr: SocketAddr,
     max_clients: usize,
     client_timeout_secs: u64,
-) -> Result<(SessionId, Arc<SessionStats>, Ipv4Addr), AcceptError> {
+) -> Result<(SessionId, Arc<SessionStats>, AssignedClientIps), AcceptError> {
     if !connection_limiter.check(remote_addr.ip()) {
         return Err(AcceptError::TooManyConnectionsPerIp);
     }
@@ -2856,7 +3108,7 @@ fn accept_session_in_domain(
     match sessions.add(session) {
         Ok(_) => {
             connection_limiter.add(remote_addr.ip());
-            Ok((session_id, stats, client_ip))
+            Ok((session_id, stats, AssignedClientIps { ipv4: client_ip, ipv6: client_ipv6 }))
         }
         Err(SessionError::MaxSessionsReached) => {
             ip_pool.release(client_ip);
@@ -2940,6 +3192,7 @@ impl LiveServerState {
             );
         Self {
             clients: std::collections::HashMap::new(),
+            fanout_queue: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
             qkey_auth: std::collections::HashMap::new(),
             domain: LiveServerDomain::new(&server_config),
             auth_rate_limiter: Arc::new(std::sync::Mutex::new(
@@ -3045,6 +3298,9 @@ impl LiveServerState {
         use std::collections::hash_map::Entry;
 
         let count_before = self.clients.len();
+        let existing_assigned_ips = self.domain.assigned_ips_by_remote(addr);
+        let forwarding_policy = Arc::clone(&self.domain.shared.forwarding_policy);
+        let fanout_queue = Arc::clone(&self.fanout_queue);
         match self.clients.entry(addr) {
             Entry::Occupied(entry) => {
                 let connection = entry.into_mut();
@@ -3059,6 +3315,9 @@ impl LiveServerState {
                     qkey_auth,
                     session_id,
                     session_stats,
+                    assigned_ips: existing_assigned_ips,
+                    forwarding_policy,
+                    fanout_queue: Arc::clone(&fanout_queue),
                 })
             }
             Entry::Vacant(entry) => {
@@ -3080,7 +3339,7 @@ impl LiveServerState {
                         return LiveClientAcquire::Rejected;
                     }
                 };
-                let (session_id, session_stats) = match self.domain.accept(addr) {
+                let (session_id, session_stats, assigned_ips) = match self.domain.accept(addr) {
                     Ok(value) => value,
                     Err(_) => {
                         metrics.connections_rejected.fetch_add(1, Ordering::Relaxed);
@@ -3103,6 +3362,9 @@ impl LiveServerState {
                     qkey_auth,
                     session_id: Some(session_id),
                     session_stats: Some(session_stats),
+                    assigned_ips: Some(assigned_ips),
+                    forwarding_policy,
+                    fanout_queue,
                 })
             }
         }
@@ -3134,6 +3396,55 @@ impl LiveServerState {
 
     fn get_mut(&mut self, addr: &SocketAddr) -> Option<&mut QuicFuscateConnection> {
         self.clients.get_mut(addr)
+    }
+
+    fn drain_client_fanout(&mut self, metrics: &Metrics) {
+        let pending: Vec<ClientFanoutPacket> = match self.fanout_queue.lock() {
+            Ok(mut queue) => queue.drain(..).collect(),
+            Err(poisoned) => poisoned.into_inner().drain(..).collect(),
+        };
+        for fanout in pending {
+            let targets = {
+                let sessions = self.domain.shared.sessions.read();
+                self.clients
+                    .iter()
+                    .filter_map(|(address, connection)| {
+                        if *address == fanout.source {
+                            return None;
+                        }
+                        let conn_id = connection.conn.source_id().as_ref();
+                        if self.qkey_auth.get(conn_id).is_some_and(|state| !state.authed) {
+                            return None;
+                        }
+                        let session = sessions.get_by_remote_addr(*address)?;
+                        if fanout.destination.is_ipv6() && session.client_ipv6().is_none() {
+                            return None;
+                        }
+                        Some(*address)
+                    })
+                    .collect::<smallvec::SmallVec<[SocketAddr; 4]>>()
+            };
+
+            let mut queued = false;
+            for target in targets {
+                let Some(connection) = self.clients.get_mut(&target) else {
+                    continue;
+                };
+                if fanout.packet.len() > connection.effective_tunnel_mtu() {
+                    log::debug!("Client fan-out packet exceeds tunnel MTU for {}", target);
+                    continue;
+                }
+                match connection.send_masque_downlink(&fanout.packet) {
+                    Ok(()) => queued = true,
+                    Err(error) => {
+                        log::debug!("Client fan-out queue for {} failed: {:?}", target, error);
+                    }
+                }
+            }
+            if queued {
+                metrics.record_routing_outcome(RoutingOutcome::Fanout);
+            }
+        }
     }
 
     fn key_addrs(&self) -> Vec<SocketAddr> {
@@ -3537,6 +3848,7 @@ struct ServerRuntimeLiveParts<'a> {
     accept_loop: &'a AcceptLoop,
     accept_max_clients: usize,
     server_tun: Option<&'a Arc<TunInterface>>,
+    server_ips: ServerTunIps,
 }
 
 struct ServerLiveRuntime {
@@ -3549,8 +3861,10 @@ struct ServerLiveRuntime {
     socket: Arc<UdpSocket>,
     local_addr: SocketAddr,
     server_tun: Option<Arc<TunInterface>>,
+    routing: Option<RoutingManager>,
     /// Server TUN IP for ICMP echo reply handling.
     server_tun_ip: Option<Ipv4Addr>,
+    server_tun_ipv6: Option<Ipv6Addr>,
     /// Channel receiving packets read from the server TUN interface (spawned reader thread).
     /// Forwarded to the appropriate client via QUIC datagrams in the run_loop.
     tun_rx: Option<std::sync::mpsc::Receiver<Vec<u8>>>,
@@ -3579,6 +3893,225 @@ struct StandaloneServiceSignals {
     admin: Option<Arc<AtomicBool>>,
     admin_web: Option<Arc<AtomicBool>>,
     metrics: Option<Arc<AtomicBool>>,
+}
+
+fn write_tun_control_packet(tun: &TunInterface, packet: &[u8], context: &str) {
+    if packet.is_empty() {
+        return;
+    }
+    if let Err(error) = tun.write(packet) {
+        log::warn!("{} write to server TUN failed: {:?}", context, error);
+    }
+}
+
+fn handle_local_tun_packet(
+    packet: &[u8],
+    tun: &TunInterface,
+    server_ips: ServerTunIps,
+    fingerprint_profile: OsFingerprintProfile,
+    metrics: &Metrics,
+) -> bool {
+    if packet.len() >= 20 && packet[0] >> 4 == 4 {
+        let destination = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
+        if destination != server_ips.ipv4 {
+            return false;
+        }
+        let header_len = usize::from(packet[0] & 0x0f) * 4;
+        if let Some(header) = icmp::parse_icmpv4(header_len, packet) {
+            if header.icmp_type == icmp::icmp_type::ECHO_REQUEST {
+                let reply = icmp::build_echo_reply_with_ttl(packet, fingerprint_profile.ttl());
+                write_tun_control_packet(tun, &reply, "ICMPv4 echo reply");
+            }
+        }
+        metrics.record_routing_outcome(RoutingOutcome::Local);
+        return true;
+    }
+
+    let Some(server_ipv6) = server_ips.ipv6 else {
+        return false;
+    };
+    let Some(header) = icmp::parse_icmpv6(packet) else {
+        return false;
+    };
+    let destination = Ipv6Addr::from(<[u8; 16]>::try_from(&packet[24..40]).unwrap_or([0; 16]));
+    let response = if header.icmp_type == icmp::icmpv6_type::NEIGHBOR_SOLICITATION {
+        icmp::build_neighbor_advertisement(packet, server_ipv6)
+    } else if destination == server_ipv6 && header.icmp_type == icmp::icmpv6_type::ECHO_REQUEST {
+        icmp::build_icmpv6_echo_reply(packet, fingerprint_profile.ttl())
+    } else if destination == server_ipv6 {
+        Vec::new()
+    } else {
+        return false;
+    };
+    write_tun_control_packet(tun, &response, "ICMPv6 local response");
+    metrics.record_routing_outcome(RoutingOutcome::Local);
+    metrics.record_routing_outcome(RoutingOutcome::Icmpv6);
+    true
+}
+
+fn write_downlink_error(
+    packet: &[u8],
+    tun: &TunInterface,
+    server_ips: ServerTunIps,
+    outcome: RoutingOutcome,
+    mtu: Option<usize>,
+    metrics: &Metrics,
+) {
+    let response = match packet.first().map(|byte| byte >> 4) {
+        Some(4) => {
+            let (icmp_type, code) = match outcome {
+                RoutingOutcome::PacketTooBig => (
+                    icmp::icmp_type::DESTINATION_UNREACHABLE,
+                    icmp::icmp_code::FRAGMENTATION_NEEDED,
+                ),
+                RoutingOutcome::TimeExceeded => (icmp::icmp_type::TIME_EXCEEDED, 0),
+                _ => (icmp::icmp_type::DESTINATION_UNREACHABLE, icmp::icmp_code::HOST_UNREACHABLE),
+            };
+            let next_hop_mtu = mtu.map(|value| value.min(usize::from(u16::MAX)) as u16);
+            icmp::build_icmpv4_error(packet, server_ips.ipv4, icmp_type, code, next_hop_mtu)
+        }
+        Some(6) => {
+            let Some(server_ipv6) = server_ips.ipv6 else {
+                return;
+            };
+            let icmp_type = match outcome {
+                RoutingOutcome::PacketTooBig => icmp::icmpv6_type::PACKET_TOO_BIG,
+                RoutingOutcome::TimeExceeded => icmp::icmpv6_type::TIME_EXCEEDED,
+                _ => icmp::icmpv6_type::DESTINATION_UNREACHABLE,
+            };
+            metrics.record_routing_outcome(RoutingOutcome::Icmpv6);
+            icmp::build_icmpv6_error(
+                packet,
+                server_ipv6,
+                icmp_type,
+                mtu.map(|value| value.min(u32::MAX as usize) as u32),
+            )
+        }
+        _ => return,
+    };
+    write_tun_control_packet(tun, &response, "routing ICMP response");
+    metrics.record_routing_outcome(outcome);
+}
+
+fn process_server_tun_packet(
+    live: &mut ServerLiveRuntime,
+    packet: &[u8],
+    out: &mut [u8],
+    socket: &UdpSocket,
+    metrics: &Metrics,
+    fingerprint_profile: OsFingerprintProfile,
+) {
+    let Some(tun) = live.server_tun.clone() else {
+        return;
+    };
+    let server_ips = ServerTunIps {
+        ipv4: live.server_tun_ip.unwrap_or(Ipv4Addr::UNSPECIFIED),
+        ipv6: live.server_tun_ipv6,
+    };
+    if handle_local_tun_packet(packet, &tun, server_ips, fingerprint_profile, metrics) {
+        return;
+    }
+
+    let policy = Arc::clone(&live.live_state.domain.shared.forwarding_policy);
+    let route = policy.classify_downlink(packet, server_ips.ipv4, server_ips.ipv6);
+    let expired = matches!(route, DownlinkRoute::Unicast { .. })
+        && match packet.first().map(|byte| byte >> 4) {
+            Some(4) => packet.get(8).is_some_and(|ttl| *ttl == 0),
+            Some(6) => packet.get(7).is_some_and(|hop_limit| *hop_limit == 0),
+            _ => false,
+        };
+    if expired {
+        write_downlink_error(packet, &tun, server_ips, RoutingOutcome::TimeExceeded, None, metrics);
+        return;
+    }
+    let mut targets = smallvec::SmallVec::<[SocketAddr; 4]>::new();
+    {
+        let sessions = live.live_state.domain.shared.sessions.read();
+        match route {
+            DownlinkRoute::Unicast { destination, .. } => {
+                let target = match destination {
+                    std::net::IpAddr::V4(ipv4) => sessions.get_by_client_ip(ipv4),
+                    std::net::IpAddr::V6(ipv6) => sessions.get_by_client_ipv6(ipv6),
+                };
+                if let Some(session) = target {
+                    targets.push(session.remote_addr());
+                }
+                metrics.record_routing_outcome(RoutingOutcome::Unicast);
+            }
+            DownlinkRoute::Fanout { source, destination } => {
+                for (_, session) in sessions.iter() {
+                    let owns_source = match source {
+                        std::net::IpAddr::V4(ipv4) => session.client_ip() == ipv4,
+                        std::net::IpAddr::V6(ipv6) => session.client_ipv6() == Some(ipv6),
+                    };
+                    let supports_family = destination.is_ipv4() || session.client_ipv6().is_some();
+                    if !owns_source && supports_family {
+                        targets.push(session.remote_addr());
+                    }
+                }
+                metrics.record_routing_outcome(RoutingOutcome::Fanout);
+            }
+            DownlinkRoute::Unknown { .. } => {
+                drop(sessions);
+                write_downlink_error(
+                    packet,
+                    &tun,
+                    server_ips,
+                    RoutingOutcome::Unknown,
+                    None,
+                    metrics,
+                );
+                return;
+            }
+            DownlinkRoute::Malformed => {
+                metrics.routing_drop_malformed.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+            DownlinkRoute::Local { .. } => return,
+        }
+    }
+
+    let mut queued = smallvec::SmallVec::<[SocketAddr; 4]>::new();
+    for target in targets {
+        let Some(connection) = live.live_state.clients.get_mut(&target) else {
+            continue;
+        };
+        let effective_mtu = connection.effective_tunnel_mtu().min(usize::from(tun.mtu()));
+        if packet.len() > effective_mtu {
+            if matches!(route, DownlinkRoute::Unicast { .. }) {
+                write_downlink_error(
+                    packet,
+                    &tun,
+                    server_ips,
+                    RoutingOutcome::PacketTooBig,
+                    Some(effective_mtu),
+                    metrics,
+                );
+            }
+            continue;
+        }
+        if let Err(error) = connection.send_masque_downlink(packet) {
+            log::debug!("TUN to MASQUE queue for {} failed: {:?}", target, error);
+        } else {
+            queued.push(target);
+        }
+    }
+
+    for target in queued {
+        let Some(connection) = live.live_state.clients.get_mut(&target) else {
+            continue;
+        };
+        loop {
+            let written = match connection.send(out) {
+                Ok(0) | Err(_) => break,
+                Ok(written) => written,
+            };
+            if let Err(error) = socket.try_send_to(&out[..written], target) {
+                log::debug!("TUN to socket send to {} failed: {:?}", target, error);
+                break;
+            }
+        }
+    }
 }
 
 impl StandaloneServiceSignals {
@@ -3986,6 +4519,10 @@ struct TransportOverrides {
     dgram_recv_queue_len: Option<usize>,
     dgram_send_queue_len: Option<usize>,
     disable_pmtud: Option<bool>,
+    pmtu_min_mtu: Option<usize>,
+    pmtu_max_mtu: Option<usize>,
+    pmtu_probe_interval_ms: Option<u64>,
+    pmtu_black_hole_timeout_ms: Option<u64>,
     initial_rtt_ms: Option<u64>,
 }
 
@@ -4141,6 +4678,31 @@ fn parse_transport_overrides_from_toml(contents: &str) -> Result<TransportOverri
             v.as_bool().ok_or_else(|| "transport.disable_pmtud must be a boolean".to_string())?;
         out.disable_pmtud = Some(val);
     }
+    for (key, destination) in
+        [("pmtu_min_mtu", &mut out.pmtu_min_mtu), ("pmtu_max_mtu", &mut out.pmtu_max_mtu)]
+    {
+        if let Some(value) = tbl.get(key) {
+            let value =
+                value.as_integer().ok_or_else(|| format!("transport.{key} must be an integer"))?;
+            if !(1200..=u16::MAX as i64).contains(&value) {
+                return Err(format!("transport.{key} must be between 1200 and 65535"));
+            }
+            *destination = Some(value as usize);
+        }
+    }
+    for (key, destination) in [
+        ("pmtu_probe_interval_ms", &mut out.pmtu_probe_interval_ms),
+        ("pmtu_black_hole_timeout_ms", &mut out.pmtu_black_hole_timeout_ms),
+    ] {
+        if let Some(value) = tbl.get(key) {
+            let value =
+                value.as_integer().ok_or_else(|| format!("transport.{key} must be an integer"))?;
+            if value <= 0 {
+                return Err(format!("transport.{key} must be > 0"));
+            }
+            *destination = Some(value as u64);
+        }
+    }
     if let Some(v) = tbl.get("initial_rtt_ms") {
         let val = v
             .as_integer()
@@ -4218,6 +4780,30 @@ pub(crate) fn apply_transport_overrides_from_toml(
     }
     if let Some(disable) = overrides.disable_pmtud {
         transport.discover_pmtu(!disable);
+    }
+    if overrides.pmtu_min_mtu.is_some()
+        || overrides.pmtu_max_mtu.is_some()
+        || overrides.pmtu_probe_interval_ms.is_some()
+        || overrides.pmtu_black_hole_timeout_ms.is_some()
+    {
+        let current = transport.pmtu_policy();
+        let policy = crate::transport::PmtuPolicy {
+            min_mtu: overrides.pmtu_min_mtu.unwrap_or(current.min_mtu),
+            max_mtu: overrides.pmtu_max_mtu.unwrap_or(current.max_mtu),
+            probe_interval: Duration::from_millis(
+                overrides
+                    .pmtu_probe_interval_ms
+                    .unwrap_or(current.probe_interval.as_millis().min(u128::from(u64::MAX)) as u64),
+            ),
+            black_hole_timeout: Duration::from_millis(
+                overrides.pmtu_black_hole_timeout_ms.unwrap_or(
+                    current.black_hole_timeout.as_millis().min(u128::from(u64::MAX)) as u64,
+                ),
+            ),
+        };
+        if let Err(error) = transport.set_pmtu_policy(policy) {
+            log::warn!("transport DPLPMTUD policy ignored: {error}");
+        }
     }
     if let Some(rtt_ms) = overrides.initial_rtt_ms {
         transport.set_initial_rtt_ms(rtt_ms);
@@ -4305,6 +4891,7 @@ pub fn apply_runtime_config_reload(
 ///
 /// Returns `None` if the packet is too short, is not IPv4, or has options
 /// that make the header length invalid.
+#[cfg(test)]
 fn parse_ipv4_dest(pkt: &[u8]) -> Option<std::net::Ipv4Addr> {
     if pkt.len() < 20 {
         return None;
@@ -4324,6 +4911,7 @@ fn parse_ipv4_dest(pkt: &[u8]) -> Option<std::net::Ipv4Addr> {
 
 /// Extract the destination IPv6 address from a raw IP packet.
 /// Returns None if the packet is too short or is not IPv6.
+#[cfg(test)]
 fn parse_ipv6_dest(pkt: &[u8]) -> Option<Ipv6Addr> {
     if pkt.len() < 40 {
         return None;
@@ -4339,6 +4927,7 @@ fn parse_ipv6_dest(pkt: &[u8]) -> Option<Ipv6Addr> {
 }
 
 /// Extract the destination IP address (IPv4 or IPv6) from a raw IP packet.
+#[cfg(test)]
 fn parse_ip_dest(pkt: &[u8]) -> Option<std::net::IpAddr> {
     if pkt.is_empty() {
         return None;
@@ -4802,21 +5391,51 @@ impl ServerRuntime {
             Self::new(engine_config, server_config.clone()).map_err(std::io::Error::other)?;
 
         let std_socket = std::net::UdpSocket::bind(server_config.listen)?;
+        let socket_ref = socket2::SockRef::from(&std_socket);
+        if let Err(error) =
+            socket_ref.set_recv_buffer_size(crate::transport::UDP_SOCKET_BUFFER_BYTES)
+        {
+            log::debug!("UDP receive buffer hint rejected: {}", error);
+        }
+        if let Err(error) =
+            socket_ref.set_send_buffer_size(crate::transport::UDP_SOCKET_BUFFER_BYTES)
+        {
+            log::debug!("UDP send buffer hint rejected: {}", error);
+        }
         std_socket.set_nonblocking(true)?;
         let socket = Arc::new(UdpSocket::from_std(std_socket)?);
         let local_addr = socket.local_addr()?;
         let (admin_actions_tx, admin_actions_rx) = mpsc::unbounded_channel::<AdminAction>();
         let accept_max_clients = server_config.max_clients;
         let server_tun_ip = Some(server_config.server_ip);
-        let (server_tun, tun_rx) = match tun_config {
+        let server_tun_ipv6 = server_config.ipv6_server_ip;
+        let (server_tun, tun_rx, routing) = match tun_config {
             Some(tun_config) => {
                 let optm = crate::optimize::OptimizationManager::from_cfg(opt_params);
                 match open_server_tun(tun_config, optm.memory_pool()) {
                     Ok(tun) => {
+                        #[cfg(target_os = "linux")]
+                        let routing = {
+                            let routing =
+                                configured_routing_manager(tun.name().to_string(), &server_config)
+                                    .map_err(std::io::Error::other)?;
+                            routing.cleanup_stale();
+                            if let Err(error) = routing.setup() {
+                                let _ = routing.teardown();
+                                return Err(std::io::Error::other(format!(
+                                    "standalone server routing setup failed: {error}"
+                                )));
+                            }
+                            Some(routing)
+                        };
+                        #[cfg(not(target_os = "linux"))]
+                        let routing = None;
                         let tun_arc = Arc::new(tun);
                         // Spawn a blocking reader thread that forwards TUN frames into a channel.
                         // These packets are forwarded to the client via QUIC datagrams in the run_loop.
-                        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+                        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(
+                            crate::interface::TUN_PACKET_QUEUE_CAPACITY,
+                        );
                         let tun_for_reader = tun_arc.clone();
                         std::thread::spawn(move || loop {
                             match tun_for_reader.read_block() {
@@ -4835,15 +5454,16 @@ impl ServerRuntime {
                             }
                         });
                         log::info!("Server TUN reader thread spawned for bidirectional forwarding");
-                        (Some(tun_arc), Some(rx))
+                        (Some(tun_arc), Some(rx), routing)
                     }
                     Err(error) => {
-                        log::warn!("server TUN open failed: {}", error);
-                        (None, None)
+                        return Err(std::io::Error::other(format!(
+                            "standalone server TUN open failed: {error}"
+                        )));
                     }
                 }
             }
-            None => (None, None),
+            None => (None, None, None),
         };
 
         runtime.live = Some(ServerLiveRuntime {
@@ -4856,7 +5476,9 @@ impl ServerRuntime {
             socket,
             local_addr,
             server_tun,
+            routing,
             server_tun_ip,
+            server_tun_ipv6,
             tun_rx,
             blocked_ips,
             qkey_registry,
@@ -4979,6 +5601,9 @@ impl ServerRuntime {
     /// Stop the server.
     pub fn stop(&mut self) -> Result<(), EngineError> {
         if self.state == ServerState::Stopped {
+            if let Some(routing) = self.live.as_mut().and_then(|live| live.routing.take()) {
+                teardown_routing_with_retries(routing);
+            }
             return Ok(());
         }
 
@@ -4993,6 +5618,9 @@ impl ServerRuntime {
         if let Some(resources) = self.host_resources.take() {
             resources.teardown();
         }
+        if let Some(routing) = self.live.as_mut().and_then(|live| live.routing.take()) {
+            teardown_routing_with_retries(routing);
+        }
 
         self.state = ServerState::Stopped;
         self.graceful_shutdown.set_stopped();
@@ -5003,7 +5631,7 @@ impl ServerRuntime {
 
     /// Handle new client connection.
     pub fn accept_client(&self, remote_addr: SocketAddr) -> Result<SessionId, AcceptError> {
-        let (session_id, _stats, client_ip) = {
+        let (session_id, _stats, assigned_ips) = {
             match self.domain.accept(remote_addr) {
                 Ok(value) => value,
                 Err(error) => {
@@ -5016,7 +5644,7 @@ impl ServerRuntime {
         self.stats.total_connections.fetch_add(1, Ordering::Relaxed);
         self.stats.active_connections.fetch_add(1, Ordering::Relaxed);
 
-        log::info!("Client connected: {} -> {}", remote_addr, client_ip);
+        log::info!("Client connected: {} -> {}", remote_addr, assigned_ips.ipv4);
         let source_ip = remote_addr.ip().to_string();
         let client_id = session_id.as_u64().to_string();
         crate::audit::audit(
@@ -5247,6 +5875,10 @@ impl ServerRuntime {
             accept_loop: &live.accept_loop,
             accept_max_clients: live.accept_max_clients,
             server_tun: live.server_tun.as_ref(),
+            server_ips: ServerTunIps {
+                ipv4: live.server_tun_ip.unwrap_or(Ipv4Addr::UNSPECIFIED),
+                ipv6: live.server_tun_ipv6,
+            },
         }
     }
 
@@ -5321,8 +5953,8 @@ impl ServerRuntime {
             .ok_or_else(|| std::io::Error::other("server admin action receiver unavailable"))?;
         // Take the TUN reader channel (if any) for forwarding TUN→client datagrams.
         let mut tun_rx = self.live_mut().tun_rx.take();
-        let mut buf = [0; 65535];
-        let mut out = [0; 1460];
+        let mut buf = [0; LIVE_UDP_DATAGRAM_BUFFER_SIZE];
+        let mut out = [0; LIVE_UDP_DATAGRAM_BUFFER_SIZE];
         let mut housekeeping = tokio::time::interval(Duration::from_millis(5));
         housekeeping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -5487,6 +6119,7 @@ impl ServerRuntime {
                                 &metrics,
                                 &client_snapshots,
                                 runtime_parts.server_tun,
+                                runtime_parts.server_ips,
                                 tun_enable,
                                 transport.fingerprint_profile(),
                                 Arc::clone(&dns_upstream_resolvers),
@@ -5506,6 +6139,7 @@ impl ServerRuntime {
                                 runtime_parts.accept_loop,
                                 &metrics,
                             );
+                            runtime_parts.live_state.drain_client_fanout(&metrics);
                         }
                         Err(e) => {
                             log::error!("Failed to read from socket: {}", e);
@@ -5532,106 +6166,14 @@ impl ServerRuntime {
                             match rx.try_recv() {
                                 Ok(pkt) => {
                                     let live = self.live_mut();
-                                    let server_tun_ip = live.server_tun_ip;
-                                    let server_tun = live.server_tun.clone();
-
-                                    // Check if this is an ICMP packet destined for the server's own TUN IP.
-                                    // If so, handle it locally (echo reply) instead of forwarding.
-                                    if let Some(server_ip) = server_tun_ip {
-                                        if pkt.len() >= 20 && (pkt[0] >> 4) == 4 {
-                                            let dest = Ipv4Addr::new(pkt[16], pkt[17], pkt[18], pkt[19]);
-                                            if dest == server_ip {
-                                                let ihl = ((pkt[0] & 0x0F) as usize) * 4;
-                                                if let Some(icmp) = icmp::parse_icmpv4(ihl, &pkt) {
-                                                    if icmp.icmp_type == icmp::icmp_type::ECHO_REQUEST {
-                                                        // Use the target OS profile's TTL for the echo
-                                                        // reply so that ICMP fingerprinting also matches
-                                                        // the configured profile (TODO-462).
-                                                        let reply = icmp::build_echo_reply_with_ttl(
-                                                            &pkt,
-                                                            fingerprint_profile.ttl(),
-                                                        );
-                                                        if let Some(ref tun) = server_tun {
-                                                            if let Err(e) = tun.write(&reply) {
-                                                                log::warn!("ICMP echo reply write to TUN failed: {:?}", e);
-                                                            }
-                                                        }
-                                                        // Skip forwarding - handled locally
-                                                        continue;
-                                                    }
-                                                    // Other ICMP types to server IP: ignore
-                                                    continue;
-                                                }
-                                                // Non-ICMP packet to server IP: ignore (no local TCP/UDP stack)
-                                                continue;
-                                            }
-                                        }
-                                    }
-
-                                    // Parse the destination IP address (IPv4 or IPv6)
-                                    // from the packet and route to the matching client.
-                                    let target_addr = parse_ip_dest(&pkt)
-                                        .and_then(|dest_ip| {
-                                            let sessions = live.live_state.domain.shared.sessions.read();
-                                            match dest_ip {
-                                                std::net::IpAddr::V4(v4) => {
-                                                    sessions.get_by_client_ip(v4)
-                                                        .map(|s| s.remote_addr())
-                                                }
-                                                std::net::IpAddr::V6(v6) => {
-                                                    sessions.get_by_client_ipv6(v6)
-                                                        .map(|s| s.remote_addr())
-                                                }
-                                            }
-                                        });
-
-                                    let mut queued_target_addr = None;
-                                    if let Some(addr) = target_addr {
-                                        // Route to the specific client that owns this IP
-                                        if let Some(conn) = live.live_state.clients.get_mut(&addr) {
-                                            if let Err(e) = conn.send_masque_downlink(&pkt) {
-                                                log::debug!("TUN→MASQUE send to {}: {:?}", addr, e);
-                                            } else {
-                                                queued_target_addr = Some(addr);
-                                            }
-                                        }
-                                    } else {
-                                        // No matching client session - send ICMP Destination Unreachable
-                                        // (Host Unreachable) back to the source, so the sender gets
-                                        // immediate feedback instead of waiting for TCP timeout.
-                                        if pkt.len() >= 20 && (pkt[0] >> 4) == 4 {
-                                            let unreachable = icmp::build_icmp_unreachable(
-                                                &pkt,
-                                                icmp::icmp_type::DESTINATION_UNREACHABLE,
-                                                icmp::icmp_code::HOST_UNREACHABLE,
-                                                None,
-                                            );
-                                            if !unreachable.is_empty() {
-                                                if let Some(ref tun) = server_tun {
-                                                    let _ = tun.write(&unreachable);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    // Flush only the client that received queued MASQUE downlink
-                                    // data. The previous all-client sweep was O(client_count) per
-                                    // TUN packet even though only one connection had new output.
-                                    if let Some(addr) = queued_target_addr {
-                                        let live = self.live_mut();
-                                        if let Some(conn) = live.live_state.clients.get_mut(&addr) {
-                                            loop {
-                                                let written = match conn.send(&mut out) {
-                                                    Ok(0) => break,
-                                                    Ok(n) => n,
-                                                    Err(_) => break,
-                                                };
-                                                if let Err(e) = socket.try_send_to(&out[..written], addr) {
-                                                    log::debug!("TUN→socket send to {}: {:?}", addr, e);
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
+                                    process_server_tun_packet(
+                                        live,
+                                        &pkt,
+                                        &mut out,
+                                        &socket,
+                                        &metrics,
+                                        fingerprint_profile,
+                                    );
                                 }
                                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -5985,6 +6527,65 @@ mod tests {
     use std::io::Write as _;
 
     #[test]
+    fn client_fanout_queue_accepts_only_broadcast_and_multicast() {
+        let queue = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+        let source = "127.0.0.1:4433".parse().unwrap();
+        let packet = [0x45, 0, 0, 20];
+        enqueue_client_fanout(
+            &queue,
+            source,
+            UplinkRoute::Broadcast {
+                source: Ipv4Addr::new(10, 0, 1, 2),
+                destination: Ipv4Addr::new(10, 0, 1, 255),
+            },
+            &packet,
+        );
+        enqueue_client_fanout(
+            &queue,
+            source,
+            UplinkRoute::Internet {
+                source: Ipv4Addr::new(10, 0, 1, 2).into(),
+                destination: Ipv4Addr::new(1, 1, 1, 1).into(),
+            },
+            &packet,
+        );
+
+        let mut queue = queue.lock().unwrap();
+        assert_eq!(queue.len(), 1);
+        let fanout = queue.pop_front().unwrap();
+        assert_eq!(fanout.source, source);
+        assert_eq!(fanout.destination, IpAddr::V4(Ipv4Addr::new(10, 0, 1, 255)));
+        assert_eq!(fanout.packet, packet);
+    }
+
+    #[test]
+    fn authenticated_server_uplink_is_typed_as_local() {
+        let server_ip = Ipv4Addr::new(10, 0, 1, 1);
+        let client_ip = Ipv4Addr::new(10, 0, 1, 2);
+        let forwarding_policy =
+            ClientIsolationManager::with_network(server_ip, Ipv4Addr::new(255, 255, 255, 0), false);
+        let assigned = AssignedClientIps { ipv4: client_ip, ipv6: None };
+        forwarding_policy.assign_client("client", assigned);
+        let metrics = Metrics::new();
+        let responses = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+        let packet = test_ipv4_udp_packet(client_ip, server_ip, 40_000, 53, &[1]);
+
+        let route = allow_client_uplink(
+            &forwarding_policy,
+            &metrics,
+            Some(assigned),
+            &packet,
+            ServerTunIps { ipv4: server_ip, ipv6: None },
+            1280,
+            &responses,
+        );
+
+        assert!(matches!(route, Some(UplinkRoute::Local { .. })));
+        assert_eq!(metrics.routing_local.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.routing_internet.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
     fn test_server_config_default() {
         let config = ServerConfig::default();
         assert_eq!(config.max_clients, 100);
@@ -6284,7 +6885,7 @@ mod tests {
     fn test_live_server_domain_resolves_session_identity_to_remote_addr() {
         let remote_addr = "127.0.0.1:54322".parse().unwrap();
         let domain = LiveServerDomain::new(&ServerConfig::default());
-        let (session_id, _) = domain.accept(remote_addr).unwrap();
+        let (session_id, _, _) = domain.accept(remote_addr).unwrap();
 
         assert_eq!(
             domain.remote_addr_for_identity(&ClientIdentity::Session(session_id)),
@@ -6300,7 +6901,7 @@ mod tests {
         let metrics = Metrics::new();
         let local_addr: SocketAddr = "127.0.0.1:4433".parse().unwrap();
         let remote_addr: SocketAddr = "127.0.0.1:54326".parse().unwrap();
-        let (session_id, _) = live_state.domain.accept(remote_addr).unwrap();
+        let (session_id, _, _) = live_state.domain.accept(remote_addr).unwrap();
         let mut transport =
             crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION).unwrap();
         let connection = create_live_server_connection(
@@ -6351,7 +6952,7 @@ mod tests {
         let server_config = ServerConfig { client_timeout_secs: 1, ..ServerConfig::default() };
         let mut live_state = LiveServerState::new(server_config);
         let remote_addr = "127.0.0.1:54324".parse().unwrap();
-        let (session_id, _) = live_state.domain.accept(remote_addr).unwrap();
+        let (session_id, _, _) = live_state.domain.accept(remote_addr).unwrap();
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let accept_loop = AcceptLoop::new(AcceptConfig::default());
         let metrics = Metrics::new();
@@ -6365,6 +6966,32 @@ mod tests {
         assert_eq!(live_state.domain.session_id_by_remote(remote_addr), None);
         assert_eq!(live_state.domain.active_session_count(), 0);
         assert_eq!(metrics.clients_active.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_live_udp_datagram_buffer_serializes_full_1500_byte_fec_envelope() {
+        let profile = crate::fec::wire::WireProfile {
+            epoch: 1,
+            codec: crate::fec::wire::WireCodec::Gf8,
+            source_count: 4,
+            total_count: 6,
+            interleave_depth: 1,
+        };
+        let metadata = crate::fec::wire::WirePacketMeta {
+            profile,
+            window: 0,
+            sequence: 0,
+            repair_index: crate::fec::wire::SYSTEMATIC_REPAIR_INDEX,
+            block_index: 0,
+            systematic: true,
+        };
+        let payload = vec![0u8; 1500 - crate::fec::wire::HEADER_LEN];
+        let mut output = vec![0u8; LIVE_UDP_DATAGRAM_BUFFER_SIZE];
+
+        let written = crate::fec::wire::write_packet(metadata, &payload, &mut output)
+            .expect("1500-byte FEC envelope must fit the live server UDP buffer");
+
+        assert_eq!(written, 1500);
     }
 
     #[tokio::test]
@@ -6677,7 +7304,7 @@ mod tests {
         let metrics = Metrics::new();
         let local_addr: SocketAddr = "127.0.0.1:4433".parse().unwrap();
         let remote_addr: SocketAddr = "127.0.0.1:54326".parse().unwrap();
-        let (session_id, _) = live_state.domain.accept(remote_addr).expect("session accepted");
+        let (session_id, _, _) = live_state.domain.accept(remote_addr).expect("session accepted");
         let mut transport =
             crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION).unwrap();
         let connection = create_live_server_connection(
@@ -7405,8 +8032,8 @@ mod tests {
         let domain = LiveServerDomain::new(&ServerConfig::default());
         let addr1: SocketAddr = "10.0.0.1:5001".parse().unwrap();
         let addr2: SocketAddr = "10.0.0.2:5002".parse().unwrap();
-        let (id1, _) = domain.accept(addr1).unwrap();
-        let (id2, _) = domain.accept(addr2).unwrap();
+        let (id1, _, _) = domain.accept(addr1).unwrap();
+        let (id2, _, _) = domain.accept(addr2).unwrap();
 
         assert_ne!(id1, id2);
         assert_eq!(domain.active_session_count(), 2);
@@ -7418,12 +8045,28 @@ mod tests {
     fn test_live_server_domain_remove_remote_clears_session() {
         let domain = LiveServerDomain::new(&ServerConfig::default());
         let addr: SocketAddr = "10.0.0.1:5003".parse().unwrap();
-        let (id, _) = domain.accept(addr).unwrap();
+        let (id, _, _) = domain.accept(addr).unwrap();
         assert_eq!(domain.session_id_by_remote(addr), Some(id));
 
         domain.remove_remote(addr);
         assert_eq!(domain.session_id_by_remote(addr), None);
         assert_eq!(domain.active_session_count(), 0);
+    }
+
+    #[test]
+    fn test_live_server_domain_synchronizes_forwarding_policy_lifecycle() {
+        let domain = LiveServerDomain::new(&ServerConfig::default());
+        let remote: SocketAddr = "10.0.0.1:5004".parse().unwrap();
+        let (_, _, assigned_ips) = domain.accept(remote).unwrap();
+
+        assert_eq!(domain.shared.forwarding_policy.assigned_address_count(), 2);
+        assert_eq!(
+            domain.shared.forwarding_policy.client_for_ip(assigned_ips.ipv4.into()),
+            domain.session_id_by_remote(remote).map(|id| id.as_u64().to_string())
+        );
+
+        domain.remove_remote(remote);
+        assert_eq!(domain.shared.forwarding_policy.assigned_address_count(), 0);
     }
 
     // --- ServerConfig defaults ---
@@ -7493,6 +8136,41 @@ mtu = 500
     }
 
     #[test]
+    fn test_transport_overrides_apply_dplpmtud_policy() {
+        let mut transport =
+            crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION).unwrap();
+        let contents = r#"
+[transport]
+pmtu_min_mtu = 1260
+pmtu_max_mtu = 1460
+pmtu_probe_interval_ms = 2500
+pmtu_black_hole_timeout_ms = 7500
+"#;
+
+        apply_transport_overrides_from_toml(
+            std::path::Path::new("test.toml"),
+            contents,
+            &mut transport,
+        );
+
+        let policy = transport.pmtu_policy();
+        assert_eq!(policy.min_mtu, 1260);
+        assert_eq!(policy.max_mtu, 1460);
+        assert_eq!(policy.probe_interval, Duration::from_millis(2500));
+        assert_eq!(policy.black_hole_timeout, Duration::from_millis(7500));
+    }
+
+    #[test]
+    fn test_validate_transport_overrides_rejects_zero_pmtud_timer() {
+        let contents = r#"
+[transport]
+pmtu_probe_interval_ms = 0
+"#;
+
+        assert!(validate_transport_overrides_from_toml(contents).is_err());
+    }
+
+    #[test]
     fn test_accept_session_dual_stack_allocates_ipv6() {
         use std::net::SocketAddr;
         let mut sessions = SessionManager::new(10);
@@ -7514,8 +8192,9 @@ mtu = 500
             30,
         );
         assert!(result.is_ok());
-        let (session_id, _, client_ip) = result.unwrap();
-        assert_eq!(client_ip, Ipv4Addr::new(10, 8, 0, 2));
+        let (session_id, _, assigned_ips) = result.unwrap();
+        assert_eq!(assigned_ips.ipv4, Ipv4Addr::new(10, 8, 0, 2));
+        assert_eq!(assigned_ips.ipv6, Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0x0002)));
 
         // Verify the session has an IPv6 address
         let session = sessions.get(session_id).unwrap();

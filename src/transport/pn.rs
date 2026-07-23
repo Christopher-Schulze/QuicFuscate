@@ -19,6 +19,9 @@ pub mod pnspace {
         pub last_recv_time: Option<Instant>,
         /// Count of packets received since the last ACK was sent.
         pub recvd_since_ack: u64,
+        /// Deadline for acknowledging the first unacknowledged ack-eliciting
+        /// packet when the packet-count threshold is not reached.
+        ack_deadline: Option<Instant>,
     }
 
     impl PktNumSpace {
@@ -32,21 +35,18 @@ pub mod pnspace {
                 last_ack_time: None,
                 last_recv_time: None,
                 recvd_since_ack: 0,
+                ack_deadline: None,
             }
         }
 
         /// Maximum packet number per RFC 9000 Section 17.1 (2^62 - 1)
         const MAX_PACKET_NUMBER: u64 = (1u64 << 62) - 1;
 
-        /// Track a newly received packet number and decide if ACK should be elicited.
+        /// Track a newly received packet number without making ACK scheduling
+        /// depend on frames that may be non-ack-eliciting.
         /// Returns false if the packet should be rejected (duplicate or overflow).
         #[inline(always)]
-        pub fn on_packet_recv(
-            &mut self,
-            pn: u64,
-            max_ack_delay_ms: u64,
-            ack_threshold: u64,
-        ) -> bool {
+        pub fn on_packet_recv(&mut self, pn: u64) -> bool {
             // RFC 9000 Section 17.1: packet numbers are limited to 2^62 - 1
             if pn > Self::MAX_PACKET_NUMBER {
                 return false;
@@ -63,21 +63,6 @@ pub mod pnspace {
             // Track largest received PN
             self.largest_recv = Some(self.largest_recv.map(|l| l.max(pn)).unwrap_or(pn));
 
-            let now = Instant::now();
-            self.last_recv_time = Some(now);
-            self.recvd_since_ack = self.recvd_since_ack.saturating_add(1);
-
-            // Overdue if exceeded max_ack_delay since last ACK emission
-            let overdue = self
-                .last_ack_time
-                .map(|t| {
-                    now.saturating_duration_since(t) >= Duration::from_millis(max_ack_delay_ms)
-                })
-                .unwrap_or(true);
-
-            if self.recvd_since_ack >= ack_threshold.max(1) || overdue {
-                self.ack_elicited = true;
-            }
             true
         }
 
@@ -94,16 +79,18 @@ pub mod pnspace {
         #[inline(always)]
         pub fn has_pending_ack(&self) -> bool {
             self.ack_elicited
+                || self.ack_deadline.is_some_and(|deadline| Instant::now() >= deadline)
         }
 
         /// Takes an ACK decision and returns (ack_delay, ranges)
         #[inline(always)]
         pub fn take_ack(&mut self, ack_delay_exponent: u64) -> Option<(u64, Vec<(u64, u64)>)> {
-            if !self.ack_elicited {
+            if !self.has_pending_ack() {
                 return None;
             }
             self.ack_elicited = false;
             self.recvd_since_ack = 0;
+            self.ack_deadline = None;
 
             let now = Instant::now();
             let delay = if let Some(last) = self.last_recv_time {
@@ -131,10 +118,27 @@ pub mod pnspace {
             false
         }
 
-        /// Force ACK-elicitation (e.g., on receiving ack-eliciting frames)
+        /// Record an ack-eliciting packet and schedule an ACK at the configured
+        /// threshold or delay boundary. ACK-only packets must never call this.
         #[inline(always)]
-        pub fn note_ack_eliciting(&mut self) {
-            self.ack_elicited = true;
+        pub fn note_ack_eliciting(&mut self, max_ack_delay_ms: u64, ack_threshold: u64) {
+            let now = Instant::now();
+            if self.recvd_since_ack == 0 {
+                self.ack_deadline =
+                    Some(now.checked_add(Duration::from_millis(max_ack_delay_ms)).unwrap_or(now));
+            }
+            self.last_recv_time = Some(now);
+            self.recvd_since_ack = self.recvd_since_ack.saturating_add(1);
+            let overdue = self
+                .last_ack_time
+                .map(|last_ack| {
+                    now.saturating_duration_since(last_ack)
+                        >= Duration::from_millis(max_ack_delay_ms)
+                })
+                .unwrap_or(true);
+            if self.recvd_since_ack >= ack_threshold.max(1) || overdue {
+                self.ack_elicited = true;
+            }
         }
     }
 }
@@ -1003,25 +1007,62 @@ mod tests {
     #[test]
     fn pkt_num_space_accepts_valid_pn() {
         let mut pns = PktNumSpace::new();
-        assert!(pns.on_packet_recv(0, 25, 2));
-        assert!(pns.on_packet_recv(1, 25, 2));
-        assert!(pns.on_packet_recv(5, 25, 2));
+        assert!(pns.on_packet_recv(0));
+        assert!(pns.on_packet_recv(1));
+        assert!(pns.on_packet_recv(5));
     }
 
     #[test]
     fn pkt_num_space_rejects_duplicate() {
         let mut pns = PktNumSpace::new();
-        assert!(pns.on_packet_recv(42, 25, 2));
-        assert!(!pns.on_packet_recv(42, 25, 2));
+        assert!(pns.on_packet_recv(42));
+        assert!(!pns.on_packet_recv(42));
     }
 
     #[test]
     fn pkt_num_space_tracks_largest() {
         let mut pns = PktNumSpace::new();
-        pns.on_packet_recv(3, 25, 2);
-        pns.on_packet_recv(7, 25, 2);
-        pns.on_packet_recv(1, 25, 2);
+        pns.on_packet_recv(3);
+        pns.on_packet_recv(7);
+        pns.on_packet_recv(1);
         assert_eq!(pns.largest_recv, Some(7));
+    }
+
+    #[test]
+    fn ack_only_packet_number_does_not_schedule_an_ack() {
+        let mut pns = PktNumSpace::new();
+        assert!(pns.on_packet_recv(1));
+        assert!(!pns.has_pending_ack());
+    }
+
+    #[test]
+    fn ack_eliciting_packets_respect_threshold_after_initial_ack() {
+        let mut pns = PktNumSpace::new();
+        assert!(pns.on_packet_recv(1));
+        pns.note_ack_eliciting(25, 2);
+        assert!(pns.take_ack(3).is_some(), "the first ack-eliciting packet is acknowledged");
+
+        assert!(pns.on_packet_recv(2));
+        pns.note_ack_eliciting(25, 2);
+        assert!(!pns.has_pending_ack());
+        assert!(pns.on_packet_recv(3));
+        pns.note_ack_eliciting(25, 2);
+        assert!(pns.has_pending_ack());
+    }
+
+    #[test]
+    fn delayed_ack_deadline_releases_single_tail_packet() {
+        let mut pns = PktNumSpace::new();
+        assert!(pns.on_packet_recv(1));
+        pns.note_ack_eliciting(25, 2);
+        assert!(pns.take_ack(3).is_some());
+
+        assert!(pns.on_packet_recv(2));
+        pns.note_ack_eliciting(1, 2);
+        assert!(!pns.has_pending_ack());
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert!(pns.has_pending_ack());
+        assert!(pns.take_ack(3).is_some());
     }
 
     // --- varint tests ---

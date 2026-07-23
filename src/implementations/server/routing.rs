@@ -23,6 +23,8 @@ pub struct RoutingManager {
     server_ipv6: Option<Ipv6Addr>,
     /// IPv6 prefix length (e.g., 64).
     ipv6_prefix_len: u8,
+    /// Explicit opt-in for direct forwarding back out of the TUN interface.
+    client_to_client_enabled: bool,
 }
 
 /// Routing errors.
@@ -30,6 +32,7 @@ pub struct RoutingManager {
 pub enum RoutingError {
     CommandFailed(String),
     PermissionDenied,
+    UnsupportedConfiguration(String),
     UnsupportedPlatform,
 }
 
@@ -38,6 +41,9 @@ impl std::fmt::Display for RoutingError {
         match self {
             RoutingError::CommandFailed(e) => write!(f, "Command failed: {}", e),
             RoutingError::PermissionDenied => write!(f, "Permission denied (need root)"),
+            RoutingError::UnsupportedConfiguration(detail) => {
+                write!(f, "Unsupported routing configuration: {detail}")
+            }
             RoutingError::UnsupportedPlatform => {
                 write!(f, "Routing not supported on this platform")
             }
@@ -55,7 +61,15 @@ impl RoutingManager {
         netmask: Ipv4Addr,
         wan_interface: String,
     ) -> Self {
-        Self { tun_name, server_ip, netmask, wan_interface, server_ipv6: None, ipv6_prefix_len: 64 }
+        Self {
+            tun_name,
+            server_ip,
+            netmask,
+            wan_interface,
+            server_ipv6: None,
+            ipv6_prefix_len: 64,
+            client_to_client_enabled: false,
+        }
     }
 
     /// Create a new dual-stack routing manager.
@@ -74,7 +88,13 @@ impl RoutingManager {
             wan_interface,
             server_ipv6: Some(server_ipv6),
             ipv6_prefix_len,
+            client_to_client_enabled: false,
         }
+    }
+
+    pub fn with_client_to_client(mut self, enabled: bool) -> Self {
+        self.client_to_client_enabled = enabled;
+        self
     }
 
     /// Returns true if IPv6 is enabled.
@@ -149,21 +169,16 @@ impl RoutingManager {
         self.assign_tun_address_macos()?;
         self.enable_ip_forwarding_macos()?;
         let subnet = self.calculate_subnet();
-        self.setup_pf(&subnet)?;
-        log::info!("Routing configured (macOS/pf): {} via {}", subnet, self.wan_interface);
 
-        // IPv6 setup (if enabled)
-        if self.is_ipv6_enabled() {
+        let ipv6_subnet = if self.is_ipv6_enabled() {
             self.assign_tun_address_v6_macos()?;
             self.enable_ipv6_forwarding_macos()?;
-            let v6_subnet = self.calculate_ipv6_subnet();
-            self.setup_pf_v6(&v6_subnet)?;
-            log::info!(
-                "IPv6 routing configured (macOS/pf): {} via {}",
-                v6_subnet,
-                self.wan_interface
-            );
-        }
+            Some(self.calculate_ipv6_subnet())
+        } else {
+            None
+        };
+        self.setup_pf(&subnet, ipv6_subnet.as_deref())?;
+        log::info!("Routing configured (macOS/pf): {} via {}", subnet, self.wan_interface);
 
         crate::audit::audit(
             crate::audit::AuditEventType::FirewallRuleAdded,
@@ -178,22 +193,11 @@ impl RoutingManager {
 
     #[cfg(target_os = "windows")]
     pub fn setup(&self) -> Result<(), RoutingError> {
+        self.validate_windows_contract()?;
         self.enable_ip_forwarding_windows()?;
         let subnet = self.calculate_subnet();
         self.setup_windows_nat(&subnet)?;
         log::info!("Routing configured (Windows/NetNat): {} via {}", subnet, self.wan_interface);
-
-        // IPv6 setup (if enabled)
-        if self.is_ipv6_enabled() {
-            self.enable_ipv6_forwarding_windows()?;
-            let v6_subnet = self.calculate_ipv6_subnet();
-            self.setup_windows_nat_v6(&v6_subnet)?;
-            log::info!(
-                "IPv6 routing configured (Windows/NetNat): {} via {}",
-                v6_subnet,
-                self.wan_interface
-            );
-        }
 
         crate::audit::audit(
             crate::audit::AuditEventType::FirewallRuleAdded,
@@ -238,11 +242,38 @@ impl RoutingManager {
             ])
             .status();
         let _ = Command::new("iptables")
-            .args(["-D", "FORWARD", "-i", &self.tun_name, "-j", "ACCEPT"])
+            .args([
+                "-D",
+                "FORWARD",
+                "-i",
+                &self.tun_name,
+                "-o",
+                &self.wan_interface,
+                "-j",
+                "ACCEPT",
+            ])
             .status();
-        let _ = Command::new("iptables")
-            .args(["-D", "FORWARD", "-o", &self.tun_name, "-j", "ACCEPT"])
-            .status();
+        for destination in self.ipv4_fanout_destinations() {
+            let _ = Command::new("iptables")
+                .args([
+                    "-D",
+                    "FORWARD",
+                    "-i",
+                    &self.tun_name,
+                    "-o",
+                    &self.tun_name,
+                    "-d",
+                    &destination,
+                    "-j",
+                    "ACCEPT",
+                ])
+                .status();
+        }
+        for action in ["ACCEPT", "DROP"] {
+            let _ = Command::new("iptables")
+                .args(["-D", "FORWARD", "-i", &self.tun_name, "-o", &self.tun_name, "-j", action])
+                .status();
+        }
         let _ = Command::new("iptables")
             .args([
                 "-D",
@@ -254,7 +285,7 @@ impl RoutingManager {
                 "-m",
                 "state",
                 "--state",
-                "ESTABLISHED,RELATED",
+                "RELATED,ESTABLISHED",
                 "-j",
                 "ACCEPT",
             ])
@@ -278,11 +309,61 @@ impl RoutingManager {
                 ])
                 .status();
             let _ = Command::new("ip6tables")
-                .args(["-D", "FORWARD", "-i", &self.tun_name, "-j", "ACCEPT"])
+                .args([
+                    "-D",
+                    "FORWARD",
+                    "-i",
+                    &self.tun_name,
+                    "-o",
+                    &self.wan_interface,
+                    "-j",
+                    "ACCEPT",
+                ])
                 .status();
             let _ = Command::new("ip6tables")
-                .args(["-D", "FORWARD", "-o", &self.tun_name, "-j", "ACCEPT"])
+                .args([
+                    "-D",
+                    "FORWARD",
+                    "-i",
+                    &self.tun_name,
+                    "-o",
+                    &self.tun_name,
+                    "-d",
+                    "ff00::/8",
+                    "-j",
+                    "ACCEPT",
+                ])
                 .status();
+            let _ = Command::new("ip6tables")
+                .args([
+                    "-D",
+                    "FORWARD",
+                    "-i",
+                    &self.wan_interface,
+                    "-o",
+                    &self.tun_name,
+                    "-m",
+                    "state",
+                    "--state",
+                    "RELATED,ESTABLISHED",
+                    "-j",
+                    "ACCEPT",
+                ])
+                .status();
+            for action in ["ACCEPT", "DROP"] {
+                let _ = Command::new("ip6tables")
+                    .args([
+                        "-D",
+                        "FORWARD",
+                        "-i",
+                        &self.tun_name,
+                        "-o",
+                        &self.tun_name,
+                        "-j",
+                        action,
+                    ])
+                    .status();
+            }
         }
 
         // nftables stale cleanup — delete the dedicated routing table if it
@@ -422,6 +503,51 @@ impl RoutingManager {
             }
         }
 
+        for destination in self.ipv4_fanout_destinations() {
+            match Command::new("iptables")
+                .args([
+                    "-D",
+                    "FORWARD",
+                    "-i",
+                    &self.tun_name,
+                    "-o",
+                    &self.tun_name,
+                    "-d",
+                    &destination,
+                    "-j",
+                    "ACCEPT",
+                ])
+                .status()
+            {
+                Ok(status) if status.success() => {}
+                Ok(status) => {
+                    log::debug!("iptables teardown fan-out returned status {}", status);
+                }
+                Err(error) => {
+                    log::debug!("iptables teardown fan-out failed: {}", error);
+                }
+            }
+        }
+
+        for action in ["ACCEPT", "DROP"] {
+            match Command::new("iptables")
+                .args(["-D", "FORWARD", "-i", &self.tun_name, "-o", &self.tun_name, "-j", action])
+                .status()
+            {
+                Ok(status) if status.success() => {}
+                Ok(status) => {
+                    log::debug!("iptables teardown TUN isolation returned status {}", status);
+                }
+                Err(error) => {
+                    log::debug!("iptables teardown TUN isolation failed: {}", error);
+                }
+            }
+        }
+
+        if self.is_ipv6_enabled() {
+            self.teardown_ip6tables()?;
+        }
+
         Ok(())
     }
 
@@ -450,7 +576,9 @@ impl RoutingManager {
         // Best-effort cleanup; keep shutdown robust even if NAT object was absent.
         let script = format!(
             "$ErrorActionPreference='SilentlyContinue'; \
-             Remove-NetNat -Name '{}' -Confirm:$false",
+             Remove-NetNat -Name '{}' -Confirm:$false; \
+             Remove-NetNat -Name '{}_v6' -Confirm:$false",
+            Self::WINDOWS_NAT_NAME,
             Self::WINDOWS_NAT_NAME
         );
         if let Err(e) = self.run_powershell(&script, "Remove-NetNat") {
@@ -517,6 +645,49 @@ impl RoutingManager {
             return Err(RoutingError::CommandFailed("iptables FORWARD rule failed".to_string()));
         }
 
+        for destination in self.ipv4_fanout_destinations() {
+            let status = Command::new("iptables")
+                .args([
+                    "-A",
+                    "FORWARD",
+                    "-i",
+                    &self.tun_name,
+                    "-o",
+                    &self.tun_name,
+                    "-d",
+                    &destination,
+                    "-j",
+                    "ACCEPT",
+                ])
+                .status()
+                .map_err(|error| RoutingError::CommandFailed(error.to_string()))?;
+            if !status.success() {
+                return Err(RoutingError::CommandFailed(
+                    "iptables fan-out rule failed".to_string(),
+                ));
+            }
+        }
+
+        let isolation_action = if self.client_to_client_enabled { "ACCEPT" } else { "DROP" };
+        let status = Command::new("iptables")
+            .args([
+                "-A",
+                "FORWARD",
+                "-i",
+                &self.tun_name,
+                "-o",
+                &self.tun_name,
+                "-j",
+                isolation_action,
+            ])
+            .status()
+            .map_err(|error| RoutingError::CommandFailed(error.to_string()))?;
+        if !status.success() {
+            return Err(RoutingError::CommandFailed(
+                "iptables client isolation rule failed".to_string(),
+            ));
+        }
+
         // Allow established connections back
         let status = Command::new("iptables")
             .args([
@@ -546,8 +717,54 @@ impl RoutingManager {
     }
 
     /// Dedicated nftables table name for QuicFuscate server routing/NAT rules.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(test, target_os = "linux"))]
     const NFT_RT_TABLE: &'static str = "quicfuscate_rt";
+
+    #[cfg(any(test, target_os = "linux"))]
+    fn nftables_ruleset(&self, subnet: &str) -> String {
+        let v6_masquerade = if self.is_ipv6_enabled() {
+            let v6_subnet = self.calculate_ipv6_subnet();
+            format!("ip6 saddr {} oifname \"{}\" masquerade\n", v6_subnet, self.wan_interface)
+        } else {
+            String::new()
+        };
+        let v6_fanout = if self.is_ipv6_enabled() {
+            format!(
+                "iifname \"{}\" oifname \"{}\" ip6 daddr ff00::/8 accept\n",
+                self.tun_name, self.tun_name
+            )
+        } else {
+            String::new()
+        };
+        let isolation_action = if self.client_to_client_enabled { "accept" } else { "drop" };
+        let directed_broadcast = self.ipv4_broadcast();
+
+        format!(
+            "table inet {table} {{\n\
+             \x20   chain postrouting {{\n\
+             \x20       type nat hook postrouting priority 100; policy accept;\n\
+             \x20       ip saddr {subnet} oifname \"{wan}\" masquerade\n\
+             \x20       {v6_masquerade}\
+             \x20   }}\n\
+             \x20   chain forward {{\n\
+             \x20       type filter hook forward priority 0; policy accept;\n\
+             \x20       iifname \"{tun}\" oifname \"{tun}\" ip daddr {{ 255.255.255.255, {directed_broadcast}, 224.0.0.0/4 }} accept\n\
+             \x20       {v6_fanout}\
+             \x20       iifname \"{tun}\" oifname \"{tun}\" {isolation_action}\n\
+             \x20       iifname \"{tun}\" oifname \"{wan}\" accept\n\
+             \x20       iifname \"{wan}\" oifname \"{tun}\" ct state established,related accept\n\
+             \x20   }}\n\
+             }}\n",
+            table = Self::NFT_RT_TABLE,
+            subnet = subnet,
+            wan = self.wan_interface,
+            v6_masquerade = v6_masquerade,
+            v6_fanout = v6_fanout,
+            tun = self.tun_name,
+            directed_broadcast = directed_broadcast,
+            isolation_action = isolation_action,
+        )
+    }
 
     /// Set up nftables NAT and forwarding rules.
     ///
@@ -563,33 +780,7 @@ impl RoutingManager {
         use std::io::Write;
         use std::process::{Command, Stdio};
 
-        // Build the IPv6 NAT rule when dual-stack is enabled.
-        let v6_masquerade = if self.is_ipv6_enabled() {
-            let v6_subnet = self.calculate_ipv6_subnet();
-            format!("ip6 saddr {} oifname \"{}\" masquerade\n", v6_subnet, self.wan_interface)
-        } else {
-            String::new()
-        };
-
-        let ruleset = format!(
-            "table inet {table} {{\n\
-             \x20   chain postrouting {{\n\
-             \x20       type nat hook postrouting priority 100; policy accept;\n\
-             \x20       ip saddr {subnet} oifname \"{wan}\" masquerade\n\
-             \x20       {v6_masquerade}\
-             \x20   }}\n\
-             \x20   chain forward {{\n\
-             \x20       type filter hook forward priority 0; policy accept;\n\
-             \x20       iifname \"{tun}\" oifname \"{wan}\" accept\n\
-             \x20       iifname \"{wan}\" oifname \"{tun}\" ct state established,related accept\n\
-             \x20   }}\n\
-             }}\n",
-            table = Self::NFT_RT_TABLE,
-            subnet = subnet,
-            wan = self.wan_interface,
-            v6_masquerade = v6_masquerade,
-            tun = self.tun_name,
-        );
+        let ruleset = self.nftables_ruleset(subnet);
 
         // Delete any existing table first (idempotent).
         let _ = Command::new("nft").args(["delete", "table", "inet", Self::NFT_RT_TABLE]).status();
@@ -652,7 +843,7 @@ impl RoutingManager {
     #[cfg(target_os = "macos")]
     const MACOS_PF_ANCHOR: &'static str = "com.quicfuscate.vpn";
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(test, target_os = "windows"))]
     const WINDOWS_NAT_NAME: &'static str = "QuicFuscateNat";
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -704,27 +895,69 @@ impl RoutingManager {
     }
 
     #[cfg(target_os = "macos")]
-    fn pf_rules(&self, subnet: &str) -> String {
-        format!(
+    fn pf_rules(&self, subnet: &str, ipv6_subnet: Option<&str>) -> String {
+        let fanout_v4 = format!(
+            "pass quick on {} inet from {} to {{ 255.255.255.255, {}, 224.0.0.0/4 }} keep state\n",
+            self.tun_name,
+            subnet,
+            self.ipv4_broadcast()
+        );
+        let isolation_v4 = if self.client_to_client_enabled {
+            String::new()
+        } else {
+            format!("block drop quick on {} inet from {} to {}\n", self.tun_name, subnet, subnet)
+        };
+        let mut rules = format!(
             "nat on {} from {} to any -> ({})\n\
+             {}\
+             {}\
              pass quick on {} inet from {} to any keep state\n\
              pass quick on {} inet from any to {} keep state\n",
             self.wan_interface,
             subnet,
             self.wan_interface,
+            fanout_v4,
+            isolation_v4,
             self.tun_name,
             subnet,
             self.wan_interface,
             subnet
-        )
+        );
+        if let Some(ipv6_subnet) = ipv6_subnet {
+            let isolation_v6 = if self.client_to_client_enabled {
+                String::new()
+            } else {
+                format!(
+                    "block drop quick on {} inet6 from {} to {}\n",
+                    self.tun_name, ipv6_subnet, ipv6_subnet
+                )
+            };
+            rules.push_str(&format!(
+                "nat on {} inet6 from {} to any -> ({})\n\
+                 pass quick on {} inet6 from {} to ff00::/8 keep state\n{}\
+                 pass quick on {} inet6 from {} to any keep state\n\
+                 pass quick on {} inet6 from any to {} keep state\n",
+                self.wan_interface,
+                ipv6_subnet,
+                self.wan_interface,
+                self.tun_name,
+                ipv6_subnet,
+                isolation_v6,
+                self.tun_name,
+                ipv6_subnet,
+                self.wan_interface,
+                ipv6_subnet
+            ));
+        }
+        rules
     }
 
     #[cfg(target_os = "macos")]
-    fn setup_pf(&self, subnet: &str) -> Result<(), RoutingError> {
+    fn setup_pf(&self, subnet: &str, ipv6_subnet: Option<&str>) -> Result<(), RoutingError> {
         // Ensure packet filter is enabled.
         self.run_command("pfctl", &["-E"], "enable pfctl")?;
 
-        let rules = self.pf_rules(subnet);
+        let rules = self.pf_rules(subnet, ipv6_subnet);
         let mut child = Command::new("pfctl")
             .args(["-a", Self::MACOS_PF_ANCHOR, "-f", "-"])
             .stdin(Stdio::piped())
@@ -773,15 +1006,31 @@ impl RoutingManager {
 
     #[cfg(target_os = "windows")]
     fn setup_windows_nat(&self, subnet: &str) -> Result<(), RoutingError> {
+        let script = self.windows_nat_script(subnet);
+        self.run_powershell(&script, "New-NetNat")
+    }
+
+    #[cfg(any(test, target_os = "windows"))]
+    fn windows_nat_script(&self, subnet: &str) -> String {
         let nat_name = Self::WINDOWS_NAT_NAME;
-        let script = format!(
+        format!(
             "$ErrorActionPreference='Stop'; \
              if (Get-NetNat -Name '{nat_name}' -ErrorAction SilentlyContinue) {{ \
                Remove-NetNat -Name '{nat_name}' -Confirm:$false | Out-Null \
              }}; \
              New-NetNat -Name '{nat_name}' -InternalIPInterfaceAddressPrefix '{subnet}' | Out-Null"
-        );
-        self.run_powershell(&script, "New-NetNat")
+        )
+    }
+
+    #[cfg(any(test, target_os = "windows"))]
+    fn validate_windows_contract(&self) -> Result<(), RoutingError> {
+        if self.is_ipv6_enabled() {
+            return Err(RoutingError::UnsupportedConfiguration(
+                "Windows WinNAT does not provide IPv6 NAT; use routed IPv6 or run the dual-stack server on Linux/macOS"
+                    .to_string(),
+            ));
+        }
+        Ok(())
     }
 
     // ================================================================
@@ -876,10 +1125,28 @@ impl RoutingManager {
         format!("{}/{}", network_ip, mask_bits)
     }
 
+    fn ipv4_broadcast(&self) -> Ipv4Addr {
+        let mask = u32::from(self.netmask);
+        Ipv4Addr::from((u32::from(self.server_ip) & mask) | !mask)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn ipv4_fanout_destinations(&self) -> [String; 3] {
+        [
+            "255.255.255.255/32".to_string(),
+            format!("{}/32", self.ipv4_broadcast()),
+            "224.0.0.0/4".to_string(),
+        ]
+    }
+
     /// Calculate the IPv6 subnet CIDR (e.g., "fd00::/64").
     fn calculate_ipv6_subnet(&self) -> String {
         match self.server_ipv6 {
-            Some(ip) => format!("{}/{}", ip, self.ipv6_prefix_len),
+            Some(ip) => {
+                let prefix = self.ipv6_prefix_len.min(128);
+                let mask = if prefix == 0 { 0 } else { u128::MAX << (128 - prefix) };
+                format!("{}/{}", Ipv6Addr::from(u128::from(ip) & mask), prefix)
+            }
             None => String::new(),
         }
     }
@@ -938,6 +1205,45 @@ impl RoutingManager {
             return Err(RoutingError::CommandFailed("ip6tables FORWARD rule failed".to_string()));
         }
 
+        let status = Command::new("ip6tables")
+            .args([
+                "-A",
+                "FORWARD",
+                "-i",
+                &self.tun_name,
+                "-o",
+                &self.tun_name,
+                "-d",
+                "ff00::/8",
+                "-j",
+                "ACCEPT",
+            ])
+            .status()
+            .map_err(|error| RoutingError::CommandFailed(error.to_string()))?;
+        if !status.success() {
+            return Err(RoutingError::CommandFailed("ip6tables multicast rule failed".to_string()));
+        }
+
+        let isolation_action = if self.client_to_client_enabled { "ACCEPT" } else { "DROP" };
+        let status = Command::new("ip6tables")
+            .args([
+                "-A",
+                "FORWARD",
+                "-i",
+                &self.tun_name,
+                "-o",
+                &self.tun_name,
+                "-j",
+                isolation_action,
+            ])
+            .status()
+            .map_err(|error| RoutingError::CommandFailed(error.to_string()))?;
+        if !status.success() {
+            return Err(RoutingError::CommandFailed(
+                "ip6tables client isolation rule failed".to_string(),
+            ));
+        }
+
         // Allow established connections back
         let status = Command::new("ip6tables")
             .args([
@@ -966,6 +1272,64 @@ impl RoutingManager {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
+    fn teardown_ip6tables(&self) -> Result<(), RoutingError> {
+        let subnet = self.calculate_ipv6_subnet();
+        let commands: [&[&str]; 5] = [
+            &[
+                "-t",
+                "nat",
+                "-D",
+                "POSTROUTING",
+                "-s",
+                &subnet,
+                "-o",
+                &self.wan_interface,
+                "-j",
+                "MASQUERADE",
+            ],
+            &["-D", "FORWARD", "-i", &self.tun_name, "-o", &self.wan_interface, "-j", "ACCEPT"],
+            &[
+                "-D",
+                "FORWARD",
+                "-i",
+                &self.wan_interface,
+                "-o",
+                &self.tun_name,
+                "-m",
+                "state",
+                "--state",
+                "RELATED,ESTABLISHED",
+                "-j",
+                "ACCEPT",
+            ],
+            &[
+                "-D",
+                "FORWARD",
+                "-i",
+                &self.tun_name,
+                "-o",
+                &self.tun_name,
+                "-d",
+                "ff00::/8",
+                "-j",
+                "ACCEPT",
+            ],
+            &["-D", "FORWARD", "-i", &self.tun_name, "-o", &self.tun_name, "-j", "ACCEPT"],
+        ];
+        for args in commands {
+            match Command::new("ip6tables").args(args).status() {
+                Ok(status) if status.success() => {}
+                Ok(status) => log::debug!("ip6tables teardown returned status {}", status),
+                Err(error) => log::debug!("ip6tables teardown failed: {}", error),
+            }
+        }
+        let _ = Command::new("ip6tables")
+            .args(["-D", "FORWARD", "-i", &self.tun_name, "-o", &self.tun_name, "-j", "DROP"])
+            .status();
+        Ok(())
+    }
+
     #[cfg(target_os = "macos")]
     fn enable_ipv6_forwarding_macos(&self) -> Result<(), RoutingError> {
         self.run_command(
@@ -973,70 +1337,6 @@ impl RoutingManager {
             &["-w", "net.inet6.ip6.forwarding=1"],
             "enable macOS IPv6 forwarding",
         )
-    }
-
-    #[cfg(target_os = "macos")]
-    fn pf_rules_v6(&self, subnet: &str) -> String {
-        format!(
-            "nat on {} inet6 from {} to any -> ({})\n\
-             pass quick on {} inet6 from {} to any keep state\n\
-             pass quick on {} inet6 from any to {} keep state\n",
-            self.wan_interface,
-            subnet,
-            self.wan_interface,
-            self.tun_name,
-            subnet,
-            self.wan_interface,
-            subnet
-        )
-    }
-
-    #[cfg(target_os = "macos")]
-    fn setup_pf_v6(&self, subnet: &str) -> Result<(), RoutingError> {
-        let rules = self.pf_rules_v6(subnet);
-        let mut child = Command::new("pfctl")
-            .args(["-a", Self::MACOS_PF_ANCHOR, "-f", "-"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| RoutingError::CommandFailed(format!("pfctl spawn failed: {e}")))?;
-
-        if let Some(stdin) = child.stdin.as_mut() {
-            stdin.write_all(rules.as_bytes()).map_err(|e| {
-                RoutingError::CommandFailed(format!("pfctl v6 rule write failed: {e}"))
-            })?;
-        } else {
-            return Err(RoutingError::CommandFailed("pfctl stdin unavailable".to_string()));
-        }
-
-        let output = child
-            .wait_with_output()
-            .map_err(|e| RoutingError::CommandFailed(format!("pfctl wait failed: {e}")))?;
-        self.map_process_error("pfctl v6 anchor load", output)
-    }
-
-    #[cfg(target_os = "windows")]
-    fn enable_ipv6_forwarding_windows(&self) -> Result<(), RoutingError> {
-        let iface = Self::ps_escape(&self.wan_interface);
-        let script = format!(
-            "$ErrorActionPreference='Stop'; \
-             Set-NetIPInterface -InterfaceAlias '{iface}' -AddressFamily IPv6 -Forwarding Enabled"
-        );
-        self.run_powershell(&script, "Set-NetIPInterface IPv6 forwarding")
-    }
-
-    #[cfg(target_os = "windows")]
-    fn setup_windows_nat_v6(&self, subnet: &str) -> Result<(), RoutingError> {
-        let nat_name = format!("{}_v6", Self::WINDOWS_NAT_NAME);
-        let script = format!(
-            "$ErrorActionPreference='Stop'; \
-             if (Get-NetNat -Name '{nat_name}' -ErrorAction SilentlyContinue) {{ \
-               Remove-NetNat -Name '{nat_name}' -Confirm:$false | Out-Null \
-             }}; \
-             New-NetNat -Name '{nat_name}' -InternalIPInterfaceAddressPrefix '{subnet}' | Out-Null"
-        );
-        self.run_powershell(&script, "New-NetNat IPv6")
     }
 }
 
@@ -1189,5 +1489,99 @@ mod tests {
     #[test]
     fn test_nft_rt_table_constant() {
         assert_eq!(RoutingManager::NFT_RT_TABLE, "quicfuscate_rt");
+    }
+
+    #[test]
+    fn test_nftables_ruleset_defaults_to_dual_stack_client_isolation() {
+        let manager = RoutingManager::new_dual_stack(
+            "qfserver0".to_string(),
+            Ipv4Addr::new(10, 8, 0, 1),
+            Ipv4Addr::new(255, 255, 255, 0),
+            "eth0".to_string(),
+            "fd00::1".parse().unwrap(),
+            64,
+        );
+        let rules = manager.nftables_ruleset("10.8.0.0/24");
+
+        assert!(rules.contains("iifname \"qfserver0\" oifname \"qfserver0\" drop"));
+        let fanout_v4 = rules
+            .find("ip daddr { 255.255.255.255, 10.8.0.255, 224.0.0.0/4 } accept")
+            .expect("IPv4 fan-out allowance");
+        let fanout_v6 = rules.find("ip6 daddr ff00::/8 accept").expect("IPv6 fan-out allowance");
+        let isolation = rules
+            .find("iifname \"qfserver0\" oifname \"qfserver0\" drop")
+            .expect("default isolation");
+        assert!(fanout_v4 < isolation);
+        assert!(fanout_v6 < isolation);
+        assert!(rules.contains("ip6 saddr fd00::/64 oifname \"eth0\" masquerade"));
+    }
+
+    #[test]
+    fn test_nftables_ruleset_requires_explicit_client_unicast_opt_in() {
+        let manager = RoutingManager::new(
+            "qfserver0".to_string(),
+            Ipv4Addr::new(10, 8, 0, 1),
+            Ipv4Addr::new(255, 255, 255, 0),
+            "eth0".to_string(),
+        )
+        .with_client_to_client(true);
+        let rules = manager.nftables_ruleset("10.8.0.0/24");
+
+        assert!(rules.contains("iifname \"qfserver0\" oifname \"qfserver0\" accept"));
+        assert!(!rules.contains("iifname \"qfserver0\" oifname \"qfserver0\" drop"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_pf_rules_keep_ipv4_and_ipv6_in_one_anchor_ruleset() {
+        let manager = RoutingManager::new_dual_stack(
+            "utun9".to_string(),
+            Ipv4Addr::new(10, 8, 0, 1),
+            Ipv4Addr::new(255, 255, 255, 0),
+            "en0".to_string(),
+            "fd00::1".parse().unwrap(),
+            64,
+        );
+        let rules = manager.pf_rules("10.8.0.0/24", Some("fd00::/64"));
+
+        assert!(rules.contains("block drop quick on utun9 inet from 10.8.0.0/24"));
+        assert!(rules.contains("block drop quick on utun9 inet6 from fd00::/64"));
+        assert!(rules.contains("to { 255.255.255.255, 10.8.0.255, 224.0.0.0/4 }"));
+        assert!(rules.contains("to ff00::/8 keep state"));
+        assert!(rules.contains("nat on en0 from 10.8.0.0/24"));
+        assert!(rules.contains("nat on en0 inet6 from fd00::/64"));
+    }
+
+    #[test]
+    fn test_windows_nat_script_is_ipv4_only_and_idempotent() {
+        let manager = RoutingManager::new(
+            "QuicFuscate".to_string(),
+            Ipv4Addr::new(10, 8, 0, 1),
+            Ipv4Addr::new(255, 255, 255, 0),
+            "Ethernet".to_string(),
+        );
+        let script = manager.windows_nat_script("10.8.0.0/24");
+
+        assert!(script.contains("Get-NetNat -Name 'QuicFuscateNat'"));
+        assert!(script.contains("Remove-NetNat -Name 'QuicFuscateNat'"));
+        assert!(script.contains("InternalIPInterfaceAddressPrefix '10.8.0.0/24'"));
+        assert!(!script.contains("_v6"));
+    }
+
+    #[test]
+    fn test_windows_dual_stack_nat_is_rejected_before_side_effects() {
+        let manager = RoutingManager::new_dual_stack(
+            "QuicFuscate".to_string(),
+            Ipv4Addr::new(10, 8, 0, 1),
+            Ipv4Addr::new(255, 255, 255, 0),
+            "Ethernet".to_string(),
+            "fd00::1".parse().unwrap(),
+            64,
+        );
+
+        assert!(matches!(
+            manager.validate_windows_contract(),
+            Err(RoutingError::UnsupportedConfiguration(_))
+        ));
     }
 }

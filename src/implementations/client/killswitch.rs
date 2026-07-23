@@ -302,13 +302,6 @@ impl LinuxKillSwitch {
         }
     }
 
-    fn cleanup(&self) -> Result<(), KillSwitchError> {
-        match self {
-            Self::Iptables(i) => i.cleanup(),
-            Self::Nftables(n) => n.cleanup(),
-        }
-    }
-
     fn cleanup_stale() -> Result<(), KillSwitchError> {
         // Attempt both backends because a previous session may have selected
         // either one. Never let one cleanup failure suppress the other attempt.

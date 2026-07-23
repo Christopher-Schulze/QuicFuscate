@@ -248,6 +248,7 @@ pub struct Config {
     pub(crate) max_amplification_factor: usize,
     pub(crate) send_capacity_factor: f64,
     pub(crate) pmtu_discovery_enabled: bool,
+    pub(crate) pmtu_policy: PmtuPolicy,
     pub(crate) disable_dcid_reuse: bool,
     pub(crate) track_unknown_transport_params: Option<usize>,
     // Real-TLS knobs
@@ -329,6 +330,42 @@ pub struct Config {
     pub(crate) nat_traversal: NatTraversalConfig,
 }
 
+/// Validated DPLPMTUD search and recovery bounds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PmtuPolicy {
+    pub min_mtu: usize,
+    pub max_mtu: usize,
+    pub probe_interval: std::time::Duration,
+    pub black_hole_timeout: std::time::Duration,
+}
+
+impl Default for PmtuPolicy {
+    fn default() -> Self {
+        Self {
+            min_mtu: 1280,
+            max_mtu: 1500,
+            probe_interval: std::time::Duration::from_secs(60),
+            black_hole_timeout: std::time::Duration::from_secs(10),
+        }
+    }
+}
+
+impl PmtuPolicy {
+    fn validate(self) -> Result<Self, crate::error::ConnectionError> {
+        if self.min_mtu < 1200
+            || self.max_mtu < self.min_mtu
+            || self.max_mtu > u16::MAX as usize
+            || self.probe_interval.is_zero()
+            || self.black_hole_timeout.is_zero()
+        {
+            return Err(crate::error::ConnectionError::Transport(
+                "invalid DPLPMTUD policy bounds or timers".to_string(),
+            ));
+        }
+        Ok(self)
+    }
+}
+
 impl Config {
     /// Creates a new config with the given version
     pub fn new_with_version(version: u32) -> Result<Self, crate::error::ConnectionError> {
@@ -366,6 +403,7 @@ impl Config {
             max_amplification_factor: 3,
             send_capacity_factor: 1.0,
             pmtu_discovery_enabled: true, // DPLPMTUD enabled by default (RFC 8899)
+            pmtu_policy: PmtuPolicy::default(),
             disable_dcid_reuse: false,
             track_unknown_transport_params: None,
             chlo_template: None,
@@ -557,6 +595,11 @@ impl Config {
         self.pmtu_discovery_enabled
     }
 
+    /// Returns the validated DPLPMTUD search and recovery policy.
+    pub fn pmtu_policy(&self) -> PmtuPolicy {
+        self.pmtu_policy
+    }
+
     /// Returns whether SIMD acceleration is enabled.
     pub fn simd_enabled(&self) -> bool {
         self.simd_enabled
@@ -603,6 +646,15 @@ impl Config {
     /// Enables or disables Path MTU discovery.
     pub fn discover_pmtu(&mut self, discover: bool) {
         self.pmtu_discovery_enabled = discover;
+    }
+
+    /// Sets validated DPLPMTUD bounds and timers.
+    pub fn set_pmtu_policy(
+        &mut self,
+        policy: PmtuPolicy,
+    ) -> Result<(), crate::error::ConnectionError> {
+        self.pmtu_policy = policy.validate()?;
+        Ok(())
     }
     /// Sets the maximum number of queued PATH_CHALLENGE frames per path.
     pub fn set_path_challenge_recv_max_queue_len(&mut self, v: usize) {
@@ -1615,5 +1667,26 @@ mod tests {
         assert_eq!(cfg.max_paths(), 1);
         cfg.set_max_paths(8);
         assert_eq!(cfg.max_paths(), 8);
+    }
+
+    #[test]
+    fn pmtu_policy_defaults_cover_ipv6_floor_and_1500_ceiling() {
+        let cfg = default_config();
+        let policy = cfg.pmtu_policy();
+
+        assert_eq!(policy.min_mtu, 1280);
+        assert_eq!(policy.max_mtu, 1500);
+        assert_eq!(policy.probe_interval, std::time::Duration::from_secs(60));
+        assert_eq!(policy.black_hole_timeout, std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn pmtu_policy_rejects_unsafe_or_inverted_bounds() {
+        let mut cfg = default_config();
+        let invalid = PmtuPolicy { min_mtu: 1199, ..PmtuPolicy::default() };
+        assert!(cfg.set_pmtu_policy(invalid).is_err());
+
+        let inverted = PmtuPolicy { min_mtu: 1500, max_mtu: 1400, ..PmtuPolicy::default() };
+        assert!(cfg.set_pmtu_policy(inverted).is_err());
     }
 }

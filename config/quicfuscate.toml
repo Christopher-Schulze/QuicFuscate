@@ -296,10 +296,10 @@ stream_every = 5
 cc_algorithm = "bbr3"
 
 # Maximum Transmission Unit (bytes)
-mtu = 1400
+mtu = 1500
 
 # Maximum UDP payload size (bytes)
-max_udp_payload = 1350
+max_udp_payload = 1500
 
 # Maximum idle timeout (milliseconds)
 max_idle_timeout = 30000
@@ -340,6 +340,12 @@ dgram_send_queue_len = 1024
 
 # Disable path MTU discovery
 disable_pmtud = false
+
+# Validated DPLPMTUD search and recovery bounds
+pmtu_min_mtu = 1280
+pmtu_max_mtu = 1500
+pmtu_probe_interval_ms = 60000
+pmtu_black_hole_timeout_ms = 10000
 
 # ==============================================================================
 # PERFORMANCE OPTIMIZATION

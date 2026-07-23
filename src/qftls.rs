@@ -851,6 +851,7 @@ mod rustls_provider {
         /// True if this is a server-side provider.
         pub is_server: bool,
         /// Whether the client verifies the server certificate.
+        #[cfg(debug_assertions)]
         pub verify_peer: bool,
         /// Whether the TLS handshake has completed.
         pub handshake_complete: bool,
@@ -992,6 +993,7 @@ mod rustls_provider {
                 connection,
                 crypto,
                 is_server,
+                #[cfg(debug_assertions)]
                 verify_peer,
                 handshake_complete: false,
                 write_level: super::Level::Initial,

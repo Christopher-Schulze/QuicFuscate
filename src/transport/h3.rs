@@ -175,6 +175,7 @@ pub struct Connection {
 struct StreamState {
     _headers: Vec<Header>,
     body_buffer: Vec<u8>,
+    frame_buffer: Vec<u8>,
     _received_bytes: usize,
     _stream_type: StreamType,
     sent_bytes: usize,
@@ -315,6 +316,7 @@ impl Connection {
             StreamState {
                 _headers: Vec::new(),
                 body_buffer: Vec::new(),
+                frame_buffer: Vec::new(),
                 _received_bytes: 0,
                 _stream_type: StreamType::Control,
                 sent_bytes: 0,
@@ -355,6 +357,7 @@ impl Connection {
             StreamState {
                 _headers: headers.to_vec(),
                 body_buffer: Vec::new(),
+                frame_buffer: Vec::new(),
                 _received_bytes: 0,
                 _stream_type: StreamType::Request,
                 sent_bytes: frame.len(),
@@ -373,25 +376,36 @@ impl Connection {
     /// Sends an HTTP/3 response
     pub fn send_response(
         &mut self,
-        _conn: &mut super::Connection,
+        conn: &mut super::Connection,
         stream_id: u64,
         headers: &[Header],
         fin: bool,
     ) -> Result<(), Error> {
-        self.streams.insert(
-            stream_id,
-            StreamState {
-                _headers: headers.to_vec(),
-                body_buffer: Vec::new(),
-                _received_bytes: 0,
-                _stream_type: StreamType::Response,
-                sent_bytes: 0,
-                fin_sent: fin,
-                fin_received: false,
-                _stream_type_dup: StreamType::Response,
-                masque_established: false,
-            },
-        );
+        let encoded = self.encode_headers_block(headers)?;
+        let mut frame = Vec::with_capacity(encoded.len().saturating_add(10));
+        frame.push(0x01);
+        Self::encode_varint(encoded.len() as u64, &mut frame);
+        frame.extend_from_slice(&encoded);
+        let sent = conn.stream_send(stream_id, &frame, fin).map_err(|_| Error::InternalError)?;
+        let stream = self.streams.entry(stream_id).or_insert_with(|| StreamState {
+            _headers: Vec::new(),
+            body_buffer: Vec::new(),
+            frame_buffer: Vec::new(),
+            _received_bytes: 0,
+            _stream_type: StreamType::Response,
+            sent_bytes: 0,
+            fin_sent: false,
+            fin_received: false,
+            _stream_type_dup: StreamType::Response,
+            masque_established: false,
+        });
+        stream._headers = headers.to_vec();
+        stream._stream_type = StreamType::Response;
+        stream._stream_type_dup = StreamType::Response;
+        stream.sent_bytes = stream.sent_bytes.saturating_add(sent);
+        stream.fin_sent = fin;
+        crate::optimize::telemetry::H3_FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::optimize::telemetry::H3_HEADERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if fin {
             self.finished_streams.insert(stream_id);
         }
@@ -634,6 +648,7 @@ impl Connection {
                 StreamState {
                     _headers: headers_for_stream,
                     body_buffer: cover_payload,
+                    frame_buffer: Vec::new(),
                     _received_bytes: 0,
                     _stream_type: StreamType::Push,
                     sent_bytes: 0,
@@ -728,6 +743,7 @@ impl Connection {
         self.streams.entry(stream_id).or_insert_with(|| StreamState {
             _headers: Vec::new(),
             body_buffer: Vec::new(),
+            frame_buffer: Vec::new(),
             _received_bytes: 0,
             _stream_type: StreamType::Request,
             sent_bytes: 0,
@@ -736,20 +752,36 @@ impl Connection {
             _stream_type_dup: StreamType::Request,
             masque_established: false,
         });
-        // Parse frames from buffer
+        const MAX_BUFFERED_H3_FRAME: usize = 1024 * 1024 + 16;
+        let buffered = {
+            let stream = self.streams.get_mut(&stream_id).ok_or(Error::IdError)?;
+            let buffered_len =
+                stream.frame_buffer.len().checked_add(buf.len()).ok_or(Error::ExcessiveLoad)?;
+            if buffered_len > MAX_BUFFERED_H3_FRAME {
+                return Err(Error::ExcessiveLoad);
+            }
+            stream.frame_buffer.extend_from_slice(&buf);
+            std::mem::take(&mut stream.frame_buffer)
+        };
+
+        // Parse complete frames and retain an incomplete tail for the next STREAM chunk.
         let mut offset = 0;
-        while offset < buf.len() {
-            let (frame_type, frame_len, frame_offset) = Self::parse_frame_header(&buf[offset..])?;
-            // Validate the frame body is fully contained in this chunk before slicing.
-            // A frame length read from the wire that exceeds the available bytes (a partial
-            // frame split across stream_recv chunks, or a malformed/hostile length) would
-            // otherwise index out of bounds and panic the whole runtime.
+        while offset < buffered.len() {
+            let (frame_type, frame_len, frame_offset) =
+                match Self::parse_frame_header(&buffered[offset..]) {
+                    Ok(header) => header,
+                    Err(Error::BufferTooShort) => break,
+                    Err(error) => return Err(error),
+                };
+            if frame_len > 1024 * 1024 {
+                return Err(Error::ExcessiveLoad);
+            }
             let body_start = offset + frame_offset;
             let body_end = match body_start.checked_add(frame_len) {
-                Some(end) if end <= buf.len() => end,
+                Some(end) if end <= buffered.len() => end,
                 _ => break,
             };
-            let frame_data = &buf[body_start..body_end];
+            let frame_data = &buffered[body_start..body_end];
             match frame_type {
                 0x00 => {
                     // DATA frame; if this stream is MASQUE, decode capsules
@@ -801,7 +833,14 @@ impl Connection {
             }
             offset += frame_offset + frame_len;
         }
+        if offset != buffered.len() {
+            let stream = self.streams.get_mut(&stream_id).ok_or(Error::IdError)?;
+            stream.frame_buffer.extend_from_slice(&buffered[offset..]);
+        }
         if fin {
+            if self.streams.get(&stream_id).is_some_and(|stream| !stream.frame_buffer.is_empty()) {
+                return Err(Error::FrameError);
+            }
             if let Some(state) = self.streams.get_mut(&stream_id) {
                 state.fin_received = true;
             }
@@ -2318,6 +2357,7 @@ mod tests {
         h3.send_response(&mut conn, 0, &headers, false).expect("send_response");
         let st = h3.streams.get(&0).expect("stream state");
         assert!(matches!(st._stream_type, StreamType::Response));
+        assert!(st.sent_bytes > 0, "response HEADERS must reach the transport stream");
     }
 
     // ---- Settings Frame Encode/Decode ------------------------------------

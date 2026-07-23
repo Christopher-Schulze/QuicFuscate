@@ -4,6 +4,8 @@
 //! and time exceeded message construction. All functions operate on raw IP
 //! packet bytes and produce ready-to-send IP packets with correct checksums.
 
+use std::net::{Ipv4Addr, Ipv6Addr};
+
 /// ICMP message types (RFC 792)
 pub mod icmp_type {
     pub const ECHO_REPLY: u8 = 0;
@@ -19,6 +21,17 @@ pub mod icmp_code {
     pub const PROTOCOL_UNREACHABLE: u8 = 2;
     pub const PORT_UNREACHABLE: u8 = 3;
     pub const FRAGMENTATION_NEEDED: u8 = 4;
+}
+
+/// ICMPv6 message types used by the dual-stack TUN boundary.
+pub mod icmpv6_type {
+    pub const DESTINATION_UNREACHABLE: u8 = 1;
+    pub const PACKET_TOO_BIG: u8 = 2;
+    pub const TIME_EXCEEDED: u8 = 3;
+    pub const ECHO_REQUEST: u8 = 128;
+    pub const ECHO_REPLY: u8 = 129;
+    pub const NEIGHBOR_SOLICITATION: u8 = 135;
+    pub const NEIGHBOR_ADVERTISEMENT: u8 = 136;
 }
 
 /// Parsed ICMP header from a raw IP packet.
@@ -152,10 +165,10 @@ pub fn build_icmp_unreachable(
     if icmp_type_val == icmp_type::DESTINATION_UNREACHABLE
         && code == icmp_code::FRAGMENTATION_NEEDED
     {
-        // Packet Too Big: next-hop MTU in bytes 24-25, unused in 26-27
+        // RFC 1191: two unused bytes followed by the 16-bit next-hop MTU.
         let mtu = next_hop_mtu.unwrap_or(1200);
-        pkt[24..26].copy_from_slice(&mtu.to_be_bytes());
-        pkt[26..28].copy_from_slice(&0u16.to_be_bytes());
+        pkt[24..26].copy_from_slice(&0u16.to_be_bytes());
+        pkt[26..28].copy_from_slice(&mtu.to_be_bytes());
     } else {
         pkt[24..28].copy_from_slice(&0u32.to_be_bytes()); // unused
     }
@@ -174,6 +187,163 @@ pub fn build_icmp_unreachable(
     pkt[11] = (ip_cksum & 0xFF) as u8;
 
     pkt
+}
+
+/// Build an IPv4 ICMP error using the actual router address as packet source.
+pub fn build_icmpv4_error(
+    original_pkt: &[u8],
+    router_ip: Ipv4Addr,
+    icmp_type_val: u8,
+    code: u8,
+    next_hop_mtu: Option<u16>,
+) -> Vec<u8> {
+    let mut packet = build_icmp_unreachable(original_pkt, icmp_type_val, code, next_hop_mtu);
+    if packet.len() < 20 {
+        return packet;
+    }
+    packet[12..16].copy_from_slice(&router_ip.octets());
+    packet[10..12].fill(0);
+    let checksum = ip_checksum(&packet[..20]);
+    packet[10..12].copy_from_slice(&checksum.to_be_bytes());
+    packet
+}
+
+/// Parsed fixed ICMPv6 header for packets without extension headers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Icmpv6Header {
+    pub icmp_type: u8,
+    pub code: u8,
+}
+
+pub fn parse_icmpv6(packet: &[u8]) -> Option<Icmpv6Header> {
+    if packet.len() < 48 || packet[0] >> 4 != 6 || packet[6] != 58 {
+        return None;
+    }
+    let payload_len = usize::from(u16::from_be_bytes([packet[4], packet[5]]));
+    if payload_len < 8 || 40usize.checked_add(payload_len)? > packet.len() {
+        return None;
+    }
+    Some(Icmpv6Header { icmp_type: packet[40], code: packet[41] })
+}
+
+/// Build an ICMPv6 Echo Reply with a fresh hop limit.
+pub fn build_icmpv6_echo_reply(original: &[u8], hop_limit: u8) -> Vec<u8> {
+    let Some(header) = parse_icmpv6(original) else {
+        return Vec::new();
+    };
+    if header.icmp_type != icmpv6_type::ECHO_REQUEST || header.code != 0 {
+        return Vec::new();
+    }
+    let payload_len = usize::from(u16::from_be_bytes([original[4], original[5]]));
+    let packet_len = 40 + payload_len;
+    let mut reply = original[..packet_len].to_vec();
+    let source = <[u8; 16]>::try_from(&reply[8..24]).unwrap_or([0; 16]);
+    let destination = <[u8; 16]>::try_from(&reply[24..40]).unwrap_or([0; 16]);
+    reply[8..24].copy_from_slice(&destination);
+    reply[24..40].copy_from_slice(&source);
+    reply[7] = hop_limit;
+    reply[40] = icmpv6_type::ECHO_REPLY;
+    reply[42..44].fill(0);
+    let checksum = icmpv6_checksum(&reply[8..24], &reply[24..40], &reply[40..]);
+    reply[42..44].copy_from_slice(&checksum.to_be_bytes());
+    reply
+}
+
+/// Build an ICMPv6 Packet Too Big or Time Exceeded response.
+pub fn build_icmpv6_error(
+    original: &[u8],
+    router_ip: Ipv6Addr,
+    icmp_type_val: u8,
+    mtu: Option<u32>,
+) -> Vec<u8> {
+    if original.len() < 40 || original[0] >> 4 != 6 {
+        return Vec::new();
+    }
+    if !matches!(
+        icmp_type_val,
+        icmpv6_type::DESTINATION_UNREACHABLE
+            | icmpv6_type::PACKET_TOO_BIG
+            | icmpv6_type::TIME_EXCEEDED
+    ) {
+        return Vec::new();
+    }
+    let original_source = <[u8; 16]>::try_from(&original[8..24]).unwrap_or([0; 16]);
+    let copy_len = original.len().min(1232);
+    let payload_len = 8 + copy_len;
+    let mut packet = vec![0u8; 40 + payload_len];
+    packet[0] = 0x60;
+    packet[4..6].copy_from_slice(&(payload_len as u16).to_be_bytes());
+    packet[6] = 58;
+    packet[7] = 64;
+    packet[8..24].copy_from_slice(&router_ip.octets());
+    packet[24..40].copy_from_slice(&original_source);
+    packet[40] = icmp_type_val;
+    packet[41] = 0;
+    if icmp_type_val == icmpv6_type::PACKET_TOO_BIG {
+        packet[44..48].copy_from_slice(&mtu.unwrap_or(1280).max(1280).to_be_bytes());
+    }
+    packet[48..].copy_from_slice(&original[..copy_len]);
+    let checksum = icmpv6_checksum(&packet[8..24], &packet[24..40], &packet[40..]);
+    packet[42..44].copy_from_slice(&checksum.to_be_bytes());
+    packet
+}
+
+/// Build a minimal Neighbor Advertisement for the server's TUN address.
+pub fn build_neighbor_advertisement(original: &[u8], router_ip: Ipv6Addr) -> Vec<u8> {
+    let Some(header) = parse_icmpv6(original) else {
+        return Vec::new();
+    };
+    if header.icmp_type != icmpv6_type::NEIGHBOR_SOLICITATION
+        || header.code != 0
+        || original.len() < 64
+        || original[48..64] != router_ip.octets()
+    {
+        return Vec::new();
+    }
+    let source = Ipv6Addr::from(<[u8; 16]>::try_from(&original[8..24]).unwrap_or([0; 16]));
+    let destination =
+        if source.is_unspecified() { Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1) } else { source };
+    let mut packet = vec![0u8; 64];
+    packet[0] = 0x60;
+    packet[4..6].copy_from_slice(&24u16.to_be_bytes());
+    packet[6] = 58;
+    packet[7] = 255;
+    packet[8..24].copy_from_slice(&router_ip.octets());
+    packet[24..40].copy_from_slice(&destination.octets());
+    packet[40] = icmpv6_type::NEIGHBOR_ADVERTISEMENT;
+    let flags = if source.is_unspecified() { 0x2000_0000u32 } else { 0x6000_0000u32 };
+    packet[44..48].copy_from_slice(&flags.to_be_bytes());
+    packet[48..64].copy_from_slice(&router_ip.octets());
+    let checksum = icmpv6_checksum(&packet[8..24], &packet[24..40], &packet[40..]);
+    packet[42..44].copy_from_slice(&checksum.to_be_bytes());
+    packet
+}
+
+fn icmpv6_checksum(source: &[u8], destination: &[u8], payload: &[u8]) -> u16 {
+    let mut sum = checksum_words(0, source);
+    sum = checksum_words(sum, destination);
+    sum = checksum_words(sum, &(payload.len() as u32).to_be_bytes());
+    sum = checksum_words(sum, &[0, 0, 0, 58]);
+    sum = checksum_words(sum, payload);
+    finalize_checksum(sum)
+}
+
+fn checksum_words(mut sum: u32, bytes: &[u8]) -> u32 {
+    let mut chunks = bytes.chunks_exact(2);
+    for chunk in &mut chunks {
+        sum += u32::from(u16::from_be_bytes([chunk[0], chunk[1]]));
+    }
+    if let Some(byte) = chunks.remainder().first() {
+        sum += u32::from(*byte) << 8;
+    }
+    sum
+}
+
+fn finalize_checksum(mut sum: u32) -> u16 {
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
 }
 
 /// Compute ICMP checksum (one's complement of one's complement sum).
@@ -355,7 +525,7 @@ mod tests {
 
         assert_eq!(too_big[20], icmp_type::DESTINATION_UNREACHABLE);
         assert_eq!(too_big[21], icmp_code::FRAGMENTATION_NEEDED);
-        let mtu = u16::from_be_bytes([too_big[24], too_big[25]]);
+        let mtu = u16::from_be_bytes([too_big[26], too_big[27]]);
         assert_eq!(mtu, 1200);
     }
 
@@ -397,5 +567,75 @@ mod tests {
             ip_sum = (ip_sum & 0xFFFF) + (ip_sum >> 16);
         }
         assert_eq!(ip_sum as u16, 0xFFFF, "IP checksum invalid");
+    }
+
+    fn make_icmpv6_packet(
+        source: Ipv6Addr,
+        destination: Ipv6Addr,
+        icmp_type: u8,
+        body: &[u8],
+    ) -> Vec<u8> {
+        let payload_len = 8 + body.len();
+        let mut packet = vec![0u8; 40 + payload_len];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&(payload_len as u16).to_be_bytes());
+        packet[6] = 58;
+        packet[7] = 64;
+        packet[8..24].copy_from_slice(&source.octets());
+        packet[24..40].copy_from_slice(&destination.octets());
+        packet[40] = icmp_type;
+        packet[48..].copy_from_slice(body);
+        let checksum = icmpv6_checksum(&packet[8..24], &packet[24..40], &packet[40..]);
+        packet[42..44].copy_from_slice(&checksum.to_be_bytes());
+        packet
+    }
+
+    #[test]
+    fn test_build_icmpv6_echo_reply_swaps_endpoints_and_checksum() {
+        let source: Ipv6Addr = "fd00::2".parse().unwrap();
+        let destination: Ipv6Addr = "fd00::1".parse().unwrap();
+        let request =
+            make_icmpv6_packet(source, destination, icmpv6_type::ECHO_REQUEST, &[0x12, 0x34, 0, 1]);
+        let reply = build_icmpv6_echo_reply(&request, 63);
+
+        assert_eq!(reply[40], icmpv6_type::ECHO_REPLY);
+        assert_eq!(reply[7], 63);
+        assert_eq!(&reply[8..24], &destination.octets());
+        assert_eq!(&reply[24..40], &source.octets());
+        assert_eq!(icmpv6_checksum(&reply[8..24], &reply[24..40], &reply[40..]), 0);
+    }
+
+    #[test]
+    fn test_build_icmpv6_packet_too_big_uses_router_and_minimum_mtu() {
+        let source: Ipv6Addr = "2001:db8::2".parse().unwrap();
+        let destination: Ipv6Addr = "fd00::2".parse().unwrap();
+        let router: Ipv6Addr = "fd00::1".parse().unwrap();
+        let original = make_icmpv6_packet(source, destination, icmpv6_type::ECHO_REPLY, &[]);
+        let response =
+            build_icmpv6_error(&original, router, icmpv6_type::PACKET_TOO_BIG, Some(1200));
+
+        assert_eq!(response[40], icmpv6_type::PACKET_TOO_BIG);
+        assert_eq!(&response[8..24], &router.octets());
+        assert_eq!(&response[24..40], &source.octets());
+        assert_eq!(u32::from_be_bytes(response[44..48].try_into().unwrap()), 1280);
+        assert_eq!(icmpv6_checksum(&response[8..24], &response[24..40], &response[40..]), 0);
+    }
+
+    #[test]
+    fn test_build_neighbor_advertisement_handles_solicited_node_request() {
+        let source: Ipv6Addr = "fd00::2".parse().unwrap();
+        let router: Ipv6Addr = "fd00::1".parse().unwrap();
+        let solicited_node: Ipv6Addr = "ff02::1:ff00:1".parse().unwrap();
+        let mut body = vec![0u8; 16];
+        body.copy_from_slice(&router.octets());
+        let request =
+            make_icmpv6_packet(source, solicited_node, icmpv6_type::NEIGHBOR_SOLICITATION, &body);
+        let response = build_neighbor_advertisement(&request, router);
+
+        assert_eq!(response[40], icmpv6_type::NEIGHBOR_ADVERTISEMENT);
+        assert_eq!(response[7], 255);
+        assert_eq!(&response[24..40], &source.octets());
+        assert_eq!(&response[48..64], &router.octets());
+        assert_eq!(icmpv6_checksum(&response[8..24], &response[24..40], &response[40..]), 0);
     }
 }

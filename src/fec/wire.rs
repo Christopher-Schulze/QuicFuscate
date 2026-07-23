@@ -18,6 +18,7 @@ pub const MAX_DATAGRAM_OVERHEAD: usize = HEADER_LEN + SOURCE_LENGTH_LEN;
 pub const SYSTEMATIC_REPAIR_INDEX: u16 = u16::MAX;
 pub const MAX_SOURCE_COUNT: u16 = 2048;
 pub const MAX_TOTAL_COUNT: u16 = 12_288;
+pub const MAX_GF8_BLOCK_SOURCE_COUNT: usize = u8::MAX as usize;
 
 const FLAG_SYSTEMATIC: u8 = 1 << 0;
 const KNOWN_FLAGS: u8 = FLAG_SYSTEMATIC;
@@ -44,7 +45,7 @@ impl WireCodec {
             | FecMode::Strong
             | FecMode::Extreme
             | FecMode::Ultra
-                if block_source_count <= 255 =>
+                if block_source_count <= MAX_GF8_BLOCK_SOURCE_COUNT =>
             {
                 Ok(Self::Gf8)
             }
@@ -73,7 +74,9 @@ impl WireCodec {
     pub fn coefficient_len(self, block_source_count: u16) -> Result<usize, WireError> {
         match self {
             Self::Gf4 if block_source_count <= 15 => Ok(block_source_count as usize),
-            Self::Gf8 | Self::StreamingGf8 if block_source_count <= 255 => {
+            Self::Gf8 | Self::StreamingGf8
+                if block_source_count <= MAX_GF8_BLOCK_SOURCE_COUNT as u16 =>
+            {
                 Ok(block_source_count as usize)
             }
             Self::Gf16 => Ok(block_source_count as usize * 2),
@@ -158,7 +161,9 @@ impl WireProfile {
         let block_source_count = self.source_count / self.interleave_depth as u16;
         match self.codec {
             WireCodec::Gf4 if block_source_count > 15 => Err(WireError::CodecSourceLimit),
-            WireCodec::Gf8 | WireCodec::StreamingGf8 if block_source_count > 255 => {
+            WireCodec::Gf8 | WireCodec::StreamingGf8
+                if block_source_count > MAX_GF8_BLOCK_SOURCE_COUNT as u16 =>
+            {
                 Err(WireError::CodecSourceLimit)
             }
             WireCodec::Fountain if self.interleave_depth != 1 => {

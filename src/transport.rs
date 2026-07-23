@@ -40,7 +40,7 @@ pub mod udpfast;
 mod xdp;
 
 pub use anti_replay::{AntiReplayConfig, StrikeRegister};
-pub use config::{Config, NatDiscoveryReason, NatTraversalConfig, NatTraversalMode};
+pub use config::{Config, NatDiscoveryReason, NatTraversalConfig, NatTraversalMode, PmtuPolicy};
 #[cfg(feature = "stream_ring_buffer")]
 pub use connection::StreamRingBuffer;
 #[cfg(feature = "benches")]
@@ -554,6 +554,9 @@ pub struct SendInfo {
     pub to: SocketAddr,
     /// Pacing-aware send timestamp.
     pub at: Instant,
+    /// Whether the packet contains frames governed by congestion control.
+    /// ACK-only packets are false so external pacers never delay ACK release.
+    pub congestion_controlled: bool,
 }
 
 impl ConnectionId {
@@ -649,6 +652,10 @@ pub const MAX_DGRAM_OVERHEAD: usize = 2;
 pub const MAX_STREAM_OVERHEAD: usize = 12;
 /// Maximum stream data offset/size per RFC 9000 (2^62).
 pub const MAX_STREAM_SIZE: u64 = 1 << 62;
+/// Maximum UDP datagrams emitted before yielding to receive-side work.
+pub const UDP_DATAGRAM_BURST_LIMIT: usize = 64;
+/// Requested kernel buffer per UDP direction for sustained tunnel traffic.
+pub const UDP_SOCKET_BUFFER_BYTES: usize = 2 * 1024 * 1024;
 
 // ============================================================================
 // Error Types
