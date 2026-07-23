@@ -14,7 +14,7 @@ pub struct VersionInformation {
 
 impl VersionInformation {
     pub fn encode_parameter(&self) -> Result<Vec<u8>, ConnectionError> {
-        if self.chosen == 0 || self.available.iter().any(|version| *version == 0) {
+        if self.chosen == 0 || self.available.contains(&0) {
             return Err(ConnectionError::InvalidState);
         }
 
@@ -48,7 +48,7 @@ impl VersionInformation {
             .chunks_exact(4)
             .map(|bytes| u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
             .collect::<Vec<_>>();
-        if chosen == 0 || available.iter().any(|version| *version == 0) {
+        if chosen == 0 || available.contains(&0) {
             return Err(ConnectionError::InvalidPacket);
         }
         Ok(Self { chosen, available })

@@ -952,8 +952,8 @@ impl Connection {
         .max(MIN_STREAM_PTO);
         let expired = self
             .stream_transmission_by_pn
-            .iter()
-            .filter_map(|(packet_number, _)| {
+            .keys()
+            .filter_map(|packet_number| {
                 self.sent_packets_by_pn
                     .get(packet_number)
                     .map(|(packet_size, sent_at)| (*packet_number, *packet_size, *sent_at))
@@ -1710,7 +1710,7 @@ impl Connection {
         super::rand::rand_bytes(&mut dcid);
         self.scid = ConnectionId::from_vec(scid.to_vec());
         self.initial_dcid = ConnectionId::from_vec(dcid.to_vec());
-        self.dcid = self.initial_dcid.clone();
+        self.dcid = self.initial_dcid;
         self.dest_cids = cid::ConnectionIdSet::new();
         self.dest_cids.insert(&self.dcid);
         self.is_established = false;
@@ -5061,8 +5061,8 @@ mod tests {
     #[test]
     fn valid_vn_restarts_once_with_preferred_common_version_and_fresh_cids() {
         let mut client = make_v2_client();
-        let original_scid = client.scid.clone();
-        let original_dcid = client.initial_dcid.clone();
+        let original_scid = client.scid;
+        let original_dcid = client.initial_dcid;
         client.sent_packets_by_pn.insert(0, (1200, Instant::now()));
         client.bytes_in_flight = 1200;
         let mut vn = packet::generate_version_negotiation_packet(
@@ -5079,8 +5079,8 @@ mod tests {
         assert!(client.sent_packets_by_pn.is_empty());
         assert_eq!(client.bytes_in_flight, 0);
 
-        let selected_scid = client.scid.clone();
-        let selected_dcid = client.initial_dcid.clone();
+        let selected_scid = client.scid;
+        let selected_dcid = client.initial_dcid;
         let mut second = packet::generate_version_negotiation_packet(
             &[],
             &[crate::transport::PROTOCOL_VERSION_V2],
@@ -5094,7 +5094,7 @@ mod tests {
     #[test]
     fn spoofed_or_original_version_vn_is_ignored() {
         let mut client = make_v2_client();
-        let original_dcid = client.initial_dcid.clone();
+        let original_dcid = client.initial_dcid;
         let mut wrong_cid = packet::generate_version_negotiation_packet(
             &[],
             &[PROTOCOL_VERSION],
