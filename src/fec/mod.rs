@@ -983,6 +983,7 @@ pub(crate) struct LossEstimator {
     cusum_thresh: f32,
     stable_ctr: u32,
     base_lambda: f32,
+    clean_streak: u32,
 }
 
 impl LossEstimator {
@@ -1005,6 +1006,7 @@ impl LossEstimator {
             cusum_thresh: 0.05,
             stable_ctr: 0,
             base_lambda: 0.2,
+            clean_streak: 0,
         }
     }
 
@@ -1035,6 +1037,7 @@ impl LossEstimator {
             cusum_thresh: 0.05,
             stable_ctr: 0,
             base_lambda: config.lambda,
+            clean_streak: 0,
         }
     }
 }
@@ -1126,6 +1129,17 @@ impl LossEstimator {
                 self.burst_window.pop_front();
             }
             self.burst_window.push_back(i < projected_loss_slots);
+        }
+        // After 32 consecutive clean observations the burst window is stale history
+        // from a previous loss regime. Flush it so recent_loss_rate() stops anchoring
+        // smoothed_loss() above the de-escalation threshold.
+        if lost == 0 {
+            self.clean_streak = self.clean_streak.saturating_add(1);
+            if self.clean_streak >= 32 {
+                self.burst_window.clear();
+            }
+        } else {
+            self.clean_streak = 0;
         }
     }
 
