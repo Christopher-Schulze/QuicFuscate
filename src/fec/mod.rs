@@ -1130,10 +1130,13 @@ impl LossEstimator {
             }
             self.burst_window.push_back(i < projected_loss_slots);
         }
-        // After 32 consecutive clean observations the burst window is stale history
-        // from a previous loss regime. Flush it so recent_loss_rate() stops anchoring
-        // smoothed_loss() above the de-escalation threshold.
-        if lost == 0 {
+        // After 32 consecutive near-clean observations the burst window is stale
+        // history from a previous loss regime. Flush it so recent_loss_rate() stops
+        // anchoring smoothed_loss() above the de-escalation threshold.
+        // Use the same 0.1% threshold as continuous_fec_target's clean-link gate
+        // because the CC smoothed-loss signal decays asymptotically and never
+        // reaches exact zero after a loss event.
+        if loss_now < 0.001 {
             self.clean_streak = self.clean_streak.saturating_add(1);
             if self.clean_streak >= 32 {
                 self.burst_window.clear();
