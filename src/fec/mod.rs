@@ -1094,6 +1094,12 @@ impl LossEstimator {
                 self.cusum_pos = 0.0;
                 self.cusum_neg = 0.0;
                 self.stable_ctr = 0;
+                // Re-anchor Welford statistics to the current regime so the
+                // running mean does not stay pinned to the previous loss level
+                // and immediately re-trigger false change-points.
+                self.mean = loss_now;
+                self.m2 = 0.0;
+                self.count = 1;
             } else {
                 self.stable_ctr = self.stable_ctr.saturating_add(1);
                 if self.stable_ctr > 128 {

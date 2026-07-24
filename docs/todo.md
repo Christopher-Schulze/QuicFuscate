@@ -2,11 +2,24 @@
 
 ## Active TODO Backlog
 
-**Current State (2026-07-23):** The protocol optimization, FEC performance, stealth coherence, TUN data-plane, CI/release, and completed production-evidence waves retain their individual proof. The exhaustive legacy-acceptance reconciliation is complete; 27 genuine remaining gaps are represented directly by open TASKs in the ordered production register below.
+**Current State (2026-07-24):** The protocol optimization, FEC performance, stealth coherence, TUN data-plane, CI/release, and completed production-evidence waves retain their individual proof. The exhaustive legacy-acceptance reconciliation is complete; 28 genuine remaining gaps are represented directly by open TASKs in the ordered production register below. TODO-532 (multipath) was scrapped by owner decision; TODO-562 (workspace crate refactoring) was added to the register.
 
 **Production-readiness condition:** Production readiness is a repository state, not a standalone TASK. It may be claimed only when the ordered production register contains zero open product TASKs, the TODO consistency and runtime guardrail audits pass, the full local and native gates are green, the exact release artifacts are identified by SHA-256, and the required isolated live matrices leave no process, namespace, firewall, route, or temporary-runtime residue.
 
-**Current execution:** Execute TODO-558 -> TODO-544 -> TODO-559 -> TODO-560 -> TODO-557 -> TODO-556, then continue the dependency-ordered product register. This order establishes a real FEC-off control, canonical transport timers, backpressure-safe TUN/MASQUE delivery, truthful active-connection FEC control, and only then quantitative FEC acceptance. Dioxus parity starts only after the UI-facing backend contracts stabilize. During Dioxus work, the existing Svelte web-admin and Svelte/Tauri desktop UI are read-only references and must remain byte- and pixel-identical.
+**Handoff coverage:** The ordered register contains 28 open product TASKs and `docs/todo/` contains exactly 28 corresponding `status: OPEN` detail files. Every open detail owns its motivation, acceptance contract, completion gates, executable sub-tasks, dependency boundary, current findings, and deviations. No separate readiness or closure umbrella exists. A successor must read this register and the selected detail file rather than treating either one alone as sufficient acceptance.
+
+**Current execution:** Finish TODO-558 on its exact handoff commit, then execute TODO-556 -> TODO-544 -> TODO-559 -> TODO-560 -> TODO-557 and continue the ordered register. Moving TODO-556 ahead of new implementation gives every later task durable Node.js 24-backed native and release gates without invalidating TODO-558's already-pushed exact-commit proof. TODO-561 performs the final canonical-document reconciliation after all non-Dioxus contracts stabilize and before the frozen Dioxus parity reference is created. During Dioxus work, the existing Svelte web-admin and Svelte/Tauri desktop UI are read-only references and must remain byte- and pixel-identical.
+
+**Mandatory successor execution contract:**
+
+- Start by reading `AGENTS.md`, `docs/todo.md`, the selected detail file, and the owning sections of `docs/DOCUMENTATION.md` and `docs/MAP.md`; then re-verify every named source signature and dependency against the current exact commit.
+- Do not promote a task whose `depends_on` items are not closed. If a dependency exposes a new contract, update the consumer task before implementation rather than creating a parallel owner.
+- Treat every Acceptance bullet and Completion Gate as conjunctive. A green unit test, build, historical artifact, or prose claim cannot substitute for a missing native, live, performance, negative-path, or residue gate.
+- Before each Rust build, preserve at least 2 GiB free space and use a resource-conservative development build. Release builds are allowed only through the task's final artifact workflow.
+- Identify native and release evidence by full commit and SHA-256. Omega work must use a new task-and-commit-specific directory under `/home/ubuntu/SOFTWARE/QuicFuscate/`, must not mutate unrelated services or host state, and must end with an explicit residue manifest.
+- Retain an evidence bundle containing commands, environment and tool versions, run/job IDs, artifact names and hashes, scenario inputs, raw measurements, pass/fail decisions, negative-path results, teardown results, and known limitations. Missing evidence keeps the task open.
+- Keep protected Svelte/Tauri paths unchanged unless a future user request explicitly authorizes a different UI scope. Dioxus work is confined to `Dioxus-UI/`, must invoke `frontend-cr-june26`, and must prove protected-path hash identity before closure.
+- Flush only verified current truth into the owning docs. Move a detail to `docs/todo/done/` and remove its OPEN row only after every sub-task and gate passes; production readiness is the resulting zero-open repository state, not a separate task.
 
 ## Active - Protocol Optimization Wave (2026-06-05)
 
@@ -260,18 +273,18 @@ experimental, or bound to explicit policy.
 
 **Motivation:** The remaining work is a finite set of implementation and proof contracts. Ordering is based on dependency ownership and rework avoidance, not task number.
 
-**Execution strategy:** FEC control and observability -> canonical loss/timer ownership -> TUN/MASQUE backpressure and throughput -> executable FEC acceptance -> CI runtime hygiene -> secret/auth/rate-policy foundations -> privilege/observability/firewall lifecycle -> migration/multipath/shaping -> Dioxus parity against stable contracts.
+**Execution strategy:** exact-commit FEC closure -> CI runtime hygiene -> canonical loss/timer ownership -> TUN/MASQUE backpressure and active FEC control -> executable FEC acceptance -> secret/auth/rate-policy foundations -> privilege/observability/firewall lifecycle -> migration/shaping -> canonical documentation reconciliation -> workspace crate refactoring -> Dioxus parity against stable contracts.
 
 ### Ordered Active Queue
 
 | Order | ID | Cluster | Title | Status | Depends On |
 |---:|---|---|---|---|---|
-| 1 | TODO-558 | FEC | Make FEC-off control and live observability truthful | **OPEN** - policy, telemetry, Rust gates, exact-artifact Off/Auto adaptation, and a supplemental bounded de-escalation probe are green; the hardened exact-commit artifact matrix remains. | TODO-424, TODO-547, TODO-555 |
-| 2 | TODO-544 | Transport | Complete RFC loss detection and network proof | **OPEN** - canonical sent-packet ownership, deadlines, PTO/loss correctness, CC propagation, and netem proof remain. | TODO-463 |
-| 3 | TODO-559 | Data plane | Make TUN/MASQUE sustained throughput backpressure-safe | **OPEN** - transient DATAGRAM pressure is erased into InternalError and consumed TUN frames can be lost before carrier acceptance. | TODO-422, TODO-534, TODO-544, TODO-555 |
-| 4 | TODO-560 | FEC | Make active-connection FEC policy changes truthful | **OPEN** - Engine runtime setters and server reload update configuration or stats without a proven active-connection policy transition. | TODO-558, TODO-559 |
-| 5 | TODO-557 | Evidence | Make specialized FEC E2E acceptance executable and truthful | **OPEN** - parked behind truthful Off/telemetry and sustained delivery; header claims and executable assertions still diverge. | TODO-423, TODO-425, TODO-427, TODO-524, TODO-547, TODO-555, TODO-558, TODO-559 |
-| 6 | TODO-556 | CI | Migrate GitHub Actions off deprecated Node.js 20 runtimes | **OPEN** - first-party action runtimes emit forced-Node.js-24 deprecation annotations across CI and release workflows. | - |
+| 1 | TODO-558 | FEC | Make FEC-off control and live observability truthful | **OPEN** - implementation and prior exact-artifact evidence are green; handoff commit `931aaa4` adds the mandatory 35-second return-to-Zero gate, while its full local test, native workflow inspection, exact ARM64 artifact matrix, residue proof, and final truth flush remain. | TODO-424, TODO-547, TODO-555 |
+| 2 | TODO-556 | CI | Migrate GitHub Actions off deprecated Node.js 20 runtimes | **OPEN** - first-party action runtimes emit forced-Node.js-24 deprecation annotations across CI and release workflows. | - |
+| 3 | TODO-544 | Transport | Complete RFC loss detection and network proof | **OPEN** - canonical sent-packet ownership, deadlines, PTO/loss correctness, CC propagation, and netem proof remain. | TODO-463 |
+| 4 | TODO-559 | Data plane | Make TUN/MASQUE sustained throughput backpressure-safe | **OPEN** - transient DATAGRAM pressure is erased into InternalError and consumed TUN frames can be lost before carrier acceptance. | TODO-422, TODO-534, TODO-544, TODO-555 |
+| 5 | TODO-560 | FEC | Make active-connection FEC policy changes truthful | **OPEN** - Engine runtime setters and server reload update configuration or stats without a proven active-connection policy transition. | TODO-558, TODO-559 |
+| 6 | TODO-557 | Evidence | Make specialized FEC E2E acceptance executable and truthful | **OPEN** - parked behind truthful Off/telemetry and sustained delivery; header claims and executable assertions still diverge. | TODO-423, TODO-425, TODO-427, TODO-524, TODO-547, TODO-555, TODO-558, TODO-559 |
 | 7 | TODO-526 | Secrets | Close retained secret erasure boundaries | **OPEN** - AEGIS derived state and raw QKey allocations still need zeroizing ownership and failable erasure proof. | TODO-440, TODO-516 |
 | 8 | TODO-539 | Secrets | Make QKey registry encryption fail closed | **OPEN** - key ownership, envelope, migration, rotation, corruption, and failure atomicity remain. | TODO-458, TODO-526 |
 | 9 | TODO-529 | Policy | Wire per-client bandwidth, quota, and fairness enforcement | **OPEN** - helper state is not owned by live sessions or forwarding. | TODO-445, TODO-523 |
@@ -286,13 +299,14 @@ experimental, or bound to explicit policy.
 | 18 | TODO-548 | Platform | Install and prove the managed macOS PF kill-switch anchor | **OPEN** - reversible anchor ownership and privileged coexistence/packet proof remain. | TODO-522, TODO-530, TODO-542 |
 | 19 | TODO-528 | Platform | Prove Wintun native adapter and data-plane lifecycle | **OPEN** - real adapter, WFP, packet transfer, close/read safety, and privileged native proof remain. | TODO-442, TODO-519, TODO-530, TODO-542 |
 | 20 | TODO-533 | Transport | Complete configurable migration and CC path adaptation | **OPEN** - typed path-change policy, validation RTT, CC-specific state, and active-transfer proof remain. | TODO-450, TODO-544 |
-| 21 | TODO-532 | Transport | Complete negotiated multipath wire and data-plane runtime | **OPEN** - negotiated per-path packet/recovery state, scheduling, failover, and bonding proof remain. | TODO-449, TODO-533, TODO-544 |
-| 22 | TODO-537 | Transport | Complete timer-owned traffic-analysis defense proof | **OPEN** - lifecycle timer/slot scheduling, bounded cadence, authenticated policy, warning, and capture proof remain. | TODO-455, TODO-532, TODO-544 |
-| 23 | TODO-543 | Transport | Complete TCP and ICMP fingerprint runtime proof | **OPEN** - full egress wiring, profile coupling, PMTUD-safe behavior, tool, allocation, and throughput proof remain. | TODO-462, TODO-534, TODO-544 |
-| 24 | TODO-549 | Dioxus | Lock the parity reference and build the shared Dioxus component system | **OPEN** - no active Dioxus parity surface exists. | TODO-529, TODO-531, TODO-538, TODO-539, TODO-540 |
-| 25 | TODO-550 | Dioxus | Rebuild the web admin in Dioxus with exact parity | **OPEN** - Dioxus web-admin implementation and proof do not exist. | TODO-525, TODO-529, TODO-531, TODO-538, TODO-539, TODO-540, TODO-549, TODO-560 |
-| 26 | TODO-551 | Dioxus | Rebuild the desktop client in Dioxus with exact parity | **OPEN** - direct Rust desktop integration and parity proof do not exist. | TODO-527, TODO-528, TODO-530, TODO-532, TODO-533, TODO-537, TODO-541, TODO-542, TODO-543, TODO-544, TODO-545, TODO-548, TODO-549, TODO-560 |
-| 27 | TODO-552 | Dioxus | Certify and package Dioxus web and desktop parity | **OPEN** - cross-surface fidelity, accessibility, performance, packaging, and release evidence do not exist. | TODO-550, TODO-551 |
+| 21 | TODO-537 | Transport | Complete timer-owned traffic-analysis defense proof | **OPEN** - lifecycle timer/slot scheduling, bounded cadence, authenticated policy, warning, and capture proof remain. | TODO-455, TODO-544 |
+| 22 | TODO-543 | Transport | Complete TCP and ICMP fingerprint runtime proof | **OPEN** - full egress wiring, profile coupling, PMTUD-safe behavior, tool, allocation, and throughput proof remain. | TODO-462, TODO-534, TODO-544 |
+| 23 | TODO-561 | Documentation | Reconcile canonical documentation and evidence-state truth | **OPEN** - canonical docs still contain completed-task, release-checkpoint, and platform-proof claims that contradict the current register and retained evidence. | TODO-525, TODO-526, TODO-527, TODO-528, TODO-529, TODO-530, TODO-531, TODO-533, TODO-537, TODO-538, TODO-539, TODO-540, TODO-541, TODO-542, TODO-543, TODO-544, TODO-548, TODO-556, TODO-557, TODO-558, TODO-559, TODO-560 |
+| 24 | TODO-562 | Architecture | Refactor single-crate monolith into Cargo workspace sub-crates | **OPEN** - 136k LoC single crate; no incremental compilation, no enforced module boundaries, global feature flags. | TODO-561 |
+| 25 | TODO-549 | Dioxus | Lock the parity reference and build the shared Dioxus component system | **OPEN** - no active Dioxus parity surface exists. | TODO-529, TODO-531, TODO-538, TODO-539, TODO-540, TODO-561 |
+| 26 | TODO-550 | Dioxus | Rebuild the web admin in Dioxus with exact parity | **OPEN** - Dioxus web-admin implementation and proof do not exist. | TODO-525, TODO-529, TODO-531, TODO-538, TODO-539, TODO-540, TODO-549, TODO-560 |
+| 27 | TODO-551 | Dioxus | Rebuild the desktop client in Dioxus with exact parity | **OPEN** - direct Rust desktop integration and parity proof do not exist. | TODO-527, TODO-528, TODO-530, TODO-533, TODO-537, TODO-541, TODO-542, TODO-543, TODO-544, TODO-545, TODO-548, TODO-549, TODO-560 |
+| 28 | TODO-552 | Dioxus | Certify and package Dioxus web and desktop parity | **OPEN** - cross-surface fidelity, accessibility, performance, packaging, and release evidence do not exist. | TODO-550, TODO-551 |
 
 ### Completed Evidence Base
 

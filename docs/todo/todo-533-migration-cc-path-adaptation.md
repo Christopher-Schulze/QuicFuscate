@@ -41,6 +41,9 @@ Validated migration preserves in-flight bytes and halves cwnd, but the factor an
 ## Notes
 
 - Created from TODO-450 reconciliation. Avoid a second Reno-only reduction after the shared migration policy.
+- Primary surfaces: `src/transport/connection.rs`, `src/transport/recovery.rs`, `src/transport/cc/`, `src/core.rs`, `src/engine/config.rs`, and `config/quicfuscate.toml`.
+- Scope lock: extend the validated RFC migration owner and every retained congestion controller through one typed path-change event. Do not bypass PATH_CHALLENGE/PATH_RESPONSE, reset bytes in flight implicitly, or add controller-specific policy forks.
+- Evidence bundle: record validated configuration, exact window vectors, RTT/timer snapshots, controller state transitions, path captures, active-transfer throughput timeline, recovery bound, artifact hash, and network-resource cleanup.
 
 ## Deviations
 

@@ -42,6 +42,9 @@ Global and per-IP token buckets, GeoIP, blacklist sync, and an EWMA helper exist
 ## Notes
 
 - Created from TODO-459 reconciliation. External feeds remain optional and fail open to the last-known-good local set, never to unbounded network input.
+- Primary surfaces: `src/implementations/server/limits.rs`, `src/implementations/server/accept.rs`, `src/implementations/server/mod.rs`, `src/implementations/server/metrics.rs`, and `config/server-linux.default.toml`.
+- Scope lock: unify existing admission defenses through bounded state and standards-compliant QUIC Retry. Do not create an external control plane, depend on live feeds for startup, punish established authenticated traffic indiscriminately, or duplicate TODO-538's credential-attempt state machine.
+- Evidence bundle: record deterministic time samples, activation/clear transitions, Retry captures, exact offered/accepted rates, cache file transitions, legitimate-client false-positive results, established-client throughput, CPU/memory bounds, artifact hash, and teardown.
 
 ## Deviations
 

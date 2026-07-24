@@ -44,6 +44,9 @@ Server startup performs TUN, routing, socket, and audit initialization before sw
 ## Notes
 
 - Created from TODO-441 reconciliation. Service-manager filesystem confinement remains the canonical chroot/sandbox replacement.
+- Primary surfaces: `src/privilege/drop.rs`, `src/privilege/mod.rs`, `src/main.rs`, `src/implementations/server/systemd.rs`, `scripts/install/quicfuscate-server.service`, and `scripts/tests/rust/integration/interface_capabilities.rs`.
+- Scope lock: Linux process identity and capability reduction is the product change. macOS sandboxing, chroot, containers, and service-manager policy redesign stay outside scope; subprocesses must isolate irreversible identity mutations from the test runner.
+- Evidence bundle: retain syscall order, starting/final UID/GID/groups/capability snapshots, negative preflight mutations, descriptor inventory, authenticated traffic result, inability-to-regain proof, service teardown, artifact hash, and host residue diff.
 
 ## Deviations
 

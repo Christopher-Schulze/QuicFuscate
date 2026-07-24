@@ -42,6 +42,9 @@ AEAD wrapper keys, AES-GCM schedules, MORUS fields, locked memory-pool blocks, a
 ## Notes
 
 - Created from TODO-440 reconciliation. TODO-516 remains closed for memory locking.
+- Primary surfaces: `src/crypto/aegis.rs`, `src/optimize/crypto/aegis.rs`, `src/engine/qkey.rs`, `src/implementations/server/qkey_registry.rs`, `src/implementations/server/auth_frame.rs`, and `scripts/tests/rust/integration/qkey_auth_integration.rs`.
+- Scope lock: change only raw-secret and derived-secret ownership that is proven to survive too long. Do not redesign the wire credential, registry encryption envelope, AEAD selection, or memory-lock policy owned by TODO-539 and completed tasks.
+- Evidence bundle: include the ownership/drop map, every observed pre-deallocation byte range, normal/error/replacement/partial-init cases, constant-time and vector results, native architecture coverage, benchmark deltas, and protected-path proof.
 
 ## Deviations
 

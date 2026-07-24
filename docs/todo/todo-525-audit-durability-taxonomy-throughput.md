@@ -44,6 +44,9 @@ The retained audit log is append-only NDJSON with file permissions, a hash chain
 ## Notes
 
 - Created from TODO-439 reconciliation. Syslog and CEF conversion remain external collector responsibilities.
+- Primary surfaces: `src/audit/mod.rs`, `src/main.rs`, `src/implementations/server/mod.rs`, `src/implementations/server/admin_http.rs`, `src/implementations/server/qkey_registry.rs`, and `src/implementations/server/routing.rs`.
+- Scope lock: preserve the existing global audit owner and NDJSON/hash-chain contract; do not create a second logger, collector, database, or network exporter. Start by tracing every current producer and shutdown path into one ordered event map.
+- Evidence bundle: record queue and segment bounds, checkpoint format, injected failure points, accepted/dropped counts, throughput distribution, restart/rotation manifests, verifier output, artifact SHA-256, and final Omega residue state.
 
 ## Deviations
 

@@ -43,6 +43,9 @@ Token-bucket, quota, statistics, and client-map helpers exist with unit tests bu
 ## Notes
 
 - Created from TODO-445 reconciliation. Existing helper units are evidence only, not runtime enforcement.
+- Primary surfaces: `src/implementations/server/bandwidth.rs`, `src/implementations/server/session.rs`, `src/implementations/server/mod.rs`, `src/implementations/server/admin_http.rs`, `src/implementations/server/qkey_registry.rs`, and `src/implementations/server/metrics.rs`.
+- Scope lock: one authenticated-session policy owner must consume the existing helpers or replace them in place. Do not create a second scheduler, billing service, durable accounting database, or UI control surface; exact admin/API behavior belongs to the existing typed control boundary.
+- Evidence bundle: retain configured/effective policy, byte-accounting ledgers, rollover clock inputs, scheduler decisions, per-client queue bounds, throughput/fairness distributions, audit/metric output, artifact SHA-256, and cleanup proof.
 
 ## Deviations
 

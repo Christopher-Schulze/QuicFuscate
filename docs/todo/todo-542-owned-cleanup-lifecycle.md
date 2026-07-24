@@ -42,6 +42,9 @@ Server startup invokes routing cleanup and server shutdown retries routing teard
 ## Notes
 
 - Created from TODO-461 reconciliation. Shared-chain flushes are explicitly forbidden.
+- Primary surfaces: `src/implementations/server/routing.rs`, `src/implementations/client/killswitch.rs`, `src/firewall/mod.rs`, `src/interface.rs`, `src/main.rs`, and the TUN/kill-switch harnesses under `scripts/tests/`.
+- Scope lock: every fallback requires a proven QuicFuscate ownership identity and target-specific postcondition. Never infer ownership from a generic interface name, flush shared state, kill unrelated processes, or hide permanent cleanup failure behind debug logging.
+- Evidence bundle: record the resource ownership ledger, injected command results, retry timing, preseeded/crash state, pre/post native firewall and route snapshots, unrelated-resource fingerprints, artifact SHA-256, and final zero-owned-residue manifest.
 
 ## Deviations
 

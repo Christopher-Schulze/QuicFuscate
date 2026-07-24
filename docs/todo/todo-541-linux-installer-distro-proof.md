@@ -41,6 +41,9 @@ The installer source creates the service identity and directories, validates pre
 ## Notes
 
 - Created from TODO-460 reconciliation. Container use for disposable installer tests is authorized by the existing task contract, not introduced as product infrastructure.
+- Primary surfaces: `scripts/install/install-server-linux.sh`, `scripts/install/quicfuscate-server.service`, `src/implementations/server/systemd.rs`, `config/server-linux.default.toml`, and the existing release lifecycle harnesses under `scripts/tests/`.
+- Scope lock: test the production installer unchanged first and make only source fixes exposed by real distro behavior. Containers or disposable hosts are test substrates, not new product deployment architecture.
+- Evidence bundle: retain clean filesystem/service baselines, distro/package-manager versions, mutation journal, owners/modes, preflight negative diffs, rerun preservation hashes, systemd/journal output, exact artifact hash, uninstall state, and residue manifest.
 
 ## Deviations
 

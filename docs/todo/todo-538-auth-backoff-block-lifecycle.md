@@ -41,6 +41,9 @@ The live server rejects an IP after ten recent failed initial QKey lookups, but 
 ## Notes
 
 - Created from TODO-456 reconciliation. Preserve TODO-520's single encrypted bearer protocol.
+- Primary surfaces: `src/implementations/server/limits.rs`, `src/implementations/server/accept.rs`, `src/implementations/server/mod.rs`, `src/implementations/server/metrics.rs`, and `config/server-linux.default.toml`.
+- Scope lock: one monotonic in-memory policy owner covers initial and post-handshake terminal results without becoming a credential oracle. Do not alter the QKey wire protocol, add persistent IP surveillance, or duplicate the broader DDoS owner from TODO-540.
+- Evidence bundle: record configuration precedence, deterministic clock vectors, outcome/audit/metric counts, expensive-work bypass proof, cardinality and prune bounds, CPU/memory results, artifact hash, flood inputs, successful-client continuity, and cleanup.
 
 ## Deviations
 

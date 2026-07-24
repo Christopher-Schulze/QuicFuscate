@@ -42,6 +42,9 @@ The packet normalizer has field/checksum units, but live TUN and MASQUE paths ca
 ## Notes
 
 - Created from TODO-462 reconciliation. Active tool classification is evidence, not permission to weaken packet correctness.
+- Primary surfaces: `src/stealth/fingerprint.rs`, `src/stealth/mod.rs`, `src/implementations/server/icmp.rs`, `src/implementations/server/mod.rs`, `src/transport/config.rs`, and the raw TUN/MASQUE paths in `src/core.rs`.
+- Scope lock: normalize each raw egress packet exactly once and preserve PMTUD. Do not rewrite encrypted QUIC packets, normalize non-SYN TCP traffic without an explicit contract, couple profile rotation non-atomically, or tune values only to fool one classifier.
+- Evidence bundle: retain profile vectors, before/after packet bytes, checksum validation, p0f/nmap versions and outputs, rotation timeline, PMTUD outcomes, allocation counters, throughput distribution, artifact hash, captures, and cleanup.
 
 ## Deviations
 

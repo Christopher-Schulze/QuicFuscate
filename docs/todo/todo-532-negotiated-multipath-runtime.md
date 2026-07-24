@@ -4,12 +4,15 @@ title: Complete negotiated multipath wire and data-plane runtime
 severity: CRITICAL
 phase: S
 priority: P0
-status: OPEN
+status: SCRAPPED
 created: 2026-07-22
+scrapped: 2026-07-24
 depends_on: [TODO-449, TODO-533, TODO-544]
 ---
 
 # TODO-532: Complete Negotiated Multipath Wire and Data-Plane Runtime
+
+**SCRAPPED (2026-07-24):** Owner decision - multipath (WiFi+LTE bonding) is explicitly excluded from the product roadmap. Existing `PathManager`/`PathScheduler` helper code in `src/transport/path.rs` and `src/transport/path_scheduler.rs` is retained as dead code but will not be wired into the production runtime. All dependent tasks have had their `depends_on` updated to remove this reference.
 
 ## Why
 
@@ -42,6 +45,9 @@ depends_on: [TODO-449, TODO-533, TODO-544]
 ## Notes
 
 - Created from TODO-449 reconciliation. Existing path and scheduler helpers may be retained only where they match the selected wire/runtime contract.
+- Primary surfaces: `src/transport/path.rs`, `src/transport/path_scheduler.rs`, `src/transport/config.rs`, `src/transport/connection.rs`, `src/core.rs`, and `src/engine/`.
+- Scope lock: select one current standards-tracked wire version from primary sources before coding. Do not ship private unversioned frames, reuse packet numbers/nonces across paths, or let existing helper APIs dictate a non-compliant protocol.
+- Evidence bundle: retain the cited draft/version, vectors, negotiated parameters, per-path state snapshots, scheduler decisions, packet-number/nonce traces, failover timing, throughput distributions, artifact hash, interface teardown, and route/qdisc residue.
 
 ## Deviations
 

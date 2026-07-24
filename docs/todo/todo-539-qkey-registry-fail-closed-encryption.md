@@ -42,6 +42,9 @@ The QKey registry has a ChaCha20-Poly1305 file format, but decryption failure ca
 ## Notes
 
 - Created from TODO-458 reconciliation. ChaCha20-Poly1305 is retained unless source review proves a reason to change AEAD.
+- Primary surfaces: `src/implementations/server/qkey_registry.rs`, `src/engine/qkey.rs`, `src/implementations/server/admin_http.rs`, `src/main.rs`, and `scripts/tests/rust/integration/qkey_auth_integration.rs`.
+- Scope lock: preserve the canonical encrypted QKey bearer and change only registry-at-rest ownership, envelope, transactions, and startup behavior. Never recover ciphertext as plaintext, place keys in process arguments, or invent a remote key-management service.
+- Evidence bundle: retain envelope vectors, key-source permissions, zeroization ownership, every injected migration/rotation crash point, before/after file hashes, temp/backup scans, logs, restart outcomes, artifact SHA-256, and Omega residue.
 
 ## Deviations
 

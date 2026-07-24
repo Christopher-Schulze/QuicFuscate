@@ -41,6 +41,9 @@ TODO-522 narrowed macOS support after local `pfctl` access returned `/dev/pf: Pe
 ## Notes
 
 - Created from the narrowed TODO-522 macOS support boundary.
+- Primary surfaces: `src/implementations/client/killswitch.rs`, `src/implementations/client/platform/macos.rs`, `src/interface.rs`, `scripts/install/`, and the native kill-switch test boundary.
+- Scope lock: own only a named QuicFuscate anchor reference and its lifecycle. Never replace the main PF ruleset, disable PF that QuicFuscate did not enable, weaken the absent-anchor fail-closed behavior, or infer protection from command success without packet proof.
+- Evidence bundle: retain original and final PF state, anchor hashes, enablement ownership, real IPv4/IPv6/DNS/endpoint/TUN packet outcomes, crash/restart/uninstall transitions, foreign-anchor fingerprints, signed artifact SHA-256, and final residue inspection.
 
 ## Deviations
 

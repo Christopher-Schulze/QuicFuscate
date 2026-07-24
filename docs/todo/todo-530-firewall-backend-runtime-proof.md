@@ -44,6 +44,9 @@ Auto-detection, nftables kill-switch/routing transactions, iptables fallback, an
 
 - Created from TODO-444 reconciliation. The canonical routing table is `inet quicfuscate_rt`.
 - TODO-522 now provides privileged Omega proof for automatic nftables kill-switch selection: exact endpoint-only and connected rules, selected VPN DNS, direct DNS/IPv6 blocking with zero captured leaks, block-only timeout transition, retained post-exit rules, stale cleanup, and SIGTERM cleanup. This task remains open for the single configured backend owner, unified routing-table proof, explicit nftables failure behavior, and real iptables fallback/atomicity proof.
+- Primary surfaces: `src/firewall/mod.rs`, `src/implementations/client/killswitch.rs`, `src/implementations/server/routing.rs`, `src/engine/config.rs`, `src/main.rs`, and `scripts/tests/tun-e2e-killswitch-netns.sh`.
+- Scope lock: retain dedicated QuicFuscate objects and one resolved backend. Never flush a shared ruleset, broaden host policy, silently fall back after an explicit backend request, or create parallel client/server detection owners.
+- Evidence bundle: capture pre/post rulesets, selection diagnostics, command transactions, injected partial failures, real blocked/connected packet results, unrelated-rule fingerprints, artifact hash, and complete cleanup/residue manifests.
 
 ## Deviations
 

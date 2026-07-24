@@ -42,6 +42,9 @@ Recovery tracks correct RTT EWMA, but PTO uses one rather than four RTTVAR. Time
 ## Notes
 
 - Created from TODO-463 reconciliation. RFC 9002 remains authoritative for QUIC; RFC 8985 may inform but not override it.
+- Primary surfaces: `src/transport/recovery.rs`, `src/transport/connection.rs`, `src/transport/cc/`, `src/core.rs`, `src/main.rs`, `scripts/tests/rust/rt-transport-recovery.rs`, and `scripts/tests/rust/rt-cc-algorithms.rs`.
+- Scope lock: one QUIC recovery owner must consume current RFC 9002 semantics and expose deadlines to all event loops. Do not transplant TCP RACK rules blindly, create a second packet ledger, or add pacing work without a measured correctness/performance contract.
+- Evidence bundle: retain requirement-to-code mapping, deterministic clock traces, ACK/loss/PTO transitions, scan/memory bounds, controller state, netem parameters, latency/spurious-retransmission/throughput distributions, artifact hash, and qdisc/namespace residue.
 
 ## Deviations
 

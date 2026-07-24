@@ -44,6 +44,9 @@ The production logger has compact JSON/text formatting, size rotation, retention
 ## Notes
 
 - Created from TODO-446 reconciliation. Existing formatter/appender units remain useful but insufficient.
+- Primary surfaces: `src/logging.rs`, `src/engine/config.rs`, `src/main.rs`, `src/implementations/server/mod.rs`, `config/quicfuscate.toml`, and `config/server-linux.default.toml`.
+- Scope lock: preserve one global application logger and the stable NDJSON schema. Audit logging remains TODO-525, daily rotation remains external, and no second async runtime, collector, or UI log surface may be introduced.
+- Evidence bundle: record effective configuration precedence, sink matrix, schema samples, rotation/retention state, failure injection, final-record flush, producer-latency distribution, queue/drop bounds if asynchronous, artifact hash, and Omega file/socket cleanup.
 
 ## Deviations
 

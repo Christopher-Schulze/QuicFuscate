@@ -6,7 +6,7 @@ phase: S
 priority: P0
 status: OPEN
 created: 2026-07-22
-depends_on: [TODO-455, TODO-532, TODO-544]
+depends_on: [TODO-455, TODO-544]
 ---
 
 # TODO-537: Complete Timer-Owned Traffic-Analysis Defense Proof
@@ -45,7 +45,9 @@ Full-padding and encrypted chaff paths exist, but chaff is polled only when the 
 - Verified send-path gap: chaff has no pending-slot state, soft stop, ramp-down, or shutdown cancellation. ACK-only congestion bypass can currently be converted into an ack-eliciting chaff packet, and the configured size limit exceeds the path-MTU boundary.
 - Verified policy gap: traffic-analysis setters are test-only and are not mapped through Engine or standalone TOML runtime configuration. QKey stealth/FEC overrides are selected from the unauthenticated Initial identifier before the encrypted HTTP/3 possession proof; traffic-analysis authorization must not repeat that boundary error.
 - Target design: one transport-owned `TrafficAnalysisScheduler` holds the effective mode, active and idle cadence, one bounded pending slot, real-traffic timestamp, idle/ramp phase, next deadline, and cancellation state. Runtime wakeups call an explicit timer transition; `send()` only consumes scheduler state, prioritizes real or ACK-only packets, and emits chaff only when congestion permits. Core exposes the deadline and timer transition to both event loops. Global configuration remains bounded independently; any QKey or Intelligent escalation upgrade is stored pending and becomes effective only after authenticated authorization.
-- The draft ownership map is retained, but final design and implementation wait for TODO-544, TODO-533, and TODO-532 so this task consumes stable recovery, migration, and multipath contracts instead of creating a parallel timer owner.
+- The draft ownership map is retained, but final design and implementation wait for TODO-544 and TODO-533 so this task consumes stable recovery and migration contracts instead of creating a parallel timer owner. Multipath (TODO-532) was scrapped by owner decision; traffic-analysis defense operates on the single active path.
+- Primary surfaces: `src/transport/config.rs`, `src/transport/connection.rs`, `src/transport.rs`, `src/stealth/mod.rs`, `src/core.rs`, and both live runtime loops in `src/main.rs`.
+- Evidence bundle: retain configured/effective authorization, scheduler state/deadlines, packet-number and wire-size traces, cadence distributions, congestion/real-data priority outcomes, CPU/bandwidth cost, artifact SHA-256, capture files, and teardown residue.
 
 ## Deviations
 
