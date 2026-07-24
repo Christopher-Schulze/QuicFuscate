@@ -1,5 +1,8 @@
 use super::test_support::{acquire_env_lock, mk_src_packet, EnvGuard};
-use super::{target_from_mode, AdaptiveFec, FecConfig, FecControlPolicy, FecMode, FecSwitchReason};
+use super::{
+    target_from_mode, AdaptiveFec, FecConfig, FecControlPolicy, FecMode, FecSwitchReason,
+    DEFAULT_FOUNTAIN_WINDOW, MAX_FOUNTAIN_REPAIR_BURST, MAX_FOUNTAIN_WINDOW,
+};
 use crate::fec::wire::{WireError, WireReceiveReport};
 
 fn off_config() -> FecConfig {
@@ -109,8 +112,8 @@ fn auto_transport_feedback_rejects_delayed_loss_as_fountain_evidence() {
     let mut fec = AdaptiveFec::new(FecConfig::product_default());
     fec.telemetry.enabled = true;
 
-    fec.report_transport_loss(160, 2, 0.02);
-    fec.report_transport_loss(0, 1, 0.10);
+    fec.report_transport_loss(160, 158, 2, 0.02);
+    fec.report_transport_loss(0, 0, 1, 0.10);
 
     let snapshot = fec.telemetry_snapshot();
     assert_eq!(snapshot.observed_packets, 160);
@@ -124,13 +127,81 @@ fn auto_transport_feedback_enters_fountain_only_after_sustained_extreme_loss() {
     let _g_up = EnvGuard::set("QUICFUSCATE_FEC_SWITCH_MIN_UP_MS", "0");
     let mut fec = AdaptiveFec::new(FecConfig::product_default());
 
-    fec.report_transport_loss(1, 1, 1.0);
+    fec.report_transport_loss(1, 0, 1, 1.0);
     assert_ne!(fec.current_mode(), FecMode::Fountain);
 
     for _ in 0..12 {
-        fec.report_transport_loss(32, 16, 0.50);
+        fec.report_transport_loss(32, 16, 16, 0.50);
     }
     assert_eq!(fec.current_mode(), FecMode::Fountain);
+}
+
+#[test]
+fn fountain_rescue_window_and_synchronous_repair_burst_are_bounded() {
+    let _env_lock = acquire_env_lock();
+    let _g_up = EnvGuard::set("QUICFUSCATE_FEC_SWITCH_MIN_UP_MS", "0");
+    let _g_window = EnvGuard::set("QUICFUSCATE_FEC_FOUNTAIN_WINDOW", "2048");
+    let pool = crate::optimize::global_pool();
+    let mut fec = AdaptiveFec::new(FecConfig::product_default());
+    let mut output = Vec::new();
+
+    for _ in 0..12 {
+        fec.report_transport_loss(32, 16, 16, 0.50);
+    }
+
+    assert_eq!(fec.current_mode(), FecMode::Fountain);
+    assert_eq!(DEFAULT_FOUNTAIN_WINDOW, MAX_FOUNTAIN_WINDOW);
+    assert_eq!(fec.telemetry_snapshot().effective_window, MAX_FOUNTAIN_WINDOW);
+
+    let mut repair_packets = 0;
+    for id in 0..MAX_FOUNTAIN_WINDOW as u64 {
+        fec.on_send_into(mk_src_packet(id, 128, &pool), &mut output);
+        assert_eq!(output.iter().filter(|packet| packet.is_systematic).count(), 1);
+        repair_packets += output.iter().filter(|packet| !packet.is_systematic).count();
+    }
+
+    assert!(repair_packets > 0);
+    assert!(repair_packets <= MAX_FOUNTAIN_REPAIR_BURST);
+}
+
+#[test]
+fn auto_transport_feedback_returns_to_zero_despite_smoothed_loss_residue() {
+    let _env_lock = acquire_env_lock();
+    let _g_up = EnvGuard::set("QUICFUSCATE_FEC_SWITCH_MIN_UP_MS", "0");
+    let _g_down = EnvGuard::set("QUICFUSCATE_FEC_SWITCH_MIN_DOWN_MS", "0");
+    let mut fec = AdaptiveFec::new(FecConfig::product_default());
+
+    for _ in 0..12 {
+        fec.report_transport_loss(32, 16, 16, 0.50);
+    }
+    assert_eq!(fec.current_mode(), FecMode::Fountain);
+
+    for _ in 0..64 {
+        fec.report_transport_loss(32, 0, 0, 0.10);
+    }
+    assert_ne!(
+        fec.current_mode(),
+        FecMode::Zero,
+        "sent packets must not masquerade as clean delivery evidence"
+    );
+
+    for _ in 0..31 {
+        fec.report_transport_loss(0, 1, 0, 0.10);
+    }
+    assert_ne!(
+        fec.current_mode(),
+        FecMode::Zero,
+        "the clean-link override must require the complete observation streak"
+    );
+
+    for _ in 0..10 {
+        fec.report_transport_loss(0, 1, 0, 0.10);
+    }
+    assert_eq!(
+        fec.current_mode(),
+        FecMode::Zero,
+        "raw clean transport observations must outlive residual smoothed CC loss"
+    );
 }
 
 #[test]
@@ -162,6 +233,39 @@ fn transition_telemetry_changes_only_after_block_boundary_commit() {
     fec.wire_profile(1).expect("pending target must commit at block boundary");
     assert_eq!(fec.current_mode(), FecMode::Fountain);
     assert_eq!(fec.telemetry_snapshot().mode_transitions, 1);
+    assert!(!fec.is_transitioning());
+}
+
+#[test]
+fn clean_ack_proof_allows_zero_to_retire_a_partial_repair_window() {
+    let _env_lock = acquire_env_lock();
+    let pool = crate::optimize::global_pool();
+    let mut fec = AdaptiveFec::new(FecConfig {
+        control_policy: FecControlPolicy::Auto,
+        initial_mode: FecMode::Normal,
+        ..FecConfig::default()
+    });
+    let mut output = Vec::new();
+
+    fec.on_send_into(mk_src_packet(0, 128, &pool), &mut output);
+    fec.transition_to_target_with_reason(
+        target_from_mode(FecMode::Zero, 0),
+        FecSwitchReason::Adaptive,
+    );
+
+    assert!(fec.is_transitioning());
+    assert_eq!(fec.current_mode(), FecMode::Normal);
+    assert!(fec.wire_profile(1).is_ok(), "unproven Zero must wait for the active block");
+
+    fec.report_transport_loss(0, 32, 0, 0.10);
+    for _ in 0..3 {
+        fec.report_transport_loss(0, 1, 0, 0.10);
+    }
+
+    assert!(fec.loss_estimator.clean_link_confirmed());
+    assert_eq!(fec.wire_profile(2), Err(WireError::ZeroModeMustRemainRaw));
+    assert_eq!(fec.current_mode(), FecMode::Zero);
+    assert_eq!(fec.encoder.lock().packets_in_window(), 0);
     assert!(!fec.is_transitioning());
 }
 

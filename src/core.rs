@@ -1985,18 +1985,19 @@ impl QuicFuscateConnection {
             self.fec.set_redundancy_ppm(ppm);
         }
 
-        // Drive AdaptiveFec from exact callback counts and the congestion controller's
-        // smoothed signal. Send and loss callbacks are temporally independent, so a
-        // delayed loss callback must not be interpreted as a self-contained 1/1 sample.
-        let (cb_sent_pkts, cb_lost_pkts, _cb_sent_bytes, _cb_lost_bytes) =
-            self.conn.take_fec_callback_feedback();
+        // Drive AdaptiveFec from exact send, ACK, and loss ownership plus the congestion
+        // controller's smoothed signal. Only classified ACKs prove clean delivery; sends
+        // and delayed loss callbacks must never masquerade as clean or self-contained 1/1
+        // observations.
+        let feedback = self.conn.take_fec_callback_feedback();
         let transport_loss_rate = self.conn.recovery_loss_rate();
         let sent_total = self.stats.packets_sent;
         let lost_total = self.stats.packets_lost;
-        if cb_sent_pkts > 0 || cb_lost_pkts > 0 {
+        if feedback.sent_packets > 0 || feedback.acked_packets > 0 || feedback.lost_packets > 0 {
             self.fec.report_transport_loss(
-                cb_sent_pkts.min(usize::MAX as u64) as usize,
-                cb_lost_pkts.min(usize::MAX as u64) as usize,
+                feedback.sent_packets.min(usize::MAX as u64) as usize,
+                feedback.acked_packets.min(usize::MAX as u64) as usize,
+                feedback.lost_packets.min(usize::MAX as u64) as usize,
                 transport_loss_rate,
             );
         } else {
@@ -2005,6 +2006,7 @@ impl QuicFuscateConnection {
             if sent_delta > 0 || lost_delta > 0 {
                 self.fec.report_transport_loss(
                     sent_delta.min(usize::MAX as u64) as usize,
+                    0,
                     lost_delta.min(usize::MAX as u64) as usize,
                     transport_loss_rate,
                 );

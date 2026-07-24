@@ -270,6 +270,13 @@ enum PathValidationOrigin {
     PeerPath,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct FecCallbackFeedback {
+    pub(crate) sent_packets: u64,
+    pub(crate) acked_packets: u64,
+    pub(crate) lost_packets: u64,
+}
+
 #[derive(Debug, Clone)]
 struct PendingPathFrame {
     local_addr: SocketAddr,
@@ -406,6 +413,8 @@ pub struct Connection {
     fec_cb_lost_packets: Arc<std::sync::atomic::AtomicU64>,
     fec_cb_sent_bytes: Arc<std::sync::atomic::AtomicU64>,
     fec_cb_lost_bytes: Arc<std::sync::atomic::AtomicU64>,
+    // ACK classification is owned by this connection, so no callback/atomic is needed.
+    fec_acked_packets: u64,
     // Sent packet accounting: PN -> (bytes, send_time) for ACK accounting + RTT sampling.
     sent_packets_by_pn: BTreeMap<u64, (usize, Instant)>,
     // Continuous congestion-gate blockage. Unreliable tail packets are only
@@ -621,6 +630,7 @@ impl Connection {
             fec_cb_lost_packets: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             fec_cb_sent_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             fec_cb_lost_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            fec_acked_packets: 0,
             sent_packets_by_pn: BTreeMap::new(),
             congestion_blocked_since: None,
             stream_transmissions: HashMap::new(),
@@ -4268,14 +4278,16 @@ impl Connection {
         d
     }
 
-    /// Take and reset recovery callback feedback counters.
-    pub fn take_fec_callback_feedback(&self) -> (u64, u64, u64, u64) {
-        (
-            self.fec_cb_sent_packets.swap(0, std::sync::atomic::Ordering::Relaxed),
-            self.fec_cb_lost_packets.swap(0, std::sync::atomic::Ordering::Relaxed),
-            self.fec_cb_sent_bytes.swap(0, std::sync::atomic::Ordering::Relaxed),
-            self.fec_cb_lost_bytes.swap(0, std::sync::atomic::Ordering::Relaxed),
-        )
+    /// Take and reset exact transport feedback for live FEC adaptation.
+    pub(crate) fn take_fec_callback_feedback(&mut self) -> FecCallbackFeedback {
+        let feedback = FecCallbackFeedback {
+            sent_packets: self.fec_cb_sent_packets.swap(0, std::sync::atomic::Ordering::Relaxed),
+            acked_packets: std::mem::take(&mut self.fec_acked_packets),
+            lost_packets: self.fec_cb_lost_packets.swap(0, std::sync::atomic::Ordering::Relaxed),
+        };
+        self.fec_cb_sent_bytes.swap(0, std::sync::atomic::Ordering::Relaxed);
+        self.fec_cb_lost_bytes.swap(0, std::sync::atomic::Ordering::Relaxed);
+        feedback
     }
 
     /// Returns the source connection ID
@@ -4687,6 +4699,7 @@ impl Connection {
     ) {
         let now = Instant::now();
         let mut acked_total = 0usize;
+        let mut acked_packet_count = 0u64;
         let mut lost_total = 0usize;
         self.acknowledge_late_stream_packets(ranges);
         let largest_acked =
@@ -4722,6 +4735,7 @@ impl Connection {
                         rtt_sample = Some(elapsed.saturating_sub(ack_delay));
                     }
                     acked_total = acked_total.saturating_add(sz);
+                    acked_packet_count = acked_packet_count.saturating_add(1);
                 } else {
                     self.lose_stream_transmission_packet(pn);
                     self.recovery.on_loss_packet(pn, sz, now);
@@ -4747,6 +4761,7 @@ impl Connection {
                                 rtt_sample = Some(elapsed.saturating_sub(ack_delay));
                             }
                             acked_total = acked_total.saturating_add(sz);
+                            acked_packet_count = acked_packet_count.saturating_add(1);
                         }
                     } else {
                         let acked_packets = self
@@ -4760,6 +4775,7 @@ impl Connection {
                                 rtt_sample = Some(elapsed.saturating_sub(ack_delay));
                             }
                             acked_total = acked_total.saturating_add(sz);
+                            acked_packet_count = acked_packet_count.saturating_add(1);
                         }
                     }
                 }
@@ -4776,6 +4792,7 @@ impl Connection {
                             rtt_sample = Some(elapsed.saturating_sub(ack_delay));
                         }
                         acked_total = acked_total.saturating_add(sz);
+                        acked_packet_count = acked_packet_count.saturating_add(1);
                     }
                 } else {
                     let acked_packets = self
@@ -4789,6 +4806,7 @@ impl Connection {
                             rtt_sample = Some(elapsed.saturating_sub(ack_delay));
                         }
                         acked_total = acked_total.saturating_add(sz);
+                        acked_packet_count = acked_packet_count.saturating_add(1);
                     }
                 }
             }
@@ -4856,6 +4874,7 @@ impl Connection {
             let declared_lost = loss_cutoff.is_some_and(|cutoff| *pn <= cutoff);
             !acknowledged && !declared_lost
         });
+        self.fec_acked_packets = self.fec_acked_packets.saturating_add(acked_packet_count);
 
         // ACK handling above applies the largest-acked RTT sample before its
         // congestion-control update. The timeout path never inflates RTT.
@@ -5582,6 +5601,28 @@ mod tests {
             initial_rtt
         );
         assert!(c.rtt >= Duration::from_millis(40), "RTT sample should be ~50ms. Got {:?}", c.rtt);
+    }
+
+    #[test]
+    fn fec_feedback_counts_only_transport_classified_acknowledgements_as_clean() {
+        let mut c = make_conn();
+        let sent_at = Instant::now() - Duration::from_millis(10);
+        for packet_number in 0..3 {
+            c.recovery.on_packet_sent(packet_number, 1200, sent_at);
+            c.sent_packets_by_pn.insert(packet_number, (1200, sent_at));
+        }
+
+        let sent_feedback = c.take_fec_callback_feedback();
+        assert_eq!(sent_feedback.sent_packets, 3);
+        assert_eq!(sent_feedback.acked_packets, 0);
+        assert_eq!(sent_feedback.lost_packets, 0);
+
+        c.account_sent_bytes_for_ack_ranges_with_delay(&[(0, 2)], Duration::ZERO);
+
+        let ack_feedback = c.take_fec_callback_feedback();
+        assert_eq!(ack_feedback.sent_packets, 0);
+        assert_eq!(ack_feedback.acked_packets, 2);
+        assert_eq!(ack_feedback.lost_packets, 0);
     }
 
     #[test]

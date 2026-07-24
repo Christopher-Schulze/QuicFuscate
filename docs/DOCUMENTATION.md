@@ -1250,7 +1250,7 @@ Runtime adaptation is applied continuously in the connection loop:
 
 - `transport::Connection::take_fec_control_delta()` provides transport-level control deltas each tick.
 - The connection updates `AdaptiveFec` (`set_stream_every`, `force_streaming_mode`, `set_redundancy_ppm`) before the next encode path.
-- Loss accounting feeds `AdaptiveFec::report_loss()` from transport callback counters and connection statistics.
+- Transport feedback feeds `AdaptiveFec::report_transport_loss()` with independently owned send, classified-ACK, and declared-loss packet counts plus the congestion controller's smoothed loss ratio. Only classified ACKs can prove a clean link.
 
 This is the convergence point where transport feedback, StealthBrain hints, and FEC policy remain synchronized during live traffic.
 
@@ -1300,14 +1300,14 @@ quicfuscate server --listen 0.0.0.0:4433 --cc-algorithm cubic
   - Block modes through 255 sources per interleave lane: GF(2^8) with deterministic Cauchy repair rows.
   - Block modes above 255 sources per lane: GF(2^16) with deterministic Cauchy repair rows and exact odd-length recovery.
   - `Streaming`: partial-window GF(2^8) repairs with explicit coverage anchors.
-  - `Fountain`: deterministic LT source sets, reserved for explicit severe-loss rescue rather than the normal efficiency path.
+  - `Fountain`: deterministic LT source sets, reserved for explicit severe-loss rescue rather than the normal efficiency path. The product window is bounded to 128 sources, limiting the current 5x-code-rate completion burst to 512 repairs instead of allowing multi-thousand-packet synchronous stalls.
 - Internal large-window decoder strategy
   - Bitsliced multi-lane MatVec with internal heuristics for projection/lanes.
   - Verification path checks `A_k * X == B` on a small sample and falls back to Gauss on mismatch.
 - Streaming (Tetrys-like)
   - Emits 1 repair per `N` sources; `QUICFUSCATE_FEC_STREAM_EVERY` overrides cadence (min 1; default computed from CPU profile).
 - Atomic transitions
-  - Pending codec/window changes commit only at complete source-block boundaries. Each committed shape change advances the wire epoch; retained inbound epochs are decoded independently.
+  - Pending codec/window changes commit only at complete source-block boundaries. The sole exception is a de-escalation to raw Zero after at least 32 consecutive transport-classified clean ACKs: an incomplete repair-only encoder window is retired immediately so stale protected state cannot hold a recovered connection above Zero. Each committed shape change advances the wire epoch; retained inbound epochs are decoded independently.
 
 SIMD & Parallelism
 - SIMD levels auto-detected: `SSE2`, `AVX2`, `AVX512`, `NEON` (fallback: scalar). Parallel chunking for large payloads.
@@ -1332,10 +1332,10 @@ Mode Selection & Hysteresis
   - >= 0.25 -> Fountain only after at least 32 transport observations and agreement between the EMA and populated recent-loss window; otherwise the controller remains below the Fountain tier
   - Measured burst loss may select Streaming instead of the corresponding block tier
 - Hysteresis & stability:
-  - Transport adaptation consumes the congestion controller's smoothed loss signal. Independently timed send and delayed loss callbacks provide exact counts but are never interpreted as standalone loss-ratio batches.
+  - Transport adaptation consumes the congestion controller's smoothed loss signal. Independently timed send, classified ACK, and delayed loss observations provide exact counts but are never interpreted as standalone loss-ratio batches. Sends never count as clean delivery; 32 consecutive loss-free classified ACKs clear stale burst history and override asymptotic smoothed-loss residue.
   - Minimum dwell time between switches (default `120 ms` upward and `450 ms` downward; Zero may escalate immediately after sufficient evidence)
   - Switch only if `|avg_loss - last_avg| >= switch_threshold` (relaxes for Streaming/Normal)
-  - Commit pending targets only after the current source block is complete; decode retained inbound epochs independently
+  - Commit pending targets only after the current source block is complete, except for the transport-confirmed clean return to Zero described above; decode retained inbound epochs independently
 
 #### Transport Integration (DATAGRAM Ingress/Egress)
 - Active 1-RTT sources and repairs are transported over UDP using the versioned FEC v1 envelope above. Initial, Handshake, and stable `Zero` datagrams remain raw QUIC.
@@ -3500,7 +3500,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `test-fec-auto-controller-proof.sh` - FEC auto-controller proof orchestration
 - `tun-e2e-fec-netns.sh` - Linux netns FEC smoke over the real tunnel with tc-netem loss. Current hard gates cover authenticated tunnel establishment, ping liveness/loss bounds, panic absence, and cleanup; a truthful Off control, live telemetry, sustained carrier delivery, quantitative FEC benefit, and iperf validity are pending TODO-558, TODO-559, and TODO-557.
 - `tun-e2e-fec-burst-netns.sh` - Linux netns correlated burst-loss ping/liveness proof. Comparative FEC recovery benefit is pending the TODO-558 Off control and TODO-557 acceptance contract.
-- `tun-e2e-fec-transition-netns.sh` - Linux netns clean, impaired, and recovered policy proof with canonical moderate (20%) and severe (40%) loss profiles. Each isolated client/server runtime exports the stable nine-mode mapping and phase telemetry. Off must remain Zero with no repairs or switches in every phase. Auto must remain Zero with no repairs or switches while clean, commit a non-Zero client mode under loss, emit real repairs by the end of the run, return to Zero within a 10-second settle plus 250-ping clean recovery phase, and never select Fountain for the moderate profile. Repair acceptance is phase-aware because block modes may commit before their first source window is full. `QF_E2E_ARTIFACT_DIR` retains collision-safe manifests, the recovery bound, and telemetry snapshots. Comparative benefit, statistical thresholds, and broader transition-quality acceptance remain TODO-557.
+- `tun-e2e-fec-transition-netns.sh` - Linux netns clean, impaired, and recovered policy proof with canonical moderate (20%) and severe (40%) loss profiles. Each isolated client/server runtime exports the stable nine-mode mapping and six phase telemetry snapshots. The impaired phase sends 150 pings so committed block modes can produce real repairs before evaluation. Off must remain Zero with no repairs or switches in every phase. Auto must remain Zero with no repairs or switches while clean, commit a non-Zero client mode under loss, emit real repairs by the end of the run, return to Zero within a 10-second settle plus 250-ping clean recovery phase, and never select Fountain for the moderate profile. Repair acceptance is phase-aware because block modes may commit before their first source window is full. `QF_E2E_ARTIFACT_DIR` retains collision-safe manifests, both runtime logs, the recovery bound, the binary SHA-256, panic/decryption counts, and telemetry snapshots. Comparative benefit, statistical thresholds, and broader transition-quality acceptance remain TODO-557.
 - `tun-e2e-fec-netem-adversity.sh` - Linux netns ping/liveness matrix for loss, jitter, bandwidth, RTT+loss, mobile-network mix, and recovery. Quantitative throughput, overhead, mode-stability, carrier backpressure, and recovery-latency acceptance is pending TODO-558, TODO-559, and TODO-557.
 - Exact TODO-555 artifact inventory for TODO-557 invalidated broader acceptance claims without invalidating the bounded lifecycle proof. Under 20% netem loss, an explicit `--fec-mode off` client reached Streaming mode with 75 switches. The uniform-loss iperf parser reported `1.05 Mbit/s` from a `105 Kbit/s` sender line while the receiver reported zero bytes. Sustained TUN traffic emitted repeated MASQUE and H3 `InternalError` failures, TUN send failures, and a heartbeat timeout. TODO-558 owns hard Off and live observability; TODO-544 owns canonical recovery deadlines; TODO-559 owns carrier backpressure and sustained delivery; TODO-557 consumes those contracts before quantitative closure.
 - `test-runtime-soak-chaos.sh` - Runtime soak/chaos (delegates to E2E, FEC loss, admin web)
@@ -3698,7 +3698,7 @@ The constructor/runtime boundary is explicit:
 - `QUICFUSCATE_FEC_SWITCH_THRESH`: float `0.0..1.0` - mode switch threshold (default: `0.02`).
 - `QUICFUSCATE_FEC_SWITCH_MIN_UP_MS`: integer milliseconds (default: `120`) - minimum dwell time before Auto-Mode may escalate to a higher FEC tier.
 - `QUICFUSCATE_FEC_SWITCH_MIN_DOWN_MS`: integer milliseconds (default: `450`) - minimum dwell time before Auto-Mode may de-escalate to a lower FEC tier.
-- `QUICFUSCATE_FEC_FOUNTAIN_WINDOW`: integer - window size when switching to Fountain (default: `2048`).
+- `QUICFUSCATE_FEC_FOUNTAIN_WINDOW`: integer `1..128` - bounded source window when switching to Fountain (default and maximum: `128`).
 - `QUICFUSCATE_FEC_EXTREME_WINDOW`: integer - window size for extreme loss escalation (default: `1024`).
 - `QUICFUSCATE_FOUNTAIN_SYMBOL`: integer bytes - fountain symbol size (default: `MTU_HINT-80`, fallback `1500`, clamp `600..16384`).
 - `QUICFUSCATE_KALMAN_Q`: float - process noise override (default: `0.001`).
@@ -3710,7 +3710,8 @@ The constructor/runtime boundary is explicit:
 
 Notes:
 - Operator policy is independent from codec state. Engine/CLI `FecMode::Off` maps to `FecControlPolicy::Off`, forces the initial and lifetime codec to `Zero`, rejects adaptive transitions and streaming/redundancy hints, emits no repairs, and retains no encoder window state. `FecControlPolicy::Auto` also bootstraps in `Zero`, then owns the adaptive Zero -> GF4/GF8/GF16 -> Fountain/Streaming cascade.
-- Transport loss ownership is split deliberately: recovery send/loss callbacks produce independent exact packet counters, while the active congestion controller produces the smoothed ratio that drives adaptation. The FEC estimator retains the recent observation weight and requires both its EMA and populated recent-loss window to confirm the Fountain threshold. A delayed loss callback can therefore update loss evidence without masquerading as a `1/1` sample.
+- Transport feedback ownership is split deliberately: recovery callbacks produce independent exact send/loss packet counters, transport ACK-range classification owns exact acknowledged-packet counts, and the active congestion controller produces the smoothed ratio that drives adaptation. Sends cannot masquerade as clean delivery. A loss resets the clean streak; 32 consecutive loss-free classified ACKs clear stale burst history, suppress stale disturbance state, and permit the bounded return to Zero despite asymptotic congestion-controller residue. The estimator still requires both its EMA and populated recent-loss window to confirm the Fountain threshold, so a delayed loss callback cannot masquerade as a self-contained `1/1` sample.
+- Fountain rescue uses a fixed product liveness bound: the runtime default and accepted override maximum are 128 source packets. At the current 5x total code rate this caps synchronous block-completion work at 512 repair packets. A deterministic regression rejects oversized ambient overrides and proves the emitted burst remains bounded.
 - The runtime may set `QUICFUSCATE_FEC_STREAM_BURST`, `QUICFUSCATE_FEC_PARALLEL`, `QUICFUSCATE_WM_BITSLICE`, `QUICFUSCATE_WM_LANE_PAR`, `QUICFUSCATE_WM_LANES`, and `QUICFUSCATE_WM_U` internally during auto tuning; there is no manual override read path in the current code.
 - `QUICFUSCATE_FEC_DECODER` and `QUICFUSCATE_FEC_WIEDEMANN_K` are advanced/internal controls for diagnostics and compatibility. They do not widen the canonical product contract.
 - Fountain symbol sizing and Rayon thread-pool setup follow explicit owner boundaries: they are snapshotted or initialized during construction instead of being repeatedly resolved inside live adaptation logic.
@@ -3844,6 +3845,7 @@ Telemetry collection/export is runtime-surface driven (`--telemetry` / metrics e
 - ACK delay buckets model browser-like ACK timing distributions and can be used to validate profile behavior under different network conditions.
 - Choke counters (`choked_bytes`, `choke_sleep_ms`) quantify pacing pressure and allow correlation with throughput/latency trade-offs.
 - FEC telemetry is an explicit process aggregate. Active mode is a nine-bucket connection distribution, effective window is a source-packet sum across active connections, and observed loss is derived from cumulative lost/observed controller samples.
+- Clean-link proof is connection-local controller state rather than a process metric. `Connection` counts only packets removed by transport ACK classification; `QuicFuscateConnection` transfers and resets that typed feedback with the independent send/loss counters, and `AdaptiveFec` consumes it without exporting a misleading aggregate ACK gauge.
 - Source/repair send counters advance only after network-facing serialization into the connection output buffer succeeds; they measure datagrams emitted by the FEC layer for transmission, not UDP syscall completion. Receive and recovery counters advance only after `WireFecReceiver` accepts the datagram and reports its original versus reconstructed decoder output. Generated, queued, dropped, malformed, and duplicate symbols do not satisfy these metrics.
 - `AdaptiveFec::telemetry_snapshot()` and `QuicFuscateConnection::fec_telemetry_snapshot()` provide exact connection-local policy, committed mode/window, loss, transition, wire, decode, and recovery evidence. Packet collection is snapshotted from `--telemetry` before connection construction.
 - Compression and SIMD counters provide backend-selection and efficiency visibility without changing data-plane behavior.

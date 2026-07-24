@@ -22,6 +22,8 @@ LOSS_PROFILE="${QF_FEC_LOSS_PROFILE:-moderate}"
 EVIDENCE_DIR="${QF_E2E_ARTIFACT_DIR:-}"
 RECOVERY_SETTLE_SECONDS=10
 RECOVERY_PING_COUNT=250
+LOSS_PHASE_PING_COUNT=150
+CRYPTO_FAILURE_PATTERN='Crypto error: crypto failure|AEAD limit reached|Key update error'
 
 case "$LOSS_PROFILE" in
     moderate)
@@ -157,6 +159,7 @@ preserve_evidence() {
     local impaired_loss="$2"
     local recovered_loss="$3"
     local panic_count
+    local decrypt_failure_count
     if [ -z "$EVIDENCE_DIR" ]; then
         return
     fi
@@ -167,15 +170,19 @@ preserve_evidence() {
         fatal "evidence parent directory does not exist: $(dirname "$EVIDENCE_DIR")"
     fi
     mkdir "$EVIDENCE_DIR" || fatal "could not create evidence directory: $EVIDENCE_DIR"
-    cp -- "$CURRENT_SCENARIO_DIR"/*.telemetry "$EVIDENCE_DIR/" \
-        || fatal "could not preserve telemetry evidence"
+    cp -- "$CURRENT_SCENARIO_DIR"/*.telemetry "$SERVER_LOG" "$CLIENT_LOG" "$EVIDENCE_DIR/" \
+        || fatal "could not preserve runtime evidence"
     panic_count=$(grep -ci 'panic' "$SERVER_LOG" "$CLIENT_LOG" 2>/dev/null \
+        | awk -F: '{ sum += $NF } END { print sum + 0 }')
+    decrypt_failure_count=$(grep -Eci "$CRYPTO_FAILURE_PATTERN" \
+        "$SERVER_LOG" "$CLIENT_LOG" 2>/dev/null \
         | awk -F: '{ sum += $NF } END { print sum + 0 }')
     {
         printf 'policy=%s\n' "$FEC_MODE"
         printf 'loss_profile=%s\n' "$LOSS_PROFILE"
         printf 'netem_loss_percent=%s\n' "$LOSS_PERCENT"
         printf 'max_tunnel_loss_percent=%s\n' "$MAX_TUNNEL_LOSS_PERCENT"
+        printf 'loss_phase_ping_count=%s\n' "$LOSS_PHASE_PING_COUNT"
         printf 'recovery_settle_seconds=%s\n' "$RECOVERY_SETTLE_SECONDS"
         printf 'recovery_ping_count=%s\n' "$RECOVERY_PING_COUNT"
         printf 'clean_tunnel_loss_percent=%s\n' "$clean_loss"
@@ -184,6 +191,7 @@ preserve_evidence() {
         printf 'server_handshakes=%s\n' "$(grep -c 'TLS handshake complete' "$SERVER_LOG")"
         printf 'client_handshakes=%s\n' "$(grep -c 'TLS handshake complete' "$CLIENT_LOG")"
         printf 'panic_count=%s\n' "$panic_count"
+        printf 'decrypt_failure_count=%s\n' "$decrypt_failure_count"
         printf 'binary_sha256=%s\n' "$(sha256sum "$B" | awk '{print $1}')"
     } > "$EVIDENCE_DIR/run-manifest.txt" \
         || fatal "could not preserve evidence manifest"
@@ -509,7 +517,7 @@ else
     fatal "could not apply ${LOSS_PERCENT}% netem loss"
 fi
 sleep 2  # Let FEC detect loss and start transition
-loss2=$(ping_phase 50 "2")
+loss2=$(ping_phase "$LOSS_PHASE_PING_COUNT" "2")
 capture_telemetry_phase "lossy"
 remove_qdisc || fatal "could not remove transition netem loss"
 
@@ -613,6 +621,10 @@ fi
 
 if grep -q 'panic' "$SERVER_LOG" "$CLIENT_LOG" 2>/dev/null; then
     echo "FAIL: panic detected"
+    FAIL=$((FAIL + 1))
+fi
+if grep -Eqi "$CRYPTO_FAILURE_PATTERN" "$SERVER_LOG" "$CLIENT_LOG" 2>/dev/null; then
+    echo "FAIL: transport decryption failure detected"
     FAIL=$((FAIL + 1))
 fi
 

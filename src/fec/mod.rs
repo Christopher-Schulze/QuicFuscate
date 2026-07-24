@@ -20,6 +20,10 @@ static REPAIR_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 const GF4_LIGHT_REDUNDANCY: f32 = 16.0 / 15.0;
 const FOUNTAIN_LOSS_THRESHOLD: f32 = 0.25;
 const FOUNTAIN_MIN_RECENT_OBSERVATIONS: u64 = 32;
+const DEFAULT_FOUNTAIN_WINDOW: usize = 128;
+const MAX_FOUNTAIN_WINDOW: usize = 128;
+#[cfg(test)]
+const MAX_FOUNTAIN_REPAIR_BURST: usize = MAX_FOUNTAIN_WINDOW * 4 + 4;
 
 fn next_repair_id() -> u64 {
     REPAIR_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
@@ -97,7 +101,9 @@ impl FecRuntimePolicy {
             switch_min_down_ms: env_parse::<u64>("QUICFUSCATE_FEC_SWITCH_MIN_DOWN_MS")
                 .unwrap_or(450),
             auto_gf4_enabled: env_flag("QUICFUSCATE_FEC_AUTO_GF4", true),
-            fountain_window: env_parse::<usize>("QUICFUSCATE_FEC_FOUNTAIN_WINDOW").unwrap_or(2048),
+            fountain_window: env_parse::<usize>("QUICFUSCATE_FEC_FOUNTAIN_WINDOW")
+                .unwrap_or(DEFAULT_FOUNTAIN_WINDOW)
+                .clamp(1, MAX_FOUNTAIN_WINDOW),
             extreme_window: env_parse::<usize>("QUICFUSCATE_FEC_EXTREME_WINDOW").unwrap_or(1024),
             fountain_symbol_size: resolve_fountain_symbol_size(),
             stream_every_override: env_parse::<usize>("QUICFUSCATE_FEC_STREAM_EVERY")
@@ -217,7 +223,7 @@ fn target_from_mode(mode: FecMode, default_window: usize) -> FecProtectionTarget
             FecMode::Strong => 128,
             FecMode::Extreme => 512,
             FecMode::Ultra => 1024,
-            FecMode::Fountain => 2048,
+            FecMode::Fountain => DEFAULT_FOUNTAIN_WINDOW,
         }
     };
 
@@ -1056,19 +1062,28 @@ impl LossEstimator {
         }
         let loss_now = lost.min(total) as f32 / total as f32;
         self.report_rate(loss_now, total, lost.min(total));
-        // After 32 consecutive near-clean actual observations the burst window is
+        self.report_actual_observation(total.saturating_sub(lost.min(total)), lost.min(total));
+    }
+
+    fn report_actual_observation(&mut self, acknowledged: usize, lost: usize) {
+        // After 32 consecutive loss-free acknowledged packets the burst window is
         // stale history from a previous loss regime. Flush it so recent_loss_rate()
         // stops anchoring smoothed_loss() above the de-escalation threshold.
-        // Only actual packet observations drive this streak - the CC smoothed-loss
-        // model (report_smoothed_rate) decays asymptotically and must not reset it.
-        if loss_now < 0.001 {
-            self.clean_streak = self.clean_streak.saturating_add(1);
+        // Only actual ACK/loss classifications drive this streak - sends are not
+        // delivery evidence, and the CC smoothed-loss model decays asymptotically.
+        if lost > 0 {
+            self.clean_streak = 0;
+        } else if acknowledged > 0 {
+            self.clean_streak =
+                self.clean_streak.saturating_add(acknowledged.min(u32::MAX as usize) as u32);
             if self.clean_streak >= 32 {
                 self.burst_window.clear();
             }
-        } else {
-            self.clean_streak = 0;
         }
+    }
+
+    fn clean_link_confirmed(&self) -> bool {
+        self.clean_streak >= 32
     }
 
     /// Report a pre-smoothed transport loss signal with its real observation weight.
@@ -1149,7 +1164,7 @@ impl LossEstimator {
     /// After 32 consecutive clean actual observations the link is proven clean -
     /// return zero regardless of the CC model's asymptotic decay residue.
     pub fn smoothed_loss(&self) -> f32 {
-        if self.clean_streak >= 32 {
+        if self.clean_link_confirmed() {
             return 0.0;
         }
         self.ema_loss_rate.max(self.recent_loss_rate())
@@ -1172,6 +1187,9 @@ impl LossEstimator {
 
     /// Returns true if a significant change/burst was detected recently.
     pub fn disturbance_detected(&self) -> bool {
+        if self.clean_link_confirmed() {
+            return false;
+        }
         self.cusum_pos > self.cusum_thresh
             || self.cusum_neg > self.cusum_thresh
             || self.stable_ctr == 0
@@ -3860,7 +3878,7 @@ impl AdaptiveFec {
         }
     }
 
-    /// Queue a target and commit it only between complete source blocks.
+    /// Queue a target for a block boundary, except transport-confirmed clean Zero.
     #[cfg(test)]
     fn transition_to_target(&mut self, target: FecProtectionTarget) {
         self.transition_to_target_with_reason(target, FecSwitchReason::Adaptive);
@@ -3882,8 +3900,20 @@ impl AdaptiveFec {
         let Some(pending) = self.pending_transition else {
             return;
         };
-        if self.encoder.lock().packets_in_window() != 0 {
-            return;
+        let clean_zero_transition = pending.target.family == FecBackendFamily::Zero
+            && self.loss_estimator.clean_link_confirmed();
+        {
+            let mut encoder = self.encoder.lock();
+            if encoder.packets_in_window() != 0 {
+                if !clean_zero_transition {
+                    return;
+                }
+                // Systematic packets were already sent and framed repairs are
+                // self-describing at the receiver. Once transport ACKs prove the
+                // path clean, retaining a partial repair-only window cannot improve
+                // delivery and must not delay the bounded return to raw Zero mode.
+                encoder.clear_window();
+            }
         }
         let target = pending.target;
         let current_window = self.mode_manager.lock().current_window().max(1);
@@ -4442,6 +4472,7 @@ impl AdaptiveFec {
     pub(crate) fn report_transport_loss(
         &mut self,
         sent_packets: usize,
+        acknowledged_packets: usize,
         lost_packets: usize,
         smoothed_loss: f32,
     ) {
@@ -4457,6 +4488,7 @@ impl AdaptiveFec {
         if self.control_policy == FecControlPolicy::Off {
             return;
         }
+        self.loss_estimator.report_actual_observation(acknowledged_packets, lost_packets);
         let observation_weight = sent_packets.max(lost_packets);
         self.loss_estimator.report_smoothed_rate(smoothed_loss, observation_weight);
         let estimated_loss = self.loss_estimator.smoothed_loss();

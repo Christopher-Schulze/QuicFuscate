@@ -4,7 +4,7 @@ title: Complete negotiated multipath wire and data-plane runtime
 severity: CRITICAL
 phase: S
 priority: P0
-status: SCRAPPED
+status: SCRAP
 created: 2026-07-22
 scrapped: 2026-07-24
 depends_on: [TODO-449, TODO-533, TODO-544]
