@@ -1056,6 +1056,19 @@ impl LossEstimator {
         }
         let loss_now = lost.min(total) as f32 / total as f32;
         self.report_rate(loss_now, total, lost.min(total));
+        // After 32 consecutive near-clean actual observations the burst window is
+        // stale history from a previous loss regime. Flush it so recent_loss_rate()
+        // stops anchoring smoothed_loss() above the de-escalation threshold.
+        // Only actual packet observations drive this streak - the CC smoothed-loss
+        // model (report_smoothed_rate) decays asymptotically and must not reset it.
+        if loss_now < 0.001 {
+            self.clean_streak = self.clean_streak.saturating_add(1);
+            if self.clean_streak >= 32 {
+                self.burst_window.clear();
+            }
+        } else {
+            self.clean_streak = 0;
+        }
     }
 
     /// Report a pre-smoothed transport loss signal with its real observation weight.
@@ -1129,20 +1142,6 @@ impl LossEstimator {
                 self.burst_window.pop_front();
             }
             self.burst_window.push_back(i < projected_loss_slots);
-        }
-        // After 32 consecutive near-clean observations the burst window is stale
-        // history from a previous loss regime. Flush it so recent_loss_rate() stops
-        // anchoring smoothed_loss() above the de-escalation threshold.
-        // Use the same 0.1% threshold as continuous_fec_target's clean-link gate
-        // because the CC smoothed-loss signal decays asymptotically and never
-        // reaches exact zero after a loss event.
-        if loss_now < 0.001 {
-            self.clean_streak = self.clean_streak.saturating_add(1);
-            if self.clean_streak >= 32 {
-                self.burst_window.clear();
-            }
-        } else {
-            self.clean_streak = 0;
         }
     }
 
