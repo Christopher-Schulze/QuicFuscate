@@ -1145,8 +1145,13 @@ impl LossEstimator {
         }
     }
 
-    /// Return smoothed point estimate; conservative: max(EMA, recent-burst-rate)
+    /// Return smoothed point estimate; conservative: max(EMA, recent-burst-rate).
+    /// After 32 consecutive clean actual observations the link is proven clean -
+    /// return zero regardless of the CC model's asymptotic decay residue.
     pub fn smoothed_loss(&self) -> f32 {
+        if self.clean_streak >= 32 {
+            return 0.0;
+        }
         self.ema_loss_rate.max(self.recent_loss_rate())
     }
 
