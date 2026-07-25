@@ -70,6 +70,8 @@ server.pem
 # Internal dev docs (not for public repo)
 docs/changelog.md
 docs/context.md
+/docs/profiling/
+/docs/remote-proof-runbook.md
 /docs/todo.md
 /docs/todo/
 /.env.*

@@ -1,2 +1,0 @@
-scenario,label,size,batch,iters,result
-a,a,1200,32,50000,294.08 MiB/s

@@ -1,2 +1,0 @@
-scenario,label,fec_mode,netem_delay,netem_loss,result
-i,i,auto,0ms,5%,variant=udpfast size=1200B iters=30000 batch=64 sent_packets=1920000 sent_bytes=2304000000 recv_bytes=0 time_ms=8453.30 throughput_MiBps=259.93

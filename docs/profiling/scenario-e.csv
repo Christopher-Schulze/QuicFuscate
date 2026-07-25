@@ -1,2 +1,0 @@
-scenario,label,fec_mode,stealth_mode,rtt,loss
-e,e,auto,off,RTT 451 ms,Loss 0.00%
