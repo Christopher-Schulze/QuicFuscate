@@ -1,7 +1,7 @@
-# Remote Proof Runbook — TODO-510 / TODO-512 / TODO-513
+# Remote Proof Runbook - TODO-512 / TODO-513
 
 This runbook contains the exact commands, expected outputs, and close criteria
-for the three remaining `OPEN (prepared)` TODOs that require remote
+for the native proofs that require remote
 infrastructure. Copy-paste each section onto the target host, capture the
 output, and update the corresponding TODO detail file with the evidence.
 
@@ -9,61 +9,6 @@ output, and update the corresponding TODO detail file with the evidence.
 **Prerequisite:** All local gates green (`cargo build --lib`, `cargo clippy
 --workspace --all-targets -- -D warnings`, `cargo test --workspace --all-targets
 --features rust-tests`, `audit-todo-consistency.sh`).
-
----
-
-## TODO-510: Docker Release Artifact Validation
-
-**Target:** GitHub Actions `ubuntu-latest` runner (no local Docker needed).
-**Trigger:** PR touching `Dockerfile` / `.dockerignore` / `docker-compose.yml`
-/ `.github/workflows/docker-validation.yml`, OR manual `workflow_dispatch`.
-
-### Step 1 — Trigger the workflow
-
-```bash
-# Option A: manual dispatch via gh CLI
-gh workflow run docker-validation.yml
-
-# Option B: create a throwaway PR touching a Docker path
-git checkout -b chore/docker-validation-trigger
-touch Dockerfile  # trivial change to trigger the path filter
-git add Dockerfile
-git commit -m "chore: trigger docker-validation workflow"
-git push -u origin chore/docker-validation-trigger
-gh pr create --title "chore: trigger docker-validation" --body "TODO-510 proof run"
-```
-
-### Step 2 — Monitor the run
-
-```bash
-gh run list --workflow=docker-validation.yml --limit 1
-gh run watch <run-id>
-```
-
-### Step 3 — Verify expected output
-
-| Step | Expected Result |
-|------|-----------------|
-| `Build Docker image` | PASS, image `quicfuscate/server:ci` built |
-| `Record image size` | size printed to `GITHUB_STEP_SUMMARY` |
-| `Verify binary starts and reports help` | `--help` output contains `Usage` |
-| `Verify required networking tools` | `iptables`, `nft`, `ip` all present |
-| `Static secret scan over image layers` | no `.pem`/`.key`/`.env` files found |
-| `Verify config is a default template` | `/etc/quicfuscate/quicfuscate.toml.default` exists |
-
-### Step 4 — Close TODO-510
-
-Update `docs/todo/todo-510-*.md`:
-- Change `status: OPEN` to `status: DONE` in frontmatter.
-- Append a `## Execution Evidence` section with: run URL, commit SHA, all 6 step results, image size.
-- Update `docs/todo.md` row for TODO-510 to `**DONE**` with run URL.
-
-### Known limitations (document, do not hide)
-
-- TUN device creation (`--device /dev/net/tun` + `--cap-add NET_ADMIN`) is
-  not tested in CI — requires privileged runner. This is a real limitation.
-- Full server startup with UDP bind is not tested in CI — requires
-  `--network host` or port mapping with real cert/key.
 
 ---
 
@@ -280,7 +225,7 @@ Update `docs/todo/todo-513-*.md`:
 
 ## Post-Closure Checklist
 
-After all three TODOs are closed:
+After both TODOs are closed:
 1. Update `docs/todo.md` closure rule: remove the `OPEN (prepared)` carve-out
    since no OPEN items remain.
 2. Update `docs/DOCUMENTATION.md` "Release Scope" and "Current Release

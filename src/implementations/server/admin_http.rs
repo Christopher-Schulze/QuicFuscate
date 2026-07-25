@@ -763,8 +763,7 @@ async fn handle_request(
         if req.path == "/api/logout" {
             return handle_logout(&req, auth.as_ref(), &sessions, peer);
         }
-        // Unauthenticated health probe for container orchestration
-        // (Docker HEALTHCHECK, Kubernetes liveness/readiness).
+        // Unauthenticated health probe for external liveness/readiness checks.
         // Returns a minimal JSON body with no sensitive information.
         if req.path == "/api/health" {
             if req.method != "GET" {
@@ -1966,7 +1965,7 @@ mod tests {
     #[test]
     fn health_endpoint_returns_ok_without_auth() {
         // The health endpoint must be accessible without authentication
-        // so it can be used by Docker HEALTHCHECK and Kubernetes probes.
+        // so it can be used by external liveness/readiness probes.
         let web_root = std::env::temp_dir();
         // Use an auth-enabled server to prove the endpoint is unauthenticated.
         let (addr, _thr) = start_auth_server(1, web_root, "secret-pw", false, 5);

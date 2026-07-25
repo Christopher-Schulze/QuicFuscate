@@ -127,7 +127,7 @@ closes every gap to reach a complete, production-ready VPN protocol.
 | DNS | DoH implemented but 0 calls, no DNS proxy, no DNS-through-tunnel | No split DNS, no DNSSEC, search_domains always empty | Wave H |
 | FEC bugs | InterleavedDecoder DATA LOSS bug (consecutive ID assumption) | swap_remove is NOT a bug (verified correct) | Wave G |
 | Transport | No multipath (WiFi+LTE bonding impossible) | Migration cwnd reset too aggressive, PMTUD disabled, no CUBIC | Wave J |
-| Production ops | Multi-client TUN broken, no HA/clustering | No log rotation, no Docker, no per-client bandwidth, no SIGTERM | Wave I |
+| Production ops | Multi-client TUN broken, no HA/clustering | No log rotation, no per-client bandwidth, no SIGTERM | Wave I |
 | Platform | Windows TUN = stub, ~~iOS/Android = stubs~~ SCRAPPED | No privilege dropping, no mlock, no CPU affinity | Wave I |
 
 **Execution order: Wave G (P0 Critical) → Wave H (P1 Security) → Wave I (P1 Platform/Deploy) → Wave J (P1-P2 Transport/Advanced)**
@@ -167,7 +167,6 @@ closes every gap to reach a complete, production-ready VPN protocol.
 | TODO-444 | I | P1 | nftables support (modern Linux firewall) | **DONE** - `src/firewall/mod.rs`: `FirewallBackend` enum (Iptables/Nftables), `detect_backend()` auto-detection, `nft_available()` check, `FirewallOps` trait, `NftablesKillSwitch` (inet table, default DROP), server routing nftables path. | TODO-429 |
 | TODO-445 | I | P1 | Per-client bandwidth limits & quotas | **DONE** - `src/implementations/server/bandwidth.rs`: `BandwidthLimiter` (token bucket, bytes/sec), `QuotaTracker` (cumulative quota per billing period), `PerClientBandwidthManager` (per-client limits + quotas), `BandwidthStats`, wired into `SessionManager`. | TODO-430 |
 | TODO-446 | I | P1 | Production logging (rotation, structured JSON, file output) | **DONE** - `src/logging.rs`: `SizeRotatingAppender` (100MB default, 5 files), JSON NDJSON format, syslog RFC 5424, `log::Log` trait impl, `LoggingConfig` with module-level overrides, file output with restrictive permissions. | - |
-| TODO-447 | I | P1 | Container deployment (Docker only; stale manifests removed) | **DONE** - retained CI/release image scope is proven by TODO-510; privileged container VPN runtime and stale manifests are explicit non-goals. | - |
 | TODO-448 | I | P1 | Graceful shutdown (SIGTERM, drain mode, connection handoff) | **DONE** - Shared drain lifecycle, existing `engine.shutdown_timeout_ms` grace control, persistent SIGINT/SIGTERM/SIGHUP handling, admin drain/status, bounded close-frame flush, and systemd notify wiring pass local full gates, GitHub CI/Clippy, native ARM64 release artifact creation, and the exact two-client Omega lifecycle proof in 5118 ms on `bef00fe`. | - |
 | TODO-459 | I | P1 | DDoS protection hardening | **DONE** - Default per-IP rate limit lowered to 1,000 PPS (from 10,000). `RateLimitConfig.burst_size` decouples burst from steady-state. `GlobalRateLimiter` caps aggregate server-wide PPS (50,000 default) with PPS estimation. `EwmaAnomalyDetector` (EWMA spike detection, 3× threshold, auto-clear) wired into `allow_incoming_datagram()` - halves per-IP limits during anomalies. `GeoIpBlocker` (stub, graceful degradation without maxminddb) and `BlacklistSync` (TTL-based IP blocklist with manual/feed sync) wired into packet acceptance path. `prune_rate_limits_if_due()` feeds PPS to detector and prunes blacklist. | - |
 | TODO-460 | I | P1 | Install script fix (user creation, directory permissions) | **DONE** - `ensure_group()` + `ensure_user()` with dedicated group, `validate_prerequisites()` (iptables/ip/systemctl), `/var/log/quicfuscate` dir creation, `chmod 0700` state dir, `chmod 0750` config/log dirs, TOML validation via python3, post-start `systemctl is-active` verification. | - |
@@ -313,7 +312,6 @@ experimental, or bound to explicit policy.
 |---|---|---|
 | TODO-508 | Canonical docs SSOT cleanup | **DONE** - retired worklog references removed and repository truth aligned. |
 | TODO-509 | Post-clean local release gate replay | **DONE** - complete local Rust, Svelte, and Tauri gates passed without UI changes. |
-| TODO-510 | Docker release artifact validation | **DONE** - ARM64 image build, runtime, dependency, and secret checks passed. |
 | TODO-511 | Security and operations acceptance audit | **DONE** - source contracts classified and genuine gaps transferred to direct TASKs. |
 | TODO-512 | Long-running production soak and chaos proof | **DONE** - 25/25 retained ARM64 scenarios passed. |
 | TODO-513 | Signed release lifecycle proof | **DONE** - install, service, upgrade, rollback, and uninstall lifecycle passed. |

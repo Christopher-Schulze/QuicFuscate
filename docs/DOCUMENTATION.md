@@ -154,9 +154,7 @@ Use this section as the shortest non-marketing answer to "what evidence exists r
 - The repository uses the Rust stable channel through `rust-toolchain.toml`; no release-specific Rust toolchain pin is part of the tracked configuration.
 - The CI workflow now includes an `app-backend-checks` job that builds the desktop Svelte bundle for Tauri context, then runs `cargo check` and `cargo test` in `apps/tauri/src-tauri` on macOS.
 - The Linux fastpath evidence job is green in the current CI checkpoint. This proves the current non-privileged CI fastpath suite, not a replacement for a privileged production deployment soak.
-- Container scope is Docker-only. `Dockerfile`, `.dockerignore`, and `docker-compose.yml` remain available for GitHub/CI image work and explicit operator use. Stale unvalidated manifest directories were removed from the active repository so they cannot be mistaken for supported production deployment targets.
 - **TODO-412 DONE**: Real-world QUIC connection over the internet verified: Mac (ARM64) → Broderick (Oracle Cloud, ARM64, 92.5.226.155:4433). TLS handshake successful, RTT 0ms, Loss 0.00%, FEC NEON SIMD active, stealth uTLS+TLS Cover active. Oracle Cloud Security List is now open for UDP 4433. Server RSS 3.1 MB at idle.
-- **TODO-510 DONE**: Docker release artifact validation passed on Broderick (ARM64): all 6 steps PASS (build, 41.7MB image, --help, iptables/nft/ip found, secret scan clean, config template present). Fixed 3 bugs: missing nftables package, PATH missing /usr/sbin, secret scan false positive on /usr/lib/ssl/cert.pem.
 - **TODO-512 DONE**: Full soak matrix on Broderick (ARM64, Ubuntu 24.04, release build): 25/25 scenarios PASS, 0 failures. 10 steady_integration + 10 fec_loss_chaos + 5 admin_qkey iterations.
 - **TODO-513 DONE**: Full install/upgrade/rollback/uninstall lifecycle on Broderick (ARM64, Ubuntu 24.04): all steps PASS. Config and QKey registry preserved across upgrade. State preserved after uninstall. `/api/health` endpoint used as liveness signal.
 - **TODO-517 DONE**: `HintChannel<A>` abstraction for brain.rs hint atomics — 3 statics wrapped in typsafe newtypes with writer/reader contracts.
@@ -2571,7 +2569,7 @@ Admin HTTP contract notes:
 - `QUICFUSCATE_TRUST_PROXY=1|true` makes admin HTTP resolve client IPs from `X-Forwarded-For`/`X-Real-Ip`; default remains socket peer address.
 - Oversized admin HTTP payloads are rejected with 413.
 - Auth uses `POST /api/login` to issue a session cookie and `POST /api/logout` to clear it.
-- `/api/health` (`GET`): unauthenticated health probe returning `{"status":"ok"}` with HTTP 200. Used by the Dockerfile HEALTHCHECK and suitable for Kubernetes liveness/readiness probes. No session required, no sensitive information exposed.
+- `/api/health` (`GET`): unauthenticated health probe returning `{"status":"ok"}` with HTTP 200. Suitable for external liveness/readiness probes. No session required, no sensitive information exposed.
 - Install/update endpoints are not exposed in the admin HTTP API.
 
 #### Stack (`apps/svelte-admin/`):

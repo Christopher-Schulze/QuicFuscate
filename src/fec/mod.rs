@@ -694,8 +694,7 @@ impl FecObserverPlatformHints {
         let mobile_os = cfg!(any(target_os = "ios", target_os = "android"));
 
         #[cfg(target_os = "linux")]
-        let containerized_server = std::path::Path::new("/.dockerenv").exists()
-            || std::path::Path::new("/run/.containerenv").exists();
+        let containerized_server = std::path::Path::new("/run/.containerenv").exists();
 
         #[cfg(not(target_os = "linux"))]
         let containerized_server = false;
