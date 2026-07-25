@@ -70,6 +70,8 @@ server.pem
 # Internal dev docs (not for public repo)
 docs/changelog.md
 docs/context.md
+/docs/todo.md
+/docs/todo/
 /.env.*
 *.tsbuildinfo
 *.swp
@@ -101,4 +103,3 @@ lcov.info
 
 # macOS debug symbols outside target/scripts/out (future-proof)
 **/*.dSYM/
-
