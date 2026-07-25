@@ -6,7 +6,7 @@ phase: U
 priority: P0
 status: OPEN
 created: 2026-07-23
-depends_on: [TODO-550, TODO-551]
+depends_on: [TODO-550, TODO-551, TODO-561]
 ---
 
 # TODO-552: Certify and package Dioxus web and desktop parity
@@ -27,7 +27,7 @@ Separate implementation completion does not prove whole-product parity. The web 
 - Benchmark startup, interaction latency, idle and active CPU, memory, network transfer, binary/bundle size, and representative long-running behavior against the frozen reference and task budgets.
 - Produce reproducible Dioxus web and native desktop release artifacts from the exact reviewed commit, record SHA-256 values, and validate installation/startup/runtime/teardown on required native platforms.
 - Verify the web artifact in an isolated Omega runtime under `/home/ubuntu/SOFTWARE/QuicFuscate/` without changing unrelated services, firewall state, routes, packages, or persistent configuration.
-- Keep parity certification separate from later improvement work. Styling, information architecture, copy, interaction, or animation improvements require a new future task after this one is complete.
+- Keep parity certification separate from later improvement work. TODO-563 through TODO-566 own the explicitly requested VisionOS Liquid Glass design, implementation, and certification program after this task closes.
 
 ## Completion Gates
 
@@ -49,7 +49,7 @@ Separate implementation completion does not prove whole-product parity. The web 
 ## Notes
 
 - This task certifies the Dioxus production candidates; it does not delete, modify, or cut over from the existing Svelte/Tauri applications.
-- A later improvement phase may use `frontend-cr-june26` for a new design direction only after parity is independently certified and the user explicitly authorizes that separate scope.
+- TODO-563 may begin only after parity is independently certified. It must use `frontend-cr-june26`, preserve the complete certified functional surface, and keep every protected Svelte/Tauri path unchanged.
 
 ## Deviations
 

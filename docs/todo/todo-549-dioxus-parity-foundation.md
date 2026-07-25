@@ -6,7 +6,7 @@ phase: U
 priority: P0
 status: OPEN
 created: 2026-07-23
-depends_on: [TODO-529, TODO-531, TODO-538, TODO-539, TODO-540, TODO-561]
+depends_on: [TODO-544]
 ---
 
 # TODO-549: Lock the parity reference and build the shared Dioxus component system
@@ -49,8 +49,8 @@ No active Dioxus UI exists, while the current Svelte web-admin and Svelte/Tauri 
 
 - This task authorizes new files only under `Dioxus-UI/` plus required updates to existing owning documentation and task files.
 - Existing Svelte and Tauri sources remain the immutable reference during this program. The new Dioxus desktop client may later remove Tauri from its own runtime path, but this task does not modify or remove the existing Tauri application.
-- Image generation is intentionally excluded from the parity phase because the current application itself is the supplied visual reference. Any later visual improvement requires a separate future task after TODO-552.
-- TODO-561 must first remove stale canonical status and platform claims so the frozen parity ledger is based on current backend, release, and documentation truth rather than historical contradictions.
+- Image generation is intentionally excluded from the parity phase because the current application itself is the supplied visual reference. TODO-563 owns the separate post-parity concept and design-system phase.
+- The visual reference and shared Dioxus foundation can be locked immediately after TODO-544 because the protected Svelte/Tauri surfaces are immutable. Functional service contracts must be revalidated against current source before TODO-550 and TODO-551 call them, and TODO-561 must reconcile canonical truth before TODO-552 certification.
 
 ## Deviations
 

@@ -18,7 +18,7 @@ The entire Rust core (~136k LoC, 146 files) lives in one crate. This causes:
 - Full recompilation of 136k lines on any single-file change (dev iteration >60s cold).
 - No isolation of unsafe/SIMD crypto machine room from safe transport/stealth logic.
 - Feature flags are global (enabling `io_uring` recompiles stealth, FEC, brain, etc.).
-- External consumers (Tauri host, future SDK) must depend on the entire monolith.
+- External consumers, including the new Dioxus services and future SDKs, must depend on the entire monolith.
 - Test parallelism is limited to one compilation unit.
 - Cognitive load: no enforced module boundary; any module can reach into any other.
 
@@ -34,7 +34,8 @@ enforced API boundaries, independent feature gating, and faster CI parallelism.
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings` passes.
 - Incremental rebuild of a single sub-crate (touch one file) completes in under 15 seconds on Apple Silicon dev profile.
 - Feature flags are scoped: `io_uring` only recompiles the platform crate, `benches` only the bench crate, etc.
-- The Tauri host (`apps/tauri/src-tauri`) depends only on the crates it needs, not the full monolith.
+- New Dioxus service and packaging crates depend only on the focused crates they need, not the full monolith.
+- The protected Svelte/Tauri reference paths remain byte-identical; this structural refactor must not edit their manifests, sources, assets, generated bundles, or lockfiles.
 - No `pub` item that was previously crate-internal becomes unnecessarily public; inter-crate APIs are minimal and documented.
 - CI workflows updated to leverage workspace parallelism (per-crate check/test where beneficial).
 - Documentation (DOCUMENTATION.md, MAP.md) updated to reflect the new crate structure.
@@ -47,7 +48,7 @@ enforced API boundaries, independent feature gating, and faster CI parallelism.
 - Clippy gate: workspace-wide Clippy with `-D warnings` passes on stable.
 - Feature gate: feature flags are per-crate; enabling one feature does not force recompilation of unrelated crates.
 - Binary gate: `cargo build --release --bin quicfuscate` produces a functionally identical binary (CLI help, server start, client connect all work).
-- Tauri gate: `cd apps/tauri/src-tauri && cargo check` passes with narrowed dependency set.
+- Protection gate: pre- and post-task SHA-256 manifests prove every protected Svelte/Tauri reference path remains byte-identical.
 - CI gate: GitHub CI and Clippy Matrix pass on the workspace structure.
 - Documentation gate: MAP.md, DOCUMENTATION.md, and AGENTS.md reflect the new crate layout.
 
@@ -59,7 +60,7 @@ enforced API boundaries, independent feature gating, and faster CI parallelism.
 - [ ] Move modules into sub-crate directories; update `mod` declarations and `use` paths.
 - [ ] Scope feature flags per crate (`io_uring` -> qf-platform, `benches` -> bench targets, SIMD features -> qf-crypto).
 - [ ] Update root `Cargo.toml` workspace manifest and binary crate to depend on sub-crates.
-- [ ] Update Tauri host `Cargo.toml` to depend only on needed crates.
+- [ ] Update Dioxus-owned service and packaging crates to depend only on the focused crates they need.
 - [ ] Update CI workflows for workspace-aware check/test/clippy.
 - [ ] Run full test suite, Clippy, release build; measure incremental rebuild time.
 - [ ] Flush documentation (MAP.md, DOCUMENTATION.md, AGENTS.md) and close with evidence.
@@ -78,6 +79,7 @@ enforced API boundaries, independent feature gating, and faster CI parallelism.
 - The `optimize/` module has cross-cutting helpers (sort, string, iter, random). These may need a small `qf-util` crate or stay in `qf-platform`.
 - Existing `[[test]]` and `[[bench]]` targets in root Cargo.toml must be redistributed to owning crates.
 - This is a pure structural refactoring: zero behavioral change, zero feature addition, zero feature removal.
+- `apps/svelte-admin/`, `apps/svelte-desktop/`, `apps/tauri/`, `packages/ui/`, `packages/theme/`, and `assets/web-admin/` are protected reference and rollback surfaces and are outside this task's editable scope.
 
 ## Deviations
 
