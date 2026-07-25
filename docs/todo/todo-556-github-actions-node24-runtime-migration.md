@@ -34,10 +34,10 @@ Exact-commit GitHub runs for `f7af807` report that `actions/checkout@v4`, `actio
 
 ## Sub-Tasks
 
-- [ ] Inventory all workflow action references and their runtime warnings.
-- [ ] Verify supported replacements from official action sources.
-- [ ] Apply one consistent version migration across all workflows.
-- [ ] Run static, native, artifact, and annotation-free regression gates.
+- [x] Inventory all workflow action references and their runtime warnings.
+- [x] Verify supported replacements from official action sources.
+- [x] Apply one consistent version migration across all workflows.
+- [~] Run static, native, artifact, and annotation-free regression gates.
 - [ ] Flush documentation and close only with exact evidence.
 
 ## Notes
@@ -45,6 +45,10 @@ Exact-commit GitHub runs for `f7af807` report that `actions/checkout@v4`, `actio
 - The exact runner annotation names `actions/checkout@v4`, `actions/cache@v4`, and `actions/upload-artifact@v4` and states that their Node.js 20 runtime is deprecated and currently forced onto Node.js 24.
 - Current affected workflow owners include `.github/workflows/ci.yml`, `.github/workflows/clippy-matrix.yml`, `.github/workflows/docker-validation.yml`, and `.github/workflows/release.yml`.
 - Do not guess replacement majors from warning text. Official action repositories and release notes own the migration contract.
+- Exact first-party inventory before migration: 20 `actions/checkout@v4` references, nine `actions/cache@v4` references, 12 `actions/upload-artifact@v4` references, and one `actions/download-artifact@v4` reference across the four workflow owners. Third-party setup references remain unchanged because the reported runtime defect and this task's first-party ownership boundary do not include them.
+- Official releases current on 2026-07-25 select `actions/checkout@v7` (`v7.0.1`), `actions/cache@v6` (`v6.1.0`), `actions/upload-artifact@v7` (`v7.0.1`), and `actions/download-artifact@v8` (`v8.0.1`). Their official `action.yml` manifests all declare `runs.using: node24`.
+- The selected manifests retain every used contract: checkout `submodules` and `fetch-depth`; cache `path`, `key`, and `restore-keys`; upload `name`, `path`, and `if-no-files-found`; download `path` plus default per-artifact extraction. No workflow permissions, cache key, artifact name, artifact path, missing-file policy, dependency edge, or release publication condition changed.
+- Official migration sources: `https://github.com/actions/checkout/releases/tag/v7.0.1`, `https://github.com/actions/cache/releases/tag/v6.1.0`, `https://github.com/actions/upload-artifact/releases/tag/v7.0.1`, and `https://github.com/actions/download-artifact/releases/tag/v8.0.1`.
 
 ## Deviations
 
