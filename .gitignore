@@ -7,6 +7,12 @@ Thumbs.db
 ehthumbs.db
 desktop.ini
 
+# Local screenshots and generated analysis output
+**/Bildschirmfoto*.png
+**/Screen Shot*.png
+**/Screenshot*.png
+**/graphify-out/
+
 # Rust/Cargo
 /target/
 **/target/
