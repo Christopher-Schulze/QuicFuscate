@@ -4,8 +4,9 @@ title: Migrate GitHub Actions off deprecated Node.js 20 runtimes
 severity: HIGH
 phase: S
 priority: P0
-status: OPEN
+status: DONE
 created: 2026-07-23
+resolved: 2026-07-25
 depends_on: []
 ---
 
@@ -37,8 +38,8 @@ Exact-commit GitHub runs for `f7af807` report that `actions/checkout@v4`, `actio
 - [x] Inventory all workflow action references and their runtime warnings.
 - [x] Verify supported replacements from official action sources.
 - [x] Apply one consistent version migration across all workflows.
-- [~] Run static, native, artifact, and annotation-free regression gates.
-- [ ] Flush documentation and close only with exact evidence.
+- [x] Run static, native, artifact, and annotation-free regression gates.
+- [x] Flush documentation and close only with exact evidence.
 
 ## Notes
 
@@ -50,6 +51,11 @@ Exact-commit GitHub runs for `f7af807` report that `actions/checkout@v4`, `actio
 - The selected manifests retain every used contract: checkout `submodules` and `fetch-depth`; cache `path`, `key`, and `restore-keys`; upload `name`, `path`, and `if-no-files-found`; download `path` plus default per-artifact extraction. No workflow permissions, cache key, artifact name, artifact path, missing-file policy, dependency edge, or release publication condition changed.
 - Official migration sources: `https://github.com/actions/checkout/releases/tag/v7.0.1`, `https://github.com/actions/cache/releases/tag/v6.1.0`, `https://github.com/actions/upload-artifact/releases/tag/v7.0.1`, and `https://github.com/actions/download-artifact/releases/tag/v8.0.1`.
 - Owner direction on 2026-07-25 removed the unsupported container image, Compose, and image-validation workflow surface from repository scope. Those files and their retired TODO records are deleted rather than retained as a release gate.
+- Closure commit `06e60435604678bc0f7c47c633d557496654a4d8` passes CI run `30156460437`, Clippy Matrix run `30156460410`, and Release Build run `30156460404`. All 29 exact-commit check runs are successful or intentionally skipped and report zero annotations.
+- The final tracked first-party inventory is 19 `actions/checkout@v7`, nine `actions/cache@v6`, 12 `actions/upload-artifact@v7`, and one `actions/download-artifact@v8` reference across the three retained workflow owners.
+- Release artifact IDs are `8619280592` (Windows), `8619261608` (macOS), `8619231397` (Linux desktop), `8619153686` (ARM64 server), `8619153072` (checksums), `8619152997` (Linux binary), and `8619152872` (x86_64 server).
+- Exact SHA-256 evidence: x86_64 server bundle `b9748c28be49f2621c3a5b67d19912710c69165b40b64a4f505f722c4ebba206`; ARM64 server bundle `31a966a6ce42be3adbb8e31d8f5bb9c16100a5d23be9b2dd8f6177f79cf2c727`; Linux binary `b2c93bb33970c4b61e285d635cc5e20a7dd027ff96f3eef9799b788d36f3af2c`; signed Windows MSI `a6b7c4cca7aec9ea56175997b9f9c76b5e2ba8cc784061f62aa031a873d17d5c`.
+- Both server archives retain the expected binary, installer, service, default configuration, and bundled admin assets. Windows MSI, macOS DMG/app archive, Linux DEB/AppImage, updater signatures, adjacent server checksums, and checksum signature are present and non-empty. Protected UI source and asset paths have zero diff.
 
 ## Deviations
 
