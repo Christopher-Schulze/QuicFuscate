@@ -49,6 +49,7 @@ Exact-commit GitHub runs for `f7af807` report that `actions/checkout@v4`, `actio
 - Official releases current on 2026-07-25 select `actions/checkout@v7` (`v7.0.1`), `actions/cache@v6` (`v6.1.0`), `actions/upload-artifact@v7` (`v7.0.1`), and `actions/download-artifact@v8` (`v8.0.1`). Their official `action.yml` manifests all declare `runs.using: node24`.
 - The selected manifests retain every used contract: checkout `submodules` and `fetch-depth`; cache `path`, `key`, and `restore-keys`; upload `name`, `path`, and `if-no-files-found`; download `path` plus default per-artifact extraction. No workflow permissions, cache key, artifact name, artifact path, missing-file policy, dependency edge, or release publication condition changed.
 - Official migration sources: `https://github.com/actions/checkout/releases/tag/v7.0.1`, `https://github.com/actions/cache/releases/tag/v6.1.0`, `https://github.com/actions/upload-artifact/releases/tag/v7.0.1`, and `https://github.com/actions/download-artifact/releases/tag/v8.0.1`.
+- Exact-commit Docker run `30155829722` proved `actions/checkout@v7` itself succeeds, then exposed a pre-existing build-context contradiction: `Dockerfile` requires `COPY bun.lock package.json ./` while `.dockerignore` excluded both tracked root manifests. The minimum contract repair keeps dependency/build outputs ignored but admits those two required manifests into the Docker context; no Docker stage, command, dependency, secret boundary, or image behavior changed.
 
 ## Deviations
 

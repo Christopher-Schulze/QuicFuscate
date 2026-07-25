@@ -39,8 +39,6 @@ config/*.runtime.json
 **/dist/
 **/build/
 **/.vite/
-bun.lock
-package.json
 
 # Docker
 Dockerfile
