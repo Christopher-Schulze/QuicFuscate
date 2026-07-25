@@ -470,7 +470,7 @@ FEC mode mapping note:
 
 GitHub Actions build and test the project on Linux and macOS. CI runs:
 - Rust core: `cargo clippy --workspace --all-targets`, `cargo build --release`, `cargo test --workspace --all-targets`
-- Rust feature matrix: `cargo test --features <feature>` for rust-tests, simd-selfcheck, io_uring combinations
+- Rust feature matrix: dedicated tests for default and simd-selfcheck configurations; rust-tests coverage remains in the full workspace test job
 - Svelte apps: `bun run check`, `bun run test:unit`, `bun run test:e2e` for `apps/svelte-admin` and `apps/svelte-desktop`
 - Desktop native backend: build the existing `apps/svelte-desktop` bundle for Tauri context, then run `cargo check` and `cargo test` in `apps/tauri/src-tauri`
 - Clippy feature matrix: multiple feature combinations (unsafe_rust, simd-selfcheck, internal_wiedemann, io_uring) via `.github/workflows/clippy-matrix.yml`
@@ -480,6 +480,8 @@ See `.github/workflows/ci.yml`, `.github/workflows/clippy-matrix.yml`, and `.git
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+Release artifacts are built only for `v*` tags or an explicit manual workflow dispatch, not for ordinary `main` pushes.
 
 ## Releases
 

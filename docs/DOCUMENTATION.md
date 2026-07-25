@@ -1900,12 +1900,12 @@ Benchmarks
 - Optional (feature-gated): build with `--features benches` to run the `crypto-bench` subcommand.
 
 #### Automated Build and CI/CD
-- The general CI workflow `ci.yml` runs frontend checks, frontend E2E, security audit, TODO consistency, app backend checks, release build/test, fuzz target checks, feature-matrix tests, benchmark regression checks on pull requests, and Linux fastpath evidence.
+- The general CI workflow `ci.yml` runs frontend checks, frontend E2E, security audit, the release-version contract, app backend checks, release compilation and tests, fuzz target checks, non-duplicated feature-matrix tests, benchmark regression checks on pull requests, and Linux fastpath evidence.
 - The `app-backend-checks` job validates the native desktop backend without UI source edits: it builds the existing `apps/svelte-desktop` bundle for Tauri context, then runs `cargo check` and `cargo test` in `apps/tauri/src-tauri`.
-- The `windows-core-checks` job runs `cargo check --lib`, `cargo test --lib --features rust-tests`, and `cargo clippy --lib --features rust-tests -- -D warnings` on `windows-latest`; native parallel execution is proven by TODO-519. The TODO consistency job also runs `scripts/audits/verify-release-version.sh` on pushes and pull requests.
+- The `windows-core-checks` job runs `cargo check --lib`, `cargo test --lib --features rust-tests`, and `cargo clippy --lib --features rust-tests -- -D warnings` on `windows-latest`; native parallel execution is proven by TODO-519. The `release-contract` job runs `scripts/audits/verify-release-version.sh` on pushes and pull requests.
 - `.github/workflows/clippy-matrix.yml` runs the Rust clippy feature matrix on stable Rust with `-D warnings`.
-- `.github/workflows/release.yml` builds required native x86_64 and ARM64 server bundles, optional signed macOS/Linux desktop artifacts, and a required signed Windows MSI. Tagged publication requires both server architectures and the Windows artifact and maps the MSI signature into `latest.json` as `windows-x86_64`.
-- Latest green release checkpoint: `e8bb5bd`; Release Build `29854481540`. The post-TODO-520 main checkpoint is under CI validation.
+- `.github/workflows/release.yml` runs only for `v*` tags or explicit manual dispatch. It builds required native x86_64 and ARM64 server bundles, optional signed macOS/Linux desktop artifacts, and a required signed Windows MSI. Tagged publication requires both server architectures and the Windows artifact and maps the MSI signature into `latest.json` as `windows-x86_64`.
+- Current workflow status is reported by GitHub Actions for the active branch or release tag.
 
 #### Local Development Workflow
 - Use `cargo test` for unit/integration tests and the suite scripts under `scripts/tests/suites/` for end-to-end coverage.

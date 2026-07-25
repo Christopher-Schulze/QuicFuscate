@@ -11,9 +11,8 @@ OUTPUT_DIR=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --output-dir) OUTPUT_DIR="$2"; shift;;
-    --verbose) QUICFUSCATE_DEBUG_SCRIPTS=1;;
     --help|-h)
-      echo "Usage: $(basename "$0") [--output-dir DIR] [--verbose]"
+      echo "Usage: $(basename "$0") [--output-dir DIR]"
       exit 0
       ;;
     *)
@@ -669,7 +668,7 @@ else
   append_item "qkey_transport_parameter_channel_removed" "fail" "$QKEY_TRANSPORT_PARAMETER_REFS"
 fi
 
-QKEY_CONFIDENTIALITY_OVERCLAIMS=$(rg -n --no-messages 'QKey.*(transport parameters|transport-parameter).*(EncryptedExtensions|invisible to DPI)|QKey-in-Encrypted-Extension' src docs/DOCUMENTATION.md docs/MAP.md docs/todo/todo-415-reality-grade-tls-mimikry.md || true)
+QKEY_CONFIDENTIALITY_OVERCLAIMS=$(rg -n --no-messages 'QKey.*(transport parameters|transport-parameter).*(EncryptedExtensions|invisible to DPI)|QKey-in-Encrypted-Extension' src docs/DOCUMENTATION.md docs/MAP.md || true)
 if [[ -z "$QKEY_CONFIDENTIALITY_OVERCLAIMS" ]]; then
   pass "QKey authentication documentation matches the encrypted HTTP/3 runtime path"
   append_item "qkey_auth_documentation_truth" "ok" "no false QKey transport-parameter confidentiality claim remains"

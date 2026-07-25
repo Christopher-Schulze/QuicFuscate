@@ -10,6 +10,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+concurrency:
+  group: clippy-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   clippy-matrix:
     name: Clippy Matrix Check
