@@ -4,7 +4,7 @@ title: Make FEC-off control and live observability truthful
 severity: CRITICAL
 phase: S
 priority: P0
-status: OPEN
+status: DONE
 created: 2026-07-23
 depends_on: [TODO-424, TODO-547, TODO-555]
 ---
@@ -50,8 +50,8 @@ The production `--fec-mode off` path currently selects `FecMode::Zero` only as t
 - [x] Make the live Auto gate phase-aware without weakening its clean-link, adaptation, repair, or Fountain assertions.
 - [x] Make bounded Auto de-escalation an explicit live gate instead of inferring it from recovered tunnel liveness.
 - [x] Complete the full local `CARGO_BUILD_JOBS=1 cargo test --features rust-tests` gate on the exact candidate source.
-- [~] Run exact-commit native CI/Clippy/Release gates and repeated exact-artifact Omega Off/Auto matrices.
-- [~] Flush documentation and close only with exact evidence.
+- [x] Run exact-commit native CI/Clippy/Release gates and repeated exact-artifact Omega Off/Auto matrices.
+- [x] Flush documentation and close only with exact evidence.
 
 ## Notes
 
@@ -76,7 +76,9 @@ The production `--fec-mode off` path currently selects `FecMode::Zero` only as t
 - Exact pre-commit candidate: base commit `7c8907e2f9817390fa87a3e8e2eef56cc8ac0263`, working-diff SHA-256 `d3d0ffea77517c22a474d3aff33e58b34eb10f137389ae8f01d32f24c52b2272`, canonical 1,343-member source archive SHA-256 `18ccc15dff53420a2e875aba2895ec6479bae7081d3b1a3cd4c6361e8a1f0e6c`, and AArch64 binary SHA-256 `5dbbdf670464408e895c86977ad3e015924212c57e7cdc20ab7f592c5ba4b129`. The source archive contains no AppleDouble members or PAX xattrs. The isolated Omega root is `/home/ubuntu/SOFTWARE/QuicFuscate/candidate-todo558-7c8907e-d3d0ffea7751`; the exact retained evidence is under `evidence-final/`.
 - The exact candidate passed the specialized ownership regression plus all eight repeated Omega matrices with the 150-ping loss phase and bounded recovery. Off moderate recorded `18%` and `22%` impaired tunnel loss; Off severe recorded `38%` and `37%`. Auto moderate recorded `16%` and `2%`; Auto severe recorded `38%` and `37%`. Every run recorded `0%` clean and recovery loss, one client and server handshake, zero panic, zero crypto/decrypt match, and the same binary SHA-256. All 24 Off client/server snapshots stayed Zero with zero effective window, repairs, and switches. Auto clean and recovered client snapshots stayed or returned to Zero; lossy client modes were Extreme, Streaming, Extreme, and Extreme with final repair counts `45`, `142`, `18`, and `18`, and no moderate Fountain or extreme-reason transition.
 - Omega teardown is exact: IPv4/IPv6 routes, host qdiscs, namespaces, links, product processes, and temporary runtimes are byte-identical before/after; the generated TUN lock is absent; iptables, ip6tables, and nftables are structurally identical after normalizing counters and snapshot timestamps. The retained AArch64 binary and canonical source archive were re-hashed after the matrix, `cargo clean` removed the 494 MiB remote target, and only the isolated candidate/evidence root remains.
-- Remaining closure sequence: push the current exact local TODO-558 commit with explicit user approval; run native CI, Clippy Matrix, and every required Release Build job for that commit; download and SHA-256-verify the produced source/binary/checksum artifacts; confirm they match the committed source contract; then mark the final two sub-tasks complete, archive this detail, update `docs/todo.md`, and create no additional implementation commit. Remote push remains an explicit user-authority boundary.
+- Final implementation commit `b7db20443bb070d97686975034ebd9656ca3f98e` is on `main`. CI run `30155084370`, all eight jobs in Clippy Matrix run `30155084377`, and every required job in Release Build run `30155084369` completed successfully.
+- GitHub source archive SHA-256 is `64a8fae24a1143ab9715b78c0075dfcf570c51432682f5c1383077d5309be678`. Release artifact `8618780323` contains the x86_64 server bundle with SHA-256 `a66c13296ad045e1011c12e62e02728c23101e45b525b0618df0e2bcd950110e` and packaged binary SHA-256 `a235ffa4617008d1badda9e11e62d242767320a522891d32b7ea951d12b05ec5`. Native ARM64 artifact `8618776310` contains the server bundle with SHA-256 `0fb66cb66b48475cb578eccadeb1d9f8da17273f98939ab60931b0dd8ebdeecb` and packaged binary SHA-256 `ea93bc10af7fc205da41b2acf02b5b6a0b25702113c7d8900390c12e99e516fb`.
+- Both server manifests match their downloaded bundles. The x86_64 and ARM64 server archives, macOS application archive, Linux Debian package, Linux AppImage, Windows MSI, and macOS DMG are structurally valid; `hdiutil verify` reports a valid DMG checksum. The exact-commit protected Svelte/Tauri diff is empty.
 - `Engine::set_fec_mode()` and server runtime reload still do not prove policy changes on already-active connections. That separate active-control contract is registered as TODO-560 and does not weaken this task's connection-construction and lifetime-Off scope.
 - Exact probe source commit: `222ebdc0c91a887e480dc6697f82e45e4c9d417c`; ARM64 binary SHA-256: `8b6ff22e0f410ac6cd5c553786bd5c7584d99c6da0f346a46d9e8839a9e1c2b1`.
 - This task owns control and observability correctness. Scenario thresholds and comparative acceptance remain TODO-557.
