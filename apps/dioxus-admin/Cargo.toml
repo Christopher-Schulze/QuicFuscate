@@ -1,0 +1,12 @@
+[package]
+name = "quicfuscate-dioxus-admin"
+version = "0.4.3"
+edition = "2021"
+authors = ["QuicFuscate Team"]
+license = "MIT"
+
+[dependencies]
+dioxus = { version = "0.7", features = ["web"] }
+quicfuscate-dioxus-ui = { path = "../../packages/dioxus-ui" }
+
+[workspace]

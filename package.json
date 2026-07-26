@@ -5,5 +5,9 @@
   "workspaces": [
     "apps/*",
     "packages/*"
-  ]
+  ],
+  "devDependencies": {
+    "tailwindcss": "^4.0.6",
+    "@tailwindcss/cli": "^4.0.6"
+  }
 }

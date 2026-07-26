@@ -1341,7 +1341,7 @@ Mode Selection & Hysteresis
 - Active 1-RTT sources and repairs are transported over UDP using the versioned FEC v1 envelope above. Initial, Handshake, and stable `Zero` datagrams remain raw QUIC.
 
 - Egress
-  - Core polls rustls and the actual Initial/Handshake CRYPTO queues before enabling active 1-RTT framing, so a pending Finished flight cannot be wrapped as FEC application data.
+  - Core polls rustls and the actual Initial/Handshake CRYPTO queues, and rejects active 1-RTT framing while any Initial/Handshake PTO probe is pending, so a pending Finished flight or handshake probe cannot be wrapped as FEC application data.
   - `Connection::send_with_datagram_overhead()` reserves 34 bytes against the minimum of output capacity, configured MTU, and discovered path MTU. Core writes the protected source-length prefix before FEC encoding and serializes sources/repairs with `fec::wire::write_packet()`.
   - Emission policy is adaptive: base interval from `QUICFUSCATE_FEC_STREAM_EVERY` (default computed from CPU profile), escalation under loss and ECN-CE.
 
@@ -2543,6 +2543,30 @@ cd apps/svelte-desktop && bun run test:unit
 cd apps/tauri && bun run check
 cd apps/tauri && bun run build
 cd apps/tauri/src-tauri && cargo check
+```
+
+### Desktop App (Dioxus)
+
+A standalone Dioxus Desktop client is being developed in parallel under `apps/dioxus-desktop/` with the goal of replacing the Tauri-hosted Svelte desktop app entirely (TODO-549).
+
+**Current status:** Dioxus 0.7 (`dx` CLI and crates) is installed and the app builds, bundles, and launches. The full Svelte desktop UI has been ported view-by-view:
+- `Sidebar` with animated active pill and drag region.
+- `TunnelsView` with `TunnelList`, `TunnelListItem`, `TunnelStats`, and `ThroughputChart` (SVG-based), plus add/import/edit/config/delete dialogs.
+- `SettingsView` with logging, startup, and updater panels.
+- `LogsView` with colored level badges and copy/clear actions.
+- `AboutView` with CPU feature detection.
+
+**Stack:**
+- Runtime: `dioxus-desktop` 0.7 (Wry webview).
+- Shared UI: `packages/dioxus-ui` provides Tailwind-v4-derived `theme.css`, reusable primitives (`Sidebar`, `Switch`, `TextInput`, `ThroughputChart`, etc.), and Rust ports of Svelte formatters/validators/policy display.
+- State: `DesktopState` in `apps/dioxus-desktop/src/state.rs` with `use_signal` and `use_context_provider`; persistence and engine polling live in `apps/dioxus-desktop/src/bridge.rs`.
+- Window: fixed 900 x 670, non-resizable, matching the Tauri desktop dimensions.
+
+**Build:**
+```bash
+cd apps/dioxus-desktop
+cargo clippy -- -D warnings
+ dx build
 ```
 
 ### Web Admin

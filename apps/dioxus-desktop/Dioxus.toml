@@ -1,0 +1,11 @@
+[application]
+name = "QuicFuscate Dioxus Desktop"
+
+[application.windows.main]
+title = "QuicFuscate"
+width = 900
+height = 670
+min_width = 900
+min_height = 670
+resizable = false
+center = true

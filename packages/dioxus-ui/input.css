@@ -1,0 +1,6 @@
+@import "tailwindcss";
+@source "../../apps/dioxus-desktop/src";
+@source "../src";
+@source "../../apps/svelte-desktop/src";
+@source "../../../packages/ui";
+@import "../theme/index.css";
