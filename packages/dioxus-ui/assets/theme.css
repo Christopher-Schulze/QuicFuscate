@@ -2513,6 +2513,42 @@ input[type="number"] {
   color: rgba(0, 0, 0, 0.75);
 }
 
+/* Admin app shell and utility styles. */
+.qf-app-shell {
+  display: flex;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background: linear-gradient(135deg, #f4f6fb 0%, #e8ecf7 100%);
+}
+.qf-stage {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.qf-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.45);
+}
+.qf-stat-label {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: rgba(0, 0, 0, 0.45);
+}
+.qf-stat-value {
+  font-size: 11px;
+  font-weight: 700;
+  color: #000;
+}
+
 /* Logs panel styles. */
 .qf-logs-section {
   margin-top: 0.75rem;
