@@ -2569,6 +2569,35 @@ cargo clippy -- -D warnings
  dx build
 ```
 
+### Web Admin (Dioxus)
+
+A Dioxus web admin panel is being developed in `apps/dioxus-admin/` with the goal of replacing the Svelte admin UI.
+
+**Current status:** The admin app builds for the web target and includes:
+- `Sidebar` navigation matching the desktop shell.
+- `LoginModal` with `/api/login` integration.
+- `DashboardView` showing server status, clients, metrics, and blocked-IP management.
+- `ConfigurationView` with a raw server config editor and save flow.
+- `LogsView` with log level selection and clear action.
+- `AboutView` with version information.
+
+**API client (`apps/dioxus-admin/src/api.rs`):**
+- CSRF token handling via `sessionStorage` and `X-CSRF-Token`/`X-CSRF-Nonce` headers.
+- `get_json` and `post_json` helpers.
+- Auth (401), password-change lock (423), and CSRF retry handling.
+
+**Stack:**
+- Runtime: `dioxus` 0.7 with `web` feature (WASM).
+- HTTP: `reqwest` (WASM build) with `web-sys`/`js-sys` for storage.
+- Shared UI: `packages/dioxus-ui` primitives and `theme.css`.
+
+**Build:**
+```bash
+cd apps/dioxus-admin
+cargo clippy -- -D warnings
+ dx build
+```
+
 ### Web Admin
 
 The active web admin UI lives in `apps/svelte-admin/`. `scripts/build/build-web-admin.sh` builds the Svelte bundle and copies it into `assets/web-admin/`. Server startup with `--admin-web` is a separate runtime step:

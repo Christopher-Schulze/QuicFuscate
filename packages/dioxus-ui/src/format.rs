@@ -97,3 +97,62 @@ impl LogLevel {
         }
     }
 }
+
+pub fn format_bits_per_second(bits_raw: f64) -> String {
+    let bits = if bits_raw.is_finite() && bits_raw >= 0.0 { bits_raw } else { 0.0 };
+    let units = [(1.0, "bit/s"), (1_000.0, "Kbit/s"), (1_000_000.0, "Mbit/s"), (1_000_000_000.0, "Gbit/s"), (1_000_000_000_000.0, "Tbit/s")];
+    let mut selected = units[0];
+    for u in &units {
+        if bits >= u.0 {
+            selected = *u;
+        }
+    }
+    let scaled = bits / selected.0;
+    let decimals = if scaled >= 100.0 { 0 } else if scaled >= 10.0 { 1 } else { 2 };
+    format!("{scaled:.decimals$} {}", selected.1)
+}
+
+pub fn format_uptime_short(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
+pub fn format_metric_bytes(value: u64) -> String {
+    let units = ["B", "KB", "MB", "GB", "TB"];
+    let mut index = 0;
+    let mut scaled = value as f64;
+    while scaled >= 1024.0 && index < units.len() - 1 {
+        scaled /= 1024.0;
+        index += 1;
+    }
+    let decimals = if scaled >= 100.0 { 0 } else if scaled >= 10.0 { 1 } else { 2 };
+    format!("{scaled:.decimals$} {}", units[index])
+}
+
+pub fn format_metric_count(value: f64) -> String {
+    format!("{}", (value.max(0.0).round() as u64).to_string().as_str())
+}
+
+pub fn format_metric_value(name: &str, value: f64) -> String {
+    if name == "quicfuscate_up" {
+        return if value >= 1.0 { "Online".to_string() } else { "Offline".to_string() };
+    }
+    if name == "quicfuscate_uptime_seconds" {
+        return format_uptime_short(value.max(0.0) as u64);
+    }
+    if name == "quicfuscate_bytes_in_total" || name == "quicfuscate_bytes_out_total" {
+        return format_metric_bytes(value.max(0.0) as u64);
+    }
+    if name.ends_with("_active") {
+        return if value >= 1.0 { "Enabled".to_string() } else { "Disabled".to_string() };
+    }
+    if value.fract() == 0.0 {
+        return format_metric_count(value);
+    }
+    format!("{value:.2}")
+}
