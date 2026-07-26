@@ -2545,59 +2545,6 @@ cd apps/tauri && bun run build
 cd apps/tauri/src-tauri && cargo check
 ```
 
-### Desktop App (Dioxus)
-
-A standalone Dioxus Desktop client is being developed in parallel under `apps/dioxus-desktop/` with the goal of replacing the Tauri-hosted Svelte desktop app entirely (TODO-549).
-
-**Current status:** Dioxus 0.7 (`dx` CLI and crates) is installed and the app builds, bundles, and launches. The full Svelte desktop UI has been ported view-by-view:
-- `Sidebar` with animated active pill and drag region.
-- `TunnelsView` with `TunnelList`, `TunnelListItem`, `TunnelStats`, and `ThroughputChart` (SVG-based), plus add/import/edit/config/delete dialogs.
-- `SettingsView` with logging, startup, and updater panels.
-- `LogsView` with colored level badges and copy/clear actions.
-- `AboutView` with CPU feature detection.
-
-**Stack:**
-- Runtime: `dioxus-desktop` 0.7 (Wry webview).
-- Shared UI: `packages/dioxus-ui` provides Tailwind-v4-derived `theme.css`, reusable primitives (`Sidebar`, `Switch`, `TextInput`, `ThroughputChart`, etc.), and Rust ports of Svelte formatters/validators/policy display.
-- State: `DesktopState` in `apps/dioxus-desktop/src/state.rs` with `use_signal` and `use_context_provider`; persistence and engine polling live in `apps/dioxus-desktop/src/bridge.rs`.
-- Window: fixed 900 x 670, non-resizable, matching the Tauri desktop dimensions.
-
-**Build:**
-```bash
-cd apps/dioxus-desktop
-cargo clippy -- -D warnings
- dx build
-```
-
-### Web Admin (Dioxus)
-
-A Dioxus web admin panel is being developed in `apps/dioxus-admin/` with the goal of replacing the Svelte admin UI.
-
-**Current status:** The admin app builds for the web target and includes:
-- `Sidebar` navigation matching the desktop shell.
-- `LoginModal` with `/api/login` integration.
-- `DashboardView` showing server status, clients, metrics, and blocked-IP management.
-- `ConfigurationView` with a raw server config editor and save flow.
-- `LogsView` with log level selection and clear action.
-- `AboutView` with version information.
-
-**API client (`apps/dioxus-admin/src/api.rs`):**
-- CSRF token handling via `sessionStorage` and `X-CSRF-Token`/`X-CSRF-Nonce` headers.
-- `get_json` and `post_json` helpers.
-- Auth (401), password-change lock (423), and CSRF retry handling.
-
-**Stack:**
-- Runtime: `dioxus` 0.7 with `web` feature (WASM).
-- HTTP: `reqwest` (WASM build) with `web-sys`/`js-sys` for storage.
-- Shared UI: `packages/dioxus-ui` primitives and `theme.css`.
-
-**Build:**
-```bash
-cd apps/dioxus-admin
-cargo clippy -- -D warnings
- dx build
-```
-
 ### Web Admin
 
 The active web admin UI lives in `apps/svelte-admin/`. `scripts/build/build-web-admin.sh` builds the Svelte bundle and copies it into `assets/web-admin/`. Server startup with `--admin-web` is a separate runtime step:
