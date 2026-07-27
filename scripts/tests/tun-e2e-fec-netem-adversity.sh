@@ -23,7 +23,7 @@
 set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
-B="$PROJECT_ROOT/target/release/quicfuscate"
+B="${QF_E2E_BINARY:-$PROJECT_ROOT/target/release/quicfuscate}"
 CA="$PROJECT_ROOT/config/local/ca.crt"
 CA_KEY="$PROJECT_ROOT/config/local/ca.key"
 
@@ -34,7 +34,6 @@ LOCK_FILE="${QF_E2E_LOCK_FILE:-/tmp/quicfuscate-tun-e2e.lock}"
 LOCK_TIMEOUT="${QF_E2E_LOCK_TIMEOUT:-300}"
 PASS=0
 FAIL=0
-SKIP=0
 SERVER_PID=""
 CLIENT_PID=""
 SERVER_NAMESPACE_CREATED=0
@@ -673,7 +672,7 @@ cleanup_owned_resources || fatal "could not clean final owned resources"
 
 echo ""
 echo "=========================================="
-echo "  Results: ${PASS} passed, ${FAIL} failed, ${SKIP} skipped"
+echo "  Results: ${PASS} passed, ${FAIL} failed"
 echo "=========================================="
 
 if [ "$FAIL" -gt 0 ]; then
