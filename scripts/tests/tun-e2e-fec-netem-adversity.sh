@@ -1,21 +1,23 @@
 #!/usr/bin/env bash
-# FEC under network adversity - comprehensive tc-netem test suite (TODO-425).
+# FEC liveness under network adversity - tc-netem test suite (TODO-425).
 #
-# Tests FEC behavior under every realistic network degradation pattern:
-#   1. Loss sweep (0-50%) with throughput measurement
-#   2. Jitter sweep (0-500ms) - mode stability under jitter
-#   3. Bandwidth limitation (1-100Mbit) - FEC overhead vs. useful throughput
-#   4. RTT variation (1-300ms) - FEC recovery vs. retransmission latency
+# Tests authenticated TUN liveness under these degradation patterns:
+#   1. Loss sweep (0-50%)
+#   2. Jitter sweep (0-500ms)
+#   3. Bandwidth limitation (1-100Mbit)
+#   4. RTT variation (1-300ms plus 5% loss)
 #   5. Combined adversity (mobile network simulation)
 #   6. Adversity recovery (clean → loss → clean transitions)
 #
 # Acceptance criteria:
-#   - Loss sweep: FEC mode escalates monotonically, throughput degrades gracefully
-#   - Jitter sweep: no mode flapping under jitter-only
-#   - Bandwidth: FEC overhead <30% on 1Mbit link
-#   - RTT: FEC recovery faster than retransmission for high-RTT
-#   - Combined: stable 60s operation, no panics
-#   - Recovery: de-escalation within 5s, no flapping
+#   - Each scenario establishes the authenticated tunnel and enforces its
+#     scenario-specific ping-loss limit.
+#   - Every scenario fails on a detected runtime panic.
+#   - The recovery path requires clean-link and post-loss liveness.
+#
+# This harness deliberately does not claim throughput, FEC overhead, mode
+# stability, retransmission latency, or a timed stability interval. Those
+# quantitative contracts belong to the specialized acceptance work in TODO-557.
 #
 # Requirements: root, Linux, iproute2, tc-netem, openssl, python3, nc.
 set -u
