@@ -6,8 +6,8 @@
 # to simulate burst loss.
 #
 # Executable acceptance (TODO-423):
-#   - 10% loss with 25% correlation: <5% tunnel loss
-#   - 20% loss with 50% correlation: <10% tunnel loss
+#   - Three 10%/25%-correlation trials: median <=5%, every sample <=10%
+#   - Three 20%/50%-correlation trials: median <=10%, every sample <=15%
 #   - TLS handshakes complete on both endpoints
 #   - No panics
 #
@@ -21,6 +21,7 @@ CA_KEY="$PROJECT_ROOT/config/local/ca.key"
 
 PING_COUNT="${PING_COUNT:-100}"
 PING_INTERVAL="${PING_INTERVAL:-0.1}"
+BURST_REPETITIONS="${QF_BURST_REPETITIONS:-3}"
 KEEP_ON_FAIL="${QF_E2E_KEEP_ON_FAIL:-0}"
 LOCK_FILE="${QF_E2E_LOCK_FILE:-/tmp/quicfuscate-tun-e2e.lock}"
 LOCK_TIMEOUT="${QF_E2E_LOCK_TIMEOUT:-300}"
@@ -40,6 +41,7 @@ ADMIN_SOCKET=""
 QKEY_STORE=""
 CERT=""
 KEY=""
+LAST_PING_LOSS=""
 
 exec 9>"$LOCK_FILE"
 if ! flock -w "$LOCK_TIMEOUT" 9; then
@@ -194,6 +196,13 @@ if [ "$(id -u)" -ne 0 ]; then
     echo "FAIL: this harness requires root" >&2
     exit 2
 fi
+case "$BURST_REPETITIONS" in
+    ''|*[!0-9]*) echo "FAIL: QF_BURST_REPETITIONS must be an integer" >&2; exit 2 ;;
+esac
+if [ "$BURST_REPETITIONS" -lt 3 ]; then
+    echo "FAIL: QF_BURST_REPETITIONS must be at least 3" >&2
+    exit 2
+fi
 if pgrep -x quicfuscate >/dev/null; then
     echo "FAIL: a pre-existing quicfuscate process is running; refusing broad cleanup" >&2
     exit 2
@@ -273,19 +282,19 @@ setup_netns() {
     done
 }
 
-run_burst_test() {
+run_burst_trial() {
     local loss_pct="$1"
     local correlation="$2"
     local label="$3"
-    local max_loss="$4"
+    local trial="$4"
 
     echo ""
     echo "=========================================="
-    echo "  FEC Burst Loss: ${label}"
+    echo "  FEC Burst Loss: ${label}, trial ${trial}/${BURST_REPETITIONS}"
     echo "=========================================="
 
     cleanup_owned_resources || fatal "could not clean the previous burst scenario"
-    prepare_scenario_runtime "burst-${loss_pct}-${correlation}"
+    prepare_scenario_runtime "burst-${loss_pct}-${correlation}-trial-${trial}"
     setup_netns
 
     ip netns exec ns-srv "$B" server --cert "$CERT" --key "$KEY" \
@@ -350,14 +359,7 @@ run_burst_test() {
     # Extract integer packet loss percentage (handle decimals like "3.33%")
     ping_loss=$(echo "$ping_output" | grep 'packet loss' | grep -oP '[\d.]+(?=% packet loss)' | awk '{printf "%d", $1}' || echo "100")
     echo "Tunnel loss: ${ping_loss}%"
-
-    if [ "$ping_loss" -le "$max_loss" ]; then
-        echo "PASS: ${label} -> ${ping_loss}% tunnel loss (threshold: ${max_loss}%)"
-        PASS=$((PASS + 1))
-    else
-        echo "FAIL: ${label} -> ${ping_loss}% tunnel loss (threshold: ${max_loss}%)"
-        FAIL=$((FAIL + 1))
-    fi
+    LAST_PING_LOSS="$ping_loss"
 
     if grep -q 'panic' "$SERVER_LOG" "$CLIENT_LOG" 2>/dev/null; then
         echo "FAIL: panic detected"
@@ -368,11 +370,48 @@ run_burst_test() {
     remove_qdisc || fatal "could not remove correlated netem loss"
 }
 
+run_burst_scenario() {
+    local loss_pct="$1"
+    local correlation="$2"
+    local label="$3"
+    local median_limit="$4"
+    local sample_limit="$5"
+    local trial
+    local -a samples=()
+
+    for trial in $(seq 1 "$BURST_REPETITIONS"); do
+        LAST_PING_LOSS=""
+        run_burst_trial "$loss_pct" "$correlation" "$label" "$trial"
+        if [ -z "$LAST_PING_LOSS" ]; then
+            echo "FAIL: ${label} trial ${trial} produced no packet-loss measurement"
+            FAIL=$((FAIL + 1))
+            continue
+        fi
+        samples+=("$LAST_PING_LOSS")
+    done
+
+    if [ "${#samples[@]}" -ne "$BURST_REPETITIONS" ]; then
+        echo "FAIL: ${label} completed ${#samples[@]}/${BURST_REPETITIONS} measurements"
+        return
+    fi
+
+    local aggregate
+    if ! aggregate=$(python3 -c \
+        'import statistics,sys; median_limit=int(sys.argv[1]); sample_limit=int(sys.argv[2]); samples=[int(value) for value in sys.argv[3:]]; median=statistics.median(samples); maximum=max(samples); print(f"samples={samples}; median={median:g}%; maximum={maximum}%"); assert median <= median_limit, (samples, median, median_limit); assert maximum <= sample_limit, (samples, maximum, sample_limit)' \
+        "$median_limit" "$sample_limit" "${samples[@]}"); then
+        echo "FAIL: ${label} statistical gate failed (median <=${median_limit}%, every sample <=${sample_limit}%)"
+        FAIL=$((FAIL + 1))
+        return
+    fi
+    echo "PASS: ${label} ${aggregate}"
+    PASS=$((PASS + 1))
+}
+
 # --- Main ---
 echo "=== FEC Burst Loss E2E Test Suite (TODO-423) ==="
 
-run_burst_test 10 25 "10% loss, 25% correlation (mild burst)" 5
-run_burst_test 20 50 "20% loss, 50% correlation (heavy burst)" 10
+run_burst_scenario 10 25 "10% loss, 25% correlation (mild burst)" 5 10
+run_burst_scenario 20 50 "20% loss, 50% correlation (heavy burst)" 10 15
 
 cleanup_owned_resources || fatal "could not clean final owned resources"
 
