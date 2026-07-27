@@ -2426,9 +2426,17 @@ mod tests {
 
         let written = outgoing.write_to(&mut wire_datagram).expect("FEC packet must serialize");
         let decoded = wire::parse_packet(&wire_datagram[..written]).expect("FEC packet must parse");
+        let mut receiver = WireFecReceiver::new(crate::optimize::global_pool());
+        let mut output = Vec::new();
+        let report = receiver
+            .receive(&wire_datagram[..written], &mut output)
+            .expect("FEC packet must decode");
 
         assert_eq!(decoded.meta, meta);
         assert_eq!(decoded.payload, protected_payload);
+        assert_eq!(report.source_payload_bytes, quic_payload.len());
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0].payload_slice(), Some(&quic_payload[..]));
     }
 
     #[test]
