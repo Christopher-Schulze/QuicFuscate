@@ -88,6 +88,7 @@ Padding and timing rates flow through `StealthRuntimePolicy` → `StealthRuntime
 - Three clean and three 5% random-loss CUBIC trials on a shared 5 Mbit/s bottleneck record median throughput of 3.001 Mbit/s clean and 2.862 Mbit/s under loss, retaining 95.38%.
 - Evidence root: `/home/ubuntu/SOFTWARE/QuicFuscate/target/todo535/evidence/run06`. Cleanup leaves no product process, network namespace, or test qdisc.
 - Exact commit `c609c68` ARM64 binary SHA-256 `322060acffd79abe30ed7d8e4238933b0106c2df1ab3e116793e62073da8d32b` passes the active-FEC CUBIC matrix after FEC framing is exempted from stateless Version Negotiation: CUBIC 1.075 Mbit/s, Reno 1.049 Mbit/s, Jain 0.999846; Auto baseline 3.001 Mbit/s; controlled 5% loss 2.988 Mbit/s; retained throughput 99.56%.
+- Harness-source `3b20cd1` makes the same CUBIC path a durable matched Auto/FEC-off control: three clean and three controlled-5%-loss trials per policy emit isolated JSON summaries and a combined absolute/relative comparison. The exact ARM64 artifact recorded Auto 3.001/2.982 Mbit/s, 99.38% retained; FEC-off 3.001/2.830 Mbit/s, 94.32% retained; delta 0.152 Mbit/s and 5.06 percentage points. Fairness was CUBIC/Reno 1.064/1.061 Mbit/s, Jain 0.999998. The isolated artifact is `/tmp/qf-3b20cd1-cubic.t2sP2k`; no product process, namespace, bridge, or qdisc remained.
 
 ### Omega FEC Wire Integrity Evidence (2026-07-22)
 
