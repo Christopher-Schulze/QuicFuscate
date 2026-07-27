@@ -498,6 +498,8 @@ if rg -F -- 'UNIFORM_PING_SCENARIOS=(' "$UNIFORM_FEC_CONTRACT_HARNESS" >/dev/nul
   && rg -F -- '"$B" --telemetry client' "$ADVERSITY_FEC_CONTRACT_HARNESS" >/dev/null \
   && rg -F -- 'capture_telemetry "loss-${loss}"' "$ADVERSITY_FEC_CONTRACT_HARNESS" >/dev/null \
   && rg -F -- 'capture_telemetry "recovery-lossy"' "$ADVERSITY_FEC_CONTRACT_HARNESS" >/dev/null \
+  && rg -F -- 'record_loss_result "loss-${loss}"' "$ADVERSITY_FEC_CONTRACT_HARNESS" >/dev/null \
+  && rg -F -- "printf 'result=%s\\n'" "$ADVERSITY_FEC_CONTRACT_HARNESS" >/dev/null \
   && rg -F -- 'preserve_telemetry_evidence' "$ADVERSITY_FEC_CONTRACT_HARNESS" >/dev/null \
   && ! rg -F -- 'for loss in 0 1 5 10 25 50; do' "$ADVERSITY_FEC_CONTRACT_HARNESS" >/dev/null; then
   pass "Specialized FEC acceptance executes printed contracts and captures loss/recovery controller evidence"

@@ -83,6 +83,7 @@ CLIENT_LOG=""
 SERVER_TELEMETRY=""
 CLIENT_TELEMETRY=""
 TELEMETRY_FILES=()
+SCENARIO_RESULTS=()
 EVIDENCE_PRESERVED=0
 ADMIN_SOCKET=""
 QKEY_STORE=""
@@ -465,6 +466,14 @@ capture_telemetry() {
     TELEMETRY_FILES+=("$SERVER_TELEMETRY" "$CLIENT_TELEMETRY")
 }
 
+record_loss_result() {
+    local scenario="$1"
+    local tunnel_loss="$2"
+    local rtt_ms="$3"
+    local maximum_loss="$4"
+    SCENARIO_RESULTS+=("${scenario}:tunnel_loss=${tunnel_loss},rtt_ms=${rtt_ms},maximum_loss=${maximum_loss}")
+}
+
 preserve_telemetry_evidence() {
     if [ -z "$EVIDENCE_DIR" ]; then
         return
@@ -496,6 +505,9 @@ preserve_telemetry_evidence() {
         printf 'rtt_contract=%s\n' "${RTT_SCENARIOS[*]}"
         printf 'combined_contract=%s\n' "$COMBINED_SCENARIO"
         printf 'recovery_contract=%s\n' "$RECOVERY_SCENARIO"
+        for result in "${SCENARIO_RESULTS[@]}"; do
+            printf 'result=%s\n' "$result"
+        done
     } > "$EVIDENCE_DIR/run-manifest.txt" \
         || {
             echo "FAIL: could not write telemetry evidence manifest" >&2
@@ -536,6 +548,7 @@ test_loss_sweep() {
         local tunnel_loss rtt
         tunnel_loss=${result%%:*}
         rtt=${result##*:}
+        record_loss_result "loss-${loss}" "$tunnel_loss" "$rtt" "$max_loss"
 
         if [ "$tunnel_loss" -le "$max_loss" ]; then
             echo "${loss}% | ${tunnel_loss}% | ${rtt} | PASS"
@@ -584,6 +597,7 @@ test_jitter_sweep() {
         local tunnel_loss rtt
         tunnel_loss=${result%%:*}
         rtt=${result##*:}
+        record_loss_result "jitter-${jitter}" "$tunnel_loss" "$rtt" "$max_loss"
 
         if [ "$tunnel_loss" -le "$max_loss" ]; then
             echo "${jitter}ms | ${tunnel_loss}% | ${rtt} | PASS"
@@ -630,6 +644,7 @@ test_bandwidth() {
         local tunnel_loss rtt
         tunnel_loss=${result%%:*}
         rtt=${result##*:}
+        record_loss_result "bandwidth-${bw}" "$tunnel_loss" "$rtt" "$max_loss"
 
         if [ "$tunnel_loss" -le "$max_loss" ]; then
             echo "${bw} | ${tunnel_loss}% | ${rtt} | PASS"
@@ -676,6 +691,7 @@ test_rtt_variation() {
         local tunnel_loss measured_rtt
         tunnel_loss=${result%%:*}
         measured_rtt=${result##*:}
+        record_loss_result "rtt-${rtt}" "$tunnel_loss" "$measured_rtt" "$max_loss"
 
         if [ "$tunnel_loss" -le "$max_loss" ]; then
             echo "${rtt}ms | ${tunnel_loss}% | ${measured_rtt} | PASS"
@@ -731,6 +747,7 @@ test_combined_adversity() {
     local tunnel_loss rtt
     tunnel_loss=${result%%:*}
     rtt=${result##*:}
+    record_loss_result "combined" "$tunnel_loss" "$rtt" "$max_loss"
 
     if [ "$tunnel_loss" -le "$max_loss" ]; then
         echo "PASS: ${tunnel_loss}% tunnel loss, ${rtt} rtt"
@@ -801,6 +818,7 @@ test_adversity_recovery() {
     local loss3
     loss3=${result3%%:*}
     echo "  Tunnel loss: ${loss3}%"
+    SCENARIO_RESULTS+=("recovery:clean_loss=${loss1},loss_phase_loss=${loss2},recovered_loss=${loss3},clean_maximum_loss=${clean_max_loss},recovery_maximum_loss=${recovery_max_loss}")
 
     if [ "$loss1" -le "$clean_max_loss" ] && [ "$loss3" -le "$recovery_max_loss" ]; then
         echo "PASS: clean=${loss1}%, loss=${loss2}%, recovered=${loss3}%"
