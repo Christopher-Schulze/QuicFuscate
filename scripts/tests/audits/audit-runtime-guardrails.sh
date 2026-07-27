@@ -474,6 +474,20 @@ else
   append_item "specialized_tun_e2e_ownership_regression" "fail" "sentinel, lifecycle mode, namespace/link refusal, or exact cleanup coverage missing"
 fi
 
+CUBIC_FEC_CONTROL_HARNESS="scripts/tests/tun-e2e-cubic-netns.sh"
+if rg -F -- 'LOSS_TRIALS=3' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
+  && rg -F -- 'for fec_mode in auto off; do' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
+  && rg -F -- 'run_loss_comparison "$fec_mode"' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
+  && rg -F -- 'loss-summary-$fec_mode.json' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
+  && rg -F -- 'fec-comparison-summary.json' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
+  && rg -F -- 'auto_minus_off_retained_percentage_points' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null; then
+  pass "CUBIC loss proof keeps matched Auto and FEC-off controls with machine-readable comparison evidence"
+  append_item "cubic_fec_control_comparison" "ok" "three clean/loss trials per policy and absolute/relative comparison artifact are required"
+else
+  fail_critical "CUBIC loss proof lost its matched Auto versus FEC-off comparison contract"
+  append_item "cubic_fec_control_comparison" "fail" "missing repetition count, both policy runs, per-policy evidence, or relative comparison artifact"
+fi
+
 # 6) Guardrail warning: shadow runtime modules with no non-test call sites.
 BATCH_RUNTIME_REFS=$(rg -n --no-messages "BatchProcessor" src | rg -v "src/transport/batch.rs|src/transport.rs" || true)
 if [[ -z "$BATCH_RUNTIME_REFS" ]]; then

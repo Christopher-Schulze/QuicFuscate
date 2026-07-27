@@ -4,8 +4,10 @@
 # Uses one exact release binary for two controlled experiments:
 # 1. Concurrent CUBIC and Reno UDP payload flows through one shared drop-tail
 #    underlay bottleneck, with Jain fairness above 0.8 and no starvation.
-# 2. CUBIC with adaptive FEC on the same fixed-rate path, comparing a clean
-#    baseline against controlled 5% random underlay loss.
+# 2. CUBIC with matched Auto-FEC and FEC-off runs on the same fixed-rate path,
+#    each comparing a clean baseline against controlled 5% random underlay
+#    loss. The artifact reports absolute and relative policy differences; it
+#    does not claim a FEC advantage without the recorded control result.
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,6 +19,10 @@ CA="${QF_E2E_CA:-$PROJECT_ROOT/config/local/ca.crt}"
 LOCK_FILE="${QF_E2E_LOCK_FILE:-/tmp/quicfuscate-tun-e2e.lock}"
 LOCK_TIMEOUT="${QF_E2E_LOCK_TIMEOUT:-300}"
 ARTIFACT_DIR="${QF_E2E_ARTIFACT_DIR:-/tmp/quicfuscate-todo535-$$}"
+LOSS_TRIALS=3
+LOSS_RATE_PERCENT=5
+MIN_RETAINED_RATIO=0.5
+MIN_RETAINED_PERCENT=50
 
 SERVER_NS="qf535s"
 CLIENT_NS=("qf535c1" "qf535c2")
@@ -354,42 +360,56 @@ run_fairness() {
 }
 
 run_loss_trial() {
-  local phase="$1"
-  local trial="$2"
+  local fec_mode="$1"
+  local phase="$2"
+  local trial="$3"
   local port=$((55400 + trial))
   local server_pid
   if [[ "$phase" == "loss" ]]; then
     port=$((port + 10))
   fi
-  start_udp_receiver "$port" 10 8 "$ARTIFACT_DIR/udp-receiver-$phase-$trial.json"
+  start_udp_receiver "$port" 10 8 "$ARTIFACT_DIR/udp-receiver-$fec_mode-$phase-$trial.json"
   server_pid="$UDP_RECEIVER_PID"
   sleep 0.3
   run_udp_sender "${CLIENT_NS[0]}" "${CLIENT_TUN_IP[0]}" "$port" 3000000 8 \
-    "$ARTIFACT_DIR/udp-sender-$phase-$trial.json" || fail "$phase trial $trial sender failed"
-  wait "$server_pid" || fail "$phase trial $trial receiver failed"
+    "$ARTIFACT_DIR/udp-sender-$fec_mode-$phase-$trial.json" || fail "$fec_mode $phase trial $trial sender failed"
+  wait "$server_pid" || fail "$fec_mode $phase trial $trial receiver failed"
 }
 
 run_loss_comparison() {
+  local fec_mode="$1"
   local phase trial
+  local receiver_files=()
   for phase in baseline loss; do
     if [[ "$phase" == "baseline" ]]; then
       set_shared_bottleneck 5mbit
     else
-      set_shared_bottleneck 5mbit 5%
+      set_shared_bottleneck 5mbit "${LOSS_RATE_PERCENT}%"
     fi
-    for trial in 1 2 3; do
-      run_loss_trial "$phase" "$trial"
+    for ((trial = 1; trial <= LOSS_TRIALS; trial++)); do
+      run_loss_trial "$fec_mode" "$phase" "$trial"
+      receiver_files+=("$ARTIFACT_DIR/udp-receiver-$fec_mode-$phase-$trial.json")
     done
-    tc -s qdisc show dev "$SERVER_HOST_VETH" >"$ARTIFACT_DIR/qdisc-$phase.txt"
+    tc -s qdisc show dev "$SERVER_HOST_VETH" >"$ARTIFACT_DIR/qdisc-$fec_mode-$phase.txt"
   done
-  grep -q 'loss 5%' "$ARTIFACT_DIR/qdisc-loss.txt" || fail '5% netem loss was not active'
+  grep -q "loss ${LOSS_RATE_PERCENT}%" "$ARTIFACT_DIR/qdisc-$fec_mode-loss.txt" \
+    || fail "$fec_mode loss run did not activate ${LOSS_RATE_PERCENT}% netem loss"
 
   python3 -c \
-    'import json,pathlib,statistics,sys; results=[json.load(open(path,encoding="utf-8")) for path in sys.argv[2:]]; values=[result["bits_per_second"] for result in results]; groups=[values[:3],values[3:]]; assert all(value>0 for value in values), values; assert all(result["duplicates"]==0 for result in results), results; baseline=statistics.median(groups[0]); loss=statistics.median(groups[1]); ratio=loss/baseline; assert ratio>0.5, ratio; summary=f"CUBIC 5% loss: baseline={baseline/1e6:.3f} Mbit/s, loss={loss/1e6:.3f} Mbit/s, retained={ratio*100:.2f}%"; pathlib.Path(sys.argv[1]).write_text(summary+"\n",encoding="utf-8"); print(summary)' \
-    "$ARTIFACT_DIR/loss-summary.txt" \
-    "$ARTIFACT_DIR"/udp-receiver-baseline-{1,2,3}.json \
-    "$ARTIFACT_DIR"/udp-receiver-loss-{1,2,3}.json || \
-    fail 'CUBIC 5% random-loss throughput did not retain more than 50% of baseline'
+    'import json,pathlib,statistics,sys; summary_path=pathlib.Path(sys.argv[1]); fec_mode=sys.argv[2]; minimum=float(sys.argv[3]); trial_count=int(sys.argv[4]); results=[json.load(open(path,encoding="utf-8")) for path in sys.argv[5:]]; assert len(results)==2*trial_count, len(results); values=[result["bits_per_second"] for result in results]; groups=[values[:trial_count],values[trial_count:]]; assert all(value>0 for value in values), values; assert all(result["duplicates"]==0 for result in results), results; baseline=statistics.median(groups[0]); loss=statistics.median(groups[1]); ratio=loss/baseline; assert ratio>minimum, ratio; summary={"fec_mode":fec_mode,"trial_count":trial_count,"baseline_bits_per_second":baseline,"loss_bits_per_second":loss,"retained_ratio":ratio,"minimum_retained_ratio":minimum}; summary_path.write_text(json.dumps(summary,sort_keys=True)+"\n",encoding="utf-8"); print(f"CUBIC FEC {fec_mode}: baseline={baseline/1e6:.3f} Mbit/s, loss={loss/1e6:.3f} Mbit/s, retained={ratio*100:.2f}%")' \
+    "$ARTIFACT_DIR/loss-summary-$fec_mode.json" \
+    "$fec_mode" "$MIN_RETAINED_RATIO" "$LOSS_TRIALS" \
+    "${receiver_files[@]}" || \
+    fail "CUBIC FEC $fec_mode random-loss throughput did not retain more than $MIN_RETAINED_PERCENT% of baseline"
+}
+
+compare_fec_modes() {
+  python3 -c \
+    'import json,pathlib,sys; auto=json.load(open(sys.argv[2],encoding="utf-8")); off=json.load(open(sys.argv[3],encoding="utf-8")); assert auto["fec_mode"]=="auto", auto; assert off["fec_mode"]=="off", off; comparison={"auto":auto,"off":off,"auto_minus_off_loss_bits_per_second":auto["loss_bits_per_second"]-off["loss_bits_per_second"],"auto_minus_off_retained_percentage_points":(auto["retained_ratio"]-off["retained_ratio"])*100.0}; pathlib.Path(sys.argv[1]).write_text(json.dumps(comparison,sort_keys=True)+"\n",encoding="utf-8"); print("CUBIC FEC comparison: auto loss={auto_loss:.3f} Mbit/s, retained={auto_retained:.2f}%; off loss={off_loss:.3f} Mbit/s, retained={off_retained:.2f}%; auto-minus-off loss={delta_loss:.3f} Mbit/s, retained={delta_retained:.2f} pp".format(auto_loss=auto["loss_bits_per_second"]/1e6,auto_retained=auto["retained_ratio"]*100.0,off_loss=off["loss_bits_per_second"]/1e6,off_retained=off["retained_ratio"]*100.0,delta_loss=comparison["auto_minus_off_loss_bits_per_second"]/1e6,delta_retained=comparison["auto_minus_off_retained_percentage_points"]))' \
+    "$ARTIFACT_DIR/fec-comparison-summary.json" \
+    "$ARTIFACT_DIR/loss-summary-auto.json" \
+    "$ARTIFACT_DIR/loss-summary-off.json" || \
+    fail 'CUBIC FEC control comparison could not be recorded'
 }
 
 main() {
@@ -411,12 +431,19 @@ main() {
   run_fairness
   stop_stack
 
-  log 'phase 2: CUBIC clean baseline versus controlled 5% random loss'
-  start_stack loss auto cubic
-  run_loss_comparison
+  local fec_mode
+  for fec_mode in auto off; do
+    log "phase 2: CUBIC $fec_mode clean baseline versus controlled ${LOSS_RATE_PERCENT}% random loss"
+    start_stack "loss-$fec_mode" "$fec_mode" cubic
+    run_loss_comparison "$fec_mode"
+    stop_stack
+  done
+  compare_fec_modes
 
   cat "$ARTIFACT_DIR/fairness-summary.txt"
-  cat "$ARTIFACT_DIR/loss-summary.txt"
+  cat "$ARTIFACT_DIR/loss-summary-auto.json"
+  cat "$ARTIFACT_DIR/loss-summary-off.json"
+  cat "$ARTIFACT_DIR/fec-comparison-summary.json"
   log "PASS: complete evidence retained in $ARTIFACT_DIR"
 }
 
