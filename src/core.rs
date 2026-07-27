@@ -171,12 +171,7 @@ impl OutgoingFecPacket {
             return self.packet.to_raw(buf);
         };
         let symbol = self.packet.payload_slice().ok_or_else(|| "No data available".to_string())?;
-        let payload = if meta.systematic {
-            wire::source_symbol_payload(symbol).map_err(|error| error.to_string())?
-        } else {
-            symbol
-        };
-        wire::write_packet(meta, payload, buf).map_err(|error| error.to_string())
+        wire::write_packet(meta, symbol, buf).map_err(|error| error.to_string())
     }
 
     fn telemetry_shape(&self) -> (bool, usize) {
@@ -2399,6 +2394,41 @@ mod tests {
         assert_eq!(written, wire::HEADER_LEN + payload.len());
         assert_eq!(decoded.meta, meta);
         assert_eq!(decoded.payload, payload);
+    }
+
+    #[test]
+    fn outgoing_systematic_packet_preserves_protected_quic_datagram() {
+        let quic_payload = [0x40, 0x11, 0x22, 0x33];
+        let mut protected_payload =
+            Vec::with_capacity(wire::SOURCE_LENGTH_LEN + quic_payload.len());
+        protected_payload.extend_from_slice(&(quic_payload.len() as u16).to_be_bytes());
+        protected_payload.extend_from_slice(&quic_payload);
+        let meta = WirePacketMeta {
+            profile: WireProfile {
+                epoch: 1,
+                codec: wire::WireCodec::Gf8,
+                source_count: 4,
+                total_count: 7,
+                interleave_depth: 1,
+            },
+            window: 0,
+            sequence: 0,
+            repair_index: wire::SYSTEMATIC_REPAIR_INDEX,
+            block_index: 0,
+            systematic: true,
+        };
+        let outgoing = OutgoingFecPacket {
+            packet: fec_packet(0, &protected_payload, None),
+            wire_meta: Some(meta),
+            congestion_controlled: true,
+        };
+        let mut wire_datagram = [0u8; 128];
+
+        let written = outgoing.write_to(&mut wire_datagram).expect("FEC packet must serialize");
+        let decoded = wire::parse_packet(&wire_datagram[..written]).expect("FEC packet must parse");
+
+        assert_eq!(decoded.meta, meta);
+        assert_eq!(decoded.payload, protected_payload);
     }
 
     #[test]
