@@ -523,7 +523,7 @@ test_rtt_variation() {
         tunnel_loss=${result%%:*}
         measured_rtt=${result##*:}
 
-        # With 5% loss + RTT, tunnel loss should be <20% (FEC helps)
+        # With 5% loss plus RTT, this liveness scenario requires tunnel loss <=20%.
         if [ "$tunnel_loss" -le 20 ]; then
             echo "${rtt}ms | ${tunnel_loss}% | ${measured_rtt} | PASS"
             PASS=$((PASS + 1))
