@@ -634,14 +634,14 @@ test_adversity_recovery() {
 
     # Phase 3: Remove loss (clean again)
     echo "Phase 3: Remove loss (clean again)..."
-    sleep 3  # Wait for de-escalation
+    sleep 3  # Allow the clean-link recovery observation to begin.
     local result3
     result3=$(ping_through_tunnel)
     local loss3
     loss3=${result3%%:*}
     echo "  Tunnel loss: ${loss3}%"
 
-    # Acceptance: Phase 1 loss <5%, Phase 3 loss <10% (recovery after de-escalation)
+    # Acceptance: Phase 1 loss <5%, Phase 3 loss <10% for clean-link recovery liveness.
     if [ "$loss1" -le 5 ] && [ "$loss3" -le 10 ]; then
         echo "PASS: clean=${loss1}%, loss=${loss2}%, recovered=${loss3}%"
         PASS=$((PASS + 1))
