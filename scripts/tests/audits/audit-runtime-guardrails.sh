@@ -433,9 +433,21 @@ elif [[ "$(rg -c --no-messages '^[[:space:]]*IPERF_SERVER_PID=\$!$' \
     scripts/tests/tun-e2e-fec-netns.sh >/dev/null; then
   fail_critical "Specialized FEC netns harness does not own its iperf3 server PID"
   append_item "specialized_tun_e2e_owned_cleanup" "fail" "iperf3 server PID ownership missing"
+elif ! rg -F -- 'QF_E2E_BINARY:-$PROJECT_ROOT/target/release/quicfuscate' \
+    scripts/tests/tun-e2e-fec-netns.sh >/dev/null \
+  || ! rg -F -- '-J > "$iperf_json"' scripts/tests/tun-e2e-fec-netns.sh >/dev/null \
+  || ! rg -F -- 'receiver=data["end"]["sum_received"]' \
+    scripts/tests/tun-e2e-fec-netns.sh >/dev/null \
+  || ! rg -F -- 'all(item["bytes"] > 0 and item["bits_per_second"] > 0 for item in intervals)' \
+    scripts/tests/tun-e2e-fec-netns.sh >/dev/null \
+  || rg -F -- 'iperf_output=$(ip netns exec' scripts/tests/tun-e2e-fec-netns.sh >/dev/null \
+  || rg -F -- 'SKIP:' scripts/tests/tun-e2e-fec-netns.sh >/dev/null; then
+  fail_critical "Specialized FEC netns throughput gate can silently accept sender-only or skipped results"
+  append_item "specialized_tun_e2e_receiver_throughput" "fail" "receiver JSON proof, required-tool failure, or exact-artifact override missing"
 else
   pass "Specialized TUN/FEC E2E harnesses own exact processes, namespaces, qdiscs, and runtime artifacts"
   append_item "specialized_tun_e2e_owned_cleanup" "ok" "four harnesses use exact child ownership, isolated runtime paths, owned server routes, and fail-closed resource preflights"
+  append_item "specialized_tun_e2e_receiver_throughput" "ok" "uniform FEC iperf3 uses bounded JSON output and positive receiver interval proof"
 fi
 
 SPECIALIZED_TUN_E2E_REGRESSION="scripts/tests/test-specialized-tun-e2e-ownership.sh"

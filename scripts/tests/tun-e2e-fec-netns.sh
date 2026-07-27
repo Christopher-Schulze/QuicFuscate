@@ -5,20 +5,22 @@
 # tunnel via MASQUE CONNECT-UDP. tc-netem injects controlled packet loss on
 # the veth interface to test FEC recovery end-to-end.
 #
-# Acceptance criteria (TODO-423):
-#   - 0% loss: 0% ping loss through tunnel
-#   - 5% loss: <2% ping loss after FEC recovery
-#   - 10% loss: <5% ping loss after FEC recovery
-#   - 25% loss: <15% ping loss after FEC recovery
-#   - FEC mode telemetry escalates correctly with loss level
-#   - No panics, no crashes
+# Executable acceptance (TODO-423):
+#   - 0% loss: 0% ping loss through the tunnel
+#   - 5% loss: at most 15% tunnel ping loss
+#   - 10% loss: at most 20% tunnel ping loss
+#   - 25% loss: at most 40% tunnel ping loss
+#   - iperf3 receiver bytes and every receiver interval are positive at 0% and
+#     10% loss
+#   - No panics or crashes
 #
-# Requirements: root, Linux, iproute2, tc-netem, openssl, python3, nc.
+# Requirements: root, Linux, iproute2, tc-netem, coreutils timeout, openssl,
+# python3, nc, iperf3.
 # Run on the target server (e.g. broderick).
 set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
-B="$PROJECT_ROOT/target/release/quicfuscate"
+B="${QF_E2E_BINARY:-$PROJECT_ROOT/target/release/quicfuscate}"
 CA="$PROJECT_ROOT/config/local/ca.crt"
 CA_KEY="$PROJECT_ROOT/config/local/ca.key"
 
@@ -31,7 +33,6 @@ LOCK_TIMEOUT="${QF_E2E_LOCK_TIMEOUT:-300}"
 
 PASS=0
 FAIL=0
-SKIP=0
 SERVER_PID=""
 CLIENT_PID=""
 IPERF_SERVER_PID=""
@@ -229,6 +230,10 @@ fi
 [ -x "$B" ] || fatal "release artifact is not executable: $B"
 [ -r "$CA" ] || fatal "CA certificate is not readable: $CA"
 [ -r "$CA_KEY" ] || fatal "CA key is not readable: $CA_KEY"
+for required_command in iperf3 timeout; do
+    command -v "$required_command" >/dev/null 2>&1 \
+        || fatal "required command is not available: $required_command"
+done
 RUNTIME_DIR="$(mktemp -d /tmp/quicfuscate-fec-netns.XXXXXX)" || fatal "could not create runtime directory"
 CERT="$RUNTIME_DIR/server.crt"
 KEY="$RUNTIME_DIR/server.key"
@@ -427,14 +432,9 @@ run_loss_level() {
     remove_loss
 }
 
-# --- iperf3 bulk throughput test (if iperf3 available) ---
+# --- iperf3 bulk throughput test ---
 run_iperf_test() {
     local loss_pct="$1"
-
-    if ! command -v iperf3 >/dev/null 2>&1; then
-        echo "iperf3 not available, skipping bulk throughput test"
-        return
-    fi
 
     echo ""
     echo "=========================================="
@@ -449,8 +449,9 @@ run_iperf_test() {
     local qkey
     qkey=$(get_qkey)
     if [ -z "$qkey" ]; then
-        echo "SKIP: could not get qkey"
-        SKIP=$((SKIP + 1))
+        echo "FAIL: could not get qkey"
+        FAIL=$((FAIL + 1))
+        preserve_failure_if_requested
         return
     fi
     start_client "$qkey"
@@ -462,24 +463,43 @@ run_iperf_test() {
 
     apply_loss "$loss_pct"
 
-    # Run iperf3 client from ns-cli through TUN
-    local iperf_output
-    iperf_output=$(ip netns exec ns-cli iperf3 -c 10.0.1.1 -p 5201 -t 10 -b 1M 2>&1)
-    echo "$iperf_output" | tail -5
-
-    # Check for retransmits (FEC should reduce them)
-    local retransmits
-    retransmits=$(echo "$iperf_output" | grep -oP '\d+(?=\s+retransmits)' || echo "0")
-    local throughput
-    throughput=$(echo "$iperf_output" | grep -oP '[\d.]+(?=\s+Mbits/sec)' | tail -1 || echo "0")
-    echo "Throughput: ${throughput} Mbits/sec, Retransmits: ${retransmits}"
-
-    if [ -z "$throughput" ] || ! awk "BEGIN{exit !($throughput > 0)}" 2>/dev/null; then
-        echo "SKIP: ${loss_pct}% loss iperf3, no measurable throughput (TUN routing may not support TCP)"
-        SKIP=$((SKIP + 1))
+    # Run a bounded client and prove the receiver, not just sender-formatted
+    # output, received useful data continuously.
+    local iperf_json="$CURRENT_SCENARIO_DIR/iperf-client.json"
+    if ! ip netns exec ns-cli timeout 20 iperf3 -c 10.0.1.1 -p 5201 -t 10 -b 1M -J > "$iperf_json"; then
+        echo "FAIL: ${loss_pct}% loss iperf3 client did not terminate successfully"
+        FAIL=$((FAIL + 1))
+        stop_owned_process "$IPERF_SERVER_PID"
+        IPERF_SERVER_PID=""
+        preserve_failure_if_requested
         remove_loss
         return
     fi
+
+    if ! wait "$IPERF_SERVER_PID"; then
+        echo "FAIL: ${loss_pct}% loss iperf3 receiver did not terminate successfully"
+        FAIL=$((FAIL + 1))
+        IPERF_SERVER_PID=""
+        preserve_failure_if_requested
+        remove_loss
+        return
+    fi
+    IPERF_SERVER_PID=""
+
+    local measurement
+    if ! measurement=$(python3 -c \
+        'import json,sys; data=json.load(open(sys.argv[1], encoding="utf-8")); sender=data["end"]["sum_sent"]; receiver=data["end"]["sum_received"]; intervals=[sample["sum"] for sample in data["intervals"]]; assert sender["bytes"] > 0 and sender["bits_per_second"] > 0, sender; assert receiver["bytes"] > 0 and receiver["bits_per_second"] > 0, receiver; assert intervals and all(item["bytes"] > 0 and item["bits_per_second"] > 0 for item in intervals), intervals; print("{:.6f} {}".format(receiver["bits_per_second"] / 1_000_000, sender.get("retransmits", 0)))' \
+        "$iperf_json"); then
+        echo "FAIL: ${loss_pct}% loss iperf3 lacks positive receiver throughput in every interval"
+        FAIL=$((FAIL + 1))
+        preserve_failure_if_requested
+        remove_loss
+        return
+    fi
+
+    local throughput retransmits
+    read -r throughput retransmits <<< "$measurement"
+    echo "Receiver throughput: ${throughput} Mbits/sec, sender retransmits: ${retransmits}"
 
     if [ "$loss_pct" = "0" ]; then
         if [ "$retransmits" = "0" ]; then
@@ -507,7 +527,7 @@ for loss in $LOSS_LEVELS; do
     run_loss_level "$loss"
 done
 
-# Bulk throughput tests (iperf3, if available)
+# Bulk throughput tests
 run_iperf_test 0
 run_iperf_test 10
 
@@ -515,7 +535,7 @@ cleanup_owned_resources || fatal "could not clean final owned resources"
 
 echo ""
 echo "=========================================="
-echo "  Results: ${PASS} passed, ${FAIL} failed, ${SKIP} skipped"
+echo "  Results: ${PASS} passed, ${FAIL} failed"
 echo "=========================================="
 
 if [ "$FAIL" -gt 0 ]; then
