@@ -171,14 +171,19 @@ impl OutgoingFecPacket {
             return self.packet.to_raw(buf);
         };
         let symbol = self.packet.payload_slice().ok_or_else(|| "No data available".to_string())?;
-        wire::write_packet(meta, symbol, buf).map_err(|error| error.to_string())
+        let payload = if meta.systematic {
+            wire::source_symbol_payload(symbol).map_err(|error| error.to_string())?
+        } else {
+            symbol
+        };
+        wire::write_packet(meta, payload, buf).map_err(|error| error.to_string())
     }
 
     fn telemetry_shape(&self) -> (bool, usize) {
         match self.wire_meta {
             None => (true, self.packet.data_len),
             Some(meta) if meta.systematic => {
-                (true, self.packet.data_len.saturating_sub(wire::SOURCE_LENGTH_LEN))
+                (true, self.packet.data_len.saturating_sub(2 * wire::SOURCE_LENGTH_LEN))
             }
             Some(_) => (false, 0),
         }
@@ -1441,11 +1446,11 @@ impl QuicFuscateConnection {
         // Otherwise, generate a new QUIC packet using a pooled buffer.
         let mut send_buffer = self.optimization_manager.alloc_block();
         let send_result = if wire_profile.is_some() {
-            if send_buffer.len() <= wire::SOURCE_LENGTH_LEN {
+            if send_buffer.len() <= 2 * wire::SOURCE_LENGTH_LEN {
                 return Err(crate::error::ConnectionError::BufferTooShort);
             }
             self.conn.send_with_datagram_overhead(
-                &mut send_buffer[wire::SOURCE_LENGTH_LEN..],
+                &mut send_buffer[2 * wire::SOURCE_LENGTH_LEN..],
                 wire::MAX_DATAGRAM_OVERHEAD,
             )
         } else {
@@ -1485,7 +1490,7 @@ impl QuicFuscateConnection {
         // Obfuscate payload if enabled (includes timing/flow shaping)
         // NON-BLOCKING: If delay needed, we schedule it and yield zero bytes.
         let quic_range = if wire_profile.is_some() {
-            wire::SOURCE_LENGTH_LEN..wire::SOURCE_LENGTH_LEN + write
+            2 * wire::SOURCE_LENGTH_LEN..2 * wire::SOURCE_LENGTH_LEN + write
         } else {
             0..write
         };
@@ -1493,10 +1498,15 @@ impl QuicFuscateConnection {
             self.stealth_manager.process_outgoing_packet(&mut send_buffer[quic_range.clone()]);
 
         let (packet_id, fec_data_len) = if wire_profile.is_some() {
-            let source_len =
+            let quic_len =
                 u16::try_from(write).map_err(|_| crate::error::ConnectionError::BufferTooShort)?;
+            let source_len = quic_len
+                .checked_add(wire::SOURCE_LENGTH_LEN as u16)
+                .ok_or(crate::error::ConnectionError::BufferTooShort)?;
             send_buffer[..wire::SOURCE_LENGTH_LEN].copy_from_slice(&source_len.to_be_bytes());
-            (self.fec_tx_sequence, write + wire::SOURCE_LENGTH_LEN)
+            send_buffer[wire::SOURCE_LENGTH_LEN..2 * wire::SOURCE_LENGTH_LEN]
+                .copy_from_slice(&quic_len.to_be_bytes());
+            (self.fec_tx_sequence, write + 2 * wire::SOURCE_LENGTH_LEN)
         } else {
             (self.packet_id_counter, write)
         };
@@ -2403,6 +2413,9 @@ mod tests {
             Vec::with_capacity(wire::SOURCE_LENGTH_LEN + quic_payload.len());
         protected_payload.extend_from_slice(&(quic_payload.len() as u16).to_be_bytes());
         protected_payload.extend_from_slice(&quic_payload);
+        let mut source_symbol = Vec::with_capacity(wire::SOURCE_LENGTH_LEN + protected_payload.len());
+        source_symbol.extend_from_slice(&(protected_payload.len() as u16).to_be_bytes());
+        source_symbol.extend_from_slice(&protected_payload);
         let meta = WirePacketMeta {
             profile: WireProfile {
                 epoch: 1,
@@ -2418,7 +2431,7 @@ mod tests {
             systematic: true,
         };
         let outgoing = OutgoingFecPacket {
-            packet: fec_packet(0, &protected_payload, None),
+            packet: fec_packet(0, &source_symbol, None),
             wire_meta: Some(meta),
             congestion_controlled: true,
         };

@@ -708,10 +708,9 @@ mod tests {
     use super::*;
 
     fn source_packet(id: u64, payload: &[u8], pool: &Arc<MemoryPool>) -> FecPacket {
-        let mut symbol = pool.alloc();
-        let symbol_len = write_source_symbol(payload, &mut symbol).expect("source symbol");
-        let mut packet =
-            FecPacket::new(id, Some(symbol), symbol_len, true, None, 0, Arc::clone(pool));
+        let mut data = pool.alloc();
+        let data_len = write_source_symbol(payload, &mut data).expect("source symbol");
+        let mut packet = FecPacket::new(id, Some(data), data_len, true, None, 0, Arc::clone(pool));
         packet.seq = id;
         packet
     }
@@ -1220,12 +1219,7 @@ mod tests {
             .and_then(FecPacket::payload_slice)
             .expect("missing source must decode");
 
-        assert_eq!(
-            source_symbol_payload(recovered),
-            Ok(sources[1].as_slice()),
-            "recovered prefix bytes: {:?}",
-            &recovered[..4]
-        );
+        assert_eq!(source_symbol_payload(recovered), Ok(sources[1].as_slice()));
     }
 
     #[test]
