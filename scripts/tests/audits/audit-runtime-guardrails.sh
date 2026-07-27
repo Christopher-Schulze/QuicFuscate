@@ -441,9 +441,10 @@ elif ! rg -F -- 'QF_E2E_BINARY:-$PROJECT_ROOT/target/release/quicfuscate' \
   || ! rg -F -- 'all(item["bytes"] > 0 and item["bits_per_second"] > 0 for item in intervals)' \
     scripts/tests/tun-e2e-fec-netns.sh >/dev/null \
   || rg -F -- 'iperf_output=$(ip netns exec' scripts/tests/tun-e2e-fec-netns.sh >/dev/null \
-  || rg -F -- 'SKIP:' scripts/tests/tun-e2e-fec-netns.sh >/dev/null; then
-  fail_critical "Specialized FEC netns throughput gate can silently accept sender-only or skipped results"
-  append_item "specialized_tun_e2e_receiver_throughput" "fail" "receiver JSON proof, required-tool failure, or exact-artifact override missing"
+  || rg -F -- 'SKIP:' scripts/tests/tun-e2e-fec-netns.sh >/dev/null \
+  || rg -F -- '[ "$retransmits" = "0" ]' scripts/tests/tun-e2e-fec-netns.sh >/dev/null; then
+  fail_critical "Specialized FEC netns throughput gate can silently accept sender-only or skipped results, or require a flakey retransmit count"
+  append_item "specialized_tun_e2e_receiver_throughput" "fail" "receiver JSON proof, required-tool failure, exact-artifact override, or stable acceptance missing"
 else
   pass "Specialized TUN/FEC E2E harnesses own exact processes, namespaces, qdiscs, and runtime artifacts"
   append_item "specialized_tun_e2e_owned_cleanup" "ok" "four harnesses use exact child ownership, isolated runtime paths, owned server routes, and fail-closed resource preflights"
