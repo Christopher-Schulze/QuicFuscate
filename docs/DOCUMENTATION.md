@@ -1358,7 +1358,7 @@ Mode Selection & Hysteresis
 - Ingress
   - Core recognizes the two-byte magic, validates the complete header before decoder-window allocation, and dispatches by transmitted epoch/profile rather than local receive-side loss estimates.
   - Receiver state retains at most four windows, bounds source blocks to 2,048 symbols and total codewords to 12,288 symbols, rejects profile mutation within a retained epoch, and suppresses duplicate repairs.
-  - Only recovered systematic payloads have their protected source length removed and enter QUIC decryption. Repairs can never enter header protection or AEAD processing.
+  - Every systematic source and recovered source validates then removes its exact protected QUIC length at the FEC-to-QUIC boundary before decryption. Repairs can never enter header protection or AEAD processing.
   - Malformed, unsupported, or resource-exhausting FEC envelopes are dropped without terminating the authenticated QUIC connection. Recovered QUIC datagrams still pass normal header protection and AEAD authentication.
   - `FecMode::Zero` remains a raw ownership-preserving passthrough, allowing the QUIC core to decrypt and remove header protection in place without an extra copy.
 

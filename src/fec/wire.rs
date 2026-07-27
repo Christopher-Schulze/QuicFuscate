@@ -290,6 +290,7 @@ pub enum WireError {
     InvalidSystematicMetadata,
     InvalidRepairMetadata,
     InvalidSourceSymbolLength,
+    InvalidSourceDatagramLength,
     SourceOutsideWindow,
     RepairOutsideWindow,
     EpochProfileMismatch,
@@ -410,6 +411,19 @@ pub fn source_symbol_payload(symbol: &[u8]) -> Result<&[u8], WireError> {
         return Err(WireError::InvalidSourceSymbolLength);
     }
     Ok(&symbol[SOURCE_LENGTH_LEN..end])
+}
+
+fn source_datagram_payload(source: &[u8]) -> Result<&[u8], WireError> {
+    if source.len() < SOURCE_LENGTH_LEN {
+        return Err(WireError::InvalidSourceDatagramLength);
+    }
+    let payload_len = u16::from_be_bytes([source[0], source[1]]) as usize;
+    let end =
+        SOURCE_LENGTH_LEN.checked_add(payload_len).ok_or(WireError::InvalidSourceDatagramLength)?;
+    if end != source.len() {
+        return Err(WireError::InvalidSourceDatagramLength);
+    }
+    Ok(&source[SOURCE_LENGTH_LEN..])
 }
 
 struct ReceiveWindow {
@@ -541,11 +555,12 @@ impl ReceiveWindow {
         } else {
             packet.id
         };
+        let symbol = packet.payload_slice().ok_or(WireError::InvalidSourceSymbolLength)?;
+        let protected_payload = source_symbol_payload(symbol)?;
+        let payload = source_datagram_payload(protected_payload)?;
         if !self.delivered.insert(global_id) {
             return Ok(None);
         }
-        let symbol = packet.payload_slice().ok_or(WireError::InvalidSourceSymbolLength)?;
-        let payload = source_symbol_payload(symbol)?;
         let payload_len = payload.len();
         let mut recovered = FecPacket::from_block(global_id, payload, Arc::clone(&self.mem_pool));
         recovered.seq = global_id;
@@ -575,9 +590,11 @@ impl ReceiveWindow {
         payload: &[u8],
         output: &mut Vec<FecPacket>,
     ) -> Result<WireReceiveReport, WireError> {
+        let systematic_payload =
+            if meta.systematic { Some(source_datagram_payload(payload)?) } else { None };
         let mut report = WireReceiveReport {
             systematic: meta.systematic,
-            source_payload_bytes: if meta.systematic { payload.len() } else { 0 },
+            source_payload_bytes: systematic_payload.map_or(0, <[u8]>::len),
             wire_bytes: HEADER_LEN + payload.len(),
             ..WireReceiveReport::default()
         };
@@ -606,6 +623,7 @@ impl ReceiveWindow {
 
         self.decoder.take_packet(packet);
         if systematic && self.delivered.insert(meta.sequence) {
+            let payload = systematic_payload.ok_or(WireError::InvalidSourceDatagramLength)?;
             let mut original =
                 FecPacket::from_block(meta.sequence, payload, Arc::clone(&self.mem_pool));
             original.seq = meta.sequence;
@@ -696,6 +714,14 @@ mod tests {
             FecPacket::new(id, Some(symbol), symbol_len, true, None, 0, Arc::clone(pool));
         packet.seq = id;
         packet
+    }
+
+    fn protected_datagram(payload: &[u8]) -> Vec<u8> {
+        let payload_len = u16::try_from(payload.len()).expect("test datagram length");
+        let mut protected = Vec::with_capacity(SOURCE_LENGTH_LEN + payload.len());
+        protected.extend_from_slice(&payload_len.to_be_bytes());
+        protected.extend_from_slice(payload);
+        protected
     }
 
     fn profile(codec: WireCodec) -> WireProfile {
@@ -872,9 +898,10 @@ mod tests {
     fn receiver_recovers_exact_variable_length_source_without_wire_coefficients() {
         let pool = crate::optimize::global_pool();
         let sources = [vec![0x10; 31], vec![0x20; 47], vec![0x30; 63], vec![0x40; 79]];
+        let protected_sources = sources.each_ref().map(|source| protected_datagram(source));
         let mut encoder = super::super::Encoder8::new(4, 6);
-        for (id, payload) in sources.iter().enumerate() {
-            encoder.take_packet(source_packet(id as u64, payload, &pool));
+        for (id, _) in sources.iter().enumerate() {
+            encoder.take_packet(source_packet(id as u64, &protected_sources[id], &pool));
         }
         let repair = encoder.generate_repair_packet(0, &pool).expect("repair packet must encode");
         let profile = WireProfile {
@@ -898,7 +925,8 @@ mod tests {
                 block_index: 0,
                 systematic: true,
             };
-            let written = write_packet(meta, &sources[source_id], &mut wire).expect("source wire");
+            let written =
+                write_packet(meta, &protected_sources[source_id], &mut wire).expect("source wire");
             receiver.receive(&wire[..written], &mut decoded).expect("source receive");
         }
 
@@ -947,8 +975,9 @@ mod tests {
             systematic: true,
         };
         let payload = [0x40, 0x11, 0x22, 0x33];
+        let protected_payload = protected_datagram(&payload);
         let mut wire = [0u8; 128];
-        let written = write_packet(meta, &payload, &mut wire).expect("source wire");
+        let written = write_packet(meta, &protected_payload, &mut wire).expect("source wire");
         let mut decoded = Vec::new();
 
         let first = receiver.receive(&wire[..written], &mut decoded).expect("first source");
@@ -964,6 +993,7 @@ mod tests {
             }
         );
         assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].payload_slice(), Some(&payload[..]));
 
         let duplicate = receiver.receive(&wire[..written], &mut decoded).expect("duplicate source");
         assert_eq!(duplicate.decoded_packets, 0);
@@ -972,12 +1002,44 @@ mod tests {
     }
 
     #[test]
+    fn receiver_rejects_systematic_datagram_with_invalid_inner_length() {
+        let pool = crate::optimize::global_pool();
+        let profile = WireProfile {
+            epoch: 31,
+            codec: WireCodec::Gf8,
+            source_count: 4,
+            total_count: 6,
+            interleave_depth: 1,
+        };
+        let meta = WirePacketMeta {
+            profile,
+            window: 0,
+            sequence: 0,
+            repair_index: SYSTEMATIC_REPAIR_INDEX,
+            block_index: 0,
+            systematic: true,
+        };
+        let mut wire = [0u8; 128];
+        let written =
+            write_packet(meta, &[0, 5, 0x40], &mut wire).expect("source wire must encode");
+        let mut receiver = WireFecReceiver::new(pool);
+        let mut decoded = Vec::new();
+
+        assert_eq!(
+            receiver.receive(&wire[..written], &mut decoded),
+            Err(WireError::InvalidSourceDatagramLength)
+        );
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
     fn gf4_receiver_recovers_exact_source_from_compact_repair_metadata() {
         let pool = crate::optimize::global_pool();
         let sources = [vec![0x11; 31], vec![0x22; 47], vec![0x33; 63], vec![0x44; 79]];
+        let protected_sources = sources.each_ref().map(|source| protected_datagram(source));
         let mut encoder = super::super::Encoder4::new(4, 6);
-        for (id, payload) in sources.iter().enumerate() {
-            encoder.take_packet(source_packet(id as u64, payload, &pool));
+        for (id, _) in sources.iter().enumerate() {
+            encoder.take_packet(source_packet(id as u64, &protected_sources[id], &pool));
         }
         let repair = encoder.generate_repair_packet(0, &pool).expect("GF4 repair");
         let profile = WireProfile {
@@ -1000,7 +1062,8 @@ mod tests {
                 block_index: 0,
                 systematic: true,
             };
-            let written = write_packet(meta, &sources[source_id], &mut wire).expect("source wire");
+            let written =
+                write_packet(meta, &protected_sources[source_id], &mut wire).expect("source wire");
             receiver.receive(&wire[..written], &mut decoded).expect("source receive");
         }
 
@@ -1029,9 +1092,10 @@ mod tests {
     fn streaming_repair_maps_partial_window_coefficients_to_exact_source_ids() {
         let pool = crate::optimize::global_pool();
         let sources = [vec![0x10; 31], vec![0x20; 47]];
+        let protected_sources = sources.each_ref().map(|source| protected_datagram(source));
         let mut encoder = super::super::Encoder8::new(4, 8);
-        for (id, payload) in sources.iter().enumerate() {
-            encoder.take_packet(source_packet(id as u64, payload, &pool));
+        for (id, _) in sources.iter().enumerate() {
+            encoder.take_packet(source_packet(id as u64, &protected_sources[id], &pool));
         }
         let repair = encoder.generate_repair_packet(0, &pool).expect("streaming repair");
         let profile = WireProfile {
@@ -1053,7 +1117,8 @@ mod tests {
             block_index: 0,
             systematic: true,
         };
-        let written = write_packet(source_meta, &sources[0], &mut wire).expect("source wire");
+        let written =
+            write_packet(source_meta, &protected_sources[0], &mut wire).expect("source wire");
         receiver.receive(&wire[..written], &mut decoded).expect("source receive");
 
         let repair_meta = WirePacketMeta {
@@ -1081,9 +1146,10 @@ mod tests {
     fn gf16_recovery_preserves_odd_final_source_byte() {
         let pool = crate::optimize::global_pool();
         let sources = [vec![0x51; 30], vec![0x62; 47], vec![0x73; 62], vec![0x84; 78]];
+        let protected_sources = sources.each_ref().map(|source| protected_datagram(source));
         let mut encoder = super::super::Encoder16::new(4, 6);
-        for (id, payload) in sources.iter().enumerate() {
-            encoder.take_packet(source_packet(id as u64, payload, &pool));
+        for (id, _) in sources.iter().enumerate() {
+            encoder.take_packet(source_packet(id as u64, &protected_sources[id], &pool));
         }
         let repair = encoder.generate_repair_packet(0, &pool).expect("GF16 repair");
         let profile = WireProfile {
@@ -1106,7 +1172,8 @@ mod tests {
                 block_index: 0,
                 systematic: true,
             };
-            let written = write_packet(meta, &sources[source_id], &mut wire).expect("source wire");
+            let written =
+                write_packet(meta, &protected_sources[source_id], &mut wire).expect("source wire");
             receiver.receive(&wire[..written], &mut decoded).expect("source receive");
         }
 
@@ -1184,7 +1251,8 @@ mod tests {
                 block_index: 0,
                 systematic: true,
             };
-            let written = write_packet(meta, &[window as u8], &mut wire).expect("source wire");
+            let payload = protected_datagram(&[window as u8]);
+            let written = write_packet(meta, &payload, &mut wire).expect("source wire");
             receiver.receive(&wire[..written], &mut decoded).expect("source receive");
         }
 
@@ -1213,11 +1281,15 @@ mod tests {
             block_index: 0,
             systematic: true,
         };
-        let written = write_packet(first_meta, &[1], &mut wire).expect("first source wire");
+        let first_payload = protected_datagram(&[1]);
+        let written =
+            write_packet(first_meta, &first_payload, &mut wire).expect("first source wire");
         receiver.receive(&wire[..written], &mut decoded).expect("first source receive");
 
         let mutated_meta = WirePacketMeta { profile: mutated_profile, ..first_meta };
-        let written = write_packet(mutated_meta, &[2], &mut wire).expect("mutated source wire");
+        let mutated_payload = protected_datagram(&[2]);
+        let written =
+            write_packet(mutated_meta, &mutated_payload, &mut wire).expect("mutated source wire");
 
         assert_eq!(
             receiver.receive(&wire[..written], &mut decoded),
@@ -1229,9 +1301,10 @@ mod tests {
     fn fountain_rescue_recovers_multiple_losses_from_seed_only() {
         let pool = crate::optimize::global_pool();
         let sources = [vec![0x11; 37], vec![0x22; 53], vec![0x33; 71], vec![0x44; 89]];
+        let protected_sources = sources.each_ref().map(|source| protected_datagram(source));
         let mut encoder = super::super::internal::EncoderVariant::new(FecMode::Fountain, 4, 20);
-        for (id, payload) in sources.iter().enumerate() {
-            encoder.take_packet(source_packet(id as u64, payload, &pool));
+        for (id, _) in sources.iter().enumerate() {
+            encoder.take_packet(source_packet(id as u64, &protected_sources[id], &pool));
         }
         let profile = WireProfile {
             epoch: 12,
@@ -1254,7 +1327,8 @@ mod tests {
                 block_index: 0,
                 systematic: true,
             };
-            let written = write_packet(meta, &sources[source_id], &mut wire).expect("source wire");
+            let written =
+                write_packet(meta, &protected_sources[source_id], &mut wire).expect("source wire");
             receiver.receive(&wire[..written], &mut decoded).expect("source receive");
         }
 
@@ -1264,7 +1338,8 @@ mod tests {
                 .expect("fountain repair");
             let payload = repair.payload_slice().expect("repair payload");
             assert!(
-                payload.len() <= sources.iter().map(Vec::len).max().unwrap() + SOURCE_LENGTH_LEN
+                payload.len()
+                    <= protected_sources.iter().map(Vec::len).max().unwrap() + SOURCE_LENGTH_LEN
             );
             let meta = WirePacketMeta {
                 profile,
