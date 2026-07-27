@@ -1260,7 +1260,7 @@ Runtime adaptation is applied continuously in the connection loop:
 
 - `transport::Connection::take_fec_control_delta()` provides transport-level control deltas each tick.
 - The connection updates `AdaptiveFec` (`set_stream_every`, `force_streaming_mode`, `set_redundancy_ppm`) before the next encode path.
-- Transport feedback feeds `AdaptiveFec::report_transport_loss()` with independently owned send, classified-ACK, and declared-loss packet counts plus the congestion controller's smoothed loss ratio. Only classified ACKs can prove a clean link.
+- Transport feedback feeds `AdaptiveFec::report_transport_loss()` only when a classified ACK or declared loss is present. The feedback retains independently owned send, ACK, and loss counts plus the congestion controller's smoothed loss ratio, but send-only callbacks are not controller observations and cannot replay stale loss into Auto FEC. Only classified ACKs can prove a clean link.
 
 This is the convergence point where transport feedback, StealthBrain hints, and FEC policy remain synchronized during live traffic.
 
@@ -3855,7 +3855,7 @@ Telemetry collection/export is runtime-surface driven (`--telemetry` / metrics e
 - ACK delay buckets model browser-like ACK timing distributions and can be used to validate profile behavior under different network conditions.
 - Choke counters (`choked_bytes`, `choke_sleep_ms`) quantify pacing pressure and allow correlation with throughput/latency trade-offs.
 - FEC telemetry is an explicit process aggregate. Active mode is a nine-bucket connection distribution, effective window is a source-packet sum across active connections, and observed loss is derived from cumulative lost/observed controller samples.
-- Clean-link proof is connection-local controller state rather than a process metric. `Connection` counts only packets removed by transport ACK classification; `QuicFuscateConnection` transfers and resets that typed feedback with the independent send/loss counters, and `AdaptiveFec` consumes it without exporting a misleading aggregate ACK gauge.
+- Clean-link proof is connection-local controller state rather than a process metric. `Connection` counts only packets removed by transport ACK classification; `QuicFuscateConnection` transfers and resets typed feedback with independent send/loss counters, but forwards it to `AdaptiveFec` only when it contains ACK or loss evidence, without exporting a misleading aggregate ACK gauge.
 - Source/repair send counters advance only after network-facing serialization into the connection output buffer succeeds; they measure datagrams emitted by the FEC layer for transmission, not UDP syscall completion. Receive and recovery counters advance only after `WireFecReceiver` accepts the datagram and reports its original versus reconstructed decoder output. Generated, queued, dropped, malformed, and duplicate symbols do not satisfy these metrics.
 - `AdaptiveFec::telemetry_snapshot()` and `QuicFuscateConnection::fec_telemetry_snapshot()` provide exact connection-local policy, committed mode/window, loss, transition, wire, decode, and recovery evidence. Packet collection is snapshotted from `--telemetry` before connection construction.
 - Compression and SIMD counters provide backend-selection and efficiency visibility without changing data-plane behavior.

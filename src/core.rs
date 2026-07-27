@@ -311,8 +311,6 @@ pub struct QuicFuscateConnection {
     /// Peer-initiated MASQUE CONNECT-UDP stream id (server side: the client opened
     /// the flow; we reuse its stream id for downlink datagram sends).
     masque_peer_stream_id: Option<u64>,
-    fec_last_report_sent: u64,
-    fec_last_report_lost: u64,
     #[cfg(feature = "orchestrator")]
     runtime_cpu_percent: u32,
     #[cfg(feature = "orchestrator")]
@@ -534,8 +532,6 @@ impl QuicFuscateConnection {
             masque_control_cb: None,
             masque_stream_id: None,
             masque_peer_stream_id: None,
-            fec_last_report_sent: 0,
-            fec_last_report_lost: 0,
             #[cfg(feature = "orchestrator")]
             runtime_cpu_percent: 0,
             #[cfg(feature = "orchestrator")]
@@ -2053,6 +2049,28 @@ impl QuicFuscateConnection {
         self.h3_conn.as_ref().map(|h| h.masque_flow_active()).unwrap_or(false)
     }
 
+    fn apply_fec_transport_feedback(
+        fec: &mut AdaptiveFec,
+        feedback: crate::transport::connection::FecCallbackFeedback,
+        transport_loss_rate: f32,
+    ) {
+        // A send callback only establishes that a packet entered recovery. It
+        // cannot establish loss or delivery, and replaying the congestion
+        // controller's current smoothed rate for each send turns stale loss
+        // into self-amplifying FEC pressure. ACK and loss callbacks are the
+        // only admissible controller evidence.
+        if feedback.acked_packets == 0 && feedback.lost_packets == 0 {
+            return;
+        }
+
+        fec.report_transport_loss(
+            feedback.sent_packets.min(usize::MAX as u64) as usize,
+            feedback.acked_packets.min(usize::MAX as u64) as usize,
+            feedback.lost_packets.min(usize::MAX as u64) as usize,
+            transport_loss_rate,
+        );
+    }
+
     /// Update internal state, e.g., FEC mode based on statistics.
     pub fn update_state(&mut self) {
         // Update stats
@@ -2129,35 +2147,12 @@ impl QuicFuscateConnection {
             self.fec.set_redundancy_ppm(ppm);
         }
 
-        // Drive AdaptiveFec from exact send, ACK, and loss ownership plus the congestion
-        // controller's smoothed signal. Only classified ACKs prove clean delivery; sends
-        // and delayed loss callbacks must never masquerade as clean or self-contained 1/1
-        // observations.
+        // Drive AdaptiveFec from classified ACK/loss evidence and the congestion
+        // controller's smoothed signal. Send callbacks alone do not classify
+        // delivery and must not replay a stale loss estimate into the controller.
         let feedback = self.conn.take_fec_callback_feedback();
         let transport_loss_rate = self.conn.recovery_loss_rate();
-        let sent_total = self.stats.packets_sent;
-        let lost_total = self.stats.packets_lost;
-        if feedback.sent_packets > 0 || feedback.acked_packets > 0 || feedback.lost_packets > 0 {
-            self.fec.report_transport_loss(
-                feedback.sent_packets.min(usize::MAX as u64) as usize,
-                feedback.acked_packets.min(usize::MAX as u64) as usize,
-                feedback.lost_packets.min(usize::MAX as u64) as usize,
-                transport_loss_rate,
-            );
-        } else {
-            let sent_delta = sent_total.saturating_sub(self.fec_last_report_sent);
-            let lost_delta = lost_total.saturating_sub(self.fec_last_report_lost);
-            if sent_delta > 0 || lost_delta > 0 {
-                self.fec.report_transport_loss(
-                    sent_delta.min(usize::MAX as u64) as usize,
-                    0,
-                    lost_delta.min(usize::MAX as u64) as usize,
-                    transport_loss_rate,
-                );
-            }
-        }
-        self.fec_last_report_sent = sent_total;
-        self.fec_last_report_lost = lost_total;
+        Self::apply_fec_transport_feedback(&mut self.fec, feedback, transport_loss_rate);
 
         // Feed RTT estimate to FEC controller for stream_every scaling.
         let rtt_ms = self.stats.rtt.max(0.0) as u32;
@@ -2255,6 +2250,26 @@ mod tests {
         assert_eq!(stats.congestion_lost, 0);
         assert_eq!(stats.congestion_score, 0);
         assert!(stats.congestion_samples.is_empty());
+    }
+
+    #[test]
+    fn send_only_feedback_does_not_replay_stale_loss_into_auto_fec() {
+        let mut fec = AdaptiveFec::new(FecConfig::product_default());
+        let send_only = crate::transport::connection::FecCallbackFeedback {
+            sent_packets: 1,
+            acked_packets: 0,
+            lost_packets: 0,
+        };
+
+        for _ in 0..64 {
+            QuicFuscateConnection::apply_fec_transport_feedback(&mut fec, send_only, 1.0);
+        }
+
+        assert_eq!(
+            fec.current_mode(),
+            crate::fec::FecMode::Zero,
+            "send callbacks alone must not turn a stale CC loss rate into FEC repair pressure"
+        );
     }
 
     #[test]
