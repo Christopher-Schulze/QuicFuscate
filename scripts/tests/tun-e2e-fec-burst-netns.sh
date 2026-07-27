@@ -6,10 +6,10 @@
 # to simulate burst loss.
 #
 # Executable acceptance (TODO-423):
-#   - Three 10%/25%-correlation trials: median <=5%, every sample <=10%
-#   - Three 20%/50%-correlation trials: median <=10%, every sample <=15%
-#   - TLS handshakes complete on both endpoints
-#   - No panics
+#   - BURST_SCENARIOS is the single source for executed loss/correlation
+#     profiles and their statistical bounds.
+#   - TLS handshakes complete on both endpoints.
+#   - No panics.
 #
 # Requirements: root, Linux, iproute2, tc-netem, openssl, python3, nc.
 set -u
@@ -22,6 +22,10 @@ CA_KEY="$PROJECT_ROOT/config/local/ca.key"
 PING_COUNT="${PING_COUNT:-100}"
 PING_INTERVAL="${PING_INTERVAL:-0.1}"
 BURST_REPETITIONS="${QF_BURST_REPETITIONS:-3}"
+BURST_SCENARIOS=(
+    "mild:10:25:5:10"
+    "heavy:20:50:10:15"
+)
 KEEP_ON_FAIL="${QF_E2E_KEEP_ON_FAIL:-0}"
 LOCK_FILE="${QF_E2E_LOCK_FILE:-/tmp/quicfuscate-tun-e2e.lock}"
 LOCK_TIMEOUT="${QF_E2E_LOCK_TIMEOUT:-300}"
@@ -409,9 +413,12 @@ run_burst_scenario() {
 
 # --- Main ---
 echo "=== FEC Burst Loss E2E Test Suite (TODO-423) ==="
+echo "Burst contract: ${BURST_SCENARIOS[*]} (label:loss:correlation:median:max-sample)"
 
-run_burst_scenario 10 25 "10% loss, 25% correlation (mild burst)" 5 10
-run_burst_scenario 20 50 "20% loss, 50% correlation (heavy burst)" 10 15
+for scenario in "${BURST_SCENARIOS[@]}"; do
+    IFS=':' read -r label loss_pct correlation median_limit sample_limit <<< "$scenario"
+    run_burst_scenario "$loss_pct" "$correlation" "$label burst" "$median_limit" "$sample_limit"
+done
 
 cleanup_owned_resources || fatal "could not clean final owned resources"
 

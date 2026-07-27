@@ -6,13 +6,11 @@
 # the veth interface to test FEC recovery end-to-end.
 #
 # Executable acceptance (TODO-423):
-#   - 0% loss: 0% ping loss through the tunnel
-#   - 5% loss: at most 15% tunnel ping loss
-#   - 10% loss: at most 20% tunnel ping loss
-#   - 25% loss: at most 40% tunnel ping loss
-#   - iperf3 receiver bytes and every receiver interval are positive at 0% and
-#     10% loss
-#   - No panics or crashes
+#   - UNIFORM_PING_SCENARIOS is the single source for executed netem loss and
+#     bounded tunnel-loss cases.
+#   - UNIFORM_IPERF_SCENARIOS is the single source for receiver-verified
+#     throughput cases.
+#   - No panics or crashes.
 #
 # Requirements: root, Linux, iproute2, tc-netem, coreutils timeout, openssl,
 # python3, nc, iperf3.
@@ -24,7 +22,13 @@ B="${QF_E2E_BINARY:-$PROJECT_ROOT/target/release/quicfuscate}"
 CA="$PROJECT_ROOT/config/local/ca.crt"
 CA_KEY="$PROJECT_ROOT/config/local/ca.key"
 
-LOSS_LEVELS="${LOSS_LEVELS:-0 5 10 25}"
+UNIFORM_PING_SCENARIOS=(
+    "0:0"
+    "5:15"
+    "10:20"
+    "25:40"
+)
+UNIFORM_IPERF_SCENARIOS=(0 10)
 PING_COUNT="${PING_COUNT:-100}"
 PING_INTERVAL="${PING_INTERVAL:-0.1}"
 KEEP_ON_FAIL="${QF_E2E_KEEP_ON_FAIL:-0}"
@@ -344,6 +348,7 @@ get_qkey() {
 
 run_loss_level() {
     local loss_pct="$1"
+    local max_loss="$2"
     echo ""
     echo "=========================================="
     echo "  FEC E2E Test: ${loss_pct}% tc-netem loss"
@@ -394,20 +399,6 @@ run_loss_level() {
     local ping_loss
     ping_loss=$(echo "$ping_output" | grep 'packet loss' | grep -oP '[\d.]+(?=% packet loss)' | awk '{printf "%d", $1}' || echo "100")
     echo "Ping loss through tunnel: ${ping_loss}%"
-
-    # Acceptance criteria - ping-based thresholds account for statistical
-    # variance in random netem loss and the fact that ping sends small packets
-    # at low rate, so FEC windows fill slowly. At 5% netem, 100 pings can
-    # naturally lose 5-15 packets. FEC recovers some but not all.
-    # The key acceptance criterion is: link stays operational (loss < 50%).
-    local max_loss
-    case "$loss_pct" in
-        0)  max_loss=0 ;;
-        5)  max_loss=15 ;;
-        10) max_loss=20 ;;
-        25) max_loss=40 ;;
-        *)  max_loss=50 ;;
-    esac
 
     if [ "$ping_loss" -le "$max_loss" ]; then
         echo "PASS: ${loss_pct}% netem loss -> ${ping_loss}% tunnel loss (threshold: ${max_loss}%)"
@@ -510,16 +501,18 @@ run_iperf_test() {
 
 # --- Main ---
 echo "=== FEC E2E Test Suite (TODO-423) ==="
-echo "Loss levels: ${LOSS_LEVELS}"
+echo "Uniform ping contract: ${UNIFORM_PING_SCENARIOS[*]} (netem-loss:max-tunnel-loss)"
+echo "Uniform iperf contract: ${UNIFORM_IPERF_SCENARIOS[*]} (netem loss, positive receiver intervals)"
 echo "Ping count per level: ${PING_COUNT}"
 
-for loss in $LOSS_LEVELS; do
-    run_loss_level "$loss"
+for scenario in "${UNIFORM_PING_SCENARIOS[@]}"; do
+    IFS=':' read -r loss max_loss <<< "$scenario"
+    run_loss_level "$loss" "$max_loss"
 done
 
-# Bulk throughput tests
-run_iperf_test 0
-run_iperf_test 10
+for loss in "${UNIFORM_IPERF_SCENARIOS[@]}"; do
+    run_iperf_test "$loss"
+done
 
 cleanup_owned_resources || fatal "could not clean final owned resources"
 
