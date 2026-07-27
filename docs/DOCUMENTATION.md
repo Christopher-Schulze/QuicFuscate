@@ -1129,7 +1129,9 @@ pub struct MacTun {
 - `transport::connection::dgram_send` returns `ConnectionError::DgramQueueFull` when the fixed DATAGRAM send queue is at capacity, preserving the original error class through `transport::h3::send_masque_datagram` and `core::{send_tunnel_packet, send_masque_downlink}`.
 - Framed H3 fallback is used only for packets that exceed the confirmed MASQUE MTU or for states where it is semantically valid; it is never used as a reaction to transient DATAGRAM pressure.
 - Client uplink: `main.rs` holds a single `tun_backpressure_frame` and retries it before reading new frames from the TUN reader channel.
-- Server downlink: `src/implementations/server/mod.rs` defers per-target downlinks in `LiveServerState::pending_tun_downlinks` and retries them each housekeeping tick via `drain_pending_tun_downlinks`; successfully enqueued packets are flushed immediately.
+- Server downlink: `src/implementations/server/mod.rs` defers queue-full packets in `LiveServerState::pending_tun_downlinks` and retries them each housekeeping tick before new TUN reads. Admission is bounded to 256 packets, 384 KiB, and 32 packets per target; entries expire after 5 seconds, follow a QUIC path migration to its new remote address, and have explicit capacity, timeout, terminal-error, and shutdown outcomes.
+- Server telemetry exports `quicfuscate_tun_downlink_backpressure_pending_{packets,bytes}` plus `quicfuscate_tun_downlink_backpressure_events_total` for enqueue, retry, and exact terminal-drop causes.
+- Server-generated MASQUE DNS and ICMP responses use a separate bounded FIFO of 128 packets or 192 KiB per connection. A `DgramQueueFull` response remains in a connection-owned retry slot ahead of later responses, while packet-capacity, byte-capacity, terminal-send, and shutdown outcomes are exported as `quicfuscate_masque_downlink_response_events_total`.
 
 ### Cryptography Design (AEAD-First, Efficient by Construction)
 - Product-level data-plane AEAD posture: retained `Aegis128L` and `Morus1280_128` families with hardware-aware automatic selection.

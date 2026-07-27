@@ -47,6 +47,17 @@ pub enum RoutingOutcome {
     Icmpv6,
 }
 
+/// Observable terminal outcomes for the bounded server TUN downlink retry queue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TunDownlinkBackpressureDrop {
+    QueueCapacity,
+    ByteCapacity,
+    PerTargetCapacity,
+    Expired,
+    TerminalTransportError,
+    Shutdown,
+}
+
 /// Server metrics collector.
 #[derive(Debug)]
 pub struct Metrics {
@@ -78,6 +89,25 @@ pub struct Metrics {
     pub routing_packet_too_big: AtomicU64,
     pub routing_time_exceeded: AtomicU64,
     pub routing_icmpv6: AtomicU64,
+
+    // TUN/MASQUE downlink backpressure metrics
+    pub tun_downlink_backpressure_enqueued: AtomicU64,
+    pub tun_downlink_backpressure_retried: AtomicU64,
+    pub tun_downlink_backpressure_pending_packets: AtomicU64,
+    pub tun_downlink_backpressure_pending_bytes: AtomicU64,
+    pub tun_downlink_backpressure_drop_queue_capacity: AtomicU64,
+    pub tun_downlink_backpressure_drop_byte_capacity: AtomicU64,
+    pub tun_downlink_backpressure_drop_per_target_capacity: AtomicU64,
+    pub tun_downlink_backpressure_drop_expired: AtomicU64,
+    pub tun_downlink_backpressure_drop_terminal_transport_error: AtomicU64,
+    pub tun_downlink_backpressure_drop_shutdown: AtomicU64,
+
+    // Server-generated MASQUE response queue metrics
+    pub masque_downlink_response_retried: AtomicU64,
+    pub masque_downlink_response_drop_packet_capacity: AtomicU64,
+    pub masque_downlink_response_drop_byte_capacity: AtomicU64,
+    pub masque_downlink_response_drop_terminal_transport_error: AtomicU64,
+    pub masque_downlink_response_drop_shutdown: AtomicU64,
 
     // Stealth metrics
     pub stealth_http3_active: AtomicU64,
@@ -123,6 +153,21 @@ impl Metrics {
             routing_packet_too_big: AtomicU64::new(0),
             routing_time_exceeded: AtomicU64::new(0),
             routing_icmpv6: AtomicU64::new(0),
+            tun_downlink_backpressure_enqueued: AtomicU64::new(0),
+            tun_downlink_backpressure_retried: AtomicU64::new(0),
+            tun_downlink_backpressure_pending_packets: AtomicU64::new(0),
+            tun_downlink_backpressure_pending_bytes: AtomicU64::new(0),
+            tun_downlink_backpressure_drop_queue_capacity: AtomicU64::new(0),
+            tun_downlink_backpressure_drop_byte_capacity: AtomicU64::new(0),
+            tun_downlink_backpressure_drop_per_target_capacity: AtomicU64::new(0),
+            tun_downlink_backpressure_drop_expired: AtomicU64::new(0),
+            tun_downlink_backpressure_drop_terminal_transport_error: AtomicU64::new(0),
+            tun_downlink_backpressure_drop_shutdown: AtomicU64::new(0),
+            masque_downlink_response_retried: AtomicU64::new(0),
+            masque_downlink_response_drop_packet_capacity: AtomicU64::new(0),
+            masque_downlink_response_drop_byte_capacity: AtomicU64::new(0),
+            masque_downlink_response_drop_terminal_transport_error: AtomicU64::new(0),
+            masque_downlink_response_drop_shutdown: AtomicU64::new(0),
             stealth_http3_active: AtomicU64::new(0),
             stealth_tls13_active: AtomicU64::new(0),
             fec_packets_encoded: FecProcessCounter::new(FecProcessCounterKind::Emitted),
@@ -207,6 +252,72 @@ impl Metrics {
             RoutingOutcome::Icmpv6 => &self.routing_icmpv6,
         };
         counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn set_tun_downlink_backpressure_pending(&self, packets: usize, bytes: usize) {
+        self.tun_downlink_backpressure_pending_packets
+            .store(packets as u64, Ordering::Relaxed);
+        self.tun_downlink_backpressure_pending_bytes
+            .store(bytes as u64, Ordering::Relaxed);
+    }
+
+    pub fn record_tun_downlink_backpressure_enqueued(&self) {
+        self.tun_downlink_backpressure_enqueued.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_tun_downlink_backpressure_retry(&self) {
+        self.tun_downlink_backpressure_retried.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_tun_downlink_backpressure_drop(&self, reason: TunDownlinkBackpressureDrop) {
+        let counter = match reason {
+            TunDownlinkBackpressureDrop::QueueCapacity => {
+                &self.tun_downlink_backpressure_drop_queue_capacity
+            }
+            TunDownlinkBackpressureDrop::ByteCapacity => {
+                &self.tun_downlink_backpressure_drop_byte_capacity
+            }
+            TunDownlinkBackpressureDrop::PerTargetCapacity => {
+                &self.tun_downlink_backpressure_drop_per_target_capacity
+            }
+            TunDownlinkBackpressureDrop::Expired => &self.tun_downlink_backpressure_drop_expired,
+            TunDownlinkBackpressureDrop::TerminalTransportError => {
+                &self.tun_downlink_backpressure_drop_terminal_transport_error
+            }
+            TunDownlinkBackpressureDrop::Shutdown => {
+                &self.tun_downlink_backpressure_drop_shutdown
+            }
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_masque_downlink_response_retry(&self) {
+        self.masque_downlink_response_retried.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_masque_downlink_response_drop(
+        &self,
+        reason: crate::core::MasqueDownlinkQueueReject,
+    ) {
+        let counter = match reason {
+            crate::core::MasqueDownlinkQueueReject::PacketCapacity => {
+                &self.masque_downlink_response_drop_packet_capacity
+            }
+            crate::core::MasqueDownlinkQueueReject::ByteCapacity => {
+                &self.masque_downlink_response_drop_byte_capacity
+            }
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_masque_downlink_response_terminal_drop(&self, packets: usize) {
+        self.masque_downlink_response_drop_terminal_transport_error
+            .fetch_add(packets as u64, Ordering::Relaxed);
+    }
+
+    pub fn record_masque_downlink_response_shutdown_drop(&self, packets: usize) {
+        self.masque_downlink_response_drop_shutdown
+            .fetch_add(packets as u64, Ordering::Relaxed);
     }
 
     /// Export as Prometheus text format.
@@ -301,6 +412,51 @@ impl Metrics {
         ] {
             out.push_str(&format!(
                 "quicfuscate_routing_packets_total{{outcome=\"{outcome}\"}} {value}\n"
+            ));
+        }
+        out.push('\n');
+
+        out.push_str("# HELP quicfuscate_tun_downlink_backpressure_pending_packets Current packets retained for retry after QUIC DATAGRAM queue pressure\n");
+        out.push_str("# TYPE quicfuscate_tun_downlink_backpressure_pending_packets gauge\n");
+        out.push_str(&format!(
+            "quicfuscate_tun_downlink_backpressure_pending_packets {}\n\n",
+            self.tun_downlink_backpressure_pending_packets.load(Ordering::Relaxed)
+        ));
+        out.push_str("# HELP quicfuscate_tun_downlink_backpressure_pending_bytes Current bytes retained for retry after QUIC DATAGRAM queue pressure\n");
+        out.push_str("# TYPE quicfuscate_tun_downlink_backpressure_pending_bytes gauge\n");
+        out.push_str(&format!(
+            "quicfuscate_tun_downlink_backpressure_pending_bytes {}\n\n",
+            self.tun_downlink_backpressure_pending_bytes.load(Ordering::Relaxed)
+        ));
+        out.push_str("# HELP quicfuscate_tun_downlink_backpressure_events_total Server TUN downlink retry queue events\n");
+        out.push_str("# TYPE quicfuscate_tun_downlink_backpressure_events_total counter\n");
+        for (event, value) in [
+            ("enqueued", self.tun_downlink_backpressure_enqueued.load(Ordering::Relaxed)),
+            ("retried", self.tun_downlink_backpressure_retried.load(Ordering::Relaxed)),
+            ("drop_queue_capacity", self.tun_downlink_backpressure_drop_queue_capacity.load(Ordering::Relaxed)),
+            ("drop_byte_capacity", self.tun_downlink_backpressure_drop_byte_capacity.load(Ordering::Relaxed)),
+            ("drop_per_target_capacity", self.tun_downlink_backpressure_drop_per_target_capacity.load(Ordering::Relaxed)),
+            ("drop_expired", self.tun_downlink_backpressure_drop_expired.load(Ordering::Relaxed)),
+            ("drop_terminal_transport_error", self.tun_downlink_backpressure_drop_terminal_transport_error.load(Ordering::Relaxed)),
+            ("drop_shutdown", self.tun_downlink_backpressure_drop_shutdown.load(Ordering::Relaxed)),
+        ] {
+            out.push_str(&format!(
+                "quicfuscate_tun_downlink_backpressure_events_total{{event=\"{event}\"}} {value}\n"
+            ));
+        }
+        out.push('\n');
+
+        out.push_str("# HELP quicfuscate_masque_downlink_response_events_total Server-generated MASQUE response queue events\n");
+        out.push_str("# TYPE quicfuscate_masque_downlink_response_events_total counter\n");
+        for (event, value) in [
+            ("retried", self.masque_downlink_response_retried.load(Ordering::Relaxed)),
+            ("drop_packet_capacity", self.masque_downlink_response_drop_packet_capacity.load(Ordering::Relaxed)),
+            ("drop_byte_capacity", self.masque_downlink_response_drop_byte_capacity.load(Ordering::Relaxed)),
+            ("drop_terminal_transport_error", self.masque_downlink_response_drop_terminal_transport_error.load(Ordering::Relaxed)),
+            ("drop_shutdown", self.masque_downlink_response_drop_shutdown.load(Ordering::Relaxed)),
+        ] {
+            out.push_str(&format!(
+                "quicfuscate_masque_downlink_response_events_total{{event=\"{event}\"}} {value}\n"
             ));
         }
         out.push('\n');
@@ -597,6 +753,65 @@ mod tests {
         assert!(output.contains("quicfuscate_bytes_in_total 1000000"));
         assert!(output.contains("quicfuscate_routing_packets_total{outcome=\"internet\"} 1"));
         assert!(output.contains("quicfuscate_routing_packets_total{outcome=\"drop_malformed\"} 1"));
+    }
+
+    #[test]
+    fn tun_downlink_backpressure_metrics_expose_depth_and_terminal_cause() {
+        let metrics = Metrics::new();
+        metrics.set_tun_downlink_backpressure_pending(3, 1_024);
+        metrics.record_tun_downlink_backpressure_enqueued();
+        metrics.record_tun_downlink_backpressure_retry();
+        metrics.record_tun_downlink_backpressure_drop(TunDownlinkBackpressureDrop::ByteCapacity);
+        metrics.record_tun_downlink_backpressure_drop(TunDownlinkBackpressureDrop::Expired);
+
+        let output = metrics.export();
+
+        assert!(output.contains("quicfuscate_tun_downlink_backpressure_pending_packets 3"));
+        assert!(output.contains("quicfuscate_tun_downlink_backpressure_pending_bytes 1024"));
+        assert!(output.contains(
+            "quicfuscate_tun_downlink_backpressure_events_total{event=\"enqueued\"} 1"
+        ));
+        assert!(output.contains(
+            "quicfuscate_tun_downlink_backpressure_events_total{event=\"retried\"} 1"
+        ));
+        assert!(output.contains(
+            "quicfuscate_tun_downlink_backpressure_events_total{event=\"drop_byte_capacity\"} 1"
+        ));
+        assert!(output.contains(
+            "quicfuscate_tun_downlink_backpressure_events_total{event=\"drop_expired\"} 1"
+        ));
+    }
+
+    #[test]
+    fn masque_downlink_response_metrics_expose_retry_and_terminal_causes() {
+        let metrics = Metrics::new();
+        metrics.record_masque_downlink_response_retry();
+        metrics.record_masque_downlink_response_drop(
+            crate::core::MasqueDownlinkQueueReject::PacketCapacity,
+        );
+        metrics.record_masque_downlink_response_drop(
+            crate::core::MasqueDownlinkQueueReject::ByteCapacity,
+        );
+        metrics.record_masque_downlink_response_terminal_drop(2);
+        metrics.record_masque_downlink_response_shutdown_drop(3);
+
+        let output = metrics.export();
+
+        assert!(output.contains(
+            "quicfuscate_masque_downlink_response_events_total{event=\"retried\"} 1"
+        ));
+        assert!(output.contains(
+            "quicfuscate_masque_downlink_response_events_total{event=\"drop_packet_capacity\"} 1"
+        ));
+        assert!(output.contains(
+            "quicfuscate_masque_downlink_response_events_total{event=\"drop_byte_capacity\"} 1"
+        ));
+        assert!(output.contains(
+            "quicfuscate_masque_downlink_response_events_total{event=\"drop_terminal_transport_error\"} 2"
+        ));
+        assert!(output.contains(
+            "quicfuscate_masque_downlink_response_events_total{event=\"drop_shutdown\"} 3"
+        ));
     }
 
     #[test]

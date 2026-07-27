@@ -62,7 +62,7 @@ pub use limits::{BlacklistSync, GeoIpBlocker, GeoIpConfig};
 pub use limits::{ConnectionLimiter, GlobalRateLimiter, RateLimitConfig, RateLimiter};
 #[cfg(any(test, feature = "rust-tests"))]
 pub use metrics::GlobalMetricsServer;
-pub use metrics::{Metrics, RoutingOutcome};
+pub use metrics::{Metrics, RoutingOutcome, TunDownlinkBackpressureDrop};
 pub use routing::{detect_wan_interface, RoutingError, RoutingManager};
 pub use session::{Session, SessionError, SessionId, SessionManager, SessionStats};
 
@@ -97,6 +97,12 @@ use crate::stealth::{
 const SERVER_STATS_LOG_INTERVAL: Duration = Duration::from_secs(1);
 const LIVE_UDP_DATAGRAM_BUFFER_SIZE: usize = 65_535;
 const _: () = assert!(LIVE_UDP_DATAGRAM_BUFFER_SIZE >= 1500);
+const MAX_PENDING_TUN_DOWNLINKS: usize = 256;
+const MAX_PENDING_TUN_DOWNLINK_BYTES: usize = 384 * 1024;
+const MAX_PENDING_TUN_DOWNLINKS_PER_TARGET: usize = 32;
+const MAX_PENDING_TUN_DOWNLINK_AGE: Duration = Duration::from_secs(5);
+const MAX_MASQUE_DOWNLINK_RESPONSES: usize = 128;
+const MAX_MASQUE_DOWNLINK_RESPONSE_BYTES: usize = 192 * 1024;
 
 #[derive(Clone, Copy, Debug)]
 struct ServerTunIps {
@@ -2429,7 +2435,7 @@ fn allow_client_uplink(
     packet: &[u8],
     server_ips: ServerTunIps,
     tun_mtu: u16,
-    response_queue: &Arc<std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>>,
+    response_queue: &Arc<std::sync::Mutex<crate::core::MasqueDownlinkQueue>>,
 ) -> Option<UplinkRoute> {
     let route = match forwarding_policy.evaluate_uplink(packet, assigned_ips) {
         Ok(route) => route,
@@ -2460,7 +2466,7 @@ fn allow_client_uplink(
             0,
             None,
         );
-        enqueue_routing_response(response_queue, response);
+        enqueue_routing_response(response_queue, metrics, response);
         metrics.record_routing_outcome(RoutingOutcome::TimeExceeded);
         return None;
     }
@@ -2472,7 +2478,7 @@ fn allow_client_uplink(
                 icmp::icmpv6_type::TIME_EXCEEDED,
                 None,
             );
-            enqueue_routing_response(response_queue, response);
+            enqueue_routing_response(response_queue, metrics, response);
             metrics.record_routing_outcome(RoutingOutcome::TimeExceeded);
             metrics.record_routing_outcome(RoutingOutcome::Icmpv6);
         }
@@ -2489,7 +2495,7 @@ fn allow_client_uplink(
                 icmp::icmp_code::FRAGMENTATION_NEEDED,
                 Some(tun_mtu),
             );
-            enqueue_routing_response(response_queue, response);
+            enqueue_routing_response(response_queue, metrics, response);
             metrics.record_routing_outcome(RoutingOutcome::PacketTooBig);
             return None;
         }
@@ -2502,7 +2508,7 @@ fn allow_client_uplink(
                 icmp::icmpv6_type::PACKET_TOO_BIG,
                 Some(u32::from(tun_mtu)),
             );
-            enqueue_routing_response(response_queue, response);
+            enqueue_routing_response(response_queue, metrics, response);
             metrics.record_routing_outcome(RoutingOutcome::PacketTooBig);
             metrics.record_routing_outcome(RoutingOutcome::Icmpv6);
         }
@@ -2513,15 +2519,53 @@ fn allow_client_uplink(
 }
 
 fn enqueue_routing_response(
-    queue: &Arc<std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>>,
+    queue: &Arc<std::sync::Mutex<crate::core::MasqueDownlinkQueue>>,
+    metrics: &Metrics,
     response: Vec<u8>,
 ) {
     if response.is_empty() {
         return;
     }
-    match queue.lock() {
-        Ok(mut pending) => pending.push_back(response),
-        Err(poisoned) => poisoned.into_inner().push_back(response),
+    let admission = match queue.lock() {
+        Ok(mut pending) => pending.enqueue(response),
+        Err(poisoned) => poisoned.into_inner().enqueue(response),
+    };
+    if let Err(reason) = admission {
+        metrics.record_masque_downlink_response_drop(reason);
+    }
+}
+
+fn drain_masque_downlink_responses(
+    conn: &mut QuicFuscateConnection,
+    addr: SocketAddr,
+    metrics: &Metrics,
+) {
+    let mut terminal_drops = 0usize;
+    while let Some(packet) = conn.pop_masque_downlink_packet() {
+        match conn.send_masque_downlink(&packet) {
+            Ok(()) => {}
+            Err(crate::error::ConnectionError::DgramQueueFull) => {
+                conn.retry_masque_downlink_packet(packet);
+                metrics.record_masque_downlink_response_retry();
+                break;
+            }
+            Err(error) => {
+                metrics.record_masque_downlink_response_terminal_drop(1);
+                terminal_drops = terminal_drops.saturating_add(1);
+                log::trace!(
+                    "MASQUE queued downlink to {} reached terminal send outcome: {:?}",
+                    addr,
+                    error
+                );
+            }
+        }
+    }
+    if terminal_drops > 0 {
+        log::debug!(
+            "dropped {} MASQUE queued downlinks to {} after terminal send outcomes",
+            terminal_drops,
+            addr
+        );
     }
 }
 
@@ -2598,7 +2642,10 @@ async fn process_live_server_client_datagram(
         if let Some(tun) = server_tun {
             if !conn.has_masque_downlink_queue() {
                 conn.set_masque_downlink_queue(Arc::new(std::sync::Mutex::new(
-                    std::collections::VecDeque::new(),
+                    crate::core::MasqueDownlinkQueue::new(
+                        MAX_MASQUE_DOWNLINK_RESPONSES,
+                        MAX_MASQUE_DOWNLINK_RESPONSE_BYTES,
+                    ),
                 )));
             }
             let tun_sink = Arc::clone(tun);
@@ -2636,6 +2683,7 @@ async fn process_live_server_client_datagram(
                         payload,
                         Arc::clone(&dns_resolvers),
                         Arc::clone(&dns_downlink_queue),
+                        Arc::clone(&masque_metrics),
                         fingerprint_profile,
                     ) {
                         return;
@@ -2740,11 +2788,7 @@ async fn process_live_server_client_datagram(
         remove_auth_conn_id = Some(conn_id.clone());
     }
 
-    for packet in conn.drain_masque_downlink_queue() {
-        if let Err(error) = conn.send_masque_downlink(&packet) {
-            log::debug!("MASQUE queued downlink send to {} failed: {:?}", addr, error);
-        }
-    }
+    drain_masque_downlink_responses(conn, addr, metrics);
 
     flush_live_server_outgoing(
         socket,
@@ -2761,12 +2805,147 @@ async fn process_live_server_client_datagram(
     Ok(LiveClientDatagramResult { auth_result, remove_auth_conn_id })
 }
 
+#[derive(Debug)]
+struct PendingTunDownlink {
+    target: SocketAddr,
+    packet: Vec<u8>,
+    queued_at: Instant,
+}
+
+impl PendingTunDownlink {
+    fn is_expired(&self, now: Instant) -> bool {
+        now.duration_since(self.queued_at) >= MAX_PENDING_TUN_DOWNLINK_AGE
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingTunDownlinkReject {
+    Queue,
+    Bytes,
+    PerTarget,
+}
+
+impl From<PendingTunDownlinkReject> for TunDownlinkBackpressureDrop {
+    fn from(reject: PendingTunDownlinkReject) -> Self {
+        match reject {
+            PendingTunDownlinkReject::Queue => Self::QueueCapacity,
+            PendingTunDownlinkReject::Bytes => Self::ByteCapacity,
+            PendingTunDownlinkReject::PerTarget => Self::PerTargetCapacity,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PendingTunDownlinks {
+    entries: std::collections::VecDeque<PendingTunDownlink>,
+    bytes: usize,
+    max_entries: usize,
+    max_bytes: usize,
+    max_per_target: usize,
+}
+
+impl PendingTunDownlinks {
+    fn new() -> Self {
+        Self::with_limits(
+            MAX_PENDING_TUN_DOWNLINKS,
+            MAX_PENDING_TUN_DOWNLINK_BYTES,
+            MAX_PENDING_TUN_DOWNLINKS_PER_TARGET,
+        )
+    }
+
+    fn with_limits(max_entries: usize, max_bytes: usize, max_per_target: usize) -> Self {
+        Self {
+            entries: std::collections::VecDeque::with_capacity(max_entries),
+            bytes: 0,
+            max_entries,
+            max_bytes,
+            max_per_target,
+        }
+    }
+
+    fn enqueue(
+        &mut self,
+        target: SocketAddr,
+        packet: Vec<u8>,
+        queued_at: Instant,
+    ) -> Result<(), PendingTunDownlinkReject> {
+        if self.entries.len() >= self.max_entries {
+            return Err(PendingTunDownlinkReject::Queue);
+        }
+        if self.bytes.saturating_add(packet.len()) > self.max_bytes {
+            return Err(PendingTunDownlinkReject::Bytes);
+        }
+        if self
+            .entries
+            .iter()
+            .filter(|entry| entry.target == target)
+            .count()
+            >= self.max_per_target
+        {
+            return Err(PendingTunDownlinkReject::PerTarget);
+        }
+        self.bytes += packet.len();
+        self.entries.push_back(PendingTunDownlink { target, packet, queued_at });
+        Ok(())
+    }
+
+    fn pop_front(&mut self) -> Option<PendingTunDownlink> {
+        let entry = self.entries.pop_front()?;
+        self.bytes = self.bytes.saturating_sub(entry.packet.len());
+        Some(entry)
+    }
+
+    fn requeue(&mut self, entry: PendingTunDownlink) {
+        self.bytes += entry.packet.len();
+        self.entries.push_back(entry);
+    }
+
+    fn rebind_target(&mut self, old_target: SocketAddr, new_target: SocketAddr) {
+        for entry in &mut self.entries {
+            if entry.target == old_target {
+                entry.target = new_target;
+            }
+        }
+    }
+
+    fn discard_target(&mut self, target: SocketAddr) -> (usize, usize) {
+        let mut discarded_packets = 0;
+        let mut discarded_bytes = 0;
+        self.entries.retain(|entry| {
+            if entry.target == target {
+                discarded_packets += 1;
+                discarded_bytes += entry.packet.len();
+                false
+            } else {
+                true
+            }
+        });
+        self.bytes = self.bytes.saturating_sub(discarded_bytes);
+        (discarded_packets, discarded_bytes)
+    }
+
+    fn discard_all(&mut self) -> (usize, usize) {
+        let discarded_packets = self.entries.len();
+        let discarded_bytes = self.bytes;
+        self.entries.clear();
+        self.bytes = 0;
+        (discarded_packets, discarded_bytes)
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn bytes(&self) -> usize {
+        self.bytes
+    }
+}
+
 pub struct LiveServerState {
     clients: std::collections::HashMap<SocketAddr, QuicFuscateConnection>,
-    /// Downlink packets that could not be enqueued because a client's QUIC
-    /// DATAGRAM queue was full. Retried on each run_loop tick before new TUN
-    /// packets are read.
-    pending_tun_downlinks: std::collections::VecDeque<(SocketAddr, Vec<u8>)>,
+    /// Bounded downlink packets that could not be enqueued because a client's
+    /// QUIC DATAGRAM queue was full. Retried before new TUN packets are read.
+    pending_tun_downlinks: PendingTunDownlinks,
     fanout_queue: ClientFanoutQueue,
     qkey_auth: std::collections::HashMap<Vec<u8>, QKeyAuthState>,
     domain: LiveServerDomain,
@@ -3204,7 +3383,7 @@ impl LiveServerState {
             );
         Self {
             clients: std::collections::HashMap::new(),
-            pending_tun_downlinks: std::collections::VecDeque::new(),
+            pending_tun_downlinks: PendingTunDownlinks::new(),
             fanout_queue: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
             qkey_auth: std::collections::HashMap::new(),
             domain: LiveServerDomain::new(&server_config),
@@ -3497,11 +3676,7 @@ impl LiveServerState {
             let session_stats = self.domain.session_stats_by_remote(addr);
             let session_id = self.domain.session_id_by_remote(addr);
             if let Some(conn) = self.get_mut(&addr) {
-                for packet in conn.drain_masque_downlink_queue() {
-                    if let Err(error) = conn.send_masque_downlink(&packet) {
-                        log::debug!("MASQUE queued downlink send to {} failed: {:?}", addr, error);
-                    }
-                }
+                drain_masque_downlink_responses(conn, addr, metrics);
                 if let Err(error) = flush_live_server_outgoing(
                     socket,
                     addr,
@@ -3625,6 +3800,7 @@ impl LiveServerState {
     ) -> bool {
         let old_addr = try_rebind_live_client_by_dcid(&mut self.clients, from, packet, accept_loop);
         if let Some(old_addr) = old_addr {
+            self.pending_tun_downlinks.rebind_target(old_addr, from);
             self.domain.rebind_remote(old_addr, from);
             return true;
         }
@@ -3660,17 +3836,72 @@ impl LiveServerState {
             }
             self.qkey_auth.remove(&conn_id);
             accept_loop.record_closed(addr);
+            let (discarded_packets, discarded_bytes) = conn.discard_masque_downlink_packets();
+            if discarded_packets > 0 {
+                metrics.record_masque_downlink_response_terminal_drop(discarded_packets);
+                log::warn!(
+                    "dropping {} queued MASQUE responses ({} bytes) for administratively removed client {}",
+                    discarded_packets,
+                    discarded_bytes,
+                    addr
+                );
+            }
+        }
+        let (discarded_packets, discarded_bytes) = self.pending_tun_downlinks.discard_target(addr);
+        if discarded_packets > 0 {
+            for _ in 0..discarded_packets {
+                metrics.record_tun_downlink_backpressure_drop(
+                    TunDownlinkBackpressureDrop::TerminalTransportError,
+                );
+            }
+            metrics.set_tun_downlink_backpressure_pending(
+                self.pending_tun_downlinks.len(),
+                self.pending_tun_downlinks.bytes(),
+            );
+            log::warn!(
+                "dropping {} pending TUN downlinks ({} bytes) for administratively removed client {}",
+                discarded_packets,
+                discarded_bytes,
+                addr
+            );
         }
         self.dissociate_qkey_for_session(session_id);
         self.domain.remove_remote(addr);
         self.sync_active_metrics(metrics);
     }
 
-    pub fn shutdown_all(&mut self, reason: &'static [u8]) {
+    pub fn shutdown_all(&mut self, reason: &'static [u8], metrics: Option<&Metrics>) {
         for conn in self.clients.values_mut() {
             if let Err(e) = conn.conn.close(true, 0x0, reason) {
                 log::warn!("Live client close failed for reason {:?}: {:?}", reason, e);
             }
+            let (discarded_packets, discarded_bytes) = conn.discard_masque_downlink_packets();
+            if discarded_packets > 0 {
+                if let Some(metrics) = metrics {
+                    metrics.record_masque_downlink_response_shutdown_drop(discarded_packets);
+                }
+                log::warn!(
+                    "dropping {} queued MASQUE responses ({} bytes) during shutdown",
+                    discarded_packets,
+                    discarded_bytes
+                );
+            }
+        }
+        let (discarded_packets, discarded_bytes) = self.pending_tun_downlinks.discard_all();
+        if discarded_packets > 0 {
+            if let Some(metrics) = metrics {
+                for _ in 0..discarded_packets {
+                    metrics.record_tun_downlink_backpressure_drop(
+                        TunDownlinkBackpressureDrop::Shutdown,
+                    );
+                }
+                metrics.set_tun_downlink_backpressure_pending(0, 0);
+            }
+            log::warn!(
+                "dropping {} pending TUN downlinks ({} bytes) during shutdown",
+                discarded_packets,
+                discarded_bytes
+            );
         }
     }
 
@@ -3686,7 +3917,7 @@ impl LiveServerState {
         accept_loop: &AcceptLoop,
         reason: &'static [u8],
     ) {
-        self.shutdown_all(reason);
+        self.shutdown_all(reason, Some(metrics));
         let client_snapshots = Arc::clone(self.domain.client_snapshots());
         for addr in self.key_addrs() {
             let session_stats = self.domain.session_stats_by_remote(addr);
@@ -4017,20 +4248,42 @@ fn drain_pending_tun_downlinks(
 ) {
     let mut still_pending = std::collections::VecDeque::new();
     let mut queued = smallvec::SmallVec::<[SocketAddr; 4]>::new();
-    while let Some((target, packet)) = live.live_state.pending_tun_downlinks.pop_front() {
+    let now = Instant::now();
+    while let Some(entry) = live.live_state.pending_tun_downlinks.pop_front() {
+        if entry.is_expired(now) {
+            metrics.record_tun_downlink_backpressure_drop(TunDownlinkBackpressureDrop::Expired);
+            log::warn!(
+                "dropping expired pending TUN downlink for {} after {} ms",
+                entry.target,
+                now.duration_since(entry.queued_at).as_millis()
+            );
+            continue;
+        }
+        let target = entry.target;
         let send_result = {
             let Some(connection) = live.live_state.clients.get_mut(&target) else {
+                metrics.record_tun_downlink_backpressure_drop(
+                    TunDownlinkBackpressureDrop::TerminalTransportError,
+                );
+                log::warn!(
+                    "dropping pending TUN downlink for {} because its connection no longer exists",
+                    target
+                );
                 continue;
             };
-            connection.send_masque_downlink(&packet)
+            connection.send_masque_downlink(&entry.packet)
         };
         match send_result {
             Ok(()) => queued.push(target),
             Err(crate::error::ConnectionError::DgramQueueFull) => {
                 log::debug!("pending TUN downlink for {} still backpressured", target);
-                still_pending.push_back((target, packet));
+                metrics.record_tun_downlink_backpressure_retry();
+                still_pending.push_back(entry);
             }
             Err(error) => {
+                metrics.record_tun_downlink_backpressure_drop(
+                    TunDownlinkBackpressureDrop::TerminalTransportError,
+                );
                 log::warn!("pending TUN downlink for {} failed: {:?}", target, error);
             }
         }
@@ -4038,8 +4291,12 @@ fn drain_pending_tun_downlinks(
 
     // Return still-pending entries to the queue in their original order.
     for entry in still_pending {
-        live.live_state.pending_tun_downlinks.push_back(entry);
+        live.live_state.pending_tun_downlinks.requeue(entry);
     }
+    metrics.set_tun_downlink_backpressure_pending(
+        live.live_state.pending_tun_downlinks.len(),
+        live.live_state.pending_tun_downlinks.bytes(),
+    );
 
     flush_tun_downlink_queue(live, &queued, out, socket, metrics);
 }
@@ -4193,10 +4450,27 @@ fn process_server_tun_packet(
         match send_result {
             Ok(()) => queued.push(target),
             Err(crate::error::ConnectionError::DgramQueueFull) => {
-                log::debug!("TUN to MASQUE queue for {} full, deferring downlink", target);
-                live.live_state
+                match live
+                    .live_state
                     .pending_tun_downlinks
-                    .push_back((target, packet.to_vec()));
+                    .enqueue(target, packet.to_vec(), Instant::now())
+                {
+                    Ok(()) => {
+                        metrics.record_tun_downlink_backpressure_enqueued();
+                        metrics.set_tun_downlink_backpressure_pending(
+                            live.live_state.pending_tun_downlinks.len(),
+                            live.live_state.pending_tun_downlinks.bytes(),
+                        );
+                    }
+                    Err(reject) => {
+                        metrics.record_tun_downlink_backpressure_drop(reject.into());
+                        log::warn!(
+                            "dropping TUN downlink for {} after bounded backpressure rejection: {:?}",
+                            target,
+                            reject
+                        );
+                    }
+                }
             }
             Err(error) => {
                 log::warn!("TUN to MASQUE queue for {} failed: {:?}", target, error);
@@ -5299,7 +5573,8 @@ fn resolve_dns_query_via_upstream(query: &[u8], upstream_resolvers: &[Ipv4Addr])
 fn spawn_dns_intercept(
     pkt: &[u8],
     upstream_resolvers: Arc<Vec<Ipv4Addr>>,
-    downlink_queue: Arc<std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>>,
+    downlink_queue: Arc<std::sync::Mutex<crate::core::MasqueDownlinkQueue>>,
+    metrics: Arc<Metrics>,
     fingerprint_profile: OsFingerprintProfile,
 ) -> bool {
     let parsed = parse_ipv4_udp_dns_query(pkt)
@@ -5359,9 +5634,12 @@ fn spawn_dns_intercept(
             return;
         }
         if let Some(packet) = build_response_packet(&response) {
-            match downlink_queue.lock() {
-                Ok(mut guard) => guard.push_back(packet),
-                Err(poisoned) => poisoned.into_inner().push_back(packet),
+            let admission = match downlink_queue.lock() {
+                Ok(mut guard) => guard.enqueue(packet),
+                Err(poisoned) => poisoned.into_inner().enqueue(packet),
+            };
+            if let Err(reason) = admission {
+                metrics.record_masque_downlink_response_drop(reason);
             }
         }
     });
@@ -6649,7 +6927,7 @@ impl ServerRuntime {
     pub fn shutdown_live(&mut self, reason: &'static [u8]) {
         let _ = self.initiate_drain(reason);
         let live = self.live_mut();
-        live.live_state.shutdown_all(reason);
+        live.live_state.shutdown_all(reason, None);
         live.service_signals.shutdown_all();
     }
 }
@@ -6698,6 +6976,59 @@ mod tests {
     use std::io::Write as _;
 
     #[test]
+    fn pending_tun_downlinks_bound_admission_and_preserve_ownership() {
+        let first_target: SocketAddr = "127.0.0.1:41001".parse().unwrap();
+        let second_target: SocketAddr = "127.0.0.1:41002".parse().unwrap();
+        let migrated_target: SocketAddr = "127.0.0.1:41003".parse().unwrap();
+        let now = Instant::now();
+
+        let mut per_target = PendingTunDownlinks::with_limits(4, 64, 1);
+        per_target.enqueue(first_target, vec![1], now).unwrap();
+        assert_eq!(
+            per_target.enqueue(first_target, vec![2], now),
+            Err(PendingTunDownlinkReject::PerTarget)
+        );
+
+        let mut by_count = PendingTunDownlinks::with_limits(2, 64, 2);
+        by_count.enqueue(first_target, vec![1], now).unwrap();
+        by_count.enqueue(second_target, vec![2], now).unwrap();
+        assert_eq!(
+            by_count.enqueue(migrated_target, vec![3], now),
+            Err(PendingTunDownlinkReject::Queue)
+        );
+
+        let mut by_bytes = PendingTunDownlinks::with_limits(4, 3, 4);
+        by_bytes.enqueue(first_target, vec![1, 2, 3], now).unwrap();
+        assert_eq!(
+            by_bytes.enqueue(second_target, vec![4], now),
+            Err(PendingTunDownlinkReject::Bytes)
+        );
+
+        let mut queue = PendingTunDownlinks::with_limits(4, 64, 4);
+        queue.enqueue(first_target, vec![10], now).unwrap();
+        queue.enqueue(second_target, vec![20], now).unwrap();
+        queue.rebind_target(first_target, migrated_target);
+
+        let first = queue.pop_front().unwrap();
+        assert_eq!(first.target, migrated_target);
+        assert_eq!(first.packet, vec![10]);
+        assert!(!first.is_expired(now));
+        queue.requeue(first);
+
+        let (discarded_packets, discarded_bytes) = queue.discard_target(second_target);
+        assert_eq!((discarded_packets, discarded_bytes), (1, 1));
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.bytes(), 1);
+
+        let expired = PendingTunDownlink {
+            target: migrated_target,
+            packet: vec![30],
+            queued_at: now - MAX_PENDING_TUN_DOWNLINK_AGE,
+        };
+        assert!(expired.is_expired(now));
+    }
+
+    #[test]
     fn client_fanout_queue_accepts_only_broadcast_and_multicast() {
         let queue = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
         let source = "127.0.0.1:4433".parse().unwrap();
@@ -6738,7 +7069,9 @@ mod tests {
         let assigned = AssignedClientIps { ipv4: client_ip, ipv6: None };
         forwarding_policy.assign_client("client", assigned);
         let metrics = Metrics::new();
-        let responses = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+        let responses = Arc::new(std::sync::Mutex::new(crate::core::MasqueDownlinkQueue::new(
+            8, 4096,
+        )));
         let packet = test_ipv4_udp_packet(client_ip, server_ip, 40_000, 53, &[1]);
 
         let route = allow_client_uplink(

@@ -5978,6 +5978,31 @@ mod tests {
     }
 
     #[test]
+    fn dgram_queue_full_is_retryable_after_send_drains_queue() {
+        // A full QUIC DATAGRAM send queue must return DgramQueueFull, not a
+        // terminal error, and a subsequent dgram_send must succeed once send()
+        // has serialized the queued frame (TODO-559).
+        let mut pair = bench_paired_1rtt_connections();
+        pair.client.pmtu = PmtuState::new(false, PmtuPolicy::default());
+        pair.client.enable_datagrams(0, 1);
+        assert_eq!(pair.client.dgram_send_queue_len(), 0);
+
+        pair.client.dgram_send(b"one").unwrap();
+        assert_eq!(pair.client.dgram_send_queue_len(), 1);
+
+        let err = pair.client.dgram_send(b"two").unwrap_err();
+        assert!(matches!(err, ConnectionError::DgramQueueFull));
+
+        let mut packet = [0u8; 1500];
+        let (written, _) = pair.client.send(&mut packet).unwrap();
+        assert!(written > 0);
+        assert_eq!(pair.client.dgram_send_queue_len(), 0);
+
+        pair.client.dgram_send(b"two").unwrap();
+        assert_eq!(pair.client.dgram_send_queue_len(), 1);
+    }
+
+    #[test]
     fn pto_probe_bypasses_congestion_gate_and_emits_ack_eliciting_packet() {
         // RFC 9002 §7.5/§6.2.4: a PTO probe bypasses the congestion gate but
         // still counts as in flight (tracked ack-eliciting packet).

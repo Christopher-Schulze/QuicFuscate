@@ -40,6 +40,68 @@ const MAX_INNER_IP_PACKET_LEN: usize = u16::MAX as usize;
 const MAX_H3_TUNNEL_PENDING_LEN: usize = 2 * (H3_TUNNEL_FRAME_HEADER_LEN + MAX_INNER_IP_PACKET_LEN);
 const IPV6_MINIMUM_LINK_MTU: usize = 1280;
 
+/// Bounded FIFO for server-generated MASQUE response packets.
+///
+/// The queue is shared with DNS resolution workers, while one dequeued packet
+/// can remain owned by the connection for a retry after QUIC DATAGRAM pressure.
+#[derive(Debug)]
+pub struct MasqueDownlinkQueue {
+    packets: VecDeque<Vec<u8>>,
+    bytes: usize,
+    max_packets: usize,
+    max_bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MasqueDownlinkQueueReject {
+    PacketCapacity,
+    ByteCapacity,
+}
+
+impl MasqueDownlinkQueue {
+    pub fn new(max_packets: usize, max_bytes: usize) -> Self {
+        Self { packets: VecDeque::new(), bytes: 0, max_packets, max_bytes }
+    }
+
+    pub fn enqueue(&mut self, packet: Vec<u8>) -> Result<(), MasqueDownlinkQueueReject> {
+        if self.packets.len() >= self.max_packets {
+            return Err(MasqueDownlinkQueueReject::PacketCapacity);
+        }
+        if self.bytes.saturating_add(packet.len()) > self.max_bytes {
+            return Err(MasqueDownlinkQueueReject::ByteCapacity);
+        }
+        self.bytes = self.bytes.saturating_add(packet.len());
+        self.packets.push_back(packet);
+        Ok(())
+    }
+
+    pub fn pop_front(&mut self) -> Option<Vec<u8>> {
+        let packet = self.packets.pop_front()?;
+        self.bytes = self.bytes.saturating_sub(packet.len());
+        Some(packet)
+    }
+
+    pub fn discard_all(&mut self) -> (usize, usize) {
+        let packets = self.packets.len();
+        let bytes = self.bytes;
+        self.packets.clear();
+        self.bytes = 0;
+        (packets, bytes)
+    }
+
+    pub fn len(&self) -> usize {
+        self.packets.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.packets.is_empty()
+    }
+
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+}
+
 #[derive(Default)]
 struct H3TunnelFrameDecoder {
     pending: Vec<u8>,
@@ -241,7 +303,8 @@ pub struct QuicFuscateConnection {
     transport_observer: Arc<FecTransportObserver>,
     masque_cb: Option<CapsuleHandler>,
     masque_datagram_cb: Option<DatagramHandler>,
-    masque_downlink_queue: Option<Arc<std::sync::Mutex<VecDeque<Vec<u8>>>>>,
+    masque_downlink_queue: Option<Arc<std::sync::Mutex<MasqueDownlinkQueue>>>,
+    masque_downlink_retry: Option<Vec<u8>>,
     masque_control_cb: Option<CapsuleHandler>,
     /// Locally-initiated MASQUE CONNECT-UDP stream id (client side).
     masque_stream_id: Option<u64>,
@@ -467,6 +530,7 @@ impl QuicFuscateConnection {
             masque_cb: None,
             masque_datagram_cb: None,
             masque_downlink_queue: None,
+            masque_downlink_retry: None,
             masque_control_cb: None,
             masque_stream_id: None,
             masque_peer_stream_id: None,
@@ -1874,12 +1938,12 @@ impl QuicFuscateConnection {
 
     /// Installs a queue for raw IP packets that must be sent back to the peer
     /// on the peer-initiated MASQUE flow after callback dispatch returns.
-    pub fn set_masque_downlink_queue(&mut self, queue: Arc<std::sync::Mutex<VecDeque<Vec<u8>>>>) {
+    pub fn set_masque_downlink_queue(&mut self, queue: Arc<std::sync::Mutex<MasqueDownlinkQueue>>) {
         self.masque_downlink_queue = Some(queue);
     }
 
     /// Returns the installed MASQUE downlink queue, if present.
-    pub fn masque_downlink_queue(&self) -> Option<Arc<std::sync::Mutex<VecDeque<Vec<u8>>>>> {
+    pub fn masque_downlink_queue(&self) -> Option<Arc<std::sync::Mutex<MasqueDownlinkQueue>>> {
         self.masque_downlink_queue.as_ref().cloned()
     }
 
@@ -1888,15 +1952,42 @@ impl QuicFuscateConnection {
         self.masque_downlink_queue.is_some()
     }
 
-    /// Drains queued MASQUE downlink raw IP packets.
-    pub fn drain_masque_downlink_queue(&mut self) -> Vec<Vec<u8>> {
-        let Some(queue) = self.masque_downlink_queue.as_ref() else {
-            return Vec::new();
-        };
-        match queue.lock() {
-            Ok(mut guard) => guard.drain(..).collect(),
-            Err(poisoned) => poisoned.into_inner().drain(..).collect(),
+    /// Returns the next queued MASQUE downlink packet, preserving a packet that
+    /// previously hit QUIC DATAGRAM backpressure ahead of later responses.
+    pub fn pop_masque_downlink_packet(&mut self) -> Option<Vec<u8>> {
+        if let Some(packet) = self.masque_downlink_retry.take() {
+            return Some(packet);
         }
+        let queue = self.masque_downlink_queue.as_ref()?;
+        match queue.lock() {
+            Ok(mut guard) => guard.pop_front(),
+            Err(poisoned) => poisoned.into_inner().pop_front(),
+        }
+    }
+
+    /// Retains a dequeued MASQUE response for the next send attempt.
+    ///
+    /// This slot is intentionally separate from the shared bounded queue so a
+    /// concurrent DNS producer cannot consume its released capacity and force
+    /// the oldest response to be dropped or reordered.
+    pub fn retry_masque_downlink_packet(&mut self, packet: Vec<u8>) {
+        debug_assert!(self.masque_downlink_retry.is_none());
+        self.masque_downlink_retry = Some(packet);
+    }
+
+    /// Drops all locally owned MASQUE response packets during terminal teardown.
+    pub fn discard_masque_downlink_packets(&mut self) -> (usize, usize) {
+        let retry = self.masque_downlink_retry.take();
+        let retry_bytes = retry.as_ref().map_or(0, Vec::len);
+        let retry_packets = usize::from(retry.is_some());
+        let Some(queue) = self.masque_downlink_queue.as_ref() else {
+            return (retry_packets, retry_bytes);
+        };
+        let (queued_packets, queued_bytes) = match queue.lock() {
+            Ok(mut guard) => guard.discard_all(),
+            Err(poisoned) => poisoned.into_inner().discard_all(),
+        };
+        (retry_packets.saturating_add(queued_packets), retry_bytes.saturating_add(queued_bytes))
     }
 
     pub fn poll_http3(&mut self) -> Result<(), crate::error::ConnectionError> {
@@ -2106,6 +2197,27 @@ impl QuicFuscateConnection {
 mod tests {
     use super::*;
 
+    fn test_connection() -> QuicFuscateConnection {
+        let pair = crate::transport::connection::bench_paired_1rtt_connections();
+        let optimization_manager = Arc::new(OptimizationManager::from_cfg(OptimizeConfig::default()));
+        let stealth_manager = Arc::new(StealthManager::new(
+            StealthConfig::default(),
+            Arc::clone(&optimization_manager),
+            Arc::new(CryptoManager::new()),
+        ));
+        QuicFuscateConnection::new(ConnectionParams {
+            conn: Box::new(pair.client),
+            local_addr: "127.0.0.1:29101".parse().unwrap(),
+            peer_addr: "127.0.0.1:29102".parse().unwrap(),
+            host_header: String::new(),
+            sni_host: None,
+            qkey_auth_token_hex: None,
+            stealth_manager,
+            optimization_manager,
+            fec_config: FecConfig::default(),
+        })
+    }
+
     fn framed_tunnel_packet(packet: &[u8]) -> Vec<u8> {
         let mut frame = Vec::with_capacity(H3_TUNNEL_FRAME_HEADER_LEN + packet.len());
         frame.extend_from_slice(H3_TUNNEL_FRAME_MAGIC);
@@ -2182,6 +2294,49 @@ mod tests {
 
         assert_eq!(error, "invalid H3 tunnel frame magic");
         assert!(decoder.pending.is_empty());
+    }
+
+    #[test]
+    fn masque_downlink_queue_bounds_bytes_and_preserves_fifo() {
+        let mut queue = MasqueDownlinkQueue::new(2, 4);
+        queue.enqueue(vec![1, 2]).unwrap();
+        queue.enqueue(vec![3]).unwrap();
+        assert_eq!(queue.enqueue(vec![4]), Err(MasqueDownlinkQueueReject::PacketCapacity));
+
+        assert_eq!(queue.pop_front(), Some(vec![1, 2]));
+        assert_eq!(
+            queue.enqueue(vec![4, 5, 6, 7]),
+            Err(MasqueDownlinkQueueReject::ByteCapacity)
+        );
+        assert_eq!(queue.pop_front(), Some(vec![3]));
+        assert_eq!(queue.len(), 0);
+        assert_eq!(queue.bytes(), 0);
+
+        queue.enqueue(vec![6, 7]).unwrap();
+        assert_eq!(queue.discard_all(), (1, 2));
+        assert_eq!(queue.bytes(), 0);
+    }
+
+    #[test]
+    fn masque_downlink_retry_precedes_later_responses_and_shutdown_discards_all_ownership() {
+        let mut connection = test_connection();
+        let queue = Arc::new(std::sync::Mutex::new(MasqueDownlinkQueue::new(4, 64)));
+        {
+            let mut pending = queue.lock().unwrap();
+            pending.enqueue(vec![1]).unwrap();
+            pending.enqueue(vec![2]).unwrap();
+        }
+        connection.set_masque_downlink_queue(Arc::clone(&queue));
+
+        let first = connection.pop_masque_downlink_packet().unwrap();
+        connection.retry_masque_downlink_packet(first);
+        assert_eq!(connection.pop_masque_downlink_packet(), Some(vec![1]));
+        assert_eq!(connection.pop_masque_downlink_packet(), Some(vec![2]));
+
+        queue.lock().unwrap().enqueue(vec![3, 4]).unwrap();
+        connection.retry_masque_downlink_packet(vec![5, 6, 7]);
+        assert_eq!(connection.discard_masque_downlink_packets(), (2, 5));
+        assert!(connection.pop_masque_downlink_packet().is_none());
     }
 
     #[test]
