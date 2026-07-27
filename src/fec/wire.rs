@@ -14,7 +14,10 @@ pub const MAGIC: [u8; 2] = [0xF1, 0xEC];
 pub const VERSION: u8 = 1;
 pub const HEADER_LEN: usize = 32;
 pub const SOURCE_LENGTH_LEN: usize = 2;
-pub const MAX_DATAGRAM_OVERHEAD: usize = HEADER_LEN + SOURCE_LENGTH_LEN;
+// Repairs retain both the outer FEC-symbol length and the inner QUIC-datagram
+// length. Reserve for that largest active-wire representation so every repair
+// respects the configured and discovered UDP payload limit.
+pub const MAX_DATAGRAM_OVERHEAD: usize = HEADER_LEN + (2 * SOURCE_LENGTH_LEN);
 pub const SYSTEMATIC_REPAIR_INDEX: u16 = u16::MAX;
 pub const MAX_SOURCE_COUNT: u16 = 2048;
 pub const MAX_TOTAL_COUNT: u16 = 12_288;
@@ -885,10 +888,10 @@ mod tests {
     }
 
     #[test]
-    fn configured_mtu_reservation_covers_repair_length_symbol() {
+    fn configured_mtu_reservation_covers_both_repair_length_symbols() {
         let outer_mtu = 1200usize;
         let max_inner_quic = outer_mtu - MAX_DATAGRAM_OVERHEAD;
-        let max_repair_payload = max_inner_quic + SOURCE_LENGTH_LEN;
+        let max_repair_payload = max_inner_quic + (2 * SOURCE_LENGTH_LEN);
 
         assert_eq!(HEADER_LEN + max_repair_payload, outer_mtu);
     }

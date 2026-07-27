@@ -1352,7 +1352,7 @@ Mode Selection & Hysteresis
 
 - Egress
   - Core polls rustls and the actual Initial/Handshake CRYPTO queues, and rejects active 1-RTT framing while any Initial/Handshake PTO probe is pending, so a pending Finished flight or handshake probe cannot be wrapped as FEC application data.
-  - `Connection::send_with_datagram_overhead()` reserves 34 bytes against the minimum of output capacity, configured MTU, and discovered path MTU. Core writes the protected source-length prefix before FEC encoding and serializes sources/repairs with `fec::wire::write_packet()`.
+  - `Connection::send_with_datagram_overhead()` reserves 36 bytes against the minimum of output capacity, configured MTU, and discovered path MTU. Core encodes `[outer FEC source length | inner QUIC length | QUIC]`; systematic wire frames omit the outer length, while repairs retain both length layers, so the reservation always covers the largest active FEC datagram.
   - Emission policy is adaptive: base interval from `QUICFUSCATE_FEC_STREAM_EVERY` (default computed from CPU profile), escalation under loss and ECN-CE.
 
 - Ingress
