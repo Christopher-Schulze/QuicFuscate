@@ -74,6 +74,7 @@ Padding and timing rates flow through `StealthRuntimePolicy` → `StealthRuntime
 - All three clients and the server discover 1500. The 20-second egress black-hole trial detects failure in 3 seconds, falls back to 1280, transfers 17,039,360 bytes, and re-confirms 1500.
 - Three 1280-floor trials have 6.454 Mbit/s median; three confirmed-1500 trials have 8.961 Mbit/s median. Every regular five-second run has exactly five positive intervals, and the median gain is 38.85%.
 - Evidence root: `/home/ubuntu/SOFTWARE/QuicFuscate/target/todo534/evidence/run35`. Cleanup leaves no product process, heartbeat failure, or network namespace.
+- Exact commit `c609c68` ARM64 binary SHA-256 `322060acffd79abe30ed7d8e4238933b0106c2df1ab3e116793e62073da8d32b` also passes the complete three-client harness: 1280-floor trials `8.970`, `9.839`, `8.585` Mbit/s, confirmed-1500 trials `10.345`, `11.496`, `9.806` Mbit/s, median gain 15.32%, and a 20.136-second black-hole transfer of 525,496 bytes. The harness printed `PASS` and removed every namespace.
 
 ### Omega CUBIC Conformance and Performance Evidence (2026-07-23)
 
@@ -83,6 +84,7 @@ Padding and timing rates flow through `StealthRuntimePolicy` → `StealthRuntime
 - The live shared 2 Mbit/s bottleneck records CUBIC 0.961 Mbit/s, Reno 0.951 Mbit/s, and Jain fairness `0.999974`.
 - Three clean and three 5% random-loss CUBIC trials on a shared 5 Mbit/s bottleneck record median throughput of 3.001 Mbit/s clean and 2.862 Mbit/s under loss, retaining 95.38%.
 - Evidence root: `/home/ubuntu/SOFTWARE/QuicFuscate/target/todo535/evidence/run06`. Cleanup leaves no product process, network namespace, or test qdisc.
+- Exact commit `c609c68` ARM64 binary SHA-256 `322060acffd79abe30ed7d8e4238933b0106c2df1ab3e116793e62073da8d32b` passes the active-FEC CUBIC matrix after FEC framing is exempted from stateless Version Negotiation: CUBIC 1.075 Mbit/s, Reno 1.049 Mbit/s, Jain 0.999846; Auto baseline 3.001 Mbit/s; controlled 5% loss 2.988 Mbit/s; retained throughput 99.56%.
 
 ### Omega FEC Wire Integrity Evidence (2026-07-22)
 
