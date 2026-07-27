@@ -1329,7 +1329,7 @@ Wire Format v1 (active 1-RTT DATAGRAM)
 [epoch:4][window:4][sequence:8][source_count:2][total_count:2]
 [repair_index:2][payload_len:2][payload:..]
 ```
-The fixed header is 32 bytes. Systematic symbols additionally protect their original QUIC length in a two-byte coded prefix, making the maximum active-FEC overhead exactly 34 bytes. Repair coefficient vectors are never transmitted: codec, block width, lane, and repair ordinal deterministically regenerate GF rows, while Fountain source sets regenerate from the repair seed. Core reserves the full overhead before QUIC serialization, so the outer UDP datagram cannot exceed the active path MTU.
+The fixed header is 32 bytes. Systematic wire symbols retain the two-byte inner QUIC length, while repair symbols retain that length plus the two-byte outer FEC source length, making the maximum active-FEC overhead exactly 36 bytes. Repair coefficient vectors are never transmitted: codec, block width, lane, and repair ordinal deterministically regenerate GF rows, while Fountain source sets regenerate from the repair seed. Core reserves the full overhead before QUIC serialization, so the outer UDP datagram cannot exceed the active path MTU.
 
 Mode Selection & Hysteresis
 - Selection heuristic (loss-driven):
@@ -1357,6 +1357,7 @@ Mode Selection & Hysteresis
 
 - Ingress
   - Core recognizes the two-byte magic, validates the complete header before decoder-window allocation, and dispatches by transmitted epoch/profile rather than local receive-side loss estimates.
+  - The standalone server bypasses stateless Version Negotiation for the FEC magic before selecting the existing peer session, so active envelopes cannot be mistaken for unsupported long-header Initial packets.
   - Receiver state retains at most four windows, bounds source blocks to 2,048 symbols and total codewords to 12,288 symbols, rejects profile mutation within a retained epoch, and suppresses duplicate repairs.
   - Every systematic source and recovered source validates then removes its exact protected QUIC length at the FEC-to-QUIC boundary before decryption. Repairs can never enter header protection or AEAD processing.
   - Malformed, unsupported, or resource-exhausting FEC envelopes are dropped without terminating the authenticated QUIC connection. Recovered QUIC datagrams still pass normal header protection and AEAD authentication.
@@ -3151,7 +3152,7 @@ Curated domain sets are defined in `CdnProvider` and `DomainFrontingManager::ult
 
 QuicFuscate bridges a TUN interface through an adaptive MASQUE/HTTP/3 carrier:
 
-- Client fast path: packets within the confirmed MASQUE payload use CONNECT-UDP datagrams. The payload ceiling is derived from confirmed DPLPMTUD, peer/configured UDP bounds, the 34-byte FEC envelope, and the bounded QUIC/MASQUE reserve.
+- Client fast path: packets within the confirmed MASQUE payload use CONNECT-UDP datagrams. The payload ceiling is derived from confirmed DPLPMTUD, peer/configured UDP bounds, the 36-byte FEC envelope, and the bounded QUIC/MASQUE reserve.
 - Client fallback: IPv6-minimum packets that exceed one MASQUE datagram but remain within the effective tunnel MTU use `QFT1` plus a two-byte packet length on the `/tun` H3 stream. Per-stream bounded reassembly preserves exact IP-packet boundaries across arbitrary H3 DATA segmentation and coalescing.
 - Reliable fallback: transport owns at most 16 MiB of immutable STREAM payload ranges. Exact ACK retirement, packet-threshold loss, and tail PTO requeue lost ranges before new data. A PMTU decrease splits queued transmissions to the new exact packet budget, and a late ACK of the original packet retires every derived segment exactly once.
 - Packetization and pacing: new and retransmitted STREAM frames use the full confirmed PMTU rather than the discovery floor. The core-owned outbound pacer gates every congestion-controlled QUIC/FEC datagram while ACK-only output bypasses pacing.

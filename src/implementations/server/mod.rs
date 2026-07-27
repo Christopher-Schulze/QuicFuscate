@@ -237,6 +237,16 @@ pub fn server_config_from_listen_addr(listen_addr: &str) -> Result<ServerConfig,
     Ok(config)
 }
 
+fn stateless_version_negotiation_response(
+    packet: &[u8],
+    supported_versions: &[u32],
+) -> Result<Option<Vec<u8>>, crate::error::ConnectionError> {
+    if crate::fec::wire::is_framed(packet) {
+        return Ok(None);
+    }
+    crate::transport::packet::server_version_negotiation_response(packet, supported_versions)
+}
+
 /// Load GeoIP blocking config from environment variables.
 ///
 /// - `QUICFUSCATE_GEOIP_DB_PATH`: path to a MaxMindDB GeoLite2-Country database.
@@ -6480,11 +6490,10 @@ impl ServerRuntime {
                                     continue;
                                 }
                             }
-                            if let Ok(Some(response)) =
-                                crate::transport::packet::server_version_negotiation_response(
-                                    &buf[..len],
-                                    runtime_config.transport.supported_versions(),
-                                )
+                            if let Ok(Some(response)) = stateless_version_negotiation_response(
+                                &buf[..len],
+                                runtime_config.transport.supported_versions(),
+                            )
                             {
                                 match socket.send_to(&response, from).await {
                                     Ok(sent) => metrics.record_egress_datagram(sent),
@@ -6974,6 +6983,46 @@ impl From<SessionError> for AcceptError {
 mod tests {
     use super::*;
     use std::io::Write as _;
+
+    #[test]
+    fn stateless_version_negotiation_skips_fec_envelopes() {
+        let meta = crate::fec::wire::WirePacketMeta {
+            profile: crate::fec::wire::WireProfile {
+                epoch: 1,
+                codec: crate::fec::wire::WireCodec::Gf8,
+                source_count: 4,
+                total_count: 5,
+                interleave_depth: 1,
+            },
+            window: 0,
+            sequence: 3,
+            repair_index: 0,
+            block_index: 0,
+            systematic: false,
+        };
+        let payload =
+            vec![0; crate::transport::MIN_CLIENT_INITIAL_LEN - crate::fec::wire::HEADER_LEN];
+        let mut datagram = vec![0; crate::transport::MIN_CLIENT_INITIAL_LEN];
+        let written = crate::fec::wire::write_packet(meta, &payload, &mut datagram)
+            .expect("FEC envelope must serialize");
+        let datagram = &datagram[..written];
+        let supported_versions = [crate::transport::PROTOCOL_VERSION];
+
+        assert!(crate::fec::wire::is_framed(datagram));
+        assert!(
+            crate::transport::packet::server_version_negotiation_response(
+                datagram,
+                &supported_versions,
+            )
+            .expect("FEC bytes can resemble an unsupported long header")
+            .is_some()
+        );
+        assert!(
+            stateless_version_negotiation_response(datagram, &supported_versions)
+                .expect("FEC envelope must bypass stateless version negotiation")
+                .is_none()
+        );
+    }
 
     #[test]
     fn pending_tun_downlinks_bound_admission_and_preserve_ownership() {
