@@ -5,17 +5,17 @@
 # more realistic than uniform random loss. tc-netem supports loss correlation
 # to simulate burst loss.
 #
-# Acceptance criteria (TODO-423):
+# Executable acceptance (TODO-423):
 #   - 10% loss with 25% correlation: <5% tunnel loss
 #   - 20% loss with 50% correlation: <10% tunnel loss
-#   - FEC interleaving should handle burst patterns better than block codes
+#   - TLS handshakes complete on both endpoints
 #   - No panics
 #
 # Requirements: root, Linux, iproute2, tc-netem, openssl, python3, nc.
 set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
-B="$PROJECT_ROOT/target/release/quicfuscate"
+B="${QF_E2E_BINARY:-$PROJECT_ROOT/target/release/quicfuscate}"
 CA="$PROJECT_ROOT/config/local/ca.crt"
 CA_KEY="$PROJECT_ROOT/config/local/ca.key"
 
