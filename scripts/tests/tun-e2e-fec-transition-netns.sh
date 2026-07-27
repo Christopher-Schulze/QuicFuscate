@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # FEC policy and mode transition E2E test via tc-netem (TODO-427, TODO-558).
 #
-# Verifies FEC mode transitions are seamless under real transport load:
-#   Phase 1: 0% loss for 5s → FEC in Zero
-#   Phase 2: moderate (20%) or severe (40%) loss → live policy behavior
-#   Phase 3: 0% loss for 35s → Auto returns to Zero (live transition)
+# Executable contract under real transport load:
+#   Phase 1: no applied netem loss, 50 pings, observed tunnel loss <=5%
+#   Phase 2: 20% moderate loss (<=35%) or 40% severe loss (<=60%), 150 pings
+#   Phase 3: no applied netem loss after a 10-second settle, 250 pings, <=10%
 #
-# Acceptance: Auto adapts then returns to Zero; Off remains Zero with no repairs or switches.
+# Off remains Zero with no repairs or switches. Auto remains Zero while clean,
+# adapts with repairs under loss, and returns to Zero during the bounded recovery.
 set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
-B="$PROJECT_ROOT/target/release/quicfuscate"
+B="${QF_E2E_BINARY:-$PROJECT_ROOT/target/release/quicfuscate}"
 CA="$PROJECT_ROOT/config/local/ca.crt"
 CA_KEY="$PROJECT_ROOT/config/local/ca.key"
 KEEP_ON_FAIL="${QF_E2E_KEEP_ON_FAIL:-0}"

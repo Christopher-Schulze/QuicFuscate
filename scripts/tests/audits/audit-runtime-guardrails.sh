@@ -437,6 +437,8 @@ elif ! rg -F -- 'QF_E2E_BINARY:-$PROJECT_ROOT/target/release/quicfuscate' \
     scripts/tests/tun-e2e-fec-netns.sh >/dev/null \
   || ! rg -F -- 'QF_E2E_BINARY:-$PROJECT_ROOT/target/release/quicfuscate' \
     scripts/tests/tun-e2e-fec-burst-netns.sh >/dev/null \
+  || ! rg -F -- 'QF_E2E_BINARY:-$PROJECT_ROOT/target/release/quicfuscate' \
+    scripts/tests/tun-e2e-fec-transition-netns.sh >/dev/null \
   || ! rg -F -- '-J > "$iperf_json"' scripts/tests/tun-e2e-fec-netns.sh >/dev/null \
   || ! rg -F -- 'receiver=data["end"]["sum_received"]' \
     scripts/tests/tun-e2e-fec-netns.sh >/dev/null \
@@ -446,7 +448,8 @@ elif ! rg -F -- 'QF_E2E_BINARY:-$PROJECT_ROOT/target/release/quicfuscate' \
   || rg -F -- 'SKIP:' scripts/tests/tun-e2e-fec-netns.sh >/dev/null \
   || rg -F -- '[ "$retransmits" = "0" ]' scripts/tests/tun-e2e-fec-netns.sh >/dev/null \
   || rg -Fi -- 'interleaving should handle burst patterns better than block codes' \
-    scripts/tests/tun-e2e-fec-burst-netns.sh >/dev/null; then
+    scripts/tests/tun-e2e-fec-burst-netns.sh >/dev/null \
+  || rg -F -- 'Phase 1: 0% loss for 5s' scripts/tests/tun-e2e-fec-transition-netns.sh >/dev/null; then
   fail_critical "Specialized FEC netns throughput gate can silently accept sender-only or skipped results, or require a flakey retransmit count"
   append_item "specialized_tun_e2e_receiver_throughput" "fail" "receiver JSON proof, required-tool failure, exact-artifact override, or stable acceptance missing"
 else
