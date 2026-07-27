@@ -83,6 +83,7 @@ CLIENT_LOG=""
 SERVER_TELEMETRY=""
 CLIENT_TELEMETRY=""
 TELEMETRY_FILES=()
+EVIDENCE_PRESERVED=0
 ADMIN_SOCKET=""
 QKEY_STORE=""
 CERT=""
@@ -187,6 +188,9 @@ remove_runtime_dir() {
 # shellcheck disable=SC2329
 cleanup_on_exit() {
     local status=$?
+    if [ "$status" -ne 0 ] && [ -n "$EVIDENCE_DIR" ] && [ "${#TELEMETRY_FILES[@]}" -gt 0 ]; then
+        preserve_telemetry_evidence || true
+    fi
     if [ "$status" -ne 0 ] && [ "$KEEP_ON_FAIL" = "1" ]; then
         echo "QF_E2E_KEEP_ON_FAIL=1: preserving owned runtime resources in ${RUNTIME_DIR:-<none>}" >&2
         return
@@ -465,12 +469,22 @@ preserve_telemetry_evidence() {
     if [ -z "$EVIDENCE_DIR" ]; then
         return
     fi
-    if [ "${#TELEMETRY_FILES[@]}" -eq 0 ]; then
-        fatal "no telemetry evidence captured for requested artifact directory"
+    if [ "$EVIDENCE_PRESERVED" = "1" ]; then
+        return
     fi
-    mkdir "$EVIDENCE_DIR" || fatal "could not create evidence directory: $EVIDENCE_DIR"
+    if [ "${#TELEMETRY_FILES[@]}" -eq 0 ]; then
+        echo "FAIL: no telemetry evidence captured for requested artifact directory" >&2
+        return 1
+    fi
+    mkdir "$EVIDENCE_DIR" || {
+        echo "FAIL: could not create evidence directory: $EVIDENCE_DIR" >&2
+        return 1
+    }
     cp -- "${TELEMETRY_FILES[@]}" "$EVIDENCE_DIR/" \
-        || fatal "could not preserve telemetry evidence"
+        || {
+            echo "FAIL: could not preserve telemetry evidence" >&2
+            return 1
+        }
     {
         printf 'suite=%s\n' "$ADVERSITY_SUITE"
         printf 'binary_sha256=%s\n' "$(sha256sum "$B" | awk '{print $1}')"
@@ -483,7 +497,11 @@ preserve_telemetry_evidence() {
         printf 'combined_contract=%s\n' "$COMBINED_SCENARIO"
         printf 'recovery_contract=%s\n' "$RECOVERY_SCENARIO"
     } > "$EVIDENCE_DIR/run-manifest.txt" \
-        || fatal "could not write telemetry evidence manifest"
+        || {
+            echo "FAIL: could not write telemetry evidence manifest" >&2
+            return 1
+        }
+    EVIDENCE_PRESERVED=1
     echo "Evidence: $EVIDENCE_DIR"
 }
 
@@ -828,7 +846,7 @@ case "$ADVERSITY_SUITE" in
 esac
 
 cleanup_owned_resources || fatal "could not clean final owned resources"
-preserve_telemetry_evidence
+preserve_telemetry_evidence || fatal "could not preserve telemetry evidence"
 
 echo ""
 echo "=========================================="
