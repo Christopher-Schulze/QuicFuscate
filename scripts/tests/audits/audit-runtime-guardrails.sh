@@ -493,12 +493,18 @@ if rg -F -- 'UNIFORM_PING_SCENARIOS=(' "$UNIFORM_FEC_CONTRACT_HARNESS" >/dev/nul
   && rg -F -- 'for scenario in "${JITTER_SCENARIOS[@]}"; do' "$ADVERSITY_FEC_CONTRACT_HARNESS" >/dev/null \
   && rg -F -- 'for scenario in "${BANDWIDTH_SCENARIOS[@]}"; do' "$ADVERSITY_FEC_CONTRACT_HARNESS" >/dev/null \
   && rg -F -- 'for scenario in "${RTT_SCENARIOS[@]}"; do' "$ADVERSITY_FEC_CONTRACT_HARNESS" >/dev/null \
+  && rg -F -- 'QF_E2E_ARTIFACT_DIR' "$ADVERSITY_FEC_CONTRACT_HARNESS" >/dev/null \
+  && rg -F -- '"$B" --telemetry server' "$ADVERSITY_FEC_CONTRACT_HARNESS" >/dev/null \
+  && rg -F -- '"$B" --telemetry client' "$ADVERSITY_FEC_CONTRACT_HARNESS" >/dev/null \
+  && rg -F -- 'capture_telemetry "loss-${loss}"' "$ADVERSITY_FEC_CONTRACT_HARNESS" >/dev/null \
+  && rg -F -- 'capture_telemetry "recovery-lossy"' "$ADVERSITY_FEC_CONTRACT_HARNESS" >/dev/null \
+  && rg -F -- 'preserve_telemetry_evidence' "$ADVERSITY_FEC_CONTRACT_HARNESS" >/dev/null \
   && ! rg -F -- 'for loss in 0 1 5 10 25 50; do' "$ADVERSITY_FEC_CONTRACT_HARNESS" >/dev/null; then
-  pass "Uniform, burst, transition, and adversity FEC acceptance execute their printed single-source scenario contracts"
-  append_item "fec_specialized_single_source_contract" "ok" "scenario inputs and bounds flow from contract arrays into execution"
+  pass "Specialized FEC acceptance executes printed contracts and captures loss/recovery controller evidence"
+  append_item "fec_specialized_single_source_contract" "ok" "scenario inputs and bounds flow from contract arrays into execution; adversity captures FEC controller telemetry"
 else
-  fail_critical "Specialized FEC acceptance drifted away from its single-source scenario contract"
-  append_item "fec_specialized_single_source_contract" "fail" "missing scenario contract arrays, contract-driven execution, or stale duplicated threshold branch"
+  fail_critical "Specialized FEC acceptance drifted from its scenario contract or lost FEC controller evidence"
+  append_item "fec_specialized_single_source_contract" "fail" "missing scenario contract arrays, contract-driven execution, telemetry evidence, or stale duplicated threshold branch"
 fi
 
 SPECIALIZED_TUN_E2E_REGRESSION="scripts/tests/test-specialized-tun-e2e-ownership.sh"

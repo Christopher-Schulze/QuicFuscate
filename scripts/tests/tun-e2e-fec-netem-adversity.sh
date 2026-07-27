@@ -63,6 +63,8 @@ RTT_SCENARIOS=(
 COMBINED_SCENARIO="100:10:25:5:10Mbit:32kbit:400ms:25"
 RECOVERY_SCENARIO="20:5:10:2:3"
 ADVERSITY_SUITE="${QF_ADVERSITY_SUITE:-all}"
+TELEMETRY_PORT="${QF_FEC_TELEMETRY_PORT:-9898}"
+EVIDENCE_DIR="${QF_E2E_ARTIFACT_DIR:-}"
 KEEP_ON_FAIL="${QF_E2E_KEEP_ON_FAIL:-0}"
 LOCK_FILE="${QF_E2E_LOCK_FILE:-/tmp/quicfuscate-tun-e2e.lock}"
 LOCK_TIMEOUT="${QF_E2E_LOCK_TIMEOUT:-300}"
@@ -78,6 +80,9 @@ RUNTIME_DIR=""
 CURRENT_SCENARIO_DIR=""
 SERVER_LOG=""
 CLIENT_LOG=""
+SERVER_TELEMETRY=""
+CLIENT_TELEMETRY=""
+TELEMETRY_FILES=()
 ADMIN_SOCKET=""
 QKEY_STORE=""
 CERT=""
@@ -236,6 +241,22 @@ if [ "$(id -u)" -ne 0 ]; then
     echo "FAIL: this harness requires root" >&2
     exit 2
 fi
+if [ -n "$EVIDENCE_DIR" ] && [ "${EVIDENCE_DIR#/}" = "$EVIDENCE_DIR" ]; then
+    echo "FAIL: QF_E2E_ARTIFACT_DIR must be an absolute path" >&2
+    exit 2
+fi
+if [ -n "$EVIDENCE_DIR" ] && [ -e "$EVIDENCE_DIR" ]; then
+    echo "FAIL: refusing to overwrite existing evidence path: $EVIDENCE_DIR" >&2
+    exit 2
+fi
+if [ -n "$EVIDENCE_DIR" ] && [ ! -d "$(dirname "$EVIDENCE_DIR")" ]; then
+    echo "FAIL: evidence parent directory does not exist: $(dirname "$EVIDENCE_DIR")" >&2
+    exit 2
+fi
+if ! command -v sha256sum >/dev/null 2>&1; then
+    echo "FAIL: required command not found: sha256sum" >&2
+    exit 2
+fi
 case "$ADVERSITY_SUITE" in
     all|loss|jitter|bandwidth|rtt|combined|recovery) ;;
     *)
@@ -327,7 +348,8 @@ setup_netns() {
 }
 
 start_tunnel() {
-    ip netns exec ns-srv "$B" server --cert "$CERT" --key "$KEY" \
+    ip netns exec ns-srv env QUICFUSCATE_METRICS_ADDR="127.0.0.1:${TELEMETRY_PORT}" \
+        "$B" --telemetry server --cert "$CERT" --key "$KEY" \
         --listen 10.10.0.1:4433 --admin-socket "$ADMIN_SOCKET" \
         --qkey-store "$QKEY_STORE" \
         --tun --tun-name qtun0 --tun-ip 10.0.1.1 --tun-netmask 255.255.255.0 \
@@ -343,7 +365,8 @@ start_tunnel() {
         fatal "could not get qkey from server"
     fi
 
-    ip netns exec ns-cli "$B" client --remote 10.10.0.1:4433 --url https://10.10.0.1/ \
+    ip netns exec ns-cli env QUICFUSCATE_METRICS_ADDR="127.0.0.1:${TELEMETRY_PORT}" \
+        "$B" --telemetry client --remote 10.10.0.1:4433 --url https://10.10.0.1/ \
         --qkey "$qkey" --ca-file "$CA" --verify-peer \
         --tun --tun-name qtun0 --tun-ip 10.0.1.2 --tun-netmask 255.255.255.0 --no-utls -v \
         > "$CLIENT_LOG" 2>&1 &
@@ -396,6 +419,74 @@ check_panics() {
     return 0
 }
 
+fetch_telemetry() {
+    local namespace="$1"
+    local output_path="$2"
+    ip netns exec "$namespace" python3 -c \
+        'import sys,urllib.request; sys.stdout.write(urllib.request.urlopen(sys.argv[1], timeout=3).read().decode())' \
+        "http://127.0.0.1:${TELEMETRY_PORT}/telemetry" > "$output_path" 2>/dev/null
+}
+
+metric_value() {
+    local file="$1"
+    local metric="$2"
+    awk -v metric="$metric" '$1 == metric { print $2; found=1; exit } END { if (!found) exit 1 }' "$file"
+}
+
+capture_telemetry() {
+    local scenario="$1"
+    SERVER_TELEMETRY="$CURRENT_SCENARIO_DIR/server-${scenario}.telemetry"
+    CLIENT_TELEMETRY="$CURRENT_SCENARIO_DIR/client-${scenario}.telemetry"
+    fetch_telemetry ns-srv "$SERVER_TELEMETRY" \
+        || fatal "server telemetry endpoint unavailable during ${scenario}"
+    fetch_telemetry ns-cli "$CLIENT_TELEMETRY" \
+        || fatal "client telemetry endpoint unavailable during ${scenario}"
+
+    local file active observed lost repairs switches
+    for file in "$SERVER_TELEMETRY" "$CLIENT_TELEMETRY"; do
+        active=$(metric_value "$file" "quicfuscate_fec_active_connections_total") \
+            || fatal "missing active FEC connection metric during ${scenario}"
+        observed=$(metric_value "$file" "quicfuscate_fec_observed_packets_total") \
+            || fatal "missing observed FEC packet metric during ${scenario}"
+        lost=$(metric_value "$file" "quicfuscate_fec_observed_lost_packets_total") \
+            || fatal "missing observed FEC loss metric during ${scenario}"
+        repairs=$(metric_value "$file" "quicfuscate_fec_repair_packets_sent_total") \
+            || fatal "missing FEC repair metric during ${scenario}"
+        switches=$(metric_value "$file" "quicfuscate_fec_mode_switches_total") \
+            || fatal "missing FEC mode-switch metric during ${scenario}"
+        [ "$active" -ge 1 ] || fatal "telemetry has no active FEC connection during ${scenario}"
+        printf 'FEC telemetry %s: active=%s observed=%s lost=%s repairs=%s switches=%s\n' \
+            "$scenario" "$active" "$observed" "$lost" "$repairs" "$switches"
+    done
+    TELEMETRY_FILES+=("$SERVER_TELEMETRY" "$CLIENT_TELEMETRY")
+}
+
+preserve_telemetry_evidence() {
+    if [ -z "$EVIDENCE_DIR" ]; then
+        return
+    fi
+    if [ "${#TELEMETRY_FILES[@]}" -eq 0 ]; then
+        fatal "no telemetry evidence captured for requested artifact directory"
+    fi
+    mkdir "$EVIDENCE_DIR" || fatal "could not create evidence directory: $EVIDENCE_DIR"
+    cp -- "${TELEMETRY_FILES[@]}" "$EVIDENCE_DIR/" \
+        || fatal "could not preserve telemetry evidence"
+    {
+        printf 'suite=%s\n' "$ADVERSITY_SUITE"
+        printf 'binary_sha256=%s\n' "$(sha256sum "$B" | awk '{print $1}')"
+        printf 'ping_count=%s\n' "$ADVERSITY_PING_COUNT"
+        printf 'ping_interval_seconds=%s\n' "$ADVERSITY_PING_INTERVAL"
+        printf 'loss_contract=%s\n' "${LOSS_SCENARIOS[*]}"
+        printf 'jitter_contract=%s\n' "${JITTER_SCENARIOS[*]}"
+        printf 'bandwidth_contract=%s\n' "${BANDWIDTH_SCENARIOS[*]}"
+        printf 'rtt_contract=%s\n' "${RTT_SCENARIOS[*]}"
+        printf 'combined_contract=%s\n' "$COMBINED_SCENARIO"
+        printf 'recovery_contract=%s\n' "$RECOVERY_SCENARIO"
+    } > "$EVIDENCE_DIR/run-manifest.txt" \
+        || fatal "could not write telemetry evidence manifest"
+    echo "Evidence: $EVIDENCE_DIR"
+}
+
 # ---------------------------------------------------------------------------
 # 1. Loss sweep
 # ---------------------------------------------------------------------------
@@ -423,6 +514,7 @@ test_loss_sweep() {
         fi
         local result
         result=$(ping_through_tunnel)
+        capture_telemetry "loss-${loss}"
         local tunnel_loss rtt
         tunnel_loss=${result%%:*}
         rtt=${result##*:}
@@ -470,6 +562,7 @@ test_jitter_sweep() {
         fi
         local result
         result=$(ping_through_tunnel)
+        capture_telemetry "jitter-${jitter}"
         local tunnel_loss rtt
         tunnel_loss=${result%%:*}
         rtt=${result##*:}
@@ -515,6 +608,7 @@ test_bandwidth() {
         apply_qdisc "tbf rate ${bw} burst ${burst} latency ${latency}"
         local result
         result=$(ping_through_tunnel)
+        capture_telemetry "bandwidth-${bw}"
         local tunnel_loss rtt
         tunnel_loss=${result%%:*}
         rtt=${result##*:}
@@ -560,6 +654,7 @@ test_rtt_variation() {
         apply_qdisc "netem delay ${rtt}ms loss ${netem_loss}%"
         local result
         result=$(ping_through_tunnel)
+        capture_telemetry "rtt-${rtt}"
         local tunnel_loss measured_rtt
         tunnel_loss=${result%%:*}
         measured_rtt=${result##*:}
@@ -614,6 +709,7 @@ test_combined_adversity() {
 
     local result
     result=$(ping_through_tunnel)
+    capture_telemetry "combined"
     local tunnel_loss rtt
     tunnel_loss=${result%%:*}
     rtt=${result##*:}
@@ -661,6 +757,7 @@ test_adversity_recovery() {
     echo "Phase 1: Clean link (0% loss)..."
     local result1
     result1=$(ping_through_tunnel)
+    capture_telemetry "recovery-clean"
     local loss1
     loss1=${result1%%:*}
     echo "  Tunnel loss: ${loss1}%"
@@ -671,6 +768,7 @@ test_adversity_recovery() {
     sleep "$loss_settle_seconds"
     local result2
     result2=$(ping_through_tunnel)
+    capture_telemetry "recovery-lossy"
     local loss2
     loss2=${result2%%:*}
     echo "  Tunnel loss: ${loss2}%"
@@ -681,6 +779,7 @@ test_adversity_recovery() {
     sleep "$recovery_settle_seconds"
     local result3
     result3=$(ping_through_tunnel)
+    capture_telemetry "recovery-recovered"
     local loss3
     loss3=${result3%%:*}
     echo "  Tunnel loss: ${loss3}%"
@@ -729,6 +828,7 @@ case "$ADVERSITY_SUITE" in
 esac
 
 cleanup_owned_resources || fatal "could not clean final owned resources"
+preserve_telemetry_evidence
 
 echo ""
 echo "=========================================="
