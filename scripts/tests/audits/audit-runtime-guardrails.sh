@@ -522,6 +522,18 @@ else
   append_item "specialized_tun_e2e_ownership_regression" "fail" "sentinel, lifecycle mode, namespace/link refusal, or exact cleanup coverage missing"
 fi
 
+LOSS_STABILITY_HARNESS="scripts/tests/tun-e2e-fec-loss-stability.sh"
+if rg -F -- 'LOSS_TRIALS=3' "$LOSS_STABILITY_HARNESS" >/dev/null \
+  && rg -F -- 'QF_ADVERSITY_SUITE=loss' "$LOSS_STABILITY_HARNESS" >/dev/null \
+  && rg -F -- 'summary.tsv' "$LOSS_STABILITY_HARNESS" >/dev/null \
+  && rg -F -- 'missing, duplicate, incomplete, or out-of-contract results' "$LOSS_STABILITY_HARNESS" >/dev/null; then
+  pass "Repeated FEC loss stability harness requires three raw-evidence trials and a fail-closed aggregate"
+  append_item "fec_loss_stability_aggregate" "ok" "three loss trials, child evidence, and TSV aggregation are required"
+else
+  fail_critical "Repeated FEC loss stability harness is missing its fail-closed aggregate contract"
+  append_item "fec_loss_stability_aggregate" "fail" "missing trial count, loss selector, raw aggregate, or failure check"
+fi
+
 CUBIC_FEC_CONTROL_HARNESS="scripts/tests/tun-e2e-cubic-netns.sh"
 if rg -F -- 'LOSS_TRIALS=3' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
   && rg -F -- 'for fec_mode in auto off; do' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
