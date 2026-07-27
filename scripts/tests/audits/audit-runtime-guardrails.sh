@@ -480,12 +480,15 @@ if rg -F -- 'LOSS_TRIALS=3' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
   && rg -F -- 'run_loss_comparison "$fec_mode"' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
   && rg -F -- 'loss-summary-$fec_mode.json' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
   && rg -F -- 'fec-comparison-summary.json' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
-  && rg -F -- 'auto_minus_off_retained_percentage_points' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null; then
+  && rg -F -- 'auto_minus_off_retained_percentage_points' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
+  && rg -F -- 'prepare_certificate' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
+  && rg -F -- 'CA_KEY="${QF_E2E_CA_KEY:-$PROJECT_ROOT/config/local/ca.key}"' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
+  && ! rg -F -- 'config/local/server.crt' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null; then
   pass "CUBIC loss proof keeps matched Auto and FEC-off controls with machine-readable comparison evidence"
-  append_item "cubic_fec_control_comparison" "ok" "three clean/loss trials per policy and absolute/relative comparison artifact are required"
+  append_item "cubic_fec_control_comparison" "ok" "three clean/loss trials per policy, isolated certificate fixture, and absolute/relative comparison artifact are required"
 else
   fail_critical "CUBIC loss proof lost its matched Auto versus FEC-off comparison contract"
-  append_item "cubic_fec_control_comparison" "fail" "missing repetition count, both policy runs, per-policy evidence, or relative comparison artifact"
+  append_item "cubic_fec_control_comparison" "fail" "missing repetition count, both policy runs, isolated fixture, per-policy evidence, or relative comparison artifact"
 fi
 
 # 6) Guardrail warning: shadow runtime modules with no non-test call sites.

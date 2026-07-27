@@ -13,9 +13,10 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 BINARY="${QF_E2E_BINARY:-$PROJECT_ROOT/target/release/quicfuscate}"
-CERT="${QF_E2E_CERT:-$PROJECT_ROOT/config/local/server.crt}"
-KEY="${QF_E2E_KEY:-$PROJECT_ROOT/config/local/server.key}"
+CERT="${QF_E2E_CERT:-}"
+KEY="${QF_E2E_KEY:-}"
 CA="${QF_E2E_CA:-$PROJECT_ROOT/config/local/ca.crt}"
+CA_KEY="${QF_E2E_CA_KEY:-$PROJECT_ROOT/config/local/ca.key}"
 LOCK_FILE="${QF_E2E_LOCK_FILE:-/tmp/quicfuscate-tun-e2e.lock}"
 LOCK_TIMEOUT="${QF_E2E_LOCK_TIMEOUT:-300}"
 ARTIFACT_DIR="${QF_E2E_ARTIFACT_DIR:-/tmp/quicfuscate-todo535-$$}"
@@ -128,6 +129,7 @@ setup_topology() {
   cleanup
   set -e
   mkdir -p "$ARTIFACT_DIR"
+  prepare_certificate
   ip link add "$BRIDGE" type bridge
   ip addr add "$GATEWAY_UNDERLAY/24" dev "$BRIDGE"
   ip link set "$BRIDGE" up
@@ -135,6 +137,39 @@ setup_topology() {
   setup_namespace_link "${CLIENT_NS[0]}" "${CLIENT_HOST_VETH[0]}" "${CLIENT_UNDERLAY[0]}"
   setup_namespace_link "${CLIENT_NS[1]}" "${CLIENT_HOST_VETH[1]}" "${CLIENT_UNDERLAY[1]}"
   sha256sum "$BINARY" >"$ARTIFACT_DIR/binary.sha256"
+}
+
+prepare_certificate() {
+  if [[ -n "$CERT" || -n "$KEY" ]]; then
+    [[ -n "$CERT" && -n "$KEY" ]] \
+      || fail 'QF_E2E_CERT and QF_E2E_KEY must be set together'
+    [[ -r "$CERT" && -r "$KEY" ]] \
+      || fail 'QF_E2E_CERT or QF_E2E_KEY is unreadable'
+    return
+  fi
+
+  local leaf_cert="$ARTIFACT_DIR/leaf.crt"
+  local certificate_request="$ARTIFACT_DIR/server.csr"
+  local certificate_extensions="$ARTIFACT_DIR/leaf-ext.cnf"
+  local certificate_serial="$ARTIFACT_DIR/ca.srl"
+  CERT="$ARTIFACT_DIR/server.crt"
+  KEY="$ARTIFACT_DIR/server.key"
+
+  cat >"$certificate_extensions" <<'EOF'
+basicConstraints=critical,CA:FALSE
+keyUsage=digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+subjectAltName=DNS:cdn.cloudflare.com,DNS:cloudflare-dns.com,DNS:one.one.one.one,DNS:warp.plus,DNS:workers.dev,DNS:localhost,IP:127.0.0.1,IP:10.10.0.1
+EOF
+  openssl req -newkey rsa:2048 -keyout "$KEY" -out "$certificate_request" \
+    -nodes -subj '/CN=cdn.cloudflare.com' >/dev/null 2>&1 \
+    || fail 'could not generate the isolated server key'
+  openssl x509 -req -in "$certificate_request" -CA "$CA" -CAkey "$CA_KEY" \
+    -CAserial "$certificate_serial" -CAcreateserial -out "$leaf_cert" -days 365 \
+    -extfile "$certificate_extensions" >/dev/null 2>&1 \
+    || fail 'could not sign the isolated server certificate'
+  cat "$leaf_cert" "$CA" >"$CERT" \
+    || fail 'could not assemble the isolated certificate chain'
 }
 
 issue_qkey() {
@@ -416,11 +451,11 @@ main() {
   [[ "$(uname -s)" == "Linux" ]] || fail 'this proof requires Linux network namespaces'
   [[ "${EUID:-$(id -u)}" == "0" ]] || fail 'this proof requires root'
   local command
-  for command in flock ip nc ping python3 sha256sum sysctl tc timeout; do
+  for command in flock ip nc openssl ping python3 sha256sum sysctl tc timeout; do
     require_command "$command"
   done
   [[ -x "$BINARY" ]] || fail "release binary not executable: $BINARY"
-  [[ -r "$CERT" && -r "$KEY" && -r "$CA" ]] || fail 'certificate, key, or CA fixture is unreadable'
+  [[ -r "$CA" && -r "$CA_KEY" ]] || fail 'CA certificate or key fixture is unreadable'
 
   exec 9>"$LOCK_FILE"
   flock -w "$LOCK_TIMEOUT" 9 || fail "could not acquire E2E lock within ${LOCK_TIMEOUT}s"
