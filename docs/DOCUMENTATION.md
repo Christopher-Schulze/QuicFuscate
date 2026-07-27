@@ -1123,6 +1123,14 @@ pub struct MacTun {
 - Platform-specific implementation injected at startup
 - Clear error messages if factory not registered
 
+#### TUN/MASQUE Backpressure and Packet Ownership
+
+- TUN frames are not consumed from the reader channel until the QUIC DATAGRAM carrier has accepted them (`ConnectionError::DgramQueueFull` is the only retried condition; terminal errors drop the frame with explicit logging).
+- `transport::connection::dgram_send` returns `ConnectionError::DgramQueueFull` when the fixed DATAGRAM send queue is at capacity, preserving the original error class through `transport::h3::send_masque_datagram` and `core::{send_tunnel_packet, send_masque_downlink}`.
+- Framed H3 fallback is used only for packets that exceed the confirmed MASQUE MTU or for states where it is semantically valid; it is never used as a reaction to transient DATAGRAM pressure.
+- Client uplink: `main.rs` holds a single `tun_backpressure_frame` and retries it before reading new frames from the TUN reader channel.
+- Server downlink: `src/implementations/server/mod.rs` defers per-target downlinks in `LiveServerState::pending_tun_downlinks` and retries them each housekeeping tick via `drain_pending_tun_downlinks`; successfully enqueued packets are flushed immediately.
+
 ### Cryptography Design (AEAD-First, Efficient by Construction)
 - Product-level data-plane AEAD posture: retained `Aegis128L` and `Morus1280_128` families with hardware-aware automatic selection.
 - Constant-time glue and strict nonce/tag checks on hot paths

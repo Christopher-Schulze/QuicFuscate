@@ -1696,6 +1696,9 @@ impl QuicFuscateConnection {
                                 debug!("MASQUE TX: sid={} {}B", sid, packet.len());
                                 return Ok(());
                             }
+                            Err(crate::transport::h3::Error::DgramQueueFull) => {
+                                return Err(crate::error::ConnectionError::DgramQueueFull);
+                            }
                             Err(error) => {
                                 warn!(
                                     "MASQUE datagram send failed, using framed H3 fallback: {:?}",
@@ -1790,6 +1793,9 @@ impl QuicFuscateConnection {
                         Ok(()) => {
                             debug!("MASQUE downlink TX: sid={} {}B dgram_queue={}", sid, payload.len(), self.conn.dgram_send_queue_len());
                             return Ok(());
+                        }
+                        Err(crate::transport::h3::Error::DgramQueueFull) => {
+                            return Err(crate::error::ConnectionError::DgramQueueFull);
                         }
                         Err(error) => {
                             warn!("MASQUE downlink failed, using framed H3 fallback: {:?}", error);

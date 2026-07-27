@@ -70,6 +70,9 @@ pub mod error {
         NoViablePath,
         ConnectionRefused,
         InvalidStreamId,
+        /// QUIC DATAGRAM send queue is at capacity; the caller should apply
+        /// backpressure and retry rather than drop the packet.
+        DgramQueueFull,
     }
 
     impl fmt::Display for ConnectionError {
@@ -110,6 +113,7 @@ pub mod error {
                 ConnectionError::TlsError(msg) => write!(f, "TLS error: {}", msg),
                 ConnectionError::ApplicationProtoError => write!(f, "Application protocol error"),
                 ConnectionError::VersionMismatch => write!(f, "Version mismatch"),
+                ConnectionError::DgramQueueFull => write!(f, "DATAGRAM send queue full"),
             }
         }
     }

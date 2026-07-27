@@ -3936,7 +3936,7 @@ impl Connection {
             return Err(crate::error::ConnectionError::InvalidState);
         }
         if self.is_dgram_send_queue_full() {
-            return Err(crate::error::ConnectionError::InvalidState);
+            return Err(crate::error::ConnectionError::DgramQueueFull);
         }
         #[cfg(not(feature = "zero_copy_dgram"))]
         {

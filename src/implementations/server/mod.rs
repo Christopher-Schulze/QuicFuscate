@@ -2763,6 +2763,10 @@ async fn process_live_server_client_datagram(
 
 pub struct LiveServerState {
     clients: std::collections::HashMap<SocketAddr, QuicFuscateConnection>,
+    /// Downlink packets that could not be enqueued because a client's QUIC
+    /// DATAGRAM queue was full. Retried on each run_loop tick before new TUN
+    /// packets are read.
+    pending_tun_downlinks: std::collections::VecDeque<(SocketAddr, Vec<u8>)>,
     fanout_queue: ClientFanoutQueue,
     qkey_auth: std::collections::HashMap<Vec<u8>, QKeyAuthState>,
     domain: LiveServerDomain,
@@ -3200,6 +3204,7 @@ impl LiveServerState {
             );
         Self {
             clients: std::collections::HashMap::new(),
+            pending_tun_downlinks: std::collections::VecDeque::new(),
             fanout_queue: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
             qkey_auth: std::collections::HashMap::new(),
             domain: LiveServerDomain::new(&server_config),
@@ -4001,6 +4006,78 @@ fn write_downlink_error(
     metrics.record_routing_outcome(outcome);
 }
 
+/// Retry downlink packets that were deferred because a client's QUIC DATAGRAM
+/// queue was full. Successfully enqueued packets are flushed to the socket;
+/// entries that are still backpressured remain in the pending queue.
+fn drain_pending_tun_downlinks(
+    live: &mut ServerLiveRuntime,
+    out: &mut [u8],
+    socket: &UdpSocket,
+    metrics: &Metrics,
+) {
+    let mut still_pending = std::collections::VecDeque::new();
+    let mut queued = smallvec::SmallVec::<[SocketAddr; 4]>::new();
+    while let Some((target, packet)) = live.live_state.pending_tun_downlinks.pop_front() {
+        let send_result = {
+            let Some(connection) = live.live_state.clients.get_mut(&target) else {
+                continue;
+            };
+            connection.send_masque_downlink(&packet)
+        };
+        match send_result {
+            Ok(()) => queued.push(target),
+            Err(crate::error::ConnectionError::DgramQueueFull) => {
+                log::debug!("pending TUN downlink for {} still backpressured", target);
+                still_pending.push_back((target, packet));
+            }
+            Err(error) => {
+                log::warn!("pending TUN downlink for {} failed: {:?}", target, error);
+            }
+        }
+    }
+
+    // Return still-pending entries to the queue in their original order.
+    for entry in still_pending {
+        live.live_state.pending_tun_downlinks.push_back(entry);
+    }
+
+    flush_tun_downlink_queue(live, &queued, out, socket, metrics);
+}
+
+/// Flush a list of client connections whose downlink datagrams have been
+/// enqueued. Callers are responsible for collecting `queued` addresses.
+fn flush_tun_downlink_queue(
+    live: &mut ServerLiveRuntime,
+    queued: &[SocketAddr],
+    out: &mut [u8],
+    socket: &UdpSocket,
+    _metrics: &Metrics,
+) {
+    for target in queued {
+        let Some(connection) = live.live_state.clients.get_mut(target) else {
+            continue;
+        };
+        loop {
+            let written = match connection.send(out) {
+                Ok(0) => {
+                    log::debug!("TUN to socket send to {}: connection.send returned 0", target);
+                    break;
+                }
+                Ok(written) => written,
+                Err(error) => {
+                    log::warn!("TUN to socket send to {}: connection.send failed: {:?}", target, error);
+                    break;
+                }
+            };
+            if let Err(error) = socket.try_send_to(&out[..written], *target) {
+                log::warn!("TUN to socket send to {} failed: {:?}", target, error);
+                break;
+            }
+            log::debug!("TUN to socket send to {}: sent {}B", target, written);
+        }
+    }
+}
+
 fn process_server_tun_packet(
     live: &mut ServerLiveRuntime,
     packet: &[u8],
@@ -4092,54 +4169,42 @@ fn process_server_tun_packet(
         live.live_state.clients.len()
     );
     for target in targets {
-        let Some(connection) = live.live_state.clients.get_mut(&target) else {
-            log::debug!("process_server_tun_packet: no connection for target {}", target);
-            continue;
-        };
-        let effective_mtu = connection.effective_tunnel_mtu().min(usize::from(tun.mtu()));
-        if packet.len() > effective_mtu {
-            if matches!(route, DownlinkRoute::Unicast { .. }) {
-                write_downlink_error(
-                    packet,
-                    &tun,
-                    server_ips,
-                    RoutingOutcome::PacketTooBig,
-                    Some(effective_mtu),
-                    metrics,
-                );
+        let send_result = {
+            let Some(connection) = live.live_state.clients.get_mut(&target) else {
+                log::debug!("process_server_tun_packet: no connection for target {}", target);
+                continue;
+            };
+            let effective_mtu = connection.effective_tunnel_mtu().min(usize::from(tun.mtu()));
+            if packet.len() > effective_mtu {
+                if matches!(route, DownlinkRoute::Unicast { .. }) {
+                    write_downlink_error(
+                        packet,
+                        &tun,
+                        server_ips,
+                        RoutingOutcome::PacketTooBig,
+                        Some(effective_mtu),
+                        metrics,
+                    );
+                }
+                continue;
             }
-            continue;
-        }
-        if let Err(error) = connection.send_masque_downlink(packet) {
-            log::warn!("TUN to MASQUE queue for {} failed: {:?}", target, error);
-        } else {
-            queued.push(target);
+            connection.send_masque_downlink(packet)
+        };
+        match send_result {
+            Ok(()) => queued.push(target),
+            Err(crate::error::ConnectionError::DgramQueueFull) => {
+                log::debug!("TUN to MASQUE queue for {} full, deferring downlink", target);
+                live.live_state
+                    .pending_tun_downlinks
+                    .push_back((target, packet.to_vec()));
+            }
+            Err(error) => {
+                log::warn!("TUN to MASQUE queue for {} failed: {:?}", target, error);
+            }
         }
     }
 
-    for target in queued {
-        let Some(connection) = live.live_state.clients.get_mut(&target) else {
-            continue;
-        };
-        loop {
-            let written = match connection.send(out) {
-                Ok(0) => {
-                    log::debug!("TUN to socket send to {}: connection.send returned 0", target);
-                    break;
-                }
-                Ok(written) => written,
-                Err(error) => {
-                    log::warn!("TUN to socket send to {}: connection.send failed: {:?}", target, error);
-                    break;
-                }
-            };
-            if let Err(error) = socket.try_send_to(&out[..written], target) {
-                log::warn!("TUN to socket send to {} failed: {:?}", target, error);
-                break;
-            }
-            log::debug!("TUN to socket send to {}: sent {}B", target, written);
-        }
-    }
+    flush_tun_downlink_queue(live, &queued, out, socket, metrics);
 }
 
 impl StandaloneServiceSignals {
@@ -6254,6 +6319,10 @@ impl ServerRuntime {
                             runtime_parts.accept_loop,
                         )
                         .await;
+                    // Retry any downlinks that were deferred because a client's QUIC
+                    // DATAGRAM queue was full, before reading new TUN frames.
+                    drain_pending_tun_downlinks(self.live_mut(), &mut out, &socket, &metrics);
+
                     // Forward TUN→client: drain any packets from the TUN reader thread
                     // and route them to the correct client based on the destination IP
                     // in the IP packet header. Each client has a unique TUN IP from the
@@ -6281,6 +6350,10 @@ impl ServerRuntime {
                             }
                         }
                     }
+                    // Retry/final-flush any downlinks that were deferred during the
+                    // TUN drain above.
+                    drain_pending_tun_downlinks(self.live_mut(), &mut out, &socket, &metrics);
+
                     // Sweep expired entries from 0-RTT anti-replay strike register.
                     if let Some(ref sr) = runtime_config.strike_register {
                         sr.cleanup(std::time::Instant::now());

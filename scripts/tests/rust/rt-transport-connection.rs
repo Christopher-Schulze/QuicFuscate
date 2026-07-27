@@ -22,7 +22,7 @@ fn connection_datagram_queues_and_thresholds() {
     assert_eq!(conn.dgram_send_queue_len(), 1);
 
     let err = conn.dgram_send(b"two").expect_err("queue full");
-    assert!(matches!(err, ConnectionError::InvalidState));
+    assert!(matches!(err, ConnectionError::DgramQueueFull));
 }
 
 #[test]

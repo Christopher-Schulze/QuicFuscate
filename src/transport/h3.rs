@@ -6,6 +6,9 @@ pub enum Error {
     Done,
     BufferTooShort,
     InternalError,
+    /// The underlying QUIC DATAGRAM send queue is at capacity; the caller
+    /// should apply backpressure and retry rather than fall back to framed H3.
+    DgramQueueFull,
     ExcessiveLoad,
     IdError,
     StreamCreationError,
@@ -1043,7 +1046,10 @@ impl Connection {
         let mut buf = Vec::with_capacity(9 + udp_payload.len());
         Self::encode_varint(flow_id, &mut buf);
         buf.extend_from_slice(udp_payload);
-        conn.dgram_send(&buf).map_err(|_| Error::InternalError)
+        conn.dgram_send(&buf).map_err(|e| match e {
+            crate::error::ConnectionError::DgramQueueFull => Error::DgramQueueFull,
+            _ => Error::InternalError,
+        })
     }
 
     /// Try to receive one MASQUE datagram; returns (flow_id, payload)
