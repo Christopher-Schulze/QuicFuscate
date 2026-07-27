@@ -62,6 +62,7 @@ RTT_SCENARIOS=(
 )
 COMBINED_SCENARIO="100:10:25:5:10Mbit:32kbit:400ms:25"
 RECOVERY_SCENARIO="20:5:10:2:3"
+ADVERSITY_SUITE="${QF_ADVERSITY_SUITE:-all}"
 KEEP_ON_FAIL="${QF_E2E_KEEP_ON_FAIL:-0}"
 LOCK_FILE="${QF_E2E_LOCK_FILE:-/tmp/quicfuscate-tun-e2e.lock}"
 LOCK_TIMEOUT="${QF_E2E_LOCK_TIMEOUT:-300}"
@@ -235,6 +236,13 @@ if [ "$(id -u)" -ne 0 ]; then
     echo "FAIL: this harness requires root" >&2
     exit 2
 fi
+case "$ADVERSITY_SUITE" in
+    all|loss|jitter|bandwidth|rtt|combined|recovery) ;;
+    *)
+        echo "FAIL: QF_ADVERSITY_SUITE must select all, loss, jitter, bandwidth, rtt, combined, or recovery" >&2
+        exit 2
+        ;;
+esac
 if pgrep -x quicfuscate >/dev/null; then
     echo "FAIL: a pre-existing quicfuscate process is running; refusing broad cleanup" >&2
     exit 2
@@ -694,6 +702,7 @@ test_adversity_recovery() {
 
 # --- Main ---
 echo "=== FEC Network Adversity Test Suite (TODO-425) ==="
+echo "Selected suite: ${ADVERSITY_SUITE}"
 echo "Ping contract: ${ADVERSITY_PING_COUNT} @ ${ADVERSITY_PING_INTERVAL}s interval"
 echo "Loss contract: ${LOSS_SCENARIOS[*]} (netem-loss:max-tunnel-loss)"
 echo "Jitter contract: ${JITTER_SCENARIOS[*]} (jitter-ms:base-delay-ms:correlation:max-tunnel-loss)"
@@ -702,12 +711,22 @@ echo "RTT contract: ${RTT_SCENARIOS[*]} (delay-ms:netem-loss:max-tunnel-loss)"
 echo "Combined contract: ${COMBINED_SCENARIO} (delay-ms:jitter-ms:correlation:netem-loss:rate:burst:latency:max-tunnel-loss)"
 echo "Recovery contract: ${RECOVERY_SCENARIO} (netem-loss:clean-max-loss:recovery-max-loss:loss-settle-seconds:recovery-settle-seconds)"
 
-test_loss_sweep
-test_jitter_sweep
-test_bandwidth
-test_rtt_variation
-test_combined_adversity
-test_adversity_recovery
+case "$ADVERSITY_SUITE" in
+    all)
+        test_loss_sweep
+        test_jitter_sweep
+        test_bandwidth
+        test_rtt_variation
+        test_combined_adversity
+        test_adversity_recovery
+        ;;
+    loss) test_loss_sweep ;;
+    jitter) test_jitter_sweep ;;
+    bandwidth) test_bandwidth ;;
+    rtt) test_rtt_variation ;;
+    combined) test_combined_adversity ;;
+    recovery) test_adversity_recovery ;;
+esac
 
 cleanup_owned_resources || fatal "could not clean final owned resources"
 
