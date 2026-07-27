@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 # FEC policy and mode transition E2E test via tc-netem (TODO-427, TODO-558).
 #
-# Executable contract under real transport load:
-#   Phase 1: no applied netem loss, 50 pings, observed tunnel loss <=5%
-#   Phase 2: 20% moderate loss (<=35%) or 40% severe loss (<=60%), 150 pings
-#   Phase 3: no applied netem loss after a 10-second settle, 250 pings, <=10%
+# `TRANSITION_SCENARIOS` is the single source for every profile's real-load
+# phase inputs, observed-loss bounds, recovery settle, and Fountain policy.
 #
 # Off remains Zero with no repairs or switches. Auto remains Zero while clean,
 # adapts with repairs under loss, and returns to Zero during the bounded recovery.
@@ -21,25 +19,46 @@ FEC_MODE="${FEC_MODE:-auto}"
 TELEMETRY_PORT="${QF_FEC_TELEMETRY_PORT:-9898}"
 LOSS_PROFILE="${QF_FEC_LOSS_PROFILE:-moderate}"
 EVIDENCE_DIR="${QF_E2E_ARTIFACT_DIR:-}"
-RECOVERY_SETTLE_SECONDS=10
-RECOVERY_PING_COUNT=250
-LOSS_PHASE_PING_COUNT=150
 CRYPTO_FAILURE_PATTERN='Crypto error: crypto failure|AEAD limit reached|Key update error'
+TRANSITION_SCENARIOS=(
+    "moderate:20:35:50:5:150:10:250:10:1"
+    "severe:40:60:50:5:150:10:250:10:0"
+)
+TRANSITION_SCENARIO=""
+LOSS_PERCENT=""
+MAX_TUNNEL_LOSS_PERCENT=""
+CLEAN_PING_COUNT=""
+CLEAN_MAX_TUNNEL_LOSS_PERCENT=""
+LOSS_PHASE_PING_COUNT=""
+RECOVERY_SETTLE_SECONDS=""
+RECOVERY_PING_COUNT=""
+RECOVERY_MAX_TUNNEL_LOSS_PERCENT=""
+FORBID_FOUNTAIN=""
 
-case "$LOSS_PROFILE" in
-    moderate)
-        LOSS_PERCENT=20
-        MAX_TUNNEL_LOSS_PERCENT=35
-        ;;
-    severe)
-        LOSS_PERCENT=40
-        MAX_TUNNEL_LOSS_PERCENT=60
-        ;;
-    *)
-        echo "FAIL: QF_FEC_LOSS_PROFILE must be 'moderate' or 'severe'" >&2
-        exit 2
-        ;;
-esac
+for scenario in "${TRANSITION_SCENARIOS[@]}"; do
+    IFS=':' read -r profile_name loss_percent max_tunnel_loss_percent \
+        clean_ping_count clean_max_tunnel_loss_percent loss_phase_ping_count \
+        recovery_settle_seconds recovery_ping_count recovery_max_tunnel_loss_percent \
+        forbid_fountain <<< "$scenario"
+    if [ "$profile_name" = "$LOSS_PROFILE" ]; then
+        TRANSITION_SCENARIO="$scenario"
+        LOSS_PERCENT="$loss_percent"
+        MAX_TUNNEL_LOSS_PERCENT="$max_tunnel_loss_percent"
+        CLEAN_PING_COUNT="$clean_ping_count"
+        CLEAN_MAX_TUNNEL_LOSS_PERCENT="$clean_max_tunnel_loss_percent"
+        LOSS_PHASE_PING_COUNT="$loss_phase_ping_count"
+        RECOVERY_SETTLE_SECONDS="$recovery_settle_seconds"
+        RECOVERY_PING_COUNT="$recovery_ping_count"
+        RECOVERY_MAX_TUNNEL_LOSS_PERCENT="$recovery_max_tunnel_loss_percent"
+        FORBID_FOUNTAIN="$forbid_fountain"
+        break
+    fi
+done
+
+if [ -z "$TRANSITION_SCENARIO" ]; then
+    echo "FAIL: QF_FEC_LOSS_PROFILE must select a declared transition scenario" >&2
+    exit 2
+fi
 
 PASS=0
 FAIL=0
@@ -180,12 +199,17 @@ preserve_evidence() {
         | awk -F: '{ sum += $NF } END { print sum + 0 }')
     {
         printf 'policy=%s\n' "$FEC_MODE"
+        printf 'transition_scenario=%s\n' "$TRANSITION_SCENARIO"
         printf 'loss_profile=%s\n' "$LOSS_PROFILE"
         printf 'netem_loss_percent=%s\n' "$LOSS_PERCENT"
         printf 'max_tunnel_loss_percent=%s\n' "$MAX_TUNNEL_LOSS_PERCENT"
+        printf 'clean_ping_count=%s\n' "$CLEAN_PING_COUNT"
+        printf 'clean_max_tunnel_loss_percent=%s\n' "$CLEAN_MAX_TUNNEL_LOSS_PERCENT"
         printf 'loss_phase_ping_count=%s\n' "$LOSS_PHASE_PING_COUNT"
         printf 'recovery_settle_seconds=%s\n' "$RECOVERY_SETTLE_SECONDS"
         printf 'recovery_ping_count=%s\n' "$RECOVERY_PING_COUNT"
+        printf 'recovery_max_tunnel_loss_percent=%s\n' "$RECOVERY_MAX_TUNNEL_LOSS_PERCENT"
+        printf 'forbid_fountain=%s\n' "$FORBID_FOUNTAIN"
         printf 'clean_tunnel_loss_percent=%s\n' "$clean_loss"
         printf 'impaired_tunnel_loss_percent=%s\n' "$impaired_loss"
         printf 'recovered_tunnel_loss_percent=%s\n' "$recovered_loss"
@@ -493,7 +517,8 @@ ping_phase() {
 
 echo "=== FEC Policy/Transition E2E Test (TODO-427, TODO-558) ==="
 echo "Policy: $FEC_MODE"
-echo "Loss profile: $LOSS_PROFILE (${LOSS_PERCENT}%)"
+echo "Transition contract: ${TRANSITION_SCENARIOS[*]} (profile:netem-loss:max-tunnel-loss:clean-pings:clean-max-loss:loss-pings:recovery-settle:recovery-pings:recovery-max-loss:forbid-fountain)"
+echo "Selected transition profile: $TRANSITION_SCENARIO"
 
 prepare_scenario_runtime "transition"
 setup_netns
@@ -505,9 +530,9 @@ if ! check_handshake; then
     exit 1
 fi
 
-# Phase 1: Clean link (0% loss) for 50 pings
+# Phase 1: Clean link without applied netem loss.
 echo "Phase 1: Clean link (0% loss)..."
-loss1=$(ping_phase 50 "1")
+loss1=$(ping_phase "$CLEAN_PING_COUNT" "1")
 capture_telemetry_phase "clean"
 
 # Phase 2: Inject the selected loss profile and observe the live policy.
@@ -536,16 +561,16 @@ echo "  Phase 2 (${LOSS_PROFILE}, ${LOSS_PERCENT}% loss): ${loss2}% loss"
 echo "  Phase 3 (recovered): ${loss3}% loss"
 
 ok=true
-if [ "$loss1" -gt 5 ]; then
-    echo "FAIL: Phase 1 loss >5%"
+if [ "$loss1" -gt "$CLEAN_MAX_TUNNEL_LOSS_PERCENT" ]; then
+    echo "FAIL: Phase 1 loss >${CLEAN_MAX_TUNNEL_LOSS_PERCENT}%"
     ok=false
 fi
 if [ "$loss2" -gt "$MAX_TUNNEL_LOSS_PERCENT" ]; then
     echo "FAIL: Phase 2 loss >${MAX_TUNNEL_LOSS_PERCENT}%"
     ok=false
 fi
-if [ "$loss3" -gt 10 ]; then
-    echo "FAIL: Phase 3 loss >10% (should recover after de-escalation)"
+if [ "$loss3" -gt "$RECOVERY_MAX_TUNNEL_LOSS_PERCENT" ]; then
+    echo "FAIL: Phase 3 loss >${RECOVERY_MAX_TUNNEL_LOSS_PERCENT}% during clean-link recovery"
     ok=false
 fi
 
@@ -598,7 +623,7 @@ else
         ok=false
     fi
 
-    if [ "$LOSS_PROFILE" = "moderate" ]; then
+    if [ "$FORBID_FOUNTAIN" = "1" ]; then
         client_fountain_active=$(metric_value \
             "$CURRENT_SCENARIO_DIR/client-lossy.telemetry" \
             'quicfuscate_fec_active_connections{mode="fountain",mode_id="7"}') \

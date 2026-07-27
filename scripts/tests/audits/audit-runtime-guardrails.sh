@@ -467,18 +467,26 @@ fi
 
 UNIFORM_FEC_CONTRACT_HARNESS="scripts/tests/tun-e2e-fec-netns.sh"
 BURST_FEC_CONTRACT_HARNESS="scripts/tests/tun-e2e-fec-burst-netns.sh"
+TRANSITION_FEC_CONTRACT_HARNESS="scripts/tests/tun-e2e-fec-transition-netns.sh"
 if rg -F -- 'UNIFORM_PING_SCENARIOS=(' "$UNIFORM_FEC_CONTRACT_HARNESS" >/dev/null \
   && rg -F -- 'UNIFORM_IPERF_SCENARIOS=(0 10)' "$UNIFORM_FEC_CONTRACT_HARNESS" >/dev/null \
   && rg -F -- 'run_loss_level "$loss" "$max_loss"' "$UNIFORM_FEC_CONTRACT_HARNESS" >/dev/null \
   && ! rg -F -- 'case "$loss_pct" in' "$UNIFORM_FEC_CONTRACT_HARNESS" >/dev/null \
   && rg -F -- 'BURST_SCENARIOS=(' "$BURST_FEC_CONTRACT_HARNESS" >/dev/null \
   && rg -F -- 'run_burst_scenario "$loss_pct" "$correlation" "$label burst" "$median_limit" "$sample_limit"' "$BURST_FEC_CONTRACT_HARNESS" >/dev/null \
-  && ! rg -F -- 'run_burst_scenario 10 25' "$BURST_FEC_CONTRACT_HARNESS" >/dev/null; then
-  pass "Uniform and burst FEC acceptance execute their printed single-source scenario contracts"
-  append_item "fec_uniform_burst_single_source_contract" "ok" "scenario inputs and bounds flow from contract arrays into execution"
+  && ! rg -F -- 'run_burst_scenario 10 25' "$BURST_FEC_CONTRACT_HARNESS" >/dev/null \
+  && rg -F -- 'TRANSITION_SCENARIOS=(' "$TRANSITION_FEC_CONTRACT_HARNESS" >/dev/null \
+  && rg -F -- 'if [ "$profile_name" = "$LOSS_PROFILE" ]; then' "$TRANSITION_FEC_CONTRACT_HARNESS" >/dev/null \
+  && rg -F -- 'loss1=$(ping_phase "$CLEAN_PING_COUNT" "1")' "$TRANSITION_FEC_CONTRACT_HARNESS" >/dev/null \
+  && rg -F -- 'loss2=$(ping_phase "$LOSS_PHASE_PING_COUNT" "2")' "$TRANSITION_FEC_CONTRACT_HARNESS" >/dev/null \
+  && rg -F -- 'loss3=$(ping_phase "$RECOVERY_PING_COUNT" "3")' "$TRANSITION_FEC_CONTRACT_HARNESS" >/dev/null \
+  && ! rg -F -- 'case "$LOSS_PROFILE" in' "$TRANSITION_FEC_CONTRACT_HARNESS" >/dev/null \
+  && ! rg -F -- 'ping_phase 50 "1"' "$TRANSITION_FEC_CONTRACT_HARNESS" >/dev/null; then
+  pass "Uniform, burst, and transition FEC acceptance execute their printed single-source scenario contracts"
+  append_item "fec_uniform_burst_transition_single_source_contract" "ok" "scenario inputs and bounds flow from contract arrays into execution"
 else
-  fail_critical "Uniform or burst FEC acceptance drifted away from its single-source scenario contract"
-  append_item "fec_uniform_burst_single_source_contract" "fail" "missing scenario contract arrays, contract-driven execution, or stale duplicated threshold branch"
+  fail_critical "Uniform, burst, or transition FEC acceptance drifted away from its single-source scenario contract"
+  append_item "fec_uniform_burst_transition_single_source_contract" "fail" "missing scenario contract arrays, contract-driven execution, or stale duplicated threshold branch"
 fi
 
 SPECIALIZED_TUN_E2E_REGRESSION="scripts/tests/test-specialized-tun-e2e-ownership.sh"
