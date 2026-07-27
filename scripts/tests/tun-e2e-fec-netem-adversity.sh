@@ -27,8 +27,41 @@ B="${QF_E2E_BINARY:-$PROJECT_ROOT/target/release/quicfuscate}"
 CA="$PROJECT_ROOT/config/local/ca.crt"
 CA_KEY="$PROJECT_ROOT/config/local/ca.key"
 
-PING_COUNT="${PING_COUNT:-50}"
-PING_INTERVAL="${PING_INTERVAL:-0.1}"
+ADVERSITY_PING_COUNT=50
+ADVERSITY_PING_INTERVAL=0.1
+LOSS_SCENARIOS=(
+    "0:15"
+    "1:16"
+    "5:20"
+    "10:25"
+    "25:40"
+    "50:65"
+)
+JITTER_SCENARIOS=(
+    "0:50:25:10"
+    "10:50:25:10"
+    "50:50:25:10"
+    "100:50:25:10"
+    "200:50:25:10"
+    "500:50:25:10"
+)
+BANDWIDTH_SCENARIOS=(
+    "100Mbit:32kbit:400ms:5"
+    "50Mbit:32kbit:400ms:5"
+    "10Mbit:32kbit:400ms:5"
+    "5Mbit:32kbit:400ms:5"
+    "1Mbit:32kbit:400ms:5"
+)
+RTT_SCENARIOS=(
+    "1:5:20"
+    "10:5:20"
+    "50:5:20"
+    "100:5:20"
+    "200:5:20"
+    "300:5:20"
+)
+COMBINED_SCENARIO="100:10:25:5:10Mbit:32kbit:400ms:25"
+RECOVERY_SCENARIO="20:5:10:2:3"
 KEEP_ON_FAIL="${QF_E2E_KEEP_ON_FAIL:-0}"
 LOCK_FILE="${QF_E2E_LOCK_FILE:-/tmp/quicfuscate-tun-e2e.lock}"
 LOCK_TIMEOUT="${QF_E2E_LOCK_TIMEOUT:-300}"
@@ -330,7 +363,7 @@ apply_qdisc() {
 
 ping_through_tunnel() {
     local ping_output
-    ping_output=$(ip netns exec ns-cli ping -c "$PING_COUNT" -i "$PING_INTERVAL" -W 5 -I qtun0 10.0.1.1 2>&1)
+    ping_output=$(ip netns exec ns-cli ping -c "$ADVERSITY_PING_COUNT" -i "$ADVERSITY_PING_INTERVAL" -W 5 -I qtun0 10.0.1.1 2>&1)
     local ping_loss
     ping_loss=$(echo "$ping_output" | grep 'packet loss' | grep -oP '[\d.]+(?=% packet loss)' | awk '{printf "%d", $1}' || echo "100")
     # Extract avg RTT (second value in "min/avg/max/mdev = X/Y/Z/W")
@@ -356,16 +389,17 @@ check_panics() {
 }
 
 # ---------------------------------------------------------------------------
-# 1. Loss sweep (0-50%)
+# 1. Loss sweep
 # ---------------------------------------------------------------------------
 test_loss_sweep() {
     echo ""
     echo "=========================================="
-    echo "  1. Loss Sweep (0-50%)"
+    echo "  1. Loss Sweep"
     echo "=========================================="
     echo "loss% | tunnel_loss% | rtt_ms | status"
 
-    for loss in 0 1 5 10 25 50; do
+    for scenario in "${LOSS_SCENARIOS[@]}"; do
+        IFS=':' read -r loss max_loss <<< "$scenario"
         cleanup_owned_resources || fatal "could not clean the previous loss scenario"
         prepare_scenario_runtime "loss-${loss}"
         setup_netns
@@ -385,8 +419,6 @@ test_loss_sweep() {
         tunnel_loss=${result%%:*}
         rtt=${result##*:}
 
-        # Threshold: tunnel loss should not exceed netem loss by more than 15%
-        local max_loss=$((loss + 15))
         if [ "$tunnel_loss" -le "$max_loss" ]; then
             echo "${loss}% | ${tunnel_loss}% | ${rtt} | PASS"
             PASS=$((PASS + 1))
@@ -404,16 +436,17 @@ test_loss_sweep() {
 }
 
 # ---------------------------------------------------------------------------
-# 2. Jitter sweep (0-500ms)
+# 2. Jitter sweep
 # ---------------------------------------------------------------------------
 test_jitter_sweep() {
     echo ""
     echo "=========================================="
-    echo "  2. Jitter Sweep (0-500ms, no loss)"
+    echo "  2. Jitter Sweep"
     echo "=========================================="
     echo "jitter_ms | tunnel_loss% | rtt_ms | status"
 
-    for jitter in 0 10 50 100 200 500; do
+    for scenario in "${JITTER_SCENARIOS[@]}"; do
+        IFS=':' read -r jitter base_delay correlation max_loss <<< "$scenario"
         cleanup_owned_resources || fatal "could not clean the previous jitter scenario"
         prepare_scenario_runtime "jitter-${jitter}"
         setup_netns
@@ -425,7 +458,7 @@ test_jitter_sweep() {
             continue
         fi
         if [ "$jitter" != "0" ]; then
-            apply_qdisc "netem delay 50ms ${jitter}ms 25%"
+            apply_qdisc "netem delay ${base_delay}ms ${jitter}ms ${correlation}%"
         fi
         local result
         result=$(ping_through_tunnel)
@@ -433,12 +466,11 @@ test_jitter_sweep() {
         tunnel_loss=${result%%:*}
         rtt=${result##*:}
 
-        # Under jitter-only (no loss), tunnel loss should be <10%
-        if [ "$tunnel_loss" -le 10 ]; then
+        if [ "$tunnel_loss" -le "$max_loss" ]; then
             echo "${jitter}ms | ${tunnel_loss}% | ${rtt} | PASS"
             PASS=$((PASS + 1))
         else
-            echo "${jitter}ms | ${tunnel_loss}% | ${rtt} | FAIL (threshold 10%)"
+            echo "${jitter}ms | ${tunnel_loss}% | ${rtt} | FAIL (threshold ${max_loss}%)"
             FAIL=$((FAIL + 1))
         fi
         if ! check_panics; then
@@ -451,16 +483,17 @@ test_jitter_sweep() {
 }
 
 # ---------------------------------------------------------------------------
-# 3. Bandwidth limitation (1-100Mbit)
+# 3. Bandwidth limitation
 # ---------------------------------------------------------------------------
 test_bandwidth() {
     echo ""
     echo "=========================================="
-    echo "  3. Bandwidth Limitation (1-100Mbit)"
+    echo "  3. Bandwidth Limitation"
     echo "=========================================="
     echo "bandwidth | tunnel_loss% | rtt_ms | status"
 
-    for bw in 100Mbit 50Mbit 10Mbit 5Mbit 1Mbit; do
+    for scenario in "${BANDWIDTH_SCENARIOS[@]}"; do
+        IFS=':' read -r bw burst latency max_loss <<< "$scenario"
         cleanup_owned_resources || fatal "could not clean the previous bandwidth scenario"
         prepare_scenario_runtime "bandwidth-${bw}"
         setup_netns
@@ -471,19 +504,18 @@ test_bandwidth() {
             preserve_failure_if_requested
             continue
         fi
-        apply_qdisc "tbf rate ${bw} burst 32kbit latency 400ms"
+        apply_qdisc "tbf rate ${bw} burst ${burst} latency ${latency}"
         local result
         result=$(ping_through_tunnel)
         local tunnel_loss rtt
         tunnel_loss=${result%%:*}
         rtt=${result##*:}
 
-        # Under bandwidth limit (no loss), tunnel loss should be <5%
-        if [ "$tunnel_loss" -le 5 ]; then
+        if [ "$tunnel_loss" -le "$max_loss" ]; then
             echo "${bw} | ${tunnel_loss}% | ${rtt} | PASS"
             PASS=$((PASS + 1))
         else
-            echo "${bw} | ${tunnel_loss}% | ${rtt} | FAIL (threshold 5%)"
+            echo "${bw} | ${tunnel_loss}% | ${rtt} | FAIL (threshold ${max_loss}%)"
             FAIL=$((FAIL + 1))
         fi
         if ! check_panics; then
@@ -496,16 +528,17 @@ test_bandwidth() {
 }
 
 # ---------------------------------------------------------------------------
-# 4. RTT variation (1-300ms with 5% loss)
+# 4. RTT variation
 # ---------------------------------------------------------------------------
 test_rtt_variation() {
     echo ""
     echo "=========================================="
-    echo "  4. RTT Variation (1-300ms + 5% loss)"
+    echo "  4. RTT Variation"
     echo "=========================================="
     echo "rtt_ms | tunnel_loss% | measured_rtt_ms | status"
 
-    for rtt in 1 10 50 100 200 300; do
+    for scenario in "${RTT_SCENARIOS[@]}"; do
+        IFS=':' read -r rtt netem_loss max_loss <<< "$scenario"
         cleanup_owned_resources || fatal "could not clean the previous RTT scenario"
         prepare_scenario_runtime "rtt-${rtt}"
         setup_netns
@@ -516,19 +549,18 @@ test_rtt_variation() {
             preserve_failure_if_requested
             continue
         fi
-        apply_qdisc "netem delay ${rtt}ms loss 5%"
+        apply_qdisc "netem delay ${rtt}ms loss ${netem_loss}%"
         local result
         result=$(ping_through_tunnel)
         local tunnel_loss measured_rtt
         tunnel_loss=${result%%:*}
         measured_rtt=${result##*:}
 
-        # With 5% loss plus RTT, this liveness scenario requires tunnel loss <=20%.
-        if [ "$tunnel_loss" -le 20 ]; then
+        if [ "$tunnel_loss" -le "$max_loss" ]; then
             echo "${rtt}ms | ${tunnel_loss}% | ${measured_rtt} | PASS"
             PASS=$((PASS + 1))
         else
-            echo "${rtt}ms | ${tunnel_loss}% | ${measured_rtt} | FAIL (threshold 20%)"
+            echo "${rtt}ms | ${tunnel_loss}% | ${measured_rtt} | FAIL (threshold ${max_loss}%)"
             FAIL=$((FAIL + 1))
         fi
         if ! check_panics; then
@@ -541,14 +573,16 @@ test_rtt_variation() {
 }
 
 # ---------------------------------------------------------------------------
-# 5. Combined adversity (mobile network simulation)
+# 5. Combined adversity
 # ---------------------------------------------------------------------------
 test_combined_adversity() {
     echo ""
     echo "=========================================="
-    echo "  5. Combined Adversity (Mobile Network)"
+    echo "  5. Combined Adversity"
     echo "=========================================="
-    echo "  100ms RTT + 10ms jitter + 5% loss + 10Mbit"
+    local delay_ms jitter_ms correlation netem_loss bandwidth burst latency max_loss
+    IFS=':' read -r delay_ms jitter_ms correlation netem_loss bandwidth burst latency max_loss <<< "$COMBINED_SCENARIO"
+    echo "  ${delay_ms}ms RTT + ${jitter_ms}ms jitter + ${netem_loss}% loss + ${bandwidth}"
 
     cleanup_owned_resources || fatal "could not clean the previous combined-adversity scenario"
     prepare_scenario_runtime "combined"
@@ -562,12 +596,12 @@ test_combined_adversity() {
     fi
 
     # Apply combined qdisc: netem (delay+jitter+loss) then tbf (bandwidth)
-    if ip netns exec ns-cli tc qdisc add dev veth-cli root handle 1: netem delay 100ms 10ms 25% loss 5%; then
+    if ip netns exec ns-cli tc qdisc add dev veth-cli root handle 1: netem delay "${delay_ms}ms" "${jitter_ms}ms" "${correlation}%" loss "${netem_loss}%"; then
         QDISC_CREATED=1
     else
         fatal "could not apply combined root netem qdisc"
     fi
-    ip netns exec ns-cli tc qdisc add dev veth-cli parent 1: handle 2: tbf rate 10Mbit burst 32kbit latency 400ms \
+    ip netns exec ns-cli tc qdisc add dev veth-cli parent 1: handle 2: tbf rate "$bandwidth" burst "$burst" latency "$latency" \
         || fatal "could not apply combined child tbf qdisc"
 
     local result
@@ -576,12 +610,11 @@ test_combined_adversity() {
     tunnel_loss=${result%%:*}
     rtt=${result##*:}
 
-    # Under combined adversity, tunnel loss should be <25%
-    if [ "$tunnel_loss" -le 25 ]; then
+    if [ "$tunnel_loss" -le "$max_loss" ]; then
         echo "PASS: ${tunnel_loss}% tunnel loss, ${rtt} rtt"
         PASS=$((PASS + 1))
     else
-        echo "FAIL: ${tunnel_loss}% tunnel loss (threshold 25%)"
+        echo "FAIL: ${tunnel_loss}% tunnel loss (threshold ${max_loss}%)"
         FAIL=$((FAIL + 1))
     fi
 
@@ -594,12 +627,12 @@ test_combined_adversity() {
 }
 
 # ---------------------------------------------------------------------------
-# 6. Adversity recovery (clean → loss → clean transitions)
+# 6. Adversity recovery
 # ---------------------------------------------------------------------------
 test_adversity_recovery() {
     echo ""
     echo "=========================================="
-    echo "  6. Adversity Recovery (clean → loss → clean)"
+    echo "  6. Adversity Recovery"
     echo "=========================================="
 
     cleanup_owned_resources || fatal "could not clean the previous recovery scenario"
@@ -613,7 +646,10 @@ test_adversity_recovery() {
         return
     fi
 
-    # Phase 1: Clean link (0% loss)
+    local netem_loss clean_max_loss recovery_max_loss loss_settle_seconds recovery_settle_seconds
+    IFS=':' read -r netem_loss clean_max_loss recovery_max_loss loss_settle_seconds recovery_settle_seconds <<< "$RECOVERY_SCENARIO"
+
+    # Phase 1: Clean link without applied netem loss.
     echo "Phase 1: Clean link (0% loss)..."
     local result1
     result1=$(ping_through_tunnel)
@@ -621,10 +657,10 @@ test_adversity_recovery() {
     loss1=${result1%%:*}
     echo "  Tunnel loss: ${loss1}%"
 
-    # Phase 2: Inject 20% loss
-    echo "Phase 2: Inject 20% loss..."
-    apply_qdisc "netem loss 20%"
-    sleep 2
+    # Phase 2: Inject the declared loss.
+    echo "Phase 2: Inject ${netem_loss}% loss..."
+    apply_qdisc "netem loss ${netem_loss}%"
+    sleep "$loss_settle_seconds"
     local result2
     result2=$(ping_through_tunnel)
     local loss2
@@ -634,15 +670,14 @@ test_adversity_recovery() {
 
     # Phase 3: Remove loss (clean again)
     echo "Phase 3: Remove loss (clean again)..."
-    sleep 3  # Allow the clean-link recovery observation to begin.
+    sleep "$recovery_settle_seconds"
     local result3
     result3=$(ping_through_tunnel)
     local loss3
     loss3=${result3%%:*}
     echo "  Tunnel loss: ${loss3}%"
 
-    # Acceptance: Phase 1 loss <5%, Phase 3 loss <10% for clean-link recovery liveness.
-    if [ "$loss1" -le 5 ] && [ "$loss3" -le 10 ]; then
+    if [ "$loss1" -le "$clean_max_loss" ] && [ "$loss3" -le "$recovery_max_loss" ]; then
         echo "PASS: clean=${loss1}%, loss=${loss2}%, recovered=${loss3}%"
         PASS=$((PASS + 1))
     else
@@ -659,7 +694,13 @@ test_adversity_recovery() {
 
 # --- Main ---
 echo "=== FEC Network Adversity Test Suite (TODO-425) ==="
-echo "Ping count: ${PING_COUNT} @ ${PING_INTERVAL}s interval"
+echo "Ping contract: ${ADVERSITY_PING_COUNT} @ ${ADVERSITY_PING_INTERVAL}s interval"
+echo "Loss contract: ${LOSS_SCENARIOS[*]} (netem-loss:max-tunnel-loss)"
+echo "Jitter contract: ${JITTER_SCENARIOS[*]} (jitter-ms:base-delay-ms:correlation:max-tunnel-loss)"
+echo "Bandwidth contract: ${BANDWIDTH_SCENARIOS[*]} (rate:burst:latency:max-tunnel-loss)"
+echo "RTT contract: ${RTT_SCENARIOS[*]} (delay-ms:netem-loss:max-tunnel-loss)"
+echo "Combined contract: ${COMBINED_SCENARIO} (delay-ms:jitter-ms:correlation:netem-loss:rate:burst:latency:max-tunnel-loss)"
+echo "Recovery contract: ${RECOVERY_SCENARIO} (netem-loss:clean-max-loss:recovery-max-loss:loss-settle-seconds:recovery-settle-seconds)"
 
 test_loss_sweep
 test_jitter_sweep
