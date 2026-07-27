@@ -2802,6 +2802,15 @@ impl Connection {
         Ok((off, false, None))
     }
 
+    #[inline(always)]
+    fn pending_datagram_frame_reserve(&self) -> Option<usize> {
+        #[cfg(not(feature = "zero_copy_dgram"))]
+        let payload_len = self.dgram_send_queue.front()?.len();
+        #[cfg(feature = "zero_copy_dgram")]
+        let payload_len = self.dgram_send_queue.front()?.len;
+        Some(1 + 2 + payload_len)
+    }
+
     /// Flushes one DATAGRAM frame. Returns `(new_off, wrote_ack_eliciting)`.
     /// DATAGRAM frames are ack-eliciting per RFC 9221 §2.
     #[inline(always)]
@@ -2810,15 +2819,10 @@ impl Connection {
         out: &mut [u8],
         mut off: usize,
     ) -> Result<(usize, bool), crate::error::ConnectionError> {
-        if let Some(front) = self.dgram_send_queue.front() {
-            #[cfg(not(feature = "zero_copy_dgram"))]
-            let front_len = front.len();
-            #[cfg(feature = "zero_copy_dgram")]
-            let front_len = front.len;
-            let need = 1 + 2 + front_len;
+        if let Some(need) = self.pending_datagram_frame_reserve() {
             let tag_reserve = self.tag_reserve_1rtt();
-            log::debug!("maybe_flush_one_datagram_frame: off={} need={} tag_reserve={} out_len={} front_len={} queue_len={}",
-                off, need, tag_reserve, out.len(), front_len, self.dgram_send_queue.len());
+            log::debug!("maybe_flush_one_datagram_frame: off={} need={} tag_reserve={} out_len={} queue_len={}",
+                off, need, tag_reserve, out.len(), self.dgram_send_queue.len());
             if off + need + tag_reserve <= out.len() {
                 #[cfg(not(feature = "zero_copy_dgram"))]
                 {
@@ -3496,8 +3500,13 @@ impl Connection {
             // stream and datagram data - those are congestion-controlled and
             // must not be sent when the window is exhausted.
             if !ack_bypass {
+                let datagram_reserve = self
+                    .pending_datagram_frame_reserve()
+                    .filter(|reserve| off + reserve + self.tag_reserve_1rtt() <= out.len())
+                    .unwrap_or(0);
+                let stream_limit = out.len().saturating_sub(datagram_reserve);
                 let (off_after_stream, stream_ack_eliciting, emitted_transmission_id) =
-                    self.maybe_flush_one_writable_stream(out, off)?;
+                    self.maybe_flush_one_writable_stream(&mut out[..stream_limit], off)?;
                 off = off_after_stream;
                 wrote_ack_eliciting |= stream_ack_eliciting;
                 stream_transmission_id = emitted_transmission_id;
@@ -6386,6 +6395,25 @@ mod tests {
         c.dgram_send(b"test_dgram").unwrap();
         assert_eq!(c.dgram_send_queue_len(), 1);
         assert_eq!(c.dgram_send_queue_byte_size(), 10);
+    }
+
+    #[test]
+    fn outer_framing_reserves_space_for_queued_datagram_after_stream() {
+        let mut pair = bench_paired_1rtt_connections();
+        pair.client.enable_datagrams(16, 16);
+        pair.server.enable_datagrams(16, 16);
+        pair.client.dgram_send(&[0xD1; 1100]).expect("datagram enqueue");
+        pair.client.stream_send(0, &[0xA5; 1200], false).expect("stream enqueue");
+        let mut packet = [0u8; 1280];
+
+        let (written, _) = pair
+            .client
+            .send_with_datagram_overhead(&mut packet, 36)
+            .expect("outer-framed packet must serialize");
+        pair.server.recv(&mut packet[..written], &pair.recv_info).expect("packet receive");
+
+        assert_eq!(pair.client.dgram_send_queue_len(), 0);
+        assert_eq!(pair.server.dgram_recv_vec().expect("datagram receive"), vec![0xD1; 1100]);
     }
 
     // ---- Recovery / FEC Escalation ---------------------------------------
