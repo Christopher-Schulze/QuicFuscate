@@ -226,7 +226,8 @@ fn pto_deadline_increases_with_count() {
     let now = Instant::now();
     let d1 = r.pto_deadline(now);
     r.on_packet_sent(1, 1200, now);
-    r.on_loss(1200, now); // bumps pto_count
+    // RFC 9002 §6.2.1: the PTO backoff grows on PTO firings, not on losses.
+    let _ = r.on_loss_detection_timeout(true, false, now);
     let d2 = r.pto_deadline(now);
     assert!(d2 > d1, "PTO deadline must grow with retransmit count");
 }

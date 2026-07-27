@@ -6,6 +6,7 @@
 Thumbs.db
 ehthumbs.db
 desktop.ini
+.opencode/
 
 # Local screenshots and generated analysis output
 **/Bildschirmfoto*.png

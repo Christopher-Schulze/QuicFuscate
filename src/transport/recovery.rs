@@ -7,11 +7,112 @@
 
 use core::cmp::min;
 use core::time::Duration;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
 pub use super::cc::stealth_shaper::BrowserProfile;
 use super::cc::{self, CcImpl, CongestionController};
+
+/// RFC 9002 packet number space (§4.1, A.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PacketSpace {
+    /// Initial packets (space index 0).
+    Initial,
+    /// Handshake packets (space index 1).
+    Handshake,
+    /// Application data / 1-RTT packets (space index 2).
+    Application,
+}
+
+impl PacketSpace {
+    /// Maps the space to its `pkt_spaces` array index.
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Initial => 0,
+            Self::Handshake => 1,
+            Self::Application => 2,
+        }
+    }
+
+    /// Maps a `pkt_spaces` array index back to its space.
+    pub const fn from_index(idx: usize) -> Self {
+        match idx {
+            0 => Self::Initial,
+            1 => Self::Handshake,
+            _ => Self::Application,
+        }
+    }
+}
+
+/// Maximum reordering in packets before packet-threshold loss (RFC 9002 §6.1.1).
+pub const K_PACKET_THRESHOLD: u64 = 3;
+/// Timer granularity floor for loss/PTO computations (RFC 9002 §6.1.2, A.2).
+pub const K_GRANULARITY: Duration = Duration::from_millis(1);
+/// Default max_ack_delay when the peer does not advertise one (RFC 9000 §18.2).
+pub const K_MAX_ACK_DELAY: Duration = Duration::from_millis(25);
+/// Initial RTT before any sample (RFC 9002 §6.2.2, A.2: handshake PTO = 1 s).
+pub const K_INITIAL_RTT: Duration = Duration::from_millis(333);
+/// Persistent congestion window multiplier (RFC 9002 §7.6.1).
+pub const K_PERSISTENT_CONGESTION_THRESHOLD: u32 = 3;
+
+/// One tracked sent packet inside the canonical recovery owner.
+#[derive(Debug, Clone)]
+pub struct SentPacket {
+    /// Packet number within its space.
+    pub pn: u64,
+    /// In-flight byte contribution (0 when `in_flight` is false).
+    pub size: usize,
+    /// Send timestamp.
+    pub sent_at: Instant,
+    /// Whether the packet is ack-eliciting (RFC 9000 §19).
+    pub ack_eliciting: bool,
+    /// Whether the packet counts toward bytes in flight.
+    pub in_flight: bool,
+    /// CRYPTO stream range carried (offset, len) for Initial/Handshake packets.
+    pub crypto_range: Option<(u64, u64)>,
+}
+
+/// Per-space loss detection state owned by [`Recovery`].
+#[derive(Debug, Default)]
+struct SpaceRecovery {
+    /// Unacknowledged sent packets by packet number.
+    sent: BTreeMap<u64, SentPacket>,
+    /// Armed time-threshold deadline (RFC 9002 §6.1.2).
+    loss_time: Option<Instant>,
+    /// Send time of the most recent ack-eliciting packet (PTO base, §6.2.1).
+    time_of_last_ack_eliciting: Option<Instant>,
+    /// Largest packet number ever acknowledged in this space (§5.1).
+    largest_acked: Option<u64>,
+}
+
+/// Result of [`Recovery::on_ack_received`]: everything the connection must react to.
+#[derive(Debug, Default)]
+pub struct AckOutcome {
+    /// Newly acknowledged `(pn, size)` pairs (in-flight accounting already applied).
+    pub newly_acked: Vec<(u64, usize)>,
+    /// Newly declared-lost `(pn, size)` pairs.
+    pub lost: Vec<(u64, usize)>,
+    /// CRYPTO ranges `(offset, len)` acknowledged via their carrier packets.
+    pub crypto_acked: Vec<(u64, u64)>,
+    /// CRYPTO ranges `(offset, len)` to requeue for retransmission.
+    pub crypto_lost: Vec<(u64, u64)>,
+    /// Raw RTT sample when one was generated per RFC 9002 §5.1.
+    pub rtt_sample: Option<Duration>,
+    /// True when persistent congestion was established (RFC 9002 §7.6).
+    pub persistent_congestion: bool,
+}
+
+/// Result of [`Recovery::on_loss_detection_timeout`].
+#[derive(Debug, Default)]
+pub struct TimeoutOutcome {
+    /// Declared-lost `(space, pn, size)` tuples from an expired time-threshold timer.
+    pub lost: Vec<(PacketSpace, u64, usize)>,
+    /// CRYPTO ranges `(offset, len)` to requeue (space implied by `lost` carriers).
+    pub crypto_lost: Vec<(PacketSpace, u64, u64)>,
+    /// Spaces that must emit an ack-eliciting probe (RFC 9002 §6.2.4).
+    pub probe_spaces: Vec<PacketSpace>,
+}
 
 /// QUIC loss recovery and congestion control state.
 ///
@@ -28,14 +129,18 @@ pub struct Recovery {
     pub rtt: Duration,
     /// RTT variation (EWMA per RFC 6298).
     rtt_var: Duration,
-    /// Minimum RTT observed (for RACK and BBR).
+    /// Minimum RTT observed (RFC 9002 §5.2; also feeds BBR).
     min_rtt: Duration,
+    /// Most recent raw RTT sample (RFC 9002 §5.1 `latest_rtt`).
+    latest_rtt: Option<Duration>,
     /// Whether we have a valid RTT sample yet.
     rtt_initialized: bool,
-    /// Probe Timeout counter (exponential backoff).
+    /// Probe Timeout counter (exponential backoff, incremented per PTO firing).
     pub pto_count: u32,
-    /// Timestamp of the most recent loss event.
-    pub loss_time: Option<Instant>,
+    /// Per-packet-number-space sent/loss state (canonical owner, RFC 9002 §4.1).
+    spaces: [SpaceRecovery; 3],
+    /// Persistent congestion loss-run window: (run_start_sent, latest_lost_sent).
+    pc_window: Option<(Instant, Instant)>,
     /// Whether HyStart slow-start exit is enabled.
     pub hystart: bool,
     /// Whether packet pacing is enabled.
@@ -59,12 +164,14 @@ impl Recovery {
             cwnd: initial_cwnd,
             ssthresh: usize::MAX / 2,
             bytes_in_flight: 0,
-            rtt: Duration::from_millis(100),
-            rtt_var: Duration::from_millis(50),
+            rtt: K_INITIAL_RTT,
+            rtt_var: K_INITIAL_RTT / 2,
             min_rtt: Duration::MAX,
+            latest_rtt: None,
             rtt_initialized: false,
             pto_count: 0,
-            loss_time: None,
+            spaces: [SpaceRecovery::default(), SpaceRecovery::default(), SpaceRecovery::default()],
+            pc_window: None,
             hystart: true,
             pacing: true,
             mss,
@@ -230,10 +337,13 @@ impl Recovery {
     }
 
     /// Records a packet loss event with known packet number for FEC callbacks.
+    ///
+    /// Compat wrapper for externally detected losses: feeds the congestion
+    /// controller only. PTO state is owned by the canonical space-aware path
+    /// (`on_loss_detection_timeout`); loss events must never bump `pto_count`
+    /// (RFC 9002 §6.2.1: backoff grows on PTO firings, not on losses).
     pub fn on_loss_packet(&mut self, packet_num: u64, lost_bytes: usize, now: Instant) {
         self.cc.on_loss_packet(packet_num, lost_bytes, now);
-        self.loss_time = Some(now);
-        self.pto_count = self.pto_count.saturating_add(1);
         self.sync_from_cc();
     }
 
@@ -263,7 +373,11 @@ impl Recovery {
                 self.min_rtt = rtt;
             }
         }
+        // The raw sample feeds the CC (BBR keeps a windowed min-filter over raw
+        // samples per its model); the EWMA variance is propagated separately so
+        // BBR can gate unstable-path behavior on it.
         self.cc.update_rtt(rtt);
+        self.cc.update_rtt_var(self.rtt_var);
     }
 
     /// Returns the maximum bytes that can be released (cwnd minus in-flight).
@@ -273,14 +387,12 @@ impl Recovery {
 
     /// Computes the Probe Timeout deadline per RFC 9002 Section 6.2.1.
     ///
-    /// PTO = SRTT + max(1*RTTVAR, granular) + max_ack_delay
+    /// PTO = SRTT + max(4*RTTVAR, kGranularity) + max_ack_delay
     /// With exponential backoff: PTO * 2^pto_count
     pub fn pto_deadline(&self, now: Instant) -> Instant {
-        let granularity = Duration::from_millis(1);
-        let max_ack_delay = Duration::from_millis(25); // QUIC default
-        let pto = self.rtt + self.rtt_var.max(granularity) + max_ack_delay;
-        let backoff = 1u32 << self.pto_count.min(8);
-        now + pto * backoff
+        let pto = self.rtt + (self.rtt_var * 4).max(K_GRANULARITY) + K_MAX_ACK_DELAY;
+        let backoff = 1u32 << self.pto_count.min(16);
+        now + pto.checked_mul(backoff).unwrap_or(pto)
     }
 
     /// Returns the send quantum (max burst size) in bytes.
@@ -298,34 +410,17 @@ impl Recovery {
         self.pacing && self.cc.pacing_rate().is_some()
     }
 
-    /// Time-based loss detection deadline per RFC 9002 Section 6.2.
+    /// Time-based loss detection deadline per RFC 9002 Section 6.1.2.
     ///
     /// A packet should be considered lost if it was sent more than
-    /// `max(9/8 * SRTT, 1ms)` ago and a later packet was acknowledged.
-    /// Returns `None` if RTT is not yet initialized.
+    /// `max(9/8 * max(SRTT, latest_rtt), kGranularity)` ago and a later packet
+    /// in the same space was acknowledged. Returns `None` if RTT is not yet
+    /// initialized.
     pub fn time_loss_deadline(&self, sent_at: Instant) -> Option<Instant> {
         if !self.rtt_initialized {
             return None;
         }
-        let threshold = (self.rtt * 9) / 8;
-        let threshold = threshold.max(Duration::from_millis(1));
-        Some(sent_at + threshold)
-    }
-
-    /// RACK (Recent ACKnowledgement) loss detection per RFC 8985.
-    ///
-    /// A packet is considered lost if:
-    /// 1. A later packet (higher PN) was acknowledged, AND
-    /// 2. The packet was sent more than `SRTT + RTTVAR` ago (the "RACK threshold")
-    ///
-    /// Returns true if the packet with `sent_at` timestamp should be
-    /// declared lost because a higher PN was acked at `latest_ack_time`.
-    pub fn rack_is_lost(&self, sent_at: Instant, latest_ack_time: Instant) -> bool {
-        if !self.rtt_initialized {
-            return false;
-        }
-        let rack_threshold = self.rtt + self.rtt_var;
-        latest_ack_time.duration_since(sent_at) > rack_threshold
+        Some(sent_at + self.loss_delay())
     }
 
     /// Returns the current RTT variation (for diagnostics/testing).
@@ -351,8 +446,407 @@ impl Recovery {
         self.ssthresh = new_cwnd;
         self.cc.set_cwnd(new_cwnd);
         self.pto_count = 0;
-        self.loss_time = None;
+        for sp in &mut self.spaces {
+            sp.loss_time = None;
+            sp.time_of_last_ack_eliciting = None;
+        }
+        self.pc_window = None;
         self.sync_from_cc();
+    }
+}
+
+/// Canonical RFC 9002 sent-packet and loss-detection-timer owner.
+impl Recovery {
+    /// RFC 9002 §6.1.2 time threshold: `max(9/8 * max(SRTT, latest_rtt), kGranularity)`.
+    fn loss_delay(&self) -> Duration {
+        let base = self.rtt.max(self.latest_rtt.unwrap_or(Duration::ZERO));
+        ((base * 9) / 8).max(K_GRANULARITY)
+    }
+
+    /// RFC 9002 §7.6.1 persistent congestion duration.
+    fn persistent_congestion_period(&self) -> Duration {
+        let base = self.rtt + (self.rtt_var * 4).max(K_GRANULARITY) + K_MAX_ACK_DELAY;
+        base.checked_mul(K_PERSISTENT_CONGESTION_THRESHOLD).unwrap_or(base)
+    }
+
+    /// Records a sent packet in the canonical per-space owner.
+    ///
+    /// Feeds the congestion controller only when `in_flight` is set; the
+    /// ACK-only bypass (RFC 9002 §7.2) stays out of all accounting.
+    #[allow(clippy::too_many_arguments)]
+    pub fn on_packet_sent_in_space(
+        &mut self,
+        space: PacketSpace,
+        pn: u64,
+        size: usize,
+        ack_eliciting: bool,
+        in_flight: bool,
+        crypto_range: Option<(u64, u64)>,
+        now: Instant,
+    ) {
+        let sp = &mut self.spaces[space.index()];
+        if ack_eliciting {
+            sp.time_of_last_ack_eliciting = Some(now);
+        }
+        sp.sent.insert(
+            pn,
+            SentPacket { pn, size, sent_at: now, ack_eliciting, in_flight, crypto_range },
+        );
+        if in_flight {
+            self.cc.on_packet_sent(pn, size, now);
+            self.sync_from_cc();
+            log::debug!("recovery.on_packet_sent_in_space: space={:?} pn={} size={} bytes_in_flight={} cwnd={}",
+                space, pn, size, self.bytes_in_flight, self.cwnd);
+        }
+    }
+
+    /// RFC 9002 §6.1 `DetectLostPackets` for one space. Removes and returns the
+    /// declared-lost packets (sorted by sent time) and (re)arms `loss_time`.
+    /// Bounded: one prefix walk over `pn <= largest_acked`, O(log n + k).
+    fn detect_lost_packets(
+        &mut self,
+        space: PacketSpace,
+        largest_acked: u64,
+        now: Instant,
+    ) -> Vec<SentPacket> {
+        let loss_delay = self.loss_delay();
+        let threshold_pn = largest_acked.checked_sub(K_PACKET_THRESHOLD);
+        let sp = &mut self.spaces[space.index()];
+        let candidates: Vec<u64> = sp.sent.range(..=largest_acked).map(|(pn, _)| *pn).collect();
+        let mut lost = Vec::new();
+        for pn in candidates {
+            let declare = match sp.sent.get(&pn) {
+                Some(pkt) => {
+                    threshold_pn.is_some_and(|t| pn <= t)
+                        || now.saturating_duration_since(pkt.sent_at) >= loss_delay
+                }
+                None => false,
+            };
+            if declare {
+                if let Some(pkt) = sp.sent.remove(&pn) {
+                    lost.push(pkt);
+                }
+            }
+        }
+        lost.sort_by_key(|p| p.sent_at);
+        // Re-arm the time-threshold timer for the earliest remaining candidate (§6.1.2).
+        sp.loss_time = sp
+            .sent
+            .range(..=largest_acked)
+            .filter_map(|(_, p)| p.sent_at.checked_add(loss_delay))
+            .filter(|d| *d > now)
+            .min();
+        lost
+    }
+
+    /// Processes an ACK frame for one packet number space (RFC 9002 §5, §6.1).
+    ///
+    /// `ranges` are half-open `[start, end)` packet-number ranges; `ack_delay`
+    /// is the peer-reported ACK delay already decoded with the ack-delay
+    /// exponent. Connection reactions arrive via the returned [`AckOutcome`];
+    /// CC/RTT/PTO state updates happen internally.
+    pub fn on_ack_received(
+        &mut self,
+        space: PacketSpace,
+        ranges: &[(u64, u64)],
+        ack_delay: Duration,
+        handshake_confirmed: bool,
+        is_server: bool,
+        now: Instant,
+    ) -> AckOutcome {
+        let mut outcome = AckOutcome::default();
+        if ranges.is_empty() {
+            return outcome;
+        }
+        log::debug!("recovery.on_ack_received: space={:?} ranges={:?} bytes_in_flight_before={} sent_count={}",
+            space, ranges, self.bytes_in_flight, self.spaces[space.index()].sent.len());
+        let largest_in_frame =
+            ranges.iter().filter_map(|(_, end)| end.checked_sub(1)).max().unwrap_or(0);
+
+        // 1. Newly acknowledged packets (bounded range walks).
+        let mut newly_acked: Vec<SentPacket> = Vec::new();
+        {
+            let sp = &mut self.spaces[space.index()];
+            for (start, end) in ranges {
+                if start >= end {
+                    continue;
+                }
+                let keys: Vec<u64> = sp.sent.range(*start..*end).map(|(pn, _)| *pn).collect();
+                for pn in keys {
+                    if let Some(pkt) = sp.sent.remove(&pn) {
+                        newly_acked.push(pkt);
+                    }
+                }
+            }
+        }
+        newly_acked.sort_by_key(|p| p.pn);
+        let any_ack_eliciting = newly_acked.iter().any(|p| p.ack_eliciting);
+        let largest_advanced = match self.spaces[space.index()].largest_acked {
+            None => true,
+            Some(prev) => largest_in_frame > prev,
+        };
+        if largest_advanced {
+            self.spaces[space.index()].largest_acked = Some(largest_in_frame);
+        }
+
+        // 2. RTT sample (RFC 9002 §5.1: largest newly acknowledged plus at
+        //    least one newly acked ack-eliciting packet; §5.3 adjustment).
+        if largest_advanced && any_ack_eliciting {
+            if let Some(largest_pkt) = newly_acked.iter().find(|p| p.pn == largest_in_frame) {
+                let latest = now.saturating_duration_since(largest_pkt.sent_at);
+                if latest > Duration::ZERO {
+                    self.latest_rtt = Some(latest);
+                    let delay = match space {
+                        PacketSpace::Initial => Duration::ZERO,
+                        _ if !handshake_confirmed => ack_delay,
+                        _ => ack_delay.min(K_MAX_ACK_DELAY),
+                    };
+                    let mut adjusted = latest;
+                    if self.min_rtt != Duration::MAX
+                        && latest >= self.min_rtt.saturating_add(delay)
+                    {
+                        adjusted = latest.saturating_sub(delay);
+                    }
+                    self.update_rtt(adjusted);
+                    outcome.rtt_sample = Some(latest);
+                }
+            }
+        }
+
+        // 3. PTO backoff reset (RFC 9002 §6.2.1; a client keeps its backoff on
+        //    Initial ACKs until the server has validated its address).
+        if any_ack_eliciting && !(space == PacketSpace::Initial && !is_server) {
+            self.pto_count = 0;
+        }
+
+        // 4. An acked packet inside the loss-run window invalidates persistent
+        //    congestion for that run: not every packet in the window was lost.
+        if let Some((start, latest)) = self.pc_window {
+            if newly_acked.iter().any(|p| p.sent_at >= start && p.sent_at <= latest) {
+                self.pc_window = None;
+            }
+        }
+        self.finish_ack_loss_accounting(space, largest_in_frame, newly_acked, now, outcome)
+    }
+
+    /// Steps 5-7 of ACK processing: loss detection, persistent congestion, and
+    /// the CC/outcome accounting. Split out to keep `on_ack_received` readable.
+    fn finish_ack_loss_accounting(
+        &mut self,
+        space: PacketSpace,
+        largest_in_frame: u64,
+        newly_acked: Vec<SentPacket>,
+        now: Instant,
+        mut outcome: AckOutcome,
+    ) -> AckOutcome {
+        // 5. Loss detection (RFC 9002 §6.1 packet + time threshold).
+        let lost = self.detect_lost_packets(space, largest_in_frame, now);
+
+        // 6. Persistent congestion (RFC 9002 §7.6): chain the loss run across
+        //    frames; an acked packet sent inside the run (or a gap longer than
+        //    the congestion period) breaks it. A run spanning at least the
+        //    persistent congestion duration collapses the window.
+        if !lost.is_empty() {
+            let period = self.persistent_congestion_period();
+            let mut run_start: Option<Instant> = self.pc_window.map(|w| w.0);
+            let mut prev_sent: Option<Instant> = self.pc_window.map(|w| w.1);
+            let mut declared = false;
+            for pkt in &lost {
+                if let Some(prev) = prev_sent {
+                    let acked_between =
+                        newly_acked.iter().any(|a| a.sent_at > prev && a.sent_at < pkt.sent_at);
+                    if acked_between || pkt.sent_at.saturating_duration_since(prev) > period {
+                        run_start = None;
+                    }
+                }
+                let start = *run_start.get_or_insert(pkt.sent_at);
+                prev_sent = Some(pkt.sent_at);
+                if pkt.sent_at.saturating_duration_since(start) >= period {
+                    declared = true;
+                    break;
+                }
+            }
+            if declared {
+                outcome.persistent_congestion = true;
+                self.pc_window = None;
+                let min_cwnd = 2 * self.mss;
+                self.cc.on_persistent_congestion(min_cwnd);
+                self.ssthresh = min_cwnd;
+                if let Some(l) = self.latest_rtt {
+                    self.min_rtt = l;
+                }
+                self.sync_from_cc();
+            } else {
+                self.pc_window = run_start.zip(prev_sent);
+            }
+        }
+
+        // 7. Feed the congestion controller and build the outcome. Loss feeds
+        //    precede the ACK feed, preserving the previous ordering.
+        let mut acked_bytes = 0usize;
+        for pkt in &newly_acked {
+            if pkt.in_flight {
+                acked_bytes = acked_bytes.saturating_add(pkt.size);
+            }
+            outcome.newly_acked.push((pkt.pn, pkt.size));
+            if let Some(range) = pkt.crypto_range {
+                outcome.crypto_acked.push(range);
+            }
+        }
+        for pkt in &lost {
+            if pkt.in_flight {
+                self.cc.on_loss_packet(pkt.pn, pkt.size, now);
+            }
+            outcome.lost.push((pkt.pn, pkt.size));
+            if let Some(range) = pkt.crypto_range {
+                outcome.crypto_lost.push(range);
+            }
+        }
+        if !lost.is_empty() {
+            self.sync_from_cc();
+        }
+        if acked_bytes > 0 {
+            self.on_ack(acked_bytes, now);
+        }
+        log::debug!("recovery.finish_ack_loss_accounting: space={:?} largest={} newly_acked={} lost={} bytes_in_flight_after={} cwnd={}",
+            space, largest_in_frame, outcome.newly_acked.len(), outcome.lost.len(), self.bytes_in_flight, self.cwnd);
+        outcome
+    }
+
+    /// Earliest loss/PTO deadline across all spaces (RFC 9002 §6.1.2, §6.2.1).
+    ///
+    /// The time-threshold timer takes precedence: while any `loss_time` is
+    /// armed, the PTO timer MUST NOT be armed (§6.2.1).
+    pub fn loss_detection_timeout(
+        &self,
+        handshake_confirmed: bool,
+        is_server: bool,
+        client_address_validated: bool,
+    ) -> Option<Instant> {
+        let earliest_loss = self.spaces.iter().filter_map(|s| s.loss_time).min();
+        if earliest_loss.is_some() {
+            return earliest_loss;
+        }
+        let mut earliest: Option<Instant> = None;
+        for space in [PacketSpace::Initial, PacketSpace::Handshake, PacketSpace::Application] {
+            // §6.2.1: no Application-space PTO before the handshake is confirmed.
+            if space == PacketSpace::Application && !handshake_confirmed {
+                continue;
+            }
+            let sp = &self.spaces[space.index()];
+            let has_ack_eliciting = sp.sent.values().any(|p| p.ack_eliciting);
+            if !has_ack_eliciting {
+                // §6.2.2.1: a server pre-address-validation MUST NOT arm the PTO
+                // without in-flight ack-eliciting data; a client pre-confirmation
+                // still arms Initial/Handshake so it can unblock the server.
+                if is_server && !client_address_validated {
+                    continue;
+                }
+                if is_server || handshake_confirmed || space == PacketSpace::Application {
+                    continue;
+                }
+            }
+            let Some(last) = sp.time_of_last_ack_eliciting else {
+                continue;
+            };
+            let max_ack_delay = match space {
+                PacketSpace::Application => K_MAX_ACK_DELAY,
+                _ => Duration::ZERO,
+            };
+            let base = self.rtt + (self.rtt_var * 4).max(K_GRANULARITY) + max_ack_delay;
+            let backoff = 1u32 << self.pto_count.min(16);
+            let Some(period) = base.checked_mul(backoff) else {
+                continue;
+            };
+            let Some(deadline) = last.checked_add(period) else {
+                continue;
+            };
+            earliest = Some(earliest.map_or(deadline, |e: Instant| e.min(deadline)));
+        }
+        earliest
+    }
+
+    /// Runs the loss detection timer (RFC 9002 A.8 `OnLossDetectionTimeout`).
+    ///
+    /// An expired time-threshold timer declares losses only; an expired PTO
+    /// increments `pto_count` and requests ack-eliciting probes (§6.2.4).
+    pub fn on_loss_detection_timeout(
+        &mut self,
+        handshake_confirmed: bool,
+        is_server: bool,
+        now: Instant,
+    ) -> TimeoutOutcome {
+        let mut outcome = TimeoutOutcome::default();
+        // Time-threshold expiry first (same precedence as loss_detection_timeout).
+        let due_space = [PacketSpace::Initial, PacketSpace::Handshake, PacketSpace::Application]
+            .into_iter()
+            .filter(|s| self.spaces[s.index()].loss_time.is_some_and(|d| d <= now))
+            .min_by_key(|s| self.spaces[s.index()].loss_time);
+        if let Some(space) = due_space {
+            let largest_acked = self.spaces[space.index()].largest_acked.unwrap_or(0);
+            let lost = self.detect_lost_packets(space, largest_acked, now);
+            for pkt in &lost {
+                if pkt.in_flight {
+                    self.cc.on_loss_packet(pkt.pn, pkt.size, now);
+                }
+                outcome.lost.push((space, pkt.pn, pkt.size));
+                if let Some(range) = pkt.crypto_range {
+                    outcome.crypto_lost.push((space, range.0, range.1));
+                }
+            }
+            if !lost.is_empty() {
+                self.sync_from_cc();
+            }
+            return outcome;
+        }
+        // PTO firing: increment backoff and request probes (RFC 9002 §6.2.4).
+        self.pto_count = self.pto_count.saturating_add(1);
+        for space in [PacketSpace::Initial, PacketSpace::Handshake, PacketSpace::Application] {
+            if space == PacketSpace::Application && !handshake_confirmed {
+                continue;
+            }
+            let sp = &self.spaces[space.index()];
+            if sp.sent.values().any(|p| p.ack_eliciting) {
+                outcome.probe_spaces.push(space);
+            }
+        }
+        if outcome.probe_spaces.is_empty() && !is_server && !handshake_confirmed {
+            // §6.2.2.1: client must probe to unblock the server pre-confirmation.
+            outcome.probe_spaces.push(PacketSpace::Handshake);
+            outcome.probe_spaces.push(PacketSpace::Initial);
+        }
+        outcome
+    }
+
+    /// Test-only: remaining tracked packet numbers in a space (sorted).
+    #[cfg(any(test, feature = "rust-tests"))]
+    pub fn tracked_sent_pns(&self, space: PacketSpace) -> Vec<u64> {
+        self.spaces[space.index()].sent.keys().copied().collect()
+    }
+
+    /// Test-only: whether a packet number is tracked in a space.
+    #[cfg(any(test, feature = "rust-tests"))]
+    pub fn tracks_sent_packet(&self, space: PacketSpace, pn: u64) -> bool {
+        self.spaces[space.index()].sent.contains_key(&pn)
+    }
+
+    /// Discards a packet number space (RFC 9002 §6.2.2 key-discard rule): the
+    /// space's packets leave bytes-in-flight without a loss response, and all
+    /// loss/PTO timers for the space are reset.
+    pub fn discard_space(&mut self, space: PacketSpace) {
+        let discarded_in_flight: usize = {
+            let sp = &mut self.spaces[space.index()];
+            let bytes = sp.sent.values().filter(|p| p.in_flight).map(|p| p.size).sum();
+            sp.sent.clear();
+            sp.loss_time = None;
+            sp.time_of_last_ack_eliciting = None;
+            sp.largest_acked = None;
+            bytes
+        };
+        if discarded_in_flight > 0 {
+            self.cc.discard_in_flight(discarded_in_flight);
+            self.sync_from_cc();
+        }
     }
 }
 
@@ -460,19 +954,6 @@ mod tests {
     }
 
     #[test]
-    fn test_rack_loss_detection() {
-        let mut recovery = Recovery::new(12_000, 1200);
-        recovery.update_rtt(Duration::from_millis(100));
-        // Packet sent at t=0, ack at t=50ms — not lost (within RACK threshold)
-        let sent_at = Instant::now();
-        let ack_time = sent_at + Duration::from_millis(50);
-        assert!(!recovery.rack_is_lost(sent_at, ack_time));
-        // Packet sent at t=0, ack at t=200ms — lost (exceeds SRTT + RTTVAR)
-        let ack_time2 = sent_at + Duration::from_millis(200);
-        assert!(recovery.rack_is_lost(sent_at, ack_time2));
-    }
-
-    #[test]
     fn test_gentle_path_migration_preserves_cwnd() {
         use super::cc::Algorithm;
         let mut recovery = Recovery::with_algorithm(12_000, 1200, Algorithm::Reno);
@@ -490,5 +971,358 @@ mod tests {
         assert!(cwnd_after > 2400, "not reset to minimum: {cwnd_after}");
         assert!(cwnd_after <= cwnd_before);
         assert_eq!(cwnd_after, (cwnd_before / 2).max(2400));
+    }
+
+    use super::PacketSpace;
+
+    /// Sends `count` ack-eliciting in-flight packets of 1200 bytes spaced 10 ms
+    /// apart starting at `t0` in the given space.
+    fn seed_space(rec: &mut Recovery, space: PacketSpace, count: u64, t0: Instant) {
+        for pn in 0..count {
+            rec.on_packet_sent_in_space(
+                space,
+                pn,
+                1200,
+                true,
+                true,
+                None,
+                t0 + Duration::from_millis(pn * 10),
+            );
+        }
+    }
+
+    #[test]
+    fn packet_threshold_declares_loss() {
+        let mut rec = Recovery::new(120_000, 1200);
+        // High pre-seeded RTT keeps the time threshold (9/8 * 1 s) out of scope,
+        // isolating the packet-threshold path.
+        rec.update_rtt(Duration::from_millis(1000));
+        let t0 = Instant::now();
+        seed_space(&mut rec, PacketSpace::Application, 5, t0);
+        let outcome = rec.on_ack_received(
+            PacketSpace::Application,
+            &[(4, 5)],
+            Duration::ZERO,
+            true,
+            false,
+            t0 + Duration::from_millis(50),
+        );
+        assert_eq!(outcome.newly_acked, vec![(4, 1200)]);
+        // pn <= largest(4) - kPacketThreshold(3) = 1 -> packets 0 and 1 lost.
+        assert_eq!(outcome.lost, vec![(0, 1200), (1, 1200)]);
+        assert_eq!(outcome.rtt_sample, Some(Duration::from_millis(10)));
+        // Packets 2 and 3 remain tracked and in flight.
+        assert_eq!(rec.bytes_in_flight, 2400);
+    }
+
+    #[test]
+    fn time_threshold_declares_loss_and_arms_timer() {
+        let mut rec = Recovery::new(120_000, 1200);
+        rec.update_rtt(Duration::from_millis(25)); // loss_delay = 9/8*25 = 28.125 ms
+        let t0 = Instant::now();
+        seed_space(&mut rec, PacketSpace::Application, 5, t0);
+        // ACK at t0+45: pn 2 (age 25 ms) and pn 3 (age 15 ms) are below 28.125 ms.
+        let outcome = rec.on_ack_received(
+            PacketSpace::Application,
+            &[(4, 5)],
+            Duration::ZERO,
+            true,
+            false,
+            t0 + Duration::from_millis(45),
+        );
+        assert_eq!(outcome.lost, vec![(0, 1200), (1, 1200)]); // packet threshold only
+        // The ACK's own 5 ms sample updates SRTT to 22.5 ms first (RFC order:
+        // sample before loss detection), so loss_delay = 9/8*22.5 = 25.3125 ms.
+        // loss_time armed for pn 2: sent at t0+20 ms -> deadline t0+45.3125 ms.
+        // The armed loss timer takes precedence over any PTO (RFC 9002 §6.2.1).
+        let deadline = rec.loss_detection_timeout(true, false, true);
+        assert_eq!(deadline, Some(t0 + Duration::from_nanos(45_312_500)));
+    }
+
+    #[test]
+    fn time_threshold_fires_on_timeout() {
+        let mut rec = Recovery::new(120_000, 1200);
+        rec.update_rtt(Duration::from_millis(25)); // loss_delay = 28.125 ms
+        let t0 = Instant::now();
+        seed_space(&mut rec, PacketSpace::Application, 5, t0);
+        let _ = rec.on_ack_received(
+            PacketSpace::Application,
+            &[(4, 5)],
+            Duration::ZERO,
+            true,
+            false,
+            t0 + Duration::from_millis(45),
+        );
+        // Fire the armed loss timer: pn 2 (sent t0+20) expires at t0+45.3125 ms.
+        let outcome = rec.on_loss_detection_timeout(true, false, t0 + Duration::from_millis(49));
+        assert_eq!(outcome.probe_spaces.len(), 0);
+        assert_eq!(outcome.lost, vec![(PacketSpace::Application, 2, 1200)]);
+        // pn 3 (sent t0+30) expires at t0+55.3125 ms and remains tracked.
+        assert_eq!(rec.bytes_in_flight, 1200);
+    }
+
+    #[test]
+    fn rtt_sample_requires_ack_eliciting_and_new_largest() {
+        let mut rec = Recovery::new(120_000, 1200);
+        let t0 = Instant::now();
+        // Non-ack-eliciting packet: ACK must not generate a sample (RFC 9002 §5.1).
+        rec.on_packet_sent_in_space(PacketSpace::Application, 0, 1200, false, true, None, t0);
+        let out = rec.on_ack_received(
+            PacketSpace::Application,
+            &[(0, 1)],
+            Duration::ZERO,
+            true,
+            false,
+            t0 + Duration::from_millis(40),
+        );
+        assert_eq!(out.rtt_sample, None);
+        // Ack-eliciting packet: sample appears exactly once per new largest.
+        rec.on_packet_sent_in_space(PacketSpace::Application, 1, 1200, true, true, None, t0);
+        let out1 = rec.on_ack_received(
+            PacketSpace::Application,
+            &[(1, 2)],
+            Duration::ZERO,
+            true,
+            false,
+            t0 + Duration::from_millis(50),
+        );
+        assert_eq!(out1.rtt_sample, Some(Duration::from_millis(50)));
+        let out2 = rec.on_ack_received(
+            PacketSpace::Application,
+            &[(1, 2)],
+            Duration::ZERO,
+            true,
+            false,
+            t0 + Duration::from_millis(60),
+        );
+        assert_eq!(out2.rtt_sample, None);
+    }
+
+    #[test]
+    fn ack_delay_adjustment_follows_confirmation_rules() {
+        let mut rec = Recovery::new(120_000, 1200);
+        let t0 = Instant::now();
+        // Post-confirmation: ack_delay above max_ack_delay is capped at 25 ms.
+        rec.on_packet_sent_in_space(PacketSpace::Application, 0, 1200, true, true, None, t0);
+        let out = rec.on_ack_received(
+            PacketSpace::Application,
+            &[(0, 1)],
+            Duration::from_millis(500),
+            true,
+            false,
+            t0 + Duration::from_millis(100),
+        );
+        assert_eq!(out.rtt_sample, Some(Duration::from_millis(100)));
+        // First sample: no adjustment possible (min_rtt unset) -> rtt = 100 ms.
+        assert_eq!(rec.rtt, Duration::from_millis(100));
+        // Second sample at 80 ms with delay 25: latest < min_rtt + delay -> no subtraction.
+        rec.on_packet_sent_in_space(
+            PacketSpace::Application,
+            1,
+            1200,
+            true,
+            true,
+            None,
+            t0 + Duration::from_millis(100),
+        );
+        let _ = rec.on_ack_received(
+            PacketSpace::Application,
+            &[(1, 2)],
+            Duration::from_millis(25),
+            true,
+            false,
+            t0 + Duration::from_millis(180),
+        );
+        // SRTT = 7/8*100 + 1/8*80 = 97.5 ms (unadjusted 80 ms sample).
+        assert_eq!(rec.rtt, Duration::from_micros(97_500));
+        // Third sample 120 ms with delay 500 (capped at 25): 120 >= min_rtt(80)+25
+        // -> adjusted = 95 ms; SRTT = 7/8*97.5 + 1/8*95 = 97.1875 ms.
+        rec.on_packet_sent_in_space(
+            PacketSpace::Application,
+            2,
+            1200,
+            true,
+            true,
+            None,
+            t0 + Duration::from_millis(180),
+        );
+        let _ = rec.on_ack_received(
+            PacketSpace::Application,
+            &[(2, 3)],
+            Duration::from_millis(500),
+            true,
+            false,
+            t0 + Duration::from_millis(300),
+        );
+        assert_eq!(rec.rtt, Duration::from_nanos(97_187_500));
+        assert_eq!(rec.min_rtt(), Duration::from_millis(80));
+    }
+
+    #[test]
+    fn pto_fire_increments_backoff_and_requests_probe() {
+        let mut rec = Recovery::new(120_000, 1200);
+        let t0 = Instant::now();
+        seed_space(&mut rec, PacketSpace::Application, 1, t0);
+        // Initial PTO = 333 + 4*166.5 + 25 = 1024 ms after the last send.
+        let deadline = rec.loss_detection_timeout(true, false, true);
+        assert_eq!(deadline, Some(t0 + Duration::from_millis(1024)));
+        let out = rec.on_loss_detection_timeout(true, false, t0 + Duration::from_millis(1024));
+        assert_eq!(rec.pto_count, 1);
+        assert_eq!(out.probe_spaces, vec![PacketSpace::Application]);
+        assert!(out.lost.is_empty());
+        // Backoff doubles the next deadline.
+        let deadline2 = rec.loss_detection_timeout(true, false, true);
+        assert_eq!(deadline2, Some(t0 + Duration::from_millis(2048)));
+    }
+
+    #[test]
+    fn application_pto_requires_handshake_confirmation() {
+        let mut rec = Recovery::new(120_000, 1200);
+        let t0 = Instant::now();
+        seed_space(&mut rec, PacketSpace::Application, 1, t0);
+        // Pre-confirmation: Application space must not arm a PTO (RFC 9002 §6.2.1).
+        assert_eq!(rec.loss_detection_timeout(false, false, true), None);
+        // Initial space arms without max_ack_delay: 333 + 666 = 999 ms.
+        rec.on_packet_sent_in_space(
+            PacketSpace::Initial,
+            0,
+            1200,
+            true,
+            true,
+            Some((0, 300)),
+            t0,
+        );
+        let deadline = rec.loss_detection_timeout(false, false, true);
+        assert_eq!(deadline, Some(t0 + Duration::from_millis(999)));
+    }
+
+    #[test]
+    fn pto_backoff_reset_rules() {
+        let mut rec = Recovery::new(120_000, 1200);
+        let t0 = Instant::now();
+        // Client, Initial space: backoff is NOT reset by Initial ACKs (§6.2.1).
+        rec.on_packet_sent_in_space(PacketSpace::Initial, 0, 1200, true, true, None, t0);
+        let _ = rec.on_loss_detection_timeout(false, false, t0 + Duration::from_millis(999));
+        assert_eq!(rec.pto_count, 1);
+        let _ = rec.on_ack_received(
+            PacketSpace::Initial,
+            &[(0, 1)],
+            Duration::ZERO,
+            false,
+            false,
+            t0 + Duration::from_millis(1000),
+        );
+        assert_eq!(rec.pto_count, 1);
+        // Handshake ACK (still client): backoff resets on non-Initial spaces.
+        rec.on_packet_sent_in_space(PacketSpace::Handshake, 0, 1200, true, true, None, t0);
+        let _ = rec.on_ack_received(
+            PacketSpace::Handshake,
+            &[(0, 1)],
+            Duration::ZERO,
+            false,
+            false,
+            t0 + Duration::from_millis(2000),
+        );
+        assert_eq!(rec.pto_count, 0);
+    }
+
+    #[test]
+    fn persistent_congestion_collapses_cwnd() {
+        let mut rec = Recovery::new(120_000, 1200);
+        rec.update_rtt(Duration::from_millis(10)); // PC period = (10+20+25)*3 = 165 ms
+        let t0 = Instant::now();
+        // 21 packets spaced 10 ms apart -> loss run spans 200 ms >= 165 ms.
+        seed_space(&mut rec, PacketSpace::Application, 21, t0);
+        let outcome = rec.on_ack_received(
+            PacketSpace::Application,
+            &[(20, 21)],
+            Duration::ZERO,
+            true,
+            false,
+            t0 + Duration::from_millis(210),
+        );
+        assert!(outcome.persistent_congestion);
+        // Collapsed from 120_000 to the controller minimum: RFC kMinimumWindow
+        // (2*MSS = 2400) is passed in, BBR3 floors at its 4*MSS operational min.
+        assert!(rec.cwnd <= 4800, "cwnd must collapse, got {}", rec.cwnd);
+        assert_eq!(rec.min_rtt(), Duration::from_millis(10));
+    }
+
+    #[test]
+    fn ack_inside_loss_run_invalidates_persistent_congestion() {
+        let mut rec = Recovery::new(120_000, 1200);
+        rec.update_rtt(Duration::from_millis(10));
+        let t0 = Instant::now();
+        seed_space(&mut rec, PacketSpace::Application, 21, t0);
+        // ACK pn 10 (inside the would-be loss window) plus the tail pn 20.
+        let outcome = rec.on_ack_received(
+            PacketSpace::Application,
+            &[(10, 11), (20, 21)],
+            Duration::ZERO,
+            true,
+            false,
+            t0 + Duration::from_millis(210),
+        );
+        assert!(!outcome.persistent_congestion);
+        assert!(rec.cwnd > 2400);
+    }
+
+    #[test]
+    fn discard_space_removes_without_loss_response() {
+        let mut rec = Recovery::new(120_000, 1200);
+        let t0 = Instant::now();
+        let cwnd_before = rec.cwnd;
+        seed_space(&mut rec, PacketSpace::Handshake, 3, t0);
+        assert_eq!(rec.bytes_in_flight, 3600);
+        rec.discard_space(PacketSpace::Handshake);
+        assert_eq!(rec.bytes_in_flight, 0);
+        assert_eq!(rec.cwnd, cwnd_before); // no loss response
+        assert_eq!(rec.loss_detection_timeout(false, true, false), None);
+    }
+
+    #[test]
+    fn crypto_ranges_tracked_through_ack_and_loss() {
+        let mut rec = Recovery::new(120_000, 1200);
+        let t0 = Instant::now();
+        for pn in 0..=4 {
+            let range = match pn {
+                0 => Some((0, 300)),
+                1 => Some((300, 200)),
+                _ => None,
+            };
+            rec.on_packet_sent_in_space(PacketSpace::Initial, pn, 1200, true, true, range, t0);
+        }
+        let outcome = rec.on_ack_received(
+            PacketSpace::Initial,
+            &[(4, 5)],
+            Duration::ZERO,
+            false,
+            true,
+            t0 + Duration::from_millis(50),
+        );
+        assert!(outcome.crypto_acked.is_empty());
+        // pn 0 and 1 lost via packet threshold: both crypto ranges requeued.
+        assert_eq!(outcome.crypto_lost, vec![(0, 300), (300, 200)]);
+        assert_eq!(outcome.lost, vec![(0, 1200), (1, 1200)]);
+    }
+
+    #[test]
+    fn migration_clears_timers_but_keeps_sent_state() {
+        let mut rec = Recovery::new(120_000, 1200);
+        let t0 = Instant::now();
+        seed_space(&mut rec, PacketSpace::Application, 2, t0);
+        assert!(rec.loss_detection_timeout(true, false, true).is_some());
+        rec.on_path_change();
+        assert_eq!(rec.loss_detection_timeout(true, false, true), None);
+        // Sent packets survive migration and can still be acked.
+        let outcome = rec.on_ack_received(
+            PacketSpace::Application,
+            &[(0, 2)],
+            Duration::ZERO,
+            true,
+            false,
+            t0 + Duration::from_millis(100),
+        );
+        assert_eq!(outcome.newly_acked.len(), 2);
     }
 }

@@ -4022,6 +4022,12 @@ fn process_server_tun_packet(
 
     let policy = Arc::clone(&live.live_state.domain.shared.forwarding_policy);
     let route = policy.classify_downlink(packet, server_ips.ipv4, server_ips.ipv6);
+    log::debug!(
+        "process_server_tun_packet: {}B route={:?} assigned_count={}",
+        packet.len(),
+        route,
+        policy.assigned_address_count()
+    );
     let expired = matches!(route, DownlinkRoute::Unicast { .. })
         && match packet.first().map(|byte| byte >> 4) {
             Some(4) => packet.get(8).is_some_and(|ttl| *ttl == 0),
@@ -4080,8 +4086,14 @@ fn process_server_tun_packet(
     }
 
     let mut queued = smallvec::SmallVec::<[SocketAddr; 4]>::new();
+    log::debug!(
+        "process_server_tun_packet: targets={} clients_count={}",
+        targets.len(),
+        live.live_state.clients.len()
+    );
     for target in targets {
         let Some(connection) = live.live_state.clients.get_mut(&target) else {
+            log::debug!("process_server_tun_packet: no connection for target {}", target);
             continue;
         };
         let effective_mtu = connection.effective_tunnel_mtu().min(usize::from(tun.mtu()));
@@ -4099,7 +4111,7 @@ fn process_server_tun_packet(
             continue;
         }
         if let Err(error) = connection.send_masque_downlink(packet) {
-            log::debug!("TUN to MASQUE queue for {} failed: {:?}", target, error);
+            log::warn!("TUN to MASQUE queue for {} failed: {:?}", target, error);
         } else {
             queued.push(target);
         }
@@ -4111,13 +4123,21 @@ fn process_server_tun_packet(
         };
         loop {
             let written = match connection.send(out) {
-                Ok(0) | Err(_) => break,
+                Ok(0) => {
+                    log::debug!("TUN to socket send to {}: connection.send returned 0", target);
+                    break;
+                }
                 Ok(written) => written,
+                Err(error) => {
+                    log::warn!("TUN to socket send to {}: connection.send failed: {:?}", target, error);
+                    break;
+                }
             };
             if let Err(error) = socket.try_send_to(&out[..written], target) {
-                log::debug!("TUN to socket send to {} failed: {:?}", target, error);
+                log::warn!("TUN to socket send to {} failed: {:?}", target, error);
                 break;
             }
+            log::debug!("TUN to socket send to {}: sent {}B", target, written);
         }
     }
 }
@@ -5482,12 +5502,23 @@ impl ServerRuntime {
                             crate::interface::TUN_PACKET_QUEUE_CAPACITY,
                         );
                         let tun_for_reader = tun_arc.clone();
-                        std::thread::spawn(move || loop {
+                        let _handle = std::thread::Builder::new().name("tun-reader".to_string()).spawn(move || {
+                            loop {
                             match tun_for_reader.read_block() {
                                 Ok((block, len)) if len > 0 => {
                                     let mut v = vec![0u8; len];
                                     v.copy_from_slice(&block[..len]);
+                                    log::debug!(
+                                        "TUN reader: read {}B proto={:#x} dst={}",
+                                        len,
+                                        v[0] >> 4,
+                                        if v[0] >> 4 == 4 && v.len() >= 20 {
+                                            format!("{}.{}.{}.{}",
+                                                v[16], v[17], v[18], v[19])
+                                        } else { String::from("?") }
+                                    );
                                     if tx.send(v).is_err() {
+                                        log::warn!("TUN reader: channel closed, exiting thread");
                                         break;
                                     }
                                 }
@@ -5495,7 +5526,11 @@ impl ServerRuntime {
                                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                                     std::thread::sleep(Duration::from_millis(1));
                                 }
-                                Err(_) => break,
+                                Err(e) => {
+                                    log::warn!("TUN reader: fatal error {:?}, exiting thread", e);
+                                    break;
+                                }
+                            }
                             }
                         });
                         log::info!("Server TUN reader thread spawned for bidirectional forwarding");

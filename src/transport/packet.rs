@@ -1686,6 +1686,15 @@ pub struct CryptoStream {
     send_buf: Vec<u8>,
     /// Current send offset
     send_off: u64,
+    /// Sent-but-unacked ranges (offset -> data), retained for retransmission.
+    /// RFC 9002 §4.9: handshake packets are not special; their CRYPTO payload
+    /// must survive packet loss until acknowledged.
+    unacked: std::collections::BTreeMap<u64, Vec<u8>>,
+    /// Total bytes held in `unacked` (bounded by `MAX_CRYPTO_UNACKED_BYTES`).
+    unacked_bytes: usize,
+    /// Offsets queued for retransmission after loss/PTO, sorted by offset.
+    /// Entries are pruned lazily once their range is acknowledged.
+    retx: VecDeque<u64>,
     /// Receive buffer for incoming CRYPTO frames (may arrive out of order)
     recv_buf: std::collections::BTreeMap<u64, Vec<u8>>,
     /// Next expected receive offset
@@ -1693,6 +1702,11 @@ pub struct CryptoStream {
     /// Maximum receive offset seen
     recv_max: u64,
 }
+
+/// Upper bound on retained unacked CRYPTO bytes per level. Handshake flights
+/// are naturally small (a few KiB of certificates); the bound only guards
+/// against pathological peers/bugs and evicts oldest-first with a warning.
+const MAX_CRYPTO_UNACKED_BYTES: usize = 4 * 1024 * 1024;
 
 impl CryptoStream {
     /// Creates a new empty CryptoStream.
@@ -1705,18 +1719,137 @@ impl CryptoStream {
         self.send_buf.extend_from_slice(data);
     }
 
-    /// Get next CRYPTO frame to send (up to max_len bytes)
+    /// Get next CRYPTO frame to send (up to max_len bytes).
+    ///
+    /// Loss/PTO-requeued ranges are re-emitted first (original offsets), then
+    /// fresh bytes. Every emitted range stays in `unacked` until
+    /// [`ack_crypto`](Self::ack_crypto) confirms it.
     pub fn next_crypto_frame(&mut self, max_len: usize) -> Option<(u64, Vec<u8>)> {
+        while let Some(&off) = self.retx.front() {
+            let Some(data) = self.unacked.get(&off) else {
+                // Range already acknowledged; drop the stale requeue entry.
+                self.retx.pop_front();
+                continue;
+            };
+            if data.len() <= max_len {
+                let data = data.clone();
+                self.retx.pop_front();
+                return Some((off, data));
+            }
+            if max_len == 0 {
+                return None;
+            }
+            // Split the range: emit a prefix now, keep the suffix queued.
+            let (prefix, suffix) = data.split_at(max_len);
+            let prefix = prefix.to_vec();
+            let suffix = suffix.to_vec();
+            self.unacked.remove(&off);
+            self.unacked.insert(off, prefix.clone());
+            self.unacked.insert(off + max_len as u64, suffix);
+            self.retx.pop_front();
+            self.retx.push_front(off + max_len as u64);
+            return Some((off, prefix));
+        }
         if self.send_buf.is_empty() {
             return None;
         }
 
         let len = max_len.min(self.send_buf.len());
         let offset = self.send_off;
-        let data = self.send_buf.drain(..len).collect();
+        let data: Vec<u8> = self.send_buf.drain(..len).collect();
         self.send_off += len as u64;
+        self.unacked_bytes += data.len();
+        self.unacked.insert(offset, data.clone());
+        self.evict_unacked_overflow();
 
         Some((offset, data))
+    }
+
+    /// Drops the acknowledged range `[offset, offset+len)` from retention,
+    /// splitting retained entries on partial overlap.
+    pub fn ack_crypto(&mut self, offset: u64, len: u64) {
+        if len == 0 {
+            return;
+        }
+        let ack_end = offset + len;
+        let overlapping: Vec<u64> = self.unacked.range(..ack_end).map(|(o, _)| *o).collect();
+        for start in overlapping {
+            let Some(data) = self.unacked.get(&start).cloned() else {
+                continue;
+            };
+            let end = start + data.len() as u64;
+            if end <= offset {
+                continue; // no overlap
+            }
+            self.unacked_bytes -= data.len();
+            self.unacked.remove(&start);
+            if start < offset {
+                let head = data[..(offset - start) as usize].to_vec();
+                self.unacked_bytes += head.len();
+                self.unacked.insert(start, head);
+            }
+            if end > ack_end {
+                let tail = data[(ack_end - start) as usize..].to_vec();
+                self.unacked_bytes += tail.len();
+                self.unacked.insert(ack_end, tail);
+            }
+        }
+    }
+
+    /// Requeues the lost range `[offset, offset+len)` for retransmission.
+    /// Overlapping retained ranges are re-emitted whole (the receiver accepts
+    /// overlapping CRYPTO data), ordered by offset.
+    pub fn requeue_crypto(&mut self, offset: u64, len: u64) {
+        if len == 0 {
+            return;
+        }
+        let end = offset + len;
+        let offsets: Vec<u64> = self
+            .unacked
+            .range(..end)
+            .filter(|(o, d)| **o + d.len() as u64 > offset)
+            .map(|(o, _)| *o)
+            .collect();
+        for off in offsets {
+            if !self.retx.contains(&off) {
+                self.retx.push_back(off);
+            }
+        }
+        let mut sorted: Vec<u64> = self.retx.iter().copied().collect();
+        sorted.sort_unstable();
+        self.retx = sorted.into_iter().collect();
+    }
+
+    /// Requeues every retained unacked range for retransmission.
+    /// Used when a PTO fires for this encryption level and fresh data is not
+    /// available (RFC 9002 §6.2.4).
+    pub fn requeue_all_unacked(&mut self) {
+        let mut offsets: Vec<u64> = self.unacked.keys().copied().collect();
+        offsets.sort_unstable();
+        for off in offsets {
+            if !self.retx.contains(&off) {
+                self.retx.push_back(off);
+            }
+        }
+    }
+
+    /// Total bytes currently retained as sent-but-unacked.
+    pub fn unacked_bytes(&self) -> usize {
+        self.unacked_bytes
+    }
+
+    /// Evicts oldest retained ranges while over the memory bound (pathological
+    /// cases only; normal handshake flights never approach it).
+    fn evict_unacked_overflow(&mut self) {
+        while self.unacked_bytes > MAX_CRYPTO_UNACKED_BYTES {
+            let Some((&oldest, _)) = self.unacked.iter().next() else {
+                break;
+            };
+            if let Some(data) = self.unacked.remove(&oldest) {
+                self.unacked_bytes -= data.len();
+                log::warn!("CRYPTO unacked overflow: evicted range at offset {oldest}");
+            }
+        }
     }
 
     /// Returns true while unsent CRYPTO bytes remain at this encryption level.

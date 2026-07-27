@@ -155,6 +155,9 @@ pub struct Connection {
     next_stream_id: u64,
     streams: HashMap<u64, StreamState>,
     finished_streams: HashSet<u64>,
+    /// Streams carrying non-HTTP/3 data (e.g. stealth cover traffic) are drained
+    /// instead of parsed, so the H3 layer stays strict without tripping on raw bytes.
+    ignored_streams: HashSet<u64>,
     pending_events: VecDeque<(u64, Event)>,
     encoder: qpack::Encoder,
     decoder: qpack::Decoder,
@@ -273,6 +276,7 @@ impl Connection {
             next_stream_id: if conn.is_server() { 1 } else { 0 },
             streams: HashMap::new(),
             finished_streams: HashSet::new(),
+            ignored_streams: HashSet::new(),
             pending_events: VecDeque::new(),
             encoder: qpack::Encoder::with_capacity(config.qpack_max_table_capacity),
             decoder: qpack::Decoder::with_capacity(config.qpack_max_table_capacity),
@@ -294,6 +298,13 @@ impl Connection {
         std::env::set_var("QUICFUSCATE_FEC_SWITCH_THRESH", format!("{:.6}", thr));
         Ok(h3_conn)
     }
+
+    /// Marks `stream_id` as a non-HTTP/3 stream. Incoming data on this stream is
+    /// drained and discarded instead of being parsed as H3 frames.
+    pub(crate) fn ignore_stream(&mut self, stream_id: u64) {
+        self.ignored_streams.insert(stream_id);
+    }
+
     /// Set the persona index policy (header names that should be prioritised).
     pub(crate) fn set_qpack_index_policy(&mut self, prefer: &[&[u8]]) {
         self.encoder.set_index_policy(prefer);
@@ -731,6 +742,22 @@ impl Connection {
         conn: &mut super::Connection,
         stream_id: u64,
     ) -> Result<(), Error> {
+        // Streams explicitly marked as non-HTTP/3 (e.g. raw cover traffic) are drained
+        // and discarded. This keeps the H3 parser strict while allowing other QUIC
+        // sub-protocols to share the connection.
+        if self.ignored_streams.contains(&stream_id) {
+            let mut discard = [0u8; 65536];
+            loop {
+                match conn.stream_recv(stream_id, &mut discard) {
+                    Ok((0, false)) => break,
+                    Ok((_, true)) => break,
+                    Ok(_) => continue,
+                    Err(_) => break,
+                }
+            }
+            return Ok(());
+        }
+
         let mut buf = vec![0u8; 65536];
         let (len, fin) = conn.stream_recv(stream_id, &mut buf).map_err(|_| Error::InternalError)?;
         if len == 0 && !fin {
@@ -758,6 +785,13 @@ impl Connection {
             let buffered_len =
                 stream.frame_buffer.len().checked_add(buf.len()).ok_or(Error::ExcessiveLoad)?;
             if buffered_len > MAX_BUFFERED_H3_FRAME {
+                log::warn!(
+                    "H3 ExcessiveLoad: stream={} buffered_len={} frame_buffer={} recv_chunk={}",
+                    stream_id,
+                    buffered_len,
+                    stream.frame_buffer.len(),
+                    buf.len()
+                );
                 return Err(Error::ExcessiveLoad);
             }
             stream.frame_buffer.extend_from_slice(&buf);
@@ -774,6 +808,16 @@ impl Connection {
                     Err(error) => return Err(error),
                 };
             if frame_len > 1024 * 1024 {
+                let preview_end = (offset + 32).min(buffered.len());
+                log::warn!(
+                    "H3 ExcessiveLoad: stream={} frame_type=0x{:02x} frame_len={} offset={} buffered={} preview={:02x?}",
+                    stream_id,
+                    frame_type,
+                    frame_len,
+                    offset,
+                    buffered.len(),
+                    &buffered[offset..preview_end]
+                );
                 return Err(Error::ExcessiveLoad);
             }
             let body_start = offset + frame_offset;
@@ -2623,5 +2667,87 @@ mod tests {
     fn h3_config_default_field_section_size() {
         let cfg = Config::new().expect("default H3 config must succeed");
         assert!(cfg.max_field_section_size > 0, "default field section size must be positive");
+    }
+
+    #[test]
+    fn masque_connect_udp_request_roundtrip_over_paired_1rtt() {
+        use crate::transport::connection::{bench_paired_1rtt_connections, BenchConnectionPair};
+        let BenchConnectionPair { mut client, mut server, recv_info } =
+            bench_paired_1rtt_connections();
+
+        let mut client_h3_cfg = Config::new().expect("cfg");
+        client_h3_cfg.set_max_field_section_size(1024 * 1024);
+        let mut client_h3 =
+            super::h3::Connection::with_transport(&mut client, &client_h3_cfg).unwrap();
+
+        let mut server_h3_cfg = Config::new().expect("cfg");
+        server_h3_cfg.set_max_field_section_size(1024 * 1024);
+        let mut server_h3 =
+            super::h3::Connection::with_transport(&mut server, &server_h3_cfg).unwrap();
+
+        let sid = client_h3
+            .connect_udp_with_headers(
+                &mut client,
+                "proxy.test",
+                "target.test:443",
+                &[],
+            )
+            .expect("connect_udp");
+        client_h3
+            .enable_masque_datagram(&mut client, sid)
+            .expect("enable_masque_datagram");
+        client_h3
+            .register_datagram_context(&mut client, sid, 1, 0)
+            .expect("register_datagram_context");
+
+        let mut packet = [0u8; 2048];
+        let (len, _) = client.send(&mut packet).expect("client send");
+        server.recv(&mut packet[..len], &recv_info).expect("server recv");
+
+        match server_h3.poll(&mut server) {
+            Ok(Some((rx_sid, Event::Headers { list, .. }))) => {
+                assert_eq!(rx_sid, sid, "server must see the same request stream id");
+                assert!(
+                    list.iter().any(|h| {
+                        h.name().eq_ignore_ascii_case(b":method")
+                            && h.value().eq_ignore_ascii_case(b"CONNECT")
+                    }),
+                    "expected CONNECT method in request headers"
+                );
+            }
+            Ok(other) => panic!("expected Headers event, got {:?}", other),
+            Err(error) => panic!("server H3 poll failed: {:?}", error),
+        }
+    }
+
+    #[test]
+    fn ignored_cover_stream_data_does_not_cause_excessive_load() {
+        use crate::transport::connection::{bench_paired_1rtt_connections, BenchConnectionPair};
+        let BenchConnectionPair { mut client, mut server, recv_info } =
+            bench_paired_1rtt_connections();
+
+        let _client_h3 = Connection::with_transport(&mut client, &Config::new().unwrap())
+            .expect("client h3");
+        let mut server_h3 = Connection::with_transport(&mut server, &Config::new().unwrap())
+            .expect("server h3");
+
+        const COVER_SID: u64 = 248;
+        server_h3.ignore_stream(COVER_SID);
+
+        // These raw bytes previously parsed as an H3 frame header with a >1MB length,
+        // triggering ExcessiveLoad. When the stream is ignored they must be drained safely.
+        let cover = vec![0xd1, 0xaa, 0xf0, 0x1e, 0xe6, 0x93, 0x7e, 0xc6];
+        client.stream_send(COVER_SID, &cover, false).expect("send cover stream data");
+
+        let mut packet = [0u8; 2048];
+        let (len, _) = client.send(&mut packet).expect("client send");
+        server.recv(&mut packet[..len], &recv_info).expect("server recv");
+
+        let result = server_h3.poll(&mut server);
+        assert!(
+            result.is_ok() || matches!(result, Err(Error::Done)),
+            "H3 poll must tolerate ignored raw cover stream data: {:?}",
+            result
+        );
     }
 }

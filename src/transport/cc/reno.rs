@@ -109,6 +109,10 @@ impl CongestionController for Reno {
         self.rtt = rtt;
     }
 
+    fn discard_in_flight(&mut self, bytes: usize) {
+        self.bytes_in_flight = self.bytes_in_flight.saturating_sub(bytes);
+    }
+
     fn cwnd(&self) -> usize {
         self.cwnd
     }
@@ -122,8 +126,14 @@ impl CongestionController for Reno {
     }
 
     fn pacing_rate(&self) -> Option<u64> {
-        // Reno does not pace; return None to let the caller send at line rate
-        None
+        // Bounded delivery-rate pacing (RFC 9002 §7.7 recommends pacing to
+        // avoid burst losses): 1.25*cwnd/SRTT, clamped to [1 MSS/RTT, 2*cwnd/RTT].
+        let rtt = self.rtt.max(Duration::from_millis(1));
+        let rtt_secs = rtt.as_secs_f64();
+        let rate = (self.cwnd as f64 * 1.25) / rtt_secs;
+        let floor = self.mss as f64 / rtt_secs;
+        let ceil = (self.cwnd.max(self.mss) as f64 * 2.0) / rtt_secs;
+        Some((rate.clamp(floor, ceil).max(1.0)) as u64)
     }
 
     fn loss_rate(&self) -> f32 {
@@ -248,10 +258,19 @@ mod tests {
     }
 
     #[test]
-    fn pacing_rate_is_none() {
-        // Reno is unclocked - no pacing rate. Returns None so caller sends at line rate.
-        let reno = Reno::new(12_000, 1200);
-        assert!(reno.pacing_rate().is_none(), "Reno must return None for pacing_rate");
+    fn pacing_rate_is_bounded_delivery_rate() {
+        // RFC 9002 §7.7 recommends pacing; Reno paces at 1.25*cwnd/SRTT,
+        // clamped to [1 MSS/RTT, 2*cwnd/RTT].
+        let mss = 1200;
+        let mut reno = Reno::new(mss * 10, mss);
+        reno.update_rtt(Duration::from_millis(100));
+        // cwnd = 12_000, rtt = 100 ms -> 12_000*1.25/0.1 = 150_000 B/s.
+        assert_eq!(reno.pacing_rate(), Some(150_000));
+        // Extreme RTT stays within bounds; zero RTT cannot divide by zero.
+        reno.update_rtt(Duration::from_millis(1));
+        assert_eq!(reno.pacing_rate(), Some(15_000_000));
+        reno.update_rtt(Duration::ZERO);
+        assert!(reno.pacing_rate().is_some_and(|r| r > 0));
     }
 
     #[test]

@@ -409,7 +409,8 @@ impl TunInterface {
     /// The block remains zero-initialized outside the valid frame region.
     pub fn read_block(&self) -> io::Result<(AlignedBox<[u8]>, usize)> {
         let mut block = self.pool.alloc();
-        let len = self.dev.read(&mut block[..])?;
+        let buf = &mut block[..];
+        let len = self.dev.read(buf)?;
         if TELEMETRY_ENABLED.load(Ordering::Relaxed) {
             crate::telemetry::BYTES_RECEIVED.inc_by(len as u64);
         }

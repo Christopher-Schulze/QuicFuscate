@@ -6087,6 +6087,15 @@ impl StealthManager {
     /// Placed far enough from real H3 request streams (0, 4, 8, ...) to avoid conflicts.
     pub(crate) const COVER_STREAM_ID: u64 = 248;
 
+    /// Returns the cover stream ID when cover stream injection is enabled.
+    pub(crate) fn cover_stream_id(&self) -> Option<u64> {
+        if self.config.enable_cover_ping && self.config.cover_ping_interval_ms > 0 {
+            Some(Self::COVER_STREAM_ID)
+        } else {
+            None
+        }
+    }
+
     /// Returns true if a cover APPLICATION_DATA frame should be injected now.
     ///
     /// Fires at 3x the cover_ping_interval to complement PING keepalives with

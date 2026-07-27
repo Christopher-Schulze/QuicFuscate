@@ -16,14 +16,10 @@ use crate::optimize::{prefetch, PrefetchHint};
 const MAX_RX_KEY_UPDATE_ADVANCE: usize = 4;
 const PATH_VALIDATION_TIMEOUT: Duration = Duration::from_secs(3);
 const MIGRATION_COOLDOWN: Duration = Duration::from_millis(750);
-const SENT_PACKET_SPLIT_DRAIN_THRESHOLD: u64 = 64;
-const ACK_PREFIX_CLASSIFY_RANGE_THRESHOLD: usize = 8;
 const MAX_STREAM_RETRANSMIT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_STREAM_ORIGINAL_TRANSMISSIONS: usize = 16 * 1024;
 const MAX_STREAM_TRANSMISSIONS: usize = 2 * MAX_STREAM_ORIGINAL_TRANSMISSIONS;
 const MAX_STREAM_LOST_PACKET_HISTORY: usize = 32;
-const MIN_STREAM_PTO: Duration = Duration::from_millis(50);
-const MIN_CONGESTION_BLOCKED_PTO: Duration = Duration::from_millis(500);
 
 /// DPLPMTUD (RFC 8899) state for packetization-layer MTU discovery.
 ///
@@ -415,11 +411,10 @@ pub struct Connection {
     fec_cb_lost_bytes: Arc<std::sync::atomic::AtomicU64>,
     // ACK classification is owned by this connection, so no callback/atomic is needed.
     fec_acked_packets: u64,
-    // Sent packet accounting: PN -> (bytes, send_time) for ACK accounting + RTT sampling.
-    sent_packets_by_pn: BTreeMap<u64, (usize, Instant)>,
-    // Continuous congestion-gate blockage. Unreliable tail packets are only
-    // released after this gate remains closed for a conservative PTO window.
-    congestion_blocked_since: Option<Instant>,
+    // Packet spaces pending an RFC 9002 §6.2.4 PTO probe. Filled by
+    // `on_recovery_timeout`, consumed by the handshake flight loop and the
+    // 1-RTT assembly. Probes bypass the congestion gate (§7.5) but count in flight.
+    pending_probe_spaces: VecDeque<recovery::PacketSpace>,
     // Reliable STREAM ownership. Packet maps hold compact transmission IDs while
     // payload bytes remain owned exactly once until any packet copy is ACKed.
     stream_transmissions: HashMap<u64, StreamTransmission>,
@@ -631,8 +626,7 @@ impl Connection {
             fec_cb_sent_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             fec_cb_lost_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             fec_acked_packets: 0,
-            sent_packets_by_pn: BTreeMap::new(),
-            congestion_blocked_since: None,
+            pending_probe_spaces: VecDeque::new(),
             stream_transmissions: HashMap::new(),
             stream_retransmit_queue: VecDeque::new(),
             stream_transmission_by_pn: BTreeMap::new(),
@@ -955,79 +949,157 @@ impl Connection {
         }
     }
 
-    fn poll_stream_pto(&mut self, now: Instant) {
-        let pto = (self.recovery.rtt
-            + self.recovery.rtt_var().max(Duration::from_millis(1))
-            + Duration::from_millis(25))
-        .max(MIN_STREAM_PTO);
-        let expired = self
-            .stream_transmission_by_pn
-            .keys()
-            .filter_map(|packet_number| {
-                self.sent_packets_by_pn
-                    .get(packet_number)
-                    .map(|(packet_size, sent_at)| (*packet_number, *packet_size, *sent_at))
-            })
-            .filter(|(_, _, sent_at)| now.saturating_duration_since(*sent_at) >= pto)
-            .min_by_key(|(_, _, sent_at)| *sent_at)
-            .map(|(packet_number, packet_size, _)| (packet_number, packet_size));
-
-        let Some((packet_number, packet_size)) = expired else {
-            return;
-        };
-        self.sent_packets_by_pn.remove(&packet_number);
-        self.lose_stream_transmission_packet(packet_number);
-        self.recovery.on_loss_packet(packet_number, packet_size, now);
-        self.stats.lost = self.stats.lost.saturating_add(1);
-        self.stats.lost_bytes = self.stats.lost_bytes.saturating_add(packet_size as u64);
-        self.pmtu_above_floor_pns.remove(&packet_number);
-        if self.pmtu_probe_pn == Some(packet_number) {
-            self.pmtu.on_probe_lost();
-            self.pmtu_probe_pn = None;
-        }
-        self.cwnd = self.recovery.cwnd;
+    /// Whether the peer's address counts as validated for recovery purposes
+    /// (RFC 9002 §6.2.2.1). Clients are never amplification-limited; for a
+    /// server, handshake completion implies validation happened by then.
+    fn client_address_validated(&self) -> bool {
+        !self.is_server || self.tls_handshake_complete()
     }
 
-    fn poll_congestion_blocked_datagram_pto(&mut self, now: Instant) {
-        if self.recovery.can_send(self.dgram_send_max_size) {
-            self.congestion_blocked_since = None;
-            return;
-        }
+    /// Earliest loss/PTO deadline across all packet number spaces
+    /// (RFC 9002 §6.1.2/§6.2.1). `None` disarms the recovery timer.
+    pub fn recovery_deadline(&self) -> Option<Instant> {
+        self.recovery.loss_detection_timeout(
+            self.tls_handshake_complete(),
+            self.is_server,
+            self.client_address_validated(),
+        )
+    }
 
-        let blocked_since = *self.congestion_blocked_since.get_or_insert(now);
-        let pto = (self.recovery.rtt
-            + self.recovery.rtt_var().max(Duration::from_millis(1))
-            + Duration::from_millis(25))
-        .max(MIN_CONGESTION_BLOCKED_PTO);
-        if now.saturating_duration_since(blocked_since) < pto {
-            return;
+    /// Runs the recovery loss-detection timer: declares time-threshold losses
+    /// or queues PTO probes (RFC 9002 A.8). Event loops call this when
+    /// [`recovery_deadline`](Self::recovery_deadline) expires.
+    pub fn on_recovery_timeout(&mut self, now: Instant) {
+        let outcome = self.recovery.on_loss_detection_timeout(
+            self.tls_handshake_complete(),
+            self.is_server,
+            now,
+        );
+        // Time-threshold losses: retire stream transmissions, PMTU, crypto.
+        for (space, pn, sz) in &outcome.lost {
+            self.stats.lost = self.stats.lost.saturating_add(1);
+            self.stats.lost_bytes = self.stats.lost_bytes.saturating_add(*sz as u64);
+            if *space == recovery::PacketSpace::Application {
+                self.lose_stream_transmission_packet(*pn);
+                self.pmtu_above_floor_pns.remove(pn);
+                if self.pmtu_probe_pn == Some(*pn) {
+                    self.pmtu.on_probe_lost();
+                    self.pmtu_probe_pn = None;
+                }
+            }
         }
-
-        let expired = self
-            .sent_packets_by_pn
-            .iter()
-            .filter(|(packet_number, (_, sent_at))| {
-                !self.stream_transmission_by_pn.contains_key(packet_number)
-                    && now.saturating_duration_since(*sent_at) >= pto
-            })
-            .min_by_key(|(_, (_, sent_at))| *sent_at)
-            .map(|(packet_number, (packet_size, _))| (*packet_number, *packet_size));
-        let Some((packet_number, packet_size)) = expired else {
-            return;
-        };
-
-        self.sent_packets_by_pn.remove(&packet_number);
-        self.recovery.on_loss_packet(packet_number, packet_size, now);
-        self.stats.lost = self.stats.lost.saturating_add(1);
-        self.stats.lost_bytes = self.stats.lost_bytes.saturating_add(packet_size as u64);
-        self.pmtu_above_floor_pns.remove(&packet_number);
-        if self.pmtu_probe_pn == Some(packet_number) {
-            self.pmtu.on_probe_lost();
-            self.pmtu_probe_pn = None;
+        if !outcome.crypto_lost.is_empty() {
+            let mut crypto = self.crypto.write();
+            for (space, off, len) in &outcome.crypto_lost {
+                let stream = match space {
+                    recovery::PacketSpace::Initial => &mut crypto.crypto_initial,
+                    recovery::PacketSpace::Handshake => &mut crypto.crypto_handshake,
+                    recovery::PacketSpace::Application => &mut crypto.crypto_application,
+                };
+                stream.requeue_crypto(*off, *len);
+            }
         }
-        self.congestion_blocked_since = None;
-        self.queue_cover_ping();
-        self.cwnd = self.recovery.cwnd;
+        if !outcome.lost.is_empty() {
+            self.cwnd = self.recovery.cwnd;
+        }
+        // PTO probes: handshake spaces requeue their retained CRYPTO (the
+        // flight loop re-emits it or sends a PING-only probe), the app space
+        // gets a PING in the 1-RTT assembly.
+        for space in outcome.probe_spaces {
+            match space {
+                recovery::PacketSpace::Application => {}
+                recovery::PacketSpace::Initial | recovery::PacketSpace::Handshake => {
+                    let mut crypto = self.crypto.write();
+                    let stream = match space {
+                        recovery::PacketSpace::Initial => &mut crypto.crypto_initial,
+                        recovery::PacketSpace::Handshake => &mut crypto.crypto_handshake,
+                        recovery::PacketSpace::Application => continue,
+                    };
+                    stream.requeue_all_unacked();
+                }
+            }
+            self.pending_probe_spaces.push_back(space);
+        }
+    }
+
+    /// Applies the connection-level reactions of an ACK processed by the
+    /// canonical recovery owner: stream retirement, PMTU bookkeeping, CRYPTO
+    /// range ack/requeue, stats, RTT mirror, and the FEC clean-ACK counter.
+    fn apply_ack_outcome(
+        &mut self,
+        space: recovery::PacketSpace,
+        outcome: recovery::AckOutcome,
+        now: Instant,
+    ) {
+        if !outcome.crypto_acked.is_empty() || !outcome.crypto_lost.is_empty() {
+            let mut crypto = self.crypto.write();
+            let stream = match space {
+                recovery::PacketSpace::Initial => &mut crypto.crypto_initial,
+                recovery::PacketSpace::Handshake => &mut crypto.crypto_handshake,
+                recovery::PacketSpace::Application => &mut crypto.crypto_application,
+            };
+            for (off, len) in &outcome.crypto_acked {
+                stream.ack_crypto(*off, *len);
+            }
+            for (off, len) in &outcome.crypto_lost {
+                stream.requeue_crypto(*off, *len);
+            }
+        }
+        let mut above_floor_acked = false;
+        let acked_packet_count = outcome.newly_acked.len() as u64;
+        let mut acked_bytes = 0usize;
+        for &(pn, sz) in &outcome.newly_acked {
+            acked_bytes = acked_bytes.saturating_add(sz);
+            if space == recovery::PacketSpace::Application {
+                self.acknowledge_stream_transmission_packet(pn);
+                above_floor_acked |= self.pmtu_above_floor_pns.remove(&pn);
+                if self.pmtu_probe_pn == Some(pn) {
+                    let previous_mtu = self.pmtu.effective_mtu();
+                    self.pmtu.on_probe_acked(now);
+                    if self.pmtu.effective_mtu() != previous_mtu {
+                        log::info!(
+                            "DPLPMTUD confirmed path MTU: {}B -> {}B",
+                            previous_mtu,
+                            self.pmtu.effective_mtu()
+                        );
+                    }
+                    self.pmtu_probe_pn = None;
+                }
+            }
+        }
+        for &(pn, sz) in &outcome.lost {
+            self.stats.lost = self.stats.lost.saturating_add(1);
+            self.stats.lost_bytes = self.stats.lost_bytes.saturating_add(sz as u64);
+            if space == recovery::PacketSpace::Application {
+                self.lose_stream_transmission_packet(pn);
+                self.pmtu_above_floor_pns.remove(&pn);
+                if self.pmtu_probe_pn == Some(pn) {
+                    self.pmtu.on_probe_lost();
+                    self.pmtu_probe_pn = None;
+                }
+            }
+        }
+        if let Some(sample) = outcome.rtt_sample {
+            self.rtt = sample;
+        }
+        self.stats.acked_bytes = self.stats.acked_bytes.saturating_add(acked_bytes as u64);
+        if !outcome.newly_acked.is_empty() || !outcome.lost.is_empty() {
+            self.cwnd = self.recovery.cwnd;
+        }
+        // Only a packet above the safe floor proves that the discovered
+        // capacity remains usable. Floor-sized ACKs cannot mask a black hole.
+        if above_floor_acked {
+            self.pmtu.on_packet_acked(self.pmtu.effective_mtu(), now);
+        }
+        if space == recovery::PacketSpace::Application {
+            self.fec_acked_packets = self.fec_acked_packets.saturating_add(acked_packet_count);
+        }
+        if outcome.persistent_congestion {
+            log::info!(
+                "persistent congestion established; cwnd collapsed to {}",
+                self.recovery.cwnd
+            );
+        }
     }
 
     fn refresh_path_count(&mut self) {
@@ -1414,7 +1486,6 @@ impl Connection {
 
     /// Returns true when the TLS provider reports handshake completion.
     /// This is intentionally distinct from transport liveness/establishment.
-    #[cfg(any(test, feature = "rust-tests"))]
     pub fn tls_handshake_complete(&self) -> bool {
         self.tls_provider.as_ref().map(|p| p.handshake_complete()).unwrap_or(true)
     }
@@ -1734,7 +1805,10 @@ impl Connection {
         ];
         self.next_send_pn_by_space = [0, 0, 0];
         self.pending_control.clear();
-        self.sent_packets_by_pn.clear();
+        self.recovery.discard_space(recovery::PacketSpace::Initial);
+        self.recovery.discard_space(recovery::PacketSpace::Handshake);
+        self.recovery.discard_space(recovery::PacketSpace::Application);
+        self.pending_probe_spaces.clear();
         self.stream_transmission_by_pn.clear();
         self.lost_stream_transmission_by_pn.clear();
         self.stream_retransmit_queue.clear();
@@ -1750,7 +1824,6 @@ impl Connection {
         self.rtt = Duration::ZERO;
         self.timeout_count = 0;
         self.last_activity = Instant::now();
-        self.congestion_blocked_since = None;
         self.conn_bytes_sent = 0;
         self.conn_bytes_recvd = 0;
         self.peer_max_data = self.config.initial_max_data;
@@ -1939,6 +2012,21 @@ impl Connection {
         };
         let pkt_ty = hdr_native.ty;
         self.received_non_vn_packet = true;
+
+        // Receiving a valid 1-RTT (Short) packet confirms the peer has the
+        // 1-RTT keys and therefore the handshake is done. Discard the
+        // Initial/Handshake packet number spaces and keys per RFC 9002 §6.2.2
+        // so unacknowledged handshake packets stop triggering PTO probes and
+        // inflating bytes_in_flight.
+        if pkt_ty == PacketType::Short {
+            self.recovery.discard_space(recovery::PacketSpace::Initial);
+            self.recovery.discard_space(recovery::PacketSpace::Handshake);
+            let mut crypto = self.crypto.write();
+            crypto.seal_initial = None;
+            crypto.open_initial = None;
+            crypto.seal_handshake = None;
+            crypto.open_handshake = None;
+        }
 
         // Learn peer CID from the first long-header packets.
         // - Server: outgoing DCID must be the client's SCID.
@@ -2246,7 +2334,20 @@ impl Connection {
                             let exp = self.config.ack_delay_exponent.min(20);
                             let ack_delay_us = ack_delay << exp;
                             let ack_delay = Duration::from_micros(ack_delay_us);
-                            self.account_sent_bytes_for_ack_ranges_with_delay(&ranges, ack_delay);
+                            // Late ACKs retire stream transmissions whose packet was
+                            // previously declared lost (spurious-loss accounting).
+                            self.acknowledge_late_stream_packets(&ranges);
+                            let space = recovery::PacketSpace::from_index(space_idx);
+                            let now = Instant::now();
+                            let outcome = self.recovery.on_ack_received(
+                                space,
+                                &ranges,
+                                ack_delay,
+                                self.tls_handshake_complete(),
+                                self.is_server,
+                                now,
+                            );
+                            self.apply_ack_outcome(space, outcome, now);
                         }
                         Frame::Crypto { offset, data } => {
                             let lvl = match pkt_ty {
@@ -2711,10 +2812,13 @@ impl Connection {
     ) -> Result<(usize, bool), crate::error::ConnectionError> {
         if let Some(front) = self.dgram_send_queue.front() {
             #[cfg(not(feature = "zero_copy_dgram"))]
-            let need = 1 + 2 + front.len();
+            let front_len = front.len();
             #[cfg(feature = "zero_copy_dgram")]
-            let need = 1 + 2 + front.len;
+            let front_len = front.len;
+            let need = 1 + 2 + front_len;
             let tag_reserve = self.tag_reserve_1rtt();
+            log::debug!("maybe_flush_one_datagram_frame: off={} need={} tag_reserve={} out_len={} front_len={} queue_len={}",
+                off, need, tag_reserve, out.len(), front_len, self.dgram_send_queue.len());
             if off + need + tag_reserve <= out.len() {
                 #[cfg(not(feature = "zero_copy_dgram"))]
                 {
@@ -2722,13 +2826,16 @@ impl Connection {
                         return Err(crate::error::ConnectionError::Done);
                     };
                     let frame = Frame::Datagram { data: Cow::Owned(front_owned) };
+                    log::debug!("maybe_flush_one_datagram_frame: attempting to write frame, frame_wire_len={}", frames::wire_len(&frame));
                     match frames::to_bytes(&frame, &mut out[off..]) {
                         Ok(written) => {
+                            log::debug!("maybe_flush_one_datagram_frame: wrote {} bytes", written);
                             off += written;
                             // DATAGRAM frames are ack-eliciting (RFC 9221 §2).
                             return Ok((off, true));
                         }
                         Err(e) => {
+                            log::debug!("maybe_flush_one_datagram_frame: to_bytes failed: {:?}", e);
                             if let Frame::Datagram { data } = frame {
                                 self.dgram_send_queue.push_front(data.into_owned());
                             }
@@ -2976,8 +3083,15 @@ impl Connection {
         self.stats.sent += 1;
         self.stats.sent_bytes += off as u64;
         let now = Instant::now();
-        self.recovery.on_packet_sent(pn, off, now);
-        self.sent_packets_by_pn.insert(pn, (off, now));
+        self.recovery.on_packet_sent_in_space(
+            recovery::PacketSpace::Application,
+            pn,
+            off,
+            true,
+            true,
+            None,
+            now,
+        );
         self.cwnd = self.recovery.cwnd;
         self.refresh_path_count();
         Ok((off, info))
@@ -3044,30 +3158,35 @@ impl Connection {
             .min(self.dgram_send_max_size.max(MIN_CLIENT_INITIAL_LEN))
             .min(packetization_mtu.max(MIN_CLIENT_INITIAL_LEN));
         let mtu_cap = outer_mtu_cap.saturating_sub(datagram_overhead);
+        log::debug!("send_with_datagram_overhead: out_len={} dgram_send_max_size={} pmtu={} packetization_mtu={} outer_mtu_cap={} datagram_overhead={} mtu_cap={} dgram_queue_len={} bytes_in_flight={} cwnd={}",
+            out.len(), self.dgram_send_max_size, pmtu, packetization_mtu, outer_mtu_cap, datagram_overhead, mtu_cap, self.dgram_send_queue.len(), self.bytes_in_flight, self.cwnd);
         if unlikely(mtu_cap == 0) {
             return Err(ConnectionError::BufferTooShort);
         }
         let out = &mut out[..mtu_cap];
-        // Reliable STREAM tails need retransmission even when packet-threshold
-        // loss cannot fire because no higher packet was acknowledged.
-        self.poll_stream_pto(now);
         // Congestion gate: only send if within cwnd budget.
         // ACK-only packets bypass the gate (RFC 9002 §7.2) to prevent
         // congestion-control deadlocks where both sides exhaust their windows
         // and neither can send ACKs to release budget.
-        let mut congestion_blocked = !self.recovery.can_send(self.dgram_send_max_size);
+        let congestion_blocked = !self.recovery.can_send(self.dgram_send_max_size);
+        log::debug!("send_with_datagram_overhead congestion gate: recovery.bytes_in_flight={} recovery.cwnd={} dgram_send_max_size={} congestion_blocked={}",
+            self.recovery.bytes_in_flight, self.recovery.cwnd, self.dgram_send_max_size, congestion_blocked);
         let mut ack_bypass = congestion_blocked && self.has_pending_application_ack();
         if congestion_blocked && !ack_bypass {
-            // DATAGRAM payloads remain unreliable. Release exactly one stale
-            // congestion owner only after the send gate has stayed closed for
-            // a conservative PTO, then send a PING to obtain fresh ACK state.
-            self.poll_congestion_blocked_datagram_pto(now);
-            congestion_blocked = !self.recovery.can_send(self.dgram_send_max_size);
-            ack_bypass = congestion_blocked && self.has_pending_application_ack();
-        } else {
-            self.congestion_blocked_since = None;
+            // RFC 9002 §7.5/§6.2.4: PTO probes MUST NOT be blocked by the
+            // congestion controller (they still count as in flight). The probe
+            // PING is written below in the assembly; stream/datagram payloads
+            // stay gated.
+            if self
+                .pending_probe_spaces
+                .iter()
+                .any(|s| *s == recovery::PacketSpace::Application)
+            {
+                ack_bypass = true;
+            }
         }
         if congestion_blocked && !ack_bypass {
+            log::debug!("send_with_datagram_overhead: early Done congestion_blocked ack_bypass={} dgram_queue_len={}", ack_bypass, self.dgram_send_queue.len());
             return Err(ConnectionError::Done);
         }
         self.poll_path_validation_timeout(now);
@@ -3146,9 +3265,10 @@ impl Connection {
                 // the same packet *after* the data: the AEAD tag (16), the CRYPTO frame
                 // header (type 1 + offset varint ≤8 + length varint ≤8), and the ACK/PING
                 // frames added below. Without this reserve, next_crypto_frame() returns up
-                // to `out.len() - off - 16` bytes, the framed packet overflows the buffer,
-                // the seal fails with BufferTooShort, and the already-drained CRYPTO bytes
-                // are lost forever (never retransmitted) - stalling the handshake.
+                // to `out.len() - off - 16` bytes, the framed packet overflows the buffer
+                // and the seal fails with BufferTooShort. (Since the CRYPTO retention
+                // buffer keeps drained bytes unacked, a failed seal no longer loses the
+                // data - but the oversized write would still error out every send.)
                 const SEND_FRAME_OVERHEAD_RESERVE: usize = 64;
                 let crypto_budget =
                     out.len().saturating_sub(off + 16 + SEND_FRAME_OVERHEAD_RESERVE);
@@ -3160,9 +3280,22 @@ impl Connection {
                 if max_len < 32 {
                     continue;
                 }
-                let Some((crypto_off, data)) = self.next_crypto_frame(lvl, max_len) else {
+                let crypto_frame = self.next_crypto_frame(lvl, max_len);
+                let probe_pos = self
+                    .pending_probe_spaces
+                    .iter()
+                    .position(|s| *s == recovery::PacketSpace::from_index(space_idx));
+                if crypto_frame.is_none() && probe_pos.is_none() {
                     continue;
-                };
+                }
+                // RFC 9002 §6.2.4: a PTO probe for this space. The packet below
+                // always carries PING (ack-eliciting), plus retransmitted or
+                // fresh CRYPTO when available. Client Initial probes stay
+                // padded to >= 1200 bytes (§6.2.2.1) via target_total below.
+                if let Some(pos) = probe_pos {
+                    self.pending_probe_spaces.remove(pos);
+                }
+                let crypto_range = crypto_frame.as_ref().map(|(o, d)| (*o, d.len() as u64));
 
                 if let Some((ack_delay, ack_ranges)) =
                     self.pkt_spaces[space_idx].take_ack(self.config.ack_delay_exponent)
@@ -3175,9 +3308,11 @@ impl Connection {
                 }
                 let ping = Frame::Ping { mtu_probe: None };
                 off += frames::to_bytes(&ping, &mut out[off..])?;
-                let frame = Frame::Crypto { offset: crypto_off, data: Cow::Owned(data) };
-                let written = frames::to_bytes(&frame, &mut out[off..])?;
-                off += written;
+                if let Some((crypto_off, data)) = crypto_frame {
+                    let frame = Frame::Crypto { offset: crypto_off, data: Cow::Owned(data) };
+                    let written = frames::to_bytes(&frame, &mut out[off..])?;
+                    off += written;
+                }
 
                 let pn_off = hdr_len_wo_pn;
                 let sample_min = pn_off + 4 + packet::SAMPLE_LEN;
@@ -3229,6 +3364,17 @@ impl Connection {
                     self.next_send_pn_by_space[space_idx].wrapping_add(1);
                 self.stats.sent += 1;
                 self.stats.sent_bytes += used as u64;
+                // RFC 9002 §4.9: handshake packets are not special - they are
+                // tracked for loss recovery exactly like 1-RTT packets.
+                self.recovery.on_packet_sent_in_space(
+                    recovery::PacketSpace::from_index(space_idx),
+                    pn,
+                    used,
+                    true,
+                    true,
+                    crypto_range,
+                    Instant::now(),
+                );
                 if !self.is_established && self.stats.recv > 0 && self.stats.sent > 0 {
                     self.is_established = true;
                 }
@@ -3247,6 +3393,7 @@ impl Connection {
             // progress there is nothing else to do this turn; once it is complete we fall
             // through to the 1-RTT path below.
             if handshake_incomplete {
+                log::debug!("send_with_datagram_overhead: early Done handshake_incomplete dgram_queue_len={}", self.dgram_send_queue.len());
                 return Err(ConnectionError::Done);
             }
         }
@@ -3269,8 +3416,14 @@ impl Connection {
         let has_pending_data = !self.pending_control.is_empty()
             || self.has_pending_application_ack()
             || self.has_sendable_stream_frame()
-            || !self.dgram_send_queue.is_empty();
+            || !self.dgram_send_queue.is_empty()
+            || self
+                .pending_probe_spaces
+                .iter()
+                .any(|s| *s == recovery::PacketSpace::Application);
         if !has_pending_data && !ack_bypass && !dedicated_pmtu_probe {
+            log::debug!("send_with_datagram_overhead: early Done has_pending_data=false dgram_queue_len={} pending_control={} app_ack={} sendable_stream={} probe_spaces={} ack_bypass={} pmtu_probe={}",
+                self.dgram_send_queue.len(), self.pending_control.is_empty(), self.has_pending_application_ack(), self.has_sendable_stream_frame(), self.pending_probe_spaces.iter().any(|s| *s == recovery::PacketSpace::Application), ack_bypass, dedicated_pmtu_probe);
             return Err(ConnectionError::Done);
         }
         // Outbound stealth timing is owned by core::QuicFuscateConnection (next_packet_release).
@@ -3322,6 +3475,23 @@ impl Connection {
             off = off_after_ctrl;
             wrote_ack_eliciting |= ctrl_ack_eliciting;
             off = self.maybe_emit_application_ack_frame(out, off)?;
+            // RFC 9002 §6.2.4: emit one ack-eliciting PING per pending
+            // Application-space PTO probe. Written directly (not via
+            // pending_control) so it also fires when the congestion gate was
+            // bypassed for the probe; stream/datagram payloads stay gated.
+            if let Some(pos) = self
+                .pending_probe_spaces
+                .iter()
+                .position(|s| *s == recovery::PacketSpace::Application)
+            {
+                let ping = Frame::Ping { mtu_probe: None };
+                let tag_reserve = self.tag_reserve_1rtt();
+                if out.len() >= off + frames::wire_len(&ping) + tag_reserve {
+                    self.pending_probe_spaces.remove(pos);
+                    off += frames::to_bytes(&ping, &mut out[off..])?;
+                    wrote_ack_eliciting = true;
+                }
+            }
             // When bypassing the congestion gate for ACK-only packets, skip
             // stream and datagram data - those are congestion-controlled and
             // must not be sent when the window is exhausted.
@@ -3399,6 +3569,8 @@ impl Connection {
             chaff.record_real_traffic(now);
         }
         if off == pn_off + pn_len {
+            log::debug!("send_with_datagram_overhead: off==pn_off+pn_len, returning Done; dgram_queue_len={} pending_control={} application_ack={} writable_streams={} probe_spaces={}",
+                self.dgram_send_queue.len(), self.pending_control.len(), self.has_pending_application_ack(), self.writable_streams.len(), self.pending_probe_spaces.len());
             return Err(ConnectionError::Done);
         }
         off = self.maybe_apply_stealth_padding(out, pn_off, pn_len, off)?;
@@ -3442,8 +3614,15 @@ impl Connection {
         let is_ack_only = !wrote_ack_eliciting;
         if !is_ack_only {
             let now = Instant::now();
-            self.recovery.on_packet_sent(pn, total, now);
-            self.sent_packets_by_pn.insert(pn, (total, now));
+            self.recovery.on_packet_sent_in_space(
+                recovery::PacketSpace::Application,
+                pn,
+                total,
+                true,
+                true,
+                None,
+                now,
+            );
             if let Some(transmission_id) = stream_transmission_id {
                 self.commit_stream_transmission(transmission_id, pn);
             }
@@ -3922,6 +4101,14 @@ impl Connection {
         if !self.is_established() {
             return Ok(false);
         }
+        // PTO probes for Initial/Handshake are flushed before 1-RTT data; a
+        // non-zero outer datagram overhead (FEC) would leave the handshake
+        // probe with too little buffer to reach MIN_CLIENT_INITIAL_LEN.
+        if self.pending_probe_spaces.iter().any(|s| {
+            *s == recovery::PacketSpace::Initial || *s == recovery::PacketSpace::Handshake
+        }) {
+            return Ok(false);
+        }
         Ok(!self.crypto.read().has_pending_handshake_send())
     }
 
@@ -4036,6 +4223,11 @@ impl Connection {
     /// Bytes currently considered in flight
     pub fn bytes_in_flight(&self) -> usize {
         self.bytes_in_flight
+    }
+
+    /// Current congestion window in bytes.
+    pub fn cwnd(&self) -> usize {
+        self.cwnd
     }
 
     /// Estimated delivery rate (bytes/s)
@@ -4682,233 +4874,6 @@ impl Connection {
         0
     }
 
-    /// Update recovery state from an ACK frame using the PN->(bytes, send_time) map.
-    /// Also generates an RTT sample from the largest acknowledged PN's send time.
-    /// Wrapper for zero ack_delay (used by bench code).
-    #[cfg(feature = "benches")]
-    fn account_sent_bytes_for_ack_ranges(&mut self, ranges: &[(u64, u64)]) {
-        self.account_sent_bytes_for_ack_ranges_with_delay(ranges, Duration::ZERO)
-    }
-
-    /// Update recovery state from an ACK frame with the ACK delay from the peer.
-    /// Generates an RTT sample: rtt = now - send_time - ack_delay (RFC 9000 §5).
-    fn account_sent_bytes_for_ack_ranges_with_delay(
-        &mut self,
-        ranges: &[(u64, u64)],
-        ack_delay: Duration,
-    ) {
-        let now = Instant::now();
-        let mut acked_total = 0usize;
-        let mut acked_packet_count = 0u64;
-        let mut lost_total = 0usize;
-        self.acknowledge_late_stream_packets(ranges);
-        let largest_acked =
-            ranges.iter().filter_map(|(_, end)| end.checked_sub(1)).max().unwrap_or(0);
-        let packet_threshold = 3u64;
-        let above_floor_acked = self
-            .pmtu_above_floor_pns
-            .iter()
-            .any(|pn| ranges.iter().any(|(start, end)| *pn >= *start && *pn < *end));
-
-        // RTT sample: look up send_time of the largest acknowledged PN.
-        // Per RFC 9000 §5.1, only the largest acked PN yields a valid RTT sample
-        // (smaller PNs may have been acknowledged by coalesced ACKs with older send times).
-        let mut rtt_sample: Option<Duration> = None;
-
-        let loss_cutoff = largest_acked.checked_sub(packet_threshold);
-        if let Some(cutoff) =
-            loss_cutoff.filter(|_| ranges.len() >= ACK_PREFIX_CLASSIFY_RANGE_THRESHOLD)
-        {
-            let mut range_idx = 0usize;
-            let prefix_packets = self.drain_sent_packets_through(cutoff);
-            for (pn, (sz, send_time)) in prefix_packets {
-                while range_idx < ranges.len() && ranges[range_idx].1 <= pn {
-                    range_idx += 1;
-                }
-                let is_acked = range_idx < ranges.len()
-                    && pn >= ranges[range_idx].0
-                    && pn < ranges[range_idx].1;
-                if is_acked {
-                    self.acknowledge_stream_transmission_packet(pn);
-                    if pn == largest_acked {
-                        let elapsed = now.saturating_duration_since(send_time);
-                        rtt_sample = Some(elapsed.saturating_sub(ack_delay));
-                    }
-                    acked_total = acked_total.saturating_add(sz);
-                    acked_packet_count = acked_packet_count.saturating_add(1);
-                } else {
-                    self.lose_stream_transmission_packet(pn);
-                    self.recovery.on_loss_packet(pn, sz, now);
-                    lost_total = lost_total.saturating_add(sz);
-                    self.stats.lost = self.stats.lost.saturating_add(1);
-                    self.stats.lost_bytes = self.stats.lost_bytes.saturating_add(sz as u64);
-                }
-            }
-
-            if let Some(after_cutoff) = cutoff.checked_add(1) {
-                for (start, end) in ranges {
-                    let start = (*start).max(after_cutoff);
-                    if start >= *end {
-                        continue;
-                    }
-                    let span = end.saturating_sub(start);
-                    if span >= SENT_PACKET_SPLIT_DRAIN_THRESHOLD {
-                        let acked_packets = self.drain_sent_packet_range(start, *end);
-                        for (pn, (sz, send_time)) in acked_packets {
-                            self.acknowledge_stream_transmission_packet(pn);
-                            if pn == largest_acked {
-                                let elapsed = now.saturating_duration_since(send_time);
-                                rtt_sample = Some(elapsed.saturating_sub(ack_delay));
-                            }
-                            acked_total = acked_total.saturating_add(sz);
-                            acked_packet_count = acked_packet_count.saturating_add(1);
-                        }
-                    } else {
-                        let acked_packets = self
-                            .sent_packets_by_pn
-                            .extract_if(start..*end, |_, _| true)
-                            .collect::<Vec<_>>();
-                        for (pn, (sz, send_time)) in acked_packets {
-                            self.acknowledge_stream_transmission_packet(pn);
-                            if pn == largest_acked {
-                                let elapsed = now.saturating_duration_since(send_time);
-                                rtt_sample = Some(elapsed.saturating_sub(ack_delay));
-                            }
-                            acked_total = acked_total.saturating_add(sz);
-                            acked_packet_count = acked_packet_count.saturating_add(1);
-                        }
-                    }
-                }
-            }
-        } else {
-            for (start, end) in ranges {
-                let span = end.saturating_sub(*start);
-                if span >= SENT_PACKET_SPLIT_DRAIN_THRESHOLD {
-                    let acked_packets = self.drain_sent_packet_range(*start, *end);
-                    for (pn, (sz, send_time)) in acked_packets {
-                        self.acknowledge_stream_transmission_packet(pn);
-                        if pn == largest_acked {
-                            let elapsed = now.saturating_duration_since(send_time);
-                            rtt_sample = Some(elapsed.saturating_sub(ack_delay));
-                        }
-                        acked_total = acked_total.saturating_add(sz);
-                        acked_packet_count = acked_packet_count.saturating_add(1);
-                    }
-                } else {
-                    let acked_packets = self
-                        .sent_packets_by_pn
-                        .extract_if(*start..*end, |_, _| true)
-                        .collect::<Vec<_>>();
-                    for (pn, (sz, send_time)) in acked_packets {
-                        self.acknowledge_stream_transmission_packet(pn);
-                        if pn == largest_acked {
-                            let elapsed = now.saturating_duration_since(send_time);
-                            rtt_sample = Some(elapsed.saturating_sub(ack_delay));
-                        }
-                        acked_total = acked_total.saturating_add(sz);
-                        acked_packet_count = acked_packet_count.saturating_add(1);
-                    }
-                }
-            }
-            if let Some(loss_cutoff) = loss_cutoff {
-                let lost_packets = self.drain_sent_packets_through(loss_cutoff);
-                for (pn, (sz, _)) in lost_packets {
-                    self.lose_stream_transmission_packet(pn);
-                    self.recovery.on_loss_packet(pn, sz, now);
-                    lost_total = lost_total.saturating_add(sz);
-                    self.stats.lost = self.stats.lost.saturating_add(1);
-                    self.stats.lost_bytes = self.stats.lost_bytes.saturating_add(sz as u64);
-                }
-            }
-        }
-        if acked_total > 0 {
-            if let Some(sample) = rtt_sample.filter(|sample| *sample > Duration::ZERO) {
-                self.rtt = sample;
-                self.recovery.on_ack_with_rtt(acked_total, sample, now);
-            } else {
-                self.recovery.on_ack(acked_total, now);
-            }
-            self.stats.acked_bytes = self.stats.acked_bytes.saturating_add(acked_total as u64);
-            self.cwnd = self.recovery.cwnd;
-            // Only a packet above the safe floor proves that the discovered
-            // capacity remains usable. Floor-sized ACKs cannot mask a black hole.
-            if above_floor_acked {
-                self.pmtu.on_packet_acked(self.pmtu.effective_mtu(), now);
-            }
-            if let Some(probe_pn) = self.pmtu_probe_pn.take() {
-                if ranges.iter().any(|(s, e)| probe_pn >= *s && probe_pn < *e) {
-                    let previous_mtu = self.pmtu.effective_mtu();
-                    self.pmtu.on_probe_acked(now);
-                    if self.pmtu.effective_mtu() != previous_mtu {
-                        log::info!(
-                            "DPLPMTUD confirmed path MTU: {}B -> {}B",
-                            previous_mtu,
-                            self.pmtu.effective_mtu()
-                        );
-                    }
-                } else {
-                    // Probe not yet acked - keep tracking it.
-                    self.pmtu_probe_pn = Some(probe_pn);
-                }
-            }
-        } else {
-            if let Some(sample) = rtt_sample.filter(|sample| *sample > Duration::ZERO) {
-                self.rtt = sample;
-                self.recovery.update_rtt(sample);
-            }
-            if lost_total > 0 {
-                self.cwnd = self.recovery.cwnd;
-            }
-        }
-
-        // DPLPMTUD probe loss: if the probe PN fell below the loss threshold,
-        // the probe is considered lost and the PMTU state machine backs off.
-        if let Some(probe_pn) = self.pmtu_probe_pn {
-            if largest_acked >= packet_threshold && probe_pn < largest_acked - packet_threshold {
-                self.pmtu.on_probe_lost();
-                self.pmtu_probe_pn = None;
-            }
-        }
-        self.pmtu_above_floor_pns.retain(|pn| {
-            let acknowledged = ranges.iter().any(|(start, end)| *pn >= *start && *pn < *end);
-            let declared_lost = loss_cutoff.is_some_and(|cutoff| *pn <= cutoff);
-            !acknowledged && !declared_lost
-        });
-        self.fec_acked_packets = self.fec_acked_packets.saturating_add(acked_packet_count);
-
-        // ACK handling above applies the largest-acked RTT sample before its
-        // congestion-control update. The timeout path never inflates RTT.
-    }
-
-    fn drain_sent_packet_range(&mut self, start: u64, end: u64) -> BTreeMap<u64, (usize, Instant)> {
-        if start >= end || self.sent_packets_by_pn.is_empty() {
-            return BTreeMap::new();
-        }
-
-        let mut tail = self.sent_packets_by_pn.split_off(&end);
-        let drained = if start == 0 {
-            std::mem::take(&mut self.sent_packets_by_pn)
-        } else {
-            self.sent_packets_by_pn.split_off(&start)
-        };
-        self.sent_packets_by_pn.append(&mut tail);
-        drained
-    }
-
-    fn drain_sent_packets_through(
-        &mut self,
-        end_inclusive: u64,
-    ) -> BTreeMap<u64, (usize, Instant)> {
-        if self.sent_packets_by_pn.is_empty() {
-            return BTreeMap::new();
-        }
-
-        let Some(after_end) = end_inclusive.checked_add(1) else {
-            return std::mem::take(&mut self.sent_packets_by_pn);
-        };
-        let tail = self.sent_packets_by_pn.split_off(&after_end);
-        std::mem::replace(&mut self.sent_packets_by_pn, tail)
-    }
 }
 
 #[cfg(any(test, feature = "benches"))]
@@ -5015,18 +4980,35 @@ impl Connection {
         self.set_brain_runtime_permissions(permissions);
     }
 
-    /// Seed the sent-packet map for ACK accounting benchmarks.
+    /// Seed the recovery owner's sent state for ACK accounting benchmarks.
     pub fn bench_seed_sent_bytes_by_pn(&mut self, count: u64, bytes_per_pn: usize) {
-        self.sent_packets_by_pn.clear();
+        self.recovery.discard_space(recovery::PacketSpace::Application);
         let now = Instant::now();
         for pn in 0..count {
-            self.sent_packets_by_pn.insert(pn, (bytes_per_pn, now));
+            self.recovery.on_packet_sent_in_space(
+                recovery::PacketSpace::Application,
+                pn,
+                bytes_per_pn,
+                true,
+                true,
+                None,
+                now,
+            );
         }
     }
 
     /// Run ACK sent-byte accounting (same logic as inbound ACK frame handling).
     pub fn bench_account_ack_ranges(&mut self, ranges: &[(u64, u64)]) {
-        self.account_sent_bytes_for_ack_ranges(ranges);
+        let now = Instant::now();
+        let outcome = self.recovery.on_ack_received(
+            recovery::PacketSpace::Application,
+            ranges,
+            Duration::ZERO,
+            true,
+            self.is_server,
+            now,
+        );
+        self.apply_ack_outcome(recovery::PacketSpace::Application, outcome, now);
     }
 }
 
@@ -5087,7 +5069,15 @@ mod tests {
         let mut client = make_v2_client();
         let original_scid = client.scid;
         let original_dcid = client.initial_dcid;
-        client.sent_packets_by_pn.insert(0, (1200, Instant::now()));
+        client.recovery.on_packet_sent_in_space(
+            recovery::PacketSpace::Application,
+            0,
+            1200,
+            true,
+            true,
+            None,
+            Instant::now(),
+        );
         client.bytes_in_flight = 1200;
         let mut vn = packet::generate_version_negotiation_packet(
             &[],
@@ -5100,7 +5090,9 @@ mod tests {
         assert!(client.version_negotiation.reacted_to_vn);
         assert_ne!(client.scid, original_scid);
         assert_ne!(client.initial_dcid, original_dcid);
-        assert!(client.sent_packets_by_pn.is_empty());
+        assert!(
+            client.recovery.tracked_sent_pns(recovery::PacketSpace::Application).is_empty()
+        );
         assert_eq!(client.bytes_in_flight, 0);
 
         let selected_scid = client.scid;
@@ -5587,11 +5579,28 @@ mod tests {
 
         // Simulate sending packet PN=0 with a known send time in the past.
         let send_time = Instant::now() - Duration::from_millis(50);
-        c.sent_packets_by_pn.insert(0, (1200, send_time));
+        c.recovery.on_packet_sent_in_space(
+            recovery::PacketSpace::Application,
+            0,
+            1200,
+            true,
+            true,
+            None,
+            send_time,
+        );
 
         // Process an ACK acknowledging PN=0 (range 0..1).
         let ranges = vec![(0u64, 1u64)];
-        c.account_sent_bytes_for_ack_ranges_with_delay(&ranges, Duration::ZERO);
+        let now = Instant::now();
+        let outcome = c.recovery.on_ack_received(
+            recovery::PacketSpace::Application,
+            &ranges,
+            Duration::ZERO,
+            true,
+            c.is_server,
+            now,
+        );
+        c.apply_ack_outcome(recovery::PacketSpace::Application, outcome, now);
 
         // RTT should now be updated to ~50ms (now - send_time), not the initial value.
         assert!(
@@ -5608,8 +5617,15 @@ mod tests {
         let mut c = make_conn();
         let sent_at = Instant::now() - Duration::from_millis(10);
         for packet_number in 0..3 {
-            c.recovery.on_packet_sent(packet_number, 1200, sent_at);
-            c.sent_packets_by_pn.insert(packet_number, (1200, sent_at));
+            c.recovery.on_packet_sent_in_space(
+                recovery::PacketSpace::Application,
+                packet_number,
+                1200,
+                true,
+                true,
+                None,
+                sent_at,
+            );
         }
 
         let sent_feedback = c.take_fec_callback_feedback();
@@ -5617,7 +5633,16 @@ mod tests {
         assert_eq!(sent_feedback.acked_packets, 0);
         assert_eq!(sent_feedback.lost_packets, 0);
 
-        c.account_sent_bytes_for_ack_ranges_with_delay(&[(0, 2)], Duration::ZERO);
+        let now = Instant::now();
+        let outcome = c.recovery.on_ack_received(
+            recovery::PacketSpace::Application,
+            &[(0, 2)],
+            Duration::ZERO,
+            true,
+            c.is_server,
+            now,
+        );
+        c.apply_ack_outcome(recovery::PacketSpace::Application, outcome, now);
 
         let ack_feedback = c.take_fec_callback_feedback();
         assert_eq!(ack_feedback.sent_packets, 0);
@@ -5630,16 +5655,35 @@ mod tests {
         // RTT sample should subtract the peer's ack_delay (RFC 9000 §19.3).
         let mut c = make_conn();
         let send_time = Instant::now() - Duration::from_millis(100);
-        c.sent_packets_by_pn.insert(0, (1200, send_time));
+        c.recovery.on_packet_sent_in_space(
+            recovery::PacketSpace::Application,
+            0,
+            1200,
+            true,
+            true,
+            None,
+            send_time,
+        );
 
         let ranges = vec![(0u64, 1u64)];
         let ack_delay = Duration::from_millis(30);
-        c.account_sent_bytes_for_ack_ranges_with_delay(&ranges, ack_delay);
+        let now = Instant::now();
+        let outcome = c.recovery.on_ack_received(
+            recovery::PacketSpace::Application,
+            &ranges,
+            ack_delay,
+            true,
+            c.is_server,
+            now,
+        );
+        c.apply_ack_outcome(recovery::PacketSpace::Application, outcome, now);
 
-        // RTT should be ~70ms (100ms elapsed - 30ms ack_delay).
+        // RFC 9002 §5.2/§5.3: the first sample sets min_rtt = latest_rtt, so the
+        // adjustment guard (latest >= min_rtt + delay) can never fire for it -
+        // the first sample is NOT ack-delay adjusted (RTT ~= 100 ms, not 70 ms).
         assert!(
-            c.rtt >= Duration::from_millis(60) && c.rtt <= Duration::from_millis(80),
-            "RTT should be ~70ms (100-30). Got {:?}",
+            c.rtt >= Duration::from_millis(90) && c.rtt <= Duration::from_millis(110),
+            "first RTT sample must be unadjusted (~100ms). Got {:?}",
             c.rtt
         );
     }
@@ -5653,9 +5697,8 @@ mod tests {
         pair.client.stream_send(0, payload, false).unwrap();
         let mut first_packet = [0u8; 1500];
         let first_pn = pair.client.next_send_pn_by_space[2];
-        pair.client.send(&mut first_packet).unwrap();
+        let (first_size, _) = pair.client.send(&mut first_packet).unwrap();
 
-        let (first_size, _) = pair.client.sent_packets_by_pn.remove(&first_pn).unwrap();
         pair.client.lose_stream_transmission_packet(first_pn);
         pair.client.recovery.on_loss_packet(first_pn, first_size, Instant::now());
 
@@ -5687,9 +5730,8 @@ mod tests {
         let original_pn = pair.client.next_send_pn_by_space[2];
         let (original_len, _) = pair.client.send(&mut packet).unwrap();
         assert!(original_len > pair.client.pmtu.min_mtu);
-        let (original_size, _) = pair.client.sent_packets_by_pn.remove(&original_pn).unwrap();
         pair.client.lose_stream_transmission_packet(original_pn);
-        pair.client.recovery.on_loss_packet(original_pn, original_size, Instant::now());
+        pair.client.recovery.on_loss_packet(original_pn, original_len, Instant::now());
         pair.client.pmtu.confirmed_mtu = pair.client.pmtu.min_mtu;
 
         let mut retransmitted_packet_numbers = Vec::new();
@@ -5709,10 +5751,16 @@ mod tests {
         assert!(!fin);
 
         for packet_number in retransmitted_packet_numbers {
-            pair.client.account_sent_bytes_for_ack_ranges_with_delay(
+            let now = Instant::now();
+            let outcome = pair.client.recovery.on_ack_received(
+                recovery::PacketSpace::Application,
                 &[(packet_number, packet_number + 1)],
                 Duration::ZERO,
+                true,
+                pair.client.is_server,
+                now,
             );
+            pair.client.apply_ack_outcome(recovery::PacketSpace::Application, outcome, now);
         }
         assert!(pair.client.stream_transmissions.is_empty());
         assert_eq!(pair.client.stream_retransmit_bytes, 0);
@@ -5728,8 +5776,7 @@ mod tests {
 
         let mut packet = [0u8; 1500];
         let original_pn = pair.client.next_send_pn_by_space[2];
-        pair.client.send(&mut packet).unwrap();
-        let (original_size, _) = pair.client.sent_packets_by_pn.remove(&original_pn).unwrap();
+        let (original_size, _) = pair.client.send(&mut packet).unwrap();
         pair.client.lose_stream_transmission_packet(original_pn);
         pair.client.recovery.on_loss_packet(original_pn, original_size, Instant::now());
         pair.client.pmtu.confirmed_mtu = pair.client.pmtu.min_mtu;
@@ -5739,10 +5786,17 @@ mod tests {
         assert_eq!(pair.client.stream_transmissions.len(), 2);
         assert_eq!(pair.client.stream_retransmit_queue.len(), 1);
 
-        pair.client.account_sent_bytes_for_ack_ranges_with_delay(
+        pair.client.acknowledge_late_stream_packets(&[(original_pn, original_pn + 1)]);
+        let now = Instant::now();
+        let outcome = pair.client.recovery.on_ack_received(
+            recovery::PacketSpace::Application,
             &[(original_pn, original_pn + 1)],
             Duration::ZERO,
+            true,
+            pair.client.is_server,
+            now,
         );
+        pair.client.apply_ack_outcome(recovery::PacketSpace::Application, outcome, now);
 
         assert!(pair.client.stream_transmissions.is_empty());
         assert!(pair.client.stream_retransmit_queue.is_empty());
@@ -5760,24 +5814,36 @@ mod tests {
         let original_pn = pair.client.next_send_pn_by_space[2];
         pair.client.send(&mut packet).unwrap();
 
-        pair.client.sent_packets_by_pn.remove(&original_pn);
         pair.client.lose_stream_transmission_packet(original_pn);
         let retransmitted_pn = pair.client.next_send_pn_by_space[2];
         pair.client.send(&mut packet).unwrap();
         assert_eq!(pair.client.stream_transmissions.len(), 1);
 
-        pair.client.account_sent_bytes_for_ack_ranges_with_delay(
+        pair.client.acknowledge_late_stream_packets(&[(original_pn, original_pn + 1)]);
+        let now = Instant::now();
+        let outcome = pair.client.recovery.on_ack_received(
+            recovery::PacketSpace::Application,
             &[(original_pn, original_pn + 1)],
             Duration::ZERO,
+            true,
+            pair.client.is_server,
+            now,
         );
+        pair.client.apply_ack_outcome(recovery::PacketSpace::Application, outcome, now);
 
         assert!(pair.client.stream_transmissions.is_empty());
         assert!(pair.client.stream_retransmit_queue.is_empty());
         assert!(!pair.client.stream_transmission_by_pn.contains_key(&retransmitted_pn));
-        pair.client.account_sent_bytes_for_ack_ranges_with_delay(
+        let now = Instant::now();
+        let outcome = pair.client.recovery.on_ack_received(
+            recovery::PacketSpace::Application,
             &[(retransmitted_pn, retransmitted_pn + 1)],
             Duration::ZERO,
+            true,
+            pair.client.is_server,
+            now,
         );
+        pair.client.apply_ack_outcome(recovery::PacketSpace::Application, outcome, now);
         assert!(pair.client.stream_transmissions.is_empty());
     }
 
@@ -5809,79 +5875,144 @@ mod tests {
     }
 
     #[test]
-    fn stream_pto_requeues_tail_packet_without_a_higher_ack() {
+    fn pto_probe_then_time_threshold_requeues_tail_packet() {
+        // Canonical RFC 9002 flow for a tail loss without a higher ACK: the PTO
+        // fires a probe, the probe's ACK advances largest_acked, and the time
+        // threshold then declares the tail packet lost.
         let mut pair = bench_paired_1rtt_connections();
         pair.client.pmtu = PmtuState::new(false, PmtuPolicy::default());
         pair.client.stream_send(0, b"tail loss", false).unwrap();
         let mut packet = [0u8; 1500];
         let packet_number = pair.client.next_send_pn_by_space[2];
-        pair.client.send(&mut packet).unwrap();
-        let packet_size = pair.client.sent_packets_by_pn[&packet_number].0;
-        pair.client
-            .sent_packets_by_pn
-            .insert(packet_number, (packet_size, Instant::now() - Duration::from_secs(1)));
+        let (packet_size, _) = pair.client.send(&mut packet).unwrap();
+        // Age the tail packet beyond the initial loss_delay (9/8 * 333 ms).
+        pair.client.recovery.on_packet_sent_in_space(
+            recovery::PacketSpace::Application,
+            packet_number,
+            packet_size,
+            true,
+            true,
+            None,
+            Instant::now() - Duration::from_secs(1),
+        );
 
-        pair.client.poll_stream_pto(Instant::now());
+        // 1. Recovery timeout fires the PTO: an Application probe is queued,
+        //    nothing is declared lost (RFC 9002 §6.2.4).
+        pair.client.on_recovery_timeout(Instant::now());
+        assert!(
+            pair.client.pending_probe_spaces.contains(&recovery::PacketSpace::Application)
+        );
+        assert!(
+            pair.client.recovery.tracks_sent_packet(
+                recovery::PacketSpace::Application,
+                packet_number
+            )
+        );
 
-        assert!(!pair.client.sent_packets_by_pn.contains_key(&packet_number));
+        // 2. The probe (a later packet) is sent and acknowledged; the time
+        //    threshold now declares the aged tail packet lost.
+        let probe_pn = packet_number + 1;
+        pair.client.recovery.on_packet_sent_in_space(
+            recovery::PacketSpace::Application,
+            probe_pn,
+            1200,
+            true,
+            true,
+            None,
+            Instant::now(),
+        );
+        let now = Instant::now();
+        let outcome = pair.client.recovery.on_ack_received(
+            recovery::PacketSpace::Application,
+            &[(probe_pn, probe_pn + 1)],
+            Duration::ZERO,
+            true,
+            pair.client.is_server,
+            now,
+        );
+        pair.client.apply_ack_outcome(recovery::PacketSpace::Application, outcome, now);
+
+        assert!(!pair.client.recovery.tracks_sent_packet(
+            recovery::PacketSpace::Application,
+            packet_number
+        ));
         assert_eq!(pair.client.stream_retransmit_queue.len(), 1);
         assert!(pair.client.lost_stream_transmission_by_pn.contains_key(&packet_number));
     }
 
     #[test]
-    fn aged_datagram_is_not_lost_while_congestion_gate_is_open() {
+    fn aged_datagram_survives_pto_without_being_declared_lost() {
+        // RFC 9002 §6.2.4: a PTO firing sends probes - it never declares loss.
         let mut pair = bench_paired_1rtt_connections();
         pair.client.pmtu = PmtuState::new(false, PmtuPolicy::default());
         pair.client.enable_datagrams(16, 16);
         pair.client.dgram_send(b"unreliable tail").unwrap();
         let mut packet = [0u8; 1500];
         let packet_number = pair.client.next_send_pn_by_space[2];
-        pair.client.send(&mut packet).unwrap();
-        let packet_size = pair.client.sent_packets_by_pn[&packet_number].0;
+        let (packet_size, _) = pair.client.send(&mut packet).unwrap();
+        // Age the recorded packet so a time-threshold timer would be expired,
+        // then verify the PTO path still does not declare loss (RFC 9002 §6.2.4).
+        pair.client.recovery.on_packet_sent_in_space(
+            recovery::PacketSpace::Application,
+            packet_number,
+            packet_size,
+            true,
+            true,
+            None,
+            Instant::now() - Duration::from_secs(1),
+        );
         let bytes_in_flight_before = pair.client.recovery.bytes_in_flight;
-        pair.client
-            .sent_packets_by_pn
-            .insert(packet_number, (packet_size, Instant::now() - Duration::from_secs(1)));
 
-        pair.client.poll_congestion_blocked_datagram_pto(Instant::now());
+        pair.client.on_recovery_timeout(Instant::now());
 
-        assert!(pair.client.sent_packets_by_pn.contains_key(&packet_number));
+        assert!(
+            pair.client.recovery.tracks_sent_packet(
+                recovery::PacketSpace::Application,
+                packet_number
+            )
+        );
         assert_eq!(pair.client.recovery.bytes_in_flight, bytes_in_flight_before);
-        assert!(pair.client.pending_control.is_empty());
+        assert!(
+            pair.client.pending_probe_spaces.contains(&recovery::PacketSpace::Application)
+        );
     }
 
     #[test]
-    fn datagram_pto_releases_tail_only_after_continuous_congestion_blockage() {
+    fn pto_probe_bypasses_congestion_gate_and_emits_ack_eliciting_packet() {
+        // RFC 9002 §7.5/§6.2.4: a PTO probe bypasses the congestion gate but
+        // still counts as in flight (tracked ack-eliciting packet).
         let mut pair = bench_paired_1rtt_connections();
         pair.client.pmtu = PmtuState::new(false, PmtuPolicy::default());
         pair.client.enable_datagrams(16, 16);
         pair.client.dgram_send(b"unreliable tail").unwrap();
         let mut packet = [0u8; 1500];
-        let packet_number = pair.client.next_send_pn_by_space[2];
         pair.client.send(&mut packet).unwrap();
-        let bytes_in_flight_before = pair.client.recovery.bytes_in_flight;
-        pair.client.recovery.cwnd = bytes_in_flight_before;
-        let blocked_at = Instant::now();
+        // Close the congestion gate: no headroom left in cwnd.
+        pair.client.recovery.cwnd = pair.client.recovery.bytes_in_flight;
+        assert!(!pair.client.recovery.can_send(pair.client.dgram_send_max_size));
 
-        pair.client.poll_congestion_blocked_datagram_pto(blocked_at);
-        pair.client.poll_congestion_blocked_datagram_pto(
-            blocked_at + MIN_CONGESTION_BLOCKED_PTO - Duration::from_millis(1),
-        );
+        // Without a pending probe the gate rejects the send.
+        assert_eq!(pair.client.send(&mut packet).unwrap_err(), crate::error::ConnectionError::Done);
 
-        assert!(pair.client.sent_packets_by_pn.contains_key(&packet_number));
-        assert_eq!(pair.client.recovery.bytes_in_flight, bytes_in_flight_before);
-
-        pair.client.poll_congestion_blocked_datagram_pto(blocked_at + MIN_CONGESTION_BLOCKED_PTO);
-
-        assert!(!pair.client.sent_packets_by_pn.contains_key(&packet_number));
-        assert!(pair.client.dgram_send_queue.is_empty());
-        assert!(pair.client.stream_retransmit_queue.is_empty());
-        assert!(pair.client.recovery.bytes_in_flight < bytes_in_flight_before);
-        assert!(pair
+        // A PTO firing queues the probe; the next send emits it despite the gate.
+        pair.client.on_recovery_timeout(Instant::now());
+        let tracked_before = pair
             .client
-            .pending_control
-            .iter()
-            .any(|frame| matches!(frame, Frame::Ping { .. })));
+            .recovery
+            .tracked_sent_pns(recovery::PacketSpace::Application)
+            .len();
+        let (probe_len, probe_info) = pair.client.send(&mut packet).expect("probe must emit");
+        assert!(probe_len > 0);
+        assert!(probe_info.congestion_controlled); // probes count as in flight (§7.5)
+        assert!(
+            !pair.client.pending_probe_spaces.contains(&recovery::PacketSpace::Application)
+        );
+        let tracked_after = pair
+            .client
+            .recovery
+            .tracked_sent_pns(recovery::PacketSpace::Application)
+            .len();
+        assert_eq!(tracked_after, tracked_before + 1);
     }
 
     #[test]
@@ -5893,11 +6024,29 @@ mod tests {
         let stream_packet_number = pair.client.next_send_pn_by_space[2];
         pair.client.send(&mut packet).unwrap();
         let now = Instant::now();
-        for packet_number in 1..=4 {
-            pair.client.sent_packets_by_pn.insert(packet_number, (1200, now));
+        // The stream packet (PN 0) is already recorded by send(); seed PNs 1-4
+        // so that an ACK for PN 4 advances largest_acked and declares PN 0 lost.
+        for pn in 1..=4 {
+            pair.client.recovery.on_packet_sent_in_space(
+                recovery::PacketSpace::Application,
+                pn,
+                1200,
+                true,
+                true,
+                None,
+                now,
+            );
         }
 
-        pair.client.account_sent_bytes_for_ack_ranges_with_delay(&[(4, 5)], Duration::ZERO);
+        let outcome = pair.client.recovery.on_ack_received(
+            recovery::PacketSpace::Application,
+            &[(4, 5)],
+            Duration::ZERO,
+            true,
+            pair.client.is_server,
+            now,
+        );
+        pair.client.apply_ack_outcome(recovery::PacketSpace::Application, outcome, now);
 
         assert_eq!(pair.client.stream_retransmit_queue.len(), 1);
         assert!(pair.client.lost_stream_transmission_by_pn.contains_key(&stream_packet_number));
@@ -5924,16 +6073,32 @@ mod tests {
         let mut c = make_conn();
         let send_time = Instant::now() - Duration::from_millis(50);
         for pn in 0..12 {
-            c.sent_packets_by_pn.insert(pn, (1200, send_time));
+            c.recovery.on_packet_sent_in_space(
+                recovery::PacketSpace::Application,
+                pn,
+                1200,
+                true,
+                true,
+                None,
+                send_time,
+            );
         }
 
         let ranges = vec![(0u64, 1u64), (4, 5), (8, 9)];
-        c.account_sent_bytes_for_ack_ranges_with_delay(&ranges, Duration::ZERO);
+        let outcome = c.recovery.on_ack_received(
+            recovery::PacketSpace::Application,
+            &ranges,
+            Duration::ZERO,
+            true,
+            c.is_server,
+            Instant::now(),
+        );
+        c.apply_ack_outcome(recovery::PacketSpace::Application, outcome, Instant::now());
 
         assert_eq!(c.stats.acked_bytes, 3600);
         assert_eq!(c.stats.lost, 4);
         assert_eq!(c.stats.lost_bytes, 4800);
-        let remaining: Vec<u64> = c.sent_packets_by_pn.keys().copied().collect();
+        let remaining: Vec<u64> = c.recovery.tracked_sent_pns(recovery::PacketSpace::Application);
         assert_eq!(remaining, vec![6, 7, 9, 10, 11]);
     }
 
@@ -5942,16 +6107,32 @@ mod tests {
         let mut c = make_conn();
         let send_time = Instant::now() - Duration::from_millis(50);
         for pn in 0..64 {
-            c.sent_packets_by_pn.insert(pn, (1200, send_time));
+            c.recovery.on_packet_sent_in_space(
+                recovery::PacketSpace::Application,
+                pn,
+                1200,
+                true,
+                true,
+                None,
+                send_time,
+            );
         }
 
         let ranges = (0u64..64).step_by(4).map(|pn| (pn, pn + 1)).collect::<Vec<_>>();
-        c.account_sent_bytes_for_ack_ranges_with_delay(&ranges, Duration::ZERO);
+        let outcome = c.recovery.on_ack_received(
+            recovery::PacketSpace::Application,
+            &ranges,
+            Duration::ZERO,
+            true,
+            c.is_server,
+            Instant::now(),
+        );
+        c.apply_ack_outcome(recovery::PacketSpace::Application, outcome, Instant::now());
 
         assert_eq!(c.stats.acked_bytes, 16 * 1200);
         assert_eq!(c.stats.lost, 43);
         assert_eq!(c.stats.lost_bytes, 43 * 1200);
-        let remaining: Vec<u64> = c.sent_packets_by_pn.keys().copied().collect();
+        let remaining: Vec<u64> = c.recovery.tracked_sent_pns(recovery::PacketSpace::Application);
         assert_eq!(remaining, vec![58, 59, 61, 62, 63]);
     }
 
@@ -5960,14 +6141,30 @@ mod tests {
         let mut c = make_conn();
         let send_time = Instant::now() - Duration::from_millis(50);
         for pn in 0..96 {
-            c.sent_packets_by_pn.insert(pn, (1200, send_time));
+            c.recovery.on_packet_sent_in_space(
+                recovery::PacketSpace::Application,
+                pn,
+                1200,
+                true,
+                true,
+                None,
+                send_time,
+            );
         }
 
         let ranges = vec![(16u64, 80u64)];
-        c.account_sent_bytes_for_ack_ranges_with_delay(&ranges, Duration::ZERO);
+        let outcome = c.recovery.on_ack_received(
+            recovery::PacketSpace::Application,
+            &ranges,
+            Duration::ZERO,
+            true,
+            c.is_server,
+            Instant::now(),
+        );
+        c.apply_ack_outcome(recovery::PacketSpace::Application, outcome, Instant::now());
 
         assert_eq!(c.stats.acked_bytes, 64 * 1200);
-        let remaining: Vec<u64> = c.sent_packets_by_pn.keys().copied().collect();
+        let remaining: Vec<u64> = c.recovery.tracked_sent_pns(recovery::PacketSpace::Application);
         assert_eq!(remaining, (80..96).collect::<Vec<_>>());
     }
 
@@ -5976,16 +6173,32 @@ mod tests {
         let mut c = make_conn();
         let send_time = Instant::now() - Duration::from_millis(50);
         for pn in 0..128 {
-            c.sent_packets_by_pn.insert(pn, (1200, send_time));
+            c.recovery.on_packet_sent_in_space(
+                recovery::PacketSpace::Application,
+                pn,
+                1200,
+                true,
+                true,
+                None,
+                send_time,
+            );
         }
 
         let ranges = vec![(127u64, 128u64)];
-        c.account_sent_bytes_for_ack_ranges_with_delay(&ranges, Duration::ZERO);
+        let outcome = c.recovery.on_ack_received(
+            recovery::PacketSpace::Application,
+            &ranges,
+            Duration::ZERO,
+            true,
+            c.is_server,
+            Instant::now(),
+        );
+        c.apply_ack_outcome(recovery::PacketSpace::Application, outcome, Instant::now());
 
         assert_eq!(c.stats.acked_bytes, 1200);
         assert_eq!(c.stats.lost, 125);
         assert_eq!(c.stats.lost_bytes, 125 * 1200);
-        let remaining: Vec<u64> = c.sent_packets_by_pn.keys().copied().collect();
+        let remaining: Vec<u64> = c.recovery.tracked_sent_pns(recovery::PacketSpace::Application);
         assert_eq!(remaining, vec![125, 126]);
     }
 

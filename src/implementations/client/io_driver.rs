@@ -6,6 +6,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::UdpSocket;
 
 use crate::core::QuicFuscateConnection;
@@ -315,6 +316,56 @@ impl IoDriver {
         &self.stats
     }
 
+    /// Compute the next inbound poll timeout, capping it by the connection's
+    /// earliest send deadline (pacing/stealth release or recovery/PTO timer).
+    fn recv_timeout(&self, conn: &Arc<parking_lot::Mutex<QuicFuscateConnection>>) -> Duration {
+        let base = Duration::from_millis(200);
+        let deadline = { conn.lock().next_send_deadline() };
+        if let Some(deadline) = deadline {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Duration::from_millis(1);
+            }
+            return remaining.min(base).max(Duration::from_millis(1));
+        }
+        base
+    }
+
+    /// Flush any pending outgoing packets (ACKs, PTO probes, etc.) produced by
+    /// the QUIC connection.  Used by the inbound loop so probes are not held
+    /// back until the outbound TUN loop wakes.
+    async fn flush_outbound(
+        &self,
+        conn: &Arc<parking_lot::Mutex<QuicFuscateConnection>>,
+        socket: &Arc<UdpSocket>,
+    ) {
+        let mut out = vec![0u8; 65535];
+        loop {
+            let written = {
+                let mut conn_guard = conn.lock();
+                match conn_guard.send(&mut out) {
+                    Ok(0) => break,
+                    Ok(written) => written,
+                    Err(e) => {
+                        log::debug!("Connection send error during flush: {:?}", e);
+                        break;
+                    }
+                }
+            };
+
+            if let Err(e) = socket.send(&out[..written]).await {
+                log::warn!("UDP send error during outbound flush: {}", e);
+                self.stats.errors.fetch_add(1, Ordering::Relaxed);
+                break;
+            }
+
+            self.stats.udp_packets_sent.fetch_add(1, Ordering::Relaxed);
+            let global = crate::instrumentation::global();
+            global.transport.record_bytes_out(written as u64);
+            global.transport.record_packet_out();
+        }
+    }
+
     /// Run the outbound loop (TUN -> QUIC).
     ///
     /// Reads packets from TUN, processes through Stealth/FEC, sends via UDP.
@@ -548,7 +599,7 @@ impl IoDriver {
         {
             if let Some((mut uring_recv, async_efd)) = Self::try_init_uring_recv(&socket, &conn) {
                 return self
-                    .run_inbound_uring(tun, conn, handshake_event, &mut uring_recv, async_efd)
+                    .run_inbound_uring(tun, conn, socket, handshake_event, &mut uring_recv, async_efd)
                     .await;
             }
         }
@@ -573,15 +624,10 @@ impl IoDriver {
         let mut handshake_signaled = false;
 
         while !self.shutdown.load(Ordering::Relaxed) {
-            let recv = tokio::time::timeout(
-                tokio::time::Duration::from_millis(200),
-                socket.recv(&mut recv_buf),
-            )
-            .await;
+            let timeout = self.recv_timeout(&conn);
+            let recv = tokio::time::timeout(timeout, socket.recv(&mut recv_buf)).await;
             match recv {
-                Err(_) => {
-                    continue;
-                }
+                Err(_) => {}
                 Ok(Err(e)) => {
                     if e.kind() != std::io::ErrorKind::WouldBlock {
                         log::warn!("UDP recv error: {}", e);
@@ -643,6 +689,10 @@ impl IoDriver {
                     handshake_signaled = true;
                 }
             }
+
+            // Flush any ACKs or PTO probes produced by recv or by a recovery
+            // deadline that fired while we were waiting.
+            self.flush_outbound(&conn, &socket).await;
         }
         Ok(())
     }
@@ -653,6 +703,7 @@ impl IoDriver {
         &self,
         tun: Arc<parking_lot::Mutex<TunInterface>>,
         conn: Arc<parking_lot::Mutex<QuicFuscateConnection>>,
+        socket: Arc<UdpSocket>,
         handshake_event: Arc<(parking_lot::Mutex<bool>, parking_lot::Condvar)>,
         uring_recv: &mut crate::optimize::uring_batch::UringRecvBatch,
         async_efd: tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>,
@@ -661,10 +712,10 @@ impl IoDriver {
         let mut handshake_signaled = false;
 
         while !self.shutdown.load(Ordering::Relaxed) {
-            // Wait for CQ notification via eventfd (with shutdown timeout).
-            let readable =
-                tokio::time::timeout(tokio::time::Duration::from_millis(200), async_efd.readable())
-                    .await;
+            // Wait for CQ notification via eventfd, capped by the connection's
+            // earliest send deadline so recovery/PTO timers are not overslept.
+            let timeout = self.recv_timeout(&conn);
+            let readable = tokio::time::timeout(timeout, async_efd.readable()).await;
 
             match readable {
                 Ok(Ok(mut guard)) => {
@@ -759,6 +810,9 @@ impl IoDriver {
                     handshake_signaled = true;
                 }
             }
+
+            // Flush ACKs or PTO probes produced by the completions/timeout.
+            self.flush_outbound(&conn, &socket).await;
         }
         Ok(())
     }

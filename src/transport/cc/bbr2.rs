@@ -127,6 +127,8 @@ pub struct Bbr2 {
     // RTT tracking
     min_rtt: Duration,
     rtt: Duration,
+    /// EWMA RTT variance propagated from recovery (RFC 6298 `rttvar`).
+    rtt_var: Duration,
     min_rtt_stamp: Instant,
     // Loss tracking (dual-timescale EWMA)
     loss_acked: f32,
@@ -177,6 +179,7 @@ impl Bbr2 {
             max_bw: 0,
             min_rtt: Duration::from_millis(100),
             rtt: Duration::from_millis(100),
+            rtt_var: Duration::ZERO,
             min_rtt_stamp: now,
             loss_acked: 0.0,
             loss_lost: 0.0,
@@ -534,6 +537,21 @@ impl CongestionController for Bbr2 {
             self.min_rtt = rtt;
             self.min_rtt_stamp = Instant::now();
         }
+    }
+
+    fn update_rtt_var(&mut self, rtt_var: Duration) {
+        self.rtt_var = rtt_var;
+    }
+
+    fn discard_in_flight(&mut self, bytes: usize) {
+        self.bytes_in_flight = self.bytes_in_flight.saturating_sub(bytes);
+    }
+
+    fn on_persistent_congestion(&mut self, min_cwnd: usize) {
+        // Restart the bandwidth model (RFC 9002 §7.6 allows a full reset).
+        self.state = State::Startup;
+        self.max_bw = 0;
+        self.cwnd = min_cwnd.max(self.mss * 2);
     }
 
     fn cwnd(&self) -> usize {

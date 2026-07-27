@@ -46,6 +46,22 @@ pub trait CongestionController: Send {
     /// Update the RTT estimate from a new sample.
     fn update_rtt(&mut self, rtt: Duration);
 
+    /// Update the EWMA RTT variance (RFC 6298 `rttvar`, propagated by
+    /// [`Recovery`](super::recovery::Recovery)). Default no-op: controllers
+    /// without variance consumers ignore it.
+    fn update_rtt_var(&mut self, _rtt_var: Duration) {}
+
+    /// Remove bytes from in-flight accounting without a loss response
+    /// (RFC 9002 §6.2.2 key-discard rule: discarded spaces are neither
+    /// lost nor acknowledged).
+    fn discard_in_flight(&mut self, bytes: usize);
+
+    /// Persistent congestion response (RFC 9002 §7.6): collapse to the minimum
+    /// window; controllers MAY reset model state. Default: window clamp only.
+    fn on_persistent_congestion(&mut self, min_cwnd: usize) {
+        self.set_cwnd(min_cwnd);
+    }
+
     /// Current congestion window in bytes.
     fn cwnd(&self) -> usize;
 
@@ -132,6 +148,15 @@ impl CongestionController for CcImpl {
     }
     fn update_rtt(&mut self, rtt: Duration) {
         cc_dispatch!(self, update_rtt, rtt);
+    }
+    fn update_rtt_var(&mut self, rtt_var: Duration) {
+        cc_dispatch!(self, update_rtt_var, rtt_var);
+    }
+    fn discard_in_flight(&mut self, bytes: usize) {
+        cc_dispatch!(self, discard_in_flight, bytes);
+    }
+    fn on_persistent_congestion(&mut self, min_cwnd: usize) {
+        cc_dispatch!(self, on_persistent_congestion, min_cwnd);
     }
     fn cwnd(&self) -> usize {
         cc_dispatch!(self, cwnd)

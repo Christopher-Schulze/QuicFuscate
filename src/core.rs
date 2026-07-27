@@ -1193,7 +1193,7 @@ impl QuicFuscateConnection {
                         terminal_receive_error = Some(error);
                         break;
                     }
-                    debug!("transport::recv failed (possible probe): {}", error);
+                    debug!("transport::recv failed (possible probe) len={}: {:?}", data.len(), error);
                     self.stealth_manager.handle_fallback(data, self.peer_addr);
                 }
             } else if let Some(slice) = packet.payload_slice() {
@@ -1218,7 +1218,7 @@ impl QuicFuscateConnection {
                         self.optimization_manager.free_block(buf);
                         break;
                     }
-                    debug!("transport::recv failed (possible probe): {}", error);
+                    debug!("transport::recv failed (possible probe) len={}: {:?}", data.len(), error);
                     self.stealth_manager.handle_fallback(data, self.peer_addr);
                 }
                 self.optimization_manager.free_block(buf);
@@ -1240,6 +1240,19 @@ impl QuicFuscateConnection {
     /// Shared receive-side memory pool for socket fast paths.
     pub fn recv_memory_pool(&self) -> Arc<MemoryPool> {
         self.optimization_manager.memory_pool().clone()
+    }
+
+    /// Earliest instant the caller should poll `send` again.
+    ///
+    /// This merges the pacing/stealth release gate with the QUIC recovery
+    /// (loss/PTO) deadline so event loops never oversleep a probe.
+    pub fn next_send_deadline(&self) -> Option<Instant> {
+        match (self.next_packet_release, self.conn.recovery_deadline()) {
+            (Some(p), Some(r)) => Some(p.min(r)),
+            (Some(p), None) => Some(p),
+            (None, Some(r)) => Some(r),
+            (None, None) => None,
+        }
     }
 
     fn prepare_fec_wire_profile(
@@ -1277,6 +1290,24 @@ impl QuicFuscateConnection {
     /// This has been completely refactored to eliminate serialization and copies.
     pub fn send(&mut self, buf: &mut [u8]) -> Result<usize, crate::error::ConnectionError> {
         let now = Instant::now();
+
+        // --- LOSS/PTO RECOVERY TIMER ---
+        // RFC 9002 §6.1.2/§6.2.1: event loops drive the recovery timer.  When the
+        // deadline has passed, run loss detection (time-threshold or PTO probe)
+        // before the pacing/stealth scheduler so probes never wait on shaping.
+        if self
+            .conn
+            .recovery_deadline()
+            .is_some_and(|recovery_deadline| now >= recovery_deadline)
+        {
+            self.conn.on_recovery_timeout(now);
+            // Recovery takes precedence over pacing/stealth release; force
+            // an immediate send attempt so PTO probes can emit.
+            if self.next_packet_release.is_some_and(|r| r > now) {
+                self.next_packet_release = None;
+            }
+        }
+
         self.conn
             .do_tls_handshake(self.tls_ch_override_template.as_deref())
             .map_err(|e| crate::error::ConnectionError::Transport(e.to_string()))?;
@@ -1307,39 +1338,34 @@ impl QuicFuscateConnection {
             self.outbound_pacer.reset();
         } else if let Some(release_time) = self.next_packet_release {
             if now < release_time {
+                debug!("connection.send: next_packet_release blocks until {:?}", release_time);
                 return Ok(0); // WouldBlock / Yield
             }
             // Timer expired, clear block and proceed
             self.next_packet_release = None;
         }
         if established && self.outbound_pacer.is_blocked(now) {
+            debug!("connection.send: outbound_pacer blocked dgram_queue={} out_fec={} bytes_in_flight={} cwnd={}",
+                self.conn.dgram_send_queue_len(), self.outgoing_fec_packets.len(), self.conn.bytes_in_flight(), self.conn.cwnd());
             return Ok(0);
         }
 
-        // If there are buffered FEC packets, send one directly - but only if
-        // there is no pending stream/datagram data that would be starved by
-        // FEC draining. Without this guard, a burst of FEC repair packets can
-        // fill the outgoing queue and block new QUIC packets (carrying stream
-        // data or DATAGRAM frames) from being generated, causing a liveness
-        // deadlock where the peer never receives application data.
-        let has_pending_app_data =
-            self.conn.writable_streams_count() > 0 || self.conn.dgram_send_queue_len() > 0;
-        if !has_pending_app_data {
-            if let Some(packet) = self.outgoing_fec_packets.pop_front() {
-                let len = packet.write_to(buf)?;
-                if self.fec.telemetry_enabled() {
-                    let (systematic, source_payload_bytes) = packet.telemetry_shape();
-                    self.fec.observe_wire_send(systematic, source_payload_bytes, len);
-                }
-                self.record_paced_packet(now, len, packet.congestion_controlled);
-                // Drop handles pool recycling automatically.
-                return Ok(len);
+        // If there are buffered FEC packets, send one directly. These packets
+        // were already generated in a previous send() call but could not be
+        // emitted because of pacing or stealth scheduling. Flushing them first
+        // prevents an accumulation deadlock: if has_pending_app_data stayed true
+        // (e.g. a MASQUE datagram was queued but conn.send was blocked), every
+        // new send() call would generate another FEC packet and push it onto
+        // outgoing_fec_packets without ever draining the buffer.
+        if let Some(packet) = self.outgoing_fec_packets.pop_front() {
+            let len = packet.write_to(buf)?;
+            if self.fec.telemetry_enabled() {
+                let (systematic, source_payload_bytes) = packet.telemetry_shape();
+                self.fec.observe_wire_send(systematic, source_payload_bytes, len);
             }
-        } else if self.outgoing_fec_packets.len() > 4 {
-            // Drain excess FEC packets when the queue grows too large, even
-            // with pending app data, to avoid unbounded memory growth.
-            // But still fall through to generate a new QUIC packet this turn.
-            self.outgoing_fec_packets.drain(4..);
+            self.record_paced_packet(now, len, packet.congestion_controlled);
+            // Drop handles pool recycling automatically.
+            return Ok(len);
         }
 
         // Cover PING: inject post-handshake keepalive if the interval has elapsed.
@@ -1373,6 +1399,8 @@ impl QuicFuscateConnection {
         let (write, send_info) = match send_result {
             Ok(v) => v,
             Err(crate::error::ConnectionError::Done) => {
+                debug!("connection.send: conn.send returned Done dgram_queue={} out_fec={} bytes_in_flight={} cwnd={}",
+                    self.conn.dgram_send_queue_len(), self.outgoing_fec_packets.len(), self.conn.bytes_in_flight(), self.conn.cwnd());
                 // No packet currently pending is a normal state for polling loops.
                 drop(send_buffer);
                 return Ok(0);
@@ -1389,6 +1417,7 @@ impl QuicFuscateConnection {
         };
 
         if write == 0 {
+            debug!("connection.send: conn.send returned write=0");
             // The buffer is recycled automatically via Drop.
             drop(send_buffer);
             return Ok(0);
@@ -1494,6 +1523,8 @@ impl QuicFuscateConnection {
         // Pop the first packet from the buffer to send it now.
         if let Some(packet) = self.outgoing_fec_packets.pop_front() {
             let len = packet.write_to(buf)?;
+            debug!("connection.send: emitting packet len={} dgram_queue_after={} remaining_fec={}",
+                len, self.conn.dgram_send_queue_len(), self.outgoing_fec_packets.len());
             if self.fec.telemetry_enabled() {
                 let (systematic, source_payload_bytes) = packet.telemetry_shape();
                 self.fec.observe_wire_send(systematic, source_payload_bytes, len);
@@ -1579,6 +1610,11 @@ impl QuicFuscateConnection {
             let mut h3 = h3;
             // Set persona QPACK index policy
             h3.set_qpack_index_policy(self.stealth_manager.qpack_index_policy());
+            // The stealth layer injects raw cover traffic on a dedicated QUIC stream;
+            // tell the H3 layer to ignore it so the random bytes are not parsed as frames.
+            if let Some(cover_sid) = self.stealth_manager.cover_stream_id() {
+                h3.ignore_stream(cover_sid);
+            }
             self.h3_conn = Some(h3);
             // Notify the compression layer about the persona (dictionary selection).
             let persona = self.stealth_manager.current_persona_name();
@@ -1740,26 +1776,37 @@ impl QuicFuscateConnection {
             || payload.len() > self.effective_tunnel_mtu()
             || !matches!(payload.first().map(|byte| byte >> 4), Some(4 | 6))
         {
+            debug!("send_masque_downlink: rejected payload len={} first={:?}", payload.len(), payload.first());
             return Err(crate::error::ConnectionError::BufferTooShort);
         }
+
+        debug!("send_masque_downlink: payload len={} masque_mtu={} masque_peer_stream_id={:?} h3_conn={}",
+            payload.len(), self.effective_masque_mtu(), self.masque_peer_stream_id, self.h3_conn.is_some());
 
         if payload.len() <= self.effective_masque_mtu() {
             if let Some(sid) = self.masque_peer_stream_id {
                 if let Some(ref mut h3) = self.h3_conn {
                     match h3.send_masque_datagram(&mut self.conn, sid, payload) {
                         Ok(()) => {
-                            debug!("MASQUE downlink TX: sid={} {}B", sid, payload.len());
+                            debug!("MASQUE downlink TX: sid={} {}B dgram_queue={}", sid, payload.len(), self.conn.dgram_send_queue_len());
                             return Ok(());
                         }
                         Err(error) => {
                             warn!("MASQUE downlink failed, using framed H3 fallback: {:?}", error);
                         }
                     }
+                } else {
+                    debug!("send_masque_downlink: no h3_conn for datagram");
                 }
+            } else {
+                debug!("send_masque_downlink: no masque_peer_stream_id");
             }
+        } else {
+            debug!("send_masque_downlink: payload too large for masque datagram, fallback to H3 stream");
         }
 
         let Some(stream_id) = self.h3_peer_tunnel_stream_id else {
+            debug!("send_masque_downlink: no h3_peer_tunnel_stream_id, returning Done");
             return Err(crate::error::ConnectionError::Done);
         };
         self.prepare_h3_tunnel_frame(payload)?;

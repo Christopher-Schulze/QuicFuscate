@@ -462,6 +462,10 @@ impl CongestionController for Cubic {
         }
     }
 
+    fn discard_in_flight(&mut self, bytes: usize) {
+        self.bytes_in_flight = self.bytes_in_flight.saturating_sub(bytes);
+    }
+
     fn cwnd(&self) -> usize {
         self.cwnd
     }

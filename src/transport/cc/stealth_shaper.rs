@@ -191,6 +191,18 @@ impl<T: CongestionController> CongestionController for StealthShaper<T> {
         self.inner.update_rtt(rtt);
     }
 
+    fn update_rtt_var(&mut self, rtt_var: Duration) {
+        self.inner.update_rtt_var(rtt_var);
+    }
+
+    fn discard_in_flight(&mut self, bytes: usize) {
+        self.inner.discard_in_flight(bytes);
+    }
+
+    fn on_persistent_congestion(&mut self, min_cwnd: usize) {
+        self.inner.on_persistent_congestion(min_cwnd);
+    }
+
     fn cwnd(&self) -> usize {
         self.inner.cwnd()
     }

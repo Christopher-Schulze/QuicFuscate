@@ -40,6 +40,8 @@ pub struct Bbr3 {
     btlbw: u64,
     min_rtt: Duration,
     rtt: Duration,
+    /// EWMA RTT variance propagated from recovery (RFC 6298 `rttvar`).
+    rtt_var: Duration,
     // Loss tracking
     loss_acked: f32,
     loss_lost: f32,
@@ -91,6 +93,7 @@ impl Bbr3 {
             btlbw: 0,
             min_rtt: Duration::from_millis(100),
             rtt: Duration::from_millis(100),
+            rtt_var: Duration::ZERO,
             loss_acked: 0.0,
             loss_lost: 0.0,
             loss_alpha: 0.1,
@@ -210,8 +213,13 @@ impl Bbr3 {
                     self.pacing_gain = self.gains[next];
                     self.cycle_stamp = now;
                 }
+                // PROBE_RTT shrinks cwnd to 4*MSS to re-measure min_rtt; doing
+                // that while the path is unstable (high EWMA variance) would
+                // sacrifice throughput without yielding a usable min sample.
+                // Defer entry until rttvar settles at or below min_rtt/8.
                 if now.duration_since(self.probe_rtt_min_stamp)
                     > std::cmp::max(MIN_RTT_WIN, Duration::from_micros(self.probe_rtt_min_us))
+                    && self.rtt_var <= self.min_rtt / 8
                 {
                     self.state = State::ProbeRtt;
                     self.prior_cwnd = self.cwnd;
@@ -300,6 +308,30 @@ impl CongestionController for Bbr3 {
             self.min_rtt = rtt;
             self.probe_rtt_min_stamp = Instant::now();
         }
+    }
+
+    fn update_rtt_var(&mut self, rtt_var: Duration) {
+        self.rtt_var = rtt_var;
+    }
+
+    fn discard_in_flight(&mut self, bytes: usize) {
+        self.bytes_in_flight = self.bytes_in_flight.saturating_sub(bytes);
+    }
+
+    fn on_persistent_congestion(&mut self, min_cwnd: usize) {
+        // Restart the bandwidth model from scratch (RFC 9002 §7.6 allows a full
+        // reset). Do NOT use set_cwnd here: its min_rtt reset is migration
+        // semantics and would corrupt the BDP estimate (min_rtt = MAX).
+        self.state = State::Startup;
+        self.btlbw = 0;
+        self.full_bw = 0;
+        self.full_bw_reached = false;
+        self.full_bw_count = 0;
+        self.cwnd = min_cwnd.max(self.mss * 2);
+        self.min_cwnd = self.cwnd.max(self.mss * 4);
+        self.pacing_gain = 2.77;
+        self.cwnd_gain = 2.0;
+        self.packet_conservation = false;
     }
 
     fn cwnd(&self) -> usize {
