@@ -197,6 +197,10 @@ struct OutboundPacer {
 }
 
 impl OutboundPacer {
+    fn next_release(&self) -> Option<Instant> {
+        self.next_release
+    }
+
     fn is_blocked(&mut self, now: Instant) -> bool {
         let Some(release) = self.next_release else {
             return false;
@@ -1312,15 +1316,17 @@ impl QuicFuscateConnection {
 
     /// Earliest instant the caller should poll `send` again.
     ///
-    /// This merges the pacing/stealth release gate with the QUIC recovery
-    /// (loss/PTO) deadline so event loops never oversleep a probe.
+    /// This merges the outer pacing, stealth release, and QUIC recovery
+    /// (loss/PTO) deadlines so event loops never oversleep a release or probe.
     pub fn next_send_deadline(&self) -> Option<Instant> {
-        match (self.next_packet_release, self.conn.recovery_deadline()) {
-            (Some(p), Some(r)) => Some(p.min(r)),
-            (Some(p), None) => Some(p),
-            (None, Some(r)) => Some(r),
-            (None, None) => None,
-        }
+        [
+            self.outbound_pacer.next_release(),
+            self.next_packet_release,
+            self.conn.recovery_deadline(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     fn prepare_fec_wire_profile(
@@ -2584,6 +2590,19 @@ mod tests {
         pacer.record_send(now, 1500, 4500, 3_000_000);
         assert!(pacer.is_blocked(now + Duration::from_micros(1499)));
         assert!(!pacer.is_blocked(now + Duration::from_micros(1500)));
+    }
+
+    #[test]
+    fn next_send_deadline_includes_outer_pacer_release() {
+        let mut connection = test_connection();
+        let now = Instant::now();
+        connection.outbound_pacer.next_release = Some(now);
+        let recovery_deadline = connection.conn.recovery_deadline();
+
+        assert_eq!(
+            connection.next_send_deadline(),
+            Some(recovery_deadline.map_or(now, |d| now.min(d)))
+        );
     }
 
     #[test]

@@ -104,6 +104,13 @@ const MAX_PENDING_TUN_DOWNLINK_AGE: Duration = Duration::from_secs(5);
 const MAX_MASQUE_DOWNLINK_RESPONSES: usize = 128;
 const MAX_MASQUE_DOWNLINK_RESPONSE_BYTES: usize = 192 * 1024;
 
+async fn wait_for_send_deadline(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ServerTunIps {
     ipv4: Ipv4Addr,
@@ -3481,6 +3488,44 @@ impl LiveServerState {
         self.clients.values_mut()
     }
 
+    fn next_send_deadline(&self) -> Option<Instant> {
+        self.clients.values().filter_map(QuicFuscateConnection::next_send_deadline).min()
+    }
+
+    async fn flush_due_outgoing(&mut self, socket: &UdpSocket, out: &mut [u8], metrics: &Metrics) {
+        let now = Instant::now();
+        let addresses = self
+            .clients
+            .iter()
+            .filter_map(|(addr, conn)| {
+                conn.next_send_deadline().is_some_and(|deadline| deadline <= now).then_some(*addr)
+            })
+            .collect::<Vec<_>>();
+        let client_snapshots = Arc::clone(self.domain.client_snapshots());
+
+        for addr in addresses {
+            let session_stats = self.domain.session_stats_by_remote(addr);
+            let session_id = self.domain.session_id_by_remote(addr);
+            let Some(conn) = self.get_mut(&addr) else {
+                continue;
+            };
+            if let Err(error) = flush_live_server_outgoing(
+                socket,
+                addr,
+                conn,
+                out,
+                metrics,
+                &client_snapshots,
+                session_stats,
+                session_id,
+            )
+            .await
+            {
+                log::warn!("Failed to flush paced packets to {}: {}", addr, error);
+            }
+        }
+    }
+
     pub fn accept_or_get_client_with<F>(
         &mut self,
         addr: SocketAddr,
@@ -6459,6 +6504,7 @@ impl ServerRuntime {
         let mut next_watchdog = watchdog_interval.map(|interval| Instant::now() + interval);
 
         loop {
+            let send_deadline = self.live().live_state.next_send_deadline();
             tokio::select! {
                 Some(action) = admin_actions_rx.recv() => {
                     self.handle_admin_action_with_runtime_reload(
@@ -6600,6 +6646,9 @@ impl ServerRuntime {
                             log::error!("Failed to read from socket: {}", e);
                         }
                     }
+                }
+                _ = wait_for_send_deadline(send_deadline) => {
+                    self.live_mut().live_state.flush_due_outgoing(&socket, &mut out, &metrics).await;
                 }
                 _ = housekeeping.tick() => {
                             let runtime_parts = self.live_parts();
