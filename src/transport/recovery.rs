@@ -56,6 +56,30 @@ pub const K_INITIAL_RTT: Duration = Duration::from_millis(333);
 /// Persistent congestion window multiplier (RFC 9002 §7.6.1).
 pub const K_PERSISTENT_CONGESTION_THRESHOLD: u32 = 3;
 
+/// Ack-eliciting content carried by a tracked QUIC packet.
+///
+/// The flags deliberately retain co-carriage: one packet can contain control
+/// plus STREAM or DATAGRAM frames, so the persistent-congestion counters are
+/// not mutually exclusive.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SentPacketContents {
+    /// The packet carried an ack-eliciting control frame or PING.
+    pub control: bool,
+    /// The packet carried a STREAM frame.
+    pub stream: bool,
+    /// The packet carried a DATAGRAM frame.
+    pub datagram: bool,
+}
+
+impl SentPacketContents {
+    /// Generic ack-eliciting traffic whose payload class is not exposed by the caller.
+    pub const CONTROL: Self = Self { control: true, stream: false, datagram: false };
+    /// A packet whose ack-eliciting application payload is a STREAM frame.
+    pub const STREAM: Self = Self { control: false, stream: true, datagram: false };
+    /// A packet whose ack-eliciting application payload is a DATAGRAM frame.
+    pub const DATAGRAM: Self = Self { control: false, stream: false, datagram: true };
+}
+
 /// One tracked sent packet inside the canonical recovery owner.
 #[derive(Debug, Clone)]
 pub struct SentPacket {
@@ -71,6 +95,8 @@ pub struct SentPacket {
     pub in_flight: bool,
     /// CRYPTO stream range carried (offset, len) for Initial/Handshake packets.
     pub crypto_range: Option<(u64, u64)>,
+    /// Ack-eliciting frame classes emitted in this packet.
+    pub contents: SentPacketContents,
     /// Whether this packet is an isolated DPLPMTUD PING+PADDING probe.
     pub pmtu_probe: bool,
 }
@@ -100,6 +126,9 @@ struct PersistentCongestionRun {
     end: Option<Instant>,
     min_packet_size: Option<usize>,
     max_packet_size: Option<usize>,
+    control_packets: usize,
+    stream_packets: usize,
+    datagram_packets: usize,
     lost_packet_numbers: BTreeSet<(usize, u64)>,
 }
 
@@ -110,6 +139,9 @@ impl PersistentCongestionRun {
         self.end = None;
         self.min_packet_size = None;
         self.max_packet_size = None;
+        self.control_packets = 0;
+        self.stream_packets = 0;
+        self.datagram_packets = 0;
         self.lost_packet_numbers.clear();
     }
 
@@ -177,6 +209,12 @@ pub struct PersistentCongestionEvidence {
     pub run_min_packet_size: usize,
     /// Largest packet size in the loss run that established congestion.
     pub run_max_packet_size: usize,
+    /// Lost run packets that carried ack-eliciting control or PING frames.
+    pub run_control_packets: usize,
+    /// Lost run packets that carried STREAM frames.
+    pub run_stream_packets: usize,
+    /// Lost run packets that carried DATAGRAM frames.
+    pub run_datagram_packets: usize,
     /// Send time of the loss that completed the run.
     pub run_end: Instant,
     /// Packet number of the loss that completed the run.
@@ -581,7 +619,42 @@ impl Recovery {
         crypto_range: Option<(u64, u64)>,
         now: Instant,
     ) {
-        self.track_sent_packet(space, pn, size, ack_eliciting, in_flight, crypto_range, false, now);
+        self.on_packet_sent_with_contents_in_space(
+            space,
+            pn,
+            size,
+            ack_eliciting,
+            in_flight,
+            crypto_range,
+            SentPacketContents::CONTROL,
+            now,
+        );
+    }
+
+    /// Records a sent packet with its ack-eliciting frame classes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn on_packet_sent_with_contents_in_space(
+        &mut self,
+        space: PacketSpace,
+        pn: u64,
+        size: usize,
+        ack_eliciting: bool,
+        in_flight: bool,
+        crypto_range: Option<(u64, u64)>,
+        contents: SentPacketContents,
+        now: Instant,
+    ) {
+        self.track_sent_packet(
+            space,
+            pn,
+            size,
+            ack_eliciting,
+            in_flight,
+            crypto_range,
+            contents,
+            false,
+            now,
+        );
     }
 
     /// Records an isolated DPLPMTUD probe without charging it to congestion
@@ -594,7 +667,17 @@ impl Recovery {
         size: usize,
         now: Instant,
     ) {
-        self.track_sent_packet(space, pn, size, true, false, None, true, now);
+        self.track_sent_packet(
+            space,
+            pn,
+            size,
+            true,
+            false,
+            None,
+            SentPacketContents::CONTROL,
+            true,
+            now,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -606,6 +689,7 @@ impl Recovery {
         ack_eliciting: bool,
         in_flight: bool,
         crypto_range: Option<(u64, u64)>,
+        contents: SentPacketContents,
         pmtu_probe: bool,
         now: Instant,
     ) {
@@ -622,6 +706,7 @@ impl Recovery {
                 ack_eliciting,
                 in_flight,
                 crypto_range,
+                contents,
                 pmtu_probe,
             },
         );
@@ -842,6 +927,9 @@ impl Recovery {
                     self.pc_window.max_packet_size = Some(
                         self.pc_window.max_packet_size.map_or(pkt.size, |size| size.max(pkt.size)),
                     );
+                    self.pc_window.control_packets += usize::from(pkt.contents.control);
+                    self.pc_window.stream_packets += usize::from(pkt.contents.stream);
+                    self.pc_window.datagram_packets += usize::from(pkt.contents.datagram);
                     self.pc_window.lost_packet_numbers.insert((space.index(), pkt.pn));
                     if pkt.sent_at.saturating_duration_since(start) >= period {
                         declaration = Some((
@@ -849,6 +937,9 @@ impl Recovery {
                             run_start_pn,
                             self.pc_window.min_packet_size.unwrap_or(pkt.size),
                             self.pc_window.max_packet_size.unwrap_or(pkt.size),
+                            self.pc_window.control_packets,
+                            self.pc_window.stream_packets,
+                            self.pc_window.datagram_packets,
                             pkt.sent_at,
                             pkt.pn,
                             packet_threshold.is_some_and(|threshold| pkt.pn <= threshold),
@@ -863,6 +954,9 @@ impl Recovery {
                     run_start_pn,
                     run_min_packet_size,
                     run_max_packet_size,
+                    run_control_packets,
+                    run_stream_packets,
+                    run_datagram_packets,
                     run_end,
                     terminal_lost_pn,
                     terminal_loss_by_packet_threshold,
@@ -887,6 +981,9 @@ impl Recovery {
                         run_start_pn,
                         run_min_packet_size,
                         run_max_packet_size,
+                        run_control_packets,
+                        run_stream_packets,
+                        run_datagram_packets,
                         run_end,
                         terminal_lost_pn,
                         terminal_loss_by_packet_threshold,
@@ -1197,7 +1294,7 @@ mod tests {
         assert_eq!(cwnd_after, (cwnd_before / 2).max(2400));
     }
 
-    use super::PacketSpace;
+    use super::{PacketSpace, SentPacketContents};
 
     /// Sends `count` ack-eliciting in-flight packets of 1200 bytes spaced 10 ms
     /// apart starting at `t0` in the given space.
@@ -1527,6 +1624,9 @@ mod tests {
         assert_eq!(evidence.run_start_pn, 0);
         assert_eq!(evidence.run_min_packet_size, 1200);
         assert_eq!(evidence.run_max_packet_size, 1200);
+        assert_eq!(evidence.run_control_packets, 16);
+        assert_eq!(evidence.run_stream_packets, 0);
+        assert_eq!(evidence.run_datagram_packets, 0);
         assert_eq!(evidence.terminal_lost_pn, 15);
         assert_eq!(evidence.lost_packet_count, 16);
         assert_eq!(evidence.triggering_ack_newly_acked_packets, 1);
@@ -1545,6 +1645,45 @@ mod tests {
         // (2*MSS = 2400) is passed in, BBR3 floors at its 4*MSS operational min.
         assert!(rec.cwnd <= 4800, "cwnd must collapse, got {}", rec.cwnd);
         assert_eq!(rec.min_rtt(), Duration::from_millis(10));
+    }
+
+    #[test]
+    fn persistent_congestion_provenance_counts_application_frame_classes() {
+        let mut rec = Recovery::new(120_000, 1200);
+        rec.update_rtt(Duration::from_millis(10));
+        let t0 = Instant::now();
+        for pn in 0..21 {
+            let contents = match pn {
+                0..=3 => SentPacketContents::CONTROL,
+                4..=9 => SentPacketContents::STREAM,
+                _ => SentPacketContents::DATAGRAM,
+            };
+            rec.on_packet_sent_with_contents_in_space(
+                PacketSpace::Application,
+                pn,
+                1200,
+                true,
+                true,
+                None,
+                contents,
+                t0 + Duration::from_millis(pn * 10),
+            );
+        }
+        let outcome = rec.on_ack_received(
+            PacketSpace::Application,
+            &[(20, 21)],
+            Duration::ZERO,
+            true,
+            false,
+            t0 + Duration::from_millis(210),
+        );
+        let evidence = outcome
+            .persistent_congestion_evidence
+            .expect("persistent congestion must retain packet-content provenance");
+        assert_eq!(evidence.lost_packet_count, 16);
+        assert_eq!(evidence.run_control_packets, 4);
+        assert_eq!(evidence.run_stream_packets, 6);
+        assert_eq!(evidence.run_datagram_packets, 6);
     }
 
     #[test]

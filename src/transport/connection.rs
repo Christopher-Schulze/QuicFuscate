@@ -1105,7 +1105,7 @@ impl Connection {
         }
         if let Some(evidence) = outcome.persistent_congestion_evidence {
             log::info!(
-                "persistent congestion established; cwnd={} space={:?} pmtu_effective={} largest_acked={} ack_delay_us={} largest_acked_age_known={} largest_acked_age_us={} acked_packets={} ack_lost_packets={} ack_packet_threshold_losses={} ack_time_threshold_losses={} run_start_pn={} run_min_packet_size={} run_max_packet_size={} terminal_lost_pn={} terminal_packet_threshold={} terminal_time_threshold={} lost_packets={} smoothed_rtt_us={} rtt_variance_us={} loss_delay_us={} period_us={} run_us={}",
+                "persistent congestion established; cwnd={} space={:?} pmtu_effective={} largest_acked={} ack_delay_us={} largest_acked_age_known={} largest_acked_age_us={} acked_packets={} ack_lost_packets={} ack_packet_threshold_losses={} ack_time_threshold_losses={} run_start_pn={} run_min_packet_size={} run_max_packet_size={} run_control_packets={} run_stream_packets={} run_datagram_packets={} terminal_lost_pn={} terminal_packet_threshold={} terminal_time_threshold={} lost_packets={} smoothed_rtt_us={} rtt_variance_us={} loss_delay_us={} period_us={} run_us={}",
                 self.recovery.cwnd,
                 space,
                 self.pmtu.effective_mtu(),
@@ -1123,6 +1123,9 @@ impl Connection {
                 evidence.run_start_pn,
                 evidence.run_min_packet_size,
                 evidence.run_max_packet_size,
+                evidence.run_control_packets,
+                evidence.run_stream_packets,
+                evidence.run_datagram_packets,
                 evidence.terminal_lost_pn,
                 evidence.terminal_loss_by_packet_threshold,
                 evidence.terminal_loss_by_time_threshold,
@@ -3513,6 +3516,7 @@ impl Connection {
         // CRYPTO, PING, MAX_DATA, NEW_CONNECTION_ID, etc.) are ack-eliciting.
         let mut wrote_ack_eliciting = false;
         let mut stream_transmission_id = None;
+        let mut packet_contents = recovery::SentPacketContents::default();
 
         // Post-handshake Application-level CRYPTO (e.g. NewSessionTicket) is not
         // emitted here. The early return above guarantees `handshake_incomplete`
@@ -3526,6 +3530,7 @@ impl Connection {
                 self.flush_pending_control_frames(out, off, congestion_bypass)?;
             off = off_after_ctrl;
             wrote_ack_eliciting |= ctrl_ack_eliciting;
+            packet_contents.control |= ctrl_ack_eliciting;
             off = self.maybe_emit_application_ack_frame(out, off)?;
             // RFC 9002 §6.2.4: emit one ack-eliciting PING per pending
             // Application-space PTO probe. Written directly (not via
@@ -3542,6 +3547,7 @@ impl Connection {
                     self.pending_probe_spaces.remove(pos);
                     off += frames::to_bytes(&ping, &mut out[off..])?;
                     wrote_ack_eliciting = true;
+                    packet_contents.control = true;
                 }
             }
             // When bypassing the congestion gate for ACK-only packets, skip
@@ -3557,12 +3563,14 @@ impl Connection {
                     self.maybe_flush_one_writable_stream(&mut out[..stream_limit], off)?;
                 off = off_after_stream;
                 wrote_ack_eliciting |= stream_ack_eliciting;
+                packet_contents.stream |= stream_ack_eliciting;
                 stream_transmission_id = emitted_transmission_id;
                 // FEC feed removed (handled by core)
                 let (off_after_dgram, dgram_ack_eliciting) =
                     self.maybe_flush_one_datagram_frame(out, off)?;
                 off = off_after_dgram;
                 wrote_ack_eliciting |= dgram_ack_eliciting;
+                packet_contents.datagram |= dgram_ack_eliciting;
             }
         }
         // DPLPMTUD probe (TODO-451): when the PMTU state machine requests a
@@ -3582,6 +3590,7 @@ impl Connection {
                 let ping = Frame::Ping { mtu_probe: None };
                 off += crate::transport::frames::to_bytes(&ping, &mut out[off..])?;
                 wrote_ack_eliciting = true;
+                packet_contents.control = true;
                 // Pad the remainder of the probe region with PADDING frames.
                 let tag_reserve = self.tag_reserve_1rtt();
                 let transport_probe_size = probe_size.saturating_sub(datagram_overhead);
@@ -3612,6 +3621,7 @@ impl Connection {
                     let ping = Frame::Ping { mtu_probe: None };
                     off += crate::transport::frames::to_bytes(&ping, &mut out[off..])?;
                     wrote_ack_eliciting = true;
+                    packet_contents.control = true;
                     let avail = out.len().saturating_sub(off + tag_reserve);
                     let needed = (chaff_size as usize).saturating_sub(off + tag_reserve);
                     let pad_len = needed.min(avail);
@@ -3679,13 +3689,14 @@ impl Connection {
                     now,
                 );
             } else {
-                self.recovery.on_packet_sent_in_space(
+                self.recovery.on_packet_sent_with_contents_in_space(
                     recovery::PacketSpace::Application,
                     pn,
                     total,
                     true,
                     true,
                     None,
+                    packet_contents,
                     now,
                 );
             }
