@@ -116,6 +116,10 @@ cleanup() {
   for ns in "${CLIENT_NS[@]}"; do
     ip netns del "$ns" 2>/dev/null
   done
+  local host_veth
+  for host_veth in "${HOST_VETH[@]}"; do
+    ip link del "$host_veth" 2>/dev/null
+  done
   ip link del "$BRIDGE" 2>/dev/null
 }
 

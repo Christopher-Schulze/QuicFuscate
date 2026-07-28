@@ -555,6 +555,16 @@ else
   append_item "cubic_fec_control_comparison" "fail" "missing repetition count, both policy runs, isolated fixture, per-policy evidence, or relative comparison artifact"
 fi
 
+MULTI_CLIENT_DUAL_STACK_HARNESS="scripts/tests/tun-e2e-multi-client-dual-stack-netns.sh"
+if rg -F -- 'for host_veth in "${HOST_VETH[@]}"; do' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'ip link del "$host_veth" 2>/dev/null' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null; then
+  pass "Multi-client dual-stack cleanup removes every owned host veth after namespace teardown"
+  append_item "multi_client_dual_stack_host_veth_cleanup" "ok" "explicit host-veth cleanup prevents partial-run residue"
+else
+  fail_critical "Multi-client dual-stack cleanup can leak owned host veths"
+  append_item "multi_client_dual_stack_host_veth_cleanup" "fail" "missing explicit host-veth cleanup after namespace teardown"
+fi
+
 # 6) Guardrail warning: shadow runtime modules with no non-test call sites.
 BATCH_RUNTIME_REFS=$(rg -n --no-messages "BatchProcessor" src | rg -v "src/transport/batch.rs|src/transport.rs" || true)
 if [[ -z "$BATCH_RUNTIME_REFS" ]]; then
