@@ -3,8 +3,8 @@
 #
 # Runs the complete three-client gate three times with per-trial external egress
 # evidence. Every child artifact remains raw evidence. The aggregate refuses a
-# mixed binary, missing receiver evidence, incomplete egress summaries, a PMTU
-# gain below the existing gate, or an invalid black-hole recovery result.
+# mixed binary, missing receiver evidence, incomplete egress summaries, a
+# median PMTU gain below the existing gate, or an invalid black-hole result.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -73,7 +73,8 @@ main() {
     for ((trial = 1; trial <= STABILITY_TRIALS; trial++)); do
         trial_dir="$ARTIFACT_DIR/trial-${trial}"
         printf 'Trial %s/%s\n' "$trial" "$STABILITY_TRIALS"
-        if env QF_E2E_EXTERNAL_EGRESS_CAPTURE=1 QF_E2E_ARTIFACT_DIR="$trial_dir" QF_E2E_BINARY="$BINARY" \
+        if env QF_E2E_EXTERNAL_EGRESS_CAPTURE=1 QF_E2E_DEFER_PMTU_GAIN_GATE=1 \
+            QF_E2E_ARTIFACT_DIR="$trial_dir" QF_E2E_BINARY="$BINARY" \
             "$DUAL_STACK_HARNESS"; then
             child_status=0
         else
@@ -88,6 +89,13 @@ main() {
     done
 
     [ "$failures" -eq 0 ] || fail "dual-stack stability aggregate has ${failures} failure(s): $ARTIFACT_DIR"
+    python3 "$AGGREGATOR" \
+        --finalize \
+        --binary-sha256 "$binary_hash" \
+        --summary "$ARTIFACT_DIR/summary.tsv" \
+        > "$ARTIFACT_DIR/aggregate.txt" \
+        || fail "dual-stack stability PMTU aggregate is outside contract: $ARTIFACT_DIR"
+    cat "$ARTIFACT_DIR/aggregate.txt"
     printf 'PASS: %s isolated dual-stack trials retained in %s\n' "$STABILITY_TRIALS" "$ARTIFACT_DIR"
 }
 

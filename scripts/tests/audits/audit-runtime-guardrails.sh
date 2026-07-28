@@ -639,18 +639,21 @@ DUAL_STACK_STABILITY_HARNESS="scripts/tests/tun-e2e-multi-client-dual-stack-stab
 DUAL_STACK_STABILITY_AGGREGATOR="scripts/tests/utils/aggregate-dual-stack-stability.py"
 if rg -F -- 'STABILITY_TRIALS=3' "$DUAL_STACK_STABILITY_HARNESS" >/dev/null \
   && rg -F -- 'QF_E2E_EXTERNAL_EGRESS_CAPTURE=1' "$DUAL_STACK_STABILITY_HARNESS" >/dev/null \
+  && rg -F -- 'QF_E2E_DEFER_PMTU_GAIN_GATE=1' "$DUAL_STACK_STABILITY_HARNESS" >/dev/null \
   && rg -F -- 'QF_E2E_ARTIFACT_DIR="$trial_dir"' "$DUAL_STACK_STABILITY_HARNESS" >/dev/null \
   && rg -F -- 'FEC_MODE="${QF_E2E_FEC_MODE:-auto}"' "$DUAL_STACK_STABILITY_HARNESS" >/dev/null \
   && rg -F -- 'QF_E2E_FEC_MODE must be auto or off' "$DUAL_STACK_STABILITY_HARNESS" >/dev/null \
   && rg -F -- 'printf '"'"'fec_mode=%s\n'"'"' "$FEC_MODE"' "$DUAL_STACK_STABILITY_HARNESS" >/dev/null \
   && rg -F -- 'summary.tsv' "$DUAL_STACK_STABILITY_HARNESS" >/dev/null \
   && rg -F -- 'dual-stack stability aggregate has' "$DUAL_STACK_STABILITY_HARNESS" >/dev/null \
-  && rg -F -- 'receiver-verified PMTU throughput gain is below 15 percent' "$DUAL_STACK_STABILITY_AGGREGATOR" >/dev/null \
+  && rg -F -- 'median receiver-verified PMTU throughput gain is below 15 percent' "$DUAL_STACK_STABILITY_AGGREGATOR" >/dev/null \
+  && rg -F -- 'every stability trial must retain a positive PMTU gain' "$DUAL_STACK_STABILITY_AGGREGATOR" >/dev/null \
+  && rg -F -- '--finalize' "$DUAL_STACK_STABILITY_HARNESS" >/dev/null \
   && rg -F -- 'child artifact binary SHA-256 differs from the stability artifact' "$DUAL_STACK_STABILITY_AGGREGATOR" >/dev/null \
   && rg -F -- 'External server UDP ingress packets' "$DUAL_STACK_STABILITY_AGGREGATOR" >/dev/null \
   && rg -F -- 'egress summary has malformed trial evidence' "$DUAL_STACK_STABILITY_AGGREGATOR" >/dev/null; then
-  pass "Repeated dual-stack stability harness requires identical-artifact receiver, black-hole, and per-trial client/server evidence"
-  append_item "dual_stack_stability_aggregate" "ok" "three capture-enabled child proofs, exact binary identity, complete receiver/black-hole evidence, and per-trial client/server aggregate are required"
+  pass "Repeated dual-stack stability harness requires identical-artifact receiver, black-hole, per-trial client/server evidence, and a positive three-run median PMTU gate"
+  append_item "dual_stack_stability_aggregate" "ok" "three capture-enabled complete child proofs, exact binary identity, positive per-child gain, median gain of at least 15 percent, and per-trial client/server evidence are required"
 else
   fail_critical "Repeated dual-stack stability harness is missing its fail-closed evidence contract"
   append_item "dual_stack_stability_aggregate" "fail" "missing fixed trial count, forced capture, exact child artifact, aggregate, binary identity, receiver, black-hole, or client/server validation"

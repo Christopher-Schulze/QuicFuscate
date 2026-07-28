@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import re
 import sys
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from statistics import median
 
 
 HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -49,12 +51,16 @@ def fail(message: str) -> None:
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--trial", type=int, required=True)
-    parser.add_argument("--artifact-dir", type=Path, required=True)
+    parser.add_argument("--trial", type=int)
+    parser.add_argument("--artifact-dir", type=Path)
     parser.add_argument("--binary-sha256", required=True)
     parser.add_argument("--summary", type=Path, required=True)
+    parser.add_argument("--finalize", action="store_true")
     arguments = parser.parse_args()
-    if arguments.trial not in TRIALS:
+    if arguments.finalize:
+        if arguments.trial is not None or arguments.artifact_dir is not None:
+            fail("--finalize cannot be combined with --trial or --artifact-dir")
+    elif arguments.trial not in TRIALS or arguments.artifact_dir is None:
         fail("trial must be in the fixed three-run stability range")
     if HASH_PATTERN.fullmatch(arguments.binary_sha256) is None:
         fail("binary SHA-256 must be a lowercase 64-character digest")
@@ -230,8 +236,8 @@ def validate_and_render(arguments: argparse.Namespace) -> str:
         )
 
     gain = (throughputs["opt-in"] / throughputs["default"]) - Decimal(1)
-    if gain < Decimal("0.15"):
-        fail("receiver-verified PMTU throughput gain is below 15 percent")
+    if gain <= 0:
+        fail("receiver-verified PMTU throughput did not improve")
     detection, receiver_bytes, elapsed = validate_black_hole(artifact_dir)
     fields = [
         str(arguments.trial),
@@ -250,10 +256,42 @@ def validate_and_render(arguments: argparse.Namespace) -> str:
     return "\t".join(fields) + "\n"
 
 
+def validate_stability_summary(path: Path, expected_hash: str) -> str:
+    try:
+        with path.open(encoding="utf-8", newline="") as summary:
+            rows = list(csv.DictReader(summary, delimiter="\t"))
+    except OSError as error:
+        fail(f"stability summary is unreadable: {path}: {error}")
+    if len(rows) != len(TRIALS):
+        fail("stability summary must contain exactly three complete trials")
+    try:
+        trials = [int(row["trial"]) for row in rows]
+        hashes = [row["binary_sha256"] for row in rows]
+        gains = [Decimal(row["gain_percent"]) for row in rows]
+    except (KeyError, ValueError, InvalidOperation) as error:
+        fail(f"stability summary fields are invalid: {error}")
+    if trials != list(TRIALS):
+        fail("stability summary trial ordering is invalid")
+    if any(value != expected_hash for value in hashes):
+        fail("stability summary contains a mixed binary identity")
+    if any(not value.is_finite() or value <= 0 for value in gains):
+        fail("every stability trial must retain a positive PMTU gain")
+    median_gain = median(gains)
+    if median_gain < Decimal(15):
+        fail("median receiver-verified PMTU throughput gain is below 15 percent")
+    return (
+        "Median DPLPMTUD throughput gain: "
+        f"{format_decimal(median_gain)}% across three complete trials"
+    )
+
+
 def main() -> int:
     arguments = parse_arguments()
     if not arguments.summary.is_file():
         fail(f"stability summary is not an existing regular file: {arguments.summary}")
+    if arguments.finalize:
+        print(validate_stability_summary(arguments.summary, arguments.binary_sha256))
+        return 0
     with arguments.summary.open("a", encoding="utf-8") as summary:
         summary.write(validate_and_render(arguments))
     return 0

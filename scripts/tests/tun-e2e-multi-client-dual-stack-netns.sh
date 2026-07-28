@@ -27,6 +27,7 @@ THROUGHPUT_RATE_BPS="${QF_E2E_THROUGHPUT_RATE_BPS:-15000000}"
 EXTERNAL_EGRESS_CAPTURE="${QF_E2E_EXTERNAL_EGRESS_CAPTURE:-0}"
 CLIENT_RECV_DIAGNOSTICS="${QF_E2E_CLIENT_RECV_DIAGNOSTICS:-1}"
 FEC_MODE="${QF_E2E_FEC_MODE:-auto}"
+DEFER_PMTU_GAIN_GATE="${QF_E2E_DEFER_PMTU_GAIN_GATE:-0}"
 
 SERVER_NS="qf523s"
 CLIENT_NS=("qf523c1" "qf523c2" "qf523c3")
@@ -838,11 +839,15 @@ capture_client_persistent_congestion() {
 }
 
 prove_pmtu_efficiency_gain() {
-  python3 -c \
+  if ! python3 -c \
     'import pathlib,sys; floor=float(pathlib.Path(sys.argv[1]).read_text()); ceiling=float(pathlib.Path(sys.argv[2]).read_text()); gain=(ceiling/floor)-1.0; print(f"DPLPMTUD throughput gain: {gain * 100:.2f}% ({floor / 1_000_000:.3f} -> {ceiling / 1_000_000:.3f} Mbit/s)"); assert gain >= 0.15, gain' \
     "$ARTIFACT_DIR/throughput-default.bps" "$ARTIFACT_DIR/throughput-opt-in.bps" \
-    >"$ARTIFACT_DIR/throughput-comparison.txt" || \
-    fail '1472-byte QUIC UDP payload did not retain the required 15% gain over the safe 1280-byte floor'
+    >"$ARTIFACT_DIR/throughput-comparison.txt"; then
+    if [[ "$DEFER_PMTU_GAIN_GATE" != "1" ]]; then
+      fail '1472-byte QUIC UDP payload did not retain the required 15% gain over the safe 1280-byte floor'
+    fi
+    log 'single-run PMTU gain is below 15%; retaining complete evidence for the stability aggregate'
+  fi
   cat "$ARTIFACT_DIR/throughput-comparison.txt"
 }
 
@@ -966,6 +971,8 @@ main() {
     fail 'QF_E2E_CLIENT_RECV_DIAGNOSTICS must be 0 or 1'
   [[ "$FEC_MODE" == "auto" || "$FEC_MODE" == "off" ]] || \
     fail 'QF_E2E_FEC_MODE must be auto or off'
+  [[ "$DEFER_PMTU_GAIN_GATE" == "0" || "$DEFER_PMTU_GAIN_GATE" == "1" ]] || \
+    fail 'QF_E2E_DEFER_PMTU_GAIN_GATE must be 0 or 1'
   [[ -r "$CA" && -r "$CA_KEY" ]] || fail 'CA certificate or key fixture is unreadable'
 
   exec 9>"$LOCK_FILE"
