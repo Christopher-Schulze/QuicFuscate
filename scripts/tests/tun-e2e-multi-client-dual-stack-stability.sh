@@ -13,6 +13,7 @@ DUAL_STACK_HARNESS="$SCRIPT_DIR/tun-e2e-multi-client-dual-stack-netns.sh"
 AGGREGATOR="$SCRIPT_DIR/utils/aggregate-dual-stack-stability.py"
 BINARY="${QF_E2E_BINARY:-$PROJECT_ROOT/target/release/quicfuscate}"
 ARTIFACT_DIR="${QF_E2E_ARTIFACT_DIR:-/tmp/quicfuscate-dual-stack-stability-$$}"
+FEC_MODE="${QF_E2E_FEC_MODE:-auto}"
 STABILITY_TRIALS=3
 
 fail() {
@@ -47,6 +48,8 @@ append_trial_evidence() {
 
 main() {
     [ "$(id -u)" -eq 0 ] || fail "this harness requires root"
+    [ "$FEC_MODE" = "auto" ] || [ "$FEC_MODE" = "off" ] \
+        || fail "QF_E2E_FEC_MODE must be auto or off"
     require_command bash
     require_command dirname
     require_command python3
@@ -64,6 +67,7 @@ main() {
     printf 'binary_sha256=%s\n' "$binary_hash" > "$ARTIFACT_DIR/run-manifest.txt"
     printf 'stability_trials=%s\n' "$STABILITY_TRIALS" >> "$ARTIFACT_DIR/run-manifest.txt"
     printf 'external_egress_capture=1\n' >> "$ARTIFACT_DIR/run-manifest.txt"
+    printf 'fec_mode=%s\n' "$FEC_MODE" >> "$ARTIFACT_DIR/run-manifest.txt"
 
     local trial trial_dir child_status failures=0
     for ((trial = 1; trial <= STABILITY_TRIALS; trial++)); do

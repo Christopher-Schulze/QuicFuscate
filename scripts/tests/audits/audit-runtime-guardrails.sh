@@ -604,6 +604,9 @@ if rg -F -- 'for host_veth in "${HOST_VETH[@]}"; do' "$MULTI_CLIENT_DUAL_STACK_H
   && rg -F -- 'persistent congestion established;' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'refusing to replace client persistent-congestion evidence' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'CLIENT_RECV_DIAGNOSTICS must be 0 or 1' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'FEC_MODE="${QF_E2E_FEC_MODE:-auto}"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'QF_E2E_FEC_MODE must be auto or off' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'printf '"'"'\n[fec]\nmode = "%s"\n'"'"' "$FEC_MODE"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'CLIENT_RECV_DIAGNOSTICS_ENV: &str = "QUICFUSCATE_CLIENT_RECV_DIAGNOSTICS"' src/main.rs src/main_parts >/dev/null \
   && rg -F -- 'Client receive diagnostics at heartbeat:' src/main.rs src/main_parts >/dev/null \
   && rg -F -- 'last_activity_marker' src/main.rs src/main_parts src/transport/connection >/dev/null \
@@ -635,6 +638,9 @@ DUAL_STACK_STABILITY_AGGREGATOR="scripts/tests/utils/aggregate-dual-stack-stabil
 if rg -F -- 'STABILITY_TRIALS=3' "$DUAL_STACK_STABILITY_HARNESS" >/dev/null \
   && rg -F -- 'QF_E2E_EXTERNAL_EGRESS_CAPTURE=1' "$DUAL_STACK_STABILITY_HARNESS" >/dev/null \
   && rg -F -- 'QF_E2E_ARTIFACT_DIR="$trial_dir"' "$DUAL_STACK_STABILITY_HARNESS" >/dev/null \
+  && rg -F -- 'FEC_MODE="${QF_E2E_FEC_MODE:-auto}"' "$DUAL_STACK_STABILITY_HARNESS" >/dev/null \
+  && rg -F -- 'QF_E2E_FEC_MODE must be auto or off' "$DUAL_STACK_STABILITY_HARNESS" >/dev/null \
+  && rg -F -- 'printf '"'"'fec_mode=%s\n'"'"' "$FEC_MODE"' "$DUAL_STACK_STABILITY_HARNESS" >/dev/null \
   && rg -F -- 'summary.tsv' "$DUAL_STACK_STABILITY_HARNESS" >/dev/null \
   && rg -F -- 'dual-stack stability aggregate has' "$DUAL_STACK_STABILITY_HARNESS" >/dev/null \
   && rg -F -- 'receiver-verified PMTU throughput gain is below 15 percent' "$DUAL_STACK_STABILITY_AGGREGATOR" >/dev/null \
@@ -815,6 +821,7 @@ RNG_POLICY_FILES=(
   src/main.rs src/main_parts
   src/implementations/server/admin.rs
   src/implementations/server/admin_http.rs
+  src/implementations/server/admin_http_parts
 )
 if rg -n --no-messages "OsRng\\.fill_bytes|getrandom::getrandom|rand::thread_rng\\(\\)\\.fill_bytes|rand::random\\(" "${RNG_POLICY_FILES[@]}" >/dev/null; then
   fail_critical "Direct RNG fill usage detected in security-sensitive modules (expected centralized rng API)"

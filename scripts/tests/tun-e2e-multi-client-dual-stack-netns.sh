@@ -26,6 +26,7 @@ THROUGHPUT_TRIAL_SECONDS="${QF_E2E_THROUGHPUT_TRIAL_SECONDS:-10}"
 THROUGHPUT_RATE_BPS="${QF_E2E_THROUGHPUT_RATE_BPS:-15000000}"
 EXTERNAL_EGRESS_CAPTURE="${QF_E2E_EXTERNAL_EGRESS_CAPTURE:-0}"
 CLIENT_RECV_DIAGNOSTICS="${QF_E2E_CLIENT_RECV_DIAGNOSTICS:-1}"
+FEC_MODE="${QF_E2E_FEC_MODE:-auto}"
 
 SERVER_NS="qf523s"
 CLIENT_NS=("qf523c1" "qf523c2" "qf523c3")
@@ -245,6 +246,7 @@ start_phase() {
   # that fits an IPv4 Ethernet path with a 1500-byte L3 MTU (1500 - 20 - 8).
   printf '[transport]\nmtu = %s\nmax_udp_payload = %s\ndisable_pmtud = false\npmtu_min_mtu = 1280\npmtu_max_mtu = %s\npmtu_probe_interval_ms = %s\npmtu_black_hole_timeout_ms = %s\n' \
     "$pmtu_payload_max" "$pmtu_payload_max" "$pmtu_payload_max" "$probe_interval_ms" "$black_hole_timeout_ms" >"$phase_config"
+  printf '\n[fec]\nmode = "%s"\n' "$FEC_MODE" >>"$phase_config"
 
   local server_args=(
     server
@@ -960,6 +962,8 @@ main() {
     fail 'QF_E2E_EXTERNAL_EGRESS_CAPTURE must be 0 or 1'
   [[ "$CLIENT_RECV_DIAGNOSTICS" == "0" || "$CLIENT_RECV_DIAGNOSTICS" == "1" ]] || \
     fail 'QF_E2E_CLIENT_RECV_DIAGNOSTICS must be 0 or 1'
+  [[ "$FEC_MODE" == "auto" || "$FEC_MODE" == "off" ]] || \
+    fail 'QF_E2E_FEC_MODE must be auto or off'
   [[ -r "$CA" && -r "$CA_KEY" ]] || fail 'CA certificate or key fixture is unreadable'
 
   exec 9>"$LOCK_FILE"
