@@ -69,15 +69,20 @@ pub struct SentPacketContents {
     pub stream: bool,
     /// The packet carried a DATAGRAM frame.
     pub datagram: bool,
+    /// The STREAM frame retransmitted a previously lost range.
+    pub stream_retransmission: bool,
 }
 
 impl SentPacketContents {
     /// Generic ack-eliciting traffic whose payload class is not exposed by the caller.
-    pub const CONTROL: Self = Self { control: true, stream: false, datagram: false };
+    pub const CONTROL: Self =
+        Self { control: true, stream: false, datagram: false, stream_retransmission: false };
     /// A packet whose ack-eliciting application payload is a STREAM frame.
-    pub const STREAM: Self = Self { control: false, stream: true, datagram: false };
+    pub const STREAM: Self =
+        Self { control: false, stream: true, datagram: false, stream_retransmission: false };
     /// A packet whose ack-eliciting application payload is a DATAGRAM frame.
-    pub const DATAGRAM: Self = Self { control: false, stream: false, datagram: true };
+    pub const DATAGRAM: Self =
+        Self { control: false, stream: false, datagram: true, stream_retransmission: false };
 }
 
 /// One tracked sent packet inside the canonical recovery owner.
@@ -128,6 +133,8 @@ struct PersistentCongestionRun {
     max_packet_size: Option<usize>,
     control_packets: usize,
     stream_packets: usize,
+    stream_fresh_packets: usize,
+    stream_retransmission_packets: usize,
     datagram_packets: usize,
     lost_packet_numbers: BTreeSet<(usize, u64)>,
 }
@@ -141,6 +148,8 @@ impl PersistentCongestionRun {
         self.max_packet_size = None;
         self.control_packets = 0;
         self.stream_packets = 0;
+        self.stream_fresh_packets = 0;
+        self.stream_retransmission_packets = 0;
         self.datagram_packets = 0;
         self.lost_packet_numbers.clear();
     }
@@ -213,6 +222,10 @@ pub struct PersistentCongestionEvidence {
     pub run_control_packets: usize,
     /// Lost run packets that carried STREAM frames.
     pub run_stream_packets: usize,
+    /// Lost run STREAM carriers that sent a range for the first time.
+    pub run_stream_fresh_packets: usize,
+    /// Lost run STREAM carriers that retransmitted a previously lost range.
+    pub run_stream_retransmission_packets: usize,
     /// Lost run packets that carried DATAGRAM frames.
     pub run_datagram_packets: usize,
     /// Send time of the loss that completed the run.
@@ -929,6 +942,13 @@ impl Recovery {
                     );
                     self.pc_window.control_packets += usize::from(pkt.contents.control);
                     self.pc_window.stream_packets += usize::from(pkt.contents.stream);
+                    if pkt.contents.stream {
+                        if pkt.contents.stream_retransmission {
+                            self.pc_window.stream_retransmission_packets += 1;
+                        } else {
+                            self.pc_window.stream_fresh_packets += 1;
+                        }
+                    }
                     self.pc_window.datagram_packets += usize::from(pkt.contents.datagram);
                     self.pc_window.lost_packet_numbers.insert((space.index(), pkt.pn));
                     if pkt.sent_at.saturating_duration_since(start) >= period {
@@ -939,6 +959,8 @@ impl Recovery {
                             self.pc_window.max_packet_size.unwrap_or(pkt.size),
                             self.pc_window.control_packets,
                             self.pc_window.stream_packets,
+                            self.pc_window.stream_fresh_packets,
+                            self.pc_window.stream_retransmission_packets,
                             self.pc_window.datagram_packets,
                             pkt.sent_at,
                             pkt.pn,
@@ -956,6 +978,8 @@ impl Recovery {
                     run_max_packet_size,
                     run_control_packets,
                     run_stream_packets,
+                    run_stream_fresh_packets,
+                    run_stream_retransmission_packets,
                     run_datagram_packets,
                     run_end,
                     terminal_lost_pn,
@@ -983,6 +1007,8 @@ impl Recovery {
                         run_max_packet_size,
                         run_control_packets,
                         run_stream_packets,
+                        run_stream_fresh_packets,
+                        run_stream_retransmission_packets,
                         run_datagram_packets,
                         run_end,
                         terminal_lost_pn,
@@ -1626,6 +1652,8 @@ mod tests {
         assert_eq!(evidence.run_max_packet_size, 1200);
         assert_eq!(evidence.run_control_packets, 16);
         assert_eq!(evidence.run_stream_packets, 0);
+        assert_eq!(evidence.run_stream_fresh_packets, 0);
+        assert_eq!(evidence.run_stream_retransmission_packets, 0);
         assert_eq!(evidence.run_datagram_packets, 0);
         assert_eq!(evidence.terminal_lost_pn, 15);
         assert_eq!(evidence.lost_packet_count, 16);
@@ -1655,7 +1683,12 @@ mod tests {
         for pn in 0..21 {
             let contents = match pn {
                 0..=3 => SentPacketContents::CONTROL,
-                4..=9 => SentPacketContents::STREAM,
+                4..=6 => SentPacketContents::STREAM,
+                7..=9 => SentPacketContents {
+                    stream: true,
+                    stream_retransmission: true,
+                    ..SentPacketContents::default()
+                },
                 _ => SentPacketContents::DATAGRAM,
             };
             rec.on_packet_sent_with_contents_in_space(
@@ -1683,6 +1716,8 @@ mod tests {
         assert_eq!(evidence.lost_packet_count, 16);
         assert_eq!(evidence.run_control_packets, 4);
         assert_eq!(evidence.run_stream_packets, 6);
+        assert_eq!(evidence.run_stream_fresh_packets, 3);
+        assert_eq!(evidence.run_stream_retransmission_packets, 3);
         assert_eq!(evidence.run_datagram_packets, 6);
     }
 

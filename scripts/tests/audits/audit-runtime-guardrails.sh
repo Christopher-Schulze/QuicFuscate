@@ -614,6 +614,8 @@ if rg -F -- 'for host_veth in "${HOST_VETH[@]}"; do' "$MULTI_CLIENT_DUAL_STACK_H
   && rg -F -- 'run_min_packet_size={}' src/transport/connection.rs >/dev/null \
   && rg -F -- 'run_control_packets={}' src/transport/connection.rs >/dev/null \
   && rg -F -- 'run_stream_packets={}' src/transport/connection.rs >/dev/null \
+  && rg -F -- 'run_stream_fresh_packets={}' src/transport/connection.rs >/dev/null \
+  && rg -F -- 'run_stream_retransmission_packets={}' src/transport/connection.rs >/dev/null \
   && rg -F -- 'run_datagram_packets={}' src/transport/connection.rs >/dev/null \
   && rg -F -- 'server UDP socket dropped datagrams during IPv6 throughput trial' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'client UDP socket dropped datagrams during IPv6 throughput trial' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \

@@ -314,6 +314,12 @@ struct StreamTransmission {
     lost_packets: VecDeque<u64>,
 }
 
+#[derive(Clone, Copy)]
+struct StreamTransmissionEmission {
+    id: u64,
+    retransmission: bool,
+}
+
 impl PendingPathValidation {
     fn matches_path(&self, local_addr: SocketAddr, peer_addr: SocketAddr) -> bool {
         self.local_addr == local_addr && self.peer_addr == peer_addr
@@ -1105,7 +1111,7 @@ impl Connection {
         }
         if let Some(evidence) = outcome.persistent_congestion_evidence {
             log::info!(
-                "persistent congestion established; cwnd={} space={:?} pmtu_effective={} largest_acked={} ack_delay_us={} largest_acked_age_known={} largest_acked_age_us={} acked_packets={} ack_lost_packets={} ack_packet_threshold_losses={} ack_time_threshold_losses={} run_start_pn={} run_min_packet_size={} run_max_packet_size={} run_control_packets={} run_stream_packets={} run_datagram_packets={} terminal_lost_pn={} terminal_packet_threshold={} terminal_time_threshold={} lost_packets={} smoothed_rtt_us={} rtt_variance_us={} loss_delay_us={} period_us={} run_us={}",
+                "persistent congestion established; cwnd={} space={:?} pmtu_effective={} largest_acked={} ack_delay_us={} largest_acked_age_known={} largest_acked_age_us={} acked_packets={} ack_lost_packets={} ack_packet_threshold_losses={} ack_time_threshold_losses={} run_start_pn={} run_min_packet_size={} run_max_packet_size={} run_control_packets={} run_stream_packets={} run_stream_fresh_packets={} run_stream_retransmission_packets={} run_datagram_packets={} terminal_lost_pn={} terminal_packet_threshold={} terminal_time_threshold={} lost_packets={} smoothed_rtt_us={} rtt_variance_us={} loss_delay_us={} period_us={} run_us={}",
                 self.recovery.cwnd,
                 space,
                 self.pmtu.effective_mtu(),
@@ -1125,6 +1131,8 @@ impl Connection {
                 evidence.run_max_packet_size,
                 evidence.run_control_packets,
                 evidence.run_stream_packets,
+                evidence.run_stream_fresh_packets,
+                evidence.run_stream_retransmission_packets,
                 evidence.run_datagram_packets,
                 evidence.terminal_lost_pn,
                 evidence.terminal_loss_by_packet_threshold,
@@ -2605,7 +2613,7 @@ impl Connection {
     }
 
     /// Flushes one retransmitted or new STREAM range. Returns `(new_off,
-    /// wrote_ack_eliciting, transmission_id)` - STREAM frames are always
+    /// wrote_ack_eliciting, transmission emission)` - STREAM frames are always
     /// ack-eliciting when emitted (RFC 9000 §19.8).
     fn maximum_stream_payload(
         packet_len: usize,
@@ -2634,7 +2642,8 @@ impl Connection {
         &mut self,
         out: &mut [u8],
         mut off: usize,
-    ) -> Result<(usize, bool, Option<u64>), crate::error::ConnectionError> {
+    ) -> Result<(usize, bool, Option<StreamTransmissionEmission>), crate::error::ConnectionError>
+    {
         use crate::error::ConnectionError;
 
         while let Some(transmission_id) = self.stream_retransmit_queue.front().copied() {
@@ -2675,7 +2684,11 @@ impl Connection {
                 fin,
                 &mut out[off..],
             )?;
-            return Ok((off, true, Some(transmission_id)));
+            return Ok((
+                off,
+                true,
+                Some(StreamTransmissionEmission { id: transmission_id, retransmission: true }),
+            ));
         }
 
         let ledger_bytes = self.stream_retransmit_bytes;
@@ -2834,7 +2847,11 @@ impl Connection {
         if let Some((stream_id, stream_offset, data, fin)) = staged_transmission {
             let transmission_id =
                 self.stage_stream_transmission(stream_id, stream_offset, data, fin)?;
-            return Ok((off, true, Some(transmission_id)));
+            return Ok((
+                off,
+                true,
+                Some(StreamTransmissionEmission { id: transmission_id, retransmission: false }),
+            ));
         }
         Ok((off, false, None))
     }
@@ -3559,12 +3576,15 @@ impl Connection {
                     .filter(|reserve| off + reserve + self.tag_reserve_1rtt() <= out.len())
                     .unwrap_or(0);
                 let stream_limit = out.len().saturating_sub(datagram_reserve);
-                let (off_after_stream, stream_ack_eliciting, emitted_transmission_id) =
+                let (off_after_stream, stream_ack_eliciting, emitted_transmission) =
                     self.maybe_flush_one_writable_stream(&mut out[..stream_limit], off)?;
                 off = off_after_stream;
                 wrote_ack_eliciting |= stream_ack_eliciting;
                 packet_contents.stream |= stream_ack_eliciting;
-                stream_transmission_id = emitted_transmission_id;
+                if let Some(emission) = emitted_transmission {
+                    stream_transmission_id = Some(emission.id);
+                    packet_contents.stream_retransmission |= emission.retransmission;
+                }
                 // FEC feed removed (handled by core)
                 let (off_after_dgram, dgram_ack_eliciting) =
                     self.maybe_flush_one_datagram_frame(out, off)?;
