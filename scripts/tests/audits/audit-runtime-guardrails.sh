@@ -595,6 +595,7 @@ if rg -F -- 'for host_veth in "${HOST_VETH[@]}"; do' "$MULTI_CLIENT_DUAL_STACK_H
   && rg -F -- 'QUICFUSCATE_CLIENT_RECV_DIAGNOSTICS="$CLIENT_RECV_DIAGNOSTICS"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'capture_client_receive_diagnostics "$phase" "$trial"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'capture_client_persistent_congestion "$phase" "$trial"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'capture_client_persistent_congestion "black-hole" 1 "$client_log"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'Client receive diagnostics at heartbeat:' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- '[[ ! -e "$output" ]] || fail "refusing to replace client receive diagnostics: $output"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'persistent congestion established;' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
@@ -607,6 +608,7 @@ if rg -F -- 'for host_veth in "${HOST_VETH[@]}"; do' "$MULTI_CLIENT_DUAL_STACK_H
   && rg -F -- 'ack_delay_us={}' src/transport/connection.rs >/dev/null \
   && rg -F -- 'ack_time_threshold_losses={}' src/transport/connection.rs >/dev/null \
   && rg -F -- 'smoothed_rtt_us={}' src/transport/connection.rs >/dev/null \
+  && rg -F -- 'run_min_packet_size={}' src/transport/connection.rs >/dev/null \
   && rg -F -- 'server UDP socket dropped datagrams during IPv6 throughput trial' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'client UDP socket dropped datagrams during IPv6 throughput trial' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'selector = f"on port {port}"' "$UDP_SOCKET_EVIDENCE" >/dev/null \

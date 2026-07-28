@@ -1105,9 +1105,10 @@ impl Connection {
         }
         if let Some(evidence) = outcome.persistent_congestion_evidence {
             log::info!(
-                "persistent congestion established; cwnd={} space={:?} largest_acked={} ack_delay_us={} largest_acked_age_known={} largest_acked_age_us={} acked_packets={} ack_lost_packets={} ack_packet_threshold_losses={} ack_time_threshold_losses={} run_start_pn={} terminal_lost_pn={} terminal_packet_threshold={} terminal_time_threshold={} lost_packets={} smoothed_rtt_us={} rtt_variance_us={} loss_delay_us={} period_us={} run_us={}",
+                "persistent congestion established; cwnd={} space={:?} pmtu_effective={} largest_acked={} ack_delay_us={} largest_acked_age_known={} largest_acked_age_us={} acked_packets={} ack_lost_packets={} ack_packet_threshold_losses={} ack_time_threshold_losses={} run_start_pn={} run_min_packet_size={} run_max_packet_size={} terminal_lost_pn={} terminal_packet_threshold={} terminal_time_threshold={} lost_packets={} smoothed_rtt_us={} rtt_variance_us={} loss_delay_us={} period_us={} run_us={}",
                 self.recovery.cwnd,
                 space,
+                self.pmtu.effective_mtu(),
                 evidence.largest_acked,
                 evidence.triggering_ack_delay.as_micros(),
                 evidence.largest_acked_packet_age.is_some(),
@@ -1120,6 +1121,8 @@ impl Connection {
                 evidence.triggering_ack_packet_threshold_losses,
                 evidence.triggering_ack_time_threshold_losses,
                 evidence.run_start_pn,
+                evidence.run_min_packet_size,
+                evidence.run_max_packet_size,
                 evidence.terminal_lost_pn,
                 evidence.terminal_loss_by_packet_threshold,
                 evidence.terminal_loss_by_time_threshold,

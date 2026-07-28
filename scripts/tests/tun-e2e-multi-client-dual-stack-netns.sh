@@ -820,7 +820,7 @@ capture_client_receive_diagnostics() {
 capture_client_persistent_congestion() {
   local phase="$1"
   local trial="$2"
-  local client_log="$ARTIFACT_DIR/client-$phase-1.log"
+  local client_log="${3:-$ARTIFACT_DIR/client-$phase-1.log}"
   local output="$ARTIFACT_DIR/client-persistent-congestion-$phase-$trial.txt"
   local diagnostic
 
@@ -889,6 +889,7 @@ prove_dplpmtud_black_hole_recovery() {
   if ! wait "$client_pid"; then
     kill -TERM "$server_pid" 2>/dev/null || true
     wait "$server_pid" 2>/dev/null || true
+    capture_client_persistent_congestion "black-hole" 1 "$client_log"
     fail 'IPv6 transfer did not recover across the black-hole interval'
   fi
   wait "$server_pid" || fail 'IPv6 black-hole recovery receiver failed'

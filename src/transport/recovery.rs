@@ -98,6 +98,8 @@ struct PersistentCongestionRun {
     start: Option<Instant>,
     start_pn: Option<u64>,
     end: Option<Instant>,
+    min_packet_size: Option<usize>,
+    max_packet_size: Option<usize>,
     lost_packet_numbers: BTreeSet<(usize, u64)>,
 }
 
@@ -106,6 +108,8 @@ impl PersistentCongestionRun {
         self.start = None;
         self.start_pn = None;
         self.end = None;
+        self.min_packet_size = None;
+        self.max_packet_size = None;
         self.lost_packet_numbers.clear();
     }
 
@@ -169,6 +173,10 @@ pub struct PersistentCongestionEvidence {
     pub run_start: Instant,
     /// Packet number at the beginning of the uninterrupted loss run.
     pub run_start_pn: u64,
+    /// Smallest packet size in the loss run that established congestion.
+    pub run_min_packet_size: usize,
+    /// Largest packet size in the loss run that established congestion.
+    pub run_max_packet_size: usize,
     /// Send time of the loss that completed the run.
     pub run_end: Instant,
     /// Packet number of the loss that completed the run.
@@ -828,11 +836,19 @@ impl Recovery {
                         }
                     };
                     self.pc_window.end = Some(pkt.sent_at);
+                    self.pc_window.min_packet_size = Some(
+                        self.pc_window.min_packet_size.map_or(pkt.size, |size| size.min(pkt.size)),
+                    );
+                    self.pc_window.max_packet_size = Some(
+                        self.pc_window.max_packet_size.map_or(pkt.size, |size| size.max(pkt.size)),
+                    );
                     self.pc_window.lost_packet_numbers.insert((space.index(), pkt.pn));
                     if pkt.sent_at.saturating_duration_since(start) >= period {
                         declaration = Some((
                             start,
                             run_start_pn,
+                            self.pc_window.min_packet_size.unwrap_or(pkt.size),
+                            self.pc_window.max_packet_size.unwrap_or(pkt.size),
                             pkt.sent_at,
                             pkt.pn,
                             packet_threshold.is_some_and(|threshold| pkt.pn <= threshold),
@@ -845,6 +861,8 @@ impl Recovery {
                 if let Some((
                     run_start,
                     run_start_pn,
+                    run_min_packet_size,
+                    run_max_packet_size,
                     run_end,
                     terminal_lost_pn,
                     terminal_loss_by_packet_threshold,
@@ -867,6 +885,8 @@ impl Recovery {
                         rtt_variance: self.rtt_var,
                         run_start,
                         run_start_pn,
+                        run_min_packet_size,
+                        run_max_packet_size,
                         run_end,
                         terminal_lost_pn,
                         terminal_loss_by_packet_threshold,
@@ -1505,6 +1525,8 @@ mod tests {
         assert_eq!(evidence.triggering_ack_delay, Duration::ZERO);
         assert_eq!(evidence.largest_acked_packet_age, Some(Duration::from_millis(10)));
         assert_eq!(evidence.run_start_pn, 0);
+        assert_eq!(evidence.run_min_packet_size, 1200);
+        assert_eq!(evidence.run_max_packet_size, 1200);
         assert_eq!(evidence.terminal_lost_pn, 15);
         assert_eq!(evidence.lost_packet_count, 16);
         assert_eq!(evidence.triggering_ack_newly_acked_packets, 1);
