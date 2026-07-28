@@ -688,6 +688,7 @@ prove_backpressure_quiescence() {
   assert_metric_zero "throughput-$phase" quicfuscate_tun_downlink_backpressure_pending_bytes
   assert_metric_family_zero "throughput-$phase" quicfuscate_tun_downlink_backpressure_events_total
   assert_metric_family_zero "throughput-$phase" quicfuscate_masque_downlink_response_events_total
+  assert_metric_zero "throughput-$phase" quicfuscate_rate_limited_total
 }
 
 prove_routing_metrics() {
@@ -799,7 +800,8 @@ prove_ipv6_throughput() {
     "$THROUGHPUT_TRIAL_SECONDS" \
     "$ARTIFACT_DIR/tcp6-client-$phase-1.json" \
     "$ARTIFACT_DIR/tcp6-client-$phase-2.json" \
-    "$ARTIFACT_DIR/tcp6-client-$phase-3.json"
+    "$ARTIFACT_DIR/tcp6-client-$phase-3.json" || \
+    fail "IPv6 throughput evidence exceeded the bounded trial duration in phase $phase"
 }
 
 capture_client_receive_diagnostics() {

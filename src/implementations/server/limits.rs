@@ -8,6 +8,11 @@ use std::time::{Duration, Instant};
 
 /// Default global server-wide packet rate cap (packets per second across all IPs).
 pub const DEFAULT_GLOBAL_RATE_LIMIT_PPS: u64 = 50_000;
+/// Default sustained packet rate per source.
+///
+/// This must leave headroom above normal tunnel packet rates so the abuse
+/// control cannot manufacture transport loss under legitimate throughput.
+pub const DEFAULT_PER_SOURCE_RATE_LIMIT_PPS: u64 = 10_000;
 
 /// Rate limit configuration.
 #[derive(Clone, Debug)]
@@ -28,8 +33,8 @@ pub struct RateLimitConfig {
 impl Default for RateLimitConfig {
     fn default() -> Self {
         Self {
-            max_pps: 1_000, // Down from 10,000 — see TODO-459
-            max_bps: 0,     // Unlimited
+            max_pps: DEFAULT_PER_SOURCE_RATE_LIMIT_PPS,
+            max_bps: 0, // Unlimited
             refill_interval: Duration::from_secs(1),
             burst_size: 0, // 0 => resolve to 2× max_pps (see `effective_burst`)
         }
@@ -1125,9 +1130,9 @@ mod tests {
     // ---- RateLimitConfig defaults & burst ----
 
     #[test]
-    fn test_rate_limit_config_default_pps_lowered() {
+    fn test_rate_limit_config_default_pps_preserves_tunnel_headroom() {
         let cfg = RateLimitConfig::default();
-        assert_eq!(cfg.max_pps, 1_000, "default per-IP PPS must be 1,000 (TODO-459)");
+        assert_eq!(cfg.max_pps, DEFAULT_PER_SOURCE_RATE_LIMIT_PPS);
     }
 
     #[test]

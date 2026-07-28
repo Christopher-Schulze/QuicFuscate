@@ -566,6 +566,8 @@ if rg -F -- 'for host_veth in "${HOST_VETH[@]}"; do' "$MULTI_CLIENT_DUAL_STACK_H
   && rg -F -- 'python3 "$THROUGHPUT_PROBE" server' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'python3 "$THROUGHPUT_PROBE" client' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- '--rate-bps "$THROUGHPUT_RATE_BPS"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'IPv6 throughput evidence exceeded the bounded trial duration in phase $phase' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'assert_metric_zero "throughput-$phase" quicfuscate_rate_limited_total' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'fetch_metrics throughput-failure || true' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && ! rg -F -- 'iperf3' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'sender/receiver byte mismatch' "$TCP_THROUGHPUT_PROBE" >/dev/null \
@@ -844,6 +846,18 @@ if rg -n --no-messages "(crate::)?optimize::random|accelerate::random" "${RNG_PO
 else
   pass "Security-sensitive modules do not reference optimize/accelerate random helpers"
   append_item "rng_policy_no_optimize_random_in_security_modules" "ok" "no optimize/accelerate random references in security-sensitive modules"
+fi
+
+if rg -F -- 'pub const DEFAULT_PER_SOURCE_RATE_LIMIT_PPS: u64 = 10_000;' \
+    src/implementations/server/limits.rs >/dev/null \
+  && rg -F -- 'max_pps: DEFAULT_PER_SOURCE_RATE_LIMIT_PPS' \
+    src/implementations/server/limits.rs >/dev/null \
+  && rg -F -- 'default: `10000`' docs/DOCUMENTATION.md >/dev/null; then
+  pass "Per-source server rate limit preserves documented tunnel-throughput headroom"
+  append_item "server_rate_limit_tunnel_headroom" "ok" "runtime, tests, docs, and native throughput gate retain the 10000 PPS default"
+else
+  fail_critical "Per-source server rate limit can regress below the documented tunnel-throughput default"
+  append_item "server_rate_limit_tunnel_headroom" "fail" "missing 10000 PPS runtime default or documentation contract"
 fi
 
 # 11) optimize::random must not expose misleading secure-entropy naming.
