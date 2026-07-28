@@ -1314,19 +1314,20 @@ impl QuicFuscateConnection {
         self.optimization_manager.memory_pool().clone()
     }
 
+    /// Earliest outgoing release imposed by the pacing or stealth scheduler.
+    pub fn next_outbound_release_deadline(&self) -> Option<Instant> {
+        [self.outbound_pacer.next_release(), self.next_packet_release].into_iter().flatten().min()
+    }
+
     /// Earliest instant the caller should poll `send` again.
     ///
     /// This merges the outer pacing, stealth release, and QUIC recovery
     /// (loss/PTO) deadlines so event loops never oversleep a release or probe.
     pub fn next_send_deadline(&self) -> Option<Instant> {
-        [
-            self.outbound_pacer.next_release(),
-            self.next_packet_release,
-            self.conn.recovery_deadline(),
-        ]
-        .into_iter()
-        .flatten()
-        .min()
+        [self.next_outbound_release_deadline(), self.conn.recovery_deadline()]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     fn prepare_fec_wire_profile(
@@ -2599,6 +2600,7 @@ mod tests {
         connection.outbound_pacer.next_release = Some(now);
         let recovery_deadline = connection.conn.recovery_deadline();
 
+        assert_eq!(connection.next_outbound_release_deadline(), Some(now));
         assert_eq!(
             connection.next_send_deadline(),
             Some(recovery_deadline.map_or(now, |d| now.min(d)))

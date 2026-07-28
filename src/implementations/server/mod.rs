@@ -3488,8 +3488,11 @@ impl LiveServerState {
         self.clients.values_mut()
     }
 
-    fn next_send_deadline(&self) -> Option<Instant> {
-        self.clients.values().filter_map(QuicFuscateConnection::next_send_deadline).min()
+    fn next_outbound_release_deadline(&self) -> Option<Instant> {
+        self.clients
+            .values()
+            .filter_map(QuicFuscateConnection::next_outbound_release_deadline)
+            .min()
     }
 
     async fn flush_due_outgoing(&mut self, socket: &UdpSocket, out: &mut [u8], metrics: &Metrics) {
@@ -3498,7 +3501,9 @@ impl LiveServerState {
             .clients
             .iter()
             .filter_map(|(addr, conn)| {
-                conn.next_send_deadline().is_some_and(|deadline| deadline <= now).then_some(*addr)
+                conn.next_outbound_release_deadline()
+                    .is_some_and(|deadline| deadline <= now)
+                    .then_some(*addr)
             })
             .collect::<Vec<_>>();
         let client_snapshots = Arc::clone(self.domain.client_snapshots());
@@ -6504,7 +6509,7 @@ impl ServerRuntime {
         let mut next_watchdog = watchdog_interval.map(|interval| Instant::now() + interval);
 
         loop {
-            let send_deadline = self.live().live_state.next_send_deadline();
+            let send_deadline = self.live().live_state.next_outbound_release_deadline();
             tokio::select! {
                 Some(action) = admin_actions_rx.recv() => {
                     self.handle_admin_action_with_runtime_reload(
