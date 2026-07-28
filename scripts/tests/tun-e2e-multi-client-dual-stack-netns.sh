@@ -33,8 +33,6 @@ SERVER_UNDERLAY="10.10.0.1"
 GATEWAY_UNDERLAY="10.10.0.254"
 TUN_NAME="qtun0"
 METRICS_PORT=19523
-CLIENT_TELEMETRY_ENABLED="${QF_E2E_CLIENT_TELEMETRY:-0}"
-CLIENT_METRICS_PORT_BASE="${QF_E2E_CLIENT_METRICS_PORT_BASE:-19600}"
 ADMIN_SOCKET="${QF_E2E_ADMIN_SOCKET:-/tmp/qf523-${$}.sock}"
 ADMIN_SOCKET_OWNED=0
 BLACK_HOLE_FILTER_ACTIVE=0
@@ -268,22 +266,12 @@ start_phase() {
   PHASE_PIDS+=("$!")
   wait_for_socket "$ADMIN_SOCKET"
 
-  local index qkey client_log client_metrics_port
+  local index qkey client_log
   for index in 0 1 2; do
     qkey="$(issue_qkey)"
     [[ -n "$qkey" ]] || fail "empty QKey for client $((index + 1))"
     client_log="$ARTIFACT_DIR/client-$phase-$((index + 1)).log"
-    client_metrics_port=$((CLIENT_METRICS_PORT_BASE + index))
-    local -a client_command=("$BINARY")
-    if [[ "$CLIENT_TELEMETRY_ENABLED" == "1" ]]; then
-      client_command=(
-        env
-        "QUICFUSCATE_METRICS_ADDR=127.0.0.1:$client_metrics_port"
-        "$BINARY"
-        --telemetry
-      )
-    fi
-    ip netns exec "${CLIENT_NS[$index]}" "${client_command[@]}" client \
+    ip netns exec "${CLIENT_NS[$index]}" "$BINARY" client \
       --config "$phase_config" \
       --remote "$SERVER_UNDERLAY:4433" \
       --url "https://$SERVER_UNDERLAY/" \
@@ -606,67 +594,6 @@ prove_backpressure_quiescence() {
   assert_metric_family_zero "throughput-$phase" quicfuscate_masque_downlink_response_events_total
 }
 
-fetch_client_telemetry() {
-  local phase="$1"
-  [[ "$CLIENT_TELEMETRY_ENABLED" == "1" ]] || return 0
-
-  local index client_metrics_port
-  for index in 0 1 2; do
-    client_metrics_port=$((CLIENT_METRICS_PORT_BASE + index))
-    printf 'GET /telemetry HTTP/1.0\r\nHost: localhost\r\n\r\n' | \
-      ip netns exec "${CLIENT_NS[$index]}" nc -w 3 127.0.0.1 "$client_metrics_port" \
-      >"$ARTIFACT_DIR/client-telemetry-$phase-$((index + 1)).txt"
-  done
-}
-
-assert_client_metric_positive() {
-  local file="$1"
-  local metric="$2"
-  local line value
-  line="$(grep "^$metric " "$file" || true)"
-  [[ -n "$line" ]] || fail "missing client metric $metric in $file"
-  value="${line##* }"
-  if [[ ! "$value" =~ ^[0-9]+$ ]] || ((value == 0)); then
-    fail "client metric $metric is not positive in $file: $value"
-  fi
-}
-
-assert_client_metric_zero() {
-  local file="$1"
-  local metric="$2"
-  local line value
-  line="$(grep "^$metric " "$file" || true)"
-  [[ -n "$line" ]] || fail "missing client metric $metric in $file"
-  value="${line##* }"
-  if [[ ! "$value" =~ ^[0-9]+$ ]] || ((value != 0)); then
-    fail "client metric $metric must be zero in $file: $value"
-  fi
-}
-
-prove_client_egress_telemetry() {
-  local phase="$1"
-  [[ "$CLIENT_TELEMETRY_ENABLED" == "1" ]] || return 0
-
-  fetch_client_telemetry "$phase"
-  local index file max_burst_line max_burst
-  for index in 0 1 2; do
-    file="$ARTIFACT_DIR/client-telemetry-$phase-$((index + 1)).txt"
-    assert_client_metric_positive "$file" quicfuscate_client_egress_flushes_total
-    assert_client_metric_positive "$file" quicfuscate_client_egress_packets_total
-    assert_client_metric_positive "$file" quicfuscate_client_egress_bytes_total
-    assert_client_metric_positive "$file" quicfuscate_client_egress_initial_flushes_total
-    assert_client_metric_positive "$file" quicfuscate_client_egress_housekeeping_flushes_total
-    assert_client_metric_zero "$file" quicfuscate_client_heartbeat_timeouts_total
-    max_burst_line="$(grep '^quicfuscate_client_egress_burst_packets_max ' "$file" || true)"
-    max_burst="${max_burst_line##* }"
-    if [[ ! "$max_burst" =~ ^[0-9]+$ ]] \
-      || ((max_burst < 1)) \
-      || ((max_burst > 64)); then
-      fail "invalid client egress burst bound in $file: $max_burst"
-    fi
-  done
-}
-
 prove_routing_metrics() {
   local phase="$1"
   fetch_metrics "$phase"
@@ -821,13 +748,6 @@ main() {
     || ((THROUGHPUT_RATE_BPS < 1000000)); then
     fail 'QF_E2E_THROUGHPUT_RATE_BPS must be an integer of at least 1000000'
   fi
-  [[ "$CLIENT_TELEMETRY_ENABLED" == "0" || "$CLIENT_TELEMETRY_ENABLED" == "1" ]] || \
-    fail 'QF_E2E_CLIENT_TELEMETRY must be 0 or 1'
-  if [[ ! "$CLIENT_METRICS_PORT_BASE" =~ ^[0-9]+$ ]] \
-    || ((CLIENT_METRICS_PORT_BASE < 1024)) \
-    || ((CLIENT_METRICS_PORT_BASE > 65532)); then
-    fail 'QF_E2E_CLIENT_METRICS_PORT_BASE must permit three non-privileged ports'
-  fi
   [[ -r "$CA" && -r "$CA_KEY" ]] || fail 'CA certificate or key fixture is unreadable'
 
   exec 9>"$LOCK_FILE"
@@ -849,7 +769,6 @@ main() {
   prove_linux_dual_stack_state
   prove_ipv6_throughput default
   prove_backpressure_quiescence default
-  prove_client_egress_telemetry default
 
   log 'phase 2: explicit client-unicast opt-in'
   start_phase opt-in 1 1472 1500 1000 2000
@@ -861,7 +780,6 @@ main() {
   prove_pmtu_efficiency_gain
   prove_dplpmtud_black_hole_recovery
   prove_backpressure_quiescence opt-in
-  prove_client_egress_telemetry opt-in
 
   log "PASS: complete evidence retained in $ARTIFACT_DIR"
 }

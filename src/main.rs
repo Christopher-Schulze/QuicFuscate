@@ -25,6 +25,7 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::OnceLock;
+#[cfg(feature = "benches")]
 use std::time::Instant;
 use tokio::io::Interest;
 use tokio::time::{interval, Duration, MissedTickBehavior};
@@ -246,58 +247,16 @@ async fn send_connected_datagram(
     }
 }
 
-struct ClientEgressTracker {
-    enabled: bool,
-    last_successful_send: Option<Instant>,
-}
-
-impl ClientEgressTracker {
-    fn new(enabled: bool) -> Self {
-        Self { enabled, last_successful_send: None }
-    }
-
-    fn record_successful_send(&mut self) {
-        self.record_successful_send_at(Instant::now());
-    }
-
-    fn record_successful_send_at(&mut self, now: Instant) {
-        if !self.enabled {
-            return;
-        }
-
-        if let Some(previous) = self.last_successful_send {
-            telemetry::record_client_egress_gap(now.saturating_duration_since(previous));
-        }
-        self.last_successful_send = Some(now);
-    }
-
-    fn record_flush(&self, trigger: telemetry::ClientEgressTrigger, packets: u64, bytes: u64) {
-        if self.enabled {
-            telemetry::record_client_egress_flush(trigger, packets, bytes);
-        }
-    }
-}
-
 async fn flush_connected_outgoing(
     socket: &tokio::net::UdpSocket,
     conn: &mut QuicFuscateConnection,
     out: &mut [u8],
-    egress_tracker: &mut ClientEgressTracker,
-    trigger: telemetry::ClientEgressTrigger,
 ) -> std::io::Result<()> {
-    let mut packets = 0_u64;
-    let mut bytes = 0_u64;
     for _ in 0..quicfuscate::transport::UDP_DATAGRAM_BURST_LIMIT {
         match conn.send(out) {
             Ok(len) if len > 0 => {
                 telemetry!(quicfuscate::telemetry::BYTES_SENT.inc_by(len as u64));
-                if let Err(error) = send_connected_datagram(socket, &out[..len]).await {
-                    egress_tracker.record_flush(trigger, packets, bytes);
-                    return Err(error);
-                }
-                packets += 1;
-                bytes += len as u64;
-                egress_tracker.record_successful_send();
+                send_connected_datagram(socket, &out[..len]).await?;
             }
             Ok(_) => break,
             Err(ConnectionError::Done) => break,
@@ -307,7 +266,6 @@ async fn flush_connected_outgoing(
             }
         }
     }
-    egress_tracker.record_flush(trigger, packets, bytes);
     Ok(())
 }
 
@@ -354,19 +312,6 @@ mod tokio_udp_tests {
         assert_eq!(from, client_addr);
         assert_eq!(&buf[..len], payload);
         Ok(())
-    }
-
-    #[test]
-    fn client_egress_tracker_records_only_opted_in_send_gaps() {
-        let started = Instant::now();
-        let mut enabled = ClientEgressTracker::new(true);
-        enabled.record_successful_send_at(started);
-        enabled.record_successful_send_at(started + Duration::from_millis(10));
-        assert_eq!(enabled.last_successful_send, Some(started + Duration::from_millis(10)));
-
-        let mut disabled = ClientEgressTracker::new(false);
-        disabled.record_successful_send_at(started);
-        assert_eq!(disabled.last_successful_send, None);
     }
 }
 #[derive(Parser, Debug)]
@@ -2007,8 +1952,6 @@ async fn run_client(
 
     let mut buf = [0; 65535];
     let mut out = [0; 65535];
-    let mut egress_tracker =
-        ClientEgressTracker::new(telemetry::TELEMETRY_ENABLED.load(Ordering::Relaxed));
 
     // Send initial packet
     if let Ok(len) = conn.send(&mut out) {
@@ -2017,8 +1960,6 @@ async fn run_client(
             if let Err(e) = send_connected_datagram(&socket, &out[..len]).await {
                 error!("Failed to send initial packet: {}", e);
             } else {
-                egress_tracker.record_successful_send();
-                egress_tracker.record_flush(telemetry::ClientEgressTrigger::Initial, 1, len as u64);
                 info!("Sent initial packet of size {}", len);
             }
         }
@@ -2122,15 +2063,7 @@ async fn run_client(
                 if let Err(e) = conn.conn.close(true, 0x0, b"shutdown") {
                     warn!("Client close on shutdown failed: {:?}", e);
                 }
-                if let Err(e) = flush_connected_outgoing(
-                    &socket,
-                    &mut conn,
-                    &mut out,
-                    &mut egress_tracker,
-                    telemetry::ClientEgressTrigger::Shutdown,
-                )
-                .await
-                {
+                if let Err(e) = flush_connected_outgoing(&socket, &mut conn, &mut out).await {
                     warn!("Client shutdown frame flush failed: {}", e);
                 }
                 break ExitReason::CleanShutdown;
@@ -2148,14 +2081,8 @@ async fn run_client(
                             }
                             Err(error) => error!("QUIC recv failed: {:?}", error),
                             Ok(_) => {
-                                if let Err(error) = flush_connected_outgoing(
-                                    &socket,
-                                    &mut conn,
-                                    &mut out,
-                                    &mut egress_tracker,
-                                    telemetry::ClientEgressTrigger::Receive,
-                                )
-                                .await
+                                if let Err(error) =
+                                    flush_connected_outgoing(&socket, &mut conn, &mut out).await
                                 {
                                     warn!("Failed to send response packet: {}", error);
                                 }
@@ -2172,15 +2099,7 @@ async fn run_client(
                                 drain_client_tun_uplink(&mut conn, tun, sid, rx, &mut tun_backpressure_frame);
                             }
                             // Flush any outgoing packets generated by the body chunk sends.
-                            if let Err(e) = flush_connected_outgoing(
-                                &socket,
-                                &mut conn,
-                                &mut out,
-                                &mut egress_tracker,
-                                telemetry::ClientEgressTrigger::TunReceive,
-                            )
-                            .await
-                            {
+                            if let Err(e) = flush_connected_outgoing(&socket, &mut conn, &mut out).await {
                                 warn!("Failed to flush TUN uplink packets: {}", e);
                             }
                         }
@@ -2196,9 +2115,6 @@ async fn run_client(
                 }
             }
             _ = housekeeping.tick() => {
-                if egress_tracker.enabled {
-                    telemetry::CLIENT_HOUSEKEEPING_TICKS.inc();
-                }
                 if conn.conn.is_established() && !request_sent {
                     match conn.send_http3_request(url_parsed.path()) {
                         Ok(_) => {
@@ -2263,15 +2179,7 @@ async fn run_client(
                     warn!("HTTP/3 error: {:?}", e);
                 }
 
-                if let Err(e) = flush_connected_outgoing(
-                    &socket,
-                    &mut conn,
-                    &mut out,
-                    &mut egress_tracker,
-                    telemetry::ClientEgressTrigger::Housekeeping,
-                )
-                .await
-                {
+                if let Err(e) = flush_connected_outgoing(&socket, &mut conn, &mut out).await {
                     warn!("Failed to flush outgoing packets: {}", e);
                 }
 
@@ -2287,12 +2195,6 @@ async fn run_client(
                 }
                 let now = tokio::time::Instant::now();
                 if now >= next_stats_log {
-                    if egress_tracker.enabled {
-                        let loss_ppm = (conn.loss_rate().clamp(0.0, 1.0) * 1_000_000.0) as u64;
-                        let rtt_us = (conn.rtt_ms().max(0.0) * 1_000.0) as u64;
-                        telemetry::CLIENT_LOSS_PPM_LAST.store(loss_ppm, Ordering::Relaxed);
-                        telemetry::CLIENT_RTT_US_LAST.store(rtt_us, Ordering::Relaxed);
-                    }
                     info!(
                         "client stats: RTT {:.0} ms, Loss {:.2}%",
                         conn.rtt_ms(),
@@ -2314,9 +2216,6 @@ async fn run_client(
                         "Client heartbeat timeout after {}ms; activating fail-closed firewall state",
                         heartbeat_timeout_ms
                     );
-                    if egress_tracker.enabled {
-                        telemetry::CLIENT_HEARTBEAT_TIMEOUTS.inc();
-                    }
                     break ExitReason::HeartbeatTimeout;
                 }
                 if conn.conn.is_closed() {
