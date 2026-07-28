@@ -225,16 +225,19 @@ issue_qkey() {
 start_phase() {
   local phase="$1"
   local allow_client_to_client="$2"
-  local pmtu_max="$3"
-  local probe_interval_ms="${4:-60000}"
-  local black_hole_timeout_ms="${5:-10000}"
+  local pmtu_payload_max="$3"
+  local tun_mtu_ceiling="$4"
+  local probe_interval_ms="${5:-60000}"
+  local black_hole_timeout_ms="${6:-10000}"
   stop_phase_processes
   [[ ! -e "$ADMIN_SOCKET" ]] || fail "admin socket appeared before phase start: $ADMIN_SOCKET"
   ADMIN_SOCKET_OWNED=1
 
   local phase_config="$ARTIFACT_DIR/config-$phase.toml"
-  printf '[transport]\nmtu = 1500\nmax_udp_payload = 1500\ndisable_pmtud = false\npmtu_min_mtu = 1280\npmtu_max_mtu = %s\npmtu_probe_interval_ms = %s\npmtu_black_hole_timeout_ms = %s\n' \
-    "$pmtu_max" "$probe_interval_ms" "$black_hole_timeout_ms" >"$phase_config"
+  # Transport PMTU is a QUIC UDP-payload limit. 1472 is the largest payload
+  # that fits an IPv4 Ethernet path with a 1500-byte L3 MTU (1500 - 20 - 8).
+  printf '[transport]\nmtu = %s\nmax_udp_payload = %s\ndisable_pmtud = false\npmtu_min_mtu = 1280\npmtu_max_mtu = %s\npmtu_probe_interval_ms = %s\npmtu_black_hole_timeout_ms = %s\n' \
+    "$pmtu_payload_max" "$pmtu_payload_max" "$pmtu_payload_max" "$probe_interval_ms" "$black_hole_timeout_ms" >"$phase_config"
 
   local server_args=(
     server
@@ -246,7 +249,7 @@ start_phase() {
     --metrics-port "$METRICS_PORT"
     --tun
     --tun-name "$TUN_NAME"
-    --tun-mtu "$pmtu_max"
+    --tun-mtu "$tun_mtu_ceiling"
     --tun-ip 10.0.1.1
     --tun-netmask 255.255.255.0
     --tun-ip6 fd00::1
@@ -277,7 +280,7 @@ start_phase() {
       --verify-peer \
       --tun \
       --tun-name "$TUN_NAME" \
-      --tun-mtu "$pmtu_max" \
+      --tun-mtu "$tun_mtu_ceiling" \
       --tun-ip "${CLIENT_V4[$index]}" \
       --tun-netmask 255.255.255.0 \
       --tun-ip6 "${CLIENT_V6[$index]}" \
@@ -400,14 +403,14 @@ prove_client_local_ptb() {
     fail 'client-local IPv6 PTB response was not observed'
 }
 
-prove_dplpmtud_1500() {
+prove_dplpmtud_ethernet_1500() {
   local index
   for index in 0 1 2; do
     wait_for_log_count "$ARTIFACT_DIR/client-opt-in-$((index + 1)).log" \
-      'DPLPMTUD confirmed path MTU: 1280B -> 1500B' 1 10
+      'DPLPMTUD confirmed path MTU: 1280B -> 1472B' 1 10
   done
   wait_for_log_count "$ARTIFACT_DIR/server-opt-in.log" \
-    'DPLPMTUD confirmed path MTU: 1280B -> 1500B' 3 10
+    'DPLPMTUD confirmed path MTU: 1280B -> 1472B' 3 10
 }
 
 start_capture() {
@@ -616,7 +619,7 @@ prove_pmtu_efficiency_gain() {
     'import pathlib,sys; floor=float(pathlib.Path(sys.argv[1]).read_text()); ceiling=float(pathlib.Path(sys.argv[2]).read_text()); gain=(ceiling/floor)-1.0; print(f"DPLPMTUD throughput gain: {gain * 100:.2f}% ({floor / 1_000_000:.3f} -> {ceiling / 1_000_000:.3f} Mbit/s)"); assert gain >= 0.15, gain' \
     "$ARTIFACT_DIR/throughput-default.bps" "$ARTIFACT_DIR/throughput-opt-in.bps" \
     >"$ARTIFACT_DIR/throughput-comparison.txt" || \
-    fail '1500-byte PMTU did not retain the required 15% gain over the safe 1280-byte floor'
+    fail '1472-byte QUIC UDP payload did not retain the required 15% gain over the safe 1280-byte floor'
   cat "$ARTIFACT_DIR/throughput-comparison.txt"
 }
 
@@ -653,7 +656,7 @@ prove_dplpmtud_black_hole_recovery() {
   local detection_started="$SECONDS"
 
   wait_for_log_count "$client_log" \
-    'DPLPMTUD black hole detected: path MTU 1500B -> 1280B' 1 12
+    'DPLPMTUD black hole detected: path MTU 1472B -> 1280B' 1 12
   local detection_seconds=$((SECONDS - detection_started))
   ((detection_seconds <= 12)) || fail "black-hole detection exceeded timeout envelope: ${detection_seconds}s"
 
@@ -675,7 +678,7 @@ prove_dplpmtud_black_hole_recovery() {
     "$ARTIFACT_DIR/tcp6-client-black-hole.json" \
     >"$ARTIFACT_DIR/black-hole-transfer.txt" || fail 'black-hole recovery transfer evidence invalid'
   wait_for_log_count "$client_log" \
-    'DPLPMTUD confirmed path MTU: .*B -> 1500B' 2 15
+    'DPLPMTUD confirmed path MTU: .*B -> 1472B' 2 15
   cat "$ARTIFACT_DIR/black-hole-transfer.txt"
   printf 'Black-hole detection: %ss\n' "$detection_seconds" \
     >"$ARTIFACT_DIR/black-hole-detection.txt"
@@ -718,7 +721,7 @@ main() {
   setup_topology
 
   log 'phase 1: default-deny multi-client dual-stack policy'
-  start_phase default 0 1280
+  start_phase default 0 1280 1280
   wait_for_tunnel_readiness default
   prove_framed_h3_fallback
   prove_client_local_ptb
@@ -732,9 +735,9 @@ main() {
   prove_ipv6_throughput default
 
   log 'phase 2: explicit client-unicast opt-in'
-  start_phase opt-in 1 1500 1000 2000
+  start_phase opt-in 1 1472 1500 1000 2000
   wait_for_tunnel_readiness opt-in
-  prove_dplpmtud_1500
+  prove_dplpmtud_ethernet_1500
   prove_simultaneous_dual_stack opt-in
   prove_client_unicast_opt_in
   prove_ipv6_throughput opt-in
