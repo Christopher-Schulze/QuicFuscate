@@ -604,6 +604,9 @@ if rg -F -- 'for host_veth in "${HOST_VETH[@]}"; do' "$MULTI_CLIENT_DUAL_STACK_H
   && rg -F -- 'Client receive diagnostics at heartbeat:' src/main.rs >/dev/null \
   && rg -F -- 'last_activity_marker' src/main.rs src/transport/connection.rs >/dev/null \
   && rg -F -- 'terminal_packet_threshold={}' src/transport/connection.rs >/dev/null \
+  && rg -F -- 'ack_delay_us={}' src/transport/connection.rs >/dev/null \
+  && rg -F -- 'ack_time_threshold_losses={}' src/transport/connection.rs >/dev/null \
+  && rg -F -- 'smoothed_rtt_us={}' src/transport/connection.rs >/dev/null \
   && rg -F -- 'server UDP socket dropped datagrams during IPv6 throughput trial' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'client UDP socket dropped datagrams during IPv6 throughput trial' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'selector = f"on port {port}"' "$UDP_SOCKET_EVIDENCE" >/dev/null \

@@ -145,10 +145,18 @@ pub struct AckOutcome {
 pub struct PersistentCongestionEvidence {
     /// Largest packet number acknowledged by the triggering ACK frame.
     pub largest_acked: u64,
+    /// Decoded ACK delay reported by the peer in the triggering ACK frame.
+    pub triggering_ack_delay: Duration,
+    /// Age of the largest newly acknowledged packet when the triggering ACK arrived.
+    pub largest_acked_packet_age: Option<Duration>,
     /// Number of packets newly acknowledged by the triggering ACK frame.
     pub triggering_ack_newly_acked_packets: usize,
     /// Number of packets declared lost while processing the triggering ACK frame.
     pub triggering_ack_lost_packets: usize,
+    /// Triggering-ACK losses that met the RFC 9002 packet threshold.
+    pub triggering_ack_packet_threshold_losses: usize,
+    /// Triggering-ACK losses that met the RFC 9002 time threshold.
+    pub triggering_ack_time_threshold_losses: usize,
     /// RFC 9002 persistent-congestion period used for the decision.
     pub period: Duration,
     /// RFC 9002 time-threshold loss delay used for the triggering ACK frame.
@@ -746,7 +754,19 @@ impl Recovery {
                 self.pc_window.reset();
             }
         }
-        self.finish_ack_loss_accounting(space, largest_in_frame, newly_acked, now, outcome)
+        let largest_acked_packet_age = newly_acked
+            .iter()
+            .find(|packet| packet.pn == largest_in_frame)
+            .map(|packet| now.saturating_duration_since(packet.sent_at));
+        self.finish_ack_loss_accounting(
+            space,
+            largest_in_frame,
+            ack_delay,
+            largest_acked_packet_age,
+            newly_acked,
+            now,
+            outcome,
+        )
     }
 
     /// Steps 5-7 of ACK processing: loss detection, persistent congestion, and
@@ -755,6 +775,8 @@ impl Recovery {
         &mut self,
         space: PacketSpace,
         largest_in_frame: u64,
+        ack_delay: Duration,
+        largest_acked_packet_age: Option<Duration>,
         newly_acked: Vec<SentPacket>,
         now: Instant,
         mut outcome: AckOutcome,
@@ -763,6 +785,14 @@ impl Recovery {
         let loss_delay = self.loss_delay();
         let packet_threshold = largest_in_frame.checked_sub(K_PACKET_THRESHOLD);
         let lost = self.detect_lost_packets(space, largest_in_frame, now);
+        let triggering_ack_packet_threshold_losses = lost
+            .iter()
+            .filter(|packet| packet_threshold.is_some_and(|threshold| packet.pn <= threshold))
+            .count();
+        let triggering_ack_time_threshold_losses = lost
+            .iter()
+            .filter(|packet| now.saturating_duration_since(packet.sent_at) >= loss_delay)
+            .count();
 
         // 6. Persistent congestion (RFC 9002 §7.6): chain the loss run across
         //    frames; an acknowledged packet inside the run (including a
@@ -825,8 +855,12 @@ impl Recovery {
                     outcome.persistent_congestion = true;
                     outcome.persistent_congestion_evidence = Some(PersistentCongestionEvidence {
                         largest_acked: largest_in_frame,
+                        triggering_ack_delay: ack_delay,
+                        largest_acked_packet_age,
                         triggering_ack_newly_acked_packets: newly_acked.len(),
                         triggering_ack_lost_packets: lost.len(),
+                        triggering_ack_packet_threshold_losses,
+                        triggering_ack_time_threshold_losses,
                         period,
                         loss_delay,
                         smoothed_rtt: self.rtt,
@@ -1468,11 +1502,15 @@ mod tests {
             .persistent_congestion_evidence
             .expect("persistent congestion must retain its decision evidence");
         assert_eq!(evidence.largest_acked, 20);
+        assert_eq!(evidence.triggering_ack_delay, Duration::ZERO);
+        assert_eq!(evidence.largest_acked_packet_age, Some(Duration::from_millis(10)));
         assert_eq!(evidence.run_start_pn, 0);
         assert_eq!(evidence.terminal_lost_pn, 15);
         assert_eq!(evidence.lost_packet_count, 16);
         assert_eq!(evidence.triggering_ack_newly_acked_packets, 1);
         assert!(evidence.triggering_ack_lost_packets >= evidence.lost_packet_count);
+        assert_eq!(evidence.triggering_ack_packet_threshold_losses, 18);
+        assert_eq!(evidence.triggering_ack_time_threshold_losses, 20);
         assert!(evidence.terminal_loss_by_packet_threshold);
         assert!(evidence.terminal_loss_by_time_threshold);
         assert_eq!(evidence.loss_delay, rec.loss_delay());

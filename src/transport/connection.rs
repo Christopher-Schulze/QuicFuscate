@@ -1105,22 +1105,30 @@ impl Connection {
         }
         if let Some(evidence) = outcome.persistent_congestion_evidence {
             log::info!(
-                "persistent congestion established; cwnd={} space={:?} largest_acked={} acked_packets={} ack_lost_packets={} run_start_pn={} terminal_lost_pn={} terminal_packet_threshold={} terminal_time_threshold={} lost_packets={} smoothed_rtt_ms={} rtt_variance_ms={} loss_delay_ms={} period_ms={} run_ms={}",
+                "persistent congestion established; cwnd={} space={:?} largest_acked={} ack_delay_us={} largest_acked_age_known={} largest_acked_age_us={} acked_packets={} ack_lost_packets={} ack_packet_threshold_losses={} ack_time_threshold_losses={} run_start_pn={} terminal_lost_pn={} terminal_packet_threshold={} terminal_time_threshold={} lost_packets={} smoothed_rtt_us={} rtt_variance_us={} loss_delay_us={} period_us={} run_us={}",
                 self.recovery.cwnd,
                 space,
                 evidence.largest_acked,
+                evidence.triggering_ack_delay.as_micros(),
+                evidence.largest_acked_packet_age.is_some(),
+                evidence
+                    .largest_acked_packet_age
+                    .map(|age| age.as_micros())
+                    .unwrap_or(0),
                 evidence.triggering_ack_newly_acked_packets,
                 evidence.triggering_ack_lost_packets,
+                evidence.triggering_ack_packet_threshold_losses,
+                evidence.triggering_ack_time_threshold_losses,
                 evidence.run_start_pn,
                 evidence.terminal_lost_pn,
                 evidence.terminal_loss_by_packet_threshold,
                 evidence.terminal_loss_by_time_threshold,
                 evidence.lost_packet_count,
-                evidence.smoothed_rtt.as_millis(),
-                evidence.rtt_variance.as_millis(),
-                evidence.loss_delay.as_millis(),
-                evidence.period.as_millis(),
-                evidence.run_end.saturating_duration_since(evidence.run_start).as_millis(),
+                evidence.smoothed_rtt.as_micros(),
+                evidence.rtt_variance.as_micros(),
+                evidence.loss_delay.as_micros(),
+                evidence.period.as_micros(),
+                evidence.run_end.saturating_duration_since(evidence.run_start).as_micros(),
             );
         }
     }
