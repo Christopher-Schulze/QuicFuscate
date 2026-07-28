@@ -269,6 +269,13 @@ async fn flush_connected_outgoing(
     Ok(())
 }
 
+async fn wait_for_outbound_release(deadline: Option<std::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
 #[cfg(test)]
 mod tokio_udp_tests {
     use super::*;
@@ -2058,6 +2065,10 @@ async fn run_client(
     tokio::pin!(shutdown_signal);
 
     let exit_reason = loop {
+        // Recovery continues through housekeeping. Only the pacing and stealth
+        // release deadline receives a direct wake-up so an overdue PTO cannot
+        // starve inbound processing.
+        let outbound_release = conn.next_outbound_release_deadline();
         tokio::select! {
             _ = &mut shutdown_signal => {
                 if let Err(e) = conn.conn.close(true, 0x0, b"shutdown") {
@@ -2112,6 +2123,11 @@ async fn run_client(
                         error!("Failed to read from socket: {}", e);
                         break ExitReason::SocketError(e.to_string());
                     }
+                }
+            }
+            _ = wait_for_outbound_release(outbound_release) => {
+                if let Err(error) = flush_connected_outgoing(&socket, &mut conn, &mut out).await {
+                    warn!("Failed to flush paced outgoing packets: {}", error);
                 }
             }
             _ = housekeeping.tick() => {
