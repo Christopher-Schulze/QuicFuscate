@@ -3199,6 +3199,7 @@ impl Connection {
         log::debug!("send_with_datagram_overhead congestion gate: recovery.bytes_in_flight={} recovery.cwnd={} dgram_send_max_size={} congestion_blocked={}",
             self.recovery.bytes_in_flight, self.recovery.cwnd, self.dgram_send_max_size, congestion_blocked);
         let mut congestion_bypass = congestion_blocked && self.has_pending_application_ack();
+        let mut pmtu_probe_bypassed_congestion = false;
         if congestion_blocked && !congestion_bypass {
             // RFC 9002 §7.5/§6.2.4: PTO probes MUST NOT be blocked by the
             // congestion controller (they still count as in flight). The probe
@@ -3217,6 +3218,7 @@ impl Connection {
             // only when the configured probe interval is at least one RTT.
             // This path emits only the PING+PADDING probe below.
             congestion_bypass = true;
+            pmtu_probe_bypassed_congestion = true;
         }
         if congestion_blocked && !congestion_bypass {
             log::debug!("send_with_datagram_overhead: early Done congestion_blocked congestion_bypass={} dgram_queue_len={}", congestion_bypass, self.dgram_send_queue.len());
@@ -3649,7 +3651,7 @@ impl Connection {
         let is_ack_only = !wrote_ack_eliciting;
         if !is_ack_only {
             let now = Instant::now();
-            if _pmtu_probe_sent {
+            if _pmtu_probe_sent && pmtu_probe_bypassed_congestion {
                 self.recovery.on_pmtu_probe_sent_in_space(
                     recovery::PacketSpace::Application,
                     pn,
