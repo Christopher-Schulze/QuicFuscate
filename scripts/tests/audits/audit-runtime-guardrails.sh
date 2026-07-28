@@ -557,6 +557,7 @@ fi
 
 MULTI_CLIENT_DUAL_STACK_HARNESS="scripts/tests/tun-e2e-multi-client-dual-stack-netns.sh"
 TCP_THROUGHPUT_PROBE="scripts/tests/utils/tcp-throughput-probe.py"
+EGRESS_SUMMARIZER="scripts/tests/utils/summarize-external-egress.py"
 if rg -F -- 'for host_veth in "${HOST_VETH[@]}"; do' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'ip link del "$host_veth" 2>/dev/null' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'THROUGHPUT_PROBE="$SCRIPT_DIR/utils/tcp-throughput-probe.py"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
@@ -567,12 +568,17 @@ if rg -F -- 'for host_veth in "${HOST_VETH[@]}"; do' "$MULTI_CLIENT_DUAL_STACK_H
   && ! rg -F -- 'iperf3' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'sender/receiver byte mismatch' "$TCP_THROUGHPUT_PROBE" >/dev/null \
   && rg -F -- 'sender/receiver SHA-256 mismatch' "$TCP_THROUGHPUT_PROBE" >/dev/null \
-  && rg -F -- 'receiver_bits_per_second' "$TCP_THROUGHPUT_PROBE" >/dev/null; then
-  pass "Multi-client dual-stack proof uses a receiver-verified TCP probe and removes every owned host veth"
-  append_item "multi_client_dual_stack_tcp_throughput" "ok" "receiver bytes, SHA-256, and receiver timing are fail-closed; partial-run host-veth cleanup is explicit"
+  && rg -F -- 'receiver_bits_per_second' "$TCP_THROUGHPUT_PROBE" >/dev/null \
+  && rg -F -- 'started_at_unix_ns' "$TCP_THROUGHPUT_PROBE" >/dev/null \
+  && rg -F -- 'finished_at_unix_ns' "$TCP_THROUGHPUT_PROBE" >/dev/null \
+  && rg -F -- 'EGRESS_SUMMARIZER="$SCRIPT_DIR/utils/summarize-external-egress.py"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- '--trial "$ARTIFACT_DIR/tcp6-client-$phase-1.json"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'retained fewer than two externally captured packets' "$EGRESS_SUMMARIZER" >/dev/null; then
+  pass "Multi-client dual-stack proof keeps receiver-verified per-trial external egress evidence and owned host-veth cleanup"
+  append_item "multi_client_dual_stack_tcp_throughput" "ok" "receiver bytes, SHA-256, wall-clock intervals, per-trial external timing, and partial-run host-veth cleanup are fail-closed"
 else
-  fail_critical "Multi-client dual-stack proof lost receiver-verified TCP throughput or host-veth cleanup"
-  append_item "multi_client_dual_stack_tcp_throughput" "fail" "missing receiver byte/hash/timing gate, direct probe use, no-iperf contract, or host-veth cleanup"
+  fail_critical "Multi-client dual-stack proof lost receiver-verified per-trial egress evidence or host-veth cleanup"
+  append_item "multi_client_dual_stack_tcp_throughput" "fail" "missing receiver byte/hash/wall-clock gate, external per-trial capture, direct probe use, no-iperf contract, or host-veth cleanup"
 fi
 
 if [[ "$(rg -F -- '--tun-mtu "$tun_mtu_ceiling"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" | wc -l | tr -d ' ')" -eq 2 ]] \

@@ -19,6 +19,7 @@ LOCK_FILE="${QF_E2E_LOCK_FILE:-/tmp/quicfuscate-tun-e2e.lock}"
 LOCK_TIMEOUT="${QF_E2E_LOCK_TIMEOUT:-300}"
 ARTIFACT_DIR="${QF_E2E_ARTIFACT_DIR:-/tmp/quicfuscate-todo523-$$}"
 THROUGHPUT_PROBE="$SCRIPT_DIR/utils/tcp-throughput-probe.py"
+EGRESS_SUMMARIZER="$SCRIPT_DIR/utils/summarize-external-egress.py"
 THROUGHPUT_TRIAL_SECONDS="${QF_E2E_THROUGHPUT_TRIAL_SECONDS:-10}"
 THROUGHPUT_RATE_BPS="${QF_E2E_THROUGHPUT_RATE_BPS:-15000000}"
 EXTERNAL_EGRESS_CAPTURE="${QF_E2E_EXTERNAL_EGRESS_CAPTURE:-0}"
@@ -449,20 +450,12 @@ summarize_client_egress_capture() {
   local phase="$1"
   [[ "$EXTERNAL_EGRESS_CAPTURE" == "1" ]] || return 0
 
-  python3 -c \
-    'import pathlib,re,sys; source=pathlib.Path(sys.argv[1]); target=pathlib.Path(sys.argv[2]); timestamps=[]; pattern=re.compile(r"^(\d+(?:\.\d+)?) IP ");
-for line in source.read_text(encoding="utf-8", errors="replace").splitlines():
-    match=pattern.match(line)
-    if match: timestamps.append(float(match.group(1)))
-gaps=[round((right-left)*1_000_000) for left,right in zip(timestamps,timestamps[1:])];
-assert len(timestamps) >= 2, (source, len(timestamps));
-summary=(f"External client-1 UDP egress packets: {len(timestamps)}\n"
-         f"External client-1 UDP egress max gap us: {max(gaps)}\n"
-         f"External client-1 UDP egress gaps ge 10ms: {sum(gap >= 10_000 for gap in gaps)}\n"
-         f"External client-1 UDP egress gaps ge 50ms: {sum(gap >= 50_000 for gap in gaps)}\n"
-         f"External client-1 UDP egress gaps ge 100ms: {sum(gap >= 100_000 for gap in gaps)}\n");
-target.write_text(summary, encoding="utf-8"); print(summary, end="")' \
-    "$ARTIFACT_DIR/egress-$phase.log" "$ARTIFACT_DIR/egress-$phase-summary.txt" \
+  python3 "$EGRESS_SUMMARIZER" \
+    --capture "$ARTIFACT_DIR/egress-$phase.log" \
+    --trial "$ARTIFACT_DIR/tcp6-client-$phase-1.json" \
+    --trial "$ARTIFACT_DIR/tcp6-client-$phase-2.json" \
+    --trial "$ARTIFACT_DIR/tcp6-client-$phase-3.json" \
+    --output "$ARTIFACT_DIR/egress-$phase-summary.txt" \
     || fail "external client egress capture did not retain enough packets in phase $phase"
 }
 
@@ -784,6 +777,7 @@ main() {
   fi
   [[ -x "$BINARY" ]] || fail "release binary not executable: $BINARY"
   [[ -r "$THROUGHPUT_PROBE" ]] || fail "TCP throughput probe is unreadable: $THROUGHPUT_PROBE"
+  [[ -r "$EGRESS_SUMMARIZER" ]] || fail "external egress summarizer is unreadable: $EGRESS_SUMMARIZER"
   if [[ ! "$THROUGHPUT_TRIAL_SECONDS" =~ ^[0-9]+$ ]] \
     || ((THROUGHPUT_TRIAL_SECONDS < 5)); then
     fail 'QF_E2E_THROUGHPUT_TRIAL_SECONDS must be an integer of at least 5'

@@ -112,6 +112,7 @@ def run_server(arguments: argparse.Namespace) -> None:
         connection.sendall(b'{"ready":true}\n')
         received_bytes = 0
         received_hash = hashlib.sha256()
+        started_at_unix_ns = time.time_ns()
         started_at = time.monotonic()
         while True:
             chunk = connection.recv(len(PAYLOAD))
@@ -120,12 +121,15 @@ def run_server(arguments: argparse.Namespace) -> None:
             received_hash.update(chunk)
             received_bytes += len(chunk)
         elapsed_seconds = time.monotonic() - started_at
+        finished_at_unix_ns = time.time_ns()
         if received_bytes == 0 or elapsed_seconds <= 0:
             fail("receiver observed no positive transfer")
         result = {
             "bytes": received_bytes,
             "elapsed_seconds": elapsed_seconds,
+            "finished_at_unix_ns": finished_at_unix_ns,
             "sha256": received_hash.hexdigest(),
+            "started_at_unix_ns": started_at_unix_ns,
         }
         write_json_new(arguments.result, result)
         connection.sendall((json.dumps(result, sort_keys=True) + "\n").encode("utf-8"))
@@ -165,6 +169,7 @@ def run_client(arguments: argparse.Namespace) -> None:
             fail("receiver did not acknowledge probe readiness")
         sent_hash = hashlib.sha256()
         sent_bytes = 0
+        started_at_unix_ns = time.time_ns()
         started_at = time.monotonic()
         deadline = started_at + arguments.duration
         while time.monotonic() < deadline:
@@ -175,6 +180,7 @@ def run_client(arguments: argparse.Namespace) -> None:
             if remaining_seconds > 0:
                 time.sleep(min(len(PAYLOAD) * 8.0 / arguments.rate_bps, remaining_seconds))
         elapsed_seconds = time.monotonic() - started_at
+        finished_at_unix_ns = time.time_ns()
         connection.shutdown(socket.SHUT_WR)
         receiver = parse_message(read_line(connection))
         receiver_bytes = receiver.get("bytes")
@@ -190,9 +196,11 @@ def run_client(arguments: argparse.Namespace) -> None:
             "bytes_sent": sent_bytes,
             "configured_rate_bps": arguments.rate_bps,
             "elapsed_seconds": elapsed_seconds,
+            "finished_at_unix_ns": finished_at_unix_ns,
             "receiver": receiver,
             "receiver_bits_per_second": sent_bytes * 8.0 / receiver_elapsed,
             "sha256": sent_hash.hexdigest(),
+            "started_at_unix_ns": started_at_unix_ns,
         }
         if result["receiver_bits_per_second"] <= 0:
             fail("receiver throughput is invalid")
