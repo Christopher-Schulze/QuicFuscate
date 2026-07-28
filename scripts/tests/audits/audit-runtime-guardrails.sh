@@ -355,7 +355,7 @@ if [[ -n "$TLS_COVER_REINSTALL_REGRESSIONS" ]]; then
 elif rg -n --no-messages 'pub fn install_tls_cover_cipher\(' src/transport/packet.rs >/dev/null \
   && rg -n --no-messages 'retired_tls_cover_identities' src/transport/packet.rs >/dev/null \
   && rg -n --no-messages 'checked_add\(1\).*AeadLimitReached' src/transport/packet.rs >/dev/null \
-  && rg -n --no-messages 'crate::rng::fill_secure\(&mut entropy\)' src/stealth/mod.rs >/dev/null; then
+  && rg -n --no-messages 'crate::rng::fill_secure\(&mut entropy\)' src/stealth >/dev/null; then
   pass "TLS Cover uses one fresh-entropy, no-reuse cipher installation contract"
   append_item "tls_cover_reinstallation_safety" "ok" "typed install, retired-key rejection, checked counters, and per-provider entropy are present"
 else

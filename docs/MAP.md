@@ -35,9 +35,9 @@ It is maintained as the current architecture and repository index, with a curate
 ### StealthMode Enum (src/engine/config.rs)
 6-variant: `Off | Performance | Stealth | AntiDpi | Manual | Auto` (default).
 `Auto` serde alias: `intelligent`. `AntiDpi` serde: `anti-dpi`, alias `antidpi`/`max` (QKey compat only).
-All call sites map `Auto` -> `StealthMode::Intelligent` in `stealth/mod.rs`.
+All call sites map `Auto` -> `StealthMode::Intelligent` in `stealth/` (config/manager parts).
 
-### StealthManager Runtime Overrides (src/stealth/mod.rs)
+### StealthManager Runtime Overrides (src/stealth/)
 Three `AtomicU8` rate fields are retained: `runtime_padding_rate`, `runtime_timing_rate`, `runtime_rotation_rate`.
 `escalate_to_level(n)` sets padding/timing only (L0=0%, L1=50% configurable padding and 0% timing, L2=100% padding/timing).
 Padding and timing rates flow through `StealthRuntimePolicy` → `StealthRuntimeDelta` → connection config.
@@ -126,7 +126,7 @@ Padding and timing rates flow through `StealthRuntimePolicy` → `StealthRuntime
 - `scripts/tests/tun-e2e-fec-burst-netns.sh`: 1,000 packets in each correlated-burst scenario, `2 passed, 0 failed`; both 10%/25%-correlation and 20%/50%-correlation cases finish with 2% residual tunnel loss.
 - Retained client/server logs prove TLS, H3/MASQUE, and NEON FEC without AEAD, decrypt, or panic errors. Local deterministic tests separately prove 1,000/1,000 unique byte-exact interleaved recovery with zero duplicates and bounded latency.
 
-### EscalationState (src/stealth/mod.rs) - TODO-416
+### EscalationState (src/stealth/parts/escalation.rs) - TODO-416
 Probe-count-based escalation state machine on `StealthManager`.
 - `record_probe()`: records timestamp, checks thresholds (≥3 in 60s → L1, ≥8 in 120s → L2).
 - `check_de_escalation()`: drops one level after configurable quiet period (default 300s).
@@ -136,12 +136,12 @@ Probe-count-based escalation state machine on `StealthManager`.
   `QUICFUSCATE_STEALTH_DEESCALATION_QUIET_PERIOD_SEC` (300), `QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1` (50).
 - `on_probe_detected` only escalates when `config.dynamic_enabled` is true (Intelligent mode).
 
-### IntelligentStealthInputs.level_hint (src/stealth/mod.rs)
+### IntelligentStealthInputs.level_hint (src/stealth/parts/manager.rs)
 Brain reads `INTELLIGENT_STEALTH_LEVEL_HINT` (a `HintChannel<AtomicU32>` with an explicit writer/reader contract at the declaration site, TODO-517) after hysteresis and passes as `level_hint: u8` (0/1/2) to `derive_intelligent_runtime_policy`.
 Level 0 (clean path): padding disabled (near-zero Intelligent-mode overhead). Level 1/2: padding active.
 Jitter under pressure (CE>5% or rtt_spike>4): 85% of budget (was wrongly 20% - direction fixed).
 
-### Preset Values (src/stealth/mod.rs)
+### Preset Values (src/stealth/parts/config.rs)
 - `performance()`: QPACK on (real Chrome always sends QPACK), domain fronting off
 - `stealth()`: Server Push Cover enabled (intensity 0.25, 60s interval)
 - `anti_dpi()`: fingerprint_rotation_interval retained for next-session policy, not active-session mutation
@@ -161,7 +161,7 @@ Jitter under pressure (CE>5% or rtt_spike>4): 85% of budget (was wrongly 20% - d
 - `optimize/udp.rs` (5): GSO config, send_batch single/multi/IPv6
 
 ### Stealth Components - Test Coverage (Session 23, 2026-03-24)
-All 15 stealth technologies in `src/stealth/mod.rs` have unit test coverage in `src/stealth/tests.rs`:
+All 15 stealth technologies in `src/stealth/` have unit test coverage in `src/stealth/tests.rs`:
 - RateChoker: token-bucket shape(), full-bucket=ZERO, deficit=positive-wait
 - DomainFrontingManager: get_fronted_domain() membership + ultra_stealth() smoke
 - Http3Masquerade: generate_headers() pseudo-headers, browser-profile UA divergence
@@ -900,8 +900,26 @@ This snapshot intentionally excludes gitignored paths and local generated direct
     |   `-- tests_dispatched.rs
     |-- stealth
     |   |-- mod.rs
+    |   |-- fingerprint.rs
+    |   |-- tls_cover.rs
     |   |-- tests.rs
-    |   `-- tls_cover.rs
+    |   |-- test_support.rs
+    |   `-- parts/
+    |       |-- browser_profiles.rs
+    |       |-- chaff.rs
+    |       |-- config.rs
+    |       |-- cover_traffic.rs
+    |       |-- doh.rs
+    |       |-- domain_fronting.rs
+    |       |-- escalation.rs
+    |       |-- flow_shaping.rs
+    |       |-- http3_masquerade.rs
+    |       |-- manager.rs
+    |       |-- masque_manager.rs
+    |       |-- probe_detector.rs
+    |       |-- stealth_coverage_tests.rs
+    |       |-- tls_client_hello.rs
+    |       `-- tls_cover_provider.rs
     |-- time_source.rs
     |-- transport
     |   |-- anti_replay.rs
