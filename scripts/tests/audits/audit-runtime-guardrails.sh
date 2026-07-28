@@ -596,6 +596,9 @@ if rg -F -- 'for host_veth in "${HOST_VETH[@]}"; do' "$MULTI_CLIENT_DUAL_STACK_H
   && rg -F -- 'capture_client_receive_diagnostics "$phase" "$trial"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'capture_client_persistent_congestion "$phase" "$trial"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'capture_client_persistent_congestion "black-hole" 1 "$client_log"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'start_client_egress_capture black-hole' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'record_throughput_trial_window "black-hole" 1' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'summarize_throughput_boundaries black-hole' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'Client receive diagnostics at heartbeat:' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- '[[ ! -e "$output" ]] || fail "refusing to replace client receive diagnostics: $output"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'persistent congestion established;' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
@@ -615,11 +618,11 @@ if rg -F -- 'for host_veth in "${HOST_VETH[@]}"; do' "$MULTI_CLIENT_DUAL_STACK_H
   && rg -F -- '--remote-port' "$UDP_SOCKET_EVIDENCE" >/dev/null \
   && rg -F -- 'remote_port' "$UDP_SOCKET_EVIDENCE" >/dev/null \
   && rg -F -- 'UDP socket dropped {drop_delta} datagrams during the trial' "$UDP_SOCKET_EVIDENCE" >/dev/null; then
-  pass "Multi-client dual-stack proof keeps receiver-verified forward and reverse boundary evidence plus client/server UDP socket-drop evidence"
-  append_item "multi_client_dual_stack_tcp_throughput" "ok" "receiver bytes, SHA-256, persisted failure windows, four host-veth boundaries, client/server socket-drop deltas, and partial-run host-veth cleanup are fail-closed"
+  pass "Multi-client dual-stack proof keeps receiver-verified forward and reverse boundary evidence, including black-hole recovery, plus client/server UDP socket-drop evidence"
+  append_item "multi_client_dual_stack_tcp_throughput" "ok" "receiver bytes, SHA-256, persisted failure windows including black-hole recovery, four host-veth boundaries, client/server socket-drop deltas, and partial-run host-veth cleanup are fail-closed"
 else
-  fail_critical "Multi-client dual-stack proof lost receiver-verified forward/reverse boundary or client/server socket-drop evidence"
-  append_item "multi_client_dual_stack_tcp_throughput" "fail" "missing receiver byte/hash/window gate, external forward/reverse capture, client/server UDP socket-drop proof, direct probe use, no-iperf contract, or host-veth cleanup"
+  fail_critical "Multi-client dual-stack proof lost receiver-verified forward/reverse boundary, black-hole, or client/server UDP socket-drop evidence"
+  append_item "multi_client_dual_stack_tcp_throughput" "fail" "missing receiver byte/hash/window gate, external forward/reverse capture including black-hole recovery, client/server UDP socket-drop proof, direct probe use, no-iperf contract, or host-veth cleanup"
 fi
 
 DUAL_STACK_STABILITY_HARNESS="scripts/tests/tun-e2e-multi-client-dual-stack-stability.sh"

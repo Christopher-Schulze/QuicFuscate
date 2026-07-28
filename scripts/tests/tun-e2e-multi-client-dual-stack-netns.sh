@@ -860,13 +860,16 @@ remove_client_large_datagram_black_hole() {
 
 prove_dplpmtud_black_hole_recovery() {
   local client_log="$ARTIFACT_DIR/client-opt-in-1.log"
+  local client_started_at_unix_ns client_finished_at_unix_ns client_exit_status
   install_client_large_datagram_black_hole
+  start_client_egress_capture black-hole
 
   ip netns exec "$SERVER_NS" timeout 45 python3 "$THROUGHPUT_PROBE" server \
     --bind fd00::1 --port 5524 --timeout 35 \
     --result "$ARTIFACT_DIR/tcp6-server-black-hole.json" \
     >"$ARTIFACT_DIR/tcp6-server-black-hole.log" 2>&1 &
   local server_pid="$!"
+  client_started_at_unix_ns="$(date +%s%N)"
   ip netns exec "${CLIENT_NS[0]}" timeout 30 python3 "$THROUGHPUT_PROBE" client \
     --source fd00::2 --destination fd00::1 --port 5524 --duration 20 \
     --rate-bps "$THROUGHPUT_RATE_BPS" --timeout 25 \
@@ -886,13 +889,30 @@ prove_dplpmtud_black_hole_recovery() {
   ip netns exec "${CLIENT_NS[0]}" tc qdisc show dev eth0 \
     >"$ARTIFACT_DIR/black-hole-rule-removed.txt"
 
-  if ! wait "$client_pid"; then
+  if wait "$client_pid"; then
+    client_exit_status=0
+  else
+    client_exit_status=$?
+  fi
+  client_finished_at_unix_ns="$(date +%s%N)"
+  record_throughput_trial_window "black-hole" 1 "$client_started_at_unix_ns" \
+    "$client_finished_at_unix_ns" "$client_exit_status"
+
+  if ((client_exit_status != 0)); then
     kill -TERM "$server_pid" 2>/dev/null || true
     wait "$server_pid" 2>/dev/null || true
+    stop_client_egress_capture
+    summarize_throughput_boundaries black-hole
     capture_client_persistent_congestion "black-hole" 1 "$client_log"
     fail 'IPv6 transfer did not recover across the black-hole interval'
   fi
-  wait "$server_pid" || fail 'IPv6 black-hole recovery receiver failed'
+  if ! wait "$server_pid"; then
+    stop_client_egress_capture
+    summarize_throughput_boundaries black-hole
+    fail 'IPv6 black-hole recovery receiver failed'
+  fi
+  stop_client_egress_capture
+  summarize_throughput_boundaries black-hole
   python3 -c \
     'import json,sys; data=json.load(open(sys.argv[1], encoding="utf-8")); received=data["receiver"]; valid=data["bytes_sent"] == received["bytes"] and data["sha256"] == received["sha256"] and received["bytes"] > 65536 and received["elapsed_seconds"] >= 18; assert valid, data; print("Black-hole recovery transfer: {} bytes in {:.3f}s".format(received["bytes"], received["elapsed_seconds"]))' \
     "$ARTIFACT_DIR/tcp6-client-black-hole.json" \
