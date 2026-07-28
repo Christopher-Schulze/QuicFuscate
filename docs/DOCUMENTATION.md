@@ -36,7 +36,7 @@ The retained complexity in this repository is intentional and should be read thr
 |---|---|---|
 | `canonical runtime/product path` | user-visible retained runtime behavior and stable product contract | `src/core.rs`, `src/transport/connection.rs`, `src/crypto/` product contract, `src/fec/` public `auto` / `off` contract |
 | `adaptive policy/control` | runtime policy loops that tune retained capability without changing the product contract | `src/brain.rs`, `src/stealth/`, `src/fec/` target/family auto-controller |
-| `platform acceleration` | hardware detection, SIMD dispatch, Linux fast paths, and owner-local hot-path helpers | `src/optimize/`, `src/simd.rs`, `src/optimize/udp.rs`, `src/optimize/uring_batch.rs` |
+| `platform acceleration` | hardware detection, SIMD dispatch, Linux fast paths, and owner-local hot-path helpers | `src/optimize/`, `src/simd/`, `src/optimize/udp.rs`, `src/optimize/uring_batch.rs` |
 | `compat/test/experimental` | retained compatibility machinery, parity hooks, and explicitly gated internal surfaces | MASQUE compatibility, `internal_af_xdp_experimental`, `rust-tests`, `benches` |
 
 ### Layer Ownership Rules
@@ -96,10 +96,10 @@ If a claim is not backed by one of the proof surfaces below, treat it as untrust
 
 | Boundary | Canonical owner | Constraint | Strongest proof surfaces |
 |---|---|---|---|
-| Data-plane AEAD posture | `src/crypto/`, `src/simd.rs` | Product contract is `Aegis128L` or `Morus1280_128`; internal width variants remain backend machine room only | `scripts/tests/rust/rt-security-suite.rs`, `scripts/tests/rust/rt-property-suite.rs`, `scripts/tests/fuzz/fuzz_targets/crypto_operations.rs` |
+| Data-plane AEAD posture | `src/crypto/`, `src/simd/` | Product contract is `Aegis128L` or `Morus1280_128`; internal width variants remain backend machine room only | `scripts/tests/rust/rt-security-suite.rs`, `scripts/tests/rust/rt-property-suite.rs`, `scripts/tests/fuzz/fuzz_targets/crypto_operations.rs` |
 | TLS-visible handshake boundary | `src/qftls.rs` | rustls owns real TLS protocol semantics; TLS Cover is overlay/cover only | `docs/todo/done/todo-85-tls-cover-and-rustls-boundary-clarification.md`, `scripts/tests/audits/audit-runtime-guardrails.sh` |
 | Packet protection ownership | `src/transport/packet.rs`, `src/transport/connection.rs` | Packet protection and data-plane AEAD are fork-specific transport decisions, not TLS cipher-suite claims | `docs/todo/done/todo-76-forked-aead-protocol-posture-clarification.md`, targeted transport rust-tests, `audit-runtime-guardrails.sh` |
-| Unsafe SIMD / crypto machine room | `src/crypto/`, `src/simd.rs`, `src/optimize/` | Unsafe and SIMD stay internal or parity-scoped; product/runtime claims stay at owner boundaries only | `cargo clippy --all-targets --all-features -- -W clippy::all`, `scripts/tests/audits/audit-all-comprehensive.sh`, `scripts/tests/audits/audit-runtime-guardrails.sh` |
+| Unsafe SIMD / crypto machine room | `src/crypto/`, `src/simd/`, `src/optimize/` | Unsafe and SIMD stay internal or parity-scoped; product/runtime claims stay at owner boundaries only | `cargo clippy --all-targets --all-features -- -W clippy::all`, `scripts/tests/audits/audit-all-comprehensive.sh`, `scripts/tests/audits/audit-runtime-guardrails.sh` |
 | Stealth/TLS-cover boundary | `src/stealth/`, `src/qftls.rs` | Stealth owns persona and cover policy; rustls still owns real TLS protocol semantics | `docs/todo/done/todo-81-stealth-capability-preservation-and-simplification.md`, `docs/todo/done/todo-85-tls-cover-and-rustls-boundary-clarification.md` |
 
 ## Transport Overlap and Divergence vs quinn-udp
@@ -1586,7 +1586,7 @@ cargo test
    - `cargo clippy -- -D warnings`
 
 #### Integration Guidelines and Optimization Strategy
-- Data-plane AEAD follows `CryptoAeadPlan` from `simd.rs` and is resolved once in `src/crypto/` into concrete packet dispatch wrappers.
+- Data-plane AEAD follows `CryptoAeadPlan` from `src/simd/` and is resolved once in `src/crypto/` into concrete packet dispatch wrappers.
 - On tag failure: constant-time verify -> error; no plaintext is emitted.
 - Keep cipher concerns isolated; avoid mixing AEGIS logic into transport code.
 - Keep performance- and safety-critical crypto changes covered by `scripts/tests/suites/test-crypto.sh`.
@@ -1620,7 +1620,7 @@ let text = telemetry::export_telemetry_text();
   - FeatureDetector (CPU features -> `CpuProfile`)
   - Central SIMD dispatch helpers (`SimdDispatch`), MemoryPool, telemetry
   - ARM: `xor_repeating_key_32` provides a dedicated SVE2 kernel with key rotation; NEON serves as fallback
-- `src/simd.rs`
+- `src/simd/`
   - Acceleration planner (`planner::AccelerationPlanner`) with per-domain plans
   - CryptoAeadPlan (LAesni/LNeon/Morus by default; wider plans exist but are not selected by default)
   - QPACK Huffman encoding/decoding: runtime dispatch includes AVX2 (x86), NEON (ARM) and an SVE2 wrapper (encode/decode) with scalar fallback

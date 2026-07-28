@@ -875,11 +875,29 @@ This snapshot intentionally excludes gitignored paths and local generated direct
     |-- reality.rs
     |-- rng.rs
     |-- simd
+    |   |-- mod.rs
+    |   |-- amx.rs
+    |   |-- arm.rs
     |   |-- arm_stream.rs
     |   |-- arm_varint.rs
+    |   |-- bitstream.rs
+    |   |-- core.rs
+    |   |-- crypto.rs
+    |   |-- fec.rs
+    |   |-- galois.rs
+    |   |-- h3.rs
+    |   |-- planner.rs
+    |   |-- qpack.rs
+    |   |-- scalar.rs
+    |   |-- string.rs
+    |   |-- transport.rs
+    |   |-- x86.rs
     |   |-- x86_ack.rs
-    |   `-- x86_header.rs
-    |-- simd.rs
+    |   |-- x86_extended.rs
+    |   |-- x86_header.rs
+    |   |-- tests.rs
+    |   |-- tests_arm.rs
+    |   `-- tests_dispatched.rs
     |-- stealth
     |   |-- mod.rs
     |   |-- tests.rs

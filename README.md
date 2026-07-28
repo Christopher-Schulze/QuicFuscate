@@ -99,7 +99,7 @@ QuicFuscate organizes its runtime into four explicit layers. This layering defin
 - hardware detection, SIMD dispatch, Linux fast paths, and owner-local hot-path helpers
 - examples:
   - `src/optimize/`
-  - `src/simd.rs`
+  - `src/simd/`
   - `src/optimize/udp.rs`
   - `src/optimize/uring_batch.rs`
 

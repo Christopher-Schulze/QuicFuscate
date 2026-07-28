@@ -212,7 +212,7 @@ else
   append_item "aead_override_surface_narrowing" "fail" "$AEAD_OVERRIDE_SURFACE_REFS"
 fi
 
-UNSAFE_VISIBILITY_REFS=$(rg -n --no-messages '^pub unsafe fn (prefetch|encode_varint_neon|encode_varint_sve2|decode_varint_neon|decode_varint_sve2|canonical_ack_blocks_avx2|canonical_ack_blocks_avx512)\b|^pub enum PrefetchHint\b|^pub unsafe fn (xor_blocks_sve2|xor_blocks_neon|memcpy_sve2|memcpy_neon|crc32_arm|popcnt_neon|popcnt_sve2|validate_header_sve2|validate_header_neon|gf_mul_sve2|gf_mul_neon_pmull|gf_mul_neon|aes_encrypt_neon|ghash_pmull|sha256_hw|pack_bits_sve2|pack_bits_neon|unpack_bits_sve2|unpack_bits_neon|reed_solomon_encode_neon|histogram_sve2|histogram_neon|qpack_encode_neon|qpack_decode_neon|qpack_encode_sve2|qpack_decode_sve2|find_pattern_sve2|find_pattern_neon|dot_product_neon_dp|dot_product_neon|matmul_apple_amx)\b' src/optimize/mod.rs src/simd.rs src/simd/arm_varint.rs src/simd/x86_ack.rs || true)
+UNSAFE_VISIBILITY_REFS=$(rg -n --no-messages '^pub unsafe fn (prefetch|encode_varint_neon|encode_varint_sve2|decode_varint_neon|decode_varint_sve2|canonical_ack_blocks_avx2|canonical_ack_blocks_avx512)\b|^pub enum PrefetchHint\b|^pub unsafe fn (xor_blocks_sve2|xor_blocks_neon|memcpy_sve2|memcpy_neon|crc32_arm|popcnt_neon|popcnt_sve2|validate_header_sve2|validate_header_neon|gf_mul_sve2|gf_mul_neon_pmull|gf_mul_neon|aes_encrypt_neon|ghash_pmull|sha256_hw|pack_bits_sve2|pack_bits_neon|unpack_bits_sve2|unpack_bits_neon|reed_solomon_encode_neon|histogram_sve2|histogram_neon|qpack_encode_neon|qpack_decode_neon|qpack_encode_sve2|qpack_decode_sve2|find_pattern_sve2|find_pattern_neon|dot_product_neon_dp|dot_product_neon|matmul_apple_amx)\b' src/optimize/mod.rs src/simd src/simd/arm_varint.rs src/simd/x86_ack.rs || true)
 if [[ -z "$UNSAFE_VISIBILITY_REFS" ]]; then
   pass "Unsafe SIMD/prefetch helpers remain internalized behind runtime-owned facades"
   append_item "unsafe_surface_internalization" "ok" "no broad public visibility on narrowed unsafe helper set"
@@ -221,7 +221,7 @@ else
   append_item "unsafe_surface_internalization" "fail" "$UNSAFE_VISIBILITY_REFS"
 fi
 
-SIMD_X86_UNSAFE_VISIBILITY_REFS=$(rg -n --no-messages '^pub unsafe fn (find_pattern_vbmi2|dot_product_avx512|dot_product_fma|varint_decode_sse2_prefast|sha256_avx2|sha256_vnni|xor_blocks_avx512|xor_blocks_avx2|memcpy_avx512|memcpy_avx2|memcpy_sse42|crc32_sse42|popcnt_hw|gf_mul_avx512_gfni|gf_mul_avx2|find_pattern_sse42_short|aes_encrypt_vaes|aes_encrypt_aesni|ghash_vpclmulqdq|ghash_pclmulqdq|sha256_hw|histogram_avx512|qpack_encode_avx2|histogram_avx2|decode_varint_bmi2|decode_varint_avx2|find_pattern_avx2|amx_init|amx_release|amx_matmul_i8|matmul_gf256_amx|berlekamp_massey_gfni|berlekamp_massey_avx2|matmul_gf256_gfni|matmul_gf256_avx2|encode_varint_sse2|encode_varint_avx2|encode_varint_avx512|varint_encode_bmi2|varint_decode_bmi2|xor_multi_key_avx512|xor_multi_key_avx2|validate_header_avx2|validate_header_sse2|pack_bits_bmi2|unpack_bits_bmi2|string_compare_avx2|string_compare_sse42|popcnt_avx512|batch_crc32_pclmul|reed_solomon_encode_gfni|reed_solomon_encode_avx2|reed_solomon_decode_gfni|reed_solomon_decode_avx2|qpack_encode_ssse3|qpack_decode_avx2|qpack_decode_ssse3)\b' src/simd.rs src/simd/x86_header.rs || true)
+SIMD_X86_UNSAFE_VISIBILITY_REFS=$(rg -n --no-messages '^pub unsafe fn (find_pattern_vbmi2|dot_product_avx512|dot_product_fma|varint_decode_sse2_prefast|sha256_avx2|sha256_vnni|xor_blocks_avx512|xor_blocks_avx2|memcpy_avx512|memcpy_avx2|memcpy_sse42|crc32_sse42|popcnt_hw|gf_mul_avx512_gfni|gf_mul_avx2|find_pattern_sse42_short|aes_encrypt_vaes|aes_encrypt_aesni|ghash_vpclmulqdq|ghash_pclmulqdq|sha256_hw|histogram_avx512|qpack_encode_avx2|histogram_avx2|decode_varint_bmi2|decode_varint_avx2|find_pattern_avx2|amx_init|amx_release|amx_matmul_i8|matmul_gf256_amx|berlekamp_massey_gfni|berlekamp_massey_avx2|matmul_gf256_gfni|matmul_gf256_avx2|encode_varint_sse2|encode_varint_avx2|encode_varint_avx512|varint_encode_bmi2|varint_decode_bmi2|xor_multi_key_avx512|xor_multi_key_avx2|validate_header_avx2|validate_header_sse2|pack_bits_bmi2|unpack_bits_bmi2|string_compare_avx2|string_compare_sse42|popcnt_avx512|batch_crc32_pclmul|reed_solomon_encode_gfni|reed_solomon_encode_avx2|reed_solomon_decode_gfni|reed_solomon_decode_avx2|qpack_encode_ssse3|qpack_decode_avx2|qpack_decode_ssse3)\b' src/simd src/simd/x86_header.rs || true)
 if [[ -z "$SIMD_X86_UNSAFE_VISIBILITY_REFS" ]]; then
   pass "x86 SIMD backend helpers remain internal to simd selectors and tests"
   append_item "simd_x86_backend_internalization" "ok" "x86 SIMD backend helpers no longer expose broad public unsafe entrypoints"
@@ -293,7 +293,7 @@ else
 fi
 
 # 5) Guardrail warning: broad dead_code suppression in production/runtime-critical modules.
-DEADCODE_SUPPRESSIONS="$(rg -n --no-messages '^#!\[allow\(dead_code\)\]' src/optimize src/transport src/fec src/simd.rs || true)"
+DEADCODE_SUPPRESSIONS="$(rg -n --no-messages '^#!\[allow\(dead_code\)\]' src/optimize src/transport src/fec src/simd || true)"
 if [[ -n "$DEADCODE_SUPPRESSIONS" ]]; then
   warn_guardrail "Broad #![allow(dead_code)] found in production/runtime-critical modules"
   echo "$DEADCODE_SUPPRESSIONS"
@@ -340,7 +340,7 @@ BROKEN_U32_SORT_BACKENDS="$(rg -n --no-messages 'sort_u32_(avx512|avx2|neon)|sor
 if [[ -z "$BROKEN_U32_SORT_BACKENDS" ]] \
   && rg -n --no-messages 'pub fn sort_u32\(data: &mut \[u32\]\).*' src/optimize/sort.rs >/dev/null \
   && rg -n --no-messages 'data\.sort_unstable\(\)' src/optimize/sort.rs >/dev/null \
-  && rg -n --no-messages 'berlekamp_massey_boundary_lengths_match_scalar' src/simd.rs >/dev/null; then
+  && rg -n --no-messages 'berlekamp_massey_boundary_lengths_match_scalar' src/simd >/dev/null; then
   pass "Windows SIMD parity paths reject the corrupt u32 sorters and cover Berlekamp boundaries"
   append_item "windows_simd_parity" "ok" "canonical u32 sort and Berlekamp boundary parity gate are present"
 else
