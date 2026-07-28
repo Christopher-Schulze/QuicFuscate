@@ -87,6 +87,15 @@ impl PmtuState {
         }
     }
 
+    /// Returns whether a PMTU probe can bypass a closed congestion gate.
+    ///
+    /// RFC 8899 requires probes that are not congestion-controlled to be
+    /// separated by at least one RTT. The caller still tracks an emitted probe
+    /// as ack-eliciting, but only this interval makes the bypass safe.
+    fn can_bypass_congestion(&self, rtt: Duration) -> bool {
+        self.probe_interval >= rtt
+    }
+
     /// Record that a probe of `size` bytes was sent.
     pub fn on_probe_sent(&mut self, size: usize, now: Instant) {
         self.probe_in_flight = Some(size);
@@ -3189,18 +3198,28 @@ impl Connection {
         let congestion_blocked = !self.recovery.can_send(self.dgram_send_max_size);
         log::debug!("send_with_datagram_overhead congestion gate: recovery.bytes_in_flight={} recovery.cwnd={} dgram_send_max_size={} congestion_blocked={}",
             self.recovery.bytes_in_flight, self.recovery.cwnd, self.dgram_send_max_size, congestion_blocked);
-        let mut ack_bypass = congestion_blocked && self.has_pending_application_ack();
-        if congestion_blocked && !ack_bypass {
+        let mut congestion_bypass = congestion_blocked && self.has_pending_application_ack();
+        if congestion_blocked && !congestion_bypass {
             // RFC 9002 §7.5/§6.2.4: PTO probes MUST NOT be blocked by the
             // congestion controller (they still count as in flight). The probe
             // PING is written below in the assembly; stream/datagram payloads
             // stay gated.
             if self.pending_probe_spaces.iter().any(|s| *s == recovery::PacketSpace::Application) {
-                ack_bypass = true;
+                congestion_bypass = true;
             }
         }
-        if congestion_blocked && !ack_bypass {
-            log::debug!("send_with_datagram_overhead: early Done congestion_blocked ack_bypass={} dgram_queue_len={}", ack_bypass, self.dgram_send_queue.len());
+        if congestion_blocked
+            && !congestion_bypass
+            && dedicated_pmtu_probe
+            && self.pmtu.can_bypass_congestion(self.recovery.rtt)
+        {
+            // RFC 8899 permits an isolated probe outside congestion control
+            // only when the configured probe interval is at least one RTT.
+            // This path emits only the PING+PADDING probe below.
+            congestion_bypass = true;
+        }
+        if congestion_blocked && !congestion_bypass {
+            log::debug!("send_with_datagram_overhead: early Done congestion_blocked congestion_bypass={} dgram_queue_len={}", congestion_bypass, self.dgram_send_queue.len());
             return Err(ConnectionError::Done);
         }
         self.poll_path_validation_timeout(now);
@@ -3432,9 +3451,9 @@ impl Connection {
             || self.has_sendable_stream_frame()
             || !self.dgram_send_queue.is_empty()
             || self.pending_probe_spaces.iter().any(|s| *s == recovery::PacketSpace::Application);
-        if !has_pending_data && !ack_bypass && !dedicated_pmtu_probe {
-            log::debug!("send_with_datagram_overhead: early Done has_pending_data=false dgram_queue_len={} pending_control={} app_ack={} sendable_stream={} probe_spaces={} ack_bypass={} pmtu_probe={}",
-                self.dgram_send_queue.len(), self.pending_control.is_empty(), self.has_pending_application_ack(), self.has_sendable_stream_frame(), self.pending_probe_spaces.iter().any(|s| *s == recovery::PacketSpace::Application), ack_bypass, dedicated_pmtu_probe);
+        if !has_pending_data && !congestion_bypass && !dedicated_pmtu_probe {
+            log::debug!("send_with_datagram_overhead: early Done has_pending_data=false dgram_queue_len={} pending_control={} app_ack={} sendable_stream={} probe_spaces={} congestion_bypass={} pmtu_probe={}",
+                self.dgram_send_queue.len(), self.pending_control.is_empty(), self.has_pending_application_ack(), self.has_sendable_stream_frame(), self.pending_probe_spaces.iter().any(|s| *s == recovery::PacketSpace::Application), congestion_bypass, dedicated_pmtu_probe);
             return Err(ConnectionError::Done);
         }
         // Outbound stealth timing is owned by core::QuicFuscateConnection (next_packet_release).
@@ -3482,7 +3501,7 @@ impl Connection {
 
         if !dedicated_pmtu_probe {
             let (off_after_ctrl, ctrl_ack_eliciting) =
-                self.flush_pending_control_frames(out, off, ack_bypass)?;
+                self.flush_pending_control_frames(out, off, congestion_bypass)?;
             off = off_after_ctrl;
             wrote_ack_eliciting |= ctrl_ack_eliciting;
             off = self.maybe_emit_application_ack_frame(out, off)?;
@@ -3506,7 +3525,7 @@ impl Connection {
             // When bypassing the congestion gate for ACK-only packets, skip
             // stream and datagram data - those are congestion-controlled and
             // must not be sent when the window is exhausted.
-            if !ack_bypass {
+            if !congestion_bypass {
                 let datagram_reserve = self
                     .pending_datagram_frame_reserve()
                     .filter(|reserve| off + reserve + self.tag_reserve_1rtt() <= out.len())
@@ -6484,6 +6503,51 @@ mod tests {
 
         assert_eq!(packet_len, 1500);
         assert!(pair.client.pmtu_probe_pn.is_some());
+    }
+
+    #[test]
+    fn dedicated_pmtu_probe_bypasses_a_closed_congestion_gate() {
+        // RFC 8899 permits a rate-limited PING+PADDING probe outside the
+        // congestion window. It must not carry queued application data.
+        let mut pair = bench_paired_1rtt_connections();
+        pair.client.dgram_send_max_size = 1472;
+        pair.client.pmtu =
+            PmtuState::new(true, PmtuPolicy { max_mtu: 1472, ..PmtuPolicy::default() });
+        pair.client.recovery.cwnd = pair.client.recovery.bytes_in_flight;
+        assert!(!pair.client.recovery.can_send(pair.client.dgram_send_max_size));
+
+        let tracked_before =
+            pair.client.recovery.tracked_sent_pns(recovery::PacketSpace::Application).len();
+        let mut packet = [0u8; 1600];
+        let (packet_len, info) =
+            pair.client.send(&mut packet).expect("dedicated PMTU probe must emit");
+
+        assert_eq!(packet_len, 1472);
+        assert!(info.congestion_controlled);
+        assert!(pair.client.pmtu_probe_pn.is_some());
+        let tracked_after =
+            pair.client.recovery.tracked_sent_pns(recovery::PacketSpace::Application).len();
+        assert_eq!(tracked_after, tracked_before + 1);
+    }
+
+    #[test]
+    fn dedicated_pmtu_probe_respects_congestion_when_interval_is_shorter_than_rtt() {
+        let mut pair = bench_paired_1rtt_connections();
+        pair.client.dgram_send_max_size = 1472;
+        pair.client.pmtu = PmtuState::new(
+            true,
+            PmtuPolicy {
+                max_mtu: 1472,
+                probe_interval: Duration::from_millis(1),
+                ..PmtuPolicy::default()
+            },
+        );
+        pair.client.recovery.cwnd = pair.client.recovery.bytes_in_flight;
+        assert!(!pair.client.recovery.can_send(pair.client.dgram_send_max_size));
+
+        let mut packet = [0u8; 1600];
+        assert_eq!(pair.client.send(&mut packet).unwrap_err(), crate::error::ConnectionError::Done);
+        assert!(pair.client.pmtu_probe_pn.is_none());
     }
 
     #[test]
