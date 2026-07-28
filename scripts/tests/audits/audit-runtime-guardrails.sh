@@ -558,6 +558,7 @@ fi
 MULTI_CLIENT_DUAL_STACK_HARNESS="scripts/tests/tun-e2e-multi-client-dual-stack-netns.sh"
 TCP_THROUGHPUT_PROBE="scripts/tests/utils/tcp-throughput-probe.py"
 EGRESS_SUMMARIZER="scripts/tests/utils/summarize-external-egress.py"
+BOUNDARY_SUMMARIZER="scripts/tests/utils/summarize-throughput-boundaries.py"
 UDP_SOCKET_EVIDENCE="scripts/tests/utils/udp-socket-evidence.py"
 if rg -F -- 'for host_veth in "${HOST_VETH[@]}"; do' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'ip link del "$host_veth" 2>/dev/null' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
@@ -578,16 +579,25 @@ if rg -F -- 'for host_veth in "${HOST_VETH[@]}"; do' "$MULTI_CLIENT_DUAL_STACK_H
   && rg -F -- '--trial "$ARTIFACT_DIR/tcp6-client-$phase-1.json"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'SERVER_INGRESS_LABEL = "server UDP ingress"' "$EGRESS_SUMMARIZER" >/dev/null \
   && rg -F -- 'retained fewer than two {label} packets' "$EGRESS_SUMMARIZER" >/dev/null \
+  && rg -F -- 'BOUNDARY_SUMMARIZER="$SCRIPT_DIR/utils/summarize-throughput-boundaries.py"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'server-return-$phase.log' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'client-ingress-$phase.log' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'throughput-window-$phase-$trial.json' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'summarize_throughput_boundaries "$phase"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- '("server UDP return", "server_return_capture")' "$BOUNDARY_SUMMARIZER" >/dev/null \
+  && rg -F -- '("client-1 UDP ingress", "client_ingress_capture")' "$BOUNDARY_SUMMARIZER" >/dev/null \
+  && rg -F -- 'External throughput trial {window.trial} client exit status' "$BOUNDARY_SUMMARIZER" >/dev/null \
+  && rg -F -- 'parser.add_argument("--self-test", action="store_true")' "$BOUNDARY_SUMMARIZER" >/dev/null \
   && rg -F -- 'UDP_SOCKET_EVIDENCE="$SCRIPT_DIR/utils/udp-socket-evidence.py"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'server-udp-$phase-$trial-before.json' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'server UDP socket dropped datagrams during IPv6 throughput trial' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'expected exactly one UDP socket on port' "$UDP_SOCKET_EVIDENCE" >/dev/null \
   && rg -F -- 'UDP socket dropped {drop_delta} datagrams during the trial' "$UDP_SOCKET_EVIDENCE" >/dev/null; then
-  pass "Multi-client dual-stack proof keeps receiver-verified per-trial client/server boundary evidence and server UDP socket-drop evidence"
-  append_item "multi_client_dual_stack_tcp_throughput" "ok" "receiver bytes, SHA-256, wall-clock intervals, client/server captures, server socket-drop deltas, and partial-run host-veth cleanup are fail-closed"
+  pass "Multi-client dual-stack proof keeps receiver-verified forward and reverse boundary evidence plus server UDP socket-drop evidence"
+  append_item "multi_client_dual_stack_tcp_throughput" "ok" "receiver bytes, SHA-256, persisted failure windows, four host-veth boundaries, server socket-drop deltas, and partial-run host-veth cleanup are fail-closed"
 else
-  fail_critical "Multi-client dual-stack proof lost receiver-verified per-trial client/server or server socket-drop evidence"
-  append_item "multi_client_dual_stack_tcp_throughput" "fail" "missing receiver byte/hash/wall-clock gate, external client/server capture, UDP socket-drop proof, direct probe use, no-iperf contract, or host-veth cleanup"
+  fail_critical "Multi-client dual-stack proof lost receiver-verified forward/reverse boundary or server socket-drop evidence"
+  append_item "multi_client_dual_stack_tcp_throughput" "fail" "missing receiver byte/hash/window gate, external forward/reverse capture, UDP socket-drop proof, direct probe use, no-iperf contract, or host-veth cleanup"
 fi
 
 DUAL_STACK_STABILITY_HARNESS="scripts/tests/tun-e2e-multi-client-dual-stack-stability.sh"

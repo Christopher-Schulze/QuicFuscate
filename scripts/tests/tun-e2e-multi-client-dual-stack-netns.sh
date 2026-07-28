@@ -20,6 +20,7 @@ LOCK_TIMEOUT="${QF_E2E_LOCK_TIMEOUT:-300}"
 ARTIFACT_DIR="${QF_E2E_ARTIFACT_DIR:-/tmp/quicfuscate-todo523-$$}"
 THROUGHPUT_PROBE="$SCRIPT_DIR/utils/tcp-throughput-probe.py"
 EGRESS_SUMMARIZER="$SCRIPT_DIR/utils/summarize-external-egress.py"
+BOUNDARY_SUMMARIZER="$SCRIPT_DIR/utils/summarize-throughput-boundaries.py"
 UDP_SOCKET_EVIDENCE="$SCRIPT_DIR/utils/udp-socket-evidence.py"
 THROUGHPUT_TRIAL_SECONDS="${QF_E2E_THROUGHPUT_TRIAL_SECONDS:-10}"
 THROUGHPUT_RATE_BPS="${QF_E2E_THROUGHPUT_RATE_BPS:-15000000}"
@@ -440,6 +441,14 @@ start_client_egress_capture() {
     "udp and src host ${CLIENT_UNDERLAY[0]} and dst host $SERVER_UNDERLAY and dst port 4433" \
     >"$ARTIFACT_DIR/server-ingress-$phase.log" 2>&1 &
   EGRESS_CAPTURE_PIDS+=("$!")
+  tcpdump -tt -n -l -Q inout -i "${HOST_VETH[0]}" \
+    "udp and src host $SERVER_UNDERLAY and dst host ${CLIENT_UNDERLAY[0]} and src port 4433" \
+    >"$ARTIFACT_DIR/server-return-$phase.log" 2>&1 &
+  EGRESS_CAPTURE_PIDS+=("$!")
+  tcpdump -tt -n -l -Q inout -i "${HOST_VETH[1]}" \
+    "udp and src host $SERVER_UNDERLAY and dst host ${CLIENT_UNDERLAY[0]} and src port 4433" \
+    >"$ARTIFACT_DIR/client-ingress-$phase.log" 2>&1 &
+  EGRESS_CAPTURE_PIDS+=("$!")
   sleep 0.2
   local pid
   for pid in "${EGRESS_CAPTURE_PIDS[@]}"; do
@@ -470,6 +479,39 @@ summarize_client_egress_capture() {
     --trial "$ARTIFACT_DIR/tcp6-client-$phase-3.json" \
     --output "$ARTIFACT_DIR/egress-$phase-summary.txt" \
     || fail "external client egress capture did not retain enough packets in phase $phase"
+}
+
+record_throughput_trial_window() {
+  local phase="$1"
+  local trial="$2"
+  local started_at_unix_ns="$3"
+  local finished_at_unix_ns="$4"
+  local client_exit_status="$5"
+  local output="$ARTIFACT_DIR/throughput-window-$phase-$trial.json"
+  [[ ! -e "$output" ]] || fail "refusing to replace throughput trial window: $output"
+  printf '{"trial":%s,"started_at_unix_ns":%s,"finished_at_unix_ns":%s,"client_exit_status":%s}\n' \
+    "$trial" "$started_at_unix_ns" "$finished_at_unix_ns" "$client_exit_status" >"$output" || \
+    fail "could not retain throughput trial window: $output"
+}
+
+summarize_throughput_boundaries() {
+  local phase="$1"
+  [[ "$EXTERNAL_EGRESS_CAPTURE" == "1" ]] || return 0
+  local window_arguments=()
+  local trial window
+  for trial in 1 2 3; do
+    window="$ARTIFACT_DIR/throughput-window-$phase-$trial.json"
+    [[ -f "$window" ]] && window_arguments+=(--window "$window")
+  done
+  ((${#window_arguments[@]} > 0)) || fail "external boundary capture lacks throughput trial windows in phase $phase"
+  python3 "$BOUNDARY_SUMMARIZER" \
+    --client-egress-capture "$ARTIFACT_DIR/egress-$phase.log" \
+    --server-ingress-capture "$ARTIFACT_DIR/server-ingress-$phase.log" \
+    --server-return-capture "$ARTIFACT_DIR/server-return-$phase.log" \
+    --client-ingress-capture "$ARTIFACT_DIR/client-ingress-$phase.log" \
+    "${window_arguments[@]}" \
+    --output "$ARTIFACT_DIR/throughput-boundaries-$phase.txt" || \
+    fail "external throughput boundary capture could not be summarized in phase $phase"
 }
 
 finish_captures() {
@@ -669,7 +711,7 @@ prove_linux_dual_stack_state() {
 
 prove_ipv6_throughput() {
   local phase="$1"
-  local trial port server_pid before_snapshot after_snapshot summary
+  local trial port server_pid before_snapshot after_snapshot summary client_started_at_unix_ns client_finished_at_unix_ns client_exit_status
   for trial in 1 2 3; do
     port=$((5524 + trial))
     before_snapshot="$ARTIFACT_DIR/server-udp-$phase-$trial-before.json"
@@ -684,18 +726,29 @@ prove_ipv6_throughput() {
       --result "$ARTIFACT_DIR/tcp6-server-$phase-$trial.json" \
       >"$ARTIFACT_DIR/tcp6-server-$phase-$trial.log" 2>&1 &
     server_pid="$!"
-    if ! ip netns exec "${CLIENT_NS[0]}" timeout "$((THROUGHPUT_TRIAL_SECONDS + 20))" \
+    client_started_at_unix_ns="$(date +%s%N)"
+    if ip netns exec "${CLIENT_NS[0]}" timeout "$((THROUGHPUT_TRIAL_SECONDS + 20))" \
       python3 "$THROUGHPUT_PROBE" client \
       --source fd00::2 --destination fd00::1 --port "$port" \
       --duration "$THROUGHPUT_TRIAL_SECONDS" --rate-bps "$THROUGHPUT_RATE_BPS" \
       --timeout "$((THROUGHPUT_TRIAL_SECONDS + 15))" \
       --result "$ARTIFACT_DIR/tcp6-client-$phase-$trial.json"; then
+      client_exit_status=0
+    else
+      client_exit_status=$?
+    fi
+    client_finished_at_unix_ns="$(date +%s%N)"
+    record_throughput_trial_window "$phase" "$trial" "$client_started_at_unix_ns" \
+      "$client_finished_at_unix_ns" "$client_exit_status"
+    if ((client_exit_status != 0)); then
       ip netns exec "$SERVER_NS" python3 "$UDP_SOCKET_EVIDENCE" snapshot \
         --port 4433 --output "$after_snapshot" || true
       python3 "$UDP_SOCKET_EVIDENCE" verify \
         --before "$before_snapshot" --after "$after_snapshot" --output "$summary" || true
       kill -TERM "$server_pid" 2>/dev/null || true
       wait "$server_pid" 2>/dev/null || true
+      stop_client_egress_capture
+      summarize_throughput_boundaries "$phase"
       fail "IPv6 throughput trial $trial did not terminate successfully in phase $phase"
     fi
     if ! wait "$server_pid"; then
@@ -703,6 +756,8 @@ prove_ipv6_throughput() {
         --port 4433 --output "$after_snapshot" || true
       python3 "$UDP_SOCKET_EVIDENCE" verify \
         --before "$before_snapshot" --after "$after_snapshot" --output "$summary" || true
+      stop_client_egress_capture
+      summarize_throughput_boundaries "$phase"
       fail "IPv6 throughput receiver failed in phase $phase trial $trial"
     fi
     ip netns exec "$SERVER_NS" python3 "$UDP_SOCKET_EVIDENCE" snapshot \
@@ -803,7 +858,7 @@ main() {
   [[ "$(uname -s)" == "Linux" ]] || fail 'this proof requires Linux network namespaces'
   [[ "${EUID:-$(id -u)}" == "0" ]] || fail 'this proof requires root'
   local command
-  for command in flock ip iptables nc openssl ping python3 sha256sum sysctl tc tcpdump timeout; do
+  for command in date flock ip iptables nc openssl ping python3 sha256sum sysctl tc tcpdump timeout; do
     require_command "$command"
   done
   if ! command -v nft >/dev/null 2>&1; then
@@ -813,6 +868,7 @@ main() {
   [[ -x "$BINARY" ]] || fail "release binary not executable: $BINARY"
   [[ -r "$THROUGHPUT_PROBE" ]] || fail "TCP throughput probe is unreadable: $THROUGHPUT_PROBE"
   [[ -r "$EGRESS_SUMMARIZER" ]] || fail "external egress summarizer is unreadable: $EGRESS_SUMMARIZER"
+  [[ -r "$BOUNDARY_SUMMARIZER" ]] || fail "throughput boundary summarizer is unreadable: $BOUNDARY_SUMMARIZER"
   [[ -r "$UDP_SOCKET_EVIDENCE" ]] || fail "UDP socket evidence helper is unreadable: $UDP_SOCKET_EVIDENCE"
   if [[ ! "$THROUGHPUT_TRIAL_SECONDS" =~ ^[0-9]+$ ]] \
     || ((THROUGHPUT_TRIAL_SECONDS < 5)); then
@@ -847,6 +903,7 @@ main() {
   prove_ipv6_throughput default
   stop_client_egress_capture
   summarize_client_egress_capture default
+  summarize_throughput_boundaries default
   prove_backpressure_quiescence default
 
   log 'phase 2: explicit client-unicast opt-in'
@@ -859,6 +916,7 @@ main() {
   prove_ipv6_throughput opt-in
   stop_client_egress_capture
   summarize_client_egress_capture opt-in
+  summarize_throughput_boundaries opt-in
   prove_pmtu_efficiency_gain
   prove_dplpmtud_black_hole_recovery
   prove_backpressure_quiescence opt-in
