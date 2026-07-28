@@ -246,7 +246,7 @@ start_phase() {
     --metrics-port "$METRICS_PORT"
     --tun
     --tun-name "$TUN_NAME"
-    --tun-mtu 1280
+    --tun-mtu "$pmtu_max"
     --tun-ip 10.0.1.1
     --tun-netmask 255.255.255.0
     --tun-ip6 fd00::1
@@ -277,7 +277,7 @@ start_phase() {
       --verify-peer \
       --tun \
       --tun-name "$TUN_NAME" \
-      --tun-mtu 1280 \
+      --tun-mtu "$pmtu_max" \
       --tun-ip "${CLIENT_V4[$index]}" \
       --tun-netmask 255.255.255.0 \
       --tun-ip6 "${CLIENT_V6[$index]}" \
@@ -293,13 +293,13 @@ start_phase() {
 }
 
 configure_tun_routes() {
-  ip netns exec "$SERVER_NS" ip link set "$TUN_NAME" mtu 1280 up
+  ip netns exec "$SERVER_NS" ip link set "$TUN_NAME" up
   ip netns exec "$SERVER_NS" ip route replace 224.0.0.0/4 dev "$TUN_NAME"
   ip netns exec "$SERVER_NS" ip -6 route replace ff00::/8 dev "$TUN_NAME"
 
   local index
   for index in 0 1 2; do
-    ip netns exec "${CLIENT_NS[$index]}" ip link set "$TUN_NAME" mtu 1280 up
+    ip netns exec "${CLIENT_NS[$index]}" ip link set "$TUN_NAME" up
     ip netns exec "${CLIENT_NS[$index]}" ip route replace 224.0.0.0/4 dev "$TUN_NAME"
     ip netns exec "${CLIENT_NS[$index]}" ip -6 route replace ff00::/8 dev "$TUN_NAME"
   done

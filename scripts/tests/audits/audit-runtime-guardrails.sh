@@ -575,6 +575,18 @@ else
   append_item "multi_client_dual_stack_tcp_throughput" "fail" "missing receiver byte/hash/timing gate, direct probe use, no-iperf contract, or host-veth cleanup"
 fi
 
+if [[ "$(rg -F -- '--tun-mtu "$pmtu_max"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" | wc -l | tr -d ' ')" -eq 2 ]] \
+  && rg -F -- 'start_phase default 0 1280' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'start_phase opt-in 1 1500 1000 2000' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && ! rg -F -- 'ip link set "$TUN_NAME" mtu 1280 up' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'assert gain >= 0.15, gain' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null; then
+  pass "Multi-client PMTU comparison gives each phase its configured TUN ceiling without weakening the 15% gate"
+  append_item "multi_client_dual_stack_pmtu_ceiling" "ok" "default stays at 1280, opt-in uses 1500, and routes do not reset the dynamic client TUN MTU"
+else
+  fail_critical "Multi-client PMTU comparison no longer exercises the configured TUN ceiling or retained 15% gate"
+  append_item "multi_client_dual_stack_pmtu_ceiling" "fail" "missing phase-specific TUN ceiling, route preservation, or 15% comparison threshold"
+fi
+
 # 6) Guardrail warning: shadow runtime modules with no non-test call sites.
 BATCH_RUNTIME_REFS=$(rg -n --no-messages "BatchProcessor" src | rg -v "src/transport/batch.rs|src/transport.rs" || true)
 if [[ -z "$BATCH_RUNTIME_REFS" ]]; then
