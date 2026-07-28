@@ -1,0 +1,1181 @@
+use super::*;
+use std::collections::{HashSet, VecDeque};
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Error {
+    Done,
+    BufferTooShort,
+    InternalError,
+    /// The underlying QUIC DATAGRAM send queue is at capacity; the caller
+    /// should apply backpressure and retry rather than fall back to framed H3.
+    DgramQueueFull,
+    ExcessiveLoad,
+    IdError,
+    StreamCreationError,
+    ClosedCriticalStream,
+    FrameUnexpected,
+    FrameError,
+    QpackDecompressionFailed,
+    TransportError(super::Error),
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl std::error::Error for Error {}
+
+impl From<super::Error> for Error {
+    fn from(err: super::Error) -> Self {
+        Error::TransportError(err)
+    }
+}
+
+/// HTTP/3 application protocol
+pub const APPLICATION_PROTOCOL: &[&[u8]] = &[b"h3", b"h3-29", b"h3-28", b"h3-27"];
+
+/// HTTP/3 header
+#[derive(Debug, Clone)]
+pub struct Header {
+    name: Vec<u8>,
+    value: Vec<u8>,
+}
+
+/// HTTP/3 Server Push Promise for stealth cover traffic
+#[derive(Debug, Clone)]
+struct PushPromise {
+    /// Promised request headers
+    headers: Vec<Header>,
+    /// Push stream state
+    state: PushState,
+    /// Cover traffic payload (fake resources)
+    cover_payload: Vec<u8>,
+    /// Timing for realistic delivery
+    scheduled_at: std::time::Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PushState {
+    Promised,
+    DataSending,
+    Complete,
+}
+
+impl Header {
+    /// Creates a new header
+    pub fn new(name: &[u8], value: &[u8]) -> Self {
+        Self { name: name.to_vec(), value: value.to_vec() }
+    }
+
+    /// Builds a header from preallocated vectors (SIMD-friendly callers).
+    #[inline]
+    pub(crate) fn from_parts(name: Vec<u8>, value: Vec<u8>) -> Self {
+        Self { name, value }
+    }
+
+    /// Returns the header name bytes.
+    #[inline]
+    pub fn name(&self) -> &[u8] {
+        &self.name
+    }
+
+    /// Returns the header value bytes.
+    #[inline]
+    pub fn value(&self) -> &[u8] {
+        &self.value
+    }
+
+    /// Returns a mutable reference to the header name bytes.
+    #[cfg(any(test, feature = "rust-tests"))]
+    pub fn name_mut(&mut self) -> &mut [u8] {
+        &mut self.name
+    }
+
+    /// Returns a mutable reference to the header value bytes.
+    #[cfg(any(test, feature = "rust-tests"))]
+    pub fn value_mut(&mut self) -> &mut [u8] {
+        &mut self.value
+    }
+}
+
+/// Trait for accessing header name and value
+#[cfg(any(test, feature = "rust-tests"))]
+pub trait NameValue {
+    fn name(&self) -> &[u8];
+    fn value(&self) -> &[u8];
+}
+
+#[cfg(any(test, feature = "rust-tests"))]
+impl NameValue for Header {
+    fn name(&self) -> &[u8] {
+        &self.name
+    }
+    fn value(&self) -> &[u8] {
+        &self.value
+    }
+}
+
+/// HTTP/3 specific configuration
+#[derive(Clone)]
+pub struct Config {
+    qpack_max_table_capacity: u64,
+    qpack_blocked_streams: u64,
+    max_field_section_size: u64,
+}
+
+impl Config {
+    /// Creates a new HTTP/3 config
+    pub fn new() -> Result<Self, crate::error::ConnectionError> {
+        Ok(Self {
+            qpack_max_table_capacity: 0,
+            qpack_blocked_streams: 0,
+            // 1MiB is a common safe default for max header section size.
+            // Keeping this bounded prevents pathological allocations during QPACK decode.
+            max_field_section_size: 1024 * 1024,
+        })
+    }
+
+    /// Sets QPACK max table capacity
+    pub(crate) fn set_qpack_max_table_capacity(&mut self, v: u64) {
+        self.qpack_max_table_capacity = v;
+    }
+    /// Sets QPACK blocked streams
+    pub(crate) fn set_qpack_blocked_streams(&mut self, v: u64) {
+        self.qpack_blocked_streams = v;
+    }
+    /// Sets max field section size
+    #[cfg(any(test, feature = "rust-tests"))]
+    pub fn set_max_field_section_size(&mut self, v: u64) {
+        self.max_field_section_size = v;
+    }
+}
+
+/// HTTP/3 connection with enhanced stream state management
+pub struct Connection {
+    config: Config,
+    next_stream_id: u64,
+    streams: HashMap<u64, StreamState>,
+    finished_streams: HashSet<u64>,
+    /// Streams carrying non-HTTP/3 data (e.g. stealth cover traffic) are drained
+    /// instead of parsed, so the H3 layer stays strict without tripping on raw bytes.
+    ignored_streams: HashSet<u64>,
+    pending_events: VecDeque<(u64, Event)>,
+    encoder: qpack::Encoder,
+    decoder: qpack::Decoder,
+    control_stream_id: Option<u64>,
+    _peer_control_stream_id: Option<u64>,
+    goaway_sent: bool,
+    goaway_received: bool,
+    /// Server Push streams for stealth cover traffic
+    push_streams: HashMap<u64, PushPromise>,
+    /// MASQUE Flow-ID mapping per CONNECT-UDP stream (when datagrams enabled)
+    masque_flow: HashMap<u64, u64>,
+    /// Next push stream ID
+    next_push_id: u64,
+}
+
+/// Stream state tracking
+#[derive(Debug, Clone)]
+struct StreamState {
+    _headers: Vec<Header>,
+    body_buffer: Vec<u8>,
+    frame_buffer: Vec<u8>,
+    _received_bytes: usize,
+    _stream_type: StreamType,
+    sent_bytes: usize,
+    fin_sent: bool,
+    fin_received: bool,
+    _stream_type_dup: StreamType,
+    masque_established: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum StreamType {
+    Request,
+    Response,
+    Control,
+    Push,
+    Masque,
+    WebTransportCover,
+}
+
+impl Connection {
+    fn build_stealth_cover_resource_plan(
+        base_path: &str,
+        seed: u64,
+    ) -> Vec<(String, &'static str, usize)> {
+        const RESOURCES: &[(&str, &str, usize)] = &[
+            ("/css/main.css", "text/css", 45_000),
+            ("/css/theme.css", "text/css", 18_000),
+            ("/css/fonts.css", "text/css", 8_000),
+            ("/js/app.js", "application/javascript", 120_000),
+            ("/js/runtime.js", "application/javascript", 22_000),
+            ("/js/vendor.js", "application/javascript", 280_000),
+            ("/js/analytics.js", "application/javascript", 25_000),
+            ("/images/hero.jpg", "image/jpeg", 85_000),
+            ("/images/card.jpg", "image/jpeg", 54_000),
+            ("/images/logo.png", "image/png", 12_000),
+            ("/images/icon.png", "image/png", 6_000),
+            ("/media/poster.jpg", "image/jpeg", 72_000),
+        ];
+
+        let base = base_path.trim_end_matches('/');
+        let count = 3 + ((seed >> 32) as usize % 5);
+        let start = (seed as usize) % RESOURCES.len();
+        let step = 5usize;
+        let mut plan = Vec::with_capacity(count);
+
+        for i in 0..count {
+            let (path, content_type, nominal_size) =
+                RESOURCES[(start + i * step) % RESOURCES.len()];
+            let jitter = ((seed.rotate_left((i as u32) & 31) >> 8) % 31) as i32 - 15;
+            let size =
+                ((nominal_size as i64) * (100 + jitter) as i64 / 100).clamp(1024, 320_000) as usize;
+            let version = seed.rotate_right((i as u32) & 31) & 0x0fff;
+            let full_path = if version.is_multiple_of(3) {
+                format!("{base}{path}?v={version:x}")
+            } else {
+                format!("{base}{path}")
+            };
+            plan.push((full_path, content_type, size));
+        }
+
+        plan
+    }
+
+    fn encode_headers_block(&mut self, headers: &[Header]) -> Result<Vec<u8>, Error> {
+        // QPACK header blocks can exceed 4KiB when stealth adds realistic header cover.
+        // Grow the buffer until the encoder succeeds (bounded to avoid pathological allocations).
+        let mut cap = 4096usize;
+        loop {
+            let mut buf = vec![0u8; cap];
+            match self.encoder.encode(headers, &mut buf) {
+                Ok(len) => {
+                    buf.truncate(len);
+                    return Ok(buf);
+                }
+                Err(Error::BufferTooShort) => {
+                    if cap >= 256 * 1024 {
+                        return Err(Error::BufferTooShort);
+                    }
+                    cap = (cap * 2).min(256 * 1024);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Creates a new HTTP/3 connection with proper initialization
+    pub fn with_transport(conn: &mut super::Connection, config: &Config) -> Result<Self, Error> {
+        // Validate config limits for HTTP/3 compliance and safety.
+        // max_field_section_size == 0 is invalid; excessively large values can cause memory abuse.
+        if config.max_field_section_size == 0 || config.max_field_section_size > 16 * 1024 * 1024 {
+            return Err(Error::ExcessiveLoad);
+        }
+        let mut h3_conn = Self {
+            config: config.clone(),
+            next_stream_id: if conn.is_server() { 1 } else { 0 },
+            streams: HashMap::new(),
+            finished_streams: HashSet::new(),
+            ignored_streams: HashSet::new(),
+            pending_events: VecDeque::new(),
+            encoder: qpack::Encoder::with_capacity(config.qpack_max_table_capacity),
+            decoder: qpack::Decoder::with_capacity(config.qpack_max_table_capacity),
+            control_stream_id: None,
+            _peer_control_stream_id: None,
+            goaway_sent: false,
+            goaway_received: false,
+            push_streams: HashMap::new(),
+            masque_flow: HashMap::new(),
+            next_push_id: if conn.is_server() { 2 } else { 3 }, // Server uses even IDs for push
+        };
+
+        // Initialize control stream if client
+        if !conn.is_server() {
+            h3_conn.init_control_stream(conn)?;
+        }
+        // Propagate FEC escalation threshold to FEC ModeManager via ENV
+        let thr = conn.fec_escalation_threshold();
+        std::env::set_var("QUICFUSCATE_FEC_SWITCH_THRESH", format!("{:.6}", thr));
+        Ok(h3_conn)
+    }
+
+    /// Marks `stream_id` as a non-HTTP/3 stream. Incoming data on this stream is
+    /// drained and discarded instead of being parsed as H3 frames.
+    pub(crate) fn ignore_stream(&mut self, stream_id: u64) {
+        self.ignored_streams.insert(stream_id);
+    }
+
+    /// Set the persona index policy (header names that should be prioritised).
+    pub(crate) fn set_qpack_index_policy(&mut self, prefer: &[&[u8]]) {
+        self.encoder.set_index_policy(prefer);
+    }
+
+    /// Initialize control stream
+    fn init_control_stream(&mut self, _conn: &mut super::Connection) -> Result<(), Error> {
+        // Create unidirectional control stream
+        let stream_id = self.next_stream_id;
+        self.next_stream_id += 4;
+        self.control_stream_id = Some(stream_id);
+        // Send SETTINGS frame (omitted actual send)
+        let _settings = [
+            (0x01, self.config.qpack_max_table_capacity),
+            (0x07, self.config.qpack_blocked_streams),
+            (0x06, self.config.max_field_section_size),
+        ];
+        self.streams.insert(
+            stream_id,
+            StreamState {
+                _headers: Vec::new(),
+                body_buffer: Vec::new(),
+                frame_buffer: Vec::new(),
+                _received_bytes: 0,
+                _stream_type: StreamType::Control,
+                sent_bytes: 0,
+                fin_sent: false,
+                fin_received: false,
+                _stream_type_dup: StreamType::Control,
+                masque_established: false,
+            },
+        );
+        Ok(())
+    }
+
+    /// Sends an HTTP/3 request with proper frame encoding
+    pub fn send_request(
+        &mut self,
+        conn: &mut super::Connection,
+        headers: &[Header],
+        fin: bool,
+    ) -> Result<u64, Error> {
+        if self.goaway_sent || self.goaway_received {
+            return Err(Error::ClosedCriticalStream);
+        }
+        let stream_id = self.next_stream_id;
+        self.next_stream_id += 4;
+        let encoded = self.encode_headers_block(headers)?;
+        let encoded_len = encoded.len();
+        // Create HEADERS frame
+        let mut frame = Vec::new();
+        frame.push(0x01);
+        Self::encode_varint(encoded_len as u64, &mut frame);
+        frame.extend_from_slice(&encoded[..encoded_len]);
+        conn.stream_send(stream_id, &frame, fin).map_err(|_| Error::InternalError)?;
+        // Telemetry
+        crate::optimize::telemetry::H3_FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::optimize::telemetry::H3_HEADERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.streams.insert(
+            stream_id,
+            StreamState {
+                _headers: headers.to_vec(),
+                body_buffer: Vec::new(),
+                frame_buffer: Vec::new(),
+                _received_bytes: 0,
+                _stream_type: StreamType::Request,
+                sent_bytes: frame.len(),
+                fin_sent: fin,
+                fin_received: false,
+                _stream_type_dup: StreamType::Request,
+                masque_established: false,
+            },
+        );
+        if fin {
+            self.finished_streams.insert(stream_id);
+        }
+        Ok(stream_id)
+    }
+
+    /// Sends an HTTP/3 response
+    pub fn send_response(
+        &mut self,
+        conn: &mut super::Connection,
+        stream_id: u64,
+        headers: &[Header],
+        fin: bool,
+    ) -> Result<(), Error> {
+        let encoded = self.encode_headers_block(headers)?;
+        let mut frame = Vec::with_capacity(encoded.len().saturating_add(10));
+        frame.push(0x01);
+        Self::encode_varint(encoded.len() as u64, &mut frame);
+        frame.extend_from_slice(&encoded);
+        let sent = conn.stream_send(stream_id, &frame, fin).map_err(|_| Error::InternalError)?;
+        let stream = self.streams.entry(stream_id).or_insert_with(|| StreamState {
+            _headers: Vec::new(),
+            body_buffer: Vec::new(),
+            frame_buffer: Vec::new(),
+            _received_bytes: 0,
+            _stream_type: StreamType::Response,
+            sent_bytes: 0,
+            fin_sent: false,
+            fin_received: false,
+            _stream_type_dup: StreamType::Response,
+            masque_established: false,
+        });
+        stream._headers = headers.to_vec();
+        stream._stream_type = StreamType::Response;
+        stream._stream_type_dup = StreamType::Response;
+        stream.sent_bytes = stream.sent_bytes.saturating_add(sent);
+        stream.fin_sent = fin;
+        crate::optimize::telemetry::H3_FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::optimize::telemetry::H3_HEADERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if fin {
+            self.finished_streams.insert(stream_id);
+        }
+        Ok(())
+    }
+
+    /// Sends body data with proper DATA frame encoding
+    pub fn send_body(
+        &mut self,
+        conn: &mut super::Connection,
+        stream_id: u64,
+        body: &[u8],
+        fin: bool,
+    ) -> Result<usize, Error> {
+        if self.finished_streams.contains(&stream_id) {
+            return Err(Error::Done);
+        }
+        let stream_state = self.streams.get_mut(&stream_id).ok_or(Error::IdError)?;
+        if stream_state.fin_sent {
+            return Err(Error::Done);
+        }
+        // Adaptive compression - policy + content-type aware
+        let mut to_send = body;
+        let mut owned_buf: Option<(
+            aligned_box::AlignedBox<[u8]>,
+            usize,
+            Arc<crate::optimize::MemoryPool>,
+        )> = None;
+        // Policy & Dictionary
+        let pol = crate::compress::global_policy();
+        if pol.enabled {
+            // Extract content-type header from stream state
+            let ctype = stream_state._headers.iter().find_map(|h| {
+                if h.name() == b"content-type" {
+                    Some(String::from_utf8_lossy(h.value()).to_string())
+                } else {
+                    None
+                }
+            });
+            let allow_match = ctype
+                .as_ref()
+                .map(|v| pol.allow.iter().any(|p| crate::compress::mime_matches(p, v)))
+                .unwrap_or(false);
+            let deny_match = ctype
+                .as_ref()
+                .map(|v| pol.deny.iter().any(|p| crate::compress::mime_matches(p, v)))
+                .unwrap_or(false);
+            let looks_text = crate::compress::CompressionManager::looks_textual(body);
+            let should_try = (allow_match || (ctype.is_none() && looks_text)) && !deny_match;
+            if should_try && body.len() >= pol.min_len {
+                let rtt = conn.rtt().as_millis() as f32;
+                let bw = conn.delivery_rate();
+                let cm =
+                    crate::compress::CompressionManager::new(crate::compress::CompressionConfig {
+                        min_len: pol.min_len,
+                        max_level: pol.level,
+                    });
+                if cm.should_compress(body.len(), rtt, 0.0, bw) {
+                    // Dictionaries: try a matching dict; otherwise use the default compressor.
+                    if let Some(ct) = ctype.as_ref() {
+                        // Training hook.
+                        crate::compress::submit_sample(ct, body);
+                        crate::compress::maybe_train(ct);
+                        if let Some((dict, ver)) = crate::compress::get_dict(ct) {
+                            let pool = &crate::compress::body_pool();
+                            if let Some((blk, used)) = crate::compress::compress_with_dict(
+                                pool, body, pol.level, &dict, ver,
+                            ) {
+                                owned_buf = Some((blk, used, pool.clone()));
+                            }
+                        } else {
+                            let pool = &crate::compress::body_pool();
+                            if let Some((blk, used)) = cm.compress_to_pool(pool, body) {
+                                owned_buf = Some((blk, used, pool.clone()));
+                            }
+                        }
+                    } else {
+                        let pool = &crate::compress::body_pool();
+                        if let Some((blk, used)) = cm.compress_to_pool(pool, body) {
+                            owned_buf = Some((blk, used, pool.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((blk, used, _pool)) = &owned_buf {
+            to_send = &blk[..*used];
+            // Note: freed after frame is sent
+        }
+        let mut frame = Vec::new();
+        frame.push(0x00);
+        Self::encode_varint(to_send.len() as u64, &mut frame);
+        frame.extend_from_slice(to_send);
+        let sent = conn.stream_send(stream_id, &frame, fin).map_err(|_| Error::InternalError)?;
+        // Telemetry
+        crate::optimize::telemetry::H3_FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::optimize::telemetry::H3_DATA_BYTES
+            .fetch_add(to_send.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        if let Some((blk, _used, pool)) = owned_buf {
+            pool.free(blk);
+        }
+        stream_state.sent_bytes += sent;
+        stream_state.fin_sent = fin;
+        if fin {
+            // Local FIN: mark as finished for GC, but do not set fin_received here.
+            self.finished_streams.insert(stream_id);
+        }
+        Ok(body.len())
+    }
+
+    /// Receives body data
+    pub fn recv_body(
+        &mut self,
+        _conn: &mut super::Connection,
+        stream_id: u64,
+        out: &mut [u8],
+    ) -> Result<usize, Error> {
+        // Return buffered DATA-frame payload accumulated by process_stream(). Returns 0
+        // when the buffer is currently drained (caller's read loop stops on 0), and
+        // Error::Done when the stream is unknown.
+        let st = self.streams.get_mut(&stream_id).ok_or(Error::Done)?;
+        if st.body_buffer.is_empty() {
+            return Ok(0);
+        }
+        let len = std::cmp::min(out.len(), st.body_buffer.len());
+        out[..len].copy_from_slice(&st.body_buffer[..len]);
+        st.body_buffer.drain(..len);
+        Ok(len)
+    }
+
+    /// Process HTTP/3 frames and generate events
+    pub fn poll(&mut self, conn: &mut super::Connection) -> Result<Option<(u64, Event)>, Error> {
+        // Process scheduled push streams and continue sending bodies
+        self.process_scheduled_push_streams(conn);
+        self.process_push_data(conn);
+
+        // Process incoming readable streams (requests, responses, MASQUE, etc).
+        // The transport marks streams readable when STREAM frames deliver data.
+        while let Some(stream_id) = conn.stream_readable_next() {
+            self.process_stream(conn, stream_id)?;
+        }
+
+        // Lightweight GC using fin_received
+        let done: Vec<u64> = self
+            .streams
+            .iter()
+            .filter_map(|(id, st)| if st.fin_received { Some(*id) } else { None })
+            .collect();
+        for id in done {
+            self.streams.remove(&id);
+        }
+        self.pending_events.pop_front().map(Some).ok_or(Error::Done)
+    }
+
+    /// **STEALTH FEATURE**: Create server push promise for cover traffic
+    /// This generates realistic HTTP/3 server push traffic to mask real data flows
+    fn create_stealth_push_promise(
+        &mut self,
+        path: &str,
+        content_type: &str,
+        size_bytes: usize,
+    ) -> Result<u64, Error> {
+        let push_id = self.next_push_id;
+        self.next_push_id += 4; // Skip to next server push ID
+
+        // Create realistic push promise headers
+        let headers = vec![
+            Header::new(b":method", b"GET"),
+            Header::new(b":path", path.as_bytes()),
+            Header::new(b":scheme", b"https"),
+            Header::new(b":authority", b"cdn.example.com"), // Fake CDN
+            Header::new(b"content-type", content_type.as_bytes()),
+            Header::new(b"cache-control", b"public, max-age=31536000"),
+            Header::new(b"x-cdn-cache", b"HIT"), // Fake CDN headers for realism
+        ];
+
+        // Generate realistic cover payload (fake CSS/JS/images)
+        let cover_payload = match content_type {
+            "text/css" => generate_fake_css(size_bytes),
+            "application/javascript" => generate_fake_js(size_bytes),
+            "image/jpeg" | "image/png" => generate_fake_image_data(size_bytes),
+            _ => vec![0x20; size_bytes], // Generic padding
+        };
+
+        let push_promise = PushPromise {
+            headers,
+            state: PushState::Promised,
+            cover_payload,
+            scheduled_at: std::time::Instant::now()
+                + std::time::Duration::from_millis(
+                    50 + (push_id % 200), // Realistic 50-250ms delay
+                ),
+        };
+
+        self.push_streams.insert(push_id, push_promise);
+        // Telemetry
+        crate::telemetry::STEALTH_PUSH_PROMISES.inc();
+        crate::telemetry::STEALTH_PUSH_BYTES
+            .fetch_add(size_bytes as u64, std::sync::atomic::Ordering::Relaxed);
+        Ok(push_id)
+    }
+
+    /// Process scheduled push streams (called from poll)
+    fn process_scheduled_push_streams(&mut self, conn: &mut super::Connection) {
+        let now = std::time::Instant::now();
+        let mut ready_streams = Vec::new();
+
+        for (&stream_id, promise) in &self.push_streams {
+            if promise.scheduled_at <= now && promise.state == PushState::Promised {
+                ready_streams.push(stream_id);
+            }
+        }
+
+        for stream_id in ready_streams {
+            let Some(promise) = self.push_streams.get(&stream_id) else { continue };
+            let headers = promise.headers.clone();
+            let headers_for_stream = headers.clone();
+            let cover_payload = promise.cover_payload.clone();
+            let encoded = match self.encode_headers_block(&headers) {
+                Ok(encoded) => encoded,
+                Err(_) => continue,
+            };
+
+            let mut frame = Vec::new();
+            frame.push(0x01); // HEADERS
+            Self::encode_varint(encoded.len() as u64, &mut frame);
+            frame.extend_from_slice(&encoded);
+            if conn.stream_send(stream_id, &frame, false).is_err() {
+                // Retry on next poll once flow-control or transport pressure clears.
+                continue;
+            }
+
+            // Queue push promise event only once HEADERS are really queued at transport level.
+            self.pending_events
+                .push_back((stream_id, Event::PushPromise { push_id: stream_id, headers }));
+
+            // Register stream with body and switch to DataSending
+            self.streams.insert(
+                stream_id,
+                StreamState {
+                    _headers: headers_for_stream,
+                    body_buffer: cover_payload,
+                    frame_buffer: Vec::new(),
+                    _received_bytes: 0,
+                    _stream_type: StreamType::Push,
+                    sent_bytes: 0,
+                    fin_sent: false,
+                    fin_received: false,
+                    _stream_type_dup: StreamType::Push,
+                    masque_established: false,
+                },
+            );
+            if let Some(promise) = self.push_streams.get_mut(&stream_id) {
+                promise.state = PushState::DataSending;
+            }
+            crate::optimize::telemetry::H3_FRAMES
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            crate::optimize::telemetry::H3_HEADERS
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    fn process_push_data(&mut self, conn: &mut super::Connection) {
+        const CHUNK: usize = 16 * 1024;
+        let mut completed = Vec::new();
+        for (stream_id, st) in self.streams.iter_mut() {
+            if st._stream_type != StreamType::Push || st.fin_sent {
+                continue;
+            }
+            let total = st.body_buffer.len();
+            if st.sent_bytes < total {
+                let remaining = total - st.sent_bytes;
+                let take = remaining.min(CHUNK);
+                let start = st.sent_bytes;
+                let end = start + take;
+                let mut frame = Vec::new();
+                frame.push(0x00); // DATA
+                Self::encode_varint(take as u64, &mut frame);
+                frame.extend_from_slice(&st.body_buffer[start..end]);
+                let fin = end == total;
+                if conn.stream_send(*stream_id, &frame, fin).is_ok() {
+                    st.sent_bytes += take;
+                    st.fin_sent = fin;
+                    crate::optimize::telemetry::H3_FRAMES
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    crate::optimize::telemetry::H3_DATA_BYTES
+                        .fetch_add(take as u64, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            if st.fin_sent {
+                completed.push(*stream_id);
+            }
+        }
+        for sid in completed {
+            self.finished_streams.insert(sid);
+            self.pending_events.push_back((sid, Event::Finished));
+            // Mark corresponding push promise as complete
+            if let Some(p) = self.push_streams.get_mut(&sid) {
+                p.state = PushState::Complete;
+            }
+        }
+    }
+
+    /// **STEALTH FEATURE**: Generate burst of cover traffic push promises
+    /// Simulates realistic web page loading with multiple resources
+    pub(crate) fn generate_stealth_cover_burst(
+        &mut self,
+        base_path: &str,
+    ) -> Result<Vec<u64>, Error> {
+        let mut push_ids = Vec::new();
+        let plan =
+            Self::build_stealth_cover_resource_plan(base_path, crate::transport::rand::rand_u64());
+
+        for (path, content_type, size) in plan {
+            let push_id = self.create_stealth_push_promise(&path, content_type, size)?;
+            push_ids.push(push_id);
+        }
+
+        Ok(push_ids)
+    }
+    fn process_stream(
+        &mut self,
+        conn: &mut super::Connection,
+        stream_id: u64,
+    ) -> Result<(), Error> {
+        // Streams explicitly marked as non-HTTP/3 (e.g. raw cover traffic) are drained
+        // and discarded. This keeps the H3 parser strict while allowing other QUIC
+        // sub-protocols to share the connection.
+        if self.ignored_streams.contains(&stream_id) {
+            let mut discard = [0u8; 65536];
+            loop {
+                match conn.stream_recv(stream_id, &mut discard) {
+                    Ok((0, false)) => break,
+                    Ok((_, true)) => break,
+                    Ok(_) => continue,
+                    Err(_) => break,
+                }
+            }
+            return Ok(());
+        }
+
+        let mut buf = vec![0u8; 65536];
+        let (len, fin) = conn.stream_recv(stream_id, &mut buf).map_err(|_| Error::InternalError)?;
+        if len == 0 && !fin {
+            return Ok(());
+        }
+        buf.truncate(len);
+        // Track state for peer-initiated streams (e.g. incoming requests) so DATA payload
+        // can be buffered and returned by recv_body(). Locally-opened streams are already
+        // present; this fills in the gap for streams we first observe here.
+        self.streams.entry(stream_id).or_insert_with(|| StreamState {
+            _headers: Vec::new(),
+            body_buffer: Vec::new(),
+            frame_buffer: Vec::new(),
+            _received_bytes: 0,
+            _stream_type: StreamType::Request,
+            sent_bytes: 0,
+            fin_sent: false,
+            fin_received: false,
+            _stream_type_dup: StreamType::Request,
+            masque_established: false,
+        });
+        const MAX_BUFFERED_H3_FRAME: usize = 1024 * 1024 + 16;
+        let buffered = {
+            let stream = self.streams.get_mut(&stream_id).ok_or(Error::IdError)?;
+            let buffered_len =
+                stream.frame_buffer.len().checked_add(buf.len()).ok_or(Error::ExcessiveLoad)?;
+            if buffered_len > MAX_BUFFERED_H3_FRAME {
+                log::warn!(
+                    "H3 ExcessiveLoad: stream={} buffered_len={} frame_buffer={} recv_chunk={}",
+                    stream_id,
+                    buffered_len,
+                    stream.frame_buffer.len(),
+                    buf.len()
+                );
+                return Err(Error::ExcessiveLoad);
+            }
+            stream.frame_buffer.extend_from_slice(&buf);
+            std::mem::take(&mut stream.frame_buffer)
+        };
+
+        // Parse complete frames and retain an incomplete tail for the next STREAM chunk.
+        let mut offset = 0;
+        while offset < buffered.len() {
+            let (frame_type, frame_len, frame_offset) =
+                match Self::parse_frame_header(&buffered[offset..]) {
+                    Ok(header) => header,
+                    Err(Error::BufferTooShort) => break,
+                    Err(error) => return Err(error),
+                };
+            if frame_len > 1024 * 1024 {
+                let preview_end = (offset + 32).min(buffered.len());
+                log::warn!(
+                    "H3 ExcessiveLoad: stream={} frame_type=0x{:02x} frame_len={} offset={} buffered={} preview={:02x?}",
+                    stream_id,
+                    frame_type,
+                    frame_len,
+                    offset,
+                    buffered.len(),
+                    &buffered[offset..preview_end]
+                );
+                return Err(Error::ExcessiveLoad);
+            }
+            let body_start = offset + frame_offset;
+            let body_end = match body_start.checked_add(frame_len) {
+                Some(end) if end <= buffered.len() => end,
+                _ => break,
+            };
+            let frame_data = &buffered[body_start..body_end];
+            match frame_type {
+                0x00 => {
+                    // DATA frame; if this stream is MASQUE, decode capsules
+                    let is_masque = self
+                        .streams
+                        .get(&stream_id)
+                        .map(|st| matches!(st._stream_type, StreamType::Masque))
+                        .unwrap_or(false);
+                    if is_masque {
+                        let mut pos = 0usize;
+                        while pos < frame_data.len() {
+                            match Self::decode_capsule(&frame_data[pos..]) {
+                                Ok((ctype, used, payload)) => {
+                                    self.pending_events.push_back((
+                                        stream_id,
+                                        Event::MasqueCapsule { capsule_type: ctype, payload },
+                                    ));
+                                    if used == 0 {
+                                        break;
+                                    }
+                                    pos += used;
+                                }
+                                Err(_) => {
+                                    break;
+                                }
+                            }
+                        }
+                    } else {
+                        // Buffer the DATA payload so recv_body() returns the real body bytes
+                        // (e.g. the IP packets tunneled over an H3 stream), then signal Data.
+                        if let Some(st) = self.streams.get_mut(&stream_id) {
+                            st.body_buffer.extend_from_slice(frame_data);
+                        }
+                        self.pending_events.push_back((stream_id, Event::Data));
+                    }
+                }
+                0x01 => {
+                    let headers = self.decoder.decode(frame_data)?;
+                    let event = Event::Headers { list: headers, has_body: !fin };
+                    self.pending_events.push_back((stream_id, event));
+                    if let Some(st) = self.streams.get_mut(&stream_id) {
+                        if matches!(st._stream_type, StreamType::Masque) {
+                            st.masque_established = true;
+                        }
+                    }
+                }
+                0x04 => { /* SETTINGS */ }
+                _ => {}
+            }
+            offset += frame_offset + frame_len;
+        }
+        if offset != buffered.len() {
+            let stream = self.streams.get_mut(&stream_id).ok_or(Error::IdError)?;
+            stream.frame_buffer.extend_from_slice(&buffered[offset..]);
+        }
+        if fin {
+            if self.streams.get(&stream_id).is_some_and(|stream| !stream.frame_buffer.is_empty()) {
+                return Err(Error::FrameError);
+            }
+            if let Some(state) = self.streams.get_mut(&stream_id) {
+                state.fin_received = true;
+            }
+            self.pending_events.push_back((stream_id, Event::Finished));
+        }
+        Ok(())
+    }
+
+    /// Parse frame header
+    fn parse_frame_header(buf: &[u8]) -> Result<(u8, usize, usize), Error> {
+        if buf.is_empty() {
+            return Err(Error::BufferTooShort);
+        }
+        let frame_type = buf[0];
+        let (frame_len, offset) = Self::decode_varint(&buf[1..])?;
+        Ok((frame_type, frame_len as usize, 1 + offset))
+    }
+
+    /// Encode variable-length integer (SIMD-dispatched)
+    fn encode_varint(val: u64, buf: &mut Vec<u8>) {
+        let mut tmp = [0u8; 10];
+        let used = crate::simd::transport::encode_varint(val, &mut tmp[..]);
+        buf.extend_from_slice(&tmp[..used]);
+    }
+
+    /// Decode variable-length integer (SIMD-dispatched)
+    fn decode_varint(buf: &[u8]) -> Result<(u64, usize), Error> {
+        match crate::simd::transport::decode_varint(buf) {
+            Some((v, used)) => Ok((v, used)),
+            None => Err(Error::BufferTooShort),
+        }
+    }
+
+    /// Decode one MASQUE capsule from a buffer
+    fn decode_capsule(buf: &[u8]) -> Result<(u64, usize, Vec<u8>), Error> {
+        if buf.is_empty() {
+            return Err(Error::BufferTooShort);
+        }
+        let (ctype, off1) = Self::decode_varint(buf)?;
+        let (clen, off2) = Self::decode_varint(&buf[off1..])?;
+        let need = off1 + off2 + clen as usize;
+        if buf.len() < need {
+            return Err(Error::BufferTooShort);
+        }
+        let payload = buf[off1 + off2..off1 + off2 + clen as usize].to_vec();
+        // MASQUE capsule telemetry (receive).
+        crate::optimize::telemetry::MASQUE_BYTES_RECEIVED.inc_by(payload.len() as u64);
+        match ctype {
+            0x00 => {
+                crate::optimize::telemetry::MASQUE_CAPSULE_00.inc();
+                crate::optimize::telemetry::MASQUE_CAPSULE_00_BYTES.inc_by(payload.len() as u64);
+            }
+            0x21 => {
+                crate::optimize::telemetry::MASQUE_CAPSULE_21.inc();
+                crate::optimize::telemetry::MASQUE_CAPSULE_21_BYTES.inc_by(payload.len() as u64);
+            }
+            0x22 => {
+                crate::optimize::telemetry::MASQUE_CAPSULE_22.inc();
+                crate::optimize::telemetry::MASQUE_CAPSULE_22_BYTES.inc_by(payload.len() as u64);
+            }
+            _ => {}
+        }
+        Ok((ctype, need, payload))
+    }
+
+    /// Establish a MASQUE CONNECT-UDP stream and return its stream id (keeps stream open).
+    pub fn connect_udp(
+        &mut self,
+        conn: &mut super::Connection,
+        proxy: &str,
+        target: &str,
+    ) -> Result<u64, Error> {
+        self.connect_udp_with_headers(conn, proxy, target, &[])
+    }
+
+    /// Establish a MASQUE CONNECT-UDP stream with additional request headers.
+    pub fn connect_udp_with_headers(
+        &mut self,
+        conn: &mut super::Connection,
+        proxy: &str,
+        target: &str,
+        extra_headers: &[Header],
+    ) -> Result<u64, Error> {
+        // Split target "host:port" into MASQUE path segments; fallback to old style if no ':'
+        let (host, port) = match target.rsplit_once(':') {
+            Some((h, p)) => (h, p),
+            None => (target, "443"),
+        };
+        let path = format!("/.well-known/masque/udp/{}/{}/", host, port);
+        let mut headers = vec![
+            Header::new(b":method", b"CONNECT"),
+            Header::new(b":protocol", b"connect-udp"),
+            Header::new(b":scheme", b"https"),
+            Header::new(b":authority", proxy.as_bytes()),
+            Header::new(b":path", path.as_bytes()),
+            Header::new(b"capsule-protocol", b"?1"),
+        ];
+        headers.extend_from_slice(extra_headers);
+        // Send request without FIN
+        let sid = self.send_request(conn, &headers, false)?;
+        if let Some(st) = self.streams.get_mut(&sid) {
+            st._stream_type = StreamType::Masque;
+            st._stream_type_dup = StreamType::Masque;
+        }
+        Ok(sid)
+    }
+
+    /// Open a bounded WebTransport-looking H3 cover session.
+    ///
+    /// This is cover traffic only. It does not own VPN/TUN payload routing and
+    /// deliberately does not compete with the production MASQUE CONNECT-UDP
+    /// carrier.
+    pub(crate) fn open_webtransport_cover_session(
+        &mut self,
+        conn: &mut super::Connection,
+        authority: &str,
+        path: &str,
+    ) -> Result<u64, Error> {
+        let headers = vec![
+            Header::new(b":method", b"CONNECT"),
+            Header::new(b":protocol", b"webtransport"),
+            Header::new(b":scheme", b"https"),
+            Header::new(b":authority", authority.as_bytes()),
+            Header::new(b":path", path.as_bytes()),
+            Header::new(b"origin", format!("https://{authority}").as_bytes()),
+        ];
+        let sid = self.send_request(conn, &headers, false)?;
+        if let Some(st) = self.streams.get_mut(&sid) {
+            st._stream_type = StreamType::WebTransportCover;
+            st._stream_type_dup = StreamType::WebTransportCover;
+        }
+        Ok(sid)
+    }
+
+    /// Enable MASQUE DATAGRAM for a CONNECT-UDP stream; returns Flow-ID (default 0)
+    pub fn enable_masque_datagram(
+        &mut self,
+        conn: &mut super::Connection,
+        stream_id: u64,
+    ) -> Result<u64, Error> {
+        // Provision QUIC DATAGRAM queues (idempotent)
+        conn.enable_datagrams(256, 256);
+        let flow_id = 0u64;
+        self.masque_flow.insert(stream_id, flow_id);
+        Ok(flow_id)
+    }
+
+    /// Send a MASQUE UDP payload via QUIC DATAGRAM using the negotiated Flow-ID
+    pub fn send_masque_datagram(
+        &mut self,
+        conn: &mut super::Connection,
+        stream_id: u64,
+        udp_payload: &[u8],
+    ) -> Result<(), Error> {
+        let flow_id = *self.masque_flow.get(&stream_id).unwrap_or(&0);
+        let mut buf = Vec::with_capacity(9 + udp_payload.len());
+        Self::encode_varint(flow_id, &mut buf);
+        buf.extend_from_slice(udp_payload);
+        conn.dgram_send(&buf).map_err(|e| match e {
+            crate::error::ConnectionError::DgramQueueFull => Error::DgramQueueFull,
+            _ => Error::InternalError,
+        })
+    }
+
+    /// Try to receive one MASQUE datagram; returns (flow_id, payload)
+    pub fn try_recv_masque_datagram(
+        &mut self,
+        conn: &mut super::Connection,
+    ) -> Option<(u64, Vec<u8>)> {
+        let mut buf = vec![0u8; 2048];
+        match conn.dgram_recv(&mut buf[..]) {
+            Ok(len) if len > 0 => {
+                let slice = &buf[..len];
+                if let Ok((flow_id, used)) = Self::decode_varint(slice) {
+                    let payload = slice[used..].to_vec();
+                    return Some((flow_id, payload));
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Send a MASQUE capsule (raw) on the given CONNECT-UDP stream.
+    pub fn send_capsule(
+        &mut self,
+        conn: &mut super::Connection,
+        stream_id: u64,
+        capsule: &[u8],
+        fin: bool,
+    ) -> Result<(), Error> {
+        // Telemetry: decode capsule type and payload length.
+        if !capsule.is_empty() {
+            if let Ok((ctype, _need, payload)) = Self::decode_capsule(capsule) {
+                crate::optimize::telemetry::MASQUE_BYTES_SENT.inc_by(payload.len() as u64);
+                match ctype {
+                    0x00 => {
+                        crate::optimize::telemetry::MASQUE_CAPSULE_00.inc();
+                        crate::optimize::telemetry::MASQUE_CAPSULE_00_BYTES
+                            .inc_by(payload.len() as u64);
+                    }
+                    0x21 => {
+                        crate::optimize::telemetry::MASQUE_CAPSULE_21.inc();
+                        crate::optimize::telemetry::MASQUE_CAPSULE_21_BYTES
+                            .inc_by(payload.len() as u64);
+                    }
+                    0x22 => {
+                        crate::optimize::telemetry::MASQUE_CAPSULE_22.inc();
+                        crate::optimize::telemetry::MASQUE_CAPSULE_22_BYTES
+                            .inc_by(payload.len() as u64);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        self.send_body(conn, stream_id, capsule, fin).map(|_| ())
+    }
+
+    /// Build a MASQUE capsule: varint type, varint length, payload
+    pub fn encode_capsule(capsule_type: u64, payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(2 + payload.len());
+        Self::encode_varint(capsule_type, &mut out);
+        Self::encode_varint(payload.len() as u64, &mut out);
+        out.extend_from_slice(payload);
+        out
+    }
+
+    /// Register a DATAGRAM context for MASQUE with given Flow-ID and Context-ID
+    pub fn register_datagram_context(
+        &mut self,
+        conn: &mut super::Connection,
+        stream_id: u64,
+        flow_id: u64,
+        context_id: u64,
+    ) -> Result<(), Error> {
+        // Capsule type chosen in private range (spec types vary by draft)
+        const REGISTER_CTX: u64 = 0x30;
+        let mut payload = Vec::with_capacity(16);
+        Self::encode_varint(flow_id, &mut payload);
+        Self::encode_varint(context_id, &mut payload);
+        let cap = Self::encode_capsule(REGISTER_CTX, &payload);
+        self.send_capsule(conn, stream_id, &cap, false)?;
+        self.masque_flow.insert(stream_id, flow_id);
+        Ok(())
+    }
+
+    /// Build a compressed UDP capsule (custom type 0x21) when beneficial.
+    pub fn encode_udp_compress_capsule(
+        &self,
+        conn: &super::Connection,
+        payload: &[u8],
+    ) -> Option<Vec<u8>> {
+        let pol = crate::compress::global_policy();
+        if !pol.enabled || payload.len() < pol.min_len {
+            return None;
+        }
+        if !crate::compress::CompressionManager::looks_textual(payload) {
+            return None;
+        }
+        let rtt = conn.rtt().as_millis() as f32;
+        let bw = conn.delivery_rate();
+        let cm = crate::compress::CompressionManager::new(crate::compress::CompressionConfig {
+            min_len: pol.min_len,
+            max_level: pol.level,
+        });
+        if !cm.should_compress(payload.len(), rtt, 0.0, bw) {
+            return None;
+        }
+        let pool = conn.dgram_pool_or_global();
+        if let Some((blk, used)) = cm.compress_to_pool(&pool, payload) {
+            let capsule = Self::encode_capsule(0x21, &blk[..used]);
+            pool.free(blk);
+            return Some(capsule);
+        }
+        None
+    }
+
+    pub fn masque_established(&self, stream_id: u64) -> bool {
+        self.streams.get(&stream_id).map(|st| st.masque_established).unwrap_or(false)
+    }
+
+    pub fn mark_masque_established(&mut self, stream_id: u64) {
+        if let Some(st) = self.streams.get_mut(&stream_id) {
+            st.masque_established = true;
+        }
+    }
+
+    pub fn masque_flow_active(&self) -> bool {
+        !self.masque_flow.is_empty()
+    }
+}

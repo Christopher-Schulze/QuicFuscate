@@ -84,7 +84,7 @@ QuicFuscate organizes its runtime into four explicit layers. This layering defin
 - production contract: transport, stealth, FEC, and data-plane crypto
 - examples:
   - `src/core.rs`
-  - `src/transport/connection.rs`
+  - `src/transport/connection/`
   - `src/crypto/` production ciphers (`Aegis128L`, `Morus1280_128`)
   - `src/fec/` public API (`auto` / `off` modes)
 
@@ -299,7 +299,7 @@ QuicFuscate uses a modular, consolidated layout:
 - `src/implementations/` (client/server runtime wiring, admin HTTP, QKey registry, platform integration).
 - `src/optimize/` (CPU/SIMD dispatch, memory/telemetry/perf-focused acceleration modules).
 The project is built as a single Rust crate that exposes a library and one CLI binary (`quicfuscate` with `client` and `server` subcommands).
-The transport subsystem uses `src/transport.rs` as the module root and focused submodules under `src/transport/` (`connection.rs`, `packet.rs`, `frames.rs`, `recovery.rs`, `udpfast.rs`, `batch.rs`, `config.rs`, `pn.rs`, `h3.rs`, `anti_replay.rs`, `xdp.rs`, `cc/`). The `cc/` directory contains the pluggable congestion control trait and implementations (`reno.rs`, `bbr2.rs`, `bbr3.rs`, `stealth_shaper.rs`). The io_uring batch sender lives in `src/optimize/uring_batch.rs` (feature-gated, Linux-only).
+The transport subsystem uses `src/transport.rs` as the module root and focused submodules under `src/transport/` (`connection/`, `packet.rs`, `frames.rs`, `recovery.rs`, `udpfast.rs`, `batch.rs`, `config.rs`, `pn.rs`, `h3.rs`, `anti_replay.rs`, `xdp.rs`, `cc/`). The `cc/` directory contains the pluggable congestion control trait and implementations (`reno.rs`, `bbr2.rs`, `bbr3.rs`, `stealth_shaper.rs`). The io_uring batch sender lives in `src/optimize/uring_batch.rs` (feature-gated, Linux-only).
 
 ## Technical Specifications
 

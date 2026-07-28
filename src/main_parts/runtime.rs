@@ -1,0 +1,1277 @@
+fn main() -> std::io::Result<()> {
+    // Quick CLI parse before full async startup (must happen before Tokio runtime
+    // because std::env::set_var is unsafe in multi-threaded contexts since Rust 1.66).
+    let args: Vec<String> = std::env::args().collect();
+    let worker_threads = {
+        let mut threads = 8usize; // default
+        if let Some(pos) = args.iter().position(|a| a == "--config") {
+            if let Some(cfg_path) = args.get(pos + 1) {
+                if let Ok(content) = std::fs::read_to_string(cfg_path) {
+                    if let Ok(engine_cfg) = quicfuscate::engine::EngineConfig::from_toml(&content) {
+                        if engine_cfg.optimization.num_worker_threads > 0 {
+                            threads = engine_cfg.optimization.num_worker_threads;
+                        }
+                    }
+                }
+            }
+        }
+        threads
+    };
+    if args.iter().any(|a| a == "--verbose" || a == "-v") {
+        std::env::set_var("RUST_LOG", "info");
+    }
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
+        .enable_all()
+        .build()?;
+    runtime.block_on(async_main())
+}
+
+async fn async_main() -> std::io::Result<()> {
+    let cli = Cli::parse();
+    let admin_log_buffer =
+        Arc::new(quicfuscate::implementations::server::admin_logs::AdminLogBuffer::new(4096));
+    if ADMIN_LOG_BUFFER.set(admin_log_buffer.clone()).is_err() {
+        log::debug!("ADMIN_LOG_BUFFER already initialized, reusing existing buffer");
+    }
+    // Register the Admin UI ring buffer as a secondary log sink so it keeps
+    // receiving entries regardless of the configured output format.
+    quicfuscate::logging::set_admin_sink(admin_log_buffer.clone());
+    // Initialize the production logger (structured JSON / size-rotating file /
+    // RFC 5424 syslog). Fall back to env_logger if it fails.
+    {
+        let logging_config = quicfuscate::engine::LoggingConfig::default();
+        if let Err(e) = quicfuscate::logging::init(&logging_config) {
+            // Fallback: env_logger with the same admin ring buffer forwarding.
+            use std::io::Write;
+            let mut builder = env_logger::Builder::new();
+            builder.filter_level(log::LevelFilter::Trace);
+            let buf = admin_log_buffer.clone();
+            builder.format(move |fmt, record| {
+                let msg = format!("{}", record.args());
+                buf.push(record.level(), &msg);
+                writeln!(fmt, "[{}] {}", record.level(), msg)
+            });
+            let _ = builder.try_init();
+            log::warn!("logging::init failed ({}); using env_logger fallback", e);
+        }
+    }
+    // Default runtime verbosity. Server and Admin UI may override via persisted log mode.
+    log::set_max_level(log::LevelFilter::Info);
+
+    // One-time validation of consolidated in-memory profiles.
+    // Logs warnings for any profile that doesn't pass the sanity checks.
+    {
+        // Validate profiles using stealth module's TlsClientHelloSpoofer
+        let results = quicfuscate::stealth::TlsClientHelloSpoofer::available_profiles()
+            .into_iter()
+            .map(|(b, o)| {
+                // Simple validation - check if we can generate a ClientHello
+                let ch =
+                    quicfuscate::stealth::tls_cover::TlsCover::generate_client_hello(b, o, None);
+                let res: Result<(), String> =
+                    if ch.len() > 100 { Ok(()) } else { Err("ClientHello too short".into()) };
+                (b, o, res)
+            })
+            .collect::<Vec<_>>();
+        let mut failures = 0usize;
+        for (b, o, res) in results {
+            if let Err(e) = res {
+                failures += 1;
+                warn!("profile validation failed for {:?}/{:?}: {}", b, o, e);
+            }
+        }
+        if failures > 0 {
+            warn!("{} profile(s) had validation issues; proceeding with best-effort.", failures);
+        } else {
+            info!("All consolidated browser profiles passed validation.");
+        }
+    }
+    if cli.telemetry {
+        use quicfuscate::telemetry::TELEMETRY_ENABLED;
+        TELEMETRY_ENABLED.store(true, Ordering::Relaxed);
+        // Spawn minimal telemetry HTTP server at /telemetry
+        quicfuscate::metrics::spawn_telemetry_server();
+    }
+
+    match cli.command {
+        Commands::Client {
+            remote,
+            local,
+            url,
+            shared,
+            ca_file,
+            no_utls,
+            debug_tls,
+            list_fingerprints,
+            verify_peer,
+            qkey,
+        } => {
+            let fec_mode = resolve_cli_fec_mode_override(shared.fec_mode);
+            run_client(
+                remote.as_str(),
+                local.as_str(),
+                url.as_str(),
+                shared.profile,
+                shared.os,
+                &shared.profile_seq,
+                shared.profile_interval,
+                fec_mode,
+                shared.pool_capacity,
+                shared.pool_block,
+                &shared.config,
+                &shared.fec_config,
+                shared.doh_provider.as_str(),
+                &shared.front_domain,
+                &ca_file,
+                no_utls,
+                debug_tls,
+                list_fingerprints,
+                verify_peer,
+                shared.disable_doh,
+                shared.disable_fronting,
+                shared.disable_http3,
+                shared.cc_algorithm,
+                shared.tun,
+                shared.tun_name,
+                shared.tun_mtu,
+                shared.tun_ip,
+                shared.tun_netmask,
+                shared.tun_ip6,
+                shared.tun_prefix6,
+                qkey.as_deref(),
+                shared.kill_switch,
+                shared.cleanup_firewall,
+                &shared.vpn_dns,
+                shared.heartbeat_timeout_ms,
+            )
+            .await?;
+        }
+        Commands::Server {
+            listen,
+            cert,
+            key,
+            shared,
+            admin_socket,
+            metrics_port,
+            admin_web,
+            admin_web_root,
+            admin_web_user,
+            admin_web_password,
+            qkey_ttl_secs,
+            qkey_store,
+            allow_client_to_client,
+            no_drop_privileges,
+            audit_log,
+        } => {
+            let fec_mode = resolve_cli_fec_mode_override(shared.fec_mode);
+            run_server(
+                listen.as_str(),
+                cert.as_path(),
+                key.as_path(),
+                shared.profile,
+                shared.os,
+                &shared.profile_seq,
+                shared.profile_interval,
+                fec_mode,
+                shared.pool_capacity,
+                shared.pool_block,
+                &shared.config,
+                &shared.fec_config,
+                shared.doh_provider.as_str(),
+                &shared.front_domain,
+                shared.disable_doh,
+                shared.disable_fronting,
+                shared.disable_http3,
+                shared.cc_algorithm,
+                shared.tun,
+                shared.tun_name,
+                shared.tun_mtu,
+                shared.tun_ip,
+                shared.tun_netmask,
+                shared.tun_ip6,
+                shared.tun_prefix6,
+                admin_socket,
+                metrics_port,
+                admin_web,
+                admin_web_root,
+                admin_web_user,
+                admin_web_password,
+                qkey_ttl_secs,
+                qkey_store,
+                allow_client_to_client,
+                no_drop_privileges,
+                audit_log,
+            )
+            .await?;
+        }
+        Commands::VerifyAuditLog { path } => {
+            quicfuscate::audit::AuditLog::verify_chain(&path)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            println!("Audit log chain valid: {}", path.display());
+        }
+        Commands::CrossFadeSim {} => {
+            run_crossfade_sim()?;
+        }
+        Commands::HighLossSim {} => {
+            run_high_loss_sim()?;
+        }
+        Commands::OptimizeProbe {} => {
+            run_optimize_probe()?;
+        }
+        #[cfg(feature = "benches")]
+        Commands::FecBench { packets, payload, mode, pool_capacity, block_size, warmup, json } => {
+            run_fec_bench(packets, payload, mode, pool_capacity, block_size, warmup, json)?;
+        }
+        #[cfg(feature = "benches")]
+        Commands::PoolBench { iterations, payload, pool_capacity, block_size, warmup, json } => {
+            run_pool_bench(iterations, payload, pool_capacity, block_size, warmup, json)?;
+        }
+        #[cfg(feature = "benches")]
+        Commands::CryptoBench { iterations, payload, mode, warmup, json } => {
+            run_crypto_bench(iterations, payload, mode, warmup, json)?;
+        }
+        #[cfg(feature = "benches")]
+        Commands::NetBench { iterations, payload, warmup, json } => {
+            run_net_bench(iterations, payload, warmup, json)?;
+        }
+        Commands::Capabilities { json: _ } => {
+            let _json = serde_json::json!({
+                "fec_bench": cfg!(feature = "benches"),
+                "pool_bench": cfg!(feature = "benches"),
+                "crypto_bench": cfg!(feature = "benches"),
+                "net_bench": cfg!(feature = "benches"),
+            });
+            println!("{}", _json);
+        }
+    }
+
+    use quicfuscate::telemetry::TELEMETRY_ENABLED;
+    if TELEMETRY_ENABLED.load(Ordering::Relaxed) {
+        quicfuscate::telemetry::flush();
+    }
+    Ok(())
+}
+
+fn run_crossfade_sim() -> std::io::Result<()> {
+    println!("[compat] Cross-fade simulation starting...");
+    let opt = OptimizationManager::new();
+    let _mem_pool = opt.memory_pool();
+    let mut fec = AdaptiveFec::new(FecConfig::default());
+    let mut last_mode = fec.current_mode();
+    println!(" initial mode: {:?}", last_mode);
+
+    let phases: &[(usize, usize, usize)] = &[
+        (0, 100, 16),  // clean
+        (10, 100, 16), // light loss
+        (30, 100, 24), // moderate
+        (50, 100, 24), // heavy
+        (10, 100, 16), // recover
+    ];
+    for (lost, total, iters) in phases {
+        for _ in 0..*iters {
+            fec.report_loss(*lost, *total);
+            let m = fec.current_mode();
+            if m != last_mode || fec.is_transitioning() {
+                println!(
+                    " mode: {:?}  transitioning: {}  (loss={}/{})",
+                    m,
+                    fec.is_transitioning(),
+                    lost,
+                    total
+                );
+                last_mode = m;
+            }
+        }
+    }
+    println!("[compat] Cross-fade simulation complete. final mode: {:?}", last_mode);
+    Ok(())
+}
+
+fn run_high_loss_sim() -> std::io::Result<()> {
+    println!("[compat] High-loss simulation starting...");
+    let opt = OptimizationManager::new();
+    let _mem_pool = opt.memory_pool();
+    let mut fec = AdaptiveFec::new(FecConfig::default());
+    let mut last_mode = fec.current_mode();
+    println!(" initial mode: {:?}", last_mode);
+    for _ in 0..64 {
+        fec.report_loss(70, 100);
+        let m = fec.current_mode();
+        if m != last_mode || fec.is_transitioning() {
+            println!(" mode: {:?}  transitioning: {}", m, fec.is_transitioning());
+            last_mode = m;
+        }
+    }
+    println!("[compat] High-loss simulation complete. final mode: {:?}", last_mode);
+    Ok(())
+}
+
+fn run_optimize_probe() -> std::io::Result<()> {
+    println!("[compat] Optimization probe starting...");
+    let opt = OptimizationManager::new_with_config(64, 4096);
+    println!(" xdp_compat_request_normalized=false active=false");
+    // Exercise the memory pool
+    let b1 = opt.alloc_block();
+    let b2 = opt.alloc_block();
+    println!(" allocated two blocks: {} + {} bytes", b1.len(), b2.len());
+    // Touch memory to exercise NUMA moves where applicable
+    let mut b1 = b1;
+    let mut b2 = b2;
+    if !b1.is_empty() {
+        b1[0] = 1;
+    }
+    if !b2.is_empty() {
+        b2[0] = 2;
+    }
+    opt.free_block(b1);
+    opt.free_block(b2);
+    // Adjust capacity dynamically
+    let pool = opt.memory_pool();
+    pool.set_capacity(128);
+    println!(" pool capacity adjusted to 128 (probe)");
+    println!("[compat] Optimization probe complete.");
+    Ok(())
+}
+
+fn load_runtime_profiles(
+    config_path: Option<&PathBuf>,
+    fec_config: &Option<PathBuf>,
+    fec_mode_override: Option<quicfuscate::engine::FecMode>,
+) -> (FecConfig, StealthConfig, OptimizeConfig, quicfuscate::engine::AntiReplaySection) {
+    let (mut fec, stealth, optimize, anti_replay) = if let Some(cfg) = config_path {
+        match AppConfig::from_file(cfg) {
+            Ok(c) => {
+                if let Err(e) = c.validate() {
+                    warn!("Config validation failed: {}", e);
+                }
+                quicfuscate::implementations::server::runtime_components_from_app_config(
+                    c,
+                    fec_mode_override,
+                )
+            }
+            Err(e) => {
+                error!("Failed to load config {}: {}", cfg.display(), e);
+                (
+                    FecConfig::product_default(),
+                    StealthConfig::default(),
+                    OptimizeConfig::default(),
+                    quicfuscate::engine::AntiReplaySection::default(),
+                )
+            }
+        }
+    } else {
+        let fec = if let Some(path) = fec_config {
+            match FecConfig::from_file(path) {
+                Ok(cfg) => {
+                    if let Err(e) = cfg.validate() {
+                        warn!("FEC config validation failed: {}", e);
+                    }
+                    cfg
+                }
+                Err(e) => {
+                    error!("Failed to load FEC config {}: {}", path.display(), e);
+                    FecConfig::product_default()
+                }
+            }
+        } else {
+            FecConfig::product_default()
+        };
+        (
+            fec,
+            StealthConfig::default(),
+            OptimizeConfig::default(),
+            quicfuscate::engine::AntiReplaySection::default(),
+        )
+    };
+
+    if let Some(mode) = fec_mode_override {
+        fec.apply_engine_mode(mode);
+    }
+
+    (fec, stealth, optimize, anti_replay)
+}
+
+fn apply_runtime_transport_defaults(
+    config: &mut quicfuscate::transport::Config,
+    cc_algorithm: CcAlgorithm,
+) {
+    config.set_cc_algorithm(cc_algorithm.into());
+    if let Err(e) =
+        config.set_application_protos(&[b"hq-interop", b"h3-29", b"h3-28", b"h3-27", b"http/0.9"])
+    {
+        warn!("Failed to set application protos: {}", e);
+    }
+    config.set_max_idle_timeout(30000);
+    config.set_max_recv_udp_payload_size(1500);
+    config.set_max_send_udp_payload_size(1500);
+    config.set_initial_max_data(10_000_000);
+    config.set_initial_max_stream_data_bidi_local(1_000_000);
+    config.set_initial_max_stream_data_bidi_remote(1_000_000);
+    config.set_initial_max_streams_bidi(100);
+    config.set_initial_max_streams_uni(100);
+}
+
+fn new_runtime_transport_config(
+) -> Result<quicfuscate::transport::Config, quicfuscate::error::ConnectionError> {
+    let mut config = quicfuscate::transport::Config::new_with_version(
+        quicfuscate::transport::PROTOCOL_VERSION_V2,
+    )?;
+    config.set_supported_versions(vec![
+        quicfuscate::transport::PROTOCOL_VERSION_V2,
+        quicfuscate::transport::PROTOCOL_VERSION,
+    ])?;
+    Ok(config)
+}
+
+fn runtime_optimize_config(
+    config_path: Option<&PathBuf>,
+    opt_cfg: OptimizeConfig,
+    pool_capacity: usize,
+    pool_block: usize,
+    origin: &str,
+) -> OptimizeConfig {
+    if config_path.is_some() {
+        quicfuscate::implementations::server::normalize_runtime_optimize_config(
+            OptimizeConfig { pool_capacity: opt_cfg.pool_capacity, block_size: opt_cfg.block_size },
+            origin,
+        )
+    } else {
+        OptimizeConfig { pool_capacity, block_size: pool_block }
+    }
+}
+
+fn derive_client_pool_for_tun(
+    server_ip: Ipv4Addr,
+    netmask: Ipv4Addr,
+) -> Option<(Ipv4Addr, Ipv4Addr)> {
+    let ip = u32::from(server_ip);
+    let mask = u32::from(netmask);
+    let network = ip & mask;
+    let broadcast = network | !mask;
+    let first_host = network.checked_add(1)?;
+    let last_host = broadcast.checked_sub(1)?;
+    if first_host > last_host {
+        return None;
+    }
+
+    if ip < last_host {
+        let start = ip.checked_add(1)?;
+        if start <= last_host {
+            return Some((Ipv4Addr::from(start), Ipv4Addr::from(last_host)));
+        }
+    }
+
+    if ip > first_host {
+        let end = ip.checked_sub(1)?;
+        if first_host <= end {
+            return Some((Ipv4Addr::from(first_host), Ipv4Addr::from(end)));
+        }
+    }
+
+    None
+}
+
+fn apply_standalone_tun_server_config(
+    server_config: &mut quicfuscate::implementations::server::ServerConfig,
+    tun_ip: Option<&str>,
+    tun_netmask: Option<&str>,
+    tun_ip6: Option<&str>,
+    tun_prefix6: Option<u8>,
+) -> std::io::Result<()> {
+    if let Some(tun_ip) = tun_ip {
+        let server_ip = tun_ip.parse::<Ipv4Addr>().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("invalid --tun-ip: {e}"))
+        })?;
+        let netmask = match tun_netmask {
+            Some(mask) => mask.parse::<Ipv4Addr>().map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("invalid --tun-netmask: {e}"),
+                )
+            })?,
+            None => server_config.server_netmask,
+        };
+        let Some((pool_start, pool_end)) = derive_client_pool_for_tun(server_ip, netmask) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("no usable client IP pool for TUN address {server_ip}/{netmask}"),
+            ));
+        };
+
+        server_config.server_ip = server_ip;
+        server_config.server_netmask = netmask;
+        server_config.ip_pool_start = pool_start;
+        server_config.ip_pool_end = pool_end;
+    }
+
+    if tun_ip6.is_some() || tun_prefix6.is_some() {
+        let server_ip = match tun_ip6 {
+            Some(value) => value.parse::<Ipv6Addr>().map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("invalid --tun-ip6: {error}"),
+                )
+            })?,
+            None => server_config.ipv6_server_ip.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "--tun-prefix6 requires an IPv6 server address",
+                )
+            })?,
+        };
+        let prefix = tun_prefix6.unwrap_or(server_config.ipv6_prefix_len);
+        let Some((pool_start, pool_end)) = derive_ipv6_client_pool_for_tun(server_ip, prefix)
+        else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("no usable client IPv6 pool for TUN address {server_ip}/{prefix}"),
+            ));
+        };
+        server_config.ipv6_server_ip = Some(server_ip);
+        server_config.ipv6_prefix_len = prefix;
+        server_config.ipv6_pool_start = Some(pool_start);
+        server_config.ipv6_pool_end = Some(pool_end);
+    }
+    Ok(())
+}
+
+fn derive_ipv6_client_pool_for_tun(
+    server_ip: Ipv6Addr,
+    prefix: u8,
+) -> Option<(Ipv6Addr, Ipv6Addr)> {
+    if prefix == 0 || prefix > 128 {
+        return None;
+    }
+    let server = u128::from(server_ip);
+    let mask = u128::MAX << (128 - prefix);
+    let network = server & mask;
+    let last = network | !mask;
+    let first_host = network.checked_add(1)?;
+    if first_host > last || server < network || server > last {
+        return None;
+    }
+
+    if server < last {
+        let start = server.checked_add(1)?;
+        let end = start.saturating_add(252).min(last);
+        return Some((Ipv6Addr::from(start), Ipv6Addr::from(end)));
+    }
+    if server > first_host {
+        let end = server.checked_sub(1)?;
+        let start = end.saturating_sub(252).max(first_host);
+        return Some((Ipv6Addr::from(start), Ipv6Addr::from(end)));
+    }
+    None
+}
+
+fn client_packet_too_big_response(packet: &[u8], tunnel_mtu: usize) -> Vec<u8> {
+    match packet.first().map(|byte| byte >> 4) {
+        Some(4) if packet.len() >= 20 => {
+            let destination = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
+            quicfuscate::implementations::server::icmp::build_icmpv4_error(
+                packet,
+                destination,
+                quicfuscate::implementations::server::icmp::icmp_type::DESTINATION_UNREACHABLE,
+                quicfuscate::implementations::server::icmp::icmp_code::FRAGMENTATION_NEEDED,
+                u16::try_from(tunnel_mtu).ok(),
+            )
+        }
+        Some(6) if packet.len() >= 40 => {
+            let destination =
+                Ipv6Addr::from(<[u8; 16]>::try_from(&packet[24..40]).unwrap_or([0; 16]));
+            quicfuscate::implementations::server::icmp::build_icmpv6_error(
+                packet,
+                destination,
+                quicfuscate::implementations::server::icmp::icmpv6_type::PACKET_TOO_BIG,
+                Some(tunnel_mtu.min(u32::MAX as usize) as u32),
+            )
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn send_client_tun_packet(
+    conn: &mut QuicFuscateConnection,
+    tun: &quicfuscate::interface::TunInterface,
+    stream_id: u64,
+    packet: &[u8],
+) -> Result<(), ConnectionError> {
+    let tunnel_mtu = conn.effective_tunnel_mtu().min(usize::from(tun.mtu()));
+    if packet.len() <= tunnel_mtu {
+        return conn.send_tunnel_packet(stream_id, packet);
+    }
+
+    let response = client_packet_too_big_response(packet, tunnel_mtu);
+    if response.is_empty() {
+        return Err(ConnectionError::BufferTooShort);
+    }
+    tun.write(&response).map_err(|error| ConnectionError::from(error.to_string()))?;
+    Ok(())
+}
+
+/// Drain TUN frames from `rx` and forward them through `conn` without dropping
+/// a frame that encounters DATAGRAM queue backpressure. A backpressured frame
+/// is held in `backlog` and retried on the next call before new frames.
+fn drain_client_tun_uplink(
+    conn: &mut QuicFuscateConnection,
+    tun: &quicfuscate::interface::TunInterface,
+    sid: u64,
+    rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+    backlog: &mut Option<Vec<u8>>,
+) {
+    if let Some(frame) = backlog.take() {
+        match send_client_tun_packet(conn, tun, sid, &frame) {
+            Ok(()) => {}
+            Err(quicfuscate::error::ConnectionError::DgramQueueFull) => {
+                *backlog = Some(frame);
+                return;
+            }
+            Err(e) => {
+                warn!("TUN packet send failed: {:?}", e);
+                return;
+            }
+        }
+    }
+
+    for _ in 0..16 {
+        match rx.try_recv() {
+            Ok(frame) => match send_client_tun_packet(conn, tun, sid, &frame) {
+                Ok(()) => {}
+                Err(quicfuscate::error::ConnectionError::DgramQueueFull) => {
+                    *backlog = Some(frame);
+                    break;
+                }
+                Err(e) => {
+                    warn!("TUN packet send failed: {:?}", e);
+                    break;
+                }
+            },
+            Err(std::sync::mpsc::TryRecvError::Empty) => break,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+        }
+    }
+}
+
+fn synchronize_client_tun_mtu(
+    conn: &QuicFuscateConnection,
+    tun: &quicfuscate::interface::TunInterface,
+    configured_ceiling: u16,
+) -> std::io::Result<()> {
+    let target =
+        configured_ceiling.min(u16::try_from(conn.effective_tunnel_mtu()).unwrap_or(u16::MAX));
+    if tun.mtu() != target {
+        tun.set_mtu(target)?;
+        info!("Client TUN MTU updated to {}", target);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_client(
+    remote_addr_str: &str,
+    local_addr_str: &str,
+    url: &str,
+    profile: BrowserProfile,
+    os: OsProfile,
+    profile_seq: &Option<Vec<String>>,
+    profile_interval: u64,
+    fec_mode: Option<quicfuscate::engine::FecMode>,
+    pool_capacity: usize,
+    pool_block: usize,
+    config: &Option<PathBuf>,
+    fec_config: &Option<PathBuf>,
+    doh_provider: &str,
+    front_domain: &[String],
+    ca_file: &Option<PathBuf>,
+    no_utls: bool,
+    debug_tls: bool,
+    list_fingerprints: bool,
+    verify_peer: bool,
+    disable_doh: bool,
+    disable_fronting: bool,
+    disable_http3: bool,
+    cc_algorithm: CcAlgorithm,
+    tun_enable: bool,
+    tun_name: Option<String>,
+    tun_mtu: Option<u16>,
+    tun_ip: Option<String>,
+    tun_netmask: Option<String>,
+    tun_ip6: Option<String>,
+    tun_prefix6: Option<u8>,
+    qkey: Option<&str>,
+    kill_switch_enabled: bool,
+    cleanup_firewall: bool,
+    vpn_dns: &[IpAddr],
+    heartbeat_timeout_ms: u64,
+) -> std::io::Result<()> {
+    enum ExitReason {
+        CleanShutdown,
+        RemoteClosed,
+        HeartbeatTimeout,
+        SocketError(String),
+    }
+
+    let config_path = config.as_ref();
+
+    // Handle --cleanup-firewall: remove stale rules from crashed session, then exit
+    if cleanup_firewall {
+        info!("Cleaning up stale kill switch firewall rules...");
+        match quicfuscate::implementations::client::KillSwitch::cleanup_stale_rules() {
+            Ok(()) => info!("Stale firewall rules cleaned up successfully"),
+            Err(e) => error!("Failed to cleanup stale rules: {}", e),
+        }
+        return Ok(());
+    }
+
+    if list_fingerprints {
+        info!("Available browser fingerprints:");
+        for (b, o) in TlsClientHelloSpoofer::available_profiles() {
+            info!("- {}@{}", format!("{:?}", b).to_lowercase(), format!("{:?}", o).to_lowercase());
+        }
+        return Ok(());
+    }
+
+    let resolved_servers: Vec<_> = remote_addr_str.to_socket_addrs()?.collect();
+    let server_addr = resolved_servers.first().copied().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "Server address not found")
+    })?;
+    let alternate_server_ip = resolved_servers
+        .iter()
+        .map(|address| address.ip())
+        .find(|ip| ip.is_ipv4() != server_addr.ip().is_ipv4());
+
+    let local_addr = local_addr_str.to_socket_addrs()?.next().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "Local address invalid")
+    })?;
+
+    let std_socket = std::net::UdpSocket::bind(local_addr)?;
+    let socket_ref = socket2::SockRef::from(&std_socket);
+    if let Err(error) =
+        socket_ref.set_recv_buffer_size(quicfuscate::transport::UDP_SOCKET_BUFFER_BYTES)
+    {
+        log::debug!("UDP receive buffer hint rejected: {}", error);
+    }
+    if let Err(error) =
+        socket_ref.set_send_buffer_size(quicfuscate::transport::UDP_SOCKET_BUFFER_BYTES)
+    {
+        log::debug!("UDP send buffer hint rejected: {}", error);
+    }
+    std_socket.connect(server_addr)?;
+    std_socket.set_nonblocking(true)?;
+    let socket = tokio::net::UdpSocket::from_std(std_socket)?;
+
+    info!("Client connecting to {}", server_addr);
+
+    let tun_name_str = tun_name.clone().unwrap_or_else(|| "tun0".to_string());
+    let firewall_policy = quicfuscate::implementations::client::VpnFirewallPolicy::new(
+        tun_name_str.clone(),
+        server_addr,
+        alternate_server_ip,
+        vpn_dns.iter().copied(),
+    )
+    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string()))?;
+
+    // Initialize kill switch if enabled
+    let kill_switch = if kill_switch_enabled {
+        let ks = std::sync::Arc::new(quicfuscate::implementations::client::KillSwitch::new());
+        ks.enable().map_err(|error| {
+            std::io::Error::other(format!("kill switch enable failed: {error}"))
+        })?;
+        ks.on_vpn_connecting(&firewall_policy).map_err(|error| {
+            std::io::Error::other(format!("kill switch connecting policy failed: {error}"))
+        })?;
+        info!("Kill switch enabled with VPN-endpoint-only connecting policy");
+        Some(ks)
+    } else {
+        None
+    };
+
+    let (fec_cfg, mut stealth_config, opt_cfg, _) =
+        load_runtime_profiles(config_path, fec_config, fec_mode);
+
+    let mut config = match new_runtime_transport_config() {
+        Ok(c) => c,
+        Err(e) => {
+            error!("Failed to create transport config: {}", e);
+            return Err(std::io::Error::other("transport config init failed"));
+        }
+    };
+    apply_runtime_transport_defaults(&mut config, cc_algorithm);
+    if let Some(cfg_path) = config_path {
+        quicfuscate::implementations::server::apply_transport_overrides_from_file(
+            cfg_path,
+            &mut config,
+        );
+    }
+    config.verify_peer(true);
+    if verify_peer {
+        log::debug!("--verify-peer is retained for compatibility; verification is already enabled");
+    }
+    if debug_tls {
+        warn!(
+            "--debug-tls currently relies on QUICFUSCATE_TRACE_TLS tracing paths; transport keylog emission is not wired in this fork"
+        );
+    }
+    if let Some(path) = ca_file {
+        match path.to_str() {
+            Some(s) => {
+                if let Err(e) = config.load_verify_locations_from_file(s) {
+                    error!("Failed to load CA file {}: {}", path.display(), e);
+                }
+                // Also set the global override so the rustls provider picks it up
+                quicfuscate::qftls::set_tls_ca_path(s);
+            }
+            None => {
+                error!("CA file path is not valid UTF-8: {}", path.display());
+            }
+        }
+    }
+
+    let url_parsed = match url::Url::parse(url) {
+        Ok(u) => u,
+        Err(e1) => {
+            warn!("Invalid URL '{}': {}. Falling back to {}", url, e1, DEFAULT_RUNTIME_URL);
+            match url::Url::parse(DEFAULT_RUNTIME_URL) {
+                Ok(u2) => u2,
+                Err(e2) => {
+                    error!("Fallback URL parse failed: {}", e2);
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "invalid URL",
+                    ));
+                }
+            }
+        }
+    };
+    quicfuscate::implementations::server::apply_runtime_stealth_overrides(
+        &mut stealth_config,
+        profile,
+        os,
+        disable_doh,
+        doh_provider,
+        disable_fronting,
+        front_domain,
+        disable_http3,
+    );
+
+    let host = url_parsed.host_str().unwrap_or(DEFAULT_RUNTIME_SNI_HOST);
+    let opt_params = runtime_optimize_config(
+        config_path,
+        opt_cfg,
+        pool_capacity,
+        pool_block,
+        "client runtime config",
+    );
+    // Derive the QKey bearer token (x-qf-auth) from a supplied QKey string.
+    // Servers that require a QKey reject clients without a valid token.
+    let qkey_auth_token_hex = match qkey {
+        Some(raw) if !raw.trim().is_empty() => match quicfuscate::engine::qkey::parse(raw.trim()) {
+            Ok(parsed) => match parsed.token.as_deref().map(str::trim) {
+                Some(tok) if !tok.is_empty() => Some(tok.to_string()),
+                _ => {
+                    error!("supplied --qkey does not contain a token");
+                    return Err(std::io::Error::other("qkey missing token"));
+                }
+            },
+            Err(e) => {
+                error!("failed to parse --qkey: {}", e);
+                return Err(std::io::Error::other("invalid qkey"));
+            }
+        },
+        _ => None,
+    };
+    // Compute the 12-char QKey ID for the QUIC Initial packet token.
+    let qkey_initial_token: Option<Vec<u8>> =
+        qkey.map(|raw| quicfuscate::engine::qkey::id(raw.trim()).into_bytes());
+
+    let mut conn = match QuicFuscateConnection::new_client(
+        host,
+        local_addr,
+        server_addr,
+        config,
+        stealth_config.clone(),
+        fec_cfg,
+        opt_params,
+        qkey_auth_token_hex,
+        qkey_initial_token,
+        !no_utls,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            error!("failed to create client connection: {}", e);
+            return Err(std::io::Error::other("client connection init failed"));
+        }
+    };
+
+    let profiles: Vec<FingerprintProfile> = match profile_seq {
+        Some(seq) => {
+            quicfuscate::implementations::server::resolve_runtime_profiles(profile, os, seq, false)
+        }
+        None => {
+            quicfuscate::implementations::server::resolve_runtime_profiles(profile, os, &[], true)
+        }
+    };
+
+    if profile_interval > 0 && profiles.is_empty() {
+        error!("No valid profiles supplied with --profile-seq");
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid profile sequence",
+        ));
+    }
+
+    if profile_interval > 0 && profiles.len() > 1 {
+        let sm = conn.stealth_manager();
+        sm.start_profile_rotation(profiles, std::time::Duration::from_secs(profile_interval));
+    }
+
+    let mut buf = [0; 65535];
+    let mut out = [0; 65535];
+
+    // Send initial packet
+    if let Ok(len) = conn.send(&mut out) {
+        if len > 0 {
+            telemetry!(quicfuscate::telemetry::BYTES_SENT.inc_by(len as u64));
+            if let Err(e) = send_connected_datagram(&socket, &out[..len]).await {
+                error!("Failed to send initial packet: {}", e);
+            } else {
+                info!("Sent initial packet of size {}", len);
+            }
+        }
+    }
+
+    let mut request_sent = false;
+    let mut kill_switch_connected = false;
+    let requested_tun_mtu = tun_mtu.unwrap_or(1500);
+
+    // Optional TUN bridging setup
+    #[allow(clippy::type_complexity)]
+    let (tun_rx, tun_writer, mut h3_stream_id): (
+        Option<std::sync::mpsc::Receiver<Vec<u8>>>,
+        Option<Arc<quicfuscate::interface::TunInterface>>,
+        Option<u64>,
+    ) = if tun_enable {
+        let effective_tun_mtu =
+            requested_tun_mtu.min(u16::try_from(conn.effective_tunnel_mtu()).unwrap_or(u16::MAX));
+        let tcfg = quicfuscate::interface::TunConfig {
+            name: tun_name,
+            ip: tun_ip.and_then(|s| s.parse().ok()),
+            netmask: tun_netmask.and_then(|s| s.parse().ok()),
+            mtu: effective_tun_mtu,
+            ip6: tun_ip6.as_ref().and_then(|s| s.parse().ok()),
+            prefix6: tun_prefix6,
+            ..Default::default()
+        };
+        let optm = OptimizationManager::from_cfg(opt_params);
+        let pool = optm.memory_pool();
+        match quicfuscate::interface::TunInterface::open(tcfg, pool.clone()) {
+            Ok(tun) => {
+                // Share the TUN via a plain Arc (no Mutex): read_block() and write()
+                // both take &self and the kernel serializes the fd, so the blocking
+                // reader thread must NOT hold a lock that would starve the downlink
+                // writer (that deadlock left the tunnel one-directional).
+                let tun = Arc::new(tun);
+                // Install the MASQUE→TUN sink so downlink CONNECT-UDP datagrams
+                // (decoded raw IP packets) are written to the client TUN by
+                // drain_masque_datagrams inside poll_http3_event_loop.
+                let tun_for_cb = tun.clone();
+                conn.set_masque_datagram_cb(std::sync::Arc::new(std::sync::Mutex::new(Box::new(
+                    move |payload: &[u8]| {
+                        // Only write to TUN if the data looks like a valid IP packet
+                        // (version 4 or 6 in the high nibble of the first byte).
+                        // This filters out CONNECT-UDP capsule protocol data, which
+                        // is not a raw IP packet and would cause EIO on TUN write.
+                        if !payload.is_empty() && (payload[0] >> 4 == 4 || payload[0] >> 4 == 6) {
+                            if let Err(e) = tun_for_cb.write(payload) {
+                                warn!("Client TUN write (MASQUE downlink) failed: {:?}", e);
+                            }
+                        }
+                    },
+                ))));
+                // Spawn a blocking reader thread that forwards TUN frames into a channel
+                let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(
+                    quicfuscate::interface::TUN_PACKET_QUEUE_CAPACITY,
+                );
+                let tun_for_reader = tun.clone();
+                std::thread::spawn(move || {
+                    loop {
+                        let read_result = tun_for_reader.read_block();
+                        match read_result {
+                            Ok((block, len)) if len > 0 => {
+                                let mut v = vec![0u8; len];
+                                v.copy_from_slice(&block[..len]);
+                                if tx.send(v).is_err() {
+                                    break;
+                                }
+                                // block freed when dropped
+                            }
+                            Ok(_) => {}
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                std::thread::sleep(Duration::from_millis(1));
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                });
+                (Some(rx), Some(tun), None)
+            }
+            Err(e) => {
+                warn!("TUN open failed: {:?}", e);
+                (None, None, None)
+            }
+        }
+    } else {
+        (None, None, None)
+    };
+    // TUN frame held when the QUIC DATAGRAM queue is full so a backpressured
+    // packet is not dropped before carrier acceptance.
+    let mut tun_backpressure_frame: Option<Vec<u8>> = None;
+    let mut housekeeping = interval(Duration::from_millis(5));
+    housekeeping.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut next_stats_log = tokio::time::Instant::now();
+    let mut receive_diagnostics =
+        quicfuscate::env_utils::env_flag(CLIENT_RECV_DIAGNOSTICS_ENV, false)
+            .then(ClientReceiveDiagnostics::default);
+    if receive_diagnostics.is_some() {
+        info!("Client receive diagnostics enabled for this process");
+    }
+    let shutdown_signal = wait_shutdown_signal();
+    tokio::pin!(shutdown_signal);
+
+    let exit_reason = loop {
+        tokio::select! {
+            _ = &mut shutdown_signal => {
+                if let Err(e) = conn.conn.close(true, 0x0, b"shutdown") {
+                    warn!("Client close on shutdown failed: {:?}", e);
+                }
+                if let Err(e) = flush_connected_outgoing(&socket, &mut conn, &mut out).await {
+                    warn!("Client shutdown frame flush failed: {}", e);
+                }
+                break ExitReason::CleanShutdown;
+            }
+            recv_res = recv_connected_datagram(&socket, &mut buf) => {
+                match recv_res {
+                    Ok(len) => {
+                        telemetry!(quicfuscate::telemetry::BYTES_RECEIVED.inc_by(len as u64));
+                        let activity_before = receive_diagnostics
+                            .as_ref()
+                            .map(|_| conn.conn.last_activity_marker());
+                        if let Some(diagnostics) = receive_diagnostics.as_mut() {
+                            diagnostics.record_socket_datagram(len);
+                        }
+                        match conn.recv(&buf[..len]) {
+                            Err(error @ (quicfuscate::error::ConnectionError::TlsError(_)
+                                | quicfuscate::error::ConnectionError::TlsAlert(_)
+                                | quicfuscate::error::ConnectionError::PeerCertificateUnsupported)) => {
+                                if let Some(diagnostics) = receive_diagnostics.as_mut() {
+                                    diagnostics.record_core_recv_error();
+                                }
+                                error!("TLS handshake failed: {}", error);
+                                return Err(std::io::Error::other(error.to_string()));
+                            }
+                            Err(error) => {
+                                if let Some(diagnostics) = receive_diagnostics.as_mut() {
+                                    diagnostics.record_core_recv_error();
+                                }
+                                error!("QUIC recv failed: {:?}", error);
+                            }
+                            Ok(_) => {
+                                if let (Some(diagnostics), Some(before)) =
+                                    (receive_diagnostics.as_mut(), activity_before)
+                                {
+                                    diagnostics.record_core_recv_success(
+                                        conn.conn.last_activity_marker() != before,
+                                    );
+                                }
+                                if let Err(error) =
+                                    flush_connected_outgoing(&socket, &mut conn, &mut out).await
+                                {
+                                    warn!("Failed to send response packet: {}", error);
+                                }
+                            }
+                        }
+                        // TUN uplink: forward frames from the TUN reader channel
+                        // to the MASQUE data plane. This is done here (in the recv
+                        // branch) rather than in the housekeeping branch because
+                        // tokio::select! is not fair: when the peer constantly sends
+                        // packets, the recv branch is always ready first and the
+                        // housekeeping tick may never fire, starving the TUN uplink.
+                        if tun_enable {
+                            if let (Some(ref rx), Some(sid), Some(ref tun)) = (&tun_rx, h3_stream_id, &tun_writer) {
+                                drain_client_tun_uplink(&mut conn, tun, sid, rx, &mut tun_backpressure_frame);
+                            }
+                            // Flush any outgoing packets generated by the body chunk sends.
+                            if let Err(e) = flush_connected_outgoing(&socket, &mut conn, &mut out).await {
+                                warn!("Failed to flush TUN uplink packets: {}", e);
+                            }
+                        }
+                        if conn.conn.is_closed() {
+                            info!("Server closed the connection");
+                            break ExitReason::RemoteClosed;
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to read from socket: {}", e);
+                        break ExitReason::SocketError(e.to_string());
+                    }
+                }
+            }
+            _ = housekeeping.tick() => {
+                if conn.conn.is_established() && !request_sent {
+                    match conn.send_http3_request(url_parsed.path()) {
+                        Ok(_) => {
+                            request_sent = true;
+                        }
+                        Err(e) => {
+                            warn!("HTTP/3 request failed: {:?}", e);
+                        }
+                    }
+                }
+
+                // Activate kill switch VPN-allow rules once connection is established
+                if conn.conn.is_established() && !kill_switch_connected {
+                    if let Some(ref ks) = kill_switch {
+                        if let Err(error) = ks.on_vpn_connected(&firewall_policy) {
+                            break ExitReason::SocketError(format!(
+                                "kill switch connected policy failed: {error}"
+                            ));
+                        }
+                        info!("Kill switch: VPN traffic allowed, non-VPN blocked");
+                    }
+                    kill_switch_connected = true;
+                }
+
+                if tun_enable {
+                    if h3_stream_id.is_none() {
+                        match conn.open_http3_stream_post("/tun") {
+                            Ok(sid) => { h3_stream_id = Some(sid); }
+                            Err(e) => { warn!("open_http3_stream_post failed: {:?}", e); }
+                        }
+                    }
+                    // Downlink: H3 stream data from server → TUN interface
+                    let tun_writer_ref = tun_writer.clone();
+                    if let Err(e) = conn.poll_http3_with(move |data| {
+                        if let Some(ref tw) = tun_writer_ref {
+                            // Only write to TUN if the data looks like a valid IP packet.
+                            if !data.is_empty() && (data[0] >> 4 == 4 || data[0] >> 4 == 6) {
+                                if let Err(e) = tw.write(data) {
+                                    warn!("Client TUN write (H3 downlink) failed: {:?}", e);
+                                }
+                            }
+                        }
+                    }) {
+                        warn!("HTTP/3 poll in TUN mode failed: {:?}", e);
+                    }
+                    // MASQUE CONNECT-UDP downlink datagrams are drained and written
+                    // to the TUN by drain_masque_datagrams (inside poll_http3_with
+                    // above) via the masque_datagram_cb sink installed at TUN open.
+                    // The previous bare dgram_recv loop expected unframed QUIC
+                    // datagrams and has been removed in favor of the single
+                    // consistent MASQUE transport.
+
+                    // TUN uplink: forward frames from the TUN reader channel to
+                    // the MASQUE data plane. Also done in the recv branch above,
+                    // but tokio::select! is not fair and the recv branch may not
+                    // fire when the server is silent. This ensures TUN frames are
+                    // forwarded on every housekeeping tick (every 5ms).
+                    if let (Some(ref rx), Some(sid), Some(ref tun)) = (&tun_rx, h3_stream_id, &tun_writer) {
+                        drain_client_tun_uplink(&mut conn, tun, sid, rx, &mut tun_backpressure_frame);
+                    }
+                } else if let Err(e) = conn.poll_http3() {
+                    warn!("HTTP/3 error: {:?}", e);
+                }
+
+                if let Err(e) = flush_connected_outgoing(&socket, &mut conn, &mut out).await {
+                    warn!("Failed to flush outgoing packets: {}", e);
+                }
+
+                conn.update_state();
+                if let Some(tun) = tun_writer.as_ref() {
+                    if let Err(error) =
+                        synchronize_client_tun_mtu(&conn, tun, requested_tun_mtu)
+                    {
+                        break ExitReason::SocketError(format!(
+                            "client TUN MTU synchronization failed: {error}"
+                        ));
+                    }
+                }
+                let now = tokio::time::Instant::now();
+                if now >= next_stats_log {
+                    info!(
+                        "client stats: RTT {:.0} ms, Loss {:.2}%",
+                        conn.rtt_ms(),
+                        conn.loss_rate() * 100.0
+                    );
+                    next_stats_log = now + Duration::from_secs(1);
+                }
+                // Only drive the idle timeout when the connection has actually been
+                // idle; calling it every tick collapses cwnd and inflates loss.
+                if conn.conn.idle_timeout_elapsed() {
+                    conn.conn.on_timeout();
+                }
+                if conn.conn.is_established()
+                    && heartbeat_timeout_ms > 0
+                    && conn.conn.last_activity_elapsed()
+                        >= Duration::from_millis(heartbeat_timeout_ms)
+                {
+                    if let Some(diagnostics) = receive_diagnostics.as_ref() {
+                        warn!(
+                            "Client receive diagnostics at heartbeat: socket_datagrams={}, socket_bytes={}, core_recv_successes={}, core_recv_errors={}, activity_updates={}, last_activity_elapsed_ms={}",
+                            diagnostics.socket_datagrams,
+                            diagnostics.socket_bytes,
+                            diagnostics.core_recv_successes,
+                            diagnostics.core_recv_errors,
+                            diagnostics.activity_updates,
+                            conn.conn.last_activity_elapsed().as_millis(),
+                        );
+                    }
+                    warn!(
+                        "Client heartbeat timeout after {}ms; activating fail-closed firewall state",
+                        heartbeat_timeout_ms
+                    );
+                    break ExitReason::HeartbeatTimeout;
+                }
+                if conn.conn.is_closed() {
+                    break ExitReason::RemoteClosed;
+                }
+                tokio::task::yield_now().await;
+            }
+        }
+    };
+
+    if let Some(ref ks) = kill_switch {
+        match &exit_reason {
+            ExitReason::CleanShutdown => {
+                ks.disable().map_err(|error| {
+                    std::io::Error::other(format!(
+                        "kill switch cleanup on clean shutdown failed: {error}"
+                    ))
+                })?;
+            }
+            _ => {
+                ks.on_vpn_disconnected().map_err(|error| {
+                    std::io::Error::other(format!(
+                        "kill switch fail-closed transition failed: {error}"
+                    ))
+                })?;
+            }
+        }
+    }
+
+    match exit_reason {
+        ExitReason::CleanShutdown => Ok(()),
+        ExitReason::RemoteClosed => Err(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "VPN server closed the connection; firewall remains fail-closed",
+        )),
+        ExitReason::HeartbeatTimeout => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "VPN heartbeat timed out; firewall remains fail-closed",
+        )),
+        ExitReason::SocketError(error) => Err(std::io::Error::other(format!(
+            "VPN socket failed; firewall remains fail-closed: {error}"
+        ))),
+    }
+}
+

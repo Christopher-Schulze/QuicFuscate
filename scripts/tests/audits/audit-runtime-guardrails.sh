@@ -67,7 +67,7 @@ echo "  Runtime Guardrails Audit"
 echo "==============================================================="
 
 # 1) Public xdp fastpath token and alias helpers must be gone.
-PUBLIC_XDP_TOKEN_REFS=$(rg -n --no-messages "QUICFUSCATE_FASTPATH=xdp|xdp.*compatibility alias|compatibility-only.*xdp|xdp.*maps to.*udp/io_uring|xdp-smoke|request_xdp_compat|enable_xdp_compat|FastpathMode::Xdp|xdp_compat_alias_log_message|normalize_request_xdp_compat" README.md docs/DOCUMENTATION.md src/interface.rs src/main.rs src/optimize/mod.rs src/implementations/client/io_driver.rs src/implementations/server/mod.rs || true)
+PUBLIC_XDP_TOKEN_REFS=$(rg -n --no-messages "QUICFUSCATE_FASTPATH=xdp|xdp.*compatibility alias|compatibility-only.*xdp|xdp.*maps to.*udp/io_uring|xdp-smoke|request_xdp_compat|enable_xdp_compat|FastpathMode::Xdp|xdp_compat_alias_log_message|normalize_request_xdp_compat" README.md docs/DOCUMENTATION.md src/interface.rs src/main.rs src/main_parts src/optimize src/implementations/client/io_driver.rs src/implementations/server || true)
 if [[ -z "$PUBLIC_XDP_TOKEN_REFS" ]]; then
   pass "Public xdp fastpath token is fully removed"
   append_item "xdp_public_token_removed" "ok" "no public xdp fastpath token or alias helpers remain"
@@ -212,7 +212,7 @@ else
   append_item "aead_override_surface_narrowing" "fail" "$AEAD_OVERRIDE_SURFACE_REFS"
 fi
 
-UNSAFE_VISIBILITY_REFS=$(rg -n --no-messages '^pub unsafe fn (prefetch|encode_varint_neon|encode_varint_sve2|decode_varint_neon|decode_varint_sve2|canonical_ack_blocks_avx2|canonical_ack_blocks_avx512)\b|^pub enum PrefetchHint\b|^pub unsafe fn (xor_blocks_sve2|xor_blocks_neon|memcpy_sve2|memcpy_neon|crc32_arm|popcnt_neon|popcnt_sve2|validate_header_sve2|validate_header_neon|gf_mul_sve2|gf_mul_neon_pmull|gf_mul_neon|aes_encrypt_neon|ghash_pmull|sha256_hw|pack_bits_sve2|pack_bits_neon|unpack_bits_sve2|unpack_bits_neon|reed_solomon_encode_neon|histogram_sve2|histogram_neon|qpack_encode_neon|qpack_decode_neon|qpack_encode_sve2|qpack_decode_sve2|find_pattern_sve2|find_pattern_neon|dot_product_neon_dp|dot_product_neon|matmul_apple_amx)\b' src/optimize/mod.rs src/simd src/simd/arm_varint.rs src/simd/x86_ack.rs || true)
+UNSAFE_VISIBILITY_REFS=$(rg -n --no-messages '^pub unsafe fn (prefetch|encode_varint_neon|encode_varint_sve2|decode_varint_neon|decode_varint_sve2|canonical_ack_blocks_avx2|canonical_ack_blocks_avx512)\b|^pub enum PrefetchHint\b|^pub unsafe fn (xor_blocks_sve2|xor_blocks_neon|memcpy_sve2|memcpy_neon|crc32_arm|popcnt_neon|popcnt_sve2|validate_header_sve2|validate_header_neon|gf_mul_sve2|gf_mul_neon_pmull|gf_mul_neon|aes_encrypt_neon|ghash_pmull|sha256_hw|pack_bits_sve2|pack_bits_neon|unpack_bits_sve2|unpack_bits_neon|reed_solomon_encode_neon|histogram_sve2|histogram_neon|qpack_encode_neon|qpack_decode_neon|qpack_encode_sve2|qpack_decode_sve2|find_pattern_sve2|find_pattern_neon|dot_product_neon_dp|dot_product_neon|matmul_apple_amx)\b' src/optimize src/simd src/simd/arm_varint.rs src/simd/x86_ack.rs || true)
 if [[ -z "$UNSAFE_VISIBILITY_REFS" ]]; then
   pass "Unsafe SIMD/prefetch helpers remain internalized behind runtime-owned facades"
   append_item "unsafe_surface_internalization" "ok" "no broad public visibility on narrowed unsafe helper set"
@@ -256,7 +256,7 @@ else
 fi
 
 # 3b) Retained MSG_ZEROCOPY and busy-poll runtime machinery must stay removed.
-ZEROCOPY_RUNTIME_REFS=$(rg -n --no-messages "MSG_ZEROCOPY|SO_ZEROCOPY|should_use_msg_zerocopy|msg_zerocopy_requested|should_retry_without_zerocopy|enable_specialized_zerocopy|drain_zerocopy|zerocopy_drain_batch" src/optimize/udp.rs src/transport/udpfast.rs src/transport/xdp.rs src/transport/connection.rs src/transport.rs || true)
+ZEROCOPY_RUNTIME_REFS=$(rg -n --no-messages "MSG_ZEROCOPY|SO_ZEROCOPY|should_use_msg_zerocopy|msg_zerocopy_requested|should_retry_without_zerocopy|enable_specialized_zerocopy|drain_zerocopy|zerocopy_drain_batch" src/optimize/udp.rs src/transport/udpfast.rs src/transport/xdp.rs src/transport/connection src/transport.rs || true)
 if [[ -z "$ZEROCOPY_RUNTIME_REFS" ]]; then
   pass "Retained MSG_ZEROCOPY runtime machinery stays removed"
   append_item "zerocopy_runtime_surface_removed" "ok" "no retained MSG_ZEROCOPY runtime helpers or branches remain"
@@ -312,11 +312,11 @@ else
   append_item "fec_internal_dead_code_suppression" "ok" "test-only constructors use explicit cfg(test) ownership"
 fi
 
-FEC_RECOVERY_INTEGRITY_REGRESSIONS="$(rg -n --no-messages 'norm_base|base_id\.wrapping_add\(j as u64\)|return self\.try_eliminate_wiedemann\(\)' src/fec/mod.rs || true)"
+FEC_RECOVERY_INTEGRITY_REGRESSIONS="$(rg -n --no-messages 'norm_base|base_id\.wrapping_add\(j as u64\)|return self\.try_eliminate_wiedemann\(\)' src/fec || true)"
 if [[ -n "$FEC_RECOVERY_INTEGRITY_REGRESSIONS" ]]; then
   fail_critical "FEC decoder regained ambiguous anchors, forward GF4 mapping, or unvalidated auto-Wiedemann recovery"
   append_item "fec_recovery_integrity" "fail" "$FEC_RECOVERY_INTEGRITY_REGRESSIONS"
-elif rg -n --no-messages 'valid\.then_some\(solution\)' src/fec/mod.rs >/dev/null \
+elif rg -n --no-messages 'valid\.then_some\(solution\)' src/fec >/dev/null \
   && rg -n --no-messages 'test_fec_e2e_default_interleave_recovers_1000_packets_at_5pct_random_loss' src/fec/e2e_tests.rs >/dev/null \
   && rg -n --no-messages 'test_fec_e2e_default_interleave_recovers_four_consecutive_losses_per_sixteen' src/fec/e2e_tests.rs >/dev/null; then
   pass "FEC recovery keeps exact anchors, validated solver output, and deterministic interleaved integrity gates"
@@ -326,7 +326,7 @@ else
   append_item "fec_recovery_integrity" "fail" "solver validation or deterministic interleaved recovery gates missing"
 fi
 
-FEC_WRONG_FIELD_GFNI_CALLS="$(rg -n --no-messages '_mm512_gf2p8mul_epi8\(' src/fec/gf_tables.rs src/fec/mod.rs || true)"
+FEC_WRONG_FIELD_GFNI_CALLS="$(rg -n --no-messages '_mm512_gf2p8mul_epi8\(' src/fec/gf_tables.rs src/fec || true)"
 if [[ -z "$FEC_WRONG_FIELD_GFNI_CALLS" ]] \
   && rg -n --no-messages 'IRREDUCIBLE_POLY: u16 = 0x11D' src/fec/gf_tables.rs >/dev/null; then
   pass "FEC GF8 kernels preserve the canonical 0x11D wire field"
@@ -604,19 +604,19 @@ if rg -F -- 'for host_veth in "${HOST_VETH[@]}"; do' "$MULTI_CLIENT_DUAL_STACK_H
   && rg -F -- 'persistent congestion established;' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'refusing to replace client persistent-congestion evidence' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'CLIENT_RECV_DIAGNOSTICS must be 0 or 1' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
-  && rg -F -- 'CLIENT_RECV_DIAGNOSTICS_ENV: &str = "QUICFUSCATE_CLIENT_RECV_DIAGNOSTICS"' src/main.rs >/dev/null \
-  && rg -F -- 'Client receive diagnostics at heartbeat:' src/main.rs >/dev/null \
-  && rg -F -- 'last_activity_marker' src/main.rs src/transport/connection.rs >/dev/null \
-  && rg -F -- 'terminal_packet_threshold={}' src/transport/connection.rs >/dev/null \
-  && rg -F -- 'ack_delay_us={}' src/transport/connection.rs >/dev/null \
-  && rg -F -- 'ack_time_threshold_losses={}' src/transport/connection.rs >/dev/null \
-  && rg -F -- 'smoothed_rtt_us={}' src/transport/connection.rs >/dev/null \
-  && rg -F -- 'run_min_packet_size={}' src/transport/connection.rs >/dev/null \
-  && rg -F -- 'run_control_packets={}' src/transport/connection.rs >/dev/null \
-  && rg -F -- 'run_stream_packets={}' src/transport/connection.rs >/dev/null \
-  && rg -F -- 'run_stream_fresh_packets={}' src/transport/connection.rs >/dev/null \
-  && rg -F -- 'run_stream_retransmission_packets={}' src/transport/connection.rs >/dev/null \
-  && rg -F -- 'run_datagram_packets={}' src/transport/connection.rs >/dev/null \
+  && rg -F -- 'CLIENT_RECV_DIAGNOSTICS_ENV: &str = "QUICFUSCATE_CLIENT_RECV_DIAGNOSTICS"' src/main.rs src/main_parts >/dev/null \
+  && rg -F -- 'Client receive diagnostics at heartbeat:' src/main.rs src/main_parts >/dev/null \
+  && rg -F -- 'last_activity_marker' src/main.rs src/main_parts src/transport/connection >/dev/null \
+  && rg -F -- 'terminal_packet_threshold={}' src/transport/connection >/dev/null \
+  && rg -F -- 'ack_delay_us={}' src/transport/connection >/dev/null \
+  && rg -F -- 'ack_time_threshold_losses={}' src/transport/connection >/dev/null \
+  && rg -F -- 'smoothed_rtt_us={}' src/transport/connection >/dev/null \
+  && rg -F -- 'run_min_packet_size={}' src/transport/connection >/dev/null \
+  && rg -F -- 'run_control_packets={}' src/transport/connection >/dev/null \
+  && rg -F -- 'run_stream_packets={}' src/transport/connection >/dev/null \
+  && rg -F -- 'run_stream_fresh_packets={}' src/transport/connection >/dev/null \
+  && rg -F -- 'run_stream_retransmission_packets={}' src/transport/connection >/dev/null \
+  && rg -F -- 'run_datagram_packets={}' src/transport/connection >/dev/null \
   && rg -F -- 'server UDP socket dropped datagrams during IPv6 throughput trial' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'client UDP socket dropped datagrams during IPv6 throughput trial' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'selector = f"on port {port}"' "$UDP_SOCKET_EVIDENCE" >/dev/null \
@@ -684,7 +684,7 @@ else
   append_item "batchprocessor_module_gate" "fail" "$BATCH_MODULE_DECLS"
 fi
 
-FASTPATH_RUNTIME_REFS=$(rg -n --no-messages "FastPathTransport" src | rg -v "src/transport/xdp.rs|src/main.rs" || true)
+FASTPATH_RUNTIME_REFS=$(rg -n --no-messages "FastPathTransport" src | rg -v "src/transport/xdp.rs|src/main.rs src/main_parts" || true)
 if [[ -z "$FASTPATH_RUNTIME_REFS" ]]; then
   pass "FastPathTransport has no runtime call sites outside xdp/main and is treated as compatibility/test-only"
   append_item "fastpathtransport_runtime_reachability" "ok" "no runtime references found (compat/test-only surface)"
@@ -756,7 +756,7 @@ else
   append_item "optimize_xdp_socket_reachability" "warn" "$OPTIMIZE_XDP_SOCKET_REFS"
 fi
 
-ZEROCOPY_SHADOW_REFS=$(rg -n --no-messages "pub mod zerocopy|optimize::zerocopy|struct ZeroCopySocket" src/optimize/mod.rs src/optimize/udp.rs docs/DOCUMENTATION.md || true)
+ZEROCOPY_SHADOW_REFS=$(rg -n --no-messages "pub mod zerocopy|optimize::zerocopy|struct ZeroCopySocket" src/optimize src/optimize/udp.rs docs/DOCUMENTATION.md || true)
 if [[ -z "$ZEROCOPY_SHADOW_REFS" ]]; then
   pass "optimize-side zerocopy shadow surface remains absent"
   append_item "optimize_zerocopy_shadow_surface" "ok" "no optimize::zerocopy shim or orphan ZeroCopySocket remains"
@@ -765,7 +765,7 @@ else
   append_item "optimize_zerocopy_shadow_surface" "fail" "$ZEROCOPY_SHADOW_REFS"
 fi
 
-OPTIMIZATION_MANAGER_XDP_STATE_REFS=$(rg -n --no-messages "XDP_RUNTIME_WIRING_ENABLED|is_xdp_compat_available\\(|is_xdp_compat_enabled\\(" src/optimize/mod.rs src/main.rs docs/DOCUMENTATION.md || true)
+OPTIMIZATION_MANAGER_XDP_STATE_REFS=$(rg -n --no-messages "XDP_RUNTIME_WIRING_ENABLED|is_xdp_compat_available\\(|is_xdp_compat_enabled\\(" src/optimize src/main.rs src/main_parts docs/DOCUMENTATION.md || true)
 if [[ -z "$OPTIMIZATION_MANAGER_XDP_STATE_REFS" ]]; then
   pass "OptimizationManager does not carry dead XDP runtime state helpers"
   append_item "optimizationmanager_xdp_runtime_state" "ok" "no dead XDP runtime state helpers found"
@@ -774,22 +774,22 @@ else
   append_item "optimizationmanager_xdp_runtime_state" "fail" "$OPTIMIZATION_MANAGER_XDP_STATE_REFS"
 fi
 
-CORE_XDP_REFS=$(rg -n --no-messages "xdp|FastPathTransport|request_xdp_compat|QUICFUSCATE_FASTPATH" src/core.rs src/transport/connection.rs || true)
+CORE_XDP_REFS=$(rg -n --no-messages "xdp|FastPathTransport|request_xdp_compat|QUICFUSCATE_FASTPATH" src/core.rs src/core_parts src/transport/connection || true)
 if [[ -z "$CORE_XDP_REFS" ]]; then
   pass "active core transport/runtime path has no XDP compatibility branches"
-  append_item "core_xdp_runtime_reachability" "ok" "no XDP compatibility references found in src/core.rs or src/transport/connection.rs"
+  append_item "core_xdp_runtime_reachability" "ok" "no XDP compatibility references found in src/core.rs src/core_parts or src/transport/connection"
 else
   warn_guardrail "active core transport/runtime path still references XDP compatibility surface"
   append_item "core_xdp_runtime_reachability" "warn" "$CORE_XDP_REFS"
 fi
 
 # 7) Guardrail warning: ServerRuntime packet limiter hooks with no external call sites.
-SERVER_RUNTIME_RATE_DEFS=$(rg -n --no-messages "pub fn (check_packet_rate|record_packet)\\(" src/implementations/server/mod.rs || true)
+SERVER_RUNTIME_RATE_DEFS=$(rg -n --no-messages "pub fn (check_packet_rate|record_packet)\\(" src/implementations/server || true)
 if [[ -z "$SERVER_RUNTIME_RATE_DEFS" ]]; then
   pass "ServerRuntime packet limiter hook surface is not present"
   append_item "serverruntime_rate_limiter_reachability" "ok" "no duplicate ServerRuntime limiter hooks present"
 else
-  SERVER_RUNTIME_RATE_REFS=$(rg -n --no-messages "check_packet_rate\\(|record_packet\\(" src | rg -v "src/implementations/server/mod.rs" || true)
+  SERVER_RUNTIME_RATE_REFS=$(rg -n --no-messages "check_packet_rate\\(|record_packet\\(" src | rg -v "src/implementations/server" || true)
   if [[ -z "$SERVER_RUNTIME_RATE_REFS" ]]; then
     warn_guardrail "ServerRuntime packet limiter hooks have no external call sites"
     append_item "serverruntime_rate_limiter_reachability" "warn" "no external references to check_packet_rate/record_packet"
@@ -812,7 +812,7 @@ fi
 RNG_POLICY_FILES=(
   src/transport/pn.rs
   src/transport/recovery.rs
-  src/main.rs
+  src/main.rs src/main_parts
   src/implementations/server/admin.rs
   src/implementations/server/admin_http.rs
 )
@@ -956,7 +956,7 @@ else
 fi
 
 if rg -n --no-messages "pub fn record_connection_accepted\\(" src/implementations/server/metrics.rs >/dev/null \
-  && rg -n --no-messages "quicfuscate_connections_accepted" src/implementations/server/metrics.rs src/implementations/server/mod.rs docs/DOCUMENTATION.md >/dev/null; then
+  && rg -n --no-messages "quicfuscate_connections_accepted" src/implementations/server/metrics.rs src/implementations/server docs/DOCUMENTATION.md >/dev/null; then
   pass "Standalone server accepted-connection metrics surface remains explicit and documented"
   append_item "server_observability_connections_accepted_surface" "ok" "producer/export/docs for connections_accepted present"
 else
@@ -973,7 +973,7 @@ else
   append_item "feature_claims_fork_posture" "fail" "missing fork/non-upstream wording in src/lib.rs/README.md/docs"
 fi
 
-if rg -n --no-messages "production-ready server implementation" src/implementations/server/mod.rs >/dev/null; then
+if rg -n --no-messages "production-ready server implementation" src/implementations/server >/dev/null; then
   fail_critical "Server module header still overclaims a production-ready implementation surface"
   append_item "feature_claims_server_header_truth" "fail" "production-ready wording present in server module header"
 else
@@ -981,7 +981,7 @@ else
   append_item "feature_claims_server_header_truth" "ok" "server module header is truth-aligned"
 fi
 
-if rg -n --no-messages "full QUIC connection lifecycle" src/core.rs >/dev/null; then
+if rg -n --no-messages "full QUIC connection lifecycle" src/core.rs src/core_parts >/dev/null; then
   fail_critical "Core module header still overclaims a full QUIC lifecycle"
   append_item "feature_claims_core_header_truth" "fail" "full QUIC lifecycle wording present in core header"
 else

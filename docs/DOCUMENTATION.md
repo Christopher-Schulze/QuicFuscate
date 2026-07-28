@@ -34,7 +34,7 @@ The retained complexity in this repository is intentional and should be read thr
 
 | Layer | Purpose | Canonical examples |
 |---|---|---|
-| `canonical runtime/product path` | user-visible retained runtime behavior and stable product contract | `src/core.rs`, `src/transport/connection.rs`, `src/crypto/` product contract, `src/fec/` public `auto` / `off` contract |
+| `canonical runtime/product path` | user-visible retained runtime behavior and stable product contract | `src/core.rs` (+ `src/core_parts/`), `src/transport/connection/`, `src/crypto/` product contract, `src/fec/` public `auto` / `off` contract |
 | `adaptive policy/control` | runtime policy loops that tune retained capability without changing the product contract | `src/brain.rs`, `src/stealth/`, `src/fec/` target/family auto-controller |
 | `platform acceleration` | hardware detection, SIMD dispatch, Linux fast paths, and owner-local hot-path helpers | `src/optimize/`, `src/simd/`, `src/optimize/udp.rs`, `src/optimize/uring_batch.rs` |
 | `compat/test/experimental` | retained compatibility machinery, parity hooks, and explicitly gated internal surfaces | MASQUE compatibility, `internal_af_xdp_experimental`, `rust-tests`, `benches` |
@@ -98,7 +98,7 @@ If a claim is not backed by one of the proof surfaces below, treat it as untrust
 |---|---|---|---|
 | Data-plane AEAD posture | `src/crypto/`, `src/simd/` | Product contract is `Aegis128L` or `Morus1280_128`; internal width variants remain backend machine room only | `scripts/tests/rust/rt-security-suite.rs`, `scripts/tests/rust/rt-property-suite.rs`, `scripts/tests/fuzz/fuzz_targets/crypto_operations.rs` |
 | TLS-visible handshake boundary | `src/qftls.rs` | rustls owns real TLS protocol semantics; TLS Cover is overlay/cover only | `docs/todo/done/todo-85-tls-cover-and-rustls-boundary-clarification.md`, `scripts/tests/audits/audit-runtime-guardrails.sh` |
-| Packet protection ownership | `src/transport/packet.rs`, `src/transport/connection.rs` | Packet protection and data-plane AEAD are fork-specific transport decisions, not TLS cipher-suite claims | `docs/todo/done/todo-76-forked-aead-protocol-posture-clarification.md`, targeted transport rust-tests, `audit-runtime-guardrails.sh` |
+| Packet protection ownership | `src/transport/packet.rs`, `src/transport/connection/` | Packet protection and data-plane AEAD are fork-specific transport decisions, not TLS cipher-suite claims | `docs/todo/done/todo-76-forked-aead-protocol-posture-clarification.md`, targeted transport rust-tests, `audit-runtime-guardrails.sh` |
 | Unsafe SIMD / crypto machine room | `src/crypto/`, `src/simd/`, `src/optimize/` | Unsafe and SIMD stay internal or parity-scoped; product/runtime claims stay at owner boundaries only | `cargo clippy --all-targets --all-features -- -W clippy::all`, `scripts/tests/audits/audit-all-comprehensive.sh`, `scripts/tests/audits/audit-runtime-guardrails.sh` |
 | Stealth/TLS-cover boundary | `src/stealth/`, `src/qftls.rs` | Stealth owns persona and cover policy; rustls still owns real TLS protocol semantics | `docs/todo/done/todo-81-stealth-capability-preservation-and-simplification.md`, `docs/todo/done/todo-85-tls-cover-and-rustls-boundary-clarification.md` |
 
@@ -342,7 +342,7 @@ This document provides comprehensive technical documentation for the system arch
 
 ### Architecture at a Glance
 - Modular Rust crate with focused modules:
-  - `src/core.rs`: QUIC I/O and session management; maintains rolling `ConnectionStats` including VNNI-accelerated congestion aggregation (`aggregate_congestion`) for cwnd, bytes-in-flight and loss score.
+  - `src/core.rs` (+ `src/core_parts/`): QUIC I/O and session management; maintains rolling `ConnectionStats` including VNNI-accelerated congestion aggregation (`aggregate_congestion`) for cwnd, bytes-in-flight and loss score.
   - `src/crypto/`: AEAD and handshake glue
   - `src/fec/`: Encoder/decoder/adaptive/GF tables
 - `src/stealth/`: DoH, HTTP/3 masquerading, TLS Cover, domain fronting, QPACK helpers, active probe detection, runtime Server Push cover coordination
@@ -1467,7 +1467,7 @@ Optimize submodules (`src/optimize/`):
 - `src/optimize/string.rs` - string/text acceleration helpers.
 - `src/optimize/telemetry.rs` - global telemetry counters and snapshot/export helpers.
 - `src/optimize/transport.rs` - transport acceleration helpers.
-  - Runtime-owned entrypoints: `aggregate_congestion(...)` for rolling congestion-window summarization in `src/core.rs`, and `decode_packet_number(...)` for packet-open PN reconstruction in `src/transport/packet.rs`.
+  - Runtime-owned entrypoints: `aggregate_congestion(...)` for rolling congestion-window summarization in `src/core.rs` (+ `src/core_parts/`), and `decode_packet_number(...)` for packet-open PN reconstruction in `src/transport/packet.rs`.
   - Parity/test-only helpers: bitmap range ops, ECN popcount, ACK-range search, and stream-frame parsing acceleration are gated behind `cfg(any(test, feature = "rust-tests"))`.
 - `src/optimize/udp.rs` - UDP fastpath helper layer.
 - `src/optimize/unsafe.rs` - unsafe FFI backend for zstd compression.
@@ -1484,7 +1484,7 @@ SIMD submodules (`src/simd/`):
 
 Transport submodules (`src/transport/`):
 - `src/transport/config.rs` - transport configuration surface.
-- `src/transport/connection.rs` - core transport connection state machine and send/recv path. Includes in-order Stream fast path (sequential data bypasses recv_frags BTreeMap, copies directly to recv_buf) and hybrid ACK/loss range draining for sent-packet accounting: sparse/narrow ACK ranges use `BTreeMap::extract_if`, while large contiguous ACK ranges and loss prefixes use `BTreeMap::split_off`. Stored frames use `Frame<'static>` with `Cow::Owned`.
+- `src/transport/connection/` - core transport connection state machine and send/recv path. Includes in-order Stream fast path (sequential data bypasses recv_frags BTreeMap, copies directly to recv_buf) and hybrid ACK/loss range draining for sent-packet accounting: sparse/narrow ACK ranges use `BTreeMap::extract_if`, while large contiguous ACK ranges and loss prefixes use `BTreeMap::split_off`. Stored frames use `Frame<'static>` with `Cow::Owned`.
 - `src/transport/frames.rs` - frame encoders/decoders and canonical ACK block logic. `from_bytes()` returns `Frame<'a>` with `Cow::Borrowed` data fields for zero-copy parsing; construction sites use `Cow::Owned`.
 - `src/transport/h3.rs` - HTTP/3 state machine (streams, QPACK, events, MASQUE wiring).
 - `src/transport/packet.rs` - QUIC packet parse/build, encryption/decryption glue.

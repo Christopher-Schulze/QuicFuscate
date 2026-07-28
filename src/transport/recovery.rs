@@ -877,6 +877,7 @@ impl Recovery {
 
     /// Steps 5-7 of ACK processing: loss detection, persistent congestion, and
     /// the CC/outcome accounting. Split out to keep `on_ack_received` readable.
+    #[allow(clippy::too_many_arguments)]
     fn finish_ack_loss_accounting(
         &mut self,
         space: PacketSpace,
