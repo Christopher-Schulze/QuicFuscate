@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarize externally captured client egress within verified trial intervals."""
+"""Summarize externally captured client egress and server ingress per trial."""
 
 from __future__ import annotations
 
@@ -14,6 +14,8 @@ from pathlib import Path
 TIMESTAMP_PATTERN = re.compile(r"^(?P<timestamp>\d+(?:\.\d+)?) IP ")
 NANOSECONDS_PER_SECOND = Decimal(1_000_000_000)
 GAP_THRESHOLDS_US = (10_000, 50_000, 100_000)
+CLIENT_EGRESS_LABEL = "client-1 UDP egress"
+SERVER_INGRESS_LABEL = "server UDP ingress"
 
 
 def fail(message: str) -> None:
@@ -23,6 +25,7 @@ def fail(message: str) -> None:
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--capture", type=Path, required=True)
+    parser.add_argument("--server-capture", type=Path, required=True)
     parser.add_argument("--trial", type=Path, action="append", required=True)
     parser.add_argument("--output", type=Path, required=True)
     arguments = parser.parse_args()
@@ -73,26 +76,40 @@ def summarize_gaps(timestamps: list[int]) -> tuple[int, tuple[int, int, int]]:
     )
 
 
-def render_summary(capture_timestamps: list[int], intervals: list[tuple[int, int]]) -> str:
-    lines = [f"External client-1 UDP egress packets: {len(capture_timestamps)}"]
+def summarize_capture_trials(
+    timestamps: list[int], intervals: list[tuple[int, int]], label: str
+) -> list[str]:
+    lines: list[str] = []
     for index, (started, finished) in enumerate(intervals, start=1):
-        timestamps = [
+        trial_timestamps = [
             timestamp
-            for timestamp in capture_timestamps
+            for timestamp in timestamps
             if started <= timestamp <= finished
         ]
-        if len(timestamps) < 2:
-            fail(f"trial {index} retained fewer than two externally captured packets")
-        max_gap_us, threshold_counts = summarize_gaps(timestamps)
+        if len(trial_timestamps) < 2:
+            fail(f"trial {index} retained fewer than two {label} packets")
+        max_gap_us, threshold_counts = summarize_gaps(trial_timestamps)
         lines.extend(
             [
-                f"External client-1 UDP egress trial {index} packets: {len(timestamps)}",
-                f"External client-1 UDP egress trial {index} max gap us: {max_gap_us}",
-                f"External client-1 UDP egress trial {index} gaps ge 10ms: {threshold_counts[0]}",
-                f"External client-1 UDP egress trial {index} gaps ge 50ms: {threshold_counts[1]}",
-                f"External client-1 UDP egress trial {index} gaps ge 100ms: {threshold_counts[2]}",
+                f"External {label} trial {index} packets: {len(trial_timestamps)}",
+                f"External {label} trial {index} max gap us: {max_gap_us}",
+                f"External {label} trial {index} gaps ge 10ms: {threshold_counts[0]}",
+                f"External {label} trial {index} gaps ge 50ms: {threshold_counts[1]}",
+                f"External {label} trial {index} gaps ge 100ms: {threshold_counts[2]}",
             ]
         )
+    return lines
+
+
+def render_summary(
+    egress_timestamps: list[int], server_ingress_timestamps: list[int], intervals: list[tuple[int, int]]
+) -> str:
+    lines = [
+        f"External {CLIENT_EGRESS_LABEL} packets: {len(egress_timestamps)}",
+        f"External {SERVER_INGRESS_LABEL} packets: {len(server_ingress_timestamps)}",
+        *summarize_capture_trials(egress_timestamps, intervals, CLIENT_EGRESS_LABEL),
+        *summarize_capture_trials(server_ingress_timestamps, intervals, SERVER_INGRESS_LABEL),
+    ]
     return "\n".join(lines) + "\n"
 
 
@@ -102,6 +119,7 @@ def main() -> int:
         fail(f"refusing to replace existing output: {arguments.output}")
     summary = render_summary(
         parse_capture_timestamps(arguments.capture),
+        parse_capture_timestamps(arguments.server_capture),
         [load_trial_interval(path) for path in arguments.trial],
     )
     arguments.output.parent.mkdir(parents=True, exist_ok=True)

@@ -41,7 +41,7 @@ BLACK_HOLE_FILTER_ACTIVE=0
 
 PHASE_PIDS=()
 CAPTURE_PIDS=()
-EGRESS_CAPTURE_PID=""
+EGRESS_CAPTURE_PIDS=()
 
 log() { printf '[TODO-523] %s\n' "$*"; }
 fail() {
@@ -429,21 +429,32 @@ start_capture() {
 start_client_egress_capture() {
   local phase="$1"
   [[ "$EXTERNAL_EGRESS_CAPTURE" == "1" ]] || return 0
-  [[ -z "$EGRESS_CAPTURE_PID" ]] || fail 'client egress capture already active'
+  ((${#EGRESS_CAPTURE_PIDS[@]} == 0)) || fail 'external throughput capture already active'
 
   tcpdump -tt -n -l -Q in -i "${HOST_VETH[1]}" \
     "udp and src host ${CLIENT_UNDERLAY[0]} and dst host $SERVER_UNDERLAY and dst port 4433" \
     >"$ARTIFACT_DIR/egress-$phase.log" 2>&1 &
-  EGRESS_CAPTURE_PID="$!"
+  EGRESS_CAPTURE_PIDS+=("$!")
+  tcpdump -tt -n -l -Q inout -i "${HOST_VETH[0]}" \
+    "udp and src host ${CLIENT_UNDERLAY[0]} and dst host $SERVER_UNDERLAY and dst port 4433" \
+    >"$ARTIFACT_DIR/server-ingress-$phase.log" 2>&1 &
+  EGRESS_CAPTURE_PIDS+=("$!")
   sleep 0.2
-  kill -0 "$EGRESS_CAPTURE_PID" 2>/dev/null || fail 'client egress capture did not start'
+  local pid
+  for pid in "${EGRESS_CAPTURE_PIDS[@]}"; do
+    kill -0 "$pid" 2>/dev/null || fail 'external throughput capture did not start'
+  done
 }
 
 stop_client_egress_capture() {
-  [[ -n "$EGRESS_CAPTURE_PID" ]] || return 0
-  kill -INT "$EGRESS_CAPTURE_PID" 2>/dev/null || true
-  wait "$EGRESS_CAPTURE_PID" 2>/dev/null || true
-  EGRESS_CAPTURE_PID=""
+  local pid
+  for pid in "${EGRESS_CAPTURE_PIDS[@]}"; do
+    kill -INT "$pid" 2>/dev/null || true
+  done
+  for pid in "${EGRESS_CAPTURE_PIDS[@]}"; do
+    wait "$pid" 2>/dev/null || true
+  done
+  EGRESS_CAPTURE_PIDS=()
 }
 
 summarize_client_egress_capture() {
@@ -452,6 +463,7 @@ summarize_client_egress_capture() {
 
   python3 "$EGRESS_SUMMARIZER" \
     --capture "$ARTIFACT_DIR/egress-$phase.log" \
+    --server-capture "$ARTIFACT_DIR/server-ingress-$phase.log" \
     --trial "$ARTIFACT_DIR/tcp6-client-$phase-1.json" \
     --trial "$ARTIFACT_DIR/tcp6-client-$phase-2.json" \
     --trial "$ARTIFACT_DIR/tcp6-client-$phase-3.json" \

@@ -59,7 +59,7 @@ main() {
     local binary_hash
     binary_hash="$(sha256sum "$BINARY" | awk '{print $1}')"
     mkdir "$ARTIFACT_DIR" || fail "could not create artifact directory: $ARTIFACT_DIR"
-    printf 'trial\tbinary_sha256\tdefault_bps\topt_in_bps\tgain_percent\tblack_hole_detection_seconds\tblack_hole_receiver_bytes\tblack_hole_elapsed_seconds\tdefault_trial_1_max_gap_us\tdefault_trial_2_max_gap_us\tdefault_trial_3_max_gap_us\topt_in_trial_1_max_gap_us\topt_in_trial_2_max_gap_us\topt_in_trial_3_max_gap_us\n' \
+    printf 'trial\tbinary_sha256\tdefault_bps\topt_in_bps\tgain_percent\tblack_hole_detection_seconds\tblack_hole_receiver_bytes\tblack_hole_elapsed_seconds\tclient_egress_default_trial_1_max_gap_us\tclient_egress_default_trial_2_max_gap_us\tclient_egress_default_trial_3_max_gap_us\tclient_egress_opt_in_trial_1_max_gap_us\tclient_egress_opt_in_trial_2_max_gap_us\tclient_egress_opt_in_trial_3_max_gap_us\tserver_ingress_default_trial_1_max_gap_us\tserver_ingress_default_trial_2_max_gap_us\tserver_ingress_default_trial_3_max_gap_us\tserver_ingress_opt_in_trial_1_max_gap_us\tserver_ingress_opt_in_trial_2_max_gap_us\tserver_ingress_opt_in_trial_3_max_gap_us\n' \
         > "$ARTIFACT_DIR/summary.tsv"
     printf 'binary_sha256=%s\n' "$binary_hash" > "$ARTIFACT_DIR/run-manifest.txt"
     printf 'stability_trials=%s\n' "$STABILITY_TRIALS" >> "$ARTIFACT_DIR/run-manifest.txt"

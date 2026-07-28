@@ -572,13 +572,16 @@ if rg -F -- 'for host_veth in "${HOST_VETH[@]}"; do' "$MULTI_CLIENT_DUAL_STACK_H
   && rg -F -- 'started_at_unix_ns' "$TCP_THROUGHPUT_PROBE" >/dev/null \
   && rg -F -- 'finished_at_unix_ns' "$TCP_THROUGHPUT_PROBE" >/dev/null \
   && rg -F -- 'EGRESS_SUMMARIZER="$SCRIPT_DIR/utils/summarize-external-egress.py"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'server-ingress-$phase.log' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- '--server-capture "$ARTIFACT_DIR/server-ingress-$phase.log"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- '--trial "$ARTIFACT_DIR/tcp6-client-$phase-1.json"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
-  && rg -F -- 'retained fewer than two externally captured packets' "$EGRESS_SUMMARIZER" >/dev/null; then
-  pass "Multi-client dual-stack proof keeps receiver-verified per-trial external egress evidence and owned host-veth cleanup"
-  append_item "multi_client_dual_stack_tcp_throughput" "ok" "receiver bytes, SHA-256, wall-clock intervals, per-trial external timing, and partial-run host-veth cleanup are fail-closed"
+  && rg -F -- 'SERVER_INGRESS_LABEL = "server UDP ingress"' "$EGRESS_SUMMARIZER" >/dev/null \
+  && rg -F -- 'retained fewer than two {label} packets' "$EGRESS_SUMMARIZER" >/dev/null; then
+  pass "Multi-client dual-stack proof keeps receiver-verified per-trial client-egress and server-ingress evidence plus owned host-veth cleanup"
+  append_item "multi_client_dual_stack_tcp_throughput" "ok" "receiver bytes, SHA-256, wall-clock intervals, external client/server timing, and partial-run host-veth cleanup are fail-closed"
 else
-  fail_critical "Multi-client dual-stack proof lost receiver-verified per-trial egress evidence or host-veth cleanup"
-  append_item "multi_client_dual_stack_tcp_throughput" "fail" "missing receiver byte/hash/wall-clock gate, external per-trial capture, direct probe use, no-iperf contract, or host-veth cleanup"
+  fail_critical "Multi-client dual-stack proof lost receiver-verified per-trial client/server evidence or host-veth cleanup"
+  append_item "multi_client_dual_stack_tcp_throughput" "fail" "missing receiver byte/hash/wall-clock gate, external client/server capture, direct probe use, no-iperf contract, or host-veth cleanup"
 fi
 
 DUAL_STACK_STABILITY_HARNESS="scripts/tests/tun-e2e-multi-client-dual-stack-stability.sh"
@@ -590,12 +593,13 @@ if rg -F -- 'STABILITY_TRIALS=3' "$DUAL_STACK_STABILITY_HARNESS" >/dev/null \
   && rg -F -- 'dual-stack stability aggregate has' "$DUAL_STACK_STABILITY_HARNESS" >/dev/null \
   && rg -F -- 'receiver-verified PMTU throughput gain is below 15 percent' "$DUAL_STACK_STABILITY_AGGREGATOR" >/dev/null \
   && rg -F -- 'child artifact binary SHA-256 differs from the stability artifact' "$DUAL_STACK_STABILITY_AGGREGATOR" >/dev/null \
+  && rg -F -- 'External server UDP ingress packets' "$DUAL_STACK_STABILITY_AGGREGATOR" >/dev/null \
   && rg -F -- 'egress summary has malformed trial evidence' "$DUAL_STACK_STABILITY_AGGREGATOR" >/dev/null; then
-  pass "Repeated dual-stack stability harness requires identical-artifact receiver, black-hole, and per-trial egress evidence"
-  append_item "dual_stack_stability_aggregate" "ok" "three capture-enabled child proofs, exact binary identity, complete receiver/black-hole evidence, and per-trial egress aggregate are required"
+  pass "Repeated dual-stack stability harness requires identical-artifact receiver, black-hole, and per-trial client/server evidence"
+  append_item "dual_stack_stability_aggregate" "ok" "three capture-enabled child proofs, exact binary identity, complete receiver/black-hole evidence, and per-trial client/server aggregate are required"
 else
   fail_critical "Repeated dual-stack stability harness is missing its fail-closed evidence contract"
-  append_item "dual_stack_stability_aggregate" "fail" "missing fixed trial count, forced capture, exact child artifact, aggregate, binary identity, receiver, black-hole, or egress validation"
+  append_item "dual_stack_stability_aggregate" "fail" "missing fixed trial count, forced capture, exact child artifact, aggregate, binary identity, receiver, black-hole, or client/server validation"
 fi
 
 if [[ "$(rg -F -- '--tun-mtu "$tun_mtu_ceiling"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" | wc -l | tr -d ' ')" -eq 2 ]] \

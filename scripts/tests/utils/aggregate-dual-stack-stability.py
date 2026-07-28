@@ -28,6 +28,17 @@ EGRESS_COUNT_PATTERN = re.compile(
     r"^External client-1 UDP egress trial (?P<trial>[1-3]) "
     r"gaps ge (?P<threshold>10|50|100)ms: (?P<value>[0-9]+)$"
 )
+SERVER_PACKET_PATTERN = re.compile(
+    r"^External server UDP ingress trial (?P<trial>[1-3]) packets: (?P<value>[0-9]+)$"
+)
+SERVER_GAP_PATTERN = re.compile(
+    r"^External server UDP ingress trial (?P<trial>[1-3]) "
+    r"max gap us: (?P<value>[0-9]+)$"
+)
+SERVER_COUNT_PATTERN = re.compile(
+    r"^External server UDP ingress trial (?P<trial>[1-3]) "
+    r"gaps ge (?P<threshold>10|50|100)ms: (?P<value>[0-9]+)$"
+)
 PHASES = ("default", "opt-in")
 TRIALS = (1, 2, 3)
 
@@ -112,9 +123,37 @@ def validate_receiver_result(path: Path) -> None:
         fail(f"receiver result is incomplete or inconsistent: {path}")
 
 
-def validate_egress_summary(path: Path) -> tuple[int, int, int]:
+def validate_trial_lines(
+    lines: list[str],
+    position: int,
+    trial: int,
+    packet_pattern: re.Pattern[str],
+    gap_pattern: re.Pattern[str],
+    count_pattern: re.Pattern[str],
+    path: Path,
+) -> tuple[int, int, int, int]:
+    packet_match = packet_pattern.fullmatch(lines[position])
+    gap_match = gap_pattern.fullmatch(lines[position + 1])
+    count_matches = [
+        count_pattern.fullmatch(lines[position + offset])
+        for offset in (2, 3, 4)
+    ]
+    if packet_match is None or gap_match is None or any(match is None for match in count_matches):
+        fail(f"egress summary has malformed trial evidence: {path}")
+    if int(packet_match.group("trial")) != trial or int(gap_match.group("trial")) != trial:
+        fail(f"egress summary trial ordering is invalid: {path}")
+    if int(packet_match.group("value")) < 2:
+        fail(f"egress summary trial retained fewer than two packets: {path}")
+    if [int(match.group("trial")) for match in count_matches] != [trial] * 3:
+        fail(f"egress summary counter trial ordering is invalid: {path}")
+    if [int(match.group("threshold")) for match in count_matches] != [10, 50, 100]:
+        fail(f"egress summary counter thresholds are invalid: {path}")
+    return int(gap_match.group("value")), *(int(match.group("value")) for match in count_matches)
+
+
+def validate_egress_summary(path: Path) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
     lines = read_text(path).splitlines()
-    if len(lines) != 16:
+    if len(lines) != 32:
         fail(f"egress summary has an unexpected line count: {path}")
     total_prefix = "External client-1 UDP egress packets: "
     if not lines[0].startswith(total_prefix):
@@ -125,29 +164,32 @@ def validate_egress_summary(path: Path) -> tuple[int, int, int]:
         fail(f"egress summary total packet count is invalid: {path}")
     if total_packets < 2:
         fail(f"egress summary retained fewer than two packets: {path}")
+    server_total_prefix = "External server UDP ingress packets: "
+    if not lines[1].startswith(server_total_prefix):
+        fail(f"egress summary lacks the server ingress packet count: {path}")
+    try:
+        server_total_packets = int(lines[1][len(server_total_prefix) :])
+    except ValueError:
+        fail(f"egress summary server ingress packet count is invalid: {path}")
+    if server_total_packets < 2:
+        fail(f"egress summary server ingress retained fewer than two packets: {path}")
 
-    max_gaps: list[int] = []
-    position = 1
+    egress_gaps: list[int] = []
+    position = 2
     for trial in TRIALS:
-        packet_match = EGRESS_PACKET_PATTERN.fullmatch(lines[position])
-        gap_match = EGRESS_GAP_PATTERN.fullmatch(lines[position + 1])
-        count_matches = [
-            EGRESS_COUNT_PATTERN.fullmatch(lines[position + offset])
-            for offset in (2, 3, 4)
-        ]
-        if packet_match is None or gap_match is None or any(match is None for match in count_matches):
-            fail(f"egress summary has malformed trial evidence: {path}")
-        if int(packet_match.group("trial")) != trial or int(gap_match.group("trial")) != trial:
-            fail(f"egress summary trial ordering is invalid: {path}")
-        if int(packet_match.group("value")) < 2:
-            fail(f"egress summary trial retained fewer than two packets: {path}")
-        if [int(match.group("trial")) for match in count_matches] != [trial] * 3:
-            fail(f"egress summary counter trial ordering is invalid: {path}")
-        if [int(match.group("threshold")) for match in count_matches] != [10, 50, 100]:
-            fail(f"egress summary counter thresholds are invalid: {path}")
-        max_gaps.append(int(gap_match.group("value")))
+        max_gap_us, *_ = validate_trial_lines(
+            lines, position, trial, EGRESS_PACKET_PATTERN, EGRESS_GAP_PATTERN, EGRESS_COUNT_PATTERN, path
+        )
+        egress_gaps.append(max_gap_us)
         position += 5
-    return tuple(max_gaps)
+    server_gaps: list[int] = []
+    for trial in TRIALS:
+        max_gap_us, *_ = validate_trial_lines(
+            lines, position, trial, SERVER_PACKET_PATTERN, SERVER_GAP_PATTERN, SERVER_COUNT_PATTERN, path
+        )
+        server_gaps.append(max_gap_us)
+        position += 5
+    return tuple(egress_gaps), tuple(server_gaps)
 
 
 def validate_black_hole(artifact_dir: Path) -> tuple[int, int, Decimal]:
@@ -178,7 +220,7 @@ def validate_and_render(arguments: argparse.Namespace) -> str:
     validate_binary_identity(artifact_dir, arguments.binary_sha256)
 
     throughputs: dict[str, Decimal] = {}
-    egress_gaps: dict[str, tuple[int, int, int]] = {}
+    egress_gaps: dict[str, tuple[tuple[int, int, int], tuple[int, int, int]]] = {}
     for phase in PHASES:
         throughputs[phase] = parse_decimal(artifact_dir / f"throughput-{phase}.bps")
         for run in TRIALS:
@@ -200,8 +242,10 @@ def validate_and_render(arguments: argparse.Namespace) -> str:
         str(detection),
         str(receiver_bytes),
         format_decimal(elapsed),
-        *(str(value) for value in egress_gaps["default"]),
-        *(str(value) for value in egress_gaps["opt-in"]),
+        *(str(value) for value in egress_gaps["default"][0]),
+        *(str(value) for value in egress_gaps["opt-in"][0]),
+        *(str(value) for value in egress_gaps["default"][1]),
+        *(str(value) for value in egress_gaps["opt-in"][1]),
     ]
     return "\t".join(fields) + "\n"
 
