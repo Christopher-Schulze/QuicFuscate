@@ -7,7 +7,7 @@
 
 use core::cmp::min;
 use core::time::Duration;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -88,6 +88,39 @@ struct SpaceRecovery {
     largest_acked: Option<u64>,
 }
 
+/// Candidate packet loss run for RFC 9002 persistent-congestion detection.
+///
+/// Retains only packet numbers from the current candidate so a reordered ACK
+/// for a packet already declared lost can invalidate the run. QUIC permits
+/// implementations to retain that state after loss to detect reordering.
+#[derive(Debug, Default)]
+struct PersistentCongestionRun {
+    start: Option<Instant>,
+    start_pn: Option<u64>,
+    end: Option<Instant>,
+    lost_packet_numbers: BTreeSet<(usize, u64)>,
+}
+
+impl PersistentCongestionRun {
+    fn reset(&mut self) {
+        self.start = None;
+        self.start_pn = None;
+        self.end = None;
+        self.lost_packet_numbers.clear();
+    }
+
+    fn contains_acknowledged_loss(&self, space: PacketSpace, ranges: &[(u64, u64)]) -> bool {
+        ranges.iter().any(|(start, end)| {
+            start < end
+                && self
+                    .lost_packet_numbers
+                    .range((space.index(), *start)..(space.index(), *end))
+                    .next()
+                    .is_some()
+        })
+    }
+}
+
 /// Result of [`Recovery::on_ack_received`]: everything the connection must react to.
 #[derive(Debug, Default)]
 pub struct AckOutcome {
@@ -116,10 +149,14 @@ pub struct PersistentCongestionEvidence {
     pub period: Duration,
     /// Send time at the beginning of the uninterrupted loss run.
     pub run_start: Instant,
+    /// Packet number at the beginning of the uninterrupted loss run.
+    pub run_start_pn: u64,
     /// Send time of the loss that completed the run.
     pub run_end: Instant,
     /// Packet number of the loss that completed the run.
     pub terminal_lost_pn: u64,
+    /// Number of declared-lost ack-eliciting packets in the run.
+    pub lost_packet_count: usize,
 }
 
 /// Result of [`Recovery::on_loss_detection_timeout`].
@@ -154,12 +191,14 @@ pub struct Recovery {
     latest_rtt: Option<Duration>,
     /// Whether we have a valid RTT sample yet.
     rtt_initialized: bool,
+    /// Time at which the first RTT sample was obtained (RFC 9002 §7.6.2).
+    first_rtt_sample: Option<Instant>,
     /// Probe Timeout counter (exponential backoff, incremented per PTO firing).
     pub pto_count: u32,
     /// Per-packet-number-space sent/loss state (canonical owner, RFC 9002 §4.1).
     spaces: [SpaceRecovery; 3],
-    /// Persistent congestion loss-run window: (run_start_sent, latest_lost_sent).
-    pc_window: Option<(Instant, Instant)>,
+    /// Persistent-congestion loss-run state retained across ACK frames.
+    pc_window: PersistentCongestionRun,
     /// Whether HyStart slow-start exit is enabled.
     pub hystart: bool,
     /// Whether packet pacing is enabled.
@@ -188,9 +227,10 @@ impl Recovery {
             min_rtt: Duration::MAX,
             latest_rtt: None,
             rtt_initialized: false,
+            first_rtt_sample: None,
             pto_count: 0,
             spaces: [SpaceRecovery::default(), SpaceRecovery::default(), SpaceRecovery::default()],
-            pc_window: None,
+            pc_window: PersistentCongestionRun::default(),
             hystart: true,
             pacing: true,
             mss,
@@ -374,12 +414,20 @@ impl Recovery {
     ///   SRTT = 7/8 * SRTT + 1/8 * R
     /// Also tracks min_rtt for RACK and BBR.
     pub fn update_rtt(&mut self, rtt: Duration) {
+        self.update_rtt_at(rtt, Instant::now());
+    }
+
+    /// Applies an RTT sample with its receive timestamp. ACK processing uses
+    /// the supplied timestamp so persistent-congestion eligibility is measured
+    /// against the actual first sample rather than a later local clock read.
+    fn update_rtt_at(&mut self, rtt: Duration, sampled_at: Instant) {
         if !self.rtt_initialized {
             // First sample: initialize SRTT and RTTVAR
             self.rtt = rtt;
             self.rtt_var = rtt / 2;
             self.min_rtt = rtt;
             self.rtt_initialized = true;
+            self.first_rtt_sample = Some(sampled_at);
         } else {
             // EWMA smoothing per RFC 6298
             let abs_diff = rtt.abs_diff(self.rtt);
@@ -469,7 +517,7 @@ impl Recovery {
             sp.loss_time = None;
             sp.time_of_last_ack_eliciting = None;
         }
-        self.pc_window = None;
+        self.pc_window.reset();
         self.sync_from_cc();
     }
 }
@@ -661,7 +709,7 @@ impl Recovery {
                     {
                         adjusted = latest.saturating_sub(delay);
                     }
-                    self.update_rtt(adjusted);
+                    self.update_rtt_at(adjusted, now);
                     outcome.rtt_sample = Some(latest);
                 }
             }
@@ -676,9 +724,12 @@ impl Recovery {
         // 4. An acknowledged ack-eliciting packet at or after the loss-run
         //    start breaks that run. It may have been acknowledged after the last
         //    loss currently recorded, but a later loss must never bridge across it.
-        if let Some((start, _)) = self.pc_window {
+        if self.pc_window.contains_acknowledged_loss(space, ranges) {
+            self.pc_window.reset();
+        }
+        if let Some(start) = self.pc_window.start {
             if newly_acked.iter().any(|p| p.ack_eliciting && p.sent_at >= start) {
-                self.pc_window = None;
+                self.pc_window.reset();
             }
         }
         self.finish_ack_loss_accounting(space, largest_in_frame, newly_acked, now, outcome)
@@ -698,48 +749,78 @@ impl Recovery {
         let lost = self.detect_lost_packets(space, largest_in_frame, now);
 
         // 6. Persistent congestion (RFC 9002 §7.6): chain the loss run across
-        //    frames; an acked packet sent inside the run (or a gap longer than
-        //    the congestion period) breaks it. A run spanning at least the
-        //    persistent congestion duration collapses the window.
+        //    frames; an acknowledged packet inside the run (including a
+        //    reordered ACK for a packet already declared lost) or a gap longer
+        //    than the congestion period breaks it. Candidates begin only after
+        //    a real RTT sample, as required by §7.6.2.
         if !lost.is_empty() {
-            let period = self.persistent_congestion_period();
-            let mut run_start: Option<Instant> = self.pc_window.map(|w| w.0);
-            let mut prev_sent: Option<Instant> = self.pc_window.map(|w| w.1);
-            let mut declaration = None;
-            for pkt in lost.iter().filter(|pkt| pkt.ack_eliciting && !pkt.pmtu_probe) {
-                if let Some(prev) = prev_sent {
-                    let acked_between =
-                        newly_acked.iter().any(|a| a.sent_at > prev && a.sent_at < pkt.sent_at);
-                    if acked_between || pkt.sent_at.saturating_duration_since(prev) > period {
-                        run_start = None;
+            if let Some(first_rtt_sample) = self.first_rtt_sample {
+                let period = self.persistent_congestion_period();
+                let mut declaration = None;
+                for pkt in lost.iter().filter(|pkt| {
+                    pkt.ack_eliciting && !pkt.pmtu_probe && pkt.sent_at > first_rtt_sample
+                }) {
+                    if let Some(prev) = self.pc_window.end {
+                        let acked_between =
+                            newly_acked.iter().any(|a| a.sent_at > prev && a.sent_at < pkt.sent_at);
+                        if acked_between || pkt.sent_at.saturating_duration_since(prev) > period {
+                            self.pc_window.reset();
+                        }
+                    }
+                    let start = match self.pc_window.start {
+                        Some(start) => start,
+                        None => {
+                            self.pc_window.start = Some(pkt.sent_at);
+                            pkt.sent_at
+                        }
+                    };
+                    let run_start_pn = match self.pc_window.start_pn {
+                        Some(start_pn) => start_pn,
+                        None => {
+                            self.pc_window.start_pn = Some(pkt.pn);
+                            pkt.pn
+                        }
+                    };
+                    self.pc_window.end = Some(pkt.sent_at);
+                    self.pc_window.lost_packet_numbers.insert((space.index(), pkt.pn));
+                    if pkt.sent_at.saturating_duration_since(start) >= period {
+                        declaration = Some((
+                            start,
+                            run_start_pn,
+                            pkt.sent_at,
+                            pkt.pn,
+                            self.pc_window.lost_packet_numbers.len(),
+                        ));
+                        break;
                     }
                 }
-                let start = *run_start.get_or_insert(pkt.sent_at);
-                prev_sent = Some(pkt.sent_at);
-                if pkt.sent_at.saturating_duration_since(start) >= period {
-                    declaration = Some((start, pkt.sent_at, pkt.pn));
-                    break;
-                }
-            }
-            if let Some((run_start, run_end, terminal_lost_pn)) = declaration {
-                outcome.persistent_congestion = true;
-                outcome.persistent_congestion_evidence = Some(PersistentCongestionEvidence {
-                    largest_acked: largest_in_frame,
-                    period,
+                if let Some((
                     run_start,
+                    run_start_pn,
                     run_end,
                     terminal_lost_pn,
-                });
-                self.pc_window = None;
-                let min_cwnd = 2 * self.mss;
-                self.cc.on_persistent_congestion(min_cwnd);
-                self.ssthresh = min_cwnd;
-                if let Some(l) = self.latest_rtt {
-                    self.min_rtt = l;
+                    lost_packet_count,
+                )) = declaration
+                {
+                    outcome.persistent_congestion = true;
+                    outcome.persistent_congestion_evidence = Some(PersistentCongestionEvidence {
+                        largest_acked: largest_in_frame,
+                        period,
+                        run_start,
+                        run_start_pn,
+                        run_end,
+                        terminal_lost_pn,
+                        lost_packet_count,
+                    });
+                    self.pc_window.reset();
+                    let min_cwnd = 2 * self.mss;
+                    self.cc.on_persistent_congestion(min_cwnd);
+                    self.ssthresh = min_cwnd;
+                    if let Some(l) = self.latest_rtt {
+                        self.min_rtt = l;
+                    }
+                    self.sync_from_cc();
                 }
-                self.sync_from_cc();
-            } else {
-                self.pc_window = run_start.zip(prev_sent);
             }
         }
 
@@ -1360,7 +1441,9 @@ mod tests {
             .persistent_congestion_evidence
             .expect("persistent congestion must retain its decision evidence");
         assert_eq!(evidence.largest_acked, 20);
+        assert_eq!(evidence.run_start_pn, 0);
         assert_eq!(evidence.terminal_lost_pn, 15);
+        assert_eq!(evidence.lost_packet_count, 16);
         assert_eq!(evidence.run_start, t0);
         assert_eq!(evidence.run_end, t0 + Duration::from_millis(150));
         assert_eq!(evidence.period, Duration::from_millis(150));
@@ -1423,6 +1506,64 @@ mod tests {
             true,
             false,
             t0 + Duration::from_millis(210),
+        );
+        assert!(!outcome.persistent_congestion);
+        assert!(rec.cwnd > 2400);
+    }
+
+    #[test]
+    fn reordered_ack_for_prior_lost_packet_breaks_persistent_congestion() {
+        let mut rec = Recovery::new(120_000, 1200);
+        rec.update_rtt(Duration::from_millis(10));
+        let t0 = Instant::now();
+        seed_space(&mut rec, PacketSpace::Application, 22, t0);
+
+        let first = rec.on_ack_received(
+            PacketSpace::Application,
+            &[(10, 11)],
+            Duration::ZERO,
+            true,
+            false,
+            t0 + Duration::from_millis(110),
+        );
+        assert!(!first.persistent_congestion);
+
+        let reordered = rec.on_ack_received(
+            PacketSpace::Application,
+            &[(4, 5)],
+            Duration::ZERO,
+            true,
+            false,
+            t0 + Duration::from_millis(120),
+        );
+        assert!(!reordered.persistent_congestion);
+
+        let outcome = rec.on_ack_received(
+            PacketSpace::Application,
+            &[(21, 22)],
+            Duration::ZERO,
+            true,
+            false,
+            t0 + Duration::from_millis(220),
+        );
+        assert!(!outcome.persistent_congestion);
+        assert!(rec.cwnd > 2400);
+    }
+
+    #[test]
+    fn losses_sent_before_first_rtt_sample_cannot_establish_persistent_congestion() {
+        let mut rec = Recovery::new(120_000, 1200);
+        let now = Instant::now();
+        seed_space(&mut rec, PacketSpace::Application, 21, now - Duration::from_millis(300));
+        rec.update_rtt(Duration::from_millis(10));
+
+        let outcome = rec.on_ack_received(
+            PacketSpace::Application,
+            &[(20, 21)],
+            Duration::ZERO,
+            true,
+            false,
+            now,
         );
         assert!(!outcome.persistent_congestion);
         assert!(rec.cwnd > 2400);

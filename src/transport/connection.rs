@@ -1105,11 +1105,13 @@ impl Connection {
         }
         if let Some(evidence) = outcome.persistent_congestion_evidence {
             log::info!(
-                "persistent congestion established; cwnd={} space={:?} largest_acked={} terminal_lost_pn={} period_ms={} run_ms={}",
+                "persistent congestion established; cwnd={} space={:?} largest_acked={} run_start_pn={} terminal_lost_pn={} lost_packets={} period_ms={} run_ms={}",
                 self.recovery.cwnd,
                 space,
                 evidence.largest_acked,
+                evidence.run_start_pn,
                 evidence.terminal_lost_pn,
+                evidence.lost_packet_count,
                 evidence.period.as_millis(),
                 evidence.run_end.saturating_duration_since(evidence.run_start).as_millis(),
             );
