@@ -2,7 +2,8 @@
 # FEC policy and mode transition E2E test via tc-netem (TODO-427, TODO-558).
 #
 # `TRANSITION_SCENARIOS` is the single source for every profile's real-load
-# phase inputs, observed-loss bounds, recovery settle, and Fountain policy.
+# phase inputs, observed-loss bounds, recovery settle, quantitative recovery
+# duration, and Fountain policy.
 #
 # Off remains Zero with no repairs or switches. Auto remains Zero while clean,
 # adapts with repairs under loss, and returns to Zero during the bounded recovery.
@@ -21,8 +22,8 @@ LOSS_PROFILE="${QF_FEC_LOSS_PROFILE:-moderate}"
 EVIDENCE_DIR="${QF_E2E_ARTIFACT_DIR:-}"
 CRYPTO_FAILURE_PATTERN='Crypto error: crypto failure|AEAD limit reached|Key update error'
 TRANSITION_SCENARIOS=(
-    "moderate:20:35:50:5:150:10:250:10:1"
-    "severe:40:60:50:5:150:10:250:10:0"
+    "moderate:20:35:50:5:150:10:250:10:40000:1"
+    "severe:40:60:50:5:150:10:250:10:40000:0"
 )
 TRANSITION_SCENARIO=""
 LOSS_PERCENT=""
@@ -33,13 +34,14 @@ LOSS_PHASE_PING_COUNT=""
 RECOVERY_SETTLE_SECONDS=""
 RECOVERY_PING_COUNT=""
 RECOVERY_MAX_TUNNEL_LOSS_PERCENT=""
+MAX_RECOVERY_DURATION_MS=""
 FORBID_FOUNTAIN=""
 
 for scenario in "${TRANSITION_SCENARIOS[@]}"; do
     IFS=':' read -r profile_name loss_percent max_tunnel_loss_percent \
         clean_ping_count clean_max_tunnel_loss_percent loss_phase_ping_count \
         recovery_settle_seconds recovery_ping_count recovery_max_tunnel_loss_percent \
-        forbid_fountain <<< "$scenario"
+        max_recovery_duration_ms forbid_fountain <<< "$scenario"
     if [ "$profile_name" = "$LOSS_PROFILE" ]; then
         TRANSITION_SCENARIO="$scenario"
         LOSS_PERCENT="$loss_percent"
@@ -50,6 +52,7 @@ for scenario in "${TRANSITION_SCENARIOS[@]}"; do
         RECOVERY_SETTLE_SECONDS="$recovery_settle_seconds"
         RECOVERY_PING_COUNT="$recovery_ping_count"
         RECOVERY_MAX_TUNNEL_LOSS_PERCENT="$recovery_max_tunnel_loss_percent"
+        MAX_RECOVERY_DURATION_MS="$max_recovery_duration_ms"
         FORBID_FOUNTAIN="$forbid_fountain"
         break
     fi
@@ -78,6 +81,7 @@ ADMIN_SOCKET=""
 QKEY_STORE=""
 CERT=""
 KEY=""
+RECOVERY_DURATION_MS=""
 
 exec 9>"$LOCK_FILE"
 if ! flock -w "$LOCK_TIMEOUT" 9; then
@@ -209,10 +213,12 @@ preserve_evidence() {
         printf 'recovery_settle_seconds=%s\n' "$RECOVERY_SETTLE_SECONDS"
         printf 'recovery_ping_count=%s\n' "$RECOVERY_PING_COUNT"
         printf 'recovery_max_tunnel_loss_percent=%s\n' "$RECOVERY_MAX_TUNNEL_LOSS_PERCENT"
+        printf 'max_recovery_duration_ms=%s\n' "$MAX_RECOVERY_DURATION_MS"
         printf 'forbid_fountain=%s\n' "$FORBID_FOUNTAIN"
         printf 'clean_tunnel_loss_percent=%s\n' "$clean_loss"
         printf 'impaired_tunnel_loss_percent=%s\n' "$impaired_loss"
         printf 'recovered_tunnel_loss_percent=%s\n' "$recovered_loss"
+        printf 'recovery_duration_ms=%s\n' "$RECOVERY_DURATION_MS"
         printf 'server_handshakes=%s\n' "$(grep -c 'TLS handshake complete' "$SERVER_LOG")"
         printf 'client_handshakes=%s\n' "$(grep -c 'TLS handshake complete' "$CLIENT_LOG")"
         printf 'panic_count=%s\n' "$panic_count"
@@ -434,6 +440,10 @@ metric_value() {
     awk -v metric="$metric" '$1 == metric { print $2; found=1; exit } END { if (!found) exit 1 }' "$file"
 }
 
+monotonic_milliseconds() {
+    python3 -c 'import time; print(time.monotonic_ns() // 1_000_000)'
+}
+
 capture_telemetry_phase() {
     local phase="$1"
     SERVER_TELEMETRY="$CURRENT_SCENARIO_DIR/server-${phase}.telemetry"
@@ -443,7 +453,7 @@ capture_telemetry_phase() {
     fetch_telemetry ns-cli "$CLIENT_TELEMETRY" \
         || fatal "client telemetry endpoint unavailable in ns-cli during ${phase}"
 
-    local file mode_id mode_name
+    local file mode_id mode_name metric
     for file in "$SERVER_TELEMETRY" "$CLIENT_TELEMETRY"; do
         for mode_id in {0..8}; do
             case "$mode_id" in
@@ -465,12 +475,23 @@ capture_telemetry_phase() {
         active=$(metric_value "$file" "quicfuscate_fec_active_connections_total") \
             || fatal "missing active FEC connection aggregate"
         [ "$active" -ge 1 ] || fatal "telemetry endpoint has no active FEC connection"
+        for metric in \
+            quicfuscate_fec_source_payload_bytes_sent_total \
+            quicfuscate_fec_source_wire_bytes_sent_total \
+            quicfuscate_fec_repair_wire_bytes_sent_total \
+            quicfuscate_fec_wire_overhead_sent_ppm \
+            quicfuscate_fec_recovered_packets_total \
+            quicfuscate_fec_recovered_payload_bytes_total
+        do
+            metric_value "$file" "$metric" >/dev/null \
+                || fatal "missing quantitative FEC metric ${metric} during ${phase}"
+        done
     done
 }
 
 assert_zero_no_repair_snapshot() {
     local file="$1"
-    local zero_active repairs switches nonzero_active
+    local zero_active repairs switches overhead nonzero_active
     zero_active=$(metric_value "$file" \
         'quicfuscate_fec_active_connections{mode="zero",mode_id="0"}') \
         || fatal "missing Zero mode bucket"
@@ -478,6 +499,8 @@ assert_zero_no_repair_snapshot() {
         || fatal "missing repair send counter"
     switches=$(metric_value "$file" "quicfuscate_fec_mode_switches_total") \
         || fatal "missing mode switch counter"
+    overhead=$(metric_value "$file" "quicfuscate_fec_wire_overhead_sent_ppm") \
+        || fatal "missing FEC wire-overhead counter"
     nonzero_active=$(awk '
         /^quicfuscate_fec_active_connections\{mode=/ &&
         $1 !~ /mode="zero"/ { sum += $2 }
@@ -487,6 +510,7 @@ assert_zero_no_repair_snapshot() {
     [ "$nonzero_active" -eq 0 ] || return 1
     [ "$repairs" -eq 0 ] || return 1
     [ "$switches" -eq 0 ] || return 1
+    [ "$overhead" -eq 0 ] || return 1
 }
 
 assert_zero_mode_snapshot() {
@@ -517,7 +541,7 @@ ping_phase() {
 
 echo "=== FEC Policy/Transition E2E Test (TODO-427, TODO-558) ==="
 echo "Policy: $FEC_MODE"
-echo "Transition contract: ${TRANSITION_SCENARIOS[*]} (profile:netem-loss:max-tunnel-loss:clean-pings:clean-max-loss:loss-pings:recovery-settle:recovery-pings:recovery-max-loss:forbid-fountain)"
+echo "Transition contract: ${TRANSITION_SCENARIOS[*]} (profile:netem-loss:max-tunnel-loss:clean-pings:clean-max-loss:loss-pings:recovery-settle:recovery-pings:recovery-max-loss:max-recovery-ms:forbid-fountain)"
 echo "Selected transition profile: $TRANSITION_SCENARIO"
 
 prepare_scenario_runtime "transition"
@@ -545,13 +569,19 @@ fi
 sleep 2  # Let FEC detect loss and start transition
 loss2=$(ping_phase "$LOSS_PHASE_PING_COUNT" "2")
 capture_telemetry_phase "lossy"
+client_lossy_overhead=$(metric_value \
+    "$CURRENT_SCENARIO_DIR/client-lossy.telemetry" \
+    "quicfuscate_fec_wire_overhead_sent_ppm") || fatal "missing lossy client FEC wire-overhead"
 remove_qdisc || fatal "could not remove transition netem loss"
 
 # Phase 3: Remove loss - FEC de-escalates (live transition)
 echo "Phase 3: Remove loss (FEC de-escalates)..."
+recovery_started_ms=$(monotonic_milliseconds) || fatal "could not read recovery monotonic clock"
 sleep "$RECOVERY_SETTLE_SECONDS"
 loss3=$(ping_phase "$RECOVERY_PING_COUNT" "3")
 capture_telemetry_phase "recovered"
+recovery_finished_ms=$(monotonic_milliseconds) || fatal "could not read recovery monotonic clock"
+RECOVERY_DURATION_MS=$((recovery_finished_ms - recovery_started_ms))
 
 # Acceptance criteria
 echo ""
@@ -559,6 +589,7 @@ echo "Results:"
 echo "  Phase 1 (clean):     ${loss1}% loss"
 echo "  Phase 2 (${LOSS_PROFILE}, ${LOSS_PERCENT}% loss): ${loss2}% loss"
 echo "  Phase 3 (recovered): ${loss3}% loss"
+echo "  Recovery duration: ${RECOVERY_DURATION_MS} ms"
 
 ok=true
 if [ "$loss1" -gt "$CLEAN_MAX_TUNNEL_LOSS_PERCENT" ]; then
@@ -571,6 +602,10 @@ if [ "$loss2" -gt "$MAX_TUNNEL_LOSS_PERCENT" ]; then
 fi
 if [ "$loss3" -gt "$RECOVERY_MAX_TUNNEL_LOSS_PERCENT" ]; then
     echo "FAIL: Phase 3 loss >${RECOVERY_MAX_TUNNEL_LOSS_PERCENT}% during clean-link recovery"
+    ok=false
+fi
+if [ "$RECOVERY_DURATION_MS" -gt "$MAX_RECOVERY_DURATION_MS" ]; then
+    echo "FAIL: Recovery duration ${RECOVERY_DURATION_MS}ms >${MAX_RECOVERY_DURATION_MS}ms"
     ok=false
 fi
 
@@ -594,7 +629,7 @@ else
         "$CURRENT_SCENARIO_DIR/client-clean.telemetry"
     do
         if ! assert_zero_no_repair_snapshot "$snapshot"; then
-            echo "FAIL: Auto policy spent FEC work or left Zero on the clean link in $snapshot"
+            echo "FAIL: Auto policy spent FEC work, emitted wire overhead, or left Zero on the clean link in $snapshot"
             ok=false
         fi
     done
@@ -612,6 +647,10 @@ else
         "quicfuscate_fec_mode_switches_total") || client_switches=0
     if [ "$client_nonzero_active" -le 0 ] || [ "$client_switches" -le 0 ]; then
         echo "FAIL: Auto policy committed no non-Zero client adaptation under loss"
+        ok=false
+    fi
+    if [ "$client_lossy_overhead" -le 0 ]; then
+        echo "FAIL: Auto policy reported no positive FEC wire overhead under loss"
         ok=false
     fi
     if [ "$client_repairs" -le 0 ]; then

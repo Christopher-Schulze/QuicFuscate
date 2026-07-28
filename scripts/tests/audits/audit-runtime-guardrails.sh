@@ -481,6 +481,10 @@ if rg -F -- 'UNIFORM_PING_SCENARIOS=(' "$UNIFORM_FEC_CONTRACT_HARNESS" >/dev/nul
   && rg -F -- 'loss1=$(ping_phase "$CLEAN_PING_COUNT" "1")' "$TRANSITION_FEC_CONTRACT_HARNESS" >/dev/null \
   && rg -F -- 'loss2=$(ping_phase "$LOSS_PHASE_PING_COUNT" "2")' "$TRANSITION_FEC_CONTRACT_HARNESS" >/dev/null \
   && rg -F -- 'loss3=$(ping_phase "$RECOVERY_PING_COUNT" "3")' "$TRANSITION_FEC_CONTRACT_HARNESS" >/dev/null \
+  && rg -F -- 'quicfuscate_fec_wire_overhead_sent_ppm' "$TRANSITION_FEC_CONTRACT_HARNESS" >/dev/null \
+  && rg -F -- 'quicfuscate_fec_recovered_packets_total' "$TRANSITION_FEC_CONTRACT_HARNESS" >/dev/null \
+  && rg -F -- 'RECOVERY_DURATION_MS=$((recovery_finished_ms - recovery_started_ms))' "$TRANSITION_FEC_CONTRACT_HARNESS" >/dev/null \
+  && rg -F -- 'MAX_RECOVERY_DURATION_MS' "$TRANSITION_FEC_CONTRACT_HARNESS" >/dev/null \
   && ! rg -F -- 'case "$LOSS_PROFILE" in' "$TRANSITION_FEC_CONTRACT_HARNESS" >/dev/null \
   && ! rg -F -- 'ping_phase 50 "1"' "$TRANSITION_FEC_CONTRACT_HARNESS" >/dev/null \
   && rg -F -- 'LOSS_SCENARIOS=(' "$ADVERSITY_FEC_CONTRACT_HARNESS" >/dev/null \
