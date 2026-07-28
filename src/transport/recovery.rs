@@ -71,6 +71,8 @@ pub struct SentPacket {
     pub in_flight: bool,
     /// CRYPTO stream range carried (offset, len) for Initial/Handshake packets.
     pub crypto_range: Option<(u64, u64)>,
+    /// Whether this packet is an isolated DPLPMTUD PING+PADDING probe.
+    pub pmtu_probe: bool,
 }
 
 /// Per-space loss detection state owned by [`Recovery`].
@@ -501,13 +503,49 @@ impl Recovery {
         crypto_range: Option<(u64, u64)>,
         now: Instant,
     ) {
+        self.track_sent_packet(space, pn, size, ack_eliciting, in_flight, crypto_range, false, now);
+    }
+
+    /// Records an isolated DPLPMTUD probe without charging it to congestion
+    /// control. The packet remains ack-eliciting and loss-tracked so its ACK or
+    /// loss still advances the PMTU state machine.
+    pub fn on_pmtu_probe_sent_in_space(
+        &mut self,
+        space: PacketSpace,
+        pn: u64,
+        size: usize,
+        now: Instant,
+    ) {
+        self.track_sent_packet(space, pn, size, true, false, None, true, now);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn track_sent_packet(
+        &mut self,
+        space: PacketSpace,
+        pn: u64,
+        size: usize,
+        ack_eliciting: bool,
+        in_flight: bool,
+        crypto_range: Option<(u64, u64)>,
+        pmtu_probe: bool,
+        now: Instant,
+    ) {
         let sp = &mut self.spaces[space.index()];
         if ack_eliciting {
             sp.time_of_last_ack_eliciting = Some(now);
         }
         sp.sent.insert(
             pn,
-            SentPacket { pn, size, sent_at: now, ack_eliciting, in_flight, crypto_range },
+            SentPacket {
+                pn,
+                size,
+                sent_at: now,
+                ack_eliciting,
+                in_flight,
+                crypto_range,
+                pmtu_probe,
+            },
         );
         if in_flight {
             self.cc.on_packet_sent(pn, size, now);
@@ -668,7 +706,7 @@ impl Recovery {
             let mut run_start: Option<Instant> = self.pc_window.map(|w| w.0);
             let mut prev_sent: Option<Instant> = self.pc_window.map(|w| w.1);
             let mut declaration = None;
-            for pkt in lost.iter().filter(|pkt| pkt.ack_eliciting) {
+            for pkt in lost.iter().filter(|pkt| pkt.ack_eliciting && !pkt.pmtu_probe) {
                 if let Some(prev) = prev_sent {
                     let acked_between =
                         newly_acked.iter().any(|a| a.sent_at > prev && a.sent_at < pkt.sent_at);
@@ -1037,6 +1075,65 @@ mod tests {
         assert_eq!(outcome.rtt_sample, Some(Duration::from_millis(10)));
         // Packets 2 and 3 remain tracked and in flight.
         assert_eq!(rec.bytes_in_flight, 2400);
+    }
+
+    #[test]
+    fn pmtu_probe_loss_does_not_feed_congestion_control() {
+        let mut with_probes = Recovery::new(12_000, 1200);
+        let mut control = Recovery::new(12_000, 1200);
+        with_probes.update_rtt(Duration::from_secs(1));
+        control.update_rtt(Duration::from_secs(1));
+        let now = Instant::now();
+
+        for pn in 0..4 {
+            with_probes.on_pmtu_probe_sent_in_space(
+                PacketSpace::Application,
+                pn,
+                1400,
+                now + Duration::from_millis(pn * 10),
+            );
+        }
+        with_probes.on_packet_sent_in_space(
+            PacketSpace::Application,
+            4,
+            1200,
+            true,
+            true,
+            None,
+            now + Duration::from_millis(40),
+        );
+        control.on_packet_sent_in_space(
+            PacketSpace::Application,
+            4,
+            1200,
+            true,
+            true,
+            None,
+            now + Duration::from_millis(40),
+        );
+
+        let with_probe_outcome = with_probes.on_ack_received(
+            PacketSpace::Application,
+            &[(4, 5)],
+            Duration::ZERO,
+            true,
+            false,
+            now + Duration::from_millis(50),
+        );
+        let control_outcome = control.on_ack_received(
+            PacketSpace::Application,
+            &[(4, 5)],
+            Duration::ZERO,
+            true,
+            false,
+            now + Duration::from_millis(50),
+        );
+
+        assert_eq!(with_probe_outcome.lost, vec![(0, 1400), (1, 1400)]);
+        assert!(with_probe_outcome.persistent_congestion_evidence.is_none());
+        assert!(control_outcome.lost.is_empty());
+        assert_eq!(with_probes.cwnd, control.cwnd);
+        assert_eq!(with_probes.bytes_in_flight, control.bytes_in_flight);
     }
 
     #[test]

@@ -3649,15 +3649,24 @@ impl Connection {
         let is_ack_only = !wrote_ack_eliciting;
         if !is_ack_only {
             let now = Instant::now();
-            self.recovery.on_packet_sent_in_space(
-                recovery::PacketSpace::Application,
-                pn,
-                total,
-                true,
-                true,
-                None,
-                now,
-            );
+            if _pmtu_probe_sent {
+                self.recovery.on_pmtu_probe_sent_in_space(
+                    recovery::PacketSpace::Application,
+                    pn,
+                    total,
+                    now,
+                );
+            } else {
+                self.recovery.on_packet_sent_in_space(
+                    recovery::PacketSpace::Application,
+                    pn,
+                    total,
+                    true,
+                    true,
+                    None,
+                    now,
+                );
+            }
             if let Some(transmission_id) = stream_transmission_id {
                 self.commit_stream_transmission(transmission_id, pn);
             }
