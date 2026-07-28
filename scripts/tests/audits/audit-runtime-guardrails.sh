@@ -591,6 +591,15 @@ if rg -F -- 'for host_veth in "${HOST_VETH[@]}"; do' "$MULTI_CLIENT_DUAL_STACK_H
   && rg -F -- 'UDP_SOCKET_EVIDENCE="$SCRIPT_DIR/utils/udp-socket-evidence.py"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'server-udp-$phase-$trial-before.json' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'client-udp-$phase-$trial-before.json' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'CLIENT_RECV_DIAGNOSTICS="${QF_E2E_CLIENT_RECV_DIAGNOSTICS:-1}"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'QUICFUSCATE_CLIENT_RECV_DIAGNOSTICS="$CLIENT_RECV_DIAGNOSTICS"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'capture_client_receive_diagnostics "$phase" "$trial"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'Client receive diagnostics at heartbeat:' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- '[[ ! -e "$output" ]] || fail "refusing to replace client receive diagnostics: $output"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'CLIENT_RECV_DIAGNOSTICS must be 0 or 1' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'CLIENT_RECV_DIAGNOSTICS_ENV: &str = "QUICFUSCATE_CLIENT_RECV_DIAGNOSTICS"' src/main.rs >/dev/null \
+  && rg -F -- 'Client receive diagnostics at heartbeat:' src/main.rs >/dev/null \
+  && rg -F -- 'last_activity_marker' src/main.rs src/transport/connection.rs >/dev/null \
   && rg -F -- 'server UDP socket dropped datagrams during IPv6 throughput trial' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'client UDP socket dropped datagrams during IPv6 throughput trial' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'selector = f"on port {port}"' "$UDP_SOCKET_EVIDENCE" >/dev/null \

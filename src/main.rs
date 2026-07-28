@@ -36,6 +36,34 @@ static ADMIN_LOG_BUFFER: OnceLock<
 
 const DEFAULT_RUNTIME_SNI_HOST: &str = "cdn.cloudflare.com";
 const DEFAULT_RUNTIME_URL: &str = "https://cloudflare-dns.com/";
+const CLIENT_RECV_DIAGNOSTICS_ENV: &str = "QUICFUSCATE_CLIENT_RECV_DIAGNOSTICS";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ClientReceiveDiagnostics {
+    socket_datagrams: u64,
+    socket_bytes: u64,
+    core_recv_successes: u64,
+    core_recv_errors: u64,
+    activity_updates: u64,
+}
+
+impl ClientReceiveDiagnostics {
+    fn record_socket_datagram(&mut self, bytes: usize) {
+        self.socket_datagrams = self.socket_datagrams.saturating_add(1);
+        self.socket_bytes = self.socket_bytes.saturating_add(bytes as u64);
+    }
+
+    fn record_core_recv_success(&mut self, activity_updated: bool) {
+        self.core_recv_successes = self.core_recv_successes.saturating_add(1);
+        if activity_updated {
+            self.activity_updates = self.activity_updates.saturating_add(1);
+        }
+    }
+
+    fn record_core_recv_error(&mut self) {
+        self.core_recv_errors = self.core_recv_errors.saturating_add(1);
+    }
+}
 
 #[cfg(test)]
 mod qkey_auth_tests {
@@ -312,6 +340,28 @@ mod tokio_udp_tests {
         assert_eq!(from, client_addr);
         assert_eq!(&buf[..len], payload);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod client_receive_diagnostics_tests {
+    use super::*;
+
+    #[test]
+    fn receive_diagnostics_distinguish_socket_core_and_activity_boundaries() {
+        let mut diagnostics = ClientReceiveDiagnostics::default();
+
+        diagnostics.record_socket_datagram(1200);
+        diagnostics.record_socket_datagram(64);
+        diagnostics.record_core_recv_success(true);
+        diagnostics.record_core_recv_success(false);
+        diagnostics.record_core_recv_error();
+
+        assert_eq!(diagnostics.socket_datagrams, 2);
+        assert_eq!(diagnostics.socket_bytes, 1264);
+        assert_eq!(diagnostics.core_recv_successes, 2);
+        assert_eq!(diagnostics.core_recv_errors, 1);
+        assert_eq!(diagnostics.activity_updates, 1);
     }
 }
 #[derive(Parser, Debug)]
@@ -2054,6 +2104,12 @@ async fn run_client(
     let mut housekeeping = interval(Duration::from_millis(5));
     housekeeping.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut next_stats_log = tokio::time::Instant::now();
+    let mut receive_diagnostics =
+        quicfuscate::env_utils::env_flag(CLIENT_RECV_DIAGNOSTICS_ENV, false)
+            .then(ClientReceiveDiagnostics::default);
+    if receive_diagnostics.is_some() {
+        info!("Client receive diagnostics enabled for this process");
+    }
     let shutdown_signal = wait_shutdown_signal();
     tokio::pin!(shutdown_signal);
 
@@ -2072,15 +2128,36 @@ async fn run_client(
                 match recv_res {
                     Ok(len) => {
                         telemetry!(quicfuscate::telemetry::BYTES_RECEIVED.inc_by(len as u64));
+                        let activity_before = receive_diagnostics
+                            .as_ref()
+                            .map(|_| conn.conn.last_activity_marker());
+                        if let Some(diagnostics) = receive_diagnostics.as_mut() {
+                            diagnostics.record_socket_datagram(len);
+                        }
                         match conn.recv(&buf[..len]) {
                             Err(error @ (quicfuscate::error::ConnectionError::TlsError(_)
                                 | quicfuscate::error::ConnectionError::TlsAlert(_)
                                 | quicfuscate::error::ConnectionError::PeerCertificateUnsupported)) => {
+                                if let Some(diagnostics) = receive_diagnostics.as_mut() {
+                                    diagnostics.record_core_recv_error();
+                                }
                                 error!("TLS handshake failed: {}", error);
                                 return Err(std::io::Error::other(error.to_string()));
                             }
-                            Err(error) => error!("QUIC recv failed: {:?}", error),
+                            Err(error) => {
+                                if let Some(diagnostics) = receive_diagnostics.as_mut() {
+                                    diagnostics.record_core_recv_error();
+                                }
+                                error!("QUIC recv failed: {:?}", error);
+                            }
                             Ok(_) => {
+                                if let (Some(diagnostics), Some(before)) =
+                                    (receive_diagnostics.as_mut(), activity_before)
+                                {
+                                    diagnostics.record_core_recv_success(
+                                        conn.conn.last_activity_marker() != before,
+                                    );
+                                }
                                 if let Err(error) =
                                     flush_connected_outgoing(&socket, &mut conn, &mut out).await
                                 {
@@ -2212,6 +2289,17 @@ async fn run_client(
                     && conn.conn.last_activity_elapsed()
                         >= Duration::from_millis(heartbeat_timeout_ms)
                 {
+                    if let Some(diagnostics) = receive_diagnostics.as_ref() {
+                        warn!(
+                            "Client receive diagnostics at heartbeat: socket_datagrams={}, socket_bytes={}, core_recv_successes={}, core_recv_errors={}, activity_updates={}, last_activity_elapsed_ms={}",
+                            diagnostics.socket_datagrams,
+                            diagnostics.socket_bytes,
+                            diagnostics.core_recv_successes,
+                            diagnostics.core_recv_errors,
+                            diagnostics.activity_updates,
+                            conn.conn.last_activity_elapsed().as_millis(),
+                        );
+                    }
                     warn!(
                         "Client heartbeat timeout after {}ms; activating fail-closed firewall state",
                         heartbeat_timeout_ms

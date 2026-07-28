@@ -4601,6 +4601,15 @@ impl Connection {
         self.last_activity.elapsed()
     }
 
+    /// Returns the exact inbound-activity marker used by the heartbeat watchdog.
+    ///
+    /// This permits opt-in runtime diagnostics to distinguish a transport
+    /// receive call that returned from one that completed frame processing and
+    /// refreshed inbound activity, without changing transport scheduling.
+    pub fn last_activity_marker(&self) -> Instant {
+        self.last_activity
+    }
+
     /// Returns true if there are pending ACK frames in the application (1-RTT)
     /// packet space that need to be sent. Used to bypass the congestion gate
     /// for ACK-only packets (RFC 9002 §7.2).
@@ -5094,6 +5103,15 @@ mod tests {
             Config::new_with_version(PROTOCOL_VERSION).unwrap(),
             false, // client
         )
+    }
+
+    #[test]
+    fn last_activity_marker_matches_the_heartbeat_activity_source() {
+        let mut connection = make_conn();
+        assert_eq!(connection.last_activity_marker(), connection.last_activity);
+
+        connection.last_activity = Instant::now();
+        assert_eq!(connection.last_activity_marker(), connection.last_activity);
     }
 
     /// Install a dummy 32-byte 1-RTT write secret so key_update() can toggle

@@ -25,6 +25,7 @@ UDP_SOCKET_EVIDENCE="$SCRIPT_DIR/utils/udp-socket-evidence.py"
 THROUGHPUT_TRIAL_SECONDS="${QF_E2E_THROUGHPUT_TRIAL_SECONDS:-10}"
 THROUGHPUT_RATE_BPS="${QF_E2E_THROUGHPUT_RATE_BPS:-15000000}"
 EXTERNAL_EGRESS_CAPTURE="${QF_E2E_EXTERNAL_EGRESS_CAPTURE:-0}"
+CLIENT_RECV_DIAGNOSTICS="${QF_E2E_CLIENT_RECV_DIAGNOSTICS:-1}"
 
 SERVER_NS="qf523s"
 CLIENT_NS=("qf523c1" "qf523c2" "qf523c3")
@@ -277,7 +278,8 @@ start_phase() {
     qkey="$(issue_qkey)"
     [[ -n "$qkey" ]] || fail "empty QKey for client $((index + 1))"
     client_log="$ARTIFACT_DIR/client-$phase-$((index + 1)).log"
-    ip netns exec "${CLIENT_NS[$index]}" "$BINARY" client \
+    ip netns exec "${CLIENT_NS[$index]}" env \
+      QUICFUSCATE_CLIENT_RECV_DIAGNOSTICS="$CLIENT_RECV_DIAGNOSTICS" "$BINARY" client \
       --config "$phase_config" \
       --remote "$SERVER_UNDERLAY:4433" \
       --url "https://$SERVER_UNDERLAY/" \
@@ -747,6 +749,7 @@ prove_ipv6_throughput() {
     record_throughput_trial_window "$phase" "$trial" "$client_started_at_unix_ns" \
       "$client_finished_at_unix_ns" "$client_exit_status"
     if ((client_exit_status != 0)); then
+      capture_client_receive_diagnostics "$phase" "$trial"
       ip netns exec "$SERVER_NS" python3 "$UDP_SOCKET_EVIDENCE" snapshot \
         --port 4433 --output "$server_after_snapshot" || true
       python3 "$UDP_SOCKET_EVIDENCE" verify \
@@ -794,6 +797,23 @@ prove_ipv6_throughput() {
     "$ARTIFACT_DIR/tcp6-client-$phase-1.json" \
     "$ARTIFACT_DIR/tcp6-client-$phase-2.json" \
     "$ARTIFACT_DIR/tcp6-client-$phase-3.json"
+}
+
+capture_client_receive_diagnostics() {
+  local phase="$1"
+  local trial="$2"
+  local client_log="$ARTIFACT_DIR/client-$phase-1.log"
+  local output="$ARTIFACT_DIR/client-recv-$phase-$trial.txt"
+  local diagnostic
+
+  [[ "$CLIENT_RECV_DIAGNOSTICS" == "1" ]] || return 0
+  [[ ! -e "$output" ]] || fail "refusing to replace client receive diagnostics: $output"
+  diagnostic="$(grep -F 'Client receive diagnostics at heartbeat:' "$client_log" | tail -n 1 || true)"
+  if [[ -n "$diagnostic" ]]; then
+    printf '%s\n' "$diagnostic" >"$output"
+  else
+    printf 'Client receive diagnostics unavailable before throughput failure.\n' >"$output"
+  fi
 }
 
 prove_pmtu_efficiency_gain() {
@@ -900,6 +920,8 @@ main() {
   fi
   [[ "$EXTERNAL_EGRESS_CAPTURE" == "0" || "$EXTERNAL_EGRESS_CAPTURE" == "1" ]] || \
     fail 'QF_E2E_EXTERNAL_EGRESS_CAPTURE must be 0 or 1'
+  [[ "$CLIENT_RECV_DIAGNOSTICS" == "0" || "$CLIENT_RECV_DIAGNOSTICS" == "1" ]] || \
+    fail 'QF_E2E_CLIENT_RECV_DIAGNOSTICS must be 0 or 1'
   [[ -r "$CA" && -r "$CA_KEY" ]] || fail 'CA certificate or key fixture is unreadable'
 
   exec 9>"$LOCK_FILE"
