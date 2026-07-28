@@ -2849,12 +2849,21 @@ impl Connection {
                 }
                 #[cfg(feature = "zero_copy_dgram")]
                 {
+                    let Some(front) = self.dgram_send_queue.pop_front() else {
+                        return Err(crate::error::ConnectionError::Done);
+                    };
                     let frame =
                         Frame::Datagram { data: Cow::Owned(front.data[..front.len].to_vec()) };
-                    let written = frames::to_bytes(&frame, &mut out[off..])?;
-                    off += written;
-                    self.dgram_send_queue.pop_front();
-                    return Ok((off, true));
+                    match frames::to_bytes(&frame, &mut out[off..]) {
+                        Ok(written) => {
+                            off += written;
+                            return Ok((off, true));
+                        }
+                        Err(error) => {
+                            self.dgram_send_queue.push_front(front);
+                            return Err(error);
+                        }
+                    }
                 }
             }
         }
