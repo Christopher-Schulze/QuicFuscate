@@ -18,6 +18,9 @@ CA_KEY="${QF_E2E_CA_KEY:-$PROJECT_ROOT/config/local/ca.key}"
 LOCK_FILE="${QF_E2E_LOCK_FILE:-/tmp/quicfuscate-tun-e2e.lock}"
 LOCK_TIMEOUT="${QF_E2E_LOCK_TIMEOUT:-300}"
 ARTIFACT_DIR="${QF_E2E_ARTIFACT_DIR:-/tmp/quicfuscate-todo523-$$}"
+THROUGHPUT_PROBE="$SCRIPT_DIR/utils/tcp-throughput-probe.py"
+THROUGHPUT_TRIAL_SECONDS="${QF_E2E_THROUGHPUT_TRIAL_SECONDS:-10}"
+THROUGHPUT_RATE_BPS="${QF_E2E_THROUGHPUT_RATE_BPS:-15000000}"
 
 SERVER_NS="qf523s"
 CLIENT_NS=("qf523c1" "qf523c2" "qf523c3")
@@ -125,6 +128,9 @@ cleanup() {
 
 dump_diagnostics() {
   set +e
+  if ip netns exec "$SERVER_NS" true 2>/dev/null; then
+    fetch_metrics throughput-failure || true
+  fi
   printf '%s\n' '=== namespaces ===' >&2
   ip netns list >&2
   printf '%s\n' '=== server log tail ===' >&2
@@ -578,13 +584,18 @@ prove_ipv6_throughput() {
   local trial port server_pid
   for trial in 1 2 3; do
     port=$((5524 + trial))
-    ip netns exec "$SERVER_NS" timeout 20 iperf3 -s -6 -B fd00::1 -p "$port" -1 \
-      >"$ARTIFACT_DIR/iperf6-server-$phase-$trial.log" 2>&1 &
+    ip netns exec "$SERVER_NS" timeout "$((THROUGHPUT_TRIAL_SECONDS + 20))" \
+      python3 "$THROUGHPUT_PROBE" server \
+      --bind fd00::1 --port "$port" --timeout "$((THROUGHPUT_TRIAL_SECONDS + 15))" \
+      --result "$ARTIFACT_DIR/tcp6-server-$phase-$trial.json" \
+      >"$ARTIFACT_DIR/tcp6-server-$phase-$trial.log" 2>&1 &
     server_pid="$!"
-    sleep 0.5
-    if ! ip netns exec "${CLIENT_NS[0]}" timeout 15 iperf3 \
-      -c fd00::1 -6 -B fd00::2 -p "$port" -t 5 -J \
-      >"$ARTIFACT_DIR/iperf6-client-$phase-$trial.json"; then
+    if ! ip netns exec "${CLIENT_NS[0]}" timeout "$((THROUGHPUT_TRIAL_SECONDS + 20))" \
+      python3 "$THROUGHPUT_PROBE" client \
+      --source fd00::2 --destination fd00::1 --port "$port" \
+      --duration "$THROUGHPUT_TRIAL_SECONDS" --rate-bps "$THROUGHPUT_RATE_BPS" \
+      --timeout "$((THROUGHPUT_TRIAL_SECONDS + 15))" \
+      --result "$ARTIFACT_DIR/tcp6-client-$phase-$trial.json"; then
       kill -TERM "$server_pid" 2>/dev/null || true
       wait "$server_pid" 2>/dev/null || true
       fail "IPv6 throughput trial $trial did not terminate successfully in phase $phase"
@@ -592,12 +603,12 @@ prove_ipv6_throughput() {
     wait "$server_pid" || fail "IPv6 throughput receiver failed in phase $phase trial $trial"
   done
   python3 -c \
-    'import json,pathlib,statistics,sys; trials=[json.load(open(path, encoding="utf-8")) for path in sys.argv[4:]]; intervals=[[interval["sum"] for interval in trial["intervals"]] for trial in trials]; assert all(len(sample) == 5 for sample in intervals), [len(sample) for sample in intervals]; assert all(item["bytes"] > 0 and item["bits_per_second"] > 0 for sample in intervals for item in sample), intervals; durations=[trial["end"]["sum_sent"]["seconds"] for trial in trials]; assert all(4.5 <= duration <= 6.5 for duration in durations), durations; values=[trial["end"]["sum_received"]["bits_per_second"] for trial in trials]; assert all(value > 0 for value in values), values; median=statistics.median(values); minimum_interval=min(item["bits_per_second"] for sample in intervals for item in sample); summary=f"IPv6 throughput ({sys.argv[1]}) trials: {values[0] / 1_000_000:.3f}, {values[1] / 1_000_000:.3f}, {values[2] / 1_000_000:.3f} Mbit/s; median: {median / 1_000_000:.3f} Mbit/s; minimum interval: {minimum_interval / 1_000_000:.3f} Mbit/s"; pathlib.Path(sys.argv[2]).write_text(f"{median}\n", encoding="utf-8"); pathlib.Path(sys.argv[3]).write_text(f"{summary}\n", encoding="utf-8"); print(summary)' \
-    "$phase" "$ARTIFACT_DIR/throughput-$phase.bps" \
-    "$ARTIFACT_DIR/throughput-$phase-samples.txt" \
-    "$ARTIFACT_DIR/iperf6-client-$phase-1.json" \
-    "$ARTIFACT_DIR/iperf6-client-$phase-2.json" \
-    "$ARTIFACT_DIR/iperf6-client-$phase-3.json"
+    'import json,pathlib,statistics,sys; duration=float(sys.argv[4]); trials=[json.load(open(path, encoding="utf-8")) for path in sys.argv[5:]]; receiver=[trial["receiver"] for trial in trials]; valid=all(trial["bytes_sent"] > 0 and trial["bytes_sent"] == item["bytes"] and trial["sha256"] == item["sha256"] and item["elapsed_seconds"] > 0 and trial["receiver_bits_per_second"] > 0 for trial,item in zip(trials,receiver)); valid=valid and all(duration * 0.95 <= trial["elapsed_seconds"] <= duration + 5 for trial in trials); assert valid, trials; values=[trial["receiver_bits_per_second"] for trial in trials]; median=statistics.median(values); minimum=min(values); summary=f"IPv6 receiver-verified TCP throughput ({sys.argv[1]}) trials: {values[0] / 1_000_000:.3f}, {values[1] / 1_000_000:.3f}, {values[2] / 1_000_000:.3f} Mbit/s; median: {median / 1_000_000:.3f} Mbit/s; minimum trial: {minimum / 1_000_000:.3f} Mbit/s"; pathlib.Path(sys.argv[2]).write_text(f"{median}\n", encoding="utf-8"); pathlib.Path(sys.argv[3]).write_text(f"{summary}\n", encoding="utf-8"); print(summary)' \
+    "$phase" "$ARTIFACT_DIR/throughput-$phase.bps" "$ARTIFACT_DIR/throughput-$phase-samples.txt" \
+    "$THROUGHPUT_TRIAL_SECONDS" \
+    "$ARTIFACT_DIR/tcp6-client-$phase-1.json" \
+    "$ARTIFACT_DIR/tcp6-client-$phase-2.json" \
+    "$ARTIFACT_DIR/tcp6-client-$phase-3.json"
 }
 
 prove_pmtu_efficiency_gain() {
@@ -629,13 +640,15 @@ prove_dplpmtud_black_hole_recovery() {
   local client_log="$ARTIFACT_DIR/client-opt-in-1.log"
   install_client_large_datagram_black_hole
 
-  ip netns exec "$SERVER_NS" timeout 35 iperf3 -s -6 -B fd00::1 -p 5524 -1 \
-    >"$ARTIFACT_DIR/iperf6-server-black-hole.log" 2>&1 &
+  ip netns exec "$SERVER_NS" timeout 45 python3 "$THROUGHPUT_PROBE" server \
+    --bind fd00::1 --port 5524 --timeout 35 \
+    --result "$ARTIFACT_DIR/tcp6-server-black-hole.json" \
+    >"$ARTIFACT_DIR/tcp6-server-black-hole.log" 2>&1 &
   local server_pid="$!"
-  sleep 0.5
-  ip netns exec "${CLIENT_NS[0]}" timeout 30 iperf3 \
-    -c fd00::1 -6 -B fd00::2 -p 5524 -t 20 -J \
-    >"$ARTIFACT_DIR/iperf6-client-black-hole.json" &
+  ip netns exec "${CLIENT_NS[0]}" timeout 30 python3 "$THROUGHPUT_PROBE" client \
+    --source fd00::2 --destination fd00::1 --port 5524 --duration 20 \
+    --rate-bps "$THROUGHPUT_RATE_BPS" --timeout 25 \
+    --result "$ARTIFACT_DIR/tcp6-client-black-hole.json" &
   local client_pid="$!"
   local detection_started="$SECONDS"
 
@@ -658,8 +671,8 @@ prove_dplpmtud_black_hole_recovery() {
   fi
   wait "$server_pid" || fail 'IPv6 black-hole recovery receiver failed'
   python3 -c \
-    'import json,sys; data=json.load(open(sys.argv[1], encoding="utf-8")); received=data["end"]["sum_received"]; assert received["bytes"] > 65536, received; assert received["seconds"] >= 18, received; print("Black-hole recovery transfer: {} bytes in {:.3f}s".format(received["bytes"], received["seconds"]))' \
-    "$ARTIFACT_DIR/iperf6-client-black-hole.json" \
+    'import json,sys; data=json.load(open(sys.argv[1], encoding="utf-8")); received=data["receiver"]; valid=data["bytes_sent"] == received["bytes"] and data["sha256"] == received["sha256"] and received["bytes"] > 65536 and received["elapsed_seconds"] >= 18; assert valid, data; print("Black-hole recovery transfer: {} bytes in {:.3f}s".format(received["bytes"], received["elapsed_seconds"]))' \
+    "$ARTIFACT_DIR/tcp6-client-black-hole.json" \
     >"$ARTIFACT_DIR/black-hole-transfer.txt" || fail 'black-hole recovery transfer evidence invalid'
   wait_for_log_count "$client_log" \
     'DPLPMTUD confirmed path MTU: .*B -> 1500B' 2 15
@@ -680,7 +693,7 @@ main() {
   [[ "$(uname -s)" == "Linux" ]] || fail 'this proof requires Linux network namespaces'
   [[ "${EUID:-$(id -u)}" == "0" ]] || fail 'this proof requires root'
   local command
-  for command in flock ip iperf3 iptables nc openssl ping python3 sha256sum sysctl tc tcpdump timeout; do
+  for command in flock ip iptables nc openssl ping python3 sha256sum sysctl tc tcpdump timeout; do
     require_command "$command"
   done
   if ! command -v nft >/dev/null 2>&1; then
@@ -688,6 +701,15 @@ main() {
     require_command ip6tables
   fi
   [[ -x "$BINARY" ]] || fail "release binary not executable: $BINARY"
+  [[ -r "$THROUGHPUT_PROBE" ]] || fail "TCP throughput probe is unreadable: $THROUGHPUT_PROBE"
+  if [[ ! "$THROUGHPUT_TRIAL_SECONDS" =~ ^[0-9]+$ ]] \
+    || ((THROUGHPUT_TRIAL_SECONDS < 5)); then
+    fail 'QF_E2E_THROUGHPUT_TRIAL_SECONDS must be an integer of at least 5'
+  fi
+  if [[ ! "$THROUGHPUT_RATE_BPS" =~ ^[0-9]+$ ]] \
+    || ((THROUGHPUT_RATE_BPS < 1000000)); then
+    fail 'QF_E2E_THROUGHPUT_RATE_BPS must be an integer of at least 1000000'
+  fi
   [[ -r "$CA" && -r "$CA_KEY" ]] || fail 'CA certificate or key fixture is unreadable'
 
   exec 9>"$LOCK_FILE"

@@ -556,13 +556,23 @@ else
 fi
 
 MULTI_CLIENT_DUAL_STACK_HARNESS="scripts/tests/tun-e2e-multi-client-dual-stack-netns.sh"
+TCP_THROUGHPUT_PROBE="scripts/tests/utils/tcp-throughput-probe.py"
 if rg -F -- 'for host_veth in "${HOST_VETH[@]}"; do' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
-  && rg -F -- 'ip link del "$host_veth" 2>/dev/null' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null; then
-  pass "Multi-client dual-stack cleanup removes every owned host veth after namespace teardown"
-  append_item "multi_client_dual_stack_host_veth_cleanup" "ok" "explicit host-veth cleanup prevents partial-run residue"
+  && rg -F -- 'ip link del "$host_veth" 2>/dev/null' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'THROUGHPUT_PROBE="$SCRIPT_DIR/utils/tcp-throughput-probe.py"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'python3 "$THROUGHPUT_PROBE" server' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'python3 "$THROUGHPUT_PROBE" client' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- '--rate-bps "$THROUGHPUT_RATE_BPS"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'fetch_metrics throughput-failure || true' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && ! rg -F -- 'iperf3' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'sender/receiver byte mismatch' "$TCP_THROUGHPUT_PROBE" >/dev/null \
+  && rg -F -- 'sender/receiver SHA-256 mismatch' "$TCP_THROUGHPUT_PROBE" >/dev/null \
+  && rg -F -- 'receiver_bits_per_second' "$TCP_THROUGHPUT_PROBE" >/dev/null; then
+  pass "Multi-client dual-stack proof uses a receiver-verified TCP probe and removes every owned host veth"
+  append_item "multi_client_dual_stack_tcp_throughput" "ok" "receiver bytes, SHA-256, and receiver timing are fail-closed; partial-run host-veth cleanup is explicit"
 else
-  fail_critical "Multi-client dual-stack cleanup can leak owned host veths"
-  append_item "multi_client_dual_stack_host_veth_cleanup" "fail" "missing explicit host-veth cleanup after namespace teardown"
+  fail_critical "Multi-client dual-stack proof lost receiver-verified TCP throughput or host-veth cleanup"
+  append_item "multi_client_dual_stack_tcp_throughput" "fail" "missing receiver byte/hash/timing gate, direct probe use, no-iperf contract, or host-veth cleanup"
 fi
 
 # 6) Guardrail warning: shadow runtime modules with no non-test call sites.
