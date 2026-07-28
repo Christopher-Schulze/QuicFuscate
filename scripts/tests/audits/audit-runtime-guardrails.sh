@@ -590,14 +590,18 @@ if rg -F -- 'for host_veth in "${HOST_VETH[@]}"; do' "$MULTI_CLIENT_DUAL_STACK_H
   && rg -F -- 'parser.add_argument("--self-test", action="store_true")' "$BOUNDARY_SUMMARIZER" >/dev/null \
   && rg -F -- 'UDP_SOCKET_EVIDENCE="$SCRIPT_DIR/utils/udp-socket-evidence.py"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'server-udp-$phase-$trial-before.json' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'client-udp-$phase-$trial-before.json' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'server UDP socket dropped datagrams during IPv6 throughput trial' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
-  && rg -F -- 'expected exactly one UDP socket on port' "$UDP_SOCKET_EVIDENCE" >/dev/null \
+  && rg -F -- 'client UDP socket dropped datagrams during IPv6 throughput trial' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'selector = f"on port {port}"' "$UDP_SOCKET_EVIDENCE" >/dev/null \
+  && rg -F -- '--remote-port' "$UDP_SOCKET_EVIDENCE" >/dev/null \
+  && rg -F -- 'remote_port' "$UDP_SOCKET_EVIDENCE" >/dev/null \
   && rg -F -- 'UDP socket dropped {drop_delta} datagrams during the trial' "$UDP_SOCKET_EVIDENCE" >/dev/null; then
-  pass "Multi-client dual-stack proof keeps receiver-verified forward and reverse boundary evidence plus server UDP socket-drop evidence"
-  append_item "multi_client_dual_stack_tcp_throughput" "ok" "receiver bytes, SHA-256, persisted failure windows, four host-veth boundaries, server socket-drop deltas, and partial-run host-veth cleanup are fail-closed"
+  pass "Multi-client dual-stack proof keeps receiver-verified forward and reverse boundary evidence plus client/server UDP socket-drop evidence"
+  append_item "multi_client_dual_stack_tcp_throughput" "ok" "receiver bytes, SHA-256, persisted failure windows, four host-veth boundaries, client/server socket-drop deltas, and partial-run host-veth cleanup are fail-closed"
 else
-  fail_critical "Multi-client dual-stack proof lost receiver-verified forward/reverse boundary or server socket-drop evidence"
-  append_item "multi_client_dual_stack_tcp_throughput" "fail" "missing receiver byte/hash/window gate, external forward/reverse capture, UDP socket-drop proof, direct probe use, no-iperf contract, or host-veth cleanup"
+  fail_critical "Multi-client dual-stack proof lost receiver-verified forward/reverse boundary or client/server socket-drop evidence"
+  append_item "multi_client_dual_stack_tcp_throughput" "fail" "missing receiver byte/hash/window gate, external forward/reverse capture, client/server UDP socket-drop proof, direct probe use, no-iperf contract, or host-veth cleanup"
 fi
 
 DUAL_STACK_STABILITY_HARNESS="scripts/tests/tun-e2e-multi-client-dual-stack-stability.sh"

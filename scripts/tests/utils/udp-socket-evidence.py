@@ -12,8 +12,12 @@ from pathlib import Path
 from typing import Any
 
 
-def parse_udp_socket(proc_text: str, port: int) -> dict[str, int | str]:
-    """Return the unique /proc/net/udp row bound to port."""
+def parse_udp_socket(
+    proc_text: str, port: int | None, remote_port: int | None
+) -> dict[str, int | str]:
+    """Return the unique /proc/net/udp row matching the requested endpoint."""
+    if port is None and remote_port is None:
+        raise ValueError("provide a local port or remote port selector")
     rows: list[dict[str, int | str]] = []
     for line in proc_text.splitlines()[1:]:
         fields = line.split()
@@ -21,24 +25,36 @@ def parse_udp_socket(proc_text: str, port: int) -> dict[str, int | str]:
             continue
         try:
             local_address, local_port_hex = fields[1].rsplit(":", 1)
+            remote_address, remote_port_hex = fields[2].rsplit(":", 1)
             local_port = int(local_port_hex, 16)
+            parsed_remote_port = int(remote_port_hex, 16)
             tx_queue_hex, rx_queue_hex = fields[4].split(":", 1)
             drops = int(fields[-1])
         except (IndexError, ValueError):
             continue
-        if local_port != port:
+        if port is not None and local_port != port:
+            continue
+        if remote_port is not None and parsed_remote_port != remote_port:
             continue
         rows.append(
             {
                 "local_address_hex": local_address,
                 "local_port": local_port,
+                "remote_address_hex": remote_address,
+                "remote_port": parsed_remote_port,
                 "tx_queue_bytes": int(tx_queue_hex, 16),
                 "rx_queue_bytes": int(rx_queue_hex, 16),
                 "drops": drops,
             }
         )
     if len(rows) != 1:
-        raise ValueError(f"expected exactly one UDP socket on port {port}, found {len(rows)}")
+        if port is not None and remote_port is None:
+            selector = f"on port {port}"
+        elif port is None:
+            selector = f"with remote port {remote_port}"
+        else:
+            selector = f"with local port {port} and remote port {remote_port}"
+        raise ValueError(f"expected exactly one UDP socket {selector}, found {len(rows)}")
     return rows[0]
 
 
@@ -47,8 +63,18 @@ def read_snapshot(path: Path) -> dict[str, Any]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"cannot read UDP socket snapshot {path}: {error}") from error
-    for field in ("captured_at_unix_ns", "local_port", "drops", "rx_queue_bytes", "tx_queue_bytes"):
+    for field in (
+        "captured_at_unix_ns",
+        "local_port",
+        "remote_port",
+        "drops",
+        "rx_queue_bytes",
+        "tx_queue_bytes",
+    ):
         if not isinstance(data.get(field), int):
+            raise ValueError(f"UDP socket snapshot {path} has invalid {field}")
+    for field in ("local_address_hex", "remote_address_hex"):
+        if not isinstance(data.get(field), str):
             raise ValueError(f"UDP socket snapshot {path} has invalid {field}")
     return data
 
@@ -72,7 +98,9 @@ def write_new_text(path: Path, text: str) -> None:
 def snapshot(args: argparse.Namespace) -> int:
     proc_path = Path(args.proc_path)
     try:
-        record = parse_udp_socket(proc_path.read_text(encoding="utf-8"), args.port)
+        record = parse_udp_socket(
+            proc_path.read_text(encoding="utf-8"), args.port, args.remote_port
+        )
         record["captured_at_unix_ns"] = time.time_ns()
         write_new_json(Path(args.output), record)
     except (OSError, ValueError) as error:
@@ -85,15 +113,24 @@ def verify(args: argparse.Namespace) -> int:
     try:
         before = read_snapshot(Path(args.before))
         after = read_snapshot(Path(args.after))
-        if before["local_port"] != after["local_port"]:
-            raise ValueError("UDP socket snapshots refer to different local ports")
+        if (
+            before["local_address_hex"] != after["local_address_hex"]
+            or before["local_port"] != after["local_port"]
+        ):
+            raise ValueError("UDP socket snapshots refer to different local endpoints")
+        if (
+            before["remote_address_hex"] != after["remote_address_hex"]
+            or before["remote_port"] != after["remote_port"]
+        ):
+            raise ValueError("UDP socket snapshots refer to different remote endpoints")
         if after["captured_at_unix_ns"] <= before["captured_at_unix_ns"]:
             raise ValueError("UDP socket snapshots are not chronologically ordered")
         drop_delta = after["drops"] - before["drops"]
         if drop_delta < 0:
             raise ValueError("UDP socket drop counter decreased")
         summary = (
-            f"UDP socket port {before['local_port']} kernel drops: {before['drops']} -> "
+            f"UDP socket local port {before['local_port']} remote port {before['remote_port']} "
+            f"kernel drops: {before['drops']} -> "
             f"{after['drops']} (delta {drop_delta}); receive queue bytes: "
             f"{before['rx_queue_bytes']} -> {after['rx_queue_bytes']}\n"
         )
@@ -112,11 +149,15 @@ def self_test() -> int:
         "timeout inode ref pointer drops\n"
         "42: 01000A0A:1151 00000000:0000 07 00000000:00000080 00:00000000 00000000 "
         "0        0 12345 2 0000000000000000 17\n"
+        "43: 02000A0A:C350 01000A0A:1151 01 00000000:00000040 00:00000000 00000000 "
+        "0        0 23456 2 0000000000000000 3\n"
     )
-    parsed = parse_udp_socket(fixture, 4433)
+    parsed = parse_udp_socket(fixture, 4433, None)
     expected = {
         "local_address_hex": "01000A0A",
         "local_port": 4433,
+        "remote_address_hex": "00000000",
+        "remote_port": 0,
         "tx_queue_bytes": 0,
         "rx_queue_bytes": 128,
         "drops": 17,
@@ -124,11 +165,14 @@ def self_test() -> int:
     if parsed != expected:
         raise AssertionError((parsed, expected))
     try:
-        parse_udp_socket(fixture, 4434)
+        parse_udp_socket(fixture, 4434, None)
     except ValueError:
         pass
     else:
         raise AssertionError("missing socket did not fail")
+    client_socket = parse_udp_socket(fixture, None, 4433)
+    if client_socket["local_port"] != 50000 or client_socket["remote_port"] != 4433:
+        raise AssertionError("remote-port UDP socket lookup is incomplete")
 
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -139,7 +183,10 @@ def self_test() -> int:
             before,
             {
                 "captured_at_unix_ns": 10,
+                "local_address_hex": "01000A0A",
                 "local_port": 4433,
+                "remote_address_hex": "00000000",
+                "remote_port": 0,
                 "drops": 17,
                 "rx_queue_bytes": 128,
                 "tx_queue_bytes": 0,
@@ -149,7 +196,10 @@ def self_test() -> int:
             after,
             {
                 "captured_at_unix_ns": 20,
+                "local_address_hex": "01000A0A",
                 "local_port": 4433,
+                "remote_address_hex": "00000000",
+                "remote_port": 0,
                 "drops": 17,
                 "rx_queue_bytes": 0,
                 "tx_queue_bytes": 0,
@@ -167,7 +217,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
 
     snapshot_parser = subparsers.add_parser("snapshot")
-    snapshot_parser.add_argument("--port", type=int, required=True)
+    snapshot_parser.add_argument("--port", type=int)
+    snapshot_parser.add_argument("--remote-port", type=int)
     snapshot_parser.add_argument("--output", required=True)
     snapshot_parser.add_argument("--proc-path", default="/proc/net/udp")
 

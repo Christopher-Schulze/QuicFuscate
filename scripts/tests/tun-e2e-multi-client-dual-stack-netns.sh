@@ -711,15 +711,21 @@ prove_linux_dual_stack_state() {
 
 prove_ipv6_throughput() {
   local phase="$1"
-  local trial port server_pid before_snapshot after_snapshot summary client_started_at_unix_ns client_finished_at_unix_ns client_exit_status
+  local trial port server_pid server_before_snapshot server_after_snapshot server_summary client_before_snapshot client_after_snapshot client_summary client_started_at_unix_ns client_finished_at_unix_ns client_exit_status
   for trial in 1 2 3; do
     port=$((5524 + trial))
-    before_snapshot="$ARTIFACT_DIR/server-udp-$phase-$trial-before.json"
-    after_snapshot="$ARTIFACT_DIR/server-udp-$phase-$trial-after.json"
-    summary="$ARTIFACT_DIR/server-udp-$phase-$trial-summary.txt"
+    server_before_snapshot="$ARTIFACT_DIR/server-udp-$phase-$trial-before.json"
+    server_after_snapshot="$ARTIFACT_DIR/server-udp-$phase-$trial-after.json"
+    server_summary="$ARTIFACT_DIR/server-udp-$phase-$trial-summary.txt"
+    client_before_snapshot="$ARTIFACT_DIR/client-udp-$phase-$trial-before.json"
+    client_after_snapshot="$ARTIFACT_DIR/client-udp-$phase-$trial-after.json"
+    client_summary="$ARTIFACT_DIR/client-udp-$phase-$trial-summary.txt"
     ip netns exec "$SERVER_NS" python3 "$UDP_SOCKET_EVIDENCE" snapshot \
-      --port 4433 --output "$before_snapshot" || \
+      --port 4433 --output "$server_before_snapshot" || \
       fail "could not capture server UDP socket before IPv6 throughput trial $trial in phase $phase"
+    ip netns exec "${CLIENT_NS[0]}" python3 "$UDP_SOCKET_EVIDENCE" snapshot \
+      --remote-port 4433 --output "$client_before_snapshot" || \
+      fail "could not capture client UDP socket before IPv6 throughput trial $trial in phase $phase"
     ip netns exec "$SERVER_NS" timeout "$((THROUGHPUT_TRIAL_SECONDS + 20))" \
       python3 "$THROUGHPUT_PROBE" server \
       --bind fd00::1 --port "$port" --timeout "$((THROUGHPUT_TRIAL_SECONDS + 15))" \
@@ -742,9 +748,13 @@ prove_ipv6_throughput() {
       "$client_finished_at_unix_ns" "$client_exit_status"
     if ((client_exit_status != 0)); then
       ip netns exec "$SERVER_NS" python3 "$UDP_SOCKET_EVIDENCE" snapshot \
-        --port 4433 --output "$after_snapshot" || true
+        --port 4433 --output "$server_after_snapshot" || true
       python3 "$UDP_SOCKET_EVIDENCE" verify \
-        --before "$before_snapshot" --after "$after_snapshot" --output "$summary" || true
+        --before "$server_before_snapshot" --after "$server_after_snapshot" --output "$server_summary" || true
+      ip netns exec "${CLIENT_NS[0]}" python3 "$UDP_SOCKET_EVIDENCE" snapshot \
+        --remote-port 4433 --output "$client_after_snapshot" || true
+      python3 "$UDP_SOCKET_EVIDENCE" verify \
+        --before "$client_before_snapshot" --after "$client_after_snapshot" --output "$client_summary" || true
       kill -TERM "$server_pid" 2>/dev/null || true
       wait "$server_pid" 2>/dev/null || true
       stop_client_egress_capture
@@ -753,19 +763,29 @@ prove_ipv6_throughput() {
     fi
     if ! wait "$server_pid"; then
       ip netns exec "$SERVER_NS" python3 "$UDP_SOCKET_EVIDENCE" snapshot \
-        --port 4433 --output "$after_snapshot" || true
+        --port 4433 --output "$server_after_snapshot" || true
       python3 "$UDP_SOCKET_EVIDENCE" verify \
-        --before "$before_snapshot" --after "$after_snapshot" --output "$summary" || true
+        --before "$server_before_snapshot" --after "$server_after_snapshot" --output "$server_summary" || true
+      ip netns exec "${CLIENT_NS[0]}" python3 "$UDP_SOCKET_EVIDENCE" snapshot \
+        --remote-port 4433 --output "$client_after_snapshot" || true
+      python3 "$UDP_SOCKET_EVIDENCE" verify \
+        --before "$client_before_snapshot" --after "$client_after_snapshot" --output "$client_summary" || true
       stop_client_egress_capture
       summarize_throughput_boundaries "$phase"
       fail "IPv6 throughput receiver failed in phase $phase trial $trial"
     fi
     ip netns exec "$SERVER_NS" python3 "$UDP_SOCKET_EVIDENCE" snapshot \
-      --port 4433 --output "$after_snapshot" || \
+      --port 4433 --output "$server_after_snapshot" || \
       fail "could not capture server UDP socket after IPv6 throughput trial $trial in phase $phase"
     python3 "$UDP_SOCKET_EVIDENCE" verify \
-      --before "$before_snapshot" --after "$after_snapshot" --output "$summary" || \
+      --before "$server_before_snapshot" --after "$server_after_snapshot" --output "$server_summary" || \
       fail "server UDP socket dropped datagrams during IPv6 throughput trial $trial in phase $phase"
+    ip netns exec "${CLIENT_NS[0]}" python3 "$UDP_SOCKET_EVIDENCE" snapshot \
+      --remote-port 4433 --output "$client_after_snapshot" || \
+      fail "could not capture client UDP socket after IPv6 throughput trial $trial in phase $phase"
+    python3 "$UDP_SOCKET_EVIDENCE" verify \
+      --before "$client_before_snapshot" --after "$client_after_snapshot" --output "$client_summary" || \
+      fail "client UDP socket dropped datagrams during IPv6 throughput trial $trial in phase $phase"
   done
   python3 -c \
     'import json,pathlib,statistics,sys; duration=float(sys.argv[4]); trials=[json.load(open(path, encoding="utf-8")) for path in sys.argv[5:]]; receiver=[trial["receiver"] for trial in trials]; valid=all(trial["bytes_sent"] > 0 and trial["bytes_sent"] == item["bytes"] and trial["sha256"] == item["sha256"] and item["elapsed_seconds"] > 0 and trial["receiver_bits_per_second"] > 0 for trial,item in zip(trials,receiver)); valid=valid and all(duration * 0.95 <= trial["elapsed_seconds"] <= duration + 5 for trial in trials); assert valid, trials; values=[trial["receiver_bits_per_second"] for trial in trials]; median=statistics.median(values); minimum=min(values); summary=f"IPv6 receiver-verified TCP throughput ({sys.argv[1]}) trials: {values[0] / 1_000_000:.3f}, {values[1] / 1_000_000:.3f}, {values[2] / 1_000_000:.3f} Mbit/s; median: {median / 1_000_000:.3f} Mbit/s; minimum trial: {minimum / 1_000_000:.3f} Mbit/s"; pathlib.Path(sys.argv[2]).write_text(f"{median}\n", encoding="utf-8"); pathlib.Path(sys.argv[3]).write_text(f"{summary}\n", encoding="utf-8"); print(summary)' \
