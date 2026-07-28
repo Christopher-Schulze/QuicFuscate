@@ -906,13 +906,13 @@ mod tests {
         };
         assert!(
             exported_value("quicfuscate_mem_pool_allocations_total{source=\"thread_local\"}")
-                >= tls_before + 1
+                > tls_before
         );
         assert!(
             exported_value("quicfuscate_mem_pool_allocations_total{source=\"ephemeral\"}")
-                >= ephemeral_before + 1
+                > ephemeral_before
         );
-        assert!(exported_value("quicfuscate_body_pool_allocations_total") >= body_before + 1);
+        assert!(exported_value("quicfuscate_body_pool_allocations_total") > body_before);
         assert!(output.contains("quicfuscate_mem_pool_in_use "));
         assert!(output.contains("quicfuscate_mem_pool_usage_bytes "));
     }
