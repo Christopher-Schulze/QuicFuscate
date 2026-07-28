@@ -145,8 +145,18 @@ pub struct AckOutcome {
 pub struct PersistentCongestionEvidence {
     /// Largest packet number acknowledged by the triggering ACK frame.
     pub largest_acked: u64,
+    /// Number of packets newly acknowledged by the triggering ACK frame.
+    pub triggering_ack_newly_acked_packets: usize,
+    /// Number of packets declared lost while processing the triggering ACK frame.
+    pub triggering_ack_lost_packets: usize,
     /// RFC 9002 persistent-congestion period used for the decision.
     pub period: Duration,
+    /// RFC 9002 time-threshold loss delay used for the triggering ACK frame.
+    pub loss_delay: Duration,
+    /// Smoothed RTT used for the persistent-congestion period.
+    pub smoothed_rtt: Duration,
+    /// RTT variance used for the persistent-congestion period.
+    pub rtt_variance: Duration,
     /// Send time at the beginning of the uninterrupted loss run.
     pub run_start: Instant,
     /// Packet number at the beginning of the uninterrupted loss run.
@@ -155,6 +165,10 @@ pub struct PersistentCongestionEvidence {
     pub run_end: Instant,
     /// Packet number of the loss that completed the run.
     pub terminal_lost_pn: u64,
+    /// Whether the terminal loss met the RFC 9002 packet threshold.
+    pub terminal_loss_by_packet_threshold: bool,
+    /// Whether the terminal loss met the RFC 9002 time threshold.
+    pub terminal_loss_by_time_threshold: bool,
     /// Number of declared-lost ack-eliciting packets in the run.
     pub lost_packet_count: usize,
 }
@@ -746,6 +760,8 @@ impl Recovery {
         mut outcome: AckOutcome,
     ) -> AckOutcome {
         // 5. Loss detection (RFC 9002 §6.1 packet + time threshold).
+        let loss_delay = self.loss_delay();
+        let packet_threshold = largest_in_frame.checked_sub(K_PACKET_THRESHOLD);
         let lost = self.detect_lost_packets(space, largest_in_frame, now);
 
         // 6. Persistent congestion (RFC 9002 §7.6): chain the loss run across
@@ -789,6 +805,8 @@ impl Recovery {
                             run_start_pn,
                             pkt.sent_at,
                             pkt.pn,
+                            packet_threshold.is_some_and(|threshold| pkt.pn <= threshold),
+                            now.saturating_duration_since(pkt.sent_at) >= loss_delay,
                             self.pc_window.lost_packet_numbers.len(),
                         ));
                         break;
@@ -799,17 +817,26 @@ impl Recovery {
                     run_start_pn,
                     run_end,
                     terminal_lost_pn,
+                    terminal_loss_by_packet_threshold,
+                    terminal_loss_by_time_threshold,
                     lost_packet_count,
                 )) = declaration
                 {
                     outcome.persistent_congestion = true;
                     outcome.persistent_congestion_evidence = Some(PersistentCongestionEvidence {
                         largest_acked: largest_in_frame,
+                        triggering_ack_newly_acked_packets: newly_acked.len(),
+                        triggering_ack_lost_packets: lost.len(),
                         period,
+                        loss_delay,
+                        smoothed_rtt: self.rtt,
+                        rtt_variance: self.rtt_var,
                         run_start,
                         run_start_pn,
                         run_end,
                         terminal_lost_pn,
+                        terminal_loss_by_packet_threshold,
+                        terminal_loss_by_time_threshold,
                         lost_packet_count,
                     });
                     self.pc_window.reset();
@@ -1444,6 +1471,13 @@ mod tests {
         assert_eq!(evidence.run_start_pn, 0);
         assert_eq!(evidence.terminal_lost_pn, 15);
         assert_eq!(evidence.lost_packet_count, 16);
+        assert_eq!(evidence.triggering_ack_newly_acked_packets, 1);
+        assert!(evidence.triggering_ack_lost_packets >= evidence.lost_packet_count);
+        assert!(evidence.terminal_loss_by_packet_threshold);
+        assert!(evidence.terminal_loss_by_time_threshold);
+        assert_eq!(evidence.loss_delay, rec.loss_delay());
+        assert_eq!(evidence.smoothed_rtt, rec.rtt);
+        assert_eq!(evidence.rtt_variance, rec.rtt_var);
         assert_eq!(evidence.run_start, t0);
         assert_eq!(evidence.run_end, t0 + Duration::from_millis(150));
         assert_eq!(evidence.period, Duration::from_millis(150));

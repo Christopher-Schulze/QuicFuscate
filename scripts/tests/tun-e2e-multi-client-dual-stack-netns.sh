@@ -750,6 +750,7 @@ prove_ipv6_throughput() {
       "$client_finished_at_unix_ns" "$client_exit_status"
     if ((client_exit_status != 0)); then
       capture_client_receive_diagnostics "$phase" "$trial"
+      capture_client_persistent_congestion "$phase" "$trial"
       ip netns exec "$SERVER_NS" python3 "$UDP_SOCKET_EVIDENCE" snapshot \
         --port 4433 --output "$server_after_snapshot" || true
       python3 "$UDP_SOCKET_EVIDENCE" verify \
@@ -813,6 +814,22 @@ capture_client_receive_diagnostics() {
     printf '%s\n' "$diagnostic" >"$output"
   else
     printf 'Client receive diagnostics unavailable before throughput failure.\n' >"$output"
+  fi
+}
+
+capture_client_persistent_congestion() {
+  local phase="$1"
+  local trial="$2"
+  local client_log="$ARTIFACT_DIR/client-$phase-1.log"
+  local output="$ARTIFACT_DIR/client-persistent-congestion-$phase-$trial.txt"
+  local diagnostic
+
+  [[ ! -e "$output" ]] || fail "refusing to replace client persistent-congestion evidence: $output"
+  diagnostic="$(grep -F 'persistent congestion established;' "$client_log" | tail -n 1 || true)"
+  if [[ -n "$diagnostic" ]]; then
+    printf '%s\n' "$diagnostic" >"$output"
+  else
+    printf 'Client persistent-congestion evidence unavailable before throughput failure.\n' >"$output"
   fi
 }
 
