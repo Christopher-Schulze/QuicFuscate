@@ -1,4 +1,50 @@
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::time::Duration;
+
+/// Source that caused a standalone client to flush its connected UDP socket.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientEgressTrigger {
+    Initial,
+    Receive,
+    TunReceive,
+    Housekeeping,
+    Shutdown,
+}
+
+/// Record a completed standalone-client egress flush without influencing scheduling.
+pub fn record_client_egress_flush(trigger: ClientEgressTrigger, packets: u64, bytes: u64) {
+    CLIENT_EGRESS_FLUSHES.inc();
+    CLIENT_EGRESS_PACKETS.inc_by(packets);
+    CLIENT_EGRESS_BYTES.inc_by(bytes);
+    CLIENT_EGRESS_BURST_PACKETS_MAX.fetch_max(packets, Ordering::Relaxed);
+    CLIENT_EGRESS_BURST_BYTES_MAX.fetch_max(bytes, Ordering::Relaxed);
+
+    match trigger {
+        ClientEgressTrigger::Initial => CLIENT_EGRESS_INITIAL_FLUSHES.inc(),
+        ClientEgressTrigger::Receive => CLIENT_EGRESS_RECEIVE_FLUSHES.inc(),
+        ClientEgressTrigger::TunReceive => CLIENT_EGRESS_TUN_RECEIVE_FLUSHES.inc(),
+        ClientEgressTrigger::Housekeeping => CLIENT_EGRESS_HOUSEKEEPING_FLUSHES.inc(),
+        ClientEgressTrigger::Shutdown => CLIENT_EGRESS_SHUTDOWN_FLUSHES.inc(),
+    }
+}
+
+/// Record the elapsed wall-clock gap between two successful standalone-client UDP sends.
+pub fn record_client_egress_gap(gap: Duration) {
+    let gap_us = u64::try_from(gap.as_micros()).unwrap_or(u64::MAX);
+    CLIENT_EGRESS_GAP_LAST_US.store(gap_us, Ordering::Relaxed);
+    CLIENT_EGRESS_GAP_MAX_US.fetch_max(gap_us, Ordering::Relaxed);
+
+    match gap_us {
+        0..=999 => CLIENT_EGRESS_GAP_LE_1MS.inc(),
+        1_000..=1_999 => CLIENT_EGRESS_GAP_LE_2MS.inc(),
+        2_000..=4_999 => CLIENT_EGRESS_GAP_LE_5MS.inc(),
+        5_000..=9_999 => CLIENT_EGRESS_GAP_LE_10MS.inc(),
+        10_000..=24_999 => CLIENT_EGRESS_GAP_LE_25MS.inc(),
+        25_000..=49_999 => CLIENT_EGRESS_GAP_LE_50MS.inc(),
+        50_000..=99_999 => CLIENT_EGRESS_GAP_LE_100MS.inc(),
+        _ => CLIENT_EGRESS_GAP_GT_100MS.inc(),
+    }
+}
 
 /// TLS provider gauge: 0 = rustls-only, 1 = rustls+tls-cover (unified).
 pub static TLS_PROVIDER_KIND: SafeGauge = SafeGauge::new();
@@ -491,6 +537,115 @@ pub fn export_telemetry_text() -> String {
             IO_URING_RECV_PACKETS.get()
         );
         let _ = writeln!(out, "quicfuscate_io_uring_recv_active {}", get(&IO_URING_RECV_ACTIVE));
+        let _ = writeln!(
+            out,
+            "quicfuscate_client_egress_flushes_total {}",
+            CLIENT_EGRESS_FLUSHES.get()
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_client_egress_packets_total {}",
+            CLIENT_EGRESS_PACKETS.get()
+        );
+        let _ =
+            writeln!(out, "quicfuscate_client_egress_bytes_total {}", CLIENT_EGRESS_BYTES.get());
+        let _ = writeln!(
+            out,
+            "quicfuscate_client_egress_burst_packets_max {}",
+            get(&CLIENT_EGRESS_BURST_PACKETS_MAX)
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_client_egress_burst_bytes_max {}",
+            get(&CLIENT_EGRESS_BURST_BYTES_MAX)
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_client_egress_initial_flushes_total {}",
+            CLIENT_EGRESS_INITIAL_FLUSHES.get()
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_client_egress_receive_flushes_total {}",
+            CLIENT_EGRESS_RECEIVE_FLUSHES.get()
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_client_egress_tun_receive_flushes_total {}",
+            CLIENT_EGRESS_TUN_RECEIVE_FLUSHES.get()
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_client_egress_housekeeping_flushes_total {}",
+            CLIENT_EGRESS_HOUSEKEEPING_FLUSHES.get()
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_client_egress_shutdown_flushes_total {}",
+            CLIENT_EGRESS_SHUTDOWN_FLUSHES.get()
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_client_egress_gap_last_us {}",
+            get(&CLIENT_EGRESS_GAP_LAST_US)
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_client_egress_gap_max_us {}",
+            get(&CLIENT_EGRESS_GAP_MAX_US)
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_client_egress_gap_le_1ms_total {}",
+            CLIENT_EGRESS_GAP_LE_1MS.get()
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_client_egress_gap_le_2ms_total {}",
+            CLIENT_EGRESS_GAP_LE_2MS.get()
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_client_egress_gap_le_5ms_total {}",
+            CLIENT_EGRESS_GAP_LE_5MS.get()
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_client_egress_gap_le_10ms_total {}",
+            CLIENT_EGRESS_GAP_LE_10MS.get()
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_client_egress_gap_le_25ms_total {}",
+            CLIENT_EGRESS_GAP_LE_25MS.get()
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_client_egress_gap_le_50ms_total {}",
+            CLIENT_EGRESS_GAP_LE_50MS.get()
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_client_egress_gap_le_100ms_total {}",
+            CLIENT_EGRESS_GAP_LE_100MS.get()
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_client_egress_gap_gt_100ms_total {}",
+            CLIENT_EGRESS_GAP_GT_100MS.get()
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_client_housekeeping_ticks_total {}",
+            CLIENT_HOUSEKEEPING_TICKS.get()
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_client_heartbeat_timeouts_total {}",
+            CLIENT_HEARTBEAT_TIMEOUTS.get()
+        );
+        let _ = writeln!(out, "quicfuscate_client_loss_ppm_last {}", get(&CLIENT_LOSS_PPM_LAST));
+        let _ = writeln!(out, "quicfuscate_client_rtt_us_last {}", get(&CLIENT_RTT_US_LAST));
     } // end packets
 
     if stealth {
@@ -1111,6 +1266,55 @@ pub static MEMORY_USAGE_BYTES: AtomicU64 = AtomicU64::new(0);
 pub static BYTES_SENT: Counter = Counter::new();
 /// Total bytes received across all transports.
 pub static BYTES_RECEIVED: Counter = Counter::new();
+
+/// Completed standalone-client connected-UDP flushes.
+pub static CLIENT_EGRESS_FLUSHES: Counter = Counter::new();
+/// Datagrams successfully handed to the standalone-client UDP socket.
+pub static CLIENT_EGRESS_PACKETS: Counter = Counter::new();
+/// Bytes successfully handed to the standalone-client UDP socket.
+pub static CLIENT_EGRESS_BYTES: Counter = Counter::new();
+/// Largest number of datagrams emitted by one standalone-client flush.
+pub static CLIENT_EGRESS_BURST_PACKETS_MAX: AtomicU64 = AtomicU64::new(0);
+/// Largest byte volume emitted by one standalone-client flush.
+pub static CLIENT_EGRESS_BURST_BYTES_MAX: AtomicU64 = AtomicU64::new(0);
+/// Standalone-client egress flushes that emitted the initial handshake packet.
+pub static CLIENT_EGRESS_INITIAL_FLUSHES: Counter = Counter::new();
+/// Standalone-client egress flushes driven by a received UDP datagram.
+pub static CLIENT_EGRESS_RECEIVE_FLUSHES: Counter = Counter::new();
+/// Standalone-client egress flushes driven by TUN uplink processing after receive.
+pub static CLIENT_EGRESS_TUN_RECEIVE_FLUSHES: Counter = Counter::new();
+/// Standalone-client egress flushes driven by the 5ms housekeeping tick.
+pub static CLIENT_EGRESS_HOUSEKEEPING_FLUSHES: Counter = Counter::new();
+/// Standalone-client egress flushes that transmit shutdown state.
+pub static CLIENT_EGRESS_SHUTDOWN_FLUSHES: Counter = Counter::new();
+/// Most recent successful standalone-client UDP-send gap in microseconds.
+pub static CLIENT_EGRESS_GAP_LAST_US: AtomicU64 = AtomicU64::new(0);
+/// Largest successful standalone-client UDP-send gap in microseconds.
+pub static CLIENT_EGRESS_GAP_MAX_US: AtomicU64 = AtomicU64::new(0);
+/// Successful standalone-client UDP-send gaps at or below one millisecond.
+pub static CLIENT_EGRESS_GAP_LE_1MS: Counter = Counter::new();
+/// Successful standalone-client UDP-send gaps above one and at or below two milliseconds.
+pub static CLIENT_EGRESS_GAP_LE_2MS: Counter = Counter::new();
+/// Successful standalone-client UDP-send gaps above two and at or below five milliseconds.
+pub static CLIENT_EGRESS_GAP_LE_5MS: Counter = Counter::new();
+/// Successful standalone-client UDP-send gaps above five and at or below ten milliseconds.
+pub static CLIENT_EGRESS_GAP_LE_10MS: Counter = Counter::new();
+/// Successful standalone-client UDP-send gaps above ten and at or below 25 milliseconds.
+pub static CLIENT_EGRESS_GAP_LE_25MS: Counter = Counter::new();
+/// Successful standalone-client UDP-send gaps above 25 and at or below 50 milliseconds.
+pub static CLIENT_EGRESS_GAP_LE_50MS: Counter = Counter::new();
+/// Successful standalone-client UDP-send gaps above 50 and at or below 100 milliseconds.
+pub static CLIENT_EGRESS_GAP_LE_100MS: Counter = Counter::new();
+/// Successful standalone-client UDP-send gaps above 100 milliseconds.
+pub static CLIENT_EGRESS_GAP_GT_100MS: Counter = Counter::new();
+/// Standalone-client housekeeping ticks executed while telemetry is enabled.
+pub static CLIENT_HOUSEKEEPING_TICKS: Counter = Counter::new();
+/// Standalone-client exits caused by the fail-closed heartbeat timeout.
+pub static CLIENT_HEARTBEAT_TIMEOUTS: Counter = Counter::new();
+/// Latest standalone-client congestion loss-rate sample in parts per million.
+pub static CLIENT_LOSS_PPM_LAST: AtomicU64 = AtomicU64::new(0);
+/// Latest standalone-client RTT sample in microseconds.
+pub static CLIENT_RTT_US_LAST: AtomicU64 = AtomicU64::new(0);
 
 /// Last FEC decoding time in milliseconds.
 pub static DECODING_TIME_MS: AtomicU64 = AtomicU64::new(0);
@@ -1826,6 +2030,37 @@ mod tests {
             first,
             "gauge must reflect the published value"
         );
+    }
+
+    #[test]
+    fn client_egress_metrics_record_flush_and_gap() {
+        let flushes_before = CLIENT_EGRESS_FLUSHES.get();
+        let packets_before = CLIENT_EGRESS_PACKETS.get();
+        let bytes_before = CLIENT_EGRESS_BYTES.get();
+        let housekeeping_before = CLIENT_EGRESS_HOUSEKEEPING_FLUSHES.get();
+        let gap_bucket_before = CLIENT_EGRESS_GAP_LE_10MS.get();
+
+        record_client_egress_flush(ClientEgressTrigger::Housekeeping, 3, 4096);
+        record_client_egress_gap(std::time::Duration::from_millis(7));
+
+        assert!(CLIENT_EGRESS_FLUSHES.get() >= flushes_before + 1);
+        assert!(CLIENT_EGRESS_PACKETS.get() >= packets_before + 3);
+        assert!(CLIENT_EGRESS_BYTES.get() >= bytes_before + 4096);
+        assert!(CLIENT_EGRESS_HOUSEKEEPING_FLUSHES.get() >= housekeeping_before + 1);
+        assert!(CLIENT_EGRESS_GAP_LE_10MS.get() >= gap_bucket_before + 1);
+        assert!(CLIENT_EGRESS_GAP_MAX_US.load(Ordering::Relaxed) >= 7_000);
+
+        let text = export_telemetry_text();
+        for metric in [
+            "quicfuscate_client_egress_flushes_total ",
+            "quicfuscate_client_egress_gap_max_us ",
+            "quicfuscate_client_housekeeping_ticks_total ",
+            "quicfuscate_client_heartbeat_timeouts_total ",
+            "quicfuscate_client_loss_ppm_last ",
+            "quicfuscate_client_rtt_us_last ",
+        ] {
+            assert!(text.contains(metric), "missing client egress metric {metric}");
+        }
     }
 
     #[test]
