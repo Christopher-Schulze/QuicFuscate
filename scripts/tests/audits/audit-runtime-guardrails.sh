@@ -539,6 +539,7 @@ else
 fi
 
 CUBIC_FEC_CONTROL_HARNESS="scripts/tests/tun-e2e-cubic-netns.sh"
+RUNTIME_PERFORMANCE_SAMPLER="scripts/tests/utils/runtime-performance-sampler.py"
 if rg -F -- 'LOSS_TRIALS=3' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
   && rg -F -- 'for fec_mode in auto off; do' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
   && rg -F -- 'run_loss_comparison "$fec_mode"' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
@@ -547,12 +548,20 @@ if rg -F -- 'LOSS_TRIALS=3' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
   && rg -F -- 'auto_minus_off_retained_percentage_points' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
   && rg -F -- 'prepare_certificate' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
   && rg -F -- 'CA_KEY="${QF_E2E_CA_KEY:-$PROJECT_ROOT/config/local/ca.key}"' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
+  && rg -F -- 'start_performance_sampler "$fec_mode-$phase"' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
+  && rg -F -- 'validate_performance_phase "$fec_mode" "$phase"' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
+  && rg -F -- 'capture_latency "$fec_mode-$phase"' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
+  && rg -F -- 'prove_runtime_logs_clean' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
+  && rg -F -- 'cpu_one_core_percent' "$RUNTIME_PERFORMANCE_SAMPLER" >/dev/null \
+  && rg -F -- 'peak_pending_packets' "$RUNTIME_PERFORMANCE_SAMPLER" >/dev/null \
+  && rg -F -- 'allocation_deltas' "$RUNTIME_PERFORMANCE_SAMPLER" >/dev/null \
+  && rg -F -- 'rate_limited_delta' "$RUNTIME_PERFORMANCE_SAMPLER" >/dev/null \
   && ! rg -F -- 'config/local/server.crt' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null; then
-  pass "CUBIC loss proof keeps matched Auto and FEC-off controls with machine-readable comparison evidence"
-  append_item "cubic_fec_control_comparison" "ok" "three clean/loss trials per policy, isolated certificate fixture, and absolute/relative comparison artifact are required"
+  pass "CUBIC loss proof keeps matched controls plus fail-closed runtime performance evidence"
+  append_item "cubic_fec_control_comparison" "ok" "three clean/loss trials per policy, isolated fixture, comparison, latency, CPU, allocation, queue, RSS, and rate-limit evidence are required"
 else
-  fail_critical "CUBIC loss proof lost its matched Auto versus FEC-off comparison contract"
-  append_item "cubic_fec_control_comparison" "fail" "missing repetition count, both policy runs, isolated fixture, per-policy evidence, or relative comparison artifact"
+  fail_critical "CUBIC loss proof lost its matched control or runtime performance contract"
+  append_item "cubic_fec_control_comparison" "fail" "missing repetition, policy control, isolated fixture, comparison, latency, CPU, allocation, queue, RSS, or rate-limit evidence"
 fi
 
 MULTI_CLIENT_DUAL_STACK_HARNESS="scripts/tests/tun-e2e-multi-client-dual-stack-netns.sh"
@@ -568,6 +577,7 @@ if rg -F -- 'for host_veth in "${HOST_VETH[@]}"; do' "$MULTI_CLIENT_DUAL_STACK_H
   && rg -F -- '--rate-bps "$THROUGHPUT_RATE_BPS"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'IPv6 throughput evidence exceeded the bounded trial duration in phase $phase' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'assert_metric_zero "throughput-$phase" quicfuscate_rate_limited_total' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'prove_runtime_logs_clean' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'fetch_metrics throughput-failure || true' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && ! rg -F -- 'iperf3' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'sender/receiver byte mismatch' "$TCP_THROUGHPUT_PROBE" >/dev/null \

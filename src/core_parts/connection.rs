@@ -1330,6 +1330,11 @@ impl QuicFuscateConnection {
             .min()
     }
 
+    /// Queue one ack-eliciting transport keepalive for the next send poll.
+    pub fn queue_keepalive_ping(&mut self) {
+        self.conn.queue_cover_ping();
+    }
+
     fn prepare_fec_wire_profile(
         &mut self,
     ) -> Result<Option<WireProfile>, crate::error::ConnectionError> {
@@ -2216,4 +2221,3 @@ impl QuicFuscateConnection {
         self.conn.server_name().map(|name| name.to_string())
     }
 }
-

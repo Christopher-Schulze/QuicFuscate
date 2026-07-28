@@ -27,6 +27,13 @@ mod runtime_reload_tests {
     }
 
     #[test]
+    fn heartbeat_probe_runs_three_times_inside_the_watchdog_window() {
+        assert_eq!(heartbeat_probe_interval(0), None);
+        assert_eq!(heartbeat_probe_interval(30_000), Some(Duration::from_secs(10)));
+        assert_eq!(heartbeat_probe_interval(2), Some(Duration::from_millis(1)));
+    }
+
+    #[test]
     fn client_ipv4_packet_too_big_response_advertises_tunnel_mtu() {
         let response = client_packet_too_big_response(&ipv4_packet(1400), 1280);
 

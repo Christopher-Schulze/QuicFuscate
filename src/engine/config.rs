@@ -1074,12 +1074,16 @@ impl Default for OptimizationConfig {
 }
 
 const MIN_POOL_BYTES: usize = 16 * 1024 * 1024; // 16 MB floor
-const MAX_POOL_BYTES: usize = 256 * 1024 * 1024; // 256 MB cap
+const MAX_POOL_BYTES: usize = 64 * 1024 * 1024; // 64 MB cap
 const FALLBACK_POOL_BYTES: usize = 64 * 1024 * 1024; // 64 MB fallback default
+
+fn scaled_memory_pool_size(total_ram: usize) -> usize {
+    (total_ram / 20).clamp(MIN_POOL_BYTES, MAX_POOL_BYTES)
+}
 
 /// Determine the memory pool size with the following priority:
 /// 1. Environment variable `QUICFUSCATE_MEMORY_POOL_MB` (explicit override, in megabytes)
-/// 2. Auto-scale: 5% of total system RAM (clamped to 16 MB..256 MB)
+/// 2. Auto-scale: 5% of total system RAM (clamped to 16 MB..64 MB)
 /// 3. Fallback: 64 MB (if sysinfo detection fails)
 fn auto_memory_pool_size() -> usize {
     // Priority 1: environment variable override
@@ -1101,7 +1105,7 @@ fn auto_memory_pool_size() -> usize {
 
     if total_ram > 0 {
         let five_percent = total_ram / 20;
-        let clamped = five_percent.clamp(MIN_POOL_BYTES, MAX_POOL_BYTES);
+        let clamped = scaled_memory_pool_size(total_ram);
         log::info!(
             "Memory pool auto-scaled: {} MB (system RAM: {} MB, 5% = {} MB)",
             clamped / (1024 * 1024),
@@ -1276,6 +1280,13 @@ mod tests {
         assert_eq!(config.transport.quic_versions, [QuicVersion::V2, QuicVersion::V1]);
         assert_eq!(config.transport.cc_algorithm, CcAlgorithm::Bbr3);
         assert_eq!(config.crypto.aead_preference, AeadPreference::Auto);
+    }
+
+    #[test]
+    fn automatic_memory_pool_stays_within_runtime_bounds() {
+        assert_eq!(scaled_memory_pool_size(128 * 1024 * 1024), MIN_POOL_BYTES);
+        assert_eq!(scaled_memory_pool_size(2 * 1024 * 1024 * 1024), MAX_POOL_BYTES);
+        assert_eq!(scaled_memory_pool_size(usize::MAX), MAX_POOL_BYTES);
     }
 
     #[test]

@@ -100,6 +100,27 @@ pub fn export_telemetry_text() -> String {
     let _ =
         writeln!(out, "quicfuscate_mem_pool_utilization_percent {}", get(&MEM_POOL_UTILIZATION));
     let _ = writeln!(out, "quicfuscate_mem_pool_block_size_bytes {}", get(&MEM_POOL_BLOCK_SIZE));
+    let _ = writeln!(
+        out,
+        "quicfuscate_mem_pool_allocations_total{{source=\"thread_local\"}} {}",
+        MEM_POOL_HITS_TLS.get()
+    );
+    let _ = writeln!(
+        out,
+        "quicfuscate_mem_pool_allocations_total{{source=\"shared_queue\"}} {}",
+        MEM_POOL_HITS_QUEUE.get()
+    );
+    let _ = writeln!(
+        out,
+        "quicfuscate_mem_pool_allocations_total{{source=\"grow\"}} {}",
+        MEM_POOL_ALLOC_GROW.get()
+    );
+    let _ = writeln!(
+        out,
+        "quicfuscate_mem_pool_allocations_total{{source=\"ephemeral\"}} {}",
+        MEM_POOL_ALLOC_EPHEMERAL.get()
+    );
+    let _ = writeln!(out, "quicfuscate_body_pool_allocations_total {}", BODY_POOL_ALLOCS.get());
 
     // SIMD usage summary
     let _ = writeln!(out, "quicfuscate_simd_usage_avx512 {}", get(&SIMD_USAGE_AVX512));

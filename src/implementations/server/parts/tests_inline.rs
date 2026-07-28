@@ -93,6 +93,66 @@ mod tests {
     }
 
     #[test]
+    fn intentional_downlink_overload_is_rejected_and_exported_by_cause() {
+        let first_target: SocketAddr = "127.0.0.1:41001".parse().unwrap();
+        let second_target: SocketAddr = "127.0.0.1:41002".parse().unwrap();
+        let now = Instant::now();
+        let metrics = Metrics::new();
+
+        let mut by_count = PendingTunDownlinks::with_limits(1, 64, 2);
+        assert!(enqueue_pending_tun_downlink(&mut by_count, first_target, vec![1], now, &metrics,)
+            .is_ok());
+        assert_eq!(
+            enqueue_pending_tun_downlink(&mut by_count, second_target, vec![2], now, &metrics,),
+            Err(PendingTunDownlinkReject::Queue)
+        );
+        assert_eq!((by_count.len(), by_count.bytes()), (1, 1));
+
+        let mut by_bytes = PendingTunDownlinks::with_limits(4, 1, 4);
+        assert!(enqueue_pending_tun_downlink(&mut by_bytes, first_target, vec![1], now, &metrics,)
+            .is_ok());
+        assert_eq!(
+            enqueue_pending_tun_downlink(&mut by_bytes, second_target, vec![2], now, &metrics,),
+            Err(PendingTunDownlinkReject::Bytes)
+        );
+        assert_eq!((by_bytes.len(), by_bytes.bytes()), (1, 1));
+
+        let mut per_target = PendingTunDownlinks::with_limits(4, 64, 1);
+        assert!(enqueue_pending_tun_downlink(
+            &mut per_target,
+            first_target,
+            vec![1],
+            now,
+            &metrics,
+        )
+        .is_ok());
+        assert_eq!(
+            enqueue_pending_tun_downlink(&mut per_target, first_target, vec![2], now, &metrics,),
+            Err(PendingTunDownlinkReject::PerTarget)
+        );
+        assert_eq!((per_target.len(), per_target.bytes()), (1, 1));
+
+        let responses =
+            Arc::new(std::sync::Mutex::new(crate::core::MasqueDownlinkQueue::new(1, 64)));
+        enqueue_routing_response(&responses, &metrics, vec![3]);
+        enqueue_routing_response(&responses, &metrics, vec![4]);
+
+        let output = metrics.export();
+        assert!(output.contains("quicfuscate_tun_downlink_backpressure_pending_packets 1"));
+        assert!(output.contains("quicfuscate_tun_downlink_backpressure_pending_bytes 1"));
+        assert!(output
+            .contains("quicfuscate_tun_downlink_backpressure_events_total{event=\"enqueued\"} 3"));
+        for event in ["drop_queue_capacity", "drop_byte_capacity", "drop_per_target_capacity"] {
+            assert!(output.contains(&format!(
+                "quicfuscate_tun_downlink_backpressure_events_total{{event=\"{event}\"}} 1"
+            )));
+        }
+        assert!(output.contains(
+            "quicfuscate_masque_downlink_response_events_total{event=\"drop_packet_capacity\"} 1"
+        ));
+    }
+
+    #[test]
     fn client_fanout_queue_accepts_only_broadcast_and_multicast() {
         let queue = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
         let source = "127.0.0.1:4433".parse().unwrap();

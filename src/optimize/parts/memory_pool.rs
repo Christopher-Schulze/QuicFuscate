@@ -7,10 +7,12 @@
 /// minimizing lock contention and fragmentation.
 #[derive(Debug)]
 pub struct MemoryPool {
+    id: usize,
     pools: Vec<Arc<SegQueue<AlignedBox<[u8]>>>>,
     block_size: usize,
     num_nodes: usize,
     capacity: AtomicUsize,
+    hard_max_capacity: usize,
     in_use: AtomicUsize,
     available: AtomicUsize,
 }
@@ -21,6 +23,14 @@ pub struct MemoryPool {
 /// locked with `mlock(2)`. Pages are released back to the kernel when the
 /// block is deallocated. On non-Unix targets this is a no-op.
 static LOCK_BLOCKS: AtomicBool = AtomicBool::new(false);
+static NEXT_MEMORY_POOL_ID: AtomicUsize = AtomicUsize::new(1);
+const DEFAULT_AUTO_TUNE_MAX_CAPACITY: usize = 1024;
+const DEFAULT_POOL_MAX_BYTES: usize = 64 * 1024 * 1024;
+type ThreadLocalPoolCaches = Vec<(usize, Vec<AlignedBox<[u8]>>)>;
+
+fn default_hard_max_capacity(initial_capacity: usize, block_size: usize) -> usize {
+    initial_capacity.max((DEFAULT_POOL_MAX_BYTES / block_size).max(1))
+}
 
 /// Lock a memory region against swap with `mlock(2)` (TODO-516).
 /// Best-effort: logs a warning on failure but does not panic.
@@ -67,21 +77,51 @@ impl MemoryPool {
             let default = std::env::var("QUICFUSCATE_TLS_CACHE")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(32);
+                .unwrap_or(0);
             AtomicUsize::new(default)
         })
     }
     // Thread-local small cache of blocks to reduce contention on queues
     thread_local! {
-        static TLS_CACHE: RefCell<Vec<AlignedBox<[u8]>>> = const { RefCell::new(Vec::new()) };
+        static TLS_CACHES: RefCell<ThreadLocalPoolCaches> = const { RefCell::new(Vec::new()) };
     }
 
     #[inline]
-    fn hard_max_cap() -> usize {
-        std::env::var("QUICFUSCATE_POOL_HARD_MAX_CAP")
+    fn with_tls_cache<R>(&self, operation: impl FnOnce(&mut Vec<AlignedBox<[u8]>>) -> R) -> R {
+        Self::TLS_CACHES.with(|caches| {
+            let mut caches = caches.borrow_mut();
+            let index = caches.iter().position(|(id, _)| *id == self.id).unwrap_or_else(|| {
+                caches.push((self.id, Vec::new()));
+                caches.len() - 1
+            });
+            operation(&mut caches[index].1)
+        })
+    }
+
+    #[inline]
+    fn try_cache_block(
+        &self,
+        block: AlignedBox<[u8]>,
+        limit: usize,
+    ) -> Result<(), AlignedBox<[u8]>> {
+        self.with_tls_cache(|cache| {
+            if cache.len() >= limit {
+                return Err(block);
+            }
+            cache.push(block);
+            Ok(())
+        })
+    }
+
+    #[inline]
+    fn configured_hard_max_capacity(initial_capacity: usize, block_size: usize) -> usize {
+        let configured = std::env::var("QUICFUSCATE_POOL_HARD_MAX_CAP")
             .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(usize::MAX)
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|capacity| *capacity > 0);
+        configured
+            .map(|capacity| capacity.max(initial_capacity))
+            .unwrap_or_else(|| default_hard_max_capacity(initial_capacity, block_size))
     }
 
     #[inline]
@@ -93,6 +133,9 @@ impl MemoryPool {
     fn bump_tls_limit(suggested: usize) {
         let cell = Self::tls_limit_cell();
         let cur = cell.load(Ordering::Relaxed);
+        if cur == 0 {
+            return;
+        }
         if suggested != cur {
             cell.store(suggested, Ordering::Relaxed);
         }
@@ -100,8 +143,7 @@ impl MemoryPool {
 
     #[inline]
     fn flush_tls_to_queue(&self, node: usize, max: usize) {
-        Self::TLS_CACHE.with(|c| {
-            let mut cache = c.borrow_mut();
+        self.with_tls_cache(|cache| {
             let limit = Self::tls_limit();
             let len = cache.len();
             if len > limit {
@@ -139,10 +181,12 @@ impl MemoryPool {
             pools.push(q);
         }
         let pool = Self {
+            id: NEXT_MEMORY_POOL_ID.fetch_add(1, Ordering::Relaxed),
             pools,
             block_size,
             num_nodes: nodes,
             capacity: AtomicUsize::new(capacity),
+            hard_max_capacity: Self::configured_hard_max_capacity(capacity, block_size),
             in_use: AtomicUsize::new(0),
             available: AtomicUsize::new(capacity),
         };
@@ -315,7 +359,7 @@ impl MemoryPool {
     }
 
     fn grow(&self, new_capacity: usize) {
-        let limit = Self::hard_max_cap();
+        let limit = self.hard_max_capacity;
         let target = core::cmp::min(new_capacity, limit);
         while self.capacity.load(Ordering::Relaxed) < target {
             for (n, q) in self.pools.iter().enumerate() {
@@ -357,7 +401,7 @@ impl MemoryPool {
     #[inline(always)]
     pub fn alloc(&self) -> AlignedBox<[u8]> {
         // Fast-path: check TLS cache first
-        if let Some(b) = Self::TLS_CACHE.with(|c| c.borrow_mut().pop()) {
+        if let Some(b) = self.with_tls_cache(Vec::pop) {
             // Validate size; drop foreign/mismatched blocks
             if b.len() == self.block_size {
                 crate::optimize::telemetry::MEM_POOL_HITS_TLS.inc();
@@ -426,7 +470,7 @@ impl MemoryPool {
         }
         // Attempt growth respecting hard cap
         let cap_now = self.capacity.load(Ordering::Relaxed);
-        let limit = Self::hard_max_cap();
+        let limit = self.hard_max_capacity;
         if cap_now < limit {
             let mut target = cap_now.saturating_mul(2);
             if target == 0 {
@@ -452,7 +496,7 @@ impl MemoryPool {
         // Hard-cap reached or still no blocks: allocate a new block and account it as pooled
         // (checked-out). This maintains invariants for free() without needing origin tags.
         let cap_now = self.capacity.load(Ordering::Relaxed);
-        let limit2 = Self::hard_max_cap();
+        let limit2 = self.hard_max_capacity;
         if cap_now < limit2 {
             let b = Self::alloc_numa_block(self.block_size, node);
             self.capacity.fetch_add(1, Ordering::Relaxed);
@@ -484,15 +528,16 @@ impl MemoryPool {
         block.as_mut().fill(0);
         // Try to place into TLS cache
         let limit = Self::tls_limit();
-        let can_push_tls = Self::TLS_CACHE.with(|c| c.borrow().len() < limit);
-        if can_push_tls {
-            Self::TLS_CACHE.with(|c| c.borrow_mut().push(block));
-            self.available.fetch_add(1, Ordering::Relaxed);
-            self.in_use.fetch_sub(1, Ordering::Relaxed);
-            self.update_metrics();
-            self.check_invariants();
-            return;
-        }
+        let block = match self.try_cache_block(block, limit) {
+            Ok(()) => {
+                self.available.fetch_add(1, Ordering::Relaxed);
+                self.in_use.fetch_sub(1, Ordering::Relaxed);
+                self.update_metrics();
+                self.check_invariants();
+                return;
+            }
+            Err(block) => block,
+        };
         // Fallback: return to global pool queue
         let node = numa::current_node() % self.num_nodes;
         if self.available.load(Ordering::Relaxed) < self.capacity.load(Ordering::Relaxed) {
@@ -510,7 +555,7 @@ impl MemoryPool {
     /// Adjusts the maximum number of cached blocks at runtime.
     pub fn set_capacity(&self, new_capacity: usize) {
         let current = self.capacity.load(Ordering::Relaxed);
-        let limit = Self::hard_max_cap();
+        let limit = self.hard_max_capacity;
         let clamped = core::cmp::min(new_capacity, limit);
         if clamped > current {
             self.grow(clamped);
@@ -584,7 +629,7 @@ impl MemoryPool {
                 let max_cap = std::env::var("QUICFUSCATE_POOL_MAX_CAP")
                     .ok()
                     .and_then(|v| v.parse().ok())
-                    .unwrap_or(4096);
+                    .unwrap_or(DEFAULT_AUTO_TUNE_MAX_CAPACITY);
                 let tick_ms = std::env::var("QUICFUSCATE_POOL_TICK_MS")
                     .ok()
                     .and_then(|v| v.parse().ok())
@@ -934,5 +979,41 @@ impl<'a> ZeroCopyBuffer<'a> {
 impl<'a> Drop for ZeroCopyBuffer<'a> {
     fn drop(&mut self) {
         self.bufs.clear();
+    }
+}
+
+#[cfg(test)]
+mod memory_pool_growth_tests {
+    use super::{default_hard_max_capacity, DEFAULT_POOL_MAX_BYTES};
+
+    #[test]
+    fn default_growth_limit_is_byte_bounded_and_never_below_initial_capacity() {
+        assert_eq!(default_hard_max_capacity(512, 65_536), 1_024);
+        assert_eq!(default_hard_max_capacity(32_768, 2_048), 32_768);
+        assert_eq!(
+            default_hard_max_capacity(65_536, 2_048),
+            65_536,
+            "an explicitly larger initial pool remains valid"
+        );
+        assert_eq!(DEFAULT_POOL_MAX_BYTES, 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn thread_local_blocks_remain_owned_by_their_origin_pool() {
+        use std::sync::atomic::Ordering;
+
+        let first_pool = super::MemoryPool::new(1, 2_048);
+        let second_pool = super::MemoryPool::new(1, 2_048);
+        let first_block = first_pool.alloc();
+        let first_pointer = first_block.as_ptr();
+        assert!(first_pool.try_cache_block(first_block, 1).is_ok());
+        first_pool.available.fetch_add(1, Ordering::Relaxed);
+        first_pool.in_use.fetch_sub(1, Ordering::Relaxed);
+
+        let second_block = second_pool.alloc();
+        assert_ne!(second_block.as_ptr(), first_pointer);
+
+        let first_block_again = first_pool.alloc();
+        assert_eq!(first_block_again.as_ptr(), first_pointer);
     }
 }

@@ -20,10 +20,17 @@ CA_KEY="${QF_E2E_CA_KEY:-$PROJECT_ROOT/config/local/ca.key}"
 LOCK_FILE="${QF_E2E_LOCK_FILE:-/tmp/quicfuscate-tun-e2e.lock}"
 LOCK_TIMEOUT="${QF_E2E_LOCK_TIMEOUT:-300}"
 ARTIFACT_DIR="${QF_E2E_ARTIFACT_DIR:-/tmp/quicfuscate-todo535-$$}"
+PERFORMANCE_SAMPLER="$PROJECT_ROOT/scripts/tests/utils/runtime-performance-sampler.py"
 LOSS_TRIALS=3
 LOSS_RATE_PERCENT=5
 MIN_RETAINED_RATIO=0.5
 MIN_RETAINED_PERCENT=50
+METRICS_PORT=9535
+MAX_CPU_ONE_CORE_PERCENT="${QF_E2E_MAX_CPU_ONE_CORE_PERCENT:-50}"
+MAX_PEAK_RSS_BYTES="${QF_E2E_MAX_PEAK_RSS_BYTES:-402653184}"
+MAX_FALLBACK_ALLOCATIONS="${QF_E2E_MAX_FALLBACK_ALLOCATIONS:-75000}"
+MAX_CLEAN_P95_LATENCY_MS="${QF_E2E_MAX_CLEAN_P95_LATENCY_MS:-75}"
+MAX_IMPAIRED_P95_LATENCY_MS="${QF_E2E_MAX_IMPAIRED_P95_LATENCY_MS:-100}"
 
 SERVER_NS="qf535s"
 CLIENT_NS=("qf535c1" "qf535c2")
@@ -39,6 +46,8 @@ ADMIN_SOCKET="${QF_E2E_ADMIN_SOCKET:-/tmp/qf535-${$}.sock}"
 ADMIN_SOCKET_OWNED=0
 STACK_PIDS=()
 UDP_RECEIVER_PID=""
+PERFORMANCE_SAMPLER_PID=""
+PERFORMANCE_SAMPLER_OUTPUT=""
 
 log() { printf '[TODO-535] %s\n' "$*"; }
 fail() {
@@ -73,7 +82,34 @@ wait_for_socket() {
   fail "admin socket did not appear: $ADMIN_SOCKET"
 }
 
+wait_for_metrics() {
+  for ((attempt = 0; attempt < 100; attempt++)); do
+    if ip netns exec "$SERVER_NS" nc -z 127.0.0.1 "$METRICS_PORT" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  fail "metrics endpoint did not become ready on port $METRICS_PORT"
+}
+
+wait_for_tun() {
+  local namespace="$1"
+  for ((attempt = 0; attempt < 100; attempt++)); do
+    if ip netns exec "$namespace" ip link show "$TUN_NAME" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  fail "TUN interface $TUN_NAME did not appear in namespace $namespace"
+}
+
 stop_stack() {
+  if [[ -n "$PERFORMANCE_SAMPLER_PID" ]]; then
+    kill -TERM "$PERFORMANCE_SAMPLER_PID" 2>/dev/null || true
+    wait "$PERFORMANCE_SAMPLER_PID" 2>/dev/null || true
+    PERFORMANCE_SAMPLER_PID=""
+    PERFORMANCE_SAMPLER_OUTPUT=""
+  fi
   local pid
   for pid in "${STACK_PIDS[@]}"; do
     kill -TERM "$pid" 2>/dev/null || true
@@ -114,6 +150,14 @@ dump_diagnostics() {
   tail -100 "$ARTIFACT_DIR"/server-*.log >&2 2>/dev/null
   printf '%s\n' '=== client logs ===' >&2
   tail -80 "$ARTIFACT_DIR"/client-*.log >&2 2>/dev/null
+}
+
+prove_runtime_logs_clean() {
+  local pattern='heartbeat timeout|InternalError|TUN packet send failed'
+  if grep -EH "$pattern" "$ARTIFACT_DIR"/client-*.log "$ARTIFACT_DIR"/server-*.log \
+    >"$ARTIFACT_DIR/runtime-liveness-errors.txt"; then
+    fail 'runtime logs contain a heartbeat timeout, InternalError, or TUN send failure'
+  fi
 }
 
 trap cleanup EXIT
@@ -206,6 +250,7 @@ start_stack() {
     --cert "$CERT" \
     --key "$KEY" \
     --listen "$SERVER_UNDERLAY:4433" \
+    --metrics-port "$METRICS_PORT" \
     --admin-socket "$ADMIN_SOCKET" \
     --tun \
     --tun-name "$TUN_NAME" \
@@ -216,6 +261,7 @@ start_stack() {
     -v >"$ARTIFACT_DIR/server-$phase.log" 2>&1 &
   STACK_PIDS+=("$!")
   wait_for_socket
+  wait_for_metrics
 
   local index qkey log_file
   for index in "${!algorithms[@]}"; do
@@ -247,9 +293,11 @@ start_stack() {
 
 configure_tuns() {
   local client_count="$1"
+  wait_for_tun "$SERVER_NS"
   ip netns exec "$SERVER_NS" ip link set "$TUN_NAME" mtu 1280 up
   local index
   for ((index = 0; index < client_count; index++)); do
+    wait_for_tun "${CLIENT_NS[$index]}"
     ip netns exec "${CLIENT_NS[$index]}" ip link set "$TUN_NAME" mtu 1280 up
     local ready=0
     for ((attempt = 0; attempt < 20; attempt++)); do
@@ -272,6 +320,71 @@ capture_process_commands() {
     tr '\0' ' ' <"/proc/$pid/cmdline" >>"$ARTIFACT_DIR/processes-$phase.txt"
     printf '\n' >>"$ARTIFACT_DIR/processes-$phase.txt"
   done
+}
+
+start_performance_sampler() {
+  local label="$1"
+  [[ -z "$PERFORMANCE_SAMPLER_PID" ]] || fail 'performance sampler already active'
+  PERFORMANCE_SAMPLER_OUTPUT="$ARTIFACT_DIR/performance-$label.json"
+  [[ ! -e "$PERFORMANCE_SAMPLER_OUTPUT" ]] \
+    || fail "refusing to replace performance artifact: $PERFORMANCE_SAMPLER_OUTPUT"
+  local sampler_args=(
+    "$PERFORMANCE_SAMPLER"
+    --metrics-port "$METRICS_PORT"
+    --output "$PERFORMANCE_SAMPLER_OUTPUT"
+  )
+  local pid
+  for pid in "${STACK_PIDS[@]}"; do
+    sampler_args+=(--pid "$pid")
+  done
+  ip netns exec "$SERVER_NS" python3 "${sampler_args[@]}" &
+  PERFORMANCE_SAMPLER_PID="$!"
+  sleep 0.5
+  kill -0 "$PERFORMANCE_SAMPLER_PID" 2>/dev/null \
+    || fail "performance sampler exited before $label workload"
+}
+
+stop_performance_sampler() {
+  local label="$1"
+  [[ -n "$PERFORMANCE_SAMPLER_PID" ]] || fail "performance sampler was not active for $label"
+  kill -TERM "$PERFORMANCE_SAMPLER_PID" \
+    || fail "could not stop performance sampler for $label"
+  wait "$PERFORMANCE_SAMPLER_PID" \
+    || fail "performance sampler failed for $label"
+  PERFORMANCE_SAMPLER_PID=""
+  [[ -s "$PERFORMANCE_SAMPLER_OUTPUT" ]] \
+    || fail "performance sampler produced no artifact for $label"
+  PERFORMANCE_SAMPLER_OUTPUT=""
+}
+
+capture_latency() {
+  local label="$1"
+  local output="$ARTIFACT_DIR/latency-$label.json"
+  local raw="$ARTIFACT_DIR/latency-$label.txt"
+  ip netns exec "${CLIENT_NS[0]}" ping -n -c 40 -i 0.1 -W 1 \
+    -I "${CLIENT_TUN_IP[0]}" 10.0.1.1 >"$raw" || true
+  python3 -c \
+    'import json,pathlib,re,statistics,sys; values=[float(value) for value in re.findall(r"time[=<]([0-9.]+) ms",pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))]; minimum=int(sys.argv[3]); assert minimum<=len(values)<=40,len(values); ordered=sorted(values); percentile=lambda fraction: ordered[max(0,min(len(ordered)-1,int(len(ordered)*fraction+0.999999)-1))]; result={"samples":len(values),"packet_loss_percent":(40-len(values))/40*100.0,"p50_ms":statistics.median(values),"p95_ms":percentile(0.95),"maximum_ms":max(values)}; pathlib.Path(sys.argv[2]).write_text(json.dumps(result,sort_keys=True)+"\n",encoding="utf-8")' \
+    "$raw" "$output" "$([[ "$label" == *-loss ]] && printf 30 || printf 40)" \
+    || fail "could not parse $label latency samples"
+}
+
+validate_performance_phase() {
+  local fec_mode="$1"
+  local phase="$2"
+  local label="$fec_mode-$phase"
+  local latency_limit="$MAX_CLEAN_P95_LATENCY_MS"
+  if [[ "$phase" == "loss" ]]; then
+    latency_limit="$MAX_IMPAIRED_P95_LATENCY_MS"
+  fi
+  python3 -c \
+    'import json,pathlib,sys; performance=json.load(open(sys.argv[1],encoding="utf-8")); latency=json.load(open(sys.argv[2],encoding="utf-8")); cpu_limit=float(sys.argv[4]); rss_limit=int(sys.argv[5]); fallback_limit=int(sys.argv[6]); latency_limit=float(sys.argv[7]); assert performance["cpu_one_core_percent"]<=cpu_limit,performance; assert performance["peak_process_rss_bytes"]<=rss_limit,performance; assert performance["allocation_deltas"]["grow"]+performance["allocation_deltas"]["ephemeral"]<=fallback_limit,performance; assert performance["peak_pending_packets"]<=256,performance; assert performance["peak_pending_bytes"]<=393216,performance; assert performance["rate_limited_delta"]==0,performance; assert latency["p95_ms"]<=latency_limit,latency; summary={"fec_mode":sys.argv[3],"phase":sys.argv[8],"limits":{"cpu_one_core_percent":cpu_limit,"peak_process_rss_bytes":rss_limit,"fallback_allocations":fallback_limit,"p95_latency_ms":latency_limit},"performance":performance,"latency":latency}; pathlib.Path(sys.argv[9]).write_text(json.dumps(summary,sort_keys=True)+"\n",encoding="utf-8")' \
+    "$ARTIFACT_DIR/performance-$label.json" \
+    "$ARTIFACT_DIR/latency-$label.json" \
+    "$fec_mode" "$MAX_CPU_ONE_CORE_PERCENT" "$MAX_PEAK_RSS_BYTES" \
+    "$MAX_FALLBACK_ALLOCATIONS" "$latency_limit" "$phase" \
+    "$ARTIFACT_DIR/performance-summary-$label.json" \
+    || fail "$label exceeded its runtime performance contract"
 }
 
 set_shared_bottleneck() {
@@ -433,10 +546,14 @@ run_loss_comparison() {
     else
       set_shared_bottleneck 5mbit "${LOSS_RATE_PERCENT}%"
     fi
+    capture_latency "$fec_mode-$phase"
+    start_performance_sampler "$fec_mode-$phase"
     for ((trial = 1; trial <= LOSS_TRIALS; trial++)); do
       run_loss_trial "$fec_mode" "$phase" "$trial"
       receiver_files+=("$ARTIFACT_DIR/udp-receiver-$fec_mode-$phase-$trial.json")
     done
+    stop_performance_sampler "$fec_mode-$phase"
+    validate_performance_phase "$fec_mode" "$phase"
     tc -s qdisc show dev "$SERVER_HOST_VETH" >"$ARTIFACT_DIR/qdisc-$fec_mode-$phase.txt"
   done
   grep -q "loss ${LOSS_RATE_PERCENT}%" "$ARTIFACT_DIR/qdisc-$fec_mode-loss.txt" \
@@ -467,6 +584,8 @@ main() {
     require_command "$command"
   done
   [[ -x "$BINARY" ]] || fail "release binary not executable: $BINARY"
+  [[ -r "$PERFORMANCE_SAMPLER" ]] \
+    || fail "performance sampler is unreadable: $PERFORMANCE_SAMPLER"
   [[ -r "$CA" && -r "$CA_KEY" ]] || fail 'CA certificate or key fixture is unreadable'
 
   exec 9>"$LOCK_FILE"
@@ -487,6 +606,7 @@ main() {
     stop_stack
   done
   compare_fec_modes
+  prove_runtime_logs_clean
 
   cat "$ARTIFACT_DIR/fairness-summary.txt"
   cat "$ARTIFACT_DIR/loss-summary-auto.json"

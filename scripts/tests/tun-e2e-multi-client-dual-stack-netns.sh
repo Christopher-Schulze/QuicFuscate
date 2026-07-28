@@ -152,6 +152,14 @@ dump_diagnostics() {
   ip netns exec "$SERVER_NS" ip6tables -S FORWARD >&2 2>/dev/null
 }
 
+prove_runtime_logs_clean() {
+  local pattern='heartbeat timeout|InternalError|TUN packet send failed'
+  if grep -EH "$pattern" "$ARTIFACT_DIR"/client-*.log "$ARTIFACT_DIR"/server-*.log \
+    >"$ARTIFACT_DIR/runtime-liveness-errors.txt"; then
+    fail 'runtime logs contain a heartbeat timeout, InternalError, or TUN send failure'
+  fi
+}
+
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -1013,6 +1021,7 @@ main() {
   prove_pmtu_efficiency_gain
   prove_dplpmtud_black_hole_recovery
   prove_backpressure_quiescence opt-in
+  prove_runtime_logs_clean
 
   log "PASS: complete evidence retained in $ARTIFACT_DIR"
 }

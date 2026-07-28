@@ -1030,6 +1030,9 @@ async fn run_client(
     let mut housekeeping = interval(Duration::from_millis(5));
     housekeeping.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut next_stats_log = tokio::time::Instant::now();
+    let heartbeat_probe_interval = heartbeat_probe_interval(heartbeat_timeout_ms);
+    let mut next_heartbeat_probe =
+        heartbeat_probe_interval.map(|interval| tokio::time::Instant::now() + interval);
     let mut receive_diagnostics =
         quicfuscate::env_utils::env_flag(CLIENT_RECV_DIAGNOSTICS_ENV, false)
             .then(ClientReceiveDiagnostics::default);
@@ -1182,6 +1185,15 @@ async fn run_client(
                     warn!("HTTP/3 error: {:?}", e);
                 }
 
+                let now = tokio::time::Instant::now();
+                if conn.conn.is_established()
+                    && heartbeat_probe_interval.is_some()
+                    && next_heartbeat_probe.is_some_and(|deadline| now >= deadline)
+                {
+                    conn.queue_keepalive_ping();
+                    next_heartbeat_probe =
+                        heartbeat_probe_interval.map(|interval| now + interval);
+                }
                 if let Err(e) = flush_connected_outgoing(&socket, &mut conn, &mut out).await {
                     warn!("Failed to flush outgoing packets: {}", e);
                 }
@@ -1196,7 +1208,6 @@ async fn run_client(
                         ));
                     }
                 }
-                let now = tokio::time::Instant::now();
                 if now >= next_stats_log {
                     info!(
                         "client stats: RTT {:.0} ms, Loss {:.2}%",
@@ -1275,3 +1286,6 @@ async fn run_client(
     }
 }
 
+fn heartbeat_probe_interval(heartbeat_timeout_ms: u64) -> Option<Duration> {
+    (heartbeat_timeout_ms > 0).then(|| Duration::from_millis((heartbeat_timeout_ms / 3).max(1)))
+}

@@ -218,6 +218,22 @@ fn drain_pending_tun_downlinks(
     flush_tun_downlink_queue(live, &queued, out, socket, metrics);
 }
 
+fn enqueue_pending_tun_downlink(
+    pending: &mut PendingTunDownlinks,
+    target: SocketAddr,
+    packet: Vec<u8>,
+    queued_at: Instant,
+    metrics: &Metrics,
+) -> Result<(), PendingTunDownlinkReject> {
+    let admission = pending.enqueue(target, packet, queued_at);
+    match admission {
+        Ok(()) => metrics.record_tun_downlink_backpressure_enqueued(),
+        Err(reject) => metrics.record_tun_downlink_backpressure_drop(reject.into()),
+    }
+    metrics.set_tun_downlink_backpressure_pending(pending.len(), pending.bytes());
+    admission
+}
+
 /// Flush a list of client connections whose downlink datagrams have been
 /// enqueued. Callers are responsible for collecting `queued` addresses.
 fn flush_tun_downlink_queue(
@@ -371,26 +387,18 @@ fn process_server_tun_packet(
         match send_result {
             Ok(()) => queued.push(target),
             Err(crate::error::ConnectionError::DgramQueueFull) => {
-                match live.live_state.pending_tun_downlinks.enqueue(
+                if let Err(reject) = enqueue_pending_tun_downlink(
+                    &mut live.live_state.pending_tun_downlinks,
                     target,
                     packet.to_vec(),
                     Instant::now(),
+                    metrics,
                 ) {
-                    Ok(()) => {
-                        metrics.record_tun_downlink_backpressure_enqueued();
-                        metrics.set_tun_downlink_backpressure_pending(
-                            live.live_state.pending_tun_downlinks.len(),
-                            live.live_state.pending_tun_downlinks.bytes(),
-                        );
-                    }
-                    Err(reject) => {
-                        metrics.record_tun_downlink_backpressure_drop(reject.into());
-                        log::warn!(
-                            "dropping TUN downlink for {} after bounded backpressure rejection: {:?}",
-                            target,
-                            reject
-                        );
-                    }
+                    log::warn!(
+                        "dropping TUN downlink for {} after bounded backpressure rejection: {:?}",
+                        target,
+                        reject
+                    );
                 }
             }
             Err(error) => {
@@ -459,4 +467,3 @@ const BUILTIN_FRONTING_SNI_ALLOWLIST: &[&str] = &[
     "incapdns.net",
     "imperva.com",
 ];
-

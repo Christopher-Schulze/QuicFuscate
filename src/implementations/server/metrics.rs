@@ -521,6 +521,47 @@ impl Metrics {
             self.fec_packets_recovered.load(Ordering::Relaxed)
         ));
 
+        // Allocation and pool pressure
+        out.push_str(
+            "# HELP quicfuscate_mem_pool_allocations_total Process-wide memory-pool allocation outcomes\n",
+        );
+        out.push_str("# TYPE quicfuscate_mem_pool_allocations_total counter\n");
+        for (source, value) in [
+            ("thread_local", crate::telemetry::MEM_POOL_HITS_TLS.get()),
+            ("shared_queue", crate::telemetry::MEM_POOL_HITS_QUEUE.get()),
+            ("grow", crate::telemetry::MEM_POOL_ALLOC_GROW.get()),
+            ("ephemeral", crate::telemetry::MEM_POOL_ALLOC_EPHEMERAL.get()),
+        ] {
+            out.push_str(&format!(
+                "quicfuscate_mem_pool_allocations_total{{source=\"{source}\"}} {value}\n"
+            ));
+        }
+        out.push('\n');
+        out.push_str(
+            "# HELP quicfuscate_body_pool_allocations_total Process-wide HTTP body-pool allocations\n",
+        );
+        out.push_str("# TYPE quicfuscate_body_pool_allocations_total counter\n");
+        out.push_str(&format!(
+            "quicfuscate_body_pool_allocations_total {}\n\n",
+            crate::telemetry::BODY_POOL_ALLOCS.get()
+        ));
+        out.push_str(
+            "# HELP quicfuscate_mem_pool_in_use Current process-wide memory-pool blocks in use\n",
+        );
+        out.push_str("# TYPE quicfuscate_mem_pool_in_use gauge\n");
+        out.push_str(&format!(
+            "quicfuscate_mem_pool_in_use {}\n\n",
+            crate::telemetry::MEM_POOL_IN_USE.load(Ordering::Relaxed)
+        ));
+        out.push_str(
+            "# HELP quicfuscate_mem_pool_usage_bytes Current process-wide memory-pool bytes in use\n",
+        );
+        out.push_str("# TYPE quicfuscate_mem_pool_usage_bytes gauge\n");
+        out.push_str(&format!(
+            "quicfuscate_mem_pool_usage_bytes {}\n\n",
+            crate::telemetry::MEM_POOL_USAGE_BYTES.load(Ordering::Relaxed)
+        ));
+
         // Errors
         out.push_str("# HELP quicfuscate_auth_failed_total Authentication failures\n");
         out.push_str("# TYPE quicfuscate_auth_failed_total counter\n");
@@ -842,6 +883,38 @@ mod tests {
         assert!(metrics.fec_packets_encoded.load(Ordering::Relaxed) >= emitted_before + 2);
         assert!(metrics.fec_packets_decoded.load(Ordering::Relaxed) >= decoded_before + 2);
         assert!(metrics.fec_packets_recovered.load(Ordering::Relaxed) >= recovered_before + 2);
+    }
+
+    #[test]
+    fn allocation_metrics_project_real_process_producers() {
+        let metrics = Metrics::new();
+        let tls_before = crate::telemetry::MEM_POOL_HITS_TLS.get();
+        let ephemeral_before = crate::telemetry::MEM_POOL_ALLOC_EPHEMERAL.get();
+        let body_before = crate::telemetry::BODY_POOL_ALLOCS.get();
+
+        crate::telemetry::MEM_POOL_HITS_TLS.inc();
+        crate::telemetry::MEM_POOL_ALLOC_EPHEMERAL.inc();
+        crate::telemetry::BODY_POOL_ALLOCS.inc();
+
+        let output = metrics.export();
+        let exported_value = |metric: &str| {
+            output
+                .lines()
+                .find_map(|line| line.strip_prefix(metric))
+                .and_then(|value| value.trim().parse::<u64>().ok())
+                .unwrap_or_default()
+        };
+        assert!(
+            exported_value("quicfuscate_mem_pool_allocations_total{source=\"thread_local\"}")
+                >= tls_before + 1
+        );
+        assert!(
+            exported_value("quicfuscate_mem_pool_allocations_total{source=\"ephemeral\"}")
+                >= ephemeral_before + 1
+        );
+        assert!(exported_value("quicfuscate_body_pool_allocations_total") >= body_before + 1);
+        assert!(output.contains("quicfuscate_mem_pool_in_use "));
+        assert!(output.contains("quicfuscate_mem_pool_usage_bytes "));
     }
 
     #[test]
