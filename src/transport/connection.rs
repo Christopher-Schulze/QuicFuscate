@@ -6509,10 +6509,13 @@ mod tests {
         pair.client.recovery.cwnd = 64 * 1024;
         pair.client.recovery.bytes_in_flight = 0;
         let mut packet = [0u8; 1600];
+        let bytes_in_flight_before = pair.client.recovery.bytes_in_flight;
 
-        let (packet_len, _) = pair.client.send(&mut packet).expect("PMTU probe must serialize");
+        let (packet_len, info) = pair.client.send(&mut packet).expect("PMTU probe must serialize");
 
         assert_eq!(packet_len, 1500);
+        assert!(info.congestion_controlled);
+        assert!(pair.client.recovery.bytes_in_flight > bytes_in_flight_before);
         assert!(pair.client.pmtu_probe_pn.is_some());
     }
 
