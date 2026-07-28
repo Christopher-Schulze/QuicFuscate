@@ -21,6 +21,7 @@ ARTIFACT_DIR="${QF_E2E_ARTIFACT_DIR:-/tmp/quicfuscate-todo523-$$}"
 THROUGHPUT_PROBE="$SCRIPT_DIR/utils/tcp-throughput-probe.py"
 THROUGHPUT_TRIAL_SECONDS="${QF_E2E_THROUGHPUT_TRIAL_SECONDS:-10}"
 THROUGHPUT_RATE_BPS="${QF_E2E_THROUGHPUT_RATE_BPS:-15000000}"
+EXTERNAL_EGRESS_CAPTURE="${QF_E2E_EXTERNAL_EGRESS_CAPTURE:-0}"
 
 SERVER_NS="qf523s"
 CLIENT_NS=("qf523c1" "qf523c2" "qf523c3")
@@ -39,6 +40,7 @@ BLACK_HOLE_FILTER_ACTIVE=0
 
 PHASE_PIDS=()
 CAPTURE_PIDS=()
+EGRESS_CAPTURE_PID=""
 
 log() { printf '[TODO-523] %s\n' "$*"; }
 fail() {
@@ -112,6 +114,7 @@ prepare_admin_socket() {
 
 cleanup() {
   set +e
+  stop_client_egress_capture
   stop_phase_processes
   remove_client_large_datagram_black_hole
   ip netns del "$SERVER_NS" 2>/dev/null
@@ -420,6 +423,47 @@ start_capture() {
   ip netns exec "$namespace" timeout 5 tcpdump -l -nn -Q in -i "$TUN_NAME" "$filter" \
     >"$ARTIFACT_DIR/$name.log" 2>&1 &
   CAPTURE_PIDS+=("$!")
+}
+
+start_client_egress_capture() {
+  local phase="$1"
+  [[ "$EXTERNAL_EGRESS_CAPTURE" == "1" ]] || return 0
+  [[ -z "$EGRESS_CAPTURE_PID" ]] || fail 'client egress capture already active'
+
+  tcpdump -tt -n -l -Q in -i "${HOST_VETH[1]}" \
+    "udp and src host ${CLIENT_UNDERLAY[0]} and dst host $SERVER_UNDERLAY and dst port 4433" \
+    >"$ARTIFACT_DIR/egress-$phase.log" 2>&1 &
+  EGRESS_CAPTURE_PID="$!"
+  sleep 0.2
+  kill -0 "$EGRESS_CAPTURE_PID" 2>/dev/null || fail 'client egress capture did not start'
+}
+
+stop_client_egress_capture() {
+  [[ -n "$EGRESS_CAPTURE_PID" ]] || return 0
+  kill -INT "$EGRESS_CAPTURE_PID" 2>/dev/null || true
+  wait "$EGRESS_CAPTURE_PID" 2>/dev/null || true
+  EGRESS_CAPTURE_PID=""
+}
+
+summarize_client_egress_capture() {
+  local phase="$1"
+  [[ "$EXTERNAL_EGRESS_CAPTURE" == "1" ]] || return 0
+
+  python3 -c \
+    'import pathlib,re,sys; source=pathlib.Path(sys.argv[1]); target=pathlib.Path(sys.argv[2]); timestamps=[]; pattern=re.compile(r"^(\d+(?:\.\d+)?) IP ");
+for line in source.read_text(encoding="utf-8", errors="replace").splitlines():
+    match=pattern.match(line)
+    if match: timestamps.append(float(match.group(1)))
+gaps=[round((right-left)*1_000_000) for left,right in zip(timestamps,timestamps[1:])];
+assert len(timestamps) >= 2, (source, len(timestamps));
+summary=(f"External client-1 UDP egress packets: {len(timestamps)}\n"
+         f"External client-1 UDP egress max gap us: {max(gaps)}\n"
+         f"External client-1 UDP egress gaps ge 10ms: {sum(gap >= 10_000 for gap in gaps)}\n"
+         f"External client-1 UDP egress gaps ge 50ms: {sum(gap >= 50_000 for gap in gaps)}\n"
+         f"External client-1 UDP egress gaps ge 100ms: {sum(gap >= 100_000 for gap in gaps)}\n");
+target.write_text(summary, encoding="utf-8"); print(summary, end="")' \
+    "$ARTIFACT_DIR/egress-$phase.log" "$ARTIFACT_DIR/egress-$phase-summary.txt" \
+    || fail "external client egress capture did not retain enough packets in phase $phase"
 }
 
 finish_captures() {
@@ -748,6 +792,8 @@ main() {
     || ((THROUGHPUT_RATE_BPS < 1000000)); then
     fail 'QF_E2E_THROUGHPUT_RATE_BPS must be an integer of at least 1000000'
   fi
+  [[ "$EXTERNAL_EGRESS_CAPTURE" == "0" || "$EXTERNAL_EGRESS_CAPTURE" == "1" ]] || \
+    fail 'QF_E2E_EXTERNAL_EGRESS_CAPTURE must be 0 or 1'
   [[ -r "$CA" && -r "$CA_KEY" ]] || fail 'CA certificate or key fixture is unreadable'
 
   exec 9>"$LOCK_FILE"
@@ -767,7 +813,10 @@ main() {
   prove_icmp_boundaries
   prove_routing_metrics default
   prove_linux_dual_stack_state
+  start_client_egress_capture default
   prove_ipv6_throughput default
+  stop_client_egress_capture
+  summarize_client_egress_capture default
   prove_backpressure_quiescence default
 
   log 'phase 2: explicit client-unicast opt-in'
@@ -776,7 +825,10 @@ main() {
   prove_dplpmtud_ethernet_1500
   prove_simultaneous_dual_stack opt-in
   prove_client_unicast_opt_in
+  start_client_egress_capture opt-in
   prove_ipv6_throughput opt-in
+  stop_client_egress_capture
+  summarize_client_egress_capture opt-in
   prove_pmtu_efficiency_gain
   prove_dplpmtud_black_hole_recovery
   prove_backpressure_quiescence opt-in
