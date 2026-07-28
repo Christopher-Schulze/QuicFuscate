@@ -35,7 +35,8 @@ BRIDGE="qf535br"
 SERVER_HOST_VETH="qf535hs"
 CLIENT_HOST_VETH=("qf535h1" "qf535h2")
 TUN_NAME="qtun0"
-ADMIN_SOCKET="$ARTIFACT_DIR/admin.sock"
+ADMIN_SOCKET="${QF_E2E_ADMIN_SOCKET:-/tmp/qf535-${$}.sock}"
+ADMIN_SOCKET_OWNED=0
 STACK_PIDS=()
 UDP_RECEIVER_PID=""
 
@@ -81,7 +82,16 @@ stop_stack() {
     wait "$pid" 2>/dev/null || true
   done
   STACK_PIDS=()
-  rm -f "$ADMIN_SOCKET"
+  if [[ "$ADMIN_SOCKET_OWNED" == "1" ]]; then
+    rm -f -- "$ADMIN_SOCKET"
+    ADMIN_SOCKET_OWNED=0
+  fi
+}
+
+prepare_admin_socket() {
+  [[ "$ADMIN_SOCKET" == /* ]] || fail 'QF_E2E_ADMIN_SOCKET must be an absolute path'
+  ((${#ADMIN_SOCKET} <= 100)) || fail 'admin socket path exceeds the Unix-domain socket limit'
+  [[ ! -e "$ADMIN_SOCKET" ]] || fail "refusing to replace existing admin socket: $ADMIN_SOCKET"
 }
 
 cleanup() {
@@ -183,6 +193,8 @@ start_stack() {
   shift 2
   local algorithms=("$@")
   stop_stack
+  [[ ! -e "$ADMIN_SOCKET" ]] || fail "admin socket appeared before stack start: $ADMIN_SOCKET"
+  ADMIN_SOCKET_OWNED=1
 
   local config="$ARTIFACT_DIR/config-$phase.toml"
   printf '[transport]\nmtu = 1280\nmax_udp_payload = 1280\ndisable_pmtud = false\npmtu_min_mtu = 1280\npmtu_max_mtu = 1280\n' \
@@ -459,6 +471,7 @@ main() {
 
   exec 9>"$LOCK_FILE"
   flock -w "$LOCK_TIMEOUT" 9 || fail "could not acquire E2E lock within ${LOCK_TIMEOUT}s"
+  prepare_admin_socket
   setup_topology
 
   log 'phase 1: CUBIC/Reno shared-bottleneck fairness'
