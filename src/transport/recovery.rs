@@ -602,8 +602,7 @@ impl Recovery {
                         _ => ack_delay.min(K_MAX_ACK_DELAY),
                     };
                     let mut adjusted = latest;
-                    if self.min_rtt != Duration::MAX
-                        && latest >= self.min_rtt.saturating_add(delay)
+                    if self.min_rtt != Duration::MAX && latest >= self.min_rtt.saturating_add(delay)
                     {
                         adjusted = latest.saturating_sub(delay);
                     }
@@ -1030,11 +1029,12 @@ mod tests {
             false,
             t0 + Duration::from_millis(45),
         );
-        assert_eq!(outcome.lost, vec![(0, 1200), (1, 1200)]); // packet threshold only
+        // Packet threshold only: pn 0 and pn 1 are declared lost here.
         // The ACK's own 5 ms sample updates SRTT to 22.5 ms first (RFC order:
         // sample before loss detection), so loss_delay = 9/8*22.5 = 25.3125 ms.
         // loss_time armed for pn 2: sent at t0+20 ms -> deadline t0+45.3125 ms.
         // The armed loss timer takes precedence over any PTO (RFC 9002 §6.2.1).
+        assert_eq!(outcome.lost, vec![(0, 1200), (1, 1200)]);
         let deadline = rec.loss_detection_timeout(true, false, true);
         assert_eq!(deadline, Some(t0 + Duration::from_nanos(45_312_500)));
     }
@@ -1183,15 +1183,7 @@ mod tests {
         // Pre-confirmation: Application space must not arm a PTO (RFC 9002 §6.2.1).
         assert_eq!(rec.loss_detection_timeout(false, false, true), None);
         // Initial space arms without max_ack_delay: 333 + 666 = 999 ms.
-        rec.on_packet_sent_in_space(
-            PacketSpace::Initial,
-            0,
-            1200,
-            true,
-            true,
-            Some((0, 300)),
-            t0,
-        );
+        rec.on_packet_sent_in_space(PacketSpace::Initial, 0, 1200, true, true, Some((0, 300)), t0);
         let deadline = rec.loss_detection_timeout(false, false, true);
         assert_eq!(deadline, Some(t0 + Duration::from_millis(999)));
     }

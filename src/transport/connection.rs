@@ -3190,11 +3190,7 @@ impl Connection {
             // congestion controller (they still count as in flight). The probe
             // PING is written below in the assembly; stream/datagram payloads
             // stay gated.
-            if self
-                .pending_probe_spaces
-                .iter()
-                .any(|s| *s == recovery::PacketSpace::Application)
-            {
+            if self.pending_probe_spaces.iter().any(|s| *s == recovery::PacketSpace::Application) {
                 ack_bypass = true;
             }
         }
@@ -3430,10 +3426,7 @@ impl Connection {
             || self.has_pending_application_ack()
             || self.has_sendable_stream_frame()
             || !self.dgram_send_queue.is_empty()
-            || self
-                .pending_probe_spaces
-                .iter()
-                .any(|s| *s == recovery::PacketSpace::Application);
+            || self.pending_probe_spaces.iter().any(|s| *s == recovery::PacketSpace::Application);
         if !has_pending_data && !ack_bypass && !dedicated_pmtu_probe {
             log::debug!("send_with_datagram_overhead: early Done has_pending_data=false dgram_queue_len={} pending_control={} app_ack={} sendable_stream={} probe_spaces={} ack_bypass={} pmtu_probe={}",
                 self.dgram_send_queue.len(), self.pending_control.is_empty(), self.has_pending_application_ack(), self.has_sendable_stream_frame(), self.pending_probe_spaces.iter().any(|s| *s == recovery::PacketSpace::Application), ack_bypass, dedicated_pmtu_probe);
@@ -4122,9 +4115,11 @@ impl Connection {
         // PTO probes for Initial/Handshake are flushed before 1-RTT data; a
         // non-zero outer datagram overhead (FEC) would leave the handshake
         // probe with too little buffer to reach MIN_CLIENT_INITIAL_LEN.
-        if self.pending_probe_spaces.iter().any(|s| {
-            *s == recovery::PacketSpace::Initial || *s == recovery::PacketSpace::Handshake
-        }) {
+        if self
+            .pending_probe_spaces
+            .iter()
+            .any(|s| *s == recovery::PacketSpace::Initial || *s == recovery::PacketSpace::Handshake)
+        {
             return Ok(false);
         }
         Ok(!self.crypto.read().has_pending_handshake_send())
@@ -4891,7 +4886,6 @@ impl Connection {
     pub fn available_dcids(&self) -> usize {
         0
     }
-
 }
 
 #[cfg(any(test, feature = "benches"))]
@@ -5108,9 +5102,7 @@ mod tests {
         assert!(client.version_negotiation.reacted_to_vn);
         assert_ne!(client.scid, original_scid);
         assert_ne!(client.initial_dcid, original_dcid);
-        assert!(
-            client.recovery.tracked_sent_pns(recovery::PacketSpace::Application).is_empty()
-        );
+        assert!(client.recovery.tracked_sent_pns(recovery::PacketSpace::Application).is_empty());
         assert_eq!(client.bytes_in_flight, 0);
 
         let selected_scid = client.scid;
@@ -5917,15 +5909,11 @@ mod tests {
         // 1. Recovery timeout fires the PTO: an Application probe is queued,
         //    nothing is declared lost (RFC 9002 §6.2.4).
         pair.client.on_recovery_timeout(Instant::now());
-        assert!(
-            pair.client.pending_probe_spaces.contains(&recovery::PacketSpace::Application)
-        );
-        assert!(
-            pair.client.recovery.tracks_sent_packet(
-                recovery::PacketSpace::Application,
-                packet_number
-            )
-        );
+        assert!(pair.client.pending_probe_spaces.contains(&recovery::PacketSpace::Application));
+        assert!(pair
+            .client
+            .recovery
+            .tracks_sent_packet(recovery::PacketSpace::Application, packet_number));
 
         // 2. The probe (a later packet) is sent and acknowledged; the time
         //    threshold now declares the aged tail packet lost.
@@ -5950,10 +5938,10 @@ mod tests {
         );
         pair.client.apply_ack_outcome(recovery::PacketSpace::Application, outcome, now);
 
-        assert!(!pair.client.recovery.tracks_sent_packet(
-            recovery::PacketSpace::Application,
-            packet_number
-        ));
+        assert!(!pair
+            .client
+            .recovery
+            .tracks_sent_packet(recovery::PacketSpace::Application, packet_number));
         assert_eq!(pair.client.stream_retransmit_queue.len(), 1);
         assert!(pair.client.lost_stream_transmission_by_pn.contains_key(&packet_number));
     }
@@ -5983,16 +5971,12 @@ mod tests {
 
         pair.client.on_recovery_timeout(Instant::now());
 
-        assert!(
-            pair.client.recovery.tracks_sent_packet(
-                recovery::PacketSpace::Application,
-                packet_number
-            )
-        );
+        assert!(pair
+            .client
+            .recovery
+            .tracks_sent_packet(recovery::PacketSpace::Application, packet_number));
         assert_eq!(pair.client.recovery.bytes_in_flight, bytes_in_flight_before);
-        assert!(
-            pair.client.pending_probe_spaces.contains(&recovery::PacketSpace::Application)
-        );
+        assert!(pair.client.pending_probe_spaces.contains(&recovery::PacketSpace::Application));
     }
 
     #[test]
@@ -6039,22 +6023,14 @@ mod tests {
 
         // A PTO firing queues the probe; the next send emits it despite the gate.
         pair.client.on_recovery_timeout(Instant::now());
-        let tracked_before = pair
-            .client
-            .recovery
-            .tracked_sent_pns(recovery::PacketSpace::Application)
-            .len();
+        let tracked_before =
+            pair.client.recovery.tracked_sent_pns(recovery::PacketSpace::Application).len();
         let (probe_len, probe_info) = pair.client.send(&mut packet).expect("probe must emit");
         assert!(probe_len > 0);
         assert!(probe_info.congestion_controlled); // probes count as in flight (§7.5)
-        assert!(
-            !pair.client.pending_probe_spaces.contains(&recovery::PacketSpace::Application)
-        );
-        let tracked_after = pair
-            .client
-            .recovery
-            .tracked_sent_pns(recovery::PacketSpace::Application)
-            .len();
+        assert!(!pair.client.pending_probe_spaces.contains(&recovery::PacketSpace::Application));
+        let tracked_after =
+            pair.client.recovery.tracked_sent_pns(recovery::PacketSpace::Application).len();
         assert_eq!(tracked_after, tracked_before + 1);
     }
 

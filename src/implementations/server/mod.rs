@@ -2885,12 +2885,7 @@ impl PendingTunDownlinks {
         if self.bytes.saturating_add(packet.len()) > self.max_bytes {
             return Err(PendingTunDownlinkReject::Bytes);
         }
-        if self
-            .entries
-            .iter()
-            .filter(|entry| entry.target == target)
-            .count()
-            >= self.max_per_target
+        if self.entries.iter().filter(|entry| entry.target == target).count() >= self.max_per_target
         {
             return Err(PendingTunDownlinkReject::PerTarget);
         }
@@ -4332,7 +4327,11 @@ fn flush_tun_downlink_queue(
                 }
                 Ok(written) => written,
                 Err(error) => {
-                    log::warn!("TUN to socket send to {}: connection.send failed: {:?}", target, error);
+                    log::warn!(
+                        "TUN to socket send to {}: connection.send failed: {:?}",
+                        target,
+                        error
+                    );
                     break;
                 }
             };
@@ -4460,11 +4459,11 @@ fn process_server_tun_packet(
         match send_result {
             Ok(()) => queued.push(target),
             Err(crate::error::ConnectionError::DgramQueueFull) => {
-                match live
-                    .live_state
-                    .pending_tun_downlinks
-                    .enqueue(target, packet.to_vec(), Instant::now())
-                {
+                match live.live_state.pending_tun_downlinks.enqueue(
+                    target,
+                    packet.to_vec(),
+                    Instant::now(),
+                ) {
                     Ok(()) => {
                         metrics.record_tun_downlink_backpressure_enqueued();
                         metrics.set_tun_downlink_backpressure_pending(
@@ -5855,37 +5854,43 @@ impl ServerRuntime {
                             crate::interface::TUN_PACKET_QUEUE_CAPACITY,
                         );
                         let tun_for_reader = tun_arc.clone();
-                        let _handle = std::thread::Builder::new().name("tun-reader".to_string()).spawn(move || {
-                            loop {
-                            match tun_for_reader.read_block() {
-                                Ok((block, len)) if len > 0 => {
-                                    let mut v = vec![0u8; len];
-                                    v.copy_from_slice(&block[..len]);
-                                    log::debug!(
-                                        "TUN reader: read {}B proto={:#x} dst={}",
-                                        len,
-                                        v[0] >> 4,
-                                        if v[0] >> 4 == 4 && v.len() >= 20 {
-                                            format!("{}.{}.{}.{}",
-                                                v[16], v[17], v[18], v[19])
-                                        } else { String::from("?") }
-                                    );
-                                    if tx.send(v).is_err() {
-                                        log::warn!("TUN reader: channel closed, exiting thread");
+                        let _handle = std::thread::Builder::new()
+                            .name("tun-reader".to_string())
+                            .spawn(move || loop {
+                                match tun_for_reader.read_block() {
+                                    Ok((block, len)) if len > 0 => {
+                                        let mut v = vec![0u8; len];
+                                        v.copy_from_slice(&block[..len]);
+                                        log::debug!(
+                                            "TUN reader: read {}B proto={:#x} dst={}",
+                                            len,
+                                            v[0] >> 4,
+                                            if v[0] >> 4 == 4 && v.len() >= 20 {
+                                                format!("{}.{}.{}.{}", v[16], v[17], v[18], v[19])
+                                            } else {
+                                                String::from("?")
+                                            }
+                                        );
+                                        if tx.send(v).is_err() {
+                                            log::warn!(
+                                                "TUN reader: channel closed, exiting thread"
+                                            );
+                                            break;
+                                        }
+                                    }
+                                    Ok(_) => {}
+                                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                        std::thread::sleep(Duration::from_millis(1));
+                                    }
+                                    Err(e) => {
+                                        log::warn!(
+                                            "TUN reader: fatal error {:?}, exiting thread",
+                                            e
+                                        );
                                         break;
                                     }
                                 }
-                                Ok(_) => {}
-                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                    std::thread::sleep(Duration::from_millis(1));
-                                }
-                                Err(e) => {
-                                    log::warn!("TUN reader: fatal error {:?}, exiting thread", e);
-                                    break;
-                                }
-                            }
-                            }
-                        });
+                            });
                         log::info!("Server TUN reader thread spawned for bidirectional forwarding");
                         (Some(tun_arc), Some(rx), routing)
                     }
@@ -7009,19 +7014,15 @@ mod tests {
         let supported_versions = [crate::transport::PROTOCOL_VERSION];
 
         assert!(crate::fec::wire::is_framed(datagram));
-        assert!(
-            crate::transport::packet::server_version_negotiation_response(
-                datagram,
-                &supported_versions,
-            )
-            .expect("FEC bytes can resemble an unsupported long header")
-            .is_some()
-        );
-        assert!(
-            stateless_version_negotiation_response(datagram, &supported_versions)
-                .expect("FEC envelope must bypass stateless version negotiation")
-                .is_none()
-        );
+        assert!(crate::transport::packet::server_version_negotiation_response(
+            datagram,
+            &supported_versions,
+        )
+        .expect("FEC bytes can resemble an unsupported long header")
+        .is_some());
+        assert!(stateless_version_negotiation_response(datagram, &supported_versions)
+            .expect("FEC envelope must bypass stateless version negotiation")
+            .is_none());
     }
 
     #[test]
@@ -7118,9 +7119,8 @@ mod tests {
         let assigned = AssignedClientIps { ipv4: client_ip, ipv6: None };
         forwarding_policy.assign_client("client", assigned);
         let metrics = Metrics::new();
-        let responses = Arc::new(std::sync::Mutex::new(crate::core::MasqueDownlinkQueue::new(
-            8, 4096,
-        )));
+        let responses =
+            Arc::new(std::sync::Mutex::new(crate::core::MasqueDownlinkQueue::new(8, 4096)));
         let packet = test_ipv4_udp_packet(client_ip, server_ip, 40_000, 53, &[1]);
 
         let route = allow_client_uplink(

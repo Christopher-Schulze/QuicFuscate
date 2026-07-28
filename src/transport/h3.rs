@@ -2692,16 +2692,9 @@ mod tests {
             super::h3::Connection::with_transport(&mut server, &server_h3_cfg).unwrap();
 
         let sid = client_h3
-            .connect_udp_with_headers(
-                &mut client,
-                "proxy.test",
-                "target.test:443",
-                &[],
-            )
+            .connect_udp_with_headers(&mut client, "proxy.test", "target.test:443", &[])
             .expect("connect_udp");
-        client_h3
-            .enable_masque_datagram(&mut client, sid)
-            .expect("enable_masque_datagram");
+        client_h3.enable_masque_datagram(&mut client, sid).expect("enable_masque_datagram");
         client_h3
             .register_datagram_context(&mut client, sid, 1, 0)
             .expect("register_datagram_context");
@@ -2732,10 +2725,10 @@ mod tests {
         let BenchConnectionPair { mut client, mut server, recv_info } =
             bench_paired_1rtt_connections();
 
-        let _client_h3 = Connection::with_transport(&mut client, &Config::new().unwrap())
-            .expect("client h3");
-        let mut server_h3 = Connection::with_transport(&mut server, &Config::new().unwrap())
-            .expect("server h3");
+        let _client_h3 =
+            Connection::with_transport(&mut client, &Config::new().unwrap()).expect("client h3");
+        let mut server_h3 =
+            Connection::with_transport(&mut server, &Config::new().unwrap()).expect("server h3");
 
         const COVER_SID: u64 = 248;
         server_h3.ignore_stream(COVER_SID);

@@ -1253,7 +1253,11 @@ impl QuicFuscateConnection {
                         terminal_receive_error = Some(error);
                         break;
                     }
-                    debug!("transport::recv failed (possible probe) len={}: {:?}", data.len(), error);
+                    debug!(
+                        "transport::recv failed (possible probe) len={}: {:?}",
+                        data.len(),
+                        error
+                    );
                     self.stealth_manager.handle_fallback(data, self.peer_addr);
                 }
             } else if let Some(slice) = packet.payload_slice() {
@@ -1278,7 +1282,11 @@ impl QuicFuscateConnection {
                         self.optimization_manager.free_block(buf);
                         break;
                     }
-                    debug!("transport::recv failed (possible probe) len={}: {:?}", data.len(), error);
+                    debug!(
+                        "transport::recv failed (possible probe) len={}: {:?}",
+                        data.len(),
+                        error
+                    );
                     self.stealth_manager.handle_fallback(data, self.peer_addr);
                 }
                 self.optimization_manager.free_block(buf);
@@ -1355,11 +1363,7 @@ impl QuicFuscateConnection {
         // RFC 9002 §6.1.2/§6.2.1: event loops drive the recovery timer.  When the
         // deadline has passed, run loss detection (time-threshold or PTO probe)
         // before the pacing/stealth scheduler so probes never wait on shaping.
-        if self
-            .conn
-            .recovery_deadline()
-            .is_some_and(|recovery_deadline| now >= recovery_deadline)
-        {
+        if self.conn.recovery_deadline().is_some_and(|recovery_deadline| now >= recovery_deadline) {
             self.conn.on_recovery_timeout(now);
             // Recovery takes precedence over pacing/stealth release; force
             // an immediate send attempt so PTO probes can emit.
@@ -1588,8 +1592,12 @@ impl QuicFuscateConnection {
         // Pop the first packet from the buffer to send it now.
         if let Some(packet) = self.outgoing_fec_packets.pop_front() {
             let len = packet.write_to(buf)?;
-            debug!("connection.send: emitting packet len={} dgram_queue_after={} remaining_fec={}",
-                len, self.conn.dgram_send_queue_len(), self.outgoing_fec_packets.len());
+            debug!(
+                "connection.send: emitting packet len={} dgram_queue_after={} remaining_fec={}",
+                len,
+                self.conn.dgram_send_queue_len(),
+                self.outgoing_fec_packets.len()
+            );
             if self.fec.telemetry_enabled() {
                 let (systematic, source_payload_bytes) = packet.telemetry_shape();
                 self.fec.observe_wire_send(systematic, source_payload_bytes, len);
@@ -1844,7 +1852,11 @@ impl QuicFuscateConnection {
             || payload.len() > self.effective_tunnel_mtu()
             || !matches!(payload.first().map(|byte| byte >> 4), Some(4 | 6))
         {
-            debug!("send_masque_downlink: rejected payload len={} first={:?}", payload.len(), payload.first());
+            debug!(
+                "send_masque_downlink: rejected payload len={} first={:?}",
+                payload.len(),
+                payload.first()
+            );
             return Err(crate::error::ConnectionError::BufferTooShort);
         }
 
@@ -1856,7 +1868,12 @@ impl QuicFuscateConnection {
                 if let Some(ref mut h3) = self.h3_conn {
                     match h3.send_masque_datagram(&mut self.conn, sid, payload) {
                         Ok(()) => {
-                            debug!("MASQUE downlink TX: sid={} {}B dgram_queue={}", sid, payload.len(), self.conn.dgram_send_queue_len());
+                            debug!(
+                                "MASQUE downlink TX: sid={} {}B dgram_queue={}",
+                                sid,
+                                payload.len(),
+                                self.conn.dgram_send_queue_len()
+                            );
                             return Ok(());
                         }
                         Err(crate::transport::h3::Error::DgramQueueFull) => {
@@ -2199,7 +2216,8 @@ mod tests {
 
     fn test_connection() -> QuicFuscateConnection {
         let pair = crate::transport::connection::bench_paired_1rtt_connections();
-        let optimization_manager = Arc::new(OptimizationManager::from_cfg(OptimizeConfig::default()));
+        let optimization_manager =
+            Arc::new(OptimizationManager::from_cfg(OptimizeConfig::default()));
         let stealth_manager = Arc::new(StealthManager::new(
             StealthConfig::default(),
             Arc::clone(&optimization_manager),
@@ -2324,10 +2342,7 @@ mod tests {
         assert_eq!(queue.enqueue(vec![4]), Err(MasqueDownlinkQueueReject::PacketCapacity));
 
         assert_eq!(queue.pop_front(), Some(vec![1, 2]));
-        assert_eq!(
-            queue.enqueue(vec![4, 5, 6, 7]),
-            Err(MasqueDownlinkQueueReject::ByteCapacity)
-        );
+        assert_eq!(queue.enqueue(vec![4, 5, 6, 7]), Err(MasqueDownlinkQueueReject::ByteCapacity));
         assert_eq!(queue.pop_front(), Some(vec![3]));
         assert_eq!(queue.len(), 0);
         assert_eq!(queue.bytes(), 0);
@@ -2413,7 +2428,8 @@ mod tests {
             Vec::with_capacity(wire::SOURCE_LENGTH_LEN + quic_payload.len());
         protected_payload.extend_from_slice(&(quic_payload.len() as u16).to_be_bytes());
         protected_payload.extend_from_slice(&quic_payload);
-        let mut source_symbol = Vec::with_capacity(wire::SOURCE_LENGTH_LEN + protected_payload.len());
+        let mut source_symbol =
+            Vec::with_capacity(wire::SOURCE_LENGTH_LEN + protected_payload.len());
         source_symbol.extend_from_slice(&(protected_payload.len() as u16).to_be_bytes());
         source_symbol.extend_from_slice(&protected_payload);
         let meta = WirePacketMeta {

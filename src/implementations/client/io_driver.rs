@@ -599,7 +599,14 @@ impl IoDriver {
         {
             if let Some((mut uring_recv, async_efd)) = Self::try_init_uring_recv(&socket, &conn) {
                 return self
-                    .run_inbound_uring(tun, conn, socket, handshake_event, &mut uring_recv, async_efd)
+                    .run_inbound_uring(
+                        tun,
+                        conn,
+                        socket,
+                        handshake_event,
+                        &mut uring_recv,
+                        async_efd,
+                    )
                     .await;
             }
         }
