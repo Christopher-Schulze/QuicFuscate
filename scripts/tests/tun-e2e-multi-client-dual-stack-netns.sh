@@ -20,6 +20,7 @@ LOCK_TIMEOUT="${QF_E2E_LOCK_TIMEOUT:-300}"
 ARTIFACT_DIR="${QF_E2E_ARTIFACT_DIR:-/tmp/quicfuscate-todo523-$$}"
 THROUGHPUT_PROBE="$SCRIPT_DIR/utils/tcp-throughput-probe.py"
 EGRESS_SUMMARIZER="$SCRIPT_DIR/utils/summarize-external-egress.py"
+UDP_SOCKET_EVIDENCE="$SCRIPT_DIR/utils/udp-socket-evidence.py"
 THROUGHPUT_TRIAL_SECONDS="${QF_E2E_THROUGHPUT_TRIAL_SECONDS:-10}"
 THROUGHPUT_RATE_BPS="${QF_E2E_THROUGHPUT_RATE_BPS:-15000000}"
 EXTERNAL_EGRESS_CAPTURE="${QF_E2E_EXTERNAL_EGRESS_CAPTURE:-0}"
@@ -668,9 +669,15 @@ prove_linux_dual_stack_state() {
 
 prove_ipv6_throughput() {
   local phase="$1"
-  local trial port server_pid
+  local trial port server_pid before_snapshot after_snapshot summary
   for trial in 1 2 3; do
     port=$((5524 + trial))
+    before_snapshot="$ARTIFACT_DIR/server-udp-$phase-$trial-before.json"
+    after_snapshot="$ARTIFACT_DIR/server-udp-$phase-$trial-after.json"
+    summary="$ARTIFACT_DIR/server-udp-$phase-$trial-summary.txt"
+    ip netns exec "$SERVER_NS" python3 "$UDP_SOCKET_EVIDENCE" snapshot \
+      --port 4433 --output "$before_snapshot" || \
+      fail "could not capture server UDP socket before IPv6 throughput trial $trial in phase $phase"
     ip netns exec "$SERVER_NS" timeout "$((THROUGHPUT_TRIAL_SECONDS + 20))" \
       python3 "$THROUGHPUT_PROBE" server \
       --bind fd00::1 --port "$port" --timeout "$((THROUGHPUT_TRIAL_SECONDS + 15))" \
@@ -683,11 +690,27 @@ prove_ipv6_throughput() {
       --duration "$THROUGHPUT_TRIAL_SECONDS" --rate-bps "$THROUGHPUT_RATE_BPS" \
       --timeout "$((THROUGHPUT_TRIAL_SECONDS + 15))" \
       --result "$ARTIFACT_DIR/tcp6-client-$phase-$trial.json"; then
+      ip netns exec "$SERVER_NS" python3 "$UDP_SOCKET_EVIDENCE" snapshot \
+        --port 4433 --output "$after_snapshot" || true
+      python3 "$UDP_SOCKET_EVIDENCE" verify \
+        --before "$before_snapshot" --after "$after_snapshot" --output "$summary" || true
       kill -TERM "$server_pid" 2>/dev/null || true
       wait "$server_pid" 2>/dev/null || true
       fail "IPv6 throughput trial $trial did not terminate successfully in phase $phase"
     fi
-    wait "$server_pid" || fail "IPv6 throughput receiver failed in phase $phase trial $trial"
+    if ! wait "$server_pid"; then
+      ip netns exec "$SERVER_NS" python3 "$UDP_SOCKET_EVIDENCE" snapshot \
+        --port 4433 --output "$after_snapshot" || true
+      python3 "$UDP_SOCKET_EVIDENCE" verify \
+        --before "$before_snapshot" --after "$after_snapshot" --output "$summary" || true
+      fail "IPv6 throughput receiver failed in phase $phase trial $trial"
+    fi
+    ip netns exec "$SERVER_NS" python3 "$UDP_SOCKET_EVIDENCE" snapshot \
+      --port 4433 --output "$after_snapshot" || \
+      fail "could not capture server UDP socket after IPv6 throughput trial $trial in phase $phase"
+    python3 "$UDP_SOCKET_EVIDENCE" verify \
+      --before "$before_snapshot" --after "$after_snapshot" --output "$summary" || \
+      fail "server UDP socket dropped datagrams during IPv6 throughput trial $trial in phase $phase"
   done
   python3 -c \
     'import json,pathlib,statistics,sys; duration=float(sys.argv[4]); trials=[json.load(open(path, encoding="utf-8")) for path in sys.argv[5:]]; receiver=[trial["receiver"] for trial in trials]; valid=all(trial["bytes_sent"] > 0 and trial["bytes_sent"] == item["bytes"] and trial["sha256"] == item["sha256"] and item["elapsed_seconds"] > 0 and trial["receiver_bits_per_second"] > 0 for trial,item in zip(trials,receiver)); valid=valid and all(duration * 0.95 <= trial["elapsed_seconds"] <= duration + 5 for trial in trials); assert valid, trials; values=[trial["receiver_bits_per_second"] for trial in trials]; median=statistics.median(values); minimum=min(values); summary=f"IPv6 receiver-verified TCP throughput ({sys.argv[1]}) trials: {values[0] / 1_000_000:.3f}, {values[1] / 1_000_000:.3f}, {values[2] / 1_000_000:.3f} Mbit/s; median: {median / 1_000_000:.3f} Mbit/s; minimum trial: {minimum / 1_000_000:.3f} Mbit/s"; pathlib.Path(sys.argv[2]).write_text(f"{median}\n", encoding="utf-8"); pathlib.Path(sys.argv[3]).write_text(f"{summary}\n", encoding="utf-8"); print(summary)' \
@@ -790,6 +813,7 @@ main() {
   [[ -x "$BINARY" ]] || fail "release binary not executable: $BINARY"
   [[ -r "$THROUGHPUT_PROBE" ]] || fail "TCP throughput probe is unreadable: $THROUGHPUT_PROBE"
   [[ -r "$EGRESS_SUMMARIZER" ]] || fail "external egress summarizer is unreadable: $EGRESS_SUMMARIZER"
+  [[ -r "$UDP_SOCKET_EVIDENCE" ]] || fail "UDP socket evidence helper is unreadable: $UDP_SOCKET_EVIDENCE"
   if [[ ! "$THROUGHPUT_TRIAL_SECONDS" =~ ^[0-9]+$ ]] \
     || ((THROUGHPUT_TRIAL_SECONDS < 5)); then
     fail 'QF_E2E_THROUGHPUT_TRIAL_SECONDS must be an integer of at least 5'
