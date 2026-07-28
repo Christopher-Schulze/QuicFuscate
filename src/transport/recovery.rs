@@ -618,10 +618,11 @@ impl Recovery {
             self.pto_count = 0;
         }
 
-        // 4. An acked packet inside the loss-run window invalidates persistent
-        //    congestion for that run: not every packet in the window was lost.
-        if let Some((start, latest)) = self.pc_window {
-            if newly_acked.iter().any(|p| p.sent_at >= start && p.sent_at <= latest) {
+        // 4. An acknowledged ack-eliciting packet at or after the loss-run
+        //    start breaks that run. It may have been acknowledged after the last
+        //    loss currently recorded, but a later loss must never bridge across it.
+        if let Some((start, _)) = self.pc_window {
+            if newly_acked.iter().any(|p| p.ack_eliciting && p.sent_at >= start) {
                 self.pc_window = None;
             }
         }
@@ -650,7 +651,7 @@ impl Recovery {
             let mut run_start: Option<Instant> = self.pc_window.map(|w| w.0);
             let mut prev_sent: Option<Instant> = self.pc_window.map(|w| w.1);
             let mut declared = false;
-            for pkt in &lost {
+            for pkt in lost.iter().filter(|pkt| pkt.ack_eliciting) {
                 if let Some(prev) = prev_sent {
                     let acked_between =
                         newly_acked.iter().any(|a| a.sent_at > prev && a.sent_at < pkt.sent_at);
@@ -1257,6 +1258,75 @@ mod tests {
         );
         assert!(!outcome.persistent_congestion);
         assert!(rec.cwnd > 2400);
+    }
+
+    #[test]
+    fn acknowledged_packet_after_prior_loss_window_breaks_persistent_congestion() {
+        let mut rec = Recovery::new(120_000, 1200);
+        rec.update_rtt(Duration::from_millis(10));
+        let t0 = Instant::now();
+        seed_space(&mut rec, PacketSpace::Application, 21, t0);
+
+        let first = rec.on_ack_received(
+            PacketSpace::Application,
+            &[(10, 11)],
+            Duration::ZERO,
+            true,
+            false,
+            t0 + Duration::from_millis(100),
+        );
+        assert!(!first.persistent_congestion);
+
+        let acknowledged_between_losses = rec.on_ack_received(
+            PacketSpace::Application,
+            &[(8, 9)],
+            Duration::ZERO,
+            true,
+            false,
+            t0 + Duration::from_millis(110),
+        );
+        assert!(!acknowledged_between_losses.persistent_congestion);
+
+        let outcome = rec.on_ack_received(
+            PacketSpace::Application,
+            &[(20, 21)],
+            Duration::ZERO,
+            true,
+            false,
+            t0 + Duration::from_millis(210),
+        );
+        assert!(!outcome.persistent_congestion);
+        assert!(rec.cwnd > 2400);
+    }
+
+    #[test]
+    fn ack_only_losses_cannot_establish_persistent_congestion() {
+        let mut rec = Recovery::new(120_000, 1200);
+        rec.update_rtt(Duration::from_millis(10));
+        let t0 = Instant::now();
+        let cwnd_before = rec.cwnd;
+        for pn in 0..21 {
+            rec.on_packet_sent_in_space(
+                PacketSpace::Application,
+                pn,
+                64,
+                false,
+                false,
+                None,
+                t0 + Duration::from_millis(pn * 10),
+            );
+        }
+
+        let outcome = rec.on_ack_received(
+            PacketSpace::Application,
+            &[(20, 21)],
+            Duration::ZERO,
+            true,
+            false,
+            t0 + Duration::from_millis(210),
+        );
+        assert!(!outcome.persistent_congestion);
+        assert_eq!(rec.cwnd, cwnd_before);
     }
 
     #[test]
