@@ -559,6 +559,41 @@ assert_metric_positive() {
   fi
 }
 
+assert_metric_zero() {
+  local phase="$1"
+  local metric="$2"
+  local line value
+  line="$(grep "^$metric " "$ARTIFACT_DIR/metrics-$phase.txt" || true)"
+  [[ -n "$line" ]] || fail "missing metric $metric"
+  value="${line##* }"
+  if [[ ! "$value" =~ ^[0-9]+$ ]] || ((value != 0)); then
+    fail "metric $metric must be zero: $value"
+  fi
+}
+
+assert_metric_family_zero() {
+  local phase="$1"
+  local metric="$2"
+  local lines line value
+  lines="$(grep "^$metric{" "$ARTIFACT_DIR/metrics-$phase.txt" || true)"
+  [[ -n "$lines" ]] || fail "missing metric family $metric"
+  while IFS= read -r line; do
+    value="${line##* }"
+    if [[ ! "$value" =~ ^[0-9]+$ ]] || ((value != 0)); then
+      fail "metric family $metric must be zero: $line"
+    fi
+  done <<<"$lines"
+}
+
+prove_backpressure_quiescence() {
+  local phase="$1"
+  fetch_metrics "throughput-$phase"
+  assert_metric_zero "throughput-$phase" quicfuscate_tun_downlink_backpressure_pending_packets
+  assert_metric_zero "throughput-$phase" quicfuscate_tun_downlink_backpressure_pending_bytes
+  assert_metric_family_zero "throughput-$phase" quicfuscate_tun_downlink_backpressure_events_total
+  assert_metric_family_zero "throughput-$phase" quicfuscate_masque_downlink_response_events_total
+}
+
 prove_routing_metrics() {
   local phase="$1"
   fetch_metrics "$phase"
@@ -733,6 +768,7 @@ main() {
   prove_routing_metrics default
   prove_linux_dual_stack_state
   prove_ipv6_throughput default
+  prove_backpressure_quiescence default
 
   log 'phase 2: explicit client-unicast opt-in'
   start_phase opt-in 1 1472 1500 1000 2000
@@ -743,6 +779,7 @@ main() {
   prove_ipv6_throughput opt-in
   prove_pmtu_efficiency_gain
   prove_dplpmtud_black_hole_recovery
+  prove_backpressure_quiescence opt-in
 
   log "PASS: complete evidence retained in $ARTIFACT_DIR"
 }
