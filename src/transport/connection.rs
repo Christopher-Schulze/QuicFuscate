@@ -1094,10 +1094,15 @@ impl Connection {
         if space == recovery::PacketSpace::Application {
             self.fec_acked_packets = self.fec_acked_packets.saturating_add(acked_packet_count);
         }
-        if outcome.persistent_congestion {
+        if let Some(evidence) = outcome.persistent_congestion_evidence {
             log::info!(
-                "persistent congestion established; cwnd collapsed to {}",
-                self.recovery.cwnd
+                "persistent congestion established; cwnd={} space={:?} largest_acked={} terminal_lost_pn={} period_ms={} run_ms={}",
+                self.recovery.cwnd,
+                space,
+                evidence.largest_acked,
+                evidence.terminal_lost_pn,
+                evidence.period.as_millis(),
+                evidence.run_end.saturating_duration_since(evidence.run_start).as_millis(),
             );
         }
     }

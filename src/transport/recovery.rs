@@ -101,6 +101,23 @@ pub struct AckOutcome {
     pub rtt_sample: Option<Duration>,
     /// True when persistent congestion was established (RFC 9002 §7.6).
     pub persistent_congestion: bool,
+    /// Provenance for a persistent-congestion decision.
+    pub persistent_congestion_evidence: Option<PersistentCongestionEvidence>,
+}
+
+/// Inputs that established a persistent-congestion loss run.
+#[derive(Debug, Clone, Copy)]
+pub struct PersistentCongestionEvidence {
+    /// Largest packet number acknowledged by the triggering ACK frame.
+    pub largest_acked: u64,
+    /// RFC 9002 persistent-congestion period used for the decision.
+    pub period: Duration,
+    /// Send time at the beginning of the uninterrupted loss run.
+    pub run_start: Instant,
+    /// Send time of the loss that completed the run.
+    pub run_end: Instant,
+    /// Packet number of the loss that completed the run.
+    pub terminal_lost_pn: u64,
 }
 
 /// Result of [`Recovery::on_loss_detection_timeout`].
@@ -650,7 +667,7 @@ impl Recovery {
             let period = self.persistent_congestion_period();
             let mut run_start: Option<Instant> = self.pc_window.map(|w| w.0);
             let mut prev_sent: Option<Instant> = self.pc_window.map(|w| w.1);
-            let mut declared = false;
+            let mut declaration = None;
             for pkt in lost.iter().filter(|pkt| pkt.ack_eliciting) {
                 if let Some(prev) = prev_sent {
                     let acked_between =
@@ -662,12 +679,19 @@ impl Recovery {
                 let start = *run_start.get_or_insert(pkt.sent_at);
                 prev_sent = Some(pkt.sent_at);
                 if pkt.sent_at.saturating_duration_since(start) >= period {
-                    declared = true;
+                    declaration = Some((start, pkt.sent_at, pkt.pn));
                     break;
                 }
             }
-            if declared {
+            if let Some((run_start, run_end, terminal_lost_pn)) = declaration {
                 outcome.persistent_congestion = true;
+                outcome.persistent_congestion_evidence = Some(PersistentCongestionEvidence {
+                    largest_acked: largest_in_frame,
+                    period,
+                    run_start,
+                    run_end,
+                    terminal_lost_pn,
+                });
                 self.pc_window = None;
                 let min_cwnd = 2 * self.mss;
                 self.cc.on_persistent_congestion(min_cwnd);
@@ -1235,6 +1259,14 @@ mod tests {
             t0 + Duration::from_millis(210),
         );
         assert!(outcome.persistent_congestion);
+        let evidence = outcome
+            .persistent_congestion_evidence
+            .expect("persistent congestion must retain its decision evidence");
+        assert_eq!(evidence.largest_acked, 20);
+        assert_eq!(evidence.terminal_lost_pn, 15);
+        assert_eq!(evidence.run_start, t0);
+        assert_eq!(evidence.run_end, t0 + Duration::from_millis(150));
+        assert_eq!(evidence.period, Duration::from_millis(150));
         // Collapsed from 120_000 to the controller minimum: RFC kMinimumWindow
         // (2*MSS = 2400) is passed in, BBR3 floors at its 4*MSS operational min.
         assert!(rec.cwnd <= 4800, "cwnd must collapse, got {}", rec.cwnd);
