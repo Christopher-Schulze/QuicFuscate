@@ -581,6 +581,23 @@ else
   append_item "multi_client_dual_stack_tcp_throughput" "fail" "missing receiver byte/hash/wall-clock gate, external per-trial capture, direct probe use, no-iperf contract, or host-veth cleanup"
 fi
 
+DUAL_STACK_STABILITY_HARNESS="scripts/tests/tun-e2e-multi-client-dual-stack-stability.sh"
+DUAL_STACK_STABILITY_AGGREGATOR="scripts/tests/utils/aggregate-dual-stack-stability.py"
+if rg -F -- 'STABILITY_TRIALS=3' "$DUAL_STACK_STABILITY_HARNESS" >/dev/null \
+  && rg -F -- 'QF_E2E_EXTERNAL_EGRESS_CAPTURE=1' "$DUAL_STACK_STABILITY_HARNESS" >/dev/null \
+  && rg -F -- 'QF_E2E_ARTIFACT_DIR="$trial_dir"' "$DUAL_STACK_STABILITY_HARNESS" >/dev/null \
+  && rg -F -- 'summary.tsv' "$DUAL_STACK_STABILITY_HARNESS" >/dev/null \
+  && rg -F -- 'dual-stack stability aggregate has' "$DUAL_STACK_STABILITY_HARNESS" >/dev/null \
+  && rg -F -- 'receiver-verified PMTU throughput gain is below 15 percent' "$DUAL_STACK_STABILITY_AGGREGATOR" >/dev/null \
+  && rg -F -- 'child artifact binary SHA-256 differs from the stability artifact' "$DUAL_STACK_STABILITY_AGGREGATOR" >/dev/null \
+  && rg -F -- 'egress summary has malformed trial evidence' "$DUAL_STACK_STABILITY_AGGREGATOR" >/dev/null; then
+  pass "Repeated dual-stack stability harness requires identical-artifact receiver, black-hole, and per-trial egress evidence"
+  append_item "dual_stack_stability_aggregate" "ok" "three capture-enabled child proofs, exact binary identity, complete receiver/black-hole evidence, and per-trial egress aggregate are required"
+else
+  fail_critical "Repeated dual-stack stability harness is missing its fail-closed evidence contract"
+  append_item "dual_stack_stability_aggregate" "fail" "missing fixed trial count, forced capture, exact child artifact, aggregate, binary identity, receiver, black-hole, or egress validation"
+fi
+
 if [[ "$(rg -F -- '--tun-mtu "$tun_mtu_ceiling"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" | wc -l | tr -d ' ')" -eq 2 ]] \
   && rg -F -- 'start_phase default 0 1280 1280' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'start_phase opt-in 1 1472 1500 1000 2000' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
