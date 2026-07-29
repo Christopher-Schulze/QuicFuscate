@@ -27,7 +27,7 @@ B="${QF_E2E_BINARY:-$PROJECT_ROOT/target/release/quicfuscate}"
 CA="$PROJECT_ROOT/config/local/ca.crt"
 CA_KEY="$PROJECT_ROOT/config/local/ca.key"
 
-ADVERSITY_PING_COUNT=50
+ADVERSITY_PING_COUNT="${QF_ADVERSITY_PING_COUNT:-50}"
 ADVERSITY_PING_INTERVAL=0.1
 LOSS_SCENARIOS=(
     "0:15"
@@ -68,6 +68,7 @@ EVIDENCE_DIR="${QF_E2E_ARTIFACT_DIR:-}"
 KEEP_ON_FAIL="${QF_E2E_KEEP_ON_FAIL:-0}"
 LOCK_FILE="${QF_E2E_LOCK_FILE:-/tmp/quicfuscate-tun-e2e.lock}"
 LOCK_TIMEOUT="${QF_E2E_LOCK_TIMEOUT:-300}"
+RUNTIME_FAILURE_PATTERN='panic|Crypto error: crypto failure|AEAD limit reached|Key update error|heartbeat timeout|InternalError|TUN packet send failed'
 PASS=0
 FAIL=0
 SERVER_PID=""
@@ -262,6 +263,12 @@ if ! command -v sha256sum >/dev/null 2>&1; then
     echo "FAIL: required command not found: sha256sum" >&2
     exit 2
 fi
+case "$ADVERSITY_PING_COUNT" in
+    ''|*[!0-9]*|0)
+        echo "FAIL: QF_ADVERSITY_PING_COUNT must be a positive integer" >&2
+        exit 2
+        ;;
+esac
 case "$ADVERSITY_SUITE" in
     all|loss|jitter|bandwidth|rtt|combined|recovery) ;;
     *)
@@ -417,8 +424,8 @@ check_handshake() {
     [ "$cli" -gt 0 ] && [ "$srv" -gt 0 ]
 }
 
-check_panics() {
-    if grep -q 'panic' "$SERVER_LOG" "$CLIENT_LOG" 2>/dev/null; then
+check_runtime_logs() {
+    if grep -Eqi "$RUNTIME_FAILURE_PATTERN" "$SERVER_LOG" "$CLIENT_LOG" 2>/dev/null; then
         return 1
     fi
     return 0
@@ -505,6 +512,9 @@ preserve_telemetry_evidence() {
         printf 'rtt_contract=%s\n' "${RTT_SCENARIOS[*]}"
         printf 'combined_contract=%s\n' "$COMBINED_SCENARIO"
         printf 'recovery_contract=%s\n' "$RECOVERY_SCENARIO"
+        printf 'runtime_failure_count=%s\n' \
+            "$(grep -Ehic "$RUNTIME_FAILURE_PATTERN" "$RUNTIME_DIR"/*/*.log 2>/dev/null \
+                | awk -F: '{ sum += $NF } END { print sum + 0 }')"
         for result in "${SCENARIO_RESULTS[@]}"; do
             printf 'result=%s\n' "$result"
         done
@@ -557,8 +567,8 @@ test_loss_sweep() {
             echo "${loss}% | ${tunnel_loss}% | ${rtt} | FAIL (threshold ${max_loss}%)"
             FAIL=$((FAIL + 1))
         fi
-        if ! check_panics; then
-            echo "${loss}% | FAIL (panic)"
+        if ! check_runtime_logs; then
+            echo "${loss}% | FAIL (panic, decryption, heartbeat, internal, or TUN-send error)"
             FAIL=$((FAIL + 1))
         fi
         preserve_failure_if_requested
@@ -606,8 +616,8 @@ test_jitter_sweep() {
             echo "${jitter}ms | ${tunnel_loss}% | ${rtt} | FAIL (threshold ${max_loss}%)"
             FAIL=$((FAIL + 1))
         fi
-        if ! check_panics; then
-            echo "${jitter}ms | FAIL (panic)"
+        if ! check_runtime_logs; then
+            echo "${jitter}ms | FAIL (panic, decryption, heartbeat, internal, or TUN-send error)"
             FAIL=$((FAIL + 1))
         fi
         preserve_failure_if_requested
@@ -653,8 +663,8 @@ test_bandwidth() {
             echo "${bw} | ${tunnel_loss}% | ${rtt} | FAIL (threshold ${max_loss}%)"
             FAIL=$((FAIL + 1))
         fi
-        if ! check_panics; then
-            echo "${bw} | FAIL (panic)"
+        if ! check_runtime_logs; then
+            echo "${bw} | FAIL (panic, decryption, heartbeat, internal, or TUN-send error)"
             FAIL=$((FAIL + 1))
         fi
         preserve_failure_if_requested
@@ -700,8 +710,8 @@ test_rtt_variation() {
             echo "${rtt}ms | ${tunnel_loss}% | ${measured_rtt} | FAIL (threshold ${max_loss}%)"
             FAIL=$((FAIL + 1))
         fi
-        if ! check_panics; then
-            echo "${rtt}ms | FAIL (panic)"
+        if ! check_runtime_logs; then
+            echo "${rtt}ms | FAIL (panic, decryption, heartbeat, internal, or TUN-send error)"
             FAIL=$((FAIL + 1))
         fi
         preserve_failure_if_requested
@@ -757,8 +767,8 @@ test_combined_adversity() {
         FAIL=$((FAIL + 1))
     fi
 
-    if ! check_panics; then
-        echo "FAIL: panic detected"
+    if ! check_runtime_logs; then
+        echo "FAIL: panic, decryption, heartbeat, internal, or TUN-send error detected"
         FAIL=$((FAIL + 1))
     fi
     preserve_failure_if_requested
@@ -828,8 +838,8 @@ test_adversity_recovery() {
         FAIL=$((FAIL + 1))
     fi
 
-    if ! check_panics; then
-        echo "FAIL: panic detected"
+    if ! check_runtime_logs; then
+        echo "FAIL: panic, decryption, heartbeat, internal, or TUN-send error detected"
         FAIL=$((FAIL + 1))
     fi
     preserve_failure_if_requested

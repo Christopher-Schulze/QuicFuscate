@@ -469,11 +469,20 @@ UNIFORM_FEC_CONTRACT_HARNESS="scripts/tests/tun-e2e-fec-netns.sh"
 BURST_FEC_CONTRACT_HARNESS="scripts/tests/tun-e2e-fec-burst-netns.sh"
 TRANSITION_FEC_CONTRACT_HARNESS="scripts/tests/tun-e2e-fec-transition-netns.sh"
 ADVERSITY_FEC_CONTRACT_HARNESS="scripts/tests/tun-e2e-fec-netem-adversity.sh"
+FEC_LOSS_STABILITY_HARNESS="scripts/tests/tun-e2e-fec-loss-stability.sh"
 if rg -F -- 'UNIFORM_PING_SCENARIOS=(' "$UNIFORM_FEC_CONTRACT_HARNESS" >/dev/null \
   && rg -F -- 'UNIFORM_IPERF_SCENARIOS=(0 10)' "$UNIFORM_FEC_CONTRACT_HARNESS" >/dev/null \
+  && rg -F -- 'refusing to overwrite existing artifact path' "$UNIFORM_FEC_CONTRACT_HARNESS" >/dev/null \
+  && rg -F -- 'binary_sha256=' "$UNIFORM_FEC_CONTRACT_HARNESS" >/dev/null \
+  && rg -F -- 'results.tsv' "$UNIFORM_FEC_CONTRACT_HARNESS" >/dev/null \
+  && rg -F -- 'RUNTIME_FAILURE_PATTERN=' "$UNIFORM_FEC_CONTRACT_HARNESS" >/dev/null \
   && rg -F -- 'run_loss_level "$loss" "$max_loss"' "$UNIFORM_FEC_CONTRACT_HARNESS" >/dev/null \
   && ! rg -F -- 'case "$loss_pct" in' "$UNIFORM_FEC_CONTRACT_HARNESS" >/dev/null \
   && rg -F -- 'BURST_SCENARIOS=(' "$BURST_FEC_CONTRACT_HARNESS" >/dev/null \
+  && rg -F -- 'refusing to overwrite existing artifact path' "$BURST_FEC_CONTRACT_HARNESS" >/dev/null \
+  && rg -F -- 'binary_sha256=' "$BURST_FEC_CONTRACT_HARNESS" >/dev/null \
+  && rg -F -- 'results.tsv' "$BURST_FEC_CONTRACT_HARNESS" >/dev/null \
+  && rg -F -- 'RUNTIME_FAILURE_PATTERN=' "$BURST_FEC_CONTRACT_HARNESS" >/dev/null \
   && rg -F -- 'run_burst_scenario "$loss_pct" "$correlation" "$label burst" "$median_limit" "$sample_limit"' "$BURST_FEC_CONTRACT_HARNESS" >/dev/null \
   && ! rg -F -- 'run_burst_scenario 10 25' "$BURST_FEC_CONTRACT_HARNESS" >/dev/null \
   && rg -F -- 'TRANSITION_SCENARIOS=(' "$TRANSITION_FEC_CONTRACT_HARNESS" >/dev/null \
@@ -485,6 +494,7 @@ if rg -F -- 'UNIFORM_PING_SCENARIOS=(' "$UNIFORM_FEC_CONTRACT_HARNESS" >/dev/nul
   && rg -F -- 'quicfuscate_fec_recovered_packets_total' "$TRANSITION_FEC_CONTRACT_HARNESS" >/dev/null \
   && rg -F -- 'RECOVERY_DURATION_MS=$((recovery_finished_ms - recovery_started_ms))' "$TRANSITION_FEC_CONTRACT_HARNESS" >/dev/null \
   && rg -F -- 'MAX_RECOVERY_DURATION_MS' "$TRANSITION_FEC_CONTRACT_HARNESS" >/dev/null \
+  && rg -F -- 'runtime_failure_count=' "$TRANSITION_FEC_CONTRACT_HARNESS" >/dev/null \
   && ! rg -F -- 'case "$LOSS_PROFILE" in' "$TRANSITION_FEC_CONTRACT_HARNESS" >/dev/null \
   && ! rg -F -- 'ping_phase 50 "1"' "$TRANSITION_FEC_CONTRACT_HARNESS" >/dev/null \
   && rg -F -- 'LOSS_SCENARIOS=(' "$ADVERSITY_FEC_CONTRACT_HARNESS" >/dev/null \
@@ -505,6 +515,13 @@ if rg -F -- 'UNIFORM_PING_SCENARIOS=(' "$UNIFORM_FEC_CONTRACT_HARNESS" >/dev/nul
   && rg -F -- 'record_loss_result "loss-${loss}"' "$ADVERSITY_FEC_CONTRACT_HARNESS" >/dev/null \
   && rg -F -- "printf 'result=%s\\n'" "$ADVERSITY_FEC_CONTRACT_HARNESS" >/dev/null \
   && rg -F -- 'preserve_telemetry_evidence' "$ADVERSITY_FEC_CONTRACT_HARNESS" >/dev/null \
+  && rg -F -- 'runtime_failure_count=' "$ADVERSITY_FEC_CONTRACT_HARNESS" >/dev/null \
+  && rg -F -- 'RUNTIME_FAILURE_PATTERN=' "$ADVERSITY_FEC_CONTRACT_HARNESS" >/dev/null \
+  && rg -F -- 'ADVERSITY_PING_COUNT="${QF_ADVERSITY_PING_COUNT:-50}"' "$ADVERSITY_FEC_CONTRACT_HARNESS" >/dev/null \
+  && rg -F -- 'LOSS_PING_COUNT=200' "$FEC_LOSS_STABILITY_HARNESS" >/dev/null \
+  && rg -F -- 'QF_ADVERSITY_PING_COUNT="$LOSS_PING_COUNT"' "$FEC_LOSS_STABILITY_HARNESS" >/dev/null \
+  && rg -F -- 'grep -Fx "ping_count=$LOSS_PING_COUNT" "$manifest"' "$FEC_LOSS_STABILITY_HARNESS" >/dev/null \
+  && rg -F -- 'grep -Fx "runtime_failure_count=0" "$manifest"' "$FEC_LOSS_STABILITY_HARNESS" >/dev/null \
   && ! rg -F -- 'for loss in 0 1 5 10 25 50; do' "$ADVERSITY_FEC_CONTRACT_HARNESS" >/dev/null; then
   pass "Specialized FEC acceptance executes printed contracts and captures loss/recovery controller evidence"
   append_item "fec_specialized_single_source_contract" "ok" "scenario inputs and bounds flow from contract arrays into execution; adversity captures FEC controller telemetry"
@@ -552,6 +569,10 @@ if rg -F -- 'LOSS_TRIALS=3' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
   && rg -F -- 'validate_performance_phase "$fec_mode" "$phase"' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
   && rg -F -- 'capture_latency "$fec_mode-$phase"' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
   && rg -F -- 'prove_runtime_logs_clean' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
+  && rg -F -- 'refusing to overwrite existing artifact path' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
+  && rg -F -- 'preflight_owned_resources' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
+  && rg -F -- 'return 0' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
+  && rg -F -- 'panic|Crypto error: crypto failure|AEAD limit reached|Key update error|heartbeat timeout|InternalError|TUN packet send failed' "$CUBIC_FEC_CONTROL_HARNESS" >/dev/null \
   && rg -F -- 'cpu_one_core_percent' "$RUNTIME_PERFORMANCE_SAMPLER" >/dev/null \
   && rg -F -- 'peak_pending_packets' "$RUNTIME_PERFORMANCE_SAMPLER" >/dev/null \
   && rg -F -- 'allocation_deltas' "$RUNTIME_PERFORMANCE_SAMPLER" >/dev/null \

@@ -442,10 +442,8 @@ unsafe fn find_pattern_neon(haystack: &[u8], needle: &[u8]) -> Option<usize> {
             let cmp_result = vceqq_u8(haystack_chunk, needle_first);
 
             // Check if any bytes matched
-            let mask = vget_lane_u64(
-                vreinterpret_u64_u8(vqmovn_u16(vreinterpretq_u16_u8(cmp_result))),
-                0,
-            );
+            let mask =
+                vget_lane_u64(vreinterpret_u64_u8(vqmovn_u16(vreinterpretq_u16_u8(cmp_result))), 0);
             if mask != 0 {
                 for bit in 0..16 {
                     if i + bit < haystack_len && haystack[i + bit] == needle[0] {

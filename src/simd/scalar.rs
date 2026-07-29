@@ -160,10 +160,8 @@ pub fn berlekamp_massey(syndrome: &[u8], len: usize) -> Vec<u8> {
             let mut new_locator = error_locator.clone();
 
             if syndrome_shift != 0 {
-                let factor = super::scalar::gf_mul_byte(
-                    discrepancy,
-                    super::scalar::gf_inv(syndrome_shift),
-                );
+                let factor =
+                    super::scalar::gf_mul_byte(discrepancy, super::scalar::gf_inv(syndrome_shift));
                 for j in 0..=old_degree {
                     if j + i >= old_degree {
                         new_locator[j + i - old_degree + 1] ^=
@@ -261,10 +259,7 @@ pub(crate) fn reed_solomon_encode_scalar(data: &[u8], parity_shards: usize) -> V
 }
 
 /// Reed-Solomon decode from available shards and their indices via Gaussian elimination.
-pub fn reed_solomon_decode(
-    shards: &[Vec<u8>],
-    indices: &[usize],
-) -> Result<Vec<u8>, &'static str> {
+pub fn reed_solomon_decode(shards: &[Vec<u8>], indices: &[usize]) -> Result<Vec<u8>, &'static str> {
     if shards.is_empty() {
         return Err("No shards provided");
     }
@@ -511,8 +506,8 @@ mod tests {
         let expected = aes::aes128_encrypt_block(
             &key,
             &[
-                0x32, 0x43, 0xf6, 0xa8, 0x88, 0x5a, 0x30, 0x8d, 0x31, 0x31, 0x98, 0xa2, 0xe0,
-                0x37, 0x07, 0x34,
+                0x32, 0x43, 0xf6, 0xa8, 0x88, 0x5a, 0x30, 0x8d, 0x31, 0x31, 0x98, 0xa2, 0xe0, 0x37,
+                0x07, 0x34,
             ],
         );
 

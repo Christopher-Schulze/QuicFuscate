@@ -64,9 +64,7 @@ fn sha256_plan() -> &'static Sha256Plan {
 
         #[cfg(all(target_arch = "x86_64", not(windows)))]
         {
-            if features.has_feature(CpuFeature::AVXVNNI)
-                && features.has_feature(CpuFeature::AVX2)
-            {
+            if features.has_feature(CpuFeature::AVXVNNI) && features.has_feature(CpuFeature::AVX2) {
                 return Sha256Plan { backend: Sha256Backend::Vnni };
             }
             if features.has_feature(CpuFeature::AVX2) {
@@ -83,8 +81,8 @@ fn sha256_plan() -> &'static Sha256Plan {
             // /proc/cpuinfo, while Apple and some probes expose `sha256`.
             // Both names represent the target feature required by
             // arm::sha256_hw and must select the same backend.
-            let has_sha256 = features.has_feature(CpuFeature::SHA256)
-                || features.has_feature(CpuFeature::SHA2);
+            let has_sha256 =
+                features.has_feature(CpuFeature::SHA256) || features.has_feature(CpuFeature::SHA2);
             if features.has_feature(CpuFeature::SVE2) && has_sha256 {
                 return Sha256Plan { backend: Sha256Backend::Sve2 };
             }

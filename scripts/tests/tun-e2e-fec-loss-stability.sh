@@ -13,6 +13,7 @@ LOSS_HARNESS="$SCRIPT_DIR/tun-e2e-fec-netem-adversity.sh"
 BINARY="${QF_E2E_BINARY:-$PROJECT_ROOT/target/release/quicfuscate}"
 ARTIFACT_DIR="${QF_E2E_ARTIFACT_DIR:-/tmp/quicfuscate-fec-loss-stability-$$}"
 LOSS_TRIALS=3
+LOSS_PING_COUNT=200
 EXPECTED_SCENARIOS=(loss-0 loss-1 loss-5 loss-10 loss-25 loss-50)
 
 fail() {
@@ -44,6 +45,8 @@ validate_trial_manifest() {
     [ -f "$manifest" ] || return 1
     grep -Fx "suite=loss" "$manifest" >/dev/null || return 1
     grep -Fx "binary_sha256=$(sha256sum "$BINARY" | awk '{print $1}')" "$manifest" >/dev/null || return 1
+    grep -Fx "ping_count=$LOSS_PING_COUNT" "$manifest" >/dev/null || return 1
+    grep -Fx "runtime_failure_count=0" "$manifest" >/dev/null || return 1
 
     while IFS= read -r result; do
         payload="${result#result=}"
@@ -83,24 +86,31 @@ main() {
     printf 'binary_sha256=%s\n' "$(sha256sum "$BINARY" | awk '{print $1}')" \
         > "$ARTIFACT_DIR/run-manifest.txt"
     printf 'loss_trials=%s\n' "$LOSS_TRIALS" >> "$ARTIFACT_DIR/run-manifest.txt"
+    printf 'loss_ping_count=%s\n' "$LOSS_PING_COUNT" >> "$ARTIFACT_DIR/run-manifest.txt"
 
-    local trial trial_dir manifest child_status failures=0
+    local trial trial_dir manifest child_status manifest_status trial_failed failures=0
     for ((trial = 1; trial <= LOSS_TRIALS; trial++)); do
         trial_dir="$ARTIFACT_DIR/trial-${trial}"
         printf 'Trial %s/%s\n' "$trial" "$LOSS_TRIALS"
-        if env QF_ADVERSITY_SUITE=loss QF_E2E_ARTIFACT_DIR="$trial_dir" QF_E2E_BINARY="$BINARY" \
-            "$LOSS_HARNESS"; then
+        trial_failed=0
+        if env QF_ADVERSITY_SUITE=loss QF_ADVERSITY_PING_COUNT="$LOSS_PING_COUNT" \
+            QF_E2E_ARTIFACT_DIR="$trial_dir" QF_E2E_BINARY="$BINARY" "$LOSS_HARNESS"; then
             child_status=0
         else
             child_status=1
-            failures=$((failures + 1))
+            trial_failed=1
         fi
         manifest="$trial_dir/run-manifest.txt"
-        if ! validate_trial_manifest "$trial" "$manifest"; then
+        if validate_trial_manifest "$trial" "$manifest"; then
+            manifest_status=0
+        else
+            manifest_status=1
+            trial_failed=1
             printf 'FAIL: trial %s has missing, duplicate, incomplete, or out-of-contract results\n' "$trial" >&2
-            failures=$((failures + 1))
         fi
-        printf 'trial_status=%s:%s\n' "$trial" "$child_status" >> "$ARTIFACT_DIR/run-manifest.txt"
+        failures=$((failures + trial_failed))
+        printf 'trial_status=%s:child=%s:manifest=%s\n' \
+            "$trial" "$child_status" "$manifest_status" >> "$ARTIFACT_DIR/run-manifest.txt"
     done
 
     [ "$failures" -eq 0 ] || fail "loss stability aggregate has ${failures} failure(s): $ARTIFACT_DIR"

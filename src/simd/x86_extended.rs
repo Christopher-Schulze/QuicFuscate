@@ -96,12 +96,10 @@ pub(super) unsafe fn matmul_gf256_avx2(
                 hi_table[j] = scalar::gf_mul_byte((j << 4) as u8, a[i * k + kk]);
             }
 
-            let lo_lut = _mm256_broadcastsi128_si256(_mm_loadu_si128(
-                lo_table.as_ptr() as *const __m128i
-            ));
-            let hi_lut = _mm256_broadcastsi128_si256(_mm_loadu_si128(
-                hi_table.as_ptr() as *const __m128i
-            ));
+            let lo_lut =
+                _mm256_broadcastsi128_si256(_mm_loadu_si128(lo_table.as_ptr() as *const __m128i));
+            let hi_lut =
+                _mm256_broadcastsi128_si256(_mm_loadu_si128(hi_table.as_ptr() as *const __m128i));
             let nibble_mask = _mm256_set1_epi8(0x0F);
 
             let mut j = 0;
@@ -748,10 +746,7 @@ pub(super) unsafe fn reed_solomon_decode_gfni(
                     _mm512_loadu_si512(output.as_ptr().add(out_start + c) as *const __m512i);
                 let result = _mm512_xor_si512(current, prod);
 
-                _mm512_storeu_si512(
-                    output.as_mut_ptr().add(out_start + c) as *mut __m512i,
-                    result,
-                );
+                _mm512_storeu_si512(output.as_mut_ptr().add(out_start + c) as *mut __m512i, result);
             }
         }
     }

@@ -227,10 +227,7 @@ unsafe fn gf4_mul_xor_avx2(a: &[u8], b: u8, dst: &mut [u8]) {
             _mm256_shuffle_epi8(lut, lo),
             _mm256_slli_epi16(_mm256_shuffle_epi8(lut, hi), 4),
         );
-        _mm256_storeu_si256(
-            dst.as_mut_ptr().add(i) as *mut _,
-            _mm256_xor_si256(current, product),
-        );
+        _mm256_storeu_si256(dst.as_mut_ptr().add(i) as *mut _, _mm256_xor_si256(current, product));
         i += 32;
     }
     if i < len {
@@ -314,8 +311,7 @@ pub fn gf16_mul(a: &[u16], b: u16, dst: &mut [u16]) {
     #[cfg(target_arch = "x86_64")]
     {
         // VPCLMULQDQ is the ultimate for GF(2^16)
-        if features.has_feature(CpuFeature::VPCLMULQDQ)
-            && features.has_feature(CpuFeature::AVX512F)
+        if features.has_feature(CpuFeature::VPCLMULQDQ) && features.has_feature(CpuFeature::AVX512F)
         {
             unsafe { gf16_mul_vpclmulqdq(a, b, dst) };
             crate::optimize::telemetry::GF16_VPCLMUL_OPS.inc();

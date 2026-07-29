@@ -44,6 +44,7 @@ CLIENT_HOST_VETH=("qf535h1" "qf535h2")
 TUN_NAME="qtun0"
 ADMIN_SOCKET="${QF_E2E_ADMIN_SOCKET:-/tmp/qf535-${$}.sock}"
 ADMIN_SOCKET_OWNED=0
+TOPOLOGY_OWNED=0
 STACK_PIDS=()
 UDP_RECEIVER_PID=""
 PERFORMANCE_SAMPLER_PID=""
@@ -133,11 +134,13 @@ prepare_admin_socket() {
 cleanup() {
   set +e
   stop_stack
+  [[ "$TOPOLOGY_OWNED" == "1" ]] || return
   tc qdisc del dev "$SERVER_HOST_VETH" root 2>/dev/null
   ip netns del "$SERVER_NS" 2>/dev/null
   ip netns del "${CLIENT_NS[0]}" 2>/dev/null
   ip netns del "${CLIENT_NS[1]}" 2>/dev/null
   ip link del "$BRIDGE" 2>/dev/null
+  TOPOLOGY_OWNED=0
 }
 
 dump_diagnostics() {
@@ -153,10 +156,10 @@ dump_diagnostics() {
 }
 
 prove_runtime_logs_clean() {
-  local pattern='heartbeat timeout|InternalError|TUN packet send failed'
-  if grep -EH "$pattern" "$ARTIFACT_DIR"/client-*.log "$ARTIFACT_DIR"/server-*.log \
+  local pattern='panic|Crypto error: crypto failure|AEAD limit reached|Key update error|heartbeat timeout|InternalError|TUN packet send failed'
+  if grep -EHi "$pattern" "$ARTIFACT_DIR"/client-*.log "$ARTIFACT_DIR"/server-*.log \
     >"$ARTIFACT_DIR/runtime-liveness-errors.txt"; then
-    fail 'runtime logs contain a heartbeat timeout, InternalError, or TUN send failure'
+    fail 'runtime logs contain a panic, decryption, heartbeat, InternalError, or TUN send failure'
   fi
 }
 
@@ -180,9 +183,8 @@ setup_namespace_link() {
 }
 
 setup_topology() {
-  cleanup
-  set -e
-  mkdir -p "$ARTIFACT_DIR"
+  mkdir "$ARTIFACT_DIR"
+  TOPOLOGY_OWNED=1
   prepare_certificate
   ip link add "$BRIDGE" type bridge
   ip addr add "$GATEWAY_UNDERLAY/24" dev "$BRIDGE"
@@ -191,6 +193,27 @@ setup_topology() {
   setup_namespace_link "${CLIENT_NS[0]}" "${CLIENT_HOST_VETH[0]}" "${CLIENT_UNDERLAY[0]}"
   setup_namespace_link "${CLIENT_NS[1]}" "${CLIENT_HOST_VETH[1]}" "${CLIENT_UNDERLAY[1]}"
   sha256sum "$BINARY" >"$ARTIFACT_DIR/binary.sha256"
+}
+
+preflight_owned_resources() {
+  [[ "$ARTIFACT_DIR" == /* ]] || fail 'QF_E2E_ARTIFACT_DIR must be an absolute path'
+  [[ ! -e "$ARTIFACT_DIR" ]] \
+    || fail "refusing to overwrite existing artifact path: $ARTIFACT_DIR"
+  [[ -d "$(dirname "$ARTIFACT_DIR")" ]] \
+    || fail "artifact parent directory does not exist: $(dirname "$ARTIFACT_DIR")"
+  pgrep -x quicfuscate >/dev/null \
+    && fail 'a pre-existing quicfuscate process is running; refusing broad cleanup'
+  local namespace
+  for namespace in "$SERVER_NS" "${CLIENT_NS[@]}"; do
+    ip netns list | grep -Eq "^${namespace}([[:space:]]|$)" \
+      && fail "network namespace already exists: $namespace"
+  done
+  local link
+  for link in "$BRIDGE" "$SERVER_HOST_VETH" "${CLIENT_HOST_VETH[@]}"; do
+    ip link show dev "$link" >/dev/null 2>&1 \
+      && fail "network link already exists: $link"
+  done
+  return 0
 }
 
 prepare_certificate() {
@@ -590,6 +613,7 @@ main() {
 
   exec 9>"$LOCK_FILE"
   flock -w "$LOCK_TIMEOUT" 9 || fail "could not acquire E2E lock within ${LOCK_TIMEOUT}s"
+  preflight_owned_resources
   prepare_admin_socket
   setup_topology
 

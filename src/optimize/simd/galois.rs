@@ -79,10 +79,8 @@ unsafe fn gf_mul_avx2(a: &[u8], b: u8, dst: &mut [u8]) {
     }
 
     // Load lookup tables into AVX2 registers
-    let lo_lut =
-        _mm256_broadcastsi128_si256(_mm_loadu_si128(lo_table.as_ptr() as *const __m128i));
-    let hi_lut =
-        _mm256_broadcastsi128_si256(_mm_loadu_si128(hi_table.as_ptr() as *const __m128i));
+    let lo_lut = _mm256_broadcastsi128_si256(_mm_loadu_si128(lo_table.as_ptr() as *const __m128i));
+    let hi_lut = _mm256_broadcastsi128_si256(_mm_loadu_si128(hi_table.as_ptr() as *const __m128i));
     let nibble_mask = _mm256_set1_epi8(0x0F);
 
     // Process 32 bytes at once

@@ -115,9 +115,8 @@ pub(super) unsafe fn sha256_avx2(data: &[u8]) -> [u8; 32] {
     {
         return super::scalar::sha256(data);
     }
-    let digest = super::sha256_hash_with_batch(data, 1, |state, blocks| {
-        compress_batch_avx2(state, blocks)
-    });
+    let digest =
+        super::sha256_hash_with_batch(data, 1, |state, blocks| compress_batch_avx2(state, blocks));
     _mm256_zeroupper();
     digest
 }
@@ -128,9 +127,8 @@ pub(super) unsafe fn sha256_vnni(data: &[u8]) -> [u8; 32] {
     {
         return super::scalar::sha256(data);
     }
-    let digest = super::sha256_hash_with_batch(data, 2, |state, blocks| {
-        compress_batch_vnni(state, blocks)
-    });
+    let digest =
+        super::sha256_hash_with_batch(data, 2, |state, blocks| compress_batch_vnni(state, blocks));
     _mm256_zeroupper();
     digest
 }
@@ -250,10 +248,8 @@ pub(super) unsafe fn gf_mul_avx2(a: &[u8], b: u8, dst: &mut [u8]) {
     }
 
     // Load lookup tables into AVX2 registers
-    let lo_lut =
-        _mm256_broadcastsi128_si256(_mm_loadu_si128(lo_table.as_ptr() as *const __m128i));
-    let hi_lut =
-        _mm256_broadcastsi128_si256(_mm_loadu_si128(hi_table.as_ptr() as *const __m128i));
+    let lo_lut = _mm256_broadcastsi128_si256(_mm_loadu_si128(lo_table.as_ptr() as *const __m128i));
+    let hi_lut = _mm256_broadcastsi128_si256(_mm_loadu_si128(hi_table.as_ptr() as *const __m128i));
     let nibble_mask = _mm256_set1_epi8(0x0F);
 
     // Process 32 bytes at once

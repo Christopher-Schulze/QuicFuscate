@@ -490,21 +490,13 @@ unsafe fn chacha20_blocks_x4_sse_core(
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn chacha20_blocks_x4_avx2(
-    key: &[u8; 32],
-    nonce: &[u8; 12],
-    counter: u32,
-) -> [[u8; 64]; 4] {
+unsafe fn chacha20_blocks_x4_avx2(key: &[u8; 32], nonce: &[u8; 12], counter: u32) -> [[u8; 64]; 4] {
     chacha20_blocks_x4_sse_core(key, nonce, counter)
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx", enable = "sse4.1", enable = "ssse3")]
-unsafe fn chacha20_blocks_x4_avx(
-    key: &[u8; 32],
-    nonce: &[u8; 12],
-    counter: u32,
-) -> [[u8; 64]; 4] {
+unsafe fn chacha20_blocks_x4_avx(key: &[u8; 32], nonce: &[u8; 12], counter: u32) -> [[u8; 64]; 4] {
     chacha20_blocks_x4_sse_core(key, nonce, counter)
 }
 
@@ -520,11 +512,7 @@ unsafe fn chacha20_blocks_x4_sse41(
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn chacha20_blocks_x4_neon(
-    key: &[u8; 32],
-    nonce: &[u8; 12],
-    counter: u32,
-) -> [[u8; 64]; 4] {
+unsafe fn chacha20_blocks_x4_neon(key: &[u8; 32], nonce: &[u8; 12], counter: u32) -> [[u8; 64]; 4] {
     use std::arch::aarch64::*;
     // Constants
     let c0 = vdupq_n_u32(0x61707865);
@@ -532,9 +520,8 @@ unsafe fn chacha20_blocks_x4_neon(
     let c2 = vdupq_n_u32(0x79622d32);
     let c3 = vdupq_n_u32(0x6b206574);
     // Key
-    let k = |i: usize| {
-        u32::from_le_bytes([key[4 * i], key[4 * i + 1], key[4 * i + 2], key[4 * i + 3]])
-    };
+    let k =
+        |i: usize| u32::from_le_bytes([key[4 * i], key[4 * i + 1], key[4 * i + 2], key[4 * i + 3]]);
     let k0 = vdupq_n_u32(k(0));
     let k1 = vdupq_n_u32(k(1));
     let k2 = vdupq_n_u32(k(2));
@@ -574,12 +561,7 @@ unsafe fn chacha20_blocks_x4_neon(
         (x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11, x12, x13, x14, x15);
 
     #[inline(always)]
-    unsafe fn qr(
-        a: &mut uint32x4_t,
-        b: &mut uint32x4_t,
-        c: &mut uint32x4_t,
-        d: &mut uint32x4_t,
-    ) {
+    unsafe fn qr(a: &mut uint32x4_t, b: &mut uint32x4_t, c: &mut uint32x4_t, d: &mut uint32x4_t) {
         // rotl32(x,16)
         *a = vaddq_u32(*a, *b);
         *d = veorq_u32(*d, *a);

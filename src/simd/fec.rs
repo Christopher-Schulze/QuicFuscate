@@ -50,8 +50,7 @@ pub fn berlekamp_massey_gf256(syndrome: &[u8], len: usize) -> Vec<u8> {
     }
     #[cfg(target_arch = "aarch64")]
     {
-        if features.has_feature(CpuFeature::SVE2)
-            && std::arch::is_aarch64_feature_detected!("sve2")
+        if features.has_feature(CpuFeature::SVE2) && std::arch::is_aarch64_feature_detected!("sve2")
         {
             return unsafe { berlekamp_massey_sve2_dispatch(syndrome, len) };
         }

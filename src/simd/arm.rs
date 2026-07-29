@@ -938,8 +938,7 @@ pub(crate) fn qpack_encode_neon(input: &[u8], output: &mut [u8]) -> usize {
 unsafe fn qpack_encode_neon_impl(input: &[u8], output: &mut [u8]) -> usize {
     use crate::transport::h3::qpack::{HUFF_CODES, HUFF_LENS};
     use core::arch::aarch64::{
-        uint32x4_t, uint8x8_t, vget_high_u16, vget_low_u16, vld1_u8, vmovl_u16, vmovl_u8,
-        vst1q_u32,
+        uint32x4_t, uint8x8_t, vget_high_u16, vget_low_u16, vld1_u8, vmovl_u16, vmovl_u8, vst1q_u32,
     };
 
     let mut acc: u128 = 0;

@@ -21,6 +21,7 @@ TELEMETRY_PORT="${QF_FEC_TELEMETRY_PORT:-9898}"
 LOSS_PROFILE="${QF_FEC_LOSS_PROFILE:-moderate}"
 EVIDENCE_DIR="${QF_E2E_ARTIFACT_DIR:-}"
 CRYPTO_FAILURE_PATTERN='Crypto error: crypto failure|AEAD limit reached|Key update error'
+RUNTIME_FAILURE_PATTERN='panic|Crypto error: crypto failure|AEAD limit reached|Key update error|heartbeat timeout|InternalError|TUN packet send failed'
 TRANSITION_SCENARIOS=(
     "moderate:20:35:50:5:150:10:250:10:40000:1"
     "severe:40:60:50:5:150:10:250:10:40000:0"
@@ -223,6 +224,9 @@ preserve_evidence() {
         printf 'client_handshakes=%s\n' "$(grep -c 'TLS handshake complete' "$CLIENT_LOG")"
         printf 'panic_count=%s\n' "$panic_count"
         printf 'decrypt_failure_count=%s\n' "$decrypt_failure_count"
+        printf 'runtime_failure_count=%s\n' \
+            "$(grep -Ehic "$RUNTIME_FAILURE_PATTERN" "$SERVER_LOG" "$CLIENT_LOG" 2>/dev/null \
+                | awk -F: '{ sum += $NF } END { print sum + 0 }')"
         printf 'binary_sha256=%s\n' "$(sha256sum "$B" | awk '{print $1}')"
     } > "$EVIDENCE_DIR/run-manifest.txt" \
         || fatal "could not preserve evidence manifest"
@@ -690,6 +694,11 @@ if grep -q 'panic' "$SERVER_LOG" "$CLIENT_LOG" 2>/dev/null; then
 fi
 if grep -Eqi "$CRYPTO_FAILURE_PATTERN" "$SERVER_LOG" "$CLIENT_LOG" 2>/dev/null; then
     echo "FAIL: transport decryption failure detected"
+    FAIL=$((FAIL + 1))
+fi
+if grep -Eqi 'heartbeat timeout|InternalError|TUN packet send failed' \
+    "$SERVER_LOG" "$CLIENT_LOG" 2>/dev/null; then
+    echo "FAIL: heartbeat, internal, or TUN-send failure detected"
     FAIL=$((FAIL + 1))
 fi
 

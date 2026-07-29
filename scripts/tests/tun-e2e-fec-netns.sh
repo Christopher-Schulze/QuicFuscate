@@ -34,6 +34,8 @@ PING_INTERVAL="${PING_INTERVAL:-0.1}"
 KEEP_ON_FAIL="${QF_E2E_KEEP_ON_FAIL:-0}"
 LOCK_FILE="${QF_E2E_LOCK_FILE:-/tmp/quicfuscate-tun-e2e.lock}"
 LOCK_TIMEOUT="${QF_E2E_LOCK_TIMEOUT:-300}"
+ARTIFACT_DIR="${QF_E2E_ARTIFACT_DIR:-/tmp/quicfuscate-fec-uniform-evidence-$$}"
+RUNTIME_FAILURE_PATTERN='panic|Crypto error: crypto failure|AEAD limit reached|Key update error|heartbeat timeout|InternalError|TUN packet send failed'
 
 PASS=0
 FAIL=0
@@ -179,6 +181,25 @@ fatal() {
     exit 1
 }
 
+record_result() {
+    printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" \
+        >> "$ARTIFACT_DIR/results.tsv" \
+        || fatal "could not append uniform evidence result"
+}
+
+check_runtime_logs() {
+    local scenario="$1"
+    local matches="$ARTIFACT_DIR/runtime-errors-${scenario}.txt"
+    if grep -EHi "$RUNTIME_FAILURE_PATTERN" "$SERVER_LOG" "$CLIENT_LOG" > "$matches" 2>/dev/null; then
+        echo "FAIL: ${scenario} logs contain a panic, decryption, heartbeat, internal, or TUN-send failure"
+        FAIL=$((FAIL + 1))
+        record_result runtime "$scenario" detected 0 fail
+        return 1
+    fi
+    rm -f -- "$matches"
+    record_result runtime "$scenario" 0 0 pass
+}
+
 preserve_failure_if_requested() {
     if [ "$KEEP_ON_FAIL" = "1" ] && [ "$FAIL" -gt 0 ]; then
         dump_diagnostics
@@ -211,6 +232,18 @@ if [ "$(id -u)" -ne 0 ]; then
     echo "FAIL: this harness requires root" >&2
     exit 2
 fi
+if [ "${ARTIFACT_DIR#/}" = "$ARTIFACT_DIR" ]; then
+    echo "FAIL: QF_E2E_ARTIFACT_DIR must be an absolute path" >&2
+    exit 2
+fi
+if [ -e "$ARTIFACT_DIR" ]; then
+    echo "FAIL: refusing to overwrite existing artifact path: $ARTIFACT_DIR" >&2
+    exit 2
+fi
+if [ ! -d "$(dirname "$ARTIFACT_DIR")" ]; then
+    echo "FAIL: artifact parent directory does not exist: $(dirname "$ARTIFACT_DIR")" >&2
+    exit 2
+fi
 if pgrep -x quicfuscate >/dev/null; then
     echo "FAIL: a pre-existing quicfuscate process is running; refusing broad cleanup" >&2
     exit 2
@@ -234,10 +267,20 @@ fi
 [ -x "$B" ] || fatal "release artifact is not executable: $B"
 [ -r "$CA" ] || fatal "CA certificate is not readable: $CA"
 [ -r "$CA_KEY" ] || fatal "CA key is not readable: $CA_KEY"
-for required_command in iperf3 timeout; do
+for required_command in flock ip iperf3 nc openssl ping python3 sha256sum tc timeout; do
     command -v "$required_command" >/dev/null 2>&1 \
         || fatal "required command is not available: $required_command"
 done
+mkdir "$ARTIFACT_DIR" || fatal "could not create artifact directory: $ARTIFACT_DIR"
+{
+    printf 'binary_sha256=%s\n' "$(sha256sum "$B" | awk '{print $1}')"
+    printf 'uniform_ping_contract=%s\n' "${UNIFORM_PING_SCENARIOS[*]}"
+    printf 'uniform_iperf_contract=%s\n' "${UNIFORM_IPERF_SCENARIOS[*]}"
+    printf 'ping_count=%s\n' "$PING_COUNT"
+    printf 'ping_interval_seconds=%s\n' "$PING_INTERVAL"
+} > "$ARTIFACT_DIR/run-manifest.txt" || fatal "could not create uniform evidence manifest"
+printf 'kind\tscenario\tmeasurement\tlimit\tstatus\n' > "$ARTIFACT_DIR/results.tsv" \
+    || fatal "could not create uniform evidence results"
 RUNTIME_DIR="$(mktemp -d /tmp/quicfuscate-fec-netns.XXXXXX)" || fatal "could not create runtime directory"
 CERT="$RUNTIME_DIR/server.crt"
 KEY="$RUNTIME_DIR/server.key"
@@ -364,6 +407,7 @@ run_loss_level() {
     if [ -z "$qkey" ]; then
         echo "FAIL: could not get qkey from server"
         FAIL=$((FAIL + 1))
+        record_result qkey "$loss_pct" missing present fail
         preserve_failure_if_requested
         return
     fi
@@ -378,10 +422,12 @@ run_loss_level() {
     if [ "$cli_complete" = "0" ] || [ "$srv_complete" = "0" ]; then
         echo "FAIL: TLS handshake not complete (cli=$cli_complete srv=$srv_complete)"
         FAIL=$((FAIL + 1))
+        record_result handshake "$loss_pct" "client=${cli_complete},server=${srv_complete}" positive fail
         preserve_failure_if_requested
         return
     fi
     echo "OK: TLS handshake complete on both sides"
+    record_result handshake "$loss_pct" "client=${cli_complete},server=${srv_complete}" positive pass
 
     # Apply loss AFTER handshake (so handshake succeeds)
     apply_loss "$loss_pct"
@@ -393,6 +439,8 @@ run_loss_level() {
     echo "Pinging through tunnel (${PING_COUNT} pings @ ${PING_INTERVAL}s interval, ${loss_pct}% loss)..."
     local ping_output
     ping_output=$(ip netns exec ns-cli ping -c "$PING_COUNT" -i "$PING_INTERVAL" -W 3 -I qtun0 10.0.1.1 2>&1)
+    printf '%s\n' "$ping_output" > "$ARTIFACT_DIR/ping-loss-${loss_pct}.txt" \
+        || fatal "could not preserve ${loss_pct}% ping evidence"
     echo "$ping_output" | tail -3
 
     # Extract packet loss percentage (handle decimals like "3.33%")
@@ -403,9 +451,11 @@ run_loss_level() {
     if [ "$ping_loss" -le "$max_loss" ]; then
         echo "PASS: ${loss_pct}% netem loss -> ${ping_loss}% tunnel loss (threshold: ${max_loss}%)"
         PASS=$((PASS + 1))
+        record_result ping "$loss_pct" "$ping_loss" "$max_loss" pass
     else
         echo "FAIL: ${loss_pct}% netem loss -> ${ping_loss}% tunnel loss (threshold: ${max_loss}%)"
         FAIL=$((FAIL + 1))
+        record_result ping "$loss_pct" "$ping_loss" "$max_loss" fail
     fi
 
     # Check FEC mode telemetry
@@ -413,11 +463,7 @@ run_loss_level() {
     echo "srv FEC: $(grep -i 'FEC_MODE\|fec.*mode' "$SERVER_LOG" | tail -3)"
     echo "cli FEC: $(grep -i 'FEC_MODE\|fec.*mode' "$CLIENT_LOG" | tail -3)"
 
-    # Check for panics
-    if grep -q 'panic' "$SERVER_LOG" "$CLIENT_LOG" 2>/dev/null; then
-        echo "FAIL: panic detected in logs"
-        FAIL=$((FAIL + 1))
-    fi
+    check_runtime_logs "ping-loss-${loss_pct}" || true
 
     preserve_failure_if_requested
     remove_loss
@@ -442,10 +488,25 @@ run_iperf_test() {
     if [ -z "$qkey" ]; then
         echo "FAIL: could not get qkey"
         FAIL=$((FAIL + 1))
+        record_result qkey "iperf-${loss_pct}" missing present fail
         preserve_failure_if_requested
         return
     fi
     start_client "$qkey"
+
+    local cli_complete srv_complete
+    cli_complete=$(grep -c 'TLS handshake complete' "$CLIENT_LOG" 2>/dev/null || true)
+    srv_complete=$(grep -c 'TLS handshake complete' "$SERVER_LOG" 2>/dev/null || true)
+    cli_complete=${cli_complete:-0}
+    srv_complete=${srv_complete:-0}
+    if [ "$cli_complete" = "0" ] || [ "$srv_complete" = "0" ]; then
+        echo "FAIL: iperf TLS handshake not complete (cli=$cli_complete srv=$srv_complete)"
+        FAIL=$((FAIL + 1))
+        record_result handshake "iperf-${loss_pct}" "client=${cli_complete},server=${srv_complete}" positive fail
+        preserve_failure_if_requested
+        return
+    fi
+    record_result handshake "iperf-${loss_pct}" "client=${cli_complete},server=${srv_complete}" positive pass
 
     # Start iperf3 server on ns-srv TUN IP
     ip netns exec ns-srv iperf3 -s -B 10.0.1.1 -p 5201 --one-off >"$IPERF_LOG" 2>&1 &
@@ -456,10 +517,12 @@ run_iperf_test() {
 
     # Run a bounded client and prove the receiver, not just sender-formatted
     # output, received useful data continuously.
-    local iperf_json="$CURRENT_SCENARIO_DIR/iperf-client.json"
+    local iperf_json="$ARTIFACT_DIR/iperf-loss-${loss_pct}.json"
     if ! ip netns exec ns-cli timeout 20 iperf3 -c 10.0.1.1 -p 5201 -t 10 -b 1M -J > "$iperf_json"; then
         echo "FAIL: ${loss_pct}% loss iperf3 client did not terminate successfully"
         FAIL=$((FAIL + 1))
+        record_result iperf "$loss_pct" client-exit zero fail
+        check_runtime_logs "iperf-loss-${loss_pct}" || true
         stop_owned_process "$IPERF_SERVER_PID"
         IPERF_SERVER_PID=""
         preserve_failure_if_requested
@@ -470,6 +533,8 @@ run_iperf_test() {
     if ! wait "$IPERF_SERVER_PID"; then
         echo "FAIL: ${loss_pct}% loss iperf3 receiver did not terminate successfully"
         FAIL=$((FAIL + 1))
+        record_result iperf "$loss_pct" receiver-exit zero fail
+        check_runtime_logs "iperf-loss-${loss_pct}" || true
         IPERF_SERVER_PID=""
         preserve_failure_if_requested
         remove_loss
@@ -483,6 +548,8 @@ run_iperf_test() {
         "$iperf_json"); then
         echo "FAIL: ${loss_pct}% loss iperf3 lacks positive receiver throughput in every interval"
         FAIL=$((FAIL + 1))
+        record_result iperf "$loss_pct" invalid positive fail
+        check_runtime_logs "iperf-loss-${loss_pct}" || true
         preserve_failure_if_requested
         remove_loss
         return
@@ -494,6 +561,8 @@ run_iperf_test() {
 
     echo "PASS: ${loss_pct}% loss iperf3 receiver delivered ${throughput} Mbits/sec"
     PASS=$((PASS + 1))
+    record_result iperf "$loss_pct" "$throughput" positive pass
+    check_runtime_logs "iperf-loss-${loss_pct}" || true
 
     preserve_failure_if_requested
     remove_loss
@@ -519,6 +588,7 @@ cleanup_owned_resources || fatal "could not clean final owned resources"
 echo ""
 echo "=========================================="
 echo "  Results: ${PASS} passed, ${FAIL} failed"
+echo "  Evidence: ${ARTIFACT_DIR}"
 echo "=========================================="
 
 if [ "$FAIL" -gt 0 ]; then

@@ -104,7 +104,6 @@ const MAX_PENDING_TUN_DOWNLINK_AGE: Duration = Duration::from_secs(5);
 const MAX_MASQUE_DOWNLINK_RESPONSES: usize = 128;
 const MAX_MASQUE_DOWNLINK_RESPONSE_BYTES: usize = 192 * 1024;
 
-
 include!("parts/config.rs");
 include!("parts/bootstrap.rs");
 include!("parts/runtime_admin.rs");

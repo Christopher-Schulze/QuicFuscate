@@ -29,6 +29,8 @@ BURST_SCENARIOS=(
 KEEP_ON_FAIL="${QF_E2E_KEEP_ON_FAIL:-0}"
 LOCK_FILE="${QF_E2E_LOCK_FILE:-/tmp/quicfuscate-tun-e2e.lock}"
 LOCK_TIMEOUT="${QF_E2E_LOCK_TIMEOUT:-300}"
+ARTIFACT_DIR="${QF_E2E_ARTIFACT_DIR:-/tmp/quicfuscate-fec-burst-evidence-$$}"
+RUNTIME_FAILURE_PATTERN='panic|Crypto error: crypto failure|AEAD limit reached|Key update error|heartbeat timeout|InternalError|TUN packet send failed'
 PASS=0
 FAIL=0
 SERVER_PID=""
@@ -170,6 +172,21 @@ fatal() {
     exit 1
 }
 
+check_runtime_logs() {
+    local scenario="$1"
+    local matches="$ARTIFACT_DIR/runtime-errors-${scenario}.txt"
+    if grep -EHi "$RUNTIME_FAILURE_PATTERN" "$SERVER_LOG" "$CLIENT_LOG" > "$matches" 2>/dev/null; then
+        echo "FAIL: ${scenario} logs contain a panic, decryption, heartbeat, internal, or TUN-send failure"
+        FAIL=$((FAIL + 1))
+        printf '%s\tfailure\tdetected\n' "$scenario" >> "$ARTIFACT_DIR/runtime.tsv" \
+            || fatal "could not append ${scenario} runtime failure evidence"
+        return 1
+    fi
+    rm -f -- "$matches"
+    printf '%s\tpass\t0\n' "$scenario" >> "$ARTIFACT_DIR/runtime.tsv" \
+        || fatal "could not append ${scenario} runtime evidence"
+}
+
 preserve_failure_if_requested() {
     if [ "$KEEP_ON_FAIL" = "1" ] && [ "$FAIL" -gt 0 ]; then
         dump_diagnostics
@@ -198,6 +215,18 @@ run_ownership_self_test() {
 # Fail closed before touching certificates or runtime resources.
 if [ "$(id -u)" -ne 0 ]; then
     echo "FAIL: this harness requires root" >&2
+    exit 2
+fi
+if [ "${ARTIFACT_DIR#/}" = "$ARTIFACT_DIR" ]; then
+    echo "FAIL: QF_E2E_ARTIFACT_DIR must be an absolute path" >&2
+    exit 2
+fi
+if [ -e "$ARTIFACT_DIR" ]; then
+    echo "FAIL: refusing to overwrite existing artifact path: $ARTIFACT_DIR" >&2
+    exit 2
+fi
+if [ ! -d "$(dirname "$ARTIFACT_DIR")" ]; then
+    echo "FAIL: artifact parent directory does not exist: $(dirname "$ARTIFACT_DIR")" >&2
     exit 2
 fi
 case "$BURST_REPETITIONS" in
@@ -230,6 +259,22 @@ fi
 [ -x "$B" ] || fatal "release artifact is not executable: $B"
 [ -r "$CA" ] || fatal "CA certificate is not readable: $CA"
 [ -r "$CA_KEY" ] || fatal "CA key is not readable: $CA_KEY"
+for required_command in flock ip nc openssl ping python3 seq sha256sum tc; do
+    command -v "$required_command" >/dev/null 2>&1 \
+        || fatal "required command is not available: $required_command"
+done
+mkdir "$ARTIFACT_DIR" || fatal "could not create artifact directory: $ARTIFACT_DIR"
+{
+    printf 'binary_sha256=%s\n' "$(sha256sum "$B" | awk '{print $1}')"
+    printf 'burst_contract=%s\n' "${BURST_SCENARIOS[*]}"
+    printf 'burst_repetitions=%s\n' "$BURST_REPETITIONS"
+    printf 'ping_count=%s\n' "$PING_COUNT"
+    printf 'ping_interval_seconds=%s\n' "$PING_INTERVAL"
+} > "$ARTIFACT_DIR/run-manifest.txt" || fatal "could not create burst evidence manifest"
+printf 'profile\ttrial\tnetem_loss_percent\tcorrelation_percent\ttunnel_loss_percent\tmedian_limit_percent\tsample_limit_percent\n' \
+    > "$ARTIFACT_DIR/results.tsv" || fatal "could not create burst evidence results"
+printf 'scenario\tstatus\tdetail\n' > "$ARTIFACT_DIR/runtime.tsv" \
+    || fatal "could not create burst runtime evidence"
 RUNTIME_DIR="$(mktemp -d /tmp/quicfuscate-fec-burst.XXXXXX)" || fatal "could not create runtime directory"
 CERT="$RUNTIME_DIR/server.crt"
 KEY="$RUNTIME_DIR/server.key"
@@ -316,6 +361,9 @@ run_burst_trial() {
     if [ -z "$qkey" ]; then
         echo "FAIL: could not get qkey from server"
         FAIL=$((FAIL + 1))
+        printf '%s\tfailure\tqkey-missing\n' "${label// /-}-trial-${trial}" \
+            >> "$ARTIFACT_DIR/runtime.tsv" \
+            || fatal "could not append missing-QKey evidence"
         preserve_failure_if_requested
         return
     fi
@@ -342,9 +390,17 @@ run_burst_trial() {
     if [ "$cli_complete" -eq 0 ] || [ "$srv_complete" -eq 0 ]; then
         echo "FAIL: TLS handshake not complete (cli=$cli_complete srv=$srv_complete)"
         FAIL=$((FAIL + 1))
+        printf '%s\tfailure\thandshake-client-%s-server-%s\n' \
+            "${label// /-}-trial-${trial}" "$cli_complete" "$srv_complete" \
+            >> "$ARTIFACT_DIR/runtime.tsv" \
+            || fatal "could not append handshake failure evidence"
         preserve_failure_if_requested
         return
     fi
+    printf '%s\tpass\thandshake-client-%s-server-%s\n' \
+        "${label// /-}-trial-${trial}" "$cli_complete" "$srv_complete" \
+        >> "$ARTIFACT_DIR/runtime.tsv" \
+        || fatal "could not append handshake evidence"
 
     # Apply burst loss AFTER handshake
     if ip netns exec ns-cli tc qdisc add dev veth-cli root netem loss "${loss_pct}%" "${correlation}%"; then
@@ -357,6 +413,9 @@ run_burst_trial() {
     echo "Pinging through tunnel (${PING_COUNT} pings @ ${PING_INTERVAL}s interval)..."
     local ping_output
     ping_output=$(ip netns exec ns-cli ping -c "$PING_COUNT" -i "$PING_INTERVAL" -W 3 -I qtun0 10.0.1.1 2>&1)
+    printf '%s\n' "$ping_output" \
+        > "$ARTIFACT_DIR/ping-${label// /-}-trial-${trial}.txt" \
+        || fatal "could not preserve ${label} trial ${trial} ping evidence"
     echo "$ping_output" | tail -3
 
     local ping_loss
@@ -365,10 +424,7 @@ run_burst_trial() {
     echo "Tunnel loss: ${ping_loss}%"
     LAST_PING_LOSS="$ping_loss"
 
-    if grep -q 'panic' "$SERVER_LOG" "$CLIENT_LOG" 2>/dev/null; then
-        echo "FAIL: panic detected"
-        FAIL=$((FAIL + 1))
-    fi
+    check_runtime_logs "${label// /-}-trial-${trial}" || true
 
     preserve_failure_if_requested
     remove_qdisc || fatal "could not remove correlated netem loss"
@@ -392,6 +448,10 @@ run_burst_scenario() {
             continue
         fi
         samples+=("$LAST_PING_LOSS")
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$label" "$trial" "$loss_pct" "$correlation" "$LAST_PING_LOSS" \
+            "$median_limit" "$sample_limit" >> "$ARTIFACT_DIR/results.tsv" \
+            || fatal "could not append ${label} trial ${trial} evidence"
     done
 
     if [ "${#samples[@]}" -ne "$BURST_REPETITIONS" ]; then
@@ -408,12 +468,16 @@ run_burst_scenario() {
         return
     fi
     echo "PASS: ${label} ${aggregate}"
+    printf '%s\t%s\n' "$label" "$aggregate" >> "$ARTIFACT_DIR/summary.tsv" \
+        || fatal "could not append ${label} aggregate evidence"
     PASS=$((PASS + 1))
 }
 
 # --- Main ---
 echo "=== FEC Burst Loss E2E Test Suite (TODO-423) ==="
 echo "Burst contract: ${BURST_SCENARIOS[*]} (label:loss:correlation:median:max-sample)"
+printf 'profile\taggregate\n' > "$ARTIFACT_DIR/summary.tsv" \
+    || fatal "could not create burst aggregate evidence"
 
 for scenario in "${BURST_SCENARIOS[@]}"; do
     IFS=':' read -r label loss_pct correlation median_limit sample_limit <<< "$scenario"
@@ -425,6 +489,7 @@ cleanup_owned_resources || fatal "could not clean final owned resources"
 echo ""
 echo "=========================================="
 echo "  Results: ${PASS} passed, ${FAIL} failed"
+echo "  Evidence: ${ARTIFACT_DIR}"
 echo "=========================================="
 
 if [ "$FAIL" -gt 0 ]; then

@@ -166,7 +166,6 @@ impl RateChoker {
 
 include!("parts/tls_cover_provider.rs");
 
-
 /// TLS Cover record generation for DPI evasion (synthetic ClientHello/ServerHello).
 pub mod tls_cover;
 
@@ -176,7 +175,6 @@ pub mod fingerprint;
 pub use fingerprint::{OsFingerprintProfile, PacketNormalizer};
 
 // Legacy external TLS FFI removed: native TLS fingerprint injection is used exclusively.
-
 
 include!("parts/doh.rs");
 include!("parts/browser_profiles.rs");
