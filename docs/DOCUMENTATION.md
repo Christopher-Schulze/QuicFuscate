@@ -4223,6 +4223,10 @@ Enable kill-switch to prevent any traffic outside the tunnel.
 **Stale rules from crashed session:**
 - Run `quicfuscate client --cleanup-firewall` to remove stale kill-switch rules
 - This removes only the owned `quicfuscate_ks` table or `QUICFUSCATE_KS` chains and their exact OUTPUT jumps. It does not flush or replace an unrelated host ruleset.
+- A kill-switch-enabled client always performs the same stale cleanup before runtime or firewall setup. Cleanup failure aborts startup; `cleanup_firewall_on_start` remains a parsed compatibility key but cannot disable this safety invariant.
+- Cleanup uses exact typed resource identities, at most three attempts with 100 ms spacing, and an absent-resource postcondition. Success distinguishes an already-absent resource from a removed resource. Persistent inspection, removal, or postcondition failure propagates through CLI, Engine, and server shutdown results.
+- An unavailable Linux firewall tool is skipped only during cross-backend stale-residue inspection. Explicit selection of that backend still fails closed before firewall mutation, while an installed backend must complete and verify cleanup.
+- The exact ARM64 release artifact `54aa80dca01a67dfb7716aa35853245a7fd0334737fc7ad6af00743a127197fb` passes both privileged nftables and real iptables-only crash/restart lifecycles. The harness retains unrelated firewall fingerprints across atomic replacement failure, stale recovery, restart, and clean shutdown and leaves no owned namespace, link, rule, table, chain, or process residue.
 
 #### macOS
 **pf rules not loading:**
@@ -4233,9 +4237,10 @@ Enable kill-switch to prevent any traffic outside the tunnel.
 **Temp file conflicts:**
 - Kill-switch config uses PID-scoped temp files (`/tmp/quicfuscate_killswitch_<pid>.conf`) to avoid multi-instance conflicts
 - Stale rules can be cleaned with `quicfuscate client --cleanup-firewall`
+- Cleanup flushes and verifies only `com.quicfuscate.killswitch`. It never disables the shared PF service.
 
 #### Windows
-The production kill switch is currently unavailable on Windows and returns a hard `NotSupported` error. The former `netsh advfirewall` design could not safely combine broad block rules with narrower endpoint and Wintun exceptions because Windows Firewall block rules override allow rules. Stale legacy QuicFuscate rules can still be removed with `quicfuscate client --cleanup-firewall`. TODO-528 owns a native WFP-backed replacement and privileged packet proof.
+The production kill switch is currently unavailable on Windows and returns a hard `NotSupported` error. The former `netsh advfirewall` design could not safely combine broad block rules with narrower endpoint and Wintun exceptions because Windows Firewall block rules override allow rules. Stale legacy rules `QuicFuscate-KillSwitch-Block` and `QuicFuscate-KillSwitch-VPN` can still be removed with `quicfuscate client --cleanup-firewall`; exact PowerShell inspection and deletion must verify both are absent. The pre-existing dedicated TUN adapter is reference-owned, so cleanup never disables or deletes it by name. Exact restoration of its pre-connection address and DNS state is not yet implemented, so native Windows client lifecycle readiness remains open. TODO-528 owns the WFP/WinTUN production replacement and privileged packet proof.
 
 ### Heartbeat Watchdog
 
@@ -4246,7 +4251,7 @@ The client runtime owns one automatic 50 ms watchdog. It detects an explicit rem
 [security]
 kill_switch = true              # Enable kill switch
 heartbeat_timeout_ms = 30000    # 30s default; 0 to disable
-cleanup_firewall_on_start = false  # Clean stale rules on startup
+cleanup_firewall_on_start = false  # Compatibility key; cleanup remains mandatory
 ```
 
 `engine.check_heartbeat()` is now a compatibility probe only. It reports a loss already handled by the runtime-owned watchdog and must not be driven as a second polling loop. The standalone client exposes `--heartbeat-timeout-ms` and `--vpn-dns`; connected policy permits only the exact VPN UDP endpoint, selected VPN resolvers on TCP/UDP port 53 through the TUN interface, and remaining traffic through that TUN. Every other IPv4/IPv6 DNS destination is dropped before the general TUN allowance.

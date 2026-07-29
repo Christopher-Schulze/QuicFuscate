@@ -78,20 +78,16 @@ impl LinuxPlatform {
     }
 
     fn restore_resolv_conf_from_backup(&self) -> Result<(), PlatformError> {
-        let backup = {
-            let mut guard = self.resolv_conf_backup.lock().unwrap_or_else(|e| e.into_inner());
-            guard.take()
-        };
+        let backup = self.resolv_conf_backup.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let Some(path) = backup else {
             return Ok(());
         };
         if path.exists() {
             std::fs::copy(&path, RESOLV_CONF_PATH)
                 .map_err(|e| PlatformError::DnsError(e.to_string()))?;
-            if let Err(e) = std::fs::remove_file(path) {
-                log::debug!("Failed to remove resolv.conf backup after restore: {}", e);
-            }
+            std::fs::remove_file(&path).map_err(|e| PlatformError::DnsError(e.to_string()))?;
         }
+        *self.resolv_conf_backup.lock().unwrap_or_else(|e| e.into_inner()) = None;
         Ok(())
     }
 }
@@ -221,24 +217,36 @@ impl PlatformBackend for LinuxPlatform {
         Ok(TunHandle { name, id, fd: file.into_raw_fd() })
     }
 
-    fn destroy_tun(&self, handle: TunHandle) -> Result<(), PlatformError> {
+    fn destroy_tun(&self, handle: &mut TunHandle) -> Result<(), PlatformError> {
+        let mut command_failures = Vec::new();
         if let Err(e) = self.run_ip(&["link", "set", &handle.name, "down"]) {
-            log::debug!("Failed to bring TUN {} down during destroy: {}", handle.name, e);
+            command_failures.push(e.to_string());
         }
         if let Err(e) = self.run_ip(&["link", "delete", &handle.name]) {
-            log::debug!("Failed to delete TUN {} during destroy: {}", handle.name, e);
+            command_failures.push(e.to_string());
         }
 
         // Close file descriptor
         // SAFETY: `handle.fd` is the raw file descriptor of the TUN device opened in
-        // `create_tun`. Ownership transfers into `TunHandle` at that point, and
-        // `destroy_tun` is the single place where it is closed. The handle is consumed
-        // by value, so it cannot be used again after this call.
-        unsafe {
-            libc::close(handle.fd);
+        // `create_tun`. A close error must not be retried because the descriptor
+        // number may already have been released and reused.
+        if handle.fd >= 0 {
+            let close_result = unsafe { libc::close(handle.fd) };
+            handle.fd = -1;
+            if close_result != 0 {
+                command_failures
+                    .push(format!("close TUN descriptor: {}", std::io::Error::last_os_error()));
+            }
+        }
+
+        if Path::new("/sys/class/net").join(&handle.name).exists() {
+            return Err(PlatformError::DeviceError(format!(
+                "owned TUN {} remains after descriptor close: {}",
+                handle.name,
+                command_failures.join("; ")
+            )));
         }
         self.set_active_tun_name(None);
-
         log::info!("Destroyed TUN device {}", handle.name);
         Ok(())
     }
@@ -272,37 +280,26 @@ impl PlatformBackend for LinuxPlatform {
 
     fn remove_route(&self, route: &RouteConfig) -> Result<(), PlatformError> {
         match route.destination {
-            IpAddr::V4(_) => {
-                if let Err(e) = self.run_ip(&[
-                    "route",
-                    "del",
-                    &format!("{}/{}", route.destination, route.prefix_len),
-                ]) {
-                    log::debug!(
-                        "Failed to remove IPv4 route {}/{}: {}",
-                        route.destination,
-                        route.prefix_len,
-                        e
-                    );
-                }
-            }
-            IpAddr::V6(_) => {
-                if let Err(e) = self.run_ip(&[
-                    "-6",
-                    "route",
-                    "del",
-                    &format!("{}/{}", route.destination, route.prefix_len),
-                ]) {
-                    log::debug!(
-                        "Failed to remove IPv6 route {}/{}: {}",
-                        route.destination,
-                        route.prefix_len,
-                        e
-                    );
-                }
-            }
+            IpAddr::V4(_) => self.run_ip(&[
+                "route",
+                "del",
+                &format!("{}/{}", route.destination, route.prefix_len),
+                "via",
+                &route.gateway.to_string(),
+                "metric",
+                &route.metric.to_string(),
+            ]),
+            IpAddr::V6(_) => self.run_ip(&[
+                "-6",
+                "route",
+                "del",
+                &format!("{}/{}", route.destination, route.prefix_len),
+                "via",
+                &route.gateway.to_string(),
+                "metric",
+                &route.metric.to_string(),
+            ]),
         }
-        Ok(())
     }
 
     fn set_dns(&self, config: &DnsConfig) -> Result<(), PlatformError> {
@@ -347,9 +344,7 @@ impl PlatformBackend for LinuxPlatform {
     fn restore_dns(&self) -> Result<(), PlatformError> {
         if self.has_systemd_resolved() {
             if let Ok(name) = self.active_tun_name() {
-                if let Err(e) = self.run_command("resolvectl", &["revert", &name]) {
-                    log::debug!("Failed to revert resolvectl DNS for {}: {}", name, e);
-                }
+                self.run_command("resolvectl", &["revert", &name])?;
             }
         }
         self.restore_resolv_conf_from_backup()?;

@@ -108,8 +108,12 @@ pub trait PlatformBackend: Send + Sync {
     /// Create and configure TUN device.
     fn create_tun(&self, config: &TunDeviceConfig) -> Result<TunHandle, PlatformError>;
 
-    /// Destroy TUN device.
-    fn destroy_tun(&self, handle: TunHandle) -> Result<(), PlatformError>;
+    /// Destroy a descriptor-owned TUN device.
+    ///
+    /// The mutable handle remains with the caller until the platform verifies
+    /// the interface is absent, allowing bounded retries without losing the
+    /// ownership proof after a partial failure.
+    fn destroy_tun(&self, handle: &mut TunHandle) -> Result<(), PlatformError>;
 
     /// Add a route.
     fn add_route(&self, route: &RouteConfig) -> Result<(), PlatformError>;
@@ -139,6 +143,21 @@ pub struct TunHandle {
     pub fd: std::os::unix::io::RawFd,
     #[cfg(windows)]
     pub handle: usize,
+}
+
+#[cfg(unix)]
+impl Drop for TunHandle {
+    fn drop(&mut self) {
+        if self.fd >= 0 {
+            // SAFETY: `fd` remains owned by this handle until platform cleanup
+            // closes it and sets it to -1. Drop is the final leak-prevention
+            // fallback when all explicit cleanup attempts fail.
+            unsafe {
+                libc::close(self.fd);
+            }
+            self.fd = -1;
+        }
+    }
 }
 
 #[cfg(test)]

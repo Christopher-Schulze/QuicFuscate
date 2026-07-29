@@ -83,7 +83,7 @@ impl ServerRuntime {
                                 ))
                             })?;
                             if let Err(error) = routing.setup() {
-                                let _ = routing.teardown();
+                                let rollback_error = routing.teardown().err();
                                 crate::audit::audit_typed(
                                     crate::audit::AuditEventType::FirewallRuleAdded,
                                     crate::audit::AuditSeverity::Critical,
@@ -97,9 +97,15 @@ impl ServerRuntime {
                                     },
                                     &format!("Standalone server routing setup failed: {error}"),
                                 );
-                                return Err(std::io::Error::other(format!(
-                                    "standalone server routing setup failed: {error}"
-                                )));
+                                let detail = rollback_error.map_or_else(
+                                    || format!("standalone server routing setup failed: {error}"),
+                                    |rollback| {
+                                        format!(
+                                            "standalone server routing setup failed: {error}; owned rollback failed: {rollback}"
+                                        )
+                                    },
+                                );
+                                return Err(std::io::Error::other(detail));
                             }
                             Some(routing)
                         };
@@ -299,7 +305,9 @@ impl ServerRuntime {
     pub fn stop(&mut self) -> Result<(), EngineError> {
         if self.state == ServerState::Stopped {
             if let Some(routing) = self.live.as_mut().and_then(|live| live.routing.take()) {
-                teardown_routing_with_retries(routing);
+                teardown_routing(routing).map_err(|error| {
+                    EngineError::Io(format!("server routing teardown failed: {error}"))
+                })?;
             }
             return Ok(());
         }
@@ -312,18 +320,28 @@ impl ServerRuntime {
             self.domain.remove(id);
         }
 
+        let mut cleanup_errors = Vec::new();
         if let Some(resources) = self.host_resources.take() {
-            resources.teardown();
+            if let Err(error) = resources.teardown() {
+                cleanup_errors.push(error.to_string());
+            }
         }
         if let Some(routing) = self.live.as_mut().and_then(|live| live.routing.take()) {
-            teardown_routing_with_retries(routing);
+            if let Err(error) = teardown_routing(routing) {
+                cleanup_errors.push(format!("server routing teardown failed: {error}"));
+            }
         }
 
         self.state = ServerState::Stopped;
         self.graceful_shutdown.set_stopped();
-        log::info!("Server stopped");
-
-        Ok(())
+        if cleanup_errors.is_empty() {
+            log::info!("Server stopped");
+            Ok(())
+        } else {
+            let detail = cleanup_errors.join("; ");
+            log::error!("Server stopped with incomplete owned cleanup: {}", detail);
+            Err(EngineError::Io(detail))
+        }
     }
 
     /// Handle new client connection.
@@ -715,10 +733,9 @@ impl ServerRuntime {
                 live.admin_actions_rx = Some(admin_actions_rx);
                 live.service_signals.shutdown_all();
                 if let Err(stop_error) = self.stop() {
-                    log::warn!(
-                        "Server cleanup after signal handler installation failure failed: {}",
-                        stop_error
-                    );
+                    return Err(std::io::Error::other(format!(
+                        "{error}; server cleanup after signal handler installation failure failed: {stop_error}"
+                    )));
                 }
                 return Err(error);
             }
@@ -962,9 +979,8 @@ impl ServerRuntime {
         }
 
         self.live_mut().admin_actions_rx = Some(admin_actions_rx);
-        if let Err(error) = self.stop() {
-            log::warn!("ServerRuntime shutdown during loop exit failed: {}", error);
-        }
+        self.stop()
+            .map_err(|error| std::io::Error::other(format!("server shutdown failed: {error}")))?;
 
         Ok(())
     }

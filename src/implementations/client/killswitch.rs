@@ -291,9 +291,20 @@ impl LinuxKillSwitch {
 
     fn cleanup_stale() -> Result<(), KillSwitchError> {
         // Attempt both backends because a previous session may have selected
-        // either one. Never let one cleanup failure suppress the other attempt.
+        // either one. An unavailable command cannot own inspectable live state;
+        // an installed command must complete its exact cleanup or fail closed.
         let iptables_result = IptablesKillSwitch::cleanup_stale();
-        let nftables_result = NftablesKillSwitch::cleanup_stale();
+        let nftables_result = if std::process::Command::new("nft")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            NftablesKillSwitch::cleanup_stale()
+        } else {
+            Ok(())
+        };
         match (iptables_result, nftables_result) {
             (Ok(()), Ok(())) => Ok(()),
             (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
@@ -483,9 +494,8 @@ impl IptablesKillSwitch {
     }
 
     fn cleanup(&self) -> Result<(), KillSwitchError> {
-        if !self.rules_active.load(Ordering::SeqCst) {
-            return Ok(());
-        }
+        // Always inspect the owned chains. A dual-stack transaction can fail
+        // after installing only one family, before `rules_active` is set.
         Self::cleanup_stale()?;
         self.rules_active.store(false, Ordering::SeqCst);
         log::debug!("Kill switch: owned chains and jumps removed (IPv4+IPv6)");
@@ -493,61 +503,23 @@ impl IptablesKillSwitch {
     }
 
     fn cleanup_stale() -> Result<(), KillSwitchError> {
-        Self::cleanup_family("iptables")?;
-        Self::cleanup_family("ip6tables")?;
+        let mut failures = Vec::new();
+        for program in ["iptables", "ip6tables"] {
+            if let Err(error) = Self::cleanup_family(program) {
+                failures.push(error.to_string());
+            }
+        }
+        if !failures.is_empty() {
+            return Err(KillSwitchError::CommandFailed(failures.join("; ")));
+        }
         log::info!("Owned kill switch chains removed ({}, IPv4+IPv6)", KS_CHAIN);
         Ok(())
     }
 
     fn cleanup_family(program: &str) -> Result<(), KillSwitchError> {
-        use std::process::{Command, Stdio};
-
-        let exists = match Command::new(program)
-            .args(["-S", KS_CHAIN])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-        {
-            Ok(status) => status.success(),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => {
-                return Err(KillSwitchError::CommandFailed(format!("{program}: {error}")));
-            }
-        };
-        if !exists {
-            return Ok(());
-        }
-
-        while Command::new(program)
-            .args(["-C", "OUTPUT", "-j", KS_CHAIN])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
-        {
-            Self::checked_status(program, &["-D", "OUTPUT", "-j", KS_CHAIN])?;
-        }
-        Self::checked_status(program, &["-F", KS_CHAIN])?;
-        Self::checked_status(program, &["-X", KS_CHAIN])
-    }
-
-    fn checked_status(program: &str, args: &[&str]) -> Result<(), KillSwitchError> {
-        use std::process::Command;
-
-        let status = Command::new(program)
-            .args(args)
-            .status()
-            .map_err(|error| KillSwitchError::CommandFailed(format!("{program}: {error}")))?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(KillSwitchError::CommandFailed(format!(
-                "{} {} returned status {}",
-                program,
-                args.join(" "),
-                status
-            )))
-        }
+        crate::firewall::cleanup_iptables_chain(program, "filter", "OUTPUT", KS_CHAIN)
+            .map(|_| ())
+            .map_err(|error| KillSwitchError::CommandFailed(error.to_string()))
     }
 }
 
@@ -762,9 +734,9 @@ impl NftablesKillSwitch {
     /// Queries `nft list table` to determine existence; if the table is
     /// present it is deleted unconditionally.
     fn cleanup_stale() -> Result<(), KillSwitchError> {
-        let removed = crate::firewall::delete_nft_table("inet", KS_NFT_TABLE)
+        let outcome = crate::firewall::delete_nft_table("inet", KS_NFT_TABLE)
             .map_err(|error| KillSwitchError::CommandFailed(error.to_string()))?;
-        if removed {
+        if outcome.removed() {
             log::info!("Stale nftables kill switch table deleted (inet {})", KS_NFT_TABLE);
         } else {
             log::info!("Stale nftables kill switch table not present (nothing to clean)");
@@ -781,8 +753,6 @@ impl NftablesKillSwitch {
 struct MacOSKillSwitch {
     rules_active: AtomicBool,
     anchor_name: String,
-    /// Whether we enabled pf ourselves (vs. it was already enabled)
-    pf_enabled_by_us: AtomicBool,
     /// PID-scoped config file path to avoid multi-instance conflicts
     config_path: String,
 }
@@ -794,8 +764,24 @@ impl MacOSKillSwitch {
         Self {
             rules_active: AtomicBool::new(false),
             anchor_name: "com.quicfuscate.killswitch".to_string(),
-            pf_enabled_by_us: AtomicBool::new(false),
             config_path: format!("/tmp/quicfuscate_killswitch_{}.conf", pid),
+        }
+    }
+
+    fn run_pfctl(args: &[&str], action: &str) -> Result<(), KillSwitchError> {
+        let output = std::process::Command::new("pfctl")
+            .args(args)
+            .output()
+            .map_err(|error| KillSwitchError::CommandFailed(format!("{action}: {error}")))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(KillSwitchError::CommandFailed(format!(
+                "{} returned status {}: {}",
+                action,
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim(),
+            )))
         }
     }
 
@@ -825,23 +811,14 @@ impl MacOSKillSwitch {
         }
 
         if self.is_pf_enabled() {
-            self.pf_enabled_by_us.store(false, Ordering::SeqCst);
             log::debug!("Kill switch: pf already enabled, skipping pfctl -e");
             return Ok(());
         }
 
-        Command::new("pfctl")
-            .args(["-e"])
-            .status()
-            .map_err(|e| KillSwitchError::CommandFailed(e.to_string()))?;
-
-        self.pf_enabled_by_us.store(true, Ordering::SeqCst);
-        Ok(())
+        Self::run_pfctl(&["-e"], "pfctl enable")
     }
 
     fn block_traffic(&self) -> Result<(), KillSwitchError> {
-        use std::process::Command;
-
         // Create pf rules
         let rules = "block out all\npass out on lo0\n".to_string();
 
@@ -850,10 +827,10 @@ impl MacOSKillSwitch {
             .map_err(|e| KillSwitchError::CommandFailed(e.to_string()))?;
 
         // Load rules
-        Command::new("pfctl")
-            .args(["-a", &self.anchor_name, "-f", &self.config_path])
-            .status()
-            .map_err(|e| KillSwitchError::CommandFailed(e.to_string()))?;
+        Self::run_pfctl(
+            &["-a", &self.anchor_name, "-f", &self.config_path],
+            "pfctl kill-switch anchor load",
+        )?;
 
         // Enable pf only if not already enabled
         self.ensure_pf_enabled()?;
@@ -879,8 +856,6 @@ impl MacOSKillSwitch {
         policy: &VpnFirewallPolicy,
         connected: bool,
     ) -> Result<(), KillSwitchError> {
-        use std::process::Command;
-
         let mut rules = "pass out quick on lo0\n".to_string();
         if let Some((ip, port)) = policy.server_ipv4() {
             rules.push_str(&format!("pass out quick proto udp to {ip} port {port}\n"));
@@ -905,10 +880,10 @@ impl MacOSKillSwitch {
         std::fs::write(&self.config_path, &rules)
             .map_err(|e| KillSwitchError::CommandFailed(e.to_string()))?;
 
-        Command::new("pfctl")
-            .args(["-a", &self.anchor_name, "-f", &self.config_path])
-            .status()
-            .map_err(|e| KillSwitchError::CommandFailed(e.to_string()))?;
+        Self::run_pfctl(
+            &["-a", &self.anchor_name, "-f", &self.config_path],
+            "pfctl kill-switch policy load",
+        )?;
 
         // Ensure pf is enabled (idempotent)
         self.ensure_pf_enabled()?;
@@ -918,46 +893,18 @@ impl MacOSKillSwitch {
     }
 
     fn cleanup(&self) -> Result<(), KillSwitchError> {
-        use std::process::Command;
+        crate::firewall::cleanup_pf_anchor(&self.anchor_name)
+            .map_err(|error| KillSwitchError::CommandFailed(error.to_string()))?;
 
-        if !self.rules_active.load(Ordering::SeqCst) {
-            return Ok(());
-        }
-
-        // Flush anchor
-        match Command::new("pfctl").args(["-a", &self.anchor_name, "-F", "all"]).status() {
-            Ok(status) if status.success() => {}
-            Ok(status) => {
-                log::debug!("Kill switch cleanup pfctl flush returned status {}", status);
+        match std::fs::remove_file(&self.config_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(KillSwitchError::CommandFailed(format!(
+                    "owned kill-switch config removal {}: {}",
+                    self.config_path, error
+                )));
             }
-            Err(e) => {
-                log::debug!("Kill switch cleanup pfctl flush failed: {}", e);
-            }
-        }
-
-        // Only disable pf if we were the ones who enabled it
-        if self.pf_enabled_by_us.load(Ordering::SeqCst) {
-            match Command::new("pfctl").args(["-d"]).status() {
-                Ok(status) if status.success() => {
-                    log::debug!("Kill switch: disabled pf (we enabled it)");
-                }
-                Ok(status) => {
-                    log::debug!("Kill switch cleanup pfctl -d returned status {}", status);
-                }
-                Err(e) => {
-                    log::debug!("Kill switch cleanup pfctl -d failed: {}", e);
-                }
-            }
-            self.pf_enabled_by_us.store(false, Ordering::SeqCst);
-        }
-
-        // Clean up PID-scoped config file
-        if let Err(e) = std::fs::remove_file(&self.config_path) {
-            log::debug!(
-                "Kill switch cleanup: failed to remove config file {}: {}",
-                self.config_path,
-                e
-            );
         }
 
         self.rules_active.store(false, Ordering::SeqCst);
@@ -965,20 +912,10 @@ impl MacOSKillSwitch {
     }
 
     fn cleanup_stale() -> Result<(), KillSwitchError> {
-        use std::process::Command;
-        // Flush the kill switch anchor unconditionally
-        match Command::new("pfctl").args(["-a", "com.quicfuscate.killswitch", "-F", "all"]).status()
-        {
-            Ok(status) if status.success() => {
-                log::info!("Stale pf anchor rules flushed");
-                Ok(())
-            }
-            Ok(status) => Err(KillSwitchError::CommandFailed(format!(
-                "pfctl anchor flush returned status {}",
-                status
-            ))),
-            Err(e) => Err(KillSwitchError::CommandFailed(e.to_string())),
-        }
+        crate::firewall::cleanup_pf_anchor("com.quicfuscate.killswitch")
+            .map_err(|error| KillSwitchError::CommandFailed(error.to_string()))?;
+        log::info!("Stale pf anchor rules verified absent");
+        Ok(())
     }
 }
 
@@ -992,9 +929,31 @@ struct WindowsKillSwitch {
 }
 
 #[cfg(target_os = "windows")]
+const WINDOWS_BLOCK_RULE: &str = "QuicFuscate-KillSwitch-Block";
+#[cfg(target_os = "windows")]
+const WINDOWS_VPN_RULE: &str = "QuicFuscate-KillSwitch-VPN";
+
+#[cfg(target_os = "windows")]
 impl WindowsKillSwitch {
     fn new() -> Self {
         Self { rules_active: AtomicBool::new(false) }
+    }
+
+    fn run_netsh(args: &[&str], action: &str) -> Result<(), KillSwitchError> {
+        let output = std::process::Command::new("netsh")
+            .args(args)
+            .output()
+            .map_err(|error| KillSwitchError::CommandFailed(format!("{action}: {error}")))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(KillSwitchError::CommandFailed(format!(
+                "{} returned status {}: {}",
+                action,
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim(),
+            )))
+        }
     }
 
     fn block_traffic(&self) -> Result<(), KillSwitchError> {
@@ -1010,19 +969,23 @@ impl WindowsKillSwitch {
     }
 
     fn allow_vpn_traffic(&self, policy: &VpnFirewallPolicy) -> Result<(), KillSwitchError> {
-        use std::process::Command;
-
         self.cleanup()?;
 
-        // Remove any existing VPN allow rules to prevent accumulation
-        Command::new("netsh")
-            .args(["advfirewall", "firewall", "delete", "rule", "name=QuicFuscate-KillSwitch-VPN"])
-            .status()
-            .ok();
-
         // Allow VPN server
-        Command::new("netsh")
-            .args([
+        let remote_ip = format!(
+            "remoteip={}",
+            policy
+                .server_ipv4()
+                .map(|(ip, _)| ip.to_string())
+                .or_else(|| policy.server_ipv6().map(|(ip, _)| ip.to_string()))
+                .ok_or_else(|| {
+                    KillSwitchError::InvalidPolicy(
+                        "at least one VPN server address is required".to_string(),
+                    )
+                })?
+        );
+        Self::run_netsh(
+            &[
                 "advfirewall",
                 "firewall",
                 "add",
@@ -1030,35 +993,13 @@ impl WindowsKillSwitch {
                 "name=QuicFuscate-KillSwitch-VPN",
                 "dir=out",
                 "action=allow",
-                &format!(
-                    "remoteip={}",
-                    policy
-                        .server_ipv4()
-                        .map(|(ip, _)| ip.to_string())
-                        .or_else(|| policy.server_ipv6().map(|(ip, _)| ip.to_string()))
-                        .ok_or_else(|| KillSwitchError::InvalidPolicy(
-                            "at least one VPN server address is required".to_string()
-                        ))?
-                ),
-            ])
-            .status()
-            .map_err(|e| KillSwitchError::CommandFailed(e.to_string()))?;
+                &remote_ip,
+            ],
+            "add owned VPN allow rule",
+        )?;
 
-        // Remove any existing block rules to prevent accumulation
-        Command::new("netsh")
-            .args([
-                "advfirewall",
-                "firewall",
-                "delete",
-                "rule",
-                "name=QuicFuscate-KillSwitch-Block",
-            ])
-            .status()
-            .ok();
-
-        // Block rest
-        Command::new("netsh")
-            .args([
+        if let Err(error) = Self::run_netsh(
+            &[
                 "advfirewall",
                 "firewall",
                 "add",
@@ -1066,71 +1007,46 @@ impl WindowsKillSwitch {
                 "name=QuicFuscate-KillSwitch-Block",
                 "dir=out",
                 "action=block",
-            ])
-            .status()
-            .map_err(|e| KillSwitchError::CommandFailed(e.to_string()))?;
+            ],
+            "add owned block rule",
+        ) {
+            let rollback = self.cleanup();
+            return Err(match rollback {
+                Ok(()) => error,
+                Err(rollback_error) => KillSwitchError::CommandFailed(format!(
+                    "{error}; partial-setup rollback failed: {rollback_error}"
+                )),
+            });
+        }
 
         self.rules_active.store(true, Ordering::SeqCst);
         Ok(())
     }
 
     fn cleanup(&self) -> Result<(), KillSwitchError> {
-        use std::process::Command;
-
-        if !self.rules_active.load(Ordering::SeqCst) {
-            return Ok(());
-        }
-
-        // Remove our rules
-        match Command::new("netsh")
-            .args([
-                "advfirewall",
-                "firewall",
-                "delete",
-                "rule",
-                "name=QuicFuscate-KillSwitch-Block",
-            ])
-            .status()
-        {
-            Ok(status) if status.success() => {}
-            Ok(status) => {
-                log::debug!(
-                    "Kill switch cleanup netsh block-rule delete returned status {}",
-                    status
-                );
-            }
-            Err(e) => {
-                log::debug!("Kill switch cleanup netsh block-rule delete failed: {}", e);
-            }
-        }
-
-        match Command::new("netsh")
-            .args(["advfirewall", "firewall", "delete", "rule", "name=QuicFuscate-KillSwitch-VPN"])
-            .status()
-        {
-            Ok(status) if status.success() => {}
-            Ok(status) => {
-                log::debug!("Kill switch cleanup netsh vpn-rule delete returned status {}", status);
-            }
-            Err(e) => {
-                log::debug!("Kill switch cleanup netsh vpn-rule delete failed: {}", e);
-            }
-        }
-
+        Self::cleanup_owned_rules()?;
         self.rules_active.store(false, Ordering::SeqCst);
         Ok(())
     }
 
     fn cleanup_stale() -> Result<(), KillSwitchError> {
-        use std::process::Command;
-        // Unconditionally delete both rules
-        for rule_name in ["QuicFuscate-KillSwitch-Block", "QuicFuscate-KillSwitch-VPN"] {
-            let _ = Command::new("netsh")
-                .args(["advfirewall", "firewall", "delete", "rule", &format!("name={}", rule_name)])
-                .status();
-        }
-        log::info!("Stale netsh firewall rules cleaned");
+        Self::cleanup_owned_rules()?;
+        log::info!("Stale Windows firewall rules verified absent");
         Ok(())
+    }
+
+    fn cleanup_owned_rules() -> Result<(), KillSwitchError> {
+        let mut failures = Vec::new();
+        for rule_name in [WINDOWS_BLOCK_RULE, WINDOWS_VPN_RULE] {
+            if let Err(error) = crate::firewall::cleanup_windows_firewall_rule(rule_name) {
+                failures.push(error.to_string());
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(KillSwitchError::CommandFailed(failures.join("; ")))
+        }
     }
 }
 

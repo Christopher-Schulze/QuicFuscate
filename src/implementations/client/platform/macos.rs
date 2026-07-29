@@ -395,19 +395,38 @@ impl PlatformBackend for MacOSPlatform {
         Ok(TunHandle { name, id: utun_num, fd })
     }
 
-    fn destroy_tun(&self, handle: TunHandle) -> Result<(), PlatformError> {
-        // Bring down interface
-        if let Err(e) = self.run_ifconfig(&[&handle.name, "down"]) {
-            log::debug!("Failed to bring {} down during destroy: {}", handle.name, e);
-        }
+    fn destroy_tun(&self, handle: &mut TunHandle) -> Result<(), PlatformError> {
+        let down_error = self.run_ifconfig(&[&handle.name, "down"]).err();
 
         // Close socket
         // SAFETY: `handle.fd` is the raw file descriptor of the utun socket created in
-        // `create_tun`. Ownership transfers into `TunHandle` at that point. `destroy_tun`
-        // consumes the handle by value and is the single place that closes this fd.
-        // The fd is not used after this call.
-        unsafe {
-            libc::close(handle.fd);
+        // `create_tun`. A close error must not be retried because the descriptor
+        // number may already have been released and reused.
+        let mut close_error = None;
+        if handle.fd >= 0 {
+            let close_result = unsafe { libc::close(handle.fd) };
+            handle.fd = -1;
+            if close_result != 0 {
+                close_error = Some(format!(
+                    "close owned utun descriptor {}: {}",
+                    handle.name,
+                    std::io::Error::last_os_error()
+                ));
+            }
+        }
+        if Command::new("ifconfig")
+            .arg(&handle.name)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            return Err(PlatformError::DeviceError(format!(
+                "owned utun {} remains after descriptor close{}{}",
+                handle.name,
+                down_error.map_or_else(String::new, |error| format!("; down failed: {error}")),
+                close_error.map_or_else(String::new, |error| format!("; {error}"))
+            )));
         }
 
         log::info!("Destroyed utun device {}", handle.name);
@@ -425,20 +444,13 @@ impl PlatformBackend for MacOSPlatform {
     }
 
     fn remove_route(&self, route: &RouteConfig) -> Result<(), PlatformError> {
-        if let Err(e) = self.run_route(&[
+        self.run_route(&[
             "-n",
             "delete",
             "-net",
             &format!("{}/{}", route.destination, route.prefix_len),
-        ]) {
-            log::debug!(
-                "Failed to remove route {}/{} on macOS: {}",
-                route.destination,
-                route.prefix_len,
-                e
-            );
-        }
-        Ok(())
+            &route.gateway.to_string(),
+        ])
     }
 
     fn set_dns(&self, config: &DnsConfig) -> Result<(), PlatformError> {
@@ -470,10 +482,7 @@ impl PlatformBackend for MacOSPlatform {
         let service = self.dns_service_name()?;
 
         // Restore original DNS servers instead of blindly resetting to DHCP
-        let saved = {
-            let mut guard = self.original_dns.lock().unwrap_or_else(|e| e.into_inner());
-            guard.take()
-        };
+        let saved = self.original_dns.lock().unwrap_or_else(|e| e.into_inner()).clone();
 
         match saved {
             Some(servers) if !servers.is_empty() => {
@@ -491,6 +500,7 @@ impl PlatformBackend for MacOSPlatform {
             }
         }
 
+        *self.original_dns.lock().unwrap_or_else(|e| e.into_inner()) = None;
         Ok(())
     }
 

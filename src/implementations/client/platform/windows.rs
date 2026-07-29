@@ -140,12 +140,12 @@ impl PlatformBackend for WindowsPlatform {
         Ok(TunHandle { name, id: 0, handle: 0 })
     }
 
-    fn destroy_tun(&self, handle: TunHandle) -> Result<(), PlatformError> {
-        // Disable the adapter
-        self.run_netsh(&["interface", "set", "interface", &handle.name, "admin=disabled"])?;
+    fn destroy_tun(&self, handle: &mut TunHandle) -> Result<(), PlatformError> {
         self.set_active_interface(None);
-
-        log::info!("Destroyed TUN device {}", handle.name);
+        log::info!(
+            "Released TUN adapter reference {} without modifying shared adapter state",
+            handle.name
+        );
         Ok(())
     }
 
@@ -165,10 +165,13 @@ impl PlatformBackend for WindowsPlatform {
     }
 
     fn remove_route(&self, route: &RouteConfig) -> Result<(), PlatformError> {
-        if let Err(e) = self.run_route(&["delete", &route.destination.to_string()]) {
-            log::debug!("Failed to remove Windows route {}: {}", route.destination, e);
-        }
-        Ok(())
+        self.run_route(&[
+            "delete",
+            &route.destination.to_string(),
+            "mask",
+            &prefix_to_netmask(route.prefix_len),
+            &route.gateway.to_string(),
+        ])
     }
 
     fn set_dns(&self, config: &DnsConfig) -> Result<(), PlatformError> {

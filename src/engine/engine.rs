@@ -768,6 +768,11 @@ impl QuicFuscateEngine {
         } else {
             self.config.security.firewall.backend.unwrap_or_default()
         };
+        if self.config.engine.mode == EngineMode::Client && self.config.security.kill_switch {
+            KillSwitch::cleanup_stale_rules().map_err(|error| {
+                EngineError::Internal(format!("Kill switch stale cleanup failed: {error}"))
+            })?;
+        }
 
         let start_result = (|| -> Result<(), EngineError> {
             match self.config.engine.mode {
@@ -910,12 +915,6 @@ impl QuicFuscateEngine {
 
         // Initialize kill switch for client mode if enabled
         if self.config.engine.mode == EngineMode::Client && self.config.security.kill_switch {
-            // Optionally cleanup stale rules from a crashed previous session
-            if self.config.security.cleanup_firewall_on_start {
-                if let Err(e) = KillSwitch::cleanup_stale_rules() {
-                    log::warn!("Kill switch stale rule cleanup failed: {}", e);
-                }
-            }
             let ks = Arc::new(KillSwitch::new_with_backend(firewall_backend));
             ks.enable()
                 .map_err(|e| EngineError::Internal(format!("Kill switch enable failed: {}", e)))?;
@@ -996,18 +995,24 @@ impl QuicFuscateEngine {
         self.start_time = None;
 
         // Disable kill switch on stop (removes all firewall rules)
-        if let Some(ks) = self.kill_switch.take() {
-            if let Err(e) = ks.disable() {
-                log::warn!("Kill switch disable on stop failed: {}", e);
-            }
-        }
-
-        log::info!("Engine stopped gracefully");
+        let kill_switch_cleanup_error =
+            self.kill_switch.take().and_then(|ks| ks.disable().err()).map(|error| {
+                EngineError::Internal(format!("Kill switch disable on stop failed: {error}"))
+            });
 
         self.set_state(EngineState::Stopped);
         self.notify_state_change(old_state, EngineState::Stopped);
 
-        Ok(())
+        match kill_switch_cleanup_error {
+            Some(error) => {
+                log::error!("Engine stopped with incomplete kill switch cleanup: {error}");
+                Err(error)
+            }
+            None => {
+                log::info!("Engine stopped gracefully");
+                Ok(())
+            }
+        }
     }
 
     /// Connect to remote server (client mode only).

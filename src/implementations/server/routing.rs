@@ -111,6 +111,22 @@ impl RoutingManager {
         self.server_ipv6.is_some()
     }
 
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    fn record_cleanup_failure(failures: &mut Vec<String>, result: Result<(), RoutingError>) {
+        if let Err(error) = result {
+            failures.push(error.to_string());
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    fn finish_cleanup(failures: Vec<String>) -> Result<(), RoutingError> {
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(RoutingError::CommandFailed(failures.join("; ")))
+        }
+    }
+
     /// Set up routing rules.
     #[cfg(target_os = "linux")]
     pub fn setup(&self) -> Result<(), RoutingError> {
@@ -232,129 +248,69 @@ impl RoutingManager {
     pub fn cleanup_stale(&self) -> Result<(), RoutingError> {
         let subnet = self.calculate_subnet();
         log::info!("Cleaning up stale routing rules for subnet {}", subnet);
+        let mut failures = Vec::new();
 
         // Current releases own dedicated chains. Keep the exact legacy-rule
         // cleanup below for crash residue left by older releases.
-        if Command::new("iptables").arg("--version").status().is_ok_and(|status| status.success()) {
-            Self::cleanup_iptables_owned("iptables")?;
-        }
-        if Command::new("ip6tables").arg("--version").status().is_ok_and(|status| status.success())
-        {
-            Self::cleanup_iptables_owned("ip6tables")?;
-        }
+        Self::record_cleanup_failure(&mut failures, Self::cleanup_iptables_owned("iptables"));
+        Self::record_cleanup_failure(&mut failures, Self::cleanup_iptables_owned("ip6tables"));
 
-        // Remove NAT rule (idempotent — errors are expected if rules don't exist)
-        let _ = Command::new("iptables")
-            .args([
-                "-t",
+        Self::record_cleanup_failure(
+            &mut failures,
+            Self::cleanup_legacy_iptables_rule(
+                "iptables",
                 "nat",
-                "-D",
                 "POSTROUTING",
-                "-s",
-                &subnet,
-                "-o",
-                &self.wan_interface,
-                "-j",
-                "MASQUERADE",
-            ])
-            .status();
-        let _ = Command::new("iptables")
-            .args([
-                "-D",
+                &["-s", &subnet, "-o", &self.wan_interface, "-j", "MASQUERADE"],
+            ),
+        );
+        Self::record_cleanup_failure(
+            &mut failures,
+            Self::cleanup_legacy_iptables_rule(
+                "iptables",
+                "filter",
                 "FORWARD",
-                "-i",
-                &self.tun_name,
-                "-o",
-                &self.wan_interface,
-                "-j",
-                "ACCEPT",
-            ])
-            .status();
+                &["-i", &self.tun_name, "-o", &self.wan_interface, "-j", "ACCEPT"],
+            ),
+        );
         for destination in self.ipv4_fanout_destinations() {
-            let _ = Command::new("iptables")
-                .args([
-                    "-D",
+            Self::record_cleanup_failure(
+                &mut failures,
+                Self::cleanup_legacy_iptables_rule(
+                    "iptables",
+                    "filter",
                     "FORWARD",
-                    "-i",
-                    &self.tun_name,
-                    "-o",
-                    &self.tun_name,
-                    "-d",
-                    &destination,
-                    "-j",
-                    "ACCEPT",
-                ])
-                .status();
+                    &[
+                        "-i",
+                        &self.tun_name,
+                        "-o",
+                        &self.tun_name,
+                        "-d",
+                        &destination,
+                        "-j",
+                        "ACCEPT",
+                    ],
+                ),
+            );
         }
         for action in ["ACCEPT", "DROP"] {
-            let _ = Command::new("iptables")
-                .args(["-D", "FORWARD", "-i", &self.tun_name, "-o", &self.tun_name, "-j", action])
-                .status();
+            Self::record_cleanup_failure(
+                &mut failures,
+                Self::cleanup_legacy_iptables_rule(
+                    "iptables",
+                    "filter",
+                    "FORWARD",
+                    &["-i", &self.tun_name, "-o", &self.tun_name, "-j", action],
+                ),
+            );
         }
-        let _ = Command::new("iptables")
-            .args([
-                "-D",
+        Self::record_cleanup_failure(
+            &mut failures,
+            Self::cleanup_legacy_iptables_rule(
+                "iptables",
+                "filter",
                 "FORWARD",
-                "-i",
-                &self.wan_interface,
-                "-o",
-                &self.tun_name,
-                "-m",
-                "state",
-                "--state",
-                "RELATED,ESTABLISHED",
-                "-j",
-                "ACCEPT",
-            ])
-            .status();
-
-        // IPv6 stale cleanup
-        if self.is_ipv6_enabled() {
-            let v6_subnet = self.calculate_ipv6_subnet();
-            let _ = Command::new("ip6tables")
-                .args([
-                    "-t",
-                    "nat",
-                    "-D",
-                    "POSTROUTING",
-                    "-s",
-                    &v6_subnet,
-                    "-o",
-                    &self.wan_interface,
-                    "-j",
-                    "MASQUERADE",
-                ])
-                .status();
-            let _ = Command::new("ip6tables")
-                .args([
-                    "-D",
-                    "FORWARD",
-                    "-i",
-                    &self.tun_name,
-                    "-o",
-                    &self.wan_interface,
-                    "-j",
-                    "ACCEPT",
-                ])
-                .status();
-            let _ = Command::new("ip6tables")
-                .args([
-                    "-D",
-                    "FORWARD",
-                    "-i",
-                    &self.tun_name,
-                    "-o",
-                    &self.tun_name,
-                    "-d",
-                    "ff00::/8",
-                    "-j",
-                    "ACCEPT",
-                ])
-                .status();
-            let _ = Command::new("ip6tables")
-                .args([
-                    "-D",
-                    "FORWARD",
+                &[
                     "-i",
                     &self.wan_interface,
                     "-o",
@@ -365,57 +321,124 @@ impl RoutingManager {
                     "RELATED,ESTABLISHED",
                     "-j",
                     "ACCEPT",
-                ])
-                .status();
-            for action in ["ACCEPT", "DROP"] {
-                let _ = Command::new("ip6tables")
-                    .args([
-                        "-D",
-                        "FORWARD",
+                ],
+            ),
+        );
+
+        // IPv6 stale cleanup
+        if self.is_ipv6_enabled() {
+            let v6_subnet = self.calculate_ipv6_subnet();
+            Self::record_cleanup_failure(
+                &mut failures,
+                Self::cleanup_legacy_iptables_rule(
+                    "ip6tables",
+                    "nat",
+                    "POSTROUTING",
+                    &["-s", &v6_subnet, "-o", &self.wan_interface, "-j", "MASQUERADE"],
+                ),
+            );
+            Self::record_cleanup_failure(
+                &mut failures,
+                Self::cleanup_legacy_iptables_rule(
+                    "ip6tables",
+                    "filter",
+                    "FORWARD",
+                    &["-i", &self.tun_name, "-o", &self.wan_interface, "-j", "ACCEPT"],
+                ),
+            );
+            Self::record_cleanup_failure(
+                &mut failures,
+                Self::cleanup_legacy_iptables_rule(
+                    "ip6tables",
+                    "filter",
+                    "FORWARD",
+                    &["-i", &self.tun_name, "-o", &self.tun_name, "-d", "ff00::/8", "-j", "ACCEPT"],
+                ),
+            );
+            Self::record_cleanup_failure(
+                &mut failures,
+                Self::cleanup_legacy_iptables_rule(
+                    "ip6tables",
+                    "filter",
+                    "FORWARD",
+                    &[
                         "-i",
-                        &self.tun_name,
+                        &self.wan_interface,
                         "-o",
                         &self.tun_name,
+                        "-m",
+                        "state",
+                        "--state",
+                        "RELATED,ESTABLISHED",
                         "-j",
-                        action,
-                    ])
-                    .status();
+                        "ACCEPT",
+                    ],
+                ),
+            );
+            for action in ["ACCEPT", "DROP"] {
+                Self::record_cleanup_failure(
+                    &mut failures,
+                    Self::cleanup_legacy_iptables_rule(
+                        "ip6tables",
+                        "filter",
+                        "FORWARD",
+                        &["-i", &self.tun_name, "-o", &self.tun_name, "-j", action],
+                    ),
+                );
             }
         }
 
         // Delete the dedicated nftables table exactly when nft is installed.
-        if Command::new("nft").arg("--version").status().is_ok_and(|status| status.success()) {
-            crate::firewall::delete_nft_table("inet", Self::NFT_RT_TABLE)
-                .map_err(|error| RoutingError::CommandFailed(error.to_string()))?;
+        if Command::new("nft")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            Self::record_cleanup_failure(
+                &mut failures,
+                crate::firewall::delete_nft_table("inet", Self::NFT_RT_TABLE)
+                    .map(|_| ())
+                    .map_err(|error| RoutingError::CommandFailed(error.to_string())),
+            );
         }
 
+        Self::finish_cleanup(failures)?;
         log::info!("Stale routing cleanup complete");
         Ok(())
     }
 
     #[cfg(target_os = "macos")]
-    pub fn cleanup_stale(&self) {
+    pub fn cleanup_stale(&self) -> Result<(), RoutingError> {
         log::info!("Cleaning up stale pf anchor rules");
-        let _ = Command::new("pfctl").args(["-a", Self::MACOS_PF_ANCHOR, "-F", "all"]).status();
+        crate::firewall::cleanup_pf_anchor(Self::MACOS_PF_ANCHOR)
+            .map_err(|error| RoutingError::CommandFailed(error.to_string()))?;
         log::info!("Stale routing cleanup complete");
+        Ok(())
     }
 
     #[cfg(target_os = "windows")]
-    pub fn cleanup_stale(&self) {
+    pub fn cleanup_stale(&self) -> Result<(), RoutingError> {
         log::info!("Cleaning up stale NetNat rules");
-        let script = format!(
-            "$ErrorActionPreference='SilentlyContinue'; \
-             Remove-NetNat -Name '{}' -Confirm:$false; \
-             Remove-NetNat -Name '{}_v6' -Confirm:$false",
-            Self::WINDOWS_NAT_NAME,
-            Self::WINDOWS_NAT_NAME
-        );
-        let _ = self.run_powershell(&script, "cleanup_stale");
+        let mut failures = Vec::new();
+        for name in [Self::WINDOWS_NAT_NAME.to_string(), format!("{}_v6", Self::WINDOWS_NAT_NAME)] {
+            Self::record_cleanup_failure(
+                &mut failures,
+                crate::firewall::cleanup_windows_nat(&name)
+                    .map(|_| ())
+                    .map_err(|error| RoutingError::CommandFailed(error.to_string())),
+            );
+        }
+        Self::finish_cleanup(failures)?;
         log::info!("Stale routing cleanup complete");
+        Ok(())
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    pub fn cleanup_stale(&self) {}
+    pub fn cleanup_stale(&self) -> Result<(), RoutingError> {
+        Err(RoutingError::UnsupportedPlatform)
+    }
 
     /// Tear down routing rules.
     #[cfg(target_os = "linux")]
@@ -443,23 +466,18 @@ impl RoutingManager {
     /// iptables-specific teardown: remove MASQUERADE and FORWARD rules.
     #[cfg(target_os = "linux")]
     fn teardown_iptables(&self) -> Result<(), RoutingError> {
-        Self::cleanup_iptables_owned("iptables")?;
+        let mut failures = Vec::new();
+        Self::record_cleanup_failure(&mut failures, Self::cleanup_iptables_owned("iptables"));
         if self.is_ipv6_enabled() {
-            Self::cleanup_iptables_owned("ip6tables")?;
+            Self::record_cleanup_failure(&mut failures, Self::cleanup_iptables_owned("ip6tables"));
         }
-        Ok(())
+        Self::finish_cleanup(failures)
     }
 
     #[cfg(target_os = "macos")]
     pub fn teardown(&self) -> Result<(), RoutingError> {
-        // Best-effort cleanup; keep shutdown robust even if rules were absent.
-        if let Err(e) = self.run_command(
-            "pfctl",
-            &["-a", Self::MACOS_PF_ANCHOR, "-F", "all"],
-            "pfctl anchor flush",
-        ) {
-            log::debug!("pfctl teardown anchor flush failed: {}", e);
-        }
+        crate::firewall::cleanup_pf_anchor(Self::MACOS_PF_ANCHOR)
+            .map_err(|error| RoutingError::CommandFailed(error.to_string()))?;
         crate::audit::audit(
             crate::audit::AuditEventType::FirewallRuleRemoved,
             crate::audit::AuditSeverity::Info,
@@ -472,17 +490,16 @@ impl RoutingManager {
 
     #[cfg(target_os = "windows")]
     pub fn teardown(&self) -> Result<(), RoutingError> {
-        // Best-effort cleanup; keep shutdown robust even if NAT object was absent.
-        let script = format!(
-            "$ErrorActionPreference='SilentlyContinue'; \
-             Remove-NetNat -Name '{}' -Confirm:$false; \
-             Remove-NetNat -Name '{}_v6' -Confirm:$false",
-            Self::WINDOWS_NAT_NAME,
-            Self::WINDOWS_NAT_NAME
-        );
-        if let Err(e) = self.run_powershell(&script, "Remove-NetNat") {
-            log::debug!("Windows teardown Remove-NetNat failed: {}", e);
+        let mut failures = Vec::new();
+        for name in [Self::WINDOWS_NAT_NAME.to_string(), format!("{}_v6", Self::WINDOWS_NAT_NAME)] {
+            Self::record_cleanup_failure(
+                &mut failures,
+                crate::firewall::cleanup_windows_nat(&name)
+                    .map(|_| ())
+                    .map_err(|error| RoutingError::CommandFailed(error.to_string())),
+            );
         }
+        Self::finish_cleanup(failures)?;
         crate::audit::audit(
             crate::audit::AuditEventType::FirewallRuleRemoved,
             crate::audit::AuditSeverity::Info,
@@ -670,50 +687,31 @@ impl RoutingManager {
 
     #[cfg(target_os = "linux")]
     fn cleanup_iptables_owned(program: &str) -> Result<(), RoutingError> {
+        let mut failures = Vec::new();
         for (table, parent, owned) in [
             ("filter", "FORWARD", Self::IPTABLES_FILTER_CHAIN),
             ("nat", "POSTROUTING", Self::IPTABLES_NAT_CHAIN),
         ] {
-            while Self::iptables_jump_exists(program, table, parent, owned)? {
-                let status = Command::new(program)
-                    .args(["-t", table, "-D", parent, "-j", owned])
-                    .status()
-                    .map_err(|error| {
-                        RoutingError::CommandFailed(format!("{program} jump cleanup: {error}"))
-                    })?;
-                if !status.success() {
-                    return Err(RoutingError::CommandFailed(format!(
-                        "{program} failed to remove {parent} jump to {owned}"
-                    )));
-                }
-            }
-
-            let exists = Command::new(program)
-                .args(["-t", table, "-S", owned])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map_err(|error| {
-                    RoutingError::CommandFailed(format!("{program} chain inspect: {error}"))
-                })?
-                .success();
-            if exists {
-                for action in ["-F", "-X"] {
-                    let status = Command::new(program)
-                        .args(["-t", table, action, owned])
-                        .status()
-                        .map_err(|error| {
-                            RoutingError::CommandFailed(format!("{program} chain cleanup: {error}"))
-                        })?;
-                    if !status.success() {
-                        return Err(RoutingError::CommandFailed(format!(
-                            "{program} {action} {owned} failed"
-                        )));
-                    }
-                }
-            }
+            Self::record_cleanup_failure(
+                &mut failures,
+                crate::firewall::cleanup_iptables_chain(program, table, parent, owned)
+                    .map(|_| ())
+                    .map_err(|error| RoutingError::CommandFailed(error.to_string())),
+            );
         }
-        Ok(())
+        Self::finish_cleanup(failures)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cleanup_legacy_iptables_rule(
+        program: &str,
+        table: &str,
+        chain: &str,
+        rule_args: &[&str],
+    ) -> Result<(), RoutingError> {
+        crate::firewall::cleanup_iptables_rule(program, table, chain, rule_args)
+            .map(|_| ())
+            .map_err(|error| RoutingError::CommandFailed(error.to_string()))
     }
 
     /// Dedicated nftables table name for QuicFuscate server routing/NAT rules.
@@ -830,9 +828,9 @@ impl RoutingManager {
     /// Removes the entire dedicated table: `nft delete table inet quicfuscate_rt`.
     #[cfg(target_os = "linux")]
     fn teardown_nftables(&self) -> Result<(), RoutingError> {
-        let removed = crate::firewall::delete_nft_table("inet", Self::NFT_RT_TABLE)
+        let outcome = crate::firewall::delete_nft_table("inet", Self::NFT_RT_TABLE)
             .map_err(|error| RoutingError::CommandFailed(error.to_string()))?;
-        if removed {
+        if outcome.removed() {
             log::debug!("nftables routing table removed (inet {})", Self::NFT_RT_TABLE);
         }
         Ok(())

@@ -66,7 +66,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for command in flock ip nft openssl nc python3 dig ping tcpdump; do
+for command in flock ip nft openssl nc python3 dig ping sha256sum tcpdump; do
   require_command "$command"
 done
 if [ "$(id -u)" -ne 0 ]; then
@@ -247,6 +247,49 @@ setup_namespaces() {
   ip netns exec "$CLIENT_NS" ip link set qf-ks-cli-veth up
   ip netns exec "$SERVER_NS" ip route replace default via "$CLIENT_UNDERLAY_IP" dev qf-ks-srv-veth
   ip netns exec "$CLIENT_NS" ip route replace default via "$SERVER_UNDERLAY_IP" dev qf-ks-cli-veth
+}
+
+seed_unrelated_firewall_state() {
+  local namespace program
+  if [ "$RULE_BACKEND" = "nftables" ]; then
+    for namespace in "$SERVER_NS" "$CLIENT_NS"; do
+      ip netns exec "$namespace" nft add table inet qf_unrelated_probe
+      ip netns exec "$namespace" nft add chain inet qf_unrelated_probe retained
+      ip netns exec "$namespace" nft add rule inet qf_unrelated_probe retained counter
+    done
+    return
+  fi
+
+  for namespace in "$SERVER_NS" "$CLIENT_NS"; do
+    for program in iptables ip6tables; do
+      ip netns exec "$namespace" "$program" -N QF_UNRELATED_PROBE
+      ip netns exec "$namespace" "$program" -A QF_UNRELATED_PROBE -j RETURN
+    done
+  done
+}
+
+unrelated_firewall_fingerprint() {
+  local namespace program
+  if [ "$RULE_BACKEND" = "nftables" ]; then
+    for namespace in "$SERVER_NS" "$CLIENT_NS"; do
+      ip netns exec "$namespace" nft -s list table inet qf_unrelated_probe
+    done
+  else
+    for namespace in "$SERVER_NS" "$CLIENT_NS"; do
+      for program in iptables ip6tables; do
+        ip netns exec "$namespace" "$program" -S QF_UNRELATED_PROBE
+      done
+    done
+  fi | sha256sum | cut -d' ' -f1
+}
+
+assert_unrelated_firewall_unchanged() {
+  local after
+  after="$(unrelated_firewall_fingerprint)"
+  if [ "$after" != "$UNRELATED_FIREWALL_FINGERPRINT" ]; then
+    echo "unrelated firewall state changed: before=$UNRELATED_FIREWALL_FINGERPRINT after=$after" >&2
+    exit 1
+  fi
 }
 
 assert_atomic_replacement_failure() {
@@ -548,8 +591,11 @@ assert_requested_backend_unavailable() {
 create_certificates
 create_runtime_config
 setup_namespaces
+seed_unrelated_firewall_state
+UNRELATED_FIREWALL_FINGERPRINT="$(unrelated_firewall_fingerprint)"
 if [ "$EXPECT_BACKEND_UNAVAILABLE" = "1" ]; then
   assert_requested_backend_unavailable
+  assert_unrelated_firewall_unchanged
   exit 0
 fi
 assert_atomic_replacement_failure
@@ -562,5 +608,6 @@ assert_dns_and_ipv6_policy
 assert_unexpected_loss_retains_block
 assert_stale_cleanup
 assert_clean_signal_cleanup
+assert_unrelated_firewall_unchanged
 
-echo "PASS ($RULE_BACKEND): connected TUN/DNS policy, IPv6 blocking, ${TRANSITION_LIMIT_MS}ms loss bound, retained fail-closed state, stale cleanup, and client/server SIGTERM cleanup"
+echo "PASS ($RULE_BACKEND): connected TUN/DNS policy, IPv6 blocking, ${TRANSITION_LIMIT_MS}ms loss bound, retained fail-closed state, stale cleanup, client/server SIGTERM cleanup, and unchanged unrelated firewall fingerprint $UNRELATED_FIREWALL_FINGERPRINT"

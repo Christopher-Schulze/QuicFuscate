@@ -464,7 +464,8 @@ kill_switch = false
 # Set to 0 to disable heartbeat watchdog.
 heartbeat_timeout_ms = 30000
 
-# Cleanup stale firewall rules from a crashed previous session on startup.
+# Legacy compatibility key. When kill_switch is enabled, owned stale firewall
+# cleanup is always mandatory and fail-closed regardless of this value.
 cleanup_firewall_on_start = false
 
 # Firewall backend selection (Linux only). Omit this key for automatic

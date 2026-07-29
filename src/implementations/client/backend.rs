@@ -71,6 +71,8 @@ pub enum BackendError {
     InvalidState(String),
     /// Configuration error
     Config(String),
+    /// One or more owned resources could not be released.
+    Cleanup(String),
 }
 
 impl std::fmt::Display for BackendError {
@@ -81,6 +83,7 @@ impl std::fmt::Display for BackendError {
             Self::QKey(s) => write!(f, "QKey error: {}", s),
             Self::InvalidState(s) => write!(f, "Invalid state: {}", s),
             Self::Config(s) => write!(f, "Config error: {}", s),
+            Self::Cleanup(s) => write!(f, "Cleanup error: {}", s),
         }
     }
 }
@@ -109,8 +112,10 @@ pub struct ClientBackend {
     connection: Option<ClientConnection>,
     /// TUN device handle
     tun_handle: Option<TunHandle>,
-    /// Active gateway used for routing (stored for disconnect cleanup)
-    active_gateway: Option<IpAddr>,
+    /// Routes successfully installed by this instance and still owned by it.
+    active_routes: Vec<RouteConfig>,
+    /// Whether this instance attempted to replace system DNS state.
+    dns_configured: bool,
     /// Statistics
     stats: ClientStatsInternal,
 }
@@ -143,7 +148,8 @@ impl ClientBackend {
             state: ConnectionState::Disconnected,
             connection: None,
             tun_handle: None,
-            active_gateway: None,
+            active_routes: Vec::new(),
+            dns_configured: false,
             stats: ClientStatsInternal::default(),
         }
     }
@@ -155,7 +161,8 @@ impl ClientBackend {
             state: ConnectionState::Disconnected,
             connection: None,
             tun_handle: None,
-            active_gateway: None,
+            active_routes: Vec::new(),
+            dns_configured: false,
             stats: ClientStatsInternal::default(),
         }
     }
@@ -255,6 +262,31 @@ impl ClientBackend {
         self.state = ConnectionState::Connecting;
         log::info!("Connecting to {}", config.connection.remote);
 
+        match self.connect_inner(config) {
+            Ok(()) => {
+                self.stats.connect_time = Some(std::time::Instant::now());
+                self.state = ConnectionState::Connected;
+                log::info!("Connected successfully");
+                Ok(())
+            }
+            Err(connect_error) => {
+                let rollback_error = self.cleanup_owned_resources().err();
+                self.state = if rollback_error.is_some() {
+                    ConnectionState::Disconnecting
+                } else {
+                    ConnectionState::Disconnected
+                };
+                match rollback_error {
+                    Some(rollback) => Err(BackendError::Cleanup(format!(
+                        "connect failed: {connect_error}; owned rollback failed: {rollback}"
+                    ))),
+                    None => Err(connect_error),
+                }
+            }
+        }
+    }
+
+    fn connect_inner(&mut self, config: &EngineConfig) -> Result<(), BackendError> {
         // Check privileges
         if !self.platform.is_elevated() {
             self.platform.request_elevation()?;
@@ -278,18 +310,22 @@ impl ClientBackend {
         // Add routes (route all traffic through VPN)
         let default_gateway = IpAddr::V4(std::net::Ipv4Addr::new(10, 8, 0, 1));
         let gateway: IpAddr = config.interface.tun_gateway.unwrap_or(default_gateway);
-        self.platform.add_route(&RouteConfig {
+        let first_route = RouteConfig {
             destination: IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)),
             prefix_len: 1,
             gateway,
             metric: 10,
-        })?;
-        self.platform.add_route(&RouteConfig {
+        };
+        self.platform.add_route(&first_route)?;
+        self.active_routes.push(first_route);
+        let second_route = RouteConfig {
             destination: IpAddr::V4(std::net::Ipv4Addr::new(128, 0, 0, 0)),
             prefix_len: 1,
             gateway,
             metric: 10,
-        })?;
+        };
+        self.platform.add_route(&second_route)?;
+        self.active_routes.push(second_route);
 
         // Configure DNS (from config or defaults)
         let dns_servers = if config.interface.dns_servers.is_empty() {
@@ -300,16 +336,8 @@ impl ClientBackend {
         } else {
             config.interface.dns_servers.clone()
         };
+        self.dns_configured = true;
         self.platform.set_dns(&DnsConfig { servers: dns_servers, search_domains: vec![] })?;
-
-        // Store active gateway for disconnect cleanup
-        self.active_gateway = Some(gateway);
-
-        // Update state
-        self.stats.connect_time = Some(std::time::Instant::now());
-        self.state = ConnectionState::Connected;
-
-        log::info!("Connected successfully");
         Ok(())
     }
 
@@ -322,52 +350,78 @@ impl ClientBackend {
         self.state = ConnectionState::Disconnecting;
         log::info!("Disconnecting");
 
-        // Close QUIC connection
-        if let Some(mut conn) = self.connection.take() {
-            conn.close(0, b"user disconnect");
+        if let Err(error) = self.cleanup_owned_resources() {
+            return Err(error);
         }
 
-        // Restore DNS - retry once on failure, then propagate error
-        if let Err(e) = self.platform.restore_dns() {
-            log::warn!("DNS restore failed, retrying: {}", e);
-            if let Err(e2) = self.platform.restore_dns() {
-                return Err(BackendError::Platform(e2));
-            }
-        }
-
-        // Remove routes
-        let default_gateway = IpAddr::V4(std::net::Ipv4Addr::new(10, 8, 0, 1));
-        let gateway: IpAddr = self.active_gateway.take().unwrap_or(default_gateway);
-        if let Err(e) = self.platform.remove_route(&RouteConfig {
-            destination: IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)),
-            prefix_len: 1,
-            gateway,
-            metric: 10,
-        }) {
-            log::warn!("Failed to remove default route half 0.0.0.0/1: {}", e);
-        }
-        if let Err(e) = self.platform.remove_route(&RouteConfig {
-            destination: IpAddr::V4(std::net::Ipv4Addr::new(128, 0, 0, 0)),
-            prefix_len: 1,
-            gateway,
-            metric: 10,
-        }) {
-            log::warn!("Failed to remove default route half 128.0.0.0/1: {}", e);
-        }
-
-        // Destroy TUN device
-        if let Some(handle) = self.tun_handle.take() {
-            if let Err(e) = self.platform.destroy_tun(handle) {
-                log::warn!("Failed to destroy TUN device during disconnect: {}", e);
-            }
-        }
-
-        // Reset state
         self.stats = ClientStatsInternal::default();
         self.state = ConnectionState::Disconnected;
 
         log::info!("Disconnected");
         Ok(())
+    }
+
+    fn cleanup_owned_resources(&mut self) -> Result<(), BackendError> {
+        if let Some(mut connection) = self.connection.take() {
+            connection.close(0, b"owned resource cleanup");
+        }
+
+        let mut failures = Vec::new();
+        if self.dns_configured {
+            match Self::retry_cleanup("restore DNS", || self.platform.restore_dns()) {
+                Ok(()) => self.dns_configured = false,
+                Err(error) => failures.push(error),
+            }
+        }
+
+        let routes = std::mem::take(&mut self.active_routes);
+        let mut retained_routes = Vec::new();
+        for route in routes.into_iter().rev() {
+            let label = format!("remove route {}/{}", route.destination, route.prefix_len);
+            if let Err(error) = Self::retry_cleanup(&label, || self.platform.remove_route(&route)) {
+                failures.push(error);
+                retained_routes.push(route);
+            }
+        }
+        retained_routes.reverse();
+        self.active_routes = retained_routes;
+
+        if let Some(mut handle) = self.tun_handle.take() {
+            let label = format!("destroy descriptor-owned TUN {}", handle.name);
+            if let Err(error) =
+                Self::retry_cleanup(&label, || self.platform.destroy_tun(&mut handle))
+            {
+                failures.push(error);
+                self.tun_handle = Some(handle);
+            }
+        }
+
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(BackendError::Cleanup(failures.join("; ")))
+        }
+    }
+
+    fn retry_cleanup<Cleanup>(label: &str, mut cleanup: Cleanup) -> Result<(), String>
+    where
+        Cleanup: FnMut() -> Result<(), PlatformError>,
+    {
+        let mut last_error = None;
+        for attempt in 1..=3 {
+            match cleanup() {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    last_error = Some(error);
+                    if attempt < 3 {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                }
+            }
+        }
+        let detail = last_error
+            .map_or_else(|| "cleanup returned no result".to_string(), |error| error.to_string());
+        Err(format!("{label} failed after 3 attempts: {detail}"))
     }
 
     /// Get the platform name.
@@ -394,6 +448,73 @@ impl Drop for ClientBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::Arc;
+
+    struct CleanupTestPlatform {
+        destroy_attempts: Arc<AtomicUsize>,
+        fail_through_attempt: Arc<AtomicUsize>,
+    }
+
+    impl PlatformBackend for CleanupTestPlatform {
+        fn name(&self) -> &'static str {
+            "cleanup-test"
+        }
+
+        fn is_elevated(&self) -> bool {
+            true
+        }
+
+        fn request_elevation(&self) -> Result<(), PlatformError> {
+            Ok(())
+        }
+
+        fn create_tun(&self, _config: &TunDeviceConfig) -> Result<TunHandle, PlatformError> {
+            Err(PlatformError::Unsupported(
+                "cleanup test does not create platform devices".to_string(),
+            ))
+        }
+
+        fn destroy_tun(&self, _handle: &mut TunHandle) -> Result<(), PlatformError> {
+            let attempt = self.destroy_attempts.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+            if attempt <= self.fail_through_attempt.load(AtomicOrdering::SeqCst) {
+                Err(PlatformError::DeviceError(format!("injected destroy failure {attempt}")))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn add_route(&self, _route: &RouteConfig) -> Result<(), PlatformError> {
+            Ok(())
+        }
+
+        fn remove_route(&self, _route: &RouteConfig) -> Result<(), PlatformError> {
+            Ok(())
+        }
+
+        fn set_dns(&self, _config: &DnsConfig) -> Result<(), PlatformError> {
+            Ok(())
+        }
+
+        fn restore_dns(&self) -> Result<(), PlatformError> {
+            Ok(())
+        }
+
+        fn default_gateway(&self) -> Result<IpAddr, PlatformError> {
+            Ok(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+        }
+    }
+
+    fn cleanup_test_tun_handle() -> TunHandle {
+        TunHandle {
+            name: "owned-test-tun".to_string(),
+            id: 7,
+            #[cfg(unix)]
+            fd: -1,
+            #[cfg(windows)]
+            handle: 0,
+        }
+    }
 
     #[test]
     fn test_connection_state_display() {
@@ -414,5 +535,58 @@ mod tests {
         let stats = backend.stats();
         assert_eq!(stats.bytes_sent, 0);
         assert_eq!(stats.uptime_secs, 0);
+    }
+
+    #[test]
+    fn cleanup_retry_recovers_first_transient_failure() {
+        let mut attempts = 0;
+        ClientBackend::retry_cleanup("test cleanup", || {
+            attempts += 1;
+            if attempts == 1 {
+                Err(PlatformError::CommandFailed("busy".to_string()))
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap();
+
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn cleanup_retry_reports_persistent_failure_exactly() {
+        let mut attempts = 0;
+        let error = ClientBackend::retry_cleanup("test cleanup", || {
+            attempts += 1;
+            Err(PlatformError::CommandFailed("permanent".to_string()))
+        })
+        .unwrap_err();
+
+        assert_eq!(attempts, 3);
+        assert!(error.contains("test cleanup failed after 3 attempts"));
+        assert!(error.contains("permanent"));
+    }
+
+    #[test]
+    fn failed_tun_cleanup_retains_owned_handle_for_later_retry() {
+        let destroy_attempts = Arc::new(AtomicUsize::new(0));
+        let fail_through_attempt = Arc::new(AtomicUsize::new(usize::MAX));
+        let platform = CleanupTestPlatform {
+            destroy_attempts: Arc::clone(&destroy_attempts),
+            fail_through_attempt: Arc::clone(&fail_through_attempt),
+        };
+        let mut backend = ClientBackend::with_platform(Box::new(platform));
+        backend.state = ConnectionState::Disconnecting;
+        backend.tun_handle = Some(cleanup_test_tun_handle());
+
+        let error = backend.cleanup_owned_resources().unwrap_err();
+        assert!(error.to_string().contains("injected destroy failure 3"));
+        assert_eq!(destroy_attempts.load(AtomicOrdering::SeqCst), 3);
+        assert!(backend.tun_handle.is_some());
+
+        fail_through_attempt.store(3, AtomicOrdering::SeqCst);
+        backend.cleanup_owned_resources().unwrap();
+        assert_eq!(destroy_attempts.load(AtomicOrdering::SeqCst), 4);
+        assert!(backend.tun_handle.is_none());
     }
 }

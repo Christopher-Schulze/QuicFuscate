@@ -846,7 +846,11 @@ async fn run_client(
         info!("Cleaning up stale kill switch firewall rules...");
         match quicfuscate::implementations::client::KillSwitch::cleanup_stale_rules() {
             Ok(()) => info!("Stale firewall rules cleaned up successfully"),
-            Err(e) => error!("Failed to cleanup stale rules: {}", e),
+            Err(error) => {
+                return Err(std::io::Error::other(format!(
+                    "stale firewall cleanup failed: {error}"
+                )));
+            }
         }
         return Ok(());
     }
@@ -901,6 +905,9 @@ async fn run_client(
 
     // Initialize kill switch if enabled
     let kill_switch = if kill_switch_enabled {
+        quicfuscate::implementations::client::KillSwitch::cleanup_stale_rules().map_err(
+            |error| std::io::Error::other(format!("stale firewall cleanup failed: {error}")),
+        )?;
         let ks = std::sync::Arc::new(
             quicfuscate::implementations::client::KillSwitch::new_with_backend(firewall_backend),
         );

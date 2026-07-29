@@ -244,25 +244,9 @@ fn configured_routing_manager(
         .with_firewall_backend(server_config.firewall_backend))
 }
 
-fn teardown_routing_with_retries(routing: RoutingManager) {
-    let mut last_error = None;
-    for attempt in 1..=3 {
-        match routing.teardown() {
-            Ok(()) => {
-                last_error = None;
-                break;
-            }
-            Err(error) => {
-                log::warn!("Routing teardown attempt {}/3 failed: {:?}", attempt, error);
-                last_error = Some(error);
-                if attempt < 3 {
-                    std::thread::sleep(Duration::from_millis(100 * attempt as u64));
-                }
-            }
-        }
-    }
-    if let Some(error) = last_error {
-        log::error!("Routing teardown failed after 3 attempts: {:?}", error);
+fn teardown_routing(routing: RoutingManager) -> Result<(), RoutingError> {
+    routing.teardown().map_err(|error| {
+        log::error!("Routing teardown failed: {:?}", error);
         crate::audit::audit_typed(
             crate::audit::AuditEventType::FirewallRuleRemoved,
             crate::audit::AuditSeverity::Critical,
@@ -274,9 +258,10 @@ fn teardown_routing_with_retries(routing: RoutingManager) {
                 outcome: crate::audit::AuditOutcome::Failed,
                 reason: Some("routing_teardown_failed"),
             },
-            &format!("Routing teardown failed after retries: {error}"),
+            &format!("Routing teardown failed: {error}"),
         );
-    }
+        error
+    })
 }
 
 impl ServerHostResources {
@@ -312,7 +297,7 @@ impl ServerHostResources {
                 .map_err(|error| EngineError::Io(format!("stale routing cleanup failed: {error}")))?;
 
             if let Err(e) = routing.setup() {
-                let _ = routing.teardown();
+                let rollback_error = routing.teardown().err();
                 crate::audit::audit_typed(
                     crate::audit::AuditEventType::FirewallRuleAdded,
                     crate::audit::AuditSeverity::Critical,
@@ -326,7 +311,15 @@ impl ServerHostResources {
                     },
                     &format!("Server routing setup failed: {e}"),
                 );
-                return Err(EngineError::Io(format!("server routing setup failed: {e}")));
+                let detail = rollback_error.map_or_else(
+                    || format!("server routing setup failed: {e}"),
+                    |rollback| {
+                        format!(
+                            "server routing setup failed: {e}; owned rollback failed: {rollback}"
+                        )
+                    },
+                );
+                return Err(EngineError::Io(detail));
             }
             Some(routing)
         };
@@ -337,12 +330,13 @@ impl ServerHostResources {
         Ok(Self { tun, routing })
     }
 
-    fn teardown(self) {
-        if let Some(routing) = self.routing {
-            teardown_routing_with_retries(routing);
-        }
+    fn teardown(self) -> Result<(), EngineError> {
+        let routing_result = self.routing.map(teardown_routing).transpose();
         log::info!("Closing server TUN: {}", self.tun.name());
         drop(self.tun);
+        routing_result
+            .map(|_| ())
+            .map_err(|error| EngineError::Io(format!("server routing teardown failed: {error}")))
     }
 }
 

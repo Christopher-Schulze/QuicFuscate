@@ -24,6 +24,8 @@ use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+pub(crate) mod cleanup;
+
 /// Selected firewall backend.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -131,23 +133,348 @@ pub(crate) fn nft_table_exists(family: &str, table: &str) -> Result<bool, std::i
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn delete_nft_table(family: &str, table: &str) -> Result<bool, std::io::Error> {
-    if !nft_table_exists(family, table)? {
-        return Ok(false);
-    }
+pub(crate) fn delete_nft_table(
+    family: &str,
+    table: &str,
+) -> Result<cleanup::CleanupOutcome, cleanup::CleanupError> {
+    let resource = cleanup::OwnedResourceId::new(
+        cleanup::OwnedResourceKind::NftTable,
+        format!("{family} {table}"),
+    );
+    cleanup::cleanup_owned_resource(
+        resource,
+        cleanup::CleanupPolicy::standard(),
+        || nft_table_exists(family, table).map_err(|error| error.to_string()),
+        || {
+            let output = Command::new("nft")
+                .args(["delete", "table", family, table])
+                .output()
+                .map_err(|error| format!("nft table delete: {error}"))?;
+            if output.status.success() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "nft table delete returned status {}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim(),
+                ))
+            }
+        },
+        std::thread::sleep,
+    )
+}
 
-    let output = Command::new("nft")
-        .args(["delete", "table", family, table])
+#[cfg(target_os = "linux")]
+fn iptables_owned_state(
+    program: &str,
+    table: &str,
+    parent_chain: &str,
+    owned_chain: &str,
+) -> Result<(usize, bool), String> {
+    let parent_output = match Command::new(program).args(["-t", table, "-S", parent_chain]).output()
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((0, false)),
+        Err(error) => return Err(format!("{program} parent-chain inspect: {error}")),
+    };
+    if !parent_output.status.success() {
+        return Err(format!(
+            "{} parent-chain inspect returned status {}: {}",
+            program,
+            parent_output.status,
+            String::from_utf8_lossy(&parent_output.stderr).trim(),
+        ));
+    }
+    let expected_jump = format!("-A {parent_chain} -j {owned_chain}");
+    let jump_count = String::from_utf8_lossy(&parent_output.stdout)
+        .lines()
+        .filter(|line| line.trim() == expected_jump)
+        .count();
+
+    let chain_output = Command::new(program)
+        .args(["-t", table, "-S", owned_chain])
         .output()
-        .map_err(|error| std::io::Error::other(format!("nft table delete: {error}")))?;
+        .map_err(|error| format!("{program} owned-chain inspect: {error}"))?;
+    if chain_output.status.success() {
+        return Ok((jump_count, true));
+    }
+    let stderr = String::from_utf8_lossy(&chain_output.stderr);
+    let lowered = stderr.to_ascii_lowercase();
+    if lowered.contains("no chain/target/match") || lowered.contains("does not exist") {
+        Ok((jump_count, false))
+    } else {
+        Err(format!(
+            "{} owned-chain inspect returned status {}: {}",
+            program,
+            chain_output.status,
+            stderr.trim(),
+        ))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_iptables_cleanup_command(program: &str, args: &[&str]) -> Result<(), String> {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|error| format!("{program} {}: {error}", args.join(" ")))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} {} returned status {}: {}",
+            program,
+            args.join(" "),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim(),
+        ))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn remove_iptables_owned_once(
+    program: &str,
+    table: &str,
+    parent_chain: &str,
+    owned_chain: &str,
+) -> Result<(), String> {
+    let (jump_count, chain_exists) =
+        iptables_owned_state(program, table, parent_chain, owned_chain)?;
+    for _ in 0..jump_count {
+        run_iptables_cleanup_command(
+            program,
+            &["-t", table, "-D", parent_chain, "-j", owned_chain],
+        )?;
+    }
+    if chain_exists {
+        run_iptables_cleanup_command(program, &["-t", table, "-F", owned_chain])?;
+        run_iptables_cleanup_command(program, &["-t", table, "-X", owned_chain])?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn cleanup_iptables_chain(
+    program: &str,
+    table: &str,
+    parent_chain: &str,
+    owned_chain: &str,
+) -> Result<cleanup::CleanupOutcome, cleanup::CleanupError> {
+    let resource = cleanup::OwnedResourceId::new(
+        cleanup::OwnedResourceKind::IptablesChain,
+        format!("{program}:{table}:{owned_chain}"),
+    );
+    cleanup::cleanup_owned_resource(
+        resource,
+        cleanup::CleanupPolicy::standard(),
+        || {
+            iptables_owned_state(program, table, parent_chain, owned_chain)
+                .map(|(jumps, chain)| jumps > 0 || chain)
+        },
+        || remove_iptables_owned_once(program, table, parent_chain, owned_chain),
+        std::thread::sleep,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn iptables_rule_exists(
+    program: &str,
+    table: &str,
+    chain: &str,
+    rule_args: &[&str],
+) -> Result<bool, String> {
+    let mut args = vec!["-t", table, "-C", chain];
+    args.extend_from_slice(rule_args);
+    let output = match Command::new(program).args(&args).output() {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("{program} exact-rule inspect: {error}")),
+    };
     if output.status.success() {
         return Ok(true);
     }
-    Err(std::io::Error::other(format!(
-        "nft table delete returned status {}: {}",
+    if output.status.code() == Some(1) {
+        return Ok(false);
+    }
+    Err(format!(
+        "{} exact-rule inspect returned status {}: {}",
+        program,
         output.status,
         String::from_utf8_lossy(&output.stderr).trim(),
-    )))
+    ))
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn cleanup_iptables_rule(
+    program: &str,
+    table: &str,
+    chain: &str,
+    rule_args: &[&str],
+) -> Result<cleanup::CleanupOutcome, cleanup::CleanupError> {
+    let resource = cleanup::OwnedResourceId::new(
+        cleanup::OwnedResourceKind::IptablesRule,
+        format!("{program}:{table}:{chain}:{}", rule_args.join(" ")),
+    );
+    cleanup::cleanup_owned_resource(
+        resource,
+        cleanup::CleanupPolicy::standard(),
+        || iptables_rule_exists(program, table, chain, rule_args),
+        || {
+            let mut args = vec!["-t", table, "-D", chain];
+            args.extend_from_slice(rule_args);
+            run_iptables_cleanup_command(program, &args)
+        },
+        std::thread::sleep,
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn pf_anchor_has_rules(anchor: &str) -> Result<bool, String> {
+    for query in ["-sr", "-sn"] {
+        let output = Command::new("pfctl")
+            .args(["-a", anchor, query])
+            .output()
+            .map_err(|error| format!("pfctl {query} {anchor}: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "pfctl {} {} returned status {}: {}",
+                query,
+                anchor,
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim(),
+            ));
+        }
+        if !String::from_utf8_lossy(&output.stdout).trim().is_empty() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn cleanup_pf_anchor(
+    anchor: &str,
+) -> Result<cleanup::CleanupOutcome, cleanup::CleanupError> {
+    let resource =
+        cleanup::OwnedResourceId::new(cleanup::OwnedResourceKind::PfAnchor, anchor.to_string());
+    cleanup::cleanup_owned_resource(
+        resource,
+        cleanup::CleanupPolicy::standard(),
+        || pf_anchor_has_rules(anchor),
+        || {
+            let mut failures = Vec::new();
+            for target in ["rules", "nat"] {
+                match Command::new("pfctl").args(["-a", anchor, "-F", target]).output() {
+                    Ok(output) if output.status.success() => {}
+                    Ok(output) => failures.push(format!(
+                        "pfctl anchor {} flush {} returned status {}: {}",
+                        anchor,
+                        target,
+                        output.status,
+                        String::from_utf8_lossy(&output.stderr).trim(),
+                    )),
+                    Err(error) => {
+                        failures.push(format!("pfctl anchor {anchor} flush {target}: {error}"));
+                    }
+                }
+            }
+            if failures.is_empty() {
+                Ok(())
+            } else {
+                Err(failures.join("; "))
+            }
+        },
+        std::thread::sleep,
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn powershell_output(script: &str) -> Result<std::process::Output, String> {
+    Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+        .map_err(|error| format!("powershell cleanup command: {error}"))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_resource_exists(command: &str, name: &str) -> Result<bool, String> {
+    let escaped_name = name.replace('\'', "''");
+    let script = format!(
+        "$resource = {command} -ErrorAction SilentlyContinue; \
+         if ($null -ne $resource) {{ exit 0 }} else {{ exit 3 }}",
+        command = command.replace("{name}", &escaped_name),
+    );
+    let output = powershell_output(&script)?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(3) => Ok(false),
+        _ => Err(format!(
+            "PowerShell resource inspection for {} returned status {}: {}",
+            name,
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim(),
+        )),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn remove_windows_resource(command: &str, name: &str) -> Result<(), String> {
+    let escaped_name = name.replace('\'', "''");
+    let script =
+        format!("$ErrorActionPreference='Stop'; {}", command.replace("{name}", &escaped_name),);
+    let output = powershell_output(&script)?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "PowerShell resource removal for {} returned status {}: {}",
+            name,
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim(),
+        ))
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn cleanup_windows_firewall_rule(
+    name: &str,
+) -> Result<cleanup::CleanupOutcome, cleanup::CleanupError> {
+    let resource = cleanup::OwnedResourceId::new(
+        cleanup::OwnedResourceKind::WindowsFirewallRule,
+        name.to_string(),
+    );
+    cleanup::cleanup_owned_resource(
+        resource,
+        cleanup::CleanupPolicy::standard(),
+        || windows_resource_exists("Get-NetFirewallRule -DisplayName '{name}'", name),
+        || {
+            remove_windows_resource(
+                "Get-NetFirewallRule -DisplayName '{name}' -ErrorAction Stop | Remove-NetFirewallRule -ErrorAction Stop",
+                name,
+            )
+        },
+        std::thread::sleep,
+    )
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn cleanup_windows_nat(
+    name: &str,
+) -> Result<cleanup::CleanupOutcome, cleanup::CleanupError> {
+    let resource =
+        cleanup::OwnedResourceId::new(cleanup::OwnedResourceKind::WindowsNat, name.to_string());
+    cleanup::cleanup_owned_resource(
+        resource,
+        cleanup::CleanupPolicy::standard(),
+        || windows_resource_exists("Get-NetNat -Name '{name}'", name),
+        || {
+            remove_windows_resource(
+                "Remove-NetNat -Name '{name}' -Confirm:$false -ErrorAction Stop",
+                name,
+            )
+        },
+        std::thread::sleep,
+    )
 }
 
 #[cfg(any(target_os = "linux", test))]

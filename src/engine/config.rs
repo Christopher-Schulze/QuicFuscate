@@ -1273,7 +1273,8 @@ pub struct SecurityConfig {
     /// this duration, trigger connection-loss detection and activate kill switch.
     /// Default: 30000 (30s). Set to 0 to disable heartbeat watchdog.
     pub heartbeat_timeout_ms: u64,
-    /// Cleanup stale firewall rules from a crashed previous session on startup.
+    /// Legacy compatibility key. Kill-switch startup cleanup is mandatory and
+    /// fail-closed regardless of this value.
     pub cleanup_firewall_on_start: bool,
     /// Firewall backend selection (Linux only). When `None`, one backend is
     /// resolved and retained at startup via [`crate::firewall::resolve_backend`].
