@@ -309,27 +309,32 @@ fn enqueue_pending_tun_downlink(
     metrics: &Metrics,
 ) -> Result<(), PendingTunDownlinkReject> {
     enqueue_pending_tun_downlink_with_accounting(
-        pending, target, session_id, weight, packet, queued_at, false, metrics,
+        pending,
+        PendingTunDownlink {
+            target,
+            session_id,
+            packet,
+            queued_at,
+            bandwidth_accounted: false,
+        },
+        weight,
+        metrics,
     )
 }
 
 fn enqueue_pending_tun_downlink_with_accounting(
     pending: &mut PendingTunDownlinks,
-    target: SocketAddr,
-    session_id: SessionId,
+    entry: PendingTunDownlink,
     weight: u16,
-    packet: Vec<u8>,
-    queued_at: Instant,
-    bandwidth_accounted: bool,
     metrics: &Metrics,
 ) -> Result<(), PendingTunDownlinkReject> {
     let admission = pending.enqueue_with_accounting(
-        target,
-        session_id,
+        entry.target,
+        entry.session_id,
         weight,
-        packet,
-        queued_at,
-        bandwidth_accounted,
+        entry.packet,
+        entry.queued_at,
+        entry.bandwidth_accounted,
     );
     match admission {
         Ok(()) => metrics.record_tun_downlink_backpressure_enqueued(),
@@ -529,12 +534,14 @@ fn process_server_tun_packet(
                         Some(Err(crate::error::ConnectionError::DgramQueueFull)) => {
                             if let Err(reject) = enqueue_pending_tun_downlink_with_accounting(
                                 &mut live.live_state.pending_tun_downlinks,
-                                target,
-                                session_id,
+                                PendingTunDownlink {
+                                    target,
+                                    session_id,
+                                    packet: packet.to_vec(),
+                                    queued_at: Instant::now(),
+                                    bandwidth_accounted: true,
+                                },
                                 weight,
-                                packet.to_vec(),
-                                Instant::now(),
-                                true,
                                 metrics,
                             ) {
                                 log::warn!(
