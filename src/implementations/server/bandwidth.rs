@@ -792,7 +792,11 @@ mod tests {
             BandwidthDecision::Allowed
         );
         assert_eq!(
-            manager.check("client", BandwidthDirection::Uplink, 1),
+            manager.check(
+                "client",
+                BandwidthDirection::Uplink,
+                TEN_MEGABIT_BYTES_PER_SECOND as usize + 1,
+            ),
             BandwidthDecision::RateLimited
         );
     }
