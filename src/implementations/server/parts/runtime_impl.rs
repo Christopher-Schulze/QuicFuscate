@@ -1093,13 +1093,25 @@ impl ServerRuntime {
 
         match result {
             Ok(()) => {
-                log::info!("Configuration reloaded successfully ({})", origin);
+                let active_sessions = self.live().live_state.clients.len();
+                let outcome = StandaloneReloadOutcome {
+                    scope: StandaloneReloadScope::NextConnectionOnly,
+                    active_sessions_unchanged: active_sessions,
+                };
+                log::info!(
+                    "Configuration reloaded successfully ({}): scope={:?}, active_sessions_unchanged={}",
+                    origin,
+                    outcome.scope,
+                    outcome.active_sessions_unchanged
+                );
                 crate::audit::audit(
                     crate::audit::AuditEventType::ConfigReloaded,
                     crate::audit::AuditSeverity::Info,
                     None,
                     None,
-                    &format!("{origin} triggered config reload"),
+                    &format!(
+                        "{origin} triggered next-connection-only config reload; {active_sessions} active sessions unchanged"
+                    ),
                 );
             }
             Err(error) => {
@@ -1221,4 +1233,3 @@ impl From<SessionError> for AcceptError {
         AcceptError::SessionError(e.to_string())
     }
 }
-

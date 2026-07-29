@@ -541,6 +541,16 @@ impl ClientRuntime {
         self.connection.as_mut()
     }
 
+    /// Retain an accepted FEC policy for the next connection or reconnect.
+    pub fn set_next_fec_mode(&mut self, mode: crate::engine::FecMode) {
+        self.config.fec.mode = mode;
+    }
+
+    /// Return the policy that will construct the next connection.
+    pub fn next_fec_mode(&self) -> crate::engine::FecMode {
+        self.config.fec.mode
+    }
+
     /// Get current state.
     pub fn state(&self) -> ClientState {
         self.state

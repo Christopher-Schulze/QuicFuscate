@@ -304,7 +304,9 @@ impl AdminHandler for DefaultAdminHandler {
     fn handle_reload(&self) -> AdminResponse {
         // Test-only fallback handler acknowledges the request without runtime wiring.
         log::info!("Admin: Config reload requested");
-        AdminResponse::ok_with_message("Configuration reloaded")
+        AdminResponse::ok_with_message(
+            "Configuration reload accepted; runtime policy changes apply to next connections only",
+        )
     }
 
     fn handle_qkey(&self) -> String {

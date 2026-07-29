@@ -257,6 +257,119 @@ mod tests {
     }
 
     #[test]
+    fn active_fec_off_preserves_queued_sources_and_discards_only_repairs() {
+        let mut connection = test_connection();
+        let profile = WireProfile {
+            epoch: 9,
+            codec: wire::WireCodec::Gf8,
+            source_count: 4,
+            total_count: 7,
+            interleave_depth: 1,
+        };
+        for (id, systematic) in [(10, true), (11, false), (12, true)] {
+            connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
+                packet: fec_packet(id, &[id as u8; 8], (!systematic).then_some(&[1, 2, 3, 4])),
+                wire_meta: Some(WirePacketMeta {
+                    profile,
+                    window: 2,
+                    sequence: id,
+                    repair_index: if systematic { wire::SYSTEMATIC_REPAIR_INDEX } else { 0 },
+                    block_index: 0,
+                    systematic,
+                }),
+                congestion_controlled: true,
+            });
+        }
+        connection.fec_tx_profile = Some(profile);
+        connection.fec_tx_sequence = 13;
+        connection.fec_tx_active = true;
+        let expected_sources = connection
+            .outgoing_fec_packets
+            .iter()
+            .filter(|packet| packet.wire_meta.is_some_and(|meta| meta.systematic))
+            .map(|packet| {
+                (
+                    packet.packet.id,
+                    packet.packet.payload_slice().expect("queued source payload").to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let change = connection.set_fec_control_policy(crate::fec::FecControlPolicy::Off);
+
+        assert_eq!(change.queued_sources_preserved, 2);
+        assert_eq!(change.queued_repairs_discarded, 1);
+        assert_eq!(connection.outgoing_fec_packets.len(), 2);
+        assert!(connection
+            .outgoing_fec_packets
+            .iter()
+            .all(|packet| packet.wire_meta.is_some_and(|meta| meta.systematic)));
+        let retained_sources = connection
+            .outgoing_fec_packets
+            .iter()
+            .map(|packet| {
+                (
+                    packet.packet.id,
+                    packet.packet.payload_slice().expect("retained source payload").to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(retained_sources, expected_sources);
+        assert_eq!(connection.fec.control_policy(), crate::fec::FecControlPolicy::Off);
+        assert_eq!(connection.fec.current_mode(), crate::fec::FecMode::Zero);
+        assert!(connection.fec_tx_profile.is_none());
+        assert_eq!(connection.fec_tx_sequence, 0);
+        assert!(!connection.fec_tx_active);
+    }
+
+    #[test]
+    fn active_fec_policy_commands_are_last_wins_and_idempotent() {
+        let mut connection = test_connection();
+
+        let off = connection.set_fec_control_policy(crate::fec::FecControlPolicy::Off);
+        let repeated_off = connection.set_fec_control_policy(crate::fec::FecControlPolicy::Off);
+        let auto = connection.set_fec_control_policy(crate::fec::FecControlPolicy::Auto);
+
+        assert_eq!(off.controller.effective_policy, crate::fec::FecControlPolicy::Off);
+        assert_eq!(
+            repeated_off.controller.previous_policy,
+            crate::fec::FecControlPolicy::Off
+        );
+        assert_eq!(repeated_off.queued_repairs_discarded, 0);
+        assert_eq!(auto.controller.effective_policy, crate::fec::FecControlPolicy::Auto);
+        assert_eq!(auto.controller.effective_mode, crate::fec::FecMode::Zero);
+        assert_eq!(connection.fec.control_policy(), crate::fec::FecControlPolicy::Auto);
+    }
+
+    #[test]
+    fn connection_mutex_serializes_concurrent_fec_commands_with_last_accepted_winning() {
+        let connection = Arc::new(parking_lot::Mutex::new(test_connection()));
+        let (off_done_tx, off_done_rx) = std::sync::mpsc::channel();
+        let off_connection = Arc::clone(&connection);
+        let off_thread = std::thread::spawn(move || {
+            let change =
+                off_connection.lock().set_fec_control_policy(crate::fec::FecControlPolicy::Off);
+            off_done_tx.send(change).expect("publish Off acknowledgement");
+        });
+        let auto_connection = Arc::clone(&connection);
+        let auto_thread = std::thread::spawn(move || {
+            let off = off_done_rx.recv().expect("wait for accepted Off command");
+            assert_eq!(off.controller.effective_policy, crate::fec::FecControlPolicy::Off);
+            auto_connection.lock().set_fec_control_policy(crate::fec::FecControlPolicy::Auto)
+        });
+
+        off_thread.join().expect("Off command thread");
+        let auto = auto_thread.join().expect("Auto command thread");
+        let snapshot = connection.lock().fec_telemetry_snapshot();
+
+        assert_eq!(auto.controller.previous_policy, crate::fec::FecControlPolicy::Off);
+        assert_eq!(auto.controller.effective_policy, crate::fec::FecControlPolicy::Auto);
+        assert_eq!(snapshot.control_policy, crate::fec::FecControlPolicy::Auto);
+        assert_eq!(snapshot.active_mode, crate::fec::FecMode::Zero);
+        assert_eq!(snapshot.policy_transitions, 2);
+    }
+
+    #[test]
     fn connection_stats_congestion_update_window_rotation() {
         let mut stats = ConnectionStats::default();
         let cap = transport_accel::CONGESTION_WINDOW_SIZE;

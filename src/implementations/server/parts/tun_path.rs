@@ -49,6 +49,20 @@ struct StandaloneRuntimeMetadata {
     reload_policy: StandaloneReloadPolicy,
 }
 
+/// Runtime scope of a successful standalone configuration reload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StandaloneReloadScope {
+    /// Construction profiles changed, while every existing session stayed immutable.
+    NextConnectionOnly,
+}
+
+/// Truthful standalone reload acknowledgement retained in logs and audit evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StandaloneReloadOutcome {
+    pub scope: StandaloneReloadScope,
+    pub active_sessions_unchanged: usize,
+}
+
 #[derive(Default)]
 struct StandaloneServiceSignals {
     admin: Option<Arc<AtomicBool>>,

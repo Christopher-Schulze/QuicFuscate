@@ -467,6 +467,55 @@ impl AdaptiveFec {
         self.control_policy
     }
 
+    /// Replace controller, encoder, decoder, repair-retention, and loss-history
+    /// state with a validated Zero-mode bootstrap for `policy`.
+    ///
+    /// The connection owner must serialize this with send and receive. Cumulative
+    /// wire evidence is preserved, while stale adaptation evidence is not.
+    pub fn set_control_policy(&mut self, policy: FecControlPolicy) -> FecPolicyChange {
+        let previous_policy = self.control_policy;
+        let previous_mode = self.active_mode;
+        if previous_policy == policy {
+            return FecPolicyChange {
+                previous_policy,
+                previous_mode,
+                effective_policy: previous_policy,
+                effective_mode: previous_mode,
+            };
+        }
+
+        let previous_telemetry = self.telemetry;
+        let mut config = self.config.clone();
+        config.control_policy = policy;
+        config.initial_mode = FecMode::Zero;
+        config.force_on = false;
+
+        let mut replacement = Self::new(config);
+        replacement.telemetry = FecTelemetrySnapshot {
+            control_policy: policy,
+            active_mode: FecMode::Zero,
+            effective_window: 0,
+            mode_transitions: previous_telemetry
+                .mode_transitions
+                .saturating_add(u64::from(previous_mode != FecMode::Zero)),
+            policy_transitions: previous_telemetry.policy_transitions.saturating_add(1),
+            ..previous_telemetry
+        };
+        *self = replacement;
+
+        crate::telemetry::FEC_POLICY_TRANSITIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if previous_mode != FecMode::Zero {
+            crate::telemetry::FEC_MODE_SWITCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        FecPolicyChange {
+            previous_policy,
+            previous_mode,
+            effective_policy: self.control_policy,
+            effective_mode: self.active_mode,
+        }
+    }
+
     /// Return exact connection-local FEC evidence.
     pub fn telemetry_snapshot(&self) -> FecTelemetrySnapshot {
         self.telemetry
@@ -1079,4 +1128,3 @@ impl Decoder8 {
         self.known.len() >= self.k
     }
 }
-

@@ -348,6 +348,34 @@ pub enum EngineCommandResult {
     Stats(StatsSnapshot),
     /// Returns TUN capability information.
     TunCapabilities(crate::interface::TunCapabilities),
+    /// Returns the exact scope and effective state of an FEC policy command.
+    FecPolicy(FecPolicyCommandResult),
+}
+
+/// Scope of an accepted Engine FEC policy command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FecPolicyCommandScope {
+    /// The active client connection was changed before acknowledgement.
+    ActiveConnection,
+    /// No connection was active; the policy is configured for the next connection.
+    NextConnection,
+}
+
+/// Truthful acknowledgement for a synchronous Engine FEC policy command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FecPolicyCommandResult {
+    /// Policy requested by the caller.
+    pub requested: super::config::FecMode,
+    /// Policy retained in Engine configuration after acceptance.
+    pub configured: super::config::FecMode,
+    /// Policy observed on the active connection, when one exists.
+    pub effective: Option<super::config::FecMode>,
+    /// Whether acknowledgement covers the active or next connection.
+    pub scope: FecPolicyCommandScope,
+    /// Source datagrams preserved across an active transition.
+    pub queued_sources_preserved: usize,
+    /// Repair-only datagrams discarded before active acknowledgement.
+    pub queued_repairs_discarded: usize,
 }
 
 /// Engine lifecycle state.
@@ -668,7 +696,7 @@ impl QuicFuscateEngine {
                 self.set_stealth_mode(mode).map(|_| EngineCommandResult::State(self.state()))
             }
             EngineCommand::SetFecMode(mode) => {
-                self.set_fec_mode(mode).map(|_| EngineCommandResult::State(self.state()))
+                self.set_fec_mode(mode).map(EngineCommandResult::FecPolicy)
             }
             EngineCommand::SetCongestionControl(cc) => {
                 self.set_cc_algorithm(cc).map(|_| EngineCommandResult::State(self.state()))
@@ -1218,19 +1246,78 @@ impl QuicFuscateEngine {
     /// # Arguments
     ///
     /// * `mode` - The new FEC mode (Auto, Off)
-    pub fn set_fec_mode(&mut self, mode: super::config::FecMode) -> Result<(), EngineError> {
+    pub fn set_fec_mode(
+        &mut self,
+        mode: super::config::FecMode,
+    ) -> Result<FecPolicyCommandResult, EngineError> {
+        if self.config.engine.mode == EngineMode::Server && self.is_running() {
+            return Err(EngineError::InvalidState(
+                self.state(),
+                "set_fec_mode (running server policy is reload-owned and next-connection-only)",
+            ));
+        }
+
+        let active =
+            self.client_runtime.as_ref().and_then(ClientRuntime::connection).map(|connection| {
+                let policy = match mode {
+                    super::config::FecMode::Off => crate::fec::FecControlPolicy::Off,
+                    super::config::FecMode::Auto => crate::fec::FecControlPolicy::Auto,
+                };
+                connection.set_fec_control_policy(policy)
+            });
+
+        if self.state() == EngineState::Connected && active.is_none() {
+            return Err(EngineError::Internal(
+                "engine reports Connected without an owned client connection".to_string(),
+            ));
+        }
+
+        if let Some(runtime) = self.client_runtime.as_mut() {
+            runtime.set_next_fec_mode(mode);
+        }
         self.config.fec.mode = mode;
         self.stats.fec_mode.store(mode as u64, Ordering::Relaxed);
 
-        // Log the FEC mode change
-        log::info!("FEC mode changed to {:?}", mode);
-
-        Ok(())
+        let result = if let Some(change) = active {
+            let effective = match change.controller.effective_policy {
+                crate::fec::FecControlPolicy::Off => super::config::FecMode::Off,
+                crate::fec::FecControlPolicy::Auto => super::config::FecMode::Auto,
+            };
+            FecPolicyCommandResult {
+                requested: mode,
+                configured: mode,
+                effective: Some(effective),
+                scope: FecPolicyCommandScope::ActiveConnection,
+                queued_sources_preserved: change.queued_sources_preserved,
+                queued_repairs_discarded: change.queued_repairs_discarded,
+            }
+        } else {
+            FecPolicyCommandResult {
+                requested: mode,
+                configured: mode,
+                effective: None,
+                scope: FecPolicyCommandScope::NextConnection,
+                queued_sources_preserved: 0,
+                queued_repairs_discarded: 0,
+            }
+        };
+        log::info!("FEC policy command accepted: {:?}", result);
+        Ok(result)
     }
 
     /// Get the current FEC mode.
     pub fn fec_mode(&self) -> super::config::FecMode {
         self.config.fec.mode
+    }
+
+    /// Observe the operator-owned FEC policy on the active client connection.
+    pub fn active_fec_mode(&self) -> Option<super::config::FecMode> {
+        self.client_runtime.as_ref().and_then(ClientRuntime::connection).map(|connection| {
+            match connection.fec_telemetry_snapshot().control_policy {
+                crate::fec::FecControlPolicy::Off => super::config::FecMode::Off,
+                crate::fec::FecControlPolicy::Auto => super::config::FecMode::Auto,
+            }
+        })
     }
 
     /// Update the congestion control algorithm at runtime.
@@ -1269,22 +1356,20 @@ impl QuicFuscateEngine {
     where
         F: FnOnce(&mut EngineConfig),
     {
-        updater(&mut self.config);
-        self.config.validate()?;
+        let mut candidate = self.config.clone();
+        updater(&mut candidate);
+        candidate.validate()?;
+        if candidate.fec.mode != self.config.fec.mode {
+            self.set_fec_mode(candidate.fec.mode)?;
+        }
+        self.config = candidate;
 
         // Update stats to reflect new config
         self.stats.stealth_mode.store(self.config.stealth.mode as u64, Ordering::Relaxed);
-        self.stats.fec_mode.store(self.config.fec.mode as u64, Ordering::Relaxed);
+        let effective_fec = self.active_fec_mode().unwrap_or(self.config.fec.mode);
+        self.stats.fec_mode.store(effective_fec as u64, Ordering::Relaxed);
 
         Ok(())
-    }
-
-    /// Get a mutable reference to the configuration for direct modification.
-    ///
-    /// **Warning**: Changes made directly are not validated until the next
-    /// operation. Use `update_config()` for validated changes.
-    pub fn config_mut(&mut self) -> &mut EngineConfig {
-        &mut self.config
     }
 
     /// Enable or disable traffic padding.
@@ -1380,7 +1465,8 @@ impl QuicFuscateEngine {
             self.stats.uptime_secs.store(start.elapsed().as_secs(), Ordering::Relaxed);
         }
         self.stats.stealth_mode.store(self.config.stealth.mode as u64, Ordering::Relaxed);
-        self.stats.fec_mode.store(self.config.fec.mode as u64, Ordering::Relaxed);
+        let effective_fec = self.active_fec_mode().unwrap_or(self.config.fec.mode);
+        self.stats.fec_mode.store(effective_fec as u64, Ordering::Relaxed);
     }
 
     fn set_state(&mut self, state: EngineState) {
@@ -1438,6 +1524,7 @@ impl QuicFuscateEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::FecMode;
     use std::path::PathBuf;
     use std::sync::atomic::AtomicBool;
     use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard};
@@ -1484,6 +1571,63 @@ mod tests {
 
         engine.stop().unwrap();
         assert_eq!(engine.state(), EngineState::Stopped);
+    }
+
+    #[test]
+    fn fec_policy_command_without_connection_reports_next_connection_scope() {
+        let mut engine = QuicFuscateEngine::new(EngineConfig::default()).expect("engine");
+
+        let result = engine.set_fec_mode(FecMode::Off).expect("policy command");
+
+        assert_eq!(result.requested, FecMode::Off);
+        assert_eq!(result.configured, FecMode::Off);
+        assert_eq!(result.effective, None);
+        assert_eq!(result.scope, FecPolicyCommandScope::NextConnection);
+        assert_eq!(engine.fec_mode(), FecMode::Off);
+        assert_eq!(engine.active_fec_mode(), None);
+    }
+
+    #[test]
+    fn structured_fec_command_returns_policy_acknowledgement() {
+        let mut engine = QuicFuscateEngine::new(EngineConfig::default()).expect("engine");
+
+        let result =
+            engine.apply_command(EngineCommand::SetFecMode(FecMode::Off)).expect("policy command");
+
+        let EngineCommandResult::FecPolicy(result) = result else {
+            panic!("FEC command must return a typed policy acknowledgement");
+        };
+        assert_eq!(result.scope, FecPolicyCommandScope::NextConnection);
+        assert_eq!(result.effective, None);
+    }
+
+    #[test]
+    fn next_connection_fec_command_updates_started_client_runtime_config() {
+        let config = EngineConfig::default();
+        let runtime = ClientRuntime::new(config.clone()).expect("client runtime");
+        let mut engine = QuicFuscateEngine::new(config).expect("engine");
+        engine.client_runtime = Some(runtime);
+        engine.state = EngineState::Running;
+
+        let result = engine.set_fec_mode(FecMode::Off).expect("policy command");
+
+        assert_eq!(result.scope, FecPolicyCommandScope::NextConnection);
+        assert_eq!(engine.client_runtime.as_ref().expect("runtime").next_fec_mode(), FecMode::Off);
+    }
+
+    #[test]
+    fn running_server_rejects_engine_fec_mutation_without_changing_configured_state() {
+        let mut config = EngineConfig::default();
+        config.engine.mode = EngineMode::Server;
+        let mut engine = QuicFuscateEngine::new(config).expect("engine");
+        engine.state = EngineState::Running;
+
+        let error = engine
+            .set_fec_mode(FecMode::Off)
+            .expect_err("running server mutation must be rejected");
+
+        assert!(matches!(error, EngineError::InvalidState(EngineState::Running, _)));
+        assert_eq!(engine.fec_mode(), FecMode::Auto);
     }
 
     #[test]

@@ -155,6 +155,21 @@ impl ClientConnection {
         guard.loss_rate()
     }
 
+    /// Apply and observe an active FEC policy change under the connection owner.
+    pub fn set_fec_control_policy(
+        &self,
+        policy: crate::fec::FecControlPolicy,
+    ) -> crate::core::ActiveFecPolicyChange {
+        let mut guard = self.inner.lock();
+        guard.set_fec_control_policy(policy)
+    }
+
+    /// Return exact active FEC policy, mode, and wire counters.
+    pub fn fec_telemetry_snapshot(&self) -> crate::fec::FecTelemetrySnapshot {
+        let guard = self.inner.lock();
+        guard.fec_telemetry_snapshot()
+    }
+
     /// Get the effective stealth mode currently used by the live connection.
     pub fn stealth_mode(&self) -> crate::stealth::StealthMode {
         let guard = self.inner.lock();

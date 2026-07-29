@@ -375,7 +375,7 @@ This document provides comprehensive technical documentation for the system arch
 - Admin control plane: `src/implementations/server/admin_http.rs` and `src/implementations/server/qkey_registry.rs` provide server-authoritative QKey issuance/revocation, persistence, and runtime policy enforcement surfaces.
 - Standalone CLI server runtime: `src/implementations/server/mod.rs::ServerRuntime::new_standalone(...)` owns standalone UDP socket bootstrap, live-state bootstrap, accept-loop ownership, optional standalone TUN setup, and auxiliary shutdown/control-plane signal registration for metrics, Unix admin, and admin-web services.
 - Graceful server lifecycle: SIGINT, SIGTERM, admin shutdown, and authenticated `POST /api/drain` enter the same `Running -> Draining -> Stopped` state machine. Draining rejects new clients immediately, preserves established sessions until they close or `[engine] shutdown_timeout_ms` expires, flushes final QUIC CONNECTION_CLOSE packets, then tears down auxiliary services and host resources. `GET /api/drain/status` reports lifecycle, active connections, grace, and elapsed time. SIGHUP validates and applies supported runtime config changes without restarting. systemd receives READY, RELOADING, STOPPING, STATUS, and configured watchdog notifications.
-- Standalone runtime config reload: the server module now also owns runtime reload normalization for stealth overrides, optimize normalization, and `transport.*` TOML overrides. `main.rs` only forwards reload intent and transport state into that server-owned path.
+- Standalone runtime config reload: the server module owns runtime reload normalization for stealth overrides, optimize normalization, and `transport.*` TOML overrides. Reload is explicitly `NextConnectionOnly`: the single live server loop serializes profile replacement with connection construction, while every existing session remains immutable. Admin acknowledgement, runtime logs, and audit records state this scope and the unchanged active-session count. `main.rs` only forwards reload intent and transport state into that server-owned path.
 - Server listen-address normalization: standalone CLI and embedded `EngineMode::Server` now derive `ServerConfig.listen` through the same server-owned resolver, so both entry surfaces share one canonical listen-address interpretation for runtime ownership.
 - Desktop: imports QKeys (paste/import), persists them per tunnel locally, and uses them for connect/disconnect. Existing tunnel shells can be upgraded in-place through `Set QKey` / `Change QKey`. The desktop UI does not generate server-issued QKeys and does not render them after import.
 
@@ -1282,6 +1282,14 @@ Runtime adaptation is applied continuously in the connection loop:
 - Transport feedback feeds `AdaptiveFec::report_transport_loss()` only when a classified ACK or declared loss is present. The feedback retains independently owned send, ACK, and loss counts plus the congestion controller's smoothed loss ratio, but send-only callbacks are not controller observations and cannot replay stale loss into Auto FEC. Only classified ACKs can prove a clean link.
 
 This is the convergence point where transport feedback, StealthBrain hints, and FEC policy remain synchronized during live traffic.
+
+#### Active FEC Policy Commands
+
+`QuicFuscateEngine::set_fec_mode()` is synchronous and returns `FecPolicyCommandResult`. The result separates `requested`, `configured`, and optional active `effective` policy, identifies `ActiveConnection` versus `NextConnection` scope, and reports queued source preservation plus repair-only retirement. A client command without a connection updates both Engine and `ClientRuntime` construction state for the next connection or reconnect. Batch configuration changes must use validated `update_config()`, which routes FEC changes through the same policy command; the Engine exposes no unchecked mutable configuration reference. A running embedded server rejects this Engine command because standalone reload owns its next-connection-only policy.
+
+An active client command locks the existing `QuicFuscateConnection` owner already used by send, receive, Brain feedback, loss feedback, reconnect, and shutdown. It adds no packet-path lock. Auto-to-Off preserves queued systematic datagrams byte-exactly, discards queued repairs before acknowledgement, clears emission/recovery scratch, and resets wire epoch state. Off-to-Auto and Auto-to-Off rebuild the adaptive controller, encoder, decoder, estimator, pending transition, and repair-retention state at Zero while preserving cumulative wire telemetry. Repeated commands are idempotent; serialized accepted commands use deterministic last-accepted-wins semantics.
+
+While local policy is Off, framed peer systematic packets remain deliverable to QUIC through source-only parsing. Peer repairs are validated and discarded without creating a receive window or decoder retention. Connection telemetry exposes codec `mode_transitions` and operator `policy_transitions` separately; process telemetry exports `quicfuscate_fec_policy_transitions_total`.
 
 #### Congestion Control Architecture
 
@@ -3829,6 +3837,7 @@ Exported telemetry metrics (via `telemetry::export_telemetry_text()`):
   - `quicfuscate_fec_effective_window_source_packets_sum`
   - `quicfuscate_fec_observed_packets_total`, `quicfuscate_fec_observed_lost_packets_total`, `quicfuscate_fec_observed_loss_ppm`: process-wide exact transport send callbacks, the lost subset reported independently when recovery declares loss, and their cumulative ratio
   - `quicfuscate_fec_mode_switches_total`, `quicfuscate_fec_switch_reason_{adaptive,force_on,extreme,disturbance,streaming_hint}_total`
+  - `quicfuscate_fec_policy_transitions_total`
   - `quicfuscate_fec_{source,repair}_packets_{sent,received}_total`
   - `quicfuscate_fec_source_payload_bytes_{sent,received}_total`
   - `quicfuscate_fec_{source,repair}_wire_bytes_{sent,received}_total`

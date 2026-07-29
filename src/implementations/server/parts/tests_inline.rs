@@ -1572,6 +1572,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn standalone_reload_scope_never_claims_active_session_mutation() {
+        let outcome = StandaloneReloadOutcome {
+            scope: StandaloneReloadScope::NextConnectionOnly,
+            active_sessions_unchanged: 7,
+        };
+
+        assert_eq!(outcome.scope, StandaloneReloadScope::NextConnectionOnly);
+        assert_eq!(outcome.active_sessions_unchanged, 7);
+    }
+
     // --- resolve_qkey_remote tests ---
 
     #[test]

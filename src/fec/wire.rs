@@ -700,6 +700,36 @@ impl WireFecReceiver {
         self.windows[window_index].receive(parsed.meta, parsed.payload, output)
     }
 
+    /// Parse a framed peer datagram while local recovery policy is Off.
+    ///
+    /// Systematic payloads remain deliverable to QUIC, but repairs are discarded
+    /// without allocating decoder state or retaining a receive window.
+    pub fn receive_source_only(
+        &self,
+        datagram: &[u8],
+        output: &mut Vec<FecPacket>,
+    ) -> Result<WireReceiveReport, WireError> {
+        output.clear();
+        let parsed = parse_packet(datagram)?;
+        let mut report = WireReceiveReport {
+            systematic: parsed.meta.systematic,
+            wire_bytes: HEADER_LEN + parsed.payload.len(),
+            ..WireReceiveReport::default()
+        };
+        if !parsed.meta.systematic {
+            return Ok(report);
+        }
+
+        let payload = source_datagram_payload(parsed.payload)?;
+        report.source_payload_bytes = payload.len();
+        report.decoded_packets = 1;
+        let mut packet =
+            FecPacket::from_block(parsed.meta.sequence, payload, Arc::clone(&self.mem_pool));
+        packet.seq = parsed.meta.sequence;
+        output.push(packet);
+        Ok(report)
+    }
+
     #[cfg(test)]
     fn retained_windows(&self) -> usize {
         self.windows.len()
@@ -749,6 +779,44 @@ mod tests {
         assert_eq!(written, HEADER_LEN + payload.len());
         assert_eq!(parsed.meta, meta);
         assert_eq!(parsed.payload, payload);
+    }
+
+    #[test]
+    fn source_only_receive_delivers_sources_and_never_retains_repair_state() {
+        let pool = crate::optimize::global_pool();
+        let receiver = WireFecReceiver::new(pool);
+        let wire_profile = profile(WireCodec::Gf8);
+        let mut wire = [0u8; 256];
+        let mut output = Vec::new();
+        let source_payload = protected_datagram(&[0x40, 0x11, 0x22, 0x33]);
+        let source_meta = WirePacketMeta {
+            profile: wire_profile,
+            window: 1,
+            sequence: 64,
+            repair_index: SYSTEMATIC_REPAIR_INDEX,
+            block_index: 0,
+            systematic: true,
+        };
+        let source_len =
+            write_packet(source_meta, &source_payload, &mut wire).expect("source wire");
+
+        let source_report = receiver
+            .receive_source_only(&wire[..source_len], &mut output)
+            .expect("source-only receive");
+        assert!(source_report.systematic);
+        assert_eq!(source_report.decoded_packets, 1);
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0].payload_slice(), Some(&[0x40, 0x11, 0x22, 0x33][..]));
+        assert_eq!(receiver.retained_windows(), 0);
+
+        let repair_meta =
+            WirePacketMeta { systematic: false, sequence: 124, repair_index: 0, ..source_meta };
+        let repair_len = write_packet(repair_meta, &[7; 16], &mut wire).expect("repair wire");
+        let repair_report =
+            receiver.receive_source_only(&wire[..repair_len], &mut output).expect("repair discard");
+        assert!(!repair_report.systematic);
+        assert!(output.is_empty());
+        assert_eq!(receiver.retained_windows(), 0);
     }
 
     #[test]

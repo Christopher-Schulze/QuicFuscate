@@ -47,6 +47,103 @@ fn engine_mode_sets_policy_independently_from_codec_bootstrap() {
 }
 
 #[test]
+fn active_auto_to_off_retires_all_controller_and_codec_state_at_ack() {
+    let process_policy_transitions =
+        crate::telemetry::FEC_POLICY_TRANSITIONS.load(std::sync::atomic::Ordering::Relaxed);
+    let pool = crate::optimize::global_pool();
+    let mut fec = AdaptiveFec::new(FecConfig {
+        control_policy: FecControlPolicy::Auto,
+        initial_mode: FecMode::Normal,
+        ..FecConfig::default()
+    });
+    let mut output = Vec::new();
+    fec.on_send_into(mk_src_packet(1, 128, &pool), &mut output);
+    fec.set_redundancy_ppm(900_000);
+    assert!(fec.encoder.lock().packets_in_window() > 0);
+
+    let change = fec.set_control_policy(FecControlPolicy::Off);
+    let snapshot = fec.telemetry_snapshot();
+
+    assert_eq!(change.previous_policy, FecControlPolicy::Auto);
+    assert_eq!(change.previous_mode, FecMode::Normal);
+    assert_eq!(change.effective_policy, FecControlPolicy::Off);
+    assert_eq!(change.effective_mode, FecMode::Zero);
+    assert_eq!(snapshot.control_policy, FecControlPolicy::Off);
+    assert_eq!(snapshot.active_mode, FecMode::Zero);
+    assert_eq!(snapshot.effective_window, 0);
+    assert_eq!(snapshot.mode_transitions, 1);
+    assert_eq!(snapshot.policy_transitions, 1);
+    assert_eq!(fec.encoder.lock().packets_in_window(), 0);
+    assert_eq!(fec.redundancy_ppm(), 0);
+    assert!(!fec.is_transitioning());
+    assert!(fec.emitted_ids.is_empty());
+    assert!(fec.emitted_order.is_empty());
+    assert!(
+        crate::telemetry::FEC_POLICY_TRANSITIONS.load(std::sync::atomic::Ordering::Relaxed)
+            > process_policy_transitions
+    );
+}
+
+#[test]
+fn active_off_to_auto_bootstraps_zero_without_stale_loss_or_repair_state() {
+    let _env_lock = acquire_env_lock();
+    let _g_up = EnvGuard::set("QUICFUSCATE_FEC_SWITCH_MIN_UP_MS", "0");
+    let mut fec = AdaptiveFec::new(FecConfig::product_default());
+    for _ in 0..16 {
+        fec.report_transport_loss(32, 0, 32, 1.0);
+    }
+    assert_ne!(fec.current_mode(), FecMode::Zero);
+
+    let off = fec.set_control_policy(FecControlPolicy::Off);
+    assert_eq!(off.effective_policy, FecControlPolicy::Off);
+    assert_eq!(off.effective_mode, FecMode::Zero);
+    for _ in 0..16 {
+        fec.report_transport_loss(32, 0, 32, 1.0);
+    }
+    let before = fec.telemetry_snapshot();
+
+    let change = fec.set_control_policy(FecControlPolicy::Auto);
+    let after = fec.telemetry_snapshot();
+
+    assert_eq!(change.previous_policy, FecControlPolicy::Off);
+    assert_eq!(change.effective_policy, FecControlPolicy::Auto);
+    assert_eq!(change.effective_mode, FecMode::Zero);
+    assert_eq!(after.observed_packets, before.observed_packets);
+    assert_eq!(after.observed_lost_packets, before.observed_lost_packets);
+    assert_eq!(after.mode_transitions, before.mode_transitions);
+    assert_eq!(after.policy_transitions, before.policy_transitions + 1);
+    assert_eq!(fec.current_mode(), FecMode::Zero);
+    assert_eq!(fec.encoder.lock().packets_in_window(), 0);
+    assert!(!fec.is_transitioning());
+
+    fec.report_transport_loss(1, 1, 0, 0.0);
+    assert_eq!(
+        fec.current_mode(),
+        FecMode::Zero,
+        "one fresh clean observation must not replay stale Off-era loss"
+    );
+}
+
+#[test]
+fn repeated_active_policy_command_is_idempotent_and_preserves_live_auto_state() {
+    let _env_lock = acquire_env_lock();
+    let _g_up = EnvGuard::set("QUICFUSCATE_FEC_SWITCH_MIN_UP_MS", "0");
+    let mut fec = AdaptiveFec::new(FecConfig::product_default());
+    for _ in 0..12 {
+        fec.report_transport_loss(32, 16, 16, 0.50);
+    }
+    let before = fec.telemetry_snapshot();
+    assert_ne!(before.active_mode, FecMode::Zero);
+
+    let change = fec.set_control_policy(FecControlPolicy::Auto);
+    let after = fec.telemetry_snapshot();
+
+    assert_eq!(change.previous_mode, before.active_mode);
+    assert_eq!(change.effective_mode, before.active_mode);
+    assert_eq!(after, before);
+}
+
+#[test]
 fn off_policy_rejects_every_adaptive_and_observer_control_input() {
     let _env_lock = acquire_env_lock();
     let mut fec = AdaptiveFec::new(off_config());

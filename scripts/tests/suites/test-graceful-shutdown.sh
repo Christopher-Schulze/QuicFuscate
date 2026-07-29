@@ -50,6 +50,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
+report_error() {
+  local exit_code="$?"
+  local line="$1"
+  printf 'FAIL: graceful-shutdown harness stopped at line %s with exit %s\n' "$line" "$exit_code" >&2
+}
+trap 'report_error "$LINENO"' ERR
+
 free_tcp_port() {
   python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
 }
@@ -139,7 +146,7 @@ SERVER_PID=$!
 ADMIN_READY=0
 for _ in $(seq 1 150); do
   process_running "$SERVER_PID" || break
-  STATUS_CODE="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$ADMIN_PORT/" 2>/dev/null || true)"
+  STATUS_CODE="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$ADMIN_PORT/api/health" 2>/dev/null || true)"
   if [[ "$STATUS_CODE" == "200" ]]; then
     ADMIN_READY=1
     break
@@ -200,7 +207,7 @@ curl -sS -b "$COOKIE_JAR" "http://127.0.0.1:$ADMIN_PORT/api/status" >"$PROOF_DIR
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["data"]; assert d["clients_active"] == 2, d' "$PROOF_DIR/status-before.json"
 
 kill -HUP "$SERVER_PID"
-wait_for_log "$SERVER_LOG" 'Configuration reloaded successfully (SIGHUP)' "$SERVER_PID" 100
+wait_for_log "$SERVER_LOG" 'Configuration reloaded successfully (SIGHUP): scope=NextConnectionOnly, active_sessions_unchanged=2' "$SERVER_PID" 100
 curl -sS -b "$COOKIE_JAR" "http://127.0.0.1:$ADMIN_PORT/api/drain/status" >"$PROOF_DIR/drain-before.json"
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["data"]; assert d == {"state":"running","active_connections":2,"grace_period_ms":5000,"drain_elapsed_ms":0}, d' "$PROOF_DIR/drain-before.json"
 
@@ -254,8 +261,17 @@ wait_for_process_exit "$CLIENT_B_PID" 30 || {
   echo "FAIL: remaining client did not exit after the server close frame" >&2
   exit 1
 }
-wait "$CLIENT_B_PID"
+if wait "$CLIENT_B_PID"; then
+  CLIENT_B_EXIT=0
+else
+  CLIENT_B_EXIT=$?
+fi
 CLIENT_B_PID=""
+[[ "$CLIENT_B_EXIT" -eq 1 ]] || {
+  echo "FAIL: remaining client exited with $CLIENT_B_EXIT instead of fail-closed status 1" >&2
+  exit 1
+}
+grep -q 'VPN server closed the connection; firewall remains fail-closed' "$CLIENT_B_LOG"
 
 grep -q 'Server drain started (reason=admin_drain, grace_ms=5000)' "$SERVER_LOG"
 grep -q 'Server drain complete (active_clients=1' "$SERVER_LOG"
@@ -271,5 +287,6 @@ fi
 
 "$BINARY" verify-audit-log "$AUDIT_LOG" >"$PROOF_DIR/audit-verify.log"
 python3 -c 'import json,sys; events=[json.loads(line)["event"] for line in open(sys.argv[1]) if line.strip()]; required={"client_authenticated":2,"admin_action":1,"config_reloaded":1,"connection_established":2,"connection_closed":1}; missing={event:minimum for event,minimum in required.items() if events.count(event)<minimum}; assert not missing,(missing,events)' "$AUDIT_LOG"
+grep -q 'SIGHUP triggered next-connection-only config reload; 2 active sessions unchanged' "$AUDIT_LOG"
 
-printf 'PASS: authenticated_clients=2 reload=SIGHUP drain=running-to-draining-to-stopped rejected_new_connection=1 client_close=2-to-1 grace_ms=5000 elapsed_ms=%s close_flush=clean audit_chain=valid\n' "$DRAIN_ELAPSED_MS"
+printf 'PASS: authenticated_clients=2 reload=SIGHUP scope=next-connection-only active_sessions_unchanged=2 drain=running-to-draining-to-stopped rejected_new_connection=1 client_close=2-to-1 grace_ms=5000 elapsed_ms=%s close_flush=clean audit_chain=valid\n' "$DRAIN_ELAPSED_MS"

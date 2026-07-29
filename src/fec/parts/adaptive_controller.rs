@@ -3,6 +3,9 @@
 
 /// Adaptive FEC controller with seamless mode transitions and burst-loss protection.
 pub struct AdaptiveFec {
+    /// Validated construction contract retained for rare active-policy changes.
+    /// The packet path never reads or clones this value.
+    config: FecConfig,
     // Using InterleavedEncoder for burst loss protection (default depth=4)
     encoder: Arc<Mutex<internal::InterleavedEncoder>>,
     // Using InterleavedDecoder (wraps LazyDecoder) for burst loss recovery
@@ -107,6 +110,8 @@ pub struct FecTelemetrySnapshot {
     pub observed_lost_packets: u64,
     /// Committed codec transitions.
     pub mode_transitions: u64,
+    /// Accepted operator-policy transitions.
+    pub policy_transitions: u64,
     /// Source datagrams serialized into the network-facing output buffer.
     pub source_packets_sent: u64,
     /// Repair datagrams serialized into the network-facing output buffer.
@@ -135,6 +140,19 @@ pub struct FecTelemetrySnapshot {
     pub recovered_payload_bytes: u64,
 }
 
+/// Atomic result of changing one live connection's operator-owned FEC policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FecPolicyChange {
+    /// Policy effective before the command.
+    pub previous_policy: FecControlPolicy,
+    /// Codec mode effective before the command.
+    pub previous_mode: FecMode,
+    /// Policy effective when the command returned.
+    pub effective_policy: FecControlPolicy,
+    /// Codec mode effective when the command returned.
+    pub effective_mode: FecMode,
+}
+
 impl FecTelemetrySnapshot {
     fn new(
         enabled: bool,
@@ -150,6 +168,7 @@ impl FecTelemetrySnapshot {
             observed_packets: 0,
             observed_lost_packets: 0,
             mode_transitions: 0,
+            policy_transitions: 0,
             source_packets_sent: 0,
             repair_packets_sent: 0,
             source_payload_bytes_sent: 0,
@@ -378,6 +397,7 @@ impl AdaptiveFec {
         let telemetry_enabled =
             crate::telemetry::TELEMETRY_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
         let fec = Self {
+            config: config.clone(),
             // InterleavedEncoder for burst loss protection
             encoder: Arc::new(Mutex::new(internal::InterleavedEncoder::new_with_policy(
                 mode,
@@ -820,4 +840,3 @@ impl AdaptiveFec {
         }
     }
 }
-

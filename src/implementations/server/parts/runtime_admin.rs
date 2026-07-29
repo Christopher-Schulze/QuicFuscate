@@ -615,7 +615,11 @@ impl ServerAdminCore {
     }
 
     pub fn reload(&self) -> AdminResponse {
-        self.dispatch_action(AdminAction::Reload, "Configuration reload scheduled".to_string())
+        self.dispatch_action(
+            AdminAction::Reload,
+            "Configuration reload scheduled; FEC, stealth, and transport policy changes apply to next connections only"
+                .to_string(),
+        )
     }
 
     pub fn shutdown(&self) -> AdminResponse {
@@ -906,4 +910,3 @@ impl AdminHttpHandler for ServerAdminHttpRuntimeHandler {
         AdminResponse::ok_with_message("Logs cleared")
     }
 }
-

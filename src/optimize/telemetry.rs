@@ -264,6 +264,11 @@ pub fn export_telemetry_text() -> String {
         );
         let _ = writeln!(
             out,
+            "quicfuscate_fec_policy_transitions_total {}",
+            get(&FEC_POLICY_TRANSITIONS)
+        );
+        let _ = writeln!(
+            out,
             "quicfuscate_fec_source_packets_sent_total {}",
             FEC_SOURCE_PACKETS_SENT.get()
         );
@@ -1172,6 +1177,8 @@ pub static FEC_SWITCH_REASON_EXTREME: AtomicU64 = AtomicU64::new(0);
 pub static FEC_SWITCH_REASON_DISTURBANCE: AtomicU64 = AtomicU64::new(0);
 /// FEC mode switches triggered by an explicit streaming hint.
 pub static FEC_SWITCH_REASON_STREAMING_HINT: AtomicU64 = AtomicU64::new(0);
+/// Accepted active operator-policy transitions.
+pub static FEC_POLICY_TRANSITIONS: AtomicU64 = AtomicU64::new(0);
 /// Packets included in process-wide FEC loss observations.
 pub static FEC_OBSERVED_PACKETS: Counter = Counter::new();
 /// Lost packets included in process-wide FEC loss observations.
@@ -1898,6 +1905,7 @@ mod tests {
             "quicfuscate_fec_observed_packets_total ",
             "quicfuscate_fec_observed_lost_packets_total ",
             "quicfuscate_fec_observed_loss_ppm ",
+            "quicfuscate_fec_policy_transitions_total ",
             "quicfuscate_fec_source_packets_sent_total ",
             "quicfuscate_fec_repair_packets_sent_total ",
             "quicfuscate_fec_source_payload_bytes_sent_total ",

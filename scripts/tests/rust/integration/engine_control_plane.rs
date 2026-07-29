@@ -1,5 +1,6 @@
 use quicfuscate::engine::{
-    EngineCommand, EngineCommandResult, EngineConfig, EngineState, QuicFuscateEngine,
+    EngineCommand, EngineCommandResult, EngineConfig, EngineState, FecPolicyCommandScope,
+    QuicFuscateEngine,
 };
 use std::time::Duration;
 
@@ -44,7 +45,14 @@ fn test_control_plane_getters_and_runtime_setters() {
 
     let current_fec = engine.fec_mode();
     match engine.apply_command(EngineCommand::SetFecMode(current_fec)).unwrap() {
-        EngineCommandResult::State(state) => assert_eq!(state, EngineState::Created),
+        EngineCommandResult::FecPolicy(result) => {
+            assert_eq!(result.requested, current_fec);
+            assert_eq!(result.configured, current_fec);
+            assert_eq!(result.effective, None);
+            assert_eq!(result.scope, FecPolicyCommandScope::NextConnection);
+            assert_eq!(result.queued_sources_preserved, 0);
+            assert_eq!(result.queued_repairs_discarded, 0);
+        }
         other => panic!("unexpected result for SetFecMode: {:?}", other),
     }
 
@@ -124,6 +132,26 @@ fn test_control_plane_connect_disconnect_fail_closed() {
     match engine.apply_command(EngineCommand::Connect) {
         Ok(EngineCommandResult::State(state)) => {
             assert_eq!(state, EngineState::Connected);
+            let off = engine
+                .apply_command(EngineCommand::SetFecMode(quicfuscate::engine::FecMode::Off))
+                .expect("active Off policy command");
+            let EngineCommandResult::FecPolicy(off) = off else {
+                panic!("active Off command must return a typed FEC acknowledgement");
+            };
+            assert_eq!(off.scope, FecPolicyCommandScope::ActiveConnection);
+            assert_eq!(off.effective, Some(quicfuscate::engine::FecMode::Off));
+            assert_eq!(engine.active_fec_mode(), Some(quicfuscate::engine::FecMode::Off));
+
+            let auto = engine
+                .apply_command(EngineCommand::SetFecMode(quicfuscate::engine::FecMode::Auto))
+                .expect("active Auto policy command");
+            let EngineCommandResult::FecPolicy(auto) = auto else {
+                panic!("active Auto command must return a typed FEC acknowledgement");
+            };
+            assert_eq!(auto.scope, FecPolicyCommandScope::ActiveConnection);
+            assert_eq!(auto.effective, Some(quicfuscate::engine::FecMode::Auto));
+            assert_eq!(engine.active_fec_mode(), Some(quicfuscate::engine::FecMode::Auto));
+
             match engine.apply_command(EngineCommand::Disconnect).unwrap() {
                 EngineCommandResult::State(state) => assert_eq!(state, EngineState::Running),
                 other => panic!("unexpected result for Disconnect: {:?}", other),

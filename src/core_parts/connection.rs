@@ -190,6 +190,17 @@ impl OutgoingFecPacket {
     }
 }
 
+/// Atomic active-connection FEC policy acknowledgement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActiveFecPolicyChange {
+    /// Controller-level policy and mode transition.
+    pub controller: crate::fec::FecPolicyChange,
+    /// Source datagrams preserved across the command boundary.
+    pub queued_sources_preserved: usize,
+    /// Repair-only datagrams discarded before acknowledgement.
+    pub queued_repairs_discarded: usize,
+}
+
 #[derive(Default)]
 struct OutboundPacer {
     next_release: Option<Instant>,
@@ -1205,7 +1216,12 @@ impl QuicFuscateConnection {
         let wire_framed = wire::is_framed(&block[..len]);
         let mut recovered_packets = std::mem::take(&mut self.fec_receive_scratch);
         let receive_report = if wire_framed {
-            let result = self.fec_wire_receiver.receive(&block[..len], &mut recovered_packets);
+            let result = if self.fec.control_policy() == crate::fec::FecControlPolicy::Off {
+                self.fec_wire_receiver
+                    .receive_source_only(&block[..len], &mut recovered_packets)
+            } else {
+                self.fec_wire_receiver.receive(&block[..len], &mut recovered_packets)
+            };
             self.optimization_manager.free_block(block);
             match result {
                 Ok(report) => report,
@@ -1333,6 +1349,51 @@ impl QuicFuscateConnection {
     /// Queue one ack-eliciting transport keepalive for the next send poll.
     pub fn queue_keepalive_ping(&mut self) {
         self.conn.queue_cover_ping();
+    }
+
+    /// Atomically change the operator-owned FEC policy for this live connection.
+    ///
+    /// The existing connection mutex serializes this command with lifecycle,
+    /// Brain feedback, loss feedback, send, and receive. Source datagrams already
+    /// owned by the output queue remain byte-identical; repair-only datagrams are
+    /// retired before the command is acknowledged. Both codec directions restart
+    /// from empty state so Auto never inherits stale Off-era or prior-Auto evidence.
+    pub fn set_fec_control_policy(
+        &mut self,
+        policy: crate::fec::FecControlPolicy,
+    ) -> ActiveFecPolicyChange {
+        let previous_policy = self.fec.control_policy();
+        if previous_policy == policy {
+            return ActiveFecPolicyChange {
+                controller: self.fec.set_control_policy(policy),
+                queued_sources_preserved: self
+                    .outgoing_fec_packets
+                    .iter()
+                    .filter(|packet| packet.wire_meta.is_none_or(|meta| meta.systematic))
+                    .count(),
+                queued_repairs_discarded: 0,
+            };
+        }
+
+        let queued_before = self.outgoing_fec_packets.len();
+        self.outgoing_fec_packets
+            .retain(|packet| packet.wire_meta.is_none_or(|meta| meta.systematic));
+        let queued_sources_preserved = self.outgoing_fec_packets.len();
+        let queued_repairs_discarded = queued_before.saturating_sub(queued_sources_preserved);
+
+        self.fec_send_scratch.clear();
+        self.fec_receive_scratch.clear();
+        self.fec_wire_receiver =
+            WireFecReceiver::new(self.optimization_manager.memory_pool().clone());
+        self.fec_tx_profile = None;
+        self.fec_tx_sequence = 0;
+        self.fec_tx_active = false;
+
+        ActiveFecPolicyChange {
+            controller: self.fec.set_control_policy(policy),
+            queued_sources_preserved,
+            queued_repairs_discarded,
+        }
     }
 
     fn prepare_fec_wire_profile(
