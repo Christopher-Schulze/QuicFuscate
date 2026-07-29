@@ -757,89 +757,135 @@ impl QuicFuscateEngine {
         let stealth_enabled = self.config.stealth.mode != super::config::StealthMode::Off;
         let fec_enabled = self.config.fec.mode != super::config::FecMode::Off;
 
-        let start_result = match self.config.engine.mode {
-            EngineMode::Client => {
-                let mut runtime = ClientRuntime::new(self.config.clone())?;
-                runtime.start()?;
-                self.client_runtime = Some(runtime);
-                Ok(())
-            }
-            EngineMode::Server => {
-                let server_config = crate::implementations::server::server_config_from_listen_addr(
-                    &self.config.connection.remote,
-                )
-                .map_err(EngineError::Config)?;
-                let mut server_runtime = ServerRuntime::new_initialized_standalone_default(
-                    self.config.clone(),
-                    server_config,
-                    None,
-                    build_server_optimize_config(&self.config),
-                    None,
-                    None,
-                    None,
-                    None,
-                )?;
-
-                let (fec_cfg, stealth_cfg) = build_server_runtime_profiles(&self.config)?;
-                let transport = build_runtime_transport_config(&self.config)?;
-                let (profile, os, mut profiles) = load_runtime_profile_values(&self.config);
-                if !self.config.fingerprint_rotation.enabled {
-                    profiles = vec![crate::stealth::FingerprintProfile::new(profile, os)];
+        let start_result = (|| -> Result<(), EngineError> {
+            match self.config.engine.mode {
+                EngineMode::Client => {
+                    let mut runtime = ClientRuntime::new(self.config.clone())?;
+                    runtime.start()?;
+                    self.client_runtime = Some(runtime);
+                    Ok(())
                 }
-                let server_metrics = server_runtime.standalone_metrics();
-                let admin_actions_tx = server_runtime.admin_actions_sender();
-                let fec_mode_override = Some(self.config.fec.mode);
-                let opt_params = normalize_runtime_optimize_config(
-                    build_server_optimize_config(&self.config),
-                    "engine server runtime",
-                );
-                let doh_provider = self.config.stealth.doh_provider.clone();
-                let front_domain = self.config.stealth.fronting_domains.clone();
-                let tun_enable =
-                    self.config.interface.interface_type == super::config::InterfaceType::Tun;
-                let profile_interval = self.config.fingerprint_rotation.interval_secs;
-                let doh_disable = !self.config.stealth.enable_doh;
-                let fronting_disable = !self.config.stealth.enable_domain_fronting;
-                let http3_disable = !self.config.stealth.enable_http3_masquerading;
-                let launch = PreparedStandaloneLaunch::new_headless_with_runtime_stealth(
-                    transport,
-                    fec_cfg,
-                    opt_params,
-                    stealth_cfg,
-                    fec_mode_override,
-                    profiles,
-                    profile_interval,
-                    crate::implementations::server::RuntimeStealthPolicy {
-                        profile,
-                        os,
-                        disable_doh: doh_disable,
-                        doh_provider: doh_provider.as_str(),
-                        disable_fronting: fronting_disable,
-                        front_domain: &front_domain,
-                        disable_http3: http3_disable,
-                    },
-                    tun_enable,
-                );
+                EngineMode::Server => {
+                    let server_config =
+                        crate::implementations::server::server_config_from_listen_addr(
+                            &self.config.connection.remote,
+                        )
+                        .map_err(EngineError::Config)?;
+                    let (fec_cfg, stealth_cfg) = build_server_runtime_profiles(&self.config)?;
+                    let transport = build_runtime_transport_config(&self.config)?;
+                    let (profile, os, mut profiles) = load_runtime_profile_values(&self.config);
+                    if !self.config.fingerprint_rotation.enabled {
+                        profiles = vec![crate::stealth::FingerprintProfile::new(profile, os)];
+                    }
+                    let fec_mode_override = Some(self.config.fec.mode);
+                    let opt_params = normalize_runtime_optimize_config(
+                        build_server_optimize_config(&self.config),
+                        "engine server runtime",
+                    );
+                    let doh_provider = self.config.stealth.doh_provider.clone();
+                    let front_domain = self.config.stealth.fronting_domains.clone();
+                    let tun_enable =
+                        self.config.interface.interface_type == super::config::InterfaceType::Tun;
+                    let profile_interval = self.config.fingerprint_rotation.interval_secs;
+                    let doh_disable = !self.config.stealth.enable_doh;
+                    let fronting_disable = !self.config.stealth.enable_domain_fronting;
+                    let http3_disable = !self.config.stealth.enable_http3_masquerading;
+                    let launch = PreparedStandaloneLaunch::new_headless_with_runtime_stealth(
+                        transport,
+                        fec_cfg,
+                        opt_params,
+                        stealth_cfg,
+                        fec_mode_override,
+                        profiles,
+                        profile_interval,
+                        crate::implementations::server::RuntimeStealthPolicy {
+                            profile,
+                            os,
+                            disable_doh: doh_disable,
+                            doh_provider: doh_provider.as_str(),
+                            disable_fronting: fronting_disable,
+                            front_domain: &front_domain,
+                            disable_http3: http3_disable,
+                        },
+                        tun_enable,
+                    );
+                    let engine_config = self.config.clone();
+                    let server_opt_params = build_server_optimize_config(&self.config);
+                    let startup_timeout = std::time::Duration::from_millis(
+                        self.config.engine.shutdown_timeout_ms.max(30_000),
+                    );
+                    let (startup_tx, startup_rx) = crossbeam_channel::bounded(1);
 
-                let handle = thread::spawn(move || {
-                    let Ok(runtime) = TokioRuntimeBuilder::new_multi_thread().enable_all().build()
-                    else {
-                        log::error!("failed to create tokio runtime for server loop");
-                        return;
-                    };
+                    let handle = thread::Builder::new()
+                        .name("quicfuscate-server-runtime".to_string())
+                        .spawn(move || {
+                            let Ok(runtime) =
+                                TokioRuntimeBuilder::new_multi_thread().enable_all().build()
+                            else {
+                                let _ = startup_tx.send(Err(EngineError::Internal(
+                                    "failed to create tokio runtime for server loop".to_string(),
+                                )));
+                                return;
+                            };
 
-                    runtime.block_on(async move {
-                        if let Err(error) = server_runtime.run_standalone(launch).await {
-                            log::error!("server loop exited with error: {error}");
+                            runtime.block_on(async move {
+                                let mut server_runtime =
+                                    match ServerRuntime::new_initialized_standalone_default(
+                                        engine_config,
+                                        server_config,
+                                        None,
+                                        server_opt_params,
+                                        None,
+                                        None,
+                                        None,
+                                        None,
+                                    ) {
+                                        Ok(server_runtime) => server_runtime,
+                                        Err(error) => {
+                                            let _ = startup_tx.send(Err(EngineError::from(error)));
+                                            return;
+                                        }
+                                    };
+                                let server_metrics = server_runtime.standalone_metrics();
+                                let admin_actions_tx = server_runtime.admin_actions_sender();
+                                if startup_tx.send(Ok((admin_actions_tx, server_metrics))).is_err()
+                                {
+                                    return;
+                                }
+                                if let Err(error) = server_runtime.run_standalone(launch).await {
+                                    log::error!("server loop exited with error: {error}");
+                                }
+                            });
+                        })
+                        .map_err(EngineError::from)?;
+                    match startup_rx.recv_timeout(startup_timeout) {
+                        Ok(Ok((admin_actions_tx, server_metrics))) => {
+                            self.server_loop_handle = Some(handle);
+                            self.server_loop_shutdown_tx = Some(admin_actions_tx);
+                            self.server_metrics = Some(server_metrics);
+                            Ok(())
                         }
-                    });
-                });
-                self.server_loop_handle = Some(handle);
-                self.server_loop_shutdown_tx = Some(admin_actions_tx);
-                self.server_metrics = Some(server_metrics);
-                Ok(())
+                        Ok(Err(error)) => {
+                            let _ = handle.join();
+                            Err(error)
+                        }
+                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                            let _ = handle.join();
+                            Err(EngineError::Internal(
+                                "server runtime exited before startup acknowledgement".to_string(),
+                            ))
+                        }
+                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                            self.server_loop_handle = Some(handle);
+                            Err(EngineError::Internal(format!(
+                                "server runtime did not acknowledge startup within {}ms",
+                                startup_timeout.as_millis()
+                            )))
+                        }
+                    }
+                }
             }
-        };
+        })();
 
         if let Err(e) = start_result {
             self.set_state(EngineState::Error);
@@ -1736,6 +1782,18 @@ mod tests {
         engine.stop().unwrap();
         assert_eq!(engine.state(), EngineState::Stopped);
         assert!(!engine.is_running());
+    }
+
+    #[test]
+    fn test_engine_start_failure_enters_error_state() {
+        let mut engine = QuicFuscateEngine::new(EngineConfig::default()).unwrap();
+        engine.config.engine.mode = EngineMode::Server;
+        engine.config.connection.remote = "not-a-socket-address".to_string();
+
+        assert!(matches!(engine.start(), Err(EngineError::Config(_))));
+        assert_eq!(engine.state(), EngineState::Error);
+        engine.stop().unwrap();
+        assert_eq!(engine.state(), EngineState::Stopped);
     }
 
     #[test]

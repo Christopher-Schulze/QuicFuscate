@@ -390,6 +390,8 @@ Both peers authenticate the result through `version_information` during the rust
 #### Engine Control Plane (embedded orchestration)
 `quicfuscate::engine::QuicFuscateEngine` is the canonical embedding entrypoint for non-CLI integrations. It owns the aggregated `EngineConfig`, selects `ClientRuntime` or `ServerRuntime` via `engine.mode`, tracks lifecycle in `EngineState`, and emits `EngineStats` snapshots for host applications.
 
+Embedded server startup constructs `ServerRuntime`, its Tokio UDP socket, and all runtime-bound channels inside the dedicated Tokio thread. The synchronous Engine start boundary waits up to the larger of 30 seconds or the configured shutdown timeout for a typed readiness acknowledgement containing shutdown control and metrics ownership. Runtime construction and thread-creation failures are returned as `EngineError`; no Tokio resource is created outside an active reactor. A startup timeout retains the thread join handle under Engine lifecycle ownership so `stop()` can complete bounded cleanup.
+
 Control and observability are explicit through typed channels:
 
 - `EngineCommand`: `Start`, `Stop`, `Connect`, `Disconnect`, `Reconnect`, runtime overrides (`SetStealthMode`, `SetFecMode`, `SetCongestionControl`, `SetTrafficPadding`, `SetTimingObfuscation`, `SetZeroRtt`), and diagnostics/state queries (`GetTunCapabilities`, `GetState`, `GetStats`).
@@ -2370,7 +2372,7 @@ Use the `--config` flag to load a unified TOML file containing FEC, stealth and 
 - telemetry/metrics export surfaces.
 
 `ServerRuntime` owns standalone UDP listener loop execution and is launched productively through `run_standalone(...)`; `run_loop(...)` remains internal runtime machinery. The same runtime entry is used by CLI standalone mode and embedded engine server mode.
-Embedded `EngineMode::Server` is therefore a real headless live server runtime in the current codebase, not a bootstrap-only helper surface. It reuses the standalone listener loop and runtime ownership model, but does not expose the standalone admin service bundle by default.
+Embedded `EngineMode::Server` is therefore a real headless live server runtime in the current codebase, not a bootstrap-only helper surface. It reuses the standalone listener loop and runtime ownership model, but does not expose the standalone admin service bundle by default. Construction and polling occur on the same dedicated Tokio runtime; the synchronous Engine owner receives its shutdown sender and shared metrics only after construction succeeds.
 Engine server-mode stats now follow the same runtime truth: bytes, packets, and active-client counts are projected from runtime-owned `implementations/server::Metrics`, while server-side RTT and loss remain `0` until explicit server-owned producers exist.
 Admin orchestration helpers (`ServerAdminCore`, `AdminAction`) live in `implementations/server`, so admin, reload, metrics, and shutdown wiring no longer depend on a CLI-local server state island.
 Within the live server path, ownership is now intentionally split only along one line:
