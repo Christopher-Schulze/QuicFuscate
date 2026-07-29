@@ -386,7 +386,9 @@ pub fn initialize_standalone_server_bootstrap(
     let admin_log_buffer = admin_log_buffer_override
         .unwrap_or_else(|| Arc::new(self::admin_logs::AdminLogBuffer::new(4096)));
     let initial_logging_mode = load_persisted_logging_mode(config_path);
-    apply_logging_mode(initial_logging_mode.as_str(), &admin_log_buffer);
+    if let Some(persisted_mode) = read_persisted_logging_mode(config_path) {
+        apply_logging_mode(persisted_mode.as_str(), &admin_log_buffer);
+    }
 
     let blocked_ips_path = resolve_blocked_ips_store_path(config_path);
     let initial_blocked = load_persisted_blocked_ips(config_path);
@@ -484,4 +486,3 @@ pub(crate) fn write_logging_mode(
     }
     AdminResponse::ok_with_message(format!("Logging mode set to '{}'", mode))
 }
-

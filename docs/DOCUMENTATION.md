@@ -2154,9 +2154,17 @@ mode = "normal"     # verbose | normal | minimal | no-log
 level = "info"
 log_to_file = true
 log_file_path = "/var/log/quicfuscate/server.log"
+log_to_stdout = false
+format = "json"
+max_file_size_bytes = 104857600
+max_files = 5
 ```
 
 For privacy-sensitive deployments, use `mode = "no-log"` for in-memory-only ring buffer with zero disk writes.
+
+The effective `[logging]` section is parsed and validated before Tokio and before the single global logger is installed. File, stderr, RFC 5424 UDP syslog, and the admin ring buffer are sink properties of that logger and are never replaced by a later level change. File and syslog I/O run on one bounded 8,192-record worker queue; saturation drops the newest record and increments `logging::stats().dropped_records`, while sink failures increment `sink_errors` without recursive logging or process termination. Clean shutdown uses `logging::FlushGuard` to enqueue a barrier and wait up to five seconds for all earlier records and owned file/stderr flushes. File rotation is size-only and retains `max_files` numbered generations.
+
+The stable JSON format is NDJSON with required `ts`, `level`, `target`, and `msg` keys. Optional `file` and `line` keys are emitted when the `log::Record` provides them. `log_to_stdout` retains its compatibility name but writes to stderr for systemd/journald capture. `file_path` takes precedence over `log_file_path`; `syslog_addr` adds RFC 5424 UDP delivery; `module_levels` applies longest-prefix module filtering. Invalid levels, empty enabled paths, zero file-size bounds, zero ring capacity, port-zero syslog targets, and invalid module overrides fail startup before network or privileged runtime setup.
 
 #### Common Operational Tasks
 ```bash

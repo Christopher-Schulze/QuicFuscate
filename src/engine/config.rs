@@ -81,6 +81,7 @@ impl EngineConfig {
         self.nat_traversal.validate()?;
         self.crypto.validate()?;
         self.interface.validate()?;
+        self.logging.validate()?;
         if self.connection.enable_0rtt && !self.anti_replay.enabled {
             log::warn!(
                 "[config] 0-RTT enabled without anti-replay protection. \
@@ -836,7 +837,7 @@ impl LoggingConfig {
                 cfg.strip_metadata = true;
             }
             LoggingMode::NoLog => {
-                cfg.level = "error".to_string();
+                cfg.level = "off".to_string();
                 cfg.log_to_file = false;
                 cfg.log_to_stdout = false;
                 cfg.strip_metadata = true;
@@ -846,6 +847,58 @@ impl LoggingConfig {
             }
         }
         cfg
+    }
+
+    fn validate(&self) -> Result<(), ConfigError> {
+        const VALID_LEVELS: &[&str] = &["off", "error", "warn", "info", "debug", "trace"];
+        if !VALID_LEVELS.contains(&self.level.trim().to_ascii_lowercase().as_str()) {
+            return Err(ConfigError::Validation(format!(
+                "Invalid logging.level: {}. Must be one of: {:?}",
+                self.level, VALID_LEVELS
+            )));
+        }
+        if self.ring_buffer_capacity == 0 {
+            return Err(ConfigError::Validation(
+                "logging.ring_buffer_capacity must be greater than zero".to_string(),
+            ));
+        }
+        if self.log_to_file && self.file_path.is_none() && self.log_file_path.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "logging.log_file_path must not be empty when log_to_file is enabled".to_string(),
+            ));
+        }
+        if self.file_path.as_ref().is_some_and(|path| path.as_os_str().is_empty()) {
+            return Err(ConfigError::Validation("logging.file_path must not be empty".to_string()));
+        }
+        if (self.log_to_file || self.file_path.is_some()) && self.max_file_size_bytes == 0 {
+            return Err(ConfigError::Validation(
+                "logging.max_file_size_bytes must be greater than zero when file logging is enabled"
+                    .to_string(),
+            ));
+        }
+        if self.max_files > 1024 {
+            return Err(ConfigError::Validation(
+                "logging.max_files must not exceed 1024".to_string(),
+            ));
+        }
+        if self.syslog_addr.is_some_and(|address| address.port() == 0) {
+            return Err(ConfigError::Validation(
+                "logging.syslog_addr port must be greater than zero".to_string(),
+            ));
+        }
+        for (module, level) in &self.module_levels {
+            if module.trim().is_empty() {
+                return Err(ConfigError::Validation(
+                    "logging.module_levels keys must not be empty".to_string(),
+                ));
+            }
+            if !VALID_LEVELS.contains(&level.trim().to_ascii_lowercase().as_str()) {
+                return Err(ConfigError::Validation(format!(
+                    "Invalid logging.module_levels value for {module}: {level}"
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1374,6 +1427,40 @@ mode = "roaming"
         let mut config = EngineConfig::default();
         config.connection.remote = String::new();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn logging_configuration_rejects_invalid_levels_and_file_bounds() {
+        let mut config = EngineConfig::default();
+        config.logging.level = "loud".to_string();
+        assert!(config.validate().is_err());
+
+        config.logging.level = "info".to_string();
+        config.logging.log_to_file = true;
+        config.logging.log_file_path.clear();
+        assert!(config.validate().is_err());
+
+        config.logging.log_file_path = "runtime.log".to_string();
+        config.logging.max_file_size_bytes = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn no_log_mode_removes_every_external_sink_and_filter() {
+        let config = LoggingConfig {
+            mode: LoggingMode::NoLog,
+            log_to_file: true,
+            file_path: Some(PathBuf::from("runtime.log")),
+            log_to_stdout: true,
+            syslog_addr: Some("127.0.0.1:514".parse().unwrap()),
+            ..Default::default()
+        };
+        let effective = config.effective();
+        assert_eq!(effective.level, "off");
+        assert!(!effective.log_to_file);
+        assert!(effective.file_path.is_none());
+        assert!(!effective.log_to_stdout);
+        assert!(effective.syslog_addr.is_none());
     }
 
     #[test]

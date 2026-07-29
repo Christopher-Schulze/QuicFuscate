@@ -34,7 +34,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
-ReadWritePaths=/etc/quicfuscate /var/lib/quicfuscate
+ReadWritePaths=/etc/quicfuscate /var/lib/quicfuscate /var/log/quicfuscate
 
 # Tune for higher connection counts.
 LimitNOFILE=1048576

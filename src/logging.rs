@@ -9,14 +9,16 @@
 //! ([`LogSink`]) can be registered with [`set_admin_sink`] so that the Admin UI
 //! ring buffer keeps receiving entries regardless of the configured output format.
 
+use crossbeam_channel::{Receiver, Sender, TrySendError};
 use log::{Level, LevelFilter, Log, Metadata, Record};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::net::{SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::engine::{LogFormat, LoggingConfig};
 
@@ -26,6 +28,9 @@ pub const DEFAULT_MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
 pub const DEFAULT_MAX_FILES: usize = 5;
 /// Default syslog facility (user-level, RFC 5424).
 pub const DEFAULT_SYSLOG_FACILITY: u8 = 1;
+/// Bounded producer-to-writer queue. Saturation drops the newest record.
+pub const LOG_QUEUE_CAPACITY: usize = 8192;
+const FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Errors returned by [`init`].
 #[derive(Debug)]
@@ -34,6 +39,10 @@ pub enum LogInitError {
     FileCreateError(io::Error),
     /// Failed to bind the syslog UDP socket.
     SyslogError(io::Error),
+    /// Failed to start the owned logging worker.
+    WorkerSpawnError(io::Error),
+    /// A different global logger already owns the `log` facade.
+    LoggerAlreadyInstalled,
 }
 
 impl std::fmt::Display for LogInitError {
@@ -41,6 +50,10 @@ impl std::fmt::Display for LogInitError {
         match self {
             LogInitError::FileCreateError(e) => write!(f, "log file create error: {}", e),
             LogInitError::SyslogError(e) => write!(f, "syslog init error: {}", e),
+            LogInitError::WorkerSpawnError(e) => write!(f, "logging worker spawn error: {}", e),
+            LogInitError::LoggerAlreadyInstalled => {
+                write!(f, "a different global logger is already installed")
+            }
         }
     }
 }
@@ -55,6 +68,7 @@ pub trait LogSink: Send + Sync {
 }
 
 static ADMIN_SINK: OnceLock<Arc<dyn LogSink>> = OnceLock::new();
+static LOGGER_CONTROL: OnceLock<LoggerControl> = OnceLock::new();
 
 /// Register a secondary [`LogSink`] (e.g. the Admin UI ring buffer).
 ///
@@ -65,9 +79,12 @@ pub fn set_admin_sink(sink: Arc<dyn LogSink>) {
 
 /// Initialize the production logger from a [`LoggingConfig`].
 ///
-/// Installs a global `log` logger and sets the max level. If a logger is already
-/// installed, this returns `Ok(())` without reconfiguring (idempotent).
+/// Installs the single owned global `log` logger and sets the maximum level.
+/// Repeating this function after a successful installation is idempotent.
 pub fn init(config: &LoggingConfig) -> Result<(), LogInitError> {
+    if LOGGER_CONTROL.get().is_some() {
+        return Ok(());
+    }
     let eff = config.effective();
 
     let level = parse_level(&eff.level);
@@ -80,7 +97,7 @@ pub fn init(config: &LoggingConfig) -> Result<(), LogInitError> {
     let file = if let Some(p) = file_path {
         let appender = SizeRotatingAppender::new(&p, eff.max_file_size_bytes, eff.max_files)
             .map_err(LogInitError::FileCreateError)?;
-        Some(Mutex::new(appender))
+        Some(appender)
     } else {
         None
     };
@@ -89,7 +106,7 @@ pub fn init(config: &LoggingConfig) -> Result<(), LogInitError> {
 
     let syslog = if let Some(addr) = eff.syslog_addr {
         let writer = SyslogWriter::new(addr, "quicfuscate").map_err(LogInitError::SyslogError)?;
-        Some(Mutex::new(writer))
+        Some(writer)
     } else {
         None
     };
@@ -105,29 +122,115 @@ pub fn init(config: &LoggingConfig) -> Result<(), LogInitError> {
     // the logger.
     let max_level = module_levels.values().copied().max().unwrap_or(level).max(level);
 
-    let hostname = detect_hostname();
-    let procid = std::process::id().to_string();
+    let dropped_records = Arc::new(AtomicU64::new(0));
+    let sink_errors = Arc::new(AtomicU64::new(0));
+    let (sender, receiver) = crossbeam_channel::bounded(LOG_QUEUE_CAPACITY);
+    let worker_errors = sink_errors.clone();
+    std::thread::Builder::new()
+        .name("qf-log-writer".to_string())
+        .spawn(move || {
+            run_writer(
+                receiver,
+                WriterSinks {
+                    file,
+                    to_stderr,
+                    syslog,
+                    format,
+                    hostname: detect_hostname(),
+                    app_name: "quicfuscate".to_string(),
+                    procid: std::process::id().to_string(),
+                },
+                &worker_errors,
+            );
+        })
+        .map_err(LogInitError::WorkerSpawnError)?;
 
     let logger = ProductionLogger {
         level,
-        format,
-        file,
-        to_stderr,
-        syslog,
         module_levels,
-        hostname,
-        app_name: "quicfuscate".to_string(),
-        procid,
+        sender: sender.clone(),
+        dropped_records: dropped_records.clone(),
     };
 
-    // set_boxed_logger fails if a logger is already installed. Treat that as
-    // a non-fatal idempotent success so callers can retry safely.
     match log::set_boxed_logger(Box::new(logger)) {
         Ok(()) => {
+            let _ = LOGGER_CONTROL.set(LoggerControl { sender, dropped_records, sink_errors });
             log::set_max_level(max_level);
             Ok(())
         }
-        Err(_) => Ok(()),
+        Err(_) => {
+            let _ = sender.send(LogCommand::Shutdown);
+            Err(LogInitError::LoggerAlreadyInstalled)
+        }
+    }
+}
+
+/// Flush every owned sink and wait for the writer to acknowledge durability.
+pub fn flush() -> io::Result<()> {
+    let Some(control) = LOGGER_CONTROL.get() else {
+        return Ok(());
+    };
+    control.flush()
+}
+
+/// Current bounded-worker counters.
+pub fn stats() -> LoggerStats {
+    LOGGER_CONTROL.get().map_or(LoggerStats::default(), LoggerControl::stats)
+}
+
+/// Flushes the global production logger on every return path.
+pub struct FlushGuard;
+
+impl FlushGuard {
+    /// Create a clean-shutdown flush guard after successful logger initialization.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for FlushGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for FlushGuard {
+    fn drop(&mut self) {
+        let _ = flush();
+    }
+}
+
+/// Observable bounded-worker outcomes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LoggerStats {
+    /// Records rejected because the bounded queue was full or disconnected.
+    pub dropped_records: u64,
+    /// File, stderr, or syslog write/flush failures observed by the worker.
+    pub sink_errors: u64,
+}
+
+struct LoggerControl {
+    sender: Sender<LogCommand>,
+    dropped_records: Arc<AtomicU64>,
+    sink_errors: Arc<AtomicU64>,
+}
+
+impl LoggerControl {
+    fn flush(&self) -> io::Result<()> {
+        let (ack_tx, ack_rx) = crossbeam_channel::bounded(1);
+        self.sender
+            .send_timeout(LogCommand::Flush(ack_tx), FLUSH_TIMEOUT)
+            .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error.to_string()))?;
+        ack_rx
+            .recv_timeout(FLUSH_TIMEOUT)
+            .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error.to_string()))?
+    }
+
+    fn stats(&self) -> LoggerStats {
+        LoggerStats {
+            dropped_records: self.dropped_records.load(Ordering::Relaxed),
+            sink_errors: self.sink_errors.load(Ordering::Relaxed),
+        }
     }
 }
 
@@ -160,14 +263,9 @@ fn parse_level(s: &str) -> LevelFilter {
 
 struct ProductionLogger {
     level: LevelFilter,
-    format: LogFormat,
-    file: Option<Mutex<SizeRotatingAppender>>,
-    to_stderr: bool,
-    syslog: Option<Mutex<SyslogWriter>>,
     module_levels: HashMap<String, LevelFilter>,
-    hostname: String,
-    app_name: String,
-    procid: String,
+    sender: Sender<LogCommand>,
+    dropped_records: Arc<AtomicU64>,
 }
 
 impl Log for ProductionLogger {
@@ -196,51 +294,127 @@ impl Log for ProductionLogger {
             return;
         }
 
-        let msg_text = record.args().to_string();
-
-        // Forward to the optional Admin UI ring buffer.
-        if let Some(sink) = ADMIN_SINK.get() {
-            sink.push(record.level(), &msg_text);
-        }
-
-        // Render the line for file/stderr according to the configured format.
-        let line = match self.format {
-            LogFormat::Json => format_json(record),
-            LogFormat::Text => format_text(record),
-            LogFormat::Syslog => format_rfc5424(
-                &self.hostname,
-                &self.app_name,
-                &self.procid,
-                record.level(),
-                &msg_text,
-            ),
+        let owned = OwnedRecord {
+            level: record.level(),
+            target: record.target().to_string(),
+            message: record.args().to_string(),
+            file: record.file().map(str::to_string),
+            line: record.line(),
         };
-        let line_nl = format!("{}\n", line);
-
-        if let Some(app) = &self.file {
-            if let Ok(mut g) = app.lock() {
-                let _ = g.write_line(line_nl.as_bytes());
-            }
-        }
-
-        if self.to_stderr {
-            let _ = io::stderr().write_all(line_nl.as_bytes());
-        }
-
-        if let Some(sw) = &self.syslog {
-            if let Ok(mut g) = sw.lock() {
-                let _ = g.write_line(record.level(), &msg_text);
+        if let Err(error) = self.sender.try_send(LogCommand::Record(owned)) {
+            if matches!(error, TrySendError::Full(_) | TrySendError::Disconnected(_)) {
+                self.dropped_records.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
 
     fn flush(&self) {
-        if let Some(app) = &self.file {
-            if let Ok(mut g) = app.lock() {
-                let _ = g.flush();
+        let _ = flush();
+    }
+}
+
+struct OwnedRecord {
+    level: Level,
+    target: String,
+    message: String,
+    file: Option<String>,
+    line: Option<u32>,
+}
+
+enum LogCommand {
+    Record(OwnedRecord),
+    Flush(Sender<io::Result<()>>),
+    Shutdown,
+}
+
+struct WriterSinks {
+    file: Option<SizeRotatingAppender>,
+    to_stderr: bool,
+    syslog: Option<SyslogWriter>,
+    format: LogFormat,
+    hostname: String,
+    app_name: String,
+    procid: String,
+}
+
+impl WriterSinks {
+    fn write_record(&mut self, record: &OwnedRecord) -> u64 {
+        if let Some(sink) = ADMIN_SINK.get() {
+            sink.push(record.level, &record.message);
+        }
+
+        if self.file.is_none() && !self.to_stderr && self.syslog.is_none() {
+            return 0;
+        }
+        let line = match self.format {
+            LogFormat::Json => format_owned_json(record),
+            LogFormat::Text => format_owned_text(record),
+            LogFormat::Syslog => format_rfc5424(
+                &self.hostname,
+                &self.app_name,
+                &self.procid,
+                record.level,
+                &record.message,
+            ),
+        };
+        let mut line_bytes = line.into_bytes();
+        line_bytes.push(b'\n');
+        let mut errors = 0u64;
+        if let Some(app) = &mut self.file {
+            if app.write_line(&line_bytes).is_err() {
+                errors += 1;
             }
         }
-        let _ = io::stderr().flush();
+        if self.to_stderr && io::stderr().write_all(&line_bytes).is_err() {
+            errors += 1;
+        }
+        if let Some(syslog) = &mut self.syslog {
+            if syslog.write_line(record.level, &record.message).is_err() {
+                errors += 1;
+            }
+        }
+        errors
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let mut first_error = None;
+        if let Some(app) = &mut self.file {
+            if let Err(error) = app.flush() {
+                first_error = Some(error);
+            }
+        }
+        if self.to_stderr {
+            if let Err(error) = io::stderr().flush() {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+}
+
+fn run_writer(receiver: Receiver<LogCommand>, mut sinks: WriterSinks, sink_errors: &AtomicU64) {
+    while let Ok(command) = receiver.recv() {
+        match command {
+            LogCommand::Record(record) => {
+                let errors = sinks.write_record(&record);
+                if errors > 0 {
+                    sink_errors.fetch_add(errors, Ordering::Relaxed);
+                }
+            }
+            LogCommand::Flush(ack) => {
+                let result = sinks.flush();
+                if result.is_err() {
+                    sink_errors.fetch_add(1, Ordering::Relaxed);
+                }
+                let _ = ack.send(result);
+            }
+            LogCommand::Shutdown => break,
+        }
+    }
+    if sinks.flush().is_err() {
+        sink_errors.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -355,7 +529,6 @@ fn rotated_path(base: &Path, n: usize) -> PathBuf {
 /// Writes RFC 5424 formatted syslog messages over UDP.
 pub struct SyslogWriter {
     sock: UdpSocket,
-    addr: SocketAddr,
     hostname: String,
     app_name: String,
     procid: String,
@@ -366,11 +539,11 @@ impl SyslogWriter {
     /// Create a new syslog writer bound to a local ephemeral port, targeting
     /// `addr` (default `127.0.0.1:514`).
     pub fn new(addr: SocketAddr, app_name: &str) -> io::Result<Self> {
-        let sock = UdpSocket::bind("0.0.0.0:0")?;
+        let bind_address = if addr.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+        let sock = UdpSocket::bind(bind_address)?;
         sock.connect(addr)?;
         Ok(Self {
             sock,
-            addr,
             hostname: detect_hostname(),
             app_name: app_name.to_string(),
             procid: std::process::id().to_string(),
@@ -381,9 +554,7 @@ impl SyslogWriter {
     /// Format and send a single syslog message.
     pub fn write_line(&mut self, level: Level, msg: &str) -> io::Result<()> {
         let line = format_rfc5424(&self.hostname, &self.app_name, &self.procid, level, msg);
-        // Use send_to with the configured addr (connect was also called, but
-        // send_to keeps things explicit and robust).
-        self.sock.send_to(line.as_bytes(), self.addr)?;
+        self.sock.send(line.as_bytes())?;
         Ok(())
     }
 
@@ -443,6 +614,27 @@ pub fn format_json(record: &Record) -> String {
         obj.insert("file".into(), serde_json::Value::String(file.to_string()));
     }
     if let Some(line) = record.line() {
+        obj.insert("line".into(), serde_json::Value::Number(serde_json::Number::from(line)));
+    }
+    serde_json::to_string(&obj).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn format_owned_text(record: &OwnedRecord) -> String {
+    let ts = rfc3339_utc(SystemTime::now());
+    format!("{} [{}] {}: {}", ts, record.level, record.target, record.message)
+}
+
+fn format_owned_json(record: &OwnedRecord) -> String {
+    let ts = rfc3339_utc(SystemTime::now());
+    let mut obj = serde_json::Map::new();
+    obj.insert("ts".into(), serde_json::Value::String(ts));
+    obj.insert("level".into(), serde_json::Value::String(record.level.as_str().to_lowercase()));
+    obj.insert("target".into(), serde_json::Value::String(record.target.clone()));
+    obj.insert("msg".into(), serde_json::Value::String(record.message.clone()));
+    if let Some(file) = &record.file {
+        obj.insert("file".into(), serde_json::Value::String(file.clone()));
+    }
+    if let Some(line) = record.line {
         obj.insert("line".into(), serde_json::Value::Number(serde_json::Number::from(line)));
     }
     serde_json::to_string(&obj).unwrap_or_else(|_| "{}".to_string())
@@ -649,16 +841,12 @@ mod tests {
     fn logger_enabled_respects_module_overrides() {
         let mut module_levels = HashMap::new();
         module_levels.insert("quicfuscate::net".to_string(), LevelFilter::Debug);
+        let (sender, _receiver) = crossbeam_channel::bounded(1);
         let logger = ProductionLogger {
             level: LevelFilter::Warn,
-            format: LogFormat::Text,
-            file: None,
-            to_stderr: false,
-            syslog: None,
             module_levels,
-            hostname: "h".to_string(),
-            app_name: "q".to_string(),
-            procid: "1".to_string(),
+            sender,
+            dropped_records: Arc::new(AtomicU64::new(0)),
         };
 
         // Global level is Warn: Info from unknown module is filtered.

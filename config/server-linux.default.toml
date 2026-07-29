@@ -185,8 +185,13 @@ mode = "performance"
 [logging]
 level = "info"
 # log_to_file = false
-# log_file_path = "/var/log/quicfuscate.log"
+# log_file_path = "/var/log/quicfuscate/server.log"
 # log_to_stdout = true
+# format = "json"
+# max_file_size_bytes = 104857600
+# max_files = 5
+# syslog_addr = "127.0.0.1:514"
+# module_levels = { "quicfuscate::transport" = "debug" }
 
 # ==============================================================================
 # REALITY-GRADE TLS MIMIKRY (TODO-415 Phase 1)

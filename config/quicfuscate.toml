@@ -413,16 +413,21 @@ collect_stealth_stats = true
 
 [logging]
 # Log level: "error", "warn", "info", "debug", "trace"
-# Wired: applied at server startup via LoggingConfig::effective() which respects mode overrides.
-# RUST_LOG env var or admin API can further override at runtime.
+# Validated and applied before the single global logger and Tokio runtime start.
+# --verbose and the admin API adjust filtering without replacing configured sinks.
 level = "info"
 
 # Log targets
-# Wired: log_to_stdout=false (via mode=no-log or explicit) suppresses all stdout logging.
-# log_to_file is parsed but file-based logging requires env_logger file target setup.
+# log_to_stdout targets stderr so systemd/journald can capture the stream.
+# File output uses a bounded worker, explicit shutdown flush, size rotation, and retention.
 log_to_file = false
 log_file_path = "/var/log/quicfuscate.log"
 log_to_stdout = true
+format = "text"
+max_file_size_bytes = 104857600
+max_files = 5
+# syslog_addr = "127.0.0.1:514"
+# module_levels = { "quicfuscate::transport" = "debug" }
 
 # ==============================================================================
 # SECURITY

@@ -291,11 +291,16 @@ pub(crate) fn resolve_logging_store_path(
 }
 
 pub(crate) fn load_persisted_logging_mode(config_path: Option<&std::path::Path>) -> String {
+    read_persisted_logging_mode(config_path).unwrap_or_else(|| "normal".to_string())
+}
+
+pub(crate) fn read_persisted_logging_mode(
+    config_path: Option<&std::path::Path>,
+) -> Option<String> {
     resolve_logging_store_path(config_path)
         .and_then(|p| std::fs::read_to_string(&p).ok())
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .and_then(|v| v.get("mode").and_then(|m| m.as_str().map(String::from)))
-        .unwrap_or_else(|| "normal".to_string())
 }
 
 pub(crate) fn apply_logging_mode(
@@ -334,4 +339,3 @@ pub(crate) fn persist_blocked_ips(
     let bytes = serde_json::to_vec_pretty(&sorted)?;
     fsutil::atomic_write_file(path, &bytes, Some(0o600), "server::persist_blocked_ips_tmp_nonce")
 }
-

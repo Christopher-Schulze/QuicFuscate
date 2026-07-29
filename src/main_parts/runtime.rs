@@ -1,22 +1,5 @@
 fn main() -> std::io::Result<()> {
-    // Quick CLI parse before full async startup (must happen before Tokio runtime
-    // because std::env::set_var is unsafe in multi-threaded contexts since Rust 1.66).
     let args: Vec<String> = std::env::args().collect();
-    let worker_threads = {
-        let mut threads = 8usize; // default
-        if let Some(pos) = args.iter().position(|a| a == "--config") {
-            if let Some(cfg_path) = args.get(pos + 1) {
-                if let Ok(content) = std::fs::read_to_string(cfg_path) {
-                    if let Ok(engine_cfg) = quicfuscate::engine::EngineConfig::from_toml(&content) {
-                        if engine_cfg.optimization.num_worker_threads > 0 {
-                            threads = engine_cfg.optimization.num_worker_threads;
-                        }
-                    }
-                }
-            }
-        }
-        threads
-    };
     if args.iter().any(|a| a == "--verbose" || a == "-v") {
         std::env::set_var("RUST_LOG", "info");
     }
@@ -24,6 +7,12 @@ fn main() -> std::io::Result<()> {
     if let Commands::Capabilities { json, user, group, tun, listen_port } = &cli.command {
         return run_capabilities_report(*json, user, group, *tun, *listen_port);
     }
+    let startup_engine_config = load_startup_engine_config(&cli)?;
+    let worker_threads = startup_engine_config
+        .as_ref()
+        .map(|config| config.optimization.num_worker_threads)
+        .filter(|threads| *threads > 0)
+        .unwrap_or(8);
     let harden_server_runtime =
         matches!(&cli.command, Commands::Server { no_drop_privileges: false, .. });
     #[cfg(target_os = "linux")]
@@ -45,39 +34,75 @@ fn main() -> std::io::Result<()> {
     #[cfg(not(target_os = "linux"))]
     let _ = harden_server_runtime;
     let runtime = runtime_builder.build()?;
-    runtime.block_on(async_main(cli))
+    runtime.block_on(async_main(cli, startup_engine_config))
 }
 
-async fn async_main(cli: Cli) -> std::io::Result<()> {
-    let admin_log_buffer =
-        Arc::new(quicfuscate::implementations::server::admin_logs::AdminLogBuffer::new(4096));
+fn command_config_path(cli: &Cli) -> Option<&Path> {
+    match &cli.command {
+        Commands::Client { shared, .. } | Commands::Server { shared, .. } => {
+            shared.config.as_deref()
+        }
+        _ => None,
+    }
+}
+
+fn load_startup_engine_config(
+    cli: &Cli,
+) -> std::io::Result<Option<quicfuscate::engine::EngineConfig>> {
+    let Some(path) = command_config_path(cli) else {
+        return Ok(None);
+    };
+    let config = quicfuscate::engine::EngineConfig::from_file(path).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid configuration {}: {error}", path.display()),
+        )
+    })?;
+    config.validate().map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid configuration {}: {error}", path.display()),
+        )
+    })?;
+    Ok(Some(config))
+}
+
+async fn async_main(
+    cli: Cli,
+    startup_engine_config: Option<quicfuscate::engine::EngineConfig>,
+) -> std::io::Result<()> {
+    let mut logging_config = startup_engine_config
+        .as_ref()
+        .map(|config| config.logging.effective())
+        .unwrap_or_default();
+    if let Some(engine_config) = startup_engine_config.as_ref() {
+        if engine_config.logging.mode != quicfuscate::engine::LoggingMode::NoLog
+            && engine_config.engine.log_level != "info"
+        {
+            logging_config.level.clone_from(&engine_config.engine.log_level);
+        }
+    }
+    if cli.verbose
+        && startup_engine_config
+            .as_ref()
+            .is_none_or(|config| config.logging.mode != quicfuscate::engine::LoggingMode::NoLog)
+    {
+        logging_config.level = "debug".to_string();
+    }
+    let admin_log_buffer = Arc::new(
+        quicfuscate::implementations::server::admin_logs::AdminLogBuffer::new(
+            logging_config.ring_buffer_capacity,
+        ),
+    );
     if ADMIN_LOG_BUFFER.set(admin_log_buffer.clone()).is_err() {
         log::debug!("ADMIN_LOG_BUFFER already initialized, reusing existing buffer");
     }
     // Register the Admin UI ring buffer as a secondary log sink so it keeps
     // receiving entries regardless of the configured output format.
     quicfuscate::logging::set_admin_sink(admin_log_buffer.clone());
-    // Initialize the production logger (structured JSON / size-rotating file /
-    // RFC 5424 syslog). Fall back to env_logger if it fails.
-    {
-        let logging_config = quicfuscate::engine::LoggingConfig::default();
-        if let Err(e) = quicfuscate::logging::init(&logging_config) {
-            // Fallback: env_logger with the same admin ring buffer forwarding.
-            use std::io::Write;
-            let mut builder = env_logger::Builder::new();
-            builder.filter_level(log::LevelFilter::Trace);
-            let buf = admin_log_buffer.clone();
-            builder.format(move |fmt, record| {
-                let msg = format!("{}", record.args());
-                buf.push(record.level(), &msg);
-                writeln!(fmt, "[{}] {}", record.level(), msg)
-            });
-            let _ = builder.try_init();
-            log::warn!("logging::init failed ({}); using env_logger fallback", e);
-        }
-    }
-    // Default runtime verbosity. Server and Admin UI may override via persisted log mode.
-    log::set_max_level(log::LevelFilter::Info);
+    quicfuscate::logging::init(&logging_config)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let _logging_flush_guard = quicfuscate::logging::FlushGuard::new();
 
     // One-time validation of consolidated in-memory profiles.
     // Logs warnings for any profile that doesn't pass the sanity checks.
@@ -226,6 +251,7 @@ async fn async_main(cli: Cli) -> std::io::Result<()> {
                 &drop_user,
                 &drop_group,
                 audit_log,
+                startup_engine_config,
             )
             .await?;
         }
@@ -268,6 +294,7 @@ async fn async_main(cli: Cli) -> std::io::Result<()> {
     if TELEMETRY_ENABLED.load(Ordering::Relaxed) {
         quicfuscate::telemetry::flush();
     }
+    quicfuscate::logging::flush()?;
     Ok(())
 }
 
