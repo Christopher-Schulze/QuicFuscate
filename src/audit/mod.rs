@@ -548,7 +548,7 @@ impl AuditLog {
 
     /// Verify the integrity of the hash chain. Returns Ok(()) if the chain
     /// is intact, or Err with the first broken entry's sequence number.
-    pub fn verify_chain(path: &PathBuf) -> Result<(), AuditError> {
+    pub fn verify_chain(path: &Path) -> Result<(), AuditError> {
         match read_checkpoint(path)? {
             Some(checkpoint) => verify_checkpointed_chain(path, &checkpoint),
             None => verify_legacy_chain(path),
@@ -1176,7 +1176,7 @@ fn recover_interrupted_rotation(base: &Path) -> Result<(), AuditError> {
         let base_still_matches =
             base.exists() && read_first_entry(base).is_ok_and(|entry| entry.seq == last.start_seq);
         if !base_still_matches {
-            let rotated = rotated_segment_path(&base.to_path_buf(), last.start_seq, last.end_seq);
+            let rotated = rotated_segment_path(base, last.start_seq, last.end_seq);
             if rotated.exists() {
                 last.file = audit_file_name(&rotated);
                 changed = true;
@@ -1214,7 +1214,7 @@ fn recover_interrupted_rotation(base: &Path) -> Result<(), AuditError> {
 }
 
 fn verify_legacy_chain(base: &Path) -> Result<(), AuditError> {
-    if !discover_rotated_segments(&base.to_path_buf())?.is_empty() {
+    if !discover_rotated_segments(base)?.is_empty() {
         return Err(AuditError::HashError(
             "rotated audit segments require a durable checkpoint".to_string(),
         ));
@@ -1227,7 +1227,7 @@ fn verify_legacy_chain(base: &Path) -> Result<(), AuditError> {
 }
 
 fn verify_checkpointed_chain(base: &Path, checkpoint: &AuditCheckpoint) -> Result<(), AuditError> {
-    let discovered = discover_rotated_segments(&base.to_path_buf())?;
+    let discovered = discover_rotated_segments(base)?;
     for segment in &discovered {
         let retained = checkpoint
             .segments
@@ -1413,12 +1413,12 @@ fn read_first_sequence(path: &PathBuf) -> Result<u64, AuditError> {
         .ok_or_else(|| AuditError::HashError("active audit segment has no valid entry".to_string()))
 }
 
-fn rotated_segment_path(base: &PathBuf, start_seq: u64, end_seq: u64) -> PathBuf {
+fn rotated_segment_path(base: &Path, start_seq: u64, end_seq: u64) -> PathBuf {
     let file_name = base.file_name().and_then(|name| name.to_str()).unwrap_or("audit.ndjson");
     base.with_file_name(format!("{file_name}.{start_seq:020}-{end_seq:020}.segment"))
 }
 
-fn discover_rotated_segments(base: &PathBuf) -> Result<Vec<AuditSegment>, AuditError> {
+fn discover_rotated_segments(base: &Path) -> Result<Vec<AuditSegment>, AuditError> {
     let Some(parent) = base.parent() else {
         return Ok(Vec::new());
     };
@@ -1582,7 +1582,7 @@ mod tests {
     fn remove_audit_set(base: &Path) {
         let _ = std::fs::remove_file(base);
         let _ = std::fs::remove_file(checkpoint_path(base));
-        if let Ok(segments) = discover_rotated_segments(&base.to_path_buf()) {
+        if let Ok(segments) = discover_rotated_segments(base) {
             for segment in segments {
                 let _ = std::fs::remove_file(segment.path);
             }
