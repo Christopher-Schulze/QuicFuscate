@@ -47,6 +47,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
 
 use super::admin::{AdminResponse, ClientInfo};
+use super::BandwidthPolicy;
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 1024 * 1024;
@@ -345,6 +346,9 @@ impl SessionStore {
 pub trait AdminHttpHandler: Send + Sync {
     fn handle_status(&self) -> AdminResponse;
     fn handle_list_clients(&self) -> Vec<ClientInfo>;
+    fn handle_get_client_bandwidth(&self, id: &str) -> AdminResponse;
+    fn handle_set_client_bandwidth(&self, id: &str, policy: BandwidthPolicy) -> AdminResponse;
+    fn handle_reset_client_quota(&self, id: &str) -> AdminResponse;
     fn handle_kick(&self, id: &str) -> AdminResponse;
     fn handle_block(&self, ip: &str) -> AdminResponse;
     fn handle_unblock(&self, ip: &str) -> AdminResponse;
@@ -558,6 +562,8 @@ struct QKeyCreatePayload {
     sni_strategy: Option<String>,
     #[serde(default)]
     sni_domain: Option<String>,
+    #[serde(default)]
+    bandwidth_policy: Option<BandwidthPolicy>,
 }
 
 #[derive(Clone, Debug)]
@@ -569,6 +575,7 @@ pub struct IssueQKeyRequest {
     pub fec: Option<String>,
     pub sni_strategy: Option<String>,
     pub sni_domain: Option<String>,
+    pub bandwidth_policy: Option<BandwidthPolicy>,
 }
 
 fn normalize_ttl(ttl_seconds: Option<u64>) -> Option<u64> {

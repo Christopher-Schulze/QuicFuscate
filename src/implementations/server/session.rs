@@ -1,12 +1,15 @@
 //! Session management for the server.
 
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::implementations::server::bandwidth::PerClientBandwidthManager;
+use crate::implementations::server::bandwidth::{
+    BandwidthDecision, BandwidthDirection, BandwidthPolicy, BandwidthStats,
+    PerClientBandwidthManager,
+};
 use crate::rng;
 
 /// Unique session identifier.
@@ -153,9 +156,7 @@ pub struct SessionManager {
     by_client_ipv6: HashMap<Ipv6Addr, SessionId>,
     by_remote_addr: HashMap<SocketAddr, SessionId>,
     max_sessions: usize,
-    /// Optional per-client bandwidth limiter & quota tracker (TODO-445).
-    /// When `Some`, `check_bandwidth` gates data forwarding per client ID.
-    bandwidth_manager: Option<PerClientBandwidthManager>,
+    bandwidth_manager: PerClientBandwidthManager,
 }
 
 impl SessionManager {
@@ -167,7 +168,8 @@ impl SessionManager {
             by_client_ipv6: HashMap::new(),
             by_remote_addr: HashMap::new(),
             max_sessions,
-            bandwidth_manager: None,
+            bandwidth_manager: PerClientBandwidthManager::new(BandwidthPolicy::default())
+                .expect("default bandwidth policy is valid"),
         }
     }
 
@@ -186,31 +188,49 @@ impl SessionManager {
             by_client_ipv6: HashMap::new(),
             by_remote_addr: HashMap::new(),
             max_sessions,
-            bandwidth_manager: Some(bandwidth_manager),
+            bandwidth_manager,
         }
     }
 
-    /// Check whether `bytes` may be sent for the given client ID under the
-    /// per-client bandwidth limits and quota.
-    ///
-    /// Returns `true` when no bandwidth manager is configured (unlimited) or
-    /// when both the rate-limit and quota checks pass. Returns `false` when the
-    /// send would exceed the client's rate limit or quota.
-    pub fn check_bandwidth(&mut self, client_id: &str, bytes: usize) -> bool {
-        match &mut self.bandwidth_manager {
-            Some(mgr) => mgr.check_send(client_id, bytes),
-            None => true,
+    pub fn check_bandwidth(
+        &mut self,
+        session_id: SessionId,
+        direction: BandwidthDirection,
+        bytes: usize,
+    ) -> BandwidthDecision {
+        self.bandwidth_manager.check(&session_id.as_u64().to_string(), direction, bytes)
+    }
+
+    pub fn activate_bandwidth(
+        &mut self,
+        session_id: SessionId,
+        policy_override: Option<BandwidthPolicy>,
+    ) -> Result<(), SessionError> {
+        if !self.sessions.contains_key(&session_id) {
+            return Err(SessionError::NotFound);
         }
+        if self.bandwidth_stats(session_id).is_some() {
+            return Err(SessionError::AlreadyExists);
+        }
+        self.bandwidth_manager
+            .add_client(&session_id.as_u64().to_string(), policy_override)
+            .map_err(SessionError::BandwidthPolicy)
     }
 
-    /// Borrow the per-client bandwidth manager, if configured.
-    pub fn bandwidth_manager(&self) -> Option<&PerClientBandwidthManager> {
-        self.bandwidth_manager.as_ref()
+    pub fn bandwidth_stats(&self, session_id: SessionId) -> Option<BandwidthStats> {
+        self.bandwidth_manager.stats(&session_id.as_u64().to_string())
     }
 
-    /// Mutably borrow the per-client bandwidth manager, if configured.
-    pub fn bandwidth_manager_mut(&mut self) -> Option<&mut PerClientBandwidthManager> {
-        self.bandwidth_manager.as_mut()
+    pub fn update_bandwidth_policy(
+        &mut self,
+        session_id: SessionId,
+        policy: BandwidthPolicy,
+    ) -> Result<(), String> {
+        self.bandwidth_manager.update_client_policy(&session_id.as_u64().to_string(), policy)
+    }
+
+    pub fn reset_bandwidth_quota(&mut self, session_id: SessionId) -> bool {
+        self.bandwidth_manager.reset_client_quota(&session_id.as_u64().to_string())
     }
 
     /// Add a session.
@@ -241,6 +261,7 @@ impl SessionManager {
     /// Remove a session.
     pub fn remove(&mut self, id: SessionId) -> Option<Session> {
         if let Some(session) = self.sessions.remove(&id) {
+            self.bandwidth_manager.remove_client(&id.as_u64().to_string());
             self.by_client_ip.remove(&session.client_ip);
             if let Some(v6) = session.client_ipv6 {
                 self.by_client_ipv6.remove(&v6);
@@ -265,6 +286,10 @@ impl SessionManager {
         self.sessions.get(&id).map(Session::remote_addr)
     }
 
+    pub fn contains(&self, id: SessionId) -> bool {
+        self.sessions.contains_key(&id)
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (&SessionId, &Session)> {
         self.sessions.iter()
     }
@@ -286,6 +311,13 @@ impl SessionManager {
 
     pub fn session_id_by_remote_addr(&self, addr: SocketAddr) -> Option<SessionId> {
         self.by_remote_addr.get(&addr).copied()
+    }
+
+    pub fn session_id_by_client_ip(&self, ip: IpAddr) -> Option<SessionId> {
+        match ip {
+            IpAddr::V4(ipv4) => self.by_client_ip.get(&ipv4).copied(),
+            IpAddr::V6(ipv6) => self.by_client_ipv6.get(&ipv6).copied(),
+        }
     }
 
     pub fn stats_by_remote_addr(&self, addr: SocketAddr) -> Option<Arc<SessionStats>> {
@@ -338,6 +370,7 @@ pub enum SessionError {
     MaxSessionsReached,
     NotFound,
     AlreadyExists,
+    BandwidthPolicy(String),
 }
 
 impl std::fmt::Display for SessionError {
@@ -346,6 +379,9 @@ impl std::fmt::Display for SessionError {
             SessionError::MaxSessionsReached => write!(f, "Maximum sessions reached"),
             SessionError::NotFound => write!(f, "Session not found"),
             SessionError::AlreadyExists => write!(f, "Session already exists"),
+            SessionError::BandwidthPolicy(error) => {
+                write!(f, "Session bandwidth policy failed: {error}")
+            }
         }
     }
 }
@@ -386,20 +422,104 @@ mod tests {
 
     #[test]
     fn test_session_manager_bandwidth_check() {
-        // Without a bandwidth manager, all sends are allowed.
         let mut mgr = SessionManager::new(100);
-        assert!(mgr.check_bandwidth("alice", 10_000));
+        let missing = SessionId::from_u64(1);
+        assert_eq!(
+            mgr.check_bandwidth(missing, BandwidthDirection::Uplink, 10_000),
+            BandwidthDecision::RateLimited
+        );
 
-        // With a bandwidth manager, the per-client limits are enforced.
-        let bw = PerClientBandwidthManager::new(1_000, 1_000, 10_000, Duration::from_secs(60));
+        let bw = PerClientBandwidthManager::new(BandwidthPolicy {
+            rate_bytes_per_second: 1_000,
+            burst_bytes: 1_000,
+            daily_quota_bytes: 10_000,
+            monthly_quota_bytes: 20_000,
+            weight: 1,
+        })
+        .unwrap();
         let mut mgr = SessionManager::with_bandwidth_manager(100, bw);
+        let session =
+            Session::new("127.0.0.1:12345".parse().unwrap(), Ipv4Addr::new(10, 8, 0, 2), 3600);
+        let id = mgr.add(session).unwrap();
+        assert!(mgr.bandwidth_stats(id).is_none());
+        assert_eq!(
+            mgr.check_bandwidth(id, BandwidthDirection::Uplink, 1_000),
+            BandwidthDecision::RateLimited
+        );
+        mgr.activate_bandwidth(id, None).unwrap();
+        assert_eq!(
+            mgr.check_bandwidth(id, BandwidthDirection::Uplink, 1_000),
+            BandwidthDecision::Allowed
+        );
+        assert_eq!(
+            mgr.check_bandwidth(id, BandwidthDirection::Uplink, 1),
+            BandwidthDecision::RateLimited
+        );
+        assert_eq!(mgr.bandwidth_stats(id).unwrap().daily_used_bytes, 1_000);
+        mgr.remove(id);
+        assert!(mgr.bandwidth_stats(id).is_none());
+    }
 
-        // First send within burst + quota → allowed.
-        assert!(mgr.check_bandwidth("alice", 1_000));
-        // Bucket drained → rejected.
-        assert!(!mgr.check_bandwidth("alice", 1));
-        // Quota was consumed by the successful send only.
-        let stats = mgr.bandwidth_manager().unwrap().stats("alice").unwrap();
-        assert_eq!(stats.quota_used_bytes, 1_000);
+    #[test]
+    fn bandwidth_policy_precedence_preserves_usage_until_reset() {
+        let global_policy = BandwidthPolicy {
+            rate_bytes_per_second: 10_000,
+            burst_bytes: 10_000,
+            daily_quota_bytes: 20_000,
+            monthly_quota_bytes: 30_000,
+            weight: 1,
+        };
+        let manager = PerClientBandwidthManager::new(global_policy.clone()).unwrap();
+        let mut sessions = SessionManager::with_bandwidth_manager(4, manager);
+        let session =
+            Session::new("127.0.0.1:12345".parse().unwrap(), Ipv4Addr::new(10, 8, 0, 2), 3600);
+        let id = sessions.add(session).unwrap();
+        sessions.activate_bandwidth(id, None).unwrap();
+        assert_eq!(sessions.bandwidth_stats(id).unwrap().policy, global_policy);
+
+        let qkey_policy = BandwidthPolicy {
+            rate_bytes_per_second: 20_000,
+            burst_bytes: 20_000,
+            daily_quota_bytes: 40_000,
+            monthly_quota_bytes: 50_000,
+            weight: 2,
+        };
+        sessions.update_bandwidth_policy(id, qkey_policy.clone()).unwrap();
+        assert_eq!(sessions.bandwidth_stats(id).unwrap().policy, qkey_policy);
+        assert_eq!(
+            sessions.check_bandwidth(id, BandwidthDirection::Uplink, 500),
+            BandwidthDecision::Allowed
+        );
+
+        let admin_policy = BandwidthPolicy {
+            rate_bytes_per_second: 30_000,
+            burst_bytes: 30_000,
+            daily_quota_bytes: 60_000,
+            monthly_quota_bytes: 70_000,
+            weight: 3,
+        };
+        sessions.update_bandwidth_policy(id, admin_policy.clone()).unwrap();
+        let stats = sessions.bandwidth_stats(id).unwrap();
+        assert_eq!(stats.policy, admin_policy);
+        assert_eq!(stats.daily_used_bytes, 500);
+        assert!(sessions.reset_bandwidth_quota(id));
+        assert_eq!(sessions.bandwidth_stats(id).unwrap().daily_used_bytes, 0);
+    }
+
+    #[test]
+    fn bandwidth_owner_is_created_once_after_authentication_and_removed_with_session() {
+        let mut sessions = SessionManager::new(4);
+        let session =
+            Session::new("127.0.0.1:12345".parse().unwrap(), Ipv4Addr::new(10, 8, 0, 2), 3600);
+        let id = sessions.add(session).unwrap();
+
+        assert!(sessions.bandwidth_stats(id).is_none());
+        sessions.activate_bandwidth(id, None).unwrap();
+        assert!(sessions.bandwidth_stats(id).is_some());
+        assert!(matches!(sessions.activate_bandwidth(id, None), Err(SessionError::AlreadyExists)));
+
+        sessions.remove(id).unwrap();
+        assert!(sessions.bandwidth_stats(id).is_none());
+        assert!(matches!(sessions.activate_bandwidth(id, None), Err(SessionError::NotFound)));
     }
 }

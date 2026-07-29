@@ -240,6 +240,7 @@ pub(crate) fn parse_live_server_initial_auth(
         pending_qkey_auth = Some(QKeyAuthState {
             key_id: record.id.clone(),
             expected_token_sha256: record.token_sha256.clone(),
+            bandwidth_policy: record.bandwidth_policy.clone(),
             authed: false,
             connected_at: Instant::now(),
             auth_attempt: Some(auth_attempt),
@@ -323,7 +324,7 @@ pub fn evaluate_qkey_http3_headers(
         return QKeyHeaderAuthOutcome::Unchanged;
     };
     if already_authed {
-        return QKeyHeaderAuthOutcome::Authenticated;
+        return QKeyHeaderAuthOutcome::Unchanged;
     }
 
     let mut provided: Option<&[u8]> = None;
@@ -685,6 +686,26 @@ fn allow_client_uplink(
     Some(route)
 }
 
+fn admit_session_bandwidth(
+    sessions: &Arc<RwLock<SessionManager>>,
+    metrics: &Metrics,
+    session_id: Option<SessionId>,
+    direction: BandwidthDirection,
+    bytes: usize,
+) -> BandwidthDecision {
+    let Some(session_id) = session_id else {
+        metrics.record_bandwidth_decision(
+            direction,
+            BandwidthDecision::RateLimited,
+            bytes,
+        );
+        return BandwidthDecision::RateLimited;
+    };
+    let decision = sessions.write().check_bandwidth(session_id, direction, bytes);
+    metrics.record_bandwidth_decision(direction, decision, bytes);
+    decision
+}
+
 fn enqueue_routing_response(
     queue: &Arc<std::sync::Mutex<crate::core::MasqueDownlinkQueue>>,
     metrics: &Metrics,
@@ -770,6 +791,7 @@ async fn process_live_server_client_datagram(
         session_id,
         assigned_ips,
         forwarding_policy,
+        sessions,
         fanout_queue,
         ..
     } = runtime_client;
@@ -818,6 +840,7 @@ async fn process_live_server_client_datagram(
             let tun_sink = Arc::clone(tun);
             let masque_normalizer = std::sync::Arc::clone(&normalizer);
             let masque_forwarding_policy = Arc::clone(&forwarding_policy);
+            let masque_sessions = Arc::clone(&sessions);
             let masque_fanout_queue = Arc::clone(&fanout_queue);
             let masque_metrics = Arc::clone(metrics);
             let dns_resolvers = Arc::clone(&dns_upstream_resolvers);
@@ -833,6 +856,20 @@ async fn process_live_server_client_datagram(
                         require_auth,
                         datagram_auth_gate.load(AtomicOrdering::Relaxed),
                     ) {
+                        return;
+                    }
+                    let bandwidth_decision = admit_session_bandwidth(
+                        &masque_sessions,
+                        &masque_metrics,
+                        session_id,
+                        BandwidthDirection::Uplink,
+                        payload.len(),
+                    );
+                    if bandwidth_decision != BandwidthDecision::Allowed {
+                        log::debug!(
+                            "Client uplink denied by bandwidth policy: {:?}",
+                            bandwidth_decision
+                        );
                         return;
                     }
                     let Some(route) = allow_client_uplink(
@@ -905,6 +942,20 @@ async fn process_live_server_client_datagram(
                     // MASQUE stream, which is not a raw IP packet and would cause
                     // EINVAL on TUN write.
                     if !data.is_empty() && (data[0] >> 4 == 4 || data[0] >> 4 == 6) {
+                        let bandwidth_decision = admit_session_bandwidth(
+                            &sessions,
+                            metrics,
+                            session_id,
+                            BandwidthDirection::Uplink,
+                            data.len(),
+                        );
+                        if bandwidth_decision != BandwidthDecision::Allowed {
+                            log::debug!(
+                                "Client framed uplink denied by bandwidth policy: {:?}",
+                                bandwidth_decision
+                            );
+                            return;
+                        }
                         let Some(response_queue) = stream_response_queue.as_ref() else {
                             return;
                         };

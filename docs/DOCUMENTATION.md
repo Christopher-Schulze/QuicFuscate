@@ -2411,6 +2411,24 @@ Within the live server path, ownership is now intentionally split only along one
 - `LiveServerState` owns active QUIC connection objects, the bounded per-IP QKey auth policy, pending QKey auth attempts, runtime QKey revocation state, and the SessionId-to-QKey tracker used to terminate active sessions on revoke. One monotonic attempt ID survives the Initial ID lookup through the encrypted HTTP/3 bearer result; success, failure, timeout, pre-auth close, and internal abandonment each complete it at most once.
 The standalone path also delegates DCID-based live path rebinding, closed-client reconciliation, control-plane shutdown registration, and runtime reload normalization to `implementations/server`, so runtime lifecycle and bookkeeping now converge on one canonical server model.
 Session timeout is also part of that canonical lifecycle: standalone housekeeping reaps expired shared-domain sessions according to `client_timeout_secs`, while `QKEY_AUTH_TIMEOUT` remains a separate short pre-auth gate for unauthenticated handshakes rather than a replacement for session expiry.
+
+#### Per-Session Bandwidth, Quota, and Fairness
+
+Every accepted session owns one `BandwidthPolicy` with independent uplink/downlink token buckets, one shared UTC daily quota, one shared UTC calendar-month quota, and a deficit-round-robin weight. Zero rate plus zero burst disables rate limiting; zero quota means unlimited. Rate and burst must both be zero or both nonzero, and weight must be `1..=1000`; invalid startup, QKey, or admin policy fails closed.
+
+Policy precedence is deterministic: validated global environment defaults apply at session creation, an optional persisted QKey policy replaces them only after encrypted bearer authentication, and a later authenticated admin update replaces the live effective policy. Policy updates preserve daily/monthly usage; only the explicit quota-reset route clears it. Session close, expiry, QKey revocation, and administrative kick remove the same state.
+
+Uplink admission occurs after authentication at both MASQUE DATAGRAM and framed-H3 TUN boundaries. Unshaped downlinks with no session backlog use direct bandwidth admission and transport enqueue; shared shaping, rate backpressure, or transport backpressure enters one bounded pending owner: 256 packets, 384 KiB total, 32 packets per session, and five-second age. Weighted byte-deficit round robin preserves FIFO within each queued session and never creates an unbounded retry path. Selection returns immediately when every active session is deferred, while its visit budget derives from the largest eligible front packet rather than total queue capacity. An optional shared downlink token bucket creates the aggregate service boundary required for proportional shares such as `1:2:1` under saturation. Its rate and burst must both be zero or both nonzero; zero plus zero keeps the direct path work-conserving. Rate-limited downlinks remain queued for a later bounded attempt; daily/monthly quota denials are terminal for that packet.
+
+Authenticated HTTP operations accept canonical session IDs, remote socket addresses, or assigned IPv4/IPv6 TUN addresses:
+
+- `GET /api/clients/{id}/bandwidth`
+- `POST /api/clients/{id}/bandwidth` with a complete `BandwidthPolicy` JSON body
+- `POST /api/clients/{id}/quota/reset`
+
+QKey creation accepts the same object as optional `bandwidth_policy`. Runtime denials and admin mutations emit typed audit context. Prometheus exports allowed bytes and `rate_limited`, `daily_quota_exceeded`, and `monthly_quota_exceeded` outcomes by direction, plus active DRR clients and delivered packet/byte totals.
+
+The exact isolated ARM64 source bundle `8759423fcdf6c60c7c23dd1cff68db7c894f94c8c291b4f2b151210ca23fc973` produced binary `defaa3314450e86550e83baf5c6acc1d7e024b8a4b6752ca0d3fbb9cf2828356`. Its production-loglevel three-client proof passed unlimited throughput at 12.76-13.00 Mbit/s, exact 10-Mbit/s policies at 9.43 Mbit/s, burst at 22.56-23.37 Mbit/s, exact 2.4-MB daily quota exhaustion at 6.14 Mbit/s, and weighted `1:2:1` service at 2.59/5.22/2.77 Mbit/s. Both baseline and shaped topologies retained exact policy and binary manifests, reported no liveness or transport errors, and removed every owned process, namespace, link, and admin socket.
  
 Server Options (selected):
 
@@ -2985,6 +3003,10 @@ At runtime you can override selected stealth options without changing the config
 - `QUICFUSCATE_METRICS_ADDR` - `host:port` for the `--telemetry` HTTP endpoint (default: `127.0.0.1:9898`).
 
 **Transport and IO (advanced):**
+- `QUICFUSCATE_CLIENT_RATE_BYTES_PER_SECOND` / `QUICFUSCATE_CLIENT_BURST_BYTES` - per-session sustained bytes/second and initial/maximum burst for each direction. Both must be zero for unlimited or both nonzero.
+- `QUICFUSCATE_CLIENT_DAILY_QUOTA_BYTES` / `QUICFUSCATE_CLIENT_MONTHLY_QUOTA_BYTES` - combined uplink plus downlink quota for the current UTC day/calendar month (`0` = unlimited).
+- `QUICFUSCATE_CLIENT_BANDWIDTH_WEIGHT` - weighted byte-deficit scheduler share from `1` through `1000` (default: `1`).
+- `QUICFUSCATE_SERVER_DOWNLINK_RATE_BYTES_PER_SECOND` / `QUICFUSCATE_SERVER_DOWNLINK_BURST_BYTES` - optional shared downlink service capacity used by the weighted scheduler. Both must be zero for unshaped operation or both nonzero.
 - `QUICFUSCATE_AUTH_POLICY_ENABLED` - `true|false|1|0`; explicit disable switch for per-IP QKey auth backoff and block state (default: `true`).
 - `QUICFUSCATE_AUTH_BACKOFF_AFTER_FAILURES` - first consecutive terminal failure that schedules backoff (default: `3`).
 - `QUICFUSCATE_AUTH_BACKOFF_BASE_MS` / `QUICFUSCATE_AUTH_BACKOFF_MAX_MS` - exponential delay base and cap (defaults: `250` / `8000`).
@@ -3914,6 +3936,8 @@ The default server metrics endpoint (`implementations::server::metrics::Metrics:
 - `quicfuscate_auth_attempts_total`, `quicfuscate_auth_succeeded_total`, `quicfuscate_auth_failed_total`
 - `quicfuscate_auth_backoff_rejected_total`, `quicfuscate_auth_blocked_rejected_total`, `quicfuscate_auth_capacity_rejected_total`, `quicfuscate_auth_abandoned_total`
 - `quicfuscate_auth_state_tracked_ips`, `quicfuscate_auth_state_pruned_total`, `quicfuscate_rate_limited_total`
+- `quicfuscate_bandwidth_allowed_bytes_total`, `quicfuscate_bandwidth_denials_total`
+- `quicfuscate_bandwidth_scheduler_active_clients`, `quicfuscate_bandwidth_scheduler_delivered_total`
 
 The three legacy server FEC counters are read-only projections of the canonical process telemetry producers, not independent atomics: `encoded` is actual source plus repair datagrams written by the FEC layer, `decoded` is original plus recovered source packets delivered by the FEC layer, and `recovered` is the decoded subset reconstructed from repair data. Their scope is the server process.
 Accepted connections are now produced by the standalone live runtime at the same point that `clients_total` is incremented, so the standalone admin/metrics surfaces report one consistent accept/reject/auth-failure story instead of mixing runtime counts with partial projections.

@@ -1,4 +1,22 @@
 impl Connection {
+    fn configured_recovery(config: &Config, max_datagram_size: usize) -> recovery::Recovery {
+        let algorithm = match config.cc_algorithm {
+            crate::transport::CongestionControlAlgorithm::Reno => {
+                crate::transport::cc::Algorithm::Reno
+            }
+            crate::transport::CongestionControlAlgorithm::Cubic => {
+                crate::transport::cc::Algorithm::Cubic
+            }
+            crate::transport::CongestionControlAlgorithm::BBR2 => {
+                crate::transport::cc::Algorithm::Bbr2
+            }
+            crate::transport::CongestionControlAlgorithm::BBR3 => {
+                crate::transport::cc::Algorithm::Bbr3
+            }
+        };
+        recovery::Recovery::with_algorithm(INITIAL_WINDOW, max_datagram_size, algorithm)
+    }
+
     /// Set the ODCID used for Initial key derivation (RFC 9001).
     ///
     /// For clients this also initializes the current destination CID used in the first Initial
@@ -29,6 +47,7 @@ impl Connection {
         let pmtu_enabled = config.pmtu_discovery_enabled();
         let pmtu_policy = config.pmtu_policy();
         let version_negotiation = super::version::VersionNegotiationState::new(config.version);
+        let recovery = Self::configured_recovery(&config, dgram_send_max_size);
         let mut conn = Self {
             scid: ConnectionId::from_vec(scid.to_vec()),
             dcid: ConnectionId::default(),
@@ -93,7 +112,7 @@ impl Connection {
             ecn_ect0: 0,
             ecn_ect1: 0,
             ecn_ce: 0,
-            recovery: recovery::Recovery::new(INITIAL_WINDOW, dgram_send_max_size),
+            recovery,
             fec_escalation_threshold: 0.05,
             fec_ctrl_delta: FecControlDelta::default(),
             fec_cb_sent_packets: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1335,7 +1354,7 @@ impl Connection {
         self.h3 = None;
         self.pmtu_probe_pn = None;
         self.pmtu_above_floor_pns.clear();
-        self.recovery = recovery::Recovery::new(INITIAL_WINDOW, self.dgram_send_max_size);
+        self.recovery = Self::configured_recovery(&self.config, self.dgram_send_max_size);
         if self.config.initial_rtt_ms != 100 {
             self.recovery.set_initial_rtt(Duration::from_millis(self.config.initial_rtt_ms));
         }

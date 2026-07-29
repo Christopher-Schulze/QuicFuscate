@@ -5,6 +5,7 @@ use quicfuscate::implementations::server::admin::{AdminResponse, ClientInfo};
 use quicfuscate::implementations::server::admin_http::{
     AdminAuth, AdminHttpHandler, AdminHttpServer, IssueQKeyRequest,
 };
+use quicfuscate::implementations::server::BandwidthPolicy;
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::sync::{atomic::Ordering, Arc};
@@ -54,6 +55,31 @@ impl AdminHttpHandler for DummyHandler {
         }]
     }
 
+    fn handle_get_client_bandwidth(&self, id: &str) -> AdminResponse {
+        AdminResponse::ok_with_data(serde_json::json!({
+            "client_id": id,
+            "bandwidth": {
+                "policy": BandwidthPolicy::default(),
+                "daily_used_bytes": 0,
+                "monthly_used_bytes": 0
+            }
+        }))
+    }
+
+    fn handle_set_client_bandwidth(&self, id: &str, policy: BandwidthPolicy) -> AdminResponse {
+        if let Err(error) = policy.validate() {
+            return AdminResponse::error(error);
+        }
+        AdminResponse::ok_with_data(serde_json::json!({
+            "client_id": id,
+            "policy": policy
+        }))
+    }
+
+    fn handle_reset_client_quota(&self, id: &str) -> AdminResponse {
+        AdminResponse::ok_with_message(format!("quota reset for {id}"))
+    }
+
     fn handle_kick(&self, id: &str) -> AdminResponse {
         AdminResponse::ok_with_message(format!("kicked {id}"))
     }
@@ -93,6 +119,7 @@ impl AdminHttpHandler for DummyHandler {
             "qkey": self.qkey,
             "created_at": 1,
             "expires_at": expires_at,
+            "bandwidth_policy": req.bandwidth_policy,
         }))
     }
 
@@ -425,6 +452,49 @@ fn admin_http_contracts() {
     assert!(resp.success);
     assert!(resp.data.is_some());
 
+    let bandwidth_path = "/api/clients/127.0.0.1:1234/bandwidth";
+    let (status, body, _) = http_request(local_addr, "GET", bandwidth_path, Some(&cookie), "");
+    assert_eq!(status, 200);
+    let resp: AdminResponse = serde_json::from_str(&body).expect("bandwidth response");
+    assert!(resp.success);
+    let (status, body, _) =
+        http_request(local_addr, "GET", "/api/clients/10.8.0.2/bandwidth", Some(&cookie), "");
+    assert_eq!(status, 200);
+    let resp: AdminResponse = serde_json::from_str(&body).expect("assigned IP bandwidth response");
+    assert!(resp.success);
+
+    let bandwidth_policy = serde_json::json!({
+        "rate_bytes_per_second": 1_250_000,
+        "burst_bytes": 2_500_000,
+        "daily_quota_bytes": 10_000_000,
+        "monthly_quota_bytes": 100_000_000,
+        "weight": 2
+    })
+    .to_string();
+    let (status, body, _) = http_request_with_csrf(
+        local_addr,
+        "POST",
+        bandwidth_path,
+        Some(&cookie),
+        Some(&csrf),
+        &bandwidth_policy,
+    );
+    assert_eq!(status, 200);
+    let resp: AdminResponse = serde_json::from_str(&body).expect("bandwidth update response");
+    assert!(resp.success);
+
+    let (status, body, _) = http_request_with_csrf(
+        local_addr,
+        "POST",
+        "/api/clients/127.0.0.1:1234/quota/reset",
+        Some(&cookie),
+        Some(&csrf),
+        "",
+    );
+    assert_eq!(status, 200);
+    let resp: AdminResponse = serde_json::from_str(&body).expect("quota reset response");
+    assert!(resp.success);
+
     let (status, body, _) = http_request_with_csrf(
         local_addr,
         "POST",
@@ -512,6 +582,32 @@ fn admin_http_contracts() {
     assert!(!qkey_value.trim().is_empty());
     let parsed = qkey::parse(qkey_value).expect("qkey parse");
     assert_eq!(parsed.token.as_deref(), Some(expected_qkey_token.as_str()));
+
+    let qkey_bandwidth_payload = serde_json::json!({
+        "bandwidth_policy": {
+            "rate_bytes_per_second": 1_250_000,
+            "burst_bytes": 2_500_000,
+            "daily_quota_bytes": 10_000_000,
+            "monthly_quota_bytes": 100_000_000,
+            "weight": 2
+        }
+    })
+    .to_string();
+    let (status, body, _) = http_request_with_csrf(
+        local_addr,
+        "POST",
+        "/api/qkey",
+        Some(&cookie),
+        Some(&csrf),
+        &qkey_bandwidth_payload,
+    );
+    assert_eq!(status, 200);
+    let resp: AdminResponse = serde_json::from_str(&body).expect("qkey bandwidth response");
+    let data = resp.data.expect("qkey bandwidth data");
+    assert_eq!(
+        data.pointer("/bandwidth_policy/rate_bytes_per_second").and_then(|value| value.as_u64()),
+        Some(1_250_000)
+    );
 
     let (status, body, _) = http_request(local_addr, "GET", "/api/qkeys", Some(&cookie), "");
     assert_eq!(status, 200);

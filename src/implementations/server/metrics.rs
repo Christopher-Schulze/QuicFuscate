@@ -8,6 +8,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use super::isolation::{UplinkDrop, UplinkRoute};
+use super::{BandwidthDecision, BandwidthDirection};
 
 #[derive(Clone, Copy, Debug)]
 enum FecProcessCounterKind {
@@ -102,6 +103,19 @@ pub struct Metrics {
     pub tun_downlink_backpressure_drop_terminal_transport_error: AtomicU64,
     pub tun_downlink_backpressure_drop_shutdown: AtomicU64,
 
+    // Per-session bandwidth and fair-scheduler metrics
+    pub bandwidth_uplink_allowed_bytes: AtomicU64,
+    pub bandwidth_downlink_allowed_bytes: AtomicU64,
+    pub bandwidth_uplink_rate_limited: AtomicU64,
+    pub bandwidth_downlink_rate_limited: AtomicU64,
+    pub bandwidth_uplink_daily_quota_exceeded: AtomicU64,
+    pub bandwidth_downlink_daily_quota_exceeded: AtomicU64,
+    pub bandwidth_uplink_monthly_quota_exceeded: AtomicU64,
+    pub bandwidth_downlink_monthly_quota_exceeded: AtomicU64,
+    pub bandwidth_scheduler_active_clients: AtomicU64,
+    pub bandwidth_scheduler_delivered_packets: AtomicU64,
+    pub bandwidth_scheduler_delivered_bytes: AtomicU64,
+
     // Server-generated MASQUE response queue metrics
     pub masque_downlink_response_retried: AtomicU64,
     pub masque_downlink_response_drop_packet_capacity: AtomicU64,
@@ -171,6 +185,17 @@ impl Metrics {
             tun_downlink_backpressure_drop_expired: AtomicU64::new(0),
             tun_downlink_backpressure_drop_terminal_transport_error: AtomicU64::new(0),
             tun_downlink_backpressure_drop_shutdown: AtomicU64::new(0),
+            bandwidth_uplink_allowed_bytes: AtomicU64::new(0),
+            bandwidth_downlink_allowed_bytes: AtomicU64::new(0),
+            bandwidth_uplink_rate_limited: AtomicU64::new(0),
+            bandwidth_downlink_rate_limited: AtomicU64::new(0),
+            bandwidth_uplink_daily_quota_exceeded: AtomicU64::new(0),
+            bandwidth_downlink_daily_quota_exceeded: AtomicU64::new(0),
+            bandwidth_uplink_monthly_quota_exceeded: AtomicU64::new(0),
+            bandwidth_downlink_monthly_quota_exceeded: AtomicU64::new(0),
+            bandwidth_scheduler_active_clients: AtomicU64::new(0),
+            bandwidth_scheduler_delivered_packets: AtomicU64::new(0),
+            bandwidth_scheduler_delivered_bytes: AtomicU64::new(0),
             masque_downlink_response_retried: AtomicU64::new(0),
             masque_downlink_response_drop_packet_capacity: AtomicU64::new(0),
             masque_downlink_response_drop_byte_capacity: AtomicU64::new(0),
@@ -338,6 +363,53 @@ impl Metrics {
         counter.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn record_bandwidth_decision(
+        &self,
+        direction: BandwidthDirection,
+        decision: BandwidthDecision,
+        bytes: usize,
+    ) {
+        let counter = match (direction, decision) {
+            (BandwidthDirection::Uplink, BandwidthDecision::Allowed) => {
+                self.bandwidth_uplink_allowed_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+                return;
+            }
+            (BandwidthDirection::Downlink, BandwidthDecision::Allowed) => {
+                self.bandwidth_downlink_allowed_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+                return;
+            }
+            (BandwidthDirection::Uplink, BandwidthDecision::RateLimited) => {
+                &self.bandwidth_uplink_rate_limited
+            }
+            (BandwidthDirection::Downlink, BandwidthDecision::RateLimited) => {
+                &self.bandwidth_downlink_rate_limited
+            }
+            (BandwidthDirection::Uplink, BandwidthDecision::DailyQuotaExceeded) => {
+                &self.bandwidth_uplink_daily_quota_exceeded
+            }
+            (BandwidthDirection::Downlink, BandwidthDecision::DailyQuotaExceeded) => {
+                &self.bandwidth_downlink_daily_quota_exceeded
+            }
+            (BandwidthDirection::Uplink, BandwidthDecision::MonthlyQuotaExceeded) => {
+                &self.bandwidth_uplink_monthly_quota_exceeded
+            }
+            (BandwidthDirection::Downlink, BandwidthDecision::MonthlyQuotaExceeded) => {
+                &self.bandwidth_downlink_monthly_quota_exceeded
+            }
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+        self.record_rate_limited();
+    }
+
+    pub fn set_bandwidth_scheduler_active_clients(&self, clients: usize) {
+        self.bandwidth_scheduler_active_clients.store(clients as u64, Ordering::Relaxed);
+    }
+
+    pub fn record_bandwidth_scheduler_delivery(&self, bytes: usize) {
+        self.bandwidth_scheduler_delivered_packets.fetch_add(1, Ordering::Relaxed);
+        self.bandwidth_scheduler_delivered_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
     pub fn record_masque_downlink_response_retry(&self) {
         self.masque_downlink_response_retried.fetch_add(1, Ordering::Relaxed);
     }
@@ -501,6 +573,78 @@ impl Metrics {
         ] {
             out.push_str(&format!(
                 "quicfuscate_tun_downlink_backpressure_events_total{{event=\"{event}\"}} {value}\n"
+            ));
+        }
+        out.push('\n');
+
+        out.push_str(
+            "# HELP quicfuscate_bandwidth_allowed_bytes_total Bytes admitted by per-session policy\n",
+        );
+        out.push_str("# TYPE quicfuscate_bandwidth_allowed_bytes_total counter\n");
+        for (direction, value) in [
+            ("uplink", self.bandwidth_uplink_allowed_bytes.load(Ordering::Relaxed)),
+            ("downlink", self.bandwidth_downlink_allowed_bytes.load(Ordering::Relaxed)),
+        ] {
+            out.push_str(&format!(
+                "quicfuscate_bandwidth_allowed_bytes_total{{direction=\"{direction}\"}} {value}\n"
+            ));
+        }
+        out.push('\n');
+        out.push_str(
+            "# HELP quicfuscate_bandwidth_denials_total Per-session bandwidth denials by typed outcome\n",
+        );
+        out.push_str("# TYPE quicfuscate_bandwidth_denials_total counter\n");
+        for (direction, outcome, value) in [
+            ("uplink", "rate_limited", self.bandwidth_uplink_rate_limited.load(Ordering::Relaxed)),
+            (
+                "downlink",
+                "rate_limited",
+                self.bandwidth_downlink_rate_limited.load(Ordering::Relaxed),
+            ),
+            (
+                "uplink",
+                "daily_quota_exceeded",
+                self.bandwidth_uplink_daily_quota_exceeded.load(Ordering::Relaxed),
+            ),
+            (
+                "downlink",
+                "daily_quota_exceeded",
+                self.bandwidth_downlink_daily_quota_exceeded.load(Ordering::Relaxed),
+            ),
+            (
+                "uplink",
+                "monthly_quota_exceeded",
+                self.bandwidth_uplink_monthly_quota_exceeded.load(Ordering::Relaxed),
+            ),
+            (
+                "downlink",
+                "monthly_quota_exceeded",
+                self.bandwidth_downlink_monthly_quota_exceeded.load(Ordering::Relaxed),
+            ),
+        ] {
+            out.push_str(&format!(
+                "quicfuscate_bandwidth_denials_total{{direction=\"{direction}\",outcome=\"{outcome}\"}} {value}\n"
+            ));
+        }
+        out.push('\n');
+        out.push_str(
+            "# HELP quicfuscate_bandwidth_scheduler_active_clients Current clients in the bounded DRR queue\n",
+        );
+        out.push_str("# TYPE quicfuscate_bandwidth_scheduler_active_clients gauge\n");
+        out.push_str(&format!(
+            "quicfuscate_bandwidth_scheduler_active_clients {}\n\n",
+            self.bandwidth_scheduler_active_clients.load(Ordering::Relaxed)
+        ));
+        out.push_str(
+            "# HELP quicfuscate_bandwidth_scheduler_delivered_total DRR deliveries by unit\n",
+        );
+        out.push_str("# TYPE quicfuscate_bandwidth_scheduler_delivered_total counter\n");
+        for (unit, value) in [
+            ("packets", self.bandwidth_scheduler_delivered_packets.load(Ordering::Relaxed)),
+            ("bytes", self.bandwidth_scheduler_delivered_bytes.load(Ordering::Relaxed)),
+        ] {
+            out.push_str(&format!(
+                "quicfuscate_bandwidth_scheduler_delivered_total{{unit=\"{unit}\"}} {value}\n"
             ));
         }
         out.push('\n');
@@ -960,6 +1104,54 @@ mod tests {
         assert!(output.contains(
             "quicfuscate_tun_downlink_backpressure_events_total{event=\"drop_expired\"} 1"
         ));
+    }
+
+    #[test]
+    fn bandwidth_metrics_expose_direction_outcome_and_scheduler_state() {
+        let metrics = Metrics::new();
+        metrics.record_bandwidth_decision(
+            BandwidthDirection::Uplink,
+            BandwidthDecision::Allowed,
+            1_250,
+        );
+        metrics.record_bandwidth_decision(
+            BandwidthDirection::Downlink,
+            BandwidthDecision::RateLimited,
+            500,
+        );
+        metrics.record_bandwidth_decision(
+            BandwidthDirection::Uplink,
+            BandwidthDecision::DailyQuotaExceeded,
+            500,
+        );
+        metrics.record_bandwidth_decision(
+            BandwidthDirection::Downlink,
+            BandwidthDecision::MonthlyQuotaExceeded,
+            500,
+        );
+        metrics.set_bandwidth_scheduler_active_clients(3);
+        metrics.record_bandwidth_scheduler_delivery(1_200);
+
+        let output = metrics.export();
+        assert!(
+            output.contains("quicfuscate_bandwidth_allowed_bytes_total{direction=\"uplink\"} 1250")
+        );
+        assert!(output.contains(
+            "quicfuscate_bandwidth_denials_total{direction=\"downlink\",outcome=\"rate_limited\"} 1"
+        ));
+        assert!(output.contains(
+            "quicfuscate_bandwidth_denials_total{direction=\"uplink\",outcome=\"daily_quota_exceeded\"} 1"
+        ));
+        assert!(output.contains(
+            "quicfuscate_bandwidth_denials_total{direction=\"downlink\",outcome=\"monthly_quota_exceeded\"} 1"
+        ));
+        assert!(output.contains("quicfuscate_bandwidth_scheduler_active_clients 3"));
+        assert!(
+            output.contains("quicfuscate_bandwidth_scheduler_delivered_total{unit=\"packets\"} 1")
+        );
+        assert!(
+            output.contains("quicfuscate_bandwidth_scheduler_delivered_total{unit=\"bytes\"} 1200")
+        );
     }
 
     #[test]

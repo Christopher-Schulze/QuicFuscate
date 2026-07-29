@@ -17,6 +17,19 @@ mod tests {
         fn handle_list_clients(&self) -> Vec<ClientInfo> {
             vec![]
         }
+        fn handle_get_client_bandwidth(&self, _id: &str) -> AdminResponse {
+            AdminResponse::ok()
+        }
+        fn handle_set_client_bandwidth(
+            &self,
+            _id: &str,
+            _policy: BandwidthPolicy,
+        ) -> AdminResponse {
+            AdminResponse::ok()
+        }
+        fn handle_reset_client_quota(&self, _id: &str) -> AdminResponse {
+            AdminResponse::ok()
+        }
         fn handle_kick(&self, _id: &str) -> AdminResponse {
             AdminResponse::ok()
         }

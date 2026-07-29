@@ -4,20 +4,47 @@ fn handle_api(
     handler: Arc<dyn AdminHttpHandler>,
     peer: Option<SocketAddr>,
 ) -> Response<Full<Bytes>> {
-    if req.method == "POST" {
-        if let Some(id) =
-            req.path.strip_prefix("/api/clients/").and_then(|rest| rest.strip_suffix("/kick"))
-        {
+    if let Some(rest) = req.path.strip_prefix("/api/clients/") {
+        let operation = if let Some(id) = rest.strip_suffix("/kick") {
+            Some((id, "kick"))
+        } else if let Some(id) = rest.strip_suffix("/bandwidth") {
+            Some((id, "bandwidth"))
+        } else {
+            rest.strip_suffix("/quota/reset").map(|id| (id, "quota-reset"))
+        };
+        if let Some((id, operation)) = operation {
             let raw = id.trim();
             if raw.is_empty() {
                 return json_response(400, &AdminResponse::error("Missing client id"));
             }
-            let Some(id) = normalize_client_id(raw) else {
+            let id = normalize_client_id(raw).or_else(|| {
+                (operation != "kick")
+                    .then(|| raw.parse::<std::net::IpAddr>().ok().map(|ip| ip.to_string()))
+                    .flatten()
+            });
+            let Some(id) = id else {
                 return json_response(400, &AdminResponse::error("Invalid client id"));
             };
-            let resp = handler.handle_kick(&id);
-            log_action(peer, "kick", &format!("id={}", id), resp.success);
-            return admin_json_response(&resp);
+            let response = match (req.method.as_str(), operation) {
+                ("POST", "kick") => handler.handle_kick(&id),
+                ("GET", "bandwidth") => handler.handle_get_client_bandwidth(&id),
+                ("POST", "bandwidth") => {
+                    let policy: BandwidthPolicy = match serde_json::from_slice(&req.body) {
+                        Ok(policy) => policy,
+                        Err(_) => {
+                            return json_response(
+                                400,
+                                &AdminResponse::error("Invalid bandwidth policy JSON"),
+                            )
+                        }
+                    };
+                    handler.handle_set_client_bandwidth(&id, policy)
+                }
+                ("POST", "quota-reset") => handler.handle_reset_client_quota(&id),
+                _ => return text_response(404, "Not Found"),
+            };
+            log_action(peer, operation, &format!("id={}", id), response.success);
+            return admin_json_response(&response);
         }
     }
     match (req.method.as_str(), req.path.as_str()) {
@@ -100,6 +127,7 @@ fn handle_api(
                     fec: None,
                     sni_strategy: None,
                     sni_domain: None,
+                    bandwidth_policy: None,
                 }
             } else {
                 match serde_json::from_slice(&req.body) {
@@ -134,6 +162,7 @@ fn handle_api(
                 fec: payload.fec,
                 sni_strategy: payload.sni_strategy,
                 sni_domain: payload.sni_domain,
+                bandwidth_policy: payload.bandwidth_policy,
             };
             let resp = handler.handle_qkey(req);
             log_action(peer, "qkey", "-", resp.success);

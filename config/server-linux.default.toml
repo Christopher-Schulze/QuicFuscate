@@ -252,3 +252,22 @@ flush_timeout_ms = 5000
 #   QUICFUSCATE_AUTH_PRUNE_INTERVAL_SECS=30
 #   QUICFUSCATE_AUTH_MAX_TRACKED_IPS=65536
 #   QUICFUSCATE_AUTH_MAX_PENDING_PER_IP=4
+
+# ==============================================================================
+# PER-SESSION BANDWIDTH, QUOTA, AND FAIR SCHEDULING
+# ==============================================================================
+# Defaults are unlimited with equal weight. Rate and burst must both be zero or
+# both nonzero. Quotas combine uplink and downlink usage and reset at UTC day or
+# calendar-month boundaries. Invalid values fail server configuration.
+#
+#   QUICFUSCATE_CLIENT_RATE_BYTES_PER_SECOND=0
+#   QUICFUSCATE_CLIENT_BURST_BYTES=0
+#   QUICFUSCATE_CLIENT_DAILY_QUOTA_BYTES=0
+#   QUICFUSCATE_CLIENT_MONTHLY_QUOTA_BYTES=0
+#   QUICFUSCATE_CLIENT_BANDWIDTH_WEIGHT=1
+#
+# Optional shared downlink shaper for proportional DRR service under aggregate
+# contention. Rate and burst must both be zero or both nonzero.
+#
+#   QUICFUSCATE_SERVER_DOWNLINK_RATE_BYTES_PER_SECOND=0
+#   QUICFUSCATE_SERVER_DOWNLINK_BURST_BYTES=0

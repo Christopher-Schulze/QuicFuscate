@@ -1,8 +1,10 @@
 #[derive(Debug)]
 struct PendingTunDownlink {
     target: SocketAddr,
+    session_id: SessionId,
     packet: Vec<u8>,
     queued_at: Instant,
+    bandwidth_accounted: bool,
 }
 
 impl PendingTunDownlink {
@@ -29,8 +31,19 @@ impl From<PendingTunDownlinkReject> for TunDownlinkBackpressureDrop {
 }
 
 #[derive(Debug)]
-struct PendingTunDownlinks {
+struct PendingTunTargetQueue {
+    weight: u16,
+    deficit_bytes: usize,
+    needs_quantum: bool,
     entries: std::collections::VecDeque<PendingTunDownlink>,
+}
+
+#[derive(Debug)]
+struct PendingTunDownlinks {
+    queues: std::collections::HashMap<SessionId, PendingTunTargetQueue>,
+    active: std::collections::VecDeque<SessionId>,
+    capacity_limiter: BandwidthLimiter,
+    entries: usize,
     bytes: usize,
     max_entries: usize,
     max_bytes: usize,
@@ -38,17 +51,35 @@ struct PendingTunDownlinks {
 }
 
 impl PendingTunDownlinks {
-    fn new() -> Self {
-        Self::with_limits(
+    const DRR_QUANTUM_BYTES: usize = 1_200;
+
+    fn new(rate_bytes_per_second: u64, burst_bytes: u64) -> Self {
+        Self::with_limits_and_capacity(
             MAX_PENDING_TUN_DOWNLINKS,
             MAX_PENDING_TUN_DOWNLINK_BYTES,
             MAX_PENDING_TUN_DOWNLINKS_PER_TARGET,
+            rate_bytes_per_second,
+            burst_bytes,
         )
     }
 
+    #[cfg(test)]
     fn with_limits(max_entries: usize, max_bytes: usize, max_per_target: usize) -> Self {
+        Self::with_limits_and_capacity(max_entries, max_bytes, max_per_target, 0, 0)
+    }
+
+    fn with_limits_and_capacity(
+        max_entries: usize,
+        max_bytes: usize,
+        max_per_target: usize,
+        rate_bytes_per_second: u64,
+        burst_bytes: u64,
+    ) -> Self {
         Self {
-            entries: std::collections::VecDeque::with_capacity(max_entries),
+            queues: std::collections::HashMap::new(),
+            active: std::collections::VecDeque::new(),
+            capacity_limiter: BandwidthLimiter::new(rate_bytes_per_second, burst_bytes),
+            entries: 0,
             bytes: 0,
             max_entries,
             max_bytes,
@@ -56,42 +87,193 @@ impl PendingTunDownlinks {
         }
     }
 
+    fn reserve_capacity(&mut self, bytes: usize) -> bool {
+        self.capacity_limiter.check(bytes)
+    }
+
+    fn refund_capacity(&mut self, bytes: usize) {
+        self.capacity_limiter.refund(bytes);
+    }
+
+    fn uses_shared_capacity(&self) -> bool {
+        !self.capacity_limiter.is_disabled()
+    }
+
+    fn contains_session(&self, session_id: SessionId) -> bool {
+        self.queues.contains_key(&session_id)
+    }
+
+    #[cfg(test)]
     fn enqueue(
         &mut self,
         target: SocketAddr,
+        session_id: SessionId,
+        weight: u16,
         packet: Vec<u8>,
         queued_at: Instant,
     ) -> Result<(), PendingTunDownlinkReject> {
-        if self.entries.len() >= self.max_entries {
+        self.enqueue_with_accounting(target, session_id, weight, packet, queued_at, false)
+    }
+
+    fn enqueue_with_accounting(
+        &mut self,
+        target: SocketAddr,
+        session_id: SessionId,
+        weight: u16,
+        packet: Vec<u8>,
+        queued_at: Instant,
+        bandwidth_accounted: bool,
+    ) -> Result<(), PendingTunDownlinkReject> {
+        if self.entries >= self.max_entries {
             return Err(PendingTunDownlinkReject::Queue);
         }
         if self.bytes.saturating_add(packet.len()) > self.max_bytes {
             return Err(PendingTunDownlinkReject::Bytes);
         }
-        if self.entries.iter().filter(|entry| entry.target == target).count() >= self.max_per_target
+        let packet_len = packet.len();
+        if self
+            .queues
+            .get(&session_id)
+            .is_some_and(|queue| queue.entries.len() >= self.max_per_target)
         {
             return Err(PendingTunDownlinkReject::PerTarget);
         }
-        self.bytes += packet.len();
-        self.entries.push_back(PendingTunDownlink { target, packet, queued_at });
+        let is_new = !self.queues.contains_key(&session_id);
+        let queue =
+            self.queues.entry(session_id).or_insert_with(|| PendingTunTargetQueue {
+                weight,
+                deficit_bytes: 0,
+                needs_quantum: true,
+                entries: std::collections::VecDeque::new(),
+            });
+        queue.weight = weight;
+        queue.entries.push_back(PendingTunDownlink {
+            target,
+            session_id,
+            packet,
+            queued_at,
+            bandwidth_accounted,
+        });
+        if is_new {
+            self.active.push_back(session_id);
+        }
+        self.entries += 1;
+        self.bytes += packet_len;
         Ok(())
     }
 
-    fn pop_front(&mut self) -> Option<PendingTunDownlink> {
-        let entry = self.entries.pop_front()?;
-        self.bytes = self.bytes.saturating_sub(entry.packet.len());
-        Some(entry)
+    fn pop_next(
+        &mut self,
+        excluded_sessions: &std::collections::HashSet<SessionId>,
+    ) -> Option<PendingTunDownlink> {
+        let max_visits = self.pop_visit_budget(excluded_sessions);
+        for _ in 0..max_visits {
+            let session_id = self.active.pop_front()?;
+            if excluded_sessions.contains(&session_id) {
+                self.active.push_back(session_id);
+                continue;
+            }
+            let mut remove_queue = false;
+            let mut selected = None;
+            if let Some(queue) = self.queues.get_mut(&session_id) {
+                if queue.needs_quantum {
+                    let quantum = Self::DRR_QUANTUM_BYTES
+                        .saturating_mul(usize::from(queue.weight.max(1)));
+                    queue.deficit_bytes =
+                        queue.deficit_bytes.saturating_add(quantum).min(self.max_bytes);
+                    queue.needs_quantum = false;
+                }
+                if queue
+                    .entries
+                    .front()
+                    .is_some_and(|entry| entry.packet.len() <= queue.deficit_bytes)
+                {
+                    selected = queue.entries.pop_front();
+                    if let Some(entry) = selected.as_ref() {
+                        queue.deficit_bytes =
+                            queue.deficit_bytes.saturating_sub(entry.packet.len());
+                    }
+                }
+                remove_queue = queue.entries.is_empty();
+            }
+            if remove_queue {
+                self.queues.remove(&session_id);
+            } else if selected.is_some()
+                && self.queues.get(&session_id).is_some_and(|queue| {
+                    queue
+                        .entries
+                        .front()
+                        .is_some_and(|entry| entry.packet.len() <= queue.deficit_bytes)
+                })
+            {
+                self.active.push_front(session_id);
+            } else {
+                if let Some(queue) = self.queues.get_mut(&session_id) {
+                    queue.needs_quantum = true;
+                }
+                self.active.push_back(session_id);
+            }
+            if let Some(entry) = selected {
+                self.entries = self.entries.saturating_sub(1);
+                self.bytes = self.bytes.saturating_sub(entry.packet.len());
+                return Some(entry);
+            }
+        }
+        None
     }
 
-    fn requeue(&mut self, entry: PendingTunDownlink) {
-        self.bytes += entry.packet.len();
-        self.entries.push_back(entry);
+    fn pop_visit_budget(
+        &self,
+        excluded_sessions: &std::collections::HashSet<SessionId>,
+    ) -> usize {
+        let Some(max_front_packet_bytes) = self
+            .active
+            .iter()
+            .filter(|session_id| !excluded_sessions.contains(session_id))
+            .filter_map(|session_id| {
+                self.queues
+                    .get(session_id)
+                    .and_then(|queue| queue.entries.front())
+                    .map(|entry| entry.packet.len())
+            })
+            .max()
+        else {
+            return 0;
+        };
+        let required_rounds = max_front_packet_bytes
+            .saturating_add(Self::DRR_QUANTUM_BYTES - 1)
+            / Self::DRR_QUANTUM_BYTES;
+        self.active.len().saturating_mul(required_rounds.saturating_add(2))
+    }
+
+    fn requeue_front(&mut self, entry: PendingTunDownlink, weight: u16) {
+        let session_id = entry.session_id;
+        let packet_len = entry.packet.len();
+        let is_new = !self.queues.contains_key(&session_id);
+        let queue =
+            self.queues.entry(session_id).or_insert_with(|| PendingTunTargetQueue {
+                weight,
+                deficit_bytes: 0,
+                needs_quantum: false,
+                entries: std::collections::VecDeque::new(),
+            });
+        queue.weight = weight;
+        queue.deficit_bytes = queue.deficit_bytes.saturating_add(packet_len).min(self.max_bytes);
+        queue.needs_quantum = false;
+        queue.entries.push_front(entry);
+        if is_new {
+            self.active.push_back(session_id);
+        }
+        self.entries += 1;
+        self.bytes += packet_len;
     }
 
     fn rebind_target(&mut self, old_target: SocketAddr, new_target: SocketAddr) {
-        for entry in &mut self.entries {
-            if entry.target == old_target {
-                entry.target = new_target;
+        for queue in self.queues.values_mut() {
+            for entry in &mut queue.entries {
+                if entry.target == old_target {
+                    entry.target = new_target;
+                }
             }
         }
     }
@@ -99,33 +281,44 @@ impl PendingTunDownlinks {
     fn discard_target(&mut self, target: SocketAddr) -> (usize, usize) {
         let mut discarded_packets = 0;
         let mut discarded_bytes = 0;
-        self.entries.retain(|entry| {
-            if entry.target == target {
-                discarded_packets += 1;
-                discarded_bytes += entry.packet.len();
-                false
-            } else {
-                true
-            }
+        self.queues.retain(|_, queue| {
+            queue.entries.retain(|entry| {
+                if entry.target == target {
+                    discarded_packets += 1;
+                    discarded_bytes += entry.packet.len();
+                    false
+                } else {
+                    true
+                }
+            });
+            !queue.entries.is_empty()
         });
+        self.active.retain(|session_id| self.queues.contains_key(session_id));
+        self.entries = self.entries.saturating_sub(discarded_packets);
         self.bytes = self.bytes.saturating_sub(discarded_bytes);
         (discarded_packets, discarded_bytes)
     }
 
     fn discard_all(&mut self) -> (usize, usize) {
-        let discarded_packets = self.entries.len();
+        let discarded_packets = self.entries;
         let discarded_bytes = self.bytes;
-        self.entries.clear();
+        self.queues.clear();
+        self.active.clear();
+        self.entries = 0;
         self.bytes = 0;
         (discarded_packets, discarded_bytes)
     }
 
     fn len(&self) -> usize {
-        self.entries.len()
+        self.entries
     }
 
     fn bytes(&self) -> usize {
         self.bytes
+    }
+
+    fn active_clients(&self) -> usize {
+        self.queues.len()
     }
 }
 
@@ -398,6 +591,7 @@ pub struct LiveClientRuntime<'a> {
     pub session_stats: Option<Arc<SessionStats>>,
     pub assigned_ips: Option<AssignedClientIps>,
     pub forwarding_policy: Arc<ClientIsolationManager>,
+    pub sessions: Arc<RwLock<SessionManager>>,
     fanout_queue: ClientFanoutQueue,
 }
 
@@ -614,7 +808,11 @@ fn accept_session_in_domain(
             }
             Err(AcceptError::MaxClientsReached)
         }
-        Err(SessionError::NotFound | SessionError::AlreadyExists) => {
+        Err(
+            SessionError::NotFound
+            | SessionError::AlreadyExists
+            | SessionError::BandwidthPolicy(_),
+        ) => {
             ip_pool.release(client_ip);
             if let Some(v6) = client_ipv6 {
                 if let Some(ref mut v6_pool) = ipv6_pool {
@@ -687,7 +885,10 @@ impl LiveServerState {
             );
         Self {
             clients: std::collections::HashMap::new(),
-            pending_tun_downlinks: PendingTunDownlinks::new(),
+            pending_tun_downlinks: PendingTunDownlinks::new(
+                server_config.downlink_scheduler_rate_bytes_per_second,
+                server_config.downlink_scheduler_burst_bytes,
+            ),
             fanout_queue: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
             qkey_auth: std::collections::HashMap::new(),
             domain: LiveServerDomain::new(&server_config),
@@ -795,6 +996,7 @@ impl LiveServerState {
         let count_before = self.clients.len();
         let existing_assigned_ips = self.domain.assigned_ips_by_remote(addr);
         let forwarding_policy = Arc::clone(&self.domain.shared.forwarding_policy);
+        let sessions = Arc::clone(&self.domain.shared.sessions);
         let fanout_queue = Arc::clone(&self.fanout_queue);
         match self.clients.entry(addr) {
             Entry::Occupied(entry) => {
@@ -812,6 +1014,7 @@ impl LiveServerState {
                     session_stats,
                     assigned_ips: existing_assigned_ips,
                     forwarding_policy,
+                    sessions,
                     fanout_queue: Arc::clone(&fanout_queue),
                 })
             }
@@ -851,6 +1054,24 @@ impl LiveServerState {
                         return LiveClientAcquire::Rejected;
                     }
                 };
+                if init.pending_qkey_auth.is_none() {
+                    let activation = self
+                        .domain
+                        .shared
+                        .sessions
+                        .write()
+                        .activate_bandwidth(session_id, None);
+                    if let Err(error) = activation {
+                        log::error!(
+                            "Default authenticated bandwidth policy failed for {}: {}",
+                            session_id,
+                            error
+                        );
+                        self.domain.remove_remote(addr);
+                        metrics.connections_rejected.fetch_add(1, Ordering::Relaxed);
+                        return LiveClientAcquire::Rejected;
+                    }
+                }
                 if let Some(state) = init.pending_qkey_auth.take() {
                     let conn_id = init.connection.conn.source_id().as_ref().to_vec();
                     self.qkey_auth.insert(conn_id, state);
@@ -869,6 +1090,7 @@ impl LiveServerState {
                     session_stats: Some(session_stats),
                     assigned_ips: Some(assigned_ips),
                     forwarding_policy,
+                    sessions,
                     fanout_queue,
                 })
             }
@@ -925,13 +1147,13 @@ impl LiveServerState {
                         if fanout.destination.is_ipv6() && session.client_ipv6().is_none() {
                             return None;
                         }
-                        Some(*address)
+                        Some((*address, session.id()))
                     })
-                    .collect::<smallvec::SmallVec<[SocketAddr; 4]>>()
+                    .collect::<smallvec::SmallVec<[(SocketAddr, SessionId); 4]>>()
             };
 
             let mut queued = false;
-            for target in targets {
+            for (target, session_id) in targets {
                 let Some(connection) = self.clients.get_mut(&target) else {
                     continue;
                 };
@@ -939,11 +1161,28 @@ impl LiveServerState {
                     log::debug!("Client fan-out packet exceeds tunnel MTU for {}", target);
                     continue;
                 }
-                match connection.send_masque_downlink(&fanout.packet) {
-                    Ok(()) => queued = true,
-                    Err(error) => {
-                        log::debug!("Client fan-out queue for {} failed: {:?}", target, error);
-                    }
+                let Some(weight) = self
+                    .domain
+                    .shared
+                    .sessions
+                    .read()
+                    .bandwidth_stats(session_id)
+                    .map(|stats| stats.policy.weight)
+                else {
+                    continue;
+                };
+                if enqueue_pending_tun_downlink(
+                    &mut self.pending_tun_downlinks,
+                    target,
+                    session_id,
+                    weight,
+                    fanout.packet.clone(),
+                    Instant::now(),
+                    metrics,
+                )
+                .is_ok()
+                {
+                    queued = true;
                 }
             }
             if queued {
@@ -1178,6 +1417,9 @@ impl LiveServerState {
                 self.pending_tun_downlinks.len(),
                 self.pending_tun_downlinks.bytes(),
             );
+            metrics.set_bandwidth_scheduler_active_clients(
+                self.pending_tun_downlinks.active_clients(),
+            );
             log::warn!(
                 "dropping {} pending TUN downlinks ({} bytes) for administratively removed client {}",
                 discarded_packets,
@@ -1217,6 +1459,7 @@ impl LiveServerState {
                     );
                 }
                 metrics.set_tun_downlink_backpressure_pending(0, 0);
+                metrics.set_bandwidth_scheduler_active_clients(0);
             }
             log::warn!(
                 "dropping {} pending TUN downlinks ({} bytes) during shutdown",
@@ -1401,7 +1644,10 @@ impl LiveServerState {
         let mut handled_conn_id: Option<Vec<u8>> = None;
         if let Some((conn_id, authed)) = auth_result {
             handled_conn_id = Some(conn_id.clone());
-            if !authed {
+            if authed && self.qkey_auth.get(&conn_id).is_some_and(|state| state.authed) {
+                // Authentication was already committed for this connection.
+                // Replayed HTTP/3 headers must not create a second bandwidth owner.
+            } else if !authed {
                 let remote_addr = self.clients.iter().find_map(|(addr, conn)| {
                     (conn.conn.source_id().as_ref() == conn_id.as_slice()).then_some(*addr)
                 });
@@ -1429,8 +1675,11 @@ impl LiveServerState {
                     );
                 }
             } else {
-                let key_id = self.qkey_auth.get(&conn_id).map(|state| state.key_id.clone());
-                let Some(key_id) = key_id else {
+                let policy = self
+                    .qkey_auth
+                    .get(&conn_id)
+                    .map(|state| (state.key_id.clone(), state.bandwidth_policy.clone()));
+                let Some((key_id, bandwidth_policy)) = policy else {
                     return;
                 };
                 if self.revocation_manager.is_revoked(&key_id) {
@@ -1465,6 +1714,54 @@ impl LiveServerState {
                     }
                     return;
                 }
+                let remote_addr = self.clients.iter().find_map(|(addr, connection)| {
+                    (connection.conn.source_id().as_ref() == conn_id.as_slice()).then_some(*addr)
+                });
+                let session_id =
+                    remote_addr.and_then(|addr| self.domain.session_id_by_remote(addr));
+                let activation_error = match session_id {
+                    Some(session_id) => self
+                        .domain
+                        .shared
+                        .sessions
+                        .write()
+                        .activate_bandwidth(session_id, bandwidth_policy)
+                        .err(),
+                    None => Some(SessionError::NotFound),
+                };
+                if let Some(error) = activation_error {
+                    log::error!("Authenticated QKey bandwidth activation failed: {}", error);
+                    metrics.record_connection_rejected();
+                    if let Some(addr) = remote_addr {
+                        if let Some(mut connection) = self.clients.remove(&addr) {
+                            if let Err(close_error) =
+                                connection.conn.close(true, 0x0, b"bandwidth_policy_invalid")
+                            {
+                                log::warn!(
+                                    "Client close after bandwidth activation failure failed: {:?}",
+                                    close_error
+                                );
+                            }
+                            accept_loop.record_closed(addr);
+                        }
+                        self.domain.remove_remote(addr);
+                        self.domain.retain_snapshots_for_clients(&self.clients);
+                        self.sync_active_metrics(metrics);
+                    }
+                    if let Some(mut state) = self.remove_qkey_auth(&conn_id) {
+                        complete_qkey_auth_state(
+                            &self.auth_rate_limiter,
+                            metrics,
+                            &mut state,
+                            crate::implementations::server::limits::AuthTerminal::Failed,
+                        );
+                    }
+                    return;
+                }
+                let Some(session_id) = session_id else {
+                    return;
+                };
+                self.qkey_tracker.associate(session_id.as_u64(), &key_id);
                 let auth_rate_limiter = Arc::clone(&self.auth_rate_limiter);
                 if let Some(state) = self.qkey_auth_state_mut(&conn_id) {
                     state.authed = true;
@@ -1474,9 +1771,6 @@ impl LiveServerState {
                         state,
                         crate::implementations::server::limits::AuthTerminal::Succeeded,
                     );
-                }
-                if let Some(session_id) = self.session_id_for_conn_id(&conn_id) {
-                    self.qkey_tracker.associate(session_id.as_u64(), &key_id);
                 }
                 crate::audit::audit_typed(
                     crate::audit::AuditEventType::ClientAuthenticated,

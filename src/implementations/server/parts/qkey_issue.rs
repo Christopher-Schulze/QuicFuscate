@@ -18,6 +18,7 @@ pub struct IssuedQKey {
 pub struct QKeyAuthState {
     pub key_id: String,
     pub expected_token_sha256: String,
+    pub bandwidth_policy: Option<BandwidthPolicy>,
     pub authed: bool,
     pub connected_at: Instant,
     pub(crate) auth_attempt: Option<crate::implementations::server::limits::AuthAttempt>,
@@ -174,6 +175,7 @@ pub fn issue_unix_admin_qkey(
             fec: None,
             sni_strategy: Some(DF_SNI_MODE_AUTO_ROTATING),
             sni_domain: None,
+            bandwidth_policy: None,
         },
         "server::issue_unix_admin_qkey",
     )?;
@@ -198,6 +200,7 @@ pub fn issue_http_admin_qkey(
             fec: req.fec.as_deref(),
             sni_strategy: req.sni_strategy.as_deref(),
             sni_domain: req.sni_domain.as_deref(),
+            bandwidth_policy: req.bandwidth_policy.clone(),
         },
         "server::issue_http_admin_qkey",
     )
@@ -211,6 +214,7 @@ struct IssueQKeyParams<'a> {
     fec: Option<&'a str>,
     sni_strategy: Option<&'a str>,
     sni_domain: Option<&'a str>,
+    bandwidth_policy: Option<BandwidthPolicy>,
 }
 
 fn issue_qkey(
@@ -223,6 +227,9 @@ fn issue_qkey(
     use crate::engine::qkey;
 
     let name = normalize_qkey_name(params.name)?;
+    if let Some(policy) = params.bandwidth_policy.as_ref() {
+        policy.validate()?;
+    }
     let nonce_hex = random_hex_8(&format!("{rng_context}::nonce"));
     let sni_policy = resolve_qkey_domain_fronting_policy(
         front_domain,
@@ -244,7 +251,13 @@ fn issue_qkey(
     let token = config.token.take().ok_or_else(|| "Generated QKey missing token".to_string())?;
     let QKeyEntry { created_at, expires_at, .. } =
         registry
-            .insert_with_ttl(qkey_value.clone(), token, params.ttl_seconds, name)
+            .insert_with_ttl_and_bandwidth(
+                qkey_value.clone(),
+                token,
+                params.ttl_seconds,
+                name,
+                params.bandwidth_policy,
+            )
             .map_err(|error| error.to_string())?;
     Ok(IssuedQKey { qkey: qkey_value, created_at, expires_at })
 }

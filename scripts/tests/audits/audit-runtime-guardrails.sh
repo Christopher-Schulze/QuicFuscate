@@ -666,6 +666,56 @@ else
   append_item "multi_client_dual_stack_tcp_throughput" "fail" "missing receiver byte/hash/window gate, external forward/reverse capture including black-hole recovery, client/server UDP socket-drop proof, direct probe use, no-iperf contract, or host-veth cleanup"
 fi
 
+PER_CLIENT_BANDWIDTH_HARNESS="scripts/tests/tun-e2e-bandwidth-netns.sh"
+UDP_THROUGHPUT_PROBE="scripts/tests/utils/udp-throughput-probe.py"
+BANDWIDTH_RELEASE_SIDE_EFFECTS="$(rg -n --no-messages 'debug_assert!\([^;]*\.(record|check|update|insert|remove)\(' src/implementations/server/bandwidth.rs || true)"
+if [[ -z "$BANDWIDTH_RELEASE_SIDE_EFFECTS" ]]; then
+  pass "Per-client bandwidth accounting remains active in release builds"
+  append_item "per_client_bandwidth_release_accounting" "ok" "quota and limiter state changes execute outside debug-only assertions"
+else
+  fail_critical "Per-client bandwidth accounting contains debug-only side effects"
+  append_item "per_client_bandwidth_release_accounting" "fail" "$BANDWIDTH_RELEASE_SIDE_EFFECTS"
+fi
+
+if rg -F -- 'UDP_PROBE="$SCRIPT_DIR/utils/udp-throughput-probe.py"' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
+  && rg -F -- 'sha256sum "$BINARY"' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
+  && rg -F -- 'cc_algorithm = "reno"' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
+  && rg -F -- 'preflight_topology' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
+  && rg -F -- 'TOPOLOGY_OWNED=1' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
+  && rg -F -- 'refusing to replace artifact directory' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
+  && rg -F -- '--header "Origin: http://127.0.0.1:$ADMIN_PORT"' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
+  && rg -F -- '--header "X-CSRF-Token: $CSRF_TOKEN"' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
+  && rg -F -- '--header "X-CSRF-Nonce: todo529-$ADMIN_REQUEST_INDEX"' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
+  && rg -F -- 'set_policies 0 0 0 0 1 1 1' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
+  && rg -F -- 'set_policies 1250000 125000 0 0 1 1 1' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
+  && rg -F -- 'set_policies 1250000 2500000 0 0 1 1 1' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
+  && rg -F -- 'run_sequential_downlink_matrix burst 1.5 40000000' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
+  && rg -F -- 'set_policies 0 0 2400000 0 1 1 1' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
+  && rg -F -- 'capture_bandwidth_stats quota-after 0 0 2400000 0 1 1 1' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
+  && rg -F -- 'set_policies 0 0 0 0 1 2 1' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
+  && rg -F -- 'SERVER_DOWNLINK_RATE_BYTES_PER_SECOND=2000000' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
+  && rg -F -- 'SERVER_DOWNLINK_BURST_BYTES=24000' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
+  && rg -F -- 'downlink-scheduler-policy.env' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
+  && rg -F -- 'QF_E2E_VERBOSE' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
+  && rg -F -- 'runtime-log-mode.env' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
+  && ! rg -F -- '-v >"$ARTIFACT_DIR/' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
+  && rg -F -- 'QUICFUSCATE_SERVER_DOWNLINK_RATE_BYTES_PER_SECOND' src/implementations/server/parts/config.rs config/server-linux.default.toml "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
+  && rg -F -- 'reserve_capacity(entry.packet.len())' src/implementations/server/parts/tun_path.rs >/dev/null \
+  && rg -F -- 'daily_quota_exceeded' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
+  && rg -F -- 'assert_matrix weighted-1-2-1 weighted' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
+  && rg -F -- 'prove_runtime_clean' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
+  && rg -F -- 'prove_topology_absent' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
+  && ! rg -F -- 'iperf3' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
+  && rg -F -- 'refusing to replace existing result' "$UDP_THROUGHPUT_PROBE" >/dev/null \
+  && rg -F -- 'duplicate_packets' "$UDP_THROUGHPUT_PROBE" >/dev/null \
+  && rg -F -- 'payload_bits_per_second' "$UDP_THROUGHPUT_PROBE" >/dev/null; then
+  pass "Per-client bandwidth proof keeps exact-artifact authenticated three-client rate, burst, quota, and weighted-fairness evidence"
+  append_item "per_client_bandwidth_three_client_matrix" "ok" "unlimited, exact 10-Mbit, burst, quota, equal-weight, 1:2:1, CSRF-authenticated mutation, binary identity, and cleanup gates are required"
+else
+  fail_critical "Per-client bandwidth proof lost its authenticated three-client evidence contract"
+  append_item "per_client_bandwidth_three_client_matrix" "fail" "missing exact policy matrix, receiver evidence, authenticated admin mutation, binary identity, fail-closed artifact ownership, or cleanup"
+fi
+
 DUAL_STACK_STABILITY_HARNESS="scripts/tests/tun-e2e-multi-client-dual-stack-stability.sh"
 DUAL_STACK_STABILITY_AGGREGATOR="scripts/tests/utils/aggregate-dual-stack-stability.py"
 if rg -F -- 'STABILITY_TRIALS=3' "$DUAL_STACK_STABILITY_HARNESS" >/dev/null \

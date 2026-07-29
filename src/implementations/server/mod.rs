@@ -50,7 +50,10 @@ pub use admin::{
     ClientInfo, ClientSnapshot,
 };
 pub use admin_http::{AdminHttpHandler, AdminHttpServer};
-pub use bandwidth::{BandwidthLimiter, BandwidthStats, PerClientBandwidthManager, QuotaTracker};
+pub use bandwidth::{
+    BandwidthDecision, BandwidthDirection, BandwidthLimiter, BandwidthPolicy, BandwidthStats,
+    PerClientBandwidthManager, QuotaPeriod, QuotaTracker,
+};
 pub use ip_pool::{IpPool, Ipv6Pool};
 pub use isolation::{
     AssignedClientIps, ClientIsolationManager, DownlinkRoute, IsolationStats, UplinkDrop,

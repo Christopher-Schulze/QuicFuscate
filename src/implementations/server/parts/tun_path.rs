@@ -177,10 +177,13 @@ fn drain_pending_tun_downlinks(
     socket: &UdpSocket,
     metrics: &Metrics,
 ) {
-    let mut still_pending = std::collections::VecDeque::new();
     let mut queued = smallvec::SmallVec::<[SocketAddr; 4]>::new();
+    let mut deferred_sessions = std::collections::HashSet::new();
+    let sessions = Arc::clone(&live.live_state.domain.shared.sessions);
     let now = Instant::now();
-    while let Some(entry) = live.live_state.pending_tun_downlinks.pop_front() {
+    while let Some(mut entry) =
+        live.live_state.pending_tun_downlinks.pop_next(&deferred_sessions)
+    {
         if entry.is_expired(now) {
             metrics.record_tun_downlink_backpressure_drop(TunDownlinkBackpressureDrop::Expired);
             log::warn!(
@@ -190,9 +193,64 @@ fn drain_pending_tun_downlinks(
             );
             continue;
         }
+        let Some(stats) = sessions.read().bandwidth_stats(entry.session_id) else {
+            metrics.record_tun_downlink_backpressure_drop(
+                TunDownlinkBackpressureDrop::TerminalTransportError,
+            );
+            continue;
+        };
+        let weight = stats.policy.weight;
+        if !live
+            .live_state
+            .pending_tun_downlinks
+            .reserve_capacity(entry.packet.len())
+        {
+            metrics.record_tun_downlink_backpressure_retry();
+            live.live_state.pending_tun_downlinks.requeue_front(entry, weight);
+            break;
+        }
+        {
+            let mut sessions = sessions.write();
+            if !entry.bandwidth_accounted {
+                let decision = sessions.check_bandwidth(
+                    entry.session_id,
+                    BandwidthDirection::Downlink,
+                    entry.packet.len(),
+                );
+                metrics.record_bandwidth_decision(
+                    BandwidthDirection::Downlink,
+                    decision,
+                    entry.packet.len(),
+                );
+                match decision {
+                    BandwidthDecision::Allowed => entry.bandwidth_accounted = true,
+                    BandwidthDecision::RateLimited => {
+                        live.live_state
+                            .pending_tun_downlinks
+                            .refund_capacity(entry.packet.len());
+                        metrics.record_tun_downlink_backpressure_retry();
+                        deferred_sessions.insert(entry.session_id);
+                        live.live_state
+                            .pending_tun_downlinks
+                            .requeue_front(entry, weight);
+                        continue;
+                    }
+                    BandwidthDecision::DailyQuotaExceeded
+                    | BandwidthDecision::MonthlyQuotaExceeded => {
+                        live.live_state
+                            .pending_tun_downlinks
+                            .refund_capacity(entry.packet.len());
+                        continue;
+                    }
+                }
+            }
+        }
         let target = entry.target;
         let send_result = {
             let Some(connection) = live.live_state.clients.get_mut(&target) else {
+                live.live_state
+                    .pending_tun_downlinks
+                    .refund_capacity(entry.packet.len());
                 metrics.record_tun_downlink_backpressure_drop(
                     TunDownlinkBackpressureDrop::TerminalTransportError,
                 );
@@ -205,13 +263,23 @@ fn drain_pending_tun_downlinks(
             connection.send_masque_downlink(&entry.packet)
         };
         match send_result {
-            Ok(()) => queued.push(target),
+            Ok(()) => {
+                metrics.record_bandwidth_scheduler_delivery(entry.packet.len());
+                queued.push(target);
+            }
             Err(crate::error::ConnectionError::DgramQueueFull) => {
+                live.live_state
+                    .pending_tun_downlinks
+                    .refund_capacity(entry.packet.len());
                 log::debug!("pending TUN downlink for {} still backpressured", target);
                 metrics.record_tun_downlink_backpressure_retry();
-                still_pending.push_back(entry);
+                deferred_sessions.insert(entry.session_id);
+                live.live_state.pending_tun_downlinks.requeue_front(entry, weight);
             }
             Err(error) => {
+                live.live_state
+                    .pending_tun_downlinks
+                    .refund_capacity(entry.packet.len());
                 metrics.record_tun_downlink_backpressure_drop(
                     TunDownlinkBackpressureDrop::TerminalTransportError,
                 );
@@ -220,13 +288,12 @@ fn drain_pending_tun_downlinks(
         }
     }
 
-    // Return still-pending entries to the queue in their original order.
-    for entry in still_pending {
-        live.live_state.pending_tun_downlinks.requeue(entry);
-    }
     metrics.set_tun_downlink_backpressure_pending(
         live.live_state.pending_tun_downlinks.len(),
         live.live_state.pending_tun_downlinks.bytes(),
+    );
+    metrics.set_bandwidth_scheduler_active_clients(
+        live.live_state.pending_tun_downlinks.active_clients(),
     );
 
     flush_tun_downlink_queue(live, &queued, out, socket, metrics);
@@ -235,16 +302,41 @@ fn drain_pending_tun_downlinks(
 fn enqueue_pending_tun_downlink(
     pending: &mut PendingTunDownlinks,
     target: SocketAddr,
+    session_id: SessionId,
+    weight: u16,
     packet: Vec<u8>,
     queued_at: Instant,
     metrics: &Metrics,
 ) -> Result<(), PendingTunDownlinkReject> {
-    let admission = pending.enqueue(target, packet, queued_at);
+    enqueue_pending_tun_downlink_with_accounting(
+        pending, target, session_id, weight, packet, queued_at, false, metrics,
+    )
+}
+
+fn enqueue_pending_tun_downlink_with_accounting(
+    pending: &mut PendingTunDownlinks,
+    target: SocketAddr,
+    session_id: SessionId,
+    weight: u16,
+    packet: Vec<u8>,
+    queued_at: Instant,
+    bandwidth_accounted: bool,
+    metrics: &Metrics,
+) -> Result<(), PendingTunDownlinkReject> {
+    let admission = pending.enqueue_with_accounting(
+        target,
+        session_id,
+        weight,
+        packet,
+        queued_at,
+        bandwidth_accounted,
+    );
     match admission {
         Ok(()) => metrics.record_tun_downlink_backpressure_enqueued(),
         Err(reject) => metrics.record_tun_downlink_backpressure_drop(reject.into()),
     }
     metrics.set_tun_downlink_backpressure_pending(pending.len(), pending.bytes());
+    metrics.set_bandwidth_scheduler_active_clients(pending.active_clients());
     admission
 }
 
@@ -323,7 +415,7 @@ fn process_server_tun_packet(
         write_downlink_error(packet, &tun, server_ips, RoutingOutcome::TimeExceeded, None, metrics);
         return;
     }
-    let mut targets = smallvec::SmallVec::<[SocketAddr; 4]>::new();
+    let mut targets = smallvec::SmallVec::<[(SocketAddr, SessionId); 4]>::new();
     {
         let sessions = live.live_state.domain.shared.sessions.read();
         match route {
@@ -333,7 +425,7 @@ fn process_server_tun_packet(
                     std::net::IpAddr::V6(ipv6) => sessions.get_by_client_ipv6(ipv6),
                 };
                 if let Some(session) = target {
-                    targets.push(session.remote_addr());
+                    targets.push((session.remote_addr(), session.id()));
                 }
                 metrics.record_routing_outcome(RoutingOutcome::Unicast);
             }
@@ -345,7 +437,7 @@ fn process_server_tun_packet(
                     };
                     let supports_family = destination.is_ipv4() || session.client_ipv6().is_some();
                     if !owns_source && supports_family {
-                        targets.push(session.remote_addr());
+                        targets.push((session.remote_addr(), session.id()));
                     }
                 }
                 metrics.record_routing_outcome(RoutingOutcome::Fanout);
@@ -370,58 +462,125 @@ fn process_server_tun_packet(
         }
     }
 
-    let mut queued = smallvec::SmallVec::<[SocketAddr; 4]>::new();
     log::debug!(
         "process_server_tun_packet: targets={} clients_count={}",
         targets.len(),
         live.live_state.clients.len()
     );
-    for target in targets {
-        let send_result = {
-            let Some(connection) = live.live_state.clients.get_mut(&target) else {
-                log::debug!("process_server_tun_packet: no connection for target {}", target);
-                continue;
-            };
-            let effective_mtu = connection.effective_tunnel_mtu().min(usize::from(tun.mtu()));
-            if packet.len() > effective_mtu {
-                if matches!(route, DownlinkRoute::Unicast { .. }) {
-                    write_downlink_error(
-                        packet,
-                        &tun,
-                        server_ips,
-                        RoutingOutcome::PacketTooBig,
-                        Some(effective_mtu),
-                        metrics,
-                    );
-                }
-                continue;
-            }
-            connection.send_masque_downlink(packet)
+    let mut direct_send_targets = smallvec::SmallVec::<[SocketAddr; 4]>::new();
+    for (target, session_id) in targets {
+        let Some(connection) = live.live_state.clients.get(&target) else {
+            log::debug!("process_server_tun_packet: no connection for target {}", target);
+            continue;
         };
-        match send_result {
-            Ok(()) => queued.push(target),
-            Err(crate::error::ConnectionError::DgramQueueFull) => {
-                if let Err(reject) = enqueue_pending_tun_downlink(
-                    &mut live.live_state.pending_tun_downlinks,
-                    target,
-                    packet.to_vec(),
-                    Instant::now(),
+        let effective_mtu = connection.effective_tunnel_mtu().min(usize::from(tun.mtu()));
+        if packet.len() > effective_mtu {
+            if matches!(route, DownlinkRoute::Unicast { .. }) {
+                write_downlink_error(
+                    packet,
+                    &tun,
+                    server_ips,
+                    RoutingOutcome::PacketTooBig,
+                    Some(effective_mtu),
                     metrics,
-                ) {
-                    log::warn!(
-                        "dropping TUN downlink for {} after bounded backpressure rejection: {:?}",
-                        target,
-                        reject
-                    );
+                );
+            }
+            continue;
+        }
+        let Some(stats) = live
+            .live_state
+            .domain
+            .shared
+            .sessions
+            .read()
+            .bandwidth_stats(session_id)
+        else {
+            continue;
+        };
+        let weight = stats.policy.weight;
+        let requires_scheduler = live.live_state.pending_tun_downlinks.uses_shared_capacity()
+            || live.live_state.pending_tun_downlinks.contains_session(session_id);
+        if !requires_scheduler {
+            let decision = live
+                .live_state
+                .domain
+                .shared
+                .sessions
+                .write()
+                .check_bandwidth(session_id, BandwidthDirection::Downlink, packet.len());
+            metrics.record_bandwidth_decision(
+                BandwidthDirection::Downlink,
+                decision,
+                packet.len(),
+            );
+            match decision {
+                BandwidthDecision::Allowed => {
+                    let send_result = live
+                        .live_state
+                        .clients
+                        .get_mut(&target)
+                        .map(|connection| connection.send_masque_downlink(packet));
+                    match send_result {
+                        Some(Ok(())) => {
+                            metrics.record_bandwidth_scheduler_delivery(packet.len());
+                            direct_send_targets.push(target);
+                            continue;
+                        }
+                        Some(Err(crate::error::ConnectionError::DgramQueueFull)) => {
+                            if let Err(reject) = enqueue_pending_tun_downlink_with_accounting(
+                                &mut live.live_state.pending_tun_downlinks,
+                                target,
+                                session_id,
+                                weight,
+                                packet.to_vec(),
+                                Instant::now(),
+                                true,
+                                metrics,
+                            ) {
+                                log::warn!(
+                                    "dropping admitted TUN downlink for {} after bounded transport backpressure rejection: {:?}",
+                                    target,
+                                    reject
+                                );
+                            }
+                            continue;
+                        }
+                        Some(Err(error)) => {
+                            metrics.record_tun_downlink_backpressure_drop(
+                                TunDownlinkBackpressureDrop::TerminalTransportError,
+                            );
+                            log::warn!("TUN downlink for {} failed: {:?}", target, error);
+                            continue;
+                        }
+                        None => continue,
+                    }
                 }
+                BandwidthDecision::RateLimited => {
+                    metrics.record_tun_downlink_backpressure_retry();
+                }
+                BandwidthDecision::DailyQuotaExceeded
+                | BandwidthDecision::MonthlyQuotaExceeded => continue,
             }
-            Err(error) => {
-                log::warn!("TUN to MASQUE queue for {} failed: {:?}", target, error);
-            }
+        }
+        if let Err(reject) = enqueue_pending_tun_downlink(
+            &mut live.live_state.pending_tun_downlinks,
+            target,
+            session_id,
+            weight,
+            packet.to_vec(),
+            Instant::now(),
+            metrics,
+        ) {
+            log::warn!(
+                "dropping TUN downlink for {} after bounded scheduler rejection: {:?}",
+                target,
+                reject
+            );
         }
     }
 
-    flush_tun_downlink_queue(live, &queued, out, socket, metrics);
+    flush_tun_downlink_queue(live, &direct_send_targets, out, socket, metrics);
+    drain_pending_tun_downlinks(live, out, socket, metrics);
 }
 
 impl StandaloneServiceSignals {

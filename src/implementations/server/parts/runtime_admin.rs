@@ -352,7 +352,11 @@ impl SharedServerDomain {
             _ => None,
         };
         Self {
-            sessions: Arc::new(RwLock::new(SessionManager::new(server_config.max_clients))),
+            sessions: Arc::new(RwLock::new(SessionManager::with_bandwidth_manager(
+                server_config.max_clients,
+                PerClientBandwidthManager::new(server_config.bandwidth_policy.clone())
+                    .expect("validated server bandwidth policy"),
+            ))),
             forwarding_policy: Arc::new(ClientIsolationManager::with_network(
                 server_config.server_ip,
                 server_config.server_netmask,
@@ -561,6 +565,7 @@ pub struct ServerAdminCore {
     metrics: Arc<Metrics>,
     blocked_ips: Arc<parking_lot::RwLock<std::collections::HashSet<String>>>,
     client_snapshots: Arc<std::sync::Mutex<std::collections::HashMap<SocketAddr, ClientSnapshot>>>,
+    sessions: Arc<RwLock<SessionManager>>,
     control_plane: ServerAdminControlPlane,
 }
 
@@ -571,9 +576,10 @@ impl ServerAdminCore {
         client_snapshots: Arc<
             std::sync::Mutex<std::collections::HashMap<SocketAddr, ClientSnapshot>>,
         >,
+        sessions: Arc<RwLock<SessionManager>>,
         control_plane: ServerAdminControlPlane,
     ) -> Self {
-        Self { metrics, blocked_ips, client_snapshots, control_plane }
+        Self { metrics, blocked_ips, client_snapshots, sessions, control_plane }
     }
 
     pub fn metrics(&self) -> &Arc<Metrics> {
@@ -630,6 +636,130 @@ impl ServerAdminCore {
             Err(p) => p.into_inner(),
         };
         snapshots_to_client_info(&guard, Instant::now())
+    }
+
+    fn resolve_session_id(&self, raw: &str) -> Option<SessionId> {
+        if let Ok(ip) = raw.parse::<IpAddr>() {
+            return self.sessions.read().session_id_by_client_ip(ip);
+        }
+        let identity = ClientIdentity::parse(raw)?;
+        let sessions = self.sessions.read();
+        match identity {
+            ClientIdentity::Session(id) => sessions.contains(id).then_some(id),
+            ClientIdentity::Remote(addr) => sessions.session_id_by_remote_addr(addr),
+        }
+    }
+
+    fn audit_bandwidth_admin(
+        &self,
+        client_id: &str,
+        action: &str,
+        outcome: crate::audit::AuditOutcome,
+        reason: Option<&str>,
+    ) {
+        crate::audit::audit_typed(
+            crate::audit::AuditEventType::AdminAction,
+            if outcome == crate::audit::AuditOutcome::Succeeded {
+                crate::audit::AuditSeverity::Info
+            } else {
+                crate::audit::AuditSeverity::Warning
+            },
+            None,
+            Some(client_id),
+            crate::audit::AuditContext {
+                actor: crate::audit::AuditActor::Administrator,
+                target: crate::audit::AuditTarget::Client,
+                outcome,
+                reason,
+            },
+            action,
+        );
+    }
+
+    pub fn client_bandwidth(&self, id: &str) -> AdminResponse {
+        let Some(session_id) = self.resolve_session_id(id) else {
+            return AdminResponse::error("Client not found");
+        };
+        let sessions = self.sessions.read();
+        match sessions.bandwidth_stats(session_id) {
+            Some(stats) => AdminResponse::ok_with_data(serde_json::json!({
+                "client_id": ClientIdentity::Session(session_id).to_string(),
+                "bandwidth": stats,
+            })),
+            None => AdminResponse::error("Client bandwidth state not found"),
+        }
+    }
+
+    pub fn set_client_bandwidth(&self, id: &str, policy: BandwidthPolicy) -> AdminResponse {
+        if let Err(error) = policy.validate() {
+            self.audit_bandwidth_admin(
+                id,
+                "Client bandwidth policy update rejected",
+                crate::audit::AuditOutcome::Denied,
+                Some("invalid_bandwidth_policy"),
+            );
+            return AdminResponse::error(error);
+        }
+        let Some(session_id) = self.resolve_session_id(id) else {
+            self.audit_bandwidth_admin(
+                id,
+                "Client bandwidth policy update rejected",
+                crate::audit::AuditOutcome::Denied,
+                Some("client_not_found"),
+            );
+            return AdminResponse::error("Client not found");
+        };
+        let canonical_id = ClientIdentity::Session(session_id).to_string();
+        match self.sessions.write().update_bandwidth_policy(session_id, policy) {
+            Ok(()) => {
+                self.audit_bandwidth_admin(
+                    &canonical_id,
+                    "Client bandwidth policy updated",
+                    crate::audit::AuditOutcome::Succeeded,
+                    None,
+                );
+                AdminResponse::ok_with_message("Client bandwidth policy updated")
+            }
+            Err(error) => {
+                self.audit_bandwidth_admin(
+                    &canonical_id,
+                    "Client bandwidth policy update failed",
+                    crate::audit::AuditOutcome::Failed,
+                    Some("bandwidth_state_update_failed"),
+                );
+                AdminResponse::error(error)
+            }
+        }
+    }
+
+    pub fn reset_client_quota(&self, id: &str) -> AdminResponse {
+        let Some(session_id) = self.resolve_session_id(id) else {
+            self.audit_bandwidth_admin(
+                id,
+                "Client quota reset rejected",
+                crate::audit::AuditOutcome::Denied,
+                Some("client_not_found"),
+            );
+            return AdminResponse::error("Client not found");
+        };
+        let canonical_id = ClientIdentity::Session(session_id).to_string();
+        if self.sessions.write().reset_bandwidth_quota(session_id) {
+            self.audit_bandwidth_admin(
+                &canonical_id,
+                "Client bandwidth quota reset",
+                crate::audit::AuditOutcome::Succeeded,
+                None,
+            );
+            AdminResponse::ok_with_message("Client quota reset")
+        } else {
+            self.audit_bandwidth_admin(
+                &canonical_id,
+                "Client quota reset failed",
+                crate::audit::AuditOutcome::Failed,
+                Some("bandwidth_state_not_found"),
+            );
+            AdminResponse::error("Client bandwidth state not found")
+        }
     }
 
     pub fn dispatch_action(&self, action: AdminAction, ok_message: String) -> AdminResponse {
@@ -817,6 +947,18 @@ impl AdminHttpHandler for ServerAdminHttpRuntimeHandler {
         self.core.list_clients()
     }
 
+    fn handle_get_client_bandwidth(&self, id: &str) -> AdminResponse {
+        self.core.client_bandwidth(id)
+    }
+
+    fn handle_set_client_bandwidth(&self, id: &str, policy: BandwidthPolicy) -> AdminResponse {
+        self.core.set_client_bandwidth(id, policy)
+    }
+
+    fn handle_reset_client_quota(&self, id: &str) -> AdminResponse {
+        self.core.reset_client_quota(id)
+    }
+
     fn handle_kick(&self, id: &str) -> AdminResponse {
         self.core.kick_client(id)
     }
@@ -914,6 +1056,17 @@ impl AdminHttpHandler for ServerAdminHttpRuntimeHandler {
                 "quicfuscate_auth_blocked_rejected_total": self.core.metrics().auth_blocked_rejected.load(Ordering::Relaxed),
                 "quicfuscate_auth_capacity_rejected_total": self.core.metrics().auth_capacity_rejected.load(Ordering::Relaxed),
                 "quicfuscate_auth_state_tracked_ips": self.core.metrics().auth_state_tracked_ips.load(Ordering::Relaxed),
+                "quicfuscate_bandwidth_uplink_allowed_bytes_total": self.core.metrics().bandwidth_uplink_allowed_bytes.load(Ordering::Relaxed),
+                "quicfuscate_bandwidth_downlink_allowed_bytes_total": self.core.metrics().bandwidth_downlink_allowed_bytes.load(Ordering::Relaxed),
+                "quicfuscate_bandwidth_uplink_rate_limited_total": self.core.metrics().bandwidth_uplink_rate_limited.load(Ordering::Relaxed),
+                "quicfuscate_bandwidth_downlink_rate_limited_total": self.core.metrics().bandwidth_downlink_rate_limited.load(Ordering::Relaxed),
+                "quicfuscate_bandwidth_uplink_daily_quota_exceeded_total": self.core.metrics().bandwidth_uplink_daily_quota_exceeded.load(Ordering::Relaxed),
+                "quicfuscate_bandwidth_downlink_daily_quota_exceeded_total": self.core.metrics().bandwidth_downlink_daily_quota_exceeded.load(Ordering::Relaxed),
+                "quicfuscate_bandwidth_uplink_monthly_quota_exceeded_total": self.core.metrics().bandwidth_uplink_monthly_quota_exceeded.load(Ordering::Relaxed),
+                "quicfuscate_bandwidth_downlink_monthly_quota_exceeded_total": self.core.metrics().bandwidth_downlink_monthly_quota_exceeded.load(Ordering::Relaxed),
+                "quicfuscate_bandwidth_scheduler_active_clients": self.core.metrics().bandwidth_scheduler_active_clients.load(Ordering::Relaxed),
+                "quicfuscate_bandwidth_scheduler_delivered_packets_total": self.core.metrics().bandwidth_scheduler_delivered_packets.load(Ordering::Relaxed),
+                "quicfuscate_bandwidth_scheduler_delivered_bytes_total": self.core.metrics().bandwidth_scheduler_delivered_bytes.load(Ordering::Relaxed),
                 "quicfuscate_rate_limited_total": self.core.metrics().rate_limited.load(Ordering::Relaxed),
             }
         }))

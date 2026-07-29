@@ -5,6 +5,8 @@ impl ServerRuntime {
         server_config: ServerConfig,
     ) -> Result<Self, EngineError> {
         server_config.auth_policy.validate().map_err(EngineError::Config)?;
+        server_config.bandwidth_policy.validate().map_err(EngineError::Config)?;
+        server_config.validate_downlink_scheduler().map_err(EngineError::Config)?;
         // Create memory pool
         let pool_bytes = engine_config.optimization.memory_pool_size;
         let block_size = engine_config.optimization.memory_pool_alignment.max(2048);
@@ -345,6 +347,11 @@ impl ServerRuntime {
                 }
             }
         };
+        if let Err(error) = self.domain.sessions.write().activate_bandwidth(session_id, None) {
+            self.domain.remove(session_id);
+            self.stats.connections_rejected.fetch_add(1, Ordering::Relaxed);
+            return Err(AcceptError::SessionError(error.to_string()));
+        }
 
         self.stats.total_connections.fetch_add(1, Ordering::Relaxed);
         self.stats.active_connections.fetch_add(1, Ordering::Relaxed);
@@ -491,6 +498,7 @@ impl ServerRuntime {
             self.standalone_metrics(),
             self.blocked_ips().clone(),
             self.live_client_snapshots().clone(),
+            Arc::clone(&self.live().live_state.domain.shared.sessions),
             ServerAdminControlPlane {
                 actions: self.admin_actions_sender(),
                 listen_addr: self.local_addr().to_string(),

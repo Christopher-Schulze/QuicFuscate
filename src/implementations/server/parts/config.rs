@@ -54,6 +54,12 @@ pub struct ServerConfig {
     pub allow_client_to_client: bool,
     /// Bounded QKey authentication backoff and block lifecycle.
     pub auth_policy: AuthPolicyConfig,
+    /// Default per-session bandwidth, quota, and scheduling policy.
+    pub bandwidth_policy: BandwidthPolicy,
+    /// Shared downlink service rate for weighted scheduling. Zero disables the shaper.
+    pub downlink_scheduler_rate_bytes_per_second: u64,
+    /// Shared downlink token-bucket burst. Zero disables the shaper.
+    pub downlink_scheduler_burst_bytes: u64,
     /// GeoIP-based source-IP blocking config (TODO-459). When a MaxMindDB
     /// database path and blocked countries are configured, incoming
     /// datagrams from those countries are dropped. Gracefully degrades to
@@ -109,6 +115,9 @@ impl Default for ServerConfig {
             ],
             allow_client_to_client: false,
             auth_policy: AuthPolicyConfig::default(),
+            bandwidth_policy: BandwidthPolicy::default(),
+            downlink_scheduler_rate_bytes_per_second: 0,
+            downlink_scheduler_burst_bytes: 0,
             #[cfg(feature = "rate_limiter")]
             geoip: limits::GeoIpConfig::default(),
             #[cfg(feature = "rate_limiter")]
@@ -127,12 +136,77 @@ pub fn server_config_from_listen_addr(listen_addr: &str) -> Result<ServerConfig,
         })?;
     let mut config = ServerConfig { listen, ..ServerConfig::default() };
     config.auth_policy = load_auth_policy_config_from_env()?;
+    config.bandwidth_policy = load_bandwidth_policy_from_env()?;
+    (
+        config.downlink_scheduler_rate_bytes_per_second,
+        config.downlink_scheduler_burst_bytes,
+    ) = load_downlink_scheduler_from_env()?;
     #[cfg(feature = "rate_limiter")]
     {
         config.geoip = load_geoip_config_from_env();
         config.blacklist = load_blacklist_config_from_env();
     }
     Ok(config)
+}
+
+impl ServerConfig {
+    fn validate_downlink_scheduler(&self) -> Result<(), String> {
+        validate_downlink_scheduler_pair(
+            self.downlink_scheduler_rate_bytes_per_second,
+            self.downlink_scheduler_burst_bytes,
+        )
+    }
+}
+
+fn validate_downlink_scheduler_pair(rate: u64, burst: u64) -> Result<(), String> {
+    if (rate == 0) != (burst == 0) {
+        return Err(
+            "server downlink scheduler rate and burst must both be zero or nonzero".to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn load_downlink_scheduler_from_env() -> Result<(u64, u64), String> {
+    let rate = parse_auth_policy_env_u64(
+        "QUICFUSCATE_SERVER_DOWNLINK_RATE_BYTES_PER_SECOND",
+        0,
+    )?;
+    let burst =
+        parse_auth_policy_env_u64("QUICFUSCATE_SERVER_DOWNLINK_BURST_BYTES", 0)?;
+    validate_downlink_scheduler_pair(rate, burst)?;
+    Ok((rate, burst))
+}
+
+fn load_bandwidth_policy_from_env() -> Result<BandwidthPolicy, String> {
+    let defaults = BandwidthPolicy::default();
+    let parse = |name: &str, default: u64| parse_auth_policy_env_u64(name, default);
+    let weight = parse(
+        "QUICFUSCATE_CLIENT_BANDWIDTH_WEIGHT",
+        u64::from(defaults.weight),
+    )?;
+    let policy = BandwidthPolicy {
+        rate_bytes_per_second: parse(
+            "QUICFUSCATE_CLIENT_RATE_BYTES_PER_SECOND",
+            defaults.rate_bytes_per_second,
+        )?,
+        burst_bytes: parse(
+            "QUICFUSCATE_CLIENT_BURST_BYTES",
+            defaults.burst_bytes,
+        )?,
+        daily_quota_bytes: parse(
+            "QUICFUSCATE_CLIENT_DAILY_QUOTA_BYTES",
+            defaults.daily_quota_bytes,
+        )?,
+        monthly_quota_bytes: parse(
+            "QUICFUSCATE_CLIENT_MONTHLY_QUOTA_BYTES",
+            defaults.monthly_quota_bytes,
+        )?,
+        weight: u16::try_from(weight)
+            .map_err(|_| "QUICFUSCATE_CLIENT_BANDWIDTH_WEIGHT exceeds u16".to_string())?,
+    };
+    policy.validate()?;
+    Ok(policy)
 }
 
 fn parse_auth_policy_env_u64(name: &str, default: u64) -> Result<u64, String> {

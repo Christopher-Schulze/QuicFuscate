@@ -45,6 +45,8 @@ pub struct QKeyEntry {
     pub stealth: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fec: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bandwidth_policy: Option<super::bandwidth::BandwidthPolicy>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -62,6 +64,8 @@ pub struct QKeyRecord {
     /// Optional per-key policy overrides. "auto" means no override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fec: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bandwidth_policy: Option<super::bandwidth::BandwidthPolicy>,
     #[serde(default)]
     pub created_at: u64,
     #[serde(default)]
@@ -161,6 +165,9 @@ impl QKeyRegistry {
                 entry.created_at = current_epoch_secs();
                 updated = true;
             }
+            if let Some(policy) = entry.bandwidth_policy.as_ref() {
+                policy.validate().map_err(QKeyRegistryError::InvalidRecord)?;
+            }
             if !seen.insert(entry.id.clone()) {
                 updated = true;
                 continue;
@@ -202,6 +209,20 @@ impl QKeyRegistry {
         ttl_seconds: Option<u64>,
         name: Option<String>,
     ) -> Result<QKeyEntry, QKeyRegistryError> {
+        self.insert_with_ttl_and_bandwidth(qkey, token_hex, ttl_seconds, name, None)
+    }
+
+    pub fn insert_with_ttl_and_bandwidth(
+        &mut self,
+        qkey: String,
+        token_hex: QKeyToken,
+        ttl_seconds: Option<u64>,
+        name: Option<String>,
+        bandwidth_policy: Option<super::bandwidth::BandwidthPolicy>,
+    ) -> Result<QKeyEntry, QKeyRegistryError> {
+        if let Some(policy) = bandwidth_policy.as_ref() {
+            policy.validate().map_err(QKeyRegistryError::InvalidRecord)?;
+        }
         let qkey = SecretString::new(qkey, "qkey_registry_input");
         let mut candidate = self.active_entries();
         let id = qkey_id(&qkey);
@@ -214,6 +235,7 @@ impl QKeyRegistry {
                 expires_at: existing.expires_at,
                 stealth: existing.stealth,
                 fec: existing.fec,
+                bandwidth_policy: existing.bandwidth_policy,
             });
         }
         let parsed = crate::engine::qkey::parse(qkey.trim()).ok();
@@ -233,6 +255,7 @@ impl QKeyRegistry {
             token_sha256,
             stealth,
             fec,
+            bandwidth_policy,
             created_at: current_epoch_secs(),
             expires_at,
         };
@@ -256,6 +279,7 @@ impl QKeyRegistry {
             expires_at: record.expires_at,
             stealth: record.stealth,
             fec: record.fec,
+            bandwidth_policy: record.bandwidth_policy,
         })
     }
 
@@ -272,6 +296,7 @@ impl QKeyRegistry {
                 expires_at: entry.expires_at,
                 stealth: entry.stealth,
                 fec: entry.fec,
+                bandwidth_policy: entry.bandwidth_policy,
             })
             .collect()
     }
@@ -573,6 +598,7 @@ mod tests {
                 token_sha256: sha.clone(),
                 stealth: None,
                 fec: None,
+                bandwidth_policy: None,
                 created_at: now,
                 expires_at: None,
             },
@@ -583,6 +609,7 @@ mod tests {
                 token_sha256: "".to_string(),
                 stealth: None,
                 fec: None,
+                bandwidth_policy: None,
                 created_at: now,
                 expires_at: None,
             },
@@ -593,6 +620,7 @@ mod tests {
                 token_sha256: sha.clone(),
                 stealth: None,
                 fec: None,
+                bandwidth_policy: None,
                 created_at: now,
                 expires_at: Some(now.saturating_sub(1)),
             },
@@ -603,6 +631,7 @@ mod tests {
                 token_sha256: sha.clone(),
                 stealth: None,
                 fec: None,
+                bandwidth_policy: None,
                 created_at: now,
                 expires_at: None,
             },

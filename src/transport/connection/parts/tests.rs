@@ -62,6 +62,49 @@ mod tests {
         connection
     }
 
+    fn assert_reno_window_grows(connection: &mut Connection) {
+        let initial_cwnd = connection.recovery.cwnd;
+        let now = Instant::now();
+        connection.recovery.on_packet_sent(1, 1200, now);
+        connection.recovery.on_ack(1200, now);
+        assert!(
+            connection.recovery.cwnd > initial_cwnd,
+            "configured Reno controller must grow its live congestion window after an ACK"
+        );
+    }
+
+    #[test]
+    fn configured_reno_controller_drives_live_connection() {
+        let mut config = Config::new_with_version(PROTOCOL_VERSION).unwrap();
+        config.set_cc_algorithm(crate::transport::CongestionControlAlgorithm::Reno);
+        let mut connection =
+            Connection::new_with_role(b"client-scid", local(), peer(), config, false);
+
+        assert_reno_window_grows(&mut connection);
+    }
+
+    #[test]
+    fn version_negotiation_restart_preserves_configured_reno_controller() {
+        let mut config = Config::new_with_version(crate::transport::PROTOCOL_VERSION_V2).unwrap();
+        config
+            .set_supported_versions(vec![crate::transport::PROTOCOL_VERSION_V2, PROTOCOL_VERSION])
+            .unwrap();
+        config.set_cc_algorithm(crate::transport::CongestionControlAlgorithm::Reno);
+        let mut connection =
+            Connection::new_with_role(b"client-scid", local(), peer(), config, false);
+        connection.set_initial_dcid(ConnectionId::from_vec(b"client-dcid".to_vec()));
+
+        let mut vn = packet::generate_version_negotiation_packet(
+            &[],
+            &[PROTOCOL_VERSION],
+            connection.scid.as_ref(),
+            connection.initial_dcid.as_ref(),
+        );
+        assert_eq!(connection.recv(&mut vn, &recv_info()), Ok(vn.len()));
+        assert_eq!(connection.config.version(), PROTOCOL_VERSION);
+        assert_reno_window_grows(&mut connection);
+    }
+
     #[test]
     fn valid_vn_restarts_once_with_preferred_common_version_and_fresh_cids() {
         let mut client = make_v2_client();

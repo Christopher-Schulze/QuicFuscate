@@ -57,39 +57,47 @@ mod tests {
         let second_target: SocketAddr = "127.0.0.1:41002".parse().unwrap();
         let migrated_target: SocketAddr = "127.0.0.1:41003".parse().unwrap();
         let now = Instant::now();
+        let first_session = SessionId::from_u64(1);
+        let second_session = SessionId::from_u64(2);
+        let third_session = SessionId::from_u64(3);
 
         let mut per_target = PendingTunDownlinks::with_limits(4, 64, 1);
-        per_target.enqueue(first_target, vec![1], now).unwrap();
+        per_target.enqueue(first_target, first_session, 1, vec![1], now).unwrap();
         assert_eq!(
-            per_target.enqueue(first_target, vec![2], now),
+            per_target.enqueue(first_target, first_session, 1, vec![2], now),
             Err(PendingTunDownlinkReject::PerTarget)
         );
 
         let mut by_count = PendingTunDownlinks::with_limits(2, 64, 2);
-        by_count.enqueue(first_target, vec![1], now).unwrap();
-        by_count.enqueue(second_target, vec![2], now).unwrap();
+        by_count.enqueue(first_target, first_session, 1, vec![1], now).unwrap();
+        by_count.enqueue(second_target, second_session, 1, vec![2], now).unwrap();
         assert_eq!(
-            by_count.enqueue(migrated_target, vec![3], now),
+            by_count.enqueue(migrated_target, third_session, 1, vec![3], now),
             Err(PendingTunDownlinkReject::Queue)
         );
 
         let mut by_bytes = PendingTunDownlinks::with_limits(4, 3, 4);
-        by_bytes.enqueue(first_target, vec![1, 2, 3], now).unwrap();
+        by_bytes
+            .enqueue(first_target, first_session, 1, vec![1, 2, 3], now)
+            .unwrap();
         assert_eq!(
-            by_bytes.enqueue(second_target, vec![4], now),
+            by_bytes.enqueue(second_target, second_session, 1, vec![4], now),
             Err(PendingTunDownlinkReject::Bytes)
         );
 
         let mut queue = PendingTunDownlinks::with_limits(4, 64, 4);
-        queue.enqueue(first_target, vec![10], now).unwrap();
-        queue.enqueue(second_target, vec![20], now).unwrap();
+        assert!(!queue.uses_shared_capacity());
+        assert!(!queue.contains_session(first_session));
+        queue.enqueue(first_target, first_session, 1, vec![10], now).unwrap();
+        assert!(queue.contains_session(first_session));
+        queue.enqueue(second_target, second_session, 1, vec![20], now).unwrap();
         queue.rebind_target(first_target, migrated_target);
 
-        let first = queue.pop_front().unwrap();
+        let first = queue.pop_next(&std::collections::HashSet::new()).unwrap();
         assert_eq!(first.target, migrated_target);
         assert_eq!(first.packet, vec![10]);
         assert!(!first.is_expired(now));
-        queue.requeue(first);
+        queue.requeue_front(first, 1);
 
         let (discarded_packets, discarded_bytes) = queue.discard_target(second_target);
         assert_eq!((discarded_packets, discarded_bytes), (1, 1));
@@ -98,10 +106,101 @@ mod tests {
 
         let expired = PendingTunDownlink {
             target: migrated_target,
+            session_id: first_session,
             packet: vec![30],
             queued_at: now - MAX_PENDING_TUN_DOWNLINK_AGE,
+            bandwidth_accounted: false,
         };
         assert!(expired.is_expired(now));
+
+        let mut shaped = PendingTunDownlinks::with_limits_and_capacity(4, 64, 4, 1_000, 1_000);
+        assert!(shaped.uses_shared_capacity());
+        shaped
+            .enqueue_with_accounting(first_target, first_session, 1, vec![40], now, true)
+            .unwrap();
+        assert!(
+            shaped
+                .pop_next(&std::collections::HashSet::new())
+                .unwrap()
+                .bandwidth_accounted
+        );
+    }
+
+    #[test]
+    fn pending_tun_downlinks_drr_is_equal_without_starvation() {
+        let now = Instant::now();
+        let mut queue = PendingTunDownlinks::with_limits(300, 360_000, 100);
+        for client in 1..=3u64 {
+            let target: SocketAddr = format!("127.0.0.1:{}", 41_000 + client).parse().unwrap();
+            for _ in 0..100 {
+                queue
+                    .enqueue(
+                        target,
+                        SessionId::from_u64(client),
+                        1,
+                        vec![client as u8; 1_200],
+                        now,
+                    )
+                    .unwrap();
+            }
+        }
+
+        let mut served = [0usize; 3];
+        for _ in 0..30 {
+            let entry = queue.pop_next(&std::collections::HashSet::new()).unwrap();
+            served[entry.session_id.as_u64() as usize - 1] += 1;
+        }
+        assert_eq!(served, [10, 10, 10]);
+    }
+
+    #[test]
+    fn pending_tun_downlinks_drr_honors_one_two_one_weights() {
+        let now = Instant::now();
+        let mut queue = PendingTunDownlinks::with_limits(300, 360_000, 100);
+        for (client, weight) in [(1u64, 1u16), (2, 2), (3, 1)] {
+            let target: SocketAddr = format!("127.0.0.1:{}", 42_000 + client).parse().unwrap();
+            for _ in 0..100 {
+                queue
+                    .enqueue(
+                        target,
+                        SessionId::from_u64(client),
+                        weight,
+                        vec![client as u8; 1_200],
+                        now,
+                    )
+                    .unwrap();
+            }
+        }
+
+        let mut served = [0usize; 3];
+        for _ in 0..40 {
+            let entry = queue.pop_next(&std::collections::HashSet::new()).unwrap();
+            served[entry.session_id.as_u64() as usize - 1] += 1;
+        }
+        assert_eq!(served, [10, 20, 10]);
+    }
+
+    #[test]
+    fn pending_tun_downlinks_skip_excluded_sessions_without_capacity_scaled_scans() {
+        let now = Instant::now();
+        let mut queue = PendingTunDownlinks::with_limits(256, 384 * 1024, 32);
+        let mut excluded = std::collections::HashSet::new();
+        for client in 1..=3u64 {
+            let session_id = SessionId::from_u64(client);
+            let target: SocketAddr = format!("127.0.0.1:{}", 43_000 + client).parse().unwrap();
+            queue.enqueue(target, session_id, 1, vec![0; 1_280], now).unwrap();
+            excluded.insert(session_id);
+        }
+
+        assert_eq!(queue.pop_visit_budget(&excluded), 0);
+        assert!(queue.pop_next(&excluded).is_none());
+
+        excluded.remove(&SessionId::from_u64(2));
+        assert_eq!(queue.pop_visit_budget(&excluded), 12);
+        assert_eq!(
+            queue.pop_next(&excluded).unwrap().session_id,
+            SessionId::from_u64(2)
+        );
     }
 
     #[test]
@@ -110,21 +209,55 @@ mod tests {
         let second_target: SocketAddr = "127.0.0.1:41002".parse().unwrap();
         let now = Instant::now();
         let metrics = Metrics::new();
+        let first_session = SessionId::from_u64(1);
+        let second_session = SessionId::from_u64(2);
 
         let mut by_count = PendingTunDownlinks::with_limits(1, 64, 2);
-        assert!(enqueue_pending_tun_downlink(&mut by_count, first_target, vec![1], now, &metrics,)
-            .is_ok());
+        assert!(enqueue_pending_tun_downlink(
+            &mut by_count,
+            first_target,
+            first_session,
+            1,
+            vec![1],
+            now,
+            &metrics,
+        )
+        .is_ok());
         assert_eq!(
-            enqueue_pending_tun_downlink(&mut by_count, second_target, vec![2], now, &metrics,),
+            enqueue_pending_tun_downlink(
+                &mut by_count,
+                second_target,
+                second_session,
+                1,
+                vec![2],
+                now,
+                &metrics,
+            ),
             Err(PendingTunDownlinkReject::Queue)
         );
         assert_eq!((by_count.len(), by_count.bytes()), (1, 1));
 
         let mut by_bytes = PendingTunDownlinks::with_limits(4, 1, 4);
-        assert!(enqueue_pending_tun_downlink(&mut by_bytes, first_target, vec![1], now, &metrics,)
-            .is_ok());
+        assert!(enqueue_pending_tun_downlink(
+            &mut by_bytes,
+            first_target,
+            first_session,
+            1,
+            vec![1],
+            now,
+            &metrics,
+        )
+        .is_ok());
         assert_eq!(
-            enqueue_pending_tun_downlink(&mut by_bytes, second_target, vec![2], now, &metrics,),
+            enqueue_pending_tun_downlink(
+                &mut by_bytes,
+                second_target,
+                second_session,
+                1,
+                vec![2],
+                now,
+                &metrics,
+            ),
             Err(PendingTunDownlinkReject::Bytes)
         );
         assert_eq!((by_bytes.len(), by_bytes.bytes()), (1, 1));
@@ -133,13 +266,23 @@ mod tests {
         assert!(enqueue_pending_tun_downlink(
             &mut per_target,
             first_target,
+            first_session,
+            1,
             vec![1],
             now,
             &metrics,
         )
         .is_ok());
         assert_eq!(
-            enqueue_pending_tun_downlink(&mut per_target, first_target, vec![2], now, &metrics,),
+            enqueue_pending_tun_downlink(
+                &mut per_target,
+                first_target,
+                first_session,
+                1,
+                vec![2],
+                now,
+                &metrics,
+            ),
             Err(PendingTunDownlinkReject::PerTarget)
         );
         assert_eq!((per_target.len(), per_target.bytes()), (1, 1));
@@ -494,6 +637,7 @@ mod tests {
         let server_config = ServerConfig::default();
         let runtime = ServerRuntime::new(engine_config, server_config).unwrap();
         let session_id = runtime.accept_client("127.0.0.1:54321".parse().unwrap()).unwrap();
+        assert!(runtime.domain.sessions.read().bandwidth_stats(session_id).is_some());
         let stats = runtime.session_stats(session_id).unwrap();
         stats.record_received(120);
         stats.record_sent(64);
@@ -526,6 +670,7 @@ mod tests {
         let domain = LiveServerDomain::new(&ServerConfig::default());
         let (session_id, _, _) = domain.accept(remote_addr).unwrap();
 
+        assert!(domain.shared.sessions.read().bandwidth_stats(session_id).is_none());
         assert_eq!(
             domain.remote_addr_for_identity(&ClientIdentity::Session(session_id)),
             Some(remote_addr)
@@ -1019,6 +1164,7 @@ mod tests {
             QKeyAuthState {
                 key_id: "test-key".to_string(),
                 expected_token_sha256: "deadbeef".to_string(),
+                bandwidth_policy: None,
                 authed: false,
                 connected_at: Instant::now() - (QKEY_AUTH_TIMEOUT + Duration::from_secs(1)),
                 auth_attempt: Some(auth_attempt),
@@ -1053,6 +1199,14 @@ mod tests {
         )
         .expect("live server connection must be creatable");
         let conn_id = connection.conn.source_id().as_ref().to_vec();
+        let qkey_policy = BandwidthPolicy {
+            rate_bytes_per_second: 1_250_000,
+            burst_bytes: 1_250_000,
+            daily_quota_bytes: 10_000_000,
+            monthly_quota_bytes: 100_000_000,
+            weight: 2,
+        };
+        let rejected_before = metrics.connections_rejected.load(Ordering::Relaxed);
 
         live_state.clients.insert(remote_addr, connection);
         let auth_attempt = begin_test_auth_attempt(&live_state, remote_addr.ip());
@@ -1061,6 +1215,7 @@ mod tests {
             QKeyAuthState {
                 key_id: "test-key".to_string(),
                 expected_token_sha256: "deadbeef".to_string(),
+                bandwidth_policy: Some(qkey_policy.clone()),
                 authed: false,
                 connected_at: Instant::now(),
                 auth_attempt: Some(auth_attempt),
@@ -1074,10 +1229,27 @@ mod tests {
             &metrics,
         );
 
+        let bandwidth_stats =
+            live_state.domain.shared.sessions.read().bandwidth_stats(session_id).unwrap();
+        assert_eq!(bandwidth_stats.policy, qkey_policy);
         assert_eq!(
             live_state.qkey_tracker.key_for_connection(session_id.as_u64()).as_deref(),
             Some("test-key")
         );
+
+        live_state.commit_qkey_auth_result(
+            None,
+            Some((conn_id.clone(), true)),
+            &accept_loop,
+            &metrics,
+        );
+
+        assert!(live_state.clients.contains_key(&remote_addr));
+        assert_eq!(
+            live_state.domain.shared.sessions.read().bandwidth_stats(session_id).unwrap().policy,
+            qkey_policy
+        );
+        assert_eq!(metrics.connections_rejected.load(Ordering::Relaxed), rejected_before);
 
         live_state.revoke_qkey_now("test-key", "test", &accept_loop, &metrics);
 
@@ -1119,6 +1291,7 @@ mod tests {
             QKeyAuthState {
                 key_id: "pending-key".to_string(),
                 expected_token_sha256: "deadbeef".to_string(),
+                bandwidth_policy: None,
                 authed: false,
                 connected_at: Instant::now(),
                 auth_attempt: Some(auth_attempt),
@@ -1374,6 +1547,7 @@ mod tests {
             metrics,
             blocked_ips.clone(),
             client_snapshots,
+            Arc::new(RwLock::new(SessionManager::new(16))),
             ServerAdminControlPlane {
                 actions: tx,
                 listen_addr: "127.0.0.1:4433".to_string(),
@@ -1407,6 +1581,7 @@ mod tests {
             metrics,
             blocked_ips,
             client_snapshots,
+            Arc::new(RwLock::new(SessionManager::new(16))),
             ServerAdminControlPlane {
                 actions: tx,
                 listen_addr: "127.0.0.1:4433".to_string(),
@@ -1540,6 +1715,7 @@ mod tests {
         let state = QKeyAuthState {
             key_id: "test-key".to_string(),
             expected_token_sha256: "abc".to_string(),
+            bandwidth_policy: None,
             authed: false,
             connected_at: Instant::now() - (QKEY_AUTH_TIMEOUT + Duration::from_secs(1)),
             auth_attempt: None,
@@ -1552,6 +1728,7 @@ mod tests {
         let state = QKeyAuthState {
             key_id: "test-key".to_string(),
             expected_token_sha256: "abc".to_string(),
+            bandwidth_policy: None,
             authed: true,
             connected_at: Instant::now() - (QKEY_AUTH_TIMEOUT + Duration::from_secs(10)),
             auth_attempt: None,
@@ -1564,6 +1741,7 @@ mod tests {
         let state = QKeyAuthState {
             key_id: "test-key".to_string(),
             expected_token_sha256: "abc".to_string(),
+            bandwidth_policy: None,
             authed: false,
             connected_at: Instant::now(),
             auth_attempt: None,
@@ -1598,7 +1776,7 @@ mod tests {
                 Vec::new(),
                 Some(expected.as_str()),
                 true,
-                QKeyHeaderAuthOutcome::Authenticated,
+                QKeyHeaderAuthOutcome::Unchanged,
             ),
             (
                 "missing header",

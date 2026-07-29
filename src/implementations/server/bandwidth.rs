@@ -3,22 +3,111 @@
 //! This module provides byte-oriented (not packet-oriented) rate limiting and
 //! quota tracking on a per-client basis. It complements `limits.rs`, which
 //! caps packet/byte rates globally and per-IP; here the granularity is the
-//! individual authenticated client (identified by a string client ID), and the
-//! unit is bytes per second with an optional total-transfer quota per billing
-//! period.
+//! individual authenticated session, and the unit is bytes per second with
+//! optional UTC daily and monthly transfer quotas.
 //!
 //! # Components
 //!
 //! - [`BandwidthLimiter`]: a token bucket refilled at `refill_rate_bps` bytes
 //!   per second, capped at `capacity_bytes` (burst). `check` consumes tokens.
-//! - [`QuotaTracker`]: tracks cumulative bytes transferred against a
-//!   `quota_limit_bytes` budget that resets every `reset_interval`.
-//! - [`PerClientBandwidthManager`]: maps a client ID to its limiter + quota,
-//!   applying default limits to previously-unseen clients and allowing
-//!   per-client overrides.
+//! - [`QuotaTracker`]: tracks cumulative bytes against one UTC calendar period.
+//! - [`PerClientBandwidthManager`]: owns independent uplink/downlink buckets and
+//!   shared quotas for every explicitly registered authenticated session.
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+const SECONDS_PER_DAY: u64 = 86_400;
+const DENIAL_AUDIT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Effective per-session bandwidth, quota, and scheduling policy.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct BandwidthPolicy {
+    /// Sustained rate per direction in bytes per second. Zero disables rate limiting.
+    pub rate_bytes_per_second: u64,
+    /// Initial and maximum burst per direction in bytes. Zero disables rate limiting.
+    pub burst_bytes: u64,
+    /// Combined uplink plus downlink quota per UTC day. Zero means unlimited.
+    pub daily_quota_bytes: u64,
+    /// Combined uplink plus downlink quota per UTC calendar month. Zero means unlimited.
+    pub monthly_quota_bytes: u64,
+    /// Deficit-round-robin weight. Higher values receive proportionally more service.
+    pub weight: u16,
+}
+
+impl BandwidthPolicy {
+    pub const MAX_WEIGHT: u16 = 1_000;
+
+    pub fn validate(&self) -> Result<(), String> {
+        if (self.rate_bytes_per_second == 0) != (self.burst_bytes == 0) {
+            return Err(
+                "bandwidth rate_bytes_per_second and burst_bytes must both be zero or nonzero"
+                    .to_string(),
+            );
+        }
+        if self.weight == 0 || self.weight > Self::MAX_WEIGHT {
+            return Err(format!("bandwidth weight must be between 1 and {}", Self::MAX_WEIGHT));
+        }
+        Ok(())
+    }
+}
+
+impl Default for BandwidthPolicy {
+    fn default() -> Self {
+        Self {
+            rate_bytes_per_second: 0,
+            burst_bytes: 0,
+            daily_quota_bytes: 0,
+            monthly_quota_bytes: 0,
+            weight: 1,
+        }
+    }
+}
+
+/// Direction whose independently paced byte bucket is being charged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BandwidthDirection {
+    Uplink,
+    Downlink,
+}
+
+impl BandwidthDirection {
+    fn index(self) -> usize {
+        match self {
+            Self::Uplink => 0,
+            Self::Downlink => 1,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Uplink => "uplink",
+            Self::Downlink => "downlink",
+        }
+    }
+}
+
+/// Exact admission outcome exported to runtime metrics and audit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BandwidthDecision {
+    Allowed,
+    RateLimited,
+    DailyQuotaExceeded,
+    MonthlyQuotaExceeded,
+}
+
+impl BandwidthDecision {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Allowed => "allowed",
+            Self::RateLimited => "rate_limited",
+            Self::DailyQuotaExceeded => "daily_quota_exceeded",
+            Self::MonthlyQuotaExceeded => "monthly_quota_exceeded",
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // BandwidthLimiter — per-client token bucket for bytes/sec.
@@ -33,6 +122,7 @@ use std::time::{Duration, Instant};
 /// `capacity_bytes` is the burst size (the bucket starts full); `refill_rate_bps`
 /// is the sustained refill rate in bytes per second. `check` consumes tokens and
 /// returns `false` when insufficient tokens are available.
+#[derive(Debug)]
 pub struct BandwidthLimiter {
     /// Burst capacity (max tokens the bucket can hold).
     capacity_bytes: u64,
@@ -87,6 +177,14 @@ impl BandwidthLimiter {
         }
     }
 
+    /// Return a reservation that could not be delivered.
+    pub(crate) fn refund(&mut self, bytes: usize) {
+        if self.is_disabled() {
+            return;
+        }
+        self.tokens = self.tokens.saturating_add(bytes as u64).min(self.capacity_bytes);
+    }
+
     /// Add tokens based on elapsed time, capped at capacity.
     ///
     /// Computes the refill as `refill_rate_bps × elapsed_seconds` using u128
@@ -129,35 +227,43 @@ impl BandwidthLimiter {
 // ---------------------------------------------------------------------------
 // QuotaTracker — cumulative byte budget per billing period.
 //
-// Tracks total bytes transferred against a `quota_limit_bytes` budget that
-// resets every `reset_interval`. `record` returns `false` when recording the
-// bytes would exceed the quota (the bytes are NOT recorded in that case). A
-// `quota_limit_bytes` of `0` means unlimited.
+// Tracks total bytes transferred against a `quota_limit_bytes` budget for one
+// deterministic UTC calendar period. `record` rejects without accounting when
+// the addition would exceed the quota. Zero means unlimited.
 // ---------------------------------------------------------------------------
 
 /// Cumulative transfer quota with periodic reset.
 ///
-/// `quota_limit_bytes` is the total bytes allowed per `reset_interval`. A limit
-/// of `0` disables the quota (unlimited). `record` accumulates bytes and
-/// returns `false` if the addition would exceed the limit; `check_and_reset`
-/// zeroes the counter when the interval has elapsed.
+/// A limit of `0` disables the quota. `record` accumulates bytes and returns
+/// `false` if the addition would exceed the limit; `check_and_reset` resets
+/// only after advancing into a later UTC calendar period.
 pub struct QuotaTracker {
     /// Total bytes allowed per billing period (0 = unlimited).
     quota_limit_bytes: u64,
     /// Bytes consumed in the current billing period.
     used_bytes: u64,
-    /// Duration of a billing period.
-    reset_interval: Duration,
-    /// Start time of the current billing period.
-    last_reset: Instant,
+    period: QuotaPeriod,
+    period_index: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuotaPeriod {
+    Daily,
+    Monthly,
 }
 
 impl QuotaTracker {
-    /// Create a new quota tracker.
-    ///
-    /// `quota_limit_bytes` of `0` means unlimited (no quota enforcement).
-    pub fn new(quota_limit_bytes: u64, reset_interval: Duration) -> Self {
-        Self { quota_limit_bytes, used_bytes: 0, reset_interval, last_reset: Instant::now() }
+    pub fn new(quota_limit_bytes: u64, period: QuotaPeriod) -> Self {
+        Self::new_at(quota_limit_bytes, period, SystemTime::now())
+    }
+
+    fn new_at(quota_limit_bytes: u64, period: QuotaPeriod, now: SystemTime) -> Self {
+        Self {
+            quota_limit_bytes,
+            used_bytes: 0,
+            period,
+            period_index: quota_period_index(now, period),
+        }
     }
 
     /// Whether this quota tracker is disabled (limit is zero).
@@ -187,15 +293,32 @@ impl QuotaTracker {
 
     /// Reset the used-bytes counter if the billing interval has elapsed.
     pub fn check_and_reset(&mut self) {
-        if self.reset_interval.is_zero() {
-            return;
-        }
+        self.check_and_reset_at(SystemTime::now());
+    }
 
-        let now = Instant::now();
-        if now.duration_since(self.last_reset) >= self.reset_interval {
+    fn check_and_reset_at(&mut self, now: SystemTime) {
+        let period_index = quota_period_index(now, self.period);
+        if period_index > self.period_index {
             self.used_bytes = 0;
-            self.last_reset = now;
+            self.period_index = period_index;
         }
+    }
+
+    fn can_record(&self, bytes: u64) -> bool {
+        self.is_disabled()
+            || self
+                .used_bytes
+                .checked_add(bytes)
+                .is_some_and(|total| total <= self.quota_limit_bytes)
+    }
+
+    pub fn reset(&mut self) {
+        self.used_bytes = 0;
+        self.period_index = quota_period_index(SystemTime::now(), self.period);
+    }
+
+    fn set_limit(&mut self, quota_limit_bytes: u64) {
+        self.quota_limit_bytes = quota_limit_bytes;
     }
 
     /// Remaining bytes in the current billing period.
@@ -220,117 +343,178 @@ impl QuotaTracker {
     }
 }
 
+fn quota_period_index(now: SystemTime, period: QuotaPeriod) -> i64 {
+    let epoch_seconds =
+        now.duration_since(UNIX_EPOCH).map(|elapsed| elapsed.as_secs()).unwrap_or(0);
+    let epoch_days = (epoch_seconds / SECONDS_PER_DAY) as i64;
+    match period {
+        QuotaPeriod::Daily => epoch_days,
+        QuotaPeriod::Monthly => {
+            let (year, month) = utc_year_month_from_epoch_days(epoch_days);
+            i64::from(year) * 12 + i64::from(month) - 1
+        }
+    }
+}
+
+fn utc_year_month_from_epoch_days(epoch_days: i64) -> (i32, u32) {
+    let shifted = epoch_days + 719_468;
+    let era = if shifted >= 0 { shifted } else { shifted - 146_096 } / 146_097;
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += if month <= 2 { 1 } else { 0 };
+    (year as i32, month as u32)
+}
+
 // ---------------------------------------------------------------------------
 // PerClientBandwidthManager — client ID → limiter + quota.
 //
-// Holds default rate/burst/quota/interval settings and a per-client map. A
-// previously-unseen client is lazily initialised with the defaults; explicit
-// overrides can be applied via `set_client_limit` / `set_client_quota`.
+// Holds one validated default policy and explicitly registered session state.
 // ---------------------------------------------------------------------------
 
 /// Per-client bandwidth + quota state.
 struct ClientBandwidthEntry {
-    limiter: BandwidthLimiter,
-    quota: QuotaTracker,
+    policy: BandwidthPolicy,
+    uplink_limiter: BandwidthLimiter,
+    downlink_limiter: BandwidthLimiter,
+    daily_quota: QuotaTracker,
+    monthly_quota: QuotaTracker,
+    last_audited_denial: [Option<(BandwidthDecision, Instant)>; 2],
 }
 
 /// Snapshot of a client's bandwidth configuration and quota usage.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct BandwidthStats {
-    /// Sustained refill rate (bytes per second).
-    pub rate_bps: u64,
-    /// Burst capacity (bytes).
-    pub burst_bytes: u64,
-    /// Quota limit per billing period (bytes; 0 = unlimited).
-    pub quota_limit_bytes: u64,
-    /// Bytes consumed in the current billing period.
-    pub quota_used_bytes: u64,
-    /// Remaining bytes in the current billing period (`u64::MAX` if unlimited).
-    pub quota_remaining_bytes: u64,
+    pub policy: BandwidthPolicy,
+    pub uplink_available_bytes: u64,
+    pub downlink_available_bytes: u64,
+    pub daily_used_bytes: u64,
+    pub daily_remaining_bytes: u64,
+    pub monthly_used_bytes: u64,
+    pub monthly_remaining_bytes: u64,
 }
 
 /// Per-client bandwidth limiter and quota tracker.
 ///
-/// Maintains a map of client ID → [`BandwidthLimiter`] + [`QuotaTracker`].
-/// Clients not yet seen are lazily initialised with the default settings
-/// supplied at construction; per-client overrides are applied via
-/// [`set_client_limit`](Self::set_client_limit) and
-/// [`set_client_quota`](Self::set_client_quota).
+/// Missing sessions fail closed. Live policy updates replace both directional
+/// buckets while preserving already-accounted quota usage.
 pub struct PerClientBandwidthManager {
     clients: HashMap<String, ClientBandwidthEntry>,
-    default_rate_bps: u64,
-    default_burst_bytes: u64,
-    default_quota_bytes: u64,
-    default_reset_interval: Duration,
+    default_policy: BandwidthPolicy,
 }
 
 impl PerClientBandwidthManager {
-    /// Create a new manager with the given default settings.
-    ///
-    /// Every previously-unseen client is initialised with these defaults when
-    /// first checked via [`check_send`](Self::check_send).
-    pub fn new(
-        default_rate_bps: u64,
-        default_burst_bytes: u64,
-        default_quota: u64,
-        reset_interval: Duration,
-    ) -> Self {
-        Self {
-            clients: HashMap::new(),
-            default_rate_bps,
-            default_burst_bytes,
-            default_quota_bytes: default_quota,
-            default_reset_interval: reset_interval,
+    pub fn new(default_policy: BandwidthPolicy) -> Result<Self, String> {
+        default_policy.validate()?;
+        Ok(Self { clients: HashMap::new(), default_policy })
+    }
+
+    fn entry_from_policy(policy: BandwidthPolicy) -> ClientBandwidthEntry {
+        ClientBandwidthEntry {
+            uplink_limiter: BandwidthLimiter::new(policy.rate_bytes_per_second, policy.burst_bytes),
+            downlink_limiter: BandwidthLimiter::new(
+                policy.rate_bytes_per_second,
+                policy.burst_bytes,
+            ),
+            daily_quota: QuotaTracker::new(policy.daily_quota_bytes, QuotaPeriod::Daily),
+            monthly_quota: QuotaTracker::new(policy.monthly_quota_bytes, QuotaPeriod::Monthly),
+            last_audited_denial: [None; 2],
+            policy,
         }
     }
 
-    /// Ensure a client entry exists, initialising it with the defaults if needed.
-    fn entry_or_default(&mut self, client_id: &str) -> &mut ClientBandwidthEntry {
-        self.clients.entry(client_id.to_string()).or_insert_with(|| ClientBandwidthEntry {
-            limiter: BandwidthLimiter::new(self.default_rate_bps, self.default_burst_bytes),
-            quota: QuotaTracker::new(self.default_quota_bytes, self.default_reset_interval),
-        })
-    }
-
-    /// Override the rate limit (bytes/sec + burst) for a specific client.
-    ///
-    /// Replaces the client's [`BandwidthLimiter`] with a fresh bucket starting
-    /// full at `burst_bytes`. If the client had no entry, one is created.
-    pub fn set_client_limit(&mut self, client_id: &str, rate_bps: u64, burst_bytes: u64) {
-        let entry = self.entry_or_default(client_id);
-        entry.limiter = BandwidthLimiter::new(rate_bps, burst_bytes);
-    }
-
-    /// Override the quota limit for a specific client.
-    ///
-    /// Replaces the client's [`QuotaTracker`], resetting the used-bytes counter
-    /// and the billing-period clock. If the client had no entry, one is created.
-    pub fn set_client_quota(&mut self, client_id: &str, quota_bytes: u64) {
-        let reset_interval = self.default_reset_interval;
-        let entry = self.entry_or_default(client_id);
-        entry.quota = QuotaTracker::new(quota_bytes, reset_interval);
-    }
-
-    /// Check whether `bytes` may be sent for `client_id`.
-    ///
-    /// Applies both the per-client rate limit (token bucket) and the per-client
-    /// quota. The quota counter is only incremented when the rate-limit check
-    /// passes **and** the quota check passes. Returns `true` only when both
-    /// checks succeed.
-    pub fn check_send(&mut self, client_id: &str, bytes: usize) -> bool {
-        let entry = self.entry_or_default(client_id);
-
-        // Reset the quota counter if the billing period has elapsed.
-        entry.quota.check_and_reset();
-
-        // Rate-limit first: if the token bucket rejects, do not touch the quota.
-        if !entry.limiter.check(bytes) {
-            return false;
+    pub fn add_client(
+        &mut self,
+        client_id: &str,
+        policy_override: Option<BandwidthPolicy>,
+    ) -> Result<(), String> {
+        let policy = policy_override.unwrap_or_else(|| self.default_policy.clone());
+        policy.validate()?;
+        if self.clients.contains_key(client_id) {
+            return Err("bandwidth client already registered".to_string());
         }
+        self.clients.insert(client_id.to_string(), Self::entry_from_policy(policy));
+        Ok(())
+    }
 
-        // Quota second: only record on success so a rejected send does not
-        // consume the client's byte budget.
-        entry.quota.record(bytes as u64)
+    pub fn update_client_policy(
+        &mut self,
+        client_id: &str,
+        policy: BandwidthPolicy,
+    ) -> Result<(), String> {
+        policy.validate()?;
+        let Some(entry) = self.clients.get_mut(client_id) else {
+            return Err("bandwidth client not found".to_string());
+        };
+        entry.uplink_limiter =
+            BandwidthLimiter::new(policy.rate_bytes_per_second, policy.burst_bytes);
+        entry.downlink_limiter =
+            BandwidthLimiter::new(policy.rate_bytes_per_second, policy.burst_bytes);
+        entry.daily_quota.set_limit(policy.daily_quota_bytes);
+        entry.monthly_quota.set_limit(policy.monthly_quota_bytes);
+        entry.policy = policy;
+        Ok(())
+    }
+
+    pub fn check(
+        &mut self,
+        client_id: &str,
+        direction: BandwidthDirection,
+        bytes: usize,
+    ) -> BandwidthDecision {
+        let Some(entry) = self.clients.get_mut(client_id) else {
+            return BandwidthDecision::RateLimited;
+        };
+        entry.daily_quota.check_and_reset();
+        entry.monthly_quota.check_and_reset();
+        let accounted_bytes = bytes as u64;
+        let decision = if !entry.daily_quota.can_record(accounted_bytes) {
+            BandwidthDecision::DailyQuotaExceeded
+        } else if !entry.monthly_quota.can_record(accounted_bytes) {
+            BandwidthDecision::MonthlyQuotaExceeded
+        } else {
+            let limiter = match direction {
+                BandwidthDirection::Uplink => &mut entry.uplink_limiter,
+                BandwidthDirection::Downlink => &mut entry.downlink_limiter,
+            };
+            if limiter.check(bytes) {
+                let daily_recorded = entry.daily_quota.record(accounted_bytes);
+                let monthly_recorded = entry.monthly_quota.record(accounted_bytes);
+                debug_assert!(daily_recorded && monthly_recorded);
+                BandwidthDecision::Allowed
+            } else {
+                BandwidthDecision::RateLimited
+            }
+        };
+        let now = Instant::now();
+        let audit_slot = &mut entry.last_audited_denial[direction.index()];
+        let should_audit = decision != BandwidthDecision::Allowed
+            && audit_slot.is_none_or(|(previous, last)| {
+                previous != decision || now.duration_since(last) >= DENIAL_AUDIT_INTERVAL
+            });
+        if should_audit {
+            *audit_slot = Some((decision, now));
+        }
+        if should_audit {
+            crate::audit::audit_typed(
+                crate::audit::AuditEventType::AdminAction,
+                crate::audit::AuditSeverity::Warning,
+                None,
+                Some(client_id),
+                crate::audit::AuditContext {
+                    actor: crate::audit::AuditActor::System,
+                    target: crate::audit::AuditTarget::Client,
+                    outcome: crate::audit::AuditOutcome::Denied,
+                    reason: Some(decision.as_str()),
+                },
+                &format!("Per-session bandwidth policy denied {} traffic", direction.as_str()),
+            );
+        }
+        decision
     }
 
     /// Snapshot of a client's bandwidth configuration and quota usage.
@@ -340,12 +524,23 @@ impl PerClientBandwidthManager {
     pub fn stats(&self, client_id: &str) -> Option<BandwidthStats> {
         let entry = self.clients.get(client_id)?;
         Some(BandwidthStats {
-            rate_bps: entry.limiter.refill_rate_bps(),
-            burst_bytes: entry.limiter.capacity_bytes(),
-            quota_limit_bytes: entry.quota.quota_limit_bytes(),
-            quota_used_bytes: entry.quota.used_bytes(),
-            quota_remaining_bytes: entry.quota.remaining(),
+            policy: entry.policy.clone(),
+            uplink_available_bytes: entry.uplink_limiter.available_tokens(),
+            downlink_available_bytes: entry.downlink_limiter.available_tokens(),
+            daily_used_bytes: entry.daily_quota.used_bytes(),
+            daily_remaining_bytes: entry.daily_quota.remaining(),
+            monthly_used_bytes: entry.monthly_quota.used_bytes(),
+            monthly_remaining_bytes: entry.monthly_quota.remaining(),
         })
+    }
+
+    pub fn reset_client_quota(&mut self, client_id: &str) -> bool {
+        let Some(entry) = self.clients.get_mut(client_id) else {
+            return false;
+        };
+        entry.daily_quota.reset();
+        entry.monthly_quota.reset();
+        true
     }
 
     /// Remove a client's bandwidth/quota state (e.g. on session teardown).
@@ -371,6 +566,7 @@ impl PerClientBandwidthManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     // --- BandwidthLimiter --------------------------------------------------
 
@@ -445,11 +641,21 @@ mod tests {
         assert_eq!(limiter.available_tokens(), 0);
     }
 
+    #[test]
+    fn limiter_refund_restores_only_the_reserved_capacity() {
+        let mut limiter = BandwidthLimiter::new(1_000, 1_000);
+        assert!(limiter.check(600));
+        limiter.refund(600);
+        assert_eq!(limiter.available_tokens(), 1_000);
+        limiter.refund(1_000);
+        assert_eq!(limiter.available_tokens(), 1_000);
+    }
+
     // --- QuotaTracker ------------------------------------------------------
 
     #[test]
     fn test_quota_record_within_limit() {
-        let mut quota = QuotaTracker::new(10_000, Duration::from_secs(3600));
+        let mut quota = QuotaTracker::new(10_000, QuotaPeriod::Daily);
         assert!(quota.record(4_000));
         assert_eq!(quota.used_bytes(), 4_000);
         assert!(quota.record(6_000));
@@ -459,7 +665,7 @@ mod tests {
 
     #[test]
     fn test_quota_exceeded_rejected() {
-        let mut quota = QuotaTracker::new(10_000, Duration::from_secs(3600));
+        let mut quota = QuotaTracker::new(10_000, QuotaPeriod::Daily);
         assert!(quota.record(9_000));
         // 2000 more would exceed 10_000 → rejected, and not recorded.
         assert!(!quota.record(2_000));
@@ -468,170 +674,216 @@ mod tests {
     }
 
     #[test]
-    fn test_quota_reset_after_interval() {
-        let mut quota = QuotaTracker::new(10_000, Duration::from_millis(50));
+    fn daily_quota_resets_at_utc_midnight_not_elapsed_duration() {
+        let start = UNIX_EPOCH + Duration::from_secs(20_000 * SECONDS_PER_DAY + 86_399);
+        let mut quota = QuotaTracker::new_at(10_000, QuotaPeriod::Daily, start);
         assert!(quota.record(10_000));
-        assert_eq!(quota.remaining(), 0);
-
-        // Interval not yet elapsed → no reset.
-        quota.check_and_reset();
+        quota.check_and_reset_at(start);
         assert_eq!(quota.used_bytes(), 10_000);
-
-        // Wait for the interval to elapse.
-        std::thread::sleep(Duration::from_millis(60));
-        quota.check_and_reset();
+        quota.check_and_reset_at(start + Duration::from_secs(1));
         assert_eq!(quota.used_bytes(), 0);
         assert_eq!(quota.remaining(), 10_000);
     }
 
     #[test]
-    fn test_quota_disabled_unlimited() {
-        let mut quota = QuotaTracker::new(0, Duration::from_secs(3600));
-        assert!(quota.is_disabled());
-        assert!(quota.record(u64::MAX));
-        assert_eq!(quota.remaining(), u64::MAX);
+    fn monthly_quota_resets_on_first_utc_day_and_ignores_clock_rollback() {
+        let january_31_2024 = UNIX_EPOCH + Duration::from_secs(19_753 * SECONDS_PER_DAY + 86_399);
+        let february_1_2024 = january_31_2024 + Duration::from_secs(1);
+        let mut quota = QuotaTracker::new_at(10_000, QuotaPeriod::Monthly, january_31_2024);
+        assert!(quota.record(10_000));
+        quota.check_and_reset_at(january_31_2024 - Duration::from_secs(SECONDS_PER_DAY));
+        assert_eq!(quota.used_bytes(), 10_000);
+        quota.check_and_reset_at(february_1_2024);
+        assert_eq!(quota.used_bytes(), 0);
     }
 
     #[test]
-    fn test_quota_overflow_protection() {
-        let mut quota = QuotaTracker::new(10_000, Duration::from_secs(3600));
-        assert!(quota.record(5_000));
-        // A huge addition that would overflow u64 → rejected, not recorded.
-        assert!(!quota.record(u64::MAX));
-        assert_eq!(quota.used_bytes(), 5_000);
+    fn quota_disabled_and_overflow_are_bounded() {
+        let mut unlimited = QuotaTracker::new(0, QuotaPeriod::Monthly);
+        assert!(unlimited.record(u64::MAX));
+        assert_eq!(unlimited.remaining(), u64::MAX);
+
+        let mut bounded = QuotaTracker::new(10_000, QuotaPeriod::Daily);
+        assert!(bounded.record(5_000));
+        assert!(!bounded.record(u64::MAX));
+        assert_eq!(bounded.used_bytes(), 5_000);
     }
 
     // --- PerClientBandwidthManager ----------------------------------------
 
-    #[test]
-    fn test_manager_defaults_for_new_client() {
-        let mut mgr = PerClientBandwidthManager::new(1_000, 1_000, 10_000, Duration::from_secs(60));
-
-        // A previously-unseen client gets the default rate limit.
-        assert!(mgr.check_send("alice", 1_000));
-        // Bucket now empty → next send rejected.
-        assert!(!mgr.check_send("alice", 1));
-
-        let stats = mgr.stats("alice").unwrap();
-        assert_eq!(stats.rate_bps, 1_000);
-        assert_eq!(stats.burst_bytes, 1_000);
-        assert_eq!(stats.quota_limit_bytes, 10_000);
-        assert_eq!(stats.quota_used_bytes, 1_000);
-        assert_eq!(stats.quota_remaining_bytes, 9_000);
+    fn policy(rate: u64, burst: u64, daily: u64, monthly: u64) -> BandwidthPolicy {
+        BandwidthPolicy {
+            rate_bytes_per_second: rate,
+            burst_bytes: burst,
+            daily_quota_bytes: daily,
+            monthly_quota_bytes: monthly,
+            weight: 1,
+        }
     }
 
     #[test]
-    fn test_manager_per_client_isolation() {
-        let mut mgr = PerClientBandwidthManager::new(1_000, 1_000, 10_000, Duration::from_secs(60));
-
-        // Drain alice's bucket.
-        assert!(mgr.check_send("alice", 1_000));
-        assert!(!mgr.check_send("alice", 1));
-
-        // Bob has an independent bucket — still full.
-        assert!(mgr.check_send("bob", 1_000));
-
-        // Alice's quota reflects only alice's usage.
-        let alice = mgr.stats("alice").unwrap();
-        let bob = mgr.stats("bob").unwrap();
-        assert_eq!(alice.quota_used_bytes, 1_000);
-        assert_eq!(bob.quota_used_bytes, 1_000);
+    fn manager_requires_explicit_session_ownership() {
+        let mut manager = PerClientBandwidthManager::new(policy(1_000, 1_000, 10_000, 20_000))
+            .expect("valid policy");
+        assert_eq!(
+            manager.check("missing", BandwidthDirection::Uplink, 1),
+            BandwidthDecision::RateLimited
+        );
+        manager.add_client("alice", None).expect("add session");
+        assert_eq!(
+            manager.check("alice", BandwidthDirection::Uplink, 1_000),
+            BandwidthDecision::Allowed
+        );
+        assert_eq!(
+            manager.check("alice", BandwidthDirection::Uplink, 1),
+            BandwidthDecision::RateLimited
+        );
     }
 
     #[test]
-    fn test_manager_set_client_limit_override() {
-        let mut mgr = PerClientBandwidthManager::new(1_000, 1_000, 10_000, Duration::from_secs(60));
+    fn duplicate_session_registration_is_rejected_without_replacing_state() {
+        let mut manager =
+            PerClientBandwidthManager::new(policy(1_000, 1_000, 10_000, 20_000)).unwrap();
+        manager.add_client("alice", None).unwrap();
+        assert_eq!(
+            manager.check("alice", BandwidthDirection::Uplink, 500),
+            BandwidthDecision::Allowed
+        );
 
-        // Give alice a higher rate and burst.
-        mgr.set_client_limit("alice", 10_000, 10_000);
-
-        // Default client is capped at 1000; alice can send 10_000.
-        assert!(!mgr.check_send("bob", 1_001));
-        assert!(mgr.check_send("alice", 10_000));
-
-        let stats = mgr.stats("alice").unwrap();
-        assert_eq!(stats.rate_bps, 10_000);
-        assert_eq!(stats.burst_bytes, 10_000);
+        assert!(manager.add_client("alice", Some(policy(2_000, 2_000, 30_000, 40_000))).is_err());
+        let stats = manager.stats("alice").unwrap();
+        assert_eq!(stats.policy, policy(1_000, 1_000, 10_000, 20_000));
+        assert_eq!(stats.daily_used_bytes, 500);
     }
 
     #[test]
-    fn test_manager_set_client_quota_override() {
-        let mut mgr = PerClientBandwidthManager::new(1_000, 1_000, 10_000, Duration::from_secs(60));
-
-        // Give alice a tiny quota.
-        mgr.set_client_quota("alice", 500);
-
-        // Rate limit allows 1000, but quota caps at 500.
-        assert!(mgr.check_send("alice", 500));
-        // Next send: rate bucket has 500 tokens left, quota has 0 → rejected.
-        assert!(!mgr.check_send("alice", 500));
-
-        let stats = mgr.stats("alice").unwrap();
-        assert_eq!(stats.quota_limit_bytes, 500);
-        assert_eq!(stats.quota_used_bytes, 500);
-        assert_eq!(stats.quota_remaining_bytes, 0);
+    fn manager_keeps_uplink_and_downlink_rate_buckets_independent() {
+        let mut manager =
+            PerClientBandwidthManager::new(policy(1_000, 1_000, 10_000, 20_000)).unwrap();
+        manager.add_client("alice", None).unwrap();
+        assert_eq!(
+            manager.check("alice", BandwidthDirection::Uplink, 1_000),
+            BandwidthDecision::Allowed
+        );
+        assert_eq!(
+            manager.check("alice", BandwidthDirection::Downlink, 1_000),
+            BandwidthDecision::Allowed
+        );
+        assert_eq!(manager.stats("alice").unwrap().daily_used_bytes, 2_000);
     }
 
     #[test]
-    fn test_manager_quota_exceeded_blocks_send() {
-        let mut mgr =
-            PerClientBandwidthManager::new(1_000_000, 1_000_000, 1_000, Duration::from_secs(60));
-
-        // Exhaust the quota (rate limit is generous).
-        assert!(mgr.check_send("alice", 1_000));
-        // Quota exhausted → further sends rejected even though rate tokens remain.
-        assert!(!mgr.check_send("alice", 1));
-
-        let stats = mgr.stats("alice").unwrap();
-        assert_eq!(stats.quota_used_bytes, 1_000);
-        assert_eq!(stats.quota_remaining_bytes, 0);
+    fn ten_megabit_policy_uses_exact_byte_rate_and_burst() {
+        const TEN_MEGABIT_BYTES_PER_SECOND: u64 = 10_000_000 / 8;
+        let mut manager = PerClientBandwidthManager::new(policy(
+            TEN_MEGABIT_BYTES_PER_SECOND,
+            TEN_MEGABIT_BYTES_PER_SECOND,
+            0,
+            0,
+        ))
+        .unwrap();
+        manager.add_client("client", None).unwrap();
+        assert_eq!(
+            manager.check(
+                "client",
+                BandwidthDirection::Uplink,
+                TEN_MEGABIT_BYTES_PER_SECOND as usize,
+            ),
+            BandwidthDecision::Allowed
+        );
+        assert_eq!(
+            manager.check("client", BandwidthDirection::Uplink, 1),
+            BandwidthDecision::RateLimited
+        );
     }
 
     #[test]
-    fn test_manager_rate_rejected_does_not_consume_quota() {
-        let mut mgr = PerClientBandwidthManager::new(1_000, 1_000, 10_000, Duration::from_secs(60));
-
-        // Drain the rate bucket (1_000 bytes). Quota is 10_000 so this is fine.
-        assert!(mgr.check_send("alice", 1_000));
-
-        // This send is rejected by the rate limiter (bucket empty). The quota
-        // must NOT be decremented.
-        assert!(!mgr.check_send("alice", 1_000));
-
-        let stats = mgr.stats("alice").unwrap();
-        assert_eq!(stats.quota_used_bytes, 1_000);
-        assert_eq!(stats.quota_remaining_bytes, 9_000);
+    fn three_clients_have_no_rate_or_quota_coupling() {
+        let mut manager =
+            PerClientBandwidthManager::new(policy(1_000, 1_000, 1_000, 2_000)).unwrap();
+        for client in ["one", "two", "three"] {
+            manager.add_client(client, None).unwrap();
+            assert_eq!(
+                manager.check(client, BandwidthDirection::Uplink, 1_000),
+                BandwidthDecision::Allowed
+            );
+        }
+        for client in ["one", "two", "three"] {
+            assert_eq!(manager.stats(client).unwrap().daily_used_bytes, 1_000);
+        }
     }
 
     #[test]
-    fn test_manager_stats_unknown_client() {
-        let mgr = PerClientBandwidthManager::new(1_000, 1_000, 10_000, Duration::from_secs(60));
-        assert!(mgr.stats("nobody").is_none());
+    fn daily_and_monthly_quota_outcomes_are_distinct() {
+        let mut daily = PerClientBandwidthManager::new(policy(10_000, 10_000, 500, 5_000)).unwrap();
+        daily.add_client("alice", None).unwrap();
+        assert_eq!(
+            daily.check("alice", BandwidthDirection::Uplink, 500),
+            BandwidthDecision::Allowed
+        );
+        assert_eq!(
+            daily.check("alice", BandwidthDirection::Downlink, 1),
+            BandwidthDecision::DailyQuotaExceeded
+        );
+
+        let mut monthly = PerClientBandwidthManager::new(policy(10_000, 10_000, 0, 500)).unwrap();
+        monthly.add_client("alice", None).unwrap();
+        assert_eq!(
+            monthly.check("alice", BandwidthDirection::Uplink, 500),
+            BandwidthDecision::Allowed
+        );
+        assert_eq!(
+            monthly.check("alice", BandwidthDirection::Downlink, 1),
+            BandwidthDecision::MonthlyQuotaExceeded
+        );
     }
 
     #[test]
-    fn test_manager_remove_client() {
-        let mut mgr = PerClientBandwidthManager::new(1_000, 1_000, 10_000, Duration::from_secs(60));
-        mgr.check_send("alice", 100);
-        assert_eq!(mgr.len(), 1);
-
-        mgr.remove_client("alice");
-        assert_eq!(mgr.len(), 0);
-        assert!(mgr.stats("alice").is_none());
-
-        // Re-checking recreates the entry with fresh defaults.
-        mgr.check_send("alice", 100);
-        let stats = mgr.stats("alice").unwrap();
-        assert_eq!(stats.quota_used_bytes, 100);
+    fn rejected_rate_does_not_consume_shared_quota() {
+        let mut manager =
+            PerClientBandwidthManager::new(policy(1_000, 1_000, 10_000, 20_000)).unwrap();
+        manager.add_client("alice", None).unwrap();
+        assert_eq!(
+            manager.check("alice", BandwidthDirection::Uplink, 1_000),
+            BandwidthDecision::Allowed
+        );
+        assert_eq!(
+            manager.check("alice", BandwidthDirection::Uplink, 1),
+            BandwidthDecision::RateLimited
+        );
+        assert_eq!(manager.stats("alice").unwrap().daily_used_bytes, 1_000);
     }
 
     #[test]
-    fn test_manager_disabled_defaults_allow_all() {
-        let mut mgr = PerClientBandwidthManager::new(0, 0, 0, Duration::from_secs(60));
-        // Everything disabled → all sends allowed, no quota consumed.
-        assert!(mgr.check_send("alice", u64::MAX as usize));
-        let stats = mgr.stats("alice").unwrap();
-        assert_eq!(stats.quota_used_bytes, 0);
-        assert_eq!(stats.quota_remaining_bytes, u64::MAX);
+    fn live_policy_update_preserves_usage_until_explicit_reset() {
+        let mut manager =
+            PerClientBandwidthManager::new(policy(10_000, 10_000, 10_000, 20_000)).unwrap();
+        manager.add_client("alice", None).unwrap();
+        assert_eq!(
+            manager.check("alice", BandwidthDirection::Uplink, 1_000),
+            BandwidthDecision::Allowed
+        );
+        manager.update_client_policy("alice", policy(20_000, 20_000, 2_000, 3_000)).unwrap();
+        assert_eq!(manager.stats("alice").unwrap().daily_used_bytes, 1_000);
+        assert!(manager.reset_client_quota("alice"));
+        assert_eq!(manager.stats("alice").unwrap().daily_used_bytes, 0);
+    }
+
+    #[test]
+    fn invalid_policy_is_rejected() {
+        assert!(PerClientBandwidthManager::new(policy(1_000, 0, 0, 0)).is_err());
+        let mut invalid_weight = policy(0, 0, 0, 0);
+        invalid_weight.weight = 0;
+        assert!(PerClientBandwidthManager::new(invalid_weight).is_err());
+    }
+
+    #[test]
+    fn remove_client_erases_the_only_session_entry() {
+        let mut manager = PerClientBandwidthManager::new(BandwidthPolicy::default()).unwrap();
+        manager.add_client("alice", None).unwrap();
+        assert_eq!(manager.len(), 1);
+        manager.remove_client("alice");
+        assert!(manager.is_empty());
+        assert!(manager.stats("alice").is_none());
     }
 }
