@@ -401,6 +401,10 @@ pub struct LiveClientRuntime<'a> {
     fanout_queue: ClientFanoutQueue,
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "boxing LiveClientRuntime would allocate on every server packet acquisition"
+)]
 pub enum LiveClientAcquire<'a> {
     Ready(LiveClientRuntime<'a>),
     Backpressure,

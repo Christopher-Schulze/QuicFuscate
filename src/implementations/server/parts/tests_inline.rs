@@ -918,11 +918,13 @@ mod tests {
 
     #[test]
     fn auth_policy_rejects_before_qkey_registry_lookup() {
-        let mut policy = AuthPolicyConfig::default();
-        policy.backoff_after_failures = 1;
-        policy.block_after_failures = 2;
-        policy.backoff_base = Duration::from_secs(60);
-        policy.backoff_max = Duration::from_secs(60);
+        let policy = AuthPolicyConfig {
+            backoff_after_failures: 1,
+            block_after_failures: 2,
+            backoff_base: Duration::from_secs(60),
+            backoff_max: Duration::from_secs(60),
+            ..AuthPolicyConfig::default()
+        };
         let auth_rate_limiter = Arc::new(std::sync::Mutex::new(
             crate::implementations::server::limits::AuthRateLimiter::new(policy),
         ));
