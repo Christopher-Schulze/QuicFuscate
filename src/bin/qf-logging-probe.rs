@@ -14,7 +14,10 @@ impl LogSink for ProbeSink {
     fn push(&self, _level: log::Level, _msg: &str) {
         self.records.fetch_add(1, Ordering::Relaxed);
         if !self.delay.is_zero() {
-            std::thread::sleep(self.delay);
+            let deadline = Instant::now() + self.delay;
+            while Instant::now() < deadline {
+                std::hint::spin_loop();
+            }
         }
     }
 }
