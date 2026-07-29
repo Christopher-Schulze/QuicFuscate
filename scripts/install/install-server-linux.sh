@@ -13,6 +13,7 @@ This script installs:
 - admin web assets   -> /usr/share/quicfuscate/admin-web
 - config             -> /etc/quicfuscate/quicfuscate.toml (created if missing)
 - env file           -> /etc/quicfuscate/quicfuscate.env (created if missing)
+- qkey registry key  -> /etc/quicfuscate/qkey-registry.key (created if no key source exists)
 - qkey registry      -> /var/lib/quicfuscate/qkeys.json
 - systemd unit       -> /etc/systemd/system/quicfuscate.service
 
@@ -155,6 +156,7 @@ main() {
   local web_dst="/usr/share/quicfuscate/admin-web"
   local state_dir="/var/lib/quicfuscate"
   local qkey_store="/var/lib/quicfuscate/qkeys.json"
+  local qkey_key_file="/etc/quicfuscate/qkey-registry.key"
   local unit_dst="/etc/systemd/system/quicfuscate.service"
 
   while [[ $# -gt 0 ]]; do
@@ -301,6 +303,35 @@ main() {
     admin_password="$(random_password)"
   fi
 
+  local qkey_key_source_configured="0"
+  if [[ -f "$env_dst" ]]; then
+    if grep -Eq '^[[:space:]]*QUICFUSCATE_QKEY_ENC_KEY=' "$env_dst" \
+      && grep -Eq '^[[:space:]]*QUICFUSCATE_QKEY_ENC_KEY_FILE=' "$env_dst"; then
+      echo "error: env file configures conflicting QKey registry key sources" >&2
+      exit 1
+    fi
+    if grep -Eq '^[[:space:]]*QUICFUSCATE_QKEY_ENC_(KEY|KEY_FILE)=' "$env_dst"; then
+      qkey_key_source_configured="1"
+    fi
+  fi
+
+  if [[ "$qkey_key_source_configured" == "0" ]]; then
+    if [[ -L "$qkey_key_file" ]]; then
+      echo "error: refusing symlink QKey registry key file: $qkey_key_file" >&2
+      exit 1
+    fi
+    if [[ -e "$qkey_key_file" && ! -f "$qkey_key_file" ]]; then
+      echo "error: QKey registry key path is not a regular file: $qkey_key_file" >&2
+      exit 1
+    fi
+    if [[ ! -e "$qkey_key_file" ]]; then
+      umask 0077
+      dd if=/dev/urandom of="$qkey_key_file" bs=32 count=1 status=none
+    fi
+    chown root:quicfuscate "$qkey_key_file"
+    chmod 0640 "$qkey_key_file"
+  fi
+
   if [[ ! -f "$env_dst" ]]; then
     cat >"$env_dst" <<EOF
 # QuicFuscate service environment.
@@ -316,6 +347,7 @@ QUICFUSCATE_ADMIN_USER=${admin_user}
 QUICFUSCATE_ADMIN_PASSWORD=${admin_password}
 QUICFUSCATE_QKEY_STORE=${qkey_store}
 QUICFUSCATE_QKEY_TTL_SECS=${qkey_ttl}
+QUICFUSCATE_QKEY_ENC_KEY_FILE=${qkey_key_file}
 EOF
     chmod 0640 "$env_dst" || true
     chown root:quicfuscate "$env_dst" || true
@@ -324,6 +356,10 @@ EOF
     echo "  pass: ${admin_password}"
   else
     echo "info: env file exists, not overwriting: $env_dst"
+    if [[ "$qkey_key_source_configured" == "0" ]]; then
+      printf '\n# Authenticated QKey registry encryption key.\nQUICFUSCATE_QKEY_ENC_KEY_FILE=%s\n' \
+        "$qkey_key_file" >>"$env_dst"
+    fi
   fi
 
   if [[ ! -f "$qkey_store" ]]; then

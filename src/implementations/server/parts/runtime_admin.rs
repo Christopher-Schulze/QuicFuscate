@@ -713,8 +713,14 @@ impl ServerAdminCore {
 
     pub fn revoke_http_qkey(&self, id: &str) -> AdminResponse {
         let mut registry = self.control_plane.qkeys.lock().unwrap_or_else(|e| e.into_inner());
-        if !registry.revoke(id) {
-            return AdminResponse::error("QKey not found");
+        match registry.revoke(id) {
+            Ok(true) => {}
+            Ok(false) => return AdminResponse::error("QKey not found"),
+            Err(error) => {
+                return AdminResponse::error(format!(
+                    "QKey revocation persistence failed: {error}"
+                ));
+            }
         }
         drop(registry);
         match self.control_plane.actions.send(AdminAction::RevokeQKey(id.to_string())) {

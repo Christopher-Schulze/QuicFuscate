@@ -626,7 +626,8 @@ mod tests {
         let server_config =
             ServerConfig { listen: "127.0.0.1:0".parse().unwrap(), ..ServerConfig::default() };
         let blocked_ips = Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new()));
-        let qkey_registry = Arc::new(std::sync::Mutex::new(QKeyRegistry::new(16, None, None)));
+        let qkey_registry =
+            Arc::new(std::sync::Mutex::new(QKeyRegistry::new_in_memory(16, None)));
         let mut runtime = ServerRuntime::new_standalone_default(
             EngineConfig::default(),
             server_config,
@@ -663,7 +664,8 @@ mod tests {
         let server_config =
             ServerConfig { listen: "127.0.0.1:0".parse().unwrap(), ..ServerConfig::default() };
         let blocked_ips = Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new()));
-        let qkey_registry = Arc::new(std::sync::Mutex::new(QKeyRegistry::new(16, None, None)));
+        let qkey_registry =
+            Arc::new(std::sync::Mutex::new(QKeyRegistry::new_in_memory(16, None)));
         let mut runtime = ServerRuntime::new_standalone_default(
             engine_config,
             server_config,
@@ -715,7 +717,8 @@ mod tests {
         let server_config =
             ServerConfig { listen: "127.0.0.1:0".parse().unwrap(), ..ServerConfig::default() };
         let blocked_ips = Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new()));
-        let qkey_registry = Arc::new(std::sync::Mutex::new(QKeyRegistry::new(16, None, None)));
+        let qkey_registry =
+            Arc::new(std::sync::Mutex::new(QKeyRegistry::new_in_memory(16, None)));
         let mut runtime = ServerRuntime::new_standalone_default(
             EngineConfig::default(),
             server_config,
@@ -1044,7 +1047,8 @@ mod tests {
     async fn test_run_loop_stops_from_admin_shutdown_without_start() {
         let server_config =
             ServerConfig { listen: "127.0.0.1:0".parse().unwrap(), ..ServerConfig::default() };
-        let qkey_registry = Arc::new(std::sync::Mutex::new(QKeyRegistry::new(16, None, None)));
+        let qkey_registry =
+            Arc::new(std::sync::Mutex::new(QKeyRegistry::new_in_memory(16, None)));
         let blocked_ips = Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new()));
         let mut runtime = ServerRuntime::new_standalone_default(
             EngineConfig::default(),
@@ -1256,7 +1260,7 @@ mod tests {
         let blocked_ips = Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new()));
         let client_snapshots = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let (tx, _rx) = mpsc::unbounded_channel::<AdminAction>();
-        let qkeys = Arc::new(std::sync::Mutex::new(QKeyRegistry::new(16, None, None)));
+        let qkeys = Arc::new(std::sync::Mutex::new(QKeyRegistry::new_in_memory(16, None)));
         let core = ServerAdminCore::new(
             metrics,
             blocked_ips.clone(),
@@ -1289,7 +1293,7 @@ mod tests {
         let blocked_ips = Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new()));
         let client_snapshots = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let (tx, _rx) = mpsc::unbounded_channel::<AdminAction>();
-        let qkeys = Arc::new(std::sync::Mutex::new(QKeyRegistry::new(16, None, None)));
+        let qkeys = Arc::new(std::sync::Mutex::new(QKeyRegistry::new_in_memory(16, None)));
         let core = ServerAdminCore::new(
             metrics,
             blocked_ips,

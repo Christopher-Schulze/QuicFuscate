@@ -943,6 +943,20 @@ else
   append_item "qkey_auth_documentation_truth" "fail" "$QKEY_CONFIDENTIALITY_OVERCLAIMS"
 fi
 
+QKEY_REGISTRY_FAIL_OPEN_REFS=$(rg -n --no-messages 'writing plaintext|decryption failed.*plaintext|failed ciphertext.*plaintext|decrypt.*fallback.*plaintext' src/implementations/server/qkey_registry.rs src/implementations/server/qkey_registry_storage.rs || true)
+if [[ -z "$QKEY_REGISTRY_FAIL_OPEN_REFS" ]] \
+  && rg -F -- 'pub fn open(' src/implementations/server/qkey_registry.rs >/dev/null \
+  && rg -F -- ') -> Result<Self, QKeyRegistryError>' src/implementations/server/qkey_registry.rs >/dev/null \
+  && rg -F -- 'map_err(std::io::Error::other)?' src/implementations/server/parts/runtime_impl.rs >/dev/null \
+  && rg -F -- 'QUICFUSCATE_QKEY_ENC_KEY_FILE' src/implementations/server/qkey_registry_storage.rs scripts/install/install-server-linux.sh docs/DOCUMENTATION.md >/dev/null \
+  && rg -F -- 'QUICFUSCATE_QKEY_ENC_PREVIOUS_KEY_FILE' src/implementations/server/qkey_registry_storage.rs docs/DOCUMENTATION.md >/dev/null; then
+  pass "QKey registry encryption remains versioned, key-file capable, and fail closed at startup"
+  append_item "qkey_registry_fail_closed_encryption" "ok" "startup propagation, production key-file source, rotation source, and no plaintext fallback remain present"
+else
+  fail_critical "QKey registry fail-closed encryption contract is incomplete"
+  append_item "qkey_registry_fail_closed_encryption" "fail" "${QKEY_REGISTRY_FAIL_OPEN_REFS:-missing startup propagation, key-file source, rotation source, installer default, or documentation}"
+fi
+
 # 12) Detect acceleration exports with no runtime references outside their defining module.
 DEAD_ACCEL_EXPORTS=(
 )

@@ -382,7 +382,7 @@ pub fn initialize_standalone_server_bootstrap(
     admin_log_buffer_override: Option<Arc<self::admin_logs::AdminLogBuffer>>,
     qkey_ttl_override: Option<u64>,
     qkey_store_override: Option<std::path::PathBuf>,
-) -> StandaloneServerBootstrapState {
+) -> Result<StandaloneServerBootstrapState, self::qkey_registry::QKeyRegistryError> {
     let admin_log_buffer = admin_log_buffer_override
         .unwrap_or_else(|| Arc::new(self::admin_logs::AdminLogBuffer::new(4096)));
     let initial_logging_mode = load_persisted_logging_mode(config_path);
@@ -399,19 +399,19 @@ pub fn initialize_standalone_server_bootstrap(
 
     let qkey_ttl_secs = resolve_qkey_ttl_secs(qkey_ttl_override);
     let qkey_store_path = resolve_qkey_store_path(config_path, qkey_store_override);
-    let qkey_registry = Arc::new(std::sync::Mutex::new(QKeyRegistry::new(
+    let qkey_registry = Arc::new(std::sync::Mutex::new(QKeyRegistry::open(
         200,
-        Some(qkey_store_path),
+        qkey_store_path,
         qkey_ttl_secs,
-    )));
+    )?));
 
-    StandaloneServerBootstrapState {
+    Ok(StandaloneServerBootstrapState {
         admin_log_buffer,
         initial_logging_mode,
         blocked_ips_path,
         blocked_ips,
         qkey_registry,
-    }
+    })
 }
 
 pub(crate) fn read_runtime_config(config_path: Option<&std::path::Path>) -> AdminResponse {

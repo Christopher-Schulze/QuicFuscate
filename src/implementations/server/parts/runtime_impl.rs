@@ -235,7 +235,8 @@ impl ServerRuntime {
             admin_log_buffer_override,
             qkey_ttl_override,
             qkey_store_override,
-        );
+        )
+        .map_err(std::io::Error::other)?;
         Self::new_standalone_with_bootstrap(
             engine_config,
             server_config,

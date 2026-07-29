@@ -188,8 +188,8 @@ Attack surface and control mapping:
   - controls: Argon2 hashes, `HttpOnly` cookies, `SameSite=Strict`, secure-cookie behavior tied to HTTPS forwarding, per-IP failed-login throttling and lockout, password-change lock (`423`) paths, same-origin POST validation (`Origin` host+port must match `Host` header when present; dev proxies must not rewrite `Host` via `changeOrigin`), and per-session CSRF token checks on authenticated POST routes.
   - verification: `implementations::server::admin_http` tests for lockout, throttling, cookie flags, lock removal, and cross-origin POST rejection.
 - QKey issuance and revocation surface:
-  - controls: strict QKey parsing and canonicalization, stable token IDs, zeroizing raw-token and decoded-token owners from issuance/import through hashing and live authentication, TTL normalization, revoke path validation, persisted registry constraints, revoked-key rejection during initial auth, SessionId-to-QKey runtime tracking, active-session close on admin revoke, pending-auth revocation race prevention, scheduled revocation processing, and runtime auth-state rebind on source-address churn by DCID/source-id matching.
-  - verification: `implementations::server::qkey_registry` tests, admin HTTP QKey API tests, runtime revocation tests, and `qkey_auth_tests::engine_qkey_id_matches_registry_qkey_id`.
+  - controls: strict QKey parsing and canonicalization, stable token IDs, zeroizing raw-token and decoded-token owners from issuance/import through hashing and live authentication, a versioned authenticated registry envelope, protected raw-key files, fail-closed startup and mutation errors, atomic plaintext migration and current/previous-key rotation, TTL normalization, revoke path validation, persisted registry constraints, revoked-key rejection during initial auth, SessionId-to-QKey runtime tracking, active-session close on admin revoke, pending-auth revocation race prevention, scheduled revocation processing, and runtime auth-state rebind on source-address churn by DCID/source-id matching.
+  - verification: `implementations::server::qkey_registry` and `qkey_registry_storage` tests cover registry transactions, envelope authentication, corruption, key mismatch, migration, rotation, permissions, and zeroization; `scripts/tests/suites/test-qkey-registry-encryption.sh` proves real-process migration, restart, plaintext-downgrade rejection, wrong-key rejection, tamper rejection, rotation, permissions, leak absence, and cleanup against an exact binary; admin HTTP QKey API tests, runtime revocation tests, and `qkey_auth_tests::engine_qkey_id_matches_registry_qkey_id` cover the surrounding runtime contract.
 - Engine connect-state surface:
   - controls: `engine.connect()` is handshake-aware and only sets `Connected` after runtime handshake establishment within a bounded timeout.
   - verification: `engine::engine::tests::test_engine_connect_disconnect`.
@@ -376,7 +376,7 @@ This document provides comprehensive technical documentation for the system arch
 - Shared UI packages: `packages/ui` (shared Svelte 5 components: Switch, Select, Toast, ConfirmDialog, Skeleton, GlassCard, ErrorBoundary, SettingRow, AboutContent; plus ripple action, cn utility, toast store, and `createCopyFeedback` hook for clipboard-write + timed visual feedback). `ErrorBoundary` is a real Svelte boundary wrapper that can catch child render failures and render a supplied fallback. `packages/ui` has its own vitest config with 82 unit tests (9 files) under `scripts/tests/frontend/shared-ui/unit/`. `packages/theme` provides the shared CSS layer (glass morphism, layout, tokens, buttons, animations, login, scrollbar).
 - QKey: server-issued connection key string (`QKey-...`) that embeds connection parameters (remote, SNI), optional policy presets (stealth/FEC), and a bearer token. QKeys are generated in the Web Admin UI and must be treated like passwords.
 - Raw QKeys are one-time reveal credentials: the server returns the full credential at issuance time, but registry/list surfaces remain metadata-only and do not reconstruct raw QKey material later.
-- Admin control plane: `src/implementations/server/admin_http.rs` and `src/implementations/server/qkey_registry.rs` provide server-authoritative QKey issuance/revocation, persistence, and runtime policy enforcement surfaces.
+- Admin control plane: `src/implementations/server/admin_http.rs`, `src/implementations/server/qkey_registry.rs`, and `src/implementations/server/qkey_registry_storage.rs` provide server-authoritative QKey issuance/revocation, fail-closed encrypted persistence, and runtime policy enforcement surfaces.
 - Standalone CLI server runtime: `src/implementations/server/mod.rs::ServerRuntime::new_standalone(...)` owns standalone UDP socket bootstrap, live-state bootstrap, accept-loop ownership, optional standalone TUN setup, and auxiliary shutdown/control-plane signal registration for metrics, Unix admin, and admin-web services.
 - Graceful server lifecycle: SIGINT, SIGTERM, admin shutdown, and authenticated `POST /api/drain` enter the same `Running -> Draining -> Stopped` state machine. Draining rejects new clients immediately, preserves established sessions until they close or `[engine] shutdown_timeout_ms` expires, flushes final QUIC CONNECTION_CLOSE packets, then tears down auxiliary services and host resources. `GET /api/drain/status` reports lifecycle, active connections, grace, and elapsed time. SIGHUP validates and applies supported runtime config changes without restarting. systemd receives READY, RELOADING, STOPPING, STATUS, and configured watchdog notifications.
 - Standalone runtime config reload: the server module owns runtime reload normalization for stealth overrides, optimize normalization, and `transport.*` TOML overrides. Reload is explicitly `NextConnectionOnly`: the single live server loop serializes profile replacement with connection construction, while every existing session remains immutable. Admin acknowledgement, runtime logs, and audit records state this scope and the unchanged active-session count. `main.rs` only forwards reload intent and transport state into that server-owned path.
@@ -1463,6 +1463,7 @@ Server implementation (`src/implementations/server/`):
 - `src/implementations/server/limits.rs` - rate limiting and connection limiting primitives.
 - `src/implementations/server/metrics.rs` - runtime metrics registry and HTTP metrics server surface (`MetricsServer` active in CLI/runtime, `GlobalMetricsServer` retained for test/compat coverage).
 - `src/implementations/server/qkey_registry.rs` - persistent QKey records, ids, token hash management.
+- `src/implementations/server/qkey_registry_storage.rs` - versioned authenticated QKey registry envelope, zeroizing keyring, atomic migration, recovery, and rotation.
 - `src/implementations/server/routing.rs` - routing/NAT/forwarding integration and WAN interface detection.
 - `src/implementations/server/session.rs` - session ids, session state and session manager.
 - `src/implementations/server/systemd.rs` - systemd-oriented service/unit integration helpers.
@@ -2214,6 +2215,7 @@ Preferred Linux install flow uses the scripts under `scripts/`:
 FHS paths used by the installer:
 - config: `/etc/quicfuscate/quicfuscate.toml`
 - env (admin creds, bind, paths): `/etc/quicfuscate/quicfuscate.env`
+- QKey registry encryption key: `/etc/quicfuscate/qkey-registry.key`
 - web assets: `/usr/share/quicfuscate/admin-web`
 - state (QKey registry): `/var/lib/quicfuscate/qkeys.json` (via `quicfuscate server --qkey-store`)
 
@@ -2225,7 +2227,8 @@ Linux server startup resolves `--drop-user` and `--drop-group` before opening pr
 
 Idempotency behavior of `scripts/install/install-server-linux.sh`:
 - Existing `quicfuscate.toml` is preserved (created only if missing).
-- Existing `quicfuscate.env` is preserved (created only if missing).
+- Existing `quicfuscate.env` entries are preserved; a missing QKey registry key-file source is appended without replacing the file.
+- Existing `qkey-registry.key` is preserved. A missing key is generated from `/dev/urandom` as 32 raw bytes and installed as `root:quicfuscate` mode `0640`.
 - Existing `qkeys.json` is preserved (created only if missing).
 - Binary, assets, and unit template are reinstalled safely on reruns.
 - `systemctl daemon-reload` is called on every install run.
@@ -2431,6 +2434,14 @@ Server Options (selected):
                             retention, and flush bounds come from the [audit] config.
     --no-drop-privileges    Skip privilege dropping (debugging only, never use in production)
 ```
+
+QKey registry encryption is configured only through environment variables, so master-key material never appears in process arguments:
+
+- `QUICFUSCATE_QKEY_ENC_KEY_FILE`: current 32-byte raw key file or 64-character hexadecimal key file. Production deployments should use this source with mode `0600` or `0640`; symlinks and other-readable or group-writable files are rejected.
+- `QUICFUSCATE_QKEY_ENC_KEY`: current 64-character hexadecimal key supplied directly through the environment. Do not configure it together with the current key-file source.
+- `QUICFUSCATE_QKEY_ENC_PREVIOUS_KEY_FILE` or `QUICFUSCATE_QKEY_ENC_PREVIOUS_KEY`: optional previous key used only to authenticate and rotate an existing registry. A previous key requires a distinct current key.
+
+Rotation procedure: install the new current key, retain the old current key as the previous source, and restart. Startup authenticates the old envelope and atomically rewrites it under the new key while retaining only encrypted recovery data. After one successful restart and registry operation, remove the previous source and restart again. Never remove the old source before the first successful rotation startup.
 
 Verify the active file plus its checkpoint-declared retained segments without starting a client or server:
 
@@ -2696,7 +2707,7 @@ Notes:
 The admin HTTP server persists the following state to JSON files derived from the main config path:
 - **Blocked IPs** (`<config>.blocked.json`): loaded on startup, written on every block/unblock action.
 - **Logging mode** (`<config>.logging.json`): loaded on startup, written on every mode change. When set to `no-log`, the server immediately calls `log::set_max_level(LevelFilter::Off)` to suppress all runtime logging output including to stderr and syslog.
-- **QKey registry** (`--qkey-store` or `<config>.qkeys.json`): loaded on startup, written on generate/revoke.
+- **QKey registry** (`--qkey-store` or `<config>.qkeys.json`): loaded on startup and transactionally written on generate/revoke. With a current encryption key configured, storage uses the `QFQREG` version-1 ChaCha20-Poly1305 envelope whose authenticated header binds magic, version, flags, key identifier, and nonce. Missing/wrong keys, corrupt or truncated ciphertext, unsupported versions, insecure permissions, serialization failures, and I/O failures abort startup or mutation without plaintext fallback. Plaintext remains supported only when no encryption source is configured. Enabling a key atomically migrates plaintext to encrypted primary and encrypted recovery files. Legacy `QFENC1` files require a valid configured key and are immediately upgraded.
 - **Admin auth** (`<config_dir>/admin-auth.json`): Argon2 PHC string (`password_phc`) with `updated_at` timestamp and `requires_password_change`. File permissions set to `0o600` on Unix. Loaded on startup; written on credential change.
 - Repository-local fallback paths (when no explicit `--config`/`--qkey-store` parent applies): `config/local/qkeys.json` and `config/local/admin-auth.json`.
 

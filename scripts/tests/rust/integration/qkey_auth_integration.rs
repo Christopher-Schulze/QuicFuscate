@@ -123,7 +123,7 @@ fn simulate_qkey_http3_auth(
     let expected_hash = token_sha256_hex_from_token_hex(expected_token_hex)
         .ok_or_else(|| "expected token hash failed".to_string())?;
 
-    let mut reg = QKeyRegistry::new(200, None, None);
+    let mut reg = QKeyRegistry::new_in_memory(200, None);
     reg.insert(qkey_value.to_string(), qkey::QKeyToken::from(expected_token_hex), None)
         .map_err(|e| format!("registry insert failed: {e}"))?;
     let record = reg

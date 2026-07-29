@@ -30,6 +30,7 @@ pub mod isolation;
 mod limits;
 pub mod metrics;
 pub mod qkey_registry;
+mod qkey_registry_storage;
 pub mod replay_window;
 pub mod revocation;
 mod routing;

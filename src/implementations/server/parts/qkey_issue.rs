@@ -242,7 +242,9 @@ fn issue_qkey(
     let qkey_value = qkey::generate(&config);
     let token = config.token.take().ok_or_else(|| "Generated QKey missing token".to_string())?;
     let QKeyEntry { created_at, expires_at, .. } =
-        registry.insert_with_ttl(qkey_value.clone(), token, params.ttl_seconds, name)?;
+        registry
+            .insert_with_ttl(qkey_value.clone(), token, params.ttl_seconds, name)
+            .map_err(|error| error.to_string())?;
     Ok(IssuedQKey { qkey: qkey_value, created_at, expires_at })
 }
 
