@@ -1134,6 +1134,13 @@ mod tests {
         let _ = KillSwitch::cleanup_stale_rules();
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_stale_rule_cleanup_is_native_verified_and_idempotent() {
+        KillSwitch::cleanup_stale_rules().unwrap();
+        KillSwitch::cleanup_stale_rules().unwrap();
+    }
+
     // ------------------------------------------------------------------
     // nftables kill switch rule generation tests
     // ------------------------------------------------------------------

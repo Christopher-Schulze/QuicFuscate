@@ -350,9 +350,7 @@ impl ClientBackend {
         self.state = ConnectionState::Disconnecting;
         log::info!("Disconnecting");
 
-        if let Err(error) = self.cleanup_owned_resources() {
-            return Err(error);
-        }
+        self.cleanup_owned_resources()?;
 
         self.stats = ClientStatsInternal::default();
         self.state = ConnectionState::Disconnected;

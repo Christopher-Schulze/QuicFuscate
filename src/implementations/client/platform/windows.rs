@@ -41,15 +41,6 @@ impl WindowsPlatform {
         Ok(())
     }
 
-    fn interface_exists(&self, name: &str) -> Result<bool, PlatformError> {
-        let output = Command::new("netsh")
-            .args(["interface", "show", "interface", &format!("name=\"{}\"", name)])
-            .output()
-            .map_err(|e| PlatformError::CommandFailed(e.to_string()))?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(output.status.success() && stdout.contains(name))
-    }
-
     fn set_active_interface(&self, name: Option<String>) {
         *self.tun_interface.lock().unwrap_or_else(|e| e.into_inner()) = name;
     }
@@ -91,53 +82,17 @@ impl PlatformBackend for WindowsPlatform {
         Err(PlatformError::PermissionDenied("Please run as Administrator".to_string()))
     }
 
-    /// Create and configure a TUN device on Windows.
+    /// Reject the legacy Windows adapter path without mutating host state.
     ///
-    /// # WinTUN Prerequisite
-    ///
-    /// Windows does not ship with a built-in TUN driver. The WinTUN driver must
-    /// be installed before QuicFuscate can create tunnel interfaces:
-    ///
-    /// 1. Download the WinTUN driver from <https://www.wintun.net/>
-    /// 2. Install the driver (requires Administrator privileges)
-    /// 3. Create a TUN adapter named "QuicFuscate" (or the name in your config)
-    ///
-    /// Without WinTUN, this function returns `PlatformError::Unsupported` with
-    /// a descriptive message including the download URL.
-    fn create_tun(&self, config: &TunDeviceConfig) -> Result<TunHandle, PlatformError> {
-        let name = config.name.clone().unwrap_or_else(|| "QuicFuscate".to_string());
-
-        if !self.interface_exists(&name)? {
-            return Err(PlatformError::Unsupported(format!(
-                "TUN interface '{}' not found. The WinTUN driver is required on Windows.\n\
-                 \n\
-                 To fix this:\n\
-                 1. Download WinTUN from https://www.wintun.net/\n\
-                 2. Install the driver (requires Administrator)\n\
-                 3. Create a TUN adapter named '{}'\n\
-                 4. Run QuicFuscate as Administrator",
-                name, name
-            )));
-        }
-
-        log::info!("Configuring tunnel interface: {}", name);
-
-        // Configure IP address via netsh
-        self.run_netsh(&[
-            "interface",
-            "ip",
-            "set",
-            "address",
-            &format!("name=\"{}\"", name),
-            "static",
-            &config.address.to_string(),
-            &prefix_to_netmask(config.netmask),
-        ])?;
-        self.set_active_interface(Some(name.clone()));
-
-        log::info!("Created TUN device {} with IP {}", name, config.address);
-
-        Ok(TunHandle { name, id: 0, handle: 0 })
+    /// The native Wintun owner in `src/interface/wintun.rs` is the only valid
+    /// Windows data-plane path. This compatibility backend cannot prove
+    /// ownership of a pre-existing adapter or restore its prior address/DNS
+    /// state, so activation must fail before executing `netsh`.
+    fn create_tun(&self, _config: &TunDeviceConfig) -> Result<TunHandle, PlatformError> {
+        Err(PlatformError::Unsupported(
+            "legacy Windows PlatformBackend cannot own adapter lifecycle; use the native Wintun data-plane implementation"
+                .to_string(),
+        ))
     }
 
     fn destroy_tun(&self, handle: &mut TunHandle) -> Result<(), PlatformError> {
@@ -281,5 +236,13 @@ mod tests {
         assert_eq!(prefix_to_netmask(16), "255.255.0.0");
         assert_eq!(prefix_to_netmask(8), "255.0.0.0");
         assert_eq!(prefix_to_netmask(32), "255.255.255.255");
+    }
+
+    #[test]
+    fn legacy_create_tun_fails_closed_before_host_mutation() {
+        let platform = WindowsPlatform::new();
+        let error = platform.create_tun(&TunDeviceConfig::default()).unwrap_err();
+        assert!(matches!(error, PlatformError::Unsupported(_)));
+        assert!(platform.active_interface().is_err());
     }
 }

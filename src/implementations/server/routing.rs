@@ -1233,6 +1233,19 @@ mod tests {
         assert_eq!(mgr.calculate_subnet(), "10.8.0.0/24");
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_stale_nat_cleanup_is_native_verified_and_idempotent() {
+        let manager = RoutingManager::new(
+            "QuicFuscate".to_string(),
+            Ipv4Addr::new(10, 8, 0, 1),
+            Ipv4Addr::new(255, 255, 255, 0),
+            "Ethernet".to_string(),
+        );
+        manager.cleanup_stale().unwrap();
+        manager.cleanup_stale().unwrap();
+    }
+
     #[test]
     fn test_parse_wan_interface_uses_dev_field() {
         let route = "default via 192.168.1.1 dev enp5s0 proto dhcp src 192.168.1.50 metric 100";
