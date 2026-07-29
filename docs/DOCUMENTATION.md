@@ -269,7 +269,7 @@ Server hardening baseline:
 - Restrict `config/` and persistent state paths to owner-only access.
 - Configure log rotation and retention; avoid logging sensitive token material.
 - Back up config and QKey registry on controlled intervals with encrypted storage.
-- Enable memory locking (`[security] lock_memory = true`, `lock_blocks = true`) to prevent key material and crypto buffers from being swapped to disk. `LimitMEMLOCK=infinity` in systemd or `CAP_IPC_LOCK` enables current-and-future process locking; finite limits safely lock current pages only and retain best-effort per-block locking.
+- Enable memory locking (`[security] lock_memory = true`, `lock_blocks = true`) to prevent key material and crypto buffers from being swapped to disk. The TLS private-key allocation and MemoryPool blocks are locked during privileged initialization. When Linux privilege reduction is configured, process-wide locking runs after setxid so glibc never broadcasts the transition across pre-locked runtime stacks. `LimitMEMLOCK=infinity` in systemd enables current-and-future process locking; finite limits retain the individually locked boundary and attempt current-page locking with explicit failure reporting.
 - Enable tamper-evident audit logging via `--audit-log <path>` to record security-relevant authentication, connection, QKey, admin, privilege, configuration, firewall, and lifecycle events in a hash-chained NDJSON file with mode `0o600`.
 - Verify the complete persisted chain with `quicfuscate verify-audit-log <path>` before trusting or archiving an audit file.
 
@@ -322,7 +322,7 @@ The server runtime emits tamper-evident audit events to a hash-chained NDJSON lo
 
 **Runtime proof:** `scripts/tests/suites/test-graceful-shutdown.sh` starts a real server with `--audit-log`, authenticates two real clients, performs authenticated admin drain and config reload operations, observes connection closure, enforces minimum event counts, and validates the persisted chain through `verify-audit-log`.
 
-**Memory locking (TODO-516):** When `[security] lock_memory = true` (default), the server reads `RLIMIT_MEMLOCK` before loading key material. An unlimited budget uses `mlockall(MCL_CURRENT | MCL_FUTURE)`; a finite or unreadable budget uses `MCL_CURRENT` so a successful call cannot make later allocations fail with `ENOMEM`. When `lock_blocks = true` (default), each `MemoryPool` block is individually `mlock`ed on allocation via `MemoryPool::set_lock_blocks()`. `LimitMEMLOCK=infinity` in the systemd unit enables full current-and-future protection. The production boundary test proves real locking where supported and explicit graceful degradation otherwise; native ARM64 Omega evidence recorded `VmLck: 967860 kB` with flags 3. Failures remain warnings and block locking remains best-effort.
+**Memory locking (TODO-516):** When `[security] lock_memory = true` (default), an unlimited `RLIMIT_MEMLOCK` uses `mlockall(MCL_CURRENT | MCL_FUTURE)`; a finite or unreadable budget uses `MCL_CURRENT` so a successful call cannot make later allocations fail with `ENOMEM`. With Linux privilege reduction, `mlockall` runs after the verified setxid transition because native ARM64 proof showed that carrying pre-locked runtime and signal stacks through glibc's multi-threaded setxid broadcast can fault. The TLS private-key allocation is parsed and individually locked before the drop, and `lock_blocks = true` individually locks each `MemoryPool` block on allocation. `LimitMEMLOCK=infinity` in the systemd unit survives the UID/GID transition and enables full current-and-future protection. Finite-limit failures remain explicit warnings while the individual key and pool locks stay active.
 
 ## Introduction & Purpose
 QuicFuscate is a forked stealth transport and VPN runtime built around a custom QUIC-like transport/data-plane posture, hybrid adaptive FEC, and a cohesive stealth stack. The canonical runtime is designed for strong censorship resilience and high-throughput operation under this forked protocol contract. It is not a drop-in upstream QUIC implementation.
@@ -2048,13 +2048,12 @@ Wants=network-online.target
 
 [Service]
 Type=notify
-User=quicfuscate
-Group=quicfuscate
 ExecStart=/opt/quicfuscate/bin/quicfuscate server --config /etc/quicfuscate/quicfuscate.toml
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65536
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_CHOWN CAP_SETGID CAP_SETUID
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_CHOWN CAP_SETGID CAP_SETUID
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
@@ -2194,6 +2193,10 @@ FHS paths used by the installer:
 - state (QKey registry): `/var/lib/quicfuscate/qkeys.json` (via `quicfuscate server --qkey-store`)
 
 Installer flow is `scripts/install/install-server-linux.sh` together with `scripts/install/quicfuscate-server.service`.
+
+Linux server startup resolves `--drop-user` and `--drop-group` before opening privileged resources. Selectors containing only decimal digits are treated strictly as numeric UID/GID values; all other selectors are resolved as names through NSS. TLS certificate and private-key PEM are validated and retained in memory before the transition, so new connections never reopen a root-owned key file. After socket, TUN, and routing setup, the process clears supplementary groups, sets real/effective/saved GID and UID, clears effective/permitted/inheritable/ambient capabilities, and verifies every Linux thread has the target IDs, empty groups, zero capability sets, and `PR_SET_NO_NEW_PRIVS`. The destructive root-regain proof is isolated in `qf-privilege-probe`; it is not run inside the multi-threaded service. The shipped systemd unit root-starts with only `CAP_NET_ADMIN`, `CAP_NET_BIND_SERVICE`, `CAP_NET_RAW`, `CAP_CHOWN`, `CAP_SETGID`, and `CAP_SETUID`, and the process removes all capabilities before accepting traffic. Service-manager confinement and privileged host-routing teardown remain platform responsibilities.
+
+`quicfuscate capabilities --json --user quicfuscate --group quicfuscate --tun --listen-port 4433` reports real/effective/saved UID and GID, supplementary groups, effective/permitted/inheritable/ambient/bounding capability masks, `no_new_privileges`, target-account resolution, and readiness for the requested startup operations.
 
 Idempotency behavior of `scripts/install/install-server-linux.sh`:
 - Existing `quicfuscate.toml` is preserved (created only if missing).
@@ -4277,8 +4280,8 @@ level = "debug"
 - The runtime falls back to sendmmsg automatically
 
 **Permission denied for TUN:**
-- Set capability: `sudo setcap cap_net_admin+ep /opt/quicfuscate/bin/quicfuscate`
-- Or run via systemd with `AmbientCapabilities=CAP_NET_ADMIN`
+- Use the shipped systemd unit with `CAP_NET_ADMIN`, `CAP_NET_BIND_SERVICE`, `CAP_NET_RAW`, `CAP_CHOWN`, `CAP_SETGID`, and `CAP_SETUID` in both `AmbientCapabilities` and `CapabilityBoundingSet`.
+- Run `quicfuscate capabilities --json --tun` before startup to identify the exact missing capability or target-account failure.
 
 #### macOS
 **utun interface creation fails:**

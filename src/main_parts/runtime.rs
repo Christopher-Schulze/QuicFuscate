@@ -20,15 +20,35 @@ fn main() -> std::io::Result<()> {
     if args.iter().any(|a| a == "--verbose" || a == "-v") {
         std::env::set_var("RUST_LOG", "info");
     }
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(worker_threads)
-        .enable_all()
-        .build()?;
-    runtime.block_on(async_main())
+    let cli = Cli::parse();
+    if let Commands::Capabilities { json, user, group, tun, listen_port } = &cli.command {
+        return run_capabilities_report(*json, user, group, *tun, *listen_port);
+    }
+    let harden_server_runtime =
+        matches!(&cli.command, Commands::Server { no_drop_privileges: false, .. });
+    #[cfg(target_os = "linux")]
+    if harden_server_runtime {
+        quicfuscate::privilege::enable_no_new_privileges()
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+    }
+    let mut runtime_builder = tokio::runtime::Builder::new_multi_thread();
+    runtime_builder.worker_threads(worker_threads).enable_all();
+    #[cfg(target_os = "linux")]
+    if harden_server_runtime {
+        runtime_builder.on_thread_start(|| {
+            if let Err(error) = quicfuscate::privilege::harden_runtime_worker_thread() {
+                eprintln!("fatal: Tokio worker privilege hardening failed: {error}");
+                std::process::abort();
+            }
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = harden_server_runtime;
+    let runtime = runtime_builder.build()?;
+    runtime.block_on(async_main(cli))
 }
 
-async fn async_main() -> std::io::Result<()> {
-    let cli = Cli::parse();
+async fn async_main(cli: Cli) -> std::io::Result<()> {
     let admin_log_buffer =
         Arc::new(quicfuscate::implementations::server::admin_logs::AdminLogBuffer::new(4096));
     if ADMIN_LOG_BUFFER.set(admin_log_buffer.clone()).is_err() {
@@ -162,6 +182,8 @@ async fn async_main() -> std::io::Result<()> {
             qkey_store,
             allow_client_to_client,
             no_drop_privileges,
+            drop_user,
+            drop_group,
             audit_log,
         } => {
             let fec_mode = resolve_cli_fec_mode_override(shared.fec_mode);
@@ -201,6 +223,8 @@ async fn async_main() -> std::io::Result<()> {
                 qkey_store,
                 allow_client_to_client,
                 no_drop_privileges,
+                &drop_user,
+                &drop_group,
                 audit_log,
             )
             .await?;
@@ -235,20 +259,86 @@ async fn async_main() -> std::io::Result<()> {
         Commands::NetBench { iterations, payload, warmup, json } => {
             run_net_bench(iterations, payload, warmup, json)?;
         }
-        Commands::Capabilities { json: _ } => {
-            let _json = serde_json::json!({
-                "fec_bench": cfg!(feature = "benches"),
-                "pool_bench": cfg!(feature = "benches"),
-                "crypto_bench": cfg!(feature = "benches"),
-                "net_bench": cfg!(feature = "benches"),
-            });
-            println!("{}", _json);
+        Commands::Capabilities { json, user, group, tun, listen_port } => {
+            run_capabilities_report(json, &user, &group, tun, listen_port)?;
         }
     }
 
     use quicfuscate::telemetry::TELEMETRY_ENABLED;
     if TELEMETRY_ENABLED.load(Ordering::Relaxed) {
         quicfuscate::telemetry::flush();
+    }
+    Ok(())
+}
+
+fn run_capabilities_report(
+    json: bool,
+    user: &str,
+    group: &str,
+    tun: bool,
+    listen_port: u16,
+) -> std::io::Result<()> {
+    let requirements = quicfuscate::privilege::CapabilityRequirements {
+        tun,
+        privileged_bind: listen_port < 1024,
+        privilege_finalize: true,
+        audit_owner: false,
+    };
+    let target = quicfuscate::privilege::inspect_identity(user, group);
+    let mut report =
+        quicfuscate::privilege::try_check_capabilities(target.identity.as_ref(), requirements)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+    report.target_user_exists = target.user_exists;
+    report.target_group_exists = target.group_exists;
+    if json {
+        let mut value = serde_json::to_value(&report)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        if let serde_json::Value::Object(fields) = &mut value {
+            fields.insert(
+                "target_error".to_string(),
+                target
+                    .error
+                    .as_ref()
+                    .map_or(serde_json::Value::Null, |error| {
+                        serde_json::Value::String(error.clone())
+                    }),
+            );
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value)
+                .map_err(|error| std::io::Error::other(error.to_string()))?
+        );
+    } else {
+        println!(
+            "identity uid={}/{}/{} gid={}/{}/{} groups={:?}",
+            report.real_uid,
+            report.effective_uid,
+            report.saved_uid,
+            report.real_gid,
+            report.effective_gid,
+            report.saved_gid,
+            report.supplementary_groups
+        );
+        println!(
+            "capabilities effective={:#x} permitted={:#x} inheritable={:#x} ambient={:#x} bounding={:#x}",
+            report.effective_capabilities,
+            report.permitted_capabilities,
+            report.inheritable_capabilities,
+            report.ambient_capabilities,
+            report.bounding_capabilities
+        );
+        println!(
+            "target user_exists={} group_exists={} match={} requested_ready={}{}",
+            report.target_user_exists,
+            report.target_group_exists,
+            report.target_matches_current_identity,
+            report.ready_for_requested_operations,
+            target
+                .error
+                .as_ref()
+                .map_or(String::new(), |error| format!(" error={error}"))
+        );
     }
     Ok(())
 }

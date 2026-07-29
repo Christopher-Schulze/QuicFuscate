@@ -852,7 +852,9 @@ impl QuicFuscateEngine {
                                 {
                                     return;
                                 }
-                                if let Err(error) = server_runtime.run_standalone(launch).await {
+                                if let Err(error) =
+                                    server_runtime.run_standalone(Box::new(launch)).await
+                                {
                                     log::error!("server loop exited with error: {error}");
                                 }
                             });

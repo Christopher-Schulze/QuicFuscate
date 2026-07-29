@@ -13,16 +13,21 @@
 set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
-B="$PROJECT_ROOT/target/release/quicfuscate"
-CERT="$PROJECT_ROOT/config/local/server.crt"
-KEY="$PROJECT_ROOT/config/local/server.key"
-CA="$PROJECT_ROOT/config/local/ca.crt"
-CERT_DIR="$PROJECT_ROOT/config/local"
+B="${QF_E2E_BINARY:-$PROJECT_ROOT/target/release/quicfuscate}"
+CERT_SOURCE_DIR="$PROJECT_ROOT/config/local"
+CERT_DIR=""
+CERT=""
+KEY=""
+CA=""
 KEEP_ON_FAIL="${QF_E2E_KEEP_ON_FAIL:-0}"
 LOCK_FILE="${QF_E2E_LOCK_FILE:-/tmp/quicfuscate-tun-e2e.lock}"
 LOCK_TIMEOUT="${QF_E2E_LOCK_TIMEOUT:-300}"
+STARTUP_TIMEOUT="${QF_E2E_STARTUP_TIMEOUT:-15}"
+QKEY_STORE="${QF_E2E_QKEY_STORE:-/tmp/qf-tun-e2e-qkeys.json}"
+ADMIN_SOCKET="${QF_E2E_ADMIN_SOCKET:-/tmp/qf-tun-e2e-admin.sock}"
 SERVER_CONFIG_ARGS=()
 CLIENT_CONFIG_ARGS=()
+SERVER_PRIVILEGE_ARGS=(--no-drop-privileges)
 SERVER_PID=""
 CLIENT_PID=""
 NAMESPACES_CREATED=0
@@ -31,6 +36,12 @@ if [ -n "${QF_E2E_SERVER_CONFIG:-}" ]; then
 fi
 if [ -n "${QF_E2E_CLIENT_CONFIG:-}" ]; then
   CLIENT_CONFIG_ARGS=(--config "$QF_E2E_CLIENT_CONFIG")
+fi
+if [ "${QF_E2E_DROP_PRIVILEGES:-0}" = "1" ]; then
+  SERVER_PRIVILEGE_ARGS=(
+    --drop-user "${QF_E2E_DROP_USER:-nobody}"
+    --drop-group "${QF_E2E_DROP_GROUP:-nogroup}"
+  )
 fi
 
 exec 9>"$LOCK_FILE"
@@ -59,6 +70,12 @@ cleanup() {
     ip netns del ns-srv 2>/dev/null
     ip netns del ns-cli 2>/dev/null
     NAMESPACES_CREATED=0
+  fi
+  rm -f "$QKEY_STORE"
+  rm -f "$ADMIN_SOCKET"
+  if [ -n "$CERT_DIR" ] && [ -d "$CERT_DIR" ]; then
+    rm -rf "$CERT_DIR"
+    CERT_DIR=""
   fi
 }
 
@@ -100,9 +117,19 @@ if ip netns list | grep -Eq '^(ns-srv|ns-cli)([[:space:]]|$)'; then
   echo "FAIL: ns-srv or ns-cli already exists; refusing to delete an unowned namespace" >&2
   exit 2
 fi
+if [ -e "$ADMIN_SOCKET" ]; then
+  echo "FAIL: admin socket path already exists; refusing to remove unowned path $ADMIN_SOCKET" >&2
+  exit 2
+fi
 trap cleanup_on_exit EXIT
 
 # --- ensure server cert valid for the client's hardcoded validation SNI ---
+CERT_DIR="$(mktemp -d /tmp/quicfuscate-tun-cert.XXXXXX)"
+CERT="$CERT_DIR/server.crt"
+KEY="$CERT_DIR/server.key"
+CA="$CERT_DIR/ca.crt"
+cp "$CERT_SOURCE_DIR/ca.crt" "$CA"
+cp "$CERT_SOURCE_DIR/ca.key" "$CERT_DIR/ca.key"
 cd "$CERT_DIR" || fail "could not enter certificate directory"
 cat > /tmp/leaf-ext.cnf <<EOF
 basicConstraints=critical,CA:FALSE
@@ -139,14 +166,26 @@ ip netns exec ns-cli ping -c1 -W2 10.10.0.1 2>&1 | grep -E "bytes from|packet lo
 
 # --- start server in ns-srv ---
 ip netns exec ns-srv "$B" server --cert "$CERT" --key "$KEY" \
-  --listen 10.10.0.1:4433 --admin-socket /tmp/qf-admin.sock \
+  --listen 10.10.0.1:4433 --admin-socket "$ADMIN_SOCKET" \
+  --qkey-store "$QKEY_STORE" \
   --tun --tun-name qtun0 --tun-ip 10.0.1.1 --tun-netmask 255.255.255.0 \
-  --no-drop-privileges -v "${SERVER_CONFIG_ARGS[@]}" \
+  "${SERVER_PRIVILEGE_ARGS[@]}" -v "${SERVER_CONFIG_ARGS[@]}" \
   > /tmp/ns-srv.log 2>&1 &
 SERVER_PID=$!
-sleep 3
 
-QKEY=$(echo '{"cmd":"qkey"}' | nc -U /tmp/qf-admin.sock 2>/dev/null | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["data"]["qkey"])' 2>/dev/null)
+QKEY=""
+for ((attempt = 0; attempt < STARTUP_TIMEOUT; attempt++)); do
+  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    break
+  fi
+  if [ -S "$ADMIN_SOCKET" ]; then
+    QKEY=$(echo '{"cmd":"qkey"}' | nc -w 1 -U "$ADMIN_SOCKET" 2>/dev/null | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["data"]["qkey"])' 2>/dev/null)
+    if [ -n "$QKEY" ]; then
+      break
+    fi
+  fi
+  sleep 1
+done
 echo "qkey len: ${#QKEY}"
 if [ -z "$QKEY" ]; then
   cat /tmp/ns-srv.log >&2
@@ -181,10 +220,17 @@ if [ "$(grep -c 'TLS handshake complete' /tmp/ns-cli.log)" = "0" ] || [ "$(grep 
 fi
 
 echo "=== PING THROUGH TUNNEL (cli 10.0.1.2 -> srv 10.0.1.1) ==="
-PING_OUTPUT="$(ip netns exec ns-cli ping -c 5 -W 3 -I qtun0 10.0.1.1 2>&1)"
-echo "$PING_OUTPUT" | tail -7
-if ! echo "$PING_OUTPUT" | grep -q " 0% packet loss"; then
-  fail "ping through tunnel did not achieve 0% packet loss"
+CLIENT_TO_SERVER_PING="$(ip netns exec ns-cli ping -c 5 -W 3 -I qtun0 10.0.1.1 2>&1)"
+echo "$CLIENT_TO_SERVER_PING" | tail -7
+if ! echo "$CLIENT_TO_SERVER_PING" | grep -q " 0% packet loss"; then
+  fail "client-to-server ping through tunnel did not achieve 0% packet loss"
+fi
+
+echo "=== PING THROUGH TUNNEL (srv 10.0.1.1 -> cli 10.0.1.2) ==="
+SERVER_TO_CLIENT_PING="$(ip netns exec ns-srv ping -c 5 -W 3 -I qtun0 10.0.1.2 2>&1)"
+echo "$SERVER_TO_CLIENT_PING" | tail -7
+if ! echo "$SERVER_TO_CLIENT_PING" | grep -q " 0% packet loss"; then
+  fail "server-to-client ping through tunnel did not achieve 0% packet loss"
 fi
 
 echo "=== MASQUE counters ==="

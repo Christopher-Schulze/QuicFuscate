@@ -930,18 +930,17 @@ impl ServerRuntime {
 
     pub async fn run_standalone(
         &mut self,
-        launch: PreparedStandaloneLaunch,
+        mut launch: Box<PreparedStandaloneLaunch>,
     ) -> std::io::Result<()> {
-        let PreparedStandaloneLaunch { services, mut runtime } = launch;
-        let service_config = services.ok_or_else(|| {
+        let service_config = launch.services.take().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
                 "standalone launch services already consumed",
             )
         })?;
-        self.sync_standalone_runtime_metadata(&runtime.standalone_runtime_metadata);
+        self.sync_standalone_runtime_metadata(&launch.runtime.standalone_runtime_metadata);
         self.start_standalone_services(service_config)?;
-        self.run_loop(&mut runtime).await
+        self.run_loop(&mut launch.runtime).await
     }
 
     pub fn handle_admin_action<F>(

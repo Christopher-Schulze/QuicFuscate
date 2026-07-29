@@ -169,6 +169,11 @@ strip = true
 name = "quicfuscate"
 path = "src/main.rs"
 
+[[bin]]
+name = "qf-privilege-probe"
+path = "src/bin/qf-privilege-probe.rs"
+required-features = ["rust-tests"]
+
 [[example]]
 name = "tun_factory_example"
 path = "examples/tun_factory_example.rs"
@@ -464,6 +469,10 @@ path = "scripts/tests/rust/integration/engine_control_plane.rs"
 [[test]]
 name = "it-interface-capabilities"
 path = "scripts/tests/rust/integration/interface_capabilities.rs"
+
+[[test]]
+name = "it-privilege-boundary"
+path = "scripts/tests/rust/integration/privilege_boundary.rs"
 
 [[test]]
 name = "it-masque-runtime-integration"

@@ -315,7 +315,7 @@ static AUDIT_LOG: std::sync::OnceLock<Arc<AuditLog>> = std::sync::OnceLock::new(
 /// function created it — a pre-existing system directory (e.g. `/var/log`)
 /// is never re-owned, which would be a privilege-escalation vector.
 /// This must be called **before** `drop_privileges`.
-pub fn init_audit_log(path: Option<PathBuf>) {
+pub fn init_audit_log(path: Option<PathBuf>, owner: Option<(u32, u32)>) {
     if let Some(p) = path {
         // Track whether *we* created the parent dir so we only chown
         // directories we own — never pre-existing system dirs like /var/log.
@@ -328,7 +328,7 @@ pub fn init_audit_log(path: Option<PathBuf>) {
         match AuditLog::open(p.clone()) {
             Ok(log) => {
                 #[cfg(unix)]
-                secure_audit_file(&p, parent_newly_created);
+                secure_audit_file(&p, parent_newly_created, owner);
                 let _ = AUDIT_LOG.set(Arc::new(log));
             }
             Err(e) => {
@@ -350,7 +350,11 @@ pub fn init_audit_log(path: Option<PathBuf>) {
 /// Extracted from `init_audit_log` so the permission logic is unit-testable
 /// without depending on the process-global `OnceLock`.
 #[cfg(unix)]
-fn secure_audit_file(path: &std::path::Path, parent_newly_created: bool) {
+fn secure_audit_file(
+    path: &std::path::Path,
+    parent_newly_created: bool,
+    owner: Option<(u32, u32)>,
+) {
     use std::os::unix::fs::PermissionsExt;
     if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
         log::warn!("Failed to set audit log permissions on {}: {}", path.display(), e);
@@ -359,52 +363,21 @@ fn secure_audit_file(path: &std::path::Path, parent_newly_created: bool) {
     // pre-existing directory (e.g. /var/log) — that would break other
     // services and open a privilege-escalation path.
     if unsafe { libc::geteuid() } == 0 {
-        chown_to_quicfuscate(path);
-        if parent_newly_created {
-            if let Some(parent) = path.parent() {
-                chown_to_quicfuscate(parent);
+        if let Some((uid, gid)) = owner {
+            chown_to_identity(path, uid, gid);
+            if parent_newly_created {
+                if let Some(parent) = path.parent() {
+                    chown_to_identity(parent, uid, gid);
+                }
             }
         }
     }
 }
 
-/// Chown `path` to the `quicfuscate` user/group (Unix only).
-/// Best-effort: logs a warning on failure but does not abort startup.
+/// Chown `path` to the pre-resolved privilege target.
 #[cfg(unix)]
-fn chown_to_quicfuscate(path: &std::path::Path) {
+fn chown_to_identity(path: &std::path::Path, uid: u32, gid: u32) {
     use std::ffi::CString;
-    let user = match CString::new("quicfuscate") {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-    let group = match CString::new("quicfuscate") {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-    // SAFETY: getpwnam/getgrnam look up the user/group database. The returned
-    // pointer is valid until the next call. We copy uid/gid immediately.
-    let uid = unsafe {
-        let pwd = libc::getpwnam(user.as_ptr());
-        if pwd.is_null() {
-            log::warn!(
-                "chown: user 'quicfuscate' not found — audit log {} will remain root-owned",
-                path.display()
-            );
-            return;
-        }
-        (*pwd).pw_uid
-    };
-    let gid = unsafe {
-        let grp = libc::getgrnam(group.as_ptr());
-        if grp.is_null() {
-            log::warn!(
-                "chown: group 'quicfuscate' not found — audit log {} will remain root-owned",
-                path.display()
-            );
-            return;
-        }
-        (*grp).gr_gid
-    };
     // SAFETY: chown changes ownership. Path is a valid filesystem path.
     let c_path = match CString::new(path.as_os_str().as_encoded_bytes()) {
         Ok(c) => c,
@@ -896,7 +869,7 @@ mod tests {
         let mode_before = std::fs::metadata(&file_path).unwrap().permissions().mode() & 0o777;
         // After the call the mode must be exactly 0o600 regardless of the
         // mode in effect when the file was created.
-        secure_audit_file(&file_path, false);
+        secure_audit_file(&file_path, false, None);
         let mode_after = std::fs::metadata(&file_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(
             mode_after, 0o600,
@@ -922,7 +895,7 @@ mod tests {
         std::fs::write(&file_path, b"seed\n").unwrap();
         let parent_meta_before = std::fs::symlink_metadata(&parent).unwrap();
         // parent_newly_created = false simulates a pre-existing system dir.
-        secure_audit_file(&file_path, false);
+        secure_audit_file(&file_path, false, None);
         let parent_meta_after = std::fs::symlink_metadata(&parent).unwrap();
         // Ownership (uid/gid) must be identical before and after.
         use std::os::unix::fs::MetadataExt;

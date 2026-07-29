@@ -25,7 +25,8 @@ pub fn load_server_identity(
         ));
     }
 
-    crate::qftls::set_tls_cert_key_paths(cert_str, key_str);
+    crate::qftls::preload_tls_server_identity(cert_str, key_str)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string()))?;
     Ok(())
 }
 
@@ -975,4 +976,3 @@ async fn process_live_server_client_datagram(
 
     Ok(LiveClientDatagramResult { auth_result, remove_auth_conn_id })
 }
-

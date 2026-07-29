@@ -344,6 +344,36 @@ fn lock_process_memory() -> std::io::Result<MemoryLockOutcome> {
     Ok(MemoryLockOutcome { flags, current_limit })
 }
 
+#[cfg(unix)]
+fn apply_process_memory_lock() {
+    match lock_process_memory() {
+        Ok(outcome) => {
+            match outcome.current_limit {
+                Some(limit) if outcome.flags == libc::MCL_CURRENT => {
+                    log::warn!(
+                        "RLIMIT_MEMLOCK is finite ({} bytes); locking current pages only to avoid future allocation failures. Set LimitMEMLOCK=infinity for full process locking.",
+                        limit
+                    );
+                }
+                None => {
+                    log::warn!(
+                        "RLIMIT_MEMLOCK query failed. Locked current pages only to avoid future allocation failures."
+                    );
+                }
+                _ => {}
+            }
+            info!("Process memory locked against swap (mlockall flags={})", outcome.flags);
+        }
+        Err(error) => {
+            log::warn!(
+                "mlockall failed: {}. Process memory may be swapped to disk. \
+                 Set LimitMEMLOCK=infinity in systemd or run with CAP_IPC_LOCK.",
+                error
+            );
+        }
+    }
+}
+
 #[cfg(all(test, unix))]
 mod memory_lock_tests {
     use super::*;
@@ -427,13 +457,78 @@ async fn run_server(
     qkey_store: Option<PathBuf>,
     allow_client_to_client: bool,
     no_drop_privileges: bool,
+    drop_user: &str,
+    drop_group: &str,
     audit_log_path: Option<PathBuf>,
 ) -> std::io::Result<()> {
     let config_path = config.as_ref();
     let config_path_ref = config_path.map(PathBuf::as_path);
+    #[cfg(not(target_os = "linux"))]
+    let _ = (no_drop_privileges, drop_user, drop_group);
+
+    #[cfg(target_os = "linux")]
+    let privilege_target = if no_drop_privileges {
+        None
+    } else {
+        Some(
+            quicfuscate::privilege::resolve_identity(drop_user, drop_group).map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("privilege target preflight failed: {error}"),
+                )
+            })?,
+        )
+    };
+    #[cfg(not(target_os = "linux"))]
+    let privilege_target: Option<quicfuscate::privilege::ResolvedIdentity> = None;
+
+    #[cfg(target_os = "linux")]
+    let privilege_requirements = {
+        let listen_port = listen_addr
+            .parse::<std::net::SocketAddr>()
+            .map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("invalid server listen address: {error}"),
+                )
+            })?
+            .port();
+        quicfuscate::privilege::CapabilityRequirements {
+            tun: tun_enable,
+            privileged_bind: listen_port < 1024,
+            privilege_finalize: privilege_target.is_some(),
+            audit_owner: privilege_target.is_some() && audit_log_path.is_some(),
+        }
+    };
+    #[cfg(target_os = "linux")]
+    {
+        let initial = quicfuscate::privilege::try_check_capabilities(
+            privilege_target.as_ref(),
+            privilege_requirements,
+        )
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+        quicfuscate::privilege::validate_startup_capabilities(
+            &initial,
+            privilege_requirements,
+        )
+        .map_err(|error| {
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, error.to_string())
+        })?;
+        if privilege_target.is_some() && !initial.can_drop {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "privilege target does not match the current identity and process is not root",
+            ));
+        }
+    }
 
     // Initialize the global audit log (TODO-515).
-    quicfuscate::audit::init_audit_log(audit_log_path.clone());
+    quicfuscate::audit::init_audit_log(
+        audit_log_path.clone(),
+        privilege_target
+            .as_ref()
+            .map(|identity| (identity.uid, identity.gid)),
+    );
     quicfuscate::audit::audit(
         quicfuscate::audit::AuditEventType::ServerStarted,
         quicfuscate::audit::AuditSeverity::Info,
@@ -504,42 +599,20 @@ async fn run_server(
     }
 
     // Apply memory-locking settings from SecurityConfig (TODO-516).
-    // mlockall must be called before any key material is loaded so that
-    // MCL_FUTURE locks all future allocations. MemoryPool::set_lock_blocks
-    // must be called before the pool is created so blocks are mlocked on alloc.
+    // MemoryPool locking remains active before key material is loaded. Linux
+    // process-wide locking is deferred until after a configured UID/GID drop:
+    // carrying MCL_CURRENT mappings through glibc's multi-threaded setxid
+    // broadcast is not safe on the production ARM64 runtime.
     let (lock_memory, lock_blocks) = engine_cfg_opt
         .as_ref()
         .map(|cfg| (cfg.security.lock_memory, cfg.security.lock_blocks))
         .unwrap_or((true, true)); // defaults: lock on server
-    if lock_memory {
+    let defer_process_memory_lock =
+        cfg!(target_os = "linux") && privilege_target.is_some() && lock_memory;
+    if lock_memory && !defer_process_memory_lock {
         #[cfg(unix)]
         {
-            match lock_process_memory() {
-                Ok(outcome) => {
-                    match outcome.current_limit {
-                        Some(limit) if outcome.flags == libc::MCL_CURRENT => {
-                            log::warn!(
-                                "RLIMIT_MEMLOCK is finite ({} bytes); locking current pages only to avoid future allocation failures. Set LimitMEMLOCK=infinity for full process locking.",
-                                limit
-                            );
-                        }
-                        None => {
-                            log::warn!(
-                                "RLIMIT_MEMLOCK query failed. Locked current pages only to avoid future allocation failures."
-                            );
-                        }
-                        _ => {}
-                    }
-                    info!("Process memory locked against swap (mlockall flags={})", outcome.flags);
-                }
-                Err(error) => {
-                    log::warn!(
-                        "mlockall failed: {}. Process memory may be swapped to disk. \
-                         Set LimitMEMLOCK=infinity in systemd or run with CAP_IPC_LOCK.",
-                        error
-                    );
-                }
-            }
+            apply_process_memory_lock();
         }
         #[cfg(not(unix))]
         {
@@ -661,44 +734,69 @@ async fn run_server(
     // Drop root privileges after all privileged setup (socket bind, TUN,
     // routing, iptables) is complete. File descriptors survive the UID/GID
     // change, so the server can continue operating unprivileged.
-    if !no_drop_privileges {
-        let cap_report = quicfuscate::privilege::check_capabilities();
-        if cap_report.is_root {
-            if tun_enable {
-                runtime.stop().map_err(std::io::Error::other)?;
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "refusing to drop root after TUN routing setup because shutdown could not remove owned firewall rules; run as the quicfuscate systemd user with AmbientCapabilities or use --no-drop-privileges only in an isolated test environment",
-                ));
+    #[cfg(target_os = "linux")]
+    if let Some(identity) = privilege_target.as_ref() {
+        info!(
+            "Finalizing process privileges as {}:{} (uid={}, gid={})",
+            identity.user_name, identity.group_name, identity.uid, identity.gid
+        );
+        let drop_identity = identity.clone();
+        let finalization = tokio::task::spawn_blocking(move || {
+            let report = quicfuscate::privilege::drop_privileges_resolved(&drop_identity)?;
+            let verified_threads =
+                quicfuscate::privilege::verify_process_privilege_state(&drop_identity)?;
+            Ok::<_, quicfuscate::privilege::DropError>((report, verified_threads))
+        })
+        .await
+        .map_err(|error| {
+            std::io::Error::other(format!("privilege finalization worker failed: {error}"))
+        })?;
+        match finalization {
+            Ok((report, verified_threads)) => {
+                if defer_process_memory_lock {
+                    apply_process_memory_lock();
+                }
+                info!(
+                    "Privileges finalized across {} threads: uid={}/{}/{}, gid={}/{}/{}, capabilities=0, no_new_privileges=true",
+                    verified_threads,
+                    report.real_uid,
+                    report.effective_uid,
+                    report.saved_uid,
+                    report.real_gid,
+                    report.effective_gid,
+                    report.saved_gid
+                );
+                quicfuscate::audit::audit(
+                    quicfuscate::audit::AuditEventType::PrivilegesDropped,
+                    quicfuscate::audit::AuditSeverity::Info,
+                    None,
+                    None,
+                    &format!(
+                        "Privileges irreversibly reduced to uid={} gid={}",
+                        identity.uid, identity.gid
+                    ),
+                );
+                if tun_enable {
+                    log::warn!(
+                        "Post-drop TUN descriptors remain active; host routing teardown is owned by the service manager or privileged orchestration layer"
+                    );
+                }
             }
-            info!("Dropping root privileges to quicfuscate:quicfuscate");
-            match quicfuscate::privilege::drop_privileges("quicfuscate", "quicfuscate") {
-                Ok(()) => {
-                    info!("Privileges dropped - running as unprivileged user");
-                    quicfuscate::audit::audit(
-                        quicfuscate::audit::AuditEventType::PrivilegesDropped,
-                        quicfuscate::audit::AuditSeverity::Info,
-                        None,
-                        None,
-                        "Root privileges dropped to quicfuscate:quicfuscate",
-                    );
-                }
-                Err(e) => {
-                    error!("Failed to drop privileges: {} - refusing to continue as root", e);
-                    quicfuscate::audit::audit(
-                        quicfuscate::audit::AuditEventType::PrivilegeDropFailed,
-                        quicfuscate::audit::AuditSeverity::Critical,
-                        None,
-                        None,
-                        &format!("Privilege drop failed: {e}"),
-                    );
-                    return Err(std::io::Error::other("privilege drop failed"));
-                }
+            Err(error) => {
+                error!("Privilege finalization failed: {error} - refusing service exposure");
+                quicfuscate::audit::audit(
+                    quicfuscate::audit::AuditEventType::PrivilegeDropFailed,
+                    quicfuscate::audit::AuditSeverity::Critical,
+                    None,
+                    None,
+                    &format!("Privilege finalization failed: {error}"),
+                );
+                return Err(std::io::Error::other("privilege finalization failed"));
             }
         }
     }
 
-    runtime.run_standalone(launch).await?;
+    runtime.run_standalone(Box::new(launch)).await?;
 
     Ok(())
 }

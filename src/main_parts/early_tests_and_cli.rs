@@ -960,6 +960,14 @@ enum Commands {
         #[clap(long = "no-drop-privileges")]
         no_drop_privileges: bool,
 
+        /// User name or numeric UID to assume after privileged setup
+        #[clap(long, default_value = "quicfuscate", value_name = "USER_OR_UID")]
+        drop_user: String,
+
+        /// Group name or numeric GID to assume after privileged setup
+        #[clap(long, default_value = "quicfuscate", value_name = "GROUP_OR_GID")]
+        drop_group: String,
+
         /// Audit log file path (NDJSON, hash-chained, tamper-evident).
         /// When set, security-relevant events are written to this file.
         #[clap(long = "audit-log", value_name = "PATH")]
@@ -1063,12 +1071,26 @@ enum Commands {
         #[clap(long)]
         json: bool,
     },
-    #[clap(hide = true)]
-    /// Internal capability probe for system diagnostics
+    /// Report process identity, Linux capability sets, and startup readiness
     Capabilities {
         /// Print machine-readable JSON (recommended)
         #[clap(long)]
         json: bool,
+
+        /// Validate a target user name or numeric UID
+        #[clap(long, default_value = "quicfuscate", value_name = "USER_OR_UID")]
+        user: String,
+
+        /// Validate a target group name or numeric GID
+        #[clap(long, default_value = "quicfuscate", value_name = "GROUP_OR_GID")]
+        group: String,
+
+        /// Require TUN/routing startup capabilities
+        #[clap(long)]
+        tun: bool,
+
+        /// UDP listen port whose bind capability should be checked
+        #[clap(long, default_value_t = 4433)]
+        listen_port: u16,
     },
 }
-

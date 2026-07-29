@@ -7,12 +7,14 @@ use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
+use zeroize::Zeroizing;
 
 use crate::error::ConnectionError;
 use crate::transport::packet::CryptoContext;
 
 static TLS_CERT_PATH_OVERRIDE: OnceLock<String> = OnceLock::new();
 static TLS_KEY_PATH_OVERRIDE: OnceLock<String> = OnceLock::new();
+static TLS_SERVER_IDENTITY_OVERRIDE: OnceLock<PreloadedServerIdentity> = OnceLock::new();
 static TLS_CA_PATH_OVERRIDE: OnceLock<String> = OnceLock::new();
 static TLS_OVERRIDE_REQUIRED: AtomicBool = AtomicBool::new(false);
 /// Configurable max early data size for server TLS config.
@@ -20,6 +22,11 @@ static TLS_OVERRIDE_REQUIRED: AtomicBool = AtomicBool::new(false);
 /// Default is u32::MAX (0-RTT offered). Set to 0 to disable 0-RTT.
 /// Set via `set_max_early_data_size()` before server connection creation.
 static MAX_EARLY_DATA_SIZE: AtomicU32 = AtomicU32::new(u32::MAX);
+
+struct PreloadedServerIdentity {
+    cert_pem: Vec<u8>,
+    key_pem: Zeroizing<Vec<u8>>,
+}
 
 /// Set the maximum early data size for new server TLS connections.
 pub fn set_max_early_data_size(size: u32) {
@@ -55,6 +62,34 @@ pub fn set_tls_cert_key_paths(cert_path: &str, key_path: &str) {
         log::debug!("TLS key path override already set, keeping existing value");
     }
     TLS_OVERRIDE_REQUIRED.store(true, Ordering::SeqCst);
+}
+
+/// Read and validate the server identity before privileged initialization ends.
+///
+/// New server connections use this in-memory copy instead of reopening a
+/// root-owned private-key file after the process drops to its runtime UID.
+pub fn preload_tls_server_identity(cert_path: &str, key_path: &str) -> Result<(), ConnectionError> {
+    let cert_pem = std::fs::read(cert_path).map_err(|error| {
+        ConnectionError::TlsError(format!("Cert read failed ({cert_path}): {error}"))
+    })?;
+    let key_pem = Zeroizing::new(std::fs::read(key_path).map_err(|error| {
+        ConnectionError::TlsError(format!("Key read failed ({key_path}): {error}"))
+    })?);
+    rustls_provider::validate_server_identity_pem(&cert_pem, key_pem.as_slice())?;
+
+    #[cfg(unix)]
+    if unsafe { libc::mlock(key_pem.as_ptr().cast(), key_pem.len()) } != 0 {
+        log::warn!(
+            "Failed to lock preloaded TLS private key in memory: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+
+    if TLS_SERVER_IDENTITY_OVERRIDE.set(PreloadedServerIdentity { cert_pem, key_pem }).is_err() {
+        log::debug!("TLS server identity already preloaded, keeping existing value");
+    }
+    set_tls_cert_key_paths(cert_path, key_path);
+    Ok(())
 }
 
 /// Override the TLS CA file path for client mode peer verification.
@@ -899,6 +934,24 @@ mod rustls_provider {
     use std::sync::Arc;
     use webpki_roots;
 
+    pub(super) fn validate_server_identity_pem(
+        cert_pem: &[u8],
+        key_pem: &[u8],
+    ) -> Result<(), ConnectionError> {
+        let certs =
+            CertificateDer::pem_slice_iter(cert_pem).collect::<Result<Vec<_>, _>>().map_err(
+                |error| ConnectionError::TlsError(format!("Certificate parse failed: {error}")),
+            )?;
+        if certs.is_empty() {
+            return Err(ConnectionError::TlsError(
+                "Certificate chain must not be empty".to_string(),
+            ));
+        }
+        PrivateKeyDer::from_pem_slice(key_pem)
+            .map_err(|error| ConnectionError::TlsError(format!("Key parse failed: {error}")))?;
+        Ok(())
+    }
+
     /// Full-featured rustls QUIC TLS provider with session resumption, 0-RTT, and PQ support.
     pub struct RustlsProviderImpl {
         /// Active rustls QUIC connection (client or server side).
@@ -1380,6 +1433,15 @@ mod rustls_provider {
         }
 
         fn load_certs_from_file() -> Result<Vec<CertificateDer<'static>>, ConnectionError> {
+            if let Some(identity) = TLS_SERVER_IDENTITY_OVERRIDE.get() {
+                return CertificateDer::pem_slice_iter(&identity.cert_pem)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| {
+                        ConnectionError::TlsError(format!(
+                            "Preloaded certificate parse failed: {error}"
+                        ))
+                    });
+            }
             if let Some(path) = TLS_CERT_PATH_OVERRIDE.get().map(|s| s.as_str()) {
                 let cert_data = std::fs::read(path).map_err(|e| {
                     ConnectionError::TlsError(format!("Cert read failed ({}): {}", path, e))
@@ -1408,6 +1470,15 @@ mod rustls_provider {
 
         fn load_private_key() -> Result<rustls::pki_types::PrivateKeyDer<'static>, ConnectionError>
         {
+            if let Some(identity) = TLS_SERVER_IDENTITY_OVERRIDE.get() {
+                return PrivateKeyDer::from_pem_slice(identity.key_pem.as_slice()).map_err(
+                    |error| {
+                        ConnectionError::TlsError(format!(
+                            "Preloaded private key parse failed: {error}"
+                        ))
+                    },
+                );
+            }
             if let Some(path) = TLS_KEY_PATH_OVERRIDE.get().map(|s| s.as_str()) {
                 let key_data = std::fs::read(path).map_err(|e| {
                     ConnectionError::TlsError(format!("Key read failed ({}): {}", path, e))
