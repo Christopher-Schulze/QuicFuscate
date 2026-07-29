@@ -94,33 +94,31 @@ pub struct KillSwitch {
 }
 
 impl KillSwitch {
-    /// Create a new kill switch.
+    /// Create a new kill switch with one fail-closed automatic backend selection.
     ///
-    /// On Linux the firewall backend (iptables vs nftables) is auto-detected
-    /// via [`crate::firewall::detect_backend`]. The selection can be overridden
-    /// explicitly via [`KillSwitch::new_with_backend`].
-    pub fn new() -> Self {
+    /// On Linux the firewall backend is resolved once through the validated
+    /// availability contract. The selection can be supplied explicitly via
+    /// [`KillSwitch::new_with_backend`].
+    pub fn new() -> Result<Self, crate::firewall::FirewallSelectionError> {
+        crate::firewall::resolve_backend(None).map(Self::new_with_backend)
+    }
+
+    /// Create a new kill switch with an explicit firewall backend.
+    ///
+    /// On non-Linux platforms the validated Linux selection is intentionally
+    /// ignored because the platform-native backend is mandatory.
+    pub fn new_with_backend(backend: crate::firewall::FirewallBackend) -> Self {
+        #[cfg(not(target_os = "linux"))]
+        let _ = backend;
         Self {
             enabled: AtomicBool::new(false),
             vpn_connected: AtomicBool::new(false),
             #[cfg(target_os = "linux")]
-            backend: LinuxKillSwitch::new(),
+            backend: LinuxKillSwitch::with_backend(backend),
             #[cfg(target_os = "macos")]
             backend: MacOSKillSwitch::new(),
             #[cfg(target_os = "windows")]
             backend: WindowsKillSwitch::new(),
-        }
-    }
-
-    /// Create a new kill switch with an explicit firewall backend (Linux only).
-    ///
-    /// On non-Linux platforms this is equivalent to [`KillSwitch::new`].
-    #[cfg(target_os = "linux")]
-    pub fn new_with_backend(backend: crate::firewall::FirewallBackend) -> Self {
-        Self {
-            enabled: AtomicBool::new(false),
-            vpn_connected: AtomicBool::new(false),
-            backend: LinuxKillSwitch::with_backend(backend),
         }
     }
 
@@ -206,12 +204,6 @@ impl KillSwitch {
     }
 }
 
-impl Default for KillSwitch {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Drop for KillSwitch {
     fn drop(&mut self) {
         if self.enabled.load(Ordering::SeqCst) {
@@ -261,11 +253,6 @@ enum LinuxKillSwitch {
 
 #[cfg(target_os = "linux")]
 impl LinuxKillSwitch {
-    /// Auto-detect the best available backend and construct it.
-    fn new() -> Self {
-        Self::with_backend(crate::firewall::detect_backend())
-    }
-
     /// Construct the kill switch with an explicit backend selection.
     fn with_backend(backend: crate::firewall::FirewallBackend) -> Self {
         match backend {
@@ -340,55 +327,38 @@ impl IptablesKillSwitch {
         Self { rules_active: AtomicBool::new(false) }
     }
 
-    /// Create the dedicated kill-switch chain if it doesn't exist, and add
-    /// a jump rule from OUTPUT to it. Idempotent — safe to call multiple times.
-    /// Applies to both iptables (IPv4) and ip6tables (IPv6) to prevent
-    /// IPv6 traffic leaks when the kill switch is active.
-    fn ensure_chain() -> Result<(), KillSwitchError> {
-        Self::ensure_family("iptables")?;
-        Self::ensure_family("ip6tables")?;
-        Ok(())
-    }
-
-    fn ensure_family(program: &str) -> Result<(), KillSwitchError> {
+    fn family_jump_exists(program: &str) -> Result<bool, KillSwitchError> {
         use std::process::{Command, Stdio};
 
-        let chain_exists = Command::new(program)
-            .args(["-S", KS_CHAIN])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map_err(|error| KillSwitchError::CommandFailed(format!("{program}: {error}")))?
-            .success();
-        if !chain_exists {
-            Self::checked_status(program, &["-N", KS_CHAIN])?;
-        }
-
-        let jump_exists = Command::new(program)
+        let status = Command::new(program)
             .args(["-C", "OUTPUT", "-j", KS_CHAIN])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
-            .map_err(|error| KillSwitchError::CommandFailed(format!("{program}: {error}")))?
-            .success();
-        if !jump_exists {
-            Self::checked_status(program, &["-I", "OUTPUT", "1", "-j", KS_CHAIN])?;
-        }
-        Ok(())
+            .map_err(|error| KillSwitchError::CommandFailed(format!("{program}: {error}")))?;
+        Ok(status.success())
     }
 
-    fn block_traffic(&self) -> Result<(), KillSwitchError> {
-        Self::ensure_chain()?;
-        let rules = format!(
+    fn block_rules(install_jump: bool) -> String {
+        let mut rules = format!(
             "*filter\n\
              :{} - [0:0]\n\
              -A {} -o lo -j ACCEPT\n\
-             -A {} -j DROP\n\
-             COMMIT\n",
+             -A {} -j DROP\n",
             KS_CHAIN, KS_CHAIN, KS_CHAIN
         );
-        Self::apply_restore("iptables", "iptables-restore", &rules)?;
-        Self::apply_restore("ip6tables", "ip6tables-restore", &rules)?;
+        if install_jump {
+            rules.push_str(&format!("-I OUTPUT 1 -j {}\n", KS_CHAIN));
+        }
+        rules.push_str("COMMIT\n");
+        rules
+    }
+
+    fn block_traffic(&self) -> Result<(), KillSwitchError> {
+        let rules_v4 = Self::block_rules(!Self::family_jump_exists("iptables")?);
+        let rules_v6 = Self::block_rules(!Self::family_jump_exists("ip6tables")?);
+        Self::apply_restore("iptables-restore", &rules_v4)?;
+        Self::apply_restore("ip6tables-restore", &rules_v6)?;
 
         self.rules_active.store(true, Ordering::SeqCst);
         log::debug!("Kill switch: traffic blocked (dedicated chain, IPv4+IPv6)");
@@ -404,30 +374,31 @@ impl IptablesKillSwitch {
         policy: &VpnFirewallPolicy,
         connected: bool,
     ) -> Result<(), KillSwitchError> {
-        Self::ensure_chain()?;
-        let rules = Self::policy_rules(policy, false, connected);
-        let rules_v6 = Self::policy_rules(policy, true, connected);
-        Self::apply_restore("iptables", "iptables-restore", &rules)?;
-        Self::apply_restore("ip6tables", "ip6tables-restore", &rules_v6)?;
+        let rules =
+            Self::policy_rules(policy, false, connected, !Self::family_jump_exists("iptables")?);
+        let rules_v6 =
+            Self::policy_rules(policy, true, connected, !Self::family_jump_exists("ip6tables")?);
+        Self::apply_restore("iptables-restore", &rules)?;
+        Self::apply_restore("ip6tables-restore", &rules_v6)?;
 
         self.rules_active.store(true, Ordering::SeqCst);
         log::debug!("Kill switch: VPN policy applied (dedicated chain, IPv4+IPv6)");
         Ok(())
     }
 
-    fn apply_restore(
-        table_program: &str,
-        restore_program: &str,
-        rules: &str,
-    ) -> Result<(), KillSwitchError> {
+    fn apply_restore(restore_program: &str, rules: &str) -> Result<(), KillSwitchError> {
         use std::io::Write;
         use std::process::{Command, Stdio};
 
-        Self::checked_status(table_program, &["-F", KS_CHAIN])?;
-        let mut child =
-            Command::new(restore_program).arg("--noflush").stdin(Stdio::piped()).spawn().map_err(
-                |error| KillSwitchError::CommandFailed(format!("{restore_program}: {error}")),
-            )?;
+        let mut child = Command::new(restore_program)
+            .args(["--noflush", "--wait", "5"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| {
+                KillSwitchError::CommandFailed(format!("{restore_program}: {error}"))
+            })?;
         child
             .stdin
             .take()
@@ -438,15 +409,17 @@ impl IptablesKillSwitch {
             .map_err(|error| {
                 KillSwitchError::CommandFailed(format!("{restore_program} stdin: {error}"))
             })?;
-        let status = child.wait().map_err(|error| {
+        let output = child.wait_with_output().map_err(|error| {
             KillSwitchError::CommandFailed(format!("{restore_program}: {error}"))
         })?;
-        if status.success() {
+        if output.status.success() {
             Ok(())
         } else {
             Err(KillSwitchError::CommandFailed(format!(
-                "{} returned status {}",
-                restore_program, status
+                "{} returned status {}: {}",
+                restore_program,
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
             )))
         }
     }
@@ -459,7 +432,12 @@ impl IptablesKillSwitch {
         self.apply_policy(policy, true)
     }
 
-    fn policy_rules(policy: &VpnFirewallPolicy, ipv6: bool, connected: bool) -> String {
+    fn policy_rules(
+        policy: &VpnFirewallPolicy,
+        ipv6: bool,
+        connected: bool,
+        install_jump: bool,
+    ) -> String {
         let mut rules =
             format!("*filter\n:{} - [0:0]\n-A {} -o lo -j ACCEPT\n", KS_CHAIN, KS_CHAIN);
         match (ipv6, policy.server_ipv4(), policy.server_ipv6()) {
@@ -496,7 +474,11 @@ impl IptablesKillSwitch {
                 policy.tun_name()
             ));
         }
-        rules.push_str(&format!("-A {} -j DROP\nCOMMIT\n", KS_CHAIN));
+        rules.push_str(&format!("-A {} -j DROP\n", KS_CHAIN));
+        if install_jump {
+            rules.push_str(&format!("-I OUTPUT 1 -j {}\n", KS_CHAIN));
+        }
+        rules.push_str("COMMIT\n");
         rules
     }
 
@@ -669,6 +651,14 @@ impl NftablesKillSwitch {
         rules
     }
 
+    fn replacement_transaction(ruleset: &str, table_exists: bool) -> String {
+        if table_exists {
+            format!("delete table inet {}\n{}", KS_NFT_TABLE, ruleset)
+        } else {
+            ruleset.to_string()
+        }
+    }
+
     /// Apply a complete ruleset atomically via `nft -f -` (stdin).
     ///
     /// The table is first flushed (deleted + recreated) to ensure a clean
@@ -678,18 +668,9 @@ impl NftablesKillSwitch {
         use std::io::Write;
         use std::process::{Command, Stdio};
 
-        let table_exists = Command::new("nft")
-            .args(["list", "table", "inet", KS_NFT_TABLE])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map_err(|error| KillSwitchError::CommandFailed(format!("nft inspect: {error}")))?
-            .success();
-        let transaction = if table_exists {
-            format!("flush table inet {}\n{}", KS_NFT_TABLE, ruleset)
-        } else {
-            ruleset.to_string()
-        };
+        let table_exists = crate::firewall::nft_table_exists("inet", KS_NFT_TABLE)
+            .map_err(|error| KillSwitchError::CommandFailed(error.to_string()))?;
+        let transaction = Self::replacement_transaction(ruleset, table_exists);
 
         let mut child = Command::new("nft")
             .arg("-f")
@@ -765,23 +746,12 @@ impl NftablesKillSwitch {
 
     /// Remove the entire kill-switch table: `nft delete table inet quicfuscate_ks`.
     fn cleanup(&self) -> Result<(), KillSwitchError> {
-        use std::process::Command;
-
         if !self.rules_active.load(Ordering::SeqCst) {
             return Ok(());
         }
 
-        let status = Command::new("nft")
-            .args(["delete", "table", "inet", KS_NFT_TABLE])
-            .status()
+        crate::firewall::delete_nft_table("inet", KS_NFT_TABLE)
             .map_err(|error| KillSwitchError::CommandFailed(error.to_string()))?;
-        if !status.success() {
-            return Err(KillSwitchError::CommandFailed(format!(
-                "nft delete table returned status {}",
-                status
-            )));
-        }
-
         self.rules_active.store(false, Ordering::SeqCst);
         log::debug!("Kill switch (nftables): table removed");
         Ok(())
@@ -792,37 +762,12 @@ impl NftablesKillSwitch {
     /// Queries `nft list table` to determine existence; if the table is
     /// present it is deleted unconditionally.
     fn cleanup_stale() -> Result<(), KillSwitchError> {
-        use std::process::{Command, Stdio};
-
-        // Check if the table exists.
-        let check = Command::new("nft")
-            .args(["list", "table", "inet", KS_NFT_TABLE])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-
-        let exists = match check {
-            Ok(status) => status.success(),
-            Err(_) => false,
-        };
-
-        if !exists {
+        let removed = crate::firewall::delete_nft_table("inet", KS_NFT_TABLE)
+            .map_err(|error| KillSwitchError::CommandFailed(error.to_string()))?;
+        if removed {
+            log::info!("Stale nftables kill switch table deleted (inet {})", KS_NFT_TABLE);
+        } else {
             log::info!("Stale nftables kill switch table not present (nothing to clean)");
-            return Ok(());
-        }
-
-        // Delete the stale table.
-        match Command::new("nft").args(["delete", "table", "inet", KS_NFT_TABLE]).status() {
-            Ok(status) if status.success() => {
-                log::info!("Stale nftables kill switch table deleted (inet {})", KS_NFT_TABLE);
-            }
-            Ok(status) => {
-                return Err(KillSwitchError::CommandFailed(format!(
-                    "nft stale table delete returned status {}",
-                    status
-                )));
-            }
-            Err(e) => return Err(KillSwitchError::CommandFailed(e.to_string())),
         }
         Ok(())
     }
@@ -1205,7 +1150,7 @@ mod tests {
 
     #[test]
     fn test_kill_switch_new() {
-        let ks = KillSwitch::new();
+        let ks = KillSwitch::new_with_backend(crate::firewall::FirewallBackend::Iptables);
         assert!(!ks.is_enabled());
     }
 
@@ -1248,7 +1193,7 @@ mod tests {
     fn test_kill_switch_enable_disable_cycle() {
         // This test verifies the enable/disable state transitions.
         // On platforms without root, enable() will fail — that's expected.
-        let ks = KillSwitch::new();
+        let ks = KillSwitch::new_with_backend(crate::firewall::FirewallBackend::Iptables);
         // Just verify the state machine works without panicking
         assert!(!ks.is_enabled());
         // enable() requires root on Linux/macOS, so we just test the flag
@@ -1257,7 +1202,7 @@ mod tests {
 
     #[test]
     fn test_kill_switch_vpn_connected_disconnected_state() {
-        let ks = KillSwitch::new();
+        let ks = KillSwitch::new_with_backend(crate::firewall::FirewallBackend::Iptables);
         // Verify initial state
         assert!(!ks.is_enabled());
         // on_vpn_connected/on_vpn_disconnected require root, test state only
@@ -1349,9 +1294,44 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn test_iptables_kill_switch_transaction_rebuilds_owned_chain_and_jump() {
+        let rules = IptablesKillSwitch::block_rules(true);
+
+        assert!(rules.contains(":QUICFUSCATE_KS - [0:0]"));
+        assert!(rules.contains("-A QUICFUSCATE_KS -j DROP"));
+        assert!(rules.contains("-I OUTPUT 1 -j QUICFUSCATE_KS"));
+        assert!(!rules.contains("-F OUTPUT"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_iptables_kill_switch_repeated_transaction_omits_duplicate_jump() {
+        let rules = IptablesKillSwitch::block_rules(false);
+
+        assert!(rules.contains(":QUICFUSCATE_KS - [0:0]"));
+        assert!(!rules.contains("-I OUTPUT"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_nftables_kill_switch_replacement_is_atomic_batch() {
+        let rules = NftablesKillSwitch::new().block_ruleset();
+        let replacement = NftablesKillSwitch::replacement_transaction(&rules, true);
+        let initial = NftablesKillSwitch::replacement_transaction(&rules, false);
+
+        assert!(
+            replacement.starts_with("delete table inet quicfuscate_ks\ntable inet quicfuscate_ks")
+        );
+        assert_eq!(replacement.matches("delete table inet quicfuscate_ks").count(), 1);
+        assert_eq!(initial, rules);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn test_kill_switch_new_with_backend_iptables() {
         let ks = KillSwitch::new_with_backend(crate::firewall::FirewallBackend::Iptables);
         assert!(!ks.is_enabled());
+        assert!(matches!(ks.backend, LinuxKillSwitch::Iptables(_)));
     }
 
     #[cfg(target_os = "linux")]
@@ -1359,6 +1339,7 @@ mod tests {
     fn test_kill_switch_new_with_backend_nftables() {
         let ks = KillSwitch::new_with_backend(crate::firewall::FirewallBackend::Nftables);
         assert!(!ks.is_enabled());
+        assert!(matches!(ks.backend, LinuxKillSwitch::Nftables(_)));
     }
 
     /// Verify that the iptables and nftables kill switch rulesets are
@@ -1368,7 +1349,7 @@ mod tests {
     #[test]
     fn test_iptables_and_nftables_killswitch_produce_equivalent_rules() {
         let policy = test_policy();
-        let iptables_rules = IptablesKillSwitch::policy_rules(&policy, false, true);
+        let iptables_rules = IptablesKillSwitch::policy_rules(&policy, false, true, true);
 
         // nftables ruleset
         let nft_ks = NftablesKillSwitch::new_nftables("198.51.100.1", "tun0");

@@ -523,9 +523,19 @@ async fn run_server(
         }
     }
 
-    let mut server_config =
-        quicfuscate::implementations::server::server_config_from_listen_addr(listen_addr)
-            .map_err(std::io::Error::other)?;
+    let requested_firewall_backend =
+        startup_engine_config.as_ref().and_then(|config| config.security.firewall.backend);
+    let firewall_backend = if tun_enable {
+        quicfuscate::firewall::resolve_backend(requested_firewall_backend)
+            .map_err(|error| std::io::Error::other(error.to_string()))?
+    } else {
+        requested_firewall_backend.unwrap_or_default()
+    };
+    let mut server_config = quicfuscate::implementations::server::server_config_from_listen_addr(
+        listen_addr,
+        firewall_backend,
+    )
+    .map_err(std::io::Error::other)?;
     server_config.allow_client_to_client = allow_client_to_client;
     if tun_enable {
         apply_standalone_tun_server_config(

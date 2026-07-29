@@ -239,7 +239,9 @@ fn configured_routing_manager(
             wan_interface,
         )
     };
-    Ok(routing.with_client_to_client(server_config.allow_client_to_client))
+    Ok(routing
+        .with_client_to_client(server_config.allow_client_to_client)
+        .with_firewall_backend(server_config.firewall_backend))
 }
 
 fn teardown_routing_with_retries(routing: RoutingManager) {
@@ -305,7 +307,9 @@ impl ServerHostResources {
                 .map_err(EngineError::Io)?;
 
             // Clean up stale rules from a crashed previous session before setup.
-            routing.cleanup_stale();
+            routing
+                .cleanup_stale()
+                .map_err(|error| EngineError::Io(format!("stale routing cleanup failed: {error}")))?;
 
             if let Err(e) = routing.setup() {
                 let _ = routing.teardown();

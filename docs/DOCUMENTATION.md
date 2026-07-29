@@ -2359,7 +2359,7 @@ Telemetry metrics exposed by `telemetry::export_telemetry_text()` include:
 - optional `KillSwitch`,
 - shared Tokio runtime state.
 
-`KillSwitch` is implemented in `implementations::client::killswitch` with platform-native firewall backends (Linux iptables, macOS pfctl, Windows netsh) and lifecycle hooks (`on_vpn_connected` / `on_vpn_disconnected`) to enforce fail-closed routing when configured.
+`KillSwitch` is implemented in `implementations::client::killswitch` with Linux nftables or iptables, macOS pfctl, and an explicit unsupported Windows activation boundary. Linux resolves one validated backend at startup for both client kill-switch and server routing ownership. Omitting `security.firewall.backend` selects nftables when its live ruleset is accessible, then iptables only when the complete dual-stack toolchain is usable. An explicit `iptables` or `nftables` request fails closed when unavailable and is never replaced by the other backend.
 
 Packet flow is unified across CLI and embedded paths:
 
@@ -4216,12 +4216,13 @@ Enable kill-switch to prevent any traffic outside the tunnel.
 - Verify no conflicting firewall manager (ufw, firewalld) is resetting rules
 
 **Traffic leaks during connect/disconnect:**
-- nftables is the preferred automatic backend. It replaces the dedicated `inet quicfuscate_ks` table in one `nft -f -` transaction and covers IPv4 plus IPv6.
-- The iptables fallback applies strict IPv4 and IPv6 rules through `iptables-restore` and `ip6tables-restore`, but replacement currently flushes the owned chain before repopulation. TODO-530 owns explicit backend selection, fallback atomicity, and live fallback proof.
+- nftables is the preferred automatic backend. Client state replaces only `inet quicfuscate_ks`, while server NAT/forwarding replaces only `inet quicfuscate_rt`; each replacement is one rollback-safe `nft -f -` transaction covering IPv4 and IPv6.
+- The iptables fallback rebuilds only `QUICFUSCATE_KS`, `QUICFUSCATE_RT`, and `QUICFUSCATE_NAT` through `iptables-restore --noflush` and `ip6tables-restore --noflush`. Shared `OUTPUT`, `FORWARD`, and `POSTROUTING` chains contain only exact jumps to those owned chains.
+- Configure an explicit backend with `[security.firewall] backend = "iptables"` or `backend = "nftables"`. Omit `backend` for automatic selection. Startup logs the requested backend, selected backend, and both live availability probes exactly once per process.
 
 **Stale rules from crashed session:**
 - Run `quicfuscate client --cleanup-firewall` to remove stale kill-switch rules
-- This only flushes the `QUICFUSCATE_KS` chain and removes the jump rule from OUTPUT - it does NOT touch unrelated user firewall rules
+- This removes only the owned `quicfuscate_ks` table or `QUICFUSCATE_KS` chains and their exact OUTPUT jumps. It does not flush or replace an unrelated host ruleset.
 
 #### macOS
 **pf rules not loading:**

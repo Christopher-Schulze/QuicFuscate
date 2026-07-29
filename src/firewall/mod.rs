@@ -5,10 +5,10 @@
 //!
 //! # Backend selection
 //!
-//! [`detect_backend`] probes the host at runtime. nftables is preferred when both
-//! the `nft` binary is callable and the kernel module `nf_tables` is loaded
-//! (probed via `/sys/module/nf_tables`). Otherwise the implementation falls back
-//! to `iptables`, which is universally available on older distributions.
+//! [`resolve_backend`] probes the host once at startup. nftables is preferred
+//! when its ruleset can be inspected with the current privileges. Otherwise the
+//! implementation falls back to iptables only when its complete dual-stack
+//! command set is installed and both live rulesets can be inspected.
 //!
 //! The selected backend can be overridden explicitly via [`FirewallConfig`] (see
 //! `engine::config`). When `None`, auto-detection is used.
@@ -22,7 +22,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::io::Write;
-use std::path::Path;
 use std::process::{Command, Stdio};
 
 /// Selected firewall backend.
@@ -36,25 +35,174 @@ pub enum FirewallBackend {
     Nftables,
 }
 
-/// Returns `true` when nftables is usable on this host.
-///
-/// Both conditions must hold:
-/// 1. `nft --version` exits successfully (the binary is installed and runnable).
-/// 2. `/sys/module/nf_tables` exists (the kernel module is loaded).
-pub fn nft_available() -> bool {
-    let nft_runs = Command::new("nft").arg("--version").output().is_ok_and(|o| o.status.success());
-    let module_loaded = Path::new("/sys/module/nf_tables").exists();
-    nft_runs && module_loaded
+impl FirewallBackend {
+    /// Stable backend name used in diagnostics and audit evidence.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Iptables => "iptables",
+            Self::Nftables => "nftables",
+        }
+    }
 }
 
-/// Detect the best available firewall backend on this host.
+/// Firewall command availability captured by the single startup probe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FirewallAvailability {
+    pub iptables: bool,
+    pub nftables: bool,
+}
+
+/// Fail-closed firewall backend selection error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FirewallSelectionError {
+    RequestedBackendUnavailable(FirewallBackend),
+    NoBackendAvailable,
+}
+
+impl std::fmt::Display for FirewallSelectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RequestedBackendUnavailable(backend) => {
+                write!(f, "requested firewall backend {} is unavailable", backend.as_str())
+            }
+            Self::NoBackendAvailable => {
+                write!(f, "no supported firewall backend is available")
+            }
+        }
+    }
+}
+
+impl std::error::Error for FirewallSelectionError {}
+
+fn command_succeeds(command: &str, args: &[&str]) -> bool {
+    Command::new(command)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Returns `true` when nftables is usable on this host.
 ///
-/// Prefers nftables when available, otherwise falls back to iptables.
-pub fn detect_backend() -> FirewallBackend {
-    if nft_available() {
-        FirewallBackend::Nftables
-    } else {
-        FirewallBackend::Iptables
+/// A live table listing proves that the binary, kernel backend, and current
+/// process privileges are all sufficient without assuming `nf_tables` is a
+/// loadable module rather than built into the kernel.
+pub fn nft_available() -> bool {
+    command_succeeds("nft", &["list", "tables"])
+}
+
+/// Returns `true` when the complete dual-stack iptables toolchain is usable.
+pub fn iptables_available() -> bool {
+    command_succeeds("iptables", &["-S"])
+        && command_succeeds("ip6tables", &["-S"])
+        && command_succeeds("iptables-restore", &["--version"])
+        && command_succeeds("ip6tables-restore", &["--version"])
+}
+
+/// Probe both supported Linux firewall backends exactly once.
+pub fn probe_availability() -> FirewallAvailability {
+    FirewallAvailability { iptables: iptables_available(), nftables: nft_available() }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn nft_table_exists(family: &str, table: &str) -> Result<bool, std::io::Error> {
+    let output = match Command::new("nft").args(["list", "table", family, table]).output() {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(std::io::Error::other(format!("nft table inspect: {error}")));
+        }
+    };
+    if output.status.success() {
+        return Ok(true);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lowered = stderr.to_ascii_lowercase();
+    if lowered.contains("no such file or directory") || lowered.contains("does not exist") {
+        return Ok(false);
+    }
+    Err(std::io::Error::other(format!(
+        "nft table inspect returned status {}: {}",
+        output.status,
+        stderr.trim(),
+    )))
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn delete_nft_table(family: &str, table: &str) -> Result<bool, std::io::Error> {
+    if !nft_table_exists(family, table)? {
+        return Ok(false);
+    }
+
+    let output = Command::new("nft")
+        .args(["delete", "table", family, table])
+        .output()
+        .map_err(|error| std::io::Error::other(format!("nft table delete: {error}")))?;
+    if output.status.success() {
+        return Ok(true);
+    }
+    Err(std::io::Error::other(format!(
+        "nft table delete returned status {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim(),
+    )))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn resolve_backend_for_availability(
+    requested: Option<FirewallBackend>,
+    availability: FirewallAvailability,
+) -> Result<FirewallBackend, FirewallSelectionError> {
+    match requested {
+        Some(FirewallBackend::Nftables) if availability.nftables => Ok(FirewallBackend::Nftables),
+        Some(FirewallBackend::Iptables) if availability.iptables => Ok(FirewallBackend::Iptables),
+        Some(backend) => Err(FirewallSelectionError::RequestedBackendUnavailable(backend)),
+        None if availability.nftables => Ok(FirewallBackend::Nftables),
+        None if availability.iptables => Ok(FirewallBackend::Iptables),
+        None => Err(FirewallSelectionError::NoBackendAvailable),
+    }
+}
+
+/// Resolve one concrete backend for the complete process lifecycle.
+pub fn resolve_backend(
+    requested: Option<FirewallBackend>,
+) -> Result<FirewallBackend, FirewallSelectionError> {
+    #[cfg(target_os = "linux")]
+    {
+        let availability = probe_availability();
+        match resolve_backend_for_availability(requested, availability) {
+            Ok(selected) => {
+                log::info!(
+                    "Firewall backend selected: requested={}, selected={}, nftables_available={}, iptables_available={}",
+                    requested.map_or("auto", FirewallBackend::as_str),
+                    selected.as_str(),
+                    availability.nftables,
+                    availability.iptables,
+                );
+                Ok(selected)
+            }
+            Err(error) => {
+                log::error!(
+                    "Firewall backend selection failed: requested={}, selected=none, nftables_available={}, iptables_available={}, error={}",
+                    requested.map_or("auto", FirewallBackend::as_str),
+                    availability.nftables,
+                    availability.iptables,
+                    error,
+                );
+                Err(error)
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let selected = requested.unwrap_or_default();
+        log::info!(
+            "Linux firewall backend setting ignored on this platform: requested={}",
+            requested.map_or("auto", FirewallBackend::as_str),
+        );
+        Ok(selected)
     }
 }
 
@@ -285,30 +433,62 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_detect_backend_returns_a_valid_variant() {
-        // detect_backend() probes the live host; it must never panic and must
-        // return one of the two known variants.
-        let backend = detect_backend();
-        assert!(matches!(backend, FirewallBackend::Iptables | FirewallBackend::Nftables));
-    }
-
-    #[test]
     fn test_nft_available_does_not_panic() {
-        // nft_available() shells out to `nft` and probes /sys/module; it must
-        // be panic-free regardless of host capabilities.
+        // nft_available() probes the live host and must be panic-free regardless
+        // of installed commands or current privileges.
         let _ = nft_available();
     }
 
     #[test]
-    fn test_nft_available_requires_both_binary_and_module() {
-        // The contract: nft_available() is true only when both the binary runs
-        // and the kernel module is loaded. We cannot force either condition in
-        // a unit test, but we verify the function returns a bool (type check)
-        // and that the logic is a logical AND by re-implementing the probe.
-        let nft_runs =
-            Command::new("nft").arg("--version").output().is_ok_and(|o| o.status.success());
-        let module_loaded = Path::new("/sys/module/nf_tables").exists();
-        assert_eq!(nft_available(), nft_runs && module_loaded);
+    fn test_nft_available_matches_live_table_probe() {
+        assert_eq!(nft_available(), command_succeeds("nft", &["list", "tables"]));
+    }
+
+    #[test]
+    fn test_explicit_nftables_fails_closed_when_unavailable() {
+        let availability = FirewallAvailability { iptables: true, nftables: false };
+        assert_eq!(
+            resolve_backend_for_availability(Some(FirewallBackend::Nftables), availability),
+            Err(FirewallSelectionError::RequestedBackendUnavailable(FirewallBackend::Nftables))
+        );
+    }
+
+    #[test]
+    fn test_explicit_iptables_never_selects_nftables() {
+        let availability = FirewallAvailability { iptables: true, nftables: true };
+        assert_eq!(
+            resolve_backend_for_availability(Some(FirewallBackend::Iptables), availability),
+            Ok(FirewallBackend::Iptables)
+        );
+    }
+
+    #[test]
+    fn test_auto_prefers_nftables_and_falls_back_to_iptables() {
+        assert_eq!(
+            resolve_backend_for_availability(
+                None,
+                FirewallAvailability { iptables: true, nftables: true },
+            ),
+            Ok(FirewallBackend::Nftables)
+        );
+        assert_eq!(
+            resolve_backend_for_availability(
+                None,
+                FirewallAvailability { iptables: true, nftables: false },
+            ),
+            Ok(FirewallBackend::Iptables)
+        );
+    }
+
+    #[test]
+    fn test_auto_fails_when_no_backend_is_available() {
+        assert_eq!(
+            resolve_backend_for_availability(
+                None,
+                FirewallAvailability { iptables: false, nftables: false },
+            ),
+            Err(FirewallSelectionError::NoBackendAvailable)
+        );
     }
 
     #[test]

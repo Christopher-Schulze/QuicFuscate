@@ -138,6 +138,8 @@ async fn async_main(
         // Spawn minimal telemetry HTTP server at /telemetry
         quicfuscate::metrics::spawn_telemetry_server();
     }
+    let requested_firewall_backend =
+        startup_engine_config.as_ref().and_then(|config| config.security.firewall.backend);
 
     match cli.command {
         Commands::Client {
@@ -153,6 +155,12 @@ async fn async_main(
             qkey,
         } => {
             let fec_mode = resolve_cli_fec_mode_override(shared.fec_mode);
+            let firewall_backend = if shared.kill_switch && !shared.cleanup_firewall {
+                quicfuscate::firewall::resolve_backend(requested_firewall_backend)
+                    .map_err(|error| std::io::Error::other(error.to_string()))?
+            } else {
+                requested_firewall_backend.unwrap_or_default()
+            };
             run_client(
                 remote.as_str(),
                 local.as_str(),
@@ -187,6 +195,7 @@ async fn async_main(
                 qkey.as_deref(),
                 shared.kill_switch,
                 shared.cleanup_firewall,
+                firewall_backend,
                 &shared.vpn_dns,
                 shared.heartbeat_timeout_ms,
             )
@@ -819,6 +828,7 @@ async fn run_client(
     qkey: Option<&str>,
     kill_switch_enabled: bool,
     cleanup_firewall: bool,
+    firewall_backend: quicfuscate::firewall::FirewallBackend,
     vpn_dns: &[IpAddr],
     heartbeat_timeout_ms: u64,
 ) -> std::io::Result<()> {
@@ -891,7 +901,9 @@ async fn run_client(
 
     // Initialize kill switch if enabled
     let kill_switch = if kill_switch_enabled {
-        let ks = std::sync::Arc::new(quicfuscate::implementations::client::KillSwitch::new());
+        let ks = std::sync::Arc::new(
+            quicfuscate::implementations::client::KillSwitch::new_with_backend(firewall_backend),
+        );
         ks.enable().map_err(|error| {
             std::io::Error::other(format!("kill switch enable failed: {error}"))
         })?;

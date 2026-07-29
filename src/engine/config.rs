@@ -1275,8 +1275,8 @@ pub struct SecurityConfig {
     pub heartbeat_timeout_ms: u64,
     /// Cleanup stale firewall rules from a crashed previous session on startup.
     pub cleanup_firewall_on_start: bool,
-    /// Firewall backend selection (Linux only). When `None`, the backend is
-    /// auto-detected at runtime via [`crate::firewall::detect_backend`].
+    /// Firewall backend selection (Linux only). When `None`, one backend is
+    /// resolved and retained at startup via [`crate::firewall::resolve_backend`].
     pub firewall: FirewallConfig,
     /// Lock all current and future process memory against swap with
     /// `mlockall(MCL_CURRENT | MCL_FUTURE)` on server startup (TODO-516).

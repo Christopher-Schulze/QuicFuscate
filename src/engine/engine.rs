@@ -756,6 +756,18 @@ impl QuicFuscateEngine {
         // Stealth and FEC modes are stored in config and applied during connection establishment
         let stealth_enabled = self.config.stealth.mode != super::config::StealthMode::Off;
         let fec_enabled = self.config.fec.mode != super::config::FecMode::Off;
+        let firewall_required = match self.config.engine.mode {
+            EngineMode::Client => self.config.security.kill_switch,
+            EngineMode::Server => {
+                self.config.interface.interface_type == super::config::InterfaceType::Tun
+            }
+        };
+        let firewall_backend = if firewall_required {
+            crate::firewall::resolve_backend(self.config.security.firewall.backend)
+                .map_err(|error| EngineError::Config(error.to_string()))?
+        } else {
+            self.config.security.firewall.backend.unwrap_or_default()
+        };
 
         let start_result = (|| -> Result<(), EngineError> {
             match self.config.engine.mode {
@@ -769,6 +781,7 @@ impl QuicFuscateEngine {
                     let server_config =
                         crate::implementations::server::server_config_from_listen_addr(
                             &self.config.connection.remote,
+                            firewall_backend,
                         )
                         .map_err(EngineError::Config)?;
                     let (fec_cfg, stealth_cfg) = build_server_runtime_profiles(&self.config)?;
@@ -903,7 +916,7 @@ impl QuicFuscateEngine {
                     log::warn!("Kill switch stale rule cleanup failed: {}", e);
                 }
             }
-            let ks = Arc::new(KillSwitch::new());
+            let ks = Arc::new(KillSwitch::new_with_backend(firewall_backend));
             ks.enable()
                 .map_err(|e| EngineError::Internal(format!("Kill switch enable failed: {}", e)))?;
             self.kill_switch = Some(ks);

@@ -40,6 +40,8 @@ pub struct ServerConfig {
     pub dns_servers: Vec<Ipv4Addr>,
     /// WAN interface for NAT
     pub wan_interface: String,
+    /// Concrete firewall backend resolved once before server startup.
+    pub firewall_backend: crate::firewall::FirewallBackend,
     /// IPv6 IP pool start (None = IPv6 disabled)
     pub ipv6_pool_start: Option<Ipv6Addr>,
     /// IPv6 IP pool end
@@ -105,6 +107,7 @@ impl Default for ServerConfig {
             server_netmask: Ipv4Addr::new(255, 255, 255, 0),
             dns_servers: vec![Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(8, 8, 8, 8)],
             wan_interface: "eth0".to_string(),
+            firewall_backend: crate::firewall::FirewallBackend::Iptables,
             ipv6_pool_start: Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0x0002)),
             ipv6_pool_end: Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0x00fe)),
             ipv6_server_ip: Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0x0001)),
@@ -126,7 +129,10 @@ impl Default for ServerConfig {
     }
 }
 
-pub fn server_config_from_listen_addr(listen_addr: &str) -> Result<ServerConfig, String> {
+pub fn server_config_from_listen_addr(
+    listen_addr: &str,
+    firewall_backend: crate::firewall::FirewallBackend,
+) -> Result<ServerConfig, String> {
     let listen = listen_addr
         .to_socket_addrs()
         .map_err(|e| format!("listen address resolve failed for '{}': {}", listen_addr, e))?
@@ -134,7 +140,7 @@ pub fn server_config_from_listen_addr(listen_addr: &str) -> Result<ServerConfig,
         .ok_or_else(|| {
             format!("listen address '{}' resolved to no socket addresses", listen_addr)
         })?;
-    let mut config = ServerConfig { listen, ..ServerConfig::default() };
+    let mut config = ServerConfig { listen, firewall_backend, ..ServerConfig::default() };
     config.auth_policy = load_auth_policy_config_from_env()?;
     config.bandwidth_policy = load_bandwidth_policy_from_env()?;
     (

@@ -921,7 +921,11 @@ mod tests {
 
     #[test]
     fn test_server_config_from_listen_addr_resolves_socket() {
-        let config = server_config_from_listen_addr("127.0.0.1:4433").unwrap();
+        let config = server_config_from_listen_addr(
+            "127.0.0.1:4433",
+            crate::firewall::FirewallBackend::Iptables,
+        )
+        .unwrap();
         assert_eq!(config.listen, "127.0.0.1:4433".parse().unwrap());
     }
 
@@ -2012,8 +2016,21 @@ mod tests {
     }
 
     #[test]
+    fn test_server_config_retains_resolved_firewall_backend() {
+        let config = server_config_from_listen_addr(
+            "127.0.0.1:4433",
+            crate::firewall::FirewallBackend::Nftables,
+        )
+        .unwrap();
+        assert_eq!(config.firewall_backend, crate::firewall::FirewallBackend::Nftables);
+    }
+
+    #[test]
     fn test_server_config_from_listen_addr_rejects_invalid() {
-        let result = server_config_from_listen_addr("not_a_valid_address");
+        let result = server_config_from_listen_addr(
+            "not_a_valid_address",
+            crate::firewall::FirewallBackend::Iptables,
+        );
         assert!(result.is_err());
     }
 

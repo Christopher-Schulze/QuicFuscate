@@ -990,8 +990,10 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 ### Policy and Platform Boundary
 - `VpnFirewallPolicy` (`src/implementations/client/killswitch.rs`): Validates one TUN name, the exact primary VPN UDP endpoint, an optional opposite-family endpoint, and up to eight deduplicated VPN DNS addresses.
 - `KillSwitch`: Owns four states: disabled, block-only, endpoint-only connecting, and connected TUN/DNS policy. `Drop` deliberately retains enabled rules; explicit shutdown or stale cleanup removes them.
+- Linux backend selection: `firewall::resolve_backend()` probes nftables and the complete dual-stack iptables toolchain once at startup. Standalone and embedded client/server paths retain the selected enum through setup, policy transitions, teardown, and diagnostics; explicit unavailable requests fail closed.
 - Linux nftables: `inet quicfuscate_ks` is replaced with one `nft -f -` transaction. The output chain permits loopback, exact endpoint, selected TUN DNS, and TUN traffic in that order under a default-drop policy.
-- Linux iptables: Dedicated `QUICFUSCATE_KS` chains and OUTPUT jumps exist for IPv4 and IPv6. Cleanup removes only owned jumps/chains. TODO-530 owns explicit backend wiring and a fully atomic fallback replacement.
+- Linux iptables: `iptables-restore --noflush` and `ip6tables-restore --noflush` atomically rebuild dedicated `QUICFUSCATE_KS` chains. Shared OUTPUT chains contain only one exact jump; cleanup removes only owned jumps/chains.
+- Server routing: nftables owns only `inet quicfuscate_rt`; iptables owns only `QUICFUSCATE_RT` and `QUICFUSCATE_NAT` plus exact FORWARD/POSTROUTING jumps. Setup, stale cleanup, and teardown use the same retained backend.
 - macOS: PF policy is available only when the main ruleset exposes the QuicFuscate anchor. TODO-548 owns managed installation and privileged proof.
 - Windows: Runtime activation fails with `NotSupported`; stale legacy rule cleanup remains. TODO-528 owns a WFP-backed implementation because broad `netsh` block rules cannot be safely overridden by endpoint/TUN allow rules.
 
@@ -1001,7 +1003,7 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 - `QuicFuscateEngine::connect()` (`src/engine/engine.rs`): Applies endpoint-only policy before handshake, connected policy after handshake, and installs the runtime watchdog. Callback and event snapshots avoid holding callback locks during user code.
 - `run_client()` (`src/main.rs`): Owns the standalone select-loop equivalent and distinguishes clean signal shutdown from remote close, socket failure, and heartbeat timeout. Its existing 5 ms housekeeping path queues an ack-eliciting QUIC keepalive every third of a nonzero heartbeat window so a responsive idle peer advances inbound activity before the fail-closed deadline.
 - `QuicFuscateEngine::check_heartbeat()`: Compatibility query only; it never drives a duplicate watchdog.
-- `scripts/tests/tun-e2e-killswitch-netns.sh`: Privileged Linux process proof for nftables state, selected VPN DNS, direct DNS and IPv6 leakage, timeout latency, retained fail-closed state, stale cleanup, and clean SIGTERM cleanup.
+- `scripts/tests/tun-e2e-killswitch-netns.sh`: Privileged Linux process proof for explicit/automatic selection, unavailable-backend failure, rollback-safe nftables and iptables replacement, real TUN traffic, selected VPN DNS, direct DNS and IPv6 leakage, timeout latency, retained fail-closed state, stale recovery, and client/server SIGTERM cleanup.
 
 ## ICMP Server Architecture (Review Fix Session)
 - `build_echo_reply()` (`src/implementations/server/icmp.rs`): Sets fresh TTL=64 for locally-originated echo replies (RFC 1812 §5.3.1), not decremented from original request.

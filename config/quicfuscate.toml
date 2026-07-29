@@ -467,10 +467,10 @@ heartbeat_timeout_ms = 30000
 # Cleanup stale firewall rules from a crashed previous session on startup.
 cleanup_firewall_on_start = false
 
-# Firewall backend selection (Linux only). "auto" auto-detects at runtime,
-# preferring nftables when available and falling back to iptables.
-# Valid values: "auto", "iptables", "nftables"
-# firewall.backend = "auto"
+# Firewall backend selection (Linux only). Omit this key for automatic
+# selection, which prefers nftables and falls back to iptables.
+# Valid explicit values: "iptables", "nftables"
+# firewall.backend = "nftables"
 
 # ==============================================================================
 # PRESETS (Quick configurations)

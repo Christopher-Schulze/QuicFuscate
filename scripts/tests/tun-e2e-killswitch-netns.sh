@@ -21,6 +21,28 @@ LOCK_FILE="${QF_E2E_LOCK_FILE:-/tmp/quicfuscate-tun-e2e.lock}"
 SERVER_LOG="/tmp/qf-killswitch-server.log"
 CLIENT_LOG="/tmp/qf-killswitch-client.log"
 CAPTURE_FILE="/tmp/qf-killswitch-underlay.pcap"
+FIREWALL_BACKEND="${FIREWALL_BACKEND:-auto}"
+RUNTIME_PATH="${RUNTIME_PATH:-$PATH}"
+EXPECT_BACKEND_UNAVAILABLE="${EXPECT_BACKEND_UNAVAILABLE:-0}"
+RUNTIME_CONFIG="$CERT_DIR/runtime.toml"
+RUNTIME_CONFIG_ARGS=()
+
+case "$FIREWALL_BACKEND" in
+  auto | nftables)
+    RULE_BACKEND="nftables"
+    ;;
+  iptables)
+    RULE_BACKEND="iptables"
+    ;;
+  *)
+    echo "invalid FIREWALL_BACKEND: $FIREWALL_BACKEND" >&2
+    exit 2
+    ;;
+esac
+if [ "$EXPECT_BACKEND_UNAVAILABLE" = "1" ] && [ "$FIREWALL_BACKEND" = "auto" ]; then
+  echo "EXPECT_BACKEND_UNAVAILABLE requires an explicit FIREWALL_BACKEND" >&2
+  exit 2
+fi
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -85,16 +107,101 @@ process_exited() {
   [ "$process_state" = "Z" ]
 }
 
+assert_selection_log() {
+  local log_file="$1"
+  local expected_line
+  expected_line="Firewall backend selected: requested=$FIREWALL_BACKEND, selected=$RULE_BACKEND"
+  wait_for 5 grep -q "$expected_line" "$log_file"
+  if [ "$(grep -c 'Firewall backend selected:' "$log_file")" != "1" ]; then
+    echo "firewall backend was not resolved exactly once: $log_file" >&2
+    exit 1
+  fi
+  if [ "$FIREWALL_BACKEND" = "iptables" ]; then
+    grep -q \
+      "$expected_line, nftables_available=false, iptables_available=true" \
+      "$log_file"
+  else
+    grep -q "$expected_line, nftables_available=true," "$log_file"
+  fi
+}
+
 rules_contain() {
-  ip netns exec "$CLIENT_NS" nft list table inet quicfuscate_ks 2>/dev/null | grep -q -- "$1"
+  local rules
+  rules="$(kill_switch_rules)"
+  grep -q -- "$1" <<<"$rules"
 }
 
 table_absent() {
-  ! ip netns exec "$CLIENT_NS" nft list table inet quicfuscate_ks >/dev/null 2>&1
+  if [ "$RULE_BACKEND" = "nftables" ]; then
+    ! ip netns exec "$CLIENT_NS" nft list table inet quicfuscate_ks >/dev/null 2>&1
+  else
+    ! ip netns exec "$CLIENT_NS" iptables -S QUICFUSCATE_KS >/dev/null 2>&1 &&
+      ! ip netns exec "$CLIENT_NS" ip6tables -S QUICFUSCATE_KS >/dev/null 2>&1
+  fi
 }
 
 endpoint_rule_absent() {
-  ! rules_contain "udp dport $LISTEN_PORT accept"
+  if [ "$RULE_BACKEND" = "nftables" ]; then
+    ! rules_contain "udp dport $LISTEN_PORT accept"
+  else
+    ! ip netns exec "$CLIENT_NS" iptables \
+      -C QUICFUSCATE_KS -d "$SERVER_UNDERLAY_IP" \
+      -p udp --dport "$LISTEN_PORT" -j ACCEPT >/dev/null 2>&1
+  fi
+}
+
+kill_switch_rules() {
+  if [ "$RULE_BACKEND" = "nftables" ]; then
+    ip netns exec "$CLIENT_NS" nft list table inet quicfuscate_ks
+  else
+    ip netns exec "$CLIENT_NS" iptables -S OUTPUT
+    ip netns exec "$CLIENT_NS" iptables -S QUICFUSCATE_KS
+    ip netns exec "$CLIENT_NS" ip6tables -S OUTPUT
+    ip netns exec "$CLIENT_NS" ip6tables -S QUICFUSCATE_KS
+  fi
+}
+
+connected_tun_rule_present() {
+  if [ "$RULE_BACKEND" = "nftables" ]; then
+    rules_contain 'oifname "qtun0" accept'
+  else
+    ip netns exec "$CLIENT_NS" iptables \
+      -C QUICFUSCATE_KS -o qtun0 -j ACCEPT >/dev/null 2>&1 &&
+      ip netns exec "$CLIENT_NS" ip6tables \
+        -C QUICFUSCATE_KS -o qtun0 -j ACCEPT >/dev/null 2>&1
+  fi
+}
+
+block_policy_present() {
+  if [ "$RULE_BACKEND" = "nftables" ]; then
+    rules_contain 'policy drop'
+  else
+    ip netns exec "$CLIENT_NS" iptables \
+      -C QUICFUSCATE_KS -j DROP >/dev/null 2>&1 &&
+      ip netns exec "$CLIENT_NS" ip6tables \
+        -C QUICFUSCATE_KS -j DROP >/dev/null 2>&1
+  fi
+}
+
+routing_policy_absent() {
+  if [ "$RULE_BACKEND" = "nftables" ]; then
+    ! ip netns exec "$SERVER_NS" nft list table inet quicfuscate_rt >/dev/null 2>&1
+  else
+    ! ip netns exec "$SERVER_NS" iptables -S QUICFUSCATE_RT >/dev/null 2>&1 &&
+      ! ip netns exec "$SERVER_NS" iptables -t nat -S QUICFUSCATE_NAT >/dev/null 2>&1 &&
+      ! ip netns exec "$SERVER_NS" ip6tables -S QUICFUSCATE_RT >/dev/null 2>&1 &&
+      ! ip netns exec "$SERVER_NS" ip6tables -t nat -S QUICFUSCATE_NAT >/dev/null 2>&1
+  fi
+}
+
+create_runtime_config() {
+  if [ "$FIREWALL_BACKEND" = "auto" ]; then
+    return
+  fi
+  printf '%s\n' \
+    '[security.firewall]' \
+    "backend = \"$FIREWALL_BACKEND\"" >"$RUNTIME_CONFIG"
+  RUNTIME_CONFIG_ARGS=(--config "$RUNTIME_CONFIG")
 }
 
 create_certificates() {
@@ -138,11 +245,94 @@ setup_namespaces() {
   ip netns exec "$SERVER_NS" ip link set qf-ks-srv-veth up
   ip netns exec "$CLIENT_NS" ip link set lo up
   ip netns exec "$CLIENT_NS" ip link set qf-ks-cli-veth up
+  ip netns exec "$SERVER_NS" ip route replace default via "$CLIENT_UNDERLAY_IP" dev qf-ks-srv-veth
+  ip netns exec "$CLIENT_NS" ip route replace default via "$SERVER_UNDERLAY_IP" dev qf-ks-cli-veth
+}
+
+assert_atomic_replacement_failure() {
+  if [ "$RULE_BACKEND" = "nftables" ]; then
+    local initial_rules invalid_rules rules_before rules_after status
+    initial_rules='table inet quicfuscate_ks {
+  chain output {
+    type filter hook output priority 0; policy drop;
+    oifname "lo" accept
+  }
+}'
+    invalid_rules='delete table inet quicfuscate_ks
+table inet quicfuscate_ks {
+  chain output {
+    type filter hook output priority 0; policy drop;
+    definitely-invalid-statement
+  }
+}'
+    ip netns exec "$CLIENT_NS" nft -f - <<<"$initial_rules"
+    rules_before="$(ip netns exec "$CLIENT_NS" nft -s list table inet quicfuscate_ks)"
+    set +e
+    ip netns exec "$CLIENT_NS" nft -f - <<<"$invalid_rules" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -eq 0 ]; then
+      echo "invalid nftables replacement unexpectedly succeeded" >&2
+      exit 1
+    fi
+    rules_after="$(ip netns exec "$CLIENT_NS" nft -s list table inet quicfuscate_ks)"
+    if [ "$rules_before" != "$rules_after" ]; then
+      echo "failed nftables replacement changed the owned table" >&2
+      exit 1
+    fi
+    ip netns exec "$CLIENT_NS" nft delete table inet quicfuscate_ks
+    return
+  fi
+
+  local program restore_program initial_rules invalid_rules rules_before rules_after status
+  for program in iptables ip6tables; do
+    if [ "$program" = "iptables" ]; then
+      restore_program="iptables-restore"
+    else
+      restore_program="ip6tables-restore"
+    fi
+    initial_rules='*filter
+:QUICFUSCATE_KS - [0:0]
+-A QUICFUSCATE_KS -o lo -j ACCEPT
+-A QUICFUSCATE_KS -j DROP
+-I OUTPUT 1 -j QUICFUSCATE_KS
+COMMIT'
+    invalid_rules='*filter
+:QUICFUSCATE_KS - [0:0]
+-A QUICFUSCATE_KS --definitely-invalid
+COMMIT'
+    ip netns exec "$CLIENT_NS" "$restore_program" --noflush --wait 5 <<<"$initial_rules"
+    rules_before="$(
+      ip netns exec "$CLIENT_NS" "$program" -S OUTPUT
+      ip netns exec "$CLIENT_NS" "$program" -S QUICFUSCATE_KS
+    )"
+    set +e
+    ip netns exec "$CLIENT_NS" "$restore_program" --noflush --wait 5 \
+      <<<"$invalid_rules" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -eq 0 ]; then
+      echo "invalid $restore_program replacement unexpectedly succeeded" >&2
+      exit 1
+    fi
+    rules_after="$(
+      ip netns exec "$CLIENT_NS" "$program" -S OUTPUT
+      ip netns exec "$CLIENT_NS" "$program" -S QUICFUSCATE_KS
+    )"
+    if [ "$rules_before" != "$rules_after" ]; then
+      echo "failed $restore_program replacement changed the owned chain" >&2
+      exit 1
+    fi
+    ip netns exec "$CLIENT_NS" "$program" -D OUTPUT -j QUICFUSCATE_KS
+    ip netns exec "$CLIENT_NS" "$program" -F QUICFUSCATE_KS
+    ip netns exec "$CLIENT_NS" "$program" -X QUICFUSCATE_KS
+  done
 }
 
 start_server() {
   rm -f /tmp/qf-killswitch-admin.sock "$SERVER_LOG"
-  ip netns exec "$SERVER_NS" "$BINARY" server \
+  ip netns exec "$SERVER_NS" env PATH="$RUNTIME_PATH" "$BINARY" server \
+    "${RUNTIME_CONFIG_ARGS[@]}" \
     --cert "$CERT_DIR/server.crt" --key "$CERT_DIR/server.key" \
     --listen "$SERVER_UNDERLAY_IP:$LISTEN_PORT" \
     --admin-socket /tmp/qf-killswitch-admin.sock \
@@ -151,6 +341,23 @@ start_server() {
     >"$SERVER_LOG" 2>&1 &
   SERVER_PID=$!
   wait_for 10 test -S /tmp/qf-killswitch-admin.sock
+  assert_selection_log "$SERVER_LOG"
+  if [ "$RULE_BACKEND" = "nftables" ]; then
+    ip netns exec "$SERVER_NS" nft list table inet quicfuscate_rt >/dev/null
+  else
+    ip netns exec "$SERVER_NS" iptables -S QUICFUSCATE_RT >/dev/null
+    ip netns exec "$SERVER_NS" iptables -t nat -S QUICFUSCATE_NAT >/dev/null
+    ip netns exec "$SERVER_NS" ip6tables -S QUICFUSCATE_RT >/dev/null
+    ip netns exec "$SERVER_NS" ip6tables -t nat -S QUICFUSCATE_NAT >/dev/null
+    ip netns exec "$SERVER_NS" iptables \
+      -C FORWARD -j QUICFUSCATE_RT >/dev/null
+    ip netns exec "$SERVER_NS" iptables \
+      -t nat -C POSTROUTING -j QUICFUSCATE_NAT >/dev/null
+    ip netns exec "$SERVER_NS" ip6tables \
+      -C FORWARD -j QUICFUSCATE_RT >/dev/null
+    ip netns exec "$SERVER_NS" ip6tables \
+      -t nat -C POSTROUTING -j QUICFUSCATE_NAT >/dev/null
+  fi
 }
 
 fetch_qkey() {
@@ -161,7 +368,8 @@ fetch_qkey() {
 start_client() {
   local qkey="$1"
   rm -f "$CLIENT_LOG"
-  ip netns exec "$CLIENT_NS" "$BINARY" client \
+  ip netns exec "$CLIENT_NS" env PATH="$RUNTIME_PATH" "$BINARY" client \
+    "${RUNTIME_CONFIG_ARGS[@]}" \
     --remote "$SERVER_UNDERLAY_IP:$LISTEN_PORT" \
     --url "https://$SERVER_UNDERLAY_IP/" --qkey "$qkey" \
     --ca-file "$CERT_DIR/ca.crt" --verify-peer --no-utls \
@@ -172,7 +380,8 @@ start_client() {
     >"$CLIENT_LOG" 2>&1 &
   CLIENT_PID=$!
   wait_for 15 grep -q 'TLS handshake complete' "$CLIENT_LOG"
-  wait_for 10 rules_contain 'oifname "qtun0" accept'
+  assert_selection_log "$CLIENT_LOG"
+  wait_for 10 connected_tun_rule_present
 }
 
 ensure_tun_interfaces() {
@@ -184,22 +393,51 @@ ensure_tun_interfaces() {
 
 assert_connected_policy() {
   local rules
-  rules="$(ip netns exec "$CLIENT_NS" nft list table inet quicfuscate_ks)"
-  grep -q "ip daddr $SERVER_UNDERLAY_IP udp dport $LISTEN_PORT accept" <<<"$rules"
-  grep -q "oifname \"qtun0\" ip daddr $SERVER_TUN_IP udp dport 53 accept" <<<"$rules"
-  grep -q 'udp dport 53 drop' <<<"$rules"
-  grep -q 'tcp dport 53 drop' <<<"$rules"
-  grep -q 'oifname "qtun0" accept' <<<"$rules"
+  if [ "$RULE_BACKEND" = "nftables" ]; then
+    rules="$(kill_switch_rules)"
+    grep -q "ip daddr $SERVER_UNDERLAY_IP udp dport $LISTEN_PORT accept" <<<"$rules"
+    grep -q "oifname \"qtun0\" ip daddr $SERVER_TUN_IP udp dport 53 accept" <<<"$rules"
+    grep -q 'udp dport 53 drop' <<<"$rules"
+    grep -q 'tcp dport 53 drop' <<<"$rules"
+    grep -q 'oifname "qtun0" accept' <<<"$rules"
+  else
+    ip netns exec "$CLIENT_NS" iptables \
+      -C QUICFUSCATE_KS -d "$SERVER_UNDERLAY_IP" \
+      -p udp --dport "$LISTEN_PORT" -j ACCEPT
+    ip netns exec "$CLIENT_NS" iptables \
+      -C QUICFUSCATE_KS -o qtun0 -d "$SERVER_TUN_IP" \
+      -p udp --dport 53 -j ACCEPT
+    ip netns exec "$CLIENT_NS" iptables \
+      -C QUICFUSCATE_KS -o qtun0 -d "$SERVER_TUN_IP" \
+      -p tcp --dport 53 -j ACCEPT
+    for program in iptables ip6tables; do
+      ip netns exec "$CLIENT_NS" "$program" \
+        -C QUICFUSCATE_KS -p udp --dport 53 -j DROP
+      ip netns exec "$CLIENT_NS" "$program" \
+        -C QUICFUSCATE_KS -p tcp --dport 53 -j DROP
+      ip netns exec "$CLIENT_NS" "$program" \
+        -C QUICFUSCATE_KS -o qtun0 -j ACCEPT
+    done
+  fi
 }
 
 assert_dns_and_ipv6_policy() {
+  local capture_filter
+  capture_filter="(src host $CLIENT_UNDERLAY_IP or src host $CLIENT_UNDERLAY_IP6) and (port 53 or ip6)"
+  rm -f "$CAPTURE_FILE"
   ip netns exec "$CLIENT_NS" tcpdump -i qf-ks-cli-veth -nn -U \
-    -w "$CAPTURE_FILE" '(port 53 or ip6)' >/dev/null 2>&1 &
+    -w "$CAPTURE_FILE" "$capture_filter" >/dev/null 2>&1 &
   CAPTURE_PID=$!
   sleep 0.5
+  if ! kill -0 "$CAPTURE_PID" 2>/dev/null || [ ! -s "$CAPTURE_FILE" ]; then
+    echo "underlay capture failed to start" >&2
+    exit 1
+  fi
 
+  ip netns exec "$CLIENT_NS" ping -c 3 -W 2 "$SERVER_TUN_IP" \
+    >/tmp/qf-killswitch-tun-ping.log
   ip netns exec "$CLIENT_NS" dig @"$SERVER_TUN_IP" example.com A \
-    +tries=1 +time=5 +norecurse +stats >/tmp/qf-killswitch-vpn-dns.log
+    +tries=1 +time=1 +norecurse +stats >/tmp/qf-killswitch-vpn-dns.log || true
   if ip netns exec "$CLIENT_NS" dig @"$SERVER_UNDERLAY_IP" example.com A \
     +tries=1 +time=1 +norecurse >/tmp/qf-killswitch-direct-dns.log 2>&1; then
     echo "direct underlay DNS unexpectedly succeeded" >&2
@@ -225,8 +463,7 @@ assert_dns_and_ipv6_policy() {
 
 assert_unexpected_loss_retains_block() {
   local start_ms end_ms elapsed_ms
-  ip netns exec "$CLIENT_NS" dig @"$SERVER_TUN_IP" example.com A \
-    +tries=1 +time=5 +norecurse >/dev/null
+  ip netns exec "$CLIENT_NS" ping -c 1 -W 2 "$SERVER_TUN_IP" >/dev/null
   start_ms="$(date +%s%3N)"
   kill -STOP "$SERVER_PID"
   wait_for 17 grep -q 'heartbeat timeout' "$CLIENT_LOG"
@@ -244,8 +481,8 @@ assert_unexpected_loss_retains_block() {
   wait_for 5 process_exited "$CLIENT_PID"
   wait "$CLIENT_PID" 2>/dev/null || true
   CLIENT_PID=""
-  rules_contain 'policy drop'
-  if rules_contain 'oifname "qtun0" accept'; then
+  block_policy_present
+  if connected_tun_rule_present; then
     echo "TUN allow rule survived unexpected loss" >&2
     exit 1
   fi
@@ -260,7 +497,8 @@ assert_unexpected_loss_retains_block() {
 }
 
 assert_stale_cleanup() {
-  ip netns exec "$CLIENT_NS" "$BINARY" client \
+  ip netns exec "$CLIENT_NS" env PATH="$RUNTIME_PATH" "$BINARY" client \
+    "${RUNTIME_CONFIG_ARGS[@]}" \
     --remote "$SERVER_UNDERLAY_IP:$LISTEN_PORT" --cleanup-firewall >/dev/null 2>&1
   wait_for 5 table_absent
 }
@@ -275,10 +513,46 @@ assert_clean_signal_cleanup() {
   wait "$CLIENT_PID"
   CLIENT_PID=""
   wait_for 5 table_absent
+  kill -TERM "$SERVER_PID"
+  wait_for 5 process_exited "$SERVER_PID"
+  wait "$SERVER_PID"
+  SERVER_PID=""
+  wait_for 5 routing_policy_absent
+}
+
+assert_requested_backend_unavailable() {
+  set +e
+  ip netns exec "$SERVER_NS" env PATH="$RUNTIME_PATH" "$BINARY" server \
+    "${RUNTIME_CONFIG_ARGS[@]}" \
+    --cert "$CERT_DIR/server.crt" --key "$CERT_DIR/server.key" \
+    --listen "$SERVER_UNDERLAY_IP:$LISTEN_PORT" \
+    --admin-socket /tmp/qf-killswitch-admin.sock \
+    --tun --tun-name qtun0 --tun-ip "$SERVER_TUN_IP" \
+    --tun-netmask 255.255.255.0 --no-drop-privileges -v \
+    >"$SERVER_LOG" 2>&1
+  local status=$?
+  set -e
+  if [ "$status" -eq 0 ]; then
+    echo "unavailable explicit backend unexpectedly started" >&2
+    exit 1
+  fi
+  grep -q \
+    "Firewall backend selection failed: requested=$FIREWALL_BACKEND, selected=none" \
+    "$SERVER_LOG"
+  grep -q "requested firewall backend $FIREWALL_BACKEND is unavailable" "$SERVER_LOG"
+  routing_policy_absent
+  table_absent
+  echo "PASS ($FIREWALL_BACKEND unavailable): explicit selection failed closed before firewall state"
 }
 
 create_certificates
+create_runtime_config
 setup_namespaces
+if [ "$EXPECT_BACKEND_UNAVAILABLE" = "1" ]; then
+  assert_requested_backend_unavailable
+  exit 0
+fi
+assert_atomic_replacement_failure
 start_server
 QKEY="$(fetch_qkey)"
 start_client "$QKEY"
@@ -289,4 +563,4 @@ assert_unexpected_loss_retains_block
 assert_stale_cleanup
 assert_clean_signal_cleanup
 
-echo "PASS: connected DNS policy, IPv6 blocking, ${TRANSITION_LIMIT_MS}ms loss bound, retained fail-closed state, stale cleanup, and SIGTERM cleanup"
+echo "PASS ($RULE_BACKEND): connected TUN/DNS policy, IPv6 blocking, ${TRANSITION_LIMIT_MS}ms loss bound, retained fail-closed state, stale cleanup, and client/server SIGTERM cleanup"

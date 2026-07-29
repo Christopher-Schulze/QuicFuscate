@@ -77,7 +77,11 @@ impl ServerRuntime {
                             let routing =
                                 configured_routing_manager(tun.name().to_string(), &server_config)
                                     .map_err(std::io::Error::other)?;
-                            routing.cleanup_stale();
+                            routing.cleanup_stale().map_err(|error| {
+                                std::io::Error::other(format!(
+                                    "stale routing cleanup failed: {error}"
+                                ))
+                            })?;
                             if let Err(error) = routing.setup() {
                                 let _ = routing.teardown();
                                 crate::audit::audit_typed(

@@ -1019,7 +1019,7 @@ checks = [
     ),
     (
         Path("src/main_parts/late_tests_and_mlock.rs"),
-        "server_config_from_listen_addr(listen_addr)",
+        "server_config_from_listen_addr(",
         "init_audit_log_with_options(",
         "auth configuration no longer validates before audit resource creation",
     ),
