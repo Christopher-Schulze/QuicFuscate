@@ -957,6 +957,58 @@ else
   append_item "qkey_registry_fail_closed_encryption" "fail" "${QKEY_REGISTRY_FAIL_OPEN_REFS:-missing startup propagation, key-file source, rotation source, installer default, or documentation}"
 fi
 
+QKEY_AUTH_POLICY_ORDER_ERRORS="$(python3 - <<'PY'
+from pathlib import Path
+
+checks = [
+    (
+        Path("src/implementations/server/parts/live_state.rs"),
+        "let admission =",
+        "parse_live_server_initial_auth(",
+        "QKey admission no longer precedes registry lookup",
+    ),
+    (
+        Path("src/main_parts/late_tests_and_mlock.rs"),
+        "server_config_from_listen_addr(listen_addr)",
+        "init_audit_log_with_options(",
+        "auth configuration no longer validates before audit resource creation",
+    ),
+]
+errors = []
+for path, first, second, message in checks:
+    text = path.read_text(encoding="utf-8")
+    first_index = text.find(first)
+    second_index = text.find(second)
+    if first_index < 0 or second_index < 0 or first_index >= second_index:
+        errors.append(message)
+print("; ".join(errors))
+PY
+)"
+QKEY_AUTH_POLICY_HARNESS="scripts/tests/suites/test-qkey-auth-policy.sh"
+if [[ -z "$QKEY_AUTH_POLICY_ORDER_ERRORS" ]] \
+  && rg -F -- 'pub struct AuthPolicyConfig {' src/implementations/server/limits.rs >/dev/null \
+  && rg -F -- 'max_tracked_ips: 65_536' src/implementations/server/limits.rs >/dev/null \
+  && rg -F -- 'max_pending_attempts_per_ip: 4' src/implementations/server/limits.rs >/dev/null \
+  && rg -F -- 'QUICFUSCATE_AUTH_BACKOFF_AFTER_FAILURES' src/implementations/server/parts/config.rs config/server-linux.default.toml docs/DOCUMENTATION.md >/dev/null \
+  && rg -F -- 'AuthRateLimiter::new(' src/implementations/server/parts/live_state.rs >/dev/null \
+  && [[ "$(rg -c --no-messages 'qkey_auth_denied' src/implementations/server/parts/live_auth.rs || true)" -ge 3 ]] \
+  && rg -F -- 'quicfuscate_auth_backoff_rejected_total' src/implementations/server/metrics.rs docs/DOCUMENTATION.md >/dev/null \
+  && rg -F -- 'quicfuscate_auth_blocked_rejected_total' src/implementations/server/metrics.rs docs/DOCUMENTATION.md >/dev/null \
+  && rg -F -- 'assert_metric_exact quicfuscate_auth_attempts_total 100' "$QKEY_AUTH_POLICY_HARNESS" >/dev/null \
+  && rg -F -- 'assert_metric_exact quicfuscate_auth_failed_total 4' "$QKEY_AUTH_POLICY_HARNESS" >/dev/null \
+  && rg -F -- 'assert_metric_exact quicfuscate_auth_blocked_rejected_total 94' "$QKEY_AUTH_POLICY_HARNESS" >/dev/null \
+  && rg -F -- 'run_valid_probe secondary "$SECONDARY_LOCAL"' "$QKEY_AUTH_POLICY_HARNESS" >/dev/null \
+  && rg -F -- 'flood_server_rss_growth_kib=' "$QKEY_AUTH_POLICY_HARNESS" >/dev/null \
+  && rg -F -- '--initial-only' src/bin/qf-e2e-client.rs "$QKEY_AUTH_POLICY_HARNESS" >/dev/null \
+  && rg -F -- 'conn.conn.is_closed()' src/bin/qf-e2e-client.rs >/dev/null \
+  && rg -F -- '--ca-file' src/bin/qf-e2e-client.rs "$QKEY_AUTH_POLICY_HARNESS" >/dev/null; then
+  pass "QKey auth abuse policy remains bounded, pre-lookup, non-oracular, observable, and process-proved"
+  append_item "qkey_auth_policy_lifecycle" "ok" "validated startup ordering, bounded state, generic wire denial, exact metrics, two-IP lifecycle, and 100-attempt resource proof remain present"
+else
+  fail_critical "QKey auth abuse-policy lifecycle contract is incomplete"
+  append_item "qkey_auth_policy_lifecycle" "fail" "${QKEY_AUTH_POLICY_ORDER_ERRORS:-missing bounded config, startup order, generic denial, metrics/docs, client terminal detection, CA verification, or exact process harness}"
+fi
+
 # 12) Detect acceleration exports with no runtime references outside their defining module.
 DEAD_ACCEL_EXPORTS=(
 )

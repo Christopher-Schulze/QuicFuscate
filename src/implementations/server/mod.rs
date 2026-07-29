@@ -58,9 +58,11 @@ pub use isolation::{
 };
 #[cfg(feature = "rate_limiter")]
 pub use limits::load_rate_limit_config_from_env;
+pub use limits::{
+    AuthPolicyConfig, ConnectionLimiter, GlobalRateLimiter, RateLimitConfig, RateLimiter,
+};
 #[cfg(feature = "rate_limiter")]
 pub use limits::{BlacklistSync, GeoIpBlocker, GeoIpConfig};
-pub use limits::{ConnectionLimiter, GlobalRateLimiter, RateLimitConfig, RateLimiter};
 #[cfg(any(test, feature = "rust-tests"))]
 pub use metrics::GlobalMetricsServer;
 pub use metrics::{Metrics, RoutingOutcome, TunDownlinkBackpressureDrop};
@@ -70,7 +72,6 @@ pub use session::{Session, SessionError, SessionId, SessionManager, SessionStats
 use self::admin_http::{AdminAuth, IssueQKeyRequest};
 use self::qkey_registry::{QKeyEntry, QKeyRecord, QKeyRegistry};
 use parking_lot::RwLock;
-#[cfg(feature = "rate_limiter")]
 use std::net::IpAddr;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 #[cfg(unix)]

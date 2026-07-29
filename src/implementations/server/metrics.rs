@@ -119,7 +119,15 @@ pub struct Metrics {
     pub fec_packets_recovered: FecProcessCounter,
 
     // Error metrics
+    pub auth_attempts: AtomicU64,
+    pub auth_succeeded: AtomicU64,
     pub auth_failed: AtomicU64,
+    pub auth_backoff_rejected: AtomicU64,
+    pub auth_blocked_rejected: AtomicU64,
+    pub auth_capacity_rejected: AtomicU64,
+    pub auth_abandoned: AtomicU64,
+    pub auth_state_tracked_ips: AtomicU64,
+    pub auth_state_pruned: AtomicU64,
     pub rate_limited: AtomicU64,
 
     // Uptime (set once at start)
@@ -173,7 +181,15 @@ impl Metrics {
             fec_packets_encoded: FecProcessCounter::new(FecProcessCounterKind::Emitted),
             fec_packets_decoded: FecProcessCounter::new(FecProcessCounterKind::Decoded),
             fec_packets_recovered: FecProcessCounter::new(FecProcessCounterKind::Recovered),
+            auth_attempts: AtomicU64::new(0),
+            auth_succeeded: AtomicU64::new(0),
             auth_failed: AtomicU64::new(0),
+            auth_backoff_rejected: AtomicU64::new(0),
+            auth_blocked_rejected: AtomicU64::new(0),
+            auth_capacity_rejected: AtomicU64::new(0),
+            auth_abandoned: AtomicU64::new(0),
+            auth_state_tracked_ips: AtomicU64::new(0),
+            auth_state_pruned: AtomicU64::new(0),
             rate_limited: AtomicU64::new(0),
             start_time: std::time::Instant::now(),
         }
@@ -197,6 +213,41 @@ impl Metrics {
     pub fn record_auth_failure(&self) {
         self.auth_failed.fetch_add(1, Ordering::Relaxed);
         crate::instrumentation::global().server.auth_failure();
+    }
+
+    pub fn record_auth_attempt(&self) {
+        self.auth_attempts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_auth_success(&self) {
+        self.auth_succeeded.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_auth_backoff_rejection(&self) {
+        self.auth_backoff_rejected.fetch_add(1, Ordering::Relaxed);
+        self.record_rate_limited();
+    }
+
+    pub fn record_auth_blocked_rejection(&self) {
+        self.auth_blocked_rejected.fetch_add(1, Ordering::Relaxed);
+        self.record_rate_limited();
+    }
+
+    pub fn record_auth_capacity_rejection(&self) {
+        self.auth_capacity_rejected.fetch_add(1, Ordering::Relaxed);
+        self.record_rate_limited();
+    }
+
+    pub fn record_auth_abandoned(&self) {
+        self.auth_abandoned.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn set_auth_state_tracked_ips(&self, tracked_ips: usize) {
+        self.auth_state_tracked_ips.store(tracked_ips as u64, Ordering::Relaxed);
+    }
+
+    pub fn record_auth_state_pruned(&self, pruned: usize) {
+        self.auth_state_pruned.fetch_add(pruned as u64, Ordering::Relaxed);
     }
 
     pub fn record_rate_limited(&self) {
@@ -563,11 +614,65 @@ impl Metrics {
         ));
 
         // Errors
-        out.push_str("# HELP quicfuscate_auth_failed_total Authentication failures\n");
+        out.push_str("# HELP quicfuscate_auth_attempts_total QKey authentication attempts\n");
+        out.push_str("# TYPE quicfuscate_auth_attempts_total counter\n");
+        out.push_str(&format!(
+            "quicfuscate_auth_attempts_total {}\n\n",
+            self.auth_attempts.load(Ordering::Relaxed)
+        ));
+        out.push_str("# HELP quicfuscate_auth_succeeded_total Successful QKey authentications\n");
+        out.push_str("# TYPE quicfuscate_auth_succeeded_total counter\n");
+        out.push_str(&format!(
+            "quicfuscate_auth_succeeded_total {}\n\n",
+            self.auth_succeeded.load(Ordering::Relaxed)
+        ));
+        out.push_str(
+            "# HELP quicfuscate_auth_failed_total Terminal QKey authentication failures\n",
+        );
         out.push_str("# TYPE quicfuscate_auth_failed_total counter\n");
         out.push_str(&format!(
             "quicfuscate_auth_failed_total {}\n\n",
             self.auth_failed.load(Ordering::Relaxed)
+        ));
+        for (name, help, value) in [
+            (
+                "backoff_rejected",
+                "QKey attempts rejected by exponential backoff",
+                self.auth_backoff_rejected.load(Ordering::Relaxed),
+            ),
+            (
+                "blocked_rejected",
+                "QKey attempts rejected by the explicit blocked state",
+                self.auth_blocked_rejected.load(Ordering::Relaxed),
+            ),
+            (
+                "capacity_rejected",
+                "QKey attempts rejected by bounded state capacity",
+                self.auth_capacity_rejected.load(Ordering::Relaxed),
+            ),
+            (
+                "abandoned",
+                "QKey attempts abandoned before a credential result",
+                self.auth_abandoned.load(Ordering::Relaxed),
+            ),
+        ] {
+            out.push_str(&format!("# HELP quicfuscate_auth_{name}_total {help}\n"));
+            out.push_str(&format!("# TYPE quicfuscate_auth_{name}_total counter\n"));
+            out.push_str(&format!("quicfuscate_auth_{name}_total {value}\n\n"));
+        }
+        out.push_str("# HELP quicfuscate_auth_state_tracked_ips Current QKey auth IP states\n");
+        out.push_str("# TYPE quicfuscate_auth_state_tracked_ips gauge\n");
+        out.push_str(&format!(
+            "quicfuscate_auth_state_tracked_ips {}\n\n",
+            self.auth_state_tracked_ips.load(Ordering::Relaxed)
+        ));
+        out.push_str(
+            "# HELP quicfuscate_auth_state_pruned_total Idle QKey auth IP states pruned\n",
+        );
+        out.push_str("# TYPE quicfuscate_auth_state_pruned_total counter\n");
+        out.push_str(&format!(
+            "quicfuscate_auth_state_pruned_total {}\n\n",
+            self.auth_state_pruned.load(Ordering::Relaxed)
         ));
 
         out.push_str("# HELP quicfuscate_rate_limited_total Rate-limited events\n");
@@ -944,6 +1049,35 @@ mod tests {
         let output = metrics.export_health();
         assert!(output.contains("\"status\":\"ok\""));
         assert!(output.contains("\"clients\":10"));
+    }
+
+    #[test]
+    fn auth_policy_metrics_export_distinct_terminal_and_admission_families() {
+        let metrics = Metrics::new();
+        metrics.record_auth_attempt();
+        metrics.record_auth_success();
+        metrics.record_auth_failure();
+        metrics.record_auth_backoff_rejection();
+        metrics.record_auth_blocked_rejection();
+        metrics.record_auth_capacity_rejection();
+        metrics.record_auth_abandoned();
+        metrics.set_auth_state_tracked_ips(7);
+        metrics.record_auth_state_pruned(3);
+
+        let output = metrics.export();
+        for metric in [
+            "quicfuscate_auth_attempts_total 1",
+            "quicfuscate_auth_succeeded_total 1",
+            "quicfuscate_auth_failed_total 1",
+            "quicfuscate_auth_backoff_rejected_total 1",
+            "quicfuscate_auth_blocked_rejected_total 1",
+            "quicfuscate_auth_capacity_rejected_total 1",
+            "quicfuscate_auth_abandoned_total 1",
+            "quicfuscate_auth_state_tracked_ips 7",
+            "quicfuscate_auth_state_pruned_total 3",
+        ] {
+            assert!(output.contains(metric), "missing auth policy metric: {metric}");
+        }
     }
 
     #[test]

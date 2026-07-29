@@ -234,3 +234,21 @@ flush_timeout_ms = 5000
 #   QUICFUSCATE_BLACKLIST_SYNC_URL=https://example.com/blocklist.txt
 #   QUICFUSCATE_BLACKLIST_TTL_SECS=3600             # TTL per blocked IP
 #   QUICFUSCATE_BLACKLIST_SYNC_INTERVAL_SECS=3600   # re-fetch interval
+
+# ==============================================================================
+# QKEY AUTHENTICATION ABUSE POLICY
+# ==============================================================================
+# The defaults apply exponential per-IP backoff after three consecutive terminal
+# QKey failures, block after ten failures, and bound attacker-controlled state.
+# Invalid values fail server configuration instead of silently weakening policy.
+#
+#   QUICFUSCATE_AUTH_POLICY_ENABLED=true
+#   QUICFUSCATE_AUTH_BACKOFF_AFTER_FAILURES=3
+#   QUICFUSCATE_AUTH_BACKOFF_BASE_MS=250
+#   QUICFUSCATE_AUTH_BACKOFF_MAX_MS=8000
+#   QUICFUSCATE_AUTH_BLOCK_AFTER_FAILURES=10
+#   QUICFUSCATE_AUTH_BLOCK_DURATION_SECS=300
+#   QUICFUSCATE_AUTH_IDLE_TIMEOUT_SECS=900
+#   QUICFUSCATE_AUTH_PRUNE_INTERVAL_SECS=30
+#   QUICFUSCATE_AUTH_MAX_TRACKED_IPS=65536
+#   QUICFUSCATE_AUTH_MAX_PENDING_PER_IP=4

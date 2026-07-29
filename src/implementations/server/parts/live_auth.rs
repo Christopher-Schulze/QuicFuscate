@@ -180,15 +180,6 @@ pub fn reconcile_live_clients(
     closed_addrs
 }
 
-pub fn record_qkey_auth_failure(metrics: &Metrics) {
-    metrics.record_auth_failure();
-}
-
-pub fn record_qkey_auth_rejection(metrics: &Metrics) {
-    metrics.record_connection_rejected();
-    record_qkey_auth_failure(metrics);
-}
-
 pub struct LiveInitialAuthContext {
     pub odcid: crate::transport::ConnectionId,
     pub version: u32,
@@ -196,22 +187,32 @@ pub struct LiveInitialAuthContext {
     pub pending_qkey_auth: Option<QKeyAuthState>,
 }
 
-pub fn parse_live_server_initial_auth(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LiveInitialAuthError {
+    MalformedPacket,
+    MissingCredential,
+    InvalidCredential,
+    RevokedCredential,
+}
+
+impl LiveInitialAuthError {
+    pub fn is_auth_failure(self) -> bool {
+        !matches!(self, Self::MalformedPacket)
+    }
+}
+
+pub(crate) fn parse_live_server_initial_auth(
     packet: &[u8],
     qkey_registry: &std::sync::Mutex<QKeyRegistry>,
     revocation_manager: &crate::implementations::server::revocation::RevocationManager,
-    metrics: &Metrics,
-) -> Option<LiveInitialAuthContext> {
+    auth_attempt: crate::implementations::server::limits::AuthAttempt,
+) -> Result<LiveInitialAuthContext, LiveInitialAuthError> {
     let (mut initial_hdr, _) = match crate::transport::packet::parse_header(packet, 0) {
         Ok(value) => value,
-        Err(_) => {
-            metrics.record_connection_rejected();
-            return None;
-        }
+        Err(_) => return Err(LiveInitialAuthError::MalformedPacket),
     };
     if initial_hdr.ty != crate::transport::PacketType::Initial {
-        metrics.record_connection_rejected();
-        return None;
+        return Err(LiveInitialAuthError::MalformedPacket);
     }
 
     let version = initial_hdr.version;
@@ -224,33 +225,29 @@ pub fn parse_live_server_initial_auth(
     if require_qkey {
         let token = match initial_token {
             Some(token) if !token.is_empty() => token,
-            _ => {
-                record_qkey_auth_rejection(metrics);
-                return None;
-            }
+            _ => return Err(LiveInitialAuthError::MissingCredential),
         };
         let record = {
             let mut registry = qkey_registry.lock().unwrap_or_else(|error| error.into_inner());
             registry.lookup_initial_id_token(&token)
         };
         let Some(record) = record else {
-            record_qkey_auth_rejection(metrics);
-            return None;
+            return Err(LiveInitialAuthError::InvalidCredential);
         };
         if revocation_manager.is_revoked(&record.id) {
-            record_qkey_auth_rejection(metrics);
-            return None;
+            return Err(LiveInitialAuthError::RevokedCredential);
         }
         pending_qkey_auth = Some(QKeyAuthState {
             key_id: record.id.clone(),
             expected_token_sha256: record.token_sha256.clone(),
             authed: false,
             connected_at: Instant::now(),
+            auth_attempt: Some(auth_attempt),
         });
         qkey_record = Some(record);
     }
 
-    Some(LiveInitialAuthContext { odcid, version, qkey_record, pending_qkey_auth })
+    Ok(LiveInitialAuthContext { odcid, version, qkey_record, pending_qkey_auth })
 }
 
 pub fn apply_qkey_policy_overrides(
@@ -338,17 +335,17 @@ pub fn evaluate_qkey_http3_headers(
     }
 
     let Some(provided) = provided else {
-        return QKeyHeaderAuthOutcome::Reject(b"missing_qkey_auth");
+        return QKeyHeaderAuthOutcome::Reject(b"qkey_auth_denied");
     };
     let provided = match std::str::from_utf8(provided) {
         Ok(value) => value.trim(),
-        Err(_) => return QKeyHeaderAuthOutcome::Reject(b"invalid_qkey_auth"),
+        Err(_) => return QKeyHeaderAuthOutcome::Reject(b"qkey_auth_denied"),
     };
     if crate::implementations::server::qkey_registry::token_matches_hash(provided, expected.trim())
     {
         QKeyHeaderAuthOutcome::Authenticated
     } else {
-        QKeyHeaderAuthOutcome::Reject(b"invalid_qkey_auth")
+        QKeyHeaderAuthOutcome::Reject(b"qkey_auth_denied")
     }
 }
 
@@ -359,11 +356,9 @@ fn qkey_payload_allowed(require_auth: bool, authenticated: bool) -> bool {
 
 pub fn close_live_client_for_qkey_auth_failure(
     conn: &mut QuicFuscateConnection,
-    metrics: &Metrics,
     remote_addr: SocketAddr,
     reason: &'static [u8],
 ) {
-    record_qkey_auth_rejection(metrics);
     if let Err(error) = conn.conn.close(true, 0x0, reason) {
         log::warn!("Client close after QKey auth failure failed for {}: {:?}", remote_addr, error);
     }
@@ -956,7 +951,7 @@ async fn process_live_server_client_datagram(
     let auth_result = qkey_datagram_auth_result(&conn_id, auth_progress.get());
     let mut remove_auth_conn_id = None;
     if let Some(reason) = should_close.get() {
-        close_live_client_for_qkey_auth_failure(conn, metrics, addr, reason);
+        close_live_client_for_qkey_auth_failure(conn, addr, reason);
         remove_auth_conn_id = Some(conn_id.clone());
     }
 

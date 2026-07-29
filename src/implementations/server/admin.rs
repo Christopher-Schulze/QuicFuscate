@@ -262,7 +262,13 @@ impl AdminHandler for DefaultAdminHandler {
             "clients_total": self.metrics.clients_total.load(Ordering::Relaxed),
             "connections_accepted": self.metrics.connections_accepted.load(Ordering::Relaxed),
             "connections_rejected": self.metrics.connections_rejected.load(Ordering::Relaxed),
+            "auth_attempts": self.metrics.auth_attempts.load(Ordering::Relaxed),
+            "auth_succeeded": self.metrics.auth_succeeded.load(Ordering::Relaxed),
             "auth_failed": self.metrics.auth_failed.load(Ordering::Relaxed),
+            "auth_backoff_rejected": self.metrics.auth_backoff_rejected.load(Ordering::Relaxed),
+            "auth_blocked_rejected": self.metrics.auth_blocked_rejected.load(Ordering::Relaxed),
+            "auth_capacity_rejected": self.metrics.auth_capacity_rejected.load(Ordering::Relaxed),
+            "auth_state_tracked_ips": self.metrics.auth_state_tracked_ips.load(Ordering::Relaxed),
             "bytes_in": self.metrics.bytes_in.load(Ordering::Relaxed),
             "bytes_out": self.metrics.bytes_out.load(Ordering::Relaxed),
             "stealth": {

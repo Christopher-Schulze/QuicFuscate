@@ -160,7 +160,7 @@ pub struct LiveClientInit {
     pub pending_qkey_auth: Option<QKeyAuthState>,
 }
 
-pub struct LiveClientBuildRequest<'a> {
+pub(crate) struct LiveClientBuildRequest<'a> {
     pub packet: &'a [u8],
     pub local_addr: SocketAddr,
     pub remote_addr: SocketAddr,
@@ -182,44 +182,144 @@ pub struct LiveClientBuildRequest<'a> {
     pub disable_http3: bool,
 }
 
-pub fn build_live_server_client_init(
+fn complete_auth_attempt(
+    limiter: &Arc<std::sync::Mutex<crate::implementations::server::limits::AuthRateLimiter>>,
+    metrics: &Metrics,
+    attempt: crate::implementations::server::limits::AuthAttempt,
+    terminal: crate::implementations::server::limits::AuthTerminal,
+) -> crate::implementations::server::limits::AuthCompletion {
+    use crate::implementations::server::limits::{AuthCompletion, AuthTerminal};
+
+    let mut limiter = limiter.lock().unwrap_or_else(|error| error.into_inner());
+    let completion = limiter.complete(attempt, terminal);
+    metrics.set_auth_state_tracked_ips(limiter.tracked_ips());
+    drop(limiter);
+    if completion == AuthCompletion::Duplicate {
+        return completion;
+    }
+    match terminal {
+        AuthTerminal::Succeeded => metrics.record_auth_success(),
+        AuthTerminal::Failed => metrics.record_auth_failure(),
+        AuthTerminal::Abandoned => metrics.record_auth_abandoned(),
+    }
+    completion
+}
+
+fn complete_qkey_auth_state(
+    limiter: &Arc<std::sync::Mutex<crate::implementations::server::limits::AuthRateLimiter>>,
+    metrics: &Metrics,
+    state: &mut QKeyAuthState,
+    terminal: crate::implementations::server::limits::AuthTerminal,
+) -> crate::implementations::server::limits::AuthCompletion {
+    let Some(attempt) = state.auth_attempt.take() else {
+        return crate::implementations::server::limits::AuthCompletion::Duplicate;
+    };
+    complete_auth_attempt(limiter, metrics, attempt, terminal)
+}
+
+fn audit_qkey_auth_denial(ip: IpAddr, reason: &'static str, message: &'static str) {
+    let source_ip = ip.to_string();
+    crate::audit::audit_typed(
+        crate::audit::AuditEventType::AuthFailed,
+        crate::audit::AuditSeverity::Warning,
+        Some(&source_ip),
+        None,
+        crate::audit::AuditContext {
+            actor: crate::audit::AuditActor::Client,
+            target: crate::audit::AuditTarget::Qkey,
+            outcome: crate::audit::AuditOutcome::Denied,
+            reason: Some(reason),
+        },
+        message,
+    );
+}
+
+pub(crate) fn build_live_server_client_init(
     request: LiveClientBuildRequest<'_>,
 ) -> Option<LiveClientInit> {
-    // Per-IP auth rate limiting: reject before any QKey lookup if the IP has
-    // exceeded the failed auth attempt threshold. This prevents brute-force
-    // attacks on QKey tokens.
-    {
-        let ip = request.remote_addr.ip();
-        let limiter = request.auth_rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
-        if !limiter.is_allowed(ip) {
-            log::warn!("QKey auth rate limit exceeded for {}; rejecting connection", ip);
+    use crate::implementations::server::limits::{AuthAdmission, AuthTerminal};
+
+    let ip = request.remote_addr.ip();
+    let admission = {
+        let mut limiter =
+            request.auth_rate_limiter.lock().unwrap_or_else(|error| error.into_inner());
+        let admission = limiter.begin(ip);
+        request.metrics.set_auth_state_tracked_ips(limiter.tracked_ips());
+        admission
+    };
+    request.metrics.record_auth_attempt();
+    let auth_attempt = match admission {
+        AuthAdmission::Allowed(attempt) => attempt,
+        AuthAdmission::Backoff { retry_after } => {
+            log::warn!(
+                "QKey authentication temporarily rate limited for {}; retry_after_ms={}",
+                ip,
+                retry_after.as_millis()
+            );
             request.metrics.record_connection_rejected();
+            request.metrics.record_auth_backoff_rejection();
+            audit_qkey_auth_denial(
+                ip,
+                "qkey_auth_backoff",
+                "QKey authentication attempt rejected by backoff policy",
+            );
             return None;
         }
-    }
+        AuthAdmission::Blocked { retry_after } => {
+            log::warn!(
+                "QKey authentication blocked for {}; retry_after_ms={}",
+                ip,
+                retry_after.as_millis()
+            );
+            request.metrics.record_connection_rejected();
+            request.metrics.record_auth_blocked_rejection();
+            audit_qkey_auth_denial(
+                ip,
+                "qkey_auth_blocked",
+                "QKey authentication attempt rejected by block policy",
+            );
+            return None;
+        }
+        AuthAdmission::StateCapacity | AuthAdmission::PendingCapacity => {
+            log::warn!("QKey authentication state capacity reached for {}", ip);
+            request.metrics.record_connection_rejected();
+            request.metrics.record_auth_capacity_rejection();
+            audit_qkey_auth_denial(
+                ip,
+                "qkey_auth_state_capacity",
+                "QKey authentication attempt rejected by bounded state capacity",
+            );
+            return None;
+        }
+    };
 
     let initial_ctx = match parse_live_server_initial_auth(
         request.packet,
         request.qkey_registry,
         request.revocation_manager,
-        request.metrics,
+        auth_attempt,
     ) {
-        Some(ctx) => ctx,
-        None => {
-            // Record the failed auth attempt for rate limiting
-            let ip = request.remote_addr.ip();
-            let mut limiter = request.auth_rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
-            limiter.record_failure(ip);
+        Ok(ctx) => ctx,
+        Err(error) => {
+            request.metrics.record_connection_rejected();
+            let terminal =
+                if error.is_auth_failure() { AuthTerminal::Failed } else { AuthTerminal::Abandoned };
+            complete_auth_attempt(
+                &request.auth_rate_limiter,
+                request.metrics,
+                auth_attempt,
+                terminal,
+            );
+            if error.is_auth_failure() {
+                audit_qkey_auth_denial(
+                    ip,
+                    "qkey_initial_auth_denied",
+                    "QKey initial authentication denied",
+                );
+            }
             return None;
         }
     };
-
-    // Successful initial auth - clear any previous failed attempts for this IP
-    {
-        let ip = request.remote_addr.ip();
-        let mut limiter = request.auth_rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
-        limiter.clear(ip);
-    }
 
     log::info!("New client connected: {}", request.remote_addr);
 
@@ -256,6 +356,12 @@ pub fn build_live_server_client_init(
     if let Err(error) = selected_transport.select_version(initial_ctx.version) {
         log::warn!("refusing unsupported QUIC version {:#010x}: {}", initial_ctx.version, error);
         request.metrics.record_connection_rejected();
+        complete_auth_attempt(
+            &request.auth_rate_limiter,
+            request.metrics,
+            auth_attempt,
+            AuthTerminal::Abandoned,
+        );
         return None;
     }
     match create_live_server_connection(
@@ -272,6 +378,12 @@ pub fn build_live_server_client_init(
         }
         Err(error) => {
             log::error!("failed to create server connection: {}", error);
+            complete_auth_attempt(
+                &request.auth_rate_limiter,
+                request.metrics,
+                auth_attempt,
+                AuthTerminal::Abandoned,
+            );
             None
         }
     }
@@ -577,8 +689,7 @@ impl LiveServerState {
             domain: LiveServerDomain::new(&server_config),
             auth_rate_limiter: Arc::new(std::sync::Mutex::new(
                 crate::implementations::server::limits::AuthRateLimiter::new(
-                    10,
-                    std::time::Duration::from_secs(60),
+                    server_config.auth_policy.clone(),
                 ),
             )),
             revocation_manager,
@@ -722,6 +833,16 @@ impl LiveServerState {
                 let (session_id, session_stats, assigned_ips) = match self.domain.accept(addr) {
                     Ok(value) => value,
                     Err(_) => {
+                        if let Some(state) = init.pending_qkey_auth.take() {
+                            if let Some(attempt) = state.auth_attempt {
+                                complete_auth_attempt(
+                                    &self.auth_rate_limiter,
+                                    metrics,
+                                    attempt,
+                                    crate::implementations::server::limits::AuthTerminal::Abandoned,
+                                );
+                            }
+                        }
                         metrics.connections_rejected.fetch_add(1, Ordering::Relaxed);
                         return LiveClientAcquire::Rejected;
                     }
@@ -842,6 +963,13 @@ impl LiveServerState {
         let log_client_stats = now >= self.next_stats_log;
         if log_client_stats {
             self.next_stats_log = now + SERVER_STATS_LOG_INTERVAL;
+        }
+        {
+            let mut limiter =
+                self.auth_rate_limiter.lock().unwrap_or_else(|error| error.into_inner());
+            let pruned = limiter.prune_if_due();
+            metrics.set_auth_state_tracked_ips(limiter.tracked_ips());
+            metrics.record_auth_state_pruned(pruned);
         }
         #[cfg(feature = "rate_limiter")]
         {
@@ -1132,6 +1260,42 @@ impl LiveServerState {
     }
 
     pub fn reconcile(&mut self, accept_loop: &AcceptLoop, metrics: &Metrics) {
+        let closed_pending: Vec<(Vec<u8>, IpAddr, String)> = self
+            .clients
+            .iter()
+            .filter(|(_, connection)| connection.conn.is_closed())
+            .filter_map(|(addr, connection)| {
+                let conn_id = connection.conn.source_id().as_ref().to_vec();
+                self.qkey_auth
+                    .get(&conn_id)
+                    .filter(|state| !state.authed)
+                    .map(|state| (conn_id, addr.ip(), state.key_id.clone()))
+            })
+            .collect();
+        for (conn_id, ip, key_id) in closed_pending {
+            if let Some(mut state) = self.remove_qkey_auth(&conn_id) {
+                complete_qkey_auth_state(
+                    &self.auth_rate_limiter,
+                    metrics,
+                    &mut state,
+                    crate::implementations::server::limits::AuthTerminal::Failed,
+                );
+                let source_ip = ip.to_string();
+                crate::audit::audit_typed(
+                    crate::audit::AuditEventType::AuthFailed,
+                    crate::audit::AuditSeverity::Warning,
+                    Some(&source_ip),
+                    Some(&key_id),
+                    crate::audit::AuditContext {
+                        actor: crate::audit::AuditActor::Client,
+                        target: crate::audit::AuditTarget::Qkey,
+                        outcome: crate::audit::AuditOutcome::Denied,
+                        reason: Some("qkey_auth_connection_closed"),
+                    },
+                    "QKey authentication connection closed before completion",
+                );
+            }
+        }
         let closed_addrs =
             reconcile_live_clients(&mut self.clients, &mut self.qkey_auth, accept_loop, metrics);
         for addr in closed_addrs {
@@ -1158,7 +1322,16 @@ impl LiveServerState {
                         error
                     );
                 }
-                self.qkey_auth.remove(&conn_id);
+                if let Some(mut state) = self.qkey_auth.remove(&conn_id) {
+                    if !state.authed {
+                        complete_qkey_auth_state(
+                            &self.auth_rate_limiter,
+                            metrics,
+                            &mut state,
+                            crate::implementations::server::limits::AuthTerminal::Failed,
+                        );
+                    }
+                }
             }
             self.dissociate_qkey_for_session(Some(session_id));
             accept_loop.record_closed(addr);
@@ -1180,7 +1353,7 @@ impl LiveServerState {
             });
             for conn in self.values_mut() {
                 if conn.conn.source_id().as_ref() == conn_id.as_slice() {
-                    record_qkey_auth_rejection(metrics);
+                    metrics.record_connection_rejected();
                     if let Err(error) = conn.conn.close(true, 0x0, b"qkey_auth_timeout") {
                         log::warn!("Client close after QKey auth timeout failed: {:?}", error);
                     }
@@ -1203,7 +1376,14 @@ impl LiveServerState {
             );
             let session_id = self.session_id_for_conn_id(&conn_id);
             self.dissociate_qkey_for_session(session_id);
-            self.remove_qkey_auth(&conn_id);
+            if let Some(mut state) = self.remove_qkey_auth(&conn_id) {
+                complete_qkey_auth_state(
+                    &self.auth_rate_limiter,
+                    metrics,
+                    &mut state,
+                    crate::implementations::server::limits::AuthTerminal::Failed,
+                );
+            }
         }
     }
 
@@ -1214,31 +1394,41 @@ impl LiveServerState {
         accept_loop: &AcceptLoop,
         metrics: &Metrics,
     ) {
-        if let Some(conn_id) = remove_auth_conn_id {
-            self.remove_qkey_auth(&conn_id);
-        } else if let Some((conn_id, authed)) = auth_result {
-            let mut authed_key_id: Option<String> = None;
-            if let Some(state) = self.qkey_auth_state_mut(&conn_id) {
-                if authed {
-                    authed_key_id = Some(state.key_id.clone());
-                } else {
-                    state.authed = false;
+        let mut handled_conn_id: Option<Vec<u8>> = None;
+        if let Some((conn_id, authed)) = auth_result {
+            handled_conn_id = Some(conn_id.clone());
+            if !authed {
+                let remote_addr = self.clients.iter().find_map(|(addr, conn)| {
+                    (conn.conn.source_id().as_ref() == conn_id.as_slice()).then_some(*addr)
+                });
+                if let Some(mut state) = self.remove_qkey_auth(&conn_id) {
+                    let key_id = state.key_id.clone();
+                    complete_qkey_auth_state(
+                        &self.auth_rate_limiter,
+                        metrics,
+                        &mut state,
+                        crate::implementations::server::limits::AuthTerminal::Failed,
+                    );
+                    let source_ip = remote_addr.map(|addr| addr.ip().to_string());
                     crate::audit::audit_typed(
                         crate::audit::AuditEventType::AuthFailed,
                         crate::audit::AuditSeverity::Warning,
-                        None,
-                        Some(&state.key_id),
+                        source_ip.as_deref(),
+                        Some(&key_id),
                         crate::audit::AuditContext {
                             actor: crate::audit::AuditActor::Client,
                             target: crate::audit::AuditTarget::Qkey,
                             outcome: crate::audit::AuditOutcome::Denied,
-                            reason: Some("qkey_authentication_failed"),
+                            reason: Some("qkey_authentication_denied"),
                         },
-                        "QKey authentication failed",
+                        "QKey authentication denied",
                     );
                 }
-            }
-            if let Some(key_id) = authed_key_id {
+            } else {
+                let key_id = self.qkey_auth.get(&conn_id).map(|state| state.key_id.clone());
+                let Some(key_id) = key_id else {
+                    return;
+                };
                 if self.revocation_manager.is_revoked(&key_id) {
                     let addr = self.clients.iter().find_map(|(addr, conn)| {
                         (conn.conn.source_id().as_ref() == conn_id.as_slice()).then_some(*addr)
@@ -1254,18 +1444,32 @@ impl LiveServerState {
                                 );
                             }
                             accept_loop.record_closed(addr);
-                            record_qkey_auth_rejection(metrics);
+                            metrics.record_connection_rejected();
                         }
                         self.dissociate_qkey_for_session(session_id);
                         self.domain.remove_remote(addr);
                         self.domain.retain_snapshots_for_clients(&self.clients);
                         self.sync_active_metrics(metrics);
                     }
-                    self.remove_qkey_auth(&conn_id);
+                    if let Some(mut state) = self.remove_qkey_auth(&conn_id) {
+                        complete_qkey_auth_state(
+                            &self.auth_rate_limiter,
+                            metrics,
+                            &mut state,
+                            crate::implementations::server::limits::AuthTerminal::Failed,
+                        );
+                    }
                     return;
                 }
+                let auth_rate_limiter = Arc::clone(&self.auth_rate_limiter);
                 if let Some(state) = self.qkey_auth_state_mut(&conn_id) {
                     state.authed = true;
+                    complete_qkey_auth_state(
+                        &auth_rate_limiter,
+                        metrics,
+                        state,
+                        crate::implementations::server::limits::AuthTerminal::Succeeded,
+                    );
                 }
                 if let Some(session_id) = self.session_id_for_conn_id(&conn_id) {
                     self.qkey_tracker.associate(session_id.as_u64(), &key_id);
@@ -1282,6 +1486,19 @@ impl LiveServerState {
                         reason: None,
                     },
                     "Client authenticated successfully",
+                );
+            }
+        }
+        if let Some(conn_id) = remove_auth_conn_id {
+            if handled_conn_id.as_deref() == Some(conn_id.as_slice()) {
+                return;
+            }
+            if let Some(mut state) = self.remove_qkey_auth(&conn_id) {
+                complete_qkey_auth_state(
+                    &self.auth_rate_limiter,
+                    metrics,
+                    &mut state,
+                    crate::implementations::server::limits::AuthTerminal::Failed,
                 );
             }
         }

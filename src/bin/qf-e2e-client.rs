@@ -8,16 +8,23 @@ use std::time::{Duration, Instant};
 
 use quicfuscate::core::QuicFuscateConnection;
 use quicfuscate::engine::qkey;
+use quicfuscate::error::ConnectionError;
 use quicfuscate::fec::FecConfig;
 use quicfuscate::optimize::OptimizeConfig;
 use quicfuscate::stealth::StealthConfig;
 use quicfuscate::transport::{Config, PROTOCOL_VERSION};
+
+const AUTH_CONFIRMATION_GRACE: Duration = Duration::from_secs(1);
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut qkey_value: Option<String> = None;
     let mut timeout_ms: u64 = 8000;
     let mut hold_ms: u64 = 0;
     let mut local_addr: Option<String> = None;
+    let mut bearer_token: Option<String> = None;
+    let mut initial_token: Option<String> = None;
+    let mut initial_only = false;
+    let mut ca_file: Option<String> = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -34,9 +41,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             "--local" => local_addr = args.next(),
+            "--bearer-token" => bearer_token = args.next(),
+            "--initial-token" => initial_token = args.next(),
+            "--initial-only" => initial_only = true,
+            "--ca-file" => ca_file = args.next(),
             "--help" | "-h" => {
                 println!(
-                    "Usage: qf-e2e-client --qkey QKEY [--timeout-ms MS] [--hold-ms MS] [--local ADDR]"
+                    "Usage: qf-e2e-client --qkey QKEY [--timeout-ms MS] [--hold-ms MS] [--local ADDR] [--bearer-token HEX] [--initial-token HEX] [--initial-only] [--ca-file PATH]"
                 );
                 return Ok(());
             }
@@ -57,20 +68,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()
         .map_err(|e| format!("Invalid local address: {e}"))?;
 
-    let token_hex = qkey::QKeyToken::new(
-        qkey_cfg
-            .token
-            .as_deref()
-            .map(|t| t.trim())
-            .filter(|t| !t.is_empty())
-            .ok_or("QKey missing token")?
-            .to_lowercase(),
-    );
+    let token_hex = bearer_token
+        .as_deref()
+        .or(qkey_cfg.token.as_deref())
+        .map(str::trim)
+        .filter(|token| token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or("QKey bearer token must be exactly 64 hexadecimal characters")?;
+    let token_hex = qkey::QKeyToken::new(token_hex.to_lowercase());
     let qkey_id = qkey::id(&qkey_value);
+    let initial_token = initial_token.as_deref().unwrap_or(&qkey_id).trim().to_ascii_lowercase();
+    if initial_token.len() != 12 || !initial_token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("QKey Initial token must be exactly 12 hexadecimal characters".into());
+    }
+    if let Some(path) = ca_file.as_deref() {
+        quicfuscate::qftls::set_tls_ca_path(path);
+    }
 
     let mut transport = Config::new_with_version(PROTOCOL_VERSION)
         .map_err(|e| format!("transport config init failed: {e:?}"))?;
-    transport.set_initial_token(Some(qkey_id.as_bytes().to_vec()));
+    transport.set_initial_token(Some(initial_token.as_bytes().to_vec()));
 
     let stealth_config = StealthConfig::performance();
     let fec_config = FecConfig::default();
@@ -106,12 +122,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     let mut checked_token = false;
     let mut auth_probe_sent = false;
+    let mut auth_probe_sent_at: Option<Instant> = None;
     let mut sent_packets = 0u64;
     let mut recv_packets = 0u64;
     let mut last_recv_err: Option<String> = None;
 
     loop {
-        if conn.conn.is_established() {
+        if conn.conn.is_closed() {
+            return Err("connection closed before QKey authentication completed".into());
+        }
+        if conn.conn.is_established()
+            && auth_probe_sent_at
+                .is_some_and(|sent_at| sent_at.elapsed() >= AUTH_CONFIRMATION_GRACE)
+        {
             println!("connected");
             if hold_ms > 0 {
                 std::thread::sleep(Duration::from_millis(hold_ms));
@@ -135,26 +158,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if len == 0 {
                     // continue polling
                 } else {
+                    let mut sent_initial = false;
                     if !checked_token {
                         let (hdr, _) = quicfuscate::transport::packet::parse_header(&out[..len], 0)
                             .map_err(|e| format!("parse header failed: {e:?}"))?;
                         if hdr.ty == quicfuscate::transport::PacketType::Initial {
                             let got = hdr.token.unwrap_or_default();
-                            if got.as_slice() != qkey_id.as_bytes() {
+                            if got.as_slice() != initial_token.as_bytes() {
                                 return Err("initial token mismatch".into());
                             }
                             checked_token = true;
+                            sent_initial = true;
                         }
                     }
-                    let _ = socket.send(&out[..len]);
+                    let written = socket.send(&out[..len])?;
+                    if written != len {
+                        return Err(
+                            format!("short UDP send: wrote {written} of {len} bytes").into()
+                        );
+                    }
                     sent_packets += 1;
+                    if initial_only && sent_initial {
+                        println!("initial-sent");
+                        return Ok(());
+                    }
                 }
             }
             Err(e) => return Err(format!("send failed: {e:?}").into()),
         }
 
-        if checked_token && !auth_probe_sent && conn.send_http3_request("/qf-e2e-probe").is_ok() {
-            auth_probe_sent = true;
+        if checked_token && !auth_probe_sent && conn.conn.is_established() {
+            match conn.send_http3_request("/qf-e2e-probe") {
+                Ok(()) => {
+                    auth_probe_sent = true;
+                    auth_probe_sent_at = Some(Instant::now());
+                }
+                Err(ConnectionError::Done) => {}
+                Err(error) => {
+                    return Err(format!("QKey auth request failed: {error:?}").into());
+                }
+            }
         }
 
         match socket.recv(&mut buf) {

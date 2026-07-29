@@ -4,6 +4,7 @@ impl ServerRuntime {
         engine_config: EngineConfig,
         server_config: ServerConfig,
     ) -> Result<Self, EngineError> {
+        server_config.auth_policy.validate().map_err(EngineError::Config)?;
         // Create memory pool
         let pool_bytes = engine_config.optimization.memory_pool_size;
         let block_size = engine_config.optimization.memory_pool_alignment.max(2048);

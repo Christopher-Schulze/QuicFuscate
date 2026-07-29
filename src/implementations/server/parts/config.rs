@@ -52,6 +52,8 @@ pub struct ServerConfig {
     pub ipv6_dns_servers: Vec<Ipv6Addr>,
     /// Explicit opt-in for direct VPN client-to-client unicast.
     pub allow_client_to_client: bool,
+    /// Bounded QKey authentication backoff and block lifecycle.
+    pub auth_policy: AuthPolicyConfig,
     /// GeoIP-based source-IP blocking config (TODO-459). When a MaxMindDB
     /// database path and blocked countries are configured, incoming
     /// datagrams from those countries are dropped. Gracefully degrades to
@@ -106,6 +108,7 @@ impl Default for ServerConfig {
                 Ipv6Addr::new(0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888), // Google
             ],
             allow_client_to_client: false,
+            auth_policy: AuthPolicyConfig::default(),
             #[cfg(feature = "rate_limiter")]
             geoip: limits::GeoIpConfig::default(),
             #[cfg(feature = "rate_limiter")]
@@ -123,11 +126,99 @@ pub fn server_config_from_listen_addr(listen_addr: &str) -> Result<ServerConfig,
             format!("listen address '{}' resolved to no socket addresses", listen_addr)
         })?;
     let mut config = ServerConfig { listen, ..ServerConfig::default() };
+    config.auth_policy = load_auth_policy_config_from_env()?;
     #[cfg(feature = "rate_limiter")]
     {
         config.geoip = load_geoip_config_from_env();
         config.blacklist = load_blacklist_config_from_env();
     }
+    Ok(config)
+}
+
+fn parse_auth_policy_env_u64(name: &str, default: u64) -> Result<u64, String> {
+    match std::env::var(name) {
+        Ok(raw) => raw
+            .trim()
+            .parse::<u64>()
+            .map_err(|error| format!("invalid {name}='{raw}': {error}")),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(format!("could not read {name}: {error}")),
+    }
+}
+
+fn load_auth_policy_config_from_env() -> Result<AuthPolicyConfig, String> {
+    let defaults = AuthPolicyConfig::default();
+    let enabled = match std::env::var("QUICFUSCATE_AUTH_POLICY_ENABLED") {
+        Ok(raw) if raw.trim() == "1" || raw.trim().eq_ignore_ascii_case("true") => true,
+        Ok(raw) if raw.trim() == "0" || raw.trim().eq_ignore_ascii_case("false") => false,
+        Ok(raw) => {
+            return Err(format!(
+                "invalid QUICFUSCATE_AUTH_POLICY_ENABLED='{raw}': expected true, false, 1, or 0"
+            ))
+        }
+        Err(std::env::VarError::NotPresent) => defaults.enabled,
+        Err(error) => {
+            return Err(format!("could not read QUICFUSCATE_AUTH_POLICY_ENABLED: {error}"))
+        }
+    };
+    let milliseconds = |name: &str, default: Duration| -> Result<Duration, String> {
+        Ok(Duration::from_millis(parse_auth_policy_env_u64(
+            name,
+            u64::try_from(default.as_millis()).unwrap_or(u64::MAX),
+        )?))
+    };
+    let seconds = |name: &str, default: Duration| -> Result<Duration, String> {
+        Ok(Duration::from_secs(parse_auth_policy_env_u64(name, default.as_secs())?))
+    };
+    let as_u32 = |name: &str, default: u32| -> Result<u32, String> {
+        let value = parse_auth_policy_env_u64(name, u64::from(default))?;
+        u32::try_from(value).map_err(|_| format!("{name} exceeds u32"))
+    };
+    let as_usize = |name: &str, default: usize| -> Result<usize, String> {
+        let value = parse_auth_policy_env_u64(name, default as u64)?;
+        usize::try_from(value).map_err(|_| format!("{name} exceeds usize"))
+    };
+
+    let config = AuthPolicyConfig {
+        enabled,
+        backoff_after_failures: as_u32(
+            "QUICFUSCATE_AUTH_BACKOFF_AFTER_FAILURES",
+            defaults.backoff_after_failures,
+        )?,
+        backoff_base: milliseconds(
+            "QUICFUSCATE_AUTH_BACKOFF_BASE_MS",
+            defaults.backoff_base,
+        )?,
+        backoff_max: milliseconds(
+            "QUICFUSCATE_AUTH_BACKOFF_MAX_MS",
+            defaults.backoff_max,
+        )?,
+        block_after_failures: as_u32(
+            "QUICFUSCATE_AUTH_BLOCK_AFTER_FAILURES",
+            defaults.block_after_failures,
+        )?,
+        block_duration: seconds(
+            "QUICFUSCATE_AUTH_BLOCK_DURATION_SECS",
+            defaults.block_duration,
+        )?,
+        idle_timeout: seconds(
+            "QUICFUSCATE_AUTH_IDLE_TIMEOUT_SECS",
+            defaults.idle_timeout,
+        )?,
+        prune_interval: seconds(
+            "QUICFUSCATE_AUTH_PRUNE_INTERVAL_SECS",
+            defaults.prune_interval,
+        )?,
+        max_tracked_ips: as_usize(
+            "QUICFUSCATE_AUTH_MAX_TRACKED_IPS",
+            defaults.max_tracked_ips,
+        )?,
+        max_pending_attempts_per_ip: as_usize(
+            "QUICFUSCATE_AUTH_MAX_PENDING_PER_IP",
+            defaults.max_pending_attempts_per_ip,
+        )?,
+    };
+    config.validate()?;
     Ok(config)
 }
 

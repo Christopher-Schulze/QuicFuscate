@@ -75,6 +75,8 @@ pub struct QKeyRegistry {
     default_ttl_secs: Option<u64>,
     /// Sliding-window anti-replay protection for QKey auth frames.
     replay_window: ReplayWindow,
+    #[cfg(any(test, feature = "rust-tests"))]
+    initial_lookup_count: u64,
 }
 
 /// Default replay-window size in seconds for auth-frame replay protection.
@@ -88,6 +90,8 @@ impl QKeyRegistry {
             storage: None,
             default_ttl_secs,
             replay_window: ReplayWindow::new(DEFAULT_AUTH_REPLAY_WINDOW_SECS),
+            #[cfg(any(test, feature = "rust-tests"))]
+            initial_lookup_count: 0,
         }
     }
 
@@ -114,6 +118,8 @@ impl QKeyRegistry {
             storage: Some(storage),
             default_ttl_secs,
             replay_window: ReplayWindow::new(DEFAULT_AUTH_REPLAY_WINDOW_SECS),
+            #[cfg(any(test, feature = "rust-tests"))]
+            initial_lookup_count: 0,
         };
         registry.load()?;
         Ok(registry)
@@ -310,12 +316,21 @@ impl QKeyRegistry {
     /// Look up a record by Initial packet token value, which must be a 12-char
     /// QKey identifier (case-insensitive hex).
     pub fn lookup_initial_id_token(&mut self, token: &[u8]) -> Option<QKeyRecord> {
+        #[cfg(any(test, feature = "rust-tests"))]
+        {
+            self.initial_lookup_count = self.initial_lookup_count.saturating_add(1);
+        }
         let id = normalize_initial_id_token(token)?;
         let now = current_epoch_secs();
         self.entries
             .iter()
             .find(|entry| entry.id == id && !is_expired(entry.expires_at, now))
             .cloned()
+    }
+
+    #[cfg(any(test, feature = "rust-tests"))]
+    pub fn initial_lookup_count(&self) -> u64 {
+        self.initial_lookup_count
     }
 
     pub fn has_entries(&mut self) -> bool {

@@ -523,6 +523,20 @@ async fn run_server(
         }
     }
 
+    let mut server_config =
+        quicfuscate::implementations::server::server_config_from_listen_addr(listen_addr)
+            .map_err(std::io::Error::other)?;
+    server_config.allow_client_to_client = allow_client_to_client;
+    if tun_enable {
+        apply_standalone_tun_server_config(
+            &mut server_config,
+            tun_ip.as_deref(),
+            tun_netmask.as_deref(),
+            tun_ip6.as_deref(),
+            tun_prefix6,
+        )?;
+    }
+
     // Initialize the global audit log (TODO-515).
     let audit_config = startup_engine_config
         .as_ref()
@@ -627,19 +641,6 @@ async fn run_server(
         );
     }
 
-    let mut server_config =
-        quicfuscate::implementations::server::server_config_from_listen_addr(listen_addr)
-            .map_err(std::io::Error::other)?;
-    server_config.allow_client_to_client = allow_client_to_client;
-    if tun_enable {
-        apply_standalone_tun_server_config(
-            &mut server_config,
-            tun_ip.as_deref(),
-            tun_netmask.as_deref(),
-            tun_ip6.as_deref(),
-            tun_prefix6,
-        )?;
-    }
     let opt_params = runtime_optimize_config(
         config_path,
         opt_cfg,

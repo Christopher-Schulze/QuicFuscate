@@ -600,7 +600,13 @@ impl ServerAdminCore {
             "clients_total": self.metrics.clients_total.load(Ordering::Relaxed),
             "connections_accepted": self.metrics.connections_accepted.load(Ordering::Relaxed),
             "connections_rejected": self.metrics.connections_rejected.load(Ordering::Relaxed),
+            "auth_attempts": self.metrics.auth_attempts.load(Ordering::Relaxed),
+            "auth_succeeded": self.metrics.auth_succeeded.load(Ordering::Relaxed),
             "auth_failed": self.metrics.auth_failed.load(Ordering::Relaxed),
+            "auth_backoff_rejected": self.metrics.auth_backoff_rejected.load(Ordering::Relaxed),
+            "auth_blocked_rejected": self.metrics.auth_blocked_rejected.load(Ordering::Relaxed),
+            "auth_capacity_rejected": self.metrics.auth_capacity_rejected.load(Ordering::Relaxed),
+            "auth_state_tracked_ips": self.metrics.auth_state_tracked_ips.load(Ordering::Relaxed),
             "bytes_in": self.metrics.bytes_in.load(Ordering::Relaxed),
             "bytes_out": self.metrics.bytes_out.load(Ordering::Relaxed),
         })
@@ -901,7 +907,13 @@ impl AdminHttpHandler for ServerAdminHttpRuntimeHandler {
                 "quicfuscate_fec_packets_encoded": self.core.metrics().fec_packets_encoded.load(Ordering::Relaxed),
                 "quicfuscate_fec_packets_decoded": self.core.metrics().fec_packets_decoded.load(Ordering::Relaxed),
                 "quicfuscate_fec_packets_recovered": self.core.metrics().fec_packets_recovered.load(Ordering::Relaxed),
+                "quicfuscate_auth_attempts_total": self.core.metrics().auth_attempts.load(Ordering::Relaxed),
+                "quicfuscate_auth_succeeded_total": self.core.metrics().auth_succeeded.load(Ordering::Relaxed),
                 "quicfuscate_auth_failed_total": self.core.metrics().auth_failed.load(Ordering::Relaxed),
+                "quicfuscate_auth_backoff_rejected_total": self.core.metrics().auth_backoff_rejected.load(Ordering::Relaxed),
+                "quicfuscate_auth_blocked_rejected_total": self.core.metrics().auth_blocked_rejected.load(Ordering::Relaxed),
+                "quicfuscate_auth_capacity_rejected_total": self.core.metrics().auth_capacity_rejected.load(Ordering::Relaxed),
+                "quicfuscate_auth_state_tracked_ips": self.core.metrics().auth_state_tracked_ips.load(Ordering::Relaxed),
                 "quicfuscate_rate_limited_total": self.core.metrics().rate_limited.load(Ordering::Relaxed),
             }
         }))

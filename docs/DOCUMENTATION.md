@@ -2408,7 +2408,7 @@ Engine server-mode stats now follow the same runtime truth: bytes, packets, and 
 Admin orchestration helpers (`ServerAdminCore`, `AdminAction`) live in `implementations/server`, so admin, reload, metrics, and shutdown wiring no longer depend on a CLI-local server state island.
 Within the live server path, ownership is now intentionally split only along one line:
 - `LiveServerDomain` owns remote/session/IP-pool/connection-limiter/packet-rate-limiter/snapshot state.
-- `LiveServerState` owns active QUIC connection objects, QKey auth tracking, runtime QKey revocation state, and the SessionId-to-QKey tracker used to terminate active sessions on revoke.
+- `LiveServerState` owns active QUIC connection objects, the bounded per-IP QKey auth policy, pending QKey auth attempts, runtime QKey revocation state, and the SessionId-to-QKey tracker used to terminate active sessions on revoke. One monotonic attempt ID survives the Initial ID lookup through the encrypted HTTP/3 bearer result; success, failure, timeout, pre-auth close, and internal abandonment each complete it at most once.
 The standalone path also delegates DCID-based live path rebinding, closed-client reconciliation, control-plane shutdown registration, and runtime reload normalization to `implementations/server`, so runtime lifecycle and bookkeeping now converge on one canonical server model.
 Session timeout is also part of that canonical lifecycle: standalone housekeeping reaps expired shared-domain sessions according to `client_timeout_secs`, while `QKEY_AUTH_TIMEOUT` remains a separate short pre-auth gate for unauthenticated handshakes rather than a replacement for session expiry.
  
@@ -2985,6 +2985,13 @@ At runtime you can override selected stealth options without changing the config
 - `QUICFUSCATE_METRICS_ADDR` - `host:port` for the `--telemetry` HTTP endpoint (default: `127.0.0.1:9898`).
 
 **Transport and IO (advanced):**
+- `QUICFUSCATE_AUTH_POLICY_ENABLED` - `true|false|1|0`; explicit disable switch for per-IP QKey auth backoff and block state (default: `true`).
+- `QUICFUSCATE_AUTH_BACKOFF_AFTER_FAILURES` - first consecutive terminal failure that schedules backoff (default: `3`).
+- `QUICFUSCATE_AUTH_BACKOFF_BASE_MS` / `QUICFUSCATE_AUTH_BACKOFF_MAX_MS` - exponential delay base and cap (defaults: `250` / `8000`).
+- `QUICFUSCATE_AUTH_BLOCK_AFTER_FAILURES` / `QUICFUSCATE_AUTH_BLOCK_DURATION_SECS` - explicit block threshold and duration (defaults: `10` / `300`).
+- `QUICFUSCATE_AUTH_IDLE_TIMEOUT_SECS` / `QUICFUSCATE_AUTH_PRUNE_INTERVAL_SECS` - idle-state retention and periodic prune interval (defaults: `900` / `30`).
+- `QUICFUSCATE_AUTH_MAX_TRACKED_IPS` / `QUICFUSCATE_AUTH_MAX_PENDING_PER_IP` - hard attacker-controlled state bounds (defaults: `65536` / `4`).
+  - Auth policy values are validated together. Invalid booleans, zero bounds/durations, a block threshold at or below the backoff threshold, or a maximum delay below its base fail server configuration.
 - `QUICFUSCATE_RATE_LIMIT_PPS` - integer `>=1`; overrides per-source packet rate limit in server runtime path (default: `10000`).
 - `QUICFUSCATE_RATE_LIMIT_BPS` - integer; overrides per-source byte rate limit (`0` = unlimited, default: `0`).
 - `QUICFUSCATE_RATE_LIMIT_REFILL_MS` - integer `>=1`; token-bucket refill interval in milliseconds (default: `1000`).
@@ -3576,6 +3583,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `tun-e2e-multi-client-dual-stack-netns.sh` - Exact-artifact Linux proof for three isolated dual-stack clients, source ownership, fan-out, PTB, DPLPMTUD black-hole recovery, positive-interval throughput, NAT, explicit client-to-client policy, and clean teardown
 - `tun-e2e-dns-leak-netns.sh` - Linux network-namespace DNS leak proof: real server/client TUN over MASQUE, DNS query through the server TUN IP, and tcpdump assertion that the client underlay sees zero raw TCP/UDP port 53 packets
 - `test-e2e-admin-web.sh` - Admin web E2E (login/status/config/qkey + headless QKey connect via `qf-e2e-client` and `qf-e2e-desktop`)
+- `test-qkey-auth-policy.sh` - Exact-process QKey auth backoff, block, expiry, second-IP isolation, idle-prune, bounded-resource, metric, audit, and 100-attempt flood proof
 - `test-desktop-webadmin-rust-integration.sh` - Cross-surface desktop/web-admin/core integration contract checks
 - `test-fec-all.sh` - Dispatcher: runs all FEC suites (test-fec, test-fec-simulation, test-fec-e2e-loss, auto-controller)
 - `test-fec-auto-controller-scenarios.sh` - FEC auto-controller scenario-driven tests
@@ -3903,7 +3911,9 @@ The default server metrics endpoint (`implementations::server::metrics::Metrics:
 - `quicfuscate_bytes_in_total`, `quicfuscate_bytes_out_total`, `quicfuscate_packets_in_total`, `quicfuscate_packets_out_total`
 - `quicfuscate_stealth_http3_active`, `quicfuscate_stealth_tls13_active`
 - `quicfuscate_fec_packets_encoded`, `quicfuscate_fec_packets_decoded`, `quicfuscate_fec_packets_recovered`
-- `quicfuscate_auth_failed_total`, `quicfuscate_rate_limited_total`
+- `quicfuscate_auth_attempts_total`, `quicfuscate_auth_succeeded_total`, `quicfuscate_auth_failed_total`
+- `quicfuscate_auth_backoff_rejected_total`, `quicfuscate_auth_blocked_rejected_total`, `quicfuscate_auth_capacity_rejected_total`, `quicfuscate_auth_abandoned_total`
+- `quicfuscate_auth_state_tracked_ips`, `quicfuscate_auth_state_pruned_total`, `quicfuscate_rate_limited_total`
 
 The three legacy server FEC counters are read-only projections of the canonical process telemetry producers, not independent atomics: `encoded` is actual source plus repair datagrams written by the FEC layer, `decoded` is original plus recovered source packets delivered by the FEC layer, and `recovered` is the decoded subset reconstructed from repair data. Their scope is the server process.
 Accepted connections are now produced by the standalone live runtime at the same point that `clients_total` is incremented, so the standalone admin/metrics surfaces report one consistent accept/reject/auth-failure story instead of mixing runtime counts with partial projections.
@@ -3911,10 +3921,14 @@ The standalone server runtime now also records accepted, rejected, rate-limited,
 Engine server-mode stats now treat RTT and loss as unavailable unless a truthful server-owned producer exists. The engine no longer reuses global client transport RTT/loss instrumentation for embedded server stats.
 For rejected/auth-failed/rate-limited events and ingress/egress traffic, those standalone `Metrics` producers now also mirror the event into `crate::instrumentation::global()` so the optional global instrumentation export does not drift away from the standalone server metrics story.
 That mirror contract is covered by a dedicated regression test in `src/implementations/server/metrics.rs`.
-QKey auth failures now route through one canonical rejection producer, so `quicfuscate_auth_failed_total` reflects:
+QKey auth attempts now use one bounded monotonic state machine. The public Initial ID lookup starts an attempt but does not reset prior failures; only the encrypted HTTP/3 bearer success resets consecutive-failure, backoff, and block state. Every attempt has one terminal owner, so `quicfuscate_auth_failed_total` reflects each of these exactly once:
 - missing or invalid public Initial QKey ID lookup
 - live HTTP/3 `x-qf-auth` rejects
 - QKey auth timeout closes
+- pending-auth connection or session closes
+Backoff, explicit block, global state-capacity, and per-IP pending-capacity rejections occur before QKey registry lookup. They expose distinct metrics and internal audit reasons but produce no credential-validity distinction on the wire.
+Auth-policy configuration is resolved and validated before audit-log, admin-socket, QKey-state, TLS, or other runtime resource setup, so an invalid policy fails startup without leaving service-owned artifacts. `scripts/tests/suites/test-qkey-auth-policy.sh` proves the real process contract against caller-selected exact binaries: strict invalid-config rejection, CA-verified H3 bearer success, the configured backoff schedule, block expiry, successful-client reset, independent secondary-loopback success, idle pruning, exact metrics/audit accounting, 100 Initial attempts, bounded RSS/CPU, raw-QKey absence, protected-UI isolation, and owned-process cleanup.
+The final local gate passed workspace/all-target Rust checking, strict all-feature Clippy, all 1,903 library tests plus every binary and integration target, 11 focused auth-policy tests, Bash/ShellCheck validation, runtime guardrails, and the macOS process harness with its explicit second-IP skip. The isolated native ARM64 candidate passed the 11 focused release tests and full process harness against server SHA-256 `b724556e7e99f2194848339f06a343e3790e221f525900ee65c0b4f6b5be7faa` and probe SHA-256 `3f0866421ea4de1a7c2020dcba9c4b20d5dfb923784e2b8799a97a606f2faf4c`: lifecycle `10` attempts, `2` successes, second-IP proof `1`, idle-pruned states `1`; flood `100` attempts, `4` terminal failures, `2` backoff rejects, `94` blocked rejects, one tracked IP, `80 KiB` RSS growth, and zero owned-process or protected-UI residue. The generated remote candidate was removed after the evidence archive was verified locally as SHA-256 `909cd47abda45edec7f845f705cb0970c3ff1ac1cfc045e293e422960a95d551`.
 Global server lifecycle metrics now keep accepted-connection ownership separate from session/client lifecycle: `connections_accepted` remains an explicit accept event, while `client_connected()` only reflects active/total client lifecycle. The runtime audit suite enforces that split.
 
 #### Global instrumentation metric families (optional/embedded)

@@ -20,6 +20,7 @@ pub struct QKeyAuthState {
     pub expected_token_sha256: String,
     pub authed: bool,
     pub connected_at: Instant,
+    pub(crate) auth_attempt: Option<crate::implementations::server::limits::AuthAttempt>,
 }
 
 impl QKeyAuthState {

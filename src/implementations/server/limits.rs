@@ -303,64 +303,308 @@ impl ConnectionLimiter {
     }
 }
 
-/// Per-IP rate limiter for QKey authentication attempts.
-///
-/// Prevents brute-force attacks on QKey tokens by limiting the number of
-/// failed auth attempts per IP within a sliding time window. Successful
-/// authentications do not count against the limit.
-pub struct AuthRateLimiter {
-    max_attempts: u32,
-    window: Duration,
-    attempts: HashMap<IpAddr, Vec<Instant>>,
+/// Bounded QKey authentication abuse-policy configuration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthPolicyConfig {
+    /// Disable all per-IP state and admission delays.
+    pub enabled: bool,
+    /// First consecutive failure that schedules exponential backoff.
+    pub backoff_after_failures: u32,
+    /// Initial exponential-backoff duration.
+    pub backoff_base: Duration,
+    /// Maximum exponential-backoff duration.
+    pub backoff_max: Duration,
+    /// Consecutive failure that enters the explicit blocked state.
+    pub block_after_failures: u32,
+    /// Duration of the explicit blocked state.
+    pub block_duration: Duration,
+    /// Remove inactive per-IP state after this duration.
+    pub idle_timeout: Duration,
+    /// Minimum interval between full-map idle-prune passes.
+    pub prune_interval: Duration,
+    /// Hard bound for attacker-controlled per-IP state.
+    pub max_tracked_ips: usize,
+    /// Hard bound for concurrent in-flight attempts from one IP.
+    pub max_pending_attempts_per_ip: usize,
+}
+
+impl Default for AuthPolicyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            backoff_after_failures: 3,
+            backoff_base: Duration::from_millis(250),
+            backoff_max: Duration::from_secs(8),
+            block_after_failures: 10,
+            block_duration: Duration::from_secs(300),
+            idle_timeout: Duration::from_secs(900),
+            prune_interval: Duration::from_secs(30),
+            max_tracked_ips: 65_536,
+            max_pending_attempts_per_ip: 4,
+        }
+    }
+}
+
+impl AuthPolicyConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.backoff_after_failures == 0 {
+            return Err("auth backoff threshold must be at least 1".to_string());
+        }
+        if self.block_after_failures <= self.backoff_after_failures {
+            return Err("auth block threshold must exceed the backoff threshold".to_string());
+        }
+        if self.backoff_base.is_zero() {
+            return Err("auth backoff base must be greater than zero".to_string());
+        }
+        if self.backoff_max < self.backoff_base {
+            return Err("auth backoff maximum must not be below the base".to_string());
+        }
+        if self.block_duration.is_zero()
+            || self.idle_timeout.is_zero()
+            || self.prune_interval.is_zero()
+        {
+            return Err(
+                "auth block, idle, and prune durations must be greater than zero".to_string()
+            );
+        }
+        if self.max_tracked_ips == 0 || self.max_pending_attempts_per_ip == 0 {
+            return Err("auth state and pending-attempt bounds must be at least 1".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AuthAttempt {
+    id: u64,
+    ip: IpAddr,
+    tracked: bool,
+}
+
+impl AuthAttempt {
+    #[cfg(test)]
+    pub(crate) fn ip(self) -> IpAddr {
+        self.ip
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AuthAdmission {
+    Allowed(AuthAttempt),
+    Backoff { retry_after: Duration },
+    Blocked { retry_after: Duration },
+    StateCapacity,
+    PendingCapacity,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AuthTerminal {
+    Succeeded,
+    Failed,
+    Abandoned,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AuthCompletion {
+    Succeeded,
+    Failed,
+    FailedWithBackoff { delay: Duration },
+    FailedAndBlocked { duration: Duration },
+    Abandoned,
+    Duplicate,
+    Disabled,
+}
+
+#[derive(Debug)]
+struct AuthIpState {
+    consecutive_failures: u32,
+    active_attempts: HashSet<u64>,
+    backoff_until: Option<Duration>,
+    blocked_until: Option<Duration>,
+    last_seen: Duration,
+}
+
+impl AuthIpState {
+    fn new(now: Duration) -> Self {
+        Self {
+            consecutive_failures: 0,
+            active_attempts: HashSet::new(),
+            backoff_until: None,
+            blocked_until: None,
+            last_seen: now,
+        }
+    }
+
+    fn reset_expired_block(&mut self, now: Duration) {
+        if self.blocked_until.is_some_and(|until| now >= until) {
+            self.consecutive_failures = 0;
+            self.backoff_until = None;
+            self.blocked_until = None;
+        }
+    }
+}
+
+/// Monotonic, bounded per-IP QKey authentication policy.
+pub(crate) struct AuthRateLimiter {
+    config: AuthPolicyConfig,
+    anchor: Instant,
+    last_now: Duration,
+    next_prune: Duration,
+    next_attempt_id: u64,
+    states: HashMap<IpAddr, AuthIpState>,
 }
 
 impl AuthRateLimiter {
-    /// Create a new auth rate limiter.
-    ///
-    /// `max_attempts` is the maximum number of failed auth attempts allowed
-    /// per IP within `window`. Once exceeded, further attempts from that IP
-    /// are rejected until the oldest attempt expires out of the window.
-    pub fn new(max_attempts: u32, window: Duration) -> Self {
-        Self { max_attempts, window, attempts: HashMap::new() }
+    pub(crate) fn new(config: AuthPolicyConfig) -> Self {
+        Self {
+            config,
+            anchor: Instant::now(),
+            last_now: Duration::ZERO,
+            next_prune: Duration::ZERO,
+            next_attempt_id: 1,
+            states: HashMap::new(),
+        }
     }
 
-    /// Check if an auth attempt from this IP is allowed without recording it.
-    /// Returns `false` if the IP has exceeded the failed-attempt threshold.
-    pub fn is_allowed(&self, ip: IpAddr) -> bool {
-        match self.attempts.get(&ip) {
-            None => true,
-            Some(attempts) => {
-                let now = Instant::now();
-                let recent: usize =
-                    attempts.iter().filter(|t| now.duration_since(**t) < self.window).count();
-                (recent as u32) < self.max_attempts
+    pub(crate) fn begin(&mut self, ip: IpAddr) -> AuthAdmission {
+        self.begin_at(ip, self.anchor.elapsed())
+    }
+
+    pub(crate) fn complete(
+        &mut self,
+        attempt: AuthAttempt,
+        terminal: AuthTerminal,
+    ) -> AuthCompletion {
+        self.complete_at(attempt, terminal, self.anchor.elapsed())
+    }
+
+    pub(crate) fn prune_if_due(&mut self) -> usize {
+        self.prune_if_due_at(self.anchor.elapsed())
+    }
+
+    pub(crate) fn tracked_ips(&self) -> usize {
+        self.states.len()
+    }
+
+    fn normalize_now(&mut self, now: Duration) -> Duration {
+        self.last_now = self.last_now.max(now);
+        self.last_now
+    }
+
+    fn begin_at(&mut self, ip: IpAddr, now: Duration) -> AuthAdmission {
+        let now = self.normalize_now(now);
+        if !self.config.enabled {
+            return AuthAdmission::Allowed(AuthAttempt { id: 0, ip, tracked: false });
+        }
+
+        self.prune_if_due_at(now);
+        if !self.states.contains_key(&ip) && self.states.len() >= self.config.max_tracked_ips {
+            self.prune_idle_at(now);
+            if self.states.len() >= self.config.max_tracked_ips {
+                return AuthAdmission::StateCapacity;
+            }
+        }
+
+        let state = self.states.entry(ip).or_insert_with(|| AuthIpState::new(now));
+        state.last_seen = now;
+        state.reset_expired_block(now);
+        if let Some(until) = state.blocked_until.filter(|until| *until > now) {
+            return AuthAdmission::Blocked { retry_after: until.saturating_sub(now) };
+        }
+        if let Some(until) = state.backoff_until.filter(|until| *until > now) {
+            return AuthAdmission::Backoff { retry_after: until.saturating_sub(now) };
+        }
+        state.backoff_until = None;
+        if state.active_attempts.len() >= self.config.max_pending_attempts_per_ip {
+            return AuthAdmission::PendingCapacity;
+        }
+
+        let id = self.next_attempt_id;
+        self.next_attempt_id = self.next_attempt_id.wrapping_add(1).max(1);
+        state.active_attempts.insert(id);
+        AuthAdmission::Allowed(AuthAttempt { id, ip, tracked: true })
+    }
+
+    fn complete_at(
+        &mut self,
+        attempt: AuthAttempt,
+        terminal: AuthTerminal,
+        now: Duration,
+    ) -> AuthCompletion {
+        let now = self.normalize_now(now);
+        if !attempt.tracked {
+            return AuthCompletion::Disabled;
+        }
+        let Some(state) = self.states.get_mut(&attempt.ip) else {
+            return AuthCompletion::Duplicate;
+        };
+        if !state.active_attempts.remove(&attempt.id) {
+            return AuthCompletion::Duplicate;
+        }
+        state.last_seen = now;
+
+        match terminal {
+            AuthTerminal::Succeeded => {
+                state.consecutive_failures = 0;
+                state.backoff_until = None;
+                state.blocked_until = None;
+                if state.active_attempts.is_empty() {
+                    self.states.remove(&attempt.ip);
+                }
+                AuthCompletion::Succeeded
+            }
+            AuthTerminal::Abandoned => {
+                if state.active_attempts.is_empty() && state.consecutive_failures == 0 {
+                    self.states.remove(&attempt.ip);
+                }
+                AuthCompletion::Abandoned
+            }
+            AuthTerminal::Failed => {
+                state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+                if state.consecutive_failures >= self.config.block_after_failures {
+                    state.backoff_until = None;
+                    state.blocked_until = Some(now.saturating_add(self.config.block_duration));
+                    return AuthCompletion::FailedAndBlocked {
+                        duration: self.config.block_duration,
+                    };
+                }
+                if state.consecutive_failures >= self.config.backoff_after_failures {
+                    let exponent = state.consecutive_failures - self.config.backoff_after_failures;
+                    let multiplier = 1u32.checked_shl(exponent.min(31)).unwrap_or(u32::MAX);
+                    let delay = self
+                        .config
+                        .backoff_base
+                        .checked_mul(multiplier)
+                        .unwrap_or(self.config.backoff_max)
+                        .min(self.config.backoff_max);
+                    state.backoff_until = Some(now.saturating_add(delay));
+                    return AuthCompletion::FailedWithBackoff { delay };
+                }
+                AuthCompletion::Failed
             }
         }
     }
 
-    /// Record a failed auth attempt from this IP.
-    /// Also prunes expired entries for this IP.
-    pub fn record_failure(&mut self, ip: IpAddr) {
-        let now = Instant::now();
-        let window = self.window;
-        let attempts = self.attempts.entry(ip).or_default();
-        attempts.retain(|t| now.duration_since(*t) < window);
-        attempts.push(now);
+    fn prune_if_due_at(&mut self, now: Duration) -> usize {
+        let now = self.normalize_now(now);
+        if now < self.next_prune {
+            return 0;
+        }
+        self.next_prune = now.saturating_add(self.config.prune_interval);
+        self.prune_idle_at(now)
     }
 
-    /// Clear all failed attempts for an IP (e.g. on successful auth).
-    pub fn clear(&mut self, ip: IpAddr) {
-        self.attempts.remove(&ip);
-    }
-
-    /// Prune expired entries across all IPs to prevent unbounded memory growth.
-    pub fn prune_expired(&mut self) {
-        let now = Instant::now();
-        let window = self.window;
-        self.attempts.retain(|_, attempts| {
-            attempts.retain(|t| now.duration_since(*t) < window);
-            !attempts.is_empty()
+    fn prune_idle_at(&mut self, now: Duration) -> usize {
+        let before = self.states.len();
+        let idle_timeout = self.config.idle_timeout;
+        self.states.retain(|_, state| {
+            state.reset_expired_block(now);
+            !state.active_attempts.is_empty()
+                || state.blocked_until.is_some_and(|until| until > now)
+                || state.backoff_until.is_some_and(|until| until > now)
+                || now.saturating_sub(state.last_seen) < idle_timeout
         });
+        before.saturating_sub(self.states.len())
     }
 }
 
@@ -1075,56 +1319,228 @@ mod tests {
         assert!(!limiter.check_packet_ip(ip2));
     }
 
-    #[test]
-    fn test_auth_rate_limiter_allows_under_threshold() {
-        let mut limiter = AuthRateLimiter::new(5, Duration::from_secs(60));
-        let ip: IpAddr = "1.2.3.4".parse().unwrap();
-
-        for _ in 0..5 {
-            assert!(limiter.is_allowed(ip));
-            limiter.record_failure(ip);
+    fn test_auth_policy_config() -> AuthPolicyConfig {
+        AuthPolicyConfig {
+            enabled: true,
+            backoff_after_failures: 2,
+            backoff_base: Duration::from_millis(10),
+            backoff_max: Duration::from_millis(40),
+            block_after_failures: 5,
+            block_duration: Duration::from_millis(100),
+            idle_timeout: Duration::from_millis(50),
+            prune_interval: Duration::from_millis(10),
+            max_tracked_ips: 3,
+            max_pending_attempts_per_ip: 2,
         }
-        // 6th attempt should be blocked
-        assert!(!limiter.is_allowed(ip));
+    }
+
+    fn allowed_attempt(admission: AuthAdmission) -> AuthAttempt {
+        match admission {
+            AuthAdmission::Allowed(attempt) => attempt,
+            other => panic!("expected allowed auth attempt, got {other:?}"),
+        }
     }
 
     #[test]
-    fn test_auth_rate_limiter_clears_on_success() {
-        let mut limiter = AuthRateLimiter::new(3, Duration::from_secs(60));
+    fn auth_policy_configuration_rejects_every_unsafe_boundary() {
+        let valid = test_auth_policy_config();
+        assert!(valid.validate().is_ok());
+
+        let mut invalid_cases = Vec::new();
+        let mut zero_backoff_threshold = valid.clone();
+        zero_backoff_threshold.backoff_after_failures = 0;
+        invalid_cases.push(zero_backoff_threshold);
+        let mut inverted_thresholds = valid.clone();
+        inverted_thresholds.block_after_failures = inverted_thresholds.backoff_after_failures;
+        invalid_cases.push(inverted_thresholds);
+        let mut zero_base = valid.clone();
+        zero_base.backoff_base = Duration::ZERO;
+        invalid_cases.push(zero_base);
+        let mut inverted_delays = valid.clone();
+        inverted_delays.backoff_max = Duration::from_millis(1);
+        invalid_cases.push(inverted_delays);
+        let mut zero_block = valid.clone();
+        zero_block.block_duration = Duration::ZERO;
+        invalid_cases.push(zero_block);
+        let mut zero_idle = valid.clone();
+        zero_idle.idle_timeout = Duration::ZERO;
+        invalid_cases.push(zero_idle);
+        let mut zero_prune = valid.clone();
+        zero_prune.prune_interval = Duration::ZERO;
+        invalid_cases.push(zero_prune);
+        let mut zero_ips = valid.clone();
+        zero_ips.max_tracked_ips = 0;
+        invalid_cases.push(zero_ips);
+        let mut zero_pending = valid;
+        zero_pending.max_pending_attempts_per_ip = 0;
+        invalid_cases.push(zero_pending);
+
+        for invalid in invalid_cases {
+            assert!(invalid.validate().is_err(), "unsafe auth policy was accepted: {invalid:?}");
+        }
+    }
+
+    #[test]
+    fn auth_policy_enforces_exact_backoff_block_expiry_and_success_reset() {
+        let mut limiter = AuthRateLimiter::new(test_auth_policy_config());
         let ip: IpAddr = "1.2.3.4".parse().unwrap();
 
-        limiter.record_failure(ip);
-        limiter.record_failure(ip);
-        assert!(limiter.is_allowed(ip));
+        let first = allowed_attempt(limiter.begin_at(ip, Duration::ZERO));
+        assert_eq!(
+            limiter.complete_at(first, AuthTerminal::Failed, Duration::ZERO),
+            AuthCompletion::Failed
+        );
+        let second = allowed_attempt(limiter.begin_at(ip, Duration::ZERO));
+        assert_eq!(
+            limiter.complete_at(second, AuthTerminal::Failed, Duration::ZERO),
+            AuthCompletion::FailedWithBackoff { delay: Duration::from_millis(10) }
+        );
+        assert_eq!(
+            limiter.begin_at(ip, Duration::from_millis(5)),
+            AuthAdmission::Backoff { retry_after: Duration::from_millis(5) }
+        );
 
-        // Successful auth clears the counter
-        limiter.clear(ip);
-        assert!(limiter.is_allowed(ip));
+        let third = allowed_attempt(limiter.begin_at(ip, Duration::from_millis(10)));
+        assert_eq!(
+            limiter.complete_at(third, AuthTerminal::Failed, Duration::from_millis(10)),
+            AuthCompletion::FailedWithBackoff { delay: Duration::from_millis(20) }
+        );
+        let fourth = allowed_attempt(limiter.begin_at(ip, Duration::from_millis(30)));
+        assert_eq!(
+            limiter.complete_at(fourth, AuthTerminal::Failed, Duration::from_millis(30)),
+            AuthCompletion::FailedWithBackoff { delay: Duration::from_millis(40) }
+        );
+        let fifth = allowed_attempt(limiter.begin_at(ip, Duration::from_millis(70)));
+        assert_eq!(
+            limiter.complete_at(fifth, AuthTerminal::Failed, Duration::from_millis(70)),
+            AuthCompletion::FailedAndBlocked { duration: Duration::from_millis(100) }
+        );
+        assert_eq!(
+            limiter.begin_at(ip, Duration::from_millis(100)),
+            AuthAdmission::Blocked { retry_after: Duration::from_millis(70) }
+        );
+
+        let after_expiry = allowed_attempt(limiter.begin_at(ip, Duration::from_millis(170)));
+        assert_eq!(
+            limiter.complete_at(after_expiry, AuthTerminal::Succeeded, Duration::from_millis(170)),
+            AuthCompletion::Succeeded
+        );
+        assert_eq!(limiter.tracked_ips(), 0);
     }
 
     #[test]
-    fn test_auth_rate_limiter_ips_are_isolated() {
-        let mut limiter = AuthRateLimiter::new(2, Duration::from_secs(60));
+    fn auth_policy_records_exactly_one_terminal_result_per_attempt() {
+        let mut limiter = AuthRateLimiter::new(test_auth_policy_config());
+        let ip: IpAddr = "1.2.3.4".parse().unwrap();
+        let attempt = allowed_attempt(limiter.begin_at(ip, Duration::ZERO));
+
+        assert_eq!(
+            limiter.complete_at(attempt, AuthTerminal::Failed, Duration::ZERO),
+            AuthCompletion::Failed
+        );
+        assert_eq!(
+            limiter.complete_at(attempt, AuthTerminal::Failed, Duration::ZERO),
+            AuthCompletion::Duplicate
+        );
+    }
+
+    #[test]
+    fn auth_policy_handles_one_hundred_attempts_and_isolates_second_ip() {
+        let mut config = test_auth_policy_config();
+        config.backoff_after_failures = 101;
+        config.block_after_failures = 102;
+        let mut limiter = AuthRateLimiter::new(config);
+        let attacker: IpAddr = "1.2.3.4".parse().unwrap();
+        let legitimate: IpAddr = "5.6.7.8".parse().unwrap();
+
+        for attempt_index in 0..100u64 {
+            let now = Duration::from_millis(attempt_index);
+            let attempt = allowed_attempt(limiter.begin_at(attacker, now));
+            assert_eq!(
+                limiter.complete_at(attempt, AuthTerminal::Failed, now),
+                AuthCompletion::Failed
+            );
+        }
+        let legitimate_attempt =
+            allowed_attempt(limiter.begin_at(legitimate, Duration::from_millis(100)));
+        assert_eq!(legitimate_attempt.ip(), legitimate);
+        assert_eq!(
+            limiter.complete_at(
+                legitimate_attempt,
+                AuthTerminal::Succeeded,
+                Duration::from_millis(100)
+            ),
+            AuthCompletion::Succeeded
+        );
+    }
+
+    #[test]
+    fn auth_policy_bounds_pending_and_tracked_state_then_prunes_idle_entries() {
+        let mut config = test_auth_policy_config();
+        config.max_tracked_ips = 2;
+        let mut limiter = AuthRateLimiter::new(config);
         let ip1: IpAddr = "1.2.3.4".parse().unwrap();
         let ip2: IpAddr = "5.6.7.8".parse().unwrap();
+        let ip3: IpAddr = "9.10.11.12".parse().unwrap();
 
-        limiter.record_failure(ip1);
-        limiter.record_failure(ip1);
-        assert!(!limiter.is_allowed(ip1));
-        assert!(limiter.is_allowed(ip2));
+        let pending1 = allowed_attempt(limiter.begin_at(ip1, Duration::ZERO));
+        let pending2 = allowed_attempt(limiter.begin_at(ip1, Duration::ZERO));
+        assert_eq!(limiter.begin_at(ip1, Duration::ZERO), AuthAdmission::PendingCapacity);
+        assert_eq!(
+            limiter.complete_at(pending1, AuthTerminal::Failed, Duration::ZERO),
+            AuthCompletion::Failed
+        );
+        assert_eq!(
+            limiter.complete_at(pending2, AuthTerminal::Abandoned, Duration::ZERO),
+            AuthCompletion::Abandoned
+        );
+
+        let second = allowed_attempt(limiter.begin_at(ip2, Duration::ZERO));
+        assert_eq!(
+            limiter.complete_at(second, AuthTerminal::Failed, Duration::ZERO),
+            AuthCompletion::Failed
+        );
+        assert_eq!(limiter.tracked_ips(), 2);
+        assert_eq!(limiter.begin_at(ip3, Duration::ZERO), AuthAdmission::StateCapacity);
+
+        assert_eq!(limiter.prune_if_due_at(Duration::from_millis(51)), 2);
+        assert_eq!(limiter.tracked_ips(), 0);
+        assert!(matches!(
+            limiter.begin_at(ip3, Duration::from_millis(51)),
+            AuthAdmission::Allowed(_)
+        ));
     }
 
     #[test]
-    fn test_auth_rate_limiter_prunes_expired() {
-        let mut limiter = AuthRateLimiter::new(1, Duration::from_millis(10));
+    fn auth_policy_monotonic_clock_prevents_time_regression_bypass() {
+        let mut limiter = AuthRateLimiter::new(test_auth_policy_config());
         let ip: IpAddr = "1.2.3.4".parse().unwrap();
+        for now in [0, 10, 30, 70] {
+            let attempt = allowed_attempt(limiter.begin_at(ip, Duration::from_millis(now)));
+            let _ = limiter.complete_at(attempt, AuthTerminal::Failed, Duration::from_millis(now));
+        }
+        let fifth = allowed_attempt(limiter.begin_at(ip, Duration::from_millis(110)));
+        let _ = limiter.complete_at(fifth, AuthTerminal::Failed, Duration::from_millis(110));
 
-        limiter.record_failure(ip);
-        assert!(!limiter.is_allowed(ip));
+        assert_eq!(
+            limiter.begin_at(ip, Duration::from_millis(1)),
+            AuthAdmission::Blocked { retry_after: Duration::from_millis(100) }
+        );
+    }
 
-        std::thread::sleep(Duration::from_millis(20));
-        limiter.prune_expired();
-        assert!(limiter.is_allowed(ip));
+    #[test]
+    fn auth_policy_disable_semantics_allocate_no_state() {
+        let mut config = test_auth_policy_config();
+        config.enabled = false;
+        let mut limiter = AuthRateLimiter::new(config);
+        let ip: IpAddr = "1.2.3.4".parse().unwrap();
+        let attempt = allowed_attempt(limiter.begin_at(ip, Duration::ZERO));
+
+        assert_eq!(
+            limiter.complete_at(attempt, AuthTerminal::Failed, Duration::ZERO),
+            AuthCompletion::Disabled
+        );
+        assert_eq!(limiter.tracked_ips(), 0);
     }
 
     // ---- RateLimitConfig defaults & burst ----

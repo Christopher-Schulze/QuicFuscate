@@ -3,6 +3,18 @@ mod tests {
     use super::*;
     use std::io::Write as _;
 
+    fn begin_test_auth_attempt(
+        live_state: &LiveServerState,
+        ip: IpAddr,
+    ) -> crate::implementations::server::limits::AuthAttempt {
+        let mut limiter =
+            live_state.auth_rate_limiter.lock().unwrap_or_else(|error| error.into_inner());
+        match limiter.begin(ip) {
+            crate::implementations::server::limits::AuthAdmission::Allowed(attempt) => attempt,
+            other => panic!("test auth attempt was not admitted: {other:?}"),
+        }
+    }
+
     #[test]
     fn stateless_version_negotiation_skips_fec_envelopes() {
         let meta = crate::fec::wire::WirePacketMeta {
@@ -876,15 +888,104 @@ mod tests {
     }
 
     #[test]
-    fn test_record_qkey_auth_rejection_updates_exported_metrics() {
+    fn test_auth_policy_metrics_distinguish_terminal_and_admission_outcomes() {
         let metrics = Metrics::new();
-        let rejected_before = metrics.connections_rejected.load(Ordering::Relaxed);
-        let auth_failed_before = metrics.auth_failed.load(Ordering::Relaxed);
+        metrics.record_auth_attempt();
+        metrics.record_auth_failure();
+        metrics.record_auth_backoff_rejection();
+        metrics.record_auth_blocked_rejection();
+        metrics.record_auth_capacity_rejection();
 
-        record_qkey_auth_rejection(&metrics);
+        assert_eq!(metrics.auth_attempts.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.auth_failed.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.auth_backoff_rejected.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.auth_blocked_rejected.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.auth_capacity_rejected.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.rate_limited.load(Ordering::Relaxed), 3);
+    }
 
-        assert_eq!(metrics.connections_rejected.load(Ordering::Relaxed), rejected_before + 1);
-        assert_eq!(metrics.auth_failed.load(Ordering::Relaxed), auth_failed_before + 1);
+    #[test]
+    fn server_runtime_rejects_invalid_auth_policy_before_resource_setup() {
+        let mut server_config = ServerConfig::default();
+        server_config.auth_policy.backoff_after_failures = 0;
+
+        let error = match ServerRuntime::new(EngineConfig::default(), server_config) {
+            Ok(_) => panic!("invalid auth policy must fail runtime construction"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, EngineError::Config(_)));
+    }
+
+    #[test]
+    fn auth_policy_rejects_before_qkey_registry_lookup() {
+        let mut policy = AuthPolicyConfig::default();
+        policy.backoff_after_failures = 1;
+        policy.block_after_failures = 2;
+        policy.backoff_base = Duration::from_secs(60);
+        policy.backoff_max = Duration::from_secs(60);
+        let auth_rate_limiter = Arc::new(std::sync::Mutex::new(
+            crate::implementations::server::limits::AuthRateLimiter::new(policy),
+        ));
+        let remote_addr: SocketAddr = "192.0.2.10:54321".parse().unwrap();
+        {
+            let mut limiter =
+                auth_rate_limiter.lock().unwrap_or_else(|error| error.into_inner());
+            let attempt = match limiter.begin(remote_addr.ip()) {
+                crate::implementations::server::limits::AuthAdmission::Allowed(attempt) => attempt,
+                other => panic!("first attempt must be admitted: {other:?}"),
+            };
+            assert_eq!(
+                limiter.complete(
+                    attempt,
+                    crate::implementations::server::limits::AuthTerminal::Failed
+                ),
+                crate::implementations::server::limits::AuthCompletion::FailedWithBackoff {
+                    delay: Duration::from_secs(60)
+                }
+            );
+        }
+
+        let qkey_registry =
+            std::sync::Mutex::new(QKeyRegistry::new_in_memory(16, None));
+        let revocation_manager =
+            crate::implementations::server::revocation::RevocationManager::new();
+        let metrics = Metrics::new();
+        let stealth_config = Arc::new(std::sync::Mutex::new(StealthConfig::default()));
+        let fec_config = Arc::new(std::sync::Mutex::new(FecConfig::default()));
+        let optimize_config =
+            Arc::new(std::sync::Mutex::new(crate::optimize::OptimizeConfig::default()));
+        let mut transport =
+            crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION).unwrap();
+
+        let result = build_live_server_client_init(LiveClientBuildRequest {
+            packet: b"not-a-valid-initial",
+            local_addr: "127.0.0.1:4433".parse().unwrap(),
+            remote_addr,
+            qkey_registry: &qkey_registry,
+            revocation_manager: &revocation_manager,
+            metrics: &metrics,
+            stealth_config: &stealth_config,
+            fec_cfg_shared: &fec_config,
+            opt_params_shared: &optimize_config,
+            transport_config: &mut transport,
+            profile: BrowserProfile::Chrome,
+            os: OsProfile::Linux,
+            disable_doh: false,
+            auth_rate_limiter,
+            doh_provider: "https://cloudflare-dns.com/dns-query",
+            disable_fronting: false,
+            front_domain: &[],
+            disable_http3: false,
+        });
+
+        assert!(result.is_none());
+        assert_eq!(
+            qkey_registry.lock().unwrap_or_else(|error| error.into_inner()).initial_lookup_count(),
+            0
+        );
+        assert_eq!(metrics.auth_attempts.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.auth_backoff_rejected.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.auth_failed.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -910,6 +1011,7 @@ mod tests {
         let auth_failed_before = metrics.auth_failed.load(Ordering::Relaxed);
 
         live_state.clients.insert(remote_addr, connection);
+        let auth_attempt = begin_test_auth_attempt(&live_state, remote_addr.ip());
         live_state.qkey_auth.insert(
             conn_id.clone(),
             QKeyAuthState {
@@ -917,6 +1019,7 @@ mod tests {
                 expected_token_sha256: "deadbeef".to_string(),
                 authed: false,
                 connected_at: Instant::now() - (QKEY_AUTH_TIMEOUT + Duration::from_secs(1)),
+                auth_attempt: Some(auth_attempt),
             },
         );
 
@@ -950,6 +1053,7 @@ mod tests {
         let conn_id = connection.conn.source_id().as_ref().to_vec();
 
         live_state.clients.insert(remote_addr, connection);
+        let auth_attempt = begin_test_auth_attempt(&live_state, remote_addr.ip());
         live_state.qkey_auth.insert(
             conn_id.clone(),
             QKeyAuthState {
@@ -957,6 +1061,7 @@ mod tests {
                 expected_token_sha256: "deadbeef".to_string(),
                 authed: false,
                 connected_at: Instant::now(),
+                auth_attempt: Some(auth_attempt),
             },
         );
 
@@ -1006,6 +1111,7 @@ mod tests {
         let auth_failed_before = metrics.auth_failed.load(Ordering::Relaxed);
 
         live_state.clients.insert(remote_addr, connection);
+        let auth_attempt = begin_test_auth_attempt(&live_state, remote_addr.ip());
         live_state.qkey_auth.insert(
             conn_id.clone(),
             QKeyAuthState {
@@ -1013,6 +1119,7 @@ mod tests {
                 expected_token_sha256: "deadbeef".to_string(),
                 authed: false,
                 connected_at: Instant::now(),
+                auth_attempt: Some(auth_attempt),
             },
         );
         live_state.revocation_manager.revoke("pending-key", "test");
@@ -1433,6 +1540,7 @@ mod tests {
             expected_token_sha256: "abc".to_string(),
             authed: false,
             connected_at: Instant::now() - (QKEY_AUTH_TIMEOUT + Duration::from_secs(1)),
+            auth_attempt: None,
         };
         assert!(state.is_expired());
     }
@@ -1444,6 +1552,7 @@ mod tests {
             expected_token_sha256: "abc".to_string(),
             authed: true,
             connected_at: Instant::now() - (QKEY_AUTH_TIMEOUT + Duration::from_secs(10)),
+            auth_attempt: None,
         };
         assert!(!state.is_expired());
     }
@@ -1455,6 +1564,7 @@ mod tests {
             expected_token_sha256: "abc".to_string(),
             authed: false,
             connected_at: Instant::now(),
+            auth_attempt: None,
         };
         assert!(!state.is_expired());
     }
@@ -1493,14 +1603,14 @@ mod tests {
                 Vec::new(),
                 Some(expected.as_str()),
                 false,
-                QKeyHeaderAuthOutcome::Reject(b"missing_qkey_auth"),
+                QKeyHeaderAuthOutcome::Reject(b"qkey_auth_denied"),
             ),
             (
                 "invalid UTF-8",
                 vec![crate::transport::h3::Header::new(b"x-qf-auth", &[0xff])],
                 Some(expected.as_str()),
                 false,
-                QKeyHeaderAuthOutcome::Reject(b"invalid_qkey_auth"),
+                QKeyHeaderAuthOutcome::Reject(b"qkey_auth_denied"),
             ),
             (
                 "wrong bearer",
@@ -1510,7 +1620,7 @@ mod tests {
                 )],
                 Some(expected.as_str()),
                 false,
-                QKeyHeaderAuthOutcome::Reject(b"invalid_qkey_auth"),
+                QKeyHeaderAuthOutcome::Reject(b"qkey_auth_denied"),
             ),
             (
                 "valid bearer",
