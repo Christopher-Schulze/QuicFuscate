@@ -261,6 +261,19 @@ fn teardown_routing_with_retries(routing: RoutingManager) {
     }
     if let Some(error) = last_error {
         log::error!("Routing teardown failed after 3 attempts: {:?}", error);
+        crate::audit::audit_typed(
+            crate::audit::AuditEventType::FirewallRuleRemoved,
+            crate::audit::AuditSeverity::Critical,
+            None,
+            None,
+            crate::audit::AuditContext {
+                actor: crate::audit::AuditActor::System,
+                target: crate::audit::AuditTarget::Route,
+                outcome: crate::audit::AuditOutcome::Failed,
+                reason: Some("routing_teardown_failed"),
+            },
+            &format!("Routing teardown failed after retries: {error}"),
+        );
     }
 }
 
@@ -296,6 +309,19 @@ impl ServerHostResources {
 
             if let Err(e) = routing.setup() {
                 let _ = routing.teardown();
+                crate::audit::audit_typed(
+                    crate::audit::AuditEventType::FirewallRuleAdded,
+                    crate::audit::AuditSeverity::Critical,
+                    None,
+                    None,
+                    crate::audit::AuditContext {
+                        actor: crate::audit::AuditActor::System,
+                        target: crate::audit::AuditTarget::Route,
+                        outcome: crate::audit::AuditOutcome::Failed,
+                        reason: Some("routing_setup_failed"),
+                    },
+                    &format!("Server routing setup failed: {e}"),
+                );
                 return Err(EngineError::Io(format!("server routing setup failed: {e}")));
             }
             Some(routing)

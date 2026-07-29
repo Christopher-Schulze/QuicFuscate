@@ -576,6 +576,23 @@ impl Metrics {
             "quicfuscate_rate_limited_total {}\n",
             self.rate_limited.load(Ordering::Relaxed)
         ));
+        let audit = crate::audit::stats();
+        out.push_str(
+            "\n# HELP quicfuscate_audit_dropped_events_total Audit events rejected by the bounded writer queue\n",
+        );
+        out.push_str("# TYPE quicfuscate_audit_dropped_events_total counter\n");
+        out.push_str(&format!(
+            "quicfuscate_audit_dropped_events_total {}\n\n",
+            audit.dropped_events
+        ));
+        out.push_str(
+            "# HELP quicfuscate_audit_persistence_errors_total Audit writer or durability-checkpoint failures\n",
+        );
+        out.push_str("# TYPE quicfuscate_audit_persistence_errors_total counter\n");
+        out.push_str(&format!(
+            "quicfuscate_audit_persistence_errors_total {}\n",
+            audit.persistence_errors
+        ));
 
         out
     }
@@ -811,6 +828,8 @@ mod tests {
         assert!(output.contains("quicfuscate_bytes_in_total 1000000"));
         assert!(output.contains("quicfuscate_routing_packets_total{outcome=\"internet\"} 1"));
         assert!(output.contains("quicfuscate_routing_packets_total{outcome=\"drop_malformed\"} 1"));
+        assert!(output.contains("quicfuscate_audit_dropped_events_total"));
+        assert!(output.contains("quicfuscate_audit_persistence_errors_total"));
     }
 
     #[test]

@@ -193,6 +193,12 @@ level = "info"
 # syslog_addr = "127.0.0.1:514"
 # module_levels = { "quicfuscate::transport" = "debug" }
 
+[audit]
+queue_capacity = 16384
+max_segment_bytes = 67108864
+max_segments = 8
+flush_timeout_ms = 5000
+
 # ==============================================================================
 # REALITY-GRADE TLS MIMIKRY (TODO-415 Phase 1)
 # ==============================================================================

@@ -44,6 +44,8 @@ pub struct EngineConfig {
     pub telemetry: TelemetryConfig,
     /// Logging configuration
     pub logging: LoggingConfig,
+    /// Security audit persistence configuration
+    pub audit: AuditConfig,
     /// Forward Error Correction settings
     #[serde(rename = "fec")]
     pub fec: FecSection,
@@ -82,6 +84,7 @@ impl EngineConfig {
         self.crypto.validate()?;
         self.interface.validate()?;
         self.logging.validate()?;
+        self.audit.validate()?;
         if self.connection.enable_0rtt && !self.anti_replay.enabled {
             log::warn!(
                 "[config] 0-RTT enabled without anti-replay protection. \
@@ -902,6 +905,57 @@ impl LoggingConfig {
     }
 }
 
+/// Bounded security audit persistence configuration.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AuditConfig {
+    /// Maximum accepted events waiting for the single audit writer.
+    pub queue_capacity: usize,
+    /// Maximum active audit segment size before rotation.
+    pub max_segment_bytes: u64,
+    /// Maximum retained segments, including the active segment.
+    pub max_segments: usize,
+    /// Maximum enqueue and acknowledgement wait for a flush barrier.
+    pub flush_timeout_ms: u64,
+}
+
+impl Default for AuditConfig {
+    fn default() -> Self {
+        Self {
+            queue_capacity: 16_384,
+            max_segment_bytes: 64 * 1024 * 1024,
+            max_segments: 8,
+            flush_timeout_ms: 5_000,
+        }
+    }
+}
+
+impl AuditConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.queue_capacity == 0 {
+            return Err(ConfigError::Validation(
+                "audit.queue_capacity must be greater than zero".to_string(),
+            ));
+        }
+        if self.max_segment_bytes == 0 {
+            return Err(ConfigError::Validation(
+                "audit.max_segment_bytes must be greater than zero".to_string(),
+            ));
+        }
+        if self.max_segments == 0 || self.max_segments > 1024 {
+            return Err(ConfigError::Validation(
+                "audit.max_segments must be between 1 and 1024".to_string(),
+            ));
+        }
+        if self.flush_timeout_ms == 0 {
+            return Err(ConfigError::Validation(
+                "audit.flush_timeout_ms must be greater than zero".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 // ============================================================================
 // FEC SECTION
 // ============================================================================
@@ -1442,6 +1496,25 @@ mode = "roaming"
 
         config.logging.log_file_path = "runtime.log".to_string();
         config.logging.max_file_size_bytes = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn audit_configuration_rejects_unbounded_or_zero_values() {
+        let mut config = EngineConfig::default();
+        config.audit.queue_capacity = 0;
+        assert!(config.validate().is_err());
+
+        config.audit.queue_capacity = 1;
+        config.audit.max_segment_bytes = 0;
+        assert!(config.validate().is_err());
+
+        config.audit.max_segment_bytes = 1;
+        config.audit.max_segments = 1025;
+        assert!(config.validate().is_err());
+
+        config.audit.max_segments = 1;
+        config.audit.flush_timeout_ms = 0;
         assert!(config.validate().is_err());
     }
 

@@ -429,6 +429,15 @@ max_files = 5
 # syslog_addr = "127.0.0.1:514"
 # module_levels = { "quicfuscate::transport" = "debug" }
 
+[audit]
+# Accepted events wait in one bounded queue; producers never perform file I/O.
+queue_capacity = 16384
+# Active NDJSON segment rotation and total retained segment count.
+max_segment_bytes = 67108864
+max_segments = 8
+# Bounded enqueue plus durability-acknowledgement wait during flush/shutdown.
+flush_timeout_ms = 5000
+
 # ==============================================================================
 # SECURITY
 # ==============================================================================

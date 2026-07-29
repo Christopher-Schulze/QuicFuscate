@@ -77,6 +77,19 @@ impl ServerRuntime {
                             routing.cleanup_stale();
                             if let Err(error) = routing.setup() {
                                 let _ = routing.teardown();
+                                crate::audit::audit_typed(
+                                    crate::audit::AuditEventType::FirewallRuleAdded,
+                                    crate::audit::AuditSeverity::Critical,
+                                    None,
+                                    None,
+                                    crate::audit::AuditContext {
+                                        actor: crate::audit::AuditActor::System,
+                                        target: crate::audit::AuditTarget::Route,
+                                        outcome: crate::audit::AuditOutcome::Failed,
+                                        reason: Some("routing_setup_failed"),
+                                    },
+                                    &format!("Standalone server routing setup failed: {error}"),
+                                );
                                 return Err(std::io::Error::other(format!(
                                     "standalone server routing setup failed: {error}"
                                 )));
@@ -312,6 +325,20 @@ impl ServerRuntime {
                 Ok(value) => value,
                 Err(error) => {
                     self.stats.connections_rejected.fetch_add(1, Ordering::Relaxed);
+                    let source_ip = remote_addr.ip().to_string();
+                    crate::audit::audit_typed(
+                        crate::audit::AuditEventType::ConnectionRejected,
+                        crate::audit::AuditSeverity::Warning,
+                        Some(&source_ip),
+                        None,
+                        crate::audit::AuditContext {
+                            actor: crate::audit::AuditActor::NetworkPeer,
+                            target: crate::audit::AuditTarget::Connection,
+                            outcome: crate::audit::AuditOutcome::Denied,
+                            reason: Some("connection_policy_rejected"),
+                        },
+                        "Client connection rejected",
+                    );
                     return Err(error);
                 }
             }
@@ -954,27 +981,54 @@ impl ServerRuntime {
     {
         match action {
             AdminAction::Kick(id) => {
-                if let Some(identity) = ClientIdentity::parse(&id) {
+                let kicked = if let Some(identity) = ClientIdentity::parse(&id) {
                     let live = self.live_mut();
-                    live.live_state.kick_client(&identity, &live.accept_loop, metrics);
-                }
-                crate::audit::audit(
+                    live.live_state.kick_client(&identity, &live.accept_loop, metrics)
+                } else {
+                    false
+                };
+                let (outcome, reason, message) = if kicked {
+                    (
+                        crate::audit::AuditOutcome::Succeeded,
+                        "client_kicked",
+                        "Admin kicked client",
+                    )
+                } else {
+                    (
+                        crate::audit::AuditOutcome::Failed,
+                        "client_not_found",
+                        "Admin client kick did not match an active client",
+                    )
+                };
+                crate::audit::audit_typed(
                     crate::audit::AuditEventType::AdminAction,
                     crate::audit::AuditSeverity::Warning,
                     None,
                     Some(&id),
-                    "Admin kicked client",
+                    crate::audit::AuditContext {
+                        actor: crate::audit::AuditActor::Administrator,
+                        target: crate::audit::AuditTarget::Client,
+                        outcome,
+                        reason: Some(reason),
+                    },
+                    message,
                 );
                 false
             }
             AdminAction::RevokeQKey(id) => {
                 let live = self.live_mut();
                 live.live_state.revoke_qkey_now(&id, "admin_revoked", &live.accept_loop, metrics);
-                crate::audit::audit(
+                crate::audit::audit_typed(
                     crate::audit::AuditEventType::QkeyRevoked,
                     crate::audit::AuditSeverity::Warning,
                     None,
                     Some(&id),
+                    crate::audit::AuditContext {
+                        actor: crate::audit::AuditActor::Administrator,
+                        target: crate::audit::AuditTarget::Qkey,
+                        outcome: crate::audit::AuditOutcome::Succeeded,
+                        reason: Some("admin_revoked"),
+                    },
                     "Admin revoked QKey",
                 );
                 false
@@ -982,21 +1036,33 @@ impl ServerRuntime {
             AdminAction::Reload => {
                 match reload() {
                     Ok(()) => {
-                        crate::audit::audit(
+                        crate::audit::audit_typed(
                             crate::audit::AuditEventType::ConfigReloaded,
                             crate::audit::AuditSeverity::Info,
                             None,
                             None,
+                            crate::audit::AuditContext {
+                                actor: crate::audit::AuditActor::Administrator,
+                                target: crate::audit::AuditTarget::Configuration,
+                                outcome: crate::audit::AuditOutcome::Succeeded,
+                                reason: Some("admin_reload"),
+                            },
                             "Admin triggered config reload",
                         );
                     }
                     Err(error) => {
                         log::warn!("Config reload failed: {}", error);
-                        crate::audit::audit(
+                        crate::audit::audit_typed(
                             crate::audit::AuditEventType::AdminAction,
                             crate::audit::AuditSeverity::Warning,
                             None,
                             None,
+                            crate::audit::AuditContext {
+                                actor: crate::audit::AuditActor::Administrator,
+                                target: crate::audit::AuditTarget::Configuration,
+                                outcome: crate::audit::AuditOutcome::Failed,
+                                reason: Some("config_reload_failed"),
+                            },
                             &format!("Config reload failed: {error}"),
                         );
                     }
@@ -1005,11 +1071,17 @@ impl ServerRuntime {
             }
             AdminAction::Drain => {
                 log::info!("Admin drain requested");
-                crate::audit::audit(
+                crate::audit::audit_typed(
                     crate::audit::AuditEventType::AdminAction,
                     crate::audit::AuditSeverity::Warning,
                     None,
                     None,
+                    crate::audit::AuditContext {
+                        actor: crate::audit::AuditActor::Administrator,
+                        target: crate::audit::AuditTarget::Server,
+                        outcome: crate::audit::AuditOutcome::Started,
+                        reason: Some("drain_requested"),
+                    },
                     "Admin requested server drain",
                 );
                 self.initiate_drain(b"admin_drain");
@@ -1017,11 +1089,17 @@ impl ServerRuntime {
             }
             AdminAction::Shutdown => {
                 log::info!("Admin shutdown requested");
-                crate::audit::audit(
+                crate::audit::audit_typed(
                     crate::audit::AuditEventType::ServerStopped,
                     crate::audit::AuditSeverity::Warning,
                     None,
                     None,
+                    crate::audit::AuditContext {
+                        actor: crate::audit::AuditActor::Administrator,
+                        target: crate::audit::AuditTarget::Server,
+                        outcome: crate::audit::AuditOutcome::Started,
+                        reason: Some("shutdown_requested"),
+                    },
                     "Admin requested server shutdown",
                 );
                 self.initiate_drain(b"admin_shutdown");
@@ -1103,11 +1181,17 @@ impl ServerRuntime {
                     outcome.scope,
                     outcome.active_sessions_unchanged
                 );
-                crate::audit::audit(
+                crate::audit::audit_typed(
                     crate::audit::AuditEventType::ConfigReloaded,
                     crate::audit::AuditSeverity::Info,
                     None,
                     None,
+                    crate::audit::AuditContext {
+                        actor: crate::audit::AuditActor::Administrator,
+                        target: crate::audit::AuditTarget::Configuration,
+                        outcome: crate::audit::AuditOutcome::Succeeded,
+                        reason: Some("next_connection_only_reload"),
+                    },
                     &format!(
                         "{origin} triggered next-connection-only config reload; {active_sessions} active sessions unchanged"
                     ),
@@ -1115,11 +1199,17 @@ impl ServerRuntime {
             }
             Err(error) => {
                 log::warn!("Config reload failed ({}): {}", origin, error);
-                crate::audit::audit(
+                crate::audit::audit_typed(
                     crate::audit::AuditEventType::AdminAction,
                     crate::audit::AuditSeverity::Warning,
                     None,
                     None,
+                    crate::audit::AuditContext {
+                        actor: crate::audit::AuditActor::Administrator,
+                        target: crate::audit::AuditTarget::Configuration,
+                        outcome: crate::audit::AuditOutcome::Failed,
+                        reason: Some("config_reload_failed"),
+                    },
                     &format!("Config reload failed ({origin}): {error}"),
                 );
             }

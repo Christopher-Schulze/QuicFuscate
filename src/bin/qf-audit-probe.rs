@@ -1,0 +1,197 @@
+use clap::Parser;
+use quicfuscate::audit::{
+    AuditActor, AuditContext, AuditEventType, AuditLog, AuditOptions, AuditOutcome, AuditSeverity,
+    AuditTarget,
+};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+const MINIMUM_ACCEPTED_EVENTS_PER_SECOND: f64 = 10_000.0;
+
+#[derive(Debug, Parser)]
+#[command(name = "qf-audit-probe")]
+#[command(about = "Exercise the bounded audit worker, restart, and verifier contract")]
+struct Arguments {
+    #[arg(long)]
+    path: PathBuf,
+    #[arg(long, default_value_t = 10_000)]
+    events: u64,
+    #[arg(long, default_value_t = 4)]
+    producers: usize,
+    #[arg(long, default_value_t = 16_384)]
+    queue_capacity: usize,
+    #[arg(long, default_value_t = 1_048_576)]
+    max_segment_bytes: u64,
+    #[arg(long, default_value_t = 16)]
+    max_segments: usize,
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let arguments = Arguments::parse();
+    validate_arguments(&arguments)?;
+    refuse_existing_audit_set(&arguments.path)?;
+
+    let options = AuditOptions {
+        queue_capacity: arguments.queue_capacity,
+        max_segment_bytes: arguments.max_segment_bytes,
+        max_segments: arguments.max_segments,
+        flush_timeout: Duration::from_secs(10),
+    };
+    let log = Arc::new(AuditLog::open_with_options(arguments.path.clone(), options)?);
+    let started = Instant::now();
+    let accepted = run_producers(log.clone(), arguments.events, arguments.producers)?;
+    let producer_elapsed = started.elapsed();
+    log.flush()?;
+    let durable_elapsed = started.elapsed();
+    let first_stats = log.stats();
+    log.shutdown()?;
+    drop(log);
+
+    if accepted != arguments.events {
+        return Err(format!("accepted {accepted} of {} requested events", arguments.events).into());
+    }
+    if first_stats.dropped_events != 0 || first_stats.persistence_errors != 0 {
+        return Err(format!("unexpected audit worker counters: {first_stats:?}").into());
+    }
+    AuditLog::verify_chain(&arguments.path)?;
+
+    let restarted = AuditLog::open_with_options(arguments.path.clone(), options)?;
+    restarted.log_typed(
+        AuditEventType::ServerStopped,
+        AuditSeverity::Info,
+        None,
+        None,
+        AuditContext {
+            actor: AuditActor::System,
+            target: AuditTarget::Server,
+            outcome: AuditOutcome::Stopped,
+            reason: Some("probe_restart_completed"),
+        },
+        "Audit lifecycle probe restarted and stopped cleanly",
+    )?;
+    restarted.shutdown()?;
+    let restart_stats = restarted.stats();
+    drop(restarted);
+    AuditLog::verify_chain(&arguments.path)?;
+
+    let producer_seconds = producer_elapsed.as_secs_f64();
+    let producer_accepted_per_second =
+        if producer_seconds > 0.0 { accepted as f64 / producer_seconds } else { f64::INFINITY };
+    let durable_seconds = durable_elapsed.as_secs_f64();
+    let durable_accepted_per_second =
+        if durable_seconds > 0.0 { accepted as f64 / durable_seconds } else { f64::INFINITY };
+    if durable_accepted_per_second < MINIMUM_ACCEPTED_EVENTS_PER_SECOND {
+        return Err(format!(
+            "audit durable throughput {durable_accepted_per_second:.2} events/s is below {:.0} events/s",
+            MINIMUM_ACCEPTED_EVENTS_PER_SECOND
+        )
+        .into());
+    }
+
+    println!(
+        "{}",
+        serde_json::json!({
+            "path": arguments.path,
+            "requested_events": arguments.events,
+            "accepted_events": accepted,
+            "producer_accepted_events_per_second": producer_accepted_per_second,
+            "durable_accepted_events_per_second": durable_accepted_per_second,
+            "producer_elapsed_micros": producer_elapsed.as_micros(),
+            "durable_elapsed_micros": durable_elapsed.as_micros(),
+            "dropped_events": first_stats.dropped_events,
+            "persistence_errors": first_stats.persistence_errors,
+            "restart_dropped_events": restart_stats.dropped_events,
+            "restart_persistence_errors": restart_stats.persistence_errors,
+            "restart_verified": true,
+        })
+    );
+    Ok(())
+}
+
+fn validate_arguments(arguments: &Arguments) -> Result<(), String> {
+    if arguments.events == 0 {
+        return Err("--events must be greater than zero".to_string());
+    }
+    if arguments.producers == 0 {
+        return Err("--producers must be greater than zero".to_string());
+    }
+    if arguments.queue_capacity == 0 {
+        return Err("--queue-capacity must be greater than zero".to_string());
+    }
+    if arguments.max_segment_bytes == 0 {
+        return Err("--max-segment-bytes must be greater than zero".to_string());
+    }
+    if arguments.max_segments == 0 {
+        return Err("--max-segments must be greater than zero".to_string());
+    }
+    Ok(())
+}
+
+fn refuse_existing_audit_set(base: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if base.exists() || checkpoint_path(base).exists() {
+        return Err(format!("audit evidence path already exists: {}", base.display()).into());
+    }
+    let parent = base.parent().unwrap_or_else(|| Path::new("."));
+    if !parent.is_dir() {
+        return Err(format!("audit evidence parent does not exist: {}", parent.display()).into());
+    }
+    let base_name = base
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("audit evidence path has no UTF-8 file name: {}", base.display()))?;
+    let segment_prefix = format!("{base_name}.");
+    for entry in std::fs::read_dir(parent)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(&segment_prefix) && name.ends_with(".segment") {
+            return Err(format!("audit segment already exists: {}", entry.path().display()).into());
+        }
+    }
+    Ok(())
+}
+
+fn checkpoint_path(base: &Path) -> PathBuf {
+    let name = base.file_name().and_then(|name| name.to_str()).unwrap_or("audit.ndjson");
+    base.with_file_name(format!("{name}.checkpoint"))
+}
+
+fn run_producers(
+    log: Arc<AuditLog>,
+    events: u64,
+    producer_count: usize,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let mut producers = Vec::with_capacity(producer_count);
+    for producer in 0..producer_count {
+        let log = log.clone();
+        producers.push(std::thread::spawn(move || -> Result<u64, String> {
+            let mut accepted = 0;
+            let mut event = producer as u64;
+            while event < events {
+                log.log_typed(
+                    AuditEventType::AdminAction,
+                    AuditSeverity::Info,
+                    None,
+                    None,
+                    AuditContext {
+                        actor: AuditActor::Administrator,
+                        target: AuditTarget::Server,
+                        outcome: AuditOutcome::Succeeded,
+                        reason: Some("throughput_probe"),
+                    },
+                    &format!("producer={producer} event={event}"),
+                )
+                .map_err(|error| error.to_string())?;
+                accepted += 1;
+                event = event.saturating_add(producer_count as u64);
+            }
+            Ok(accepted)
+        }));
+    }
+    let mut accepted = 0;
+    for producer in producers {
+        accepted += producer.join().map_err(|_| "audit producer thread panicked")??;
+    }
+    Ok(accepted)
+}

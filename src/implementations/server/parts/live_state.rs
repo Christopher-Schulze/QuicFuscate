@@ -1012,9 +1012,9 @@ impl LiveServerState {
         identity: &ClientIdentity,
         accept_loop: &AcceptLoop,
         metrics: &Metrics,
-    ) {
+    ) -> bool {
         let Some(addr) = self.domain.remote_addr_for_identity(identity) else {
-            return;
+            return false;
         };
         let session_id = self.domain.session_id_by_remote(addr);
         if let Some(mut conn) = self.clients.remove(&addr) {
@@ -1056,6 +1056,7 @@ impl LiveServerState {
         self.dissociate_qkey_for_session(session_id);
         self.domain.remove_remote(addr);
         self.sync_active_metrics(metrics);
+        true
     }
 
     pub fn shutdown_all(&mut self, reason: &'static [u8], metrics: Option<&Metrics>) {
@@ -1187,11 +1188,17 @@ impl LiveServerState {
                 }
             }
             let source_ip = remote_addr.map(|addr| addr.ip().to_string());
-            crate::audit::audit(
+            crate::audit::audit_typed(
                 crate::audit::AuditEventType::AuthTimeout,
                 crate::audit::AuditSeverity::Warning,
                 source_ip.as_deref(),
                 key_id.as_deref(),
+                crate::audit::AuditContext {
+                    actor: crate::audit::AuditActor::Client,
+                    target: crate::audit::AuditTarget::Client,
+                    outcome: crate::audit::AuditOutcome::TimedOut,
+                    reason: Some("qkey_authentication_timeout"),
+                },
                 "QKey authentication timed out",
             );
             let session_id = self.session_id_for_conn_id(&conn_id);
@@ -1216,11 +1223,17 @@ impl LiveServerState {
                     authed_key_id = Some(state.key_id.clone());
                 } else {
                     state.authed = false;
-                    crate::audit::audit(
+                    crate::audit::audit_typed(
                         crate::audit::AuditEventType::AuthFailed,
                         crate::audit::AuditSeverity::Warning,
                         None,
                         Some(&state.key_id),
+                        crate::audit::AuditContext {
+                            actor: crate::audit::AuditActor::Client,
+                            target: crate::audit::AuditTarget::Qkey,
+                            outcome: crate::audit::AuditOutcome::Denied,
+                            reason: Some("qkey_authentication_failed"),
+                        },
                         "QKey authentication failed",
                     );
                 }
@@ -1257,15 +1270,20 @@ impl LiveServerState {
                 if let Some(session_id) = self.session_id_for_conn_id(&conn_id) {
                     self.qkey_tracker.associate(session_id.as_u64(), &key_id);
                 }
-                crate::audit::audit(
+                crate::audit::audit_typed(
                     crate::audit::AuditEventType::ClientAuthenticated,
                     crate::audit::AuditSeverity::Info,
                     None,
                     Some(&key_id),
+                    crate::audit::AuditContext {
+                        actor: crate::audit::AuditActor::Client,
+                        target: crate::audit::AuditTarget::Connection,
+                        outcome: crate::audit::AuditOutcome::Succeeded,
+                        reason: None,
+                    },
                     "Client authenticated successfully",
                 );
             }
         }
     }
 }
-

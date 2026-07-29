@@ -299,15 +299,17 @@ Verification commands:
 - `bash scripts/build/build-web-admin.sh`
 - `cargo audit --json > scripts/out/tests/cargo-audit.json`
 
-### Audit Logging (TODO-515)
+### Audit Logging (TODO-515, TODO-525)
 
-The server runtime emits tamper-evident audit events to a hash-chained NDJSON log file when `--audit-log <path>` is provided. The audit log is initialized once during server startup via a global `OnceLock<Arc<AuditLog>>` accessor (same pattern as `ADMIN_LOG_BUFFER`), before privilege dropping.
+The server runtime emits tamper-evident audit events to a bounded, hash-chained NDJSON segment set when `--audit-log <path>` is provided. One global `OnceLock<Arc<AuditLog>>` owner is initialized before privilege dropping. Producers submit fully owned events through non-blocking `try_send`; the single `qf-audit-writer` assigns sequence and timestamp, serializes, hashes, rotates, checkpoints, and performs all file I/O. Queue saturation or disconnection rejects the newest event and increments `quicfuscate_audit_dropped_events_total`; sink or checkpoint failures increment `quicfuscate_audit_persistence_errors_total`.
 
-**File security:** The audit log file is created with mode `0o600` (owner read/write only). When running as root, the file is chowned to the `quicfuscate` user/group so that audit logging survives the root-to-unprivileged privilege drop. The parent directory is chowned only if the server created it. Pre-existing system directories such as `/var/log` are never re-owned, which would be a privilege-escalation vector.
+**File security:** The active log, immutable segments, and checkpoint are regular files created with mode `0o600` (owner read/write only). Symlinks and special files are rejected before reading. When running as root, the audit set is chowned to the resolved runtime user/group so logging survives privilege reduction. The parent directory is chowned only if the server created it; pre-existing system directories are never re-owned.
 
-**Mutex poisoning resilience:** The audit logger recovers from mutex poisoning rather than panicking. If another thread panicked while holding the `last_hash` or `writer` mutex, the audit logger continues with the last known state via `unwrap_or_else(|e| e.into_inner())`. A security audit logger must never crash the server because of an unrelated thread panic.
+**Hash chaining and schema:** Schema v2 hashes `version|seq|timestamp|event_type|severity|source_ip|client_id|actor|target|outcome|reason|message|prev_hash`. Every v2 record carries typed actor, target, and outcome fields plus an optional stable reason. The verifier retains schema v1 compatibility for existing single-file logs.
 
-**Hash chaining:** Each audit entry includes a SHA-256 hash computed over the canonical form `seq|timestamp|event_type|severity|source_ip|client_id|message|prev_hash`. Libraries can call `AuditLog::verify_chain()`, while operators can run `quicfuscate verify-audit-log <path>`. Tampering with any entry breaks the chain.
+**Rotation and retained proof:** `[audit] max_segment_bytes` rotates the active file to an immutable `<base>.<start>-<end>.segment`; `max_segments` bounds the complete retained set including the active file. Before retention removes an oldest segment, a mode-`0600` atomic checkpoint advances the retained anchor and records the ordered segment identities plus tail sequence/hash. Checkpoint replacement is durable on Unix and Windows. Restart verifies the retained set, resumes at `tail_seq + 1`, and recovers a fully valid active tail left by an interrupted rotation.
+
+**Verification and lifecycle:** `AuditLog::verify_chain()` and `quicfuscate verify-audit-log <path>` validate ordered segment identity, sequence and hash continuity, checkpoint anchor/tail, and detect mutation, interior deletion, reordering, truncation, and tail loss. `flush()` is a bounded acknowledged barrier for every previously accepted event. Clean shutdown flushes, stops, and joins the worker; a runtime error remains primary if the audit shutdown also fails.
 
 **Event types emitted at runtime:**
 - `ServerStarted` / `ServerStopped` - server lifecycle
@@ -317,10 +319,10 @@ The server runtime emits tamper-evident audit events to a hash-chained NDJSON lo
 - `QkeyRevoked` - admin revoked a QKey
 - `AdminAction` - admin kick, failed config reload
 - `ConfigReloaded` - successful config reload
-- `ConnectionEstablished` / `ConnectionClosed` - live and standalone session acceptance, removal, and expiry reconciliation
+- `ConnectionEstablished` / `ConnectionClosed` / `ConnectionRejected` - live and standalone session acceptance, rejection, removal, and expiry reconciliation
 - `FirewallRuleAdded` / `FirewallRuleRemoved` - platform routing/firewall setup and idempotent teardown boundaries
 
-**Runtime proof:** `scripts/tests/suites/test-graceful-shutdown.sh` starts a real server with `--audit-log`, authenticates two real clients, performs authenticated admin drain and config reload operations, observes connection closure, enforces minimum event counts, and validates the persisted chain through `verify-audit-log`.
+**Runtime proof:** `scripts/tests/suites/test-graceful-shutdown.sh` starts a real server with `--audit-log`, authenticates two real clients, performs authenticated admin drain and config reload operations, observes connection closure, enforces minimum event counts, and validates the persisted chain through `verify-audit-log`. `qf-audit-probe` refuses existing evidence, drives concurrent producers, enforces at least 10,000 durably accepted events per second with zero drops/errors, restarts the writer, re-verifies the chain, and emits machine-readable JSON. RFC 5424 and CEF conversion remain external collector responsibilities; collectors consume the canonical NDJSON segment set.
 
 **Memory locking (TODO-516):** When `[security] lock_memory = true` (default), an unlimited `RLIMIT_MEMLOCK` uses `mlockall(MCL_CURRENT | MCL_FUTURE)`; a finite or unreadable budget uses `MCL_CURRENT` so a successful call cannot make later allocations fail with `ENOMEM`. With Linux privilege reduction, `mlockall` runs after the verified setxid transition because native ARM64 proof showed that carrying pre-locked runtime and signal stacks through glibc's multi-threaded setxid broadcast can fault. The TLS private-key allocation is parsed and individually locked before the drop, and `lock_blocks = true` individually locks each `MemoryPool` block on allocation. `LimitMEMLOCK=infinity` in the systemd unit survives the UID/GID transition and enables full current-and-future protection. Finite-limit failures remain explicit warnings while the individual key and pool locks stay active.
 
@@ -1463,7 +1465,8 @@ Server implementation (`src/implementations/server/`):
 - `src/implementations/server/systemd.rs` - systemd-oriented service/unit integration helpers.
 
 Audit module (`src/audit/`):
-- `src/audit/mod.rs` - tamper-evident NDJSON audit log with SHA-256 hash chaining and a global `OnceLock<Arc<AuditLog>>` accessor initialized via `--audit-log <path>`. Runtime emitters cover server lifecycle, privilege-drop outcomes, authentication success/failure/timeout, QKey issuance/revocation, selected admin actions, config reload, connection lifecycle, and platform firewall setup/teardown. The production `verify-audit-log <path>` command verifies a persisted chain. The file is created with mode `0o600` and chowned to the runtime user before privilege drop.
+- `src/audit/mod.rs` - one bounded asynchronous audit owner with non-blocking producers, schema-v2 typed events, SHA-256 chaining, deterministic segment rotation/retention, atomic durability checkpoints, restart recovery, observable drop/persistence counters, and schema-v1 compatibility. `verify-audit-log <path>` verifies the complete retained set. Every audit artifact is a mode-`0o600` regular file owned by the runtime identity.
+- `src/bin/qf-audit-probe.rs` - concurrent release probe for durable throughput, bounded-worker counters, shutdown/restart continuity, and end-to-end verification.
 
 Optimize submodules (`src/optimize/`):
 - `src/optimize/brain.rs` - optimize helpers used by brain/statistical hotpaths.
@@ -2166,6 +2169,17 @@ The effective `[logging]` section is parsed and validated before Tokio and befor
 
 The stable JSON format is NDJSON with required `ts`, `level`, `target`, and `msg` keys. Optional `file` and `line` keys are emitted when the `log::Record` provides them. `log_to_stdout` retains its compatibility name but writes to stderr for systemd/journald capture. `file_path` takes precedence over `log_file_path`; `syslog_addr` adds RFC 5424 UDP delivery; `module_levels` applies longest-prefix module filtering. Invalid levels, empty enabled paths, zero file-size bounds, zero ring capacity, port-zero syslog targets, and invalid module overrides fail startup before network or privileged runtime setup.
 
+Audit persistence is configured independently:
+```toml
+[audit]
+queue_capacity = 16384
+max_segment_bytes = 67108864
+max_segments = 8
+flush_timeout_ms = 5000
+```
+
+All audit bounds must be non-zero and `max_segments` must be at most 1,024. `queue_capacity` bounds accepted events waiting for the writer, `max_segment_bytes` controls deterministic rotation, `max_segments` includes the active segment, and `flush_timeout_ms` bounds enqueue plus acknowledgement waits during flush and shutdown.
+
 #### Common Operational Tasks
 ```bash
 # Reload configuration
@@ -2408,14 +2422,14 @@ Server Options (selected):
     --qkey-ttl-secs <secs> Default QKey TTL in seconds (0 disables expiration; env QUICFUSCATE_QKEY_TTL_SECS)
     --qkey-store <path> QKey registry store path (recommended: /var/lib/quicfuscate/qkeys.json)
     --metrics-port <port>   Metrics HTTP port (text format at /metrics)
-    --audit-log <path>      Tamper-evident audit log file (NDJSON, hash-chained).
-                            Security events are written to this file with mode 0o600.
-                            Must be set before privilege drop; file is chowned to
-                            the runtime user so logging survives root->unprivileged drop.
+    --audit-log <path>      Base path for the tamper-evident NDJSON audit segment set.
+                            Active log, rotated segments, and durability checkpoint use
+                            mode 0o600 and the resolved runtime identity. Queue, rotation,
+                            retention, and flush bounds come from the [audit] config.
     --no-drop-privileges    Skip privilege dropping (debugging only, never use in production)
 ```
 
-Verify a persisted audit chain without starting a client or server:
+Verify the active file plus its checkpoint-declared retained segments without starting a client or server:
 
 ```text
 quicfuscate verify-audit-log <path>

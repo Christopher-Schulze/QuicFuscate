@@ -524,17 +524,35 @@ async fn run_server(
     }
 
     // Initialize the global audit log (TODO-515).
-    quicfuscate::audit::init_audit_log(
+    let audit_config = startup_engine_config
+        .as_ref()
+        .map(|config| config.audit.clone())
+        .unwrap_or_default();
+    quicfuscate::audit::init_audit_log_with_options(
         audit_log_path.clone(),
         privilege_target
             .as_ref()
             .map(|identity| (identity.uid, identity.gid)),
-    );
-    quicfuscate::audit::audit(
+        quicfuscate::audit::AuditOptions {
+            queue_capacity: audit_config.queue_capacity,
+            max_segment_bytes: audit_config.max_segment_bytes,
+            max_segments: audit_config.max_segments,
+            flush_timeout: std::time::Duration::from_millis(audit_config.flush_timeout_ms),
+        },
+    )
+    .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let _audit_flush_guard = quicfuscate::audit::AuditFlushGuard::new();
+    quicfuscate::audit::audit_typed(
         quicfuscate::audit::AuditEventType::ServerStarted,
         quicfuscate::audit::AuditSeverity::Info,
         None,
         None,
+        quicfuscate::audit::AuditContext {
+            actor: quicfuscate::audit::AuditActor::System,
+            target: quicfuscate::audit::AuditTarget::Server,
+            outcome: quicfuscate::audit::AuditOutcome::Started,
+            reason: None,
+        },
         &format!("Server starting on {listen_addr}"),
     );
 
@@ -737,11 +755,17 @@ async fn run_server(
                     report.effective_gid,
                     report.saved_gid
                 );
-                quicfuscate::audit::audit(
+                quicfuscate::audit::audit_typed(
                     quicfuscate::audit::AuditEventType::PrivilegesDropped,
                     quicfuscate::audit::AuditSeverity::Info,
                     None,
                     None,
+                    quicfuscate::audit::AuditContext {
+                        actor: quicfuscate::audit::AuditActor::System,
+                        target: quicfuscate::audit::AuditTarget::System,
+                        outcome: quicfuscate::audit::AuditOutcome::Succeeded,
+                        reason: Some("configured_identity_applied"),
+                    },
                     &format!(
                         "Privileges irreversibly reduced to uid={} gid={}",
                         identity.uid, identity.gid
@@ -755,11 +779,17 @@ async fn run_server(
             }
             Err(error) => {
                 error!("Privilege finalization failed: {error} - refusing service exposure");
-                quicfuscate::audit::audit(
+                quicfuscate::audit::audit_typed(
                     quicfuscate::audit::AuditEventType::PrivilegeDropFailed,
                     quicfuscate::audit::AuditSeverity::Critical,
                     None,
                     None,
+                    quicfuscate::audit::AuditContext {
+                        actor: quicfuscate::audit::AuditActor::System,
+                        target: quicfuscate::audit::AuditTarget::System,
+                        outcome: quicfuscate::audit::AuditOutcome::Failed,
+                        reason: Some("privilege_finalization_failed"),
+                    },
                     &format!("Privilege finalization failed: {error}"),
                 );
                 return Err(std::io::Error::other("privilege finalization failed"));
@@ -767,7 +797,44 @@ async fn run_server(
         }
     }
 
-    runtime.run_standalone(Box::new(launch)).await?;
-
-    Ok(())
+    let runtime_result = runtime.run_standalone(Box::new(launch)).await;
+    let (severity, message) = match &runtime_result {
+        Ok(()) => (
+            quicfuscate::audit::AuditSeverity::Info,
+            "Server runtime stopped cleanly".to_string(),
+        ),
+        Err(error) => (
+            quicfuscate::audit::AuditSeverity::Critical,
+            format!("Server runtime stopped with error: {error}"),
+        ),
+    };
+    let stop_context = match &runtime_result {
+        Ok(()) => quicfuscate::audit::AuditContext {
+            actor: quicfuscate::audit::AuditActor::System,
+            target: quicfuscate::audit::AuditTarget::Server,
+            outcome: quicfuscate::audit::AuditOutcome::Stopped,
+            reason: Some("runtime_completed"),
+        },
+        Err(_) => quicfuscate::audit::AuditContext {
+            actor: quicfuscate::audit::AuditActor::System,
+            target: quicfuscate::audit::AuditTarget::Server,
+            outcome: quicfuscate::audit::AuditOutcome::Failed,
+            reason: Some("runtime_failed"),
+        },
+    };
+    quicfuscate::audit::audit_typed(
+        quicfuscate::audit::AuditEventType::ServerStopped,
+        severity,
+        None,
+        None,
+        stop_context,
+        &message,
+    );
+    let flush_result =
+        quicfuscate::audit::flush().map_err(|error| std::io::Error::other(error.to_string()));
+    match (runtime_result, flush_result) {
+        (Err(runtime_error), _) => Err(runtime_error),
+        (Ok(()), Err(audit_error)) => Err(audit_error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
 }
