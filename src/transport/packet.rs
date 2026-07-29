@@ -2087,9 +2087,9 @@ pub struct CryptoContext {
     /// Header protection key for incoming 1-RTT packets (direction-specific).
     pub hp_1rtt_open: Option<Arc<dyn HeaderProtector + Send + Sync>>,
     /// Current 1-RTT read secret for key update derivation.
-    pub read_secret_1rtt: Option<Vec<u8>>,
+    pub(crate) read_secret_1rtt: Option<crate::secret::SecretBytes>,
     /// Current 1-RTT write secret for key update derivation.
-    pub write_secret_1rtt: Option<Vec<u8>>,
+    pub(crate) write_secret_1rtt: Option<crate::secret::SecretBytes>,
     /// Current 1-RTT read key generation counter.
     pub read_generation_1rtt: u64,
     /// Current 1-RTT write key generation counter.
@@ -2327,7 +2327,7 @@ impl CryptoContext {
         let (key, iv) = derive_key_iv(&next);
         let (_, open) = select_packet_data_aead(&key, &iv);
         self.open_1rtt = Some(Arc::new(open));
-        self.read_secret_1rtt = Some(next);
+        self.read_secret_1rtt = Some(crate::secret::SecretBytes::new(next, "tls_1rtt_read_secret"));
         self.read_generation_1rtt = self.read_generation_1rtt.saturating_add(1);
         true
     }
@@ -2341,7 +2341,8 @@ impl CryptoContext {
         let (key, iv) = derive_key_iv(&next);
         let (seal, _) = select_packet_data_aead(&key, &iv);
         self.seal_1rtt = Some(Arc::new(seal));
-        self.write_secret_1rtt = Some(next);
+        self.write_secret_1rtt =
+            Some(crate::secret::SecretBytes::new(next, "tls_1rtt_write_secret"));
         self.write_generation_1rtt = self.write_generation_1rtt.saturating_add(1);
         true
     }
@@ -2392,7 +2393,8 @@ impl crate::crypto::aead::KeyScheduleHooks for CryptoContext {
                 }
             }
             crate::crypto::aead::Level::OneRTT => {
-                self.read_secret_1rtt = Some(secret.to_vec());
+                self.read_secret_1rtt =
+                    Some(crate::secret::SecretBytes::new(secret.to_vec(), "tls_1rtt_read_secret"));
                 self.read_generation_1rtt = 0;
                 self.previous_read_1rtt.clear();
                 self.install_read_1rtt_secret(secret);
@@ -2435,9 +2437,54 @@ impl crate::crypto::aead::KeyScheduleHooks for CryptoContext {
                 }
             }
             crate::crypto::aead::Level::OneRTT => {
-                self.write_secret_1rtt = Some(secret.to_vec());
+                self.write_secret_1rtt =
+                    Some(crate::secret::SecretBytes::new(secret.to_vec(), "tls_1rtt_write_secret"));
                 self.write_generation_1rtt = 0;
                 self.install_write_1rtt_secret(secret);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod secret_erasure_tests {
+    use super::CryptoContext;
+    use crate::crypto::aead::{Algorithm, KeyScheduleHooks, Level};
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn tls_secret_replacement_drop_and_header_protection_erase_owned_bytes() {
+        let events = Arc::new(Mutex::new(Vec::<(&'static str, Vec<u8>)>::new()));
+        let observed = Arc::clone(&events);
+        let _observer = crate::secret::test_observation::install(Arc::new(move |label, bytes| {
+            observed.lock().expect("erasure event lock").push((label, bytes.to_vec()));
+        }));
+
+        {
+            let mut crypto = CryptoContext::default();
+            crypto.set_read_secret(Level::OneRTT, Algorithm::AES128_GCM, &[0x11; 32]);
+            crypto.set_read_secret(Level::OneRTT, Algorithm::AES128_GCM, &[0x22; 32]);
+            crypto.set_write_secret(Level::OneRTT, Algorithm::AES128_GCM, &[0x33; 32]);
+            crypto.set_write_secret(Level::OneRTT, Algorithm::AES128_GCM, &[0x44; 32]);
+            crypto.read_secret_1rtt = None;
+            drop(crate::crypto::aead::AesHp::new(&[0x55; 16]));
+        }
+
+        let events = events.lock().expect("erasure events");
+        for (label, minimum_events, expected_len) in [
+            ("tls_1rtt_read_secret", 2, 32),
+            ("tls_1rtt_write_secret", 2, 32),
+            ("aes_hp_key", 1, 16),
+        ] {
+            let matches: Vec<_> =
+                events.iter().filter(|(event_label, _)| *event_label == label).collect();
+            assert!(
+                matches.len() >= minimum_events,
+                "missing normal/replacement erasure events for {label}"
+            );
+            for (_, bytes) in matches {
+                assert_eq!(bytes.len(), expected_len);
+                assert!(bytes.iter().all(|byte| *byte == 0));
             }
         }
     }

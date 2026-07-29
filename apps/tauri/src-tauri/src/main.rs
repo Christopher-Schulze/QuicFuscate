@@ -660,7 +660,8 @@ fn build_client_engine_config(
         .map(|t| t.trim())
         .filter(|t| !t.is_empty())
         .ok_or_else(|| "QKey missing token".to_string())?;
-    cfg.connection.qkey_token = Some(normalize_token_hex_32(token_hex)?);
+    cfg.connection.qkey_token =
+        Some(quicfuscate::engine::qkey::QKeyToken::new(normalize_token_hex_32(token_hex)?));
 
     // Keep client-side settings optional. Only apply supported fields.
     if let Some(v) = settings {
@@ -761,8 +762,9 @@ async fn qkey_generate(
         return Err("SNI cannot be empty".to_string());
     }
 
+    let token = token.map(quicfuscate::engine::qkey::QKeyToken::new);
     let token = match token.as_deref() {
-        Some(v) => Some(normalize_token_hex_32(v)?),
+        Some(v) => Some(quicfuscate::engine::qkey::QKeyToken::new(normalize_token_hex_32(v)?)),
         None => return Err("Token is required".to_string()),
     };
 

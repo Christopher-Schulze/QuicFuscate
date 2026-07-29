@@ -204,7 +204,7 @@ pub struct ConnectionConfig {
     pub sni: String,
     /// QKey token (hex, client mode only)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub qkey_token: Option<String>,
+    pub qkey_token: Option<crate::engine::qkey::QKeyToken>,
     /// QKey id (public identifier, client mode only)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qkey_id: Option<String>,

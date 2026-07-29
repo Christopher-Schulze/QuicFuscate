@@ -318,10 +318,12 @@ impl AdminHandler for DefaultAdminHandler {
         let mut nonce = [0u8; 8];
         crate::rng::fill_secure_or_abort(&mut nonce, "admin::handle_qkey_nonce");
         let extra: String = nonce.iter().map(|b| format!("{:02x}", b)).collect();
-        let mut token_bytes = [0u8; 32];
-        crate::rng::fill_secure_or_abort(&mut token_bytes, "admin::handle_qkey_token");
-        let token_hex: String = token_bytes.iter().map(|b| format!("{:02x}", b)).collect();
-        let config = config.with_extra(&format!("nonce={}", extra)).with_token(&token_hex);
+        let mut token_bytes = crate::secret::SecretBytes::zeroed(32, "qkey_generated_token_bytes");
+        crate::rng::fill_secure_or_abort(token_bytes.as_mut_slice(), "admin::handle_qkey_token");
+        let token = crate::engine::qkey::QKeyToken::new(
+            token_bytes.iter().map(|byte| format!("{byte:02x}")).collect(),
+        );
+        let config = config.with_extra(&format!("nonce={}", extra)).with_owned_token(token);
         qkey::generate(&config)
     }
 

@@ -1,5 +1,8 @@
 use std::path::PathBuf;
 
+use crate::engine::qkey::QKeyToken;
+use crate::secret::{SecretBytes, SecretString};
+
 use super::auth_frame::AuthFrame;
 use super::replay_window::ReplayWindow;
 
@@ -83,39 +86,19 @@ fn decrypt_payload(data: &[u8], key: &[u8; 32]) -> Option<Vec<u8>> {
 /// This is not a secret. Authentication is enforced separately by verifying the per-QKey token
 /// post-handshake.
 pub fn qkey_id(qkey: &str) -> String {
-    let trimmed = qkey.trim();
-    // Canonicalize prefix case for stability (copy/paste often changes casing).
-    let canonical = if trimmed
-        .get(..crate::engine::qkey::QKEY_PREFIX.len())
-        .map(|p| p.eq_ignore_ascii_case(crate::engine::qkey::QKEY_PREFIX))
-        .unwrap_or(false)
-    {
-        let rest = trimmed.get(crate::engine::qkey::QKEY_PREFIX.len()..).unwrap_or("");
-        if trimmed.starts_with(crate::engine::qkey::QKEY_PREFIX) {
-            trimmed.to_string()
-        } else {
-            format!("{}{}", crate::engine::qkey::QKEY_PREFIX, rest)
-        }
-    } else {
-        trimmed.to_string()
-    };
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(canonical.as_bytes());
-    let hex = format!("{:x}", hasher.finalize());
-    hex.chars().take(12).collect()
+    crate::engine::qkey::id(qkey)
 }
 
-pub fn qkey_token_hex_from_qkey(qkey: &str) -> Option<String> {
+pub fn qkey_token_hex_from_qkey(qkey: &str) -> Option<QKeyToken> {
     let trimmed = qkey.trim();
     if trimmed.is_empty() {
         return None;
     }
     if let Ok(cfg) = crate::engine::qkey::parse(trimmed) {
         if let Some(token) = cfg.token {
-            let token = token.trim().to_lowercase();
-            if token.len() == 64 && token.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
-                return Some(token);
+            let token = token.trim();
+            if token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Some(QKeyToken::new(token.to_ascii_lowercase()));
             }
         }
     }
@@ -245,7 +228,7 @@ impl QKeyRegistry {
     pub fn insert(
         &mut self,
         qkey: String,
-        token_hex: String,
+        token_hex: QKeyToken,
         name: Option<String>,
     ) -> Result<QKeyEntry, String> {
         self.insert_with_ttl(qkey, token_hex, None, name)
@@ -254,10 +237,11 @@ impl QKeyRegistry {
     pub fn insert_with_ttl(
         &mut self,
         qkey: String,
-        token_hex: String,
+        token_hex: QKeyToken,
         ttl_seconds: Option<u64>,
         name: Option<String>,
     ) -> Result<QKeyEntry, String> {
+        let qkey = SecretString::new(qkey, "qkey_registry_input");
         self.prune_expired();
         let id = qkey_id(&qkey);
         if let Some(existing) = self.entries.iter().find(|e| e.id == id).cloned() {
@@ -272,7 +256,6 @@ impl QKeyRegistry {
         }
         let parsed = crate::engine::qkey::parse(qkey.trim()).ok();
         let (stealth, fec) = parsed.as_ref().map(policy_from_parsed_qkey).unwrap_or((None, None));
-        let token_hex = token_hex.trim().to_lowercase();
         let token_sha256 = match token_sha256_hex_from_token_hex(&token_hex) {
             Some(h) => h,
             None => return Err("Invalid QKey token (expected 64 hex chars)".to_string()),
@@ -468,14 +451,11 @@ pub fn token_sha256_hex_from_token_hex(token_hex: &str) -> Option<String> {
     if token_hex.len() != 64 {
         return None;
     }
-    if !token_hex.as_bytes().iter().all(|b| b.is_ascii_hexdigit()) {
-        return None;
-    }
-    let canonical = token_hex.to_ascii_lowercase();
-    let binary = hex::decode(&canonical).ok()?;
+    let mut binary = SecretBytes::zeroed(32, "qkey_decoded_token");
+    hex::decode_to_slice(token_hex, binary.as_mut_slice()).ok()?;
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    hasher.update(&binary);
+    hasher.update(binary.as_slice());
     Some(format!("{:x}", hasher.finalize()))
 }
 
@@ -558,7 +538,7 @@ mod tests {
         let token_sha = token_sha256_hex_from_token_hex(&token_hex).expect("sha");
 
         let mut reg = QKeyRegistry::new(200, None, None);
-        reg.insert(qkey_value.clone(), token_hex.clone(), None).expect("insert");
+        reg.insert(qkey_value.clone(), token_hex.clone().into(), None).expect("insert");
 
         let got = reg.lookup_initial_id_token(id.as_bytes()).expect("record must exist");
         assert_eq!(got.id, id);
@@ -587,7 +567,7 @@ mod tests {
         let id = qkey_id(&qkey_value);
 
         let mut reg = QKeyRegistry::new(200, None, None);
-        reg.insert(qkey_value, token_hex, None).expect("insert");
+        reg.insert(qkey_value, token_hex.into(), None).expect("insert");
         assert_eq!(reg.entries.len(), 1);
 
         let now = current_epoch_secs();
@@ -604,7 +584,7 @@ mod tests {
         let id = qkey_id(&qkey_value);
 
         let mut reg = QKeyRegistry::new(200, None, None);
-        reg.insert(qkey_value, token_hex, None).expect("insert");
+        reg.insert(qkey_value, token_hex.into(), None).expect("insert");
         assert!(reg.lookup_initial_id_token(id.to_uppercase().as_bytes()).is_some());
         assert!(reg.lookup_initial_id_token(b"").is_none());
         assert!(reg.lookup_initial_id_token(b"abc").is_none());
@@ -622,7 +602,7 @@ mod tests {
 
         {
             let mut reg = QKeyRegistry::new(200, Some(path.clone()), None);
-            reg.insert(qkey_value, token_hex, None).expect("insert");
+            reg.insert(qkey_value, token_hex.into(), None).expect("insert");
         }
 
         let before = read_records(&path);
@@ -710,14 +690,14 @@ mod tests {
         let token_hex = "A".repeat(64);
         let qkey_value = mk_qkey_with_token(&token_hex);
         let lower = qkey_token_hex_from_qkey(&qkey_value).expect("token");
-        assert_eq!(lower, "a".repeat(64));
+        assert_eq!(lower.as_ref(), "a".repeat(64));
 
         let mut pasted = qkey_value.clone();
         if let Some(rest) = pasted.strip_prefix(crate::engine::qkey::QKEY_PREFIX) {
             pasted = format!("{}{}", crate::engine::qkey::QKEY_PREFIX.to_lowercase(), rest);
         }
         let lower2 = qkey_token_hex_from_qkey(&pasted).expect("token");
-        assert_eq!(lower2, "a".repeat(64));
+        assert_eq!(lower2.as_ref(), "a".repeat(64));
     }
 
     #[test]
@@ -731,19 +711,44 @@ mod tests {
     }
 
     #[test]
+    fn decoded_token_normal_and_partial_error_paths_erase_before_deallocation() {
+        use std::sync::{Arc, Mutex};
+
+        let events = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let observed = Arc::clone(&events);
+        let _observer = crate::secret::test_observation::install(Arc::new(move |label, bytes| {
+            if label == "qkey_decoded_token" {
+                observed.lock().expect("erasure event lock").push(bytes.to_vec());
+            }
+        }));
+
+        assert!(token_sha256_hex_from_token_hex(&"a5".repeat(32)).is_some());
+        let mut partial = "a5".repeat(32);
+        partial.replace_range(46..48, "zz");
+        assert!(token_sha256_hex_from_token_hex(&partial).is_none());
+
+        let events = events.lock().expect("erasure events");
+        assert_eq!(events.len(), 2, "normal and partial decode owners must both be observed");
+        for bytes in events.iter() {
+            assert_eq!(bytes.len(), 32);
+            assert!(bytes.iter().all(|byte| *byte == 0));
+        }
+    }
+
+    #[test]
     fn insert_with_ttl_applies_expiry_and_zero_means_no_expiry() {
         let mut reg = QKeyRegistry::new(200, None, Some(90));
 
         let t1 = mk_token_hex('1');
         let q1 = mk_qkey_with_token(&t1);
-        let e1 = reg.insert_with_ttl(q1, t1, Some(60), None).expect("insert ttl");
+        let e1 = reg.insert_with_ttl(q1, t1.into(), Some(60), None).expect("insert ttl");
         let now = current_epoch_secs();
         let exp = e1.expires_at.expect("expires");
         assert!(exp >= now + 55 && exp <= now + 65);
 
         let t2 = mk_token_hex('2');
         let q2 = mk_qkey_with_token(&t2);
-        let e2 = reg.insert_with_ttl(q2, t2, Some(0), None).expect("insert no expiry");
+        let e2 = reg.insert_with_ttl(q2, t2.into(), Some(0), None).expect("insert no expiry");
         assert!(e2.expires_at.is_none());
     }
 
@@ -752,7 +757,7 @@ mod tests {
         let mut reg = QKeyRegistry::new(200, None, Some(120));
         let token_hex = mk_token_hex('3');
         let qkey_value = mk_qkey_with_token(&token_hex);
-        let e = reg.insert(qkey_value, token_hex, None).expect("insert");
+        let e = reg.insert(qkey_value, token_hex.into(), None).expect("insert");
         let now = current_epoch_secs();
         let exp = e.expires_at.expect("default expiry");
         assert!(exp >= now + 115 && exp <= now + 125);
@@ -764,15 +769,15 @@ mod tests {
 
         let t1 = mk_token_hex('4');
         let q1 = mk_qkey_with_token(&t1);
-        let e1 = reg.insert(q1, t1, None).expect("insert 1");
+        let e1 = reg.insert(q1, t1.into(), None).expect("insert 1");
 
         let t2 = mk_token_hex('5');
         let q2 = mk_qkey_with_token(&t2);
-        let e2 = reg.insert(q2, t2, None).expect("insert 2");
+        let e2 = reg.insert(q2, t2.into(), None).expect("insert 2");
 
         let t3 = mk_token_hex('6');
         let q3 = mk_qkey_with_token(&t3);
-        let e3 = reg.insert(q3, t3, None).expect("insert 3");
+        let e3 = reg.insert(q3, t3.into(), None).expect("insert 3");
 
         let ids: Vec<String> = reg.list().into_iter().map(|e| e.id).collect();
         assert_eq!(ids.len(), 2);
@@ -788,7 +793,7 @@ mod tests {
         let id = qkey_id(&qkey_value);
 
         let mut reg = QKeyRegistry::new(200, None, None);
-        reg.insert(qkey_value, token_hex.clone(), None).expect("insert");
+        reg.insert(qkey_value, token_hex.clone().into(), None).expect("insert");
 
         let token_bytes = hex::decode(token_hex.to_ascii_lowercase()).expect("decode token");
         let mut nonce = [0u8; 16];
@@ -815,7 +820,7 @@ mod tests {
         let token_hex = mk_token_hex('8');
         let qkey_value = mk_qkey_with_token(&token_hex);
         let mut reg = QKeyRegistry::new(200, None, None);
-        reg.insert(qkey_value, token_hex.clone(), None).expect("insert");
+        reg.insert(qkey_value, token_hex.clone().into(), None).expect("insert");
 
         let token_bytes = hex::decode(token_hex.to_ascii_lowercase()).expect("decode token");
         let nonce = [0u8; 16];
@@ -830,7 +835,7 @@ mod tests {
         let qkey_value = mk_qkey_with_token(&token_hex);
         let id = qkey_id(&qkey_value);
         let mut reg = QKeyRegistry::new(200, None, None);
-        reg.insert(qkey_value, token_hex.clone(), None).expect("insert");
+        reg.insert(qkey_value, token_hex.clone().into(), None).expect("insert");
 
         let token_bytes = hex::decode(token_hex.to_ascii_lowercase()).expect("decode token");
         let wrong_token = {

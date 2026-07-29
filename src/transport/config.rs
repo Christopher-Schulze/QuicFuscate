@@ -1,6 +1,7 @@
 use super::{is_supported_version, CongestionControlAlgorithm};
 use crate::stealth::OsFingerprintProfile;
 use rustls::pki_types::pem::PemObject;
+use zeroize::Zeroizing;
 
 // ============================================================================
 
@@ -265,9 +266,9 @@ pub struct Config {
     #[cfg(any(test, feature = "rust-tests"))]
     pub(crate) qlog_config: Option<(String, String, String, u32)>,
     #[cfg(any(test, feature = "rust-tests"))]
-    pub(crate) ticket_key: Option<Vec<u8>>,
+    pub(crate) ticket_key: Option<crate::secret::SecretBytes>,
     #[cfg(any(test, feature = "rust-tests"))]
-    pub(crate) tls_session: Option<Vec<u8>>,
+    pub(crate) tls_session: Option<crate::secret::SecretBytes>,
     pub(crate) simd_enabled: bool,
     pub(crate) custom_bbr_settings: Option<Vec<u8>>,
     pub(crate) active_connection_id_limit: u64,
@@ -902,12 +903,12 @@ impl Config {
         &mut self,
         path: &str,
     ) -> Result<(), crate::error::ConnectionError> {
-        let key_data = std::fs::read(path).map_err(|e| {
+        let key_data = Zeroizing::new(std::fs::read(path).map_err(|e| {
             crate::error::ConnectionError::TlsError(format!(
                 "Private key read failed ({}): {}",
                 path, e
             ))
-        })?;
+        })?);
         rustls::pki_types::PrivateKeyDer::from_pem_slice(&key_data).map_err(|e| {
             crate::error::ConnectionError::TlsError(format!(
                 "Private key parse failed ({}): {}",
@@ -989,7 +990,8 @@ impl Config {
         if _key.is_empty() {
             return Err(crate::error::ConnectionError::InvalidState);
         }
-        self.ticket_key = Some(_key.to_vec());
+        self.ticket_key =
+            Some(crate::secret::SecretBytes::new(_key.to_vec(), "tls_ticket_encryption_key"));
         Ok(())
     }
     // duplicate removed: enable_early_data
@@ -1029,7 +1031,8 @@ impl Config {
     /// Stores a TLS session ticket for 0-RTT resumption (test helper).
     #[cfg(any(test, feature = "rust-tests"))]
     pub fn set_session(&mut self, ticket: &[u8]) {
-        self.tls_session = Some(ticket.to_vec());
+        self.tls_session =
+            Some(crate::secret::SecretBytes::new(ticket.to_vec(), "tls_config_session_ticket"));
     }
     // Handshake-specific setters delegate to base setters
     /// Sets initial congestion window for the handshake phase (test helper).
@@ -1488,6 +1491,37 @@ mod tests {
         ));
         cfg.set_strike_register(register);
         assert!(cfg.strike_register.is_some());
+    }
+
+    #[test]
+    fn tls_test_key_and_session_replacement_and_drop_erase_owned_bytes() {
+        use std::sync::{Arc, Mutex};
+
+        let events = Arc::new(Mutex::new(Vec::<(&'static str, Vec<u8>)>::new()));
+        let observed = Arc::clone(&events);
+        let _observer = crate::secret::test_observation::install(Arc::new(move |label, bytes| {
+            observed.lock().expect("erasure event lock").push((label, bytes.to_vec()));
+        }));
+
+        let mut cfg = default_config();
+        cfg.set_ticket_key(&[0x31; 32]).expect("set first ticket key");
+        cfg.set_ticket_key(&[0x42; 32]).expect("replace ticket key");
+        cfg.set_session(&[0x53; 48]);
+        cfg.set_session(&[0x64; 48]);
+        drop(cfg);
+
+        let events = events.lock().expect("erasure events");
+        for (label, expected_len) in
+            [("tls_ticket_encryption_key", 32), ("tls_config_session_ticket", 48)]
+        {
+            let matching =
+                events.iter().filter(|(event_label, _)| *event_label == label).collect::<Vec<_>>();
+            assert_eq!(matching.len(), 2, "replacement and drop must erase {label}");
+            for (_, bytes) in matching {
+                assert_eq!(bytes.len(), expected_len);
+                assert!(bytes.iter().all(|byte| *byte == 0));
+            }
+        }
     }
 
     #[test]

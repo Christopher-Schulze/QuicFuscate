@@ -45,7 +45,10 @@ mod tests {
     /// Install a dummy 32-byte 1-RTT write secret so key_update() can toggle
     /// key_phase without a real TLS handshake.
     fn install_write_secret(c: &mut Connection) {
-        c.crypto.write().write_secret_1rtt = Some(vec![0u8; 32]);
+        c.crypto.write().write_secret_1rtt = Some(crate::secret::SecretBytes::new(
+            vec![0u8; 32],
+            "tls_1rtt_write_secret",
+        ));
     }
 
     fn make_v2_client() -> Connection {

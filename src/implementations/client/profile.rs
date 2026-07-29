@@ -31,7 +31,7 @@ pub struct Profile {
     pub fec_mode: Option<String>,
     /// QKey token (hex). Required when the server enforces QKeys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token: Option<String>,
+    pub token: Option<qkey::QKeyToken>,
     /// Country code (for display)
     pub country: Option<String>,
     /// City (for display)

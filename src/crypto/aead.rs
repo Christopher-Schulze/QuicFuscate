@@ -1,3 +1,5 @@
+use zeroize::Zeroize;
+
 /// QUIC packet protection algorithm identifier.
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug)]
@@ -120,6 +122,13 @@ impl AesHp {
         let mut key = [0u8; 16];
         key.copy_from_slice(&secret[..16.min(secret.len())]);
         Self { key }
+    }
+}
+
+impl Drop for AesHp {
+    fn drop(&mut self) {
+        self.key.zeroize();
+        crate::secret::observe_erasure("aes_hp_key", &self.key);
     }
 }
 

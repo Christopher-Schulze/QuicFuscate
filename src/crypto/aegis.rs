@@ -69,22 +69,37 @@ impl Aegis128X8Aead {
 
 impl Drop for Aegis128LAead {
     fn drop(&mut self) {
+        if let Some(cipher) = self.cipher.get_mut().as_mut() {
+            cipher.zeroize_state("aegis_l_wrapper_state");
+        }
         self.key.zeroize();
+        crate::secret::observe_erasure("aegis_l_wrapper_key", &self.key);
         self.iv.zeroize();
+        crate::secret::observe_erasure("aegis_l_wrapper_iv", &self.iv);
     }
 }
 
 impl Drop for Aegis128X4Aead {
     fn drop(&mut self) {
+        if let Some(cipher) = self.cipher.get_mut().as_mut() {
+            cipher.zeroize_state("aegis_x4_wrapper_state");
+        }
         self.key.zeroize();
+        crate::secret::observe_erasure("aegis_x4_wrapper_key", &self.key);
         self.iv.zeroize();
+        crate::secret::observe_erasure("aegis_x4_wrapper_iv", &self.iv);
     }
 }
 
 impl Drop for Aegis128X8Aead {
     fn drop(&mut self) {
+        if let Some(cipher) = self.cipher.get_mut().as_mut() {
+            cipher.zeroize_state("aegis_x8_wrapper_state");
+        }
         self.key.zeroize();
+        crate::secret::observe_erasure("aegis_x8_wrapper_key", &self.key);
         self.iv.zeroize();
+        crate::secret::observe_erasure("aegis_x8_wrapper_iv", &self.iv);
     }
 }
 
@@ -454,6 +469,24 @@ mod aegis_aes_block {
 
 use aegis_aes_block::AesBlock;
 
+fn zeroize_aegis_state(state: &mut [AesBlock; 8], label: &'static str) {
+    for block in state.iter_mut() {
+        block.zeroize();
+    }
+    #[cfg(test)]
+    {
+        let mut snapshot = [0u8; 128];
+        for (destination, block) in snapshot.chunks_exact_mut(16).zip(state.iter()) {
+            destination.copy_from_slice(&block.into_bytes());
+        }
+        crate::secret::observe_erasure(label, &snapshot);
+    }
+    #[cfg(not(test))]
+    {
+        let _ = label;
+    }
+}
+
 #[inline(always)]
 fn aegis128l_update(state: &mut [AesBlock; 8], d0: AesBlock, d1: AesBlock) {
     super::prefetch_aegis_state(state.as_ptr() as *const u8);
@@ -538,7 +571,6 @@ fn aegis128l_init_state(key: &[u8], nonce: &[u8]) -> Result<[AesBlock; 8], Aegis
     // Each update performs 8 AESENC rounds over the 8-word state.
     // Count initialization work as well, but aggregate to a single atomic add.
     aegis_aes_block::add_aesenc_ops(10 * 8);
-
     Ok(state)
 }
 
@@ -549,9 +581,7 @@ pub struct Aegis128L {
 
 impl Drop for Aegis128L {
     fn drop(&mut self) {
-        for block in self.state.iter_mut() {
-            block.zeroize();
-        }
+        self.zeroize_state("aegis_l_inner_state");
     }
 }
 
@@ -570,6 +600,10 @@ impl Aegis128L {
     pub fn reinit(&mut self, key: &[u8], nonce: &[u8]) -> Result<(), AegisError> {
         self.state = aegis128l_init_state(key, nonce)?;
         Ok(())
+    }
+
+    fn zeroize_state(&mut self, label: &'static str) {
+        zeroize_aegis_state(&mut self.state, label);
     }
 
     #[inline(always)]
@@ -889,9 +923,7 @@ pub(crate) struct Aegis128X4 {
 
 impl Drop for Aegis128X4 {
     fn drop(&mut self) {
-        for block in self.state.iter_mut() {
-            block.zeroize();
-        }
+        self.zeroize_state("aegis_x4_inner_state");
     }
 }
 
@@ -906,6 +938,10 @@ impl Aegis128X4 {
     pub(crate) fn reinit(&mut self, key: &[u8], nonce: &[u8]) -> Result<(), AegisError> {
         self.state = aegis128l_init_state(key, nonce)?;
         Ok(())
+    }
+
+    fn zeroize_state(&mut self, label: &'static str) {
+        zeroize_aegis_state(&mut self.state, label);
     }
 
     #[inline(always)]
@@ -1236,9 +1272,7 @@ pub(crate) struct Aegis128X8 {
 
 impl Drop for Aegis128X8 {
     fn drop(&mut self) {
-        for block in self.state.iter_mut() {
-            block.zeroize();
-        }
+        self.zeroize_state("aegis_x8_inner_state");
     }
 }
 
@@ -1253,6 +1287,10 @@ impl Aegis128X8 {
     pub(crate) fn reinit(&mut self, key: &[u8], nonce: &[u8]) -> Result<(), AegisError> {
         self.state = aegis128l_init_state(key, nonce)?;
         Ok(())
+    }
+
+    fn zeroize_state(&mut self, label: &'static str) {
+        zeroize_aegis_state(&mut self.state, label);
     }
 
     #[inline(always)]
@@ -2386,6 +2424,92 @@ mod tests {
             let pt_len = open.open_with_u64_counter(counter, ad, opt_buf.as_mut_slice()).unwrap();
             assert_eq!(pt_len, pt.len());
             assert_eq!(&opt_buf[..pt_len], pt);
+        }
+    }
+
+    #[test]
+    fn aegis_wrapper_drop_erases_keys_ivs_and_initialized_state() {
+        use super::{AeadSeal, Aegis128LAead, Aegis128X4Aead, Aegis128X8Aead};
+        use std::sync::{Arc, Mutex};
+
+        let events = Arc::new(Mutex::new(Vec::<(&'static str, Vec<u8>)>::new()));
+        let observed = Arc::clone(&events);
+        let _observer = crate::secret::test_observation::install(Arc::new(move |label, bytes| {
+            observed.lock().expect("erasure event lock").push((label, bytes.to_vec()));
+        }));
+
+        let key = [0xA5u8; 16];
+        let iv = [0x5Au8; 12];
+        for seal in [
+            Box::new(Aegis128LAead::new(&key, &iv)) as Box<dyn AeadSeal + Send + Sync>,
+            Box::new(Aegis128X4Aead::new(&key, &iv)),
+            Box::new(Aegis128X8Aead::new(&key, &iv)),
+        ] {
+            let mut buffer = vec![0xC3u8; 48];
+            seal.seal_with_u64_counter(7, b"drop-proof", &mut buffer, 32, None)
+                .expect("initialize wrapper state");
+        }
+
+        let events = events.lock().expect("erasure events");
+        for (label, expected_len) in [
+            ("aegis_l_wrapper_key", 16),
+            ("aegis_l_wrapper_iv", 12),
+            ("aegis_l_wrapper_state", 128),
+            ("aegis_x4_wrapper_key", 16),
+            ("aegis_x4_wrapper_iv", 12),
+            ("aegis_x4_wrapper_state", 128),
+            ("aegis_x8_wrapper_key", 16),
+            ("aegis_x8_wrapper_iv", 12),
+            ("aegis_x8_wrapper_state", 128),
+        ] {
+            let bytes = events
+                .iter()
+                .find_map(|(event_label, bytes)| (*event_label == label).then_some(bytes))
+                .unwrap_or_else(|| panic!("missing erasure event: {label}"));
+            assert_eq!(bytes.len(), expected_len, "wrong erased range for {label}");
+            assert!(bytes.iter().all(|byte| *byte == 0), "non-zero byte retained by {label}");
+        }
+    }
+
+    #[test]
+    fn aegis_replacement_and_partial_wrapper_drop_are_erased() {
+        use super::{AeadSeal, Aegis128LAead};
+        use std::sync::{Arc, Mutex};
+
+        let events = Arc::new(Mutex::new(Vec::<(&'static str, Vec<u8>)>::new()));
+        let observed = Arc::clone(&events);
+        let _observer = crate::secret::test_observation::install(Arc::new(move |label, bytes| {
+            observed.lock().expect("erasure event lock").push((label, bytes.to_vec()));
+        }));
+
+        let mut retained = Some(Aegis128LAead::new(&[0x3C; 16], &[0xC3; 12]));
+        let mut buffer = vec![0xA7; 48];
+        retained
+            .as_ref()
+            .expect("retained wrapper")
+            .seal_with_u64_counter(9, b"replacement-proof", &mut buffer, 32, None)
+            .expect("initialize retained wrapper state");
+        drop(retained.replace(Aegis128LAead::new(&[0x6D; 16], &[0xD6; 12])));
+        drop(Aegis128LAead::new(&[0xD4; 7], &[0x4D; 5]));
+
+        let events = events.lock().expect("erasure events");
+        for (label, expected_count) in
+            [("aegis_l_wrapper_state", 1), ("aegis_l_wrapper_key", 2), ("aegis_l_wrapper_iv", 2)]
+        {
+            let matching =
+                events.iter().filter(|(event_label, _)| *event_label == label).collect::<Vec<_>>();
+            assert_eq!(matching.len(), expected_count, "wrong erasure event count for {label}");
+            for (_, bytes) in matching {
+                assert!(!bytes.is_empty(), "erased range must be observable for {label}");
+                assert!(bytes.iter().all(|byte| *byte == 0), "non-zero byte retained by {label}");
+            }
+        }
+        for label in ["aegis_l_wrapper_key", "aegis_l_wrapper_iv"] {
+            let bytes = events
+                .iter()
+                .find_map(|(event_label, bytes)| (*event_label == label).then_some(bytes))
+                .unwrap_or_else(|| panic!("missing erasure event: {label}"));
+            assert!(bytes.iter().all(|byte| *byte == 0), "partial wrapper retained {label}");
         }
     }
 }

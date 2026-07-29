@@ -230,18 +230,19 @@ fn issue_qkey(
         params.sni_domain,
         &nonce_hex,
     )?;
-    let token_hex = random_hex_32(&format!("{rng_context}::token"));
+    let token = random_qkey_token(&format!("{rng_context}::token"));
     let stealth = normalize_qkey_stealth(params.stealth)?;
     let fec = normalize_qkey_fec(params.fec)?;
     let remote = resolve_qkey_remote(listen_addr, params.port)?;
-    let config = qkey::QKeyConfig::new(&remote, &sni_policy.qkey_sni)
+    let mut config = qkey::QKeyConfig::new(&remote, &sni_policy.qkey_sni)
         .with_stealth(stealth)
         .with_fec(fec)
         .with_extra(&sni_policy.extra_json)
-        .with_token(&token_hex);
+        .with_owned_token(token);
     let qkey_value = qkey::generate(&config);
+    let token = config.token.take().ok_or_else(|| "Generated QKey missing token".to_string())?;
     let QKeyEntry { created_at, expires_at, .. } =
-        registry.insert_with_ttl(qkey_value.clone(), token_hex, params.ttl_seconds, name)?;
+        registry.insert_with_ttl(qkey_value.clone(), token, params.ttl_seconds, name)?;
     Ok(IssuedQKey { qkey: qkey_value, created_at, expires_at })
 }
 
@@ -313,10 +314,10 @@ fn random_hex_8(context: &str) -> String {
     hex_from_bytes(&bytes)
 }
 
-fn random_hex_32(context: &str) -> String {
-    let mut bytes = [0u8; 32];
-    crate::rng::fill_secure_or_abort(&mut bytes, context);
-    hex_from_bytes(&bytes)
+fn random_qkey_token(context: &str) -> crate::engine::qkey::QKeyToken {
+    let mut bytes = crate::secret::SecretBytes::zeroed(32, "qkey_generated_token_bytes");
+    crate::rng::fill_secure_or_abort(bytes.as_mut_slice(), context);
+    crate::engine::qkey::QKeyToken::new(hex_from_bytes(bytes.as_slice()))
 }
 
 fn hex_from_bytes(bytes: &[u8]) -> String {
@@ -327,6 +328,36 @@ fn hex_from_bytes(bytes: &[u8]) -> String {
         out.push(HEX[(b & 0x0f) as usize] as char);
     }
     out
+}
+
+#[cfg(test)]
+mod qkey_secret_tests {
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn generated_qkey_token_bytes_and_hex_owner_erase_before_deallocation() {
+        let events = Arc::new(Mutex::new(Vec::<(&'static str, Vec<u8>)>::new()));
+        let observed = Arc::clone(&events);
+        let _observer = crate::secret::test_observation::install(Arc::new(move |label, bytes| {
+            observed.lock().expect("erasure event lock").push((label, bytes.to_vec()));
+        }));
+
+        let token = super::random_qkey_token("server::qkey_secret_test");
+        assert_eq!(token.len(), 64);
+        drop(token);
+
+        let events = events.lock().expect("erasure events");
+        for (label, expected_len) in
+            [("qkey_generated_token_bytes", 32), ("qkey_token", 64)]
+        {
+            let bytes = events
+                .iter()
+                .find_map(|(event_label, bytes)| (*event_label == label).then_some(bytes))
+                .unwrap_or_else(|| panic!("missing erasure event: {label}"));
+            assert_eq!(bytes.len(), expected_len);
+            assert!(bytes.iter().all(|byte| *byte == 0));
+        }
+    }
 }
 
 #[derive(Default)]
@@ -749,4 +780,3 @@ pub fn apply_runtime_config_reload(
     apply_transport_overrides_from_toml(cfg_path, &contents, transport);
     Ok(())
 }
-

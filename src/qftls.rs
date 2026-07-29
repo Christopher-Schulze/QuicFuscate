@@ -641,7 +641,7 @@ pub trait QuicTlsProvider: Send + Sync {
     /// Get configured server name (SNI)
     fn server_name_get(&self) -> Option<&str>;
     /// Get TLS session ticket for resumption (if any)
-    fn session_ticket(&self) -> Option<Vec<u8>>;
+    fn session_ticket(&self) -> Option<Zeroizing<Vec<u8>>>;
     /// Enable 0-RTT if supported
     fn enable_0rtt(&mut self) -> Result<(), ConnectionError>;
     /// Get 0-RTT keys if available
@@ -860,7 +860,7 @@ impl QuicTlsProvider for CombinedProvider {
     fn server_name_get(&self) -> Option<&str> {
         self.rustls.server_name_get()
     }
-    fn session_ticket(&self) -> Option<Vec<u8>> {
+    fn session_ticket(&self) -> Option<Zeroizing<Vec<u8>>> {
         self.rustls.session_ticket()
     }
     fn enable_0rtt(&mut self) -> Result<(), ConnectionError> {
@@ -1011,8 +1011,8 @@ mod rustls_provider {
     }
 
     struct SessionData {
-        ticket: Vec<u8>,
-        master_secret: Vec<u8>,
+        ticket: crate::secret::SecretBytes,
+        master_secret: crate::secret::SecretBytes,
         alpn: String,
         timestamp: std::time::Instant,
     }
@@ -1032,8 +1032,56 @@ mod rustls_provider {
             }
             self.sessions.insert(server_name, data);
         }
-        fn get_ticket(&self, server_name: &str) -> Option<Vec<u8>> {
-            self.sessions.get(server_name).map(|d| d.ticket.clone())
+        fn get_ticket(&self, server_name: &str) -> Option<Zeroizing<Vec<u8>>> {
+            self.sessions
+                .get(server_name)
+                .map(|data| Zeroizing::new(data.ticket.as_slice().to_vec()))
+        }
+    }
+
+    #[cfg(test)]
+    mod session_secret_tests {
+        use super::{SessionCache, SessionData};
+        use std::sync::{Arc, Mutex};
+
+        fn session_data(fill: u8) -> SessionData {
+            SessionData {
+                ticket: crate::secret::SecretBytes::new(vec![fill; 32], "tls_session_ticket"),
+                master_secret: crate::secret::SecretBytes::new(
+                    vec![fill.wrapping_add(1); 32],
+                    "tls_session_master_secret",
+                ),
+                alpn: "h3".to_string(),
+                timestamp: std::time::Instant::now(),
+            }
+        }
+
+        #[test]
+        fn session_cache_eviction_and_drop_erase_retained_secret_material() {
+            let events = Arc::new(Mutex::new(Vec::<(&'static str, Vec<u8>)>::new()));
+            let observed = Arc::clone(&events);
+            let _observer =
+                crate::secret::test_observation::install(Arc::new(move |label, bytes| {
+                    observed.lock().expect("erasure event lock").push((label, bytes.to_vec()));
+                }));
+
+            let mut cache = SessionCache::new(1);
+            cache.store("first.example".to_string(), session_data(0x31));
+            cache.store("second.example".to_string(), session_data(0x42));
+            drop(cache);
+
+            let events = events.lock().expect("erasure events");
+            for label in ["tls_session_ticket", "tls_session_master_secret"] {
+                let matching = events
+                    .iter()
+                    .filter(|(event_label, _)| *event_label == label)
+                    .collect::<Vec<_>>();
+                assert_eq!(matching.len(), 2, "evicted and retained owners must erase for {label}");
+                for (_, bytes) in matching {
+                    assert_eq!(bytes.len(), 32);
+                    assert!(bytes.iter().all(|byte| *byte == 0));
+                }
+            }
         }
     }
 
@@ -1480,9 +1528,9 @@ mod rustls_provider {
                 );
             }
             if let Some(path) = TLS_KEY_PATH_OVERRIDE.get().map(|s| s.as_str()) {
-                let key_data = std::fs::read(path).map_err(|e| {
+                let key_data = Zeroizing::new(std::fs::read(path).map_err(|e| {
                     ConnectionError::TlsError(format!("Key read failed ({}): {}", path, e))
-                })?;
+                })?);
                 let key = PrivateKeyDer::from_pem_slice(&key_data).map_err(|e| {
                     ConnectionError::TlsError(format!("Key parse failed ({}): {}", path, e))
                 })?;
@@ -1492,6 +1540,7 @@ mod rustls_provider {
             let key_paths = vec!["certs/server.key", "/etc/quicfuscate/server.key", "server.key"];
             for path in key_paths {
                 if let Ok(key_data) = std::fs::read(path) {
+                    let key_data = Zeroizing::new(key_data);
                     if let Ok(key) = PrivateKeyDer::from_pem_slice(&key_data) {
                         return Ok(key);
                     }
@@ -1824,8 +1873,14 @@ mod rustls_provider {
                                 hasher.update(a.as_bytes());
                             }
                             let digest = hasher.finalize();
-                            let ticket = digest[..32].to_vec();
-                            let master = digest[..32].to_vec();
+                            let ticket = crate::secret::SecretBytes::new(
+                                digest[..32].to_vec(),
+                                "tls_session_ticket",
+                            );
+                            let master = crate::secret::SecretBytes::new(
+                                digest[..32].to_vec(),
+                                "tls_session_master_secret",
+                            );
                             let data = SessionData {
                                 ticket,
                                 master_secret: master,
@@ -1852,17 +1907,23 @@ mod rustls_provider {
                         .and_then(|p| p.sni.as_deref())
                         .unwrap_or("default")
                         .to_owned();
-                    let ticket = {
-                        use sha2::{Digest, Sha256};
-                        let mut hasher = Sha256::new();
-                        hasher.update(b"qf-session-ticket");
-                        hasher.update(alpn_s.as_bytes());
-                        hasher.update(key.as_bytes());
-                        hasher.finalize()[..32].to_vec()
-                    };
+                    let ticket = crate::secret::SecretBytes::new(
+                        {
+                            use sha2::{Digest, Sha256};
+                            let mut hasher = Sha256::new();
+                            hasher.update(b"qf-session-ticket");
+                            hasher.update(alpn_s.as_bytes());
+                            hasher.update(key.as_bytes());
+                            hasher.finalize()[..32].to_vec()
+                        },
+                        "tls_session_ticket",
+                    );
                     let data = SessionData {
                         ticket: ticket.clone(),
-                        master_secret: ticket,
+                        master_secret: crate::secret::SecretBytes::new(
+                            ticket.as_slice().to_vec(),
+                            "tls_session_master_secret",
+                        ),
                         alpn: alpn_s,
                         timestamp: std::time::Instant::now(),
                     };
@@ -1886,7 +1947,7 @@ mod rustls_provider {
             // Server name stored in profile.sni
             self.profile.as_ref().and_then(|p| p.sni.as_deref())
         }
-        fn session_ticket(&self) -> Option<Vec<u8>> {
+        fn session_ticket(&self) -> Option<Zeroizing<Vec<u8>>> {
             if let Some(ref cache) = self.session_cache {
                 let key = self
                     .profile
@@ -1914,7 +1975,7 @@ mod rustls_provider {
                     }
                 }
                 let digest = hasher.finalize();
-                return Some(digest[..32].to_vec());
+                return Some(Zeroizing::new(digest[..32].to_vec()));
             }
             None
         }
@@ -2053,7 +2114,7 @@ impl QuicTlsProvider for RustlsProvider {
     fn server_name_get(&self) -> Option<&str> {
         self.0.server_name_get()
     }
-    fn session_ticket(&self) -> Option<Vec<u8>> {
+    fn session_ticket(&self) -> Option<Zeroizing<Vec<u8>>> {
         self.0.session_ticket()
     }
     fn enable_0rtt(&mut self) -> Result<(), ConnectionError> {

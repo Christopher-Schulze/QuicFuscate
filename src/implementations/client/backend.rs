@@ -207,7 +207,7 @@ impl ClientBackend {
             .map(|t| t.trim())
             .filter(|t| !t.is_empty())
             .ok_or_else(|| BackendError::QKey("QKey missing token".to_string()))?;
-        let token_hex = token_hex.to_lowercase();
+        let token_hex = qkey::QKeyToken::new(token_hex.to_lowercase());
         if token_hex.len() != 64
             || !token_hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
         {

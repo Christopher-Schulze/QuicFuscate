@@ -188,7 +188,7 @@ Attack surface and control mapping:
   - controls: Argon2 hashes, `HttpOnly` cookies, `SameSite=Strict`, secure-cookie behavior tied to HTTPS forwarding, per-IP failed-login throttling and lockout, password-change lock (`423`) paths, same-origin POST validation (`Origin` host+port must match `Host` header when present; dev proxies must not rewrite `Host` via `changeOrigin`), and per-session CSRF token checks on authenticated POST routes.
   - verification: `implementations::server::admin_http` tests for lockout, throttling, cookie flags, lock removal, and cross-origin POST rejection.
 - QKey issuance and revocation surface:
-  - controls: strict QKey parsing and canonicalization, stable token IDs, TTL normalization, revoke path validation, persisted registry constraints, revoked-key rejection during initial auth, SessionId-to-QKey runtime tracking, active-session close on admin revoke, pending-auth revocation race prevention, scheduled revocation processing, and runtime auth-state rebind on source-address churn by DCID/source-id matching.
+  - controls: strict QKey parsing and canonicalization, stable token IDs, zeroizing raw-token and decoded-token owners from issuance/import through hashing and live authentication, TTL normalization, revoke path validation, persisted registry constraints, revoked-key rejection during initial auth, SessionId-to-QKey runtime tracking, active-session close on admin revoke, pending-auth revocation race prevention, scheduled revocation processing, and runtime auth-state rebind on source-address churn by DCID/source-id matching.
   - verification: `implementations::server::qkey_registry` tests, admin HTTP QKey API tests, runtime revocation tests, and `qkey_auth_tests::engine_qkey_id_matches_registry_qkey_id`.
 - Engine connect-state surface:
   - controls: `engine.connect()` is handshake-aware and only sets `Connected` after runtime handshake establishment within a bounded timeout.
@@ -325,6 +325,8 @@ The server runtime emits tamper-evident audit events to a bounded, hash-chained 
 **Runtime proof:** `scripts/tests/suites/test-graceful-shutdown.sh` starts a real server with `--audit-log`, authenticates two real clients, performs authenticated admin drain and config reload operations, observes connection closure, enforces minimum event counts, and validates the persisted chain through `verify-audit-log`. `qf-audit-probe` refuses existing evidence, drives concurrent producers, enforces at least 10,000 durably accepted events per second with zero drops/errors, restarts the writer, re-verifies the chain, and emits machine-readable JSON. RFC 5424 and CEF conversion remain external collector responsibilities; collectors consume the canonical NDJSON segment set.
 
 **Memory locking (TODO-516):** When `[security] lock_memory = true` (default), an unlimited `RLIMIT_MEMLOCK` uses `mlockall(MCL_CURRENT | MCL_FUTURE)`; a finite or unreadable budget uses `MCL_CURRENT` so a successful call cannot make later allocations fail with `ENOMEM`. With Linux privilege reduction, `mlockall` runs after the verified setxid transition because native ARM64 proof showed that carrying pre-locked runtime and signal stacks through glibc's multi-threaded setxid broadcast can fault. The TLS private-key allocation is parsed and individually locked before the drop, and `lock_blocks = true` individually locks each `MemoryPool` block on allocation. `LimitMEMLOCK=infinity` in the systemd unit survives the UID/GID transition and enables full current-and-future protection. Finite-limit failures remain explicit warnings while the individual key and pool locks stay active.
+
+**Retained-secret erasure:** `src/secret.rs` owns heap-backed secret byte and UTF-8 representations and overwrites the live range before clearing and deallocation. QKey generation, parsing, configuration, profile, connection, registry insertion, and binary-token hashing use these owners; persisted registry state contains only the non-secret QKey identifier and SHA-256 verifier. QuicFuscate's copied 1-RTT traffic secrets, session-cache ticket/master material, test-bound ticket keys/sessions, returned session-ticket copies, private-key PEM read buffers, and AES header-protection key use zeroizing owners. AEGIS L/X4/X8 wrappers wipe key, IV, and initialized 128-byte derived state on wrapper drop while the existing per-packet `reinit` and SIMD dispatch paths remain unchanged. Test-only pre-deallocation observers make normal, error, eviction, replacement, and partial-initialization erasure assertions failable without reading freed memory.
 
 ## Introduction & Purpose
 QuicFuscate is a forked stealth transport and VPN runtime built around a custom QUIC-like transport/data-plane posture, hybrid adaptive FEC, and a cohesive stealth stack. The canonical runtime is designed for strong censorship resilience and high-throughput operation under this forked protocol contract. It is not a drop-in upstream QUIC implementation.
@@ -1173,6 +1175,7 @@ pub struct MacTun {
   - AArch64 uses `Morus1280_128` automatically because Broderick ARM/AArch64 Criterion evidence shows MORUS beats retained AEGIS L/X4/X8 for 64B, 1024B, 1400B, and 8192B single and batch8 seal/open trait paths.
   - Architectures without an evidence-backed AEGIS advantage fall back to `Morus1280_128`.
 - Packet hot path dispatch: normal 0-RTT/1-RTT data-plane AEAD slots resolve to `DataAead` enum variants (`Aegis128L`, `Aegis128X4`, `Aegis128X8`, `Morus`) and avoid boxed trait dispatch. Rustls-provided packet keys remain supported through the explicit `PacketAead*::Dynamic` wrapper arm.
+- AEGIS secret retirement: L/X4/X8 wrapper drop wipes the retained 16-byte key, 12-byte IV, and initialized 128-byte cipher state. Inner cipher drop uses the same state-wipe primitive. Packet `reinit`, encryption, decryption, and SIMD backend selection retain their previous hot-path instruction flow.
 - Performance evidence:
   - retained backend evidence is produced by `scripts/benchmarks/suites/bench-retained-crypto-backends.sh`
   - the suite records hardware profile, per-backend throughput, and per-size winners for `Aegis128L`, `Aegis128X4`, `Aegis128X8`, and `Morus1280_128`
@@ -2127,7 +2130,7 @@ sudo ufw deny 8080/tcp comment "QuicFuscate admin - localhost only"
 
 #### QKey Management
 
-QKeys authenticate clients to the server. The server stores only SHA-256 hashes of tokens; the plaintext token is given to the client and never stored on the server.
+QKeys authenticate clients to the server. The server stores only SHA-256 hashes of tokens; the plaintext token is given to the client and never persisted on the server. In-memory issuance bytes, raw token text, decoded QKey JSON, decoded binary tokens, client configuration/profile copies, and live connection copies use explicit zeroizing owners. Registry hashing consumes the typed token owner and retains only the public QKey ID plus SHA-256 verifier.
 
 **Generate a QKey:**
 ```bash

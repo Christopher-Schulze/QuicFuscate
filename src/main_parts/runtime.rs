@@ -985,7 +985,9 @@ async fn run_client(
     let qkey_auth_token_hex = match qkey {
         Some(raw) if !raw.trim().is_empty() => match quicfuscate::engine::qkey::parse(raw.trim()) {
             Ok(parsed) => match parsed.token.as_deref().map(str::trim) {
-                Some(tok) if !tok.is_empty() => Some(tok.to_string()),
+                Some(tok) if !tok.is_empty() => {
+                    Some(quicfuscate::engine::qkey::QKeyToken::from(tok))
+                }
                 _ => {
                     error!("supplied --qkey does not contain a token");
                     return Err(std::io::Error::other("qkey missing token"));

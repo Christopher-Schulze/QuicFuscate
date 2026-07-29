@@ -124,7 +124,7 @@ fn simulate_qkey_http3_auth(
         .ok_or_else(|| "expected token hash failed".to_string())?;
 
     let mut reg = QKeyRegistry::new(200, None, None);
-    reg.insert(qkey_value.to_string(), expected_token_hex.to_string(), None)
+    reg.insert(qkey_value.to_string(), qkey::QKeyToken::from(expected_token_hex), None)
         .map_err(|e| format!("registry insert failed: {e}"))?;
     let record = reg
         .record_for_id_token(qkey_id.as_bytes())
@@ -164,7 +164,7 @@ fn simulate_qkey_http3_auth(
         stealth_config.clone(),
         fec_config.clone(),
         opt_config,
-        Some(client_token_hex.trim().to_lowercase()),
+        Some(qkey::QKeyToken::new(client_token_hex.trim().to_lowercase())),
         None,
         false,
     )?;

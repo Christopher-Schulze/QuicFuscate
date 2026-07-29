@@ -57,13 +57,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()
         .map_err(|e| format!("Invalid local address: {e}"))?;
 
-    let token_hex = qkey_cfg
-        .token
-        .as_deref()
-        .map(|t| t.trim())
-        .filter(|t| !t.is_empty())
-        .ok_or("QKey missing token")?
-        .to_lowercase();
+    let token_hex = qkey::QKeyToken::new(
+        qkey_cfg
+            .token
+            .as_deref()
+            .map(|t| t.trim())
+            .filter(|t| !t.is_empty())
+            .ok_or("QKey missing token")?
+            .to_lowercase(),
+    );
     let qkey_id = qkey::id(&qkey_value);
 
     let mut transport = Config::new_with_version(PROTOCOL_VERSION)

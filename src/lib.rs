@@ -165,6 +165,7 @@ pub mod qftls;
 pub mod reality;
 /// Cryptographically secure random number generation with hardware entropy sources.
 pub mod rng;
+mod secret;
 /// Centralized SIMD dispatch - x86 (SSE/AVX/AVX-512) and ARM (NEON) fast paths.
 pub mod simd;
 /// Stealth and obfuscation engine - traffic shaping, protocol mimicry, fingerprint rotation.

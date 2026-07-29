@@ -12,7 +12,9 @@
 //! ```
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URLSAFE, Engine as _};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+use crate::secret::{SecretBytes, SecretString};
 
 /// QKey prefix
 pub const QKEY_PREFIX: &str = "QKey-";
@@ -21,6 +23,66 @@ pub const QKEY_PREFIX: &str = "QKey-";
 const MAX_QKEY_CHARS: usize = 16 * 1024;
 const MAX_DECODED_JSON_BYTES: usize = 16 * 1024;
 
+/// Zeroizing owner for a raw QKey bearer token.
+#[derive(Clone)]
+pub struct QKeyToken(SecretString);
+
+impl QKeyToken {
+    pub fn new(value: String) -> Self {
+        Self(SecretString::new(value, "qkey_token"))
+    }
+}
+
+impl std::fmt::Debug for QKeyToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("QKeyToken([REDACTED])")
+    }
+}
+
+impl std::ops::Deref for QKeyToken {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_str()
+    }
+}
+
+impl AsRef<str> for QKeyToken {
+    fn as_ref(&self) -> &str {
+        self
+    }
+}
+
+impl From<String> for QKeyToken {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<&str> for QKeyToken {
+    fn from(value: &str) -> Self {
+        Self::new(value.to_string())
+    }
+}
+
+impl Serialize for QKeyToken {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for QKeyToken {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer).map(Self::new)
+    }
+}
+
 /// Stable QKey id for server-side registries.
 ///
 /// This is *not* a secret. It is used as a compact identifier and should not be relied on for
@@ -28,29 +90,17 @@ const MAX_DECODED_JSON_BYTES: usize = 16 * 1024;
 /// post-handshake).
 pub fn id(qkey: &str) -> String {
     let trimmed = qkey.trim();
-    // Canonicalize prefix case for stability. Users often paste keys with different casing,
-    // but those should still map to the same stable id.
-    let canonical = if trimmed
-        .get(..QKEY_PREFIX.len())
-        .map(|p| p.eq_ignore_ascii_case(QKEY_PREFIX))
-        .unwrap_or(false)
-    {
-        // Keep the base64 payload byte-for-byte. Only normalize the prefix.
-        // This keeps ids stable for server-issued keys ("QKey-...") while making pasted
-        // variants ("qkey-...") equivalent.
-        let rest = trimmed.get(QKEY_PREFIX.len()..).unwrap_or("");
-        // Avoid allocating in the common case.
-        if trimmed.starts_with(QKEY_PREFIX) {
-            trimmed.to_string()
-        } else {
-            format!("{}{}", QKEY_PREFIX, rest)
-        }
-    } else {
-        trimmed.to_string()
-    };
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    hasher.update(canonical.as_bytes());
+    if trimmed
+        .get(..QKEY_PREFIX.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(QKEY_PREFIX))
+    {
+        hasher.update(QKEY_PREFIX.as_bytes());
+        hasher.update(&trimmed.as_bytes()[QKEY_PREFIX.len()..]);
+    } else {
+        hasher.update(trimmed.as_bytes());
+    }
     let hex = format!("{:x}", hasher.finalize());
     hex.chars().take(12).collect()
 }
@@ -73,7 +123,7 @@ pub struct QKeyConfig {
     pub extra: Option<String>,
     /// QKey auth token (hex, optional)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token: Option<String>,
+    pub token: Option<QKeyToken>,
     /// Checksum string (legacy: 8 hex chars MD5 prefix, current: `s256:<8-hex>`).
     #[serde(rename = "m")]
     pub md5: String,
@@ -118,28 +168,37 @@ impl QKeyConfig {
 
     /// Set token (hex-encoded).
     pub fn with_token(mut self, token: &str) -> Self {
-        self.token = Some(token.to_string());
+        self.token = Some(QKeyToken::from(token));
         self.update_checksum();
         self
     }
 
-    /// Compute the checksum data (everything except md5 field).
-    fn checksum_data(&self) -> String {
-        format!(
-            "{}|{}|{}|{}|{}|{}",
-            self.remote,
-            self.sni,
+    /// Set an already-owned token without creating another raw-secret copy.
+    pub fn with_owned_token(mut self, token: QKeyToken) -> Self {
+        self.token = Some(token);
+        self.update_checksum();
+        self
+    }
+
+    fn checksum_prefix8_hex(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        for (index, field) in [
+            self.remote.as_str(),
+            self.sni.as_str(),
             self.stealth.as_deref().unwrap_or(""),
             self.fec.as_deref().unwrap_or(""),
             self.extra.as_deref().unwrap_or(""),
             self.token.as_deref().unwrap_or(""),
-        )
-    }
-
-    fn sha256_prefix8_hex(data: &[u8]) -> String {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(data);
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if index > 0 {
+                hasher.update(b"|");
+            }
+            hasher.update(field.as_bytes());
+        }
         let hex = format!("{:x}", hasher.finalize());
         hex.chars().take(8).collect()
     }
@@ -150,9 +209,8 @@ impl QKeyConfig {
 
     /// Update the checksum.
     fn update_checksum(&mut self) {
-        let data = self.checksum_data();
         // Default to SHA-256 prefix for new keys. Old keys remain valid via validate().
-        let prefix = Self::sha256_prefix8_hex(data.as_bytes());
+        let prefix = self.checksum_prefix8_hex();
         self.md5 = format!("s256:{}", prefix);
     }
 
@@ -165,18 +223,21 @@ impl QKeyConfig {
         if !Self::is_hex8(rest) {
             return false;
         }
-        let data = self.checksum_data();
-        let expected = Self::sha256_prefix8_hex(data.as_bytes());
+        let expected = self.checksum_prefix8_hex();
         rest.eq_ignore_ascii_case(&expected)
     }
 }
 
 /// Generate a QKey string from config.
 pub fn generate(config: &QKeyConfig) -> String {
-    let json = serde_json::to_string(config).unwrap_or_default();
+    let json =
+        SecretString::new(serde_json::to_string(config).unwrap_or_default(), "qkey_json_encode");
     // Prefer URL-safe base64 without padding for copy/paste stability.
-    let encoded = BASE64_URLSAFE.encode(json.as_bytes());
-    format!("{}{}", QKEY_PREFIX, encoded)
+    let encoded = SecretString::new(BASE64_URLSAFE.encode(json.as_bytes()), "qkey_base64_payload");
+    let mut qkey = String::with_capacity(QKEY_PREFIX.len() + encoded.len());
+    qkey.push_str(QKEY_PREFIX);
+    qkey.push_str(&encoded);
+    qkey
 }
 
 /// Parse a QKey string back to config.
@@ -200,7 +261,10 @@ pub fn parse(qkey: &str) -> Result<QKeyConfig, QKeyError> {
     // Extract base64 part
     let encoded = rest;
 
-    let decoded = BASE64_URLSAFE.decode(encoded).map_err(|_| QKeyError::InvalidBase64)?;
+    let decoded = SecretBytes::new(
+        BASE64_URLSAFE.decode(encoded).map_err(|_| QKeyError::InvalidBase64)?,
+        "qkey_decoded_json",
+    );
 
     if decoded.len() > MAX_DECODED_JSON_BYTES {
         return Err(QKeyError::TooLarge);
@@ -382,5 +446,50 @@ mod tests {
         // Exceed MAX_QKEY_CHARS to guarantee fast rejection before decoding.
         let oversized = format!("{}{}", QKEY_PREFIX, "A".repeat(MAX_QKEY_CHARS));
         assert_eq!(parse(&oversized).unwrap_err(), QKeyError::TooLarge);
+    }
+
+    #[test]
+    fn qkey_token_normal_replacement_and_parse_error_paths_erase_owned_bytes() {
+        use std::sync::{Arc, Mutex};
+
+        let events = Arc::new(Mutex::new(Vec::<(&'static str, Vec<u8>)>::new()));
+        let observed = Arc::clone(&events);
+        let _observer = crate::secret::test_observation::install(Arc::new(move |label, bytes| {
+            observed.lock().expect("erasure event lock").push((label, bytes.to_vec()));
+        }));
+
+        let mut token = Some(QKeyToken::new("a".repeat(64)));
+        drop(token.replace(QKeyToken::new("b".repeat(64))));
+        drop(token);
+
+        let invalid_checksum_qkey = {
+            let mut config =
+                QKeyConfig::new("127.0.0.1:4433", "example.com").with_token(&"c".repeat(64));
+            config.md5 = "s256:00000000".to_string();
+            generate(&config)
+        };
+        events.lock().expect("clear setup events").clear();
+        assert_eq!(
+            parse(&invalid_checksum_qkey).expect_err("invalid checksum must fail"),
+            QKeyError::InvalidChecksum
+        );
+
+        let events = events.lock().expect("erasure events");
+        let token_events: Vec<_> =
+            events.iter().filter(|(label, _)| *label == "qkey_token").collect();
+        assert!(
+            !token_events.is_empty(),
+            "normal, replacement, and error owners must emit token erasure evidence"
+        );
+        for (_, bytes) in token_events {
+            assert_eq!(bytes.len(), 64);
+            assert!(bytes.iter().all(|byte| *byte == 0));
+        }
+        let decoded = events
+            .iter()
+            .find_map(|(label, bytes)| (*label == "qkey_decoded_json").then_some(bytes))
+            .expect("decoded JSON erasure event");
+        assert!(!decoded.is_empty());
+        assert!(decoded.iter().all(|byte| *byte == 0));
     }
 }
