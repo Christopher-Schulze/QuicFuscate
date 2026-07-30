@@ -20,14 +20,24 @@ pub struct QKeyAuthState {
     pub expected_token_sha256: String,
     pub bandwidth_policy: Option<BandwidthPolicy>,
     pub authed: bool,
-    pub connected_at: Instant,
+    pub post_handshake_started_at: Option<Instant>,
     pub(crate) auth_attempt: Option<crate::implementations::server::limits::AuthAttempt>,
 }
 
 impl QKeyAuthState {
     #[inline]
+    pub fn begin_post_handshake_timeout(&mut self) {
+        if !self.authed && self.post_handshake_started_at.is_none() {
+            self.post_handshake_started_at = Some(Instant::now());
+        }
+    }
+
+    #[inline]
     pub fn is_expired(&self) -> bool {
-        !self.authed && self.connected_at.elapsed() > QKEY_AUTH_TIMEOUT
+        !self.authed
+            && self
+                .post_handshake_started_at
+                .is_some_and(|started_at| started_at.elapsed() > QKEY_AUTH_TIMEOUT)
     }
 }
 

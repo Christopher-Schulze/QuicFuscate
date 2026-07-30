@@ -1234,7 +1234,7 @@ impl LiveServerState {
         for addr in addresses {
             let session_stats = self.domain.session_stats_by_remote(addr);
             let session_id = self.domain.session_id_by_remote(addr);
-            if let Some(conn) = self.get_mut(&addr) {
+            let established_conn_id = if let Some(conn) = self.get_mut(&addr) {
                 drain_masque_downlink_responses(conn, addr, metrics);
                 if let Err(error) = flush_live_server_outgoing(
                     socket,
@@ -1263,6 +1263,16 @@ impl LiveServerState {
                 // idle; calling it every tick collapses cwnd and inflates loss.
                 if conn.conn.idle_timeout_elapsed() {
                     conn.conn.on_timeout();
+                }
+                conn.conn
+                    .is_established()
+                    .then(|| conn.conn.source_id().as_ref().to_vec())
+            } else {
+                None
+            };
+            if let Some(conn_id) = established_conn_id {
+                if let Some(state) = self.qkey_auth.get_mut(&conn_id) {
+                    state.begin_post_handshake_timeout();
                 }
             }
         }

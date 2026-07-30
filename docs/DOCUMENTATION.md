@@ -2420,7 +2420,7 @@ Within the live server path, ownership is now intentionally split only along one
 - `LiveServerDomain` owns remote/session/IP-pool/connection-limiter/packet-rate-limiter/snapshot state.
 - `LiveServerState` owns active QUIC connection objects, the bounded per-IP QKey auth policy, pending QKey auth attempts, runtime QKey revocation state, and the SessionId-to-QKey tracker used to terminate active sessions on revoke. One monotonic attempt ID survives the Initial ID lookup through the encrypted HTTP/3 bearer result; success, failure, timeout, pre-auth close, and internal abandonment each complete it at most once.
 The standalone path also delegates DCID-based live path rebinding, closed-client reconciliation, control-plane shutdown registration, and runtime reload normalization to `implementations/server`, so runtime lifecycle and bookkeeping now converge on one canonical server model.
-Session timeout is also part of that canonical lifecycle: standalone housekeeping reaps expired shared-domain sessions according to `client_timeout_secs`, while `QKEY_AUTH_TIMEOUT` remains a separate short pre-auth gate for unauthenticated handshakes rather than a replacement for session expiry.
+Session timeout is also part of that canonical lifecycle: standalone housekeeping reaps expired shared-domain sessions according to `client_timeout_secs`, while `QKEY_AUTH_TIMEOUT` remains a separate short post-handshake gate for encrypted HTTP/3 bearer authentication rather than a replacement for session expiry. Its deadline starts once after QUIC/TLS establishment, so handshake latency cannot consume the authentication window.
 
 #### Per-Session Bandwidth, Quota, and Fairness
 
@@ -3955,7 +3955,7 @@ The standalone server runtime now also records accepted, rejected, rate-limited,
 Engine server-mode stats now treat RTT and loss as unavailable unless a truthful server-owned producer exists. The engine no longer reuses global client transport RTT/loss instrumentation for embedded server stats.
 For rejected/auth-failed/rate-limited events and ingress/egress traffic, those standalone `Metrics` producers now also mirror the event into `crate::instrumentation::global()` so the optional global instrumentation export does not drift away from the standalone server metrics story.
 That mirror contract is covered by a dedicated regression test in `src/implementations/server/metrics.rs`.
-QKey auth attempts now use one bounded monotonic state machine. The public Initial ID lookup starts an attempt but does not reset prior failures; only the encrypted HTTP/3 bearer success resets consecutive-failure, backoff, and block state. Every attempt has one terminal owner, so `quicfuscate_auth_failed_total` reflects each of these exactly once:
+QKey auth attempts now use one bounded monotonic state machine. The public Initial ID lookup starts an attempt but does not reset prior failures; only the encrypted HTTP/3 bearer success resets consecutive-failure, backoff, and block state. The bounded bearer-auth timeout starts once after QUIC/TLS establishment and is never extended by later housekeeping ticks. Every attempt has one terminal owner, so `quicfuscate_auth_failed_total` reflects each of these exactly once:
 - missing or invalid public Initial QKey ID lookup
 - live HTTP/3 `x-qf-auth` rejects
 - QKey auth timeout closes

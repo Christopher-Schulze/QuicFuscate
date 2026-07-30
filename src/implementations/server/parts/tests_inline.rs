@@ -1170,7 +1170,9 @@ mod tests {
                 expected_token_sha256: "deadbeef".to_string(),
                 bandwidth_policy: None,
                 authed: false,
-                connected_at: Instant::now() - (QKEY_AUTH_TIMEOUT + Duration::from_secs(1)),
+                post_handshake_started_at: Some(
+                    Instant::now() - (QKEY_AUTH_TIMEOUT + Duration::from_secs(1)),
+                ),
                 auth_attempt: Some(auth_attempt),
             },
         );
@@ -1221,7 +1223,7 @@ mod tests {
                 expected_token_sha256: "deadbeef".to_string(),
                 bandwidth_policy: Some(qkey_policy.clone()),
                 authed: false,
-                connected_at: Instant::now(),
+                post_handshake_started_at: Some(Instant::now()),
                 auth_attempt: Some(auth_attempt),
             },
         );
@@ -1297,7 +1299,7 @@ mod tests {
                 expected_token_sha256: "deadbeef".to_string(),
                 bandwidth_policy: None,
                 authed: false,
-                connected_at: Instant::now(),
+                post_handshake_started_at: Some(Instant::now()),
                 auth_attempt: Some(auth_attempt),
             },
         );
@@ -1715,13 +1717,35 @@ mod tests {
     // --- QKeyAuthState tests ---
 
     #[test]
+    fn qkey_auth_timeout_starts_only_after_handshake() {
+        let mut state = QKeyAuthState {
+            key_id: "test-key".to_string(),
+            expected_token_sha256: "abc".to_string(),
+            bandwidth_policy: None,
+            authed: false,
+            post_handshake_started_at: None,
+            auth_attempt: None,
+        };
+
+        assert!(!state.is_expired());
+        state.begin_post_handshake_timeout();
+        let started_at = state.post_handshake_started_at;
+        assert!(started_at.is_some());
+        state.begin_post_handshake_timeout();
+        assert_eq!(state.post_handshake_started_at, started_at);
+        assert!(!state.is_expired());
+    }
+
+    #[test]
     fn test_qkey_auth_state_is_expired_when_not_authed_past_timeout() {
         let state = QKeyAuthState {
             key_id: "test-key".to_string(),
             expected_token_sha256: "abc".to_string(),
             bandwidth_policy: None,
             authed: false,
-            connected_at: Instant::now() - (QKEY_AUTH_TIMEOUT + Duration::from_secs(1)),
+            post_handshake_started_at: Some(
+                Instant::now() - (QKEY_AUTH_TIMEOUT + Duration::from_secs(1)),
+            ),
             auth_attempt: None,
         };
         assert!(state.is_expired());
@@ -1734,7 +1758,9 @@ mod tests {
             expected_token_sha256: "abc".to_string(),
             bandwidth_policy: None,
             authed: true,
-            connected_at: Instant::now() - (QKEY_AUTH_TIMEOUT + Duration::from_secs(10)),
+            post_handshake_started_at: Some(
+                Instant::now() - (QKEY_AUTH_TIMEOUT + Duration::from_secs(10)),
+            ),
             auth_attempt: None,
         };
         assert!(!state.is_expired());
@@ -1747,7 +1773,7 @@ mod tests {
             expected_token_sha256: "abc".to_string(),
             bandwidth_policy: None,
             authed: false,
-            connected_at: Instant::now(),
+            post_handshake_started_at: Some(Instant::now()),
             auth_attempt: None,
         };
         assert!(!state.is_expired());

@@ -242,7 +242,7 @@ pub(crate) fn parse_live_server_initial_auth(
             expected_token_sha256: record.token_sha256.clone(),
             bandwidth_policy: record.bandwidth_policy.clone(),
             authed: false,
-            connected_at: Instant::now(),
+            post_handshake_started_at: None,
             auth_attempt: Some(auth_attempt),
         });
         qkey_record = Some(record);
