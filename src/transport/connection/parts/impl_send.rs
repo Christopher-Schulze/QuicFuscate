@@ -60,7 +60,7 @@ impl Connection {
             .min(self.dgram_send_max_size.max(MIN_CLIENT_INITIAL_LEN))
             .min(packetization_mtu.max(MIN_CLIENT_INITIAL_LEN));
         let mtu_cap = outer_mtu_cap.saturating_sub(datagram_overhead);
-        log::debug!("send_with_datagram_overhead: out_len={} dgram_send_max_size={} pmtu={} packetization_mtu={} outer_mtu_cap={} datagram_overhead={} mtu_cap={} dgram_queue_len={} bytes_in_flight={} cwnd={}",
+        log::trace!("send_with_datagram_overhead: out_len={} dgram_send_max_size={} pmtu={} packetization_mtu={} outer_mtu_cap={} datagram_overhead={} mtu_cap={} dgram_queue_len={} bytes_in_flight={} cwnd={}",
             out.len(), self.dgram_send_max_size, pmtu, packetization_mtu, outer_mtu_cap, datagram_overhead, mtu_cap, self.dgram_send_queue.len(), self.bytes_in_flight, self.cwnd);
         if unlikely(mtu_cap == 0) {
             return Err(ConnectionError::BufferTooShort);
@@ -71,7 +71,7 @@ impl Connection {
         // congestion-control deadlocks where both sides exhaust their windows
         // and neither can send ACKs to release budget.
         let congestion_blocked = !self.recovery.can_send(self.dgram_send_max_size);
-        log::debug!("send_with_datagram_overhead congestion gate: recovery.bytes_in_flight={} recovery.cwnd={} dgram_send_max_size={} congestion_blocked={}",
+        log::trace!("send_with_datagram_overhead congestion gate: recovery.bytes_in_flight={} recovery.cwnd={} dgram_send_max_size={} congestion_blocked={}",
             self.recovery.bytes_in_flight, self.recovery.cwnd, self.dgram_send_max_size, congestion_blocked);
         let mut congestion_bypass = congestion_blocked && self.has_pending_application_ack();
         let mut pmtu_probe_bypassed_congestion = false;
@@ -96,7 +96,7 @@ impl Connection {
             pmtu_probe_bypassed_congestion = true;
         }
         if congestion_blocked && !congestion_bypass {
-            log::debug!("send_with_datagram_overhead: early Done congestion_blocked congestion_bypass={} dgram_queue_len={}", congestion_bypass, self.dgram_send_queue.len());
+            log::trace!("send_with_datagram_overhead: early Done congestion_blocked congestion_bypass={} dgram_queue_len={}", congestion_bypass, self.dgram_send_queue.len());
             return Err(ConnectionError::Done);
         }
         self.poll_path_validation_timeout(now);
@@ -303,7 +303,7 @@ impl Connection {
             // progress there is nothing else to do this turn; once it is complete we fall
             // through to the 1-RTT path below.
             if handshake_incomplete {
-                log::debug!("send_with_datagram_overhead: early Done handshake_incomplete dgram_queue_len={}", self.dgram_send_queue.len());
+                log::trace!("send_with_datagram_overhead: early Done handshake_incomplete dgram_queue_len={}", self.dgram_send_queue.len());
                 return Err(ConnectionError::Done);
             }
         }
@@ -329,7 +329,7 @@ impl Connection {
             || !self.dgram_send_queue.is_empty()
             || self.pending_probe_spaces.iter().any(|s| *s == recovery::PacketSpace::Application);
         if !has_pending_data && !congestion_bypass && !dedicated_pmtu_probe {
-            log::debug!("send_with_datagram_overhead: early Done has_pending_data=false dgram_queue_len={} pending_control={} app_ack={} sendable_stream={} probe_spaces={} congestion_bypass={} pmtu_probe={}",
+            log::trace!("send_with_datagram_overhead: early Done has_pending_data=false dgram_queue_len={} pending_control={} app_ack={} sendable_stream={} probe_spaces={} congestion_bypass={} pmtu_probe={}",
                 self.dgram_send_queue.len(), self.pending_control.is_empty(), self.has_pending_application_ack(), self.has_sendable_stream_frame(), self.pending_probe_spaces.iter().any(|s| *s == recovery::PacketSpace::Application), congestion_bypass, dedicated_pmtu_probe);
             return Err(ConnectionError::Done);
         }
@@ -491,7 +491,7 @@ impl Connection {
             chaff.record_real_traffic(now);
         }
         if off == pn_off + pn_len {
-            log::debug!("send_with_datagram_overhead: off==pn_off+pn_len, returning Done; dgram_queue_len={} pending_control={} application_ack={} writable_streams={} probe_spaces={}",
+            log::trace!("send_with_datagram_overhead: off==pn_off+pn_len, returning Done; dgram_queue_len={} pending_control={} application_ack={} writable_streams={} probe_spaces={}",
                 self.dgram_send_queue.len(), self.pending_control.len(), self.has_pending_application_ack(), self.writable_streams.len(), self.pending_probe_spaces.len());
             return Err(ConnectionError::Done);
         }

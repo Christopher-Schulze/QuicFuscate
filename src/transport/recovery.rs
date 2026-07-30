@@ -726,7 +726,7 @@ impl Recovery {
         if in_flight {
             self.cc.on_packet_sent(pn, size, now);
             self.sync_from_cc();
-            log::debug!("recovery.on_packet_sent_in_space: space={:?} pn={} size={} bytes_in_flight={} cwnd={}",
+            log::trace!("recovery.on_packet_sent_in_space: space={:?} pn={} size={} bytes_in_flight={} cwnd={}",
                 space, pn, size, self.bytes_in_flight, self.cwnd);
         }
     }
@@ -789,7 +789,7 @@ impl Recovery {
         if ranges.is_empty() {
             return outcome;
         }
-        log::debug!("recovery.on_ack_received: space={:?} ranges={:?} bytes_in_flight_before={} sent_count={}",
+        log::trace!("recovery.on_ack_received: space={:?} ranges={:?} bytes_in_flight_before={} sent_count={}",
             space, ranges, self.bytes_in_flight, self.spaces[space.index()].sent.len());
         let largest_in_frame =
             ranges.iter().filter_map(|(_, end)| end.checked_sub(1)).max().unwrap_or(0);
@@ -1056,7 +1056,7 @@ impl Recovery {
         if acked_bytes > 0 {
             self.on_ack(acked_bytes, now);
         }
-        log::debug!("recovery.finish_ack_loss_accounting: space={:?} largest={} newly_acked={} lost={} bytes_in_flight_after={} cwnd={}",
+        log::trace!("recovery.finish_ack_loss_accounting: space={:?} largest={} newly_acked={} lost={} bytes_in_flight_after={} cwnd={}",
             space, largest_in_frame, outcome.newly_acked.len(), outcome.lost.len(), self.bytes_in_flight, self.cwnd);
         outcome
     }

@@ -974,7 +974,7 @@ impl Connection {
     ) -> Result<(usize, bool), crate::error::ConnectionError> {
         if let Some(need) = self.pending_datagram_frame_reserve() {
             let tag_reserve = self.tag_reserve_1rtt();
-            log::debug!("maybe_flush_one_datagram_frame: off={} need={} tag_reserve={} out_len={} queue_len={}",
+            log::trace!("maybe_flush_one_datagram_frame: off={} need={} tag_reserve={} out_len={} queue_len={}",
                 off, need, tag_reserve, out.len(), self.dgram_send_queue.len());
             if off + need + tag_reserve <= out.len() {
                 #[cfg(not(feature = "zero_copy_dgram"))]
@@ -983,16 +983,16 @@ impl Connection {
                         return Err(crate::error::ConnectionError::Done);
                     };
                     let frame = Frame::Datagram { data: Cow::Owned(front_owned) };
-                    log::debug!("maybe_flush_one_datagram_frame: attempting to write frame, frame_wire_len={}", frames::wire_len(&frame));
+                    log::trace!("maybe_flush_one_datagram_frame: attempting to write frame, frame_wire_len={}", frames::wire_len(&frame));
                     match frames::to_bytes(&frame, &mut out[off..]) {
                         Ok(written) => {
-                            log::debug!("maybe_flush_one_datagram_frame: wrote {} bytes", written);
+                            log::trace!("maybe_flush_one_datagram_frame: wrote {} bytes", written);
                             off += written;
                             // DATAGRAM frames are ack-eliciting (RFC 9221 §2).
                             return Ok((off, true));
                         }
                         Err(e) => {
-                            log::debug!("maybe_flush_one_datagram_frame: to_bytes failed: {:?}", e);
+                            log::trace!("maybe_flush_one_datagram_frame: to_bytes failed: {:?}", e);
                             if let Frame::Datagram { data } = frame {
                                 self.dgram_send_queue.push_front(data.into_owned());
                             }

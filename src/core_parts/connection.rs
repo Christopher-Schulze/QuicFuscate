@@ -1055,7 +1055,7 @@ impl QuicFuscateConnection {
                     &bindings.masque_cb,
                 );
             }
-            debug!("HTTP/3 events processed in {} ms", start.elapsed().as_millis());
+            log::trace!("HTTP/3 events processed in {} ms", start.elapsed().as_millis());
         }
         Ok(())
     }
@@ -1504,14 +1504,14 @@ impl QuicFuscateConnection {
             self.outbound_pacer.reset();
         } else if let Some(release_time) = self.next_packet_release {
             if now < release_time {
-                debug!("connection.send: next_packet_release blocks until {:?}", release_time);
+                log::trace!("connection.send: next_packet_release blocks until {:?}", release_time);
                 return Ok(0); // WouldBlock / Yield
             }
             // Timer expired, clear block and proceed
             self.next_packet_release = None;
         }
         if established && self.outbound_pacer.is_blocked(now) {
-            debug!("connection.send: outbound_pacer blocked dgram_queue={} out_fec={} bytes_in_flight={} cwnd={}",
+            log::trace!("connection.send: outbound_pacer blocked dgram_queue={} out_fec={} bytes_in_flight={} cwnd={}",
                 self.conn.dgram_send_queue_len(), self.outgoing_fec_packets.len(), self.conn.bytes_in_flight(), self.conn.cwnd());
             return Ok(0);
         }
@@ -1565,7 +1565,7 @@ impl QuicFuscateConnection {
         let (write, send_info) = match send_result {
             Ok(v) => v,
             Err(crate::error::ConnectionError::Done) => {
-                debug!("connection.send: conn.send returned Done dgram_queue={} out_fec={} bytes_in_flight={} cwnd={}",
+                log::trace!("connection.send: conn.send returned Done dgram_queue={} out_fec={} bytes_in_flight={} cwnd={}",
                     self.conn.dgram_send_queue_len(), self.outgoing_fec_packets.len(), self.conn.bytes_in_flight(), self.conn.cwnd());
                 // No packet currently pending is a normal state for polling loops.
                 drop(send_buffer);
@@ -1583,7 +1583,7 @@ impl QuicFuscateConnection {
         };
 
         if write == 0 {
-            debug!("connection.send: conn.send returned write=0");
+            log::trace!("connection.send: conn.send returned write=0");
             // The buffer is recycled automatically via Drop.
             drop(send_buffer);
             return Ok(0);
@@ -1694,7 +1694,7 @@ impl QuicFuscateConnection {
         // Pop the first packet from the buffer to send it now.
         if let Some(packet) = self.outgoing_fec_packets.pop_front() {
             let len = packet.write_to(buf)?;
-            debug!(
+            log::trace!(
                 "connection.send: emitting packet len={} dgram_queue_after={} remaining_fec={}",
                 len,
                 self.conn.dgram_send_queue_len(),
@@ -1868,7 +1868,7 @@ impl QuicFuscateConnection {
                     if let Some(ref mut h3) = self.h3_conn {
                         match h3.send_masque_datagram(&mut self.conn, sid, packet) {
                             Ok(()) => {
-                                debug!("MASQUE TX: sid={} {}B", sid, packet.len());
+                                log::trace!("MASQUE TX: sid={} {}B", sid, packet.len());
                                 return Ok(());
                             }
                             Err(crate::transport::h3::Error::DgramQueueFull) => {
@@ -1962,7 +1962,7 @@ impl QuicFuscateConnection {
             return Err(crate::error::ConnectionError::BufferTooShort);
         }
 
-        debug!("send_masque_downlink: payload len={} masque_mtu={} masque_peer_stream_id={:?} h3_conn={}",
+        log::trace!("send_masque_downlink: payload len={} masque_mtu={} masque_peer_stream_id={:?} h3_conn={}",
             payload.len(), self.effective_masque_mtu(), self.masque_peer_stream_id, self.h3_conn.is_some());
 
         if payload.len() <= self.effective_masque_mtu() {
@@ -1970,7 +1970,7 @@ impl QuicFuscateConnection {
                 if let Some(ref mut h3) = self.h3_conn {
                     match h3.send_masque_datagram(&mut self.conn, sid, payload) {
                         Ok(()) => {
-                            debug!(
+                            log::trace!(
                                 "MASQUE downlink TX: sid={} {}B dgram_queue={}",
                                 sid,
                                 payload.len(),
