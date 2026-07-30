@@ -39,6 +39,32 @@ function Require-SecretValue {
     }
 }
 
+function Read-SharedText {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $Stream = [System.IO.FileStream]::new(
+        $Path,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::ReadWrite
+    )
+    try {
+        $Reader = [System.IO.StreamReader]::new($Stream)
+        try {
+            return $Reader.ReadToEnd()
+        }
+        finally {
+            $Reader.Dispose()
+        }
+    }
+    finally {
+        $Stream.Dispose()
+    }
+}
+
 function Wait-ForLogPattern {
     param(
         [Parameter(Mandatory = $true)]
@@ -61,7 +87,7 @@ function Wait-ForLogPattern {
         }
         foreach ($Path in $Paths) {
             if ((Test-Path -LiteralPath $Path -PathType Leaf) -and
-                [System.IO.File]::ReadAllText($Path).Contains($Pattern)) {
+                (Read-SharedText -Path $Path).Contains($Pattern)) {
                 return
             }
         }
@@ -189,7 +215,7 @@ try {
     $CombinedLog = ""
     foreach ($LogPath in @($StandardOutputPath, $StandardErrorPath)) {
         if (Test-Path -LiteralPath $LogPath -PathType Leaf) {
-            $CombinedLog += [System.IO.File]::ReadAllText($LogPath)
+            $CombinedLog += Read-SharedText -Path $LogPath
         }
     }
     if ($CombinedLog.Contains($QKey)) {
