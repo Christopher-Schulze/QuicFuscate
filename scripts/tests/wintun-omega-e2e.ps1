@@ -175,8 +175,8 @@ function Wait-ForTunnelAdapterReady {
             $Ipv6Interfaces = @(Get-NetIPInterface -InterfaceIndex $Adapter.ifIndex `
                 -AddressFamily IPv6 -ErrorAction SilentlyContinue)
             $LastDiagnostic = "status=$($Adapter.Status) ipv4=$($Ipv4Addresses.Count) " +
-                "ipv6=$($Ipv6Addresses.Count) mtu4=$($Ipv4Interfaces.NlMtuBytes -join ',') " +
-                "mtu6=$($Ipv6Interfaces.NlMtuBytes -join ',')"
+                "ipv6=$($Ipv6Addresses.Count) mtu4=$($Ipv4Interfaces.NlMtu -join ',') " +
+                "mtu6=$($Ipv6Interfaces.NlMtu -join ',')"
             if (($Adapter.Status -eq "Up") -and
                 ($Ipv4Addresses.Count -eq 1) -and
                 ($Ipv6Addresses.Count -eq 1) -and
@@ -185,8 +185,8 @@ function Wait-ForTunnelAdapterReady {
                 return [ordered]@{
                     if_index = $Adapter.ifIndex
                     status = [string]$Adapter.Status
-                    mtu_ipv4 = $Ipv4Interfaces[0].NlMtuBytes
-                    mtu_ipv6 = $Ipv6Interfaces[0].NlMtuBytes
+                    mtu_ipv4 = $Ipv4Interfaces[0].NlMtu
+                    mtu_ipv6 = $Ipv6Interfaces[0].NlMtu
                 }
             }
         }
