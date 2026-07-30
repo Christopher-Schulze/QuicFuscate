@@ -280,8 +280,8 @@ mod tests {
     #[test]
     fn pending_path_control_preempts_buffered_fec_datagram() {
         let mut connection = test_connection();
-        connection.conn =
-            Box::new(crate::transport::connection::bench_paired_1rtt_connections().client);
+        *connection.conn =
+            crate::transport::connection::bench_paired_1rtt_connections().client;
         let new_local: SocketAddr = "127.0.0.1:29103".parse().unwrap();
         let new_peer: SocketAddr = "127.0.0.1:29104".parse().unwrap();
         connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
