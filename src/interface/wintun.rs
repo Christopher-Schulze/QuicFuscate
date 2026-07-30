@@ -1353,6 +1353,10 @@ mod tests {
         const TUNNEL_V6: &[u8] = b"quicfuscate-wfp-tunnel-v6";
         const DISABLED_V4: &[u8] = b"quicfuscate-wfp-disabled-v4";
         const DISABLED_V6: &[u8] = b"quicfuscate-wfp-disabled-v6";
+        const PERSISTED_V4: &[u8] = b"quicfuscate-wfp-persisted-v4";
+        const PERSISTED_V6: &[u8] = b"quicfuscate-wfp-persisted-v6";
+        const RECOVERED_V4: &[u8] = b"quicfuscate-wfp-recovered-v4";
+        const RECOVERED_V6: &[u8] = b"quicfuscate-wfp-recovered-v6";
 
         KillSwitch::cleanup_stale_rules().expect("pre-test WFP cleanup");
         let _cleanup = NativeKillSwitchCleanup;
@@ -1546,6 +1550,85 @@ mod tests {
             },
         );
 
+        drop(kill_switch);
+        let child_status = std::process::Command::new(
+            std::env::current_exe().expect("resolve native WFP test executable"),
+        )
+        .arg("interface::wintun::tests::wfp_native_install_block_and_exit")
+        .arg("--ignored")
+        .arg("--exact")
+        .arg("--nocapture")
+        .arg("--test-threads=1")
+        .env("QUICFUSCATE_WFP_PERSISTENCE_CHILD", "1")
+        .status()
+        .expect("spawn native WFP persistence child");
+        assert!(child_status.success(), "native WFP persistence child failed: {child_status}");
+        assert_native_udp_blocked(
+            &socket_v4,
+            server_v4,
+            PERSISTED_V4,
+            &packet_receiver,
+            |packet| {
+                is_udp_ipv4_packet(
+                    packet,
+                    NATIVE_LOCAL_IP,
+                    source_port_v4,
+                    NATIVE_PEER_IP,
+                    SERVER_PORT,
+                    PERSISTED_V4,
+                )
+            },
+        );
+        assert_native_udp_blocked(
+            &socket_v6,
+            server_v6,
+            PERSISTED_V6,
+            &packet_receiver,
+            |packet| {
+                is_udp_ipv6_packet(
+                    packet,
+                    NATIVE_LOCAL_IP6,
+                    source_port_v6,
+                    NATIVE_PEER_IP6,
+                    SERVER_PORT,
+                    PERSISTED_V6,
+                )
+            },
+        );
+        KillSwitch::cleanup_stale_rules().expect("remove process-retained WFP policy");
+        assert_native_udp_permitted(
+            &socket_v4,
+            other_v4,
+            RECOVERED_V4,
+            &packet_receiver,
+            |packet| {
+                is_udp_ipv4_packet(
+                    packet,
+                    NATIVE_LOCAL_IP,
+                    source_port_v4,
+                    NATIVE_PEER_IP,
+                    OTHER_PORT,
+                    RECOVERED_V4,
+                )
+            },
+        );
+        assert_native_udp_permitted(
+            &socket_v6,
+            other_v6,
+            RECOVERED_V6,
+            &packet_receiver,
+            |packet| {
+                is_udp_ipv6_packet(
+                    packet,
+                    NATIVE_LOCAL_IP6,
+                    source_port_v6,
+                    NATIVE_PEER_IP6,
+                    OTHER_PORT,
+                    RECOVERED_V6,
+                )
+            },
+        );
+
         device.close().expect("close WFP test Wintun adapter");
         reader.join().expect("WFP test Wintun reader panicked");
         drop(device);
@@ -1553,8 +1636,26 @@ mod tests {
         KillSwitch::cleanup_stale_rules().expect("post-test WFP cleanup");
         println!(
             "native WFP policy passed: ipv4=true ipv6=true endpoint=true wintun_luid=true \
-             disconnect=true disable=true residue=false"
+             disconnect=true disable=true process_exit=true stale_cleanup=true residue=false"
         );
+    }
+
+    #[cfg(all(target_os = "windows", feature = "tun-windows"))]
+    #[test]
+    #[ignore = "invoked only by the elevated native WFP persistence parent"]
+    fn wfp_native_install_block_and_exit() {
+        use crate::firewall::FirewallBackend;
+        use crate::implementations::client::KillSwitch;
+
+        assert!(
+            matches!(std::env::var("QUICFUSCATE_WFP_PERSISTENCE_CHILD").as_deref(), Ok("1")),
+            "native WFP persistence helper requires its parent marker"
+        );
+        KillSwitch::cleanup_stale_rules().expect("pre-child WFP cleanup");
+        let kill_switch = KillSwitch::new_with_backend(FirewallBackend::Iptables);
+        kill_switch.enable().expect("install process-persistent WFP block policy");
+        drop(kill_switch);
+        println!("native WFP persistence child exited with block policy retained");
     }
 
     #[cfg(all(target_os = "windows", feature = "tun-windows"))]
