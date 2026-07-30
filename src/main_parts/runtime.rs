@@ -1463,7 +1463,11 @@ async fn run_client(
                 }
 
                 let update_started = std::time::Instant::now();
-                conn.update_state();
+                if client_receive_diagnostics_enabled {
+                    conn.update_state_with_slow_phase_diagnostics();
+                } else {
+                    conn.update_state();
+                }
                 let update_elapsed = update_started.elapsed();
                 if client_receive_diagnostics_enabled
                     && update_elapsed >= Duration::from_millis(100)

@@ -2195,94 +2195,134 @@ impl QuicFuscateConnection {
         );
     }
 
+    fn run_update_state_phase<T>(
+        diagnostics_enabled: bool,
+        phase: &'static str,
+        operation: impl FnOnce() -> T,
+    ) -> T {
+        if !diagnostics_enabled {
+            return operation();
+        }
+        let started = std::time::Instant::now();
+        let result = operation();
+        let elapsed = started.elapsed();
+        if elapsed >= std::time::Duration::from_millis(100) {
+            info!(
+                "Connection update_state slow phase: phase={phase} duration_ms={}",
+                elapsed.as_millis()
+            );
+        }
+        result
+    }
+
     /// Update internal state, e.g., FEC mode based on statistics.
     pub fn update_state(&mut self) {
-        // Update stats
-        let stats = self.conn.stats();
-        self.stats.packets_sent = stats.sent as u64;
-        self.stats.rtt =
-            self.conn.path_stats().next().map(|ps| ps.rtt.as_secs_f32()).unwrap_or(0.0);
-        self.stats.packets_lost = stats.lost as u64;
-        self.stats.loss_rate =
-            if stats.sent > 0 { stats.lost as f32 / stats.sent as f32 } else { 0.0 };
-        self.stats.update_congestion(CongestionSample::from_transport_stats(stats));
+        self.update_state_inner(false);
+    }
 
-        if self.last_telemetry.elapsed() >= std::time::Duration::from_secs(1) {
-            telemetry!(telemetry::refresh_resource_metrics_if_due());
-            #[cfg(feature = "orchestrator")]
-            self.update_orchestrator_resource_signals();
-            self.last_telemetry = std::time::Instant::now();
-        }
+    /// Update internal state while retaining opt-in slow-subphase diagnostics.
+    pub fn update_state_with_slow_phase_diagnostics(&mut self) {
+        self.update_state_inner(true);
+    }
 
-        // Handle path events for connection migration
-        while let Some(event) = self.conn.path_event_next() {
-            match event {
-                crate::transport::PathEvent::New(local, peer) => {
-                    info!("New path detected: {local}->{peer}");
-                }
-                crate::transport::PathEvent::Validated(local, peer) => {
-                    info!("Path validated: {local}->{peer}");
-                    self.peer_addr = peer;
-                    self.local_addr = local;
-                    telemetry!(telemetry::PATH_MIGRATIONS.inc());
-                }
-                crate::transport::PathEvent::FailedValidation(local, peer) => {
-                    warn!("Path validation failed: {local}->{peer}");
-                }
-                crate::transport::PathEvent::Closed(local, peer) => {
-                    info!("Path closed: {local}->{peer}");
-                }
-                crate::transport::PathEvent::ReusedSourceConnectionId(seq, old, new) => {
-                    info!("CID {seq} reused from {old:?} to {new:?}");
-                }
-                crate::transport::PathEvent::PeerMigrated(old_peer, peer) => {
-                    info!("Peer migrated: {old_peer}->{peer}");
+    fn update_state_inner(&mut self, diagnostics_enabled: bool) {
+        Self::run_update_state_phase(diagnostics_enabled, "transport-stats", || {
+            let stats = self.conn.stats();
+            self.stats.packets_sent = stats.sent as u64;
+            self.stats.rtt =
+                self.conn.path_stats().next().map(|ps| ps.rtt.as_secs_f32()).unwrap_or(0.0);
+            self.stats.packets_lost = stats.lost as u64;
+            self.stats.loss_rate =
+                if stats.sent > 0 { stats.lost as f32 / stats.sent as f32 } else { 0.0 };
+            self.stats.update_congestion(CongestionSample::from_transport_stats(stats));
+        });
+
+        Self::run_update_state_phase(diagnostics_enabled, "resource-telemetry", || {
+            if self.last_telemetry.elapsed() >= std::time::Duration::from_secs(1) {
+                telemetry!(telemetry::refresh_resource_metrics_if_due());
+                #[cfg(feature = "orchestrator")]
+                self.update_orchestrator_resource_signals();
+                self.last_telemetry = std::time::Instant::now();
+            }
+        });
+
+        Self::run_update_state_phase(diagnostics_enabled, "path-events", || {
+            while let Some(event) = self.conn.path_event_next() {
+                match event {
+                    crate::transport::PathEvent::New(local, peer) => {
+                        info!("New path detected: {local}->{peer}");
+                    }
+                    crate::transport::PathEvent::Validated(local, peer) => {
+                        info!("Path validated: {local}->{peer}");
+                        self.peer_addr = peer;
+                        self.local_addr = local;
+                        telemetry!(telemetry::PATH_MIGRATIONS.inc());
+                    }
+                    crate::transport::PathEvent::FailedValidation(local, peer) => {
+                        warn!("Path validation failed: {local}->{peer}");
+                    }
+                    crate::transport::PathEvent::Closed(local, peer) => {
+                        info!("Path closed: {local}->{peer}");
+                    }
+                    crate::transport::PathEvent::ReusedSourceConnectionId(seq, old, new) => {
+                        info!("CID {seq} reused from {old:?} to {new:?}");
+                    }
+                    crate::transport::PathEvent::PeerMigrated(old_peer, peer) => {
+                        info!("Peer migrated: {old_peer}->{peer}");
+                    }
                 }
             }
-        }
+        });
 
-        if self.masque_flow_active() {
-            crate::telemetry::MASQUE_ACTIVE.store(1, std::sync::atomic::Ordering::Relaxed);
-        } else {
-            crate::telemetry::MASQUE_ACTIVE.store(0, std::sync::atomic::Ordering::Relaxed);
-            self.masque_stream_id = None;
-            self.masque_peer_stream_id = None;
-        }
+        Self::run_update_state_phase(diagnostics_enabled, "masque-state", || {
+            if self.masque_flow_active() {
+                crate::telemetry::MASQUE_ACTIVE.store(1, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                crate::telemetry::MASQUE_ACTIVE.store(0, std::sync::atomic::Ordering::Relaxed);
+                self.masque_stream_id = None;
+                self.masque_peer_stream_id = None;
+            }
+        });
 
-        // Sync FEC-owned runtime hints only. Generic transport actuators are driven
-        // through the live transport observer path, not duplicated here.
-        self.transport_observer.sync_runtime_hints(&mut self.conn);
-        // Opportunistic FEC streaming interval from observer (independent of brain)
-        let ivl = self.transport_observer.compute_streaming_interval() as usize;
-        if (1..=32).contains(&ivl) {
-            self.conn.set_fec_stream_every(ivl);
-        }
+        Self::run_update_state_phase(diagnostics_enabled, "fec-observer-sync", || {
+            self.transport_observer.sync_runtime_hints(&mut self.conn);
+        });
 
-        // Consume FEC control deltas from transport and apply to core AdaptiveFec
-        let delta = self.conn.take_fec_control_delta();
-        if let Some(every) = delta.stream_every {
-            self.fec.set_stream_every(every);
-        }
-        if delta.force_streaming {
-            self.fec.force_streaming_mode();
-        }
-        if let Some(ppm) = delta.redundancy_ppm {
-            self.fec.set_redundancy_ppm(ppm);
-        }
+        Self::run_update_state_phase(diagnostics_enabled, "fec-observer-interval", || {
+            let interval = self.transport_observer.compute_streaming_interval() as usize;
+            if (1..=32).contains(&interval) {
+                self.conn.set_fec_stream_every(interval);
+            }
+        });
 
-        // Drive AdaptiveFec from classified ACK/loss evidence and the congestion
-        // controller's smoothed signal. Send callbacks alone do not classify
-        // delivery and must not replay a stale loss estimate into the controller.
-        let feedback = self.conn.take_fec_callback_feedback();
-        let transport_loss_rate = self.conn.recovery_loss_rate();
-        Self::apply_fec_transport_feedback(&mut self.fec, feedback, transport_loss_rate);
+        Self::run_update_state_phase(diagnostics_enabled, "fec-control-delta", || {
+            let delta = self.conn.take_fec_control_delta();
+            if let Some(every) = delta.stream_every {
+                self.fec.set_stream_every(every);
+            }
+            if delta.force_streaming {
+                self.fec.force_streaming_mode();
+            }
+            if let Some(ppm) = delta.redundancy_ppm {
+                self.fec.set_redundancy_ppm(ppm);
+            }
+        });
 
-        // Feed RTT estimate to FEC controller for stream_every scaling.
-        let rtt_ms = self.stats.rtt.max(0.0) as u32;
-        self.fec.set_rtt_hint(rtt_ms);
+        let (feedback, transport_loss_rate) =
+            Self::run_update_state_phase(diagnostics_enabled, "fec-feedback-read", || {
+                (self.conn.take_fec_callback_feedback(), self.conn.recovery_loss_rate())
+            });
+        Self::run_update_state_phase(diagnostics_enabled, "fec-feedback-apply", || {
+            Self::apply_fec_transport_feedback(&mut self.fec, feedback, transport_loss_rate);
+        });
+        Self::run_update_state_phase(diagnostics_enabled, "fec-rtt-hint", || {
+            let rtt_ms = self.stats.rtt.max(0.0) as u32;
+            self.fec.set_rtt_hint(rtt_ms);
+        });
 
-        // Sync stealth runtime level with brain's intelligent level hint.
-        self.stealth_manager.sync_intelligent_level();
+        Self::run_update_state_phase(diagnostics_enabled, "stealth-intelligence", || {
+            self.stealth_manager.sync_intelligent_level();
+        });
     }
 
     /// Returns the current estimated RTT in milliseconds.
