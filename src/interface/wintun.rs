@@ -1123,6 +1123,24 @@ mod tests {
     }
 
     #[cfg(all(target_os = "windows", feature = "tun-windows"))]
+    fn bind_native_udp(address: IpAddr) -> std::net::UdpSocket {
+        let endpoint = std::net::SocketAddr::new(address, 0);
+        let deadline = std::time::Instant::now() + NATIVE_TEST_TIMEOUT;
+        loop {
+            match std::net::UdpSocket::bind(endpoint) {
+                Ok(socket) => return socket,
+                Err(error)
+                    if error.kind() == io::ErrorKind::AddrNotAvailable
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(error) => panic!("bind native WFP UDP probe at {endpoint}: {error}"),
+            }
+        }
+    }
+
+    #[cfg(all(target_os = "windows", feature = "tun-windows"))]
     fn assert_native_udp_blocked(
         socket: &std::net::UdpSocket,
         target: std::net::SocketAddr,
@@ -1322,7 +1340,7 @@ mod tests {
     fn wfp_native_packet_policy_and_cleanup() {
         use crate::firewall::FirewallBackend;
         use crate::implementations::client::{KillSwitch, VpnFirewallPolicy};
-        use std::net::{SocketAddr, UdpSocket};
+        use std::net::SocketAddr;
         use std::sync::{mpsc, Arc};
 
         const SERVER_PORT: u16 = 35_802;
@@ -1345,8 +1363,8 @@ mod tests {
         );
         wait_for_powershell(&adapter_state_script(&adapter_name, NATIVE_MTU), true);
 
-        let socket_v4 = UdpSocket::bind((NATIVE_LOCAL_IP, 0)).expect("bind native WFP IPv4 probe");
-        let socket_v6 = UdpSocket::bind((NATIVE_LOCAL_IP6, 0)).expect("bind native WFP IPv6 probe");
+        let socket_v4 = bind_native_udp(IpAddr::V4(NATIVE_LOCAL_IP));
+        let socket_v6 = bind_native_udp(IpAddr::V6(NATIVE_LOCAL_IP6));
         let source_port_v4 = socket_v4.local_addr().expect("IPv4 probe address").port();
         let source_port_v6 = socket_v6.local_addr().expect("IPv6 probe address").port();
         let server_v4 = SocketAddr::new(IpAddr::V4(NATIVE_PEER_IP), SERVER_PORT);
