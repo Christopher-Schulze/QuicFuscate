@@ -156,6 +156,49 @@ function Wait-ForAdapterAbsence {
     throw "Wintun adapter '$AdapterName' remained after client process exit"
 }
 
+function Wait-ForTunnelAdapterReady {
+    $Deadline = [DateTime]::UtcNow.AddSeconds(15)
+    $LastDiagnostic = "adapter not observed"
+    do {
+        $Adapters = @(Get-NetAdapter -Name $AdapterName -IncludeHidden `
+            -ErrorAction SilentlyContinue)
+        if ($Adapters.Count -eq 1) {
+            $Adapter = $Adapters[0]
+            $Ipv4Addresses = @(Get-NetIPAddress -InterfaceIndex $Adapter.ifIndex `
+                -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                Where-Object IPAddress -eq $ClientTunAddress)
+            $Ipv6Addresses = @(Get-NetIPAddress -InterfaceIndex $Adapter.ifIndex `
+                -AddressFamily IPv6 -ErrorAction SilentlyContinue |
+                Where-Object IPAddress -eq $ClientTunAddress6)
+            $Ipv4Interfaces = @(Get-NetIPInterface -InterfaceIndex $Adapter.ifIndex `
+                -AddressFamily IPv4 -ErrorAction SilentlyContinue)
+            $Ipv6Interfaces = @(Get-NetIPInterface -InterfaceIndex $Adapter.ifIndex `
+                -AddressFamily IPv6 -ErrorAction SilentlyContinue)
+            $LastDiagnostic = "status=$($Adapter.Status) ipv4=$($Ipv4Addresses.Count) " +
+                "ipv6=$($Ipv6Addresses.Count) mtu4=$($Ipv4Interfaces.NlMtuBytes -join ',') " +
+                "mtu6=$($Ipv6Interfaces.NlMtuBytes -join ',')"
+            if (($Adapter.Status -eq "Up") -and
+                ($Ipv4Addresses.Count -eq 1) -and
+                ($Ipv6Addresses.Count -eq 1) -and
+                ($Ipv4Interfaces.Count -eq 1) -and
+                ($Ipv6Interfaces.Count -eq 1)) {
+                return [ordered]@{
+                    if_index = $Adapter.ifIndex
+                    status = [string]$Adapter.Status
+                    mtu_ipv4 = $Ipv4Interfaces[0].NlMtuBytes
+                    mtu_ipv6 = $Ipv6Interfaces[0].NlMtuBytes
+                }
+            }
+        }
+        else {
+            $LastDiagnostic = "adapter_count=$($Adapters.Count)"
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $Deadline)
+
+    throw "Wintun adapter '$AdapterName' did not become dual-stack ready: $LastDiagnostic"
+}
+
 Require-SecretValue -Name "QUICFUSCATE_WINDOWS_E2E_ENDPOINT" -Value $Endpoint
 Require-SecretValue -Name "QUICFUSCATE_WINDOWS_E2E_QKEY" -Value $QKey
 Require-SecretValue -Name "QUICFUSCATE_WINDOWS_E2E_CA_PEM" -Value $CaPem
@@ -234,6 +277,8 @@ try {
         -Pattern "Kill switch: VPN traffic allowed, non-VPN blocked" `
         -Process $ClientProcess
 
+    $AdapterSnapshot = Wait-ForTunnelAdapterReady
+
     $PingSuccesses = 0
     for ($Attempt = 1; $Attempt -le 5; $Attempt++) {
         if (Test-Connection -TargetName $ServerTunAddress -IPv4 -Count 1 `
@@ -296,6 +341,10 @@ try {
         binary_sha256 = $BinarySha256
         endpoint_sha256 = $EndpointHash
         adapter_name = $AdapterName
+        adapter_if_index = $AdapterSnapshot.if_index
+        adapter_status = $AdapterSnapshot.status
+        adapter_mtu_ipv4 = $AdapterSnapshot.mtu_ipv4
+        adapter_mtu_ipv6 = $AdapterSnapshot.mtu_ipv6
         client_tun_address = $ClientTunAddress
         server_tun_address = $ServerTunAddress
         client_tun_address_ipv6 = $ClientTunAddress6

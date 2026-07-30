@@ -58,7 +58,7 @@ mod imp {
     use std::os::windows::process::CommandExt;
     use std::ptr;
     use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use parking_lot::{Mutex, RwLock};
     use windows_sys::core::{PCSTR, PCWSTR};
@@ -83,6 +83,8 @@ mod imp {
     const WINTUN_MAX_RING_CAPACITY: u32 = 0x0400_0000; // 64 MiB
     const WINTUN_MAX_IP_PACKET_SIZE: usize = 0xffff;
     const CLOSE_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+    const ADDRESS_ACTIVATION_TIMEOUT: Duration = Duration::from_secs(10);
+    const ADDRESS_ACTIVATION_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
     // Default adapter name / tunnel type when the config does not specify one.
     const DEFAULT_ADAPTER_NAME: &str = "QuicFuscate";
@@ -283,6 +285,45 @@ mod imp {
         Ok(())
     }
 
+    fn wait_for_address_activation(config: &TunConfig) -> io::Result<()> {
+        let addresses = config.ip.into_iter().chain(config.ip6.map(IpAddr::V6));
+        for address in addresses {
+            let endpoint = std::net::SocketAddr::new(address, 0);
+            let deadline = Instant::now() + ADDRESS_ACTIVATION_TIMEOUT;
+            loop {
+                match std::net::UdpSocket::bind(endpoint) {
+                    Ok(socket) => {
+                        drop(socket);
+                        break;
+                    }
+                    Err(error)
+                        if error.kind() == io::ErrorKind::AddrNotAvailable
+                            && Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(ADDRESS_ACTIVATION_POLL_INTERVAL);
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::AddrNotAvailable => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!(
+                                "Wintun address {address} did not become bindable within {}s: \
+                                 {error}",
+                                ADDRESS_ACTIVATION_TIMEOUT.as_secs()
+                            ),
+                        ));
+                    }
+                    Err(error) => {
+                        return Err(io::Error::new(
+                            error.kind(),
+                            format!("Wintun address {address} activation check failed: {error}"),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Windows TUN device backed by a dynamically loaded Wintun session.
     #[derive(Debug)]
     pub struct WintunDevice {
@@ -406,6 +447,7 @@ mod imp {
             if let Err(e) = device
                 .assign_address(config)
                 .and_then(|()| set_interface_mtu(&device.name, config.mtu, device.ipv6_enabled))
+                .and_then(|()| wait_for_address_activation(config))
             {
                 if let Err(cleanup_error) = device.close_inner() {
                     log::error!(
