@@ -1,6 +1,6 @@
 use crate::optimize::{self};
 use log::warn;
-use std::sync::Once;
+use std::sync::{Once, OnceLock};
 
 // GF(2^8) constants
 const IRREDUCIBLE_POLY: u16 = 0x11D;
@@ -585,6 +585,46 @@ unsafe fn gf_mul_scalar_slice_neon(coeff: u8, src: &[u8], out_xor: &mut [u8]) {
 // --- GF(2^16) Arithmetic for Extreme Mode ---
 // Using GF16_POLY from gf_tables module
 
+const GF16_FIELD_ORDER: usize = u16::MAX as usize;
+const GF16_REDUCTION_POLY: u16 = 0x100B;
+static GF16_INVERSE_TABLE: OnceLock<Box<[u16]>> = OnceLock::new();
+
+#[inline]
+fn gf16_mul_generator(value: u16) -> u16 {
+    let carry = value & 0x8000 != 0;
+    let doubled = value << 1;
+    if carry {
+        doubled ^ GF16_REDUCTION_POLY
+    } else {
+        doubled
+    }
+}
+
+fn gf16_inverse_table() -> &'static [u16] {
+    GF16_INVERSE_TABLE.get_or_init(|| {
+        // 0x1100B is primitive, so repeated multiplication by x (2) visits
+        // every non-zero field element exactly once. Build inverses in O(2^16)
+        // with no hot-path exponentiation or architecture-dependent dispatch.
+        let mut exponents = vec![0u16; GF16_FIELD_ORDER];
+        let mut logarithms = vec![0u16; GF16_FIELD_ORDER + 1];
+        let mut value = 1u16;
+        for (power, exponent) in exponents.iter_mut().enumerate() {
+            *exponent = value;
+            logarithms[value as usize] = power as u16;
+            value = gf16_mul_generator(value);
+        }
+        debug_assert_eq!(value, 1, "GF16 generator must span the multiplicative group");
+
+        let mut inverses = vec![0u16; GF16_FIELD_ORDER + 1];
+        for element in 1..=GF16_FIELD_ORDER {
+            let logarithm = logarithms[element] as usize;
+            let inverse_power = if logarithm == 0 { 0 } else { GF16_FIELD_ORDER - logarithm };
+            inverses[element] = exponents[inverse_power];
+        }
+        inverses.into_boxed_slice()
+    })
+}
+
 #[inline(always)]
 pub(crate) fn gf16_mul(a: u16, b: u16) -> u16 {
     optimize::dispatch(|policy| {
@@ -616,13 +656,14 @@ pub(crate) fn gf16_mul(a: u16, b: u16) -> u16 {
             let carry = (aa & 0x8000) != 0;
             aa <<= 1;
             if carry {
-                aa ^= 0x100B; // GF16_POLY value (normalized)
+                aa ^= GF16_REDUCTION_POLY;
             }
         }
         res
     })
 }
 
+#[cfg(test)]
 #[inline(always)]
 pub(crate) fn gf16_pow(mut x: u16, mut power: u32) -> u16 {
     let mut result: u16 = 1;
@@ -642,7 +683,7 @@ pub(crate) fn gf16_inv(x: u16) -> u16 {
         warn!("gf16_inv called with 0; returning 0 as safe fallback");
         return 0;
     }
-    gf16_pow(x, 0x1_0000 - 2)
+    gf16_inverse_table()[x as usize]
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -653,7 +694,7 @@ unsafe fn gf16_mul_sve2_impl(a: u16, b: u16) -> u16 {
 
         let pg = svptrue_b16();
         let zero = svdup_n_u16(0);
-        let poly = svdup_n_u16(0x100B);
+        let poly = svdup_n_u16(GF16_REDUCTION_POLY);
         let msb_mask = svdup_n_u16(0x8000);
         let mut multiplicand = svdup_n_u16(a);
         let mut acc = svdup_n_u16(0);
@@ -690,7 +731,7 @@ fn gf16_mul_neon_impl(a: u16, b: u16) -> u16 {
         bb >>= 1;
         aa <<= 1;
         if aa & 0x10000 != 0 {
-            aa ^= 0x100B_u32; // GF16_POLY value (normalized)
+            aa ^= GF16_REDUCTION_POLY as u32;
         }
     }
     res as u16
@@ -842,6 +883,30 @@ mod tests {
             let inv = gf16_inv(a);
             let product = gf16_mul(a, inv);
             assert_eq!(product, 1, "gf16 a * inv(a) should be 1 for a={} (inv={})", a, inv);
+        }
+    }
+
+    #[test]
+    fn test_gf16_inverse_table_covers_entire_nonzero_field() {
+        let table = gf16_inverse_table();
+
+        assert_eq!(table.len(), GF16_FIELD_ORDER + 1);
+        assert_eq!(table[0], 0);
+        for element in 1..=u16::MAX {
+            let inverse = table[element as usize];
+            assert_ne!(inverse, 0, "non-zero GF16 element must have a non-zero inverse");
+            assert_eq!(
+                gf16_mul(element, inverse),
+                1,
+                "GF16 inverse table mismatch for element {element}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_gf16_inverse_table_matches_exponentiation_reference() {
+        for element in [1u16, 2, 7, 255, 1000, 0x8000, 0xFFFF] {
+            assert_eq!(gf16_inv(element), gf16_pow(element, 0x1_0000 - 2));
         }
     }
 
