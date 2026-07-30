@@ -5,6 +5,11 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(target_os = "windows")]
+use windows::WindowsKillSwitch;
+
 /// Typed firewall exceptions for one VPN connection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VpnFirewallPolicy {
@@ -916,137 +921,6 @@ impl MacOSKillSwitch {
             .map_err(|error| KillSwitchError::CommandFailed(error.to_string()))?;
         log::info!("Stale pf anchor rules verified absent");
         Ok(())
-    }
-}
-
-// ============================================================================
-// Windows Implementation (Windows Firewall)
-// ============================================================================
-
-#[cfg(target_os = "windows")]
-struct WindowsKillSwitch {
-    rules_active: AtomicBool,
-}
-
-#[cfg(target_os = "windows")]
-const WINDOWS_BLOCK_RULE: &str = "QuicFuscate-KillSwitch-Block";
-#[cfg(target_os = "windows")]
-const WINDOWS_VPN_RULE: &str = "QuicFuscate-KillSwitch-VPN";
-
-#[cfg(target_os = "windows")]
-impl WindowsKillSwitch {
-    fn new() -> Self {
-        Self { rules_active: AtomicBool::new(false) }
-    }
-
-    fn run_netsh(args: &[&str], action: &str) -> Result<(), KillSwitchError> {
-        let output = std::process::Command::new("netsh")
-            .args(args)
-            .output()
-            .map_err(|error| KillSwitchError::CommandFailed(format!("{action}: {error}")))?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(KillSwitchError::CommandFailed(format!(
-                "{} returned status {}: {}",
-                action,
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim(),
-            )))
-        }
-    }
-
-    fn block_traffic(&self) -> Result<(), KillSwitchError> {
-        Err(KillSwitchError::NotSupported)
-    }
-
-    fn allow_traffic(&self) -> Result<(), KillSwitchError> {
-        self.cleanup()
-    }
-
-    fn allow_vpn_connecting(&self, policy: &VpnFirewallPolicy) -> Result<(), KillSwitchError> {
-        self.allow_vpn_traffic(policy)
-    }
-
-    fn allow_vpn_traffic(&self, policy: &VpnFirewallPolicy) -> Result<(), KillSwitchError> {
-        self.cleanup()?;
-
-        // Allow VPN server
-        let remote_ip = format!(
-            "remoteip={}",
-            policy
-                .server_ipv4()
-                .map(|(ip, _)| ip.to_string())
-                .or_else(|| policy.server_ipv6().map(|(ip, _)| ip.to_string()))
-                .ok_or_else(|| {
-                    KillSwitchError::InvalidPolicy(
-                        "at least one VPN server address is required".to_string(),
-                    )
-                })?
-        );
-        Self::run_netsh(
-            &[
-                "advfirewall",
-                "firewall",
-                "add",
-                "rule",
-                "name=QuicFuscate-KillSwitch-VPN",
-                "dir=out",
-                "action=allow",
-                &remote_ip,
-            ],
-            "add owned VPN allow rule",
-        )?;
-
-        if let Err(error) = Self::run_netsh(
-            &[
-                "advfirewall",
-                "firewall",
-                "add",
-                "rule",
-                "name=QuicFuscate-KillSwitch-Block",
-                "dir=out",
-                "action=block",
-            ],
-            "add owned block rule",
-        ) {
-            let rollback = self.cleanup();
-            return Err(match rollback {
-                Ok(()) => error,
-                Err(rollback_error) => KillSwitchError::CommandFailed(format!(
-                    "{error}; partial-setup rollback failed: {rollback_error}"
-                )),
-            });
-        }
-
-        self.rules_active.store(true, Ordering::SeqCst);
-        Ok(())
-    }
-
-    fn cleanup(&self) -> Result<(), KillSwitchError> {
-        Self::cleanup_owned_rules()?;
-        self.rules_active.store(false, Ordering::SeqCst);
-        Ok(())
-    }
-
-    fn cleanup_stale() -> Result<(), KillSwitchError> {
-        Self::cleanup_owned_rules()?;
-        log::info!("Stale Windows firewall rules verified absent");
-        Ok(())
-    }
-
-    fn cleanup_owned_rules() -> Result<(), KillSwitchError> {
-        let mut failures = Vec::new();
-        for rule_name in [WINDOWS_BLOCK_RULE, WINDOWS_VPN_RULE] {
-            if let Err(error) = crate::firewall::cleanup_windows_firewall_rule(rule_name) {
-                failures.push(error.to_string());
-            }
-        }
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(KillSwitchError::CommandFailed(failures.join("; ")))
-        }
     }
 }
 
