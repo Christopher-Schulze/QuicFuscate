@@ -2562,7 +2562,19 @@ println!("started validation for path {path_id}");
 
 `migrate_connection` starts PATH_CHALLENGE probing immediately, but the active path only changes after a matching PATH_RESPONSE validates the candidate path.
 
-Successful validated migrations increment the internal `PATH_MIGRATIONS` telemetry counter.
+The `[connection]` migration policy is operator-configurable:
+
+- `migration_cwnd_reduction_factor = 0.5` retains that fraction of the previous congestion window for a port-only rebinding. `0` resets to the initial window and `1` retains the complete prior window.
+- `migration_cooldown_ms = 750` sets the minimum interval between successful local migrations. `0` disables the cooldown.
+- `migration_probe_target = "previous-window"` uses the previous congestion window as the recovery boundary. `"reduced-window"` uses the post-reduction window.
+
+The retained-window policy applies only when the local and peer IP addresses remain unchanged. A validated IP-address change resets Reno, CUBIC, BBR2, or BBR3 congestion and RTT models to a fresh path per RFC 9000 Section 9.4. The PATH_CHALLENGE/PATH_RESPONSE delay supplies the initial path estimate, but it is not recorded as an ordinary ACK RTT sample.
+
+Recovery increments a path epoch, preserves sent-packet and bytes-in-flight ownership, resets loss/PTO timers deliberately, and prevents ACK or loss events from the previous epoch from changing the new path's congestion or RTT model. Those old events only release their existing bytes-in-flight accounting.
+
+PATH_CHALLENGE and PATH_RESPONSE datagrams carry explicit path-control metadata. The Core prioritizes them ahead of buffered FEC output, bypasses FEC encapsulation, outer pacing, and stealth delay, and still enforces the server amplification budget. Completing or timing out a simultaneous local validation removes only its own PATH_CHALLENGE; a queued response to the peer's challenge remains sendable.
+
+On the standalone server, a new `(local, peer)` tuple remains a candidate route until the matching response validates it. Only then does the DCID route registry commit the new peer address. Successful validated migrations increment the internal `PATH_MIGRATIONS` telemetry counter.
 
 ---
 

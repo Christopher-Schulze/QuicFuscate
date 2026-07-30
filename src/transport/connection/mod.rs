@@ -15,7 +15,6 @@ use crate::optimize::{prefetch, PrefetchHint};
 
 const MAX_RX_KEY_UPDATE_ADVANCE: usize = 4;
 const PATH_VALIDATION_TIMEOUT: Duration = Duration::from_secs(3);
-const MIGRATION_COOLDOWN: Duration = Duration::from_millis(750);
 const MAX_STREAM_RETRANSMIT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_STREAM_ORIGINAL_TRANSMISSIONS: usize = 16 * 1024;
 const MAX_STREAM_TRANSMISSIONS: usize = 2 * MAX_STREAM_ORIGINAL_TRANSMISSIONS;

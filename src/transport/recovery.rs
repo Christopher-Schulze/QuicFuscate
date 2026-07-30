@@ -12,7 +12,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 pub use super::cc::stealth_shaper::BrowserProfile;
-use super::cc::{self, CcImpl, CongestionController};
+use super::cc::{self, CcImpl, CongestionController, PathChangeEvent, PathChangeKind};
+use super::config::{MigrationPolicy, MigrationProbeTarget};
 
 /// RFC 9002 packet number space (§4.1, A.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -104,6 +105,8 @@ pub struct SentPacket {
     pub contents: SentPacketContents,
     /// Whether this packet is an isolated DPLPMTUD PING+PADDING probe.
     pub pmtu_probe: bool,
+    /// Validated path epoch on which the packet was emitted.
+    pub path_epoch: u64,
 }
 
 /// Per-space loss detection state owned by [`Recovery`].
@@ -288,6 +291,8 @@ pub struct Recovery {
     batch_size: usize,
     cc: CcImpl,
     mem_pool: Arc<crate::optimize::MemoryPool>,
+    initial_cwnd: usize,
+    path_epoch: u64,
 }
 
 impl Recovery {
@@ -318,6 +323,8 @@ impl Recovery {
             batch_size: 16,
             cc: cc::create(algo, initial_cwnd, mss),
             mem_pool: crate::optimize::global_pool(),
+            initial_cwnd,
+            path_epoch: 0,
         }
     }
 
@@ -581,18 +588,48 @@ impl Recovery {
         self.min_rtt
     }
 
-    /// Called when the connection migrates to a new path.
-    ///
-    /// Instead of resetting cwnd to INITIAL_WINDOW (which causes throughput
-    /// collapse), we reduce cwnd by 50% and set ssthresh to the reduced value
-    /// to enter congestion avoidance directly. bytes_in_flight is preserved
-    /// because the packets are still in flight on the new path (the peer will
-    /// ACK or lose them). The CC implementation gets a chance to reset
-    /// path-specific state (e.g. BBR3 resets min_rtt and re-enters PROBE_BW).
-    pub fn on_path_change(&mut self) {
-        let new_cwnd = (self.cwnd / 2).max(self.mss * 2);
-        self.ssthresh = new_cwnd;
-        self.cc.set_cwnd(new_cwnd);
+    /// Applies one validated path transition without reclassifying old packets
+    /// as traffic on the new path.
+    pub fn on_path_change(
+        &mut self,
+        kind: PathChangeKind,
+        validation_rtt: Duration,
+        policy: MigrationPolicy,
+        now: Instant,
+    ) -> PathChangeEvent {
+        let prior_cwnd = self.cwnd;
+        let congestion_window = match kind {
+            PathChangeKind::NewAddress => self.initial_cwnd,
+            PathChangeKind::PortRebinding if policy.port_rebinding_cwnd_factor == 0.0 => {
+                self.initial_cwnd
+            }
+            PathChangeKind::PortRebinding => {
+                ((prior_cwnd as f64 * policy.port_rebinding_cwnd_factor) as usize).max(self.mss * 2)
+            }
+        };
+        let probe_target = match (kind, policy.probe_target) {
+            (PathChangeKind::PortRebinding, MigrationProbeTarget::PreviousWindow)
+                if policy.port_rebinding_cwnd_factor > 0.0 =>
+            {
+                prior_cwnd.max(congestion_window)
+            }
+            _ => congestion_window,
+        };
+        let validation_rtt = validation_rtt.max(K_GRANULARITY);
+        let event = PathChangeEvent { kind, validation_rtt, congestion_window, probe_target, now };
+
+        self.path_epoch = self.path_epoch.wrapping_add(1);
+        self.ssthresh =
+            if kind == PathChangeKind::NewAddress { usize::MAX / 2 } else { probe_target };
+        self.cc.on_path_change(event);
+        if kind == PathChangeKind::NewAddress {
+            self.rtt = validation_rtt;
+            self.rtt_var = validation_rtt / 2;
+            self.min_rtt = Duration::MAX;
+            self.latest_rtt = None;
+            self.rtt_initialized = false;
+            self.first_rtt_sample = None;
+        }
         self.pto_count = 0;
         for sp in &mut self.spaces {
             sp.loss_time = None;
@@ -600,6 +637,7 @@ impl Recovery {
         }
         self.pc_window.reset();
         self.sync_from_cc();
+        event
     }
 }
 
@@ -721,6 +759,7 @@ impl Recovery {
                 crypto_range,
                 contents,
                 pmtu_probe,
+                path_epoch: self.path_epoch,
             },
         );
         if in_flight {
@@ -811,7 +850,8 @@ impl Recovery {
             }
         }
         newly_acked.sort_by_key(|p| p.pn);
-        let any_ack_eliciting = newly_acked.iter().any(|p| p.ack_eliciting);
+        let any_current_ack_eliciting =
+            newly_acked.iter().any(|p| p.ack_eliciting && p.path_epoch == self.path_epoch);
         let largest_advanced = match self.spaces[space.index()].largest_acked {
             None => true,
             Some(prev) => largest_in_frame > prev,
@@ -822,8 +862,11 @@ impl Recovery {
 
         // 2. RTT sample (RFC 9002 §5.1: largest newly acknowledged plus at
         //    least one newly acked ack-eliciting packet; §5.3 adjustment).
-        if largest_advanced && any_ack_eliciting {
-            if let Some(largest_pkt) = newly_acked.iter().find(|p| p.pn == largest_in_frame) {
+        if largest_advanced && any_current_ack_eliciting {
+            if let Some(largest_pkt) = newly_acked
+                .iter()
+                .find(|p| p.pn == largest_in_frame && p.path_epoch == self.path_epoch)
+            {
                 let latest = now.saturating_duration_since(largest_pkt.sent_at);
                 if latest > Duration::ZERO {
                     self.latest_rtt = Some(latest);
@@ -845,7 +888,7 @@ impl Recovery {
 
         // 3. PTO backoff reset (RFC 9002 §6.2.1; a client keeps its backoff on
         //    Initial ACKs until the server has validated its address).
-        if any_ack_eliciting && !(space == PacketSpace::Initial && !is_server) {
+        if any_current_ack_eliciting && !(space == PacketSpace::Initial && !is_server) {
             self.pto_count = 0;
         }
 
@@ -856,7 +899,10 @@ impl Recovery {
             self.pc_window.reset();
         }
         if let Some(start) = self.pc_window.start {
-            if newly_acked.iter().any(|p| p.ack_eliciting && p.sent_at >= start) {
+            if newly_acked
+                .iter()
+                .any(|p| p.ack_eliciting && p.path_epoch == self.path_epoch && p.sent_at >= start)
+            {
                 self.pc_window.reset();
             }
         }
@@ -911,7 +957,10 @@ impl Recovery {
                 let period = self.persistent_congestion_period();
                 let mut declaration = None;
                 for pkt in lost.iter().filter(|pkt| {
-                    pkt.ack_eliciting && !pkt.pmtu_probe && pkt.sent_at > first_rtt_sample
+                    pkt.path_epoch == self.path_epoch
+                        && pkt.ack_eliciting
+                        && !pkt.pmtu_probe
+                        && pkt.sent_at > first_rtt_sample
                 }) {
                     if let Some(prev) = self.pc_window.end {
                         let acked_between =
@@ -1032,9 +1081,15 @@ impl Recovery {
         // 7. Feed the congestion controller and build the outcome. Loss feeds
         //    precede the ACK feed, preserving the previous ordering.
         let mut acked_bytes = 0usize;
+        let mut cc_accounting_changed = false;
         for pkt in &newly_acked {
             if pkt.in_flight {
-                acked_bytes = acked_bytes.saturating_add(pkt.size);
+                if pkt.path_epoch == self.path_epoch {
+                    acked_bytes = acked_bytes.saturating_add(pkt.size);
+                } else {
+                    self.cc.discard_in_flight(pkt.size);
+                    cc_accounting_changed = true;
+                }
             }
             outcome.newly_acked.push((pkt.pn, pkt.size));
             if let Some(range) = pkt.crypto_range {
@@ -1043,14 +1098,19 @@ impl Recovery {
         }
         for pkt in &lost {
             if pkt.in_flight {
-                self.cc.on_loss_packet(pkt.pn, pkt.size, now);
+                if pkt.path_epoch == self.path_epoch {
+                    self.cc.on_loss_packet(pkt.pn, pkt.size, now);
+                } else {
+                    self.cc.discard_in_flight(pkt.size);
+                }
+                cc_accounting_changed = true;
             }
             outcome.lost.push((pkt.pn, pkt.size));
             if let Some(range) = pkt.crypto_range {
                 outcome.crypto_lost.push(range);
             }
         }
-        if !lost.is_empty() {
+        if cc_accounting_changed {
             self.sync_from_cc();
         }
         if acked_bytes > 0 {
@@ -1135,7 +1195,11 @@ impl Recovery {
             let lost = self.detect_lost_packets(space, largest_acked, now);
             for pkt in &lost {
                 if pkt.in_flight {
-                    self.cc.on_loss_packet(pkt.pn, pkt.size, now);
+                    if pkt.path_epoch == self.path_epoch {
+                        self.cc.on_loss_packet(pkt.pn, pkt.size, now);
+                    } else {
+                        self.cc.discard_in_flight(pkt.size);
+                    }
                 }
                 outcome.lost.push((space, pkt.pn, pkt.size));
                 if let Some(range) = pkt.crypto_range {
@@ -1303,7 +1367,8 @@ mod tests {
 
     #[test]
     fn test_gentle_path_migration_preserves_cwnd() {
-        use super::cc::Algorithm;
+        use super::cc::{Algorithm, PathChangeKind};
+        use super::{MigrationPolicy, MigrationProbeTarget};
         let mut recovery = Recovery::with_algorithm(12_000, 1200, Algorithm::Reno);
         // Grow cwnd via ACKs (Reno slow-start doubles cwnd each RTT).
         let now = Instant::now();
@@ -1313,12 +1378,244 @@ mod tests {
         }
         let cwnd_before = recovery.cwnd;
         assert!(cwnd_before > 12_000, "cwnd should have grown: {cwnd_before}");
-        // Path change: cwnd should be halved, not reset to INITIAL_WINDOW
-        recovery.on_path_change();
+        let policy = MigrationPolicy {
+            port_rebinding_cwnd_factor: 0.5,
+            cooldown: Duration::ZERO,
+            probe_target: MigrationProbeTarget::PreviousWindow,
+        };
+        recovery.on_path_change(
+            PathChangeKind::PortRebinding,
+            Duration::from_millis(20),
+            policy,
+            now,
+        );
         let cwnd_after = recovery.cwnd;
         assert!(cwnd_after > 2400, "not reset to minimum: {cwnd_after}");
         assert!(cwnd_after <= cwnd_before);
         assert_eq!(cwnd_after, (cwnd_before / 2).max(2400));
+        assert_eq!(recovery.ssthresh, cwnd_before);
+    }
+
+    #[test]
+    fn exact_port_rebinding_vectors_reach_every_controller() {
+        use super::cc::{Algorithm, CongestionController, PathChangeKind};
+        use super::{MigrationPolicy, MigrationProbeTarget};
+
+        for algorithm in [Algorithm::Reno, Algorithm::Cubic, Algorithm::Bbr2, Algorithm::Bbr3] {
+            for (factor, expected) in [(0.5, 50_000), (0.25, 25_000), (1.0, 100_000)] {
+                let mut recovery = Recovery::with_algorithm(100_000, 1200, algorithm);
+                let now = Instant::now();
+                recovery.on_packet_sent(1, 1200, now);
+                let event = recovery.on_path_change(
+                    PathChangeKind::PortRebinding,
+                    Duration::from_millis(17),
+                    MigrationPolicy {
+                        port_rebinding_cwnd_factor: factor,
+                        cooldown: Duration::ZERO,
+                        probe_target: MigrationProbeTarget::PreviousWindow,
+                    },
+                    now,
+                );
+                assert_eq!(event.congestion_window, expected, "{algorithm:?} factor={factor}");
+                assert_eq!(event.probe_target, 100_000, "{algorithm:?} factor={factor}");
+                assert_eq!(recovery.cwnd, expected, "{algorithm:?} factor={factor}");
+                assert_eq!(recovery.ssthresh, 100_000, "{algorithm:?} factor={factor}");
+                assert_eq!(recovery.bytes_in_flight, 1200, "{algorithm:?} factor={factor}");
+            }
+
+            let mut recovery = Recovery::with_algorithm(12_000, 1200, algorithm);
+            recovery.cc.set_cwnd(100_000);
+            recovery.sync_from_cc();
+            recovery.on_packet_sent(1, 1200, Instant::now());
+            let event = recovery.on_path_change(
+                PathChangeKind::PortRebinding,
+                Duration::from_millis(17),
+                MigrationPolicy {
+                    port_rebinding_cwnd_factor: 0.0,
+                    cooldown: Duration::ZERO,
+                    probe_target: MigrationProbeTarget::PreviousWindow,
+                },
+                Instant::now(),
+            );
+            assert_eq!(event.congestion_window, 12_000, "{algorithm:?} factor=0");
+            assert_eq!(event.probe_target, 12_000, "{algorithm:?} factor=0");
+            assert_eq!(recovery.cwnd, 12_000, "{algorithm:?} factor=0");
+            assert_eq!(recovery.ssthresh, 12_000, "{algorithm:?} factor=0");
+            assert_eq!(recovery.bytes_in_flight, 1200, "{algorithm:?} factor=0");
+        }
+    }
+
+    #[test]
+    fn reduced_window_policy_sets_the_avoidance_boundary() {
+        use super::cc::{Algorithm, PathChangeKind};
+        use super::{MigrationPolicy, MigrationProbeTarget};
+
+        let mut recovery = Recovery::with_algorithm(100_000, 1200, Algorithm::Reno);
+        recovery.on_path_change(
+            PathChangeKind::PortRebinding,
+            Duration::from_millis(10),
+            MigrationPolicy {
+                port_rebinding_cwnd_factor: 0.5,
+                cooldown: Duration::ZERO,
+                probe_target: MigrationProbeTarget::ReducedWindow,
+            },
+            Instant::now(),
+        );
+        assert_eq!(recovery.cwnd, 50_000);
+        assert_eq!(recovery.ssthresh, 50_000);
+    }
+
+    #[test]
+    fn old_path_ack_releases_flight_without_updating_new_path_cc_or_rtt() {
+        use super::cc::{Algorithm, PathChangeKind};
+        use super::{MigrationPolicy, MigrationProbeTarget, PacketSpace};
+
+        let mut recovery = Recovery::with_algorithm(12_000, 1200, Algorithm::Reno);
+        let start = Instant::now();
+        recovery.on_packet_sent_in_space(
+            PacketSpace::Application,
+            0,
+            1200,
+            true,
+            true,
+            None,
+            start,
+        );
+        recovery.on_path_change(
+            PathChangeKind::NewAddress,
+            Duration::from_millis(40),
+            MigrationPolicy {
+                port_rebinding_cwnd_factor: 1.0,
+                cooldown: Duration::ZERO,
+                probe_target: MigrationProbeTarget::PreviousWindow,
+            },
+            start + Duration::from_millis(40),
+        );
+
+        let old_outcome = recovery.on_ack_received(
+            PacketSpace::Application,
+            &[(0, 1)],
+            Duration::ZERO,
+            true,
+            false,
+            start + Duration::from_millis(100),
+        );
+        assert_eq!(old_outcome.rtt_sample, None);
+        assert_eq!(recovery.rtt, Duration::from_millis(40));
+        assert_eq!(recovery.cwnd, 12_000);
+        assert_eq!(recovery.bytes_in_flight, 0);
+
+        recovery.on_packet_sent_in_space(
+            PacketSpace::Application,
+            1,
+            1200,
+            true,
+            true,
+            None,
+            start + Duration::from_millis(110),
+        );
+        let new_outcome = recovery.on_ack_received(
+            PacketSpace::Application,
+            &[(1, 2)],
+            Duration::ZERO,
+            true,
+            false,
+            start + Duration::from_millis(140),
+        );
+        assert_eq!(new_outcome.rtt_sample, Some(Duration::from_millis(30)));
+        assert_eq!(recovery.rtt, Duration::from_millis(30));
+        assert_eq!(recovery.cwnd, 13_200);
+    }
+
+    #[test]
+    fn old_path_loss_releases_flight_without_reducing_new_path_cc() {
+        use super::cc::{Algorithm, PathChangeKind};
+        use super::{MigrationPolicy, MigrationProbeTarget, PacketSpace};
+
+        let mut recovery = Recovery::with_algorithm(12_000, 1200, Algorithm::Reno);
+        let start = Instant::now();
+        seed_space(&mut recovery, PacketSpace::Application, 5, start);
+        recovery.on_path_change(
+            PathChangeKind::NewAddress,
+            Duration::from_millis(40),
+            MigrationPolicy {
+                port_rebinding_cwnd_factor: 1.0,
+                cooldown: Duration::ZERO,
+                probe_target: MigrationProbeTarget::PreviousWindow,
+            },
+            start + Duration::from_millis(40),
+        );
+
+        let outcome = recovery.on_ack_received(
+            PacketSpace::Application,
+            &[(4, 5)],
+            Duration::ZERO,
+            true,
+            false,
+            start + Duration::from_millis(100),
+        );
+        assert_eq!(outcome.newly_acked, vec![(4, 1200)]);
+        assert_eq!(outcome.lost, vec![(0, 1200), (1, 1200), (2, 1200), (3, 1200)]);
+        assert_eq!(outcome.rtt_sample, None);
+        assert_eq!(recovery.rtt, Duration::from_millis(40));
+        assert_eq!(recovery.cwnd, 12_000);
+        assert_eq!(recovery.bytes_in_flight, 0);
+        assert_eq!(recovery.pto_count, 0);
+    }
+
+    #[test]
+    fn new_address_resets_every_controller_to_a_fresh_path_model() {
+        use super::cc::{Algorithm, CongestionController, PathChangeKind};
+        use super::{MigrationPolicy, MigrationProbeTarget};
+
+        for algorithm in [Algorithm::Reno, Algorithm::Cubic, Algorithm::Bbr2, Algorithm::Bbr3] {
+            let mut recovery = Recovery::with_algorithm(12_000, 1200, algorithm);
+            let start = Instant::now();
+            recovery.cc.set_cwnd(100_000);
+            recovery.sync_from_cc();
+            recovery.update_rtt(Duration::from_millis(100));
+            recovery.on_packet_sent(1, 1200, start);
+            recovery.pto_count = 4;
+
+            let event = recovery.on_path_change(
+                PathChangeKind::NewAddress,
+                Duration::from_millis(25),
+                MigrationPolicy {
+                    port_rebinding_cwnd_factor: 1.0,
+                    cooldown: Duration::ZERO,
+                    probe_target: MigrationProbeTarget::PreviousWindow,
+                },
+                start + Duration::from_millis(25),
+            );
+
+            assert_eq!(event.congestion_window, 12_000, "{algorithm:?}");
+            assert_eq!(event.probe_target, 12_000, "{algorithm:?}");
+            assert_eq!(event.validation_rtt, Duration::from_millis(25), "{algorithm:?}");
+            assert_eq!(recovery.cwnd, 12_000, "{algorithm:?}");
+            assert_eq!(recovery.ssthresh, usize::MAX / 2, "{algorithm:?}");
+            assert_eq!(recovery.bytes_in_flight, 1200, "{algorithm:?}");
+            assert_eq!(recovery.rtt, Duration::from_millis(25), "{algorithm:?}");
+            assert_eq!(recovery.rtt_var(), Duration::from_micros(12_500), "{algorithm:?}");
+            assert_eq!(recovery.min_rtt(), Duration::MAX, "{algorithm:?}");
+            assert_eq!(recovery.latest_rtt, None, "{algorithm:?}");
+            assert!(!recovery.rtt_initialized, "{algorithm:?}");
+            assert_eq!(recovery.first_rtt_sample, None, "{algorithm:?}");
+            assert_eq!(recovery.path_epoch, 1, "{algorithm:?}");
+            assert_eq!(recovery.pto_count, 0, "{algorithm:?}");
+
+            match algorithm {
+                Algorithm::Reno | Algorithm::Cubic => {
+                    recovery.on_ack(1200, start + Duration::from_millis(50));
+                    assert_eq!(recovery.cwnd, 13_200, "{algorithm:?} must restart slow start");
+                }
+                Algorithm::Bbr2 | Algorithm::Bbr3 => {
+                    assert!(
+                        recovery.cc.pacing_rate().is_some_and(|rate| rate > 0),
+                        "{algorithm:?} must restart with a live pacing model"
+                    );
+                }
+            }
+        }
     }
 
     use super::{PacketSpace, SentPacketContents};
@@ -1909,11 +2206,22 @@ mod tests {
 
     #[test]
     fn migration_clears_timers_but_keeps_sent_state() {
+        use super::cc::PathChangeKind;
+        use super::{MigrationPolicy, MigrationProbeTarget};
         let mut rec = Recovery::new(120_000, 1200);
         let t0 = Instant::now();
         seed_space(&mut rec, PacketSpace::Application, 2, t0);
         assert!(rec.loss_detection_timeout(true, false, true).is_some());
-        rec.on_path_change();
+        rec.on_path_change(
+            PathChangeKind::NewAddress,
+            Duration::from_millis(25),
+            MigrationPolicy {
+                port_rebinding_cwnd_factor: 0.5,
+                cooldown: Duration::ZERO,
+                probe_target: MigrationProbeTarget::PreviousWindow,
+            },
+            t0 + Duration::from_millis(25),
+        );
         assert_eq!(rec.loss_detection_timeout(true, false, true), None);
         // Sent packets survive migration and can still be acked.
         let outcome = rec.on_ack_received(

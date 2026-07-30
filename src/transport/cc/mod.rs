@@ -26,6 +26,29 @@ pub enum Algorithm {
     Bbr3,
 }
 
+/// Relationship between the validated candidate and the active network path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathChangeKind {
+    /// Only a UDP port changed while both endpoint IP addresses stayed constant.
+    PortRebinding,
+    /// At least one endpoint IP address changed, creating a genuinely new path.
+    NewAddress,
+}
+
+/// Validated path transition delivered atomically to every congestion controller.
+///
+/// `validation_rtt` is an initial estimate from PATH_CHALLENGE/PATH_RESPONSE,
+/// not an RTT sample. `congestion_window` is the post-transition window and
+/// `probe_target` is the canonical slow-start or model-recovery boundary.
+#[derive(Debug, Clone, Copy)]
+pub struct PathChangeEvent {
+    pub kind: PathChangeKind,
+    pub validation_rtt: Duration,
+    pub congestion_window: usize,
+    pub probe_target: usize,
+    pub now: Instant,
+}
+
 /// Core congestion controller interface.
 ///
 /// Every CC algorithm implements this trait. [`Recovery`](super::recovery::Recovery)
@@ -61,6 +84,9 @@ pub trait CongestionController: Send {
     fn on_persistent_congestion(&mut self, min_cwnd: usize) {
         self.set_cwnd(min_cwnd);
     }
+
+    /// Apply one validated path transition, including path-specific model reset.
+    fn on_path_change(&mut self, event: PathChangeEvent);
 
     /// Current congestion window in bytes.
     fn cwnd(&self) -> usize;
@@ -157,6 +183,9 @@ impl CongestionController for CcImpl {
     }
     fn on_persistent_congestion(&mut self, min_cwnd: usize) {
         cc_dispatch!(self, on_persistent_congestion, min_cwnd);
+    }
+    fn on_path_change(&mut self, event: PathChangeEvent) {
+        cc_dispatch!(self, on_path_change, event);
     }
     fn cwnd(&self) -> usize {
         cc_dispatch!(self, cwnd)

@@ -15,7 +15,7 @@ use core::cmp::min;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::CongestionController;
+use super::{CongestionController, PathChangeEvent, PathChangeKind};
 
 // ---------------------------------------------------------------------------
 // Constants (RFC 9438)
@@ -464,6 +464,53 @@ impl CongestionController for Cubic {
 
     fn discard_in_flight(&mut self, bytes: usize) {
         self.bytes_in_flight = self.bytes_in_flight.saturating_sub(bytes);
+    }
+
+    fn on_path_change(&mut self, event: PathChangeEvent) {
+        let congestion_window = event.congestion_window.max(self.mss * 2);
+        if event.kind == PathChangeKind::PortRebinding
+            && congestion_window == self.cwnd
+            && event.probe_target == self.cwnd
+        {
+            self.recovery_end_packet = RECOVERY_NOT_STARTED;
+            return;
+        }
+
+        self.cwnd = congestion_window;
+        self.ssthresh = if event.kind == PathChangeKind::NewAddress {
+            usize::MAX / 2
+        } else {
+            event.probe_target.max(self.cwnd)
+        };
+        self.w_max = event.probe_target.max(self.cwnd) as f64;
+        self.cwnd_prior = self.cwnd as f64;
+        self.w_est = self.cwnd as f64;
+        self.alpha_aimd = ALPHA_AIMD_INITIAL;
+        self.k = 0.0;
+        self.cwnd_increment = 0.0;
+        self.t_epoch = event.now;
+        self.epoch_initialized = false;
+        self.idle_started_at = None;
+        self.recovery_end_packet = RECOVERY_NOT_STARTED;
+        self.pacing_rate_override = None;
+
+        if event.kind == PathChangeKind::NewAddress {
+            self.rtt = event.validation_rtt;
+            self.rtt_initialized = false;
+            self.hystart_phase = HystartPhase::Standard;
+            self.hystart_round_acked = 0;
+            self.hystart_round_cwnd = self.cwnd;
+            self.hystart_last_rtt_min_ns = RTT_UNSET;
+            self.hystart_current_rtt_min_ns = RTT_UNSET;
+            self.hystart_pending_rtt_ns = RTT_UNSET;
+            self.hystart_css_baseline_ns = RTT_UNSET;
+            self.hystart_rtt_samples = 0;
+            self.hystart_css_rounds = 0;
+            self.hystart_css_entered_this_round = false;
+            self.hystart_growth_remainder = 0;
+            self.loss_acked = 0.0;
+            self.loss_lost = 0.0;
+        }
     }
 
     fn cwnd(&self) -> usize {

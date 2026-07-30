@@ -84,6 +84,18 @@ max_streams_uni = 100
 # Connection migration support (new paths must complete PATH_CHALLENGE/PATH_RESPONSE validation)
 enable_migration = true
 
+# Port-only rebinding retains this fraction of the previous congestion window.
+# 0 resets to the initial window; 1 retains the complete previous window.
+# A real IP-address change always resets CC and RTT per RFC 9000 Section 9.4.
+migration_cwnd_reduction_factor = 0.5
+
+# Minimum interval between successful migrations. 0 disables the cooldown.
+migration_cooldown_ms = 750
+
+# Recovery boundary after a port-only reduction.
+# Options: "previous-window", "reduced-window"
+migration_probe_target = "previous-window"
+
 # ==============================================================================
 # NAT TRAVERSAL / PATH DISCOVERY
 # ==============================================================================

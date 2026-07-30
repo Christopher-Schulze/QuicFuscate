@@ -196,6 +196,60 @@ impl NatTraversalConfig {
 
 // ============================================================================
 
+/// Congestion recovery boundary used after a validated port-only rebinding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MigrationProbeTarget {
+    /// Recover toward the congestion window observed before rebinding.
+    #[default]
+    PreviousWindow,
+    /// Treat the reduced window as the new congestion-avoidance boundary.
+    ReducedWindow,
+}
+
+/// Validated connection-migration policy.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MigrationPolicy {
+    /// Multiplicative retained cwnd fraction for port-only rebinding.
+    ///
+    /// `0.0` explicitly resets to the initial window and `1.0` retains the
+    /// complete prior window. Genuine IP-address changes always reset.
+    pub port_rebinding_cwnd_factor: f64,
+    /// Minimum interval between successful migrations.
+    pub cooldown: std::time::Duration,
+    /// Recovery boundary after a reduced port-only rebinding.
+    pub probe_target: MigrationProbeTarget,
+}
+
+impl Default for MigrationPolicy {
+    fn default() -> Self {
+        Self {
+            port_rebinding_cwnd_factor: 0.5,
+            cooldown: std::time::Duration::from_millis(750),
+            probe_target: MigrationProbeTarget::PreviousWindow,
+        }
+    }
+}
+
+impl MigrationPolicy {
+    const MAX_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
+
+    fn validate(self) -> Result<Self, crate::error::ConnectionError> {
+        if !self.port_rebinding_cwnd_factor.is_finite()
+            || !(0.0..=1.0).contains(&self.port_rebinding_cwnd_factor)
+            || self.cooldown > Self::MAX_COOLDOWN
+        {
+            return Err(crate::error::ConnectionError::Transport(
+                "migration cwnd factor must be finite in [0,1] and cooldown must not exceed 60s"
+                    .to_string(),
+            ));
+        }
+        Ok(self)
+    }
+}
+
+// ============================================================================
+
 /// QUIC connection configuration
 #[derive(Clone)]
 pub struct Config {
@@ -219,6 +273,7 @@ pub struct Config {
     pub(crate) ack_delay_exponent: u64,
     pub(crate) max_ack_delay: u64,
     pub(crate) disable_active_migration: bool,
+    pub(crate) migration_policy: MigrationPolicy,
     /// Enables 0-RTT early data (TLS 1.3 early data / QUIC 0-RTT).
     ///
     /// WARNING: 0-RTT data is inherently replayable. An attacker who captures
@@ -391,6 +446,7 @@ impl Config {
             ack_delay_exponent: 3,
             max_ack_delay: 25,
             disable_active_migration: false,
+            migration_policy: MigrationPolicy::default(),
             enable_early_data: false,
             verify_peer: true,
             cert_chain_path: None,
@@ -657,6 +713,18 @@ impl Config {
     /// Sets whether to disable active migration
     pub fn set_disable_active_migration(&mut self, v: bool) {
         self.disable_active_migration = v;
+    }
+    /// Sets validated port-rebinding reduction and migration timing policy.
+    pub fn set_migration_policy(
+        &mut self,
+        policy: MigrationPolicy,
+    ) -> Result<(), crate::error::ConnectionError> {
+        self.migration_policy = policy.validate()?;
+        Ok(())
+    }
+    /// Returns the validated connection-migration policy.
+    pub fn migration_policy(&self) -> MigrationPolicy {
+        self.migration_policy
     }
     /// Sets the anti-amplification factor for unvalidated paths (default: 3x).
     pub fn set_max_amplification_factor(&mut self, v: usize) {
@@ -1400,6 +1468,26 @@ mod tests {
         assert_eq!(cfg.initial_rtt_ms, 1);
         cfg.set_initial_rtt_ms(500);
         assert_eq!(cfg.initial_rtt_ms, 500);
+    }
+
+    #[test]
+    fn migration_policy_validates_factor_cooldown_and_probe_target() {
+        let mut cfg = default_config();
+        let policy = MigrationPolicy {
+            port_rebinding_cwnd_factor: 0.25,
+            cooldown: std::time::Duration::ZERO,
+            probe_target: MigrationProbeTarget::ReducedWindow,
+        };
+        cfg.set_migration_policy(policy).unwrap();
+        assert_eq!(cfg.migration_policy(), policy);
+
+        for factor in [f64::NAN, f64::INFINITY, -0.01, 1.01] {
+            let invalid = MigrationPolicy { port_rebinding_cwnd_factor: factor, ..policy };
+            assert!(cfg.set_migration_policy(invalid).is_err());
+        }
+        let excessive =
+            MigrationPolicy { cooldown: std::time::Duration::from_millis(60_001), ..policy };
+        assert!(cfg.set_migration_policy(excessive).is_err());
     }
 
     #[test]

@@ -1,7 +1,10 @@
 #![cfg(feature = "rust-tests")]
 
 use quicfuscate::error::ConnectionError;
-use quicfuscate::transport::{packet, Config, ConnectionId, PathEvent, PROTOCOL_VERSION};
+use quicfuscate::transport::{
+    packet, Config, ConnectionId, MigrationPolicy, MigrationProbeTarget, PathEvent,
+    PROTOCOL_VERSION,
+};
 
 #[test]
 fn connection_datagram_queues_and_thresholds() {
@@ -124,6 +127,40 @@ fn connection_migrate_enforces_post_validation_cooldown() {
         .migrate(first_local, second_peer)
         .expect_err("cooldown should block immediate re-migration");
     assert!(matches!(err, ConnectionError::InvalidState));
+}
+
+#[test]
+fn connection_migration_policy_reduces_port_rebinding_and_resets_new_ip_path() {
+    let mut cfg = Config::new_with_version(PROTOCOL_VERSION).expect("config");
+    cfg.set_migration_policy(MigrationPolicy {
+        port_rebinding_cwnd_factor: 0.5,
+        cooldown: std::time::Duration::ZERO,
+        probe_target: MigrationProbeTarget::PreviousWindow,
+    })
+    .expect("migration policy");
+    let local: std::net::SocketAddr = "127.0.0.1:4000".parse().expect("local");
+    let peer: std::net::SocketAddr = "127.0.0.1:4433".parse().expect("peer");
+    let scid = ConnectionId::from_ref(&[6u8; 8]);
+    let mut conn = packet::connect(None, scid.as_ref(), local, peer, &mut cfg).expect("connect");
+    let initial_cwnd = conn.cwnd();
+    assert_eq!(initial_cwnd, 14_720);
+
+    let rebound_local: std::net::SocketAddr = "127.0.0.1:4001".parse().expect("rebound local");
+    let rebound_peer: std::net::SocketAddr = "127.0.0.1:4434".parse().expect("rebound peer");
+    conn.migrate(rebound_local, rebound_peer).expect("port rebinding");
+    assert_eq!(conn.cwnd(), initial_cwnd, "validation must precede activation");
+    let (_, pending_local, pending_peer, challenge) =
+        conn.pending_path_validation_for_test().expect("pending rebinding");
+    conn.receive_path_response_for_test(pending_local, pending_peer, challenge);
+    assert_eq!(conn.cwnd(), initial_cwnd / 2);
+
+    let new_ip_peer: std::net::SocketAddr = "127.0.0.2:4434".parse().expect("new IP peer");
+    conn.migrate(rebound_local, new_ip_peer).expect("new IP path");
+    assert_eq!(conn.cwnd(), initial_cwnd / 2, "unvalidated IP path must not alter CC");
+    let (_, pending_local, pending_peer, challenge) =
+        conn.pending_path_validation_for_test().expect("pending new IP path");
+    conn.receive_path_response_for_test(pending_local, pending_peer, challenge);
+    assert_eq!(conn.cwnd(), initial_cwnd, "new IP path must reset to the initial window");
 }
 
 #[test]

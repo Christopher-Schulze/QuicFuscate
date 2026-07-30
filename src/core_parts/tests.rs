@@ -48,6 +48,16 @@ mod tests {
         )
     }
 
+    fn test_send_info() -> crate::transport::SendInfo {
+        crate::transport::SendInfo {
+            from: "127.0.0.1:29101".parse().unwrap(),
+            to: "127.0.0.1:29102".parse().unwrap(),
+            at: Instant::now(),
+            congestion_controlled: true,
+            path_control: false,
+        }
+    }
+
     #[test]
     fn connection_stats_default_zeroed() {
         let stats = ConnectionStats::default();
@@ -173,6 +183,7 @@ mod tests {
         let outgoing = OutgoingFecPacket {
             packet: fec_packet(7, &payload, None),
             wire_meta: None,
+            send_info: test_send_info(),
             congestion_controlled: true,
         };
         let mut wire = [0u8; 64];
@@ -202,8 +213,12 @@ mod tests {
             block_index: 0,
             systematic: false,
         };
-        let outgoing =
-            OutgoingFecPacket { packet, wire_meta: Some(meta), congestion_controlled: true };
+        let outgoing = OutgoingFecPacket {
+            packet,
+            wire_meta: Some(meta),
+            send_info: test_send_info(),
+            congestion_controlled: true,
+        };
         let mut wire = [0u8; 128];
 
         let written = outgoing.write_to(&mut wire).expect("FEC packet must serialize");
@@ -242,6 +257,7 @@ mod tests {
         let outgoing = OutgoingFecPacket {
             packet: fec_packet(0, &source_symbol, None),
             wire_meta: Some(meta),
+            send_info: test_send_info(),
             congestion_controlled: true,
         };
         let mut wire_datagram = [0u8; 128];
@@ -259,6 +275,94 @@ mod tests {
         assert_eq!(report.source_payload_bytes, quic_payload.len());
         assert_eq!(output.len(), 1);
         assert_eq!(output[0].payload_slice(), Some(&quic_payload[..]));
+    }
+
+    #[test]
+    fn pending_path_control_preempts_buffered_fec_datagram() {
+        let mut connection = test_connection();
+        connection.conn =
+            Box::new(crate::transport::connection::bench_paired_1rtt_connections().client);
+        let new_local: SocketAddr = "127.0.0.1:29103".parse().unwrap();
+        let new_peer: SocketAddr = "127.0.0.1:29104".parse().unwrap();
+        connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
+            packet: fec_packet(99, &[0x40, 0x01, 0x02, 0x03], None),
+            wire_meta: None,
+            send_info: test_send_info(),
+            congestion_controlled: true,
+        });
+        connection.conn.migrate(new_local, new_peer).expect("migration candidate");
+        assert_eq!(
+            connection.conn.pending_path_validation_for_test().map(|(_, local, peer, _)| {
+                (local, peer)
+            }),
+            Some((new_local, new_peer))
+        );
+        assert!(connection.conn.has_sendable_path_control());
+        let mut wire = [0u8; 2048];
+
+        let (written, send_info) =
+            connection.send_with_info(&mut wire).expect("path control must serialize");
+
+        assert!(written > 0);
+        assert_eq!(
+            (
+                send_info.from,
+                send_info.to,
+                send_info.path_control,
+                connection.conn.has_sendable_path_control(),
+                connection.outgoing_fec_packets.len(),
+            ),
+            (new_local, new_peer, true, false, 1)
+        );
+        assert!(!wire::is_framed(&wire[..written]));
+    }
+
+    #[test]
+    fn path_control_metadata_survives_raw_fec_queueing() {
+        let payload = [0x40, 0x01, 0x02, 0x03];
+        let mut send_info = test_send_info();
+        send_info.path_control = true;
+        let outgoing = OutgoingFecPacket {
+            packet: fec_packet(99, &payload, None),
+            wire_meta: None,
+            send_info,
+            congestion_controlled: true,
+        };
+        let mut wire = [0u8; 64];
+
+        let written = outgoing.write_to(&mut wire).expect("path control packet must serialize");
+
+        assert_eq!(&wire[..written], &payload);
+        assert!(!wire::is_framed(&wire[..written]));
+        assert!(outgoing.send_info.path_control);
+    }
+
+    #[test]
+    fn path_control_bypass_moves_reserved_quic_datagram_and_disables_fec() {
+        let profile = WireProfile {
+            epoch: 1,
+            codec: wire::WireCodec::Gf8,
+            source_count: 4,
+            total_count: 7,
+            interleave_depth: 1,
+        };
+        let payload = [0x40, 0x01, 0x02, 0x03];
+        let mut send_buffer = [0xAA; 64];
+        let quic_offset = 2 * wire::SOURCE_LENGTH_LEN;
+        send_buffer[quic_offset..quic_offset + payload.len()].copy_from_slice(&payload);
+        let mut send_info = test_send_info();
+        send_info.path_control = true;
+
+        let effective_profile = QuicFuscateConnection::bypass_fec_for_path_control(
+            Some(profile),
+            &send_info,
+            &mut send_buffer,
+            payload.len(),
+        )
+        .expect("path control bypass");
+
+        assert!(effective_profile.is_none());
+        assert_eq!(&send_buffer[..payload.len()], &payload);
     }
 
     #[test]
@@ -282,6 +386,7 @@ mod tests {
                     block_index: 0,
                     systematic,
                 }),
+                send_info: test_send_info(),
                 congestion_controlled: true,
             });
         }

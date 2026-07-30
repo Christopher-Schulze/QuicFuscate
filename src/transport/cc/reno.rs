@@ -8,7 +8,7 @@ use core::cmp::min;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::CongestionController;
+use super::{CongestionController, PathChangeEvent, PathChangeKind};
 
 /// TCP New Reno congestion controller.
 pub struct Reno {
@@ -111,6 +111,21 @@ impl CongestionController for Reno {
 
     fn discard_in_flight(&mut self, bytes: usize) {
         self.bytes_in_flight = self.bytes_in_flight.saturating_sub(bytes);
+    }
+
+    fn on_path_change(&mut self, event: PathChangeEvent) {
+        self.cwnd = event.congestion_window.max(self.mss * 2);
+        self.ssthresh = if event.kind == PathChangeKind::NewAddress {
+            usize::MAX / 2
+        } else {
+            event.probe_target.max(self.cwnd)
+        };
+        self.recovery_end_packet = None;
+        if event.kind == PathChangeKind::NewAddress {
+            self.rtt = event.validation_rtt;
+            self.loss_acked = 0.0;
+            self.loss_lost = 0.0;
+        }
     }
 
     fn cwnd(&self) -> usize {

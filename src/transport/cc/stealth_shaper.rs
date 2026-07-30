@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::CongestionController;
+use super::{CongestionController, PathChangeEvent};
 
 /// Browser congestion fingerprint to emulate.
 ///
@@ -201,6 +201,10 @@ impl<T: CongestionController> CongestionController for StealthShaper<T> {
 
     fn on_persistent_congestion(&mut self, min_cwnd: usize) {
         self.inner.on_persistent_congestion(min_cwnd);
+    }
+
+    fn on_path_change(&mut self, event: PathChangeEvent) {
+        self.inner.on_path_change(event);
     }
 
     fn cwnd(&self) -> usize {

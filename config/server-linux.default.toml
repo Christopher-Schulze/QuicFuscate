@@ -31,6 +31,9 @@ remote = "0.0.0.0:4433"        # Server listen address
 # max_streams_bidi = 100
 # max_streams_uni = 100
 # enable_migration = true   # candidate paths must validate before activation
+# migration_cwnd_reduction_factor = 0.5  # port-only retained cwnd; 0 reset, 1 retain
+# migration_cooldown_ms = 750             # 0 disables the cooldown
+# migration_probe_target = "previous-window" # previous-window | reduced-window
 
 # ==============================================================================
 # NAT TRAVERSAL / PATH DISCOVERY

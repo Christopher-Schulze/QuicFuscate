@@ -162,6 +162,7 @@ struct Http3PollBindings {
 struct OutgoingFecPacket {
     packet: FecPacket,
     wire_meta: Option<WirePacketMeta>,
+    send_info: crate::transport::SendInfo,
     congestion_controlled: bool,
 }
 
@@ -1220,6 +1221,16 @@ impl QuicFuscateConnection {
     /// Processes an incoming raw buffer, parsing it into an FEC packet and handling recovery.
     /// This now avoids any serialization overhead.
     pub fn recv(&mut self, data: &[u8]) -> Result<usize, crate::error::ConnectionError> {
+        self.recv_on_path(data, self.peer_addr, self.local_addr)
+    }
+
+    /// Processes an incoming raw datagram on its observed network path.
+    pub fn recv_on_path(
+        &mut self,
+        data: &[u8],
+        from: SocketAddr,
+        to: SocketAddr,
+    ) -> Result<usize, crate::error::ConnectionError> {
         let mut block = self.optimization_manager.alloc_block();
         if data.len() > block.len() {
             // Avoid silent truncation; return a clear error and recycle the block.
@@ -1228,7 +1239,7 @@ impl QuicFuscateConnection {
         }
         let copy_len = data.len();
         block[..copy_len].copy_from_slice(&data[..copy_len]);
-        self.recv_pooled_block(block, copy_len)
+        self.recv_pooled_block_on_path(block, copy_len, from, to)
     }
 
     /// Processes an incoming packet that already resides in a pooled block.
@@ -1236,6 +1247,17 @@ impl QuicFuscateConnection {
         &mut self,
         block: AlignedBox<[u8]>,
         len: usize,
+    ) -> Result<usize, crate::error::ConnectionError> {
+        self.recv_pooled_block_on_path(block, len, self.peer_addr, self.local_addr)
+    }
+
+    /// Processes a pooled incoming datagram on its observed network path.
+    pub fn recv_pooled_block_on_path(
+        &mut self,
+        block: AlignedBox<[u8]>,
+        len: usize,
+        from: SocketAddr,
+        to: SocketAddr,
     ) -> Result<usize, crate::error::ConnectionError> {
         if len > block.len() {
             self.optimization_manager.free_block(block);
@@ -1286,12 +1308,8 @@ impl QuicFuscateConnection {
             // payload into a fresh pooled buffer so conn.recv() can mutate it
             // (header protection removal + AEAD decryption are in-place).
             if let Some(data) = packet.payload_mut_unique() {
-                self.stealth_manager.process_incoming_packet(data, self.peer_addr);
-                let recv_info = crate::transport::RecvInfo {
-                    from: self.peer_addr,
-                    to: self.local_addr,
-                    ecn: None,
-                };
+                self.stealth_manager.process_incoming_packet(data, from);
+                let recv_info = crate::transport::RecvInfo { from, to, ecn: None };
                 if let Err(error) = self.conn.recv(data, &recv_info) {
                     if matches!(
                         error,
@@ -1307,19 +1325,15 @@ impl QuicFuscateConnection {
                         data.len(),
                         error
                     );
-                    self.stealth_manager.handle_fallback(data, self.peer_addr);
+                    self.stealth_manager.handle_fallback(data, from);
                 }
             } else if let Some(slice) = packet.payload_slice() {
                 let mut buf = self.optimization_manager.alloc_block();
                 let n = slice.len().min(buf.len());
                 buf[..n].copy_from_slice(&slice[..n]);
                 let data = &mut buf[..n];
-                self.stealth_manager.process_incoming_packet(data, self.peer_addr);
-                let recv_info = crate::transport::RecvInfo {
-                    from: self.peer_addr,
-                    to: self.local_addr,
-                    ecn: None,
-                };
+                self.stealth_manager.process_incoming_packet(data, from);
+                let recv_info = crate::transport::RecvInfo { from, to, ecn: None };
                 if let Err(error) = self.conn.recv(data, &recv_info) {
                     if matches!(
                         error,
@@ -1336,7 +1350,7 @@ impl QuicFuscateConnection {
                         data.len(),
                         error
                     );
-                    self.stealth_manager.handle_fallback(data, self.peer_addr);
+                    self.stealth_manager.handle_fallback(data, from);
                 }
                 self.optimization_manager.free_block(buf);
             }
@@ -1456,9 +1470,39 @@ impl QuicFuscateConnection {
         Ok(Some(profile))
     }
 
-    /// Prepares QUIC packets for sending, wraps them in FEC, and buffers them.
-    /// This has been completely refactored to eliminate serialization and copies.
+    fn bypass_fec_for_path_control(
+        wire_profile: Option<WireProfile>,
+        send_info: &crate::transport::SendInfo,
+        send_buffer: &mut [u8],
+        write: usize,
+    ) -> Result<Option<WireProfile>, crate::error::ConnectionError> {
+        if wire_profile.is_none() || !send_info.path_control {
+            return Ok(wire_profile);
+        }
+
+        let quic_offset = 2 * wire::SOURCE_LENGTH_LEN;
+        let quic_end = quic_offset
+            .checked_add(write)
+            .filter(|end| *end <= send_buffer.len())
+            .ok_or(crate::error::ConnectionError::BufferTooShort)?;
+        send_buffer.copy_within(quic_offset..quic_end, 0);
+        Ok(None)
+    }
+
+    /// Prepares one wire datagram and discards its address metadata.
+    ///
+    /// Connected-socket callers can use this compatibility API. Multipath and
+    /// unconnected-socket runtimes must use [`Self::send_with_info`] so targeted
+    /// path-validation frames reach the address selected by the transport.
     pub fn send(&mut self, buf: &mut [u8]) -> Result<usize, crate::error::ConnectionError> {
+        self.send_with_info(buf).map(|(len, _)| len)
+    }
+
+    /// Prepares one wire datagram together with its exact transport-selected path.
+    pub fn send_with_info(
+        &mut self,
+        buf: &mut [u8],
+    ) -> Result<(usize, crate::transport::SendInfo), crate::error::ConnectionError> {
         let now = Instant::now();
 
         // --- LOSS/PTO RECOVERY TIMER ---
@@ -1482,6 +1526,7 @@ impl QuicFuscateConnection {
             .conn
             .post_handshake_datagram_ready()
             .map_err(|error| crate::error::ConnectionError::Transport(error.to_string()))?;
+        let path_control_pending = self.conn.has_sendable_path_control();
 
         // --- REALITY FALLBACK RESPONSE POLLING ---
         // Check if there are any responses from upstream to send back (bypass stealth scheduler)
@@ -1490,7 +1535,16 @@ impl QuicFuscateConnection {
                 return Err(crate::error::ConnectionError::BufferTooShort);
             }
             buf[..resp.data.len()].copy_from_slice(&resp.data);
-            return Ok(resp.data.len());
+            return Ok((
+                resp.data.len(),
+                crate::transport::SendInfo {
+                    from: self.local_addr,
+                    to: self.peer_addr,
+                    at: now,
+                    congestion_controlled: false,
+                    path_control: false,
+                },
+            ));
         }
 
         // --- ASYNC STEALTH SCHEDULER ---
@@ -1502,18 +1556,38 @@ impl QuicFuscateConnection {
         if !established {
             self.next_packet_release = None;
             self.outbound_pacer.reset();
-        } else if let Some(release_time) = self.next_packet_release {
-            if now < release_time {
-                log::trace!("connection.send: next_packet_release blocks until {:?}", release_time);
-                return Ok(0); // WouldBlock / Yield
+        } else if !path_control_pending {
+            if let Some(release_time) = self.next_packet_release {
+                if now < release_time {
+                    log::trace!("connection.send: next_packet_release blocks until {:?}", release_time);
+                    return Ok((
+                        0,
+                        crate::transport::SendInfo {
+                            from: self.local_addr,
+                            to: self.peer_addr,
+                            at: now,
+                            congestion_controlled: false,
+                            path_control: false,
+                        },
+                    )); // WouldBlock / Yield
+                }
+                // Timer expired, clear block and proceed
+                self.next_packet_release = None;
             }
-            // Timer expired, clear block and proceed
-            self.next_packet_release = None;
         }
-        if established && self.outbound_pacer.is_blocked(now) {
+        if established && !path_control_pending && self.outbound_pacer.is_blocked(now) {
             log::trace!("connection.send: outbound_pacer blocked dgram_queue={} out_fec={} bytes_in_flight={} cwnd={}",
                 self.conn.dgram_send_queue_len(), self.outgoing_fec_packets.len(), self.conn.bytes_in_flight(), self.conn.cwnd());
-            return Ok(0);
+            return Ok((
+                0,
+                crate::transport::SendInfo {
+                    from: self.local_addr,
+                    to: self.peer_addr,
+                    at: now,
+                    congestion_controlled: false,
+                    path_control: false,
+                },
+            ));
         }
 
         // If there are buffered FEC packets, send one directly. These packets
@@ -1523,26 +1597,33 @@ impl QuicFuscateConnection {
         // (e.g. a MASQUE datagram was queued but conn.send was blocked), every
         // new send() call would generate another FEC packet and push it onto
         // outgoing_fec_packets without ever draining the buffer.
-        if let Some(packet) = self.outgoing_fec_packets.pop_front() {
-            let len = packet.write_to(buf)?;
-            if self.fec.telemetry_enabled() {
-                let (systematic, source_payload_bytes) = packet.telemetry_shape();
-                self.fec.observe_wire_send(systematic, source_payload_bytes, len);
+        if !path_control_pending {
+            if let Some(packet) = self.outgoing_fec_packets.pop_front() {
+                let len = packet.write_to(buf)?;
+                let mut send_info = packet.send_info;
+                send_info.at = now;
+                if self.fec.telemetry_enabled() {
+                    let (systematic, source_payload_bytes) = packet.telemetry_shape();
+                    self.fec.observe_wire_send(systematic, source_payload_bytes, len);
+                }
+                self.record_paced_packet(now, len, packet.congestion_controlled);
+                // Drop handles pool recycling automatically.
+                return Ok((len, send_info));
             }
-            self.record_paced_packet(now, len, packet.congestion_controlled);
-            // Drop handles pool recycling automatically.
-            return Ok(len);
         }
 
         // Cover PING: inject post-handshake keepalive if the interval has elapsed.
         // The PING lands in pending_control and is flushed by flush_pending_control_frames()
         // inside conn.send(), requiring no extra round-trip through this function.
-        if established && self.stealth_manager.should_send_cover_ping() {
+        if established && !path_control_pending && self.stealth_manager.should_send_cover_ping() {
             self.conn.queue_cover_ping();
         }
         // Cover stream: inject fake APPLICATION_DATA on a dedicated stream to simulate
         // idle HTTP/3 traffic patterns beyond what PINGs alone can achieve.
-        if established && self.stealth_manager.should_inject_cover_stream_frame() {
+        if established
+            && !path_control_pending
+            && self.stealth_manager.should_inject_cover_stream_frame()
+        {
             let data = self.stealth_manager.generate_cover_stream_data();
             let _ = self.conn.stream_send(StealthManager::COVER_STREAM_ID, &data, false);
         }
@@ -1569,7 +1650,16 @@ impl QuicFuscateConnection {
                     self.conn.dgram_send_queue_len(), self.outgoing_fec_packets.len(), self.conn.bytes_in_flight(), self.conn.cwnd());
                 // No packet currently pending is a normal state for polling loops.
                 drop(send_buffer);
-                return Ok(0);
+                return Ok((
+                    0,
+                    crate::transport::SendInfo {
+                        from: self.local_addr,
+                        to: self.peer_addr,
+                        at: now,
+                        congestion_controlled: false,
+                        path_control: false,
+                    },
+                ));
             }
             Err(crate::error::ConnectionError::BufferTooShort) => {
                 drop(send_buffer);
@@ -1586,8 +1676,21 @@ impl QuicFuscateConnection {
             log::trace!("connection.send: conn.send returned write=0");
             // The buffer is recycled automatically via Drop.
             drop(send_buffer);
-            return Ok(0);
+            return Ok((
+                0,
+                crate::transport::SendInfo {
+                    from: self.local_addr,
+                    to: self.peer_addr,
+                    at: now,
+                    congestion_controlled: false,
+                    path_control: false,
+                },
+            ));
         }
+
+        let bypass_fec_for_path_control = send_info.path_control;
+        let wire_profile =
+            Self::bypass_fec_for_path_control(wire_profile, &send_info, &mut send_buffer, write)?;
 
         // The buffer may be larger than the written data; the length is tracked separately.
         // Stealth padding may be applied by the transport configuration; do not mutate the
@@ -1600,8 +1703,11 @@ impl QuicFuscateConnection {
         } else {
             0..write
         };
-        let delay_opt =
-            self.stealth_manager.process_outgoing_packet(&mut send_buffer[quic_range.clone()]);
+        let delay_opt = if bypass_fec_for_path_control {
+            None
+        } else {
+            self.stealth_manager.process_outgoing_packet(&mut send_buffer[quic_range.clone()])
+        };
 
         let (packet_id, fec_data_len) = if wire_profile.is_some() {
             let quic_len =
@@ -1665,35 +1771,53 @@ impl QuicFuscateConnection {
                         systematic: packet.is_systematic,
                     }),
                     packet,
+                    send_info,
                     congestion_controlled: send_info.congestion_controlled,
                 });
             }
             self.fec_tx_sequence = self.fec_tx_sequence.wrapping_add(1);
         } else {
             self.packet_id_counter = self.packet_id_counter.wrapping_add(1);
-            self.outgoing_fec_packets.push_back(OutgoingFecPacket {
+            let outgoing = OutgoingFecPacket {
                 packet: fec_packet,
                 wire_meta: None,
+                send_info,
                 congestion_controlled: send_info.congestion_controlled,
-            });
+            };
+            if send_info.path_control {
+                self.outgoing_fec_packets.push_front(outgoing);
+            } else {
+                self.outgoing_fec_packets.push_back(outgoing);
+            }
         }
 
         // Single outbound stealth timing owner: core merges StealthManager shaping delay
         // with transport jitter (when enabled) into one release deadline. Connection::send
         // no longer maintains a parallel next_send_at gate.
-        if established {
+        if established && !bypass_fec_for_path_control {
             let transport_jitter = self.conn.transport_stealth_jitter_delay();
             if let Some(release_at) =
                 Self::compute_outbound_stealth_release(now, delay_opt, transport_jitter)
             {
                 self.next_packet_release = Some(release_at);
-                return Ok(0); // Yield immediately, do not send the just-generated packets yet.
+                return Ok((
+                    0,
+                    crate::transport::SendInfo {
+                        from: self.local_addr,
+                        to: self.peer_addr,
+                        at: now,
+                        congestion_controlled: false,
+                        path_control: false,
+                    },
+                )); // Yield immediately, do not send the just-generated packets yet.
             }
         }
 
         // Pop the first packet from the buffer to send it now.
         if let Some(packet) = self.outgoing_fec_packets.pop_front() {
             let len = packet.write_to(buf)?;
+            let mut send_info = packet.send_info;
+            send_info.at = now;
             log::trace!(
                 "connection.send: emitting packet len={} dgram_queue_after={} remaining_fec={}",
                 len,
@@ -1706,9 +1830,18 @@ impl QuicFuscateConnection {
             }
             self.record_paced_packet(now, len, packet.congestion_controlled);
             // Drop handles pool recycling automatically.
-            Ok(len)
+            Ok((len, send_info))
         } else {
-            Ok(0)
+            Ok((
+                0,
+                crate::transport::SendInfo {
+                    from: self.local_addr,
+                    to: self.peer_addr,
+                    at: now,
+                    congestion_controlled: false,
+                    path_control: false,
+                },
+            ))
         }
     }
 

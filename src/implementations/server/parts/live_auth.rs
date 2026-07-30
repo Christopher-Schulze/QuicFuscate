@@ -131,34 +131,20 @@ pub fn start_configured_standalone_admin_web_service(
     Ok(())
 }
 
-pub fn try_rebind_live_client_by_dcid(
-    clients: &mut std::collections::HashMap<SocketAddr, QuicFuscateConnection>,
+pub fn find_live_client_by_dcid(
+    clients: &std::collections::HashMap<SocketAddr, QuicFuscateConnection>,
     from: SocketAddr,
     packet: &[u8],
-    accept_loop: &AcceptLoop,
 ) -> Option<SocketAddr> {
-    let migrated_from =
-        crate::transport::packet::parse_header(packet, 0).ok().and_then(|(hdr, _)| {
-            clients.iter().find_map(|(addr, conn)| {
-                if conn.conn.source_id().as_ref() == hdr.dcid.as_slice() {
-                    Some(*addr)
-                } else {
-                    None
-                }
-            })
-        });
-
-    let old_addr = migrated_from?;
-    if old_addr == from {
-        return None;
-    }
-
-    if let Some(conn) = clients.remove(&old_addr) {
-        clients.insert(from, conn);
-    }
-    accept_loop.record_migration(old_addr, from);
-    crate::telemetry::QKEY_PATH_REBIND_TOTAL.inc();
-    Some(old_addr)
+    clients.iter().find_map(|(addr, conn)| {
+        if *addr == from {
+            return None;
+        }
+        let source_id = conn.conn.source_id();
+        let (header, _) =
+            crate::transport::packet::parse_header(packet, source_id.as_ref().len()).ok()?;
+        (source_id.as_ref() == header.dcid.as_slice()).then_some(*addr)
+    })
 }
 
 pub fn reconcile_live_clients(
@@ -501,10 +487,10 @@ pub async fn flush_live_server_outgoing(
     // Collect all outgoing packets from this connection before sending.
     // This lets us submit them as a single io_uring batch (one io_uring_enter
     // syscall instead of one sendmsg per packet).
-    let mut staging: Vec<Vec<u8>> = Vec::new();
+    let mut staging: Vec<(SocketAddr, Vec<u8>)> = Vec::new();
     while staging.len() < crate::transport::UDP_DATAGRAM_BURST_LIMIT {
-        match conn.send(out) {
-            Ok(len) if len > 0 => {
+        match conn.send_with_info(out) {
+            Ok((len, send_info)) if len > 0 => {
                 crate::telemetry::BYTES_SENT.inc_by(len as u64);
                 metrics.record_egress_datagram(len);
                 if let Some(stats) = session_stats.as_ref() {
@@ -512,7 +498,7 @@ pub async fn flush_live_server_outgoing(
                 }
                 bytes_sent = bytes_sent.saturating_add(len as u64);
                 packets_sent = packets_sent.saturating_add(1);
-                staging.push(out[..len].to_vec());
+                staging.push((send_info.to, out[..len].to_vec()));
             }
             Ok(_) => break,
             Err(e) => {
@@ -538,7 +524,7 @@ pub async fn flush_live_server_outgoing(
                 use std::os::unix::io::AsRawFd;
                 let fd = socket.as_raw_fd();
                 let packets: Vec<(SocketAddr, &[u8])> =
-                    staging.iter().map(|p| (addr, p.as_slice())).collect();
+                    staging.iter().map(|(target, packet)| (*target, packet.as_slice())).collect();
                 crate::optimize::uring_batch::server_send_batch_to(fd, &packets)
                     .unwrap_or(0)
                     .min(staging.len())
@@ -557,8 +543,8 @@ pub async fn flush_live_server_outgoing(
             }
         }
         // io_uring unavailable, failed, or partially sent: finish via individual async calls.
-        for p in staging.iter().skip(already_sent) {
-            send_live_datagram_to(socket, &addr, p).await?;
+        for (target, packet) in staging.iter().skip(already_sent) {
+            send_live_datagram_to(socket, target, packet).await?;
         }
     }
 
@@ -793,11 +779,13 @@ async fn process_live_server_client_datagram(
         forwarding_policy,
         sessions,
         fanout_queue,
+        migration_from,
         ..
     } = runtime_client;
+    let logical_addr = migration_from.unwrap_or(addr);
     record_live_snapshot_bytes_in(
         client_snapshots,
-        addr,
+        logical_addr,
         packet.len() as u64,
         format!("{:?}", conn.stealth_mode()),
         session_id,
@@ -806,7 +794,8 @@ async fn process_live_server_client_datagram(
         stats.record_received(packet.len() as u64);
     }
 
-    match conn.recv(packet) {
+    let local_addr = socket.local_addr()?;
+    match conn.recv_on_path(packet, addr, local_addr) {
         Ok(_) => {}
         Err(error) => {
             log::error!("QUIC recv failed for {}: {:?}", addr, error);
@@ -897,12 +886,17 @@ async fn process_live_server_client_datagram(
                     if !payload.is_empty() && payload[0] >> 4 == 4 {
                         let mut buf = payload.to_vec();
                         masque_normalizer.normalize_ipv4(&mut buf);
-                        enqueue_client_fanout(&masque_fanout_queue, addr, route, &buf);
+                        enqueue_client_fanout(&masque_fanout_queue, logical_addr, route, &buf);
                         if let Err(error) = tun_sink.write(&buf) {
                             log::warn!("Server TUN write (MASQUE) failed: {:?}", error);
                         }
                     } else {
-                        enqueue_client_fanout(&masque_fanout_queue, addr, route, payload);
+                        enqueue_client_fanout(
+                            &masque_fanout_queue,
+                            logical_addr,
+                            route,
+                            payload,
+                        );
                         if let Err(error) = tun_sink.write(payload) {
                             log::warn!("Server TUN write (MASQUE) failed: {:?}", error);
                         }
@@ -975,12 +969,12 @@ async fn process_live_server_client_datagram(
                         if data[0] >> 4 == 4 {
                             let mut buf = data.to_vec();
                             normalizer.normalize_ipv4(&mut buf);
-                            enqueue_client_fanout(&fanout_queue, addr, route, &buf);
+                            enqueue_client_fanout(&fanout_queue, logical_addr, route, &buf);
                             if let Err(error) = tun.write(&buf) {
                                 log::warn!("Server TUN write failed: {:?}", error);
                             }
                         } else {
-                            enqueue_client_fanout(&fanout_queue, addr, route, data);
+                            enqueue_client_fanout(&fanout_queue, logical_addr, route, data);
                             if let Err(error) = tun.write(data) {
                                 log::warn!("Server TUN write failed: {:?}", error);
                             }
@@ -1024,7 +1018,7 @@ async fn process_live_server_client_datagram(
 
     flush_live_server_outgoing(
         socket,
-        addr,
+        logical_addr,
         conn,
         out,
         metrics,

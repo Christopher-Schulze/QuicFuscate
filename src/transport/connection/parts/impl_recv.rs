@@ -1244,6 +1244,7 @@ impl Connection {
             to: send_peer,
             at: Instant::now(),
             congestion_controlled: true,
+            path_control: true,
         };
         self.mark_unvalidated_path_send(send_local, send_peer, off);
         self.stats.sent += 1;

@@ -684,6 +684,23 @@ impl Connection {
         self.pending_path_frames.pop_front()
     }
 
+    /// Returns whether a queued PATH_CHALLENGE or PATH_RESPONSE can be emitted now.
+    ///
+    /// Outer datagram owners use this to prioritize validation traffic ahead of
+    /// buffered application/FEC output without bypassing the server amplification
+    /// budget enforced by [`Self::pop_targeted_path_frame_for_send`].
+    pub fn has_sendable_path_control(&mut self) -> bool {
+        self.poll_path_validation_timeout(Instant::now());
+
+        let Some(front) = self.pending_path_frames.front() else {
+            return false;
+        };
+        self.pending_path_validation.as_ref().is_none_or(|path| {
+            !path.matches_path(front.local_addr, front.peer_addr)
+                || self.path_validation_budget_allows(path, &front.frame)
+        })
+    }
+
     fn mark_unvalidated_path_send(
         &mut self,
         local_addr: SocketAddr,
@@ -715,6 +732,17 @@ impl Connection {
         self.path_events.push_back(PathEvent::FailedValidation(local_addr, peer_addr));
     }
 
+    fn discard_own_path_challenge(&mut self, path: &PendingPathValidation) {
+        self.pending_path_frames.retain(|frame| {
+            let is_own_challenge = path.matches_path(frame.local_addr, frame.peer_addr)
+                && matches!(
+                    &frame.frame,
+                    Frame::PathChallenge { data } if *data == path.challenge
+                );
+            !is_own_challenge
+        });
+    }
+
     fn poll_path_validation_timeout(&mut self, now: Instant) {
         let should_fail = self.pending_path_validation.as_ref().is_some_and(|path| {
             now.saturating_duration_since(path.issued_at) >= PATH_VALIDATION_TIMEOUT
@@ -726,8 +754,7 @@ impl Connection {
         let Some(path) = self.pending_path_validation.take() else {
             return;
         };
-        self.pending_path_frames
-            .retain(|frame| !path.matches_path(frame.local_addr, frame.peer_addr));
+        self.discard_own_path_challenge(&path);
         self.emit_failed_validation(path.local_addr, path.peer_addr);
         self.refresh_path_count();
     }
@@ -753,7 +780,9 @@ impl Connection {
         }
 
         if origin != PathValidationOrigin::PeerPath
-            && self.last_migration_at.is_some_and(|last| last.elapsed() < MIGRATION_COOLDOWN)
+            && self
+                .last_migration_at
+                .is_some_and(|last| last.elapsed() < self.config.migration_policy.cooldown)
         {
             return Err(crate::error::ConnectionError::InvalidState);
         }
@@ -761,6 +790,7 @@ impl Connection {
         let mut challenge = [0u8; 8];
         crate::transport::rand::rand_bytes(&mut challenge);
         let next_path_id = self.path_id.wrapping_add(1);
+        let issued_at = Instant::now();
         let path = PendingPathValidation {
             path_id: next_path_id,
             old_local_addr: self.local_addr,
@@ -768,7 +798,7 @@ impl Connection {
             local_addr,
             peer_addr,
             challenge,
-            issued_at: Instant::now(),
+            issued_at,
             received_bytes: initial_received_bytes,
             sent_bytes: 0,
             origin,
@@ -805,7 +835,10 @@ impl Connection {
             return;
         }
 
-        if self.last_migration_at.is_some_and(|last| last.elapsed() < MIGRATION_COOLDOWN) {
+        if self
+            .last_migration_at
+            .is_some_and(|last| last.elapsed() < self.config.migration_policy.cooldown)
+        {
             return;
         }
 
@@ -835,23 +868,43 @@ impl Connection {
         let Some(path) = self.pending_path_validation.take() else {
             return;
         };
-        self.pending_path_frames
-            .retain(|frame| !path.matches_path(frame.local_addr, frame.peer_addr));
+        let now = Instant::now();
+        self.discard_own_path_challenge(&path);
         self.local_addr = path.local_addr;
         self.peer_addr = path.peer_addr;
         self.path_id = path.path_id;
-        // Gentle migration: reduce cwnd by 50% instead of resetting to INITIAL_WINDOW.
-        // Preserve bytes_in_flight (packets are still in flight, peer will ACK/lose them).
-        // This prevents throughput collapse on WiFi→LTE transitions.
-        self.recovery.on_path_change();
+        let kind = if path.old_local_addr.ip() == path.local_addr.ip()
+            && path.old_peer_addr.ip() == path.peer_addr.ip()
+        {
+            crate::transport::cc::PathChangeKind::PortRebinding
+        } else {
+            crate::transport::cc::PathChangeKind::NewAddress
+        };
+        self.recovery.on_path_change(
+            kind,
+            now.saturating_duration_since(path.issued_at),
+            self.config.migration_policy,
+            now,
+        );
         self.cwnd = self.recovery.cwnd;
         self.validated_paths.insert((path.local_addr, path.peer_addr));
-        self.last_migration_at = Some(Instant::now());
+        self.last_migration_at = Some(now);
         self.path_events.push_back(PathEvent::Validated(path.local_addr, path.peer_addr));
         if path.old_local_addr != path.local_addr || path.old_peer_addr != path.peer_addr {
             self.path_events.push_back(PathEvent::PeerMigrated(path.old_peer_addr, path.peer_addr));
         }
         self.refresh_path_count();
+    }
+
+    /// Returns whether validation is active for the exact network path.
+    pub fn is_path_validation_pending(
+        &self,
+        local_addr: SocketAddr,
+        peer_addr: SocketAddr,
+    ) -> bool {
+        self.pending_path_validation
+            .as_ref()
+            .is_some_and(|path| path.matches_path(local_addr, peer_addr))
     }
 
     /// Returns pending path validation state for test assertions.
@@ -879,7 +932,8 @@ impl Connection {
     #[cfg(any(test, feature = "rust-tests"))]
     pub fn expire_pending_path_validation_for_test(&mut self) {
         if let Some(path) = self.pending_path_validation.as_mut() {
-            path.issued_at = Instant::now() - PATH_VALIDATION_TIMEOUT - Duration::from_millis(1);
+            path.issued_at =
+                Instant::now() - PATH_VALIDATION_TIMEOUT - Duration::from_millis(1);
         }
         self.poll_path_validation_timeout(Instant::now());
     }
@@ -1377,5 +1431,71 @@ impl Connection {
         self.stats.recv = self.stats.recv.saturating_add(1);
         self.stats.recv_bytes = self.stats.recv_bytes.saturating_add(packet_len as u64);
         Ok(packet_len)
+    }
+}
+
+#[cfg(test)]
+mod simultaneous_path_validation_tests {
+    use super::*;
+
+    fn migrating_connection() -> (Connection, SocketAddr, SocketAddr, [u8; 8]) {
+        let mut config = Config::new_with_version(crate::transport::PROTOCOL_VERSION)
+            .expect("transport config");
+        config
+            .set_migration_policy(crate::transport::MigrationPolicy {
+                port_rebinding_cwnd_factor: 0.5,
+                cooldown: Duration::ZERO,
+                probe_target: crate::transport::MigrationProbeTarget::PreviousWindow,
+            })
+            .expect("migration policy");
+        let local: SocketAddr = "127.0.0.1:41000".parse().expect("local address");
+        let migrated_local: SocketAddr =
+            "127.0.0.1:41001".parse().expect("migrated local address");
+        let peer: SocketAddr = "127.0.0.1:4433".parse().expect("peer address");
+        let scid = ConnectionId::from_ref(b"path-race");
+        let mut connection =
+            packet::connect(None, scid.as_ref(), local, peer, &mut config).expect("connection");
+        connection.migrate(migrated_local, peer).expect("migration");
+        let (_, _, _, challenge) =
+            connection.pending_path_validation_for_test().expect("pending validation");
+        (connection, migrated_local, peer, challenge)
+    }
+
+    #[test]
+    fn successful_validation_preserves_peer_path_response() {
+        let (mut connection, migrated_local, peer, own_challenge) = migrating_connection();
+        let peer_challenge = [0xA5; 8];
+        connection.enqueue_path_response(migrated_local, peer, peer_challenge);
+
+        connection.handle_path_response_frame(migrated_local, peer, own_challenge);
+
+        let queued = connection
+            .pop_targeted_path_frame_for_send()
+            .expect("peer PATH_RESPONSE must remain queued");
+        assert_eq!(queued.local_addr, migrated_local);
+        assert_eq!(queued.peer_addr, peer);
+        assert!(matches!(
+            queued.frame,
+            Frame::PathResponse { data } if data == peer_challenge
+        ));
+    }
+
+    #[test]
+    fn validation_timeout_preserves_peer_path_response() {
+        let (mut connection, migrated_local, peer, _) = migrating_connection();
+        let peer_challenge = [0x5A; 8];
+        connection.enqueue_path_response(migrated_local, peer, peer_challenge);
+
+        connection.expire_pending_path_validation_for_test();
+
+        let queued = connection
+            .pop_targeted_path_frame_for_send()
+            .expect("peer PATH_RESPONSE must survive local validation timeout");
+        assert_eq!(queued.local_addr, migrated_local);
+        assert_eq!(queued.peer_addr, peer);
+        assert!(matches!(
+            queued.frame,
+            Frame::PathResponse { data } if data == peer_challenge
+        ));
     }
 }

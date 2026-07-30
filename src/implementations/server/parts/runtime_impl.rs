@@ -860,6 +860,7 @@ impl ServerRuntime {
                                     continue;
                                 }
                             };
+                            let migration_from = runtime_client.migration_from;
 
                             let datagram_result = match process_live_server_client_datagram(
                                 &socket,
@@ -884,6 +885,14 @@ impl ServerRuntime {
                                     }
                                 }
                             };
+                            if let Some(old_addr) = migration_from {
+                                runtime_parts.live_state.reconcile_incoming_path_update(
+                                    old_addr,
+                                    from,
+                                    local_addr,
+                                    runtime_parts.accept_loop,
+                                );
+                            }
                             runtime_parts.live_state.commit_qkey_auth_result(
                                 datagram_result.remove_auth_conn_id,
                                 datagram_result.auth_result,

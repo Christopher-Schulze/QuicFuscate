@@ -295,6 +295,7 @@ impl Connection {
                         from: self.local_addr,
                         to: self.peer_addr,
                         congestion_controlled: true,
+                        path_control: false,
                     },
                 ));
             }
@@ -514,6 +515,7 @@ impl Connection {
             to: self.peer_addr,
             at: Instant::now(),
             congestion_controlled: wrote_ack_eliciting,
+            path_control: false,
         };
         self.stats.sent += 1;
         self.stats.sent_bytes += total as u64;

@@ -324,6 +324,7 @@ impl PendingTunDownlinks {
 
 pub struct LiveServerState {
     clients: std::collections::HashMap<SocketAddr, QuicFuscateConnection>,
+    path_candidates: std::collections::HashMap<SocketAddr, SocketAddr>,
     /// Bounded downlink packets that could not be enqueued because a client's
     /// QUIC DATAGRAM queue was full. Retried before new TUN packets are read.
     pending_tun_downlinks: PendingTunDownlinks,
@@ -585,6 +586,7 @@ pub(crate) fn build_live_server_client_init(
 pub struct LiveClientRuntime<'a> {
     pub connection: &'a mut QuicFuscateConnection,
     pub client_count: usize,
+    pub migration_from: Option<SocketAddr>,
     pub conn_id: Vec<u8>,
     pub qkey_auth: Option<QKeyAuthState>,
     pub session_id: Option<SessionId>,
@@ -885,6 +887,7 @@ impl LiveServerState {
             );
         Self {
             clients: std::collections::HashMap::new(),
+            path_candidates: std::collections::HashMap::new(),
             pending_tun_downlinks: PendingTunDownlinks::new(
                 server_config.downlink_scheduler_rate_bytes_per_second,
                 server_config.downlink_scheduler_burst_bytes,
@@ -1008,6 +1011,7 @@ impl LiveServerState {
                 LiveClientAcquire::Ready(LiveClientRuntime {
                     connection,
                     client_count: count_before,
+                    migration_from: None,
                     conn_id,
                     qkey_auth,
                     session_id,
@@ -1084,6 +1088,7 @@ impl LiveServerState {
                 LiveClientAcquire::Ready(LiveClientRuntime {
                     connection,
                     client_count: count_before + 1,
+                    migration_from: None,
                     conn_id,
                     qkey_auth,
                     session_id: Some(session_id),
@@ -1109,13 +1114,21 @@ impl LiveServerState {
     where
         F: FnOnce() -> Option<LiveClientInit>,
     {
-        if self.handle_incoming_path_update(addr, packet, accept_loop) {
-            log::info!("Client path updated to {}", addr);
+        let migration_from = self.handle_incoming_path_update(addr, packet);
+        let lookup_addr = migration_from.unwrap_or(addr);
+        if let Some(old_addr) = migration_from {
+            log::debug!("Client path candidate observed: {} -> {}", old_addr, addr);
         }
 
-        let acquired =
-            self.accept_or_get_client_with(addr, accept_loop, accept_max_clients, metrics, build);
-        if let LiveClientAcquire::Ready(client) = &acquired {
+        let mut acquired = self.accept_or_get_client_with(
+            lookup_addr,
+            accept_loop,
+            accept_max_clients,
+            metrics,
+            build,
+        );
+        if let LiveClientAcquire::Ready(client) = &mut acquired {
+            client.migration_from = migration_from;
             metrics.clients_active.store(client.client_count as u64, Ordering::Relaxed);
         }
         acquired
@@ -1361,31 +1374,80 @@ impl LiveServerState {
         self.close_sessions_for_revoked_qkey(key_id, accept_loop, metrics);
     }
 
-    fn try_rebind_by_dcid(
-        &mut self,
-        from: SocketAddr,
-        packet: &[u8],
-        accept_loop: &AcceptLoop,
-    ) -> bool {
-        let old_addr = try_rebind_live_client_by_dcid(&mut self.clients, from, packet, accept_loop);
-        if let Some(old_addr) = old_addr {
-            self.pending_tun_downlinks.rebind_target(old_addr, from);
-            self.domain.rebind_remote(old_addr, from);
-            return true;
-        }
-        false
-    }
-
     pub fn handle_incoming_path_update(
         &mut self,
         from: SocketAddr,
         packet: &[u8],
+    ) -> Option<SocketAddr> {
+        if self.clients.contains_key(&from) {
+            return None;
+        }
+        if let Some(old_addr) = self.path_candidates.get(&from).copied() {
+            if self.clients.contains_key(&old_addr) {
+                return Some(old_addr);
+            }
+            self.path_candidates.remove(&from);
+        }
+        let old_addr = find_live_client_by_dcid(&self.clients, from, packet)?;
+        self.path_candidates.retain(|_, candidate_old| *candidate_old != old_addr);
+        self.path_candidates.insert(from, old_addr);
+        Some(old_addr)
+    }
+
+    pub fn commit_validated_path_update(
+        &mut self,
+        old_addr: SocketAddr,
+        new_addr: SocketAddr,
+        local_addr: SocketAddr,
         accept_loop: &AcceptLoop,
     ) -> bool {
-        if self.clients.contains_key(&from) {
+        if old_addr == new_addr || self.clients.contains_key(&new_addr) {
             return false;
         }
-        self.try_rebind_by_dcid(from, packet, accept_loop)
+        let validated = self.clients.get(&old_addr).is_some_and(|connection| {
+            connection
+                .conn
+                .path_stats()
+                .next()
+                .is_some_and(|path| path.local_addr == local_addr && path.peer_addr == new_addr)
+        });
+        if !validated {
+            return false;
+        }
+
+        let Some(connection) = self.clients.remove(&old_addr) else {
+            return false;
+        };
+        self.clients.insert(new_addr, connection);
+        self.path_candidates.remove(&new_addr);
+        self.pending_tun_downlinks.rebind_target(old_addr, new_addr);
+        self.domain.rebind_remote(old_addr, new_addr);
+        accept_loop.record_migration(old_addr, new_addr);
+        crate::telemetry::QKEY_PATH_REBIND_TOTAL.inc();
+        log::info!("Client path validated and committed: {} -> {}", old_addr, new_addr);
+        true
+    }
+
+    pub fn reconcile_incoming_path_update(
+        &mut self,
+        old_addr: SocketAddr,
+        new_addr: SocketAddr,
+        local_addr: SocketAddr,
+        accept_loop: &AcceptLoop,
+    ) -> bool {
+        if self.commit_validated_path_update(old_addr, new_addr, local_addr, accept_loop) {
+            return true;
+        }
+        let validation_pending = self
+            .clients
+            .get(&old_addr)
+            .is_some_and(|connection| {
+                connection.conn.is_path_validation_pending(local_addr, new_addr)
+            });
+        if !validation_pending {
+            self.path_candidates.remove(&new_addr);
+        }
+        false
     }
 
     pub fn kick_client(
@@ -1517,6 +1579,13 @@ impl LiveServerState {
     }
 
     pub fn reconcile(&mut self, accept_loop: &AcceptLoop, metrics: &Metrics) {
+        self.path_candidates.retain(|new_addr, old_addr| {
+            self.clients.get(old_addr).is_some_and(|connection| {
+                connection.conn.path_stats().next().is_some_and(|active| {
+                    connection.conn.is_path_validation_pending(active.local_addr, *new_addr)
+                })
+            })
+        });
         let closed_pending: Vec<(Vec<u8>, IpAddr, String)> = self
             .clients
             .iter()
@@ -1810,5 +1879,92 @@ impl LiveServerState {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod migration_commit_tests {
+    use super::*;
+
+    #[test]
+    fn server_rebind_commits_only_after_transport_path_validation() {
+        let mut live_state = LiveServerState::new(ServerConfig::default());
+        let accept_loop = AcceptLoop::new(AcceptConfig::default());
+        let local_addr: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+        let old_addr: SocketAddr = "127.0.0.1:54321".parse().unwrap();
+        let new_addr: SocketAddr = "127.0.0.1:54322".parse().unwrap();
+        let (session_id, _, _) = live_state.domain.accept(old_addr).expect("session");
+        let mut transport =
+            crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION)
+                .expect("transport config");
+        let mut connection = create_live_server_connection(
+            local_addr,
+            old_addr,
+            &mut transport,
+            StealthConfig::default(),
+            FecConfig::default(),
+            OptimizeConfig::default(),
+            &crate::transport::ConnectionId::from_ref(b"migration-commit"),
+        )
+        .expect("server connection");
+        connection.conn.migrate(local_addr, new_addr).expect("migration candidate");
+        let (_, _, _, challenge) =
+            connection.conn.pending_path_validation_for_test().expect("pending validation");
+        let source_id = connection.conn.source_id().as_ref().to_vec();
+        live_state.clients.insert(old_addr, connection);
+        live_state
+            .pending_tun_downlinks
+            .enqueue(old_addr, session_id, 1, vec![1], Instant::now())
+            .expect("pending downlink");
+        let mut routed_packet = [0u8; 64];
+        let header_len =
+            crate::transport::packet::format_short_header(&source_id, false, &mut routed_packet)
+                .expect("short header");
+        routed_packet[header_len] = 0;
+
+        assert_eq!(
+            live_state.handle_incoming_path_update(
+                new_addr,
+                &routed_packet[..header_len.saturating_add(1)],
+            ),
+            Some(old_addr)
+        );
+        assert!(live_state.clients.contains_key(&old_addr));
+        assert!(!live_state.clients.contains_key(&new_addr));
+
+        assert!(!live_state.reconcile_incoming_path_update(
+            old_addr,
+            new_addr,
+            local_addr,
+            &accept_loop,
+        ));
+        assert_eq!(live_state.path_candidates.get(&new_addr), Some(&old_addr));
+        assert!(live_state.clients.contains_key(&old_addr));
+        assert!(!live_state.clients.contains_key(&new_addr));
+        assert_eq!(live_state.domain.session_id_by_remote(old_addr), Some(session_id));
+        assert_eq!(live_state.domain.session_id_by_remote(new_addr), None);
+
+        live_state
+            .clients
+            .get_mut(&old_addr)
+            .expect("old registry key")
+            .conn
+            .receive_path_response_for_test(local_addr, new_addr, challenge);
+
+        assert!(live_state.reconcile_incoming_path_update(
+            old_addr,
+            new_addr,
+            local_addr,
+            &accept_loop,
+        ));
+        assert!(!live_state.clients.contains_key(&old_addr));
+        assert!(live_state.clients.contains_key(&new_addr));
+        assert_eq!(live_state.domain.session_id_by_remote(old_addr), None);
+        assert_eq!(live_state.domain.session_id_by_remote(new_addr), Some(session_id));
+        let downlink = live_state
+            .pending_tun_downlinks
+            .pop_next(&std::collections::HashSet::new())
+            .expect("rebound downlink");
+        assert_eq!(downlink.target, new_addr);
     }
 }

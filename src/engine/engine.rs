@@ -126,6 +126,13 @@ fn build_runtime_transport_config(config: &EngineConfig) -> Result<Config, Engin
         transport.enable_early_data();
     }
     transport.set_disable_active_migration(!config.connection.enable_migration);
+    transport
+        .set_migration_policy(crate::transport::MigrationPolicy {
+            port_rebinding_cwnd_factor: config.connection.migration_cwnd_reduction_factor,
+            cooldown: Duration::from_millis(config.connection.migration_cooldown_ms),
+            probe_target: config.connection.migration_probe_target,
+        })
+        .map_err(|error| EngineError::Config(format!("migration policy invalid: {error}")))?;
     transport.set_nat_traversal(
         config.nat_traversal.to_transport_config().map_err(|error| {
             EngineError::Config(format!("NAT traversal config invalid: {error}"))
@@ -1736,6 +1743,21 @@ mod tests {
         let disabled_transport =
             build_runtime_transport_config(&disabled).expect("transport config");
         assert!(disabled_transport.disable_active_migration);
+    }
+
+    #[test]
+    fn test_runtime_transport_config_carries_migration_policy() {
+        let mut config = EngineConfig::default();
+        config.connection.migration_cwnd_reduction_factor = 0.25;
+        config.connection.migration_cooldown_ms = 0;
+        config.connection.migration_probe_target =
+            crate::transport::MigrationProbeTarget::ReducedWindow;
+
+        let transport = build_runtime_transport_config(&config).expect("transport config");
+        let policy = transport.migration_policy();
+        assert_eq!(policy.port_rebinding_cwnd_factor, 0.25);
+        assert_eq!(policy.cooldown, Duration::ZERO);
+        assert_eq!(policy.probe_target, crate::transport::MigrationProbeTarget::ReducedWindow);
     }
 
     #[test]

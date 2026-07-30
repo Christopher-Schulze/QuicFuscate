@@ -10,7 +10,7 @@ use core::cmp::{max, min};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::CongestionController;
+use super::{CongestionController, PathChangeEvent, PathChangeKind};
 
 // ---------------------------------------------------------------------------
 // Constants (from IETF draft-ietf-ccwg-bbr-04)
@@ -571,6 +571,45 @@ impl CongestionController for Bbr2 {
         self.startup_pacing_floor =
             Self::startup_pacing_rate(self.cwnd, self.rtt, self.pacing_gain);
         self.pacing_rate = self.startup_pacing_floor;
+    }
+
+    fn on_path_change(&mut self, event: PathChangeEvent) {
+        self.cwnd = event.congestion_window.max(self.mss * 2);
+        self.ack_epoch_acked = 0;
+        self.extra_acked = 0;
+        self.idle_restart = false;
+        self.probe_rtt_done_stamp = None;
+        self.prior_cwnd = event.probe_target.max(self.cwnd);
+
+        if event.kind == PathChangeKind::NewAddress {
+            self.state = State::Startup;
+            self.pacing_gain = STARTUP_PACING_GAIN;
+            self.cwnd_gain = STARTUP_CWND_GAIN;
+            self.max_bw_filter = MaxBwFilter::new();
+            self.max_bw = 0;
+            self.min_rtt = event.validation_rtt;
+            self.rtt = event.validation_rtt;
+            self.rtt_var = event.validation_rtt / 2;
+            self.min_rtt_stamp = event.now;
+            self.loss_acked = 0.0;
+            self.loss_lost = 0.0;
+            self.loss_in_round = 0.0;
+            self.round_loss_acked = 0.0;
+            self.delivered = 0;
+            self.delivered_time = event.now;
+            self.app_limited = 0;
+            self.round_count = 0;
+            self.round_start = false;
+            self.next_round_delivered = 0;
+            self.full_bw_reached = false;
+            self.full_bw_count = 0;
+            self.full_bw = 0;
+            self.cycle_count = 0;
+            self.cycle_stamp = event.now;
+            self.startup_pacing_floor =
+                Self::startup_pacing_rate(self.cwnd, self.rtt, STARTUP_PACING_GAIN);
+            self.pacing_rate = self.startup_pacing_floor;
+        }
     }
 
     fn cwnd(&self) -> usize {

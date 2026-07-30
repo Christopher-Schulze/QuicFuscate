@@ -238,6 +238,14 @@ impl ClientConnection {
             tc.enable_early_data();
         }
 
+        tc.set_disable_active_migration(!config.connection.enable_migration);
+        tc.set_migration_policy(crate::transport::MigrationPolicy {
+            port_rebinding_cwnd_factor: config.connection.migration_cwnd_reduction_factor,
+            cooldown: std::time::Duration::from_millis(config.connection.migration_cooldown_ms),
+            probe_target: config.connection.migration_probe_target,
+        })
+        .map_err(|e| EngineError::Config(format!("Migration policy invalid: {e}")))?;
+
         tc.set_nat_traversal(
             config
                 .nat_traversal
@@ -388,6 +396,23 @@ mod tests {
         assert_eq!(nat.mode, crate::transport::NatTraversalMode::ConnectivityFallback);
         assert!(nat.ice_enabled);
         assert_eq!(nat.stun_servers.len(), 1);
+    }
+
+    #[test]
+    fn test_client_transport_config_carries_migration_policy() {
+        let mut config = EngineConfig::default();
+        config.connection.enable_migration = false;
+        config.connection.migration_cwnd_reduction_factor = 1.0;
+        config.connection.migration_cooldown_ms = 1250;
+        config.connection.migration_probe_target =
+            crate::transport::MigrationProbeTarget::ReducedWindow;
+
+        let tc = ClientConnection::build_transport_config(&config).unwrap();
+        assert!(tc.disable_active_migration);
+        let policy = tc.migration_policy();
+        assert_eq!(policy.port_rebinding_cwnd_factor, 1.0);
+        assert_eq!(policy.cooldown, std::time::Duration::from_millis(1250));
+        assert_eq!(policy.probe_target, crate::transport::MigrationProbeTarget::ReducedWindow);
     }
 
     #[test]

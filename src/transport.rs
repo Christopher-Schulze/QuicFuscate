@@ -42,7 +42,10 @@ pub mod version;
 mod xdp;
 
 pub use anti_replay::{AntiReplayConfig, StrikeRegister};
-pub use config::{Config, NatDiscoveryReason, NatTraversalConfig, NatTraversalMode, PmtuPolicy};
+pub use config::{
+    Config, MigrationPolicy, MigrationProbeTarget, NatDiscoveryReason, NatTraversalConfig,
+    NatTraversalMode, PmtuPolicy,
+};
 #[cfg(feature = "stream_ring_buffer")]
 pub use connection::StreamRingBuffer;
 #[cfg(feature = "benches")]
@@ -559,6 +562,12 @@ pub struct SendInfo {
     /// Whether the packet contains frames governed by congestion control.
     /// ACK-only packets are false so external pacers never delay ACK release.
     pub congestion_controlled: bool,
+    /// Whether this datagram exclusively carries PATH_CHALLENGE or PATH_RESPONSE.
+    ///
+    /// Path-control datagrams must bypass outer FEC framing and stealth delay so
+    /// an endpoint can validate a candidate address before accepting FEC traffic
+    /// from that address.
+    pub path_control: bool,
 }
 
 impl ConnectionId {

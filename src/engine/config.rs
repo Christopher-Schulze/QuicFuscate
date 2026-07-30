@@ -218,6 +218,12 @@ pub struct ConnectionConfig {
     pub max_streams_uni: u64,
     /// Enable validated connection migration
     pub enable_migration: bool,
+    /// Retained congestion-window fraction for port-only rebinding.
+    pub migration_cwnd_reduction_factor: f64,
+    /// Minimum interval between successful migrations.
+    pub migration_cooldown_ms: u64,
+    /// Congestion recovery boundary after port-only rebinding.
+    pub migration_probe_target: crate::transport::MigrationProbeTarget,
 }
 
 impl Default for ConnectionConfig {
@@ -238,6 +244,9 @@ impl Default for ConnectionConfig {
             max_streams_bidi: 100,
             max_streams_uni: 100,
             enable_migration: true,
+            migration_cwnd_reduction_factor: 0.5,
+            migration_cooldown_ms: 750,
+            migration_probe_target: crate::transport::MigrationProbeTarget::PreviousWindow,
         }
     }
 }
@@ -249,6 +258,18 @@ impl ConnectionConfig {
         }
         if self.idle_timeout_ms == 0 {
             return Err(ConfigError::Validation("idle_timeout_ms must be > 0".into()));
+        }
+        if !self.migration_cwnd_reduction_factor.is_finite()
+            || !(0.0..=1.0).contains(&self.migration_cwnd_reduction_factor)
+        {
+            return Err(ConfigError::Validation(
+                "migration_cwnd_reduction_factor must be finite and within [0, 1]".into(),
+            ));
+        }
+        if self.migration_cooldown_ms > 60_000 {
+            return Err(ConfigError::Validation(
+                "migration_cooldown_ms must not exceed 60000".into(),
+            ));
         }
         if let Some(id) = self.qkey_id.as_deref() {
             let id = id.trim();
@@ -1481,6 +1502,31 @@ mode = "roaming"
     fn test_validation_fails_empty_remote() {
         let mut config = EngineConfig::default();
         config.connection.remote = String::new();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn migration_policy_toml_roundtrip_and_bounds() {
+        let mut config = EngineConfig::default();
+        config.connection.migration_cwnd_reduction_factor = 0.25;
+        config.connection.migration_cooldown_ms = 0;
+        config.connection.migration_probe_target =
+            crate::transport::MigrationProbeTarget::ReducedWindow;
+        config.validate().unwrap();
+
+        let encoded = toml::to_string(&config).unwrap();
+        let decoded = EngineConfig::from_toml(&encoded).unwrap();
+        assert_eq!(decoded.connection.migration_cwnd_reduction_factor, 0.25);
+        assert_eq!(decoded.connection.migration_cooldown_ms, 0);
+        assert_eq!(
+            decoded.connection.migration_probe_target,
+            crate::transport::MigrationProbeTarget::ReducedWindow
+        );
+
+        config.connection.migration_cwnd_reduction_factor = 1.01;
+        assert!(config.validate().is_err());
+        config.connection.migration_cwnd_reduction_factor = 0.5;
+        config.connection.migration_cooldown_ms = 60_001;
         assert!(config.validate().is_err());
     }
 
