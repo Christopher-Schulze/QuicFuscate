@@ -316,8 +316,10 @@ try {
         throw "QuicFuscate client log exposed the raw QKey"
     }
 
-    Stop-Process -Id $ClientProcess.Id -Force
-    Wait-Process -Id $ClientProcess.Id -Timeout 15
+    Stop-Process -InputObject $ClientProcess -Force -ErrorAction SilentlyContinue
+    if (-not $ClientProcess.WaitForExit(15000)) {
+        throw "QuicFuscate client did not exit within 15 seconds"
+    }
     $ClientProcess = $null
 
     Invoke-ExactFirewallCleanup
