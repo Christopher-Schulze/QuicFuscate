@@ -1,0 +1,79 @@
+name: Windows Omega E2E
+
+on:
+  workflow_dispatch:
+
+jobs:
+  authenticated-wintun-tunnel:
+    runs-on: windows-latest
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-omega-e2e-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build native Wintun client and residue verifier
+        run: |
+          cargo build --bin quicfuscate --features tun-windows
+          cargo test --lib --features tun-windows,rust-tests --no-run
+
+      - name: Provision verified upstream Wintun
+        shell: pwsh
+        run: |
+          ./scripts/utils/provision-wintun.ps1 `
+            -DestinationDirectory "target/debug" `
+            -EvidencePath "scripts/out/tests/wintun-omega-e2e/wintun-client-provenance.json"
+          ./scripts/utils/provision-wintun.ps1 `
+            -DestinationDirectory "target/debug/deps" `
+            -EvidencePath "scripts/out/tests/wintun-omega-e2e/wintun-test-provenance.json"
+
+      - name: Prove authenticated Wintun tunnel against Omega
+        shell: pwsh
+        env:
+          QUICFUSCATE_WINDOWS_E2E_ENDPOINT: ${{ secrets.QUICFUSCATE_WINDOWS_E2E_ENDPOINT }}
+          QUICFUSCATE_WINDOWS_E2E_QKEY: ${{ secrets.QUICFUSCATE_WINDOWS_E2E_QKEY }}
+          QUICFUSCATE_WINDOWS_E2E_CA_PEM: ${{ secrets.QUICFUSCATE_WINDOWS_E2E_CA_PEM }}
+        run: |
+          ./scripts/tests/wintun-omega-e2e.ps1 `
+            -BinaryPath "target/debug/quicfuscate.exe" `
+            -EvidenceDirectory "scripts/out/tests/wintun-omega-e2e"
+
+      - name: Verify zero Windows WFP object residue
+        if: always()
+        run: >-
+          cargo test --lib --features tun-windows,rust-tests
+          implementations::client::killswitch::windows::tests::native_wfp_managed_objects_are_absent
+          -- --ignored --exact --nocapture --test-threads=1
+
+      - name: Verify zero Wintun adapter residue
+        if: always()
+        shell: pwsh
+        run: |
+          $residue = @(Get-NetAdapter -Name "QuicFuscate-CI-Omega" -IncludeHidden `
+            -ErrorAction SilentlyContinue)
+          if ($residue.Count -ne 0) {
+            $residue | Format-Table -AutoSize | Out-String | Write-Error
+            throw "Authenticated E2E left $($residue.Count) Wintun adapter(s)"
+          }
+
+      - name: Upload native Windows-Omega evidence
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: windows-omega-e2e
+          path: scripts/out/tests/wintun-omega-e2e/
+          if-no-files-found: warn

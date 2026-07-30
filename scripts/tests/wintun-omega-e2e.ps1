@@ -1,0 +1,256 @@
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$BinaryPath,
+
+    [Parameter(Mandatory = $true)]
+    [string]$EvidenceDirectory,
+
+    [string]$AdapterName = "QuicFuscate-CI-Omega",
+    [string]$ClientTunAddress = "10.252.0.2",
+    [string]$ServerTunAddress = "10.252.0.1"
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+$Endpoint = $env:QUICFUSCATE_WINDOWS_E2E_ENDPOINT
+$QKey = $env:QUICFUSCATE_WINDOWS_E2E_QKEY
+$CaPem = $env:QUICFUSCATE_WINDOWS_E2E_CA_PEM
+$ClientProcess = $null
+$CleanupRequired = $false
+$TemporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) `
+    "quicfuscate-wintun-omega-$([guid]::NewGuid())"
+$CaPath = Join-Path $TemporaryRoot "ca.crt"
+$StandardOutputPath = Join-Path $TemporaryRoot "client.stdout.log"
+$StandardErrorPath = Join-Path $TemporaryRoot "client.stderr.log"
+
+function Require-SecretValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+
+        [AllowEmptyString()]
+        [string]$Value
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        throw "Required secret environment variable $Name is missing"
+    }
+}
+
+function Wait-ForLogPattern {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Paths,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Pattern,
+
+        [Parameter(Mandatory = $true)]
+        [System.Diagnostics.Process]$Process,
+
+        [int]$TimeoutSeconds = 60
+    )
+
+    $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ([DateTime]::UtcNow -lt $Deadline) {
+        $Process.Refresh()
+        if ($Process.HasExited) {
+            throw "QuicFuscate client exited before log pattern '$Pattern'"
+        }
+        foreach ($Path in $Paths) {
+            if ((Test-Path -LiteralPath $Path -PathType Leaf) -and
+                [System.IO.File]::ReadAllText($Path).Contains($Pattern)) {
+                return
+            }
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    throw "Timed out waiting for QuicFuscate client log pattern '$Pattern'"
+}
+
+function Invoke-ExactFirewallCleanup {
+    if (-not (Test-Path -LiteralPath $BinaryPath -PathType Leaf)) {
+        return
+    }
+    & $BinaryPath client --remote $Endpoint --cleanup-firewall
+    if ($LASTEXITCODE -ne 0) {
+        throw "QuicFuscate stale firewall cleanup exited with $LASTEXITCODE"
+    }
+}
+
+function Wait-ForAdapterAbsence {
+    $Deadline = [DateTime]::UtcNow.AddSeconds(15)
+    do {
+        $Adapters = @(Get-NetAdapter -Name $AdapterName -IncludeHidden `
+            -ErrorAction SilentlyContinue)
+        if ($Adapters.Count -eq 0) {
+            return
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $Deadline)
+
+    throw "Wintun adapter '$AdapterName' remained after client process exit"
+}
+
+Require-SecretValue -Name "QUICFUSCATE_WINDOWS_E2E_ENDPOINT" -Value $Endpoint
+Require-SecretValue -Name "QUICFUSCATE_WINDOWS_E2E_QKEY" -Value $QKey
+Require-SecretValue -Name "QUICFUSCATE_WINDOWS_E2E_CA_PEM" -Value $CaPem
+
+if (-not (Test-Path -LiteralPath $BinaryPath -PathType Leaf)) {
+    throw "QuicFuscate binary does not exist: $BinaryPath"
+}
+$WintunPath = Join-Path (Split-Path -Parent $BinaryPath) "wintun.dll"
+if (-not (Test-Path -LiteralPath $WintunPath -PathType Leaf)) {
+    throw "Verified Wintun DLL is not beside the QuicFuscate binary: $WintunPath"
+}
+
+$Identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$Principal = [Security.Principal.WindowsPrincipal]::new($Identity)
+if (-not $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw "The native Wintun Omega proof requires an elevated Windows runner"
+}
+
+$EndpointHost = $Endpoint
+if ($EndpointHost.StartsWith("[")) {
+    $ClosingBracket = $EndpointHost.IndexOf("]")
+    if ($ClosingBracket -lt 2) {
+        throw "Invalid bracketed endpoint: $Endpoint"
+    }
+    $EndpointHost = $EndpointHost.Substring(1, $ClosingBracket - 1)
+}
+elseif ($EndpointHost.Contains(":")) {
+    $EndpointHost = $EndpointHost.Substring(0, $EndpointHost.LastIndexOf(":"))
+}
+if ([string]::IsNullOrWhiteSpace($EndpointHost)) {
+    throw "Invalid endpoint host: $Endpoint"
+}
+
+New-Item -ItemType Directory -Path $TemporaryRoot | Out-Null
+New-Item -ItemType Directory -Path $EvidenceDirectory -Force | Out-Null
+[System.IO.File]::WriteAllText($CaPath, $CaPem)
+[Environment]::SetEnvironmentVariable("QUICFUSCATE_WINDOWS_E2E_ENDPOINT", $null, "Process")
+[Environment]::SetEnvironmentVariable("QUICFUSCATE_WINDOWS_E2E_QKEY", $null, "Process")
+[Environment]::SetEnvironmentVariable("QUICFUSCATE_WINDOWS_E2E_CA_PEM", $null, "Process")
+$CaPem = $null
+
+try {
+    Invoke-ExactFirewallCleanup
+
+    $Arguments = @(
+        "client",
+        "--remote", $Endpoint,
+        "--url", "https://$EndpointHost/",
+        "--qkey", $QKey,
+        "--ca-file", $CaPath,
+        "--verify-peer",
+        "--no-utls",
+        "--tun",
+        "--tun-name", $AdapterName,
+        "--tun-ip", $ClientTunAddress,
+        "--tun-netmask", "255.255.255.0",
+        "--kill-switch",
+        "--heartbeat-timeout-ms", "15000",
+        "-v"
+    )
+    $ClientProcess = Start-Process -FilePath $BinaryPath `
+        -ArgumentList $Arguments `
+        -NoNewWindow `
+        -PassThru `
+        -RedirectStandardOutput $StandardOutputPath `
+        -RedirectStandardError $StandardErrorPath
+    $Arguments[6] = "<cleared>"
+    $CleanupRequired = $true
+
+    Wait-ForLogPattern -Paths @($StandardOutputPath, $StandardErrorPath) `
+        -Pattern "TLS handshake complete" `
+        -Process $ClientProcess
+    Wait-ForLogPattern -Paths @($StandardOutputPath, $StandardErrorPath) `
+        -Pattern "Kill switch: VPN traffic allowed, non-VPN blocked" `
+        -Process $ClientProcess
+
+    $PingSuccesses = 0
+    for ($Attempt = 1; $Attempt -le 5; $Attempt++) {
+        if (Test-Connection -TargetName $ServerTunAddress -IPv4 -Count 1 `
+            -Quiet -TimeoutSeconds 3) {
+            $PingSuccesses++
+        }
+    }
+    if ($PingSuccesses -ne 5) {
+        throw "Authenticated Wintun tunnel ping passed $PingSuccesses/5 attempts"
+    }
+
+    $ClientProcess.Refresh()
+    if ($ClientProcess.HasExited) {
+        throw "QuicFuscate client exited after authenticated tunnel ping"
+    }
+
+    $CombinedLog = ""
+    foreach ($LogPath in @($StandardOutputPath, $StandardErrorPath)) {
+        if (Test-Path -LiteralPath $LogPath -PathType Leaf) {
+            $CombinedLog += [System.IO.File]::ReadAllText($LogPath)
+        }
+    }
+    if ($CombinedLog.Contains($QKey)) {
+        throw "QuicFuscate client log exposed the raw QKey"
+    }
+
+    Stop-Process -Id $ClientProcess.Id -Force
+    Wait-Process -Id $ClientProcess.Id -Timeout 15
+    $ClientProcess = $null
+
+    Invoke-ExactFirewallCleanup
+    $CleanupRequired = $false
+    Wait-ForAdapterAbsence
+
+    $Os = Get-CimInstance Win32_OperatingSystem
+    $EndpointHash = [Convert]::ToHexString(
+        [Security.Cryptography.SHA256]::HashData(
+            [Text.Encoding]::UTF8.GetBytes($Endpoint)
+        )
+    ).ToLowerInvariant()
+    $BinarySha256 =
+        (Get-FileHash -LiteralPath $BinaryPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    [ordered]@{
+        schema = "quicfuscate.wintun-omega-e2e.v1"
+        git_sha = $env:GITHUB_SHA
+        windows_caption = $Os.Caption
+        windows_version = $Os.Version
+        windows_build = $Os.BuildNumber
+        binary_sha256 = $BinarySha256
+        endpoint_sha256 = $EndpointHash
+        adapter_name = $AdapterName
+        client_tun_address = $ClientTunAddress
+        server_tun_address = $ServerTunAddress
+        tls_authenticated = $true
+        connected_wfp_policy = $true
+        tunnel_ping_attempts = 5
+        tunnel_ping_successes = $PingSuccesses
+        client_process_exit = "forced"
+        stale_cleanup = $true
+        adapter_residue = 0
+        qkey_log_residue = 0
+    } | ConvertTo-Json | Set-Content `
+        -LiteralPath (Join-Path $EvidenceDirectory "windows-omega-e2e.json") `
+        -Encoding utf8
+
+    Write-Output "Native Windows-to-Omega tunnel proof passed: authenticated=true ping=5/5 cleanup=true"
+}
+finally {
+    if ($null -ne $ClientProcess) {
+        $ClientProcess.Refresh()
+        if (-not $ClientProcess.HasExited) {
+            Stop-Process -Id $ClientProcess.Id -Force -ErrorAction SilentlyContinue
+            Wait-Process -Id $ClientProcess.Id -Timeout 15 -ErrorAction SilentlyContinue
+        }
+    }
+    if ($CleanupRequired) {
+        Invoke-ExactFirewallCleanup
+    }
+    Wait-ForAdapterAbsence
+    if (Test-Path -LiteralPath $TemporaryRoot) {
+        Remove-Item -LiteralPath $TemporaryRoot -Recurse -Force
+    }
+    $QKey = $null
+}
