@@ -873,6 +873,21 @@ mod tests {
     }
 
     #[cfg(all(target_os = "windows", feature = "tun-windows"))]
+    fn powershell_output(script: &str) -> io::Result<std::process::Output> {
+        std::process::Command::new("powershell.exe")
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ])
+            .output()
+    }
+
+    #[cfg(all(target_os = "windows", feature = "tun-windows"))]
     struct NativeFirewallRule {
         name: String,
         active: bool,
@@ -929,12 +944,25 @@ mod tests {
     fn wait_for_powershell(script: &str, expected_success: bool) {
         let deadline = std::time::Instant::now() + NATIVE_TEST_TIMEOUT;
         loop {
-            if powershell_succeeds(script) == expected_success {
+            let (succeeded, diagnostic) = match powershell_output(script) {
+                Ok(output) => {
+                    let diagnostic = format!(
+                        "status={:?}\nstdout={}\nstderr={}",
+                        output.status.code(),
+                        String::from_utf8_lossy(&output.stdout).trim(),
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    );
+                    (output.status.success(), diagnostic)
+                }
+                Err(error) => (false, format!("PowerShell execution failed: {error}")),
+            };
+            if succeeded == expected_success {
                 return;
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "PowerShell state did not converge before the native Wintun deadline"
+                "PowerShell state did not converge before the native Wintun deadline:\n\
+                 {diagnostic}"
             );
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
@@ -951,12 +979,19 @@ mod tests {
              $ipv6 = Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv6 \
                  -ErrorAction SilentlyContinue | Where-Object IPAddress -eq '{NATIVE_LOCAL_IP6}'; \
              $interface4 = Get-NetIPInterface -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 \
-                 -ErrorAction SilentlyContinue; \
+                 -NlMtuBytes {mtu} -ErrorAction SilentlyContinue; \
              $interface6 = Get-NetIPInterface -InterfaceIndex $adapter.ifIndex -AddressFamily IPv6 \
-                 -ErrorAction SilentlyContinue; \
+                 -NlMtuBytes {mtu} -ErrorAction SilentlyContinue; \
+             [ordered]@{{ \
+                 adapter = $null -ne $adapter; \
+                 if_index = if ($null -ne $adapter) {{ $adapter.ifIndex }} else {{ $null }}; \
+                 ipv4 = @($ipv4).Count; \
+                 ipv6 = @($ipv6).Count; \
+                 mtu4 = @($interface4).Count; \
+                 mtu6 = @($interface6).Count \
+             }} | ConvertTo-Json -Compress | Write-Output; \
              if ($null -eq $ipv4 -or $null -eq $ipv6 -or $null -eq $interface4 -or \
-                 $null -eq $interface6 -or $interface4.NlMtuBytes -ne {mtu} -or \
-                 $interface6.NlMtuBytes -ne {mtu}) {{ exit 1 }}; exit 0"
+                 $null -eq $interface6) {{ exit 1 }}; exit 0"
         )
     }
 
