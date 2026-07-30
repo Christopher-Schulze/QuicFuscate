@@ -720,9 +720,13 @@ mod tests {
     #[cfg(all(target_os = "windows", feature = "tun-windows"))]
     const NATIVE_LOCAL_IP6: Ipv6Addr = Ipv6Addr::new(0xfd53, 0, 0, 0, 0, 0, 0, 1);
     #[cfg(all(target_os = "windows", feature = "tun-windows"))]
+    const NATIVE_PEER_IP6: Ipv6Addr = Ipv6Addr::new(0xfd53, 0, 0, 0, 0, 0, 0, 2);
+    #[cfg(all(target_os = "windows", feature = "tun-windows"))]
     const NATIVE_MTU: u16 = 1420;
     #[cfg(all(target_os = "windows", feature = "tun-windows"))]
     const NATIVE_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    #[cfg(all(target_os = "windows", feature = "tun-windows"))]
+    const NATIVE_BLOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(750);
 
     #[cfg(not(target_os = "windows"))]
     #[test]
@@ -1073,6 +1077,104 @@ mod tests {
     }
 
     #[cfg(all(target_os = "windows", feature = "tun-windows"))]
+    fn is_udp_ipv6_packet(
+        packet: &[u8],
+        source_ip: Ipv6Addr,
+        source_port: u16,
+        destination_ip: Ipv6Addr,
+        destination_port: u16,
+        payload: &[u8],
+    ) -> bool {
+        if packet.len() < 48 || packet[0] >> 4 != 6 || packet[6] != 17 {
+            return false;
+        }
+        let udp_len = usize::from(u16::from_be_bytes([packet[44], packet[45]]));
+        if udp_len < 8 || packet.len() < 40 + udp_len {
+            return false;
+        }
+        packet[8..24] == source_ip.octets()
+            && packet[24..40] == destination_ip.octets()
+            && packet[40..42] == source_port.to_be_bytes()
+            && packet[42..44] == destination_port.to_be_bytes()
+            && packet[48..40 + udp_len] == *payload
+    }
+
+    #[cfg(all(target_os = "windows", feature = "tun-windows"))]
+    fn wait_for_native_packet(
+        receiver: &std::sync::mpsc::Receiver<Vec<u8>>,
+        timeout: std::time::Duration,
+        predicate: impl Fn(&[u8]) -> bool,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            match receiver.recv_timeout(remaining) {
+                Ok(packet) if predicate(&packet) => return true,
+                Ok(_) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return false,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("native Wintun capture reader disconnected")
+                }
+            }
+        }
+    }
+
+    #[cfg(all(target_os = "windows", feature = "tun-windows"))]
+    fn assert_native_udp_blocked(
+        socket: &std::net::UdpSocket,
+        target: std::net::SocketAddr,
+        payload: &[u8],
+        receiver: &std::sync::mpsc::Receiver<Vec<u8>>,
+        predicate: impl Fn(&[u8]) -> bool,
+    ) {
+        match socket.send_to(payload, target) {
+            Ok(length) => {
+                assert_eq!(length, payload.len());
+                assert!(
+                    !wait_for_native_packet(receiver, NATIVE_BLOCK_TIMEOUT, predicate),
+                    "blocked UDP packet reached the Wintun ring"
+                );
+            }
+            Err(error) => assert_eq!(
+                error.kind(),
+                io::ErrorKind::PermissionDenied,
+                "WFP block returned an unrelated socket error: {error}"
+            ),
+        }
+    }
+
+    #[cfg(all(target_os = "windows", feature = "tun-windows"))]
+    fn assert_native_udp_permitted(
+        socket: &std::net::UdpSocket,
+        target: std::net::SocketAddr,
+        payload: &[u8],
+        receiver: &std::sync::mpsc::Receiver<Vec<u8>>,
+        predicate: impl Fn(&[u8]) -> bool,
+    ) {
+        assert_eq!(
+            socket.send_to(payload, target).expect("permitted native UDP send failed"),
+            payload.len()
+        );
+        assert!(
+            wait_for_native_packet(receiver, NATIVE_TEST_TIMEOUT, predicate),
+            "permitted UDP packet did not reach the Wintun ring"
+        );
+    }
+
+    #[cfg(all(target_os = "windows", feature = "tun-windows"))]
+    struct NativeKillSwitchCleanup;
+
+    #[cfg(all(target_os = "windows", feature = "tun-windows"))]
+    impl Drop for NativeKillSwitchCleanup {
+        fn drop(&mut self) {
+            let _ = crate::implementations::client::KillSwitch::cleanup_stale_rules();
+        }
+    }
+
+    #[cfg(all(target_os = "windows", feature = "tun-windows"))]
     #[test]
     #[ignore = "requires an administrator and an integrity-checked upstream wintun.dll"]
     fn native_adapter_packet_io_and_bounded_close() {
@@ -1211,6 +1313,229 @@ mod tests {
         println!(
             "native Wintun lifecycle passed: adapter={adapter_name} mtu={NATIVE_MTU} \
              ipv4={NATIVE_LOCAL_IP} bidirectional_io=true bounded_close=true residue=false"
+        );
+    }
+
+    #[cfg(all(target_os = "windows", feature = "tun-windows"))]
+    #[test]
+    #[ignore = "requires an administrator and an integrity-checked upstream wintun.dll"]
+    fn wfp_native_packet_policy_and_cleanup() {
+        use crate::firewall::FirewallBackend;
+        use crate::implementations::client::{KillSwitch, VpnFirewallPolicy};
+        use std::net::{SocketAddr, UdpSocket};
+        use std::sync::{mpsc, Arc};
+
+        const SERVER_PORT: u16 = 35_802;
+        const OTHER_PORT: u16 = 35_803;
+        const BLOCKED_V4: &[u8] = b"quicfuscate-wfp-block-v4";
+        const BLOCKED_V6: &[u8] = b"quicfuscate-wfp-block-v6";
+        const ENDPOINT_V4: &[u8] = b"quicfuscate-wfp-endpoint-v4";
+        const ENDPOINT_V6: &[u8] = b"quicfuscate-wfp-endpoint-v6";
+        const TUNNEL_V4: &[u8] = b"quicfuscate-wfp-tunnel-v4";
+        const TUNNEL_V6: &[u8] = b"quicfuscate-wfp-tunnel-v6";
+        const DISABLED_V4: &[u8] = b"quicfuscate-wfp-disabled-v4";
+        const DISABLED_V6: &[u8] = b"quicfuscate-wfp-disabled-v6";
+
+        KillSwitch::cleanup_stale_rules().expect("pre-test WFP cleanup");
+        let _cleanup = NativeKillSwitchCleanup;
+        let adapter_name = format!("QuicFuscate-CI-WFP-{}", std::process::id());
+        let device = Arc::new(
+            WintunDevice::new(&native_config(&adapter_name))
+                .expect("verified Wintun must create the WFP test adapter"),
+        );
+        wait_for_powershell(&adapter_state_script(&adapter_name, NATIVE_MTU), true);
+
+        let socket_v4 = UdpSocket::bind((NATIVE_LOCAL_IP, 0)).expect("bind native WFP IPv4 probe");
+        let socket_v6 = UdpSocket::bind((NATIVE_LOCAL_IP6, 0)).expect("bind native WFP IPv6 probe");
+        let source_port_v4 = socket_v4.local_addr().expect("IPv4 probe address").port();
+        let source_port_v6 = socket_v6.local_addr().expect("IPv6 probe address").port();
+        let server_v4 = SocketAddr::new(IpAddr::V4(NATIVE_PEER_IP), SERVER_PORT);
+        let server_v6 = SocketAddr::new(IpAddr::V6(NATIVE_PEER_IP6), SERVER_PORT);
+        let other_v4 = SocketAddr::new(IpAddr::V4(NATIVE_PEER_IP), OTHER_PORT);
+        let other_v6 = SocketAddr::new(IpAddr::V6(NATIVE_PEER_IP6), OTHER_PORT);
+
+        let reader_device = Arc::clone(&device);
+        let (packet_sender, packet_receiver) = mpsc::sync_channel(64);
+        let reader = std::thread::spawn(move || {
+            let mut packet = [0u8; 65_535];
+            while let Ok(length) = reader_device.read(&mut packet) {
+                if packet_sender.send(packet[..length].to_vec()).is_err() {
+                    return;
+                }
+            }
+        });
+
+        let policy = VpnFirewallPolicy::new(
+            adapter_name.clone(),
+            server_v4,
+            Some(IpAddr::V6(NATIVE_PEER_IP6)),
+            [],
+        )
+        .expect("valid native WFP policy");
+        let kill_switch = KillSwitch::new_with_backend(FirewallBackend::Iptables);
+        kill_switch.enable().expect("install native WFP block policy");
+
+        assert_native_udp_blocked(&socket_v4, server_v4, BLOCKED_V4, &packet_receiver, |packet| {
+            is_udp_ipv4_packet(
+                packet,
+                NATIVE_LOCAL_IP,
+                source_port_v4,
+                NATIVE_PEER_IP,
+                SERVER_PORT,
+                BLOCKED_V4,
+            )
+        });
+        assert_native_udp_blocked(&socket_v6, server_v6, BLOCKED_V6, &packet_receiver, |packet| {
+            is_udp_ipv6_packet(
+                packet,
+                NATIVE_LOCAL_IP6,
+                source_port_v6,
+                NATIVE_PEER_IP6,
+                SERVER_PORT,
+                BLOCKED_V6,
+            )
+        });
+
+        kill_switch.on_vpn_connecting(&policy).expect("install exact endpoint exceptions");
+        assert_native_udp_permitted(
+            &socket_v4,
+            server_v4,
+            ENDPOINT_V4,
+            &packet_receiver,
+            |packet| {
+                is_udp_ipv4_packet(
+                    packet,
+                    NATIVE_LOCAL_IP,
+                    source_port_v4,
+                    NATIVE_PEER_IP,
+                    SERVER_PORT,
+                    ENDPOINT_V4,
+                )
+            },
+        );
+        assert_native_udp_permitted(
+            &socket_v6,
+            server_v6,
+            ENDPOINT_V6,
+            &packet_receiver,
+            |packet| {
+                is_udp_ipv6_packet(
+                    packet,
+                    NATIVE_LOCAL_IP6,
+                    source_port_v6,
+                    NATIVE_PEER_IP6,
+                    SERVER_PORT,
+                    ENDPOINT_V6,
+                )
+            },
+        );
+        assert_native_udp_blocked(&socket_v4, other_v4, BLOCKED_V4, &packet_receiver, |packet| {
+            is_udp_ipv4_packet(
+                packet,
+                NATIVE_LOCAL_IP,
+                source_port_v4,
+                NATIVE_PEER_IP,
+                OTHER_PORT,
+                BLOCKED_V4,
+            )
+        });
+        assert_native_udp_blocked(&socket_v6, other_v6, BLOCKED_V6, &packet_receiver, |packet| {
+            is_udp_ipv6_packet(
+                packet,
+                NATIVE_LOCAL_IP6,
+                source_port_v6,
+                NATIVE_PEER_IP6,
+                OTHER_PORT,
+                BLOCKED_V6,
+            )
+        });
+
+        kill_switch.on_vpn_connected(&policy).expect("install connected Wintun exceptions");
+        assert_native_udp_permitted(&socket_v4, other_v4, TUNNEL_V4, &packet_receiver, |packet| {
+            is_udp_ipv4_packet(
+                packet,
+                NATIVE_LOCAL_IP,
+                source_port_v4,
+                NATIVE_PEER_IP,
+                OTHER_PORT,
+                TUNNEL_V4,
+            )
+        });
+        assert_native_udp_permitted(&socket_v6, other_v6, TUNNEL_V6, &packet_receiver, |packet| {
+            is_udp_ipv6_packet(
+                packet,
+                NATIVE_LOCAL_IP6,
+                source_port_v6,
+                NATIVE_PEER_IP6,
+                OTHER_PORT,
+                TUNNEL_V6,
+            )
+        });
+
+        kill_switch.on_vpn_disconnected().expect("restore fail-closed WFP policy");
+        assert_native_udp_blocked(&socket_v4, server_v4, BLOCKED_V4, &packet_receiver, |packet| {
+            is_udp_ipv4_packet(
+                packet,
+                NATIVE_LOCAL_IP,
+                source_port_v4,
+                NATIVE_PEER_IP,
+                SERVER_PORT,
+                BLOCKED_V4,
+            )
+        });
+        assert_native_udp_blocked(&socket_v6, server_v6, BLOCKED_V6, &packet_receiver, |packet| {
+            is_udp_ipv6_packet(
+                packet,
+                NATIVE_LOCAL_IP6,
+                source_port_v6,
+                NATIVE_PEER_IP6,
+                SERVER_PORT,
+                BLOCKED_V6,
+            )
+        });
+
+        kill_switch.disable().expect("remove native WFP policy");
+        assert_native_udp_permitted(
+            &socket_v4,
+            other_v4,
+            DISABLED_V4,
+            &packet_receiver,
+            |packet| {
+                is_udp_ipv4_packet(
+                    packet,
+                    NATIVE_LOCAL_IP,
+                    source_port_v4,
+                    NATIVE_PEER_IP,
+                    OTHER_PORT,
+                    DISABLED_V4,
+                )
+            },
+        );
+        assert_native_udp_permitted(
+            &socket_v6,
+            other_v6,
+            DISABLED_V6,
+            &packet_receiver,
+            |packet| {
+                is_udp_ipv6_packet(
+                    packet,
+                    NATIVE_LOCAL_IP6,
+                    source_port_v6,
+                    NATIVE_PEER_IP6,
+                    OTHER_PORT,
+                    DISABLED_V6,
+                )
+            },
+        );
+
+        device.close().expect("close WFP test Wintun adapter");
+        reader.join().expect("WFP test Wintun reader panicked");
+        drop(device);
+        wait_for_powershell(&adapter_absent_script(&adapter_name), true);
+        KillSwitch::cleanup_stale_rules().expect("post-test WFP cleanup");
+        println!(
+            "native WFP policy passed: ipv4=true ipv6=true endpoint=true wintun_luid=true \
+             disconnect=true disable=true residue=false"
         );
     }
 

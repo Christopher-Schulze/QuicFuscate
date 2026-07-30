@@ -106,7 +106,9 @@ impl WindowsKillSwitch {
             KillSwitchError::CommandFailed("Windows WFP operation lock poisoned".to_string())
         })?;
         Self::replace_policy(None, false)?;
-        Self::cleanup_legacy_rules()?;
+        if !self.rules_active.load(Ordering::SeqCst) {
+            Self::cleanup_legacy_rules()?;
+        }
         self.rules_active.store(true, Ordering::SeqCst);
         log::debug!("Windows kill switch: persistent WFP block policy committed");
         Ok(())
@@ -131,7 +133,6 @@ impl WindowsKillSwitch {
             KillSwitchError::CommandFailed("Windows WFP operation lock poisoned".to_string())
         })?;
         Self::replace_policy(Some(policy), false)?;
-        Self::cleanup_legacy_rules()?;
         self.rules_active.store(true, Ordering::SeqCst);
         log::debug!("Windows kill switch: endpoint-only WFP policy committed");
         Ok(())
@@ -145,7 +146,6 @@ impl WindowsKillSwitch {
             KillSwitchError::CommandFailed("Windows WFP operation lock poisoned".to_string())
         })?;
         Self::replace_policy(Some(policy), true)?;
-        Self::cleanup_legacy_rules()?;
         self.rules_active.store(true, Ordering::SeqCst);
         log::debug!("Windows kill switch: endpoint and Wintun WFP policy committed");
         Ok(())
@@ -639,25 +639,6 @@ fn check_delete_status(action: &str, status: u32, not_found: u32) -> Result<(), 
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
-    use std::net::UdpSocket;
-
-    struct NativeCleanup;
-
-    impl Drop for NativeCleanup {
-        fn drop(&mut self) {
-            let _ = WindowsKillSwitch::cleanup_stale();
-        }
-    }
-
-    fn test_policy() -> VpnFirewallPolicy {
-        VpnFirewallPolicy::new(
-            "QuicFuscate-Test",
-            "192.0.2.1:4433".parse().expect("valid documentation endpoint"),
-            Some("2001:db8::1".parse().expect("valid documentation endpoint")),
-            [],
-        )
-        .expect("valid native test policy")
-    }
 
     #[test]
     fn managed_filter_keys_are_unique_and_complete() {
@@ -676,48 +657,6 @@ mod tests {
     fn layer_contract_covers_both_ip_families() {
         assert_eq!(Layer::ALL.iter().filter(|layer| layer.is_ipv6()).count(), 1);
         assert_eq!(Layer::ALL.iter().filter(|layer| !layer.is_ipv6()).count(), 1);
-    }
-
-    #[test]
-    #[ignore = "requires an elevated native Windows host with Base Filtering Engine"]
-    fn native_wfp_block_endpoint_exception_and_cleanup() {
-        let _cleanup = NativeCleanup;
-        WindowsKillSwitch::cleanup_stale().expect("pre-test WFP cleanup");
-        let kill_switch = WindowsKillSwitch::new();
-        let socket = UdpSocket::bind("0.0.0.0:0").expect("bind native UDP probe");
-        let payload = b"quicfuscate-wfp-probe";
-
-        kill_switch.block_traffic().expect("install block policy");
-        let blocked = socket.send_to(payload, "192.0.2.1:4433");
-        assert!(
-            blocked.is_err_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied),
-            "catch-all WFP block must reject the outbound packet"
-        );
-
-        kill_switch.allow_vpn_connecting(&test_policy()).expect("install endpoint exception");
-        assert_eq!(
-            socket.send_to(payload, "192.0.2.1:4433").expect("send permitted endpoint packet"),
-            payload.len()
-        );
-        let other_endpoint = socket.send_to(payload, "192.0.2.2:4433");
-        assert!(
-            other_endpoint.is_err_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied),
-            "non-policy endpoint must remain blocked"
-        );
-
-        kill_switch.block_traffic().expect("restore fail-closed policy");
-        let blocked_again = socket.send_to(payload, "192.0.2.1:4433");
-        assert!(
-            blocked_again.is_err_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied),
-            "disconnect transition must remove the endpoint exception"
-        );
-
-        kill_switch.allow_traffic().expect("remove WFP policy");
-        assert_eq!(
-            socket.send_to(payload, "192.0.2.2:4433").expect("send after disable"),
-            payload.len()
-        );
-        WindowsKillSwitch::verify_managed_objects_absent().expect("zero WFP object residue");
     }
 
     #[test]
