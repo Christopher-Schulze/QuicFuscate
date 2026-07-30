@@ -99,8 +99,8 @@ require_host() {
 
   local command_name
   for command_name in \
-    awk bash chroot cp curl debootstrap df dnf du find getent gpg grep machinectl \
-    mkdir ps realpath rpm seq sha256sum shellcheck sort \
+    awk bash chroot cp curl debootstrap df dirname dnf du find getent gpg grep \
+    machinectl mkdir ps realpath rpm seq sha256sum shellcheck sort \
     systemd-machine-id-setup systemd-nspawn systemd-run tail tar tee tr uname
   do
     need_cmd "$command_name" || fail "host prerequisite missing: $command_name"
@@ -512,6 +512,7 @@ main() {
   require_host
   resolve_architecture
   verify_capacity
+  mkdir -p "$(dirname "$OUTPUT_DIR")"
   mkdir "$OUTPUT_DIR"
   OUTPUT_DIR="$(realpath "$OUTPUT_DIR")"
   run_static_checks
