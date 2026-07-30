@@ -25,7 +25,6 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::OnceLock;
-#[cfg(feature = "benches")]
 use std::time::Instant;
 use tokio::io::Interest;
 use tokio::time::{interval, Duration, MissedTickBehavior};
@@ -39,15 +38,22 @@ const DEFAULT_RUNTIME_URL: &str = "https://cloudflare-dns.com/";
 const CLIENT_RECV_DIAGNOSTICS_ENV: &str = "QUICFUSCATE_CLIENT_RECV_DIAGNOSTICS";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct ClientReceiveDiagnostics {
+struct ClientIoDiagnostics {
     socket_datagrams: u64,
     socket_bytes: u64,
     core_recv_successes: u64,
     core_recv_errors: u64,
     activity_updates: u64,
+    send_polls: u64,
+    send_datagrams: u64,
+    send_bytes: u64,
+    send_zero_results: u64,
+    send_done_results: u64,
+    send_errors: u64,
+    last_send_at: Option<Instant>,
 }
 
-impl ClientReceiveDiagnostics {
+impl ClientIoDiagnostics {
     fn record_socket_datagram(&mut self, bytes: usize) {
         self.socket_datagrams = self.socket_datagrams.saturating_add(1);
         self.socket_bytes = self.socket_bytes.saturating_add(bytes as u64);
@@ -62,6 +68,28 @@ impl ClientReceiveDiagnostics {
 
     fn record_core_recv_error(&mut self) {
         self.core_recv_errors = self.core_recv_errors.saturating_add(1);
+    }
+
+    fn record_send_poll(&mut self) {
+        self.send_polls = self.send_polls.saturating_add(1);
+    }
+
+    fn record_send_datagram(&mut self, bytes: usize) {
+        self.send_datagrams = self.send_datagrams.saturating_add(1);
+        self.send_bytes = self.send_bytes.saturating_add(bytes as u64);
+        self.last_send_at = Some(Instant::now());
+    }
+
+    fn record_send_zero(&mut self) {
+        self.send_zero_results = self.send_zero_results.saturating_add(1);
+    }
+
+    fn record_send_done(&mut self) {
+        self.send_done_results = self.send_done_results.saturating_add(1);
+    }
+
+    fn record_send_error(&mut self) {
+        self.send_errors = self.send_errors.saturating_add(1);
     }
 }
 
@@ -279,16 +307,36 @@ async fn flush_connected_outgoing(
     socket: &tokio::net::UdpSocket,
     conn: &mut QuicFuscateConnection,
     out: &mut [u8],
+    mut diagnostics: Option<&mut ClientIoDiagnostics>,
 ) -> std::io::Result<()> {
     for _ in 0..quicfuscate::transport::UDP_DATAGRAM_BURST_LIMIT {
+        if let Some(diagnostics) = diagnostics.as_deref_mut() {
+            diagnostics.record_send_poll();
+        }
         match conn.send(out) {
             Ok(len) if len > 0 => {
+                if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                    diagnostics.record_send_datagram(len);
+                }
                 telemetry!(quicfuscate::telemetry::BYTES_SENT.inc_by(len as u64));
                 send_connected_datagram(socket, &out[..len]).await?;
             }
-            Ok(_) => break,
-            Err(ConnectionError::Done) => break,
+            Ok(_) => {
+                if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                    diagnostics.record_send_zero();
+                }
+                break;
+            }
+            Err(ConnectionError::Done) => {
+                if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                    diagnostics.record_send_done();
+                }
+                break;
+            }
             Err(e) => {
+                if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                    diagnostics.record_send_error();
+                }
                 log::error!("Send failed: {:?}", e);
                 break;
             }
@@ -344,24 +392,39 @@ mod tokio_udp_tests {
 }
 
 #[cfg(test)]
-mod client_receive_diagnostics_tests {
+mod client_io_diagnostics_tests {
     use super::*;
 
     #[test]
     fn receive_diagnostics_distinguish_socket_core_and_activity_boundaries() {
-        let mut diagnostics = ClientReceiveDiagnostics::default();
+        let mut diagnostics = ClientIoDiagnostics::default();
 
         diagnostics.record_socket_datagram(1200);
         diagnostics.record_socket_datagram(64);
         diagnostics.record_core_recv_success(true);
         diagnostics.record_core_recv_success(false);
         diagnostics.record_core_recv_error();
+        diagnostics.record_send_poll();
+        diagnostics.record_send_datagram(1280);
+        diagnostics.record_send_poll();
+        diagnostics.record_send_zero();
+        diagnostics.record_send_poll();
+        diagnostics.record_send_done();
+        diagnostics.record_send_poll();
+        diagnostics.record_send_error();
 
         assert_eq!(diagnostics.socket_datagrams, 2);
         assert_eq!(diagnostics.socket_bytes, 1264);
         assert_eq!(diagnostics.core_recv_successes, 2);
         assert_eq!(diagnostics.core_recv_errors, 1);
         assert_eq!(diagnostics.activity_updates, 1);
+        assert_eq!(diagnostics.send_polls, 4);
+        assert_eq!(diagnostics.send_datagrams, 1);
+        assert_eq!(diagnostics.send_bytes, 1280);
+        assert_eq!(diagnostics.send_zero_results, 1);
+        assert_eq!(diagnostics.send_done_results, 1);
+        assert_eq!(diagnostics.send_errors, 1);
+        assert!(diagnostics.last_send_at.is_some());
     }
 }
 #[derive(Parser, Debug)]
