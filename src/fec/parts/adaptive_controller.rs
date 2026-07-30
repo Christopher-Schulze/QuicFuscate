@@ -707,45 +707,74 @@ impl AdaptiveFec {
         target: FecProtectionTarget,
         reason: FecSwitchReason,
     ) {
+        self.transition_to_target_with_reason_inner(target, reason, false);
+    }
+
+    fn transition_to_target_with_reason_inner(
+        &mut self,
+        target: FecProtectionTarget,
+        reason: FecSwitchReason,
+        diagnostics_enabled: bool,
+    ) {
         if self.control_policy == FecControlPolicy::Off {
             return;
         }
         self.pending_transition = Some(PendingFecTransition { target, reason });
-        self.commit_pending_target_if_ready();
+        self.commit_pending_target_if_ready_inner(diagnostics_enabled);
     }
 
     fn commit_pending_target_if_ready(&mut self) {
+        self.commit_pending_target_if_ready_inner(false);
+    }
+
+    fn commit_pending_target_if_ready_inner(&mut self, diagnostics_enabled: bool) {
         let Some(pending) = self.pending_transition else {
             return;
         };
         let clean_zero_transition = pending.target.family == FecBackendFamily::Zero
             && self.loss_estimator.clean_link_confirmed();
-        {
-            let mut encoder = self.encoder.lock();
-            if encoder.packets_in_window() != 0 {
-                if !clean_zero_transition {
-                    return;
+        let active_window_blocks_transition = Self::run_feedback_phase(
+            diagnostics_enabled,
+            "transition-encoder-window",
+            || {
+                let mut encoder = self.encoder.lock();
+                if encoder.packets_in_window() != 0 {
+                    if !clean_zero_transition {
+                        return true;
+                    }
+                    // Systematic packets were already sent and framed repairs are
+                    // self-describing at the receiver. Once transport ACKs prove the
+                    // path clean, retaining a partial repair-only window cannot improve
+                    // delivery and must not delay the bounded return to raw Zero mode.
+                    encoder.clear_window();
                 }
-                // Systematic packets were already sent and framed repairs are
-                // self-describing at the receiver. Once transport ACKs prove the
-                // path clean, retaining a partial repair-only window cannot improve
-                // delivery and must not delay the bounded return to raw Zero mode.
-                encoder.clear_window();
-            }
+                false
+            },
+        );
+        if active_window_blocks_transition {
+            return;
         }
         let target = pending.target;
-        let current_window = self.mode_manager.lock().current_window().max(1);
-        let (mode, requested_k, requested_n) = internal::ModeManager::params_for_target(
-            target,
-            current_window,
-            self.runtime_policy.auto_gf4_enabled,
-        );
-        let (k, n, depth) = wire_safe_encoder_params(
-            mode,
-            requested_k,
-            requested_n,
-            self.interleave_depth,
-            self.runtime_policy.interleave_enabled,
+        let (mode, k, n, depth) = Self::run_feedback_phase(
+            diagnostics_enabled,
+            "transition-parameters",
+            || {
+                let current_window = self.mode_manager.lock().current_window().max(1);
+                let (mode, requested_k, requested_n) =
+                    internal::ModeManager::params_for_target(
+                        target,
+                        current_window,
+                        self.runtime_policy.auto_gf4_enabled,
+                    );
+                let (k, n, depth) = wire_safe_encoder_params(
+                    mode,
+                    requested_k,
+                    requested_n,
+                    self.interleave_depth,
+                    self.runtime_policy.interleave_enabled,
+                );
+                (mode, k, n, depth)
+            },
         );
         let old_mode = self.active_mode;
         let old_window = self.telemetry.effective_window;
@@ -753,26 +782,30 @@ impl AdaptiveFec {
         if old_mode == mode && old_window == k {
             return;
         }
-        self.encoder = Arc::new(Mutex::new(internal::InterleavedEncoder::new_with_policy(
-            mode,
-            k,
-            n,
-            depth,
-            &self.runtime_policy,
-        )));
-        self.decoder = Arc::new(Mutex::new(internal::InterleavedDecoder::new_with_policy(
-            mode,
-            k,
-            Arc::clone(&self.mem_pool),
-            depth,
-            &self.runtime_policy,
-        )));
+        Self::run_feedback_phase(diagnostics_enabled, "transition-encoder-replace", || {
+            self.encoder = Arc::new(Mutex::new(internal::InterleavedEncoder::new_with_policy(
+                mode,
+                k,
+                n,
+                depth,
+                &self.runtime_policy,
+            )));
+        });
+        Self::run_feedback_phase(diagnostics_enabled, "transition-decoder-replace", || {
+            self.decoder = Arc::new(Mutex::new(internal::InterleavedDecoder::new_with_policy(
+                mode,
+                k,
+                Arc::clone(&self.mem_pool),
+                depth,
+                &self.runtime_policy,
+            )));
+        });
         self.active_mode = mode;
         self.streaming_mode = mode == FecMode::Streaming;
         self.window_complete = false;
-        let mut mode_manager = self.mode_manager.lock();
-        mode_manager.force_state(mode, k);
-        drop(mode_manager);
+        Self::run_feedback_phase(diagnostics_enabled, "transition-mode-commit", || {
+            self.mode_manager.lock().force_state(mode, k);
+        });
 
         self.telemetry.active_mode = mode;
         self.telemetry.effective_window = k;

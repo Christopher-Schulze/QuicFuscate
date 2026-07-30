@@ -425,7 +425,7 @@ impl AdaptiveFec {
         // Update estimator with current observation and drive mode via smoothed loss
         self.loss_estimator.report(lost, total);
         let estimated_loss = self.loss_estimator.smoothed_loss();
-        self.update_mode(estimated_loss);
+        self.update_mode(estimated_loss, false);
         self.update_stream_interval(self.policy_loss_estimate(estimated_loss));
     }
 
@@ -437,6 +437,40 @@ impl AdaptiveFec {
         lost_packets: usize,
         smoothed_loss: f32,
     ) {
+        self.report_transport_loss_inner(
+            sent_packets,
+            acknowledged_packets,
+            lost_packets,
+            smoothed_loss,
+            false,
+        );
+    }
+
+    pub(crate) fn report_transport_loss_with_slow_phase_diagnostics(
+        &mut self,
+        sent_packets: usize,
+        acknowledged_packets: usize,
+        lost_packets: usize,
+        smoothed_loss: f32,
+    ) {
+        self.report_transport_loss_inner(
+            sent_packets,
+            acknowledged_packets,
+            lost_packets,
+            smoothed_loss,
+            true,
+        );
+    }
+
+    fn report_transport_loss_inner(
+        &mut self,
+        sent_packets: usize,
+        acknowledged_packets: usize,
+        lost_packets: usize,
+        smoothed_loss: f32,
+        diagnostics_enabled: bool,
+    ) {
+        let feedback_started = diagnostics_enabled.then(std::time::Instant::now);
         let observed_total = sent_packets as u64;
         let observed_lost = lost_packets as u64;
         if self.telemetry.enabled {
@@ -449,12 +483,40 @@ impl AdaptiveFec {
         if self.control_policy == FecControlPolicy::Off {
             return;
         }
-        self.loss_estimator.report_actual_observation(acknowledged_packets, lost_packets);
+        Self::run_feedback_phase(diagnostics_enabled, "estimator-actual", || {
+            self.loss_estimator.report_actual_observation(acknowledged_packets, lost_packets);
+        });
         let observation_weight = sent_packets.max(lost_packets);
-        self.loss_estimator.report_smoothed_rate(smoothed_loss, observation_weight);
-        let estimated_loss = self.loss_estimator.smoothed_loss();
-        self.update_mode(estimated_loss);
-        self.update_stream_interval(self.policy_loss_estimate(estimated_loss));
+        Self::run_feedback_phase(diagnostics_enabled, "estimator-smoothed", || {
+            self.loss_estimator.report_smoothed_rate(smoothed_loss, observation_weight);
+        });
+        let estimated_loss = Self::run_feedback_phase(
+            diagnostics_enabled,
+            "estimator-read",
+            || self.loss_estimator.smoothed_loss(),
+        );
+        Self::run_feedback_phase(diagnostics_enabled, "mode-update-total", || {
+            self.update_mode(estimated_loss, diagnostics_enabled);
+        });
+        Self::run_feedback_phase(diagnostics_enabled, "stream-interval-update", || {
+            self.update_stream_interval(self.policy_loss_estimate(estimated_loss));
+        });
+        if let Some(started) = feedback_started {
+            let elapsed = started.elapsed();
+            if elapsed >= std::time::Duration::from_millis(100) {
+                log::info!(
+                    "FEC transport feedback slow total: duration_ms={} sent={} acked={} lost={} transport_loss={:.6} estimated_loss={:.6} active_mode={:?} pending_transition={}",
+                    elapsed.as_millis(),
+                    sent_packets,
+                    acknowledged_packets,
+                    lost_packets,
+                    smoothed_loss,
+                    estimated_loss,
+                    self.active_mode,
+                    self.pending_transition.is_some()
+                );
+            }
+        }
     }
 
     /// Return the currently active FEC protection mode.
@@ -632,72 +694,110 @@ impl AdaptiveFec {
             Arc::new(Mutex::new(internal::ModeManager::with_switch_threshold(mode, 0.02)));
     }
 
-    fn update_mode(&mut self, estimated_loss: f32) {
+    fn run_feedback_phase<T>(
+        diagnostics_enabled: bool,
+        phase: &'static str,
+        operation: impl FnOnce() -> T,
+    ) -> T {
+        if !diagnostics_enabled {
+            return operation();
+        }
+        let started = std::time::Instant::now();
+        let result = operation();
+        let elapsed = started.elapsed();
+        if elapsed >= std::time::Duration::from_millis(100) {
+            log::info!(
+                "FEC transport feedback slow phase: phase={phase} duration_ms={}",
+                elapsed.as_millis()
+            );
+        }
+        result
+    }
+
+    fn update_mode(&mut self, estimated_loss: f32, diagnostics_enabled: bool) {
         let estimated_loss = self.policy_loss_estimate(estimated_loss);
-        let (prev, current_mode, current_window) = {
-            let mut mode_mgr = self.mode_manager.lock();
-            let prev = mode_mgr.update(estimated_loss);
-            let cur_mode = mode_mgr.current_mode();
-            let cur_window = mode_mgr.current_window();
-            (prev, cur_mode, cur_window)
-        };
+        let (prev, current_mode, current_window) =
+            Self::run_feedback_phase(diagnostics_enabled, "mode-manager-update", || {
+                let mut mode_mgr = self.mode_manager.lock();
+                let prev = mode_mgr.update(estimated_loss);
+                let cur_mode = mode_mgr.current_mode();
+                let cur_window = mode_mgr.current_window();
+                (prev, cur_mode, cur_window)
+            });
         // Derive target mode/window from mode manager and apply policy overrides.
         let mut switched = prev.is_some();
-        let mut reason = FecSwitchReason::Adaptive;
-        let desired_target = continuous_fec_target(
-            estimated_loss,
-            self.runtime_policy.auto_gf4_enabled,
-            self.loss_estimator.disturbance_detected(),
-            self.fountain_window,
-            self.extreme_window,
-            self.rtt_ms,
-            self.loss_estimator.burst_variance(),
-        );
-        let mut controller_target = if prev.is_some() {
-            desired_target
-        } else {
-            target_from_mode(current_mode, current_window)
-        };
+        let (controller_target, reason) =
+            Self::run_feedback_phase(diagnostics_enabled, "mode-target", || {
+                let mut reason = FecSwitchReason::Adaptive;
+                let desired_target = continuous_fec_target(
+                    estimated_loss,
+                    self.runtime_policy.auto_gf4_enabled,
+                    self.loss_estimator.disturbance_detected(),
+                    self.fountain_window,
+                    self.extreme_window,
+                    self.rtt_ms,
+                    self.loss_estimator.burst_variance(),
+                );
+                let mut controller_target = if prev.is_some() {
+                    desired_target
+                } else {
+                    target_from_mode(current_mode, current_window)
+                };
 
-        // Policy guard: "FEC On" must never downshift to Zero.
-        if self.force_on && desired_target.family == FecBackendFamily::Zero {
-            controller_target = target_from_mode(FecMode::Normal, 64);
-            reason = FecSwitchReason::ForceOnPolicy;
-        }
-        // Ultra-loss policy: route to Fountain for extreme loss
-        if estimated_loss >= FOUNTAIN_LOSS_THRESHOLD {
-            controller_target = target_from_mode(FecMode::Fountain, self.fountain_window);
-            reason = FecSwitchReason::ExtremeLossPolicy;
-        } else if self.loss_estimator.disturbance_detected() && estimated_loss >= 0.15 {
-            controller_target = target_from_mode(FecMode::Streaming, self.extreme_window)
-                .with_window(self.extreme_window);
-            reason = FecSwitchReason::DisturbancePolicy;
-        }
-        let (new_mode, new_window, _n) = internal::ModeManager::params_for_target(
-            controller_target,
-            current_window,
-            self.runtime_policy.auto_gf4_enabled,
-        );
+                if self.force_on && desired_target.family == FecBackendFamily::Zero {
+                    controller_target = target_from_mode(FecMode::Normal, 64);
+                    reason = FecSwitchReason::ForceOnPolicy;
+                }
+                if estimated_loss >= FOUNTAIN_LOSS_THRESHOLD {
+                    controller_target =
+                        target_from_mode(FecMode::Fountain, self.fountain_window);
+                    reason = FecSwitchReason::ExtremeLossPolicy;
+                } else if self.loss_estimator.disturbance_detected() && estimated_loss >= 0.15 {
+                    controller_target = target_from_mode(FecMode::Streaming, self.extreme_window)
+                        .with_window(self.extreme_window);
+                    reason = FecSwitchReason::DisturbancePolicy;
+                }
+                (controller_target, reason)
+            });
+        let (new_mode, new_window, _n) =
+            Self::run_feedback_phase(diagnostics_enabled, "mode-parameters", || {
+                internal::ModeManager::params_for_target(
+                    controller_target,
+                    current_window,
+                    self.runtime_policy.auto_gf4_enabled,
+                )
+            });
         switched = switched || current_mode != new_mode || current_window != new_window;
         let k = new_window;
 
         if switched {
-            let mut mode_mgr = self.mode_manager.lock();
-            mode_mgr.force_state(new_mode, new_window);
+            Self::run_feedback_phase(diagnostics_enabled, "mode-manager-force", || {
+                self.mode_manager.lock().force_state(new_mode, new_window);
+            });
         }
 
         if let Some(stream_every) = controller_target.stream_every {
-            self.set_stream_every_internal(stream_every);
+            Self::run_feedback_phase(diagnostics_enabled, "mode-stream-cadence", || {
+                self.set_stream_every_internal(stream_every);
+            });
         }
 
         // Auto control tuning stays connection-local. Process-global environment
         // mutation here would serialize unrelated connections and race their policy.
         if self.control_policy == FecControlPolicy::Auto {
-            self.apply_auto_tuning(k, estimated_loss, controller_target);
+            Self::run_feedback_phase(diagnostics_enabled, "mode-auto-tuning", || {
+                self.apply_auto_tuning(k, estimated_loss, controller_target);
+            });
         }
 
         if switched {
-            self.transition_to_target_with_reason(controller_target, reason);
+            Self::run_feedback_phase(diagnostics_enabled, "mode-transition-total", || {
+                self.transition_to_target_with_reason_inner(
+                    controller_target,
+                    reason,
+                    diagnostics_enabled,
+                );
+            });
         }
     }
 

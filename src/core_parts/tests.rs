@@ -73,7 +73,12 @@ mod tests {
         };
 
         for _ in 0..64 {
-            QuicFuscateConnection::apply_fec_transport_feedback(&mut fec, send_only, 1.0);
+            QuicFuscateConnection::apply_fec_transport_feedback(
+                &mut fec,
+                send_only,
+                1.0,
+                false,
+            );
         }
 
         assert_eq!(

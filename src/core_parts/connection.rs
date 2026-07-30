@@ -2177,6 +2177,7 @@ impl QuicFuscateConnection {
         fec: &mut AdaptiveFec,
         feedback: crate::transport::connection::FecCallbackFeedback,
         transport_loss_rate: f32,
+        diagnostics_enabled: bool,
     ) {
         // A send callback only establishes that a packet entered recovery. It
         // cannot establish loss or delivery, and replaying the congestion
@@ -2187,12 +2188,24 @@ impl QuicFuscateConnection {
             return;
         }
 
-        fec.report_transport_loss(
-            feedback.sent_packets.min(usize::MAX as u64) as usize,
-            feedback.acked_packets.min(usize::MAX as u64) as usize,
-            feedback.lost_packets.min(usize::MAX as u64) as usize,
-            transport_loss_rate,
-        );
+        let sent_packets = feedback.sent_packets.min(usize::MAX as u64) as usize;
+        let acknowledged_packets = feedback.acked_packets.min(usize::MAX as u64) as usize;
+        let lost_packets = feedback.lost_packets.min(usize::MAX as u64) as usize;
+        if diagnostics_enabled {
+            fec.report_transport_loss_with_slow_phase_diagnostics(
+                sent_packets,
+                acknowledged_packets,
+                lost_packets,
+                transport_loss_rate,
+            );
+        } else {
+            fec.report_transport_loss(
+                sent_packets,
+                acknowledged_packets,
+                lost_packets,
+                transport_loss_rate,
+            );
+        }
     }
 
     fn run_update_state_phase<T>(
@@ -2313,7 +2326,12 @@ impl QuicFuscateConnection {
                 (self.conn.take_fec_callback_feedback(), self.conn.recovery_loss_rate())
             });
         Self::run_update_state_phase(diagnostics_enabled, "fec-feedback-apply", || {
-            Self::apply_fec_transport_feedback(&mut self.fec, feedback, transport_loss_rate);
+            Self::apply_fec_transport_feedback(
+                &mut self.fec,
+                feedback,
+                transport_loss_rate,
+                diagnostics_enabled,
+            );
         });
         Self::run_update_state_phase(diagnostics_enabled, "fec-rtt-hint", || {
             let rtt_ms = self.stats.rtt.max(0.0) as u32;
