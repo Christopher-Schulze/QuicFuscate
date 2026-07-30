@@ -5,7 +5,7 @@ use log::info;
 use log::trace;
 use parking_lot::RwLock;
 use std::collections::VecDeque;
-#[cfg(any(test, feature = "rust-tests"))]
+#[cfg(any(test, feature = "rust-tests", feature = "orchestrator"))]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;

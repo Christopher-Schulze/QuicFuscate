@@ -330,6 +330,8 @@ pub struct QuicFuscateConnection {
     runtime_cpu_percent: u32,
     #[cfg(feature = "orchestrator")]
     runtime_memory_pressure: u32,
+    #[cfg(feature = "orchestrator")]
+    runtime_system: sysinfo::System,
     tls_ch_override_template: Option<String>,
 
     // Async Stealth Scheduler State
@@ -551,6 +553,8 @@ impl QuicFuscateConnection {
             runtime_cpu_percent: 0,
             #[cfg(feature = "orchestrator")]
             runtime_memory_pressure: 0,
+            #[cfg(feature = "orchestrator")]
+            runtime_system: sysinfo::System::new(),
             tls_ch_override_template: Self::env_optional_trimmed(
                 "QUICFUSCATE_TLS_CH_OVERRIDE_TEMPLATE",
             ),
@@ -632,18 +636,28 @@ impl QuicFuscateConnection {
 
     #[cfg(feature = "orchestrator")]
     fn update_orchestrator_resource_signals(&mut self) {
-        use sysinfo::ProcessesToUpdate;
+        use sysinfo::{MemoryRefreshKind, ProcessRefreshKind, ProcessesToUpdate};
 
-        let mut sys = sysinfo::System::new_all();
+        if ORCHESTRATOR.get().is_none() {
+            return;
+        }
         let Ok(pid) = sysinfo::get_current_pid() else {
             return;
         };
-        sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
-        sys.refresh_memory();
-        if let Some(proc_) = sys.process(pid) {
-            self.runtime_cpu_percent = proc_.cpu_usage().round().clamp(0.0, 100.0) as u32;
-            let total = sys.total_memory();
-            let used = proc_.memory();
+        self.runtime_system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing()
+                .with_cpu()
+                .with_memory()
+                .without_tasks(),
+        );
+        self.runtime_system
+            .refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
+        if let Some(process) = self.runtime_system.process(pid) {
+            self.runtime_cpu_percent = process.cpu_usage().round().clamp(0.0, 100.0) as u32;
+            let total = self.runtime_system.total_memory();
+            let used = process.memory();
             self.runtime_memory_pressure = if total > 0 {
                 ((used as f64 * 100.0) / total as f64).round().clamp(0.0, 100.0) as u32
             } else {
@@ -2194,8 +2208,7 @@ impl QuicFuscateConnection {
         self.stats.update_congestion(CongestionSample::from_transport_stats(stats));
 
         if self.last_telemetry.elapsed() >= std::time::Duration::from_secs(1) {
-            telemetry!(telemetry::update_memory_usage());
-            telemetry!(telemetry::flush());
+            telemetry!(telemetry::refresh_resource_metrics_if_due());
             #[cfg(feature = "orchestrator")]
             self.update_orchestrator_resource_signals();
             self.last_telemetry = std::time::Instant::now();

@@ -3980,6 +3980,7 @@ Global server lifecycle metrics now keep accepted-connection ownership separate 
 - `QUICFUSCATE_EXTERNAL_PACING`: enable external pacing mode for pacing/choke paths.
 
 Telemetry collection/export is runtime-surface driven (`--telemetry` / metrics endpoints). There is no standalone `QUICFUSCATE_TELEMETRY_ENABLED` runtime read path in the current code.
+Disabled telemetry performs no operating-system process scan. Enabled connection maintenance coalesces resource refreshes process-wide to at most once per second, refreshes only the current process with memory-only fields, and stores the byte value returned by `sysinfo` without unit conversion. An explicit shutdown `telemetry::flush()` remains unthrottled. Optional orchestrator sampling is skipped when the runtime orchestrator is disabled; when active, each connection retains its current-process sampler for CPU and memory deltas instead of rebuilding or enumerating the system process table.
 
 #### Telemetry access and operational interpretation
 
@@ -4089,7 +4090,7 @@ and export metrics through your own endpoint:
 ### Telemetry HowTo
 - Enable telemetry via CLI: start with `--telemetry` to activate counters.
 - Exporting metrics: call `telemetry::export_telemetry_text()` to obtain a plain text snapshot, or use the built-in `/telemetry` endpoint.
-- Integration: serve the snapshot via your own HTTP endpoint or exporter; call `telemetry::flush()` to emit a one-off snapshot to logs.
+- Integration: serve the snapshot via your own HTTP endpoint or exporter; call `telemetry::flush()` to refresh process and pool resource gauges immediately before exporting a one-off snapshot.
 
 ### AF_XDP Experimental Status
 Status: `experimental/internal` for the retained AF_XDP socket code behind `internal_af_xdp_experimental`.

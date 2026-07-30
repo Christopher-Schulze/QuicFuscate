@@ -1,4 +1,6 @@
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::OnceLock;
+use std::time::Instant;
 
 /// TLS provider gauge: 0 = rustls-only, 1 = rustls+tls-cover (unified).
 pub static TLS_PROVIDER_KIND: SafeGauge = SafeGauge::new();
@@ -1636,25 +1638,76 @@ pub static XDP_PACKETS_SENT: Counter = Counter::new();
 /// Total packets received via XDP fast path.
 pub static XDP_PACKETS_RECEIVED: Counter = Counter::new();
 
+const RESOURCE_REFRESH_INTERVAL_MS: u64 = 1_000;
+const RESOURCE_REFRESH_UNSET: u64 = u64::MAX;
+static RESOURCE_REFRESH_EPOCH: OnceLock<Instant> = OnceLock::new();
+static LAST_RESOURCE_REFRESH_MS: AtomicU64 = AtomicU64::new(RESOURCE_REFRESH_UNSET);
+
+fn publish_memory_usage_bytes(memory_bytes: u64) {
+    MEMORY_USAGE_BYTES.store(memory_bytes, Ordering::Relaxed);
+}
+
+fn claim_resource_refresh(last_refresh_ms: &AtomicU64, now_ms: u64) -> bool {
+    let mut observed = last_refresh_ms.load(Ordering::Relaxed);
+    loop {
+        if observed != RESOURCE_REFRESH_UNSET
+            && now_ms.saturating_sub(observed) < RESOURCE_REFRESH_INTERVAL_MS
+        {
+            return false;
+        }
+        match last_refresh_ms.compare_exchange_weak(
+            observed,
+            now_ms,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return true,
+            Err(actual) => observed = actual,
+        }
+    }
+}
+
+fn resource_refresh_due() -> bool {
+    let epoch = RESOURCE_REFRESH_EPOCH.get_or_init(Instant::now);
+    let elapsed_ms = epoch.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    claim_resource_refresh(&LAST_RESOURCE_REFRESH_MS, elapsed_ms)
+}
+
 /// Refresh the `MEMORY_USAGE_BYTES` gauge from the OS process stats.
 pub fn update_memory_usage() {
-    use sysinfo::ProcessesToUpdate;
-    let mut sys = sysinfo::System::new_all();
-    if let Ok(pid) = sysinfo::get_current_pid() {
-        sys.refresh_processes(ProcessesToUpdate::All, true);
-        if let Some(proc_) = sys.process(pid) {
-            let mem = proc_.memory();
-            MEMORY_USAGE_BYTES.store(mem * 1024, Ordering::Relaxed);
-        }
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
+
+    let Ok(pid) = sysinfo::get_current_pid() else {
+        return;
+    };
+    let mut system = sysinfo::System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing().with_memory().without_tasks(),
+    );
+    if let Some(process) = system.process(pid) {
+        publish_memory_usage_bytes(process.memory());
+    }
+}
+
+fn refresh_resource_metrics() {
+    update_memory_usage();
+    let pool = crate::optimize::global_pool();
+    pool.refresh_metrics();
+}
+
+/// Refresh process-wide resource metrics at most once per interval.
+pub(crate) fn refresh_resource_metrics_if_due() {
+    if TELEMETRY_ENABLED.load(Ordering::Relaxed) && resource_refresh_due() {
+        refresh_resource_metrics();
     }
 }
 
 /// Flush telemetry: refresh memory usage and pool metrics if telemetry is enabled.
 pub fn flush() {
     if TELEMETRY_ENABLED.load(Ordering::Relaxed) {
-        update_memory_usage();
-        let pool = crate::optimize::global_pool();
-        pool.refresh_metrics();
+        refresh_resource_metrics();
     }
 }
 
@@ -1887,6 +1940,29 @@ mod tests {
             let parts: Vec<&str> = line.splitn(2, ' ').collect();
             assert_eq!(parts.len(), 2, "metric line must have 'name value' format: {}", line);
         }
+    }
+
+    #[test]
+    fn memory_usage_publisher_preserves_bytes() {
+        const EXPECTED_BYTES: u64 = 123_456_789;
+
+        publish_memory_usage_bytes(EXPECTED_BYTES);
+
+        assert!(
+            MEMORY_USAGE_BYTES.load(Ordering::Relaxed) == EXPECTED_BYTES,
+            "resident memory must remain in the byte unit returned by sysinfo"
+        );
+    }
+
+    #[test]
+    fn resource_refresh_slot_is_process_wide_and_rate_limited() {
+        let last_refresh_ms = AtomicU64::new(RESOURCE_REFRESH_UNSET);
+
+        assert!(claim_resource_refresh(&last_refresh_ms, 0));
+        assert!(!claim_resource_refresh(&last_refresh_ms, 999));
+        assert!(claim_resource_refresh(&last_refresh_ms, 1_000));
+        assert!(!claim_resource_refresh(&last_refresh_ms, 1_999));
+        assert!(claim_resource_refresh(&last_refresh_ms, 2_000));
     }
 
     #[test]
