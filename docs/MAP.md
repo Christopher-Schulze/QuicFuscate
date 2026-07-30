@@ -61,6 +61,7 @@ Padding and timing rates flow through `StealthRuntimePolicy` → `StealthRuntime
 - Engine client uses `stealth.use_utls` and no longer hardcodes `use_utls=false`.
 - Connection persona is frozen for the session: Browser/OS/uTLS/QPACK/header identity does not mutate mid-connection.
 - Domain fronting defaults off in Performance, Intelligent clean path, and Stealth; Anti-DPI keeps the aggressive built-in list.
+- Post-handshake application cover uses H3-framed cover requests, Server Push, and WebTransport only. QUIC Cover PING stays transport-owned; no raw fixed-stream payload or configuration-dependent H3 ignore path exists.
 - Server Push cover uses bounded seed-varied resource plans.
 - WebTransport cover is H3 application cover only, active for Anti-DPI or Intelligent level 2, never a competing VPN carrier.
 - Core H3/MASQUE remains the production VPN/TUN data plane; `stealth::MasqueManager` remains compatibility/experiment machinery.

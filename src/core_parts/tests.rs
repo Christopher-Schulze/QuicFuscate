@@ -74,6 +74,59 @@ mod tests {
     }
 
     #[test]
+    fn asymmetric_stealth_server_emits_no_raw_h3_cover_stream() {
+        use crate::transport::connection::{bench_paired_1rtt_connections, BenchConnectionPair};
+
+        let BenchConnectionPair { client, server, recv_info } =
+            bench_paired_1rtt_connections();
+        let wrap = |conn, local_addr, peer_addr, stealth_config| {
+            let optimization_manager =
+                Arc::new(OptimizationManager::from_cfg(OptimizeConfig::default()));
+            let stealth_manager = Arc::new(StealthManager::new(
+                stealth_config,
+                Arc::clone(&optimization_manager),
+                Arc::new(CryptoManager::new()),
+            ));
+            let mut fec_config = FecConfig::product_default();
+            fec_config.apply_engine_mode(crate::engine::FecMode::Off);
+            QuicFuscateConnection::new(ConnectionParams {
+                conn: Box::new(conn),
+                local_addr,
+                peer_addr,
+                host_header: String::new(),
+                sni_host: None,
+                qkey_auth_token_hex: None,
+                stealth_manager,
+                optimization_manager,
+                fec_config,
+            })
+        };
+
+        let mut server_config = StealthConfig::stealth();
+        server_config.enable_timing_obfuscation = false;
+        server_config.enable_traffic_padding = false;
+        let mut server = wrap(server, recv_info.to, recv_info.from, server_config);
+        let mut client =
+            wrap(client, recv_info.from, recv_info.to, StealthConfig::performance());
+        server.init_http3().expect("server H3 initialization");
+        client.init_http3().expect("client H3 initialization");
+
+        let mut packet = [0u8; 2048];
+        let (len, send_info) =
+            server.send_with_info(&mut packet).expect("server cover PING send");
+        client
+            .recv_on_path(&packet[..len], send_info.from, send_info.to)
+            .expect("client receives server cover PING");
+
+        assert_eq!(
+            client.conn.stream_readable_next(),
+            None,
+            "QUIC cover PING must not create an unframed H3 stream"
+        );
+        client.poll_http3().expect("asymmetric H3 poll must remain valid");
+    }
+
+    #[test]
     fn send_only_feedback_does_not_replay_stale_loss_into_auto_fec() {
         let mut fec = AdaptiveFec::new(FecConfig::product_default());
         let send_only = crate::transport::connection::FecCallbackFeedback {

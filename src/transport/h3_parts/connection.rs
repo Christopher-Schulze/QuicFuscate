@@ -158,9 +158,6 @@ pub struct Connection {
     next_stream_id: u64,
     streams: HashMap<u64, StreamState>,
     finished_streams: HashSet<u64>,
-    /// Streams carrying non-HTTP/3 data (e.g. stealth cover traffic) are drained
-    /// instead of parsed, so the H3 layer stays strict without tripping on raw bytes.
-    ignored_streams: HashSet<u64>,
     pending_events: VecDeque<(u64, Event)>,
     encoder: qpack::Encoder,
     decoder: qpack::Decoder,
@@ -279,7 +276,6 @@ impl Connection {
             next_stream_id: if conn.is_server() { 1 } else { 0 },
             streams: HashMap::new(),
             finished_streams: HashSet::new(),
-            ignored_streams: HashSet::new(),
             pending_events: VecDeque::new(),
             encoder: qpack::Encoder::with_capacity(config.qpack_max_table_capacity),
             decoder: qpack::Decoder::with_capacity(config.qpack_max_table_capacity),
@@ -300,12 +296,6 @@ impl Connection {
         let thr = conn.fec_escalation_threshold();
         std::env::set_var("QUICFUSCATE_FEC_SWITCH_THRESH", format!("{:.6}", thr));
         Ok(h3_conn)
-    }
-
-    /// Marks `stream_id` as a non-HTTP/3 stream. Incoming data on this stream is
-    /// drained and discarded instead of being parsed as H3 frames.
-    pub(crate) fn ignore_stream(&mut self, stream_id: u64) {
-        self.ignored_streams.insert(stream_id);
     }
 
     /// Set the persona index policy (header names that should be prioritised).
@@ -745,22 +735,6 @@ impl Connection {
         conn: &mut super::Connection,
         stream_id: u64,
     ) -> Result<(), Error> {
-        // Streams explicitly marked as non-HTTP/3 (e.g. raw cover traffic) are drained
-        // and discarded. This keeps the H3 parser strict while allowing other QUIC
-        // sub-protocols to share the connection.
-        if self.ignored_streams.contains(&stream_id) {
-            let mut discard = [0u8; 65536];
-            loop {
-                match conn.stream_recv(stream_id, &mut discard) {
-                    Ok((0, false)) => break,
-                    Ok((_, true)) => break,
-                    Ok(_) => continue,
-                    Err(_) => break,
-                }
-            }
-            return Ok(());
-        }
-
         let mut buf = vec![0u8; 65536];
         let (len, fin) = conn.stream_recv(stream_id, &mut buf).map_err(|_| Error::InternalError)?;
         if len == 0 && !fin {

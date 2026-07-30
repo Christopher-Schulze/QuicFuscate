@@ -58,8 +58,6 @@ pub struct StealthManager {
     pub(crate) cover_cache: Option<Arc<crate::reality::CoverHandshakeCache>>,
     /// Next scheduled cover PING emission time
     next_cover_ping: parking_lot::Mutex<std::time::Instant>,
-    /// Next scheduled cover APPLICATION_DATA stream frame injection time
-    next_cover_stream: parking_lot::Mutex<std::time::Instant>,
 }
 
 impl StealthManager {
@@ -203,7 +201,6 @@ impl StealthManager {
             fallback_rx: Arc::new(Mutex::new(rx)),
             cover_cache,
             next_cover_ping: parking_lot::Mutex::new(std::time::Instant::now()),
-            next_cover_stream: parking_lot::Mutex::new(std::time::Instant::now()),
         }
     }
 
@@ -1554,53 +1551,6 @@ impl StealthManager {
         } else {
             false
         }
-    }
-
-    /// Dedicated stream ID for injected cover APPLICATION_DATA frames.
-    ///
-    /// Client-initiated bidirectional, ordinal 62 (stream_id = 4 * 62 = 248).
-    /// Placed far enough from real H3 request streams (0, 4, 8, ...) to avoid conflicts.
-    pub(crate) const COVER_STREAM_ID: u64 = 248;
-
-    /// Returns the cover stream ID when cover stream injection is enabled.
-    pub(crate) fn cover_stream_id(&self) -> Option<u64> {
-        if self.config.enable_cover_ping && self.config.cover_ping_interval_ms > 0 {
-            Some(Self::COVER_STREAM_ID)
-        } else {
-            None
-        }
-    }
-
-    /// Returns true if a cover APPLICATION_DATA frame should be injected now.
-    ///
-    /// Fires at 3x the cover_ping_interval to complement PING keepalives with
-    /// realistic-looking application-layer stream traffic.
-    pub(crate) fn should_inject_cover_stream_frame(&self) -> bool {
-        if !self.config.enable_cover_ping || self.config.cover_ping_interval_ms == 0 {
-            return false;
-        }
-        let interval = std::time::Duration::from_millis(self.config.cover_ping_interval_ms * 3);
-        let mut guard = self.next_cover_stream.lock();
-        let now = std::time::Instant::now();
-        if now >= *guard {
-            *guard = now + interval;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Produce a random-length (16-64 bytes) cover stream payload.
-    ///
-    /// Drawn from the OS entropy source so the payload is indistinguishable from
-    /// real encrypted application data at the traffic-analysis layer.
-    pub(crate) fn generate_cover_stream_data(&self) -> Vec<u8> {
-        let mut len_byte = [0u8; 1];
-        crate::rng::fill_secure_or_abort(&mut len_byte, "stealth::cover_stream");
-        let len = 16 + (len_byte[0] as usize % 49); // 16..=64 bytes
-        let mut data = vec![0u8; len];
-        crate::rng::fill_secure_or_abort(&mut data, "stealth::cover_stream_data");
-        data
     }
 
     /// Polls for upstream responses to route back to the scanner.

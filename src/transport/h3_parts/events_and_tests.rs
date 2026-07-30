@@ -1621,7 +1621,7 @@ mod tests {
     }
 
     #[test]
-    fn ignored_cover_stream_data_does_not_cause_excessive_load() {
+    fn raw_non_h3_stream_data_is_rejected() {
         use crate::transport::connection::{bench_paired_1rtt_connections, BenchConnectionPair};
         let BenchConnectionPair { mut client, mut server, recv_info } =
             bench_paired_1rtt_connections();
@@ -1631,23 +1631,16 @@ mod tests {
         let mut server_h3 =
             Connection::with_transport(&mut server, &Config::new().unwrap()).expect("server h3");
 
-        const COVER_SID: u64 = 248;
-        server_h3.ignore_stream(COVER_SID);
-
-        // These raw bytes previously parsed as an H3 frame header with a >1MB length,
-        // triggering ExcessiveLoad. When the stream is ignored they must be drained safely.
-        let cover = vec![0xd1, 0xaa, 0xf0, 0x1e, 0xe6, 0x93, 0x7e, 0xc6];
-        client.stream_send(COVER_SID, &cover, false).expect("send cover stream data");
+        const RAW_STREAM_ID: u64 = 248;
+        let raw = vec![0xd1, 0xaa, 0xf0, 0x1e, 0xe6, 0x93, 0x7e, 0xc6];
+        client
+            .stream_send(RAW_STREAM_ID, &raw, false)
+            .expect("send malformed H3 stream data");
 
         let mut packet = [0u8; 2048];
         let (len, _) = client.send(&mut packet).expect("client send");
         server.recv(&mut packet[..len], &recv_info).expect("server recv");
 
-        let result = server_h3.poll(&mut server);
-        assert!(
-            result.is_ok() || matches!(result, Err(Error::Done)),
-            "H3 poll must tolerate ignored raw cover stream data: {:?}",
-            result
-        );
+        assert!(matches!(server_h3.poll(&mut server), Err(Error::ExcessiveLoad)));
     }
 }

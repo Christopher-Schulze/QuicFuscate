@@ -294,14 +294,8 @@ mod stealth_coverage_tests {
     }
 
     // =========================================================================
-    // 4. Cover traffic (Cover PING + Cover Stream)
+    // 4. Cover traffic (Cover PING)
     // =========================================================================
-
-    #[test]
-    fn cover_stream_id_constant() {
-        // 4 * 62 = 248 (client-initiated bidirectional stream)
-        assert_eq!(StealthManager::COVER_STREAM_ID, 248);
-    }
 
     #[test]
     fn cover_ping_disabled_when_off() {
@@ -316,43 +310,6 @@ mod stealth_coverage_tests {
         assert!(m.should_send_cover_ping());
         // Immediately after, it should return false (interval not elapsed)
         assert!(!m.should_send_cover_ping());
-    }
-
-    #[test]
-    fn cover_stream_injection_disabled_when_off() {
-        let m = make_manager(StealthConfig::off());
-        assert!(!m.should_inject_cover_stream_frame());
-    }
-
-    #[test]
-    fn cover_stream_injection_fires_then_waits() {
-        let m = make_manager(StealthConfig::stealth());
-        // First call: fires
-        assert!(m.should_inject_cover_stream_frame());
-        // Second call: interval (3x cover_ping_interval) not elapsed
-        assert!(!m.should_inject_cover_stream_frame());
-    }
-
-    #[test]
-    fn generate_cover_stream_data_returns_valid_range() {
-        let m = make_manager(StealthConfig::stealth());
-        for _ in 0..20 {
-            let data = m.generate_cover_stream_data();
-            assert!(
-                (16..=64).contains(&data.len()),
-                "cover stream len {} out of [16,64]",
-                data.len()
-            );
-        }
-    }
-
-    #[test]
-    fn generate_cover_stream_data_is_random() {
-        let m = make_manager(StealthConfig::stealth());
-        let a = m.generate_cover_stream_data();
-        let b = m.generate_cover_stream_data();
-        // Extremely unlikely for two random payloads to be identical
-        assert_ne!(a, b, "cover stream data should be random");
     }
 
     // =========================================================================
@@ -934,4 +891,3 @@ mod stealth_coverage_tests {
         assert_eq!(cfg.padding_strategy, PaddingStrategy::BrowserMimic);
     }
 }
-

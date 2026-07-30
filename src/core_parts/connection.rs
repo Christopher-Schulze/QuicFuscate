@@ -1625,15 +1625,6 @@ impl QuicFuscateConnection {
         if established && !path_control_pending && self.stealth_manager.should_send_cover_ping() {
             self.conn.queue_cover_ping();
         }
-        // Cover stream: inject fake APPLICATION_DATA on a dedicated stream to simulate
-        // idle HTTP/3 traffic patterns beyond what PINGs alone can achieve.
-        if established
-            && !path_control_pending
-            && self.stealth_manager.should_inject_cover_stream_frame()
-        {
-            let data = self.stealth_manager.generate_cover_stream_data();
-            let _ = self.conn.stream_send(StealthManager::COVER_STREAM_ID, &data, false);
-        }
 
         let wire_profile = if fec_wire_ready { self.prepare_fec_wire_profile()? } else { None };
 
@@ -1925,11 +1916,6 @@ impl QuicFuscateConnection {
             let mut h3 = h3;
             // Set persona QPACK index policy
             h3.set_qpack_index_policy(self.stealth_manager.qpack_index_policy());
-            // The stealth layer injects raw cover traffic on a dedicated QUIC stream;
-            // tell the H3 layer to ignore it so the random bytes are not parsed as frames.
-            if let Some(cover_sid) = self.stealth_manager.cover_stream_id() {
-                h3.ignore_stream(cover_sid);
-            }
             self.h3_conn = Some(h3);
             // Notify the compression layer about the persona (dictionary selection).
             let persona = self.stealth_manager.current_persona_name();
