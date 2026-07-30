@@ -474,8 +474,8 @@ mod tests {
 
     #[test]
     fn non_root_service_uses_ambient_capabilities() {
-        let mut config = ServiceConfig::default();
-        config.user = Some("quicfuscate".to_string());
+        let config =
+            ServiceConfig { user: Some("quicfuscate".to_string()), ..ServiceConfig::default() };
 
         let content = config.generate_service();
 
