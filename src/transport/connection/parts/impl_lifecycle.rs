@@ -58,7 +58,7 @@ impl Connection {
         ));
     }
 
-    /// Set the ODCID used for Initial key derivation (RFC 9001).
+    /// Set the Destination Connection ID retained for the Initial packet space.
     ///
     /// For clients this also initializes the current destination CID used in the first Initial
     /// packet. For servers the current destination CID is learned from the peer's SCID when the
@@ -1014,8 +1014,10 @@ impl Connection {
         // QUIC initial keys are direction-specific:
         // - Client: write=client_secret, read=server_secret
         // - Server: write=server_secret, read=client_secret
-        // RFC 9001: Initial secrets derive from the Destination Connection ID in the first Initial.
-        // Use the recorded ODCID if available (server accepts it from the first client packet).
+        // RFC 9001: Initial secrets derive from the Destination Connection ID
+        // in the packet being accepted. After Retry the server receives its
+        // Retry SCID in that field, while the client re-derives explicitly in
+        // the Retry receive path.
         let initial_dcid = if !self.initial_dcid.is_empty() {
             self.initial_dcid.as_ref()
         } else {

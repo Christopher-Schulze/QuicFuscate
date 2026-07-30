@@ -22,6 +22,7 @@ pub mod admin_http;
 pub mod admin_logs;
 pub mod auth_frame;
 pub mod bandwidth;
+mod ddos;
 #[doc(hidden)]
 pub mod fsutil;
 pub mod icmp;

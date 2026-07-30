@@ -180,6 +180,9 @@ struct SharedServerDomain {
     /// detected, per-IP limits are temporarily halved via `limit_multiplier`.
     #[cfg(feature = "rate_limiter")]
     ddos_detector: Arc<crate::implementations::server::limits::EwmaAnomalyDetector>,
+    #[cfg(feature = "rate_limiter")]
+    retry_token_manager:
+        Option<Arc<crate::implementations::server::ddos::RetryTokenManager>>,
     /// GeoIP-based source-IP blocker (TODO-459). Uses `maxminddb` to look up
     /// the country of an incoming IP and reject blocked countries. Gracefully
     /// degrades to allowing all IPs when no database is configured.
@@ -197,6 +200,7 @@ struct SharedServerDomain {
 struct PacketRateLimiterDomain {
     limiter: RateLimiter,
     last_prune: Instant,
+    last_sample: Instant,
 }
 
 struct ServerHostResources {
@@ -372,23 +376,46 @@ impl SharedServerDomain {
             packet_rate_limiter: Arc::new(parking_lot::Mutex::new(PacketRateLimiterDomain {
                 limiter: RateLimiter::new(load_rate_limit_config_from_env()),
                 last_prune: Instant::now(),
+                last_sample: Instant::now(),
             })),
             #[cfg(feature = "rate_limiter")]
             global_rate_limiter: Arc::new(GlobalRateLimiter::with_default_cap()),
             #[cfg(feature = "rate_limiter")]
             ddos_detector: Arc::new(
-                crate::implementations::server::limits::EwmaAnomalyDetector::with_defaults(),
+                crate::implementations::server::limits::EwmaAnomalyDetector::with_config(
+                    server_config.ddos_policy.clone(),
+                )
+                .expect("validated server DDoS policy"),
             ),
+            #[cfg(feature = "rate_limiter")]
+            retry_token_manager: (server_config.ddos_policy.enabled
+                && server_config.ddos_policy.retry_enabled)
+                .then(|| {
+                    Arc::new(
+                        crate::implementations::server::ddos::RetryTokenManager::new(
+                            server_config.ddos_policy.retry_token_lifetime,
+                        )
+                        .expect("validated Retry token lifetime"),
+                    )
+                }),
             #[cfg(feature = "rate_limiter")]
             geoip_blocker: Arc::new(crate::implementations::server::limits::GeoIpBlocker::new(
                 server_config.geoip.clone(),
             )),
             #[cfg(feature = "rate_limiter")]
-            blacklist: Arc::new(crate::implementations::server::limits::BlacklistSync::new(
-                Duration::from_secs(server_config.blacklist.default_ttl_secs),
-                server_config.blacklist.sync_url.clone(),
-                Duration::from_secs(server_config.blacklist.sync_interval_secs),
-            )),
+            blacklist: Arc::new(
+                crate::implementations::server::limits::BlacklistSync::new_bounded_with_ca(
+                    Duration::from_secs(server_config.blacklist.default_ttl_secs),
+                    server_config.blacklist.sync_url.clone(),
+                    Duration::from_secs(server_config.blacklist.sync_interval_secs),
+                    Duration::from_secs(server_config.blacklist.request_timeout_secs),
+                    server_config.blacklist.max_body_bytes,
+                    server_config.blacklist.max_entries,
+                    server_config.blacklist.cache_path.clone(),
+                    server_config.blacklist.custom_ca_path.clone(),
+                )
+                .expect("validated server blacklist policy"),
+            ),
             max_clients: server_config.max_clients,
             client_timeout_secs: server_config.client_timeout_secs,
         }
@@ -459,55 +486,131 @@ impl SharedServerDomain {
     }
 
     #[cfg(feature = "rate_limiter")]
-    fn allow_incoming_datagram(&self, from: SocketAddr, len: usize) -> bool {
+    fn admit_incoming_datagram(
+        &self,
+        from: SocketAddr,
+        packet: &[u8],
+        established: bool,
+        retry_eligible: bool,
+    ) -> crate::implementations::server::ddos::IncomingDatagramAdmission {
+        use crate::implementations::server::ddos::{DdosDropReason, IncomingDatagramAdmission};
+
         // 1. Global server-wide cap: drop if aggregate PPS exceeds the cap,
         //    regardless of source IP. This is checked first so a flood from
         //    many IPs cannot overwhelm the host even if each is under its
         //    per-IP limit.
         if !self.global_rate_limiter.check() {
-            crate::instrumentation::global().server.rate_limit_hit();
-            return false;
+            return IncomingDatagramAdmission::Drop(DdosDropReason::GlobalLimit);
         }
         // 2. GeoIP blocking (TODO-459): drop if the source IP maps to a blocked
         //    country. Gracefully allows all IPs when no database is configured.
         if self.geoip_blocker.is_blocked(from.ip()) {
-            crate::instrumentation::global().server.rate_limit_hit();
-            return false;
+            return IncomingDatagramAdmission::Drop(DdosDropReason::GeoIp);
         }
         // 3. External blacklist (TODO-459): drop if the source IP is on the
         //    TTL-based blocklist (manual or from an external feed).
         if self.blacklist.is_blocked(from.ip()) {
-            crate::instrumentation::global().server.rate_limit_hit();
-            return false;
+            return IncomingDatagramAdmission::Drop(DdosDropReason::Blacklist);
         }
-        // 4. Per-IP token bucket. When the DDoS anomaly detector reports a
-        //    spike, per-IP limits are temporarily halved by probabilistically
-        //    dropping ~50% of packets before the per-IP bucket is consulted.
-        if self.ddos_detector.is_anomaly() {
-            // Simple deterministic drop: use the low bit of a counter.
-            let count = self.global_rate_limiter.accepted.load(Ordering::Relaxed);
-            if count & 1 == 1 {
-                crate::instrumentation::global().server.rate_limit_hit();
-                return false;
+        // 4. One per-IP bucket owns both normal and enhanced admission.
+        //    Enhanced mode consumes a validated higher token cost instead of
+        //    probabilistically discarding arbitrary packets.
+        let packet_cost =
+            if established { 1 } else { self.ddos_detector.enhanced_packet_cost() };
+        let limiter = self.packet_rate_limiter.lock();
+        let allowed_packet = limiter.limiter.check_packet_ip_cost(from.ip(), packet_cost);
+        let allowed_bytes =
+            allowed_packet && limiter.limiter.check_bytes_ip(from.ip(), packet.len() as u64);
+        drop(limiter);
+        if !allowed_packet || !allowed_bytes {
+            return IncomingDatagramAdmission::Drop(DdosDropReason::PerIpLimit);
+        }
+
+        let Some(retry_tokens) = self
+            .retry_token_manager
+            .as_ref()
+            .filter(|_| retry_eligible && !established && self.ddos_detector.is_anomaly())
+        else {
+            return IncomingDatagramAdmission::Allow;
+        };
+        let Ok((header, _)) = crate::transport::packet::parse_header(packet, 0) else {
+            return IncomingDatagramAdmission::Drop(DdosDropReason::MalformedInitial);
+        };
+        if header.ty != crate::transport::PacketType::Initial {
+            return IncomingDatagramAdmission::Drop(DdosDropReason::MalformedInitial);
+        }
+        if let Some(token) = header.token.as_deref() {
+            if crate::implementations::server::ddos::RetryTokenManager::is_retry_token(token) {
+                return if retry_tokens.validate(token, from.ip(), &header.dcid).is_ok() {
+                    IncomingDatagramAdmission::RetryValidated
+                } else {
+                    IncomingDatagramAdmission::Drop(DdosDropReason::InvalidRetry)
+                };
             }
         }
-        let limiter = self.packet_rate_limiter.lock();
-        let allowed_packet = limiter.limiter.check_packet_ip(from.ip());
-        let allowed_bytes = allowed_packet && limiter.limiter.check_bytes_ip(from.ip(), len as u64);
-        allowed_packet && allowed_bytes
+        match retry_tokens.issue_for_initial(packet, from.ip()) {
+            Ok(issue) => IncomingDatagramAdmission::Retry(issue.packet),
+            Err(error) => {
+                log::debug!("QUIC Retry issuance rejected for {}: {}", from, error);
+                IncomingDatagramAdmission::Drop(DdosDropReason::MalformedInitial)
+            }
+        }
     }
 
     #[cfg(feature = "rate_limiter")]
-    fn prune_rate_limits_if_due(&self) {
-        let mut limiter = self.packet_rate_limiter.lock();
-        if limiter.last_prune.elapsed() >= Duration::from_secs(30) {
-            limiter.limiter.prune_idle(Duration::from_secs(120));
-            limiter.last_prune = Instant::now();
-            // DDoS anomaly detection (TODO-459): feed the EWMA detector with
-            // the current global PPS count and prune expired blacklist entries.
+    fn prune_rate_limits_if_due(&self, metrics: &Metrics) {
+        let should_sample = {
+            let mut limiter = self.packet_rate_limiter.lock();
+            if limiter.last_prune.elapsed() >= Duration::from_secs(30) {
+                limiter.limiter.prune_idle(Duration::from_secs(120));
+                limiter.last_prune = Instant::now();
+                self.blacklist.prune_expired();
+            }
+            let due = limiter.last_sample.elapsed() >= self.ddos_detector.sample_interval();
+            if due {
+                limiter.last_sample = Instant::now();
+            }
+            due
+        };
+        if should_sample {
             let pps = self.global_rate_limiter.current_pps();
-            self.ddos_detector.record_pps(pps);
-            self.blacklist.prune_expired();
+            let transition = self.ddos_detector.record_pps(pps);
+            metrics.record_ddos_sample(pps, transition);
+            match transition {
+                crate::implementations::server::limits::DdosTransition::Activated => {
+                    log::warn!("Enhanced DDoS admission activated at {pps} accepted PPS");
+                    crate::audit::audit_typed(
+                        crate::audit::AuditEventType::DdosAnomaly,
+                        crate::audit::AuditSeverity::Warning,
+                        None,
+                        None,
+                        crate::audit::AuditContext {
+                            actor: crate::audit::AuditActor::NetworkPeer,
+                            target: crate::audit::AuditTarget::System,
+                            outcome: crate::audit::AuditOutcome::Detected,
+                            reason: Some("sustained_pps_activation"),
+                        },
+                        &format!("Enhanced DDoS admission activated at {pps} accepted PPS"),
+                    );
+                }
+                crate::implementations::server::limits::DdosTransition::Cleared => {
+                    log::info!("Enhanced DDoS admission cleared at {pps} accepted PPS");
+                    crate::audit::audit_typed(
+                        crate::audit::AuditEventType::DdosAnomaly,
+                        crate::audit::AuditSeverity::Info,
+                        None,
+                        None,
+                        crate::audit::AuditContext {
+                            actor: crate::audit::AuditActor::NetworkPeer,
+                            target: crate::audit::AuditTarget::System,
+                            outcome: crate::audit::AuditOutcome::Stopped,
+                            reason: Some("sustained_pps_recovery"),
+                        },
+                        &format!("Enhanced DDoS admission cleared at {pps} accepted PPS"),
+                    );
+                }
+                crate::implementations::server::limits::DdosTransition::Unchanged => {}
+            }
         }
     }
 

@@ -3,6 +3,7 @@
 //! Connects to a QuicFuscate server using a QKey and exits once the
 //! connection is established or a timeout is reached.
 
+use std::io::Write;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -20,6 +21,8 @@ const MIGRATION_BASELINE_WINDOWS: usize = 4;
 const MIGRATION_RECOVERY_WINDOWS: usize = 8;
 const MIGRATION_TRAFFIC_INTERVAL: Duration = Duration::from_millis(5);
 const MIGRATION_BODY_BYTES: usize = 1000;
+const HOLD_PING_INTERVAL: Duration = Duration::from_millis(100);
+const HOLD_IO_BURST: usize = 64;
 const MIN_TRANSITION_RATIO_PPM: u64 = 500_000;
 const MIN_RECOVERY_RATIO_PPM: u64 = 900_000;
 
@@ -192,6 +195,96 @@ fn run_migration_probe(
     Ok(())
 }
 
+fn hold_established_connection(
+    conn: &mut QuicFuscateConnection,
+    socket: &std::net::UdpSocket,
+    hold_duration: Duration,
+    out: &mut [u8],
+    buf: &mut [u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let started = Instant::now();
+    let deadline = started + hold_duration;
+    let mut next_ping_at = started;
+    let mut queued_pings = 0u64;
+    let mut sent_packets = 0u64;
+    let mut received_packets = 0u64;
+
+    while Instant::now() < deadline {
+        if conn.conn.is_closed() || !conn.conn.is_established() {
+            return Err("established connection did not survive the hold interval".into());
+        }
+
+        let now = Instant::now();
+        if now >= next_ping_at {
+            conn.queue_keepalive_ping();
+            queued_pings = queued_pings.saturating_add(1);
+            next_ping_at = now + HOLD_PING_INTERVAL;
+        }
+
+        let mut progressed = false;
+        for _ in 0..HOLD_IO_BURST {
+            match conn.send(out) {
+                Ok(0) | Err(ConnectionError::Done) => break,
+                Ok(len) => {
+                    let written = socket.send(&out[..len])?;
+                    if written != len {
+                        return Err(
+                            format!("short UDP send: wrote {written} of {len} bytes").into()
+                        );
+                    }
+                    sent_packets = sent_packets.saturating_add(1);
+                    progressed = true;
+                }
+                Err(error) => {
+                    return Err(format!("established hold send failed: {error:?}").into());
+                }
+            }
+        }
+
+        for _ in 0..HOLD_IO_BURST {
+            match socket.recv(buf) {
+                Ok(0) => break,
+                Ok(len) => {
+                    match conn.recv(&buf[..len]) {
+                        Ok(_) | Err(ConnectionError::Done) => {}
+                        Err(error) => {
+                            return Err(
+                                format!("established hold receive failed: {error:?}").into()
+                            );
+                        }
+                    }
+                    received_packets = received_packets.saturating_add(1);
+                    progressed = true;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => {
+                    return Err(format!("established hold socket receive failed: {error}").into());
+                }
+            }
+        }
+
+        if !progressed {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    if conn.conn.is_closed() || !conn.conn.is_established() {
+        return Err("established connection closed at the end of the hold interval".into());
+    }
+    if queued_pings == 0 || sent_packets == 0 || received_packets == 0 {
+        return Err(format!(
+            "established hold produced insufficient traffic: pings={queued_pings}, sent={sent_packets}, recv={received_packets}"
+        )
+        .into());
+    }
+
+    println!(
+        "hold-proof duration_ms={} pings={queued_pings} sent={sent_packets} recv={received_packets} established=1",
+        started.elapsed().as_millis()
+    );
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut qkey_value: Option<String> = None;
     let mut timeout_ms: u64 = 8000;
@@ -200,6 +293,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut bearer_token: Option<String> = None;
     let mut initial_token: Option<String> = None;
     let mut initial_only = false;
+    let mut initial_count: u64 = 1;
+    let mut initial_interval_us: u64 = 0;
     let mut ca_file: Option<String> = None;
     let mut migration_local: Option<String> = None;
 
@@ -221,11 +316,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--bearer-token" => bearer_token = args.next(),
             "--initial-token" => initial_token = args.next(),
             "--initial-only" => initial_only = true,
+            "--initial-count" => {
+                let value = args.next().ok_or("missing value for --initial-count")?;
+                initial_count =
+                    value.parse::<u64>().map_err(|_| "--initial-count must be an integer")?;
+                if initial_count == 0 {
+                    return Err("--initial-count must be greater than zero".into());
+                }
+            }
+            "--initial-interval-us" => {
+                let value = args.next().ok_or("missing value for --initial-interval-us")?;
+                initial_interval_us =
+                    value.parse::<u64>().map_err(|_| "--initial-interval-us must be an integer")?;
+            }
             "--ca-file" => ca_file = args.next(),
             "--migration-local" => migration_local = args.next(),
             "--help" | "-h" => {
                 println!(
-                    "Usage: qf-e2e-client --qkey QKEY [--timeout-ms MS] [--hold-ms MS] [--local ADDR] [--bearer-token HEX] [--initial-token HEX] [--initial-only] [--ca-file PATH] [--migration-local ADDR]"
+                    "Usage: qf-e2e-client --qkey QKEY [--timeout-ms MS] [--hold-ms MS] [--local ADDR] [--bearer-token HEX] [--initial-token HEX] [--initial-only] [--initial-count COUNT] [--initial-interval-us US] [--ca-file PATH] [--migration-local ADDR]"
                 );
                 return Ok(());
             }
@@ -333,8 +441,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             println!("connected");
+            std::io::stdout().flush()?;
             if hold_ms > 0 {
-                std::thread::sleep(Duration::from_millis(hold_ms));
+                hold_established_connection(
+                    &mut conn,
+                    &socket,
+                    Duration::from_millis(hold_ms),
+                    &mut out,
+                    &mut buf,
+                )?;
             }
             return Ok(());
         }
@@ -376,7 +491,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     sent_packets += 1;
                     if initial_only && sent_initial {
-                        println!("initial-sent");
+                        for _ in 1..initial_count {
+                            if initial_interval_us > 0 {
+                                std::thread::sleep(Duration::from_micros(initial_interval_us));
+                            }
+                            let written = socket.send(&out[..len])?;
+                            if written != len {
+                                return Err(format!(
+                                    "short repeated Initial UDP send: wrote {written} of {len} bytes"
+                                )
+                                .into());
+                            }
+                            sent_packets += 1;
+                        }
+                        println!("initial-sent count={sent_packets}");
                         return Ok(());
                     }
                 }

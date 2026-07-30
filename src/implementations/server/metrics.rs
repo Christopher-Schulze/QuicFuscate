@@ -143,6 +143,18 @@ pub struct Metrics {
     pub auth_state_tracked_ips: AtomicU64,
     pub auth_state_pruned: AtomicU64,
     pub rate_limited: AtomicU64,
+    pub ddos_active: AtomicU64,
+    pub ddos_current_pps: AtomicU64,
+    pub ddos_activations: AtomicU64,
+    pub ddos_clears: AtomicU64,
+    pub ddos_retry_issued: AtomicU64,
+    pub ddos_retry_validated: AtomicU64,
+    pub ddos_drop_global_limit: AtomicU64,
+    pub ddos_drop_geoip: AtomicU64,
+    pub ddos_drop_blacklist: AtomicU64,
+    pub ddos_drop_per_ip_limit: AtomicU64,
+    pub ddos_drop_malformed_initial: AtomicU64,
+    pub ddos_drop_invalid_retry: AtomicU64,
 
     // Uptime (set once at start)
     start_time: std::time::Instant,
@@ -216,6 +228,18 @@ impl Metrics {
             auth_state_tracked_ips: AtomicU64::new(0),
             auth_state_pruned: AtomicU64::new(0),
             rate_limited: AtomicU64::new(0),
+            ddos_active: AtomicU64::new(0),
+            ddos_current_pps: AtomicU64::new(0),
+            ddos_activations: AtomicU64::new(0),
+            ddos_clears: AtomicU64::new(0),
+            ddos_retry_issued: AtomicU64::new(0),
+            ddos_retry_validated: AtomicU64::new(0),
+            ddos_drop_global_limit: AtomicU64::new(0),
+            ddos_drop_geoip: AtomicU64::new(0),
+            ddos_drop_blacklist: AtomicU64::new(0),
+            ddos_drop_per_ip_limit: AtomicU64::new(0),
+            ddos_drop_malformed_initial: AtomicU64::new(0),
+            ddos_drop_invalid_retry: AtomicU64::new(0),
             start_time: std::time::Instant::now(),
         }
     }
@@ -278,6 +302,56 @@ impl Metrics {
     pub fn record_rate_limited(&self) {
         self.rate_limited.fetch_add(1, Ordering::Relaxed);
         crate::instrumentation::global().server.rate_limit_hit();
+    }
+
+    pub(crate) fn record_ddos_sample(
+        &self,
+        pps: u64,
+        transition: crate::implementations::server::limits::DdosTransition,
+    ) {
+        use crate::implementations::server::limits::DdosTransition;
+
+        self.ddos_current_pps.store(pps, Ordering::Relaxed);
+        match transition {
+            DdosTransition::Activated => {
+                self.ddos_active.store(1, Ordering::Relaxed);
+                self.ddos_activations.fetch_add(1, Ordering::Relaxed);
+            }
+            DdosTransition::Cleared => {
+                self.ddos_active.store(0, Ordering::Relaxed);
+                self.ddos_clears.fetch_add(1, Ordering::Relaxed);
+            }
+            DdosTransition::Unchanged => {}
+        }
+    }
+
+    pub(crate) fn record_ddos_retry_issued(&self) {
+        self.ddos_retry_issued.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_ddos_retry_validated(&self) {
+        self.ddos_retry_validated.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_ddos_drop(
+        &self,
+        reason: crate::implementations::server::ddos::DdosDropReason,
+    ) {
+        use crate::implementations::server::ddos::DdosDropReason;
+
+        let counter = match reason {
+            DdosDropReason::GlobalLimit => &self.ddos_drop_global_limit,
+            DdosDropReason::GeoIp => &self.ddos_drop_geoip,
+            DdosDropReason::Blacklist => &self.ddos_drop_blacklist,
+            DdosDropReason::PerIpLimit => &self.ddos_drop_per_ip_limit,
+            DdosDropReason::MalformedInitial => &self.ddos_drop_malformed_initial,
+            DdosDropReason::InvalidRetry => &self.ddos_drop_invalid_retry,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+        self.rate_limited.fetch_add(1, Ordering::Relaxed);
+        if reason != DdosDropReason::PerIpLimit {
+            crate::instrumentation::global().server.rate_limit_hit();
+        }
     }
 
     pub fn record_ingress_datagram(&self, bytes: usize) {
@@ -825,6 +899,50 @@ impl Metrics {
             "quicfuscate_rate_limited_total {}\n",
             self.rate_limited.load(Ordering::Relaxed)
         ));
+        out.push_str("\n# HELP quicfuscate_ddos_active Enhanced DDoS admission state\n");
+        out.push_str("# TYPE quicfuscate_ddos_active gauge\n");
+        out.push_str(&format!(
+            "quicfuscate_ddos_active {}\n",
+            self.ddos_active.load(Ordering::Relaxed)
+        ));
+        out.push_str("# HELP quicfuscate_ddos_current_pps Latest interval-correct accepted PPS\n");
+        out.push_str("# TYPE quicfuscate_ddos_current_pps gauge\n");
+        out.push_str(&format!(
+            "quicfuscate_ddos_current_pps {}\n",
+            self.ddos_current_pps.load(Ordering::Relaxed)
+        ));
+        out.push_str("# HELP quicfuscate_ddos_transitions_total Enhanced admission transitions\n");
+        out.push_str("# TYPE quicfuscate_ddos_transitions_total counter\n");
+        for (transition, value) in [
+            ("activated", self.ddos_activations.load(Ordering::Relaxed)),
+            ("cleared", self.ddos_clears.load(Ordering::Relaxed)),
+        ] {
+            out.push_str(&format!(
+                "quicfuscate_ddos_transitions_total{{transition=\"{transition}\"}} {value}\n"
+            ));
+        }
+        out.push_str("# HELP quicfuscate_ddos_retry_total QUIC Retry outcomes\n");
+        out.push_str("# TYPE quicfuscate_ddos_retry_total counter\n");
+        for (outcome, value) in [
+            ("issued", self.ddos_retry_issued.load(Ordering::Relaxed)),
+            ("validated", self.ddos_retry_validated.load(Ordering::Relaxed)),
+        ] {
+            out.push_str(&format!(
+                "quicfuscate_ddos_retry_total{{outcome=\"{outcome}\"}} {value}\n"
+            ));
+        }
+        out.push_str("# HELP quicfuscate_ddos_drops_total DDoS admission drops by cause\n");
+        out.push_str("# TYPE quicfuscate_ddos_drops_total counter\n");
+        for (reason, value) in [
+            ("global_limit", self.ddos_drop_global_limit.load(Ordering::Relaxed)),
+            ("geoip", self.ddos_drop_geoip.load(Ordering::Relaxed)),
+            ("blacklist", self.ddos_drop_blacklist.load(Ordering::Relaxed)),
+            ("per_ip_limit", self.ddos_drop_per_ip_limit.load(Ordering::Relaxed)),
+            ("malformed_initial", self.ddos_drop_malformed_initial.load(Ordering::Relaxed)),
+            ("invalid_retry", self.ddos_drop_invalid_retry.load(Ordering::Relaxed)),
+        ] {
+            out.push_str(&format!("quicfuscate_ddos_drops_total{{reason=\"{reason}\"}} {value}\n"));
+        }
         let audit = crate::audit::stats();
         out.push_str(
             "\n# HELP quicfuscate_audit_dropped_events_total Audit events rejected by the bounded writer queue\n",
@@ -1269,6 +1387,49 @@ mod tests {
             "quicfuscate_auth_state_pruned_total 3",
         ] {
             assert!(output.contains(metric), "missing auth policy metric: {metric}");
+        }
+    }
+
+    #[test]
+    fn ddos_metrics_expose_state_retry_and_exact_drop_causes() {
+        let metrics = Metrics::new();
+        metrics.record_ddos_sample(
+            42_000,
+            crate::implementations::server::limits::DdosTransition::Activated,
+        );
+        metrics.record_ddos_retry_issued();
+        metrics.record_ddos_retry_validated();
+        for reason in [
+            crate::implementations::server::ddos::DdosDropReason::GlobalLimit,
+            crate::implementations::server::ddos::DdosDropReason::GeoIp,
+            crate::implementations::server::ddos::DdosDropReason::Blacklist,
+            crate::implementations::server::ddos::DdosDropReason::PerIpLimit,
+            crate::implementations::server::ddos::DdosDropReason::MalformedInitial,
+            crate::implementations::server::ddos::DdosDropReason::InvalidRetry,
+        ] {
+            metrics.record_ddos_drop(reason);
+        }
+        metrics.record_ddos_sample(
+            1_000,
+            crate::implementations::server::limits::DdosTransition::Cleared,
+        );
+
+        let output = metrics.export();
+        for expected in [
+            "quicfuscate_ddos_active 0",
+            "quicfuscate_ddos_current_pps 1000",
+            "quicfuscate_ddos_transitions_total{transition=\"activated\"} 1",
+            "quicfuscate_ddos_transitions_total{transition=\"cleared\"} 1",
+            "quicfuscate_ddos_retry_total{outcome=\"issued\"} 1",
+            "quicfuscate_ddos_retry_total{outcome=\"validated\"} 1",
+            "quicfuscate_ddos_drops_total{reason=\"global_limit\"} 1",
+            "quicfuscate_ddos_drops_total{reason=\"geoip\"} 1",
+            "quicfuscate_ddos_drops_total{reason=\"blacklist\"} 1",
+            "quicfuscate_ddos_drops_total{reason=\"per_ip_limit\"} 1",
+            "quicfuscate_ddos_drops_total{reason=\"malformed_initial\"} 1",
+            "quicfuscate_ddos_drops_total{reason=\"invalid_retry\"} 1",
+        ] {
+            assert!(output.contains(expected), "missing DDoS metric: {expected}");
         }
     }
 

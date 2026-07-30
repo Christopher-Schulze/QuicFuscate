@@ -128,6 +128,7 @@ Use this section as the shortest non-marketing answer to "what evidence exists r
 | Fuzzing | `scripts/tests/fuzz/fuzz_targets/crypto_operations.rs`, `scripts/tests/suites/test-security-fuzzing.sh` | malformed input handling and retained crypto/runtime stress coverage |
 | Guardrail audit | `scripts/tests/audits/audit-runtime-guardrails.sh` | runtime/docs/contract drift detection |
 | Runtime soak and chaos | `scripts/tests/suites/test-runtime-soak-chaos.sh` | control-plane, integration, and runtime stability evidence |
+| DDoS admission | `scripts/tests/suites/test-ddos-admission.sh` | sustained activation/clear hysteresis, established-client bidirectional continuity, real Retry handshake, real MaxMind decisions, strict-HTTPS blacklist refresh, cache restart, failed-refresh last-known-good preservation, and bounded resource evidence |
 | FEC empirical proof | `scripts/tests/suites/test-fec-auto-controller-proof.sh`, `scripts/tests/suites/test-fec-auto-controller-scenarios.sh` | clean-path efficiency, escalation, cadence, recovery, and backend-family evidence |
 | Retained crypto performance evidence | `scripts/benchmarks/suites/bench-retained-crypto-backends.sh` | whether retained `Aegis128L` / `Aegis128X4` / `Aegis128X8` / `Morus1280_128` machine room earns its complexity |
 
@@ -1448,6 +1449,7 @@ Core crate and entrypoints:
 Binary entrypoints:
 - `src/bin/harness.rs` - script-facing harness binary (3-line entry point); implementation is in `src/harness.rs` (~260 lines).
 - `src/bin/qf-e2e-client.rs` - headless QKey-based E2E client for admin/web flows.
+- `src/bin/qf-ddos-policy-probe.rs` - bounded real-data GeoIP and strict-HTTPS blacklist policy probe.
 - `src/bin/qf-e2e-desktop.rs` - headless desktop-style Engine E2E probe (connect/stats/disconnect).
 - `src/bin/quicfuscate-ctl.rs` - Unix admin socket CLI (`status`, `clients`, `kick`, `block`, `reload`, `qkey`, `shutdown`).
 
@@ -1484,6 +1486,7 @@ Server implementation (`src/implementations/server/`):
 - `src/implementations/server/admin.rs` - Unix admin socket protocol, handler contracts, and centralized admin-visible client snapshot projection (`ClientSnapshot` -> `ClientInfo`) for the live CLI server path. Canonical admin IDs use `session:<id>` when the live server domain has a session owner; `remote:<addr>` remains only as compatibility input and as auxiliary transport metadata.
 - `src/implementations/server/admin_http.rs` - HTTP admin server, auth/session API, config and QKey endpoints.
 - `src/implementations/server/admin_logs.rs` - in-memory admin log buffer and line model.
+- `src/implementations/server/ddos.rs` - stateless source/CID/credential-bound QUIC Retry token issuance, validation, and typed enhanced-admission outcomes.
 - `src/implementations/server/fsutil.rs` - atomic file write helper (`atomic_write_file`) used by server persistence paths.
 - `src/implementations/server/ip_pool.rs` - server-side tunnel IP allocation pool.
 - `src/implementations/server/limits.rs` - rate limiting and connection limiting primitives.
@@ -2432,6 +2435,9 @@ Use the `--config` flag to load a unified TOML file containing FEC, stealth and 
 Embedded `EngineMode::Server` is therefore a real headless live server runtime in the current codebase, not a bootstrap-only helper surface. It reuses the standalone listener loop and runtime ownership model, but does not expose the standalone admin service bundle by default. Construction and polling occur on the same dedicated Tokio runtime; the synchronous Engine owner receives its shutdown sender and shared metrics only after construction succeeds.
 Engine server-mode stats now follow the same runtime truth: bytes, packets, and active-client counts are projected from runtime-owned `implementations/server::Metrics`, while server-side RTT and loss remain `0` until explicit server-owned producers exist.
 Admin orchestration helpers (`ServerAdminCore`, `AdminAction`) live in `implementations/server`, so admin, reload, metrics, and shutdown wiring no longer depend on a CLI-local server state island.
+Datagram admission is ordered and bounded: global packet cap -> GeoIP -> external blacklist -> one per-IP packet/byte bucket -> enhanced Retry policy. Interval-delta accepted PPS feeds a monotonic EWMA state machine with sustained activation and clear windows. Enhanced mode preserves only cryptographically established traffic at normal per-IP cost; half-open clients remain new traffic. New traffic consumes the configured higher token cost and requires a stateless QUIC Retry for supported Initial packets. Retry tokens bind source IP, original and Retry connection IDs, the public Initial credential, issuance time, and an HMAC. After validation, live authentication restores the public credential while RFC 9001 Initial keys derive from the Retry SCID carried as the retried packet's DCID. Stateless Version Negotiation remains connection-allocation-free but cannot bypass the global or source admission caps.
+External blacklist synchronization accepts only HTTPS, applies request-timeout, streamed body-size, strict UTF-8, line-format, and unique-entry bounds, and preserves the active last-known-good set on every failure. An optional custom CA bundle is limited to a non-empty regular PEM file of at most 1 MiB and is parsed before use without disabling certificate validation. A validated replacement is atomically persisted as a bounded versioned cache before it becomes active; startup ignores stale, malformed, oversized, or unsupported cache state. Cache persistence can be disabled explicitly without disabling in-memory or remote policy.
+Exact ARM64 source tree `856e99f2a5079bd02b2f3674a8c9be7ee27ce772` passes the privileged process gate on Omega. Release binaries `31b6e57377fc61e31ccf1857ace5f580aa16652ab8978d62d9ba67f1ad3981ed`, `ccd56fdebf8a646f0b5e44c058c1fa5e08abd616306a594eaa4458d60d30017f`, and `8c6cfbe2bd95a0d44eaf646ef938ce753c1eef662eefd42c72f30f9d471203a1` prove a pinned real MaxMind database, strict custom-CA HTTPS refresh, cache restart, failed-refresh retention, 820 controlled Initial packets, one activation and one clear, one Retry-protected handshake, and a pre-existing authenticated connection that exchanged 120 PING and 120 ACK packets across the flood. The measured server bounds were 10,340 KiB RSS growth and 240 ms CPU; the locally retained evidence archive SHA-256 is `26cd028e2222458550099e326a90f1889958365951039320ee53725b0e1bdc5f`. Candidate teardown left no TODO-540 process or source residue and did not restart or modify the independent server process. The final local source passes the complete workspace/all-target `rust-tests` matrix, including 1,999 library tests, strict all-target/all-feature Clippy, formatting, Bash/ShellCheck, runtime guardrails with zero critical findings, exact process evidence, diff hygiene, and protected-UI isolation.
 Within the live server path, ownership is now intentionally split only along one line:
 - `LiveServerDomain` owns remote/session/IP-pool/connection-limiter/packet-rate-limiter/snapshot state.
 - `LiveServerState` owns active QUIC connection objects, the bounded per-IP QKey auth policy, pending QKey auth attempts, runtime QKey revocation state, and the SessionId-to-QKey tracker used to terminate active sessions on revoke. One monotonic attempt ID survives the Initial ID lookup through the encrypted HTTP/3 bearer result; success, failure, timeout, pre-auth close, and internal abandonment each complete it at most once.
@@ -3063,6 +3069,16 @@ At runtime you can override selected stealth options without changing the config
 - `QUICFUSCATE_RATE_LIMIT_BPS` - integer; overrides per-source byte rate limit (`0` = unlimited, default: `0`).
 - `QUICFUSCATE_RATE_LIMIT_REFILL_MS` - integer `>=1`; token-bucket refill interval in milliseconds (default: `1000`).
   - These overrides are active only when the binary is built with the `rate_limiter` feature.
+- `QUICFUSCATE_DDOS_ENABLED` / `QUICFUSCATE_DDOS_RETRY_ENABLED` - strict boolean switches for sustained enhanced admission and stateless QUIC Retry (defaults: `true` / `true`).
+- `QUICFUSCATE_DDOS_SAMPLE_INTERVAL_MS`, `QUICFUSCATE_DDOS_ACTIVATION_WINDOW_MS`, `QUICFUSCATE_DDOS_CLEAR_WINDOW_MS` - monotonic sampling and hysteresis durations (defaults: `1000`, `5000`, `15000`).
+- `QUICFUSCATE_DDOS_EWMA_ALPHA`, `QUICFUSCATE_DDOS_SPIKE_MULTIPLIER`, `QUICFUSCATE_DDOS_CLEAR_FACTOR` - validated EWMA and transition factors (defaults: `0.1`, `3.0`, `1.5`).
+- `QUICFUSCATE_DDOS_ENHANCED_PACKET_COST` - per-IP token cost for new traffic while enhanced admission is active (default: `2`).
+- `QUICFUSCATE_DDOS_RETRY_TOKEN_LIFETIME_SECS` - stateless Retry-token validity window (default: `10`).
+- `QUICFUSCATE_GEOIP_DB_PATH` / `QUICFUSCATE_GEOIP_BLOCKED_COUNTRIES` - optional MaxMind country database and comma-separated blocked ISO codes.
+- `QUICFUSCATE_BLACKLIST_SYNC_URL`, `QUICFUSCATE_BLACKLIST_TTL_SECS`, `QUICFUSCATE_BLACKLIST_SYNC_INTERVAL_SECS` - optional strict-HTTPS feed, entry TTL, and refresh interval.
+- `QUICFUSCATE_BLACKLIST_CA_PATH` - optional bounded PEM CA bundle for private HTTPS feed endpoints; public feeds continue using platform roots.
+- `QUICFUSCATE_BLACKLIST_REQUEST_TIMEOUT_SECS`, `QUICFUSCATE_BLACKLIST_MAX_BODY_BYTES`, `QUICFUSCATE_BLACKLIST_MAX_ENTRIES` - fetch and parsed-state bounds (defaults: `30`, `16777216`, `250000`).
+- `QUICFUSCATE_BLACKLIST_CACHE_PATH` - atomic last-known-good cache path, or `disabled` for no persistence (default: `config/local/blacklist-cache.json`).
 - `QUICFUSCATE_FASTPATH` - `auto|off` (default: `auto`). Controls XDP/UDP fast-path selection.
 - io_uring queue depth and SQPOLL are probed automatically at runtime with no env override needed.
   SQPOLL requires `CAP_SYS_ADMIN` on kernels < 5.12 and falls back to standard mode silently.
@@ -3650,6 +3666,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `tun-e2e-dns-leak-netns.sh` - Linux network-namespace DNS leak proof: real server/client TUN over MASQUE, DNS query through the server TUN IP, and tcpdump assertion that the client underlay sees zero raw TCP/UDP port 53 packets
 - `test-e2e-admin-web.sh` - Admin web E2E (login/status/config/qkey + headless QKey connect via `qf-e2e-client` and `qf-e2e-desktop`)
 - `test-qkey-auth-policy.sh` - Exact-process QKey auth backoff, block, expiry, second-IP isolation, idle-prune, bounded-resource, metric, audit, and 100-attempt flood proof
+- `test-ddos-admission.sh` - Exact-process sustained DDoS activation/clear, established-client PING/ACK continuity, QUIC Retry, real MaxMind GeoIP, custom-CA HTTPS blacklist, cache restart, failed-refresh last-known-good, resource, secret, UI-isolation, and cleanup proof
 - `test-desktop-webadmin-rust-integration.sh` - Cross-surface desktop/web-admin/core integration contract checks
 - `test-fec-all.sh` - Dispatcher: runs all FEC suites (test-fec, test-fec-simulation, test-fec-e2e-loss, auto-controller)
 - `test-fec-auto-controller-scenarios.sh` - FEC auto-controller scenario-driven tests
@@ -3980,6 +3997,8 @@ The default server metrics endpoint (`implementations::server::metrics::Metrics:
 - `quicfuscate_auth_attempts_total`, `quicfuscate_auth_succeeded_total`, `quicfuscate_auth_failed_total`
 - `quicfuscate_auth_backoff_rejected_total`, `quicfuscate_auth_blocked_rejected_total`, `quicfuscate_auth_capacity_rejected_total`, `quicfuscate_auth_abandoned_total`
 - `quicfuscate_auth_state_tracked_ips`, `quicfuscate_auth_state_pruned_total`, `quicfuscate_rate_limited_total`
+- `quicfuscate_ddos_active`, `quicfuscate_ddos_current_pps`, `quicfuscate_ddos_transitions_total`
+- `quicfuscate_ddos_retry_total`, `quicfuscate_ddos_drops_total`
 - `quicfuscate_bandwidth_allowed_bytes_total`, `quicfuscate_bandwidth_denials_total`
 - `quicfuscate_bandwidth_scheduler_active_clients`, `quicfuscate_bandwidth_scheduler_delivered_total`
 

@@ -474,7 +474,7 @@ impl QuicFuscateConnection {
     #[allow(clippy::too_many_arguments)]
     pub fn new_server(
         scid: &crate::transport::ConnectionId,
-        odcid: Option<&crate::transport::ConnectionId>,
+        initial_key_dcid: Option<&crate::transport::ConnectionId>,
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
         config: &mut crate::transport::Config,
@@ -492,7 +492,7 @@ impl QuicFuscateConnection {
 
         let conn = crate::transport::packet::accept(
             scid.as_ref(),
-            odcid.as_ref().map(|id| id.as_ref()),
+            initial_key_dcid.as_ref().map(|id| id.as_ref()),
             local_addr,
             remote_addr,
             config,

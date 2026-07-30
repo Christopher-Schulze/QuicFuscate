@@ -185,6 +185,11 @@ name = "qf-logging-probe"
 path = "src/bin/qf-logging-probe.rs"
 required-features = ["rust-tests"]
 
+[[bin]]
+name = "qf-ddos-policy-probe"
+path = "src/bin/qf-ddos-policy-probe.rs"
+required-features = ["server", "rate_limiter", "rust-tests"]
+
 [[example]]
 name = "tun_factory_example"
 path = "examples/tun_factory_example.rs"

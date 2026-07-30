@@ -333,6 +333,9 @@ pub struct LiveServerState {
     domain: LiveServerDomain,
     auth_rate_limiter:
         Arc<std::sync::Mutex<crate::implementations::server::limits::AuthRateLimiter>>,
+    #[cfg(feature = "rate_limiter")]
+    retry_token_manager:
+        Option<Arc<crate::implementations::server::ddos::RetryTokenManager>>,
     revocation_manager: Arc<crate::implementations::server::revocation::RevocationManager>,
     qkey_tracker: Arc<crate::implementations::server::revocation::QKeyConnectionTracker>,
     key_rotation_manager: crate::implementations::server::revocation::KeyRotationManager,
@@ -370,6 +373,8 @@ pub(crate) struct LiveClientBuildRequest<'a> {
     pub disable_doh: bool,
     pub auth_rate_limiter:
         Arc<std::sync::Mutex<crate::implementations::server::limits::AuthRateLimiter>>,
+    pub retry_token_manager:
+        Option<Arc<crate::implementations::server::ddos::RetryTokenManager>>,
     pub doh_provider: &'a str,
     pub disable_fronting: bool,
     pub front_domain: &'a [String],
@@ -489,6 +494,8 @@ pub(crate) fn build_live_server_client_init(
 
     let mut initial_ctx = match parse_live_server_initial_auth(
         request.packet,
+        ip,
+        request.retry_token_manager.as_deref(),
         request.qkey_registry,
         request.revocation_manager,
         auth_attempt,
@@ -570,7 +577,7 @@ pub(crate) fn build_live_server_client_init(
         conn_stealth_cfg,
         conn_fec_cfg,
         opt_params,
-        &initial_ctx.odcid,
+        &initial_ctx.initial_key_dcid,
     ) {
         Ok(connection) => {
             Some(LiveClientInit { connection, pending_qkey_auth: initial_ctx.pending_qkey_auth })
@@ -747,13 +754,19 @@ impl LiveServerDomain {
     }
 
     #[cfg(feature = "rate_limiter")]
-    fn allow_incoming_datagram(&self, from: SocketAddr, len: usize) -> bool {
-        self.shared.allow_incoming_datagram(from, len)
+    fn admit_incoming_datagram(
+        &self,
+        from: SocketAddr,
+        packet: &[u8],
+        established: bool,
+        retry_eligible: bool,
+    ) -> crate::implementations::server::ddos::IncomingDatagramAdmission {
+        self.shared.admit_incoming_datagram(from, packet, established, retry_eligible)
     }
 
     #[cfg(feature = "rate_limiter")]
-    fn prune_rate_limits_if_due(&self) {
-        self.shared.prune_rate_limits_if_due();
+    fn prune_rate_limits_if_due(&self, metrics: &Metrics) {
+        self.shared.prune_rate_limits_if_due(metrics);
     }
 
     /// Returns a clone of the blacklist synchronizer Arc for async sync.
@@ -890,6 +903,9 @@ impl LiveServerState {
                 crate::implementations::server::revocation::DEFAULT_OVERLAP_WINDOW_SECS,
                 Arc::clone(&revocation_manager),
             );
+        let domain = LiveServerDomain::new(&server_config);
+        #[cfg(feature = "rate_limiter")]
+        let retry_token_manager = domain.shared.retry_token_manager.clone();
         Self {
             clients: std::collections::HashMap::new(),
             path_candidates: std::collections::HashMap::new(),
@@ -899,12 +915,14 @@ impl LiveServerState {
             ),
             fanout_queue: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
             qkey_auth: std::collections::HashMap::new(),
-            domain: LiveServerDomain::new(&server_config),
+            domain,
             auth_rate_limiter: Arc::new(std::sync::Mutex::new(
                 crate::implementations::server::limits::AuthRateLimiter::new(
                     server_config.auth_policy.clone(),
                 ),
             )),
+            #[cfg(feature = "rate_limiter")]
+            retry_token_manager,
             revocation_manager,
             qkey_tracker,
             key_rotation_manager,
@@ -921,13 +939,29 @@ impl LiveServerState {
     }
 
     #[cfg(feature = "rate_limiter")]
-    pub fn allow_incoming_datagram(&self, from: SocketAddr, len: usize) -> bool {
-        self.domain.allow_incoming_datagram(from, len)
+    pub(crate) fn admit_incoming_datagram(
+        &self,
+        from: SocketAddr,
+        packet: &[u8],
+        established: bool,
+        retry_eligible: bool,
+    ) -> crate::implementations::server::ddos::IncomingDatagramAdmission {
+        self.domain.admit_incoming_datagram(from, packet, established, retry_eligible)
     }
 
     #[cfg(feature = "rate_limiter")]
-    pub fn prune_rate_limits_if_due(&self) {
-        self.domain.prune_rate_limits_if_due();
+    pub fn is_established_datagram(&self, from: SocketAddr, packet: &[u8]) -> bool {
+        if let Some(connection) = self.clients.get(&from) {
+            return connection.conn.is_established();
+        }
+        find_live_client_by_dcid(&self.clients, from, packet)
+            .and_then(|address| self.clients.get(&address))
+            .is_some_and(|connection| connection.conn.is_established())
+    }
+
+    #[cfg(feature = "rate_limiter")]
+    pub fn prune_rate_limits_if_due(&self, metrics: &Metrics) {
+        self.domain.prune_rate_limits_if_due(metrics);
     }
 
     /// Periodically sync the external blacklist feed if a sync URL is
@@ -1234,7 +1268,7 @@ impl LiveServerState {
         }
         #[cfg(feature = "rate_limiter")]
         {
-            self.prune_rate_limits_if_due();
+            self.prune_rate_limits_if_due(metrics);
             // Periodically dispatch a background blacklist sync. The sync
             // is an async HTTPS fetch (30s timeout) but is spawned via
             // `tokio::spawn` so it never blocks the 5ms housekeeping tick.

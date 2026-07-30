@@ -62,6 +62,9 @@ pub struct ServerConfig {
     pub downlink_scheduler_rate_bytes_per_second: u64,
     /// Shared downlink token-bucket burst. Zero disables the shaper.
     pub downlink_scheduler_burst_bytes: u64,
+    /// Validated sustained DDoS detection and enhanced-admission policy.
+    #[cfg(feature = "rate_limiter")]
+    pub ddos_policy: limits::DdosPolicyConfig,
     /// GeoIP-based source-IP blocking config (TODO-459). When a MaxMindDB
     /// database path and blocked countries are configured, incoming
     /// datagrams from those countries are dropped. Gracefully degrades to
@@ -86,12 +89,57 @@ pub struct BlacklistConfig {
     pub sync_url: Option<String>,
     /// Interval between automatic sync fetches (seconds).
     pub sync_interval_secs: u64,
+    /// End-to-end HTTPS request timeout (seconds).
+    pub request_timeout_secs: u64,
+    /// Maximum feed and serialized-cache size.
+    pub max_body_bytes: usize,
+    /// Maximum number of unique blocked addresses.
+    pub max_entries: usize,
+    /// Atomic last-known-good cache path. `None` disables persistence.
+    pub cache_path: Option<std::path::PathBuf>,
+    /// Optional PEM CA bundle for private HTTPS feed endpoints.
+    pub custom_ca_path: Option<std::path::PathBuf>,
 }
 
 #[cfg(feature = "rate_limiter")]
 impl Default for BlacklistConfig {
     fn default() -> Self {
-        Self { default_ttl_secs: 3600, sync_url: None, sync_interval_secs: 3600 }
+        Self {
+            default_ttl_secs: 3600,
+            sync_url: None,
+            sync_interval_secs: 3600,
+            request_timeout_secs: 30,
+            max_body_bytes: 16 * 1024 * 1024,
+            max_entries: 250_000,
+            cache_path: Some(std::path::PathBuf::from(
+                "config/local/blacklist-cache.json",
+            )),
+            custom_ca_path: None,
+        }
+    }
+}
+
+#[cfg(feature = "rate_limiter")]
+impl BlacklistConfig {
+    fn validate(&self) -> Result<(), String> {
+        if self.default_ttl_secs == 0
+            || self.sync_interval_secs == 0
+            || self.request_timeout_secs == 0
+            || self.max_body_bytes == 0
+            || self.max_entries == 0
+        {
+            return Err(
+                "blacklist TTL, interval, timeout, body cap, and entry cap must be nonzero"
+                    .to_string(),
+            );
+        }
+        if self.sync_url.as_ref().is_some_and(|url| !url.starts_with("https://")) {
+            return Err("blacklist sync URL must use HTTPS".to_string());
+        }
+        if self.custom_ca_path.is_some() && self.sync_url.is_none() {
+            return Err("blacklist CA path requires a sync URL".to_string());
+        }
+        Ok(())
     }
 }
 
@@ -122,6 +170,8 @@ impl Default for ServerConfig {
             downlink_scheduler_rate_bytes_per_second: 0,
             downlink_scheduler_burst_bytes: 0,
             #[cfg(feature = "rate_limiter")]
+            ddos_policy: limits::DdosPolicyConfig::default(),
+            #[cfg(feature = "rate_limiter")]
             geoip: limits::GeoIpConfig::default(),
             #[cfg(feature = "rate_limiter")]
             blacklist: BlacklistConfig::default(),
@@ -149,8 +199,9 @@ pub fn server_config_from_listen_addr(
     ) = load_downlink_scheduler_from_env()?;
     #[cfg(feature = "rate_limiter")]
     {
+        config.ddos_policy = load_ddos_policy_config_from_env()?;
         config.geoip = load_geoip_config_from_env();
-        config.blacklist = load_blacklist_config_from_env();
+        config.blacklist = load_blacklist_config_from_env()?;
     }
     Ok(config)
 }
@@ -224,6 +275,80 @@ fn parse_auth_policy_env_u64(name: &str, default: u64) -> Result<u64, String> {
         Err(std::env::VarError::NotPresent) => Ok(default),
         Err(error) => Err(format!("could not read {name}: {error}")),
     }
+}
+
+fn parse_policy_env_bool(name: &str, default: bool) -> Result<bool, String> {
+    match std::env::var(name) {
+        Ok(raw) if raw.trim() == "1" || raw.trim().eq_ignore_ascii_case("true") => Ok(true),
+        Ok(raw) if raw.trim() == "0" || raw.trim().eq_ignore_ascii_case("false") => Ok(false),
+        Ok(raw) => Err(format!("invalid {name}='{raw}': expected true, false, 1, or 0")),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(format!("could not read {name}: {error}")),
+    }
+}
+
+#[cfg(feature = "rate_limiter")]
+fn parse_policy_env_f64(name: &str, default: f64) -> Result<f64, String> {
+    match std::env::var(name) {
+        Ok(raw) => raw.trim().parse::<f64>().map_err(|error| format!("invalid {name}='{raw}': {error}")),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(format!("could not read {name}: {error}")),
+    }
+}
+
+#[cfg(feature = "rate_limiter")]
+fn load_ddos_policy_config_from_env() -> Result<limits::DdosPolicyConfig, String> {
+    let defaults = limits::DdosPolicyConfig::default();
+    let milliseconds = |name: &str, default: Duration| -> Result<Duration, String> {
+        Ok(Duration::from_millis(parse_auth_policy_env_u64(
+            name,
+            u64::try_from(default.as_millis()).unwrap_or(u64::MAX),
+        )?))
+    };
+    let seconds = |name: &str, default: Duration| -> Result<Duration, String> {
+        Ok(Duration::from_secs(parse_auth_policy_env_u64(name, default.as_secs())?))
+    };
+    let config = limits::DdosPolicyConfig {
+        enabled: parse_policy_env_bool("QUICFUSCATE_DDOS_ENABLED", defaults.enabled)?,
+        sample_interval: milliseconds(
+            "QUICFUSCATE_DDOS_SAMPLE_INTERVAL_MS",
+            defaults.sample_interval,
+        )?,
+        activation_window: milliseconds(
+            "QUICFUSCATE_DDOS_ACTIVATION_WINDOW_MS",
+            defaults.activation_window,
+        )?,
+        clear_window: milliseconds(
+            "QUICFUSCATE_DDOS_CLEAR_WINDOW_MS",
+            defaults.clear_window,
+        )?,
+        ewma_alpha: parse_policy_env_f64(
+            "QUICFUSCATE_DDOS_EWMA_ALPHA",
+            defaults.ewma_alpha,
+        )?,
+        spike_multiplier: parse_policy_env_f64(
+            "QUICFUSCATE_DDOS_SPIKE_MULTIPLIER",
+            defaults.spike_multiplier,
+        )?,
+        clear_factor: parse_policy_env_f64(
+            "QUICFUSCATE_DDOS_CLEAR_FACTOR",
+            defaults.clear_factor,
+        )?,
+        enhanced_packet_cost: parse_auth_policy_env_u64(
+            "QUICFUSCATE_DDOS_ENHANCED_PACKET_COST",
+            defaults.enhanced_packet_cost,
+        )?,
+        retry_enabled: parse_policy_env_bool(
+            "QUICFUSCATE_DDOS_RETRY_ENABLED",
+            defaults.retry_enabled,
+        )?,
+        retry_token_lifetime: seconds(
+            "QUICFUSCATE_DDOS_RETRY_TOKEN_LIFETIME_SECS",
+            defaults.retry_token_lifetime,
+        )?,
+    };
+    config.validate()?;
+    Ok(config)
 }
 
 fn load_auth_policy_config_from_env() -> Result<AuthPolicyConfig, String> {
@@ -343,19 +468,56 @@ fn load_geoip_config_from_env() -> limits::GeoIpConfig {
 /// - `QUICFUSCATE_BLACKLIST_SYNC_URL`: HTTPS URL to fetch a plain-text IP list.
 /// - `QUICFUSCATE_BLACKLIST_TTL_SECS`: TTL for blocked IPs (default: 3600).
 /// - `QUICFUSCATE_BLACKLIST_SYNC_INTERVAL_SECS`: sync interval (default: 3600).
+/// - `QUICFUSCATE_BLACKLIST_CA_PATH`: optional PEM CA bundle for a private feed.
 #[cfg(feature = "rate_limiter")]
-fn load_blacklist_config_from_env() -> BlacklistConfig {
+fn load_blacklist_config_from_env() -> Result<BlacklistConfig, String> {
+    let defaults = BlacklistConfig::default();
     let sync_url = env_string("QUICFUSCATE_BLACKLIST_SYNC_URL");
-    let default_ttl_secs = std::env::var("QUICFUSCATE_BLACKLIST_TTL_SECS")
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(3600);
-    let sync_interval_secs = std::env::var("QUICFUSCATE_BLACKLIST_SYNC_INTERVAL_SECS")
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(3600);
-
-    let config = BlacklistConfig { default_ttl_secs, sync_url, sync_interval_secs };
+    let custom_ca_path =
+        env_string("QUICFUSCATE_BLACKLIST_CA_PATH").map(std::path::PathBuf::from);
+    let max_body_bytes = parse_auth_policy_env_u64(
+        "QUICFUSCATE_BLACKLIST_MAX_BODY_BYTES",
+        defaults.max_body_bytes as u64,
+    )?;
+    let max_entries = parse_auth_policy_env_u64(
+        "QUICFUSCATE_BLACKLIST_MAX_ENTRIES",
+        defaults.max_entries as u64,
+    )?;
+    let cache_path = match std::env::var("QUICFUSCATE_BLACKLIST_CACHE_PATH") {
+        Ok(raw) if raw.trim().eq_ignore_ascii_case("disabled") => None,
+        Ok(raw) if raw.trim().is_empty() => {
+            return Err(
+                "QUICFUSCATE_BLACKLIST_CACHE_PATH must be a path or 'disabled'".to_string(),
+            )
+        }
+        Ok(raw) => Some(std::path::PathBuf::from(raw.trim())),
+        Err(std::env::VarError::NotPresent) => defaults.cache_path,
+        Err(error) => {
+            return Err(format!("could not read QUICFUSCATE_BLACKLIST_CACHE_PATH: {error}"))
+        }
+    };
+    let config = BlacklistConfig {
+        default_ttl_secs: parse_auth_policy_env_u64(
+            "QUICFUSCATE_BLACKLIST_TTL_SECS",
+            defaults.default_ttl_secs,
+        )?,
+        sync_url,
+        sync_interval_secs: parse_auth_policy_env_u64(
+            "QUICFUSCATE_BLACKLIST_SYNC_INTERVAL_SECS",
+            defaults.sync_interval_secs,
+        )?,
+        request_timeout_secs: parse_auth_policy_env_u64(
+            "QUICFUSCATE_BLACKLIST_REQUEST_TIMEOUT_SECS",
+            defaults.request_timeout_secs,
+        )?,
+        max_body_bytes: usize::try_from(max_body_bytes)
+            .map_err(|_| "QUICFUSCATE_BLACKLIST_MAX_BODY_BYTES exceeds usize".to_string())?,
+        max_entries: usize::try_from(max_entries)
+            .map_err(|_| "QUICFUSCATE_BLACKLIST_MAX_ENTRIES exceeds usize".to_string())?,
+        cache_path,
+        custom_ca_path,
+    };
+    config.validate()?;
     if config.sync_url.is_some() {
         log::info!(
             "Blacklist sync enabled: ttl={}s, interval={}s",
@@ -363,7 +525,7 @@ fn load_blacklist_config_from_env() -> BlacklistConfig {
             config.sync_interval_secs
         );
     }
-    config
+    Ok(config)
 }
 
 pub(crate) fn resolve_qkey_ttl_secs(ttl_override: Option<u64>) -> Option<u64> {

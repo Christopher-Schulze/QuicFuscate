@@ -110,16 +110,18 @@ pub fn connect(
 /// Creates a new server-side QUIC connection accepting a client handshake.
 pub fn accept(
     scid: &[u8],
-    odcid: Option<&[u8]>,
+    initial_key_dcid: Option<&[u8]>,
     local: std::net::SocketAddr,
     peer: std::net::SocketAddr,
     config: &mut crate::transport::Config,
 ) -> Result<crate::transport::Connection, ConnectionError> {
     // Create connection with server role
-    // Record ODCID for Initial key derivation (RFC 9001).
+    // Record the Destination Connection ID from this Initial for RFC 9001
+    // key derivation. After Retry this is the server's Retry SCID, not the
+    // client's original destination connection ID.
     let mut conn = crate::transport::Connection::new_server(scid, local, peer, config.clone());
-    if let Some(odcid) = odcid {
-        conn.set_initial_dcid(crate::transport::ConnectionId::from_vec(odcid.to_vec()));
+    if let Some(initial_key_dcid) = initial_key_dcid {
+        conn.set_initial_dcid(crate::transport::ConnectionId::from_vec(initial_key_dcid.to_vec()));
     }
     // Attach lightweight FEC transport observer to collect ECN/ACK telemetry
     // (policy application remains optional and external)

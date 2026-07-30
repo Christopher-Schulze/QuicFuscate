@@ -7,6 +7,11 @@ impl ServerRuntime {
         server_config.auth_policy.validate().map_err(EngineError::Config)?;
         server_config.bandwidth_policy.validate().map_err(EngineError::Config)?;
         server_config.validate_downlink_scheduler().map_err(EngineError::Config)?;
+        #[cfg(feature = "rate_limiter")]
+        {
+            server_config.ddos_policy.validate().map_err(EngineError::Config)?;
+            server_config.blacklist.validate().map_err(EngineError::Config)?;
+        }
         // Create memory pool
         let pool_bytes = engine_config.optimization.memory_pool_size;
         let block_size = engine_config.optimization.memory_pool_alignment.max(2048);
@@ -599,8 +604,16 @@ impl ServerRuntime {
     }
 
     #[cfg(feature = "rate_limiter")]
-    pub fn allow_incoming_datagram(&self, from: SocketAddr, len: usize) -> bool {
-        self.live().live_state.allow_incoming_datagram(from, len)
+    pub(crate) fn admit_incoming_datagram(
+        &self,
+        from: SocketAddr,
+        packet: &[u8],
+        retry_eligible: bool,
+    ) -> crate::implementations::server::ddos::IncomingDatagramAdmission {
+        let established = self.live().live_state.is_established_datagram(from, packet);
+        self.live()
+            .live_state
+            .admit_incoming_datagram(from, packet, established, retry_eligible)
     }
 
     fn live_parts(&mut self) -> ServerRuntimeLiveParts<'_> {
@@ -784,18 +797,45 @@ impl ServerRuntime {
                                 metrics.record_connection_rejected();
                                 continue;
                             }
-                            #[cfg(feature = "rate_limiter")]
-                            {
-                                if !self.allow_incoming_datagram(from, len) {
-                                    metrics.record_rate_limited();
-                                    continue;
-                                }
-                            }
-                            if let Ok(Some(response)) = stateless_version_negotiation_response(
+                            let version_negotiation = stateless_version_negotiation_response(
                                 &buf[..len],
                                 runtime_config.transport.supported_versions(),
                             )
+                            .ok()
+                            .flatten();
+                            #[cfg(feature = "rate_limiter")]
                             {
+                                use crate::implementations::server::ddos::IncomingDatagramAdmission;
+                                match self.admit_incoming_datagram(
+                                    from,
+                                    &buf[..len],
+                                    version_negotiation.is_none(),
+                                ) {
+                                    IncomingDatagramAdmission::Allow => {}
+                                    IncomingDatagramAdmission::RetryValidated => {
+                                        metrics.record_ddos_retry_validated();
+                                    }
+                                    IncomingDatagramAdmission::Drop(reason) => {
+                                        metrics.record_ddos_drop(reason);
+                                        continue;
+                                    }
+                                    IncomingDatagramAdmission::Retry(response) => {
+                                        metrics.record_ddos_retry_issued();
+                                        match socket.send_to(&response, from).await {
+                                            Ok(sent) => metrics.record_egress_datagram(sent),
+                                            Err(error) => {
+                                                log::warn!(
+                                                    "failed to send QUIC Retry to {}: {}",
+                                                    from,
+                                                    error
+                                                );
+                                            }
+                                        }
+                                        continue;
+                                    }
+                                }
+                            }
+                            if let Some(response) = version_negotiation {
                                 match socket.send_to(&response, from).await {
                                     Ok(sent) => metrics.record_egress_datagram(sent),
                                     Err(error) => {
@@ -809,6 +849,11 @@ impl ServerRuntime {
                                 continue;
                             }
 
+                            #[cfg(feature = "rate_limiter")]
+                            let retry_token_manager =
+                                self.live().live_state.retry_token_manager.clone();
+                            #[cfg(not(feature = "rate_limiter"))]
+                            let retry_token_manager = None;
                             let runtime_parts = self.live_parts();
                             let client_snapshots = runtime_parts.live_state.client_snapshots().clone();
                             let auth_rate_limiter = runtime_parts.live_state.auth_rate_limiter.clone();
@@ -841,6 +886,7 @@ impl ServerRuntime {
                                         os,
                                         disable_doh,
                                         auth_rate_limiter: auth_rate_limiter.clone(),
+                                        retry_token_manager: retry_token_manager.clone(),
                                         doh_provider: doh_provider.as_str(),
                                         disable_fronting,
                                         front_domain: &front_domain,

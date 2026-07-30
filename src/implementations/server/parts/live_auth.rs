@@ -167,7 +167,7 @@ pub fn reconcile_live_clients(
 }
 
 pub struct LiveInitialAuthContext {
-    pub odcid: crate::transport::ConnectionId,
+    pub initial_key_dcid: crate::transport::ConnectionId,
     pub version: u32,
     pub qkey_record: Option<QKeyRecord>,
     pub pending_qkey_auth: Option<QKeyAuthState>,
@@ -189,6 +189,8 @@ impl LiveInitialAuthError {
 
 pub(crate) fn parse_live_server_initial_auth(
     packet: &[u8],
+    remote_ip: IpAddr,
+    retry_token_manager: Option<&crate::implementations::server::ddos::RetryTokenManager>,
     qkey_registry: &std::sync::Mutex<QKeyRegistry>,
     revocation_manager: &crate::implementations::server::revocation::RevocationManager,
     auth_attempt: crate::implementations::server::limits::AuthAttempt,
@@ -202,8 +204,23 @@ pub(crate) fn parse_live_server_initial_auth(
     }
 
     let version = initial_hdr.version;
-    let odcid = crate::transport::ConnectionId::from_vec(std::mem::take(&mut initial_hdr.dcid));
-    let initial_token = initial_hdr.token.take();
+    let initial_key_dcid = crate::transport::ConnectionId::from_vec(initial_hdr.dcid.clone());
+    let mut initial_token = initial_hdr.token.take();
+    if initial_token.as_deref().is_some_and(
+        crate::implementations::server::ddos::RetryTokenManager::is_retry_token,
+    ) {
+        let Some(manager) = retry_token_manager else {
+            return Err(LiveInitialAuthError::InvalidCredential);
+        };
+        let claims = manager
+            .validate(
+                initial_token.as_deref().unwrap_or_default(),
+                remote_ip,
+                &initial_hdr.dcid,
+            )
+            .map_err(|_| LiveInitialAuthError::InvalidCredential)?;
+        initial_token = Some(claims.credential);
+    }
     let require_qkey = require_qkey_for_new_clients();
     let mut qkey_record = None;
     let mut pending_qkey_auth = None;
@@ -235,7 +252,7 @@ pub(crate) fn parse_live_server_initial_auth(
         qkey_record = Some(record);
     }
 
-    Ok(LiveInitialAuthContext { odcid, version, qkey_record, pending_qkey_auth })
+    Ok(LiveInitialAuthContext { initial_key_dcid, version, qkey_record, pending_qkey_auth })
 }
 
 pub fn apply_qkey_policy_overrides(
@@ -279,14 +296,14 @@ pub fn create_live_server_connection(
     stealth_config: crate::stealth::StealthConfig,
     fec_config: crate::fec::FecConfig,
     opt_params: crate::optimize::OptimizeConfig,
-    odcid: &crate::transport::ConnectionId,
+    initial_key_dcid: &crate::transport::ConnectionId,
 ) -> Result<QuicFuscateConnection, String> {
     let mut scid_bytes = [0u8; crate::transport::MAX_CONN_ID_LEN];
     crate::transport::rand::rand_bytes(&mut scid_bytes);
     let scid = crate::transport::ConnectionId::from_ref(&scid_bytes);
     QuicFuscateConnection::new_server(
         &scid,
-        Some(odcid),
+        Some(initial_key_dcid),
         local_addr,
         remote_addr,
         transport_config,

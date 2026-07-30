@@ -7,9 +7,10 @@ pub struct Connection {
     // Internal state
     scid: ConnectionId,
     dcid: ConnectionId,
-    /// Original Destination Connection ID (ODCID) used for Initial key derivation (RFC 9001).
-    /// Client: this is the initial DCID it chose for the first Initial packet.
-    /// Server: this is the DCID observed in the first client Initial packet.
+    /// Destination Connection ID retained for the Initial packet space.
+    /// Client: the original DCID used to verify Retry integrity.
+    /// Server: the DCID from the accepted Initial, including the Retry SCID
+    /// selected by the server when Retry occurred.
     initial_dcid: ConnectionId,
     is_server: bool,
     is_established: bool,

@@ -15,6 +15,18 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "rate_limiter")]
+    fn admission_allowed(
+        domain: &LiveServerDomain,
+        remote_addr: SocketAddr,
+        packet: &[u8],
+    ) -> bool {
+        matches!(
+            domain.admit_incoming_datagram(remote_addr, packet, true, true),
+            crate::implementations::server::ddos::IncomingDatagramAdmission::Allow
+        )
+    }
+
     #[test]
     fn stateless_version_negotiation_skips_fec_envelopes() {
         let meta = crate::fec::wire::WirePacketMeta {
@@ -721,14 +733,16 @@ mod tests {
                 burst_size: 1,
             }),
             last_prune: Instant::now(),
+            last_sample: Instant::now(),
         };
 
-        assert!(domain.allow_incoming_datagram(remote_addr, 64));
-        assert!(!domain.allow_incoming_datagram(remote_addr, 64));
+        let packet = [0u8; 64];
+        assert!(admission_allowed(&domain, remote_addr, &packet));
+        assert!(!admission_allowed(&domain, remote_addr, &packet));
 
         domain.remove_remote(remote_addr);
 
-        assert!(domain.allow_incoming_datagram(remote_addr, 64));
+        assert!(admission_allowed(&domain, remote_addr, &packet));
     }
 
     #[tokio::test]
@@ -949,6 +963,8 @@ mod tests {
                 default_ttl_secs: 60,
                 sync_url: Some("https://example.com/blocklist".to_string()),
                 sync_interval_secs: 300,
+                cache_path: None,
+                ..BlacklistConfig::default()
             },
             ..ServerConfig::default()
         };
@@ -979,6 +995,174 @@ mod tests {
         // but gracefully degrade (missing db → is_blocked returns false).
         assert!(domain.geoip_blocker.is_enabled());
         assert!(!domain.geoip_blocker.is_blocked("1.2.3.4".parse().unwrap()));
+    }
+
+    #[cfg(feature = "rate_limiter")]
+    #[test]
+    fn sustained_admission_retries_new_initials_and_preserves_established_traffic() {
+        use crate::implementations::server::ddos::{
+            DdosDropReason, IncomingDatagramAdmission,
+        };
+        use crate::implementations::server::limits::DdosPolicyConfig;
+        use crate::transport::packet::{format_header, parse_header, verify_retry_tag, Header};
+
+        fn initial_packet(dcid: Vec<u8>, scid: Vec<u8>, token: Vec<u8>) -> Vec<u8> {
+            let header = Header {
+                ty: crate::transport::PacketType::Initial,
+                version: crate::transport::PROTOCOL_VERSION,
+                dcid,
+                scid,
+                pkt_num: 0,
+                pkt_num_len: 0,
+                token: Some(token),
+                versions: None,
+                key_phase: false,
+            };
+            let mut storage = [0u8; 256];
+            let length = format_header(&header, &mut storage).expect("Initial header");
+            storage[..length].to_vec()
+        }
+
+        let config = ServerConfig {
+            ddos_policy: DdosPolicyConfig {
+                activation_window: Duration::from_secs(1),
+                clear_window: Duration::from_secs(5),
+                ..DdosPolicyConfig::default()
+            },
+            blacklist: BlacklistConfig {
+                cache_path: None,
+                ..BlacklistConfig::default()
+            },
+            ..ServerConfig::default()
+        };
+        let domain = LiveServerDomain::new(&config);
+        assert_eq!(
+            domain.shared.ddos_detector.record_pps_at(100, Duration::ZERO),
+            crate::implementations::server::limits::DdosTransition::Unchanged
+        );
+        assert_eq!(
+            domain.shared.ddos_detector.record_pps_at(1_000, Duration::from_secs(1)),
+            crate::implementations::server::limits::DdosTransition::Unchanged
+        );
+        assert_eq!(
+            domain.shared.ddos_detector.record_pps_at(1_000, Duration::from_secs(2)),
+            crate::implementations::server::limits::DdosTransition::Activated
+        );
+
+        let remote: SocketAddr = "203.0.113.9:44321".parse().expect("remote address");
+        let original_dcid = vec![1, 2, 3, 4];
+        let client_scid = vec![5, 6, 7, 8];
+        let credential = b"a1b2c3d4e5f6".to_vec();
+        let initial =
+            initial_packet(original_dcid.clone(), client_scid.clone(), credential.clone());
+        let retry_packet =
+            match domain.admit_incoming_datagram(remote, &initial, false, true) {
+                IncomingDatagramAdmission::Retry(packet) => packet,
+                _ => panic!("enhanced admission did not issue Retry"),
+            };
+        let (retry, _) = parse_header(&retry_packet, 0).expect("Retry header");
+        verify_retry_tag(&retry_packet, &original_dcid, crate::transport::PROTOCOL_VERSION)
+            .expect("Retry integrity");
+        let retry_token = retry.token.clone().expect("Retry token");
+        let retried_initial =
+            initial_packet(retry.scid.clone(), client_scid, retry_token.clone());
+
+        assert!(matches!(
+            domain.admit_incoming_datagram(remote, &retried_initial, false, true),
+            IncomingDatagramAdmission::RetryValidated
+        ));
+        assert!(matches!(
+            domain.admit_incoming_datagram(remote, &initial, true, true),
+            IncomingDatagramAdmission::Allow
+        ));
+        assert!(matches!(
+            domain.admit_incoming_datagram(remote, &initial, false, false),
+            IncomingDatagramAdmission::Allow
+        ));
+
+        let mut tampered_token = retry_token;
+        let last = tampered_token.len() - 1;
+        tampered_token[last] ^= 1;
+        let tampered = initial_packet(retry.scid, vec![9, 10], tampered_token);
+        assert!(matches!(
+            domain.admit_incoming_datagram(remote, &tampered, false, true),
+            IncomingDatagramAdmission::Drop(DdosDropReason::InvalidRetry)
+        ));
+    }
+
+    #[cfg(feature = "rate_limiter")]
+    #[test]
+    fn validated_retry_uses_retry_scid_for_initial_keys_and_restores_qkey_identity() {
+        use crate::implementations::server::ddos::RetryTokenManager;
+        use crate::implementations::server::limits::{
+            AuthAdmission, AuthPolicyConfig, AuthRateLimiter,
+        };
+        use crate::transport::packet::{format_header, parse_header, Header};
+
+        fn initial_packet(dcid: Vec<u8>, scid: Vec<u8>, token: Vec<u8>) -> Vec<u8> {
+            let header = Header {
+                ty: crate::transport::PacketType::Initial,
+                version: crate::transport::PROTOCOL_VERSION,
+                dcid,
+                scid,
+                pkt_num: 0,
+                pkt_num_len: 0,
+                token: Some(token),
+                versions: None,
+                key_phase: false,
+            };
+            let mut storage = [0u8; 256];
+            let length = format_header(&header, &mut storage).expect("Initial header");
+            storage[..length].to_vec()
+        }
+
+        let token_hex = "a".repeat(64);
+        let qkey = crate::engine::qkey::generate(
+            &crate::engine::qkey::QKeyConfig::new("127.0.0.1:4433", "example.com")
+                .with_stealth("auto")
+                .with_fec("auto")
+                .with_token(&token_hex),
+        );
+        let qkey_id = qkey_registry::qkey_id(&qkey);
+        let mut registry = QKeyRegistry::new_in_memory(4, None);
+        registry
+            .insert(qkey, token_hex.into(), Some("retry-proof".to_string()))
+            .expect("QKey insert");
+        let registry = std::sync::Mutex::new(registry);
+
+        let remote: SocketAddr = "203.0.113.10:44321".parse().expect("remote address");
+        let original_dcid = vec![1, 2, 3, 4];
+        let client_scid = vec![5, 6, 7, 8];
+        let initial =
+            initial_packet(original_dcid.clone(), client_scid.clone(), qkey_id.as_bytes().to_vec());
+        let manager = RetryTokenManager::new(Duration::from_secs(10)).expect("Retry manager");
+        let issue = manager.issue_for_initial(&initial, remote.ip()).expect("Retry issue");
+        let (retry, _) = parse_header(&issue.packet, 0).expect("Retry header");
+        let retry_scid = retry.scid.clone();
+        let retried = initial_packet(
+            retry.scid,
+            client_scid,
+            retry.token.expect("Retry token"),
+        );
+
+        let mut limiter = AuthRateLimiter::new(AuthPolicyConfig::default());
+        let attempt = match limiter.begin(remote.ip()) {
+            AuthAdmission::Allowed(attempt) => attempt,
+            _ => panic!("auth attempt was not admitted"),
+        };
+        let context = parse_live_server_initial_auth(
+            &retried,
+            remote.ip(),
+            Some(&manager),
+            &registry,
+            &crate::implementations::server::revocation::RevocationManager::new(),
+            attempt,
+        )
+        .expect("retried Initial authentication");
+
+        assert_eq!(context.initial_key_dcid.as_ref(), retry_scid);
+        assert_eq!(context.qkey_record.expect("QKey record").id, qkey_id);
+        assert!(context.pending_qkey_auth.is_some());
     }
 
     #[test]
@@ -1123,6 +1307,7 @@ mod tests {
             os: OsProfile::Linux,
             disable_doh: false,
             auth_rate_limiter,
+            retry_token_manager: None,
             doh_provider: "https://cloudflare-dns.com/dns-query",
             disable_fronting: false,
             front_domain: &[],

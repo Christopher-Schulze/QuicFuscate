@@ -13,6 +13,7 @@ pub const DEFAULT_GLOBAL_RATE_LIMIT_PPS: u64 = 50_000;
 /// This must leave headroom above normal tunnel packet rates so the abuse
 /// control cannot manufacture transport loss under legitimate throughput.
 pub const DEFAULT_PER_SOURCE_RATE_LIMIT_PPS: u64 = 10_000;
+const MAX_BLACKLIST_CA_BUNDLE_BYTES: u64 = 1024 * 1024;
 
 /// Rate limit configuration.
 #[derive(Clone, Debug)]
@@ -121,18 +122,25 @@ struct TokenBucket {
 
 impl TokenBucket {
     fn new(capacity: u64, refill_rate: u64, refill_interval: Duration) -> Self {
+        Self::new_at(capacity, refill_rate, refill_interval, Instant::now())
+    }
+
+    fn new_at(capacity: u64, refill_rate: u64, refill_interval: Duration, now: Instant) -> Self {
         Self {
             tokens: capacity,
             capacity,
-            last_refill: Instant::now(),
-            last_seen: Instant::now(),
+            last_refill: now,
+            last_seen: now,
             refill_rate,
             refill_interval,
         }
     }
 
     fn consume(&mut self, amount: u64) -> bool {
-        let now = Instant::now();
+        self.consume_at(amount, Instant::now())
+    }
+
+    fn consume_at(&mut self, amount: u64, now: Instant) -> bool {
         self.last_seen = now;
         self.refill(now);
 
@@ -145,7 +153,7 @@ impl TokenBucket {
     }
 
     fn refill(&mut self, now: Instant) {
-        let elapsed = now.duration_since(self.last_refill);
+        let elapsed = now.saturating_duration_since(self.last_refill);
 
         if elapsed >= self.refill_interval {
             let refill_interval_us = self.refill_interval.as_micros();
@@ -201,16 +209,28 @@ impl RateLimiter {
 
     /// Check if a packet is allowed (by source IP).
     pub fn check_packet_ip(&self, ip: IpAddr) -> bool {
-        self.check_packet_key(RateLimitKey::Ip(ip))
+        self.check_packet_ip_cost(ip, 1)
+    }
+
+    /// Check if a source packet is allowed with an explicit policy token cost.
+    pub fn check_packet_ip_cost(&self, ip: IpAddr, cost: u64) -> bool {
+        self.check_packet_key_with_cost(RateLimitKey::Ip(ip), cost)
     }
 
     fn check_packet_key(&self, key: RateLimitKey) -> bool {
+        self.check_packet_key_with_cost(key, 1)
+    }
+
+    fn check_packet_key_with_cost(&self, key: RateLimitKey, cost: u64) -> bool {
+        if cost == 0 {
+            return false;
+        }
         let burst = self.config.effective_burst();
         let mut buckets = self.packet_buckets.lock();
         let bucket = buckets.entry(key).or_insert_with(|| {
             TokenBucket::new(burst, self.config.max_pps, self.config.refill_interval)
         });
-        let allowed = bucket.consume(1);
+        let allowed = bucket.consume(cost);
 
         if !allowed {
             crate::instrumentation::global().server.rate_limit_hit();
@@ -638,6 +658,10 @@ pub struct GlobalRateLimiter {
     pub(crate) accepted: AtomicU64,
     /// Timestamp (ns since anchor) of the last PPS snapshot.
     last_pps_ns: AtomicU64,
+    /// Accepted-packet total captured by the last PPS snapshot.
+    last_pps_accepted: AtomicU64,
+    /// Whether the first PPS baseline has been captured.
+    pps_initialized: AtomicBool,
     /// Last computed PPS snapshot.
     last_pps: AtomicU64,
 }
@@ -658,6 +682,8 @@ impl GlobalRateLimiter {
             anchor,
             accepted: AtomicU64::new(0),
             last_pps_ns: AtomicU64::new(0),
+            last_pps_accepted: AtomicU64::new(0),
+            pps_initialized: AtomicBool::new(false),
             last_pps: AtomicU64::new(0),
         }
     }
@@ -678,7 +704,10 @@ impl GlobalRateLimiter {
     /// thread applies the refill), then consumes one token via a CAS loop.
     /// No heap allocation, no mutex.
     pub fn check(&self) -> bool {
-        let now = self.now_ns();
+        self.check_at(self.now_ns())
+    }
+
+    fn check_at(&self, now: u64) -> bool {
         let last = self.last_refill_ns.load(Ordering::Relaxed);
         if now > last {
             let elapsed = now - last;
@@ -744,25 +773,28 @@ impl GlobalRateLimiter {
     /// snapshot from the total accepted-packet counter and the elapsed time
     /// since the last snapshot. Best-effort; safe to call from any thread.
     pub fn current_pps(&self) -> u64 {
-        let now = self.now_ns();
-        let last_ns = self.last_pps_ns.load(Ordering::Relaxed);
         let total = self.accepted.load(Ordering::Relaxed);
-        if last_ns == 0 {
-            // First snapshot — seed the baseline.
-            self.last_pps_ns.store(now, Ordering::Relaxed);
+        self.sample_pps_at(self.now_ns(), total)
+    }
+
+    fn sample_pps_at(&self, now_ns: u64, accepted_total: u64) -> u64 {
+        if !self.pps_initialized.swap(true, Ordering::AcqRel) {
+            self.last_pps_ns.store(now_ns, Ordering::Relaxed);
+            self.last_pps_accepted.store(accepted_total, Ordering::Relaxed);
             self.last_pps.store(0, Ordering::Relaxed);
             return 0;
         }
-        let elapsed_ns = now.saturating_sub(last_ns);
+
+        let last_ns = self.last_pps_ns.swap(now_ns, Ordering::AcqRel);
+        let last_total = self.last_pps_accepted.swap(accepted_total, Ordering::AcqRel);
+        let elapsed_ns = now_ns.saturating_sub(last_ns);
         if elapsed_ns == 0 {
             return self.last_pps.load(Ordering::Relaxed);
         }
-        // PPS = (total - prev_total) / elapsed_seconds.
-        // We don't store prev_total separately; instead we compute a running
-        // rate from the delta since the last snapshot.
-        let pps = (total as u128 * 1_000_000_000 / elapsed_ns as u128) as u64;
-        // Update the snapshot (best-effort).
-        self.last_pps_ns.store(now, Ordering::Relaxed);
+
+        let accepted_delta = accepted_total.saturating_sub(last_total);
+        let pps = (accepted_delta as u128 * 1_000_000_000 / elapsed_ns as u128)
+            .min(u64::MAX as u128) as u64;
         self.last_pps.store(pps, Ordering::Relaxed);
         pps
     }
@@ -783,13 +815,94 @@ pub const DEFAULT_EWMA_ALPHA: f64 = 0.1;
 /// Default spike multiplier: current rate must exceed 3× the EWMA.
 pub const DEFAULT_SPIKE_MULTIPLIER: f64 = 3.0;
 
+/// Validated sustained-anomaly and enhanced-admission policy.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DdosPolicyConfig {
+    pub enabled: bool,
+    pub sample_interval: Duration,
+    pub activation_window: Duration,
+    pub clear_window: Duration,
+    pub ewma_alpha: f64,
+    pub spike_multiplier: f64,
+    pub clear_factor: f64,
+    pub enhanced_packet_cost: u64,
+    pub retry_enabled: bool,
+    pub retry_token_lifetime: Duration,
+}
+
+impl Default for DdosPolicyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            sample_interval: Duration::from_secs(1),
+            activation_window: Duration::from_secs(5),
+            clear_window: Duration::from_secs(15),
+            ewma_alpha: DEFAULT_EWMA_ALPHA,
+            spike_multiplier: DEFAULT_SPIKE_MULTIPLIER,
+            clear_factor: 1.5,
+            enhanced_packet_cost: 2,
+            retry_enabled: true,
+            retry_token_lifetime: Duration::from_secs(10),
+        }
+    }
+}
+
+impl DdosPolicyConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.sample_interval.is_zero()
+            || self.activation_window.is_zero()
+            || self.clear_window.is_zero()
+            || self.retry_token_lifetime.is_zero()
+        {
+            return Err(
+                "DDoS sample, activation, clear, and Retry-token durations must be greater than zero"
+                    .to_string(),
+            );
+        }
+        if !self.ewma_alpha.is_finite() || self.ewma_alpha <= 0.0 || self.ewma_alpha > 1.0 {
+            return Err("DDoS EWMA alpha must be finite and within (0, 1]".to_string());
+        }
+        if !self.spike_multiplier.is_finite() || self.spike_multiplier <= 1.0 {
+            return Err("DDoS spike multiplier must be finite and greater than 1".to_string());
+        }
+        if !self.clear_factor.is_finite()
+            || self.clear_factor <= 0.0
+            || self.clear_factor >= self.spike_multiplier
+        {
+            return Err(
+                "DDoS clear factor must be finite, greater than zero, and below the spike multiplier"
+                    .to_string(),
+            );
+        }
+        if self.enhanced_packet_cost < 2 {
+            return Err("DDoS enhanced packet cost must be at least 2".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DdosTransition {
+    Unchanged,
+    Activated,
+    Cleared,
+}
+
+#[derive(Debug, Default)]
+struct AnomalyTimingState {
+    last_now: Duration,
+    activation_since: Option<Duration>,
+    activation_baseline: f64,
+    clear_since: Option<Duration>,
+}
+
 /// EWMA-based DDoS/anomaly detector.
 ///
 /// A background sampler calls `record_pps` with the observed PPS each tick.
-/// `is_anomaly` reports whether a spike is currently in progress; while it
-/// is, `limit_multiplier` returns `0.5` so per-IP limits are temporarily
-/// halved. The flag auto-clears once the current rate settles back near the
-/// (now-raised) EWMA baseline.
+/// `is_anomaly` reports whether a sustained spike is currently active. New
+/// traffic then consumes the validated enhanced per-IP token cost until the
+/// rate remains below the frozen pre-spike baseline threshold for the clear
+/// window.
 #[allow(dead_code)] // public API for admin tooling / future wiring
 pub struct EwmaAnomalyDetector {
     /// EWMA of PPS, stored as `f64::to_bits`.
@@ -798,47 +911,56 @@ pub struct EwmaAnomalyDetector {
     current_pps: AtomicU64,
     /// Whether enhanced (stricter) limiting is currently active.
     anomaly_active: AtomicBool,
-    /// EWMA smoothing factor α ∈ (0, 1].
-    alpha: f64,
-    /// Spike threshold: anomaly when current > spike_multiplier × EWMA.
-    spike_multiplier: f64,
-    /// Clear threshold: anomaly clears when current < ewma × clear_factor.
-    clear_factor: f64,
+    config: DdosPolicyConfig,
+    anchor: Instant,
+    timing: parking_lot::Mutex<AnomalyTimingState>,
 }
 
 #[allow(dead_code)] // public API for admin tooling / future wiring
 impl EwmaAnomalyDetector {
     /// Create a detector with the given smoothing and spike threshold.
     pub fn new(alpha: f64, spike_multiplier: f64) -> Self {
-        Self {
+        let config =
+            DdosPolicyConfig { ewma_alpha: alpha, spike_multiplier, ..DdosPolicyConfig::default() };
+        Self::with_config(config).expect("legacy DDoS detector parameters must be valid")
+    }
+
+    pub fn with_config(config: DdosPolicyConfig) -> Result<Self, String> {
+        config.validate()?;
+        Ok(Self {
             ewma_pps: AtomicU64::new(0f64.to_bits()),
             current_pps: AtomicU64::new(0),
             anomaly_active: AtomicBool::new(false),
-            alpha: alpha.clamp(0.0, 1.0),
-            spike_multiplier,
-            clear_factor: 1.5,
-        }
+            config,
+            anchor: Instant::now(),
+            timing: parking_lot::Mutex::new(AnomalyTimingState::default()),
+        })
     }
 
     /// Create a detector with sensible defaults (α=0.1, spike=3×).
     pub fn with_defaults() -> Self {
-        Self::new(DEFAULT_EWMA_ALPHA, DEFAULT_SPIKE_MULTIPLIER)
+        Self::with_config(DdosPolicyConfig::default()).expect("default DDoS policy must be valid")
     }
 
-    /// Record an observed PPS sample and update the EWMA / anomaly flag.
-    ///
-    /// Lock-free: the EWMA update uses a CAS loop on the bit-pattern AtomicU64.
-    pub fn record_pps(&self, pps: u64) {
+    /// Record an observed PPS sample at the detector's monotonic clock.
+    pub fn record_pps(&self, pps: u64) -> DdosTransition {
+        self.record_pps_at(pps, self.anchor.elapsed())
+    }
+
+    /// Record a deterministic monotonic sample.
+    pub fn record_pps_at(&self, pps: u64, now: Duration) -> DdosTransition {
         self.current_pps.store(pps, Ordering::Relaxed);
 
-        // Capture the pre-update EWMA for the anomaly check — the spike
-        // comparison must use the baseline *before* this sample is absorbed.
         let prev_ewma = f64::from_bits(self.ewma_pps.load(Ordering::Relaxed));
 
         let mut prev_bits = self.ewma_pps.load(Ordering::Relaxed);
         loop {
             let prev = f64::from_bits(prev_bits);
-            let next = self.alpha * (pps as f64) + (1.0 - self.alpha) * prev;
+            let next = if prev == 0.0 {
+                pps as f64
+            } else {
+                self.config.ewma_alpha * pps as f64 + (1.0 - self.config.ewma_alpha) * prev
+            };
             let next_bits = next.to_bits();
             match self.ewma_pps.compare_exchange(
                 prev_bits,
@@ -851,15 +973,65 @@ impl EwmaAnomalyDetector {
             }
         }
 
-        // Use the pre-update EWMA for spike detection so a sudden jump is
-        // compared against the historical baseline, not the just-updated value.
-        let ewma = prev_ewma;
-        let current = pps as f64;
-        if ewma > 0.0 && current > self.spike_multiplier * ewma {
-            self.anomaly_active.store(true, Ordering::Relaxed);
-        } else if ewma > 0.0 && current < self.clear_factor * ewma {
-            // Rate has settled back near/under the baseline → clear.
-            self.anomaly_active.store(false, Ordering::Relaxed);
+        let mut timing = self.timing.lock();
+        timing.last_now = timing.last_now.max(now);
+        let now = timing.last_now;
+        if !self.config.enabled {
+            let was_active = self.anomaly_active.swap(false, Ordering::AcqRel);
+            timing.activation_since = None;
+            timing.clear_since = None;
+            timing.activation_baseline = 0.0;
+            return if was_active { DdosTransition::Cleared } else { DdosTransition::Unchanged };
+        }
+
+        if self.anomaly_active.load(Ordering::Acquire) {
+            let clear_threshold = self.config.clear_factor * timing.activation_baseline;
+            if pps as f64 <= clear_threshold {
+                let clear_since = *timing.clear_since.get_or_insert(now);
+                if now.saturating_sub(clear_since) >= self.config.clear_window {
+                    self.anomaly_active.store(false, Ordering::Release);
+                    timing.activation_since = None;
+                    timing.clear_since = None;
+                    timing.activation_baseline = 0.0;
+                    return DdosTransition::Cleared;
+                }
+            } else {
+                timing.clear_since = None;
+            }
+            return DdosTransition::Unchanged;
+        }
+
+        let baseline =
+            if timing.activation_since.is_some() { timing.activation_baseline } else { prev_ewma };
+        let spike = baseline > 0.0 && pps as f64 > self.config.spike_multiplier * baseline;
+        if !spike {
+            timing.activation_since = None;
+            timing.activation_baseline = 0.0;
+            return DdosTransition::Unchanged;
+        }
+
+        if timing.activation_since.is_none() {
+            timing.activation_since = Some(now);
+            timing.activation_baseline = prev_ewma;
+        }
+        let activation_since = timing.activation_since.unwrap_or(now);
+        if now.saturating_sub(activation_since) >= self.config.activation_window {
+            self.anomaly_active.store(true, Ordering::Release);
+            timing.clear_since = None;
+            return DdosTransition::Activated;
+        }
+        DdosTransition::Unchanged
+    }
+
+    pub fn sample_interval(&self) -> Duration {
+        self.config.sample_interval
+    }
+
+    pub fn enhanced_packet_cost(&self) -> u64 {
+        if self.is_anomaly() {
+            self.config.enhanced_packet_cost
+        } else {
+            1
         }
     }
 
@@ -891,6 +1063,10 @@ impl EwmaAnomalyDetector {
     /// Force-clear the anomaly flag (for tests / manual reset).
     pub fn clear(&self) {
         self.anomaly_active.store(false, Ordering::Relaxed);
+        let mut timing = self.timing.lock();
+        timing.activation_since = None;
+        timing.clear_since = None;
+        timing.activation_baseline = 0.0;
     }
 }
 
@@ -1040,6 +1216,10 @@ pub enum BlacklistError {
     NoSyncUrl,
     /// HTTP fetch failed.
     FetchError(String),
+    /// Bounded cache read or write failed.
+    CacheError(String),
+    /// Configuration or feed content violated the bounded contract.
+    InvalidData(String),
 }
 
 impl std::fmt::Display for BlacklistError {
@@ -1047,11 +1227,58 @@ impl std::fmt::Display for BlacklistError {
         match self {
             Self::NoSyncUrl => write!(f, "no blacklist sync URL configured"),
             Self::FetchError(s) => write!(f, "blacklist fetch error: {s}"),
+            Self::CacheError(s) => write!(f, "blacklist cache error: {s}"),
+            Self::InvalidData(s) => write!(f, "invalid blacklist data: {s}"),
         }
     }
 }
 
 impl std::error::Error for BlacklistError {}
+
+fn load_blacklist_ca_bundle(
+    path: &std::path::Path,
+) -> Result<Vec<reqwest::Certificate>, BlacklistError> {
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        BlacklistError::InvalidData(format!(
+            "blacklist CA bundle metadata {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.is_file() || metadata.len() == 0 {
+        return Err(BlacklistError::InvalidData(format!(
+            "blacklist CA bundle must be a non-empty regular file: {}",
+            path.display()
+        )));
+    }
+    if metadata.len() > MAX_BLACKLIST_CA_BUNDLE_BYTES {
+        return Err(BlacklistError::InvalidData(format!(
+            "blacklist CA bundle exceeds {MAX_BLACKLIST_CA_BUNDLE_BYTES} bytes: {}",
+            path.display()
+        )));
+    }
+    let pem = std::fs::read(path).map_err(|error| {
+        BlacklistError::InvalidData(format!("blacklist CA bundle read {}: {error}", path.display()))
+    })?;
+    if pem.len() as u64 > MAX_BLACKLIST_CA_BUNDLE_BYTES {
+        return Err(BlacklistError::InvalidData(format!(
+            "blacklist CA bundle exceeds {MAX_BLACKLIST_CA_BUNDLE_BYTES} bytes after read: {}",
+            path.display()
+        )));
+    }
+    let certificates = reqwest::Certificate::from_pem_bundle(&pem).map_err(|error| {
+        BlacklistError::InvalidData(format!(
+            "blacklist CA bundle parse {}: {error}",
+            path.display()
+        ))
+    })?;
+    if certificates.is_empty() {
+        return Err(BlacklistError::InvalidData(format!(
+            "blacklist CA bundle contains no certificates: {}",
+            path.display()
+        )));
+    }
+    Ok(certificates)
+}
 
 /// External blacklist synchronizer with TTL-based expiry.
 ///
@@ -1064,17 +1291,95 @@ pub struct BlacklistSync {
     default_ttl: Duration,
     sync_url: Option<String>,
     sync_interval: Duration,
+    request_timeout: Duration,
+    max_body_bytes: usize,
+    max_entries: usize,
+    cache_path: Option<PathBuf>,
+    custom_ca_certificates: Vec<reqwest::Certificate>,
 }
 
 impl BlacklistSync {
     /// Create a new blacklist synchronizer.
     pub fn new(default_ttl: Duration, sync_url: Option<String>, sync_interval: Duration) -> Self {
-        Self {
+        Self::new_bounded(
+            default_ttl,
+            sync_url,
+            sync_interval,
+            Duration::from_secs(30),
+            16 * 1024 * 1024,
+            250_000,
+            None,
+        )
+        .expect("legacy blacklist defaults must be valid")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_bounded(
+        default_ttl: Duration,
+        sync_url: Option<String>,
+        sync_interval: Duration,
+        request_timeout: Duration,
+        max_body_bytes: usize,
+        max_entries: usize,
+        cache_path: Option<PathBuf>,
+    ) -> Result<Self, BlacklistError> {
+        Self::new_bounded_with_ca(
+            default_ttl,
+            sync_url,
+            sync_interval,
+            request_timeout,
+            max_body_bytes,
+            max_entries,
+            cache_path,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_bounded_with_ca(
+        default_ttl: Duration,
+        sync_url: Option<String>,
+        sync_interval: Duration,
+        request_timeout: Duration,
+        max_body_bytes: usize,
+        max_entries: usize,
+        cache_path: Option<PathBuf>,
+        custom_ca_path: Option<PathBuf>,
+    ) -> Result<Self, BlacklistError> {
+        if default_ttl.is_zero()
+            || sync_interval.is_zero()
+            || request_timeout.is_zero()
+            || max_body_bytes == 0
+            || max_entries == 0
+        {
+            return Err(BlacklistError::InvalidData(
+                "TTL, sync interval, timeout, body cap, and entry cap must be nonzero".to_string(),
+            ));
+        }
+        if sync_url.as_ref().is_some_and(|url| !url.starts_with("https://")) {
+            return Err(BlacklistError::InvalidData(
+                "blacklist sync URL must use HTTPS".to_string(),
+            ));
+        }
+        let custom_ca_certificates = match custom_ca_path {
+            Some(path) => load_blacklist_ca_bundle(&path)?,
+            None => Vec::new(),
+        };
+        let synchronizer = Self {
             blocked: parking_lot::RwLock::new(HashMap::new()),
             default_ttl,
             sync_url,
             sync_interval,
+            request_timeout,
+            max_body_bytes,
+            max_entries,
+            cache_path,
+            custom_ca_certificates,
+        };
+        if let Err(error) = synchronizer.load_cache() {
+            log::warn!("Blacklist cache ignored: {error}");
         }
+        Ok(synchronizer)
     }
 
     /// Create a synchronizer with no feed configured (manual blocking only).
@@ -1165,22 +1470,24 @@ impl BlacklistSync {
     /// context should wrap this in `tokio::task::spawn_blocking` + a
     /// `Runtime::block_on`, or use a dedicated runtime.
     pub async fn sync(&self) -> Result<usize, BlacklistError> {
-        const MAX_FEED_BODY_BYTES: u64 = 16 * 1024 * 1024; // 16 MiB
-
         let url = match &self.sync_url {
             Some(u) => u.clone(),
             None => return Err(BlacklistError::NoSyncUrl),
         };
 
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+        let mut client_builder = reqwest::Client::builder()
+            .timeout(self.request_timeout)
             .https_only(true)
             .redirect(reqwest::redirect::Policy::limited(3))
-            .user_agent("quicfuscate-blacklist-sync/1.0")
+            .user_agent("quicfuscate-blacklist-sync/1.0");
+        for certificate in &self.custom_ca_certificates {
+            client_builder = client_builder.add_root_certificate(certificate.clone());
+        }
+        let client = client_builder
             .build()
             .map_err(|e| BlacklistError::FetchError(format!("client build: {e}")))?;
 
-        let response = client
+        let mut response = client
             .get(&url)
             .send()
             .await
@@ -1197,49 +1504,165 @@ impl BlacklistSync {
         // Pre-check Content-Length if the server provided it. A feed larger
         // than the cap is rejected before any body bytes are buffered.
         if let Some(len) = response.content_length() {
-            if len > MAX_FEED_BODY_BYTES {
+            if len > self.max_body_bytes as u64 {
                 return Err(BlacklistError::FetchError(format!(
-                    "feed body too large: Content-Length {len} > {MAX_FEED_BODY_BYTES} bytes"
+                    "feed body too large: Content-Length {len} > {} bytes",
+                    self.max_body_bytes
                 )));
             }
         }
 
-        let body = response
-            .bytes()
+        let mut body = Vec::with_capacity(
+            response.content_length().unwrap_or(0).min(self.max_body_bytes as u64) as usize,
+        );
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .map_err(|e| BlacklistError::FetchError(format!("body read: {e}")))?;
-
-        // Hard cap on the actual body size (defeats servers that omit
-        // Content-Length or lie about it via chunked encoding).
-        if body.len() as u64 > MAX_FEED_BODY_BYTES {
-            return Err(BlacklistError::FetchError(format!(
-                "feed body too large: actual {} > {MAX_FEED_BODY_BYTES} bytes",
-                body.len()
-            )));
+            .map_err(|error| BlacklistError::FetchError(format!("body read: {error}")))?
+        {
+            if body.len().saturating_add(chunk.len()) > self.max_body_bytes {
+                return Err(BlacklistError::FetchError(format!(
+                    "feed body exceeds {} bytes",
+                    self.max_body_bytes
+                )));
+            }
+            body.extend_from_slice(&chunk);
         }
 
-        // Parse as UTF-8 lossy — IP addresses and comments are ASCII, so
-        // invalid UTF-8 bytes become U+FFFD and simply fail to parse as IPs.
-        let body_text = String::from_utf8_lossy(&body);
+        let count = self.apply_feed(&body)?;
+        log::info!("Blacklist sync: loaded {count} IPs from {url}");
+        Ok(count)
+    }
 
-        let mut ips = Vec::new();
-        for line in body_text.lines() {
+    fn parse_feed(&self, body: &[u8]) -> Result<Vec<IpAddr>, BlacklistError> {
+        if body.len() > self.max_body_bytes {
+            return Err(BlacklistError::InvalidData(format!(
+                "feed body exceeds {} bytes",
+                self.max_body_bytes
+            )));
+        }
+        let body_text = std::str::from_utf8(body)
+            .map_err(|error| BlacklistError::InvalidData(format!("feed is not UTF-8: {error}")))?;
+        let mut unique = HashSet::new();
+        for (line_index, line) in body_text.lines().enumerate() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            // Strip inline comments.
             let ip_str = line.split('#').next().unwrap_or(line).trim();
-            if let Ok(ip) = ip_str.parse::<IpAddr>() {
-                ips.push(ip);
+            let ip = ip_str.parse::<IpAddr>().map_err(|error| {
+                BlacklistError::InvalidData(format!(
+                    "line {} is not an IP address: {error}",
+                    line_index + 1
+                ))
+            })?;
+            unique.insert(ip);
+            if unique.len() > self.max_entries {
+                return Err(BlacklistError::InvalidData(format!(
+                    "feed exceeds {} unique entries",
+                    self.max_entries
+                )));
             }
         }
 
+        let mut ips: Vec<IpAddr> = unique.into_iter().collect();
+        ips.sort();
+        Ok(ips)
+    }
+
+    fn apply_feed(&self, body: &[u8]) -> Result<usize, BlacklistError> {
+        let ips = self.parse_feed(body)?;
         let count = ips.len();
+        self.persist_cache(&ips)?;
         self.replace_list(&ips);
-        log::info!("Blacklist sync: loaded {count} IPs from {url}");
         Ok(count)
     }
+
+    fn load_cache(&self) -> Result<usize, BlacklistError> {
+        let Some(path) = self.cache_path.as_ref() else {
+            return Ok(0);
+        };
+        let metadata = match std::fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => {
+                return Err(BlacklistError::CacheError(format!(
+                    "metadata {}: {error}",
+                    path.display()
+                )))
+            }
+        };
+        if metadata.len() > self.max_body_bytes as u64 {
+            return Err(BlacklistError::CacheError(format!(
+                "{} exceeds {} bytes",
+                path.display(),
+                self.max_body_bytes
+            )));
+        }
+        let bytes = std::fs::read(path)
+            .map_err(|error| BlacklistError::CacheError(format!("read: {error}")))?;
+        let cache: BlacklistCache = serde_json::from_slice(&bytes)
+            .map_err(|error| BlacklistError::CacheError(format!("parse: {error}")))?;
+        if cache.version != 1 || cache.ips.len() > self.max_entries {
+            return Err(BlacklistError::CacheError(
+                "unsupported version or entry bound exceeded".to_string(),
+            ));
+        }
+        let now = current_epoch_secs();
+        if cache.expires_at_secs <= now {
+            return Err(BlacklistError::CacheError("cache is stale".to_string()));
+        }
+        let mut unique: HashSet<IpAddr> = cache.ips.into_iter().collect();
+        if unique.len() > self.max_entries {
+            return Err(BlacklistError::CacheError("cache entry bound exceeded".to_string()));
+        }
+        let remaining = Duration::from_secs(cache.expires_at_secs - now);
+        let expiry = Instant::now() + remaining;
+        let count = unique.len();
+        self.blocked.write().extend(unique.drain().map(|ip| (ip, expiry)));
+        log::info!("Blacklist cache: loaded {count} entries from {}", path.display());
+        Ok(count)
+    }
+
+    fn persist_cache(&self, ips: &[IpAddr]) -> Result<(), BlacklistError> {
+        let Some(path) = self.cache_path.as_ref() else {
+            return Ok(());
+        };
+        let cache = BlacklistCache {
+            version: 1,
+            expires_at_secs: current_epoch_secs().saturating_add(self.default_ttl.as_secs()),
+            ips: ips.to_vec(),
+        };
+        let bytes = serde_json::to_vec(&cache)
+            .map_err(|error| BlacklistError::CacheError(format!("serialize: {error}")))?;
+        if bytes.len() > self.max_body_bytes {
+            return Err(BlacklistError::CacheError(format!(
+                "serialized cache exceeds {} bytes",
+                self.max_body_bytes
+            )));
+        }
+        crate::implementations::server::fsutil::atomic_write_file(
+            path,
+            &bytes,
+            Some(0o600),
+            "server::blacklist_cache_tmp_nonce",
+        )
+        .map_err(|error| BlacklistError::CacheError(format!("atomic write: {error}")))
+    }
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct BlacklistCache {
+    version: u8,
+    expires_at_secs: u64,
+    ips: Vec<IpAddr>,
+}
+
+fn current_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -1317,6 +1740,24 @@ mod tests {
 
         assert!(limiter.check_packet_ip(ip2));
         assert!(!limiter.check_packet_ip(ip2));
+    }
+
+    #[test]
+    fn test_rate_limiter_enhanced_cost_reuses_the_same_bucket() {
+        let limiter = RateLimiter::new(RateLimitConfig {
+            max_pps: 4,
+            max_bps: 0,
+            refill_interval: Duration::from_secs(1),
+            burst_size: 4,
+        });
+        let ip: IpAddr = "1.2.3.4".parse().unwrap();
+
+        assert!(limiter.check_packet_ip_cost(ip, 2));
+        assert!(limiter.check_packet_ip(ip));
+        assert!(!limiter.check_packet_ip_cost(ip, 2));
+        assert!(limiter.check_packet_ip(ip));
+        assert!(!limiter.check_packet_ip(ip));
+        assert!(!limiter.check_packet_ip_cost(ip, 0));
     }
 
     fn test_auth_policy_config() -> AuthPolicyConfig {
@@ -1575,20 +2016,18 @@ mod tests {
 
     #[test]
     fn test_token_bucket_burst_then_steady() {
-        // burst=5, sustained=2/sec, refill every 1s.
-        let mut bucket = TokenBucket::new(5, 2, Duration::from_secs(1));
-        // Initial burst of 5 is allowed.
-        for _ in 0..5 {
-            assert!(bucket.consume(1));
+        let anchor = Instant::now();
+        let mut bucket = TokenBucket::new_at(4, 2, Duration::from_secs(1), anchor);
+
+        for _ in 0..4 {
+            assert!(bucket.consume_at(1, anchor));
         }
-        // 6th immediately is rejected (no refill yet).
-        assert!(!bucket.consume(1));
-        // After 1s, 2 tokens refill (capped at burst=5).
-        std::thread::sleep(Duration::from_millis(1100));
-        assert!(bucket.consume(1));
-        assert!(bucket.consume(1));
-        // Only 2 refilled per second.
-        assert!(!bucket.consume(1));
+        assert!(!bucket.consume_at(1, anchor));
+        assert!(!bucket.consume_at(1, anchor + Duration::from_millis(999)));
+        assert!(bucket.consume_at(2, anchor + Duration::from_secs(1)));
+        assert!(!bucket.consume_at(1, anchor + Duration::from_millis(1999)));
+        assert!(bucket.consume_at(2, anchor + Duration::from_secs(2)));
+        assert!(!bucket.consume_at(1, anchor + Duration::from_secs(2)));
     }
 
     // ---- GlobalRateLimiter ----
@@ -1611,17 +2050,18 @@ mod tests {
 
     #[test]
     fn test_global_rate_limiter_refills_over_time() {
-        let limiter = GlobalRateLimiter::new(100, 5);
-        // Drain the burst.
-        for _ in 0..5 {
-            assert!(limiter.check());
+        let limiter = GlobalRateLimiter::new(2, 4);
+
+        for _ in 0..4 {
+            assert!(limiter.check_at(0));
         }
-        assert!(!limiter.check());
-        // After ~1s, 100 tokens refill (capped at burst=5).
-        std::thread::sleep(Duration::from_millis(1100));
-        for _ in 0..5 {
-            assert!(limiter.check());
-        }
+        assert!(!limiter.check_at(0));
+        assert!(!limiter.check_at(499_999_999));
+        assert!(limiter.check_at(500_000_000));
+        assert!(!limiter.check_at(500_000_000));
+        assert!(limiter.check_at(1_000_000_000));
+        assert!(!limiter.check_at(1_000_000_000));
+        assert_eq!(limiter.accepted.load(Ordering::Relaxed), 6);
     }
 
     #[test]
@@ -1650,7 +2090,29 @@ mod tests {
         assert!(allowed >= 1_000, "at least the burst should be admitted: got {allowed}");
     }
 
+    #[test]
+    fn global_rate_limiter_pps_uses_only_the_latest_interval_delta() {
+        let limiter = GlobalRateLimiter::new(1, 1);
+
+        assert_eq!(limiter.sample_pps_at(1_000_000_000, 10_000), 0);
+        assert_eq!(limiter.sample_pps_at(2_000_000_000, 11_000), 1_000);
+        assert_eq!(limiter.sample_pps_at(2_500_000_000, 11_250), 500);
+        assert_eq!(limiter.sample_pps_at(3_500_000_000, 11_250), 0);
+    }
+
     // ---- EwmaAnomalyDetector ----
+
+    fn deterministic_ddos_config() -> DdosPolicyConfig {
+        DdosPolicyConfig {
+            sample_interval: Duration::from_secs(1),
+            activation_window: Duration::from_secs(3),
+            clear_window: Duration::from_secs(4),
+            ewma_alpha: 0.1,
+            spike_multiplier: 3.0,
+            clear_factor: 1.5,
+            ..DdosPolicyConfig::default()
+        }
+    }
 
     #[test]
     fn test_ewma_no_anomaly_at_baseline() {
@@ -1665,34 +2127,83 @@ mod tests {
 
     #[test]
     fn test_ewma_spike_triggers_anomaly() {
-        let det = EwmaAnomalyDetector::new(0.5, 3.0);
-        // Establish a baseline.
-        for _ in 0..50 {
-            det.record_pps(100);
-        }
+        let det = EwmaAnomalyDetector::with_config(deterministic_ddos_config()).unwrap();
+        det.record_pps_at(100, Duration::ZERO);
         assert!(!det.is_anomaly());
-        // Sudden spike to 1,000 (> 3× the ~100 baseline).
-        det.record_pps(1_000);
+        assert_eq!(det.record_pps_at(1_000, Duration::from_secs(1)), DdosTransition::Unchanged);
+        assert_eq!(det.record_pps_at(1_000, Duration::from_secs(3)), DdosTransition::Unchanged);
+        assert_eq!(det.record_pps_at(1_000, Duration::from_secs(4)), DdosTransition::Activated);
         assert!(det.is_anomaly());
         assert_eq!(det.limit_multiplier(), 0.5, "anomaly should halve the per-IP limit");
+        assert_eq!(det.enhanced_packet_cost(), 2);
     }
 
     #[test]
     fn test_ewma_auto_clears_when_rate_settles() {
-        let det = EwmaAnomalyDetector::new(0.5, 3.0);
-        for _ in 0..50 {
-            det.record_pps(100);
-        }
-        det.record_pps(1_000);
+        let det = EwmaAnomalyDetector::with_config(deterministic_ddos_config()).unwrap();
+        det.record_pps_at(100, Duration::ZERO);
+        det.record_pps_at(1_000, Duration::from_secs(1));
+        det.record_pps_at(1_000, Duration::from_secs(4));
         assert!(det.is_anomaly());
-        // Continue feeding high rate so the EWMA rises, then drop back.
-        for _ in 0..200 {
-            det.record_pps(1_000);
-        }
-        // EWMA is now ~1,000; feeding 1,000 is no longer a spike and is < 1.5× ewma.
-        det.record_pps(1_000);
-        assert!(!det.is_anomaly(), "anomaly should clear once rate settles near EWMA");
+        assert_eq!(det.record_pps_at(100, Duration::from_secs(5)), DdosTransition::Unchanged);
+        assert_eq!(det.record_pps_at(100, Duration::from_secs(8)), DdosTransition::Unchanged);
+        assert_eq!(det.record_pps_at(100, Duration::from_secs(9)), DdosTransition::Cleared);
+        assert!(!det.is_anomaly());
         assert_eq!(det.limit_multiplier(), 1.0);
+    }
+
+    #[test]
+    fn test_ewma_spike_and_clear_windows_reset_on_one_sample_recovery() {
+        let det = EwmaAnomalyDetector::with_config(deterministic_ddos_config()).unwrap();
+        det.record_pps_at(100, Duration::ZERO);
+        det.record_pps_at(1_000, Duration::from_secs(1));
+        det.record_pps_at(100, Duration::from_secs(2));
+        det.record_pps_at(1_000, Duration::from_secs(3));
+        det.record_pps_at(1_000, Duration::from_secs(5));
+        assert!(!det.is_anomaly());
+        det.record_pps_at(1_000, Duration::from_secs(6));
+        assert!(det.is_anomaly());
+
+        det.record_pps_at(100, Duration::from_secs(7));
+        det.record_pps_at(1_000, Duration::from_secs(8));
+        det.record_pps_at(100, Duration::from_secs(9));
+        det.record_pps_at(100, Duration::from_secs(12));
+        assert!(det.is_anomaly());
+        det.record_pps_at(100, Duration::from_secs(13));
+        assert!(!det.is_anomaly());
+    }
+
+    #[test]
+    fn test_ddos_policy_validation_and_disable_semantics() {
+        let valid = deterministic_ddos_config();
+        assert!(valid.validate().is_ok());
+
+        let mut invalid = valid.clone();
+        invalid.sample_interval = Duration::ZERO;
+        assert!(invalid.validate().is_err());
+        invalid = valid.clone();
+        invalid.ewma_alpha = f64::NAN;
+        assert!(invalid.validate().is_err());
+        invalid = valid.clone();
+        invalid.spike_multiplier = 1.0;
+        assert!(invalid.validate().is_err());
+        invalid = valid.clone();
+        invalid.clear_factor = invalid.spike_multiplier;
+        assert!(invalid.validate().is_err());
+        invalid = valid.clone();
+        invalid.enhanced_packet_cost = 1;
+        assert!(invalid.validate().is_err());
+
+        let disabled = DdosPolicyConfig { enabled: false, ..valid };
+        let det = EwmaAnomalyDetector::with_config(disabled).unwrap();
+        det.record_pps_at(100, Duration::ZERO);
+        for second in 1..10 {
+            assert_eq!(
+                det.record_pps_at(10_000, Duration::from_secs(second)),
+                DdosTransition::Unchanged
+            );
+        }
+        assert!(!det.is_anomaly());
     }
 
     #[test]
@@ -1825,17 +2336,182 @@ mod tests {
 
     #[test]
     fn test_blacklist_sync_parses_plain_text_ips() {
-        // Verify that replace_list correctly handles a parsed IP list
-        // (the sync method uses replace_list internally).
-        let bl = BlacklistSync::manual_only(Duration::from_secs(60));
-        let ips: Vec<IpAddr> =
-            ["10.0.0.1", "10.0.0.2", "192.168.1.1"].iter().map(|s| s.parse().unwrap()).collect();
-        bl.replace_list(&ips);
+        let bl = BlacklistSync::new_bounded(
+            Duration::from_secs(60),
+            None,
+            Duration::from_secs(60),
+            Duration::from_secs(1),
+            1024,
+            3,
+            None,
+        )
+        .unwrap();
+        let count = bl
+            .apply_feed(b"# exact feed\n10.0.0.2\n10.0.0.1 # inline\n192.168.1.1\n10.0.0.1\n")
+            .unwrap();
+        assert_eq!(count, 3);
         assert!(bl.is_blocked("10.0.0.1".parse().unwrap()));
         assert!(bl.is_blocked("10.0.0.2".parse().unwrap()));
         assert!(bl.is_blocked("192.168.1.1".parse().unwrap()));
         assert!(!bl.is_blocked("10.0.0.3".parse().unwrap()));
         assert_eq!(bl.len(), 3);
+    }
+
+    #[test]
+    fn blacklist_feed_rejects_every_bound_without_replacing_last_known_good() {
+        let cache_path = std::env::temp_dir();
+        let bl = BlacklistSync::new_bounded(
+            Duration::from_secs(60),
+            None,
+            Duration::from_secs(60),
+            Duration::from_secs(1),
+            32,
+            2,
+            Some(cache_path),
+        )
+        .unwrap();
+        let retained: IpAddr = "192.0.2.10".parse().unwrap();
+        bl.add(retained);
+
+        for invalid in [
+            b"not-an-ip\n".as_slice(),
+            &[0xff, 0xfe],
+            b"192.0.2.1\n192.0.2.2\n192.0.2.3\n".as_slice(),
+            &[b'x'; 33],
+        ] {
+            assert!(bl.apply_feed(invalid).is_err());
+            assert!(bl.is_blocked(retained));
+            assert_eq!(bl.len(), 1);
+        }
+
+        assert!(bl.apply_feed(b"192.0.2.20\n").is_err(), "directory cache path must fail");
+        assert!(bl.is_blocked(retained));
+        assert_eq!(bl.len(), 1);
+    }
+
+    fn blacklist_cache_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "quicfuscate-blacklist-{name}-{}-{}.json",
+            std::process::id(),
+            crate::transport::rand::rand_u64()
+        ))
+    }
+
+    fn bounded_blacklist(cache_path: PathBuf) -> BlacklistSync {
+        BlacklistSync::new_bounded(
+            Duration::from_secs(60),
+            None,
+            Duration::from_secs(60),
+            Duration::from_secs(1),
+            4096,
+            8,
+            Some(cache_path),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn blacklist_cache_roundtrip_restores_only_unexpired_bounded_entries() {
+        let path = blacklist_cache_path("roundtrip");
+        let first = bounded_blacklist(path.clone());
+        let ips = ["192.0.2.1".parse().unwrap(), "2001:db8::1".parse().unwrap()];
+        first.persist_cache(&ips).unwrap();
+        drop(first);
+
+        let restored = bounded_blacklist(path.clone());
+        assert_eq!(restored.len(), 2);
+        assert!(restored.is_blocked(ips[0]));
+        assert!(restored.is_blocked(ips[1]));
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn blacklist_cache_rejects_stale_malformed_oversized_and_interrupted_candidates() {
+        let stale_path = blacklist_cache_path("stale");
+        let stale = BlacklistCache {
+            version: 1,
+            expires_at_secs: current_epoch_secs().saturating_sub(1),
+            ips: vec!["192.0.2.1".parse().unwrap()],
+        };
+        std::fs::write(&stale_path, serde_json::to_vec(&stale).unwrap()).unwrap();
+        assert!(bounded_blacklist(stale_path.clone()).is_empty());
+        std::fs::remove_file(stale_path).unwrap();
+
+        let malformed_path = blacklist_cache_path("malformed");
+        std::fs::write(&malformed_path, b"{not-json").unwrap();
+        assert!(bounded_blacklist(malformed_path.clone()).is_empty());
+        std::fs::remove_file(malformed_path).unwrap();
+
+        let oversized_path = blacklist_cache_path("oversized");
+        std::fs::write(&oversized_path, vec![0u8; 4097]).unwrap();
+        assert!(bounded_blacklist(oversized_path.clone()).is_empty());
+        std::fs::remove_file(oversized_path).unwrap();
+
+        let stable_path = blacklist_cache_path("interrupted");
+        let stable = bounded_blacklist(stable_path.clone());
+        stable.persist_cache(&["192.0.2.2".parse().unwrap()]).unwrap();
+        let interrupted_path = stable_path.with_extension("json.tmp-interrupted");
+        std::fs::write(&interrupted_path, b"{partial").unwrap();
+        let restored = bounded_blacklist(stable_path.clone());
+        assert!(restored.is_blocked("192.0.2.2".parse().unwrap()));
+        std::fs::remove_file(stable_path).unwrap();
+        std::fs::remove_file(interrupted_path).unwrap();
+    }
+
+    #[test]
+    fn blacklist_bounded_configuration_rejects_unsafe_values_and_plain_http() {
+        assert!(BlacklistSync::new_bounded(
+            Duration::ZERO,
+            None,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            1,
+            1,
+            None,
+        )
+        .is_err());
+        assert!(BlacklistSync::new_bounded(
+            Duration::from_secs(1),
+            Some("http://example.com/feed".to_string()),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            1,
+            1,
+            None,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn blacklist_custom_ca_rejects_missing_and_malformed_bundles() {
+        let missing = blacklist_cache_path("missing-ca");
+        assert!(BlacklistSync::new_bounded_with_ca(
+            Duration::from_secs(1),
+            Some("https://example.com/feed".to_string()),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            1,
+            1,
+            None,
+            Some(missing),
+        )
+        .is_err());
+
+        let malformed = blacklist_cache_path("malformed-ca");
+        std::fs::write(&malformed, b"not a PEM certificate").unwrap();
+        assert!(BlacklistSync::new_bounded_with_ca(
+            Duration::from_secs(1),
+            Some("https://example.com/feed".to_string()),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            1,
+            1,
+            None,
+            Some(malformed.clone()),
+        )
+        .is_err());
+        std::fs::remove_file(malformed).unwrap();
     }
 
     #[test]
