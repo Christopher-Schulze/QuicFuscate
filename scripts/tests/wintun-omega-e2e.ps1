@@ -26,6 +26,19 @@ $TemporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) `
 $CaPath = Join-Path $TemporaryRoot "ca.crt"
 $StandardOutputPath = Join-Path $TemporaryRoot "client.stdout.log"
 $StandardErrorPath = Join-Path $TemporaryRoot "client.stderr.log"
+$RunStartedAtUtc = [DateTime]::UtcNow
+$Phase = "preflight"
+$EvidenceStatus = "running"
+$FailureMessage = $null
+$ClientStartedAtUtc = $null
+$TlsReadyAtUtc = $null
+$ConnectedPolicyReadyAtUtc = $null
+$AdapterQueryStartedAtUtc = $null
+$AdapterReadyAtUtc = $null
+$AdapterSnapshot = $null
+$PingAttempts = @()
+$PingAttempts6 = @()
+$ClientAliveBeforeCleanup = $false
 
 function Require-SecretValue {
     param(
@@ -199,6 +212,51 @@ function Wait-ForTunnelAdapterReady {
     throw "Wintun adapter '$AdapterName' did not become dual-stack ready: $LastDiagnostic"
 }
 
+function Invoke-TunnelPingAttempt {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TargetAddress,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("IPv4", "IPv6")]
+        [string]$AddressFamily,
+
+        [Parameter(Mandatory = $true)]
+        [int]$Attempt
+    )
+
+    $StartedAtUtc = [DateTime]::UtcNow
+    $Succeeded = $false
+    $ErrorMessage = $null
+    try {
+        if ($AddressFamily -eq "IPv4") {
+            $Succeeded = [bool](Test-Connection -TargetName $TargetAddress `
+                -IPv4 -Count 1 -Quiet -TimeoutSeconds 3)
+        }
+        else {
+            $Succeeded = [bool](Test-Connection -TargetName $TargetAddress `
+                -IPv6 -Count 1 -Quiet -TimeoutSeconds 3)
+        }
+    }
+    catch {
+        $ErrorMessage = $_.Exception.Message
+    }
+    $CompletedAtUtc = [DateTime]::UtcNow
+
+    return [ordered]@{
+        attempt = $Attempt
+        address_family = $AddressFamily
+        started_at_utc = $StartedAtUtc.ToString("o")
+        completed_at_utc = $CompletedAtUtc.ToString("o")
+        duration_ms = [Math]::Round(
+            ($CompletedAtUtc - $StartedAtUtc).TotalMilliseconds,
+            3
+        )
+        success = $Succeeded
+        error = $ErrorMessage
+    }
+}
+
 Require-SecretValue -Name "QUICFUSCATE_WINDOWS_E2E_ENDPOINT" -Value $Endpoint
 Require-SecretValue -Name "QUICFUSCATE_WINDOWS_E2E_QKEY" -Value $QKey
 Require-SecretValue -Name "QUICFUSCATE_WINDOWS_E2E_CA_PEM" -Value $CaPem
@@ -241,6 +299,7 @@ New-Item -ItemType Directory -Path $EvidenceDirectory -Force | Out-Null
 $CaPem = $null
 
 try {
+    $Phase = "stale-firewall-cleanup"
     Invoke-ExactFirewallCleanup
 
     $Arguments = @(
@@ -267,22 +326,35 @@ try {
         -PassThru `
         -RedirectStandardOutput $StandardOutputPath `
         -RedirectStandardError $StandardErrorPath
+    $ClientStartedAtUtc = [DateTime]::UtcNow
     $Arguments[6] = "<cleared>"
     $CleanupRequired = $true
 
+    $Phase = "tls-readiness"
     Wait-ForLogPattern -Paths @($StandardOutputPath, $StandardErrorPath) `
         -Pattern "TLS handshake complete" `
         -Process $ClientProcess
+    $TlsReadyAtUtc = [DateTime]::UtcNow
+    $Phase = "connected-firewall-readiness"
     Wait-ForLogPattern -Paths @($StandardOutputPath, $StandardErrorPath) `
         -Pattern "Kill switch: VPN traffic allowed, non-VPN blocked" `
         -Process $ClientProcess
+    $ConnectedPolicyReadyAtUtc = [DateTime]::UtcNow
 
+    $Phase = "adapter-readiness"
+    $AdapterQueryStartedAtUtc = [DateTime]::UtcNow
     $AdapterSnapshot = Wait-ForTunnelAdapterReady
+    $AdapterReadyAtUtc = [DateTime]::UtcNow
 
+    $Phase = "ipv4-tunnel-ping"
     $PingSuccesses = 0
     for ($Attempt = 1; $Attempt -le 5; $Attempt++) {
-        if (Test-Connection -TargetName $ServerTunAddress -IPv4 -Count 1 `
-            -Quiet -TimeoutSeconds 3) {
+        $PingResult = Invoke-TunnelPingAttempt `
+            -TargetAddress $ServerTunAddress `
+            -AddressFamily "IPv4" `
+            -Attempt $Attempt
+        $PingAttempts += $PingResult
+        if ($PingResult.success) {
             $PingSuccesses++
         }
     }
@@ -290,10 +362,15 @@ try {
         throw "Authenticated Wintun IPv4 tunnel ping passed $PingSuccesses/5 attempts"
     }
 
+    $Phase = "ipv6-tunnel-ping"
     $PingSuccesses6 = 0
     for ($Attempt = 1; $Attempt -le 5; $Attempt++) {
-        if (Test-Connection -TargetName $ServerTunAddress6 -IPv6 -Count 1 `
-            -Quiet -TimeoutSeconds 3) {
+        $PingResult = Invoke-TunnelPingAttempt `
+            -TargetAddress $ServerTunAddress6 `
+            -AddressFamily "IPv6" `
+            -Attempt $Attempt
+        $PingAttempts6 += $PingResult
+        if ($PingResult.success) {
             $PingSuccesses6++
         }
     }
@@ -316,6 +393,7 @@ try {
         throw "QuicFuscate client log exposed the raw QKey"
     }
 
+    $Phase = "cleanup"
     Stop-Process -InputObject $ClientProcess -Force -ErrorAction SilentlyContinue
     if (-not $ClientProcess.WaitForExit(15000)) {
         throw "QuicFuscate client did not exit within 15 seconds"
@@ -365,12 +443,62 @@ try {
         -LiteralPath (Join-Path $EvidenceDirectory "windows-omega-e2e.json") `
         -Encoding utf8
 
+    $EvidenceStatus = "passed"
+    $Phase = "complete"
     Write-Output "Native Windows-to-Omega tunnel proof passed: authenticated=true ipv4=5/5 ipv6=5/5 cleanup=true"
+}
+catch {
+    $EvidenceStatus = "failed"
+    $FailureMessage = $_.Exception.Message
+    throw
 }
 finally {
     try {
         if ($null -ne $ClientProcess) {
             $ClientProcess.Refresh()
+            $ClientAliveBeforeCleanup = -not $ClientProcess.HasExited
+        }
+        [ordered]@{
+            schema = "quicfuscate.wintun-omega-e2e-progress.v1"
+            git_sha = $env:GITHUB_SHA
+            status = $EvidenceStatus
+            phase = $Phase
+            failure = $FailureMessage
+            run_started_at_utc = $RunStartedAtUtc.ToString("o")
+            client_started_at_utc = if ($null -eq $ClientStartedAtUtc) {
+                $null
+            } else {
+                $ClientStartedAtUtc.ToString("o")
+            }
+            tls_ready_at_utc = if ($null -eq $TlsReadyAtUtc) {
+                $null
+            } else {
+                $TlsReadyAtUtc.ToString("o")
+            }
+            connected_policy_ready_at_utc = if ($null -eq $ConnectedPolicyReadyAtUtc) {
+                $null
+            } else {
+                $ConnectedPolicyReadyAtUtc.ToString("o")
+            }
+            adapter_query_started_at_utc = if ($null -eq $AdapterQueryStartedAtUtc) {
+                $null
+            } else {
+                $AdapterQueryStartedAtUtc.ToString("o")
+            }
+            adapter_ready_at_utc = if ($null -eq $AdapterReadyAtUtc) {
+                $null
+            } else {
+                $AdapterReadyAtUtc.ToString("o")
+            }
+            adapter = $AdapterSnapshot
+            ipv4_attempts = $PingAttempts
+            ipv6_attempts = $PingAttempts6
+            client_alive_before_cleanup = $ClientAliveBeforeCleanup
+        } | ConvertTo-Json -Depth 6 | Set-Content `
+            -LiteralPath (Join-Path $EvidenceDirectory `
+                "windows-omega-e2e-progress.json") `
+            -Encoding utf8
+        if ($null -ne $ClientProcess) {
             if (-not $ClientProcess.HasExited) {
                 Stop-Process -Id $ClientProcess.Id -Force -ErrorAction SilentlyContinue
                 Wait-Process -Id $ClientProcess.Id -Timeout 15 -ErrorAction SilentlyContinue
