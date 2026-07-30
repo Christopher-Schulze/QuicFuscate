@@ -1,4 +1,22 @@
+#[cfg(target_os = "windows")]
+const WINDOWS_APPLICATION_STACK_BYTES: usize = 8 * 1024 * 1024;
+
+#[cfg(target_os = "windows")]
 fn main() -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name("quicfuscate-main".to_string())
+        .stack_size(WINDOWS_APPLICATION_STACK_BYTES)
+        .spawn(application_main)?
+        .join()
+        .map_err(|_| std::io::Error::other("QuicFuscate application thread panicked"))?
+}
+
+#[cfg(not(target_os = "windows"))]
+fn main() -> std::io::Result<()> {
+    application_main()
+}
+
+fn application_main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--verbose" || a == "-v") {
         std::env::set_var("RUST_LOG", "info");

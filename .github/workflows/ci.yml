@@ -208,12 +208,35 @@ jobs:
       - name: Compile Windows Wintun tests
         run: cargo test --lib --features tun-windows,rust-tests --no-run
 
+      - name: Build Windows Wintun CLI
+        run: cargo build --bin quicfuscate --features tun-windows
+
       - name: Provision verified upstream Wintun
         shell: pwsh
         run: |
           ./scripts/utils/provision-wintun.ps1 `
+            -DestinationDirectory "target/debug" `
+            -EvidencePath "scripts/out/tests/wintun-native/wintun-cli-provenance.json"
+          ./scripts/utils/provision-wintun.ps1 `
             -DestinationDirectory "target/debug/deps" `
             -EvidencePath "scripts/out/tests/wintun-native/wintun-provenance.json"
+
+      - name: Test Windows CLI startup and stale WFP cleanup
+        shell: pwsh
+        run: |
+          & "target/debug/quicfuscate.exe" client `
+            --remote "127.0.0.1:4433" `
+            --cleanup-firewall
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows CLI stale WFP cleanup exited with $LASTEXITCODE"
+          }
+          [ordered]@{
+            schema = "quicfuscate.windows-cli-startup.v1"
+            git_sha = $env:GITHUB_SHA
+            cleanup_exit_code = $LASTEXITCODE
+          } | ConvertTo-Json | Set-Content `
+            -LiteralPath "scripts/out/tests/wintun-native/windows-cli-startup.json" `
+            -Encoding utf8
 
       - name: Test Windows Wintun core library
         run: cargo test --lib --features tun-windows,rust-tests
