@@ -12,6 +12,7 @@
 //! External crates may appear in tests or baseline oracles, but they are not
 //! the canonical runtime providers for the retained data-plane AEAD contract.
 
+#[cfg(target_arch = "x86_64")]
 use crate::optimize::{CpuFeature, FeatureDetector};
 use crate::simd::CryptoAeadPlan;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -206,8 +207,12 @@ pub use chacha20poly1305::ChaCha20Poly1305;
 // Keep selection logic centralized in simd::CryptoAeadPlan.
 // ============================================================================
 
-/// Cross-platform fast AES-128 encrypt for a single block.
-/// Uses AES-NI on x86_64 if available; falls back to software elsewhere.
+/// Cross-platform AES-128 encryption for a single block.
+///
+/// The x86_64 path keeps its pre-existing AES-NI shortcut. Every other
+/// architecture uses the canonical runtime dispatcher in `crypto::aes` so
+/// packet protection and header protection cannot drift from its validated
+/// round implementation.
 #[inline]
 fn aes128_encrypt_block_fast(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
     #[cfg(target_arch = "x86_64")]
@@ -227,92 +232,7 @@ fn aes128_encrypt_block_fast(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
             return out;
         }
     }
-    #[cfg(target_arch = "aarch64")]
-    // SAFETY: runtime feature detection in the if-guard ensures NEON/AES instructions
-    // are present before calling aes128_encrypt_block_arm. key and block are
-    // fixed-size references (&[u8; 16]) owned by the caller.
-    unsafe {
-        if FeatureDetector::instance().has_feature(CpuFeature::AES) {
-            // SAFETY:
-            // - runtime feature detection gates the ARM AES fast path
-            // - `key` and `block` are fixed-size references owned by the caller
-            // - the accelerated helper does not retain pointers past the call
-            return aes128_encrypt_block_arm(key, block);
-        }
-    }
     crate::crypto::aes::aes128_encrypt_block(key, block)
-}
-
-#[cfg(target_arch = "aarch64")]
-#[inline]
-#[target_feature(enable = "aes")]
-/// # Safety
-/// Requires aarch64 with AES instructions available (checked by caller via runtime detection).
-/// `key` and `block` must point to valid 16-byte aligned data readable by the function.
-unsafe fn aes128_encrypt_block_arm(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
-    use core::arch::aarch64::*;
-    let rk_bytes = crate::crypto::aes::key_expansion(key);
-    // Load round keys into NEON vectors
-    let mut k0 = [0u8; 16];
-    k0.copy_from_slice(&rk_bytes[0..16]);
-    let rk0 = vld1q_u8(k0.as_ptr());
-    let mut k1 = [0u8; 16];
-    k1.copy_from_slice(&rk_bytes[16..32]);
-    let rk1 = vld1q_u8(k1.as_ptr());
-    let mut k2 = [0u8; 16];
-    k2.copy_from_slice(&rk_bytes[32..48]);
-    let rk2 = vld1q_u8(k2.as_ptr());
-    let mut k3 = [0u8; 16];
-    k3.copy_from_slice(&rk_bytes[48..64]);
-    let rk3 = vld1q_u8(k3.as_ptr());
-    let mut k4 = [0u8; 16];
-    k4.copy_from_slice(&rk_bytes[64..80]);
-    let rk4 = vld1q_u8(k4.as_ptr());
-    let mut k5 = [0u8; 16];
-    k5.copy_from_slice(&rk_bytes[80..96]);
-    let rk5 = vld1q_u8(k5.as_ptr());
-    let mut k6 = [0u8; 16];
-    k6.copy_from_slice(&rk_bytes[96..112]);
-    let rk6 = vld1q_u8(k6.as_ptr());
-    let mut k7 = [0u8; 16];
-    k7.copy_from_slice(&rk_bytes[112..128]);
-    let rk7 = vld1q_u8(k7.as_ptr());
-    let mut k8 = [0u8; 16];
-    k8.copy_from_slice(&rk_bytes[128..144]);
-    let rk8 = vld1q_u8(k8.as_ptr());
-    let mut k9 = [0u8; 16];
-    k9.copy_from_slice(&rk_bytes[144..160]);
-    let rk9 = vld1q_u8(k9.as_ptr());
-    let mut k10 = [0u8; 16];
-    k10.copy_from_slice(&rk_bytes[160..176]);
-    let rk10 = vld1q_u8(k10.as_ptr());
-
-    // Encrypt one block with AESE/AESMC
-    let mut state = vld1q_u8(block.as_ptr());
-    state = veorq_u8(state, rk0);
-    state = vaeseq_u8(state, rk1);
-    state = vaesmcq_u8(state);
-    state = vaeseq_u8(state, rk2);
-    state = vaesmcq_u8(state);
-    state = vaeseq_u8(state, rk3);
-    state = vaesmcq_u8(state);
-    state = vaeseq_u8(state, rk4);
-    state = vaesmcq_u8(state);
-    state = vaeseq_u8(state, rk5);
-    state = vaesmcq_u8(state);
-    state = vaeseq_u8(state, rk6);
-    state = vaesmcq_u8(state);
-    state = vaeseq_u8(state, rk7);
-    state = vaesmcq_u8(state);
-    state = vaeseq_u8(state, rk8);
-    state = vaesmcq_u8(state);
-    state = vaeseq_u8(state, rk9);
-    state = vaesmcq_u8(state);
-    state = vaeseq_u8(state, rk10);
-
-    let mut out = [0u8; 16];
-    vst1q_u8(out.as_mut_ptr(), state);
-    out
 }
 
 /// AEGIS-128L/X4/X8 AEAD cipher.

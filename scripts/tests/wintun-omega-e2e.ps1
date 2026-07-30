@@ -65,6 +65,40 @@ function Read-SharedText {
     }
 }
 
+function Write-RedactedClientLogs {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Paths,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$SensitiveValues
+    )
+
+    foreach ($Path in $Paths) {
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+            continue
+        }
+        $Content = Read-SharedText -Path $Path
+        foreach ($SensitiveValue in $SensitiveValues) {
+            if (-not [string]::IsNullOrWhiteSpace($SensitiveValue)) {
+                $Content = $Content.Replace($SensitiveValue, "<redacted>")
+            }
+        }
+        foreach ($SensitiveValue in $SensitiveValues) {
+            if ((-not [string]::IsNullOrWhiteSpace($SensitiveValue)) -and
+                $Content.Contains($SensitiveValue)) {
+                throw "Redacted client evidence still contains a sensitive value"
+            }
+        }
+        $Destination = Join-Path $DestinationDirectory `
+            ([System.IO.Path]::GetFileName($Path))
+        [System.IO.File]::WriteAllText($Destination, $Content)
+    }
+}
+
 function Wait-ForLogPattern {
     param(
         [Parameter(Mandatory = $true)]
@@ -264,19 +298,27 @@ try {
     Write-Output "Native Windows-to-Omega tunnel proof passed: authenticated=true ping=5/5 cleanup=true"
 }
 finally {
-    if ($null -ne $ClientProcess) {
-        $ClientProcess.Refresh()
-        if (-not $ClientProcess.HasExited) {
-            Stop-Process -Id $ClientProcess.Id -Force -ErrorAction SilentlyContinue
-            Wait-Process -Id $ClientProcess.Id -Timeout 15 -ErrorAction SilentlyContinue
+    try {
+        if ($null -ne $ClientProcess) {
+            $ClientProcess.Refresh()
+            if (-not $ClientProcess.HasExited) {
+                Stop-Process -Id $ClientProcess.Id -Force -ErrorAction SilentlyContinue
+                Wait-Process -Id $ClientProcess.Id -Timeout 15 -ErrorAction SilentlyContinue
+            }
         }
+        Write-RedactedClientLogs `
+            -Paths @($StandardOutputPath, $StandardErrorPath) `
+            -DestinationDirectory $EvidenceDirectory `
+            -SensitiveValues @($QKey, $Endpoint)
     }
-    if ($CleanupRequired) {
-        Invoke-ExactFirewallCleanup
+    finally {
+        if ($CleanupRequired) {
+            Invoke-ExactFirewallCleanup
+        }
+        Wait-ForAdapterAbsence
+        if (Test-Path -LiteralPath $TemporaryRoot) {
+            Remove-Item -LiteralPath $TemporaryRoot -Recurse -Force
+        }
+        $QKey = $null
     }
-    Wait-ForAdapterAbsence
-    if (Test-Path -LiteralPath $TemporaryRoot) {
-        Remove-Item -LiteralPath $TemporaryRoot -Recurse -Force
-    }
-    $QKey = $null
 }

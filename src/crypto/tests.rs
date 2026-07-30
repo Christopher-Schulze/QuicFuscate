@@ -278,7 +278,45 @@ fn data_aead_config_preference_is_conditional() {
     super::set_data_aead_override_mode(DATA_AEAD_OVERRIDE_AUTO);
 }
 
+#[test]
+fn aes_gcm128_matches_nist_single_block_vector() {
+    let key = [0u8; 16];
+    let iv = [0u8; 12];
+    let mut buffer = [0u8; 32];
+    let expected = hex_to_bytes(concat!(
+        "0388dace60b6a392f328c2b971b2fe78",
+        "ab6e47d42cec13bdf53a67b21257bddf",
+    ));
+
+    let seal = super::AesGcm128::new(&key, &iv);
+    let sealed_len = seal
+        .seal_with_u64_counter(0, &[], &mut buffer, 16, None)
+        .expect("NIST AES-GCM sealing must succeed");
+    assert_eq!(sealed_len, expected.len());
+    assert_eq!(buffer.as_slice(), expected.as_slice());
+
+    let open = super::AesGcm128::new(&key, &iv);
+    let plaintext_len =
+        open.open_with_u64_counter(0, &[], &mut buffer).expect("NIST AES-GCM opening must succeed");
+    assert_eq!(plaintext_len, 16);
+    assert_eq!(&buffer[..plaintext_len], &[0u8; 16]);
+}
+
 // --- Header Protection Tests ---
+
+#[test]
+fn aes_hp_matches_fips197_block_vector() {
+    use crate::crypto::aead::AesHp;
+    use crate::transport::packet::HeaderProtector;
+
+    let key: [u8; 16] =
+        hex_to_bytes("000102030405060708090a0b0c0d0e0f").try_into().expect("16-byte key");
+    let sample: [u8; 16] =
+        hex_to_bytes("00112233445566778899aabbccddeeff").try_into().expect("16-byte sample");
+    let hp = AesHp::new(&key);
+
+    assert_eq!(hp.new_mask(&sample), [0x69, 0xc4, 0xe0, 0xd8, 0x6a]);
+}
 
 #[test]
 fn aes_hp_new_mask_deterministic() {
