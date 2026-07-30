@@ -16,6 +16,8 @@ const TAG_LEN: usize = 16;
 const ENVELOPE_HEADER_LEN: usize = ENVELOPE_MAGIC.len() + 1 + 1 + KEY_ID_LEN + NONCE_LEN;
 const LEGACY_MAGIC: &[u8; 6] = b"QFENC1";
 const MAX_REGISTRY_FILE_BYTES: u64 = 4 * 1024 * 1024;
+#[cfg(unix)]
+const REGISTRY_FILE_MODE: u32 = 0o640;
 
 const CURRENT_KEY_ENV: &str = "QUICFUSCATE_QKEY_ENC_KEY";
 const CURRENT_KEY_FILE_ENV: &str = "QUICFUSCATE_QKEY_ENC_KEY_FILE";
@@ -672,6 +674,13 @@ fn write_and_commit_temporary(
         .map_err(|error| QKeyRegistryError::io("temporary create", temporary_path, error))?;
     file.write_all(bytes)
         .map_err(|error| QKeyRegistryError::io("temporary write", temporary_path, error))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(REGISTRY_FILE_MODE)).map_err(
+            |error| QKeyRegistryError::io("temporary permission set", temporary_path, error),
+        )?;
+    }
     file.sync_all()
         .map_err(|error| QKeyRegistryError::io("temporary sync", temporary_path, error))?;
     drop(file);
@@ -772,6 +781,14 @@ mod tests {
         storage.persist(PLAINTEXT, RewriteReason::Normal).expect("persist encrypted registry");
 
         let encrypted = std::fs::read(&path).expect("read encrypted registry");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).expect("registry metadata").permissions().mode() & 0o777,
+                REGISTRY_FILE_MODE
+            );
+        }
         assert!(encrypted.starts_with(ENVELOPE_MAGIC));
         assert!(!encrypted.windows(16).any(|window| PLAINTEXT.windows(16).any(|p| p == window)));
 

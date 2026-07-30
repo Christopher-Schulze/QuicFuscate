@@ -172,7 +172,9 @@ impl ServiceConfig {
         // Capabilities
         if !self.capabilities.is_empty() {
             let caps = self.capabilities.join(" ");
-            content.push_str(&format!("AmbientCapabilities={}\n", caps));
+            if self.user.is_some() {
+                content.push_str(&format!("AmbientCapabilities={}\n", caps));
+            }
             content.push_str(&format!("CapabilityBoundingSet={}\n", caps));
         }
 
@@ -465,7 +467,20 @@ mod tests {
         assert!(content.contains("ExecReload=/bin/kill -HUP $MAINPID"));
         assert!(content.contains("KillSignal=SIGTERM"));
         assert!(content.contains("TimeoutStopSec=10s"));
+        assert!(content.contains("CapabilityBoundingSet="));
+        assert!(!content.contains("AmbientCapabilities="));
         assert!(content.contains("WantedBy=multi-user.target"));
+    }
+
+    #[test]
+    fn non_root_service_uses_ambient_capabilities() {
+        let mut config = ServiceConfig::default();
+        config.user = Some("quicfuscate".to_string());
+
+        let content = config.generate_service();
+
+        assert!(content.contains("AmbientCapabilities="));
+        assert!(content.contains("CapabilityBoundingSet="));
     }
 
     #[test]

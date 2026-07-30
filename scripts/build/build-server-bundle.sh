@@ -66,7 +66,7 @@ main() {
   mkdir -p "$out_dir"
 
   local version
-  version="$(awk -F '\"' '/^[[:space:]]*version[[:space:]]*=[[:space:]]*\"/ {print $2; exit}' "$PROJECT_ROOT/Cargo.toml" || true)"
+  version="$(awk -F '"' '/^[[:space:]]*version[[:space:]]*=[[:space:]]*"/ {print $2; exit}' "$PROJECT_ROOT/Cargo.toml" || true)"
   [[ -n "$version" ]] || version="unknown"
 
   local ts

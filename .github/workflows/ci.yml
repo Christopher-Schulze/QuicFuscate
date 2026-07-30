@@ -422,6 +422,49 @@ jobs:
           path: scripts/out/tests/traffic-analysis-native/
           if-no-files-found: error
 
+  linux-installer-native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.21"
+
+      - name: Install native installer proof dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y debootstrap dnf gawk rpm shellcheck systemd-container
+
+      - name: Build real admin web publish tree
+        shell: bash
+        working-directory: apps/svelte-admin
+        run: |
+          bun install --no-progress
+          bun run build
+
+      - name: Prove AlmaLinux and Debian installer lifecycles
+        shell: bash
+        run: |
+          scripts/tests/suites/test-linux-installer.sh \
+            --output-dir scripts/out/tests/linux-installer-native \
+            --assets apps/svelte-admin/build
+
+      - name: Upload native Linux installer evidence
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: linux-installer-native
+          path: scripts/out/tests/linux-installer-native/
+          if-no-files-found: error
+
   security-audit:
     runs-on: ubuntu-latest
     steps:

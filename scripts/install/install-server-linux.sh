@@ -113,17 +113,83 @@ ensure_user() {
 }
 
 validate_prerequisites() {
+  local no_start="$1"
   local missing=()
   if ! need_cmd iptables; then missing+=("iptables"); fi
   if ! need_cmd ip;       then missing+=("iproute2 (ip)"); fi
+  for command_name in cat chmod chown cp cut dd dirname find getent grep head id install mkdir sleep tr; do
+    if ! need_cmd "$command_name"; then missing+=("$command_name"); fi
+  done
   if [[ "$no_start" != "1" ]] && ! need_cmd systemctl; then
     missing+=("systemctl")
+  fi
+  if [[ "$no_start" != "1" ]] && ! need_cmd journalctl; then
+    missing+=("journalctl")
   fi
   if [[ ${#missing[@]} -gt 0 ]]; then
     echo "error: missing prerequisites:" >&2
     printf '  - %s\n' "${missing[@]}" >&2
     echo "hint: on Debian/Ubuntu: apt-get install iptables iproute2 systemd" >&2
     echo "hint: on RHEL/Fedora:   dnf install iptables iproute systemd" >&2
+    exit 1
+  fi
+}
+
+validate_account_state() {
+  local user="$1"
+  local group="$2"
+
+  if ! getent group "$group" >/dev/null 2>&1 \
+    && ! need_cmd groupadd \
+    && ! need_cmd addgroup; then
+    echo "error: cannot create group '$group' (need groupadd or addgroup)" >&2
+    exit 1
+  fi
+
+  if ! id -u "$user" >/dev/null 2>&1; then
+    if ! need_cmd useradd && ! need_cmd adduser; then
+      echo "error: cannot create user '$user' (need useradd or adduser)" >&2
+      exit 1
+    fi
+    return 0
+  fi
+
+  local primary_group
+  primary_group="$(id -gn "$user" 2>/dev/null || true)"
+  if [[ "$primary_group" != "$group" ]]; then
+    echo "error: user '$user' has primary group '$primary_group', expected '$group'" >&2
+    exit 1
+  fi
+}
+
+validate_existing_qkey_state() {
+  local env_path="$1"
+  local key_path="$2"
+
+  if [[ -f "$env_path" ]] \
+    && grep -Eq '^[[:space:]]*QUICFUSCATE_QKEY_ENC_KEY=' "$env_path" \
+    && grep -Eq '^[[:space:]]*QUICFUSCATE_QKEY_ENC_KEY_FILE=' "$env_path"; then
+    echo "error: env file configures conflicting QKey registry key sources" >&2
+    exit 1
+  fi
+  if [[ -L "$key_path" ]]; then
+    echo "error: refusing symlink QKey registry key file: $key_path" >&2
+    exit 1
+  fi
+  if [[ -e "$key_path" && ! -f "$key_path" ]]; then
+    echo "error: QKey registry key path is not a regular file: $key_path" >&2
+    exit 1
+  fi
+}
+
+validate_toml_if_supported() {
+  local config_path="$1"
+  if need_cmd python3 \
+    && python3 -c 'import tomllib' >/dev/null 2>&1 \
+    && ! python3 -c \
+      'import sys,tomllib; tomllib.load(open(sys.argv[1],"rb"))' \
+      "$config_path" >/dev/null 2>&1; then
+    echo "error: config is not valid TOML: $config_path" >&2
     exit 1
   fi
 }
@@ -136,8 +202,13 @@ copy_tree() {
 }
 
 main() {
+  local script_path="${BASH_SOURCE[0]}"
   local script_dir
-  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  if [[ "$script_path" == */* ]]; then
+    script_dir="$(cd "${script_path%/*}" && pwd)"
+  else
+    script_dir="$(pwd)"
+  fi
 
   local binary=""
   local build="0"
@@ -158,6 +229,8 @@ main() {
   local qkey_store="/var/lib/quicfuscate/qkeys.json"
   local qkey_key_file="/etc/quicfuscate/qkey-registry.key"
   local unit_dst="/etc/systemd/system/quicfuscate.service"
+  local template=""
+  local unit_template=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -179,7 +252,7 @@ main() {
   done
 
   require_root
-  validate_prerequisites
+  validate_prerequisites "$no_start"
 
   # Bundle-friendly defaults:
   # - If invoked from an extracted bundle, the typical layout is:
@@ -227,50 +300,7 @@ main() {
     exit 1
   fi
 
-  ensure_group "quicfuscate"
-  ensure_user  "quicfuscate"
-
-  local log_dir="/var/log/quicfuscate"
-  mkdir -p /etc/quicfuscate "$state_dir" "$log_dir" /usr/share/quicfuscate
-
-  # Data/state dir: holds QKey store, per-client state — restrictive.
-  chown quicfuscate:quicfuscate "$state_dir"
-  chmod 0700 "$state_dir"
-
-  # Config dir: admin panel writes here, root + group read.
-  chown root:quicfuscate /etc/quicfuscate
-  chmod 0750 /etc/quicfuscate
-
-  # Log dir: server writes audit + runtime logs here.
-  chown quicfuscate:quicfuscate "$log_dir"
-  chmod 0750 "$log_dir"
-
-  if [[ "$build" == "1" ]]; then
-    if ! need_cmd cargo; then
-      echo "error: --build requires cargo (Rust toolchain)" >&2
-      exit 1
-    fi
-    (cd "$(pwd)" && cargo build --release --bin quicfuscate)
-    binary="./target/release/quicfuscate"
-  fi
-
-  if [[ ! -f "$binary" ]]; then
-    echo "error: binary not found: $binary" >&2
-    exit 1
-  fi
-
-  install -m 0755 "$binary" /usr/local/bin/quicfuscate
-
-  if [[ ! -f "$assets/index.html" ]]; then
-    echo "error: admin web assets missing: $assets/index.html" >&2
-    echo "hint: run ./scripts/build/build-web-admin.sh first, or pass --assets PATH" >&2
-    exit 1
-  fi
-  mkdir -p "$web_dst"
-  copy_tree "$assets" "$web_dst"
-
   if [[ ! -f "$config_dst" ]]; then
-    local template=""
     for candidate in \
       "${script_dir}/server-linux.default.toml" \
       "${script_dir}/../config/server-linux.default.toml" \
@@ -286,17 +316,82 @@ main() {
       echo "hint: expected near installer script, or at ./config/server-linux.default.toml" >&2
       exit 1
     fi
-    install -m 0640 "$template" "$config_dst"
-    chown root:quicfuscate "$config_dst" || true
   fi
 
-  # Validate installed config is parseable TOML (if python3 is available)
-  if need_cmd python3; then
-    if ! python3 -c "import tomllib,sys; tomllib.load(open('$config_dst','rb'))" \
-          >/dev/null 2>&1; then
-      echo "error: installed config is not valid TOML: $config_dst" >&2
+  for candidate in \
+    "${script_dir}/quicfuscate-server.service" \
+    "${script_dir}/../install/quicfuscate-server.service" \
+    "./scripts/install/quicfuscate-server.service"
+  do
+    if [[ -f "$candidate" ]]; then
+      unit_template="$candidate"
+      break
+    fi
+  done
+  if [[ -z "$unit_template" ]]; then
+    echo "error: missing unit template (quicfuscate-server.service)" >&2
+    echo "hint: expected near installer script, or at ./scripts/install/quicfuscate-server.service" >&2
+    exit 1
+  fi
+
+  if [[ ! -d "$(dirname "$unit_dst")" ]]; then
+    echo "error: systemd unit directory is missing: $(dirname "$unit_dst")" >&2
+    exit 1
+  fi
+  if [[ ! -f "$assets/index.html" ]]; then
+    echo "error: admin web assets missing: $assets/index.html" >&2
+    echo "hint: run ./scripts/build/build-web-admin.sh first, or pass --assets PATH" >&2
+    exit 1
+  fi
+  validate_account_state "quicfuscate" "quicfuscate"
+  validate_existing_qkey_state "$env_dst" "$qkey_key_file"
+  if [[ -f "$config_dst" ]]; then
+    validate_toml_if_supported "$config_dst"
+  else
+    validate_toml_if_supported "$template"
+  fi
+
+  if [[ "$build" == "1" ]]; then
+    if ! need_cmd cargo; then
+      echo "error: --build requires cargo (Rust toolchain)" >&2
       exit 1
     fi
+    (cd "$(pwd)" && cargo build --release --bin quicfuscate)
+    binary="./target/release/quicfuscate"
+  fi
+
+  if [[ ! -f "$binary" ]]; then
+    echo "error: binary not found: $binary" >&2
+    exit 1
+  fi
+
+  ensure_group "quicfuscate"
+  ensure_user  "quicfuscate"
+
+  local log_dir="/var/log/quicfuscate"
+  mkdir -p /etc/quicfuscate "$state_dir" "$log_dir" /usr/share/quicfuscate
+
+  # Shared bootstrap/runtime state: root initializes it, then the daemon owns
+  # atomic updates after dropping to the dedicated quicfuscate group.
+  chown root:quicfuscate "$state_dir"
+  chmod 0770 "$state_dir"
+
+  # Config dir: the daemon atomically persists admin auth and panel edits here.
+  chown root:quicfuscate /etc/quicfuscate
+  chmod 0770 /etc/quicfuscate
+
+  # Log dir: server writes audit + runtime logs here.
+  chown quicfuscate:quicfuscate "$log_dir"
+  chmod 0750 "$log_dir"
+
+  install -m 0755 "$binary" /usr/local/bin/quicfuscate
+
+  mkdir -p "$web_dst"
+  copy_tree "$assets" "$web_dst"
+
+  if [[ ! -f "$config_dst" ]]; then
+    install -m 0640 "$template" "$config_dst"
+    chown root:quicfuscate "$config_dst" || true
   fi
 
   if [[ -z "$admin_password" ]]; then
@@ -305,25 +400,12 @@ main() {
 
   local qkey_key_source_configured="0"
   if [[ -f "$env_dst" ]]; then
-    if grep -Eq '^[[:space:]]*QUICFUSCATE_QKEY_ENC_KEY=' "$env_dst" \
-      && grep -Eq '^[[:space:]]*QUICFUSCATE_QKEY_ENC_KEY_FILE=' "$env_dst"; then
-      echo "error: env file configures conflicting QKey registry key sources" >&2
-      exit 1
-    fi
     if grep -Eq '^[[:space:]]*QUICFUSCATE_QKEY_ENC_(KEY|KEY_FILE)=' "$env_dst"; then
       qkey_key_source_configured="1"
     fi
   fi
 
   if [[ "$qkey_key_source_configured" == "0" ]]; then
-    if [[ -L "$qkey_key_file" ]]; then
-      echo "error: refusing symlink QKey registry key file: $qkey_key_file" >&2
-      exit 1
-    fi
-    if [[ -e "$qkey_key_file" && ! -f "$qkey_key_file" ]]; then
-      echo "error: QKey registry key path is not a regular file: $qkey_key_file" >&2
-      exit 1
-    fi
     if [[ ! -e "$qkey_key_file" ]]; then
       umask 0077
       dd if=/dev/urandom of="$qkey_key_file" bs=32 count=1 status=none
@@ -365,32 +447,21 @@ EOF
   if [[ ! -f "$qkey_store" ]]; then
     mkdir -p "$(dirname "$qkey_store")"
     printf "[]\n" >"$qkey_store"
-    chown quicfuscate:quicfuscate "$qkey_store" || true
-    chmod 0640 "$qkey_store" || true
+    chown root:quicfuscate "$qkey_store"
+    chmod 0640 "$qkey_store"
   fi
 
-  local unit_template=""
-  for candidate in \
-    "${script_dir}/quicfuscate-server.service" \
-    "${script_dir}/../install/quicfuscate-server.service" \
-    "./scripts/install/quicfuscate-server.service"
-  do
-    if [[ -f "$candidate" ]]; then
-      unit_template="$candidate"
-      break
-    fi
-  done
-  if [[ -z "$unit_template" ]]; then
-    echo "error: missing unit template (quicfuscate-server.service)" >&2
-    echo "hint: expected near installer script, or at ./scripts/install/quicfuscate-server.service" >&2
-    exit 1
-  fi
   install -m 0644 "$unit_template" "$unit_dst"
 
   if need_cmd systemctl; then
     systemctl daemon-reload
     if [[ "$no_start" != "1" ]]; then
-      systemctl enable --now quicfuscate.service
+      if ! systemctl enable --now quicfuscate.service; then
+        echo "error: quicfuscate.service failed to start" >&2
+        systemctl status --no-pager quicfuscate.service || true
+        journalctl -u quicfuscate.service -n 50 --no-pager || true
+        exit 1
+      fi
       sleep 1
       if ! systemctl is-active --quiet quicfuscate.service; then
         echo "error: quicfuscate.service failed to start" >&2

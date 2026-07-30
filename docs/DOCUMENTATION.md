@@ -2084,16 +2084,16 @@ Wants=network-online.target
 
 [Service]
 Type=notify
+Group=quicfuscate
 ExecStart=/opt/quicfuscate/bin/quicfuscate server --config /etc/quicfuscate/quicfuscate.toml
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65536
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_CHOWN CAP_SETGID CAP_SETUID
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_CHOWN CAP_SETGID CAP_SETUID
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/log/quicfuscate
+ReadWritePaths=/etc/quicfuscate /var/lib/quicfuscate /var/log/quicfuscate
 
 [Install]
 WantedBy=multi-user.target
@@ -2244,23 +2244,29 @@ Preferred Linux install flow uses the scripts under `scripts/`:
 FHS paths used by the installer:
 - config: `/etc/quicfuscate/quicfuscate.toml`
 - env (admin creds, bind, paths): `/etc/quicfuscate/quicfuscate.env`
+- persisted admin auth: `/etc/quicfuscate/admin-auth.json`
 - QKey registry encryption key: `/etc/quicfuscate/qkey-registry.key`
 - web assets: `/usr/share/quicfuscate/admin-web`
 - state (QKey registry): `/var/lib/quicfuscate/qkeys.json` (via `quicfuscate server --qkey-store`)
 
 Installer flow is `scripts/install/install-server-linux.sh` together with `scripts/install/quicfuscate-server.service`.
 
-Linux server startup resolves `--drop-user` and `--drop-group` before opening privileged resources. Selectors containing only decimal digits are treated strictly as numeric UID/GID values; all other selectors are resolved as names through NSS. TLS certificate and private-key PEM are validated and retained in memory before the transition, so new connections never reopen a root-owned key file. After socket, TUN, and routing setup, the process clears supplementary groups, sets real/effective/saved GID and UID, clears effective/permitted/inheritable/ambient capabilities, and verifies every Linux thread has the target IDs, empty groups, zero capability sets, and `PR_SET_NO_NEW_PRIVS`. The destructive root-regain proof is isolated in `qf-privilege-probe`; it is not run inside the multi-threaded service. The shipped systemd unit root-starts with only `CAP_NET_ADMIN`, `CAP_NET_BIND_SERVICE`, `CAP_NET_RAW`, `CAP_CHOWN`, `CAP_SETGID`, and `CAP_SETUID`, and the process removes all capabilities before accepting traffic. Service-manager confinement and privileged host-routing teardown remain platform responsibilities.
+The installer validates required commands, account compatibility, source binary, admin assets, config and unit templates, systemd paths, QKey key-source consistency, and TOML support before its first persistent mutation. It creates `quicfuscate:quicfuscate`, keeps `/etc/quicfuscate` and `/var/lib/quicfuscate` as `root:quicfuscate` mode `0770`, keeps individual config, environment, registry-key, and registry files at mode `0640`, and lets the daemon create `admin-auth.json` as mode `0600`. The service root-starts with primary group `quicfuscate` and a bounded effective/permitted setup set. It intentionally does not use `AmbientCapabilities`, which would also populate the inheritable set on every thread.
+
+Linux server startup resolves `--drop-user` and `--drop-group` before opening privileged resources. Selectors containing only decimal digits are treated strictly as numeric UID/GID values; all other selectors are resolved as names through NSS. TLS certificate and private-key PEM are validated and retained in memory before the transition, so new connections never reopen a root-owned key file. After socket, TUN, and routing setup, the process clears supplementary groups, sets real/effective/saved GID and UID, clears effective/permitted/inheritable/ambient capabilities, and verifies every Linux thread has the target IDs, empty groups, zero capability sets, and `PR_SET_NO_NEW_PRIVS`. The destructive root-regain proof is isolated in `qf-privilege-probe`; it is not run inside the multi-threaded service. The shipped systemd unit root-starts with only `CAP_NET_ADMIN`, `CAP_NET_BIND_SERVICE`, `CAP_NET_RAW`, `CAP_CHOWN`, `CAP_SETGID`, and `CAP_SETUID` in `CapabilityBoundingSet`, and the process removes all capabilities before accepting traffic. Service-manager confinement and privileged host-routing teardown remain platform responsibilities.
 
 `quicfuscate capabilities --json --user quicfuscate --group quicfuscate --tun --listen-port 4433` reports real/effective/saved UID and GID, supplementary groups, effective/permitted/inheritable/ambient/bounding capability masks, `no_new_privileges`, target-account resolution, and readiness for the requested startup operations.
 
 Idempotency behavior of `scripts/install/install-server-linux.sh`:
 - Existing `quicfuscate.toml` is preserved (created only if missing).
 - Existing `quicfuscate.env` entries are preserved; a missing QKey registry key-file source is appended without replacing the file.
+- Existing `admin-auth.json` is loaded and preserved by the server across installer reruns.
 - Existing `qkey-registry.key` is preserved. A missing key is generated from `/dev/urandom` as 32 raw bytes and installed as `root:quicfuscate` mode `0640`.
 - Existing `qkeys.json` is preserved (created only if missing).
 - Binary, assets, and unit template are reinstalled safely on reruns.
 - `systemctl daemon-reload` is called on every install run.
+
+Native disposable verification is owned by `scripts/tests/suites/test-linux-installer.sh` and `scripts/tests/suites/test-linux-installer-guest.sh`. The host harness uses temporary `systemd-nspawn` machines, signature-checked Debian 12 `debootstrap`, and AlmaLinux 9 BaseOS/AppStream with pinned signing-key fingerprint `BF18AC2876178908D6E71267D36CB86CB86B3716`. Its default path builds the release server inside AlmaLinux 9 with two Cargo jobs and no incremental compilation, then installs that exact binary in both guests. It proves every prerequisite failure before mutation, exact account and file metadata, systemd activation, zero capability sets after the runtime drop, preserved config and credentials on rerun, actionable journal output on invalid TLS material, recovery, byte-identical cross-distro installation, and allowlisted zero-residue teardown. Docker and redirected production paths are not used.
 
 #### Reverse Proxy (Admin Web)
 
@@ -4424,7 +4430,7 @@ level = "debug"
 - The runtime falls back to sendmmsg automatically
 
 **Permission denied for TUN:**
-- Use the shipped systemd unit with `CAP_NET_ADMIN`, `CAP_NET_BIND_SERVICE`, `CAP_NET_RAW`, `CAP_CHOWN`, `CAP_SETGID`, and `CAP_SETUID` in both `AmbientCapabilities` and `CapabilityBoundingSet`.
+- Use the shipped root-started systemd unit with `CAP_NET_ADMIN`, `CAP_NET_BIND_SERVICE`, `CAP_NET_RAW`, `CAP_CHOWN`, `CAP_SETGID`, and `CAP_SETUID` in `CapabilityBoundingSet`. Do not add `AmbientCapabilities`; root setup already receives the bounded effective/permitted set and ambient capabilities would populate the inheritable set.
 - Run `quicfuscate capabilities --json --tun` before startup to identify the exact missing capability or target-account failure.
 
 #### macOS
