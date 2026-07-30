@@ -23,6 +23,8 @@ const MIN_RTT_WIN: Duration = Duration::from_secs(10);
 const PROBE_RTT_DURATION: Duration = Duration::from_millis(200);
 const STARTUP_GROWTH_TARGET: f64 = 1.25;
 const BW_PROBE_UP_ROUNDS: u64 = 3;
+const INITIAL_RTT: Duration = Duration::from_millis(100);
+const STARTUP_PACING_GAIN: f64 = 2.77;
 
 /// Default pacing gain cycle (standard BBR3 - no stealth shaping).
 const DEFAULT_GAINS: [f64; 8] = [1.25, 0.75, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
@@ -35,6 +37,7 @@ pub struct Bbr3 {
     mss: usize,
     bytes_in_flight: usize,
     pacing_rate: u64,
+    startup_pacing_floor: u64,
     pacing_gain: f64,
     cwnd_gain: f64,
     btlbw: u64,
@@ -76,23 +79,31 @@ pub struct Bbr3 {
 }
 
 impl Bbr3 {
+    fn startup_pacing_rate(cwnd: usize, rtt: Duration, pacing_gain: f64) -> u64 {
+        let rtt_seconds = rtt.max(Duration::from_millis(1)).as_secs_f64();
+        ((cwnd as f64 / rtt_seconds) * pacing_gain).clamp(1.0, u64::MAX as f64) as u64
+    }
+
     /// Create a new BBR3 controller with the given initial window and MSS.
     pub fn new(initial_cwnd: usize, mss: usize) -> Self {
         let now = Instant::now();
         let mss = mss.max(1);
         let min_cwnd = initial_cwnd.max(mss * 4);
+        let startup_pacing_floor =
+            Self::startup_pacing_rate(min_cwnd, INITIAL_RTT, STARTUP_PACING_GAIN);
         Self {
             state: State::Startup,
             cwnd: min_cwnd,
             min_cwnd,
             mss,
             bytes_in_flight: 0,
-            pacing_rate: 0,
-            pacing_gain: 2.77,
+            pacing_rate: startup_pacing_floor,
+            startup_pacing_floor,
+            pacing_gain: STARTUP_PACING_GAIN,
             cwnd_gain: 2.0,
             btlbw: 0,
-            min_rtt: Duration::from_millis(100),
-            rtt: Duration::from_millis(100),
+            min_rtt: INITIAL_RTT,
+            rtt: INITIAL_RTT,
             rtt_var: Duration::ZERO,
             loss_acked: 0.0,
             loss_lost: 0.0,
@@ -260,7 +271,12 @@ impl Bbr3 {
             self.pacing_gain = self.pacing_gain.max(1.0);
             self.idle_restart = false;
         }
-        self.pacing_rate = (self.pacing_gain * self.btlbw as f64).max(0.0) as u64;
+        let model_rate = (self.pacing_gain * self.btlbw as f64).max(0.0) as u64;
+        self.pacing_rate = if matches!(self.state, State::Startup) {
+            self.startup_pacing_floor.max(model_rate)
+        } else {
+            model_rate
+        };
     }
 }
 
@@ -329,7 +345,10 @@ impl CongestionController for Bbr3 {
         self.full_bw_count = 0;
         self.cwnd = min_cwnd.max(self.mss * 2);
         self.min_cwnd = self.cwnd.max(self.mss * 4);
-        self.pacing_gain = 2.77;
+        self.pacing_gain = STARTUP_PACING_GAIN;
+        self.startup_pacing_floor =
+            Self::startup_pacing_rate(self.cwnd, self.rtt, self.pacing_gain);
+        self.pacing_rate = self.startup_pacing_floor;
         self.cwnd_gain = 2.0;
         self.packet_conservation = false;
     }
@@ -397,6 +416,29 @@ mod tests {
         let bbr = Bbr3::new(12_000, 1200);
         assert_eq!(bbr.state, State::Startup);
         assert!(bbr.cwnd() >= 12_000);
+        assert_eq!(
+            bbr.pacing_rate(),
+            Some(Bbr3::startup_pacing_rate(12_000, INITIAL_RTT, STARTUP_PACING_GAIN))
+        );
+    }
+
+    #[test]
+    fn slow_first_ack_does_not_collapse_startup_pacing() {
+        let mut bbr = Bbr3::new(12_000, 1200);
+        let initial_rate = bbr.pacing_rate().expect("startup pacing must be initialized");
+        let now = Instant::now();
+
+        bbr.on_packet_sent(1, 1200, now);
+        bbr.on_ack(1200, now + Duration::from_secs(10));
+        bbr.set_pacing_rate(1);
+        bbr.on_packet_sent(2, 1200, now + Duration::from_secs(10));
+        bbr.on_ack(1200, now + Duration::from_secs(20));
+
+        assert_eq!(bbr.state, State::Startup);
+        assert!(
+            bbr.pacing_rate().is_some_and(|rate| rate >= initial_rate),
+            "a transient slow first delivery sample must not schedule a multi-second startup stall"
+        );
     }
 
     #[test]

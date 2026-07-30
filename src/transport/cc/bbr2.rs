@@ -52,6 +52,7 @@ const MIN_PIPE_CWND_PKTS: usize = 4;
 const LOSS_ALPHA: f32 = 0.1;
 /// Loss discount factor for conservative BW estimate.
 const LOSS_BW_DISCOUNT: f64 = 0.3;
+const INITIAL_RTT: Duration = Duration::from_millis(100);
 
 // ---------------------------------------------------------------------------
 // State machine
@@ -119,6 +120,7 @@ pub struct Bbr2 {
     mss: usize,
     // Pacing
     pacing_rate: u64,
+    startup_pacing_floor: u64,
     pacing_gain: f64,
     cwnd_gain: f64,
     // Bandwidth model
@@ -163,22 +165,30 @@ pub struct Bbr2 {
 }
 
 impl Bbr2 {
+    fn startup_pacing_rate(cwnd: usize, rtt: Duration, pacing_gain: f64) -> u64 {
+        let rtt_seconds = rtt.max(Duration::from_millis(1)).as_secs_f64();
+        ((cwnd as f64 / rtt_seconds) * pacing_gain).clamp(1.0, u64::MAX as f64) as u64
+    }
+
     /// Create a new BBR2 controller with the given initial window and MSS.
     pub fn new(initial_cwnd: usize, mss: usize) -> Self {
         let now = Instant::now();
         let mss = mss.max(1);
+        let startup_pacing_floor =
+            Self::startup_pacing_rate(initial_cwnd, INITIAL_RTT, STARTUP_PACING_GAIN);
         Self {
             state: State::Startup,
             cwnd: initial_cwnd,
             bytes_in_flight: 0,
             mss,
-            pacing_rate: 0,
+            pacing_rate: startup_pacing_floor,
+            startup_pacing_floor,
             pacing_gain: STARTUP_PACING_GAIN,
             cwnd_gain: STARTUP_CWND_GAIN,
             max_bw_filter: MaxBwFilter::new(),
             max_bw: 0,
-            min_rtt: Duration::from_millis(100),
-            rtt: Duration::from_millis(100),
+            min_rtt: INITIAL_RTT,
+            rtt: INITIAL_RTT,
             rtt_var: Duration::ZERO,
             min_rtt_stamp: now,
             loss_acked: 0.0,
@@ -405,7 +415,12 @@ impl Bbr2 {
         // Conservative BW estimate discounted by loss
         let loss_discount = 1.0 - self.current_loss_rate() * LOSS_BW_DISCOUNT;
         let effective_bw = (self.max_bw as f64 * loss_discount).max(0.0);
-        self.pacing_rate = (effective_bw * self.pacing_gain).max(0.0) as u64;
+        let model_rate = (effective_bw * self.pacing_gain).max(0.0) as u64;
+        self.pacing_rate = if matches!(self.state, State::Startup) {
+            self.startup_pacing_floor.max(model_rate)
+        } else {
+            model_rate
+        };
     }
 
     fn update_cwnd(&mut self) {
@@ -552,6 +567,10 @@ impl CongestionController for Bbr2 {
         self.state = State::Startup;
         self.max_bw = 0;
         self.cwnd = min_cwnd.max(self.mss * 2);
+        self.pacing_gain = STARTUP_PACING_GAIN;
+        self.startup_pacing_floor =
+            Self::startup_pacing_rate(self.cwnd, self.rtt, self.pacing_gain);
+        self.pacing_rate = self.startup_pacing_floor;
     }
 
     fn cwnd(&self) -> usize {
@@ -620,6 +639,29 @@ mod tests {
         assert_eq!(bbr.state, State::Startup);
         assert_eq!(bbr.pacing_gain, STARTUP_PACING_GAIN);
         assert_eq!(bbr.cwnd_gain, STARTUP_CWND_GAIN);
+        assert_eq!(
+            bbr.pacing_rate(),
+            Some(Bbr2::startup_pacing_rate(12_000, INITIAL_RTT, STARTUP_PACING_GAIN))
+        );
+    }
+
+    #[test]
+    fn slow_first_ack_does_not_collapse_startup_pacing() {
+        let mut bbr = Bbr2::new(12_000, 1200);
+        let initial_rate = bbr.pacing_rate().expect("startup pacing must be initialized");
+        let now = Instant::now();
+
+        bbr.on_packet_sent(1, 1200, now);
+        bbr.on_ack(1200, now + Duration::from_secs(10));
+        bbr.set_pacing_rate(1);
+        bbr.on_packet_sent(2, 1200, now + Duration::from_secs(10));
+        bbr.on_ack(1200, now + Duration::from_secs(20));
+
+        assert_eq!(bbr.state, State::Startup);
+        assert!(
+            bbr.pacing_rate().is_some_and(|rate| rate >= initial_rate),
+            "a transient slow first delivery sample must not schedule a multi-second startup stall"
+        );
     }
 
     #[test]

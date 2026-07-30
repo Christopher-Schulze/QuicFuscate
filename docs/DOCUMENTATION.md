@@ -1321,6 +1321,8 @@ QuicFuscate uses a pluggable congestion control framework in `src/transport/cc/`
 
 All four implement the `CongestionController` trait (`cc/mod.rs`). Dispatch uses an enum wrapper (`CcImpl`) with eight variants for zero-vtable hot-path performance: `Reno`, `Cubic`, `Bbr2`, `Bbr3` (base variants created at startup) and `StealthReno`, `StealthCubic`, `StealthBbr2`, `StealthBbr3` (stealth-wrapped variants, activated at runtime by `Recovery::set_stealth_mode()`). The macro `cc_dispatch!` handles all eight uniformly.
 
+BBR2 and BBR3 initialize a Startup pacing floor from the initial congestion window and a 100 ms initial RTT. While Startup is probing, transient slow delivery samples may raise but cannot collapse that model floor; optional Stealth shaping is applied once to each recomputed output instead of compounding across ACKs. Drain and Probe states use the measured model rate directly. Persistent congestion returns either BBR controller to Startup and reinitializes the same pacing floor from its reset window and current RTT estimate.
+
 **CLI Usage:**
 ```bash
 quicfuscate client --remote server:4433 --cc-algorithm bbr3
