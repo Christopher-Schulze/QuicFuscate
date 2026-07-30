@@ -320,12 +320,22 @@ try {
         "--heartbeat-timeout-ms", "15000",
         "-v"
     )
+    [Environment]::SetEnvironmentVariable(
+        "QUICFUSCATE_CLIENT_RECV_DIAGNOSTICS",
+        "1",
+        "Process"
+    )
     $ClientProcess = Start-Process -FilePath $BinaryPath `
         -ArgumentList $Arguments `
         -NoNewWindow `
         -PassThru `
         -RedirectStandardOutput $StandardOutputPath `
         -RedirectStandardError $StandardErrorPath
+    [Environment]::SetEnvironmentVariable(
+        "QUICFUSCATE_CLIENT_RECV_DIAGNOSTICS",
+        $null,
+        "Process"
+    )
     $ClientStartedAtUtc = [DateTime]::UtcNow
     $Arguments[6] = "<cleared>"
     $CleanupRequired = $true
@@ -517,6 +527,11 @@ finally {
         if (Test-Path -LiteralPath $TemporaryRoot) {
             Remove-Item -LiteralPath $TemporaryRoot -Recurse -Force
         }
+        [Environment]::SetEnvironmentVariable(
+            "QUICFUSCATE_CLIENT_RECV_DIAGNOSTICS",
+            $null,
+            "Process"
+        )
         $QKey = $null
     }
 }

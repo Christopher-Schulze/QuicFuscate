@@ -763,11 +763,19 @@ fn drain_client_tun_uplink(
     sid: u64,
     rx: &std::sync::mpsc::Receiver<Vec<u8>>,
     backlog: &mut Option<Vec<u8>>,
+    diagnostics_enabled: bool,
 ) {
     if let Some(frame) = backlog.take() {
         match send_client_tun_packet(conn, tun, sid, &frame) {
-            Ok(()) => {}
+            Ok(()) => {
+                if diagnostics_enabled {
+                    info!("Client Wintun backlog accepted by MASQUE uplink: bytes={}", frame.len());
+                }
+            }
             Err(quicfuscate::error::ConnectionError::DgramQueueFull) => {
+                if diagnostics_enabled {
+                    info!("Client MASQUE uplink remains backpressured: bytes={}", frame.len());
+                }
                 *backlog = Some(frame);
                 return;
             }
@@ -781,8 +789,15 @@ fn drain_client_tun_uplink(
     for _ in 0..16 {
         match rx.try_recv() {
             Ok(frame) => match send_client_tun_packet(conn, tun, sid, &frame) {
-                Ok(()) => {}
+                Ok(()) => {
+                    if diagnostics_enabled {
+                        info!("Client Wintun packet accepted by MASQUE uplink: bytes={}", frame.len());
+                    }
+                }
                 Err(quicfuscate::error::ConnectionError::DgramQueueFull) => {
+                    if diagnostics_enabled {
+                        info!("Client MASQUE uplink backpressured: bytes={}", frame.len());
+                    }
                     *backlog = Some(frame);
                     break;
                 }
@@ -1100,6 +1115,11 @@ async fn run_client(
     let mut request_sent = false;
     let mut kill_switch_connected = false;
     let requested_tun_mtu = tun_mtu.unwrap_or(1500);
+    let client_receive_diagnostics_enabled =
+        quicfuscate::env_utils::env_flag(CLIENT_RECV_DIAGNOSTICS_ENV, false);
+    if client_receive_diagnostics_enabled {
+        info!("Client receive diagnostics enabled for this process");
+    }
 
     // Optional TUN bridging setup
     #[allow(clippy::type_complexity)]
@@ -1150,11 +1170,15 @@ async fn run_client(
                     quicfuscate::interface::TUN_PACKET_QUEUE_CAPACITY,
                 );
                 let tun_for_reader = tun.clone();
+                let tun_reader_diagnostics = client_receive_diagnostics_enabled;
                 std::thread::spawn(move || {
                     loop {
                         let read_result = tun_for_reader.read_block();
                         match read_result {
                             Ok((block, len)) if len > 0 => {
+                                if tun_reader_diagnostics {
+                                    info!("Client Wintun packet read: bytes={len}");
+                                }
                                 let mut v = vec![0u8; len];
                                 v.copy_from_slice(&block[..len]);
                                 if tx.send(v).is_err() {
@@ -1190,11 +1214,8 @@ async fn run_client(
     let mut next_heartbeat_probe =
         heartbeat_probe_interval.map(|interval| tokio::time::Instant::now() + interval);
     let mut receive_diagnostics =
-        quicfuscate::env_utils::env_flag(CLIENT_RECV_DIAGNOSTICS_ENV, false)
-            .then(ClientReceiveDiagnostics::default);
-    if receive_diagnostics.is_some() {
-        info!("Client receive diagnostics enabled for this process");
-    }
+        client_receive_diagnostics_enabled.then(ClientReceiveDiagnostics::default);
+    let mut last_runtime_progress = std::time::Instant::now();
     let shutdown_signal = wait_shutdown_signal();
     tokio::pin!(shutdown_signal);
 
@@ -1210,6 +1231,17 @@ async fn run_client(
                 break ExitReason::CleanShutdown;
             }
             recv_res = recv_connected_datagram(&socket, &mut buf) => {
+                let branch_started = std::time::Instant::now();
+                let scheduling_gap = branch_started.duration_since(last_runtime_progress);
+                if client_receive_diagnostics_enabled
+                    && scheduling_gap >= Duration::from_millis(250)
+                {
+                    info!(
+                        "Client runtime resumed: branch=udp-recv scheduling_gap_ms={}",
+                        scheduling_gap.as_millis()
+                    );
+                }
+                last_runtime_progress = branch_started;
                 match recv_res {
                     Ok(len) => {
                         telemetry!(quicfuscate::telemetry::BYTES_RECEIVED.inc_by(len as u64));
@@ -1258,11 +1290,28 @@ async fn run_client(
                         // housekeeping tick may never fire, starving the TUN uplink.
                         if tun_enable && conn.masque_tunnel_established() {
                             if let (Some(ref rx), Some(sid), Some(ref tun)) = (&tun_rx, h3_stream_id, &tun_writer) {
-                                drain_client_tun_uplink(&mut conn, tun, sid, rx, &mut tun_backpressure_frame);
+                                drain_client_tun_uplink(
+                                    &mut conn,
+                                    tun,
+                                    sid,
+                                    rx,
+                                    &mut tun_backpressure_frame,
+                                    client_receive_diagnostics_enabled,
+                                );
                             }
                             // Flush any outgoing packets generated by the body chunk sends.
+                            let flush_started = std::time::Instant::now();
                             if let Err(e) = flush_connected_outgoing(&socket, &mut conn, &mut out).await {
                                 warn!("Failed to flush TUN uplink packets: {}", e);
+                            }
+                            let flush_elapsed = flush_started.elapsed();
+                            if client_receive_diagnostics_enabled
+                                && flush_elapsed >= Duration::from_millis(100)
+                            {
+                                info!(
+                                    "Client runtime slow phase: branch=udp-recv phase=flush duration_ms={}",
+                                    flush_elapsed.as_millis()
+                                );
                             }
                         }
                         if conn.conn.is_closed() {
@@ -1277,6 +1326,17 @@ async fn run_client(
                 }
             }
             _ = housekeeping.tick() => {
+                let branch_started = std::time::Instant::now();
+                let scheduling_gap = branch_started.duration_since(last_runtime_progress);
+                if client_receive_diagnostics_enabled
+                    && scheduling_gap >= Duration::from_millis(250)
+                {
+                    info!(
+                        "Client runtime resumed: branch=housekeeping scheduling_gap_ms={}",
+                        scheduling_gap.as_millis()
+                    );
+                }
+                last_runtime_progress = branch_started;
                 if conn.conn.is_established()
                     && tun_enable
                     && !conn.masque_tunnel_established()
@@ -1298,6 +1358,7 @@ async fn run_client(
                 }
 
                 if tun_enable {
+                    let poll_started = std::time::Instant::now();
                     if h3_stream_id.is_none() {
                         match conn.open_http3_stream_post("/tun") {
                             Ok(sid) => { h3_stream_id = Some(sid); }
@@ -1332,8 +1393,24 @@ async fn run_client(
                     // forwarded on every housekeeping tick (every 5ms).
                     if conn.masque_tunnel_established() {
                         if let (Some(ref rx), Some(sid), Some(ref tun)) = (&tun_rx, h3_stream_id, &tun_writer) {
-                            drain_client_tun_uplink(&mut conn, tun, sid, rx, &mut tun_backpressure_frame);
+                            drain_client_tun_uplink(
+                                &mut conn,
+                                tun,
+                                sid,
+                                rx,
+                                &mut tun_backpressure_frame,
+                                client_receive_diagnostics_enabled,
+                            );
                         }
+                    }
+                    let poll_elapsed = poll_started.elapsed();
+                    if client_receive_diagnostics_enabled
+                        && poll_elapsed >= Duration::from_millis(100)
+                    {
+                        info!(
+                            "Client runtime slow phase: branch=housekeeping phase=http3-and-tun duration_ms={}",
+                            poll_elapsed.as_millis()
+                        );
                     }
                 } else if let Err(e) = conn.poll_http3() {
                     warn!("HTTP/3 error: {:?}", e);
@@ -1344,6 +1421,7 @@ async fn run_client(
                 let data_plane_ready = conn.conn.is_established()
                     && (!tun_enable || conn.masque_tunnel_established());
                 if data_plane_ready && !kill_switch_connected {
+                    let policy_started = std::time::Instant::now();
                     if let Some(ref ks) = kill_switch {
                         if let Err(error) = ks.on_vpn_connected(&firewall_policy) {
                             break ExitReason::SocketError(format!(
@@ -1353,6 +1431,12 @@ async fn run_client(
                         info!("Kill switch: VPN traffic allowed, non-VPN blocked");
                     }
                     kill_switch_connected = true;
+                    if client_receive_diagnostics_enabled {
+                        info!(
+                            "Client runtime phase: connected-firewall duration_ms={}",
+                            policy_started.elapsed().as_millis()
+                        );
+                    }
                 }
 
                 let now = tokio::time::Instant::now();
@@ -1364,11 +1448,31 @@ async fn run_client(
                     next_heartbeat_probe =
                         heartbeat_probe_interval.map(|interval| now + interval);
                 }
+                let flush_started = std::time::Instant::now();
                 if let Err(e) = flush_connected_outgoing(&socket, &mut conn, &mut out).await {
                     warn!("Failed to flush outgoing packets: {}", e);
                 }
+                let flush_elapsed = flush_started.elapsed();
+                if client_receive_diagnostics_enabled
+                    && flush_elapsed >= Duration::from_millis(100)
+                {
+                    info!(
+                        "Client runtime slow phase: branch=housekeeping phase=flush duration_ms={}",
+                        flush_elapsed.as_millis()
+                    );
+                }
 
+                let update_started = std::time::Instant::now();
                 conn.update_state();
+                let update_elapsed = update_started.elapsed();
+                if client_receive_diagnostics_enabled
+                    && update_elapsed >= Duration::from_millis(100)
+                {
+                    info!(
+                        "Client runtime slow phase: branch=housekeeping phase=update-state duration_ms={}",
+                        update_elapsed.as_millis()
+                    );
+                }
                 if let Some(tun) = tun_writer.as_ref() {
                     if let Err(error) =
                         synchronize_client_tun_mtu(&conn, tun, requested_tun_mtu)
