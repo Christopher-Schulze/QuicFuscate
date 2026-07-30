@@ -336,13 +336,15 @@ mod tests {
     }
 
     #[test]
-    fn on_timeout_increments_count_and_sets_draining() {
+    fn on_timeout_closes_connection_and_sets_timeout_error() {
         let mut c = make_conn();
         assert!(!c.is_draining());
         assert!(!c.is_timed_out());
         c.on_timeout();
+        assert!(c.is_closed(), "idle timeout must make the connection reapable");
         assert!(c.is_draining(), "on_timeout() must set is_draining");
         assert!(c.is_timed_out(), "on_timeout() must make is_timed_out() return true");
+        assert_eq!(c.local_error, Some(ConnectionError::Timeout));
     }
 
     #[test]
@@ -583,6 +585,28 @@ mod tests {
         let t = c.timeout();
         assert!(t.is_some(), "timeout() must return Some");
         assert!(t.unwrap() > Duration::from_secs(0), "timeout must be positive");
+    }
+
+    #[test]
+    fn timeout_uses_configured_max_idle_timeout() {
+        let mut config = Config::new_with_version(PROTOCOL_VERSION).unwrap();
+        config.set_max_idle_timeout(1_234);
+        let c =
+            Connection::new_with_role(b"test_scid_0123456789", local(), peer(), config, false);
+
+        assert_eq!(c.timeout(), Some(Duration::from_millis(1_234)));
+    }
+
+    #[test]
+    fn zero_max_idle_timeout_disables_idle_expiry() {
+        let mut config = Config::new_with_version(PROTOCOL_VERSION).unwrap();
+        config.set_max_idle_timeout(0);
+        let mut c =
+            Connection::new_with_role(b"test_scid_0123456789", local(), peer(), config, false);
+        c.last_activity = Instant::now() - Duration::from_secs(60);
+
+        assert_eq!(c.timeout(), None);
+        assert!(!c.idle_timeout_elapsed());
     }
 
     #[test]

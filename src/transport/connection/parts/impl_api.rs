@@ -780,9 +780,10 @@ impl Connection {
         Ok(())
     }
 
-    /// Returns the connection timeout
+    /// Returns the configured idle timeout, or `None` when idle timeout is disabled.
     pub fn timeout(&self) -> Option<Duration> {
-        Some(Duration::from_millis(30000))
+        (self.config.max_idle_timeout > 0)
+            .then(|| Duration::from_millis(self.config.max_idle_timeout))
     }
     /// Whether the connection has been idle (no inbound packet) for at least the
     /// idle-timeout window. Run loops invoke this each housekeeping tick to decide
@@ -790,8 +791,7 @@ impl Connection {
     /// tick would inflate the loss counter and repeatedly collapse the congestion
     /// window for a perfectly healthy connection.
     pub fn idle_timeout_elapsed(&self) -> bool {
-        let window = self.timeout().unwrap_or(Duration::from_secs(30));
-        self.last_activity.elapsed() >= window
+        self.timeout().is_some_and(|window| self.last_activity.elapsed() >= window)
     }
 
     /// Returns the duration elapsed since the last inbound packet was received.
@@ -862,7 +862,11 @@ impl Connection {
                 .bytes_in_flight_duration
                 .saturating_add(Instant::now().saturating_duration_since(start));
         }
-        // Switch into draining on timeout.
+        // QUIC idle timeout is terminal and silent: no CONNECTION_CLOSE frame
+        // is sent, but runtime owners must be able to reap the connection and
+        // release its session, address allocation, and policy state.
+        self.local_error = Some(crate::error::ConnectionError::Timeout);
+        self.is_closed = true;
         self.is_draining = true;
     }
     /// Server name (SNI) from TLS provider
