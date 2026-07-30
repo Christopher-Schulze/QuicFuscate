@@ -99,6 +99,9 @@ docs/context.md
 /scripts/tests/fuzz/corpus/
 /scripts/tests/fuzz/artifacts/
 
+# Verified at build time by scripts/utils/provision-wintun.ps1; never commit DLL blobs.
+/apps/tauri/src-tauri/resources/windows/wintun.dll
+
 # Tool caches
 **/.cache/
 bun.lockb

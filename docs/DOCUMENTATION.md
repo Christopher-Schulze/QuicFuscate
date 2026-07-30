@@ -352,6 +352,7 @@ This document provides comprehensive technical documentation for the system arch
 - `src/stealth/`: DoH, HTTP/3 masquerading, TLS Cover, domain fronting, QPACK helpers, active probe detection, runtime Server Push cover coordination
   - `src/reality.rs`: Reality Fallback (Xray-style reverse proxy for active probe mitigation)
   - `src/interface.rs`: Cross-platform TUN interface
+  - `src/interface/wintun.rs`: Feature-gated native Windows Wintun adapter, packet I/O, MTU, and shutdown lifecycle
   - `src/transport.rs`: Transport module root with focused submodules in `src/transport/` (packet, version, recovery, frames, h3, xdp, udpfast, connection)
   - HTTP/3 streams: `fin_received` flag tracks stream completion for deterministic GC in `poll()`
   - UDP fast paths: runtime-owned sendmmsg/recvmmsg batching in `src/optimize/udp.rs`, narrowed `udpfast` compatibility coverage, and sendmsg_x batching (macOS)
@@ -1124,10 +1125,19 @@ pub struct MacTun {
 - Control socket configuration via `ioctl(CTLIOCGINFO)`
 - Automatic cleanup in Drop trait
 
-**Windows/iOS:**
-- External TUN factory pattern via `OnceLock<Box<dyn TunDeviceFactory>>`
-- Platform-specific implementation injected at startup
-- Clear error messages if factory not registered
+**Windows (`WintunDevice`, feature `tun-windows`):**
+- Dynamically loads the upstream `wintun.dll` only from the executable directory or protected System32 search directory.
+- Creates and owns the adapter and session, captures the stable adapter LUID, and configures IPv4/IPv6 addresses and active MTU.
+- Uses Wintun's session-owned read event plus a device-owned shutdown event. Operation-lifetime synchronization wakes blocked reads before session, adapter, event, and DLL teardown.
+- Distinguishes empty-ring, terminating-session, corrupt-ring, full-send-ring, and raw Win32 errors without polling or packet truncation.
+- `scripts/utils/provision-wintun.ps1` downloads upstream Wintun 0.14.1, verifies archive SHA-256 `07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51`, verifies AMD64 DLL SHA-256 `e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce`, requires a valid Authenticode signature, and refuses to overwrite a different destination file. No DLL blob is tracked.
+- Ignored native tests create a dual-stack adapter, verify name/LUID/IPv4/IPv6/MTU/capabilities, transfer UDP payloads through both Wintun directions, force close against a blocked read, repeat open/close, and require zero adapter and test-firewall residue. The required `windows-core-checks` job provisions the verified DLL and executes this suite serially as administrator.
+- Local Windows-GNU compilation and product Clippy prove the complete feature-gated Rust surface. Native MSVC execution, authenticated QuicFuscate traffic, WFP policy, and exact CI/MSI artifact evidence remain open under TODO-528 until the new workflows run successfully.
+
+**iOS:**
+- External TUN factory pattern via `OnceLock<Box<dyn TunDeviceFactory>>`.
+- Platform-specific NetworkExtension implementation is injected at startup.
+- Missing factory registration returns a clear configuration error.
 
 #### TUN/MASQUE Backpressure and Packet Ownership
 
@@ -1949,9 +1959,9 @@ Benchmarks
 #### Automated Build and CI/CD
 - The general CI workflow `ci.yml` runs frontend checks, frontend E2E, security audit, the release-version contract, app backend checks, release compilation and tests, fuzz target checks, non-duplicated feature-matrix tests, benchmark regression checks on pull requests, and Linux fastpath evidence.
 - The `app-backend-checks` job validates the native desktop backend without UI source edits: it builds the existing `apps/svelte-desktop` bundle for Tauri context, then runs `cargo check` and `cargo test` in `apps/tauri/src-tauri`.
-- The `windows-core-checks` job runs `cargo check --lib`, `cargo test --lib --features rust-tests`, and `cargo clippy --lib --features rust-tests -- -D warnings` on `windows-latest`; native parallel execution is proven by TODO-519. The `release-contract` job runs `scripts/audits/verify-release-version.sh` on pushes and pull requests.
+- The `windows-core-checks` job caps Cargo at two jobs, checks and lints `tun-windows,rust-tests`, compiles its unit-test binary, provisions the integrity-checked upstream DLL beside that binary, executes ordinary tests plus the serial privileged Wintun adapter/I/O/close suite, rejects owned adapter or firewall-rule residue, and uploads provenance plus Windows-build evidence. The tracked gate still requires a successful current MSVC run before TODO-528 can claim native proof. The `release-contract` job runs `scripts/audits/verify-release-version.sh` on pushes and pull requests.
 - `.github/workflows/clippy-matrix.yml` runs the Rust clippy feature matrix on stable Rust with `-D warnings`.
-- `.github/workflows/release.yml` runs only for `v*` tags or explicit manual dispatch. It builds required native x86_64 and ARM64 server bundles, optional signed macOS/Linux desktop artifacts, and a required signed Windows MSI. Tagged publication requires both server architectures and the Windows artifact and maps the MSI signature into `latest.json` as `windows-x86_64`.
+- `.github/workflows/release.yml` runs only for `v*` tags or explicit manual dispatch. It builds required native x86_64 and ARM64 server bundles, optional signed macOS/Linux desktop artifacts, and a required signed Windows MSI. The Windows job enables `tun-windows`, provisions the same verified upstream DLL as a Windows-only Tauri resource beside the executable, administratively extracts every produced MSI, and verifies exactly one byte-identical DLL before upload. Tagged publication requires both server architectures and the Windows artifact and maps the MSI signature into `latest.json` as `windows-x86_64`.
 - Current workflow status is reported by GitHub Actions for the active branch or release tag.
 
 #### Local Development Workflow
@@ -3260,7 +3270,7 @@ QuicFuscate bridges a TUN interface through an adaptive MASQUE/HTTP/3 carrier:
 - Platform support (interface.rs):
   - Linux/Android: `/dev/net/tun` via `TUNSETIFF` (IFF_TUN | IFF_NO_PI)
   - macOS: `utun` (PF_SYSTEM/SYSPROTO_CONTROL), 4-byte AF header using readv/writev
-  - Windows: pluggable via `register_tun_factory` (feature `tun-windows`)
+  - Windows: built-in Wintun adapter when `tun-windows` is enabled, with external factory override retained
   - Other Unix: external factory via trait injection
   - All use the shared `MemoryPool` for zero-copy slices where possible.
 
@@ -4240,7 +4250,7 @@ Enable kill-switch to prevent any traffic outside the tunnel.
 - Cleanup flushes and verifies only `com.quicfuscate.killswitch`. It never disables the shared PF service.
 
 #### Windows
-The production kill switch is currently unavailable on Windows and returns a hard `NotSupported` error. The former `netsh advfirewall` design could not safely combine broad block rules with narrower endpoint and Wintun exceptions because Windows Firewall block rules override allow rules. Stale legacy rules `QuicFuscate-KillSwitch-Block` and `QuicFuscate-KillSwitch-VPN` can still be removed with `quicfuscate client --cleanup-firewall`; exact PowerShell inspection and deletion must verify both are absent. The legacy `WindowsPlatform` adapter path also returns `Unsupported` before executing `netsh` because it cannot own and exactly restore a pre-existing adapter. The native Wintun implementation is the only valid Windows data-plane owner. TODO-528 owns its WFP integration and privileged packet/lifecycle proof.
+The production kill switch is currently unavailable on Windows and returns a hard `NotSupported` error. The former `netsh advfirewall` design could not safely combine broad block rules with narrower endpoint and Wintun exceptions because Windows Firewall block rules override allow rules. Stale legacy rules `QuicFuscate-KillSwitch-Block` and `QuicFuscate-KillSwitch-VPN` can still be removed with `quicfuscate client --cleanup-firewall`; exact PowerShell inspection and deletion must verify both are absent. The legacy `WindowsPlatform` adapter path also returns `Unsupported` before executing `netsh` because it cannot own and exactly restore a pre-existing adapter. The feature-gated native Wintun owner and tracked native CI/MSI provisioning now cover the data-plane lifecycle and signed DLL supply chain by construction, but current privileged CI/MSI evidence is still pending. TODO-528 owns that execution proof plus WFP integration.
 
 ### Heartbeat Watchdog
 
@@ -4369,9 +4379,11 @@ level = "debug"
 - Run with `sudo` for development/testing
 
 #### Windows
-**WinTUN adapter not found:**
-- WinTUN driver must be installed separately from https://www.wintun.net/
-- Create a TUN adapter named "QuicFuscate" and run QuicFuscate as Administrator
+**Wintun adapter cannot start:**
+- Build with the `tun-windows` feature and place the verified upstream `wintun.dll` beside the executable.
+- On Windows development hosts, run `scripts/utils/provision-wintun.ps1` with explicit destination and evidence paths instead of downloading or copying an unverified DLL manually.
+- Run QuicFuscate as Administrator. The native backend creates and owns the adapter; do not create a persistent adapter manually.
+- The tracked Windows MSI path provisions and hashes the DLL automatically. Treat current privileged lifecycle and production kill-switch support as incomplete until TODO-528's native CI, authenticated packet, WFP, and residue gates pass.
 
 ### Admin Interface Issues
 

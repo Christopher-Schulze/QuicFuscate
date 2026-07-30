@@ -23,6 +23,7 @@ keyring = { version = "3.6.2", default-features = false, features = ["apple-nati
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3.6.2", default-features = false, features = ["windows-native"] }
+quicfuscate = { path = "../../../", features = ["tun-windows"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3.6.2", default-features = false, features = ["linux-native"] }

@@ -266,6 +266,7 @@ jobs:
     runs-on: windows-latest
     env:
       CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_JOBS: "2"
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
@@ -278,6 +279,12 @@ jobs:
         run: cargo install tauri-cli --version "^2.0.0"
       - name: Install workspace dependencies
         run: bun install
+      - name: Provision verified upstream Wintun for MSI
+        shell: pwsh
+        run: |
+          ./scripts/utils/provision-wintun.ps1 `
+            -DestinationDirectory "apps/tauri/src-tauri/resources/windows" `
+            -EvidencePath "scripts/out/build/windows/wintun-provenance.json"
       - name: Build signed Tauri MSI (Windows)
         working-directory: apps/tauri/src-tauri
         run: cargo tauri build --bundles msi --ci
@@ -294,6 +301,25 @@ jobs:
               throw "Missing updater signature for $($installer.Name)"
             }
           }
+          foreach ($installer in $installers) {
+            $extraction = Join-Path $env:RUNNER_TEMP `
+              "quicfuscate-msi-$([System.IO.Path]::GetFileNameWithoutExtension($installer.Name))"
+            New-Item -ItemType Directory -Path $extraction | Out-Null
+            & msiexec.exe /a $installer.FullName /qn "TARGETDIR=$extraction"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Administrative MSI extraction failed with exit $LASTEXITCODE"
+            }
+            $wintun = @(Get-ChildItem -Path $extraction -Recurse -File -Filter "wintun.dll")
+            if ($wintun.Count -ne 1) {
+              throw "Extracted MSI must contain exactly one wintun.dll, found $($wintun.Count)"
+            }
+            $hash = (Get-FileHash -LiteralPath $wintun[0].FullName `
+              -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($hash -ne `
+              "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce") {
+              throw "Packaged wintun.dll has unexpected SHA-256: $hash"
+            }
+          }
       - name: Upload Windows MSI bundle
         uses: actions/upload-artifact@v7
         with:
@@ -301,6 +327,7 @@ jobs:
           path: |
             target/release/bundle/**/*.msi
             target/release/bundle/**/*.msi.sig
+            scripts/out/build/windows/wintun-provenance.json
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------

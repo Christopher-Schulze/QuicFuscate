@@ -182,6 +182,7 @@ jobs:
     runs-on: windows-latest
     env:
       CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_JOBS: "2"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -201,14 +202,66 @@ jobs:
             target
           key: windows-core-${{ hashFiles('Cargo.lock') }}
 
-      - name: Check Windows core library
-        run: cargo check --lib
+      - name: Check Windows Wintun core library
+        run: cargo check --lib --features tun-windows,rust-tests
 
-      - name: Test Windows core library
-        run: cargo test --lib --features rust-tests
+      - name: Compile Windows Wintun tests
+        run: cargo test --lib --features tun-windows,rust-tests --no-run
 
-      - name: Lint Windows core library
-        run: cargo clippy --lib --features rust-tests -- -D warnings
+      - name: Provision verified upstream Wintun
+        shell: pwsh
+        run: |
+          ./scripts/utils/provision-wintun.ps1 `
+            -DestinationDirectory "target/debug/deps" `
+            -EvidencePath "scripts/out/tests/wintun-native/wintun-provenance.json"
+
+      - name: Test Windows Wintun core library
+        run: cargo test --lib --features tun-windows,rust-tests
+
+      - name: Test privileged Wintun adapter lifecycle
+        run: >-
+          cargo test --lib --features tun-windows,rust-tests
+          interface::wintun::tests::native_
+          -- --ignored --nocapture --test-threads=1
+
+      - name: Verify zero Wintun adapter residue
+        shell: pwsh
+        run: |
+          $residue = @(Get-NetAdapter -Name "QuicFuscate-CI-*" -IncludeHidden `
+            -ErrorAction SilentlyContinue)
+          if ($residue.Count -ne 0) {
+            $residue | Format-Table -AutoSize | Out-String | Write-Error
+            throw "Native Wintun tests left $($residue.Count) owned adapter(s)"
+          }
+          $firewallResidue = @(Get-NetFirewallRule `
+            -DisplayName "QuicFuscate-CI-Wintun-*" -ErrorAction SilentlyContinue)
+          if ($firewallResidue.Count -ne 0) {
+            $firewallResidue | Format-Table -AutoSize | Out-String | Write-Error
+            throw "Native Wintun tests left $($firewallResidue.Count) owned firewall rule(s)"
+          }
+          $os = Get-CimInstance Win32_OperatingSystem
+          [ordered]@{
+            schema = "quicfuscate.wintun-native.v1"
+            git_sha = $env:GITHUB_SHA
+            windows_caption = $os.Caption
+            windows_version = $os.Version
+            windows_build = $os.BuildNumber
+            adapter_residue = 0
+            firewall_rule_residue = 0
+          } | ConvertTo-Json | Set-Content `
+            -LiteralPath "scripts/out/tests/wintun-native/windows-runtime.json" `
+            -Encoding utf8
+
+      - name: Lint Windows Wintun core library
+        run: cargo clippy --lib --features tun-windows,rust-tests -- -D warnings
+
+      - name: Upload native Wintun evidence
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: wintun-native-evidence
+          path: scripts/out/tests/wintun-native/
+          if-no-files-found: error
 
   feature-matrix:
     runs-on: ${{ matrix.os }}
