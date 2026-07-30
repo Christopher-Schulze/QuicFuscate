@@ -1068,23 +1068,23 @@ mod tests {
     }
 
     #[test]
-    fn test_masque_established_tracking() {
-        let mut conn = make_conn();
-        let mut cfg = Config::new().expect("cfg");
-        cfg.set_max_field_section_size(1024 * 1024);
-        let mut h3 = super::h3::Connection::with_transport(&mut conn, &cfg).expect("h3");
-
-        let sid = h3.connect_udp(&mut conn, "proxy.test", "target.test:443").expect("connect_udp");
-
-        // Before marking: not established
-        assert!(!h3.masque_established(sid));
-
-        // After marking: established
-        h3.mark_masque_established(sid);
-        assert!(h3.masque_established(sid));
-
-        // Non-existent stream returns false
-        assert!(!h3.masque_established(99999));
+    fn masque_response_status_accepts_only_valid_status_headers() {
+        assert_eq!(
+            Connection::masque_response_status(&[Header::new(b":status", b"200")]),
+            Some(200)
+        );
+        assert_eq!(
+            Connection::masque_response_status(&[Header::new(b":status", b"403")]),
+            Some(403)
+        );
+        assert_eq!(
+            Connection::masque_response_status(&[Header::new(b":status", b"invalid")]),
+            None
+        );
+        assert_eq!(
+            Connection::masque_response_status(&[Header::new(b"content-type", b"text/plain")]),
+            None
+        );
     }
 
     #[test]
@@ -1536,6 +1536,88 @@ mod tests {
             Ok(other) => panic!("expected Headers event, got {:?}", other),
             Err(error) => panic!("server H3 poll failed: {:?}", error),
         }
+
+        assert!(
+            server_h3.accept_masque_connect(&mut server, sid).expect("accept CONNECT-UDP"),
+            "first accept must emit the readiness response"
+        );
+        assert!(server_h3.masque_established(sid));
+        assert!(
+            !server_h3.accept_masque_connect(&mut server, sid).expect("idempotent accept"),
+            "accepted flow must not emit duplicate responses"
+        );
+
+        let (len, _) = server.send(&mut packet).expect("server response send");
+        let client_recv_info = crate::transport::RecvInfo {
+            from: recv_info.to,
+            to: recv_info.from,
+            ecn: None,
+        };
+        client
+            .recv(&mut packet[..len], &client_recv_info)
+            .expect("client response receive");
+        match client_h3.poll(&mut client) {
+            Ok(Some((rx_sid, Event::Headers { list, .. }))) => {
+                assert_eq!(rx_sid, sid);
+                assert!(list.iter().any(|header| {
+                    header.name() == b":status" && header.value() == b"200"
+                }));
+            }
+            Ok(other) => panic!("expected successful response Headers, got {:?}", other),
+            Err(error) => panic!("client H3 poll failed: {:?}", error),
+        }
+        assert!(
+            client_h3.masque_established(sid),
+            "client readiness requires the peer's 2xx response"
+        );
+    }
+
+    #[test]
+    fn masque_connect_udp_rejection_never_establishes_client_flow() {
+        use crate::transport::connection::{bench_paired_1rtt_connections, BenchConnectionPair};
+        let BenchConnectionPair { mut client, mut server, recv_info } =
+            bench_paired_1rtt_connections();
+        let mut client_h3 =
+            Connection::with_transport(&mut client, &Config::new().unwrap()).expect("client h3");
+        let mut server_h3 =
+            Connection::with_transport(&mut server, &Config::new().unwrap()).expect("server h3");
+
+        let sid = client_h3
+            .connect_udp(&mut client, "proxy.test", "target.test:443")
+            .expect("connect_udp");
+        let mut packet = [0u8; 2048];
+        let (len, _) = client.send(&mut packet).expect("client send");
+        server.recv(&mut packet[..len], &recv_info).expect("server recv");
+        assert!(matches!(
+            server_h3.poll(&mut server),
+            Ok(Some((_, Event::Headers { .. })))
+        ));
+
+        server_h3
+            .send_response(
+                &mut server,
+                sid,
+                &[Header::new(b":status", b"403")],
+                false,
+            )
+            .expect("reject CONNECT-UDP");
+        let (len, _) = server.send(&mut packet).expect("server response send");
+        let client_recv_info = crate::transport::RecvInfo {
+            from: recv_info.to,
+            to: recv_info.from,
+            ecn: None,
+        };
+        client
+            .recv(&mut packet[..len], &client_recv_info)
+            .expect("client response receive");
+        assert!(matches!(
+            client_h3.poll(&mut client),
+            Ok(Some((_, Event::Headers { .. })))
+        ));
+        assert!(
+            !client_h3.masque_established(sid),
+            "non-2xx response must keep the data plane closed"
+        );
     }
 
     #[test]

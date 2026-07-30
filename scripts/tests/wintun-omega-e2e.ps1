@@ -8,7 +8,9 @@ param(
 
     [string]$AdapterName = "QuicFuscate-CI-Omega",
     [string]$ClientTunAddress = "10.252.0.2",
-    [string]$ServerTunAddress = "10.252.0.1"
+    [string]$ServerTunAddress = "10.252.0.1",
+    [string]$ClientTunAddress6 = "fd00::2",
+    [string]$ServerTunAddress6 = "fd00::1"
 )
 
 Set-StrictMode -Version Latest
@@ -210,6 +212,8 @@ try {
         "--tun-name", $AdapterName,
         "--tun-ip", $ClientTunAddress,
         "--tun-netmask", "255.255.255.0",
+        "--tun-ip6", $ClientTunAddress6,
+        "--tun-prefix6", "64",
         "--kill-switch",
         "--heartbeat-timeout-ms", "15000",
         "-v"
@@ -238,7 +242,18 @@ try {
         }
     }
     if ($PingSuccesses -ne 5) {
-        throw "Authenticated Wintun tunnel ping passed $PingSuccesses/5 attempts"
+        throw "Authenticated Wintun IPv4 tunnel ping passed $PingSuccesses/5 attempts"
+    }
+
+    $PingSuccesses6 = 0
+    for ($Attempt = 1; $Attempt -le 5; $Attempt++) {
+        if (Test-Connection -TargetName $ServerTunAddress6 -IPv6 -Count 1 `
+            -Quiet -TimeoutSeconds 3) {
+            $PingSuccesses6++
+        }
+    }
+    if ($PingSuccesses6 -ne 5) {
+        throw "Authenticated Wintun IPv6 tunnel ping passed $PingSuccesses6/5 attempts"
     }
 
     $ClientProcess.Refresh()
@@ -283,10 +298,14 @@ try {
         adapter_name = $AdapterName
         client_tun_address = $ClientTunAddress
         server_tun_address = $ServerTunAddress
+        client_tun_address_ipv6 = $ClientTunAddress6
+        server_tun_address_ipv6 = $ServerTunAddress6
         tls_authenticated = $true
         connected_wfp_policy = $true
         tunnel_ping_attempts = 5
         tunnel_ping_successes = $PingSuccesses
+        tunnel_ping_ipv6_attempts = 5
+        tunnel_ping_ipv6_successes = $PingSuccesses6
         client_process_exit = "forced"
         stale_cleanup = $true
         adapter_residue = 0
@@ -295,7 +314,7 @@ try {
         -LiteralPath (Join-Path $EvidenceDirectory "windows-omega-e2e.json") `
         -Encoding utf8
 
-    Write-Output "Native Windows-to-Omega tunnel proof passed: authenticated=true ping=5/5 cleanup=true"
+    Write-Output "Native Windows-to-Omega tunnel proof passed: authenticated=true ipv4=5/5 ipv6=5/5 cleanup=true"
 }
 finally {
     try {

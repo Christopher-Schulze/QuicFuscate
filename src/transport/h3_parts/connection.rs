@@ -867,11 +867,17 @@ impl Connection {
                 }
                 0x01 => {
                     let headers = self.decoder.decode(frame_data)?;
+                    let masque_response_accepted = self
+                        .streams
+                        .get(&stream_id)
+                        .is_some_and(|stream| matches!(stream._stream_type, StreamType::Masque))
+                        && Self::masque_response_status(&headers)
+                            .is_some_and(|status| (200..300).contains(&status));
                     let event = Event::Headers { list: headers, has_body: !fin };
                     self.pending_events.push_back((stream_id, event));
-                    if let Some(st) = self.streams.get_mut(&stream_id) {
-                        if matches!(st._stream_type, StreamType::Masque) {
-                            st.masque_established = true;
+                    if masque_response_accepted {
+                        if let Some(stream) = self.streams.get_mut(&stream_id) {
+                            stream.masque_established = true;
                         }
                     }
                 }
@@ -995,6 +1001,15 @@ impl Connection {
         Ok(sid)
     }
 
+    fn masque_response_status(headers: &[Header]) -> Option<u16> {
+        headers.iter().find_map(|header| {
+            if !header.name().eq_ignore_ascii_case(b":status") {
+                return None;
+            }
+            std::str::from_utf8(header.value()).ok()?.parse::<u16>().ok()
+        })
+    }
+
     /// Open a bounded WebTransport-looking H3 cover session.
     ///
     /// This is cover traffic only. It does not own VPN/TUN payload routing and
@@ -1033,6 +1048,36 @@ impl Connection {
         let flow_id = 0u64;
         self.masque_flow.insert(stream_id, flow_id);
         Ok(flow_id)
+    }
+
+    /// Accepts a peer-initiated CONNECT-UDP stream exactly once.
+    ///
+    /// The successful response is the client-visible data-plane readiness
+    /// barrier. The stream is not established merely because request headers or
+    /// registration capsules arrived.
+    pub fn accept_masque_connect(
+        &mut self,
+        conn: &mut super::Connection,
+        stream_id: u64,
+    ) -> Result<bool, Error> {
+        if self.masque_established(stream_id) {
+            return Ok(false);
+        }
+        if !self.streams.contains_key(&stream_id) {
+            return Err(Error::IdError);
+        }
+
+        self.enable_masque_datagram(conn, stream_id)?;
+        let headers = [
+            Header::new(b":status", b"200"),
+            Header::new(b"capsule-protocol", b"?1"),
+        ];
+        self.send_response(conn, stream_id, &headers, false)?;
+        let stream = self.streams.get_mut(&stream_id).ok_or(Error::IdError)?;
+        stream._stream_type = StreamType::Masque;
+        stream._stream_type_dup = StreamType::Masque;
+        stream.masque_established = true;
+        Ok(true)
     }
 
     /// Send a MASQUE UDP payload via QUIC DATAGRAM using the negotiated Flow-ID
@@ -1167,12 +1212,6 @@ impl Connection {
 
     pub fn masque_established(&self, stream_id: u64) -> bool {
         self.streams.get(&stream_id).map(|st| st.masque_established).unwrap_or(false)
-    }
-
-    pub fn mark_masque_established(&mut self, stream_id: u64) {
-        if let Some(st) = self.streams.get_mut(&stream_id) {
-            st.masque_established = true;
-        }
     }
 
     pub fn masque_flow_active(&self) -> bool {

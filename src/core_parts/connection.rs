@@ -763,6 +763,36 @@ impl QuicFuscateConnection {
         }
     }
 
+    /// Starts the locally initiated CONNECT-UDP flow without sending tunnel data.
+    pub fn begin_masque_tunnel(&mut self) -> Result<u64, crate::error::ConnectionError> {
+        self.ensure_http3_initialized()?;
+        self.ensure_masque_tunnel_for_send()?
+            .ok_or_else(|| "MASQUE tunnel unavailable".into())
+    }
+
+    /// Returns true only after the peer acknowledged CONNECT-UDP with a 2xx response.
+    pub fn masque_tunnel_established(&self) -> bool {
+        let Some(stream_id) = self.masque_stream_id else {
+            return false;
+        };
+        self.h3_conn
+            .as_ref()
+            .is_some_and(|h3| h3.masque_established(stream_id))
+    }
+
+    /// Accepts the recorded peer CONNECT-UDP flow after application authentication.
+    pub fn accept_peer_masque_tunnel(
+        &mut self,
+    ) -> Result<bool, crate::error::ConnectionError> {
+        let Some(stream_id) = self.masque_peer_stream_id else {
+            return Ok(false);
+        };
+        let Some(h3) = self.h3_conn.as_mut() else {
+            return Ok(false);
+        };
+        h3.accept_masque_connect(&mut self.conn, stream_id).map_err(Into::into)
+    }
+
     fn emit_server_push_cover_burst(
         h3: &mut crate::transport::h3::Connection,
         conn: &mut crate::transport::Connection,
@@ -936,13 +966,10 @@ impl QuicFuscateConnection {
                         }
                     }
                     Ok(Some((
-                        sid,
+                        _sid,
                         crate::transport::h3::Event::MasqueCapsule { capsule_type, payload },
                     ))) => {
                         Self::handle_masque_capsule_event(
-                            h3,
-                            &mut self.conn,
-                            sid,
                             capsule_type,
                             &payload,
                             &bindings.masque_datagram_cb,
@@ -1086,11 +1113,7 @@ impl QuicFuscateConnection {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn handle_masque_capsule_event(
-        h3: &mut crate::transport::h3::Connection,
-        conn: &mut crate::transport::Connection,
-        sid: u64,
         capsule_type: u64,
         payload: &[u8],
         masque_datagram_cb: &Option<DatagramHandler>,
@@ -1098,14 +1121,6 @@ impl QuicFuscateConnection {
         masque_cb: &Option<CapsuleHandler>,
         memory_pool: &Arc<crate::optimize::MemoryPool>,
     ) {
-        if !h3.masque_established(sid) {
-            h3.mark_masque_established(sid);
-            let ack = crate::transport::h3::Connection::encode_capsule(0x02, b"established");
-            if let Err(e) = h3.send_capsule(conn, sid, &ack, false) {
-                warn!("MASQUE establishment ACK capsule send failed on stream {}: {:?}", sid, e);
-            }
-        }
-
         match capsule_type {
             0x00 => {
                 Self::dispatch_masque_datagram_payload(masque_datagram_cb, masque_cb, payload);

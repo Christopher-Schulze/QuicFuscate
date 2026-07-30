@@ -86,12 +86,13 @@ fn h3_header_accessors() {
 }
 
 #[test]
-fn h3_masque_established_tracking() {
+fn h3_masque_connect_is_not_ready_before_peer_response() {
     let (mut conn, mut h3c) = make_h3_pair();
     let sid = h3c.connect_udp(&mut conn, "proxy.test", "target.test:443").expect("connect_udp");
-    assert!(!h3c.masque_established(sid), "not yet established");
-    h3c.mark_masque_established(sid);
-    assert!(h3c.masque_established(sid), "must be established after mark");
+    assert!(
+        !h3c.masque_established(sid),
+        "locally opening CONNECT-UDP must not bypass the peer response"
+    );
     assert!(!h3c.masque_established(99999), "non-existent stream returns false");
 }
 

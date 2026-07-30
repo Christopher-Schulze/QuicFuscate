@@ -1256,7 +1256,7 @@ async fn run_client(
                         // tokio::select! is not fair: when the peer constantly sends
                         // packets, the recv branch is always ready first and the
                         // housekeeping tick may never fire, starving the TUN uplink.
-                        if tun_enable {
+                        if tun_enable && conn.masque_tunnel_established() {
                             if let (Some(ref rx), Some(sid), Some(ref tun)) = (&tun_rx, h3_stream_id, &tun_writer) {
                                 drain_client_tun_uplink(&mut conn, tun, sid, rx, &mut tun_backpressure_frame);
                             }
@@ -1277,6 +1277,15 @@ async fn run_client(
                 }
             }
             _ = housekeeping.tick() => {
+                if conn.conn.is_established()
+                    && tun_enable
+                    && !conn.masque_tunnel_established()
+                {
+                    if let Err(error) = conn.begin_masque_tunnel() {
+                        warn!("MASQUE CONNECT-UDP open failed: {:?}", error);
+                    }
+                }
+
                 if conn.conn.is_established() && !request_sent {
                     match conn.send_http3_request(url_parsed.path()) {
                         Ok(_) => {
@@ -1286,19 +1295,6 @@ async fn run_client(
                             warn!("HTTP/3 request failed: {:?}", e);
                         }
                     }
-                }
-
-                // Activate kill switch VPN-allow rules once connection is established
-                if conn.conn.is_established() && !kill_switch_connected {
-                    if let Some(ref ks) = kill_switch {
-                        if let Err(error) = ks.on_vpn_connected(&firewall_policy) {
-                            break ExitReason::SocketError(format!(
-                                "kill switch connected policy failed: {error}"
-                            ));
-                        }
-                        info!("Kill switch: VPN traffic allowed, non-VPN blocked");
-                    }
-                    kill_switch_connected = true;
                 }
 
                 if tun_enable {
@@ -1334,11 +1330,29 @@ async fn run_client(
                     // but tokio::select! is not fair and the recv branch may not
                     // fire when the server is silent. This ensures TUN frames are
                     // forwarded on every housekeeping tick (every 5ms).
-                    if let (Some(ref rx), Some(sid), Some(ref tun)) = (&tun_rx, h3_stream_id, &tun_writer) {
-                        drain_client_tun_uplink(&mut conn, tun, sid, rx, &mut tun_backpressure_frame);
+                    if conn.masque_tunnel_established() {
+                        if let (Some(ref rx), Some(sid), Some(ref tun)) = (&tun_rx, h3_stream_id, &tun_writer) {
+                            drain_client_tun_uplink(&mut conn, tun, sid, rx, &mut tun_backpressure_frame);
+                        }
                     }
                 } else if let Err(e) = conn.poll_http3() {
                     warn!("HTTP/3 error: {:?}", e);
+                }
+
+                // Connected policy means the authenticated tunnel data plane is
+                // ready, not merely that QUIC completed its handshake.
+                let data_plane_ready = conn.conn.is_established()
+                    && (!tun_enable || conn.masque_tunnel_established());
+                if data_plane_ready && !kill_switch_connected {
+                    if let Some(ref ks) = kill_switch {
+                        if let Err(error) = ks.on_vpn_connected(&firewall_policy) {
+                            break ExitReason::SocketError(format!(
+                                "kill switch connected policy failed: {error}"
+                            ));
+                        }
+                        info!("Kill switch: VPN traffic allowed, non-VPN blocked");
+                    }
+                    kill_switch_connected = true;
                 }
 
                 let now = tokio::time::Instant::now();

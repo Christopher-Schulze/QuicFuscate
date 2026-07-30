@@ -993,6 +993,20 @@ async fn process_live_server_client_datagram(
         log::warn!("HTTP/3 header/body poll failed for {}: {:?}", addr, error);
     }
 
+    // A successful CONNECT response is the client-visible data-plane barrier.
+    // For QKey clients it is queued only after the CONNECT headers authenticated;
+    // the caller commits bandwidth ownership synchronously before receiving the
+    // client's next datagram.
+    if should_close.get().is_none() && auth_gate.load(AtomicOrdering::Relaxed) {
+        match conn.accept_peer_masque_tunnel() {
+            Ok(true) => log::info!("Authenticated MASQUE data plane accepted for {}", addr),
+            Ok(false) => {}
+            Err(error) => {
+                log::warn!("MASQUE CONNECT response failed for {}: {:?}", addr, error);
+            }
+        }
+    }
+
     // MASQUE CONNECT-UDP uplink datagrams are drained and written to the TUN by
     // drain_masque_datagrams (inside poll_http3_with_headers above) via the
     // masque_datagram_cb sink installed earlier. The previous bare dgram_recv
