@@ -305,9 +305,13 @@ jobs:
             $extraction = Join-Path $env:RUNNER_TEMP `
               "quicfuscate-msi-$([System.IO.Path]::GetFileNameWithoutExtension($installer.Name))"
             New-Item -ItemType Directory -Path $extraction | Out-Null
-            & msiexec.exe /a $installer.FullName /qn "TARGETDIR=$extraction"
-            if ($LASTEXITCODE -ne 0) {
-              throw "Administrative MSI extraction failed with exit $LASTEXITCODE"
+            $msiArguments = "/a `"$($installer.FullName)`" /qn TARGETDIR=`"$extraction`""
+            $msiProcess = Start-Process -FilePath "msiexec.exe" `
+              -ArgumentList $msiArguments `
+              -Wait `
+              -PassThru
+            if ($msiProcess.ExitCode -ne 0) {
+              throw "Administrative MSI extraction failed with exit $($msiProcess.ExitCode)"
             }
             $wintun = @(Get-ChildItem -Path $extraction -Recurse -File -Filter "wintun.dll")
             if ($wintun.Count -ne 1) {
