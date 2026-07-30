@@ -224,7 +224,21 @@ jobs:
           interface::wintun::tests::native_
           -- --ignored --nocapture --test-threads=1
 
+      - name: Test privileged Windows WFP kill switch
+        run: >-
+          cargo test --lib --features tun-windows,rust-tests
+          implementations::client::killswitch::windows::tests::native_wfp_block_endpoint_exception_and_cleanup
+          -- --ignored --exact --nocapture --test-threads=1
+
+      - name: Verify zero Windows WFP object residue
+        if: always()
+        run: >-
+          cargo test --lib --features tun-windows,rust-tests
+          implementations::client::killswitch::windows::tests::native_wfp_managed_objects_are_absent
+          -- --ignored --exact --nocapture --test-threads=1
+
       - name: Verify zero Wintun adapter residue
+        if: always()
         shell: pwsh
         run: |
           $residue = @(Get-NetAdapter -Name "QuicFuscate-CI-*" -IncludeHidden `

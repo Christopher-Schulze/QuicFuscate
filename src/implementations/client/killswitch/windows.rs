@@ -719,4 +719,22 @@ mod tests {
         );
         WindowsKillSwitch::verify_managed_objects_absent().expect("zero WFP object residue");
     }
+
+    #[test]
+    #[ignore = "requires an elevated native Windows host with Base Filtering Engine"]
+    fn native_wfp_managed_objects_are_absent() {
+        WindowsKillSwitch::verify_managed_objects_absent().expect("zero WFP object residue");
+        let evidence_dir = std::path::Path::new("scripts/out/tests/wintun-native");
+        std::fs::create_dir_all(evidence_dir).expect("create native WFP evidence directory");
+        let evidence = serde_json::json!({
+            "schema": "quicfuscate.wfp-native.v1",
+            "git_sha": std::env::var("GITHUB_SHA").unwrap_or_else(|_| "local".to_string()),
+            "managed_object_residue": 0,
+        });
+        std::fs::write(
+            evidence_dir.join("wfp-residue.json"),
+            serde_json::to_vec_pretty(&evidence).expect("serialize native WFP residue evidence"),
+        )
+        .expect("write native WFP residue evidence");
+    }
 }
