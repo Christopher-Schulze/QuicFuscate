@@ -690,7 +690,8 @@ impl AdaptiveFec {
             self.set_stream_every_internal(stream_every);
         }
 
-        // Auto control tuning: set best parameters live (env toggles + cached fields)
+        // Auto control tuning stays connection-local. Process-global environment
+        // mutation here would serialize unrelated connections and race their policy.
         if self.control_policy == FecControlPolicy::Auto {
             self.apply_auto_tuning(k, estimated_loss, controller_target);
         }
@@ -799,65 +800,26 @@ impl AdaptiveFec {
     // Removed associated test; proper tests are in #[cfg(test)] modules.
 
     fn apply_auto_tuning(&mut self, k: usize, loss: f32, target: FecProtectionTarget) {
-        if target.family == FecBackendFamily::Zero {
-            std::env::set_var("QUICFUSCATE_FEC_DECODER", "gauss");
-            std::env::set_var("QUICFUSCATE_WM_BITSLICE", "0");
-            std::env::set_var("QUICFUSCATE_WM_LANE_PAR", "0");
-            std::env::set_var("QUICFUSCATE_WM_LANES", "1");
-            std::env::set_var("QUICFUSCATE_WM_U", "1");
-            self.set_stream_every_internal(4);
-            std::env::set_var("QUICFUSCATE_FEC_STREAM_BURST", "1");
-            return;
-        }
-        let big_k = k > std::env::var("QUICFUSCATE_FEC_WIEDEMANN_K")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(256);
-        if target.family == FecBackendFamily::LowCostBlock && loss < 0.01 {
-            // Low loss: bevorzugt Gauss, sanftes Streaming
-            std::env::set_var("QUICFUSCATE_FEC_DECODER", if big_k { "auto" } else { "gauss" });
-            std::env::set_var("QUICFUSCATE_WM_BITSLICE", if big_k { "1" } else { "0" });
-            std::env::set_var("QUICFUSCATE_WM_LANE_PAR", "0");
-            std::env::set_var("QUICFUSCATE_WM_LANES", if big_k { "4" } else { "1" });
-            std::env::set_var("QUICFUSCATE_WM_U", "1");
-            self.set_stream_every_internal(3);
-            std::env::set_var("QUICFUSCATE_FEC_STREAM_BURST", "1");
+        let big_k = k > self.wiedemann_threshold;
+        let (decoder_policy, stream_every) = if target.family == FecBackendFamily::Zero {
+            ("gauss", 4)
+        } else if target.family == FecBackendFamily::LowCostBlock && loss < 0.01 {
+            (if big_k { "auto" } else { "gauss" }, 3)
         } else if matches!(
             target.family,
             FecBackendFamily::LowCostBlock | FecBackendFamily::HeavyBlock
         ) && loss < 0.05
         {
-            // Normal / moderate block protection
-            std::env::set_var("QUICFUSCATE_FEC_DECODER", "auto");
-            std::env::set_var("QUICFUSCATE_WM_BITSLICE", if big_k { "1" } else { "0" });
-            std::env::set_var("QUICFUSCATE_WM_LANE_PAR", if big_k { "1" } else { "0" });
-            std::env::set_var("QUICFUSCATE_WM_LANES", if big_k { "6" } else { "2" });
-            std::env::set_var("QUICFUSCATE_WM_U", if big_k { "2" } else { "1" });
-            self.set_stream_every_internal(2);
-            std::env::set_var("QUICFUSCATE_FEC_STREAM_BURST", "2");
-        } else if matches!(
-            target.family,
-            FecBackendFamily::HeavyBlock | FecBackendFamily::Streaming
-        ) && loss < 0.20
-        {
-            // Strong / streaming-biased protection
-            std::env::set_var("QUICFUSCATE_FEC_DECODER", "wiedemann");
-            std::env::set_var("QUICFUSCATE_WM_BITSLICE", "1");
-            std::env::set_var("QUICFUSCATE_WM_LANE_PAR", "1");
-            std::env::set_var("QUICFUSCATE_WM_LANES", "8");
-            std::env::set_var("QUICFUSCATE_WM_U", "2");
-            self.set_stream_every_internal(target.stream_every.unwrap_or(1));
-            std::env::set_var("QUICFUSCATE_FEC_STREAM_BURST", "4");
+            ("auto", 2)
         } else {
-            // Extreme / fountain
-            std::env::set_var("QUICFUSCATE_FEC_DECODER", "wiedemann");
-            std::env::set_var("QUICFUSCATE_WM_BITSLICE", "1");
-            std::env::set_var("QUICFUSCATE_WM_LANE_PAR", "1");
-            std::env::set_var("QUICFUSCATE_WM_LANES", "8");
-            std::env::set_var("QUICFUSCATE_WM_U", "4");
-            self.set_stream_every_internal(target.stream_every.unwrap_or(1));
-            std::env::set_var("QUICFUSCATE_FEC_STREAM_BURST", "8");
+            ("wiedemann", target.stream_every.unwrap_or(1))
+        };
+
+        if self.decoder_policy_tunable && self.runtime_policy.decoder_policy != decoder_policy {
+            self.runtime_policy.decoder_policy.clear();
+            self.runtime_policy.decoder_policy.push_str(decoder_policy);
         }
+        self.set_stream_every_internal(stream_every);
     }
 }
 

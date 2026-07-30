@@ -24,6 +24,8 @@ pub struct AdaptiveFec {
     streaming_mode: bool,
     partial_enabled: bool,
     runtime_policy: FecRuntimePolicy,
+    decoder_policy_tunable: bool,
+    wiedemann_threshold: usize,
     emitted_ids: std::collections::HashSet<u64>,
     emitted_order: VecDeque<u64>,
     loss_estimator: LossEstimator,
@@ -396,6 +398,9 @@ impl AdaptiveFec {
 
         let telemetry_enabled =
             crate::telemetry::TELEMETRY_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
+        let decoder_policy_tunable = runtime_policy.decoder_policy.eq_ignore_ascii_case("auto");
+        let wiedemann_threshold =
+            env_parse::<usize>("QUICFUSCATE_FEC_WIEDEMANN_K").unwrap_or(256);
         let fec = Self {
             config: config.clone(),
             // InterleavedEncoder for burst loss protection
@@ -432,6 +437,8 @@ impl AdaptiveFec {
             streaming_mode: fec_backend_family(mode) == FecBackendFamily::Streaming,
             partial_enabled,
             runtime_policy,
+            decoder_policy_tunable,
+            wiedemann_threshold,
             emitted_ids: std::collections::HashSet::new(),
             emitted_order: VecDeque::new(),
             loss_estimator,

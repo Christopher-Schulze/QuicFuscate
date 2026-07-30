@@ -396,3 +396,65 @@ fn connection_local_wire_metrics_have_positive_and_negative_controls() {
     assert_eq!(snapshot.recovered_packets - initial.recovered_packets, 2);
     assert_eq!(snapshot.recovered_payload_bytes - initial.recovered_payload_bytes, 180);
 }
+
+#[test]
+fn auto_tuning_is_connection_local_and_never_mutates_process_environment() {
+    let _env_lock = acquire_env_lock();
+    let _decoder = EnvGuard::set("QUICFUSCATE_FEC_DECODER", "auto");
+    let _threshold = EnvGuard::set("QUICFUSCATE_FEC_WIEDEMANN_K", "17");
+    let former_runtime_outputs = [
+        ("QUICFUSCATE_WM_BITSLICE", "sentinel-bitslice"),
+        ("QUICFUSCATE_WM_LANE_PAR", "sentinel-lane-par"),
+        ("QUICFUSCATE_WM_LANES", "sentinel-lanes"),
+        ("QUICFUSCATE_WM_U", "sentinel-u"),
+        ("QUICFUSCATE_FEC_STREAM_BURST", "sentinel-burst"),
+    ];
+    let _guards: Vec<_> =
+        former_runtime_outputs.iter().map(|(key, value)| EnvGuard::set(key, value)).collect();
+    let mut fec = AdaptiveFec::new(FecConfig::product_default());
+
+    fec.apply_auto_tuning(128, 0.50, target_from_mode(FecMode::Fountain, 128));
+    assert_eq!(fec.runtime_policy.decoder_policy, "wiedemann");
+    assert_eq!(fec.stream_every, 1);
+
+    fec.apply_auto_tuning(0, 0.0, target_from_mode(FecMode::Zero, 0));
+    assert_eq!(fec.runtime_policy.decoder_policy, "gauss");
+    assert_eq!(fec.stream_every, 4);
+
+    assert_eq!(std::env::var("QUICFUSCATE_FEC_DECODER").as_deref(), Ok("auto"));
+    assert_eq!(std::env::var("QUICFUSCATE_FEC_WIEDEMANN_K").as_deref(), Ok("17"));
+    for (key, expected) in former_runtime_outputs {
+        assert_eq!(std::env::var(key).as_deref(), Ok(expected));
+    }
+}
+
+#[test]
+fn decoder_override_remains_immutable_during_auto_tuning() {
+    let _env_lock = acquire_env_lock();
+    let _decoder = EnvGuard::set("QUICFUSCATE_FEC_DECODER", "gauss");
+    let _switch = EnvGuard::set("QUICFUSCATE_FEC_SWITCH_MIN_UP_MS", "0");
+    let mut fec = AdaptiveFec::new(FecConfig::product_default());
+
+    for _ in 0..12 {
+        fec.report_transport_loss(32, 16, 16, 0.50);
+    }
+
+    assert_eq!(fec.current_mode(), FecMode::Fountain);
+    assert_eq!(fec.runtime_policy.decoder_policy, "gauss");
+    assert_eq!(std::env::var("QUICFUSCATE_FEC_DECODER").as_deref(), Ok("gauss"));
+}
+
+#[test]
+fn wiedemann_threshold_is_snapshotted_before_feedback_processing() {
+    let _env_lock = acquire_env_lock();
+    let _decoder = EnvGuard::set("QUICFUSCATE_FEC_DECODER", "auto");
+    let _initial_threshold = EnvGuard::set("QUICFUSCATE_FEC_WIEDEMANN_K", "8");
+    let mut fec = AdaptiveFec::new(FecConfig::product_default());
+    let _changed_threshold = EnvGuard::set("QUICFUSCATE_FEC_WIEDEMANN_K", "4096");
+
+    fec.apply_auto_tuning(64, 0.005, target_from_mode(FecMode::Normal, 64));
+
+    assert_eq!(fec.wiedemann_threshold, 8);
+    assert_eq!(fec.runtime_policy.decoder_policy, "auto");
+    assert_eq!(std::env::var("QUICFUSCATE_FEC_WIEDEMANN_K").as_deref(), Ok("4096"));
+}
