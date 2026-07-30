@@ -128,6 +128,7 @@ fn handle_api(
                     sni_strategy: None,
                     sni_domain: None,
                     bandwidth_policy: None,
+                    traffic_analysis_policy: None,
                 }
             } else {
                 match serde_json::from_slice(&req.body) {
@@ -163,6 +164,7 @@ fn handle_api(
                 sni_strategy: payload.sni_strategy,
                 sni_domain: payload.sni_domain,
                 bandwidth_policy: payload.bandwidth_policy,
+                traffic_analysis_policy: payload.traffic_analysis_policy,
             };
             let resp = handler.handle_qkey(req);
             log_action(peer, "qkey", "-", resp.success);

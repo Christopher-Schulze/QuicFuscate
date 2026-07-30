@@ -54,6 +54,147 @@ impl TrafficAnalysisDefense {
             _ => None,
         }
     }
+
+    const fn protection_level(self) -> u8 {
+        match self {
+            Self::Off => 0,
+            Self::FullPadding => 1,
+            Self::ConstantRate => 2,
+        }
+    }
+}
+
+/// Complete traffic-analysis policy for one transport connection.
+///
+/// A server may use its configured policy as a ceiling for an authenticated
+/// per-QKey request. Numeric fields are bandwidth-cost ceilings, and defense
+/// modes are ordered `Off < FullPadding < ConstantRate`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TrafficAnalysisPolicy {
+    pub defense: TrafficAnalysisDefense,
+    pub chaff_rate_pps: u32,
+    pub chaff_size_bytes: u32,
+    pub constant_rate_pps: u32,
+    pub idle_timeout_ms: u64,
+    pub ramp_down_ms: u64,
+}
+
+impl Default for TrafficAnalysisPolicy {
+    fn default() -> Self {
+        Self {
+            defense: TrafficAnalysisDefense::Off,
+            chaff_rate_pps: 0,
+            chaff_size_bytes: 1280,
+            constant_rate_pps: 100,
+            idle_timeout_ms: 30_000,
+            ramp_down_ms: 5_000,
+        }
+    }
+}
+
+impl TrafficAnalysisPolicy {
+    pub const MAX_CHAFF_RATE_PPS: u32 = 10_000;
+    pub const MAX_CONSTANT_RATE_PPS: u32 = 1_000;
+    pub const MIN_CHAFF_SIZE_BYTES: u32 = 64;
+    pub const MAX_CHAFF_SIZE_BYTES: u32 = 65_535;
+    pub const MAX_IDLE_TIMEOUT_MS: u64 = 3_600_000;
+    pub const MAX_RAMP_DOWN_MS: u64 = 60_000;
+
+    /// Hard upper bound used for authenticated per-QKey policy requests.
+    pub const fn safety_ceiling() -> Self {
+        Self {
+            defense: TrafficAnalysisDefense::ConstantRate,
+            chaff_rate_pps: Self::MAX_CHAFF_RATE_PPS,
+            chaff_size_bytes: Self::MAX_CHAFF_SIZE_BYTES,
+            constant_rate_pps: Self::MAX_CONSTANT_RATE_PPS,
+            idle_timeout_ms: Self::MAX_IDLE_TIMEOUT_MS,
+            ramp_down_ms: Self::MAX_RAMP_DOWN_MS,
+        }
+    }
+
+    /// Rejects malformed or intrinsically unsafe policy values.
+    pub fn validate(self) -> Result<Self, &'static str> {
+        if self.chaff_rate_pps > Self::MAX_CHAFF_RATE_PPS {
+            return Err("chaff_rate_pps exceeds 10000");
+        }
+        if self.constant_rate_pps > Self::MAX_CONSTANT_RATE_PPS {
+            return Err("constant_rate_pps exceeds 1000");
+        }
+        if !(Self::MIN_CHAFF_SIZE_BYTES..=Self::MAX_CHAFF_SIZE_BYTES)
+            .contains(&self.chaff_size_bytes)
+        {
+            return Err("chaff_size_bytes must be between 64 and 65535");
+        }
+        if self.idle_timeout_ms > Self::MAX_IDLE_TIMEOUT_MS {
+            return Err("idle_timeout_ms exceeds 3600000");
+        }
+        if self.ramp_down_ms > Self::MAX_RAMP_DOWN_MS {
+            return Err("ramp_down_ms exceeds 60000");
+        }
+        if self.defense == TrafficAnalysisDefense::ConstantRate && self.constant_rate_pps == 0 {
+            return Err("constant-rate defense requires constant_rate_pps > 0");
+        }
+        Ok(self)
+    }
+
+    /// Intersects a requested policy with an independently configured ceiling.
+    pub fn bounded_by(self, ceiling: Self) -> Self {
+        let defense = if self.defense.protection_level() <= ceiling.defense.protection_level() {
+            self.defense
+        } else {
+            ceiling.defense
+        };
+        let rate_pps = self.rate_ceiling_for(defense).min(ceiling.rate_ceiling_for(defense));
+        let mut bounded = Self {
+            defense,
+            chaff_rate_pps: rate_pps,
+            chaff_size_bytes: self.chaff_size_bytes.min(ceiling.chaff_size_bytes),
+            constant_rate_pps: rate_pps,
+            idle_timeout_ms: self.idle_timeout_ms.min(ceiling.idle_timeout_ms),
+            ramp_down_ms: self.ramp_down_ms.min(ceiling.ramp_down_ms),
+        };
+        match bounded.defense {
+            TrafficAnalysisDefense::Off => {
+                bounded.chaff_rate_pps = 0;
+                bounded.constant_rate_pps = 0;
+            }
+            TrafficAnalysisDefense::FullPadding => {
+                bounded.constant_rate_pps = 0;
+            }
+            TrafficAnalysisDefense::ConstantRate => {
+                bounded.chaff_rate_pps = 0;
+            }
+        }
+        bounded
+    }
+
+    const fn rate_ceiling_for(self, defense: TrafficAnalysisDefense) -> u32 {
+        match (self.defense, defense) {
+            (_, TrafficAnalysisDefense::Off) => 0,
+            (TrafficAnalysisDefense::Off, _) => 0,
+            (TrafficAnalysisDefense::FullPadding, TrafficAnalysisDefense::FullPadding) => {
+                self.chaff_rate_pps
+            }
+            (TrafficAnalysisDefense::ConstantRate, TrafficAnalysisDefense::FullPadding)
+            | (TrafficAnalysisDefense::ConstantRate, TrafficAnalysisDefense::ConstantRate) => {
+                self.constant_rate_pps
+            }
+            (TrafficAnalysisDefense::FullPadding, TrafficAnalysisDefense::ConstantRate) => 0,
+        }
+    }
+
+    /// Maximum configured wire cost before IP/UDP overhead.
+    pub fn estimated_max_bits_per_second(self, max_udp_payload_size: u32) -> u64 {
+        let (rate, target_size) = match self.defense {
+            TrafficAnalysisDefense::Off => (0, 0),
+            TrafficAnalysisDefense::FullPadding => (self.chaff_rate_pps, max_udp_payload_size),
+            TrafficAnalysisDefense::ConstantRate => {
+                (self.constant_rate_pps, self.chaff_size_bytes.min(max_udp_payload_size))
+            }
+        };
+        u64::from(rate).saturating_mul(u64::from(target_size)).saturating_mul(8)
+    }
 }
 
 // ============================================================================
@@ -368,6 +509,14 @@ pub struct Config {
     /// Target emission rate (packets/sec) for `ConstantRate` mode. When real
     /// traffic is sparse, chaff is injected to maintain this rate. Default 100.
     pub(crate) constant_rate_pps: u32,
+    /// Full-rate idle window before chaff begins a gradual soft stop.
+    pub(crate) chaff_idle_timeout_ms: u64,
+    /// Ramp-down duration after the idle window. Zero stops immediately.
+    pub(crate) chaff_ramp_down_ms: u64,
+    /// Independent ceiling for authenticated per-QKey traffic-analysis requests.
+    qkey_traffic_analysis_ceiling: TrafficAnalysisPolicy,
+    /// Operator ceiling for post-authentication Intelligent escalation.
+    intelligent_traffic_analysis_ceiling: TrafficAnalysisPolicy,
     // --- TCP/ICMP fingerprint obfuscation (TODO-462) ---
     /// Target OS fingerprint profile for packet normalization on the TUN
     /// egress path. Controls TTL, TCP window, MSS, DF bit, IP ID behavior,
@@ -498,6 +647,10 @@ impl Config {
             chaff_rate_pps: 0,
             chaff_size_bytes: 1280,
             constant_rate_pps: 100,
+            chaff_idle_timeout_ms: 30_000,
+            chaff_ramp_down_ms: 5_000,
+            qkey_traffic_analysis_ceiling: TrafficAnalysisPolicy::safety_ceiling(),
+            intelligent_traffic_analysis_ceiling: TrafficAnalysisPolicy::default(),
             fingerprint_profile: OsFingerprintProfile::default(),
             multipath_enabled: false,
             max_paths: 3,
@@ -1276,6 +1429,49 @@ impl Config {
         self.constant_rate_pps = pps.min(1_000);
     }
 
+    /// Sets the full-rate idle window, bounded to one hour.
+    pub fn set_chaff_idle_timeout_ms(&mut self, timeout_ms: u64) {
+        self.chaff_idle_timeout_ms = timeout_ms.min(3_600_000);
+    }
+
+    /// Sets the soft-stop ramp duration, bounded to one minute.
+    pub fn set_chaff_ramp_down_ms(&mut self, ramp_down_ms: u64) {
+        self.chaff_ramp_down_ms = ramp_down_ms.min(60_000);
+    }
+
+    /// Atomically applies one validated traffic-analysis policy.
+    pub fn set_traffic_analysis_policy(
+        &mut self,
+        policy: TrafficAnalysisPolicy,
+    ) -> Result<(), &'static str> {
+        let policy = policy.validate()?;
+        self.traffic_analysis_defense = policy.defense;
+        self.chaff_rate_pps = policy.chaff_rate_pps;
+        self.chaff_size_bytes = policy.chaff_size_bytes;
+        self.constant_rate_pps = policy.constant_rate_pps;
+        self.chaff_idle_timeout_ms = policy.idle_timeout_ms;
+        self.chaff_ramp_down_ms = policy.ramp_down_ms;
+        Ok(())
+    }
+
+    /// Sets the independent ceiling for authenticated per-QKey policy requests.
+    pub fn set_qkey_traffic_analysis_ceiling(
+        &mut self,
+        policy: TrafficAnalysisPolicy,
+    ) -> Result<(), &'static str> {
+        self.qkey_traffic_analysis_ceiling = policy.validate()?;
+        Ok(())
+    }
+
+    /// Sets the operator ceiling for post-authentication Intelligent escalation.
+    pub fn set_intelligent_traffic_analysis_ceiling(
+        &mut self,
+        policy: TrafficAnalysisPolicy,
+    ) -> Result<(), &'static str> {
+        self.intelligent_traffic_analysis_ceiling = policy.validate()?;
+        Ok(())
+    }
+
     /// Returns the active traffic analysis defense mode.
     pub fn traffic_analysis_defense(&self) -> TrafficAnalysisDefense {
         self.traffic_analysis_defense
@@ -1294,6 +1490,38 @@ impl Config {
     /// Returns the configured constant-rate target in packets per second.
     pub fn constant_rate_pps(&self) -> u32 {
         self.constant_rate_pps
+    }
+
+    /// Returns the full-rate idle window in milliseconds.
+    pub fn chaff_idle_timeout_ms(&self) -> u64 {
+        self.chaff_idle_timeout_ms
+    }
+
+    /// Returns the soft-stop ramp duration in milliseconds.
+    pub fn chaff_ramp_down_ms(&self) -> u64 {
+        self.chaff_ramp_down_ms
+    }
+
+    /// Returns the complete effective traffic-analysis policy.
+    pub fn traffic_analysis_policy(&self) -> TrafficAnalysisPolicy {
+        TrafficAnalysisPolicy {
+            defense: self.traffic_analysis_defense,
+            chaff_rate_pps: self.chaff_rate_pps,
+            chaff_size_bytes: self.chaff_size_bytes,
+            constant_rate_pps: self.constant_rate_pps,
+            idle_timeout_ms: self.chaff_idle_timeout_ms,
+            ramp_down_ms: self.chaff_ramp_down_ms,
+        }
+    }
+
+    /// Returns the authenticated per-QKey traffic-analysis policy ceiling.
+    pub fn qkey_traffic_analysis_ceiling(&self) -> TrafficAnalysisPolicy {
+        self.qkey_traffic_analysis_ceiling
+    }
+
+    /// Returns the post-authentication Intelligent escalation ceiling.
+    pub fn intelligent_traffic_analysis_ceiling(&self) -> TrafficAnalysisPolicy {
+        self.intelligent_traffic_analysis_ceiling
     }
 
     // duplicate removed: load_verify_locations_from_directory
@@ -1631,6 +1859,10 @@ mod tests {
         assert_eq!(cfg.chaff_rate_pps(), 0);
         assert_eq!(cfg.chaff_size_bytes(), 1280);
         assert_eq!(cfg.constant_rate_pps(), 100);
+        assert_eq!(cfg.chaff_idle_timeout_ms(), 30_000);
+        assert_eq!(cfg.chaff_ramp_down_ms(), 5_000);
+        assert_eq!(cfg.qkey_traffic_analysis_ceiling(), TrafficAnalysisPolicy::safety_ceiling());
+        assert_eq!(cfg.intelligent_traffic_analysis_ceiling(), TrafficAnalysisPolicy::default());
     }
 
     #[test]
@@ -1736,6 +1968,121 @@ mod tests {
         assert_eq!(cfg.constant_rate_pps(), 250);
         cfg.set_constant_rate_pps(99_999);
         assert_eq!(cfg.constant_rate_pps(), 1_000);
+    }
+
+    #[test]
+    fn test_chaff_lifecycle_bounds() {
+        let mut cfg = default_config();
+        cfg.set_chaff_idle_timeout_ms(u64::MAX);
+        cfg.set_chaff_ramp_down_ms(u64::MAX);
+        assert_eq!(cfg.chaff_idle_timeout_ms(), 3_600_000);
+        assert_eq!(cfg.chaff_ramp_down_ms(), 60_000);
+    }
+
+    #[test]
+    fn test_traffic_analysis_policy_is_bounded_by_global_ceiling() {
+        let requested = TrafficAnalysisPolicy {
+            defense: TrafficAnalysisDefense::ConstantRate,
+            chaff_rate_pps: 10,
+            chaff_size_bytes: 1400,
+            constant_rate_pps: 100,
+            idle_timeout_ms: 30_000,
+            ramp_down_ms: 5_000,
+        };
+        let ceiling = TrafficAnalysisPolicy {
+            defense: TrafficAnalysisDefense::FullPadding,
+            chaff_rate_pps: 8,
+            chaff_size_bytes: 1280,
+            constant_rate_pps: 80,
+            idle_timeout_ms: 20_000,
+            ramp_down_ms: 2_000,
+        };
+
+        assert_eq!(
+            requested.bounded_by(ceiling),
+            TrafficAnalysisPolicy {
+                defense: TrafficAnalysisDefense::FullPadding,
+                chaff_rate_pps: 8,
+                chaff_size_bytes: 1280,
+                constant_rate_pps: 0,
+                idle_timeout_ms: 20_000,
+                ramp_down_ms: 2_000,
+            }
+        );
+    }
+
+    #[test]
+    fn test_traffic_analysis_policy_rejects_unbounded_constant_rate() {
+        let policy = TrafficAnalysisPolicy {
+            defense: TrafficAnalysisDefense::ConstantRate,
+            constant_rate_pps: TrafficAnalysisPolicy::MAX_CONSTANT_RATE_PPS + 1,
+            ..TrafficAnalysisPolicy::default()
+        };
+        assert!(policy.validate().is_err());
+    }
+
+    #[test]
+    fn test_traffic_analysis_cost_uses_mode_specific_wire_target() {
+        let full_padding = TrafficAnalysisPolicy {
+            defense: TrafficAnalysisDefense::FullPadding,
+            chaff_rate_pps: 10,
+            chaff_size_bytes: 1280,
+            ..TrafficAnalysisPolicy::default()
+        };
+        let constant_rate = TrafficAnalysisPolicy {
+            defense: TrafficAnalysisDefense::ConstantRate,
+            constant_rate_pps: 100,
+            chaff_size_bytes: 1280,
+            ..TrafficAnalysisPolicy::default()
+        };
+
+        assert_eq!(full_padding.estimated_max_bits_per_second(1500), 120_000);
+        assert_eq!(constant_rate.estimated_max_bits_per_second(1500), 1_024_000);
+        assert_eq!(constant_rate.estimated_max_bits_per_second(1200), 960_000);
+    }
+
+    #[test]
+    fn test_qkey_traffic_analysis_ceiling_is_independent_from_active_policy() {
+        let mut config = default_config();
+        let ceiling = TrafficAnalysisPolicy {
+            defense: TrafficAnalysisDefense::FullPadding,
+            chaff_rate_pps: 10,
+            chaff_size_bytes: 1200,
+            constant_rate_pps: 0,
+            idle_timeout_ms: 30_000,
+            ramp_down_ms: 5_000,
+        };
+
+        config.set_qkey_traffic_analysis_ceiling(ceiling).expect("valid ceiling");
+
+        assert_eq!(config.traffic_analysis_policy().defense, TrafficAnalysisDefense::Off);
+        assert_eq!(config.qkey_traffic_analysis_ceiling(), ceiling);
+    }
+
+    #[test]
+    fn test_stronger_constant_rate_caps_a_full_padding_escalation_rate() {
+        let requested = TrafficAnalysisPolicy {
+            defense: TrafficAnalysisDefense::ConstantRate,
+            chaff_rate_pps: 0,
+            chaff_size_bytes: 1200,
+            constant_rate_pps: 100,
+            idle_timeout_ms: 30_000,
+            ramp_down_ms: 5_000,
+        };
+        let ceiling = TrafficAnalysisPolicy {
+            defense: TrafficAnalysisDefense::FullPadding,
+            chaff_rate_pps: 10,
+            chaff_size_bytes: 1200,
+            constant_rate_pps: 0,
+            idle_timeout_ms: 30_000,
+            ramp_down_ms: 5_000,
+        };
+
+        let bounded = requested.bounded_by(ceiling);
+
+        assert_eq!(bounded.defense, TrafficAnalysisDefense::FullPadding);
+        assert_eq!(bounded.chaff_rate_pps, 10);
+        assert_eq!(bounded.constant_rate_pps, 0);
     }
 
     #[test]

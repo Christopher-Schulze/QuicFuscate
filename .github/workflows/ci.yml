@@ -378,6 +378,50 @@ jobs:
           path: |
             scripts/out/tests/linux-fastpath-gates
 
+  linux-traffic-analysis-native:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-traffic-analysis-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install native capture dependencies
+        run: sudo apt-get update && sudo apt-get install -y iproute2 netcat-openbsd tcpdump
+
+      - name: Build exact traffic-analysis artifact
+        run: cargo build --release --bin quicfuscate
+
+      - name: Prove native traffic-analysis cadence and cost
+        shell: bash
+        run: >-
+          sudo --preserve-env=GITHUB_SHA
+          env QF_E2E_BINARY="$GITHUB_WORKSPACE/target/release/quicfuscate"
+          QF_TRAFFIC_OUTPUT_DIR="$GITHUB_WORKSPACE/scripts/out/tests/traffic-analysis-native"
+          scripts/tests/tun-e2e-traffic-analysis-netns.sh
+
+      - name: Upload native traffic-analysis evidence
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: traffic-analysis-native
+          path: scripts/out/tests/traffic-analysis-native/
+          if-no-files-found: error
+
   security-audit:
     runs-on: ubuntu-latest
     steps:

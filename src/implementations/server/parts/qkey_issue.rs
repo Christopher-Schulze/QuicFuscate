@@ -19,6 +19,7 @@ pub struct QKeyAuthState {
     pub key_id: String,
     pub expected_token_sha256: String,
     pub bandwidth_policy: Option<BandwidthPolicy>,
+    pub traffic_analysis_policy: Option<crate::transport::config::TrafficAnalysisPolicy>,
     pub authed: bool,
     pub post_handshake_started_at: Option<Instant>,
     pub(crate) auth_attempt: Option<crate::implementations::server::limits::AuthAttempt>,
@@ -186,6 +187,7 @@ pub fn issue_unix_admin_qkey(
             sni_strategy: Some(DF_SNI_MODE_AUTO_ROTATING),
             sni_domain: None,
             bandwidth_policy: None,
+            traffic_analysis_policy: None,
         },
         "server::issue_unix_admin_qkey",
     )?;
@@ -211,6 +213,7 @@ pub fn issue_http_admin_qkey(
             sni_strategy: req.sni_strategy.as_deref(),
             sni_domain: req.sni_domain.as_deref(),
             bandwidth_policy: req.bandwidth_policy.clone(),
+            traffic_analysis_policy: req.traffic_analysis_policy,
         },
         "server::issue_http_admin_qkey",
     )
@@ -225,6 +228,7 @@ struct IssueQKeyParams<'a> {
     sni_strategy: Option<&'a str>,
     sni_domain: Option<&'a str>,
     bandwidth_policy: Option<BandwidthPolicy>,
+    traffic_analysis_policy: Option<crate::transport::config::TrafficAnalysisPolicy>,
 }
 
 fn issue_qkey(
@@ -239,6 +243,9 @@ fn issue_qkey(
     let name = normalize_qkey_name(params.name)?;
     if let Some(policy) = params.bandwidth_policy.as_ref() {
         policy.validate()?;
+    }
+    if let Some(policy) = params.traffic_analysis_policy {
+        policy.validate().map_err(str::to_string)?;
     }
     let nonce_hex = random_hex_8(&format!("{rng_context}::nonce"));
     let sni_policy = resolve_qkey_domain_fronting_policy(
@@ -261,12 +268,13 @@ fn issue_qkey(
     let token = config.token.take().ok_or_else(|| "Generated QKey missing token".to_string())?;
     let QKeyEntry { created_at, expires_at, .. } =
         registry
-            .insert_with_ttl_and_bandwidth(
+            .insert_with_ttl_and_policies(
                 qkey_value.clone(),
                 token,
                 params.ttl_seconds,
                 name,
                 params.bandwidth_policy,
+                params.traffic_analysis_policy,
             )
             .map_err(|error| error.to_string())?;
     Ok(IssuedQKey { qkey: qkey_value, created_at, expires_at })
@@ -408,6 +416,10 @@ struct TransportOverrides {
     pmtu_probe_interval_ms: Option<u64>,
     pmtu_black_hole_timeout_ms: Option<u64>,
     initial_rtt_ms: Option<u64>,
+    traffic_analysis: Option<crate::transport::config::TrafficAnalysisPolicy>,
+    qkey_traffic_analysis_ceiling: Option<crate::transport::config::TrafficAnalysisPolicy>,
+    intelligent_traffic_analysis_ceiling:
+        Option<crate::transport::config::TrafficAnalysisPolicy>,
 }
 
 pub fn normalize_runtime_optimize_config(cfg: OptimizeConfig, _origin: &str) -> OptimizeConfig {
@@ -627,8 +639,30 @@ fn parse_transport_overrides_from_toml(contents: &str) -> Result<TransportOverri
         }
         out.initial_rtt_ms = Some(val as u64);
     }
+    out.traffic_analysis = parse_traffic_analysis_policy(tbl, "traffic_analysis")?;
+    out.qkey_traffic_analysis_ceiling =
+        parse_traffic_analysis_policy(tbl, "qkey_traffic_analysis_ceiling")?;
+    out.intelligent_traffic_analysis_ceiling =
+        parse_traffic_analysis_policy(tbl, "intelligent_traffic_analysis_ceiling")?;
 
     Ok(out)
+}
+
+fn parse_traffic_analysis_policy(
+    transport: &toml::Table,
+    key: &str,
+) -> Result<Option<crate::transport::config::TrafficAnalysisPolicy>, String> {
+    let Some(value) = transport.get(key) else {
+        return Ok(None);
+    };
+    let policy: crate::transport::config::TrafficAnalysisPolicy =
+        value.clone().try_into().map_err(|error| {
+            format!("transport.{key} must be a valid traffic-analysis policy: {error}")
+        })?;
+    policy
+        .validate()
+        .map(Some)
+        .map_err(|error| format!("transport.{key} is invalid: {error}"))
 }
 
 pub(crate) fn validate_transport_overrides_from_toml(contents: &str) -> Result<(), String> {
@@ -727,6 +761,21 @@ pub(crate) fn apply_transport_overrides_from_toml(
     }
     if let Some(rtt_ms) = overrides.initial_rtt_ms {
         transport.set_initial_rtt_ms(rtt_ms);
+    }
+    if let Some(policy) = overrides.traffic_analysis {
+        if let Err(error) = transport.set_traffic_analysis_policy(policy) {
+            log::warn!("transport traffic-analysis policy ignored: {error}");
+        }
+    }
+    if let Some(policy) = overrides.qkey_traffic_analysis_ceiling {
+        if let Err(error) = transport.set_qkey_traffic_analysis_ceiling(policy) {
+            log::warn!("transport QKey traffic-analysis ceiling ignored: {error}");
+        }
+    }
+    if let Some(policy) = overrides.intelligent_traffic_analysis_ceiling {
+        if let Err(error) = transport.set_intelligent_traffic_analysis_ceiling(policy) {
+            log::warn!("transport Intelligent traffic-analysis ceiling ignored: {error}");
+        }
     }
 }
 

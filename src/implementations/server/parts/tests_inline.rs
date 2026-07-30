@@ -1169,6 +1169,7 @@ mod tests {
                 key_id: "test-key".to_string(),
                 expected_token_sha256: "deadbeef".to_string(),
                 bandwidth_policy: None,
+                traffic_analysis_policy: None,
                 authed: false,
                 post_handshake_started_at: Some(
                     Instant::now() - (QKEY_AUTH_TIMEOUT + Duration::from_secs(1)),
@@ -1212,8 +1213,20 @@ mod tests {
             monthly_quota_bytes: 100_000_000,
             weight: 2,
         };
+        let traffic_analysis_policy = crate::transport::config::TrafficAnalysisPolicy {
+            defense: crate::transport::config::TrafficAnalysisDefense::ConstantRate,
+            chaff_rate_pps: 0,
+            chaff_size_bytes: 1200,
+            constant_rate_pps: 80,
+            idle_timeout_ms: 20_000,
+            ramp_down_ms: 2_000,
+        };
         let rejected_before = metrics.connections_rejected.load(Ordering::Relaxed);
 
+        assert_eq!(
+            connection.conn.traffic_analysis_policy().defense,
+            crate::transport::config::TrafficAnalysisDefense::Off
+        );
         live_state.clients.insert(remote_addr, connection);
         let auth_attempt = begin_test_auth_attempt(&live_state, remote_addr.ip());
         live_state.qkey_auth.insert(
@@ -1222,6 +1235,7 @@ mod tests {
                 key_id: "test-key".to_string(),
                 expected_token_sha256: "deadbeef".to_string(),
                 bandwidth_policy: Some(qkey_policy.clone()),
+                traffic_analysis_policy: Some(traffic_analysis_policy),
                 authed: false,
                 post_handshake_started_at: Some(Instant::now()),
                 auth_attempt: Some(auth_attempt),
@@ -1238,6 +1252,15 @@ mod tests {
         let bandwidth_stats =
             live_state.domain.shared.sessions.read().bandwidth_stats(session_id).unwrap();
         assert_eq!(bandwidth_stats.policy, qkey_policy);
+        assert_eq!(
+            live_state
+                .clients
+                .get(&remote_addr)
+                .expect("authenticated client")
+                .conn
+                .traffic_analysis_policy(),
+            traffic_analysis_policy
+        );
         assert_eq!(
             live_state.qkey_tracker.key_for_connection(session_id.as_u64()).as_deref(),
             Some("test-key")
@@ -1264,6 +1287,71 @@ mod tests {
         assert!(live_state.domain.session_id_by_remote(remote_addr).is_none());
         assert!(live_state.qkey_tracker.connections_for_key("test-key").is_empty());
         assert!(!live_state.qkey_auth.contains_key(&conn_id));
+    }
+
+    #[test]
+    fn failed_qkey_auth_never_activates_pending_traffic_analysis_policy() {
+        let mut live_state = LiveServerState::new(ServerConfig::default());
+        let accept_loop = AcceptLoop::new(AcceptConfig::default());
+        let metrics = Metrics::new();
+        let local_addr: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+        let remote_addr: SocketAddr = "127.0.0.1:54328".parse().unwrap();
+        live_state.domain.accept(remote_addr).expect("session accepted");
+        let mut transport =
+            crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION).unwrap();
+        let connection = create_live_server_connection(
+            local_addr,
+            remote_addr,
+            &mut transport,
+            StealthConfig::default(),
+            FecConfig::default(),
+            OptimizeConfig::default(),
+            &crate::transport::ConnectionId::from_ref(b"failed-policy-auth"),
+        )
+        .expect("live server connection");
+        let conn_id = connection.conn.source_id().as_ref().to_vec();
+        let pending_policy = crate::transport::config::TrafficAnalysisPolicy {
+            defense: crate::transport::config::TrafficAnalysisDefense::ConstantRate,
+            chaff_rate_pps: 0,
+            chaff_size_bytes: 1200,
+            constant_rate_pps: 80,
+            idle_timeout_ms: 20_000,
+            ramp_down_ms: 2_000,
+        };
+
+        live_state.clients.insert(remote_addr, connection);
+        let auth_attempt = begin_test_auth_attempt(&live_state, remote_addr.ip());
+        live_state.qkey_auth.insert(
+            conn_id.clone(),
+            QKeyAuthState {
+                key_id: "failed-policy-key".to_string(),
+                expected_token_sha256: "deadbeef".to_string(),
+                bandwidth_policy: None,
+                traffic_analysis_policy: Some(pending_policy),
+                authed: false,
+                post_handshake_started_at: Some(Instant::now()),
+                auth_attempt: Some(auth_attempt),
+            },
+        );
+
+        live_state.commit_qkey_auth_result(
+            None,
+            Some((conn_id.clone(), false)),
+            &accept_loop,
+            &metrics,
+        );
+
+        assert!(!live_state.qkey_auth.contains_key(&conn_id));
+        assert_eq!(
+            live_state
+                .clients
+                .get(&remote_addr)
+                .expect("connection remains until caller reconciliation")
+                .conn
+                .traffic_analysis_policy()
+                .defense,
+            crate::transport::config::TrafficAnalysisDefense::Off
+        );
     }
 
     #[test]
@@ -1298,6 +1386,7 @@ mod tests {
                 key_id: "pending-key".to_string(),
                 expected_token_sha256: "deadbeef".to_string(),
                 bandwidth_policy: None,
+                traffic_analysis_policy: None,
                 authed: false,
                 post_handshake_started_at: Some(Instant::now()),
                 auth_attempt: Some(auth_attempt),
@@ -1722,6 +1811,7 @@ mod tests {
             key_id: "test-key".to_string(),
             expected_token_sha256: "abc".to_string(),
             bandwidth_policy: None,
+            traffic_analysis_policy: None,
             authed: false,
             post_handshake_started_at: None,
             auth_attempt: None,
@@ -1742,6 +1832,7 @@ mod tests {
             key_id: "test-key".to_string(),
             expected_token_sha256: "abc".to_string(),
             bandwidth_policy: None,
+            traffic_analysis_policy: None,
             authed: false,
             post_handshake_started_at: Some(
                 Instant::now() - (QKEY_AUTH_TIMEOUT + Duration::from_secs(1)),
@@ -1757,6 +1848,7 @@ mod tests {
             key_id: "test-key".to_string(),
             expected_token_sha256: "abc".to_string(),
             bandwidth_policy: None,
+            traffic_analysis_policy: None,
             authed: true,
             post_handshake_started_at: Some(
                 Instant::now() - (QKEY_AUTH_TIMEOUT + Duration::from_secs(10)),
@@ -1772,6 +1864,7 @@ mod tests {
             key_id: "test-key".to_string(),
             expected_token_sha256: "abc".to_string(),
             bandwidth_policy: None,
+            traffic_analysis_policy: None,
             authed: false,
             post_handshake_started_at: Some(Instant::now()),
             auth_attempt: None,
@@ -2170,6 +2263,69 @@ pmtu_black_hole_timeout_ms = 7500
         let contents = r#"
 [transport]
 pmtu_probe_interval_ms = 0
+"#;
+
+        assert!(validate_transport_overrides_from_toml(contents).is_err());
+    }
+
+    #[test]
+    fn transport_overrides_apply_independent_traffic_analysis_policies() {
+        let mut transport =
+            crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION).unwrap();
+        let contents = r#"
+[transport.traffic_analysis]
+defense = "off"
+chaff_rate_pps = 0
+chaff_size_bytes = 1200
+constant_rate_pps = 100
+idle_timeout_ms = 30000
+ramp_down_ms = 5000
+
+[transport.qkey_traffic_analysis_ceiling]
+defense = "constant-rate"
+chaff_rate_pps = 0
+chaff_size_bytes = 1280
+constant_rate_pps = 100
+idle_timeout_ms = 30000
+ramp_down_ms = 5000
+
+[transport.intelligent_traffic_analysis_ceiling]
+defense = "full-padding"
+chaff_rate_pps = 10
+chaff_size_bytes = 1200
+constant_rate_pps = 0
+idle_timeout_ms = 30000
+ramp_down_ms = 5000
+"#;
+
+        apply_transport_overrides_from_toml(
+            std::path::Path::new("test.toml"),
+            contents,
+            &mut transport,
+        );
+
+        assert_eq!(
+            transport.traffic_analysis_policy().defense,
+            crate::transport::config::TrafficAnalysisDefense::Off
+        );
+        assert_eq!(
+            transport.qkey_traffic_analysis_ceiling().constant_rate_pps,
+            100
+        );
+        assert_eq!(
+            transport
+                .intelligent_traffic_analysis_ceiling()
+                .chaff_rate_pps,
+            10
+        );
+    }
+
+    #[test]
+    fn transport_overrides_reject_unsafe_traffic_analysis_policy() {
+        let contents = r#"
+[transport.qkey_traffic_analysis_ceiling]
+defense = "constant-rate"
+constant_rate_pps = 1001
 "#;
 
         assert!(validate_transport_overrides_from_toml(contents).is_err());

@@ -129,12 +129,14 @@ pub struct Connection {
     // Packet numbers whose complete outer datagram exercised capacity above
     // the configured safe MTU floor.
     pmtu_above_floor_pns: HashSet<u64>,
-    // Chaff (dummy packet) generator for traffic analysis defense (TODO-455).
-    // Active only when `traffic_analysis_defense` is `ConstantRate` and
-    // `chaff_rate_pps > 0`. The generator is polled on every `send()` call; if
-    // it signals that a chaff packet is due and no real ack-eliciting payload
-    // was written, a PING+PADDING chaff packet is emitted instead.
-    chaff: Option<crate::stealth::ChaffGenerator>,
+    // Single transport-owned deadline and bounded pending slot for idle chaff
+    // and constant-rate traffic-analysis defense.
+    traffic_analysis: Option<crate::stealth::TrafficAnalysisScheduler>,
+    // Authenticated baseline restored when Intelligent escalation deactivates.
+    traffic_analysis_base_policy: crate::transport::config::TrafficAnalysisPolicy,
+    // Post-authentication Intelligent escalation ceiling. None is fail-closed.
+    traffic_analysis_escalation_ceiling:
+        Option<crate::transport::config::TrafficAnalysisPolicy>,
 }
 
 #[cfg(feature = "zero_copy_dgram")]
@@ -209,4 +211,3 @@ fn stream_ring_buffer_roundtrip() {
     assert_eq!(read, payload.len());
     assert_eq!(out, payload);
 }
-

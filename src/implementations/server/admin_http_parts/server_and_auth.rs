@@ -564,6 +564,8 @@ struct QKeyCreatePayload {
     sni_domain: Option<String>,
     #[serde(default)]
     bandwidth_policy: Option<BandwidthPolicy>,
+    #[serde(default)]
+    traffic_analysis_policy: Option<crate::transport::config::TrafficAnalysisPolicy>,
 }
 
 #[derive(Clone, Debug)]
@@ -576,6 +578,7 @@ pub struct IssueQKeyRequest {
     pub sni_strategy: Option<String>,
     pub sni_domain: Option<String>,
     pub bandwidth_policy: Option<BandwidthPolicy>,
+    pub traffic_analysis_policy: Option<crate::transport::config::TrafficAnalysisPolicy>,
 }
 
 fn normalize_ttl(ttl_seconds: Option<u64>) -> Option<u64> {

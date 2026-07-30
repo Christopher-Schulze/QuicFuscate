@@ -763,6 +763,9 @@ impl Connection {
         self.is_closed = true;
         self.is_draining = true;
         self.local_error = Some(crate::error::ConnectionError::ApplicationClosed);
+        if let Some(scheduler) = self.traffic_analysis.as_mut() {
+            scheduler.cancel();
+        }
         // Emit Close frame into control queue.
         if app {
             self.pending_control.push_back(Frame::ApplicationClose {
@@ -818,6 +821,86 @@ impl Connection {
         self.pkt_spaces[2].has_pending_ack()
     }
 
+    /// Returns the armed traffic-analysis deadline after 1-RTT establishment.
+    pub fn traffic_analysis_deadline(&self) -> Option<Instant> {
+        if !self.is_established() {
+            return None;
+        }
+        self.traffic_analysis.as_ref().and_then(|scheduler| scheduler.next_deadline())
+    }
+
+    /// Advances the single traffic-analysis timer at a runtime wakeup boundary.
+    pub fn on_traffic_analysis_timeout(&mut self, now: Instant) {
+        if !self.is_established() || self.is_closed {
+            return;
+        }
+        if let Some(scheduler) = self.traffic_analysis.as_mut() {
+            scheduler.on_timer(now);
+        }
+    }
+
+    /// Atomically applies one validated traffic-analysis policy to this live connection.
+    pub fn apply_traffic_analysis_policy(
+        &mut self,
+        policy: crate::transport::config::TrafficAnalysisPolicy,
+    ) -> Result<(), crate::error::ConnectionError> {
+        if self.is_closed {
+            return Err(crate::error::ConnectionError::InvalidState);
+        }
+        self.config
+            .set_traffic_analysis_policy(policy)
+            .map_err(|error| crate::error::ConnectionError::Transport(error.to_string()))?;
+        self.traffic_analysis_base_policy = policy;
+        self.rebuild_traffic_analysis_scheduler();
+        Ok(())
+    }
+
+    /// Authorizes Intelligent traffic-analysis escalation after QKey proof succeeds.
+    pub(crate) fn authorize_intelligent_traffic_analysis(
+        &mut self,
+        qkey_ceiling: Option<crate::transport::config::TrafficAnalysisPolicy>,
+    ) -> Result<(), crate::error::ConnectionError> {
+        if self.is_closed {
+            return Err(crate::error::ConnectionError::InvalidState);
+        }
+        let operator_ceiling = self.config.intelligent_traffic_analysis_ceiling();
+        let effective_ceiling =
+            qkey_ceiling.map_or(operator_ceiling, |ceiling| operator_ceiling.bounded_by(ceiling));
+        self.traffic_analysis_base_policy = self.config.traffic_analysis_policy();
+        self.traffic_analysis_escalation_ceiling =
+            (effective_ceiling.defense != crate::transport::config::TrafficAnalysisDefense::Off)
+                .then_some(effective_ceiling);
+        Ok(())
+    }
+
+    /// Applies the authorized Level-2 defense or restores the authenticated baseline.
+    pub(crate) fn apply_intelligent_traffic_analysis_level(
+        &mut self,
+        level: u32,
+    ) -> Result<(), crate::error::ConnectionError> {
+        let target = if level >= 2 {
+            self.traffic_analysis_escalation_ceiling
+                .unwrap_or(self.traffic_analysis_base_policy)
+        } else {
+            self.traffic_analysis_base_policy
+        };
+        if target == self.config.traffic_analysis_policy() {
+            return Ok(());
+        }
+        self.config
+            .set_traffic_analysis_policy(target)
+            .map_err(|error| crate::error::ConnectionError::Transport(error.to_string()))?;
+        self.rebuild_traffic_analysis_scheduler();
+        Ok(())
+    }
+
+    /// Returns the complete active traffic-analysis policy for this connection.
+    pub fn traffic_analysis_policy(
+        &self,
+    ) -> crate::transport::config::TrafficAnalysisPolicy {
+        self.config.traffic_analysis_policy()
+    }
+
     /// Handles timeout
     pub fn on_timeout(&mut self) {
         // Handle connection timeout
@@ -868,6 +951,9 @@ impl Connection {
         self.local_error = Some(crate::error::ConnectionError::Timeout);
         self.is_closed = true;
         self.is_draining = true;
+        if let Some(scheduler) = self.traffic_analysis.as_mut() {
+            scheduler.cancel();
+        }
     }
     /// Server name (SNI) from TLS provider
     pub fn server_name(&self) -> Option<&str> {

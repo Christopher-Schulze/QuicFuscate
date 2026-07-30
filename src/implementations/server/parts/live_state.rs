@@ -487,7 +487,7 @@ pub(crate) fn build_live_server_client_init(
         }
     };
 
-    let initial_ctx = match parse_live_server_initial_auth(
+    let mut initial_ctx = match parse_live_server_initial_auth(
         request.packet,
         request.qkey_registry,
         request.revocation_manager,
@@ -514,6 +514,11 @@ pub(crate) fn build_live_server_client_init(
             return None;
         }
     };
+    if let Some(state) = initial_ctx.pending_qkey_auth.as_mut() {
+        state.traffic_analysis_policy = state.traffic_analysis_policy.map(|requested| {
+            requested.bounded_by(request.transport_config.qkey_traffic_analysis_ceiling())
+        });
+    }
 
     log::info!("New client connected: {}", request.remote_addr);
 
@@ -1757,8 +1762,14 @@ impl LiveServerState {
                 let policy = self
                     .qkey_auth
                     .get(&conn_id)
-                    .map(|state| (state.key_id.clone(), state.bandwidth_policy.clone()));
-                let Some((key_id, bandwidth_policy)) = policy else {
+                    .map(|state| {
+                        (
+                            state.key_id.clone(),
+                            state.bandwidth_policy.clone(),
+                            state.traffic_analysis_policy,
+                        )
+                    });
+                let Some((key_id, bandwidth_policy, traffic_analysis_policy)) = policy else {
                     return;
                 };
                 if self.revocation_manager.is_revoked(&key_id) {
@@ -1798,26 +1809,49 @@ impl LiveServerState {
                 });
                 let session_id =
                     remote_addr.and_then(|addr| self.domain.session_id_by_remote(addr));
-                let activation_error = match session_id {
-                    Some(session_id) => self
-                        .domain
-                        .shared
-                        .sessions
-                        .write()
-                        .activate_bandwidth(session_id, bandwidth_policy)
-                        .err(),
-                    None => Some(SessionError::NotFound),
+                let traffic_analysis_error = match remote_addr {
+                    Some(addr) => self
+                        .clients
+                        .get_mut(&addr)
+                        .ok_or(crate::error::ConnectionError::InvalidState)
+                        .and_then(|connection| {
+                            if let Some(policy) = traffic_analysis_policy {
+                                connection.conn.apply_traffic_analysis_policy(policy)?;
+                            }
+                            connection
+                                .conn
+                                .authorize_intelligent_traffic_analysis(traffic_analysis_policy)
+                        })
+                        .err()
+                        .map(|error| error.to_string()),
+                    None => Some("live connection not found".to_string()),
                 };
+                let bandwidth_error = if traffic_analysis_error.is_none() {
+                    match session_id {
+                        Some(session_id) => self
+                            .domain
+                            .shared
+                            .sessions
+                            .write()
+                            .activate_bandwidth(session_id, bandwidth_policy)
+                            .err()
+                            .map(|error| error.to_string()),
+                        None => Some(SessionError::NotFound.to_string()),
+                    }
+                } else {
+                    None
+                };
+                let activation_error = traffic_analysis_error.or(bandwidth_error);
                 if let Some(error) = activation_error {
-                    log::error!("Authenticated QKey bandwidth activation failed: {}", error);
+                    log::error!("Authenticated QKey policy activation failed: {}", error);
                     metrics.record_connection_rejected();
                     if let Some(addr) = remote_addr {
                         if let Some(mut connection) = self.clients.remove(&addr) {
                             if let Err(close_error) =
-                                connection.conn.close(true, 0x0, b"bandwidth_policy_invalid")
+                                connection.conn.close(true, 0x0, b"qkey_policy_invalid")
                             {
                                 log::warn!(
-                                    "Client close after bandwidth activation failure failed: {:?}",
+                                    "Client close after QKey policy activation failure failed: {:?}",
                                     close_error
                                 );
                             }

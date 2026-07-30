@@ -328,7 +328,11 @@ impl Connection {
             || self.has_pending_application_ack()
             || self.has_sendable_stream_frame()
             || !self.dgram_send_queue.is_empty()
-            || self.pending_probe_spaces.iter().any(|s| *s == recovery::PacketSpace::Application);
+            || self.pending_probe_spaces.iter().any(|s| *s == recovery::PacketSpace::Application)
+            || self
+                .traffic_analysis
+                .as_ref()
+                .is_some_and(|scheduler| scheduler.has_pending_chaff());
         if !has_pending_data && !congestion_bypass && !dedicated_pmtu_probe {
             log::trace!("send_with_datagram_overhead: early Done has_pending_data=false dgram_queue_len={} pending_control={} app_ack={} sendable_stream={} probe_spaces={} congestion_bypass={} pmtu_probe={}",
                 self.dgram_send_queue.len(), self.pending_control.is_empty(), self.has_pending_application_ack(), self.has_sendable_stream_frame(), self.pending_probe_spaces.iter().any(|s| *s == recovery::PacketSpace::Application), congestion_bypass, dedicated_pmtu_probe);
@@ -461,35 +465,34 @@ impl Connection {
                 self.pmtu_probe_pn = Some(pn);
             }
         }
-        // Chaff injection (TODO-455): when the chaff generator signals that a
-        // dummy packet is due and no ack-eliciting payload was written (real
-        // traffic already covers the slot), inject a PING + PADDING chaff
-        // packet sized to `chaff_size_bytes`. The chaff is a real 1-RTT packet
-        // - encrypted with the same keys, same header format - indistinguishable
-        // from a real data packet to an outside observer.
-        if !wrote_ack_eliciting {
-            // Extract values before mutable borrow of self.chaff.
+        // A due traffic-analysis slot emits chaff only when the packet remains
+        // completely empty. ACK-only, control, stream, DATAGRAM, recovery, and
+        // PMTU traffic always win and cover the slot without being converted
+        // into an ack-eliciting chaff packet.
+        let packet_has_real_frames = off > pn_off + pn_len;
+        let mut emitted_chaff = false;
+        if !packet_has_real_frames && !congestion_bypass && !dedicated_pmtu_probe {
             let tag_reserve = self.tag_reserve_1rtt();
-            let chaff_size = self.chaff.as_ref().map(|c| c.chaff_size_bytes()).unwrap_or(0);
-            if let Some(ref mut chaff) = self.chaff {
-                if chaff.should_chaff(now, false) {
-                    use crate::transport::Frame;
-                    let ping = Frame::Ping { mtu_probe: None };
-                    off += crate::transport::frames::to_bytes(&ping, &mut out[off..])?;
-                    wrote_ack_eliciting = true;
-                    packet_contents.control = true;
-                    let avail = out.len().saturating_sub(off + tag_reserve);
-                    let needed = (chaff_size as usize).saturating_sub(off + tag_reserve);
-                    let pad_len = needed.min(avail);
-                    if pad_len > 0 {
-                        off += crate::transport::frames::write_padding(pad_len, &mut out[off..])?;
-                    }
+            let chaff_size = self
+                .traffic_analysis
+                .as_ref()
+                .filter(|scheduler| scheduler.has_pending_chaff())
+                .map(|scheduler| scheduler.chaff_size_bytes())
+                .unwrap_or(0);
+            if chaff_size > 0 {
+                use crate::transport::Frame;
+                let ping = Frame::Ping { mtu_probe: None };
+                off += crate::transport::frames::to_bytes(&ping, &mut out[off..])?;
+                wrote_ack_eliciting = true;
+                emitted_chaff = true;
+                packet_contents.control = true;
+                let avail = out.len().saturating_sub(off + tag_reserve);
+                let needed = (chaff_size as usize).saturating_sub(off + tag_reserve);
+                let pad_len = needed.min(avail);
+                if pad_len > 0 {
+                    off += crate::transport::frames::write_padding(pad_len, &mut out[off..])?;
                 }
             }
-        } else if let Some(ref mut chaff) = self.chaff {
-            // Real ack-eliciting traffic was sent - reset the chaff clock so the
-            // next chaff is deferred for one interval.
-            chaff.record_real_traffic(now);
         }
         if off == pn_off + pn_len {
             log::trace!("send_with_datagram_overhead: off==pn_off+pn_len, returning Done; dgram_queue_len={} pending_control={} application_ack={} writable_streams={} probe_spaces={}",
@@ -498,6 +501,16 @@ impl Connection {
         }
         off = self.maybe_apply_stealth_padding(out, pn_off, pn_len, off)?;
         off = self.seal_short_header_packet(out, pn, pn_off, pn_len, off)?;
+        if let Some(scheduler) = self.traffic_analysis.as_mut() {
+            if emitted_chaff {
+                scheduler.record_chaff_emitted();
+            } else {
+                scheduler.record_cover_packet(
+                    now,
+                    packet_contents.stream || packet_contents.datagram,
+                );
+            }
+        }
 
         // Mark bytes-in-flight timing start if we actually wrote payload beyond header
         if off > (pn_off + pn_len) && self.bytes_in_flight_started.is_none() {
@@ -581,7 +594,7 @@ impl Connection {
     ///   so every packet is maximally padded regardless of `stealth_padding_rate`.
     /// - `ConstantRate`: same maximal-padding behavior as `FullPadding` at this
     ///   layer; the consistent target size and chaff injection are orchestrated
-    ///   by `maybe_apply_stealth_padding` and the `ChaffGenerator`.
+    ///   by `maybe_apply_stealth_padding` and the `TrafficAnalysisScheduler`.
     #[inline(always)]
     pub(crate) fn compute_stealth_padding(&self, cur_pt_len: usize, budget: usize) -> usize {
         // Traffic analysis defense modes take precedence over the legacy

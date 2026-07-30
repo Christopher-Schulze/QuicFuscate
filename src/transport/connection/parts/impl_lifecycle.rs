@@ -17,6 +17,47 @@ impl Connection {
         recovery::Recovery::with_algorithm(INITIAL_WINDOW, max_datagram_size, algorithm)
     }
 
+    fn rebuild_traffic_analysis_scheduler(&mut self) {
+        let policy = self.config.traffic_analysis_policy();
+        let (rate_pps, constant_rate) = match policy.defense {
+            crate::transport::config::TrafficAnalysisDefense::Off => (0, false),
+            crate::transport::config::TrafficAnalysisDefense::FullPadding => {
+                (policy.chaff_rate_pps, false)
+            }
+            crate::transport::config::TrafficAnalysisDefense::ConstantRate => {
+                (policy.constant_rate_pps, true)
+            }
+        };
+        let Some(rate_pps) = std::num::NonZeroU32::new(rate_pps) else {
+            self.traffic_analysis = None;
+            return;
+        };
+
+        let max_udp_payload_size = self.config.max_udp_payload_size as u32;
+        let target_size = match policy.defense {
+            crate::transport::config::TrafficAnalysisDefense::FullPadding => max_udp_payload_size,
+            crate::transport::config::TrafficAnalysisDefense::ConstantRate => {
+                policy.chaff_size_bytes.min(max_udp_payload_size)
+            }
+            crate::transport::config::TrafficAnalysisDefense::Off => 0,
+        };
+        log::warn!(
+            "traffic-analysis defense enabled: mode={:?} rate_pps={} target_bytes={} estimated_max_bps={}",
+            policy.defense,
+            rate_pps,
+            target_size,
+            policy.estimated_max_bits_per_second(max_udp_payload_size)
+        );
+        self.traffic_analysis = Some(crate::stealth::TrafficAnalysisScheduler::with_lifecycle(
+            rate_pps.get(),
+            target_size,
+            true,
+            constant_rate,
+            Duration::from_millis(policy.idle_timeout_ms),
+            Duration::from_millis(policy.ramp_down_ms),
+        ));
+    }
+
     /// Set the ODCID used for Initial key derivation (RFC 9001).
     ///
     /// For clients this also initializes the current destination CID used in the first Initial
@@ -46,6 +87,7 @@ impl Connection {
         let initial_max_data = config.initial_max_data;
         let pmtu_enabled = config.pmtu_discovery_enabled();
         let pmtu_policy = config.pmtu_policy();
+        let traffic_analysis_base_policy = config.traffic_analysis_policy();
         let version_negotiation = super::version::VersionNegotiationState::new(config.version);
         let recovery = Self::configured_recovery(&config, dgram_send_max_size);
         let mut conn = Self {
@@ -135,21 +177,11 @@ impl Connection {
             pmtu: PmtuState::new(pmtu_enabled, pmtu_policy),
             pmtu_probe_pn: None,
             pmtu_above_floor_pns: HashSet::new(),
-            chaff: None,
+            traffic_analysis: None,
+            traffic_analysis_base_policy,
+            traffic_analysis_escalation_ceiling: None,
         };
-        // Initialize chaff generator when ConstantRate defense is configured
-        // with a non-zero chaff rate.
-        if matches!(
-            conn.config.traffic_analysis_defense,
-            crate::transport::config::TrafficAnalysisDefense::ConstantRate
-        ) && conn.config.chaff_rate_pps > 0
-        {
-            conn.chaff = Some(crate::stealth::ChaffGenerator::new(
-                conn.config.chaff_rate_pps,
-                conn.config.chaff_size_bytes,
-                true, // ack-eliciting so the peer generates cover ACKs
-            ));
-        }
+        conn.rebuild_traffic_analysis_scheduler();
         // Inherit strike register from config (server-side 0-RTT anti-replay).
         conn.strike_register = conn.config.strike_register.clone();
         // Apply configured initial RTT estimate before the first real measurement.

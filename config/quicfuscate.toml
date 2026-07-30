@@ -362,6 +362,39 @@ pmtu_max_mtu = 1500
 pmtu_probe_interval_ms = 60000
 pmtu_black_hole_timeout_ms = 10000
 
+# Active connection baseline. Off preserves the normal transport behavior.
+# FullPadding pads every 1-RTT packet and idle chaff to max_udp_payload.
+# ConstantRate uses chaff_size_bytes and maintains the configured fixed idle
+# cadence. Each enabled connection logs its estimated maximum wire cost before
+# IP/UDP overhead.
+[transport.traffic_analysis]
+defense = "off"
+chaff_rate_pps = 0
+chaff_size_bytes = 1280
+constant_rate_pps = 100
+idle_timeout_ms = 30000
+ramp_down_ms = 5000
+
+# Independent hard ceiling for policy requested by an authenticated QKey.
+# The requested policy remains inert until encrypted QKey possession succeeds.
+[transport.qkey_traffic_analysis_ceiling]
+defense = "constant-rate"
+chaff_rate_pps = 10000
+chaff_size_bytes = 65535
+constant_rate_pps = 1000
+idle_timeout_ms = 3600000
+ramp_down_ms = 60000
+
+# Operator ceiling for Intelligent level-2 escalation after QKey authentication.
+# Off makes Intelligent traffic-analysis escalation fail closed by default.
+[transport.intelligent_traffic_analysis_ceiling]
+defense = "off"
+chaff_rate_pps = 0
+chaff_size_bytes = 1280
+constant_rate_pps = 0
+idle_timeout_ms = 30000
+ramp_down_ms = 5000
+
 # ==============================================================================
 # PERFORMANCE OPTIMIZATION
 # ==============================================================================

@@ -14,7 +14,8 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 B="${QF_E2E_BINARY:-$PROJECT_ROOT/target/release/quicfuscate}"
-CERT_SOURCE_DIR="$PROJECT_ROOT/config/local"
+CA_SOURCE="${QF_E2E_CA:-$PROJECT_ROOT/config/local/ca.crt}"
+CA_KEY_SOURCE="${QF_E2E_CA_KEY:-$PROJECT_ROOT/config/local/ca.key}"
 CERT_DIR=""
 CERT=""
 KEY=""
@@ -30,7 +31,11 @@ CLIENT_CONFIG_ARGS=()
 SERVER_PRIVILEGE_ARGS=(--no-drop-privileges)
 SERVER_PID=""
 CLIENT_PID=""
+CAPTURE_PID=""
 NAMESPACES_CREATED=0
+TRAFFIC_CAPTURE_FILE="${QF_E2E_TRAFFIC_CAPTURE_FILE:-}"
+TRAFFIC_CAPTURE_SECONDS="${QF_E2E_TRAFFIC_CAPTURE_SECONDS:-10}"
+TRAFFIC_CAPTURE_DRAIN_SECONDS=1
 if [ -n "${QF_E2E_SERVER_CONFIG:-}" ]; then
   SERVER_CONFIG_ARGS=(--config "$QF_E2E_SERVER_CONFIG")
 fi
@@ -60,7 +65,18 @@ stop_owned_process() {
   wait "$pid" 2>/dev/null || true
 }
 
+stop_capture_process() {
+  if [ -z "$CAPTURE_PID" ]; then
+    return
+  fi
+
+  kill -INT "$CAPTURE_PID" 2>/dev/null || true
+  wait "$CAPTURE_PID" 2>/dev/null || true
+  CAPTURE_PID=""
+}
+
 cleanup() {
+  stop_capture_process
   stop_owned_process "$CLIENT_PID"
   CLIENT_PID=""
   stop_owned_process "$SERVER_PID"
@@ -109,7 +125,7 @@ fail() {
 }
 
 # --- fail closed before touching certificates or runtime resources ---
-if pgrep -x quicfuscate >/dev/null; then
+if pgrep -x quicfuscate >/dev/null && [ "${QF_E2E_ALLOW_EXISTING_RUNTIME:-0}" != "1" ]; then
   echo "FAIL: a pre-existing quicfuscate process is running; refusing broad cleanup" >&2
   exit 2
 fi
@@ -121,6 +137,20 @@ if [ -e "$ADMIN_SOCKET" ]; then
   echo "FAIL: admin socket path already exists; refusing to remove unowned path $ADMIN_SOCKET" >&2
   exit 2
 fi
+if [ -n "$TRAFFIC_CAPTURE_FILE" ]; then
+  if [ -e "$TRAFFIC_CAPTURE_FILE" ] || [ -e "${TRAFFIC_CAPTURE_FILE}.tcpdump.log" ]; then
+    echo "FAIL: traffic capture artifact already exists; refusing to overwrite $TRAFFIC_CAPTURE_FILE" >&2
+    exit 2
+  fi
+  if ! [[ "$TRAFFIC_CAPTURE_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "FAIL: QF_E2E_TRAFFIC_CAPTURE_SECONDS must be a positive integer" >&2
+    exit 2
+  fi
+  if ! command -v tcpdump >/dev/null 2>&1; then
+    echo "FAIL: tcpdump is required when QF_E2E_TRAFFIC_CAPTURE_FILE is set" >&2
+    exit 2
+  fi
+fi
 trap cleanup_on_exit EXIT
 
 # --- ensure server cert valid for the client's hardcoded validation SNI ---
@@ -128,18 +158,29 @@ CERT_DIR="$(mktemp -d /tmp/quicfuscate-tun-cert.XXXXXX)"
 CERT="$CERT_DIR/server.crt"
 KEY="$CERT_DIR/server.key"
 CA="$CERT_DIR/ca.crt"
-cp "$CERT_SOURCE_DIR/ca.crt" "$CA"
-cp "$CERT_SOURCE_DIR/ca.key" "$CERT_DIR/ca.key"
+if [ -s "$CA_SOURCE" ] && [ -s "$CA_KEY_SOURCE" ]; then
+  cp "$CA_SOURCE" "$CA"
+  cp "$CA_KEY_SOURCE" "$CERT_DIR/ca.key"
+elif [ -n "${QF_E2E_CA:-}" ] || [ -n "${QF_E2E_CA_KEY:-}" ]; then
+  fail "explicit CA source is incomplete: $CA_SOURCE / $CA_KEY_SOURCE"
+else
+  openssl req -x509 -newkey rsa:2048 \
+    -keyout "$CERT_DIR/ca.key" -out "$CA" -days 2 -nodes \
+    -subj "/CN=QuicFuscate TUN E2E CA" 2>/dev/null \
+    || fail "could not generate isolated test CA"
+fi
 cd "$CERT_DIR" || fail "could not enter certificate directory"
-cat > /tmp/leaf-ext.cnf <<EOF
+cat > "$CERT_DIR/leaf-ext.cnf" <<EOF
 basicConstraints=critical,CA:FALSE
 keyUsage=digitalSignature,keyEncipherment
 extendedKeyUsage=serverAuth
 subjectAltName=DNS:cdn.cloudflare.com,DNS:cloudflare-dns.com,DNS:one.one.one.one,DNS:warp.plus,DNS:workers.dev,DNS:localhost,IP:127.0.0.1,IP:10.10.0.1
 EOF
-openssl req -newkey rsa:2048 -keyout server.key -out /tmp/s.csr -nodes -subj "/CN=cdn.cloudflare.com" 2>/dev/null
-openssl x509 -req -in /tmp/s.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out /tmp/leaf.crt -days 365 -extfile /tmp/leaf-ext.cnf 2>/dev/null
-cat /tmp/leaf.crt ca.crt > server.crt
+openssl req -newkey rsa:2048 -keyout server.key -out server.csr \
+  -nodes -subj "/CN=cdn.cloudflare.com" 2>/dev/null
+openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
+  -out leaf.crt -days 2 -extfile leaf-ext.cnf 2>/dev/null
+cat leaf.crt ca.crt > server.crt
 cd "$PROJECT_ROOT" || fail "could not return to project root"
 
 # --- netns + veth ---
@@ -217,6 +258,43 @@ if [ "$(grep -c 'TLS handshake complete' /tmp/ns-cli.log)" = "0" ] || [ "$(grep 
   cat /tmp/ns-srv.log >&2
   cat /tmp/ns-cli.log >&2
   fail "TLS handshake did not complete on both sides"
+fi
+
+if [ -n "$TRAFFIC_CAPTURE_FILE" ]; then
+  mkdir -p "$(dirname "$TRAFFIC_CAPTURE_FILE")"
+  CAPTURE_STDERR="${TRAFFIC_CAPTURE_FILE}.tcpdump.log"
+  ip netns exec ns-cli tcpdump --immediate-mode -U -n -s 0 -B 4096 -i veth-cli \
+    -w "$TRAFFIC_CAPTURE_FILE" \
+    'udp and host 10.10.0.2 and host 10.10.0.1 and port 4433' \
+    2>"$CAPTURE_STDERR" &
+  CAPTURE_PID=$!
+  sleep 1
+  if ! kill -0 "$CAPTURE_PID" 2>/dev/null; then
+    cat "$CAPTURE_STDERR" >&2
+    fail "tcpdump did not remain active"
+  fi
+  CLIENT_CPU_TICKS_BEFORE="$(awk '{print $14 + $15}' "/proc/$CLIENT_PID/stat")"
+  CLOCK_TICKS_PER_SECOND="$(getconf CLK_TCK)"
+  CAPTURE_START_EPOCH="$(python3 -c 'import time; print(f"{time.time():.9f}")')"
+  sleep "$TRAFFIC_CAPTURE_SECONDS"
+  CAPTURE_END_EPOCH="$(python3 -c 'import time; print(f"{time.time():.9f}")')"
+  CLIENT_CPU_TICKS_AFTER="$(awk '{print $14 + $15}' "/proc/$CLIENT_PID/stat")"
+  # Keep capture alive past the measured end so libpcap can deliver and flush
+  # packets already accepted by the kernel. The analyzer clips the pcap to the
+  # exact timestamps above, so this drain interval cannot inflate the result.
+  sleep "$TRAFFIC_CAPTURE_DRAIN_SECONDS"
+  stop_capture_process
+  if [ ! -s "$TRAFFIC_CAPTURE_FILE" ]; then
+    fail "traffic capture is empty"
+  fi
+  CLIENT_CPU_PERCENT="$(
+    awk -v before="$CLIENT_CPU_TICKS_BEFORE" \
+      -v after="$CLIENT_CPU_TICKS_AFTER" \
+      -v ticks="$CLOCK_TICKS_PER_SECOND" \
+      -v seconds="$TRAFFIC_CAPTURE_SECONDS" \
+      'BEGIN { printf "%.3f", ((after - before) / ticks) * 100 / seconds }'
+  )"
+  echo "TRAFFIC_CAPTURE file=$TRAFFIC_CAPTURE_FILE duration_seconds=$TRAFFIC_CAPTURE_SECONDS capture_start_epoch=$CAPTURE_START_EPOCH capture_end_epoch=$CAPTURE_END_EPOCH client_cpu_percent=$CLIENT_CPU_PERCENT"
 fi
 
 echo "=== PING THROUGH TUNNEL (cli 10.0.1.2 -> srv 10.0.1.1) ==="

@@ -227,6 +227,7 @@ pub(crate) fn parse_live_server_initial_auth(
             key_id: record.id.clone(),
             expected_token_sha256: record.token_sha256.clone(),
             bandwidth_policy: record.bandwidth_policy.clone(),
+            traffic_analysis_policy: record.traffic_analysis_policy,
             authed: false,
             post_handshake_started_at: None,
             auth_attempt: Some(auth_attempt),

@@ -1380,10 +1380,14 @@ impl QuicFuscateConnection {
 
     /// Earliest instant the caller should poll `send` again.
     ///
-    /// This merges the outer pacing, stealth release, and QUIC recovery
-    /// (loss/PTO) deadlines so event loops never oversleep a release or probe.
+    /// This merges outer pacing, stealth release, QUIC recovery, and the one
+    /// transport-owned traffic-analysis deadline.
     pub fn next_send_deadline(&self) -> Option<Instant> {
-        [self.next_outbound_release_deadline(), self.conn.recovery_deadline()]
+        [
+            self.next_outbound_release_deadline(),
+            self.conn.recovery_deadline(),
+            self.conn.traffic_analysis_deadline(),
+        ]
             .into_iter()
             .flatten()
             .min()
@@ -1522,6 +1526,9 @@ impl QuicFuscateConnection {
             .do_tls_handshake(self.tls_ch_override_template.as_deref())
             .map_err(|e| crate::error::ConnectionError::Transport(e.to_string()))?;
         let established = self.conn.is_established();
+        if established {
+            self.conn.on_traffic_analysis_timeout(now);
+        }
         let fec_wire_ready = self
             .conn
             .post_handshake_datagram_ready()
@@ -2473,6 +2480,10 @@ impl QuicFuscateConnection {
 
         Self::run_update_state_phase(diagnostics_enabled, "stealth-intelligence", || {
             self.stealth_manager.sync_intelligent_level();
+            let level = self.stealth_manager.intelligent_runtime_level();
+            if let Err(error) = self.conn.apply_intelligent_traffic_analysis_level(level) {
+                warn!("Intelligent traffic-analysis policy transition failed: {error}");
+            }
         });
     }
 

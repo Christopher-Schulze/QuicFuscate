@@ -47,6 +47,8 @@ pub struct QKeyEntry {
     pub fec: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bandwidth_policy: Option<super::bandwidth::BandwidthPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub traffic_analysis_policy: Option<crate::transport::config::TrafficAnalysisPolicy>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -66,6 +68,8 @@ pub struct QKeyRecord {
     pub fec: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bandwidth_policy: Option<super::bandwidth::BandwidthPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traffic_analysis_policy: Option<crate::transport::config::TrafficAnalysisPolicy>,
     #[serde(default)]
     pub created_at: u64,
     #[serde(default)]
@@ -168,6 +172,11 @@ impl QKeyRegistry {
             if let Some(policy) = entry.bandwidth_policy.as_ref() {
                 policy.validate().map_err(QKeyRegistryError::InvalidRecord)?;
             }
+            if let Some(policy) = entry.traffic_analysis_policy {
+                policy
+                    .validate()
+                    .map_err(|error| QKeyRegistryError::InvalidRecord(error.to_string()))?;
+            }
             if !seen.insert(entry.id.clone()) {
                 updated = true;
                 continue;
@@ -220,8 +229,32 @@ impl QKeyRegistry {
         name: Option<String>,
         bandwidth_policy: Option<super::bandwidth::BandwidthPolicy>,
     ) -> Result<QKeyEntry, QKeyRegistryError> {
+        self.insert_with_ttl_and_policies(
+            qkey,
+            token_hex,
+            ttl_seconds,
+            name,
+            bandwidth_policy,
+            None,
+        )
+    }
+
+    pub fn insert_with_ttl_and_policies(
+        &mut self,
+        qkey: String,
+        token_hex: QKeyToken,
+        ttl_seconds: Option<u64>,
+        name: Option<String>,
+        bandwidth_policy: Option<super::bandwidth::BandwidthPolicy>,
+        traffic_analysis_policy: Option<crate::transport::config::TrafficAnalysisPolicy>,
+    ) -> Result<QKeyEntry, QKeyRegistryError> {
         if let Some(policy) = bandwidth_policy.as_ref() {
             policy.validate().map_err(QKeyRegistryError::InvalidRecord)?;
+        }
+        if let Some(policy) = traffic_analysis_policy {
+            policy
+                .validate()
+                .map_err(|error| QKeyRegistryError::InvalidRecord(error.to_string()))?;
         }
         let qkey = SecretString::new(qkey, "qkey_registry_input");
         let mut candidate = self.active_entries();
@@ -236,6 +269,7 @@ impl QKeyRegistry {
                 stealth: existing.stealth,
                 fec: existing.fec,
                 bandwidth_policy: existing.bandwidth_policy,
+                traffic_analysis_policy: existing.traffic_analysis_policy,
             });
         }
         let parsed = crate::engine::qkey::parse(qkey.trim()).ok();
@@ -256,6 +290,7 @@ impl QKeyRegistry {
             stealth,
             fec,
             bandwidth_policy,
+            traffic_analysis_policy,
             created_at: current_epoch_secs(),
             expires_at,
         };
@@ -280,6 +315,7 @@ impl QKeyRegistry {
             stealth: record.stealth,
             fec: record.fec,
             bandwidth_policy: record.bandwidth_policy,
+            traffic_analysis_policy: record.traffic_analysis_policy,
         })
     }
 
@@ -297,6 +333,7 @@ impl QKeyRegistry {
                 stealth: entry.stealth,
                 fec: entry.fec,
                 bandwidth_policy: entry.bandwidth_policy,
+                traffic_analysis_policy: entry.traffic_analysis_policy,
             })
             .collect()
     }
@@ -506,6 +543,67 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_traffic_analysis_policy_roundtrips_through_registry() {
+        let token_hex = mk_token_hex('e');
+        let qkey_value = mk_qkey_with_token(&token_hex);
+        let id = qkey_id(&qkey_value);
+        let policy = crate::transport::config::TrafficAnalysisPolicy {
+            defense: crate::transport::config::TrafficAnalysisDefense::ConstantRate,
+            chaff_rate_pps: 0,
+            chaff_size_bytes: 1200,
+            constant_rate_pps: 80,
+            idle_timeout_ms: 20_000,
+            ramp_down_ms: 2_000,
+        };
+        let mut registry = QKeyRegistry::new_in_memory(16, None);
+
+        let entry = registry
+            .insert_with_ttl_and_policies(
+                qkey_value,
+                token_hex.into(),
+                None,
+                None,
+                None,
+                Some(policy),
+            )
+            .expect("valid policy");
+
+        assert_eq!(entry.traffic_analysis_policy, Some(policy));
+        assert_eq!(
+            registry
+                .lookup_initial_id_token(id.as_bytes())
+                .expect("stored record")
+                .traffic_analysis_policy,
+            Some(policy)
+        );
+    }
+
+    #[test]
+    fn registry_rejects_unsafe_traffic_analysis_policy() {
+        let token_hex = mk_token_hex('f');
+        let qkey_value = mk_qkey_with_token(&token_hex);
+        let invalid = crate::transport::config::TrafficAnalysisPolicy {
+            defense: crate::transport::config::TrafficAnalysisDefense::ConstantRate,
+            constant_rate_pps:
+                crate::transport::config::TrafficAnalysisPolicy::MAX_CONSTANT_RATE_PPS + 1,
+            ..crate::transport::config::TrafficAnalysisPolicy::default()
+        };
+        let mut registry = QKeyRegistry::new_in_memory(16, None);
+
+        assert!(registry
+            .insert_with_ttl_and_policies(
+                qkey_value,
+                token_hex.into(),
+                None,
+                None,
+                None,
+                Some(invalid),
+            )
+            .is_err());
+        assert!(registry.entries.is_empty());
+    }
+
+    #[test]
     fn qkey_id_is_stable_across_prefix_case_and_whitespace() {
         let token_hex = mk_token_hex('f');
         let qkey_value = mk_qkey_with_token(&token_hex);
@@ -599,6 +697,7 @@ mod tests {
                 stealth: None,
                 fec: None,
                 bandwidth_policy: None,
+                traffic_analysis_policy: None,
                 created_at: now,
                 expires_at: None,
             },
@@ -610,6 +709,7 @@ mod tests {
                 stealth: None,
                 fec: None,
                 bandwidth_policy: None,
+                traffic_analysis_policy: None,
                 created_at: now,
                 expires_at: None,
             },
@@ -621,6 +721,7 @@ mod tests {
                 stealth: None,
                 fec: None,
                 bandwidth_policy: None,
+                traffic_analysis_policy: None,
                 created_at: now,
                 expires_at: Some(now.saturating_sub(1)),
             },
@@ -632,6 +733,7 @@ mod tests {
                 stealth: None,
                 fec: None,
                 bandwidth_policy: None,
+                traffic_analysis_policy: None,
                 created_at: now,
                 expires_at: None,
             },

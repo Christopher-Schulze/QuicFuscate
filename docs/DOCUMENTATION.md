@@ -823,6 +823,18 @@ The stealth timing system has been fully refactored to eliminate blocking `std::
 - Transport stealth jitter (`stealth_timing_enabled` / `stealth_timing_max_jitter_us`) is merged into the same release deadline; `transport::Connection::send` no longer maintains a parallel gate.
 - When delay expires, clears the block and proceeds to flush `outgoing_fec_packets`.
 
+#### Traffic-Analysis Defense Scheduler
+
+`transport::Connection` owns one `TrafficAnalysisScheduler` deadline and one pending chaff slot for both enabled defenses:
+- `FullPadding` pads every emitted 1-RTT packet to the current maximum UDP payload and uses independently jittered idle chaff at `chaff_rate_pps`.
+- `ConstantRate` emits configured-size idle chaff at an exact phase-locked `constant_rate_pps` cadence. Missed deadlines advance to the next phase boundary without catch-up bursts.
+- Real data, ACK-only output, control, recovery, and PMTU probes always take priority and consume a due cadence slot. Only application STREAM or DATAGRAM traffic extends the idle lifecycle, so cover ACKs cannot prevent soft stop. Congestion defers the single pending chaff slot without queue growth or packet-number gaps.
+- `idle_timeout_ms` starts a bounded `ramp_down_ms` soft stop; real traffic reactivates the scheduler, while connection shutdown permanently cancels it.
+- `QuicFuscateConnection::next_send_deadline()` merges the traffic-analysis deadline with outer pacing, stealth release, and QUIC recovery so live loops cannot oversleep the timer.
+- An enabled policy logs its estimated maximum pre-IP/UDP wire cost. Packet size and cadence are bounded by the validated transport policy and current path UDP payload.
+
+The active baseline comes from `[transport.traffic_analysis]`. `[transport.qkey_traffic_analysis_ceiling]` is an independent operator ceiling for per-QKey requests and remains inert until encrypted bearer authentication succeeds. `[transport.intelligent_traffic_analysis_ceiling]` controls post-authentication Intelligent level-2 escalation; its default `off` value is fail-closed. Failed or incomplete QKey authentication cannot activate either upgrade.
+
 ### Compression Module
 
 The compression module (`src/compress.rs`) provides adaptive zstd payload compression with intelligent policy control:
@@ -2440,7 +2452,7 @@ Authenticated HTTP operations accept canonical session IDs, remote socket addres
 - `POST /api/clients/{id}/bandwidth` with a complete `BandwidthPolicy` JSON body
 - `POST /api/clients/{id}/quota/reset`
 
-QKey creation accepts the same object as optional `bandwidth_policy`. Runtime denials and admin mutations emit typed audit context. Prometheus exports allowed bytes and `rate_limited`, `daily_quota_exceeded`, and `monthly_quota_exceeded` outcomes by direction, plus active DRR clients and delivered packet/byte totals.
+QKey creation accepts the same object as optional `bandwidth_policy` and accepts an optional validated `traffic_analysis_policy`. The traffic-analysis request is persisted but remains inert until encrypted bearer authentication, then is bounded by `[transport.qkey_traffic_analysis_ceiling]`. Runtime denials and admin mutations emit typed audit context. Prometheus exports allowed bytes and `rate_limited`, `daily_quota_exceeded`, and `monthly_quota_exceeded` outcomes by direction, plus active DRR clients and delivered packet/byte totals.
 
 Commit `b9a338317e38cd6df2b9b87ba9d9bde085351e0c` passes CI `30487629259` and Clippy Matrix `30487632307`. Its exact isolated ARM64 source archive `73f2c10d2f85daa4e5701b011e242200bd66b3546fc628d1361807ded20c062b` produced binary `fa841b580df82bddeae1f1449e719285ede18f895543eca6eaeb27b1c7939434`. The production-loglevel three-client proof passed unlimited throughput at 12.56-12.62 Mbit/s, exact 10-Mbit/s policies at 9.97 Mbit/s, burst at 22.57-22.67 Mbit/s, exact 2.4-MB daily quota exhaustion at 6.14 Mbit/s, and weighted `1:2:1` service at 2.47/4.75/2.42 Mbit/s. Both baseline and shaped topologies retained exact policy and binary manifests, used `info` logging, reported empty runtime-error files, and removed every owned process, namespace, link, and admin socket.
  
@@ -2682,7 +2694,7 @@ Keep `--admin-web-root` pointing at `assets/web-admin` so `/_app/...` paths reso
 Admin HTTP contract notes:
 - JSON endpoints respond with `AdminResponse { success, message, data }` and `/api/clients` is wrapped.
 - Admin API failures return appropriate HTTP error statuses (`4xx`/`5xx`) while keeping the same `AdminResponse` envelope (`success: false`, optional `message`/`data`).
-- `/api/qkey` is `POST` only, accepts `{ stealth, fec, ttl_seconds }` (presets + optional TTL), and returns `{ qkey, created_at, expires_at }` in `data`. The returned `qkey` is the one-time reveal point for the raw credential.
+- `/api/qkey` is `POST` only, accepts `{ stealth, fec, ttl_seconds, bandwidth_policy, traffic_analysis_policy }` (presets, optional TTL, and optional validated policies), and returns `{ qkey, created_at, expires_at }` in `data`. The returned `qkey` is the one-time reveal point for the raw credential.
 - `/api/qkeys` returns metadata-only entries (`id`, optional `name`, `created_at`, optional `expires_at`, optional policy hints). Expired entries are pruned and the endpoint does not expose or reconstruct raw QKey strings.
 - QKey strings include the embedded token field and are validated at issuance/import boundaries rather than being replayed through the registry list contract.
 - `/api/clients/{id}/kick` is supported as an alias for `/api/kick`.
@@ -2971,6 +2983,13 @@ For full stealth-mode semantics and all `[stealth]` keys, use:
 ### Configuration Reference (Full)
 
 For the complete, commented runtime configuration with all canonical sections and defaults, see `config/quicfuscate.toml`.
+
+Traffic-analysis configuration uses three independent policy sections:
+- `[transport.traffic_analysis]`: active baseline with `defense`, `chaff_rate_pps`, `chaff_size_bytes`, `constant_rate_pps`, `idle_timeout_ms`, and `ramp_down_ms`.
+- `[transport.qkey_traffic_analysis_ceiling]`: maximum policy an authenticated QKey may request.
+- `[transport.intelligent_traffic_analysis_ceiling]`: maximum post-authentication Intelligent escalation policy.
+
+Valid defenses are `off`, `full-padding`, and `constant-rate`. Enabled policies are intentionally bandwidth-expensive and emit a startup warning with their bounded estimated bit rate.
 
 ### Environment Variable Overrides
 
@@ -3628,6 +3647,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `test-performance-regression.sh` - Performance regression with baseline comparison
 - `test-e2e.sh` - End-to-end integration tests with real network scenarios
 - `tun-e2e-netns.sh` - Linux network-namespace production smoke: real server/client TUN over authenticated H3/MASQUE CONNECT-UDP and a hard 0%-loss ping assertion through the tunnel
+- `tun-e2e-traffic-analysis-netns.sh` - Exact-artifact Linux capture proof for 10 PPS full-padding idle chaff and 100 PPS constant-rate defense. It verifies complete ten-second capture windows, exact UDP payload sizes, reverse ACK/control traffic, explicit cost warnings, CPU and bandwidth ceilings, artifact identity, and residue-free teardown.
 - `tun-e2e-multi-client-dual-stack-netns.sh` - Exact-artifact Linux proof for three isolated dual-stack clients, source ownership, fan-out, PTB, DPLPMTUD black-hole recovery, positive-interval throughput, NAT, explicit client-to-client policy, and clean teardown
 - `tun-e2e-dns-leak-netns.sh` - Linux network-namespace DNS leak proof: real server/client TUN over MASQUE, DNS query through the server TUN IP, and tcpdump assertion that the client underlay sees zero raw TCP/UDP port 53 packets
 - `test-e2e-admin-web.sh` - Admin web E2E (login/status/config/qkey + headless QKey connect via `qf-e2e-client` and `qf-e2e-desktop`)

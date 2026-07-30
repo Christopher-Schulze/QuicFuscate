@@ -33,6 +33,29 @@ mod tests {
         )
     }
 
+    fn enable_test_traffic_analysis(
+        connection: &mut Connection,
+        mode: crate::transport::config::TrafficAnalysisDefense,
+        rate_pps: u32,
+        target_size: u32,
+    ) -> Instant {
+        let constant_rate =
+            matches!(mode, crate::transport::config::TrafficAnalysisDefense::ConstantRate);
+        connection.config.set_traffic_analysis_defense(mode);
+        connection.config.set_chaff_size_bytes(target_size);
+        connection.pmtu = PmtuState::new(false, PmtuPolicy::default());
+        connection.traffic_analysis =
+            Some(crate::stealth::TrafficAnalysisScheduler::with_lifecycle(
+                rate_pps,
+                target_size,
+                true,
+                constant_rate,
+                Duration::from_secs(60),
+                Duration::from_secs(5),
+            ));
+        connection.traffic_analysis_deadline().expect("established scheduler deadline")
+    }
+
     #[test]
     fn last_activity_marker_matches_the_heartbeat_activity_source() {
         let mut connection = make_conn();
@@ -923,6 +946,308 @@ mod tests {
 
         assert!(!send_info.congestion_controlled);
         assert_eq!(pair.server.recovery.bytes_in_flight, bytes_in_flight);
+    }
+
+    #[test]
+    fn traffic_analysis_off_mode_never_constructs_a_scheduler() {
+        let mut config = Config::new_with_version(PROTOCOL_VERSION).unwrap();
+        config.set_chaff_rate_pps(10);
+        config.set_traffic_analysis_defense(
+            crate::transport::config::TrafficAnalysisDefense::Off,
+        );
+
+        let connection = Connection::new_with_role(
+            b"traffic-analysis-off",
+            local(),
+            peer(),
+            config,
+            false,
+        );
+
+        assert!(connection.traffic_analysis.is_none());
+        assert!(connection.traffic_analysis_deadline().is_none());
+    }
+
+    #[test]
+    fn traffic_analysis_policy_applies_atomically_to_a_live_connection() {
+        let mut pair = bench_paired_1rtt_connections();
+        let policy = crate::transport::config::TrafficAnalysisPolicy {
+            defense: crate::transport::config::TrafficAnalysisDefense::ConstantRate,
+            chaff_rate_pps: 0,
+            chaff_size_bytes: 1200,
+            constant_rate_pps: 80,
+            idle_timeout_ms: 20_000,
+            ramp_down_ms: 2_000,
+        };
+
+        pair.client.apply_traffic_analysis_policy(policy).expect("valid live policy");
+
+        assert_eq!(pair.client.config.traffic_analysis_policy(), policy);
+        assert!(pair.client.traffic_analysis_deadline().is_some());
+
+        pair.client
+            .apply_traffic_analysis_policy(crate::transport::config::TrafficAnalysisPolicy {
+                defense: crate::transport::config::TrafficAnalysisDefense::Off,
+                ..policy
+            })
+            .expect("off policy");
+        assert!(pair.client.traffic_analysis.is_none());
+        assert!(pair.client.traffic_analysis_deadline().is_none());
+    }
+
+    #[test]
+    fn invalid_live_traffic_analysis_policy_preserves_the_active_scheduler() {
+        let mut pair = bench_paired_1rtt_connections();
+        let policy = crate::transport::config::TrafficAnalysisPolicy {
+            defense: crate::transport::config::TrafficAnalysisDefense::ConstantRate,
+            chaff_rate_pps: 0,
+            chaff_size_bytes: 1200,
+            constant_rate_pps: 80,
+            idle_timeout_ms: 20_000,
+            ramp_down_ms: 2_000,
+        };
+        pair.client.apply_traffic_analysis_policy(policy).expect("valid live policy");
+        let deadline = pair.client.traffic_analysis_deadline();
+
+        let invalid = crate::transport::config::TrafficAnalysisPolicy {
+            constant_rate_pps:
+                crate::transport::config::TrafficAnalysisPolicy::MAX_CONSTANT_RATE_PPS + 1,
+            ..policy
+        };
+        assert!(pair.client.apply_traffic_analysis_policy(invalid).is_err());
+
+        assert_eq!(pair.client.config.traffic_analysis_policy(), policy);
+        assert_eq!(pair.client.traffic_analysis_deadline(), deadline);
+    }
+
+    #[test]
+    fn intelligent_traffic_analysis_escalation_is_fail_closed_until_authorized() {
+        let mut config = Config::new_with_version(PROTOCOL_VERSION).unwrap();
+        let escalation = crate::transport::config::TrafficAnalysisPolicy {
+            defense: crate::transport::config::TrafficAnalysisDefense::FullPadding,
+            chaff_rate_pps: 10,
+            chaff_size_bytes: 1200,
+            constant_rate_pps: 0,
+            idle_timeout_ms: 30_000,
+            ramp_down_ms: 5_000,
+        };
+        config
+            .set_intelligent_traffic_analysis_ceiling(escalation)
+            .expect("valid escalation ceiling");
+        let mut connection =
+            Connection::new_with_role(b"intelligent-auth", local(), peer(), config, true);
+
+        connection
+            .apply_intelligent_traffic_analysis_level(2)
+            .expect("unauthorized transition is a no-op");
+        assert_eq!(
+            connection.traffic_analysis_policy().defense,
+            crate::transport::config::TrafficAnalysisDefense::Off
+        );
+
+        connection.authorize_intelligent_traffic_analysis(None).expect("authorization");
+        connection
+            .apply_intelligent_traffic_analysis_level(2)
+            .expect("authorized escalation");
+        assert_eq!(connection.traffic_analysis_policy(), escalation);
+        assert!(connection.traffic_analysis.is_some());
+
+        connection
+            .apply_intelligent_traffic_analysis_level(0)
+            .expect("de-escalation");
+        assert_eq!(
+            connection.traffic_analysis_policy().defense,
+            crate::transport::config::TrafficAnalysisDefense::Off
+        );
+        assert!(connection.traffic_analysis.is_none());
+    }
+
+    #[test]
+    fn traffic_analysis_chaff_is_congestion_deferred_exact_sized_and_sequential() {
+        let mut pair = bench_paired_1rtt_connections();
+        let first_deadline = enable_test_traffic_analysis(
+            &mut pair.client,
+            crate::transport::config::TrafficAnalysisDefense::ConstantRate,
+            100,
+            1200,
+        );
+        pair.client.on_traffic_analysis_timeout(first_deadline);
+        assert!(pair
+            .client
+            .traffic_analysis
+            .as_ref()
+            .is_some_and(|scheduler| scheduler.has_pending_chaff()));
+
+        pair.client.recovery.cwnd = pair.client.recovery.bytes_in_flight;
+        let first_packet_number = pair.client.next_send_pn_by_space[2];
+        let mut packet = [0u8; 1500];
+        assert_eq!(pair.client.send(&mut packet).unwrap_err(), ConnectionError::Done);
+        assert_eq!(pair.client.next_send_pn_by_space[2], first_packet_number);
+        assert!(pair
+            .client
+            .traffic_analysis
+            .as_ref()
+            .is_some_and(|scheduler| scheduler.has_pending_chaff()));
+
+        pair.client.recovery.cwnd = 64 * 1024;
+        let (first_len, first_info) = pair.client.send(&mut packet).expect("first chaff");
+        assert_eq!(first_len, 1200);
+        assert!(first_info.congestion_controlled);
+        assert_eq!(pair.client.next_send_pn_by_space[2], first_packet_number + 1);
+        pair.server.recv(&mut packet[..first_len], &pair.recv_info).expect("first chaff decrypts");
+
+        let second_deadline = pair
+            .client
+            .traffic_analysis_deadline()
+            .expect("second chaff deadline");
+        pair.client.on_traffic_analysis_timeout(second_deadline);
+        let (second_len, second_info) = pair.client.send(&mut packet).expect("second chaff");
+        assert_eq!(second_len, 1200);
+        assert!(second_info.congestion_controlled);
+        assert_eq!(pair.client.next_send_pn_by_space[2], first_packet_number + 2);
+        pair.server.recv(&mut packet[..second_len], &pair.recv_info).expect("second chaff decrypts");
+    }
+
+    #[test]
+    fn traffic_analysis_chaff_ack_releases_congestion_budget() {
+        let mut pair = bench_paired_1rtt_connections();
+        let deadline = enable_test_traffic_analysis(
+            &mut pair.client,
+            crate::transport::config::TrafficAnalysisDefense::ConstantRate,
+            100,
+            1200,
+        );
+        pair.client.on_traffic_analysis_timeout(deadline);
+        let mut packet = [0u8; 1500];
+        let (chaff_len, _) = pair.client.send(&mut packet).expect("chaff");
+        pair.server.recv(&mut packet[..chaff_len], &pair.recv_info).expect("chaff decrypts");
+        assert!(pair.client.recovery.bytes_in_flight > 0);
+        assert!(pair.server.has_pending_application_ack());
+
+        let (ack_len, ack_info) = pair.server.send(&mut packet).expect("ACK");
+        assert!(!ack_info.congestion_controlled);
+        pair.client
+            .recv(
+                &mut packet[..ack_len],
+                &RecvInfo {
+                    from: pair.server.local_addr,
+                    to: pair.client.local_addr,
+                    ecn: None,
+                },
+            )
+            .expect("ACK decrypts");
+
+        assert_eq!(pair.client.recovery.bytes_in_flight, 0);
+    }
+
+    #[test]
+    fn full_padding_chaff_uses_the_complete_udp_payload_budget() {
+        let mut pair = bench_paired_1rtt_connections();
+        pair.client.config.set_max_send_udp_payload_size(1500);
+        pair.client.dgram_send_max_size = 1500;
+        pair.server.config.set_max_recv_udp_payload_size(1500);
+        pair.client.pmtu = PmtuState::new(true, PmtuPolicy::default());
+        let probe_time = Instant::now();
+        pair.client.pmtu.on_probe_sent(1500, probe_time);
+        pair.client.pmtu.on_probe_acked(probe_time);
+        pair.client
+            .apply_traffic_analysis_policy(crate::transport::config::TrafficAnalysisPolicy {
+                defense: crate::transport::config::TrafficAnalysisDefense::FullPadding,
+                chaff_rate_pps: 10,
+                chaff_size_bytes: 1280,
+                constant_rate_pps: 100,
+                idle_timeout_ms: 60_000,
+                ramp_down_ms: 5_000,
+            })
+            .expect("full-padding policy");
+        let deadline = pair.client.traffic_analysis_deadline().expect("deadline");
+        pair.client.on_traffic_analysis_timeout(deadline);
+        let scheduler = pair.client.traffic_analysis.as_ref().expect("scheduler");
+        assert_eq!(scheduler.chaff_size_bytes(), 1500);
+
+        let mut packet = [0u8; 1500];
+        let (packet_len, _) = pair.client.send(&mut packet).expect("full-padding chaff");
+        assert_eq!(packet_len, 1500);
+        pair.server.recv(&mut packet, &pair.recv_info).expect("full-padding chaff decrypts");
+    }
+
+    #[test]
+    fn traffic_analysis_pending_slot_never_turns_ack_only_into_chaff() {
+        let mut pair = bench_paired_1rtt_connections();
+        let deadline = enable_test_traffic_analysis(
+            &mut pair.server,
+            crate::transport::config::TrafficAnalysisDefense::ConstantRate,
+            100,
+            1200,
+        );
+        pair.server.on_traffic_analysis_timeout(deadline);
+        assert!(pair.server.pkt_spaces[2].on_packet_recv(7));
+        pair.server.pkt_spaces[2].note_ack_eliciting(0, 1);
+        let bytes_in_flight = pair.server.recovery.bytes_in_flight;
+        let mut packet = [0u8; 1500];
+
+        let (packet_len, send_info) = pair.server.send(&mut packet).expect("ACK must serialize");
+
+        assert_eq!(packet_len, 1200);
+        assert!(!send_info.congestion_controlled);
+        assert_eq!(pair.server.recovery.bytes_in_flight, bytes_in_flight);
+        assert!(pair
+            .server
+            .traffic_analysis
+            .as_ref()
+            .is_some_and(|scheduler| !scheduler.has_pending_chaff()));
+        pair.client.recv(&mut packet[..packet_len], &pair.recv_info).expect("ACK decrypts");
+    }
+
+    #[test]
+    fn traffic_analysis_real_stream_data_consumes_the_due_slot_first() {
+        let mut pair = bench_paired_1rtt_connections();
+        let deadline = enable_test_traffic_analysis(
+            &mut pair.client,
+            crate::transport::config::TrafficAnalysisDefense::ConstantRate,
+            100,
+            1200,
+        );
+        pair.client.on_traffic_analysis_timeout(deadline);
+        let payload = b"real data must win over a due chaff slot";
+        pair.client.stream_send(0, payload, false).expect("stream enqueue");
+        let packet_number = pair.client.next_send_pn_by_space[2];
+        let mut packet = [0u8; 1500];
+
+        let (packet_len, send_info) = pair.client.send(&mut packet).expect("stream packet");
+
+        assert_eq!(packet_len, 1200);
+        assert!(send_info.congestion_controlled);
+        assert_eq!(pair.client.next_send_pn_by_space[2], packet_number + 1);
+        assert!(pair
+            .client
+            .traffic_analysis
+            .as_ref()
+            .is_some_and(|scheduler| !scheduler.has_pending_chaff()));
+        pair.server.recv(&mut packet[..packet_len], &pair.recv_info).expect("stream decrypts");
+        let mut received = vec![0u8; payload.len()];
+        let (received_len, fin) = pair.server.stream_recv(0, &mut received).expect("stream receive");
+        assert_eq!(&received[..received_len], payload);
+        assert!(!fin);
+        assert_eq!(pair.client.send(&mut packet).unwrap_err(), ConnectionError::Done);
+    }
+
+    #[test]
+    fn traffic_analysis_connection_shutdown_cancels_deadline_and_pending_slot() {
+        let mut pair = bench_paired_1rtt_connections();
+        let deadline = enable_test_traffic_analysis(
+            &mut pair.client,
+            crate::transport::config::TrafficAnalysisDefense::FullPadding,
+            10,
+            1200,
+        );
+        pair.client.on_traffic_analysis_timeout(deadline);
+        pair.client.close(true, 0, b"shutdown").expect("close");
+
+        let scheduler = pair.client.traffic_analysis.as_ref().expect("scheduler retained");
+        assert_eq!(scheduler.phase(), crate::stealth::TrafficAnalysisPhase::Cancelled);
+        assert!(!scheduler.has_pending_chaff());
+        assert!(pair.client.traffic_analysis_deadline().is_none());
     }
 
     #[test]
