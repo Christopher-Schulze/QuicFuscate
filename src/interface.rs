@@ -86,6 +86,9 @@ pub mod app_config {
             stealth.enable_traffic_padding = parsed.stealth.enable_traffic_padding;
             stealth.enable_timing_obfuscation = parsed.stealth.enable_timing_obfuscation;
             stealth.enable_protocol_mimicry = parsed.stealth.enable_protocol_mimicry;
+            stealth.enable_network_fingerprint_normalization =
+                parsed.stealth.enable_network_fingerprint_normalization;
+            stealth.suppress_icmp_unreachable = parsed.stealth.suppress_icmp_unreachable;
             stealth.enable_doh = parsed.stealth.enable_doh;
             stealth.doh_provider = parsed.stealth.doh_provider.clone();
             stealth.max_padding_size = parsed.stealth.max_padding_size;

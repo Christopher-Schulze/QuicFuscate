@@ -21,6 +21,7 @@ mod tests {
             stealth_manager,
             optimization_manager,
             fec_config: FecConfig::default(),
+            tunnel_ingress_normalizer: PacketNormalizer::new(OsFingerprintProfile::Disabled),
         })
     }
 
@@ -77,8 +78,7 @@ mod tests {
     fn asymmetric_stealth_server_emits_no_raw_h3_cover_stream() {
         use crate::transport::connection::{bench_paired_1rtt_connections, BenchConnectionPair};
 
-        let BenchConnectionPair { client, server, recv_info } =
-            bench_paired_1rtt_connections();
+        let BenchConnectionPair { client, server, recv_info } = bench_paired_1rtt_connections();
         let wrap = |conn, local_addr, peer_addr, stealth_config| {
             let optimization_manager =
                 Arc::new(OptimizationManager::from_cfg(OptimizeConfig::default()));
@@ -99,6 +99,7 @@ mod tests {
                 stealth_manager,
                 optimization_manager,
                 fec_config,
+                tunnel_ingress_normalizer: PacketNormalizer::new(OsFingerprintProfile::Disabled),
             })
         };
 
@@ -106,14 +107,12 @@ mod tests {
         server_config.enable_timing_obfuscation = false;
         server_config.enable_traffic_padding = false;
         let mut server = wrap(server, recv_info.to, recv_info.from, server_config);
-        let mut client =
-            wrap(client, recv_info.from, recv_info.to, StealthConfig::performance());
+        let mut client = wrap(client, recv_info.from, recv_info.to, StealthConfig::performance());
         server.init_http3().expect("server H3 initialization");
         client.init_http3().expect("client H3 initialization");
 
         let mut packet = [0u8; 2048];
-        let (len, send_info) =
-            server.send_with_info(&mut packet).expect("server cover PING send");
+        let (len, send_info) = server.send_with_info(&mut packet).expect("server cover PING send");
         client
             .recv_on_path(&packet[..len], send_info.from, send_info.to)
             .expect("client receives server cover PING");
@@ -136,12 +135,7 @@ mod tests {
         };
 
         for _ in 0..64 {
-            QuicFuscateConnection::apply_fec_transport_feedback(
-                &mut fec,
-                send_only,
-                1.0,
-                false,
-            );
+            QuicFuscateConnection::apply_fec_transport_feedback(&mut fec, send_only, 1.0, false);
         }
 
         assert_eq!(
@@ -333,8 +327,7 @@ mod tests {
     #[test]
     fn pending_path_control_preempts_buffered_fec_datagram() {
         let mut connection = test_connection();
-        *connection.conn =
-            crate::transport::connection::bench_paired_1rtt_connections().client;
+        *connection.conn = crate::transport::connection::bench_paired_1rtt_connections().client;
         let new_local: SocketAddr = "127.0.0.1:29103".parse().unwrap();
         let new_peer: SocketAddr = "127.0.0.1:29104".parse().unwrap();
         connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
@@ -345,9 +338,10 @@ mod tests {
         });
         connection.conn.migrate(new_local, new_peer).expect("migration candidate");
         assert_eq!(
-            connection.conn.pending_path_validation_for_test().map(|(_, local, peer, _)| {
-                (local, peer)
-            }),
+            connection
+                .conn
+                .pending_path_validation_for_test()
+                .map(|(_, local, peer, _)| { (local, peer) }),
             Some((new_local, new_peer))
         );
         assert!(connection.conn.has_sendable_path_control());
@@ -494,10 +488,7 @@ mod tests {
         let auto = connection.set_fec_control_policy(crate::fec::FecControlPolicy::Auto);
 
         assert_eq!(off.controller.effective_policy, crate::fec::FecControlPolicy::Off);
-        assert_eq!(
-            repeated_off.controller.previous_policy,
-            crate::fec::FecControlPolicy::Off
-        );
+        assert_eq!(repeated_off.controller.previous_policy, crate::fec::FecControlPolicy::Off);
         assert_eq!(repeated_off.queued_repairs_discarded, 0);
         assert_eq!(auto.controller.effective_policy, crate::fec::FecControlPolicy::Auto);
         assert_eq!(auto.controller.effective_mode, crate::fec::FecMode::Zero);

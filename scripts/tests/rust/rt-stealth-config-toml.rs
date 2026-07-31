@@ -24,6 +24,8 @@ fn stealth_config_from_toml_overrides_fields_and_updates_policy() {
 [stealth]
 initial_browser = "Firefox"
 initial_os = "Linux"
+enable_network_fingerprint_normalization = false
+suppress_icmp_unreachable = true
 use_tls_cover = true
 enable_doh = false
 doh_provider = "https://example.com/doh"
@@ -48,6 +50,8 @@ deny = ["image/*"]
     let cfg = StealthConfig::from_toml(toml).expect("parse stealth toml");
     assert_eq!(cfg.initial_browser, BrowserProfile::Firefox);
     assert_eq!(cfg.initial_os, OsProfile::Linux);
+    assert!(!cfg.enable_network_fingerprint_normalization);
+    assert!(cfg.suppress_icmp_unreachable);
     assert!(cfg.use_tls_cover);
     assert!(!cfg.enable_doh);
     assert_eq!(cfg.doh_provider, "https://example.com/doh");
@@ -113,6 +117,8 @@ fn anti_dpi_preset_uses_packet_normalize_with_target() {
 fn off_preset_has_normalize_target_zero() {
     let cfg = StealthConfig::off();
     assert_eq!(cfg.normalize_target_size, 0);
+    assert!(!cfg.enable_network_fingerprint_normalization);
+    assert!(!cfg.suppress_icmp_unreachable);
     assert!(!cfg.enable_cover_ping);
 }
 

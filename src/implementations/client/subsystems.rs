@@ -63,6 +63,9 @@ fn init_stealth(config: &EngineConfig) -> Result<Arc<crate::stealth::StealthMana
     if let Ok(os) = config.stealth.initial_os.parse() {
         stealth_config.initial_os = os;
     }
+    stealth_config.enable_network_fingerprint_normalization =
+        config.stealth.enable_network_fingerprint_normalization;
+    stealth_config.suppress_icmp_unreachable = config.stealth.suppress_icmp_unreachable;
     if let Some(strategy) = parse_padding_strategy(&config.stealth.padding_strategy) {
         stealth_config.padding_strategy = strategy;
     }

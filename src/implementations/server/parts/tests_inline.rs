@@ -89,9 +89,7 @@ mod tests {
         );
 
         let mut by_bytes = PendingTunDownlinks::with_limits(4, 3, 4);
-        by_bytes
-            .enqueue(first_target, first_session, 1, vec![1, 2, 3], now)
-            .unwrap();
+        by_bytes.enqueue(first_target, first_session, 1, vec![1, 2, 3], now).unwrap();
         assert_eq!(
             by_bytes.enqueue(second_target, second_session, 1, vec![4], now),
             Err(PendingTunDownlinkReject::Bytes)
@@ -130,12 +128,7 @@ mod tests {
         shaped
             .enqueue_with_accounting(first_target, first_session, 1, vec![40], now, true)
             .unwrap();
-        assert!(
-            shaped
-                .pop_next(&std::collections::HashSet::new())
-                .unwrap()
-                .bandwidth_accounted
-        );
+        assert!(shaped.pop_next(&std::collections::HashSet::new()).unwrap().bandwidth_accounted);
     }
 
     #[test]
@@ -146,13 +139,7 @@ mod tests {
             let target: SocketAddr = format!("127.0.0.1:{}", 41_000 + client).parse().unwrap();
             for _ in 0..100 {
                 queue
-                    .enqueue(
-                        target,
-                        SessionId::from_u64(client),
-                        1,
-                        vec![client as u8; 1_200],
-                        now,
-                    )
+                    .enqueue(target, SessionId::from_u64(client), 1, vec![client as u8; 1_200], now)
                     .unwrap();
             }
         }
@@ -209,10 +196,7 @@ mod tests {
 
         excluded.remove(&SessionId::from_u64(2));
         assert_eq!(queue.pop_visit_budget(&excluded), 12);
-        assert_eq!(
-            queue.pop_next(&excluded).unwrap().session_id,
-            SessionId::from_u64(2)
-        );
+        assert_eq!(queue.pop_next(&excluded).unwrap().session_id, SessionId::from_u64(2));
     }
 
     #[test]
@@ -797,8 +781,7 @@ mod tests {
         let server_config =
             ServerConfig { listen: "127.0.0.1:0".parse().unwrap(), ..ServerConfig::default() };
         let blocked_ips = Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new()));
-        let qkey_registry =
-            Arc::new(std::sync::Mutex::new(QKeyRegistry::new_in_memory(16, None)));
+        let qkey_registry = Arc::new(std::sync::Mutex::new(QKeyRegistry::new_in_memory(16, None)));
         let mut runtime = ServerRuntime::new_standalone_default(
             EngineConfig::default(),
             server_config,
@@ -835,8 +818,7 @@ mod tests {
         let server_config =
             ServerConfig { listen: "127.0.0.1:0".parse().unwrap(), ..ServerConfig::default() };
         let blocked_ips = Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new()));
-        let qkey_registry =
-            Arc::new(std::sync::Mutex::new(QKeyRegistry::new_in_memory(16, None)));
+        let qkey_registry = Arc::new(std::sync::Mutex::new(QKeyRegistry::new_in_memory(16, None)));
         let mut runtime = ServerRuntime::new_standalone_default(
             engine_config,
             server_config,
@@ -888,8 +870,7 @@ mod tests {
         let server_config =
             ServerConfig { listen: "127.0.0.1:0".parse().unwrap(), ..ServerConfig::default() };
         let blocked_ips = Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new()));
-        let qkey_registry =
-            Arc::new(std::sync::Mutex::new(QKeyRegistry::new_in_memory(16, None)));
+        let qkey_registry = Arc::new(std::sync::Mutex::new(QKeyRegistry::new_in_memory(16, None)));
         let mut runtime = ServerRuntime::new_standalone_default(
             EngineConfig::default(),
             server_config,
@@ -1000,9 +981,7 @@ mod tests {
     #[cfg(feature = "rate_limiter")]
     #[test]
     fn sustained_admission_retries_new_initials_and_preserves_established_traffic() {
-        use crate::implementations::server::ddos::{
-            DdosDropReason, IncomingDatagramAdmission,
-        };
+        use crate::implementations::server::ddos::{DdosDropReason, IncomingDatagramAdmission};
         use crate::implementations::server::limits::DdosPolicyConfig;
         use crate::transport::packet::{format_header, parse_header, verify_retry_tag, Header};
 
@@ -1029,10 +1008,7 @@ mod tests {
                 clear_window: Duration::from_secs(5),
                 ..DdosPolicyConfig::default()
             },
-            blacklist: BlacklistConfig {
-                cache_path: None,
-                ..BlacklistConfig::default()
-            },
+            blacklist: BlacklistConfig { cache_path: None, ..BlacklistConfig::default() },
             ..ServerConfig::default()
         };
         let domain = LiveServerDomain::new(&config);
@@ -1055,17 +1031,15 @@ mod tests {
         let credential = b"a1b2c3d4e5f6".to_vec();
         let initial =
             initial_packet(original_dcid.clone(), client_scid.clone(), credential.clone());
-        let retry_packet =
-            match domain.admit_incoming_datagram(remote, &initial, false, true) {
-                IncomingDatagramAdmission::Retry(packet) => packet,
-                _ => panic!("enhanced admission did not issue Retry"),
-            };
+        let retry_packet = match domain.admit_incoming_datagram(remote, &initial, false, true) {
+            IncomingDatagramAdmission::Retry(packet) => packet,
+            _ => panic!("enhanced admission did not issue Retry"),
+        };
         let (retry, _) = parse_header(&retry_packet, 0).expect("Retry header");
         verify_retry_tag(&retry_packet, &original_dcid, crate::transport::PROTOCOL_VERSION)
             .expect("Retry integrity");
         let retry_token = retry.token.clone().expect("Retry token");
-        let retried_initial =
-            initial_packet(retry.scid.clone(), client_scid, retry_token.clone());
+        let retried_initial = initial_packet(retry.scid.clone(), client_scid, retry_token.clone());
 
         assert!(matches!(
             domain.admit_incoming_datagram(remote, &retried_initial, false, true),
@@ -1139,11 +1113,7 @@ mod tests {
         let issue = manager.issue_for_initial(&initial, remote.ip()).expect("Retry issue");
         let (retry, _) = parse_header(&issue.packet, 0).expect("Retry header");
         let retry_scid = retry.scid.clone();
-        let retried = initial_packet(
-            retry.scid,
-            client_scid,
-            retry.token.expect("Retry token"),
-        );
+        let retried = initial_packet(retry.scid, client_scid, retry.token.expect("Retry token"));
 
         let mut limiter = AuthRateLimiter::new(AuthPolicyConfig::default());
         let attempt = match limiter.begin(remote.ip()) {
@@ -1263,8 +1233,7 @@ mod tests {
         ));
         let remote_addr: SocketAddr = "192.0.2.10:54321".parse().unwrap();
         {
-            let mut limiter =
-                auth_rate_limiter.lock().unwrap_or_else(|error| error.into_inner());
+            let mut limiter = auth_rate_limiter.lock().unwrap_or_else(|error| error.into_inner());
             let attempt = match limiter.begin(remote_addr.ip()) {
                 crate::implementations::server::limits::AuthAdmission::Allowed(attempt) => attempt,
                 other => panic!("first attempt must be admitted: {other:?}"),
@@ -1280,8 +1249,7 @@ mod tests {
             );
         }
 
-        let qkey_registry =
-            std::sync::Mutex::new(QKeyRegistry::new_in_memory(16, None));
+        let qkey_registry = std::sync::Mutex::new(QKeyRegistry::new_in_memory(16, None));
         let revocation_manager =
             crate::implementations::server::revocation::RevocationManager::new();
         let metrics = Metrics::new();
@@ -1303,15 +1271,8 @@ mod tests {
             fec_cfg_shared: &fec_config,
             opt_params_shared: &optimize_config,
             transport_config: &mut transport,
-            profile: BrowserProfile::Chrome,
-            os: OsProfile::Linux,
-            disable_doh: false,
             auth_rate_limiter,
             retry_token_manager: None,
-            doh_provider: "https://cloudflare-dns.com/dns-query",
-            disable_fronting: false,
-            front_domain: &[],
-            disable_http3: false,
         });
 
         assert!(result.is_none());
@@ -1609,8 +1570,7 @@ mod tests {
     async fn test_run_loop_stops_from_admin_shutdown_without_start() {
         let server_config =
             ServerConfig { listen: "127.0.0.1:0".parse().unwrap(), ..ServerConfig::default() };
-        let qkey_registry =
-            Arc::new(std::sync::Mutex::new(QKeyRegistry::new_in_memory(16, None)));
+        let qkey_registry = Arc::new(std::sync::Mutex::new(QKeyRegistry::new_in_memory(16, None)));
         let blocked_ips = Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new()));
         let mut runtime = ServerRuntime::new_standalone_default(
             EngineConfig::default(),
@@ -2493,16 +2453,8 @@ ramp_down_ms = 5000
             transport.traffic_analysis_policy().defense,
             crate::transport::config::TrafficAnalysisDefense::Off
         );
-        assert_eq!(
-            transport.qkey_traffic_analysis_ceiling().constant_rate_pps,
-            100
-        );
-        assert_eq!(
-            transport
-                .intelligent_traffic_analysis_ceiling()
-                .chaff_rate_pps,
-            10
-        );
+        assert_eq!(transport.qkey_traffic_analysis_ceiling().constant_rate_pps, 100);
+        assert_eq!(transport.intelligent_traffic_analysis_ceiling().chaff_rate_pps, 10);
     }
 
     #[test]

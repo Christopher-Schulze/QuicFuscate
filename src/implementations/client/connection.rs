@@ -290,6 +290,9 @@ impl ClientConnection {
         stealth.enable_traffic_padding = config.stealth.enable_traffic_padding;
         stealth.enable_timing_obfuscation = config.stealth.enable_timing_obfuscation;
         stealth.enable_protocol_mimicry = config.stealth.enable_protocol_mimicry;
+        stealth.enable_network_fingerprint_normalization =
+            config.stealth.enable_network_fingerprint_normalization;
+        stealth.suppress_icmp_unreachable = config.stealth.suppress_icmp_unreachable;
         stealth.enable_doh = config.stealth.enable_doh;
         stealth.doh_provider = config.stealth.doh_provider.clone();
         stealth.max_padding_size = config.stealth.max_padding_size;
@@ -436,12 +439,16 @@ mod tests {
         config.stealth.use_tls_cover = false;
         config.stealth.initial_browser = "firefox".to_string();
         config.stealth.initial_os = "linux".to_string();
+        config.stealth.enable_network_fingerprint_normalization = false;
+        config.stealth.suppress_icmp_unreachable = true;
         config.stealth.padding_strategy = "browser-mimic".to_string();
 
         let sc = ClientConnection::build_stealth_config(&config);
         assert_eq!(sc.mode, crate::stealth::StealthMode::Manual);
         assert_eq!(sc.initial_browser, crate::stealth::BrowserProfile::Firefox);
         assert_eq!(sc.initial_os, crate::stealth::OsProfile::Linux);
+        assert!(!sc.enable_network_fingerprint_normalization);
+        assert!(sc.suppress_icmp_unreachable);
         assert_eq!(sc.padding_strategy, crate::stealth::PaddingStrategy::BrowserMimic);
         assert!(sc.enable_http3_masquerading);
         assert!(sc.use_qpack_headers);

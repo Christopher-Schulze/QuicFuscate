@@ -25,8 +25,9 @@ pub fn load_server_identity(
         ));
     }
 
-    crate::qftls::preload_tls_server_identity(cert_str, key_str)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string()))?;
+    crate::qftls::preload_tls_server_identity(cert_str, key_str).map_err(|error| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
+    })?;
     Ok(())
 }
 
@@ -206,18 +207,15 @@ pub(crate) fn parse_live_server_initial_auth(
     let version = initial_hdr.version;
     let initial_key_dcid = crate::transport::ConnectionId::from_vec(initial_hdr.dcid.clone());
     let mut initial_token = initial_hdr.token.take();
-    if initial_token.as_deref().is_some_and(
-        crate::implementations::server::ddos::RetryTokenManager::is_retry_token,
-    ) {
+    if initial_token
+        .as_deref()
+        .is_some_and(crate::implementations::server::ddos::RetryTokenManager::is_retry_token)
+    {
         let Some(manager) = retry_token_manager else {
             return Err(LiveInitialAuthError::InvalidCredential);
         };
         let claims = manager
-            .validate(
-                initial_token.as_deref().unwrap_or_default(),
-                remote_ip,
-                &initial_hdr.dcid,
-            )
+            .validate(initial_token.as_deref().unwrap_or_default(), remote_ip, &initial_hdr.dcid)
             .map_err(|_| LiveInitialAuthError::InvalidCredential)?;
         initial_token = Some(claims.credential);
     }
@@ -698,11 +696,7 @@ fn admit_session_bandwidth(
     bytes: usize,
 ) -> BandwidthDecision {
     let Some(session_id) = session_id else {
-        metrics.record_bandwidth_decision(
-            direction,
-            BandwidthDecision::RateLimited,
-            bytes,
-        );
+        metrics.record_bandwidth_decision(direction, BandwidthDecision::RateLimited, bytes);
         return BandwidthDecision::RateLimited;
     };
     let decision = sessions.write().check_bandwidth(session_id, direction, bytes);
@@ -773,19 +767,10 @@ async fn process_live_server_client_datagram(
     server_tun: Option<&Arc<TunInterface>>,
     server_ips: ServerTunIps,
     tun_enable: bool,
-    fingerprint_profile: OsFingerprintProfile,
     dns_upstream_resolvers: Arc<Vec<Ipv4Addr>>,
 ) -> std::io::Result<LiveClientDatagramResult> {
     use std::cell::Cell;
     use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-
-    // Packet normalizer for OS fingerprint obfuscation (TODO-462).
-    // Applied to all IPv4 packets before they are written to the TUN interface
-    // so that passive OS fingerprinting (p0f, Nmap) classifies the host as the
-    // target OS rather than the real underlying platform. Wrapped in Arc so the
-    // MASQUE datagram callback (set once per connection) can retain its own
-    // clone across calls.
-    let normalizer = std::sync::Arc::new(PacketNormalizer::new(fingerprint_profile));
 
     let LiveClientRuntime {
         connection: conn,
@@ -800,6 +785,7 @@ async fn process_live_server_client_datagram(
         migration_from,
         ..
     } = runtime_client;
+    let fingerprint_profile = conn.tunnel_ingress_profile();
     let logical_addr = migration_from.unwrap_or(addr);
     record_live_snapshot_bytes_in(
         client_snapshots,
@@ -845,7 +831,6 @@ async fn process_live_server_client_datagram(
                 )));
             }
             let tun_sink = Arc::clone(tun);
-            let masque_normalizer = std::sync::Arc::clone(&normalizer);
             let masque_forwarding_policy = Arc::clone(&forwarding_policy);
             let masque_sessions = Arc::clone(&sessions);
             let masque_fanout_queue = Arc::clone(&fanout_queue);
@@ -899,25 +884,9 @@ async fn process_live_server_client_datagram(
                     ) {
                         return;
                     }
-                    // Apply OS fingerprint normalization for IPv4 packets
-                    // before writing to TUN (TODO-462).
-                    if !payload.is_empty() && payload[0] >> 4 == 4 {
-                        let mut buf = payload.to_vec();
-                        masque_normalizer.normalize_ipv4(&mut buf);
-                        enqueue_client_fanout(&masque_fanout_queue, logical_addr, route, &buf);
-                        if let Err(error) = tun_sink.write(&buf) {
-                            log::warn!("Server TUN write (MASQUE) failed: {:?}", error);
-                        }
-                    } else {
-                        enqueue_client_fanout(
-                            &masque_fanout_queue,
-                            logical_addr,
-                            route,
-                            payload,
-                        );
-                        if let Err(error) = tun_sink.write(payload) {
-                            log::warn!("Server TUN write (MASQUE) failed: {:?}", error);
-                        }
+                    enqueue_client_fanout(&masque_fanout_queue, logical_addr, route, payload);
+                    if let Err(error) = tun_sink.write(payload) {
+                        log::warn!("Server TUN write (MASQUE) failed: {:?}", error);
                     }
                 },
             ))));
@@ -982,20 +951,9 @@ async fn process_live_server_client_datagram(
                         ) else {
                             return;
                         };
-                        // Apply OS fingerprint normalization for IPv4 packets
-                        // before writing to TUN (TODO-462).
-                        if data[0] >> 4 == 4 {
-                            let mut buf = data.to_vec();
-                            normalizer.normalize_ipv4(&mut buf);
-                            enqueue_client_fanout(&fanout_queue, logical_addr, route, &buf);
-                            if let Err(error) = tun.write(&buf) {
-                                log::warn!("Server TUN write failed: {:?}", error);
-                            }
-                        } else {
-                            enqueue_client_fanout(&fanout_queue, logical_addr, route, data);
-                            if let Err(error) = tun.write(data) {
-                                log::warn!("Server TUN write failed: {:?}", error);
-                            }
+                        enqueue_client_fanout(&fanout_queue, logical_addr, route, data);
+                        if let Err(error) = tun.write(data) {
+                            log::warn!("Server TUN write failed: {:?}", error);
                         }
                     }
                 }

@@ -231,6 +231,15 @@ fronting_domains = []
 initial_browser = "chrome"  # chrome, firefox, safari, edge
 initial_os = "windows"      # windows, macos, linux, android, ios
 
+# Normalize decoded client tunnel ingress to the selected OS network-stack
+# signature before server TUN/fanout delivery. Existing sessions retain their
+# frozen profile; rotation affects the next accepted connection atomically.
+enable_network_fingerprint_normalization = true
+
+# Optional policy to suppress ICMP destination-unreachable traffic while always
+# preserving IPv4 Fragmentation Needed and ICMPv6 Packet Too Big for PMTUD.
+suppress_icmp_unreachable = false
+
 # ==============================================================================
 # FINGERPRINT ROTATION
 # ==============================================================================

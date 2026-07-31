@@ -27,6 +27,7 @@
 | `accelerate::*` parity helpers | `compat-only` | internal runtime owner plus explicit `rust-tests` parity surface |
 | `accelerate::random` helpers | `compat-only` | heuristic/perf helper surface only |
 | Packet-number decode dispatch | `active` | `transport::packet` calls `optimize::transport::decode_packet_number()` after header protection removal; BMI2/SVE2/NEON/scalar dispatch preserves QUIC reconstruction semantics |
+| Server egress network-stack normalization | `active` | one frozen TLS/network persona per server-side connection; decoded IPv4 TUN/MASQUE uplink only; explicit disabled passthrough |
 
 ## Runtime Complexity Layer Model
 
@@ -101,6 +102,7 @@ If a claim is not backed by one of the proof surfaces below, treat it as untrust
 | Packet protection ownership | `src/transport/packet.rs`, `src/transport/connection/` | Packet protection and data-plane AEAD are fork-specific transport decisions, not TLS cipher-suite claims | `docs/todo/done/todo-76-forked-aead-protocol-posture-clarification.md`, targeted transport rust-tests, `audit-runtime-guardrails.sh` |
 | Unsafe SIMD / crypto machine room | `src/crypto/`, `src/simd/`, `src/optimize/` | Unsafe and SIMD stay internal or parity-scoped; product/runtime claims stay at owner boundaries only | `cargo clippy --all-targets --all-features -- -W clippy::all`, `scripts/tests/audits/audit-all-comprehensive.sh`, `scripts/tests/audits/audit-runtime-guardrails.sh` |
 | Stealth/TLS-cover boundary | `src/stealth/`, `src/qftls.rs` | Stealth owns persona and cover policy; rustls still owns real TLS protocol semantics | `docs/todo/done/todo-81-stealth-capability-preservation-and-simplification.md`, `docs/todo/done/todo-85-tls-cover-and-rustls-boundary-clarification.md` |
+| Raw-IP fingerprint boundary | `src/stealth/fingerprint.rs`, `src/core_parts/connection.rs` | normalize decoded server uplink exactly once; never mutate sealed QUIC; preserve fragments and PMTUD | fingerprint units, `rt-core-connection-basics`, `rt-stealth-config-toml`, `fingerprint_normalizer` benchmark |
 
 ## Transport Overlap and Divergence vs quinn-udp
 
@@ -143,11 +145,13 @@ Use this section as the shortest non-marketing answer to "what evidence exists r
 - `.github/workflows/release.yml` builds native x86_64 and ARM64 Linux server bundles plus Tauri ed25519-signed desktop artifacts for macOS (DMG plus `.app.tar.gz` updater), Linux (deb plus directly signed `.AppImage`), and Windows (directly signed MSI). Both server architectures and Windows are required dependencies of tagged release publication; macOS and Linux desktop jobs remain non-blocking.
 - Updater integration is configured in `tauri.conf.json` with `bundle.createUpdaterArtifacts: true`, a GitHub Releases endpoint, and an embedded ed25519 pubkey. The `latest.json` manifest is generated in CI with real minisign signatures from the Tauri build output, including only platforms whose signed updater bundles are present.
 - TODO-519 is complete: native parallel MSVC check, all 1,673 tests, and Clippy passed; release `v0.4.3` publishes the signed Windows MSI and a matching `latest.json` `windows-x86_64` entry.
+- The synchronized release target is `v0.4.4`, the smallest patch increment from `v0.4.3`. `Cargo.toml`, the root and dependent lockfiles, and `apps/tauri/src-tauri/tauri.conf.json` carry `0.4.4`; tagged publication remains conditional on the complete release workflow.
 
 ### Current Release Checkpoint
 
 - **First GitHub Release published: `v0.4.0`** — https://github.com/Christopher-Schulze/QuicFuscate/releases/tag/v0.4.0
 - **Current public GitHub release: `v0.4.3`** - version-coherent server and desktop artifacts, including the signed Windows MSI and matching updater manifest, were published by Release Build run `29854481540`.
+- **Prepared release version: `v0.4.4`** - source and bundle metadata are synchronized; this line does not claim publication before the `v0.4.4` tagged workflow succeeds.
 - Server release artifacts include separate native x86_64 and ARM64 bundles. The ARM64 artifact is architecture-named and carries an adjacent SHA-256 file so an operator cannot mistake the x86_64 bundle for an AArch64 deployment.
 - Last fully verified release checkpoint: `e8bb5bd` (v0.4.3 tag).
 - GitHub `CI` run `28567731479`, `Clippy Matrix` run `28567731478` green on prior checkpoint `f1ec566`.
@@ -220,11 +224,11 @@ Security findings table:
 |---|---|---|---|---|
 | medium | Comprehensive audit script reports many `unsafe` blocks | higher review burden for memory-sensitive paths | accepted with controls | core runtime |
 | medium | Comprehensive audit script reports many `unwrap` call sites | potential panic if assumptions are broken | accepted with controls | core runtime |
-| low | Windows updater/signature path is tracked but not yet native/tag-proven | Windows binary update trust cannot be claimed until MSI and manifest evidence exists | open (TODO-519) | desktop release |
+| low | Signed updater availability is platform-dependent | macOS/Linux may be omitted if their non-blocking release jobs fail; Windows remains a required tagged-release dependency | controlled by release workflow | desktop release |
 
 Current release constraints:
-- v0.4.0 remains the last accepted version-coherent checkpoint. GitHub releases v0.4.1 and v0.4.2 exist, but their `0.4.0` artifact versions do not match their tag/manifest versions. This task has not yet produced or verified the synchronized v0.4.3 signed Windows desktop binary.
-- The tracked future tag path fails closed on the required Windows MSI/signature job, but native CI and tagged updater-manifest evidence are still pending.
+- Releases `v0.4.1` and `v0.4.2` retained mismatched `0.4.0` artifact versions. `v0.4.3` resolved that historical defect with coherent server, desktop, MSI, signature, and updater-manifest versions.
+- The `v0.4.4` tag must match both root Cargo and Tauri bundle versions and fails closed unless the required x86_64 server, ARM64 server, and signed Windows MSI jobs succeed.
 
 ### Threat Model
 
@@ -1180,8 +1184,18 @@ pub struct MacTun {
 - Native evidence showed that treating every PMTU probe as congestion-neutral is unsafe: 1328 and 1400 were reconfirmed after the reset, but a later regular probe loss entered persistent congestion. `Recovery` records only an isolated DPLPMTUD probe that actually bypassed a closed congestion gate as ack-eliciting loss-detection state outside bytes in flight, congestion-control loss, and persistent-congestion runs. Regular PMTU probes retain normal congestion-control accounting. Focused probe-loss, gate-bypass, sub-RTT rejection, and regular-probe accounting regressions pass locally. Exact ARM64 proof remains required.
 - Exact ARM64 source `bfe8bd9` produced binary SHA-256 `f6e3ecdeeac887478e12c0612cf990f3f2295c90a0b63a1df544b43818a4e129` and passed the full three-client dual-stack gate. Receiver-verified default trials were 7.835/7.757/7.701 Mbit/s (median 7.757); 1472-byte opt-in trials were 10.169/10.616/10.186 Mbit/s (median 10.186), a 31.31% gain. The black-hole phase detected the loss within 2 seconds and completed its 18,022,400-byte receiver-valid transfer in 20.732 seconds. Captured server metrics recorded zero TUN-downlink and MASQUE-response queue/retry/drop events; teardown left no product process, namespace, qf523 link, or qdisc residue.
 - The native `d5e1937` harness attempt proved the new queue-quiescence assertions during the completed default phase. Two clean opt-in attempts then failed before that assertion after application-space persistent-congestion collapses at 0.07% and 0.12% observed loss; both failure snapshots still had zero TUN/MASQUE pending, retry, and drop counters and both cleanups left no product process, namespace, qf523 link, or qdisc. The correction above must receive a fresh exact-artifact run before any opt-in quiescence claim.
-- Exact ARM64 source `12da3cc` built binary `d137ce40157d2669ce01f101604c0018b68f795a30f04b0405182e4e19a36f26`. Its default phase completed receiver-valid trials at 7.281 Mbit/s median, but opt-in trial one failed before producing a receiver result after a 12-packet application-space persistent-congestion run from PN 10177 through 10191: 108 ms against an 80-ms RFC period, with ACK largest PN 10193 and 0.12% observed loss. The reordered-ACK correction therefore did not mask this run. Failure metrics retained zero TUN/MASQUE pending, retry, and drop counters; cleanup left no product process, namespace, qf523 link, or qdisc. This remains a release blocker.
-- The current local library release gate `cargo test --lib --features rust-tests --quiet` passes all 1,844 tests. Its exit status is captured through an isolated test sentinel rather than inferred from partial terminal progress output.
+- Historical ARM64 source `12da3cc` built binary `d137ce40157d2669ce01f101604c0018b68f795a30f04b0405182e4e19a36f26`. Its default phase completed receiver-valid trials at 7.281 Mbit/s median, but opt-in trial one failed before producing a receiver result after a 12-packet application-space persistent-congestion run from PN 10177 through 10191: 108 ms against an 80-ms RFC period, with ACK largest PN 10193 and 0.12% observed loss. Failure metrics retained zero TUN/MASQUE pending, retry, and drop counters; cleanup was clean. The later final-source proof above resolved this historical blocker.
+- The current local library release gate `cargo test --lib --features rust-tests --quiet` passes all 2,008 tests. The broader `cargo test --workspace --all-targets --features rust-tests` release gate also exits successfully.
+
+#### Network-Stack Fingerprint Normalization
+
+- Each server-side `QuicFuscateConnection` freezes one `PacketNormalizer` from the same immutable `StealthConfig` snapshot that owns its TLS/H3 persona. Profile rotation changes only the next connection, so TLS and raw-IP personas cannot diverge mid-session.
+- Client-side connections and `StealthMode::Off` use `OsFingerprintProfile::Disabled`, which returns before packet inspection, mutation, allocation, or IP-ID state advancement.
+- Normalization runs exactly once after raw IP is decoded from MASQUE DATAGRAM, MASQUE capsule, compressed capsule, or framed H3 body and before the authenticated server TUN/fanout callback. Sealed QUIC datagrams and ordinary server downlink packets are never rewritten.
+- IPv4 normalization sets the profile TTL, DF policy, and monotonic IP ID only on unfragmented packets. TCP window, MSS, window scale, and canonical p0f option layout are rewritten only when SYN is set. Linux, Windows, macOS, and Android profiles retain exact request signatures from p0f 3.09b; iOS maps to the macOS/Darwin network family.
+- Canonical option expansion and shrink preserve SYN payload bytes, TCP data offset, IPv4 total length, and full IPv4/TCP checksums. The normalizer uses bounded stack state and caller-owned spare capacity; framed H3 supports the complete valid IPv4 packet-length range without a per-packet heap allocation.
+- `suppress_icmp_unreachable=true` drops only non-PMTUD destination-unreachable traffic. IPv4 Fragmentation Needed and ICMPv6 Packet Too Big always pass. Echo payloads remain byte-exact, and locally generated echo responses use the connection's frozen source profile.
+- `benches/fingerprint_normalizer.rs` asserts zero allocations after warmup and measures the common IPv4 UDP path. Tool and retained-host evidence remains owned by TODO-543 until its capture, p0f, active-probe, and Omega gates are closed.
 
 ### Cryptography Design (AEAD-First, Efficient by Construction)
 - Product-level data-plane AEAD posture: retained `Aegis128L` and `Morus1280_128` families with hardware-aware automatic selection.
@@ -3017,6 +3031,8 @@ At runtime you can override selected stealth options without changing the config
 - `QUICFUSCATE_TLS_COVER_ULTRA`: `0|1|true|false`
 - `QUICFUSCATE_DOH`: `0|1|true|false`
 - `QUICFUSCATE_DOH_PROVIDER`: URL
+- `QUICFUSCATE_NETWORK_FINGERPRINT_NORMALIZATION`: `0|1|true|false` - enables decoded server-uplink network-stack normalization; forced off in `StealthMode::Off`
+- `QUICFUSCATE_SUPPRESS_ICMP_UNREACHABLE`: `0|1|true|false` - suppresses only non-PMTUD destination-unreachable traffic
 
 **Compression Module (current):**
 - `QUICFUSCATE_COMPRESS`: `0|1|false|true` - Enable/disable compression
@@ -3135,6 +3151,8 @@ Notes:
 - `QUICFUSCATE_STEALTH_PADDING_STRATEGY`: `random|fixed|adaptive|browser|browser-mimic` (aliases: `1|2|3|4`; legacy alias: `QUICFUSCATE_PADDING_STRATEGY`)
 - `QUICFUSCATE_FINGERPRINT_ROTATION`: `0|1|true|false`
 - `QUICFUSCATE_FINGERPRINT_ROTATION_INTERVAL`: integer seconds
+- `QUICFUSCATE_NETWORK_FINGERPRINT_NORMALIZATION`: `0|1|true|false`
+- `QUICFUSCATE_SUPPRESS_ICMP_UNREACHABLE`: `0|1|true|false`
 - `QUICFUSCATE_STEALTH_DYNAMIC`: `0|1|true|false` - enable dynamic escalation and de-escalation
 - `QUICFUSCATE_CHOKE_ENABLE`: `0|1|true|false` - enable real-time rate choke
 - `QUICFUSCATE_CHOKE_TARGET_MBPS`: integer - target Mbps for rate choke
@@ -3751,6 +3769,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `bench-retained-crypto-backends.sh` - Crypto backend comparison benchmark
 - `bench-fec-all.sh` - Dispatcher: runs all FEC benchmarks
 - `bench-ci-regression.sh` - CI regression benchmark gate (Criterion)
+- Root Criterion target `fingerprint_normalizer` - allocation and throughput proof for decoded raw-IP normalization (`cargo bench --bench fingerprint_normalizer --features benches`)
 
 **Micro (`scripts/benchmarks/micro/`)**
 - `micro-crypto-all.sh`, `micro-aes-block.sh`, `micro-aes-gcm.sh`, `micro-ghash.sh`, `micro-chacha-x4.sh`, `micro-udpfast-throughput.sh`

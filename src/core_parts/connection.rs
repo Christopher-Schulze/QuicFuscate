@@ -16,7 +16,10 @@ use crate::crypto::CryptoManager;
 use crate::fec::wire::{self, WireFecReceiver, WirePacketMeta, WireProfile};
 use crate::fec::{AdaptiveFec, FecConfig, FecPacket, FecTransportObserver};
 use crate::optimize::{AlignedBox, MemoryPool, OptimizationManager, OptimizeConfig};
-use crate::stealth::{StealthConfig, StealthManager, StealthMode};
+use crate::stealth::{
+    IcmpUnreachablePolicy, NormalizeResult, OsFingerprintProfile, PacketNormalizer, StealthConfig,
+    StealthManager, StealthMode,
+};
 use std::sync::Arc;
 #[cfg(feature = "orchestrator")]
 use std::sync::OnceLock;
@@ -110,7 +113,7 @@ struct H3TunnelFrameDecoder {
 impl H3TunnelFrameDecoder {
     fn push<F>(&mut self, data: &[u8], mut on_packet: F) -> Result<(), &'static str>
     where
-        F: FnMut(&[u8]),
+        F: FnMut(&mut [u8]),
     {
         if self.pending.len().saturating_add(data.len()) > MAX_H3_TUNNEL_PENDING_LEN {
             self.pending.clear();
@@ -136,7 +139,7 @@ impl H3TunnelFrameDecoder {
             }
             let packet_start = consumed + H3_TUNNEL_FRAME_HEADER_LEN;
             let packet_end = consumed + frame_len;
-            let packet = &self.pending[packet_start..packet_end];
+            let packet = &mut self.pending[packet_start..packet_end];
             if !matches!(packet.first().map(|byte| byte >> 4), Some(4 | 6)) {
                 self.pending.clear();
                 return Err("H3 tunnel frame does not contain an IP packet");
@@ -272,6 +275,8 @@ pub struct ConnectionParams {
     pub optimization_manager: Arc<OptimizationManager>,
     /// Forward error correction configuration.
     pub fec_config: FecConfig,
+    /// Frozen raw-IP normalizer for decoded tunnel ingress.
+    pub tunnel_ingress_normalizer: PacketNormalizer,
 }
 
 /// Represents a single QuicFuscate connection and manages its state.
@@ -290,6 +295,7 @@ pub struct QuicFuscateConnection {
     // Stealth & Optimization Modules
     stealth_manager: Arc<StealthManager>,
     optimization_manager: Arc<OptimizationManager>,
+    tunnel_ingress_normalizer: PacketNormalizer,
 
     // State
     stats: ConnectionStats,
@@ -467,6 +473,7 @@ impl QuicFuscateConnection {
             stealth_manager,
             optimization_manager,
             fec_config,
+            tunnel_ingress_normalizer: PacketNormalizer::new(OsFingerprintProfile::Disabled),
         }))
     }
 
@@ -482,6 +489,18 @@ impl QuicFuscateConnection {
         fec_config: FecConfig,
         opt_cfg: OptimizeConfig,
     ) -> Result<Self, String> {
+        let tunnel_ingress_profile = if !stealth_config.enable_network_fingerprint_normalization
+            || matches!(stealth_config.mode, StealthMode::Off)
+        {
+            OsFingerprintProfile::Disabled
+        } else {
+            OsFingerprintProfile::from_stealth_os(stealth_config.initial_os)
+        };
+        let icmp_unreachable_policy = if stealth_config.suppress_icmp_unreachable {
+            IcmpUnreachablePolicy::SuppressNonPmtud
+        } else {
+            IcmpUnreachablePolicy::Preserve
+        };
         let crypto_manager = Arc::new(CryptoManager::new());
         let optimization_manager = Arc::new(OptimizationManager::from_cfg(opt_cfg));
         let stealth_manager = Arc::new(StealthManager::new(
@@ -509,6 +528,10 @@ impl QuicFuscateConnection {
             stealth_manager,
             optimization_manager,
             fec_config,
+            tunnel_ingress_normalizer: PacketNormalizer::with_icmp_unreachable_policy(
+                tunnel_ingress_profile,
+                icmp_unreachable_policy,
+            ),
         }))
     }
 
@@ -524,6 +547,7 @@ impl QuicFuscateConnection {
             fec: AdaptiveFec::new(params.fec_config),
             stealth_manager: params.stealth_manager,
             optimization_manager: params.optimization_manager,
+            tunnel_ingress_normalizer: params.tunnel_ingress_normalizer,
             stats: ConnectionStats::default(),
             packet_id_counter: 0,
             outgoing_fec_packets: VecDeque::new(),
@@ -648,13 +672,9 @@ impl QuicFuscateConnection {
         self.runtime_system.refresh_processes_specifics(
             ProcessesToUpdate::Some(&[pid]),
             true,
-            ProcessRefreshKind::nothing()
-                .with_cpu()
-                .with_memory()
-                .without_tasks(),
+            ProcessRefreshKind::nothing().with_cpu().with_memory().without_tasks(),
         );
-        self.runtime_system
-            .refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
+        self.runtime_system.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
         if let Some(process) = self.runtime_system.process(pid) {
             self.runtime_cpu_percent = process.cpu_usage().round().clamp(0.0, 100.0) as u32;
             let total = self.runtime_system.total_memory();
@@ -781,8 +801,7 @@ impl QuicFuscateConnection {
     /// Starts the locally initiated CONNECT-UDP flow without sending tunnel data.
     pub fn begin_masque_tunnel(&mut self) -> Result<u64, crate::error::ConnectionError> {
         self.ensure_http3_initialized()?;
-        self.ensure_masque_tunnel_for_send()?
-            .ok_or_else(|| "MASQUE tunnel unavailable".into())
+        self.ensure_masque_tunnel_for_send()?.ok_or_else(|| "MASQUE tunnel unavailable".into())
     }
 
     /// Returns true only after the peer acknowledged CONNECT-UDP with a 2xx response.
@@ -790,15 +809,11 @@ impl QuicFuscateConnection {
         let Some(stream_id) = self.masque_stream_id else {
             return false;
         };
-        self.h3_conn
-            .as_ref()
-            .is_some_and(|h3| h3.masque_established(stream_id))
+        self.h3_conn.as_ref().is_some_and(|h3| h3.masque_established(stream_id))
     }
 
     /// Accepts the recorded peer CONNECT-UDP flow after application authentication.
-    pub fn accept_peer_masque_tunnel(
-        &mut self,
-    ) -> Result<bool, crate::error::ConnectionError> {
+    pub fn accept_peer_masque_tunnel(&mut self) -> Result<bool, crate::error::ConnectionError> {
         let Some(stream_id) = self.masque_peer_stream_id else {
             return Ok(false);
         };
@@ -972,8 +987,30 @@ impl QuicFuscateConnection {
                                 break;
                             }
                             if let Some(decoder) = self.h3_tunnel_rx.get_mut(&sid) {
+                                let normalizer = &self.tunnel_ingress_normalizer;
                                 decoder
-                                    .push(&buf[..read], |packet| on_body(sid, packet))
+                                    .push(&buf[..read], |packet| {
+                                        let required = normalizer.required_capacity(packet);
+                                        if required > packet.len()
+                                            && required <= MAX_INNER_IP_PACKET_LEN
+                                        {
+                                            let mut expanded = [0u8; MAX_INNER_IP_PACKET_LEN];
+                                            expanded[..packet.len()].copy_from_slice(packet);
+                                            let outcome = normalizer.normalize_with_capacity(
+                                                &mut expanded,
+                                                packet.len(),
+                                            );
+                                            if outcome.result != NormalizeResult::Dropped {
+                                                on_body(sid, &expanded[..outcome.packet_len]);
+                                            }
+                                        } else {
+                                            let outcome = normalizer
+                                                .normalize_with_capacity(packet, packet.len());
+                                            if outcome.result != NormalizeResult::Dropped {
+                                                on_body(sid, &packet[..outcome.packet_len]);
+                                            }
+                                        }
+                                    })
                                     .map_err(crate::error::ConnectionError::from)?;
                             } else {
                                 on_body(sid, &buf[..read]);
@@ -982,15 +1019,16 @@ impl QuicFuscateConnection {
                     }
                     Ok(Some((
                         _sid,
-                        crate::transport::h3::Event::MasqueCapsule { capsule_type, payload },
+                        crate::transport::h3::Event::MasqueCapsule { capsule_type, mut payload },
                     ))) => {
                         Self::handle_masque_capsule_event(
                             capsule_type,
-                            &payload,
+                            &mut payload,
                             &bindings.masque_datagram_cb,
                             &bindings.masque_control_cb,
                             &bindings.masque_cb,
                             &bindings.memory_pool,
+                            &self.tunnel_ingress_normalizer,
                         );
                     }
                     Ok(Some((_id, crate::transport::h3::Event::Reset(err)))) => {
@@ -1039,6 +1077,7 @@ impl QuicFuscateConnection {
                     &self.stealth_manager,
                     &bindings.masque_datagram_cb,
                     &bindings.masque_cb,
+                    &self.tunnel_ingress_normalizer,
                 );
             }
             // Always drain MASQUE datagrams after the H3 event loop exits.
@@ -1054,6 +1093,7 @@ impl QuicFuscateConnection {
                     &self.stealth_manager,
                     &bindings.masque_datagram_cb,
                     &bindings.masque_cb,
+                    &self.tunnel_ingress_normalizer,
                 );
             }
             log::trace!("HTTP/3 events processed in {} ms", start.elapsed().as_millis());
@@ -1116,29 +1156,40 @@ impl QuicFuscateConnection {
         pool: &Arc<crate::optimize::MemoryPool>,
         payload: &[u8],
         dict: Option<&[u8]>,
+        normalizer: &PacketNormalizer,
     ) {
         let decoded = match dict {
             Some(dict_bytes) => crate::compress::decompress_with_dict(pool, payload, dict_bytes),
             None => crate::compress::CompressionManager::new(Default::default())
                 .decompress_to_pool(pool, payload),
         };
-        if let Some((blk, used)) = decoded {
-            Self::dispatch_masque_datagram_payload(masque_datagram_cb, masque_cb, &blk[..used]);
+        if let Some((mut blk, used)) = decoded {
+            let outcome = normalizer.normalize_with_capacity(&mut blk, used);
+            if outcome.result != NormalizeResult::Dropped {
+                Self::dispatch_masque_datagram_payload(
+                    masque_datagram_cb,
+                    masque_cb,
+                    &blk[..outcome.packet_len],
+                );
+            }
             pool.free(blk);
         }
     }
 
     fn handle_masque_capsule_event(
         capsule_type: u64,
-        payload: &[u8],
+        payload: &mut Vec<u8>,
         masque_datagram_cb: &Option<DatagramHandler>,
         masque_control_cb: &Option<CapsuleHandler>,
         masque_cb: &Option<CapsuleHandler>,
         memory_pool: &Arc<crate::optimize::MemoryPool>,
+        normalizer: &PacketNormalizer,
     ) {
         match capsule_type {
             0x00 => {
-                Self::dispatch_masque_datagram_payload(masque_datagram_cb, masque_cb, payload);
+                if normalizer.normalize_vec(payload) != NormalizeResult::Dropped {
+                    Self::dispatch_masque_datagram_payload(masque_datagram_cb, masque_cb, payload);
+                }
             }
             0x21 => {
                 Self::dispatch_masque_compressed_datagram(
@@ -1147,6 +1198,7 @@ impl QuicFuscateConnection {
                     memory_pool,
                     payload,
                     None,
+                    normalizer,
                 );
             }
             0x22 => {
@@ -1164,6 +1216,7 @@ impl QuicFuscateConnection {
                             memory_pool,
                             payload,
                             Some(&dict),
+                            normalizer,
                         );
                     }
                 }
@@ -1185,6 +1238,7 @@ impl QuicFuscateConnection {
         stealth_manager: &StealthManager,
         masque_datagram_cb: &Option<DatagramHandler>,
         masque_cb: &Option<CapsuleHandler>,
+        normalizer: &PacketNormalizer,
     ) {
         // Drain whenever a sink is present (TUN bridge) or the stealth runtime
         // explicitly enabled MASQUE datagrams. Without this, MASQUE-framed
@@ -1192,8 +1246,10 @@ impl QuicFuscateConnection {
         // or consumed as corrupted raw bytes by a bare dgram_recv loop.
         let has_sink = masque_datagram_cb.is_some() || masque_cb.is_some();
         if stealth_manager.masque_datagram_enabled() || has_sink {
-            while let Some((_fid, pl)) = h3.try_recv_masque_datagram(conn) {
-                Self::dispatch_masque_datagram_payload(masque_datagram_cb, masque_cb, &pl[..]);
+            while let Some((_fid, mut payload)) = h3.try_recv_masque_datagram(conn) {
+                if normalizer.normalize_vec(&mut payload) != NormalizeResult::Dropped {
+                    Self::dispatch_masque_datagram_payload(masque_datagram_cb, masque_cb, &payload);
+                }
             }
         }
     }
@@ -1268,8 +1324,7 @@ impl QuicFuscateConnection {
         let mut recovered_packets = std::mem::take(&mut self.fec_receive_scratch);
         let receive_report = if wire_framed {
             let result = if self.fec.control_policy() == crate::fec::FecControlPolicy::Off {
-                self.fec_wire_receiver
-                    .receive_source_only(&block[..len], &mut recovered_packets)
+                self.fec_wire_receiver.receive_source_only(&block[..len], &mut recovered_packets)
             } else {
                 self.fec_wire_receiver.receive(&block[..len], &mut recovered_packets)
             };
@@ -1388,9 +1443,9 @@ impl QuicFuscateConnection {
             self.conn.recovery_deadline(),
             self.conn.traffic_analysis_deadline(),
         ]
-            .into_iter()
-            .flatten()
-            .min()
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// Queue one ack-eliciting transport keepalive for the next send poll.
@@ -1566,7 +1621,10 @@ impl QuicFuscateConnection {
         } else if !path_control_pending {
             if let Some(release_time) = self.next_packet_release {
                 if now < release_time {
-                    log::trace!("connection.send: next_packet_release blocks until {:?}", release_time);
+                    log::trace!(
+                        "connection.send: next_packet_release blocks until {:?}",
+                        release_time
+                    );
                     return Ok((
                         0,
                         crate::transport::SendInfo {
@@ -1898,6 +1956,11 @@ impl QuicFuscateConnection {
     /// Returns the stealth manager for dynamic profile updates.
     pub fn stealth_manager(&self) -> Arc<StealthManager> {
         self.stealth_manager.clone()
+    }
+
+    /// Returns the network-stack profile frozen with this connection persona.
+    pub fn tunnel_ingress_profile(&self) -> OsFingerprintProfile {
+        self.tunnel_ingress_normalizer.profile
     }
 
     /// Initializes the HTTP/3 connection if it hasn't been created yet.

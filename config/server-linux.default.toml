@@ -101,6 +101,8 @@ mode = "performance"
 # fronting_domains = []
 # initial_browser = "chrome"       # chrome, firefox, safari, edge
 # initial_os = "linux"             # windows, macos, linux, android, ios
+# enable_network_fingerprint_normalization = true
+# suppress_icmp_unreachable = false # preserves PMTUD signals even when true
 
 # ==============================================================================
 # FINGERPRINT ROTATION

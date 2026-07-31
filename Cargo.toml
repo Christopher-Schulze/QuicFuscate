@@ -8,7 +8,7 @@ exclude = [
 resolver = "2"
 
 [workspace.package]
-version = "0.4.3"
+version = "0.4.4"
 edition = "2021"
 authors = ["QuicFuscate Team"]
 license = "MIT"
@@ -528,5 +528,11 @@ required-features = ["benches"]
 [[bench]]
 name = "fec_pipeline"
 path = "benches/fec_pipeline.rs"
+harness = false
+required-features = ["benches"]
+
+[[bench]]
+name = "fingerprint_normalizer"
+path = "benches/fingerprint_normalizer.rs"
 harness = false
 required-features = ["benches"]

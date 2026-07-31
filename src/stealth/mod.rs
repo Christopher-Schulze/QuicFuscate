@@ -172,7 +172,10 @@ pub mod tls_cover;
 /// TCP/ICMP fingerprint obfuscation (TODO-462).
 pub mod fingerprint;
 
-pub use fingerprint::{OsFingerprintProfile, PacketNormalizer};
+pub use fingerprint::{
+    IcmpUnreachablePolicy, NormalizeOutcome, NormalizeResult, OsFingerprintProfile,
+    PacketNormalizer,
+};
 
 // Legacy external TLS FFI removed: native TLS fingerprint injection is used exclusively.
 

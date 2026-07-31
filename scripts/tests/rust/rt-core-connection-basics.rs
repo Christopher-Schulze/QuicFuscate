@@ -6,7 +6,7 @@ use std::sync::{Mutex, OnceLock};
 use quicfuscate::core::QuicFuscateConnection;
 use quicfuscate::fec::FecConfig;
 use quicfuscate::optimize::OptimizeConfig;
-use quicfuscate::stealth::{StealthConfig, StealthMode};
+use quicfuscate::stealth::{OsFingerprintProfile, OsProfile, StealthConfig, StealthMode};
 use quicfuscate::telemetry::PATH_MIGRATIONS;
 use quicfuscate::transport::{Config, ConnectionId, MAX_CONN_ID_LEN, PROTOCOL_VERSION};
 
@@ -101,6 +101,76 @@ fn new_server_constructs_without_network() {
     assert!(!conn.masque_flow_active());
     assert_eq!(conn.rtt_ms(), 0.0);
     assert_eq!(conn.loss_rate(), 0.0);
+}
+
+#[test]
+fn server_connection_freezes_network_profile_from_stealth_snapshot() {
+    let cases = [
+        (OsProfile::Linux, OsFingerprintProfile::Linux),
+        (OsProfile::Windows, OsFingerprintProfile::Windows),
+        (OsProfile::MacOS, OsFingerprintProfile::MacOS),
+        (OsProfile::IOS, OsFingerprintProfile::MacOS),
+        (OsProfile::Android, OsFingerprintProfile::Android),
+    ];
+    for (index, (os, expected)) in cases.into_iter().enumerate() {
+        let mut config = base_config();
+        let mut stealth = StealthConfig::stealth();
+        stealth.initial_os = os;
+        let scid_bytes = [index as u8 + 1; MAX_CONN_ID_LEN];
+        let scid = ConnectionId::from_ref(&scid_bytes);
+        let conn = QuicFuscateConnection::new_server(
+            &scid,
+            None,
+            addr(4500 + index as u16 * 2),
+            addr(4501 + index as u16 * 2),
+            &mut config,
+            stealth,
+            FecConfig::default(),
+            OptimizeConfig::default(),
+        )
+        .expect("server connection");
+        assert_eq!(conn.tunnel_ingress_profile(), expected);
+    }
+}
+
+#[test]
+fn server_connection_honors_explicit_network_profile_disable() {
+    let mut config = base_config();
+    let mut stealth = StealthConfig::stealth();
+    stealth.initial_os = OsProfile::Windows;
+    stealth.enable_network_fingerprint_normalization = false;
+    let scid = ConnectionId::from_ref(&[9; MAX_CONN_ID_LEN]);
+
+    let conn = QuicFuscateConnection::new_server(
+        &scid,
+        None,
+        addr(4520),
+        addr(4521),
+        &mut config,
+        stealth,
+        FecConfig::default(),
+        OptimizeConfig::default(),
+    )
+    .expect("server connection");
+
+    assert_eq!(conn.tunnel_ingress_profile(), OsFingerprintProfile::Disabled);
+
+    let mut config = base_config();
+    let mut stealth = StealthConfig::off();
+    stealth.enable_network_fingerprint_normalization = true;
+    let scid = ConnectionId::from_ref(&[10; MAX_CONN_ID_LEN]);
+    let conn = QuicFuscateConnection::new_server(
+        &scid,
+        None,
+        addr(4522),
+        addr(4523),
+        &mut config,
+        stealth,
+        FecConfig::default(),
+        OptimizeConfig::default(),
+    )
+    .expect("off-mode server connection");
+    assert_eq!(conn.tunnel_ingress_profile(), OsFingerprintProfile::Disabled);
 }
 
 #[test]

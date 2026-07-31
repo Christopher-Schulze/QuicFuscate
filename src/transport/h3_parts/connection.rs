@@ -912,7 +912,9 @@ impl Connection {
         if buf.len() < need {
             return Err(Error::BufferTooShort);
         }
-        let payload = buf[off1 + off2..off1 + off2 + clen as usize].to_vec();
+        let payload_bytes = &buf[off1 + off2..off1 + off2 + clen as usize];
+        let mut payload = Vec::with_capacity(payload_bytes.len().saturating_add(4));
+        payload.extend_from_slice(payload_bytes);
         // MASQUE capsule telemetry (receive).
         crate::optimize::telemetry::MASQUE_BYTES_RECEIVED.inc_by(payload.len() as u64);
         match ctype {
@@ -1079,10 +1081,10 @@ impl Connection {
         let mut buf = vec![0u8; 2048];
         match conn.dgram_recv(&mut buf[..]) {
             Ok(len) if len > 0 => {
-                let slice = &buf[..len];
-                if let Ok((flow_id, used)) = Self::decode_varint(slice) {
-                    let payload = slice[used..].to_vec();
-                    return Some((flow_id, payload));
+                if let Ok((flow_id, used)) = Self::decode_varint(&buf[..len]) {
+                    buf.copy_within(used..len, 0);
+                    buf.truncate(len - used);
+                    return Some((flow_id, buf));
                 }
                 None
             }

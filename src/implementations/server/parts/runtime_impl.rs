@@ -611,9 +611,7 @@ impl ServerRuntime {
         retry_eligible: bool,
     ) -> crate::implementations::server::ddos::IncomingDatagramAdmission {
         let established = self.live().live_state.is_established_datagram(from, packet);
-        self.live()
-            .live_state
-            .admit_incoming_datagram(from, packet, established, retry_eligible)
+        self.live().live_state.admit_incoming_datagram(from, packet, established, retry_eligible)
     }
 
     fn live_parts(&mut self) -> ServerRuntimeLiveParts<'_> {
@@ -658,16 +656,8 @@ impl ServerRuntime {
     ) -> std::io::Result<()> {
         let profiles = runtime_config.profiles.clone();
         let profile_interval_secs = runtime_config.profile_interval_secs;
-        let stealth_policy = runtime_config.stealth_policy.as_runtime_policy();
         let standalone_runtime_metadata = runtime_config.standalone_runtime_metadata.clone();
         let tun_enable = runtime_config.tun_enable;
-        let profile = stealth_policy.profile;
-        let os = stealth_policy.os;
-        let disable_doh = stealth_policy.disable_doh;
-        let doh_provider = stealth_policy.doh_provider.to_string();
-        let disable_fronting = stealth_policy.disable_fronting;
-        let front_domain = stealth_policy.front_domain.to_vec();
-        let disable_http3 = stealth_policy.disable_http3;
         let fingerprint_profile = runtime_config.transport.fingerprint_profile();
         let dns_upstream_resolvers = Arc::new(self.server_config.dns_servers.clone());
         if self.state != ServerState::Stopped {
@@ -880,17 +870,10 @@ impl ServerRuntime {
                                             metrics: &metrics,
                                             stealth_config: &stealth_config,
                                             fec_cfg_shared: &fec_cfg_shared,
-                                            opt_params_shared: &opt_params_shared,
+                                        opt_params_shared: &opt_params_shared,
                                         transport_config: transport,
-                                        profile,
-                                        os,
-                                        disable_doh,
                                         auth_rate_limiter: auth_rate_limiter.clone(),
                                         retry_token_manager: retry_token_manager.clone(),
-                                        doh_provider: doh_provider.as_str(),
-                                        disable_fronting,
-                                        front_domain: &front_domain,
-                                        disable_http3,
                                     },
                                 )
                             },
@@ -919,7 +902,6 @@ impl ServerRuntime {
                                 runtime_parts.server_tun,
                                 runtime_parts.server_ips,
                                 tun_enable,
-                                transport.fingerprint_profile(),
                                 Arc::clone(&dns_upstream_resolvers),
                             ).await {
                                 Ok(result) => result,
@@ -1073,11 +1055,7 @@ impl ServerRuntime {
                     false
                 };
                 let (outcome, reason, message) = if kicked {
-                    (
-                        crate::audit::AuditOutcome::Succeeded,
-                        "client_kicked",
-                        "Admin kicked client",
-                    )
+                    (crate::audit::AuditOutcome::Succeeded, "client_kicked", "Admin kicked client")
                 } else {
                     (
                         crate::audit::AuditOutcome::Failed,

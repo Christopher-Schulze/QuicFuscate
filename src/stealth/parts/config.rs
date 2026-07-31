@@ -11,6 +11,10 @@ pub struct StealthConfig {
     pub initial_browser: BrowserProfile,
     /// Initial OS profile for fingerprinting.
     pub initial_os: OsProfile,
+    /// Normalize decoded server-side tunnel ingress to the frozen OS profile.
+    pub enable_network_fingerprint_normalization: bool,
+    /// Suppress ICMP destination-unreachable traffic except PMTUD signals.
+    pub suppress_icmp_unreachable: bool,
     /// Enable traffic padding to obscure packet sizes.
     pub enable_traffic_padding: bool,
     /// Enable timing obfuscation with random delays.
@@ -271,6 +275,8 @@ impl StealthConfig {
             // Fields removed during consolidation
             initial_browser: BrowserProfile::Chrome,
             initial_os: OsProfile::Windows,
+            enable_network_fingerprint_normalization: true,
+            suppress_icmp_unreachable: false,
             // Enable adaptive padding with a very small budget (sweetspot)
             // to retain near-zero overhead while smoothing packet sizes.
             enable_traffic_padding: true,
@@ -329,6 +335,8 @@ impl StealthConfig {
             use_qpack_headers: true,
             initial_browser: BrowserProfile::Chrome,
             initial_os: OsProfile::Windows,
+            enable_network_fingerprint_normalization: true,
+            suppress_icmp_unreachable: false,
             enable_traffic_padding: true,
             enable_timing_obfuscation: true, // Performance impact accepted
             enable_protocol_mimicry: true,
@@ -386,6 +394,8 @@ impl StealthConfig {
             enable_domain_fronting: false,
             initial_browser: BrowserProfile::Chrome,
             initial_os: OsProfile::Windows,
+            enable_network_fingerprint_normalization: false,
+            suppress_icmp_unreachable: false,
             enable_traffic_padding: false,
             enable_timing_obfuscation: false,
             enable_protocol_mimicry: false,
@@ -432,6 +442,8 @@ impl StealthConfig {
             enable_domain_fronting: false,
             initial_browser: BrowserProfile::Chrome,
             initial_os: OsProfile::Windows,
+            enable_network_fingerprint_normalization: true,
+            suppress_icmp_unreachable: false,
             enable_traffic_padding: false,
             enable_timing_obfuscation: false,
             enable_protocol_mimicry: false,
@@ -482,6 +494,8 @@ impl StealthConfig {
             // Fingerprint: stable Chromium/Windows baseline
             initial_browser: BrowserProfile::Chrome,
             initial_os: OsProfile::Windows,
+            enable_network_fingerprint_normalization: true,
+            suppress_icmp_unreachable: false,
             // Padding: completely off
             enable_traffic_padding: false,
             // Timing obfuscation / Flow shaping: off
@@ -576,6 +590,8 @@ impl StealthConfig {
             mode: Option<StealthMode>,
             initial_browser: Option<BrowserProfile>,
             initial_os: Option<OsProfile>,
+            enable_network_fingerprint_normalization: Option<bool>,
+            suppress_icmp_unreachable: Option<bool>,
             #[serde(alias = "use_tls_cover_extras")]
             use_tls_cover: Option<bool>,
             enable_doh: Option<bool>,
@@ -639,6 +655,12 @@ impl StealthConfig {
             }
             if let Some(v) = sec.initial_os {
                 cfg.initial_os = v;
+            }
+            if let Some(v) = sec.enable_network_fingerprint_normalization {
+                cfg.enable_network_fingerprint_normalization = v;
+            }
+            if let Some(v) = sec.suppress_icmp_unreachable {
+                cfg.suppress_icmp_unreachable = v;
             }
             if let Some(v) = sec.use_tls_cover {
                 cfg.use_tls_cover = v;
@@ -813,6 +835,8 @@ impl StealthConfig {
     /// Supported variables:
     /// - QUICFUSCATE_BROWSER / QUICFUSCATE_BROWSER_PROFILE: chrome|firefox|safari|edge (case-insensitive)
     /// - QUICFUSCATE_OS / QUICFUSCATE_OS_PROFILE: windows|linux|macos|android|ios (case-insensitive)
+    /// - QUICFUSCATE_NETWORK_FINGERPRINT_NORMALIZATION: 0|1|true|false
+    /// - QUICFUSCATE_SUPPRESS_ICMP_UNREACHABLE: 0|1|true|false
     /// - QUICFUSCATE_USE_TLS_COVER_EXTRAS: 0|1|true|false
     /// - QUICFUSCATE_DOH / QUICFUSCATE_DOH_ENABLED: 0|1|true|false
     /// - QUICFUSCATE_DOH_PROVIDER: URL
@@ -856,6 +880,14 @@ impl StealthConfig {
             if let Some(os) = Self::parse_os(&v) {
                 self.initial_os = os;
             }
+        }
+        if let Some(b) =
+            Self::env_bool_first(["QUICFUSCATE_NETWORK_FINGERPRINT_NORMALIZATION"])
+        {
+            self.enable_network_fingerprint_normalization = b;
+        }
+        if let Some(b) = Self::env_bool_first(["QUICFUSCATE_SUPPRESS_ICMP_UNREACHABLE"]) {
+            self.suppress_icmp_unreachable = b;
         }
         if let Some(b) =
             Self::env_bool_first(["QUICFUSCATE_USE_TLS_COVER_EXTRAS", "QUICFUSCATE_USE_TLS_COVER"])

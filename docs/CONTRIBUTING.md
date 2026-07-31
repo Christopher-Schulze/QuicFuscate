@@ -150,6 +150,8 @@ Component conventions:
 
 ## Stealth Profiles & Fingerprints
 - Runtime fingerprinting uses deterministic in-memory ClientHello synthesis (no on-disk profiles required).
+- Server raw-IP fingerprint normalization is connection-frozen with the TLS/H3 persona and runs only after decoded TUN/MASQUE uplink. Preserve disabled byte identity, SYN-only TCP policy, fragments, PMTUD messages, and checksums.
+- Changes to network-stack profiles require exact packet vectors, `rt-core-connection-basics`, `rt-stealth-config-toml`, and the `fingerprint_normalizer` allocation/throughput benchmark.
 - If you maintain external base64 dumps (`.chlo`/`.chlo.b64`) for auditing, place them under top-level `browser_profiles/` and use the TLS utility scripts to decode/verify and generate sidecars.
 - Use the CLI to list available fingerprints and verify selection
 - Ensure TLS Cover and real TLS fingerprint modes remain consistent with the profile set

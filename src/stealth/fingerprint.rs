@@ -52,6 +52,8 @@ pub enum IpIdBehavior {
 )]
 #[serde(rename_all = "lowercase")]
 pub enum OsFingerprintProfile {
+    /// Byte-for-byte passthrough with no packet inspection or mutation.
+    Disabled,
     /// Linux kernel network stack (default).
     #[default]
     Linux,
@@ -66,6 +68,7 @@ pub enum OsFingerprintProfile {
 impl std::fmt::Display for OsFingerprintProfile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Disabled => write!(f, "disabled"),
             Self::Linux => write!(f, "linux"),
             Self::Windows => write!(f, "windows"),
             Self::MacOS => write!(f, "macos"),
@@ -79,6 +82,7 @@ impl std::str::FromStr for OsFingerprintProfile {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim().to_ascii_lowercase().as_str() {
+            "disabled" | "none" | "off" => Ok(Self::Disabled),
             "linux" => Ok(Self::Linux),
             "windows" | "win" => Ok(Self::Windows),
             "macos" | "mac" => Ok(Self::MacOS),
@@ -89,12 +93,30 @@ impl std::str::FromStr for OsFingerprintProfile {
 }
 
 impl OsFingerprintProfile {
+    /// Maps the OS used by the frozen TLS/H3 persona to its network-stack profile.
+    ///
+    /// iOS and macOS share the Darwin network-stack family represented by the
+    /// macOS profile. Disabled is selected separately by runtime policy.
+    pub fn from_stealth_os(os: crate::stealth::OsProfile) -> Self {
+        match os {
+            crate::stealth::OsProfile::Windows => Self::Windows,
+            crate::stealth::OsProfile::MacOS | crate::stealth::OsProfile::IOS => Self::MacOS,
+            crate::stealth::OsProfile::Linux => Self::Linux,
+            crate::stealth::OsProfile::Android => Self::Android,
+        }
+    }
+
+    /// Returns true when normalization is an explicit passthrough.
+    pub fn is_disabled(self) -> bool {
+        self == Self::Disabled
+    }
+
     /// Returns the default IP TTL for this OS.
     ///
     /// - Linux: 64, Windows: 128, macOS: 64, Android: 64
     pub fn ttl(&self) -> u8 {
         match self {
-            Self::Linux => 64,
+            Self::Disabled | Self::Linux => 64,
             Self::Windows => 128,
             Self::MacOS => 64,
             Self::Android => 64,
@@ -103,13 +125,26 @@ impl OsFingerprintProfile {
 
     /// Returns the default TCP receive window size advertised in SYN segments.
     ///
-    /// - Linux: 64240, Windows: 65535, macOS: 65535, Android: 57344
+    /// Values select exact request signatures from the retained p0f 3.09b
+    /// database for Ethernet MSS 1460.
     pub fn default_window(&self) -> u16 {
         match self {
-            Self::Linux => 64240,
-            Self::Windows => 65535,
+            Self::Disabled | Self::Linux => 29_200,
+            Self::Windows => 8_192,
             Self::MacOS => 65535,
-            Self::Android => 57344,
+            Self::Android => 64_240,
+        }
+    }
+
+    /// Returns the TCP window-scale value paired with the selected p0f request
+    /// signature.
+    fn window_scale(&self) -> u8 {
+        match self {
+            Self::Disabled => 0,
+            Self::Linux => 10,
+            Self::Windows => 2,
+            Self::MacOS => 4,
+            Self::Android => 1,
         }
     }
 
@@ -131,27 +166,32 @@ impl OsFingerprintProfile {
     /// Returns the IP identification field behavior for this OS.
     pub fn ip_id_behavior(&self) -> IpIdBehavior {
         match self {
-            Self::Linux | Self::MacOS | Self::Android => IpIdBehavior::Incremental,
+            Self::Disabled | Self::Linux | Self::MacOS | Self::Android => IpIdBehavior::Incremental,
             Self::Windows => IpIdBehavior::Sequential,
         }
     }
 
-    /// Returns the preferred TCP option ordering for SYN segments, expressed as
-    /// a list of option kind bytes in the order they should appear.
-    ///
-    /// Common TCP option kinds:
-    /// - `0x02` — MSS (Maximum Segment Size)
-    /// - `0x03` — Window Scale
-    /// - `0x04` — SACK Permitted
-    /// - `0x08` — Timestamp
+    /// Returns the exact TCP options length of the selected p0f request
+    /// signature.
+    fn tcp_options_len(&self) -> usize {
+        match self {
+            Self::Disabled => 0,
+            Self::Linux | Self::Windows | Self::Android => 20,
+            Self::MacOS => 24,
+        }
+    }
+
+    /// Returns the fallback preferred TCP option ordering when a SYN carries
+    /// unknown options and cannot safely be rewritten to the canonical layout.
     fn tcp_option_order(&self) -> &'static [u8] {
         match self {
-            // Linux: MSS, SACK_PERM, WindowScale, Timestamp
-            Self::Linux | Self::Android => &[0x02, 0x04, 0x03, 0x08],
-            // Windows: MSS, SACK_PERM, WindowScale, Timestamp
-            Self::Windows => &[0x02, 0x04, 0x03, 0x08],
-            // macOS: MSS, WindowScale, SACK_PERM, Timestamp
-            Self::MacOS => &[0x02, 0x03, 0x04, 0x08],
+            Self::Disabled => &[],
+            // p0f request family: MSS, SACK permitted, Timestamp, NOP, Window Scale.
+            Self::Linux | Self::Android => &[0x02, 0x04, 0x08, 0x03],
+            // Windows request family: MSS, NOP, Window Scale, SACK permitted, Timestamp.
+            Self::Windows => &[0x02, 0x03, 0x04, 0x08],
+            // Darwin request family: MSS, NOP, Window Scale, Timestamp, SACK permitted.
+            Self::MacOS => &[0x02, 0x03, 0x08, 0x04],
         }
     }
 }
@@ -159,6 +199,37 @@ impl OsFingerprintProfile {
 // ============================================================================
 // Packet normalizer
 // ============================================================================
+
+/// Result of one complete raw-IP normalization pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NormalizeResult {
+    /// Packet bytes were not changed.
+    Passthrough,
+    /// Packet bytes and dependent checksums were updated.
+    Modified,
+    /// Packet must not be forwarded under the configured ICMP policy.
+    Dropped,
+}
+
+/// Result plus the logical packet length after canonical TCP option rewriting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NormalizeOutcome {
+    /// Packet disposition and mutation state.
+    pub result: NormalizeResult,
+    /// Bytes that belong to the normalized IP packet.
+    pub packet_len: usize,
+}
+
+/// Policy for ICMP destination-unreachable traffic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IcmpUnreachablePolicy {
+    /// Preserve every unreachable message.
+    #[default]
+    Preserve,
+    /// Suppress non-PMTUD unreachable messages while always preserving IPv4
+    /// Fragmentation Needed and ICMPv6 Packet Too Big.
+    SuppressNonPmtud,
+}
 
 /// Normalizes raw IPv4 packets to match a target OS fingerprint profile.
 ///
@@ -171,6 +242,7 @@ pub struct PacketNormalizer {
     pub profile: OsFingerprintProfile,
     /// Monotonic counter for IP ID generation.
     ip_id_counter: AtomicU64,
+    icmp_unreachable_policy: IcmpUnreachablePolicy,
 }
 
 impl PacketNormalizer {
@@ -178,12 +250,131 @@ impl PacketNormalizer {
     /// The IP ID counter starts at a non-zero value to avoid predictable
     /// initial IDs.
     pub fn new(profile: OsFingerprintProfile) -> Self {
-        Self { profile, ip_id_counter: AtomicU64::new(0x0001_0000) }
+        Self {
+            profile,
+            ip_id_counter: AtomicU64::new(0x0001_0000),
+            icmp_unreachable_policy: IcmpUnreachablePolicy::Preserve,
+        }
+    }
+
+    /// Creates a normalizer with an explicit ICMP unreachable policy.
+    pub fn with_icmp_unreachable_policy(
+        profile: OsFingerprintProfile,
+        icmp_unreachable_policy: IcmpUnreachablePolicy,
+    ) -> Self {
+        Self { profile, ip_id_counter: AtomicU64::new(0x0001_0000), icmp_unreachable_policy }
     }
 
     /// Creates a normalizer with the default profile (Linux).
     pub fn default_profile() -> Self {
         Self::new(OsFingerprintProfile::default())
+    }
+
+    /// Applies the complete packet policy exactly once.
+    ///
+    /// Disabled mode returns before inspecting packet bytes. IPv4 header
+    /// normalization is followed by SYN or SYN-ACK TCP normalization. Optional
+    /// ICMP suppression is evaluated before mutation and never drops PMTUD
+    /// signals.
+    pub fn normalize(&self, pkt: &mut [u8]) -> NormalizeResult {
+        self.normalize_with_capacity(pkt, pkt.len()).result
+    }
+
+    /// Applies normalization to a logical packet inside a potentially larger
+    /// caller-owned buffer. The spare capacity permits exact profile option
+    /// lengths without allocation.
+    pub fn normalize_with_capacity(&self, pkt: &mut [u8], packet_len: usize) -> NormalizeOutcome {
+        if packet_len > pkt.len() {
+            return NormalizeOutcome {
+                result: NormalizeResult::Passthrough,
+                packet_len: pkt.len(),
+            };
+        }
+        if self.profile.is_disabled() {
+            return NormalizeOutcome { result: NormalizeResult::Passthrough, packet_len };
+        }
+        if self.should_drop_icmp_unreachable(&pkt[..packet_len]) {
+            return NormalizeOutcome { result: NormalizeResult::Dropped, packet_len };
+        }
+        let Some((ip_hdr_len, protocol)) = Self::parse_ipv4_header(&pkt[..packet_len]) else {
+            return NormalizeOutcome { result: NormalizeResult::Passthrough, packet_len };
+        };
+        let fragmented = u16::from_be_bytes([pkt[6], pkt[7]]) & 0x3fff != 0;
+        let ipv4_modified = self.normalize_ipv4_fields(&mut pkt[..packet_len]);
+        let (tcp_modified, normalized_len) = if protocol == 6 && !fragmented {
+            self.normalize_tcp_fields_with_capacity(pkt, packet_len, ip_hdr_len)
+        } else {
+            (false, packet_len)
+        };
+        let result = if ipv4_modified || tcp_modified {
+            NormalizeResult::Modified
+        } else {
+            NormalizeResult::Passthrough
+        };
+        NormalizeOutcome { result, packet_len: normalized_len }
+    }
+
+    /// Applies normalization to an owned packet and retains its canonical
+    /// logical length. Callers that preallocate four spare bytes incur no
+    /// allocation even when a Darwin profile expands a 20-byte option area.
+    pub fn normalize_vec(&self, pkt: &mut Vec<u8>) -> NormalizeResult {
+        if self.profile.is_disabled() {
+            return NormalizeResult::Passthrough;
+        }
+        let packet_len = pkt.len();
+        let required_len = self.required_capacity(pkt);
+        if pkt.capacity() < required_len {
+            pkt.reserve_exact(required_len - pkt.capacity());
+        }
+        if required_len > packet_len {
+            pkt.resize(required_len, 0);
+        }
+        let outcome = self.normalize_with_capacity(pkt, packet_len);
+        pkt.truncate(outcome.packet_len);
+        outcome.result
+    }
+
+    /// Returns the buffer length required for canonical SYN option rewriting.
+    /// Non-SYN, malformed, fragmented, and disabled packets require no spare
+    /// capacity.
+    pub(crate) fn required_capacity(&self, pkt: &[u8]) -> usize {
+        if self.profile.is_disabled() {
+            return pkt.len();
+        }
+        let Some((ip_hdr_len, protocol)) = Self::parse_ipv4_header(pkt) else {
+            return pkt.len();
+        };
+        if protocol != 6 || u16::from_be_bytes([pkt[6], pkt[7]]) & 0x3fff != 0 {
+            return pkt.len();
+        }
+        let tcp = ip_hdr_len;
+        if pkt.len() < tcp + 20 || pkt[tcp + 13] & 0x02 == 0 {
+            return pkt.len();
+        }
+        let data_offset = ((pkt[tcp + 12] >> 4) as usize) * 4;
+        if data_offset < 20 || pkt.len() < tcp + data_offset {
+            return pkt.len();
+        }
+        let source_options_len = data_offset - 20;
+        pkt.len().saturating_add(self.profile.tcp_options_len().saturating_sub(source_options_len))
+    }
+
+    fn should_drop_icmp_unreachable(&self, pkt: &[u8]) -> bool {
+        if self.icmp_unreachable_policy != IcmpUnreachablePolicy::SuppressNonPmtud {
+            return false;
+        }
+        match pkt.first().map(|byte| byte >> 4) {
+            Some(4) => {
+                let Some((header_len, protocol)) = Self::parse_ipv4_header(pkt) else {
+                    return false;
+                };
+                protocol == 1
+                    && pkt.get(header_len) == Some(&3)
+                    && pkt.get(header_len + 1) != Some(&4)
+            }
+            Some(6) => pkt.len() >= 42 && pkt[6] == 58 && pkt[40] == 1,
+            _ => false,
+        }
     }
 
     /// Generates the next IP ID value according to the profile's behavior.
@@ -230,10 +421,18 @@ impl PacketNormalizer {
     /// Non-IPv4 packets are left unchanged. The IP header checksum is updated
     /// incrementally (RFC 1624) after each field modification.
     pub fn normalize_ipv4(&self, pkt: &mut [u8]) {
+        if self.profile.is_disabled() {
+            return;
+        }
+        self.normalize_ipv4_fields(pkt);
+    }
+
+    fn normalize_ipv4_fields(&self, pkt: &mut [u8]) -> bool {
         let (_ihl, _proto) = match Self::parse_ipv4_header(pkt) {
             Some(v) => v,
-            None => return,
+            None => return false,
         };
+        let mut modified = false;
 
         // --- TTL normalization ---
         let old_ttl = pkt[8];
@@ -241,31 +440,41 @@ impl PacketNormalizer {
         if old_ttl != new_ttl {
             update_ip_checksum_incremental(pkt, old_ttl, new_ttl, 8);
             pkt[8] = new_ttl;
+            modified = true;
         }
 
         // --- DF bit normalization ---
         // The flags occupy the high 3 bits of byte 6: Reserved(0x80) DF(0x40) MF(0x20).
-        let old_flags = pkt[6];
-        let new_flags = if self.profile.df_bit() { old_flags | 0x40 } else { old_flags & !0x40 };
-        if old_flags != new_flags {
-            update_ip_checksum_incremental(pkt, old_flags, new_flags, 6);
-            pkt[6] = new_flags;
-        }
+        let fragment_field = u16::from_be_bytes([pkt[6], pkt[7]]);
+        let is_fragment = fragment_field & 0x3fff != 0;
+        if !is_fragment {
+            let old_flags = pkt[6];
+            let new_flags =
+                if self.profile.df_bit() { old_flags | 0x40 } else { old_flags & !0x40 };
+            if old_flags != new_flags {
+                update_ip_checksum_incremental(pkt, old_flags, new_flags, 6);
+                pkt[6] = new_flags;
+                modified = true;
+            }
 
-        // --- IP ID normalization ---
-        let old_id_hi = pkt[4];
-        let old_id_lo = pkt[5];
-        let new_id = self.next_ip_id();
-        let new_id_hi = (new_id >> 8) as u8;
-        let new_id_lo = (new_id & 0xFF) as u8;
-        if old_id_hi != new_id_hi {
-            update_ip_checksum_incremental(pkt, old_id_hi, new_id_hi, 4);
-            pkt[4] = new_id_hi;
+            // --- IP ID normalization ---
+            let old_id_hi = pkt[4];
+            let old_id_lo = pkt[5];
+            let new_id = self.next_ip_id();
+            let new_id_hi = (new_id >> 8) as u8;
+            let new_id_lo = (new_id & 0xFF) as u8;
+            if old_id_hi != new_id_hi {
+                update_ip_checksum_incremental(pkt, old_id_hi, new_id_hi, 4);
+                pkt[4] = new_id_hi;
+                modified = true;
+            }
+            if old_id_lo != new_id_lo {
+                update_ip_checksum_incremental(pkt, old_id_lo, new_id_lo, 5);
+                pkt[5] = new_id_lo;
+                modified = true;
+            }
         }
-        if old_id_lo != new_id_lo {
-            update_ip_checksum_incremental(pkt, old_id_lo, new_id_lo, 5);
-            pkt[5] = new_id_lo;
-        }
+        modified
     }
 
     /// Normalizes the TCP layer of a packet to match the target OS profile.
@@ -284,24 +493,44 @@ impl PacketNormalizer {
     /// and fully recomputed after option reordering. Non-TCP packets are
     /// silently ignored.
     pub fn normalize_tcp(&self, pkt: &mut [u8], ip_hdr_len: usize) {
-        // Verify this is TCP (protocol 6).
-        if pkt.len() < ip_hdr_len + 20 {
+        if self.profile.is_disabled() {
             return;
         }
-        if pkt.len() >= 10 && pkt[9] != 6 {
-            return;
+        self.normalize_tcp_fields(pkt, ip_hdr_len);
+    }
+
+    fn normalize_tcp_fields(&self, pkt: &mut [u8], ip_hdr_len: usize) -> bool {
+        self.normalize_tcp_fields_with_capacity(pkt, pkt.len(), ip_hdr_len).0
+    }
+
+    fn normalize_tcp_fields_with_capacity(
+        &self,
+        pkt: &mut [u8],
+        packet_len: usize,
+        ip_hdr_len: usize,
+    ) -> (bool, usize) {
+        // Verify this is TCP (protocol 6).
+        if packet_len > pkt.len() || packet_len < ip_hdr_len + 20 {
+            return (false, packet_len);
+        }
+        if packet_len >= 10 && pkt[9] != 6 {
+            return (false, packet_len);
         }
 
         let tcp = ip_hdr_len; // offset of TCP header within the packet
         let data_offset = ((pkt[tcp + 12] >> 4) as usize) * 4;
-        if data_offset < 20 || pkt.len() < tcp + data_offset {
-            return;
+        if data_offset < 20 || packet_len < tcp + data_offset {
+            return (false, packet_len);
         }
 
         let flags = pkt[tcp + 13];
         let is_syn = (flags & 0x02) != 0;
 
-        if is_syn {
+        if !is_syn {
+            return (false, packet_len);
+        }
+        let mut modified = false;
+        {
             // --- Window size normalization ---
             let old_win = u16::from_be_bytes([pkt[tcp + 14], pkt[tcp + 15]]);
             let new_win = self.profile.default_window();
@@ -313,13 +542,27 @@ impl PacketNormalizer {
                 pkt[tcp + 14] = new_hi;
                 update_tcp_checksum_incremental(pkt, ip_hdr_len, old_lo, new_lo, tcp + 15);
                 pkt[tcp + 15] = new_lo;
+                modified = true;
             }
 
             // --- MSS option normalization ---
-            normalize_tcp_mss(pkt, ip_hdr_len, self.profile.mss());
+            modified |= normalize_tcp_mss(pkt, ip_hdr_len, self.profile.mss());
 
-            // --- TCP option reordering ---
-            reorder_tcp_options(pkt, ip_hdr_len, self.profile.tcp_option_order());
+            // --- Exact p0f TCP option layout ---
+            let (options_modified, normalized_len) =
+                match rewrite_tcp_options_canonical(pkt, packet_len, ip_hdr_len, self.profile) {
+                    Some(outcome) => outcome,
+                    None => (
+                        reorder_tcp_options(pkt, ip_hdr_len, self.profile.tcp_option_order()),
+                        packet_len,
+                    ),
+                };
+            modified |= options_modified;
+            if options_modified {
+                recompute_tcp_checksum(&mut pkt[..normalized_len], ip_hdr_len);
+                recompute_ipv4_checksum(&mut pkt[..normalized_len], ip_hdr_len);
+            }
+            return (modified, normalized_len);
         }
     }
 }
@@ -424,35 +667,24 @@ fn update_checksum_byte(
 const TCP_OPT_END: u8 = 0x00;
 const TCP_OPT_NOP: u8 = 0x01;
 const TCP_OPT_MSS: u8 = 0x02;
-#[allow(dead_code)]
+const TCP_OPT_WINDOW_SCALE: u8 = 0x03;
+const TCP_OPT_SACK_PERMITTED: u8 = 0x04;
 const TCP_OPT_TIMESTAMP: u8 = 0x08;
 
-/// A parsed TCP option (excluding NOP and END padding).
-#[derive(Clone, Debug)]
-struct TcpOption {
+const MAX_TCP_OPTIONS_LEN: usize = 40;
+const MAX_PARSED_TCP_OPTIONS: usize = 16;
+
+/// One parsed TCP option pointing into a bounded stack copy.
+#[derive(Clone, Copy, Debug, Default)]
+struct TcpOptionRef {
     kind: u8,
-    data: Vec<u8>, // raw bytes after kind+length (i.e. value only)
+    start: u8,
+    len: u8,
 }
 
-impl TcpOption {
-    /// Total wire length including kind and length bytes.
-    fn wire_len(&self) -> usize {
-        2 + self.data.len()
-    }
-
-    /// Serialize to wire format (kind, length, value).
-    fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(self.wire_len());
-        buf.push(self.kind);
-        buf.push(self.wire_len() as u8);
-        buf.extend_from_slice(&self.data);
-        buf
-    }
-}
-
-/// Parses TCP options from the given slice, returning non-NOP/non-END options.
-fn parse_tcp_options(opts: &[u8]) -> Vec<TcpOption> {
-    let mut result = Vec::new();
+/// Parses non-padding TCP options into caller-owned fixed storage.
+fn parse_tcp_options(opts: &[u8], parsed: &mut [TcpOptionRef; MAX_PARSED_TCP_OPTIONS]) -> usize {
+    let mut count = 0usize;
     let mut i = 0;
     while i < opts.len() {
         let kind = opts[i];
@@ -471,10 +703,14 @@ fn parse_tcp_options(opts: &[u8]) -> Vec<TcpOption> {
         if len < 2 || i + len > opts.len() {
             break;
         }
-        result.push(TcpOption { kind, data: opts[i + 2..i + len].to_vec() });
+        if count == parsed.len() {
+            break;
+        }
+        parsed[count] = TcpOptionRef { kind, start: i as u8, len: len as u8 };
+        count += 1;
         i += len;
     }
-    result
+    count
 }
 
 /// Reorders TCP options to match the given preferred kind ordering, then
@@ -484,53 +720,222 @@ fn parse_tcp_options(opts: &[u8]) -> Vec<TcpOption> {
 /// original relative order. The remaining space in the options field is filled
 /// with NOP padding. The data offset field is not changed (reordering does not
 /// alter the total options length).
-fn reorder_tcp_options(pkt: &mut [u8], ip_hdr_len: usize, order: &[u8]) {
+fn reorder_tcp_options(pkt: &mut [u8], ip_hdr_len: usize, order: &[u8]) -> bool {
     let tcp = ip_hdr_len;
     if pkt.len() < tcp + 20 {
-        return;
+        return false;
     }
     let data_offset = ((pkt[tcp + 12] >> 4) as usize) * 4;
     if data_offset < 20 || pkt.len() < tcp + data_offset {
-        return;
+        return false;
     }
     let opts_start = tcp + 20;
     let opts_end = tcp + data_offset;
     let opts_len = opts_end - opts_start;
-    if opts_len == 0 {
-        return;
+    if opts_len == 0 || opts_len > MAX_TCP_OPTIONS_LEN {
+        return false;
     }
 
-    let parsed = parse_tcp_options(&pkt[opts_start..opts_end]);
-    if parsed.is_empty() || parsed.len() == 1 {
-        // Nothing to reorder.
-        return;
+    let mut source = [0u8; MAX_TCP_OPTIONS_LEN];
+    source[..opts_len].copy_from_slice(&pkt[opts_start..opts_end]);
+    let mut parsed = [TcpOptionRef::default(); MAX_PARSED_TCP_OPTIONS];
+    let parsed_len = parse_tcp_options(&source[..opts_len], &mut parsed);
+    if parsed_len <= 1 {
+        return false;
     }
 
-    // Sort parsed options according to the preferred order.
-    // Options not in `order` get a sort priority of usize::MAX and preserve
-    // their original relative order (Rust's sort is stable).
-    let mut sorted = parsed.clone();
-    sorted.sort_by_key(|opt| order.iter().position(|&k| k == opt.kind).unwrap_or(usize::MAX));
+    let mut output = [TCP_OPT_NOP; MAX_TCP_OPTIONS_LEN];
+    let mut used = [false; MAX_PARSED_TCP_OPTIONS];
+    let mut written = 0usize;
+    for target_kind in order {
+        for index in 0..parsed_len {
+            let option = parsed[index];
+            if used[index] || option.kind != *target_kind {
+                continue;
+            }
+            let start = usize::from(option.start);
+            let len = usize::from(option.len);
+            if written + len > opts_len {
+                return false;
+            }
+            output[written..written + len].copy_from_slice(&source[start..start + len]);
+            written += len;
+            used[index] = true;
+        }
+    }
+    for index in 0..parsed_len {
+        if used[index] {
+            continue;
+        }
+        let option = parsed[index];
+        let start = usize::from(option.start);
+        let len = usize::from(option.len);
+        if written + len > opts_len {
+            return false;
+        }
+        output[written..written + len].copy_from_slice(&source[start..start + len]);
+        written += len;
+    }
 
-    // Re-serialize: options in new order, then NOP padding to fill remaining space.
-    let mut buf = Vec::with_capacity(opts_len);
-    for opt in &sorted {
-        buf.extend_from_slice(&opt.to_bytes());
+    if pkt[opts_start..opts_end] == output[..opts_len] {
+        return false;
     }
-    // Fill remaining space with NOPs.
-    while buf.len() < opts_len {
-        buf.push(TCP_OPT_NOP);
-    }
-    // If we somehow overflowed (shouldn't happen since we only reorder), bail.
-    if buf.len() != opts_len {
-        return;
-    }
-
-    // Write reordered options back.
-    pkt[opts_start..opts_end].copy_from_slice(&buf);
+    pkt[opts_start..opts_end].copy_from_slice(&output[..opts_len]);
 
     // Recompute TCP checksum from scratch (many bytes changed position).
     recompute_tcp_checksum(pkt, ip_hdr_len);
+    true
+}
+
+/// Rewrites a conventional SYN option set into one exact p0f 3.09b request
+/// signature. Unknown options are preserved through the fallback reorder path.
+fn rewrite_tcp_options_canonical(
+    pkt: &mut [u8],
+    packet_len: usize,
+    ip_hdr_len: usize,
+    profile: OsFingerprintProfile,
+) -> Option<(bool, usize)> {
+    let tcp = ip_hdr_len;
+    let data_offset = ((pkt.get(tcp + 12)? >> 4) as usize) * 4;
+    if data_offset < 20 || packet_len < tcp + data_offset {
+        return None;
+    }
+    let source_len = data_offset - 20;
+    if source_len == 0 || source_len > MAX_TCP_OPTIONS_LEN {
+        return None;
+    }
+
+    let options_start = tcp + 20;
+    let mut source = [0u8; MAX_TCP_OPTIONS_LEN];
+    source[..source_len].copy_from_slice(&pkt[options_start..options_start + source_len]);
+    let mut parsed = [TcpOptionRef::default(); MAX_PARSED_TCP_OPTIONS];
+    let parsed_len = parse_tcp_options(&source[..source_len], &mut parsed);
+
+    let mut timestamp = None;
+    let mut has_mss = false;
+    let mut has_sack_permitted = false;
+    let mut has_window_scale = false;
+    for option in &parsed[..parsed_len] {
+        match option.kind {
+            TCP_OPT_MSS if option.len == 4 => has_mss = true,
+            TCP_OPT_WINDOW_SCALE if option.len == 3 => has_window_scale = true,
+            TCP_OPT_SACK_PERMITTED if option.len == 2 => has_sack_permitted = true,
+            TCP_OPT_TIMESTAMP if option.len == 10 => {
+                let start = usize::from(option.start) + 2;
+                let mut value = [0u8; 8];
+                value.copy_from_slice(&source[start..start + 8]);
+                timestamp = Some(value);
+            }
+            _ => return None,
+        }
+    }
+    let timestamp = timestamp?;
+    if !has_mss || !has_sack_permitted || !has_window_scale {
+        return None;
+    }
+
+    let target_options_len = profile.tcp_options_len();
+    let delta = target_options_len as isize - source_len as isize;
+    let normalized_len = packet_len.checked_add_signed(delta)?;
+    if normalized_len > pkt.len() || normalized_len > usize::from(u16::MAX) {
+        return None;
+    }
+    let payload_start = tcp + data_offset;
+    let target_payload_start = options_start + target_options_len;
+    pkt.copy_within(payload_start..packet_len, target_payload_start);
+
+    let mut output = [0u8; MAX_TCP_OPTIONS_LEN];
+    let [mss_hi, mss_lo] = profile.mss().to_be_bytes();
+    let ws = profile.window_scale();
+    match profile {
+        OsFingerprintProfile::Disabled => return None,
+        OsFingerprintProfile::Linux | OsFingerprintProfile::Android => {
+            output[..20].copy_from_slice(&[
+                TCP_OPT_MSS,
+                4,
+                mss_hi,
+                mss_lo,
+                TCP_OPT_SACK_PERMITTED,
+                2,
+                TCP_OPT_TIMESTAMP,
+                10,
+                timestamp[0],
+                timestamp[1],
+                timestamp[2],
+                timestamp[3],
+                timestamp[4],
+                timestamp[5],
+                timestamp[6],
+                timestamp[7],
+                TCP_OPT_NOP,
+                TCP_OPT_WINDOW_SCALE,
+                3,
+                ws,
+            ]);
+        }
+        OsFingerprintProfile::Windows => {
+            output[..20].copy_from_slice(&[
+                TCP_OPT_MSS,
+                4,
+                mss_hi,
+                mss_lo,
+                TCP_OPT_NOP,
+                TCP_OPT_WINDOW_SCALE,
+                3,
+                ws,
+                TCP_OPT_SACK_PERMITTED,
+                2,
+                TCP_OPT_TIMESTAMP,
+                10,
+                timestamp[0],
+                timestamp[1],
+                timestamp[2],
+                timestamp[3],
+                timestamp[4],
+                timestamp[5],
+                timestamp[6],
+                timestamp[7],
+            ]);
+        }
+        OsFingerprintProfile::MacOS => {
+            output[..24].copy_from_slice(&[
+                TCP_OPT_MSS,
+                4,
+                mss_hi,
+                mss_lo,
+                TCP_OPT_NOP,
+                TCP_OPT_WINDOW_SCALE,
+                3,
+                ws,
+                TCP_OPT_NOP,
+                TCP_OPT_NOP,
+                TCP_OPT_TIMESTAMP,
+                10,
+                timestamp[0],
+                timestamp[1],
+                timestamp[2],
+                timestamp[3],
+                timestamp[4],
+                timestamp[5],
+                timestamp[6],
+                timestamp[7],
+                TCP_OPT_SACK_PERMITTED,
+                2,
+                TCP_OPT_END,
+                TCP_OPT_END,
+            ]);
+        }
+    }
+    let options_end = options_start + target_options_len;
+    let changed = source_len != target_options_len
+        || pkt[options_start..options_end] != output[..target_options_len];
+    pkt[options_start..options_end].copy_from_slice(&output[..target_options_len]);
+    pkt[tcp + 12] = (pkt[tcp + 12] & 0x0f) | (((20 + target_options_len) / 4) as u8) << 4;
+
+    let ip_total_len = usize::from(u16::from_be_bytes([pkt[2], pkt[3]]));
+    let normalized_ip_total_len = ip_total_len.checked_add_signed(delta)?;
+    pkt[2..4].copy_from_slice(&(normalized_ip_total_len as u16).to_be_bytes());
+    Some((changed, normalized_len))
 }
 
 /// Normalizes the MSS value in TCP options to the given target MSS.
@@ -538,14 +943,14 @@ fn reorder_tcp_options(pkt: &mut [u8], ip_hdr_len: usize, order: &[u8]) {
 /// Finds the MSS option (kind 0x02) in the TCP options and updates its 2-byte
 /// value, adjusting the TCP checksum incrementally. If no MSS option is found,
 /// this is a no-op.
-fn normalize_tcp_mss(pkt: &mut [u8], ip_hdr_len: usize, target_mss: u16) {
+fn normalize_tcp_mss(pkt: &mut [u8], ip_hdr_len: usize, target_mss: u16) -> bool {
     let tcp = ip_hdr_len;
     if pkt.len() < tcp + 24 {
-        return; // Need at least 4 bytes of options for MSS.
+        return false; // Need at least 4 bytes of options for MSS.
     }
     let data_offset = ((pkt[tcp + 12] >> 4) as usize) * 4;
     if data_offset < 24 || pkt.len() < tcp + data_offset {
-        return;
+        return false;
     }
     let opts_start = tcp + 20;
     let opts_end = tcp + data_offset;
@@ -579,10 +984,11 @@ fn normalize_tcp_mss(pkt: &mut [u8], ip_hdr_len: usize, target_mss: u16) {
                 update_tcp_checksum_incremental(pkt, ip_hdr_len, old_lo, new_lo, i + 3);
                 pkt[i + 3] = new_lo;
             }
-            return;
+            return old_hi != new_hi || old_lo != new_lo;
         }
         i += len;
     }
+    false
 }
 
 // ============================================================================
@@ -604,41 +1010,49 @@ fn recompute_tcp_checksum(pkt: &mut [u8], ip_hdr_len: usize) {
         return;
     }
     let tcp_len = total_len - ip_hdr_len;
-
-    // Build pseudo-header.
-    let mut pseudo = Vec::with_capacity(12 + tcp_len);
-    pseudo.extend_from_slice(&pkt[12..16]); // source IP
-    pseudo.extend_from_slice(&pkt[16..20]); // destination IP
-    pseudo.push(0); // zero
-    pseudo.push(pkt[9]); // protocol (6 = TCP)
-    pseudo.extend_from_slice(&(tcp_len as u16).to_be_bytes()); // TCP length
-    pseudo.extend_from_slice(&pkt[tcp..tcp + tcp_len]); // TCP segment
-
-    // Zero out the existing checksum before computing.
     let cksum_off = tcp + 16;
-    pseudo[12 + 16] = 0;
-    pseudo[12 + 17] = 0;
-
-    let cksum = ones_complement_checksum(&pseudo);
+    let mut sum = 0u32;
+    sum = add_checksum_words(sum, &pkt[12..20]);
+    sum = sum.wrapping_add(u32::from(pkt[9]));
+    sum = sum.wrapping_add(tcp_len as u32);
+    sum = add_checksum_words(sum, &pkt[tcp..cksum_off]);
+    sum = add_checksum_words(sum, &pkt[cksum_off + 2..tcp + tcp_len]);
+    let cksum = finalize_checksum(sum);
     pkt[cksum_off] = (cksum >> 8) as u8;
     pkt[cksum_off + 1] = (cksum & 0xFF) as u8;
 }
 
-/// Computes the one's complement checksum (RFC 1071) over the given data.
-fn ones_complement_checksum(data: &[u8]) -> u16 {
-    let mut sum: u32 = 0;
-    let mut i = 0;
-    while i + 1 < data.len() {
-        sum += u16::from_be_bytes([data[i], data[i + 1]]) as u32;
-        i += 2;
+fn recompute_ipv4_checksum(pkt: &mut [u8], ip_hdr_len: usize) {
+    if ip_hdr_len < 20 || pkt.len() < ip_hdr_len {
+        return;
     }
-    if i < data.len() {
-        sum += (data[i] as u32) << 8;
+    pkt[10..12].fill(0);
+    let checksum = finalize_checksum(add_checksum_words(0, &pkt[..ip_hdr_len]));
+    pkt[10..12].copy_from_slice(&checksum.to_be_bytes());
+}
+
+fn add_checksum_words(mut sum: u32, data: &[u8]) -> u32 {
+    let mut chunks = data.chunks_exact(2);
+    for word in &mut chunks {
+        sum = sum.wrapping_add(u32::from(u16::from_be_bytes([word[0], word[1]])));
     }
+    if let Some(byte) = chunks.remainder().first() {
+        sum = sum.wrapping_add(u32::from(*byte) << 8);
+    }
+    sum
+}
+
+fn finalize_checksum(mut sum: u32) -> u16 {
     while sum >> 16 != 0 {
         sum = (sum & 0xFFFF) + (sum >> 16);
     }
     !(sum as u16)
+}
+
+/// Computes the one's complement checksum (RFC 1071) over the given data.
+#[cfg(test)]
+fn ones_complement_checksum(data: &[u8]) -> u16 {
+    finalize_checksum(add_checksum_words(0, data))
 }
 
 /// Verifies that the IPv4 header checksum is valid (sum of all 16-bit words
@@ -832,6 +1246,12 @@ mod tests {
         pkt
     }
 
+    fn parsed_option_kinds(options: &[u8]) -> Vec<u8> {
+        let mut parsed = [TcpOptionRef::default(); MAX_PARSED_TCP_OPTIONS];
+        let count = parse_tcp_options(options, &mut parsed);
+        parsed[..count].iter().map(|option| option.kind).collect()
+    }
+
     // --- Profile characteristic tests ---
 
     #[test]
@@ -843,11 +1263,36 @@ mod tests {
     }
 
     #[test]
+    fn disabled_profile_parses_and_maps_every_stealth_os() {
+        assert_eq!("none".parse::<OsFingerprintProfile>().unwrap(), OsFingerprintProfile::Disabled);
+        assert_eq!(
+            OsFingerprintProfile::from_stealth_os(crate::stealth::OsProfile::Windows),
+            OsFingerprintProfile::Windows
+        );
+        assert_eq!(
+            OsFingerprintProfile::from_stealth_os(crate::stealth::OsProfile::MacOS),
+            OsFingerprintProfile::MacOS
+        );
+        assert_eq!(
+            OsFingerprintProfile::from_stealth_os(crate::stealth::OsProfile::IOS),
+            OsFingerprintProfile::MacOS
+        );
+        assert_eq!(
+            OsFingerprintProfile::from_stealth_os(crate::stealth::OsProfile::Linux),
+            OsFingerprintProfile::Linux
+        );
+        assert_eq!(
+            OsFingerprintProfile::from_stealth_os(crate::stealth::OsProfile::Android),
+            OsFingerprintProfile::Android
+        );
+    }
+
+    #[test]
     fn test_profile_window_values() {
-        assert_eq!(OsFingerprintProfile::Linux.default_window(), 64240);
-        assert_eq!(OsFingerprintProfile::Windows.default_window(), 65535);
+        assert_eq!(OsFingerprintProfile::Linux.default_window(), 29_200);
+        assert_eq!(OsFingerprintProfile::Windows.default_window(), 8_192);
         assert_eq!(OsFingerprintProfile::MacOS.default_window(), 65535);
-        assert_eq!(OsFingerprintProfile::Android.default_window(), 57344);
+        assert_eq!(OsFingerprintProfile::Android.default_window(), 64_240);
     }
 
     #[test]
@@ -1018,7 +1463,7 @@ mod tests {
         let normalizer = PacketNormalizer::new(OsFingerprintProfile::Linux);
         normalizer.normalize_tcp(&mut pkt, 20);
         let window = u16::from_be_bytes([pkt[34], pkt[35]]);
-        assert_eq!(window, 64240, "Window should be normalized to Linux default");
+        assert_eq!(window, 29_200, "Window should match the selected Linux p0f signature");
         assert!(verify_tcp_checksum(&pkt, 20), "TCP checksum must be valid");
     }
 
@@ -1028,7 +1473,7 @@ mod tests {
         let normalizer = PacketNormalizer::new(OsFingerprintProfile::Windows);
         normalizer.normalize_tcp(&mut pkt, 20);
         let window = u16::from_be_bytes([pkt[34], pkt[35]]);
-        assert_eq!(window, 65535, "Window should be normalized to Windows default");
+        assert_eq!(window, 8_192, "Window should match the selected Windows p0f signature");
         assert!(verify_tcp_checksum(&pkt, 20), "TCP checksum must be valid");
     }
 
@@ -1038,7 +1483,7 @@ mod tests {
         let normalizer = PacketNormalizer::new(OsFingerprintProfile::Android);
         normalizer.normalize_tcp(&mut pkt, 20);
         let window = u16::from_be_bytes([pkt[34], pkt[35]]);
-        assert_eq!(window, 57344, "Window should be normalized to Android default");
+        assert_eq!(window, 64_240, "Window should match the selected Android p0f signature");
         assert!(verify_tcp_checksum(&pkt, 20), "TCP checksum must be valid");
     }
 
@@ -1089,14 +1534,13 @@ mod tests {
         let opts = &pkt[tcp + 20..tcp + data_offset];
 
         // Parse option kinds (excluding NOP/END).
-        let parsed = parse_tcp_options(opts);
-        let kinds: Vec<u8> = parsed.iter().map(|o| o.kind).collect();
+        let kinds = parsed_option_kinds(opts);
 
-        // macOS order: MSS(0x02), WindowScale(0x03), SACK_PERM(0x04), Timestamp(0x08)
+        // macOS order: MSS, WindowScale, Timestamp, SACK permitted.
         assert_eq!(
             kinds,
-            vec![0x02, 0x03, 0x04, 0x08],
-            "macOS should place WindowScale before SACK_PERM"
+            vec![0x02, 0x03, 0x08, 0x04],
+            "macOS should use the Darwin option ordering"
         );
         assert!(verify_tcp_checksum(&pkt, 20), "TCP checksum must be valid after reorder");
     }
@@ -1110,16 +1554,152 @@ mod tests {
         let tcp = 20;
         let data_offset = ((pkt[tcp + 12] >> 4) as usize) * 4;
         let opts = &pkt[tcp + 20..tcp + data_offset];
-        let parsed = parse_tcp_options(opts);
-        let kinds: Vec<u8> = parsed.iter().map(|o| o.kind).collect();
+        let kinds = parsed_option_kinds(opts);
 
-        // Linux order: MSS(0x02), SACK_PERM(0x04), WindowScale(0x03), Timestamp(0x08)
+        // Linux order: MSS, SACK permitted, Timestamp, Window Scale.
         assert_eq!(
             kinds,
-            vec![0x02, 0x04, 0x03, 0x08],
-            "Linux order: MSS, SACK_PERM, WindowScale, Timestamp"
+            vec![0x02, 0x04, 0x08, 0x03],
+            "Linux order: MSS, SACK permitted, Timestamp, Window Scale"
         );
         assert!(verify_tcp_checksum(&pkt, 20), "TCP checksum must be valid");
+    }
+
+    #[test]
+    fn canonical_p0f_option_vectors_and_lengths_are_exact() {
+        let timestamp = [0x11; 8];
+        let cases = [
+            (
+                OsFingerprintProfile::Linux,
+                60usize,
+                vec![
+                    2,
+                    4,
+                    0x05,
+                    0xb4,
+                    4,
+                    2,
+                    8,
+                    10,
+                    timestamp[0],
+                    timestamp[1],
+                    timestamp[2],
+                    timestamp[3],
+                    timestamp[4],
+                    timestamp[5],
+                    timestamp[6],
+                    timestamp[7],
+                    1,
+                    3,
+                    3,
+                    10,
+                ],
+            ),
+            (
+                OsFingerprintProfile::Windows,
+                60,
+                vec![
+                    2,
+                    4,
+                    0x05,
+                    0xb4,
+                    1,
+                    3,
+                    3,
+                    2,
+                    4,
+                    2,
+                    8,
+                    10,
+                    timestamp[0],
+                    timestamp[1],
+                    timestamp[2],
+                    timestamp[3],
+                    timestamp[4],
+                    timestamp[5],
+                    timestamp[6],
+                    timestamp[7],
+                ],
+            ),
+            (
+                OsFingerprintProfile::Android,
+                60,
+                vec![
+                    2,
+                    4,
+                    0x05,
+                    0xb4,
+                    4,
+                    2,
+                    8,
+                    10,
+                    timestamp[0],
+                    timestamp[1],
+                    timestamp[2],
+                    timestamp[3],
+                    timestamp[4],
+                    timestamp[5],
+                    timestamp[6],
+                    timestamp[7],
+                    1,
+                    3,
+                    3,
+                    1,
+                ],
+            ),
+        ];
+        for (profile, expected_len, expected_options) in cases {
+            let mut packet = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 37, 8192, 1200, 0x1234);
+            packet.reserve_exact(4);
+            let normalizer = PacketNormalizer::new(profile);
+            assert_eq!(normalizer.normalize_vec(&mut packet), NormalizeResult::Modified);
+            assert_eq!(packet.len(), expected_len);
+            assert_eq!(&packet[40..], expected_options);
+            assert!(verify_ip_checksum(&packet));
+            assert!(verify_tcp_checksum(&packet, 20));
+        }
+
+        let mut packet = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 37, 8192, 1200, 0x1234);
+        packet.reserve_exact(4);
+        PacketNormalizer::new(OsFingerprintProfile::Linux).normalize_vec(&mut packet);
+        assert_eq!(packet.len(), 60);
+        PacketNormalizer::new(OsFingerprintProfile::MacOS).normalize_vec(&mut packet);
+        assert_eq!(packet.len(), 64);
+        assert_eq!(
+            &packet[40..],
+            &[
+                2, 4, 0x05, 0xb4, 1, 3, 3, 4, 1, 1, 8, 10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+                0x11, 0x11, 4, 2, 0, 0,
+            ]
+        );
+        assert!(verify_ip_checksum(&packet));
+        assert!(verify_tcp_checksum(&packet, 20));
+    }
+
+    #[test]
+    fn macos_canonical_expansion_supports_jumbo_syn_without_allocation() {
+        let mut packet = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 37, 8192, 1200, 0x1234);
+        PacketNormalizer::new(OsFingerprintProfile::Linux).normalize_vec(&mut packet);
+        assert_eq!(packet.len(), 60);
+        packet.resize(9_000, 0x5a);
+        packet[2..4].copy_from_slice(&(9_000u16).to_be_bytes());
+        recompute_ipv4_checksum(&mut packet, 20);
+        recompute_tcp_checksum(&mut packet, 20);
+
+        let mut storage = [0u8; 9_004];
+        storage[..packet.len()].copy_from_slice(&packet);
+        let normalizer = PacketNormalizer::new(OsFingerprintProfile::MacOS);
+        assert_eq!(normalizer.required_capacity(&packet), storage.len());
+
+        let outcome = normalizer.normalize_with_capacity(&mut storage, packet.len());
+
+        assert_eq!(outcome.result, NormalizeResult::Modified);
+        assert_eq!(outcome.packet_len, storage.len());
+        assert_eq!(u16::from_be_bytes([storage[2], storage[3]]), 9_004);
+        assert_eq!(storage[32] >> 4, 11);
+        assert_eq!(&storage[64..], &packet[60..]);
+        assert!(verify_ip_checksum(&storage));
+        assert!(verify_tcp_checksum(&storage, 20));
     }
 
     // --- Full normalization: valid checksums after combined IPv4+TCP ---
@@ -1208,6 +1788,74 @@ mod tests {
         let normalizer = PacketNormalizer::new(OsFingerprintProfile::Linux);
         normalizer.normalize_ipv4(&mut pkt);
         assert_eq!(pkt, original, "Non-IPv4 packets must not be modified");
+    }
+
+    #[test]
+    fn disabled_profile_is_byte_for_byte_passthrough() {
+        let mut packet = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 37, 8192, 1200, 0x1234);
+        packet.shrink_to_fit();
+        let original = packet.clone();
+        let original_capacity = packet.capacity();
+        let normalizer = PacketNormalizer::new(OsFingerprintProfile::Disabled);
+        assert_eq!(normalizer.normalize_vec(&mut packet), NormalizeResult::Passthrough);
+        assert_eq!(packet, original);
+        assert_eq!(packet.capacity(), original_capacity);
+        assert_eq!(normalizer.ip_id_counter.load(Ordering::Relaxed), 0x0001_0000);
+    }
+
+    #[test]
+    fn complete_normalization_updates_ipv4_and_tcp_once() {
+        let mut packet = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 37, 8192, 1200, 0x1234);
+        let normalizer = PacketNormalizer::new(OsFingerprintProfile::Windows);
+        assert_eq!(normalizer.normalize(&mut packet), NormalizeResult::Modified);
+        assert_eq!(packet[8], 128);
+        assert_eq!(u16::from_be_bytes([packet[34], packet[35]]), 8_192);
+        assert!(verify_ip_checksum(&packet));
+        assert!(verify_tcp_checksum(&packet, 20));
+        assert_eq!(normalizer.ip_id_counter.load(Ordering::Relaxed), 0x0001_0001);
+    }
+
+    #[test]
+    fn suppress_policy_drops_unreachable_but_preserves_fragmentation_needed() {
+        let mut unreachable = build_icmp_request([10, 0, 0, 1], [10, 0, 0, 2], 200);
+        unreachable[20] = 3;
+        unreachable[21] = 1;
+        unreachable[22..24].fill(0);
+        let checksum = ones_complement_checksum(&unreachable[20..]);
+        unreachable[22..24].copy_from_slice(&checksum.to_be_bytes());
+        let original = unreachable.clone();
+        let normalizer = PacketNormalizer::with_icmp_unreachable_policy(
+            OsFingerprintProfile::Windows,
+            IcmpUnreachablePolicy::SuppressNonPmtud,
+        );
+        assert_eq!(normalizer.normalize(&mut unreachable), NormalizeResult::Dropped);
+        assert_eq!(unreachable, original);
+
+        let mut packet_too_big = original;
+        packet_too_big[21] = 4;
+        packet_too_big[22..24].fill(0);
+        let checksum = ones_complement_checksum(&packet_too_big[20..]);
+        packet_too_big[22..24].copy_from_slice(&checksum.to_be_bytes());
+        assert_eq!(normalizer.normalize(&mut packet_too_big), NormalizeResult::Modified);
+        assert_eq!(packet_too_big[8], 128);
+        assert!(verify_ip_checksum(&packet_too_big));
+        assert!(ones_complement_sum_is_ones(&packet_too_big[20..]));
+    }
+
+    #[test]
+    fn fragmented_ipv4_packet_preserves_fragment_identity() {
+        let mut packet = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 37, 8192, 1200, 0x1234);
+        packet[6] = 0x20;
+        packet[7] = 0x01;
+        packet[10..12].fill(0);
+        let checksum = ones_complement_checksum(&packet[..20]);
+        packet[10..12].copy_from_slice(&checksum.to_be_bytes());
+        let original_fragment = packet[4..8].to_vec();
+        let normalizer = PacketNormalizer::new(OsFingerprintProfile::Windows);
+        assert_eq!(normalizer.normalize(&mut packet), NormalizeResult::Modified);
+        assert_eq!(&packet[4..8], original_fragment.as_slice());
+        assert_eq!(normalizer.ip_id_counter.load(Ordering::Relaxed), 0x0001_0000);
+        assert!(verify_ip_checksum(&packet));
     }
 
     #[test]

@@ -1461,7 +1461,7 @@ dependencies = [
 
 [[package]]
 name = "quicfuscate"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "aligned_box",
  "arc-swap",

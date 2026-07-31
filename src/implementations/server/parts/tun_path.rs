@@ -79,6 +79,24 @@ fn write_tun_control_packet(tun: &TunInterface, packet: &[u8], context: &str) {
     }
 }
 
+fn source_fingerprint_profile(
+    state: &LiveServerState,
+    packet: &[u8],
+) -> Option<OsFingerprintProfile> {
+    let remote_addr = match packet.first().map(|byte| byte >> 4) {
+        Some(4) if packet.len() >= 20 => {
+            let source = Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
+            state.domain.shared.sessions.read().get_by_client_ip(source).map(Session::remote_addr)
+        }
+        Some(6) if packet.len() >= 40 => {
+            let source = Ipv6Addr::from(<[u8; 16]>::try_from(&packet[8..24]).ok()?);
+            state.domain.shared.sessions.read().get_by_client_ipv6(source).map(Session::remote_addr)
+        }
+        _ => None,
+    }?;
+    state.clients.get(&remote_addr).map(QuicFuscateConnection::tunnel_ingress_profile)
+}
+
 fn handle_local_tun_packet(
     packet: &[u8],
     tun: &TunInterface,
@@ -181,9 +199,7 @@ fn drain_pending_tun_downlinks(
     let mut deferred_sessions = std::collections::HashSet::new();
     let sessions = Arc::clone(&live.live_state.domain.shared.sessions);
     let now = Instant::now();
-    while let Some(mut entry) =
-        live.live_state.pending_tun_downlinks.pop_next(&deferred_sessions)
-    {
+    while let Some(mut entry) = live.live_state.pending_tun_downlinks.pop_next(&deferred_sessions) {
         if entry.is_expired(now) {
             metrics.record_tun_downlink_backpressure_drop(TunDownlinkBackpressureDrop::Expired);
             log::warn!(
@@ -200,11 +216,7 @@ fn drain_pending_tun_downlinks(
             continue;
         };
         let weight = stats.policy.weight;
-        if !live
-            .live_state
-            .pending_tun_downlinks
-            .reserve_capacity(entry.packet.len())
-        {
+        if !live.live_state.pending_tun_downlinks.reserve_capacity(entry.packet.len()) {
             metrics.record_tun_downlink_backpressure_retry();
             live.live_state.pending_tun_downlinks.requeue_front(entry, weight);
             break;
@@ -225,21 +237,15 @@ fn drain_pending_tun_downlinks(
                 match decision {
                     BandwidthDecision::Allowed => entry.bandwidth_accounted = true,
                     BandwidthDecision::RateLimited => {
-                        live.live_state
-                            .pending_tun_downlinks
-                            .refund_capacity(entry.packet.len());
+                        live.live_state.pending_tun_downlinks.refund_capacity(entry.packet.len());
                         metrics.record_tun_downlink_backpressure_retry();
                         deferred_sessions.insert(entry.session_id);
-                        live.live_state
-                            .pending_tun_downlinks
-                            .requeue_front(entry, weight);
+                        live.live_state.pending_tun_downlinks.requeue_front(entry, weight);
                         continue;
                     }
                     BandwidthDecision::DailyQuotaExceeded
                     | BandwidthDecision::MonthlyQuotaExceeded => {
-                        live.live_state
-                            .pending_tun_downlinks
-                            .refund_capacity(entry.packet.len());
+                        live.live_state.pending_tun_downlinks.refund_capacity(entry.packet.len());
                         continue;
                     }
                 }
@@ -248,9 +254,7 @@ fn drain_pending_tun_downlinks(
         let target = entry.target;
         let send_result = {
             let Some(connection) = live.live_state.clients.get_mut(&target) else {
-                live.live_state
-                    .pending_tun_downlinks
-                    .refund_capacity(entry.packet.len());
+                live.live_state.pending_tun_downlinks.refund_capacity(entry.packet.len());
                 metrics.record_tun_downlink_backpressure_drop(
                     TunDownlinkBackpressureDrop::TerminalTransportError,
                 );
@@ -268,18 +272,14 @@ fn drain_pending_tun_downlinks(
                 queued.push(target);
             }
             Err(crate::error::ConnectionError::DgramQueueFull) => {
-                live.live_state
-                    .pending_tun_downlinks
-                    .refund_capacity(entry.packet.len());
+                live.live_state.pending_tun_downlinks.refund_capacity(entry.packet.len());
                 log::debug!("pending TUN downlink for {} still backpressured", target);
                 metrics.record_tun_downlink_backpressure_retry();
                 deferred_sessions.insert(entry.session_id);
                 live.live_state.pending_tun_downlinks.requeue_front(entry, weight);
             }
             Err(error) => {
-                live.live_state
-                    .pending_tun_downlinks
-                    .refund_capacity(entry.packet.len());
+                live.live_state.pending_tun_downlinks.refund_capacity(entry.packet.len());
                 metrics.record_tun_downlink_backpressure_drop(
                     TunDownlinkBackpressureDrop::TerminalTransportError,
                 );
@@ -310,13 +310,7 @@ fn enqueue_pending_tun_downlink(
 ) -> Result<(), PendingTunDownlinkReject> {
     enqueue_pending_tun_downlink_with_accounting(
         pending,
-        PendingTunDownlink {
-            target,
-            session_id,
-            packet,
-            queued_at,
-            bandwidth_accounted: false,
-        },
+        PendingTunDownlink { target, session_id, packet, queued_at, bandwidth_accounted: false },
         weight,
         metrics,
     )
@@ -398,7 +392,9 @@ fn process_server_tun_packet(
         ipv4: live.server_tun_ip.unwrap_or(Ipv4Addr::UNSPECIFIED),
         ipv6: live.server_tun_ipv6,
     };
-    if handle_local_tun_packet(packet, &tun, server_ips, fingerprint_profile, metrics) {
+    let source_profile =
+        source_fingerprint_profile(&live.live_state, packet).unwrap_or(fingerprint_profile);
+    if handle_local_tun_packet(packet, &tun, server_ips, source_profile, metrics) {
         return;
     }
 
@@ -492,13 +488,7 @@ fn process_server_tun_packet(
             }
             continue;
         }
-        let Some(stats) = live
-            .live_state
-            .domain
-            .shared
-            .sessions
-            .read()
-            .bandwidth_stats(session_id)
+        let Some(stats) = live.live_state.domain.shared.sessions.read().bandwidth_stats(session_id)
         else {
             continue;
         };
@@ -506,18 +496,12 @@ fn process_server_tun_packet(
         let requires_scheduler = live.live_state.pending_tun_downlinks.uses_shared_capacity()
             || live.live_state.pending_tun_downlinks.contains_session(session_id);
         if !requires_scheduler {
-            let decision = live
-                .live_state
-                .domain
-                .shared
-                .sessions
-                .write()
-                .check_bandwidth(session_id, BandwidthDirection::Downlink, packet.len());
-            metrics.record_bandwidth_decision(
+            let decision = live.live_state.domain.shared.sessions.write().check_bandwidth(
+                session_id,
                 BandwidthDirection::Downlink,
-                decision,
                 packet.len(),
             );
+            metrics.record_bandwidth_decision(BandwidthDirection::Downlink, decision, packet.len());
             match decision {
                 BandwidthDecision::Allowed => {
                     let send_result = live
@@ -565,8 +549,9 @@ fn process_server_tun_packet(
                 BandwidthDecision::RateLimited => {
                     metrics.record_tun_downlink_backpressure_retry();
                 }
-                BandwidthDecision::DailyQuotaExceeded
-                | BandwidthDecision::MonthlyQuotaExceeded => continue,
+                BandwidthDecision::DailyQuotaExceeded | BandwidthDecision::MonthlyQuotaExceeded => {
+                    continue
+                }
             }
         }
         if let Err(reject) = enqueue_pending_tun_downlink(

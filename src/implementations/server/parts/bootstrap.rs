@@ -90,7 +90,6 @@ pub(crate) struct PreparedStandaloneRuntimeConfig {
     stealth_config: Arc<std::sync::Mutex<StealthConfig>>,
     profiles: Vec<FingerprintProfile>,
     profile_interval_secs: u64,
-    stealth_policy: OwnedRuntimeStealthPolicy,
     standalone_runtime_metadata: StandaloneRuntimeMetadata,
     tun_enable: bool,
     /// Shared 0-RTT anti-replay strike register (server only).
@@ -242,7 +241,6 @@ impl PreparedStandaloneRuntimeConfig {
                     stealth_policy: stealth_policy.clone(),
                 },
             },
-            stealth_policy,
             tun_enable,
             strike_register: None,
             anti_replay_section: crate::engine::AntiReplaySection::default(),
@@ -399,11 +397,8 @@ pub fn initialize_standalone_server_bootstrap(
 
     let qkey_ttl_secs = resolve_qkey_ttl_secs(qkey_ttl_override);
     let qkey_store_path = resolve_qkey_store_path(config_path, qkey_store_override);
-    let qkey_registry = Arc::new(std::sync::Mutex::new(QKeyRegistry::open(
-        200,
-        qkey_store_path,
-        qkey_ttl_secs,
-    )?));
+    let qkey_registry =
+        Arc::new(std::sync::Mutex::new(QKeyRegistry::open(200, qkey_store_path, qkey_ttl_secs)?));
 
     Ok(StandaloneServerBootstrapState {
         admin_log_buffer,

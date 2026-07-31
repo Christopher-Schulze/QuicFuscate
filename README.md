@@ -227,6 +227,7 @@ Development focuses on hardening and operational validation across all runtime s
 
 ### Feature Status Highlights
 - **UDP/io_uring fast path**: active
+- **Server egress network-stack normalization**: active, connection-frozen, explicit disabled passthrough
 - **AF_XDP socket code (`internal_af_xdp_experimental`)**: experimental/internal only
 
 ### Development and Review Transparency
@@ -402,6 +403,8 @@ Top runtime environment variables (quick reference):
   QUICFUSCATE_STEALTH_MODE         Stealth baseline (off|performance|stealth|anti-dpi|intelligent|manual); "base" is an alias for "performance"
   QUICFUSCATE_TLS_COVER            TLS Cover provider gate (0|1)
   QUICFUSCATE_USE_TLS_COVER_EXTRAS TLS Cover extras gate in StealthManager (0|1)
+  QUICFUSCATE_NETWORK_FINGERPRINT_NORMALIZATION Decoded server-uplink IP/TCP normalization (0|1)
+  QUICFUSCATE_SUPPRESS_ICMP_UNREACHABLE Drop non-PMTUD destination-unreachable traffic (0|1)
   QUICFUSCATE_FEC_STREAM_EVERY     Streaming FEC cadence override
   QUICFUSCATE_FASTPATH             Transport fast path policy (auto|off)
   QUICFUSCATE_RAYON_THREADS        Parallel worker cap for FEC paths
@@ -485,19 +488,16 @@ Release artifacts are built only for `v*` tags or an explicit manual workflow di
 
 ## Releases
 
-This project is published as a source-first open-source release.
-Users build from source using the documented Rust and Bun workflows.
+This project is published as open source plus CI-built GitHub Release artifacts. The current public release is `v0.4.3`; the synchronized patch release target is `v0.4.4`.
 
-Signed binary distribution and automatic updates are not part of the current source-first release scope.
-They require signing credentials and CI secret management to be available.
+Tagged releases build native x86_64 and ARM64 Linux server bundles and signed Tauri desktop artifacts. Windows MSI publication is required; macOS and Linux desktop jobs are non-blocking and appear only when their signed updater artifacts are available.
 
 Desktop updater behavior in this release:
 - Integrated but disabled by default.
 - Runtime activation gate: `QUICFUSCATE_DESKTOP_UPDATER_ACTIVE=true`.
-- Keep disabled for source-first release builds without signed artifacts.
+- Enable only when the running platform has an entry in the signed `latest.json` manifest.
 
 Binary distribution requirements:
-- A signing and notarization pipeline is required (macOS/Windows, optional Linux package signing).
 - Updater activation in shipped builds requires end-to-end verified signature validation.
 - Signed release assets and update metadata are published through GitHub Releases.
 
@@ -506,9 +506,9 @@ Security and hardening references for this release:
 - Release scope and distribution policy: [Release Scope](./docs/DOCUMENTATION.md#release-scope)
 - Architecture and release wiring map: `docs/MAP.md`
 
-Known limitations in this source-first release:
-- No signed desktop binaries are shipped yet.
-- Desktop updater remains disabled by default until signed artifacts are available.
+Known release limitations:
+- macOS and Linux desktop artifacts can be absent when their optional release jobs fail.
+- Desktop updater activation remains an explicit runtime decision even when a signed artifact exists.
 
 Release packaging helper:
 ```bash

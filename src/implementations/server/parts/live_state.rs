@@ -139,13 +139,12 @@ impl PendingTunDownlinks {
             return Err(PendingTunDownlinkReject::PerTarget);
         }
         let is_new = !self.queues.contains_key(&session_id);
-        let queue =
-            self.queues.entry(session_id).or_insert_with(|| PendingTunTargetQueue {
-                weight,
-                deficit_bytes: 0,
-                needs_quantum: true,
-                entries: std::collections::VecDeque::new(),
-            });
+        let queue = self.queues.entry(session_id).or_insert_with(|| PendingTunTargetQueue {
+            weight,
+            deficit_bytes: 0,
+            needs_quantum: true,
+            entries: std::collections::VecDeque::new(),
+        });
         queue.weight = weight;
         queue.entries.push_back(PendingTunDownlink {
             target,
@@ -177,8 +176,8 @@ impl PendingTunDownlinks {
             let mut selected = None;
             if let Some(queue) = self.queues.get_mut(&session_id) {
                 if queue.needs_quantum {
-                    let quantum = Self::DRR_QUANTUM_BYTES
-                        .saturating_mul(usize::from(queue.weight.max(1)));
+                    let quantum =
+                        Self::DRR_QUANTUM_BYTES.saturating_mul(usize::from(queue.weight.max(1)));
                     queue.deficit_bytes =
                         queue.deficit_bytes.saturating_add(quantum).min(self.max_bytes);
                     queue.needs_quantum = false;
@@ -222,10 +221,7 @@ impl PendingTunDownlinks {
         None
     }
 
-    fn pop_visit_budget(
-        &self,
-        excluded_sessions: &std::collections::HashSet<SessionId>,
-    ) -> usize {
+    fn pop_visit_budget(&self, excluded_sessions: &std::collections::HashSet<SessionId>) -> usize {
         let Some(max_front_packet_bytes) = self
             .active
             .iter()
@@ -240,8 +236,7 @@ impl PendingTunDownlinks {
         else {
             return 0;
         };
-        let required_rounds = max_front_packet_bytes
-            .saturating_add(Self::DRR_QUANTUM_BYTES - 1)
+        let required_rounds = max_front_packet_bytes.saturating_add(Self::DRR_QUANTUM_BYTES - 1)
             / Self::DRR_QUANTUM_BYTES;
         self.active.len().saturating_mul(required_rounds.saturating_add(2))
     }
@@ -250,13 +245,12 @@ impl PendingTunDownlinks {
         let session_id = entry.session_id;
         let packet_len = entry.packet.len();
         let is_new = !self.queues.contains_key(&session_id);
-        let queue =
-            self.queues.entry(session_id).or_insert_with(|| PendingTunTargetQueue {
-                weight,
-                deficit_bytes: 0,
-                needs_quantum: false,
-                entries: std::collections::VecDeque::new(),
-            });
+        let queue = self.queues.entry(session_id).or_insert_with(|| PendingTunTargetQueue {
+            weight,
+            deficit_bytes: 0,
+            needs_quantum: false,
+            entries: std::collections::VecDeque::new(),
+        });
         queue.weight = weight;
         queue.deficit_bytes = queue.deficit_bytes.saturating_add(packet_len).min(self.max_bytes);
         queue.needs_quantum = false;
@@ -334,8 +328,7 @@ pub struct LiveServerState {
     auth_rate_limiter:
         Arc<std::sync::Mutex<crate::implementations::server::limits::AuthRateLimiter>>,
     #[cfg(feature = "rate_limiter")]
-    retry_token_manager:
-        Option<Arc<crate::implementations::server::ddos::RetryTokenManager>>,
+    retry_token_manager: Option<Arc<crate::implementations::server::ddos::RetryTokenManager>>,
     revocation_manager: Arc<crate::implementations::server::revocation::RevocationManager>,
     qkey_tracker: Arc<crate::implementations::server::revocation::QKeyConnectionTracker>,
     key_rotation_manager: crate::implementations::server::revocation::KeyRotationManager,
@@ -368,17 +361,9 @@ pub(crate) struct LiveClientBuildRequest<'a> {
     pub fec_cfg_shared: &'a Arc<std::sync::Mutex<FecConfig>>,
     pub opt_params_shared: &'a Arc<std::sync::Mutex<OptimizeConfig>>,
     pub transport_config: &'a mut crate::transport::Config,
-    pub profile: BrowserProfile,
-    pub os: OsProfile,
-    pub disable_doh: bool,
     pub auth_rate_limiter:
         Arc<std::sync::Mutex<crate::implementations::server::limits::AuthRateLimiter>>,
-    pub retry_token_manager:
-        Option<Arc<crate::implementations::server::ddos::RetryTokenManager>>,
-    pub doh_provider: &'a str,
-    pub disable_fronting: bool,
-    pub front_domain: &'a [String],
-    pub disable_http3: bool,
+    pub retry_token_manager: Option<Arc<crate::implementations::server::ddos::RetryTokenManager>>,
 }
 
 fn complete_auth_attempt(
@@ -503,8 +488,11 @@ pub(crate) fn build_live_server_client_init(
         Ok(ctx) => ctx,
         Err(error) => {
             request.metrics.record_connection_rejected();
-            let terminal =
-                if error.is_auth_failure() { AuthTerminal::Failed } else { AuthTerminal::Abandoned };
+            let terminal = if error.is_auth_failure() {
+                AuthTerminal::Failed
+            } else {
+                AuthTerminal::Abandoned
+            };
             complete_auth_attempt(
                 &request.auth_rate_limiter,
                 request.metrics,
@@ -543,16 +531,6 @@ pub(crate) fn build_live_server_client_init(
     };
     if let Some(ref record) = initial_ctx.qkey_record {
         apply_qkey_policy_overrides(record, &mut conn_stealth_cfg, &mut conn_fec_cfg);
-        apply_runtime_stealth_overrides(
-            &mut conn_stealth_cfg,
-            request.profile,
-            request.os,
-            request.disable_doh,
-            request.doh_provider,
-            request.disable_fronting,
-            request.front_domain,
-            request.disable_http3,
-        );
     }
     let opt_params = match request.opt_params_shared.lock() {
         Ok(guard) => *guard,
@@ -829,9 +807,7 @@ fn accept_session_in_domain(
             Err(AcceptError::MaxClientsReached)
         }
         Err(
-            SessionError::NotFound
-            | SessionError::AlreadyExists
-            | SessionError::BandwidthPolicy(_),
+            SessionError::NotFound | SessionError::AlreadyExists | SessionError::BandwidthPolicy(_),
         ) => {
             ip_pool.release(client_ip);
             if let Some(v6) = client_ipv6 {
@@ -1098,12 +1074,8 @@ impl LiveServerState {
                     }
                 };
                 if init.pending_qkey_auth.is_none() {
-                    let activation = self
-                        .domain
-                        .shared
-                        .sessions
-                        .write()
-                        .activate_bandwidth(session_id, None);
+                    let activation =
+                        self.domain.shared.sessions.write().activate_bandwidth(session_id, None);
                     if let Err(error) = activation {
                         log::error!(
                             "Default authenticated bandwidth policy failed for {}: {}",
@@ -1316,9 +1288,7 @@ impl LiveServerState {
                 if conn.conn.idle_timeout_elapsed() {
                     conn.conn.on_timeout();
                 }
-                conn.conn
-                    .is_established()
-                    .then(|| conn.conn.source_id().as_ref().to_vec())
+                conn.conn.is_established().then(|| conn.conn.source_id().as_ref().to_vec())
             } else {
                 None
             };
@@ -1477,12 +1447,9 @@ impl LiveServerState {
         if self.commit_validated_path_update(old_addr, new_addr, local_addr, accept_loop) {
             return true;
         }
-        let validation_pending = self
-            .clients
-            .get(&old_addr)
-            .is_some_and(|connection| {
-                connection.conn.is_path_validation_pending(local_addr, new_addr)
-            });
+        let validation_pending = self.clients.get(&old_addr).is_some_and(|connection| {
+            connection.conn.is_path_validation_pending(local_addr, new_addr)
+        });
         if !validation_pending {
             self.path_candidates.remove(&new_addr);
         }
@@ -1793,16 +1760,13 @@ impl LiveServerState {
                     );
                 }
             } else {
-                let policy = self
-                    .qkey_auth
-                    .get(&conn_id)
-                    .map(|state| {
-                        (
-                            state.key_id.clone(),
-                            state.bandwidth_policy.clone(),
-                            state.traffic_analysis_policy,
-                        )
-                    });
+                let policy = self.qkey_auth.get(&conn_id).map(|state| {
+                    (
+                        state.key_id.clone(),
+                        state.bandwidth_policy.clone(),
+                        state.traffic_analysis_policy,
+                    )
+                });
                 let Some((key_id, bandwidth_policy, traffic_analysis_policy)) = policy else {
                     return;
                 };

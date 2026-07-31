@@ -1078,6 +1078,10 @@ pub struct StealthSection {
     pub initial_browser: String,
     /// Initial OS profile
     pub initial_os: String,
+    /// Normalize decoded server-side tunnel ingress to the selected OS profile.
+    pub enable_network_fingerprint_normalization: bool,
+    /// Suppress ICMP destination-unreachable traffic except PMTUD signals.
+    pub suppress_icmp_unreachable: bool,
 }
 
 impl Default for StealthSection {
@@ -1099,6 +1103,8 @@ impl Default for StealthSection {
             fronting_domains: Vec::new(),
             initial_browser: "chrome".to_string(),
             initial_os: "windows".to_string(),
+            enable_network_fingerprint_normalization: true,
+            suppress_icmp_unreachable: false,
         }
     }
 }
@@ -1409,6 +1415,27 @@ mod tests {
         assert_eq!(config.transport.quic_versions, [QuicVersion::V2, QuicVersion::V1]);
         assert_eq!(config.transport.cc_algorithm, CcAlgorithm::Bbr3);
         assert_eq!(config.crypto.aead_preference, AeadPreference::Auto);
+        assert!(config.stealth.enable_network_fingerprint_normalization);
+        assert!(!config.stealth.suppress_icmp_unreachable);
+    }
+
+    #[test]
+    fn network_fingerprint_policy_roundtrips_through_engine_toml() {
+        let config = EngineConfig::from_toml(
+            r#"
+[stealth]
+enable_network_fingerprint_normalization = false
+suppress_icmp_unreachable = true
+"#,
+        )
+        .unwrap();
+        assert!(!config.stealth.enable_network_fingerprint_normalization);
+        assert!(config.stealth.suppress_icmp_unreachable);
+
+        let encoded = toml::to_string(&config).unwrap();
+        let decoded = EngineConfig::from_toml(&encoded).unwrap();
+        assert!(!decoded.stealth.enable_network_fingerprint_normalization);
+        assert!(decoded.stealth.suppress_icmp_unreachable);
     }
 
     #[test]
