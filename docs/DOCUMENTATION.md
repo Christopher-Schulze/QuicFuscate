@@ -4487,7 +4487,7 @@ level = "debug"
 
 ## Deep Audit Findings (2026-08-04)
 
-A full deep-audit sweep of `src/` was performed with parallel read-only module scans and `cargo check`/`cargo clippy` verification. The scan produced new TODO entries (TODO-626 through TODO-657) and augmented existing TODOs with additional evidence. The findings span crypto correctness, FEC resource bounds, transport/stealth hot-path issues, privilege and unsafe-code correctness, and production-readiness gaps.
+A full deep-audit sweep of `src/` was performed with parallel read-only module scans and `cargo check`/`cargo clippy` verification. The scan produced new TODO entries (TODO-626 through TODO-675) and augmented existing TODOs with additional evidence. The findings span crypto correctness, FEC resource bounds, transport/stealth hot-path issues, privilege and unsafe-code correctness, client/server lifecycle, DNS behavior, and production-readiness gaps.
 
 ### Security-Critical Findings
 
@@ -4503,6 +4503,10 @@ A full deep-audit sweep of `src/` was performed with parallel read-only module s
 - **Privilege drop unsafe assumptions**: `src/privilege/drop.rs` uses `assume_init` and `CStr::from_ptr` without validating libc success or NUL termination. Tracked in TODO-652 and TODO-653.
 - **TUN unsafe reads**: `src/interface.rs` performs unaligned `*const u32` reads and ignores `fcntl` errors. Tracked in TODO-654 and TODO-655.
 - **PKI timestamp epoch fallback**: `src/pki/mod.rs` defaults to timestamp 0 on failure. Tracked in TODO-656.
+- **Client profile ID collision**: `src/implementations/client/profile.rs` masks a nanosecond timestamp to 32 bits, creating predictable collisions. Tracked in TODO-658.
+- **Retry token length validation after encoding**: `src/implementations/server/ddos.rs` checks `MAX_RETRY_TOKEN_LEN` only after building the token. Tracked in TODO-659.
+- **DNS NXDOMAIN lie**: `src/dns/mod.rs` returns NXDOMAIN for upstream failures. Tracked in TODO-666.
+- **fsutil TOCTOU race**: `src/implementations/server/fsutil.rs` sets permissions after the atomic rename. Tracked in TODO-667.
 
 ### Resource and Performance Findings
 
@@ -4512,6 +4516,7 @@ A full deep-audit sweep of `src/` was performed with parallel read-only module s
 - **Wiedemann solver repeated allocations**: column buffers are allocated per solve. Tracked in TODO-637.
 - **ConnectionId cloning hot path**: `src/transport/connection/parts/impl_recv.rs` clones CIDs and tokens repeatedly. Tracked in TODO-638.
 - **Metrics/optimize allocation hot spots**: metrics export and optimize module allocate per call. Tracked in TODO-587 and TODO-615.
+- **DNS response per-call allocations**: `build_dns_response_*` in `src/dns/mod.rs` allocates a new `Vec` per query. Tracked in TODO-669.
 
 ### Production-Readiness Gaps
 
@@ -4523,6 +4528,13 @@ A full deep-audit sweep of `src/` was performed with parallel read-only module s
 - **DNS intercept spawn ignored**: `src/implementations/server/parts/dns_signals.rs` does not check `spawn_blocking` failures. Tracked in TODO-650.
 - **CLI probe parse defaults**: probe binaries silently default on parse errors. Tracked in TODO-657.
 - **qftls mlock without munlock**: `src/qftls.rs` does not `munlock` preloaded keys. Tracked in TODO-643.
+- **Blacklist sync detached**: `src/implementations/server/parts/live_state.rs` spawns blacklist sync without abort handle or shutdown. Tracked in TODO-660.
+- **Admin HTTP per-operation timeout**: handlers in `src/implementations/server/admin_http_parts/server_and_auth.rs` have no per-operation timeout. Tracked in TODO-661.
+- **DNS rate limiting**: `src/dns/mod.rs` has no per-client query rate limit. Tracked in TODO-668.
+- **DNS forwarding timeout**: `forward_dns_query` in `src/dns/mod.rs` has no end-to-end timeout. Tracked in TODO-669.
+- **Environment variable race/validation**: `src/env_utils.rs` re-reads env vars and silently ignores invalid values. Tracked in TODO-670.
+- **File permission umask reliance**: several writers create sensitive files without explicit modes. Tracked in TODO-671.
+- **Audit log blocking flush**: `src/audit/mod.rs` flushes synchronously with no timeout. Tracked in TODO-675.
 
 ### Build Verification
 

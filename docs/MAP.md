@@ -1029,13 +1029,13 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 
 ## Deep Audit Update (2026-08-04)
 
-A full source-audit sweep produced TODO-626 through TODO-657 and augmented TODO-570, TODO-584, TODO-587, TODO-592, TODO-615, and TODO-576. The new findings affect the following wiring surfaces and should be reconciled before treating those areas as production-proven:
+A full source-audit sweep produced TODO-626 through TODO-675 and augmented TODO-570, TODO-584, TODO-587, TODO-592, TODO-615, TODO-576, and TODO-649. The new findings affect the following wiring surfaces and should be reconciled before treating those areas as production-proven:
 
 - **Crypto data plane**: constant-time tag comparison (TODO-626), key/IV length validation (TODO-627), AEGIS `unwrap` panics (TODO-628), AEAD header-protection sample validation (TODO-629), GHASH test override removal (TODO-630), round-key zeroization (TODO-631), nonce/IV uniqueness (TODO-632), and QUIC KDF input validation (TODO-633).
 - **FEC recovery**: unbounded fountain-decoder storage (TODO-634), adaptive emitted-ID cap (TODO-635), decoder peeling complexity (TODO-636), and Wiedemann buffer reuse (TODO-637).
 - **Transport/Stealth**: ConnectionId clone hot path (TODO-638), StealthShaper RNG fallback logging (TODO-639), H3 masquerade time source (TODO-640), domain fronting jitter (TODO-641), TLS cover zero-key fallback (TODO-642), qftls `munlock` (TODO-643), probe detector history cap (TODO-644), Reality session map timer-driven cleanup (TODO-570), and brain escalation/histogram/config correctness (TODO-584).
 - **Optimize/Engine/Admin**: engine config reload (TODO-645), uring_batch backpressure (TODO-646), admin HTTP connection limit (TODO-647), config write validation (TODO-648), memory-pool unsafe bounds (TODO-587), metrics export allocations (TODO-587, TODO-615), and TUN interface unaligned/fcntl safety (TODO-654, TODO-655).
-- **Client/Server/DNS/PKI**: DNS backup path (TODO-649), DNS intercept spawn failure (TODO-650), PKI timestamp fallback (TODO-656), and CLI probe parse errors (TODO-657).
-- **Privilege and secrets**: SecretString UTF-8 safety (TODO-651), privilege `assume_init`/`CStr` validation (TODO-652, TODO-653).
+- **Client/Server/DNS/PKI**: DNS backup path (TODO-649), DNS intercept spawn failure (TODO-650), PKI timestamp fallback (TODO-656), CLI probe parse errors (TODO-657), profile ID collision (TODO-658), retry token length validation (TODO-659), blacklist sync ownership (TODO-660), admin per-operation timeout (TODO-661), profile save atomicity (TODO-662), client TUN dual-stack (TODO-663), Windows TUN backend confusion (TODO-664), admin replay store pruning (TODO-665), DNS NXDOMAIN lie (TODO-666), DNS rate limiting (TODO-668), DNS allocation/timeout (TODO-669), env var race/validation (TODO-670), umask file permissions (TODO-671), log rotation hooks (TODO-672), CLI unbounded strings (TODO-673), duplicate logging init (TODO-674), and audit blocking flush (TODO-675).
+- **Privilege and secrets**: SecretString UTF-8 safety (TODO-651), privilege `assume_init`/`CStr` validation (TODO-652, TODO-653), fsutil TOCTOU (TODO-667).
 
 `cargo check --all-targets --all-features` and `cargo clippy --all-targets --all-features -- -D warnings` pass after a `cargo clean` recovered a corrupted `target/` cache.
