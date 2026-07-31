@@ -488,7 +488,7 @@ Release artifacts are built only for `v*` tags or an explicit manual workflow di
 
 ## Releases
 
-This project is published as open source plus CI-built GitHub Release artifacts. The current public release is `v0.4.3`; the synchronized patch release target is `v0.4.4`.
+This project is published as open source plus CI-built GitHub Release artifacts. The current public release is [`v0.4.4`](https://github.com/Christopher-Schulze/QuicFuscate/releases/tag/v0.4.4).
 
 Tagged releases build native x86_64 and ARM64 Linux server bundles and signed Tauri desktop artifacts. Windows MSI publication is required; macOS and Linux desktop jobs are non-blocking and appear only when their signed updater artifacts are available.
 
