@@ -4484,3 +4484,48 @@ level = "debug"
 - `scripts/utils/util-run-local-admin-web.sh` and `scripts/utils/util-run-local-ui.sh` intentionally set `QUICFUSCATE_ALLOW_WEAK_ADMIN_DEFAULTS=1` and use `--admin-web-user admin --admin-web-password 123`
 - This is a loopback-focused local-development shortcut, not a deployment recommendation
 - To use a different password, edit those scripts or launch the server manually with `--admin-web-user` and `--admin-web-password`
+
+## Deep Audit Findings (2026-08-04)
+
+A full deep-audit sweep of `src/` was performed with parallel read-only module scans and `cargo check`/`cargo clippy` verification. The scan produced new TODO entries (TODO-626 through TODO-657) and augmented existing TODOs with additional evidence. The findings span crypto correctness, FEC resource bounds, transport/stealth hot-path issues, privilege and unsafe-code correctness, and production-readiness gaps.
+
+### Security-Critical Findings
+
+- **Constant-time tag comparison**: `src/crypto/mod.rs::subtle_ct_eq` is not constant-time; the compiler may short-circuit on first mismatch, creating a timing oracle for all AEADs. Tracked in TODO-626.
+- **Key/IV zero padding**: crypto constructors in `src/crypto/mod.rs`, `src/crypto/aegis.rs`, and `src/crypto/morus.rs` silently pad short keys/IVs with zeros. Tracked in TODO-627.
+- **AEGIS unwrap panics**: `Aegis128L/X4/X8Aead` use `.unwrap()` on `Mutex<Option<...>>` state in the seal/open hot path. Tracked in TODO-628.
+- **AEAD header-protection sample bypass**: `AesHp::apply` zero-pads short samples with `unwrap_or([0u8; 16])`. Tracked in TODO-629.
+- **GHASH test override in production**: `src/crypto/gcm.rs` exposes an env-var-activated test override in release builds. Tracked in TODO-630.
+- **TLS cover zero keys**: `src/stealth/parts/tls_cover_provider.rs` falls back to all-zero keys on RNG failure. Tracked in TODO-642.
+- **Reality session map unbounded**: `src/reality.rs` only cleans the session map on `forward_probe`, so sustained probes can exceed `MAX_SESSIONS`. Tracked in TODO-570.
+- **Probe detector history unbounded**: `src/stealth/parts/probe_detector.rs` has no hard cap before the 60-second retention window. Tracked in TODO-644.
+- **SecretString UB**: `src/secret.rs` uses `from_utf8_unchecked` on bytes that can be cloned without a UTF-8 guarantee. Tracked in TODO-651.
+- **Privilege drop unsafe assumptions**: `src/privilege/drop.rs` uses `assume_init` and `CStr::from_ptr` without validating libc success or NUL termination. Tracked in TODO-652 and TODO-653.
+- **TUN unsafe reads**: `src/interface.rs` performs unaligned `*const u32` reads and ignores `fcntl` errors. Tracked in TODO-654 and TODO-655.
+- **PKI timestamp epoch fallback**: `src/pki/mod.rs` defaults to timestamp 0 on failure. Tracked in TODO-656.
+
+### Resource and Performance Findings
+
+- **Fountain decoder unbounded storage**: `src/fec/fountain_codes.rs` stores unique repair symbols without a cap. Tracked in TODO-634.
+- **Adaptive FEC emitted_ids unbounded**: `src/fec/parts/adaptive_controller.rs` emitted ID tracking can grow without a hard cap. Tracked in TODO-635.
+- **FEC decoder quadratic peeling**: `src/fec/parts/decoders.rs::try_peel_all` uses O(n^2) Vec remove/insert. Tracked in TODO-636.
+- **Wiedemann solver repeated allocations**: column buffers are allocated per solve. Tracked in TODO-637.
+- **ConnectionId cloning hot path**: `src/transport/connection/parts/impl_recv.rs` clones CIDs and tokens repeatedly. Tracked in TODO-638.
+- **Metrics/optimize allocation hot spots**: metrics export and optimize module allocate per call. Tracked in TODO-587 and TODO-615.
+
+### Production-Readiness Gaps
+
+- **Engine config no atomic reload**: `src/engine/config.rs` cannot be reloaded at runtime. Tracked in TODO-645.
+- **uring_batch unbounded queue**: `src/optimize/uring_batch.rs` has no backpressure and calls blocking `submit_and_wait` from async. Tracked in TODO-646.
+- **Admin HTTP connection limit hardcoded**: `src/implementations/server/admin_http_parts/server_and_auth.rs` hardcodes 16. Tracked in TODO-647.
+- **Config write not validated**: `src/implementations/server/parts/config.rs` does not parse the temp config before atomic rename. Tracked in TODO-648.
+- **DNS backup path hardcoded**: `src/implementations/client/platform/linux.rs` assumes `/etc/resolv.conf.quicfuscate.bak`. Tracked in TODO-649.
+- **DNS intercept spawn ignored**: `src/implementations/server/parts/dns_signals.rs` does not check `spawn_blocking` failures. Tracked in TODO-650.
+- **CLI probe parse defaults**: probe binaries silently default on parse errors. Tracked in TODO-657.
+- **qftls mlock without munlock**: `src/qftls.rs` does not `munlock` preloaded keys. Tracked in TODO-643.
+
+### Build Verification
+
+- `cargo check --all-targets --all-features` completed successfully.
+- `cargo clippy --all-targets --all-features -- -D warnings` completed successfully.
+- `cargo test --all-features` failed initially due to a corrupted `target/` cache (missing object files), recovered with `cargo clean` and rerun of `cargo check`/`cargo clippy`. No code-level build errors were produced.
