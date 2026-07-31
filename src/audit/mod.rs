@@ -1571,6 +1571,10 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 mod tests {
     use super::*;
 
+    // Tiny segments intentionally force dozens of synchronous checkpoint replacements.
+    // Windows write-through durability needs a wider bound under parallel CI load.
+    const ROTATION_DURABILITY_TEST_TIMEOUT: Duration = Duration::from_secs(30);
+
     fn audit_test_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "quicfuscate_audit_{name}_{}_{}.jsonl",
@@ -1775,7 +1779,7 @@ mod tests {
             queue_capacity: 256,
             max_segment_bytes: 700,
             max_segments: 3,
-            flush_timeout: Duration::from_secs(5),
+            flush_timeout: ROTATION_DURABILITY_TEST_TIMEOUT,
         };
         let log = AuditLog::open_with_options(tmp.clone(), options).unwrap();
         for index in 0..40 {
@@ -1840,7 +1844,7 @@ mod tests {
             queue_capacity: 128,
             max_segment_bytes: 650,
             max_segments: 5,
-            flush_timeout: Duration::from_secs(5),
+            flush_timeout: ROTATION_DURABILITY_TEST_TIMEOUT,
         };
         let log = AuditLog::open_with_options(tmp.clone(), options).unwrap();
         for index in 0..24 {
