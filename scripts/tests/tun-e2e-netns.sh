@@ -28,6 +28,7 @@ QKEY_STORE="${QF_E2E_QKEY_STORE:-/tmp/qf-tun-e2e-qkeys.json}"
 ADMIN_SOCKET="${QF_E2E_ADMIN_SOCKET:-/tmp/qf-tun-e2e-admin.sock}"
 SERVER_CONFIG_ARGS=()
 CLIENT_CONFIG_ARGS=()
+SERVER_PROFILE_ARGS=()
 SERVER_PRIVILEGE_ARGS=(--no-drop-privileges)
 SERVER_PID=""
 CLIENT_PID=""
@@ -36,11 +37,18 @@ NAMESPACES_CREATED=0
 TRAFFIC_CAPTURE_FILE="${QF_E2E_TRAFFIC_CAPTURE_FILE:-}"
 TRAFFIC_CAPTURE_SECONDS="${QF_E2E_TRAFFIC_CAPTURE_SECONDS:-10}"
 TRAFFIC_CAPTURE_DRAIN_SECONDS=1
+READY_HOOK="${QF_E2E_READY_HOOK:-}"
 if [ -n "${QF_E2E_SERVER_CONFIG:-}" ]; then
   SERVER_CONFIG_ARGS=(--config "$QF_E2E_SERVER_CONFIG")
 fi
 if [ -n "${QF_E2E_CLIENT_CONFIG:-}" ]; then
   CLIENT_CONFIG_ARGS=(--config "$QF_E2E_CLIENT_CONFIG")
+fi
+if [ -n "${QF_E2E_SERVER_PROFILE:-}" ]; then
+  SERVER_PROFILE_ARGS+=(--profile "$QF_E2E_SERVER_PROFILE")
+fi
+if [ -n "${QF_E2E_SERVER_OS:-}" ]; then
+  SERVER_PROFILE_ARGS+=(--os "$QF_E2E_SERVER_OS")
 fi
 if [ "${QF_E2E_DROP_PRIVILEGES:-0}" = "1" ]; then
   SERVER_PRIVILEGE_ARGS=(
@@ -210,7 +218,7 @@ ip netns exec ns-srv "$B" server --cert "$CERT" --key "$KEY" \
   --listen 10.10.0.1:4433 --admin-socket "$ADMIN_SOCKET" \
   --qkey-store "$QKEY_STORE" \
   --tun --tun-name qtun0 --tun-ip 10.0.1.1 --tun-netmask 255.255.255.0 \
-  "${SERVER_PRIVILEGE_ARGS[@]}" -v "${SERVER_CONFIG_ARGS[@]}" \
+  "${SERVER_PRIVILEGE_ARGS[@]}" "${SERVER_PROFILE_ARGS[@]}" -v "${SERVER_CONFIG_ARGS[@]}" \
   > /tmp/ns-srv.log 2>&1 &
 SERVER_PID=$!
 
@@ -258,6 +266,15 @@ if [ "$(grep -c 'TLS handshake complete' /tmp/ns-cli.log)" = "0" ] || [ "$(grep 
   cat /tmp/ns-srv.log >&2
   cat /tmp/ns-cli.log >&2
   fail "TLS handshake did not complete on both sides"
+fi
+
+if [ -n "$READY_HOOK" ]; then
+  if [ ! -x "$READY_HOOK" ]; then
+    fail "QF_E2E_READY_HOOK is not executable: $READY_HOOK"
+  fi
+  if ! "$READY_HOOK"; then
+    fail "QF_E2E_READY_HOOK failed: $READY_HOOK"
+  fi
 fi
 
 if [ -n "$TRAFFIC_CAPTURE_FILE" ]; then
