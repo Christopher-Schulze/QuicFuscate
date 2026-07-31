@@ -562,7 +562,7 @@ impl PacketNormalizer {
                 recompute_tcp_checksum(&mut pkt[..normalized_len], ip_hdr_len);
                 recompute_ipv4_checksum(&mut pkt[..normalized_len], ip_hdr_len);
             }
-            return (modified, normalized_len);
+            (modified, normalized_len)
         }
     }
 }
