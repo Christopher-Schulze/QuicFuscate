@@ -4487,7 +4487,7 @@ level = "debug"
 
 ## Deep Audit Findings (2026-08-04)
 
-A full deep-audit sweep of `src/` was performed with parallel read-only module scans and `cargo check`/`cargo clippy` verification. The scan produced new TODO entries (TODO-626 through TODO-675) and augmented existing TODOs with additional evidence. The findings span crypto correctness, FEC resource bounds, transport/stealth hot-path issues, privilege and unsafe-code correctness, client/server lifecycle, DNS behavior, and production-readiness gaps.
+A full deep-audit sweep of `src/` was performed with parallel read-only module scans and `cargo check`/`cargo clippy` verification. The scan produced new TODO entries (TODO-626 through TODO-677) and augmented existing TODOs with additional evidence. The findings span crypto correctness, FEC resource bounds, transport/stealth hot-path issues, privilege and unsafe-code correctness, client/server lifecycle, DNS behavior, time-source consistency, SIMD static mutables, and production-readiness gaps.
 
 ### Security-Critical Findings
 
@@ -4535,6 +4535,8 @@ A full deep-audit sweep of `src/` was performed with parallel read-only module s
 - **Environment variable race/validation**: `src/env_utils.rs` re-reads env vars and silently ignores invalid values. Tracked in TODO-670.
 - **File permission umask reliance**: several writers create sensitive files without explicit modes. Tracked in TODO-671.
 - **Audit log blocking flush**: `src/audit/mod.rs` flushes synchronously with no timeout. Tracked in TODO-675.
+- **AMX static mut**: `src/simd/amx.rs` uses a `static mut` tile config. Tracked in TODO-676.
+- **Time source bypass**: multiple modules use `Instant::now()` or `SystemTime::now()` directly. Tracked in TODO-677.
 
 ### Build Verification
 
