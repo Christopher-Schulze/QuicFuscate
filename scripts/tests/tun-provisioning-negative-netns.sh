@@ -207,6 +207,10 @@ assert_interface_absent "$PERMISSION_NAME"
 
 CONFLICT_NAME="qf-conflict"
 CONFLICT_IP="10.20.5.1"
+ip netns exec "$NAMESPACE" ip link add eth0 type dummy ||
+  fail "could not create the configured-WAN sentinel"
+ip netns exec "$NAMESPACE" ip link set eth0 up ||
+  fail "could not activate the configured-WAN sentinel"
 ip netns exec "$NAMESPACE" ip tuntap add dev "$CONFLICT_NAME" mode tun ||
   fail "could not create conflicting-address sentinel"
 ip netns exec "$NAMESPACE" ip addr add "$CONFLICT_IP/24" dev "$CONFLICT_NAME" ||
@@ -219,6 +223,8 @@ assert_interface_absent "$CONFLICT_NAME-new"
 assert_interface_present "$CONFLICT_NAME"
 ip netns exec "$NAMESPACE" ip tuntap del dev "$CONFLICT_NAME" mode tun ||
   fail "could not remove conflicting-address sentinel"
+ip netns exec "$NAMESPACE" ip link delete dev eth0 ||
+  fail "could not remove the configured-WAN sentinel"
 
 PARTIAL_NAME="qf-partial"
 expect_failure "routing-failure" root "$PARTIAL_NAME" 10.20.3.1 255.255.255.0
