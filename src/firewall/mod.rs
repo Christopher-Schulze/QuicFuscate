@@ -314,6 +314,56 @@ pub(crate) fn iptables_rule_exists_exact(
     iptables_rule_exists(program, table, chain, rule_args)
 }
 
+#[cfg(any(test, target_os = "linux"))]
+fn nft_rule_matches_fragment(rule: &str, fragment: &str) -> bool {
+    let normalized_rule = rule.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized_fragment = fragment.split_whitespace().collect::<Vec<_>>().join(" ");
+    let Some(fragment_open) = normalized_fragment.find('{') else {
+        return normalized_rule.contains(&normalized_fragment);
+    };
+    let Some(fragment_close) = normalized_fragment[fragment_open + 1..].find('}') else {
+        return false;
+    };
+    let fragment_close = fragment_open + 1 + fragment_close;
+    let required_prefix = normalized_fragment[..fragment_open].trim();
+    let required_suffix = normalized_fragment[fragment_close + 1..].trim();
+    let mut required_members = normalized_fragment[fragment_open + 1..fragment_close]
+        .split(',')
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    required_members.sort_unstable();
+
+    let Some(rule_open) = normalized_rule.find('{') else {
+        return false;
+    };
+    let Some(rule_close) = normalized_rule[rule_open + 1..].find('}') else {
+        return false;
+    };
+    let rule_close = rule_open + 1 + rule_close;
+    if normalized_rule[..rule_open].trim() != required_prefix
+        || normalized_rule[rule_close + 1..].trim() != required_suffix
+    {
+        return false;
+    }
+
+    let mut actual_members =
+        normalized_rule[rule_open + 1..rule_close].split(',').map(str::trim).collect::<Vec<_>>();
+    actual_members.sort_unstable();
+    actual_members == required_members
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn nft_output_contains_fragment(output: &str, fragment: &str) -> bool {
+    if fragment.contains('{') {
+        output.lines().any(|line| nft_rule_matches_fragment(line, fragment))
+    } else {
+        let normalized_fragment = fragment.split_whitespace().collect::<Vec<_>>().join(" ");
+        output.lines().any(|line| {
+            line.split_whitespace().collect::<Vec<_>>().join(" ").contains(&normalized_fragment)
+        })
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) fn verify_nft_table_rules(
     family: &str,
@@ -332,7 +382,9 @@ pub(crate) fn verify_nft_table_rules(
         )));
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    if let Some(missing) = required_fragments.iter().find(|fragment| !stdout.contains(**fragment)) {
+    if let Some(missing) =
+        required_fragments.iter().find(|fragment| !nft_output_contains_fragment(&stdout, fragment))
+    {
         return Err(std::io::Error::other(format!(
             "nft table {family} {table} is missing required rule fragment {missing:?}"
         )));
@@ -913,6 +965,22 @@ mod tests {
         let chain = "inet quicfuscate_ks output";
         let expected = format!("flush chain {}\n", chain);
         assert_eq!(expected, "flush chain inet quicfuscate_ks output\n");
+    }
+
+    #[test]
+    fn test_nft_rule_fragment_accepts_canonicalized_set_order() {
+        let required = r#"iifname "qtun0" oifname "qtun0" ip daddr { 255.255.255.255, 10.0.1.255, 224.0.0.0/4 } accept"#;
+        let listed = r#"    iifname "qtun0" oifname "qtun0" ip daddr { 10.0.1.255, 224.0.0.0/4, 255.255.255.255 } accept"#;
+
+        assert!(nft_output_contains_fragment(listed, required));
+    }
+
+    #[test]
+    fn test_nft_rule_fragment_rejects_different_set_members() {
+        let required = r#"iifname "qtun0" oifname "qtun0" ip daddr { 255.255.255.255, 10.0.1.255, 224.0.0.0/4 } accept"#;
+        let listed = r#"    iifname "qtun0" oifname "qtun0" ip daddr { 10.0.1.255, 224.0.0.0/4, 10.0.2.255 } accept"#;
+
+        assert!(!nft_output_contains_fragment(listed, required));
     }
 
     /// Verify that the iptables and nftables backends produce semantically
