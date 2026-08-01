@@ -233,6 +233,10 @@ expect_failure "routing-retry" root "$PARTIAL_NAME" 10.20.3.1 255.255.255.0
 assert_interface_absent "$PARTIAL_NAME"
 
 MISSING_NAME="qf-missing"
+ip netns exec "$NAMESPACE" ip link add eth0 type dummy ||
+  fail "could not create the missing-interface WAN sentinel"
+ip netns exec "$NAMESPACE" ip link set eth0 up ||
+  fail "could not activate the missing-interface WAN sentinel"
 server_command root "missing-interface" "$MISSING_NAME" 10.20.4.1 255.255.255.0
 deleted=0
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
@@ -260,5 +264,7 @@ missing_status=$?
 SERVER_PID=""
 [ "$missing_status" -ne 0 ] || fail "missing-interface case unexpectedly succeeded"
 assert_interface_absent "$MISSING_NAME"
+ip netns exec "$NAMESPACE" ip link delete dev eth0 ||
+  fail "could not remove the missing-interface WAN sentinel"
 
 echo "PASS: Linux TUN provisioning rejects invalid/conflicting activation and leaves zero owned residue"
