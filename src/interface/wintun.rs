@@ -122,7 +122,7 @@ mod imp {
         )))
     }
 
-    fn interface_mtu_script(name: &str, family: &str) -> String {
+    pub(super) fn interface_mtu_script(name: &str, family: &str) -> String {
         let escaped_name = name.replace('\'', "''");
         format!(
             "$ErrorActionPreference='Stop'; $interface = Get-NetIPInterface -InterfaceAlias '{escaped_name}' -AddressFamily {family} | Select-Object -First 1; if ($null -eq $interface) {{ throw 'interface not found' }}; [Console]::WriteLine($interface.NlMtu)"
