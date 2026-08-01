@@ -331,7 +331,6 @@ pub struct LiveServerState {
     retry_token_manager: Option<Arc<crate::implementations::server::ddos::RetryTokenManager>>,
     revocation_manager: Arc<crate::implementations::server::revocation::RevocationManager>,
     qkey_tracker: Arc<crate::implementations::server::revocation::QKeyConnectionTracker>,
-    key_rotation_manager: crate::implementations::server::revocation::KeyRotationManager,
     next_stats_log: Instant,
     /// Last time the external blacklist feed sync was *started*. Used by
     /// `run_housekeeping_tick` to trigger periodic re-syncs at the
@@ -882,12 +881,6 @@ impl LiveServerState {
             Arc::new(crate::implementations::server::revocation::RevocationManager::new());
         let qkey_tracker =
             Arc::new(crate::implementations::server::revocation::QKeyConnectionTracker::new());
-        let key_rotation_manager =
-            crate::implementations::server::revocation::KeyRotationManager::new(
-                crate::implementations::server::revocation::DEFAULT_ROTATION_INTERVAL_SECS,
-                crate::implementations::server::revocation::DEFAULT_OVERLAP_WINDOW_SECS,
-                Arc::clone(&revocation_manager),
-            );
         let domain = LiveServerDomain::try_new(&server_config)?;
         #[cfg(feature = "rate_limiter")]
         let retry_token_manager = domain.shared.retry_token_manager.clone();
@@ -910,7 +903,6 @@ impl LiveServerState {
             retry_token_manager,
             revocation_manager,
             qkey_tracker,
-            key_rotation_manager,
             next_stats_log: Instant::now(),
             #[cfg(feature = "rate_limiter")]
             last_blacklist_sync: Arc::new(parking_lot::Mutex::new(None)),
@@ -1265,10 +1257,6 @@ impl LiveServerState {
             // `Instant::now()` comparison under a short-lived lock.
             self.maybe_sync_blacklist();
         }
-        let _ = self.key_rotation_manager.check_and_rotate();
-        for revoked_key_id in self.key_rotation_manager.process_pending_revocations() {
-            self.close_sessions_for_revoked_qkey(&revoked_key_id, accept_loop, metrics);
-        }
         let client_snapshots = Arc::clone(self.domain.client_snapshots());
         let addresses = self.key_addrs();
         for addr in addresses {
@@ -1348,8 +1336,6 @@ impl LiveServerState {
     fn close_sessions_for_revoked_qkey(
         &mut self,
         key_id: &str,
-        accept_loop: &AcceptLoop,
-        metrics: &Metrics,
     ) {
         let revoked_session_ids = self.qkey_tracker.drain_connections_for_key(key_id);
         if revoked_session_ids.is_empty() {
@@ -1369,7 +1355,10 @@ impl LiveServerState {
             })
             .collect();
         for addr in addrs {
-            if let Some(mut conn) = self.clients.remove(&addr) {
+            // Keep the closed connection in `clients` until the next runtime
+            // flush sends its queued CONNECTION_CLOSE frame. Removing it here
+            // would drop that frame and leave the peer unaware of revocation.
+            if let Some(conn) = self.clients.get_mut(&addr) {
                 let conn_id = conn.conn.source_id().as_ref().to_vec();
                 if let Err(error) = conn.conn.close(true, 0x0, b"qkey_revoked") {
                     log::warn!(
@@ -1379,24 +1368,19 @@ impl LiveServerState {
                     );
                 }
                 self.qkey_auth.remove(&conn_id);
-                accept_loop.record_closed(addr);
-                metrics.record_connection_rejected();
             }
-            self.domain.remove_remote(addr);
         }
-        self.domain.retain_snapshots_for_clients(&self.clients);
-        self.sync_active_metrics(metrics);
     }
 
     pub fn revoke_qkey_now(
         &mut self,
         key_id: &str,
         reason: &str,
-        accept_loop: &AcceptLoop,
-        metrics: &Metrics,
+        _accept_loop: &AcceptLoop,
+        _metrics: &Metrics,
     ) {
         self.revocation_manager.revoke(key_id, reason);
-        self.close_sessions_for_revoked_qkey(key_id, accept_loop, metrics);
+        self.close_sessions_for_revoked_qkey(key_id);
     }
 
     pub fn handle_incoming_path_update(

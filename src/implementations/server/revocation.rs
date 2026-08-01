@@ -1,21 +1,15 @@
-//! Key rotation & immediate revocation (TODO-436).
+//! Immediate QKey revocation and active-session tracking.
 //!
 //! Provides:
-//! - `KeyRotationManager`: automatic QKey rotation with an overlap window
-//!   (old key stays valid during the overlap to prevent connection drops).
 //! - `RevocationManager`: tracks revoked QKeys with O(1) lookup and
 //!   immediately terminates active connections using a revoked key.
 //! - `QKeyConnectionTracker`: O(1) mapping from QKey ID to active connection IDs,
 //!   enabling immediate connection termination on revocation.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Default rotation interval (24 hours).
-pub const DEFAULT_ROTATION_INTERVAL_SECS: u64 = 86400;
-/// Default overlap window: old key remains valid for 5 minutes after rotation.
-pub const DEFAULT_OVERLAP_WINDOW_SECS: u64 = 300;
+use parking_lot::RwLock;
 
 /// A revoked QKey entry.
 #[derive(Debug, Clone)]
@@ -30,67 +24,41 @@ pub struct RevokedKey {
 
 /// Manages revoked QKeys with O(1) lookup.
 pub struct RevocationManager {
-    /// Set of revoked key IDs for O(1) `is_revoked()` lookup.
-    revoked_ids: RwLock<HashSet<String>>,
-    /// Full revocation records (for audit/display).
+    /// One state owner keeps lookup and display records consistent atomically.
     revoked_records: RwLock<HashMap<String, RevokedKey>>,
-    /// Callback to terminate a connection by QKey ID.
-    #[allow(clippy::type_complexity)]
-    terminate_callback: Mutex<Option<Box<dyn Fn(&str) + Send + Sync>>>,
 }
 
 impl RevocationManager {
     pub fn new() -> Self {
-        Self {
-            revoked_ids: RwLock::new(HashSet::new()),
-            revoked_records: RwLock::new(HashMap::new()),
-            terminate_callback: Mutex::new(None),
-        }
-    }
-
-    /// Register a callback that terminates all active connections using the
-    /// given QKey ID. Called immediately when a key is revoked.
-    pub fn set_terminate_callback<F>(&self, callback: F)
-    where
-        F: Fn(&str) + Send + Sync + 'static,
-    {
-        *self.terminate_callback.lock().unwrap() = Some(Box::new(callback));
+        Self { revoked_records: RwLock::new(HashMap::new()) }
     }
 
     /// Revoke a QKey by ID. Immediately terminates all active connections
-    /// using that key (if a terminate callback is registered).
+    /// using that key through the owning live server state.
     pub fn revoke(&self, key_id: &str, reason: &str) {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
 
         let record =
             RevokedKey { key_id: key_id.to_string(), revoked_at: now, reason: reason.to_string() };
 
-        self.revoked_ids.write().unwrap().insert(key_id.to_string());
-        self.revoked_records.write().unwrap().insert(key_id.to_string(), record);
+        self.revoked_records.write().insert(key_id.to_string(), record);
 
         log::warn!("QKey revoked: id={} reason={}", key_id, reason);
-
-        // Immediately terminate active connections using this key.
-        if let Some(callback) = self.terminate_callback.lock().unwrap().as_ref() {
-            callback(key_id);
-        }
     }
 
     /// Check if a QKey is revoked. O(1) lookup.
     pub fn is_revoked(&self, key_id: &str) -> bool {
-        self.revoked_ids.read().unwrap().contains(key_id)
+        self.revoked_records.read().contains_key(key_id)
     }
 
     /// List all revoked keys (for admin display).
     pub fn list_revoked(&self) -> Vec<RevokedKey> {
-        self.revoked_records.read().unwrap().values().cloned().collect()
+        self.revoked_records.read().values().cloned().collect()
     }
 
     /// Unrevoke a key (admin manual override).
     pub fn unrevoke(&self, key_id: &str) -> bool {
-        let removed_ids = self.revoked_ids.write().unwrap().remove(key_id);
-        let removed_records = self.revoked_records.write().unwrap().remove(key_id).is_some();
-        if removed_ids || removed_records {
+        if self.revoked_records.write().remove(key_id).is_some() {
             log::info!("QKey unrevoked: id={}", key_id);
             true
         } else {
@@ -101,8 +69,7 @@ impl RevocationManager {
     /// Clear all revocations (used on restart when revocations are persisted
     /// externally and reloaded).
     pub fn clear(&self) {
-        self.revoked_ids.write().unwrap().clear();
-        self.revoked_records.write().unwrap().clear();
+        self.revoked_records.write().clear();
     }
 }
 
@@ -115,41 +82,64 @@ impl Default for RevocationManager {
 /// Tracks which connections are using which QKey. O(1) lookup in both
 /// directions: QKey→connections and connection→QKey.
 pub struct QKeyConnectionTracker {
+    state: RwLock<QKeyConnectionTrackerState>,
+}
+
+struct QKeyConnectionTrackerState {
     /// QKey ID → set of connection IDs.
-    by_key: RwLock<HashMap<String, HashSet<u64>>>,
+    by_key: HashMap<String, HashSet<u64>>,
     /// Connection ID → QKey ID.
-    by_conn: RwLock<HashMap<u64, String>>,
+    by_conn: HashMap<u64, String>,
+}
+
+fn remove_connection_from_key(
+    by_key: &mut HashMap<String, HashSet<u64>>,
+    key_id: &str,
+    conn_id: u64,
+) {
+    if let Some(conns) = by_key.get_mut(key_id) {
+        conns.remove(&conn_id);
+        if conns.is_empty() {
+            by_key.remove(key_id);
+        }
+    }
 }
 
 impl QKeyConnectionTracker {
     pub fn new() -> Self {
-        Self { by_key: RwLock::new(HashMap::new()), by_conn: RwLock::new(HashMap::new()) }
+        Self {
+            state: RwLock::new(QKeyConnectionTrackerState {
+                by_key: HashMap::new(),
+                by_conn: HashMap::new(),
+            }),
+        }
     }
 
-    /// Register that a connection is using a QKey.
+    /// Register or reassociate a connection with a QKey atomically.
     pub fn associate(&self, conn_id: u64, key_id: &str) {
-        self.by_conn.write().unwrap().insert(conn_id, key_id.to_string());
-        self.by_key.write().unwrap().entry(key_id.to_string()).or_default().insert(conn_id);
+        let mut state = self.state.write();
+        let key_id = key_id.to_string();
+        if let Some(previous_key_id) = state.by_conn.insert(conn_id, key_id.clone()) {
+            if previous_key_id != key_id {
+                remove_connection_from_key(&mut state.by_key, &previous_key_id, conn_id);
+            }
+        }
+        state.by_key.entry(key_id).or_default().insert(conn_id);
     }
 
     /// Remove a connection association (on disconnect).
     pub fn dissociate(&self, conn_id: u64) {
-        if let Some(key_id) = self.by_conn.write().unwrap().remove(&conn_id) {
-            let mut by_key = self.by_key.write().unwrap();
-            if let Some(conns) = by_key.get_mut(&key_id) {
-                conns.remove(&conn_id);
-                if conns.is_empty() {
-                    by_key.remove(&key_id);
-                }
-            }
+        let mut state = self.state.write();
+        if let Some(key_id) = state.by_conn.remove(&conn_id) {
+            remove_connection_from_key(&mut state.by_key, &key_id, conn_id);
         }
     }
 
     /// Get all connection IDs using a given QKey. O(1).
     pub fn connections_for_key(&self, key_id: &str) -> Vec<u64> {
-        self.by_key
+        self.state
             .read()
-            .unwrap()
+            .by_key
             .get(key_id)
             .map(|set| set.iter().copied().collect())
             .unwrap_or_default()
@@ -157,16 +147,20 @@ impl QKeyConnectionTracker {
 
     /// Get the QKey ID for a connection. O(1).
     pub fn key_for_connection(&self, conn_id: u64) -> Option<String> {
-        self.by_conn.read().unwrap().get(&conn_id).cloned()
+        self.state.read().by_conn.get(&conn_id).cloned()
     }
 
     /// Get all connection IDs for a QKey and remove them from the tracker.
     /// Used during revocation to get the list before terminating.
     pub fn drain_connections_for_key(&self, key_id: &str) -> Vec<u64> {
-        let conn_ids = self.by_key.write().unwrap().remove(key_id).unwrap_or_default();
-        let mut by_conn = self.by_conn.write().unwrap();
+        let mut state = self.state.write();
+        let Some(conn_ids) = state.by_key.remove(key_id) else {
+            return Vec::new();
+        };
         for &conn_id in &conn_ids {
-            by_conn.remove(&conn_id);
+            if state.by_conn.get(&conn_id).is_some_and(|mapped_key| mapped_key == key_id) {
+                state.by_conn.remove(&conn_id);
+            }
         }
         conn_ids.into_iter().collect()
     }
@@ -175,118 +169,6 @@ impl QKeyConnectionTracker {
 impl Default for QKeyConnectionTracker {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// Manages automatic QKey rotation with an overlap window.
-///
-/// During rotation, the new key is generated and distributed. The old key
-/// remains valid for `overlap_window` seconds to allow in-flight connections
-/// to transition. After the overlap window, the old key is revoked.
-pub struct KeyRotationManager {
-    /// Rotation interval.
-    rotation_interval: Duration,
-    /// Overlap window: old key stays valid this long after rotation.
-    overlap_window: Duration,
-    /// Last rotation time.
-    last_rotation: RwLock<Instant>,
-    /// Keys that are in the overlap window (old key ID → rotation time).
-    pending_revocations: RwLock<Vec<(String, Instant)>>,
-    /// Callback to generate a new key.
-    generate_callback: Mutex<Option<Box<dyn Fn() -> String + Send + Sync>>>,
-    /// Reference to the revocation manager.
-    revocation_manager: Arc<RevocationManager>,
-}
-
-impl KeyRotationManager {
-    pub fn new(
-        rotation_interval_secs: u64,
-        overlap_window_secs: u64,
-        revocation_manager: Arc<RevocationManager>,
-    ) -> Self {
-        Self {
-            rotation_interval: Duration::from_secs(rotation_interval_secs),
-            overlap_window: Duration::from_secs(overlap_window_secs),
-            last_rotation: RwLock::new(Instant::now()),
-            pending_revocations: RwLock::new(Vec::new()),
-            generate_callback: Mutex::new(None),
-            revocation_manager,
-        }
-    }
-
-    /// Register a callback that generates a new QKey and returns its ID.
-    pub fn set_generate_callback<F>(&self, callback: F)
-    where
-        F: Fn() -> String + Send + Sync + 'static,
-    {
-        *self.generate_callback.lock().unwrap() = Some(Box::new(callback));
-    }
-
-    /// Check if rotation is due. If so, trigger rotation and return the new key ID.
-    pub fn check_and_rotate(&self) -> Option<String> {
-        let last = *self.last_rotation.read().unwrap();
-        if last.elapsed() < self.rotation_interval {
-            return None;
-        }
-
-        // Generate new key.
-        let new_key_id = {
-            let cb = self.generate_callback.lock().unwrap();
-            let callback = cb.as_ref()?;
-            callback()
-        };
-
-        // Schedule revocation of the old key after the overlap window.
-        // (In a real implementation, the old key ID would be passed here.)
-        *self.last_rotation.write().unwrap() = Instant::now();
-
-        log::info!("QKey rotated: new key id={}", new_key_id);
-        Some(new_key_id)
-    }
-
-    /// Schedule revocation of an old key after the overlap window.
-    pub fn schedule_revocation(&self, old_key_id: &str) {
-        self.pending_revocations.write().unwrap().push((old_key_id.to_string(), Instant::now()));
-        log::info!(
-            "QKey revocation scheduled: id={} after {}s overlap",
-            old_key_id,
-            self.overlap_window.as_secs()
-        );
-    }
-
-    /// Process pending revocations. Called periodically (e.g., every second).
-    /// Revokes keys whose overlap window has expired.
-    pub fn process_pending_revocations(&self) -> Vec<String> {
-        let now = Instant::now();
-        let mut pending = self.pending_revocations.write().unwrap();
-        let mut to_revoke = Vec::new();
-        pending.retain(|(key_id, scheduled_at)| {
-            if now.duration_since(*scheduled_at) >= self.overlap_window {
-                to_revoke.push(key_id.clone());
-                false
-            } else {
-                true
-            }
-        });
-        drop(pending);
-
-        let mut revoked = Vec::with_capacity(to_revoke.len());
-        for key_id in to_revoke {
-            self.revocation_manager.revoke(&key_id, "rotation overlap window expired");
-            revoked.push(key_id);
-        }
-        revoked
-    }
-
-    /// Time until the next rotation (seconds).
-    pub fn time_until_rotation(&self) -> u64 {
-        let last = *self.last_rotation.read().unwrap();
-        let elapsed = last.elapsed();
-        if elapsed >= self.rotation_interval {
-            0
-        } else {
-            (self.rotation_interval - elapsed).as_secs()
-        }
     }
 }
 
@@ -323,16 +205,35 @@ mod tests {
     }
 
     #[test]
-    fn test_revocation_manager_terminate_callback() {
+    fn test_revocation_manager_owns_lookup_and_record_atomically() {
         let mgr = RevocationManager::new();
-        let terminated = Arc::new(Mutex::new(Vec::new()));
-        let terminated_clone = terminated.clone();
-        mgr.set_terminate_callback(move |key_id| {
-            terminated_clone.lock().unwrap().push(key_id.to_string());
-        });
         mgr.revoke("key1", "compromised");
-        assert_eq!(terminated.lock().unwrap().len(), 1);
-        assert_eq!(terminated.lock().unwrap()[0], "key1");
+        let records = mgr.list_revoked();
+        let record = records.iter().find(|record| record.key_id == "key1").expect("record");
+        assert_eq!(record.reason, "compromised");
+        assert!(mgr.is_revoked("key1"));
+
+        mgr.revoke("key1", "updated");
+        let records = mgr.list_revoked();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].reason, "updated");
+        assert!(mgr.unrevoke("key1"));
+        assert!(mgr.list_revoked().is_empty());
+        assert!(!mgr.is_revoked("key1"));
+    }
+
+    #[test]
+    fn test_revocation_manager_recovers_after_panicking_owner() {
+        let manager = std::sync::Arc::new(RevocationManager::new());
+        let owner = std::sync::Arc::clone(&manager);
+        let join = std::thread::spawn(move || {
+            let _guard = owner.revoked_records.write();
+            panic!("test-only revocation owner panic");
+        });
+        assert!(join.join().is_err());
+
+        manager.revoke("key-after-panic", "still-usable");
+        assert!(manager.is_revoked("key-after-panic"));
     }
 
     #[test]
@@ -374,6 +275,44 @@ mod tests {
     }
 
     #[test]
+    fn test_qkey_connection_tracker_reassociation_preserves_bijection() {
+        let tracker = QKeyConnectionTracker::new();
+        tracker.associate(1, "keyA");
+        tracker.associate(1, "keyB");
+
+        assert!(tracker.connections_for_key("keyA").is_empty());
+        assert_eq!(tracker.connections_for_key("keyB"), vec![1]);
+        assert_eq!(tracker.key_for_connection(1).as_deref(), Some("keyB"));
+
+        assert_eq!(tracker.drain_connections_for_key("keyB"), vec![1]);
+        assert_eq!(tracker.key_for_connection(1), None);
+        assert!(tracker.connections_for_key("keyB").is_empty());
+    }
+
+    #[test]
+    fn test_qkey_connection_tracker_concurrent_reassociation_preserves_bijection() {
+        let tracker = std::sync::Arc::new(QKeyConnectionTracker::new());
+        let mut workers = Vec::new();
+        for worker in 0..4 {
+            let tracker = std::sync::Arc::clone(&tracker);
+            workers.push(std::thread::spawn(move || {
+                for iteration in 0..250 {
+                    let key = if (worker + iteration) % 2 == 0 { "keyA" } else { "keyB" };
+                    tracker.associate(1, key);
+                }
+            }));
+        }
+        for worker in workers {
+            worker.join().expect("reassociation worker");
+        }
+
+        let final_key = tracker.key_for_connection(1).expect("final association");
+        let other_key = if final_key == "keyA" { "keyB" } else { "keyA" };
+        assert_eq!(tracker.connections_for_key(&final_key), vec![1]);
+        assert!(tracker.connections_for_key(other_key).is_empty());
+    }
+
+    #[test]
     fn test_qkey_connection_tracker_drain() {
         let tracker = QKeyConnectionTracker::new();
         tracker.associate(1, "keyA");
@@ -387,25 +326,5 @@ mod tests {
         assert_eq!(tracker.key_for_connection(2), None);
         // keyB connections should be unaffected.
         assert_eq!(tracker.connections_for_key("keyB").len(), 1);
-    }
-
-    #[test]
-    fn test_key_rotation_manager_time_until() {
-        let revocation = Arc::new(RevocationManager::new());
-        let mgr = KeyRotationManager::new(3600, 300, revocation);
-        // Just created, so ~3600 seconds until rotation.
-        let t = mgr.time_until_rotation();
-        assert!((3599..=3600).contains(&t));
-    }
-
-    #[test]
-    fn test_key_rotation_manager_pending_revocation() {
-        let revocation = Arc::new(RevocationManager::new());
-        // Very short overlap window for testing.
-        let mgr = KeyRotationManager::new(3600, 0, revocation.clone());
-        mgr.schedule_revocation("oldKey");
-        // Overlap is 0, so process_pending should revoke immediately.
-        mgr.process_pending_revocations();
-        assert!(revocation.is_revoked("oldKey"));
     }
 }

@@ -1465,6 +1465,11 @@ mod tests {
         live_state.revoke_qkey_now("test-key", "test", &accept_loop, &metrics);
 
         assert!(live_state.revocation_manager.is_revoked("test-key"));
+        assert!(live_state
+            .clients
+            .get(&remote_addr)
+            .is_some_and(|connection| connection.conn.is_closed()));
+        live_state.reconcile(&accept_loop, &metrics);
         assert!(!live_state.clients.contains_key(&remote_addr));
         assert!(live_state.domain.session_id_by_remote(remote_addr).is_none());
         assert!(live_state.qkey_tracker.connections_for_key("test-key").is_empty());

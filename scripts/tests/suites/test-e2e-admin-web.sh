@@ -17,8 +17,10 @@ SERVER_ADDR_SET=0
 ADMIN_WEB_ROOT="assets/web-admin"
 REBUILD_WEB=0
 USE_BINARY=""
+CLIENT_BINARY="${QUICFUSCATE_E2E_RUNTIME_CLIENT_BINARY:-$PROJECT_ROOT/target/debug/quicfuscate}"
 CERT_PATH=""
 KEY_PATH=""
+CA_PATH=""
 READY_TIMEOUT_SECS=120
 QKEY_TTL_SECS=120
 
@@ -32,13 +34,15 @@ while [[ $# -gt 0 ]]; do
     --admin-web-root) ADMIN_WEB_ROOT="$2"; shift;;
     --rebuild-web) REBUILD_WEB=1;;
     --use-binary) USE_BINARY="$2"; shift;;
+    --client-binary) CLIENT_BINARY="$2"; shift;;
     --cert) CERT_PATH="$2"; shift;;
     --key) KEY_PATH="$2"; shift;;
+    --ca-file) CA_PATH="$2"; shift;;
     --ready-timeout) READY_TIMEOUT_SECS="$2"; shift;;
     --dry-run) DRY_RUN=1;;
     --verbose) QUICFUSCATE_DEBUG_SCRIPTS=1;;
     --help|-h)
-      echo "Usage: $(basename "$0") [--admin-user USER] [--admin-pass PASS] [--admin-addr ADDR] [--server-addr ADDR] [--admin-web-root PATH] [--rebuild-web] [--use-binary PATH] [--cert PATH] [--key PATH] [--ready-timeout SECS]"
+      echo "Usage: $(basename "$0") [--admin-user USER] [--admin-pass PASS] [--admin-addr ADDR] [--server-addr ADDR] [--admin-web-root PATH] [--rebuild-web] [--use-binary PATH] [--client-binary PATH] [--cert PATH] [--key PATH] [--ca-file PATH] [--ready-timeout SECS]"
       usage_common_flags
       exit 0
       ;;
@@ -128,6 +132,10 @@ cleanup() {
     kill "$DESKTOP_PID" 2>/dev/null || true
     wait "$DESKTOP_PID" 2>/dev/null || true
   fi
+  if [[ -n "${CLIENT_PID:-}" ]]; then
+    kill "$CLIENT_PID" 2>/dev/null || true
+    wait "$CLIENT_PID" 2>/dev/null || true
+  fi
   rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
@@ -138,20 +146,43 @@ fetch_csrf_token() {
   local code
   code="$(awk 'BEGIN{IGNORECASE=1}/^HTTP\//{c=$2}END{print c}' "$headers_file")"
   [[ "$code" == "200" ]] || die "Failed to fetch CSRF token (status $code)"
-  CSRF_TOKEN="$(awk 'BEGIN{IGNORECASE=1}/^X-CSRF-Token:/{sub("\r$","",$2);print $2}' "$headers_file" | tail -n1)"
+  CSRF_TOKEN="$(awk 'tolower($1)=="x-csrf-token:" {sub("\r$","",$2);print $2}' "$headers_file" | tail -n1)"
   [[ -n "$CSRF_TOKEN" ]] || die "Missing CSRF token header"
 }
 
-if [[ -z "$CERT_PATH" ]]; then
-  CERT_PATH="$(ls -1t config/local/dev-certs/*.crt 2>/dev/null | head -n 1 || true)"
-  [[ -n "$CERT_PATH" ]] || CERT_PATH="$(ls -1t config/dev-certs/*.crt 2>/dev/null | head -n 1 || true)"
+[[ -x "$CLIENT_BINARY" ]] || die "Missing QKey client binary: $CLIENT_BINARY"
+
+if [[ -n "$CA_PATH" ]]; then
+  [[ -n "$CERT_PATH" ]] || die "Missing server cert path. Provide --cert PATH with --ca-file PATH"
+  [[ -n "$KEY_PATH" ]] || die "Missing server key path. Provide --key PATH with --ca-file PATH"
+  [[ -s "$CA_PATH" ]] || die "Missing CA bundle: $CA_PATH"
+else
+  if [[ -n "$CERT_PATH" || -n "$KEY_PATH" ]]; then
+    die "Custom --cert/--key requires a matching --ca-file; omit them to generate an ephemeral test PKI"
+  fi
+  require_cmd openssl
+  CA_PATH="$TMP_DIR/ca.crt"
+  CA_KEY_PATH="$TMP_DIR/ca.key"
+  CERT_PATH="$TMP_DIR/server.crt"
+  KEY_PATH="$TMP_DIR/server.key"
+  SERVER_CSR_PATH="$TMP_DIR/server.csr"
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -sha256 -nodes \
+    -days 1 -subj '/CN=QuicFuscate Admin E2E CA' \
+    -addext 'basicConstraints=critical,CA:TRUE,pathlen:0' \
+    -addext 'keyUsage=critical,keyCertSign,cRLSign' \
+    -keyout "$CA_KEY_PATH" -out "$CA_PATH" >/dev/null 2>&1
+  openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -sha256 -nodes \
+    -subj '/CN=localhost' \
+    -addext 'subjectAltName=DNS:cdn.cloudflare.com,DNS:localhost,IP:127.0.0.1' \
+    -addext 'basicConstraints=critical,CA:FALSE' \
+    -addext 'keyUsage=critical,digitalSignature' \
+    -addext 'extendedKeyUsage=serverAuth' \
+    -keyout "$KEY_PATH" -out "$SERVER_CSR_PATH" >/dev/null 2>&1
+  openssl x509 -req -in "$SERVER_CSR_PATH" -CA "$CA_PATH" -CAkey "$CA_KEY_PATH" \
+    -CAcreateserial -days 1 -sha256 -copy_extensions copy -out "$CERT_PATH" >/dev/null 2>&1
+  chmod 600 "$CA_KEY_PATH" "$KEY_PATH"
+  info "Generated ephemeral CA and server leaf for verified QKey TLS"
 fi
-if [[ -z "$KEY_PATH" ]]; then
-  KEY_PATH="$(ls -1t config/local/dev-certs/*.key 2>/dev/null | head -n 1 || true)"
-  [[ -n "$KEY_PATH" ]] || KEY_PATH="$(ls -1t config/dev-certs/*.key 2>/dev/null | head -n 1 || true)"
-fi
-[[ -n "$CERT_PATH" ]] || die "Missing cert path. Provide --cert PATH or place a .crt under config/local/dev-certs/"
-[[ -n "$KEY_PATH" ]] || die "Missing key path. Provide --key PATH or place a .key under config/local/dev-certs/"
 
 cat > "$CONFIG_FILE" <<'TOML'
 [fec]
@@ -206,7 +237,7 @@ SERVER_CMD+=(
   "--listen" "$SERVER_ADDR"
   "--cert" "$CERT_PATH"
   "--key" "$KEY_PATH"
-  "--front-domain" "localhost"
+  "--front-domain" "cdn.cloudflare.com"
   "--admin-web" "$ADMIN_ADDR"
   "--admin-web-root" "$ADMIN_WEB_ROOT"
   "--admin-web-user" "$ADMIN_USER"
@@ -362,21 +393,6 @@ if "config" not in data:
     raise SystemExit("config response missing config field")
 PY
 
-info "Updating config"
-python3 - "$CONFIG_UPDATE" > "$PAYLOAD_FILE" <<'PY'
-import json, sys
-with open(sys.argv[1], "r") as fh:
-    text = fh.read()
-print(json.dumps({"config": text}))
-PY
-UPDATE_RESP="$(curl -s -b "$COOKIE_JAR" -H "Content-Type: application/json" -H "$ORIGIN_HEADER" -H "X-CSRF-Token: $CSRF_TOKEN" -d @"$PAYLOAD_FILE" "http://$ADMIN_ADDR/api/config")"
-python3 - "$UPDATE_RESP" <<'PY'
-import json, sys
-resp = json.loads(sys.argv[1])
-if not resp.get("success"):
-    raise SystemExit(f"config update failed: {resp}")
-PY
-
 info "Generating QKey"
 QKEY_PAYLOAD=$(python3 - <<PY
 import json
@@ -412,8 +428,52 @@ QKEY_EXPIRES_AT="${QKEY_LINES[1]:-}"
 [[ -n "$QKEY_VALUE" ]] || die "Missing qkey value"
 [[ -n "$QKEY_EXPIRES_AT" ]] || die "Missing qkey expires_at"
 
-info "Connecting with QKey (headless)"
-info "QKey transport-connect validation is covered in dedicated transport/integration suites."
+info "Connecting with the runtime QKey client and retaining an authenticated session"
+CLIENT_LOG="$OUTPUT_DIR/qkey-revocation-client.log"
+AUTH_SUCCEEDED_BEFORE="$(curl -s -b "$COOKIE_JAR" "http://$ADMIN_ADDR/api/metrics" \
+  | awk '$1 == "quicfuscate_auth_succeeded_total" {print $2; exit}')"
+[[ "$AUTH_SUCCEEDED_BEFORE" =~ ^[0-9]+$ ]] || die "Could not read baseline QKey auth metric"
+"$CLIENT_BINARY" client \
+  --remote "$SERVER_ADDR" \
+  --url "https://cdn.cloudflare.com/qf-e2e-probe" \
+  --qkey "$QKEY_VALUE" \
+  --ca-file "$CA_PATH" \
+  --no-utls \
+  --verify-peer \
+  --disable-doh \
+  --disable-fronting >"$CLIENT_LOG" 2>&1 &
+CLIENT_PID=$!
+CLIENT_CONNECTED=0
+for _ in $(seq 1 100); do
+  AUTH_SUCCEEDED_NOW="$(curl -s -b "$COOKIE_JAR" "http://$ADMIN_ADDR/api/metrics" \
+    | awk '$1 == "quicfuscate_auth_succeeded_total" {print $2; exit}')"
+  if [[ "$AUTH_SUCCEEDED_NOW" =~ ^[0-9]+$ ]] \
+    && (( AUTH_SUCCEEDED_NOW > AUTH_SUCCEEDED_BEFORE )); then
+    CLIENT_CONNECTED=1
+    break
+  fi
+  if ! kill -0 "$CLIENT_PID" 2>/dev/null; then
+    tail -n 100 "$CLIENT_LOG" >&2 || true
+    die "QKey client exited before active-session proof"
+  fi
+  sleep 0.1
+done
+[[ "$CLIENT_CONNECTED" -eq 1 ]] || die "Runtime QKey client did not authenticate before revocation"
+
+info "Updating config while the authenticated QKey session is active"
+python3 - "$CONFIG_UPDATE" > "$PAYLOAD_FILE" <<'PY'
+import json, sys
+with open(sys.argv[1], "r") as fh:
+    text = fh.read()
+print(json.dumps({"config": text}))
+PY
+UPDATE_RESP="$(curl -s -b "$COOKIE_JAR" -H "Content-Type: application/json" -H "$ORIGIN_HEADER" -H "X-CSRF-Token: $CSRF_TOKEN" -d @"$PAYLOAD_FILE" "http://$ADMIN_ADDR/api/config")"
+python3 - "$UPDATE_RESP" <<'PY'
+import json, sys
+resp = json.loads(sys.argv[1])
+if not resp.get("success"):
+    raise SystemExit(f"config update failed: {resp}")
+PY
 
 info "Connecting with QKey (desktop engine)"
 info "Desktop runtime transport-connect validation is covered in dedicated integration suites."
@@ -479,6 +539,53 @@ if entry is None:
 is_revoked = bool(entry.get("revoked")) or bool(entry.get("disabled")) or bool(entry.get("is_revoked"))
 if not is_revoked:
     raise SystemExit("revoked qkey not marked revoked/disabled in list")
+PY
+
+info "Verifying immediate active-session closure and zero stale clients"
+CLIENT_EXIT=0
+for _ in $(seq 1 100); do
+  if ! kill -0 "$CLIENT_PID" 2>/dev/null; then
+    break
+  fi
+  sleep 0.1
+done
+if kill -0 "$CLIENT_PID" 2>/dev/null; then
+  kill -TERM "$CLIENT_PID" 2>/dev/null || true
+fi
+if wait "$CLIENT_PID"; then
+  CLIENT_EXIT=0
+else
+  CLIENT_EXIT=$?
+fi
+CLIENT_PID=""
+[[ "$CLIENT_EXIT" -ne 0 ]] || die "revoked active QKey client remained connected"
+grep -F 'VPN server closed the connection' "$CLIENT_LOG" >/dev/null \
+  || die "revoked active QKey client did not report immediate closure"
+
+CLIENTS_AFTER_REVOKE_RESP=""
+for _ in $(seq 1 100); do
+  CLIENTS_AFTER_REVOKE_RESP="$(curl -s -b "$COOKIE_JAR" "http://$ADMIN_ADDR/api/clients")"
+  if python3 - "$CLIENTS_AFTER_REVOKE_RESP" <<'PY'
+import json, sys
+resp = json.loads(sys.argv[1])
+if not resp.get("success"):
+    raise SystemExit(1)
+clients = resp.get("data")
+if clients == []:
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+  then
+    break
+  fi
+  sleep 0.1
+done
+python3 - "$CLIENTS_AFTER_REVOKE_RESP" <<'PY'
+import json, sys
+resp = json.loads(sys.argv[1])
+clients = resp.get("data")
+if clients != []:
+    raise SystemExit(f"stale active client remains after revoke: {clients}")
 PY
 
 info "Fetching logs (normal mode)"

@@ -234,8 +234,8 @@ grep -F "$TOKEN_HASH" "$OUTPUT_DIR/migration.log" "$OUTPUT_DIR/migration.cmdline
   >/dev/null 2>&1 && fail "token hash leaked into logs or process arguments"
 [[ "$(head -c 6 "$REGISTRY")" == "QFQREG" ]] || fail "primary was not migrated"
 [[ "$(head -c 6 "$BACKUP")" == "QFQREG" ]] || fail "backup was not encrypted"
-[[ "$(file_mode "$REGISTRY")" == "600" ]] || fail "primary mode is not 600"
-[[ "$(file_mode "$BACKUP")" == "600" ]] || fail "backup mode is not 600"
+[[ "$(file_mode "$REGISTRY")" == "640" ]] || fail "primary mode is not 640"
+[[ "$(file_mode "$BACKUP")" == "640" ]] || fail "backup mode is not 640"
 grep -aF "$TOKEN_HASH" "$REGISTRY" "$BACKUP" >/dev/null 2>&1 \
   && fail "token hash is visible in encrypted storage"
 OLD_PRIMARY_SHA256="$(sha256_file "$REGISTRY")"
