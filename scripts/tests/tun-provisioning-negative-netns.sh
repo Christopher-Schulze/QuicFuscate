@@ -22,6 +22,8 @@ BINARY="${QF_E2E_BINARY:-$PROJECT_ROOT/target/release/quicfuscate}"
 RUNTIME_DIR=""
 CERT=""
 KEY=""
+NOBODY_RUNTIME_DIR=""
+NOBODY_BINARY=""
 NAMESPACE="qf-tun-provision-$$"
 SERVER_PID=""
 PORT=$((43000 + ($$ % 1000)))
@@ -108,6 +110,13 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
   fail "could not create isolated test certificate"
 chmod 644 "$CERT" "$KEY" || fail "could not make test certificate readable"
 
+NOBODY_RUNTIME_DIR="$RUNTIME_DIR/nobody"
+mkdir "$NOBODY_RUNTIME_DIR" || fail "could not create permission-test runtime directory"
+chmod 777 "$NOBODY_RUNTIME_DIR" || fail "could not make permission-test runtime directory writable"
+NOBODY_BINARY="$RUNTIME_DIR/quicfuscate"
+cp -- "$BINARY" "$NOBODY_BINARY" || fail "could not stage permission-test binary"
+chmod 755 "$NOBODY_BINARY" || fail "could not make permission-test binary executable"
+
 ip netns add "$NAMESPACE" || fail "could not create isolated network namespace"
 NAMESPACE_CREATED=1
 ip netns exec "$NAMESPACE" ip link set lo up ||
@@ -120,13 +129,16 @@ server_command() {
   local tun_ip="$4"
   local tun_netmask="$5"
   local log="$RUNTIME_DIR/${label}.log"
+  local binary="$BINARY"
   local qkey_store="$RUNTIME_DIR/${label}-qkeys.json"
   local -a command=(ip netns exec "$NAMESPACE")
   if [ "$run_as" = "nobody" ]; then
+    binary="$NOBODY_BINARY"
+    qkey_store="$NOBODY_RUNTIME_DIR/${label}-qkeys.json"
     command+=(runuser -u nobody --)
   fi
   command+=(
-    "$BINARY" server
+    "$binary" server
     --cert "$CERT"
     --key "$KEY"
     --listen "127.0.0.1:$PORT"
@@ -194,11 +206,12 @@ expect_failure "permission-denied" nobody "$PERMISSION_NAME" 10.20.2.1 255.255.2
 assert_interface_absent "$PERMISSION_NAME"
 
 CONFLICT_NAME="qf-conflict"
+CONFLICT_IP="10.20.5.1"
 ip netns exec "$NAMESPACE" ip tuntap add dev "$CONFLICT_NAME" mode tun ||
   fail "could not create conflicting-address sentinel"
-ip netns exec "$NAMESPACE" ip addr add 127.0.0.1/24 dev "$CONFLICT_NAME" ||
+ip netns exec "$NAMESPACE" ip addr add "$CONFLICT_IP/24" dev "$CONFLICT_NAME" ||
   fail "could not assign conflicting-address sentinel"
-expect_failure "conflicting-address" root "$CONFLICT_NAME-new" 127.0.0.1 255.255.255.0
+expect_failure "conflicting-address" root "$CONFLICT_NAME-new" "$CONFLICT_IP" 255.255.255.0
 grep -Eiq "file exists|already exists|cannot assign requested address|address.*exist" \
   "$RUNTIME_DIR/conflicting-address.log" ||
   fail "conflicting-address did not produce an address-conflict diagnostic"
