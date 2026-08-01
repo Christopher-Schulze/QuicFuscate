@@ -122,11 +122,15 @@ mod imp {
         )))
     }
 
-    fn read_interface_mtu(name: &str, family: &str) -> io::Result<u16> {
+    fn interface_mtu_script(name: &str, family: &str) -> String {
         let escaped_name = name.replace('\'', "''");
-        let script = format!(
-            "$ErrorActionPreference='Stop'; $interface = Get-NetIPInterface -InterfaceAlias '{escaped_name}' -AddressFamily {family} | Select-Object -First 1; if ($null -eq $interface) {{ throw 'interface not found' }}; [Console]::WriteLine($interface.NlMtuBytes)"
-        );
+        format!(
+            "$ErrorActionPreference='Stop'; $interface = Get-NetIPInterface -InterfaceAlias '{escaped_name}' -AddressFamily {family} | Select-Object -First 1; if ($null -eq $interface) {{ throw 'interface not found' }}; [Console]::WriteLine($interface.NlMtu)"
+        )
+    }
+
+    fn read_interface_mtu(name: &str, family: &str) -> io::Result<u16> {
+        let script = interface_mtu_script(name, family);
         let output = std::process::Command::new("powershell.exe")
             .creation_flags(CREATE_NO_WINDOW)
             .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", &script])
@@ -915,6 +919,15 @@ mod tests {
             ..TunConfig::default()
         };
         assert!(matches!(validate_config(&invalid_prefix), Err(TunError::Config(_))));
+    }
+
+    #[cfg(all(target_os = "windows", feature = "tun-windows"))]
+    #[test]
+    fn interface_mtu_script_reads_the_nl_mtu_property() {
+        let script = imp::interface_mtu_script("QuicFuscate-CI", "IPv4");
+
+        assert!(script.contains("$interface.NlMtu)"));
+        assert!(!script.contains("$interface.NlMtuBytes)"));
     }
 
     #[test]
