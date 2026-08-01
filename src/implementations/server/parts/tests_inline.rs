@@ -21,8 +21,9 @@ mod tests {
         remote_addr: SocketAddr,
         packet: &[u8],
     ) -> bool {
+        let metrics = Metrics::new();
         matches!(
-            domain.admit_incoming_datagram(remote_addr, packet, true, true),
+            domain.admit_incoming_datagram(remote_addr, packet, true, true, &metrics),
             crate::implementations::server::ddos::IncomingDatagramAdmission::Allow
         )
     }
@@ -664,7 +665,8 @@ mod tests {
     #[test]
     fn test_live_server_domain_resolves_session_identity_to_remote_addr() {
         let remote_addr = "127.0.0.1:54322".parse().unwrap();
-        let domain = LiveServerDomain::new(&ServerConfig::default());
+        let domain = LiveServerDomain::try_new(&ServerConfig::default())
+            .unwrap_or_else(|error| panic!("live server domain construction failed: {error}"));
         let (session_id, _, _) = domain.accept(remote_addr).unwrap();
 
         assert!(domain.shared.sessions.read().bandwidth_stats(session_id).is_none());
@@ -677,7 +679,8 @@ mod tests {
 
     #[test]
     fn test_live_state_kick_client_accepts_canonical_session_identity() {
-        let mut live_state = LiveServerState::new(ServerConfig::default());
+        let mut live_state = LiveServerState::try_new(ServerConfig::default())
+            .unwrap_or_else(|error| panic!("live server state construction failed: {error}"));
         let accept_loop = AcceptLoop::new(AcceptConfig::default());
         let metrics = Metrics::new();
         let local_addr: SocketAddr = "127.0.0.1:4433".parse().unwrap();
@@ -708,7 +711,8 @@ mod tests {
     #[test]
     fn test_live_server_domain_remove_remote_clears_packet_rate_limit_ip_state() {
         let remote_addr = "127.0.0.1:54323".parse().unwrap();
-        let domain = LiveServerDomain::new(&ServerConfig::default());
+        let domain = LiveServerDomain::try_new(&ServerConfig::default())
+            .unwrap_or_else(|error| panic!("live server domain construction failed: {error}"));
         let _ = domain.accept(remote_addr).unwrap();
         *domain.shared.packet_rate_limiter.lock() = PacketRateLimiterDomain {
             limiter: RateLimiter::new(crate::implementations::server::limits::RateLimitConfig {
@@ -733,7 +737,8 @@ mod tests {
     #[tokio::test]
     async fn test_housekeeping_tick_reaps_expired_sessions_from_runtime_lifecycle() {
         let server_config = ServerConfig { client_timeout_secs: 1, ..ServerConfig::default() };
-        let mut live_state = LiveServerState::new(server_config);
+        let mut live_state = LiveServerState::try_new(server_config)
+            .unwrap_or_else(|error| panic!("live server state construction failed: {error}"));
         let remote_addr = "127.0.0.1:54324".parse().unwrap();
         let (session_id, _, _) = live_state.domain.accept(remote_addr).unwrap();
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -950,7 +955,8 @@ mod tests {
             },
             ..ServerConfig::default()
         };
-        let domain = SharedServerDomain::new(&config);
+        let domain = SharedServerDomain::try_new(&config)
+            .unwrap_or_else(|error| panic!("shared server domain construction failed: {error}"));
         assert!(domain.blacklist.has_sync_url());
         assert_eq!(domain.blacklist.sync_interval(), Duration::from_secs(300));
     }
@@ -972,11 +978,35 @@ mod tests {
             },
             ..ServerConfig::default()
         };
-        let domain = SharedServerDomain::new(&config);
-        // The blocker should be enabled (config has db_path + countries),
-        // but gracefully degrade (missing db → is_blocked returns false).
-        assert!(domain.geoip_blocker.is_enabled());
-        assert!(!domain.geoip_blocker.is_blocked("1.2.3.4".parse().unwrap()));
+        let error = match SharedServerDomain::try_new(&config) {
+            Ok(_) => panic!("missing GeoIP database must fail domain construction"),
+            Err(error) => error,
+        };
+        assert!(error.contains("GeoIP activation failed"));
+        assert!(error.contains("missing"));
+    }
+
+    #[cfg(feature = "rate_limiter")]
+    #[test]
+    fn server_runtime_rejects_invalid_geoip_before_live_resources() {
+        use crate::implementations::server::limits::GeoIpConfig;
+        use std::collections::HashSet;
+        use std::path::PathBuf;
+
+        let server_config = ServerConfig {
+            geoip: GeoIpConfig {
+                db_path: Some(PathBuf::from("/nonexistent/GeoLite2-Country.mmdb")),
+                blocked_countries: ["GB".to_string()].into_iter().collect::<HashSet<_>>(),
+            },
+            ..ServerConfig::default()
+        };
+        let error = match ServerRuntime::new(EngineConfig::default(), server_config) {
+            Ok(_) => panic!("configured missing GeoIP database must reject runtime startup"),
+            Err(EngineError::Config(error)) => error,
+            Err(other) => panic!("unexpected GeoIP startup error: {other:?}"),
+        };
+        assert!(error.contains("GeoIP activation failed"));
+        assert!(error.contains("missing"));
     }
 
     #[cfg(feature = "rate_limiter")]
@@ -1012,7 +1042,9 @@ mod tests {
             blacklist: BlacklistConfig { cache_path: None, ..BlacklistConfig::default() },
             ..ServerConfig::default()
         };
-        let domain = LiveServerDomain::new(&config);
+        let domain = LiveServerDomain::try_new(&config)
+            .unwrap_or_else(|error| panic!("live server domain construction failed: {error}"));
+        let metrics = Metrics::new();
         assert_eq!(
             domain.shared.ddos_detector.record_pps_at(100, Duration::ZERO),
             crate::implementations::server::limits::DdosTransition::Unchanged
@@ -1032,7 +1064,7 @@ mod tests {
         let credential = b"a1b2c3d4e5f6".to_vec();
         let initial =
             initial_packet(original_dcid.clone(), client_scid.clone(), credential.clone());
-        let retry_packet = match domain.admit_incoming_datagram(remote, &initial, false, true) {
+        let retry_packet = match domain.admit_incoming_datagram(remote, &initial, false, true, &metrics) {
             IncomingDatagramAdmission::Retry(packet) => packet,
             _ => panic!("enhanced admission did not issue Retry"),
         };
@@ -1043,15 +1075,15 @@ mod tests {
         let retried_initial = initial_packet(retry.scid.clone(), client_scid, retry_token.clone());
 
         assert!(matches!(
-            domain.admit_incoming_datagram(remote, &retried_initial, false, true),
+            domain.admit_incoming_datagram(remote, &retried_initial, false, true, &metrics),
             IncomingDatagramAdmission::RetryValidated
         ));
         assert!(matches!(
-            domain.admit_incoming_datagram(remote, &initial, true, true),
+            domain.admit_incoming_datagram(remote, &initial, true, true, &metrics),
             IncomingDatagramAdmission::Allow
         ));
         assert!(matches!(
-            domain.admit_incoming_datagram(remote, &initial, false, false),
+            domain.admit_incoming_datagram(remote, &initial, false, false, &metrics),
             IncomingDatagramAdmission::Allow
         ));
 
@@ -1060,7 +1092,7 @@ mod tests {
         tampered_token[last] ^= 1;
         let tampered = initial_packet(retry.scid, vec![9, 10], tampered_token);
         assert!(matches!(
-            domain.admit_incoming_datagram(remote, &tampered, false, true),
+            domain.admit_incoming_datagram(remote, &tampered, false, true, &metrics),
             IncomingDatagramAdmission::Drop(DdosDropReason::InvalidRetry)
         ));
     }
@@ -1289,7 +1321,8 @@ mod tests {
 
     #[test]
     fn test_enforce_qkey_auth_timeouts_updates_exported_auth_failed_metrics() {
-        let mut live_state = LiveServerState::new(ServerConfig::default());
+        let mut live_state = LiveServerState::try_new(ServerConfig::default())
+            .unwrap_or_else(|error| panic!("live server state construction failed: {error}"));
         let metrics = Metrics::new();
         let local_addr: SocketAddr = "127.0.0.1:4433".parse().unwrap();
         let remote_addr: SocketAddr = "127.0.0.1:54325".parse().unwrap();
@@ -1335,7 +1368,8 @@ mod tests {
 
     #[test]
     fn test_qkey_auth_success_associates_session_and_revocation_closes_client() {
-        let mut live_state = LiveServerState::new(ServerConfig::default());
+        let mut live_state = LiveServerState::try_new(ServerConfig::default())
+            .unwrap_or_else(|error| panic!("live server state construction failed: {error}"));
         let accept_loop = AcceptLoop::new(AcceptConfig::default());
         let metrics = Metrics::new();
         let local_addr: SocketAddr = "127.0.0.1:4433".parse().unwrap();
@@ -1439,7 +1473,8 @@ mod tests {
 
     #[test]
     fn failed_qkey_auth_never_activates_pending_traffic_analysis_policy() {
-        let mut live_state = LiveServerState::new(ServerConfig::default());
+        let mut live_state = LiveServerState::try_new(ServerConfig::default())
+            .unwrap_or_else(|error| panic!("live server state construction failed: {error}"));
         let accept_loop = AcceptLoop::new(AcceptConfig::default());
         let metrics = Metrics::new();
         let local_addr: SocketAddr = "127.0.0.1:4433".parse().unwrap();
@@ -1504,7 +1539,8 @@ mod tests {
 
     #[test]
     fn test_pending_qkey_auth_cannot_complete_after_revocation() {
-        let mut live_state = LiveServerState::new(ServerConfig::default());
+        let mut live_state = LiveServerState::try_new(ServerConfig::default())
+            .unwrap_or_else(|error| panic!("live server state construction failed: {error}"));
         let accept_loop = AcceptLoop::new(AcceptConfig::default());
         let metrics = Metrics::new();
         let local_addr: SocketAddr = "127.0.0.1:4433".parse().unwrap();
@@ -1797,7 +1833,16 @@ mod tests {
                 qkeys,
                 graceful_shutdown: Arc::new(GracefulShutdown::new(5_000)),
             },
+            #[cfg(feature = "rate_limiter")]
+            GeoIpStatus::Disabled,
         );
+
+        #[cfg(feature = "rate_limiter")]
+        {
+            assert_eq!(core.base_status_json()["geoip"]["status"], "disabled");
+            assert_eq!(core.base_status_json()["geoip"]["active"], false);
+            assert_eq!(core.health_json()["geoip_status"], "disabled");
+        }
 
         let resp = core.block_ip("10.0.0.1");
         assert!(resp.success);
@@ -1831,6 +1876,8 @@ mod tests {
                 qkeys,
                 graceful_shutdown: Arc::new(GracefulShutdown::new(5_000)),
             },
+            #[cfg(feature = "rate_limiter")]
+            GeoIpStatus::Disabled,
         );
 
         core.block_ip("10.0.0.3");
@@ -2231,7 +2278,8 @@ mod tests {
 
     #[test]
     fn test_live_server_domain_accept_tracks_multiple_remotes() {
-        let domain = LiveServerDomain::new(&ServerConfig::default());
+        let domain = LiveServerDomain::try_new(&ServerConfig::default())
+            .unwrap_or_else(|error| panic!("live server domain construction failed: {error}"));
         let addr1: SocketAddr = "10.0.0.1:5001".parse().unwrap();
         let addr2: SocketAddr = "10.0.0.2:5002".parse().unwrap();
         let (id1, _, _) = domain.accept(addr1).unwrap();
@@ -2245,7 +2293,8 @@ mod tests {
 
     #[test]
     fn test_live_server_domain_remove_remote_clears_session() {
-        let domain = LiveServerDomain::new(&ServerConfig::default());
+        let domain = LiveServerDomain::try_new(&ServerConfig::default())
+            .unwrap_or_else(|error| panic!("live server domain construction failed: {error}"));
         let addr: SocketAddr = "10.0.0.1:5003".parse().unwrap();
         let (id, _, _) = domain.accept(addr).unwrap();
         assert_eq!(domain.session_id_by_remote(addr), Some(id));
@@ -2257,7 +2306,8 @@ mod tests {
 
     #[test]
     fn test_live_server_domain_synchronizes_forwarding_policy_lifecycle() {
-        let domain = LiveServerDomain::new(&ServerConfig::default());
+        let domain = LiveServerDomain::try_new(&ServerConfig::default())
+            .unwrap_or_else(|error| panic!("live server domain construction failed: {error}"));
         let remote: SocketAddr = "10.0.0.1:5004".parse().unwrap();
         let (_, _, assigned_ips) = domain.accept(remote).unwrap();
 
@@ -2573,7 +2623,8 @@ constant_rate_pps = 1001
     #[test]
     fn test_shared_server_domain_creates_ipv6_pool() {
         let config = ServerConfig::default();
-        let domain = SharedServerDomain::new(&config);
+        let domain = SharedServerDomain::try_new(&config)
+            .unwrap_or_else(|error| panic!("shared server domain construction failed: {error}"));
         // Default config has IPv6 pool start/end configured
         assert!(domain.ipv6_pool.is_some());
     }
@@ -2586,7 +2637,8 @@ constant_rate_pps = 1001
             ipv6_server_ip: None,
             ..Default::default()
         };
-        let domain = SharedServerDomain::new(&config);
+        let domain = SharedServerDomain::try_new(&config)
+            .unwrap_or_else(|error| panic!("shared server domain construction failed: {error}"));
         // IPv6 pool should not be created
         assert!(domain.ipv6_pool.is_none());
     }

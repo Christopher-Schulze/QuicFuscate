@@ -186,8 +186,8 @@ struct SharedServerDomain {
     retry_token_manager:
         Option<Arc<crate::implementations::server::ddos::RetryTokenManager>>,
     /// GeoIP-based source-IP blocker (TODO-459). Uses `maxminddb` to look up
-    /// the country of an incoming IP and reject blocked countries. Gracefully
-    /// degrades to allowing all IPs when no database is configured.
+    /// the country of an incoming IP and reject blocked countries. Configured
+    /// activation failures are propagated before the server becomes ready.
     #[cfg(feature = "rate_limiter")]
     geoip_blocker: Arc<crate::implementations::server::limits::GeoIpBlocker>,
     /// External blacklist synchronizer (TODO-459). TTL-based IP blocklist with
@@ -347,7 +347,7 @@ impl ServerHostResources {
 }
 
 impl SharedServerDomain {
-    fn new(server_config: &ServerConfig) -> Self {
+    fn try_new(server_config: &ServerConfig) -> Result<Self, String> {
         // Create IPv6 pool only if both start and end are configured
         let ipv6_pool = match (server_config.ipv6_pool_start, server_config.ipv6_pool_end) {
             (Some(start), Some(end)) => {
@@ -355,7 +355,7 @@ impl SharedServerDomain {
             }
             _ => None,
         };
-        Self {
+        Ok(Self {
             sessions: Arc::new(RwLock::new(SessionManager::with_bandwidth_manager(
                 server_config.max_clients,
                 PerClientBandwidthManager::new(server_config.bandwidth_policy.clone())
@@ -401,9 +401,15 @@ impl SharedServerDomain {
                     )
                 }),
             #[cfg(feature = "rate_limiter")]
-            geoip_blocker: Arc::new(crate::implementations::server::limits::GeoIpBlocker::new(
-                server_config.geoip.clone(),
-            )),
+            geoip_blocker: Arc::new(
+                crate::implementations::server::limits::GeoIpBlocker::try_new(
+                    server_config.geoip.clone(),
+                )
+                .map_err(|error| {
+                    log::error!("GeoIP activation failed: {error}");
+                    format!("GeoIP activation failed: {error}")
+                })?,
+            ),
             #[cfg(feature = "rate_limiter")]
             blacklist: Arc::new(
                 crate::implementations::server::limits::BlacklistSync::new_bounded_with_ca(
@@ -420,7 +426,12 @@ impl SharedServerDomain {
             ),
             max_clients: server_config.max_clients,
             client_timeout_secs: server_config.client_timeout_secs,
-        }
+        })
+    }
+
+    #[cfg(feature = "rate_limiter")]
+    fn geoip_status(&self) -> crate::implementations::server::limits::GeoIpStatus {
+        self.geoip_blocker.status()
     }
 
     fn accept(
@@ -494,6 +505,7 @@ impl SharedServerDomain {
         packet: &[u8],
         established: bool,
         retry_eligible: bool,
+        metrics: &Metrics,
     ) -> crate::implementations::server::ddos::IncomingDatagramAdmission {
         use crate::implementations::server::ddos::{DdosDropReason, IncomingDatagramAdmission};
 
@@ -504,10 +516,26 @@ impl SharedServerDomain {
         if !self.global_rate_limiter.check() {
             return IncomingDatagramAdmission::Drop(DdosDropReason::GlobalLimit);
         }
-        // 2. GeoIP blocking (TODO-459): drop if the source IP maps to a blocked
-        //    country. Gracefully allows all IPs when no database is configured.
-        if self.geoip_blocker.is_blocked(from.ip()) {
-            return IncomingDatagramAdmission::Drop(DdosDropReason::GeoIp);
+        // 2. GeoIP blocking (TODO-459): a disabled policy is a zero-cost allow
+        //    path. An active policy fails closed on lookup/decode errors.
+        if self.geoip_blocker.is_enabled() {
+            metrics.record_geoip_lookup();
+            match self.geoip_blocker.lookup(from.ip()) {
+                Ok(true) => {
+                    metrics.record_geoip_blocked();
+                    return IncomingDatagramAdmission::Drop(DdosDropReason::GeoIp);
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    metrics.record_geoip_lookup_error();
+                    log::error!(
+                        "GeoIP lookup failed for {}; dropping datagram fail-closed: {}",
+                        from.ip(),
+                        error
+                    );
+                    return IncomingDatagramAdmission::Drop(DdosDropReason::GeoIp);
+                }
+            }
         }
         // 3. External blacklist (TODO-459): drop if the source IP is on the
         //    TTL-based blocklist (manual or from an external feed).
@@ -670,6 +698,8 @@ pub struct ServerAdminCore {
     client_snapshots: Arc<std::sync::Mutex<std::collections::HashMap<SocketAddr, ClientSnapshot>>>,
     sessions: Arc<RwLock<SessionManager>>,
     control_plane: ServerAdminControlPlane,
+    #[cfg(feature = "rate_limiter")]
+    geoip_status: crate::implementations::server::limits::GeoIpStatus,
 }
 
 impl ServerAdminCore {
@@ -681,8 +711,18 @@ impl ServerAdminCore {
         >,
         sessions: Arc<RwLock<SessionManager>>,
         control_plane: ServerAdminControlPlane,
+        #[cfg(feature = "rate_limiter")] geoip_status:
+            crate::implementations::server::limits::GeoIpStatus,
     ) -> Self {
-        Self { metrics, blocked_ips, client_snapshots, sessions, control_plane }
+        Self {
+            metrics,
+            blocked_ips,
+            client_snapshots,
+            sessions,
+            control_plane,
+            #[cfg(feature = "rate_limiter")]
+            geoip_status,
+        }
     }
 
     pub fn metrics(&self) -> &Arc<Metrics> {
@@ -701,8 +741,13 @@ impl ServerAdminCore {
         &self.control_plane.qkeys
     }
 
+    #[cfg(feature = "rate_limiter")]
+    pub fn geoip_status(&self) -> crate::implementations::server::limits::GeoIpStatus {
+        self.geoip_status
+    }
+
     pub fn base_status_json(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut data = serde_json::json!({
             "version": env!("CARGO_PKG_VERSION"),
             "uptime_secs": self.metrics.uptime_secs(),
             "clients_active": self.metrics.clients_active.load(Ordering::Relaxed),
@@ -718,7 +763,24 @@ impl ServerAdminCore {
             "auth_state_tracked_ips": self.metrics.auth_state_tracked_ips.load(Ordering::Relaxed),
             "bytes_in": self.metrics.bytes_in.load(Ordering::Relaxed),
             "bytes_out": self.metrics.bytes_out.load(Ordering::Relaxed),
-        })
+        });
+        #[cfg(feature = "rate_limiter")]
+        {
+            data["geoip"] = serde_json::json!({
+                "status": self.geoip_status.as_str(),
+                "active": self.geoip_status == crate::implementations::server::limits::GeoIpStatus::Active,
+            });
+        }
+        data
+    }
+
+    pub fn health_json(&self) -> serde_json::Value {
+        let mut data = serde_json::json!({ "status": "ok" });
+        #[cfg(feature = "rate_limiter")]
+        {
+            data["geoip_status"] = serde_json::Value::String(self.geoip_status.as_str().to_string());
+        }
+        data
     }
 
     pub fn drain(&self) -> AdminResponse {
@@ -1046,6 +1108,10 @@ impl AdminHttpHandler for ServerAdminHttpRuntimeHandler {
         AdminResponse::ok_with_data(data)
     }
 
+    fn handle_health(&self) -> AdminResponse {
+        AdminResponse::ok_with_data(self.core.health_json())
+    }
+
     fn handle_list_clients(&self) -> Vec<ClientInfo> {
         self.core.list_clients()
     }
@@ -1135,8 +1201,7 @@ impl AdminHttpHandler for ServerAdminHttpRuntimeHandler {
 
     fn handle_metrics_json(&self) -> AdminResponse {
         use std::sync::atomic::Ordering;
-        AdminResponse::ok_with_data(serde_json::json!({
-            "metrics": {
+        let mut metrics = serde_json::json!({
                 "quicfuscate_up": 1,
                 "quicfuscate_uptime_seconds": self.core.metrics().uptime_secs(),
                 "quicfuscate_clients_active": self.core.metrics().clients_active.load(Ordering::Relaxed),
@@ -1171,8 +1236,19 @@ impl AdminHttpHandler for ServerAdminHttpRuntimeHandler {
                 "quicfuscate_bandwidth_scheduler_delivered_packets_total": self.core.metrics().bandwidth_scheduler_delivered_packets.load(Ordering::Relaxed),
                 "quicfuscate_bandwidth_scheduler_delivered_bytes_total": self.core.metrics().bandwidth_scheduler_delivered_bytes.load(Ordering::Relaxed),
                 "quicfuscate_rate_limited_total": self.core.metrics().rate_limited.load(Ordering::Relaxed),
-            }
-        }))
+        });
+        #[cfg(feature = "rate_limiter")]
+        {
+            metrics["quicfuscate_geoip_status"] =
+                serde_json::json!(self.core.geoip_status().as_str());
+            metrics["quicfuscate_geoip_lookups_total"] =
+                serde_json::json!(self.core.metrics().geoip_lookups.load(Ordering::Relaxed));
+            metrics["quicfuscate_geoip_blocked_total"] =
+                serde_json::json!(self.core.metrics().geoip_blocked.load(Ordering::Relaxed));
+            metrics["quicfuscate_geoip_lookup_errors_total"] =
+                serde_json::json!(self.core.metrics().geoip_lookup_errors.load(Ordering::Relaxed));
+        }
+        AdminResponse::ok_with_data(serde_json::json!({ "metrics": metrics }))
     }
 
     fn handle_get_logging_config(&self) -> AdminResponse {

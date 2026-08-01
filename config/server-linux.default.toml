@@ -243,7 +243,10 @@ flush_timeout_ms = 5000
 #   QUICFUSCATE_DDOS_RETRY_ENABLED=true
 #   QUICFUSCATE_DDOS_RETRY_TOKEN_LIFETIME_SECS=10
 #
-# GeoIP blocking (requires a MaxMindDB GeoLite2-Country database):
+# GeoIP blocking is disabled when both variables are absent. If either variable
+# is supplied, configuration must contain uppercase ISO alpha-2 codes and a
+# regular, non-empty, fully verified MaxMindDB country database; activation
+# failure stops server startup rather than silently allowing every source:
 #   QUICFUSCATE_GEOIP_DB_PATH=/path/to/GeoLite2-Country.mmdb
 #   QUICFUSCATE_GEOIP_BLOCKED_COUNTRIES=CN,RU,KP    # comma-separated ISO codes
 #

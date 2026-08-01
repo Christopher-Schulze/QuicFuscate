@@ -90,17 +90,11 @@ fn run_geoip(
     expect_blocked: Vec<IpAddr>,
     expect_allowed: Vec<IpAddr>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    ensure_regular_nonempty_file(&database)?;
     let blocked_country = blocked_country.trim().to_ascii_uppercase();
-    if blocked_country.len() != 2 || !blocked_country.bytes().all(|byte| byte.is_ascii_alphabetic())
-    {
-        return Err("--blocked-country must be a two-letter ISO country code".into());
-    }
-
-    let blocker = GeoIpBlocker::new(GeoIpConfig {
+    let blocker = GeoIpBlocker::try_new(GeoIpConfig {
         db_path: Some(database.clone()),
         blocked_countries: HashSet::from([blocked_country.clone()]),
-    });
+    })?;
     if !blocker.is_enabled() {
         return Err("GeoIP blocker did not enable with a database and country policy".into());
     }
@@ -112,6 +106,7 @@ fn run_geoip(
         serde_json::json!({
             "result": "pass",
             "policy": "geoip",
+            "status": blocker.status().as_str(),
             "database": database,
             "blocked_country": blocked_country,
             "blocked_addresses": expect_blocked,

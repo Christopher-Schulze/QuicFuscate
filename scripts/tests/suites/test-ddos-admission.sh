@@ -14,6 +14,7 @@ MAX_RSS_GROWTH_KIB="${QUICFUSCATE_DDOS_MAX_RSS_GROWTH_KIB:-65536}"
 MAX_SERVER_CPU_MS="${QUICFUSCATE_DDOS_MAX_SERVER_CPU_MS:-15000}"
 MAXMIND_COMMIT="7ef0ff7a28a05d08020fe1a7d9902d2b71f8bc1b"
 MAXMIND_SHA256="b37601903448683d241af52893c8cbf0fed461e0cdebe0bfaca01891fdeb6db9"
+MAXMIND_CITY_SHA256="ed972738e4e03a3e56e12041a6af4d91592249d110f7e4a647e5f2fa0e639c09"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -65,6 +66,9 @@ METRICS_PORT=""
 HTTPS_PORT=""
 FAILURE_PORT=""
 FLOOD_LOCAL_PORT=""
+RESTART_SERVER_PORT=""
+RESTART_METRICS_PORT=""
+RESTART_ADMIN_SOCKET=""
 QKEY=""
 
 fail() {
@@ -251,6 +255,50 @@ print(qkey)
 PY
 }
 
+expect_geoip_failure() {
+  local label="$1"
+  local database="$2"
+  local country="$3"
+  local expected="$4"
+  local output="$OUTPUT_DIR/geoip-${label}.log"
+  if "$POLICY_PROBE_BINARY" geoip \
+    --database "$database" \
+    --blocked-country "$country" \
+    --expect-blocked 81.2.69.142 \
+    --expect-allowed 89.160.20.128 >"$output" 2>&1; then
+    fail "GeoIP ${label} case unexpectedly activated"
+  fi
+  grep -F "$expected" "$output" >/dev/null \
+    || fail "GeoIP ${label} case did not expose typed failure: expected ${expected}"
+}
+
+read_admin_status() {
+  local socket_path="$1"
+  python3 - "$socket_path" <<'PY'
+import json
+import socket
+import sys
+
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.settimeout(2)
+sock.connect(sys.argv[1])
+sock.sendall(b'{"cmd":"status"}\n')
+chunks = []
+while True:
+    chunk = sock.recv(65536)
+    if not chunk:
+        break
+    chunks.append(chunk)
+    if b"\n" in chunk:
+        break
+sock.close()
+payload = json.loads(b"".join(chunks))
+if not payload.get("success"):
+    raise SystemExit("admin status failed")
+print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+PY
+}
+
 run_initial_flood() {
   local label="$1"
   local count="$2"
@@ -423,6 +471,35 @@ curl --fail --location --silent --show-error \
   --blocked-country GB \
   --expect-blocked 81.2.69.142 \
   --expect-allowed 89.160.20.128 >"$OUTPUT_DIR/geoip.json"
+grep -F '"status":"active"' "$OUTPUT_DIR/geoip.json" >/dev/null \
+  || fail "valid GeoIP probe did not report active status"
+
+MAXMIND_CITY_DATABASE="$SECRET_DIR/GeoIP2-City-Test.mmdb"
+curl --fail --location --silent --show-error \
+  "https://raw.githubusercontent.com/maxmind/MaxMind-DB/$MAXMIND_COMMIT/test-data/GeoIP2-City-Test.mmdb" \
+  --output "$MAXMIND_CITY_DATABASE"
+[[ "$(sha256_file "$MAXMIND_CITY_DATABASE")" == "$MAXMIND_CITY_SHA256" ]] \
+  || fail "MaxMind city test database checksum mismatch"
+
+MISSING_DATABASE="$SECRET_DIR/missing.mmdb"
+expect_geoip_failure missing "$MISSING_DATABASE" GB 'MissingDatabase('
+
+PERMISSION_DATABASE="$SECRET_DIR/permission.mmdb"
+cp "$MAXMIND_DATABASE" "$PERMISSION_DATABASE"
+chmod 000 "$PERMISSION_DATABASE"
+expect_geoip_failure permission "$PERMISSION_DATABASE" GB 'UnreadableDatabase {'
+chmod 600 "$PERMISSION_DATABASE"
+
+CORRUPT_DATABASE="$SECRET_DIR/corrupt.mmdb"
+python3 - "$CORRUPT_DATABASE" <<'PY'
+import pathlib
+import sys
+
+pathlib.Path(sys.argv[1]).write_bytes(b"not a MaxMind database")
+PY
+expect_geoip_failure corrupt "$CORRUPT_DATABASE" GB 'InvalidDatabase {'
+expect_geoip_failure invalid-country "$MAXMIND_DATABASE" G3 'InvalidCountryCode('
+expect_geoip_failure unsupported "$MAXMIND_CITY_DATABASE" GB 'UnsupportedDatabase {'
 
 env \
   RUST_LOG=info \
@@ -437,6 +514,8 @@ env \
   QUICFUSCATE_DDOS_ENHANCED_PACKET_COST=2 \
   QUICFUSCATE_DDOS_RETRY_ENABLED=true \
   QUICFUSCATE_DDOS_RETRY_TOKEN_LIFETIME_SECS=10 \
+  QUICFUSCATE_GEOIP_DB_PATH="$MAXMIND_DATABASE" \
+  QUICFUSCATE_GEOIP_BLOCKED_COUNTRIES=GB \
   "$SERVER_BINARY" server \
     --listen "127.0.0.1:$SERVER_PORT" \
     --metrics-port "$METRICS_PORT" \
@@ -464,6 +543,16 @@ done
 [[ -S "$SECRET_DIR/admin.sock" ]] || fail "server admin socket did not become ready"
 curl -fsS "http://127.0.0.1:$METRICS_PORT/health" >/dev/null \
   || fail "server metrics did not become ready"
+curl -fsS "http://127.0.0.1:$METRICS_PORT/health" >"$OUTPUT_DIR/health.json"
+grep -F '"geoip_status":"active"' "$OUTPUT_DIR/health.json" >/dev/null \
+  || fail "server health did not report active GeoIP status"
+assert_metric_exact 'quicfuscate_geoip_activation{state="active"}' 1
+assert_metric_exact 'quicfuscate_geoip_activation{state="disabled"}' 0
+assert_metric_exact 'quicfuscate_geoip_activation{state="failed"}' 0
+read_admin_status "$SECRET_DIR/admin.sock" >"$OUTPUT_DIR/admin-status.json"
+grep -F '"geoip":{"active":true,"status":"active"}' \
+  "$OUTPUT_DIR/admin-status.json" >/dev/null \
+  || fail "admin status did not report active GeoIP status"
 QKEY="$(issue_qkey)"
 
 assert_metric_exact quicfuscate_ddos_active 0
@@ -518,6 +607,74 @@ CPU_DELTA_MS="$((CPU_AFTER_MS - CPU_BEFORE_MS))"
   || fail "DDoS proof consumed ${CPU_DELTA_MS} ms of server CPU"
 
 curl -fsS "http://127.0.0.1:$METRICS_PORT/metrics" >"$OUTPUT_DIR/metrics.prom"
+RETRY_VALIDATED="$(metric_value 'quicfuscate_ddos_retry_total{outcome="validated"}')"
+
+stop_process "$SERVER_PID"
+SERVER_PID=""
+RESTART_SERVER_PORT="$(free_port udp)"
+RESTART_METRICS_PORT="$(free_port tcp)"
+RESTART_ADMIN_SOCKET="$SECRET_DIR/restart-admin.sock"
+env \
+  RUST_LOG=info \
+  QUICFUSCATE_BRAIN=0 \
+  QUICFUSCATE_DDOS_ENABLED=true \
+  QUICFUSCATE_DDOS_SAMPLE_INTERVAL_MS=100 \
+  QUICFUSCATE_DDOS_ACTIVATION_WINDOW_MS=200 \
+  QUICFUSCATE_DDOS_CLEAR_WINDOW_MS=2000 \
+  QUICFUSCATE_DDOS_EWMA_ALPHA=0.1 \
+  QUICFUSCATE_DDOS_SPIKE_MULTIPLIER=2 \
+  QUICFUSCATE_DDOS_CLEAR_FACTOR=1.1 \
+  QUICFUSCATE_DDOS_ENHANCED_PACKET_COST=2 \
+  QUICFUSCATE_DDOS_RETRY_ENABLED=true \
+  QUICFUSCATE_DDOS_RETRY_TOKEN_LIFETIME_SECS=10 \
+  QUICFUSCATE_GEOIP_DB_PATH="$MAXMIND_DATABASE" \
+  QUICFUSCATE_GEOIP_BLOCKED_COUNTRIES=GB \
+  "$SERVER_BINARY" server \
+    --listen "127.0.0.1:$RESTART_SERVER_PORT" \
+    --metrics-port "$RESTART_METRICS_PORT" \
+    --cert "$SECRET_DIR/server.crt" \
+    --key "$SECRET_DIR/server.key" \
+    --front-domain cloudflare-dns.com \
+    --admin-socket "$RESTART_ADMIN_SOCKET" \
+    --qkey-store "$SECRET_DIR/restart-qkeys.json" \
+    --audit-log "$SECRET_DIR/restart-audit.ndjson" \
+    --config "$SECRET_DIR/server.toml" \
+    --pool-capacity 32 \
+    --disable-doh \
+    --disable-fronting \
+    --no-drop-privileges >"$OUTPUT_DIR/server-restart.log" 2>&1 &
+SERVER_PID=$!
+
+for _ in $(seq 1 150); do
+  if [[ -S "$RESTART_ADMIN_SOCKET" ]] \
+    && curl -fsS "http://127.0.0.1:$RESTART_METRICS_PORT/health" >/dev/null 2>&1; then
+    break
+  fi
+  process_running "$SERVER_PID" || fail "restarted server exited before readiness"
+  sleep 0.1
+done
+[[ -S "$RESTART_ADMIN_SOCKET" ]] || fail "restarted server admin socket did not become ready"
+curl -fsS "http://127.0.0.1:$RESTART_METRICS_PORT/health" >"$OUTPUT_DIR/restart-health.json" \
+  || fail "restarted server metrics did not become ready"
+grep -F '"geoip_status":"active"' "$OUTPUT_DIR/restart-health.json" >/dev/null \
+  || fail "restarted server health did not report active GeoIP status"
+curl -fsS "http://127.0.0.1:$RESTART_METRICS_PORT/metrics" >"$OUTPUT_DIR/restart-metrics.prom"
+grep -Fx 'quicfuscate_geoip_activation{state="active"} 1' \
+  "$OUTPUT_DIR/restart-metrics.prom" >/dev/null \
+  || fail "restarted server metrics did not report active GeoIP status"
+grep -Fx 'quicfuscate_geoip_activation{state="disabled"} 0' \
+  "$OUTPUT_DIR/restart-metrics.prom" >/dev/null \
+  || fail "restarted server metrics reported unexpected disabled GeoIP state"
+grep -Fx 'quicfuscate_geoip_activation{state="failed"} 0' \
+  "$OUTPUT_DIR/restart-metrics.prom" >/dev/null \
+  || fail "restarted server metrics reported unexpected failed GeoIP state"
+read_admin_status "$RESTART_ADMIN_SOCKET" >"$OUTPUT_DIR/restart-admin-status.json"
+grep -F '"geoip":{"active":true,"status":"active"}' \
+  "$OUTPUT_DIR/restart-admin-status.json" >/dev/null \
+  || fail "restarted admin status did not report active GeoIP status"
+stop_process "$SERVER_PID"
+SERVER_PID=""
+
 PROTECTED_UI_DIFF="$(git diff --name-only -- \
   apps/svelte-admin apps/svelte-desktop packages/ui packages/theme assets/web-admin)"
 [[ -z "$PROTECTED_UI_DIFF" ]] || fail "protected UI changed: $PROTECTED_UI_DIFF"
@@ -532,7 +689,16 @@ PROBE_SHA256="$(sha256_file "$POLICY_PROBE_BINARY")"
   printf 'policy_probe_binary_sha256=%s\n' "$PROBE_SHA256"
   printf 'maxmind_commit=%s\n' "$MAXMIND_COMMIT"
   printf 'maxmind_database_sha256=%s\n' "$MAXMIND_SHA256"
+  printf 'maxmind_city_database_sha256=%s\n' "$MAXMIND_CITY_SHA256"
   printf 'geoip_real_database_proved=1\n'
+  printf 'geoip_missing_database_rejected=1\n'
+  printf 'geoip_permission_database_rejected=1\n'
+  printf 'geoip_corrupt_database_rejected=1\n'
+  printf 'geoip_invalid_country_rejected=1\n'
+  printf 'geoip_unsupported_database_rejected=1\n'
+  printf 'geoip_exact_admission_proved=1\n'
+  printf 'geoip_restart_status_proved=1\n'
+  printf 'geoip_health_admin_metrics_truth_proved=1\n'
   printf 'blacklist_https_sync_proved=1\n'
   printf 'blacklist_restart_cache_proved=1\n'
   printf 'blacklist_failed_refresh_lkg_proved=1\n'
@@ -543,8 +709,7 @@ PROBE_SHA256="$(sha256_file "$POLICY_PROBE_BINARY")"
   printf 'retry_issued_control_after=%s\n' "$RETRY_ISSUED_CONTROL_AFTER"
   printf 'retry_issued_before_valid=%s\n' "$RETRY_ISSUED_BEFORE"
   printf 'retry_issued_after_valid=%s\n' "$RETRY_ISSUED_AFTER"
-  printf 'retry_validated=%s\n' \
-    "$(metric_value 'quicfuscate_ddos_retry_total{outcome="validated"}')"
+  printf 'retry_validated=%s\n' "$RETRY_VALIDATED"
   printf 'established_traffic_preservation_process_proof=1\n'
   printf 'server_rss_growth_kib=%s\n' "$RSS_GROWTH_KIB"
   printf 'server_cpu_ms=%s\n' "$CPU_DELTA_MS"

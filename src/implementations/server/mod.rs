@@ -66,7 +66,9 @@ pub use limits::{
     AuthPolicyConfig, ConnectionLimiter, GlobalRateLimiter, RateLimitConfig, RateLimiter,
 };
 #[cfg(feature = "rate_limiter")]
-pub use limits::{BlacklistSync, GeoIpBlocker, GeoIpConfig};
+pub use limits::{
+    BlacklistSync, GeoIpBlocker, GeoIpConfig, GeoIpError, GeoIpLookupError, GeoIpStatus,
+};
 #[cfg(any(test, feature = "rust-tests"))]
 pub use metrics::GlobalMetricsServer;
 pub use metrics::{Metrics, RoutingOutcome, TunDownlinkBackpressureDrop};

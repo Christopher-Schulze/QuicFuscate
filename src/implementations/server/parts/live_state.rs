@@ -605,11 +605,11 @@ struct LiveServerDomain {
 }
 
 impl LiveServerDomain {
-    fn new(server_config: &ServerConfig) -> Self {
-        Self {
-            shared: SharedServerDomain::new(server_config),
+    fn try_new(server_config: &ServerConfig) -> Result<Self, String> {
+        Ok(Self {
+            shared: SharedServerDomain::try_new(server_config)?,
             client_snapshots: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        }
+        })
     }
 
     fn accept(
@@ -740,8 +740,15 @@ impl LiveServerDomain {
         packet: &[u8],
         established: bool,
         retry_eligible: bool,
+        metrics: &Metrics,
     ) -> crate::implementations::server::ddos::IncomingDatagramAdmission {
-        self.shared.admit_incoming_datagram(from, packet, established, retry_eligible)
+        self.shared
+            .admit_incoming_datagram(from, packet, established, retry_eligible, metrics)
+    }
+
+    #[cfg(feature = "rate_limiter")]
+    fn geoip_status(&self) -> crate::implementations::server::limits::GeoIpStatus {
+        self.shared.geoip_status()
     }
 
     #[cfg(feature = "rate_limiter")]
@@ -870,7 +877,7 @@ fn reap_expired_sessions_from_domain(
 }
 
 impl LiveServerState {
-    pub fn new(server_config: ServerConfig) -> Self {
+    pub fn try_new(server_config: ServerConfig) -> Result<Self, String> {
         let revocation_manager =
             Arc::new(crate::implementations::server::revocation::RevocationManager::new());
         let qkey_tracker =
@@ -881,10 +888,10 @@ impl LiveServerState {
                 crate::implementations::server::revocation::DEFAULT_OVERLAP_WINDOW_SECS,
                 Arc::clone(&revocation_manager),
             );
-        let domain = LiveServerDomain::new(&server_config);
+        let domain = LiveServerDomain::try_new(&server_config)?;
         #[cfg(feature = "rate_limiter")]
         let retry_token_manager = domain.shared.retry_token_manager.clone();
-        Self {
+        Ok(Self {
             clients: std::collections::HashMap::new(),
             path_candidates: std::collections::HashMap::new(),
             pending_tun_downlinks: PendingTunDownlinks::new(
@@ -907,7 +914,7 @@ impl LiveServerState {
             next_stats_log: Instant::now(),
             #[cfg(feature = "rate_limiter")]
             last_blacklist_sync: Arc::new(parking_lot::Mutex::new(None)),
-        }
+        })
     }
 
     pub fn client_snapshots(
@@ -923,8 +930,15 @@ impl LiveServerState {
         packet: &[u8],
         established: bool,
         retry_eligible: bool,
+        metrics: &Metrics,
     ) -> crate::implementations::server::ddos::IncomingDatagramAdmission {
-        self.domain.admit_incoming_datagram(from, packet, established, retry_eligible)
+        self.domain
+            .admit_incoming_datagram(from, packet, established, retry_eligible, metrics)
+    }
+
+    #[cfg(feature = "rate_limiter")]
+    pub(crate) fn geoip_status(&self) -> crate::implementations::server::limits::GeoIpStatus {
+        self.domain.geoip_status()
     }
 
     #[cfg(feature = "rate_limiter")]
@@ -1922,7 +1936,8 @@ mod migration_commit_tests {
 
     #[test]
     fn server_rebind_commits_only_after_transport_path_validation() {
-        let mut live_state = LiveServerState::new(ServerConfig::default());
+        let mut live_state = LiveServerState::try_new(ServerConfig::default())
+            .unwrap_or_else(|error| panic!("live server state construction failed: {error}"));
         let accept_loop = AcceptLoop::new(AcceptConfig::default());
         let local_addr: SocketAddr = "127.0.0.1:4433".parse().unwrap();
         let old_addr: SocketAddr = "127.0.0.1:54321".parse().unwrap();

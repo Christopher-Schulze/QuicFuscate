@@ -2,7 +2,7 @@
 //!
 //! Exports metrics in Prometheus text format at /metrics endpoint.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -155,6 +155,10 @@ pub struct Metrics {
     pub ddos_drop_per_ip_limit: AtomicU64,
     pub ddos_drop_malformed_initial: AtomicU64,
     pub ddos_drop_invalid_retry: AtomicU64,
+    pub geoip_status: AtomicU8,
+    pub geoip_lookups: AtomicU64,
+    pub geoip_blocked: AtomicU64,
+    pub geoip_lookup_errors: AtomicU64,
 
     // Uptime (set once at start)
     start_time: std::time::Instant,
@@ -240,6 +244,12 @@ impl Metrics {
             ddos_drop_per_ip_limit: AtomicU64::new(0),
             ddos_drop_malformed_initial: AtomicU64::new(0),
             ddos_drop_invalid_retry: AtomicU64::new(0),
+            geoip_status: AtomicU8::new(
+                crate::implementations::server::limits::GeoIpStatus::Disabled as u8,
+            ),
+            geoip_lookups: AtomicU64::new(0),
+            geoip_blocked: AtomicU64::new(0),
+            geoip_lookup_errors: AtomicU64::new(0),
             start_time: std::time::Instant::now(),
         }
     }
@@ -331,6 +341,37 @@ impl Metrics {
 
     pub(crate) fn record_ddos_retry_validated(&self) {
         self.ddos_retry_validated.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn set_geoip_status(
+        &self,
+        status: crate::implementations::server::limits::GeoIpStatus,
+    ) {
+        self.geoip_status.store(status as u8, Ordering::Release);
+    }
+
+    pub(crate) fn geoip_status(&self) -> crate::implementations::server::limits::GeoIpStatus {
+        match self.geoip_status.load(Ordering::Acquire) {
+            value if value == crate::implementations::server::limits::GeoIpStatus::Active as u8 => {
+                crate::implementations::server::limits::GeoIpStatus::Active
+            }
+            value if value == crate::implementations::server::limits::GeoIpStatus::Failed as u8 => {
+                crate::implementations::server::limits::GeoIpStatus::Failed
+            }
+            _ => crate::implementations::server::limits::GeoIpStatus::Disabled,
+        }
+    }
+
+    pub(crate) fn record_geoip_lookup(&self) {
+        self.geoip_lookups.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_geoip_blocked(&self) {
+        self.geoip_blocked.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_geoip_lookup_error(&self) {
+        self.geoip_lookup_errors.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn record_ddos_drop(
@@ -943,6 +984,40 @@ impl Metrics {
         ] {
             out.push_str(&format!("quicfuscate_ddos_drops_total{{reason=\"{reason}\"}} {value}\n"));
         }
+        out.push_str("# HELP quicfuscate_geoip_activation Actual GeoIP policy activation state\n");
+        out.push_str("# TYPE quicfuscate_geoip_activation gauge\n");
+        let geoip_status = self.geoip_status();
+        for status in [
+            crate::implementations::server::limits::GeoIpStatus::Disabled,
+            crate::implementations::server::limits::GeoIpStatus::Active,
+            crate::implementations::server::limits::GeoIpStatus::Failed,
+        ] {
+            let value = u8::from(status == geoip_status);
+            out.push_str(&format!(
+                "quicfuscate_geoip_activation{{state=\"{}\"}} {value}\n",
+                status.as_str()
+            ));
+        }
+        out.push_str("# HELP quicfuscate_geoip_lookups_total Active GeoIP source lookups\n");
+        out.push_str("# TYPE quicfuscate_geoip_lookups_total counter\n");
+        out.push_str(&format!(
+            "quicfuscate_geoip_lookups_total {}\n",
+            self.geoip_lookups.load(Ordering::Relaxed)
+        ));
+        out.push_str(
+            "# HELP quicfuscate_geoip_blocked_total Sources blocked by GeoIP country policy\n",
+        );
+        out.push_str("# TYPE quicfuscate_geoip_blocked_total counter\n");
+        out.push_str(&format!(
+            "quicfuscate_geoip_blocked_total {}\n",
+            self.geoip_blocked.load(Ordering::Relaxed)
+        ));
+        out.push_str("# HELP quicfuscate_geoip_lookup_errors_total GeoIP lookup/decode failures dropped fail-closed\n");
+        out.push_str("# TYPE quicfuscate_geoip_lookup_errors_total counter\n");
+        out.push_str(&format!(
+            "quicfuscate_geoip_lookup_errors_total {}\n",
+            self.geoip_lookup_errors.load(Ordering::Relaxed)
+        ));
         let audit = crate::audit::stats();
         out.push_str(
             "\n# HELP quicfuscate_audit_dropped_events_total Audit events rejected by the bounded writer queue\n",
@@ -966,11 +1041,19 @@ impl Metrics {
 
     /// Export as JSON for health endpoint.
     pub fn export_health(&self) -> String {
+        let status = self.geoip_status();
+        let health = if status == crate::implementations::server::limits::GeoIpStatus::Failed {
+            "not_ready"
+        } else {
+            "ok"
+        };
         format!(
-            r#"{{"status":"ok","version":"{}","uptime":{},"clients":{}}}"#,
+            r#"{{"status":"{}","version":"{}","uptime":{},"clients":{},"geoip_status":"{}"}}"#,
+            health,
             env!("CARGO_PKG_VERSION"),
             self.uptime_secs(),
-            self.clients_active.load(Ordering::Relaxed)
+            self.clients_active.load(Ordering::Relaxed),
+            status.as_str()
         )
     }
 }
@@ -1359,6 +1442,37 @@ mod tests {
         let output = metrics.export_health();
         assert!(output.contains("\"status\":\"ok\""));
         assert!(output.contains("\"clients\":10"));
+        assert!(output.contains("\"geoip_status\":\"disabled\""));
+    }
+
+    #[test]
+    fn geoip_metrics_expose_activation_state_lookup_counters_and_failed_health() {
+        let metrics = Metrics::new();
+        use crate::implementations::server::limits::GeoIpStatus;
+
+        metrics.record_geoip_lookup();
+        metrics.record_geoip_blocked();
+        metrics.record_geoip_lookup_error();
+        metrics.set_geoip_status(GeoIpStatus::Active);
+
+        let output = metrics.export();
+        for expected in [
+            "quicfuscate_geoip_activation{state=\"active\"} 1",
+            "quicfuscate_geoip_activation{state=\"disabled\"} 0",
+            "quicfuscate_geoip_activation{state=\"failed\"} 0",
+            "quicfuscate_geoip_lookups_total 1",
+            "quicfuscate_geoip_blocked_total 1",
+            "quicfuscate_geoip_lookup_errors_total 1",
+        ] {
+            assert!(output.contains(expected), "missing GeoIP metric: {expected}");
+        }
+        assert!(metrics.export_health().contains("\"status\":\"ok\""));
+        assert!(metrics.export_health().contains("\"geoip_status\":\"active\""));
+
+        metrics.set_geoip_status(GeoIpStatus::Failed);
+        let failed_health = metrics.export_health();
+        assert!(failed_health.contains("\"status\":\"not_ready\""));
+        assert!(failed_health.contains("\"geoip_status\":\"failed\""));
     }
 
     #[test]

@@ -345,6 +345,9 @@ impl SessionStore {
 /// HTTP admin handler interface.
 pub trait AdminHttpHandler: Send + Sync {
     fn handle_status(&self) -> AdminResponse;
+    fn handle_health(&self) -> AdminResponse {
+        AdminResponse::ok_with_data(serde_json::json!({ "status": "ok" }))
+    }
     fn handle_list_clients(&self) -> Vec<ClientInfo>;
     fn handle_get_client_bandwidth(&self, id: &str) -> AdminResponse;
     fn handle_set_client_bandwidth(&self, id: &str, policy: BandwidthPolicy) -> AdminResponse;
@@ -774,12 +777,13 @@ async fn handle_request(
             return handle_logout(&req, auth.as_ref(), &sessions, peer);
         }
         // Unauthenticated health probe for external liveness/readiness checks.
-        // Returns a minimal JSON body with no sensitive information.
+        // The runtime handler includes actual policy activation state.
         if req.path == "/api/health" {
             if req.method != "GET" {
                 return text_response(405, "Method Not Allowed");
             }
-            return json_response(200, &serde_json::json!({"status": "ok"}));
+            let response = handler.handle_health();
+            return json_response(if response.success { 200 } else { 503 }, &response);
         }
         if !authorize(&req, auth.as_ref(), &sessions) {
             return json_response(401, &AdminResponse::error("Unauthorized"));

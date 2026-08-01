@@ -66,9 +66,8 @@ pub struct ServerConfig {
     #[cfg(feature = "rate_limiter")]
     pub ddos_policy: limits::DdosPolicyConfig,
     /// GeoIP-based source-IP blocking config (TODO-459). When a MaxMindDB
-    /// database path and blocked countries are configured, incoming
-    /// datagrams from those countries are dropped. Gracefully degrades to
-    /// allowing all IPs when no database is configured.
+    /// country database path and blocked countries are configured, incoming
+    /// datagrams from those countries are dropped. Activation is fail-closed.
     #[cfg(feature = "rate_limiter")]
     pub geoip: limits::GeoIpConfig,
     /// External blacklist synchronizer config (TODO-459). When a sync URL
@@ -200,7 +199,7 @@ pub fn server_config_from_listen_addr(
     #[cfg(feature = "rate_limiter")]
     {
         config.ddos_policy = load_ddos_policy_config_from_env()?;
-        config.geoip = load_geoip_config_from_env();
+        config.geoip = load_geoip_config_from_env()?;
         config.blacklist = load_blacklist_config_from_env()?;
     }
     Ok(config)
@@ -443,24 +442,25 @@ fn stateless_version_negotiation_response(
 /// - `QUICFUSCATE_GEOIP_BLOCKED_COUNTRIES`: comma-separated ISO country codes
 ///   (e.g. "CN,RU,KP").
 #[cfg(feature = "rate_limiter")]
-fn load_geoip_config_from_env() -> limits::GeoIpConfig {
+fn load_geoip_config_from_env() -> Result<limits::GeoIpConfig, String> {
     use std::collections::HashSet;
     use std::path::PathBuf;
 
     let db_path = env_string("QUICFUSCATE_GEOIP_DB_PATH").map(PathBuf::from);
     let blocked_countries: HashSet<String> = env_string("QUICFUSCATE_GEOIP_BLOCKED_COUNTRIES")
-        .map(|s| s.split(',').map(|c| c.trim().to_uppercase()).filter(|c| !c.is_empty()).collect())
+        .map(|s| s.split(',').map(|c| c.trim().to_uppercase()).collect())
         .unwrap_or_default();
 
     let config = limits::GeoIpConfig { db_path, blocked_countries };
+    config.validate().map_err(|error| format!("Invalid GeoIP configuration: {error}"))?;
     if config.is_enabled() {
         log::info!(
-            "GeoIP blocking enabled: {} blocked countries, db={}",
+            "GeoIP blocking configured: {} blocked countries, db={}",
             config.blocked_countries.len(),
             config.db_path.as_ref().map(|p| p.display().to_string()).unwrap_or_default()
         );
     }
-    config
+    Ok(config)
 }
 
 /// Load external blacklist sync config from environment variables.

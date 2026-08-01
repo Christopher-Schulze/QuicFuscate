@@ -1,6 +1,7 @@
 impl Default for LiveServerState {
     fn default() -> Self {
-        Self::new(ServerConfig::default())
+        Self::try_new(ServerConfig::default())
+            .unwrap_or_else(|error| panic!("default live server state construction failed: {error}"))
     }
 }
 

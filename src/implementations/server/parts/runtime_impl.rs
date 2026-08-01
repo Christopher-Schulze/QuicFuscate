@@ -21,7 +21,7 @@ impl ServerRuntime {
         }
         let pool = Arc::new(MemoryPool::new(capacity, block_size));
 
-        let domain = SharedServerDomain::new(&server_config);
+        let domain = SharedServerDomain::try_new(&server_config).map_err(EngineError::Config)?;
         let stealth_runtime = Arc::new(
             StealthRuntimeOwner::from_env()
                 .map_err(|error| EngineError::Config(format!("Invalid Reality config: {error}")))?,
@@ -57,6 +57,8 @@ impl ServerRuntime {
     ) -> std::io::Result<Self> {
         let mut runtime =
             Self::new(engine_config, server_config.clone()).map_err(std::io::Error::other)?;
+        let live_state =
+            LiveServerState::try_new(server_config.clone()).map_err(std::io::Error::other)?;
 
         let std_socket = std::net::UdpSocket::bind(server_config.listen)?;
         let socket_ref = socket2::SockRef::from(&std_socket);
@@ -178,13 +180,16 @@ impl ServerRuntime {
             None => (None, None, None),
         };
 
+        let metrics = Arc::new(Metrics::new());
+        #[cfg(feature = "rate_limiter")]
+        metrics.set_geoip_status(live_state.geoip_status());
         runtime.live = Some(ServerLiveRuntime {
-            live_state: LiveServerState::new(server_config),
+            live_state,
             accept_loop: AcceptLoop::new(accept_config),
             accept_max_clients,
             admin_actions_tx,
             admin_actions_rx: Some(admin_actions_rx),
-            metrics: Arc::new(Metrics::new()),
+            metrics,
             socket,
             local_addr,
             server_tun,
@@ -551,6 +556,8 @@ impl ServerRuntime {
                 qkeys: self.qkey_registry().clone(),
                 graceful_shutdown: self.graceful_shutdown.clone(),
             },
+            #[cfg(feature = "rate_limiter")]
+            self.live().live_state.geoip_status(),
         )
     }
 
@@ -622,9 +629,16 @@ impl ServerRuntime {
         from: SocketAddr,
         packet: &[u8],
         retry_eligible: bool,
+        metrics: &Metrics,
     ) -> crate::implementations::server::ddos::IncomingDatagramAdmission {
         let established = self.live().live_state.is_established_datagram(from, packet);
-        self.live().live_state.admit_incoming_datagram(from, packet, established, retry_eligible)
+        self.live().live_state.admit_incoming_datagram(
+            from,
+            packet,
+            established,
+            retry_eligible,
+            metrics,
+        )
     }
 
     fn live_parts(&mut self) -> ServerRuntimeLiveParts<'_> {
@@ -831,6 +845,7 @@ impl ServerRuntime {
                                     from,
                                     &buf[..len],
                                     version_negotiation.is_none(),
+                                    &metrics,
                                 ) {
                                     IncomingDatagramAdmission::Allow => {}
                                     IncomingDatagramAdmission::RetryValidated => {
