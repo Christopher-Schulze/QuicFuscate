@@ -1172,7 +1172,7 @@ pub struct MacTun {
 - IPv4 TUN MTU must be at least 576 bytes. An IPv6-enabled TUN must remain at or above 1280 bytes for initial configuration and every live update.
 - A registered external factory must apply or already expose the requested MTU and report the exact value before `TunInterface::open` publishes the device.
 - `TunInterface` publishes a new MTU only after the backend reports the requested value. Backend and client provisioning errors preserve command spawn, exit status, and diagnostics; exact idempotent postconditions are inspected instead of treating arbitrary failures as duplicates.
-- Client TUN provisioning rolls back the owned descriptor/interface on every failure after creation. Server Linux routing verifies TUN addresses, prefixes, link-up state, forwarding, and the selected firewall rules before readiness, then rolls back only mutations recorded as owned.
+- Client TUN provisioning rolls back the owned descriptor/interface on every failure after creation. Server Linux routing rejects an IPv4 or IPv6 address already owned by another interface, verifies TUN addresses, prefixes, link-up state, forwarding, and the selected firewall rules before readiness, then rolls back only mutations recorded as owned.
 - Shipped server TUN mode is Linux-only. The embedded and standalone server runtimes reject server TUN mode on macOS, Windows, and other platforms before host mutation because those platforms do not yet have a shipped native server routing owner and proof. macOS, Windows, and iOS remain client-side TUN platforms through their respective native or external-factory paths.
 
 #### TUN/MASQUE Backpressure and Packet Ownership

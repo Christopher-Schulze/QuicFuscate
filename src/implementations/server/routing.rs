@@ -212,6 +212,39 @@ impl RoutingManager {
     }
 
     #[cfg(target_os = "linux")]
+    fn linux_address_on_other_interface(
+        &self,
+        family: &str,
+        address: &str,
+    ) -> Result<Option<String>, RoutingError> {
+        let value = Self::linux_json(&["-j", "address", "show"])?;
+        let interfaces = value.as_array().ok_or_else(|| {
+            RoutingError::CommandFailed(
+                "ip address inspection returned no interface array".to_string(),
+            )
+        })?;
+        for interface in interfaces {
+            let Some(name) = interface.get("ifname").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            if name == self.tun_name {
+                continue;
+            }
+            let Some(addresses) = interface.get("addr_info").and_then(serde_json::Value::as_array)
+            else {
+                continue;
+            };
+            if addresses.iter().any(|entry| {
+                entry.get("family").and_then(serde_json::Value::as_str) == Some(family)
+                    && entry.get("local").and_then(serde_json::Value::as_str) == Some(address)
+            }) {
+                return Ok(Some(name.to_string()));
+            }
+        }
+        Ok(None)
+    }
+
+    #[cfg(target_os = "linux")]
     fn ipv4_prefix_len(&self) -> Result<u8, RoutingError> {
         let raw = u32::from(self.netmask);
         let prefix = raw.leading_ones();
@@ -1489,13 +1522,17 @@ impl RoutingManager {
     fn assign_tun_address_linux(&self) -> Result<(), RoutingError> {
         let prefix = self.ipv4_prefix_len()?;
         let addr = format!("{}/{}", self.server_ip, prefix);
-        let address_present =
-            self.linux_address_present("inet", &self.server_ip.to_string(), prefix)?;
+        let address_text = self.server_ip.to_string();
+        if let Some(interface) = self.linux_address_on_other_interface("inet", &address_text)? {
+            return Err(RoutingError::CommandFailed(format!(
+                "Linux TUN address {} already exists on interface {}; refusing address conflict",
+                self.server_ip, interface
+            )));
+        }
+        let address_present = self.linux_address_present("inet", &address_text, prefix)?;
         if !address_present {
             let result = Self::run_ip_command(&["-4", "addr", "add", &addr, "dev", &self.tun_name]);
-            if result.is_err()
-                && !self.linux_address_present("inet", &self.server_ip.to_string(), prefix)?
-            {
+            if result.is_err() && !self.linux_address_present("inet", &address_text, prefix)? {
                 return result;
             }
             self.ownership
@@ -1514,7 +1551,7 @@ impl RoutingManager {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .link_brought_up = true;
         }
-        if !self.linux_address_present("inet", &self.server_ip.to_string(), prefix)?
+        if !self.linux_address_present("inet", &address_text, prefix)?
             || !self.linux_link_is_up()?
         {
             return Err(RoutingError::CommandFailed(format!(
@@ -1537,15 +1574,20 @@ impl RoutingManager {
                 )));
             }
             let addr = format!("{}/{}", ipv6, self.ipv6_prefix_len);
-            if !self.linux_address_present("inet6", &ipv6.to_string(), self.ipv6_prefix_len)? {
+            let address_text = ipv6.to_string();
+            if let Some(interface) =
+                self.linux_address_on_other_interface("inet6", &address_text)?
+            {
+                return Err(RoutingError::CommandFailed(format!(
+                    "Linux TUN IPv6 address {} already exists on interface {}; refusing address conflict",
+                    ipv6, interface
+                )));
+            }
+            if !self.linux_address_present("inet6", &address_text, self.ipv6_prefix_len)? {
                 let result =
                     Self::run_ip_command(&["-6", "addr", "add", &addr, "dev", &self.tun_name]);
                 if result.is_err()
-                    && !self.linux_address_present(
-                        "inet6",
-                        &ipv6.to_string(),
-                        self.ipv6_prefix_len,
-                    )?
+                    && !self.linux_address_present("inet6", &address_text, self.ipv6_prefix_len)?
                 {
                     return result;
                 }
