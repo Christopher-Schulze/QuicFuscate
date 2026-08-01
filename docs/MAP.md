@@ -542,6 +542,7 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 |   |   |   |   `-- critical-allowlist.txt
 |   |   |   |-- audit-all-comprehensive.sh
 |   |   |   |-- audit-readiness-gates.sh
+|   |   |   |-- verify-audit-completeness.sh
 |   |   |   `-- audit-runtime-guardrails.sh
 |   |   |-- build
 |   |   |   |-- build-check.sh

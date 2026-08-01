@@ -108,7 +108,10 @@ fi
 
 echo -e "\n> Checking for panic-inducing code..."
 STRICT_RUNTIME_CLIPPY="$OUTPUT_DIR/strict-runtime-clippy.log"
-RUNTIME_CLIPPY_OUTPUT=$(cargo clippy --lib --bins --all-features -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic 2>&1 || true)
+set +e
+RUNTIME_CLIPPY_OUTPUT=$(cargo clippy --lib --bins --all-features -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic 2>&1)
+RUNTIME_CLIPPY_RC=$?
+set -e
 printf "%s\n" "$RUNTIME_CLIPPY_OUTPUT" > "$STRICT_RUNTIME_CLIPPY"
 
 UNWRAP_COUNT=$(printf "%s\n" "$RUNTIME_CLIPPY_OUTPUT" | grep -c 'used `unwrap()' || true)
@@ -128,11 +131,14 @@ fi
 if [ "$PANIC_COUNT" -gt 0 ]; then
     log_critical "Found $PANIC_COUNT panic! usages in runtime code (clippy strict)"
 fi
+if [ "$RUNTIME_CLIPPY_RC" -ne 0 ]; then
+    log_critical "Strict runtime Clippy command failed with rc=$RUNTIME_CLIPPY_RC"
+fi
 
 echo -e "\n> Checking for hardcoded secrets..."
 SECRET_ASSIGN_RE='(password|secret|token|api[_-]?key|private[_-]?key|credential)[[:space:]]*[:=][[:space:]]*"[^"]{8,}"'
 SECRET_KEY_BLOCK_RE='-----BEGIN[[:space:]]+(RSA|EC|OPENSSH|PRIVATE)[[:space:]]+PRIVATE[[:space:]]+KEY-----'
-SECRET_MATCHES="$( (rg -n --no-heading -g '*.rs' -g '!**/test*/**' -g '!**/bench*/**' -e "$SECRET_ASSIGN_RE" -e "$SECRET_KEY_BLOCK_RE" src || true) )"
+SECRET_MATCHES="$( (rg -n --no-heading -g '*.rs' -g '!**/test*/**' -g '!**/bench*/**' -g '!src/implementations/server/parts/tests_inline.rs' -e "$SECRET_ASSIGN_RE" -e "$SECRET_KEY_BLOCK_RE" src || true) )"
 SECRET_COUNT=$(printf "%s\n" "$SECRET_MATCHES" | sed '/^$/d' | count_lines)
 if [ "$SECRET_COUNT" -gt 0 ]; then
     log_critical "Hardcoded secret literals detected: $SECRET_COUNT occurrences"
@@ -155,7 +161,13 @@ echo "+===============================================================+"
 
 echo -e "\n> Checking for vulnerable dependencies..."
 if command -v cargo-audit &> /dev/null; then
-    AUDIT_OUTPUT=$(cargo audit 2>&1 || true)
+    set +e
+    AUDIT_OUTPUT=$(cargo audit 2>&1)
+    AUDIT_RC=$?
+    set -e
+    if [ "$AUDIT_RC" -ne 0 ]; then
+        log_critical "cargo audit command failed with rc=$AUDIT_RC"
+    fi
     VULN_COUNT=$(echo "$AUDIT_OUTPUT" | grep -c "Vulnerability" || true)
     if [ "$VULN_COUNT" -gt 0 ]; then
         log_critical "Found $VULN_COUNT vulnerable dependencies"
@@ -209,7 +221,7 @@ echo -e "\n> Checking allocations in hot paths..."
 HOT_PATH_ALLOCS=$(
 python3 - <<'PY'
 import pathlib, re
-files = ["src/transport/connection.rs", "src/transport/packet.rs", "src/crypto/mod.rs"]
+files = ["src/transport/connection/mod.rs", "src/transport/packet.rs", "src/crypto/mod.rs"]
 alloc = re.compile(r"\b(Vec::new|String::new|Box::new|to_vec\()")
 loop = re.compile(r"\b(for|while|loop)\b")
 comment = re.compile(r"^\s*//")
@@ -238,7 +250,10 @@ echo "|                  CODE QUALITY AUDIT                            |"
 echo "+===============================================================+"
 
 echo -e "\n> Running Clippy analysis..."
-CLIPPY_OUTPUT=$(cargo clippy --all-targets --all-features -- -W clippy::all 2>&1 || true)
+set +e
+CLIPPY_OUTPUT=$(cargo clippy --all-targets --all-features -- -W clippy::all 2>&1)
+CLIPPY_RC=$?
+set -e
 CLIPPY_WARNINGS=$(echo "$CLIPPY_OUTPUT" | grep -c "warning:" || true)
 CLIPPY_ERRORS=$(echo "$CLIPPY_OUTPUT" | grep -c "error:" || true)
 
@@ -248,6 +263,9 @@ elif [ "$CLIPPY_WARNINGS" -gt 50 ]; then
     log_warning "Clippy found $CLIPPY_WARNINGS warnings"
 else
     log_info "Clippy warnings acceptable: $CLIPPY_WARNINGS"
+fi
+if [ "$CLIPPY_RC" -ne 0 ]; then
+    log_critical "Code quality Clippy command failed with rc=$CLIPPY_RC"
 fi
 
 echo -e "\n> Checking for commented-out code blocks..."
@@ -262,9 +280,14 @@ else
 fi
 
 echo -e "\n> Checking documentation coverage..."
-DOC_OUTPUT=$(cargo doc --no-deps 2>&1 || true)
+set +e
+DOC_OUTPUT=$(cargo doc --no-deps 2>&1)
+DOC_RC=$?
+set -e
 MISSING_DOCS=$(echo "$DOC_OUTPUT" | grep -c "missing documentation" || true)
-if [ "$MISSING_DOCS" -gt 20 ]; then
+if [ "$DOC_RC" -ne 0 ]; then
+    log_critical "cargo doc command failed with rc=$DOC_RC"
+elif [ "$MISSING_DOCS" -gt 20 ]; then
     log_warning "Poor documentation: $MISSING_DOCS items missing docs"
 else
     log_info "Documentation coverage good: $MISSING_DOCS items missing"

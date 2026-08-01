@@ -3782,6 +3782,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `audit-runtime-guardrails.sh` - Fast runtime/docs/structure anti-drift gate for reachability, contract, and shadow-path regressions
 - `audit-all-comprehensive.sh` - Consolidated audit (security/dependencies/quality/performance) with clear exit codes
 - `audit-readiness-gates.sh` - Readiness gate checks for release and CI quality thresholds
+- `verify-audit-completeness.sh` - Fail-closed TODO register, archive reconciliation, schema, dependency, and Git-scope coverage gate
 
 Guardrail remediation playbook:
 - `Critical` failure: treat as contract drift or structural regression. Fix code/docs first, then rerun `audit-runtime-guardrails.sh`.
