@@ -185,7 +185,7 @@ ip netns exec "$NAMESPACE" ip tuntap add dev "$DUPLICATE_NAME" mode tun ||
   fail "could not create duplicate-interface sentinel"
 expect_failure "duplicate-name" root "$DUPLICATE_NAME" 10.20.1.1 255.255.255.0
 assert_interface_present "$DUPLICATE_NAME"
-ip netns exec "$NAMESPACE" ip tuntap del dev "$DUPLICATE_NAME" ||
+ip netns exec "$NAMESPACE" ip tuntap del dev "$DUPLICATE_NAME" mode tun ||
   fail "could not remove duplicate-interface sentinel"
 assert_interface_absent "$DUPLICATE_NAME"
 
@@ -204,7 +204,7 @@ grep -Eiq "file exists|already exists|cannot assign requested address|address.*e
   fail "conflicting-address did not produce an address-conflict diagnostic"
 assert_interface_absent "$CONFLICT_NAME-new"
 assert_interface_present "$CONFLICT_NAME"
-ip netns exec "$NAMESPACE" ip tuntap del dev "$CONFLICT_NAME" ||
+ip netns exec "$NAMESPACE" ip tuntap del dev "$CONFLICT_NAME" mode tun ||
   fail "could not remove conflicting-address sentinel"
 
 PARTIAL_NAME="qf-partial"
