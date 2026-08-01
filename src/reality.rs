@@ -129,6 +129,14 @@ impl RealityProxy {
                 );
             }
         } else {
+            if sessions.len() >= MAX_SESSIONS {
+                log::warn!(
+                    "Reality Proxy: rejecting new session from {} (at capacity {})",
+                    source,
+                    MAX_SESSIONS
+                );
+                return;
+            }
             // New Probe Session
             let target_addr_str = self.select_target();
             log::info!(
@@ -167,7 +175,7 @@ impl RealityProxy {
                 // But since we are in the spawn block, we can't access `packet` easily unless cloned before.
                 // Strategy: The session creation pushes to pkt_tx. The Loop reads pkt_rx.
 
-                let mut buf = [0u8; 2048];
+                let mut buf = [0u8; 65535];
 
                 loop {
                     tokio::select! {

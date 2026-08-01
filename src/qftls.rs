@@ -337,7 +337,8 @@ impl TlsProfile {
     /// Uses rand::random for non-security profile selection (stealth heuristic,
     /// not a cryptographic decision).
     pub fn random() -> Self {
-        match rand::random::<u8>() % 6 {
+        use rand::Rng;
+        match rand::rng().random_range(0..6u8) {
             0 => Self::chrome_130(),
             1 => Self::firefox_133(),
             2 => Self::safari_18(),
@@ -2159,17 +2160,11 @@ impl QuicTlsProvider for RustlsProvider {
 
 impl RustlsProvider {
     pub fn apply_session_hint_to_profile(&mut self) {
-        // If we have session cache entries, bias SNI/ALPN selection next time
         if self.0.session_cache.is_some() {
-            let has_entry = true; // Cache populated earlier; bias ALPN ordering regardless of key presence
-            if has_entry {
-                // Example: could adjust profile.alpn order or prefer h3
-                // Keeping simple: ensure ALPN starts with h3
-                if let Some(ref mut prof) = self.0.profile {
-                    if !prof.alpn_protocols.is_empty() && prof.alpn_protocols[0] != "h3" {
-                        prof.alpn_protocols.retain(|p| p != "h3");
-                        prof.alpn_protocols.insert(0, "h3".into());
-                    }
+            if let Some(ref mut prof) = self.0.profile {
+                if !prof.alpn_protocols.is_empty() && prof.alpn_protocols[0] != "h3" {
+                    prof.alpn_protocols.retain(|p| p != "h3");
+                    prof.alpn_protocols.insert(0, "h3".into());
                 }
             }
         }

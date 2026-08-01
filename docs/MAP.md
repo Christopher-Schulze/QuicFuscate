@@ -1027,7 +1027,7 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 - `build_echo_reply()` (`src/implementations/server/icmp.rs`): Sets fresh TTL=64 for locally-originated echo replies (RFC 1812 §5.3.1), not decremented from original request.
 - Live local echo handling selects the connection's frozen network profile before the reply enters the bounded MASQUE response queue. Optional unreachable suppression never removes IPv4 Fragmentation Needed or ICMPv6 Packet Too Big.
 
-## Deep Audit Update (2026-08-04)
+## Deep Audit Update (2026-08-01)
 
 A full source-audit sweep produced TODO-626 through TODO-689 and augmented TODO-570, TODO-584, TODO-587, TODO-592, TODO-615, TODO-576, and TODO-649. The new findings affect the following wiring surfaces and should be reconciled before treating those areas as production-proven:
 

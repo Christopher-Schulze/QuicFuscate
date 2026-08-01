@@ -694,11 +694,7 @@ impl Connection {
                         obs.on_ack(ack_delay, ranges);
                     }
                 }
-                if matches!(&ack, Frame::Ack { ecn_counts: Some(_), .. }) {
-                    self.ecn_ect0 = 0;
-                    self.ecn_ect1 = 0;
-                    self.ecn_ce = 0;
-                }
+
                 let exp = self.config.ack_delay_exponent.min(20);
                 let ack_delay_us = ack_delay << exp;
                 crate::telemetry::ACK_DELAY_LAST_US

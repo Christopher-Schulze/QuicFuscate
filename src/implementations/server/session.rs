@@ -136,7 +136,7 @@ impl Session {
 
     /// Check if session has expired.
     pub fn is_expired(&self) -> bool {
-        self.timeout.as_secs() > 0 && self.created_at.elapsed() > self.timeout
+        !self.timeout.is_zero() && self.created_at.elapsed() > self.timeout
     }
 
     /// Get session stats.

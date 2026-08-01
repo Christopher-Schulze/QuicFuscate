@@ -82,7 +82,7 @@ impl AdaptiveRSEncoder {
         diffs.extend(right.iter().map(|&loss| (loss - avg_loss).powi(2)));
 
         let sum_sq = accelerate::iter::sum_f32(&diffs);
-        (sum_sq / (len - 1) as f32).sqrt()
+        sum_sq / (len - 1) as f32
     }
 
     // Removed encode/parity helper (not used in the production path).

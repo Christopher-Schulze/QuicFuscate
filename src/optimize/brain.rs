@@ -713,7 +713,7 @@ unsafe fn horizontal_max_ps_sse(v: std::arch::x86_64::__m128) -> f32 {
 /// Moving average with AVX2 - 3x faster
 #[inline(always)]
 pub fn moving_average(data: &[f32], window: usize) -> Vec<f32> {
-    assert!(window > 0, "moving average window must be non-zero");
+    let window = window.max(1);
     if data.is_empty() {
         return Vec::new();
     }
@@ -991,6 +991,9 @@ unsafe fn moving_average_neon(data: &[f32], window: usize) -> Vec<f32> {
 /// Percentile calculation with AVX2 minmax - 2x faster
 #[inline(always)]
 pub fn compute_percentile(data: &mut [f32], percentile: f32) -> f32 {
+    if data.is_empty() {
+        return 0.0;
+    }
     let _profile = FeatureDetector::instance().profile();
 
     #[cfg(target_arch = "x86_64")]
@@ -1345,6 +1348,13 @@ unsafe fn softmax_batch_avx2(data: &mut [f32]) {
     }
 
     // Normalize
+    if sum == 0.0 {
+        let uniform = 1.0 / data.len() as f32;
+        for v in data.iter_mut() {
+            *v = uniform;
+        }
+        return;
+    }
     let sum_inv = _mm256_set1_ps(1.0 / sum);
     i = 0;
 
@@ -1863,10 +1873,11 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "non-zero")]
-    fn test_moving_average_window_zero_panics() {
-        let data = vec![1.0, 2.0];
-        let _ = moving_average(&data, 0);
+    fn test_moving_average_window_zero_clamps_to_one() {
+        let data = vec![1.0, 2.0, 3.0];
+        let result = moving_average(&data, 0);
+        assert_eq!(result.len(), 3);
+        assert!((result[0] - 1.0).abs() < 1e-6);
     }
 
     // ---------------------------------------------------------------

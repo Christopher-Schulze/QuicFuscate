@@ -88,7 +88,6 @@ fn build_runtime_transport_config(config: &EngineConfig) -> Result<Config, Engin
     transport.set_initial_max_stream_data_bidi_remote(
         config.transport.initial_max_stream_data_bidi_remote,
     );
-    transport.set_initial_max_data(config.transport.initial_max_data);
     // [connection].max_streams_bidi/uni override [transport] values when explicitly set to
     // a different non-zero value (the two sections are historical duplicates).
     let bidi = if config.connection.max_streams_bidi != config.transport.initial_max_streams_bidi

@@ -163,7 +163,6 @@ impl Connection {
                 self.dgram_recv_queue.pop_front().ok_or(crate::error::ConnectionError::Done)?;
             let len = std::cmp::min(buf.len(), dgram.len());
             buf[..len].copy_from_slice(&dgram[..len]);
-            self.stats.dgram_recv += 1;
             Ok(len)
         }
         #[cfg(feature = "zero_copy_dgram")]
@@ -172,7 +171,6 @@ impl Connection {
                 self.dgram_recv_queue.pop_front().ok_or(crate::error::ConnectionError::Done)?;
             let len = std::cmp::min(buf.len(), dgram.len);
             buf[..len].copy_from_slice(&dgram.data[..len]);
-            self.stats.dgram_recv += 1;
             Ok(len)
         }
     }
@@ -213,7 +211,6 @@ impl Connection {
         }
         #[cfg(not(feature = "zero_copy_dgram"))]
         {
-            self.stats.dgram_recv += 1;
             if let Some(v) = self.dgram_recv_queue.pop_front() {
                 Ok(v)
             } else {
@@ -227,7 +224,6 @@ impl Connection {
             };
             let mut vec = vec![0u8; dgram.len];
             vec.copy_from_slice(&dgram.data[..dgram.len]);
-            self.stats.dgram_recv += 1;
             Ok(vec)
         }
     }

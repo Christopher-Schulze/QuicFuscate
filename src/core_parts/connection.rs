@@ -1031,7 +1031,9 @@ impl QuicFuscateConnection {
                             &self.tunnel_ingress_normalizer,
                         );
                     }
-                    Ok(Some((_id, crate::transport::h3::Event::Reset(err)))) => {
+                    Ok(Some((sid, crate::transport::h3::Event::Reset(err)))) => {
+                        self.h3_tunnel_rx.remove(&sid);
+                        self.h3_tunnel_response_started.remove(&sid);
                         crate::optimize::telemetry::STEALTH_SIGNAL_RST
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         if verbose_events {

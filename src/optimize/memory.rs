@@ -270,10 +270,10 @@ unsafe fn transpose_8x8_avx2(
     }
 }
 
-/// Rust parity/test-only lock-free ring buffer helper.
+/// Rust parity/test-only lock-free ring buffer helper (SPSC: one producer, one consumer).
 #[cfg(any(test, feature = "rust-tests"))]
 pub struct LockFreeRingBuffer {
-    buffer: Vec<u8>,
+    buffer: std::cell::UnsafeCell<Vec<u8>>,
     capacity: usize,
     mask: usize,
     head: std::sync::atomic::AtomicUsize,
@@ -281,12 +281,16 @@ pub struct LockFreeRingBuffer {
 }
 
 #[cfg(any(test, feature = "rust-tests"))]
+unsafe impl Send for LockFreeRingBuffer {}
+#[cfg(any(test, feature = "rust-tests"))]
+unsafe impl Sync for LockFreeRingBuffer {}
+
+#[cfg(any(test, feature = "rust-tests"))]
 impl LockFreeRingBuffer {
     pub fn new(capacity: usize) -> Self {
-        // Round up to power of 2 for fast modulo
         let capacity = capacity.next_power_of_two();
         Self {
-            buffer: vec![0; capacity],
+            buffer: std::cell::UnsafeCell::new(vec![0; capacity]),
             capacity,
             mask: capacity - 1,
             head: std::sync::atomic::AtomicUsize::new(0),
@@ -309,22 +313,15 @@ impl LockFreeRingBuffer {
         let first = (self.capacity - idx).min(data.len());
 
         unsafe {
-            let dst_ptr = self.buffer.as_ptr().add(idx) as *mut u8;
-            let dst_slice = std::slice::from_raw_parts_mut(dst_ptr, first);
-            dst_slice.copy_from_slice(&data[..first]);
-        }
-
-        if data.len() > first {
-            let second = data.len() - first;
-            unsafe {
-                let dst_ptr = self.buffer.as_ptr() as *mut u8;
-                let dst_slice = std::slice::from_raw_parts_mut(dst_ptr, second);
-                dst_slice.copy_from_slice(&data[first..]);
+            let buf = &mut *self.buffer.get();
+            buf[idx..idx + first].copy_from_slice(&data[..first]);
+            if data.len() > first {
+                let second = data.len() - first;
+                buf[..second].copy_from_slice(&data[first..]);
             }
         }
 
         let pos = head.wrapping_add(data.len());
-        // Update head
         self.head.store(pos, std::sync::atomic::Ordering::Release);
         true
     }
@@ -342,16 +339,16 @@ impl LockFreeRingBuffer {
 
         if first > 0 {
             unsafe {
-                let src_slice = std::slice::from_raw_parts(self.buffer.as_ptr().add(idx), first);
-                buf[..first].copy_from_slice(src_slice);
+                let buf_ref = &*self.buffer.get();
+                buf[..first].copy_from_slice(&buf_ref[idx..idx + first]);
             }
         }
 
         if to_read > first {
             let second = to_read - first;
             unsafe {
-                let src_slice = std::slice::from_raw_parts(self.buffer.as_ptr(), second);
-                buf[first..first + second].copy_from_slice(src_slice);
+                let buf_ref = &*self.buffer.get();
+                buf[first..first + second].copy_from_slice(&buf_ref[..second]);
             }
         }
 

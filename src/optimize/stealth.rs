@@ -345,17 +345,8 @@ pub fn inject_pattern(data: &mut [u8], pattern: &[u8], positions: &[usize]) {
 #[target_feature(enable = "avx2")]
 unsafe fn inject_pattern_avx2(data: &mut [u8], pattern: &[u8], positions: &[usize]) {
     if pattern.len() <= 32 {
-        // Load pattern into AVX2 register
-        let mut pattern_buf = [0u8; 32];
-        pattern_buf[..pattern.len()].copy_from_slice(pattern);
-        let pattern_vec = _mm256_loadu_si256(pattern_buf.as_ptr() as *const __m256i);
-
         for &pos in positions {
-            if pos + 32 <= data.len() {
-                // Fast injection with AVX2
-                _mm256_storeu_si256(data.as_mut_ptr().add(pos) as *mut __m256i, pattern_vec);
-            } else if pos + pattern.len() <= data.len() {
-                // Partial injection
+            if pos + pattern.len() <= data.len() {
                 data[pos..pos + pattern.len()].copy_from_slice(pattern);
             }
         }

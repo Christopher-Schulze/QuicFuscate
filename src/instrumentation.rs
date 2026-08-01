@@ -59,6 +59,9 @@ impl GlobalMetrics {
         // FEC metrics
         self.fec.export(&mut out);
 
+        // Client metrics
+        self.client.export(&mut out);
+
         out
     }
 
@@ -134,7 +137,9 @@ impl ServerMetrics {
 
     /// Record a client disconnection (decrements active count).
     pub fn client_disconnected(&self) {
-        self.clients_active.fetch_sub(1, Ordering::Relaxed);
+        let _ = self
+            .clients_active
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| Some(v.saturating_sub(1)));
     }
 
     /// Record a rejected connection attempt.
@@ -280,6 +285,40 @@ impl ClientMetrics {
     /// Record an automatic reconnection event.
     pub fn reconnect(&self) {
         self.reconnects.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn export(&self, out: &mut String) {
+        out.push_str(
+            "# HELP quicfuscate_client_connection_attempts Total client connection attempts\n",
+        );
+        out.push_str("# TYPE quicfuscate_client_connection_attempts counter\n");
+        out.push_str(&format!(
+            "quicfuscate_client_connection_attempts {}\n\n",
+            self.connection_attempts.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "# HELP quicfuscate_client_connection_successes Successful client connections\n",
+        );
+        out.push_str("# TYPE quicfuscate_client_connection_successes counter\n");
+        out.push_str(&format!(
+            "quicfuscate_client_connection_successes {}\n\n",
+            self.connection_successes.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP quicfuscate_client_connection_failures Failed client connections\n");
+        out.push_str("# TYPE quicfuscate_client_connection_failures counter\n");
+        out.push_str(&format!(
+            "quicfuscate_client_connection_failures {}\n\n",
+            self.connection_failures.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP quicfuscate_client_reconnects Automatic reconnection events\n");
+        out.push_str("# TYPE quicfuscate_client_reconnects counter\n");
+        out.push_str(&format!(
+            "quicfuscate_client_reconnects {}\n\n",
+            self.reconnects.load(Ordering::Relaxed)
+        ));
     }
 }
 

@@ -24,6 +24,7 @@ struct PacketInfo {
 /// Stealth-specific packet classification for flow shaping decisions.
 /// Distinct from the QUIC-level `transport::PacketType` which classifies wire packet types.
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 enum StealthPacketClass {
     Data,
     Ack,
@@ -35,40 +36,12 @@ impl FlowShaper {
     /// Create a new flow shaper.
     pub fn new(jitter_us: u64, _enable_dummy_retransmits: bool) -> Self {
         let jitter_max_us = jitter_us.max(1);
-        let s = Self {
+        Self {
             jitter_min_us: (jitter_max_us / 2).max(1),
             jitter_max_us,
             packet_history: Arc::new(Mutex::new(VecDeque::with_capacity(100))),
             _enabled: AtomicBool::new(true),
-        };
-        // Seed history with one entry of each packet type to exercise all enum variants
-        {
-            use std::time::Instant;
-            if let Ok(mut hist) = s.packet_history.lock() {
-                let now = Instant::now();
-                hist.push_back(PacketInfo {
-                    timestamp: now,
-                    _size: 0,
-                    _packet_type: StealthPacketClass::Data,
-                });
-                hist.push_back(PacketInfo {
-                    timestamp: now,
-                    _size: 0,
-                    _packet_type: StealthPacketClass::Ack,
-                });
-                hist.push_back(PacketInfo {
-                    timestamp: now,
-                    _size: 0,
-                    _packet_type: StealthPacketClass::Retransmit,
-                });
-                hist.push_back(PacketInfo {
-                    timestamp: now,
-                    _size: 0,
-                    _packet_type: StealthPacketClass::Dummy,
-                });
-            }
         }
-        s
     }
 
     /// Apply jitter to packet timing.

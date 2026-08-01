@@ -522,7 +522,7 @@ pub fn classify_content_type(ct: &str) -> ContentClass {
 struct DictEntry {
     dict: Option<Vec<u8>>, // trained dict bytes
     version: u32,
-    samples: Vec<Vec<u8>>, // training samples reservoir
+    samples: std::collections::VecDeque<Vec<u8>>, // training samples reservoir
 }
 
 type DictKey = (String, ContentClass);
@@ -546,10 +546,9 @@ pub fn submit_sample(ct: &str, data: &[u8]) {
     let e = reg.entry((persona, class)).or_default();
     // Cap sample size per entry.
     let take = data.len().min(4096);
-    e.samples.push(data[..take].to_vec());
-    // Reservoir limitieren
+    e.samples.push_back(data[..take].to_vec());
     if e.samples.len() > 200 {
-        e.samples.remove(0);
+        e.samples.pop_front();
     }
 }
 

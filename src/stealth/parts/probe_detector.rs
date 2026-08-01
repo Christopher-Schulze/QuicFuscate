@@ -105,11 +105,10 @@ impl ActiveProbeDetector {
                 };
 
                 if let Ok(mut history) = self.history.lock() {
+                    history.retain(|e| e._timestamp.elapsed().as_secs() < 60);
                     history.push(event);
 
-                    // Check threshold
-                    let recent_count =
-                        history.iter().filter(|e| e._timestamp.elapsed().as_secs() < 60).count();
+                    let recent_count = history.len();
 
                     if recent_count >= self.threshold {
                         error!("Active probing threshold exceeded! Count: {}", recent_count);

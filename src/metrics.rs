@@ -1,16 +1,20 @@
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+const MAX_CONCURRENT_METRICS_CONNECTIONS: usize = 32;
+
 async fn handle_connection(mut stream: TcpStream) {
     let mut buf = [0u8; 1024];
-    // Read a single request (very small parser sufficient for /telemetry)
-    let n = match stream.read(&mut buf).await {
-        Ok(0) => return,
-        Ok(n) => n,
-        Err(e) => {
+    let n = match tokio::time::timeout(std::time::Duration::from_secs(5), stream.read(&mut buf))
+        .await
+    {
+        Ok(Ok(0)) => return,
+        Ok(Ok(n)) => n,
+        Ok(Err(e)) => {
             log::debug!("Telemetry request read failed: {}", e);
             return;
         }
+        Err(_) => return,
     };
     let req = &buf[..n];
     if is_telemetry_request(req) {
@@ -39,7 +43,7 @@ async fn handle_connection(mut stream: TcpStream) {
 
 /// Check if a raw HTTP request targets the /telemetry endpoint.
 fn is_telemetry_request(req: &[u8]) -> bool {
-    req.starts_with(b"GET /telemetry") || req.starts_with(b"GET /telemetry ")
+    req.starts_with(b"GET /telemetry")
 }
 
 /// Spawn a minimal HTTP server that exposes a telemetry snapshot on /telemetry.
@@ -47,15 +51,26 @@ fn is_telemetry_request(req: &[u8]) -> bool {
 pub fn spawn_telemetry_server() {
     let addr =
         std::env::var("QUICFUSCATE_METRICS_ADDR").unwrap_or_else(|_| "127.0.0.1:9898".into());
-    // JoinHandle intentionally not stored: runs until process exit. Errors logged.
     tokio::spawn(async move {
+        let semaphore =
+            std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_METRICS_CONNECTIONS));
         match TcpListener::bind(&addr).await {
             Ok(listener) => {
                 log::info!("Telemetry server listening on {} at /telemetry", addr);
                 loop {
                     match listener.accept().await {
                         Ok((stream, _peer)) => {
-                            tokio::spawn(handle_connection(stream));
+                            let permit = match semaphore.clone().try_acquire_owned() {
+                                Ok(p) => p,
+                                Err(_) => {
+                                    drop(stream);
+                                    continue;
+                                }
+                            };
+                            tokio::spawn(async move {
+                                handle_connection(stream).await;
+                                drop(permit);
+                            });
                         }
                         Err(e) => {
                             log::warn!("Metrics accept error: {}", e);

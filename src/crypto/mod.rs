@@ -952,11 +952,14 @@ pub fn select_data_aead(
     key: &[u8],
     iv: &[u8],
 ) -> (Box<dyn AeadSeal + Send + Sync>, Box<dyn AeadOpen + Send + Sync>) {
-    // Normalize key/iv materials
     let mut k16 = [0u8; 16];
-    k16.copy_from_slice(&key[..16]);
+    for (i, b) in key.iter().take(16).enumerate() {
+        k16[i] = *b;
+    }
     let mut iv12 = [0u8; 12];
-    iv12.copy_from_slice(&iv[..12]);
+    for (i, b) in iv.iter().take(12).enumerate() {
+        iv12[i] = *b;
+    }
 
     let plan = resolve_data_aead_plan(DEFAULT_DATA_PLANE_AEAD_LEN);
     build_data_aead(plan, &k16, &iv12)
@@ -965,9 +968,13 @@ pub fn select_data_aead(
 /// Selects the data-plane AEAD backend for packet hot paths without boxed dispatch.
 pub(crate) fn select_packet_data_aead(key: &[u8], iv: &[u8]) -> (PacketAeadSeal, PacketAeadOpen) {
     let mut k16 = [0u8; 16];
-    k16.copy_from_slice(&key[..16]);
+    for (i, b) in key.iter().take(16).enumerate() {
+        k16[i] = *b;
+    }
     let mut iv12 = [0u8; 12];
-    iv12.copy_from_slice(&iv[..12]);
+    for (i, b) in iv.iter().take(12).enumerate() {
+        iv12[i] = *b;
+    }
 
     let plan = resolve_data_aead_plan(DEFAULT_DATA_PLANE_AEAD_LEN);
     build_packet_data_aead(plan, &k16, &iv12)

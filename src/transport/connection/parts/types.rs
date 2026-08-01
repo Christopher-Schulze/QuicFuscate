@@ -170,10 +170,13 @@ impl StreamRingBuffer {
         let available = capacity - self.size;
         let to_write = data.len().min(available);
 
-        for &b in data.iter().take(to_write) {
-            self.buffer[self.tail] = b;
-            self.tail = (self.tail + 1) & (capacity - 1); // Fast modulo for power of 2
+        let first = to_write.min(capacity - self.tail);
+        self.buffer[self.tail..self.tail + first].copy_from_slice(&data[..first]);
+        if first < to_write {
+            let second = to_write - first;
+            self.buffer[..second].copy_from_slice(&data[first..to_write]);
         }
+        self.tail = (self.tail + to_write) & (capacity - 1);
         self.size += to_write;
         to_write
     }
@@ -181,10 +184,15 @@ impl StreamRingBuffer {
     #[inline(always)]
     fn read(&mut self, buf: &mut [u8]) -> usize {
         let to_read = buf.len().min(self.size);
-        for out in buf.iter_mut().take(to_read) {
-            *out = self.buffer[self.head];
-            self.head = (self.head + 1) & (self.buffer.len() - 1);
+        let capacity = self.buffer.len();
+
+        let first = to_read.min(capacity - self.head);
+        buf[..first].copy_from_slice(&self.buffer[self.head..self.head + first]);
+        if first < to_read {
+            let second = to_read - first;
+            buf[first..to_read].copy_from_slice(&self.buffer[..second]);
         }
+        self.head = (self.head + to_read) & (capacity - 1);
         self.size -= to_read;
         to_read
     }

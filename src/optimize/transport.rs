@@ -553,6 +553,11 @@ unsafe fn bitmap_set_range_bmi2(bitmap: &mut [u64], start: usize, end: usize) {
     let end_word = end / 64;
     let end_bit = end % 64;
 
+    if start_word >= bitmap.len() {
+        return;
+    }
+    let end_word = end_word.min(bitmap.len() - 1);
+
     if start_word == end_word {
         // Range within single word
         let mask = _bzhi_u64(!0u64, (end_bit - start_bit + 1) as u32);

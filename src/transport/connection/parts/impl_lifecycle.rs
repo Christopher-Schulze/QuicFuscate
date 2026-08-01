@@ -464,7 +464,7 @@ impl Connection {
         for (start, end) in ranges {
             transmission_ids.extend(
                 self.lost_stream_transmission_by_pn
-                    .range(*start..*end)
+                    .range(*start..=*end)
                     .flat_map(|(_, transmission_ids)| transmission_ids.iter().copied()),
             );
         }

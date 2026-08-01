@@ -143,8 +143,9 @@ fn encode_name(name: &str, out: &mut Vec<u8>) {
         if label.is_empty() {
             continue;
         }
-        out.push(label.len() as u8);
-        out.extend_from_slice(label.as_bytes());
+        let len = label.len().min(63);
+        out.push(len as u8);
+        out.extend_from_slice(&label.as_bytes()[..len]);
     }
     out.push(0); // Root terminator.
 }

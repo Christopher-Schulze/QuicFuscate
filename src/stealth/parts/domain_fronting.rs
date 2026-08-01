@@ -128,9 +128,11 @@ impl DomainFrontingManager {
     #[inline]
     pub fn get_fronted_domain(&self) -> String {
         use rand::Rng;
+        if self.domains.is_empty() {
+            return "cdn.cloudflare.com".to_string();
+        }
         let mut rng = rand::rng();
 
-        // Add time-based jitter to prevent predictable patterns
         let jitter = rng.random_range(0..3);
         let current = self.index.fetch_add(1 + jitter, Ordering::Relaxed);
         let idx = current % self.domains.len();

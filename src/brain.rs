@@ -408,9 +408,8 @@ struct PolicyActuatorSnap {
 
 impl StealthBrainState {
     fn new(cfg: &StealthBrainConfig) -> Self {
-        let kf_enabled = true;
         Self {
-            kalman_ce: if kf_enabled { Some(KalmanFilter::new(0.01, 0.1)) } else { None },
+            kalman_ce: Some(KalmanFilter::new(0.01, 0.1)),
             last_red_ppm: 100_000,
             red_ppm_momentum: 0.0,
             last_fec_interval: 8,
@@ -599,7 +598,7 @@ pub struct StealthBrain {
     cfg: StealthBrainConfig,
     st: RwLock<StealthBrainState>,
     // Lock-free buffers for observer callbacks - drained in apply_policy's single write lock.
-    pending_ecn: AtomicU64, // packed: ect0 in high 32 bits, ect1 in bits 16..32, ce in low 16
+    pending_ecn: AtomicU64, // packed: ect0 in bits 48..64, ect1 in bits 32..48, ce in bits 0..32
     pending_ack_delay: AtomicU64, // ack_delay in microseconds
     // Server Push cover-traffic knobs and telemetry inputs
     #[cfg(any(test, feature = "rust-tests"))]
@@ -1058,7 +1057,7 @@ impl TransportObserver for StealthBrain {
                         best_val = st.bandit_avg_reward[i];
                     }
                 }
-                if best_val.is_finite() && best_val > f64::NEG_INFINITY / 2.0 {
+                if best_val.is_finite() {
                     best
                 } else {
                     let mut idx = 0usize;

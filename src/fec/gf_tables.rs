@@ -1,32 +1,41 @@
 use crate::optimize::{self};
 use log::warn;
-use std::sync::{Once, OnceLock};
+use std::sync::OnceLock;
 
 // GF(2^8) constants
 const IRREDUCIBLE_POLY: u16 = 0x11D;
-// GF16 poly constant removed (unused); reduction constants are in kernels
 
-// Precomputed tables for GF(2^8)
-static mut LOG_TABLE: [u8; 256] = [0; 256];
-static mut EXP_TABLE: [u8; 512] = [0; 512];
-static INIT: Once = Once::new();
+static LOG_TABLE: OnceLock<[u8; 256]> = OnceLock::new();
+static EXP_TABLE: OnceLock<[u8; 512]> = OnceLock::new();
 
 pub(crate) fn init_tables() {
-    INIT.call_once(|| {
-        unsafe {
-            // Initialize exp/log tables
-            let mut x = 1u8;
-            for i in 0..255 {
-                EXP_TABLE[i] = x;
-                EXP_TABLE[i + 255] = x;
-                LOG_TABLE[x as usize] = i as u8;
-                let mut y = x as u16;
-                y = (y << 1) ^ if y & 0x80 != 0 { IRREDUCIBLE_POLY } else { 0 };
-                x = y as u8;
-            }
-            LOG_TABLE[0] = 0;
-        }
-    });
+    if LOG_TABLE.get().is_some() {
+        return;
+    }
+    let mut log = [0u8; 256];
+    let mut exp = [0u8; 512];
+    let mut x = 1u8;
+    for i in 0..255 {
+        exp[i] = x;
+        exp[i + 255] = x;
+        log[x as usize] = i as u8;
+        let mut y = x as u16;
+        y = (y << 1) ^ if y & 0x80 != 0 { IRREDUCIBLE_POLY } else { 0 };
+        x = y as u8;
+    }
+    log[0] = 0;
+    let _ = LOG_TABLE.set(log);
+    let _ = EXP_TABLE.set(exp);
+}
+
+#[inline(always)]
+fn log_table() -> &'static [u8; 256] {
+    LOG_TABLE.get().expect("GF tables not initialized")
+}
+
+#[inline(always)]
+fn exp_table() -> &'static [u8; 512] {
+    EXP_TABLE.get().expect("GF tables not initialized")
 }
 
 #[inline(always)]
@@ -35,7 +44,7 @@ pub(crate) fn prefetch_gf_log_lookup(idx: usize) {
     {
         unsafe {
             crate::optimize::prefetch(
-                LOG_TABLE.as_ptr().add(idx),
+                log_table().as_ptr().add(idx),
                 crate::optimize::PrefetchHint::T0,
             );
         }
@@ -66,12 +75,10 @@ pub(crate) fn gf_mul_table(a: u8, b: u8) -> u8 {
     if a == 0 || b == 0 {
         return 0;
     }
-    unsafe {
-        let log_a = LOG_TABLE[a as usize] as u16;
-        let log_b = LOG_TABLE[b as usize] as u16;
-        let sum_log = log_a + log_b;
-        EXP_TABLE[sum_log as usize]
-    }
+    let log_a = log_table()[a as usize] as u16;
+    let log_b = log_table()[b as usize] as u16;
+    let sum_log = log_a + log_b;
+    exp_table()[sum_log as usize]
 }
 
 #[inline(always)]
@@ -80,12 +87,9 @@ pub(crate) fn gf_inv8(x: u8) -> u8 {
     if x == 0 {
         return 0;
     }
-    unsafe {
-        let lx = LOG_TABLE[x as usize] as i32;
-        // In GF(2^8) with 0x11D primitive, multiplicative group size is 255
-        let e = 255 - lx;
-        EXP_TABLE[(e as usize) % 255]
-    }
+    let lx = log_table()[x as usize] as i32;
+    let e = 255 - lx;
+    exp_table()[(e as usize) % 255]
 }
 
 // Removed gf_exp (not used).
@@ -327,11 +331,11 @@ pub(crate) fn gf_mul_scalar_slice(coeff: u8, src: &[u8], out_xor: &mut [u8]) {
     // The LUT is rebuilt only when the coefficient changes, avoiding redundant computation
     // on hot paths where the same coefficient is reused across consecutive slices.
     thread_local! {
-        static CACHED_LUT: std::cell::RefCell<(u8, [u8; 256])> = const { std::cell::RefCell::new((0xFF, [0u8; 256])) };
+        static CACHED_LUT: std::cell::RefCell<(Option<u8>, [u8; 256])> = const { std::cell::RefCell::new((None, [0u8; 256])) };
     }
     CACHED_LUT.with(|cell| {
         let mut cached = cell.borrow_mut();
-        if cached.0 != coeff {
+        if cached.0 != Some(coeff) {
             prefetch_gf_log_lookup(coeff as usize);
             let lut = &mut cached.1;
             let mut x = 0;
@@ -346,7 +350,7 @@ pub(crate) fn gf_mul_scalar_slice(coeff: u8, src: &[u8], out_xor: &mut [u8]) {
                 lut[x] = gf_mul_table(coeff, x as u8);
                 x += 1;
             }
-            cached.0 = coeff;
+            cached.0 = Some(coeff);
         }
         let lut = &cached.1;
 

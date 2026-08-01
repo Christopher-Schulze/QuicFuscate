@@ -4485,7 +4485,7 @@ level = "debug"
 - This is a loopback-focused local-development shortcut, not a deployment recommendation
 - To use a different password, edit those scripts or launch the server manually with `--admin-web-user` and `--admin-web-password`
 
-## Deep Audit Findings (2026-08-04)
+## Deep Audit Findings (2026-08-01)
 
 A full deep-audit sweep of `src/` was performed with parallel read-only module scans and `cargo check`/`cargo clippy` verification. The scan produced new TODO entries (TODO-626 through TODO-689) and augmented existing TODOs with additional evidence. The findings span crypto correctness, FEC resource bounds, transport/stealth hot-path issues, privilege and unsafe-code correctness, client/server lifecycle, DNS behavior, time-source consistency, SIMD static mutables, and a full unsafe-code surface audit (memory pools, SIMD, crypto, transport, interface, privilege, FEC, io_uring, and auxiliary modules).
 

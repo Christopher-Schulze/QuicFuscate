@@ -553,7 +553,14 @@ impl SyslogWriter {
 
     /// Format and send a single syslog message.
     pub fn write_line(&mut self, level: Level, msg: &str) -> io::Result<()> {
-        let line = format_rfc5424(&self.hostname, &self.app_name, &self.procid, level, msg);
+        let line = format_rfc5424_facility(
+            self.facility,
+            &self.hostname,
+            &self.app_name,
+            &self.procid,
+            level,
+            msg,
+        );
         self.sock.send(line.as_bytes())?;
         Ok(())
     }
@@ -585,10 +592,20 @@ pub fn format_rfc5424(
     level: Level,
     msg: &str,
 ) -> String {
+    format_rfc5424_facility(DEFAULT_SYSLOG_FACILITY, hostname, app_name, procid, level, msg)
+}
+
+fn format_rfc5424_facility(
+    facility: u8,
+    hostname: &str,
+    app_name: &str,
+    procid: &str,
+    level: Level,
+    msg: &str,
+) -> String {
     let severity = level_to_severity(level);
-    let pri = (DEFAULT_SYSLOG_FACILITY as u32) * 8 + severity as u32;
+    let pri = (facility as u32) * 8 + severity as u32;
     let ts = rfc3339_utc(SystemTime::now());
-    // MSGID and STRUCTURED-DATA are nilvalues ("-").
     format!("<{}>1 {} {} {} {} - - {}", pri, ts, hostname, app_name, procid, msg)
 }
 
