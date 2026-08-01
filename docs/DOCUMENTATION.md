@@ -4487,7 +4487,7 @@ level = "debug"
 
 ## Deep Audit Findings (2026-08-04)
 
-A full deep-audit sweep of `src/` was performed with parallel read-only module scans and `cargo check`/`cargo clippy` verification. The scan produced new TODO entries (TODO-626 through TODO-677) and augmented existing TODOs with additional evidence. The findings span crypto correctness, FEC resource bounds, transport/stealth hot-path issues, privilege and unsafe-code correctness, client/server lifecycle, DNS behavior, time-source consistency, SIMD static mutables, and production-readiness gaps.
+A full deep-audit sweep of `src/` was performed with parallel read-only module scans and `cargo check`/`cargo clippy` verification. The scan produced new TODO entries (TODO-626 through TODO-689) and augmented existing TODOs with additional evidence. The findings span crypto correctness, FEC resource bounds, transport/stealth hot-path issues, privilege and unsafe-code correctness, client/server lifecycle, DNS behavior, time-source consistency, SIMD static mutables, and a full unsafe-code surface audit (memory pools, SIMD, crypto, transport, interface, privilege, FEC, io_uring, and auxiliary modules).
 
 ### Security-Critical Findings
 
@@ -4537,6 +4537,18 @@ A full deep-audit sweep of `src/` was performed with parallel read-only module s
 - **Audit log blocking flush**: `src/audit/mod.rs` flushes synchronously with no timeout. Tracked in TODO-675.
 - **AMX static mut**: `src/simd/amx.rs` uses a `static mut` tile config. Tracked in TODO-676.
 - **Time source bypass**: multiple modules use `Instant::now()` or `SystemTime::now()` directly. Tracked in TODO-677.
+- **Memory pool unsafe**: `src/optimize/unsafe.rs` and `src/optimize/parts/memory_pool.rs` lack runtime bounds and TLS thread-affinity checks. Tracked in TODO-678.
+- **SIMD unsafe surface**: `src/simd/*` and `src/optimize/simd/*` lack safety docs and runtime bounds. Tracked in TODO-679.
+- **Optimize brain/transport/stealth unsafe**: AVX-512/AVX2 confusion and raw pointer loops. Tracked in TODO-680.
+- **Crypto unsafe primitives**: AES, AEGIS, MORUS, GCM, Poly1305, ChaCha lack safety docs and bounds. Tracked in TODO-681.
+- **Transport unsafe**: `recvmmsg`/`sendmmsg`, AF_XDP, and frame parsing lack validation. Tracked in TODO-682.
+- **Interface/platform unsafe**: Wintun, Linux, macOS, Windows WFP lack syscall checks and safety docs. Tracked in TODO-683.
+- **Privilege/mlock/secret unsafe**: `privilege/drop.rs`, mlock, `qftls.rs`, `secret.rs` handle credentials unsafely. Tracked in TODO-684.
+- **QKey/admin unsafe**: QKey registry and admin session blocks lack safety docs. Tracked in TODO-685.
+- **FEC unsafe**: GF tables, GF16, decoders, codecs use raw pointers without full validation. Tracked in TODO-686.
+- **io_uring/io_driver unsafe**: SQE/CQE lifetimes and raw socket buffers undocumented. Tracked in TODO-687.
+- **Audit/limits unsafe**: audit log and rate limiter `unsafe` blocks undocumented. Tracked in TODO-688.
+- **Remaining unsafe**: `cpu_dispatch`, `telemetry`, `cache_and_const`, `lib.rs`, and tests need safety docs. Tracked in TODO-689.
 
 ### Build Verification
 

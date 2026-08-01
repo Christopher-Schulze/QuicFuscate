@@ -1029,7 +1029,7 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 
 ## Deep Audit Update (2026-08-04)
 
-A full source-audit sweep produced TODO-626 through TODO-677 and augmented TODO-570, TODO-584, TODO-587, TODO-592, TODO-615, TODO-576, and TODO-649. The new findings affect the following wiring surfaces and should be reconciled before treating those areas as production-proven:
+A full source-audit sweep produced TODO-626 through TODO-689 and augmented TODO-570, TODO-584, TODO-587, TODO-592, TODO-615, TODO-576, and TODO-649. The new findings affect the following wiring surfaces and should be reconciled before treating those areas as production-proven:
 
 - **Crypto data plane**: constant-time tag comparison (TODO-626), key/IV length validation (TODO-627), AEGIS `unwrap` panics (TODO-628), AEAD header-protection sample validation (TODO-629), GHASH test override removal (TODO-630), round-key zeroization (TODO-631), nonce/IV uniqueness (TODO-632), and QUIC KDF input validation (TODO-633).
 - **FEC recovery**: unbounded fountain-decoder storage (TODO-634), adaptive emitted-ID cap (TODO-635), decoder peeling complexity (TODO-636), and Wiedemann buffer reuse (TODO-637).
@@ -1038,5 +1038,9 @@ A full source-audit sweep produced TODO-626 through TODO-677 and augmented TODO-
 - **Client/Server/DNS/PKI**: DNS backup path (TODO-649), DNS intercept spawn failure (TODO-650), PKI timestamp fallback (TODO-656), CLI probe parse errors (TODO-657), profile ID collision (TODO-658), retry token length validation (TODO-659), blacklist sync ownership (TODO-660), admin per-operation timeout (TODO-661), profile save atomicity (TODO-662), client TUN dual-stack (TODO-663), Windows TUN backend confusion (TODO-664), admin replay store pruning (TODO-665), DNS NXDOMAIN lie (TODO-666), DNS rate limiting (TODO-668), DNS allocation/timeout (TODO-669), env var race/validation (TODO-670), umask file permissions (TODO-671), log rotation hooks (TODO-672), CLI unbounded strings (TODO-673), duplicate logging init (TODO-674), and audit blocking flush (TODO-675).
 - **Privilege and secrets**: SecretString UTF-8 safety (TODO-651), privilege `assume_init`/`CStr` validation (TODO-652, TODO-653), fsutil TOCTOU (TODO-667).
 - **SIMD/time-source**: AMX `static mut` tile config (TODO-676), `Instant::now()` bypass across brain, flow shaping, probe detector, qftls, core, engine, and session (TODO-677).
+- **Unsafe memory and SIMD**: `UnsafeMemoryPool` bounds/affinity (TODO-678), full SIMD surface lacking safety docs/bounds (TODO-679), optimize brain/transport/stealth raw loops (TODO-680).
+- **Unsafe crypto/transport/interface/privilege**: crypto primitives (TODO-681), transport syscalls (TODO-682), interface/Wintun/WFP (TODO-683), privilege/mlock/secrets (TODO-684).
+- **Unsafe FEC/io_uring/auxiliary**: FEC GF tables and decoders (TODO-686), io_uring/io_driver (TODO-687), audit/limits (TODO-688), cpu_dispatch/telemetry/cache/lib.rs/tests (TODO-689).
+- **Unsafe QKey/admin**: QKey registry and admin session blocks (TODO-685).
 
 `cargo check --all-targets --all-features` and `cargo clippy --all-targets --all-features -- -D warnings` pass after a `cargo clean` recovered a corrupted `target/` cache.
