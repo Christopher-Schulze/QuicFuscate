@@ -47,19 +47,71 @@ impl LinuxPlatform {
     }
 
     fn run_command(&self, cmd: &str, args: &[&str]) -> Result<(), PlatformError> {
-        let status = Command::new(cmd)
+        let output = Command::new(cmd)
             .args(args)
-            .status()
-            .map_err(|e| PlatformError::CommandFailed(e.to_string()))?;
-        if status.success() {
+            .output()
+            .map_err(|e| PlatformError::CommandFailed(format!("{cmd} spawn: {e}")))?;
+        if output.status.success() {
             return Ok(());
         }
-        Err(PlatformError::CommandFailed(format!("{} {} failed", cmd, args.join(" "))))
+        Err(PlatformError::CommandFailed(format!(
+            "{} {} returned status {}: {}",
+            cmd,
+            args.join(" "),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
     }
 
     /// Run ip command.
     fn run_ip(&self, args: &[&str]) -> Result<(), PlatformError> {
         self.run_command("ip", args)
+    }
+
+    fn interface_exists(name: &str) -> Result<bool, PlatformError> {
+        let output =
+            Command::new("ip").args(["link", "show", "dev", name]).output().map_err(|error| {
+                PlatformError::CommandFailed(format!("ip link inspect spawn: {error}"))
+            })?;
+        if output.status.success() {
+            return Ok(true);
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+        if stderr.contains("cannot find device")
+            || stderr.contains("does not exist")
+            || stderr.contains("no such device")
+        {
+            return Ok(false);
+        }
+        Err(PlatformError::CommandFailed(format!(
+            "ip link inspect returned status {}: {}",
+            output.status,
+            stderr.trim()
+        )))
+    }
+
+    fn remove_owned_interface(name: &str) -> Result<(), PlatformError> {
+        if !Self::interface_exists(name)? {
+            return Ok(());
+        }
+        let output =
+            Command::new("ip").args(["link", "delete", "dev", name]).output().map_err(|error| {
+                PlatformError::CommandFailed(format!("ip link delete spawn: {error}"))
+            })?;
+        if !output.status.success() && Self::interface_exists(name)? {
+            return Err(PlatformError::CommandFailed(format!(
+                "ip link delete returned status {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        if Self::interface_exists(name)? {
+            return Err(PlatformError::DeviceError(format!(
+                "owned TUN {} remains after rollback",
+                name
+            )));
+        }
+        Ok(())
     }
 
     fn backup_resolv_conf_if_needed(&self) -> Result<(), PlatformError> {
@@ -122,6 +174,26 @@ impl PlatformBackend for LinuxPlatform {
         use std::os::unix::io::AsRawFd;
         use std::os::unix::io::IntoRawFd;
 
+        if let Some(requested_name) = config.name.as_deref() {
+            if requested_name.is_empty() || requested_name.as_bytes().len() > 15 {
+                return Err(PlatformError::DeviceError(format!(
+                    "Interface name must contain 1-15 bytes, got {}",
+                    requested_name.as_bytes().len()
+                )));
+            }
+            if requested_name.contains('/') || requested_name.contains('\0') {
+                return Err(PlatformError::DeviceError(
+                    "Interface name contains a forbidden character".to_string(),
+                ));
+            }
+            if Self::interface_exists(requested_name)? {
+                return Err(PlatformError::DeviceError(format!(
+                    "Linux TUN interface {} already exists",
+                    requested_name
+                )));
+            }
+        }
+
         let file = match std::fs::OpenOptions::new().read(true).write(true).open("/dev/net/tun") {
             Ok(f) => f,
             Err(_) => std::fs::OpenOptions::new()
@@ -173,36 +245,60 @@ impl PlatformBackend for LinuxPlatform {
         let name: String =
             ifr.ifr_name[..name_len].iter().map(|&c| char::from(c.to_ne_bytes()[0])).collect();
         if name.is_empty() {
+            drop(file);
             return Err(PlatformError::DeviceError(
                 "Kernel did not return a valid tunnel interface name".to_string(),
             ));
         }
+        if let Some(requested_name) = config.name.as_deref() {
+            if requested_name != name {
+                drop(file);
+                let cleanup = Self::remove_owned_interface(&name);
+                return Err(match cleanup {
+                    Ok(()) => PlatformError::DeviceError(format!(
+                        "Kernel returned interface {}, requested {}",
+                        name, requested_name
+                    )),
+                    Err(cleanup_error) => PlatformError::DeviceError(format!(
+                        "Kernel returned interface {}, requested {}; rollback failed: {}",
+                        name, requested_name, cleanup_error
+                    )),
+                });
+            }
+        }
 
         // Configure the device via ip commands
-        self.run_ip(&["link", "set", &name, "up"])?;
-        match config.address {
-            IpAddr::V4(_) => {
-                self.run_ip(&[
+        if let Err(error) = self
+            .run_ip(&["link", "set", &name, "up"])
+            .and_then(|()| match config.address {
+                IpAddr::V4(_) => self.run_ip(&[
                     "addr",
                     "add",
                     &format!("{}/{}", config.address, config.netmask),
                     "dev",
                     &name,
-                ])?;
-            }
-            IpAddr::V6(_) => {
-                self.run_ip(&[
+                ]),
+                IpAddr::V6(_) => self.run_ip(&[
                     "-6",
                     "addr",
                     "add",
                     &format!("{}/{}", config.address, config.netmask),
                     "dev",
                     &name,
-                ])?;
-            }
+                ]),
+            })
+            .and_then(|()| self.run_ip(&["link", "set", &name, "mtu", &config.mtu.to_string()]))
+        {
+            drop(file);
+            let cleanup = Self::remove_owned_interface(&name);
+            return Err(match cleanup {
+                Ok(()) => error,
+                Err(cleanup_error) => PlatformError::DeviceError(format!(
+                    "Linux TUN setup failed: {}; rollback failed: {}",
+                    error, cleanup_error
+                )),
+            });
         }
-
-        self.run_ip(&["link", "set", &name, "mtu", &config.mtu.to_string()])?;
 
         log::info!("Created TUN device {} with IP {}/{}", name, config.address, config.netmask);
 
@@ -212,6 +308,19 @@ impl PlatformBackend for LinuxPlatform {
         // interface name. It lives until the end of the statement. `if_nametoindex` only
         // reads the string and cannot cause UB regardless of the returned index value.
         let id = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
+        if id == 0 {
+            let error = std::io::Error::last_os_error();
+            drop(file);
+            let cleanup = Self::remove_owned_interface(&name);
+            return Err(match cleanup {
+                Ok(()) => {
+                    PlatformError::DeviceError(format!("if_nametoindex({name}) failed: {error}"))
+                }
+                Err(cleanup_error) => PlatformError::DeviceError(format!(
+                    "if_nametoindex({name}) failed: {error}; rollback failed: {cleanup_error}"
+                )),
+            });
+        }
         self.set_active_tun_name(Some(name.clone()));
 
         Ok(TunHandle { name, id, fd: file.into_raw_fd() })
@@ -239,7 +348,7 @@ impl PlatformBackend for LinuxPlatform {
             }
         }
 
-        if Path::new("/sys/class/net").join(&handle.name).exists() {
+        if Self::interface_exists(&handle.name)? {
             return Err(PlatformError::DeviceError(format!(
                 "owned TUN {} remains after descriptor close: {}",
                 handle.name,
@@ -353,10 +462,17 @@ impl PlatformBackend for LinuxPlatform {
     }
 
     fn default_gateway(&self) -> Result<IpAddr, PlatformError> {
-        let output = Command::new("ip")
-            .args(["route", "show", "default"])
-            .output()
-            .map_err(|e| PlatformError::CommandFailed(e.to_string()))?;
+        let output =
+            Command::new("ip").args(["route", "show", "default"]).output().map_err(|e| {
+                PlatformError::CommandFailed(format!("ip default route inspect spawn: {e}"))
+            })?;
+        if !output.status.success() {
+            return Err(PlatformError::CommandFailed(format!(
+                "ip route show default returned status {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
 
@@ -371,10 +487,17 @@ impl PlatformBackend for LinuxPlatform {
             }
         }
 
-        let output_v6 = Command::new("ip")
-            .args(["-6", "route", "show", "default"])
-            .output()
-            .map_err(|e| PlatformError::CommandFailed(e.to_string()))?;
+        let output_v6 =
+            Command::new("ip").args(["-6", "route", "show", "default"]).output().map_err(|e| {
+                PlatformError::CommandFailed(format!("ip IPv6 default route inspect spawn: {e}"))
+            })?;
+        if !output_v6.status.success() {
+            return Err(PlatformError::CommandFailed(format!(
+                "ip -6 route show default returned status {}: {}",
+                output_v6.status,
+                String::from_utf8_lossy(&output_v6.stderr).trim()
+            )));
+        }
         let stdout_v6 = String::from_utf8_lossy(&output_v6.stdout);
         for (i, word) in stdout_v6.split_whitespace().enumerate() {
             if word == "via" {

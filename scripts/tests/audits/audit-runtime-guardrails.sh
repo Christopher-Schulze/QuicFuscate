@@ -381,6 +381,25 @@ else
   append_item "tun_e2e_owned_process_cleanup" "fail" "child PID capture, scoped cleanup, exit trap, or pre-existing runtime refusal missing"
 fi
 
+TUN_PROVISIONING_NEGATIVE_HARNESS="scripts/tests/tun-provisioning-negative-netns.sh"
+if [[ -x "$TUN_PROVISIONING_NEGATIVE_HARNESS" ]] \
+  && rg -F -- 'expect_failure "overlong-name"' "$TUN_PROVISIONING_NEGATIVE_HARNESS" >/dev/null \
+  && rg -F -- 'expect_failure "duplicate-name"' "$TUN_PROVISIONING_NEGATIVE_HARNESS" >/dev/null \
+  && rg -F -- 'expect_failure "permission-denied"' "$TUN_PROVISIONING_NEGATIVE_HARNESS" >/dev/null \
+  && rg -F -- 'expect_failure "conflicting-address"' "$TUN_PROVISIONING_NEGATIVE_HARNESS" >/dev/null \
+  && rg -F -- 'expect_failure "routing-failure"' "$TUN_PROVISIONING_NEGATIVE_HARNESS" >/dev/null \
+  && rg -F -- 'expect_failure "routing-retry"' "$TUN_PROVISIONING_NEGATIVE_HARNESS" >/dev/null \
+  && rg -F -- 'missing-interface' "$TUN_PROVISIONING_NEGATIVE_HARNESS" >/dev/null \
+  && rg -F -- 'assert_interface_absent' "$TUN_PROVISIONING_NEGATIVE_HARNESS" >/dev/null \
+  && rg -F -- 'ip netns add "$NAMESPACE"' "$TUN_PROVISIONING_NEGATIVE_HARNESS" >/dev/null \
+  && ! rg -n --no-messages 'pkill|killall' "$TUN_PROVISIONING_NEGATIVE_HARNESS" >/dev/null; then
+  pass "Linux TUN provisioning has a process-real negative, retry, rollback, and zero-residue namespace harness"
+  append_item "tun_provisioning_negative_namespace_proof" "ok" "overlong names, duplicate state, permission denial, conflicting address, missing interface, retry, and exact residue checks are present"
+else
+  fail_critical "Linux TUN provisioning negative namespace proof is missing or incomplete"
+  append_item "tun_provisioning_negative_namespace_proof" "fail" "missing executable harness, required negative cases, exact residue checks, namespace setup, or safe process ownership"
+fi
+
 SPECIALIZED_TUN_E2E_HARNESSES=(
   scripts/tests/tun-e2e-fec-netns.sh
   scripts/tests/tun-e2e-fec-burst-netns.sh

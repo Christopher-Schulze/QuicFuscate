@@ -305,6 +305,42 @@ fn iptables_rule_exists(
 }
 
 #[cfg(target_os = "linux")]
+pub(crate) fn iptables_rule_exists_exact(
+    program: &str,
+    table: &str,
+    chain: &str,
+    rule_args: &[&str],
+) -> Result<bool, String> {
+    iptables_rule_exists(program, table, chain, rule_args)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn verify_nft_table_rules(
+    family: &str,
+    table: &str,
+    required_fragments: &[&str],
+) -> Result<(), std::io::Error> {
+    let output = Command::new("nft")
+        .args(["list", "table", family, table])
+        .output()
+        .map_err(|error| std::io::Error::other(format!("nft table verify: {error}")))?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "nft table verify returned status {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim(),
+        )));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if let Some(missing) = required_fragments.iter().find(|fragment| !stdout.contains(**fragment)) {
+        return Err(std::io::Error::other(format!(
+            "nft table {family} {table} is missing required rule fragment {missing:?}"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 pub(crate) fn cleanup_iptables_rule(
     program: &str,
     table: &str,

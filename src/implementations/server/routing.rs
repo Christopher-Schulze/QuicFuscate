@@ -12,6 +12,8 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::process::Command;
 #[cfg(target_os = "macos")]
 use std::process::Stdio;
+#[cfg(target_os = "linux")]
+use std::sync::Mutex;
 
 /// Routing manager for VPN server.
 pub struct RoutingManager {
@@ -27,6 +29,20 @@ pub struct RoutingManager {
     ipv6_prefix_len: u8,
     /// Explicit opt-in for direct forwarding back out of the TUN interface.
     client_to_client_enabled: bool,
+    /// Host mutations made by this manager and therefore eligible for exact
+    /// rollback. Pre-existing desired state is never claimed as owned.
+    #[cfg(target_os = "linux")]
+    ownership: Mutex<RoutingOwnership>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct RoutingOwnership {
+    ipv4_address_added: bool,
+    ipv6_address_added: bool,
+    link_brought_up: bool,
+    ipv4_forwarding_previous: Option<String>,
+    ipv6_forwarding_previous: Option<String>,
 }
 
 /// Routing errors.
@@ -72,6 +88,8 @@ impl RoutingManager {
             server_ipv6: None,
             ipv6_prefix_len: 64,
             client_to_client_enabled: false,
+            #[cfg(target_os = "linux")]
+            ownership: Mutex::new(RoutingOwnership::default()),
         }
     }
 
@@ -93,6 +111,8 @@ impl RoutingManager {
             server_ipv6: Some(server_ipv6),
             ipv6_prefix_len,
             client_to_client_enabled: false,
+            #[cfg(target_os = "linux")]
+            ownership: Mutex::new(RoutingOwnership::default()),
         }
     }
 
@@ -127,64 +147,188 @@ impl RoutingManager {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn linux_json(args: &[&str]) -> Result<serde_json::Value, RoutingError> {
+        let output = Command::new("ip")
+            .args(args)
+            .output()
+            .map_err(|error| RoutingError::CommandFailed(format!("ip inspect spawn: {error}")))?;
+        if !output.status.success() {
+            return Err(RoutingError::CommandFailed(format!(
+                "ip {} returned status {}: {}",
+                args.join(" "),
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        serde_json::from_slice(&output.stdout).map_err(|error| {
+            RoutingError::CommandFailed(format!(
+                "ip {} returned invalid JSON: {error}",
+                args.join(" ")
+            ))
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn linux_link_is_up(&self) -> Result<bool, RoutingError> {
+        let value = Self::linux_json(&["-j", "link", "show", "dev", &self.tun_name])?;
+        let item = value.as_array().and_then(|items| items.first()).ok_or_else(|| {
+            RoutingError::CommandFailed(format!(
+                "ip link inspection returned no device {}",
+                self.tun_name
+            ))
+        })?;
+        Ok(item
+            .get("flags")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|flags| flags.iter().any(|flag| flag.as_str() == Some("UP"))))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn linux_address_present(
+        &self,
+        family: &str,
+        address: &str,
+        prefix: u8,
+    ) -> Result<bool, RoutingError> {
+        let value = Self::linux_json(&["-j", "address", "show", "dev", &self.tun_name])?;
+        let address_items = value
+            .as_array()
+            .and_then(|items| items.first())
+            .and_then(|item| item.get("addr_info"))
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                RoutingError::CommandFailed(format!(
+                    "ip address inspection omitted addr_info for {}",
+                    self.tun_name
+                ))
+            })?;
+        Ok(address_items.iter().any(|entry| {
+            entry.get("family").and_then(serde_json::Value::as_str) == Some(family)
+                && entry.get("local").and_then(serde_json::Value::as_str) == Some(address)
+                && entry.get("prefixlen").and_then(serde_json::Value::as_u64)
+                    == Some(u64::from(prefix))
+        }))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn ipv4_prefix_len(&self) -> Result<u8, RoutingError> {
+        let raw = u32::from(self.netmask);
+        let prefix = raw.leading_ones();
+        let canonical = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
+        if raw != canonical {
+            return Err(RoutingError::UnsupportedConfiguration(format!(
+                "server IPv4 netmask {} is not contiguous",
+                self.netmask
+            )));
+        }
+        Ok(prefix as u8)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn verify_linux_addresses(&self) -> Result<(), RoutingError> {
+        let prefix = self.ipv4_prefix_len()?;
+        let address = self.server_ip.to_string();
+        if !self.linux_address_present("inet", &address, prefix)? {
+            return Err(RoutingError::CommandFailed(format!(
+                "Linux TUN {} is missing IPv4 address {}/{}",
+                self.tun_name, address, prefix
+            )));
+        }
+        if let Some(ipv6) = self.server_ipv6 {
+            let address = ipv6.to_string();
+            if self.ipv6_prefix_len > 128
+                || !self.linux_address_present("inet6", &address, self.ipv6_prefix_len)?
+            {
+                return Err(RoutingError::CommandFailed(format!(
+                    "Linux TUN {} is missing IPv6 address {}/{}",
+                    self.tun_name, address, self.ipv6_prefix_len
+                )));
+            }
+        }
+        if !self.linux_link_is_up()? {
+            return Err(RoutingError::CommandFailed(format!(
+                "Linux TUN {} is not administratively up",
+                self.tun_name
+            )));
+        }
+        Ok(())
+    }
+
     /// Set up routing rules.
     #[cfg(target_os = "linux")]
     pub fn setup(&self) -> Result<(), RoutingError> {
-        // Assign IPv4 address to the TUN interface
-        self.assign_tun_address_linux()?;
+        let result = (|| {
+            self.assign_tun_address_linux()?;
+            self.enable_ip_forwarding()?;
 
-        // Enable IPv4 forwarding
-        self.enable_ip_forwarding()?;
-
-        // Calculate subnet
-        let subnet = self.calculate_subnet();
-
-        match self.firewall_backend {
-            crate::firewall::FirewallBackend::Nftables => {
-                self.setup_nftables(&subnet)?;
-                log::info!("Routing configured (nftables): {} via {}", subnet, self.wan_interface);
-            }
-            crate::firewall::FirewallBackend::Iptables => {
-                self.setup_iptables(&subnet)?;
-                log::info!("Routing configured (iptables): {} via {}", subnet, self.wan_interface);
-            }
-        }
-
-        // IPv6 setup (if enabled)
-        if self.is_ipv6_enabled() {
-            self.assign_tun_address_v6_linux()?;
-            self.enable_ipv6_forwarding()?;
-            let v6_subnet = self.calculate_ipv6_subnet();
+            let subnet = self.calculate_subnet_checked()?;
+            let ipv6_subnet = if self.is_ipv6_enabled() {
+                Some(self.calculate_ipv6_subnet_checked()?)
+            } else {
+                None
+            };
             match self.firewall_backend {
                 crate::firewall::FirewallBackend::Nftables => {
-                    // nftables inet table already covers IPv6 in setup_nftables
-                    // when dual-stack is enabled — no separate call needed.
+                    self.setup_nftables(&subnet)?;
                     log::info!(
-                        "IPv6 routing configured (nftables inet): {} via {}",
-                        v6_subnet,
+                        "Routing configured (nftables): {} via {}",
+                        subnet,
                         self.wan_interface
                     );
                 }
                 crate::firewall::FirewallBackend::Iptables => {
-                    self.setup_ip6tables(&v6_subnet)?;
+                    self.setup_iptables(&subnet)?;
                     log::info!(
-                        "IPv6 routing configured (ip6tables): {} via {}",
-                        v6_subnet,
+                        "Routing configured (iptables): {} via {}",
+                        subnet,
                         self.wan_interface
                     );
                 }
             }
+
+            if let Some(v6_subnet) = ipv6_subnet.as_deref() {
+                self.assign_tun_address_v6_linux()?;
+                self.enable_ipv6_forwarding()?;
+                match self.firewall_backend {
+                    crate::firewall::FirewallBackend::Nftables => {
+                        log::info!(
+                            "IPv6 routing configured (nftables inet): {} via {}",
+                            v6_subnet,
+                            self.wan_interface
+                        );
+                    }
+                    crate::firewall::FirewallBackend::Iptables => {
+                        self.setup_ip6tables(&v6_subnet)?;
+                        log::info!(
+                            "IPv6 routing configured (ip6tables): {} via {}",
+                            v6_subnet,
+                            self.wan_interface
+                        );
+                    }
+                }
+            }
+
+            self.verify_linux_addresses()?;
+            crate::audit::audit(
+                crate::audit::AuditEventType::FirewallRuleAdded,
+                crate::audit::AuditSeverity::Info,
+                None,
+                None,
+                "Linux VPN routing and firewall rules installed",
+            );
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) => match self.teardown() {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(RoutingError::CommandFailed(format!(
+                    "routing setup failed: {error}; owned rollback failed: {rollback}"
+                ))),
+            },
         }
-
-        crate::audit::audit(
-            crate::audit::AuditEventType::FirewallRuleAdded,
-            crate::audit::AuditSeverity::Info,
-            None,
-            None,
-            "Linux VPN routing and firewall rules installed",
-        );
-
-        Ok(())
     }
 
     #[cfg(target_os = "macos")]
@@ -443,14 +587,91 @@ impl RoutingManager {
     /// Tear down routing rules.
     #[cfg(target_os = "linux")]
     pub fn teardown(&self) -> Result<(), RoutingError> {
-        match self.firewall_backend {
-            crate::firewall::FirewallBackend::Nftables => {
-                self.teardown_nftables()?;
-            }
-            crate::firewall::FirewallBackend::Iptables => {
-                self.teardown_iptables()?;
+        let mut failures = Vec::new();
+        let firewall_result = match self.firewall_backend {
+            crate::firewall::FirewallBackend::Nftables => self.teardown_nftables(),
+            crate::firewall::FirewallBackend::Iptables => self.teardown_iptables(),
+        };
+        Self::record_cleanup_failure(&mut failures, firewall_result);
+
+        let (ipv4_address_added, ipv6_address_added, link_brought_up, ipv4_previous, ipv6_previous) = {
+            let ownership = self.ownership.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            (
+                ownership.ipv4_address_added,
+                ownership.ipv6_address_added,
+                ownership.link_brought_up,
+                ownership.ipv4_forwarding_previous.clone(),
+                ownership.ipv6_forwarding_previous.clone(),
+            )
+        };
+
+        if ipv4_address_added {
+            match self.ipv4_prefix_len() {
+                Ok(prefix) => {
+                    let result =
+                        self.remove_linux_address("inet", &self.server_ip.to_string(), prefix);
+                    let succeeded = result.is_ok();
+                    Self::record_cleanup_failure(&mut failures, result);
+                    if succeeded {
+                        self.ownership
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .ipv4_address_added = false;
+                    }
+                }
+                Err(error) => failures.push(error.to_string()),
             }
         }
+        if ipv6_address_added {
+            if let Some(ipv6) = self.server_ipv6 {
+                let result =
+                    self.remove_linux_address("inet6", &ipv6.to_string(), self.ipv6_prefix_len);
+                let succeeded = result.is_ok();
+                Self::record_cleanup_failure(&mut failures, result);
+                if succeeded {
+                    self.ownership
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .ipv6_address_added = false;
+                }
+            }
+        }
+        if link_brought_up {
+            let result = self.set_linux_link_down();
+            let succeeded = result.is_ok();
+            Self::record_cleanup_failure(&mut failures, result);
+            if succeeded {
+                self.ownership
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .link_brought_up = false;
+            }
+        }
+        if let Some(previous) = ipv4_previous {
+            let result = self.restore_forwarding("/proc/sys/net/ipv4/ip_forward", &previous);
+            let succeeded = result.is_ok();
+            Self::record_cleanup_failure(&mut failures, result);
+            if succeeded {
+                self.ownership
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .ipv4_forwarding_previous = None;
+            }
+        }
+        if let Some(previous) = ipv6_previous {
+            let result =
+                self.restore_forwarding("/proc/sys/net/ipv6/conf/all/forwarding", &previous);
+            let succeeded = result.is_ok();
+            Self::record_cleanup_failure(&mut failures, result);
+            if succeeded {
+                self.ownership
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .ipv6_forwarding_previous = None;
+            }
+        }
+
+        Self::finish_cleanup(failures)?;
 
         log::info!("Routing rules removed");
         crate::audit::audit(
@@ -460,6 +681,77 @@ impl RoutingManager {
             None,
             "Linux VPN routing and firewall rules removed",
         );
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn remove_linux_address(
+        &self,
+        family: &str,
+        address: &str,
+        prefix: u8,
+    ) -> Result<(), RoutingError> {
+        if !self.linux_address_present(family, address, prefix)? {
+            return Ok(());
+        }
+        let family_arg = if family == "inet6" { "-6" } else { "-4" };
+        let cidr = format!("{address}/{prefix}");
+        let result =
+            Self::run_ip_command(&[family_arg, "addr", "del", &cidr, "dev", &self.tun_name]);
+        if result.is_err() && self.linux_address_present(family, address, prefix)? {
+            return result;
+        }
+        if self.linux_address_present(family, address, prefix)? {
+            return Err(RoutingError::CommandFailed(format!(
+                "Linux TUN {} retains owned {} address {}/{}",
+                self.tun_name, family, address, prefix
+            )));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn set_linux_link_down(&self) -> Result<(), RoutingError> {
+        if !self.linux_link_is_up()? {
+            return Ok(());
+        }
+        let result = Self::run_ip_command(&["link", "set", "down", "dev", &self.tun_name]);
+        if result.is_err() && self.linux_link_is_up()? {
+            return result;
+        }
+        if self.linux_link_is_up()? {
+            return Err(RoutingError::CommandFailed(format!(
+                "Linux TUN {} remains up after rollback",
+                self.tun_name
+            )));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn restore_forwarding(&self, path: &str, previous: &str) -> Result<(), RoutingError> {
+        let current = std::fs::read_to_string(path)
+            .map_err(|error| RoutingError::CommandFailed(format!("read {path}: {error}")))?;
+        if current.trim() == previous.trim() {
+            return Ok(());
+        }
+        if current.trim() != "1" {
+            return Err(RoutingError::CommandFailed(format!(
+                "not restoring {path}: forwarding changed externally to {:?}",
+                current.trim()
+            )));
+        }
+        std::fs::write(path, previous)
+            .map_err(|error| RoutingError::CommandFailed(format!("restore {path}: {error}")))?;
+        let verified = std::fs::read_to_string(path)
+            .map_err(|error| RoutingError::CommandFailed(format!("verify {path}: {error}")))?;
+        if verified.trim() != previous.trim() {
+            return Err(RoutingError::CommandFailed(format!(
+                "{path} remained {:?}, expected {:?}",
+                verified.trim(),
+                previous.trim()
+            )));
+        }
         Ok(())
     }
 
@@ -511,12 +803,29 @@ impl RoutingManager {
     }
 
     #[cfg(target_os = "linux")]
-    fn enable_ip_forwarding(&self) -> Result<(), RoutingError> {
-        std::fs::write("/proc/sys/net/ipv4/ip_forward", "1")
-            .map_err(|_| RoutingError::PermissionDenied)?;
-
+    fn enable_ip_forwarding(&self) -> Result<Option<String>, RoutingError> {
+        let path = "/proc/sys/net/ipv4/ip_forward";
+        let previous = std::fs::read_to_string(path)
+            .map_err(|error| RoutingError::CommandFailed(format!("read {path}: {error}")))?;
+        if previous.trim() == "1" {
+            return Ok(None);
+        }
+        std::fs::write(path, "1")
+            .map_err(|error| RoutingError::CommandFailed(format!("write {path}: {error}")))?;
+        self.ownership
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .ipv4_forwarding_previous = Some(previous.clone());
+        let verified = std::fs::read_to_string(path)
+            .map_err(|error| RoutingError::CommandFailed(format!("verify {path}: {error}")))?;
+        if verified.trim() != "1" {
+            return Err(RoutingError::CommandFailed(format!(
+                "{path} remained {:?} after enabling",
+                verified.trim()
+            )));
+        }
         log::debug!("IP forwarding enabled");
-        Ok(())
+        Ok(Some(previous))
     }
 
     #[cfg(target_os = "linux")]
@@ -604,24 +913,6 @@ impl RoutingManager {
     }
 
     #[cfg(target_os = "linux")]
-    fn iptables_jump_exists(
-        program: &str,
-        table: &str,
-        parent_chain: &str,
-        owned_chain: &str,
-    ) -> Result<bool, RoutingError> {
-        use std::process::Stdio;
-
-        let status = Command::new(program)
-            .args(["-t", table, "-C", parent_chain, "-j", owned_chain])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map_err(|error| RoutingError::CommandFailed(format!("{program}: {error}")))?;
-        Ok(status.success())
-    }
-
-    #[cfg(target_os = "linux")]
     fn setup_iptables_family(
         &self,
         program: &str,
@@ -629,21 +920,113 @@ impl RoutingManager {
         subnet: &str,
         ipv6: bool,
     ) -> Result<(), RoutingError> {
-        let install_nat_jump =
-            !Self::iptables_jump_exists(program, "nat", "POSTROUTING", Self::IPTABLES_NAT_CHAIN)?;
-        let install_filter_jump =
-            !Self::iptables_jump_exists(program, "filter", "FORWARD", Self::IPTABLES_FILTER_CHAIN)?;
-        let rules = self.iptables_ruleset(subnet, ipv6, install_nat_jump, install_filter_jump);
+        Self::cleanup_iptables_owned(program)?;
+        let rules = self.iptables_ruleset(subnet, ipv6, true, true);
+        let rollback = |error: RoutingError| match Self::cleanup_iptables_owned(program) {
+            Ok(()) => error,
+            Err(cleanup_error) => {
+                RoutingError::CommandFailed(format!("{error}; rollback failed: {cleanup_error}"))
+            }
+        };
         if let Err(error) = Self::apply_iptables_restore(restore_program, &rules) {
-            let cleanup_error = Self::cleanup_iptables_owned(program).err();
-            return Err(match cleanup_error {
-                Some(cleanup_error) => RoutingError::CommandFailed(format!(
-                    "{error}; rollback failed: {cleanup_error}"
-                )),
-                None => error,
-            });
+            return Err(rollback(error));
+        }
+        if let Err(error) = self.verify_iptables_family(program, subnet, ipv6) {
+            return Err(rollback(error));
         }
         Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn verify_iptables_family(
+        &self,
+        program: &str,
+        subnet: &str,
+        ipv6: bool,
+    ) -> Result<(), RoutingError> {
+        let require = |table: &str, chain: &str, rule_args: &[&str]| -> Result<(), RoutingError> {
+            let exists =
+                crate::firewall::iptables_rule_exists_exact(program, table, chain, rule_args)
+                    .map_err(RoutingError::CommandFailed)?;
+            if exists {
+                Ok(())
+            } else {
+                Err(RoutingError::CommandFailed(format!(
+                    "{program} missing exact rule in {table}/{chain}: {}",
+                    rule_args.join(" ")
+                )))
+            }
+        };
+
+        require("nat", "POSTROUTING", &["-j", Self::IPTABLES_NAT_CHAIN])?;
+        require("filter", "FORWARD", &["-j", Self::IPTABLES_FILTER_CHAIN])?;
+        require(
+            "nat",
+            Self::IPTABLES_NAT_CHAIN,
+            &["-s", subnet, "-o", self.wan_interface.as_str(), "-j", "MASQUERADE"],
+        )?;
+        require(
+            "filter",
+            Self::IPTABLES_FILTER_CHAIN,
+            &["-i", self.tun_name.as_str(), "-o", self.wan_interface.as_str(), "-j", "ACCEPT"],
+        )?;
+
+        if ipv6 {
+            require(
+                "filter",
+                Self::IPTABLES_FILTER_CHAIN,
+                &[
+                    "-i",
+                    self.tun_name.as_str(),
+                    "-o",
+                    self.tun_name.as_str(),
+                    "-d",
+                    "ff00::/8",
+                    "-j",
+                    "ACCEPT",
+                ],
+            )?;
+        } else {
+            for destination in self.ipv4_fanout_destinations() {
+                require(
+                    "filter",
+                    Self::IPTABLES_FILTER_CHAIN,
+                    &[
+                        "-i",
+                        self.tun_name.as_str(),
+                        "-o",
+                        self.tun_name.as_str(),
+                        "-d",
+                        destination.as_str(),
+                        "-j",
+                        "ACCEPT",
+                    ],
+                )?;
+            }
+        }
+
+        let isolation_action = if self.client_to_client_enabled { "ACCEPT" } else { "DROP" };
+        require(
+            "filter",
+            Self::IPTABLES_FILTER_CHAIN,
+            &["-i", self.tun_name.as_str(), "-o", self.tun_name.as_str(), "-j", isolation_action],
+        )?;
+        require(
+            "filter",
+            Self::IPTABLES_FILTER_CHAIN,
+            &[
+                "-i",
+                self.wan_interface.as_str(),
+                "-o",
+                self.tun_name.as_str(),
+                "-m",
+                "state",
+                "--state",
+                "RELATED,ESTABLISHED",
+                "-j",
+                "ACCEPT",
+            ],
+        )
     }
 
     #[cfg(target_os = "linux")]
@@ -660,16 +1043,19 @@ impl RoutingManager {
             .map_err(|error| {
                 RoutingError::CommandFailed(format!("{restore_program} spawn: {error}"))
             })?;
-        child
-            .stdin
-            .take()
-            .ok_or_else(|| {
-                RoutingError::CommandFailed(format!("{restore_program} stdin unavailable"))
-            })?
-            .write_all(rules.as_bytes())
-            .map_err(|error| {
-                RoutingError::CommandFailed(format!("{restore_program} stdin: {error}"))
-            })?;
+        let Some(mut stdin) = child.stdin.take() else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(RoutingError::CommandFailed(format!(
+                "{restore_program} stdin unavailable"
+            )));
+        };
+        if let Err(error) = stdin.write_all(rules.as_bytes()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(RoutingError::CommandFailed(format!("{restore_program} stdin: {error}")));
+        }
+        drop(stdin);
         let output = child.wait_with_output().map_err(|error| {
             RoutingError::CommandFailed(format!("{restore_program} wait: {error}"))
         })?;
@@ -791,6 +1177,45 @@ impl RoutingManager {
         let table_exists = crate::firewall::nft_table_exists("inet", Self::NFT_RT_TABLE)
             .map_err(|error| RoutingError::CommandFailed(error.to_string()))?;
         let transaction = Self::nftables_replacement_transaction(&ruleset, table_exists);
+        let mut required_fragments = vec![
+            "chain postrouting".to_string(),
+            "chain forward".to_string(),
+            format!(
+                "ip saddr {subnet} oifname \"{}\" masquerade",
+                self.wan_interface
+            ),
+            format!(
+                "iifname \"{}\" oifname \"{}\" ip daddr {{ 255.255.255.255, {}, 224.0.0.0/4 }} accept",
+                self.tun_name,
+                self.tun_name,
+                self.ipv4_broadcast()
+            ),
+            format!(
+                "iifname \"{}\" oifname \"{}\" {}",
+                self.tun_name,
+                self.tun_name,
+                if self.client_to_client_enabled { "accept" } else { "drop" }
+            ),
+            format!(
+                "iifname \"{}\" oifname \"{}\" accept",
+                self.tun_name, self.wan_interface
+            ),
+            format!(
+                "iifname \"{}\" oifname \"{}\" ct state established,related accept",
+                self.wan_interface, self.tun_name
+            ),
+        ];
+        if self.server_ipv6.is_some() {
+            required_fragments.push(format!(
+                "ip6 saddr {} oifname \"{}\" masquerade",
+                self.calculate_ipv6_subnet(),
+                self.wan_interface
+            ));
+            required_fragments.push(format!(
+                "iifname \"{}\" oifname \"{}\" ip6 daddr ff00::/8 accept",
+                self.tun_name, self.tun_name
+            ));
+        }
 
         let mut child = Command::new("nft")
             .arg("-f")
@@ -801,11 +1226,17 @@ impl RoutingManager {
             .spawn()
             .map_err(|e| RoutingError::CommandFailed(format!("nft spawn: {}", e)))?;
 
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(transaction.as_bytes())
-                .map_err(|e| RoutingError::CommandFailed(format!("nft stdin: {}", e)))?;
+        let Some(mut stdin) = child.stdin.take() else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(RoutingError::CommandFailed("nft stdin unavailable".to_string()));
+        };
+        if let Err(error) = stdin.write_all(transaction.as_bytes()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(RoutingError::CommandFailed(format!("nft stdin: {error}")));
         }
+        drop(stdin);
 
         let output = child
             .wait_with_output()
@@ -818,6 +1249,9 @@ impl RoutingManager {
                 stderr.trim()
             )));
         }
+        let required_refs = required_fragments.iter().map(String::as_str).collect::<Vec<_>>();
+        crate::firewall::verify_nft_table_rules("inet", Self::NFT_RT_TABLE, &required_refs)
+            .map_err(|error| RoutingError::CommandFailed(error.to_string()))?;
 
         log::debug!("nftables routing table created (inet {})", Self::NFT_RT_TABLE);
         Ok(())
@@ -1033,27 +1467,62 @@ impl RoutingManager {
     // TUN interface address assignment
     // ================================================================
 
+    #[cfg(target_os = "linux")]
+    fn run_ip_command(args: &[&str]) -> Result<(), RoutingError> {
+        let output = Command::new("ip")
+            .args(args)
+            .output()
+            .map_err(|error| RoutingError::CommandFailed(format!("ip spawn: {error}")))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        Err(RoutingError::CommandFailed(format!(
+            "ip {} returned status {}: {}",
+            args.join(" "),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
+    }
+
     /// Assign the IPv4 address to the TUN interface on Linux.
     #[cfg(target_os = "linux")]
     fn assign_tun_address_linux(&self) -> Result<(), RoutingError> {
-        let subnet = self.calculate_subnet();
-        // Extract the network prefix length from the CIDR
-        let prefix_len = subnet.split('/').nth(1).unwrap_or("24");
-        let addr = format!("{}/{}", self.server_ip, prefix_len);
-
-        // Use `ip addr add` — ignore error if address already assigned
-        let status = Command::new("ip")
-            .args(["addr", "add", &addr, "dev", &self.tun_name])
-            .status()
-            .map_err(|e| RoutingError::CommandFailed(e.to_string()))?;
-
-        if !status.success() {
-            // Address may already exist — log but don't fail
-            log::debug!("ip addr add {} dev {} (may already exist)", addr, self.tun_name);
+        let prefix = self.ipv4_prefix_len()?;
+        let addr = format!("{}/{}", self.server_ip, prefix);
+        let address_present =
+            self.linux_address_present("inet", &self.server_ip.to_string(), prefix)?;
+        if !address_present {
+            let result = Self::run_ip_command(&["-4", "addr", "add", &addr, "dev", &self.tun_name]);
+            if result.is_err()
+                && !self.linux_address_present("inet", &self.server_ip.to_string(), prefix)?
+            {
+                return result;
+            }
+            self.ownership
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .ipv4_address_added = true;
         }
-        // Bring the interface up
-        let _ = Command::new("ip").args(["link", "set", "up", "dev", &self.tun_name]).status();
-        log::debug!("TUN IPv4 address assigned: {} on {}", addr, self.tun_name);
+
+        if !self.linux_link_is_up()? {
+            let result = Self::run_ip_command(&["link", "set", "up", "dev", &self.tun_name]);
+            if result.is_err() && !self.linux_link_is_up()? {
+                return result;
+            }
+            self.ownership
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .link_brought_up = true;
+        }
+        if !self.linux_address_present("inet", &self.server_ip.to_string(), prefix)?
+            || !self.linux_link_is_up()?
+        {
+            return Err(RoutingError::CommandFailed(format!(
+                "Linux TUN {} failed IPv4/link postcondition",
+                self.tun_name
+            )));
+        }
+        log::debug!("TUN IPv4 address verified: {} on {}", addr, self.tun_name);
         Ok(())
     }
 
@@ -1061,16 +1530,32 @@ impl RoutingManager {
     #[cfg(target_os = "linux")]
     fn assign_tun_address_v6_linux(&self) -> Result<(), RoutingError> {
         if let Some(ipv6) = self.server_ipv6 {
-            let addr = format!("{}/{}", ipv6, self.ipv6_prefix_len);
-            let status = Command::new("ip")
-                .args(["-6", "addr", "add", &addr, "dev", &self.tun_name])
-                .status()
-                .map_err(|e| RoutingError::CommandFailed(e.to_string()))?;
-
-            if !status.success() {
-                log::debug!("ip -6 addr add {} dev {} (may already exist)", addr, self.tun_name);
+            if self.ipv6_prefix_len > 128 {
+                return Err(RoutingError::UnsupportedConfiguration(format!(
+                    "IPv6 prefix length {} exceeds 128",
+                    self.ipv6_prefix_len
+                )));
             }
-            log::debug!("TUN IPv6 address assigned: {} on {}", addr, self.tun_name);
+            let addr = format!("{}/{}", ipv6, self.ipv6_prefix_len);
+            if !self.linux_address_present("inet6", &ipv6.to_string(), self.ipv6_prefix_len)? {
+                let result =
+                    Self::run_ip_command(&["-6", "addr", "add", &addr, "dev", &self.tun_name]);
+                if result.is_err()
+                    && !self.linux_address_present(
+                        "inet6",
+                        &ipv6.to_string(),
+                        self.ipv6_prefix_len,
+                    )?
+                {
+                    return result;
+                }
+                self.ownership
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .ipv6_address_added = true;
+            }
+            self.verify_linux_addresses()?;
+            log::debug!("TUN IPv6 address verified: {} on {}", addr, self.tun_name);
         }
         Ok(())
     }
@@ -1078,17 +1563,14 @@ impl RoutingManager {
     /// Assign the IPv4 address to the TUN interface on macOS.
     #[cfg(target_os = "macos")]
     fn assign_tun_address_macos(&self) -> Result<(), RoutingError> {
-        let mask_bits = self.netmask.octets().iter().map(|b| b.count_ones()).sum::<u32>();
-        let _ = Command::new("ifconfig")
-            .args([
-                &self.tun_name,
-                &self.server_ip.to_string(),
-                "netmask",
-                &self.netmask.to_string(),
-            ])
-            .status();
+        let address = self.server_ip.to_string();
+        let netmask = self.netmask.to_string();
+        self.run_command(
+            "ifconfig",
+            &[&self.tun_name, &address, "netmask", &netmask, "up"],
+            "assign macOS IPv4 TUN address",
+        )?;
         log::debug!("TUN IPv4 address assigned: {} on {}", self.server_ip, self.tun_name);
-        let _ = mask_bits; // suppress unused warning
         Ok(())
     }
 
@@ -1096,15 +1578,19 @@ impl RoutingManager {
     #[cfg(target_os = "macos")]
     fn assign_tun_address_v6_macos(&self) -> Result<(), RoutingError> {
         if let Some(ipv6) = self.server_ipv6 {
-            let _ = Command::new("ifconfig")
-                .args([
-                    &self.tun_name,
-                    "inet6",
-                    &ipv6.to_string(),
-                    "prefixlen",
-                    &self.ipv6_prefix_len.to_string(),
-                ])
-                .status();
+            if self.ipv6_prefix_len > 128 {
+                return Err(RoutingError::UnsupportedConfiguration(format!(
+                    "IPv6 prefix length {} exceeds 128",
+                    self.ipv6_prefix_len
+                )));
+            }
+            let address = ipv6.to_string();
+            let prefix = self.ipv6_prefix_len.to_string();
+            self.run_command(
+                "ifconfig",
+                &[&self.tun_name, "inet6", &address, "prefixlen", &prefix, "up"],
+                "assign macOS IPv6 TUN address",
+            )?;
             log::debug!("TUN IPv6 address assigned: {} on {}", ipv6, self.tun_name);
         }
         Ok(())
@@ -1119,6 +1605,13 @@ impl RoutingManager {
         let network_ip = Ipv4Addr::from(network);
 
         format!("{}/{}", network_ip, mask_bits)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn calculate_subnet_checked(&self) -> Result<String, RoutingError> {
+        let prefix = self.ipv4_prefix_len()?;
+        let network = u32::from(self.server_ip) & u32::from(self.netmask);
+        Ok(format!("{}/{}", Ipv4Addr::from(network), prefix))
     }
 
     fn ipv4_broadcast(&self) -> Ipv4Addr {
@@ -1147,16 +1640,45 @@ impl RoutingManager {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn calculate_ipv6_subnet_checked(&self) -> Result<String, RoutingError> {
+        if self.ipv6_prefix_len > 128 {
+            return Err(RoutingError::UnsupportedConfiguration(format!(
+                "IPv6 prefix length {} exceeds 128",
+                self.ipv6_prefix_len
+            )));
+        }
+        Ok(self.calculate_ipv6_subnet())
+    }
+
     // ================================================================
     // IPv6 forwarding and NAT
     // ================================================================
 
     #[cfg(target_os = "linux")]
-    fn enable_ipv6_forwarding(&self) -> Result<(), RoutingError> {
-        std::fs::write("/proc/sys/net/ipv6/conf/all/forwarding", "1")
-            .map_err(|_| RoutingError::PermissionDenied)?;
+    fn enable_ipv6_forwarding(&self) -> Result<Option<String>, RoutingError> {
+        let path = "/proc/sys/net/ipv6/conf/all/forwarding";
+        let previous = std::fs::read_to_string(path)
+            .map_err(|error| RoutingError::CommandFailed(format!("read {path}: {error}")))?;
+        if previous.trim() == "1" {
+            return Ok(None);
+        }
+        std::fs::write(path, "1")
+            .map_err(|error| RoutingError::CommandFailed(format!("write {path}: {error}")))?;
+        self.ownership
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .ipv6_forwarding_previous = Some(previous.clone());
+        let verified = std::fs::read_to_string(path)
+            .map_err(|error| RoutingError::CommandFailed(format!("verify {path}: {error}")))?;
+        if verified.trim() != "1" {
+            return Err(RoutingError::CommandFailed(format!(
+                "{path} remained {:?} after enabling",
+                verified.trim()
+            )));
+        }
         log::debug!("IPv6 forwarding enabled");
-        Ok(())
+        Ok(Some(previous))
     }
 
     #[cfg(target_os = "linux")]

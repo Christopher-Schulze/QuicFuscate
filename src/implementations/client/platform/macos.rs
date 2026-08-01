@@ -93,42 +93,73 @@ impl MacOSPlatform {
 
     /// Run route command.
     fn run_route(&self, args: &[&str]) -> Result<(), PlatformError> {
-        let status = Command::new("route")
+        let output = Command::new("route")
             .args(args)
-            .status()
-            .map_err(|e| PlatformError::CommandFailed(e.to_string()))?;
+            .output()
+            .map_err(|e| PlatformError::CommandFailed(format!("route spawn: {e}")))?;
 
-        if !status.success() {
-            return Err(PlatformError::CommandFailed(format!("route {} failed", args.join(" "))));
+        if !output.status.success() {
+            return Err(PlatformError::CommandFailed(format!(
+                "route {} returned status {}: {}",
+                args.join(" "),
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
         }
         Ok(())
     }
 
     /// Run ifconfig command.
     fn run_ifconfig(&self, args: &[&str]) -> Result<(), PlatformError> {
-        let status = Command::new("ifconfig")
+        let output = Command::new("ifconfig")
             .args(args)
-            .status()
-            .map_err(|e| PlatformError::CommandFailed(e.to_string()))?;
+            .output()
+            .map_err(|e| PlatformError::CommandFailed(format!("ifconfig spawn: {e}")))?;
 
-        if !status.success() {
+        if !output.status.success() {
             return Err(PlatformError::CommandFailed(format!(
-                "ifconfig {} failed",
-                args.join(" ")
+                "ifconfig {} returned status {}: {}",
+                args.join(" "),
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
             )));
         }
         Ok(())
     }
 
     fn run_networksetup(&self, args: &[&str]) -> Result<(), PlatformError> {
-        let status = Command::new("networksetup")
+        let output = Command::new("networksetup")
             .args(args)
-            .status()
-            .map_err(|e| PlatformError::DnsError(e.to_string()))?;
-        if !status.success() {
-            return Err(PlatformError::DnsError(format!("networksetup {} failed", args.join(" "))));
+            .output()
+            .map_err(|e| PlatformError::DnsError(format!("networksetup spawn: {e}")))?;
+        if !output.status.success() {
+            return Err(PlatformError::DnsError(format!(
+                "networksetup {} returned status {}: {}",
+                args.join(" "),
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
         }
         Ok(())
+    }
+
+    fn interface_exists(&self, name: &str) -> Result<bool, PlatformError> {
+        let output = Command::new("ifconfig").arg(name).output().map_err(|error| {
+            PlatformError::CommandFailed(format!("ifconfig inspect spawn: {error}"))
+        })?;
+        if output.status.success() {
+            return Ok(true);
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+        if stderr.contains("does not exist") || stderr.contains("interface not found") {
+            return Ok(false);
+        }
+        Err(PlatformError::CommandFailed(format!(
+            "ifconfig {} inspect returned status {}: {}",
+            name,
+            output.status,
+            stderr.trim()
+        )))
     }
 
     fn detect_default_interface(&self) -> Result<String, PlatformError> {
@@ -357,13 +388,10 @@ impl PlatformBackend for MacOSPlatform {
             }
         }
 
-        // Socket is now fully bound and connected - disarm the RAII guard
-        guard.disarm();
-
         let name = format!("utun{}", utun_num);
 
         // Configure the interface (IP, netmask, MTU, bring up)
-        if let Err(e) = self.run_ifconfig(&[
+        self.run_ifconfig(&[
             &name,
             &config.address.to_string(),
             &config.address.to_string(), // Point-to-point destination
@@ -372,17 +400,12 @@ impl PlatformBackend for MacOSPlatform {
             "mtu",
             &config.mtu.to_string(),
             "up",
-        ]) {
-            // ifconfig failed after socket creation - close the fd manually
-            // SAFETY: `fd` is a valid open socket obtained from `libc::socket()` above.
-            // The FdGuard was already disarmed at this point, so this is the sole close
-            // of the fd on this error path. We return immediately after, so `fd` is
-            // never used again.
-            unsafe {
-                libc::close(fd);
-            }
-            return Err(e);
-        }
+        ])?;
+
+        // Socket and interface configuration are complete. Ownership now moves
+        // into the returned handle; every earlier error stays covered by the
+        // descriptor guard.
+        guard.disarm();
 
         log::info!(
             "Created utun device {} (ctl_id={}, sc_unit={}) with IP {}",
@@ -414,13 +437,7 @@ impl PlatformBackend for MacOSPlatform {
                 ));
             }
         }
-        if Command::new("ifconfig")
-            .arg(&handle.name)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
-        {
+        if self.interface_exists(&handle.name)? {
             return Err(PlatformError::DeviceError(format!(
                 "owned utun {} remains after descriptor close{}{}",
                 handle.name,

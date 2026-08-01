@@ -682,7 +682,7 @@ async fn run_server(
             netmask: tun_netmask.and_then(|s| s.parse().ok()),
             mtu: tun_mtu.unwrap_or(1500),
             ip6: server_config.ipv6_server_ip,
-            prefix6: Some(server_config.ipv6_prefix_len),
+            prefix6: server_config.ipv6_server_ip.map(|_| server_config.ipv6_prefix_len),
             ..Default::default()
         })
     } else {

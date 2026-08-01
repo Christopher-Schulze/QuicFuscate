@@ -286,7 +286,7 @@ impl ServerHostResources {
             mtu: engine_config.interface.tun_mtu,
             zero_copy: engine_config.interface.zero_copy,
             ip6: server_config.ipv6_server_ip,
-            prefix6: Some(server_config.ipv6_prefix_len),
+            prefix6: server_config.ipv6_server_ip.map(|_| server_config.ipv6_prefix_len),
         };
 
         let tun = open_server_tun(tun_config, pool).map_err(EngineError::Tun)?;

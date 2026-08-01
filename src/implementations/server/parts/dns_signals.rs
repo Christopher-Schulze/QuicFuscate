@@ -357,8 +357,19 @@ pub(crate) fn open_server_tun(
     tun_config: TunConfig,
     pool: Arc<MemoryPool>,
 ) -> Result<TunInterface, String> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (tun_config, pool);
+        Err(
+            "server TUN mode is supported only on Linux until a native routing owner and proof exist for this platform"
+                .to_string(),
+        )
+    }
+    #[cfg(target_os = "linux")]
+    {
     crate::interface::validate_tun_runtime_requirements().map_err(|e| format!("{:?}", e))?;
     TunInterface::open(tun_config, pool).map_err(|e| format!("{:?}", e))
+    }
 }
 
 enum ServerSignalEvent {
@@ -457,4 +468,3 @@ pub(crate) async fn recv_datagram_from(
         }
     }
 }
-

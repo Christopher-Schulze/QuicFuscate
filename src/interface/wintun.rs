@@ -34,6 +34,22 @@ fn validate_config(config: &TunConfig) -> Result<(), TunError> {
     if matches!(config.netmask, Some(std::net::IpAddr::V6(_))) {
         return Err(TunError::Config("Wintun IPv4 netmask field must contain an IPv4 netmask"));
     }
+    if config.ip.is_some() != config.netmask.is_some() {
+        return Err(TunError::Config(
+            "Wintun IPv4 address and netmask must be configured together",
+        ));
+    }
+    if let Some(std::net::IpAddr::V4(mask)) = config.netmask {
+        let raw = u32::from(mask);
+        let prefix = raw.leading_ones();
+        let canonical = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
+        if raw != canonical {
+            return Err(TunError::Config("Wintun IPv4 netmask must be contiguous"));
+        }
+    }
+    if config.ip6.is_some() != config.prefix6.is_some() {
+        return Err(TunError::Config("Wintun IPv6 address and prefix must be configured together"));
+    }
     if config.prefix6.is_some() && config.ip6.is_none() {
         return Err(TunError::Config("Wintun IPv6 prefix requires an IPv6 address"));
     }
@@ -89,6 +105,46 @@ mod imp {
     // Default adapter name / tunnel type when the config does not specify one.
     const DEFAULT_ADAPTER_NAME: &str = "QuicFuscate";
     const WINTUN_TUNNEL_TYPE: &str = "Wintun";
+
+    fn run_netsh(args: &[&str], action: &str) -> io::Result<()> {
+        let output = std::process::Command::new("netsh")
+            .creation_flags(CREATE_NO_WINDOW)
+            .args(args)
+            .output()
+            .map_err(|error| io::Error::other(format!("{action} spawn failed: {error}")))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        Err(io::Error::other(format!(
+            "{action} returned status {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
+    }
+
+    fn read_interface_mtu(name: &str, family: &str) -> io::Result<u16> {
+        let escaped_name = name.replace('\'', "''");
+        let script = format!(
+            "$ErrorActionPreference='Stop'; $interface = Get-NetIPInterface -InterfaceAlias '{escaped_name}' -AddressFamily {family} | Select-Object -First 1; if ($null -eq $interface) {{ throw 'interface not found' }}; [Console]::WriteLine($interface.NlMtuBytes)"
+        );
+        let output = std::process::Command::new("powershell.exe")
+            .creation_flags(CREATE_NO_WINDOW)
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()
+            .map_err(|error| {
+                io::Error::other(format!("{family} MTU inspect spawn failed: {error}"))
+            })?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "{family} MTU inspect returned status {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        String::from_utf8_lossy(&output.stdout).trim().parse::<u16>().map_err(|error| {
+            io::Error::other(format!("{family} MTU inspect returned invalid value: {error}"))
+        })
+    }
 
     // Function-pointer typedefs matching the signatures in wintun.h.
     type WintunCreateAdapterFn =
@@ -211,74 +267,46 @@ mod imp {
 
     /// Assign an IPv4 address (and netmask) to the adapter via `netsh`.
     fn assign_ipv4(name: &str, ip: Ipv4Addr, mask: Ipv4Addr) -> io::Result<()> {
-        let status = std::process::Command::new("netsh")
-            .creation_flags(CREATE_NO_WINDOW)
-            .args([
+        let name_arg = format!("name={name}");
+        let addr_arg = format!("addr={ip}");
+        let mask_arg = format!("mask={mask}");
+        run_netsh(
+            &[
                 "interface",
                 "ip",
                 "set",
                 "address",
-                &format!("name={}", name),
+                &name_arg,
                 "source=static",
-                &format!("addr={}", ip),
-                &format!("mask={}", mask),
-            ])
-            .status()
-            .map_err(|e| io::Error::other(format!("netsh spawn failed: {e}")))?;
-        if !status.success() {
-            return Err(io::Error::other(format!(
-                "netsh set address failed (exit {:?}) for adapter '{}'",
-                status.code(),
-                name
-            )));
-        }
-        Ok(())
+                &addr_arg,
+                &mask_arg,
+            ],
+            "netsh set IPv4 address",
+        )
     }
 
     /// Assign an IPv6 address (with prefix length) to the adapter via `netsh`.
     fn assign_ipv6(name: &str, ip: Ipv6Addr, prefix: u8) -> io::Result<()> {
-        let status = std::process::Command::new("netsh")
-            .creation_flags(CREATE_NO_WINDOW)
-            .args([
-                "interface",
-                "ipv6",
-                "set",
-                "address",
-                &format!("interface={}", name),
-                &format!("address={}/{}", ip, prefix),
-            ])
-            .status()
-            .map_err(|e| io::Error::other(format!("netsh spawn failed: {e}")))?;
-        if !status.success() {
-            return Err(io::Error::other(format!(
-                "netsh set ipv6 address failed (exit {:?}) for adapter '{}'",
-                status.code(),
-                name
-            )));
-        }
-        Ok(())
+        let interface_arg = format!("interface={name}");
+        let address_arg = format!("address={ip}/{prefix}");
+        run_netsh(
+            &["interface", "ipv6", "set", "address", &interface_arg, &address_arg],
+            "netsh set IPv6 address",
+        )
     }
 
     fn set_interface_mtu(name: &str, mtu: u16, ipv6_enabled: bool) -> io::Result<()> {
         let families = if ipv6_enabled { &["ipv4", "ipv6"][..] } else { &["ipv4"][..] };
         for family in families {
-            let status = std::process::Command::new("netsh")
-                .creation_flags(CREATE_NO_WINDOW)
-                .args([
-                    "interface",
-                    family,
-                    "set",
-                    "subinterface",
-                    name,
-                    &format!("mtu={mtu}"),
-                    "store=active",
-                ])
-                .status()
-                .map_err(|error| io::Error::other(format!("netsh spawn failed: {error}")))?;
-            if !status.success() {
+            let mtu_arg = format!("mtu={mtu}");
+            run_netsh(
+                &["interface", family, "set", "subinterface", name, &mtu_arg, "store=active"],
+                &format!("netsh {family} MTU update for adapter '{name}'"),
+            )?;
+            let verified = read_interface_mtu(name, family)?;
+            if verified != mtu {
                 return Err(io::Error::other(format!(
-                    "netsh {family} MTU update failed for adapter '{name}' with exit {:?}",
-                    status.code()
+                    "netsh {family} MTU update reported {verified}, expected {mtu}"
                 )));
             }
         }
@@ -465,12 +493,22 @@ mod imp {
             if let Some(IpAddr::V4(ip)) = config.ip {
                 let mask = match config.netmask {
                     Some(IpAddr::V4(m)) => m,
-                    _ => Ipv4Addr::new(255, 255, 255, 0),
+                    _ => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "Wintun IPv4 address and netmask must be configured together",
+                        ))
+                    }
                 };
                 assign_ipv4(&self.name, ip, mask)?;
             }
             if let Some(ip6) = config.ip6 {
-                let prefix = config.prefix6.unwrap_or(64);
+                let Some(prefix) = config.prefix6 else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Wintun IPv6 address and prefix must be configured together",
+                    ));
+                };
                 assign_ipv6(&self.name, ip6, prefix)?;
             }
             Ok(())
@@ -854,6 +892,21 @@ mod tests {
 
         let orphan_prefix = TunConfig { prefix6: Some(64), ip6: None, ..TunConfig::default() };
         assert!(matches!(validate_config(&orphan_prefix), Err(TunError::Config(_))));
+
+        let orphan_ipv4 =
+            TunConfig { ip: Some(IpAddr::V4(Ipv4Addr::new(10, 8, 0, 2))), ..TunConfig::default() };
+        assert!(matches!(validate_config(&orphan_ipv4), Err(TunError::Config(_))));
+
+        let non_contiguous_netmask = TunConfig {
+            ip: Some(IpAddr::V4(Ipv4Addr::new(10, 8, 0, 2))),
+            netmask: Some(IpAddr::V4(Ipv4Addr::new(255, 0, 255, 0))),
+            ..TunConfig::default()
+        };
+        assert!(matches!(validate_config(&non_contiguous_netmask), Err(TunError::Config(_))));
+
+        let orphan_ipv6 =
+            TunConfig { ip6: Some(Ipv6Addr::LOCALHOST), mtu: 1280, ..TunConfig::default() };
+        assert!(matches!(validate_config(&orphan_ipv6), Err(TunError::Config(_))));
 
         let invalid_prefix = TunConfig {
             ip6: Some(Ipv6Addr::LOCALHOST),

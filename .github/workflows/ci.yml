@@ -406,6 +406,15 @@ jobs:
       - name: Build exact traffic-analysis artifact
         run: cargo build --release --bin quicfuscate
 
+      - name: Prove fail-closed Linux TUN provisioning and rollback
+        shell: bash
+        run: >-
+          sudo --preserve-env=GITHUB_SHA
+          env QF_E2E_BINARY="$GITHUB_WORKSPACE/target/release/quicfuscate"
+          QF_TUN_PROVISIONING_KEEP=1
+          PROJECT_ROOT="$GITHUB_WORKSPACE"
+          scripts/tests/tun-provisioning-negative-netns.sh
+
       - name: Prove native traffic-analysis cadence and cost
         shell: bash
         run: >-
@@ -421,6 +430,14 @@ jobs:
           name: traffic-analysis-native
           path: scripts/out/tests/traffic-analysis-native/
           if-no-files-found: error
+
+      - name: Upload native TUN provisioning evidence
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: tun-provisioning-negative-native
+          path: /tmp/quicfuscate-tun-provisioning.*
+          if-no-files-found: warn
 
   linux-installer-native:
     runs-on: ubuntu-latest

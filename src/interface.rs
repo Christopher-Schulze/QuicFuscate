@@ -31,6 +31,10 @@ use std::sync::{Arc, OnceLock};
 /// the async transport loop. The bounded queue propagates transport pressure
 /// back to the kernel instead of allowing unbounded heap growth.
 pub const TUN_PACKET_QUEUE_CAPACITY: usize = 1024;
+/// Minimum valid IPv4 TUN MTU.
+pub const TUN_MIN_MTU: u16 = 576;
+/// Minimum valid TUN MTU while IPv6 is enabled.
+pub const TUN_IPV6_MIN_MTU: u16 = 1280;
 
 /// Application configuration module
 pub mod app_config {
@@ -160,9 +164,9 @@ impl From<io::Error> for TunError {
 pub struct TunConfig {
     /// Requested TUN device name (None for OS-assigned).
     pub name: Option<String>,
-    /// Static IP address to assign to the TUN interface.
+    /// Static IPv4 address to assign to the TUN interface.
     pub ip: Option<IpAddr>,
-    /// Netmask for the TUN interface IP.
+    /// IPv4 netmask for the TUN interface address.
     pub netmask: Option<IpAddr>,
     /// Maximum transmission unit for the TUN device.
     pub mtu: u16,
@@ -186,6 +190,64 @@ impl Default for TunConfig {
             prefix6: None,
         }
     }
+}
+
+/// Validate the shared address and MTU contract before any backend is opened.
+pub(crate) fn validate_tun_config(config: &TunConfig) -> Result<(), TunError> {
+    if config.mtu < TUN_MIN_MTU {
+        return Err(TunError::Config("TUN MTU must be >= 576"));
+    }
+    if let Some(name) = config.name.as_deref() {
+        if name.is_empty() || name.contains('\0') {
+            return Err(TunError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "TUN interface name must be non-empty and must not contain NUL",
+            )));
+        }
+    }
+
+    match (config.ip, config.netmask) {
+        (None, None) => {}
+        (Some(IpAddr::V4(_)), Some(IpAddr::V4(mask))) => {
+            let raw = u32::from(mask);
+            let prefix = raw.leading_ones();
+            let canonical = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
+            if raw != canonical {
+                return Err(TunError::Config("TUN IPv4 netmask must be contiguous"));
+            }
+        }
+        (Some(IpAddr::V6(_)), Some(IpAddr::V6(_))) => {
+            return Err(TunError::Config(
+                "TUN IPv6 address must use ip6 and prefix6, not ip and netmask",
+            ));
+        }
+        (Some(_), Some(_)) => {
+            return Err(TunError::Config("TUN IPv4 address and netmask must use IPv4"));
+        }
+        _ => {
+            return Err(TunError::Config(
+                "TUN IPv4 address and netmask must be configured together",
+            ));
+        }
+    }
+
+    match (config.ip6, config.prefix6) {
+        (None, None) => {}
+        (Some(_), Some(prefix)) if prefix <= 128 => {
+            if config.mtu < TUN_IPV6_MIN_MTU {
+                return Err(TunError::Config("IPv6 TUN MTU must be >= 1280"));
+            }
+        }
+        (Some(_), Some(_)) => {
+            return Err(TunError::Config("IPv6 TUN prefix must be <= 128"));
+        }
+        _ => {
+            return Err(TunError::Config(
+                "IPv6 TUN address and prefix must be configured together",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Runtime capability view for TUN integration.
@@ -266,7 +328,8 @@ pub trait TunDevice: Send + Sync {
     fn name(&self) -> &str;
     /// Returns the configured MTU for this device.
     fn mtu(&self) -> u16;
-    /// Applies a new MTU to the live device.
+    /// Applies a new MTU to the live device. A successful implementation must
+    /// make the new value observable through `mtu()` before returning.
     fn set_mtu(&self, mtu: u16) -> io::Result<()> {
         if mtu == self.mtu() {
             Ok(())
@@ -294,6 +357,7 @@ pub struct TunInterface {
     dev: Box<dyn TunDevice>,
     pool: Arc<MemoryPool>,
     configured_mtu: AtomicU16,
+    ipv6_enabled: bool,
     #[cfg(target_os = "linux")]
     zero_copy: bool,
 }
@@ -301,7 +365,9 @@ pub struct TunInterface {
 impl std::fmt::Debug for TunInterface {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut dbg = f.debug_struct("TunInterface");
-        dbg.field("name", &self.dev.name()).field("mtu", &self.mtu());
+        dbg.field("name", &self.dev.name())
+            .field("mtu", &self.mtu())
+            .field("ipv6_enabled", &self.ipv6_enabled);
         #[cfg(target_os = "linux")]
         {
             dbg.field("zero_copy", &self.zero_copy);
@@ -311,12 +377,41 @@ impl std::fmt::Debug for TunInterface {
 }
 
 impl TunInterface {
+    fn reconcile_device_mtu(
+        dev: &dyn TunDevice,
+        requested_mtu: u16,
+        ipv6_enabled: bool,
+    ) -> Result<u16, TunError> {
+        let reported_mtu = dev.mtu();
+        if reported_mtu != requested_mtu {
+            dev.set_mtu(requested_mtu).map_err(TunError::Io)?;
+        }
+        let verified_mtu = dev.mtu();
+        if verified_mtu != requested_mtu {
+            return Err(TunError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "TUN backend reported MTU {} after requesting {}",
+                    verified_mtu, requested_mtu
+                ),
+            )));
+        }
+        if verified_mtu < TUN_MIN_MTU {
+            return Err(TunError::Config("TUN backend reported an MTU below 576"));
+        }
+        if ipv6_enabled && verified_mtu < TUN_IPV6_MIN_MTU {
+            return Err(TunError::Config("IPv6 TUN backend reported an MTU below 1280"));
+        }
+        Ok(verified_mtu)
+    }
+
     /// Open a TUN interface using the given config and memory pool.
     pub fn open(config: TunConfig, pool: Arc<MemoryPool>) -> Result<Self, TunError> {
-        if config.mtu < 576 {
+        if let Err(error) = validate_tun_config(&config) {
             crate::optimize::telemetry::TUN_CONFIG_REJECTS.fetch_add(1, Ordering::Relaxed);
-            return Err(TunError::Config("TUN MTU must be >= 576"));
+            return Err(error);
         }
+        let ipv6_enabled = config.ip6.is_some();
 
         // Deterministic behavior on factory-required targets.
         // Windows has a built-in Wintun backend when `tun-windows` is enabled;
@@ -343,10 +438,12 @@ impl TunInterface {
                 }
                 Err(e) => return Err(TunError::Io(e)),
             };
+            let verified_mtu = Self::reconcile_device_mtu(&*dev, config.mtu, ipv6_enabled)?;
             return Ok(Self {
                 dev,
                 pool,
-                configured_mtu: AtomicU16::new(config.mtu),
+                configured_mtu: AtomicU16::new(verified_mtu),
+                ipv6_enabled,
                 #[cfg(target_os = "linux")]
                 zero_copy: config.zero_copy,
             });
@@ -359,10 +456,12 @@ impl TunInterface {
             }
             Err(e) => return Err(e),
         };
+        let verified_mtu = Self::reconcile_device_mtu(&*dev, config.mtu, ipv6_enabled)?;
         Ok(Self {
             dev,
             pool,
-            configured_mtu: AtomicU16::new(config.mtu),
+            configured_mtu: AtomicU16::new(verified_mtu),
+            ipv6_enabled,
             #[cfg(target_os = "linux")]
             zero_copy: config.zero_copy,
         })
@@ -378,6 +477,26 @@ impl TunInterface {
         let _ = zero_copy;
         Self {
             configured_mtu: AtomicU16::new(dev.mtu()),
+            ipv6_enabled: false,
+            dev,
+            pool,
+            #[cfg(target_os = "linux")]
+            zero_copy,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_device_for_test_with_ipv6(
+        dev: Box<dyn TunDevice>,
+        pool: Arc<MemoryPool>,
+        zero_copy: bool,
+    ) -> Self {
+        #[cfg(not(target_os = "linux"))]
+        let _ = zero_copy;
+        let mtu = dev.mtu();
+        Self {
+            configured_mtu: AtomicU16::new(mtu),
+            ipv6_enabled: true,
             dev,
             pool,
             #[cfg(target_os = "linux")]
@@ -397,13 +516,25 @@ impl TunInterface {
 
     /// Atomically applies and publishes a new live layer-3 MTU.
     pub fn set_mtu(&self, mtu: u16) -> io::Result<()> {
-        if mtu < 576 {
+        if mtu < TUN_MIN_MTU {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "TUN MTU must be >= 576"));
+        }
+        if self.ipv6_enabled && mtu < TUN_IPV6_MIN_MTU {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "IPv6 TUN MTU must be >= 1280",
+            ));
         }
         if self.mtu() == mtu {
             return Ok(());
         }
         self.dev.set_mtu(mtu)?;
+        if self.dev.mtu() != mtu {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("TUN backend did not report requested MTU {mtu}"),
+            ));
+        }
         self.configured_mtu.store(mtu, Ordering::Release);
         Ok(())
     }
@@ -593,6 +724,7 @@ mod linux_tun {
     use std::mem;
     use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
     use std::process::Command;
+    use std::sync::atomic::{AtomicU16, Ordering};
 
     const IFF_TUN: libc::c_short = 0x0001;
     const IFF_NO_PI: libc::c_short = 0x1000;
@@ -608,7 +740,7 @@ mod linux_tun {
     pub struct LinuxTun {
         name: Arc<str>,
         fd: RawFd,
-        mtu: u16,
+        mtu: AtomicU16,
     }
 
     impl LinuxTun {
@@ -641,13 +773,181 @@ mod linux_tun {
             }
         }
 
+        fn validate_interface_name(name: &str) -> io::Result<()> {
+            if name.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Linux TUN interface name must not be empty",
+                ));
+            }
+            if name.as_bytes().len() > 15 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Linux TUN interface name is {} bytes; maximum is 15",
+                        name.as_bytes().len()
+                    ),
+                ));
+            }
+            if name.contains('/') || name.contains('\0') {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Linux TUN interface name contains a forbidden character",
+                ));
+            }
+            Ok(())
+        }
+
+        fn interface_exists(name: &str) -> io::Result<bool> {
+            let output = Command::new("ip")
+                .args(["link", "show", "dev", name])
+                .output()
+                .map_err(|error| io::Error::other(format!("ip link inspect spawn: {error}")))?;
+            if output.status.success() {
+                return Ok(true);
+            }
+            let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+            if stderr.contains("cannot find device")
+                || stderr.contains("does not exist")
+                || stderr.contains("no such device")
+            {
+                return Ok(false);
+            }
+            Err(io::Error::other(format!(
+                "ip link inspect returned status {}: {}",
+                output.status,
+                stderr.trim()
+            )))
+        }
+
+        fn remove_owned_interface(name: &str) -> io::Result<()> {
+            if !Self::interface_exists(name)? {
+                return Ok(());
+            }
+            let output = Command::new("ip")
+                .args(["link", "delete", "dev", name])
+                .output()
+                .map_err(|error| io::Error::other(format!("ip link delete spawn: {error}")))?;
+            if !output.status.success() && Self::interface_exists(name)? {
+                return Err(io::Error::other(format!(
+                    "ip link delete returned status {}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )));
+            }
+            if Self::interface_exists(name)? {
+                return Err(io::Error::other("owned Linux TUN interface remains after rollback"));
+            }
+            Ok(())
+        }
+
+        fn json_ip(args: &[&str]) -> io::Result<serde_json::Value> {
+            let output = Command::new("ip")
+                .args(args)
+                .output()
+                .map_err(|error| io::Error::other(format!("ip inspection spawn: {error}")))?;
+            if !output.status.success() {
+                return Err(io::Error::other(format!(
+                    "ip {} returned status {}: {}",
+                    args.join(" "),
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )));
+            }
+            serde_json::from_slice(&output.stdout).map_err(|error| {
+                io::Error::other(format!("ip {} returned invalid JSON: {error}", args.join(" ")))
+            })
+        }
+
+        fn read_mtu(name: &str) -> io::Result<u16> {
+            let value = Self::json_ip(&["-j", "link", "show", "dev", name])?;
+            let mtu = value
+                .as_array()
+                .and_then(|items| items.first())
+                .and_then(|item| item.get("mtu"))
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| io::Error::other("ip link inspection omitted MTU"))?;
+            u16::try_from(mtu).map_err(|_| io::Error::other("Linux TUN MTU exceeds u16"))
+        }
+
+        fn verify_configured(name: &str, cfg: &TunConfig) -> io::Result<u16> {
+            let link = Self::json_ip(&["-j", "link", "show", "dev", name])?;
+            let item = link
+                .as_array()
+                .and_then(|items| items.first())
+                .ok_or_else(|| io::Error::other("ip link inspection returned no device"))?;
+            let is_up = item
+                .get("flags")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|flags| flags.iter().any(|flag| flag.as_str() == Some("UP")));
+            if !is_up {
+                return Err(io::Error::other("Linux TUN link is not administratively up"));
+            }
+            let mtu = item
+                .get("mtu")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| io::Error::other("ip link inspection omitted MTU"))?;
+            let mtu =
+                u16::try_from(mtu).map_err(|_| io::Error::other("Linux TUN MTU exceeds u16"))?;
+
+            let addresses = Self::json_ip(&["-j", "address", "show", "dev", name])?;
+            let address_items = addresses
+                .as_array()
+                .and_then(|items| items.first())
+                .and_then(|item| item.get("addr_info"))
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| io::Error::other("ip address inspection omitted addr_info"))?;
+            if let Some(IpAddr::V4(expected)) = cfg.ip {
+                let Some(netmask) = cfg.netmask else {
+                    return Err(io::Error::other("validated TUN configuration lost IPv4 netmask"));
+                };
+                let prefix = Self::netmask_prefix(netmask)?;
+                let expected_text = expected.to_string();
+                let found = address_items.iter().any(|entry| {
+                    entry.get("family").and_then(serde_json::Value::as_str) == Some("inet")
+                        && entry.get("local").and_then(serde_json::Value::as_str)
+                            == Some(expected_text.as_str())
+                        && entry.get("prefixlen").and_then(serde_json::Value::as_u64)
+                            == Some(u64::from(prefix))
+                });
+                if !found {
+                    return Err(io::Error::other(format!(
+                        "Linux TUN is missing IPv4 address {expected}/{prefix}"
+                    )));
+                }
+            }
+            if let (Some(expected), Some(prefix)) = (cfg.ip6, cfg.prefix6) {
+                let expected_text = expected.to_string();
+                let found = address_items.iter().any(|entry| {
+                    entry.get("family").and_then(serde_json::Value::as_str) == Some("inet6")
+                        && entry.get("local").and_then(serde_json::Value::as_str)
+                            == Some(expected_text.as_str())
+                        && entry.get("prefixlen").and_then(serde_json::Value::as_u64)
+                            == Some(u64::from(prefix))
+                });
+                if !found {
+                    return Err(io::Error::other(format!(
+                        "Linux TUN is missing IPv6 address {expected}/{prefix}"
+                    )));
+                }
+            }
+            Ok(mtu)
+        }
+
         fn run_ip(args: &[&str]) -> io::Result<()> {
-            let output = Command::new("ip").args(args).output()?;
+            let output = Command::new("ip").args(args).output().map_err(|error| {
+                io::Error::other(format!("ip {} spawn: {error}", args.join(" ")))
+            })?;
             if output.status.success() {
                 return Ok(());
             }
             let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(io::Error::other(format!("ip {} failed: {}", args.join(" "), stderr.trim())))
+            Err(io::Error::other(format!(
+                "ip {} returned status {}: {}",
+                args.join(" "),
+                output.status,
+                stderr.trim()
+            )))
         }
 
         fn configure(name: &str, cfg: &TunConfig) -> io::Result<()> {
@@ -689,11 +989,23 @@ mod linux_tun {
                     io::ErrorKind::InvalidInput,
                     "IPv6 TUN address and prefix must be configured together",
                 )),
-            }
+            }?;
+
+            Self::verify_configured(name, cfg).map(|_| ())
         }
 
         /// Open a Linux TUN device with the given configuration.
         pub fn open(cfg: &TunConfig) -> io::Result<Self> {
+            if let Some(name) = cfg.name.as_deref() {
+                Self::validate_interface_name(name)?;
+                if Self::interface_exists(name)? {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!("Linux TUN interface {name} already exists"),
+                    ));
+                }
+            }
+
             // Try canonical path first, fallback to /dev/tun (Android)
             let file = match OpenOptions::new().read(true).write(true).open("/dev/net/tun") {
                 Ok(f) => f,
@@ -706,8 +1018,13 @@ mod linux_tun {
                 let c = CString::new(n.as_str())
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
                 let bytes = c.as_bytes_with_nul();
-                let len = bytes.len().min(ifr.ifr_name.len());
-                for (i, byte) in bytes.iter().enumerate().take(len) {
+                if bytes.len() > ifr.ifr_name.len() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Linux TUN interface name exceeds IFNAMSIZ - 1",
+                    ));
+                }
+                for (i, byte) in bytes.iter().enumerate() {
                     ifr.ifr_name[i] = *byte as libc::c_char;
                 }
             }
@@ -718,15 +1035,51 @@ mod linux_tun {
             }
 
             // Determine actual device name
-            let mut name = String::new();
+            let mut name_bytes = Vec::new();
             for &c in &ifr.ifr_name {
                 if c == 0 {
                     break;
                 }
-                name.push(char::from(c.to_ne_bytes()[0]));
+                name_bytes.push(c.to_ne_bytes()[0]);
+            }
+            let name = match String::from_utf8(name_bytes) {
+                Ok(name) => name,
+                Err(error) => {
+                    drop(file);
+                    return Err(io::Error::other(format!(
+                        "kernel returned invalid TUN name: {error}"
+                    )));
+                }
+            };
+            if let Err(error) = Self::validate_interface_name(&name) {
+                drop(file);
+                return Err(error);
+            }
+            if let Some(requested) = cfg.name.as_deref() {
+                if requested != name {
+                    drop(file);
+                    let cleanup = Self::remove_owned_interface(&name);
+                    return Err(match cleanup {
+                        Ok(()) => io::Error::other(format!(
+                            "kernel returned TUN name {name}, requested {requested}"
+                        )),
+                        Err(cleanup_error) => io::Error::other(format!(
+                            "kernel returned TUN name {name}, requested {requested}; rollback failed: {cleanup_error}"
+                        )),
+                    });
+                }
             }
 
-            Self::configure(&name, cfg)?;
+            if let Err(error) = Self::configure(&name, cfg) {
+                drop(file);
+                let cleanup = Self::remove_owned_interface(&name);
+                return Err(match cleanup {
+                    Ok(()) => error,
+                    Err(cleanup_error) => io::Error::other(format!(
+                        "Linux TUN setup failed: {error}; rollback failed: {cleanup_error}"
+                    )),
+                });
+            }
 
             // Take ownership of the fd to avoid per-call File reconstruction.
             // Keep the descriptor nonblocking so async runtimes and shutdown
@@ -739,17 +1092,44 @@ mod linux_tun {
                 unsafe {
                     libc::close(fd);
                 }
-                return Err(error);
+                let cleanup = Self::remove_owned_interface(&name);
+                return Err(match cleanup {
+                    Ok(()) => error,
+                    Err(cleanup_error) => io::Error::other(format!(
+                        "Linux TUN descriptor setup failed: {error}; rollback failed: {cleanup_error}"
+                    )),
+                });
             }
             if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
                 let error = io::Error::last_os_error();
                 unsafe {
                     libc::close(fd);
                 }
-                return Err(error);
+                let cleanup = Self::remove_owned_interface(&name);
+                return Err(match cleanup {
+                    Ok(()) => error,
+                    Err(cleanup_error) => io::Error::other(format!(
+                        "Linux TUN nonblocking setup failed: {error}; rollback failed: {cleanup_error}"
+                    )),
+                });
             }
             let name: Arc<str> = Arc::from(name);
-            Ok(Self { name, fd, mtu: cfg.mtu })
+            let mtu = match Self::read_mtu(&name) {
+                Ok(mtu) => mtu,
+                Err(error) => {
+                    unsafe {
+                        libc::close(fd);
+                    }
+                    let cleanup = Self::remove_owned_interface(&name);
+                    return Err(match cleanup {
+                        Ok(()) => error,
+                        Err(cleanup_error) => io::Error::other(format!(
+                            "Linux TUN MTU verification failed: {error}; rollback failed: {cleanup_error}"
+                        )),
+                    });
+                }
+            };
+            Ok(Self { name, fd, mtu: AtomicU16::new(mtu) })
         }
     }
 
@@ -758,11 +1138,19 @@ mod linux_tun {
             self.name.as_ref()
         }
         fn mtu(&self) -> u16 {
-            self.mtu
+            self.mtu.load(Ordering::Acquire)
         }
         fn set_mtu(&self, mtu: u16) -> io::Result<()> {
-            let mtu = mtu.to_string();
-            Self::run_ip(&["link", "set", "dev", self.name(), "mtu", &mtu])
+            let mtu_text = mtu.to_string();
+            Self::run_ip(&["link", "set", "dev", self.name(), "mtu", &mtu_text])?;
+            let verified = Self::read_mtu(self.name())?;
+            if verified != mtu {
+                return Err(io::Error::other(format!(
+                    "Linux TUN reported MTU {verified} after requesting {mtu}"
+                )));
+            }
+            self.mtu.store(verified, Ordering::Release);
+            Ok(())
         }
         #[cfg(unix)]
         fn raw_fd(&self) -> Option<std::os::fd::RawFd> {
@@ -846,6 +1234,13 @@ mod linux_tun {
             let error = LinuxTun::netmask_prefix(Ipv4Addr::new(255, 0, 255, 0).into()).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         }
+
+        #[test]
+        fn interface_name_validation_rejects_truncation() {
+            assert!(LinuxTun::validate_interface_name("123456789012345").is_ok());
+            assert!(LinuxTun::validate_interface_name("1234567890123456").is_err());
+            assert!(LinuxTun::validate_interface_name("tun/name").is_err());
+        }
     }
 }
 
@@ -855,6 +1250,7 @@ mod macos_tun {
     use std::mem;
     use std::os::fd::RawFd;
     use std::process::Command;
+    use std::sync::atomic::{AtomicU16, Ordering};
 
     // PF_SYSTEM/SYSPROTO_CONTROL utun open
     const CTLIOCGINFO: libc::c_ulong = 0xc064_4e03;
@@ -882,20 +1278,81 @@ mod macos_tun {
     pub struct MacTun {
         fd: RawFd,
         name: Arc<str>,
-        mtu: u16,
+        mtu: AtomicU16,
     }
 
     impl MacTun {
-        fn set_device_mtu(name: &str, mtu: u16) -> io::Result<()> {
-            let status =
-                Command::new("/sbin/ifconfig").args([name, "mtu", &mtu.to_string()]).status()?;
-            if status.success() {
-                Ok(())
-            } else {
-                Err(io::Error::other(format!(
-                    "ifconfig MTU update failed for {name} with status {status}"
-                )))
+        fn run_ifconfig(args: &[&str]) -> io::Result<()> {
+            let output = Command::new("/sbin/ifconfig")
+                .args(args)
+                .output()
+                .map_err(|error| io::Error::other(format!("ifconfig spawn: {error}")))?;
+            if output.status.success() {
+                return Ok(());
             }
+            Err(io::Error::other(format!(
+                "ifconfig {} returned status {}: {}",
+                args.join(" "),
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )))
+        }
+
+        fn read_mtu(name: &str) -> io::Result<u16> {
+            let output = Command::new("/sbin/ifconfig")
+                .arg(name)
+                .output()
+                .map_err(|error| io::Error::other(format!("ifconfig inspect spawn: {error}")))?;
+            if !output.status.success() {
+                return Err(io::Error::other(format!(
+                    "ifconfig {name} inspect returned status {}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )));
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let tokens: Vec<&str> = stdout.split_whitespace().collect();
+            let mtu = tokens
+                .windows(2)
+                .find(|pair| pair[0] == "mtu")
+                .and_then(|pair| pair[1].parse::<u16>().ok())
+                .ok_or_else(|| io::Error::other("ifconfig inspection omitted MTU"))?;
+            Ok(mtu)
+        }
+
+        fn configure(name: &str, cfg: &TunConfig) -> io::Result<u16> {
+            if let (Some(IpAddr::V4(address)), Some(IpAddr::V4(netmask))) = (cfg.ip, cfg.netmask) {
+                let address = address.to_string();
+                let netmask = netmask.to_string();
+                Self::run_ifconfig(&[name, "inet", &address, "netmask", &netmask, "up"])?;
+            }
+            if let (Some(address), Some(prefix)) = (cfg.ip6, cfg.prefix6) {
+                let address = address.to_string();
+                let prefix = prefix.to_string();
+                Self::run_ifconfig(&[name, "inet6", &address, "prefixlen", &prefix, "up"])?;
+            }
+            let mtu = cfg.mtu.to_string();
+            Self::run_ifconfig(&[name, "mtu", &mtu, "up"])?;
+            let verified = Self::read_mtu(name)?;
+            if verified != cfg.mtu {
+                return Err(io::Error::other(format!(
+                    "macOS utun reported MTU {verified} after requesting {}",
+                    cfg.mtu
+                )));
+            }
+            Ok(verified)
+        }
+
+        fn set_device_mtu(name: &str, mtu: u16) -> io::Result<()> {
+            let mtu_text = mtu.to_string();
+            Self::run_ifconfig(&[name, "mtu", &mtu_text])?;
+            let verified = Self::read_mtu(name)?;
+            if verified != mtu {
+                return Err(io::Error::other(format!(
+                    "macOS utun reported MTU {verified} after requesting {mtu}"
+                )));
+            }
+            Ok(())
         }
 
         /// Open a macOS utun device with the given configuration.
@@ -952,12 +1409,15 @@ mod macos_tun {
                 return Err(io::Error::other("ifname empty"));
             }
             let name_s = String::from_utf8_lossy(&ifname[..(len as usize - 1)]).to_string();
-            if let Err(error) = Self::set_device_mtu(&name_s, cfg.mtu) {
-                unsafe { libc::close(fd) };
-                return Err(error);
-            }
+            let mtu = match Self::configure(&name_s, cfg) {
+                Ok(mtu) => mtu,
+                Err(error) => {
+                    unsafe { libc::close(fd) };
+                    return Err(error);
+                }
+            };
             let name: Arc<str> = Arc::from(name_s);
-            Ok(Self { fd, name, mtu: cfg.mtu })
+            Ok(Self { fd, name, mtu: AtomicU16::new(mtu) })
         }
     }
 
@@ -966,10 +1426,12 @@ mod macos_tun {
             self.name.as_ref()
         }
         fn mtu(&self) -> u16 {
-            self.mtu
+            self.mtu.load(Ordering::Acquire)
         }
         fn set_mtu(&self, mtu: u16) -> io::Result<()> {
-            Self::set_device_mtu(self.name(), mtu)
+            Self::set_device_mtu(self.name(), mtu)?;
+            self.mtu.store(mtu, Ordering::Release);
+            Ok(())
         }
         #[cfg(unix)]
         fn raw_fd(&self) -> Option<std::os::fd::RawFd> {
@@ -1166,6 +1628,7 @@ mod tests {
         writes: AtomicUsize,
         last_write_len: AtomicUsize,
         mtu: AtomicU16,
+        refuse_mtu_updates: bool,
     }
 
     impl DummyTun {
@@ -1175,7 +1638,12 @@ mod tests {
                 writes: AtomicUsize::new(0),
                 last_write_len: AtomicUsize::new(0),
                 mtu: AtomicU16::new(1500),
+                refuse_mtu_updates: false,
             }
+        }
+
+        fn refusing_mtu_updates() -> Self {
+            Self { refuse_mtu_updates: true, ..Self::with_reads(Vec::new()) }
         }
     }
 
@@ -1189,6 +1657,9 @@ mod tests {
         }
 
         fn set_mtu(&self, mtu: u16) -> io::Result<()> {
+            if self.refuse_mtu_updates {
+                return Err(io::Error::other("dummy backend refused MTU update"));
+            }
             self.mtu.store(mtu, Ordering::Relaxed);
             Ok(())
         }
@@ -1209,6 +1680,42 @@ mod tests {
             self.last_write_len.store(buf.len(), Ordering::Relaxed);
             Ok(buf.len())
         }
+    }
+
+    #[test]
+    fn shared_config_rejects_incomplete_address_pairs_and_ipv6_floor() {
+        let missing_netmask = TunConfig {
+            ip: Some("10.8.0.1".parse().expect("valid test IPv4 address")),
+            ..TunConfig::default()
+        };
+        assert!(matches!(validate_tun_config(&missing_netmask), Err(TunError::Config(_))));
+
+        let missing_prefix =
+            TunConfig { ip6: Some(Ipv6Addr::LOCALHOST), mtu: 1500, ..TunConfig::default() };
+        assert!(matches!(validate_tun_config(&missing_prefix), Err(TunError::Config(_))));
+
+        let low_ipv6_mtu = TunConfig {
+            ip6: Some(Ipv6Addr::LOCALHOST),
+            prefix6: Some(128),
+            mtu: 1279,
+            ..TunConfig::default()
+        };
+        assert!(matches!(validate_tun_config(&low_ipv6_mtu), Err(TunError::Config(_))));
+    }
+
+    #[test]
+    fn external_factory_mtu_is_reconciled_and_misreport_fails() {
+        let device = DummyTun::with_reads(Vec::new());
+        let verified = TunInterface::reconcile_device_mtu(&device, 1400, false)
+            .expect("factory MTU update must be verified");
+        assert_eq!(verified, 1400);
+        assert_eq!(device.mtu(), 1400);
+
+        let refusing = DummyTun::refusing_mtu_updates();
+        assert!(matches!(
+            TunInterface::reconcile_device_mtu(&refusing, 1400, false),
+            Err(TunError::Io(_))
+        ));
     }
 
     #[test]
@@ -1238,6 +1745,21 @@ mod tests {
         tun.set_mtu(1280).expect("dummy MTU update must succeed");
 
         assert_eq!(tun.mtu(), 1280);
+    }
+
+    #[test]
+    fn ipv6_rejects_subminimum_mtu_before_backend_mutation() {
+        let pool = crate::optimize::global_pool();
+        let tun = TunInterface::from_device_for_test_with_ipv6(
+            Box::new(DummyTun::with_reads(Vec::new())),
+            pool,
+            false,
+        );
+
+        let error = tun.set_mtu(1279).expect_err("IPv6 MTU below 1280 must be rejected");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(tun.mtu(), 1500);
     }
 
     #[test]

@@ -1123,30 +1123,32 @@ Runtime probing should be performed before starting client/server data paths:
 pub struct LinuxTun {
     name: Arc<str>,
     fd: RawFd,
-    mtu: u16,
+    mtu: AtomicU16,
 }
 ```
 - TUN device creation via `ioctl(TUNSETIFF)` with IFF_TUN | IFF_NO_PI flags
+- Requested names are rejected before `TUNSETIFF` when empty, invalid, or longer than 15 bytes; the kernel-returned name must equal the requested name.
 - Direct file descriptor I/O via `libc::read`/`libc::write` with EINTR retry
 - The descriptor is switched to nonblocking mode after `TUNSETIFF`; async and threaded
   runtime loops treat `WouldBlock` as an idle poll, not as a fatal teardown signal.
-- Automatic cleanup in Drop trait
+- Every post-`TUNSETIFF` setup failure closes the owned descriptor and removes only the exact owned interface, reporting rollback failure together with the primary failure.
 - No intermediate buffering
-- MTU configuration support
+- MTU configuration is applied and read back from the live device; link-up and configured IPv4/IPv6 address/prefix are inspected before readiness.
 
 **macOS (`MacTun`):**
 ```rust
 pub struct MacTun {
     fd: RawFd,
     name: Arc<str>,
-    mtu: u16,
+    mtu: AtomicU16,
 }
 ```
 - utun device creation via `socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL)`
 - 4-byte AF header handling with `libc::readv`/`libc::writev` using iovecs
 - Scatter-gather I/O eliminates header copying
 - Control socket configuration via `ioctl(CTLIOCGINFO)`
-- Automatic cleanup in Drop trait
+- IPv4/IPv6 addresses, link-up, and MTU are configured before the descriptor is published; MTU updates are read back from `ifconfig`.
+- Descriptor ownership remains armed until all configuration succeeds, so intermediate failures close the utun socket.
 
 **Windows (`WintunDevice`, feature `tun-windows`):**
 - Dynamically loads the upstream `wintun.dll` only from the executable directory or protected System32 search directory.
@@ -1163,6 +1165,15 @@ pub struct MacTun {
 - External TUN factory pattern via `OnceLock<Box<dyn TunDeviceFactory>>`.
 - Platform-specific NetworkExtension implementation is injected at startup.
 - Missing factory registration returns a clear configuration error.
+
+#### Shared TUN contract and server platform boundary
+
+- `TunConfig.ip` and `TunConfig.netmask` are one all-or-none IPv4 pair. `TunConfig.ip6` and `TunConfig.prefix6` are one all-or-none IPv6 pair; no backend supplies an implicit address prefix or netmask.
+- IPv4 TUN MTU must be at least 576 bytes. An IPv6-enabled TUN must remain at or above 1280 bytes for initial configuration and every live update.
+- A registered external factory must apply or already expose the requested MTU and report the exact value before `TunInterface::open` publishes the device.
+- `TunInterface` publishes a new MTU only after the backend reports the requested value. Backend and client provisioning errors preserve command spawn, exit status, and diagnostics; exact idempotent postconditions are inspected instead of treating arbitrary failures as duplicates.
+- Client TUN provisioning rolls back the owned descriptor/interface on every failure after creation. Server Linux routing verifies TUN addresses, prefixes, link-up state, forwarding, and the selected firewall rules before readiness, then rolls back only mutations recorded as owned.
+- Shipped server TUN mode is Linux-only. The embedded and standalone server runtimes reject server TUN mode on macOS, Windows, and other platforms before host mutation because those platforms do not yet have a shipped native server routing owner and proof. macOS, Windows, and iOS remain client-side TUN platforms through their respective native or external-factory paths.
 
 #### TUN/MASQUE Backpressure and Packet Ownership
 
@@ -1793,6 +1804,7 @@ See `src/interface.rs` for platform-specific implementations and factory registr
 pub trait TunDevice: Send + Sync {
     fn name(&self) -> &str;
     fn mtu(&self) -> u16;
+    fn set_mtu(&self, mtu: u16) -> io::Result<()>;
     fn read(&self, buf: &mut [u8]) -> io::Result<usize>;
     fn write(&self, buf: &[u8]) -> io::Result<usize>;
 }
@@ -2895,6 +2907,8 @@ The user-facing FEC contract is `auto` / `off`. Any other value is a hard error.
 - `--tun-ip`: TUN IP address
 - `--tun-netmask`: TUN netmask
 
+Server TUN mode is supported only on Linux. Client-side TUN support remains platform-specific as described in the TUN contract above.
+
 **Configuration:**
 - `--config`: Path to unified TOML configuration
 
@@ -3344,7 +3358,8 @@ QuicFuscate bridges a TUN interface through an adaptive MASQUE/HTTP/3 carrier:
 - Reliable fallback: transport owns at most 16 MiB of immutable STREAM payload ranges. Exact ACK retirement, packet-threshold loss, and tail PTO requeue lost ranges before new data. A PMTU decrease splits queued transmissions to the new exact packet budget, and a late ACK of the original packet retires every derived segment exactly once.
 - Packetization and pacing: new and retransmitted STREAM frames use the full confirmed PMTU rather than the discovery floor. The core-owned outbound pacer gates every congestion-controlled QUIC/FEC datagram while ACK-only output bypasses pacing.
 - MTU lifecycle: DPLPMTUD policy exposes validated minimum, maximum, probe interval, and black-hole timeout values. The client opens TUN at the lower of the configured ceiling and effective tunnel MTU, then applies confirmed changes through the platform backend. Packets above the live boundary receive local IPv4 Fragmentation Needed or IPv6 Packet Too Big instead of silent loss.
-- Server: with `--tun`, authenticated MASQUE CONNECT-UDP datagrams carrying raw IP packets are written to a TUN interface (when available on the platform). Standalone server mode derives `ServerConfig.server_ip`, `server_netmask`, and the client IPv4 pool from explicit `--tun-ip` / `--tun-netmask`, so runtime session routing and OS TUN addressing stay aligned.
+- Server Linux: with `--tun`, authenticated MASQUE CONNECT-UDP datagrams carrying raw IP packets are written to the verified Linux TUN interface. Standalone server mode derives `ServerConfig.server_ip`, `server_netmask`, and the client IPv4 pool from explicit `--tun-ip` / `--tun-netmask`, so runtime session routing and OS TUN addressing stay aligned.
+- Server macOS/Windows: embedded and standalone server TUN startup rejects the mode before host mutation because no native server routing owner and privileged proof are shipped for those platforms. Their internal rule generators are not advertised server capabilities.
 - Multi-client routing: authenticated source ownership is enforced for both datagram and framed-stream uplink. Owned unicast is destination-routed; IPv4 directed broadcast/multicast and IPv6 multicast use explicit authenticated fan-out; client-to-client unicast remains default-deny unless explicitly enabled.
 - Server hotpath: after a TUN packet is queued as MASQUE downlink for one session, only that target client's connection is flushed. The server does not scan and flush all clients per TUN packet.
 - Authentication: the public QKey ID in the QUIC Initial selects the server-side record. The client sends the bearer only after 1-RTT encryption through the H3/MASQUE `x-qf-auth` header. The server gates MASQUE DATAGRAM-to-TUN delivery on the current authenticated state and closes missing or invalid authentication attempts.
@@ -3690,6 +3705,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `test-security-fuzzing.sh` - Security & fuzzing (ASAN/MSAN/UBSAN, fuzz targets, concurrency, `rt-property-suite` via proptest)
 - `test-performance-regression.sh` - Performance regression with baseline comparison
 - `test-e2e.sh` - End-to-end integration tests with real network scenarios
+- `tun-provisioning-negative-netns.sh` - Privileged Linux network-namespace proof for fail-closed TUN creation, duplicate/conflicting resources, permission denial, routing failure/retry, missing-interface rollback, and zero owned residue
 - `tun-e2e-netns.sh` - Linux network-namespace production smoke: real server/client TUN over authenticated H3/MASQUE CONNECT-UDP and a hard 0%-loss ping assertion through the tunnel
 - `fingerprint-runtime-proof-netns.sh` - Privileged five-profile packet/capture/p0f proof with exact artifact hash, non-overwriting evidence directories, protected-process and namespace gates, and explicit active-nmap match status. Use `QF_FINGERPRINT_NMAP_GATE=record` for evidence collection; `match` is intentionally fail-closed when a profile has no exact active result.
 - `fingerprint-runtime-proof-hook.sh` - Synchronous hook used while `tun-e2e-netns.sh` owns the authenticated namespaces and product processes; captures both TUN directions, runs p0f and nmap, and invokes the pure Python pcap verifier.
@@ -4358,10 +4374,12 @@ cleanup_firewall_on_start = false  # Compatibility key; cleanup remains mandator
 ### IPv6 Dual-Stack Support
 
 The VPN server supports dual-stack IPv4/IPv6 operation. When IPv6 is enabled (default), the server:
-- Assigns IPv6 addresses to the TUN interface via `ip addr add` / `ifconfig inet6`
+- Assigns IPv6 addresses to the Linux TUN interface via `ip addr add` and verifies the exact address/prefix before readiness
 - Allocates IPv6 addresses to clients from a dedicated `Ipv6Pool`
 - Routes IPv6 packets via `get_by_client_ipv6()` session lookup
-- Sets up ip6tables MASQUERADE / pf inet6 NAT / Windows NetNat v6
+- Sets up Linux ip6tables or nftables MASQUERADE and forwarding rules
+
+The shipped server runtime does not advertise macOS pf or Windows NetNat as server TUN backends. Those platform-specific rule generators remain internal library code until a native server routing owner and privileged proof are provided.
 
 **Configuration:**
 ```toml
