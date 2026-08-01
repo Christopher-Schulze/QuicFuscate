@@ -20,6 +20,8 @@ pub struct ServerRuntime {
     stats: Arc<ServerStats>,
     /// Optional standalone live UDP runtime state.
     live: Option<ServerLiveRuntime>,
+    /// Shared owner for all stealth background workers of this generation.
+    stealth_runtime: Arc<StealthRuntimeOwner>,
 }
 
 /// Server state.

@@ -371,6 +371,10 @@ name = "rt-reality-targets"
 path = "scripts/tests/rust/rt-reality-targets.rs"
 
 [[test]]
+name = "rt-stealth-runtime-lifecycle"
+path = "scripts/tests/rust/rt-stealth-runtime-lifecycle.rs"
+
+[[test]]
 name = "rt-ring-buffer-parity"
 path = "scripts/tests/rust/rt-ring-buffer-parity.rs"
 

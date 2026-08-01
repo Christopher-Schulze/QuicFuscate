@@ -90,6 +90,10 @@ if ! run_case "Reality fallback target rotation" cargo test --release --features
   FAIL=$((FAIL + 1))
 fi
 
+if ! run_case "Stealth runtime worker lifecycle" cargo test --release --features rust-tests --test rt-stealth-runtime-lifecycle -- --nocapture; then
+  FAIL=$((FAIL + 1))
+fi
+
 if (( FAST == 0 )); then
   if ! run_case "Stealth core suite (probe pressure paths)" ./scripts/tests/suites/test-stealth.sh --fast; then
     FAIL=$((FAIL + 1))

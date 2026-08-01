@@ -18,7 +18,7 @@ use crate::fec::{AdaptiveFec, FecConfig, FecPacket, FecTransportObserver};
 use crate::optimize::{AlignedBox, MemoryPool, OptimizationManager, OptimizeConfig};
 use crate::stealth::{
     IcmpUnreachablePolicy, NormalizeResult, OsFingerprintProfile, PacketNormalizer, StealthConfig,
-    StealthManager, StealthMode,
+    StealthManager, StealthMode, StealthRuntimeOwner,
 };
 use std::sync::Arc;
 #[cfg(feature = "orchestrator")]
@@ -424,7 +424,7 @@ impl QuicFuscateConnection {
         server_name: &str,
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
-        mut config: crate::transport::Config,
+        config: crate::transport::Config,
         stealth_config: StealthConfig,
         fec_config: FecConfig,
         opt_cfg: OptimizeConfig,
@@ -432,12 +432,43 @@ impl QuicFuscateConnection {
         qkey_initial_token: Option<Vec<u8>>,
         use_utls: bool,
     ) -> Result<Self, String> {
+        Self::new_client_with_runtime(
+            server_name,
+            local_addr,
+            remote_addr,
+            config,
+            stealth_config,
+            fec_config,
+            opt_cfg,
+            qkey_auth_token_hex,
+            qkey_initial_token,
+            use_utls,
+            None,
+        )
+    }
+
+    /// Creates a new client connection attached to a runtime-owned stealth service.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_client_with_runtime(
+        server_name: &str,
+        local_addr: SocketAddr,
+        remote_addr: SocketAddr,
+        mut config: crate::transport::Config,
+        stealth_config: StealthConfig,
+        fec_config: FecConfig,
+        opt_cfg: OptimizeConfig,
+        qkey_auth_token_hex: Option<crate::engine::qkey::QKeyToken>,
+        qkey_initial_token: Option<Vec<u8>>,
+        use_utls: bool,
+        runtime_owner: Option<Arc<StealthRuntimeOwner>>,
+    ) -> Result<Self, String> {
         let crypto_manager = Arc::new(CryptoManager::new());
         let optimization_manager = Arc::new(OptimizationManager::from_cfg(opt_cfg));
-        let stealth_manager = Arc::new(StealthManager::new(
+        let stealth_manager = Arc::new(StealthManager::new_with_runtime_owner(
             stealth_config,
             optimization_manager.clone(),
             crypto_manager.clone(),
+            runtime_owner,
         ));
 
         if use_utls {
@@ -492,6 +523,32 @@ impl QuicFuscateConnection {
         fec_config: FecConfig,
         opt_cfg: OptimizeConfig,
     ) -> Result<Self, String> {
+        Self::new_server_with_runtime(
+            scid,
+            initial_key_dcid,
+            local_addr,
+            remote_addr,
+            config,
+            stealth_config,
+            fec_config,
+            opt_cfg,
+            None,
+        )
+    }
+
+    /// Creates a new server-side connection attached to a runtime-owned stealth service.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_server_with_runtime(
+        scid: &crate::transport::ConnectionId,
+        initial_key_dcid: Option<&crate::transport::ConnectionId>,
+        local_addr: SocketAddr,
+        remote_addr: SocketAddr,
+        config: &mut crate::transport::Config,
+        stealth_config: StealthConfig,
+        fec_config: FecConfig,
+        opt_cfg: OptimizeConfig,
+        runtime_owner: Option<Arc<StealthRuntimeOwner>>,
+    ) -> Result<Self, String> {
         let tunnel_ingress_profile = if !stealth_config.enable_network_fingerprint_normalization
             || matches!(stealth_config.mode, StealthMode::Off)
         {
@@ -506,10 +563,11 @@ impl QuicFuscateConnection {
         };
         let crypto_manager = Arc::new(CryptoManager::new());
         let optimization_manager = Arc::new(OptimizationManager::from_cfg(opt_cfg));
-        let stealth_manager = Arc::new(StealthManager::new(
+        let stealth_manager = Arc::new(StealthManager::new_with_runtime_owner(
             stealth_config,
             optimization_manager.clone(),
             crypto_manager.clone(),
+            runtime_owner,
         ));
 
         let conn = crate::transport::packet::accept(

@@ -32,29 +32,12 @@ pub fn load_server_identity(
 }
 
 pub fn start_runtime_profile_rotation(
+    runtime_owner: &Arc<StealthRuntimeOwner>,
     stealth_config: Arc<std::sync::Mutex<StealthConfig>>,
     profiles: Vec<FingerprintProfile>,
     profile_interval_secs: u64,
-) {
-    if profile_interval_secs == 0 || profiles.len() <= 1 {
-        return;
-    }
-
-    tokio::task::spawn(async move {
-        let mut idx = 0usize;
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(profile_interval_secs)).await;
-            idx = (idx + 1) % profiles.len();
-            let mut guard = match stealth_config.lock() {
-                Ok(g) => g,
-                Err(p) => {
-                    log::warn!("stealth_config mutex poisoned; recovering inner state");
-                    p.into_inner()
-                }
-            };
-            apply_runtime_profile_identity(&mut guard, profiles[idx].browser, profiles[idx].os);
-        }
-    });
+) -> Result<(), String> {
+    runtime_owner.start(Some(stealth_config), profiles, profile_interval_secs)
 }
 
 pub fn start_standalone_metrics_service(runtime: &mut ServerRuntime, port: u16) {
@@ -296,10 +279,33 @@ pub fn create_live_server_connection(
     opt_params: crate::optimize::OptimizeConfig,
     initial_key_dcid: &crate::transport::ConnectionId,
 ) -> Result<QuicFuscateConnection, String> {
+    create_live_server_connection_with_runtime(
+        local_addr,
+        remote_addr,
+        transport_config,
+        stealth_config,
+        fec_config,
+        opt_params,
+        initial_key_dcid,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_live_server_connection_with_runtime(
+    local_addr: SocketAddr,
+    remote_addr: SocketAddr,
+    transport_config: &mut crate::transport::Config,
+    stealth_config: crate::stealth::StealthConfig,
+    fec_config: crate::fec::FecConfig,
+    opt_params: crate::optimize::OptimizeConfig,
+    initial_key_dcid: &crate::transport::ConnectionId,
+    runtime_owner: Option<Arc<StealthRuntimeOwner>>,
+) -> Result<QuicFuscateConnection, String> {
     let mut scid_bytes = [0u8; crate::transport::MAX_CONN_ID_LEN];
     crate::transport::rand::rand_bytes(&mut scid_bytes);
     let scid = crate::transport::ConnectionId::from_ref(&scid_bytes);
-    QuicFuscateConnection::new_server(
+    QuicFuscateConnection::new_server_with_runtime(
         &scid,
         Some(initial_key_dcid),
         local_addr,
@@ -308,6 +314,7 @@ pub fn create_live_server_connection(
         stealth_config,
         fec_config,
         opt_params,
+        runtime_owner,
     )
 }
 
@@ -598,6 +605,7 @@ fn enqueue_client_fanout(
 }
 
 #[inline]
+#[allow(clippy::too_many_arguments)]
 fn allow_client_uplink(
     forwarding_policy: &ClientIsolationManager,
     metrics: &Metrics,

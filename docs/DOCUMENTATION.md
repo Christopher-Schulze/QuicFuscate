@@ -812,6 +812,12 @@ When an active probe is detected (invalid QUIC authentication, suspicious packet
 
 **Effect:** The scanner receives a cryptographically valid QUIC/TLS response from Cloudflare or Google, making the server indistinguishable from a standard web service.
 
+**Background worker ownership (TODO-570):**
+- `StealthRuntimeOwner` is created once per client or server runtime generation, including the standalone CLI client path. Production connection construction passes that owner into `StealthManager`; compatibility constructors used by the finite `qf-e2e-client` probe and direct tests remain non-spawning.
+- The owner shares one validated `RealityConfig` and one `CoverHandshakeCache` across all connections, owns the cancellation-aware refresh worker, and periodically sweeps `RealityProxy` sessions independently of probe traffic.
+- Standalone profile rotation uses the same owner, cancellation signal, generation identity, bounded join timeout, and shutdown barrier. Client and server stop paths explicitly signal and await owned workers; a replacement runtime receives a new generation.
+- Cover TCP connect, TLS handshake, raw-capture collection, refresh delay, and retry delay are bounded. Capture-channel closure is reported as an error rather than converted into an empty successful capture.
+
 #### DoH Multi-Provider Rotation
 
 DNS-over-HTTPS now supports multiple providers with automatic round-robin rotation and fallback:
@@ -4498,7 +4504,7 @@ A full deep-audit sweep of `src/` was performed with parallel read-only module s
 - **AEAD header-protection sample bypass**: `AesHp::apply` zero-pads short samples with `unwrap_or([0u8; 16])`. Tracked in TODO-629.
 - **GHASH test override in production**: `src/crypto/gcm.rs` exposes an env-var-activated test override in release builds. Tracked in TODO-630.
 - **TLS cover zero keys**: `src/stealth/parts/tls_cover_provider.rs` falls back to all-zero keys on RNG failure. Tracked in TODO-642.
-- **Reality session map unbounded**: `src/reality.rs` only cleans the session map on `forward_probe`, so sustained probes can exceed `MAX_SESSIONS`. Tracked in TODO-570.
+- **Reality session map cleanup**: `src/reality.rs` now sweeps stale sessions on the owner timer as well as on probe traffic, so sustained probes cannot bypass `MAX_SESSIONS` cleanup. Resolved by TODO-570.
 - **Probe detector history unbounded**: `src/stealth/parts/probe_detector.rs` has no hard cap before the 60-second retention window. Tracked in TODO-644.
 - **SecretString UB**: `src/secret.rs` uses `from_utf8_unchecked` on bytes that can be cloned without a UTF-8 guarantee. Tracked in TODO-651.
 - **Privilege drop unsafe assumptions**: `src/privilege/drop.rs` uses `assume_init` and `CStr::from_ptr` without validating libc success or NUL termination. Tracked in TODO-652 and TODO-653.

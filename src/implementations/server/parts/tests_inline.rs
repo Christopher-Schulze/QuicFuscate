@@ -1272,6 +1272,7 @@ mod tests {
             fec_cfg_shared: &fec_config,
             opt_params_shared: &optimize_config,
             transport_config: &mut transport,
+            stealth_runtime: None,
             auth_rate_limiter,
             retry_token_manager: None,
         });

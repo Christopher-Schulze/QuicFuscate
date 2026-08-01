@@ -56,6 +56,8 @@ pub struct StealthManager {
     /// When enabled, holds cached TLS handshake material from a cover site
     /// that can be replayed to probes for byte-identical mimikry.
     pub(crate) cover_cache: Option<Arc<crate::reality::CoverHandshakeCache>>,
+    /// Shared runtime owner for background Reality and profile workers.
+    _background_owner: Option<Arc<StealthRuntimeOwner>>,
     /// Next scheduled cover PING emission time
     next_cover_ping: parking_lot::Mutex<std::time::Instant>,
 }
@@ -67,7 +69,23 @@ impl StealthManager {
         optimization_manager: Arc<OptimizationManager>,
         crypto_manager: Arc<CryptoManager>,
     ) -> Self {
-        Self::new_internal(config, optimization_manager, crypto_manager, false)
+        Self::new_internal(config, optimization_manager, crypto_manager, false, None)
+    }
+
+    /// Creates a stealth manager attached to an explicit runtime owner.
+    pub fn new_with_runtime_owner(
+        config: StealthConfig,
+        optimization_manager: Arc<OptimizationManager>,
+        crypto_manager: Arc<CryptoManager>,
+        runtime_owner: Option<Arc<StealthRuntimeOwner>>,
+    ) -> Self {
+        Self::new_internal(
+            config,
+            optimization_manager,
+            crypto_manager,
+            false,
+            runtime_owner,
+        )
     }
 
     fn new_internal(
@@ -75,6 +93,7 @@ impl StealthManager {
         optimization_manager: Arc<OptimizationManager>,
         crypto_manager: Arc<CryptoManager>,
         force_masque_compat: bool,
+        runtime_owner: Option<Arc<StealthRuntimeOwner>>,
     ) -> Self {
         let fingerprint = Arc::new(Mutex::new(FingerprintProfile::new(
             config.initial_browser,
@@ -149,29 +168,33 @@ impl StealthManager {
             None
         };
 
+        if let (Some(owner), Some(proxy)) = (runtime_owner.as_ref(), reality_proxy.as_ref()) {
+            owner.register_reality_proxy(proxy);
+        }
+
         if reality_proxy.is_some() {
             log::info!("Reality Proxy (Reverse Proxy) initialized for Active Probe fallback.");
         }
 
         // COVER HANDSHAKE CACHE INITIALIZATION (TODO-415)
-        // Load RealityConfig from env. When enabled, create the cache and spawn
-        // the background refresh loop so cover material is captured and kept fresh.
-        let reality_config = crate::reality::RealityConfig::from_env();
-        let cover_cache = if reality_config.enabled {
-            let cache = Arc::new(crate::reality::CoverHandshakeCache::new(reality_config.clone()));
-            let cache_for_loop = Arc::clone(&cache);
-            tokio::spawn(async move {
-                cache_for_loop.refresh_loop().await;
+        // Runtime-owned managers share one cache. Compatibility managers keep
+        // a local cache without spawning an unowned worker.
+        let cover_cache = runtime_owner
+            .as_ref()
+            .and_then(|owner| owner.cover_cache())
+            .or_else(|| {
+                let reality_config = crate::reality::RealityConfig::from_env();
+                if reality_config.enabled {
+                    log::info!(
+                        "Cover handshake cache initialized for {} (TTL={}s) without a runtime worker",
+                        reality_config.cover_host,
+                        reality_config.cache_ttl
+                    );
+                    Some(Arc::new(crate::reality::CoverHandshakeCache::new(reality_config)))
+                } else {
+                    None
+                }
             });
-            log::info!(
-                "Cover handshake cache initialized for {} (TTL={}s)",
-                reality_config.cover_host,
-                reality_config.cache_ttl
-            );
-            Some(cache)
-        } else {
-            None
-        };
 
         Self {
             config,
@@ -200,6 +223,7 @@ impl StealthManager {
             reality_proxy,
             fallback_rx: Arc::new(Mutex::new(rx)),
             cover_cache,
+            _background_owner: runtime_owner,
             next_cover_ping: parking_lot::Mutex::new(std::time::Instant::now()),
         }
     }
@@ -227,7 +251,7 @@ impl StealthManager {
         optimization_manager: Arc<OptimizationManager>,
         crypto_manager: Arc<CryptoManager>,
     ) -> Self {
-        Self::new_internal(config, optimization_manager, crypto_manager, true)
+        Self::new_internal(config, optimization_manager, crypto_manager, true, None)
     }
 
     /// Debug consistency check: validates TLS fingerprint matches header profile.

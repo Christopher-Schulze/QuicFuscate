@@ -59,6 +59,13 @@ Padding and timing rates flow through `StealthRuntimePolicy` → `StealthRuntime
 `transport_stealth_jitter_delay()` uses `stealth_timing_rate` to scale jitter magnitude.
 `runtime_rotation_rate` stays 0 for active sessions; `maybe_rotate_fingerprint()` now defers persona movement to future sessions only.
 
+### StealthRuntimeOwner (src/stealth/parts/runtime.rs, TODO-570)
+One owner is created per client/server runtime generation, including `main_parts/runtime.rs::run_client`, and passed into production `StealthManager` and `QuicFuscateConnection` construction.
+- Shared `RealityConfig` and `CoverHandshakeCache`: at most one refresh worker per owner, never one worker per connection.
+- `watch` cancellation plus named `JoinHandle` registry: Reality refresh, timer-driven proxy cleanup, and next-connection profile rotation are explicitly joined with a bounded shutdown timeout.
+- `RealityProxy` registration uses weak references, so proxy sessions do not keep an old runtime generation alive after connection teardown.
+- Compatibility constructors without an owner create no background worker and preserve direct-test/legacy behavior.
+
 ### Stealth Stack Coherence Wave (2026-06-30)
 - Engine client uses `stealth.use_utls` and no longer hardcodes `use_utls=false`.
 - Connection persona is frozen for the session: Browser/OS/uTLS/QPACK/header identity does not mutate mid-connection.
@@ -1034,7 +1041,7 @@ A full source-audit sweep produced TODO-626 through TODO-689 and augmented TODO-
 
 - **Crypto data plane**: constant-time tag comparison (TODO-626), key/IV length validation (TODO-627), AEGIS `unwrap` panics (TODO-628), AEAD header-protection sample validation (TODO-629), GHASH test override removal (TODO-630), round-key zeroization (TODO-631), nonce/IV uniqueness (TODO-632), and QUIC KDF input validation (TODO-633).
 - **FEC recovery**: unbounded fountain-decoder storage (TODO-634), adaptive emitted-ID cap (TODO-635), decoder peeling complexity (TODO-636), and Wiedemann buffer reuse (TODO-637).
-- **Transport/Stealth**: ConnectionId clone hot path (TODO-638), StealthShaper RNG fallback logging (TODO-639), H3 masquerade time source (TODO-640), domain fronting jitter (TODO-641), TLS cover zero-key fallback (TODO-642), qftls `munlock` (TODO-643), probe detector history cap (TODO-644), Reality session map timer-driven cleanup (TODO-570), and brain escalation/histogram/config correctness (TODO-584).
+- **Transport/Stealth**: ConnectionId clone hot path (TODO-638), StealthShaper RNG fallback logging (TODO-639), H3 masquerade time source (TODO-640), domain fronting jitter (TODO-641), TLS cover zero-key fallback (TODO-642), qftls `munlock` (TODO-643), probe detector history cap (TODO-644), and brain escalation/histogram/config correctness (TODO-584). Reality session map timer-driven cleanup is resolved by TODO-570.
 - **Optimize/Engine/Admin**: engine config reload (TODO-645), uring_batch backpressure (TODO-646), admin HTTP connection limit (TODO-647), config write validation (TODO-648), memory-pool unsafe bounds (TODO-587), metrics export allocations (TODO-587, TODO-615), and TUN interface unaligned/fcntl safety (TODO-654, TODO-655).
 - **Client/Server/DNS/PKI**: DNS backup path (TODO-649), DNS intercept spawn failure (TODO-650), PKI timestamp fallback (TODO-656), CLI probe parse errors (TODO-657), profile ID collision (TODO-658), retry token length validation (TODO-659), blacklist sync ownership (TODO-660), admin per-operation timeout (TODO-661), profile save atomicity (TODO-662), client TUN dual-stack (TODO-663), Windows TUN backend confusion (TODO-664), admin replay store pruning (TODO-665), DNS NXDOMAIN lie (TODO-666), DNS rate limiting (TODO-668), DNS allocation/timeout (TODO-669), env var race/validation (TODO-670), umask file permissions (TODO-671), log rotation hooks (TODO-672), CLI unbounded strings (TODO-673), duplicate logging init (TODO-674), and audit blocking flush (TODO-675).
 - **Privilege and secrets**: SecretString UTF-8 safety (TODO-651), privilege `assume_init`/`CStr` validation (TODO-652, TODO-653), fsutil TOCTOU (TODO-667).

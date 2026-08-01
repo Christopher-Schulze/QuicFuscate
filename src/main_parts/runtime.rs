@@ -935,6 +935,10 @@ async fn run_client(
         vpn_dns.iter().copied(),
     )
     .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string()))?;
+    let stealth_runtime = Arc::new(
+        StealthRuntimeOwner::from_env()
+            .map_err(|error| std::io::Error::other(format!("invalid Reality config: {error}")))?,
+    );
 
     // Initialize kill switch if enabled
     let kill_switch = if kill_switch_enabled {
@@ -1056,7 +1060,7 @@ async fn run_client(
     let qkey_initial_token: Option<Vec<u8>> =
         qkey.map(|raw| quicfuscate::engine::qkey::id(raw.trim()).into_bytes());
 
-    let mut conn = match QuicFuscateConnection::new_client(
+    let mut conn = match QuicFuscateConnection::new_client_with_runtime(
         host,
         local_addr,
         server_addr,
@@ -1067,6 +1071,7 @@ async fn run_client(
         qkey_auth_token_hex,
         qkey_initial_token,
         !no_utls,
+        Some(stealth_runtime.clone()),
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -1096,6 +1101,9 @@ async fn run_client(
         let sm = conn.stealth_manager();
         sm.start_profile_rotation(profiles, std::time::Duration::from_secs(profile_interval));
     }
+    stealth_runtime
+        .start(None, Vec::new(), 0)
+        .map_err(|error| std::io::Error::other(format!("stealth runtime start failed: {error}")))?;
 
     let mut buf = [0; 65535];
     let mut out = [0; 65535];
@@ -1266,7 +1274,7 @@ async fn run_client(
                                     diagnostics.record_core_recv_error();
                                 }
                                 error!("TLS handshake failed: {}", error);
-                                return Err(std::io::Error::other(error.to_string()));
+                                break ExitReason::SocketError(error.to_string());
                             }
                             Err(error) => {
                                 if let Some(diagnostics) = io_diagnostics.as_mut() {
@@ -1583,23 +1591,32 @@ async fn run_client(
         }
     };
 
-    if let Some(ref ks) = kill_switch {
+    let stealth_shutdown_error = stealth_runtime
+        .shutdown(quicfuscate::stealth::STEALTH_RUNTIME_SHUTDOWN_TIMEOUT)
+        .await
+        .err();
+    let kill_switch_error = if let Some(ref ks) = kill_switch {
         match &exit_reason {
-            ExitReason::CleanShutdown => {
-                ks.disable().map_err(|error| {
-                    std::io::Error::other(format!(
-                        "kill switch cleanup on clean shutdown failed: {error}"
-                    ))
-                })?;
-            }
-            _ => {
-                ks.on_vpn_disconnected().map_err(|error| {
-                    std::io::Error::other(format!(
-                        "kill switch fail-closed transition failed: {error}"
-                    ))
-                })?;
-            }
+            ExitReason::CleanShutdown => ks
+                .disable()
+                .err()
+                .map(|error| format!("kill switch cleanup on clean shutdown failed: {error}")),
+            _ => ks.on_vpn_disconnected().err().map(|error| {
+                format!("kill switch fail-closed transition failed: {error}")
+            }),
         }
+    } else {
+        None
+    };
+    if let Some(error) = match (stealth_shutdown_error, kill_switch_error) {
+        (Some(stealth), Some(kill_switch)) => {
+            Some(format!("stealth runtime shutdown failed: {stealth}; {kill_switch}"))
+        }
+        (Some(stealth), None) => Some(format!("stealth runtime shutdown failed: {stealth}")),
+        (None, Some(kill_switch)) => Some(kill_switch),
+        (None, None) => None,
+    } {
+        return Err(std::io::Error::other(error));
     }
 
     match exit_reason {

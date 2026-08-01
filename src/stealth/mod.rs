@@ -191,6 +191,7 @@ include!("parts/chaff.rs");
 include!("parts/tls_client_hello.rs");
 include!("parts/config.rs");
 include!("parts/escalation.rs");
+include!("parts/runtime.rs");
 include!("parts/manager.rs");
 include!("parts/stealth_coverage_tests.rs");
 

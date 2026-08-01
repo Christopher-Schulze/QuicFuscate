@@ -43,6 +43,7 @@ use tokio::task::JoinHandle;
 use crate::engine::{DisconnectReason, EngineConfig, EngineError, EngineState};
 use crate::interface::{TunConfig, TunInterface};
 use crate::optimize::MemoryPool;
+use crate::stealth::StealthRuntimeOwner;
 
 /// Client runtime handle for the VPN client.
 ///
@@ -63,6 +64,8 @@ pub struct ClientRuntime {
     subsystems: Option<ClientSubsystems>,
     /// Tokio runtime handle
     runtime: Option<runtime::SharedRuntime>,
+    /// Shared owner for all stealth background workers of this generation.
+    stealth_runtime: Option<Arc<StealthRuntimeOwner>>,
     /// I/O driver
     io_driver: Option<Arc<IoDriver>>,
     /// I/O task handles
@@ -174,6 +177,10 @@ impl ClientRuntime {
             capacity = 1;
         }
         let pool = Arc::new(MemoryPool::new(capacity, block_size));
+        let stealth_runtime =
+            Arc::new(StealthRuntimeOwner::from_env().map_err(|error| {
+                EngineError::Config(format!("Invalid Reality config: {error}"))
+            })?);
 
         Ok(Self {
             config,
@@ -183,6 +190,7 @@ impl ClientRuntime {
             socket: None,
             subsystems: None,
             runtime: None,
+            stealth_runtime: Some(stealth_runtime),
             io_driver: None,
             io_handles: Vec::new(),
             shutdown: Arc::new(AtomicBool::new(false)),
@@ -235,16 +243,6 @@ impl ClientRuntime {
         log::info!("TUN interface opened: {}", tun.name());
         self.tun = Some(Arc::new(parking_lot::Mutex::new(tun)));
 
-        // Initialize subsystems
-        self.subsystems = match subsystems::init_subsystems(&self.config) {
-            Ok(subsystems) => Some(subsystems),
-            Err(e) => {
-                self.tun = None;
-                self.state = ClientState::Error;
-                return Err(e);
-            }
-        };
-
         if self.runtime.is_none() {
             let runtime = match runtime::create_shared_runtime(&runtime::RuntimeConfig::default()) {
                 Ok(rt) => rt,
@@ -256,6 +254,56 @@ impl ClientRuntime {
                 }
             };
             self.runtime = Some(runtime);
+        }
+
+        let runtime_owner = match self.stealth_runtime.as_ref() {
+            Some(owner) if !owner.is_shutdown() => owner.clone(),
+            _ => match StealthRuntimeOwner::from_env() {
+                Ok(owner) => {
+                    let owner = Arc::new(owner);
+                    self.stealth_runtime = Some(owner.clone());
+                    owner
+                }
+                Err(error) => {
+                    self.tun = None;
+                    self.state = ClientState::Error;
+                    return Err(EngineError::Config(format!("Invalid Reality config: {error}")));
+                }
+            },
+        };
+
+        // Initialize subsystems against the runtime owner before any worker starts.
+        self.subsystems = match subsystems::init_subsystems_with_runtime(
+            &self.config,
+            Some(runtime_owner.clone()),
+        ) {
+            Ok(subsystems) => Some(subsystems),
+            Err(e) => {
+                self.tun = None;
+                self.state = ClientState::Error;
+                return Err(e);
+            }
+        };
+
+        let Some(runtime) = self.runtime.as_ref().cloned() else {
+            runtime_owner.request_shutdown();
+            self.subsystems = None;
+            self.tun = None;
+            self.state = ClientState::Error;
+            return Err(EngineError::Internal(
+                "Runtime disappeared before stealth worker start".to_string(),
+            ));
+        };
+        let start_result = {
+            let _runtime_guard = runtime.enter();
+            runtime_owner.start(None, Vec::new(), 0)
+        };
+        if let Err(error) = start_result {
+            runtime_owner.request_shutdown();
+            self.subsystems = None;
+            self.tun = None;
+            self.state = ClientState::Error;
+            return Err(EngineError::Internal(format!("Stealth runtime start failed: {error}")));
         }
 
         self.state = ClientState::Running;
@@ -290,6 +338,24 @@ impl ClientRuntime {
         // Close subsystems
         self.subsystems = None;
 
+        if let Some(owner) = self.stealth_runtime.as_ref() {
+            if let Some(runtime) = self.runtime.as_ref() {
+                match runtime
+                    .block_on(owner.shutdown(crate::stealth::STEALTH_RUNTIME_SHUTDOWN_TIMEOUT))
+                {
+                    Ok(report) => log::debug!(
+                        "Client stealth runtime generation {} stopped: joined={}, force_stopped={}",
+                        report.generation,
+                        report.workers_joined,
+                        report.workers_force_stopped
+                    ),
+                    Err(error) => log::warn!("Client stealth runtime shutdown failed: {}", error),
+                }
+            } else {
+                owner.request_shutdown();
+            }
+        }
+
         // Close TUN
         if let Some(tun) = self.tun.take() {
             let name = tun.lock().name().to_string();
@@ -311,7 +377,8 @@ impl ClientRuntime {
         *self.loss_reason.lock() = None;
 
         // Create QUIC connection
-        let conn = ClientConnection::connect(&self.config)?;
+        let conn =
+            ClientConnection::connect_with_runtime(&self.config, self.stealth_runtime.clone())?;
         let local_addr = conn.local_addr();
         let remote_addr = conn.peer_addr();
         self.connection = Some(conn);

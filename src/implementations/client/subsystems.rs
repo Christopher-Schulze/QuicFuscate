@@ -3,11 +3,15 @@
 use std::sync::Arc;
 
 use crate::engine::{EngineConfig, EngineError};
+use crate::stealth::StealthRuntimeOwner;
 
 use super::{ClientSubsystems, FecCodec};
 
-pub fn init_subsystems(config: &EngineConfig) -> Result<ClientSubsystems, EngineError> {
-    let stealth = init_stealth(config)?;
+pub fn init_subsystems_with_runtime(
+    config: &EngineConfig,
+    runtime_owner: Option<Arc<StealthRuntimeOwner>>,
+) -> Result<ClientSubsystems, EngineError> {
+    let stealth = init_stealth(config, runtime_owner)?;
     let fec = Arc::new(std::sync::Mutex::new(FecCodec::new(config.fec.clone())));
     Ok(ClientSubsystems { stealth, fec })
 }
@@ -25,7 +29,10 @@ fn engine_mode_to_stealth(mode: crate::engine::StealthMode) -> crate::stealth::S
     }
 }
 
-fn init_stealth(config: &EngineConfig) -> Result<Arc<crate::stealth::StealthManager>, EngineError> {
+fn init_stealth(
+    config: &EngineConfig,
+    runtime_owner: Option<Arc<StealthRuntimeOwner>>,
+) -> Result<Arc<crate::stealth::StealthManager>, EngineError> {
     use crate::crypto::CryptoManager;
     use crate::optimize::OptimizationManager;
     use crate::stealth::{StealthConfig, StealthManager};
@@ -73,7 +80,12 @@ fn init_stealth(config: &EngineConfig) -> Result<Arc<crate::stealth::StealthMana
 
     let opt_mgr = Arc::new(OptimizationManager::new());
     let crypto_mgr = Arc::new(CryptoManager::new());
-    Ok(Arc::new(StealthManager::new(stealth_config, opt_mgr, crypto_mgr)))
+    Ok(Arc::new(StealthManager::new_with_runtime_owner(
+        stealth_config,
+        opt_mgr,
+        crypto_mgr,
+        runtime_owner,
+    )))
 }
 
 fn parse_padding_strategy(value: &str) -> Option<crate::stealth::PaddingStrategy> {
@@ -110,7 +122,7 @@ mod tests {
     #[test]
     fn test_init_subsystems_default_config() {
         let config = EngineConfig::default();
-        let result = init_subsystems(&config);
+        let result = init_subsystems_with_runtime(&config, None);
         assert!(result.is_ok(), "init_subsystems with default config must succeed");
         let subs = result.unwrap();
         // Verify both subsystems are initialized
@@ -125,7 +137,7 @@ mod tests {
         config.stealth.enable_domain_fronting = true;
         config.stealth.enable_traffic_padding = true;
         config.stealth.max_padding_size = 512;
-        let result = init_subsystems(&config);
+        let result = init_subsystems_with_runtime(&config, None);
         assert!(result.is_ok(), "init_subsystems with Manual mode must succeed");
     }
 }

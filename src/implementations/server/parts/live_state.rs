@@ -361,6 +361,7 @@ pub(crate) struct LiveClientBuildRequest<'a> {
     pub fec_cfg_shared: &'a Arc<std::sync::Mutex<FecConfig>>,
     pub opt_params_shared: &'a Arc<std::sync::Mutex<OptimizeConfig>>,
     pub transport_config: &'a mut crate::transport::Config,
+    pub stealth_runtime: Option<Arc<StealthRuntimeOwner>>,
     pub auth_rate_limiter:
         Arc<std::sync::Mutex<crate::implementations::server::limits::AuthRateLimiter>>,
     pub retry_token_manager: Option<Arc<crate::implementations::server::ddos::RetryTokenManager>>,
@@ -548,7 +549,7 @@ pub(crate) fn build_live_server_client_init(
         );
         return None;
     }
-    match create_live_server_connection(
+    match create_live_server_connection_with_runtime(
         request.local_addr,
         request.remote_addr,
         &mut selected_transport,
@@ -556,6 +557,7 @@ pub(crate) fn build_live_server_client_init(
         conn_fec_cfg,
         opt_params,
         &initial_ctx.initial_key_dcid,
+        request.stealth_runtime.clone(),
     ) {
         Ok(connection) => {
             Some(LiveClientInit { connection, pending_qkey_auth: initial_ctx.pending_qkey_auth })

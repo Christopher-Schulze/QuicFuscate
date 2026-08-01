@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::core::QuicFuscateConnection;
 use crate::engine::{EngineConfig, EngineError};
+use crate::stealth::StealthRuntimeOwner;
 
 /// Client connection wrapper.
 ///
@@ -19,6 +20,14 @@ pub struct ClientConnection {
 impl ClientConnection {
     /// Create a new client connection from engine configuration.
     pub fn connect(config: &EngineConfig) -> Result<Self, EngineError> {
+        Self::connect_with_runtime(config, None)
+    }
+
+    /// Create a new client connection attached to a runtime-owned stealth service.
+    pub fn connect_with_runtime(
+        config: &EngineConfig,
+        runtime_owner: Option<Arc<StealthRuntimeOwner>>,
+    ) -> Result<Self, EngineError> {
         // Record connection attempt
         crate::instrumentation::global().client.connection_attempt();
 
@@ -63,7 +72,7 @@ impl ClientConnection {
         let qkey_token = config.connection.qkey_token.clone().filter(|t| !t.trim().is_empty());
         let qkey_initial_token: Option<Vec<u8>> =
             qkey_token.as_deref().map(|raw| crate::engine::qkey::id(raw.trim()).into_bytes());
-        let conn = QuicFuscateConnection::new_client(
+        let conn = QuicFuscateConnection::new_client_with_runtime(
             &sni,
             local_addr,
             remote_addr,
@@ -74,6 +83,7 @@ impl ClientConnection {
             qkey_token,
             qkey_initial_token,
             Self::should_use_utls(config),
+            runtime_owner,
         )
         .map_err(|e| {
             crate::instrumentation::global().client.connection_failure();

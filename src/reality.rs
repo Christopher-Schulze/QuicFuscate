@@ -1,7 +1,7 @@
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
@@ -19,6 +19,10 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_SESSIONS: usize = 10_000;
 /// Session TTL - evict entries inactive for longer than this.
 const SESSION_TTL: Duration = Duration::from_secs(300);
+const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+const CAPTURE_COLLECT_TIMEOUT: Duration = Duration::from_secs(5);
+const REFRESH_RETRY_DELAY: Duration = Duration::from_secs(60);
 
 /// Represents a raw response packet that needs to be relayed back to the scanner.
 pub struct FallbackResponse {
@@ -39,6 +43,8 @@ pub struct RealityProxy {
     sessions: Mutex<HashMap<SocketAddr, SessionHandle>>,
     // Round-robin target selector
     target_idx: AtomicUsize,
+    // Prevent new sessions after the owning runtime generation shuts down.
+    closed: AtomicBool,
     // Upstream targets (env override supported)
     targets: Vec<String>,
     // Deterministic cleanup tracker
@@ -58,6 +64,7 @@ impl RealityProxy {
             tx,
             sessions: Mutex::new(HashMap::new()),
             target_idx: AtomicUsize::new(0),
+            closed: AtomicBool::new(false),
             targets: load_targets(),
             last_cleanup: Mutex::new(Instant::now()),
         }
@@ -84,37 +91,67 @@ impl RealityProxy {
     /// The channel has capacity 64; if full (backpressure), the response is
     /// dropped with a debug log — preferable to blocking the recv hot path.
     pub fn send_cached_response(&self, target: SocketAddr, data: Vec<u8>) {
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
         let resp = FallbackResponse { target, data };
         if let Err(e) = self.tx.try_send(resp) {
             log::debug!("RealityProxy: failed to send cached response: {}", e);
         }
     }
 
+    fn cleanup_stale_sessions_locked(&self, sessions: &mut HashMap<SocketAddr, SessionHandle>) {
+        let before = sessions.len();
+        sessions.retain(|_, session| {
+            let keep = session.last_active.elapsed() < SESSION_TTL;
+            if !keep {
+                session.task.abort();
+            }
+            keep
+        });
+        let evicted = before.saturating_sub(sessions.len());
+        if evicted > 0 {
+            log::debug!(
+                "Reality Proxy: evicted {} stale sessions ({} remaining)",
+                evicted,
+                sessions.len()
+            );
+        }
+    }
+
+    /// Sweep all stale sessions independently of probe traffic.
+    pub(crate) fn cleanup_stale_sessions_now(&self) {
+        let mut sessions = self.sessions.lock();
+        self.cleanup_stale_sessions_locked(&mut sessions);
+        *self.last_cleanup.lock() = Instant::now();
+    }
+
+    /// Abort every upstream task owned by this proxy during runtime teardown.
+    pub(crate) fn shutdown_sessions(&self) {
+        self.closed.store(true, Ordering::Release);
+        let mut sessions = self.sessions.lock();
+        for session in sessions.values() {
+            session.task.abort();
+        }
+        sessions.clear();
+    }
+
     /// Handles a potential probe packet.
     /// If a session exists, forwards it. If not, creates a new session.
     pub fn forward_probe(&self, packet: &[u8], source: SocketAddr) {
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
         let mut sessions = self.sessions.lock();
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
 
         // Deterministic session cleanup: time-based interval or capacity pressure.
         {
             let mut last = self.last_cleanup.lock();
             if last.elapsed() > CLEANUP_INTERVAL || sessions.len() > MAX_SESSIONS {
-                let before = sessions.len();
-                sessions.retain(|_, v| {
-                    let keep = v.last_active.elapsed() < SESSION_TTL;
-                    if !keep {
-                        v.task.abort();
-                    }
-                    keep
-                });
-                let evicted = before.saturating_sub(sessions.len());
-                if evicted > 0 {
-                    log::debug!(
-                        "Reality Proxy: evicted {} stale sessions ({} remaining)",
-                        evicted,
-                        sessions.len()
-                    );
-                }
+                self.cleanup_stale_sessions_locked(&mut sessions);
                 *last = Instant::now();
             }
         }
@@ -223,6 +260,12 @@ impl RealityProxy {
     }
 }
 
+impl Drop for RealityProxy {
+    fn drop(&mut self) {
+        self.shutdown_sessions();
+    }
+}
+
 fn load_targets() -> Vec<String> {
     if let Ok(raw) = std::env::var("QUICFUSCATE_REALITY_TARGETS") {
         let parsed: Vec<String> = raw
@@ -287,6 +330,29 @@ impl RealityConfig {
             cache_ttl: env_parse::<u64>("QUICFUSCATE_REALITY_CACHE_TTL").unwrap_or(3600),
             fallback_to_synthetic: env_flag("QUICFUSCATE_REALITY_FALLBACK_SYNTHETIC", true),
         }
+    }
+
+    /// Validate the effective configuration before a background worker can be started.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let host = self.cover_host.trim();
+        if host.is_empty() {
+            return Err("Reality cover_host must not be empty when enabled".to_string());
+        }
+        if host.len() > 253 || host.chars().any(char::is_whitespace) {
+            return Err("Reality cover_host is not a valid bounded host name".to_string());
+        }
+        if self.cover_port == 0 {
+            return Err("Reality cover_port must be greater than zero when enabled".to_string());
+        }
+        if self.cache_ttl == 0 || self.cache_ttl > 86_400 {
+            return Err(
+                "Reality cache_ttl must be between 1 and 86400 seconds when enabled".to_string()
+            );
+        }
+        Ok(())
     }
 }
 
@@ -415,16 +481,18 @@ impl CoverHandshakeCache {
         let connector = TlsConnector::from(std::sync::Arc::new(config));
 
         // Connect TCP and wrap with a capturing layer that records raw inbound bytes.
-        let tcp = TcpStream::connect(&addr)
+        let tcp = tokio::time::timeout(TCP_CONNECT_TIMEOUT, TcpStream::connect(&addr))
             .await
+            .map_err(|_| format!("TCP connect to {} timed out", addr))?
             .map_err(|e| format!("TCP connect to {} failed: {}", addr, e))?;
         let server_name = rustls::pki_types::ServerName::try_from(self.config.cover_host.clone())
             .map_err(|e| format!("invalid cover_host: {}", e))?;
         let (capturing, capture_rx) = capturing_stream(tcp);
-        let tls = connector
-            .connect(server_name, capturing)
-            .await
-            .map_err(|e| format!("TLS handshake with {} failed: {}", addr, e))?;
+        let tls =
+            tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, connector.connect(server_name, capturing))
+                .await
+                .map_err(|_| format!("TLS handshake with {} timed out", addr))?
+                .map_err(|e| format!("TLS handshake with {} failed: {}", addr, e))?;
 
         // In TLS 1.3 the server sends its full first flight (ServerHello +
         // encrypted EncryptedExtensions/Certificate/CertificateVerify/Finished)
@@ -438,7 +506,9 @@ impl CoverHandshakeCache {
         // `CapturingStream::drop` runs — and `CapturingStream` is owned by
         // `tls`. Without the explicit drop, `collect()` would deadlock.
         drop(tls);
-        let captured = capture_rx.collect().await;
+        let captured = tokio::time::timeout(CAPTURE_COLLECT_TIMEOUT, capture_rx.collect())
+            .await
+            .map_err(|_| format!("capturing TLS flight from {} timed out", addr))??;
         let raw = captured.inbound;
 
         // Parse the raw TLS records to extract ServerHello and certificate material.
@@ -475,27 +545,58 @@ impl CoverHandshakeCache {
     /// Background refresh task — captures cover material periodically.
     /// Should be spawned as a tokio task. On failure, logs warning and
     /// retries after TTL/2 seconds.
-    pub async fn refresh_loop(self: Arc<Self>) {
+    pub async fn refresh_loop(self: Arc<Self>, mut cancel: tokio::sync::watch::Receiver<bool>) {
         if !self.config.enabled {
             return;
         }
 
         loop {
-            match self.capture().await {
+            let capture_result = tokio::select! {
+                changed = cancel.changed() => {
+                    if changed.is_err() || *cancel.borrow() {
+                        return;
+                    }
+                    continue;
+                }
+                result = self.capture() => result,
+            };
+            match capture_result {
                 Ok(material) => {
                     self.store(material);
                     log::debug!("Reality: cache refreshed, sleeping {}s", self.config.cache_ttl);
-                    tokio::time::sleep(Duration::from_secs(self.config.cache_ttl)).await;
+                    if !wait_for_refresh_delay(
+                        &mut cancel,
+                        Duration::from_secs(self.config.cache_ttl),
+                    )
+                    .await
+                    {
+                        return;
+                    }
                 }
                 Err(e) => {
-                    log::warn!("Reality: capture failed: {} — retrying in 60s", e);
+                    log::warn!("Reality: capture failed: {} - retrying in 60s", e);
                     if self.config.fallback_to_synthetic {
                         log::warn!("Reality: fallback_to_synthetic=true, using synthetic TLS");
                     }
-                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    if !wait_for_refresh_delay(&mut cancel, REFRESH_RETRY_DELAY).await {
+                        return;
+                    }
                 }
             }
         }
+    }
+}
+
+async fn wait_for_refresh_delay(
+    cancel: &mut tokio::sync::watch::Receiver<bool>,
+    delay: Duration,
+) -> bool {
+    if *cancel.borrow() {
+        return false;
+    }
+    tokio::select! {
+        changed = cancel.changed() => changed.is_ok() && !*cancel.borrow(),
+        _ = tokio::time::sleep(delay) => !*cancel.borrow(),
     }
 }
 
@@ -524,8 +625,8 @@ impl RawCaptureHandle {
     /// Collect all captured raw bytes. Waits for the `CapturingStream` to be
     /// dropped (its `AsyncRead`/`AsyncWrite` impls append to internal buffers;
     /// this returns the buffers once the sender side is dropped).
-    pub async fn collect(self) -> CapturedBytes {
-        self.rx.await.unwrap_or_default()
+    pub async fn collect(self) -> Result<CapturedBytes, String> {
+        self.rx.await.map_err(|_| "capturing stream closed before bytes were delivered".to_string())
     }
 }
 
@@ -782,6 +883,26 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_sessions_aborts_owned_tasks_and_rejects_new_probes() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        rt.block_on(async {
+            let (proxy, _rx) = make_proxy();
+            let source: SocketAddr = "10.0.0.3:3333".parse().expect("source address");
+            proxy.forward_probe(b"probe", source);
+            assert_eq!(proxy.sessions.lock().len(), 1);
+
+            proxy.shutdown_sessions();
+            assert!(proxy.sessions.lock().is_empty());
+
+            proxy.forward_probe(b"probe-after-shutdown", source);
+            assert!(proxy.sessions.lock().is_empty());
+        });
+    }
+
+    #[test]
     fn constants_are_reasonable() {
         const { assert!(MAX_SESSIONS >= 1000, "MAX_SESSIONS too low") };
         const { assert!(SESSION_TTL.as_secs() >= 60, "SESSION_TTL too short") };
@@ -795,6 +916,23 @@ mod tests {
         assert!(cfg.fallback_to_synthetic, "fallback should be on by default");
         assert_eq!(cfg.cover_port, 443);
         assert_eq!(cfg.cache_ttl, 3600);
+    }
+
+    #[test]
+    fn enabled_reality_config_rejects_unbounded_values() {
+        let empty_host =
+            RealityConfig { enabled: true, cover_host: String::new(), ..Default::default() };
+        assert!(empty_host.validate().is_err());
+
+        let zero_port = RealityConfig { enabled: true, cover_port: 0, ..Default::default() };
+        assert!(zero_port.validate().is_err());
+
+        let zero_ttl = RealityConfig { enabled: true, cache_ttl: 0, ..Default::default() };
+        assert!(zero_ttl.validate().is_err());
+
+        let excessive_ttl =
+            RealityConfig { enabled: true, cache_ttl: 86_401, ..Default::default() };
+        assert!(excessive_ttl.validate().is_err());
     }
 
     #[test]
@@ -982,7 +1120,8 @@ mod tests {
             let captured =
                 tokio::time::timeout(std::time::Duration::from_secs(2), handle.collect())
                     .await
-                    .expect("collect() must not deadlock");
+                    .expect("collect() must not deadlock")
+                    .expect("capture channel must deliver bytes");
 
             assert!(
                 captured.inbound.windows(payload.len()).any(|w| w == payload),

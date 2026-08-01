@@ -22,6 +22,10 @@ impl ServerRuntime {
         let pool = Arc::new(MemoryPool::new(capacity, block_size));
 
         let domain = SharedServerDomain::new(&server_config);
+        let stealth_runtime = Arc::new(
+            StealthRuntimeOwner::from_env()
+                .map_err(|error| EngineError::Config(format!("Invalid Reality config: {error}")))?,
+        );
 
         Ok(Self {
             graceful_shutdown: Arc::new(GracefulShutdown::new(
@@ -36,6 +40,7 @@ impl ServerRuntime {
             state: ServerState::Stopped,
             stats: Arc::new(ServerStats::default()),
             live: None,
+            stealth_runtime,
         })
     }
 
@@ -272,6 +277,13 @@ impl ServerRuntime {
             ));
         }
 
+        if self.stealth_runtime.is_shutdown() {
+            self.stealth_runtime = Arc::new(
+                StealthRuntimeOwner::from_env()
+                    .map_err(|error| EngineError::Config(format!("Invalid Reality config: {error}")))?,
+            );
+        }
+
         self.state = ServerState::Starting;
         self.shutdown.store(false, Ordering::SeqCst);
 
@@ -308,6 +320,7 @@ impl ServerRuntime {
 
     /// Stop the server.
     pub fn stop(&mut self) -> Result<(), EngineError> {
+        self.stealth_runtime.request_shutdown();
         if self.state == ServerState::Stopped {
             if let Some(routing) = self.live.as_mut().and_then(|live| live.routing.take()) {
                 teardown_routing(routing).map_err(|error| {
@@ -671,24 +684,21 @@ impl ServerRuntime {
             .map_err(|error| std::io::Error::other(format!("server loop start failed: {error}")))?;
 
         self.ensure_standalone_runtime_metadata(&standalone_runtime_metadata);
-        if !profiles.is_empty() {
-            start_runtime_profile_rotation(
-                runtime_config.stealth_config.clone(),
-                profiles,
-                profile_interval_secs,
-            );
-        }
+        let runtime_owner = self.stealth_runtime.clone();
 
         let metrics = self.standalone_metrics();
         let socket = self.socket();
         let local_addr = self.local_addr();
         let blocked_ips = self.blocked_ips().clone();
         let qkey_registry = self.qkey_registry().clone();
-        let mut admin_actions_rx = self
-            .live_mut()
-            .admin_actions_rx
-            .take()
-            .ok_or_else(|| std::io::Error::other("server admin action receiver unavailable"))?;
+        let Some(mut admin_actions_rx) = self.live_mut().admin_actions_rx.take() else {
+            if let Err(stop_error) = self.stop() {
+                return Err(std::io::Error::other(format!(
+                    "server admin action receiver unavailable; cleanup failed: {stop_error}"
+                )));
+            }
+            return Err(std::io::Error::other("server admin action receiver unavailable"));
+        };
         // Take the TUN reader channel (if any) for forwarding TUN→client datagrams.
         let mut tun_rx = self.live_mut().tun_rx.take();
         let mut buf = [0; LIVE_UDP_DATAGRAM_BUFFER_SIZE];
@@ -743,6 +753,27 @@ impl ServerRuntime {
                 return Err(error);
             }
         };
+
+        if let Err(error) = start_runtime_profile_rotation(
+            &runtime_owner,
+            runtime_config.stealth_config.clone(),
+            profiles,
+            profile_interval_secs,
+        ) {
+            self.live_mut().admin_actions_rx = Some(admin_actions_rx);
+            self.live_mut().service_signals.shutdown_all();
+            let shutdown_error = self.shutdown_stealth_runtime().await.err();
+            let stop_error = self.stop().err();
+            let detail = match (shutdown_error, stop_error) {
+                (Some(shutdown), Some(stop)) => {
+                    format!("{error}; stealth shutdown failed: {shutdown}; server cleanup failed: {stop}")
+                }
+                (Some(shutdown), None) => format!("{error}; stealth shutdown failed: {shutdown}"),
+                (None, Some(stop)) => format!("{error}; server cleanup failed: {stop}"),
+                (None, None) => error,
+            };
+            return Err(std::io::Error::other(detail));
+        }
 
         #[cfg(unix)]
         {
@@ -845,6 +876,7 @@ impl ServerRuntime {
                             #[cfg(not(feature = "rate_limiter"))]
                             let retry_token_manager = None;
                             let runtime_parts = self.live_parts();
+                            let stealth_runtime = runtime_owner.clone();
                             let client_snapshots = runtime_parts.live_state.client_snapshots().clone();
                             let auth_rate_limiter = runtime_parts.live_state.auth_rate_limiter.clone();
                             let revocation_manager =
@@ -870,11 +902,12 @@ impl ServerRuntime {
                                             metrics: &metrics,
                                             stealth_config: &stealth_config,
                                             fec_cfg_shared: &fec_cfg_shared,
-                                        opt_params_shared: &opt_params_shared,
-                                        transport_config: transport,
-                                        auth_rate_limiter: auth_rate_limiter.clone(),
-                                        retry_token_manager: retry_token_manager.clone(),
-                                    },
+                                            opt_params_shared: &opt_params_shared,
+                                            transport_config: transport,
+                                            stealth_runtime: Some(stealth_runtime.clone()),
+                                            auth_rate_limiter: auth_rate_limiter.clone(),
+                                            retry_token_manager: retry_token_manager.clone(),
+                                        },
                                 )
                             },
                             ) {
@@ -1016,8 +1049,22 @@ impl ServerRuntime {
         }
 
         self.live_mut().admin_actions_rx = Some(admin_actions_rx);
-        self.stop()
-            .map_err(|error| std::io::Error::other(format!("server shutdown failed: {error}")))?;
+        let stealth_error = self.shutdown_stealth_runtime().await.err();
+        let stop_error = self.stop().err();
+        match (stealth_error, stop_error) {
+            (None, None) => {}
+            (Some(stealth), None) => {
+                return Err(std::io::Error::other(format!("stealth shutdown failed: {stealth}")))
+            }
+            (None, Some(stop)) => {
+                return Err(std::io::Error::other(format!("server shutdown failed: {stop}")))
+            }
+            (Some(stealth), Some(stop)) => {
+                return Err(std::io::Error::other(format!(
+                    "stealth shutdown failed: {stealth}; server shutdown failed: {stop}"
+                )))
+            }
+        }
 
         Ok(())
     }
@@ -1338,6 +1385,20 @@ impl ServerRuntime {
             );
         }
         live.service_signals.shutdown_all();
+    }
+
+    async fn shutdown_stealth_runtime(&self) -> Result<(), String> {
+        let report = self
+            .stealth_runtime
+            .shutdown(crate::stealth::STEALTH_RUNTIME_SHUTDOWN_TIMEOUT)
+            .await?;
+        log::debug!(
+            "Server stealth runtime generation {} stopped: joined={}, force_stopped={}",
+            report.generation,
+            report.workers_joined,
+            report.workers_force_stopped
+        );
+        Ok(())
     }
 
     pub fn shutdown_live(&mut self, reason: &'static [u8]) {
