@@ -603,6 +603,7 @@ fn allow_client_uplink(
     metrics: &Metrics,
     assigned_ips: Option<AssignedClientIps>,
     packet: &[u8],
+    fingerprint_profile: OsFingerprintProfile,
     server_ips: ServerTunIps,
     tun_mtu: u16,
     response_queue: &Arc<std::sync::Mutex<crate::core::MasqueDownlinkQueue>>,
@@ -629,12 +630,13 @@ fn allow_client_uplink(
     let is_forwarded_unicast =
         matches!(route, UplinkRoute::Internet { .. } | UplinkRoute::Client { .. });
     if is_forwarded_unicast && packet.first().is_some_and(|byte| byte >> 4 == 4) && packet[8] <= 1 {
-        let response = icmp::build_icmpv4_error(
+        let response = icmp::build_icmpv4_error_with_ttl(
             packet,
             server_ips.ipv4,
             icmp::icmp_type::TIME_EXCEEDED,
             0,
             None,
+            fingerprint_profile.ttl(),
         );
         enqueue_routing_response(response_queue, metrics, response);
         metrics.record_routing_outcome(RoutingOutcome::TimeExceeded);
@@ -642,11 +644,12 @@ fn allow_client_uplink(
     }
     if is_forwarded_unicast && packet.first().is_some_and(|byte| byte >> 4 == 6) && packet[7] <= 1 {
         if let Some(server_ipv6) = server_ips.ipv6 {
-            let response = icmp::build_icmpv6_error(
+            let response = icmp::build_icmpv6_error_with_hop_limit(
                 packet,
                 server_ipv6,
                 icmp::icmpv6_type::TIME_EXCEEDED,
                 None,
+                fingerprint_profile.ttl(),
             );
             enqueue_routing_response(response_queue, metrics, response);
             metrics.record_routing_outcome(RoutingOutcome::TimeExceeded);
@@ -658,12 +661,13 @@ fn allow_client_uplink(
     if packet.len() > usize::from(tun_mtu) && packet.first().is_some_and(|byte| byte >> 4 == 4) {
         let dont_fragment = u16::from_be_bytes([packet[6], packet[7]]) & 0x4000 != 0;
         if dont_fragment {
-            let response = icmp::build_icmpv4_error(
+            let response = icmp::build_icmpv4_error_with_ttl(
                 packet,
                 server_ips.ipv4,
                 icmp::icmp_type::DESTINATION_UNREACHABLE,
                 icmp::icmp_code::FRAGMENTATION_NEEDED,
                 Some(tun_mtu),
+                fingerprint_profile.ttl(),
             );
             enqueue_routing_response(response_queue, metrics, response);
             metrics.record_routing_outcome(RoutingOutcome::PacketTooBig);
@@ -672,11 +676,12 @@ fn allow_client_uplink(
     }
     if packet.len() > usize::from(tun_mtu) && packet.first().is_some_and(|byte| byte >> 4 == 6) {
         if let Some(server_ipv6) = server_ips.ipv6 {
-            let response = icmp::build_icmpv6_error(
+            let response = icmp::build_icmpv6_error_with_hop_limit(
                 packet,
                 server_ipv6,
                 icmp::icmpv6_type::PACKET_TOO_BIG,
                 Some(u32::from(tun_mtu)),
+                fingerprint_profile.ttl(),
             );
             enqueue_routing_response(response_queue, metrics, response);
             metrics.record_routing_outcome(RoutingOutcome::PacketTooBig);
@@ -869,6 +874,7 @@ async fn process_live_server_client_datagram(
                         &masque_metrics,
                         assigned_ips,
                         payload,
+                        fingerprint_profile,
                         server_ips,
                         tun_mtu,
                         &masque_response_queue,
@@ -945,6 +951,7 @@ async fn process_live_server_client_datagram(
                             metrics,
                             assigned_ips,
                             data,
+                            fingerprint_profile,
                             server_ips,
                             tun.mtu(),
                             response_queue,

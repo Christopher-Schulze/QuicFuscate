@@ -1246,6 +1246,24 @@ mod tests {
         pkt
     }
 
+    /// Builds a minimal IPv4 + UDP probe with a valid IP header checksum.
+    fn build_udp_probe(src: [u8; 4], dst: [u8; 4], ttl: u8, ip_id: u16) -> Vec<u8> {
+        let mut pkt = vec![0u8; 28];
+        pkt[0] = 0x45;
+        pkt[2..4].copy_from_slice(&28u16.to_be_bytes());
+        pkt[4..6].copy_from_slice(&ip_id.to_be_bytes());
+        pkt[8] = ttl;
+        pkt[9] = 17;
+        pkt[12..16].copy_from_slice(&src);
+        pkt[16..20].copy_from_slice(&dst);
+        pkt[20..22].copy_from_slice(&40_000u16.to_be_bytes());
+        pkt[22..24].copy_from_slice(&33434u16.to_be_bytes());
+        pkt[24..26].copy_from_slice(&8u16.to_be_bytes());
+        let ip_checksum = ones_complement_checksum(&pkt[..20]);
+        pkt[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
+        pkt
+    }
+
     fn parsed_option_kinds(options: &[u8]) -> Vec<u8> {
         let mut parsed = [TcpOptionRef::default(); MAX_PARSED_TCP_OPTIONS];
         let count = parse_tcp_options(options, &mut parsed);
@@ -1883,6 +1901,59 @@ mod tests {
             window, original_window,
             "Non-SYN window must not be modified (dynamic flow-control value)"
         );
+    }
+
+    #[test]
+    fn active_probe_response_classes_preserve_transport_and_normalize_ip_layer() {
+        let normalizer = PacketNormalizer::new(OsFingerprintProfile::Windows);
+
+        let mut closed_tcp = build_tcp_syn([10, 0, 0, 2], [10, 0, 0, 1], 37, 5000, 1460, 0x1234);
+        closed_tcp[33] = 0x14; // RST + ACK, as returned for a closed TCP port.
+        recompute_tcp_checksum(&mut closed_tcp, 20);
+        let tcp_transport = closed_tcp[20..].to_vec();
+        assert_eq!(normalizer.normalize(&mut closed_tcp), NormalizeResult::Modified);
+        assert_eq!(&closed_tcp[20..], tcp_transport.as_slice());
+        assert_eq!(closed_tcp[8], 128);
+        assert!(verify_ip_checksum(&closed_tcp));
+        assert!(verify_tcp_checksum(&closed_tcp, 20));
+
+        let mut udp = build_udp_probe([10, 0, 0, 2], [10, 0, 0, 1], 31, 0x4321);
+        let udp_payload = udp[20..].to_vec();
+        assert_eq!(normalizer.normalize(&mut udp), NormalizeResult::Modified);
+        assert_eq!(&udp[20..], udp_payload.as_slice());
+        assert_eq!(udp[8], 128);
+        assert!(udp[6] & 0x40 != 0);
+        assert!(verify_ip_checksum(&udp));
+
+        let mut icmp = build_icmp_request([10, 0, 0, 2], [10, 0, 0, 1], 29);
+        icmp[20] = 3;
+        icmp[21] = 3; // ICMP port unreachable, as returned for a closed UDP port.
+        icmp[22..24].fill(0);
+        let icmp_checksum = ones_complement_checksum(&icmp[20..]);
+        icmp[22..24].copy_from_slice(&icmp_checksum.to_be_bytes());
+        let icmp_payload = icmp[20..].to_vec();
+        assert_eq!(normalizer.normalize(&mut icmp), NormalizeResult::Modified);
+        assert_eq!(&icmp[20..], icmp_payload.as_slice());
+        assert_eq!(icmp[8], 128);
+        assert!(verify_ip_checksum(&icmp));
+        assert!(ones_complement_sum_is_ones(&icmp[20..]));
+    }
+
+    #[test]
+    fn active_probe_ip_layer_matches_each_enabled_profile() {
+        for (profile, expected_ttl) in [
+            (OsFingerprintProfile::Linux, 64),
+            (OsFingerprintProfile::Windows, 128),
+            (OsFingerprintProfile::MacOS, 64),
+            (OsFingerprintProfile::Android, 64),
+        ] {
+            let mut packet = build_udp_probe([10, 0, 0, 2], [10, 0, 0, 1], 17, 0x9999);
+            let normalizer = PacketNormalizer::new(profile);
+            assert_eq!(normalizer.normalize(&mut packet), NormalizeResult::Modified);
+            assert_eq!(packet[8], expected_ttl);
+            assert!(packet[6] & 0x40 != 0);
+            assert!(verify_ip_checksum(&packet));
+        }
     }
 
     #[test]

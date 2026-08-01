@@ -7,6 +7,7 @@ import argparse
 import json
 import struct
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -186,6 +187,214 @@ def parse_ipv4_tcp(packet: bytes) -> dict[str, Any] | None:
     }
 
 
+def parse_ipv4_packet(packet: bytes) -> dict[str, Any] | None:
+    if len(packet) < 20 or packet[0] >> 4 != 4:
+        return None
+    ihl = (packet[0] & 0x0F) * 4
+    total_length = int.from_bytes(packet[2:4], "big")
+    if ihl < 20 or total_length < ihl or total_length > len(packet):
+        fail("invalid IPv4 length in capture")
+
+    flags_fragment = int.from_bytes(packet[6:8], "big")
+    payload = packet[ihl:total_length]
+    parsed: dict[str, Any] = {
+        "raw_hex": packet[:total_length].hex(),
+        "source": ".".join(str(value) for value in packet[12:16]),
+        "destination": ".".join(str(value) for value in packet[16:20]),
+        "ttl": packet[8],
+        "df": bool(flags_fragment & 0x4000),
+        "fragmented": bool(flags_fragment & 0x3FFF),
+        "ip_id": int.from_bytes(packet[4:6], "big"),
+        "ip_checksum_valid": valid_checksum(packet[:ihl]),
+        "protocol": packet[9],
+        "transport_hex": payload.hex(),
+    }
+
+    if packet[9] == 6 and len(payload) >= 20:
+        tcp_header_length = (payload[12] >> 4) * 4
+        if tcp_header_length < 20 or len(payload) < tcp_header_length:
+            fail("invalid TCP data offset in capture")
+        pseudo = (
+            packet[12:20]
+            + b"\x00\x06"
+            + len(payload).to_bytes(2, "big")
+            + payload
+        )
+        options, mss = parse_options(payload[20:tcp_header_length])
+        parsed.update(
+            {
+                "flags": payload[13],
+                "window": int.from_bytes(payload[14:16], "big"),
+                "tcp_sequence": int.from_bytes(payload[4:8], "big"),
+                "tcp_acknowledgement": int.from_bytes(payload[8:12], "big"),
+                "options": options,
+                "mss": mss,
+                "tcp_checksum_valid": valid_checksum(pseudo),
+            }
+        )
+    elif packet[9] == 17 and len(payload) >= 8:
+        udp_length = int.from_bytes(payload[4:6], "big")
+        if udp_length < 8 or udp_length > len(payload):
+            fail("invalid UDP length in capture")
+        udp_checksum = int.from_bytes(payload[6:8], "big")
+        if udp_checksum == 0:
+            udp_checksum_valid = True
+        else:
+            pseudo = (
+                packet[12:20]
+                + b"\x00\x11"
+                + udp_length.to_bytes(2, "big")
+                + payload[:udp_length]
+            )
+            udp_checksum_valid = valid_checksum(pseudo)
+        parsed.update(
+            {
+                "source_port": int.from_bytes(payload[0:2], "big"),
+                "destination_port": int.from_bytes(payload[2:4], "big"),
+                "udp_checksum_valid": udp_checksum_valid,
+            }
+        )
+    elif packet[9] == 1 and len(payload) >= 8:
+        parsed.update(
+            {
+                "icmp_type": payload[0],
+                "icmp_code": payload[1],
+                "icmp_checksum_valid": valid_checksum(payload),
+            }
+        )
+    return parsed
+
+
+def ipv4_packets(path: Path) -> list[dict[str, Any]]:
+    packets: list[dict[str, Any]] = []
+    for packet in read_pcap(path):
+        parsed = parse_ipv4_packet(packet)
+        if parsed is not None:
+            packets.append(parsed)
+    return packets
+
+
+def response_packets(packets: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        packet
+        for packet in packets
+        if packet["source"] == "10.0.1.2" and packet["destination"] == "10.0.1.1"
+    ]
+
+
+def verify_active_response_contract(
+    profile: str,
+    client_packets: list[dict[str, Any]],
+    server_packets: list[dict[str, Any]],
+    nmap_log: Path | None,
+) -> dict[str, Any]:
+    client_responses = response_packets(client_packets)
+    server_responses = response_packets(server_packets)
+    if not client_responses or not server_responses:
+        fail("active response direction has no captured client->server IPv4 packets")
+    if len(client_responses) != len(server_responses):
+        fail(
+            "active response capture counts differ: "
+            f"client={len(client_responses)} server={len(server_responses)}"
+        )
+
+    vector_counts = {
+        "tcp_syn_response": sum(
+            packet.get("protocol") == 6 and packet.get("flags", 0) & 0x02 != 0
+            for packet in server_responses
+        ),
+        "tcp_rst_response": sum(
+            packet.get("protocol") == 6 and packet.get("flags", 0) & 0x04 != 0
+            for packet in server_responses
+        ),
+        "icmp_echo_reply": sum(
+            packet.get("protocol") == 1 and packet.get("icmp_type") == 0
+            for packet in server_responses
+        ),
+        "icmp_udp_port_unreachable": sum(
+            packet.get("protocol") == 1
+            and packet.get("icmp_type") == 3
+            and packet.get("icmp_code") == 3
+            for packet in server_responses
+        ),
+        "tcp_sequence_fields": sum(packet.get("protocol") == 6 for packet in server_responses),
+    }
+    for vector_name in (
+        "tcp_syn_response",
+        "tcp_rst_response",
+        "icmp_echo_reply",
+        "icmp_udp_port_unreachable",
+    ):
+        if vector_counts[vector_name] == 0:
+            fail(f"active probe vector is missing from server capture: {vector_name}")
+
+    if nmap_log is not None:
+        nmap_text = nmap_log.read_text(encoding="utf-8")
+        if "Starting Nmap" not in nmap_text:
+            fail("Nmap evidence does not contain a successful scan header")
+
+    for index, packet in enumerate(server_responses):
+        label = f"active response {index}"
+        if not packet["ip_checksum_valid"]:
+            fail(f"{label}: invalid IPv4 checksum")
+        if not packet["fragmented"]:
+            if profile != "disabled" and not packet["df"]:
+                fail(f"{label}: DF bit is not set")
+            if profile != "disabled" and packet["ttl"] != PROFILE_EXPECTATIONS[profile]["ttl"]:
+                fail(
+                    f"{label}: TTL={packet['ttl']} expected "
+                    f"{PROFILE_EXPECTATIONS[profile]['ttl']}"
+                )
+        if packet.get("protocol") == 6 and not packet.get("tcp_checksum_valid", False):
+            fail(f"{label}: invalid TCP checksum")
+        if packet.get("protocol") == 17 and not packet.get("udp_checksum_valid", False):
+            fail(f"{label}: invalid UDP checksum")
+        if packet.get("protocol") == 1 and not packet.get("icmp_checksum_valid", False):
+            fail(f"{label}: invalid ICMP checksum")
+
+    exact_byte_match = False
+    non_syn_transport_match = False
+    if profile == "disabled":
+        exact_byte_match = Counter(packet["raw_hex"] for packet in client_responses) == Counter(
+            packet["raw_hex"] for packet in server_responses
+        )
+        if not exact_byte_match:
+            fail("disabled profile changed active response bytes")
+    else:
+        client_non_syn = [
+            packet
+            for packet in client_responses
+            if not (packet.get("protocol") == 6 and packet.get("flags", 0) & 0x02)
+        ]
+        server_non_syn = [
+            packet
+            for packet in server_responses
+            if not (packet.get("protocol") == 6 and packet.get("flags", 0) & 0x02)
+        ]
+        non_syn_transport_match = Counter(
+            packet["transport_hex"] for packet in client_non_syn
+        ) == Counter(packet["transport_hex"] for packet in server_non_syn)
+        if not non_syn_transport_match:
+            fail("non-SYN active response transport bytes changed across the normalizer")
+
+    ids = [packet["ip_id"] for packet in server_responses if not packet["fragmented"]]
+    id_steps = [((right - left) & 0xFFFF) for left, right in zip(ids, ids[1:])]
+    id_sequence_consecutive = all(step == 1 for step in id_steps) if len(ids) > 1 else False
+    if profile != "disabled" and len(ids) > 1 and not id_sequence_consecutive:
+        fail(f"normalized active response IP-ID sequence is not consecutive: {ids}")
+
+    return {
+        "response_direction": "10.0.1.2->10.0.1.1",
+        "client_response_count": len(client_responses),
+        "server_response_count": len(server_responses),
+        "vector_counts": vector_counts,
+        "disabled_byte_exact": exact_byte_match,
+        "non_syn_transport_byte_exact": non_syn_transport_match,
+        "server_ip_ids": ids,
+        "server_ip_id_sequence_consecutive": id_sequence_consecutive,
+    }
+
+
 def tcp_packets(path: Path) -> list[dict[str, Any]]:
     packets: list[dict[str, Any]] = []
     for packet in read_pcap(path):
@@ -250,23 +459,33 @@ def main() -> int:
     parser.add_argument("--profile", choices=PROFILE_EXPECTATIONS, required=True)
     parser.add_argument("--server-pcap", type=Path, required=True)
     parser.add_argument("--client-pcap", type=Path, required=True)
+    parser.add_argument("--nmap-log", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:
-        server_packets = tcp_packets(args.server_pcap)
-        client_packets = tcp_packets(args.client_pcap)
-        client_syn = find_packet(client_packets, "10.0.1.2", "10.0.1.1", 0x02)
-        server_syn = find_packet(server_packets, "10.0.1.2", "10.0.1.1", 0x02)
+        server_packets = ipv4_packets(args.server_pcap)
+        client_packets = ipv4_packets(args.client_pcap)
+        server_tcp_packets = [
+            packet for packet in server_packets if packet.get("protocol") == 6 and "flags" in packet
+        ]
+        client_tcp_packets = [
+            packet for packet in client_packets if packet.get("protocol") == 6 and "flags" in packet
+        ]
+        client_syn = find_packet(client_tcp_packets, "10.0.1.2", "10.0.1.1", 0x02)
+        server_syn = find_packet(server_tcp_packets, "10.0.1.2", "10.0.1.1", 0x02)
         if args.profile == "disabled":
             if client_syn["raw_hex"] != server_syn["raw_hex"]:
                 fail("disabled profile changed the captured SYN bytes")
             verify_profile(client_syn, "disabled", "client passthrough SYN")
         else:
             verify_profile(server_syn, args.profile, "normalized client SYN")
-        server_syn_ack = find_packet(server_packets, "10.0.1.1", "10.0.1.2", 0x12)
+        server_syn_ack = find_packet(server_tcp_packets, "10.0.1.1", "10.0.1.2", 0x12)
         verify_integrity(server_syn_ack, "server downlink SYN-ACK")
+        active_probe_contract = verify_active_response_contract(
+            args.profile, client_packets, server_packets, args.nmap_log
+        )
         result = {
-            "schema": "quicfuscate.fingerprint-pcap.v2",
+            "schema": "quicfuscate.fingerprint-pcap.v3",
             "profile": args.profile,
             "effective_profile": PROFILE_EXPECTATIONS[args.profile]["effective_profile"],
             "client_syn": client_syn,
@@ -275,6 +494,7 @@ def main() -> int:
             "server_syn_ack_normalization_scope": "downlink_passthrough",
             "packet_count": {"client": len(client_packets), "server": len(server_packets)},
             "passthrough_byte_exact": client_syn["raw_hex"] == server_syn["raw_hex"],
+            "active_probe_contract": active_probe_contract,
         }
         write_new_json(args.output, result)
     except (OSError, ValueError, struct.error) as error:

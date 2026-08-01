@@ -353,6 +353,7 @@ mod tests {
             &metrics,
             Some(assigned),
             &packet,
+            OsFingerprintProfile::Linux,
             ServerTunIps { ipv4: server_ip, ipv6: None },
             1280,
             &responses,

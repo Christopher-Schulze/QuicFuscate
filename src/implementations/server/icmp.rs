@@ -189,7 +189,29 @@ pub fn build_icmp_unreachable(
     pkt
 }
 
-/// Build an IPv4 ICMP error using the actual router address as packet source.
+/// Build an IPv4 ICMP error using the actual router address as packet source
+/// and the selected profile's locally-generated TTL.
+pub fn build_icmpv4_error_with_ttl(
+    original_pkt: &[u8],
+    router_ip: Ipv4Addr,
+    icmp_type_val: u8,
+    code: u8,
+    next_hop_mtu: Option<u16>,
+    ttl: u8,
+) -> Vec<u8> {
+    let mut packet = build_icmp_unreachable(original_pkt, icmp_type_val, code, next_hop_mtu);
+    if packet.len() < 20 {
+        return packet;
+    }
+    packet[12..16].copy_from_slice(&router_ip.octets());
+    packet[8] = ttl;
+    packet[10..12].fill(0);
+    let checksum = ip_checksum(&packet[..20]);
+    packet[10..12].copy_from_slice(&checksum.to_be_bytes());
+    packet
+}
+
+/// Build an IPv4 ICMP error with the RFC 1812 default locally-generated TTL.
 pub fn build_icmpv4_error(
     original_pkt: &[u8],
     router_ip: Ipv4Addr,
@@ -197,15 +219,7 @@ pub fn build_icmpv4_error(
     code: u8,
     next_hop_mtu: Option<u16>,
 ) -> Vec<u8> {
-    let mut packet = build_icmp_unreachable(original_pkt, icmp_type_val, code, next_hop_mtu);
-    if packet.len() < 20 {
-        return packet;
-    }
-    packet[12..16].copy_from_slice(&router_ip.octets());
-    packet[10..12].fill(0);
-    let checksum = ip_checksum(&packet[..20]);
-    packet[10..12].copy_from_slice(&checksum.to_be_bytes());
-    packet
+    build_icmpv4_error_with_ttl(original_pkt, router_ip, icmp_type_val, code, next_hop_mtu, 64)
 }
 
 /// Parsed fixed ICMPv6 header for packets without extension headers.
@@ -249,12 +263,14 @@ pub fn build_icmpv6_echo_reply(original: &[u8], hop_limit: u8) -> Vec<u8> {
     reply
 }
 
-/// Build an ICMPv6 Packet Too Big or Time Exceeded response.
-pub fn build_icmpv6_error(
+/// Build an ICMPv6 Packet Too Big or Time Exceeded response with a selected
+/// locally-generated hop limit.
+pub fn build_icmpv6_error_with_hop_limit(
     original: &[u8],
     router_ip: Ipv6Addr,
     icmp_type_val: u8,
     mtu: Option<u32>,
+    hop_limit: u8,
 ) -> Vec<u8> {
     if original.len() < 40 || original[0] >> 4 != 6 {
         return Vec::new();
@@ -274,7 +290,7 @@ pub fn build_icmpv6_error(
     packet[0] = 0x60;
     packet[4..6].copy_from_slice(&(payload_len as u16).to_be_bytes());
     packet[6] = 58;
-    packet[7] = 64;
+    packet[7] = hop_limit;
     packet[8..24].copy_from_slice(&router_ip.octets());
     packet[24..40].copy_from_slice(&original_source);
     packet[40] = icmp_type_val;
@@ -286,6 +302,16 @@ pub fn build_icmpv6_error(
     let checksum = icmpv6_checksum(&packet[8..24], &packet[24..40], &packet[40..]);
     packet[42..44].copy_from_slice(&checksum.to_be_bytes());
     packet
+}
+
+/// Build an ICMPv6 error with the RFC 4291 default locally-generated hop limit.
+pub fn build_icmpv6_error(
+    original: &[u8],
+    router_ip: Ipv6Addr,
+    icmp_type_val: u8,
+    mtu: Option<u32>,
+) -> Vec<u8> {
+    build_icmpv6_error_with_hop_limit(original, router_ip, icmp_type_val, mtu, 64)
 }
 
 /// Build a minimal Neighbor Advertisement for the server's TUN address.
@@ -530,6 +556,26 @@ mod tests {
     }
 
     #[test]
+    fn test_build_icmpv4_error_with_profile_ttl_preserves_pmtud_and_checksums() {
+        let original = make_echo_request([10, 8, 0, 2], [10, 8, 0, 1], 0x1234, 1);
+        let response = build_icmpv4_error_with_ttl(
+            &original,
+            Ipv4Addr::new(10, 8, 0, 1),
+            icmp_type::DESTINATION_UNREACHABLE,
+            icmp_code::FRAGMENTATION_NEEDED,
+            Some(1280),
+            128,
+        );
+
+        assert_eq!(response[8], 128);
+        assert_eq!(response[20], icmp_type::DESTINATION_UNREACHABLE);
+        assert_eq!(response[21], icmp_code::FRAGMENTATION_NEEDED);
+        assert_eq!(u16::from_be_bytes([response[26], response[27]]), 1280);
+        assert_eq!(ip_checksum(&response[..20]), 0);
+        assert_eq!(icmp_checksum(&response[20..]), 0);
+    }
+
+    #[test]
     fn test_build_icmp_unreachable_checksum_valid() {
         let original = make_echo_request([10, 8, 0, 2], [10, 8, 0, 1], 0x1234, 1);
         let unreachable = build_icmp_unreachable(
@@ -618,6 +664,25 @@ mod tests {
         assert_eq!(&response[8..24], &router.octets());
         assert_eq!(&response[24..40], &source.octets());
         assert_eq!(u32::from_be_bytes(response[44..48].try_into().unwrap()), 1280);
+        assert_eq!(icmpv6_checksum(&response[8..24], &response[24..40], &response[40..]), 0);
+    }
+
+    #[test]
+    fn test_build_icmpv6_error_with_profile_hop_limit_preserves_checksum() {
+        let source: Ipv6Addr = "2001:db8::2".parse().unwrap();
+        let destination: Ipv6Addr = "fd00::2".parse().unwrap();
+        let router: Ipv6Addr = "fd00::1".parse().unwrap();
+        let original = make_icmpv6_packet(source, destination, icmpv6_type::ECHO_REPLY, &[1, 2]);
+        let response = build_icmpv6_error_with_hop_limit(
+            &original,
+            router,
+            icmpv6_type::PACKET_TOO_BIG,
+            Some(1400),
+            128,
+        );
+
+        assert_eq!(response[7], 128);
+        assert_eq!(u32::from_be_bytes(response[44..48].try_into().unwrap()), 1400);
         assert_eq!(icmpv6_checksum(&response[8..24], &response[24..40], &response[40..]), 0);
     }
 

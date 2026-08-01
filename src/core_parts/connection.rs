@@ -275,7 +275,10 @@ pub struct ConnectionParams {
     pub optimization_manager: Arc<OptimizationManager>,
     /// Forward error correction configuration.
     pub fec_config: FecConfig,
-    /// Frozen raw-IP normalizer for decoded tunnel ingress.
+    /// Frozen raw-IP normalizer for decoded client-to-server tunnel ingress.
+    ///
+    /// It is never applied to sealed QUIC packets or ordinary server-to-client
+    /// raw-IP downlink payloads.
     pub tunnel_ingress_normalizer: PacketNormalizer,
 }
 
@@ -2132,11 +2135,13 @@ impl QuicFuscateConnection {
         }
     }
 
-    /// Sends a raw IP packet downlink through the fastest safe peer carrier.
+    /// Sends an ordinary raw IP packet downlink through the fastest safe peer carrier.
     ///
     /// A bare QUIC datagram fallback was intentionally removed: the client only
     /// drains MASQUE-framed datagrams via `drain_masque_datagrams` and would
     /// never consume a bare dgram, causing silent data loss and queue growth.
+    /// The fingerprint normalizer is intentionally not applied here. Only
+    /// decoded client-to-server tunnel ingress is normalized.
     pub fn send_masque_downlink(
         &mut self,
         payload: &[u8],

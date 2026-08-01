@@ -153,7 +153,9 @@ for profile in "${PROFILES[@]}"; do
   nmap_regex="$(nmap_pattern "$profile")"
   if [ "$profile" = disabled ]; then
     nmap_match_status=not-applicable
-  elif grep -Eiq "$nmap_regex" "$run_dir/nmap.log"; then
+  elif grep -Eiq '^No exact OS matches' "$run_dir/nmap.log"; then
+    nmap_match_status=not-matched
+  elif grep -Eiq "^(Running:|OS details:).*($nmap_regex)" "$run_dir/nmap.log"; then
     nmap_match_status=pass
   else
     nmap_match_status=not-matched

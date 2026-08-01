@@ -68,9 +68,20 @@ P0F_LOG="$OUTPUT_DIR/p0f.log"
 P0F_STDERR="$OUTPUT_DIR/p0f.stderr.log"
 NMAP_LOG="$OUTPUT_DIR/nmap.log"
 NMAP_STATUS="$OUTPUT_DIR/nmap.status"
-for path in "$CLIENT_PCAP" "$SERVER_PCAP" "$P0F_LOG" "$P0F_STDERR" "$NMAP_LOG" "$NMAP_STATUS"; do
+PING_LOG="$OUTPUT_DIR/icmp-echo.log"
+PROBE_MANIFEST="$OUTPUT_DIR/probe-manifest.txt"
+for path in "$CLIENT_PCAP" "$SERVER_PCAP" "$P0F_LOG" "$P0F_STDERR" "$NMAP_LOG" "$NMAP_STATUS" "$PING_LOG" "$PROBE_MANIFEST"; do
   [ ! -e "$path" ] || fail "refusing to overwrite evidence path: $path"
 done
+
+printf '%s\n' \
+  'schema=quicfuscate.fingerprint-active-probes.v1' \
+  'icmp_echo=ping -c 1 -W 3 -I qtun0 10.0.1.2' \
+  'nmap=nmap -O --osscan-guess -sS -sU -PE -Pn -n -p T:18080,18082,U:18081 --reason --packet-trace --max-retries 1 --host-timeout 30s 10.0.1.2' \
+  'tcp_open_port=18080' \
+  'tcp_closed_port=18082' \
+  'udp_closed_port=18081' \
+  'response_direction=10.0.1.2->10.0.1.1' > "$PROBE_MANIFEST"
 
 ip netns exec ns-cli tcpdump --immediate-mode -U -n -s 0 -B 4096 -i qtun0 \
   -w "$CLIENT_PCAP" 'ip' >"$OUTPUT_DIR/client-tcpdump.log" 2>&1 &
@@ -96,17 +107,21 @@ ip netns exec ns-cli python3 -c \
   'import socket; s=socket.create_connection(("10.0.1.1",18081),5); s.close()' \
   >"$OUTPUT_DIR/client-syn.log" 2>&1 || fail "client SYN probe failed"
 
-CLIENT_LISTENER_CODE='import socket; s=socket.socket(socket.AF_INET,socket.SOCK_STREAM); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(("10.0.1.2",18080)); s.listen(1); s.settimeout(20); c,_=s.accept(); c.close(); s.close()'
-ip netns exec ns-cli timeout 25s python3 -c "$CLIENT_LISTENER_CODE" \
+CLIENT_LISTENER_CODE='import socket,time; s=socket.socket(socket.AF_INET,socket.SOCK_STREAM); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(("10.0.1.2",18080)); s.listen(8); s.settimeout(10); c,_=s.accept(); c.close(); time.sleep(25); s.close()'
+ip netns exec ns-cli timeout 40s python3 -c "$CLIENT_LISTENER_CODE" \
   >"$OUTPUT_DIR/client-listener.log" 2>&1 &
 CLIENT_LISTENER_PID=$!
 sleep 1
+ip netns exec ns-srv ping -c 1 -W 3 -I qtun0 10.0.1.2 >"$PING_LOG" 2>&1 \
+  || fail "client ICMP echo probe failed"
 set +e
-ip netns exec ns-srv nmap -O --osscan-guess -Pn -n -p 18080 --max-retries 1 \
-  --host-timeout 20s 10.0.1.2 >"$NMAP_LOG" 2>&1
+ip netns exec ns-srv nmap -O --osscan-guess -sS -sU -PE -Pn -n \
+  -p 'T:18080,18082,U:18081' --reason --packet-trace --max-retries 1 \
+  --host-timeout 30s 10.0.1.2 >"$NMAP_LOG" 2>&1
 NMAP_EXIT=$?
 set -e
 printf '%s\n' "$NMAP_EXIT" > "$NMAP_STATUS"
+[ "$NMAP_EXIT" -eq 0 ] || fail "active Nmap probe matrix failed with exit $NMAP_EXIT"
 
 sleep 1
 stop_process "$CLIENT_LISTENER_PID"
@@ -123,7 +138,8 @@ SERVER_CAPTURE_PID=""
 [ -s "$CLIENT_PCAP" ] || fail "client capture is empty"
 [ -s "$SERVER_PCAP" ] || fail "server capture is empty"
 python3 "$VERIFY_PCAP" --profile "$PROFILE" --client-pcap "$CLIENT_PCAP" \
-  --server-pcap "$SERVER_PCAP" --output "$OUTPUT_DIR/packet-verification.json"
+  --server-pcap "$SERVER_PCAP" --nmap-log "$NMAP_LOG" \
+  --output "$OUTPUT_DIR/packet-verification.json"
 
 printf 'schema=quicfuscate.fingerprint-runtime-hook.v1\nprofile=%s\nnmap_exit=%s\n' \
   "$PROFILE" "$NMAP_EXIT" > "$OUTPUT_DIR/hook-summary.txt"

@@ -146,6 +146,7 @@ fn write_downlink_error(
     packet: &[u8],
     tun: &TunInterface,
     server_ips: ServerTunIps,
+    fingerprint_profile: OsFingerprintProfile,
     outcome: RoutingOutcome,
     mtu: Option<usize>,
     metrics: &Metrics,
@@ -161,7 +162,14 @@ fn write_downlink_error(
                 _ => (icmp::icmp_type::DESTINATION_UNREACHABLE, icmp::icmp_code::HOST_UNREACHABLE),
             };
             let next_hop_mtu = mtu.map(|value| value.min(usize::from(u16::MAX)) as u16);
-            icmp::build_icmpv4_error(packet, server_ips.ipv4, icmp_type, code, next_hop_mtu)
+            icmp::build_icmpv4_error_with_ttl(
+                packet,
+                server_ips.ipv4,
+                icmp_type,
+                code,
+                next_hop_mtu,
+                fingerprint_profile.ttl(),
+            )
         }
         Some(6) => {
             let Some(server_ipv6) = server_ips.ipv6 else {
@@ -173,11 +181,12 @@ fn write_downlink_error(
                 _ => icmp::icmpv6_type::DESTINATION_UNREACHABLE,
             };
             metrics.record_routing_outcome(RoutingOutcome::Icmpv6);
-            icmp::build_icmpv6_error(
+            icmp::build_icmpv6_error_with_hop_limit(
                 packet,
                 server_ipv6,
                 icmp_type,
                 mtu.map(|value| value.min(u32::MAX as usize) as u32),
+                fingerprint_profile.ttl(),
             )
         }
         _ => return,
@@ -413,7 +422,15 @@ fn process_server_tun_packet(
             _ => false,
         };
     if expired {
-        write_downlink_error(packet, &tun, server_ips, RoutingOutcome::TimeExceeded, None, metrics);
+        write_downlink_error(
+            packet,
+            &tun,
+            server_ips,
+            source_profile,
+            RoutingOutcome::TimeExceeded,
+            None,
+            metrics,
+        );
         return;
     }
     let mut targets = smallvec::SmallVec::<[(SocketAddr, SessionId); 4]>::new();
@@ -449,6 +466,7 @@ fn process_server_tun_packet(
                     packet,
                     &tun,
                     server_ips,
+                    source_profile,
                     RoutingOutcome::Unknown,
                     None,
                     metrics,
@@ -481,6 +499,7 @@ fn process_server_tun_packet(
                     packet,
                     &tun,
                     server_ips,
+                    source_profile,
                     RoutingOutcome::PacketTooBig,
                     Some(effective_mtu),
                     metrics,
