@@ -7,7 +7,7 @@
 # Modes:
 #   internal     - FEC internal machine-room tests (modes, adaptive, GF, Rayon, stress)
 #   simulation   - FEC simulation parameter matrix (mode x loss x thread x GF16 x cadence)
-#   e2e-loss     - FEC end-to-end loss recovery via fec_sim example binary
+#   e2e-loss     - FEC model-loss matrix via fec_sim; native QUIC/TUN proof is separate
 #   controller   - FEC auto-controller scenario suite (clean-efficiency, escalation, etc.)
 #   proof        - FEC auto-controller proof (scenarios + bench iterations combined)
 #   fast         - Quick FEC smoke (unit tests + bench compile check)

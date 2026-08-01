@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Description: Test suite runner: test-fec-e2e-loss.
+# Description: Deterministic FEC model-loss matrix; this is not a real QUIC/TUN gate.
+# The native transport contract is owned by the tun-e2e-fec-* netns harnesses.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,6 +15,7 @@ JOBS=""
 SIZE=1200
 K=64
 BASE_SEED=424242
+CARGO_ARGS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -31,8 +33,10 @@ while [[ $# -gt 0 ]]; do
       usage_common_flags 2>/dev/null || true
       cat <<USAGE
   Additional flags:
-    --size N             Payload size for fec_sim example (default: 1200)
-    --k N                Number of source packets in fec_sim (default: 64)
+    --features LIST      Cargo feature list passed to fec_sim (default: none)
+    --jobs N             Cargo build jobs passed to fec_sim (default: Cargo default)
+    --size N             Payload size for fec_sim model (default: 1200)
+    --k N                Number of source packets in fec_sim model (default: 64)
     --base-seed N        Base RNG seed, incremented per run (default: 424242)
 USAGE
       exit 0
@@ -45,6 +49,13 @@ USAGE
   shift
 done
 
+if [[ -n "$CARGO_FEATURES" ]]; then
+  CARGO_ARGS+=(--features "$CARGO_FEATURES")
+fi
+if [[ -n "$JOBS" ]]; then
+  CARGO_ARGS+=(--jobs "$JOBS")
+fi
+
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 BASE_NAME="$(basename "$0" .sh)"
 [[ -z "$OUTPUT_DIR" ]] && OUTPUT_DIR="$SCRIPT_DIR/../../out/tests/${BASE_NAME}-${TIMESTAMP}"
@@ -54,6 +65,9 @@ LOG_FILE="$OUTPUT_DIR/${BASE_NAME}.log"
 echo "===============================================================" | tee -a "$LOG_FILE"
 echo "  FEC E2E Loss Suite" | tee -a "$LOG_FILE"
 echo "===============================================================" | tee -a "$LOG_FILE"
+echo "  Execution model: fec_sim only; no QUIC, TLS, congestion-control, ACK, or TUN path" | tee -a "$LOG_FILE"
+echo "  Cargo features: ${CARGO_FEATURES:-<default>}" | tee -a "$LOG_FILE"
+echo "  Cargo jobs: ${JOBS:-<default>}" | tee -a "$LOG_FILE"
 print_system_banner | tee -a "$LOG_FILE"
 
 LOSSES=(0.00 0.02 0.05 0.10 0.15 0.20)
@@ -97,7 +111,7 @@ for loss in "${LOSSES[@]}"; do
     FEC_SIM_K="$K" \
     FEC_SIM_LOSS="$loss" \
     FEC_SIM_SEED="$seed" \
-    cargo run --release --example fec_sim -- --size "$SIZE" --k "$K" --loss "$loss" \
+    cargo run --release --example fec_sim "${CARGO_ARGS[@]}" -- --size "$SIZE" --k "$K" --loss "$loss" \
     >"$run_log" 2>>"$LOG_FILE"; then
     :
   else
