@@ -33,13 +33,11 @@ JSON="$OUTPUT_DIR/results.json"; json_begin "$JSON" "bench_qpack_encode"; JSON_F
 append_item() {
   local cell="$1"; local size="$2"; local bytes="$3"; local result="$4"
   local reason="$5"; local command_status="$6"; local output_file="$7"
-  if [[ "$JSON_FIRST_RUN" -eq 0 ]]; then echo "," >> "$JSON"; fi
-  JSON_FIRST_RUN=0
-  local command_text="${8:-}"; local command_escaped
-  command_escaped="$(qf_json_escape "$command_text")"
-  printf '  {"cell":%s,"size":"%s","bytes":%s,"result":"%s","reason":"%s","command":"%s","command_status":%s,"output":"%s"}' \
-    "$cell" "$(qf_json_escape "$size")" "$bytes" "$(qf_json_escape "$result")" \
-    "$(qf_json_escape "$reason")" "$command_escaped" "$command_status" "$(qf_json_escape "$output_file")" >> "$JSON"
+  local argv_json="${8:-[]}"
+  qf_json_append_object "$JSON" "cell=int:$cell" "size=$size" "bytes=json:$bytes" \
+    "result=$result" "reason=$reason" "argv=json:$argv_json" \
+    "environment=json:$(qf_json_environment)" \
+    "command_status=int:$command_status" "output=$output_file"
 }
 
 if ! validate_control_free_value "RUSTFLAGS_EXTRA" "$RUSTFLAGS_EXTRA" 8192 || \
@@ -148,8 +146,8 @@ for sz in "${SIZES[@]}"; do
     FAILURES=$((FAILURES + 1))
   fi
   cat "$output_file"
-  command_text="target/release/harness qpack-encode --input $(printf '%q' "$BYTES") --iters 200"
-  append_item "$CELL" "$sz" "$BYTES" "$result" "$reason" "$command_status" "$output_file" "$command_text"
+  append_item "$CELL" "$sz" "$BYTES" "$result" "$reason" "$command_status" "$output_file" \
+    "$(qf_json_array target/release/harness qpack-encode --input "$BYTES" --iters 200)"
 
 done
 

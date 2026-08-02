@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Description: Shell utility script: lib-common.
+# shellcheck disable=SC2034
 set -Eeuo pipefail
 
 # Common helpers for QuicFuscate scripts
@@ -127,10 +128,13 @@ print_system_banner() {
   echo "==============================================================="
 }
 
-# Prepare artifacts directory
+# Prepare an artifact directory without allowing an implicit rerun to reuse it.
 prepare_artifacts() {
   local dir="$1"
   mkdir -p "$dir"
+  if find "$dir" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+    die "refusing to reuse non-empty artifact directory: $dir; choose a new directory"
+  fi
   echo "$dir"
 }
 
@@ -140,7 +144,8 @@ run() {
     echo "DRY-RUN: $*"
     return 0
   fi
-  local __start=$(date +%s)
+  local __start
+  __start="$(date +%s)"
   local __rc=0
   if [[ -n "${LOG_FILE:-}" ]]; then
     "$@" 2>&1 | tee -a "$LOG_FILE"; __rc=${PIPESTATUS[0]}
@@ -153,14 +158,14 @@ run() {
     local __jf="${JSON:-${JSON_FILE}}"
     if [[ -f "$__jf" ]]; then
       if [[ -z "${JSON_FIRST_RUN:-}" ]]; then JSON_FIRST_RUN=1; fi
-      if [[ "$JSON_FIRST_RUN" -eq 0 ]]; then echo "," >> "$__jf"; fi
-      JSON_FIRST_RUN=0
-      local __cmd
-      __cmd=$(printf '%q ' "$@" | sed 's/\s$//')
-      echo -n '  {"cmd":'"\"$__cmd\""',"rc":'"$__rc"',"duration_sec":'"$__dur"'}' >> "$__jf"
+      qf_json_append_object "$__jf" \
+        "argv=json:$(qf_json_array "$@")" \
+        "environment=json:$(qf_json_environment)" \
+        "rc=int:$__rc" \
+        "duration_sec=int:$__dur"
     fi
   fi
-  return $__rc
+  return "$__rc"
 }
 
 # Run cargo with common environment knobs
@@ -307,14 +312,266 @@ QF_CARGO_TEST_TARGET=""
 QF_CARGO_TEST_FEATURE_SET=""
 QF_CARGO_TEST_FILTER=""
 QF_CARGO_TEST_RAW_OUTPUT=""
+QF_CARGO_TEST_ARGV_JSON="[]"
 
 qf_json_escape() {
-  local value="${1:-}"
-  value="${value//\\/\\\\}"
-  value="${value//\"/\\\"}"
-  value="${value//$'\n'/\\n}"
-  value="${value//$'\r'/\\r}"
-  printf '%s' "$value"
+  python3 - "${1:-}" <<'PY'
+import json
+import sys
+
+encoded = json.dumps(sys.argv[1], ensure_ascii=False)
+sys.stdout.write(encoded[1:-1])
+PY
+}
+
+qf_json_array() {
+  python3 - "$@" <<'PY'
+import json
+import sys
+
+sys.stdout.write(json.dumps(sys.argv[1:], ensure_ascii=False, separators=(",", ":")))
+PY
+}
+
+qf_json_environment() {
+  local -a pairs=()
+  local name
+  for name in RUSTFLAGS RUSTFLAGS_EXTRA CARGO_FEATURES CARGO_TARGET_DIR JOBS CARGO_BUILD_JOBS \
+    QUICFUSCATE_ARTIFACT_POLICY QUICFUSCATE_DEBUG_SCRIPTS; do
+    if [[ -n "${!name+x}" ]]; then
+      pairs+=("$name=${!name}")
+    fi
+  done
+  if [[ "${#pairs[@]}" -eq 0 ]]; then
+    pairs=(__QF_EMPTY_ENVIRONMENT__)
+  fi
+  python3 - "${pairs[@]}" <<'PY'
+import json
+import sys
+
+environment = {}
+for item in sys.argv[1:]:
+    if not item or item == "__QF_EMPTY_ENVIRONMENT__":
+        continue
+    name, value = item.split("=", 1)
+    environment[name] = value
+sys.stdout.write(json.dumps(environment, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+qf_json_environment_with_assignments() {
+  local base_environment
+  base_environment="$(qf_json_environment)"
+  python3 - "$base_environment" "$@" <<'PY'
+import json
+import re
+import sys
+
+environment = json.loads(sys.argv[1])
+for assignment in sys.argv[2:]:
+    name, value = assignment.split("=", 1)
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+        raise SystemExit(f"invalid environment assignment: {name}")
+    environment[name] = value
+sys.stdout.write(json.dumps(environment, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+qf_json_validate_file() {
+  local file="$1"
+  python3 - "$file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    with path.open(encoding="utf-8") as handle:
+        json.load(handle)
+except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+    print(f"invalid JSON artifact {path}: {error}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+qf_json_append_raw() {
+  local file="$1"
+  local raw="$2"
+  if ! python3 - "$raw" <<'PY'
+import json
+import sys
+
+try:
+    value = json.loads(sys.argv[1])
+except json.JSONDecodeError as error:
+    print(f"invalid JSON item: {error}", file=sys.stderr)
+    raise SystemExit(1)
+if not isinstance(value, dict):
+    print("JSON artifact items must be objects", file=sys.stderr)
+    raise SystemExit(1)
+PY
+  then
+    return 1
+  fi
+  if [[ "${JSON_FIRST_RUN:-1}" -eq 0 ]]; then
+    printf ',\n' >> "$file"
+  fi
+  JSON_FIRST_RUN=0
+  printf '  %s' "$raw" >> "$file"
+}
+
+qf_json_object_from_pairs() {
+  python3 - "$@" <<'PY'
+import json
+import math
+import sys
+
+def parse_value(raw):
+    if raw.startswith("json:"):
+        return json.loads(raw[5:])
+    if raw.startswith("int:"):
+        return int(raw[4:])
+    if raw.startswith("float:"):
+        value = float(raw[6:])
+        if not math.isfinite(value):
+            raise ValueError("non-finite float")
+        return value
+    if raw.startswith("bool:"):
+        value = raw[5:].lower()
+        if value not in {"true", "false"}:
+            raise ValueError("boolean must be true or false")
+        return value == "true"
+    if raw == "null":
+        return None
+    return raw
+
+result = {}
+try:
+    for item in sys.argv[1:]:
+        key, raw = item.split("=", 1)
+        if not key:
+            raise ValueError("JSON item key cannot be empty")
+        result[key] = parse_value(raw)
+except (ValueError, json.JSONDecodeError) as error:
+    print(f"invalid JSON object field: {error}", file=sys.stderr)
+    raise SystemExit(1) from error
+sys.stdout.write(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+PY
+}
+
+qf_json_append_object() {
+  local file="$1"
+  shift
+  local -a fields=("$@")
+  local field key
+  local has_argv=0
+  local has_environment=0
+  for field in "${fields[@]}"; do
+    key="${field%%=*}"
+    [[ "$key" == "argv" ]] && has_argv=1
+    [[ "$key" == "environment" ]] && has_environment=1
+  done
+  (( has_argv )) || fields+=("argv=json:[]")
+  (( has_environment )) || fields+=("environment=json:{}")
+  local object_json
+  if ! object_json="$(qf_json_object_from_pairs "${fields[@]}")"; then
+    return 1
+  fi
+  qf_json_append_raw "$file" "$object_json"
+}
+
+qf_json_write_object_file() {
+  local file="$1"
+  shift
+  local object_json
+  if ! object_json="$(qf_json_object_from_pairs "$@")"; then
+    return 1
+  fi
+  qf_json_write_raw_file "$file" "$object_json"
+}
+
+qf_json_write_raw_file() {
+  local file="$1"
+  local raw="$2"
+  local run_id; run_id="$(qf_artifact_run_id)"
+  local policy; policy="$(qf_artifact_policy)"
+  local normalized
+  if ! normalized="$(python3 - "$raw" "$run_id" "$file" "$policy" <<'PY'
+import json
+import sys
+
+try:
+    value = json.loads(sys.argv[1])
+except json.JSONDecodeError as error:
+    print(f"invalid JSON artifact: {error}", file=sys.stderr)
+    raise SystemExit(1) from error
+
+if isinstance(value, dict) and "artifact" not in value:
+    value["artifact"] = {
+        "run_id": sys.argv[2],
+        "path": sys.argv[3],
+        "ownership": "create-new",
+        "replacement": sys.argv[4],
+    }
+
+sys.stdout.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+PY
+)"; then
+    return 1
+  fi
+  mkdir -p "$(dirname "$file")"
+  qf_artifact_prepare_file "$file" "$run_id" >/dev/null
+  local temp_file; temp_file="$(mktemp "${file}.tmp.XXXXXX")"
+  printf '%s\n' "$normalized" > "$temp_file"
+  if ! qf_json_validate_file "$temp_file"; then
+    rm -f -- "$temp_file"
+    return 1
+  fi
+  if [[ -e "$file" || -L "$file" ]]; then
+    rm -f -- "$temp_file"
+    die "artifact path appeared during JSON write: $file"
+  fi
+  mv -- "$temp_file" "$file" || {
+    rm -f -- "$temp_file"
+    die "could not install JSON artifact: $file"
+  }
+}
+
+qf_artifact_run_id() {
+  python3 - <<'PY'
+import uuid
+
+print(uuid.uuid4().hex)
+PY
+}
+
+qf_artifact_policy() {
+  local policy="${QUICFUSCATE_ARTIFACT_POLICY:-create-new}"
+  case "$policy" in
+    create-new|replace-with-backup) printf '%s' "$policy";;
+    *) die "invalid QUICFUSCATE_ARTIFACT_POLICY: $policy";;
+  esac
+}
+
+qf_artifact_prepare_file() {
+  local file="$1"
+  local run_id="$2"
+  local policy
+  policy="$(qf_artifact_policy)"
+  if [[ ! -e "$file" && ! -L "$file" ]]; then
+    return 0
+  fi
+  if [[ "$policy" != replace-with-backup ]]; then
+    die "refusing to overwrite existing artifact path: $file; choose a new output directory or set QUICFUSCATE_ARTIFACT_POLICY=replace-with-backup"
+  fi
+  local backup="${file}.previous-${run_id}"
+  local backup_suffix=0
+  while [[ -e "$backup" || -L "$backup" ]]; do
+    backup_suffix=$((backup_suffix + 1))
+    backup="${file}.previous-${run_id}-${backup_suffix}"
+  done
+  mv -- "$file" "$backup" || die "could not preserve existing artifact before replacement: $file"
+  printf '%s' "$backup"
 }
 
 qf_cargo_test_feature_set() {
@@ -365,6 +622,32 @@ qf_cargo_test_command_line() {
   if [[ -n "${JOBS:-}" ]]; then line+=" -j $(printf '%q' "$JOBS")"; fi
   for arg in "${suffix[@]}"; do line+=" $(printf '%q' "$arg")"; done
   printf '%s' "$line"
+}
+
+qf_cargo_test_command_argv_json() {
+  local feature_set="$1"
+  shift
+  local -a args=("$@")
+  local -a prefix=()
+  local -a suffix=()
+  local found_separator=0
+  local arg
+  for arg in "${args[@]}"; do
+    if [[ "$arg" == "--" ]]; then
+      found_separator=1
+    fi
+    if (( found_separator )); then
+      suffix+=("$arg")
+    else
+      prefix+=("$arg")
+    fi
+  done
+  local -a command=(cargo test "${prefix[@]}" --features "$feature_set")
+  if [[ -n "${JOBS:-}" ]]; then
+    command+=(-j "$JOBS")
+  fi
+  command+=("${suffix[@]}")
+  qf_json_array "${command[@]}"
 }
 
 qf_cargo_test_metadata_from_args() {
@@ -445,6 +728,7 @@ qf_cargo_test_metadata_from_args() {
   QF_CARGO_TEST_FEATURE_SET="$(qf_cargo_test_feature_set "$feature_request")"
   QF_CARGO_TEST_FILTER="$filter"
   QF_CARGO_TEST_COMMAND="$(qf_cargo_test_command_line "$QF_CARGO_TEST_FEATURE_SET" "${args[@]}")"
+  QF_CARGO_TEST_ARGV_JSON="$(qf_cargo_test_command_argv_json "$QF_CARGO_TEST_FEATURE_SET" "${args[@]}")"
 }
 
 qf_cargo_test_classify_output() {
@@ -499,6 +783,7 @@ qf_cargo_test_discover() {
   effective_features="$(qf_cargo_test_feature_set "$feature_set")"
   local command
   command="$(qf_cargo_test_command_line "$effective_features" "${args[@]}" -- --list)"
+  QF_CARGO_TEST_ARGV_JSON="$(qf_cargo_test_command_argv_json "$effective_features" "${args[@]}" -- --list)"
   mkdir -p "$(dirname "$output_file")"
   : > "$output_file"
   local command_status=0
@@ -521,6 +806,7 @@ qf_cargo_test_run() {
   effective_features="$(qf_cargo_test_feature_set "$feature_set")"
   local command
   command="$(qf_cargo_test_command_line "$effective_features" "${args[@]}")"
+  QF_CARGO_TEST_ARGV_JSON="$(qf_cargo_test_command_argv_json "$effective_features" "${args[@]}")"
   mkdir -p "$(dirname "$output_file")"
   : > "$output_file"
   local command_status=0
@@ -565,24 +851,48 @@ sys_mem_gb() {
 json_begin() {
   local f="$1"; local suite="$2"
   mkdir -p "$(dirname "$f")"
+  local run_id
+  run_id="$(qf_artifact_run_id)"
+  qf_artifact_prepare_file "$f" "$run_id" >/dev/null
+  local policy
+  policy="$(qf_artifact_policy)"
+  local timestamp; timestamp="$(date -Iseconds)"
+  local source_revision; source_revision="$(git rev-parse HEAD 2>/dev/null || printf '%s' unknown)"
+  local temp_file; temp_file="$(mktemp "${f}.tmp.XXXXXX")"
   {
-    echo '{'
-    echo '  "schema": "quicfuscate.v1",'
-    echo '  "tool": "quicfuscate",'
-    echo '  "suite": '"\"$suite\""','
-    echo '  "timestamp": '"\"$(date -Iseconds)\""','
-    echo '  "system": {'
-    echo '    "os": '"\"$(sys_os)\""','
-    echo '    "arch": '"\"$(sys_arch)\""','
-    echo '    "cpu_cores": '"$(sys_cpu_cores)"','
-    echo '    "memory_gb": '"\"$(sys_mem_gb)\""''
-    echo '  },'
-    echo '  "items": ['
-  } > "$f"
+    printf '{\n'
+    printf '  "schema": "quicfuscate.v1",\n'
+    printf '  "tool": "quicfuscate",\n'
+    printf '  "suite": "%s",\n' "$(qf_json_escape "$suite")"
+    printf '  "timestamp": "%s",\n' "$(qf_json_escape "$timestamp")"
+    printf '  "artifact": {"run_id":"%s","path":"%s","ownership":"create-new","replacement":"%s","source_revision":"%s"},\n' \
+      "$(qf_json_escape "$run_id")" "$(qf_json_escape "$f")" \
+      "$(qf_json_escape "$policy")" "$(qf_json_escape "$source_revision")"
+    printf '  "system": {\n'
+    printf '    "os": "%s",\n' "$(qf_json_escape "$(sys_os)")"
+    printf '    "arch": "%s",\n' "$(qf_json_escape "$(sys_arch)")"
+    printf '    "cpu_cores": %s,\n' "$(sys_cpu_cores)"
+    printf '    "memory_gb": "%s"\n' "$(qf_json_escape "$(sys_mem_gb)")"
+    printf '  },\n'
+    printf '  "items": [\n'
+  } > "$temp_file" || {
+    rm -f -- "$temp_file"
+    die "could not initialize JSON artifact: $f"
+  }
+  if [[ -e "$f" || -L "$f" ]]; then
+    rm -f -- "$temp_file"
+    die "artifact path appeared during initialization: $f"
+  fi
+  mv -- "$temp_file" "$f" || {
+    rm -f -- "$temp_file"
+    die "could not install JSON artifact: $f"
+  }
+  JSON_FIRST_RUN=1
 }
 
 # Closes the JSON document started by json_begin
 json_end() {
   local f="$1"
-  echo -e "\n  ]\n}" >> "$f"
+  printf '\n  ]\n}\n' >> "$f"
+  qf_json_validate_file "$f"
 }

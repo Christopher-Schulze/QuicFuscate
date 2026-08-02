@@ -228,6 +228,5 @@ echo "  - Platform-specific implementations"
 echo "  - Public API that external users depend on"
 
 echo -e "\n${GREEN}[OK] Dead Code Analysis Complete${NC}"
-if [[ $JSON_FIRST_RUN -eq 0 ]]; then echo "," >> "$JSON"; fi; JSON_FIRST_RUN=0
-echo -n '  {"total_dead_code_markers":'"$total_dead_code"'}' >> "$JSON"
+qf_json_append_object "$JSON" "total_dead_code_markers=int:$total_dead_code"
 json_end "$JSON"

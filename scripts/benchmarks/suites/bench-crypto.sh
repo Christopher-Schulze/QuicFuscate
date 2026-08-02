@@ -64,21 +64,22 @@ append_mode_metadata() {
     (( FAST )) && mode="fast"
     local cells_json="["
     local cell
-    for cell in "${SELECTED_CELLS[@]}"; do
-        [[ "$cells_json" == "[" ]] || cells_json+=","
-        cells_json+="\"$(qf_json_escape "$cell")\""
-    done
-    cells_json+="]"
-    printf '  {"cell":"meta","result":"PASS","reason":"","command":"","command_status":0,"meta":{"mode":"%s","fast":%s,"selected_cells":%s,"cell_count":%s}}' \
-        "$mode" "$FAST" "$cells_json" "${#SELECTED_CELLS[@]}" >> "$JSON"
-    JSON_FIRST_RUN=0
+  for cell in "${SELECTED_CELLS[@]}"; do
+    if [[ "$cells_json" != "[" ]]; then
+      cells_json+=","
+    fi
+    cells_json+="\"$(qf_json_escape "$cell")\""
+  done
+  cells_json+="]"
+    qf_json_append_object "$JSON" "cell=meta" "result=PASS" "reason=" "argv=json:[]" "environment=json:$(qf_json_environment)" \
+      "command_status=int:0" \
+      "meta=json:{\"mode\":\"$mode\",\"fast\":$FAST,\"selected_cells\":$cells_json,\"cell_count\":${#SELECTED_CELLS[@]}}"
 }
 
 append_mode_metadata
 if (( DRY_RUN )); then
     echo "DRY-RUN: mode=$([[ "$FAST" -eq 1 ]] && echo fast || echo full) cells=${SELECTED_CELLS[*]}"
-    echo "," >> "$JSON"
-    echo '  {"cell":"dry-run","result":"SKIP","reason":"dry_run","command_status":null}' >> "$JSON"
+    qf_json_append_object "$JSON" "cell=dry-run" "result=SKIP" "reason=dry_run" "command_status=null"
     json_end "$JSON"
     exit 0
 fi
@@ -92,8 +93,7 @@ echo "==============================================================="
 # Skip gracefully if bench harness absent
 if ! cargo bench --no-run --features benches >/dev/null 2>&1; then
   echo "No Rust benches detected; skipping crypto benches."
-  echo "," >> "$JSON"
-  echo '  {"cell":"suite","result":"SKIP","reason":"no_rust_benches","command_status":0}' >> "$JSON"
+  qf_json_append_object "$JSON" "cell=suite" "result=SKIP" "reason=no_rust_benches" "command_status=int:0"
   json_end "$JSON"
   exit 0
 fi
@@ -126,27 +126,35 @@ measure_throughput() {
     
     echo -e "\n${BLUE}> Benchmarking $name...${NC}"
     
-    if run_cargo_with_env "${env_vars[@]}" -- test --release --lib "$test_pattern" >"$output_file" 2>&1; then
-        command_status=0
+    local command_argv_json
+    local command_environment_json
+    if [[ "${#env_vars[@]}" -gt 0 ]]; then
+        if run_cargo_with_env "${env_vars[@]}" -- test --release --lib "$test_pattern" >"$output_file" 2>&1; then
+            command_status=0
+        else
+            command_status=$?
+            result="FAIL"
+            reason="cargo_test_failed"
+            BENCH_FAILURES=$((BENCH_FAILURES + 1))
+        fi
+        command_argv_json="$(qf_json_array env "${env_vars[@]}" cargo test --release --lib "$test_pattern")"
+        command_environment_json="$(qf_json_environment_with_assignments "${env_vars[@]}")"
     else
-        command_status=$?
-        result="FAIL"
-        reason="cargo_test_failed"
-        BENCH_FAILURES=$((BENCH_FAILURES + 1))
+        if run_cargo_with_env -- test --release --lib "$test_pattern" >"$output_file" 2>&1; then
+            command_status=0
+        else
+            command_status=$?
+            result="FAIL"
+            reason="cargo_test_failed"
+            BENCH_FAILURES=$((BENCH_FAILURES + 1))
+        fi
+        command_argv_json="$(qf_json_array env cargo test --release --lib "$test_pattern")"
+        command_environment_json="$(qf_json_environment)"
     fi
     cat "$output_file"
-    local command_text
-    command_text="env"
-    local env_assignment
-    for env_assignment in "${env_vars[@]}"; do
-        command_text+=" $(printf '%q' "$env_assignment")"
-    done
-    command_text+=" cargo test --release --lib $(printf '%q' "$test_pattern")"
-    if [[ "$JSON_FIRST_RUN" -eq 0 ]]; then echo "," >> "$JSON"; fi
-    JSON_FIRST_RUN=0
-    printf '  {"name":"%s","result":"%s","reason":"%s","command":"%s","command_status":%s,"output":"%s"}' \
-        "$(qf_json_escape "$name")" "$(qf_json_escape "$result")" "$(qf_json_escape "$reason")" \
-        "$(qf_json_escape "$command_text")" "$command_status" "$(qf_json_escape "$output_file")" >> "$JSON"
+    qf_json_append_object "$JSON" "name=$name" "result=$result" "reason=$reason" \
+        "argv=json:$command_argv_json" "environment=json:$command_environment_json" \
+        "command_status=int:$command_status" "output=$output_file"
     return 0
 }
 

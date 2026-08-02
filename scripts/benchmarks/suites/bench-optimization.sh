@@ -44,16 +44,15 @@ append_mode_metadata() {
     cells_json+="\"$(qf_json_escape "$cell")\""
   done
   cells_json+="]"
-  printf '  {"cell":"meta","result":"PASS","reason":"","command":"","command_status":0,"meta":{"mode":"%s","fast":%s,"selected_cells":%s,"cell_count":%s}}' \
-    "$mode" "$FAST" "$cells_json" "${#SELECTED_CELLS[@]}" >> "$JSON"
-  JSON_FIRST_RUN=0
+  qf_json_append_object "$JSON" "cell=meta" "result=PASS" "reason=" "argv=json:[]" "environment=json:$(qf_json_environment)" \
+    "command_status=int:0" \
+    "meta=json:{\"mode\":\"$mode\",\"fast\":$FAST,\"selected_cells\":$cells_json,\"cell_count\":${#SELECTED_CELLS[@]}}"
 }
 
 append_mode_metadata
 if (( DRY_RUN )); then
   echo "DRY-RUN: mode=$([[ "$FAST" -eq 1 ]] && echo fast || echo full) cells=${SELECTED_CELLS[*]}"
-  echo "," >> "$JSON"
-  echo '  {"cell":"dry-run","result":"SKIP","reason":"dry_run","command_status":null}' >> "$JSON"
+  qf_json_append_object "$JSON" "cell=dry-run" "result=SKIP" "reason=dry_run" "command_status=null"
   json_end "$JSON"
   exit 0
 fi
@@ -65,8 +64,7 @@ echo "==============================================================="
 # Skip gracefully if bench harness absent
 if ! cargo bench --no-run --features benches >/dev/null 2>&1; then
   echo "No Rust benches detected; skipping optimization benches."
-  if [[ $JSON_FIRST_RUN -eq 0 ]]; then echo "," >> "$JSON"; fi; JSON_FIRST_RUN=0
-  echo -n '  {"status":"skipped","reason":"no_rust_benches"}' >> "$JSON"
+  qf_json_append_object "$JSON" "status=skipped" "reason=no_rust_benches"
   json_end "$JSON"
   exit 0
 fi

@@ -37,16 +37,15 @@ else
 fi
 
 append_mode_metadata() {
-  printf '  {"cell":"meta","result":"PASS","reason":"","command":"","command_status":0,"meta":{"mode":"%s","fast":%s,"selected_cells":["%s"],"cell_count":1,"backend":"%s"}}' \
-    "$MODE" "$FAST" "$COVERAGE_BACKEND" "$COVERAGE_BACKEND" >> "$RESULTS_JSON"
-  JSON_FIRST_RUN=0
+  qf_json_append_object "$RESULTS_JSON" "cell=meta" "result=PASS" "reason=" \
+    "argv=json:[]" "environment=json:$(qf_json_environment)" "command_status=int:0" \
+    "meta=json:{\"mode\":\"$MODE\",\"fast\":$FAST,\"selected_cells\":[\"$COVERAGE_BACKEND\"],\"cell_count\":1,\"backend\":\"$COVERAGE_BACKEND\"}"
 }
 
 append_mode_metadata
 if (( DRY_RUN )); then
   echo "DRY-RUN: mode=$MODE backend=$COVERAGE_BACKEND"
-  echo "," >> "$RESULTS_JSON"
-  echo '  {"cell":"dry-run","result":"SKIP","reason":"dry_run","command_status":null}' >> "$RESULTS_JSON"
+  qf_json_append_object "$RESULTS_JSON" "cell=dry-run" "result=SKIP" "reason=dry_run" "command_status=null"
   json_end "$RESULTS_JSON"
   echo "Artifacts: $OUTPUT_DIR"
   exit 0
@@ -67,9 +66,11 @@ if (( FAST )); then
   test_fns=$(rg -N "#\[(tokio:)?test\b" src scripts/tests/rust -n --color=never | wc -l | tr -d ' ')
   echo "Total functions: $total_fns" | tee "$OUTPUT_DIR/coverage.txt"
   echo "Test functions:  $test_fns" | tee -a "$OUTPUT_DIR/coverage.txt"
-  echo "," >> "$RESULTS_JSON"
-  printf '  {"cell":"static-function-test-inventory","mode":"fast","result":"PASS","reason":"","command":"rg function and test inventory","command_status":0,"total_functions":%s,"test_functions":%s}' \
-    "$total_fns" "$test_fns" >> "$RESULTS_JSON"
+  qf_json_append_object "$RESULTS_JSON" "cell=static-function-test-inventory" "mode=fast" \
+    "result=PASS" "reason=" \
+    "argv=json:$(qf_json_array rg -N '^\s*(pub\s+)?(async\s+)?fn\s+' src -n --color=never)" \
+    "environment=json:$(qf_json_environment)" \
+    "command_status=int:0" "total_functions=int:$total_fns" "test_functions=int:$test_fns"
 elif command -v cargo-llvm-cov >/dev/null 2>&1; then
   info "Using cargo-llvm-cov"
   run cargo llvm-cov clean --workspace
@@ -77,9 +78,9 @@ elif command -v cargo-llvm-cov >/dev/null 2>&1; then
   run cargo llvm-cov report --summary-only --workspace | tee "$OUTPUT_DIR/coverage.txt"
   # Append a JSON item with the summary line
   if [[ -f "$OUTPUT_DIR/coverage.txt" ]]; then
-    summary=$(tail -n 1 "$OUTPUT_DIR/coverage.txt" | sed 's/"/\"/g')
-    if [[ $JSON_FIRST_RUN -eq 0 ]]; then echo "," >> "$RESULTS_JSON"; fi; JSON_FIRST_RUN=0
-    echo -n '  {"cell":"coverage-summary","mode":"full","backend":"cargo-llvm-cov-summary","result":"PASS","summary":'"\"$summary\""'}' >> "$RESULTS_JSON"
+    summary=$(tail -n 1 "$OUTPUT_DIR/coverage.txt")
+    qf_json_append_object "$RESULTS_JSON" "cell=coverage-summary" "mode=full" \
+      "backend=cargo-llvm-cov-summary" "result=PASS" "summary=$summary"
   fi
 else
   warn "cargo-llvm-cov not installed; falling back to simple stats"
@@ -90,8 +91,9 @@ else
   test_fns=$(rg -N "#\[(tokio::)?test\b" src scripts/tests/rust -n --color=never | wc -l | tr -d ' ')
   echo "Total functions: $total_fns" | tee "$OUTPUT_DIR/coverage.txt"
   echo "Test functions:  $test_fns" | tee -a "$OUTPUT_DIR/coverage.txt"
-  if [[ $JSON_FIRST_RUN -eq 0 ]]; then echo "," >> "$RESULTS_JSON"; fi; JSON_FIRST_RUN=0
-  echo -n '  {"cell":"static-function-test-inventory","mode":"full","backend":"cargo-test-function-inventory","result":"PASS","total_functions":'"$total_fns"',"test_functions":'"$test_fns"'}' >> "$RESULTS_JSON"
+  qf_json_append_object "$RESULTS_JSON" "cell=static-function-test-inventory" "mode=full" \
+    "backend=cargo-test-function-inventory" "result=PASS" \
+    "total_functions=int:$total_fns" "test_functions=int:$test_fns"
 fi
 
 echo -e "\nArtifacts: $OUTPUT_DIR"

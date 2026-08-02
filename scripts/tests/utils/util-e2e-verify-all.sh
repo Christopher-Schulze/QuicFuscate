@@ -70,6 +70,5 @@ for d in browser_profiles; do
 done
 echo "[E2E] Summary: total=$total failed=$failed"
 [ "$failed" -eq 0 ]
-if [[ $JSON_FIRST_RUN -eq 0 ]]; then echo "," >> "$JSON"; fi; JSON_FIRST_RUN=0
-echo -n '  {"total":'"$total"',"failed":'"$failed"'}' >> "$JSON"
+qf_json_append_object "$JSON" "total=int:$total" "failed=int:$failed"
 json_end "$JSON"

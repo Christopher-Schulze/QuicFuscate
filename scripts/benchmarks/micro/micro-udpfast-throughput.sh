@@ -56,12 +56,10 @@ fi
 
 append_item() {
   local cell="$1"; local result="$2"; local reason="$3"; local command_status="$4"; local output_file="$5"
-  local command_text="${6:-}"
-  if [[ "$JSON_FIRST_RUN" -eq 0 ]]; then echo "," >> "$RESULTS_JSON"; fi
-  JSON_FIRST_RUN=0
-  printf '  {"cell":"%s","result":"%s","reason":"%s","command":"%s","command_status":%s,"output":"%s"}' \
-    "$(qf_json_escape "$cell")" "$(qf_json_escape "$result")" "$(qf_json_escape "$reason")" \
-    "$(qf_json_escape "$command_text")" "$command_status" "$(qf_json_escape "$output_file")" >> "$RESULTS_JSON"
+  local argv_json="${6:-[]}"
+  qf_json_append_object "$RESULTS_JSON" "cell=$cell" "result=$result" "reason=$reason" \
+    "argv=json:$argv_json" "environment=json:$(qf_json_environment)" \
+    "command_status=int:$command_status" "output=$output_file"
 }
 
 validate_endpoint() {
@@ -102,10 +100,9 @@ fi
 
 print_system_banner
 info "UDP fast-path throughput: size=$SIZE bytes iters=$ITERS batch=$BATCH bind=$BIND"
-if [[ "$JSON_FIRST_RUN" -eq 0 ]]; then echo "," >> "$RESULTS_JSON"; fi
-JSON_FIRST_RUN=0
-printf '  {"cell":"meta","result":"PASS","reason":"","command":"","command_status":0,"meta":{"size":%s,"iters":%s,"batch":%s,"bind":"%s","remote":"%s"}}' \
-  "$SIZE" "$ITERS" "$BATCH" "$(qf_json_escape "$BIND")" "$(qf_json_escape "$REMOTE")" >> "$RESULTS_JSON"
+qf_json_append_object "$RESULTS_JSON" "cell=meta" "result=PASS" "reason=" "argv=json:[]" "environment=json:$(qf_json_environment)" \
+  "command_status=int:0" \
+  "meta=json:{\"size\":$SIZE,\"iters\":$ITERS,\"batch\":$BATCH,\"bind\":\"$(qf_json_escape "$BIND")\",\"remote\":\"$(qf_json_escape "$REMOTE")\"}"
 
 if run_cargo build --release; then
   :
@@ -134,9 +131,8 @@ else
   reason="harness_command_failed"
 fi
 cat "$RESULTS"
-command_text="$(printf '%q ' "${command[@]}")"
-command_text="${command_text% }"
-append_item "udp-throughput" "$result" "$reason" "$command_status" "$RESULTS" "$command_text"
+append_item "udp-throughput" "$result" "$reason" "$command_status" "$RESULTS" \
+  "$(qf_json_array "${command[@]}")"
 
 json_end "$RESULTS_JSON"
 info "Results saved to: $ARTIFACTS_DIR"

@@ -239,7 +239,10 @@ run_tun_scenario() {
     local client_command=("$BINARY" client --remote 127.0.0.1:4433 --fec-mode "$fec_mode" --tun --tun-ip "$CLIENT_TUN_IP" --tun-netmask "$TUN_NETMASK" --disable-doh -v)
     local iperf_server_command=("$IPERF3_PATH" -s -B "$CLIENT_TUN_IP")
     local iperf_client_command=("$IPERF3_PATH" -c "$CLIENT_TUN_IP" -t "$DURATION" -P 4 -J)
-    local command_text; command_text="server: $(profile_shell_command "${server_command[@]}"); client: $(profile_shell_command "${client_command[@]}"); iperf: $(profile_shell_command "${iperf_client_command[@]}")"
+    local command_json; command_json="$(profile_command_bundle_json \
+        "server=$(profile_command_json "${server_command[@]}")" \
+        "client=$(profile_command_json "${client_command[@]}")" \
+        "iperf=$(profile_command_json "${iperf_client_command[@]}")")"
     local result="PASS"; local reason=""; local metrics_status="SKIP"; local metrics_complete=false
     local perf_status="SKIP"; local flamegraph_status="SKIP"; local flamegraph_exit_status="null"; local perf_data_retained=false
     local rtt=""; local loss=""; local throughput_json="{}"; local cleanup_status="PASS"; local termination_requested=false
@@ -247,7 +250,7 @@ run_tun_scenario() {
 
     printf 'scenario,label,fec_mode,netem_delay,netem_loss,result,reason,server_exit,client_exit,iperf_exit,perf_status,flamegraph_status,metrics_status,throughput_mbps,rtt,loss\n' > "$csv"
     if (( DRY_RUN )); then
-        record_scenario "$label" "$title" SKIP dry_run "$command_text" \
+        record_scenario "$label" "$title" SKIP dry_run "$command_json" \
             "$(profile_typed_pairs_json status=SKIP method=netem_process_log_traffic)" \
             "$(profile_typed_pairs_json server_pid=null client_pid=null iperf_server_pid=null iperf_client_pid=null server_exit_status=null client_exit_status=null iperf_exit_status=null termination_requested=bool:false)" \
             "$(profile_typed_pairs_json status=SKIP exit_status=null data_file=null)" \
@@ -259,7 +262,7 @@ run_tun_scenario() {
         return
     fi
     if [[ "$PREFLIGHT_STATUS" != PASS ]]; then
-        record_scenario "$label" "$title" UNAVAILABLE "$PREFLIGHT_REASON" "$command_text" \
+        record_scenario "$label" "$title" UNAVAILABLE "$PREFLIGHT_REASON" "$command_json" \
             "$(profile_typed_pairs_json status=UNAVAILABLE method=preflight)" \
             "$(profile_typed_pairs_json server_pid=null client_pid=null iperf_server_pid=null iperf_client_pid=null server_exit_status=null client_exit_status=null iperf_exit_status=null termination_requested=bool:false)" \
             "$(profile_typed_pairs_json status=UNAVAILABLE exit_status=null data_file=null)" \
@@ -277,7 +280,7 @@ run_tun_scenario() {
             netem_setup_status="PASS"
         else
             netem_setup_status="FAIL"; result="FAIL"; reason="netem_setup_failed"
-            record_scenario "$label" "$title" "$result" "$reason" "$command_text" \
+            record_scenario "$label" "$title" "$result" "$reason" "$command_json" \
                 "$(profile_typed_pairs_json status=FAIL method=netem_setup)" \
                 "$(profile_typed_pairs_json server_pid=null client_pid=null iperf_server_pid=null iperf_client_pid=null server_exit_status=null client_exit_status=null iperf_exit_status=null termination_requested=bool:false)" \
                 "$(profile_typed_pairs_json status=SKIP exit_status=null data_file=null)" \
@@ -429,7 +432,7 @@ run_tun_scenario() {
     metrics_json="$(profile_typed_pairs_json status="$metrics_status" complete="bool:$metrics_complete" throughput_mbps="${throughput_mbps:-}" rtt="$rtt" loss="$loss")"
     local process_json
     process_json="$(profile_typed_pairs_json server_pid="${server_pid:-null}" client_pid="${client_pid:-null}" iperf_server_pid="${iperf_server_pid:-null}" iperf_client_pid="${iperf_client_pid:-null}" server_exit_status="${server_exit_status:-null}" client_exit_status="${client_exit_status:-null}" iperf_server_exit_status="${iperf_server_exit_status:-null}" iperf_client_exit_status="${iperf_client_exit_status:-null}" termination_requested="bool:$termination_requested")"
-    record_scenario "$label" "$title" "$result" "${reason:-completed}" "$command_text" \
+    record_scenario "$label" "$title" "$result" "${reason:-completed}" "$command_json" \
         "$(profile_typed_pairs_json status="$readiness_status" reason="$readiness_reason" server_log="$server_log" client_log="$client_log")" \
         "$process_json" \
         "$(profile_typed_pairs_json status="$perf_status" exit_status="${perf_exit_status:-null}" data_file="$perf_data" retained="bool:$perf_data_retained")" \

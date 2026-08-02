@@ -5,6 +5,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$PROJECT_ROOT"
+# shellcheck disable=SC1091
+[[ -f "$SCRIPT_DIR/../lib/lib-common.sh" ]] && source "$SCRIPT_DIR/../lib/lib-common.sh"
 
 OUT_DIR=""
 while [[ $# -gt 0 ]]; do
@@ -34,6 +36,8 @@ mkdir -p "$OUT_DIR"
 REPORT="$OUT_DIR/report.txt"
 JSON="$OUT_DIR/results.json"
 FULL_SUITE="$PROJECT_ROOT/scripts/tests/utils/util-run-full-suite.sh"
+json_begin "$JSON" "analysis_suite_matrix"
+JSON_FIRST_RUN=1
 
 total=0
 fast_supported=0
@@ -46,9 +50,6 @@ mismatch_fast=0
   echo "Full suite runner: ${FULL_SUITE#$PROJECT_ROOT/}"
   echo
 } > "$REPORT"
-
-echo "[" > "$JSON"
-first=1
 
 for f in "$PROJECT_ROOT"/scripts/tests/suites/*.sh; do
   [[ -f "$f" ]] || continue
@@ -83,14 +84,14 @@ for f in "$PROJECT_ROOT"/scripts/tests/suites/*.sh; do
   printf "%s supports_fast=%s invoked=%s invoked_with_fast=%s\n" \
     "$rel" "$supports_fast" "$([[ "$call_count" -gt 0 ]] && echo 1 || echo 0)" "$call_with_fast" >> "$REPORT"
 
-  if [[ $first -eq 0 ]]; then echo "," >> "$JSON"; fi
-  first=0
-  cat >> "$JSON" <<EOF
-  {"suite":"$rel","supports_fast":$supports_fast,"invoked":$([[ "$call_count" -gt 0 ]] && echo 1 || echo 0),"invoked_with_fast":$call_with_fast,"fast_flag_mismatch":$mismatch}
-EOF
+  invoked_flag=0
+  [[ "$call_count" -gt 0 ]] && invoked_flag=1
+  qf_json_append_object "$JSON" \
+    "suite=$rel" "supports_fast=int:$supports_fast" "invoked=int:$invoked_flag" \
+    "invoked_with_fast=int:$call_with_fast" "fast_flag_mismatch=int:$mismatch"
 done
 
-echo "]" >> "$JSON"
+json_end "$JSON"
 
 cat >> "$REPORT" <<EOF
 

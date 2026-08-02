@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import socket
 import struct
 import sys
@@ -53,15 +54,20 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def write_json_new(path: Path, value: object) -> None:
-    if path.exists():
-        fail(f"refusing to replace existing result: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = path.with_name(f".{path.name}.tmp-{time.monotonic_ns()}")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     try:
-        temporary_path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
-        temporary_path.replace(path)
-    finally:
-        temporary_path.unlink(missing_ok=True)
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError as error:
+        fail(f"refusing to replace existing result: {path}")
+        raise error
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            json.dump(value, output, sort_keys=True)
+            output.write("\n")
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
 
 
 def create_socket() -> socket.socket:

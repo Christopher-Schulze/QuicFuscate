@@ -42,8 +42,9 @@ for d in browser_profiles; do
       echo " - ${browser^}/${os^}"
       found=1
       size_dec=$(base64 $DEC < "$f" | wc -c | tr -d ' ')
-      if [[ $JSON_FIRST_RUN -eq 0 ]]; then echo "," >> "$JSON"; fi; JSON_FIRST_RUN=0
-      echo -n '  {"browser":'"\"${browser^}\""',"os":'"\"${os^}\""',"dir":'"\"$d\""',"file":'"\"$base\""',"decoded_size":'"$size_dec"'}' >> "$JSON"
+      qf_json_append_object "$JSON" \
+        "browser=${browser^}" "os=${os^}" "dir=$d" "file=$base" \
+        "decoded_size=int:$size_dec"
     done
   fi
 done

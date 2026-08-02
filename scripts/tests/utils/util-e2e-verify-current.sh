@@ -70,6 +70,5 @@ for d in browser_profiles; do [ -d "$d" ] || continue
   fi
 done
 if [ "$found" = 0 ]; then echo "Profile file not found for ${b}_${o}.chlo in browser_profiles/."; exit 3; fi
-if [[ $JSON_FIRST_RUN -eq 0 ]]; then echo "," >> "$JSON"; fi; JSON_FIRST_RUN=0
-echo -n '  {"browser":'"\"$B\""',"os":'"\"$O\""'}' >> "$JSON"
+qf_json_append_object "$JSON" "browser=$B" "os=$O"
 json_end "$JSON"

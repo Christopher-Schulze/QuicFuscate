@@ -53,8 +53,9 @@ for d in browser_profiles; do
     echo
     found=1
     # JSON item
-    if [[ $JSON_FIRST_RUN -eq 0 ]]; then echo "," >> "$JSON"; fi; JSON_FIRST_RUN=0
-    echo -n '  {"browser":'"\"${browser^}\""',"os":'"\"${os^}\""',"dir":'"\"$d\""',"file":'"\"$base\""',"decoded_size":'"$size"'}' >> "$JSON"
+    qf_json_append_object "$JSON" \
+      "browser=${browser^}" "os=${os^}" "dir=$d" "file=$base" \
+      "decoded_size=int:$size"
   done
 done
 if [ "$found" = 0 ]; then echo 'No .chlo profiles found.'; fi

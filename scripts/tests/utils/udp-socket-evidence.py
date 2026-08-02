@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import tempfile
 import time
@@ -80,11 +81,19 @@ def read_snapshot(path: Path) -> dict[str, Any]:
 
 
 def write_new_json(path: Path, payload: dict[str, Any]) -> None:
+    encoded = json.dumps(payload, sort_keys=True) + "\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     try:
-        with path.open("x", encoding="utf-8") as output:
-            output.write(json.dumps(payload, sort_keys=True) + "\n")
+        descriptor = os.open(path, flags, 0o600)
     except FileExistsError as error:
         raise ValueError(f"refusing to replace existing output: {path}") from error
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            output.write(encoded)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
 
 
 def write_new_text(path: Path, text: str) -> None:

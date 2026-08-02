@@ -36,24 +36,24 @@ TOTAL=0; PASSED=0; FAILED=0; SKIPPED=0
 TEST_LIST_FILE="$OUTPUT_DIR/testlist.txt"
 BASE_FEATURES="$(qf_cargo_test_feature_set "${CARGO_FEATURES:-}")"
 BASE_DISCOVERY_DONE=0; BASE_DISCOVERY_STATUS=""; BASE_DISCOVERY_REASON=""
-BASE_DISCOVERY_COUNT=0; BASE_DISCOVERY_COMMAND_STATUS=""; BASE_DISCOVERY_COMMAND=""; BASE_DISCOVERY_TARGET=""; BASE_DISCOVERY_FEATURES=""; BASE_DISCOVERY_RAW_OUTPUT="$TEST_LIST_FILE"
+BASE_DISCOVERY_COUNT=0; BASE_DISCOVERY_COMMAND_STATUS=""; BASE_DISCOVERY_COMMAND=""; BASE_DISCOVERY_ARGV_JSON="[]"; BASE_DISCOVERY_TARGET=""; BASE_DISCOVERY_FEATURES=""; BASE_DISCOVERY_RAW_OUTPUT="$TEST_LIST_FILE"
 ZERO_COPY_DISCOVERY_DONE=0; ZERO_COPY_DISCOVERY_STATUS=""; ZERO_COPY_DISCOVERY_REASON=""
-ZERO_COPY_DISCOVERY_COUNT=0; ZERO_COPY_DISCOVERY_COMMAND_STATUS=""; ZERO_COPY_DISCOVERY_COMMAND=""; ZERO_COPY_DISCOVERY_TARGET=""; ZERO_COPY_DISCOVERY_FEATURES=""; ZERO_COPY_DISCOVERY_RAW_OUTPUT=""
+ZERO_COPY_DISCOVERY_COUNT=0; ZERO_COPY_DISCOVERY_COMMAND_STATUS=""; ZERO_COPY_DISCOVERY_COMMAND=""; ZERO_COPY_DISCOVERY_ARGV_JSON="[]"; ZERO_COPY_DISCOVERY_TARGET=""; ZERO_COPY_DISCOVERY_FEATURES=""; ZERO_COPY_DISCOVERY_RAW_OUTPUT=""
 ACTIVE_TEST_LIST_FILE="$TEST_LIST_FILE"; ACTIVE_DISCOVERY_STATUS=""; ACTIVE_DISCOVERY_REASON=""
 DISCOVERY_STATUS_FOR_RUN="not_applicable"
+COMMAND_ARGV_JSON="[]"; COMMAND_ENVIRONMENT_JSON="{}"
 
 append_json_record() {
   local name="$1" legacy_status="$2" dur="$3" result="$4" reason="$5"
-  local command="$6" target="$7" feature_set="$8" discovered_count="${9:-null}"
+  local target="$7" feature_set="$8" discovered_count="${9:-null}"
   local executed_count="${10:-null}" command_status="${11:-null}"
   local discovery_status="${12:-not_applicable}" raw_output="${13:-}"
-  if [[ $JSON_FIRST_RUN -eq 0 ]]; then echo "," >> "$RESULTS_JSON"; fi
-  JSON_FIRST_RUN=0
-  printf '  {"name":"%s","status":"%s","result":"%s","reason":"%s","command":"%s","target":"%s","feature_set":"%s","discovered_test_count":%s,"executed_test_count":%s,"command_status":%s,"discovery_status":"%s","raw_output":"%s","duration_sec":%s}' \
-    "$(qf_json_escape "$name")" "$(qf_json_escape "$legacy_status")" "$(qf_json_escape "$result")" \
-    "$(qf_json_escape "$reason")" "$(qf_json_escape "$command")" "$(qf_json_escape "$target")" \
-    "$(qf_json_escape "$feature_set")" "$discovered_count" "$executed_count" "$command_status" \
-    "$(qf_json_escape "$discovery_status")" "$(qf_json_escape "$raw_output")" "$dur" >> "$RESULTS_JSON"
+  qf_json_append_object "$RESULTS_JSON" "name=$name" "status=$legacy_status" \
+    "result=$result" "reason=$reason" "argv=json:${COMMAND_ARGV_JSON:-[]}" \
+    "environment=json:${COMMAND_ENVIRONMENT_JSON:-{}}" "target=$target" \
+    "feature_set=$feature_set" "discovered_test_count=json:$discovered_count" \
+    "executed_test_count=json:$executed_count" "command_status=json:$command_status" \
+    "discovery_status=$discovery_status" "raw_output=$raw_output" "duration_sec=int:$dur"
 }
 
 append_json() {
@@ -70,6 +70,7 @@ append_json() {
 record_platform_skip() {
   local name="$1" reason="$2" target="${3:-not_applicable}" feature_set="${4:-$BASE_FEATURES}"
   SKIPPED=$((SKIPPED+1))
+  COMMAND_ARGV_JSON="[]"; COMMAND_ENVIRONMENT_JSON="{}"
   append_json_record "$name" "skipped" 0 "SKIP" "$reason" "not_applicable" "$target" "$feature_set" \
     null null null "SKIP" ""
 }
@@ -92,6 +93,7 @@ ensure_test_list() {
       QF_CARGO_TEST_STATUS="$BASE_DISCOVERY_STATUS"; QF_CARGO_TEST_REASON="$BASE_DISCOVERY_REASON"
       QF_CARGO_TEST_COUNT="$BASE_DISCOVERY_COUNT"; QF_CARGO_TEST_COMMAND_STATUS="$BASE_DISCOVERY_COMMAND_STATUS"
       QF_CARGO_TEST_COMMAND="$BASE_DISCOVERY_COMMAND"; QF_CARGO_TEST_TARGET="$BASE_DISCOVERY_TARGET"
+      QF_CARGO_TEST_ARGV_JSON="$BASE_DISCOVERY_ARGV_JSON"
       QF_CARGO_TEST_FEATURE_SET="$BASE_DISCOVERY_FEATURES"; QF_CARGO_TEST_FILTER="<all>"
       QF_CARGO_TEST_RAW_OUTPUT="$BASE_DISCOVERY_RAW_OUTPUT"
     else
@@ -100,6 +102,7 @@ ensure_test_list() {
       QF_CARGO_TEST_STATUS="$ZERO_COPY_DISCOVERY_STATUS"; QF_CARGO_TEST_REASON="$ZERO_COPY_DISCOVERY_REASON"
       QF_CARGO_TEST_COUNT="$ZERO_COPY_DISCOVERY_COUNT"; QF_CARGO_TEST_COMMAND_STATUS="$ZERO_COPY_DISCOVERY_COMMAND_STATUS"
       QF_CARGO_TEST_COMMAND="$ZERO_COPY_DISCOVERY_COMMAND"; QF_CARGO_TEST_TARGET="$ZERO_COPY_DISCOVERY_TARGET"
+      QF_CARGO_TEST_ARGV_JSON="$ZERO_COPY_DISCOVERY_ARGV_JSON"
       QF_CARGO_TEST_FEATURE_SET="$ZERO_COPY_DISCOVERY_FEATURES"; QF_CARGO_TEST_FILTER="<all>"
       QF_CARGO_TEST_RAW_OUTPUT="$ZERO_COPY_DISCOVERY_RAW_OUTPUT"
     fi
@@ -119,6 +122,7 @@ ensure_test_list() {
     BASE_DISCOVERY_COUNT="$QF_CARGO_TEST_COUNT"
     BASE_DISCOVERY_COMMAND_STATUS="$QF_CARGO_TEST_COMMAND_STATUS"
     BASE_DISCOVERY_COMMAND="$QF_CARGO_TEST_COMMAND"
+    BASE_DISCOVERY_ARGV_JSON="$QF_CARGO_TEST_ARGV_JSON"
     BASE_DISCOVERY_TARGET="$QF_CARGO_TEST_TARGET"
     BASE_DISCOVERY_FEATURES="$QF_CARGO_TEST_FEATURE_SET"
     BASE_DISCOVERY_RAW_OUTPUT="$QF_CARGO_TEST_RAW_OUTPUT"
@@ -129,6 +133,7 @@ ensure_test_list() {
     ZERO_COPY_DISCOVERY_COUNT="$QF_CARGO_TEST_COUNT"
     ZERO_COPY_DISCOVERY_COMMAND_STATUS="$QF_CARGO_TEST_COMMAND_STATUS"
     ZERO_COPY_DISCOVERY_COMMAND="$QF_CARGO_TEST_COMMAND"
+    ZERO_COPY_DISCOVERY_ARGV_JSON="$QF_CARGO_TEST_ARGV_JSON"
     ZERO_COPY_DISCOVERY_TARGET="$QF_CARGO_TEST_TARGET"
     ZERO_COPY_DISCOVERY_FEATURES="$QF_CARGO_TEST_FEATURE_SET"
     ZERO_COPY_DISCOVERY_RAW_OUTPUT="$QF_CARGO_TEST_RAW_OUTPUT"
@@ -136,6 +141,7 @@ ensure_test_list() {
   ACTIVE_TEST_LIST_FILE="$list_file"
   ACTIVE_DISCOVERY_STATUS="$QF_CARGO_TEST_STATUS"
   ACTIVE_DISCOVERY_REASON="$QF_CARGO_TEST_REASON"
+  COMMAND_ARGV_JSON="$QF_CARGO_TEST_ARGV_JSON"; COMMAND_ENVIRONMENT_JSON="$(qf_json_environment)"
   append_json_record "discovery:${scope}" "$legacy_status" 0 "$QF_CARGO_TEST_STATUS" "$QF_CARGO_TEST_REASON" \
     "$QF_CARGO_TEST_COMMAND" "$QF_CARGO_TEST_TARGET" "$QF_CARGO_TEST_FEATURE_SET" \
     "$QF_CARGO_TEST_COUNT" null "$QF_CARGO_TEST_COMMAND_STATUS" "$QF_CARGO_TEST_STATUS" "$QF_CARGO_TEST_RAW_OUTPUT"
@@ -176,17 +182,23 @@ run_optional_test() {
     if [[ -n "$feature_arg" ]]; then
       command=(cargo test --release --features "$feature_arg" --lib "$pattern" -- "${runner_args[@]}")
     fi
-    run_case "$label" "${envs[@]}" -- "${command[@]}"
+    if [[ "${#envs[@]}" -gt 0 ]]; then
+      run_case "$label" "${envs[@]}" -- "${command[@]}"
+    else
+      run_case "$label" -- "${command[@]}"
+    fi
     DISCOVERY_STATUS_FOR_RUN="not_applicable"
     return 0
   fi
   local pattern_status=$?
   if [[ "$pattern_status" -eq 2 ]]; then
+    COMMAND_ARGV_JSON="$QF_CARGO_TEST_ARGV_JSON"; COMMAND_ENVIRONMENT_JSON="$(qf_json_environment)"
     append_json_record "$label" "fail" 0 "$ACTIVE_DISCOVERY_STATUS" "$ACTIVE_DISCOVERY_REASON" \
       "$QF_CARGO_TEST_COMMAND" "$QF_CARGO_TEST_TARGET" "$QF_CARGO_TEST_FEATURE_SET" \
       "$QF_CARGO_TEST_COUNT" null "$QF_CARGO_TEST_COMMAND_STATUS" "$ACTIVE_DISCOVERY_STATUS" "$QF_CARGO_TEST_RAW_OUTPUT"
   else
     SKIPPED=$((SKIPPED+1))
+    COMMAND_ARGV_JSON="$QF_CARGO_TEST_ARGV_JSON"; COMMAND_ENVIRONMENT_JSON="$(qf_json_environment)"
     append_json_record "$label" "skipped" 0 "SKIP" "pattern_not_found_after_target_scoped_discovery" \
       "$QF_CARGO_TEST_COMMAND" "$QF_CARGO_TEST_TARGET" "$QF_CARGO_TEST_FEATURE_SET" \
       "$QF_CARGO_TEST_COUNT" null "$QF_CARGO_TEST_COMMAND_STATUS" "$ACTIVE_DISCOVERY_STATUS" "$QF_CARGO_TEST_RAW_OUTPUT"
@@ -206,7 +218,13 @@ run_cargo_test_capture() {
   shift
   local -a cmd=("$@")
   local command_status=0
-  if ( LOG_FILE="" JSON="" JSON_FILE="" run_cargo_with_env "${envs[@]}" -- "${cmd[@]:1}" ) > "$output_file" 2>&1; then
+  if [[ "${#envs[@]}" -gt 0 ]]; then
+    if ( LOG_FILE="" JSON="" JSON_FILE="" run_cargo_with_env "${envs[@]}" -- "${cmd[@]:1}" ) > "$output_file" 2>&1; then
+      command_status=0
+    else
+      command_status=$?
+    fi
+  elif ( LOG_FILE="" JSON="" JSON_FILE="" run_cargo_with_env -- "${cmd[@]:1}" ) > "$output_file" 2>&1; then
     command_status=0
   else
     command_status=$?
@@ -232,7 +250,13 @@ run_case() {
   if [[ "${cmd[0]:-}" == "cargo" && "${cmd[1]:-}" == "test" ]]; then
     local output_file="$OUTPUT_DIR/cargo-test-${TOTAL}.txt"
     local command_status=0
-    if run_cargo_test_capture "$output_file" "${envs[@]}" -- "${cmd[@]}"; then
+    if [[ "${#envs[@]}" -gt 0 ]]; then
+      if run_cargo_test_capture "$output_file" "${envs[@]}" -- "${cmd[@]}"; then
+        command_status=0
+      else
+        command_status=$?
+      fi
+    elif run_cargo_test_capture "$output_file" -- "${cmd[@]}"; then
       command_status=0
     else
       command_status=$?
@@ -249,11 +273,28 @@ run_case() {
     local legacy_status="ok"
     if [[ "$QF_CARGO_TEST_STATUS" != "PASS" ]]; then legacy_status="fail"; fi
     if [[ "$QF_CARGO_TEST_STATUS" == "PASS" ]]; then PASSED=$((PASSED+1)); else FAILED=$((FAILED+1)); fi
+    COMMAND_ARGV_JSON="$QF_CARGO_TEST_ARGV_JSON"
+    if [[ "${#envs[@]}" -gt 0 ]]; then
+      COMMAND_ENVIRONMENT_JSON="$(qf_json_environment_with_assignments "${envs[@]}")"
+    else
+      COMMAND_ENVIRONMENT_JSON="$(qf_json_environment_with_assignments)"
+    fi
     append_json_record "$name" "$legacy_status" "$duration" "$QF_CARGO_TEST_STATUS" "$QF_CARGO_TEST_REASON" \
       "$QF_CARGO_TEST_COMMAND" "$QF_CARGO_TEST_TARGET" "$QF_CARGO_TEST_FEATURE_SET" null \
       "$QF_CARGO_TEST_COUNT" "$QF_CARGO_TEST_COMMAND_STATUS" "$DISCOVERY_STATUS_FOR_RUN" "$QF_CARGO_TEST_RAW_OUTPUT"
     DISCOVERY_STATUS_FOR_RUN="not_applicable"
     return 0
+  fi
+  if [[ ${#envs[@]} -gt 0 ]]; then
+    COMMAND_ARGV_JSON="$(qf_json_array env "${envs[@]}" "${cmd[@]}")"
+    if [[ "${#envs[@]}" -gt 0 ]]; then
+      COMMAND_ENVIRONMENT_JSON="$(qf_json_environment_with_assignments "${envs[@]}")"
+    else
+      COMMAND_ENVIRONMENT_JSON="$(qf_json_environment_with_assignments)"
+    fi
+  else
+    COMMAND_ARGV_JSON="$(qf_json_array "${cmd[@]}")"
+    COMMAND_ENVIRONMENT_JSON="$(qf_json_environment)"
   fi
   if [[ ${#envs[@]} -gt 0 ]]; then
     if run env "${envs[@]}" "${cmd[@]}"; then

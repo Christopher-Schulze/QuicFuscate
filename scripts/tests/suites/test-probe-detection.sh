@@ -52,11 +52,7 @@ JSON_FIRST_RUN=1
 
 append_json() {
   local name="$1" status="$2" duration="$3"
-  if [[ $JSON_FIRST_RUN -eq 0 ]]; then
-    echo "," >> "$RESULTS_JSON"
-  fi
-  JSON_FIRST_RUN=0
-  echo -n "  {\"name\":\"${name}\",\"status\":\"${status}\",\"duration_sec\":${duration}}" >> "$RESULTS_JSON"
+  qf_json_append_object "$RESULTS_JSON" "name=$name" "status=$status" "duration_sec=int:$duration"
 }
 
 run_case() {

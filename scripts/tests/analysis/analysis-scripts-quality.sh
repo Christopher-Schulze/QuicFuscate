@@ -5,6 +5,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$PROJECT_ROOT"
+# shellcheck disable=SC1091
+[[ -f "$SCRIPT_DIR/../lib/lib-common.sh" ]] && source "$SCRIPT_DIR/../lib/lib-common.sh"
 
 if ! command -v rg >/dev/null 2>&1; then
   echo "error: missing required command: rg" >&2
@@ -39,6 +41,8 @@ TS="$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUT_DIR"
 REPORT="$OUT_DIR/report.txt"
 JSON="$OUT_DIR/results.json"
+json_begin "$JSON" "analysis_scripts_quality"
+JSON_FIRST_RUN=1
 
 total=0
 missing_shebang=0
@@ -124,18 +128,12 @@ Summary:
   bad_unknown_arg=$bad_unknown_arg
 EOF
 
-cat > "$JSON" <<EOF
-{
-  "total": $total,
-  "missing_shebang": $missing_shebang,
-  "missing_strict": $missing_strict,
-  "missing_desc": $missing_desc,
-  "missing_help": $missing_help,
-  "invalid_name": $invalid_name,
-  "missing_usage_line": $missing_usage_line,
-  "bad_unknown_arg": $bad_unknown_arg
-}
-EOF
+qf_json_append_object "$JSON" \
+  "total=int:$total" "missing_shebang=int:$missing_shebang" \
+  "missing_strict=int:$missing_strict" "missing_desc=int:$missing_desc" \
+  "missing_help=int:$missing_help" "invalid_name=int:$invalid_name" \
+  "missing_usage_line=int:$missing_usage_line" "bad_unknown_arg=int:$bad_unknown_arg"
+json_end "$JSON"
 
 echo "report: $REPORT"
 echo "json:   $JSON"

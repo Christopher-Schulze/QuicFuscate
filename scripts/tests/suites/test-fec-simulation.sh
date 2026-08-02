@@ -64,7 +64,7 @@ fi
 # Result accumulators
 TOTAL=0; PASS=0; FAIL=0
 
-RESULTS_JSON="$OUTPUT_DIR/results.json"; json_begin "$RESULTS_JSON" "fec_simulation"; FIRST=true
+RESULTS_JSON="$OUTPUT_DIR/results.json"; json_begin "$RESULTS_JSON" "fec_simulation"; JSON_FIRST_RUN=1
 RAW="$OUTPUT_DIR/raw.tsv"; : > "$RAW" # mode\tloss\tthreads\tgf16\tstream_every\tadapt_rs\tok
 
 run_cargo_logged() {
@@ -117,10 +117,12 @@ run_one() {
   # JSON line
   # Raw line for post-matrix
   echo -e "${mode}\t${loss}\t${th}\t${use_gf16}\t${stream_every}\t${adapt_rs}\t${ok}" >> "$RAW"
-  if [[ "$FIRST" == "true" ]]; then FIRST=false; else echo "," >> "$RESULTS_JSON"; fi
-  printf '  {"mode":"%s","loss":%s,"threads":%s,"gf16":%s,"stream_every":%s,"adapt_rs":%s,"duration_sec":%s,"ok":%s,"result":"%s","reason":"%s","command":"cargo test --release --lib fec::test_auto_mode_streaming_selection -- --nocapture","environment":"%s","command_status":%s}' \
-    "$(qf_json_escape "$mode")" "$loss" "$th" "$use_gf16" "$stream_every" "$adapt_rs" "$dur" "$ok" \
-    "$result" "$reason" "$(qf_json_escape "${envs[*]}")" "$command_status" >> "$RESULTS_JSON"
+  qf_json_append_object "$RESULTS_JSON" "mode=$mode" "loss=float:$loss" "threads=int:$th" \
+    "gf16=int:$use_gf16" "stream_every=int:$stream_every" "adapt_rs=int:$adapt_rs" \
+    "duration_sec=int:$dur" "ok=int:$ok" "result=$result" "reason=$reason" \
+    "argv=json:$(qf_json_array cargo test --release --lib fec::test_auto_mode_streaming_selection -- --nocapture)" \
+    "environment=json:$(qf_json_environment_with_assignments "${envs[@]}" "CARGO_FEATURES=$(qf_cargo_test_feature_set "$CARGO_FEATURES")")" \
+    "command_status=int:$command_status"
 }
 
 if (( COMPACT )); then
@@ -193,20 +195,25 @@ awk -F"\t" '{ key=$1"\t"$2; total[key]++; pass[key]+=$7 } END { for (k in total)
 
 # Emit matrix.json (simple)
 MATRIX_JSON="$OUTPUT_DIR/matrix.json"
-{
-  echo '{';
-  echo '  "matrix": {';
-  first=1
-  while IFS=$'\t' read -r mode loss pass fail rate; do
-    key="${mode}_${loss}"
-    [[ $first -eq 0 ]] && echo ','
-    first=0
-    printf '    "%s": {"mode":"%s","loss":%s,"pass":%s,"fail":%s,"success_rate":%s}' "$key" "$mode" "$loss" "$pass" "$fail" "$rate"
-  done < "$MATRIX_TSV"
-  echo '';
-  echo '  }'
-  echo '}'
-} > "$MATRIX_JSON"
+MATRIX_DOCUMENT="$(python3 - "$MATRIX_TSV" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+matrix = {}
+for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    mode, loss, passed, failed, rate = line.split("\t")
+    matrix[f"{mode}_{loss}"] = {
+        "mode": mode,
+        "loss": float(loss),
+        "pass": int(passed),
+        "fail": int(failed),
+        "success_rate": float(rate),
+    }
+print(json.dumps({"schema": "quicfuscate.v1.fec_simulation_matrix", "matrix": matrix}, ensure_ascii=False, separators=(",", ":")))
+PY
+)"
+qf_json_write_raw_file "$MATRIX_JSON" "$MATRIX_DOCUMENT"
 
 # fec_sim e2e tests moved to test-fec-e2e-loss.sh (TODO-370)
 

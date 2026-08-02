@@ -2429,9 +2429,9 @@ The profiling runners are measurement entrypoints, not performance claims. Every
 - `scripts/benchmarks/profiling-baseline.sh` records scenarios `a`-`c` through the UDP harness and scenarios `d`-`f` through the real loopback client/server. The connection scenarios use explicit FEC and cover-feature flags; there is no standalone CLI `stealth_mode` argument to claim.
 - `scripts/benchmarks/profiling-tun-mode.sh` records TUN scenarios `g`-`k` and requires Linux, root, `tc`, `iperf3`, the release binary, certificates, `perf`, and both FlameGraph tools. Netem ownership begins only after a successful `tc qdisc add` and is removed only by the owning run.
 - `scripts/benchmarks/profiling-zc.sh` is the canonical zero-copy entrypoint. It runs the real product server and client with `QUICFUSCATE_IO_URING_ZC=1` and `--telemetry`, then requires positive `quicfuscate_io_uring_zc_sends_total` and `quicfuscate_io_uring_zc_notifs_total` telemetry before a scenario can pass.
-- `scripts/benchmarks/profiling-common.sh` owns schema version `1`, provenance, tool-version capture, JSON serialization, CSV quoting, process/readiness waits, iperf validation, telemetry validation, cleanup status, and flamegraph execution.
+- `scripts/benchmarks/profiling-common.sh` owns schema version `1`, provenance, structured command serialization, tool-version capture, CSV quoting, process/readiness waits, iperf validation, telemetry validation, cleanup status, and flamegraph execution. Scenario and manifest files use exclusive creation and reject replacement.
 
-Each scenario JSON records the source revision, executable SHA-256, host, kernel, tool versions, prerequisites, exact shell command identity, readiness evidence, process exit statuses, `perf` and flamegraph status, metric completeness, cleanup status, and UTC timestamps. `manifest.json` contains the same provenance and a result count for every emitted scenario. The only result values are `PASS`, `FAIL`, `SKIP`, and `UNAVAILABLE`.
+Each scenario JSON records the source revision, executable SHA-256, host, kernel, tool versions, prerequisites, structured command identity, readiness evidence, process exit statuses, `perf` and flamegraph status, metric completeness, cleanup status, and UTC timestamps. `manifest.json` contains the same provenance and a result count for every emitted scenario. The only result values are `PASS`, `FAIL`, `SKIP`, and `UNAVAILABLE`.
 
 Missing native prerequisites are `UNAVAILABLE`. Failed process startup, netem setup, traffic, metric extraction, perf capture, flamegraph generation, or cleanup is `FAIL`. Missing metrics are never serialized as `N/A`, and a CSV row cannot turn an incomplete run into a pass. `--dry-run` emits `SKIP` evidence without starting a process.
 
@@ -3743,6 +3743,10 @@ Notes:
 
 The affected test and benchmark wrappers preserve operator and CI arguments as arrays. `scripts/tests/lib/lib-common.sh` validates control-free values, bounded decimal integers, feature lists, output paths, and environment assignments; `run_cargo_with_env` exports validated assignments without `eval`, `bash -lc`, word splitting, or loss of argument boundaries. FEC, FEC simulation, StealthBrain, optimization, security/fuzzing, and crypto benchmark suites use the shared boundary and record per-cell `PASS`, `FAIL`, or `SKIP` status with command status and bounded command/environment identity.
 
+Internal JSON artifacts use the shared serializer contract. `run` records command identity as `argv` plus an `environment` object; it never stores Bash-escaped command text as JSON. `qf_json_append_object` validates typed fields before appending and supplies empty structured `argv` and `environment` fields when an item does not execute a command, `json_end` parses the completed document before the caller can report success, and `qf_json_write_raw_file` validates and installs standalone JSON atomically. Default ownership is create-new: `json_begin`, `qf_json_write_object_file`, and standalone writers refuse an existing target. `QUICFUSCATE_ARTIFACT_POLICY=replace-with-backup` is the only replacement mode and moves the previous file to a unique `.previous-<run-id>` path before installing the new document. Suite headers and standalone object artifacts record run ID, path, ownership, replacement policy, and source revision.
+
+The suite result schema is the canonical envelope for test, benchmark, audit, and utility result streams. Standalone summary objects such as FEC matrices and analysis reports use the same parser-backed writer and retain their domain fields beside the artifact provenance object. Foreign JSON produced directly by Cargo, curl, iperf3, or a probe process remains a separately validated input or measurement artifact and is not misrepresented as a shell serializer output.
+
 `scripts/benchmarks/suites/bench-orchestrator.sh` resolves fixed suite names to executable-plus-argv arrays, passes output directories as one argument, records structured `argv` and command identity in `manifest.json`, marks dry-run children as `SKIP`, and exits nonzero for failed children or unknown requested suites. `bench-qpack-encode.sh`, `micro-udpfast-throughput.sh`, and `micro-crypto-all.sh` validate numeric, size, endpoint, feature, jobs, flag, and path input before execution or numeric JSON serialization. The Admin E2E wrapper validates credentials, addresses, paths, timeout, and TTL, passes dynamic JSON values through Python `sys.argv`, and makes `--dry-run` a complete non-executing plan that does not require curl, PKI generation, server startup, or readiness polling.
 
 Benchmark and analysis mode truth is explicit. `bench-crypto.sh`, `bench-fec.sh`, `bench-optimization.sh`, `bench-stealth.sh`, and `bench-transport.sh` accept `--fast` and `--full`, select different documented Criterion or test cells, and write a `meta` item with `mode`, `selected_cells`, and `cell_count`. `bench-orchestrator.sh` records `selected_suites` and propagates the matching flag to each mode-aware child. `analysis-coverage-summary.sh --fast` is a bounded static function/test inventory with no Cargo coverage run; `--full` runs the cargo-llvm-cov summary when available or the documented Cargo-test proxy. All dry-run paths serialize the selected mode without executing Cargo.
@@ -3774,7 +3778,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `analysis-suite-matrix.sh` - Test/benchmark suite matrix report generation
 
 #### Library (`scripts/tests/lib/`)
-- `lib-common.sh` - Shared helpers (logging, JSON, environment detection, array-safe Cargo execution, and bounded harness-input validation)
+- `lib-common.sh` - Shared helpers (logging, typed JSON serialization and validation, create-new artifact ownership, environment detection, array-safe Cargo execution, and bounded harness-input validation)
 
 #### Tests (`scripts/tests/`)
 **Suites (`scripts/tests/suites/`)**
@@ -3846,6 +3850,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `test-benchmark-fast-mode-contract.sh` - Positive fast/full benchmark and coverage-mode contract with JSON cell metadata, orchestrator propagation, and dry-run path safety
 - `test-harness-argument-safety.sh` - Real negative contract for array-safe suite propagation, redacted Admin E2E dry-run, malformed QPACK sizes, invalid microbench numerics, paths with spaces, and shell-side-effect rejection
 - `test-profiling-evidence-contract.sh` - Negative contract for profiling dry-run safety, unavailable native tools, missing iperf/SendMsgZc metrics, failed-process markers, failed-netem markers, and missing flamegraph tooling
+- `test-shared-artifact-writer-contract.sh` - Shared JSON contract for escaped argv/environment values, parser-backed serialization failure, create-new rerun protection, backup replacement, standalone metadata, and profiling scenario/manifest ownership
 
 **Quick validation profile (macOS / Apple Silicon)**
 - Fast confidence pass:
@@ -3929,6 +3934,9 @@ Local admin-helper credential note:
 - Bench/test scripts write timestamped artifacts here, e.g., `scripts/out/<category>/<script>-<timestamp>/` with JSON + logs.
 - `scripts/out/` is intentionally gitignored and remains the canonical runtime/build/test artifact sink.
   Exported JSON reports originate from the individual suite scripts; `util-run-full-suite.sh` aggregates test runs, and benchmark suites emit their own summaries.
+- A caller-provided output directory is not a rerun cache. Shared directory writers reject non-empty directories, and file writers reject an existing target by default. Use a fresh run directory for normal evidence collection.
+- Explicit replacement is opt-in through `QUICFUSCATE_ARTIFACT_POLICY=replace-with-backup`; the prior target is preserved beside the new file with a unique `.previous-<run-id>` suffix and the active document records the replacement policy.
+- Internal Linux E2E summaries and Python probe/sampler writers also use exclusive creation and parser-safe JSON serialization. Their domain-specific payloads remain separate schemas; externally produced `curl`, `cargo`, `iperf`, and third-party probe outputs remain foreign inputs and are never rewritten by the shared artifact writer.
 
 **JSON schema (suite results)**
 ```json
@@ -3937,6 +3945,13 @@ Local admin-helper credential note:
   "tool": "quicfuscate",
   "suite": "test-crypto",
   "timestamp": "2026-01-25T12:34:56-08:00",
+  "artifact": {
+    "run_id": "<uuid-hex>",
+    "path": "<absolute-or-selected-output-path>",
+    "ownership": "create-new",
+    "replacement": "create-new",
+    "source_revision": "<git-revision>"
+  },
   "system": {
     "os": "Darwin",
     "arch": "arm64",
@@ -3944,7 +3959,7 @@ Local admin-helper credential note:
     "memory_gb": "16.0"
   },
   "items": [
-    {"cmd": "cargo test --release ...", "rc": 0, "duration_sec": 12}
+    {"argv": ["cargo", "test", "--release", "..."], "environment": {}, "rc": 0, "duration_sec": 12}
   ]
 }
 ```
@@ -3957,10 +3972,11 @@ Local admin-helper credential note:
   "tool": "quicfuscate",
   "suite": "micro-aes-block",
   "timestamp": "2026-01-25T12:34:56-08:00",
+  "artifact": { "ownership": "create-new", "replacement": "create-new" },
   "system": { "os": "Darwin", "arch": "arm64", "cpu_cores": 8, "memory_gb": "16.0" },
   "items": [
     {"meta": {"iters": 1000, "sizes": "256B 1KiB 16KiB 1MiB"}},
-    {"cmd": "cargo run --release ...", "rc": 0, "duration_sec": 3}
+    {"argv": ["cargo", "run", "--release", "..."], "environment": {}, "rc": 0, "duration_sec": 3}
   ]
 }
 ```

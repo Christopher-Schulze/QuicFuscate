@@ -582,7 +582,8 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 |   |   |   |-- test-fast-fec.sh
 |   |   |   |-- test-benchmark-fast-mode-contract.sh
 |   |   |   |-- test-harness-argument-safety.sh
-|   |   |   `-- test-profiling-evidence-contract.sh
+|   |   |   |-- test-profiling-evidence-contract.sh
+|   |   |   `-- test-shared-artifact-writer-contract.sh
 |   |   |-- frontend
 |   |   |   |-- desktop
 |   |   |   |   |-- e2e
@@ -1189,3 +1190,10 @@ The audit remains open. These reconciliations document current evidence and owne
 - **Orchestration:** `bench-orchestrator.sh` records the selected suite list and passes `--fast` or `--full` to every mode-aware child. Its dry-run manifest therefore exposes both the parent mode and the exact child argv contract.
 - **Coverage analysis:** `analysis-coverage-summary.sh --fast` performs only the static function/test inventory and records that scope; `--full` retains the cargo-llvm-cov path or its Cargo-test proxy. A dry run records the backend without launching Cargo.
 - **Regression proof:** `scripts/tests/fast/test-benchmark-fast-mode-contract.sh` validates both modes for all affected helpers, exact selected cells, orchestrator propagation, valid JSON, and output paths containing spaces without executing a benchmark.
+
+## Implementation Reconciliation (2026-08-02, shared artifact writer contract)
+
+- **Structured serialization:** `scripts/tests/lib/lib-common.sh` records command `argv` and relevant environment as JSON values, validates every appended object and completed suite document, and provides a parser-backed standalone writer for metadata and domain summary objects.
+- **Ownership:** `json_begin`, standalone object writers, and profiling scenario/manifest writers reject an existing target by default. `QUICFUSCATE_ARTIFACT_POLICY=replace-with-backup` preserves the previous target under a unique `.previous-<run-id>` name before installing the replacement; the active artifact records the policy and source revision.
+- **Coverage:** The contract now includes profile runners, benchmark and microbench metadata/dry-run rows, FEC matrices, analysis reports, probe detection, audit/test/utility result rows, Linux E2E summaries, Python probe/sampler outputs, and Linux send-path decision output. Domain-specific payloads use exclusive creation and parser-safe JSON serialization while remaining separate schemas. Externally produced Cargo, curl, iperf3, and third-party probe JSON remains an external-input boundary rather than shell-assembled evidence.
+- **Regression proof:** `scripts/tests/fast/test-shared-artifact-writer-contract.sh` exercises quotes, backslashes, control characters, Unicode, spaces, structured argv/environment identity, malformed JSON rejection, default rerun immutability, backup replacement, standalone metadata, and profiling scenario/manifest create-new behavior.

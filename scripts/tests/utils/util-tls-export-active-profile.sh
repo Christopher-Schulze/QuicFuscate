@@ -50,7 +50,9 @@ for d in browser_profiles; do [ -d "$d" ] || continue
     base64 $DEC < "$f" > "$export_out"
     sz=$(wc -c < "$export_out" | tr -d ' ')
     sum=$($HASH "$export_out" | awk '{print $1}')
-    printf '{"browser":%q,"os":%q,"file":%q,"size":%s,"sha256":%q,"timestamp":%q}\n' "$B" "$O" "$export_out" "$sz" "$sum" "$(date -u +%FT%TZ)" > "$export_meta"
+    qf_json_write_object_file "$export_meta" \
+      "browser=$B" "os=$O" "file=$export_out" "size=int:$sz" \
+      "sha256=$sum" "timestamp=$(date -u +%FT%TZ)"
     echo "[export] $export_out"
     echo "[meta]   $export_meta"
     break
@@ -62,6 +64,7 @@ if [ "$found" = 0 ]; then
   exit 3
 fi
 size_dec=$(base64 $DEC < "$profile_file" | wc -c | tr -d ' ')
-if [[ $JSON_FIRST_RUN -eq 0 ]]; then echo "," >> "$JSON"; fi; JSON_FIRST_RUN=0
-echo -n '  {"browser":'"\"$B\""',"os":'"\"$O\""',"dir":'"\"$profile_dir\""',"file":'"\"$(basename "$profile_file")\""',"decoded_size":'"$size_dec"',"exported_bin":'"\"$export_out\""',"exported_meta":'"\"$export_meta\""'}' >> "$JSON"
+qf_json_append_object "$JSON" \
+  "browser=$B" "os=$O" "dir=$profile_dir" "file=$(basename "$profile_file")" \
+  "decoded_size=int:$size_dec" "exported_bin=$export_out" "exported_meta=$export_meta"
 json_end "$JSON"

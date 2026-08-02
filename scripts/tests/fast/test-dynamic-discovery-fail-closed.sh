@@ -33,14 +33,12 @@ JSON_FIRST_RUN=1
 append_probe() {
   local name="$1" result="$2" reason="$3" legacy_status="$4"
   local output_file="$5"
-  if [[ "$JSON_FIRST_RUN" -eq 0 ]]; then echo "," >> "$RESULTS_JSON"; fi
-  JSON_FIRST_RUN=0
-  printf '  {"name":"%s","status":"%s","result":"%s","reason":"%s","command":"%s","target":"%s","feature_set":"%s","filter":"%s","test_count":%s,"command_status":%s,"raw_output":"%s"}' \
-    "$(qf_json_escape "$name")" "$(qf_json_escape "$legacy_status")" "$(qf_json_escape "$result")" \
-    "$(qf_json_escape "$reason")" "$(qf_json_escape "$QF_CARGO_TEST_COMMAND")" \
-    "$(qf_json_escape "$QF_CARGO_TEST_TARGET")" "$(qf_json_escape "$QF_CARGO_TEST_FEATURE_SET")" \
-    "$(qf_json_escape "$QF_CARGO_TEST_FILTER")" "$QF_CARGO_TEST_COUNT" "$QF_CARGO_TEST_COMMAND_STATUS" \
-    "$(qf_json_escape "$output_file")" >> "$RESULTS_JSON"
+  qf_json_append_object "$RESULTS_JSON" "name=$name" "status=$legacy_status" \
+    "result=$result" "reason=$reason" "argv=json:${QF_CARGO_TEST_ARGV_JSON:-[]}" \
+    "environment=json:$(qf_json_environment)" \
+    "target=$QF_CARGO_TEST_TARGET" "feature_set=$QF_CARGO_TEST_FEATURE_SET" \
+    "filter=$QF_CARGO_TEST_FILTER" "test_count=int:$QF_CARGO_TEST_COUNT" \
+    "command_status=int:$QF_CARGO_TEST_COMMAND_STATUS" "raw_output=$output_file"
 }
 
 run_discovery_probe() {

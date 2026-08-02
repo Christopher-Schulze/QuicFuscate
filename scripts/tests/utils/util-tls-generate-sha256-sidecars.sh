@@ -35,7 +35,7 @@ gen() {
   echo "[gen] $dir"
   sidecar_dir="$OUTPUT_DIR/sidecars/$dir"
   mkdir -p "$sidecar_dir"
-  find "$dir" -name '*.chlo' -type f | while read -r f; do
+  while read -r f; do
     got=$(base64 $DEC < "$f" | $HASH | awk '{print $1}')
     base=$(basename "$f")
     sidecar_file="$sidecar_dir/${base%.chlo}.sha256"
@@ -43,9 +43,10 @@ gen() {
     # JSON item per generated sidecar
     name=${base%.chlo}; browser=${name%%_*}; os=${name#*_}
     size_dec=$(base64 $DEC < "$f" | wc -c | tr -d ' ')
-    if [[ $JSON_FIRST_RUN -eq 0 ]]; then echo "," >> "$JSON"; fi; JSON_FIRST_RUN=0
-    echo -n '  {"browser":'"\"${browser^}\""',"os":'"\"${os^}\""',"dir":'"\"$dir\""',"file":'"\"$base\""',"decoded_size":'"$size_dec"',"sha256":'"\"$got\""',"sidecar":'"\"$sidecar_file\""'}' >> "$JSON"
-  done
+    qf_json_append_object "$JSON" \
+      "browser=${browser^}" "os=${os^}" "dir=$dir" "file=$base" \
+      "decoded_size=int:$size_dec" "sha256=$got" "sidecar=$sidecar_file"
+  done < <(find "$dir" -name '*.chlo' -type f)
 }
 
 gen browser_profiles

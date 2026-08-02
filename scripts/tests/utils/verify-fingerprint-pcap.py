@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import struct
 import sys
 from collections import Counter
@@ -449,9 +450,20 @@ def verify_integrity(packet: dict[str, Any], label: str) -> None:
 
 
 def write_new_json(path: Path, payload: dict[str, Any]) -> None:
-    if path.exists():
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError as error:
         fail(f"refusing to replace existing output {path}")
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        raise error
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            json.dump(payload, output, indent=2, sort_keys=True)
+            output.write("\n")
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
 
 
 def main() -> int:

@@ -14,6 +14,63 @@ profile_shell_command() {
   printf '%s' "${command_text# }"
 }
 
+profile_command_json() {
+  python3 - "$@" <<'PY'
+import json
+import os
+import sys
+
+environment = {
+    name: os.environ[name]
+    for name in (
+        "RUSTFLAGS",
+        "RUSTFLAGS_EXTRA",
+        "CARGO_FEATURES",
+        "CARGO_TARGET_DIR",
+        "JOBS",
+        "CARGO_BUILD_JOBS",
+        "QUICFUSCATE_ARTIFACT_POLICY",
+    )
+    if name in os.environ
+}
+print(json.dumps({"argv": sys.argv[1:], "environment": environment}, ensure_ascii=False, separators=(",", ":")))
+PY
+}
+
+profile_command_bundle_json() {
+  python3 - "$@" <<'PY'
+import json
+import os
+import sys
+
+environment = {
+    name: os.environ[name]
+    for name in (
+        "RUSTFLAGS",
+        "RUSTFLAGS_EXTRA",
+        "CARGO_FEATURES",
+        "CARGO_TARGET_DIR",
+        "JOBS",
+        "CARGO_BUILD_JOBS",
+        "QUICFUSCATE_ARTIFACT_POLICY",
+    )
+    if name in os.environ
+}
+commands = []
+for item in sys.argv[1:]:
+    label, raw_command = item.split("=", 1)
+    command = json.loads(raw_command)
+    if not isinstance(command, dict) or not isinstance(command.get("argv"), list):
+        raise SystemExit(f"invalid structured command for {label}")
+    commands.append({
+        "label": label,
+        "argv": command["argv"],
+        "environment": environment,
+    })
+print(json.dumps({"commands": commands}, ensure_ascii=False, separators=(",", ":")))
+PY
+}
+
 profile_sha256_file() {
   local path="$1"
   if command -v shasum >/dev/null 2>&1; then
@@ -179,6 +236,7 @@ profile_write_scenario() {
   shift
   python3 - "$output_file" "$@" <<'PY'
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -222,6 +280,11 @@ perf_document = nested(perf, "perf")
 flamegraph_document = nested(flamegraph, "flamegraph")
 metrics_document = nested(metrics, "metrics")
 cleanup_document = nested(cleanup, "cleanup")
+command_document = nested(command, "command")
+if not isinstance(command_document, dict):
+    raise SystemExit("command evidence must be a structured object")
+if "argv" not in command_document and "commands" not in command_document:
+    raise SystemExit("command evidence must contain argv or commands")
 if result == "PASS":
     required = {
         "readiness": readiness_document.get("status") == "PASS",
@@ -241,7 +304,7 @@ document = {
     "title": title,
     "result": result,
     "reason": reason,
-    "command": {"shell": command},
+    "command": command_document,
     "provenance": {
         "source_revision": source_revision,
         "executable_sha256": executable_sha256,
@@ -263,10 +326,15 @@ document = {
 if "N/A" in json.dumps(document, ensure_ascii=False):
     raise SystemExit("profiling evidence cannot contain N/A markers")
 
-Path(output_file).write_text(
-    json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-    encoding="utf-8",
-)
+payload = json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+try:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(output_file, flags, 0o600)
+except FileExistsError as error:
+    raise SystemExit(f"refusing to overwrite existing profiling artifact: {output_file}") from error
+with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+    handle.write(payload)
 PY
 }
 
@@ -275,6 +343,7 @@ profile_write_manifest() {
   shift
   python3 - "$output_file" "$@" <<'PY'
 import json
+import os
 import sys
 from collections import Counter
 from pathlib import Path
@@ -318,10 +387,15 @@ manifest = {
     },
     "scenarios": scenarios,
 }
-Path(output_file).write_text(
-    json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-    encoding="utf-8",
-)
+payload = json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+try:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(output_file, flags, 0o600)
+except FileExistsError as error:
+    raise SystemExit(f"refusing to overwrite existing profiling artifact: {output_file}") from error
+with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+    handle.write(payload)
 PY
 }
 

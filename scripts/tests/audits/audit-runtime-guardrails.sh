@@ -55,11 +55,7 @@ append_item() {
   local name="$1"
   local status="$2"
   local details="$3"
-  if [[ "$JSON_FIRST_RUN" -eq 0 ]]; then
-    echo "," >> "$JSON"
-  fi
-  JSON_FIRST_RUN=0
-  echo -n '  {"name":'"\"$name\""',"status":'"\"$status\""',"details":'"\"$details\""'}' >> "$JSON"
+  qf_json_append_object "$JSON" "name=$name" "status=$status" "details=$details"
 }
 
 echo "==============================================================="
@@ -1228,11 +1224,7 @@ else
   append_item "feature_claims_runtime_aead_comment_truth" "fail" "missing fork-specific AEAD wording in packet/crypto comments"
 fi
 
-if [[ "$JSON_FIRST_RUN" -eq 0 ]]; then
-  echo "," >> "$JSON"
-fi
-JSON_FIRST_RUN=0
-echo -n '  {"critical":'"$critical"',"warnings":'"$warnings"'}' >> "$JSON"
+qf_json_append_object "$JSON" "critical=int:$critical" "warnings=int:$warnings"
 json_end "$JSON"
 
 echo

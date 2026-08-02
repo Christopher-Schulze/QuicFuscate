@@ -45,7 +45,7 @@ LOSSES=(0.0 0.05 0.20 0.40)
 THREADS=(1 4 8)
 if (( FAST )); then MODES=(normal streaming); LOSSES=(0.0 0.20); THREADS=(4); fi
 
-RESULTS_JSON="$OUTPUT_DIR/bench_results.json"; json_begin "$RESULTS_JSON" "bench_fec_simulation"; FIRST=true
+RESULTS_JSON="$OUTPUT_DIR/bench_results.json"; json_begin "$RESULTS_JSON" "bench_fec_simulation"; JSON_FIRST_RUN=1
 TOTAL=0; FAILURES=0
 
 run_cargo_logged() {
@@ -93,9 +93,9 @@ bench_one() {
     reason="one_or_more_benchmark_commands_failed"
     FAILURES=$((FAILURES+1))
   fi
-  if [[ "$FIRST" == "true" ]]; then FIRST=false; else echo "," >> "$RESULTS_JSON"; fi
-  printf '  {"mode":"%s","loss":%s,"threads":%s,"duration_sec":%s,"result":"%s","reason":"%s","command_status":{"auto":%s,"batch":%s}}' \
-    "$(qf_json_escape "$mode")" "$loss" "$th" "$dur" "$result" "$reason" "$auto_status" "$batch_status" >> "$RESULTS_JSON"
+  qf_json_append_object "$RESULTS_JSON" "mode=$mode" "loss=float:$loss" "threads=int:$th" \
+    "duration_sec=int:$dur" "result=$result" "reason=$reason" \
+    "command_status=json:{\"auto\":$auto_status,\"batch\":$batch_status}"
 }
 
 for m in "${MODES[@]}"; do

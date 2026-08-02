@@ -189,7 +189,7 @@ run_harness_scenario() {
     local flamegraph_log="$RUN_DIR/flamegraph-${label}.log"
     local started_at; started_at="$(profile_now_utc)"
     local command=("$HARNESS" udp-throughput --size "$size" --iters "$iters" --batch "$batch")
-    local command_text; command_text="$(profile_shell_command "${command[@]}")"
+    local command_json; command_json="$(profile_command_json "${command[@]}")"
     local result="PASS"; local reason=""
     local readiness_status="NOT_STARTED"; local metric_line=""
     local process_status="null"; local termination_requested=false
@@ -201,7 +201,7 @@ run_harness_scenario() {
 
     printf 'scenario,label,size,batch,iters,result,reason,process_exit,perf_status,flamegraph_status,metrics_status,metric\n' > "$csv"
     if (( DRY_RUN )); then
-        record_scenario "$label" "$title" "SKIP" "dry_run" "$command_text" \
+        record_scenario "$label" "$title" "SKIP" "dry_run" "$command_json" \
             "$(profile_pairs_json status=skipped method=none)" \
             "$(profile_typed_pairs_json pid=null exit_status=null termination_requested=bool:false)" \
             "$(profile_typed_pairs_json status=SKIP exit_status=null data_file=null)" \
@@ -213,7 +213,7 @@ run_harness_scenario() {
         return
     fi
     if [[ "$PREFLIGHT_STATUS" != PASS ]]; then
-        record_scenario "$label" "$title" "UNAVAILABLE" "$PREFLIGHT_REASON" "$command_text" \
+        record_scenario "$label" "$title" "UNAVAILABLE" "$PREFLIGHT_REASON" "$command_json" \
             "$(profile_pairs_json status=not_checked method=preflight)" \
             "$(profile_typed_pairs_json pid=null exit_status=null termination_requested=bool:false)" \
             "$(profile_typed_pairs_json status=UNAVAILABLE exit_status=null data_file=null)" \
@@ -290,7 +290,7 @@ run_harness_scenario() {
     local flamegraph_json; flamegraph_json="$(profile_typed_pairs_json status="$flamegraph_status" exit_status="$flamegraph_exit" output_file="$flamegraph")"
     local metrics_json; metrics_json="$(profile_typed_pairs_json status="$metrics_status" complete=bool:$metrics_complete value="$metric_line")"
     local cleanup_json; cleanup_json="$(profile_typed_pairs_json status="$cleanup_status" perf_data_retained=bool:$perf_data_retained)"
-    record_scenario "$label" "$title" "$result" "$reason" "$command_text" \
+    record_scenario "$label" "$title" "$result" "$reason" "$command_json" \
         "$readiness_json" "$process_json" "$perf_json" "$flamegraph_json" "$metrics_json" "$cleanup_json" \
         "$started_at" "$(profile_now_utc)"
     write_csv_row "$csv" "$label" "$label" "$size" "$batch" "$iters" "$result" "$reason" "$process_status" "$perf_status" "$flamegraph_status" "$metrics_status" "$metric_line"
@@ -305,7 +305,9 @@ run_connection_scenario() {
     local csv="$RUN_DIR/scenario-${label}.csv"; local started_at; started_at="$(profile_now_utc)"
     local server_command=("$BINARY" server --cert "$CERT" --key "$KEY" --listen 127.0.0.1:4433 --fec-mode "$fec_mode" "${mode_args[@]}" -v)
     local client_command=("$BINARY" client --remote 127.0.0.1:4433 --fec-mode "$fec_mode" "${mode_args[@]}" -v)
-    local command_text; command_text="server: $(profile_shell_command "${server_command[@]}"); client: $(profile_shell_command "${client_command[@]}")"
+    local command_json; command_json="$(profile_command_bundle_json \
+        "server=$(profile_command_json "${server_command[@]}")" \
+        "client=$(profile_command_json "${client_command[@]}")")"
     local mode_args_text; mode_args_text="$(profile_shell_command "${mode_args[@]}")"
     local result="PASS"; local reason=""; local readiness_status="NOT_STARTED"; local process_status="null"
     local termination_requested=false; local perf_status="SKIP"; local perf_exit="null"; local flamegraph_status="SKIP"; local flamegraph_exit="null"
@@ -314,7 +316,7 @@ run_connection_scenario() {
 
     printf 'scenario,label,fec_mode,runtime_flags,result,reason,server_exit,client_exit,perf_status,flamegraph_status,metrics_status,rtt,loss\n' > "$csv"
     if (( DRY_RUN )); then
-        record_scenario "$label" "$title" "SKIP" "dry_run" "$command_text" \
+        record_scenario "$label" "$title" "SKIP" "dry_run" "$command_json" \
             "$(profile_pairs_json status=skipped method=process_and_log)" \
             "$(profile_typed_pairs_json server_pid=null client_pid=null server_exit_status=null client_exit_status=null termination_requested=bool:false)" \
             "$(profile_typed_pairs_json status=SKIP exit_status=null data_file=null)" \
@@ -326,7 +328,7 @@ run_connection_scenario() {
         return
     fi
     if [[ "$PREFLIGHT_STATUS" != PASS ]]; then
-        record_scenario "$label" "$title" "UNAVAILABLE" "$PREFLIGHT_REASON" "$command_text" \
+        record_scenario "$label" "$title" "UNAVAILABLE" "$PREFLIGHT_REASON" "$command_json" \
             "$(profile_pairs_json status=not_checked method=preflight)" \
             "$(profile_typed_pairs_json server_pid=null client_pid=null server_exit_status=null client_exit_status=null termination_requested=bool:false)" \
             "$(profile_typed_pairs_json status=UNAVAILABLE exit_status=null data_file=null)" \
@@ -349,7 +351,7 @@ run_connection_scenario() {
         result="FAIL"; reason="server_not_ready"; readiness_status="FAIL"
         if ! profile_stop_pid "$server_pid"; then cleanup_status="FAIL"; fi
         server_exit_status="$PROFILE_LAST_WAIT_STATUS"
-        record_scenario "$label" "$title" "$result" "$reason" "$command_text" \
+        record_scenario "$label" "$title" "$result" "$reason" "$command_json" \
             "$(profile_pairs_json status=FAIL method=server_log_and_process)" \
             "$(profile_typed_pairs_json server_pid="int:$server_pid" client_pid=null server_exit_status="int:$server_exit_status" client_exit_status=null termination_requested=bool:true)" \
             "$(profile_typed_pairs_json status=SKIP exit_status=null data_file=null)" \
@@ -373,7 +375,7 @@ run_connection_scenario() {
         client_exit_status="$PROFILE_LAST_WAIT_STATUS"
         if ! profile_stop_pid "$server_pid"; then cleanup_status="FAIL"; fi
         server_exit_status="$PROFILE_LAST_WAIT_STATUS"
-        record_scenario "$label" "$title" "$result" "$reason" "$command_text" \
+        record_scenario "$label" "$title" "$result" "$reason" "$command_json" \
             "$(profile_pairs_json status=FAIL method=server_and_client_log_and_process)" \
             "$(profile_typed_pairs_json server_pid="int:$server_pid" client_pid="int:$client_pid" server_exit_status="int:$server_exit_status" client_exit_status="int:$client_exit_status" termination_requested=bool:true)" \
             "$(profile_typed_pairs_json status=SKIP exit_status=null data_file=null)" \
@@ -425,7 +427,7 @@ run_connection_scenario() {
     local flamegraph_json; flamegraph_json="$(profile_typed_pairs_json status="$flamegraph_status" exit_status="$flamegraph_exit" output_file="$flamegraph")"
     local metrics_json; metrics_json="$(profile_typed_pairs_json status="$metrics_status" complete=bool:$metrics_complete rtt="$rtt" loss="$loss")"
     local cleanup_json; cleanup_json="$(profile_typed_pairs_json status="$cleanup_status" perf_data_retained=bool:$perf_data_retained)"
-    record_scenario "$label" "$title" "$result" "$reason" "$command_text" "$readiness_json" "$process_json" "$perf_json" "$flamegraph_json" "$metrics_json" "$cleanup_json" "$started_at" "$(profile_now_utc)"
+    record_scenario "$label" "$title" "$result" "$reason" "$command_json" "$readiness_json" "$process_json" "$perf_json" "$flamegraph_json" "$metrics_json" "$cleanup_json" "$started_at" "$(profile_now_utc)"
     write_csv_row "$csv" "$label" "$label" "$fec_mode" "$mode_args_text" "$result" "$reason" "$server_exit_status" "$client_exit_status" "$perf_status" "$flamegraph_status" "$metrics_status" "$rtt" "$loss"
 }
 

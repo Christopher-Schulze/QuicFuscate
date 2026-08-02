@@ -36,10 +36,9 @@ RESULTS_JSON="$ARTIFACTS_DIR/${BASE_NAME}.json"; JSON="$RESULTS_JSON"; json_begi
 
 print_system_banner
 info "AES-GCM microbench sizes: ${SIZES[*]} | iters=$ITERS"
-if [[ -f "$RESULTS_JSON" ]]; then
-  echo "  {\"meta\":{\"iters\":$ITERS,\"sizes\":\"${SIZES[*]}\"}}" >> "$RESULTS_JSON"
-  JSON_FIRST_RUN=0
-fi
+qf_json_append_object "$RESULTS_JSON" "cell=meta" "result=PASS" "reason=" \
+  "argv=json:[]" "environment=json:$(qf_json_environment)" "command_status=int:0" \
+  "meta=json:{\"iters\":$ITERS,\"sizes\":\"$(qf_json_escape "${SIZES[*]}")\"}"
 
 echo "ts,$(date -Iseconds)" | tee "$OUT_CSV" >/dev/null
 

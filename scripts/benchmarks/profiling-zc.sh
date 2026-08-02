@@ -218,7 +218,7 @@ run_zc_scenario() {
     local flamegraph_log="$RUN_DIR/flamegraph-${label}.log"
     local started_at; started_at="$(profile_now_utc)"
     local quic_port=4433; local server_metrics_port=19898; local client_metrics_port=19899
-    local command_text=""
+    local command_json=""
     local result="PASS"; local reason=""
     local readiness_status="SKIP"; local readiness_reason=""
     local metrics_status="SKIP"; local metrics_complete=false; local metrics_json="{}"
@@ -247,10 +247,12 @@ run_zc_scenario() {
     client_command=(env "QUICFUSCATE_IO_URING_ZC=1" "QUICFUSCATE_METRICS_ADDR=127.0.0.1:${client_metrics_port}" \
         "$BINARY" --telemetry client --remote "127.0.0.1:${quic_port}" --url https://127.0.0.1/ \
         --ca-file "$CERT" --verify-peer --disable-doh -v)
-    command_text="server: $(profile_shell_command "${server_command[@]}"); client: $(profile_shell_command "${client_command[@]}")"
+    command_json="$(profile_command_bundle_json \
+        "server=$(profile_command_json "${server_command[@]}")" \
+        "client=$(profile_command_json "${client_command[@]}")")"
 
     if (( DRY_RUN )); then
-        record_scenario "$label" "$title" SKIP dry_run "$command_text" \
+        record_scenario "$label" "$title" SKIP dry_run "$command_json" \
             "$(profile_typed_pairs_json status=SKIP method=server_log_and_client_log)" \
             "$(profile_typed_pairs_json server_pid=null client_pid=null server_exit_status=null client_exit_status=null termination_requested=bool:false)" \
             "$(profile_typed_pairs_json status=SKIP exit_status=null data_file=null retained=bool:false)" \
@@ -262,7 +264,7 @@ run_zc_scenario() {
         return
     fi
     if [[ "$PREFLIGHT_STATUS" != PASS ]]; then
-        record_scenario "$label" "$title" UNAVAILABLE "$PREFLIGHT_REASON" "$command_text" \
+        record_scenario "$label" "$title" UNAVAILABLE "$PREFLIGHT_REASON" "$command_json" \
             "$(profile_typed_pairs_json status=UNAVAILABLE method=preflight)" \
             "$(profile_typed_pairs_json server_pid=null client_pid=null server_exit_status=null client_exit_status=null termination_requested=bool:false)" \
             "$(profile_typed_pairs_json status=UNAVAILABLE exit_status=null data_file=null retained=bool:false)" \
@@ -274,7 +276,7 @@ run_zc_scenario() {
         return
     fi
     if [[ "$result" != PASS ]]; then
-        record_scenario "$label" "$title" FAIL "$reason" "$command_text" \
+        record_scenario "$label" "$title" FAIL "$reason" "$command_json" \
             "$(profile_typed_pairs_json status=FAIL method=port_allocation)" \
             "$(profile_typed_pairs_json server_pid=null client_pid=null server_exit_status=null client_exit_status=null termination_requested=bool:false)" \
             "$(profile_typed_pairs_json status=SKIP exit_status=null data_file=null retained=bool:false)" \
@@ -380,7 +382,7 @@ run_zc_scenario() {
         flamegraph_status="UNAVAILABLE"
     fi
 
-    record_scenario "$label" "$title" "$result" "${reason:-completed}" "$command_text" \
+    record_scenario "$label" "$title" "$result" "${reason:-completed}" "$command_json" \
         "$(profile_typed_pairs_json status="$readiness_status" reason="$readiness_reason" server_log="$server_log" client_log="$client_log" server_metrics="http://127.0.0.1:${server_metrics_port}/telemetry" client_metrics="http://127.0.0.1:${client_metrics_port}/telemetry")" \
         "$(profile_typed_pairs_json server_pid="${server_pid:-null}" client_pid="${client_pid:-null}" server_exit_status="${server_exit_status:-null}" client_exit_status="${client_exit_status:-null}" termination_requested="bool:$termination_requested")" \
         "$(profile_typed_pairs_json status="$perf_status" exit_status="$perf_exit_status" data_file="$perf_data" retained="bool:$perf_data_retained")" \

@@ -43,17 +43,10 @@ append_result() {
   local log_name="$7"
   local reason="${8:-}"
 
-  if [[ "$JSON_FIRST_RUN" -eq 0 ]]; then
-    echo "," >> "$JSON"
-  fi
-  JSON_FIRST_RUN=0
-  printf '  {"name":"%s","status":"%s","requested_filter":"%s","feature_set":"%s","executed_test_count":%s,"command_status":%s,"log":"%s"' \
-    "$name" "$status" "$requested_filter" "$feature_set" \
-    "$executed_test_count" "$command_status" "$log_name" >> "$JSON"
-  if [[ -n "$reason" ]]; then
-    printf ',"reason":"%s"' "$reason" >> "$JSON"
-  fi
-  printf '}' >> "$JSON"
+  qf_json_append_object "$JSON" "name=$name" "status=$status" \
+    "requested_filter=$requested_filter" "feature_set=$feature_set" \
+    "executed_test_count=int:$executed_test_count" "command_status=int:$command_status" \
+    "log=$log_name" "reason=$reason"
 }
 
 result_status() {

@@ -40,8 +40,7 @@ run_test() {
     error "${name} failed. See ${ARTIFACT_DIR}/${name}.log"
     exit 1
   fi
-  if [[ $JSON_FIRST_RUN -eq 0 ]]; then echo "," >> "$JSON"; fi; JSON_FIRST_RUN=0
-  echo -n '  {"test":'"\"$name\""',"log":'"\"${ARTIFACT_DIR}/${name}.log\""'}' >> "$JSON"
+  qf_json_append_object "$JSON" "test=$name" "log=${ARTIFACT_DIR}/${name}.log"
 }
 
 run_test simd-selfcheck run_cargo test --features simd-selfcheck,rust-tests --test rt-simd-selfcheck

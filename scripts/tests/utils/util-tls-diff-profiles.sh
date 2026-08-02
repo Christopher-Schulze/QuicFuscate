@@ -59,8 +59,9 @@ shaA=$(base64 $DEC < "$FA" | $HASH | awk '{print $1}')
 shaB=$(base64 $DEC < "$FB" | $HASH | awk '{print $1}')
 equal=0; [ "$shaA" = "$shaB" ] && equal=1
 
-if [[ $JSON_FIRST_RUN -eq 0 ]]; then echo "," >> "$JSON"; fi; JSON_FIRST_RUN=0
-echo -n '  {"A":'"\"$A\""',"B":'"\"$B\""',"fileA":'"\"$FA\""',"fileB":'"\"$FB\""',"shaA":'"\"$shaA\""',"shaB":'"\"$shaB\""',"equal":'"$equal"'}' >> "$JSON"
+qf_json_append_object "$JSON" \
+  "A=$A" "B=$B" "fileA=$FA" "fileB=$FB" \
+  "shaA=$shaA" "shaB=$shaB" "equal=int:$equal"
 
 tmpA="$OUTPUT_DIR/${BASE_NAME}.tmpA.bin"
 tmpB="$OUTPUT_DIR/${BASE_NAME}.tmpB.bin"

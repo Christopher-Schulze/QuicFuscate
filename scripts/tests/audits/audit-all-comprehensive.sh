@@ -302,8 +302,11 @@ if [ "$TEST_COVERAGE" -lt 30 ]; then
 else
     log_info "Test coverage acceptable: $TEST_COVERAGE% of files"
 fi
-if [[ $JSON_FIRST_RUN -eq 0 ]]; then echo "," >> "$JSON"; fi; JSON_FIRST_RUN=0
-echo -n '  {"unsafe_in_prod":'"$UNSAFE_IN_PROD"',"unwrap_calls":'"$UNWRAP_COUNT"',"panic_macros":'"$PANIC_COUNT"',"secrets":'"$SECRET_COUNT"',"leak_patterns":'"$LEAK_COUNT"',"simd_features":'"$SIMD_FEATURES"',"test_coverage_percent":'"$TEST_COVERAGE"'}' >> "$JSON"
+qf_json_append_object "$JSON" \
+  "unsafe_in_prod=int:$UNSAFE_IN_PROD" "unwrap_calls=int:$UNWRAP_COUNT" \
+  "panic_macros=int:$PANIC_COUNT" "secrets=int:$SECRET_COUNT" \
+  "leak_patterns=int:$LEAK_COUNT" "simd_features=int:$SIMD_FEATURES" \
+  "test_coverage_percent=int:$TEST_COVERAGE"
 
 echo -e "\n> Running runtime guardrails..."
 if "$SCRIPT_DIR/audit-runtime-guardrails.sh" --output-dir "$OUTPUT_DIR/runtime-guardrails"; then

@@ -50,7 +50,7 @@ if (( FAST )); then
   ACK_MAX=(8); JITTER_US=(1000); EXPLORE=(0.02); PAD_MAX=(128)
 fi
 
-RESULTS_JSON="$OUTPUT_DIR/results.json"; json_begin "$RESULTS_JSON" "stealth_brain"; FIRST=true
+RESULTS_JSON="$OUTPUT_DIR/results.json"; json_begin "$RESULTS_JSON" "stealth_brain"; JSON_FIRST_RUN=1
 TOTAL=0; PASS=0; FAIL=0
 
 run_cargo_logged() {
@@ -138,10 +138,12 @@ run_one() {
   local result="PASS"; local reason=""
   if (( ! ok )); then result="FAIL"; reason="required_cargo_test_failed"; fi
 
-  if [[ "$FIRST" == "true" ]]; then FIRST=false; else echo "," >> "$RESULTS_JSON"; fi
-  printf '  {"ack_max":%s,"jitter_us":%s,"explore":%s,"pad_max":%s,"duration_sec":%s,"ok":%s,"result":"%s","reason":"%s","command_status":{"stealth":%s,"brain":%s,"brain_probe":%s},"brain_probe_result":"%s","brain_probe_reason":"%s","ack_thr_min":%s,"ack_thr_max":%s,"ack_thr_avg":%s}' \
-    "$amax" "$jut" "$exp" "$pmax" "$dur" "$ok" "$result" "$reason" "$stealth_status" "$brain_status" "$probe_status" \
-    "$probe_result" "$probe_reason" "$ack_stat_min" "$ack_stat_max" "$ack_stat_avg" >> "$RESULTS_JSON"
+  qf_json_append_object "$RESULTS_JSON" "ack_max=int:$amax" "jitter_us=int:$jut" \
+    "explore=int:$exp" "pad_max=int:$pmax" "duration_sec=int:$dur" "ok=int:$ok" \
+    "result=$result" "reason=$reason" \
+    "command_status=json:{\"stealth\":$stealth_status,\"brain\":$brain_status,\"brain_probe\":$probe_status}" \
+    "brain_probe_result=$probe_result" "brain_probe_reason=$probe_reason" \
+    "ack_thr_min=int:$ack_stat_min" "ack_thr_max=int:$ack_stat_max" "ack_thr_avg=int:$ack_stat_avg"
 }
 
 for a in "${ACK_MAX[@]}"; do

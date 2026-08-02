@@ -12,6 +12,8 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/lib-common.sh"
 BINARY="${QF_E2E_BINARY:-$PROJECT_ROOT/target/release/quicfuscate}"
 CERT="${QF_E2E_CERT:-}"
 KEY="${QF_E2E_KEY:-}"
@@ -387,10 +389,13 @@ capture_latency() {
   local raw="$ARTIFACT_DIR/latency-$label.txt"
   ip netns exec "${CLIENT_NS[0]}" ping -n -c 40 -i 0.1 -W 1 \
     -I "${CLIENT_TUN_IP[0]}" 10.0.1.1 >"$raw" || true
-  python3 -c \
-    'import json,pathlib,re,statistics,sys; values=[float(value) for value in re.findall(r"time[=<]([0-9.]+) ms",pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))]; minimum=int(sys.argv[3]); assert minimum<=len(values)<=40,len(values); ordered=sorted(values); percentile=lambda fraction: ordered[max(0,min(len(ordered)-1,int(len(ordered)*fraction+0.999999)-1))]; result={"samples":len(values),"packet_loss_percent":(40-len(values))/40*100.0,"p50_ms":statistics.median(values),"p95_ms":percentile(0.95),"maximum_ms":max(values)}; pathlib.Path(sys.argv[2]).write_text(json.dumps(result,sort_keys=True)+"\n",encoding="utf-8")' \
+  local latency_document
+  latency_document="$(python3 -c \
+    'import json,pathlib,re,statistics,sys; values=[float(value) for value in re.findall(r"time[=<]([0-9.]+) ms",pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))]; minimum=int(sys.argv[3]); assert minimum<=len(values)<=40,len(values); ordered=sorted(values); percentile=lambda fraction: ordered[max(0,min(len(ordered)-1,int(len(ordered)*fraction+0.999999)-1))]; result={"samples":len(values),"packet_loss_percent":(40-len(values))/40*100.0,"p50_ms":statistics.median(values),"p95_ms":percentile(0.95),"maximum_ms":max(values)}; print(json.dumps(result,sort_keys=True))' \
     "$raw" "$output" "$([[ "$label" == *-loss ]] && printf 30 || printf 40)" \
-    || fail "could not parse $label latency samples"
+    )" || fail "could not parse $label latency samples"
+  qf_json_write_raw_file "$output" "$latency_document" \
+    || fail "could not write $label latency artifact"
 }
 
 validate_performance_phase() {
@@ -401,14 +406,16 @@ validate_performance_phase() {
   if [[ "$phase" == "loss" ]]; then
     latency_limit="$MAX_IMPAIRED_P95_LATENCY_MS"
   fi
-  python3 -c \
-    'import json,pathlib,sys; performance=json.load(open(sys.argv[1],encoding="utf-8")); latency=json.load(open(sys.argv[2],encoding="utf-8")); cpu_limit=float(sys.argv[4]); rss_limit=int(sys.argv[5]); fallback_limit=int(sys.argv[6]); latency_limit=float(sys.argv[7]); assert performance["cpu_one_core_percent"]<=cpu_limit,performance; assert performance["peak_process_rss_bytes"]<=rss_limit,performance; assert performance["allocation_deltas"]["grow"]+performance["allocation_deltas"]["ephemeral"]<=fallback_limit,performance; assert performance["peak_pending_packets"]<=256,performance; assert performance["peak_pending_bytes"]<=393216,performance; assert performance["rate_limited_delta"]==0,performance; assert latency["p95_ms"]<=latency_limit,latency; summary={"fec_mode":sys.argv[3],"phase":sys.argv[8],"limits":{"cpu_one_core_percent":cpu_limit,"peak_process_rss_bytes":rss_limit,"fallback_allocations":fallback_limit,"p95_latency_ms":latency_limit},"performance":performance,"latency":latency}; pathlib.Path(sys.argv[9]).write_text(json.dumps(summary,sort_keys=True)+"\n",encoding="utf-8")' \
+  local performance_document
+  performance_document="$(python3 -c \
+    'import json,sys; performance=json.load(open(sys.argv[1],encoding="utf-8")); latency=json.load(open(sys.argv[2],encoding="utf-8")); cpu_limit=float(sys.argv[4]); rss_limit=int(sys.argv[5]); fallback_limit=int(sys.argv[6]); latency_limit=float(sys.argv[7]); assert performance["cpu_one_core_percent"]<=cpu_limit,performance; assert performance["peak_process_rss_bytes"]<=rss_limit,performance; assert performance["allocation_deltas"]["grow"]+performance["allocation_deltas"]["ephemeral"]<=fallback_limit,performance; assert performance["peak_pending_packets"]<=256,performance; assert performance["peak_pending_bytes"]<=393216,performance; assert performance["rate_limited_delta"]==0,performance; assert latency["p95_ms"]<=latency_limit,latency; summary={"fec_mode":sys.argv[3],"phase":sys.argv[8],"limits":{"cpu_one_core_percent":cpu_limit,"peak_process_rss_bytes":rss_limit,"fallback_allocations":fallback_limit,"p95_latency_ms":latency_limit},"performance":performance,"latency":latency}; print(json.dumps(summary,sort_keys=True))' \
     "$ARTIFACT_DIR/performance-$label.json" \
     "$ARTIFACT_DIR/latency-$label.json" \
     "$fec_mode" "$MAX_CPU_ONE_CORE_PERCENT" "$MAX_PEAK_RSS_BYTES" \
-    "$MAX_FALLBACK_ALLOCATIONS" "$latency_limit" "$phase" \
-    "$ARTIFACT_DIR/performance-summary-$label.json" \
+    "$MAX_FALLBACK_ALLOCATIONS" "$latency_limit" "$phase")" \
     || fail "$label exceeded its runtime performance contract"
+  qf_json_write_raw_file "$ARTIFACT_DIR/performance-summary-$label.json" "$performance_document" \
+    || fail "could not write $label performance summary"
 }
 
 set_shared_bottleneck() {
@@ -469,8 +476,9 @@ result = {
     "missing_packets": maximum_sequence + 1 - packets,
     "packets": packets,
 }
-with open(output, "w", encoding="utf-8") as handle:
+with open(output, "x", encoding="utf-8") as handle:
     json.dump(result, handle, sort_keys=True)
+    handle.write("\n")
 ' "$port" "$active_seconds" "$measured_seconds" "$output" &
   UDP_RECEIVER_PID="$!"
 }
@@ -511,8 +519,9 @@ while time.monotonic() < deadline:
     if delay > 0:
         time.sleep(delay)
 result = {"bytes": sequence * payload_size, "packets": sequence}
-with open(output, "w", encoding="utf-8") as handle:
+with open(output, "x", encoding="utf-8") as handle:
     json.dump(result, handle, sort_keys=True)
+    handle.write("\n")
 ' "$source_ip" "$port" "$rate_bps" "$duration" "$output"
 }
 
@@ -583,21 +592,25 @@ run_loss_comparison() {
   grep -q "loss ${LOSS_RATE_PERCENT}%" "$ARTIFACT_DIR/qdisc-$fec_mode-loss.txt" \
     || fail "$fec_mode loss run did not activate ${LOSS_RATE_PERCENT}% netem loss"
 
-  python3 -c \
-    'import json,pathlib,statistics,sys; summary_path=pathlib.Path(sys.argv[1]); fec_mode=sys.argv[2]; minimum=float(sys.argv[3]); trial_count=int(sys.argv[4]); results=[json.load(open(path,encoding="utf-8")) for path in sys.argv[5:]]; assert len(results)==2*trial_count, len(results); values=[result["bits_per_second"] for result in results]; groups=[values[:trial_count],values[trial_count:]]; assert all(value>0 for value in values), values; assert all(result["duplicates"]==0 for result in results), results; baseline=statistics.median(groups[0]); loss=statistics.median(groups[1]); ratio=loss/baseline; assert ratio>minimum, ratio; summary={"fec_mode":fec_mode,"trial_count":trial_count,"baseline_bits_per_second":baseline,"loss_bits_per_second":loss,"retained_ratio":ratio,"minimum_retained_ratio":minimum}; summary_path.write_text(json.dumps(summary,sort_keys=True)+"\n",encoding="utf-8"); print(f"CUBIC FEC {fec_mode}: baseline={baseline/1e6:.3f} Mbit/s, loss={loss/1e6:.3f} Mbit/s, retained={ratio*100:.2f}%")' \
-    "$ARTIFACT_DIR/loss-summary-$fec_mode.json" \
+  local loss_document
+  loss_document="$(python3 -c \
+    'import json,statistics,sys; fec_mode=sys.argv[1]; minimum=float(sys.argv[2]); trial_count=int(sys.argv[3]); results=[json.load(open(path,encoding="utf-8")) for path in sys.argv[4:]]; assert len(results)==2*trial_count, len(results); values=[result["bits_per_second"] for result in results]; groups=[values[:trial_count],values[trial_count:]]; assert all(value>0 for value in values), values; assert all(result["duplicates"]==0 for result in results), results; baseline=statistics.median(groups[0]); loss=statistics.median(groups[1]); ratio=loss/baseline; assert ratio>minimum, ratio; summary={"fec_mode":fec_mode,"trial_count":trial_count,"baseline_bits_per_second":baseline,"loss_bits_per_second":loss,"retained_ratio":ratio,"minimum_retained_ratio":minimum}; print(json.dumps(summary,sort_keys=True))' \
     "$fec_mode" "$MIN_RETAINED_RATIO" "$LOSS_TRIALS" \
-    "${receiver_files[@]}" || \
+    "${receiver_files[@]}")" || \
     fail "CUBIC FEC $fec_mode random-loss throughput did not retain more than $MIN_RETAINED_PERCENT% of baseline"
+  qf_json_write_raw_file "$ARTIFACT_DIR/loss-summary-$fec_mode.json" "$loss_document" \
+    || fail "could not write CUBIC FEC $fec_mode loss summary"
 }
 
 compare_fec_modes() {
-  python3 -c \
-    'import json,pathlib,sys; auto=json.load(open(sys.argv[2],encoding="utf-8")); off=json.load(open(sys.argv[3],encoding="utf-8")); assert auto["fec_mode"]=="auto", auto; assert off["fec_mode"]=="off", off; comparison={"auto":auto,"off":off,"auto_minus_off_loss_bits_per_second":auto["loss_bits_per_second"]-off["loss_bits_per_second"],"auto_minus_off_retained_percentage_points":(auto["retained_ratio"]-off["retained_ratio"])*100.0}; pathlib.Path(sys.argv[1]).write_text(json.dumps(comparison,sort_keys=True)+"\n",encoding="utf-8"); print("CUBIC FEC comparison: auto loss={auto_loss:.3f} Mbit/s, retained={auto_retained:.2f}%; off loss={off_loss:.3f} Mbit/s, retained={off_retained:.2f}%; auto-minus-off loss={delta_loss:.3f} Mbit/s, retained={delta_retained:.2f} pp".format(auto_loss=auto["loss_bits_per_second"]/1e6,auto_retained=auto["retained_ratio"]*100.0,off_loss=off["loss_bits_per_second"]/1e6,off_retained=off["retained_ratio"]*100.0,delta_loss=comparison["auto_minus_off_loss_bits_per_second"]/1e6,delta_retained=comparison["auto_minus_off_retained_percentage_points"]))' \
-    "$ARTIFACT_DIR/fec-comparison-summary.json" \
+  local comparison_document
+  comparison_document="$(python3 -c \
+    'import json,sys; auto=json.load(open(sys.argv[1],encoding="utf-8")); off=json.load(open(sys.argv[2],encoding="utf-8")); assert auto["fec_mode"]=="auto", auto; assert off["fec_mode"]=="off", off; comparison={"auto":auto,"off":off,"auto_minus_off_loss_bits_per_second":auto["loss_bits_per_second"]-off["loss_bits_per_second"],"auto_minus_off_retained_percentage_points":(auto["retained_ratio"]-off["retained_ratio"])*100.0}; print(json.dumps(comparison,sort_keys=True))' \
     "$ARTIFACT_DIR/loss-summary-auto.json" \
-    "$ARTIFACT_DIR/loss-summary-off.json" || \
+    "$ARTIFACT_DIR/loss-summary-off.json")" || \
     fail 'CUBIC FEC control comparison could not be recorded'
+  qf_json_write_raw_file "$ARTIFACT_DIR/fec-comparison-summary.json" "$comparison_document" \
+    || fail 'CUBIC FEC control comparison could not be recorded'
 }
 
 main() {

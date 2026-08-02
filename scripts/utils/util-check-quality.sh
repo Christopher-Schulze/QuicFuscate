@@ -78,8 +78,7 @@ if command -v shellcheck >/dev/null 2>&1; then
   done
   SC_ISSUES=$(grep -E "SC[0-9]+:" "$SC_OUT" | wc -l | tr -d ' ')
   info "ShellCheck issues: $SC_ISSUES (see $SC_OUT)"
-  if [[ $JSON_FIRST_RUN -eq 0 ]]; then echo "," >> "$JSON"; fi; JSON_FIRST_RUN=0
-  echo -n '  {"shellcheck_issues":'"$SC_ISSUES"'}' >> "$JSON"
+  qf_json_append_object "$JSON" "shellcheck_issues=int:$SC_ISSUES"
 else
   warn "shellcheck not installed; skipping"
 fi

@@ -33,14 +33,15 @@ CURRENT_FILE="$OUTPUT_DIR/performance_current.json"
 SUMMARY_JSON="$OUTPUT_DIR/performance_results.json"
 mkdir -p "$OUTPUT_DIR"
 json_begin "$SUMMARY_JSON" "performance_regression"
-FIRST=1
+JSON_FIRST_RUN=1
 FAIL=0
 BENCH_AVAILABLE=1
 TEST_LIST_FILE="$OUTPUT_DIR/testlist.txt"
 BASE_FEATURES="$(qf_cargo_test_feature_set "${CARGO_FEATURES:-}")"
 DISCOVERY_DONE=0; DISCOVERY_STATUS=""; DISCOVERY_REASON=""; DISCOVERY_COUNT=0
-DISCOVERY_COMMAND_STATUS=""; DISCOVERY_COMMAND=""; DISCOVERY_TARGET=""; DISCOVERY_FEATURES=""; DISCOVERY_RAW_OUTPUT="$TEST_LIST_FILE"
+DISCOVERY_COMMAND_STATUS=""; DISCOVERY_COMMAND=""; DISCOVERY_ARGV_JSON="[]"; DISCOVERY_TARGET=""; DISCOVERY_FEATURES=""; DISCOVERY_RAW_OUTPUT="$TEST_LIST_FILE"
 ACTIVE_DISCOVERY_STATUS=""; ACTIVE_DISCOVERY_REASON=""
+COMMAND_ARGV_JSON="[]"; COMMAND_ENVIRONMENT_JSON="{}"
 
 # Performance thresholds (% degradation allowed)
 THROUGHPUT_THRESHOLD=5
@@ -152,17 +153,16 @@ PY
 
 append_performance_record() {
   local name="$1" metric="$2" value="$3" legacy_status="$4" result="$5" reason="$6"
-  local command="$7" target="$8" feature_set="$9" discovered_count="${10:-null}"
+  local target="$8" feature_set="$9" discovered_count="${10:-null}"
   local executed_count="${11:-null}" command_status="${12:-null}"
   local discovery_status="${13:-not_applicable}" raw_output="${14:-}"
-  if [[ "$FIRST" -eq 0 ]]; then echo "," >> "$SUMMARY_JSON"; fi
-  FIRST=0
-  printf '  {"name":"%s","metric":"%s","value":"%s","status":"%s","result":"%s","reason":"%s","command":"%s","target":"%s","feature_set":"%s","discovered_test_count":%s,"executed_test_count":%s,"command_status":%s,"discovery_status":"%s","raw_output":"%s"}' \
-    "$(qf_json_escape "$name")" "$(qf_json_escape "$metric")" "$(qf_json_escape "$value")" \
-    "$(qf_json_escape "$legacy_status")" "$(qf_json_escape "$result")" "$(qf_json_escape "$reason")" \
-    "$(qf_json_escape "$command")" "$(qf_json_escape "$target")" "$(qf_json_escape "$feature_set")" \
-    "$discovered_count" "$executed_count" "$command_status" "$(qf_json_escape "$discovery_status")" \
-    "$(qf_json_escape "$raw_output")" >> "$SUMMARY_JSON"
+  qf_json_append_object "$SUMMARY_JSON" "name=$name" "metric=$metric" "value=$value" \
+    "status=$legacy_status" "result=$result" "reason=$reason" \
+    "argv=json:${COMMAND_ARGV_JSON:-[]}" "environment=json:${COMMAND_ENVIRONMENT_JSON:-{}}" \
+    "target=$target" "feature_set=$feature_set" \
+    "discovered_test_count=json:$discovered_count" "executed_test_count=json:$executed_count" \
+    "command_status=json:$command_status" "discovery_status=$discovery_status" \
+    "raw_output=$raw_output" "duration_sec=null"
 }
 
 ensure_test_list() {
@@ -172,6 +172,7 @@ ensure_test_list() {
     QF_CARGO_TEST_STATUS="$DISCOVERY_STATUS"; QF_CARGO_TEST_REASON="$DISCOVERY_REASON"
     QF_CARGO_TEST_COUNT="$DISCOVERY_COUNT"; QF_CARGO_TEST_COMMAND_STATUS="$DISCOVERY_COMMAND_STATUS"
     QF_CARGO_TEST_COMMAND="$DISCOVERY_COMMAND"; QF_CARGO_TEST_TARGET="$DISCOVERY_TARGET"
+    QF_CARGO_TEST_ARGV_JSON="$DISCOVERY_ARGV_JSON"
     QF_CARGO_TEST_FEATURE_SET="$DISCOVERY_FEATURES"; QF_CARGO_TEST_FILTER="<all>"
     QF_CARGO_TEST_RAW_OUTPUT="$DISCOVERY_RAW_OUTPUT"
     return 0
@@ -188,11 +189,13 @@ ensure_test_list() {
   DISCOVERY_COUNT="$QF_CARGO_TEST_COUNT"
   DISCOVERY_COMMAND_STATUS="$QF_CARGO_TEST_COMMAND_STATUS"
   DISCOVERY_COMMAND="$QF_CARGO_TEST_COMMAND"
+  DISCOVERY_ARGV_JSON="$QF_CARGO_TEST_ARGV_JSON"
   DISCOVERY_TARGET="$QF_CARGO_TEST_TARGET"
   DISCOVERY_FEATURES="$QF_CARGO_TEST_FEATURE_SET"
   DISCOVERY_RAW_OUTPUT="$QF_CARGO_TEST_RAW_OUTPUT"
   ACTIVE_DISCOVERY_STATUS="$DISCOVERY_STATUS"
   ACTIVE_DISCOVERY_REASON="$DISCOVERY_REASON"
+  COMMAND_ARGV_JSON="$QF_CARGO_TEST_ARGV_JSON"; COMMAND_ENVIRONMENT_JSON="$(qf_json_environment)"
   append_performance_record "discovery:lib" "test_discovery" "$DISCOVERY_COUNT" "$legacy_status" "$QF_CARGO_TEST_STATUS" "$QF_CARGO_TEST_REASON" \
     "$QF_CARGO_TEST_COMMAND" "$QF_CARGO_TEST_TARGET" "$QF_CARGO_TEST_FEATURE_SET" "$QF_CARGO_TEST_COUNT" null \
     "$QF_CARGO_TEST_COMMAND_STATUS" "$QF_CARGO_TEST_STATUS" "$QF_CARGO_TEST_RAW_OUTPUT"
@@ -219,6 +222,7 @@ run_optional_cargo_test() {
       local legacy_status="fail"
       FAIL=1
     fi
+    COMMAND_ARGV_JSON="$QF_CARGO_TEST_ARGV_JSON"; COMMAND_ENVIRONMENT_JSON="$(qf_json_environment)"
     append_performance_record "$label" "test_execution" "$QF_CARGO_TEST_COUNT" "$legacy_status" "$QF_CARGO_TEST_STATUS" \
       "$QF_CARGO_TEST_REASON" "$QF_CARGO_TEST_COMMAND" "$QF_CARGO_TEST_TARGET" "$QF_CARGO_TEST_FEATURE_SET" \
       null "$QF_CARGO_TEST_COUNT" "$QF_CARGO_TEST_COMMAND_STATUS" "$ACTIVE_DISCOVERY_STATUS" "$QF_CARGO_TEST_RAW_OUTPUT"
@@ -226,10 +230,12 @@ run_optional_cargo_test() {
   fi
   local pattern_status=$?
   if [[ "$pattern_status" -eq 2 ]]; then
+    COMMAND_ARGV_JSON="$QF_CARGO_TEST_ARGV_JSON"; COMMAND_ENVIRONMENT_JSON="$(qf_json_environment)"
     append_performance_record "$label" "test_execution" "0" "fail" "$ACTIVE_DISCOVERY_STATUS" "$ACTIVE_DISCOVERY_REASON" \
       "$QF_CARGO_TEST_COMMAND" "$QF_CARGO_TEST_TARGET" "$QF_CARGO_TEST_FEATURE_SET" "$QF_CARGO_TEST_COUNT" null \
       "$QF_CARGO_TEST_COMMAND_STATUS" "$ACTIVE_DISCOVERY_STATUS" "$QF_CARGO_TEST_RAW_OUTPUT"
   else
+    COMMAND_ARGV_JSON="$QF_CARGO_TEST_ARGV_JSON"; COMMAND_ENVIRONMENT_JSON="$(qf_json_environment)"
     append_performance_record "$label" "test_execution" "0" "skipped" "SKIP" \
       "pattern_not_found_after_target_scoped_discovery" "$QF_CARGO_TEST_COMMAND" "$QF_CARGO_TEST_TARGET" \
       "$QF_CARGO_TEST_FEATURE_SET" "$QF_CARGO_TEST_COUNT" null "$QF_CARGO_TEST_COMMAND_STATUS" \
@@ -247,8 +253,10 @@ measure_performance() {
     
     if [[ "$BENCH_AVAILABLE" -ne 1 ]]; then
         echo "  Skipped: no bench harness available"
+        COMMAND_ARGV_JSON="$(qf_json_array cargo bench --features benches -- "$test_name")"
+        COMMAND_ENVIRONMENT_JSON="$(qf_json_environment_with_assignments "RUSTFLAGS=$BENCH_RUSTFLAGS")"
         append_performance_record "$test_name" "$metric" "0" "skipped" "SKIP" \
-          "benchmark_harness_unavailable" "cargo bench --features benches -- $test_name" "bench" "benches" \
+          "benchmark_harness_unavailable" "not_recorded" "bench" "benches" \
           null null null "SKIP" ""
         return 0
     fi
@@ -312,7 +320,6 @@ measure_performance() {
         fi
     fi
     # Save current result into summary JSON items
-    if [[ "$FIRST" -eq 0 ]]; then echo "," >> "$SUMMARY_JSON"; fi; FIRST=0
     local result_state="PASS"
     local result_reason="benchmark_completed_without_regression"
     case "$status" in
@@ -320,15 +327,19 @@ measure_performance() {
       no_output) result_state="FAIL"; result_reason="benchmark_output_missing";;
       no_baseline) result_reason="benchmark_completed_without_baseline";;
     esac
-    local benchmark_command="cargo bench --features benches -- $(printf '%q' "$test_name")"
-    printf '  {"name":"%s","metric":"%s","value":"%s","result":"%s","reason":"%s","command":"%s","target":"bench","feature_set":"benches","discovered_test_count":null,"executed_test_count":null,"command_status":null,"discovery_status":"not_applicable","raw_output":"%s"' \
-      "$(qf_json_escape "$test_name")" "$(qf_json_escape "$metric_used")" "$(qf_json_escape "$result")" \
-      "$result_state" "$result_reason" "$(qf_json_escape "$benchmark_command")" "$(qf_json_escape "$output_file")" >> "$SUMMARY_JSON"
+    local -a benchmark_fields=(
+      "name=$test_name" "metric=$metric_used" "value=$result" "result=$result_state"
+      "reason=$result_reason" "argv=json:$(qf_json_array cargo bench --features benches -- "$test_name")" \
+      "environment=json:$(qf_json_environment_with_assignments "RUSTFLAGS=$BENCH_RUSTFLAGS")" \
+      "target=bench" "feature_set=benches"
+      "discovered_test_count=null" "executed_test_count=null" "command_status=null"
+      "discovery_status=not_applicable" "raw_output=$output_file"
+    )
     if [ -f "$BASELINE_FILE" ]; then
-      printf ',"baseline":"%s","change_percent":"%s","threshold_percent":%s,"status":"%s"' \
-        "$baseline" "$change" "$threshold" "$status" >> "$SUMMARY_JSON"
+      benchmark_fields+=("baseline=$baseline" "change_percent=$change" \
+        "threshold_percent=int:$threshold" "status=$status")
     fi
-    printf '}' >> "$SUMMARY_JSON"
+    qf_json_append_object "$SUMMARY_JSON" "${benchmark_fields[@]}"
     [ "$status" = "regression" ] && return 1
     [ "$status" = "no_output" ] && return 1
     return 0
@@ -358,6 +369,7 @@ if [[ "$RUN_MEM_CPU" -eq 1 ]]; then
   run_optional_cargo_test "CPU usage" "cpu_usage"
 else
   warn "FAST mode: skipping memory/CPU tests"
+  COMMAND_ARGV_JSON="[]"; COMMAND_ENVIRONMENT_JSON="{}"
   append_performance_record "memory_cpu_tests" "test_execution" "0" "skipped" "SKIP" \
     "fast_mode_reduced_selection" "not_applicable" "lib" "$BASE_FEATURES" null null null "SKIP" ""
 fi
@@ -380,6 +392,7 @@ if [[ "$RUN_SIMD" -eq 1 && "$BENCH_AVAILABLE" -eq 1 && $(uname -m) == "x86_64" ]
     echo "  With AVX2: $OPTIMIZED"
 elif [[ "$RUN_SIMD" -eq 0 ]]; then
     warn "FAST mode: skipping SIMD verification"
+    COMMAND_ARGV_JSON="[]"; COMMAND_ENVIRONMENT_JSON="{}"
     append_performance_record "SIMD verification" "benchmark" "0" "skipped" "SKIP" \
       "fast_mode_reduced_selection" "cargo bench --features benches -- simd_xor" "bench" "benches" \
       null null null "SKIP" ""

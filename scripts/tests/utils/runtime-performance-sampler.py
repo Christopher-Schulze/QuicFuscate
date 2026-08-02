@@ -158,6 +158,22 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def write_json_new(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError as error:
+        raise FileExistsError(f"refusing to replace existing output: {path}") from error
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            json.dump(value, output, sort_keys=True)
+            output.write("\n")
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+
+
 def main() -> int:
     args = parse_args()
     if args.interval <= 0:
@@ -165,9 +181,6 @@ def main() -> int:
     pids = tuple(dict.fromkeys(args.pid))
     if any(pid <= 0 for pid in pids):
         raise ValueError("--pid values must be positive")
-    if args.output.exists():
-        raise FileExistsError(f"refusing to replace existing output: {args.output}")
-
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
     page_size = os.sysconf("SC_PAGE_SIZE")
@@ -186,7 +199,7 @@ def main() -> int:
 
     elapsed_seconds = time.monotonic() - started
     summary = summarize(process_samples, metric_samples, elapsed_seconds, clock_ticks)
-    args.output.write_text(json.dumps(summary, sort_keys=True) + "\n", encoding="utf-8")
+    write_json_new(args.output, summary)
     return 0
 
 

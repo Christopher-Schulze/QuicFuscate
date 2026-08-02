@@ -34,8 +34,9 @@ FP=${QUICFUSCATE_DOH_PROVIDER:-https://cloudflare-dns.com/dns-query}
 FR=${QUICFUSCATE_FRONTING:-1}
 Q=${QUICFUSCATE_QPACK:-1}
 
-if [[ $JSON_FIRST_RUN -eq 0 ]]; then echo "," >> "$JSON"; fi; JSON_FIRST_RUN=0
-echo -n '  {"browser":'"\"$B\""',"os":'"\"$O\""',"use_tls_cover":'"\"$F\""',"doh_enabled":'"\"$D\""',"doh_provider":'"\"$FP\""',"fronting":'"\"$FR\""',"qpack":'"\"$Q\""'}' >> "$JSON"
+qf_json_append_object "$JSON" \
+  "browser=$B" "os=$O" "use_tls_cover=$F" "doh_enabled=$D" \
+  "doh_provider=$FP" "fronting=$FR" "qpack=$Q"
 
 json_end "$JSON"
 

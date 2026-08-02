@@ -40,11 +40,7 @@ append_item() {
   local name="$1"
   local status="$2"
   local details="$3"
-  if [[ "$JSON_FIRST_RUN" -eq 0 ]]; then
-    echo "," >> "$JSON"
-  fi
-  JSON_FIRST_RUN=0
-  echo -n '  {"name":'"\"$name\""',"status":'"\"$status\""',"details":'"\"$details\""'}' >> "$JSON"
+  qf_json_append_object "$JSON" "name=$name" "status=$status" "details=$details"
 }
 
 run_named_case() {

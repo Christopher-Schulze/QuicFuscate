@@ -8,6 +8,8 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/lib-common.sh"
 BINARY="${QF_E2E_BINARY:-$PROJECT_ROOT/target/release/quicfuscate}"
 CA="${QF_E2E_CA:-$PROJECT_ROOT/config/local/ca.crt}"
 CA_KEY="${QF_E2E_CA_KEY:-$PROJECT_ROOT/config/local/ca.key}"
@@ -461,12 +463,16 @@ run_downlink_matrix() {
     wait "$pid" || fail "measurement process failed in phase $phase"
   done
   MEASUREMENT_PIDS=()
-  python3 -c \
-    'import json,pathlib,sys; phase=sys.argv[1]; duration=float(sys.argv[2]); paths=sys.argv[4:]; samples=[json.load(open(path, encoding="utf-8")) for path in paths]; rates=[item["payload_bytes"]*8.0/duration for item in samples]; result={"phase":phase,"duration_seconds":duration,"offered_rate_bps":float(sys.argv[3]),"payload_rates_bps":rates,"payload_bytes":[item["payload_bytes"] for item in samples],"packets":[item["packets"] for item in samples]}; pathlib.Path(sys.argv[4]).with_name(f"{phase}-summary.json").write_text(json.dumps(result,sort_keys=True)+"\n",encoding="utf-8"); print(json.dumps(result,sort_keys=True))' \
+  local summary_document
+  summary_document="$(python3 -c \
+    'import json,sys; phase=sys.argv[1]; duration=float(sys.argv[2]); paths=sys.argv[4:]; samples=[json.load(open(path, encoding="utf-8")) for path in paths]; rates=[item["payload_bytes"]*8.0/duration for item in samples]; result={"phase":phase,"duration_seconds":duration,"offered_rate_bps":float(sys.argv[3]),"payload_rates_bps":rates,"payload_bytes":[item["payload_bytes"] for item in samples],"packets":[item["packets"] for item in samples]}; print(json.dumps(result,sort_keys=True))' \
     "$phase" "$duration" "$offered_rate" \
     "$ARTIFACT_DIR/$phase-receiver-1.json" \
     "$ARTIFACT_DIR/$phase-receiver-2.json" \
-    "$ARTIFACT_DIR/$phase-receiver-3.json"
+    "$ARTIFACT_DIR/$phase-receiver-3.json")" \
+    || fail "could not summarize parallel downlink phase $phase"
+  qf_json_write_raw_file "$ARTIFACT_DIR/$phase-summary.json" "$summary_document" \
+    || fail "could not write parallel downlink summary $phase"
 }
 
 run_sequential_downlink_matrix() {
@@ -500,12 +506,16 @@ run_sequential_downlink_matrix() {
     wait "$receiver_pid" || fail "receiver failed for client $((index + 1)) in phase $phase"
     MEASUREMENT_PIDS=()
   done
-  python3 -c \
-    'import json,pathlib,sys; phase=sys.argv[1]; duration=float(sys.argv[2]); paths=sys.argv[4:]; samples=[json.load(open(path, encoding="utf-8")) for path in paths]; rates=[item["payload_bytes"]*8.0/duration for item in samples]; result={"phase":phase,"duration_seconds":duration,"offered_rate_bps":float(sys.argv[3]),"measurement_mode":"sequential","payload_rates_bps":rates,"payload_bytes":[item["payload_bytes"] for item in samples],"packets":[item["packets"] for item in samples]}; pathlib.Path(sys.argv[4]).with_name(f"{phase}-summary.json").write_text(json.dumps(result,sort_keys=True)+"\n",encoding="utf-8"); print(json.dumps(result,sort_keys=True))' \
+  local summary_document
+  summary_document="$(python3 -c \
+    'import json,sys; phase=sys.argv[1]; duration=float(sys.argv[2]); paths=sys.argv[4:]; samples=[json.load(open(path, encoding="utf-8")) for path in paths]; rates=[item["payload_bytes"]*8.0/duration for item in samples]; result={"phase":phase,"duration_seconds":duration,"offered_rate_bps":float(sys.argv[3]),"measurement_mode":"sequential","payload_rates_bps":rates,"payload_bytes":[item["payload_bytes"] for item in samples],"packets":[item["packets"] for item in samples]}; print(json.dumps(result,sort_keys=True))' \
     "$phase" "$duration" "$offered_rate" \
     "$ARTIFACT_DIR/$phase-receiver-1.json" \
     "$ARTIFACT_DIR/$phase-receiver-2.json" \
-    "$ARTIFACT_DIR/$phase-receiver-3.json"
+    "$ARTIFACT_DIR/$phase-receiver-3.json")" \
+    || fail "could not summarize sequential downlink phase $phase"
+  qf_json_write_raw_file "$ARTIFACT_DIR/$phase-summary.json" "$summary_document" \
+    || fail "could not write sequential downlink summary $phase"
 }
 
 assert_matrix() {

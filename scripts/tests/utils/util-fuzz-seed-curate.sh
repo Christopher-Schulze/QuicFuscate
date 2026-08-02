@@ -82,8 +82,8 @@ for target_dir in "$SEEDS_DIR"/*; do
   done < <(find "$target_dir" -type f | sort)
 
   echo "[curate] $target_name: scanned=$scanned kept=$kept removed=$removed"
-  if [[ $JSON_FIRST_RUN -eq 0 ]]; then echo "," >> "$JSON"; fi; JSON_FIRST_RUN=0
-  echo -n '  {"target":'"\"$target_name\""',"scanned":'"$scanned"',"kept":'"$kept"',"removed":'"$removed"'}' >> "$JSON"
+  qf_json_append_object "$JSON" "target=$target_name" "scanned=int:$scanned" \
+    "kept=int:$kept" "removed=int:$removed"
 done
 
 echo "[curate] total: scanned=$total_files kept=$total_kept removed=$total_removed"

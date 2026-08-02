@@ -88,22 +88,10 @@ JSON_FIRST_RUN=1
 append_item() {
   local name="$1"; local result="$2"; local reason="$3"
   local command_status="$4"; local dur="$5"; local log="$6"
-  if [[ "$JSON_FIRST_RUN" -eq 0 ]]; then
-    echo "," >> "$MANIFEST"
-  fi
-  JSON_FIRST_RUN=0
-  local command_text; command_text=$(printf '%q ' "${SUITE_ARGV[@]}")
-  command_text="${command_text% }"
-  printf '  {"name":"%s","result":"%s","reason":"%s","argv":[' \
-    "$(qf_json_escape "$name")" "$(qf_json_escape "$result")" "$(qf_json_escape "$reason")" >> "$MANIFEST"
-  local index=0; local arg
-  for arg in "${SUITE_ARGV[@]}"; do
-    [[ "$index" -eq 0 ]] || printf ',' >> "$MANIFEST"
-    printf '"%s"' "$(qf_json_escape "$arg")" >> "$MANIFEST"
-    index=$((index + 1))
-  done
-  printf '],"command":"%s","command_status":%s,"duration_sec":%s,"log":"%s"}' \
-    "$(qf_json_escape "$command_text")" "$command_status" "$dur" "$(qf_json_escape "$log")" >> "$MANIFEST"
+  qf_json_append_object "$MANIFEST" "name=$name" "result=$result" "reason=$reason" \
+    "argv=json:$(qf_json_array "${SUITE_ARGV[@]}")" \
+    "environment=json:$(qf_json_environment)" \
+    "command_status=json:$command_status" "duration_sec=int:$dur" "log=$log"
 }
 
 append_mode_metadata() {
@@ -116,12 +104,9 @@ append_mode_metadata() {
     suites_json+="\"$(qf_json_escape "$suite")\""
   done
   suites_json+="]"
-  if [[ "$JSON_FIRST_RUN" -eq 0 ]]; then
-    echo "," >> "$MANIFEST"
-  fi
-  JSON_FIRST_RUN=0
-  printf '  {"cell":"meta","result":"PASS","reason":"","command":"","command_status":0,"meta":{"mode":"%s","fast":%s,"selected_suites":%s,"suite_count":%s}}' \
-    "$mode" "$FAST" "$suites_json" "${#SUITE_NAMES[@]}" >> "$MANIFEST"
+  qf_json_append_object "$MANIFEST" "cell=meta" "result=PASS" "reason=" "argv=json:[]" "environment=json:$(qf_json_environment)" \
+    "command_status=int:0" \
+    "meta=json:{\"mode\":\"$mode\",\"fast\":$FAST,\"selected_suites\":$suites_json,\"suite_count\":${#SUITE_NAMES[@]}}"
 }
 
 print_system_banner

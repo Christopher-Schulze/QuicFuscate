@@ -66,12 +66,22 @@ JSON_FIRST_RUN=1
 
 append_result() {
   local name="$1"; local result="$2"; local reason="$3"; local command_status="$4"
-  local command_text="${5:-}"; local scope="${6:-e2e}"
-  if [[ "$JSON_FIRST_RUN" -eq 0 ]]; then echo "," >> "$JSON"; fi
-  JSON_FIRST_RUN=0
-  printf '  {"name":"%s","result":"%s","reason":"%s","command":"%s","command_status":%s,"scope":"%s"}' \
-    "$(qf_json_escape "$name")" "$(qf_json_escape "$result")" "$(qf_json_escape "$reason")" \
-    "$(qf_json_escape "$command_text")" "$command_status" "$(qf_json_escape "$scope")" >> "$JSON"
+  local scope="${6:-e2e}"
+  local command_argv_json="${7:-[]}"
+  qf_json_append_object "$JSON" "name=$name" "result=$result" "reason=$reason" \
+    "argv=json:$command_argv_json" "environment=json:$(qf_json_environment)" \
+    "command_status=json:$command_status" "scope=$scope"
+}
+
+redacted_command_json() {
+  local -a command=("$@")
+  local index
+  for ((index=1; index<${#command[@]}; index++)); do
+    if [[ "${command[$((index - 1))]}" == "--admin-web-password" ]]; then
+      command[index]="<redacted>"
+    fi
+  done
+  qf_json_array "${command[@]}"
 }
 
 validate_endpoint() {
@@ -141,7 +151,8 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   redacted_command="${redacted_command% }"
   info "DRY-RUN: planned admin E2E command"
   printf '%s\n' "$redacted_command"
-  append_result "admin-e2e-plan" "SKIP" "dry_run" null "$redacted_command" "plan_only"
+  append_result "admin-e2e-plan" "SKIP" "dry_run" null "" "plan_only" \
+    "$(redacted_command_json "${SERVER_CMD[@]}")"
   json_end "$JSON"
   exit 0
 fi
@@ -762,5 +773,5 @@ code="$(curl -s -b "$COOKIE_JAR" -o /dev/null -w "%{http_code}" "http://$ADMIN_A
 [[ "$code" == "401" ]] || die "Expected 401 after logout, got $code"
 
 info "Admin Web E2E completed"
-append_result "admin-e2e" "PASS" "" 0 "" "live"
+append_result "admin-e2e" "PASS" "" 0 "" "live" "$(redacted_command_json "${SERVER_CMD[@]}")"
 json_end "$JSON"

@@ -53,13 +53,10 @@ OUT_CSV="$ARTIFACTS_DIR/microbench.csv"
 
 append_item() {
   local cell="$1"; local result="$2"; local reason="$3"; local command_status="$4"; local output_file="$5"
-  local command_text="${6:-}"; local environment="${7:-}"
-  if [[ "$JSON_FIRST_RUN" -eq 0 ]]; then echo "," >> "$RESULTS_JSON"; fi
-  JSON_FIRST_RUN=0
-  printf '  {"cell":"%s","result":"%s","reason":"%s","command":"%s","environment":"%s","command_status":%s,"output":"%s"}' \
-    "$(qf_json_escape "$cell")" "$(qf_json_escape "$result")" "$(qf_json_escape "$reason")" \
-    "$(qf_json_escape "$command_text")" "$(qf_json_escape "$environment")" "$command_status" \
-    "$(qf_json_escape "$output_file")" >> "$RESULTS_JSON"
+  local argv_json="${6:-[]}"; local environment_json="${7:-$(qf_json_environment)}"
+  qf_json_append_object "$RESULTS_JSON" "cell=$cell" "result=$result" "reason=$reason" \
+    "argv=json:$argv_json" "environment=json:$environment_json" "command_status=int:$command_status" \
+    "output=$output_file"
 }
 
 size_to_bytes() {
@@ -114,10 +111,9 @@ if [[ "$input_ok" -ne 1 ]]; then
 fi
 
 info "Microbench sizes: ${SIZES[*]} | iters=$ITERS"
-if [[ "$JSON_FIRST_RUN" -eq 0 ]]; then echo "," >> "$RESULTS_JSON"; fi
-JSON_FIRST_RUN=0
-printf '  {"cell":"meta","result":"PASS","reason":"","command":"","environment":"","command_status":0,"meta":{"iters":%s,"sizes":"%s","fast":%s}}' \
-  "$ITERS" "$(qf_json_escape "${SIZES[*]}")" "$FAST" >> "$RESULTS_JSON"
+qf_json_append_object "$RESULTS_JSON" "cell=meta" "result=PASS" "reason=" "argv=json:[]" \
+  "environment=json:$(qf_json_environment)" "command_status=int:0" \
+  "meta=json:{\"iters\":$ITERS,\"sizes\":\"$(qf_json_escape "${SIZES[*]}")\",\"fast\":$FAST}"
 
 echo "ts,$(date -Iseconds)" | tee "$OUT_CSV" >/dev/null
 
@@ -133,7 +129,11 @@ microbench_run() {
     printf 'DRY-RUN:'; printf ' %q' "${cmd[@]}"; printf '\n'
     return 0
   fi
-  run env "${envs[@]}" "${cmd[@]}"
+  if [[ "${#envs[@]}" -gt 0 ]]; then
+    run env "${envs[@]}" "${cmd[@]}"
+  else
+    run "${cmd[@]}"
+  fi
 }
 
 microbench_capture() {
@@ -148,7 +148,30 @@ microbench_capture() {
     printf 'DRY-RUN'; printf ' %q' "${cmd[@]}"; printf '\n'
     return 0
   fi
-  env "${envs[@]}" "${cmd[@]}"
+  if [[ "${#envs[@]}" -gt 0 ]]; then
+    env "${envs[@]}" "${cmd[@]}"
+  else
+    "${cmd[@]}"
+  fi
+}
+
+microbench_command_argv_json() {
+  local kind="$1"; shift
+  local -a command=(cargo run --release -q)
+  [[ -n "$CARGO_FEATURES" ]] && command+=(--features "$CARGO_FEATURES")
+  [[ -n "$JOBS" ]] && command+=(-j "$JOBS")
+  command+=(--example microbench -- "$kind" "$@")
+  qf_json_array "${command[@]}"
+}
+
+microbench_environment_json() {
+  local -a envs=()
+  [[ -n "$RUSTFLAGS_EXTRA" ]] && envs+=("RUSTFLAGS=$RUSTFLAGS_EXTRA")
+  if [[ "${#envs[@]}" -gt 0 ]]; then
+    qf_json_environment_with_assignments "${envs[@]}"
+  else
+    qf_json_environment_with_assignments
+  fi
 }
 
 FAILURES=0
@@ -168,15 +191,7 @@ cat "$PROFILE_OUTPUT"
 info "CPU profile: $PROFILE_LINE"
 echo "$PROFILE_LINE" | tee -a "$OUT_CSV" >/dev/null
 append_item "profile" "$profile_result" "$profile_reason" "$profile_status" "$PROFILE_OUTPUT" \
-  "cargo run --release -q --example microbench -- profile" "RUSTFLAGS=${RUSTFLAGS_EXTRA}; CARGO_FEATURES=${CARGO_FEATURES}; JOBS=${JOBS}"
-
-microbench_command_text() {
-  local kind="$1"; local size="$2"; local iters="$3"
-  printf 'cargo run --release -q'
-  [[ -n "$CARGO_FEATURES" ]] && printf ' --features %q' "$CARGO_FEATURES"
-  [[ -n "$JOBS" ]] && printf ' -j %q' "$JOBS"
-  printf ' --example microbench -- %q %q %q' "$kind" "$size" "$iters"
-}
+  "$(microbench_command_argv_json profile)" "$(microbench_environment_json)"
 
 run_microbench_cell() {
   local kind="$1"; local size="$2"; local iters="$3"; local cell="$4"
@@ -193,8 +208,7 @@ run_microbench_cell() {
   cat "$output_file"
   cat "$output_file" >> "$OUT_CSV"
   append_item "${kind}:${size}" "$cell_result" "$cell_reason" "$cell_status" "$output_file" \
-    "$(microbench_command_text "$kind" "$size" "$iters")" \
-    "RUSTFLAGS=${RUSTFLAGS_EXTRA}; CARGO_FEATURES=${CARGO_FEATURES}; JOBS=${JOBS}"
+    "$(microbench_command_argv_json "$kind" "$size" "$iters")" "$(microbench_environment_json)"
 }
 
 CELL=0

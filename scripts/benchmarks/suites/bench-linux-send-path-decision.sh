@@ -125,7 +125,7 @@ done
 json_end "$JSON"
 SUMMARY_FILE="$ARTIFACTS_DIR/summary.txt"
 DECISION_JSON="$ARTIFACTS_DIR/decision.json"
-python3 - "$ARTIFACTS_DIR" "$SUMMARY_FILE" "$DECISION_JSON" <<'PY'
+DECISION_DOCUMENT="$(python3 - "$ARTIFACTS_DIR" "$SUMMARY_FILE" <<'PY'
 import json
 import re
 import sys
@@ -133,7 +133,6 @@ from pathlib import Path
 
 artifacts = Path(sys.argv[1])
 summary_path = Path(sys.argv[2])
-decision_path = Path(sys.argv[3])
 
 line_re = re.compile(
     r"variant=udpfast size=(?P<size>\d+)B iters=(?P<iters>\d+) batch=(?P<batch>\d+) "
@@ -194,7 +193,7 @@ decision = {
     "verdict": "benchmark-only",
     "rationale": "MSG_ZEROCOPY has been removed from the runtime. This harness records the retained Linux send-path baseline only.",
 }
-decision_path.write_text(json.dumps(decision, indent=2) + "\n")
+print(json.dumps(decision, indent=2))
 
 lines = [
     "Linux Send-Path Benchmark Summary",
@@ -215,4 +214,6 @@ for item in measurements_out:
     )
 summary_path.write_text("\n".join(lines) + "\n")
 PY
+)"
+qf_json_write_raw_file "$DECISION_JSON" "$DECISION_DOCUMENT"
 info "Artifacts stored under $ARTIFACTS_DIR"

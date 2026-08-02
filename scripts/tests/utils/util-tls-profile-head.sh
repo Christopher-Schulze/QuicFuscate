@@ -46,8 +46,9 @@ for d in browser_profiles; do [ -d "$d" ] || continue
     echo "$head_hex"
     size_dec=$(base64 $DEC < "$f" | wc -c | tr -d ' ')
     # JSON item
-    if [[ $JSON_FIRST_RUN -eq 0 ]]; then echo "," >> "$JSON"; fi; JSON_FIRST_RUN=0
-    echo -n '  {"browser":'"\"$B\""',"os":'"\"$O\""',"dir":'"\"$d\""',"file":'"\"$(basename "$f")\""',"decoded_size":'"$size_dec"',"head_hex":'"\"$head_hex\""'}' >> "$JSON"
+    qf_json_append_object "$JSON" \
+      "browser=$B" "os=$O" "dir=$d" "file=$(basename "$f")" \
+      "decoded_size=int:$size_dec" "head_hex=$head_hex"
     found=1
     break
   fi

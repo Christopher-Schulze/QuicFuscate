@@ -183,6 +183,8 @@ fi
 echo "  Safety ratio: ${safe_ratio}% safe code"
 
 echo -e "\n[OK] Analysis complete"
-if [[ $JSON_FIRST_RUN -eq 0 ]]; then echo "," >> "$JSON"; fi; JSON_FIRST_RUN=0
-echo -n '  {"total_lines":'"$total_lines"',"total_files":'"$total_files"',"unsafe_blocks":'"$unsafe_total"',"test_functions":'"$test_total"',"safety_ratio_percent":'"\"$safe_ratio\""'}' >> "$JSON"
+qf_json_append_object "$JSON" \
+  "total_lines=int:$total_lines" "total_files=int:$total_files" \
+  "unsafe_blocks=int:$unsafe_total" "test_functions=int:$test_total" \
+  "safety_ratio_percent=$safe_ratio"
 json_end "$JSON"

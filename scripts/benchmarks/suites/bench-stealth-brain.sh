@@ -38,7 +38,7 @@ ACK_MAX=(6 8 12)
 JITTER_US=(500 1000 1500)
 if (( FAST )); then ACK_MAX=(8); JITTER_US=(1000); fi
 
-RESULTS_JSON="$OUTPUT_DIR/bench_results.json"; json_begin "$RESULTS_JSON" "bench_stealth_brain"; FIRST=true
+RESULTS_JSON="$OUTPUT_DIR/bench_results.json"; json_begin "$RESULTS_JSON" "bench_stealth_brain"; JSON_FIRST_RUN=1
 TOTAL=0; FAILURES=0
 
 run_cargo_logged() {
@@ -83,9 +83,9 @@ bench_one() {
     reason="one_or_more_benchmark_commands_failed"
     FAILURES=$((FAILURES+1))
   fi
-  if [[ "$FIRST" == "true" ]]; then FIRST=false; else echo "," >> "$RESULTS_JSON"; fi
-  printf '  {"ack_max":%s,"jitter_us":%s,"duration_sec":%s,"result":"%s","reason":"%s","command_status":{"stealth":%s,"brain":%s}}' \
-    "$amax" "$jut" "$dur" "$result" "$reason" "$stealth_status" "$brain_status" >> "$RESULTS_JSON"
+  qf_json_append_object "$RESULTS_JSON" "ack_max=int:$amax" "jitter_us=int:$jut" \
+    "duration_sec=int:$dur" "result=$result" "reason=$reason" \
+    "command_status=json:{\"stealth\":$stealth_status,\"brain\":$brain_status}"
 }
 
 for a in "${ACK_MAX[@]}"; do
