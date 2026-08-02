@@ -1000,7 +1000,7 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 ## IPv6 Dual-Stack Architecture (Review Fix Session)
 
 ### Components
-- `Ipv6Pool` (`src/implementations/server/ip_pool.rs`): Allocate/release IPv6 addresses from ULA range (default fd00::2–fd00::fe).
+- `Ipv6Pool` (`src/implementations/server/ip_pool.rs`): Allocate/release IPv6 addresses from ULA range (default fd00::2-fd00::fe) through a forward cursor and release FIFO; capacity counters use `u128`, with the full `2^128` range explicitly saturated at `u128::MAX`.
 - `Session::new_dual_stack()` (`src/implementations/server/session.rs`): Creates session with both IPv4 and IPv6 client addresses.
 - `RoutingManager::new_dual_stack()` (`src/implementations/server/routing.rs`): Configures dual-stack Linux NAT and forwarding (ip6tables or nftables) for the shipped server runtime. macOS pf and Windows NetNat generators are internal, non-advertised surfaces until native server ownership and proof exist.
 - `TunConfig.ip6` / `TunConfig.prefix6` (`src/interface.rs`): IPv6 TUN interface address fields, now wired to CLI flags `--tun-ip6` / `--tun-prefix6`.

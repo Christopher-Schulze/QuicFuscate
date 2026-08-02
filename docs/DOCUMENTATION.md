@@ -4418,6 +4418,8 @@ The VPN server supports dual-stack IPv4/IPv6 operation. When IPv6 is enabled (de
 - Routes IPv6 packets via `get_by_client_ipv6()` session lookup
 - Sets up Linux ip6tables or nftables MASQUERADE and forwarding rules
 
+`Ipv6Pool` allocation uses a forward cursor plus a FIFO of released addresses, so it never enumerates an entire configured prefix. IPv6 capacity counters use `u128`; the mathematically unrepresentable full `2^128` address range is explicitly saturated at `u128::MAX`. Both IPv4 and IPv6 pools ignore releases outside their configured ranges.
+
 The shipped server runtime does not advertise macOS pf or Windows NetNat as server TUN backends. Those platform-specific rule generators remain internal library code until a native server routing owner and privileged proof are provided.
 
 **Configuration:**
