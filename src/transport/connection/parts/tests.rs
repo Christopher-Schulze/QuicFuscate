@@ -560,6 +560,26 @@ mod tests {
         assert_eq!(c.local_error, Some(error));
     }
 
+    #[test]
+    fn tls_crypto_failure_queues_connection_close() {
+        let mut c = make_conn();
+        c.enable_tls("chrome").expect("test rustls provider");
+
+        let result = c.process_crypto_frame(
+            crate::qftls::Level::Initial,
+            0,
+            std::borrow::Cow::Owned(vec![0xff; 64]),
+        );
+
+        assert!(matches!(result, Err(ConnectionError::TlsError(_))));
+        assert!(c.is_closed(), "TLS failure must close the connection");
+        assert!(matches!(c.local_error(), Some(ConnectionError::TlsError(_))));
+        assert!(c.pending_control.iter().any(|frame| matches!(
+            frame,
+            Frame::ConnectionClose { error_code, .. } if (0x0100..=0x01ff).contains(error_code)
+        )));
+    }
+
     // ---- Priority 4: In-Flight / Congestion Control ----------------------
 
     #[test]

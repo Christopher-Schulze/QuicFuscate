@@ -4339,6 +4339,10 @@ The overall approach prioritizes runtime performance over architectural purity. 
 #### Connection Error Ownership
 `transport::Connection` keeps the first locally decided failure in `local_error` so a later shutdown or protocol event cannot replace the root cause. A peer `CONNECTION_CLOSE` or `APPLICATION_CLOSE` is recorded separately in `remote_error` with its error code, frame type where applicable, and raw reason bytes. `Connection::error()` exposes the local root cause when present and otherwise the first peer close; `local_error()` and `remote_error()` expose each side independently. This separation keeps local timeout/TLS failures observable while preserving a later peer close for diagnostics.
 
+TLS CRYPTO processing converts provider failures into a local `CRYPTO_ERROR` close with the
+`0x0100` TLS-alert base code before returning the error. Receiving a peer close remains terminal
+without sending a second close frame; the peer-provided close is retained through `remote_error`.
+
 #### QKey Authentication Failure
 **Symptoms:** "Connection refused" or "Invalid token" immediately after handshake.
 

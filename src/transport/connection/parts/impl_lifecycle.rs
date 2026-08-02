@@ -19,6 +19,17 @@ impl Connection {
         Self::retain_first_error(&mut self.remote_error, error);
     }
 
+    /// Record a TLS failure and queue the RFC 9001 CRYPTO_ERROR close frame before returning it.
+    fn fail_tls_handshake(
+        &mut self,
+        error: crate::error::ConnectionError,
+    ) -> crate::error::ConnectionError {
+        self.record_local_error(error.clone());
+        let reason = error.to_string();
+        let _ = self.close(false, 0x0100, reason.as_bytes());
+        error
+    }
+
     fn configured_recovery(config: &Config, max_datagram_size: usize) -> recovery::Recovery {
         let algorithm = match config.cc_algorithm {
             crate::transport::CongestionControlAlgorithm::Reno => {
@@ -1229,9 +1240,7 @@ impl Connection {
             if let Some(provider) = &mut self.tls_provider {
                 for chunk in chunks {
                     if let Err(error) = provider.provide_quic_data(level, &chunk) {
-                        self.record_local_error(error.clone());
-                        self.is_closed = true;
-                        return Err(error);
+                        return Err(self.fail_tls_handshake(error));
                     }
                 }
             }
@@ -1239,9 +1248,7 @@ impl Connection {
             // Without this, the transport would never transition to 1-RTT and application streams
             // (including HTTP/3 HEADERS carrying x-qf-auth) would stall behind the handshake gate.
             if let Err(error) = self.poll_tls_and_validate_versions() {
-                self.record_local_error(error.clone());
-                self.is_closed = true;
-                return Err(error);
+                return Err(self.fail_tls_handshake(error));
             }
         } else {
             // Store in crypto stream for later processing
