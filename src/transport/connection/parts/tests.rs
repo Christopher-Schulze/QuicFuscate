@@ -657,11 +657,35 @@ mod tests {
 
     #[test]
     fn double_close_is_idempotent() {
-        let mut c = make_conn();
-        c.close(true, 1, b"first").unwrap();
-        c.close(true, 2, b"second").unwrap();
-        assert!(c.is_closed(), "connection must remain closed after double close");
-        assert_eq!(c.pending_control.len(), 2, "both close frames should be queued");
+        let mut pair = bench_paired_1rtt_connections();
+        pair.client.close(false, 1, b"first").unwrap();
+        pair.client.close(true, 2, b"second").unwrap();
+
+        assert!(pair.client.is_closed(), "connection must remain closed after double close");
+        assert!(pair.client.is_draining(), "connection must remain draining after double close");
+        assert_eq!(pair.client.pending_control.len(), 1, "exactly one close frame must be queued");
+        assert!(matches!(
+            pair.client.pending_control.front(),
+            Some(Frame::ConnectionClose { error_code: 1, reason, .. })
+                if reason.as_ref() == b"first"
+        ));
+
+        let mut packet = [0u8; 1500];
+        let (packet_len, _) = pair.client.send(&mut packet).expect("first close must serialize");
+        assert!(pair.client.pending_control.is_empty(), "close frame must be removed after send");
+        pair.server.recv(&mut packet[..packet_len], &pair.recv_info).expect("close must decrypt");
+        assert_eq!(
+            pair.server.remote_error(),
+            Some(&ConnectionError::PeerConnectionClosed {
+                error_code: 1,
+                frame_type: 0,
+                reason: b"first".to_vec(),
+            })
+        );
+        assert!(matches!(
+            pair.client.send(&mut packet),
+            Err(ConnectionError::Done)
+        ));
     }
 
     // ---- Stream Open/Close and Flow Control ------------------------------

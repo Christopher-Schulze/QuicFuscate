@@ -903,6 +903,11 @@ impl Connection {
         err: u64,
         reason: &[u8],
     ) -> Result<(), crate::error::ConnectionError> {
+        // A terminal connection cannot emit any later frames. Preserve the first
+        // close kind, code, and reason instead of queueing a second terminal frame.
+        if self.is_closed {
+            return Ok(());
+        }
         self.is_closed = true;
         self.is_draining = true;
         self.record_local_error(crate::error::ConnectionError::ApplicationClosed);
