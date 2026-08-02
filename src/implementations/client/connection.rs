@@ -192,18 +192,52 @@ impl ClientConnection {
         guard.server_name()
     }
 
-    /// Close the connection gracefully.
+    /// Return the terminal error, preferring the first local root cause.
+    pub fn error(&self) -> Option<crate::error::ConnectionError> {
+        let guard = self.inner.lock();
+        guard.conn.error().cloned()
+    }
+
+    /// Return the first locally decided terminal or protocol error.
+    pub fn local_error(&self) -> Option<crate::error::ConnectionError> {
+        let guard = self.inner.lock();
+        guard.conn.local_error().cloned()
+    }
+
+    /// Return the first close reason received from the peer.
+    pub fn remote_error(&self) -> Option<crate::error::ConnectionError> {
+        let guard = self.inner.lock();
+        guard.conn.remote_error().cloned()
+    }
+
+    /// Close the connection with an application error.
+    ///
+    /// This emits an `APPLICATION_CLOSE` frame. Use `close_transport()` when
+    /// the error belongs to the QUIC transport rather than the application.
     pub fn close(&mut self, app_error: u64, reason: &[u8]) {
+        self.close_with_kind(true, app_error, reason, "application");
+    }
+
+    /// Close the connection with a transport error.
+    ///
+    /// This emits a `CONNECTION_CLOSE` frame with frame type zero, matching the
+    /// transport's local close representation.
+    pub fn close_transport(&mut self, transport_error: u64, reason: &[u8]) {
+        self.close_with_kind(false, transport_error, reason, "transport");
+    }
+
+    fn close_with_kind(&mut self, app: bool, error_code: u64, reason: &[u8], kind: &str) {
         let mut guard = self.inner.lock();
-        if let Err(e) = guard.conn.close(false, app_error, reason) {
+        if let Err(e) = guard.conn.close(app, error_code, reason) {
             log::warn!(
-                "Connection close returned error (app_error={}, reason={:?}): {:?}",
-                app_error,
+                "{} connection close returned error (error_code={}, reason={:?}): {:?}",
+                kind,
+                error_code,
                 reason,
                 e
             );
         }
-        log::info!("Connection closed: error={}, reason={:?}", app_error, reason);
+        log::info!("{} connection closed: error={}, reason={:?}", kind, error_code, reason);
     }
 
     // ========================================================================
@@ -369,6 +403,27 @@ impl ClientConnection {
 mod tests {
     use super::*;
 
+    fn make_client_connection() -> ClientConnection {
+        let config = EngineConfig::default();
+        let local_addr = "127.0.0.1:10000".parse().unwrap();
+        let remote_addr = "127.0.0.1:10001".parse().unwrap();
+        let conn = QuicFuscateConnection::new_client(
+            "localhost",
+            local_addr,
+            remote_addr,
+            ClientConnection::build_transport_config(&config).unwrap(),
+            ClientConnection::build_stealth_config(&config),
+            ClientConnection::build_fec_config(&config),
+            ClientConnection::build_optimize_config(&config),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+
+        ClientConnection { inner: Arc::new(parking_lot::Mutex::new(conn)), remote_addr, local_addr }
+    }
+
     #[test]
     fn test_build_configs() {
         let config = EngineConfig::default();
@@ -463,5 +518,41 @@ mod tests {
         assert!(sc.enable_http3_masquerading);
         assert!(sc.use_qpack_headers);
         assert!(sc.use_tls_cover);
+    }
+
+    #[test]
+    fn public_close_reports_application_error_and_is_idempotent() {
+        let mut client = make_client_connection();
+
+        client.close(7, b"application shutdown");
+        client.close_transport(8, b"later transport shutdown");
+
+        assert_eq!(
+            client.local_error(),
+            Some(crate::error::ConnectionError::LocalApplicationClosed {
+                error_code: 7,
+                reason: b"application shutdown".to_vec(),
+            })
+        );
+        assert_eq!(client.error(), client.local_error());
+        assert!(client.remote_error().is_none());
+        assert!(client.is_closed());
+    }
+
+    #[test]
+    fn public_transport_close_reports_transport_error() {
+        let mut client = make_client_connection();
+
+        client.close_transport(9, b"transport shutdown");
+
+        assert_eq!(
+            client.local_error(),
+            Some(crate::error::ConnectionError::LocalConnectionClosed {
+                error_code: 9,
+                frame_type: 0,
+                reason: b"transport shutdown".to_vec(),
+            })
+        );
+        assert!(client.is_closed());
     }
 }

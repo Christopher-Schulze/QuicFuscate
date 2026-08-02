@@ -758,13 +758,43 @@ mod tests {
     }
 
     #[test]
-    fn close_sets_local_error_application_closed() {
+    fn close_sets_structured_local_application_error() {
         let mut c = make_conn();
-        c.close(true, 0, b"bye").unwrap();
+        c.close(true, 7, b"bye").unwrap();
         assert!(
-            matches!(c.local_error, Some(crate::error::ConnectionError::ApplicationClosed)),
-            "close() must set local_error to ApplicationClosed"
+            matches!(
+                c.local_error,
+                Some(crate::error::ConnectionError::LocalApplicationClosed {
+                    error_code: 7,
+                    reason,
+                }) if reason == b"bye"
+            ),
+            "application close must preserve its structured local error"
         );
+    }
+
+    #[test]
+    fn close_sets_structured_local_transport_error() {
+        let mut c = make_conn();
+        c.close(false, 9, b"transport bye").unwrap();
+        assert_eq!(
+            c.local_error(),
+            Some(&crate::error::ConnectionError::LocalConnectionClosed {
+                error_code: 9,
+                frame_type: 0,
+                reason: b"transport bye".to_vec(),
+            })
+        );
+    }
+
+    #[test]
+    fn close_preserves_earlier_tls_root_cause() {
+        let mut c = make_conn();
+        let root = ConnectionError::TlsError("provider failure".to_string());
+        c.record_local_error(root.clone());
+        c.close(false, 0x100, b"tls shutdown").unwrap();
+        assert_eq!(c.local_error(), Some(&root));
+        assert_eq!(c.error(), Some(&root));
     }
 
     #[test]
@@ -1894,6 +1924,14 @@ mod tests {
         let has_conn =
             c2.pending_control.iter().any(|f| matches!(f, Frame::ConnectionClose { .. }));
         assert!(has_conn, "transport close must produce ConnectionClose frame");
+        assert!(matches!(
+            c1.local_error(),
+            Some(ConnectionError::LocalApplicationClosed { error_code: 42, .. })
+        ));
+        assert!(matches!(
+            c2.local_error(),
+            Some(ConnectionError::LocalConnectionClosed { error_code: 0x01, .. })
+        ));
     }
 
     #[test]

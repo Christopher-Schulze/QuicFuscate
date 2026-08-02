@@ -896,7 +896,11 @@ impl Connection {
         self.config.initial_max_streams_uni
     }
 
-    /// Closes the connection
+    /// Closes the connection with an application or transport close frame.
+    ///
+    /// The first close call wins. The local error records the selected frame
+    /// kind, error code, and reason unless an earlier local root cause already
+    /// occupies the error slot.
     pub fn close(
         &mut self,
         app: bool,
@@ -910,7 +914,19 @@ impl Connection {
         }
         self.is_closed = true;
         self.is_draining = true;
-        self.record_local_error(crate::error::ConnectionError::ApplicationClosed);
+        let local_error = if app {
+            crate::error::ConnectionError::LocalApplicationClosed {
+                error_code: err,
+                reason: reason.to_vec(),
+            }
+        } else {
+            crate::error::ConnectionError::LocalConnectionClosed {
+                error_code: err,
+                frame_type: 0,
+                reason: reason.to_vec(),
+            }
+        };
+        self.record_local_error(local_error);
         if let Some(scheduler) = self.traffic_analysis.as_mut() {
             scheduler.cancel();
         }
