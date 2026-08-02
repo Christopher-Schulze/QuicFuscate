@@ -36,6 +36,47 @@ pub const TUN_MIN_MTU: u16 = 576;
 /// Minimum valid TUN MTU while IPv6 is enabled.
 pub const TUN_IPV6_MIN_MTU: u16 = 1280;
 
+/// An owned TUN frame backed by a pooled memory block.
+///
+/// The frame can cross the blocking-reader to async-runtime boundary without
+/// copying into a newly allocated `Vec`. Dropping it returns the block to the
+/// originating pool.
+pub struct TunPacket {
+    block: Option<AlignedBox<[u8]>>,
+    pool: Arc<MemoryPool>,
+    len: usize,
+}
+
+impl TunPacket {
+    fn new(block: AlignedBox<[u8]>, len: usize, pool: Arc<MemoryPool>) -> Self {
+        let len = len.min(block.len());
+        Self { block: Some(block), pool, len }
+    }
+
+    /// Return the valid layer-3 frame bytes.
+    pub fn as_slice(&self) -> &[u8] {
+        self.block.as_ref().map(|block| &block[..self.len]).unwrap_or(&[])
+    }
+
+    /// Return the valid frame length.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Return whether the frame contains no valid bytes.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl Drop for TunPacket {
+    fn drop(&mut self) {
+        if let Some(block) = self.block.take() {
+            self.pool.free(block);
+        }
+    }
+}
+
 /// Application configuration module
 pub mod app_config {
     use crate::engine::{EngineConfig, StealthMode as EngineStealthMode};
@@ -742,6 +783,40 @@ impl TunInterface {
                 Ok((block, _)) => {
                     self.pool.free(block);
                 }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    if !self.wait_for_readable(shutdown)? {
+                        return Ok(());
+                    }
+                }
+                Err(_) if shutdown.load(Ordering::Acquire) => {
+                    self.request_reader_shutdown()?;
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// Convenience loop with cooperative shutdown that transfers pooled TUN
+    /// blocks to the callback without copying packet bytes.
+    pub fn reader_loop_with_shutdown_owned<F>(
+        &self,
+        shutdown: &AtomicBool,
+        mut on_packet: F,
+    ) -> io::Result<()>
+    where
+        F: FnMut(TunPacket),
+    {
+        loop {
+            if shutdown.load(Ordering::Acquire) {
+                self.request_reader_shutdown()?;
+                return Ok(());
+            }
+            match self.read_block() {
+                Ok((block, len)) if len > 0 => {
+                    on_packet(TunPacket::new(block, len, Arc::clone(&self.pool)))
+                }
+                Ok((block, _)) => self.pool.free(block),
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     if !self.wait_for_readable(shutdown)? {
                         return Ok(());
@@ -1853,6 +1928,29 @@ mod tests {
             shutdown.store(true, Ordering::Release);
         })
         .expect("reader must exit cleanly after shutdown");
+
+        assert_eq!(packets, 1);
+        assert!(shutdown.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn owned_reader_loop_transfers_pooled_packet_without_copying() {
+        let pool = crate::optimize::global_pool();
+        let shutdown = AtomicBool::new(false);
+        let tun = TunInterface::from_device_for_test(
+            Box::new(DummyTun::with_reads(vec![vec![0x45, 0, 0, 20]])),
+            pool,
+            false,
+        );
+        let mut packets = 0;
+
+        tun.reader_loop_with_shutdown_owned(&shutdown, |packet| {
+            assert_eq!(packet.as_slice(), [0x45, 0, 0, 20]);
+            assert_eq!(packet.len(), 4);
+            packets += 1;
+            shutdown.store(true, Ordering::Release);
+        })
+        .expect("owned reader must exit cleanly after shutdown");
 
         assert_eq!(packets, 1);
         assert!(shutdown.load(Ordering::Acquire));

@@ -36,12 +36,13 @@ use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use parking_lot::{Mutex, RwLock};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex, RwLock,
+    Arc,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
@@ -57,6 +58,7 @@ const SESSION_COOKIE: &str = "qf_admin_session";
 const SESSION_TTL_SECS: u64 = 60 * 60;
 const LOGIN_RATE_LIMIT_ATTEMPTS: u32 = 5;
 const LOGIN_RATE_LIMIT_WINDOW_SECS: u64 = 60;
+const MAX_LOGIN_RATE_LIMIT_KEYS: usize = 10_000;
 const CSRF_TOKEN_BYTES: usize = 16;
 const CSRF_TOKEN_HEADER: &str = "X-CSRF-Token";
 const CSRF_NONCE_HEADER: &str = "X-CSRF-Nonce";
@@ -189,13 +191,19 @@ fn current_epoch_secs() -> u64 {
 
 struct LoginRateLimiter {
     attempts: HashMap<String, (u32, Instant)>,
+    lru_keys: VecDeque<String>,
     max_attempts: u32,
     lockout: Duration,
 }
 
 impl LoginRateLimiter {
     fn new(max_attempts: u32, lockout_secs: u64) -> Self {
-        Self { attempts: HashMap::new(), max_attempts, lockout: Duration::from_secs(lockout_secs) }
+        Self {
+            attempts: HashMap::new(),
+            lru_keys: VecDeque::new(),
+            max_attempts,
+            lockout: Duration::from_secs(lockout_secs),
+        }
     }
 
     fn is_locked(&mut self, ip: &str) -> bool {
@@ -207,19 +215,51 @@ impl LoginRateLimiter {
         }
     }
 
-    fn record_failure(&mut self, ip: &str) {
-        let entry = self.attempts.entry(ip.to_string()).or_insert((0, Instant::now()));
-        entry.0 += 1;
-        entry.1 = Instant::now();
+    fn record_attempt(&mut self, ip: &str) {
+        let now = Instant::now();
+        if let Some(entry) = self.attempts.get_mut(ip) {
+            entry.0 = entry.0.saturating_add(1);
+            entry.1 = now;
+            self.touch(ip);
+        } else {
+            self.attempts.insert(ip.to_string(), (1, now));
+            self.lru_keys.push_back(ip.to_string());
+            self.evict_excess();
+        }
     }
 
     fn clear(&mut self, ip: &str) {
         self.attempts.remove(ip);
+        self.remove_from_lru(ip);
     }
 
     fn prune(&mut self) {
         let cutoff = self.lockout;
         self.attempts.retain(|_, (_, ts)| ts.elapsed() < cutoff);
+        self.lru_keys.retain(|ip| self.attempts.contains_key(ip));
+    }
+
+    fn touch(&mut self, ip: &str) {
+        if let Some(index) = self.lru_keys.iter().position(|key| key == ip) {
+            if let Some(key) = self.lru_keys.remove(index) {
+                self.lru_keys.push_back(key);
+            }
+        }
+    }
+
+    fn remove_from_lru(&mut self, ip: &str) {
+        if let Some(index) = self.lru_keys.iter().position(|key| key == ip) {
+            self.lru_keys.remove(index);
+        }
+    }
+
+    fn evict_excess(&mut self) {
+        while self.attempts.len() > MAX_LOGIN_RATE_LIMIT_KEYS {
+            let Some(oldest) = self.lru_keys.pop_front() else {
+                break;
+            };
+            self.attempts.remove(&oldest);
+        }
     }
 
     fn retry_after_secs(&mut self, ip: &str) -> Option<u64> {
@@ -243,7 +283,8 @@ struct SessionStore {
 struct SessionRecord {
     expires_at: Instant,
     csrf_token: String,
-    replay_fingerprints: Vec<u64>,
+    replay_fingerprints: VecDeque<u64>,
+    replay_fingerprint_set: HashSet<u64>,
 }
 
 impl SessionStore {
@@ -270,7 +311,8 @@ impl SessionStore {
             SessionRecord {
                 expires_at,
                 csrf_token: csrf_token.clone(),
-                replay_fingerprints: Vec::new(),
+                replay_fingerprints: VecDeque::new(),
+                replay_fingerprint_set: HashSet::new(),
             },
         );
         (id, csrf_token)
@@ -313,13 +355,14 @@ impl SessionStore {
                 return Err("Invalid CSRF token");
             }
             if enforce_replay_guard {
-                if record.replay_fingerprints.contains(&replay_fingerprint) {
+                if !record.replay_fingerprint_set.insert(replay_fingerprint) {
                     return Err("Replay request detected");
                 }
-                record.replay_fingerprints.push(replay_fingerprint);
+                record.replay_fingerprints.push_back(replay_fingerprint);
                 if record.replay_fingerprints.len() > MAX_REPLAY_FINGERPRINTS {
-                    let excess = record.replay_fingerprints.len() - MAX_REPLAY_FINGERPRINTS;
-                    record.replay_fingerprints.drain(0..excess);
+                    if let Some(evicted) = record.replay_fingerprints.pop_front() {
+                        record.replay_fingerprint_set.remove(&evicted);
+                    }
                 }
             }
             record.expires_at = Instant::now() + self.ttl;
@@ -407,9 +450,8 @@ impl AdminHttpServer {
         let auth = auth.map(|a| Arc::new(RwLock::new(a)));
         if let (Some(path), Some(auth_ref)) = (auth_path.as_ref(), auth.as_ref()) {
             if std::fs::metadata(path).is_err() {
-                if let Ok(guard) = auth_ref.read() {
-                    persist_auth_file(path, &guard);
-                }
+                let guard = auth_ref.read();
+                persist_auth_file(path, &guard);
             }
         }
         Self {
@@ -809,8 +851,7 @@ async fn handle_request(
             }
         }
         if let Some(auth_ref) = auth.as_ref() {
-            let requires_pw_change =
-                auth_ref.read().map(|guard| guard.requires_password_change()).unwrap_or(false);
+            let requires_pw_change = auth_ref.read().requires_password_change();
             if requires_pw_change && req.path != "/api/admin/auth" && req.path != "/api/logout" {
                 return json_response(423, &AdminResponse::error("Password change required"));
             }
@@ -871,7 +912,7 @@ fn authorize(
     let Some(session_id) = get_cookie(req, SESSION_COOKIE) else {
         return false;
     };
-    let mut store = sessions.lock().unwrap_or_else(|e| e.into_inner());
+    let mut store = sessions.lock();
     store.is_valid(&session_id)
 }
 
@@ -880,7 +921,7 @@ fn csrf_token_for_request(
     sessions: &Arc<Mutex<SessionStore>>,
 ) -> Option<String> {
     let session_id = get_cookie(req, SESSION_COOKIE)?;
-    let mut store = sessions.lock().unwrap_or_else(|e| e.into_inner());
+    let mut store = sessions.lock();
     store.csrf_token(&session_id)
 }
 
@@ -997,7 +1038,7 @@ fn handle_login(
     let peer_ip = client_ip_for_rate_limit(peer, &req);
     let key = limiter_key("login", &peer_ip);
     let rate_limited = {
-        let mut limiter = rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
+        let mut limiter = rate_limiter.lock();
         if limiter.is_locked(&key) {
             let retry_after = limiter.retry_after_secs(&key).unwrap_or(60);
             Some(retry_after)
@@ -1013,6 +1054,10 @@ fn handle_login(
             vec![("Retry-After".to_string(), retry_after.to_string())],
         );
     }
+    {
+        let mut limiter = rate_limiter.lock();
+        limiter.record_attempt(&key);
+    }
     let payload: LoginPayload = match serde_json::from_slice(&req.body) {
         Ok(p) => p,
         Err(_) => return json_response(400, &AdminResponse::error("Invalid JSON")),
@@ -1024,29 +1069,23 @@ fn handle_login(
     if payload.password.len() > MAX_PASSWORD_BYTES {
         return json_response(400, &AdminResponse::error("Password too long"));
     }
-    let ok =
-        auth.read().map(|guard| guard.verify(username, payload.password.as_str())).unwrap_or(false);
+    let ok = auth.read().verify(username, payload.password.as_str());
     if !ok {
-        {
-            let mut limiter = rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
-            limiter.record_failure(&key);
-        }
         log_action(peer, "login", &format!("user={}", username), false);
         return json_response(401, &AdminResponse::error("Invalid credentials"));
     }
     // Success: clear rate limit for this IP
     {
-        let mut limiter = rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
+        let mut limiter = rate_limiter.lock();
         limiter.clear(&key);
     }
     let (session_id, csrf_token) = {
-        let mut store = sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let mut store = sessions.lock();
         store.create()
     };
     let cookie = build_session_cookie(&session_id, &req);
     log_action(peer, "login", &format!("user={}", username), true);
-    let requires_password_change =
-        auth.read().map(|guard| guard.requires_password_change()).unwrap_or(false);
+    let requires_password_change = auth.read().requires_password_change();
     json_response_with_headers(
         200,
         &AdminResponse::ok_with_data(serde_json::json!({
@@ -1067,7 +1106,7 @@ fn handle_logout(
         return admin_json_response(&AdminResponse::ok_with_message("Logged out"));
     }
     if let Some(session_id) = get_cookie(req, SESSION_COOKIE) {
-        let mut store = sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let mut store = sessions.lock();
         store.remove(&session_id);
     }
     let cookie = build_expired_cookie(req);
@@ -1101,17 +1140,11 @@ fn handle_admin_auth(
     };
 
     if req.method == "GET" {
-        let payload = auth
-            .read()
-            .map(|guard| {
-                serde_json::json!({
-                    "user": guard.user(),
-                    "requires_password_change": guard.requires_password_change(),
-                })
-            })
-            .unwrap_or_else(
-                |_| serde_json::json!({ "user": "admin", "requires_password_change": false }),
-            );
+        let guard = auth.read();
+        let payload = serde_json::json!({
+            "user": guard.user(),
+            "requires_password_change": guard.requires_password_change(),
+        });
         return admin_json_response(&AdminResponse::ok_with_data(payload));
     }
 
@@ -1136,7 +1169,7 @@ fn handle_admin_auth(
     let peer_ip = client_ip_for_rate_limit(peer, &req);
     let key = limiter_key("admin-auth", &peer_ip);
     let rate_limited = {
-        let mut limiter = rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
+        let mut limiter = rate_limiter.lock();
         if limiter.is_locked(&key) {
             let retry_after = limiter.retry_after_secs(&key).unwrap_or(60);
             Some(retry_after)
@@ -1152,6 +1185,10 @@ fn handle_admin_auth(
             vec![("Retry-After".to_string(), retry_after.to_string())],
         );
     }
+    {
+        let mut limiter = rate_limiter.lock();
+        limiter.record_attempt(&key);
+    }
 
     let new_password = payload.new_password;
     if let Some(ref pw) = new_password {
@@ -1160,27 +1197,21 @@ fn handle_admin_auth(
         }
     }
 
-    let (old_user, verified) = auth
-        .read()
-        .map(|guard| {
-            (
-                guard.user().to_string(),
-                guard.verify_password_only(payload.current_password.as_str()),
-            )
-        })
-        .unwrap_or_else(|_| ("-".to_string(), false));
+    let (old_user, verified) = {
+        let guard = auth.read();
+        (
+            guard.user().to_string(),
+            guard.verify_password_only(payload.current_password.as_str()),
+        )
+    };
     if !verified {
-        {
-            let mut limiter = rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
-            limiter.record_failure(&key);
-        }
         log_action(peer, "admin-auth", &format!("user={}", old_user), false);
         return json_response(401, &AdminResponse::error("Invalid credentials"));
     }
 
     // Success: clear rate limiter for this key.
     {
-        let mut limiter = rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
+        let mut limiter = rate_limiter.lock();
         limiter.clear(&key);
     }
 
@@ -1202,7 +1233,7 @@ fn handle_admin_auth(
     }
 
     let hash_failed = {
-        let mut guard = auth.write().unwrap_or_else(|e| e.into_inner());
+        let mut guard = auth.write();
         if let Some(pw) = new_password {
             match guard.set_credentials(new_user.clone(), pw) {
                 Ok(()) => false,
@@ -1221,12 +1252,12 @@ fn handle_admin_auth(
         return json_response(500, &AdminResponse::error("Password hashing failed"));
     }
     if let Some(path) = auth_path {
-        let guard = auth.read().unwrap_or_else(|e| e.into_inner());
+        let guard = auth.read();
         persist_auth_file(path, &guard);
     }
 
     {
-        let mut store = sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let mut store = sessions.lock();
         store.clear_all();
     }
 

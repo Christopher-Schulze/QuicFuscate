@@ -345,12 +345,12 @@ impl IoDriver {
         &self,
         conn: &Arc<parking_lot::Mutex<QuicFuscateConnection>>,
         socket: &Arc<UdpSocket>,
+        out: &mut [u8],
     ) {
-        let mut out = vec![0u8; 65535];
         loop {
             let written = {
                 let mut conn_guard = conn.lock();
-                match conn_guard.send(&mut out) {
+                match conn_guard.send(&mut *out) {
                     Ok(0) => break,
                     Ok(written) => written,
                     Err(e) => {
@@ -390,7 +390,10 @@ impl IoDriver {
         let mut batch_payloads: Vec<Vec<u8>> =
             (0..batch_cap).map(|_| Vec::with_capacity(2048)).collect();
         #[cfg(target_os = "linux")]
+        let mut batch_refs: Vec<&[u8]> = Vec::with_capacity(batch_cap);
+        #[cfg(target_os = "linux")]
         while !self.shutdown.load(Ordering::Relaxed) {
+            batch_refs.clear();
             // Read from TUN - returns (block, len)
             // TUN read path is blocking; loop structure keeps the behavior explicit.
             let read_result = {
@@ -446,12 +449,10 @@ impl IoDriver {
                     {
                         use std::os::fd::AsRawFd;
                         let socket_fd = socket.as_raw_fd();
-                        let mut batch_refs: Vec<&[u8]> = Vec::new();
 
                         // io_uring batch path (preferred when available).
                         #[cfg(feature = "io_uring")]
                         if matches!(dispatch, OutboundDispatch::IoUringBatch) {
-                            batch_refs.reserve(queued);
                             batch_refs.extend(
                                 batch_payloads
                                     .iter()
@@ -477,7 +478,6 @@ impl IoDriver {
                         // sendmmsg batch path (fallback from io_uring, or primary).
                         if already_sent == 0 && queued > 1 {
                             if batch_refs.is_empty() {
-                                batch_refs.reserve(queued);
                                 batch_refs.extend(
                                     batch_payloads
                                         .iter()
@@ -632,6 +632,7 @@ impl IoDriver {
     ) -> Result<(), EngineError> {
         let mut recv_buf = vec![0u8; 65535];
         let mut stream_buf = vec![0u8; 65535];
+        let mut send_buf = vec![0u8; 65535];
         let batch_cap = self.normalized_batch_size();
         let mut inbound_batch: Vec<Vec<u8>> =
             (0..batch_cap).map(|_| Vec::with_capacity(2048)).collect();
@@ -706,7 +707,7 @@ impl IoDriver {
 
             // Flush any ACKs or PTO probes produced by recv or by a recovery
             // deadline that fired while we were waiting.
-            self.flush_outbound(&conn, &socket).await;
+            self.flush_outbound(&conn, &socket, &mut send_buf).await;
         }
         Ok(())
     }
@@ -723,6 +724,7 @@ impl IoDriver {
         async_efd: tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>,
     ) -> Result<(), EngineError> {
         let mut stream_buf = vec![0u8; 65535];
+        let mut send_buf = vec![0u8; 65535];
         let mut handshake_signaled = false;
 
         while !self.shutdown.load(Ordering::Relaxed) {
@@ -826,7 +828,7 @@ impl IoDriver {
             }
 
             // Flush ACKs or PTO probes produced by the completions/timeout.
-            self.flush_outbound(&conn, &socket).await;
+            self.flush_outbound(&conn, &socket, &mut send_buf).await;
         }
         Ok(())
     }

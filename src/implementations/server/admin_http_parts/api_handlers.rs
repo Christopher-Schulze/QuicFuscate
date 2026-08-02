@@ -388,7 +388,7 @@ fn validate_csrf_request(
 
     let has_origin_header = header_value(req, "origin").is_some();
     let replay_fingerprint = request_replay_fingerprint(req, &token);
-    let mut store = sessions.lock().unwrap_or_else(|e| e.into_inner());
+    let mut store = sessions.lock();
     match store.validate_post_guard(&session_id, &token, replay_fingerprint, has_origin_header) {
         Ok(()) => None,
         Err(msg) => {

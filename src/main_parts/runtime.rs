@@ -761,20 +761,21 @@ fn drain_client_tun_uplink(
     conn: &mut QuicFuscateConnection,
     tun: &quicfuscate::interface::TunInterface,
     sid: u64,
-    rx: &std::sync::mpsc::Receiver<Vec<u8>>,
-    backlog: &mut Option<Vec<u8>>,
+    rx: &std::sync::mpsc::Receiver<quicfuscate::interface::TunPacket>,
+    backlog: &mut Option<quicfuscate::interface::TunPacket>,
     diagnostics_enabled: bool,
 ) -> bool {
     if let Some(frame) = backlog.take() {
-        match send_client_tun_packet(conn, tun, sid, &frame) {
+        let frame_len = frame.len();
+        match send_client_tun_packet(conn, tun, sid, frame.as_slice()) {
             Ok(()) => {
                 if diagnostics_enabled {
-                    info!("Client Wintun backlog accepted by MASQUE uplink: bytes={}", frame.len());
+                    info!("Client Wintun backlog accepted by MASQUE uplink: bytes={frame_len}");
                 }
             }
             Err(quicfuscate::error::ConnectionError::DgramQueueFull) => {
                 if diagnostics_enabled {
-                    info!("Client MASQUE uplink remains backpressured: bytes={}", frame.len());
+                    info!("Client MASQUE uplink remains backpressured: bytes={frame_len}");
                 }
                 *backlog = Some(frame);
                 return true;
@@ -788,24 +789,29 @@ fn drain_client_tun_uplink(
 
     for _ in 0..16 {
         match rx.try_recv() {
-            Ok(frame) => match send_client_tun_packet(conn, tun, sid, &frame) {
-                Ok(()) => {
-                    if diagnostics_enabled {
-                        info!("Client Wintun packet accepted by MASQUE uplink: bytes={}", frame.len());
+            Ok(frame) => {
+                let frame_len = frame.len();
+                match send_client_tun_packet(conn, tun, sid, frame.as_slice()) {
+                    Ok(()) => {
+                        if diagnostics_enabled {
+                            info!(
+                                "Client Wintun packet accepted by MASQUE uplink: bytes={frame_len}"
+                            );
+                        }
+                    }
+                    Err(quicfuscate::error::ConnectionError::DgramQueueFull) => {
+                        if diagnostics_enabled {
+                            info!("Client MASQUE uplink backpressured: bytes={frame_len}");
+                        }
+                        *backlog = Some(frame);
+                        break;
+                    }
+                    Err(e) => {
+                        warn!("TUN packet send failed: {:?}", e);
+                        break;
                     }
                 }
-                Err(quicfuscate::error::ConnectionError::DgramQueueFull) => {
-                    if diagnostics_enabled {
-                        info!("Client MASQUE uplink backpressured: bytes={}", frame.len());
-                    }
-                    *backlog = Some(frame);
-                    break;
-                }
-                Err(e) => {
-                    warn!("TUN packet send failed: {:?}", e);
-                    break;
-                }
-            },
+            }
             Err(std::sync::mpsc::TryRecvError::Empty) => break,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
         }
@@ -1186,7 +1192,7 @@ async fn run_client(
     let tun_notify = Arc::new(tokio::sync::Notify::new());
     #[allow(clippy::type_complexity)]
     let (tun_rx, tun_writer, mut h3_stream_id, tun_reader_shutdown, mut tun_reader_handle): (
-        Option<std::sync::mpsc::Receiver<Vec<u8>>>,
+        Option<std::sync::mpsc::Receiver<quicfuscate::interface::TunPacket>>,
         Option<Arc<quicfuscate::interface::TunInterface>>,
         Option<u64>,
         Option<Arc<AtomicBool>>,
@@ -1215,7 +1221,7 @@ async fn run_client(
                 // The reader owns the shutdown flag and is joined after the
                 // transport loop exits. The bounded channel still applies
                 // backpressure to the TUN source.
-                let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(
+                let (tx, rx) = std::sync::mpsc::sync_channel::<quicfuscate::interface::TunPacket>(
                     quicfuscate::interface::TUN_PACKET_QUEUE_CAPACITY,
                 );
                 let tun_for_reader = tun.clone();
@@ -1227,13 +1233,13 @@ async fn run_client(
                 match std::thread::Builder::new()
                     .name("client-tun-reader".to_string())
                     .spawn(move || {
-                        let read_result = tun_for_reader.reader_loop_with_shutdown(
+                        let read_result = tun_for_reader.reader_loop_with_shutdown_owned(
                             &shutdown_for_loop,
                             move |packet| {
                                 if tun_reader_diagnostics {
                                     info!("Client Wintun packet read: bytes={}", packet.len());
                                 }
-                                if tx.send(packet.to_vec()).is_err() {
+                                if tx.send(packet).is_err() {
                                     shutdown_for_callback.store(true, Ordering::Release);
                                     return;
                                 }
@@ -1288,7 +1294,7 @@ async fn run_client(
     };
     // TUN frame held when the QUIC DATAGRAM queue is full so a backpressured
     // packet is not dropped before carrier acceptance.
-    let mut tun_backpressure_frame: Option<Vec<u8>> = None;
+    let mut tun_backpressure_frame: Option<quicfuscate::interface::TunPacket> = None;
     let mut housekeeping = interval(Duration::from_millis(5));
     housekeeping.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut next_stats_log = tokio::time::Instant::now();

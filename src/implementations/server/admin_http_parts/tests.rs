@@ -4,7 +4,7 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::{TcpListener as StdTcpListener, TcpStream as StdTcpStream};
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Mutex as StdMutex, OnceLock};
     use std::thread;
 
     #[derive(Clone)]
@@ -497,9 +497,9 @@ mod tests {
         // Environment variables are process-global. Guard tests that mutate
         // QUICFUSCATE_TRUST_PROXY and QUICFUSCATE_TRUSTED_PROXY_IPS so
         // parallel test execution cannot race.
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        static ENV_LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
         let _guard =
-            ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+            ENV_LOCK.get_or_init(|| StdMutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
 
         let prev_trust_proxy = std::env::var("QUICFUSCATE_TRUST_PROXY").ok();
         let prev_trusted_proxy_ips = std::env::var("QUICFUSCATE_TRUSTED_PROXY_IPS").ok();
@@ -1000,7 +1000,7 @@ mod tests {
         let auth_resp = send_req(addr, &auth_req);
         assert_eq!(parse_status(&auth_resp), 401);
 
-        let guard = auth.read().unwrap_or_else(|e| e.into_inner());
+        let guard = auth.read();
         assert_eq!(guard.user(), "root");
         assert!(guard.requires_password_change());
     }
@@ -1417,7 +1417,7 @@ mod tests {
         let mut limiter = LoginRateLimiter::new(5, 60);
         let ip = "127.0.0.1";
         for _ in 0..5 {
-            limiter.record_failure(ip);
+            limiter.record_attempt(ip);
         }
         assert!(limiter.is_locked(ip));
 
@@ -1429,6 +1429,40 @@ mod tests {
             panic!("missing attempts entry");
         }
         assert!(!limiter.is_locked(ip));
+    }
+
+    #[test]
+    fn login_rate_limiter_evicts_least_recently_used_key_at_cap() {
+        let mut limiter = LoginRateLimiter::new(5, 60);
+        for index in 0..MAX_LOGIN_RATE_LIMIT_KEYS {
+            limiter.record_attempt(&format!("ip-{index}"));
+        }
+        limiter.record_attempt("ip-0");
+        limiter.record_attempt("ip-new");
+
+        assert_eq!(limiter.attempts.len(), MAX_LOGIN_RATE_LIMIT_KEYS);
+        assert_eq!(limiter.lru_keys.len(), MAX_LOGIN_RATE_LIMIT_KEYS);
+        assert!(limiter.attempts.contains_key("ip-0"));
+        assert!(!limiter.attempts.contains_key("ip-1"));
+        assert!(limiter.attempts.contains_key("ip-new"));
+    }
+
+    #[test]
+    fn session_replay_fingerprints_prune_one_oldest_entry_per_insert() {
+        let mut store = SessionStore::new(Duration::from_secs(60));
+        let (session_id, csrf_token) = store.create();
+
+        for fingerprint in 0..=MAX_REPLAY_FINGERPRINTS as u64 {
+            assert!(store
+                .validate_post_guard(&session_id, &csrf_token, fingerprint, true)
+                .is_ok());
+        }
+
+        let record = store.sessions.get(&session_id).expect("session must exist");
+        assert_eq!(record.replay_fingerprints.len(), MAX_REPLAY_FINGERPRINTS);
+        assert_eq!(record.replay_fingerprint_set.len(), MAX_REPLAY_FINGERPRINTS);
+        assert!(!record.replay_fingerprint_set.contains(&0));
+        assert!(record.replay_fingerprint_set.contains(&(MAX_REPLAY_FINGERPRINTS as u64)));
     }
 
     #[test]
