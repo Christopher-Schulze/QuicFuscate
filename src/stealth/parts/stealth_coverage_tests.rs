@@ -766,6 +766,32 @@ mod stealth_coverage_tests {
     }
 
     #[test]
+    fn probe_detector_threshold_controls_switch_escalation() {
+        let gfw_packet = vec![0x16, 0x03, 0x01, 0x00, 0x00, 0xff, 0xff];
+        let addr: std::net::SocketAddr = "1.2.3.4:1234".parse().expect("addr");
+
+        let low_threshold = ActiveProbeDetector::new(2, ProbeResponseMode::Fake);
+        assert_eq!(
+            low_threshold.check_packet(&gfw_packet, addr),
+            Some(ProbeResponseMode::Fake)
+        );
+        assert_eq!(
+            low_threshold.check_packet(&gfw_packet, addr),
+            Some(ProbeResponseMode::Switch)
+        );
+
+        let high_threshold = ActiveProbeDetector::new(3, ProbeResponseMode::Fake);
+        assert_eq!(
+            high_threshold.check_packet(&gfw_packet, addr),
+            Some(ProbeResponseMode::Fake)
+        );
+        assert_eq!(
+            high_threshold.check_packet(&gfw_packet, addr),
+            Some(ProbeResponseMode::Fake)
+        );
+    }
+
+    #[test]
     fn probe_detector_ignores_normal_quic_packet() {
         let detector = ActiveProbeDetector::new(5, ProbeResponseMode::Switch);
         // Normal-looking QUIC short header (Fixed Bit set)

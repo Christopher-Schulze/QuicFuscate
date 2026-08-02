@@ -3295,6 +3295,7 @@ if let Some(mode) = detector.check_packet(&packet, source_addr) {
     // mode is Ignore | Fake | Switch | Block
 }
 ```
+`check_packet` records matching probes in a rolling 60-second history. Below the configured threshold it returns the configured response mode; once the recent matching count reaches the threshold it returns `Switch` for escalation. The current `StealthManager` path uses a threshold of 5 when dynamic stealth, traffic padding, or timing obfuscation is enabled.
 
 #### Flow Shaping
 ```rust
