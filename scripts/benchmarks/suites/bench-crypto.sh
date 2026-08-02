@@ -5,15 +5,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$PROJECT_ROOT"
+# shellcheck disable=SC1091
 [[ -f "$SCRIPT_DIR/../../tests/lib/lib-common.sh" ]] && source "$SCRIPT_DIR/../../tests/lib/lib-common.sh"
 
-OUTPUT_DIR=""; FAST=0
+OUTPUT_DIR=""; FAST=0; DRY_RUN=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --output-dir) OUTPUT_DIR="$2"; shift;;
     --fast) FAST=1;;
-    --verbose) QUICFUSCATE_DEBUG_SCRIPTS=1;;
-    --help|-h) echo "Usage: $(basename "$0") [options]"; echo "Crypto Benchmarks"; usage_common_flags 2>/dev/null || true; exit 0;;
+    --full) FAST=0;;
+    --dry-run) DRY_RUN=1;;
+    --verbose) export QUICFUSCATE_DEBUG_SCRIPTS=1;;
+    --help|-h) echo "Usage: $(basename "$0") [--output-dir DIR] [--fast|--full] [--dry-run]"; echo "Crypto Benchmarks"; usage_common_flags 2>/dev/null || true; exit 0;;
     *) echo "Unknown flag: $1" >&2; exit 2;;
   esac; shift
 done
@@ -21,6 +24,64 @@ done
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 [[ -z "$OUTPUT_DIR" ]] && OUTPUT_DIR="$SCRIPT_DIR/../../out/benchmarks/crypto-bench-${TIMESTAMP}"
 validate_harness_inputs "$OUTPUT_DIR" "${CARGO_FEATURES:-}" "${RUSTFLAGS_EXTRA:-}" "${JOBS:-}"
+
+mkdir -p "$OUTPUT_DIR"
+# shellcheck disable=SC2034
+LOG_FILE="$OUTPUT_DIR/crypto-bench.log"
+JSON="$OUTPUT_DIR/results.json"; json_begin "$JSON" "bench_crypto_comprehensive"; JSON_FIRST_RUN=1
+
+SELECTED_CELLS=(crypto_all_native)
+case "$(uname -m)" in
+  x86_64)
+    (( FAST )) || SELECTED_CELLS+=(crypto_all_sse2 crypto_all_avx2)
+    ;;
+  aarch64|arm64)
+    (( FAST )) || SELECTED_CELLS+=(crypto_all_neon)
+    ;;
+esac
+SELECTED_CELLS+=(morus_native)
+case "$(uname -m)" in
+  x86_64)
+    (( FAST )) || SELECTED_CELLS+=(morus_sse2)
+    ;;
+  aarch64|arm64)
+    (( FAST )) || SELECTED_CELLS+=(morus_neon)
+    ;;
+esac
+SELECTED_CELLS+=(aes_gcm_native)
+case "$(uname -m)" in
+  x86_64)
+    (( FAST )) || SELECTED_CELLS+=(aes_gcm_aesni aes_gcm_vaes)
+    ;;
+  aarch64|arm64)
+    (( FAST )) || SELECTED_CELLS+=(aes_gcm_crypto)
+    ;;
+esac
+SELECTED_CELLS+=(chacha20_poly1305_native)
+
+append_mode_metadata() {
+    local mode="full"
+    (( FAST )) && mode="fast"
+    local cells_json="["
+    local cell
+    for cell in "${SELECTED_CELLS[@]}"; do
+        [[ "$cells_json" == "[" ]] || cells_json+=","
+        cells_json+="\"$(qf_json_escape "$cell")\""
+    done
+    cells_json+="]"
+    printf '  {"cell":"meta","result":"PASS","reason":"","command":"","command_status":0,"meta":{"mode":"%s","fast":%s,"selected_cells":%s,"cell_count":%s}}' \
+        "$mode" "$FAST" "$cells_json" "${#SELECTED_CELLS[@]}" >> "$JSON"
+    JSON_FIRST_RUN=0
+}
+
+append_mode_metadata
+if (( DRY_RUN )); then
+    echo "DRY-RUN: mode=$([[ "$FAST" -eq 1 ]] && echo fast || echo full) cells=${SELECTED_CELLS[*]}"
+    echo "," >> "$JSON"
+    echo '  {"cell":"dry-run","result":"SKIP","reason":"dry_run","command_status":null}' >> "$JSON"
+    json_end "$JSON"
+    exit 0
+fi
 
 echo "==============================================================="
 echo "  Crypto Comprehensive Benchmark Suite"
@@ -31,6 +92,9 @@ echo "==============================================================="
 # Skip gracefully if bench harness absent
 if ! cargo bench --no-run --features benches >/dev/null 2>&1; then
   echo "No Rust benches detected; skipping crypto benches."
+  echo "," >> "$JSON"
+  echo '  {"cell":"suite","result":"SKIP","reason":"no_rust_benches","command_status":0}' >> "$JSON"
+  json_end "$JSON"
   exit 0
 fi
 
@@ -41,10 +105,6 @@ BLUE='\033[0;34m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-# Output directory
-mkdir -p "$OUTPUT_DIR"
-LOG_FILE="$OUTPUT_DIR/crypto-bench.log"
-JSON="$OUTPUT_DIR/results.json"; json_begin "$JSON" "bench_crypto_comprehensive"; JSON_FIRST_RUN=1
 BENCH_FAILURES=0
 
 # Function to measure crypto throughput
@@ -104,14 +164,17 @@ elif [[ $(uname -m) == "aarch64" ]] || [[ $(uname -m) == "arm64" ]]; then
         sysctl -a 2>/dev/null | grep -i "hw.optional" | grep -E "aes|neon" || echo "  ARM crypto extensions"
 fi
 
-# Full Crypto Suite Benchmarks (AEGIS, AES-HP, ChaCha, key derivation)
-echo -e "\n${YELLOW}=== Full Crypto Suite Performance ===${NC}"
+if (( FAST )); then
+    echo -e "\n${YELLOW}=== Fast Crypto Suite Performance ===${NC}"
+else
+    echo -e "\n${YELLOW}=== Full Crypto Suite Performance ===${NC}"
+fi
 measure_throughput "crypto_all_native" "crypto::tests" --
 
-if [[ $(uname -m) == "x86_64" ]]; then
+if [[ "$FAST" -eq 0 && $(uname -m) == "x86_64" ]]; then
     measure_throughput "crypto_all_sse2" "crypto::tests" "RUSTFLAGS=-C target-feature=+sse2" --
     measure_throughput "crypto_all_avx2" "crypto::tests" "RUSTFLAGS=-C target-feature=+avx2" --
-elif [[ $(uname -m) == "aarch64" ]] || [[ $(uname -m) == "arm64" ]]; then
+elif [[ "$FAST" -eq 0 && ( $(uname -m) == "aarch64" || $(uname -m) == "arm64" ) ]]; then
     measure_throughput "crypto_all_neon" "crypto::tests" "RUSTFLAGS=-C target-feature=+neon" --
 fi
 
@@ -119,9 +182,9 @@ fi
 echo -e "\n${YELLOW}=== MORUS-1280-128 Performance ===${NC}"
 measure_throughput "morus_native" "crypto::morus::morus_tests" --
 
-if [[ $(uname -m) == "x86_64" ]]; then
+if [[ "$FAST" -eq 0 && $(uname -m) == "x86_64" ]]; then
     measure_throughput "morus_sse2" "crypto::morus::morus_tests" "RUSTFLAGS=-C target-feature=+sse2" --
-elif [[ $(uname -m) == "aarch64" ]] || [[ $(uname -m) == "arm64" ]]; then
+elif [[ "$FAST" -eq 0 && ( $(uname -m) == "aarch64" || $(uname -m) == "arm64" ) ]]; then
     measure_throughput "morus_neon" "crypto::morus::morus_tests" "RUSTFLAGS=-C target-feature=+neon" --
 fi
 
@@ -129,10 +192,10 @@ fi
 echo -e "\n${YELLOW}=== AES-GCM Performance ===${NC}"
 measure_throughput "aes_gcm_native" "crypto::gcm::tests" --
 
-if [[ $(uname -m) == "x86_64" ]]; then
+if [[ "$FAST" -eq 0 && $(uname -m) == "x86_64" ]]; then
     measure_throughput "aes_gcm_aesni" "crypto::gcm::tests" "RUSTFLAGS=-C target-feature=+aes,+sse2" --
     measure_throughput "aes_gcm_vaes" "crypto::gcm::tests" "RUSTFLAGS=-C target-feature=+vaes,+avx512f" --
-elif [[ $(uname -m) == "aarch64" ]] || [[ $(uname -m) == "arm64" ]]; then
+elif [[ "$FAST" -eq 0 && ( $(uname -m) == "aarch64" || $(uname -m) == "arm64" ) ]]; then
     measure_throughput "aes_gcm_crypto" "crypto::gcm::tests" "RUSTFLAGS=-C target-feature=+aes,+neon" --
 fi
 

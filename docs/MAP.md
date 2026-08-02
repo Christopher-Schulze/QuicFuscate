@@ -580,6 +580,7 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 |   |   |   |-- test-fast-crypto.sh
 |   |   |   |-- test-fast-fec-fail-closed.sh
 |   |   |   |-- test-fast-fec.sh
+|   |   |   |-- test-benchmark-fast-mode-contract.sh
 |   |   |   |-- test-harness-argument-safety.sh
 |   |   |   `-- test-profiling-evidence-contract.sh
 |   |   |-- frontend
@@ -1181,3 +1182,10 @@ The audit remains open. These reconciliations document current evidence and owne
 - **Zero-copy boundary:** `profiling-zc.sh` is the only canonical SendMsgZc runner. It launches the actual product binary with `QUICFUSCATE_IO_URING_ZC=1` and `--telemetry`, and requires positive send and notification counters from both telemetry endpoints before emitting a pass.
 - **Evidence status:** `PASS`, `FAIL`, `SKIP`, and `UNAVAILABLE` are the only scenario states. Missing setup, process, traffic, measurement, or tooling evidence cannot be encoded as `N/A`. Generated `docs/profiling/` output remains ignored; historical ignored profiling files are evidence-boundary inputs, not current tracked proof.
 - **Negative coverage:** `scripts/tests/fast/test-profiling-evidence-contract.sh` exercises portable dry-runs, unavailable-tool manifests, invalid iperf/SendMsgZc metric payloads, side-effect-safe paths, and source-backed failure markers. Native failed-process and netem fixtures run only when real Linux/root prerequisites are present.
+
+## Implementation Reconciliation (2026-08-02, benchmark and analysis fast/full modes)
+
+- **Suite matrices:** `bench-crypto.sh`, `bench-fec.sh`, `bench-optimization.sh`, `bench-stealth.sh`, and `bench-transport.sh` now consume `--fast` and `--full`. Fast selects bounded native, pipeline, single-size, or single-group cells; full selects the complete architecture or benchmark-group matrix. Each runner writes a machine-readable `meta` item with the effective mode and selected cells.
+- **Orchestration:** `bench-orchestrator.sh` records the selected suite list and passes `--fast` or `--full` to every mode-aware child. Its dry-run manifest therefore exposes both the parent mode and the exact child argv contract.
+- **Coverage analysis:** `analysis-coverage-summary.sh --fast` performs only the static function/test inventory and records that scope; `--full` retains the cargo-llvm-cov path or its Cargo-test proxy. A dry run records the backend without launching Cargo.
+- **Regression proof:** `scripts/tests/fast/test-benchmark-fast-mode-contract.sh` validates both modes for all affected helpers, exact selected cells, orchestrator propagation, valid JSON, and output paths containing spaces without executing a benchmark.

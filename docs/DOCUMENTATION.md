@@ -2040,7 +2040,7 @@ let selected = match plan {
 ```
 
 Benchmarks
-- Script: `./scripts/benchmarks/suites/bench-crypto.sh` - runs crypto micro-benchmarks across modes and exports results to `scripts/out/benchmarks/`.
+- Script: `./scripts/benchmarks/suites/bench-crypto.sh` - runs the explicit `--fast` native-cell smoke matrix or the complete architecture matrix and records the effective mode and selected cells in `results.json` under `scripts/out/benchmarks/`.
 - Optional (feature-gated): build with `--features benches` to run the `crypto-bench` subcommand.
 
 #### Automated Build and CI/CD
@@ -3745,7 +3745,9 @@ The affected test and benchmark wrappers preserve operator and CI arguments as a
 
 `scripts/benchmarks/suites/bench-orchestrator.sh` resolves fixed suite names to executable-plus-argv arrays, passes output directories as one argument, records structured `argv` and command identity in `manifest.json`, marks dry-run children as `SKIP`, and exits nonzero for failed children or unknown requested suites. `bench-qpack-encode.sh`, `micro-udpfast-throughput.sh`, and `micro-crypto-all.sh` validate numeric, size, endpoint, feature, jobs, flag, and path input before execution or numeric JSON serialization. The Admin E2E wrapper validates credentials, addresses, paths, timeout, and TTL, passes dynamic JSON values through Python `sys.argv`, and makes `--dry-run` a complete non-executing plan that does not require curl, PKI generation, server startup, or readiness polling.
 
-`scripts/tests/fast/test-harness-argument-safety.sh` is the real negative contract for these boundaries. It exercises the orchestrator, Admin E2E, QPACK, UDP, and crypto harnesses with shell metacharacters, paths containing spaces, malformed sizes, and invalid numerics; it requires structured JSON failure/skip records and proves that no side-effect marker is created. TODO-735 remains the owner for the broader benchmark build/export/selection matrix, and TODO-738 remains the owner for typed parsing and checked workload arithmetic inside the Rust benchmark/probe examples.
+Benchmark and analysis mode truth is explicit. `bench-crypto.sh`, `bench-fec.sh`, `bench-optimization.sh`, `bench-stealth.sh`, and `bench-transport.sh` accept `--fast` and `--full`, select different documented Criterion or test cells, and write a `meta` item with `mode`, `selected_cells`, and `cell_count`. `bench-orchestrator.sh` records `selected_suites` and propagates the matching flag to each mode-aware child. `analysis-coverage-summary.sh --fast` is a bounded static function/test inventory with no Cargo coverage run; `--full` runs the cargo-llvm-cov summary when available or the documented Cargo-test proxy. All dry-run paths serialize the selected mode without executing Cargo.
+
+`scripts/tests/fast/test-harness-argument-safety.sh` is the real negative contract for argument boundaries. `scripts/tests/fast/test-benchmark-fast-mode-contract.sh` is the positive mode contract: it runs every affected benchmark and analysis helper in fast and full dry-run modes, validates JSON metadata and selected cells, checks orchestrator propagation, and uses paths containing spaces. TODO-781 owns this fast/full mode contract; TODO-735 remains the owner for the broader benchmark result-status and build/export contract, and TODO-738 remains the owner for typed parsing and checked workload arithmetic inside the Rust benchmark/probe examples.
 
 ## Scripts Reference
 This section is the authoritative build/packaging script reference in this document. Script-produced artifacts are written to `scripts/out/<category>/` (including build-release artifacts under `scripts/out/build/...`).
@@ -3766,7 +3768,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `build-web-admin.sh` - SvelteKit admin UI static build to `assets/web-admin/`
 
 #### Analysis (`scripts/tests/analysis/`)
-- `analysis-coverage-summary.sh` - Coverage summary (JSON/text)
+- `analysis-coverage-summary.sh` - Coverage summary (JSON/text); `--fast` emits the bounded static function/test inventory, while `--full` runs the complete coverage path
 - `analysis-dead-code-report.sh` - Dead code report (JSON/text)
 - `analysis-scripts-quality.sh` - Script quality/static consistency checks
 - `analysis-suite-matrix.sh` - Test/benchmark suite matrix report generation
@@ -3841,6 +3843,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `test-dynamic-discovery-fail-closed.sh` - Real Cargo contract for discovery command failure, target mismatch, stale patterns, and zero-test execution
 - `test-fast-fec.sh` - Fast FEC sanity; runs separate `fec::tests::`, `gf16`, `wiedemann`, and `streaming` filters with `benches,rust-tests`, requires a positive executed-test count per filter, and records a separate bench compile result
 - `test-fast-fec-fail-closed.sh` - Negative contract proving a real focused Cargo failure propagates as nonzero, records bounded failure evidence, and cannot reach the green completion marker or bench stage
+- `test-benchmark-fast-mode-contract.sh` - Positive fast/full benchmark and coverage-mode contract with JSON cell metadata, orchestrator propagation, and dry-run path safety
 - `test-harness-argument-safety.sh` - Real negative contract for array-safe suite propagation, redacted Admin E2E dry-run, malformed QPACK sizes, invalid microbench numerics, paths with spaces, and shell-side-effect rejection
 - `test-profiling-evidence-contract.sh` - Negative contract for profiling dry-run safety, unavailable native tools, missing iperf/SendMsgZc metrics, failed-process markers, failed-netem markers, and missing flamegraph tooling
 
@@ -3869,13 +3872,13 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 
 #### Benchmarks (`scripts/benchmarks/`)
 **Suites (`scripts/benchmarks/suites/`)**
-- `bench-orchestrator.sh` - Orchestrates benchmark matrix with fixed executable argv resolution; writes structured `manifest.json`, `summary.txt`, and per-suite logs under `scripts/out/benchmarks/`, and fails on unknown or failed requested suites
-- `bench-fec.sh` - FEC benchmarks (encoder/decoder/Wiedemann/GF16/parallelization)
+- `bench-orchestrator.sh` - Orchestrates the explicit fast or full benchmark matrix with fixed executable argv resolution; writes structured `manifest.json`, `summary.txt`, mode metadata, and per-suite logs under `scripts/out/benchmarks/`, and fails on unknown or failed requested suites
+- `bench-fec.sh` - FEC benchmarks; full runs matrix multiply plus pipeline, while fast runs the pipeline cell only
 - `bench-fec-simulation.sh` - FEC performance under simulated network conditions with per-cell command statuses
-- `bench-crypto.sh` - Extended crypto benchmarks with per-cell command result artifacts
-- `bench-transport.sh` - Transport benchmarks (packet/varint/frames/streams; io_uring on Linux)
-- `bench-optimization.sh` - Runtime-owned SIMD sort/shuffle optimization benchmarks; memory microprimitives are rust-tests parity-only.
-- `bench-stealth.sh` - Stealth module performance (padding, masquerading, obfuscation)
+- `bench-crypto.sh` - Extended crypto benchmarks with per-cell command result artifacts; fast keeps one native cell per primitive, full adds architecture-specific cells
+- `bench-transport.sh` - Transport benchmarks; fast runs varint, full adds packet-number encoding
+- `bench-optimization.sh` - Runtime-owned SIMD optimization benchmarks; fast runs the 1024-element sort cell, full runs sort and shuffle; memory microprimitives are rust-tests parity-only
+- `bench-stealth.sh` - Stealth padding performance; fast runs the 512-byte padding cell, full runs the complete padding group
 - `bench-stealth-brain.sh` - StealthBrain ACK policy optimization benchmarks with per-cell command statuses
 - `bench-compression.sh` - Compression microbenchmarks (`examples/compress_bench.rs`) for text and binary payloads with JSON output
 - `bench-qpack-encode.sh` - QPACK encode benchmark harness with bounded size grammar, preflight rejection, and per-cell status

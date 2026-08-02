@@ -5,6 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$PROJECT_ROOT"
+# shellcheck disable=SC1091
 [[ -f "$SCRIPT_DIR/../../tests/lib/lib-common.sh" ]] && source "$SCRIPT_DIR/../../tests/lib/lib-common.sh"
 
 OUTPUT_DIR=""
@@ -15,14 +16,16 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --output-dir) OUTPUT_DIR="$2"; shift;;
     --fast) FAST=1;;
+    --full) FAST=0;;
     --suite) SUITE_FILTER="$2"; shift;;
     --dry-run) DRY_RUN=1;;
-    --verbose) QUICFUSCATE_DEBUG_SCRIPTS=1;;
+    --verbose) export QUICFUSCATE_DEBUG_SCRIPTS=1;;
     --list) LIST_ONLY=1;;
     --help|-h)
       echo "Usage: $(basename "$0") [options]"
       echo "Benchmark Orchestrator Suite"; usage_common_flags 2>/dev/null || true;
       echo "  --suite list     Comma-separated suite list (e.g., crypto,fec,transport)";
+      echo "  --fast|--full    Select the bounded fast or complete benchmark matrix";
       echo "  --list           Print available suites";
       exit 0
       ;;
@@ -103,6 +106,24 @@ append_item() {
     "$(qf_json_escape "$command_text")" "$command_status" "$dur" "$(qf_json_escape "$log")" >> "$MANIFEST"
 }
 
+append_mode_metadata() {
+  local mode="full"
+  (( FAST )) && mode="fast"
+  local suites_json="["
+  local suite
+  for suite in "${SUITE_NAMES[@]}"; do
+    [[ "$suites_json" == "[" ]] || suites_json+=","
+    suites_json+="\"$(qf_json_escape "$suite")\""
+  done
+  suites_json+="]"
+  if [[ "$JSON_FIRST_RUN" -eq 0 ]]; then
+    echo "," >> "$MANIFEST"
+  fi
+  JSON_FIRST_RUN=0
+  printf '  {"cell":"meta","result":"PASS","reason":"","command":"","command_status":0,"meta":{"mode":"%s","fast":%s,"selected_suites":%s,"suite_count":%s}}' \
+    "$mode" "$FAST" "$suites_json" "${#SUITE_NAMES[@]}" >> "$MANIFEST"
+}
+
 print_system_banner
 log "writing artifacts to ${OUTPUT_DIR}"
 
@@ -115,12 +136,12 @@ for name in "${SUITE_NAMES[@]}"; do
   case "$name" in
     micro-crypto-all) suite_script="$SCRIPT_DIR/../micro/micro-crypto-all.sh"; suite_args=(--fast);;
     fec-simulation-fast) suite_script="$SCRIPT_DIR/bench-fec-simulation.sh"; suite_args=(--fast);;
-    crypto) suite_script="$SCRIPT_DIR/bench-crypto.sh";;
-    fec) suite_script="$SCRIPT_DIR/bench-fec.sh";;
-    transport) suite_script="$SCRIPT_DIR/bench-transport.sh"; [[ "$FAST" -eq 1 ]] && suite_args=(--fast);;
+    crypto) suite_script="$SCRIPT_DIR/bench-crypto.sh"; suite_args=(--full);;
+    fec) suite_script="$SCRIPT_DIR/bench-fec.sh"; suite_args=(--full);;
+    transport) suite_script="$SCRIPT_DIR/bench-transport.sh"; if [[ "$FAST" -eq 1 ]]; then suite_args=(--fast); else suite_args=(--full); fi;;
     compression) suite_script="$SCRIPT_DIR/bench-compression.sh";;
-    optimization) suite_script="$SCRIPT_DIR/bench-optimization.sh";;
-    stealth) suite_script="$SCRIPT_DIR/bench-stealth.sh"; [[ "$FAST" -eq 1 ]] && suite_args=(--fast);;
+    optimization) suite_script="$SCRIPT_DIR/bench-optimization.sh"; suite_args=(--full);;
+    stealth) suite_script="$SCRIPT_DIR/bench-stealth.sh"; if [[ "$FAST" -eq 1 ]]; then suite_args=(--fast); else suite_args=(--full); fi;;
     stealth-brain) suite_script="$SCRIPT_DIR/bench-stealth-brain.sh";;
     qpack-encode) suite_script="$SCRIPT_DIR/bench-qpack-encode.sh";;
     *) error "Unknown benchmark suite: ${name}"; FAILED_SUITES=$((FAILED_SUITES + 1)); continue;;
@@ -160,6 +181,8 @@ for name in "${SUITE_NAMES[@]}"; do
     info "suite ${name} result=${result}"
   fi
  done
+
+append_mode_metadata
 
 json_end "$MANIFEST"
 
