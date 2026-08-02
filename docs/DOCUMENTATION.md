@@ -1261,6 +1261,7 @@ pub struct MacTun {
 - **Hybrid design**: Adaptive RLNC + Tetrys-like streaming with automatic mode switching
 - **Auto-Mode**: Switches based on observed loss/RTT (bounded by `hysteresis`, smoothed by `lambda`)
 - **Telemetry**: Track mode switches via `fec_mode`, `fec_mode_switch_total`
+- **Decoder observability**: Process-wide counters expose admitted repair equations, full-solver attempts, successful solves, cumulative solver time, bounded dedup evictions, and a derived solve-success ratio.
 
 #### FEC Modes
 
@@ -1320,6 +1321,7 @@ pub struct MacTun {
 - VBMI2 nibble gather kernel (`gf16_mul_slice_vbmi2`) drives `FEC_GF16_VBMI2_OPS`; processes 32xu16 per iteration via `_mm512_permutex2var_epi16` tables. Planner selects it for `X86_P3c+`; scalar fallback remains for residual CPUs. Throughput characteristics remain hardware-dependent and are validated on target systems.
 - Matrix multiplication delegates coefficient application to the same canonical 0x11D slice kernel; raw AVX-512 GFNI multiplication is excluded because its 0x11B polynomial is wire-incompatible.
 - NEON and SVE2 slice kernels share nibble tables with adaptive prefetch; `FEC_NEON_OPS` and `FEC_SVE2_OPS` counters expose runtime usage.
+- GF(2^8) lookup tables are initialized once through a synchronized `Once`/`OnceLock` boundary during FEC startup and never re-enter initialization from `gf_mul_table` or `gf_inv8`.
 
 **GF(2^16) - 16-bit Galois Field:**
 - AVX2-optimized nibble paths (x86_64)
@@ -1340,6 +1342,7 @@ pub struct MacTun {
 - Internal block-iterative solver for large GF(2^8) recovery systems.
 - Parallel per-byte solving via Rayon.
 - Every candidate is checked against every original row before materialization; missing or invalid byte solutions fall back to Gaussian elimination.
+- Solver attempts and wall-clock nanoseconds are recorded for GF(2^8)/GF(2^16) full elimination; the exported success ratio is derived from attempts and successful solves. Repair-equation admission covers all decoder backends.
 
 **Public contract vs internal machinery:**
 - The canonical FEC runtime surface is intentionally narrow: `FecConfig`, `FecMode`, `FecPacket`, and `AdaptiveFec` runtime operations.
@@ -1412,7 +1415,7 @@ quicfuscate server --listen 0.0.0.0:4433 --cc-algorithm cubic
   - Block modes through 255 sources per interleave lane: GF(2^8) with deterministic Cauchy repair rows.
   - Block modes above 255 sources per lane: GF(2^16) with deterministic Cauchy repair rows and exact odd-length recovery. A process-wide 65,536-entry, 128 KiB inverse table is built once in linear field order, preserving every wire coefficient while removing repeated exponentiation from eager row-cache construction.
   - `Streaming`: partial-window GF(2^8) repairs with explicit coverage anchors.
-  - `Fountain`: deterministic LT source sets, reserved for explicit severe-loss rescue rather than the normal efficiency path. The product window is bounded to 128 sources, limiting the current 5x-code-rate completion burst to 512 repairs instead of allowing multi-thousand-packet synchronous stalls.
+  - `Fountain`: keyed deterministic LT source sets, reserved for explicit severe-loss rescue rather than the normal efficiency path. The seed is HMAC-SHA-256-derived from the local QUIC 1-RTT traffic secret, so the peer derives the same sets without a public seed. The product window is bounded to 128 sources, limiting the current 5x-code-rate completion burst to 512 repairs instead of allowing multi-thousand-packet synchronous stalls.
 - Internal large-window decoder strategy
   - Bitsliced multi-lane MatVec with internal heuristics for projection/lanes.
   - Verification path checks `A_k * X == B` on a small sample and falls back to Gauss on mismatch.
@@ -1431,7 +1434,7 @@ Wire Format v1 (active 1-RTT DATAGRAM)
 [epoch:4][window:4][sequence:8][source_count:2][total_count:2]
 [repair_index:2][payload_len:2][payload:..]
 ```
-The fixed header is 32 bytes. Systematic wire symbols retain the two-byte inner QUIC length, while repair symbols retain that length plus the two-byte outer FEC source length, making the maximum active-FEC overhead exactly 36 bytes. Repair coefficient vectors are never transmitted: codec, block width, lane, and repair ordinal deterministically regenerate GF rows, while Fountain source sets regenerate from the repair seed. Core reserves the full overhead before QUIC serialization, so the outer UDP datagram cannot exceed the active path MTU.
+The fixed header is 32 bytes. Systematic wire symbols retain the two-byte inner QUIC length, while repair symbols retain that length plus the two-byte outer FEC source length, making the maximum active-FEC overhead exactly 36 bytes. Repair coefficient vectors are never transmitted: codec, block width, lane, and repair ordinal deterministically regenerate GF rows, while Fountain source sets regenerate from an HMAC-SHA-256-derived seed over the matching QUIC 1-RTT traffic secret and never from public wire metadata. Core reserves the full overhead before QUIC serialization, so the outer UDP datagram cannot exceed the active path MTU.
 
 Mode Selection & Hysteresis
 - Selection heuristic (loss-driven):
@@ -1460,7 +1463,7 @@ Mode Selection & Hysteresis
 - Ingress
   - Core recognizes the two-byte magic, validates the complete header before decoder-window allocation, and dispatches by transmitted epoch/profile rather than local receive-side loss estimates.
   - The standalone server bypasses stateless Version Negotiation for the FEC magic before selecting the existing peer session, so active envelopes cannot be mistaken for unsupported long-header Initial packets.
-  - Receiver state retains at most four windows, bounds source blocks to 2,048 symbols and total codewords to 12,288 symbols, rejects profile mutation within a retained epoch, and suppresses duplicate repairs.
+  - Receiver state retains at most four windows, bounds source blocks to 2,048 symbols and total codewords to 12,288 symbols, rejects profile mutation within a retained epoch, and suppresses duplicate repairs with a FIFO set capped at the profile's total repair capacity.
   - Every systematic source and recovered source validates then removes its exact protected QUIC length at the FEC-to-QUIC boundary before decryption. Repairs can never enter header protection or AEAD processing.
   - Malformed, unsupported, or resource-exhausting FEC envelopes are dropped without terminating the authenticated QUIC connection. Recovered QUIC datagrams still pass normal header protection and AEAD authentication.
   - `FecMode::Zero` remains a raw ownership-preserving passthrough, allowing the QUIC core to decrypt and remove header protection in place without an extra copy.
@@ -1468,6 +1471,7 @@ Mode Selection & Hysteresis
 - Semantics & Safety
   - `epoch`, `window`, `sequence`, `source_count`, `total_count`, `interleave_depth`, `block_index`, and `repair_index` fully define decoder ownership and deterministic repair reconstruction.
   - All payload and coefficient buffers are bounded by the `MemoryPool` block size and returned to the pool on drop.
+  - Decoder telemetry exports `quicfuscate_fec_decoder_equations_total`, `quicfuscate_fec_decoder_solve_attempts_total`, `quicfuscate_fec_decoder_solve_successes_total`, `quicfuscate_fec_decoder_solve_success_ratio_ppm`, `quicfuscate_fec_decoder_solve_time_ns_total`, and `quicfuscate_fec_decoder_dedup_evictions_total`.
   - The retained `FecPacket::to_stream_raw()` / `from_stream_raw()` format is a legacy internal compatibility/test surface and is not used by Core transport framing.
 
 Performance evidence on Apple Silicon for the product-window repair burst: optimized single-repair GF4 k=15 reaches about `6.69 us` median and `199.45 MiB/s`, versus the measured GF8 k=16 baseline at about `11.67 us` and `114.44 MiB/s`. The exact one-repair policy improves its preceding two-repair GF4 result by about 22% in median time. The v1 envelope itself measures about `29.73 ns` to write and `12.83 ns` to parse at a 1,400-byte outer MTU; deterministic GF8 k=16 row derivation measures about `22.75 ns`.

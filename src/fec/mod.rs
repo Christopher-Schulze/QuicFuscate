@@ -24,6 +24,19 @@ const DEFAULT_FOUNTAIN_WINDOW: usize = 128;
 const MAX_FOUNTAIN_WINDOW: usize = 128;
 #[cfg(test)]
 const MAX_FOUNTAIN_REPAIR_BURST: usize = MAX_FOUNTAIN_WINDOW * 4 + 4;
+pub(crate) const DEFAULT_FOUNTAIN_SEED: u64 = 12_345;
+const FOUNTAIN_SEED_LABEL: &[u8] = b"quicfuscate fec fountain v1";
+
+/// Derive the connection-local fountain seed from the matching QUIC 1-RTT secret.
+///
+/// The sender's write secret is the receiver's read secret, so both endpoints
+/// regenerate identical symbol sets without putting the seed on the wire.
+pub(crate) fn derive_fountain_seed(secret: &[u8]) -> u64 {
+    let digest = crate::crypto::hkdf::hmac_sha256(secret, FOUNTAIN_SEED_LABEL);
+    let mut seed_bytes = [0u8; 8];
+    seed_bytes.copy_from_slice(&digest[..8]);
+    u64::from_be_bytes(seed_bytes)
+}
 
 fn next_repair_id() -> u64 {
     REPAIR_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
@@ -425,14 +438,10 @@ pub fn matrix_multiply_scalar(a: &[Vec<u8>], b: &[Vec<u8>], result: &mut [Vec<u8
 
 #[inline]
 fn matrix_multiply_accumulate(a: &[Vec<u8>], b: &[Vec<u8>], result: &mut [Vec<u8>]) {
+    gf_tables::init_tables();
     let m = a.len();
     let k = if m > 0 { a[0].len() } else { 0 };
     let n = if !b.is_empty() { b[0].len() } else { 0 };
-
-    for row in result.iter_mut() {
-        row.clear();
-        row.resize(n, 0);
-    }
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "ssse3")]
@@ -592,6 +601,7 @@ impl FecGlobalResources {
     }
 
     fn initialize(&self) {
+        gf_tables::init_tables();
         self.rayon.initialize();
     }
 }

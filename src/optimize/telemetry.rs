@@ -342,6 +342,42 @@ pub fn export_telemetry_text() -> String {
             "quicfuscate_fec_recovered_payload_bytes_total {}",
             FEC_RECOVERED_PAYLOAD_BYTES.get()
         );
+        let decoder_solve_attempts = FEC_DECODER_SOLVE_ATTEMPTS.get();
+        let decoder_solve_successes = FEC_DECODER_SOLVE_SUCCESSES.get();
+        let decoder_solve_success_ratio_ppm = if decoder_solve_attempts == 0 {
+            0
+        } else {
+            (decoder_solve_successes as u128)
+                .saturating_mul(1_000_000)
+                .checked_div(decoder_solve_attempts as u128)
+                .unwrap_or(0)
+                .min(1_000_000) as u64
+        };
+        let _ = writeln!(
+            out,
+            "quicfuscate_fec_decoder_equations_total {}",
+            FEC_DECODER_EQUATIONS.get()
+        );
+        let _ =
+            writeln!(out, "quicfuscate_fec_decoder_solve_attempts_total {decoder_solve_attempts}");
+        let _ = writeln!(
+            out,
+            "quicfuscate_fec_decoder_solve_successes_total {decoder_solve_successes}"
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_fec_decoder_solve_success_ratio_ppm {decoder_solve_success_ratio_ppm}"
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_fec_decoder_solve_time_ns_total {}",
+            FEC_DECODER_SOLVE_TIME_NS.get()
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_fec_decoder_dedup_evictions_total {}",
+            FEC_DECODER_DEDUP_EVICTIONS.get()
+        );
     } // end fec
 
     // MASQUE
@@ -1211,6 +1247,16 @@ pub static FEC_DECODED_PACKETS: Counter = Counter::new();
 pub static FEC_RECOVERED_PACKETS: Counter = Counter::new();
 /// Original QUIC payload bytes reconstructed from repair data.
 pub static FEC_RECOVERED_PAYLOAD_BYTES: Counter = Counter::new();
+/// Repair equations admitted to a decoder backend.
+pub static FEC_DECODER_EQUATIONS: Counter = Counter::new();
+/// Full GF(256)/GF(65536) solver attempts.
+pub static FEC_DECODER_SOLVE_ATTEMPTS: Counter = Counter::new();
+/// Solver attempts that produced a complete recovered solution.
+pub static FEC_DECODER_SOLVE_SUCCESSES: Counter = Counter::new();
+/// Cumulative wall-clock time spent in full solver attempts, in nanoseconds.
+pub static FEC_DECODER_SOLVE_TIME_NS: Counter = Counter::new();
+/// Receive-window repair dedup entries evicted at the bounded FIFO limit.
+pub static FEC_DECODER_DEDUP_EVICTIONS: Counter = Counter::new();
 
 fn atomic_saturating_sub(value: &AtomicU64, decrement: u64) {
     let _ = value.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
@@ -1939,6 +1985,21 @@ mod tests {
             );
             let parts: Vec<&str> = line.splitn(2, ' ').collect();
             assert_eq!(parts.len(), 2, "metric line must have 'name value' format: {}", line);
+        }
+    }
+
+    #[test]
+    fn fec_decoder_telemetry_is_exported() {
+        let text = export_telemetry_text();
+        for metric in [
+            "quicfuscate_fec_decoder_equations_total ",
+            "quicfuscate_fec_decoder_solve_attempts_total ",
+            "quicfuscate_fec_decoder_solve_successes_total ",
+            "quicfuscate_fec_decoder_solve_success_ratio_ppm ",
+            "quicfuscate_fec_decoder_solve_time_ns_total ",
+            "quicfuscate_fec_decoder_dedup_evictions_total ",
+        ] {
+            assert!(text.contains(metric), "missing FEC decoder telemetry metric: {metric}");
         }
     }
 

@@ -433,6 +433,24 @@ impl Connection {
         Ok(!self.crypto.read().has_pending_handshake_send())
     }
 
+    /// Return the sender-side fountain seed derived from the active 1-RTT secret.
+    pub(crate) fn fec_send_fountain_seed(&self) -> Option<u64> {
+        let crypto = self.crypto.read();
+        crypto
+            .write_secret_1rtt
+            .as_ref()
+            .map(|secret| crate::fec::derive_fountain_seed(secret.as_slice()))
+    }
+
+    /// Return the receiver-side fountain seed derived from the active 1-RTT secret.
+    pub(crate) fn fec_receive_fountain_seed(&self) -> Option<u64> {
+        let crypto = self.crypto.read();
+        crypto
+            .read_secret_1rtt
+            .as_ref()
+            .map(|secret| crate::fec::derive_fountain_seed(secret.as_slice()))
+    }
+
     /// Returns true if the connection is closed
     pub fn is_closed(&self) -> bool {
         self.is_closed

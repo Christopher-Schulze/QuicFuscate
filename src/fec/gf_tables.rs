@@ -1,31 +1,31 @@
 use crate::optimize::{self};
 use log::warn;
-use std::sync::OnceLock;
+use std::sync::{Once, OnceLock};
 
 // GF(2^8) constants
 const IRREDUCIBLE_POLY: u16 = 0x11D;
 
 static LOG_TABLE: OnceLock<[u8; 256]> = OnceLock::new();
 static EXP_TABLE: OnceLock<[u8; 512]> = OnceLock::new();
+static TABLES_INIT: Once = Once::new();
 
 pub(crate) fn init_tables() {
-    if LOG_TABLE.get().is_some() {
-        return;
-    }
-    let mut log = [0u8; 256];
-    let mut exp = [0u8; 512];
-    let mut x = 1u8;
-    for i in 0..255 {
-        exp[i] = x;
-        exp[i + 255] = x;
-        log[x as usize] = i as u8;
-        let mut y = x as u16;
-        y = (y << 1) ^ if y & 0x80 != 0 { IRREDUCIBLE_POLY } else { 0 };
-        x = y as u8;
-    }
-    log[0] = 0;
-    let _ = LOG_TABLE.set(log);
-    let _ = EXP_TABLE.set(exp);
+    TABLES_INIT.call_once(|| {
+        let mut log = [0u8; 256];
+        let mut exp = [0u8; 512];
+        let mut x = 1u8;
+        for i in 0..255 {
+            exp[i] = x;
+            exp[i + 255] = x;
+            log[x as usize] = i as u8;
+            let mut y = x as u16;
+            y = (y << 1) ^ if y & 0x80 != 0 { IRREDUCIBLE_POLY } else { 0 };
+            x = y as u8;
+        }
+        log[0] = 0;
+        let _ = LOG_TABLE.set(log);
+        let _ = EXP_TABLE.set(exp);
+    });
 }
 
 #[inline(always)]
@@ -71,7 +71,6 @@ pub(crate) fn prefetch_fec_slice(ptr: *const u8) {
 
 #[inline(always)]
 pub(crate) fn gf_mul_table(a: u8, b: u8) -> u8 {
-    init_tables();
     if a == 0 || b == 0 {
         return 0;
     }
@@ -83,7 +82,6 @@ pub(crate) fn gf_mul_table(a: u8, b: u8) -> u8 {
 
 #[inline(always)]
 pub(crate) fn gf_inv8(x: u8) -> u8 {
-    init_tables();
     if x == 0 {
         return 0;
     }

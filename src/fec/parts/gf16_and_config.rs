@@ -529,6 +529,16 @@ impl AdaptiveFec {
         self.control_policy
     }
 
+    /// Install the connection-local fountain seed before the first protected window.
+    pub(crate) fn set_fountain_seed(&mut self, seed: u64) {
+        if self.fountain_seed == seed {
+            return;
+        }
+        self.fountain_seed = seed;
+        self.encoder.lock().set_fountain_seed(seed);
+        self.decoder.lock().set_fountain_seed(seed);
+    }
+
     /// Replace controller, encoder, decoder, repair-retention, and loss-history
     /// state with a validated Zero-mode bootstrap for `policy`.
     ///
@@ -552,7 +562,9 @@ impl AdaptiveFec {
         config.initial_mode = FecMode::Zero;
         config.force_on = false;
 
+        let fountain_seed = self.fountain_seed;
         let mut replacement = Self::new(config);
+        replacement.set_fountain_seed(fountain_seed);
         replacement.telemetry = FecTelemetrySnapshot {
             control_policy: policy,
             active_mode: FecMode::Zero,

@@ -43,6 +43,8 @@ pub struct AdaptiveFec {
     /// Current RTT estimate in milliseconds (0 = unknown/unset).
     /// Fed by transport via `set_rtt_hint()` and used to scale `stream_every`.
     rtt_ms: u32,
+    /// Connection-local seed shared by the sender and receiver fountain paths.
+    fountain_seed: u64,
     telemetry: FecTelemetrySnapshot,
 }
 
@@ -452,6 +454,7 @@ impl AdaptiveFec {
             fountain_window,
             extreme_window,
             rtt_ms: 0,
+            fountain_seed: DEFAULT_FOUNTAIN_SEED,
             telemetry: FecTelemetrySnapshot::new(telemetry_enabled, control_policy, mode, k),
         };
         if telemetry_enabled {
@@ -783,22 +786,26 @@ impl AdaptiveFec {
             return;
         }
         Self::run_feedback_phase(diagnostics_enabled, "transition-encoder-replace", || {
-            self.encoder = Arc::new(Mutex::new(internal::InterleavedEncoder::new_with_policy(
+            let mut encoder = internal::InterleavedEncoder::new_with_policy(
                 mode,
                 k,
                 n,
                 depth,
                 &self.runtime_policy,
-            )));
+            );
+            encoder.set_fountain_seed(self.fountain_seed);
+            self.encoder = Arc::new(Mutex::new(encoder));
         });
         Self::run_feedback_phase(diagnostics_enabled, "transition-decoder-replace", || {
-            self.decoder = Arc::new(Mutex::new(internal::InterleavedDecoder::new_with_policy(
+            let mut decoder = internal::InterleavedDecoder::new_with_policy(
                 mode,
                 k,
                 Arc::clone(&self.mem_pool),
                 depth,
                 &self.runtime_policy,
-            )));
+            );
+            decoder.set_fountain_seed(self.fountain_seed);
+            self.decoder = Arc::new(Mutex::new(decoder));
         });
         self.active_mode = mode;
         self.streaming_mode = mode == FecMode::Streaming;

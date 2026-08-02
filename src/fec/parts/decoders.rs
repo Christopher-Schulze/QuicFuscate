@@ -1,5 +1,15 @@
 // --- GF(2^8) Streaming Decoder (peeling) ---
 
+#[inline]
+fn record_decoder_solve(started: std::time::Instant, solved: bool) {
+    crate::telemetry::FEC_DECODER_SOLVE_ATTEMPTS.inc();
+    crate::telemetry::FEC_DECODER_SOLVE_TIME_NS
+        .inc_by(started.elapsed().as_nanos().min(u64::MAX as u128) as u64);
+    if solved {
+        crate::telemetry::FEC_DECODER_SOLVE_SUCCESSES.inc();
+    }
+}
+
 struct Equation8 {
     base_id: u64,
     coeffs: Vec<u8>,
@@ -209,6 +219,13 @@ impl Decoder8 {
     }
 
     fn try_eliminate(&mut self) -> bool {
+        let started = std::time::Instant::now();
+        let solved = self.try_eliminate_unmeasured();
+        record_decoder_solve(started, solved);
+        solved
+    }
+
+    fn try_eliminate_unmeasured(&mut self) -> bool {
         // Decoder policy via ENV: QUICFUSCATE_FEC_DECODER = gauss|wiedemann|auto (default)
         match self.decoder_policy.to_ascii_lowercase().as_str() {
             "wiedemann" => {
@@ -1084,6 +1101,13 @@ impl Decoder16 {
     }
 
     fn try_eliminate(&mut self) -> bool {
+        let started = std::time::Instant::now();
+        let solved = self.try_eliminate_unmeasured();
+        record_decoder_solve(started, solved);
+        solved
+    }
+
+    fn try_eliminate_unmeasured(&mut self) -> bool {
         use std::collections::BTreeSet;
         let mut unknown_set = BTreeSet::new();
         let mut min_len = usize::MAX;
@@ -1206,4 +1230,3 @@ impl Decoder16 {
         true
     }
 }
-

@@ -5,7 +5,7 @@
 //! repair ordinal. Source lengths are protected inside each coded symbol so a
 //! recovered variable-length QUIC datagram can be restored exactly.
 
-use super::{FecMode, FecPacket, FecRuntimePolicy, MemoryPool};
+use super::{FecMode, FecPacket, FecRuntimePolicy, MemoryPool, DEFAULT_FOUNTAIN_SEED};
 use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::sync::Arc;
@@ -26,6 +26,7 @@ pub const MAX_GF8_BLOCK_SOURCE_COUNT: usize = u8::MAX as usize;
 const FLAG_SYSTEMATIC: u8 = 1 << 0;
 const KNOWN_FLAGS: u8 = FLAG_SYSTEMATIC;
 const RECEIVE_WINDOW_LIMIT: usize = 4;
+type RepairKey = (u64, u16, u8);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -94,6 +95,9 @@ impl WireCodec {
         repair_index: u16,
         output: &mut [u8],
     ) -> Result<usize, WireError> {
+        if matches!(self, Self::Gf8 | Self::StreamingGf8) {
+            super::gf_tables::init_tables();
+        }
         let coefficient_len = self.coefficient_len(block_source_count)?;
         if output.len() < coefficient_len {
             return Err(WireError::BufferTooShort);
@@ -434,7 +438,9 @@ struct ReceiveWindow {
     window: u32,
     decoder: super::internal::InterleavedDecoder,
     delivered: HashSet<u64>,
-    seen_repairs: HashSet<(u64, u16, u8)>,
+    seen_repairs: HashSet<RepairKey>,
+    seen_repair_order: VecDeque<RepairKey>,
+    seen_repairs_limit: usize,
     mem_pool: Arc<MemoryPool>,
 }
 
@@ -444,7 +450,9 @@ impl ReceiveWindow {
         window: u32,
         mem_pool: Arc<MemoryPool>,
         policy: &FecRuntimePolicy,
+        fountain_seed: u64,
     ) -> Self {
+        let seen_repairs_limit = (profile.total_count - profile.source_count) as usize;
         Self {
             profile,
             window,
@@ -452,11 +460,29 @@ impl ReceiveWindow {
                 profile,
                 Arc::clone(&mem_pool),
                 policy,
+                fountain_seed,
             ),
             delivered: HashSet::with_capacity(profile.source_count as usize),
-            seen_repairs: HashSet::new(),
+            seen_repairs: HashSet::with_capacity(seen_repairs_limit),
+            seen_repair_order: VecDeque::with_capacity(seen_repairs_limit),
+            seen_repairs_limit,
             mem_pool,
         }
+    }
+
+    fn remember_repair(&mut self, key: RepairKey) -> bool {
+        if self.seen_repairs.contains(&key) {
+            return false;
+        }
+        if self.seen_repairs_limit > 0 && self.seen_repairs.len() >= self.seen_repairs_limit {
+            if let Some(oldest) = self.seen_repair_order.pop_front() {
+                self.seen_repairs.remove(&oldest);
+                crate::telemetry::FEC_DECODER_DEDUP_EVICTIONS.inc();
+            }
+        }
+        self.seen_repairs.insert(key);
+        self.seen_repair_order.push_back(key);
+        true
     }
 
     fn window_start(&self) -> u64 {
@@ -621,7 +647,7 @@ impl ReceiveWindow {
             self.repair_packet(meta, payload)?
         };
         if !systematic {
-            self.seen_repairs.insert(repair_key);
+            let _ = self.remember_repair(repair_key);
         }
 
         self.decoder.take_packet(packet);
@@ -656,15 +682,26 @@ pub struct WireFecReceiver {
     windows: VecDeque<ReceiveWindow>,
     mem_pool: Arc<MemoryPool>,
     policy: FecRuntimePolicy,
+    fountain_seed: u64,
 }
 
 impl WireFecReceiver {
     pub fn new(mem_pool: Arc<MemoryPool>) -> Self {
+        super::gf_tables::init_tables();
         Self {
             windows: VecDeque::with_capacity(RECEIVE_WINDOW_LIMIT),
             mem_pool,
             policy: FecRuntimePolicy::detect(),
+            fountain_seed: DEFAULT_FOUNTAIN_SEED,
         }
+    }
+
+    pub(crate) fn set_fountain_seed(&mut self, seed: u64) {
+        if self.fountain_seed == seed {
+            return;
+        }
+        self.fountain_seed = seed;
+        self.windows.clear();
     }
 
     pub fn receive(
@@ -694,6 +731,7 @@ impl WireFecReceiver {
                     parsed.meta.window,
                     Arc::clone(&self.mem_pool),
                     &self.policy,
+                    self.fountain_seed,
                 ));
                 self.windows.len() - 1
             });
@@ -758,6 +796,22 @@ mod tests {
 
     fn profile(codec: WireCodec) -> WireProfile {
         WireProfile { epoch: 7, codec, source_count: 64, total_count: 80, interleave_depth: 4 }
+    }
+
+    #[test]
+    fn seen_repairs_are_bounded_by_profile_repair_capacity() {
+        let pool = crate::optimize::global_pool();
+        let policy = FecRuntimePolicy::detect();
+        let profile = profile(WireCodec::Gf8);
+        let limit = (profile.total_count - profile.source_count) as usize;
+        let mut window = ReceiveWindow::new(profile, 0, pool, &policy, DEFAULT_FOUNTAIN_SEED);
+
+        for ordinal in 0..limit.saturating_mul(3) {
+            assert!(window.remember_repair((ordinal as u64, ordinal as u16, 0)));
+            assert!(window.seen_repairs.len() <= limit);
+            assert!(window.seen_repair_order.len() <= limit);
+        }
+        assert_eq!(window.seen_repairs.len(), limit);
     }
 
     #[test]

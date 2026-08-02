@@ -1,8 +1,17 @@
-use super::MemoryPool;
+use super::{MemoryPool, DEFAULT_FOUNTAIN_SEED};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-const RNG_SEED: u64 = 12_345;
+const SPLITMIX64_GAMMA: u64 = 0x9e37_79b9_7f4a_7c15;
+
+#[inline]
+fn splitmix64_next(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(SPLITMIX64_GAMMA);
+    let mut value = *state;
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
 
 fn deterministic_source_indices(
     symbol_count: usize,
@@ -13,9 +22,8 @@ fn deterministic_source_indices(
     if symbol_count == 0 {
         return Vec::new();
     }
-    let mut rng_state = rng_seed.wrapping_mul(symbol_id).wrapping_add(0x9e3779b9);
-    let random = (rng_state as f64) / (u64::MAX as f64);
-    rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
+    let mut rng_state = rng_seed.wrapping_add(symbol_id.wrapping_mul(SPLITMIX64_GAMMA));
+    let random = (splitmix64_next(&mut rng_state) as f64) / (u64::MAX as f64);
     let degree = degree_dist
         .iter()
         .enumerate()
@@ -24,8 +32,7 @@ fn deterministic_source_indices(
     let mut selected = HashSet::with_capacity(degree);
     let mut indices = Vec::with_capacity(degree);
     for _ in 0..degree {
-        let index = (rng_state % symbol_count as u64) as usize;
-        rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
+        let index = (splitmix64_next(&mut rng_state) % symbol_count as u64) as usize;
         if selected.insert(index) {
             indices.push(index);
         }
@@ -45,8 +52,13 @@ pub struct LTEncoder {
 impl LTEncoder {
     /// Create a new LT encoder with `k` source symbols and fixed symbol size.
     pub fn new(k: usize, symbol_size: usize) -> Self {
+        Self::new_with_seed(k, symbol_size, DEFAULT_FOUNTAIN_SEED)
+    }
+
+    /// Create an LT encoder with an explicit connection-local PRNG seed.
+    pub fn new_with_seed(k: usize, symbol_size: usize, rng_seed: u64) -> Self {
         let degree_dist = Self::robust_soliton_distribution(k);
-        Self { k, symbols: Vec::with_capacity(k), degree_dist, rng_seed: RNG_SEED, symbol_size }
+        Self { k, symbols: Vec::with_capacity(k), degree_dist, rng_seed, symbol_size }
     }
 
     /// **Robust Soliton Distribution** - Optimal degree distribution for LT codes
@@ -142,6 +154,10 @@ impl LTEncoder {
     pub fn k(&self) -> usize {
         self.k
     }
+
+    pub(crate) fn set_seed(&mut self, rng_seed: u64) {
+        self.rng_seed = rng_seed;
+    }
 }
 
 /// **Belief Propagation Decoder** for LT codes
@@ -167,6 +183,16 @@ impl LTDecoder {
     }
     /// Create a new LT decoder expecting `k` source symbols.
     pub fn new(k: usize, symbol_size: usize, mem_pool: Arc<MemoryPool>) -> Self {
+        Self::new_with_seed(k, symbol_size, mem_pool, DEFAULT_FOUNTAIN_SEED)
+    }
+
+    /// Create an LT decoder with an explicit connection-local PRNG seed.
+    pub fn new_with_seed(
+        k: usize,
+        symbol_size: usize,
+        mem_pool: Arc<MemoryPool>,
+        rng_seed: u64,
+    ) -> Self {
         #[cfg(not(test))]
         let _ = symbol_size;
         Self {
@@ -178,7 +204,7 @@ impl LTDecoder {
             symbol_degrees: HashMap::new(),
             degree_one_queue: Vec::new(),
             degree_dist: LTEncoder::robust_soliton_distribution(k),
-            rng_seed: RNG_SEED,
+            rng_seed,
             mem_pool,
         }
     }
@@ -199,6 +225,10 @@ impl LTDecoder {
         deterministic_source_indices(self.k, &self.degree_dist, self.rng_seed, symbol_id)
             .into_iter()
             .collect()
+    }
+
+    pub(crate) fn set_seed(&mut self, rng_seed: u64) {
+        self.rng_seed = rng_seed;
     }
 
     /// Add received symbol for decoding (no degree info available)
@@ -397,6 +427,35 @@ mod tests {
         let (d2, i2) = enc2.generate_symbol_with_indices(42);
         assert_eq!(d1, d2, "same seed+id must produce identical encoded symbol");
         assert_eq!(i1, i2, "same seed+id must produce identical indices");
+    }
+
+    #[test]
+    fn seeded_encoder_and_decoder_share_symbol_sets() {
+        let seed = 0x6f31_2a8d_95c4_e107;
+        let mut encoder = LTEncoder::new_with_seed(12, 32, seed);
+        let decoder = LTDecoder::new_with_seed(12, 32, make_pool(), seed);
+        for value in 0u8..12 {
+            encoder.add_source_symbol(vec![value; 32]);
+        }
+
+        let (_, encoder_indices) = encoder.generate_symbol_with_indices(77);
+        let encoder_indices = encoder_indices.into_iter().collect::<HashSet<_>>();
+        assert_eq!(encoder_indices, decoder.source_indices(77));
+    }
+
+    #[test]
+    fn different_connection_seeds_change_symbol_sets() {
+        let mut first = LTEncoder::new_with_seed(12, 32, 1);
+        let mut second = LTEncoder::new_with_seed(12, 32, 2);
+        for value in 0u8..12 {
+            let symbol = vec![value; 32];
+            first.add_source_symbol(symbol.clone());
+            second.add_source_symbol(symbol);
+        }
+
+        let (_, first_indices) = first.generate_symbol_with_indices(77);
+        let (_, second_indices) = second.generate_symbol_with_indices(77);
+        assert_ne!(first_indices, second_indices);
     }
 
     #[test]

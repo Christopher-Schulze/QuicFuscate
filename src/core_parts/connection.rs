@@ -329,6 +329,8 @@ pub struct QuicFuscateConnection {
     // Reused FEC recovery scratch to avoid allocating a Vec for every packet on the receive path.
     fec_receive_scratch: Vec<FecPacket>,
     fec_wire_receiver: WireFecReceiver,
+    fec_tx_seed: Option<u64>,
+    fec_rx_seed: Option<u64>,
     fec_tx_profile: Option<WireProfile>,
     fec_tx_epoch: u32,
     fec_tx_sequence: u64,
@@ -643,6 +645,8 @@ impl QuicFuscateConnection {
             fec_send_scratch: Vec::with_capacity(1),
             fec_receive_scratch: Vec::with_capacity(1),
             fec_wire_receiver: WireFecReceiver::new(fec_mem_pool),
+            fec_tx_seed: None,
+            fec_rx_seed: None,
             fec_tx_profile: None,
             fec_tx_epoch: 0,
             fec_tx_sequence: 0,
@@ -1426,6 +1430,12 @@ impl QuicFuscateConnection {
         let wire_framed = wire::is_framed(&block[..len]);
         let mut recovered_packets = std::mem::take(&mut self.fec_receive_scratch);
         let receive_report = if wire_framed {
+            if self.fec_rx_seed.is_none() {
+                if let Some(seed) = self.conn.fec_receive_fountain_seed() {
+                    self.fec_wire_receiver.set_fountain_seed(seed);
+                    self.fec_rx_seed = Some(seed);
+                }
+            }
             let result = if self.fec.control_policy() == crate::fec::FecControlPolicy::Off {
                 self.fec_wire_receiver.receive_source_only(&block[..len], &mut recovered_packets)
             } else {
@@ -1588,8 +1598,12 @@ impl QuicFuscateConnection {
 
         self.fec_send_scratch.clear();
         self.fec_receive_scratch.clear();
-        self.fec_wire_receiver =
+        let mut wire_receiver =
             WireFecReceiver::new(self.optimization_manager.memory_pool().clone());
+        if let Some(seed) = self.fec_rx_seed {
+            wire_receiver.set_fountain_seed(seed);
+        }
+        self.fec_wire_receiver = wire_receiver;
         self.fec_tx_profile = None;
         self.fec_tx_sequence = 0;
         self.fec_tx_active = false;
@@ -1604,6 +1618,12 @@ impl QuicFuscateConnection {
     fn prepare_fec_wire_profile(
         &mut self,
     ) -> Result<Option<WireProfile>, crate::error::ConnectionError> {
+        if self.fec_tx_seed.is_none() {
+            if let Some(seed) = self.conn.fec_send_fountain_seed() {
+                self.fec.set_fountain_seed(seed);
+                self.fec_tx_seed = Some(seed);
+            }
+        }
         let candidate = match self.fec.wire_profile(self.fec_tx_epoch.max(1)) {
             Ok(profile) => profile,
             Err(wire::WireError::ZeroModeMustRemainRaw) => {

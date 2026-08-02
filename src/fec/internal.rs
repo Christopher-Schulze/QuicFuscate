@@ -1,5 +1,6 @@
 #![allow(private_interfaces)]
 use super::*;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// LT fountain encoder alias for internal FEC variant dispatch.
@@ -265,6 +266,12 @@ impl EncoderVariant {
             EncoderVariant::Fountain(e) => e.packets_in_window(),
         }
     }
+
+    pub(crate) fn set_fountain_seed(&mut self, seed: u64) {
+        if let EncoderVariant::Fountain(encoder) = self {
+            encoder.set_seed(seed);
+        }
+    }
 }
 
 /// Decoder variant for different FEC modes
@@ -288,6 +295,7 @@ impl DecoderVariant {
         pool: Arc<MemoryPool>,
         policy: &super::FecRuntimePolicy,
         depth: usize,
+        seed: u64,
     ) -> Self {
         match codec {
             wire::WireCodec::Gf4 => DecoderVariant::GF4(Decoder4::new_with_depth(k, pool, depth)),
@@ -297,9 +305,12 @@ impl DecoderVariant {
             wire::WireCodec::Gf16 => {
                 DecoderVariant::GF16(Decoder16::new_with_depth(k, pool, depth))
             }
-            wire::WireCodec::Fountain => {
-                DecoderVariant::Fountain(FountainDecoder::new(k, policy.fountain_symbol_size, pool))
-            }
+            wire::WireCodec::Fountain => DecoderVariant::Fountain(FountainDecoder::new_with_seed(
+                k,
+                policy.fountain_symbol_size,
+                pool,
+                seed,
+            )),
         }
     }
 
@@ -362,6 +373,9 @@ impl DecoderVariant {
 
     /// Feed a received packet into the active decoder backend.
     pub fn take_packet(&mut self, p: FecPacket) {
+        if !p.is_systematic {
+            crate::telemetry::FEC_DECODER_EQUATIONS.inc();
+        }
         match self {
             DecoderVariant::Zero(d) => d.take_packet(p),
             DecoderVariant::GF8(d) => d.take_packet(p),
@@ -378,6 +392,12 @@ impl DecoderVariant {
                     }
                 }
             }
+        }
+    }
+
+    pub(crate) fn set_fountain_seed(&mut self, seed: u64) {
+        if let DecoderVariant::Fountain(decoder) = self {
+            decoder.set_seed(seed);
         }
     }
 
@@ -483,7 +503,9 @@ pub struct LazyDecoder {
     /// Buffered repair packets (only decoded when gaps detected)
     pending_repairs: VecDeque<FecPacket>,
     /// Tracks seen source packet sequence numbers
-    seen_seqs: std::collections::BTreeSet<u64>,
+    seen_seqs: HashSet<u64>,
+    seen_seq_min: Option<u64>,
+    seen_seq_max: Option<u64>,
     /// Source packets per decoder block. Used to distinguish clean full
     /// blocks from tail-loss blocks where no later systematic packet can reveal
     /// a sequence gap.
@@ -523,12 +545,15 @@ impl LazyDecoder {
         pool: Arc<MemoryPool>,
         policy: &FecRuntimePolicy,
         depth: usize,
+        seed: u64,
     ) -> Self {
         Self {
-            inner: DecoderVariant::new_for_wire(codec, k, pool, policy, depth),
+            inner: DecoderVariant::new_for_wire(codec, k, pool, policy, depth, seed),
             pending_sources: VecDeque::with_capacity(k.max(1)),
             pending_repairs: VecDeque::with_capacity(32),
-            seen_seqs: std::collections::BTreeSet::new(),
+            seen_seqs: HashSet::new(),
+            seen_seq_min: None,
+            seen_seq_max: None,
             k,
             depth: depth.max(1),
             expected_seq: 0,
@@ -574,7 +599,9 @@ impl LazyDecoder {
             inner: DecoderVariant::new_with_depth(mode, k, pool, policy, depth),
             pending_sources: VecDeque::with_capacity(k.max(1)),
             pending_repairs: VecDeque::with_capacity(32),
-            seen_seqs: std::collections::BTreeSet::new(),
+            seen_seqs: HashSet::new(),
+            seen_seq_min: None,
+            seen_seq_max: None,
             k,
             depth: depth.max(1),
             expected_seq: 0,
@@ -596,18 +623,11 @@ impl LazyDecoder {
     /// Check if there are gaps in the received sequence
     #[inline]
     fn has_gaps(&self) -> bool {
-        if self.seen_seqs.is_empty() {
-            return false;
-        }
-        let mut it = self.seen_seqs.iter();
-        let Some(&first) = it.next() else {
-            return false;
-        };
-        let Some(&last) = self.seen_seqs.iter().next_back() else {
+        let (Some(first), Some(last)) = (self.seen_seq_min, self.seen_seq_max) else {
             return false;
         };
         // Gap exists if we've seen N sequences but range is > N
-        (last - first + 1) as usize > self.seen_seqs.len()
+        last.saturating_sub(first).saturating_add(1) as usize > self.seen_seqs.len()
     }
 
     /// Flush pending repairs to actual decoder (when loss detected)
@@ -636,8 +656,10 @@ impl LazyDecoder {
             let block_seq = self.source_block_seq(p.seq);
             // Source packet - track sequence
             self.seen_seqs.insert(block_seq);
+            self.seen_seq_min = Some(self.seen_seq_min.map_or(block_seq, |min| min.min(block_seq)));
+            self.seen_seq_max = Some(self.seen_seq_max.map_or(block_seq, |max| max.max(block_seq)));
             // Update expected sequence
-            self.expected_seq = self.expected_seq.max(block_seq + 1);
+            self.expected_seq = self.expected_seq.max(block_seq.saturating_add(1));
 
             // If lazy disabled, forward to decoder
             if !self.lazy_enabled {
@@ -668,6 +690,8 @@ impl LazyDecoder {
                     && self.seen_seqs.len().is_multiple_of(self.k)
                 {
                     self.seen_seqs.clear();
+                    self.seen_seq_min = None;
+                    self.seen_seq_max = None;
                     self.pending_sources.clear();
                 } else {
                     self.push_pending_source(p);
@@ -756,6 +780,10 @@ impl LazyDecoder {
         let result = self.inner.get_partial_result();
         self.partial_recovery_pending = false;
         result
+    }
+
+    pub(crate) fn set_fountain_seed(&mut self, seed: u64) {
+        self.inner.set_fountain_seed(seed);
     }
 
     #[cfg(test)]
@@ -890,6 +918,12 @@ impl InterleavedEncoder {
         self.blocks.iter().map(|b| b.packets_in_window()).sum()
     }
 
+    pub(crate) fn set_fountain_seed(&mut self, seed: u64) {
+        for block in &mut self.blocks {
+            block.set_fountain_seed(seed);
+        }
+    }
+
     /// Return the fountain symbol size of the first block (test helper).
     #[cfg(test)]
     pub fn first_block_fountain_symbol_size(&self) -> Option<usize> {
@@ -911,12 +945,20 @@ impl InterleavedDecoder {
         profile: wire::WireProfile,
         pool: Arc<MemoryPool>,
         policy: &FecRuntimePolicy,
+        seed: u64,
     ) -> Self {
         let depth = profile.interleave_depth as usize;
         let block_k = profile.block_source_count() as usize;
         let blocks = (0..depth)
             .map(|_| {
-                LazyDecoder::new_for_wire(profile.codec, block_k, Arc::clone(&pool), policy, depth)
+                LazyDecoder::new_for_wire(
+                    profile.codec,
+                    block_k,
+                    Arc::clone(&pool),
+                    policy,
+                    depth,
+                    seed,
+                )
             })
             .collect();
         Self { blocks, depth }
@@ -951,6 +993,12 @@ impl InterleavedDecoder {
             .collect();
 
         Self { blocks, depth: actual_depth }
+    }
+
+    pub(crate) fn set_fountain_seed(&mut self, seed: u64) {
+        for block in &mut self.blocks {
+            block.set_fountain_seed(seed);
+        }
     }
 
     /// Route a received packet to the correct interleaved block by sequence number.
@@ -1657,6 +1705,7 @@ mod tests {
             pool.clone(),
             &policy,
             profile.interleave_depth as usize,
+            DEFAULT_FOUNTAIN_SEED,
         );
 
         {
