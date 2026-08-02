@@ -306,6 +306,7 @@ start_runtime() {
       --qkey "$qkey" \
       --ca-file "$CA" \
       --verify-peer \
+      --disable-doh \
       --tun \
       --tun-name "$TUN_NAME" \
       --tun-mtu 1280 \

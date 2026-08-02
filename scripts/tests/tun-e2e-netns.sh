@@ -243,7 +243,7 @@ fi
 
 # --- start client in ns-cli ---
 ip netns exec ns-cli "$B" client --remote 10.10.0.1:4433 --url https://10.10.0.1/ \
-  --qkey "$QKEY" --ca-file "$CA" --verify-peer \
+  --qkey "$QKEY" --ca-file "$CA" --verify-peer --disable-doh \
   --tun --tun-name qtun0 --tun-ip 10.0.1.2 --tun-netmask 255.255.255.0 --no-utls -v \
   "${CLIENT_CONFIG_ARGS[@]}" \
   > /tmp/ns-cli.log 2>&1 &

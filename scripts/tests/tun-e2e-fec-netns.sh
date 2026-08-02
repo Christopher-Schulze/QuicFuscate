@@ -370,7 +370,7 @@ start_server() {
 start_client() {
     local qkey="$1"
     ip netns exec ns-cli "$B" client --remote 10.10.0.1:4433 --url https://10.10.0.1/ \
-        --qkey "$qkey" --ca-file "$CA" --verify-peer \
+        --qkey "$qkey" --ca-file "$CA" --verify-peer --disable-doh \
         --tun --tun-name qtun0 --tun-ip 10.0.1.2 --tun-netmask 255.255.255.0 --no-utls -v \
         > "$CLIENT_LOG" 2>&1 &
     CLIENT_PID=$!

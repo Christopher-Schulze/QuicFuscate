@@ -9,7 +9,7 @@
 //! parsed, and either resolved via DoH (client-side) or forwarded to
 //! upstream DNS servers (server-side).
 
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 
 /// Default upstream DoH providers used when none are configured.
@@ -246,6 +246,36 @@ pub struct DnsProxyConfig {
 }
 
 impl DnsProxyConfig {
+    /// Build a client-side DoH configuration with endpoint resolution pinned
+    /// before the system resolver is redirected to the local proxy.
+    pub fn for_client_endpoints(doh_endpoints: Vec<String>) -> Result<Self, DnsProxyError> {
+        if doh_endpoints.is_empty() {
+            return Err(DnsProxyError::ConfigError(
+                "at least one DoH endpoint is required".to_string(),
+            ));
+        }
+        let config = Self {
+            doh_endpoints,
+            upstream_resolvers: Vec::new(),
+            use_doh: true,
+            listen_port: 53,
+            doh_client: Arc::new(parking_lot::Mutex::new(None)),
+        };
+        config.prepare_doh_client()?;
+        Ok(config)
+    }
+
+    /// Resolve and cache the DoH client before the system resolver changes.
+    ///
+    /// A client DNS proxy cannot resolve its own DoH host through the proxy.
+    /// Pinning the endpoint addresses here keeps subsequent requests on the
+    /// VPN path without re-entering the local DNS listener.
+    pub fn prepare_doh_client(&self) -> Result<(), DnsProxyError> {
+        let client = build_doh_client_for_endpoints(&self.doh_endpoints)?;
+        *self.doh_client.lock() = Some(client);
+        Ok(())
+    }
+
     /// Returns a shared `reqwest::Client` for DoH resolution, building it
     /// on first call and reusing it on subsequent calls. Cloning the
     /// config (or the returned client) is cheap — both are Arc bumps that
@@ -258,7 +288,7 @@ impl DnsProxyConfig {
         if let Some(c) = guard.as_ref() {
             return Ok(c.clone());
         }
-        let client = build_doh_client()?;
+        let client = build_doh_client_for_endpoints(&self.doh_endpoints)?;
         *guard = Some(client.clone());
         Ok(client)
     }
@@ -343,6 +373,77 @@ pub fn build_doh_client() -> Result<reqwest::Client, DnsProxyError> {
         .map_err(|e| DnsProxyError::DohError(format!("HTTP client build failed: {e}")))
 }
 
+/// Build a DoH client with static resolution overrides for each endpoint.
+///
+/// The overrides are deliberately resolved synchronously before a client-side
+/// DNS proxy changes the host resolver. The URL hostname remains the TLS SNI
+/// and HTTP authority, while the connection destination remains stable after
+/// the local resolver becomes active.
+pub fn build_doh_client_for_endpoints(
+    endpoints: &[String],
+) -> Result<reqwest::Client, DnsProxyError> {
+    if endpoints.is_empty() {
+        return Err(DnsProxyError::ConfigError(
+            "at least one DoH endpoint is required".to_string(),
+        ));
+    }
+    if endpoints.len() > 8 {
+        return Err(DnsProxyError::ConfigError(
+            "at most eight DoH endpoints are supported".to_string(),
+        ));
+    }
+
+    let mut builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("quicfuscate-doh/1.0");
+
+    for endpoint in endpoints {
+        let url = url::Url::parse(endpoint).map_err(|error| {
+            DnsProxyError::ConfigError(format!("invalid DoH endpoint {endpoint:?}: {error}"))
+        })?;
+        if url.scheme() != "https" {
+            return Err(DnsProxyError::ConfigError(format!(
+                "DoH endpoint must use https: {endpoint}"
+            )));
+        }
+        if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
+            return Err(DnsProxyError::ConfigError(format!(
+                "DoH endpoint contains unsupported credentials or fragment: {endpoint}"
+            )));
+        }
+        let host = url.host_str().ok_or_else(|| {
+            DnsProxyError::ConfigError(format!("DoH endpoint has no host: {endpoint}"))
+        })?;
+        let port = url.port_or_known_default().ok_or_else(|| {
+            DnsProxyError::ConfigError(format!("DoH endpoint has no usable port: {endpoint}"))
+        })?;
+        if host.parse::<std::net::IpAddr>().is_ok() {
+            continue;
+        }
+        let addresses: Vec<SocketAddr> = (host, port)
+            .to_socket_addrs()
+            .map_err(|error| {
+                DnsProxyError::ConfigError(format!(
+                    "could not resolve DoH endpoint host {host:?}: {error}"
+                ))
+            })?
+            .collect();
+        if addresses.is_empty() {
+            return Err(DnsProxyError::ConfigError(format!(
+                "DoH endpoint host resolved to no addresses: {host}"
+            )));
+        }
+        builder = builder.resolve_to_addrs(host, &addresses);
+    }
+
+    builder
+        .build()
+        .map_err(|error| DnsProxyError::DohError(format!("HTTP client build failed: {error}")))
+}
+
 /// Handle a DNS query by resolving via DoH (client-side) using a caller-
 /// supplied `reqwest::Client`. Sends the raw DNS query as
 /// `application/dns-message` (RFC 8484) to the DoH endpoint via HTTP POST.
@@ -424,6 +525,7 @@ pub enum DnsProxyError {
     IoError(std::io::Error),
     DohError(String),
     ParseError(String),
+    ConfigError(String),
 }
 
 impl std::fmt::Display for DnsProxyError {
@@ -432,6 +534,7 @@ impl std::fmt::Display for DnsProxyError {
             Self::IoError(e) => write!(f, "DNS I/O error: {e}"),
             Self::DohError(s) => write!(f, "DoH error: {s}"),
             Self::ParseError(s) => write!(f, "DNS parse error: {s}"),
+            Self::ConfigError(s) => write!(f, "DNS configuration error: {s}"),
         }
     }
 }
@@ -593,6 +696,34 @@ mod tests {
         assert!(!config.upstream_resolvers.is_empty());
         assert!(config.use_doh);
         assert_eq!(config.listen_port, 53);
+    }
+
+    #[test]
+    fn test_client_dns_proxy_config_prepares_ip_endpoint() {
+        let config =
+            DnsProxyConfig::for_client_endpoints(vec!["https://127.0.0.1/dns-query".to_string()])
+                .expect("IP-based DoH endpoint should be valid");
+
+        assert!(config.use_doh);
+        assert!(config.upstream_resolvers.is_empty());
+        assert!(config.doh_client.lock().is_some());
+    }
+
+    #[test]
+    fn test_client_dns_proxy_config_rejects_non_https_endpoint() {
+        let result =
+            DnsProxyConfig::for_client_endpoints(vec!["http://127.0.0.1/dns-query".to_string()]);
+
+        assert!(matches!(result, Err(DnsProxyError::ConfigError(_))));
+    }
+
+    #[test]
+    fn test_client_dns_proxy_config_rejects_endpoint_credentials() {
+        let result = DnsProxyConfig::for_client_endpoints(vec![
+            "https://user:password@127.0.0.1/dns-query".to_string(),
+        ]);
+
+        assert!(matches!(result, Err(DnsProxyError::ConfigError(_))));
     }
 
     #[tokio::test]

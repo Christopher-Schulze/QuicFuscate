@@ -127,6 +127,13 @@ pub trait PlatformBackend: Send + Sync {
     /// Restore original DNS configuration.
     fn restore_dns(&self) -> Result<(), PlatformError>;
 
+    /// Provide the active TUN name to DNS ownership code that did not create
+    /// the device through this compatibility backend.
+    fn set_dns_interface_name(&self, _name: &str) {}
+
+    /// Clear the interface name supplied to DNS ownership code.
+    fn clear_dns_interface_name(&self) {}
+
     /// Get default gateway.
     fn default_gateway(&self) -> Result<IpAddr, PlatformError>;
 }

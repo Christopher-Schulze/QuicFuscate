@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 # End-to-end DNS leak test: two Linux network namespaces over a veth pair,
-# QUIC tunnel with TUN/MASQUE, DNS query over the client TUN, tcpdump proof
-# that no raw DNS (TCP/UDP port 53) leaves the client underlay interface.
+# QUIC tunnel with TUN/MASQUE, explicit and OS-resolver DNS queries, and
+# tcpdump proof that no raw DNS (TCP/UDP port 53) leaves the client underlay.
+# The client resolver runs in a private mount namespace so the host resolver
+# configuration is never modified by the Linux platform backend.
 #
 # Acceptance criteria:
 #   - Client and server complete the TLS handshake.
-#   - A real DNS query sent to the server TUN IP receives a DNS response.
+#   - A real DNS query sent explicitly to the server TUN IP receives a DNS response.
+#   - A normal OS resolver query reaches the client-owned localhost proxy.
 #   - tcpdump on the client veth underlay observes zero TCP/UDP port 53 packets.
 #
-# Requirements: root, Linux, iproute2, tcpdump, openssl, python3, nc, dig.
+# Requirements: root, Linux, iproute2, tcpdump, openssl, python3, nc, dig,
+# nsenter, unshare, mount.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,6 +36,10 @@ LOCK_TIMEOUT="${QF_E2E_LOCK_TIMEOUT:-300}"
 TCPDUMP_LOG="/tmp/qf-dns-leak-tcpdump.log"
 TCPDUMP_PCAP="/tmp/qf-dns-leak.pcap"
 DNS_OUT="/tmp/qf-dns-leak-dig.out"
+DNS_OS_OUT="/tmp/qf-dns-leak-os-dig.out"
+PRIVATE_RESOLV_CONF="/tmp/qf-dns-leak-private-resolv.conf"
+PRIVATE_RESOLVE_DIR=""
+DOH_PROVIDER="${QF_E2E_DOH_PROVIDER:-https://127.0.0.1:1/dns-query}"
 SERVER_LOG="/tmp/qf-dns-leak-server.log"
 CLIENT_LOG="/tmp/qf-dns-leak-client.log"
 
@@ -48,10 +56,12 @@ cleanup() {
   pkill -9 -f "$B" 2>/dev/null
   ip netns del "$SERVER_NS" 2>/dev/null
   ip netns del "$CLIENT_NS" 2>/dev/null
+  rm -f "$PRIVATE_RESOLV_CONF"
+  [ -z "${PRIVATE_RESOLVE_DIR:-}" ] || rmdir "$PRIVATE_RESOLVE_DIR" 2>/dev/null
 }
 trap cleanup EXIT
 
-for cmd in ip tcpdump openssl python3 nc dig; do
+for cmd in ip tcpdump openssl python3 nc dig nsenter unshare mount; do
   require_cmd "$cmd"
 done
 require_cmd flock
@@ -93,7 +103,9 @@ chmod 600 server.key ca.key 2>/dev/null || true
 cd "$PROJECT_ROOT"
 
 cleanup
-rm -f "$TCPDUMP_LOG" "$TCPDUMP_PCAP" "$DNS_OUT" "$SERVER_LOG" "$CLIENT_LOG"
+rm -f "$TCPDUMP_LOG" "$TCPDUMP_PCAP" "$DNS_OUT" "$DNS_OS_OUT" "$SERVER_LOG" "$CLIENT_LOG"
+printf 'nameserver 127.0.0.1\n' > "$PRIVATE_RESOLV_CONF"
+PRIVATE_RESOLVE_DIR="$(mktemp -d /tmp/qf-dns-leak-resolve.XXXXXX)"
 
 ip netns add "$SERVER_NS"
 ip netns add "$CLIENT_NS"
@@ -124,10 +136,16 @@ sleep 3
 QKEY=$(echo '{"cmd":"qkey"}' | nc -U /tmp/qf-dns-admin.sock 2>/dev/null | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["data"]["qkey"])')
 echo "qkey len: ${#QKEY}"
 
-ip netns exec "$CLIENT_NS" "$B" client --remote "$SERVER_UNDERLAY_IP:$LISTEN_PORT" \
+ip netns exec "$CLIENT_NS" unshare --mount --propagation private \
+  bash -c 'if [ -d /run/systemd/resolve ]; then mount --bind "$1" /run/systemd/resolve || exit 1; fi; mount --bind "$2" /etc/resolv.conf && shift 2 && exec "$@"' \
+  qf-dns-client "$PRIVATE_RESOLVE_DIR" "$PRIVATE_RESOLV_CONF" "$B" client \
+  --remote "$SERVER_UNDERLAY_IP:$LISTEN_PORT" \
   --url "https://$SERVER_UNDERLAY_IP/" --qkey "$QKEY" --ca-file "$CA" --verify-peer \
-  --tun --tun-name qtun0 --tun-ip "$CLIENT_TUN_IP" --tun-netmask 255.255.255.0 --no-utls -v \
+  --doh-provider "$DOH_PROVIDER" \
+  --tun --tun-name qtun0 --tun-ip "$CLIENT_TUN_IP" --tun-netmask 255.255.255.0 \
+  --no-utls -v \
   > "$CLIENT_LOG" 2>&1 &
+CLIENT_PID=$!
 sleep 5
 
 ip netns exec "$SERVER_NS" ip addr add "$SERVER_TUN_IP/24" dev qtun0 2>/dev/null || true
@@ -140,6 +158,11 @@ echo "=== tunnel status ==="
 echo "srv: $(ip netns exec "$SERVER_NS" ip -br addr show qtun0 2>&1)"
 echo "cli: $(ip netns exec "$CLIENT_NS" ip -br addr show qtun0 2>&1)"
 echo "client_complete=$(grep -c 'TLS handshake complete' "$CLIENT_LOG") server_complete=$(grep -c 'TLS handshake complete' "$SERVER_LOG")"
+if ! grep -q 'Client DoH DNS proxy active' "$CLIENT_LOG"; then
+  echo "client DoH DNS proxy did not activate" >&2
+  cat "$CLIENT_LOG" >&2
+  exit 1
+fi
 
 ip netns exec "$CLIENT_NS" tcpdump -i veth-cli -nn -U -w "$TCPDUMP_PCAP" \
   '(udp port 53 or tcp port 53)' > "$TCPDUMP_LOG" 2>&1 &
@@ -149,6 +172,9 @@ sleep 1
 set +e
 ip netns exec "$CLIENT_NS" dig @"$SERVER_TUN_IP" example.com A +tries=1 +time=5 +norecurse +stats > "$DNS_OUT" 2>&1
 DIG_STATUS=$?
+ip netns exec "$CLIENT_NS" nsenter -t "$CLIENT_PID" -m -n -- \
+  dig example.com A +tries=1 +time=5 +norecurse +stats > "$DNS_OS_OUT" 2>&1
+OS_DIG_STATUS=$?
 set -e
 sleep 1
 kill "$TCPDUMP_PID" 2>/dev/null || true
@@ -156,22 +182,27 @@ wait "$TCPDUMP_PID" 2>/dev/null || true
 TCPDUMP_PID=""
 
 DNS_STATUS_LINE="$(grep -m1 'status:' "$DNS_OUT" || true)"
+OS_DNS_STATUS_LINE="$(grep -m1 'status:' "$DNS_OS_OUT" || true)"
 LEAK_COUNT="$(tcpdump -nn -r "$TCPDUMP_PCAP" 2>/dev/null | wc -l | tr -d ' ')"
 
 echo "=== DNS result ==="
 echo "dig_exit=$DIG_STATUS"
 echo "$DNS_STATUS_LINE"
+echo "os_dig_exit=$OS_DIG_STATUS"
+echo "$OS_DNS_STATUS_LINE"
 echo "=== underlay tcpdump ==="
 echo "raw_port_53_packets=$LEAK_COUNT"
 
-if [ "$DIG_STATUS" -ne 0 ]; then
+if [ "$DIG_STATUS" -ne 0 ] || [ "$OS_DIG_STATUS" -ne 0 ]; then
   echo "DNS query failed" >&2
   cat "$DNS_OUT" >&2
+  cat "$DNS_OS_OUT" >&2
   exit 1
 fi
-if ! grep -q 'status:' "$DNS_OUT"; then
+if ! grep -q 'status:' "$DNS_OUT" || ! grep -q 'status:' "$DNS_OS_OUT"; then
   echo "DNS response missing status line" >&2
   cat "$DNS_OUT" >&2
+  cat "$DNS_OS_OUT" >&2
   exit 1
 fi
 if [ "$LEAK_COUNT" != "0" ]; then
@@ -180,4 +211,13 @@ if [ "$LEAK_COUNT" != "0" ]; then
   exit 1
 fi
 
-echo "PASS: DNS response received and zero raw port 53 packets observed on client underlay"
+kill "$CLIENT_PID" 2>/dev/null || true
+wait "$CLIENT_PID" 2>/dev/null || true
+CLIENT_PID=""
+if ! grep -q 'Client DoH DNS proxy stopped and system DNS restored' "$CLIENT_LOG"; then
+  echo "client DoH DNS proxy did not report resolver restoration" >&2
+  cat "$CLIENT_LOG" >&2
+  exit 1
+fi
+
+echo "PASS: explicit and OS-resolver DNS responses received, resolver restored, and zero raw port 53 packets observed on client underlay"

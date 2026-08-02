@@ -407,7 +407,7 @@ start_tunnel() {
 
     ip netns exec ns-cli env QUICFUSCATE_METRICS_ADDR="127.0.0.1:${TELEMETRY_PORT}" \
         "$B" --telemetry client --remote 10.10.0.1:4433 --url https://10.10.0.1/ \
-        --qkey "$qkey" --ca-file "$CA" --verify-peer \
+        --qkey "$qkey" --ca-file "$CA" --verify-peer --disable-doh \
         --tun --tun-name qtun0 --tun-ip 10.0.1.2 --tun-netmask 255.255.255.0 \
         --fec-mode "$FEC_MODE" --no-utls -v \
         > "$CLIENT_LOG" 2>&1 &

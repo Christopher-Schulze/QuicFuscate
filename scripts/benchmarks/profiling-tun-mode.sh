@@ -97,7 +97,7 @@ run_tun_scenario() {
 
     # Start client with TUN
     "$BINARY" client --remote 127.0.0.1:4433 --fec-mode "$fec_mode" \
-        --tun --tun-ip "$CLIENT_TUN_IP" --tun-netmask "$TUN_NETMASK" \
+        --tun --tun-ip "$CLIENT_TUN_IP" --tun-netmask "$TUN_NETMASK" --disable-doh \
         -v > "/tmp/client-${label}.log" 2>&1 &
     local cpid=$!
     sleep 3

@@ -994,6 +994,16 @@ async fn run_client(
         vpn_dns.iter().copied(),
     )
     .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string()))?;
+    let mut prepared_dns = if tun_enable && !disable_doh {
+        Some(tokio::task::block_in_place(|| {
+            quicfuscate::implementations::client::ClientDnsRuntime::prepare_endpoint(doh_provider)
+        })
+        .map_err(|error| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
+        })?)
+    } else {
+        None
+    };
     let stealth_runtime = Arc::new(
         StealthRuntimeOwner::from_env()
             .map_err(|error| std::io::Error::other(format!("invalid Reality config: {error}")))?,
@@ -1295,6 +1305,7 @@ async fn run_client(
     // TUN frame held when the QUIC DATAGRAM queue is full so a backpressured
     // packet is not dropped before carrier acceptance.
     let mut tun_backpressure_frame: Option<quicfuscate::interface::TunPacket> = None;
+    let mut dns_runtime: Option<quicfuscate::implementations::client::ClientDnsRuntime> = None;
     let mut housekeeping = interval(Duration::from_millis(5));
     housekeeping.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut next_stats_log = tokio::time::Instant::now();
@@ -1600,6 +1611,35 @@ async fn run_client(
                         info!("Kill switch: VPN traffic allowed, non-VPN blocked");
                     }
                     kill_switch_connected = true;
+                    if tun_enable && !disable_doh {
+                        let Some(tun) = tun_writer.as_ref() else {
+                            break ExitReason::SocketError(
+                                "client DoH requires an active TUN interface".to_string(),
+                            );
+                        };
+                        let Some(proxy_config) = prepared_dns.take() else {
+                            break ExitReason::SocketError(
+                                "client DoH configuration was not prepared".to_string(),
+                            );
+                        };
+                        let dns_start =
+                            quicfuscate::implementations::client::ClientDnsRuntime::start_with_config(
+                                &tokio::runtime::Handle::current(),
+                                proxy_config,
+                                tun.name(),
+                            );
+                        match dns_start {
+                            Ok(proxy) => {
+                                dns_runtime = Some(proxy);
+                                info!("Client DoH DNS proxy activated for the standalone TUN runtime");
+                            }
+                            Err(error) => {
+                                break ExitReason::SocketError(format!(
+                                    "client DoH DNS proxy activation failed: {error}"
+                                ));
+                            }
+                        }
+                    }
                     if client_receive_diagnostics_enabled {
                         info!(
                             "Client runtime phase: connected-firewall duration_ms={}",
@@ -1738,6 +1778,16 @@ async fn run_client(
         }
     };
 
+    let dns_shutdown_error = if let Some(mut dns_runtime) = dns_runtime.take() {
+        dns_runtime
+            .stop_async()
+            .await
+            .err()
+            .map(|error| format!("client DNS proxy shutdown failed: {error}"))
+    } else {
+        None
+    };
+
     // Drop the receiver before signalling the reader. This unblocks a reader
     // that is waiting for capacity in the bounded channel. Wake any native
     // backend wait, then publish the shutdown flag before joining the owned
@@ -1762,14 +1812,20 @@ async fn run_client(
         .await
         .err();
     let kill_switch_error = if let Some(ref ks) = kill_switch {
-        match &exit_reason {
-            ExitReason::CleanShutdown => ks
-                .disable()
-                .err()
-                .map(|error| format!("kill switch cleanup on clean shutdown failed: {error}")),
-            _ => ks.on_vpn_disconnected().err().map(|error| {
-                format!("kill switch fail-closed transition failed: {error}")
-            }),
+        if dns_shutdown_error.is_some() {
+            ks.on_vpn_disconnected().err().map(|error| {
+                format!("kill switch fail-closed transition after DNS restore failure failed: {error}")
+            })
+        } else {
+            match &exit_reason {
+                ExitReason::CleanShutdown => ks
+                    .disable()
+                    .err()
+                    .map(|error| format!("kill switch cleanup on clean shutdown failed: {error}")),
+                _ => ks.on_vpn_disconnected().err().map(|error| {
+                    format!("kill switch fail-closed transition failed: {error}")
+                }),
+            }
         }
     } else {
         None
@@ -1779,6 +1835,9 @@ async fn run_client(
         cleanup_errors.push(format!("stealth runtime shutdown failed: {error}"));
     }
     if let Some(error) = kill_switch_error {
+        cleanup_errors.push(error);
+    }
+    if let Some(error) = dns_shutdown_error {
         cleanup_errors.push(error);
     }
     if let Some(error) = tun_reader_error {

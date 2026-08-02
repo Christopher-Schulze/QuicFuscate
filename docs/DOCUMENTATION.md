@@ -357,6 +357,7 @@ This document provides comprehensive technical documentation for the system arch
   - `src/fec/`: Encoder/decoder/adaptive/GF tables
   - `src/stealth/`: HTTP/3 masquerading, TLS Cover, domain fronting, QPACK helpers, active probe detection, runtime Server Push cover coordination
   - `src/dns/`: canonical DNS packet parsing, upstream forwarding, cached DoH client, endpoint fallback, and DNS response construction
+  - `src/implementations/client/dns_runtime.rs`: client-owned localhost UDP/53 proxy, pre-pinned DoH endpoint lifecycle, platform resolver mutation, and fail-closed restoration
   - `src/reality.rs`: Reality Fallback (Xray-style reverse proxy for active probe mitigation)
   - `src/interface.rs`: Cross-platform TUN interface
   - `src/interface/wintun.rs`: Feature-gated native Windows Wintun adapter, packet I/O, MTU, and shutdown lifecycle
@@ -831,11 +832,12 @@ When an active probe is detected (invalid QUIC authentication, suspicious packet
 
 #### DoH Endpoint Fallback
 
-The shared DoH primitives are implemented in `src/dns/mod.rs`, but client runtime ownership is not complete:
-- `DnsProxyConfig` owns the configured endpoint list and lazily caches one `reqwest::Client` for connection reuse.
-- `process_dns_query()` tries configured `doh_endpoints` in order and returns the first successful RFC 8484 response; the current repository has no production client caller for this helper. The missing runtime wiring is tracked in TODO-771.
-- The live server TUN path forwards intercepted DNS with plain UDP `forward_dns_query()` rather than this DoH helper; its failure semantics are tracked in TODO-666.
-- `StealthConfig.enable_doh` and `StealthConfig.doh_provider` remain runtime configuration inputs, but no stealth-local resolver, process-global provider rotation counter, or `resolve_doh_multi()` surface exists.
+The shared DoH primitives and client runtime owner are implemented in `src/dns/mod.rs` and `src/implementations/client/dns_runtime.rs`:
+- `DnsProxyConfig` owns the configured endpoint list, pre-pins endpoint addresses before resolver mutation, and caches one `reqwest::Client` for connection reuse.
+- `ClientDnsRuntime` binds the configured client listener on localhost UDP/53, calls `process_dns_query()` for RFC 8484 responses, and restores the prior platform resolver before TUN or connection teardown. The embedded Engine and standalone TUN client use this owner when `enable_doh` is enabled.
+- Endpoint resolution occurs before kill-switch connecting policy and before the local resolver changes. Invalid HTTPS endpoints, unsupported credentials/fragments, missing hosts, non-53 listener ports, and non-DoH client configs fail closed.
+- The live server TUN path forwards intercepted DNS with plain UDP `forward_dns_query()` rather than this DoH helper. That server ownership model is intentional and its failure/admission semantics remain tracked in TODO-666, TODO-668, and TODO-611.
+- Standalone client mode without TUN does not install an OS resolver owner. macOS uses the existing network-service backend; Linux and Windows receive the active TUN interface name through the platform DNS hook.
 
 #### Async Stealth Scheduler (Non-Blocking)
 
@@ -3577,7 +3579,7 @@ Core H3/MASQUE is the canonical VPN/TUN data-plane carrier and the only active C
 Notes
 - Canonical Stealth, Anti-DPI, Performance, and Intelligent modes use the production H3/MASQUE TUN carrier when TUN mode is active.
 - Split capsule varints use the full 1/2/4/8-byte QUIC widths, including 16,384-byte payload lengths. A malformed capsule or truncated FIN suffix fails closed before staged events are exposed.
-- `src/dns/mod.rs` remains the owner of shared DoH primitives; the retired `stealth/parts/doh.rs` resolver and `stealth::MasqueManager` source are preserved under `archive/stealth/` for historical inspection only. Client runtime wiring remains open under TODO-771.
+- `src/dns/mod.rs` remains the owner of shared DoH primitives, and `src/implementations/client/dns_runtime.rs` owns the active client lifecycle; the retired `stealth/parts/doh.rs` resolver and `stealth::MasqueManager` source are preserved under `archive/stealth/` for historical inspection only. TODO-771 completed the runtime wiring.
 - If you maintain external profile dumps, `scripts/tests/utils/util-tls-export-active-profile.sh` exports them under `scripts/out/utils/.../profiles/` by default (or a caller-provided `--output-dir`) for regression tracking.
 
 #### MASQUE Roundtrip Example
@@ -3761,7 +3763,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `utils/verify-fingerprint-pcap.py` - Dependency-free pcap parser and checksum/vector verifier. Schema `quicfuscate.fingerprint-pcap.v3` distinguishes normalized client-originated SYN responses and non-SYN active responses from the ordinary server downlink SYN-ACK passthrough boundary, and fails closed on missing TCP reset, ICMP echo, ICMP UDP port-unreachable, checksum, IP-ID, or disabled/full transport-byte evidence.
 - `tun-e2e-traffic-analysis-netns.sh` - Exact-artifact Linux capture proof for 10 PPS full-padding idle chaff and 100 PPS constant-rate defense. It verifies complete ten-second capture windows, exact UDP payload sizes, reverse ACK/control traffic, explicit cost warnings, CPU and bandwidth ceilings, artifact identity, and residue-free teardown.
 - `tun-e2e-multi-client-dual-stack-netns.sh` - Exact-artifact Linux proof for three isolated dual-stack clients, source ownership, fan-out, PTB, DPLPMTUD black-hole recovery, positive-interval throughput, NAT, explicit client-to-client policy, and clean teardown
-- `tun-e2e-dns-leak-netns.sh` - Linux network-namespace DNS leak proof: real server/client TUN over MASQUE, DNS query through the server TUN IP, and tcpdump assertion that the client underlay sees zero raw TCP/UDP port 53 packets
+- `tun-e2e-dns-leak-netns.sh` - Linux network-namespace DNS leak proof: real server/client TUN over MASQUE, explicit TUN DNS plus a normal OS-resolver query through a private resolver mount, resolver restoration, and tcpdump assertion that the client underlay sees zero raw TCP/UDP port 53 packets
 - `test-e2e-admin-web.sh` - Admin web E2E (login/status/config/QKey API plus productive runtime QKey authentication, active-session revocation close, revoked-key rejection, and zero-stale-client reconciliation; desktop transport validation remains in dedicated integration suites)
 - `test-qkey-auth-policy.sh` - Exact-process QKey auth backoff, block, expiry, second-IP isolation, idle-prune, bounded-resource, metric, audit, and 100-attempt flood proof
 - `test-ddos-admission.sh` - Exact-process sustained DDoS activation/clear, established-client PING/ACK continuity, QUIC Retry, real MaxMind GeoIP with typed activation-outcome rejection coverage, custom-CA HTTPS blacklist, cache restart, failed-refresh last-known-good, resource, secret, UI-isolation, and cleanup proof
@@ -4363,12 +4365,12 @@ nslookup -type=A example.com
 # The response should come from your configured VPN DNS servers, not your ISP
 ```
 
-Linux root validation uses `scripts/tests/tun-e2e-dns-leak-netns.sh`. The gate creates server/client namespaces, opens a real QKey-authenticated TUN/MASQUE tunnel, runs a DNS query through the server TUN IP, and captures the client underlay with tcpdump. Passing evidence requires a DNS response plus `raw_port_53_packets=0`.
+Linux root validation uses `scripts/tests/tun-e2e-dns-leak-netns.sh`. The gate creates server/client namespaces, opens a real QKey-authenticated TUN/MASQUE tunnel, runs one explicit query through the server TUN IP and one normal resolver query through a private `/etc/resolv.conf` mount pointed at the client localhost proxy, verifies resolver restoration, and captures the client underlay with tcpdump. Passing evidence requires both DNS responses plus `raw_port_53_packets=0`. Set `QF_E2E_DOH_PROVIDER` for a reachable provider-success run; the default endpoint intentionally proves local ownership and cleanup with NXDOMAIN fallback.
 
 #### Common DNS Leak Causes
 1. **Split-tunnel configuration:** Ensure all DNS traffic routes through the tunnel
-2. **IPv6 DNS fallback:** Configure IPv6 DNS explicitly when IPv6 is enabled. The live server intercepts both IPv4 and IPv6 UDP/53 DNS packets that arrive through the MASQUE/TUN path, but local OS resolver bypass outside the tunnel still requires kill-switch enforcement.
-3. **macOS:** DNS reset to "Empty" falls back to DHCP DNS (see platform-specific section)
+2. **IPv6 DNS fallback:** Configure IPv6 DNS explicitly when IPv6 is enabled. The live server intercepts both IPv4 and IPv6 UDP/53 DNS packets that arrive through the MASQUE/TUN path. The client proxy owns IPv4 localhost UDP/53 and binds IPv6 localhost UDP/53 when available; the OS resolver is configured with the supported platform backend.
+3. **macOS and Windows:** Native resolver mutation requires the corresponding privileged platform gate. The local Linux namespace proof does not claim native proof for those platforms.
 
 #### Prevention
 Configure DNS servers explicitly:
@@ -4590,10 +4592,10 @@ A full deep-audit sweep of `src/` was performed with parallel read-only module s
 - **Retry token length validation after encoding**: `src/implementations/server/ddos.rs` checks `MAX_RETRY_TOKEN_LEN` only after building the token. Tracked in TODO-659.
 - **DNS NXDOMAIN lie**: `src/dns/mod.rs` returns NXDOMAIN for upstream failures. Tracked in TODO-666.
 - **DNS query wire semantics**: DNS admission accepts incomplete query/header/name semantics and synthetic responses can rewrite the original question. Tracked in TODO-770.
-- **DNS client runtime wiring**: The shared DoH/proxy API has no production client caller, and the existing E2E proof does not exercise the system resolver. Tracked in TODO-771.
+- **DNS client runtime wiring**: `ClientDnsRuntime` now owns localhost UDP/53, pre-pinned RFC 8484 DoH endpoint transport, platform resolver mutation, and restoration in the Engine and standalone TUN client. The Linux E2E harness exercises explicit TUN DNS, OS/application DNS, underlay capture, and restoration. Resolved by TODO-771; native macOS/Windows proof remains environment-specific.
 - **Local close error kind**: `Connection::close()` emits distinct application/transport frames but records `ApplicationClosed` for both branches. Tracked in TODO-772.
 - **fsutil TOCTOU race**: `src/implementations/server/fsutil.rs` now creates and secures the temporary file before the atomic rename, with post-rename defense-in-depth. Resolved by TODO-591; TODO-667 was a duplicate tracker.
-- **MASQUE/DoH ownership**: TODO-597 retired the empty `stealth::MasqueManager`, its false-success send/legacy-varint path, and the unused stealth-local DoH resolver. Core H3/MASQUE now owns the active CONNECT-UDP/capsule carrier, buffers split DATA, rejects malformed or truncated FIN tails before event delivery, and covers all 1/2/4/8-byte varints including 16,384-byte payloads. Retired sources and the obsolete integration test remain recoverable under `archive/`; shared DoH primitives remain in `src/dns/mod.rs`, with client runtime wiring tracked in TODO-771.
+- **MASQUE/DoH ownership**: TODO-597 retired the empty `stealth::MasqueManager`, its false-success send/legacy-varint path, and the unused stealth-local DoH resolver. Core H3/MASQUE now owns the active CONNECT-UDP/capsule carrier, buffers split DATA, rejects malformed or truncated FIN tails before event delivery, and covers all 1/2/4/8-byte varints including 16,384-byte payloads. Retired sources and the obsolete integration test remain recoverable under `archive/`; shared DoH primitives remain in `src/dns/mod.rs`, while `ClientDnsRuntime` owns the active client resolver path. The server's final DNS hop remains plain UDP by design. TODO-771 completed the runtime wiring.
 
 ### Resource and Performance Findings
 

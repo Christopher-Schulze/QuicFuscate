@@ -178,6 +178,14 @@ impl PlatformBackend for WindowsPlatform {
         Ok(())
     }
 
+    fn set_dns_interface_name(&self, name: &str) {
+        self.set_active_interface(Some(name.to_string()));
+    }
+
+    fn clear_dns_interface_name(&self) {
+        self.set_active_interface(None);
+    }
+
     fn default_gateway(&self) -> Result<IpAddr, PlatformError> {
         let output = Command::new("route")
             .args(["print", "0.0.0.0"])

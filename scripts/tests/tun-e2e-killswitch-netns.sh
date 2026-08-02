@@ -415,7 +415,7 @@ start_client() {
     "${RUNTIME_CONFIG_ARGS[@]}" \
     --remote "$SERVER_UNDERLAY_IP:$LISTEN_PORT" \
     --url "https://$SERVER_UNDERLAY_IP/" --qkey "$qkey" \
-    --ca-file "$CERT_DIR/ca.crt" --verify-peer --no-utls \
+    --ca-file "$CERT_DIR/ca.crt" --verify-peer --disable-doh --no-utls \
     --tun --tun-name qtun0 --tun-ip "$CLIENT_TUN_IP" \
     --tun-netmask 255.255.255.0 --kill-switch \
     --vpn-dns "$SERVER_TUN_IP" \

@@ -16,6 +16,7 @@
 
 mod backend;
 mod connection;
+mod dns_runtime;
 #[cfg(test)]
 mod integration;
 mod io_driver;
@@ -28,6 +29,7 @@ mod subsystems;
 
 pub use backend::*;
 pub use connection::*;
+pub use dns_runtime::ClientDnsRuntime;
 pub use io_driver::*;
 pub use killswitch::{KillSwitch, VpnFirewallPolicy};
 pub use profile::{Profile, ProfileError, ProfileManager};
@@ -64,6 +66,8 @@ pub struct ClientRuntime {
     subsystems: Option<ClientSubsystems>,
     /// Tokio runtime handle
     runtime: Option<runtime::SharedRuntime>,
+    /// Client-owned DoH proxy and system DNS lifecycle.
+    dns_runtime: Option<dns_runtime::ClientDnsRuntime>,
     /// Shared owner for all stealth background workers of this generation.
     stealth_runtime: Option<Arc<StealthRuntimeOwner>>,
     /// I/O driver
@@ -190,6 +194,7 @@ impl ClientRuntime {
             socket: None,
             subsystems: None,
             runtime: None,
+            dns_runtime: None,
             stealth_runtime: Some(stealth_runtime),
             io_driver: None,
             io_handles: Vec::new(),
@@ -312,14 +317,85 @@ impl ClientRuntime {
         Ok(())
     }
 
+    /// Activate the client-owned DoH proxy after the VPN connection is ready.
+    pub fn activate_dns(&mut self) -> Result<(), EngineError> {
+        if !self.config.stealth.enable_doh || self.dns_runtime.is_some() {
+            return Ok(());
+        }
+        let proxy_config = dns_runtime::ClientDnsRuntime::prepare(&self.config)?;
+        self.activate_dns_with_config(proxy_config)
+    }
+
+    /// Activate the client-owned DoH proxy from a pre-resolved configuration.
+    pub fn activate_dns_with_config(
+        &mut self,
+        proxy_config: crate::dns::DnsProxyConfig,
+    ) -> Result<(), EngineError> {
+        if !self.config.stealth.enable_doh || self.dns_runtime.is_some() {
+            return Ok(());
+        }
+        if self.state != ClientState::Connected {
+            return Err(EngineError::InvalidState(
+                self.state.into(),
+                "activate DNS (must be connected)",
+            ));
+        }
+
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| EngineError::Internal("Runtime not initialized".to_string()))?
+            .clone();
+        let tun_name =
+            self.tun_name().ok_or_else(|| EngineError::Tun("TUN not initialized".to_string()))?;
+        let dns_runtime = dns_runtime::ClientDnsRuntime::start_with_config(
+            runtime.handle(),
+            proxy_config,
+            &tun_name,
+        )?;
+        self.dns_runtime = Some(dns_runtime);
+        Ok(())
+    }
+
+    /// Restore the prior system DNS configuration and stop the client proxy.
+    pub fn deactivate_dns(&mut self) -> Result<(), EngineError> {
+        let Some(mut dns_runtime) = self.dns_runtime.take() else {
+            return Ok(());
+        };
+        let runtime = match self.runtime.as_ref().cloned() {
+            Some(runtime) => runtime,
+            None => {
+                self.dns_runtime = Some(dns_runtime);
+                return Err(EngineError::Internal(
+                    "Runtime not initialized while stopping client DNS proxy".to_string(),
+                ));
+            }
+        };
+
+        match dns_runtime.stop(&runtime) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.dns_runtime = Some(dns_runtime);
+                Err(error)
+            }
+        }
+    }
+
     /// Stop the client runtime.
     pub fn stop(&mut self) -> Result<(), EngineError> {
         if self.state == ClientState::Stopped {
             return Ok(());
         }
         if self.state == ClientState::Connected {
-            if let Err(e) = self.disconnect() {
-                log::warn!("Client disconnect during stop failed: {:?}", e);
+            if let Err(error) = self.disconnect() {
+                self.state = ClientState::Error;
+                return Err(error);
+            }
+        }
+        if self.dns_runtime.is_some() {
+            if let Err(error) = self.deactivate_dns() {
+                self.state = ClientState::Error;
+                return Err(error);
             }
         }
 
@@ -530,6 +606,8 @@ impl ClientRuntime {
                 "disconnect (must be connected)",
             ));
         }
+
+        self.deactivate_dns()?;
 
         if let Some(io) = &self.io_driver {
             io.shutdown();

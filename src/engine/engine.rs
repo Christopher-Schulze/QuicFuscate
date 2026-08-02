@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 
 use super::config::{ConfigError, EngineConfig, EngineMode};
-use crate::implementations::client::{ClientRuntime, KillSwitch, VpnFirewallPolicy};
+use crate::implementations::client::{
+    ClientDnsRuntime, ClientRuntime, KillSwitch, VpnFirewallPolicy,
+};
 use crate::implementations::server::{
     metrics::Metrics, normalize_runtime_optimize_config, AdminAction, PreparedStandaloneLaunch,
     ServerRuntime,
@@ -975,9 +977,12 @@ impl QuicFuscateEngine {
         let old_state = state;
         self.set_state(EngineState::Stopping);
 
+        let mut client_runtime_stop_error = None;
         if let Some(mut runtime) = self.client_runtime.take() {
-            if let Err(e) = runtime.stop() {
-                log::warn!("Client runtime stop failed: {}", e);
+            if let Err(error) = runtime.stop() {
+                log::error!("Client runtime stop failed; preserving runtime for retry: {}", error);
+                client_runtime_stop_error = Some(error);
+                self.client_runtime = Some(runtime);
             }
         }
         if let Some(sender) = self.server_loop_shutdown_tx.take() {
@@ -1005,20 +1010,28 @@ impl QuicFuscateEngine {
         self.start_time = None;
 
         // Disable kill switch on stop (removes all firewall rules)
-        let kill_switch_cleanup_error =
-            self.kill_switch.take().and_then(|ks| ks.disable().err()).map(|error| {
-                EngineError::Internal(format!("Kill switch disable on stop failed: {error}"))
-            });
+        let kill_switch_cleanup_error = if client_runtime_stop_error.is_none() {
+            self.kill_switch.take().and_then(|kill_switch| {
+                kill_switch.disable().err().map(|error| {
+                    self.kill_switch = Some(kill_switch);
+                    EngineError::Internal(format!("Kill switch disable on stop failed: {error}"))
+                })
+            })
+        } else {
+            None
+        };
 
-        self.set_state(EngineState::Stopped);
-        self.notify_state_change(old_state, EngineState::Stopped);
-
-        match kill_switch_cleanup_error {
+        let shutdown_error = client_runtime_stop_error.or(kill_switch_cleanup_error);
+        match shutdown_error {
             Some(error) => {
-                log::error!("Engine stopped with incomplete kill switch cleanup: {error}");
+                self.set_state(EngineState::Error);
+                self.notify_state_change(old_state, EngineState::Error);
+                log::error!("Engine stop incomplete: {error}");
                 Err(error)
             }
             None => {
+                self.set_state(EngineState::Stopped);
+                self.notify_state_change(old_state, EngineState::Stopped);
                 log::info!("Engine stopped gracefully");
                 Ok(())
             }
@@ -1062,6 +1075,12 @@ impl QuicFuscateEngine {
             self.config.interface.dns_servers.iter().copied(),
         )
         .map_err(|error| EngineError::Config(error.to_string()))?;
+
+        let prepared_dns = if self.config.stealth.enable_doh {
+            Some(ClientDnsRuntime::prepare(&self.config)?)
+        } else {
+            None
+        };
 
         if let Some(ref kill_switch) = self.kill_switch {
             kill_switch
@@ -1125,6 +1144,28 @@ impl QuicFuscateEngine {
                 )));
             }
             log::info!("Kill switch: VPN traffic allowed, non-VPN traffic blocked");
+        }
+
+        if let Some(proxy_config) = prepared_dns {
+            if let Err(error) = runtime.activate_dns_with_config(proxy_config) {
+                if let Err(disconnect_error) = runtime.disconnect() {
+                    log::warn!(
+                        "Client runtime cleanup after DNS activation failure failed: {}",
+                        disconnect_error
+                    );
+                }
+                if let Some(ref ks) = self.kill_switch {
+                    if let Err(disconnect_error) = ks.on_vpn_disconnected() {
+                        log::error!(
+                            "Kill switch restore after DNS activation failure failed: {}",
+                            disconnect_error
+                        );
+                    }
+                }
+                self.set_state(EngineState::Running);
+                self.notify_state_change(EngineState::Connecting, EngineState::Running);
+                return Err(error);
+            }
         }
 
         self.set_state(EngineState::Connected);
