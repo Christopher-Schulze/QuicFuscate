@@ -65,6 +65,8 @@ def tracked_class(path: str) -> str | None:
         return root_file_classes.get(path)
     if path.startswith(".cargo/"):
         return "cargo-configuration"
+    if path.startswith("archive/"):
+        return "historical-archive"
     prefixes = (
         (".github/", "ci-workflow"),
         ("apps/svelte-admin/", "frontend-admin"),
