@@ -73,6 +73,17 @@ pub mod error {
         /// QUIC DATAGRAM send queue is at capacity; the caller should apply
         /// backpressure and retry rather than drop the packet.
         DgramQueueFull,
+        /// The peer closed the transport connection.
+        PeerConnectionClosed {
+            error_code: u64,
+            frame_type: u64,
+            reason: Vec<u8>,
+        },
+        /// The peer closed the application connection.
+        PeerApplicationClosed {
+            error_code: u64,
+            reason: Vec<u8>,
+        },
     }
 
     impl fmt::Display for ConnectionError {
@@ -109,6 +120,19 @@ pub mod error {
                 ConnectionError::StreamStopped => write!(f, "Stream stopped"),
                 ConnectionError::IdLimit => write!(f, "ID limit exceeded"),
                 ConnectionError::ApplicationClosed => write!(f, "Application closed"),
+                ConnectionError::PeerConnectionClosed { error_code, frame_type, reason } => write!(
+                    f,
+                    "Peer connection closed: code={} frame_type={} reason={}",
+                    error_code,
+                    frame_type,
+                    String::from_utf8_lossy(reason)
+                ),
+                ConnectionError::PeerApplicationClosed { error_code, reason } => write!(
+                    f,
+                    "Peer application closed: code={} reason={}",
+                    error_code,
+                    String::from_utf8_lossy(reason)
+                ),
                 ConnectionError::CryptoError(msg) => write!(f, "Crypto error: {}", msg),
                 ConnectionError::TlsError(msg) => write!(f, "TLS error: {}", msg),
                 ConnectionError::ApplicationProtoError => write!(f, "Application protocol error"),

@@ -52,7 +52,10 @@ pub struct Connection {
     readable_stream_ids: HashSet<u64>,
     writable_streams: VecDeque<u64>,
     writable_stream_ids: HashSet<u64>,
+    /// First locally decided terminal/protocol error.
     local_error: Option<crate::error::ConnectionError>,
+    /// First peer-provided close reason, kept separate from local failures.
+    remote_error: Option<crate::error::ConnectionError>,
     #[cfg(any(test, feature = "rust-tests"))]
     retired_scids: VecDeque<ConnectionId>,
     bytes_in_flight_started: Option<Instant>,

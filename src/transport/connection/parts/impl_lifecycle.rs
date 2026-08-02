@@ -1,4 +1,24 @@
 impl Connection {
+    /// Retain the first error in a state slot without borrowing the whole connection.
+    fn retain_first_error(
+        slot: &mut Option<crate::error::ConnectionError>,
+        error: crate::error::ConnectionError,
+    ) {
+        if slot.is_none() {
+            *slot = Some(error);
+        }
+    }
+
+    /// Retain the first local failure as the root cause for this connection.
+    fn record_local_error(&mut self, error: crate::error::ConnectionError) {
+        Self::retain_first_error(&mut self.local_error, error);
+    }
+
+    /// Retain the first close received from the peer independently of local state.
+    fn record_remote_error(&mut self, error: crate::error::ConnectionError) {
+        Self::retain_first_error(&mut self.remote_error, error);
+    }
+
     fn configured_recovery(config: &Config, max_datagram_size: usize) -> recovery::Recovery {
         let algorithm = match config.cc_algorithm {
             crate::transport::CongestionControlAlgorithm::Reno => {
@@ -133,6 +153,7 @@ impl Connection {
             writable_streams: VecDeque::new(),
             writable_stream_ids: HashSet::new(),
             local_error: None,
+            remote_error: None,
             #[cfg(any(test, feature = "rust-tests"))]
             retired_scids: VecDeque::new(),
             bytes_in_flight_started: None,
@@ -1208,7 +1229,7 @@ impl Connection {
             if let Some(provider) = &mut self.tls_provider {
                 for chunk in chunks {
                     if let Err(error) = provider.provide_quic_data(level, &chunk) {
-                        self.local_error = Some(error.clone());
+                        self.record_local_error(error.clone());
                         self.is_closed = true;
                         return Err(error);
                     }
@@ -1218,7 +1239,7 @@ impl Connection {
             // Without this, the transport would never transition to 1-RTT and application streams
             // (including HTTP/3 HEADERS carrying x-qf-auth) would stall behind the handshake gate.
             if let Err(error) = self.poll_tls_and_validate_versions() {
-                self.local_error = Some(error.clone());
+                self.record_local_error(error.clone());
                 self.is_closed = true;
                 return Err(error);
             }
@@ -1334,8 +1355,8 @@ impl Connection {
         reason: &'static str,
     ) -> crate::error::ConnectionError {
         let error = crate::error::ConnectionError::Transport(reason.to_string());
+        self.record_local_error(error.clone());
         let _ = self.close(false, error_code, reason.as_bytes());
-        self.local_error = Some(error.clone());
         error
     }
 
@@ -1385,7 +1406,7 @@ impl Connection {
             Err(ConnectionError::Done) => return Ok(packet_len),
             Err(ConnectionError::VersionMismatch) => {
                 self.is_closed = true;
-                self.local_error = Some(ConnectionError::VersionMismatch);
+                self.record_local_error(ConnectionError::VersionMismatch);
                 return Err(ConnectionError::VersionMismatch);
             }
             Err(error) => return Err(error),
@@ -1406,6 +1427,7 @@ impl Connection {
         self.is_closed = false;
         self.is_draining = false;
         self.local_error = None;
+        self.remote_error = None;
         self.pkt_spaces = [
             pnspace::PktNumSpace::default(),
             pnspace::PktNumSpace::default(),

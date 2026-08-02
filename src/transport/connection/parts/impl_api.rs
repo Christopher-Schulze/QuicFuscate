@@ -455,6 +455,21 @@ impl Connection {
     pub fn is_closed(&self) -> bool {
         self.is_closed
     }
+
+    /// Returns the terminal error exposed to callers, preferring the local root cause.
+    pub fn error(&self) -> Option<&crate::error::ConnectionError> {
+        self.local_error.as_ref().or(self.remote_error.as_ref())
+    }
+
+    /// Returns the first locally decided terminal/protocol error.
+    pub fn local_error(&self) -> Option<&crate::error::ConnectionError> {
+        self.local_error.as_ref()
+    }
+
+    /// Returns the first close reason received from the peer.
+    pub fn remote_error(&self) -> Option<&crate::error::ConnectionError> {
+        self.remote_error.as_ref()
+    }
     /// Returns true if the connection has any readable streams
     #[cfg(any(test, feature = "rust-tests"))]
     pub fn is_readable(&self) -> bool {
@@ -856,7 +871,7 @@ impl Connection {
     ) -> Result<(), crate::error::ConnectionError> {
         self.is_closed = true;
         self.is_draining = true;
-        self.local_error = Some(crate::error::ConnectionError::ApplicationClosed);
+        self.record_local_error(crate::error::ConnectionError::ApplicationClosed);
         if let Some(scheduler) = self.traffic_analysis.as_mut() {
             scheduler.cancel();
         }
@@ -1045,7 +1060,7 @@ impl Connection {
         // QUIC idle timeout is terminal and silent: no CONNECTION_CLOSE frame
         // is sent, but runtime owners must be able to reap the connection and
         // release its session, address allocation, and policy state.
-        self.local_error = Some(crate::error::ConnectionError::Timeout);
+        self.record_local_error(crate::error::ConnectionError::Timeout);
         self.is_closed = true;
         self.is_draining = true;
         if let Some(scheduler) = self.traffic_analysis.as_mut() {

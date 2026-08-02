@@ -439,6 +439,17 @@ mod tests {
     }
 
     #[test]
+    fn local_error_preserves_first_tls_provider_failure() {
+        let mut c = make_conn();
+        let provider_error = ConnectionError::TlsError("provider failure".to_string());
+        c.record_local_error(provider_error.clone());
+        c.record_local_error(ConnectionError::Transport("later shutdown error".to_string()));
+
+        assert_eq!(c.local_error, Some(provider_error.clone()));
+        assert_eq!(c.error(), Some(&provider_error));
+    }
+
+    #[test]
     fn on_timeout_clears_bytes_in_flight() {
         let mut c = make_conn();
         c.bytes_in_flight = 4800;
@@ -628,6 +639,8 @@ mod tests {
     fn local_error_none_on_fresh_connection() {
         let c = make_conn();
         assert!(c.local_error.is_none(), "fresh connection must not have local_error");
+        assert!(c.remote_error.is_none(), "fresh connection must not have remote_error");
+        assert!(c.error().is_none(), "fresh connection must not expose an error");
     }
 
     #[test]
@@ -1795,7 +1808,47 @@ mod tests {
 
             assert!(pair.server.is_closed(), "peer close frame must close the connection");
             assert!(pair.server.is_draining(), "peer close frame must enter draining state");
+            let expected = if app_close {
+                ConnectionError::PeerApplicationClosed {
+                    error_code: 42,
+                    reason: b"peer shutdown".to_vec(),
+                }
+            } else {
+                ConnectionError::PeerConnectionClosed {
+                    error_code: 42,
+                    frame_type: 0,
+                    reason: b"peer shutdown".to_vec(),
+                }
+            };
+            assert_eq!(pair.server.remote_error(), Some(&expected));
         }
+    }
+
+    #[test]
+    fn remote_close_remains_observable_after_local_timeout() {
+        let mut pair = bench_paired_1rtt_connections();
+        pair.server.close(false, 0x42, b"peer shutdown").unwrap();
+
+        let mut packet = [0u8; 1500];
+        let (packet_len, _) = pair.server.send(&mut packet).unwrap();
+        pair.client.on_timeout();
+        let recv_info = RecvInfo {
+            from: pair.server.local_addr,
+            to: pair.client.local_addr,
+            ecn: None,
+        };
+        pair.client.recv(&mut packet[..packet_len], &recv_info).unwrap();
+
+        assert_eq!(pair.client.local_error, Some(ConnectionError::Timeout));
+        assert_eq!(
+            pair.client.remote_error(),
+            Some(&ConnectionError::PeerConnectionClosed {
+                error_code: 0x42,
+                frame_type: 0,
+                reason: b"peer shutdown".to_vec(),
+            })
+        );
+        assert_eq!(pair.client.error(), Some(&ConnectionError::Timeout));
     }
 
     // ---- ECN Counters ----------------------------------------------------

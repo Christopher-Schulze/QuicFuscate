@@ -53,7 +53,7 @@ impl Connection {
                 self.dcid.as_ref()
             };
             if let Err(e) = packet::verify_retry_tag(buf, odcid, self.config.version) {
-                self.local_error = Some(e);
+                self.record_local_error(e);
                 if let Some(err) = self.local_error.clone() {
                     return Err(err);
                 }
@@ -146,7 +146,7 @@ impl Connection {
                 }
                 Err(ConnectionError::Done) => return Err(ConnectionError::Done),
                 Err(e) => {
-                    self.local_error = Some(e);
+                    self.record_local_error(e);
                     if let Some(err) = self.local_error.clone() {
                         return Err(err);
                     }
@@ -329,8 +329,10 @@ impl Connection {
                                     None => s.recv_final_size = Some(end),
                                     Some(prev) if prev == end => {}
                                     Some(_) => {
-                                        self.local_error =
-                                            Some(crate::error::ConnectionError::FinalSize);
+                                        Self::retain_first_error(
+                                            &mut self.local_error,
+                                            crate::error::ConnectionError::FinalSize,
+                                        );
                                     }
                                 }
                             }
@@ -382,7 +384,10 @@ impl Connection {
                             }
                             // If exceeding current stream window, flag flow control (minimal handling)
                             if s.recv_off > s.max_stream_data_rx {
-                                self.local_error = Some(crate::error::ConnectionError::FlowControl);
+                                Self::retain_first_error(
+                                    &mut self.local_error,
+                                    crate::error::ConnectionError::FlowControl,
+                                );
                             } else if s.recv_off * 4 >= s.max_stream_data_rx * 3 {
                                 // Grow stream window and queue MAX_STREAM_DATA
                                 let new_max =
@@ -448,7 +453,24 @@ impl Connection {
                             });
                             s.max_stream_data_tx = max;
                         }
-                        Frame::ConnectionClose { .. } | Frame::ApplicationClose { .. } => {
+                        Frame::ConnectionClose { error_code, frame_type, reason } => {
+                            self.record_remote_error(
+                                crate::error::ConnectionError::PeerConnectionClosed {
+                                    error_code,
+                                    frame_type,
+                                    reason: reason.into_owned(),
+                                },
+                            );
+                            self.is_closed = true;
+                            self.is_draining = true;
+                        }
+                        Frame::ApplicationClose { error_code, reason } => {
+                            self.record_remote_error(
+                                crate::error::ConnectionError::PeerApplicationClosed {
+                                    error_code,
+                                    reason: reason.into_owned(),
+                                },
+                            );
                             self.is_closed = true;
                             self.is_draining = true;
                         }

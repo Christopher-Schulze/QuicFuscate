@@ -4329,6 +4329,9 @@ The overall approach prioritizes runtime performance over architectural purity. 
 3. Verify NAT/router does not drop long-lived UDP sessions
 4. Check `transport.max_idle_timeout` is consistent on both sides
 
+#### Connection Error Ownership
+`transport::Connection` keeps the first locally decided failure in `local_error` so a later shutdown or protocol event cannot replace the root cause. A peer `CONNECTION_CLOSE` or `APPLICATION_CLOSE` is recorded separately in `remote_error` with its error code, frame type where applicable, and raw reason bytes. `Connection::error()` exposes the local root cause when present and otherwise the first peer close; `local_error()` and `remote_error()` expose each side independently. This separation keeps local timeout/TLS failures observable while preserving a later peer close for diagnostics.
+
 #### QKey Authentication Failure
 **Symptoms:** "Connection refused" or "Invalid token" immediately after handshake.
 
