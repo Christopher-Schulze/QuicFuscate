@@ -11,8 +11,6 @@ pub struct StealthManager {
     profile_pool: Arc<Vec<(BrowserProfile, OsProfile)>>,
     /// Current profile index for rotation
     profile_index: Arc<AtomicUsize>,
-    /// MASQUE manager for CONNECT-UDP tunneling
-    masque_manager: Option<MasqueManager>,
     /// Active probe detector
     probe_detector: Option<ActiveProbeDetector>,
     /// Flow shaper for jitter and dummy retransmits
@@ -71,7 +69,7 @@ impl StealthManager {
         optimization_manager: Arc<OptimizationManager>,
         crypto_manager: Arc<CryptoManager>,
     ) -> Self {
-        Self::new_internal(config, optimization_manager, crypto_manager, false, None)
+        Self::new_internal(config, optimization_manager, crypto_manager, None)
     }
 
     /// Creates a stealth manager attached to an explicit runtime owner.
@@ -85,7 +83,6 @@ impl StealthManager {
             config,
             optimization_manager,
             crypto_manager,
-            false,
             runtime_owner,
         )
     }
@@ -94,7 +91,6 @@ impl StealthManager {
         config: StealthConfig,
         optimization_manager: Arc<OptimizationManager>,
         crypto_manager: Arc<CryptoManager>,
-        force_masque_compat: bool,
         runtime_owner: Option<Arc<StealthRuntimeOwner>>,
     ) -> Self {
         let fingerprint = Arc::new(Mutex::new(FingerprintProfile::new(
@@ -106,14 +102,6 @@ impl StealthManager {
 
         let profile_pool = Arc::new(TlsClientHelloSpoofer::available_profiles());
 
-        // MASQUE remains compiled in for compatibility experiments, but the
-        // canonical runtime keeps it disabled unless explicitly requested.
-        let masque_manager = if force_masque_compat || StealthConfig::masque_compat_requested() {
-            Some(MasqueManager::new_internal())
-        } else {
-            None
-        };
-
         let probe_detector = if config.dynamic_enabled
             || config.enable_traffic_padding
             || config.enable_timing_obfuscation
@@ -124,8 +112,8 @@ impl StealthManager {
         };
 
         // FlowShaper is the primary heavy timing owner for Anti-DPI and
-        // escalation-only compatibility paths. Light Stealth timing stays on
-        // the transport timing gate.
+        // escalation-only paths. Light Stealth timing stays on the transport
+        // timing gate.
         let flow_shaper = if config.enable_timing_obfuscation || config.dynamic_enabled {
             let jitter_us = if matches!(config.mode, StealthMode::AntiDpi) { 3000 } else { 750 };
             Some(FlowShaper::new(jitter_us, matches!(config.mode, StealthMode::AntiDpi)))
@@ -179,8 +167,8 @@ impl StealthManager {
         }
 
         // COVER HANDSHAKE CACHE INITIALIZATION (TODO-415)
-        // Runtime-owned managers share one cache. Compatibility managers keep
-        // a local cache without spawning an unowned worker.
+        // Runtime-owned managers share one cache. Direct constructors keep a
+        // local cache without spawning an unowned worker.
         let cover_cache = runtime_owner
             .as_ref()
             .and_then(|owner| owner.cover_cache())
@@ -208,7 +196,6 @@ impl StealthManager {
             last_rotation: Arc::new(Mutex::new(std::time::Instant::now())),
             profile_pool,
             profile_index: Arc::new(AtomicUsize::new(0)),
-            masque_manager,
             probe_detector,
             flow_shaper,
             cover_traffic,
@@ -247,16 +234,6 @@ impl StealthManager {
             "Domain fronting requested without configured fronting domains outside Anti-DPI - disabling for a coherent H3 persona"
         );
         None
-    }
-
-    /// Creates a stealth manager with MASQUE compatibility forced on (test-only).
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn new_with_masque_compat_for_test(
-        config: StealthConfig,
-        optimization_manager: Arc<OptimizationManager>,
-        crypto_manager: Arc<CryptoManager>,
-    ) -> Self {
-        Self::new_internal(config, optimization_manager, crypto_manager, true, None)
     }
 
     /// Debug consistency check: validates TLS fingerprint matches header profile.
@@ -1449,16 +1426,12 @@ impl StealthManager {
 
     /// Returns true if MASQUE datagram handling should be active.
     pub(crate) fn masque_datagram_enabled(&self) -> bool {
-        if self.masque_manager.is_none() {
-            return false;
-        }
         StealthConfig::masque_env_flag("QUICFUSCATE_MASQUE_DATAGRAM")
     }
 
     /// Determine MASQUE proxy authority to use.
     /// Priority: QUICFUSCATE_MASQUE_PROXY env -> first fronting domain (":443").
     pub(crate) fn masque_proxy(&self) -> Option<String> {
-        self.masque_manager.as_ref()?;
         if let Some(v) = StealthConfig::masque_proxy_override() {
             return Some(v);
         }
@@ -1471,14 +1444,10 @@ impl StealthManager {
         None
     }
 
-    /// Intelligent mode compatibility hook: only prefer MASQUE when the
-    /// compatibility surface was explicitly enabled and probe/escalation
-    /// pressure justifies it.
+    /// Intelligent-mode hook: prefer the production Core H3/MASQUE carrier
+    /// when probe or escalation pressure justifies it.
     fn maybe_escalate_masque_intelligent(&self) {
         if !matches!(self.config.mode, StealthMode::Intelligent) {
-            return;
-        }
-        if self.masque_manager.is_none() {
             return;
         }
         let desired_preference = self.desired_masque_preference();
@@ -1500,16 +1469,13 @@ impl StealthManager {
         if !matches!(self.config.mode, StealthMode::Intelligent) {
             return;
         }
-        if self.masque_manager.is_none() {
-            return;
-        }
         let desired_preference = self.desired_masque_preference_with_hint(telemetry_hint);
         self.prefer_masque.store(desired_preference, Ordering::Relaxed);
     }
 
     /// Keep Intelligent mode runtime controls in one place.
-    /// This includes preference updates for compatibility MASQUE signaling and
-    /// the base server-push runtime activation policy for that level.
+    /// This includes preference updates for Core H3/MASQUE selection and the
+    /// base server-push runtime activation policy for that level.
     pub(crate) fn sync_intelligent_runtime_controls(&self, intelligent_level: u32) {
         if !self.is_intelligent_runtime() {
             return;

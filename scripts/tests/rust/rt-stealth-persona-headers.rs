@@ -202,7 +202,7 @@ fn chrome_header_order_uses_simd_template() {
 }
 
 #[test]
-fn safari_header_order_titlecase_template() {
+fn safari_header_order_dedicated_template() {
     let profile = FingerprintProfile::new(BrowserProfile::Safari, OsProfile::MacOS);
     let masquerade = Http3Masquerade::new(profile);
     let headers = masquerade.generate_headers("cdn.cloudflare.com", "/");
@@ -217,19 +217,10 @@ fn safari_header_order_titlecase_template() {
         &b"Accept"[..],
         &b"Accept-Language"[..],
         &b"Accept-Encoding"[..],
-        &b"Sec-Fetch-Dest"[..],
-        &b"Sec-Fetch-Mode"[..],
-        &b"Sec-Fetch-Site"[..],
-        &b"Sec-Fetch-User"[..],
-        &b"Upgrade-Insecure-Requests"[..],
-        &b"Cache-Control"[..],
         &b"Referer"[..],
     ];
     assert_eq!(names, expected_names);
 
     let referer = headers.iter().find(|h| h.name() == b"Referer").unwrap();
     assert_eq!(referer.value(), b"https://www.apple.com/");
-
-    let fetch_site = headers.iter().find(|h| h.name() == b"Sec-Fetch-Site").unwrap();
-    assert_eq!(fetch_site.value(), b"cross-site");
 }

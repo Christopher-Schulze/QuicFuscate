@@ -21,7 +21,7 @@
 |---|---|---|
 | UDP/io_uring fast path | `active` | canonical retained fastpath |
 | AF_XDP socket code (`internal_af_xdp_experimental`) | `experimental/internal` | not part of default runtime |
-| MASQUE manager | `compat-only` | retained outside canonical product path |
+| Core H3/MASQUE carrier | `active` | production CONNECT-UDP/capsule carrier for authenticated TUN traffic |
 | XOR obfuscation | `compat-only` | not part of canonical product path |
 | `transport::batch` | `experimental/internal` | rust-parity/test-only transport surface |
 | `accelerate::*` parity helpers | `compat-only` | internal runtime owner plus explicit `rust-tests` parity surface |
@@ -38,7 +38,7 @@ The retained complexity in this repository is intentional and should be read thr
 | `canonical runtime/product path` | user-visible retained runtime behavior and stable product contract | `src/core.rs` (+ `src/core_parts/`), `src/transport/connection/`, `src/crypto/` product contract, `src/fec/` public `auto` / `off` contract |
 | `adaptive policy/control` | runtime policy loops that tune retained capability without changing the product contract | `src/brain.rs`, `src/stealth/`, `src/fec/` target/family auto-controller |
 | `platform acceleration` | hardware detection, SIMD dispatch, Linux fast paths, and owner-local hot-path helpers | `src/optimize/`, `src/simd/`, `src/optimize/udp.rs`, `src/optimize/uring_batch.rs` |
-| `compat/test/experimental` | retained compatibility machinery, parity hooks, and explicitly gated internal surfaces | MASQUE compatibility, `internal_af_xdp_experimental`, `rust-tests`, `benches` |
+| `compat/test/experimental` | retained compatibility machinery, parity hooks, archived sources, and explicitly gated internal surfaces | archived legacy sources, `internal_af_xdp_experimental`, `rust-tests`, `benches` |
 
 ### Layer Ownership Rules
 
@@ -355,14 +355,15 @@ This document provides comprehensive technical documentation for the system arch
   - `src/core.rs` (+ `src/core_parts/`): QUIC I/O and session management; maintains rolling `ConnectionStats` including VNNI-accelerated congestion aggregation (`aggregate_congestion`) for cwnd, bytes-in-flight and loss score.
   - `src/crypto/`: AEAD and handshake glue
   - `src/fec/`: Encoder/decoder/adaptive/GF tables
-- `src/stealth/`: DoH, HTTP/3 masquerading, TLS Cover, domain fronting, QPACK helpers, active probe detection, runtime Server Push cover coordination
+  - `src/stealth/`: HTTP/3 masquerading, TLS Cover, domain fronting, QPACK helpers, active probe detection, runtime Server Push cover coordination
+  - `src/dns/`: canonical DNS packet parsing, upstream forwarding, cached DoH client, endpoint fallback, and DNS response construction
   - `src/reality.rs`: Reality Fallback (Xray-style reverse proxy for active probe mitigation)
   - `src/interface.rs`: Cross-platform TUN interface
   - `src/interface/wintun.rs`: Feature-gated native Windows Wintun adapter, packet I/O, MTU, and shutdown lifecycle
   - `src/transport.rs`: Transport module root with focused submodules in `src/transport/` (packet, version, recovery, frames, h3, xdp, udpfast, connection)
   - HTTP/3 streams: `fin_received` flag tracks stream completion for deterministic GC in `poll()`
   - UDP fast paths: runtime-owned sendmmsg/recvmmsg batching in `src/optimize/udp.rs`, narrowed `udpfast` compatibility coverage, and sendmsg_x batching (macOS)
-- `src/brain.rs`: StealthBrain adaptive policy engine (ACK/FEC hints plus compatibility-only MASQUE hint channel), lock-free packet-observer telemetry accumulators drained by `apply_policy` (packet size/count/reordering are complete; inter-arrival bins use every-eighth-packet sampling), sensor-fusion logic, and Intelligent-mode runtime-policy delta emitter
+- `src/brain.rs`: StealthBrain adaptive policy engine (ACK/FEC hints plus Core H3/MASQUE hint channel), lock-free packet-observer telemetry accumulators drained by `apply_policy` (packet size/count/reordering are complete; inter-arrival bins use every-eighth-packet sampling), sensor-fusion logic, and Intelligent-mode runtime-policy delta emitter
 
 - `src/profile.rs`: test/compat-only `Aegis128Profile` adapter mapped to `simd::CryptoAeadPlan`
 - `src/engine/`: Embedded control plane (`QuicFuscateEngine`, `EngineConfig`, `EngineCommand`, `EngineEvent`, `EngineStats`) for programmatic runtime orchestration
@@ -419,7 +420,7 @@ stealth toggles. TODO-464 through TODO-471 are complete and define the productio
 - Persona: one browser/OS/TLS/H3/QPACK persona is selected per connection and remains immutable for that connection. Profile sequences and interval rotation are next-connection/reconnect policies, not mid-session identity mutation.
 - TLS: RealTLS via rustls with optional TLS Cover that emits synthetic encrypted QUIC cover records from the active profile (no external uTLS/FFI in the cover layer). TLS Cover does not own or synthesize the real ClientHello. The Engine client path now passes the uTLS/persona decision instead of hardcoding it off.
 - HTTP/3/QPACK: ALPN, header sets, QPACK policy, and framing must align with the selected persona snapshot.
-- Core H3/MASQUE: production VPN/TUN payloads use the core H3/MASQUE data plane. The `stealth::MasqueManager` surface is retained compatibility/experimental machinery, not the canonical hot path.
+- Core H3/MASQUE: production VPN/TUN payloads use the Core H3/MASQUE data plane. It is the sole active CONNECT-UDP/capsule carrier; the retired `stealth::MasqueManager` and stealth-local DoH resolver are preserved only under `archive/`.
 - Domain Fronting: useful only with explicit, vetted fronting configuration. Blind fronting defaults are disabled for Performance, Stealth, and clean Intelligent mode.
 - DoH: DNS resolution stays inside the tunnel path and keeps the canonical stealth runtime free of payload-side XOR obfuscation.
 - Active Probe Detection + Reality Fallback: probe-like traffic is detected and, when required, relayed via `RealityProxy` to preserve realistic upstream behavior under active scanning.
@@ -590,8 +591,8 @@ Current Obfuscation-Modes - Matrix & Tuning (on = enabled, off = disabled, value
 | DNS-over-HTTPS | on | on | on | on |
 | TLS Cover provider | on* | on* | on* | on* |
 | WebTransport Cover | off | off | escalated/anti-DPI cover only | Level 2 only |
-| MASQUE Manager | compat-only | compat-only | compat-only | compat-only |
-| MASQUE Preferred | off | off | off | off |
+| Core H3/MASQUE TUN | only if TUN requires it | only if TUN requires it | only if TUN requires it | TUN or escalation |
+| Core H3/MASQUE Preference | off | off | off | off at Level 0; dynamic after escalation |
 | Cover Traffic Interval | off | 5 s | 5 s (tightened on escalation) | off at Level 0; 5 s from Level 1 |
 
 Notes:
@@ -600,7 +601,7 @@ Notes:
 - `StealthManager` owns all preset baselines and the concrete Intelligent-mode runtime policy derivation for pacing, timing, padding, mimic bias, granularity, and CC profile. `StealthBrain` adapts transport ACK policy per connection, and its Intelligent-mode stealth steering flows through a narrow runtime-policy delta instead of embedding raw per-actuator mapping logic inline.
 - * TLS Cover provider is enabled by default across modes and can be disabled with `QUICFUSCATE_TLS_COVER=0`. Runtime cover performance mode is now driven by the active stealth mode profile rather than relying on ENV-only shadow state. `StealthConfig.use_tls_cover` (TOML alias: `use_tls_cover_extras`) only controls TLS Cover extras (ticket manager and cert emulator).
 - Risk/Tradeoff: domain fronting behavior depends on current upstream provider policy and regional filtering rules. It is not a safe default cover signal on modern CDNs.
-- Core H3/MASQUE is the production VPN/TUN carrier. The compatibility MASQUE manager inside `stealth/` is not the canonical data-plane owner.
+- Core H3/MASQUE is the production VPN/TUN carrier and the only active MASQUE implementation. Its H3 capsule parser buffers split DATA frames, rejects malformed/truncated FIN tails, and stages decoded events until the enclosing batch is valid.
 - Per-packet MASQUE TX/downlink logs are `trace`-only in the production hot path. CONNECT-UDP lifecycle and peer-flow registration remain `info` for operator observability without packet-rate log amplification.
 
 Production Mode Policy
@@ -795,13 +796,13 @@ let combined_observer = CombinedObserver::new(observers);
 
 #### Active Probing Escalation
 
-- The canonical runtime does not route escalation through MASQUE.
+- Intelligent runtime escalation may select the Core H3/MASQUE carrier when TUN bridging or telemetry pressure requires it; MASQUE is not a separate cover-traffic scheduler.
 - On active probing, the stealth stack escalates to a hardened window (~20 minutes):
   - Adds extra pacing (1-3 ms per packet; 3-7 ms in Anti-DPI) in addition to existing timing gates.
   - Tightens cover-traffic cadence (default 5 s to 2.5 s; 2.0 s in Anti-DPI) with realistic GET/HEAD mix.
   - Raises server-push cover intensity and keeps the HTTP/3 persona stable.
   - Automatically clears after the escalation window (interval reset to 5 s).
-- MASQUE stays compiled in as a compatibility experiment and may only be enabled explicitly outside the canonical stealth plan.
+- The retired standalone MASQUE manager is not compiled or selectable; all active CONNECT-UDP behavior remains in the Core H3 transport path.
 
 #### Reality Fallback (Xray-style Reverse Proxy)
 
@@ -827,12 +828,12 @@ When an active probe is detected (invalid QUIC authentication, suspicious packet
 - `StealthRuntimeOwner::start()` and `spawn_owned()` fail closed with an explicit error when no Tokio runtime is active; the compatibility `StealthManager::new()` path constructs without spawning background work.
 - Cover TCP connect, TLS handshake, raw-capture collection, refresh delay, and retry delay are bounded. Capture-channel closure is reported as an error rather than converted into an empty successful capture.
 
-#### DoH Multi-Provider Rotation
+#### DoH Endpoint Fallback
 
-DNS-over-HTTPS now supports multiple providers with automatic round-robin rotation and fallback:
-- **Providers**: Cloudflare (`cloudflare-dns.com`), Quad9 (`dns.quad9.net`), Google (`dns.google`), NextDNS (`dns.nextdns.io`).
-- **Mechanism**: `DOH_PROVIDERS` array with `DOH_PROVIDER_INDEX` atomic counter for rotation; `resolve_doh_multi()` tries next on failure.
-- **Telemetry**: `DOH_QUERIES_TOTAL`, `DOH_FAILURES_TOTAL` counters.
+The production DoH owner is `src/dns/mod.rs`:
+- `DnsProxyConfig` owns the configured endpoint list and lazily caches one `reqwest::Client` for connection reuse.
+- `process_dns_query()` tries configured `doh_endpoints` in order and returns the first successful RFC 8484 response; when all endpoints fail, it returns the existing bounded NXDOMAIN fallback.
+- `StealthConfig.enable_doh` and `StealthConfig.doh_provider` remain runtime configuration inputs, but no stealth-local resolver, process-global provider rotation counter, or `resolve_doh_multi()` surface exists.
 
 #### Async Stealth Scheduler (Non-Blocking)
 
@@ -2074,11 +2075,12 @@ remains connection-local through the FEC configuration; H3 construction does not
 environment state.
 
 #### MASQUE Handler Registration
-The current fork retains MASQUE as a compatibility-only path inside the HTTP/3 stack. There is no
-public `QuicFuscateConnection` setter surface such as `set_masque_capsule_handler(...)`,
-`set_masque_datagram_handler(...)`, or `set_masque_control_handler(...)` in the active API.
-Operational MASQUE behavior should therefore be read from `src/transport/h3.rs` rather than from
-standalone connection-level callback registration.
+The current fork uses Core H3/MASQUE as the production VPN/TUN carrier inside the HTTP/3 stack.
+There is no public `QuicFuscateConnection` setter surface such as
+`set_masque_capsule_handler(...)`, `set_masque_datagram_handler(...)`, or
+`set_masque_control_handler(...)` in the active API. Operational MASQUE behavior should therefore
+be read from `src/core_parts/connection.rs` and `src/transport/h3_parts/connection.rs` rather than
+from standalone connection-level callback registration.
 
 #### Connection Management Functions
 ```rust
@@ -3104,10 +3106,10 @@ At runtime you can override selected stealth options without changing the config
 - `QUICFUSCATE_BODYPOOL_BLOCK`: integer - Body pool block size (bytes)
 - `QUICFUSCATE_DICT_DIR`: path - Dictionary cache directory
 
-**MASQUE controls (compatibility-only):**
-- `QUICFUSCATE_MASQUE_ENABLE`: `0|1|true|false` - Explicitly create the compatibility MASQUE manager.
-- `QUICFUSCATE_MASQUE_PROXY`: hostname of the MASQUE proxy (e.g., `masque.example.com`).
-- `QUICFUSCATE_MASQUE_DATAGRAM`: `0|1|true|false` - Override MASQUE DATAGRAM handling once the compatibility manager exists.
+**Core H3/MASQUE controls:**
+- `QUICFUSCATE_MASQUE_PROXY`: hostname of the MASQUE proxy (e.g., `masque.example.com`); used as the Core H3 `:authority` override when configured.
+- `QUICFUSCATE_MASQUE_DATAGRAM`: `0|1|true|false` - explicitly enable Core H3 MASQUE DATAGRAM draining outside an active TUN sink.
+- The former `QUICFUSCATE_MASQUE_ENABLE` compatibility toggle is retired and has no runtime effect. Core H3/MASQUE is selected by an active TUN bridge or the Intelligent runtime policy.
 
 **StealthBrain Module:**
 - `QUICFUSCATE_BRAIN_ACK_MAX`: integer - Maximum ACK threshold (default from code)
@@ -3301,9 +3303,10 @@ let jitter = shaper.apply_jitter();
 ```
 
 #### MASQUE Tunnel Management
-The retained MASQUE tunnel state is internal compatibility machinery inside `src/stealth/` and
-is compiled only for test or `rust-tests` coverage. There is no stable public
-`MasqueTunnel::connect(...)` product API in the current runtime.
+Core H3/MASQUE tunnel state is internal production machinery inside
+`src/core_parts/connection.rs` and `src/transport/h3_parts/connection.rs`. There is no stable public
+`MasqueTunnel::connect(...)` product API in the current runtime; the live carrier is wired through
+the authenticated Core H3 connection.
 
 ### Advanced TLS Features
 
@@ -3550,14 +3553,9 @@ fn poll_h3_events(h3: &mut H3, conn: &mut quicfuscate::transport::Connection) {
 }
 ```
 
-### MASQUE CONNECT-UDP (compatibility-only)
+### MASQUE CONNECT-UDP
 
-There are two MASQUE surfaces and they must not be confused:
-
-- Production carrier: Core/H3 MASQUE is the canonical VPN/TUN data-plane carrier used by the live tunnel path.
-- Compatibility manager: `stealth::MasqueManager` is retained experiment and compatibility machinery.
-
-The details below describe the retained HTTP/3 CONNECT-UDP machinery and compatibility manager surface, not a separate replacement for the production TUN carrier.
+Core H3/MASQUE is the canonical VPN/TUN data-plane carrier and the only active CONNECT-UDP implementation. The live path is owned by `src/core_parts/connection.rs` and `src/transport/h3_parts/connection.rs`; the retired stealth manager and stealth-local DoH source remain recoverable under `archive/` and are not compiled.
 
 - Streams: establishes CONNECT-UDP control streams; keeps them open for duration of the tunnel.
 - DATAGRAM: registers Flow-ID/Context-ID; sends UDP payloads over QUIC DATAGRAM frames.
@@ -3568,8 +3566,8 @@ The details below describe the retained HTTP/3 CONNECT-UDP machinery and compati
 
 Notes
 - Canonical Stealth, Anti-DPI, Performance, and Intelligent modes use the production H3/MASQUE TUN carrier when TUN mode is active.
-- The compatibility `stealth::MasqueManager` path is opt-in experiment machinery and should not be expanded as a second production tunnel stack.
-- CONNECT-UDP compatibility paths are documented here because the code remains available for targeted experiments.
+- Split capsule varints use the full 1/2/4/8-byte QUIC widths, including 16,384-byte payload lengths. A malformed capsule or truncated FIN suffix fails closed before staged events are exposed.
+- `src/dns/mod.rs` remains the production DoH owner; the retired `stealth/parts/doh.rs` resolver and `stealth::MasqueManager` source are preserved under `archive/stealth/` for historical inspection only.
 - If you maintain external profile dumps, `scripts/tests/utils/util-tls-export-active-profile.sh` exports them under `scripts/out/utils/.../profiles/` by default (or a caller-provided `--output-dir`) for regression tracking.
 
 #### MASQUE Roundtrip Example
@@ -3625,12 +3623,6 @@ for (a, b) in decoded.iter().zip(headers.iter()) {
 Notes:
 - Telemetry export is disabled by default; enable via `--telemetry` (see "Telemetry Metrics").
 - A structural header list is also available via `StealthManager::get_http3_header_list(..)`.
-
-Additional helpers:
-- __StealthManager::masque_preferred() -> bool__
-  - Indicates whether the compatibility MASQUE path is currently preferred.
-- __StealthManager::get_masque_connect_headers(proxy, target) -> Option<Vec<Header>>__
-  - Builds CONNECT-UDP headers for use with a MASQUE proxy. Returns `None` when the compatibility MASQUE manager is absent.
 
 Cover Traffic integration:
 - __StealthManager::cover_headers_due() -> Option<Vec<Header>>__
@@ -4285,12 +4277,12 @@ Global atomics provide lock-free, zero-overhead cross-module coordination for a 
 | `src/transport/batch.rs` | 3 | Metrics | Batch send/recv/packet counters for transport telemetry. |
 | `src/crypto/` | 2 | Runtime config | `DATA_AEAD_OVERRIDE_MODE` (AEAD selection), `ARM_AES_OK` (ARM AES capability cache). |
 | `src/fec/` | 1 | Sequencing | `REPAIR_ID_COUNTER` - monotonic repair packet ID generator. |
-| `src/stealth/` | 1 | Round-robin | `DOH_PROVIDER_INDEX` - DoH provider rotation index. |
+| `src/stealth/parts/runtime.rs` | 1 | Runtime generation | `NEXT_STEALTH_RUNTIME_GENERATION` - monotonic runtime-owner generation identity. |
 | `src/qftls.rs` | 2 | Runtime gate | `TLS_OVERRIDE_REQUIRED` (TLS cover override flag), `MAX_EARLY_DATA_SIZE` (0-RTT data limit). |
 | `src/rng.rs` | 1 | Test gate | `TEST_FORCE_SECURE_ENTROPY_FAILURE` - test-only entropy failure injection. |
 | `src/main.rs` | 1 | Sequencing | `NEXT_ID` - connection ID generator. |
 
-**Total: 117 scalar atomic statics** (recounted 2026-08-01 after TODO-584). The previous 120-count included three process-global brain hint channels that are now connection-local. The telemetry array `FEC_ACTIVE_CONNECTIONS_BY_MODE` remains an atomic-backed static but is not included in the scalar declaration count.
+**Total: 117 scalar atomic statics** (recounted 2026-08-02 after TODO-584 and TODO-597). The previous 120-count included three process-global brain hint channels that are now connection-local. The retired stealth-local DoH rotation counter was removed and the runtime-owner generation counter is listed explicitly. The telemetry array `FEC_ACTIVE_CONNECTIONS_BY_MODE` remains an atomic-backed static but is not included in the scalar declaration count.
 
 ### Trade-offs
 
@@ -4304,7 +4296,7 @@ Global atomics provide lock-free, zero-overhead cross-module coordination for a 
 - **Connection-local brain hints (0 global statics)**: DONE (TODO-584). `BrainFecHints` carries FEC interval and redundancy policy to the matching observer, while `IntelligentLevelHints` combines independent Brain-pressure and probe-threshold levels inside one connection. No process-global brain actuator remains.
 - **Runtime config (15 across telemetry.rs, optimize/, crypto/, qftls.rs)**: 6 telemetry collection gates + 5 optimize/ hardware-adaptive + 2 crypto/ AEAD/AES + 2 qftls/ TLS gates. Could migrate to a shared `RuntimeConfig` struct passed through the call chain, but current usage is stable and well-bounded.
 - **Sequencing (2 in fec/, main.rs)**: Standard pattern for ID generation. No change needed.
-- **Round-robin (1 in stealth/)**: Standard pattern for DoH provider rotation. No change needed.
+- **Runtime generation (1 in `src/stealth/parts/runtime.rs`)**: Standard monotonic owner identity used to correlate runtime generations. No change needed.
 - **Test gates (1 in rng.rs)**: Test-only, acceptable as-is.
 
 The overall approach prioritizes runtime performance over architectural purity. The highest-return coupling-reduction target (the brain.rs hint channels) is now closed; the remaining globals are either read-only metrics, stable runtime config, or standard sequencing/round-robin/test primitives.
@@ -4581,6 +4573,7 @@ A full deep-audit sweep of `src/` was performed with parallel read-only module s
 - **Retry token length validation after encoding**: `src/implementations/server/ddos.rs` checks `MAX_RETRY_TOKEN_LEN` only after building the token. Tracked in TODO-659.
 - **DNS NXDOMAIN lie**: `src/dns/mod.rs` returns NXDOMAIN for upstream failures. Tracked in TODO-666.
 - **fsutil TOCTOU race**: `src/implementations/server/fsutil.rs` now creates and secures the temporary file before the atomic rename, with post-rename defense-in-depth. Resolved by TODO-591; TODO-667 was a duplicate tracker.
+- **MASQUE/DoH ownership**: TODO-597 retired the empty `stealth::MasqueManager`, its false-success send/legacy-varint path, and the unused stealth-local DoH resolver. Core H3/MASQUE now owns the active CONNECT-UDP/capsule carrier, buffers split DATA, rejects malformed or truncated FIN tails before event delivery, and covers all 1/2/4/8-byte varints including 16,384-byte payloads. Retired sources and the obsolete integration test remain recoverable under `archive/`; production DoH remains owned by `src/dns/mod.rs`.
 
 ### Resource and Performance Findings
 

@@ -350,7 +350,7 @@ struct StealthBrainState {
     last_probe: Instant,
     // Cooldown
     last_policy_change: Instant,
-    // Compatibility-only MASQUE hint state (hysteresis)
+    // Core H3/MASQUE preference hint state (hysteresis)
     last_masque_hint: bool,
     last_masque_hint_change: Instant,
     // Last applied decisions to avoid oscillation & redundant calls

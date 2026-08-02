@@ -80,15 +80,10 @@ Rules-File Guard (Stealth Module)
 use crate::accelerate::stealth::AsciiSimdBackend;
 use crate::crypto::hkdf::{hkdf_expand, hkdf_extract};
 use log::{debug, error, info, warn};
-use reqwest::Client;
-use std::sync::LazyLock;
 // use of sha2 replaced with centralized SIMD dispatch
 use std::collections::{HashMap, VecDeque};
-use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::runtime::Runtime;
-use url::Url;
 
 use self::tls_cover::ServerHelloParamsOwned;
 use crate::crypto::CryptoManager; // Assumed for integration
@@ -179,11 +174,9 @@ pub use fingerprint::{
 
 // Legacy external TLS FFI removed: native TLS fingerprint injection is used exclusively.
 
-include!("parts/doh.rs");
 include!("parts/browser_profiles.rs");
 include!("parts/http3_masquerade.rs");
 include!("parts/domain_fronting.rs");
-include!("parts/masque_manager.rs");
 include!("parts/cover_traffic.rs");
 include!("parts/probe_detector.rs");
 include!("parts/flow_shaping.rs");

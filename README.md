@@ -59,7 +59,7 @@ QuicFuscate is a stealth transport and VPN runtime built on a custom QUIC-based 
 
 ## Highlights
 - Censorship-resistant runtime with browser-grade traffic observables
-  (rustls-backed RealTLS, optional TLS Cover, HTTP/3/QPACK shaping, domain fronting, DoH, profile-coherent timing/padding; MASQUE and XOR are compatibility surfaces only)
+  (rustls-backed RealTLS, optional TLS Cover, HTTP/3/QPACK shaping, domain fronting, DoH, profile-coherent timing/padding; Core H3/MASQUE is the production TUN carrier and XOR remains compatibility-only)
 - Adaptive SIMD dispatch (AVX2/AVX-512/NEON) with runtime CPU feature detection for optimal performance paths
 - AEAD selection at runtime (`Aegis128L` family, `Morus1280_128`) with automatic CPU feature detection;
   PFS by default via ephemeral X25519 key exchange
@@ -108,7 +108,7 @@ QuicFuscate organizes its runtime into four explicit layers. This layering defin
 - examples:
   - internal AF_XDP experiment hooks
   - AF_XDP code behind `internal_af_xdp_experimental`
-  - MASQUE compatibility surface
+  - archived legacy MASQUE sources under `archive/`
   - `rust-tests` / `benches` hooks
 
 Rule of thumb:
@@ -127,8 +127,8 @@ Rule of thumb:
   - Risk/Tradeoff: effectiveness depends on current provider policy and regional filtering behavior<br>
 - **HTTP/3 Masquerading**: Disguises traffic as standard HTTP/3 web traffic
   - Aligns ALPN, header sets, and framing to common web patterns<br>
-- **MASQUE Tunneling**: HTTP/3 CONNECT-UDP/capsule surface (compatibility-only, disabled by default)
-  - Available for explicit opt-in; not part of the default stealth runtime<br>
+- **MASQUE Tunneling**: Core HTTP/3 CONNECT-UDP/capsule carrier for authenticated TUN traffic
+  - Selected by an active TUN bridge or Intelligent-mode escalation; the retired standalone manager is not part of the runtime<br>
 - **Traffic Obfuscation**: XOR-based obfuscation layer (compatibility-only, not part of the default runtime)
   - Sealed QUIC datagrams remain unmodified to preserve AEAD/FEC integrity<br>
 - **TLS Profile Cache**: Generated ClientHello bytes are cached in memory for reuse across connections<br>
@@ -310,8 +310,8 @@ The transport subsystem uses `src/transport.rs` as the module root and focused s
 | Encryption          | AEGIS-128L family, MORUS-1280-128                                          |
 | Key Exchange        | X25519 (ephemeral); Perfect Forward Secrecy by default                      |
 | Error Correction    | Hybrid Adaptive FEC (RLNC + Streaming)                                     |
-| Stealth/Obfuscation | rustls-backed RealTLS, optional TLS Cover, HTTP/3/QPACK shaping, domain fronting, DoH, adaptive padding/timing/protocol mimicry, active-probe detection + Reality fallback, server-push cover traffic; MASQUE and XOR are compatibility-only |
-| Adaptive Intelligence | StealthBrain policy engine (ACK/timing/padding/FEC coordination plus compatibility-only MASQUE hinting) |
+| Stealth/Obfuscation | rustls-backed RealTLS, optional TLS Cover, HTTP/3/QPACK shaping, domain fronting, DoH, adaptive padding/timing/protocol mimicry, active-probe detection + Reality fallback, server-push cover traffic; Core H3/MASQUE is the production TUN carrier and XOR is compatibility-only |
+| Adaptive Intelligence | StealthBrain policy engine (ACK/timing/padding/FEC coordination plus Core H3/MASQUE preference hinting) |
 | Control Plane       | Server-authoritative QKey lifecycle (issue/revoke/persist), Admin Web/API policy enforcement |
 | Compression         | Adaptive zstd policy (signal-aware compression decisions, optional dictionary path) |
 | NAT Traversal       | Optional STUN/TURN/ICE path discovery, default-off and policy-gated                 |

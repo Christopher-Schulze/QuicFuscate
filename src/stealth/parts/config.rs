@@ -571,10 +571,6 @@ impl StealthConfig {
         Self::env_first(["QUICFUSCATE_MASQUE_PROXY"]).filter(|v| !v.is_empty())
     }
 
-    fn masque_compat_requested() -> bool {
-        Self::masque_env_flag("QUICFUSCATE_MASQUE_ENABLE")
-    }
-
     /// Parses a TOML string and constructs a `StealthConfig` from the
     /// `[stealth]` table. Unknown keys are ignored. This does not apply
     /// environment overrides; call `apply_env_overrides` separately if needed.

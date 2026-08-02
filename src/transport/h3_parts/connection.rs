@@ -154,6 +154,7 @@ impl Config {
 
 const STREAM_RECV_BUFFER_SIZE: usize = 64 * 1024;
 const MAX_QUIC_DATAGRAM_SIZE: usize = 65_535;
+const MAX_BUFFERED_H3_FRAME: usize = 1024 * 1024 + 16;
 
 /// HTTP/3 connection with enhanced stream state management
 pub struct Connection {
@@ -192,6 +193,7 @@ struct StreamState {
     fin_sent: bool,
     fin_received: bool,
     masque_established: bool,
+    masque_capsule_buffer: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -333,6 +335,7 @@ impl Connection {
                 fin_sent: false,
                 fin_received: false,
                 masque_established: false,
+                masque_capsule_buffer: Vec::new(),
             },
         );
         Ok(())
@@ -373,6 +376,7 @@ impl Connection {
                 fin_sent: fin,
                 fin_received: false,
                 masque_established: false,
+                masque_capsule_buffer: Vec::new(),
             },
         );
         if fin {
@@ -405,6 +409,7 @@ impl Connection {
             fin_sent: false,
             fin_received: false,
             masque_established: false,
+            masque_capsule_buffer: Vec::new(),
         });
         stream._headers = headers.to_vec();
         stream._stream_type = StreamType::Response;
@@ -675,6 +680,7 @@ impl Connection {
                     fin_sent: false,
                     fin_received: false,
                     masque_established: false,
+                    masque_capsule_buffer: Vec::new(),
                 },
             );
             if let Some(promise) = self.push_streams.get_mut(&stream_id) {
@@ -770,8 +776,8 @@ impl Connection {
             fin_sent: false,
             fin_received: false,
             masque_established: false,
+            masque_capsule_buffer: Vec::new(),
         });
-        const MAX_BUFFERED_H3_FRAME: usize = 1024 * 1024 + 16;
         let buffered = {
             let stream = self.streams.get_mut(&stream_id).ok_or(Error::IdError)?;
             let buffered_len =
@@ -795,6 +801,9 @@ impl Connection {
         };
 
         // Parse complete frames and retain an incomplete tail for the next STREAM chunk.
+        // MASQUE events are staged until the complete H3 DATA batch is valid so a malformed
+        // suffix cannot leave earlier capsules from the same batch visible to callers.
+        let mut pending_masque_events = Vec::new();
         let mut offset = 0;
         while offset < buffered.len() {
             let (frame_type, frame_len, frame_offset) =
@@ -831,24 +840,22 @@ impl Connection {
                         .map(|st| matches!(st._stream_type, StreamType::Masque))
                         .unwrap_or(false);
                     if is_masque {
-                        let mut pos = 0usize;
-                        while pos < frame_data.len() {
-                            match Self::decode_capsule(&frame_data[pos..]) {
-                                Ok((ctype, used, payload)) => {
-                                    self.pending_events.push_back((
-                                        stream_id,
-                                        Event::MasqueCapsule { capsule_type: ctype, payload },
-                                    ));
-                                    if used == 0 {
-                                        break;
-                                    }
-                                    pos += used;
-                                }
-                                Err(_) => {
-                                    break;
-                                }
+                        let events = {
+                            let stream = self.streams.get_mut(&stream_id).ok_or(Error::IdError)?;
+                            let buffered_len = stream
+                                .masque_capsule_buffer
+                                .len()
+                                .checked_add(frame_data.len())
+                                .ok_or(Error::ExcessiveLoad)?;
+                            if buffered_len > MAX_BUFFERED_H3_FRAME {
+                                return Err(Error::ExcessiveLoad);
                             }
-                        }
+                            stream.masque_capsule_buffer.extend_from_slice(frame_data);
+                            Self::decode_masque_capsules(&mut stream.masque_capsule_buffer)?
+                        };
+                        pending_masque_events.extend(events.into_iter().map(|(ctype, payload)| {
+                            (stream_id, Event::MasqueCapsule { capsule_type: ctype, payload })
+                        }));
                     } else {
                         // Buffer the DATA payload so recv_body() returns the real body bytes
                         // (e.g. the IP packets tunneled over an H3 stream), then signal Data.
@@ -887,9 +894,18 @@ impl Connection {
             if self.streams.get(&stream_id).is_some_and(|stream| !stream.frame_buffer.is_empty()) {
                 return Err(Error::FrameError);
             }
+            if self.streams.get(&stream_id).is_some_and(|stream| {
+                matches!(stream._stream_type, StreamType::Masque)
+                    && !stream.masque_capsule_buffer.is_empty()
+            }) {
+                return Err(Error::FrameError);
+            }
             if let Some(state) = self.streams.get_mut(&stream_id) {
                 state.fin_received = true;
             }
+        }
+        self.pending_events.extend(pending_masque_events);
+        if fin {
             self.pending_events.push_back((stream_id, Event::Finished));
         }
         Ok(())
@@ -914,9 +930,16 @@ impl Connection {
 
     /// Decode variable-length integer (SIMD-dispatched)
     fn decode_varint(buf: &[u8]) -> Result<(u64, usize), Error> {
+        if buf.is_empty() {
+            return Err(Error::BufferTooShort);
+        }
+        let required = 1usize << usize::from(buf[0] >> 6);
+        if buf.len() < required {
+            return Err(Error::BufferTooShort);
+        }
         match crate::simd::transport::decode_varint(buf) {
             Some((v, used)) => Ok((v, used)),
-            None => Err(Error::BufferTooShort),
+            None => Err(Error::FrameError),
         }
     }
 
@@ -927,11 +950,19 @@ impl Connection {
         }
         let (ctype, off1) = Self::decode_varint(buf)?;
         let (clen, off2) = Self::decode_varint(&buf[off1..])?;
-        let need = off1 + off2 + clen as usize;
+        let payload_len = usize::try_from(clen).map_err(|_| Error::ExcessiveLoad)?;
+        if payload_len > MAX_BUFFERED_H3_FRAME {
+            return Err(Error::ExcessiveLoad);
+        }
+        let need = off1
+            .checked_add(off2)
+            .and_then(|header_len| header_len.checked_add(payload_len))
+            .ok_or(Error::ExcessiveLoad)?;
         if buf.len() < need {
             return Err(Error::BufferTooShort);
         }
-        let payload_bytes = &buf[off1 + off2..off1 + off2 + clen as usize];
+        let payload_start = off1 + off2;
+        let payload_bytes = &buf[payload_start..need];
         let mut payload = Vec::with_capacity(payload_bytes.len().saturating_add(4));
         payload.extend_from_slice(payload_bytes);
         // MASQUE capsule telemetry (receive).
@@ -952,6 +983,34 @@ impl Connection {
             _ => {}
         }
         Ok((ctype, need, payload))
+    }
+
+    /// Decode every complete capsule in a buffered MASQUE DATA byte stream.
+    ///
+    /// A short tail is retained because one capsule may span multiple H3 DATA frames. Any
+    /// complete framing error aborts the batch before decoded events are exposed to callers.
+    fn decode_masque_capsules(
+        buffer: &mut Vec<u8>,
+    ) -> Result<Vec<(u64, Vec<u8>)>, Error> {
+        let mut offset = 0usize;
+        let mut events = Vec::new();
+        while offset < buffer.len() {
+            match Self::decode_capsule(&buffer[offset..]) {
+                Ok((ctype, used, payload)) => {
+                    if used == 0 {
+                        return Err(Error::FrameError);
+                    }
+                    events.push((ctype, payload));
+                    offset += used;
+                }
+                Err(Error::BufferTooShort) => break,
+                Err(error) => return Err(error),
+            }
+        }
+        if offset > 0 {
+            buffer.drain(..offset);
+        }
+        Ok(events)
     }
 
     /// Establish a MASQUE CONNECT-UDP stream and return its stream id (keeps stream open).

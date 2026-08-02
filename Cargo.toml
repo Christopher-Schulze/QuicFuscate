@@ -500,11 +500,6 @@ path = "scripts/tests/rust/integration/logging_runtime.rs"
 required-features = ["rust-tests"]
 
 [[test]]
-name = "it-masque-runtime-integration"
-path = "scripts/tests/rust/integration/masque_runtime_integration.rs"
-required-features = ["rust-tests"]
-
-[[test]]
 name = "it-orchestrator-runtime-activation"
 path = "scripts/tests/rust/integration/orchestrator_runtime_activation.rs"
 

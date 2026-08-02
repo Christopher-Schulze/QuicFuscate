@@ -8,7 +8,7 @@ It is maintained as the current architecture and repository index, with a curate
 - Runtime core: Rust crate under `src/` with entrypoints in `src/main.rs` and `src/lib.rs`.
 - Data path wiring: app or TUN ingress -> core/transport -> stealth shaping -> crypto -> FEC -> network I/O.
 - QUIC version wiring: Engine and standalone CLI config default to ordered v2/v1 support; `transport::version` owns selection, greasing, type mapping, and authenticated Version Information; `transport::packet` owns v1/v2 Initial and Retry material plus stateless VN; standalone server ingress bypasses VN for the FEC magic before existing-session dispatch; `transport::Connection` owns strict CID validation and one bounded fresh-state restart.
-- Production VPN carrier: authenticated Core H3/MASQUE CONNECT-UDP carries TUN IP packets. The public QKey ID in the QUIC Initial selects the server record; the bearer is presented only through the encrypted H3 `x-qf-auth` header. The server gates MASQUE DATAGRAM-to-TUN delivery on the current authenticated state.
+- Production VPN carrier: authenticated Core H3/MASQUE CONNECT-UDP carries TUN IP packets. The public QKey ID in the QUIC Initial selects the server record; the bearer is presented only through the encrypted H3 `x-qf-auth` header. The server gates MASQUE DATAGRAM-to-TUN delivery on the current authenticated state. The retired stealth manager and stealth-local DoH resolver are archived, not compiled.
 - TUN provisioning proof: `src/interface.rs`, `src/interface/wintun.rs`, and `src/implementations/client/platform/{linux,macos}.rs` enforce the shared address/prefix/MTU contract; Linux server routing in `src/implementations/server/routing.rs` rejects addresses owned by another interface, verifies exact postconditions, and performs bounded owned rollback; `scripts/tests/tun-provisioning-negative-netns.sh` owns the privileged negative/retry/residue proof.
 - QKey auth abuse-policy wiring: `ServerConfig.auth_policy` resolves and validates bounded environment controls -> `LiveServerState` owns one monotonic `AuthRateLimiter` -> new Initial admission allocates one attempt ID before registry lookup -> the same ID survives pending H3 authentication -> QUIC/TLS establishment starts the bounded encrypted-bearer deadline exactly once -> success, failure, timeout, pre-auth close, and internal abandonment complete the attempt at most once. Constant-size per-IP state applies capped exponential backoff, explicit block expiry, pending/state capacity bounds, and periodic idle pruning; admission outcomes remain wire-indistinguishable while Prometheus and typed audit events remain distinct.
 - QKey revocation wiring: explicit admin revoke persists the registry mutation -> `LiveServerState` records the single revocation state and atomically drains the SessionId-to-QKey tracker -> affected transports queue authenticated QUIC CONNECTION_CLOSE frames -> the next live flush delivers the close before closed-client reconciliation releases the session/domain state. Pending authentication checks the same revocation owner before and during commit. Revoked records use the validated 90-day default retention, are pruned at most every five minutes from housekeeping, and expose `quicfuscate_revocation_pruned_total`; no automatic QKey-rotation scheduler or external revocation callback remains in the housekeeping path.
@@ -82,7 +82,7 @@ One owner is created per client/server runtime generation, including `main_parts
 - Post-handshake application cover uses H3-framed cover requests, Server Push, and WebTransport only. QUIC Cover PING stays transport-owned; no raw fixed-stream payload or configuration-dependent H3 ignore path exists.
 - Server Push cover uses bounded seed-varied resource plans.
 - WebTransport cover is H3 application cover only, active for Anti-DPI or Intelligent level 2, never a competing VPN carrier.
-- Core H3/MASQUE remains the production VPN/TUN data plane; `stealth::MasqueManager` remains compatibility/experiment machinery.
+- Core H3/MASQUE is the sole active production VPN/TUN data plane; the retired `stealth::MasqueManager`, stealth-local DoH resolver, and obsolete integration test are preserved under `archive/` and are not compiled.
 
 ### Linux Production E2E Evidence (2026-06-30)
 - `broderick` release build: `cargo build --release --bin quicfuscate` passes on Linux.
@@ -294,6 +294,12 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 |-- Cargo.toml
 |-- README.md
 |-- SECURITY.md
+|-- archive
+|   |-- stealth
+|   |   |-- doh.rs
+|   |   `-- masque_manager.rs
+|   `-- tests
+|       `-- masque_runtime_integration.rs
 |-- apps
 |   |-- tauri
 |   |   |-- package.json
@@ -696,7 +702,6 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 |   |   |   |-- integration
 |   |   |   |   |-- engine_control_plane.rs
 |   |   |   |   |-- interface_capabilities.rs
-|   |   |   |   |-- masque_runtime_integration.rs
 |   |   |   |   |-- orchestrator_runtime_activation.rs
 |   |   |   |   |-- qkey_auth_integration.rs
 |   |   |   |   `-- stealth_mode_matrix.rs
@@ -962,13 +967,11 @@ This snapshot intentionally excludes gitignored paths and local generated direct
     |       |-- chaff.rs
     |       |-- config.rs
     |       |-- cover_traffic.rs
-    |       |-- doh.rs
     |       |-- domain_fronting.rs
     |       |-- escalation.rs
     |       |-- flow_shaping.rs
     |       |-- http3_masquerade.rs
     |       |-- manager.rs
-    |       |-- masque_manager.rs
     |       |-- probe_detector.rs
     |       |-- stealth_coverage_tests.rs
     |       |-- tls_client_hello.rs
@@ -1055,6 +1058,7 @@ A full source-audit sweep produced TODO-626 through TODO-689 and augmented TODO-
 - **Transport/Stealth**: ConnectionId clone hot path (TODO-638), StealthShaper RNG fallback logging (TODO-639), H3 masquerade time source (TODO-640), domain fronting jitter (TODO-641), TLS cover zero-key fallback (TODO-642), qftls `munlock` (TODO-643), probe detector history cap (TODO-644), and brain escalation/histogram/config correctness (TODO-584). Reality session map timer-driven cleanup is resolved by TODO-570.
 - **TLS fingerprint metadata**: TODO-595 corrects the Chrome-based `qftls` extension order to use one `server_name`, registered `renegotiation_info` (`0xff01`), one `compress_certificate` (`0x001b`), and no invalid `0x0019`; a regression test enforces uniqueness and the scoped registered-ID set.
 - **TLS Cover and persona boundary**: TODO-596 removes the unread `TlsCoverProvider` ClientHello-template and extension-builder machinery, removes the no-op `CombinedProvider` override seed, and keeps rustls as the real ClientHello owner. `CombinedProvider::supports_ch_override()` is false for the cover overlay. Safari now uses a dedicated HTTP/3 header template without `sec-fetch-*`, `upgrade-insecure-requests`, or `cache-control`; the remaining real TLS ClientHello ChaCha policy is owned by TODO-598.
+- **MASQUE/DoH ownership**: TODO-597 makes Core H3/MASQUE the sole active CONNECT-UDP/capsule carrier, buffers split capsule DATA, rejects malformed or truncated FIN tails before event delivery, and covers all 1/2/4/8-byte varints including 16,384-byte payloads. The empty `stealth::MasqueManager`, its false-success send path, the stale stealth-local DoH resolver, and their integration test are retired and preserved under `archive/`; production DoH remains owned by `src/dns/mod.rs`.
 - **Optimize/Engine/Admin**: engine config reload (TODO-645), uring_batch backpressure (TODO-646), admin HTTP connection limit (TODO-647), config write validation (TODO-648), memory-pool unsafe bounds (TODO-587), metrics export allocations (TODO-587, TODO-615), and TUN interface unaligned/fcntl safety (TODO-654, TODO-655).
 - **Client/Server/DNS/PKI**: DNS backup path (TODO-649), DNS intercept spawn failure (TODO-650), PKI timestamp fallback (TODO-656), CLI probe parse errors (TODO-657), profile ID collision (TODO-658), retry token length validation (TODO-659), blacklist sync ownership (TODO-660), admin per-operation timeout (TODO-661), profile save atomicity (TODO-662), client TUN dual-stack (TODO-663), Windows TUN backend confusion (TODO-664), admin replay store pruning (TODO-665), DNS NXDOMAIN lie (TODO-666), DNS rate limiting (TODO-668), DNS allocation/timeout (TODO-669), env var race/validation (TODO-670), umask file permissions (TODO-671), log rotation hooks (TODO-672), CLI unbounded strings (TODO-673), duplicate logging init (TODO-674), and audit blocking flush (TODO-675).
 - **Privilege and secrets**: SecretString UTF-8 safety (TODO-651), privilege `assume_init`/`CStr` validation (TODO-652, TODO-653), fsutil TOCTOU (resolved by TODO-591; duplicate TODO-667).

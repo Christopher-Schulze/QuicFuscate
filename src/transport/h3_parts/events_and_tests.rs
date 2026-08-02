@@ -834,6 +834,7 @@ mod tests {
                     fin_sent: true,
                     fin_received: true,
                     masque_established: true,
+                    masque_capsule_buffer: Vec::new(),
                 },
             );
             h3.finished_streams.insert(stream_id);
@@ -861,6 +862,7 @@ mod tests {
                     fin_sent: true,
                     fin_received: false,
                     masque_established: false,
+                    masque_capsule_buffer: Vec::new(),
                 },
             );
             h3.finished_streams.insert(push_id);
@@ -1057,6 +1059,54 @@ mod tests {
             assert_eq!(used, capsule.len(), "used bytes mismatch");
             assert_eq!(decoded_payload, payload, "payload mismatch for type {}", ctype);
         }
+    }
+
+    #[test]
+    fn masque_varint_roundtrip_covers_all_wire_widths() {
+        let cases = [
+            (0u64, 1usize),
+            (63, 1),
+            (64, 2),
+            (16_383, 2),
+            (16_384, 4),
+            (1 << 30, 8),
+            ((1 << 62) - 1, 8),
+        ];
+
+        for (value, expected_len) in cases {
+            let mut encoded = Vec::new();
+            Connection::encode_varint(value, &mut encoded);
+            assert_eq!(encoded.len(), expected_len, "wire width for {value}");
+            let (decoded, used) = Connection::decode_varint(&encoded).expect("decode varint");
+            assert_eq!(decoded, value);
+            assert_eq!(used, encoded.len());
+        }
+    }
+
+    #[test]
+    fn masque_capsule_roundtrip_supports_16384_byte_payload() {
+        let payload = vec![0xA5; 16_384];
+        let capsule = Connection::encode_capsule(0x00, &payload);
+        assert_eq!(capsule[1] & 0xC0, 0x80, "payload length must use a four-byte varint");
+        let (capsule_type, used, decoded) =
+            Connection::decode_capsule(&capsule).expect("decode large capsule");
+        assert_eq!(capsule_type, 0x00);
+        assert_eq!(used, capsule.len());
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn masque_capsule_decoder_retains_split_tail_and_rejects_oversized_length() {
+        let mut split = vec![0x00, 0x40];
+        let events = Connection::decode_masque_capsules(&mut split).expect("split tail");
+        assert!(events.is_empty());
+        assert_eq!(split, vec![0x00, 0x40]);
+
+        let mut oversized = vec![0x00, 0xC0, 0x3F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
+        assert!(matches!(
+            Connection::decode_masque_capsules(&mut oversized),
+            Err(Error::ExcessiveLoad)
+        ));
     }
 
     #[test]
@@ -1749,6 +1799,59 @@ mod tests {
         assert!(
             !client_h3.masque_established(sid),
             "non-2xx response must keep the data plane closed"
+        );
+    }
+
+    #[test]
+    fn masque_data_frame_rejects_truncated_suffix_without_partial_event() {
+        use crate::transport::connection::{bench_paired_1rtt_connections, BenchConnectionPair};
+        let BenchConnectionPair { mut client, mut server, recv_info } =
+            bench_paired_1rtt_connections();
+        let _client_h3 =
+            Connection::with_transport(&mut client, &Config::new().unwrap()).expect("client h3");
+        let mut server_h3 =
+            Connection::with_transport(&mut server, &Config::new().unwrap()).expect("server h3");
+
+        const STREAM_ID: u64 = 248;
+        server_h3.streams.insert(
+            STREAM_ID,
+            StreamState {
+                _headers: Vec::new(),
+                body_buffer: Vec::new(),
+                frame_buffer: Vec::new(),
+                _received_bytes: 0,
+                _stream_type: StreamType::Masque,
+                sent_bytes: 0,
+                fin_sent: false,
+                fin_received: false,
+                masque_established: true,
+                masque_capsule_buffer: Vec::new(),
+            },
+        );
+
+        let mut capsule_data = Connection::encode_capsule(0x00, b"valid");
+        capsule_data.extend_from_slice(&[0x00, 0x40]);
+        let mut frame = vec![0x00];
+        Connection::encode_varint(capsule_data.len() as u64, &mut frame);
+        frame.extend_from_slice(&capsule_data);
+        client
+            .stream_send(STREAM_ID, &frame, true)
+            .expect("send malformed MASQUE DATA frame");
+
+        let mut packet = [0u8; 2048];
+        let (len, _) = client.send(&mut packet).expect("client send");
+        server.recv(&mut packet[..len], &recv_info).expect("server recv");
+
+        assert!(matches!(server_h3.poll(&mut server), Err(Error::FrameError)));
+        assert!(server_h3.pending_events.iter().all(|(_, event)| {
+            !matches!(event, Event::MasqueCapsule { .. })
+        }));
+        assert_eq!(
+            server_h3
+                .streams
+                .get(&STREAM_ID)
+                .map(|stream| stream.masque_capsule_buffer.as_slice()),
+            Some(&[0x00, 0x40][..])
         );
     }
 

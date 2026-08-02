@@ -804,8 +804,8 @@ impl QuicFuscateConnection {
         }
 
         // For TUN bridging, fall back to the connection's host header as the
-        // MASQUE proxy authority when the stealth manager has no MASQUE config
-        // (no masque_manager / fronting domains). The proxy authority is just
+        // MASQUE proxy authority when the stealth manager has no explicit
+        // MASQUE proxy / fronting-domain config. The proxy authority is just
         // the H3 :authority header - the server validates it against itself.
         let proxy = self.stealth_manager.masque_proxy().unwrap_or_else(|| format!("{}:443", host));
 

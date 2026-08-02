@@ -16,12 +16,8 @@ fn manager_for_config(cfg: StealthConfig) -> StealthManager {
     StealthManager::new(cfg, Arc::new(OptimizationManager::new()), Arc::new(CryptoManager::new()))
 }
 
-fn manager_for_config_with_masque_compat(cfg: StealthConfig) -> StealthManager {
-    StealthManager::new_with_masque_compat_for_test(
-        cfg,
-        Arc::new(OptimizationManager::new()),
-        Arc::new(CryptoManager::new()),
-    )
+fn manager_for_config_with_core_masque(cfg: StealthConfig) -> StealthManager {
+    manager_for_config(cfg)
 }
 
 #[test]
@@ -145,7 +141,7 @@ fn test_intelligent_runtime_push_requires_nonzero_level_hint() {
 #[test]
 fn test_intelligent_masque_preference_uses_hint_fallback() {
     let manager =
-        manager_for_config_with_masque_compat(StealthConfig::from_mode(StealthMode::Intelligent));
+        manager_for_config_with_core_masque(StealthConfig::from_mode(StealthMode::Intelligent));
     manager.set_masque_preferred(true);
     manager.sync_masque_preference_with_hint_for_test(0);
     assert!(!manager.masque_preferred());
