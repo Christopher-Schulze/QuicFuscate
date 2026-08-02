@@ -367,8 +367,8 @@ This document provides comprehensive technical documentation for the system arch
 - `src/engine/`: Embedded control plane (`QuicFuscateEngine`, `EngineConfig`, `EngineCommand`, `EngineEvent`, `EngineStats`) for programmatic runtime orchestration
 - `src/compress.rs`: Compression manager (zstd-only) with adaptive policy, telemetry-backed decisions, and optional dictionaries
 - `src/qftls.rs`: Boundary split between rustls real TLS protocol and optional TLS Cover overlay
-  - `src/instrumentation.rs`: Global runtime metrics and health export surfaces (`/metrics`, `/health`)
-  - `src/implementations/server/metrics.rs`: Server metrics runtime and HTTP endpoint wiring
+  - `src/instrumentation.rs`: Global runtime metrics and health export surfaces (`/metrics`, `/health`); Prometheus export writes directly into one pre-sized output string without per-metric temporary `String` values.
+  - `src/implementations/server/metrics.rs`: Server metrics runtime and HTTP endpoint wiring; the Prometheus exporter uses direct `write!` formatting into a pre-sized buffer.
   - `src/optimize/`: Optimization submodules now live under `src/optimize/*` and are re-exported through `src/accelerate.rs` to keep the public `accelerate::*` API stable.
   - TLS fingerprint sourcing follows the canonical "Unified TLS Provider (RealTLS + TLS Cover) -> Fingerprint Source Model".
   - Unified configuration via `config/quicfuscate.toml`; environment overrides through `QUICFUSCATE_*`
@@ -1072,6 +1072,8 @@ let pool = MemoryPool::new(1024, 65536)?; // 1024 blocks of 64KB each
 - Huge pages support (2MB/1GB) for TLB optimization
 - Thread-local caching to minimize contention
 - Minimum block size is clamped to 2048 bytes for safety; mismatch-sized blocks are dropped on return to preserve invariants.
+- The process-wide auto-tuner owns a stop flag and join handle; callers can terminate it explicitly with `MemoryPool::shutdown_auto_tuner()` and the stop path wakes the parked thread immediately.
+- Unsafe pool copies require a live, aligned block pointer owned by the pool, validate the block-length bound through a bounded destination slice, and document non-overlap and lifetime invariants.
 
 **Compatibility/Test Utility Structures:**
 - `ConstPacketPool` plus its `ConstBuffer` contract remain available only in test and `rust-tests` builds for external regression coverage.
@@ -1081,6 +1083,7 @@ let pool = MemoryPool::new(1024, 65536)?; // 1024 blocks of 64KB each
 - In `optimize::stealth`, `AsciiSimdBackend` remains the runtime-owned ASCII formatting owner used by persona/header generation, while the old free wrapper functions and perf-smoke shell around it have been reduced or removed because they had no independent runtime or external rust-test owner.
 - In `optimize::transport`, `aggregate_congestion(...)` remains the only retained runtime-owned entrypoint, while the old orphan ACK-range search and stream-frame parsing utility surface has been removed; the remaining bitmap/ECN/packet-number helpers stay only as explicit parity/test surface.
 - In `optimize::brain`, `decay_histogram(...)` and `jensen_shannon_divergence(...)` remain runtime-owned through `src/brain.rs`, while moving-average, percentile, and activation helpers remain explicit parity/test surface; the old standalone statistics, correlation, and matrix-multiply helper shell has been removed from the retained optimize contract.
+- The SVE2 Jensen-Shannon implementation uses a bounded eight-lane stack workspace and limits each predicate to that workspace; it does not allocate a per-call heap buffer.
 - `optimize::sort` is no longer part of the normal optimize product surface in non-test builds; `sort_u32(...)`, `sort_f32(...)`, and `argsort(...)` remain available only as explicit rust parity helpers through `cfg(any(test, feature = "rust-tests"))`.
 - Windows SIMD correctness is guarded by native `windows-latest` check, parallel test, and Clippy stages. Proof job `88909613077` on `15570abf772766c76959f6aae6ba16b2b9c26fd7` passes Berlekamp boundary parity, canonical u32 sort parity, and all other native core gates.
 - In `optimize::telemetry`, the retained public helper surface is limited to the real runtime/export owners such as `export_telemetry_text(...)`, `publish_cpu_profile_mask(...)`, `update_memory_usage(...)`, and `flush(...)`; the old duplicate snapshot helper `telemetry_snapshot_text(...)` has been removed because it had no owner outside the module itself.
@@ -2491,6 +2494,7 @@ Use the `--config` flag to load a unified TOML file containing FEC, stealth and 
 `ServerRuntime` owns standalone UDP listener loop execution and is launched productively through `run_standalone(...)`; `run_loop(...)` remains internal runtime machinery. The same runtime entry is used by CLI standalone mode and embedded engine server mode.
 Embedded `EngineMode::Server` is therefore a real headless live server runtime in the current codebase, not a bootstrap-only helper surface. It reuses the standalone listener loop and runtime ownership model, but does not expose the standalone admin service bundle by default. Construction and polling occur on the same dedicated Tokio runtime; the synchronous Engine owner receives its shutdown sender and shared metrics only after construction succeeds.
 Engine server-mode stats now follow the same runtime truth: bytes, packets, and active-client counts are projected from runtime-owned `implementations/server::Metrics`, while server-side RTT and loss remain `0` until explicit server-owned producers exist.
+Each `QuicFuscateEngine` retains one `Arc<GlobalMetrics>` acquired during construction, so repeated `stats()` refreshes read the shared registry without cloning the global `Arc` on every call.
 Admin orchestration helpers (`ServerAdminCore`, `AdminAction`) live in `implementations/server`, so admin, reload, metrics, and shutdown wiring no longer depend on a CLI-local server state island.
 Datagram admission is ordered and bounded: global packet cap -> GeoIP -> external blacklist -> one per-IP packet/byte bucket -> enhanced Retry policy. Interval-delta accepted PPS feeds a monotonic EWMA state machine with sustained activation and clear windows. Enhanced mode preserves only cryptographically established traffic at normal per-IP cost; half-open clients remain new traffic. New traffic consumes the configured higher token cost and requires a stateless QUIC Retry for supported Initial packets. Retry tokens bind source IP, original and Retry connection IDs, the public Initial credential, issuance time, and an HMAC. After validation, live authentication restores the public credential while RFC 9001 Initial keys derive from the Retry SCID carried as the retried packet's DCID. Stateless Version Negotiation remains connection-allocation-free but cannot bypass the global or source admission caps.
 Configured GeoIP activation is fail-closed: `GeoIpBlocker::try_new` validates uppercase ISO alpha-2 codes, requires a regular non-empty database file, opens and fully verifies the MaxMind reader, and rejects non-country database metadata before runtime readiness. A disabled policy has neither path nor country set and takes a zero-cost allow branch. Database lookup/decode errors drop the datagram as `DdosDropReason::GeoIp` and increment explicit lookup-error telemetry. Health, admin status, JSON metrics, and Prometheus expose the actual `disabled|active` runtime state; typed activation failures are logged and propagated before readiness, while the `failed|not_ready` state remains available for an owned failed runtime. Configured activation failures propagate through `SharedServerDomain`, `LiveServerState`, `ServerRuntime`, and standalone startup instead of creating an allow-all runtime.
@@ -3159,6 +3163,7 @@ At runtime you can override selected stealth options without changing the config
 - `QUICFUSCATE_POOL_MIN_CAP` - Minimum capacity for auto-tuner. Default: `64`.
 - `QUICFUSCATE_POOL_MAX_CAP` - Maximum capacity requested by the auto-tuner. Default: `1024`; the per-pool byte bound remains authoritative.
 - `QUICFUSCATE_POOL_TICK_MS` - Auto-tuner tick duration in milliseconds. Default: `1000`.
+- `MemoryPool::shutdown_auto_tuner()` - Explicitly stops and joins the auto-tuner when a short-lived process or test owns the global pool.
 - `QUICFUSCATE_POOL_UTIL_HIGH` - Utilization percent that triggers growth (default: `80`).
 - `QUICFUSCATE_POOL_UTIL_LOW` - Utilization percent that triggers shrink (default: `30`).
 - `QUICFUSCATE_TLS_HIGH` - TLS cache size under high utilization after explicit TLS-cache opt-in (default: `48`).

@@ -593,11 +593,13 @@ unsafe fn jensen_shannon_sve2_impl(bins: &[u64], total: u64, target: &[f64], len
 
     let mut acc = 0.0;
     let mut offset = 0usize;
-    let lanes = svcntd() as usize;
-    let mut buf = vec![0f64; lanes];
+    const STACK_LANES: usize = 8;
+    let lanes = (svcntd() as usize).clamp(1, STACK_LANES);
+    let mut buf = [0f64; STACK_LANES];
 
     while offset < len {
-        let pg = svwhilelt_b64(offset as u64, len as u64);
+        let chunk_end = offset.saturating_add(lanes).min(len);
+        let pg = svwhilelt_b64(offset as u64, chunk_end as u64);
         let vals = svld1_u64(pg, bins.as_ptr().add(offset));
         let vals_f64 = svcvt_f64_u64_x(pg, vals);
         let p = svmul_f64_m(pg, vals_f64, inv_total);
@@ -626,7 +628,7 @@ unsafe fn jensen_shannon_sve2_impl(bins: &[u64], total: u64, target: &[f64], len
         let chunk = svmul_f64_x(pg, half, svadd_f64_x(pg, p_term, q_term));
         acc += svaddv_f64(pg, chunk);
 
-        offset += lanes.min(len - offset);
+        offset = chunk_end;
     }
 
     acc

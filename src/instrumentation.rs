@@ -3,6 +3,7 @@
 //! This module provides a global metrics registry that can be accessed
 //! from anywhere in the codebase to record events and statistics.
 
+use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -174,63 +175,68 @@ impl ServerMetrics {
 
         out.push_str("# HELP quicfuscate_uptime_seconds Server uptime\n");
         out.push_str("# TYPE quicfuscate_uptime_seconds counter\n");
-        out.push_str(&format!("quicfuscate_uptime_seconds {}\n\n", self.uptime_secs()));
+        let _ = write!(out, "quicfuscate_uptime_seconds {}\n\n", self.uptime_secs());
 
         out.push_str("# HELP quicfuscate_clients_active Active client connections\n");
         out.push_str("# TYPE quicfuscate_clients_active gauge\n");
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "quicfuscate_clients_active {}\n\n",
             self.clients_active.load(Ordering::Relaxed)
-        ));
+        );
 
         out.push_str("# HELP quicfuscate_clients_total Total clients connected\n");
         out.push_str("# TYPE quicfuscate_clients_total counter\n");
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "quicfuscate_clients_total {}\n\n",
             self.clients_total.load(Ordering::Relaxed)
-        ));
+        );
 
         out.push_str("# HELP quicfuscate_connections_accepted Accepted connections\n");
         out.push_str("# TYPE quicfuscate_connections_accepted counter\n");
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "quicfuscate_connections_accepted {}\n\n",
             self.connections_accepted.load(Ordering::Relaxed)
-        ));
+        );
 
         out.push_str("# HELP quicfuscate_connections_rejected Rejected connections\n");
         out.push_str("# TYPE quicfuscate_connections_rejected counter\n");
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "quicfuscate_connections_rejected {}\n\n",
             self.connections_rejected.load(Ordering::Relaxed)
-        ));
+        );
 
         out.push_str("# HELP quicfuscate_sessions_created Sessions created\n");
         out.push_str("# TYPE quicfuscate_sessions_created counter\n");
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "quicfuscate_sessions_created {}\n\n",
             self.sessions_created.load(Ordering::Relaxed)
-        ));
+        );
 
         out.push_str("# HELP quicfuscate_sessions_expired Sessions expired\n");
         out.push_str("# TYPE quicfuscate_sessions_expired counter\n");
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "quicfuscate_sessions_expired {}\n\n",
             self.sessions_expired.load(Ordering::Relaxed)
-        ));
+        );
 
         out.push_str("# HELP quicfuscate_auth_failed Authentication failures\n");
         out.push_str("# TYPE quicfuscate_auth_failed counter\n");
-        out.push_str(&format!(
-            "quicfuscate_auth_failed {}\n\n",
-            self.auth_failed.load(Ordering::Relaxed)
-        ));
+        let _ =
+            write!(out, "quicfuscate_auth_failed {}\n\n", self.auth_failed.load(Ordering::Relaxed));
 
         out.push_str("# HELP quicfuscate_rate_limited Rate-limited events\n");
         out.push_str("# TYPE quicfuscate_rate_limited counter\n");
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "quicfuscate_rate_limited {}\n\n",
             self.rate_limited.load(Ordering::Relaxed)
-        ));
+        );
     }
 }
 
@@ -292,33 +298,37 @@ impl ClientMetrics {
             "# HELP quicfuscate_client_connection_attempts Total client connection attempts\n",
         );
         out.push_str("# TYPE quicfuscate_client_connection_attempts counter\n");
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "quicfuscate_client_connection_attempts {}\n\n",
             self.connection_attempts.load(Ordering::Relaxed)
-        ));
+        );
 
         out.push_str(
             "# HELP quicfuscate_client_connection_successes Successful client connections\n",
         );
         out.push_str("# TYPE quicfuscate_client_connection_successes counter\n");
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "quicfuscate_client_connection_successes {}\n\n",
             self.connection_successes.load(Ordering::Relaxed)
-        ));
+        );
 
         out.push_str("# HELP quicfuscate_client_connection_failures Failed client connections\n");
         out.push_str("# TYPE quicfuscate_client_connection_failures counter\n");
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "quicfuscate_client_connection_failures {}\n\n",
             self.connection_failures.load(Ordering::Relaxed)
-        ));
+        );
 
         out.push_str("# HELP quicfuscate_client_reconnects Automatic reconnection events\n");
         out.push_str("# TYPE quicfuscate_client_reconnects counter\n");
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "quicfuscate_client_reconnects {}\n\n",
             self.reconnects.load(Ordering::Relaxed)
-        ));
+        );
     }
 }
 
@@ -432,46 +442,37 @@ impl TransportMetrics {
     fn export(&self, out: &mut String) {
         out.push_str("# HELP quicfuscate_bytes_in Total bytes received\n");
         out.push_str("# TYPE quicfuscate_bytes_in counter\n");
-        out.push_str(&format!(
-            "quicfuscate_bytes_in {}\n\n",
-            self.bytes_in.load(Ordering::Relaxed)
-        ));
+        let _ = write!(out, "quicfuscate_bytes_in {}\n\n", self.bytes_in.load(Ordering::Relaxed));
 
         out.push_str("# HELP quicfuscate_bytes_out Total bytes sent\n");
         out.push_str("# TYPE quicfuscate_bytes_out counter\n");
-        out.push_str(&format!(
-            "quicfuscate_bytes_out {}\n\n",
-            self.bytes_out.load(Ordering::Relaxed)
-        ));
+        let _ = write!(out, "quicfuscate_bytes_out {}\n\n", self.bytes_out.load(Ordering::Relaxed));
 
         out.push_str("# HELP quicfuscate_packets_in Total packets received\n");
         out.push_str("# TYPE quicfuscate_packets_in counter\n");
-        out.push_str(&format!(
-            "quicfuscate_packets_in {}\n\n",
-            self.packets_in.load(Ordering::Relaxed)
-        ));
+        let _ =
+            write!(out, "quicfuscate_packets_in {}\n\n", self.packets_in.load(Ordering::Relaxed));
 
         out.push_str("# HELP quicfuscate_packets_out Total packets sent\n");
         out.push_str("# TYPE quicfuscate_packets_out counter\n");
-        out.push_str(&format!(
-            "quicfuscate_packets_out {}\n\n",
-            self.packets_out.load(Ordering::Relaxed)
-        ));
+        let _ =
+            write!(out, "quicfuscate_packets_out {}\n\n", self.packets_out.load(Ordering::Relaxed));
 
         out.push_str("# HELP quicfuscate_packets_lost Packets lost\n");
         out.push_str("# TYPE quicfuscate_packets_lost counter\n");
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "quicfuscate_packets_lost {}\n\n",
             self.packets_lost.load(Ordering::Relaxed)
-        ));
+        );
 
         out.push_str("# HELP quicfuscate_rtt_avg_ms Average RTT in milliseconds\n");
         out.push_str("# TYPE quicfuscate_rtt_avg_ms gauge\n");
-        out.push_str(&format!("quicfuscate_rtt_avg_ms {:.2}\n\n", self.avg_rtt_ms()));
+        let _ = write!(out, "quicfuscate_rtt_avg_ms {:.2}\n\n", self.avg_rtt_ms());
 
         out.push_str("# HELP quicfuscate_loss_rate Packet loss rate percent\n");
         out.push_str("# TYPE quicfuscate_loss_rate gauge\n");
-        out.push_str(&format!("quicfuscate_loss_rate {:.2}\n\n", self.loss_rate()));
+        let _ = write!(out, "quicfuscate_loss_rate {:.2}\n\n", self.loss_rate());
     }
 }
 
@@ -542,24 +543,27 @@ impl StealthMetrics {
     fn export(&self, out: &mut String) {
         out.push_str("# HELP quicfuscate_stealth_http3 Clients using HTTP/3 stealth\n");
         out.push_str("# TYPE quicfuscate_stealth_http3 gauge\n");
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "quicfuscate_stealth_http3 {}\n\n",
             self.http3_active.load(Ordering::Relaxed)
-        ));
+        );
 
         out.push_str("# HELP quicfuscate_stealth_tls13 Clients using TLS 1.3 stealth\n");
         out.push_str("# TYPE quicfuscate_stealth_tls13 gauge\n");
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "quicfuscate_stealth_tls13 {}\n\n",
             self.tls13_active.load(Ordering::Relaxed)
-        ));
+        );
 
         out.push_str("# HELP quicfuscate_padding_bytes Total padding bytes added\n");
         out.push_str("# TYPE quicfuscate_padding_bytes counter\n");
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "quicfuscate_padding_bytes {}\n\n",
             self.padding_bytes.load(Ordering::Relaxed)
-        ));
+        );
     }
 }
 
@@ -635,35 +639,39 @@ impl FecMetrics {
     fn export(&self, out: &mut String) {
         out.push_str("# HELP quicfuscate_fec_encoded FEC encoded packets\n");
         out.push_str("# TYPE quicfuscate_fec_encoded counter\n");
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "quicfuscate_fec_encoded {}\n\n",
             self.packets_encoded.load(Ordering::Relaxed)
-        ));
+        );
 
         out.push_str("# HELP quicfuscate_fec_decoded FEC decoded packets\n");
         out.push_str("# TYPE quicfuscate_fec_decoded counter\n");
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "quicfuscate_fec_decoded {}\n\n",
             self.packets_decoded.load(Ordering::Relaxed)
-        ));
+        );
 
         out.push_str("# HELP quicfuscate_fec_recovered FEC recovered packets\n");
         out.push_str("# TYPE quicfuscate_fec_recovered counter\n");
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "quicfuscate_fec_recovered {}\n\n",
             self.packets_recovered.load(Ordering::Relaxed)
-        ));
+        );
 
         out.push_str("# HELP quicfuscate_fec_recovery_rate FEC recovery success rate\n");
         out.push_str("# TYPE quicfuscate_fec_recovery_rate gauge\n");
-        out.push_str(&format!("quicfuscate_fec_recovery_rate {:.2}\n\n", self.recovery_rate()));
+        let _ = write!(out, "quicfuscate_fec_recovery_rate {:.2}\n\n", self.recovery_rate());
 
         out.push_str("# HELP quicfuscate_fec_redundancy FEC redundancy bytes\n");
         out.push_str("# TYPE quicfuscate_fec_redundancy counter\n");
-        out.push_str(&format!(
-            "quicfuscate_fec_redundancy {}\n",
+        let _ = writeln!(
+            out,
+            "quicfuscate_fec_redundancy {}",
             self.redundancy_bytes.load(Ordering::Relaxed)
-        ));
+        );
     }
 }
 

@@ -28,6 +28,16 @@ const DEFAULT_AUTO_TUNE_MAX_CAPACITY: usize = 1024;
 const DEFAULT_POOL_MAX_BYTES: usize = 64 * 1024 * 1024;
 type ThreadLocalPoolCaches = Vec<(usize, Vec<AlignedBox<[u8]>>)>;
 
+struct AutoTunerHandle {
+    stop: Arc<AtomicBool>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+fn auto_tuner_slot() -> &'static std::sync::Mutex<Option<AutoTunerHandle>> {
+    static AUTO_TUNER: OnceLock<std::sync::Mutex<Option<AutoTunerHandle>>> = OnceLock::new();
+    AUTO_TUNER.get_or_init(|| std::sync::Mutex::new(None))
+}
+
 fn default_hard_max_capacity(initial_capacity: usize, block_size: usize) -> usize {
     initial_capacity.max((DEFAULT_POOL_MAX_BYTES / block_size).max(1))
 }
@@ -425,6 +435,7 @@ impl MemoryPool {
     pub fn alloc_from_slice(&self, data: &[u8]) -> AlignedBox<[u8]> {
         let mut buf = self.alloc();
         let copy_len = data.len().min(buf.len());
+        debug_assert!(copy_len <= buf.len());
         buf[..copy_len].copy_from_slice(&data[..copy_len]);
         // Resize the box to match the actual data length if possible
         // For now, just return the full buffer - callers should track actual length
@@ -613,15 +624,23 @@ impl MemoryPool {
 
     /// Spawns a background thread that periodically adjusts pool capacity based on utilization.
     pub fn start_auto_tuner(pool: Arc<MemoryPool>) {
-        static STARTED: OnceLock<()> = OnceLock::new();
         let enabled = std::env::var("QUICFUSCATE_POOL_AUTO_TUNE")
             .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
             .unwrap_or(true);
         if !enabled {
             return;
         }
-        let _ = STARTED.get_or_init(|| {
-            std::thread::spawn(move || {
+
+        let mut slot = auto_tuner_slot().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot.is_some() {
+            return;
+        }
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let thread = match std::thread::Builder::new()
+            .name("quicfuscate-pool-auto-tuner".to_owned())
+            .spawn(move || {
                 let min_cap = std::env::var("QUICFUSCATE_POOL_MIN_CAP")
                     .ok()
                     .and_then(|v| v.parse().ok())
@@ -635,6 +654,10 @@ impl MemoryPool {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(1000u64);
                 loop {
+                    if thread_stop.load(Ordering::Acquire) {
+                        break;
+                    }
+
                     // Allow runtime-configurable utilization thresholds
                     let util_high = std::env::var("QUICFUSCATE_POOL_UTIL_HIGH")
                         .ok()
@@ -678,10 +701,38 @@ impl MemoryPool {
                     if target != cap {
                         pool.set_capacity(target);
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(tick_ms));
+
+                    std::thread::park_timeout(std::time::Duration::from_millis(tick_ms));
                 }
-            });
-        });
+            })
+        {
+            Ok(thread) => thread,
+            Err(error) => {
+                warn!(target: "memory_pool", "failed to start auto-tuner thread: {}", error);
+                return;
+            }
+        };
+
+        *slot = Some(AutoTunerHandle { stop, thread });
+    }
+
+    /// Stops and joins the process-wide auto-tuner thread when one is running.
+    pub fn shutdown_auto_tuner() {
+        let handle = {
+            let mut slot = auto_tuner_slot()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            slot.take()
+        };
+        let Some(handle) = handle else {
+            return;
+        };
+
+        handle.stop.store(true, Ordering::Release);
+        handle.thread.thread().unpark();
+        if handle.thread.join().is_err() {
+            warn!(target: "memory_pool", "auto-tuner thread terminated with a panic");
+        }
     }
 }
 

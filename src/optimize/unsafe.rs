@@ -233,16 +233,23 @@ impl UnsafeMemoryPool {
         self.in_use.fetch_sub(1, Ordering::Relaxed);
     }
 
-    /// Copies data directly without bounds checks
+    /// Copies data into a live pool block, clamping the write to the block size.
     #[inline(always)]
     /// # Safety
-    /// `ptr` must be valid for writes of at least `data.len()` bytes within the pool block.
+    /// `ptr` must be a live, correctly aligned block returned by this pool's
+    /// `alloc_uninit`, valid for `self.block_size` writable bytes, and not overlap
+    /// the source slice. The block must not have been returned through `free`.
     pub unsafe fn copy_from_slice(&self, ptr: NonNull<u8>, data: &[u8]) -> usize {
-        // SAFETY: `len` is clamped to block_size, so the write stays within the
-        // allocated block. `ptr` is NonNull and valid for block_size bytes (caller
-        // guarantee). source and destination do not overlap (pool block vs stack/heap data).
+        debug_assert_eq!(ptr.as_ptr() as usize % self.layout.align(), 0);
+        debug_assert!(self.block_size > 0);
         let len = data.len().min(self.block_size);
-        ptr::copy_nonoverlapping(data.as_ptr(), ptr.as_ptr(), len);
+        debug_assert!(len <= self.block_size);
+
+        // SAFETY: The caller guarantees that `ptr` points to a live block with
+        // `self.block_size` writable bytes. The explicit slice length and bounded
+        // subslice make the destination range checked before the copy.
+        let destination = slice::from_raw_parts_mut(ptr.as_ptr(), self.block_size);
+        destination[..len].copy_from_slice(&data[..len]);
         len
     }
 

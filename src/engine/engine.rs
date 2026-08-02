@@ -275,6 +275,8 @@ pub struct QuicFuscateEngine {
     state: EngineState,
     /// Statistics
     stats: Arc<EngineStats>,
+    /// Process-wide instrumentation registry reused by statistics refreshes.
+    instrumentation: Arc<crate::instrumentation::GlobalMetrics>,
     /// Registered callbacks
     callbacks: Arc<Mutex<Vec<Arc<dyn EngineCallback>>>>,
     /// Central event sinks for control-plane integrations.
@@ -619,11 +621,13 @@ impl QuicFuscateEngine {
     pub fn new(config: EngineConfig) -> Result<Self, EngineError> {
         config.validate()?;
         crate::crypto::install_data_aead_config(&config.crypto);
+        let instrumentation = crate::instrumentation::global();
 
         let engine = Self {
             config,
             state: EngineState::Created,
             stats: Arc::new(EngineStats::default()),
+            instrumentation,
             callbacks: Arc::new(Mutex::new(Vec::new())),
             event_sinks: Arc::new(Mutex::new(Vec::new())),
             client_runtime: None,
@@ -1487,7 +1491,7 @@ impl QuicFuscateEngine {
     // ========================================================================
 
     fn refresh_stats(&self) {
-        let metrics = crate::instrumentation::global();
+        let metrics = &self.instrumentation;
         if let Some(metrics) = self.server_metrics.as_ref() {
             self.stats
                 .bytes_sent
