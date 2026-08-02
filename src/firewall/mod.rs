@@ -679,6 +679,20 @@ impl IptablesBackend {
     fn split_args(rule: &str) -> Vec<&str> {
         rule.split_whitespace().collect()
     }
+
+    /// Convert an append rule into deletion arguments without touching later
+    /// tokens such as comment text that may also contain `-A`.
+    fn delete_args(rule: &str) -> Result<Vec<&str>, std::io::Error> {
+        let mut args = Self::split_args(rule);
+        if args.first().copied() != Some("-A") {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "iptables delete_rule requires a rule beginning with -A",
+            ));
+        }
+        args[0] = "-D";
+        Ok(args)
+    }
 }
 
 impl Default for IptablesBackend {
@@ -701,9 +715,8 @@ impl FirewallOps for IptablesBackend {
     }
 
     fn delete_rule(&self, rule: &str) -> Result<(), std::io::Error> {
-        // Replace a leading "-A" with "-D" for deletion.
-        let del_rule = rule.replacen("-A", "-D", 1);
-        let args = Self::split_args(&del_rule);
+        let args = Self::delete_args(rule)?;
+        let del_rule = args.join(" ");
         let status = Command::new(self.bin())
             .args(&args)
             .status()
@@ -925,12 +938,18 @@ mod tests {
     }
 
     #[test]
-    fn test_iptables_delete_rule_replaces_append_with_delete() {
-        // The delete_rule() impl rewrites the leading "-A" to "-D". We verify
-        // the transformation logic without invoking the binary.
-        let rule = "-A FORWARD -j ACCEPT";
-        let del = rule.replacen("-A", "-D", 1);
-        assert_eq!(del, "-D FORWARD -j ACCEPT");
+    fn test_iptables_delete_rule_replaces_only_the_action_token() {
+        let rule = "-A FORWARD -m comment --comment \"contains -A marker\" -j ACCEPT";
+        let args = IptablesBackend::delete_args(rule).unwrap();
+        assert_eq!(args.first().copied(), Some("-D"));
+        assert!(args[1..].contains(&"-A"));
+        assert!(!args[1..].contains(&"-D"));
+    }
+
+    #[test]
+    fn test_iptables_delete_rule_rejects_non_append_input() {
+        let error = IptablesBackend::delete_args("-D FORWARD -j ACCEPT").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[test]

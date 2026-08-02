@@ -58,10 +58,16 @@ pub struct IdentityResolution {
 pub struct CapabilityReport {
     pub real_uid: u32,
     pub effective_uid: u32,
-    pub saved_uid: u32,
+    /// Saved UID when the target platform exposes it; `None` means the
+    /// platform has no portable saved-ID query and the value must not be
+    /// inferred from the effective UID.
+    pub saved_uid: Option<u32>,
     pub real_gid: u32,
     pub effective_gid: u32,
-    pub saved_gid: u32,
+    /// Saved GID when the target platform exposes it; `None` means the
+    /// platform has no portable saved-ID query and the value must not be
+    /// inferred from the effective GID.
+    pub saved_gid: Option<u32>,
     pub supplementary_groups: Vec<u32>,
     pub effective_capabilities: u64,
     pub permitted_capabilities: u64,
@@ -213,10 +219,10 @@ impl CapabilityReport {
         Self {
             real_uid: u32::MAX,
             effective_uid: u32::MAX,
-            saved_uid: u32::MAX,
+            saved_uid: None,
             real_gid: u32::MAX,
             effective_gid: u32::MAX,
-            saved_gid: u32::MAX,
+            saved_gid: None,
             supplementary_groups: Vec::new(),
             effective_capabilities: 0,
             permitted_capabilities: 0,
@@ -618,8 +624,20 @@ fn resolve_group(selector: &str) -> Result<(u32, String), DropError> {
 }
 
 #[cfg(unix)]
-fn current_ids() -> Result<(u32, u32, u32, u32, u32, u32), DropError> {
-    #[cfg(target_os = "linux")]
+type CurrentIds = (u32, u32, Option<u32>, u32, u32, Option<u32>);
+
+#[cfg(unix)]
+fn current_ids() -> Result<CurrentIds, DropError> {
+    #[cfg(any(
+        target_os = "android",
+        target_os = "dragonfly",
+        target_os = "emscripten",
+        target_os = "freebsd",
+        target_os = "fuchsia",
+        target_os = "l4re",
+        target_os = "linux",
+        target_os = "openbsd",
+    ))]
     {
         let mut real_uid = 0;
         let mut effective_uid = 0;
@@ -633,20 +651,29 @@ fn current_ids() -> Result<(u32, u32, u32, u32, u32, u32), DropError> {
         call_zero("getresgid", unsafe {
             libc::getresgid(&mut real_gid, &mut effective_gid, &mut saved_gid)
         })?;
-        Ok((real_uid, effective_uid, saved_uid, real_gid, effective_gid, saved_gid))
+        Ok((real_uid, effective_uid, Some(saved_uid), real_gid, effective_gid, Some(saved_gid)))
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(
+        target_os = "android",
+        target_os = "dragonfly",
+        target_os = "emscripten",
+        target_os = "freebsd",
+        target_os = "fuchsia",
+        target_os = "l4re",
+        target_os = "linux",
+        target_os = "openbsd",
+    )))]
     {
         let real_uid = unsafe { libc::getuid() };
         let effective_uid = unsafe { libc::geteuid() };
         let real_gid = unsafe { libc::getgid() };
         let effective_gid = unsafe { libc::getegid() };
-        Ok((real_uid, effective_uid, effective_uid, real_gid, effective_gid, effective_gid))
+        Ok((real_uid, effective_uid, None, real_gid, effective_gid, None))
     }
 }
 
 #[cfg(not(unix))]
-fn current_ids() -> Result<(u32, u32, u32, u32, u32, u32), DropError> {
+fn current_ids() -> Result<CurrentIds, DropError> {
     Err(DropError::NotSupported)
 }
 
@@ -779,18 +806,18 @@ fn verify_linux_post_drop(
     identity: &ResolvedIdentity,
 ) -> Result<(), DropError> {
     if (report.real_uid, report.effective_uid, report.saved_uid)
-        != (identity.uid, identity.uid, identity.uid)
+        != (identity.uid, identity.uid, Some(identity.uid))
     {
         return Err(DropError::VerificationFailed(format!(
-            "UIDs are {}/{}/{}, expected {}",
+            "UIDs are {}/{}/{:?}, expected {}",
             report.real_uid, report.effective_uid, report.saved_uid, identity.uid
         )));
     }
     if (report.real_gid, report.effective_gid, report.saved_gid)
-        != (identity.gid, identity.gid, identity.gid)
+        != (identity.gid, identity.gid, Some(identity.gid))
     {
         return Err(DropError::VerificationFailed(format!(
-            "GIDs are {}/{}/{}, expected {}",
+            "GIDs are {}/{}/{:?}, expected {}",
             report.real_gid, report.effective_gid, report.saved_gid, identity.gid
         )));
     }
@@ -913,7 +940,7 @@ fn verify_root_cannot_be_regained() -> Result<(), DropError> {
         )));
     }
     let ids = current_ids()?;
-    if ids.0 == 0 || ids.1 == 0 || ids.2 == 0 {
+    if ids.0 == 0 || ids.1 == 0 || ids.2 == Some(0) {
         return Err(DropError::VerificationFailed("root-regain probe left a root UID".to_string()));
     }
     Ok(())
@@ -943,6 +970,43 @@ mod tests {
         assert_eq!(parse_numeric_selector("123", "user").unwrap(), Some(123));
         assert_eq!(parse_numeric_selector("alice", "user").unwrap(), None);
         assert!(parse_numeric_selector("", "user").is_err());
+    }
+
+    #[cfg(any(
+        target_os = "android",
+        target_os = "dragonfly",
+        target_os = "emscripten",
+        target_os = "freebsd",
+        target_os = "fuchsia",
+        target_os = "l4re",
+        target_os = "linux",
+        target_os = "openbsd",
+    ))]
+    #[test]
+    fn saved_ids_are_reported_when_the_platform_supports_the_query() {
+        let ids = current_ids().expect("supported platform identity query must succeed");
+        assert!(ids.2.is_some());
+        assert!(ids.5.is_some());
+    }
+
+    #[cfg(all(
+        unix,
+        not(any(
+            target_os = "android",
+            target_os = "dragonfly",
+            target_os = "emscripten",
+            target_os = "freebsd",
+            target_os = "fuchsia",
+            target_os = "l4re",
+            target_os = "linux",
+            target_os = "openbsd",
+        ))
+    ))]
+    #[test]
+    fn saved_ids_are_not_inferred_on_platforms_without_a_query() {
+        let ids = current_ids().expect("basic Unix identity query must succeed");
+        assert_eq!(ids.2, None);
+        assert_eq!(ids.5, None);
     }
 
     #[test]

@@ -594,7 +594,7 @@ impl AuditWriter {
     }
 
     fn try_write_event(&mut self, event: PendingAuditEvent) -> std::io::Result<()> {
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let timestamp = unix_timestamp(SystemTime::now())?;
         let mut entry = AuditEntry {
             version: 2,
             seq: self.next_seq,
@@ -717,6 +717,12 @@ impl AuditWriter {
         }
         sync_parent_directory(&self.path)
     }
+}
+
+fn unix_timestamp(now: SystemTime) -> std::io::Result<u64> {
+    now.duration_since(UNIX_EPOCH).map(|duration| duration.as_secs()).map_err(|error| {
+        std::io::Error::other(format!("system clock is before Unix epoch: {error}"))
+    })
 }
 
 fn default_context(event_type: AuditEventType, _message: &str) -> AuditContext<'static> {
@@ -1403,7 +1409,7 @@ fn sync_parent_directory(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn read_first_sequence(path: &PathBuf) -> Result<u64, AuditError> {
+fn read_first_sequence(path: &Path) -> Result<u64, AuditError> {
     let content = std::fs::read_to_string(path).map_err(AuditError::IoError)?;
     content
         .lines()
@@ -1454,7 +1460,7 @@ fn discover_rotated_segments(base: &Path) -> Result<Vec<AuditSegment>, AuditErro
 }
 
 /// Read the next sequence and last hash from an existing verified audit file.
-fn read_tail_state(path: &PathBuf) -> Result<(u64, String), AuditError> {
+fn read_tail_state(path: &Path) -> Result<(u64, String), AuditError> {
     AuditLog::verify_chain(path)?;
     if let Some(checkpoint) = read_checkpoint(path)? {
         return Ok((checkpoint.tail_seq.saturating_add(1), checkpoint.tail_hash));
@@ -1591,6 +1597,13 @@ mod tests {
                 let _ = std::fs::remove_file(segment.path);
             }
         }
+    }
+
+    #[test]
+    fn unix_timestamp_rejects_a_clock_before_the_epoch() {
+        let error = unix_timestamp(UNIX_EPOCH - Duration::from_secs(1)).unwrap_err();
+        assert!(error.to_string().contains("before Unix epoch"));
+        assert_eq!(unix_timestamp(UNIX_EPOCH).unwrap(), 0);
     }
 
     #[test]

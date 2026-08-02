@@ -407,8 +407,10 @@ fn quarantine_existing_pki(
 
 /// Convert DER bytes to PEM format.
 fn der_to_pem(der: &[u8], label: &str) -> String {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
     use std::fmt::Write;
-    let b64 = base64_encode(der);
+    let b64 = STANDARD.encode(der);
     let mut pem = String::new();
     let _ = writeln!(pem, "-----BEGIN {label}-----");
     for chunk in b64.as_bytes().chunks(64) {
@@ -418,31 +420,6 @@ fn der_to_pem(der: &[u8], label: &str) -> String {
     }
     let _ = writeln!(pem, "-----END {label}-----");
     pem
-}
-
-/// Base64 encoder (no external dependency).
-fn base64_encode(data: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b = chunk;
-        let n = ((b[0] as u32) << 16)
-            | ((b.get(1).copied().unwrap_or(0) as u32) << 8)
-            | (b.get(2).copied().unwrap_or(0) as u32);
-        result.push(TABLE[((n >> 18) & 0x3F) as usize] as char);
-        result.push(TABLE[((n >> 12) & 0x3F) as usize] as char);
-        if b.len() > 1 {
-            result.push(TABLE[((n >> 6) & 0x3F) as usize] as char);
-        } else {
-            result.push('=');
-        }
-        if b.len() > 2 {
-            result.push(TABLE[(n & 0x3F) as usize] as char);
-        } else {
-            result.push('=');
-        }
-    }
-    result
 }
 
 /// Initialize a production PKI at the given directory. Generates the full
@@ -527,14 +504,12 @@ mod tests {
     }
 
     #[test]
-    fn test_base64_encode() {
-        assert_eq!(base64_encode(b""), "");
-        assert_eq!(base64_encode(b"f"), "Zg==");
-        assert_eq!(base64_encode(b"fo"), "Zm8=");
-        assert_eq!(base64_encode(b"foo"), "Zm9v");
-        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
-        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
-        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    fn test_der_to_pem_uses_standard_base64_padding() {
+        assert!(der_to_pem(b"", "TEST").contains("-----BEGIN TEST-----\n-----END TEST-----"));
+        assert!(der_to_pem(b"f", "TEST").contains("Zg==\n"));
+        assert!(der_to_pem(b"fo", "TEST").contains("Zm8=\n"));
+        assert!(der_to_pem(b"foo", "TEST").contains("Zm9v\n"));
+        assert!(der_to_pem(b"foobar", "TEST").contains("Zm9vYmFy\n"));
     }
 
     #[cfg(feature = "rcgen")]

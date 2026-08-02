@@ -365,7 +365,7 @@ fn run_capabilities_report(
         );
     } else {
         println!(
-            "identity uid={}/{}/{} gid={}/{}/{} groups={:?}",
+            "identity uid={}/{}/{:?} gid={}/{}/{:?} groups={:?}",
             report.real_uid,
             report.effective_uid,
             report.saved_uid,

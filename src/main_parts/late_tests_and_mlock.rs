@@ -757,7 +757,7 @@ async fn run_server(
                     apply_process_memory_lock();
                 }
                 info!(
-                    "Privileges finalized across {} threads: uid={}/{}/{}, gid={}/{}/{}, capabilities=0, no_new_privileges=true",
+                    "Privileges finalized across {} threads: uid={}/{}/{:?}, gid={}/{}/{:?}, capabilities=0, no_new_privileges=true",
                     verified_threads,
                     report.real_uid,
                     report.effective_uid,

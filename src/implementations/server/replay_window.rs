@@ -26,7 +26,7 @@ pub struct ReplayWindow {
     /// words `[s * WORDS_PER_SLOT .. (s+1) * WORDS_PER_SLOT)`.
     bitmap: Vec<u64>,
     /// Timestamp of slot 0 (the oldest tracked second).
-    base_timestamp: u64,
+    base_timestamp: Option<u64>,
 }
 
 impl ReplayWindow {
@@ -34,7 +34,7 @@ impl ReplayWindow {
     pub fn new(window_size: u64) -> Self {
         let window_size = window_size.max(1);
         let words = (window_size as usize) * WORDS_PER_SLOT;
-        Self { window_size, bitmap: vec![0u64; words], base_timestamp: 0 }
+        Self { window_size, bitmap: vec![0u64; words], base_timestamp: None }
     }
 
     /// Check an auth frame's `(timestamp, nonce)` and mark it as seen.
@@ -44,21 +44,28 @@ impl ReplayWindow {
     /// the frame if it is fresh.
     pub fn check_and_mark(&mut self, timestamp: u64, nonce: &[u8; 16]) -> bool {
         // First-ever frame seeds the window base.
-        if self.base_timestamp == 0 && self.is_empty() {
-            self.base_timestamp = timestamp;
+        if self.base_timestamp.is_none() && self.is_empty() {
+            self.base_timestamp = Some(timestamp);
         }
 
+        let Some(base_timestamp) = self.base_timestamp else {
+            return false;
+        };
+
         // Stale: below the window's lower edge -> replay or too old.
-        if timestamp < self.base_timestamp {
+        if timestamp < base_timestamp {
             return false;
         }
 
         // Future: slide the window forward so the new timestamp lands at the top.
-        if timestamp >= self.base_timestamp + self.window_size {
+        if timestamp.saturating_sub(base_timestamp) >= self.window_size {
             self.slide_to(timestamp);
         }
 
-        let slot = (timestamp - self.base_timestamp) as usize;
+        let Some(base_timestamp) = self.base_timestamp else {
+            return false;
+        };
+        let slot = (timestamp - base_timestamp) as usize;
         let bit = self.nonce_bit(timestamp, nonce);
         let word_idx = slot * WORDS_PER_SLOT + (bit / u64::BITS as u64) as usize;
         let bit_mask = 1u64 << (bit % u64::BITS as u64);
@@ -94,10 +101,14 @@ impl ReplayWindow {
     }
 
     fn advance_base_to(&mut self, new_base: u64) {
-        if new_base <= self.base_timestamp {
+        let Some(base_timestamp) = self.base_timestamp else {
+            self.base_timestamp = Some(new_base);
+            return;
+        };
+        if new_base <= base_timestamp {
             return;
         }
-        let delta = (new_base - self.base_timestamp) as usize;
+        let delta = (new_base - base_timestamp) as usize;
         if delta >= self.window_size as usize {
             // Entire window rolled past: clear everything.
             self.bitmap.fill(0);
@@ -110,7 +121,7 @@ impl ReplayWindow {
                 *w = 0;
             }
         }
-        self.base_timestamp = new_base;
+        self.base_timestamp = Some(new_base);
     }
 
     /// Compute the bloom bit index within a slot for `(timestamp, nonce)`.
@@ -219,6 +230,16 @@ mod tests {
     fn is_empty_initially_true() {
         let rw = ReplayWindow::new(32);
         assert!(rw.is_empty());
+    }
+
+    #[test]
+    fn epoch_timestamp_is_not_an_initialization_sentinel() {
+        let mut rw = ReplayWindow::new(32);
+        assert_eq!(rw.base_timestamp, None);
+        let n = nonce(18);
+        assert!(rw.check_and_mark(0, &n));
+        assert_eq!(rw.base_timestamp, Some(0));
+        assert!(!rw.check_and_mark(0, &n));
     }
 
     #[test]
