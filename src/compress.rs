@@ -707,6 +707,10 @@ pub fn compress_with_dict(
 }
 
 /// Decompress a dictionary-compressed buffer (magic 0x5D) into a pooled buffer.
+///
+/// The pool block must be at least as large as the declared original payload length. The decoder
+/// writes into exactly that declared-length slice and rejects any result whose length differs, so
+/// an undersized block or malformed frame returns `None` instead of exposing a truncated payload.
 pub fn decompress_with_dict(
     pool: &Arc<MemoryPool>,
     data: &[u8],
@@ -996,6 +1000,61 @@ mod tests {
 
         let (decompressed, decompressed_len) =
             decompress_with_dict(&pool, &compressed[..used], dict).expect("decompress with dict");
+        assert_eq!(decompressed_len, payload.len());
+        assert_eq!(&decompressed[..decompressed_len], payload.as_slice());
+    }
+
+    struct AdaptiveBlockGuard {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl AdaptiveBlockGuard {
+        fn disable() -> Self {
+            let previous = std::env::var_os("QUICFUSCATE_POOL_ADAPTIVE_BLOCK");
+            unsafe {
+                std::env::set_var("QUICFUSCATE_POOL_ADAPTIVE_BLOCK", "0");
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for AdaptiveBlockGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => unsafe {
+                    std::env::set_var("QUICFUSCATE_POOL_ADAPTIVE_BLOCK", value);
+                },
+                None => unsafe {
+                    std::env::remove_var("QUICFUSCATE_POOL_ADAPTIVE_BLOCK");
+                },
+            }
+        }
+    }
+
+    #[test]
+    fn compress_with_dict_roundtrip_handles_payload_larger_than_64k() {
+        let adaptive_block_guard = AdaptiveBlockGuard::disable();
+        let pool = Arc::new(MemoryPool::new(2, 128 * 1024));
+        assert_eq!(pool.block_size(), 128 * 1024);
+        drop(adaptive_block_guard);
+        let dict = b"header:value\ncontent-type:text/plain\nhello hello hello\n";
+        let mut payload = Vec::with_capacity(96 * 1024);
+        for index in 0..1024 {
+            payload.extend_from_slice(
+                format!(
+                    "header:value\ncontent-type:text/plain\nrecord={index:04}\nhello hello hello\n"
+                )
+                .as_bytes(),
+            );
+        }
+
+        assert!(payload.len() > 64 * 1024);
+        let (compressed, used) =
+            compress_with_dict(&pool, &payload, 5, dict, 7).expect("compress large payload");
+        let (decompressed, decompressed_len) =
+            decompress_with_dict(&pool, &compressed[..used], dict)
+                .expect("decompress large payload");
+
         assert_eq!(decompressed_len, payload.len());
         assert_eq!(&decompressed[..decompressed_len], payload.as_slice());
     }

@@ -537,7 +537,7 @@ cfg.log_keys();
 - Safe path (`src/compress.rs`):
   - `CompressionManager::compress_to_pool()` writes zstd output directly into the caller-provided pool block after the `0x5A` header via `zstd::bulk::Compressor::compress_to_buffer`.
   - `CompressionManager::decompress_to_pool()` writes directly into the caller-provided pool block with `zstd::bulk::decompress_to_buffer`, validating the declared original length without an intermediate `Vec`.
-  - Dictionary compression and decompression write directly into the caller-provided pool block via the symmetric bulk compressor/decompressor APIs after the `0x5D` dictionary header.
+  - Dictionary compression and decompression write directly into the caller-provided pool block via the symmetric bulk compressor/decompressor APIs after the `0x5D` dictionary header. Decompression requires the block to hold the declared original length and rejects any decoded length mismatch instead of returning a truncated payload.
   - No API change; behavior is compatible, headers remain `0x5A` and `0x5D` in the safe path.
 
 #### Provider API (Unified)
