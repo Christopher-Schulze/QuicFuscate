@@ -346,6 +346,7 @@ This document provides comprehensive technical documentation for the system arch
 - TLS boundary and controls: [TLS Boundary: rustls protocol with optional cover overlay](#tls-boundary-rustls-protocol-with-optional-cover-overlay)
 - FEC runtime controls and tuning: [FEC Operations Guide](#fec-operations-guide)
 - CLI operation and server/client flows: [Usage](#usage)
+- Profiling runners and evidence semantics: [Profiling Evidence Contract](#profiling-evidence-contract)
 - Full config schema and env overrides: [Configuration Reference (Full)](#configuration-reference-full)
 - Embedded API contracts: [Engine Control Plane (embedded orchestration)](#engine-control-plane-embedded-orchestration)
 - Script entrypoints and suites: [Scripts Reference (Authoritative)](#scripts-reference-authoritative)
@@ -2421,6 +2422,30 @@ Each script is self-contained and handles specific functionality. Scripts can be
 
 All scripts include a unified, minimal help handler accessible via `-h`, `--help`, or `help`. It prints `Usage: <script>` together with the first `# Description:` line found in the script, then exits early with code `0` and no side effects.
 
+### Profiling Evidence Contract
+
+The profiling runners are measurement entrypoints, not performance claims. Every invocation creates a unique run directory below the selected output root:
+
+- `scripts/benchmarks/profiling-baseline.sh` records scenarios `a`-`c` through the UDP harness and scenarios `d`-`f` through the real loopback client/server. The connection scenarios use explicit FEC and cover-feature flags; there is no standalone CLI `stealth_mode` argument to claim.
+- `scripts/benchmarks/profiling-tun-mode.sh` records TUN scenarios `g`-`k` and requires Linux, root, `tc`, `iperf3`, the release binary, certificates, `perf`, and both FlameGraph tools. Netem ownership begins only after a successful `tc qdisc add` and is removed only by the owning run.
+- `scripts/benchmarks/profiling-zc.sh` is the canonical zero-copy entrypoint. It runs the real product server and client with `QUICFUSCATE_IO_URING_ZC=1` and `--telemetry`, then requires positive `quicfuscate_io_uring_zc_sends_total` and `quicfuscate_io_uring_zc_notifs_total` telemetry before a scenario can pass.
+- `scripts/benchmarks/profiling-common.sh` owns schema version `1`, provenance, tool-version capture, JSON serialization, CSV quoting, process/readiness waits, iperf validation, telemetry validation, cleanup status, and flamegraph execution.
+
+Each scenario JSON records the source revision, executable SHA-256, host, kernel, tool versions, prerequisites, exact shell command identity, readiness evidence, process exit statuses, `perf` and flamegraph status, metric completeness, cleanup status, and UTC timestamps. `manifest.json` contains the same provenance and a result count for every emitted scenario. The only result values are `PASS`, `FAIL`, `SKIP`, and `UNAVAILABLE`.
+
+Missing native prerequisites are `UNAVAILABLE`. Failed process startup, netem setup, traffic, metric extraction, perf capture, flamegraph generation, or cleanup is `FAIL`. Missing metrics are never serialized as `N/A`, and a CSV row cannot turn an incomplete run into a pass. `--dry-run` emits `SKIP` evidence without starting a process.
+
+Generated output under `docs/profiling/` remains ignored by Git. The historical files in that boundary are external evidence only and do not replace the current tracked runner contract. Durable source truth is the runner, its schema, the fast negative fixture `scripts/tests/fast/test-profiling-evidence-contract.sh`, and this documentation. The fixture runs the portable gates locally and leaves privileged Linux process/netem branches conditional on real native prerequisites.
+
+Example commands:
+
+```bash
+scripts/benchmarks/profiling-baseline.sh --dry-run --scenario a
+scripts/benchmarks/profiling-tun-mode.sh --dry-run --scenario g
+scripts/benchmarks/profiling-zc.sh --dry-run
+scripts/tests/fast/test-profiling-evidence-contract.sh
+```
+
 ### TUN interface example (feature-gated)
 The TUN example is intentionally gated by both Cargo's `required-features = ["tun-tests"]` target contract and the example's crate-level cfg, so it does not affect default builds. It demonstrates external factory registration with an in-process test device; it is not a Wintun or NetworkExtension backend proof. The `tun-windows` and `tun-ios` features do not select this example.
 ```bash
@@ -3817,6 +3842,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `test-fast-fec.sh` - Fast FEC sanity; runs separate `fec::tests::`, `gf16`, `wiedemann`, and `streaming` filters with `benches,rust-tests`, requires a positive executed-test count per filter, and records a separate bench compile result
 - `test-fast-fec-fail-closed.sh` - Negative contract proving a real focused Cargo failure propagates as nonzero, records bounded failure evidence, and cannot reach the green completion marker or bench stage
 - `test-harness-argument-safety.sh` - Real negative contract for array-safe suite propagation, redacted Admin E2E dry-run, malformed QPACK sizes, invalid microbench numerics, paths with spaces, and shell-side-effect rejection
+- `test-profiling-evidence-contract.sh` - Negative contract for profiling dry-run safety, unavailable native tools, missing iperf/SendMsgZc metrics, failed-process markers, failed-netem markers, and missing flamegraph tooling
 
 **Quick validation profile (macOS / Apple Silicon)**
 - Fast confidence pass:
@@ -3854,6 +3880,10 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `bench-compression.sh` - Compression microbenchmarks (`examples/compress_bench.rs`) for text and binary payloads with JSON output
 - `bench-qpack-encode.sh` - QPACK encode benchmark harness with bounded size grammar, preflight rejection, and per-cell status
 - `bench-profile-transport-fastpaths.sh` - Transport profiling (Tokio vs io_uring)
+- `profiling-baseline.sh` - Fail-closed UDP harness and loopback client/server baseline with per-scenario provenance and measurement status
+- `profiling-common.sh` - Shared profiling evidence schema, status, metric, process, and cleanup helpers
+- `profiling-tun-mode.sh` - Fail-closed Linux TUN plus tc-netem profiling with owned qdisc cleanup and iperf3 JSON metrics
+- `profiling-zc.sh` - Real product SendMsgZc profiling with telemetry counters and perf/flamegraph evidence
 - `bench-linux-send-path-decision.sh` - Linux send-path decision benchmark
 - `bench-retained-crypto-backends.sh` - Crypto backend comparison benchmark
 - `bench-fec-all.sh` - Dispatcher: runs all FEC benchmarks

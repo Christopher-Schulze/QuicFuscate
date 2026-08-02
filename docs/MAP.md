@@ -523,6 +523,10 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 |   |-- benchmarks
 |   |   |-- bench-ci-regression.sh
 |   |   |-- ci_regression.rs
+|   |   |-- profiling-baseline.sh
+|   |   |-- profiling-common.sh
+|   |   |-- profiling-tun-mode.sh
+|   |   |-- profiling-zc.sh
 |   |   |-- micro
 |   |   |   |-- micro-aes-block.sh
 |   |   |   |-- micro-aes-gcm.sh
@@ -576,7 +580,8 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 |   |   |   |-- test-fast-crypto.sh
 |   |   |   |-- test-fast-fec-fail-closed.sh
 |   |   |   |-- test-fast-fec.sh
-|   |   |   `-- test-harness-argument-safety.sh
+|   |   |   |-- test-harness-argument-safety.sh
+|   |   |   `-- test-profiling-evidence-contract.sh
 |   |   |-- frontend
 |   |   |   |-- desktop
 |   |   |   |   |-- e2e
@@ -1167,3 +1172,12 @@ The audit remains open. These reconciliations document current evidence and owne
 - **Orchestration and input gates:** `bench-orchestrator.sh` uses fixed executable-plus-argv resolution and structured manifests; QPACK, UDP, crypto microbench, fuzz, and Admin E2E boundaries reject malformed numeric, size, feature, endpoint, credential, timeout, TTL, flag, and path inputs before execution or numeric JSON serialization. Admin E2E dry-run is plan-only and redacts the password.
 - **Negative proof:** `scripts/tests/fast/test-harness-argument-safety.sh` exercises the real orchestrator, Admin E2E, QPACK, UDP, and crypto harnesses with shell metacharacters, malformed sizes, invalid numerics, and paths containing spaces. It requires bounded JSON failure/skip records and proves that no side-effect marker is created.
 - **Ownership boundary:** TODO-735 remains open for the broader benchmark build/export/selection matrix, and TODO-738 remains open for typed parsing and checked workload arithmetic inside the Rust benchmark/probe examples.
+
+## Implementation Reconciliation (2026-08-02, profiling evidence contract)
+
+- **Runner ownership:** `scripts/benchmarks/profiling-common.sh` owns schema version `1`, JSON/CSV serialization, source and executable provenance, tool versions, bounded readiness waits, process status, metric validation, flamegraph execution, and cleanup status. `profiling-baseline.sh`, `profiling-tun-mode.sh`, and `profiling-zc.sh` each write a unique run directory and a manifest without overwriting a previous run.
+- **Baseline matrix:** Scenarios `a`-`c` are the real UDP harness boundary. Scenarios `d`-`f` are real loopback client/server runs with explicit FEC and cover-feature flags. The runner no longer claims a CLI stealth mode that the standalone parser does not expose.
+- **TUN boundary:** Scenarios `g`-`k` require native Linux/root, `tc`, `iperf3`, certificates, `perf`, and FlameGraph. A qdisc is owned only after successful setup and is removed through the same scenario owner. Setup, readiness, traffic, metrics, perf, flamegraph, and cleanup are independent evidence fields.
+- **Zero-copy boundary:** `profiling-zc.sh` is the only canonical SendMsgZc runner. It launches the actual product binary with `QUICFUSCATE_IO_URING_ZC=1` and `--telemetry`, and requires positive send and notification counters from both telemetry endpoints before emitting a pass.
+- **Evidence status:** `PASS`, `FAIL`, `SKIP`, and `UNAVAILABLE` are the only scenario states. Missing setup, process, traffic, measurement, or tooling evidence cannot be encoded as `N/A`. Generated `docs/profiling/` output remains ignored; historical ignored profiling files are evidence-boundary inputs, not current tracked proof.
+- **Negative coverage:** `scripts/tests/fast/test-profiling-evidence-contract.sh` exercises portable dry-runs, unavailable-tool manifests, invalid iperf/SendMsgZc metric payloads, side-effect-safe paths, and source-backed failure markers. Native failed-process and netem fixtures run only when real Linux/root prerequisites are present.
