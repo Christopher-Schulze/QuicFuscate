@@ -1640,12 +1640,12 @@ Build/runtime behavior for TLS fingerprint inputs is documented in the TLS bound
 
 Platform builds are executed from `src/` via consolidated scripts:
 
-- `./scripts/build/build-pgo-release.sh` - PGO-optimized release build (optional `--features "io_uring zero_copy_dgram"`)
+- `./scripts/build/build-pgo-release.sh` - PGO-optimized release build (optional `--features "io_uring zero_copy_dgram"`, optional `--output-dir DIR`)
 - `./scripts/build/build-server-bundle.sh` - Server deployment bundle
 - `./scripts/tests/build/build-check.sh` - Format/Clippy/Compile/Test/Bench compilation
 - `./scripts/tests/build/build-env-doctor.sh` - Toolchain diagnostics
 
-Artifacts are written to `scripts/out/build/<run>/` by `build-pgo-release.sh`.
+Each invocation creates a unique evidence directory at `scripts/out/build/pgo-<UTC>-<random>/` (or below the caller-provided `--output-dir`). The directory contains the copied `quicfuscate` binary, `manifest.json`, `merged.profdata`, `profile-data/*.profraw`, `workloads.ndjson`, phase logs, and the run-scoped Cargo target. `manifest.json` uses schema `quicfuscate.pgo-release.v1` and records the run ID, create-new artifact ownership, source revision and dirty state, feature set, toolchain versions, build argv/environment, workload and profile counts, merge validation, final binary size, and SHA-256. The helper never deletes a global or another run's profile directory; interrupted and failed runs retain their bounded diagnostics and exit nonzero. `--features` adds to the always-enabled `benches` feature, while `--output-dir` changes only the evidence root.
 
 #### TLS Profile Sidecars (Generating and Verifying)
 These utilities are only relevant if you maintain external base64 ClientHello dumps (for example in `browser_profiles/`). The runtime does not require on-disk profiles because it generates ClientHello bytes in memory.
@@ -3768,7 +3768,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `build-env-doctor.sh` - Environment/Toolchain diagnostics
 
 #### Build (`scripts/build/`)
-- `build-pgo-release.sh` - PGO-optimized release build (profile-guided optimization)
+- `build-pgo-release.sh` - Isolated PGO release build with run-scoped profiles, workload/merge validation, final binary hash, and `quicfuscate.pgo-release.v1` provenance manifest under `scripts/out/build/pgo-<UTC>-<random>/`
 - `build-server-bundle.sh` - Server deployment bundle (binary + assets + systemd unit)
 - `build-web-admin.sh` - SvelteKit admin UI static build to `assets/web-admin/`
 
