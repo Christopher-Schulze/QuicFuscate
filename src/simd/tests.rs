@@ -197,6 +197,19 @@ mod tests_rs_neon {
     }
 
     #[test]
+    fn neon_rs_encode_preserves_partial_input_shard() {
+        let data: Vec<u8> =
+            (0..257).map(|index| (index as u8).wrapping_mul(29).wrapping_add(11)).collect();
+
+        let scalar = super::scalar::reed_solomon_encode_scalar(&data, 2);
+        let neon = unsafe { super::arm::reed_solomon_encode_neon(&data, 2) };
+
+        assert_eq!(neon, scalar);
+        assert_eq!(&neon[..data.len()], data.as_slice());
+        assert!(neon[data.len()..2 * 256].iter().all(|&byte| byte == 0));
+    }
+
+    #[test]
     fn neon_bitpack_roundtrip_matches_scalar() {
         let mut src = vec![0u8; 257];
         for (i, v) in src.iter_mut().enumerate() {

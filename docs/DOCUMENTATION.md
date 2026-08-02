@@ -951,6 +951,7 @@ let policy: Box<dyn SimdPolicy> = if cpu_supports_avx512gfni() {
  - **Crypto (Poly1305 wide reduction ARM)**: Done - `mac_sve2_block_wide` provides the 256-bit carry chain on `ARM_A2`/Apple M.
  - **FEC (large-window decode acceleration)**: Done - `simd::amx::matmul_gf256_amx` processes 16x64 GF(256) blocks for internal large-window decoder paths, planner gating & telemetry active, scalar fallback intact.
  - **Utility (RVV)**: Infrastructure for RISC-V Vector (`RVV`) and additional iterator backends are not active in the current build.
+ - **SIMD safety (TODO-593)**: x86 GF(256) matrix kernels validate dimension products in debug builds, BMI2 varint encoding validates its required output capacity, AVX2 header dispatch avoids a discarded 32-byte load by delegating to the scalar first-byte check, and scalar/NEON/GFNI Reed-Solomon encoders zero-pad partial input shards instead of truncating them. Windows-only SHA-256 compression stubs fail loudly if reached.
 
 #### Accelerate Module (Re-export)
 `accelerate.rs` is now a thin re-export layer for the optimize submodules. All implementation lives under `src/optimize/` while the public API stays stable under `accelerate::*` paths.

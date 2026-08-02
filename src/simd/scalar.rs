@@ -235,7 +235,7 @@ pub fn reed_solomon_encode(data: &[u8], parity_shards: usize) -> Vec<u8> {
 #[inline(always)]
 pub(crate) fn reed_solomon_encode_scalar(data: &[u8], parity_shards: usize) -> Vec<u8> {
     // Scalar Reed-Solomon encoding
-    let data_shards = data.len() / 256;
+    let data_shards = data.len().div_ceil(256);
     let total_shards = data_shards + parity_shards;
     let mut output = vec![0u8; total_shards * 256];
 
@@ -527,6 +527,22 @@ mod tests {
 
         let expected = gcm::ghash(h, &[], data);
         assert_eq!(tag, expected);
+    }
+
+    #[test]
+    fn reed_solomon_encode_preserves_partial_input_shard() {
+        let data: Vec<u8> =
+            (0..257).map(|index| (index as u8).wrapping_mul(17).wrapping_add(3)).collect();
+        let mut padded = vec![0u8; 2 * 256];
+        padded[..data.len()].copy_from_slice(&data);
+
+        let encoded = reed_solomon_encode_scalar(&data, 2);
+        let expected = reed_solomon_encode_scalar(&padded, 2);
+
+        assert_eq!(encoded.len(), 4 * 256);
+        assert_eq!(&encoded[..data.len()], data.as_slice());
+        assert!(encoded[data.len()..2 * 256].iter().all(|&byte| byte == 0));
+        assert_eq!(encoded, expected);
     }
 
     #[test]

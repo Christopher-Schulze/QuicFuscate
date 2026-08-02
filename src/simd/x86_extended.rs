@@ -30,8 +30,21 @@ pub(super) unsafe fn matmul_gf256_gfni(
     k: usize,
     n: usize,
 ) {
+    let a_len = m.checked_mul(k);
+    debug_assert!(a_len.is_some(), "GFNI matrix dimensions overflow for A");
+    let Some(a_len) = a_len else { return };
+    let b_len = k.checked_mul(n);
+    debug_assert!(b_len.is_some(), "GFNI matrix dimensions overflow for B");
+    let Some(b_len) = b_len else { return };
+    let c_len = m.checked_mul(n);
+    debug_assert!(c_len.is_some(), "GFNI matrix dimensions overflow for C");
+    let Some(c_len) = c_len else { return };
+    debug_assert!(a.len() >= a_len, "GFNI matrix A is smaller than m * k");
+    debug_assert!(b.len() >= b_len, "GFNI matrix B is smaller than k * n");
+    debug_assert!(c.len() >= c_len, "GFNI matrix C is smaller than m * n");
+
     // Zero output matrix
-    for elem in c.iter_mut().take(m * n) {
+    for elem in c.iter_mut().take(c_len) {
         *elem = 0;
     }
 
@@ -77,8 +90,21 @@ pub(super) unsafe fn matmul_gf256_avx2(
     k: usize,
     n: usize,
 ) {
+    let a_len = m.checked_mul(k);
+    debug_assert!(a_len.is_some(), "AVX2 matrix dimensions overflow for A");
+    let Some(a_len) = a_len else { return };
+    let b_len = k.checked_mul(n);
+    debug_assert!(b_len.is_some(), "AVX2 matrix dimensions overflow for B");
+    let Some(b_len) = b_len else { return };
+    let c_len = m.checked_mul(n);
+    debug_assert!(c_len.is_some(), "AVX2 matrix dimensions overflow for C");
+    let Some(c_len) = c_len else { return };
+    debug_assert!(a.len() >= a_len, "AVX2 matrix A is smaller than m * k");
+    debug_assert!(b.len() >= b_len, "AVX2 matrix B is smaller than k * n");
+    debug_assert!(c.len() >= c_len, "AVX2 matrix C is smaller than m * n");
+
     // Use AVX2 with lookup tables for GF multiplication
-    for elem in c.iter_mut().take(m * n) {
+    for elem in c.iter_mut().take(c_len) {
         *elem = 0;
     }
 
@@ -164,6 +190,13 @@ pub(super) unsafe fn encode_varint_avx512(val: u64, buf: &mut [u8]) -> Option<us
 #[target_feature(enable = "bmi2")]
 pub(super) unsafe fn varint_encode_bmi2(mut value: u64, buf: &mut [u8]) -> usize {
     use std::arch::x86_64::*;
+
+    let required_len =
+        if value == 0 { 1 } else { ((64 - value.leading_zeros()) as usize).div_ceil(7) };
+    debug_assert!(
+        buf.len() >= required_len,
+        "BMI2 varint output buffer is smaller than the encoded value"
+    );
 
     if value < 128 {
         buf[0] = value as u8;
@@ -321,24 +354,10 @@ pub(super) unsafe fn xor_multi_key_avx2(data: &mut [u8], keys: &[&[u8]]) {
 /// Packet header validation with AVX2 when available.
 #[target_feature(enable = "avx2")]
 pub(super) unsafe fn validate_header_avx2(header: &[u8]) -> bool {
-    use std::arch::x86_64::*;
-
-    if header.len() < 32 {
-        return scalar::validate_header(header);
-    }
-
-    let data = _mm256_loadu_si256(header.as_ptr() as *const __m256i);
-
-    // Check fixed bit (0x40) is set
-    let fixed_bit_mask = _mm256_set1_epi8(0x40);
-    let first_byte = _mm256_and_si256(data, fixed_bit_mask);
-    let fixed_check = _mm256_cmpeq_epi8(first_byte, fixed_bit_mask);
-
-    if _mm256_extract_epi8(fixed_check, 0) == 0 {
-        return false;
-    }
-
-    (header[0] & 0x80) != 0 || (header[0] & 0x18) == 0
+    // Header validation only depends on the first byte. Keep the AVX2 dispatch
+    // boundary for API and feature-selection stability, but avoid a discarded
+    // 32-byte load and comparison of unrelated header bytes.
+    scalar::validate_header(header)
 }
 
 /// Packet header validation with SSE2 when available.
@@ -559,9 +578,10 @@ pub(super) unsafe fn popcnt_avx512(data: &[u8]) -> usize {
 #[target_feature(enable = "avx512f", enable = "gfni")]
 pub(super) unsafe fn reed_solomon_encode_gfni(data: &[u8], parity_shards: usize) -> Vec<u8> {
     // Generate parity using GFNI for GF(256) operations
-    let data_shards = data.len() / 256;
+    let shard_size = 256;
+    let data_shards = data.len().div_ceil(shard_size);
     let total_shards = data_shards + parity_shards;
-    let mut output = vec![0u8; total_shards * 256];
+    let mut output = vec![0u8; total_shards * shard_size];
 
     // Copy data
     output[..data.len()].copy_from_slice(data);
@@ -573,17 +593,18 @@ pub(super) unsafe fn reed_solomon_encode_gfni(data: &[u8], parity_shards: usize)
             let coeff_vec = _mm512_set1_epi8(coeff as i8);
 
             let mut k = 0;
-            while k + 64 <= 256 {
-                let src = _mm512_loadu_si512(data[j * 256 + k..].as_ptr() as *const __m512i);
+            while k + 64 <= shard_size {
+                let src =
+                    _mm512_loadu_si512(output[j * shard_size + k..].as_ptr() as *const __m512i);
                 let dst = _mm512_loadu_si512(
-                    output[(data_shards + i) * 256 + k..].as_ptr() as *const __m512i
+                    output[(data_shards + i) * shard_size + k..].as_ptr() as *const __m512i
                 );
 
                 let prod = _mm512_gf2p8mul_epi8(src, coeff_vec);
                 let result = _mm512_xor_si512(dst, prod);
 
                 _mm512_storeu_si512(
-                    output[(data_shards + i) * 256 + k..].as_mut_ptr() as *mut __m512i,
+                    output[(data_shards + i) * shard_size + k..].as_mut_ptr() as *mut __m512i,
                     result,
                 );
                 k += 64;
@@ -1166,5 +1187,21 @@ mod tests {
             let decoded = unsafe { qpack_decode_ssse3(&sse_buf, &mut decode_buf) };
             assert_eq!(&decode_buf[..decoded], sample);
         }
+    }
+
+    #[test]
+    fn gfni_rs_encode_preserves_partial_input_shard() {
+        if !is_x86_feature_detected!("avx512f") || !is_x86_feature_detected!("gfni") {
+            return;
+        }
+
+        let data: Vec<u8> =
+            (0..257).map(|index| (index as u8).wrapping_mul(23).wrapping_add(5)).collect();
+        let scalar = crate::simd::scalar::reed_solomon_encode_scalar(&data, 2);
+        let gfni = unsafe { reed_solomon_encode_gfni(&data, 2) };
+
+        assert_eq!(gfni, scalar);
+        assert_eq!(&gfni[..data.len()], data.as_slice());
+        assert!(gfni[data.len()..2 * 256].iter().all(|&byte| byte == 0));
     }
 }

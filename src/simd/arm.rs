@@ -342,6 +342,7 @@ unsafe fn compress_sha_blocks(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
     #[cfg(windows)]
     {
         let _ = (state, blocks);
+        unreachable!("ARM SHA-256 compression is unavailable on Windows");
     }
 }
 
@@ -874,26 +875,27 @@ pub(super) unsafe fn unpack_bits_neon(src: &[u8], bit_width: u8, dst: &mut [u8])
 // Reed-Solomon encode using NEON+PMULL GF multiply (block-wise)
 #[inline(always)]
 pub(super) unsafe fn reed_solomon_encode_neon(data: &[u8], parity_shards: usize) -> Vec<u8> {
-    let data_shards = data.len() / 256;
+    let shard_size = 256;
+    let data_shards = data.len().div_ceil(shard_size);
     let total_shards = data_shards + parity_shards;
-    let mut output = vec![0u8; total_shards * 256];
+    let mut output = vec![0u8; total_shards * shard_size];
 
     // Copy data shards
     output[..data.len()].copy_from_slice(data);
 
     // Generate parity shards
     for p in 0..parity_shards {
-        let parity_base = (data_shards + p) * 256;
+        let parity_base = (data_shards + p) * shard_size;
         for d in 0..data_shards {
             let coeff = super::scalar::gf_pow((p as u8) + 1, d as u8);
-            let data_base = d * 256;
+            let data_base = d * shard_size;
 
             // Process 16-byte blocks with PMULL-assisted multiply
             let mut k = 0usize;
-            while k + 16 <= 256 {
+            while k + 16 <= shard_size {
                 let mut prod = [0u8; 16];
                 super::arm::gf_mul_neon_pmull(
-                    &data[data_base + k..data_base + k + 16],
+                    &output[data_base + k..data_base + k + 16],
                     coeff,
                     &mut prod,
                 );
@@ -905,9 +907,9 @@ pub(super) unsafe fn reed_solomon_encode_neon(data: &[u8], parity_shards: usize)
             }
 
             // Tail (should be zero for shard size 256, but keep safe)
-            while k < 256 {
+            while k < shard_size {
                 let idx = data_base + k;
-                output[parity_base + k] ^= super::scalar::gf_mul_byte(data[idx], coeff);
+                output[parity_base + k] ^= super::scalar::gf_mul_byte(output[idx], coeff);
                 k += 1;
             }
         }

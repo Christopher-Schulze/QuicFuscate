@@ -60,6 +60,7 @@ unsafe fn compress_batch_avx2(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
     #[cfg(windows)]
     {
         let _ = (state, blocks);
+        unreachable!("AVX2 SHA-256 compression is unavailable on Windows");
     }
 }
 
@@ -70,6 +71,7 @@ unsafe fn compress_batch_vnni(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
     #[cfg(windows)]
     {
         let _ = (state, blocks);
+        unreachable!("AVX-512 VNNI SHA-256 compression is unavailable on Windows");
     }
 }
 
