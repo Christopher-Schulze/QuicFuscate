@@ -1,3 +1,33 @@
+const SERVER_HOUSEKEEPING_ACTIVE: Duration = Duration::from_millis(5);
+const SERVER_HOUSEKEEPING_IDLE: Duration = Duration::from_millis(250);
+
+fn standalone_housekeeping_delay(live: &ServerLiveRuntime) -> Duration {
+    let fanout_pending = live
+        .live_state
+        .fanout_queue
+        .lock()
+        .map(|queue| !queue.is_empty())
+        .unwrap_or(true);
+    if fanout_pending || live.live_state.pending_tun_downlinks.len() > 0 {
+        return SERVER_HOUSEKEEPING_ACTIVE;
+    }
+
+    let now = Instant::now();
+    let mut delay = SERVER_HOUSEKEEPING_IDLE;
+    for connection in live.live_state.clients.values() {
+        if !connection.conn.is_established()
+            || connection.conn.has_pending_application_ack()
+            || connection.conn.dgram_send_queue_len() > 0
+        {
+            return SERVER_HOUSEKEEPING_ACTIVE;
+        }
+        if let Some(deadline) = connection.next_send_deadline() {
+            delay = delay.min(deadline.saturating_duration_since(now));
+        }
+    }
+    delay.max(SERVER_HOUSEKEEPING_ACTIVE)
+}
+
 impl ServerRuntime {
     /// Create a new server runtime.
     pub fn new(
@@ -79,7 +109,8 @@ impl ServerRuntime {
         let accept_max_clients = server_config.max_clients;
         let server_tun_ip = Some(server_config.server_ip);
         let server_tun_ipv6 = server_config.ipv6_server_ip;
-        let (server_tun, tun_rx, routing) = match tun_config {
+        let tun_notify = Arc::new(tokio::sync::Notify::new());
+        let (server_tun, tun_rx, routing, tun_reader_shutdown, tun_reader_handle) = match tun_config {
             Some(tun_config) => {
                 let optm = crate::optimize::OptimizationManager::from_cfg(opt_params);
                 match open_server_tun(tun_config, optm.memory_pool()) {
@@ -130,16 +161,20 @@ impl ServerRuntime {
                             crate::interface::TUN_PACKET_QUEUE_CAPACITY,
                         );
                         let tun_for_reader = tun_arc.clone();
-                        let _handle = std::thread::Builder::new()
+                        let reader_shutdown = Arc::new(AtomicBool::new(false));
+                        let shutdown_for_loop = Arc::clone(&reader_shutdown);
+                        let shutdown_for_callback = Arc::clone(&reader_shutdown);
+                        let tun_notify_for_reader = Arc::clone(&tun_notify);
+                        let reader_spawn = std::thread::Builder::new()
                             .name("tun-reader".to_string())
-                            .spawn(move || loop {
-                                match tun_for_reader.read_block() {
-                                    Ok((block, len)) if len > 0 => {
-                                        let mut v = vec![0u8; len];
-                                        v.copy_from_slice(&block[..len]);
+                            .spawn(move || {
+                                let read_result = tun_for_reader.reader_loop_with_shutdown(
+                                    &shutdown_for_loop,
+                                    move |packet| {
+                                        let v = packet.to_vec();
                                         log::debug!(
                                             "TUN reader: read {}B proto={:#x} dst={}",
-                                            len,
+                                            v.len(),
                                             v[0] >> 4,
                                             if v[0] >> 4 == 4 && v.len() >= 20 {
                                                 format!("{}.{}.{}.{}", v[16], v[17], v[18], v[19])
@@ -148,27 +183,40 @@ impl ServerRuntime {
                                             }
                                         );
                                         if tx.send(v).is_err() {
-                                            log::warn!(
-                                                "TUN reader: channel closed, exiting thread"
-                                            );
-                                            break;
+                                            shutdown_for_callback.store(true, Ordering::Release);
+                                            return;
                                         }
-                                    }
-                                    Ok(_) => {}
-                                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                        std::thread::sleep(Duration::from_millis(1));
-                                    }
-                                    Err(e) => {
-                                        log::warn!(
-                                            "TUN reader: fatal error {:?}, exiting thread",
-                                            e
-                                        );
-                                        break;
-                                    }
+                                        tun_notify_for_reader.notify_one();
+                                    },
+                                );
+                                if let Err(error) = read_result {
+                                    log::warn!("TUN reader stopped with error: {error}");
                                 }
                             });
+                        let reader_handle = match reader_spawn {
+                            Ok(handle) => handle,
+                            Err(error) => {
+                                let routing_error =
+                                    routing.and_then(|routing| teardown_routing(routing).err());
+                                let detail = routing_error.map_or_else(
+                                    || format!("standalone TUN reader spawn failed: {error}"),
+                                    |routing_error| {
+                                        format!(
+                                            "standalone TUN reader spawn failed: {error}; routing rollback failed: {routing_error}"
+                                        )
+                                    },
+                                );
+                                return Err(std::io::Error::other(detail));
+                            }
+                        };
                         log::info!("Server TUN reader thread spawned for bidirectional forwarding");
-                        (Some(tun_arc), Some(rx), routing)
+                        (
+                            Some(tun_arc),
+                            Some(rx),
+                            routing,
+                            Some(reader_shutdown),
+                            Some(reader_handle),
+                        )
                     }
                     Err(error) => {
                         return Err(std::io::Error::other(format!(
@@ -177,7 +225,7 @@ impl ServerRuntime {
                     }
                 }
             }
-            None => (None, None, None),
+            None => (None, None, None, None, None),
         };
 
         let metrics = Arc::new(Metrics::new());
@@ -197,6 +245,9 @@ impl ServerRuntime {
             server_tun_ip,
             server_tun_ipv6,
             tun_rx,
+            tun_reader_shutdown,
+            tun_reader_handle,
+            tun_notify,
             blocked_ips,
             qkey_registry,
             admin_web_bootstrap,
@@ -323,16 +374,55 @@ impl ServerRuntime {
         Ok(())
     }
 
+    fn stop_tun_reader(&mut self) -> Result<(), String> {
+        let Some(live) = self.live.as_mut() else {
+            return Ok(());
+        };
+
+        // Release the receiver first so a reader blocked on the bounded send
+        // exits immediately. Wake a native blocking read before publishing the
+        // cooperative flag; the device remains owned until the join completes.
+        live.tun_rx.take();
+        let wake_error = live.server_tun.as_ref().and_then(|tun| {
+            tun.request_reader_shutdown()
+                .err()
+                .map(|error| format!("server TUN reader wake failed: {error}"))
+        });
+        if let Some(shutdown) = live.tun_reader_shutdown.take() {
+            shutdown.store(true, Ordering::Release);
+        }
+        let join_error = live.tun_reader_handle.take().and_then(|handle| {
+            handle
+                .join()
+                .err()
+                .map(|_| "server TUN reader thread panicked".to_string())
+        });
+        live.server_tun.take();
+        match (wake_error, join_error) {
+            (None, None) => Ok(()),
+            (Some(error), None) | (None, Some(error)) => Err(error),
+            (Some(wake), Some(join)) => Err(format!("{wake}; {join}")),
+        }
+    }
+
     /// Stop the server.
     pub fn stop(&mut self) -> Result<(), EngineError> {
         self.stealth_runtime.request_shutdown();
+        let tun_reader_error = self.stop_tun_reader().err();
         if self.state == ServerState::Stopped {
-            if let Some(routing) = self.live.as_mut().and_then(|live| live.routing.take()) {
-                teardown_routing(routing).map_err(|error| {
-                    EngineError::Io(format!("server routing teardown failed: {error}"))
-                })?;
+            let mut cleanup_errors = Vec::new();
+            if let Some(error) = tun_reader_error {
+                cleanup_errors.push(error);
             }
-            return Ok(());
+            if let Some(routing) = self.live.as_mut().and_then(|live| live.routing.take()) {
+                if let Err(error) = teardown_routing(routing) {
+                    cleanup_errors.push(format!("server routing teardown failed: {error}"));
+                }
+            }
+            if cleanup_errors.is_empty() {
+                return Ok(());
+            }
+            return Err(EngineError::Io(cleanup_errors.join("; ")));
         }
 
         self.state = ServerState::Stopping;
@@ -344,6 +434,9 @@ impl ServerRuntime {
         }
 
         let mut cleanup_errors = Vec::new();
+        if let Some(error) = tun_reader_error {
+            cleanup_errors.push(error);
+        }
         if let Some(resources) = self.host_resources.take() {
             if let Err(error) = resources.teardown() {
                 cleanup_errors.push(error.to_string());
@@ -715,10 +808,11 @@ impl ServerRuntime {
         };
         // Take the TUN reader channel (if any) for forwarding TUN→client datagrams.
         let mut tun_rx = self.live_mut().tun_rx.take();
+        let tun_notify = self.live().tun_notify.clone();
         let mut buf = [0; LIVE_UDP_DATAGRAM_BUFFER_SIZE];
         let mut out = [0; LIVE_UDP_DATAGRAM_BUFFER_SIZE];
         let mut housekeeping = tokio::time::interval(Duration::from_millis(5));
-        housekeeping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        housekeeping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         // Create shared 0-RTT anti-replay strike register if early data is enabled.
         if runtime_config.transport.is_early_data_enabled()
@@ -756,6 +850,7 @@ impl ServerRuntime {
         let mut server_signals = match ServerSignals::install() {
             Ok(signals) => signals,
             Err(error) => {
+                drop(tun_rx);
                 let live = self.live_mut();
                 live.admin_actions_rx = Some(admin_actions_rx);
                 live.service_signals.shutdown_all();
@@ -774,6 +869,7 @@ impl ServerRuntime {
             profiles,
             profile_interval_secs,
         ) {
+            drop(tun_rx);
             self.live_mut().admin_actions_rx = Some(admin_actions_rx);
             self.live_mut().service_signals.shutdown_all();
             let shutdown_error = self.shutdown_stealth_runtime().await.err();
@@ -1001,27 +1097,16 @@ impl ServerRuntime {
                     // in the IP packet header. Each client has a unique TUN IP from the
                     // server's IP pool, and we look up the session by client_ip to find
                     // the corresponding SocketAddr.
-                    if let Some(ref rx) = tun_rx {
-                        for _ in 0..32 {
-                            match rx.try_recv() {
-                                Ok(pkt) => {
-                                    let live = self.live_mut();
-                                    process_server_tun_packet(
-                                        live,
-                                        &pkt,
-                                        &mut out,
-                                        &socket,
-                                        &metrics,
-                                        fingerprint_profile,
-                                    );
-                                }
-                                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                                    tun_rx = None;
-                                    break;
-                                }
-                            }
-                        }
+                    let more_tun = drain_server_tun_packets(
+                        self.live_mut(),
+                        &mut tun_rx,
+                        &mut out,
+                        &socket,
+                        &metrics,
+                        fingerprint_profile,
+                    );
+                    if more_tun {
+                        tun_notify.notify_one();
                     }
                     // Retry/final-flush any downlinks that were deferred during the
                     // TUN drain above.
@@ -1058,11 +1143,26 @@ impl ServerRuntime {
                         .await;
                         break;
                     }
-                    tokio::task::yield_now().await;
+                    housekeeping.reset_after(standalone_housekeeping_delay(self.live()));
+                }
+                _ = tun_notify.notified(), if tun_enable && tun_rx.is_some() => {
+                    let more_tun = drain_server_tun_packets(
+                        self.live_mut(),
+                        &mut tun_rx,
+                        &mut out,
+                        &socket,
+                        &metrics,
+                        fingerprint_profile,
+                    );
+                    if more_tun {
+                        tun_notify.notify_one();
+                    }
+                    drain_pending_tun_downlinks(self.live_mut(), &mut out, &socket, &metrics);
                 }
             }
         }
 
+        drop(tun_rx);
         self.live_mut().admin_actions_rx = Some(admin_actions_rx);
         let stealth_error = self.shutdown_stealth_runtime().await.err();
         let stop_error = self.stop().err();
@@ -1426,7 +1526,13 @@ impl ServerRuntime {
 
 impl Drop for ServerRuntime {
     fn drop(&mut self) {
-        if self.state != ServerState::Stopped {
+        let live_needs_cleanup = self.live.as_ref().is_some_and(|live| {
+            live.server_tun.is_some()
+                || live.tun_reader_handle.is_some()
+                || live.tun_reader_shutdown.is_some()
+                || live.routing.is_some()
+        });
+        if self.state != ServerState::Stopped || live_needs_cleanup {
             if let Err(e) = self.stop() {
                 log::warn!("ServerRuntime drop cleanup failed: {}", e);
             }

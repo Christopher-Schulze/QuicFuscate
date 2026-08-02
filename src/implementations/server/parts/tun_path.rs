@@ -30,6 +30,12 @@ struct ServerLiveRuntime {
     /// Channel receiving packets read from the server TUN interface (spawned reader thread).
     /// Forwarded to the appropriate client via QUIC datagrams in the run_loop.
     tun_rx: Option<std::sync::mpsc::Receiver<Vec<u8>>>,
+    /// Cooperative cancellation for the standalone TUN reader.
+    tun_reader_shutdown: Option<Arc<AtomicBool>>,
+    /// Owned reader handle. `stop()` joins it before releasing the TUN device.
+    tun_reader_handle: Option<std::thread::JoinHandle<()>>,
+    /// Wakes the run loop as soon as the reader queues a TUN frame.
+    tun_notify: Arc<tokio::sync::Notify>,
     blocked_ips: Arc<parking_lot::RwLock<std::collections::HashSet<String>>>,
     qkey_registry: Arc<std::sync::Mutex<QKeyRegistry>>,
     admin_web_bootstrap: StandaloneAdminWebBootstrap,
@@ -606,6 +612,56 @@ impl StandaloneServiceSignals {
         if let Some(sig) = self.metrics.take() {
             sig.store(true, Ordering::SeqCst);
         }
+    }
+}
+
+/// Drain bounded batches from the standalone TUN reader and report whether a
+/// follow-up wake-up is required for more queued packets.
+fn drain_server_tun_packets(
+    live: &mut ServerLiveRuntime,
+    tun_rx: &mut Option<std::sync::mpsc::Receiver<Vec<u8>>>,
+    out: &mut [u8],
+    socket: &UdpSocket,
+    metrics: &Metrics,
+    fingerprint_profile: OsFingerprintProfile,
+) -> bool {
+    for _ in 0..32 {
+        let result = tun_rx.as_ref().map(std::sync::mpsc::Receiver::try_recv);
+        match result {
+            Some(Ok(packet)) => process_server_tun_packet(
+                live,
+                &packet,
+                out,
+                socket,
+                metrics,
+                fingerprint_profile,
+            ),
+            Some(Err(std::sync::mpsc::TryRecvError::Empty)) => return false,
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                *tun_rx = None;
+                return false;
+            }
+            None => return false,
+        }
+    }
+
+    match tun_rx.as_ref().map(std::sync::mpsc::Receiver::try_recv) {
+        Some(Ok(packet)) => {
+            process_server_tun_packet(
+                live,
+                &packet,
+                out,
+                socket,
+                metrics,
+                fingerprint_profile,
+            );
+            true
+        }
+        Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+            *tun_rx = None;
+            false
+        }
+        Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => false,
     }
 }
 

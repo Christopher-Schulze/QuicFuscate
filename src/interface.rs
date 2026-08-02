@@ -24,7 +24,7 @@ use crate::telemetry::TELEMETRY_ENABLED;
 use aligned_box::AlignedBox;
 use std::io::{self};
 use std::net::{IpAddr, Ipv6Addr};
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, OnceLock};
 
 /// Maximum number of owned packets buffered between a blocking TUN reader and
@@ -344,6 +344,13 @@ pub trait TunDevice: Send + Sync {
     fn read(&self, buf: &mut [u8]) -> io::Result<usize>;
     /// Writes one IP packet from `buf`, returning the number of bytes written.
     fn write(&self, buf: &[u8]) -> io::Result<usize>;
+    /// Wake a potentially blocking reader so its owner can observe shutdown.
+    /// Backends whose read operation is already nonblocking may keep the
+    /// default no-op implementation. Blocking platform backends must signal
+    /// their native wait primitive here.
+    fn request_read_shutdown(&self) -> io::Result<()> {
+        Ok(())
+    }
     /// Returns the raw file descriptor for io_uring or epoll integration (Unix only).
     #[cfg(unix)]
     fn raw_fd(&self) -> Option<std::os::fd::RawFd> {
@@ -659,14 +666,74 @@ impl TunInterface {
         Ok(n)
     }
 
-    /// Convenience loop: repeatedly reads from TUN and invokes callback with a
-    /// borrowed slice into a pooled block. The callback may copy or process in
-    /// place; the block is returned to the pool once the callback returns.
-    pub fn reader_loop<F>(&self, mut on_packet: F) -> io::Result<()>
+    /// Wake the backend reader before its owning thread is joined.
+    pub fn request_reader_shutdown(&self) -> io::Result<()> {
+        self.dev.request_read_shutdown()
+    }
+
+    /// Waits until the device is readable or shutdown is requested.
+    #[cfg(unix)]
+    fn wait_for_readable(&self, shutdown: &AtomicBool) -> io::Result<bool> {
+        let Some(fd) = self.dev.raw_fd() else {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "TUN backend returned WouldBlock without a raw file descriptor",
+            ));
+        };
+        let mut pollfd =
+            libc::pollfd { fd, events: libc::POLLIN | libc::POLLERR | libc::POLLHUP, revents: 0 };
+        loop {
+            if shutdown.load(Ordering::Acquire) {
+                return Ok(false);
+            }
+            // SAFETY: `pollfd` points to one initialized descriptor owned by the
+            // TUN backend and remains valid for the duration of this call.
+            let result = unsafe { libc::poll(&mut pollfd, 1, 100) };
+            if result > 0 {
+                if pollfd.revents & libc::POLLNVAL != 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "TUN descriptor became invalid while waiting for input",
+                    ));
+                }
+                return Ok(true);
+            }
+            if result == 0 {
+                continue;
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn wait_for_readable(&self, _shutdown: &AtomicBool) -> io::Result<bool> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "TUN backend returned WouldBlock without event-driven wait support",
+        ))
+    }
+
+    /// Convenience loop with cooperative shutdown: repeatedly reads from TUN
+    /// and invokes callback with a borrowed slice into a pooled block. The
+    /// callback may copy or process in place; the block is returned to the pool
+    /// once the callback returns.
+    pub fn reader_loop_with_shutdown<F>(
+        &self,
+        shutdown: &AtomicBool,
+        mut on_packet: F,
+    ) -> io::Result<()>
     where
         F: FnMut(&[u8]),
     {
         loop {
+            if shutdown.load(Ordering::Acquire) {
+                self.request_reader_shutdown()?;
+                return Ok(());
+            }
             match self.read_block() {
                 Ok((block, len)) if len > 0 => {
                     on_packet(&block[..len]);
@@ -675,12 +742,33 @@ impl TunInterface {
                 Ok((block, _)) => {
                     self.pool.free(block);
                 }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    if !self.wait_for_readable(shutdown)? {
+                        return Ok(());
+                    }
                 }
-                Err(e) => return Err(e),
+                Err(_) if shutdown.load(Ordering::Acquire) => {
+                    self.request_reader_shutdown()?;
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
             }
         }
+    }
+
+    /// Convenience loop: repeatedly reads from TUN and invokes callback with a
+    /// borrowed slice into a pooled block. The callback may copy or process in
+    /// place; the block is returned to the pool once the callback returns.
+    ///
+    /// This compatibility wrapper runs until the device returns an error. New
+    /// callers should use [`Self::reader_loop_with_shutdown`] so the reader can
+    /// be joined deterministically.
+    pub fn reader_loop<F>(&self, mut on_packet: F) -> io::Result<()>
+    where
+        F: FnMut(&[u8]),
+    {
+        let shutdown = AtomicBool::new(false);
+        self.reader_loop_with_shutdown(&shutdown, |packet| on_packet(packet))
     }
 }
 
@@ -1388,6 +1476,21 @@ mod macos_tun {
                 return Err(io::Error::last_os_error());
             }
 
+            // Keep the descriptor interruptible by the cooperative reader
+            // loop. `poll(2)` supplies the blocking wait and the shutdown
+            // flag is checked between bounded waits.
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            if flags < 0 {
+                let error = io::Error::last_os_error();
+                unsafe { libc::close(fd) };
+                return Err(error);
+            }
+            if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+                let error = io::Error::last_os_error();
+                unsafe { libc::close(fd) };
+                return Err(error);
+            }
+
             // Query interface name
             let mut ifname = [0u8; 64];
             let mut len = ifname.len() as libc::socklen_t;
@@ -1620,7 +1723,7 @@ use windows_tun::open_platform_tun;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     struct DummyTun {
@@ -1731,6 +1834,102 @@ mod tests {
         let (block, len) = tun.read_block().expect("read_block must succeed");
         assert_eq!(len, packet.len());
         assert_eq!(&block[..len], packet.as_slice());
+    }
+
+    #[test]
+    fn reader_loop_with_shutdown_exits_after_callback_requests_stop() {
+        let pool = crate::optimize::global_pool();
+        let shutdown = AtomicBool::new(false);
+        let tun = TunInterface::from_device_for_test(
+            Box::new(DummyTun::with_reads(vec![vec![0x45, 0, 0, 20]])),
+            pool,
+            false,
+        );
+        let mut packets = 0;
+
+        tun.reader_loop_with_shutdown(&shutdown, |packet| {
+            assert_eq!(packet, [0x45, 0, 0, 20]);
+            packets += 1;
+            shutdown.store(true, Ordering::Release);
+        })
+        .expect("reader must exit cleanly after shutdown");
+
+        assert_eq!(packets, 1);
+        assert!(shutdown.load(Ordering::Acquire));
+    }
+
+    #[cfg(unix)]
+    struct PollWaitTun {
+        read_fd: std::os::fd::RawFd,
+        write_fd: std::os::fd::RawFd,
+        ready: Arc<AtomicBool>,
+    }
+
+    #[cfg(unix)]
+    impl TunDevice for PollWaitTun {
+        fn name(&self) -> &str {
+            "poll-wait"
+        }
+
+        fn mtu(&self) -> u16 {
+            1500
+        }
+
+        fn read(&self, _buf: &mut [u8]) -> io::Result<usize> {
+            self.ready.store(true, Ordering::Release);
+            Err(io::Error::from(io::ErrorKind::WouldBlock))
+        }
+
+        fn write(&self, _buf: &[u8]) -> io::Result<usize> {
+            Ok(0)
+        }
+
+        fn raw_fd(&self) -> Option<std::os::fd::RawFd> {
+            Some(self.read_fd)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for PollWaitTun {
+        fn drop(&mut self) {
+            // SAFETY: both descriptors were returned by one successful pipe
+            // call and are owned exclusively by this test device.
+            unsafe {
+                libc::close(self.read_fd);
+                libc::close(self.write_fd);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reader_loop_with_shutdown_interrupts_poll_wait() {
+        let mut fds = [-1; 2];
+        // SAFETY: `fds` points to storage for the two descriptors requested by
+        // libc::pipe and remains valid for the duration of the call.
+        let result = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        assert_eq!(result, 0, "pipe must be created for poll shutdown test");
+
+        let ready = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let reader_shutdown = Arc::clone(&shutdown);
+        let tun = TunInterface::from_device_for_test(
+            Box::new(PollWaitTun { read_fd: fds[0], write_fd: fds[1], ready: Arc::clone(&ready) }),
+            crate::optimize::global_pool(),
+            false,
+        );
+        let reader =
+            std::thread::spawn(move || tun.reader_loop_with_shutdown(&reader_shutdown, |_| {}));
+
+        for _ in 0..1_000 {
+            if ready.load(Ordering::Acquire) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(ready.load(Ordering::Acquire), "reader must reach the poll wait");
+        shutdown.store(true, Ordering::Release);
+        assert!(reader.join().expect("reader thread must join").is_ok());
     }
 
     #[test]

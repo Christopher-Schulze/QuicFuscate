@@ -717,6 +717,16 @@ mod imp {
             unsafe { (self.lib.send_packet)(self.session, dst) };
             Ok(buf.len())
         }
+
+        fn request_read_shutdown(&self) -> io::Result<()> {
+            if self.closed.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            if unsafe { SetEvent(self.shutdown_event) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        }
     }
 
     impl Drop for WintunDevice {

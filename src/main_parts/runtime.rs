@@ -764,7 +764,7 @@ fn drain_client_tun_uplink(
     rx: &std::sync::mpsc::Receiver<Vec<u8>>,
     backlog: &mut Option<Vec<u8>>,
     diagnostics_enabled: bool,
-) {
+) -> bool {
     if let Some(frame) = backlog.take() {
         match send_client_tun_packet(conn, tun, sid, &frame) {
             Ok(()) => {
@@ -777,11 +777,11 @@ fn drain_client_tun_uplink(
                     info!("Client MASQUE uplink remains backpressured: bytes={}", frame.len());
                 }
                 *backlog = Some(frame);
-                return;
+                return true;
             }
             Err(e) => {
                 warn!("TUN packet send failed: {:?}", e);
-                return;
+                return false;
             }
         }
     }
@@ -810,6 +810,59 @@ fn drain_client_tun_uplink(
             Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
         }
     }
+
+    if backlog.is_some() {
+        return true;
+    }
+
+    // Preserve the wake-up contract when the bounded drain limit was reached.
+    // Holding one frame in the existing backlog also keeps the adaptive tick
+    // active without probing the channel on every idle tick.
+    match rx.try_recv() {
+        Ok(frame) => {
+            *backlog = Some(frame);
+            true
+        }
+        Err(std::sync::mpsc::TryRecvError::Empty)
+        | Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
+    }
+}
+
+const CLIENT_HOUSEKEEPING_ACTIVE: Duration = Duration::from_millis(5);
+const CLIENT_HOUSEKEEPING_IDLE: Duration = Duration::from_millis(250);
+
+fn client_housekeeping_delay(
+    conn: &QuicFuscateConnection,
+    tun_enable: bool,
+    request_sent: bool,
+    tun_backpressure_pending: bool,
+    heartbeat_deadline: Option<tokio::time::Instant>,
+) -> Duration {
+    let active = !conn.conn.is_established()
+        || !request_sent
+        || (tun_enable && !conn.masque_tunnel_established())
+        || conn.conn.has_pending_application_ack()
+        || conn.conn.dgram_send_queue_len() > 0
+        || tun_backpressure_pending;
+    if active {
+        return CLIENT_HOUSEKEEPING_ACTIVE;
+    }
+
+    let now = std::time::Instant::now();
+    let mut delay = CLIENT_HOUSEKEEPING_IDLE;
+    for deadline in [
+        conn.next_outbound_release_deadline(),
+        conn.conn.recovery_deadline(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        delay = delay.min(deadline.saturating_duration_since(now));
+    }
+    if let Some(deadline) = heartbeat_deadline {
+        delay = delay.min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+    }
+    delay.max(CLIENT_HOUSEKEEPING_ACTIVE)
 }
 
 fn synchronize_client_tun_mtu(
@@ -1130,11 +1183,14 @@ async fn run_client(
     }
 
     // Optional TUN bridging setup
+    let tun_notify = Arc::new(tokio::sync::Notify::new());
     #[allow(clippy::type_complexity)]
-    let (tun_rx, tun_writer, mut h3_stream_id): (
+    let (tun_rx, tun_writer, mut h3_stream_id, tun_reader_shutdown, mut tun_reader_handle): (
         Option<std::sync::mpsc::Receiver<Vec<u8>>>,
         Option<Arc<quicfuscate::interface::TunInterface>>,
         Option<u64>,
+        Option<Arc<AtomicBool>>,
+        Option<std::thread::JoinHandle<()>>,
     ) = if tun_enable {
         let effective_tun_mtu =
             requested_tun_mtu.min(u16::try_from(conn.effective_tunnel_mtu()).unwrap_or(u16::MAX));
@@ -1156,67 +1212,85 @@ async fn run_client(
                 // reader thread must NOT hold a lock that would starve the downlink
                 // writer (that deadlock left the tunnel one-directional).
                 let tun = Arc::new(tun);
-                // Install the MASQUE→TUN sink so downlink CONNECT-UDP datagrams
-                // (decoded raw IP packets) are written to the client TUN by
-                // drain_masque_datagrams inside poll_http3_event_loop.
-                let tun_for_cb = tun.clone();
-                conn.set_masque_datagram_cb(std::sync::Arc::new(std::sync::Mutex::new(Box::new(
-                    move |payload: &[u8]| {
-                        // Only write to TUN if the data looks like a valid IP packet
-                        // (version 4 or 6 in the high nibble of the first byte).
-                        // This filters out CONNECT-UDP capsule protocol data, which
-                        // is not a raw IP packet and would cause EIO on TUN write.
-                        if !payload.is_empty() && (payload[0] >> 4 == 4 || payload[0] >> 4 == 6) {
-                            if let Err(e) = tun_for_cb.write(payload) {
-                                warn!("Client TUN write (MASQUE downlink) failed: {:?}", e);
-                            }
-                        }
-                    },
-                ))));
-                // Spawn a blocking reader thread that forwards TUN frames into a channel
+                // The reader owns the shutdown flag and is joined after the
+                // transport loop exits. The bounded channel still applies
+                // backpressure to the TUN source.
                 let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(
                     quicfuscate::interface::TUN_PACKET_QUEUE_CAPACITY,
                 );
                 let tun_for_reader = tun.clone();
                 let tun_reader_diagnostics = client_receive_diagnostics_enabled;
-                std::thread::spawn(move || {
-                    loop {
-                        let read_result = tun_for_reader.read_block();
-                        match read_result {
-                            Ok((block, len)) if len > 0 => {
+                let reader_shutdown = Arc::new(AtomicBool::new(false));
+                let shutdown_for_loop = Arc::clone(&reader_shutdown);
+                let shutdown_for_callback = Arc::clone(&reader_shutdown);
+                let tun_notify_for_reader = Arc::clone(&tun_notify);
+                match std::thread::Builder::new()
+                    .name("client-tun-reader".to_string())
+                    .spawn(move || {
+                        let read_result = tun_for_reader.reader_loop_with_shutdown(
+                            &shutdown_for_loop,
+                            move |packet| {
                                 if tun_reader_diagnostics {
-                                    info!("Client Wintun packet read: bytes={len}");
+                                    info!("Client Wintun packet read: bytes={}", packet.len());
                                 }
-                                let mut v = vec![0u8; len];
-                                v.copy_from_slice(&block[..len]);
-                                if tx.send(v).is_err() {
-                                    break;
+                                if tx.send(packet.to_vec()).is_err() {
+                                    shutdown_for_callback.store(true, Ordering::Release);
+                                    return;
                                 }
-                                // block freed when dropped
-                            }
-                            Ok(_) => {}
-                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                std::thread::sleep(Duration::from_millis(1));
-                            }
-                            Err(_) => break,
+                                tun_notify_for_reader.notify_one();
+                            },
+                        );
+                        if let Err(error) = read_result {
+                            warn!("Client TUN reader stopped with error: {error}");
                         }
+                    }) {
+                    Ok(reader_handle) => {
+                        // Install the MASQUE→TUN sink so downlink CONNECT-UDP
+                        // datagrams are written to the client TUN by the H3 poll.
+                        let tun_for_cb = tun.clone();
+                        conn.set_masque_datagram_cb(std::sync::Arc::new(
+                            std::sync::Mutex::new(Box::new(move |payload: &[u8]| {
+                                // Only write raw IPv4/IPv6 packets. CONNECT-UDP
+                                // capsules are not TUN payloads.
+                                if !payload.is_empty()
+                                    && (payload[0] >> 4 == 4 || payload[0] >> 4 == 6)
+                                {
+                                    if let Err(error) = tun_for_cb.write(payload) {
+                                        warn!(
+                                            "Client TUN write (MASQUE downlink) failed: {:?}",
+                                            error
+                                        );
+                                    }
+                                }
+                            })),
+                        ));
+                        (
+                            Some(rx),
+                            Some(tun),
+                            None,
+                            Some(reader_shutdown),
+                            Some(reader_handle),
+                        )
                     }
-                });
-                (Some(rx), Some(tun), None)
+                    Err(error) => {
+                        warn!("Client TUN reader spawn failed; disabling TUN bridge: {error}");
+                        (None, None, None, None, None)
+                    }
+                }
             }
             Err(e) => {
                 warn!("TUN open failed: {:?}", e);
-                (None, None, None)
+                (None, None, None, None, None)
             }
         }
     } else {
-        (None, None, None)
+        (None, None, None, None, None)
     };
     // TUN frame held when the QUIC DATAGRAM queue is full so a backpressured
     // packet is not dropped before carrier acceptance.
     let mut tun_backpressure_frame: Option<Vec<u8>> = None;
     let mut housekeeping = interval(Duration::from_millis(5));
-    housekeeping.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    housekeeping.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut next_stats_log = tokio::time::Instant::now();
     let heartbeat_probe_interval = heartbeat_probe_interval(heartbeat_timeout_ms);
     let mut next_heartbeat_probe =
@@ -1311,7 +1385,7 @@ async fn run_client(
                         // housekeeping tick may never fire, starving the TUN uplink.
                         if tun_enable && conn.masque_tunnel_established() {
                             if let (Some(ref rx), Some(sid), Some(ref tun)) = (&tun_rx, h3_stream_id, &tun_writer) {
-                                drain_client_tun_uplink(
+                                let more_tun = drain_client_tun_uplink(
                                     &mut conn,
                                     tun,
                                     sid,
@@ -1319,6 +1393,9 @@ async fn run_client(
                                     &mut tun_backpressure_frame,
                                     client_receive_diagnostics_enabled,
                                 );
+                                if more_tun {
+                                    tun_notify.notify_one();
+                                }
                             }
                             // Flush any outgoing packets generated by the body chunk sends.
                             let flush_started = std::time::Instant::now();
@@ -1352,6 +1429,60 @@ async fn run_client(
                         break ExitReason::SocketError(e.to_string());
                     }
                 }
+                housekeeping.reset_after(client_housekeeping_delay(
+                    &conn,
+                    tun_writer.is_some(),
+                    request_sent,
+                    tun_backpressure_frame.is_some(),
+                    next_heartbeat_probe,
+                ));
+            }
+            _ = tun_notify.notified(), if tun_writer.is_some() => {
+                let branch_started = std::time::Instant::now();
+                let scheduling_gap = branch_started.duration_since(last_runtime_progress);
+                if client_receive_diagnostics_enabled
+                    && scheduling_gap >= Duration::from_millis(250)
+                {
+                    info!(
+                        "Client runtime resumed: branch=tun-notify scheduling_gap_ms={}",
+                        scheduling_gap.as_millis()
+                    );
+                }
+                last_runtime_progress = branch_started;
+                if conn.masque_tunnel_established() {
+                    if let (Some(ref rx), Some(sid), Some(ref tun)) =
+                        (&tun_rx, h3_stream_id, &tun_writer)
+                    {
+                        let more_tun = drain_client_tun_uplink(
+                            &mut conn,
+                            tun,
+                            sid,
+                            rx,
+                            &mut tun_backpressure_frame,
+                            client_receive_diagnostics_enabled,
+                        );
+                        if more_tun {
+                            tun_notify.notify_one();
+                        }
+                        if let Err(error) = flush_connected_outgoing(
+                            &socket,
+                            &mut conn,
+                            &mut out,
+                            io_diagnostics.as_mut(),
+                        )
+                        .await
+                        {
+                            warn!("Failed to flush TUN notification uplink: {error}");
+                        }
+                    }
+                }
+                housekeeping.reset_after(client_housekeeping_delay(
+                    &conn,
+                    tun_writer.is_some(),
+                    request_sent,
+                    tun_backpressure_frame.is_some(),
+                    next_heartbeat_probe,
+                ));
             }
             _ = housekeeping.tick() => {
                 let branch_started = std::time::Instant::now();
@@ -1417,11 +1548,12 @@ async fn run_client(
                     // TUN uplink: forward frames from the TUN reader channel to
                     // the MASQUE data plane. Also done in the recv branch above,
                     // but tokio::select! is not fair and the recv branch may not
-                    // fire when the server is silent. This ensures TUN frames are
-                    // forwarded on every housekeeping tick (every 5ms).
+                    // fire when the server is silent. TUN reader notifications
+                    // wake the event loop immediately; the adaptive tick remains
+                    // as a bounded retry path for transport progress.
                     if conn.masque_tunnel_established() {
                         if let (Some(ref rx), Some(sid), Some(ref tun)) = (&tun_rx, h3_stream_id, &tun_writer) {
-                            drain_client_tun_uplink(
+                            let more_tun = drain_client_tun_uplink(
                                 &mut conn,
                                 tun,
                                 sid,
@@ -1429,6 +1561,9 @@ async fn run_client(
                                 &mut tun_backpressure_frame,
                                 client_receive_diagnostics_enabled,
                             );
+                            if more_tun {
+                                tun_notify.notify_one();
+                            }
                         }
                     }
                     let poll_elapsed = poll_started.elapsed();
@@ -1586,11 +1721,36 @@ async fn run_client(
                 if conn.conn.is_closed() {
                     break ExitReason::RemoteClosed;
                 }
-                tokio::task::yield_now().await;
+                housekeeping.reset_after(client_housekeeping_delay(
+                    &conn,
+                    tun_writer.is_some(),
+                    request_sent,
+                    tun_backpressure_frame.is_some(),
+                    next_heartbeat_probe,
+                ));
             }
         }
     };
 
+    // Drop the receiver before signalling the reader. This unblocks a reader
+    // that is waiting for capacity in the bounded channel. Wake any native
+    // backend wait, then publish the shutdown flag before joining the owned
+    // reader handle.
+    drop(tun_rx);
+    let tun_reader_shutdown_error = tun_writer.as_ref().and_then(|tun| {
+        tun.request_reader_shutdown()
+            .err()
+            .map(|error| format!("client TUN reader wake failed: {error}"))
+    });
+    if let Some(shutdown) = tun_reader_shutdown.as_ref() {
+        shutdown.store(true, Ordering::Release);
+    }
+    let tun_reader_error = tun_reader_handle.take().and_then(|handle| {
+        handle
+            .join()
+            .err()
+            .map(|_| "client TUN reader thread panicked".to_string())
+    });
     let stealth_shutdown_error = stealth_runtime
         .shutdown(quicfuscate::stealth::STEALTH_RUNTIME_SHUTDOWN_TIMEOUT)
         .await
@@ -1608,15 +1768,21 @@ async fn run_client(
     } else {
         None
     };
-    if let Some(error) = match (stealth_shutdown_error, kill_switch_error) {
-        (Some(stealth), Some(kill_switch)) => {
-            Some(format!("stealth runtime shutdown failed: {stealth}; {kill_switch}"))
-        }
-        (Some(stealth), None) => Some(format!("stealth runtime shutdown failed: {stealth}")),
-        (None, Some(kill_switch)) => Some(kill_switch),
-        (None, None) => None,
-    } {
-        return Err(std::io::Error::other(error));
+    let mut cleanup_errors = Vec::new();
+    if let Some(error) = stealth_shutdown_error {
+        cleanup_errors.push(format!("stealth runtime shutdown failed: {error}"));
+    }
+    if let Some(error) = kill_switch_error {
+        cleanup_errors.push(error);
+    }
+    if let Some(error) = tun_reader_error {
+        cleanup_errors.push(error);
+    }
+    if let Some(error) = tun_reader_shutdown_error {
+        cleanup_errors.push(error);
+    }
+    if !cleanup_errors.is_empty() {
+        return Err(std::io::Error::other(cleanup_errors.join("; ")));
     }
 
     match exit_reason {
