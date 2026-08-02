@@ -26,6 +26,7 @@ done
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 BASE_NAME="$(basename "$0" .sh)"
 [[ -z "$OUTPUT_DIR" ]] && OUTPUT_DIR="$SCRIPT_DIR/../../out/tests/${BASE_NAME}-${TIMESTAMP}"
+validate_harness_inputs "$OUTPUT_DIR" "${CARGO_FEATURES:-}" "${RUSTFLAGS_EXTRA:-}" "${JOBS:-}"
 mkdir -p "$OUTPUT_DIR"; LOG_FILE="$OUTPUT_DIR/${BASE_NAME}.log"
 
 echo "===============================================================" | tee -a "$LOG_FILE"
@@ -53,15 +54,14 @@ RESULTS_JSON="$OUTPUT_DIR/results.json"; json_begin "$RESULTS_JSON" "stealth_bra
 TOTAL=0; PASS=0; FAIL=0
 
 run_cargo_logged() {
-  local envs="$1"
+  local -a envs=()
+  while [[ "$#" -gt 0 && "$1" != "--" ]]; do
+    envs+=("$1")
+    shift
+  done
+  [[ "${1:-}" == "--" ]] || { error "run_cargo_logged requires -- before cargo arguments"; return 2; }
   shift
-  if [[ -n "$envs" ]]; then
-    # shellcheck disable=SC2206
-    local env_array=($envs)
-    run env "${env_array[@]}" cargo "$@"
-  else
-    run cargo "$@"
-  fi
+  run_cargo_with_env "${envs[@]}" -- "$@"
 }
 
 run_one() {
@@ -76,20 +76,34 @@ run_one() {
 
   echo -e "\n> ack_max=${amax}, jitter_us=${jut}, explore=${exp}, pad_max=${pmax}" | tee -a "$LOG_FILE"
   local start=$(date +%s); ok=1
+  local stealth_status=0; local brain_status=0; local probe_status=0
+  local probe_result="PASS"; local probe_reason=""
 
   # Update padding maximum via runtime env mapped in config parsing where applicable
   # Fallback: use extra RUSTFLAGS to ensure optimized code path
-  export RUSTFLAGS="${RUSTFLAGS_EXTRA:-}"
+  local -a run_envs=("${envs[@]}")
+  if [[ -n "${RUSTFLAGS_EXTRA:-}" ]]; then run_envs+=("RUSTFLAGS=${RUSTFLAGS_EXTRA}"); fi
+  local -a stealth_envs=("${run_envs[@]}" "QUICFUSCATE_STEALTH_MAX_PADDING=${pmax}")
 
   # Stealth module unit-tests (in-module)
-  if ! run_cargo_logged "${envs[*]} QUICFUSCATE_STEALTH_MAX_PADDING=${pmax}" test --release --lib stealth:: -- --nocapture >>"$LOG_FILE" 2>&1; then ok=0; fi
+  if run_cargo_logged "${stealth_envs[@]}" -- test --release --lib stealth:: -- --nocapture >>"$LOG_FILE" 2>&1; then
+    stealth_status=0
+  else
+    stealth_status=$?
+    ok=0
+  fi
 
   # Brain-focused tests
-  if ! run_cargo_logged "${envs[*]}" test --release --lib brain:: -- --nocapture >>"$LOG_FILE" 2>&1; then ok=0; fi
+  if run_cargo_logged "${run_envs[@]}" -- test --release --lib brain:: -- --nocapture >>"$LOG_FILE" 2>&1; then
+    brain_status=0
+  else
+    brain_status=$?
+    ok=0
+  fi
 
   # Run E2E brain probe example (logs rich metrics) if available
   METR="$OUTPUT_DIR/brain_metrics.txt"
-  if run_cargo_logged "" run --release --example brain_probe -- --iters 50 --jitter 5ms >>"$METR" 2>&1; then
+  if run_cargo_logged -- run --release --example brain_probe -- --iters 50 --jitter 5ms >>"$METR" 2>&1; then
     # Extract metrics from trace line pattern
     # Capture ack_thr, pacing, jitter_us, ivl, red_ppm
     awk '/brain: policy/ {
@@ -112,15 +126,22 @@ run_one() {
     local ack_stat_avg=0
     if (( ack_stat_cnt > 0 )); then ack_stat_avg=$((ack_stat_sum/ack_stat_cnt)); fi
   else
+    probe_status=$?
+    probe_result="SKIP"
+    probe_reason="brain_probe_unavailable_or_failed"
     echo "(brain_probe example not available or failed)" >>"$LOG_FILE"
     local ack_stat_min=0 ack_stat_max=0 ack_stat_avg=0
   fi
 
   local end=$(date +%s); local dur=$((end-start))
   TOTAL=$((TOTAL+1)); if (( ok )); then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); fi
+  local result="PASS"; local reason=""
+  if (( ! ok )); then result="FAIL"; reason="required_cargo_test_failed"; fi
 
   if [[ "$FIRST" == "true" ]]; then FIRST=false; else echo "," >> "$RESULTS_JSON"; fi
-  echo -n '  {"ack_max":'$amax',"jitter_us":'$jut',"explore":'$exp',"pad_max":'$pmax',"duration_sec":'$dur',"ok":'$ok',"ack_thr_min":'$ack_stat_min',"ack_thr_max":'$ack_stat_max',"ack_thr_avg":'$ack_stat_avg'}' >> "$RESULTS_JSON"
+  printf '  {"ack_max":%s,"jitter_us":%s,"explore":%s,"pad_max":%s,"duration_sec":%s,"ok":%s,"result":"%s","reason":"%s","command_status":{"stealth":%s,"brain":%s,"brain_probe":%s},"brain_probe_result":"%s","brain_probe_reason":"%s","ack_thr_min":%s,"ack_thr_max":%s,"ack_thr_avg":%s}' \
+    "$amax" "$jut" "$exp" "$pmax" "$dur" "$ok" "$result" "$reason" "$stealth_status" "$brain_status" "$probe_status" \
+    "$probe_result" "$probe_reason" "$ack_stat_min" "$ack_stat_max" "$ack_stat_avg" >> "$RESULTS_JSON"
 }
 
 for a in "${ACK_MAX[@]}"; do

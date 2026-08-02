@@ -196,6 +196,106 @@ run_cargo() {
   run env "${flags[@]}" cargo "${cargo_args[@]}"
 }
 
+run_cargo_with_env() {
+  local -a env_assignments=()
+  while [[ "$#" -gt 0 && "$1" != "--" ]]; do
+    env_assignments+=("$1")
+    shift
+  done
+  if [[ "${1:-}" != "--" ]]; then
+    error "run_cargo_with_env requires -- before cargo arguments"
+    return 2
+  fi
+  shift
+  local assignment
+  for assignment in "${env_assignments[@]}"; do
+    if ! [[ "$assignment" =~ ^[a-zA-Z_][a-zA-Z0-9_]*= ]]; then
+      error "Invalid environment assignment: ${assignment}"
+      return 2
+    fi
+    if ! validate_control_free_value "environment assignment" "$assignment" 8192; then
+      return 2
+    fi
+  done
+  (
+    for assignment in "${env_assignments[@]}"; do
+      # The full assignment is validated and exported without eval so values keep their argv identity.
+      # shellcheck disable=SC2163
+      export "$assignment"
+    done
+    run_cargo "$@"
+  )
+}
+
+validate_control_free_value() {
+  local label="$1"
+  local value="$2"
+  local max_length="${3:-4096}"
+  if [[ "$value" =~ [[:cntrl:]] ]]; then
+    error "${label} contains control characters"
+    return 2
+  fi
+  if (( ${#value} > max_length )); then
+    error "${label} exceeds the ${max_length}-character limit"
+    return 2
+  fi
+}
+
+validate_positive_int() {
+  local label="$1"
+  local value="$2"
+  local max_value="$3"
+  if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+    error "${label} must be a positive decimal integer"
+    return 2
+  fi
+  local numeric_value=$((10#$value))
+  if (( numeric_value < 1 || numeric_value > max_value )); then
+    error "${label} must be between 1 and ${max_value}"
+    return 2
+  fi
+}
+
+validate_nonnegative_int() {
+  local label="$1"
+  local value="$2"
+  local max_value="$3"
+  if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+    error "${label} must be a non-negative decimal integer"
+    return 2
+  fi
+  local numeric_value=$((10#$value))
+  if (( numeric_value > max_value )); then
+    error "${label} must be at most ${max_value}"
+    return 2
+  fi
+}
+
+validate_feature_list() {
+  local label="$1"
+  local value="$2"
+  if [[ -z "$value" ]]; then
+    return 0
+  fi
+  if ! [[ "$value" =~ ^[[:space:]]*[A-Za-z0-9_.-]+([[:space:],]+[A-Za-z0-9_.-]+)*[[:space:]]*$ ]]; then
+    error "${label} contains an invalid feature name or separator"
+    return 2
+  fi
+}
+
+validate_harness_inputs() {
+  local output_dir="$1"
+  local feature_set="${2:-}"
+  local rustflags="${3:-}"
+  local jobs="${4:-}"
+  local valid=0
+  if ! validate_control_free_value "output directory" "$output_dir" 4096; then valid=2; fi
+  if ! validate_feature_list "cargo features" "$feature_set"; then valid=2; fi
+  if ! validate_control_free_value "RUSTFLAGS_EXTRA" "$rustflags" 8192; then valid=2; fi
+  if [[ -n "$jobs" ]] && ! validate_positive_int "jobs" "$jobs" 64; then valid=2; fi
+  return "$valid"
+}
+
 # ---------------- Fail-closed Cargo test discovery helpers ----------------
 
 QF_CARGO_TEST_STATUS=""

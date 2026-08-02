@@ -30,8 +30,8 @@ done
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 BASE_NAME="$(basename "$0" .sh)"
 [[ -z "$OUTPUT_DIR" ]] && OUTPUT_DIR="$SCRIPT_DIR/../../out/tests/${BASE_NAME}-${TIMESTAMP}"
+validate_control_free_value "output directory" "$OUTPUT_DIR" 4096
 mkdir -p "$OUTPUT_DIR"; LOG_FILE="$OUTPUT_DIR/${BASE_NAME}.log"; exec > >(tee -a "$LOG_FILE") 2>&1
-[[ -n "${RUSTFLAGS_EXTRA:-}" ]] && export RUSTFLAGS="${RUSTFLAGS_EXTRA} ${RUSTFLAGS:-}"
 RESULTS_JSON="$OUTPUT_DIR/results.json"; json_begin "$RESULTS_JSON" "tests_security_fuzzing"; JSON_FIRST_RUN=1
 
 echo "==============================================================="
@@ -158,19 +158,19 @@ test_pattern_exists() {
 
 run_optional_test() {
   local label="$1"; local pattern="$2"; shift 2
-  local env_string=""
-  if [[ "$#" -gt 0 ]]; then
-    env_string="$1"
+  local -a env_args=()
+  while [[ "$#" -gt 0 && "$1" != "--" ]]; do
+    env_args+=("$1")
     shift
-  fi
+  done
+  [[ "${1:-}" == "--" ]] || { error "run_optional_test requires -- before cargo arguments"; return 2; }
+  shift
   local -a cargo_args=("$@")
   if [[ "$#" -eq 0 ]]; then
     cargo_args=(--release --features rust-tests --lib "$pattern" -- --nocapture)
   fi
   if test_pattern_exists "$pattern"; then
     DISCOVERY_STATUS_FOR_RUN="$ACTIVE_DISCOVERY_STATUS"
-    local -a env_args=()
-    if [[ -n "$env_string" ]]; then eval "env_args=( $env_string )"; fi
     if [[ "${#env_args[@]}" -gt 0 ]]; then
       run_case "$label" "${env_args[@]}" -- cargo test "${cargo_args[@]}"
     else
@@ -272,7 +272,7 @@ run_case() {
 run_named_test() {
   local label="$1"; shift
   local pattern="$1"; shift
-  run_optional_test "$label" "$pattern"
+  run_optional_test "$label" "$pattern" --
 }
 
 # Fuzzing configuration
@@ -285,6 +285,14 @@ FUZZ_CRASH_ROOT="$FUZZ_ARTIFACT_ROOT/artifacts"
 FUZZ_DIR="$PROJECT_ROOT/scripts/tests/fuzz"
 FUZZ_SEED_ROOT="$FUZZ_DIR/seeds"
 FUZZ_MANIFEST="$FUZZ_DIR/Cargo.toml"
+validate_control_free_value "RUSTFLAGS_EXTRA" "${RUSTFLAGS_EXTRA:-}" 8192
+validate_feature_list "CARGO_FEATURES" "${CARGO_FEATURES:-}"
+validate_positive_int "fuzz duration" "$FUZZ_DURATION" 3600
+validate_positive_int "fuzz jobs" "$FUZZ_JOBS" 64
+validate_control_free_value "fuzz target directory" "$FUZZ_TARGET_DIR" 4096
+if [[ -n "${RUSTFLAGS_EXTRA:-}" ]]; then
+  export RUSTFLAGS="${RUSTFLAGS_EXTRA} ${RUSTFLAGS:-}"
+fi
 mkdir -p "$FUZZ_TARGET_DIR" "$FUZZ_CORPUS_ROOT" "$FUZZ_CRASH_ROOT"
 
 echo -e "\n> Configuration:"
@@ -331,7 +339,7 @@ echo -e "\n> Testing boundary conditions..."
 run_named_test "Boundary conditions" "boundary_conditions"
 
 echo -e "\n> Testing integer overflows..."
-run_optional_test "Integer overflow checks" "integer_overflow" "RUSTFLAGS=-Coverflow-checks=on"
+run_optional_test "Integer overflow checks" "integer_overflow" "RUSTFLAGS=-Coverflow-checks=on" --
 
 # Memory safety tests
 echo -e "\n=== Memory Safety Tests ==="
@@ -350,17 +358,19 @@ echo -e "\n=== Concurrency Safety Tests ==="
 
 echo -e "\n> Testing data races..."
 if has_nightly_rustc && tsan_supported; then
-  run_optional_test "Data races (TSAN)" "data_race" "RUSTUP_TOOLCHAIN=${TOOLCHAIN_PIN} RUSTFLAGS='-Zsanitizer=thread -Cunsafe-allow-abi-mismatch=sanitizer'"
+  run_optional_test "Data races (TSAN)" "data_race" \
+    "RUSTUP_TOOLCHAIN=${TOOLCHAIN_PIN}" \
+    "RUSTFLAGS=-Zsanitizer=thread -Cunsafe-allow-abi-mismatch=sanitizer" --
 else
-  run_optional_test "Data races" "data_race"
+  run_optional_test "Data races" "data_race" --
 fi
 
 echo -e "\n> Testing deadlocks..."
-run_optional_test "Deadlock detection" "deadlock_detection" "" \
+run_optional_test "Deadlock detection" "deadlock_detection" -- \
   --release --features rust-tests --lib deadlock_detection -- --nocapture --test-threads=8
 
 echo -e "\n> Testing race conditions..."
-run_optional_test "Race conditions" "race_conditions" "" \
+run_optional_test "Race conditions" "race_conditions" -- \
   --release --features rust-tests --lib race_conditions -- --nocapture --test-threads=16
 
 # Crypto security tests

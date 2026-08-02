@@ -18,6 +18,10 @@ while [[ $# -gt 0 ]]; do
   esac; shift
 done
 
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+[[ -z "$OUTPUT_DIR" ]] && OUTPUT_DIR="$SCRIPT_DIR/../../out/benchmarks/crypto-bench-${TIMESTAMP}"
+validate_harness_inputs "$OUTPUT_DIR" "${CARGO_FEATURES:-}" "${RUSTFLAGS_EXTRA:-}" "${JOBS:-}"
+
 echo "==============================================================="
 echo "  Crypto Comprehensive Benchmark Suite"
 echo "==============================================================="
@@ -38,27 +42,52 @@ RED='\033[0;31m'
 NC='\033[0m'
 
 # Output directory
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-[[ -z "$OUTPUT_DIR" ]] && OUTPUT_DIR="$SCRIPT_DIR/../../out/benchmarks/crypto-bench-${TIMESTAMP}"
 mkdir -p "$OUTPUT_DIR"
 LOG_FILE="$OUTPUT_DIR/crypto-bench.log"
 JSON="$OUTPUT_DIR/results.json"; json_begin "$JSON" "bench_crypto_comprehensive"; JSON_FIRST_RUN=1
-export -f run run_cargo
+BENCH_FAILURES=0
 
 # Function to measure crypto throughput
 measure_throughput() {
     local name="$1"
     local test_pattern="$2"
-    local env_vars="${3:-}"
+    shift 2
+    local -a env_vars=()
+    while [[ "$#" -gt 0 && "$1" != "--" ]]; do
+        env_vars+=("$1")
+        shift
+    done
+    [[ "${1:-}" == "--" ]] || { error "measure_throughput requires -- before cargo arguments"; return 2; }
+    shift
+    local output_file="$OUTPUT_DIR/${name}.txt"
+    local command_status=0
+    local result="PASS"
+    local reason=""
     
     echo -e "\n${BLUE}> Benchmarking $name...${NC}"
     
-    # Run the benchmark
-    if [ -n "$env_vars" ]; then
-        run bash -lc "export $env_vars; run_cargo test --release --lib \"$test_pattern\" 2>&1 | tee \"$OUTPUT_DIR/${name}.txt\""
+    if run_cargo_with_env "${env_vars[@]}" -- test --release --lib "$test_pattern" >"$output_file" 2>&1; then
+        command_status=0
     else
-        run bash -lc "run_cargo test --release --lib \"$test_pattern\" 2>&1 | tee \"$OUTPUT_DIR/${name}.txt\""
+        command_status=$?
+        result="FAIL"
+        reason="cargo_test_failed"
+        BENCH_FAILURES=$((BENCH_FAILURES + 1))
     fi
+    cat "$output_file"
+    local command_text
+    command_text="env"
+    local env_assignment
+    for env_assignment in "${env_vars[@]}"; do
+        command_text+=" $(printf '%q' "$env_assignment")"
+    done
+    command_text+=" cargo test --release --lib $(printf '%q' "$test_pattern")"
+    if [[ "$JSON_FIRST_RUN" -eq 0 ]]; then echo "," >> "$JSON"; fi
+    JSON_FIRST_RUN=0
+    printf '  {"name":"%s","result":"%s","reason":"%s","command":"%s","command_status":%s,"output":"%s"}' \
+        "$(qf_json_escape "$name")" "$(qf_json_escape "$result")" "$(qf_json_escape "$reason")" \
+        "$(qf_json_escape "$command_text")" "$command_status" "$(qf_json_escape "$output_file")" >> "$JSON"
+    return 0
 }
 
 # CPU Feature Detection
@@ -77,39 +106,39 @@ fi
 
 # Full Crypto Suite Benchmarks (AEGIS, AES-HP, ChaCha, key derivation)
 echo -e "\n${YELLOW}=== Full Crypto Suite Performance ===${NC}"
-measure_throughput "crypto_all_native" "crypto::tests" ""
+measure_throughput "crypto_all_native" "crypto::tests" --
 
 if [[ $(uname -m) == "x86_64" ]]; then
-    measure_throughput "crypto_all_sse2" "crypto::tests" "RUSTFLAGS='-C target-feature=+sse2'"
-    measure_throughput "crypto_all_avx2" "crypto::tests" "RUSTFLAGS='-C target-feature=+avx2'"
+    measure_throughput "crypto_all_sse2" "crypto::tests" "RUSTFLAGS=-C target-feature=+sse2" --
+    measure_throughput "crypto_all_avx2" "crypto::tests" "RUSTFLAGS=-C target-feature=+avx2" --
 elif [[ $(uname -m) == "aarch64" ]] || [[ $(uname -m) == "arm64" ]]; then
-    measure_throughput "crypto_all_neon" "crypto::tests" "RUSTFLAGS='-C target-feature=+neon'"
+    measure_throughput "crypto_all_neon" "crypto::tests" "RUSTFLAGS=-C target-feature=+neon" --
 fi
 
 # MORUS-1280-128 Benchmarks
 echo -e "\n${YELLOW}=== MORUS-1280-128 Performance ===${NC}"
-measure_throughput "morus_native" "crypto::morus::morus_tests" ""
+measure_throughput "morus_native" "crypto::morus::morus_tests" --
 
 if [[ $(uname -m) == "x86_64" ]]; then
-    measure_throughput "morus_sse2" "crypto::morus::morus_tests" "RUSTFLAGS='-C target-feature=+sse2'"
+    measure_throughput "morus_sse2" "crypto::morus::morus_tests" "RUSTFLAGS=-C target-feature=+sse2" --
 elif [[ $(uname -m) == "aarch64" ]] || [[ $(uname -m) == "arm64" ]]; then
-    measure_throughput "morus_neon" "crypto::morus::morus_tests" "RUSTFLAGS='-C target-feature=+neon'"
+    measure_throughput "morus_neon" "crypto::morus::morus_tests" "RUSTFLAGS=-C target-feature=+neon" --
 fi
 
 # AES-GCM Benchmarks
 echo -e "\n${YELLOW}=== AES-GCM Performance ===${NC}"
-measure_throughput "aes_gcm_native" "crypto::gcm::tests" ""
+measure_throughput "aes_gcm_native" "crypto::gcm::tests" --
 
 if [[ $(uname -m) == "x86_64" ]]; then
-    measure_throughput "aes_gcm_aesni" "crypto::gcm::tests" "RUSTFLAGS='-C target-feature=+aes,+sse2'"
-    measure_throughput "aes_gcm_vaes" "crypto::gcm::tests" "RUSTFLAGS='-C target-feature=+vaes,+avx512f'"
+    measure_throughput "aes_gcm_aesni" "crypto::gcm::tests" "RUSTFLAGS=-C target-feature=+aes,+sse2" --
+    measure_throughput "aes_gcm_vaes" "crypto::gcm::tests" "RUSTFLAGS=-C target-feature=+vaes,+avx512f" --
 elif [[ $(uname -m) == "aarch64" ]] || [[ $(uname -m) == "arm64" ]]; then
-    measure_throughput "aes_gcm_crypto" "crypto::gcm::tests" "RUSTFLAGS='-C target-feature=+aes,+neon'"
+    measure_throughput "aes_gcm_crypto" "crypto::gcm::tests" "RUSTFLAGS=-C target-feature=+aes,+neon" --
 fi
 
 # ChaCha20-Poly1305 Benchmarks (fallback)
 echo -e "\n${YELLOW}=== ChaCha20-Poly1305 Performance ===${NC}"
-measure_throughput "chacha20_poly1305_native" "crypto::tests::chacha20poly1305" ""
+measure_throughput "chacha20_poly1305_native" "crypto::tests::chacha20poly1305" --
 
 # Comparative Analysis
 echo -e "\n${YELLOW}=== Comparative Analysis ===${NC}"
@@ -184,3 +213,7 @@ fi
 
 echo -e "\n${GREEN}[OK] Crypto Benchmark Suite Complete${NC}"
 json_end "$JSON"
+if [[ "$BENCH_FAILURES" -gt 0 ]]; then
+    echo -e "\n${RED}[FAIL] ${BENCH_FAILURES} crypto benchmark cells failed${NC}"
+    exit 1
+fi

@@ -21,6 +21,9 @@ done
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 BASE_NAME="$(basename "$0" .sh)"
 [[ -z "$OUTPUT_DIR" ]] && OUTPUT_DIR="$SCRIPT_DIR/../../out/tests/${BASE_NAME}-${TIMESTAMP}"
+validate_control_free_value "output directory" "$OUTPUT_DIR" 4096
+validate_feature_list "CARGO_FEATURES" "${CARGO_FEATURES:-}"
+validate_control_free_value "RUSTFLAGS_EXTRA" "${RUSTFLAGS_EXTRA:-}" 8192
 mkdir -p "$OUTPUT_DIR"; LOG_FILE="$OUTPUT_DIR/${BASE_NAME}.log"; exec > >(tee -a "$LOG_FILE") 2>&1
 [[ -n "${RUSTFLAGS_EXTRA:-}" ]] && export RUSTFLAGS="${RUSTFLAGS_EXTRA} ${RUSTFLAGS:-}"
 RESULTS_JSON="$OUTPUT_DIR/results.json"; json_begin "$RESULTS_JSON" "tests_optimization"; JSON_FIRST_RUN=1
@@ -156,17 +159,24 @@ test_pattern_exists() {
 
 run_optional_test() {
   local label="$1"; local pattern="$2"; local feature_set="${3:-$BASE_FEATURES}"
-  local envs="${4:-}"; local feature_arg="${5:-}"
-  shift 5
+  local feature_arg="${4:-}"
+  shift 4
+  local -a envs=()
+  while [[ "$#" -gt 0 && "$1" != "--" ]]; do
+    envs+=("$1")
+    shift
+  done
+  [[ "${1:-}" == "--" ]] || { error "run_optional_test requires -- before runner arguments"; return 2; }
+  shift
   local -a runner_args=(--nocapture)
   if [[ "$#" -gt 0 ]]; then runner_args=("$@"); fi
   if test_pattern_exists "$pattern" "$feature_set"; then
     DISCOVERY_STATUS_FOR_RUN="$ACTIVE_DISCOVERY_STATUS"
+    local -a command=(cargo test --release --lib "$pattern" -- "${runner_args[@]}")
     if [[ -n "$feature_arg" ]]; then
-      run_case "$label" "$envs" cargo test --release --features "$feature_arg" --lib "$pattern" -- "${runner_args[@]}"
-    else
-      run_case "$label" "$envs" cargo test --release --lib "$pattern" -- "${runner_args[@]}"
+      command=(cargo test --release --features "$feature_arg" --lib "$pattern" -- "${runner_args[@]}")
     fi
+    run_case "$label" "${envs[@]}" -- "${command[@]}"
     DISCOVERY_STATUS_FOR_RUN="not_applicable"
     return 0
   fi
@@ -185,33 +195,44 @@ run_optional_test() {
 }
 
 run_cargo_test_capture() {
-  local output_file="$1"; local envs="$2"; shift 2
+  local output_file="$1"
+  shift
+  local -a envs=()
+  while [[ "$#" -gt 0 && "$1" != "--" ]]; do
+    envs+=("$1")
+    shift
+  done
+  [[ "${1:-}" == "--" ]] || { error "run_cargo_test_capture requires -- before command"; return 2; }
+  shift
   local -a cmd=("$@")
-  if [[ -n "$envs" ]]; then
-    if ( eval "export $envs"; LOG_FILE="" JSON="" JSON_FILE="" run_cargo "${cmd[@]:1}" ) > "$output_file" 2>&1; then
-      return 0
-    fi
-    return $?
+  local command_status=0
+  if ( LOG_FILE="" JSON="" JSON_FILE="" run_cargo_with_env "${envs[@]}" -- "${cmd[@]:1}" ) > "$output_file" 2>&1; then
+    command_status=0
+  else
+    command_status=$?
   fi
-  if LOG_FILE="" JSON="" JSON_FILE="" run_cargo "${cmd[@]:1}" > "$output_file" 2>&1; then
-    return 0
-  fi
-  return $?
+  return "$command_status"
 }
 
 run_case() {
   local name="$1"; shift
-  local envs="$1"; shift
+  local -a envs=()
+  while [[ "$#" -gt 0 && "$1" != "--" ]]; do
+    envs+=("$1")
+    shift
+  done
+  [[ "${1:-}" == "--" ]] || { error "run_case requires -- before command"; return 2; }
+  shift
   local cmd=("$@")
   local start=$(date +%s)
   TOTAL=$((TOTAL+1))
   echo -e "\n> [$TOTAL] $name"
-  [[ -n "$envs" ]] && echo "  Env: $envs"
+  [[ ${#envs[@]} -gt 0 ]] && echo "  Env: ${envs[*]}"
   echo "  Cmd: ${cmd[*]}"
   if [[ "${cmd[0]:-}" == "cargo" && "${cmd[1]:-}" == "test" ]]; then
     local output_file="$OUTPUT_DIR/cargo-test-${TOTAL}.txt"
     local command_status=0
-    if run_cargo_test_capture "$output_file" "$envs" "${cmd[@]}"; then
+    if run_cargo_test_capture "$output_file" "${envs[@]}" -- "${cmd[@]}"; then
       command_status=0
     else
       command_status=$?
@@ -234,8 +255,8 @@ run_case() {
     DISCOVERY_STATUS_FOR_RUN="not_applicable"
     return 0
   fi
-  if [[ -n "$envs" ]]; then
-    if run env $envs "${cmd[@]}"; then
+  if [[ ${#envs[@]} -gt 0 ]]; then
+    if run env "${envs[@]}" "${cmd[@]}"; then
       PASSED=$((PASSED+1)); append_json "$name" "ok" $(( $(date +%s) - start )); return 0
     fi
   elif run "${cmd[@]}"; then
@@ -249,7 +270,7 @@ run_case() {
 run_named_test() {
   local label="$1"; shift
   local pattern="$1"; shift
-  run_optional_test "$label" "$pattern" "$BASE_FEATURES" "" ""
+  run_optional_test "$label" "$pattern" "$BASE_FEATURES" "" --
 }
 
 # Test I/O batch sizing
@@ -260,7 +281,7 @@ if (( FAST )); then
   echo -e "\n> Fast mode enabled (reduced optimization matrix)"
   run_named_test "CPU profile telemetry mask" "cpu_profile_mask"
   run_named_test "FEC batch processing" "test_batch_"
-  run_optional_test "Telemetry system" "telemetry" "$BASE_FEATURES" "QUICFUSCATE_TELEMETRY=1" ""
+  run_optional_test "Telemetry system" "telemetry" "$BASE_FEATURES" "" "QUICFUSCATE_TELEMETRY=1" --
 
   FEATURES="${CARGO_FEATURES:-rust-tests}"
   if [[ ",${FEATURES}," != *",rust-tests,"* ]]; then
@@ -281,7 +302,7 @@ if (( FAST )); then
   if [[ "$(uname -m)" == "x86_64" ]]; then
     SIMD_FAST_TEST_ARGS+=(--test rt-ack-merge-parity --test rt-xor-sse2-parity)
   fi
-  run_case "SIMD/Accelerate integration" "" cargo test --release --features "$FEATURES" \
+  run_case "SIMD/Accelerate integration" -- cargo test --release --features "$FEATURES" \
     "${SIMD_FAST_TEST_ARGS[@]}" \
     -- --nocapture
 
@@ -303,25 +324,25 @@ fi
 
 # Test NUMA awareness
 echo -e "\n> Testing NUMA Awareness..."
-run_optional_test "NUMA local" "numa" "$BASE_FEATURES" "QUICFUSCATE_NUMA_POLICY=local" ""
-run_optional_test "NUMA interleave" "numa" "$BASE_FEATURES" "QUICFUSCATE_NUMA_POLICY=interleave" ""
-run_optional_test "NUMA preferred" "numa" "$BASE_FEATURES" "QUICFUSCATE_NUMA_POLICY=preferred:0" ""
+run_optional_test "NUMA local" "numa" "$BASE_FEATURES" "" "QUICFUSCATE_NUMA_POLICY=local" --
+run_optional_test "NUMA interleave" "numa" "$BASE_FEATURES" "" "QUICFUSCATE_NUMA_POLICY=interleave" --
+run_optional_test "NUMA preferred" "numa" "$BASE_FEATURES" "" "QUICFUSCATE_NUMA_POLICY=preferred:0" --
 
 # Test HugePages
 echo -e "\n> Testing HugePages Support..."
-run_optional_test "HugePages" "hugepages" "$BASE_FEATURES" "QUICFUSCATE_MADVISE_HUGEPAGE=1" ""
+run_optional_test "HugePages" "hugepages" "$BASE_FEATURES" "" "QUICFUSCATE_MADVISE_HUGEPAGE=1" --
 
 # Test SIMD paths (x86_64)
 echo -e "\n> Testing x86_64 SIMD Paths..."
 if [[ $(uname -m) == "x86_64" ]]; then
     echo "  - Testing SSE2..."
-    run_optional_test "SSE2 paths" "sse2" "$BASE_FEATURES" "RUSTFLAGS=-Ctarget-feature=+sse2" ""
+    run_optional_test "SSE2 paths" "sse2" "$BASE_FEATURES" "" "RUSTFLAGS=-Ctarget-feature=+sse2" --
     
     echo "  - Testing AVX2..."
-    run_optional_test "AVX2 paths" "avx2" "$BASE_FEATURES" "RUSTFLAGS=-Ctarget-feature=+avx2" ""
+    run_optional_test "AVX2 paths" "avx2" "$BASE_FEATURES" "" "RUSTFLAGS=-Ctarget-feature=+avx2" --
     
     echo "  - Testing AVX-512..."
-    run_optional_test "AVX-512 paths" "avx512" "$BASE_FEATURES" "RUSTFLAGS=-Ctarget-feature=+avx512f" ""
+    run_optional_test "AVX-512 paths" "avx512" "$BASE_FEATURES" "" "RUSTFLAGS=-Ctarget-feature=+avx512f" --
 else
     echo "  Skipping (x86_64 only)"
     record_platform_skip "x86_64 SIMD paths" "host_arch_not_x86_64" "x86_64" "$BASE_FEATURES"
@@ -331,10 +352,10 @@ fi
 echo -e "\n> Testing ARM SIMD Paths..."
 if [[ $(uname -m) == "aarch64" ]] || [[ $(uname -m) == "arm64" ]]; then
     echo "  - Testing NEON..."
-    run_optional_test "NEON paths" "neon" "$BASE_FEATURES" "" ""
+    run_optional_test "NEON paths" "neon" "$BASE_FEATURES" "" --
     
     echo "  - Testing PMULL..."
-    run_optional_test "PMULL paths" "pmull" "$BASE_FEATURES" "" ""
+    run_optional_test "PMULL paths" "pmull" "$BASE_FEATURES" "" --
 else
     echo "  Skipping (ARM only)"
     record_platform_skip "ARM SIMD paths" "host_arch_not_arm64" "arm64" "$BASE_FEATURES"
@@ -355,7 +376,7 @@ run_named_test "Cache alignment" "cache_alignment"
 # Test zero-copy operations
 echo -e "\n> Testing Zero-Copy Operations..."
 ZERO_COPY_FEATURES="$(qf_cargo_test_feature_set "${BASE_FEATURES},zero_copy_dgram")"
-run_optional_test "Zero-copy operations" "zero_copy" "$ZERO_COPY_FEATURES" "" "zero_copy_dgram"
+run_optional_test "Zero-copy operations" "zero_copy" "$ZERO_COPY_FEATURES" "zero_copy_dgram" --
 
 # Test batch processing
 echo -e "\n> Testing Batch Processing..."
@@ -363,7 +384,7 @@ run_named_test "Batch processing" "batch_processing"
 
 # Test telemetry
 echo -e "\n> Testing Telemetry System..."
-run_optional_test "Telemetry system" "telemetry" "$BASE_FEATURES" "QUICFUSCATE_TELEMETRY=1" ""
+run_optional_test "Telemetry system" "telemetry" "$BASE_FEATURES" "" "QUICFUSCATE_TELEMETRY=1" --
 
 # Integration fixtures (SIMD/accelerate/telemetry)
 FEATURES="${CARGO_FEATURES:-rust-tests}"
@@ -400,14 +421,17 @@ SIMD_FULL_TEST_ARGS=(
 if [[ "$(uname -m)" == "x86_64" ]]; then
   SIMD_FULL_TEST_ARGS+=(--test rt-ack-merge-parity --test rt-xor-sse2-parity)
 fi
-run_case "SIMD/Accelerate integration" "" cargo test --release --features "$FEATURES" \
+run_case "SIMD/Accelerate integration" -- cargo test --release --features "$FEATURES" \
   "${SIMD_FULL_TEST_ARGS[@]}" \
   -- --nocapture
 
 # Combined optimization test
 echo -e "\n> Running Optimization Stress Test..."
-run_optional_test "Optimization stress" "optimization_stress" "$BASE_FEATURES" \
-  "QUICFUSCATE_NUMA_POLICY=interleave QUICFUSCATE_MADVISE_HUGEPAGE=1 QUICFUSCATE_TELEMETRY=1 RUSTFLAGS=-Ctarget-cpu=native" "" \
+run_optional_test "Optimization stress" "optimization_stress" "$BASE_FEATURES" "" \
+  "QUICFUSCATE_NUMA_POLICY=interleave" \
+  "QUICFUSCATE_MADVISE_HUGEPAGE=1" \
+  "QUICFUSCATE_TELEMETRY=1" \
+  "RUSTFLAGS=-Ctarget-cpu=native" -- \
   --nocapture --test-threads=1
 
 echo -e "\n==============================================================="

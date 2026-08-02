@@ -3714,6 +3714,13 @@ Notes:
 - Existing methods (`get_fronted_domain`, `random_domain`) remain for backward compatibility.
 - Internally, domains are stored as `Arc<[String]>` to reduce cloning and enable zero-copy access.
 
+## Verification Harness Contracts
+
+The affected test and benchmark wrappers preserve operator and CI arguments as arrays. `scripts/tests/lib/lib-common.sh` validates control-free values, bounded decimal integers, feature lists, output paths, and environment assignments; `run_cargo_with_env` exports validated assignments without `eval`, `bash -lc`, word splitting, or loss of argument boundaries. FEC, FEC simulation, StealthBrain, optimization, security/fuzzing, and crypto benchmark suites use the shared boundary and record per-cell `PASS`, `FAIL`, or `SKIP` status with command status and bounded command/environment identity.
+
+`scripts/benchmarks/suites/bench-orchestrator.sh` resolves fixed suite names to executable-plus-argv arrays, passes output directories as one argument, records structured `argv` and command identity in `manifest.json`, marks dry-run children as `SKIP`, and exits nonzero for failed children or unknown requested suites. `bench-qpack-encode.sh`, `micro-udpfast-throughput.sh`, and `micro-crypto-all.sh` validate numeric, size, endpoint, feature, jobs, flag, and path input before execution or numeric JSON serialization. The Admin E2E wrapper validates credentials, addresses, paths, timeout, and TTL, passes dynamic JSON values through Python `sys.argv`, and makes `--dry-run` a complete non-executing plan that does not require curl, PKI generation, server startup, or readiness polling.
+
+`scripts/tests/fast/test-harness-argument-safety.sh` is the real negative contract for these boundaries. It exercises the orchestrator, Admin E2E, QPACK, UDP, and crypto harnesses with shell metacharacters, paths containing spaces, malformed sizes, and invalid numerics; it requires structured JSON failure/skip records and proves that no side-effect marker is created. TODO-735 remains the owner for the broader benchmark build/export/selection matrix, and TODO-738 remains the owner for typed parsing and checked workload arithmetic inside the Rust benchmark/probe examples.
 
 ## Scripts Reference
 This section is the authoritative build/packaging script reference in this document. Script-produced artifacts are written to `scripts/out/<category>/` (including build-release artifacts under `scripts/out/build/...`).
@@ -3740,18 +3747,18 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `analysis-suite-matrix.sh` - Test/benchmark suite matrix report generation
 
 #### Library (`scripts/tests/lib/`)
-- `lib-common.sh` - Shared helpers (logging, JSON, env detection)
+- `lib-common.sh` - Shared helpers (logging, JSON, environment detection, array-safe Cargo execution, and bounded harness-input validation)
 
 #### Tests (`scripts/tests/`)
 **Suites (`scripts/tests/suites/`)**
 - `test-core.sh` - Core integration tests (CLI/telemetry/profile/qftls/reality/config)
 - `test-profile-overrides.sh` - Deterministic profile override parity tests
 - `test-profile-fuzz-parity.sh` - Fuzz-style parity tests (scalar vs SIMD) with forced profiles
-- `test-fec.sh` - FEC suite (all modes + GF16/GF8/Wiedemann/Partial/Adaptive/Stress; add `--refactor` / `--refactor-only` for structural invariants)
-- `test-fec-simulation.sh` - FEC simulation under varied loss/threads/mode matrices
+- `test-fec.sh` - FEC suite (all modes + GF16/GF8/Wiedemann/Partial/Adaptive/Stress; add `--refactor` / `--refactor-only` for structural invariants; environment and Cargo arguments stay array-safe)
+- `test-fec-simulation.sh` - FEC simulation under varied loss/threads/mode matrices with per-cell command status
 - `test-fec-e2e-loss.sh` - Deterministic FEC model-loss matrix using seeded `fec_sim` runs and explicit ratio thresholds; it does not exercise real QUIC, TLS, congestion control, ACK processing, or TUN delivery. Native transport proof is owned by the `tun-e2e-fec-*` netns harnesses.
 - `test-stealth.sh` - Stealth suite (browser/OS profiles, padding, DoH, H3 masquerade, rotation)
-- `test-stealth-brain.sh` - StealthBrain ACK policy optimization tests
+- `test-stealth-brain.sh` - StealthBrain ACK policy optimization tests with per-cell required-command status and explicit optional probe status
 - `test-probe-detection.sh` - Active-probe validation (detector invariants, reality fallback rotation, optional stealth pressure path)
 - `test-crypto.sh` - Crypto suite (AEGIS/MORUS/AES-GCM/ChaCha20/HKDF/CT operations)
 - `test-transport.sh` - Transport suite (varint/frames/loss/BBR/0-RTT/validated migration/DATAGRAM; io_uring on Linux)
@@ -3767,7 +3774,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `tun-e2e-traffic-analysis-netns.sh` - Exact-artifact Linux capture proof for 10 PPS full-padding idle chaff and 100 PPS constant-rate defense. It verifies complete ten-second capture windows, exact UDP payload sizes, reverse ACK/control traffic, explicit cost warnings, CPU and bandwidth ceilings, artifact identity, and residue-free teardown.
 - `tun-e2e-multi-client-dual-stack-netns.sh` - Exact-artifact Linux proof for three isolated dual-stack clients, source ownership, fan-out, PTB, DPLPMTUD black-hole recovery, positive-interval throughput, NAT, explicit client-to-client policy, and clean teardown
 - `tun-e2e-dns-leak-netns.sh` - Linux network-namespace DNS leak proof: real server/client TUN over MASQUE, explicit TUN DNS plus a normal OS-resolver query through a private resolver mount, resolver restoration, and tcpdump assertion that the client underlay sees zero raw TCP/UDP port 53 packets
-- `test-e2e-admin-web.sh` - Admin web E2E (login/status/config/QKey API plus productive runtime QKey authentication, active-session revocation close, revoked-key rejection, and zero-stale-client reconciliation; desktop transport validation remains in dedicated integration suites)
+- `test-e2e-admin-web.sh` - Admin web E2E (login/status/config/QKey API plus productive runtime QKey authentication, active-session revocation close, revoked-key rejection, and zero-stale-client reconciliation; dynamic JSON values use process arguments, and `--dry-run` is a complete non-executing plan; desktop transport validation remains in dedicated integration suites)
 - `test-qkey-auth-policy.sh` - Exact-process QKey auth backoff, block, expiry, second-IP isolation, idle-prune, bounded-resource, metric, audit, and 100-attempt flood proof
 - `test-ddos-admission.sh` - Exact-process sustained DDoS activation/clear, established-client PING/ACK continuity, QUIC Retry, real MaxMind GeoIP with typed activation-outcome rejection coverage, custom-CA HTTPS blacklist, cache restart, failed-refresh last-known-good, resource, secret, UI-isolation, and cleanup proof
 - `test-desktop-webadmin-rust-integration.sh` - Cross-surface desktop/web-admin/core integration contract checks
@@ -3809,6 +3816,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `test-dynamic-discovery-fail-closed.sh` - Real Cargo contract for discovery command failure, target mismatch, stale patterns, and zero-test execution
 - `test-fast-fec.sh` - Fast FEC sanity; runs separate `fec::tests::`, `gf16`, `wiedemann`, and `streaming` filters with `benches,rust-tests`, requires a positive executed-test count per filter, and records a separate bench compile result
 - `test-fast-fec-fail-closed.sh` - Negative contract proving a real focused Cargo failure propagates as nonzero, records bounded failure evidence, and cannot reach the green completion marker or bench stage
+- `test-harness-argument-safety.sh` - Real negative contract for array-safe suite propagation, redacted Admin E2E dry-run, malformed QPACK sizes, invalid microbench numerics, paths with spaces, and shell-side-effect rejection
 
 **Quick validation profile (macOS / Apple Silicon)**
 - Fast confidence pass:
@@ -3835,16 +3843,16 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 
 #### Benchmarks (`scripts/benchmarks/`)
 **Suites (`scripts/benchmarks/suites/`)**
-- `bench-orchestrator.sh` - Orchestrates benchmark matrix; writes `manifest.json`, `summary.txt`, and per-suite logs under `scripts/out/benchmarks/`
+- `bench-orchestrator.sh` - Orchestrates benchmark matrix with fixed executable argv resolution; writes structured `manifest.json`, `summary.txt`, and per-suite logs under `scripts/out/benchmarks/`, and fails on unknown or failed requested suites
 - `bench-fec.sh` - FEC benchmarks (encoder/decoder/Wiedemann/GF16/parallelization)
-- `bench-fec-simulation.sh` - FEC performance under simulated network conditions
-- `bench-crypto.sh` - Extended crypto benchmarks with all cipher suites
+- `bench-fec-simulation.sh` - FEC performance under simulated network conditions with per-cell command statuses
+- `bench-crypto.sh` - Extended crypto benchmarks with per-cell command result artifacts
 - `bench-transport.sh` - Transport benchmarks (packet/varint/frames/streams; io_uring on Linux)
 - `bench-optimization.sh` - Runtime-owned SIMD sort/shuffle optimization benchmarks; memory microprimitives are rust-tests parity-only.
 - `bench-stealth.sh` - Stealth module performance (padding, masquerading, obfuscation)
-- `bench-stealth-brain.sh` - StealthBrain ACK policy optimization benchmarks
+- `bench-stealth-brain.sh` - StealthBrain ACK policy optimization benchmarks with per-cell command statuses
 - `bench-compression.sh` - Compression microbenchmarks (`examples/compress_bench.rs`) for text and binary payloads with JSON output
-- `bench-qpack-encode.sh` - QPACK encode benchmark harness
+- `bench-qpack-encode.sh` - QPACK encode benchmark harness with bounded size grammar, preflight rejection, and per-cell status
 - `bench-profile-transport-fastpaths.sh` - Transport profiling (Tokio vs io_uring)
 - `bench-linux-send-path-decision.sh` - Linux send-path decision benchmark
 - `bench-retained-crypto-backends.sh` - Crypto backend comparison benchmark
@@ -3854,7 +3862,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 
 **Micro (`scripts/benchmarks/micro/`)**
 - `micro-crypto-all.sh`, `micro-aes-block.sh`, `micro-aes-gcm.sh`, `micro-ghash.sh`, `micro-chacha-x4.sh`, `micro-udpfast-throughput.sh`
-  - Micro JSON output: each script writes `<name>.json` with a `meta` object (e.g., `iters`, `sizes`, `batch`, `bind`, `remote`) plus per-command entries.
+  - Affected micro scripts validate CLI input before execution and write a `meta` object plus per-command `PASS`, `FAIL`, or `SKIP` entries with command status and bounded output identity.
 
 #### Audits (`scripts/tests/audits/`)
 - `audit-runtime-guardrails.sh` - Fast runtime/docs/structure anti-drift gate for reachability, contract, and shadow-path regressions

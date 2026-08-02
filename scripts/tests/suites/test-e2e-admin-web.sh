@@ -23,6 +23,7 @@ KEY_PATH=""
 CA_PATH=""
 READY_TIMEOUT_SECS=120
 QKEY_TTL_SECS=120
+DRY_RUN=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -42,21 +43,19 @@ while [[ $# -gt 0 ]]; do
     --dry-run) DRY_RUN=1;;
     --verbose) QUICFUSCATE_DEBUG_SCRIPTS=1;;
     --help|-h)
-      echo "Usage: $(basename "$0") [--admin-user USER] [--admin-pass PASS] [--admin-addr ADDR] [--server-addr ADDR] [--admin-web-root PATH] [--rebuild-web] [--use-binary PATH] [--client-binary PATH] [--cert PATH] [--key PATH] [--ca-file PATH] [--ready-timeout SECS]"
+      echo "Usage: $(basename "$0") [--admin-user USER] [--admin-pass PASS] [--admin-addr ADDR] [--server-addr ADDR] [--admin-web-root PATH] [--rebuild-web] [--use-binary PATH] [--client-binary PATH] [--cert PATH] [--key PATH] [--ca-file PATH] [--ready-timeout SECS] [--dry-run]"
       usage_common_flags
       exit 0
       ;;
-    *) break;;
+    *) echo "Unknown flag: $1" >&2; exit 2;;
   esac
   shift
 done
 
-require_cmd curl
-require_cmd python3
-
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 BASE_NAME="$(basename "$0" .sh)"
 [[ -z "$OUTPUT_DIR" ]] && OUTPUT_DIR="$SCRIPT_DIR/../../out/tests/${BASE_NAME}-${TIMESTAMP}"
+validate_control_free_value "output directory" "$OUTPUT_DIR" 4096
 mkdir -p "$OUTPUT_DIR"
 LOG_FILE="$OUTPUT_DIR/${BASE_NAME}.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
@@ -64,6 +63,91 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 JSON="$OUTPUT_DIR/results.json"
 json_begin "$JSON" "tests_e2e_admin_web"
 JSON_FIRST_RUN=1
+
+append_result() {
+  local name="$1"; local result="$2"; local reason="$3"; local command_status="$4"
+  local command_text="${5:-}"; local scope="${6:-e2e}"
+  if [[ "$JSON_FIRST_RUN" -eq 0 ]]; then echo "," >> "$JSON"; fi
+  JSON_FIRST_RUN=0
+  printf '  {"name":"%s","result":"%s","reason":"%s","command":"%s","command_status":%s,"scope":"%s"}' \
+    "$(qf_json_escape "$name")" "$(qf_json_escape "$result")" "$(qf_json_escape "$reason")" \
+    "$(qf_json_escape "$command_text")" "$command_status" "$(qf_json_escape "$scope")" >> "$JSON"
+}
+
+validate_endpoint() {
+  local label="$1"; local value="$2"
+  local port=""
+  validate_control_free_value "$label" "$value" 256 || return 2
+  if [[ "$value" =~ ^\[([0-9A-Fa-f:]+)\]:([0-9]+)$ ]]; then
+    port="${BASH_REMATCH[2]}"
+  elif [[ "$value" =~ ^([A-Za-z0-9._-]+):([0-9]+)$ ]]; then
+    port="${BASH_REMATCH[2]}"
+  else
+    error "${label} must be host:port or [ipv6]:port"
+    return 2
+  fi
+  validate_nonnegative_int "${label} port" "$port" 65535
+}
+
+validate_credential() {
+  local label="$1"; local value="$2"
+  validate_control_free_value "$label" "$value" 256 || return 2
+  [[ -n "$value" ]] || { error "${label} must not be empty"; return 2; }
+}
+
+validate_credential "admin username" "$ADMIN_USER"
+validate_credential "admin password" "$ADMIN_PASS"
+validate_endpoint "admin address" "$ADMIN_ADDR"
+validate_endpoint "server address" "$SERVER_ADDR"
+validate_positive_int "ready timeout" "$READY_TIMEOUT_SECS" 600
+validate_positive_int "qkey TTL" "$QKEY_TTL_SECS" 3600
+validate_control_free_value "admin web root" "$ADMIN_WEB_ROOT" 4096
+validate_control_free_value "client binary path" "$CLIENT_BINARY" 4096
+validate_control_free_value "use-binary path" "$USE_BINARY" 4096
+validate_control_free_value "certificate path" "$CERT_PATH" 4096
+validate_control_free_value "key path" "$KEY_PATH" 4096
+validate_control_free_value "CA path" "$CA_PATH" 4096
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  TMP_DIR="$OUTPUT_DIR/tmp"
+  [[ -n "$CA_PATH" ]] || CA_PATH="$TMP_DIR/ca.crt"
+  [[ -n "$CERT_PATH" ]] || CERT_PATH="$TMP_DIR/server.crt"
+  [[ -n "$KEY_PATH" ]] || KEY_PATH="$TMP_DIR/server.key"
+  SERVER_CMD=()
+  if [[ -n "$USE_BINARY" ]]; then
+    SERVER_CMD=(env RUST_LOG=info QUICFUSCATE_BRAIN=0 "$USE_BINARY")
+  else
+    SERVER_CMD=(env RUST_LOG=info QUICFUSCATE_BRAIN=0 cargo run --bin quicfuscate --)
+  fi
+  SERVER_CMD+=(
+    server
+    --listen "$SERVER_ADDR"
+    --cert "$CERT_PATH"
+    --key "$KEY_PATH"
+    --front-domain cdn.cloudflare.com
+    --admin-web "$ADMIN_ADDR"
+    --admin-web-root "$ADMIN_WEB_ROOT"
+    --admin-web-user "$ADMIN_USER"
+    --admin-web-password "$ADMIN_PASS"
+    --config "$TMP_DIR/server.toml"
+  )
+  REDACTED_SERVER_CMD=("${SERVER_CMD[@]}")
+  for ((index=1; index<${#REDACTED_SERVER_CMD[@]}; index++)); do
+    if [[ "${REDACTED_SERVER_CMD[$((index - 1))]}" == "--admin-web-password" ]]; then
+      REDACTED_SERVER_CMD[index]="<redacted>"
+    fi
+  done
+  redacted_command="$(printf '%q ' "${REDACTED_SERVER_CMD[@]}")"
+  redacted_command="${redacted_command% }"
+  info "DRY-RUN: planned admin E2E command"
+  printf '%s\n' "$redacted_command"
+  append_result "admin-e2e-plan" "SKIP" "dry_run" null "$redacted_command" "plan_only"
+  json_end "$JSON"
+  exit 0
+fi
+
+require_cmd curl
+require_cmd python3
 
 print_system_banner
 info "Admin Web E2E starting"
@@ -289,11 +373,11 @@ code="$(curl -s -o /dev/null -w "%{http_code}" "http://$ADMIN_ADDR/api/status")"
 [[ "$code" == "401" ]] || die "Expected 401 for unauthorized status, got $code"
 
 info "Logging in"
-LOGIN_PAYLOAD=$(python3 - <<PY
-import json
-print(json.dumps({"username": "$ADMIN_USER", "password": "$ADMIN_PASS"}))
+LOGIN_PAYLOAD="$(python3 - "$ADMIN_USER" "$ADMIN_PASS" <<'PY'
+import json, sys
+print(json.dumps({"username": sys.argv[1], "password": sys.argv[2]}))
 PY
-)
+)"
 LOGIN_RESP="$(curl -s -c "$COOKIE_JAR" -H "Content-Type: application/json" -d "$LOGIN_PAYLOAD" "http://$ADMIN_ADDR/api/login")"
 python3 - "$LOGIN_RESP" <<'PY'
 import json, sys
@@ -319,11 +403,11 @@ PY
 
 info "Updating admin password (forces re-login)"
 NEW_ADMIN_PASS="pw-${RANDOM}${RANDOM}"
-AUTH_UPDATE_PAYLOAD=$(python3 - <<PY
-import json
-print(json.dumps({"new_username": "$ADMIN_USER", "current_password": "$ADMIN_PASS", "new_password": "$NEW_ADMIN_PASS"}))
+AUTH_UPDATE_PAYLOAD="$(python3 - "$ADMIN_USER" "$ADMIN_PASS" "$NEW_ADMIN_PASS" <<'PY'
+import json, sys
+print(json.dumps({"new_username": sys.argv[1], "current_password": sys.argv[2], "new_password": sys.argv[3]}))
 PY
-)
+)"
 AUTH_UPDATE_RESP="$(curl -s -b "$COOKIE_JAR" -H "Content-Type: application/json" -H "$ORIGIN_HEADER" -H "X-CSRF-Token: $CSRF_TOKEN" -d "$AUTH_UPDATE_PAYLOAD" "http://$ADMIN_ADDR/api/admin/auth")"
 python3 - "$AUTH_UPDATE_RESP" <<'PY'
 import json, sys
@@ -336,11 +420,11 @@ code="$(curl -s -b "$COOKIE_JAR" -o /dev/null -w "%{http_code}" "http://$ADMIN_A
 [[ "$code" == "401" ]] || die "Expected 401 after credential update, got $code"
 
 ADMIN_PASS="$NEW_ADMIN_PASS"
-LOGIN_PAYLOAD=$(python3 - <<PY
-import json
-print(json.dumps({"username": "$ADMIN_USER", "password": "$ADMIN_PASS"}))
+LOGIN_PAYLOAD="$(python3 - "$ADMIN_USER" "$ADMIN_PASS" <<'PY'
+import json, sys
+print(json.dumps({"username": sys.argv[1], "password": sys.argv[2]}))
 PY
-)
+)"
 LOGIN_RESP="$(curl -s -c "$COOKIE_JAR" -H "Content-Type: application/json" -d "$LOGIN_PAYLOAD" "http://$ADMIN_ADDR/api/login")"
 python3 - "$LOGIN_RESP" <<'PY'
 import json, sys
@@ -394,11 +478,11 @@ if "config" not in data:
 PY
 
 info "Generating QKey"
-QKEY_PAYLOAD=$(python3 - <<PY
-import json
-print(json.dumps({"ttl_seconds": $QKEY_TTL_SECS}))
+QKEY_PAYLOAD="$(python3 - "$QKEY_TTL_SECS" <<'PY'
+import json, sys
+print(json.dumps({"ttl_seconds": int(sys.argv[1])}))
 PY
-)
+)"
 QKEY_RESP="$(curl -s -b "$COOKIE_JAR" -H "Content-Type: application/json" -H "$ORIGIN_HEADER" -H "X-CSRF-Token: $CSRF_TOKEN" -d "$QKEY_PAYLOAD" "http://$ADMIN_ADDR/api/qkey")"
 QKEY_INFO="$(python3 - "$QKEY_RESP" "$QKEY_TTL_SECS" <<'PY'
 import json, sys, time
@@ -511,11 +595,11 @@ PY
 [[ -n "$QKEY_ID" ]] || die "Missing qkey id"
 
 info "Revoking QKey"
-REVOKE_PAYLOAD=$(python3 - <<PY
-import json
-print(json.dumps({"id": "$QKEY_ID"}))
+REVOKE_PAYLOAD="$(python3 - "$QKEY_ID" <<'PY'
+import json, sys
+print(json.dumps({"id": sys.argv[1]}))
 PY
-)
+)"
 REVOKE_RESP="$(curl -s -b "$COOKIE_JAR" -H "Content-Type: application/json" -H "$ORIGIN_HEADER" -H "X-CSRF-Token: $CSRF_TOKEN" -d "$REVOKE_PAYLOAD" "http://$ADMIN_ADDR/api/qkeys/revoke")"
 python3 - "$REVOKE_RESP" <<'PY'
 import json, sys
@@ -678,4 +762,5 @@ code="$(curl -s -b "$COOKIE_JAR" -o /dev/null -w "%{http_code}" "http://$ADMIN_A
 [[ "$code" == "401" ]] || die "Expected 401 after logout, got $code"
 
 info "Admin Web E2E completed"
+append_result "admin-e2e" "PASS" "" 0 "" "live"
 json_end "$JSON"

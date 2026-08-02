@@ -575,7 +575,8 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 |   |   |   |-- test-dynamic-discovery-fail-closed.sh
 |   |   |   |-- test-fast-crypto.sh
 |   |   |   |-- test-fast-fec-fail-closed.sh
-|   |   |   `-- test-fast-fec.sh
+|   |   |   |-- test-fast-fec.sh
+|   |   |   `-- test-harness-argument-safety.sh
 |   |   |-- frontend
 |   |   |   |-- desktop
 |   |   |   |   |-- e2e
@@ -1158,3 +1159,11 @@ The audit remains open. These reconciliations document current evidence and owne
 - **Shared contract:** `scripts/tests/lib/lib-common.sh` owns target-scoped Cargo test discovery and execution classification. It preserves raw output and command status, requires a positive listed or executed test count, and emits `PASS`, `FAIL`, or `UNAVAILABLE` metadata with target, feature set, filter, and reason.
 - **Suite wiring:** `test-optimization.sh`, `test-performance-regression.sh`, and `test-security-fuzzing.sh` discover and execute the same release `--lib` test universe, including the effective `rust-tests` feature set. Optimization keeps a separate zero-copy feature scope; platform and toolchain skips retain explicit prerequisites and machine-readable reasons.
 - **Negative proof:** `scripts/tests/fast/test-dynamic-discovery-fail-closed.sh` uses real Cargo calls to prove discovery command failure, integration-to-library target mismatch, stale-pattern discovery, and zero-test execution are non-pass results. Raw outputs and exit statuses remain in the bounded result artifact.
+
+## Implementation Reconciliation (2026-08-02, harness argument safety)
+
+- **Array boundary:** `scripts/tests/lib/lib-common.sh` now validates control-free values, bounded decimal integers, feature lists, output paths, and environment assignments. `run_cargo_with_env` exports validated assignments without `eval`, `bash -lc`, word splitting, or loss of argument boundaries.
+- **Suite wiring:** FEC, FEC simulation, StealthBrain, optimization, security/fuzzing, and crypto benchmark suites pass environment and Cargo arguments as arrays. Their result rows retain `PASS`, `FAIL`, or `SKIP` state, command status, and bounded command/environment identity.
+- **Orchestration and input gates:** `bench-orchestrator.sh` uses fixed executable-plus-argv resolution and structured manifests; QPACK, UDP, crypto microbench, fuzz, and Admin E2E boundaries reject malformed numeric, size, feature, endpoint, credential, timeout, TTL, flag, and path inputs before execution or numeric JSON serialization. Admin E2E dry-run is plan-only and redacts the password.
+- **Negative proof:** `scripts/tests/fast/test-harness-argument-safety.sh` exercises the real orchestrator, Admin E2E, QPACK, UDP, and crypto harnesses with shell metacharacters, malformed sizes, invalid numerics, and paths containing spaces. It requires bounded JSON failure/skip records and proves that no side-effect marker is created.
+- **Ownership boundary:** TODO-735 remains open for the broader benchmark build/export/selection matrix, and TODO-738 remains open for typed parsing and checked workload arithmetic inside the Rust benchmark/probe examples.

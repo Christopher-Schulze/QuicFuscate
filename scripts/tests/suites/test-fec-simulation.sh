@@ -27,6 +27,7 @@ done
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 BASE_NAME="$(basename "$0" .sh)"
 [[ -z "$OUTPUT_DIR" ]] && OUTPUT_DIR="$SCRIPT_DIR/../../out/tests/${BASE_NAME}-${TIMESTAMP}"
+validate_harness_inputs "$OUTPUT_DIR" "$CARGO_FEATURES" "$RUSTFLAGS_EXTRA" "$JOBS"
 mkdir -p "$OUTPUT_DIR"; LOG_FILE="$OUTPUT_DIR/${BASE_NAME}.log"
 
 echo "===============================================================" | tee -a "$LOG_FILE"
@@ -66,14 +67,15 @@ TOTAL=0; PASS=0; FAIL=0
 RESULTS_JSON="$OUTPUT_DIR/results.json"; json_begin "$RESULTS_JSON" "fec_simulation"; FIRST=true
 RAW="$OUTPUT_DIR/raw.tsv"; : > "$RAW" # mode\tloss\tthreads\tgf16\tstream_every\tadapt_rs\tok
 
-export -f run run_cargo
 run_cargo_logged() {
-  local envs="$1"; shift
-  if [[ -n "$envs" ]]; then
-    run bash -lc "export $envs; run_cargo $*"
-  else
-    run bash -lc "run_cargo $*"
-  fi
+  local -a envs=()
+  while [[ "$#" -gt 0 && "$1" != "--" ]]; do
+    envs+=("$1")
+    shift
+  done
+  [[ "${1:-}" == "--" ]] || { error "run_cargo_logged requires -- before cargo arguments"; return 2; }
+  shift
+  run_cargo_with_env "${envs[@]}" -- "$@"
 }
 
 run_one() {
@@ -87,18 +89,26 @@ run_one() {
   if [[ "$use_gf16" == "1" ]]; then envs+=("QUICFUSCATE_GF16_SIMD=1" "QUICFUSCATE_GF16_NIBBLE=1"); fi
   if [[ -n "${stream_every}" ]]; then envs+=("QUICFUSCATE_FEC_STREAM_EVERY=${stream_every}"); fi
   if [[ "$adapt_rs" == "1" ]]; then envs+=("QUICFUSCATE_FEC_ADAPT_RS=1"); fi
+  if [[ -n "$RUSTFLAGS_EXTRA" ]]; then envs+=("RUSTFLAGS=${RUSTFLAGS_EXTRA}"); fi
 
   echo -e "\n> ${tag}" | tee -a "$LOG_FILE"
   local start=$(date +%s)
 
   # Cargo accepts a single test-name filter; use an adaptive FEC core-path test
   # per matrix cell to validate env-driven behavior without invalid multi-filter args.
-  if run_cargo_logged "${envs[*]} RUSTFLAGS=${RUSTFLAGS_EXTRA:-}" \
+  local command_status=0
+  if run_cargo_logged "${envs[@]}" -- \
       test --release --lib 'fec::test_auto_mode_streaming_selection' -- --nocapture \
       >>"$LOG_FILE" 2>&1; then
     ok=1
   else
+    command_status=$?
     ok=0
+  fi
+  local result="PASS"; local reason=""
+  if (( ! ok )); then
+    result="FAIL"
+    reason="cargo_test_failed"
   fi
 
   local end=$(date +%s); local dur=$((end-start))
@@ -108,7 +118,9 @@ run_one() {
   # Raw line for post-matrix
   echo -e "${mode}\t${loss}\t${th}\t${use_gf16}\t${stream_every}\t${adapt_rs}\t${ok}" >> "$RAW"
   if [[ "$FIRST" == "true" ]]; then FIRST=false; else echo "," >> "$RESULTS_JSON"; fi
-  echo -n '  {"mode":"'$mode'","loss":'$loss',"threads":'$th',"gf16":'$use_gf16',"stream_every":'$stream_every',"adapt_rs":'$adapt_rs',"duration_sec":'$dur',"ok":'$ok'}' >> "$RESULTS_JSON"
+  printf '  {"mode":"%s","loss":%s,"threads":%s,"gf16":%s,"stream_every":%s,"adapt_rs":%s,"duration_sec":%s,"ok":%s,"result":"%s","reason":"%s","command":"cargo test --release --lib fec::test_auto_mode_streaming_selection -- --nocapture","environment":"%s","command_status":%s}' \
+    "$(qf_json_escape "$mode")" "$loss" "$th" "$use_gf16" "$stream_every" "$adapt_rs" "$dur" "$ok" \
+    "$result" "$reason" "$(qf_json_escape "${envs[*]}")" "$command_status" >> "$RESULTS_JSON"
 }
 
 if (( COMPACT )); then
