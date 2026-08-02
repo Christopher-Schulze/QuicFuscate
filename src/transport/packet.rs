@@ -89,7 +89,7 @@ pub fn connect(
     // used for Initial key derivation (RFC 9001).
     let mut dcid = [0u8; crate::transport::MAX_CONN_ID_LEN];
     crate::transport::rand::rand_bytes(&mut dcid);
-    conn.set_initial_dcid(crate::transport::ConnectionId::from_vec(dcid.to_vec()));
+    conn.set_initial_dcid(crate::transport::ConnectionId::from_ref(&dcid));
 
     // Attach lightweight FEC transport observer to collect ECN/ACK telemetry
     // (policy application remains optional and external)
@@ -121,7 +121,7 @@ pub fn accept(
     // client's original destination connection ID.
     let mut conn = crate::transport::Connection::new_server(scid, local, peer, config.clone());
     if let Some(initial_key_dcid) = initial_key_dcid {
-        conn.set_initial_dcid(crate::transport::ConnectionId::from_vec(initial_key_dcid.to_vec()));
+        conn.set_initial_dcid(crate::transport::ConnectionId::from_ref(initial_key_dcid));
     }
     // Attach lightweight FEC transport observer to collect ECN/ACK telemetry
     // (policy application remains optional and external)

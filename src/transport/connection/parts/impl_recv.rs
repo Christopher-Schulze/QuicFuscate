@@ -65,7 +65,7 @@ impl Connection {
             if !self.is_server {
                 if let Some((retry_hdr, _)) = pre_parsed_hdr.as_ref() {
                     if !retry_hdr.scid.is_empty() {
-                        self.set_destination_cid(ConnectionId::from_vec(retry_hdr.scid.clone()));
+                        self.set_destination_cid(ConnectionId::from_ref(&retry_hdr.scid));
                     }
                     self.config.initial_token = retry_hdr.token.clone();
                     let (client_secret, server_secret) =
@@ -178,15 +178,15 @@ impl Connection {
         if hdr_native.ty != PacketType::Short && !hdr_native.scid.is_empty() {
             if self.is_server {
                 if self.dcid.is_empty() {
-                    self.set_destination_cid(ConnectionId::from_vec(hdr_native.scid.clone()));
+                    self.set_destination_cid(ConnectionId::from_ref(&hdr_native.scid));
                 }
                 if self.initial_dcid.is_empty() && !hdr_native.dcid.is_empty() {
-                    self.initial_dcid = ConnectionId::from_vec(hdr_native.dcid.clone());
+                    self.initial_dcid = ConnectionId::from_ref(&hdr_native.dcid);
                 }
             } else {
                 // Client: only rotate away from the initial placeholder DCID once we have a peer SCID.
                 if self.dcid.is_empty() || self.dcid == self.initial_dcid {
-                    self.set_destination_cid(ConnectionId::from_vec(hdr_native.scid.clone()));
+                    self.set_destination_cid(ConnectionId::from_ref(&hdr_native.scid));
                 }
             }
         }
@@ -265,7 +265,7 @@ impl Connection {
                         Frame::Stream { stream_id, offset, data, fin } => {
                             ack_eliciting = true;
                             self.stats.stream_recv_bytes += data.len() as u64;
-                            if !self.readable_streams.contains(&stream_id) {
+                            if self.readable_stream_ids.insert(stream_id) {
                                 self.readable_streams.push_back(stream_id);
                             }
                             // Flow-control tracking
@@ -909,7 +909,7 @@ impl Connection {
                             }
                         };
                         if emptied && fin_now {
-                            self.writable_streams.retain(|&id| id != stream_id);
+                            self.remove_front_writable_stream(stream_id);
                         }
                         staged_transmission = Some((stream_id, stream_offset, data, fin_now));
                     }
@@ -935,7 +935,7 @@ impl Connection {
                             &mut out[off..],
                         )?;
                         off += written;
-                        self.writable_streams.retain(|&id| id != stream_id);
+                        self.remove_front_writable_stream(stream_id);
                         staged_transmission = Some((stream_id, stream_offset, Arc::from([]), true));
                     }
                 } else {
@@ -945,7 +945,7 @@ impl Connection {
                     // Without this, an idle stream blocks all other streams
                     // forever because maybe_flush_one_writable_stream only looks
                     // at the front of the queue.
-                    self.writable_streams.retain(|&id| id != stream_id);
+                    self.remove_front_writable_stream(stream_id);
                 }
             }
         }

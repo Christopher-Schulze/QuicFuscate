@@ -259,7 +259,7 @@ proptest! {
         // to_vec round-trip preserves bytes
         prop_assert_eq!(a.to_vec(), bytes.clone());
         // from_vec also produces the same ID
-        let c = ConnectionId::from_vec(bytes);
+        let c = ConnectionId::from_ref(&bytes);
         prop_assert_eq!(&a, &c);
     }
 

@@ -251,7 +251,7 @@ fn simulate_qkey_http3_auth(
 
                     // Server needs to know the original destination connection ID (client-chosen)
                     // so it can complete the handshake correctly.
-                    let odcid = ConnectionId::from_vec(hdr.dcid.clone());
+                    let odcid = ConnectionId::from_ref(&hdr.dcid);
                     let scid =
                         ConnectionId::from_ref(&[1; quicfuscate::transport::MAX_CONN_ID_LEN]);
                     let mut srv = QuicFuscateConnection::new_server(

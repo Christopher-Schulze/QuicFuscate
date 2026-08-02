@@ -188,7 +188,7 @@ pub(crate) fn parse_live_server_initial_auth(
     }
 
     let version = initial_hdr.version;
-    let initial_key_dcid = crate::transport::ConnectionId::from_vec(initial_hdr.dcid.clone());
+    let initial_key_dcid = crate::transport::ConnectionId::from_ref(&initial_hdr.dcid);
     let mut initial_token = initial_hdr.token.take();
     if initial_token
         .as_deref()

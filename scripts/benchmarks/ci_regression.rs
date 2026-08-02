@@ -735,6 +735,42 @@ fn bench_stream_frame_encoding(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// Multi-stream scheduler membership (TODO-580)
+// ---------------------------------------------------------------------------
+fn bench_stream_scheduler_multistream(c: &mut Criterion) {
+    use quicfuscate::transport::{bench_paired_1rtt_connections, BenchConnectionPair};
+
+    let mut group = c.benchmark_group("stream_scheduler_multistream");
+    for stream_count in [16usize, 64, 256] {
+        group.throughput(Throughput::Elements(stream_count as u64));
+        group.bench_function(format!("{stream_count}_streams"), |b| {
+            b.iter_batched(
+                || {
+                    let mut pair = bench_paired_1rtt_connections();
+                    for stream_index in 0..stream_count {
+                        let stream_id = (stream_index as u64) * 4;
+                        pair.client
+                            .stream_send(stream_id, &[0xA5], false)
+                            .expect("initial stream enqueue");
+                    }
+                    pair
+                },
+                |BenchConnectionPair { mut client, .. }| {
+                    for stream_index in 0..stream_count {
+                        let stream_id = (stream_index as u64) * 4;
+                        black_box(client.stream_send(stream_id, &[0x5A], false))
+                            .expect("active stream enqueue");
+                    }
+                    black_box(client.writable_streams_count());
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
 // Brain: TransportObserver policy application
 // ---------------------------------------------------------------------------
 fn bench_brain_apply_policy(c: &mut Criterion) {
@@ -872,6 +908,7 @@ criterion_group!(
     bench_ack_sent_byte_accounting,
     bench_connection_1rtt_stealth_compare,
     bench_stream_frame_encoding,
+    bench_stream_scheduler_multistream,
     bench_brain_apply_policy,
     bench_brain_packet_observer,
 );

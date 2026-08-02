@@ -28,14 +28,8 @@ pub struct Connection {
     config: Config,
     version_negotiation: super::version::VersionNegotiationState,
     stats: Stats,
-    #[cfg(not(feature = "zero_copy_dgram"))]
-    dgram_recv_queue: VecDeque<Vec<u8>>,
-    #[cfg(not(feature = "zero_copy_dgram"))]
-    dgram_send_queue: VecDeque<Vec<u8>>,
-    #[cfg(feature = "zero_copy_dgram")]
-    dgram_recv_queue: VecDeque<DatagramBuffer>,
-    #[cfg(feature = "zero_copy_dgram")]
-    dgram_send_queue: VecDeque<DatagramBuffer>,
+    dgram_recv_queue: DatagramQueue,
+    dgram_send_queue: DatagramQueue,
     #[cfg(feature = "zero_copy_dgram")]
     dgram_pool: Arc<crate::optimize::MemoryPool>,
     dgram_send_max_size: usize,
@@ -55,7 +49,9 @@ pub struct Connection {
     // Current key phase (short header KEY_PHASE bit). Header bit only; no rotation here.
     key_phase: bool,
     readable_streams: VecDeque<u64>,
+    readable_stream_ids: HashSet<u64>,
     writable_streams: VecDeque<u64>,
+    writable_stream_ids: HashSet<u64>,
     local_error: Option<crate::error::ConnectionError>,
     #[cfg(any(test, feature = "rust-tests"))]
     retired_scids: VecDeque<ConnectionId>,
@@ -140,6 +136,12 @@ pub struct Connection {
     traffic_analysis_escalation_ceiling:
         Option<crate::transport::config::TrafficAnalysisPolicy>,
 }
+
+#[cfg(not(feature = "zero_copy_dgram"))]
+type DatagramQueue = VecDeque<Vec<u8>>;
+
+#[cfg(feature = "zero_copy_dgram")]
+type DatagramQueue = VecDeque<DatagramBuffer>;
 
 #[cfg(feature = "zero_copy_dgram")]
 struct DatagramBuffer {

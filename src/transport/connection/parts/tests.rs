@@ -81,7 +81,7 @@ mod tests {
             .unwrap();
         let mut connection =
             Connection::new_with_role(b"client-scid", local(), peer(), config, false);
-        connection.set_initial_dcid(ConnectionId::from_vec(b"client-dcid".to_vec()));
+        connection.set_initial_dcid(ConnectionId::from_ref(b"client-dcid"));
         connection
     }
 
@@ -115,7 +115,7 @@ mod tests {
         config.set_cc_algorithm(crate::transport::CongestionControlAlgorithm::Reno);
         let mut connection =
             Connection::new_with_role(b"client-scid", local(), peer(), config, false);
-        connection.set_initial_dcid(ConnectionId::from_vec(b"client-dcid".to_vec()));
+        connection.set_initial_dcid(ConnectionId::from_ref(b"client-dcid"));
 
         let mut vn = packet::generate_version_negotiation_packet(
             &[],
@@ -603,6 +603,23 @@ mod tests {
         c.stream_send(4, b"b", false).unwrap();
         assert!(c.writable_streams.contains(&0), "stream 0 must be writable");
         assert!(c.writable_streams.contains(&4), "stream 4 must be writable");
+        assert!(c.writable_stream_ids.contains(&0));
+        assert!(c.writable_stream_ids.contains(&4));
+    }
+
+    #[test]
+    fn stream_membership_sets_follow_queue_pop_lifecycle() {
+        let mut c = make_conn();
+        c.peer_max_data = 10_000;
+        c.stream_send(0, b"a", false).unwrap();
+        assert_eq!(c.stream_writable_next(), Some(0));
+        assert!(!c.writable_stream_ids.contains(&0));
+
+        assert!(c.readable_stream_ids.insert(4));
+        c.readable_streams.push_back(4);
+        assert!(!c.readable_stream_ids.insert(4), "readable membership must deduplicate");
+        assert_eq!(c.stream_readable_next(), Some(4));
+        assert!(!c.readable_stream_ids.contains(&4));
     }
 
     // ---- Error Handling: Transport Errors, Reset -------------------------

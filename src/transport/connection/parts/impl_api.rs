@@ -99,6 +99,43 @@ impl Connection {
         Ok((len, fin))
     }
 
+    #[inline]
+    fn insert_writable_stream_ordered(&mut self, stream_id: u64) {
+        let urgency = self.streams.get(&stream_id).map(|s| s.priority_urgency).unwrap_or(3);
+        let mut insert_at = None;
+        for (idx, id) in self.writable_streams.iter().enumerate() {
+            if let Some(s) = self.streams.get(id) {
+                if urgency < s.priority_urgency {
+                    insert_at = Some(idx);
+                    break;
+                }
+            }
+        }
+        if let Some(idx) = insert_at {
+            self.writable_streams.insert(idx, stream_id);
+        } else {
+            self.writable_streams.push_back(stream_id);
+        }
+    }
+
+    #[inline]
+    fn enqueue_writable_stream(&mut self, stream_id: u64) {
+        if self.writable_stream_ids.insert(stream_id) {
+            self.insert_writable_stream_ordered(stream_id);
+        }
+    }
+
+    #[inline]
+    fn remove_front_writable_stream(&mut self, stream_id: u64) {
+        debug_assert_eq!(self.writable_streams.front().copied(), Some(stream_id));
+        if self.writable_streams.front().copied() == Some(stream_id) {
+            self.writable_streams.pop_front();
+        } else {
+            self.writable_streams.retain(|&id| id != stream_id);
+        }
+        self.writable_stream_ids.remove(&stream_id);
+    }
+
     /// Sends data on a stream
     #[inline(always)]
     pub fn stream_send(
@@ -184,23 +221,7 @@ impl Connection {
             }
         }
         stream.send_fin = fin;
-        if !self.writable_streams.contains(&stream_id) {
-            let urgency = self.streams.get(&stream_id).map(|s| s.priority_urgency).unwrap_or(3);
-            let mut insert_at = None;
-            for (idx, id) in self.writable_streams.iter().enumerate() {
-                if let Some(s) = self.streams.get(id) {
-                    if urgency < s.priority_urgency {
-                        insert_at = Some(idx);
-                        break;
-                    }
-                }
-            }
-            if let Some(idx) = insert_at {
-                self.writable_streams.insert(idx, stream_id);
-            } else {
-                self.writable_streams.push_back(stream_id);
-            }
-        }
+        self.enqueue_writable_stream(stream_id);
 
         Ok(buf.len())
     }
@@ -1032,22 +1053,9 @@ impl Connection {
             _stream.priority_incremental = _incremental;
         }
 
-        if self.writable_streams.contains(&stream_id) {
+        if self.writable_stream_ids.contains(&stream_id) {
             self.writable_streams.retain(|&id| id != stream_id);
-            let mut insert_at = None;
-            for (idx, id) in self.writable_streams.iter().enumerate() {
-                if let Some(s) = self.streams.get(id) {
-                    if _urgency < s.priority_urgency {
-                        insert_at = Some(idx);
-                        break;
-                    }
-                }
-            }
-            if let Some(idx) = insert_at {
-                self.writable_streams.insert(idx, stream_id);
-            } else {
-                self.writable_streams.push_back(stream_id);
-            }
+            self.insert_writable_stream_ordered(stream_id);
         }
         Ok(())
     }
@@ -1072,13 +1080,13 @@ impl Connection {
     /// Returns true if the stream has buffered receive data.
     #[cfg(any(test, feature = "rust-tests"))]
     pub fn stream_readable(&self, _stream_id: u64) -> bool {
-        self.readable_streams.contains(&_stream_id)
+        self.readable_stream_ids.contains(&_stream_id)
     }
 
     /// Returns true if the stream has queued send data.
     #[cfg(any(test, feature = "rust-tests"))]
     pub fn stream_writable(&self, _stream_id: u64, _len: usize) -> bool {
-        self.writable_streams.contains(&_stream_id)
+        self.writable_stream_ids.contains(&_stream_id)
     }
 
     /// Returns true if the stream's send buffer is empty and FIN has been set.
@@ -1112,11 +1120,9 @@ impl Connection {
 
     /// Pops and returns the next stream ID that has data ready to read.
     pub fn stream_readable_next(&mut self) -> Option<u64> {
-        if self.readable_streams.is_empty() {
-            None
-        } else {
-            self.readable_streams.pop_front()
-        }
+        let stream_id = self.readable_streams.pop_front()?;
+        self.readable_stream_ids.remove(&stream_id);
+        Some(stream_id)
     }
 
     /// Returns the number of streams with pending writable data.
@@ -1127,11 +1133,9 @@ impl Connection {
     /// Pops the next stream ID with queued send data (test helper).
     #[cfg(any(test, feature = "rust-tests"))]
     pub fn stream_writable_next(&mut self) -> Option<u64> {
-        if self.writable_streams.is_empty() {
-            None
-        } else {
-            self.writable_streams.pop_front()
-        }
+        let stream_id = self.writable_streams.pop_front()?;
+        self.writable_stream_ids.remove(&stream_id);
+        Some(stream_id)
     }
 
     /// Path migration

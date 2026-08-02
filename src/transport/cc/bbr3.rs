@@ -153,8 +153,10 @@ impl Bbr3 {
 
     /// Run the BBR3 state machine on ACK.
     fn bbr3_on_ack(&mut self, acked_bytes: usize, now: Instant) {
-        // Compute delivery rate BEFORE updating delivered_time so that
-        // (now - delivered_time) reflects the actual interval since last event.
+        // `delivered_time` is an ACK clock, not a send clock. Compute the
+        // delivery rate before advancing it so the interval covers the time
+        // since the previous delivery sample. Updating it from on_packet_sent
+        // would turn send-to-ACK latency into a false bandwidth spike.
         let delivery_rate = if now > self.delivered_time {
             let elapsed =
                 now.duration_since(self.delivered_time).max(Duration::from_millis(1)).as_secs_f64();
@@ -543,6 +545,25 @@ mod tests {
         bbr.on_ack(1200, start + Duration::from_millis(101));
 
         assert!(bbr.btlbw < 100_000, "send timestamp must not become the delivery-rate clock");
+    }
+
+    #[test]
+    fn delivery_time_advances_only_on_ack_samples() {
+        let mut bbr = Bbr3::new(50_000, 1200);
+        let start = bbr.delivered_time;
+        let sent_at = start + Duration::from_millis(100);
+        let acked_at = sent_at + Duration::from_millis(1);
+
+        bbr.on_packet_sent(1, 1200, sent_at);
+        assert_eq!(bbr.delivered_time, start);
+
+        bbr.on_ack(1200, acked_at);
+        assert_eq!(bbr.delivered_time, acked_at);
+        assert!(
+            (11_800..=12_000).contains(&bbr.btlbw),
+            "delivery rate must use the 101 ms ACK interval, got {}",
+            bbr.btlbw
+        );
     }
 
     #[test]

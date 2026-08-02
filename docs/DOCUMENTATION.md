@@ -1297,11 +1297,14 @@ pub struct MacTun {
 
 #### Connection Benchmark Coverage
 
-- `scripts/benchmarks/ci_regression.rs` contains the CI Criterion hotpath groups for transport send/receive, ACK accounting, STREAM frame encoding, Brain policy application, concurrent Brain packet observation, and stealth padding decisions.
+- `scripts/benchmarks/ci_regression.rs` contains the CI Criterion hotpath groups for transport send/receive, ACK accounting, STREAM frame encoding, multi-stream scheduler membership, Brain policy application, concurrent Brain packet observation, and stealth padding decisions.
+- TODO-580 local multi-stream Criterion evidence: `stream_scheduler_multistream` measured median times of `3.299 us` for 16 streams, `10.258 us` for 64 streams, and `81.490 us` for 256 streams on the local ARM64 host.
 - TODO-575 local ARM64 Criterion hotpath evidence: `brain_packet_observer` measured `30.614 us` / `33.449 Melem/s` with one worker, `294.47 us` / `13.910 Melem/s` with four workers, and `975.43 us` / `8.3984 Melem/s` with eight workers after the lock-free accumulator and IAT sampling change. The pre-change medians were `168.55 us` / `6.0752 Melem/s`, `668.13 us` / `6.1305 Melem/s`, and `1.2923 ms` / `6.3393 Melem/s` respectively.
 - Broderick ARM/AArch64 Brain policy reference after TODO-507 direct histogram divergence: `brain_apply_policy/clean_observer` `600.01 ns`, `intelligent_clean` `599.07 ns`, and `intelligent_pressure_actuating` `550.67 ns`; Criterion reports about `7.33-8.39%` lower time versus the scratch-copy path.
 - `connection_1rtt_send_recv` and `connection_1rtt_stealth_compare` use Criterion `iter_batched(..., BatchSize::PerIteration)` so paired-connection construction, CID setup, and key installation are excluded from timed measurement.
 - `transport_stealth_padding_decision` protects the real per-packet transport padding decision path. Adaptive padding uses a power-of-two remainder fastpath for the default 64-byte granularity while preserving modulo behavior for custom non-power-of-two granularities.
+- Stream readiness membership is kept in HashSets for O(1) average admission checks while VecDeque order remains the scheduling contract; front removals are O(1), and priority reordering remains an explicit control-path scan.
+- `QuicFuscateConnection` retains one configured MemoryPool block as the reusable HTTP/3 body-read buffer; the default block is 64 KiB and is returned to the pool on connection drop.
 - The measured routine remains the real 1-RTT path: `stream_send -> send -> recv`.
 - Broderick ARM/AArch64 reference after TODO-500 AArch64 MORUS auto-selection: `connection_1rtt_send_recv` is about `4.70 us` for 256B, `5.50 us` for 1024B, and `5.84 us` for 1400B; `connection_1rtt_stealth_compare` is about `5.48 us` stealth-off and `5.55 us` stealth-on.
 

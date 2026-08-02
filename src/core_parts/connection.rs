@@ -209,6 +209,7 @@ pub struct ActiveFecPolicyChange {
 struct OutboundPacer {
     next_release: Option<Instant>,
     burst_bytes: usize,
+    burst_last_at: Option<Instant>,
 }
 
 impl OutboundPacer {
@@ -234,15 +235,30 @@ impl OutboundPacer {
         send_quantum: usize,
         rate_bytes_per_second: u64,
     ) {
-        if bytes == 0 || rate_bytes_per_second == 0 {
+        if bytes == 0 {
             return;
         }
+        if rate_bytes_per_second == 0 {
+            self.burst_bytes = 0;
+            self.burst_last_at = None;
+            return;
+        }
+        if let Some(last_at) = self.burst_last_at {
+            let elapsed_nanos = now.saturating_duration_since(last_at).as_nanos();
+            let decayed = (u128::from(rate_bytes_per_second)
+                .saturating_mul(elapsed_nanos)
+                / 1_000_000_000)
+            .min(usize::MAX as u128) as usize;
+            self.burst_bytes = self.burst_bytes.saturating_sub(decayed);
+        }
+        self.burst_last_at = Some(now);
         self.burst_bytes = self.burst_bytes.saturating_add(bytes);
         if self.burst_bytes < send_quantum.max(1) {
             return;
         }
 
         let paced_bytes = std::mem::take(&mut self.burst_bytes);
+        self.burst_last_at = None;
         let numerator = (paced_bytes as u128).saturating_mul(1_000_000_000);
         let denominator = rate_bytes_per_second as u128;
         let delay_nanos = numerator.div_ceil(denominator).max(1).min(u64::MAX as u128) as u64;
@@ -252,6 +268,7 @@ impl OutboundPacer {
     fn reset(&mut self) {
         self.next_release = None;
         self.burst_bytes = 0;
+        self.burst_last_at = None;
     }
 }
 
@@ -317,6 +334,8 @@ pub struct QuicFuscateConnection {
     fec_tx_sequence: u64,
     fec_tx_active: bool,
     h3_conn: Option<crate::transport::h3::Connection>,
+    /// Reusable pooled buffer for HTTP/3 body reads. The default pool block is 64 KiB.
+    h3_body_buffer: Option<AlignedBox<[u8]>>,
     h3_tunnel_rx: HashMap<u64, H3TunnelFrameDecoder>,
     h3_tunnel_tx_frame: Vec<u8>,
     h3_peer_tunnel_stream_id: Option<u64>,
@@ -347,6 +366,14 @@ pub struct QuicFuscateConnection {
     // Async Stealth Scheduler State
     next_packet_release: Option<std::time::Instant>,
     outbound_pacer: OutboundPacer,
+}
+
+impl Drop for QuicFuscateConnection {
+    fn drop(&mut self) {
+        if let Some(buffer) = self.h3_body_buffer.take() {
+            self.optimization_manager.free_block(buffer);
+        }
+    }
 }
 
 /// Tracks performance and reliability metrics for a connection.
@@ -599,6 +626,7 @@ impl QuicFuscateConnection {
     fn new(params: ConnectionParams) -> Self {
         let obs = FecTransportObserver::new();
         let fec_mem_pool = params.optimization_manager.memory_pool().clone();
+        let h3_body_buffer = params.optimization_manager.alloc_block();
         let mut s = Self {
             conn: params.conn,
             peer_addr: params.peer_addr,
@@ -620,6 +648,7 @@ impl QuicFuscateConnection {
             fec_tx_sequence: 0,
             fec_tx_active: false,
             h3_conn: None,
+            h3_body_buffer: Some(h3_body_buffer),
             h3_tunnel_rx: HashMap::new(),
             h3_tunnel_tx_frame: Vec::new(),
             h3_peer_tunnel_stream_id: None,
@@ -1042,12 +1071,18 @@ impl QuicFuscateConnection {
                         on_headers(sid, &list);
                     }
                     Ok(Some((sid, crate::transport::h3::Event::Data))) => {
-                        let mut buf = [0; 65535];
-                        while let Ok(read) = h3.recv_body(&mut self.conn, sid, &mut buf) {
+                        let Some(buf) = self.h3_body_buffer.as_mut() else {
+                            return Err(crate::error::ConnectionError::InvalidState);
+                        };
+                        let body_result: Result<(), crate::error::ConnectionError> = loop {
+                            let read = match h3.recv_body(&mut self.conn, sid, buf) {
+                                Ok(read) => read,
+                                Err(_) => break Ok(()),
+                            };
                             if read == 0 {
-                                break;
+                                break Ok(());
                             }
-                            if let Some(decoder) = self.h3_tunnel_rx.get_mut(&sid) {
+                            let result = if let Some(decoder) = self.h3_tunnel_rx.get_mut(&sid) {
                                 let normalizer = &self.tunnel_ingress_normalizer;
                                 decoder
                                     .push(&buf[..read], |packet| {
@@ -1072,11 +1107,16 @@ impl QuicFuscateConnection {
                                             }
                                         }
                                     })
-                                    .map_err(crate::error::ConnectionError::from)?;
+                                    .map_err(crate::error::ConnectionError::from)
                             } else {
                                 on_body(sid, &buf[..read]);
+                                Ok(())
+                            };
+                            if let Err(error) = result {
+                                break Err(error);
                             }
-                        }
+                        };
+                        body_result?;
                     }
                     Ok(Some((
                         _sid,

@@ -665,6 +665,19 @@ mod tests {
 
         assert!(!pacer.is_blocked(now));
         assert_eq!(pacer.burst_bytes, 0);
+        assert!(pacer.burst_last_at.is_none());
         assert!(pacer.next_release.is_none());
+    }
+
+    #[test]
+    fn outbound_pacer_decays_partial_burst_after_elapsed_time() {
+        let now = Instant::now();
+        let mut pacer = OutboundPacer::default();
+
+        pacer.record_send(now, 4_000, 4_500, 1_000_000);
+        pacer.record_send(now + Duration::from_millis(2), 1_000, 4_500, 1_000_000);
+
+        assert!(pacer.next_release.is_none());
+        assert_eq!(pacer.burst_bytes, 3_000);
     }
 }

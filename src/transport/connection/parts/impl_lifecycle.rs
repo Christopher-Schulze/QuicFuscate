@@ -91,7 +91,7 @@ impl Connection {
         let version_negotiation = super::version::VersionNegotiationState::new(config.version);
         let recovery = Self::configured_recovery(&config, dgram_send_max_size);
         let mut conn = Self {
-            scid: ConnectionId::from_vec(scid.to_vec()),
+            scid: ConnectionId::from_ref(scid),
             dcid: ConnectionId::default(),
             initial_dcid: ConnectionId::default(),
             is_server,
@@ -105,13 +105,7 @@ impl Connection {
             config,
             version_negotiation,
             stats: Stats::default(),
-            #[cfg(not(feature = "zero_copy_dgram"))]
             dgram_recv_queue: VecDeque::new(),
-            #[cfg(not(feature = "zero_copy_dgram"))]
-            dgram_send_queue: VecDeque::new(),
-            #[cfg(feature = "zero_copy_dgram")]
-            dgram_recv_queue: VecDeque::new(),
-            #[cfg(feature = "zero_copy_dgram")]
             dgram_send_queue: VecDeque::new(),
             #[cfg(feature = "zero_copy_dgram")]
             dgram_pool: crate::optimize::global_pool(),
@@ -135,7 +129,9 @@ impl Connection {
             next_send_pn_by_space: [0, 0, 0],
             key_phase: false,
             readable_streams: VecDeque::new(),
+            readable_stream_ids: HashSet::new(),
             writable_streams: VecDeque::new(),
+            writable_stream_ids: HashSet::new(),
             local_error: None,
             #[cfg(any(test, feature = "rust-tests"))]
             retired_scids: VecDeque::new(),
@@ -1401,8 +1397,8 @@ impl Connection {
         let mut dcid = [0u8; super::MAX_CONN_ID_LEN];
         super::rand::rand_bytes(&mut scid);
         super::rand::rand_bytes(&mut dcid);
-        self.scid = ConnectionId::from_vec(scid.to_vec());
-        self.initial_dcid = ConnectionId::from_vec(dcid.to_vec());
+        self.scid = ConnectionId::from_ref(&scid);
+        self.initial_dcid = ConnectionId::from_ref(&dcid);
         self.dcid = self.initial_dcid;
         self.dest_cids = cid::ConnectionIdSet::new();
         self.dest_cids.insert(&self.dcid);

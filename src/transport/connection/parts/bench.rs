@@ -42,8 +42,8 @@ pub fn bench_paired_1rtt_connections_stealth(stealth_on: bool) -> BenchConnectio
         Connection::new_client(&client_scid, local_client, peer_client, config.clone());
     let mut server = Connection::new_server(&server_scid, local_server, peer_server, config);
 
-    client.set_destination_cid(ConnectionId::from_vec(server_scid.to_vec()));
-    server.set_destination_cid(ConnectionId::from_vec(client_scid.to_vec()));
+    client.set_destination_cid(ConnectionId::from_ref(&server_scid));
+    server.set_destination_cid(ConnectionId::from_ref(&client_scid));
 
     {
         let mut crypto = client.crypto.write();
