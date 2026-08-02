@@ -10,7 +10,7 @@ use core::cmp::{max, min};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::{CongestionController, PathChangeEvent, PathChangeKind};
+use super::{configured_min_rtt_window, CongestionController, PathChangeEvent, PathChangeKind};
 
 // ---------------------------------------------------------------------------
 // Constants (from IETF draft-ietf-ccwg-bbr-04)
@@ -44,8 +44,6 @@ const PROBE_RTT_PACING_GAIN: f64 = 0.75;
 const PROBE_RTT_CWND_GAIN: f64 = 0.5;
 /// ProbeRTT minimum duration.
 const PROBE_RTT_DURATION: Duration = Duration::from_millis(200);
-/// How often to enter ProbeRTT (at least every 5 seconds of no new min_rtt).
-const PROBE_RTT_INTERVAL: Duration = Duration::from_secs(5);
 /// Minimum pipe cwnd in MSS units.
 const MIN_PIPE_CWND_PKTS: usize = 4;
 /// EWMA decay for loss tracking.
@@ -132,6 +130,8 @@ pub struct Bbr2 {
     /// EWMA RTT variance propagated from recovery (RFC 6298 `rttvar`).
     rtt_var: Duration,
     min_rtt_stamp: Instant,
+    min_rtt_window: Duration,
+    min_rtt_expired: bool,
     // Loss tracking (dual-timescale EWMA)
     loss_acked: f32,
     loss_lost: f32,
@@ -142,9 +142,10 @@ pub struct Bbr2 {
     delivered_time: Instant,
     app_limited: u64,
     // Round counting
+    sent_bytes: u64,
+    next_round_sent_bytes: u64,
     round_count: u64,
     round_start: bool,
-    next_round_delivered: u64,
     // Startup exit detection
     full_bw_reached: bool,
     full_bw_count: u32,
@@ -172,7 +173,7 @@ impl Bbr2 {
 
     /// Create a new BBR2 controller with the given initial window and MSS.
     pub fn new(initial_cwnd: usize, mss: usize) -> Self {
-        let now = Instant::now();
+        let now = crate::time_source::now_instant();
         let mss = mss.max(1);
         let startup_pacing_floor =
             Self::startup_pacing_rate(initial_cwnd, INITIAL_RTT, STARTUP_PACING_GAIN);
@@ -191,6 +192,8 @@ impl Bbr2 {
             rtt: INITIAL_RTT,
             rtt_var: Duration::ZERO,
             min_rtt_stamp: now,
+            min_rtt_window: configured_min_rtt_window(),
+            min_rtt_expired: false,
             loss_acked: 0.0,
             loss_lost: 0.0,
             loss_in_round: 0.0,
@@ -198,9 +201,10 @@ impl Bbr2 {
             delivered: 0,
             delivered_time: now,
             app_limited: 0,
+            sent_bytes: 0,
+            next_round_sent_bytes: 0,
             round_count: 0,
             round_start: false,
-            next_round_delivered: 0,
             full_bw_reached: false,
             full_bw_count: 0,
             full_bw: 0,
@@ -234,6 +238,19 @@ impl Bbr2 {
     /// Bandwidth-delay product.
     fn bdp(&self) -> usize {
         (self.max_bw as f64 * self.min_rtt.as_secs_f64()) as usize
+    }
+
+    /// Mark the minimum-RTT sample stale without exposing an unbounded BDP.
+    fn refresh_min_rtt_window(&mut self, now: Instant) -> bool {
+        if self.min_rtt_expired {
+            return true;
+        }
+        if now.saturating_duration_since(self.min_rtt_stamp) < self.min_rtt_window {
+            return false;
+        }
+        self.min_rtt = self.rtt;
+        self.min_rtt_expired = true;
+        true
     }
 
     /// Inflight target for the current state.
@@ -323,6 +340,7 @@ impl Bbr2 {
     }
 
     fn update_state_machine(&mut self, now: Instant) {
+        let min_rtt_expired = self.refresh_min_rtt_window(now);
         match self.state {
             State::Startup => {
                 if self.full_bw_reached || self.check_startup_high_loss() {
@@ -335,7 +353,7 @@ impl Bbr2 {
                 }
             }
             State::ProbeBW(phase) => {
-                self.update_probe_bw(phase, now);
+                self.update_probe_bw(phase, now, min_rtt_expired);
             }
             State::ProbeRTT => {
                 self.update_probe_rtt(now);
@@ -343,11 +361,11 @@ impl Bbr2 {
         }
     }
 
-    fn update_probe_bw(&mut self, phase: ProbeBwPhase, now: Instant) {
+    fn update_probe_bw(&mut self, phase: ProbeBwPhase, now: Instant, min_rtt_expired: bool) {
         let elapsed = now.duration_since(self.cycle_stamp);
 
-        // Check if it's time to enter ProbeRTT
-        if now.duration_since(self.min_rtt_stamp) > PROBE_RTT_INTERVAL {
+        // Check if the minimum-RTT sample has expired.
+        if min_rtt_expired {
             self.enter_probe_rtt();
             return;
         }
@@ -398,6 +416,7 @@ impl Bbr2 {
             if now >= done {
                 // Restore cwnd and return to ProbeBW
                 self.min_rtt_stamp = now;
+                self.min_rtt_expired = false;
                 self.cwnd = max(self.prior_cwnd, self.min_pipe_cwnd());
                 self.enter_probe_bw(now);
             }
@@ -446,6 +465,12 @@ impl Bbr2 {
         // Delivery rate
         let delivery_rate = self.compute_delivery_rate(acked_bytes as u64, now);
 
+        // Delivery accounting advances only on ACK samples. The send path has
+        // a separate byte counter for round tracking and must not move this
+        // clock.
+        self.delivered = self.delivered.saturating_add(acked_bytes as u64);
+        self.delivered_time = now;
+
         // Update bandwidth model
         self.update_bandwidth(delivery_rate);
         self.check_full_bw_reached(delivery_rate);
@@ -468,6 +493,17 @@ impl Bbr2 {
         self.update_pacing_rate();
         self.update_cwnd();
     }
+
+    fn update_rtt_at(&mut self, rtt: Duration, now: Instant) {
+        self.rtt = rtt;
+        let window_expired =
+            now.saturating_duration_since(self.min_rtt_stamp) >= self.min_rtt_window;
+        if self.min_rtt_expired || window_expired || rtt < self.min_rtt {
+            self.min_rtt = rtt;
+            self.min_rtt_stamp = now;
+            self.min_rtt_expired = false;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -475,16 +511,15 @@ impl Bbr2 {
 // ---------------------------------------------------------------------------
 
 impl CongestionController for Bbr2 {
-    fn on_packet_sent(&mut self, pkt_num: u64, sent_bytes: usize, now: Instant) {
-        self.bytes_in_flight += sent_bytes;
-        self.delivered += sent_bytes as u64;
-        self.delivered_time = now;
+    fn on_packet_sent(&mut self, pkt_num: u64, sent_bytes: usize, _now: Instant) {
+        self.bytes_in_flight = self.bytes_in_flight.saturating_add(sent_bytes);
+        self.sent_bytes = self.sent_bytes.saturating_add(sent_bytes as u64);
 
         // Round tracking
-        if self.delivered >= self.next_round_delivered {
-            self.round_count += 1;
+        if self.sent_bytes >= self.next_round_sent_bytes {
+            self.round_count = self.round_count.saturating_add(1);
             self.round_start = true;
-            self.next_round_delivered = self.delivered + self.cwnd as u64;
+            self.next_round_sent_bytes = self.sent_bytes.saturating_add(self.cwnd as u64);
             // Reset per-round loss tracking
             self.loss_in_round = 0.0;
             self.round_loss_acked = 0.0;
@@ -509,10 +544,6 @@ impl CongestionController for Bbr2 {
         // compute_delivery_rate() sees the previous delivered_time and correctly
         // computes elapsed = now - prev_delivered_time > 0.
         self.process_ack(acked_bytes, now);
-
-        // Update delivery tracking after rate measurement
-        self.delivered += acked_bytes as u64;
-        self.delivered_time = now;
 
         // EWMA loss tracking
         let decay = 1.0 - LOSS_ALPHA;
@@ -547,11 +578,7 @@ impl CongestionController for Bbr2 {
     }
 
     fn update_rtt(&mut self, rtt: Duration) {
-        self.rtt = rtt;
-        if rtt < self.min_rtt {
-            self.min_rtt = rtt;
-            self.min_rtt_stamp = Instant::now();
-        }
+        self.update_rtt_at(rtt, crate::time_source::now_instant());
     }
 
     fn update_rtt_var(&mut self, rtt_var: Duration) {
@@ -591,6 +618,7 @@ impl CongestionController for Bbr2 {
             self.rtt = event.validation_rtt;
             self.rtt_var = event.validation_rtt / 2;
             self.min_rtt_stamp = event.now;
+            self.min_rtt_expired = false;
             self.loss_acked = 0.0;
             self.loss_lost = 0.0;
             self.loss_in_round = 0.0;
@@ -598,9 +626,10 @@ impl CongestionController for Bbr2 {
             self.delivered = 0;
             self.delivered_time = event.now;
             self.app_limited = 0;
+            self.sent_bytes = 0;
+            self.next_round_sent_bytes = 0;
             self.round_count = 0;
             self.round_start = false;
-            self.next_round_delivered = 0;
             self.full_bw_reached = false;
             self.full_bw_count = 0;
             self.full_bw = 0;
@@ -618,7 +647,6 @@ impl CongestionController for Bbr2 {
 
     fn set_cwnd(&mut self, cwnd: usize) {
         self.cwnd = cwnd.max(self.mss * 2);
-        self.min_rtt = Duration::MAX;
     }
 
     fn bytes_in_flight(&self) -> usize {
@@ -725,9 +753,8 @@ mod tests {
     fn pacing_rate_non_zero_after_acks() {
         let mut bbr = Bbr2::new(12_000, 1200);
         let now = Instant::now();
-        // Send 10 packets at 10ms intervals. Last on_packet_sent sets
-        // delivered_time = now+90ms. ACK at now+100ms → elapsed = 10ms,
-        // delivery_rate = 6000/0.01 = 600_000 bytes/sec → max_bw and pacing_rate must be > 0.
+        // Send 10 packets at 10ms intervals and ACK after the final send.
+        // The ACK clock remains independent from the send timestamps.
         for i in 0..10_u64 {
             bbr.on_packet_sent(i, 1200, now + Duration::from_millis(i * 10));
         }
@@ -812,6 +839,33 @@ mod tests {
     }
 
     #[test]
+    fn send_events_do_not_count_as_delivered_or_reset_delivery_clock() {
+        let mut bbr = Bbr2::new(50_000, 1200);
+        let delivered_before = bbr.delivered;
+        let delivery_clock_before = bbr.delivered_time;
+
+        bbr.on_packet_sent(1, 12_000, delivery_clock_before + Duration::from_millis(100));
+
+        assert_eq!(bbr.delivered, delivered_before);
+        assert_eq!(bbr.delivered_time, delivery_clock_before);
+    }
+
+    #[test]
+    fn delivery_rate_uses_ack_clock_not_send_clock() {
+        let mut bbr = Bbr2::new(50_000, 1200);
+        let start = bbr.delivered_time;
+        bbr.on_packet_sent(1, 1200, start + Duration::from_millis(100));
+        bbr.on_ack(1200, start + Duration::from_millis(101));
+
+        assert_eq!(bbr.delivered_time, start + Duration::from_millis(101));
+        assert!(
+            (11_800..=12_000).contains(&bbr.max_bw),
+            "delivery rate must use the 101 ms ACK interval, got {}",
+            bbr.max_bw
+        );
+    }
+
+    #[test]
     fn bytes_in_flight_tracks_send_and_ack() {
         let mut bbr = Bbr2::new(50_000, 1200);
         let now = Instant::now();
@@ -820,6 +874,37 @@ mod tests {
         assert_eq!(bbr.bytes_in_flight(), 3600);
         bbr.on_ack(1200, now + Duration::from_millis(20));
         assert_eq!(bbr.bytes_in_flight(), 2400);
+    }
+
+    #[test]
+    fn bytes_in_flight_send_saturates_at_usize_max() {
+        let mut bbr = Bbr2::new(12_000, 1200);
+        bbr.bytes_in_flight = usize::MAX - 10;
+        bbr.on_packet_sent(1, 20, Instant::now());
+        assert_eq!(bbr.bytes_in_flight(), usize::MAX);
+    }
+
+    #[test]
+    fn min_rtt_window_replaces_stale_sample() {
+        let mut bbr = Bbr2::new(12_000, 1200);
+        bbr.min_rtt_window = Duration::from_millis(10);
+        let initial_stamp = bbr.min_rtt_stamp;
+        bbr.update_rtt_at(Duration::from_millis(20), initial_stamp + Duration::from_millis(1));
+        let sample_stamp = bbr.min_rtt_stamp;
+
+        bbr.update_rtt_at(Duration::from_millis(50), sample_stamp + Duration::from_millis(11));
+
+        assert_eq!(bbr.min_rtt, Duration::from_millis(50));
+        assert!(!bbr.min_rtt_expired);
+        assert_eq!(bbr.min_rtt_stamp, sample_stamp + Duration::from_millis(11));
+    }
+
+    #[test]
+    fn set_cwnd_preserves_min_rtt_sample() {
+        let mut bbr = Bbr2::new(12_000, 1200);
+        bbr.min_rtt = Duration::from_millis(25);
+        bbr.set_cwnd(24_000);
+        assert_eq!(bbr.min_rtt, Duration::from_millis(25));
     }
 
     #[test]

@@ -9,7 +9,7 @@ use core::cmp::min;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::{CongestionController, PathChangeEvent, PathChangeKind};
+use super::{configured_min_rtt_window, CongestionController, PathChangeEvent, PathChangeKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -19,7 +19,6 @@ enum State {
     ProbeRtt,
 }
 
-const MIN_RTT_WIN: Duration = Duration::from_secs(10);
 const PROBE_RTT_DURATION: Duration = Duration::from_millis(200);
 const STARTUP_GROWTH_TARGET: f64 = 1.25;
 const BW_PROBE_UP_ROUNDS: u64 = 3;
@@ -45,6 +44,8 @@ pub struct Bbr3 {
     rtt: Duration,
     /// EWMA RTT variance propagated from recovery (RFC 6298 `rttvar`).
     rtt_var: Duration,
+    min_rtt_window: Duration,
+    min_rtt_expired: bool,
     // Loss tracking
     loss_acked: f32,
     loss_lost: f32,
@@ -86,7 +87,7 @@ impl Bbr3 {
 
     /// Create a new BBR3 controller with the given initial window and MSS.
     pub fn new(initial_cwnd: usize, mss: usize) -> Self {
-        let now = Instant::now();
+        let now = crate::time_source::now_instant();
         let mss = mss.max(1);
         let min_cwnd = initial_cwnd.max(mss * 4);
         let startup_pacing_floor =
@@ -105,6 +106,8 @@ impl Bbr3 {
             min_rtt: INITIAL_RTT,
             rtt: INITIAL_RTT,
             rtt_var: Duration::ZERO,
+            min_rtt_window: configured_min_rtt_window(),
+            min_rtt_expired: false,
             loss_acked: 0.0,
             loss_lost: 0.0,
             loss_alpha: 0.1,
@@ -133,6 +136,19 @@ impl Bbr3 {
             fec_on_lost: None,
             gains: DEFAULT_GAINS,
         }
+    }
+
+    /// Mark the minimum-RTT sample stale without exposing an unbounded BDP.
+    fn refresh_min_rtt_window(&mut self, now: Instant) -> bool {
+        if self.min_rtt_expired {
+            return true;
+        }
+        if now.saturating_duration_since(self.probe_rtt_min_stamp) < self.min_rtt_window {
+            return false;
+        }
+        self.min_rtt = self.rtt;
+        self.min_rtt_expired = true;
+        true
     }
 
     /// Override the pacing gain table. Used by StealthShaper to inject
@@ -199,6 +215,7 @@ impl Bbr3 {
         }
 
         // State machine transitions
+        let min_rtt_expired = self.refresh_min_rtt_window(now);
         match self.state {
             State::Startup => {
                 if self.full_bw_reached {
@@ -230,8 +247,12 @@ impl Bbr3 {
                 // that while the path is unstable (high EWMA variance) would
                 // sacrifice throughput without yielding a usable min sample.
                 // Defer entry until rttvar settles at or below min_rtt/8.
-                if now.duration_since(self.probe_rtt_min_stamp)
-                    > std::cmp::max(MIN_RTT_WIN, Duration::from_micros(self.probe_rtt_min_us))
+                if (min_rtt_expired
+                    || now.saturating_duration_since(self.probe_rtt_min_stamp)
+                        > std::cmp::max(
+                            self.min_rtt_window,
+                            Duration::from_micros(self.probe_rtt_min_us),
+                        ))
                     && self.rtt_var <= self.min_rtt / 8
                 {
                     self.state = State::ProbeRtt;
@@ -246,6 +267,7 @@ impl Bbr3 {
                         self.state = State::ProbeBw;
                         self.cwnd = self.prior_cwnd;
                         self.probe_rtt_min_stamp = now;
+                        self.min_rtt_expired = false;
                         self.probe_rtt_round_done = true;
                     }
                 }
@@ -280,11 +302,22 @@ impl Bbr3 {
             model_rate
         };
     }
+
+    fn update_rtt_at(&mut self, rtt: Duration, now: Instant) {
+        self.rtt = rtt;
+        let window_expired =
+            now.saturating_duration_since(self.probe_rtt_min_stamp) >= self.min_rtt_window;
+        if self.min_rtt_expired || window_expired || rtt < self.min_rtt {
+            self.min_rtt = rtt;
+            self.probe_rtt_min_stamp = now;
+            self.min_rtt_expired = false;
+        }
+    }
 }
 
 impl CongestionController for Bbr3 {
     fn on_packet_sent(&mut self, pkt_num: u64, sent_bytes: usize, _now: Instant) {
-        self.bytes_in_flight += sent_bytes;
+        self.bytes_in_flight = self.bytes_in_flight.saturating_add(sent_bytes);
 
         if self.bytes_in_flight < self.cwnd / 2 {
             self.app_limited = self.delivered;
@@ -321,11 +354,7 @@ impl CongestionController for Bbr3 {
     }
 
     fn update_rtt(&mut self, rtt: Duration) {
-        self.rtt = rtt;
-        if rtt < self.min_rtt {
-            self.min_rtt = rtt;
-            self.probe_rtt_min_stamp = Instant::now();
-        }
+        self.update_rtt_at(rtt, crate::time_source::now_instant());
     }
 
     fn update_rtt_var(&mut self, rtt_var: Duration) {
@@ -338,8 +367,8 @@ impl CongestionController for Bbr3 {
 
     fn on_persistent_congestion(&mut self, min_cwnd: usize) {
         // Restart the bandwidth model from scratch (RFC 9002 §7.6 allows a full
-        // reset). Do NOT use set_cwnd here: its min_rtt reset is migration
-        // semantics and would corrupt the BDP estimate (min_rtt = MAX).
+        // reset). Keep model-reset semantics explicit instead of routing this
+        // through the public window setter.
         self.state = State::Startup;
         self.btlbw = 0;
         self.full_bw = 0;
@@ -383,6 +412,7 @@ impl CongestionController for Bbr3 {
             self.cycle_index = 0;
             self.cycle_stamp = event.now;
             self.probe_rtt_min_stamp = event.now;
+            self.min_rtt_expired = false;
             self.delivered = 0;
             self.delivered_time = event.now;
             self.app_limited = 0;
@@ -402,8 +432,6 @@ impl CongestionController for Bbr3 {
     fn set_cwnd(&mut self, cwnd: usize) {
         self.cwnd = cwnd.max(self.mss * 2);
         self.min_cwnd = self.cwnd.max(self.mss * 4);
-        // On path change, reset min_rtt so the new path gets fresh RTT samples
-        self.min_rtt = Duration::MAX;
     }
 
     fn bytes_in_flight(&self) -> usize {
@@ -624,6 +652,37 @@ mod tests {
     }
 
     #[test]
+    fn bytes_in_flight_send_saturates_at_usize_max() {
+        let mut bbr = Bbr3::new(12_000, 1200);
+        bbr.bytes_in_flight = usize::MAX - 10;
+        bbr.on_packet_sent(1, 20, Instant::now());
+        assert_eq!(bbr.bytes_in_flight(), usize::MAX);
+    }
+
+    #[test]
+    fn min_rtt_window_replaces_stale_sample() {
+        let mut bbr = Bbr3::new(12_000, 1200);
+        bbr.min_rtt_window = Duration::from_millis(10);
+        let initial_stamp = bbr.probe_rtt_min_stamp;
+        bbr.update_rtt_at(Duration::from_millis(20), initial_stamp + Duration::from_millis(1));
+        let sample_stamp = bbr.probe_rtt_min_stamp;
+
+        bbr.update_rtt_at(Duration::from_millis(50), sample_stamp + Duration::from_millis(11));
+
+        assert_eq!(bbr.min_rtt, Duration::from_millis(50));
+        assert!(!bbr.min_rtt_expired);
+        assert_eq!(bbr.probe_rtt_min_stamp, sample_stamp + Duration::from_millis(11));
+    }
+
+    #[test]
+    fn set_cwnd_preserves_min_rtt_sample() {
+        let mut bbr = Bbr3::new(12_000, 1200);
+        bbr.min_rtt = Duration::from_millis(25);
+        bbr.set_cwnd(24_000);
+        assert_eq!(bbr.min_rtt, Duration::from_millis(25));
+    }
+
+    #[test]
     fn can_send_respects_cwnd() {
         let mut bbr = Bbr3::new(12_000, 1200);
         let now = Instant::now();
@@ -696,7 +755,7 @@ mod tests {
             bbr.on_ack(12_000, t0 + rtt * i + rtt);
         }
         // Trigger ProbeRTT by advancing time past MIN_RTT_WIN
-        let probe_offset = MIN_RTT_WIN + Duration::from_secs(1);
+        let probe_offset = super::super::DEFAULT_MIN_RTT_WINDOW + Duration::from_secs(1);
         bbr.on_packet_sent(100, 1200, t0 + probe_offset);
         bbr.on_ack(1200, t0 + probe_offset + rtt);
         // cwnd must always be at or above 4*MSS regardless of state

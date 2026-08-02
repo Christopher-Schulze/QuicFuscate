@@ -13,6 +13,17 @@ pub mod stealth_shaper;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// Default BBR minimum-RTT filter window.
+pub(crate) const DEFAULT_MIN_RTT_WINDOW: Duration = Duration::from_secs(10);
+
+/// Read the shared BBR minimum-RTT filter window override.
+pub(crate) fn configured_min_rtt_window() -> Duration {
+    crate::env_utils::env_parse::<u64>("QUICFUSCATE_BBR_MIN_RTT_WINDOW_MS")
+        .filter(|millis| *millis > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_MIN_RTT_WINDOW)
+}
+
 /// Selectable congestion control algorithm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Algorithm {

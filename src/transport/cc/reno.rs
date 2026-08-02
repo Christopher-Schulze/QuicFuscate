@@ -52,7 +52,7 @@ impl Reno {
 
 impl CongestionController for Reno {
     fn on_packet_sent(&mut self, pkt_num: u64, sent_bytes: usize, _now: Instant) {
-        self.bytes_in_flight += sent_bytes;
+        self.bytes_in_flight = self.bytes_in_flight.saturating_add(sent_bytes);
         self.largest_sent_packet = self.largest_sent_packet.max(pkt_num);
         if let Some(ref cb) = self.fec_on_sent {
             cb(pkt_num, sent_bytes);
@@ -270,6 +270,15 @@ mod tests {
         assert_eq!(reno.bytes_in_flight(), mss * 2);
         reno.on_ack(mss * 2, now);
         assert_eq!(reno.bytes_in_flight(), 0);
+    }
+
+    #[test]
+    fn bytes_in_flight_send_saturates_at_usize_max() {
+        let mss = 1200;
+        let mut reno = Reno::new(mss * 10, mss);
+        reno.bytes_in_flight = usize::MAX - 10;
+        reno.on_packet_sent(1, 20, Instant::now());
+        assert_eq!(reno.bytes_in_flight(), usize::MAX);
     }
 
     #[test]

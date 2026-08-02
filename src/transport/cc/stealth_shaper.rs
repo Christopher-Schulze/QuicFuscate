@@ -165,7 +165,7 @@ impl<T: CongestionController> StealthShaper<T> {
         }
         let jitter_frac = self.timing_jitter_us as f64 / 1_000_000.0;
         let jitter = jitter_frac * base_rate as f64;
-        let perturbed = base_rate as f64 + jitter * (self.rng.next_f64() - 0.5);
+        let perturbed = base_rate as f64 + jitter * (self.rng.next_f64() * 2.0 - 1.0);
         perturbed.max(0.0) as u64
     }
 }
@@ -361,8 +361,8 @@ mod tests {
         let bbr = Bbr3::new(12_000, 1200);
         let mut stealth = StealthShaper::new(bbr, BrowserProfile::Chrome);
         let base = 1_000_000u64;
-        // Chrome jitter = 750us, so max perturbation = 750/1_000_000 * base / 2 = 375
-        let max_delta = (750.0 / 1_000_000.0 * base as f64 / 2.0) as u64;
+        // Chrome jitter = 750us, so max perturbation = 750/1_000_000 * base = 750.
+        let max_delta = (750.0 / 1_000_000.0 * base as f64) as u64;
         for _ in 0..100 {
             let jittered = stealth.jitter_rate(base);
             assert!(jittered >= base - max_delta - 1);

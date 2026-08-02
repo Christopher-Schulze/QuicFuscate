@@ -1388,7 +1388,7 @@ QuicFuscate uses a pluggable congestion control framework in `src/transport/cc/`
 
 All four implement the `CongestionController` trait (`cc/mod.rs`). Dispatch uses an enum wrapper (`CcImpl`) with eight variants for zero-vtable hot-path performance: `Reno`, `Cubic`, `Bbr2`, `Bbr3` (base variants created at startup) and `StealthReno`, `StealthCubic`, `StealthBbr2`, `StealthBbr3` (stealth-wrapped variants, activated at runtime by `Recovery::set_stealth_mode()`). The macro `cc_dispatch!` handles all eight uniformly.
 
-BBR2 and BBR3 initialize a Startup pacing floor from the initial congestion window and a 100 ms initial RTT. While Startup is probing, transient slow delivery samples may raise but cannot collapse that model floor; optional Stealth shaping is applied once to each recomputed output instead of compounding across ACKs. Drain and Probe states use the measured model rate directly. Persistent congestion returns either BBR controller to Startup and reinitializes the same pacing floor from its reset window and current RTT estimate.
+BBR2 and BBR3 initialize a Startup pacing floor from the initial congestion window and a 100 ms initial RTT. While Startup is probing, transient slow delivery samples may raise but cannot collapse that model floor; optional Stealth shaping is applied once to each recomputed output instead of compounding across ACKs. Both controllers use saturating bytes-in-flight accounting, expire their minimum-RTT filter after the configurable `QUICFUSCATE_BBR_MIN_RTT_WINDOW_MS` window (default 10 seconds), and route RTT timestamps through `time_source`. BBR2 keeps its delivery counter and ACK clock separate from send-side round tracking. `set_cwnd()` changes only the window; validated path migration owns path-model resets through `on_path_change()`. Drain and Probe states use the measured model rate directly. Persistent congestion returns either BBR controller to Startup and reinitializes the same pacing floor from its reset window and current RTT estimate.
 
 **CLI Usage:**
 ```bash
@@ -1404,7 +1404,7 @@ quicfuscate server --listen 0.0.0.0:4433 --cc-algorithm cubic
 
 **What it does (when active):**
 - **Browser-profile gain tables:** Overrides BBR3's ProbeBW gain cycle with browser-specific values (Chrome/Firefox/Safari/Edge) so congestion patterns resemble real browser HTTPS traffic.
-- **Pacing jitter:** Injects randomized timing perturbations via Xoshiro256++ PRNG (+/- the profile's jitter window) to defeat statistical timing analysis.
+- **Pacing jitter:** Injects symmetric randomized timing perturbations via Xoshiro256++ PRNG (+/- the full profile jitter window) to defeat statistical timing analysis.
 - **Flow dampening:** Optional 2% pacing reduction for smoother traffic shape.
 
 **Algorithm-specific behavior:**
@@ -3153,6 +3153,10 @@ At runtime you can override selected stealth options without changing the config
   the production send path stays on batched SendMsg.
 - `QUICFUSCATE_IO_URING_ZC` - `1|true|yes|on` enables experimental Linux `SendMsgZc` zero-copy
   after the runtime probe succeeds (default: disabled).
+
+#### Congestion Control Environment Overrides
+
+- `QUICFUSCATE_BBR_MIN_RTT_WINDOW_MS` - Positive minimum-RTT filter window in milliseconds for BBR2 and BBR3. Default: `10000`; invalid or zero values use the default.
 
 #### Memory Pool (Optimization) Environment Overrides
 
