@@ -23,6 +23,7 @@
     getLogsDirty,
     getConfirmDialogRequest,
     resolveConfirmDialog,
+    cancelConfirmDialog,
     confirmDialog,
   } from "$lib/stores/app.svelte";
   import { ApiError, getJson, PASSWORD_CHANGE_EVENT } from "$lib/api";
@@ -40,6 +41,13 @@
   const effectiveTab = $derived.by(() => (
     getRequiresPasswordChange() ? "configuration" : getActiveTab()
   ));
+
+  // Confirmation policy: a newer request cancels the older caller, and teardown cancels the visible request.
+  $effect(() => {
+    const requestId = confirmRequest?.id;
+    if (requestId === undefined) return;
+    return () => cancelConfirmDialog(requestId);
+  });
 
   function toErrorDetails(error: unknown): string {
     if (error instanceof Error) {
@@ -184,8 +192,8 @@
         confirmLabel={confirmRequest.confirmLabel}
         cancelLabel={confirmRequest.cancelLabel}
         portalTarget="#qf-app-stage"
-        onconfirm={() => resolveConfirmDialog(true)}
-        oncancel={() => resolveConfirmDialog(false)}
+        onconfirm={() => resolveConfirmDialog(confirmRequest.id, true)}
+        oncancel={() => resolveConfirmDialog(confirmRequest.id, false)}
       />
     {/if}
 

@@ -127,22 +127,46 @@ export function setLogsDirty(v: boolean): void {
 }
 
 // Confirm dialog
-let _confirmDialogRequest = $state<ConfirmDialogRequest | null>(null);
-let _confirmDialogResolve = $state<((accepted: boolean) => void) | null>(null);
+interface ConfirmDialogState extends ConfirmDialogRequest {
+  id: number;
+}
 
-export function getConfirmDialogRequest(): ConfirmDialogRequest | null {
+interface PendingConfirmDialog {
+  id: number;
+  resolve: (accepted: boolean) => void;
+}
+
+let _confirmDialogRequest = $state<ConfirmDialogState | null>(null);
+let _pendingConfirmDialog: PendingConfirmDialog | null = null;
+let _nextConfirmDialogId = 0;
+
+export function getConfirmDialogRequest(): ConfirmDialogState | null {
   return _confirmDialogRequest;
 }
 
 export function confirmDialog(request: ConfirmDialogRequest): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
-    _confirmDialogRequest = request;
-    _confirmDialogResolve = resolve;
+    if (_pendingConfirmDialog) {
+      settleConfirmDialog(_pendingConfirmDialog.id, false);
+    }
+    const id = ++_nextConfirmDialogId;
+    _pendingConfirmDialog = { id, resolve };
+    _confirmDialogRequest = { ...request, id };
   });
 }
 
-export function resolveConfirmDialog(accepted: boolean): void {
-  _confirmDialogResolve?.(accepted);
+export function resolveConfirmDialog(requestId: number, accepted: boolean): void {
+  settleConfirmDialog(requestId, accepted);
+}
+
+export function cancelConfirmDialog(requestId: number): void {
+  settleConfirmDialog(requestId, false);
+}
+
+function settleConfirmDialog(requestId: number, accepted: boolean): void {
+  if (!_pendingConfirmDialog || _pendingConfirmDialog.id !== requestId) return;
+  const pending = _pendingConfirmDialog;
+  _pendingConfirmDialog = null;
   _confirmDialogRequest = null;
-  _confirmDialogResolve = null;
+  pending.resolve(accepted);
 }

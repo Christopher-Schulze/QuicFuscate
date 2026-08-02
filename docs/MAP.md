@@ -1155,6 +1155,12 @@ The audit remains open. These reconciliations document current evidence and owne
 - **Desktop ownership:** `startEnginePollers()` serializes status, stats, and log calls independently, rejects responses from stopped or superseded poller owners, binds stats to the status generation and active tunnel captured at request start, and rejects log cursor regression or log-clear epoch responses. The poller invokes the statically imported Tauri API for deterministic runtime/test resolution; unrelated bridge operations retain their existing browser-safe dynamic imports.
 - **Verification:** The affected Admin view tests pass 43/43 across Dashboard, Configuration, and Logs; the Desktop polling lifecycle tests pass 2/2; both `bun run check` commands report 0 errors and 0 warnings. The repository-wide frontend `bun run test:unit` command did not return a report within the bounded local run and was stopped; it is not represented as a passing gate.
 
+## Implementation Reconciliation (2026-08-02, admin confirmation lifecycle)
+
+- **Ownership:** `apps/svelte-admin/src/lib/stores/app.svelte.ts` owns one active confirmation with a monotonic request ID and one resolver. A newer request explicitly cancels the prior caller with `false`; stale IDs cannot settle the active request.
+- **Rendering and teardown:** `apps/svelte-admin/src/routes/+layout.svelte` renders and resolves the dialog using the captured request ID and cancels the active request on layout teardown. Sidebar navigation/logout, Configuration refresh, Logs refresh, and keyboard reload/close therefore share one deterministic latest-wins policy without independent resolver overwrite.
+- **Verification:** `scripts/tests/frontend/web-admin/unit/src/confirm-dialog-store.test.ts` covers supersession, stale callbacks, exactly-once settlement, and teardown cancellation. The UI presentation and shared dialog component remain unchanged.
+
 ## Implementation Reconciliation (2026-08-02, fast FEC gate)
 
 - **Focused unit-test contract:** `scripts/tests/fast/test-fast-fec.sh` runs `fec::tests::`, `gf16`, `wiedemann`, and `streaming` as separate libtest invocations with the explicit `benches,rust-tests` feature set. Each result records the requested filter, command status, executed-test count, status, and bounded log name; zero-test or missing-`ok` output is a failure.
