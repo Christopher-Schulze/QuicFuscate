@@ -559,6 +559,11 @@ impl Connection {
         self.dgram_send_max_size
     }
 
+    /// Configured upper bound for one incoming UDP payload.
+    pub fn max_recv_udp_payload_size(&self) -> usize {
+        self.dgram_send_max_size
+    }
+
     /// Bytes currently considered in flight
     pub fn bytes_in_flight(&self) -> usize {
         self.bytes_in_flight

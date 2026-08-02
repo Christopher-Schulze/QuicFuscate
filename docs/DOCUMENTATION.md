@@ -2058,6 +2058,14 @@ conn.poll_http3_with(|data| {
 })?;
 ```
 
+The H3 connection reuses one caller-owned 64 KiB STREAM receive buffer instead of allocating on
+each poll. Its polling GC removes terminal stream IDs and MASQUE flow mappings together with the
+transport stream state, and releases completed Server Push promises with their cover payloads.
+The MASQUE DATAGRAM receive buffer is allocated once per H3 connection from the configured
+transport UDP payload ceiling, capped at the QUIC maximum DATAGRAM size. FEC threshold selection
+remains connection-local through the FEC configuration; H3 construction does not mutate process-global
+environment state.
+
 #### MASQUE Handler Registration
 The current fork retains MASQUE as a compatibility-only path inside the HTTP/3 stack. There is no
 public `QuicFuscateConnection` setter surface such as `set_masque_capsule_handler(...)`,
@@ -3484,6 +3492,7 @@ randomized bursts according to their cover budget.
   - `create_server_push_promise()` and `generate_stealth_cover_burst()` synthesize push promises with realistic content types.
   - Payloads: generated CSS, JS and small image blobs with deterministic variability to evade static signatures.
   - State: maintains `next_push_id`, tracks open push streams, and injects cover DATA frames interleaved with real traffic.
+  - Lifecycle: completed push streams are released by the H3 polling GC together with their stream state and cover payload; terminal stream IDs and MASQUE flow mappings are released at the same boundary.
 - Telemetry: MASQUE/cover traffic counters under `optimize::telemetry::*` record bytes and capsule usage (when applicable).
 
 Example (runtime behavior)

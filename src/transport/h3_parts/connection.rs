@@ -152,6 +152,9 @@ impl Config {
     }
 }
 
+const STREAM_RECV_BUFFER_SIZE: usize = 64 * 1024;
+const MAX_QUIC_DATAGRAM_SIZE: usize = 65_535;
+
 /// HTTP/3 connection with enhanced stream state management
 pub struct Connection {
     config: Config,
@@ -171,6 +174,10 @@ pub struct Connection {
     masque_flow: HashMap<u64, u64>,
     /// Next push stream ID
     next_push_id: u64,
+    /// Reused caller-owned buffer for one transport STREAM receive operation.
+    stream_recv_buffer: Vec<u8>,
+    /// Receive buffer sized to the transport's configured UDP payload ceiling.
+    masque_recv_buffer: Vec<u8>,
 }
 
 /// Stream state tracking
@@ -184,7 +191,6 @@ struct StreamState {
     sent_bytes: usize,
     fin_sent: bool,
     fin_received: bool,
-    _stream_type_dup: StreamType,
     masque_established: bool,
 }
 
@@ -271,6 +277,7 @@ impl Connection {
         if config.max_field_section_size == 0 || config.max_field_section_size > 16 * 1024 * 1024 {
             return Err(Error::ExcessiveLoad);
         }
+        let masque_buffer_len = conn.max_recv_udp_payload_size().clamp(1, MAX_QUIC_DATAGRAM_SIZE);
         let mut h3_conn = Self {
             config: config.clone(),
             next_stream_id: if conn.is_server() { 1 } else { 0 },
@@ -286,15 +293,14 @@ impl Connection {
             push_streams: HashMap::new(),
             masque_flow: HashMap::new(),
             next_push_id: if conn.is_server() { 2 } else { 3 }, // Server uses even IDs for push
+            stream_recv_buffer: vec![0u8; STREAM_RECV_BUFFER_SIZE],
+            masque_recv_buffer: vec![0u8; masque_buffer_len],
         };
 
         // Initialize control stream if client
         if !conn.is_server() {
             h3_conn.init_control_stream(conn)?;
         }
-        // Propagate FEC escalation threshold to FEC ModeManager via ENV
-        let thr = conn.fec_escalation_threshold();
-        std::env::set_var("QUICFUSCATE_FEC_SWITCH_THRESH", format!("{:.6}", thr));
         Ok(h3_conn)
     }
 
@@ -326,7 +332,6 @@ impl Connection {
                 sent_bytes: 0,
                 fin_sent: false,
                 fin_received: false,
-                _stream_type_dup: StreamType::Control,
                 masque_established: false,
             },
         );
@@ -367,7 +372,6 @@ impl Connection {
                 sent_bytes: frame.len(),
                 fin_sent: fin,
                 fin_received: false,
-                _stream_type_dup: StreamType::Request,
                 masque_established: false,
             },
         );
@@ -400,12 +404,10 @@ impl Connection {
             sent_bytes: 0,
             fin_sent: false,
             fin_received: false,
-            _stream_type_dup: StreamType::Response,
             masque_established: false,
         });
         stream._headers = headers.to_vec();
         stream._stream_type = StreamType::Response;
-        stream._stream_type_dup = StreamType::Response;
         stream.sent_bytes = stream.sent_bytes.saturating_add(sent);
         stream.fin_sent = fin;
         crate::optimize::telemetry::H3_FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -542,17 +544,38 @@ impl Connection {
         // Process incoming readable streams (requests, responses, MASQUE, etc).
         // The transport marks streams readable when STREAM frames deliver data.
         while let Some(stream_id) = conn.stream_readable_next() {
-            self.process_stream(conn, stream_id)?;
+            let mut recv_buffer = std::mem::take(&mut self.stream_recv_buffer);
+            let result = self.process_stream(conn, stream_id, &mut recv_buffer);
+            self.stream_recv_buffer = recv_buffer;
+            result?;
         }
 
-        // Lightweight GC using fin_received
+        // Lightweight GC using fin_received. Completed push streams are locally
+        // terminal after their FIN because peers do not send a reciprocal stream FIN.
         let done: Vec<u64> = self
             .streams
             .iter()
-            .filter_map(|(id, st)| if st.fin_received { Some(*id) } else { None })
+            .filter_map(|(id, st)| {
+                let push_complete = st._stream_type == StreamType::Push
+                    && st.fin_sent
+                    && self
+                        .push_streams
+                        .get(id)
+                        .is_some_and(|promise| promise.state == PushState::Complete);
+                if st.fin_received || push_complete { Some(*id) } else { None }
+            })
             .collect();
         for id in done {
             self.streams.remove(&id);
+            self.finished_streams.remove(&id);
+            self.masque_flow.remove(&id);
+            if self
+                .push_streams
+                .get(&id)
+                .is_some_and(|promise| promise.state == PushState::Complete)
+            {
+                self.push_streams.remove(&id);
+            }
         }
         self.pending_events.pop_front().map(Some).ok_or(Error::Done)
     }
@@ -651,7 +674,6 @@ impl Connection {
                     sent_bytes: 0,
                     fin_sent: false,
                     fin_received: false,
-                    _stream_type_dup: StreamType::Push,
                     masque_established: false,
                 },
             );
@@ -727,13 +749,14 @@ impl Connection {
         &mut self,
         conn: &mut super::Connection,
         stream_id: u64,
+        recv_buffer: &mut [u8],
     ) -> Result<(), Error> {
-        let mut buf = vec![0u8; 65536];
-        let (len, fin) = conn.stream_recv(stream_id, &mut buf).map_err(|_| Error::InternalError)?;
+        let (len, fin) =
+            conn.stream_recv(stream_id, recv_buffer).map_err(|_| Error::InternalError)?;
         if len == 0 && !fin {
             return Ok(());
         }
-        buf.truncate(len);
+        let received = &recv_buffer[..len];
         // Track state for peer-initiated streams (e.g. incoming requests) so DATA payload
         // can be buffered and returned by recv_body(). Locally-opened streams are already
         // present; this fills in the gap for streams we first observe here.
@@ -746,25 +769,28 @@ impl Connection {
             sent_bytes: 0,
             fin_sent: false,
             fin_received: false,
-            _stream_type_dup: StreamType::Request,
             masque_established: false,
         });
         const MAX_BUFFERED_H3_FRAME: usize = 1024 * 1024 + 16;
         let buffered = {
             let stream = self.streams.get_mut(&stream_id).ok_or(Error::IdError)?;
             let buffered_len =
-                stream.frame_buffer.len().checked_add(buf.len()).ok_or(Error::ExcessiveLoad)?;
+                stream
+                    .frame_buffer
+                    .len()
+                    .checked_add(received.len())
+                    .ok_or(Error::ExcessiveLoad)?;
             if buffered_len > MAX_BUFFERED_H3_FRAME {
                 log::warn!(
                     "H3 ExcessiveLoad: stream={} buffered_len={} frame_buffer={} recv_chunk={}",
                     stream_id,
                     buffered_len,
                     stream.frame_buffer.len(),
-                    buf.len()
+                    received.len()
                 );
                 return Err(Error::ExcessiveLoad);
             }
-            stream.frame_buffer.extend_from_slice(&buf);
+            stream.frame_buffer.extend_from_slice(received);
             std::mem::take(&mut stream.frame_buffer)
         };
 
@@ -965,7 +991,6 @@ impl Connection {
         let sid = self.send_request(conn, &headers, false)?;
         if let Some(st) = self.streams.get_mut(&sid) {
             st._stream_type = StreamType::Masque;
-            st._stream_type_dup = StreamType::Masque;
         }
         Ok(sid)
     }
@@ -1001,7 +1026,6 @@ impl Connection {
         let sid = self.send_request(conn, &headers, false)?;
         if let Some(st) = self.streams.get_mut(&sid) {
             st._stream_type = StreamType::WebTransportCover;
-            st._stream_type_dup = StreamType::WebTransportCover;
         }
         Ok(sid)
     }
@@ -1044,7 +1068,6 @@ impl Connection {
         self.send_response(conn, stream_id, &headers, false)?;
         let stream = self.streams.get_mut(&stream_id).ok_or(Error::IdError)?;
         stream._stream_type = StreamType::Masque;
-        stream._stream_type_dup = StreamType::Masque;
         stream.masque_established = true;
         Ok(true)
     }
@@ -1071,13 +1094,10 @@ impl Connection {
         &mut self,
         conn: &mut super::Connection,
     ) -> Option<(u64, Vec<u8>)> {
-        let mut buf = vec![0u8; 2048];
-        match conn.dgram_recv(&mut buf[..]) {
+        match conn.dgram_recv(&mut self.masque_recv_buffer[..]) {
             Ok(len) if len > 0 => {
-                if let Ok((flow_id, used)) = Self::decode_varint(&buf[..len]) {
-                    buf.copy_within(used..len, 0);
-                    buf.truncate(len - used);
-                    return Some((flow_id, buf));
+                if let Ok((flow_id, used)) = Self::decode_varint(&self.masque_recv_buffer[..len]) {
+                    return Some((flow_id, self.masque_recv_buffer[used..len].to_vec()));
                 }
                 None
             }

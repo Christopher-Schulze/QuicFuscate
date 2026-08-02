@@ -738,6 +738,35 @@ mod tests {
         crate::transport::packet::connect(None, &scid, local, peer, &mut cfg).unwrap()
     }
 
+    fn make_conn_with_max_udp_payload_size(max_udp_payload_size: usize) -> super::super::Connection {
+        let mut cfg = crate::transport::Config::new_with_version(PROTOCOL_VERSION).unwrap();
+        cfg.set_max_recv_udp_payload_size(max_udp_payload_size);
+        let local: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let peer: std::net::SocketAddr = "127.0.0.1:4433".parse().unwrap();
+        let scid = [2u8; 8];
+        crate::transport::packet::connect(None, &scid, local, peer, &mut cfg).unwrap()
+    }
+
+    fn current_rss_bytes() -> Option<u64> {
+        #[cfg(unix)]
+        {
+            let pid = std::process::id().to_string();
+            let output = std::process::Command::new("ps")
+                .args(["-o", "rss=", "-p", &pid])
+                .output()
+                .ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            let rss_kib = String::from_utf8(output.stdout).ok()?.trim().parse::<u64>().ok()?;
+            rss_kib.checked_mul(1024)
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    }
+
     #[test]
     fn scheduled_push_stays_promised_when_headers_send_fails() {
         let mut conn = make_conn_with_limits(0, 0);
@@ -782,6 +811,111 @@ mod tests {
     }
 
     #[test]
+    fn poll_gc_prunes_auxiliary_state_under_stream_churn() {
+        const ITERATIONS: u64 = 96;
+        const COVER_BYTES: usize = 320 * 1024;
+
+        let mut conn = make_conn();
+        let cfg = super::Config::new().expect("cfg");
+        let mut h3 = super::h3::Connection::with_transport(&mut conn, &cfg).expect("h3");
+        let rss_before = current_rss_bytes();
+
+        for iteration in 0..ITERATIONS {
+            let stream_id = 10_000 + iteration * 4;
+            h3.streams.insert(
+                stream_id,
+                StreamState {
+                    _headers: Vec::new(),
+                    body_buffer: Vec::new(),
+                    frame_buffer: Vec::new(),
+                    _received_bytes: 0,
+                    _stream_type: StreamType::Masque,
+                    sent_bytes: 0,
+                    fin_sent: true,
+                    fin_received: true,
+                    masque_established: true,
+                },
+            );
+            h3.finished_streams.insert(stream_id);
+            h3.masque_flow.insert(stream_id, iteration);
+
+            let push_id = 1_000_000 + iteration * 4;
+            h3.push_streams.insert(
+                push_id,
+                PushPromise {
+                    headers: Vec::new(),
+                    state: PushState::Complete,
+                    cover_payload: vec![0u8; COVER_BYTES],
+                    scheduled_at: std::time::Instant::now(),
+                },
+            );
+            h3.streams.insert(
+                push_id,
+                StreamState {
+                    _headers: Vec::new(),
+                    body_buffer: vec![0u8; COVER_BYTES],
+                    frame_buffer: Vec::new(),
+                    _received_bytes: 0,
+                    _stream_type: StreamType::Push,
+                    sent_bytes: COVER_BYTES,
+                    fin_sent: true,
+                    fin_received: false,
+                    masque_established: false,
+                },
+            );
+            h3.finished_streams.insert(push_id);
+            h3.masque_flow.insert(push_id, iteration);
+
+            let _ = h3.poll(&mut conn);
+            assert!(!h3.streams.contains_key(&stream_id));
+            assert!(!h3.streams.contains_key(&push_id));
+            assert!(!h3.finished_streams.contains(&stream_id));
+            assert!(!h3.finished_streams.contains(&push_id));
+            assert!(!h3.masque_flow.contains_key(&stream_id));
+            assert!(!h3.masque_flow.contains_key(&push_id));
+            assert!(!h3.push_streams.contains_key(&push_id));
+        }
+
+        assert!(h3.finished_streams.is_empty(), "finished stream IDs must not accumulate");
+        assert!(h3.masque_flow.is_empty(), "MASQUE flow IDs must not accumulate");
+        assert!(h3.push_streams.is_empty(), "completed push promises must be released");
+        assert!(h3
+            .streams
+            .keys()
+            .all(|id| Some(*id) == h3.control_stream_id), "only the client control stream may remain");
+
+        if let (Some(before), Some(after)) = (rss_before, current_rss_bytes()) {
+            const RSS_GROWTH_LIMIT: u64 = 32 * 1024 * 1024;
+            assert!(
+                after <= before.saturating_add(RSS_GROWTH_LIMIT),
+                "H3 churn RSS grew from {before} to {after} bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn h3_constructor_does_not_mutate_fec_environment() {
+        let _env_lock = crate::fec::test_support::acquire_env_lock();
+        let before = std::env::var_os("QUICFUSCATE_FEC_SWITCH_THRESH");
+        let mut conn = make_conn();
+        let cfg = super::Config::new().expect("cfg");
+        let _h3 = super::h3::Connection::with_transport(&mut conn, &cfg).expect("h3");
+        assert_eq!(std::env::var_os("QUICFUSCATE_FEC_SWITCH_THRESH"), before);
+    }
+
+    #[test]
+    fn h3_receive_buffers_follow_transport_payload_limits() {
+        const MAX_PAYLOAD: usize = 16 * 1024;
+        let mut conn = make_conn_with_max_udp_payload_size(MAX_PAYLOAD);
+        let cfg = super::Config::new().expect("cfg");
+        let h3 = super::h3::Connection::with_transport(&mut conn, &cfg).expect("h3");
+
+        assert_eq!(conn.max_recv_udp_payload_size(), MAX_PAYLOAD);
+        assert_eq!(h3.masque_recv_buffer.len(), MAX_PAYLOAD);
+        assert_eq!(h3.stream_recv_buffer.len(), 64 * 1024);
+    }
+
+    #[test]
     fn stealth_cover_resource_plan_varies_by_seed_with_bounds() {
         let a = super::h3::Connection::build_stealth_cover_resource_plan(
             "/assets",
@@ -815,7 +949,6 @@ mod tests {
             .expect("webtransport cover");
         let st = h3.streams.get(&sid).expect("cover stream state");
         assert!(matches!(st._stream_type, StreamType::WebTransportCover));
-        assert!(matches!(st._stream_type_dup, StreamType::WebTransportCover));
     }
 
     #[test]
@@ -1213,7 +1346,6 @@ mod tests {
         let sid = h3.connect_udp(&mut conn, "proxy.test", "target.test:443").expect("connect_udp");
         let st = h3.streams.get(&sid).expect("stream state");
         assert!(matches!(st._stream_type, StreamType::Masque));
-        assert!(matches!(st._stream_type_dup, StreamType::Masque));
     }
 
     #[test]
