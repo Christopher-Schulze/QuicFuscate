@@ -1079,7 +1079,12 @@ impl ServerRuntime {
                     }
                 }
                 _ = housekeeping.tick() => {
-                            let runtime_parts = self.live_parts();
+                    let qkey_registry = self.live().qkey_registry.clone();
+                    qkey_registry
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .prune_replay_window();
+                    let runtime_parts = self.live_parts();
                     runtime_parts.live_state
                         .run_housekeeping_tick(
                             &socket,

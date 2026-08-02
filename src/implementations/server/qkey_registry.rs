@@ -375,6 +375,11 @@ impl QKeyRegistry {
         self.replay_window.check_and_mark(frame.timestamp, &frame.nonce)
     }
 
+    /// Prune replay slots against the current Unix-epoch timestamp.
+    pub fn prune_replay_window(&mut self) {
+        self.replay_window.prune(current_epoch_secs());
+    }
+
     /// Look up a record by Initial packet token value, which must be a 12-char
     /// QKey identifier (case-insensitive hex).
     pub fn lookup_initial_id_token(&mut self, token: &[u8]) -> Option<QKeyRecord> {

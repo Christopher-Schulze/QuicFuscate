@@ -154,10 +154,17 @@ fn try_sendmmsg_batch(
     dispatch: OutboundDispatch,
     payloads: &[&[u8]],
 ) -> Result<usize, String> {
-    if !matches!(dispatch, OutboundDispatch::SendmmsgBatch) {
-        return Ok(0);
+    match dispatch {
+        #[cfg(feature = "io_uring")]
+        OutboundDispatch::IoUringBatch => {
+            Err("io_uring dispatch must be handled by the io_uring sender".to_string())
+        }
+        OutboundDispatch::SendmmsgBatch => {
+            Ok(adapter.sendmmsg_batch(socket_fd, payloads)?.min(payloads.len()))
+        }
+        #[cfg(any(test, feature = "io_uring"))]
+        OutboundDispatch::SocketPerPacket => Ok(0),
     }
-    Ok(adapter.sendmmsg_batch(socket_fd, payloads)?.min(payloads.len()))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1038,6 +1045,19 @@ mod tests {
             .expect("sendmmsg");
 
         assert_eq!(sent, 0);
+        assert_eq!(adapter.sendmmsg_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    #[cfg(all(target_os = "linux", feature = "io_uring"))]
+    fn test_try_sendmmsg_batch_rejects_io_uring_dispatch() {
+        let adapter = MockHotpathAdapter::new(Ok(1));
+        let payloads = vec![&b"one"[..], &b"two"[..]];
+
+        let error = try_sendmmsg_batch(&adapter, 0, OutboundDispatch::IoUringBatch, &payloads)
+            .expect_err("io_uring dispatch must not silently report zero sends");
+
+        assert!(error.contains("io_uring"));
         assert_eq!(adapter.sendmmsg_calls.load(Ordering::Relaxed), 0);
     }
 

@@ -70,14 +70,14 @@ impl ReplayWindow {
         true
     }
 
-    /// Drop slots that are older than `window_size` seconds relative to the
-    /// highest timestamp seen so far. This is also performed implicitly when a
-    /// future timestamp arrives, but `prune` lets callers bound memory on a
-    /// schedule without waiting for new traffic.
-    pub fn prune(&mut self) {
-        if self.is_empty() {}
-        // No external "now" is tracked; pruning only happens relative to the
-        // current base. Without a new high-water mark there is nothing to drop.
+    /// Drop slots older than `now - window_size`.
+    ///
+    /// The timestamp is expressed in the same seconds-based domain as auth
+    /// frames. Pruning advances the logical base even when the bitmap is
+    /// empty, so a quiet registry cannot later accept a newly-seen frame whose
+    /// timestamp is already outside the replay window.
+    pub fn prune(&mut self, now: u64) {
+        self.advance_base_to(now.saturating_sub(self.window_size));
     }
 
     /// Returns true if no frames have been recorded yet.
@@ -90,6 +90,10 @@ impl ReplayWindow {
     fn slide_to(&mut self, timestamp: u64) {
         // New base places `timestamp` at the top slot.
         let new_base = timestamp.saturating_sub(self.window_size - 1);
+        self.advance_base_to(new_base);
+    }
+
+    fn advance_base_to(&mut self, new_base: u64) {
         if new_base <= self.base_timestamp {
             return;
         }
@@ -220,7 +224,28 @@ mod tests {
     #[test]
     fn prune_on_empty_is_noop() {
         let mut rw = ReplayWindow::new(32);
-        rw.prune(); // must not panic
+        rw.prune(0); // must not panic
         assert!(rw.is_empty());
+    }
+
+    #[test]
+    fn prune_discards_slots_older_than_now_minus_window() {
+        let mut rw = ReplayWindow::new(8);
+        assert!(rw.check_and_mark(991, &nonce(13)));
+        assert!(rw.check_and_mark(992, &nonce(14)));
+
+        rw.prune(1000);
+
+        assert!(!rw.check_and_mark(991, &nonce(15)));
+        assert!(rw.check_and_mark(992, &nonce(16)));
+    }
+
+    #[test]
+    fn prune_advances_empty_window_for_stale_rejection() {
+        let mut rw = ReplayWindow::new(8);
+        rw.prune(1000);
+
+        assert!(!rw.check_and_mark(991, &nonce(17)));
+        assert!(rw.check_and_mark(992, &nonce(18)));
     }
 }
