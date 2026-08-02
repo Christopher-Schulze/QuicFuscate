@@ -532,9 +532,6 @@ impl Connection {
         };
         self.stats.sent += 1;
         self.stats.sent_bytes += total as u64;
-        if !self.is_established && self.stats.recv > 0 && self.stats.sent > 0 {
-            self.is_established = true;
-        }
         // Per RFC 9002 §7.2, only packets containing ack-eliciting frames are
         // congestion-controlled. Packets carrying only ACK/PADDING/CONNECTION_CLOSE
         // are not congestion-controlled and must not inflate bytes_in_flight.

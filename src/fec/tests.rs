@@ -12,8 +12,6 @@ use super::{
     FecConfig, FecMode, FecObserverPlatformHints, FecObserverProfilePolicy, FecPacket,
     FecRuntimePlan, FecRuntimePolicy, FecTransportObserver, SimdLevel, TransportProfile,
 };
-#[cfg(target_arch = "x86_64")]
-use super::{matrix_multiply_avx512, matrix_multiply_scalar};
 use crate::optimize::telemetry;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -972,50 +970,6 @@ fn test_wiedemann_amx_telemetry_increments() {
 
     assert!(usage_after >= usage_before + 1, "usage counter should increase");
     assert!(amx_after >= amx_before + 1, "amx counter should increase");
-}
-
-#[test]
-#[cfg(target_arch = "x86_64")]
-fn matrix_multiply_avx512_matches_scalar_when_available() {
-    if !(std::arch::is_x86_feature_detected!("avx512f")
-        && std::arch::is_x86_feature_detected!("avx512bw")
-        && std::arch::is_x86_feature_detected!("avx512vl")
-        && std::arch::is_x86_feature_detected!("gfni"))
-    {
-        println!("AVX-512 GFNI not available; skipping test");
-        return;
-    }
-
-    use rand::{Rng, SeedableRng};
-
-    let mut rng = rand::rngs::StdRng::seed_from_u64(0xfeed_cafe);
-    let rows = 8usize;
-    let cols = 8usize;
-    let shared = 8usize;
-
-    let mut a = vec![vec![0u8; shared]; rows];
-    for row in &mut a {
-        for val in row.iter_mut() {
-            *val = rng.random();
-        }
-    }
-
-    let mut b = vec![vec![0u8; cols]; shared];
-    for row in &mut b {
-        for val in row.iter_mut() {
-            *val = rng.random();
-        }
-    }
-
-    let mut scalar = vec![Vec::new(); rows];
-    matrix_multiply_scalar(&a, &b, &mut scalar);
-
-    let mut avx512 = vec![Vec::new(); rows];
-    unsafe {
-        matrix_multiply_avx512(&a, &b, &mut avx512);
-    }
-
-    assert_eq!(scalar, avx512, "AVX-512 GFNI result must match scalar reference");
 }
 
 #[test]

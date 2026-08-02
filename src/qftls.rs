@@ -1016,8 +1016,6 @@ mod rustls_provider {
 
     struct SessionData {
         ticket: crate::secret::SecretBytes,
-        master_secret: crate::secret::SecretBytes,
-        alpn: String,
         timestamp: std::time::Instant,
     }
 
@@ -1051,11 +1049,6 @@ mod rustls_provider {
         fn session_data(fill: u8) -> SessionData {
             SessionData {
                 ticket: crate::secret::SecretBytes::new(vec![fill; 32], "tls_session_ticket"),
-                master_secret: crate::secret::SecretBytes::new(
-                    vec![fill.wrapping_add(1); 32],
-                    "tls_session_master_secret",
-                ),
-                alpn: "h3".to_string(),
                 timestamp: std::time::Instant::now(),
             }
         }
@@ -1075,7 +1068,7 @@ mod rustls_provider {
             drop(cache);
 
             let events = events.lock().expect("erasure events");
-            for label in ["tls_session_ticket", "tls_session_master_secret"] {
+            for label in ["tls_session_ticket"] {
                 let matching = events
                     .iter()
                     .filter(|(event_label, _)| *event_label == label)
@@ -1917,7 +1910,7 @@ mod rustls_provider {
                 if let Some(certs) = self.connection.peer_certificates() {
                     if let Some(cert) = certs.first() {
                         let cert_bytes = cert.to_vec();
-                        // Derive a stable session hint from peer cert + ALPN (pseudo-ticket/master)
+                        // Derive a stable session ticket hint from the peer certificate and ALPN.
                         if let Some(ref cache) = self.session_cache {
                             use sha2::{Digest, Sha256};
                             let mut hasher = Sha256::new();
@@ -1930,16 +1923,7 @@ mod rustls_provider {
                                 digest[..32].to_vec(),
                                 "tls_session_ticket",
                             );
-                            let master = crate::secret::SecretBytes::new(
-                                digest[..32].to_vec(),
-                                "tls_session_master_secret",
-                            );
-                            let data = SessionData {
-                                ticket,
-                                master_secret: master,
-                                alpn: self.alpn.as_deref().unwrap_or("h3").to_owned(),
-                                timestamp: std::time::Instant::now(),
-                            };
+                            let data = SessionData { ticket, timestamp: std::time::Instant::now() };
                             let key = self
                                 .profile
                                 .as_ref()
@@ -1950,39 +1934,6 @@ mod rustls_provider {
                         }
                         self.peer_cert = Some(cert_bytes);
                     }
-                }
-                // Persist basic session info in cache (for future 0-RTT/resumption hints)
-                if let Some(ref cache) = self.session_cache {
-                    let alpn_s = self.alpn.as_deref().unwrap_or("h3").to_owned();
-                    let key = self
-                        .profile
-                        .as_ref()
-                        .and_then(|p| p.sni.as_deref())
-                        .unwrap_or("default")
-                        .to_owned();
-                    let ticket = crate::secret::SecretBytes::new(
-                        {
-                            use sha2::{Digest, Sha256};
-                            let mut hasher = Sha256::new();
-                            hasher.update(b"qf-session-ticket");
-                            hasher.update(alpn_s.as_bytes());
-                            hasher.update(key.as_bytes());
-                            hasher.finalize()[..32].to_vec()
-                        },
-                        "tls_session_ticket",
-                    );
-                    let data = SessionData {
-                        ticket: ticket.clone(),
-                        master_secret: crate::secret::SecretBytes::new(
-                            ticket.as_slice().to_vec(),
-                            "tls_session_master_secret",
-                        ),
-                        alpn: alpn_s,
-                        timestamp: std::time::Instant::now(),
-                    };
-                    // Touch fields to satisfy usage and sanity-check sizes
-                    let _touch = data.ticket.len() + data.master_secret.len() + data.alpn.len();
-                    cache.write().store(key, data);
                 }
             }
             Ok(())

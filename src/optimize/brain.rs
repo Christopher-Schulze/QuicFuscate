@@ -1560,34 +1560,6 @@ unsafe fn softmax_batch_sve2(data: &mut [f32]) {
 #[cfg(all(target_arch = "aarch64", target_feature = "sve2"))]
 #[target_feature(enable = "sve2")]
 unsafe fn softmax_batch_sve2_impl(data: &mut [f32]) {
-    use std::arch::aarch64::*;
-
-    let len = data.len();
-    if len == 0 {
-        return;
-    }
-
-    let mut offset = 0usize;
-    let all = svptrue_b32();
-    let mut max = f32::NEG_INFINITY;
-
-    while offset < len {
-        let pg = svwhilelt_b32(offset as u64, len as u64);
-        if !svptest_any(all, pg) {
-            break;
-        }
-        let vals = svld1_f32(pg, data.as_ptr().add(offset));
-        let chunk_max = svmaxv_f32(pg, vals);
-        if chunk_max > max {
-            max = chunk_max;
-        }
-        offset += svcntw() as usize;
-    }
-
-    let max_vec = svdup_f32(max);
-    offset = 0;
-    let mut sum = 0.0f32;
-
     // SVE2 path currently reuses NEON implementation for numerical stability.
     softmax_batch_neon(data);
 }

@@ -614,12 +614,14 @@ fn format_rfc5424_facility(
 // ============================================================================
 
 /// Format a record as a human-readable text line (no trailing newline).
+#[cfg(any(test, feature = "rust-tests"))]
 pub fn format_text(record: &Record) -> String {
     let ts = rfc3339_utc(SystemTime::now());
     format!("{} [{}] {}: {}", ts, record.level(), record.target(), record.args())
 }
 
 /// Format a record as a single NDJSON line (no trailing newline).
+#[cfg(any(test, feature = "rust-tests"))]
 pub fn format_json(record: &Record) -> String {
     let ts = rfc3339_utc(SystemTime::now());
     let mut obj = serde_json::Map::new();

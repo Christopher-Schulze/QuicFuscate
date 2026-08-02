@@ -19,7 +19,7 @@ pub use crate::optimize::{
     brain, iter, memory, random, sort, stealth, string, transport, udp as transport_io,
 };
 
-/// Count ASCII printable bytes (0x20..=0x7E) using SIMD acceleration where available.
+/// Count ASCII printable bytes (0x20..=0x7E) with the scalar implementation.
 #[inline(always)]
 pub fn count_ascii_printable(bytes: &[u8]) -> usize {
     count_ascii_printable_scalar(bytes)

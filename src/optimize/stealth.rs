@@ -695,7 +695,6 @@ unsafe fn add_tls_padding_neon(record: &mut Vec<u8>, target_size: usize, padding
 /// Fake HMAC generation (select accelerated SHA backends when available).
 #[inline(always)]
 #[cfg(any(test, feature = "rust-tests"))]
-#[cfg(any(test, feature = "rust-tests"))]
 pub fn generate_fake_hmac(data: &[u8], key: &[u8; 32]) -> [u8; 32] {
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     let detector = FeatureDetector::instance();

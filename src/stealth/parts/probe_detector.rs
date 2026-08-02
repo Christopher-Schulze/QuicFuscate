@@ -148,7 +148,8 @@ impl ActiveProbeDetector {
                 vec![0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x28]
             }
             "DPI_QUIC_Scan" => {
-                // Fake QUIC version negotiation
+                // Keep the legacy response selector for callers that still name the removed
+                // detector pattern; the pattern itself is intentionally not matched anymore.
                 vec![0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]
             }
             _ => {

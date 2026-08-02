@@ -620,15 +620,6 @@ const STREAM_ADJUST_MIN_MS: u64 = 150;
 // FEC implementation with accelerated kernels where available.
 // ============================================================================
 
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f", enable = "avx512bw", enable = "avx512vl", enable = "gfni")]
-#[allow(dead_code)]
-unsafe fn matrix_multiply_avx512(a: &[Vec<u8>], b: &[Vec<u8>], result: &mut [Vec<u8>]) {
-    // `_mm512_gf2p8mul_epi8` is fixed to polynomial 0x11B and cannot
-    // implement this codec's GF(256)/0x11D wire contract directly.
-    matrix_multiply_accumulate(a, b, result);
-}
-
 /// Fast XOR helper with centralized SIMD dispatch from optimize.rs.
 #[inline(always)]
 fn fast_xor_inplace(src: &[u8], dst: &mut [u8]) {
