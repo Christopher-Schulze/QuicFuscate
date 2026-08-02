@@ -4591,6 +4591,7 @@ A full deep-audit sweep of `src/` was performed with parallel read-only module s
 - **DNS NXDOMAIN lie**: `src/dns/mod.rs` returns NXDOMAIN for upstream failures. Tracked in TODO-666.
 - **DNS query wire semantics**: DNS admission accepts incomplete query/header/name semantics and synthetic responses can rewrite the original question. Tracked in TODO-770.
 - **DNS client runtime wiring**: The shared DoH/proxy API has no production client caller, and the existing E2E proof does not exercise the system resolver. Tracked in TODO-771.
+- **Local close error kind**: `Connection::close()` emits distinct application/transport frames but records `ApplicationClosed` for both branches. Tracked in TODO-772.
 - **fsutil TOCTOU race**: `src/implementations/server/fsutil.rs` now creates and secures the temporary file before the atomic rename, with post-rename defense-in-depth. Resolved by TODO-591; TODO-667 was a duplicate tracker.
 - **MASQUE/DoH ownership**: TODO-597 retired the empty `stealth::MasqueManager`, its false-success send/legacy-varint path, and the unused stealth-local DoH resolver. Core H3/MASQUE now owns the active CONNECT-UDP/capsule carrier, buffers split DATA, rejects malformed or truncated FIN tails before event delivery, and covers all 1/2/4/8-byte varints including 16,384-byte payloads. Retired sources and the obsolete integration test remain recoverable under `archive/`; shared DoH primitives remain in `src/dns/mod.rs`, with client runtime wiring tracked in TODO-771.
 
