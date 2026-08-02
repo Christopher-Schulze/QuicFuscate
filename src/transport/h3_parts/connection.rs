@@ -449,16 +449,9 @@ impl Connection {
                     None
                 }
             });
-            let allow_match = ctype
-                .as_ref()
-                .map(|v| pol.allow.iter().any(|p| crate::compress::mime_matches(p, v)))
-                .unwrap_or(false);
-            let deny_match = ctype
-                .as_ref()
-                .map(|v| pol.deny.iter().any(|p| crate::compress::mime_matches(p, v)))
-                .unwrap_or(false);
             let looks_text = crate::compress::CompressionManager::looks_textual(body);
-            let should_try = (allow_match || (ctype.is_none() && looks_text)) && !deny_match;
+            let should_try = pol.allows_content_type(ctype.as_deref())
+                && (ctype.is_some() || looks_text);
             if should_try && body.len() >= pol.min_len {
                 let rtt = conn.rtt().as_millis() as f32;
                 let bw = conn.delivery_rate();

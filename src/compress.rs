@@ -270,14 +270,8 @@ impl CompressionManager {
         if out.len() < orig_len {
             return None;
         }
-        match zstd::decode_all(&data[5..]) {
-            Ok(z) => {
-                let n = z.len().min(out.len());
-                out[..n].copy_from_slice(&z[..n]);
-                Some((out, n))
-            }
-            Err(_) => None,
-        }
+        let n = zstd::bulk::decompress_to_buffer(&data[5..], &mut out[..orig_len]).ok()?;
+        (n == orig_len).then_some((out, n))
     }
 }
 
@@ -405,6 +399,20 @@ pub fn set_global_policy(pol: CompressionPolicy) {
 }
 
 impl CompressionPolicy {
+    /// Return whether a content type is eligible for compression.
+    ///
+    /// A missing content type remains eligible for the caller's textuality
+    /// fallback. Explicit content types must match an allow pattern and must
+    /// not match a deny pattern; deny always wins.
+    pub fn allows_content_type(&self, content_type: Option<&str>) -> bool {
+        let Some(content_type) = content_type else {
+            return true;
+        };
+        let allowed = self.allow.iter().any(|pattern| mime_matches(pattern, content_type));
+        let denied = self.deny.iter().any(|pattern| mime_matches(pattern, content_type));
+        allowed && !denied
+    }
+
     /// Build a compression policy from QUICFUSCATE_COMPRESS_* environment variables.
     pub fn from_env() -> Self {
         let mut p = CompressionPolicy::default();
@@ -663,7 +671,7 @@ fn compute_chunk_metrics(data: &[u8]) -> (u32, u32, u32) {
 
 /// Compress payload using a pre-trained zstd dictionary into a pooled buffer.
 pub fn compress_with_dict(
-    _pool: &Arc<MemoryPool>,
+    pool: &Arc<MemoryPool>,
     data: &[u8],
     level: i32,
     dict_bytes: &[u8],
@@ -672,7 +680,7 @@ pub fn compress_with_dict(
     crate::optimize::telemetry::COMPRESS_ATTEMPTS.inc();
     let analysis = CompressionAnalysis::from_full(data);
     analysis.record_telemetry();
-    let mut out = body_pool().alloc(); // prefer large blocks
+    let mut out = pool.alloc();
     crate::optimize::telemetry::BODY_POOL_ALLOCS.inc();
     // Header: 1 byte magic (0x5D) + 2 bytes dict id hash + 2 bytes version + 4 bytes orig len
     if out.len() < 9 {
@@ -700,7 +708,7 @@ pub fn compress_with_dict(
 
 /// Decompress a dictionary-compressed buffer (magic 0x5D) into a pooled buffer.
 pub fn decompress_with_dict(
-    _pool: &Arc<MemoryPool>,
+    pool: &Arc<MemoryPool>,
     data: &[u8],
     dict_bytes: &[u8],
 ) -> Option<(aligned_box::AlignedBox<[u8]>, usize)> {
@@ -710,15 +718,13 @@ pub fn decompress_with_dict(
     let mut len_buf = [0u8; 4];
     len_buf.copy_from_slice(&data[5..9]);
     let orig_len = u32::from_be_bytes(len_buf) as usize;
-    // Decoder with dictionary bytes.
-    let mut dec = zstd::stream::Decoder::with_dictionary(&data[9..], dict_bytes).ok()?;
-    let mut out = body_pool().alloc();
+    let mut dec = zstd::bulk::Decompressor::with_dictionary(dict_bytes).ok()?;
+    let mut out = pool.alloc();
     if out.len() < orig_len {
         return None;
     }
-    use std::io::Read;
-    let n = dec.read(&mut out[..orig_len]).ok()?;
-    Some((out, n))
+    let n = dec.decompress_to_buffer(&data[9..], &mut out[..orig_len]).ok()?;
+    (n == orig_len).then_some((out, n))
 }
 
 // -------------------- Large Body Pool --------------------
@@ -837,19 +843,24 @@ fn parse_ver_hash(name: &str) -> Option<(u16, u16)> {
 /// Check if a MIME type `value` matches a `pattern` (supports wildcard subtypes).
 #[inline]
 pub fn mime_matches(pattern: &str, value: &str) -> bool {
+    let pattern = pattern.split(';').next().unwrap_or(pattern).trim();
+    let value = value.split(';').next().unwrap_or(value).trim();
     if let Some(pos) = pattern.find('/') {
         let (pt, ps) = pattern.split_at(pos);
         let ps = &ps[1..];
         if let Some(pos2) = value.find('/') {
             let (vt, vs) = value.split_at(pos2);
             let vs = &vs[1..];
-            return (pt == vt || pt == "*")
-                && (ps == vs
+            return (pt.eq_ignore_ascii_case(vt) || pt == "*")
+                && (ps.eq_ignore_ascii_case(vs)
                     || ps == "*"
-                    || (ps.ends_with("*") && vs.starts_with(&ps[..ps.len() - 1])));
+                    || (ps.ends_with('*')
+                        && vs.get(..ps.len() - 1).is_some_and(|prefix| {
+                            prefix.eq_ignore_ascii_case(&ps[..ps.len() - 1])
+                        })));
         }
     }
-    pattern == value
+    pattern.eq_ignore_ascii_case(value)
 }
 
 // -------------------- Entropy estimator --------------------
@@ -968,7 +979,7 @@ mod tests {
 
     #[test]
     fn compress_with_dict_roundtrip_uses_pool_buffer() {
-        let pool = body_pool();
+        let pool = Arc::new(MemoryPool::new(4, 16 * 1024));
         let dict = b"header:value\ncontent-type:text/plain\nhello hello hello\n";
         let mut payload = Vec::new();
         for _ in 0..48 {
@@ -987,5 +998,36 @@ mod tests {
             decompress_with_dict(&pool, &compressed[..used], dict).expect("decompress with dict");
         assert_eq!(decompressed_len, payload.len());
         assert_eq!(&decompressed[..decompressed_len], payload.as_slice());
+    }
+
+    #[test]
+    fn compression_policy_enforces_allow_and_deny_patterns() {
+        let policy = CompressionPolicy::default();
+
+        assert!(policy.allows_content_type(Some("text/css; charset=utf-8")));
+        assert!(policy.allows_content_type(Some("application/json; charset=utf-8")));
+        assert!(!policy.allows_content_type(Some("image/png")));
+        assert!(!policy.allows_content_type(Some("application/zip")));
+        assert!(!policy.allows_content_type(Some("application/octet-stream")));
+        assert!(policy.allows_content_type(None));
+
+        let deny_precedence = CompressionPolicy {
+            allow: vec!["image/*".into()],
+            deny: vec!["image/png".into()],
+            ..policy
+        };
+        assert!(!deny_precedence.allows_content_type(Some("IMAGE/PNG")));
+    }
+
+    #[test]
+    fn decompression_rejects_payload_length_mismatch() {
+        let pool = Arc::new(MemoryPool::new(4, 16 * 1024));
+        let manager = CompressionManager::new(CompressionConfig::default());
+        let payload = b"compression length contract".repeat(64);
+        let (compressed, used) = manager.compress_to_pool(&pool, &payload).expect("compress");
+
+        let mut wrong_header = compressed[..used].to_vec();
+        wrong_header[1..5].copy_from_slice(&((payload.len() + 1) as u32).to_be_bytes());
+        assert!(manager.decompress_to_pool(&pool, &wrong_header).is_none());
     }
 }

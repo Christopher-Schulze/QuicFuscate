@@ -530,7 +530,8 @@ cfg.log_keys();
   - Header semantics are identical to direct: `0x5A` (no dict) or `0x5D` (with dict-ID: 2B hash, 2B version, then 4B length).
 - Safe path (`src/compress.rs`):
   - `CompressionManager::compress_to_pool()` writes zstd output directly into the caller-provided pool block after the `0x5A` header via `zstd::bulk::Compressor::compress_to_buffer`.
-  - Dictionary compression writes directly into the body-pool block after the `0x5D` dictionary header via `zstd::bulk::Compressor::with_dictionary(...).compress_to_buffer(...)`.
+  - `CompressionManager::decompress_to_pool()` writes directly into the caller-provided pool block with `zstd::bulk::decompress_to_buffer`, validating the declared original length without an intermediate `Vec`.
+  - Dictionary compression and decompression write directly into the caller-provided pool block via the symmetric bulk compressor/decompressor APIs after the `0x5D` dictionary header.
   - No API change; behavior is compatible, headers remain `0x5A` and `0x5D` in the safe path.
 
 #### Provider API (Unified)
@@ -861,6 +862,7 @@ The compression module (`src/compress.rs`) provides adaptive zstd payload compre
 - **`CompressionPolicy`**: Runtime policy control for adaptive compression decisions
 - **`CompressionAnalysis`**: SIMD-powered preprocessing (ASCII/newline/null/high-bit counters + chunk hashing) feeding telemetry (`COMPRESS_PREPROC_*`) and influencing encoder tuning.
 - Pool-backed compression writes compressed zstd frames directly into `MemoryPool` / body-pool blocks with `compress_to_buffer`, avoiding an intermediate compressed `Vec` copy while preserving H3 payload semantics and wire headers.
+- H3 content-type compression uses the policy allow/deny lists centrally; explicit denies override allows, MIME parameters are ignored for matching, and payloads without a content type still require the textuality heuristic.
 
 #### Supported Algorithms
 - **zstd** only (levels 1-22), with optional dictionary training
