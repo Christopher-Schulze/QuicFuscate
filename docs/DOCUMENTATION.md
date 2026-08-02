@@ -4588,6 +4588,7 @@ A full deep-audit sweep of `src/` was performed with parallel read-only module s
 - **Client profile ID collision**: `src/implementations/client/profile.rs` masks a nanosecond timestamp to 32 bits, creating predictable collisions. Tracked in TODO-658.
 - **Retry token length validation after encoding**: `src/implementations/server/ddos.rs` checks `MAX_RETRY_TOKEN_LEN` only after building the token. Tracked in TODO-659.
 - **DNS NXDOMAIN lie**: `src/dns/mod.rs` returns NXDOMAIN for upstream failures. Tracked in TODO-666.
+- **DNS query wire semantics**: DNS admission accepts incomplete query/header/name semantics and synthetic responses can rewrite the original question. Tracked in TODO-770.
 - **fsutil TOCTOU race**: `src/implementations/server/fsutil.rs` now creates and secures the temporary file before the atomic rename, with post-rename defense-in-depth. Resolved by TODO-591; TODO-667 was a duplicate tracker.
 - **MASQUE/DoH ownership**: TODO-597 retired the empty `stealth::MasqueManager`, its false-success send/legacy-varint path, and the unused stealth-local DoH resolver. Core H3/MASQUE now owns the active CONNECT-UDP/capsule carrier, buffers split DATA, rejects malformed or truncated FIN tails before event delivery, and covers all 1/2/4/8-byte varints including 16,384-byte payloads. Retired sources and the obsolete integration test remain recoverable under `archive/`; production DoH remains owned by `src/dns/mod.rs`.
 
