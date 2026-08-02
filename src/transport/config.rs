@@ -1193,12 +1193,14 @@ impl Config {
         self.verify_locations_directory = Some(dir.to_string());
         Ok(())
     }
-    /// Sets a Real-TLS ClientHello template for deterministic TLS fingerprinting.
+    /// Stores a deterministic ClientHello template for compatibility and audit
+    /// inspection. The active rustls connection builder does not consume this
+    /// field; real wire ClientHello construction is owned by the TLS provider.
     pub fn set_chlo_template(&mut self, tmpl: &[u8]) -> Result<(), crate::error::ConnectionError> {
         self.chlo_template = Some(tmpl.to_vec());
         Ok(())
     }
-    /// Applies a deterministic TLS ClientHello template (alias for `set_chlo_template`).
+    /// Stores a deterministic ClientHello template (alias for `set_chlo_template`).
     pub fn apply_deterministic_tls_hello_template(
         &mut self,
         tmpl: &[u8],

@@ -377,6 +377,29 @@ pub fn profile_from_fingerprint(fp: &crate::stealth::FingerprintProfile) -> TlsP
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn client_hello_cipher_suites(frame: &[u8]) -> Vec<u16> {
+        assert!(frame.len() >= 4, "ClientHello handshake header is truncated");
+        assert_eq!(frame[0], 0x01, "expected a ClientHello handshake");
+        let body_len = usize::try_from(u32::from_be_bytes([0, frame[1], frame[2], frame[3]]))
+            .expect("ClientHello body length");
+        assert!(frame.len() >= 4 + body_len, "ClientHello body is truncated");
+        let body = &frame[4..4 + body_len];
+        assert!(body.len() >= 35, "ClientHello body lacks version/random/session ID");
+        let session_id_len = usize::from(body[34]);
+        let suites_len_offset = 35 + session_id_len;
+        assert!(body.len() >= suites_len_offset + 2, "cipher-suite length is truncated");
+        let suites_len =
+            usize::from(u16::from_be_bytes([body[suites_len_offset], body[suites_len_offset + 1]]));
+        let suites_start = suites_len_offset + 2;
+        assert_eq!(suites_len % 2, 0, "cipher-suite vector has an odd length");
+        assert!(body.len() >= suites_start + suites_len, "cipher-suite vector is truncated");
+        body[suites_start..suites_start + suites_len]
+            .chunks_exact(2)
+            .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
+            .collect()
+    }
+
     #[test]
     fn profile_from_fp_has_h3_first() {
         let fp = crate::stealth::FingerprintProfile::new(
@@ -455,6 +478,33 @@ mod tests {
                 !p.cipher_suites.iter().any(|cs| matches!(*cs, 0x1303 | 0xCCA8 | 0xCCA9)),
                 "ChaCha suites must be removed by policy for profile {}",
                 p.name
+            );
+        }
+    }
+
+    #[test]
+    fn rustls_client_hello_policy_excludes_chacha_for_chrome_and_firefox() {
+        let crypto = Arc::new(RwLock::new(CryptoContext::default()));
+        let mut provider = RustlsProvider::new(
+            false,
+            Arc::clone(&crypto),
+            false,
+            crate::transport::PROTOCOL_VERSION,
+            &[],
+        )
+        .expect("client provider");
+
+        for profile in [TlsProfile::chrome_130(), TlsProfile::firefox_133()] {
+            provider.configure(&profile).expect("configure profile");
+            let (_, frame) = provider
+                .next_crypto_frame(Level::Initial, usize::MAX)
+                .expect("initial ClientHello");
+            let suites = client_hello_cipher_suites(&frame);
+            assert!(
+                !suites.iter().any(|suite| matches!(*suite, 0x1303 | 0xCCA8 | 0xCCA9)),
+                "real rustls ClientHello for {} contains ChaCha: {:?}",
+                profile.name,
+                suites
             );
         }
     }
@@ -977,6 +1027,24 @@ mod rustls_provider {
     }
 
     /// Full-featured rustls QUIC TLS provider with session resumption, 0-RTT, and PQ support.
+    /// Build the shared rustls provider with the project's real-TLS ChaCha policy.
+    ///
+    /// This provider is used on both client and server connections. TLS Cover's
+    /// synthetic record cipher remains independently configurable and is not part
+    /// of this ClientHello negotiation policy.
+    fn crypto_provider_without_chacha() -> rustls::crypto::CryptoProvider {
+        let mut provider = rustls::crypto::ring::default_provider();
+        provider.cipher_suites.retain(|suite| {
+            !matches!(
+                suite.suite(),
+                rustls::CipherSuite::TLS13_CHACHA20_POLY1305_SHA256
+                    | rustls::CipherSuite::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
+                    | rustls::CipherSuite::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+            )
+        });
+        provider
+    }
+
     pub struct RustlsProviderImpl {
         /// Active rustls QUIC connection (client or server side).
         pub connection: rustls::quic::Connection,
@@ -1132,6 +1200,31 @@ mod rustls_provider {
             );
             assert!(provider.profile_ready_at.is_some_and(|ready_at| ready_at > Instant::now()));
             assert!(provider.next_crypto_frame(Level::Initial, 1200).is_none());
+        }
+    }
+
+    #[cfg(test)]
+    mod cipher_policy_tests {
+        use super::*;
+
+        #[test]
+        fn shared_client_server_provider_excludes_chacha() {
+            let provider = crypto_provider_without_chacha();
+            assert!(provider.cipher_suites.iter().any(|suite| {
+                matches!(
+                    suite.suite(),
+                    rustls::CipherSuite::TLS13_AES_128_GCM_SHA256
+                        | rustls::CipherSuite::TLS13_AES_256_GCM_SHA384
+                )
+            }));
+            assert!(provider.cipher_suites.iter().all(|suite| {
+                !matches!(
+                    suite.suite(),
+                    rustls::CipherSuite::TLS13_CHACHA20_POLY1305_SHA256
+                        | rustls::CipherSuite::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
+                        | rustls::CipherSuite::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+                )
+            }));
         }
     }
 
@@ -1402,11 +1495,12 @@ mod rustls_provider {
             let _ = verify_peer;
             let roots = Self::build_client_root_store()?;
 
-            let builder = ClientConfig::builder_with_provider(Arc::new(
-                rustls::crypto::ring::default_provider(),
-            ))
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .map_err(|e| ConnectionError::TlsError(format!("Protocol version error: {}", e)))?;
+            let builder =
+                ClientConfig::builder_with_provider(Arc::new(crypto_provider_without_chacha()))
+                    .with_protocol_versions(&[&rustls::version::TLS13])
+                    .map_err(|e| {
+                        ConnectionError::TlsError(format!("Protocol version error: {}", e))
+                    })?;
             #[cfg(debug_assertions)]
             let allow_invalid = !verify_peer
                 || crate::env_utils::env_flag("QUICFUSCATE_ALLOW_INVALID_CERTS", false);
@@ -1481,14 +1575,15 @@ mod rustls_provider {
                 }
             };
 
-            let config = ServerConfig::builder_with_provider(Arc::new(
-                rustls::crypto::ring::default_provider(),
-            ))
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .map_err(|e| ConnectionError::TlsError(format!("Protocol version error: {}", e)))?
-            .with_no_client_auth()
-            .with_single_cert(certs, key)
-            .map_err(|e| ConnectionError::TlsError(format!("Cert error: {}", e)))?;
+            let config =
+                ServerConfig::builder_with_provider(Arc::new(crypto_provider_without_chacha()))
+                    .with_protocol_versions(&[&rustls::version::TLS13])
+                    .map_err(|e| {
+                        ConnectionError::TlsError(format!("Protocol version error: {}", e))
+                    })?
+                    .with_no_client_auth()
+                    .with_single_cert(certs, key)
+                    .map_err(|e| ConnectionError::TlsError(format!("Cert error: {}", e)))?;
 
             let mut config = config;
             config.alpn_protocols = vec![b"h3".to_vec(), b"h3-29".to_vec()];
@@ -1663,11 +1758,12 @@ mod rustls_provider {
             // (otherwise the rebuilt connection would only trust native roots and reject
             // a custom CA with UnknownIssuer).
             let roots = Self::build_client_root_store()?;
-            let builder = ClientConfig::builder_with_provider(Arc::new(
-                rustls::crypto::ring::default_provider(),
-            ))
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .map_err(|e| ConnectionError::TlsError(format!("Protocol version error: {}", e)))?;
+            let builder =
+                ClientConfig::builder_with_provider(Arc::new(crypto_provider_without_chacha()))
+                    .with_protocol_versions(&[&rustls::version::TLS13])
+                    .map_err(|e| {
+                        ConnectionError::TlsError(format!("Protocol version error: {}", e))
+                    })?;
             #[cfg(debug_assertions)]
             let allow_invalid = !self.verify_peer
                 || crate::env_utils::env_flag("QUICFUSCATE_ALLOW_INVALID_CERTS", false);

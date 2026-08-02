@@ -418,7 +418,7 @@ The stealth design is one coherent browser-like H3/MASQUE flow, not a pile of un
 stealth toggles. TODO-464 through TODO-471 are complete and define the production policy.
 
 - Persona: one browser/OS/TLS/H3/QPACK persona is selected per connection and remains immutable for that connection. Profile sequences and interval rotation are next-connection/reconnect policies, not mid-session identity mutation.
-- TLS: RealTLS via rustls with optional TLS Cover that emits synthetic encrypted QUIC cover records from the active profile (no external uTLS/FFI in the cover layer). TLS Cover does not own or synthesize the real ClientHello. The Engine client path now passes the uTLS/persona decision instead of hardcoding it off.
+- TLS: RealTLS via rustls with optional TLS Cover that emits synthetic encrypted QUIC cover records from the active profile (no external uTLS/FFI in the cover layer). TLS Cover does not own or synthesize the real ClientHello. The Engine client path now passes the uTLS/persona decision instead of hardcoding it off; a shared filtered rustls provider removes ChaCha suites from real client offers and server-accepted suites.
 - HTTP/3/QPACK: ALPN, header sets, QPACK policy, and framing must align with the selected persona snapshot.
 - Core H3/MASQUE: production VPN/TUN payloads use the Core H3/MASQUE data plane. It is the sole active CONNECT-UDP/capsule carrier; the retired `stealth::MasqueManager` and stealth-local DoH resolver are preserved only under `archive/`.
 - Domain Fronting: useful only with explicit, vetted fronting configuration. Blind fronting defaults are disabled for Performance, Stealth, and clean Intelligent mode.
@@ -449,7 +449,7 @@ The intended result is a homogeneous, believable fingerprint: normal QUIC crypto
 - Real TLS: implemented via rustls in `src/qftls.rs` with `CombinedProvider` orchestrating a rustls protocol stack plus optional TLS Cover overlay. Client certificate verification is enabled by default and mandatory in release builds; `--verify-peer` is retained as a compatibility flag, `--ca-file` adds a private trust anchor, and negotiated HTTP/3 is unavailable until rustls completes.
 - TLS Cover: cover provider in `qftls::CombinedProvider` is enabled by default and can be disabled with `QUICFUSCATE_TLS_COVER=0`. Generates synthetic QUIC `CRYPTO` frames during the TLS handshake phase only (correct QUIC behavior per RFC 9001 - CRYPTO frames do not appear post-handshake in real QUIC). Post-handshake cover is provided by QUIC Cover PINGs, H3-framed cover requests and Server Push/WebTransport, plus transport TrafficPadding. Raw random bytes are never injected into an H3 stream. The canonical runtime cover mode now comes from the active `StealthManager::runtime_tls_profile(...)`: `off`, `performance`, and `intelligent` drive the cover layer into performance mode, while stealth-heavy modes keep timing/jitter enabled. `StealthConfig.use_tls_cover` (TOML alias: `use_tls_cover_extras`) enables TLS Cover extras in the stealth manager (ticket manager and cert chain emulator) but does not control the cover provider itself. Cipher selection is automatic (`auto`) and prefers AES-128-GCM when hardware AES (AESNI/VAES/SVE AES) is available, otherwise falls back to ChaCha20-Poly1305. Each provider obtains fresh OS entropy and derives connection-local key/IV material through domain-separated HKDF. `CryptoContext::install_tls_cover_cipher` is the single install/rotation contract: exact active material is an idempotent no-op that preserves sequence numbers, fresh material retires the previous identity and resets both directions, retired material is rejected, and sequence exhaustion fails closed with `AeadLimitReached`. Cover-frame generation never performs lazy reinstallation. On x86 the ChaCha keystream dispatches AVX-512 -> AVX2 -> AVX -> SSE4.1/SSSE3 -> Scalar with telemetry (`CHACHA20_X4_AVX2_OPS`, `CHACHA20_X4_AVX_OPS`, `CHACHA20_X4_SSE41_OPS`, `CHACHA20_X4_SCALAR_OPS`). Override via `QUICFUSCATE_TLS_COVER_CIPHER=auto|chacha|aes`.
 - Ownership split: `qftls::CombinedProvider` provides a single runtime interface that keeps rustls as the security-critical protocol owner and composes the cover layer for observable mimicry behavior where enabled.
-- ClientHello boundary: `TlsCoverProvider` emits synthetic decoy records and reports no ClientHello-override support. Real ClientHello protocol/configuration remains owned by rustls and the explicit TLS profile path; the removed cover-template machinery is tracked by TODO-596, while production injected-ClientHello policy remains separately tracked by TODO-598.
+- ClientHello boundary: `TlsCoverProvider` emits synthetic decoy records and reports no ClientHello-override support. Real ClientHello protocol/configuration remains owned by rustls. `TlsClientHelloSpoofer` generates deterministic persona templates for compatibility and audit inspection, but `transport::Config::chlo_template` is write-only in the active source and cannot override the wire; TODO-766 owns removal or proper wiring of that API. TODO-598 closes the real-TLS ChaCha policy gap and removes the dead advanced builder.
 - Fork boundary: rustls/TLS Cover governs the TLS-visible handshake story only. The custom 1-RTT data-plane AEAD posture in `src/crypto/` and `src/transport/*` is a separate fork-specific transport decision, valid only under the explicit full-fork assumption, and must not be interpreted as a TLS cipher-suite or upstream interoperability claim.
 - Risk/Tradeoff: enabling TLS Cover increases cover-byte volume and per-packet processing work.
 - Certificate tooling: development certificates enabled by feature `dev-certs` (rcgen); production uses PEM chain via `--cert/--key` (server) and CA bundle via `--ca-file` (client).
@@ -457,11 +457,12 @@ The intended result is a homogeneous, believable fingerprint: normal QUIC crypto
   - Anti-replay: 0-RTT data is protected by a SHA-256 strike register (`src/transport/anti_replay.rs`) per RFC 8446 Section 8 and RFC 9001 Section 9.2. The register uses a Bloom fast-negative in front of the full-fingerprint index and a FIFO ring for O(1) capacity eviction. Replayed 0-RTT packets are silently discarded; clients fall back to 1-RTT automatically. Configurable via `[anti_replay]` TOML section.
 
 #### Fingerprint Source Model
-- Primary runtime path: deterministic in-memory ClientHello synthesis via `TlsClientHelloSpoofer` from `BrowserProfile` and `OsProfile`.
+- Primary runtime path: `TlsProfile` selection and rustls `ClientConfig` construction from the active `BrowserProfile` and `OsProfile` persona.
+- Compatibility/audit path: deterministic in-memory ClientHello synthesis via `TlsClientHelloSpoofer`; the resulting bytes are stored as metadata and are not consumed by the active rustls connection builder.
 - Optional external path: top-level `browser_profiles/*.chlo` or `*.chlo.b64` dumps for strict byte-level replay and audit/regression workflows.
 - The `qftls` browser profile extension-order metadata keeps unique IANA-registered extension IDs plus intentional GREASE; Chrome's `renegotiation_info` and `compress_certificate` values are covered by regression tests (TODO-595).
-- Injection path: selected ClientHello bytes are injected natively through transport configuration (`set_custom_tls`) and then cached in memory.
-- Operational rule: external dumps are optional; runtime operation remains available without on-disk profile artifacts.
+- Provider path: `RustlsProvider::rebuild_client_connection` constructs the real client handshake with the shared filtered provider; `create_server_connection` uses the same provider policy.
+- Operational rule: external dumps and deterministic compatibility templates are optional; runtime operation remains available without on-disk profile artifacts.
 
 #### Environment Controls
 - `QUICFUSCATE_TLS_COVER=0|1` - enable or disable the TLS Cover provider in `qftls` (default: enabled, set to `0` to disable).
@@ -3435,9 +3436,9 @@ The current control additionally samples exact process CPU/RSS and standalone al
 
 This section is an operational view; canonical behavior is defined in "Unified TLS Provider (RealTLS + TLS Cover) -> Fingerprint Source Model".
 
-QuicFuscate performs native TLS handshake profile injection using deterministic in-memory ClientHello synthesis selected by `--profile` and `--os`. Runtime operation does not require on-disk profile dumps.
+QuicFuscate performs native TLS handshake profile selection using `TlsProfile` values selected by `--profile` and `--os`; rustls constructs the real wire ClientHello. Deterministic in-memory ClientHello templates remain available for compatibility and audit inspection. Runtime operation does not require on-disk profile dumps.
 
-Generated ClientHello bytes are cached in memory for reuse across connections.
+Generated compatibility ClientHello templates are cached in memory for reuse across connections.
 
 If you maintain external profile dumps for audit/regression purposes, place them under `browser_profiles/` and use the TLS utilities to inspect and verify them.
 Example:
@@ -3464,7 +3465,7 @@ Notes
 
 ### TLS Cover Exchange
 
-TLS Cover is a lightweight synthetic exchange for stealth shaping and traffic realism. It derives profile-scoped cover-record material from the active fingerprint profile and emits synthesized reply artifacts with shorter message sizing than a full handshake. It does not generate or replace a real ClientHello.
+TLS Cover is a lightweight synthetic exchange for stealth shaping and traffic realism. It derives profile-scoped cover-record material from the active fingerprint profile and emits synthesized reply artifacts with shorter message sizing than a full handshake. It does not generate or replace a real ClientHello. Real ClientHello bytes are owned by rustls; compatibility templates stored by `TlsClientHelloSpoofer` are not consumed on the wire.
 
 TLS Cover is optional and does not replace native TLS security semantics.
 

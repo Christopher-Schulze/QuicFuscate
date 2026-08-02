@@ -1,9 +1,9 @@
 // --- 10. TLS Client Hello Spoofing
 
-/// Allows manipulation of the TLS ClientHello to mimic real browser behaviour.
+/// Provides deterministic browser/OS persona metadata and compatibility templates.
 ///
-/// ClientHello bytes are synthesized in-memory using integrated fingerprinting,
-/// replacing legacy on-disk dumps.
+/// The active wire ClientHello is created by rustls from [`TlsProfile`]. The
+/// synthesized bytes retained by this helper are not a runtime wire override.
 /// Profiles are referenced via [`BrowserProfile`] and [`OsProfile`].
 pub struct TlsClientHelloSpoofer;
 
@@ -17,153 +17,7 @@ type ChloCache = Mutex<ChloCacheMap>;
 static CHLO_CACHE: std::sync::OnceLock<ChloCache> = std::sync::OnceLock::new();
 
 impl TlsClientHelloSpoofer {
-    /// Generate ClientHello with advanced features.
-    pub fn generate_advanced_hello(
-        browser: BrowserProfile,
-        os: OsProfile,
-        sni: Option<&str>,
-        session_tickets: Option<Vec<(Vec<u8>, u32)>>,
-        enable_ech: bool,
-    ) -> Vec<u8> {
-        let seed = (browser as u16) ^ ((os as u16) << 8);
-        let enable_grease = !matches!(browser, BrowserProfile::Safari);
-
-        // Build extensions with all advanced features
-        let mut exts = Vec::with_capacity(1024);
-
-        // Add extensions in browser-specific order
-        let ext_order = Self::get_extension_order(browser);
-
-        for ext_name in ext_order {
-            match *ext_name {
-                "grease" if enable_grease => {
-                    exts.extend_from_slice(&tls_cover::grease_ext(seed));
-                }
-                "sni" => {
-                    if let Some(host) = sni {
-                        exts.extend_from_slice(&tls_cover::sni_ext(host));
-                    }
-                }
-                "session_ticket" => {
-                    if let Some(ref tickets) = session_tickets {
-                        exts.extend_from_slice(&Self::build_psk_extension(tickets));
-                    }
-                }
-                "ech" if enable_ech => {
-                    exts.extend_from_slice(&Self::build_ech_grease());
-                }
-                "supported_versions" => {
-                    exts.extend_from_slice(&Self::build_supported_versions());
-                }
-                "key_share" => {
-                    exts.extend_from_slice(&tls_cover::key_share_ext(0x001d, seed as u64));
-                }
-                _ => {}
-            }
-        }
-
-        // Generate full ClientHello
-        tls_cover::TlsCover::client_hello_custom(tls_cover::ClientHelloParams {
-            tls_version: 0x0303,
-            cipher_suites: &Self::get_cipher_suites(browser, enable_grease, seed),
-            extensions: &exts,
-        })
-    }
-
-    fn get_extension_order(browser: BrowserProfile) -> &'static [&'static str] {
-        match browser {
-            BrowserProfile::Chrome | BrowserProfile::Edge => &[
-                "grease",
-                "sni",
-                "ech",
-                "supported_versions",
-                "key_share",
-                "session_ticket",
-                "psk_modes",
-                "signature_algorithms",
-            ],
-            BrowserProfile::Firefox => &[
-                "sni",
-                "supported_versions",
-                "signature_algorithms",
-                "key_share",
-                "session_ticket",
-                "psk_modes",
-                "ech",
-            ],
-            BrowserProfile::Safari => &[
-                "sni",
-                "supported_versions",
-                "signature_algorithms",
-                "key_share",
-                "session_ticket",
-            ],
-        }
-    }
-
-    fn get_cipher_suites(browser: BrowserProfile, grease: bool, seed: u16) -> Vec<u16> {
-        let mut ciphers = match browser {
-            BrowserProfile::Firefox => vec![0x1301, 0x1302, 0x1303, 0xCCA9, 0xCCA8],
-            _ => vec![0x1301, 0x1302, 0x1303, 0xC02B, 0xC02F],
-        };
-
-        if grease {
-            ciphers.insert(0, tls_cover::grease_value(seed as usize));
-        }
-
-        ciphers
-    }
-
-    fn build_psk_extension(tickets: &[(Vec<u8>, u32)]) -> Vec<u8> {
-        let mut ext = Vec::with_capacity(256);
-
-        // Extension type (pre_shared_key = 41)
-        ext.extend_from_slice(&41u16.to_be_bytes());
-
-        // Build identities
-        let mut identities = Vec::new();
-        for (ticket, age_ms) in tickets.iter().take(2) {
-            identities.extend_from_slice(&(ticket.len() as u16).to_be_bytes());
-            identities.extend_from_slice(ticket);
-            identities.extend_from_slice(&age_ms.to_be_bytes());
-        }
-
-        // Extension length
-        ext.extend_from_slice(&((identities.len() + 2) as u16).to_be_bytes());
-
-        // Identities length
-        ext.extend_from_slice(&(identities.len() as u16).to_be_bytes());
-        ext.extend_from_slice(&identities);
-
-        ext
-    }
-
-    fn build_ech_grease() -> Vec<u8> {
-        // Build ECH GREASE extension (type 0xfe0d)
-        let mut ext = Vec::with_capacity(128);
-        ext.extend_from_slice(&0xfe0du16.to_be_bytes());
-
-        // Random GREASE data (64 bytes)
-        let grease_len = 64u16;
-        ext.extend_from_slice(&grease_len.to_be_bytes());
-
-        for _ in 0..grease_len {
-            ext.push(rand::random());
-        }
-
-        ext
-    }
-
-    fn build_supported_versions() -> Vec<u8> {
-        let mut ext = Vec::new();
-        ext.extend_from_slice(&43u16.to_be_bytes()); // Extension type
-        ext.extend_from_slice(&3u16.to_be_bytes()); // Length
-        ext.push(2); // Versions length
-        ext.extend_from_slice(&0x0304u16.to_be_bytes()); // TLS 1.3
-        ext
-    }
-
-    /// Loads a base64-encoded ClientHello dump for the given browser/OS from disk.
+    /// Builds a deterministic ClientHello template for the given browser/OS.
     #[inline]
     fn load_client_hello(browser: BrowserProfile, os: OsProfile) -> Option<Vec<u8>> {
         // Fast path: cached profile
@@ -181,25 +35,26 @@ impl TlsClientHelloSpoofer {
         Some(bytes)
     }
 
-    /// Injects the given ClientHello bytes into the transport configuration (native).
+    /// Stores the given ClientHello bytes as compatibility metadata.
     #[inline]
     fn inject_bytes(cfg: &mut crate::transport::Config, hello: &[u8]) {
         if hello.is_empty() {
             return;
         }
-        // Native path: store ClientHello template and adjust GREASE/determinism knobs.
+        // The transport field is retained for compatibility and audit inspection.
+        // The active rustls connection builder does not consume it.
         let _ = cfg.apply_deterministic_tls_hello_template(hello);
     }
 
-    /// Loads the specified profile and injects it into the transport config.
+    /// Loads the specified profile and stores its compatibility template.
     ///
     /// Generates ClientHello using integrated fingerprinting for the specified browser/OS.
     /// If generation fails, this logs an error and leaves `cfg` unchanged.
     ///
     /// Side effects
     /// ------------
-    /// Disables GREASE and enables deterministic hellos for the lifetime of the
-    /// process TLS context. No error is returned.
+    /// This does not replace rustls or alter the active wire handshake. No error
+    /// is returned.
     ///
     /// Examples
     /// --------
@@ -241,6 +96,7 @@ impl TlsClientHelloSpoofer {
                 0xC014,
             ],
         };
+        ciphers.retain(|cipher_suite| !tls_cover::is_client_hello_cipher_removed(*cipher_suite));
 
         if enable_grease {
             let grease = tls_cover::grease_value(seed as usize);
@@ -265,8 +121,8 @@ impl TlsClientHelloSpoofer {
         Self::inject_bytes(cfg, &ch);
     }
 
-    /// Returns a list of all available browser/OS combinations for which a
-    /// ClientHello dump exists.
+    /// Returns browser/OS combinations for which a deterministic compatibility
+    /// template can be generated.
     #[inline]
     pub fn available_profiles() -> Vec<(BrowserProfile, OsProfile)> {
         // Enumerate curated combos that blend in widely

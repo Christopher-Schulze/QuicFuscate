@@ -292,6 +292,62 @@ fn tls_cover_client_hello_is_valid_tls_record() {
     }
 }
 
+fn deterministic_client_hello_cipher_suites(record: &[u8]) -> Vec<u16> {
+    assert!(record.len() >= 9, "ClientHello record is truncated");
+    assert_eq!(record[0], 0x16, "expected a TLS handshake record");
+    assert_eq!(record[5], 0x01, "expected a ClientHello handshake");
+    let body_len = usize::try_from(u32::from_be_bytes([0, record[6], record[7], record[8]]))
+        .expect("ClientHello body length");
+    assert!(record.len() >= 9 + body_len, "ClientHello body is truncated");
+    let body = &record[9..9 + body_len];
+    assert!(body.len() >= 35, "ClientHello body lacks version/random/session ID");
+    let session_id_len = usize::from(body[34]);
+    let suites_len_offset = 35 + session_id_len;
+    assert!(body.len() >= suites_len_offset + 2, "cipher-suite length is truncated");
+    let suites_len =
+        usize::from(u16::from_be_bytes([body[suites_len_offset], body[suites_len_offset + 1]]));
+    let suites_start = suites_len_offset + 2;
+    assert_eq!(suites_len % 2, 0, "cipher-suite vector has an odd length");
+    assert!(body.len() >= suites_start + suites_len, "cipher-suite vector is truncated");
+    body[suites_start..suites_start + suites_len]
+        .chunks_exact(2)
+        .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
+        .collect()
+}
+
+#[test]
+fn apply_utls_profile_client_hello_excludes_chacha_for_chrome_and_firefox() {
+    use super::{BrowserProfile, OsProfile};
+
+    for (browser, os) in
+        [(BrowserProfile::Chrome, OsProfile::Windows), (BrowserProfile::Firefox, OsProfile::Linux)]
+    {
+        let mut stealth_config = StealthConfig::stealth();
+        stealth_config.initial_browser = browser;
+        stealth_config.initial_os = os;
+        let manager = StealthManager::new(
+            stealth_config,
+            Arc::new(OptimizationManager::new()),
+            Arc::new(CryptoManager::new()),
+        );
+        let mut transport_config =
+            crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION)
+                .expect("transport config");
+
+        manager.apply_utls_profile(&mut transport_config, None);
+
+        let hello = transport_config.chlo_template.as_ref().expect("ClientHello template");
+        let suites = deterministic_client_hello_cipher_suites(hello);
+        assert!(
+            !suites.iter().any(|suite| matches!(*suite, 0x1303 | 0xCCA8 | 0xCCA9)),
+            "deterministic ClientHello for {:?}/{:?} contains ChaCha: {:?}",
+            browser,
+            os,
+            suites
+        );
+    }
+}
+
 #[test]
 fn tls_cover_client_hello_firefox_has_no_session_id() {
     use super::{tls_cover::TlsCover, BrowserProfile, OsProfile};

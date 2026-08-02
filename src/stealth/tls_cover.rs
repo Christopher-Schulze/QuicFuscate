@@ -46,6 +46,12 @@ pub(super) fn grease_ext(seed: u16) -> Vec<u8> {
     ext
 }
 
+/// Returns true for cipher suites excluded from the real TLS ClientHello policy.
+/// TLS Cover record encryption remains separately configurable.
+pub(super) fn is_client_hello_cipher_removed(cipher_suite: u16) -> bool {
+    matches!(cipher_suite, 0x1303 | 0xCCA8 | 0xCCA9)
+}
+
 pub(super) fn alpn_ext(protocols: &[&str]) -> Vec<u8> {
     let mut names = Vec::new();
     for p in protocols {
@@ -224,16 +230,9 @@ impl TlsCover {
             ],
         };
 
-        // OS-specific ordering tweaks for fingerprint parity (TLS Cover only)
-        if matches!(os, super::OsProfile::Android) {
-            // Place ChaCha earlier on Android to mirror common mobile stacks
-            if let Some(pos) = ciphers.iter().position(|&cs| cs == 0x1303) {
-                if pos > 1 {
-                    ciphers.remove(pos);
-                    ciphers.insert(1, 0x1303);
-                }
-            }
-        }
+        // The real TLS policy removes ChaCha from every deterministic ClientHello.
+        // Synthetic TLS Cover record encryption is a separate, explicit choice.
+        ciphers.retain(|cipher_suite| !is_client_hello_cipher_removed(*cipher_suite));
 
         // Add GREASE cipher if enabled
         if enable_grease {

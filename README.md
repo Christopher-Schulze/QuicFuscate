@@ -120,7 +120,7 @@ Rule of thumb:
 ## Core Features
 
 ### Stealth Techniques
-- **Curated Browser Fingerprints**: Out-of-the-box deterministic in-memory ClientHello synthesis for curated browser/OS combinations (Chrome, Firefox, Safari, Edge), with no on-disk profile requirement for runtime operation<br>
+- **Curated Browser Fingerprints**: Curated browser/OS persona metadata (Chrome, Firefox, Safari, Edge) drives the real rustls ClientHello; deterministic in-memory templates remain available for compatibility and audit inspection without an on-disk profile requirement<br>
 - **Native TLS handshake profile injection + TLS Cover**: Applies native fingerprint-aligned TLS profiles and can emit a lightweight synthetic TLS Cover exchange for stealth traffic shaping<br>
 - **Domain Fronting**: Masks traffic by routing through trusted CDN providers
   - Rotates across vetted provider domains to decouple the visible SNI from the true origin<br>
@@ -131,7 +131,7 @@ Rule of thumb:
   - Selected by an active TUN bridge or Intelligent-mode escalation; the retired standalone manager is not part of the runtime<br>
 - **Traffic Obfuscation**: XOR-based obfuscation layer (compatibility-only, not part of the default runtime)
   - Sealed QUIC datagrams remain unmodified to preserve AEAD/FEC integrity<br>
-- **TLS Profile Cache**: Generated ClientHello bytes are cached in memory for reuse across connections<br>
+- **TLS Profile Cache**: Generated compatibility ClientHello templates are cached in memory for reuse across connections<br>
 - **DNS-over-HTTPS (DoH)**: Resolves DNS via HTTPS to hide queries from on-path resolvers<br>
 - **QPACK Header Shaping**: Encodes realistic HTTP/3 headers with QPACK for indistinguishable request patterns<br>
 - **Active Probe Detection + Reality Fallback**: Detects probe-like traffic patterns and relays suspicious flows through a legitimate upstream path to preserve realistic network behavior under active scanning<br>
@@ -358,7 +358,7 @@ cd ../tauri
 bun run tauri build
 ```
 
-QuicFuscate works out of the box with deterministic in-memory ClientHello synthesis for curated browser/OS profiles. External `.chlo`/`.chlo.b64` dumps under `browser_profiles/` are optional and intended for audit/regression workflows.
+QuicFuscate works out of the box with curated browser/OS TLS profiles. The active wire ClientHello is constructed by rustls; deterministic in-memory templates are retained for compatibility and audit/regression workflows. External `.chlo`/`.chlo.b64` dumps under `browser_profiles/` are optional.
 
 ### Running the tests
 

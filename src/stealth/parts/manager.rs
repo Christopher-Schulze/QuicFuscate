@@ -406,9 +406,9 @@ impl StealthManager {
     }
 
     /// Applies the configured TLS fingerprint to the transport configuration.
-    /// ClientHello bytes are generated using integrated fingerprinting and injected
-    /// natively via `Config::set_custom_tls`, ensuring the handshake matches the
-    /// specified browser exactly (deterministic, GREASE disabled).
+    /// The deterministic ClientHello bytes are retained as compatibility metadata;
+    /// the real wire ClientHello is emitted by the rustls provider during
+    /// `configure_tls`, where the shared cipher policy is enforced.
     pub(crate) fn apply_utls_profile(
         &self,
         config: &mut crate::transport::Config,
@@ -423,11 +423,12 @@ impl StealthManager {
         };
         info!("Applying uTLS fingerprint for: {:?}/{:?}", fingerprint.browser, fingerprint.os);
 
-        // Manipulate TLS ClientHello to match the desired ordering.
-        // Note: Config currently provides no stable API to set ciphers directly.
-        // Cipher ordering is governed by the injected ClientHello profile.
+        // Retain the deterministic persona bytes for compatibility and audit
+        // inspection. The transport config has no active wire consumer for this
+        // field; rustls owns the real ClientHello and its cipher policy.
         if preferred.is_some() {
-            // Preference is applied via pre-ordered ClientHello bytes in the spoofed profile.
+            // Preference is applied by the active runtime TLS profile. The retained
+            // compatibility bytes are not a wire-level override.
         }
         if fingerprint.client_hello.is_none() {
             fingerprint.client_hello =
