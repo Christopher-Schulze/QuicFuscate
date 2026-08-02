@@ -818,6 +818,7 @@ When an active probe is detected (invalid QUIC authentication, suspicious packet
 - `StealthRuntimeOwner` is created once per client or server runtime generation, including the standalone CLI client path. Production connection construction passes that owner into `StealthManager`; compatibility constructors used by the finite `qf-e2e-client` probe and direct tests remain non-spawning.
 - The owner shares one validated `RealityConfig` and one `CoverHandshakeCache` across all connections, owns the cancellation-aware refresh worker, and periodically sweeps `RealityProxy` sessions independently of probe traffic.
 - Standalone profile rotation uses the same owner, cancellation signal, generation identity, bounded join timeout, and shutdown barrier. Client and server stop paths explicitly signal and await owned workers; a replacement runtime receives a new generation.
+- `StealthRuntimeOwner::start()` and `spawn_owned()` fail closed with an explicit error when no Tokio runtime is active; the compatibility `StealthManager::new()` path constructs without spawning background work.
 - Cover TCP connect, TLS handshake, raw-capture collection, refresh delay, and retry delay are bounded. Capture-channel closure is reported as an error rather than converted into an empty successful capture.
 
 #### DoH Multi-Provider Rotation
@@ -834,6 +835,7 @@ The stealth timing system has been fully refactored to eliminate blocking `std::
 - `core::QuicFuscateConnection` is the single outbound timing owner via `next_packet_release: Option<Instant>`.
 - `send()` checks `next_packet_release`; if `now < release_time`, returns `Ok(0)` (yield) without blocking the reactor.
 - Transport stealth jitter (`stealth_timing_enabled` / `stealth_timing_max_jitter_us`) is merged into the same release deadline; `transport::Connection::send` no longer maintains a parallel gate.
+- `RustlsProviderImpl::apply_profile_to_config()` records a profile-ready deadline instead of sleeping; `flush_handshake_io()` suppresses CRYPTO emission until that deadline expires, preserving the synchronous provider API without blocking an executor.
 - When delay expires, clears the block and proceeds to flush `outgoing_fec_packets`.
 
 #### Traffic-Analysis Defense Scheduler

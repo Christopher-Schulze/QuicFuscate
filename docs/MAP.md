@@ -71,6 +71,8 @@ One owner is created per client/server runtime generation, including `main_parts
 - `watch` cancellation plus named `JoinHandle` registry: Reality refresh, timer-driven proxy cleanup, and next-connection profile rotation are explicitly joined with a bounded shutdown timeout.
 - `RealityProxy` registration uses weak references, so proxy sessions do not keep an old runtime generation alive after connection teardown.
 - Compatibility constructors without an owner create no background worker and preserve direct-test/legacy behavior.
+- `StealthRuntimeOwner::start()` and `spawn_owned()` require an active Tokio runtime and return an explicit error otherwise; `StealthManager::new()` remains a non-spawning compatibility constructor.
+- TLS profile jitter is represented as a provider-local readiness deadline; `RustlsProviderImpl::flush_handshake_io()` gates CRYPTO emission without synchronous executor blocking.
 
 ### Stealth Stack Coherence Wave (2026-06-30)
 - Engine client uses `stealth.use_utls` and no longer hardcodes `use_utls=false`.

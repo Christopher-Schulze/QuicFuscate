@@ -933,6 +933,7 @@ mod rustls_provider {
     use rustls_native_certs::load_native_certs;
     use std::collections::VecDeque;
     use std::sync::Arc;
+    use std::time::Instant;
     use webpki_roots;
 
     pub(super) fn validate_server_identity_pem(
@@ -982,6 +983,8 @@ mod rustls_provider {
         pub peer_transport_params: Option<Vec<u8>>,
         /// Active TLS profile configuration.
         pub profile: Option<TlsProfile>,
+        /// Earliest instant at which profile-gated handshake bytes may be emitted.
+        pub profile_ready_at: Option<Instant>,
         /// Next 1-RTT secrets for key update.
         pub next_1rtt_secrets: Option<rustls::quic::Secrets>,
         /// Pending local 1-RTT packet keys queued during key update.
@@ -1086,6 +1089,37 @@ mod rustls_provider {
         }
     }
 
+    #[cfg(test)]
+    mod profile_delay_tests {
+        use super::*;
+        use std::time::{Duration, Instant};
+
+        #[test]
+        fn profile_jitter_is_scheduled_without_blocking_configuration() {
+            let crypto = Arc::new(RwLock::new(CryptoContext::default()));
+            let mut provider = RustlsProviderImpl::new(
+                false,
+                crypto,
+                false,
+                crate::transport::PROTOCOL_VERSION,
+                &[],
+            )
+            .expect("client provider");
+            let mut profile = TlsProfile::chrome_130();
+            profile.timing_jitter = Some(Duration::from_secs(2));
+
+            let started = Instant::now();
+            provider.apply_profile_to_config(&profile).expect("profile configuration");
+
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "profile configuration must not synchronously sleep for its jitter"
+            );
+            assert!(provider.profile_ready_at.is_some_and(|ready_at| ready_at > Instant::now()));
+            assert!(provider.next_crypto_frame(Level::Initial, 1200).is_none());
+        }
+    }
+
     /// Insecure verifier used only when explicitly requested via env.
     /// Only available in debug builds to prevent accidental production use.
     #[cfg(debug_assertions)]
@@ -1170,6 +1204,7 @@ mod rustls_provider {
                 quic_version,
                 peer_transport_params: None,
                 profile: None,
+                profile_ready_at: None,
                 next_1rtt_secrets: None,
                 pending_local_1rtt: VecDeque::new(),
                 pending_remote_1rtt: VecDeque::new(),
@@ -1226,6 +1261,12 @@ mod rustls_provider {
         }
 
         fn flush_handshake_io(&mut self) -> Result<(), ConnectionError> {
+            if let Some(ready_at) = self.profile_ready_at {
+                if Instant::now() < ready_at {
+                    return Ok(());
+                }
+                self.profile_ready_at = None;
+            }
             // Emit handshake bytes; rustls signals key transitions via KeyChange.
             // When KeyChange is returned, the keys must be used for future handshake data,
             // which we model by updating `write_level` after queueing any bytes produced.
@@ -1571,19 +1612,30 @@ mod rustls_provider {
         }
 
         fn apply_profile_to_config(&mut self, profile: &TlsProfile) -> Result<(), ConnectionError> {
-            // Store profile and apply minor timing knobs.
-            // Intentional sync sleep for TLS timing-channel mitigation.
-            // This runs during sync handshake setup, NOT inside an async task.
+            // Store profile and schedule cosmetic timing without blocking the
+            // caller. The synchronous provider API cannot await, so the
+            // handshake I/O flush observes this deadline instead.
             self.profile = Some(profile.clone());
-            if !profile.cover_performance_mode {
-                if let Some(jitter) = profile.timing_jitter {
-                    std::thread::sleep(jitter);
+            let profile_ready_at = if profile.cover_performance_mode {
+                None
+            } else if let Some(jitter) = profile.timing_jitter {
+                match Instant::now().checked_add(jitter) {
+                    Some(ready_at) => Some(ready_at),
+                    None => {
+                        log::warn!(
+                            "TLS profile timing jitter deadline overflowed; continuing immediately"
+                        );
+                        None
+                    }
                 }
-            }
+            } else {
+                None
+            };
             // Best-effort reconfigure only for client side before handshake
             if let rustls::quic::Connection::Client(_) = &self.connection {
                 self.rebuild_client_connection(profile)?;
             }
+            self.profile_ready_at = profile_ready_at;
             Ok(())
         }
 

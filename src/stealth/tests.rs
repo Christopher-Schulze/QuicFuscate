@@ -77,6 +77,18 @@ fn runtime_tls_profile_tracks_cover_performance_mode_from_stealth_mode() {
 }
 
 #[test]
+fn stealth_manager_constructs_without_a_tokio_runtime() {
+    let manager = StealthManager::new(
+        StealthConfig::intelligent(),
+        Arc::new(OptimizationManager::new()),
+        Arc::new(CryptoManager::new()),
+    );
+
+    assert_eq!(manager.mode(), StealthMode::Intelligent);
+    assert!(manager.reality_proxy.is_some());
+}
+
+#[test]
 fn brain_runtime_permissions_lock_operator_overrides() {
     let _env_lock = acquire_env_lock();
     let _ack = EnvGuard::set("QUICFUSCATE_ACK_THRESHOLD", "5");

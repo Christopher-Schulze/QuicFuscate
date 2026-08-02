@@ -1330,15 +1330,20 @@ impl GeoIpBlocker {
     }
 }
 
-fn map_geoip_database_error(path: &PathBuf, error: maxminddb::MaxMindDbError) -> GeoIpError {
+fn map_geoip_database_error(
+    path: &std::path::Path,
+    error: maxminddb::MaxMindDbError,
+) -> GeoIpError {
     match error {
         maxminddb::MaxMindDbError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            GeoIpError::MissingDatabase(path.clone())
+            GeoIpError::MissingDatabase(path.to_path_buf())
         }
         maxminddb::MaxMindDbError::Io(error) => {
-            GeoIpError::UnreadableDatabase { path: path.clone(), reason: error.to_string() }
+            GeoIpError::UnreadableDatabase { path: path.to_path_buf(), reason: error.to_string() }
         }
-        error => GeoIpError::InvalidDatabase { path: path.clone(), reason: error.to_string() },
+        error => {
+            GeoIpError::InvalidDatabase { path: path.to_path_buf(), reason: error.to_string() }
+        }
     }
 }
 
@@ -2431,7 +2436,7 @@ mod tests {
             std::process::id(),
             crate::transport::rand::rand_u64()
         ));
-        std::fs::write(&empty, &[]).unwrap();
+        std::fs::write(&empty, []).unwrap();
         assert!(matches!(
             GeoIpBlocker::try_new(config(empty.clone())),
             Err(GeoIpError::EmptyDatabase(path)) if path == empty

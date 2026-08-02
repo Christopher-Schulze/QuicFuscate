@@ -785,7 +785,7 @@ impl TransportObserver for StealthBrain {
         let idx_sz = Self::bin_index(len, 2048, self.pending_size_bins.len());
         self.pending_size_bins[idx_sz].fetch_add(1, Ordering::Relaxed);
         self.record_packet_number(pn);
-        if packet_index % PACKET_IAT_SAMPLE_INTERVAL == 0 {
+        if packet_index.is_multiple_of(PACKET_IAT_SAMPLE_INTERVAL) {
             self.record_packet_interarrival(crate::time_source::now_instant());
         }
     }

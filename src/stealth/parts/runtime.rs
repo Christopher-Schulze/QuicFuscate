@@ -397,6 +397,22 @@ mod runtime_owner_tests {
         assert!(Arc::ptr_eq(&first, &second));
     }
 
+    #[test]
+    fn start_without_runtime_returns_error_without_spawning() {
+        let owner = Arc::new(
+            StealthRuntimeOwner::new(RealityConfig {
+                enabled: true,
+                ..RealityConfig::default()
+            })
+            .expect("valid reality configuration"),
+        );
+
+        let error = owner.start(None, Vec::new(), 0).expect_err("runtime is required");
+
+        assert!(error.contains("active Tokio runtime"));
+        assert_eq!(owner.worker_count(), 0);
+    }
+
     #[tokio::test]
     async fn profile_rotation_is_cancelled_and_joined() {
         let owner = Arc::new(StealthRuntimeOwner::new(RealityConfig::default()).unwrap());
