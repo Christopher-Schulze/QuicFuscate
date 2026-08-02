@@ -831,9 +831,10 @@ When an active probe is detected (invalid QUIC authentication, suspicious packet
 
 #### DoH Endpoint Fallback
 
-The production DoH owner is `src/dns/mod.rs`:
+The shared DoH primitives are implemented in `src/dns/mod.rs`, but client runtime ownership is not complete:
 - `DnsProxyConfig` owns the configured endpoint list and lazily caches one `reqwest::Client` for connection reuse.
-- `process_dns_query()` tries configured `doh_endpoints` in order and returns the first successful RFC 8484 response; when all endpoints fail, it returns the existing bounded NXDOMAIN fallback.
+- `process_dns_query()` tries configured `doh_endpoints` in order and returns the first successful RFC 8484 response; the current repository has no production client caller for this helper. The missing runtime wiring is tracked in TODO-771.
+- The live server TUN path forwards intercepted DNS with plain UDP `forward_dns_query()` rather than this DoH helper; its failure semantics are tracked in TODO-666.
 - `StealthConfig.enable_doh` and `StealthConfig.doh_provider` remain runtime configuration inputs, but no stealth-local resolver, process-global provider rotation counter, or `resolve_doh_multi()` surface exists.
 
 #### Async Stealth Scheduler (Non-Blocking)
@@ -3576,7 +3577,7 @@ Core H3/MASQUE is the canonical VPN/TUN data-plane carrier and the only active C
 Notes
 - Canonical Stealth, Anti-DPI, Performance, and Intelligent modes use the production H3/MASQUE TUN carrier when TUN mode is active.
 - Split capsule varints use the full 1/2/4/8-byte QUIC widths, including 16,384-byte payload lengths. A malformed capsule or truncated FIN suffix fails closed before staged events are exposed.
-- `src/dns/mod.rs` remains the production DoH owner; the retired `stealth/parts/doh.rs` resolver and `stealth::MasqueManager` source are preserved under `archive/stealth/` for historical inspection only.
+- `src/dns/mod.rs` remains the owner of shared DoH primitives; the retired `stealth/parts/doh.rs` resolver and `stealth::MasqueManager` source are preserved under `archive/stealth/` for historical inspection only. Client runtime wiring remains open under TODO-771.
 - If you maintain external profile dumps, `scripts/tests/utils/util-tls-export-active-profile.sh` exports them under `scripts/out/utils/.../profiles/` by default (or a caller-provided `--output-dir`) for regression tracking.
 
 #### MASQUE Roundtrip Example
@@ -4589,8 +4590,9 @@ A full deep-audit sweep of `src/` was performed with parallel read-only module s
 - **Retry token length validation after encoding**: `src/implementations/server/ddos.rs` checks `MAX_RETRY_TOKEN_LEN` only after building the token. Tracked in TODO-659.
 - **DNS NXDOMAIN lie**: `src/dns/mod.rs` returns NXDOMAIN for upstream failures. Tracked in TODO-666.
 - **DNS query wire semantics**: DNS admission accepts incomplete query/header/name semantics and synthetic responses can rewrite the original question. Tracked in TODO-770.
+- **DNS client runtime wiring**: The shared DoH/proxy API has no production client caller, and the existing E2E proof does not exercise the system resolver. Tracked in TODO-771.
 - **fsutil TOCTOU race**: `src/implementations/server/fsutil.rs` now creates and secures the temporary file before the atomic rename, with post-rename defense-in-depth. Resolved by TODO-591; TODO-667 was a duplicate tracker.
-- **MASQUE/DoH ownership**: TODO-597 retired the empty `stealth::MasqueManager`, its false-success send/legacy-varint path, and the unused stealth-local DoH resolver. Core H3/MASQUE now owns the active CONNECT-UDP/capsule carrier, buffers split DATA, rejects malformed or truncated FIN tails before event delivery, and covers all 1/2/4/8-byte varints including 16,384-byte payloads. Retired sources and the obsolete integration test remain recoverable under `archive/`; production DoH remains owned by `src/dns/mod.rs`.
+- **MASQUE/DoH ownership**: TODO-597 retired the empty `stealth::MasqueManager`, its false-success send/legacy-varint path, and the unused stealth-local DoH resolver. Core H3/MASQUE now owns the active CONNECT-UDP/capsule carrier, buffers split DATA, rejects malformed or truncated FIN tails before event delivery, and covers all 1/2/4/8-byte varints including 16,384-byte payloads. Retired sources and the obsolete integration test remain recoverable under `archive/`; shared DoH primitives remain in `src/dns/mod.rs`, with client runtime wiring tracked in TODO-771.
 
 ### Resource and Performance Findings
 
