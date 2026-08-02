@@ -61,22 +61,6 @@ impl FileStateStore {
         Ok(())
     }
 
-    fn corrupt_state_path(&self, path: &Path) -> PathBuf {
-        let mut nonce = [0u8; 4];
-        fill_secure_or_abort(&mut nonce, "state_store::corrupt_state_path");
-        let mut suffix = format!(".corrupt-{}", now_ms());
-        for b in nonce {
-            let _ = std::fmt::Write::write_fmt(&mut suffix, format_args!("-{:02x}", b));
-        }
-        path.with_file_name(format!(
-            "{}{}",
-            path.file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("desktop_state.json"),
-            suffix
-        ))
-    }
-
     pub(crate) fn save_state_to_path(
         &self,
         path: &Path,
@@ -111,17 +95,12 @@ impl FileStateStore {
             Ok(v) => v,
             Err(e) => {
                 log::warn!("State parse failed: {}", e);
-                let dst = self.corrupt_state_path(path);
-                if std::fs::rename(path, &dst).is_ok() {
-                    log::warn!("State file was corrupted and was renamed to {:?}", dst);
-                } else {
-                    log::warn!("State file was corrupted but could not be renamed");
-                }
-                return Ok(None);
+                return Err(format!("State file is corrupt and remains unavailable: {}", e));
             }
         };
 
-        let _ = self.atomic_write_json(path, &json);
+        self.atomic_write_json(path, &json)
+            .map_err(|e| format!("State normalization could not be persisted: {}", e))?;
         Ok(Some(runtime))
     }
 }
@@ -158,12 +137,4 @@ impl StateStore for FileStateStore {
 
 pub fn default_store() -> Arc<dyn StateStore> {
     Arc::new(FileStateStore::new())
-}
-
-fn now_ms() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }

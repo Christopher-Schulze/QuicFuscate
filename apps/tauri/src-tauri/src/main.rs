@@ -4,6 +4,7 @@ use quicfuscate::engine::qkey;
 use quicfuscate::engine::{EngineConfig, EngineState, QuicFuscateEngine};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
@@ -900,13 +901,14 @@ async fn engine_logs_clear() -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn save_state(app: tauri::AppHandle, data: PersistedState) -> Result<(), String> {
-    let store = secret_store();
-    let start_login_enabled =
-        settings_general_bool(&data.settings, SETTINGS_GENERAL_START_AT_LOGIN, false);
-    sync_os_start_at_login(&app, start_login_enabled)?;
-    let path = state_store().save_state(&app, data, store.as_ref())?;
+async fn save_state(
+    app: tauri::AppHandle,
+    data: PersistedState,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let path = save_state_with_start_login_sync(&app, data)?;
     log::info!("State saved to {:?}", path);
+    update_tray_ui(&app, state.inner());
     Ok(())
 }
 
@@ -1065,6 +1067,133 @@ fn settings_set_general_bool(settings: &mut serde_json::Value, key: &str, value:
     }
 }
 
+#[derive(Debug)]
+enum TrayRuntimeState {
+    FirstRun,
+    Loaded(PersistedState),
+    Unavailable(String),
+}
+
+fn load_tray_runtime_state(app: &tauri::AppHandle) -> TrayRuntimeState {
+    match load_runtime_state_for_tray(app) {
+        Ok(Some(state)) => TrayRuntimeState::Loaded(state),
+        Ok(None) => TrayRuntimeState::FirstRun,
+        Err(error) => TrayRuntimeState::Unavailable(error),
+    }
+}
+
+fn tray_runtime_state_ref(state: &TrayRuntimeState) -> Option<&PersistedState> {
+    match state {
+        TrayRuntimeState::Loaded(state) => Some(state),
+        TrayRuntimeState::FirstRun | TrayRuntimeState::Unavailable(_) => None,
+    }
+}
+
+fn tray_runtime_state_is_available(state: &TrayRuntimeState) -> bool {
+    !matches!(state, TrayRuntimeState::Unavailable(_))
+}
+
+trait StartAtLoginBackend {
+    fn is_enabled(&self) -> Result<bool, String>;
+    fn set_enabled(&self, enabled: bool) -> Result<(), String>;
+}
+
+struct TauriStartAtLoginBackend<'a> {
+    app: &'a tauri::AppHandle,
+}
+
+impl StartAtLoginBackend for TauriStartAtLoginBackend<'_> {
+    fn is_enabled(&self) -> Result<bool, String> {
+        self.app
+            .autolaunch()
+            .is_enabled()
+            .map_err(|error| format!("Failed to read start-at-login state: {}", error))
+    }
+
+    fn set_enabled(&self, enabled: bool) -> Result<(), String> {
+        if enabled {
+            self.app
+                .autolaunch()
+                .enable()
+                .map_err(|error| format!("Failed to enable start-at-login: {}", error))
+        } else {
+            self.app
+                .autolaunch()
+                .disable()
+                .map_err(|error| format!("Failed to disable start-at-login: {}", error))
+        }
+    }
+}
+
+fn start_at_login_action(enabled: bool) -> &'static str {
+    if enabled {
+        "enable"
+    } else {
+        "disable"
+    }
+}
+
+fn commit_start_at_login_change<B, F>(backend: &B, desired: bool, save_new: F) -> Result<(), String>
+where
+    B: StartAtLoginBackend,
+    F: FnOnce() -> Result<(), String>,
+{
+    let previous_os = backend.is_enabled()?;
+    if previous_os == desired {
+        return save_new().map_err(|error| {
+            format!(
+                "Failed to persist start-at-login={}: {}; OS state was unchanged",
+                desired, error
+            )
+        });
+    }
+
+    if let Err(apply_error) = backend.set_enabled(desired) {
+        return match backend.set_enabled(previous_os) {
+            Ok(()) => Err(format!(
+                "Failed to {} start-at-login: {}; OS compensation restored {}; durable state was not written",
+                start_at_login_action(desired), apply_error, previous_os
+            )),
+            Err(compensation_error) => Err(format!(
+                "Failed to {} start-at-login: {}; retryable partial result: OS compensation to {} failed: {}",
+                start_at_login_action(desired), apply_error, previous_os, compensation_error
+            )),
+        };
+    }
+
+    if let Err(save_error) = save_new() {
+        return match backend.set_enabled(previous_os) {
+            Ok(()) => Err(format!(
+                "Failed to persist start-at-login={}: {}; OS compensation restored {}",
+                desired, save_error, previous_os
+            )),
+            Err(compensation_error) => Err(format!(
+                "Failed to persist start-at-login={}: {}; retryable partial result: OS compensation to {} failed: {}",
+                desired, save_error, previous_os, compensation_error
+            )),
+        };
+    }
+
+    Ok(())
+}
+
+fn save_state_with_start_login_sync(
+    app: &tauri::AppHandle,
+    data: PersistedState,
+) -> Result<PathBuf, String> {
+    let store = secret_store();
+    let state_store = state_store();
+    let path = state_store.state_path(app)?;
+    let start_login_enabled =
+        settings_general_bool(&data.settings, SETTINGS_GENERAL_START_AT_LOGIN, false);
+    let data_to_save = data.clone();
+    let backend = TauriStartAtLoginBackend { app };
+    commit_start_at_login_change(&backend, start_login_enabled, || {
+        state_store.save_state(app, data_to_save, store.as_ref()).map(|_| ())
+    })?;
+    Ok(path)
+}
+
 fn load_runtime_state_for_tray(app: &tauri::AppHandle) -> Result<Option<PersistedState>, String> {
     state_store().load_state(app, secret_store().as_ref())
 }
@@ -1109,10 +1238,22 @@ fn update_tray_ui(app: &tauri::AppHandle, state: &AppState) {
         .and_then(|g| g.as_ref().map(|e| e.state()))
         .unwrap_or(EngineState::Stopped);
     let active_tunnel_id = state.active_tunnel_id.lock().ok().and_then(|g| g.clone());
-    let last_error = state.last_error.lock().ok().and_then(|g| g.clone());
-    let runtime_state = load_runtime_state_for_tray(app).ok().flatten();
+    let mut last_error = state.last_error.lock().ok().and_then(|g| g.clone());
+    let tray_runtime_state = load_tray_runtime_state(app);
+    let preference_available = tray_runtime_state_is_available(&tray_runtime_state);
+    if let TrayRuntimeState::Unavailable(error) = &tray_runtime_state {
+        let message = format!("Tray preferences unavailable: {}", error);
+        log::warn!("{}", message);
+        last_error = Some(message.clone());
+        if let Ok(mut guard) = state.last_error.lock() {
+            *guard = Some(message);
+        }
+    }
+    let runtime_state = tray_runtime_state_ref(&tray_runtime_state);
 
-    let tunnel_name = if let Some(active_id) = active_tunnel_id.as_deref() {
+    let tunnel_name = if !preference_available {
+        "Unavailable".to_string()
+    } else if let Some(active_id) = active_tunnel_id.as_deref() {
         runtime_state
             .as_ref()
             .and_then(|s| s.tunnels.iter().find(|t| t.id == active_id))
@@ -1130,6 +1271,13 @@ fn update_tray_ui(app: &tauri::AppHandle, state: &AppState) {
         .as_ref()
         .map(|s| settings_general_bool(&s.settings, SETTINGS_GENERAL_START_AT_LOGIN, false))
         .unwrap_or(false);
+    let auto_connect_label = if preference_available {
+        "Auto-connect on launch"
+    } else {
+        "Auto-connect on launch (unavailable)"
+    };
+    let start_login_label =
+        if preference_available { "Start at login" } else { "Start at login (unavailable)" };
 
     let status_text = match engine_state {
         EngineState::Created => "Status: Created",
@@ -1147,6 +1295,10 @@ fn update_tray_ui(app: &tauri::AppHandle, state: &AppState) {
     let connect_text =
         if engine_state == EngineState::Connected { "Disconnect" } else { "Connect" };
     let _ = tray_ui.connect_item.set_text(connect_text);
+    let _ = tray_ui.auto_connect_item.set_text(auto_connect_label);
+    let _ = tray_ui.start_at_login_item.set_text(start_login_label);
+    let _ = tray_ui.auto_connect_item.set_enabled(preference_available);
+    let _ = tray_ui.start_at_login_item.set_enabled(preference_available);
     let _ = tray_ui.auto_connect_item.set_checked(auto_connect_enabled);
     let _ = tray_ui.start_at_login_item.set_checked(start_login_enabled);
 
@@ -1186,23 +1338,20 @@ fn set_boolean_preference_for_tray(
     let next = !current;
     settings_set_general_bool(&mut state.settings, key, next);
     if key == SETTINGS_GENERAL_START_AT_LOGIN {
-        sync_os_start_at_login(app, next)?;
+        let backend = TauriStartAtLoginBackend { app };
+        commit_start_at_login_change(&backend, next, || save_runtime_state_for_tray(app, state))?;
+    } else {
+        save_runtime_state_for_tray(app, state)?;
     }
-    save_runtime_state_for_tray(app, state)?;
-    if let Ok(Some(latest)) = load_runtime_state_for_tray(app) {
-        emit_settings_changed(app, &latest.settings);
-    }
+    let latest = load_runtime_state_for_tray(app)?
+        .ok_or_else(|| "State disappeared after preference save".to_string())?;
+    emit_settings_changed(app, &latest.settings);
     Ok(next)
 }
 
 fn sync_os_start_at_login(app: &tauri::AppHandle, enabled: bool) -> Result<(), String> {
-    let autostart = app.autolaunch();
-    if enabled {
-        autostart.enable().map_err(|e| format!("Failed to enable start-at-login: {}", e))?;
-    } else {
-        autostart.disable().map_err(|e| format!("Failed to disable start-at-login: {}", e))?;
-    }
-    Ok(())
+    let backend = TauriStartAtLoginBackend { app };
+    commit_start_at_login_change(&backend, enabled, || Ok(()))
 }
 
 fn env_flag_true(name: &str) -> bool {
@@ -1287,9 +1436,10 @@ fn main() {
             let state = app.state::<AppState>();
             state.updater_runtime_enabled.store(updater_enabled, Ordering::Relaxed);
             // System tray: keep the engine running when the window is closed.
-            let runtime_state = load_runtime_state_for_tray(&app_handle).ok().flatten();
+            let tray_runtime_state = load_tray_runtime_state(&app_handle);
+            let preference_available = tray_runtime_state_is_available(&tray_runtime_state);
+            let runtime_state = tray_runtime_state_ref(&tray_runtime_state);
             let auto_connect_enabled = runtime_state
-                .as_ref()
                 .map(|s| {
                     settings_general_bool(
                         &s.settings,
@@ -1299,12 +1449,21 @@ fn main() {
                 })
                 .unwrap_or(false);
             let start_login_enabled = runtime_state
-                .as_ref()
                 .map(|s| settings_general_bool(&s.settings, SETTINGS_GENERAL_START_AT_LOGIN, false))
                 .unwrap_or(false);
-            if let Err(err) = sync_os_start_at_login(&app_handle, start_login_enabled) {
-                if let Ok(mut guard) = state.last_error.lock() {
-                    *guard = Some(err);
+            match &tray_runtime_state {
+                TrayRuntimeState::Unavailable(error) => {
+                    log::error!("Tray preferences are unavailable: {}", error);
+                    if let Ok(mut guard) = state.last_error.lock() {
+                        *guard = Some(format!("Tray preferences unavailable: {}", error));
+                    }
+                }
+                TrayRuntimeState::FirstRun | TrayRuntimeState::Loaded(_) => {
+                    if let Err(err) = sync_os_start_at_login(&app_handle, start_login_enabled) {
+                        if let Ok(mut guard) = state.last_error.lock() {
+                            *guard = Some(err);
+                        }
+                    }
                 }
             }
 
@@ -1332,16 +1491,24 @@ fn main() {
             let auto_connect_item = CheckMenuItem::with_id(
                 &app_handle,
                 TRAY_AUTOCONNECT_ITEM_ID,
-                "Auto-connect on launch",
-                true,
+                if preference_available {
+                    "Auto-connect on launch"
+                } else {
+                    "Auto-connect on launch (unavailable)"
+                },
+                preference_available,
                 auto_connect_enabled,
                 None::<&str>,
             )?;
             let start_at_login_item = CheckMenuItem::with_id(
                 &app_handle,
                 TRAY_START_LOGIN_ITEM_ID,
-                "Start at login",
-                true,
+                if preference_available {
+                    "Start at login"
+                } else {
+                    "Start at login (unavailable)"
+                },
+                preference_available,
                 start_login_enabled,
                 None::<&str>,
             )?;
@@ -1885,7 +2052,7 @@ mod tests {
     }
 
     #[test]
-    fn load_state_from_path_renames_corrupt_file_and_returns_none() {
+    fn load_state_from_path_returns_error_and_preserves_corrupt_file() {
         let store = secrets::MemorySecretStore::new();
         let state_store = state_store::FileStateStore::new();
 
@@ -1894,20 +2061,55 @@ mod tests {
         let path = base.join("desktop_state.json");
         std::fs::write(&path, "not-json").expect("write");
 
-        let out = state_store.load_state_from_path(&path, &store).expect("load");
-        assert!(out.is_none());
-        assert!(!path.exists());
+        let error = state_store.load_state_from_path(&path, &store).expect_err("load");
+        assert!(error.contains("corrupt"), "{}", error);
+        assert!(path.exists());
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "not-json");
 
-        let mut found = false;
-        for entry in std::fs::read_dir(&base).expect("read_dir") {
-            let entry = entry.expect("entry");
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with("desktop_state.json.corrupt-") {
-                found = true;
-                break;
-            }
-        }
-        assert!(found);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn load_state_from_path_propagates_unreadable_state_path() {
+        let store = secrets::MemorySecretStore::new();
+        let state_store = state_store::FileStateStore::new();
+        let base = std::env::temp_dir().join(format!("qf-desktop-state-unreadable-{}", now_ms()));
+        let _ = std::fs::create_dir_all(&base);
+        let path = base.join("desktop_state.json");
+        std::fs::create_dir(&path).expect("directory state path");
+
+        let error = state_store.load_state_from_path(&path, &store).expect_err("read directory");
+        assert!(!error.trim().is_empty());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn restart_loads_persisted_start_at_login_without_fabricating_state() {
+        let store = secrets::MemorySecretStore::new();
+        let state_store = state_store::FileStateStore::new();
+        let base = std::env::temp_dir().join(format!("qf-desktop-state-restart-{}", now_ms()));
+        let _ = std::fs::create_dir_all(&base);
+        let path = base.join("desktop_state.json");
+        let state = PersistedState {
+            schema_version: 1,
+            settings: serde_json::json!({
+                "general": { "startAtLogin": true }
+            }),
+            ..PersistedState::default()
+        };
+
+        state_store.save_state_to_path(&path, state, &store).expect("save");
+        let loaded = state_store
+            .load_state_from_path(&path, &store)
+            .expect("load")
+            .expect("persisted state");
+        assert!(settings_general_bool(&loaded.settings, SETTINGS_GENERAL_START_AT_LOGIN, false));
+
+        let missing = state_store
+            .load_state_from_path(&base.join("missing.json"), &store)
+            .expect("missing read");
+        assert!(missing.is_none());
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -2004,6 +2206,133 @@ mod tests {
         assert!(!settings_general_bool(&settings, SETTINGS_GENERAL_AUTO_CONNECT_ON_LAUNCH, false));
         settings_set_general_bool(&mut settings, SETTINGS_GENERAL_AUTO_CONNECT_ON_LAUNCH, true);
         assert!(settings_general_bool(&settings, SETTINGS_GENERAL_AUTO_CONNECT_ON_LAUNCH, false));
+    }
+
+    struct FakeStartAtLoginBackend {
+        enabled: Mutex<bool>,
+        read_error: Mutex<Option<String>>,
+        set_failures: Mutex<VecDeque<String>>,
+        calls: Mutex<Vec<bool>>,
+    }
+
+    impl FakeStartAtLoginBackend {
+        fn new(enabled: bool) -> Self {
+            Self {
+                enabled: Mutex::new(enabled),
+                read_error: Mutex::new(None),
+                set_failures: Mutex::new(VecDeque::new()),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn with_set_failures(enabled: bool, failures: &[&str]) -> Self {
+            let backend = Self::new(enabled);
+            *backend.set_failures.lock().unwrap() =
+                failures.iter().map(|value| (*value).to_string()).collect();
+            backend
+        }
+    }
+
+    impl StartAtLoginBackend for FakeStartAtLoginBackend {
+        fn is_enabled(&self) -> Result<bool, String> {
+            if let Some(error) = self.read_error.lock().unwrap().clone() {
+                return Err(error);
+            }
+            Ok(*self.enabled.lock().unwrap())
+        }
+
+        fn set_enabled(&self, enabled: bool) -> Result<(), String> {
+            self.calls.lock().unwrap().push(enabled);
+            if let Some(error) = self.set_failures.lock().unwrap().pop_front() {
+                return Err(error);
+            }
+            *self.enabled.lock().unwrap() = enabled;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn start_at_login_read_failure_does_not_save_or_mutate() {
+        let backend = FakeStartAtLoginBackend::new(false);
+        *backend.read_error.lock().unwrap() = Some("permission denied".to_string());
+        let mut save_calls = 0;
+
+        let error = commit_start_at_login_change(&backend, true, || {
+            save_calls += 1;
+            Ok(())
+        })
+        .expect_err("read failure");
+
+        assert!(error.contains("permission denied"), "{}", error);
+        assert_eq!(save_calls, 0);
+        assert!(backend.calls.lock().unwrap().is_empty());
+        assert!(!*backend.enabled.lock().unwrap());
+    }
+
+    #[test]
+    fn start_at_login_failed_save_compensates_os_change() {
+        let backend = FakeStartAtLoginBackend::new(false);
+
+        let error = commit_start_at_login_change(&backend, true, || Err("disk full".to_string()))
+            .expect_err("save failure");
+
+        assert!(error.contains("disk full"), "{}", error);
+        assert!(error.contains("compensation restored false"), "{}", error);
+        assert!(!*backend.enabled.lock().unwrap());
+        assert_eq!(*backend.calls.lock().unwrap(), vec![true, false]);
+    }
+
+    #[test]
+    fn start_at_login_failed_enable_and_disable_are_compensated() {
+        let enable_backend = FakeStartAtLoginBackend::with_set_failures(false, &["enable failed"]);
+        let enable_error = commit_start_at_login_change(&enable_backend, true, || Ok(()))
+            .expect_err("enable failure");
+        assert!(enable_error.contains("enable failed"), "{}", enable_error);
+        assert_eq!(*enable_backend.calls.lock().unwrap(), vec![true, false]);
+        assert!(!*enable_backend.enabled.lock().unwrap());
+
+        let disable_backend = FakeStartAtLoginBackend::with_set_failures(true, &["disable failed"]);
+        let disable_error = commit_start_at_login_change(&disable_backend, false, || Ok(()))
+            .expect_err("disable failure");
+        assert!(disable_error.contains("disable failed"), "{}", disable_error);
+        assert_eq!(*disable_backend.calls.lock().unwrap(), vec![false, true]);
+        assert!(*disable_backend.enabled.lock().unwrap());
+    }
+
+    #[test]
+    fn start_at_login_failed_compensation_is_explicitly_retryable() {
+        let backend = FakeStartAtLoginBackend::with_set_failures(
+            false,
+            &["enable failed", "compensation failed"],
+        );
+
+        let error = commit_start_at_login_change(&backend, true, || Ok(())).expect_err("partial");
+
+        assert!(error.contains("retryable partial result"), "{}", error);
+        assert!(error.contains("compensation failed"), "{}", error);
+        assert_eq!(*backend.calls.lock().unwrap(), vec![true, false]);
+    }
+
+    #[test]
+    fn start_at_login_retry_succeeds_after_compensated_save_failure() {
+        let backend = FakeStartAtLoginBackend::new(false);
+        let first =
+            commit_start_at_login_change(&backend, true, || Err("temporary failure".to_string()));
+        assert!(first.is_err());
+        assert!(!*backend.enabled.lock().unwrap());
+
+        commit_start_at_login_change(&backend, true, || Ok(())).expect("retry");
+        assert!(*backend.enabled.lock().unwrap());
+    }
+
+    #[test]
+    fn tray_state_outcome_keeps_first_run_distinct_from_unavailable() {
+        let first_run = TrayRuntimeState::FirstRun;
+        let unavailable = TrayRuntimeState::Unavailable("read failed".to_string());
+        assert!(tray_runtime_state_is_available(&first_run));
+        assert!(!tray_runtime_state_is_available(&unavailable));
+        assert!(tray_runtime_state_ref(&first_run).is_none());
+        assert!(tray_runtime_state_ref(&unavailable).is_none());
     }
 
     #[test]

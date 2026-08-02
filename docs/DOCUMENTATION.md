@@ -1510,7 +1510,7 @@ Core crate and entrypoints:
 - `src/main.rs` - CLI wiring, client/server runtime bootstrap, hidden diagnostic/bench commands, and process wiring around the centralized server/admin modules.
 - `src/time_source.rs` - injectable time abstraction (`TimeSource`) with test install guard.
 - `src/implementations/client/io_driver.rs` - client runtime I/O driver; its dispatch/fallback hotpath is isolated behind an internal `IoHotpathAdapter` seam for deterministic tests without real sockets or TUN devices.
-- `apps/tauri/src-tauri/src/state_store.rs` - desktop native-host `StateStore` abstraction with file-backed production persistence and corrupt-state handling.
+- `apps/tauri/src-tauri/src/state_store.rs` - desktop native-host `StateStore` abstraction with file-backed production persistence; missing state is explicit first-run absence, while corrupt, unreadable, or failed-normalization state returns an error and remains unavailable instead of becoming a fabricated default.
 
 Binary entrypoints:
 - `src/bin/harness.rs` - script-facing harness binary (3-line entry point); implementation is in `src/harness.rs` (~260 lines).
@@ -2769,7 +2769,7 @@ Current status: early beta for desktop delivery. Core tunnel operations are func
 - Logs poller (350 ms): incremental `engine_logs_since` fetches are serialized, cursor regressions are rejected, and a cursor epoch invalidates responses that overlap log clearing; the ring buffer retains 2000 entries.
 
 **Persistence:**
-- State (tunnels, settings, selected tunnel) is loaded on startup via `invoke("load_state")` and saved on change via `invoke("save_state")` with a 450 ms debounce timer to avoid excessive disk writes.
+- State (tunnels, settings, selected tunnel) is loaded on startup via `invoke("load_state")` and saved on change via `invoke("save_state")` with a 450 ms debounce timer to avoid excessive disk writes. A missing file is the only first-run absence; corrupt, unreadable, or failed-normalization state propagates as unavailable. Start-at-login writes read the current OS registration, apply the OS change, persist the new state, and compensate the OS on persistence failure; an unsuccessful compensation is returned as a retryable partial result.
 
 **Build:**
 ```bash
@@ -2785,9 +2785,9 @@ GitHub CI validates the native desktop backend through the `app-backend-checks` 
 
 **Tray and Startup Behavior:**
 - Closing the main window hides it instead of exiting; runtime continues in tray.
-- Tray menu exposes status, active tunnel summary, connect/disconnect, open/hide app, auto-connect-on-launch toggle, start-at-login preference toggle, and quit.
-- Auto-connect-on-launch reads persisted desktop settings and attempts connection on startup when enabled.
-- Start-at-login persists user preference and is wired to OS auto-start registration via the desktop runtime plugin.
+- Tray menu exposes status, active tunnel summary, connect/disconnect, open/hide app, auto-connect-on-launch toggle, start-at-login preference toggle, and quit. If persisted state is unavailable, both preference items are disabled and labeled `(unavailable)` rather than shown as unchecked values.
+- Auto-connect-on-launch reads persisted desktop settings and attempts connection on startup when enabled. Corrupt or unreadable state disables startup preference hydration and does not trigger an OS autostart mutation.
+- Start-at-login persists user preference and is wired to OS auto-start registration via the desktop runtime plugin. Every mutation reads the current OS state first; failed enable/disable and failed durable saves are compensated when possible, and compensation failure is surfaced as a retryable partial result.
 
 **Updater Integration (source-first and signed-release boundary):**
 - Updater plugin path is integrated but runtime-gated behind `QUICFUSCATE_DESKTOP_UPDATER_ACTIVE`.
