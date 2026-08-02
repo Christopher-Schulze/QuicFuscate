@@ -19,6 +19,8 @@ use crate::accelerate::brain as brain_accel;
 use crate::fec::KalmanFilter;
 use crate::transport::{Connection, TransportObserver};
 
+const PACKET_IAT_SAMPLE_INTERVAL: u64 = 8;
+
 // ===== Global Hints (optional) =================================================
 // Transport can consult these hint channels to adapt FEC and timing without
 // creating hard dependencies on Brain internals. Each channel is a lock-free
@@ -288,6 +290,11 @@ struct Hist {
     bins: VecDeque<u64>,
     total: u64,
 }
+
+fn new_atomic_bins(len: usize) -> Box<[AtomicU64]> {
+    (0..len.max(1)).map(|_| AtomicU64::new(0)).collect()
+}
+
 impl Hist {
     fn new(n: usize) -> Self {
         let len = n.max(1);
@@ -296,6 +303,7 @@ impl Hist {
         Self { bins, total: 0 }
     }
 
+    #[cfg(test)]
     fn add(&mut self, idx: usize) {
         let i = idx.min(self.bins.len() - 1);
         self.bins[i] = self.bins[i].saturating_add(1);
@@ -332,7 +340,6 @@ struct StealthBrainState {
     // Histograms
     size: Hist,
     iat: Hist,
-    last_pkt_t: Option<Instant>,
     // Probing budget
     probe_tokens: u32,
     last_probe: Instant,
@@ -421,7 +428,6 @@ impl StealthBrainState {
             ce: 0,
             size: Hist::new(cfg.size_bins),
             iat: Hist::new(cfg.iat_bins),
-            last_pkt_t: None,
             probe_tokens: cfg.probe_max_per_min, // filled initially
             last_probe: crate::time_source::now_instant(),
             last_policy_change: crate::time_source::now_instant(),
@@ -600,6 +606,13 @@ pub struct StealthBrain {
     // Lock-free buffers for observer callbacks - drained in apply_policy's single write lock.
     pending_ecn: AtomicU64, // packed: ect0 in bits 48..64, ect1 in bits 32..48, ce in bits 0..32
     pending_ack_delay: AtomicU64, // ack_delay in microseconds
+    pending_packet_count: AtomicU64,
+    pending_reorder_count: AtomicU64,
+    pending_max_pn: AtomicU64,
+    pending_last_packet_time_ns: AtomicU64,
+    packet_time_base: Instant,
+    pending_size_bins: Box<[AtomicU64]>,
+    pending_iat_bins: Box<[AtomicU64]>,
     // Server Push cover-traffic knobs and telemetry inputs
     #[cfg(any(test, feature = "rust-tests"))]
     server_push_enabled: AtomicBool,
@@ -619,11 +632,21 @@ pub struct StealthBrain {
 impl StealthBrain {
     /// Creates a new brain instance with the given config, seeding global FEC hints.
     pub fn new(cfg: StealthBrainConfig) -> Arc<Self> {
+        let packet_time_base = crate::time_source::now_instant();
+        let size_bins = cfg.size_bins.max(1);
+        let iat_bins = cfg.iat_bins.max(1);
         let brain = Arc::new(Self {
             st: RwLock::new(StealthBrainState::new(&cfg)),
             cfg,
             pending_ecn: AtomicU64::new(0),
             pending_ack_delay: AtomicU64::new(0),
+            pending_packet_count: AtomicU64::new(0),
+            pending_reorder_count: AtomicU64::new(0),
+            pending_max_pn: AtomicU64::new(0),
+            pending_last_packet_time_ns: AtomicU64::new(0),
+            packet_time_base,
+            pending_size_bins: new_atomic_bins(size_bins),
+            pending_iat_bins: new_atomic_bins(iat_bins),
             #[cfg(any(test, feature = "rust-tests"))]
             server_push_enabled: AtomicBool::new(false),
             #[cfg(any(test, feature = "rust-tests"))]
@@ -653,7 +676,43 @@ impl StealthBrain {
         }
         let v = val.min(max_val);
         let w = (max_val as f64 / bins as f64).max(1.0);
-        ((v as f64) / w) as usize
+        (((v as f64) / w) as usize).min(bins - 1)
+    }
+
+    #[inline(always)]
+    fn packet_time_stamp_ns(&self, now: Instant) -> u64 {
+        let elapsed = now.checked_duration_since(self.packet_time_base).unwrap_or_default();
+        let nanos = elapsed.as_nanos().min((u64::MAX - 1) as u128) as u64;
+        nanos + 1
+    }
+
+    #[inline(always)]
+    fn record_packet_interarrival(&self, now: Instant) {
+        let current = self.packet_time_stamp_ns(now);
+        let previous = self.pending_last_packet_time_ns.fetch_max(current, Ordering::Relaxed);
+        if previous != 0 && current >= previous {
+            let iat_us = ((current - previous) / 1_000).min(100_000) as usize;
+            let idx = Self::bin_index(iat_us, 100_000, self.pending_iat_bins.len());
+            self.pending_iat_bins[idx].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    fn record_packet_number(&self, pn: u64) {
+        let previous = self.pending_max_pn.fetch_max(pn, Ordering::Relaxed);
+        if pn < previous {
+            self.pending_reorder_count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn drain_pending_histogram(pending: &[AtomicU64], hist: &mut Hist) {
+        for (index, counter) in pending.iter().enumerate() {
+            let added = counter.swap(0, Ordering::Relaxed);
+            if let Some(bin) = hist.bins.get_mut(index) {
+                *bin = bin.saturating_add(added);
+            }
+        }
+        hist.total = hist.bins.iter().copied().fold(0, u64::saturating_add);
     }
 
     fn size_profile_target(bins: usize) -> Vec<f64> {
@@ -721,26 +780,14 @@ impl TransportObserver for StealthBrain {
     }
 
     fn on_packet_recv(&self, pn: u64, len: usize) {
-        let mut st = self.st.write();
-        let now = crate::time_source::now_instant();
+        let packet_index = self.pending_packet_count.fetch_add(1, Ordering::Relaxed);
         // Size histogram (cap at ~2kB for binning)
-        let idx_sz = Self::bin_index(len, 2048, st.size.bins.len());
-        st.size.add(idx_sz);
-        // Inter-arrival histogram
-        if let Some(last) = st.last_pkt_t {
-            let iat_us = now.duration_since(last).as_micros() as usize;
-            let idx_iat = Self::bin_index(iat_us, 100_000, st.iat.bins.len());
-            st.iat.add(idx_iat);
+        let idx_sz = Self::bin_index(len, 2048, self.pending_size_bins.len());
+        self.pending_size_bins[idx_sz].fetch_add(1, Ordering::Relaxed);
+        self.record_packet_number(pn);
+        if packet_index % PACKET_IAT_SAMPLE_INTERVAL == 0 {
+            self.record_packet_interarrival(crate::time_source::now_instant());
         }
-        st.last_pkt_t = Some(now);
-        // Reorder detection: count out-of-order packets
-        if pn < st.max_pn_seen {
-            st.reorder_count = st.reorder_count.saturating_add(1);
-        }
-        if pn > st.max_pn_seen {
-            st.max_pn_seen = pn;
-        }
-        st.pkt_count = st.pkt_count.saturating_add(1);
     }
 
     fn on_ecn_update(&self, ect0: u64, ect1: u64, ce: u64) {
@@ -773,6 +820,15 @@ impl TransportObserver for StealthBrain {
                 st.ect1 = ecn_packed >> 32 & 0xFFFF;
                 st.ce = ecn_packed & 0xFFFFFFFF;
             }
+
+            Self::drain_pending_histogram(&self.pending_size_bins, &mut st.size);
+            Self::drain_pending_histogram(&self.pending_iat_bins, &mut st.iat);
+            st.pkt_count =
+                st.pkt_count.saturating_add(self.pending_packet_count.swap(0, Ordering::Relaxed));
+            st.reorder_count = st
+                .reorder_count
+                .saturating_add(self.pending_reorder_count.swap(0, Ordering::Relaxed));
+            st.max_pn_seen = st.max_pn_seen.max(self.pending_max_pn.load(Ordering::Relaxed));
 
             // Drain lock-free pending ack_delay (buffered by on_ack).
             let ack_delay_raw = self.pending_ack_delay.swap(0, Ordering::Relaxed);
@@ -1689,6 +1745,105 @@ mod time_source_tests {
         assert_eq!(conn.stealth_padding_strategy_for_test(), 4);
 
         clear_runtime_hints_for_test();
+    }
+
+    #[test]
+    fn packet_observer_drains_lock_free_metadata() {
+        let base_instant = Instant::now();
+        let base_system = UNIX_EPOCH + Duration::from_secs(50);
+        let manual = Arc::new(ManualTimeSource::new(base_instant, base_system));
+        let _time_guard = crate::time_source::install_for_test(manual);
+
+        let brain = StealthBrain::new(StealthBrainConfig::default());
+        brain.on_packet_recv(10, 64);
+        brain.on_packet_recv(8, 2048);
+        brain.on_packet_recv(12, 128);
+
+        assert_eq!(brain.pending_packet_count.load(Ordering::Relaxed), 3);
+        assert_eq!(brain.pending_reorder_count.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            brain
+                .pending_size_bins
+                .iter()
+                .map(|counter| counter.load(Ordering::Relaxed))
+                .sum::<u64>(),
+            3
+        );
+        assert_eq!(
+            brain
+                .pending_iat_bins
+                .iter()
+                .map(|counter| counter.load(Ordering::Relaxed))
+                .sum::<u64>(),
+            0
+        );
+
+        let mut conn = test_connection(4466, 4467);
+        brain.apply_policy(&mut conn);
+        let state = brain.st.read();
+        assert_eq!(state.pkt_count, 3);
+        assert_eq!(state.reorder_count, 1);
+        assert_eq!(state.max_pn_seen, 12);
+        assert_eq!(state.iat.total, 0);
+        assert_eq!(brain.pending_packet_count.load(Ordering::Relaxed), 0);
+        assert_eq!(brain.pending_reorder_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn packet_observer_samples_interarrival_histogram() {
+        let brain = StealthBrain::new(StealthBrainConfig::default());
+        for pn in 0..=8 {
+            brain.on_packet_recv(pn, 128);
+        }
+
+        assert_eq!(brain.pending_packet_count.load(Ordering::Relaxed), 9);
+        assert_eq!(
+            brain
+                .pending_iat_bins
+                .iter()
+                .map(|counter| counter.load(Ordering::Relaxed))
+                .sum::<u64>(),
+            1
+        );
+    }
+
+    #[test]
+    fn packet_observer_accumulates_concurrent_callbacks() {
+        let brain = StealthBrain::new(StealthBrainConfig::default());
+        const WORKERS: usize = 4;
+        const PACKETS_PER_WORKER: u64 = 512;
+
+        std::thread::scope(|scope| {
+            for worker in 0..WORKERS {
+                let brain = Arc::clone(&brain);
+                scope.spawn(move || {
+                    let base = worker as u64 * PACKETS_PER_WORKER;
+                    for offset in 0..PACKETS_PER_WORKER {
+                        let pn = base + offset;
+                        brain.on_packet_recv(pn, 96 + ((pn as usize * 17) & 511));
+                    }
+                });
+            }
+        });
+
+        assert_eq!(
+            brain.pending_packet_count.load(Ordering::Relaxed),
+            (WORKERS as u64) * PACKETS_PER_WORKER
+        );
+        let mut conn = test_connection(4468, 4469);
+        brain.apply_policy(&mut conn);
+        let state = brain.st.read();
+        assert_eq!(state.pkt_count, (WORKERS as u64) * PACKETS_PER_WORKER);
+        assert!(state.reorder_count <= state.pkt_count);
+        assert!(state.size.total <= state.pkt_count);
+        assert_eq!(
+            brain
+                .pending_size_bins
+                .iter()
+                .map(|counter| counter.load(Ordering::Relaxed))
+                .sum::<u64>(),
+            0
+        );
     }
 }
 

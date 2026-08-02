@@ -335,6 +335,74 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pending_control_coalesces_latest_window_updates() {
+        let mut c = make_conn();
+        Connection::queue_control_frame(&mut c.pending_control, Frame::MaxData { max: 100 });
+        Connection::queue_control_frame(&mut c.pending_control, Frame::MaxData { max: 200 });
+        Connection::queue_control_frame(
+            &mut c.pending_control,
+            Frame::MaxStreamData { stream_id: 4, max: 10 },
+        );
+        Connection::queue_control_frame(
+            &mut c.pending_control,
+            Frame::MaxStreamData { stream_id: 4, max: 20 },
+        );
+        Connection::queue_control_frame(
+            &mut c.pending_control,
+            Frame::MaxStreamData { stream_id: 8, max: 30 },
+        );
+
+        assert_eq!(
+            c.pending_control.iter().filter(|frame| matches!(frame, Frame::MaxData { .. })).count(),
+            1
+        );
+        assert_eq!(
+            c.pending_control
+                .iter()
+                .filter(|frame| matches!(frame, Frame::MaxStreamData { stream_id: 4, .. }))
+                .count(),
+            1
+        );
+        assert!(c.pending_control.iter().any(|frame| matches!(
+            frame,
+            Frame::MaxData { max: 200 }
+        )));
+        assert!(c.pending_control.iter().any(|frame| matches!(
+            frame,
+            Frame::MaxStreamData { stream_id: 4, max: 20 }
+        )));
+        assert!(c.pending_control.iter().any(|frame| matches!(
+            frame,
+            Frame::MaxStreamData { stream_id: 8, max: 30 }
+        )));
+    }
+
+    #[test]
+    fn pending_control_is_bounded_and_preserves_close_admission() {
+        let mut c = make_conn();
+        for probe in 0..(MAX_PENDING_CONTROL_FRAMES + 32) {
+            Connection::queue_control_frame(
+                &mut c.pending_control,
+                Frame::Ping { mtu_probe: Some(probe) },
+            );
+        }
+        assert_eq!(c.pending_control.len(), MAX_PENDING_CONTROL_FRAMES);
+
+        Connection::queue_control_frame(
+            &mut c.pending_control,
+            Frame::ApplicationClose {
+                error_code: 7,
+                reason: std::borrow::Cow::Owned(b"overload".to_vec()),
+            },
+        );
+        assert_eq!(c.pending_control.len(), MAX_PENDING_CONTROL_FRAMES);
+        assert!(c.pending_control.iter().any(|frame| matches!(
+            frame,
+            Frame::ApplicationClose { error_code: 7, .. }
+        )));
+    }
+
     // ---- Priority 2: State Transitions ------------------------------------
 
     #[test]

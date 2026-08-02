@@ -1,4 +1,55 @@
 impl Connection {
+    #[inline]
+    fn is_terminal_control_frame(frame: &Frame<'_>) -> bool {
+        matches!(frame, Frame::ConnectionClose { .. } | Frame::ApplicationClose { .. })
+    }
+
+    /// Admits a control frame without allowing adversarial producers to grow the queue forever.
+    /// Window updates are monotonic and replace an older queued update for the same scope; close
+    /// frames can evict one non-terminal advisory frame so the peer still receives the shutdown.
+    #[inline]
+    fn queue_control_frame(queue: &mut VecDeque<Frame<'static>>, frame: Frame<'static>) {
+        if matches!(&frame, Frame::MaxData { .. }) {
+            if let Some(existing) = queue
+                .iter_mut()
+                .find(|queued| matches!(queued, Frame::MaxData { .. }))
+            {
+                *existing = frame;
+                return;
+            }
+        }
+
+        let stream_update = match &frame {
+            Frame::MaxStreamData { stream_id, .. } => Some(*stream_id),
+            _ => None,
+        };
+        if let Some(stream_id) = stream_update {
+            if let Some(existing) = queue.iter_mut().find(|queued| {
+                matches!(
+                    queued,
+                    Frame::MaxStreamData { stream_id: queued_id, .. } if *queued_id == stream_id
+                )
+            }) {
+                *existing = frame;
+                return;
+            }
+        }
+
+        if queue.len() >= MAX_PENDING_CONTROL_FRAMES {
+            if !Self::is_terminal_control_frame(&frame) {
+                return;
+            }
+            let Some(index) = queue
+                .iter()
+                .position(|queued| !Self::is_terminal_control_frame(queued))
+            else {
+                return;
+            };
+            queue.remove(index);
+        }
+        queue.push_back(frame);
+    }
+
     /// Performs a local 1-RTT write key update and toggles the short-header key phase bit.
     pub fn key_update(&mut self) {
         let mut updated = self
@@ -63,7 +114,10 @@ impl Connection {
             .saturating_add(buf.len() as u64);
         if pending_conn_after > self.peer_max_data {
             // Inform peer we are blocked by connection window
-            self.pending_control.push_back(Frame::DataBlocked { limit: self.peer_max_data });
+            Self::queue_control_frame(
+                &mut self.pending_control,
+                Frame::DataBlocked { limit: self.peer_max_data },
+            );
             return Err(crate::error::ConnectionError::FlowControl);
         }
 
@@ -109,10 +163,10 @@ impl Connection {
             }
         };
         if pending_stream_after > stream.max_stream_data_tx {
-            self.pending_control.push_back(Frame::StreamDataBlocked {
-                stream_id,
-                limit: stream.max_stream_data_tx,
-            });
+            Self::queue_control_frame(
+                &mut self.pending_control,
+                Frame::StreamDataBlocked { stream_id, limit: stream.max_stream_data_tx },
+            );
             return Err(crate::error::ConnectionError::FlowControl);
         }
 
@@ -764,17 +818,20 @@ impl Connection {
         }
         // Emit Close frame into control queue.
         if app {
-            self.pending_control.push_back(Frame::ApplicationClose {
-                error_code: err,
-                reason: Cow::Owned(reason.to_vec()),
-            });
+            Self::queue_control_frame(
+                &mut self.pending_control,
+                Frame::ApplicationClose { error_code: err, reason: Cow::Owned(reason.to_vec()) },
+            );
         } else {
             // frame_type=0 (unknown) in minimal implementation
-            self.pending_control.push_back(Frame::ConnectionClose {
-                error_code: err,
-                frame_type: 0,
-                reason: Cow::Owned(reason.to_vec()),
-            });
+            Self::queue_control_frame(
+                &mut self.pending_control,
+                Frame::ConnectionClose {
+                    error_code: err,
+                    frame_type: 0,
+                    reason: Cow::Owned(reason.to_vec()),
+                },
+            );
         }
         Ok(())
     }

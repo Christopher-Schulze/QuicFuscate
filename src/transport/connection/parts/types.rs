@@ -75,6 +75,7 @@ pub struct Connection {
     tls_provider: Option<Box<dyn crate::qftls::QuicTlsProvider>>,
     tls_profile: Option<crate::qftls::TlsProfile>,
     conn_bytes_sent: u64,
+    /// Control frames admitted through `queue_control_frame`; bounded and window-update coalesced.
     pending_control: VecDeque<Frame<'static>>,
     // Crypto context (AEAD/HP) hooks for header and payload processing
     crypto: Arc<parking_lot::RwLock<packet::CryptoContext>>,

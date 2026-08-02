@@ -811,6 +811,43 @@ fn bench_brain_apply_policy(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// Brain: concurrent packet observer hotpath (TODO-575)
+// ---------------------------------------------------------------------------
+fn bench_brain_packet_observer(c: &mut Criterion) {
+    use quicfuscate::brain::{StealthBrain, StealthBrainConfig};
+    use quicfuscate::transport::TransportObserver;
+    use std::sync::Arc;
+    use std::thread;
+
+    const PACKETS_PER_WORKER: u64 = 1024;
+    let mut group = c.benchmark_group("brain_packet_observer");
+
+    for workers in [1usize, 4, 8] {
+        group.throughput(Throughput::Elements((workers as u64) * PACKETS_PER_WORKER));
+        group.bench_function(format!("workers_{workers}"), |bench| {
+            bench.iter(|| {
+                let brain = StealthBrain::new(StealthBrainConfig::default());
+                thread::scope(|scope| {
+                    for worker in 0..workers {
+                        let brain = Arc::clone(&brain);
+                        scope.spawn(move || {
+                            let base = worker as u64 * PACKETS_PER_WORKER;
+                            for index in 0..PACKETS_PER_WORKER {
+                                let pn = base + index;
+                                brain.on_packet_recv(pn, 64 + ((pn as usize * 37) & 1023));
+                            }
+                        });
+                    }
+                });
+                black_box(brain);
+            });
+        });
+    }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
 // Group registration
 // ---------------------------------------------------------------------------
 criterion_group!(
@@ -836,6 +873,7 @@ criterion_group!(
     bench_connection_1rtt_stealth_compare,
     bench_stream_frame_encoding,
     bench_brain_apply_policy,
+    bench_brain_packet_observer,
 );
 
 criterion_group!(fec_benches, bench_fec_matrix_mul,);

@@ -361,7 +361,7 @@ This document provides comprehensive technical documentation for the system arch
   - `src/transport.rs`: Transport module root with focused submodules in `src/transport/` (packet, version, recovery, frames, h3, xdp, udpfast, connection)
   - HTTP/3 streams: `fin_received` flag tracks stream completion for deterministic GC in `poll()`
   - UDP fast paths: runtime-owned sendmmsg/recvmmsg batching in `src/optimize/udp.rs`, narrowed `udpfast` compatibility coverage, and sendmsg_x batching (macOS)
-- `src/brain.rs`: StealthBrain adaptive policy engine (ACK/FEC hints plus compatibility-only MASQUE hint channel), sensor-fusion logic, and Intelligent-mode runtime-policy delta emitter
+- `src/brain.rs`: StealthBrain adaptive policy engine (ACK/FEC hints plus compatibility-only MASQUE hint channel), lock-free packet-observer telemetry accumulators drained by `apply_policy` (packet size/count/reordering are complete; inter-arrival bins use every-eighth-packet sampling), sensor-fusion logic, and Intelligent-mode runtime-policy delta emitter
 
 - `src/profile.rs`: test/compat-only `Aegis128Profile` adapter mapped to `simd::CryptoAeadPlan`
 - `src/engine/`: Embedded control plane (`QuicFuscateEngine`, `EngineConfig`, `EngineCommand`, `EngineEvent`, `EngineStats`) for programmatic runtime orchestration
@@ -1291,7 +1291,8 @@ pub struct MacTun {
 
 #### Connection Benchmark Coverage
 
-- `scripts/benchmarks/ci_regression.rs` contains the CI Criterion hotpath groups for transport send/receive, ACK accounting, STREAM frame encoding, Brain policy application, and stealth padding decisions.
+- `scripts/benchmarks/ci_regression.rs` contains the CI Criterion hotpath groups for transport send/receive, ACK accounting, STREAM frame encoding, Brain policy application, concurrent Brain packet observation, and stealth padding decisions.
+- TODO-575 local ARM64 Criterion hotpath evidence: `brain_packet_observer` measured `30.614 us` / `33.449 Melem/s` with one worker, `294.47 us` / `13.910 Melem/s` with four workers, and `975.43 us` / `8.3984 Melem/s` with eight workers after the lock-free accumulator and IAT sampling change. The pre-change medians were `168.55 us` / `6.0752 Melem/s`, `668.13 us` / `6.1305 Melem/s`, and `1.2923 ms` / `6.3393 Melem/s` respectively.
 - Broderick ARM/AArch64 Brain policy reference after TODO-507 direct histogram divergence: `brain_apply_policy/clean_observer` `600.01 ns`, `intelligent_clean` `599.07 ns`, and `intelligent_pressure_actuating` `550.67 ns`; Criterion reports about `7.33-8.39%` lower time versus the scratch-copy path.
 - `connection_1rtt_send_recv` and `connection_1rtt_stealth_compare` use Criterion `iter_batched(..., BatchSize::PerIteration)` so paired-connection construction, CID setup, and key installation are excluded from timed measurement.
 - `transport_stealth_padding_decision` protects the real per-packet transport padding decision path. Adaptive padding uses a power-of-two remainder fastpath for the default 64-byte granularity while preserving modulo behavior for custom non-power-of-two granularities.

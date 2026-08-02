@@ -388,15 +388,20 @@ impl Connection {
                                 let new_max =
                                     (s.max_stream_data_rx.saturating_mul(2)).min(MAX_STREAM_SIZE);
                                 s.max_stream_data_rx = new_max;
-                                self.pending_control
-                                    .push_back(Frame::MaxStreamData { stream_id, max: new_max });
+                                Self::queue_control_frame(
+                                    &mut self.pending_control,
+                                    Frame::MaxStreamData { stream_id, max: new_max },
+                                );
                             }
                             if self.conn_bytes_recvd * 4 >= self.conn_max_data * 3 {
                                 // Grow connection window and queue MAX_DATA
                                 let new_max =
                                     self.conn_max_data.saturating_mul(2).min(MAX_STREAM_SIZE);
                                 self.conn_max_data = new_max;
-                                self.pending_control.push_back(Frame::MaxData { max: new_max });
+                                Self::queue_control_frame(
+                                    &mut self.pending_control,
+                                    Frame::MaxData { max: new_max },
+                                );
                             }
                         }
                         Frame::MaxData { max } => {
@@ -810,12 +815,17 @@ impl Connection {
                         let stream_avail = s.max_stream_data_tx.saturating_sub(s.send_off) as usize;
                         let send_avail = conn_avail.min(stream_avail);
                         if send_avail == 0 {
-                            self.pending_control
-                                .push_back(Frame::DataBlocked { limit: self.peer_max_data });
-                            self.pending_control.push_back(Frame::StreamDataBlocked {
-                                stream_id,
-                                limit: s.max_stream_data_tx,
-                            });
+                            Self::queue_control_frame(
+                                &mut self.pending_control,
+                                Frame::DataBlocked { limit: self.peer_max_data },
+                            );
+                            Self::queue_control_frame(
+                                &mut self.pending_control,
+                                Frame::StreamDataBlocked {
+                                    stream_id,
+                                    limit: s.max_stream_data_tx,
+                                },
+                            );
                             return Err(ConnectionError::Done);
                         }
                         let body_len = Self::maximum_stream_payload(
@@ -1093,7 +1103,10 @@ impl Connection {
     /// that matches idle HTTP/3 keepalive patterns observed in real browser sessions.
     pub(crate) fn queue_cover_ping(&mut self) {
         if self.is_established() {
-            self.pending_control.push_back(Frame::Ping { mtu_probe: None });
+            Self::queue_control_frame(
+                &mut self.pending_control,
+                Frame::Ping { mtu_probe: None },
+            );
         }
     }
 
