@@ -14,18 +14,67 @@ pub fn __test_set_ghash_override(val: Option<&str>) {
 const GHASH_REDUCTION: u128 = 0xe100_0000_0000_0000_0000_0000_0000_0000;
 
 #[inline(always)]
-fn ghash_multiply(x: u128, h: u128) -> u128 {
+fn ghash_shift_right(value: u128) -> u128 {
+    let reduction_mask = 0u128.wrapping_sub(value & 1);
+    (value >> 1) ^ (GHASH_REDUCTION & reduction_mask)
+}
+
+#[inline(always)]
+fn ghash_shift_right_four(mut value: u128) -> u128 {
+    value = ghash_shift_right(value);
+    value = ghash_shift_right(value);
+    value = ghash_shift_right(value);
+    ghash_shift_right(value)
+}
+
+#[inline(always)]
+fn ghash_multiply_bitserial(x: u128, h: u128) -> u128 {
     let mut product = 0u128;
     let mut factor = h;
 
     for bit in (0..128).rev() {
         let x_mask = 0u128.wrapping_sub((x >> bit) & 1);
         product ^= factor & x_mask;
-
-        let reduction_mask = 0u128.wrapping_sub(factor & 1);
-        factor = (factor >> 1) ^ (GHASH_REDUCTION & reduction_mask);
+        factor = ghash_shift_right(factor);
     }
 
+    product
+}
+
+#[inline]
+fn ghash_multiply_table(h: u128) -> [u128; 16] {
+    let h1 = ghash_shift_right(h);
+    let h2 = ghash_shift_right(h1);
+    let h3 = ghash_shift_right(h2);
+    [
+        0,
+        h3,
+        h2,
+        h3 ^ h2,
+        h1,
+        h3 ^ h1,
+        h2 ^ h1,
+        h3 ^ h2 ^ h1,
+        h,
+        h3 ^ h,
+        h2 ^ h,
+        h3 ^ h2 ^ h,
+        h1 ^ h,
+        h3 ^ h1 ^ h,
+        h2 ^ h1 ^ h,
+        h3 ^ h2 ^ h1 ^ h,
+    ]
+}
+
+#[inline(always)]
+fn ghash_multiply_with_table(x: u128, table: &[u128; 16]) -> u128 {
+    let mut product = 0u128;
+    let mut nibble_index = 0usize;
+    while nibble_index < 32 {
+        product =
+            ghash_shift_right_four(product) ^ table[((x >> (nibble_index * 4)) & 0x0f) as usize];
+        nibble_index += 1;
+    }
     product
 }
 
@@ -206,7 +255,7 @@ unsafe fn ghash_hw_sse(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
         for byte_val in 0..256 {
             let shift = 120 - byte_idx * 8;
             let input = (byte_val as u128) << shift;
-            let bytes = ghash_multiply(input, h128).to_be_bytes();
+            let bytes = ghash_multiply_bitserial(input, h128).to_be_bytes();
             let vec = _mm_loadu_si128(bytes.as_ptr() as *const __m128i);
             byte_tables_ptr.add(byte_idx * 256 + byte_val).write(vec);
         }
@@ -346,37 +395,38 @@ pub fn aes_gcm_open(
 
 fn ghash_software(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
     let h128 = u128::from_be_bytes(h);
+    let table = ghash_multiply_table(h128);
     let mut y: u128 = 0;
     let mut i = 0usize;
     while i + 16 <= aad.len() {
         let mut blk = [0u8; 16];
         blk.copy_from_slice(&aad[i..i + 16]);
-        y = ghash_multiply(y ^ u128::from_be_bytes(blk), h128);
+        y = ghash_multiply_with_table(y ^ u128::from_be_bytes(blk), &table);
         i += 16;
     }
     if i < aad.len() {
         let mut blk = [0u8; 16];
         blk[..aad.len() - i].copy_from_slice(&aad[i..]);
-        y = ghash_multiply(y ^ u128::from_be_bytes(blk), h128);
+        y = ghash_multiply_with_table(y ^ u128::from_be_bytes(blk), &table);
     }
     let mut j = 0usize;
     while j + 16 <= ct.len() {
         let mut blk = [0u8; 16];
         blk.copy_from_slice(&ct[j..j + 16]);
-        y = ghash_multiply(y ^ u128::from_be_bytes(blk), h128);
+        y = ghash_multiply_with_table(y ^ u128::from_be_bytes(blk), &table);
         j += 16;
     }
     if j < ct.len() {
         let mut blk = [0u8; 16];
         blk[..ct.len() - j].copy_from_slice(&ct[j..]);
-        y = ghash_multiply(y ^ u128::from_be_bytes(blk), h128);
+        y = ghash_multiply_with_table(y ^ u128::from_be_bytes(blk), &table);
     }
     let aad_bits = (aad.len() as u128) * 8;
     let ct_bits = (ct.len() as u128) * 8;
     let mut lenblk = [0u8; 16];
     lenblk[..8].copy_from_slice(&(aad_bits as u64).to_be_bytes());
     lenblk[8..].copy_from_slice(&(ct_bits as u64).to_be_bytes());
-    y = ghash_multiply(y ^ u128::from_be_bytes(lenblk), h128);
+    y = ghash_multiply_with_table(y ^ u128::from_be_bytes(lenblk), &table);
     y.to_be_bytes()
 }
 
@@ -384,6 +434,22 @@ fn ghash_software(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ghash_table_multiply_matches_bitserial_reference() {
+        let mut h = 0x66e94bd4ef8a2c3b884cfa59ca342b2eu128;
+        let mut x = 0x0388dace60b6a392f328c2b971b2fe78u128;
+        for index in 0..256 {
+            let table = ghash_multiply_table(h);
+            assert_eq!(
+                ghash_multiply_with_table(x, &table),
+                ghash_multiply_bitserial(x, h),
+                "mismatch at vector {index}"
+            );
+            h = h.rotate_left(17) ^ (index as u128).wrapping_mul(0x9e3779b97f4a7c15);
+            x = x.rotate_right(23) ^ (index as u128).wrapping_mul(0xd6e8feb86659fd93);
+        }
+    }
 
     #[test]
     fn ghash_hw_equals_sw_small_cases() {
@@ -990,7 +1056,7 @@ unsafe fn neon_ghash_block(
     vst1q_u8(y_bytes.as_mut_ptr(), y);
     vst1q_u8(x_bytes.as_mut_ptr(), x);
 
-    let product = ghash_multiply(
+    let product = ghash_multiply_bitserial(
         u128::from_be_bytes(y_bytes) ^ u128::from_be_bytes(x_bytes),
         u128::from_be_bytes(h_bytes),
     )

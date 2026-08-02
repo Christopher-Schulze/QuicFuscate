@@ -12,7 +12,6 @@ use zeroize::Zeroize;
 pub struct Aegis128LAead {
     key: [u8; 16],
     iv: [u8; 12],
-    cipher: parking_lot::Mutex<Option<Aegis128L>>,
 }
 
 /// Generate a `new(aead_key, iv)` constructor that copies key/IV bytes into
@@ -27,14 +26,13 @@ impl Aegis128LAead {
         let mut v = [0u8; 12];
         let vlen = iv.len().min(12);
         v[..vlen].copy_from_slice(&iv[..vlen]);
-        Self { key: k, iv: v, cipher: parking_lot::Mutex::new(None) }
+        Self { key: k, iv: v }
     }
 }
 
 pub(crate) struct Aegis128X4Aead {
     key: [u8; 16],
     iv: [u8; 12],
-    cipher: parking_lot::Mutex<Option<Aegis128X4>>,
 }
 
 impl Aegis128X4Aead {
@@ -45,14 +43,13 @@ impl Aegis128X4Aead {
         let mut v = [0u8; 12];
         let vlen = iv.len().min(12);
         v[..vlen].copy_from_slice(&iv[..vlen]);
-        Self { key: k, iv: v, cipher: parking_lot::Mutex::new(None) }
+        Self { key: k, iv: v }
     }
 }
 
 pub(crate) struct Aegis128X8Aead {
     key: [u8; 16],
     iv: [u8; 12],
-    cipher: parking_lot::Mutex<Option<Aegis128X8>>,
 }
 
 impl Aegis128X8Aead {
@@ -63,15 +60,12 @@ impl Aegis128X8Aead {
         let mut v = [0u8; 12];
         let vlen = iv.len().min(12);
         v[..vlen].copy_from_slice(&iv[..vlen]);
-        Self { key: k, iv: v, cipher: parking_lot::Mutex::new(None) }
+        Self { key: k, iv: v }
     }
 }
 
 impl Drop for Aegis128LAead {
     fn drop(&mut self) {
-        if let Some(cipher) = self.cipher.get_mut().as_mut() {
-            cipher.zeroize_state("aegis_l_wrapper_state");
-        }
         self.key.zeroize();
         crate::secret::observe_erasure("aegis_l_wrapper_key", &self.key);
         self.iv.zeroize();
@@ -81,9 +75,6 @@ impl Drop for Aegis128LAead {
 
 impl Drop for Aegis128X4Aead {
     fn drop(&mut self) {
-        if let Some(cipher) = self.cipher.get_mut().as_mut() {
-            cipher.zeroize_state("aegis_x4_wrapper_state");
-        }
         self.key.zeroize();
         crate::secret::observe_erasure("aegis_x4_wrapper_key", &self.key);
         self.iv.zeroize();
@@ -93,9 +84,6 @@ impl Drop for Aegis128X4Aead {
 
 impl Drop for Aegis128X8Aead {
     fn drop(&mut self) {
-        if let Some(cipher) = self.cipher.get_mut().as_mut() {
-            cipher.zeroize_state("aegis_x8_wrapper_state");
-        }
         self.key.zeroize();
         crate::secret::observe_erasure("aegis_x8_wrapper_key", &self.key);
         self.iv.zeroize();
@@ -1691,22 +1679,10 @@ impl AeadSeal for Aegis128LAead {
             return Err(ConnectionError::BufferTooShort);
         }
         let nonce16 = super::make_nonce16(&self.iv, counter);
-        let mut cipher = self.cipher.lock();
-        if cipher.is_none() {
-            *cipher = Some(
-                crate::crypto::Aegis128L::new(&self.key, &nonce16)
-                    .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?,
-            );
-        } else {
-            cipher
-                .as_mut()
-                .unwrap()
-                .reinit(&self.key, &nonce16)
-                .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
-        }
-        let a = cipher.as_mut().unwrap();
+        let mut cipher = crate::crypto::Aegis128L::new(&self.key, &nonce16)
+            .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
         let (pt, rest) = buf.split_at_mut(len);
-        let tag = a.encrypt_in_place(pt, ad);
+        let tag = cipher.encrypt_in_place(pt, ad);
         rest[..16].copy_from_slice(&tag);
         Ok(len + 16)
     }
@@ -1724,27 +1700,25 @@ impl AeadSeal for Aegis128LAead {
             return Ok(());
         }
         let homogeneous = aegis_batch_homogeneous_seal(items);
-        let mut cipher = self.cipher.lock();
-        for item in items.iter_mut() {
-            if item.buf.len() < item.plaintext_len + 16 {
-                return Err(ConnectionError::BufferTooShort);
-            }
-            let nonce16 = super::make_nonce16(&self.iv, item.counter);
-            if cipher.is_none() {
-                *cipher = Some(
-                    Aegis128L::new(&self.key, &nonce16)
-                        .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?,
-                );
-            } else {
+        let first = &items[0];
+        if first.buf.len() < first.plaintext_len + 16 {
+            return Err(ConnectionError::BufferTooShort);
+        }
+        let first_nonce = super::make_nonce16(&self.iv, first.counter);
+        let mut cipher = Aegis128L::new(&self.key, &first_nonce)
+            .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
+        for (index, item) in items.iter_mut().enumerate() {
+            if index > 0 {
+                if item.buf.len() < item.plaintext_len + 16 {
+                    return Err(ConnectionError::BufferTooShort);
+                }
+                let nonce16 = super::make_nonce16(&self.iv, item.counter);
                 cipher
-                    .as_mut()
-                    .unwrap()
                     .reinit(&self.key, &nonce16)
                     .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
             }
-            let a = cipher.as_mut().unwrap();
             let (pt, rest) = item.buf.split_at_mut(item.plaintext_len);
-            let tag = a.encrypt_in_place(pt, item.ad);
+            let tag = cipher.encrypt_in_place(pt, item.ad);
             rest[..16].copy_from_slice(&tag);
         }
         record_aegis_batch_ops(items.len(), homogeneous);
@@ -1768,21 +1742,10 @@ impl AeadOpen for Aegis128LAead {
         let mut tag = [0u8; 16];
         tag.copy_from_slice(&tag_in[..16]);
         let nonce16 = super::make_nonce16(&self.iv, counter);
-        let mut cipher = self.cipher.lock();
-        if cipher.is_none() {
-            *cipher = Some(
-                crate::crypto::Aegis128L::new(&self.key, &nonce16)
-                    .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?,
-            );
-        } else {
-            cipher
-                .as_mut()
-                .unwrap()
-                .reinit(&self.key, &nonce16)
-                .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
-        }
-        let a = cipher.as_mut().unwrap();
-        a.decrypt_in_place(ct, ad, &tag)
+        let mut cipher = crate::crypto::Aegis128L::new(&self.key, &nonce16)
+            .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
+        cipher
+            .decrypt_in_place(ct, ad, &tag)
             .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
         Ok(ct_len)
     }
@@ -1800,31 +1763,28 @@ impl AeadOpen for Aegis128LAead {
             return Ok(());
         }
         let homogeneous = aegis_batch_homogeneous_open(items);
-        let mut cipher = self.cipher.lock();
-        for item in items.iter_mut() {
-            if item.buf.len() < 16 {
-                return Err(ConnectionError::BufferTooShort);
+        let first = &items[0];
+        if first.buf.len() < 16 {
+            return Err(ConnectionError::BufferTooShort);
+        }
+        let first_nonce = super::make_nonce16(&self.iv, first.counter);
+        let mut cipher = Aegis128L::new(&self.key, &first_nonce)
+            .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
+        for (index, item) in items.iter_mut().enumerate() {
+            if index > 0 {
+                if item.buf.len() < 16 {
+                    return Err(ConnectionError::BufferTooShort);
+                }
+                let nonce16 = super::make_nonce16(&self.iv, item.counter);
+                cipher
+                    .reinit(&self.key, &nonce16)
+                    .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
             }
             let ct_len = item.buf.len() - 16;
             let (ct, tag_in) = item.buf.split_at_mut(ct_len);
             let mut tag = [0u8; 16];
             tag.copy_from_slice(&tag_in[..16]);
-            let nonce16 = super::make_nonce16(&self.iv, item.counter);
-            if cipher.is_none() {
-                *cipher = Some(
-                    Aegis128L::new(&self.key, &nonce16)
-                        .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?,
-                );
-            } else {
-                cipher
-                    .as_mut()
-                    .unwrap()
-                    .reinit(&self.key, &nonce16)
-                    .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
-            }
             cipher
-                .as_mut()
-                .unwrap()
                 .decrypt_in_place(ct, item.ad, &tag)
                 .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
         }
@@ -1855,7 +1815,7 @@ impl AeadSeal for Aegis128X4Aead {
         &self,
         items: &mut [AeadSealItem<'_>],
     ) -> Result<(), crate::error::ConnectionError> {
-        aegis_x4_x8_seal_batch(&self.key, &self.iv, &self.cipher, items)
+        aegis_x4_seal_batch(&self.key, &self.iv, items)
     }
 }
 
@@ -1884,7 +1844,7 @@ impl AeadOpen for Aegis128X4Aead {
         &self,
         items: &mut [AeadOpenItem<'_>],
     ) -> Result<(), crate::error::ConnectionError> {
-        aegis_x4_x8_open_batch(&self.key, &self.iv, &self.cipher, items)
+        aegis_x4_open_batch(&self.key, &self.iv, items)
     }
 }
 
@@ -1910,7 +1870,7 @@ impl AeadSeal for Aegis128X8Aead {
         &self,
         items: &mut [AeadSealItem<'_>],
     ) -> Result<(), crate::error::ConnectionError> {
-        aegis_x8_seal_batch(&self.key, &self.iv, &self.cipher, items)
+        aegis_x8_seal_batch(&self.key, &self.iv, items)
     }
 }
 
@@ -1939,14 +1899,13 @@ impl AeadOpen for Aegis128X8Aead {
         &self,
         items: &mut [AeadOpenItem<'_>],
     ) -> Result<(), crate::error::ConnectionError> {
-        aegis_x8_open_batch(&self.key, &self.iv, &self.cipher, items)
+        aegis_x8_open_batch(&self.key, &self.iv, items)
     }
 }
 
-fn aegis_x4_x8_seal_batch(
+fn aegis_x4_seal_batch(
     key: &[u8; 16],
     iv: &[u8; 12],
-    cipher: &parking_lot::Mutex<Option<Aegis128X4>>,
     items: &mut [AeadSealItem<'_>],
 ) -> Result<(), crate::error::ConnectionError> {
     use crate::error::ConnectionError;
@@ -1954,37 +1913,34 @@ fn aegis_x4_x8_seal_batch(
         return Ok(());
     }
     let homogeneous = aegis_batch_homogeneous_seal(items);
-    let mut cipher = cipher.lock();
-    for item in items.iter_mut() {
-        if item.buf.len() < item.plaintext_len + 16 {
-            return Err(ConnectionError::BufferTooShort);
-        }
-        let nonce16 = super::make_nonce16(iv, item.counter);
-        if cipher.is_none() {
-            *cipher = Some(
-                Aegis128X4::new(key, &nonce16)
-                    .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?,
-            );
-        } else {
+    let first = &items[0];
+    if first.buf.len() < first.plaintext_len + 16 {
+        return Err(ConnectionError::BufferTooShort);
+    }
+    let first_nonce = super::make_nonce16(iv, first.counter);
+    let mut cipher = Aegis128X4::new(key, &first_nonce)
+        .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
+    for (index, item) in items.iter_mut().enumerate() {
+        if index > 0 {
+            if item.buf.len() < item.plaintext_len + 16 {
+                return Err(ConnectionError::BufferTooShort);
+            }
+            let nonce16 = super::make_nonce16(iv, item.counter);
             cipher
-                .as_mut()
-                .unwrap()
                 .reinit(key, &nonce16)
                 .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
         }
-        let a = cipher.as_mut().unwrap();
         let (pt, rest) = item.buf.split_at_mut(item.plaintext_len);
-        let tag = a.encrypt_in_place(pt, item.ad);
+        let tag = cipher.encrypt_in_place(pt, item.ad);
         rest[..16].copy_from_slice(&tag);
     }
     record_aegis_batch_ops(items.len(), homogeneous);
     Ok(())
 }
 
-fn aegis_x4_x8_open_batch(
+fn aegis_x4_open_batch(
     key: &[u8; 16],
     iv: &[u8; 12],
-    cipher: &parking_lot::Mutex<Option<Aegis128X4>>,
     items: &mut [AeadOpenItem<'_>],
 ) -> Result<(), crate::error::ConnectionError> {
     use crate::error::ConnectionError;
@@ -1992,31 +1948,28 @@ fn aegis_x4_x8_open_batch(
         return Ok(());
     }
     let homogeneous = aegis_batch_homogeneous_open(items);
-    let mut cipher = cipher.lock();
-    for item in items.iter_mut() {
-        if item.buf.len() < 16 {
-            return Err(ConnectionError::BufferTooShort);
+    let first = &items[0];
+    if first.buf.len() < 16 {
+        return Err(ConnectionError::BufferTooShort);
+    }
+    let first_nonce = super::make_nonce16(iv, first.counter);
+    let mut cipher = Aegis128X4::new(key, &first_nonce)
+        .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
+    for (index, item) in items.iter_mut().enumerate() {
+        if index > 0 {
+            if item.buf.len() < 16 {
+                return Err(ConnectionError::BufferTooShort);
+            }
+            let nonce16 = super::make_nonce16(iv, item.counter);
+            cipher
+                .reinit(key, &nonce16)
+                .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
         }
         let ct_len = item.buf.len() - 16;
         let (ct, tag_in) = item.buf.split_at_mut(ct_len);
         let mut tag = [0u8; 16];
         tag.copy_from_slice(&tag_in[..16]);
-        let nonce16 = super::make_nonce16(iv, item.counter);
-        if cipher.is_none() {
-            *cipher = Some(
-                Aegis128X4::new(key, &nonce16)
-                    .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?,
-            );
-        } else {
-            cipher
-                .as_mut()
-                .unwrap()
-                .reinit(key, &nonce16)
-                .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
-        }
         cipher
-            .as_mut()
-            .unwrap()
             .decrypt_in_place(ct, item.ad, &tag)
             .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
     }
@@ -2027,7 +1980,6 @@ fn aegis_x4_x8_open_batch(
 fn aegis_x8_seal_batch(
     key: &[u8; 16],
     iv: &[u8; 12],
-    cipher: &parking_lot::Mutex<Option<Aegis128X8>>,
     items: &mut [AeadSealItem<'_>],
 ) -> Result<(), crate::error::ConnectionError> {
     use crate::error::ConnectionError;
@@ -2035,27 +1987,25 @@ fn aegis_x8_seal_batch(
         return Ok(());
     }
     let homogeneous = aegis_batch_homogeneous_seal(items);
-    let mut cipher = cipher.lock();
-    for item in items.iter_mut() {
-        if item.buf.len() < item.plaintext_len + 16 {
-            return Err(ConnectionError::BufferTooShort);
-        }
-        let nonce16 = super::make_nonce16(iv, item.counter);
-        if cipher.is_none() {
-            *cipher = Some(
-                Aegis128X8::new(key, &nonce16)
-                    .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?,
-            );
-        } else {
+    let first = &items[0];
+    if first.buf.len() < first.plaintext_len + 16 {
+        return Err(ConnectionError::BufferTooShort);
+    }
+    let first_nonce = super::make_nonce16(iv, first.counter);
+    let mut cipher = Aegis128X8::new(key, &first_nonce)
+        .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
+    for (index, item) in items.iter_mut().enumerate() {
+        if index > 0 {
+            if item.buf.len() < item.plaintext_len + 16 {
+                return Err(ConnectionError::BufferTooShort);
+            }
+            let nonce16 = super::make_nonce16(iv, item.counter);
             cipher
-                .as_mut()
-                .unwrap()
                 .reinit(key, &nonce16)
                 .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
         }
-        let a = cipher.as_mut().unwrap();
         let (pt, rest) = item.buf.split_at_mut(item.plaintext_len);
-        let tag = a.encrypt_in_place(pt, item.ad);
+        let tag = cipher.encrypt_in_place(pt, item.ad);
         rest[..16].copy_from_slice(&tag);
     }
     record_aegis_batch_ops(items.len(), homogeneous);
@@ -2065,7 +2015,6 @@ fn aegis_x8_seal_batch(
 fn aegis_x8_open_batch(
     key: &[u8; 16],
     iv: &[u8; 12],
-    cipher: &parking_lot::Mutex<Option<Aegis128X8>>,
     items: &mut [AeadOpenItem<'_>],
 ) -> Result<(), crate::error::ConnectionError> {
     use crate::error::ConnectionError;
@@ -2073,31 +2022,28 @@ fn aegis_x8_open_batch(
         return Ok(());
     }
     let homogeneous = aegis_batch_homogeneous_open(items);
-    let mut cipher = cipher.lock();
-    for item in items.iter_mut() {
-        if item.buf.len() < 16 {
-            return Err(ConnectionError::BufferTooShort);
+    let first = &items[0];
+    if first.buf.len() < 16 {
+        return Err(ConnectionError::BufferTooShort);
+    }
+    let first_nonce = super::make_nonce16(iv, first.counter);
+    let mut cipher = Aegis128X8::new(key, &first_nonce)
+        .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
+    for (index, item) in items.iter_mut().enumerate() {
+        if index > 0 {
+            if item.buf.len() < 16 {
+                return Err(ConnectionError::BufferTooShort);
+            }
+            let nonce16 = super::make_nonce16(iv, item.counter);
+            cipher
+                .reinit(key, &nonce16)
+                .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
         }
         let ct_len = item.buf.len() - 16;
         let (ct, tag_in) = item.buf.split_at_mut(ct_len);
         let mut tag = [0u8; 16];
         tag.copy_from_slice(&tag_in[..16]);
-        let nonce16 = super::make_nonce16(iv, item.counter);
-        if cipher.is_none() {
-            *cipher = Some(
-                Aegis128X8::new(key, &nonce16)
-                    .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?,
-            );
-        } else {
-            cipher
-                .as_mut()
-                .unwrap()
-                .reinit(key, &nonce16)
-                .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
-        }
         cipher
-            .as_mut()
-            .unwrap()
             .decrypt_in_place(ct, item.ad, &tag)
             .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
     }
@@ -2428,7 +2374,7 @@ mod tests {
     }
 
     #[test]
-    fn aegis_wrapper_drop_erases_keys_ivs_and_initialized_state() {
+    fn aegis_wrapper_drop_erases_keys_and_ivs() {
         use super::{AeadSeal, Aegis128LAead, Aegis128X4Aead, Aegis128X8Aead};
         use std::sync::{Arc, Mutex};
 
@@ -2454,13 +2400,13 @@ mod tests {
         for (label, expected_len) in [
             ("aegis_l_wrapper_key", 16),
             ("aegis_l_wrapper_iv", 12),
-            ("aegis_l_wrapper_state", 128),
+            ("aegis_l_inner_state", 128),
             ("aegis_x4_wrapper_key", 16),
             ("aegis_x4_wrapper_iv", 12),
-            ("aegis_x4_wrapper_state", 128),
+            ("aegis_x4_inner_state", 128),
             ("aegis_x8_wrapper_key", 16),
             ("aegis_x8_wrapper_iv", 12),
-            ("aegis_x8_wrapper_state", 128),
+            ("aegis_x8_inner_state", 128),
         ] {
             let bytes = events
                 .iter()
@@ -2494,7 +2440,7 @@ mod tests {
 
         let events = events.lock().expect("erasure events");
         for (label, expected_count) in
-            [("aegis_l_wrapper_state", 1), ("aegis_l_wrapper_key", 2), ("aegis_l_wrapper_iv", 2)]
+            [("aegis_l_wrapper_key", 2), ("aegis_l_wrapper_iv", 2), ("aegis_l_inner_state", 1)]
         {
             let matching =
                 events.iter().filter(|(event_label, _)| *event_label == label).collect::<Vec<_>>();
@@ -2510,6 +2456,42 @@ mod tests {
                 .find_map(|(event_label, bytes)| (*event_label == label).then_some(bytes))
                 .unwrap_or_else(|| panic!("missing erasure event: {label}"));
             assert!(bytes.iter().all(|byte| *byte == 0), "partial wrapper retained {label}");
+        }
+    }
+
+    #[test]
+    fn aegis_wrapper_supports_concurrent_packets() {
+        use super::{AeadSeal, Aegis128LAead};
+        use std::sync::Arc;
+        use std::thread;
+
+        let key = [0x42u8; 16];
+        let iv = [0x24u8; 12];
+        let ad = b"concurrent-aegis";
+        let plaintext = b"same-wrapper-independent-state";
+        let seal = Arc::new(Aegis128LAead::new(&key, &iv));
+        let handles = (1u64..=8)
+            .map(|counter| {
+                let seal = Arc::clone(&seal);
+                thread::spawn(move || {
+                    let mut buf = vec![0u8; plaintext.len() + 16];
+                    buf[..plaintext.len()].copy_from_slice(plaintext);
+                    seal.seal_with_u64_counter(counter, ad, &mut buf, plaintext.len(), None)
+                        .expect("concurrent seal");
+                    (counter, buf)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            let (counter, actual) = handle.join().expect("concurrent worker");
+            let nonce16 = super::super::make_nonce16(&iv, counter);
+            let mut expected = plaintext.to_vec();
+            let tag = Aegis128L::new(&key, &nonce16)
+                .expect("reference cipher")
+                .encrypt_in_place(&mut expected, ad);
+            expected.extend_from_slice(&tag);
+            assert_eq!(actual, expected, "counter {counter} diverged");
         }
     }
 }

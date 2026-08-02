@@ -46,9 +46,7 @@ pub(crate) const DEFAULT_DATA_PLANE_AEAD_LEN: usize = 1400;
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 fn prefetch_aegis_state(ptr: *const u8) {
-    if FeatureDetector::instance().has_feature(CpuFeature::SSE42) {
-        crate::optimize::prefetch(ptr, crate::optimize::PrefetchHint::T0);
-    }
+    crate::optimize::prefetch(ptr, crate::optimize::PrefetchHint::T0);
 }
 
 #[cfg(not(target_arch = "x86_64"))]
