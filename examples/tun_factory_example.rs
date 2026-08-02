@@ -1,7 +1,7 @@
 #![cfg(feature = "tun-tests")]
 
-// Example: Register a custom TUN factory (e.g., for Windows/iOS integration)
-// This uses a minimal in-process mock that requires no OS privileges.
+// Example: Register a custom TUN factory for external platform integration.
+// This uses a minimal in-process device that requires no OS privileges.
 
 use quicfuscate::interface::{register_tun_factory, TunConfig, TunDevice, TunInterface};
 use quicfuscate::optimize::MemoryPool;
@@ -60,13 +60,6 @@ fn example_usage() {
 }
 
 fn main() {
-    println!("TUN Factory Example - Run with appropriate features");
-    #[cfg(any(feature = "tun-tests", feature = "tun-windows", feature = "tun-ios"))]
-    {
-        example_usage();
-    }
-    #[cfg(not(any(feature = "tun-tests", feature = "tun-windows", feature = "tun-ios")))]
-    {
-        println!("This example requires tun-tests, tun-windows, or tun-ios feature to be enabled");
-    }
+    println!("TUN Factory Example - tun-tests");
+    example_usage();
 }

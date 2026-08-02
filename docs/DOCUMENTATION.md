@@ -1980,6 +1980,7 @@ See "Unified TLS Provider (RealTLS + TLS Cover) -> Fingerprint Source Model" for
     - `compression_zstd_ffi`
   - Platform integration:
     - `tun-windows`
+    - `tun-ios`
   - Test/validation:
     - `rust-tests`
     - `benches`
@@ -2421,7 +2422,7 @@ Each script is self-contained and handles specific functionality. Scripts can be
 All scripts include a unified, minimal help handler accessible via `-h`, `--help`, or `help`. It prints `Usage: <script>` together with the first `# Description:` line found in the script, then exits early with code `0` and no side effects.
 
 ### TUN interface example (feature-gated)
-The TUN example is gated behind the Cargo feature `tun-tests` to avoid impacting default builds. Use the following command:
+The TUN example is intentionally gated by both Cargo's `required-features = ["tun-tests"]` target contract and the example's crate-level cfg, so it does not affect default builds. It demonstrates external factory registration with an in-process test device; it is not a Wintun or NetworkExtension backend proof. The `tun-windows` and `tun-ios` features do not select this example.
 ```bash
 # Run example demonstrating factory registration
 cargo run --features tun-tests --example tun_factory_example
@@ -2429,6 +2430,7 @@ cargo run --features tun-tests --example tun_factory_example
 
 Notes:
 - The example integrates with `MemoryPool` to exercise zero-copy paths.
+- Platform backend coverage remains under the dedicated `tun-windows` and iOS/platform integration paths.
 
 ### Client
 
@@ -4706,6 +4708,6 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 
 - **Cargo target inventory:** The root package declares 71 integration-test targets and every declared source path exists. The desktop/web-admin Rust validation suite invokes five current declared targets. The historical `it-masque-runtime-integration` source remains under `archive/tests/` as evidence only and is not an active Cargo target; TODO-774 closed the stale runner contract.
 - **Feature-gated tests:** Sixty declared test targets have crate-level feature cfgs without matching Cargo `required-features`. The common `run_cargo` helper currently injects `rust-tests` for test commands, but direct target calls and CI's default all-target and SIMD self-check lanes still omit or under-specify intended feature bodies. XDP also requires `internal_af_xdp_experimental`, which the transport suite does not pass. TODO-734 owns the feature and non-vacuity contract.
-- **Example target:** `tun_factory_example` is selected by Cargo only with `tun-tests`, and its crate-level cfg repeats that restriction even though `main()` advertises `tun-windows` and `tun-ios` branches. Those branches are unreachable under the declared target contract. TODO-775 owns the reconciliation; TODO-443 remains the platform implementation owner.
+- **Example target:** `tun_factory_example` is selected by Cargo and its crate-level cfg only with `tun-tests`; `main()` now demonstrates the registered external factory without advertising unreachable `tun-windows` or `tun-ios` branches. The example proves factory wiring, not platform backend behavior. TODO-775 closed the target contract; TODO-443 remains the platform implementation owner.
 - **CI and release:** The current workflow review confirms existing ownership under TODO-708, TODO-709, TODO-734, TODO-741, TODO-749, and TODO-758: masked benchmark-baseline failures, incomplete strict Clippy feature coverage, vacuous feature lanes, optional release artifact publication and updater activation, mutable dependency/toolchain inputs, and push-only fuzz coverage. No additional unowned workflow finding was created in this pass.
-- **Audit register:** The current local corpus contains 701 tracker headings, 362 current detail files, and 374 archived detail files. Git scope currently enumerates 899 tracked, 55,098 ignored, and zero non-ignored untracked paths, for 55,997 accounted paths. `bash scripts/tests/audits/verify-audit-completeness.sh` passes its register/detail/archive/scope checks and reports exactly three `historical-archive` paths. TODO-773 closed the tracked archive classifier boundary; new runtime/configuration/evidence findings are owned by TODO-724, TODO-751, and TODO-788 through TODO-797. Therefore the broader whole-project audit remains open for its separately owned target, runtime, native, evidence, and feature-contract boundaries.
+- **Audit register:** The current local corpus contains 701 tracker headings, 362 current detail files, and 374 archived detail files. Git scope currently enumerates 899 tracked, 56,036 ignored, and zero non-ignored untracked paths, for 56,935 accounted paths. `bash scripts/tests/audits/verify-audit-completeness.sh` passes its register/detail/archive/scope checks and reports exactly three `historical-archive` paths. TODO-773 closed the tracked archive classifier boundary; new runtime/configuration/evidence findings are owned by TODO-724, TODO-751, and TODO-788 through TODO-797. Therefore the broader whole-project audit remains open for its separately owned target, runtime, native, evidence, and feature-contract boundaries.
