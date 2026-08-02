@@ -302,6 +302,24 @@ mod tests {
     }
 
     #[test]
+    fn repeated_connection_window_blocks_coalesce() {
+        let mut c = make_conn();
+        c.peer_max_data = 10;
+        for _ in 0..8 {
+            assert!(c.stream_send(0, &[0u8; 100], false).is_err());
+        }
+
+        assert_eq!(
+            c.pending_control
+                .iter()
+                .filter(|frame| matches!(frame, Frame::DataBlocked { .. }))
+                .count(),
+            1,
+            "retries in one connection window must retain one DataBlocked frame"
+        );
+    }
+
+    #[test]
     fn flow_control_stream_window_blocks_independently() {
         let mut c = make_conn();
         // Connection window is generous; stream window is the bottleneck.
@@ -332,6 +350,28 @@ mod tests {
         assert!(
             has_stream_blocked,
             "StreamDataBlocked frame must be queued when stream window is exhausted"
+        );
+    }
+
+    #[test]
+    fn repeated_stream_window_blocks_coalesce_per_stream() {
+        let mut c = make_conn();
+        c.peer_max_data = 10_000;
+        c.stream_send(0, b"", false).ok();
+        if let Some(s) = c.streams.get_mut(&0) {
+            s.max_stream_data_tx = 5;
+        }
+        for _ in 0..8 {
+            assert!(c.stream_send(0, &[0u8; 100], false).is_err());
+        }
+
+        assert_eq!(
+            c.pending_control
+                .iter()
+                .filter(|frame| matches!(frame, Frame::StreamDataBlocked { stream_id: 0, .. }))
+                .count(),
+            1,
+            "retries in one stream window must retain one StreamDataBlocked frame"
         );
     }
 
@@ -470,7 +510,7 @@ mod tests {
         let mut c = make_conn();
         install_write_secret(&mut c);
         assert!(!c.key_phase);
-        c.key_update();
+        c.key_update().expect("transport-owned key update");
         assert!(
             c.key_phase,
             "key_update() must flip key_phase to true when write secret is present"
@@ -481,13 +521,43 @@ mod tests {
     fn key_update_twice_restores_phase() {
         let mut c = make_conn();
         install_write_secret(&mut c);
-        c.key_update();
+        c.key_update().expect("first transport-owned key update");
         assert!(c.key_phase, "after first update: key_phase = true");
         // The second update derives from the rotated secret – re-install a known secret
         // so the derivation chain can continue without panicking.
         install_write_secret(&mut c);
-        c.key_update();
+        c.key_update().expect("second transport-owned key update");
         assert!(!c.key_phase, "after second update: key_phase must return to false");
+    }
+
+    #[test]
+    fn key_update_does_not_fallback_when_provider_rejects() {
+        let mut c = make_conn();
+        c.enable_tls("chrome").expect("test rustls provider");
+        install_write_secret(&mut c);
+        let (secret_before, generation_before) = {
+            let crypto = c.crypto.read();
+            (
+                crypto.write_secret_1rtt.as_ref().map(|secret| secret.as_slice().to_vec()),
+                crypto.write_generation_1rtt,
+            )
+        };
+
+        let error = c.key_update().expect_err("incomplete provider must reject key update");
+
+        assert!(matches!(error, ConnectionError::TlsError(_)));
+        assert!(!c.key_phase, "provider failure must not toggle the key phase");
+        let crypto = c.crypto.read();
+        assert_eq!(
+            crypto.write_secret_1rtt.as_ref().map(|secret| secret.as_slice().to_vec()),
+            secret_before,
+            "provider failure must not rotate the transport write secret"
+        );
+        assert_eq!(
+            crypto.write_generation_1rtt, generation_before,
+            "provider failure must not rotate the transport write generation"
+        );
+        assert_eq!(c.local_error, Some(error));
     }
 
     // ---- Priority 4: In-Flight / Congestion Control ----------------------

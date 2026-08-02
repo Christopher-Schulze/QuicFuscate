@@ -19,6 +19,16 @@ impl Connection {
             }
         }
 
+        if matches!(&frame, Frame::DataBlocked { .. }) {
+            if let Some(existing) = queue
+                .iter_mut()
+                .find(|queued| matches!(queued, Frame::DataBlocked { .. }))
+            {
+                *existing = frame;
+                return;
+            }
+        }
+
         let stream_update = match &frame {
             Frame::MaxStreamData { stream_id, .. } => Some(*stream_id),
             _ => None,
@@ -28,6 +38,22 @@ impl Connection {
                 matches!(
                     queued,
                     Frame::MaxStreamData { stream_id: queued_id, .. } if *queued_id == stream_id
+                )
+            }) {
+                *existing = frame;
+                return;
+            }
+        }
+
+        let stream_blocked = match &frame {
+            Frame::StreamDataBlocked { stream_id, .. } => Some(*stream_id),
+            _ => None,
+        };
+        if let Some(stream_id) = stream_blocked {
+            if let Some(existing) = queue.iter_mut().find(|queued| {
+                matches!(
+                    queued,
+                    Frame::StreamDataBlocked { stream_id: queued_id, .. } if *queued_id == stream_id
                 )
             }) {
                 *existing = frame;
@@ -51,19 +77,27 @@ impl Connection {
     }
 
     /// Performs a local 1-RTT write key update and toggles the short-header key phase bit.
-    pub fn key_update(&mut self) {
-        let mut updated = self
-            .tls_provider
-            .as_mut()
-            .map(|provider| provider.key_update_write().is_ok())
-            .unwrap_or(false);
-        if !updated {
-            updated = self.crypto.write().key_update_1rtt_write();
+    ///
+    /// A configured TLS provider owns the write-key transition. Its failure is returned and
+    /// never followed by a raw transport fallback, because that would desynchronize the two key
+    /// stacks. Connections without a provider use the transport-owned secret path.
+    pub fn key_update(&mut self) -> Result<(), crate::error::ConnectionError> {
+        let result = if let Some(provider) = self.tls_provider.as_mut() {
+            provider.key_update_write()
+        } else if self.crypto.write().key_update_1rtt_write() {
+            Ok(())
+        } else {
+            Err(crate::error::ConnectionError::KeyUpdateError)
+        };
+
+        if let Err(error) = result {
+            self.record_local_error(error.clone());
+            return Err(error);
         }
-        if updated {
-            self.key_phase = !self.key_phase;
-            self.refresh_short_header_tag_reserve();
-        }
+
+        self.key_phase = !self.key_phase;
+        self.refresh_short_header_tag_reserve();
+        Ok(())
     }
 
     /// Receives data from a stream

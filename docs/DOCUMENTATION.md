@@ -2103,6 +2103,13 @@ println!("RTT: {}ms, Delivery rate: {}bps",
          stats.delivery_rate);
 ```
 
+The low-level `transport::Connection::key_update()` returns a `Result`. When a TLS provider is
+configured, the provider exclusively owns the write-key transition; a provider failure is
+reported without rotating the transport fallback or toggling the short-header key phase. A
+providerless test/compatibility connection uses its transport-owned 1-RTT secret. Repeated
+`DataBlocked` and `StreamDataBlocked` notifications are coalesced per connection window and
+stream window in the bounded control queue.
+
 
 ## Deployment
 
