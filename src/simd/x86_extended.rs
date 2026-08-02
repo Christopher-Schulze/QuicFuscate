@@ -4,6 +4,14 @@ use super::scalar;
 use super::*;
 use std::arch::x86_64::*;
 
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_high_nibbles(value: __m256i) -> __m256i {
+    let nibble_mask = _mm256_set1_epi8(0x0F);
+    let low_byte_nibbles = _mm256_and_si256(_mm256_srli_epi16(value, 4), nibble_mask);
+    let high_byte_nibbles = _mm256_slli_epi16(_mm256_srli_epi16(value, 12), 8);
+    _mm256_or_si256(low_byte_nibbles, high_byte_nibbles)
+}
+
 /// AVX-512/GFNI feature boundary using the canonical scalar algorithm.
 #[target_feature(enable = "avx512f", enable = "gfni")]
 pub(super) unsafe fn berlekamp_massey_gfni(syndrome: &[u8], len: usize) -> Vec<u8> {
@@ -135,7 +143,7 @@ pub(super) unsafe fn matmul_gf256_avx2(
 
                 // GF multiply using shuffle
                 let lo_nibbles = _mm256_and_si256(b_vec, nibble_mask);
-                let hi_nibbles = _mm256_and_si256(_mm256_srli_epi16(b_vec, 4), nibble_mask);
+                let hi_nibbles = avx2_high_nibbles(b_vec);
                 let lo_result = _mm256_shuffle_epi8(lo_lut, lo_nibbles);
                 let hi_result = _mm256_shuffle_epi8(hi_lut, hi_nibbles);
                 let prod = _mm256_xor_si256(lo_result, hi_result);
@@ -632,20 +640,14 @@ pub(super) unsafe fn reed_solomon_encode_avx2(data: &[u8], parity_shards: usize)
     let mut matrix = vec![0u8; parity_shards * data_shards];
     for i in 0..parity_shards {
         for j in 0..data_shards {
-            // Vandermonde element: (i+data_shards)^j in GF(256)
-            let mut val = 1u8;
-            let x = (i + data_shards) as u8;
-            for _ in 0..j {
-                val = gf_mul_single(val, x);
-            }
-            matrix[i * data_shards + j] = val;
+            matrix[i * data_shards + j] = scalar::gf_pow((i + 1) as u8, j as u8);
         }
     }
 
     // Compute parity shards using AVX2
     for p in 0..parity_shards {
         let parity_start = (data_shards + p) * shard_size;
-        let mut parity_vec = _mm256_setzero_si256();
+        let mut lookup_tables = Vec::with_capacity(data_shards);
 
         for d in 0..data_shards {
             let coeff = matrix[p * data_shards + d];
@@ -653,28 +655,98 @@ pub(super) unsafe fn reed_solomon_encode_avx2(data: &[u8], parity_shards: usize)
                 continue;
             }
 
-            let data_start = d * shard_size;
-            let coeff_vec = _mm256_set1_epi8(coeff as i8);
+            let (lo_lut, hi_lut) = gf_mul_avx2_tables(coeff);
+            lookup_tables.push((d, lo_lut, hi_lut));
+        }
 
-            // Process 32 bytes at a time
-            for i in (0..shard_size).step_by(32) {
+        for i in (0..shard_size).step_by(32) {
+            let mut parity_vec = _mm256_setzero_si256();
+            for &(data_shard, lo_lut, hi_lut) in &lookup_tables {
+                let data_start = data_shard * shard_size;
                 let data_vec =
                     _mm256_loadu_si256(output.as_ptr().add(data_start + i) as *const __m256i);
 
-                // GF(256) multiplication using shuffle tables
-                let prod = gf_mul_avx2_vec(data_vec, coeff_vec);
+                let prod = gf_mul_avx2_vec(data_vec, lo_lut, hi_lut);
                 parity_vec = _mm256_xor_si256(parity_vec, prod);
+            }
 
-                _mm256_storeu_si256(
-                    output.as_mut_ptr().add(parity_start + i) as *mut __m256i,
-                    parity_vec,
-                );
-                parity_vec = _mm256_setzero_si256();
+            _mm256_storeu_si256(
+                output.as_mut_ptr().add(parity_start + i) as *mut __m256i,
+                parity_vec,
+            );
+        }
+    }
+
+    _mm256_zeroupper();
+    output
+}
+
+fn build_reed_solomon_decode_matrix(
+    shards: &[Vec<u8>],
+    indices: &[usize],
+) -> Result<(Vec<Vec<u8>>, usize, usize), &'static str> {
+    if shards.is_empty() {
+        return Err("No shards provided");
+    }
+    if shards.len() != indices.len() {
+        return Err("Shard/index length mismatch");
+    }
+
+    let shard_size = shards[0].len();
+    if !shards.iter().all(|shard| shard.len() == shard_size) {
+        return Err("Shard size mismatch");
+    }
+
+    let k = shards.len();
+    if k > 256 {
+        return Err("Too many shards for GF(256)");
+    }
+    if indices.iter().any(|&index| index > u8::MAX as usize) {
+        return Err("Shard index outside GF(256)");
+    }
+
+    let augmented_width = k.checked_mul(2).ok_or("Shard count overflow")?;
+    let output_len = k.checked_mul(shard_size).ok_or("Output size overflow")?;
+    let mut matrix = vec![vec![0u8; augmented_width]; k];
+
+    for (row, &index) in indices.iter().enumerate() {
+        let x = index as u8;
+        for column in 0..k {
+            matrix[row][column] = scalar::gf_pow(x, column as u8);
+        }
+        matrix[row][k + row] = 1;
+    }
+
+    for pivot in 0..k {
+        if matrix[pivot][pivot] == 0 {
+            let swap_row = ((pivot + 1)..k).find(|&row| matrix[row][pivot] != 0);
+            if let Some(swap_row) = swap_row {
+                matrix.swap(pivot, swap_row);
+            } else {
+                return Err("Matrix not invertible");
+            }
+        }
+
+        let pivot_inverse = scalar::gf_inv(matrix[pivot][pivot]);
+        for column in pivot..augmented_width {
+            matrix[pivot][column] = scalar::gf_mul_byte(matrix[pivot][column], pivot_inverse);
+        }
+
+        for row in 0..k {
+            if row == pivot {
+                continue;
+            }
+            let factor = matrix[row][pivot];
+            if factor == 0 {
+                continue;
+            }
+            for column in pivot..augmented_width {
+                matrix[row][column] ^= scalar::gf_mul_byte(matrix[pivot][column], factor);
             }
         }
     }
 
-    output
+    Ok((matrix, shard_size, output_len))
 }
 
 /// Reed-Solomon decoding with GFNI when available.
@@ -683,91 +755,38 @@ pub(super) unsafe fn reed_solomon_decode_gfni(
     shards: &[Vec<u8>],
     indices: &[usize],
 ) -> Result<Vec<u8>, &'static str> {
-    use std::arch::x86_64::*;
+    let (matrix, shard_size, output_len) = build_reed_solomon_decode_matrix(shards, indices)?;
+    let k = shards.len();
+    let mut output = vec![0u8; output_len];
 
-    if shards.is_empty() {
-        return Err("No shards provided");
-    }
-
-    let shard_size = shards[0].len();
-    let k = shards.len(); // Number of available shards
-
-    // Build decoding matrix using Gaussian elimination
-    let mut matrix = vec![vec![0u8; k + 1]; k];
-    for (i, &idx) in indices.iter().enumerate().take(k) {
-        // Vandermonde row for this index
-        for j in 0..k {
-            let mut val = 1u8;
-            let x = idx as u8;
-            for _ in 0..j {
-                val = gf_mul_single(val, x);
-            }
-            matrix[i][j] = val;
-        }
-        matrix[i][k] = 1; // Augmented identity
-    }
-
-    // Gaussian elimination to invert matrix
-    for i in 0..k {
-        // Find pivot
-        if matrix[i][i] == 0 {
-            for j in (i + 1)..k {
-                if matrix[j][i] != 0 {
-                    matrix.swap(i, j);
-                    break;
-                }
-            }
-        }
-
-        // Normalize row
-        let pivot = matrix[i][i];
-        if pivot == 0 {
-            return Err("Matrix not invertible");
-        }
-        let pivot_inv = gf_inv(pivot);
-
-        for j in 0..=k {
-            matrix[i][j] = gf_mul_single(matrix[i][j], pivot_inv);
-        }
-
-        // Eliminate column
-        for j in 0..k {
-            if i != j && matrix[j][i] != 0 {
-                let factor = matrix[j][i];
-                for c in 0..=k {
-                    matrix[j][c] ^= gf_mul_single(matrix[i][c], factor);
-                }
-            }
-        }
-    }
-
-    // Apply inverted matrix to recover data using AVX512-GFNI
-    let mut output = vec![0u8; k * shard_size];
-
-    for i in 0..k {
-        let out_start = i * shard_size;
-
-        for j in 0..k {
-            let coeff = matrix[i][k]; // From inverted matrix
+    for output_row in 0..k {
+        let output_start = output_row * shard_size;
+        for shard_index in 0..k {
+            let coeff = matrix[output_row][k + shard_index];
             if coeff == 0 {
                 continue;
             }
 
-            let shard_data = &shards[j];
+            let shard_data = &shards[shard_index];
+            let coeff_vec = _mm512_set1_epi8(coeff as i8);
+            let mut offset = 0;
+            while offset + 64 <= shard_size {
+                let data = _mm512_loadu_si512(shard_data.as_ptr().add(offset) as *const __m512i);
+                let current = _mm512_loadu_si512(
+                    output.as_ptr().add(output_start + offset) as *const __m512i
+                );
+                let product = _mm512_gf2p8mul_epi8(data, coeff_vec);
+                let result = _mm512_xor_si512(current, product);
+                _mm512_storeu_si512(
+                    output.as_mut_ptr().add(output_start + offset) as *mut __m512i,
+                    result,
+                );
+                offset += 64;
+            }
 
-            // Process 64 bytes at a time with AVX512-GFNI
-            for c in (0..shard_size).step_by(64) {
-                let data = _mm512_loadu_si512(shard_data.as_ptr().add(c) as *const __m512i);
-                let coeff_vec = _mm512_set1_epi8(coeff as i8);
-
-                // GFNI multiplication
-                let prod = _mm512_gf2p8mul_epi8(data, coeff_vec);
-
-                let current =
-                    _mm512_loadu_si512(output.as_ptr().add(out_start + c) as *const __m512i);
-                let result = _mm512_xor_si512(current, prod);
-
-                _mm512_storeu_si512(output.as_mut_ptr().add(out_start + c) as *mut __m512i, result);
+            while offset < shard_size {
+                output[output_start + offset] ^= scalar::gf_mul_byte(shard_data[offset], coeff);
+                offset += 1;
             }
         }
     }
@@ -775,102 +794,28 @@ pub(super) unsafe fn reed_solomon_decode_gfni(
     Ok(output)
 }
 
-#[inline(always)]
-unsafe fn gf_mul_avx2_vec(a: __m256i, b: __m256i) -> __m256i {
-    use std::arch::x86_64::*;
+#[target_feature(enable = "avx2")]
+unsafe fn gf_mul_avx2_tables(coefficient: u8) -> (__m256i, __m256i) {
+    let mut lo_table = [0u8; 16];
+    let mut hi_table = [0u8; 16];
+    for nibble in 0..16 {
+        lo_table[nibble] = scalar::gf_mul_byte(nibble as u8, coefficient);
+        hi_table[nibble] = scalar::gf_mul_byte((nibble << 4) as u8, coefficient);
+    }
 
-    // Full GF(256) multiplication table lookup
-    let mask = _mm256_set1_epi8(0x0F);
-    let a_lo = _mm256_and_si256(a, mask);
-    let a_hi = _mm256_srli_epi16(_mm256_and_si256(a, _mm256_set1_epi8(0xF0u8 as i8)), 4);
-
-    // Lookup tables for b multiplication
-    let b_lo = _mm256_and_si256(b, mask);
-    let _b_hi = _mm256_srli_epi16(_mm256_and_si256(b, _mm256_set1_epi8(0xF0u8 as i8)), 4);
-
-    // Multiplication via table lookups
-    let tbl_lo = _mm256_shuffle_epi8(
-        _mm256_set_epi8(
-            0x00,
-            0x1b,
-            0x36,
-            0x2d,
-            0x6c,
-            0x77,
-            0x5a,
-            0x41,
-            0xd8u8 as i8,
-            0xc3u8 as i8,
-            0xeeu8 as i8,
-            0xf5u8 as i8,
-            0xb4u8 as i8,
-            0xafu8 as i8,
-            0x82u8 as i8,
-            0x99u8 as i8,
-            0x00,
-            0x1b,
-            0x36,
-            0x2d,
-            0x6c,
-            0x77,
-            0x5a,
-            0x41,
-            0xd8u8 as i8,
-            0xc3u8 as i8,
-            0xeeu8 as i8,
-            0xf5u8 as i8,
-            0xb4u8 as i8,
-            0xafu8 as i8,
-            0x82u8 as i8,
-            0x99u8 as i8,
-        ),
-        b_lo,
-    );
-
-    let p1 = _mm256_shuffle_epi8(tbl_lo, a_lo);
-    let p2 = _mm256_shuffle_epi8(tbl_lo, a_hi);
-    _mm256_xor_si256(p1, p2)
+    let lo_lut = _mm256_broadcastsi128_si256(_mm_loadu_si128(lo_table.as_ptr() as *const __m128i));
+    let hi_lut = _mm256_broadcastsi128_si256(_mm_loadu_si128(hi_table.as_ptr() as *const __m128i));
+    (lo_lut, hi_lut)
 }
 
-#[inline(always)]
-fn gf_inv(a: u8) -> u8 {
-    // Compute multiplicative inverse in GF(256) using exponentiation: a^254 = a^-1
-    // Reduction polynomial 0x1b (AES polynomial), consistent with gf_mul_single()
-    if a == 0 {
-        return 0;
-    }
-    fn gf_pow(mut base: u8, mut exp: u16) -> u8 {
-        let mut result: u8 = 1;
-        while exp > 0 {
-            if (exp & 1) != 0 {
-                result = gf_mul_single(result, base);
-            }
-            base = gf_mul_single(base, base);
-            exp >>= 1;
-        }
-        result
-    }
-    gf_pow(a, 254)
-}
-
-#[inline(always)]
-fn gf_mul_single(a: u8, b: u8) -> u8 {
-    // Fast GF(256) multiplication
-    let mut result = 0u8;
-    let mut aa = a;
-    let mut bb = b;
-    while bb != 0 {
-        if bb & 1 != 0 {
-            result ^= aa;
-        }
-        let hi_bit = aa & 0x80;
-        aa <<= 1;
-        if hi_bit != 0 {
-            aa ^= 0x1b; // x^8 + x^4 + x^3 + x + 1
-        }
-        bb >>= 1;
-    }
-    result
+#[target_feature(enable = "avx2")]
+unsafe fn gf_mul_avx2_vec(a: __m256i, lo_lut: __m256i, hi_lut: __m256i) -> __m256i {
+    let nibble_mask = _mm256_set1_epi8(0x0F);
+    let lo_nibbles = _mm256_and_si256(a, nibble_mask);
+    let hi_nibbles = avx2_high_nibbles(a);
+    let lo_result = _mm256_shuffle_epi8(lo_lut, lo_nibbles);
+    let hi_result = _mm256_shuffle_epi8(hi_lut, hi_nibbles);
+    _mm256_xor_si256(lo_result, hi_result)
 }
 
 /// Reed-Solomon decoding with AVX2
@@ -879,7 +824,44 @@ pub(super) unsafe fn reed_solomon_decode_avx2(
     shards: &[Vec<u8>],
     indices: &[usize],
 ) -> Result<Vec<u8>, &'static str> {
-    reed_solomon_decode_gfni(shards, indices)
+    let (matrix, shard_size, output_len) = build_reed_solomon_decode_matrix(shards, indices)?;
+    let k = shards.len();
+    let mut output = vec![0u8; output_len];
+
+    for output_row in 0..k {
+        let output_start = output_row * shard_size;
+        for shard_index in 0..k {
+            let coeff = matrix[output_row][k + shard_index];
+            if coeff == 0 {
+                continue;
+            }
+
+            let (lo_lut, hi_lut) = gf_mul_avx2_tables(coeff);
+            let shard_data = &shards[shard_index];
+            let mut offset = 0;
+            while offset + 32 <= shard_size {
+                let data = _mm256_loadu_si256(shard_data.as_ptr().add(offset) as *const __m256i);
+                let current = _mm256_loadu_si256(
+                    output.as_ptr().add(output_start + offset) as *const __m256i
+                );
+                let product = gf_mul_avx2_vec(data, lo_lut, hi_lut);
+                let result = _mm256_xor_si256(current, product);
+                _mm256_storeu_si256(
+                    output.as_mut_ptr().add(output_start + offset) as *mut __m256i,
+                    result,
+                );
+                offset += 32;
+            }
+
+            while offset < shard_size {
+                output[output_start + offset] ^= scalar::gf_mul_byte(shard_data[offset], coeff);
+                offset += 1;
+            }
+        }
+    }
+
+    _mm256_zeroupper();
+    Ok(output)
 }
 
 /// QPACK Huffman encoding with AVX2
@@ -1190,6 +1172,61 @@ mod tests {
     }
 
     #[test]
+    fn avx2_rs_encode_and_decode_roundtrip_with_tail() {
+        if !is_x86_feature_detected!("avx2") {
+            return;
+        }
+
+        let data: Vec<u8> =
+            (0..512).map(|index| (index as u8).wrapping_mul(37).wrapping_add(9)).collect();
+        let scalar = crate::simd::scalar::reed_solomon_encode_scalar(&data, 2);
+        let avx2 = unsafe { reed_solomon_encode_avx2(&data, 2) };
+        assert_eq!(avx2, scalar);
+
+        let shard_size = 65;
+        let available = vec![avx2[..shard_size].to_vec(), avx2[512..512 + shard_size].to_vec()];
+        let decoded = unsafe { reed_solomon_decode_avx2(&available, &[0, 2]) }
+            .expect("AVX2 Reed-Solomon decode");
+        let expected = [avx2[..shard_size].to_vec(), avx2[256..256 + shard_size].to_vec()].concat();
+        assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn avx2_rs_decode_validates_shard_metadata() {
+        if !is_x86_feature_detected!("avx2") {
+            return;
+        }
+
+        let shards = vec![vec![0u8; 65]];
+        assert_eq!(
+            unsafe { reed_solomon_decode_avx2(&shards, &[]) },
+            Err("Shard/index length mismatch")
+        );
+
+        let mismatched = vec![vec![0u8; 65], vec![0u8; 64]];
+        assert_eq!(
+            unsafe { reed_solomon_decode_avx2(&mismatched, &[0, 1]) },
+            Err("Shard size mismatch")
+        );
+    }
+
+    #[test]
+    fn avx2_gf256_matmul_matches_scalar_for_all_byte_positions() {
+        if !is_x86_feature_detected!("avx2") {
+            return;
+        }
+
+        let a = [0x57, 0xA3];
+        let b: Vec<u8> =
+            (0..130).map(|index| (index as u8).wrapping_mul(19).wrapping_add(7)).collect();
+        let mut scalar_output = vec![0u8; 65];
+        let mut avx2_output = vec![0u8; 65];
+        crate::simd::scalar::matmul_gf256(&a, &b, &mut scalar_output, 1, 2, 65);
+        unsafe { matmul_gf256_avx2(&a, &b, &mut avx2_output, 1, 2, 65) };
+        assert_eq!(avx2_output, scalar_output);
+    }
+
+    #[test]
     fn gfni_rs_encode_preserves_partial_input_shard() {
         if !is_x86_feature_detected!("avx512f") || !is_x86_feature_detected!("gfni") {
             return;
@@ -1203,5 +1240,25 @@ mod tests {
         assert_eq!(gfni, scalar);
         assert_eq!(&gfni[..data.len()], data.as_slice());
         assert!(gfni[data.len()..2 * 256].iter().all(|&byte| byte == 0));
+    }
+
+    #[test]
+    fn gfni_rs_encode_and_decode_roundtrip_with_tail() {
+        if !is_x86_feature_detected!("avx512f") || !is_x86_feature_detected!("gfni") {
+            return;
+        }
+
+        let data: Vec<u8> =
+            (0..512).map(|index| (index as u8).wrapping_mul(41).wrapping_add(3)).collect();
+        let scalar = crate::simd::scalar::reed_solomon_encode_scalar(&data, 2);
+        let gfni = unsafe { reed_solomon_encode_gfni(&data, 2) };
+        assert_eq!(gfni, scalar);
+
+        let shard_size = 65;
+        let available = vec![gfni[..shard_size].to_vec(), gfni[512..512 + shard_size].to_vec()];
+        let decoded = unsafe { reed_solomon_decode_gfni(&available, &[0, 2]) }
+            .expect("GFNI Reed-Solomon decode");
+        let expected = [gfni[..shard_size].to_vec(), gfni[256..256 + shard_size].to_vec()].concat();
+        assert_eq!(decoded, expected);
     }
 }
