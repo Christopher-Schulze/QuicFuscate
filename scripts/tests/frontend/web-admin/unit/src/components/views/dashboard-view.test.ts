@@ -60,6 +60,12 @@ const BLOCKED_RESPONSE = {
   data: { ips: ["192.168.1.99"] },
 };
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => { resolve = res; });
+  return { promise, resolve };
+}
+
 function mockAllEndpoints() {
   getJsonMock.mockImplementation((path: string) => {
     if (path === "/api/status") return Promise.resolve(STATUS_RESPONSE);
@@ -248,5 +254,42 @@ describe("DashboardView", () => {
     await waitFor(() => {
       expect(postJsonMock).toHaveBeenCalledWith("/api/unblock", { ip: "192.168.1.99" });
     });
+  });
+
+  test("discards a blocked response that predates an optimistic block", async () => {
+    const initialBlocked = deferred<typeof BLOCKED_RESPONSE>();
+    const reconciledBlocked = deferred<typeof BLOCKED_RESPONSE>();
+    let blockedCalls = 0;
+    postJsonMock.mockResolvedValue({ success: true });
+    getJsonMock.mockImplementation((path: string) => {
+      if (path === "/api/status") return Promise.resolve(STATUS_RESPONSE);
+      if (path === "/api/clients") return Promise.resolve(CLIENTS_RESPONSE);
+      if (path.startsWith("/api/metrics")) return Promise.resolve(METRICS_RESPONSE);
+      if (path === "/api/blocked") {
+        blockedCalls += 1;
+        if (blockedCalls === 1) return Promise.resolve({ success: true, data: { ips: [] } });
+        return blockedCalls === 2 ? initialBlocked.promise : reconciledBlocked.promise;
+      }
+      return Promise.resolve({ success: true, data: null });
+    });
+
+    render(DashboardView);
+    await waitFor(() => {
+      expect(screen.getAllByRole("button", { name: "Block IP" }).length).toBe(2);
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(blockedCalls).toBe(2));
+    await fireEvent.click(screen.getAllByRole("button", { name: "Block IP" })[0]);
+    await waitFor(() => expect(postJsonMock).toHaveBeenCalledWith("/api/block", { ip: "10.0.0.1" }));
+
+    initialBlocked.resolve({ success: true, data: { ips: ["10.0.0.2"] } });
+    await vi.advanceTimersByTimeAsync(0);
+    await waitFor(() => expect(blockedCalls).toBe(3));
+    expect(screen.getAllByText("10.0.0.1").length).toBeGreaterThan(0);
+    const blockedColumn = screen.getByText("Blocked").parentElement;
+    expect(blockedColumn?.textContent).not.toContain("10.0.0.2");
+
+    reconciledBlocked.resolve({ success: true, data: { ips: ["10.0.0.1"] } });
+    await waitFor(() => expect(screen.getAllByText("10.0.0.1").length).toBeGreaterThan(0));
   });
 });

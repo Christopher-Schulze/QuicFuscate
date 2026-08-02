@@ -37,6 +37,7 @@
   import TextInput from "$lib/components/ui/TextInput.svelte";
   import { Select } from "@quicfuscate/ui";
   import { ApiError, isAuthError, getJson, postJson } from "$lib/api";
+  import { createRequestCoordinator, type RequestOptions, type RequestToken } from "$lib/request-coordinator";
   import {
     setAuthRequired,
     setAuthError,
@@ -85,6 +86,9 @@
   let selectedIds = $state<Set<string>>(new Set());
   let busyBulkRevoke = $state(false);
   const copyFb = createCopyFeedback<string>(1100);
+  let viewActive = true;
+  const qkeyRequests = createRequestCoordinator();
+  const reconciliationTimers = new Set<number>();
 
   const qkeyNameError = $derived.by(() => {
     const v = qkeyName.trim();
@@ -142,18 +146,32 @@
     }
   });
 
-  async function fetchQKeyList() {
-    setQkeyListLoading(true);
-    try {
-      const resp = await getJson<AdminResponse<QKeyList>>("/api/qkeys");
-      if (!resp.success) throw new Error(resp.message ?? "Failed to load QKeys");
-      setQkeyList(resp.data?.keys ?? []);
-    } catch (e: unknown) {
-      if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
-    } finally {
-      setQkeyListLoading(false);
-      qkeyReady = true;
-    }
+  function fetchQKeyList(options: RequestOptions = {}): Promise<void> {
+    return qkeyRequests.request(async (token: RequestToken) => {
+      setQkeyListLoading(true);
+      try {
+        const resp = await getJson<AdminResponse<QKeyList>>("/api/qkeys");
+        if (!resp.success) throw new Error(resp.message ?? "Failed to load QKeys");
+        if (!qkeyRequests.isCurrent(token)) return;
+        setQkeyList(resp.data?.keys ?? []);
+      } catch (e: unknown) {
+        if (!qkeyRequests.isCurrent(token)) return;
+        if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
+      } finally {
+        if (qkeyRequests.isCurrent(token)) {
+          setQkeyListLoading(false);
+          qkeyReady = true;
+        }
+      }
+    }, options);
+  }
+
+  function scheduleQKeyRefresh(): void {
+    const timer = window.setTimeout(() => {
+      reconciliationTimers.delete(timer);
+      if (viewActive) void fetchQKeyList({ invalidate: true });
+    }, 600);
+    reconciliationTimers.add(timer);
   }
 
   async function copyQKey(text: string, id?: string) {
@@ -183,32 +201,36 @@
   }
 
   async function bulkRevoke() {
-    if (selectedIds.size === 0) return;
+    if (!viewActive || selectedIds.size === 0) return;
     const selected = new Set(selectedIds);
+    qkeyRequests.invalidate();
     setQkeyList(qkeyEntries.filter((e) => !selected.has(e.id)));
     selectedIds = new Set();
     busyBulkRevoke = true;
     let ok = 0;
     let fail = 0;
     for (const id of selected) {
+      if (!viewActive) return;
       try {
         const resp = await postJson<AdminResponse<unknown>, { id: string }>("/api/qkeys/revoke", { id });
         if (resp.success) ok++;
         else fail++;
       } catch { fail++; }
     }
+    if (!viewActive) return;
     busyBulkRevoke = false;
     if (fail === 0) addToast(`${ok} QKey${ok === 1 ? "" : "s"} revoked`, "success");
     else {
       addToast(`${ok} revoked, ${fail} failed`, "warning");
-      setTimeout(() => { void fetchQKeyList(); }, 600);
+      scheduleQKeyRefresh();
     }
   }
 
   async function createQKey() {
-    if (busyCreate || qkeyNameError || qkeyPortError) return;
+    if (!viewActive || busyCreate || qkeyNameError || qkeyPortError) return;
     const name = qkeyName.trim();
     const port = parsePort(qkeyPortText);
+    qkeyRequests.invalidate();
     busyCreate = true;
     try {
       const payload: { name?: string; port?: number; sni_strategy: "auto_rotating" | "fixed" | "off"; sni_domain?: string } = {
@@ -219,6 +241,7 @@
       if (qkeyFrontingMode === "manual") payload.sni_domain = qkeyFixedDomain;
       const resp = await postJson<AdminResponse<QKeyCreateResp>, typeof payload>("/api/qkey", payload);
       if (!resp.success || !resp.data?.qkey) throw new Error(resp.message ?? "QKey create failed");
+      if (!viewActive) return;
       const normalized = normalizeQKey(resp.data.qkey);
       issuedQKey = {
         value: normalized,
@@ -232,18 +255,21 @@
       qkeyPortText = "";
       qkeyFrontingMode = "auto";
       qkeyFixedDomain = FRONTING_SNI_ALLOWLIST[0];
-      await fetchQKeyList();
+      await fetchQKeyList({ invalidate: true });
+      if (!viewActive) return;
       issuedQKeyDialogOpen = true;
     } catch (e: unknown) {
+      if (!viewActive) return;
       if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
       else { addToast("QKey create failed", "error"); }
     } finally {
-      busyCreate = false;
+      if (viewActive) busyCreate = false;
     }
   }
 
   async function revokeQKey(id: string) {
-    if (busyRevokeId) return;
+    if (!viewActive || busyRevokeId) return;
+    qkeyRequests.invalidate();
     busyRevokeId = id;
     setQkeyList(qkeyEntries.filter((e) => e.id !== id));
     const next = new Set(selectedIds);
@@ -254,16 +280,25 @@
       const resp = await postJson<AdminResponse<unknown>, { id: string }>("/api/qkeys/revoke", { id });
       if (!resp.success) throw new Error(resp.message ?? "Revoke failed");
     } catch (e: unknown) {
+      if (!viewActive) return;
       if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
       else { addToast("Revoke failed", "error"); }
-      setTimeout(() => { void fetchQKeyList(); }, 600);
+      scheduleQKeyRefresh();
     } finally {
-      busyRevokeId = null;
+      if (viewActive) busyRevokeId = null;
     }
   }
 
   // Init + enable animations after first load
-  $effect(() => { fetchQKeyList(); });
+  $effect(() => {
+    void fetchQKeyList();
+    return () => {
+      viewActive = false;
+      qkeyRequests.dispose();
+      for (const timer of reconciliationTimers) window.clearTimeout(timer);
+      reconciliationTimers.clear();
+    };
+  });
   $effect(() => {
     if (qkeyReady && !qkeyAnimationReady) {
       requestAnimationFrame(() => { qkeyAnimationReady = true; });

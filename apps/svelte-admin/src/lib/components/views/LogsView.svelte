@@ -14,6 +14,7 @@
     setLogsDirty,
     confirmDialog,
   } from "$lib/stores/app.svelte";
+  import { createRequestCoordinator, type RequestOptions, type RequestToken } from "$lib/request-coordinator";
   import type { LogEntry, LogMode } from "$lib/types";
 
   const MODE_DESCRIPTIONS: Record<LogMode, { title: string; desc: string; icon: typeof Eye; color: string }> = {
@@ -41,8 +42,10 @@
   let logsReady = $state(false);
   let backendOnline = $state(false);
   let cursor = $state(0);
-  let logsFetchInFlight = false;
-  let logsEpoch = 0;
+  let viewActive = true;
+  const modeRequests = createRequestCoordinator();
+  const logsRequests = createRequestCoordinator();
+  const statusRequests = createRequestCoordinator();
   let clearDialogOpen = $state(false);
   let modeLabels: Record<string, HTMLElement | undefined> = $state({});
   let modeContainer: HTMLDivElement | undefined = $state();
@@ -65,6 +68,7 @@
   $effect(() => useAnchorSync(actionsEl));
 
   function showLogErrorToast(e: unknown, fallback: string) {
+    if (!viewActive) return;
     const msg = sanitizeErrorMessage(
       e instanceof Error ? e.message : String(e),
       fallback,
@@ -101,87 +105,94 @@
     return { lines, cursor: cur };
   }
 
-  async function fetchMode(): Promise<LogMode> {
+  function fetchMode(options: RequestOptions = {}): Promise<LogMode> {
     let nextMode = savedMode;
     const selectionVersionAtStart = modeSelectionVersion;
-    try {
-      const resp = await getJson<{ success: boolean; message?: string; data?: { mode?: string } }>("/api/config/logging");
-      if (!resp.success) throw new Error(resp.message ?? "Failed to load logging mode");
-      const VALID_LOG_MODES: readonly string[] = ["verbose", "normal", "minimal", "no-log"];
-      if (resp.data?.mode && VALID_LOG_MODES.includes(resp.data.mode)) {
-        const m: LogMode = resp.data.mode as LogMode;
-        if (selectionVersionAtStart === modeSelectionVersion) {
-          mode = m;
+    return modeRequests.request(async (token: RequestToken) => {
+      try {
+        const resp = await getJson<{ success: boolean; message?: string; data?: { mode?: string } }>("/api/config/logging");
+        if (!resp.success) throw new Error(resp.message ?? "Failed to load logging mode");
+        if (!modeRequests.isCurrent(token)) return;
+        const VALID_LOG_MODES: readonly string[] = ["verbose", "normal", "minimal", "no-log"];
+        if (resp.data?.mode && VALID_LOG_MODES.includes(resp.data.mode)) {
+          const m: LogMode = resp.data.mode as LogMode;
+          if (selectionVersionAtStart === modeSelectionVersion) mode = m;
+          savedMode = m;
+          nextMode = m;
         }
-        savedMode = m;
-        nextMode = m;
+      } catch (e: unknown) {
+        if (!modeRequests.isCurrent(token)) return;
+        if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
+        else showLogErrorToast(e, "Failed to load logging mode");
       }
-    } catch (e: unknown) {
-      if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
-      else showLogErrorToast(e, "Failed to load logging mode");
-    }
-    return nextMode;
+    }, options).then(() => nextMode);
   }
 
-  async function fetchLogsOnce(modeOverride?: LogMode, reset = false) {
-    if (logsFetchInFlight) return;
-    logsFetchInFlight = true;
-    const epochAtStart = logsEpoch;
-    const effectiveMode = modeOverride ?? mode;
-    if (reset) cursor = 0;
-    if (effectiveMode === "no-log") {
-      if (epochAtStart !== logsEpoch) { logsFetchInFlight = false; return; }
-      cursor = 0;
-      logs = [];
-      loadingLogs = false;
-      logsReady = true;
-      logsFetchInFlight = false;
-      return;
-    }
-    try {
-      const resp = await getJson<unknown>(`/api/logs?cursor=${cursor}`);
-      const next = parseLogsResponse(resp);
-      if (epochAtStart !== logsEpoch) return;
-      if (next.lines.length) {
-        cursor = next.cursor;
-        if (reset) {
-          logs = next.lines.length > 500 ? next.lines.slice(-500) : next.lines;
-        } else {
-          const merged = [...logs, ...next.lines];
-          logs = merged.length > 500 ? merged.slice(-500) : merged;
-        }
-      } else if (next.cursor >= 0) {
-        cursor = next.cursor;
-        if (reset) logs = [];
-      }
-    } catch (e: unknown) {
-      if (epochAtStart !== logsEpoch) return;
-      if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
-      else showLogErrorToast(e, "Failed to load logs");
-    } finally {
-      if (epochAtStart === logsEpoch) {
+  function fetchLogsOnce(modeOverride?: LogMode, reset = false, options: RequestOptions = {}): Promise<void> {
+    return logsRequests.request(async (token: RequestToken) => {
+      const effectiveMode = modeOverride ?? mode;
+      const requestCursor = reset ? 0 : cursor;
+      if (effectiveMode === "no-log") {
+        if (!logsRequests.isCurrent(token)) return;
+        cursor = 0;
+        logs = [];
         loadingLogs = false;
         logsReady = true;
+        return;
       }
-      logsFetchInFlight = false;
-    }
+      try {
+        const resp = await getJson<unknown>(`/api/logs?cursor=${requestCursor}`);
+        const next = parseLogsResponse(resp);
+        if (!logsRequests.isCurrent(token)) return;
+        if (next.lines.length) {
+          cursor = next.cursor;
+          if (reset) {
+            logs = next.lines.length > 500 ? next.lines.slice(-500) : next.lines;
+          } else {
+            const merged = [...logs, ...next.lines];
+            logs = merged.length > 500 ? merged.slice(-500) : merged;
+          }
+        } else if (next.cursor >= 0) {
+          cursor = next.cursor;
+          if (reset) logs = [];
+        }
+      } catch (e: unknown) {
+        if (!logsRequests.isCurrent(token)) return;
+        if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
+        else showLogErrorToast(e, "Failed to load logs");
+      } finally {
+        if (logsRequests.isCurrent(token)) {
+          loadingLogs = false;
+          logsReady = true;
+        }
+      }
+    }, options);
   }
 
-  async function fetchOnlineStatus() {
-    try {
-      const resp = await getJson<{ success: boolean; data?: unknown }>("/api/status");
-      backendOnline = Boolean(resp?.success && resp?.data);
-    } catch (e: unknown) {
-      if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
-      else showLogErrorToast(e, "Failed to check server status");
-      backendOnline = false;
-    }
+  function fetchOnlineStatus(options: RequestOptions = {}): Promise<void> {
+    return statusRequests.request(async (token: RequestToken) => {
+      try {
+        const resp = await getJson<{ success: boolean; data?: unknown }>("/api/status");
+        if (!statusRequests.isCurrent(token)) return;
+        backendOnline = Boolean(resp?.success && resp?.data);
+      } catch (e: unknown) {
+        if (!statusRequests.isCurrent(token)) return;
+        if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
+        else showLogErrorToast(e, "Failed to check server status");
+        backendOnline = false;
+      }
+    }, options);
   }
 
   async function refreshAll() {
+    if (!viewActive) return;
     loadingLogs = true;
-    const latestMode = await fetchMode();
-    await Promise.allSettled([fetchOnlineStatus(), fetchLogsOnce(latestMode, true)]);
+    const latestMode = await fetchMode({ invalidate: true });
+    if (!viewActive) return;
+    await Promise.allSettled([
+      fetchOnlineStatus({ invalidate: true }),
+      fetchLogsOnce(latestMode, true, { invalidate: true }),
+    ]);
   }
 
   async function handleRefresh() {
@@ -194,11 +205,16 @@
       });
       if (!discard) return;
     }
+    if (!viewActive) return;
     addToast("Refreshed", "info");
     void refreshAll();
   }
 
   async function applyMode(newMode: LogMode) {
+    if (!viewActive) return;
+    modeRequests.invalidate();
+    logsRequests.invalidate();
+    modeSelectionVersion += 1;
     saving = true;
     try {
       for (let attempt = 1; attempt <= MAX_PERSIST_ATTEMPTS; attempt++) {
@@ -213,34 +229,41 @@
           if (e instanceof ApiError && e.status != null && e.status < 500) throw e;
         }
       }
+      if (!viewActive) return;
       mode = newMode;
       savedMode = newMode;
       addToast("Changes saved", "success");
+      void fetchLogsOnce(newMode, true, { invalidate: true });
     } catch (e: unknown) {
+      if (!viewActive) return;
       if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
       else { addToast("Failed to save logging mode", "error"); }
     } finally {
-      saving = false;
+      if (viewActive) saving = false;
     }
   }
 
   function selectMode(nextMode: LogMode) {
     modeSelectionVersion += 1;
+    modeRequests.invalidate();
+    logsRequests.invalidate();
     mode = nextMode;
   }
 
   async function confirmClearLogs() {
+    if (!viewActive) return;
     const previousLogs = logs;
-    logsEpoch += 1;
+    logsRequests.invalidate();
     clearDialogOpen = false;
-    logsFetchInFlight = false;
     cursor = 0;
     logs = [];
     try {
       const resp = await postJson<{ success: boolean; message?: string }, Record<string, never>>("/api/logs/clear", {});
       if (!resp.success) throw new Error(resp.message ?? "Failed to clear logs");
-      await fetchLogsOnce(mode, true);
+      if (!viewActive) return;
+      await fetchLogsOnce(mode, true, { invalidate: true });
     } catch (e: unknown) {
+      if (!viewActive) return;
       if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); return; }
       logs = previousLogs;
       addToast("Failed to clear logs", "error");
@@ -262,6 +285,10 @@
     const logPoll = window.setInterval(() => { void fetchLogsOnce(); }, 1200);
     const statusPoll = window.setInterval(() => { void fetchOnlineStatus(); }, 5000);
     return () => {
+      viewActive = false;
+      modeRequests.dispose();
+      statusRequests.dispose();
+      logsRequests.dispose();
       window.clearInterval(logPoll);
       window.clearInterval(statusPoll);
     };

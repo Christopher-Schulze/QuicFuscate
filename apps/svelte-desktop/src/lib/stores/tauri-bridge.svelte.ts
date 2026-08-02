@@ -19,6 +19,7 @@ import {
   getActiveTunnelId,
 } from "./app.svelte";
 import type { TunnelConfig, AppSettings, GeneralSettings, HardwareSettings } from "$lib/types";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 
 /** Shape returned by the Tauri `load_state` command. */
 interface PersistedState {
@@ -152,18 +153,36 @@ export function startSettingsListener(): (() => void) | null {
 }
 
 let logCursor = 0;
+let logCursorEpoch = 0;
+let nextPollerOwner = 0;
+let activePollerOwner = 0;
 
 export function startEnginePollers(): () => void {
   if (!isTauri()) return () => {};
+  const owner = ++nextPollerOwner;
+  activePollerOwner = owner;
   let stopped = false;
+  let statusInFlight = false;
+  let statsInFlight = false;
+  let logsInFlight = false;
+  let statusStateVersion = 0;
+  let previousStatusSignature = "";
   const throughputSamples: Record<string, { ts: number; rx: number; tx: number }> = {};
+  const isCurrent = (): boolean => !stopped && activePollerOwner === owner;
 
-  const statusInterval = setInterval(async () => {
-    if (stopped) return;
+  const pollStatus = async (): Promise<void> => {
+    if (!isCurrent() || statusInFlight) return;
+    statusInFlight = true;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const status = await invoke<{ state: string; activeTunnelId?: string | null; lastError?: string | null }>("engine_status");
+      if (!isCurrent()) return;
+      const status = await tauriInvoke<{ state: string; activeTunnelId?: string | null; lastError?: string | null }>("engine_status");
+      if (!isCurrent()) return;
       const activeTunnelId = status.activeTunnelId ?? null;
+      const signature = `${status.state}:${activeTunnelId ?? ""}:${status.lastError ?? ""}`;
+      if (signature !== previousStatusSignature) {
+        previousStatusSignature = signature;
+        statusStateVersion += 1;
+      }
       setActiveTunnelId(activeTunnelId);
       const tunnels = getTunnels();
       const current = getTunnelStates();
@@ -180,21 +199,25 @@ export function startEnginePollers(): () => void {
       setTunnelStates(next);
       if (status.lastError) setError(status.lastError);
     } catch { /* ignore */ }
-  }, 500);
+    finally { statusInFlight = false; }
+  };
 
-  const statsInterval = setInterval(async () => {
-    if (stopped) return;
+  const pollStats = async (): Promise<void> => {
+    if (!isCurrent() || statsInFlight) return;
+    statsInFlight = true;
+    const stateVersionAtStart = statusStateVersion;
+    const activeTunnelIdAtStart = getActiveTunnelId();
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const activeTunnelId = getActiveTunnelId();
-      const stats = await invoke<RawEngineStats | null>("engine_stats");
-      if (!activeTunnelId || !stats) {
+      if (!isCurrent()) return;
+      const stats = await tauriInvoke<RawEngineStats | null>("engine_stats");
+      if (!isCurrent() || stateVersionAtStart !== statusStateVersion || activeTunnelIdAtStart !== getActiveTunnelId()) return;
+      if (!activeTunnelIdAtStart || !stats) {
         updateTunnelStats(() => ({}));
         return;
       }
       updateTunnelStats((prev) => ({
         ...prev,
-        [activeTunnelId]: {
+        [activeTunnelIdAtStart]: {
           latencyMs: stats.latencyMs ?? 0,
           lossPercent: stats.lossPercent ?? 0,
           rxBytes: stats.bytesIn ?? 0,
@@ -233,30 +256,43 @@ export function startEnginePollers(): () => void {
       }
       setThroughput(nextThroughput);
     } catch { /* ignore */ }
-  }, 900);
+    finally { statsInFlight = false; }
+  };
 
-  const logsInterval = setInterval(async () => {
-    if (stopped) return;
+  const pollLogs = async (): Promise<void> => {
+    if (!isCurrent() || logsInFlight) return;
+    logsInFlight = true;
+    const cursorAtStart = logCursor;
+    const cursorEpochAtStart = logCursorEpoch;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const resp = await invoke<{ cursor: number; lines: { tsMs: number; level: string; message: string }[] }>(
-        "engine_logs_since", { cursor: logCursor },
+      if (!isCurrent()) return;
+      const resp = await tauriInvoke<{ cursor: number; lines: { tsMs: number; level: string; message: string }[] }>(
+        "engine_logs_since", { cursor: cursorAtStart },
       );
+      if (!isCurrent() || cursorEpochAtStart !== logCursorEpoch) return;
+      const nextCursor = resp?.cursor ?? cursorAtStart;
+      if (nextCursor < cursorAtStart || nextCursor < logCursor) return;
       if (!resp || !Array.isArray(resp.lines) || resp.lines.length === 0) {
-        logCursor = resp?.cursor ?? logCursor;
+        logCursor = nextCursor;
         return;
       }
-      logCursor = resp.cursor ?? logCursor;
+      logCursor = nextCursor;
       appendLogs(resp.lines.map((l) => ({
         timestamp: l.tsMs,
         level: (l.level ?? "info") as "trace" | "debug" | "info" | "warn" | "error",
         message: l.message,
       })));
     } catch { /* ignore */ }
-  }, 350);
+    finally { logsInFlight = false; }
+  };
+
+  const statusInterval = setInterval(() => { void pollStatus(); }, 500);
+  const statsInterval = setInterval(() => { void pollStats(); }, 900);
+  const logsInterval = setInterval(() => { void pollLogs(); }, 350);
 
   return () => {
     stopped = true;
+    if (activePollerOwner === owner) activePollerOwner = 0;
     clearInterval(statusInterval);
     clearInterval(statsInterval);
     clearInterval(logsInterval);
@@ -296,10 +332,11 @@ export async function detectCpuFeatures(): Promise<string[]> {
 
 export async function engineLogsClear(): Promise<void> {
   if (!isTauri()) return;
+  logCursor = 0;
+  logCursorEpoch += 1;
   try {
     const { invoke } = await import("@tauri-apps/api/core");
     await invoke("engine_logs_clear");
-    logCursor = 0;
   } catch { /* no-op */ }
 }
 

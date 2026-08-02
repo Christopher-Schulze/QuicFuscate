@@ -24,6 +24,7 @@
     setMetricsLoading,
   } from "$lib/stores/app.svelte";
   import { formatBitsPerSecond, formatUptime, formatMetricCount, formatMetricValue } from "$lib/format";
+  import { createRequestCoordinator, type RequestOptions, type RequestToken } from "$lib/request-coordinator";
   import type { AdminResponse, ClientInfo, MetricsMap, StatusData, PendingIpAction } from "$lib/types";
 
   type MetricsResponse = { metrics?: MetricsMap | null };
@@ -39,10 +40,16 @@
   let serverPanelCleared = $state(false);
   let lastErrorMsg = "";
   let actionsEl: HTMLDivElement | undefined = $state();
+  let viewActive = true;
+  const statusRequests = createRequestCoordinator();
+  const clientsRequests = createRequestCoordinator();
+  const metricsRequests = createRequestCoordinator();
+  const blockedRequests = createRequestCoordinator();
 
   $effect(() => useAnchorSync(actionsEl));
 
   function showErrorToast(e: unknown, fallback: string) {
+    if (!viewActive) return;
     const msg = sanitizeErrorMessage(
       e instanceof Error ? e.message : String(e),
       fallback,
@@ -98,89 +105,109 @@
     ipActionPending = next;
   }
 
-  async function fetchStatus() {
-    setStatusLoading(true);
-    try {
-      const resp = await getJson<AdminResponse<StatusData>>("/api/status");
-      if (!resp.success || !resp.data) throw new Error(resp.message ?? "No status");
-      const data = resp.data;
-      setStatus(data);
+  function fetchStatus(options: RequestOptions = {}): Promise<void> {
+    return statusRequests.request(async (token: RequestToken) => {
+      setStatusLoading(true);
+      try {
+        const resp = await getJson<AdminResponse<StatusData>>("/api/status");
+        if (!resp.success || !resp.data) throw new Error(resp.message ?? "No status");
+        if (!statusRequests.isCurrent(token)) return;
+        const data = resp.data;
+        setStatus(data);
 
-      const nowMs = performance.now();
-      let inBps = 0;
-      let outBps = 0;
-      if (prevSample) {
-        const dt = Math.max((nowMs - prevSample.tsMs) / 1000, 0.001);
-        inBps = (Math.max(0, data.bytes_in - prevSample.bytesIn) * 8) / dt;
-        outBps = (Math.max(0, data.bytes_out - prevSample.bytesOut) * 8) / dt;
-      }
-      prevSample = { bytesIn: data.bytes_in, bytesOut: data.bytes_out, tsMs: nowMs };
-      trafficBps = { in: inBps, out: outBps };
+        const nowMs = performance.now();
+        let inBps = 0;
+        let outBps = 0;
+        if (prevSample) {
+          const dt = Math.max((nowMs - prevSample.tsMs) / 1000, 0.001);
+          inBps = (Math.max(0, data.bytes_in - prevSample.bytesIn) * 8) / dt;
+          outBps = (Math.max(0, data.bytes_out - prevSample.bytesOut) * 8) / dt;
+        }
+        prevSample = { bytesIn: data.bytes_in, bytesOut: data.bytes_out, tsMs: nowMs };
+        trafficBps = { in: inBps, out: outBps };
 
-      const maxHistory = 20;
-      metricsHistory = {
-        bytesIn: [...metricsHistory.bytesIn, inBps].slice(-maxHistory),
-        bytesOut: [...metricsHistory.bytesOut, outBps].slice(-maxHistory),
-        clients: [...metricsHistory.clients, data.clients_active].slice(-maxHistory),
-      };
-    } catch (e: unknown) {
-      if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
-      else showErrorToast(e, "Failed to load status");
-    } finally {
-      setStatusLoading(false);
-      statusReady = true;
-    }
-  }
-
-  async function fetchClients() {
-    setClientsLoading(true);
-    try {
-      const resp = await getJson<AdminResponse<ClientInfo[]>>("/api/clients");
-      if (!resp.success) throw new Error(resp.message ?? "Failed to load clients");
-      setClients(Array.isArray(resp.data) ? resp.data : []);
-    } catch (e: unknown) {
-      if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
-      else showErrorToast(e, "Failed to load clients");
-    } finally {
-      setClientsLoading(false);
-      clientsReady = true;
-    }
-  }
-
-  async function fetchMetrics() {
-    setMetricsLoading(true);
-    try {
-      const resp = await getJson<AdminResponse<MetricsResponse>>("/api/metrics/json");
-      if (!resp.success) throw new Error(resp.message ?? "Failed to load metrics");
-      const incoming = resp.data?.metrics;
-      const sanitized: MetricsMap = {};
-      if (incoming && typeof incoming === "object") {
-        for (const [key, raw] of Object.entries(incoming)) {
-          if (!key) continue;
-          const value = Number(raw);
-          if (!Number.isFinite(value)) continue;
-          sanitized[key] = value;
+        const maxHistory = 20;
+        metricsHistory = {
+          bytesIn: [...metricsHistory.bytesIn, inBps].slice(-maxHistory),
+          bytesOut: [...metricsHistory.bytesOut, outBps].slice(-maxHistory),
+          clients: [...metricsHistory.clients, data.clients_active].slice(-maxHistory),
+        };
+      } catch (e: unknown) {
+        if (!statusRequests.isCurrent(token)) return;
+        if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
+        else showErrorToast(e, "Failed to load status");
+      } finally {
+        if (statusRequests.isCurrent(token)) {
+          setStatusLoading(false);
+          statusReady = true;
         }
       }
-      setMetrics(Object.keys(sanitized).length > 0 ? sanitized : null);
-    } catch (e: unknown) {
-      if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
-      else if (e instanceof ApiError && e.status === 404) {
-        try {
-          const text = await getText("/api/metrics");
-          const map = parsePrometheusText(text);
-          setMetrics(Object.keys(map).length > 0 ? map : null);
-        } catch (fe: unknown) {
-          if (isAuthError(fe)) { setAuthError(null); setAuthRequired(true); }
-          else showErrorToast(fe, "Failed to load metrics");
+    }, options);
+  }
+
+  function fetchClients(options: RequestOptions = {}): Promise<void> {
+    return clientsRequests.request(async (token: RequestToken) => {
+      setClientsLoading(true);
+      try {
+        const resp = await getJson<AdminResponse<ClientInfo[]>>("/api/clients");
+        if (!resp.success) throw new Error(resp.message ?? "Failed to load clients");
+        if (!clientsRequests.isCurrent(token)) return;
+        setClients(Array.isArray(resp.data) ? resp.data : []);
+      } catch (e: unknown) {
+        if (!clientsRequests.isCurrent(token)) return;
+        if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
+        else showErrorToast(e, "Failed to load clients");
+      } finally {
+        if (clientsRequests.isCurrent(token)) {
+          setClientsLoading(false);
+          clientsReady = true;
         }
-      } else {
-        showErrorToast(e, "Failed to load metrics");
       }
-    } finally {
-      setMetricsLoading(false);
-      metricsReady = true;
-    }
+    }, options);
+  }
+
+  function fetchMetrics(options: RequestOptions = {}): Promise<void> {
+    return metricsRequests.request(async (token: RequestToken) => {
+      setMetricsLoading(true);
+      try {
+        const resp = await getJson<AdminResponse<MetricsResponse>>("/api/metrics/json");
+        if (!resp.success) throw new Error(resp.message ?? "Failed to load metrics");
+        if (!metricsRequests.isCurrent(token)) return;
+        const incoming = resp.data?.metrics;
+        const sanitized: MetricsMap = {};
+        if (incoming && typeof incoming === "object") {
+          for (const [key, raw] of Object.entries(incoming)) {
+            if (!key) continue;
+            const value = Number(raw);
+            if (!Number.isFinite(value)) continue;
+            sanitized[key] = value;
+          }
+        }
+        setMetrics(Object.keys(sanitized).length > 0 ? sanitized : null);
+      } catch (e: unknown) {
+        if (!metricsRequests.isCurrent(token)) return;
+        if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
+        else if (e instanceof ApiError && e.status === 404) {
+          try {
+            const text = await getText("/api/metrics");
+            if (!metricsRequests.isCurrent(token)) return;
+            const map = parsePrometheusText(text);
+            setMetrics(Object.keys(map).length > 0 ? map : null);
+          } catch (fe: unknown) {
+            if (!metricsRequests.isCurrent(token)) return;
+            if (isAuthError(fe)) { setAuthError(null); setAuthRequired(true); }
+            else showErrorToast(fe, "Failed to load metrics");
+          }
+        } else {
+          showErrorToast(e, "Failed to load metrics");
+        }
+      } finally {
+        if (metricsRequests.isCurrent(token)) {
+          setMetricsLoading(false);
+          metricsReady = true;
+        }
+      }
+    }, options);
   }
 
   function parsePrometheusText(raw: string): MetricsMap {
@@ -199,80 +226,103 @@
     return map;
   }
 
-  async function fetchBlocked() {
-    try {
-      const resp = await getJson<AdminResponse<{ ips?: unknown; blocked?: unknown }>>("/api/blocked");
-      if (!resp.success) throw new Error(resp.message ?? "Failed to load blocked IPs");
-      const serverBlocked = extractBlockedIps(resp.data);
-      blockedIps = mergeBlockedIps(serverBlocked, ipActionPending);
-    } catch (e: unknown) {
-      if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
-      else showErrorToast(e, "Failed to load blocked IPs");
-    } finally {
-      blockedReady = true;
-    }
+  function fetchBlocked(options: RequestOptions = {}): Promise<void> {
+    return blockedRequests.request(async (token: RequestToken) => {
+      try {
+        const resp = await getJson<AdminResponse<{ ips?: unknown; blocked?: unknown }>>("/api/blocked");
+        if (!resp.success) throw new Error(resp.message ?? "Failed to load blocked IPs");
+        if (!blockedRequests.isCurrent(token)) return;
+        const serverBlocked = extractBlockedIps(resp.data);
+        blockedIps = mergeBlockedIps(serverBlocked, ipActionPending);
+      } catch (e: unknown) {
+        if (!blockedRequests.isCurrent(token)) return;
+        if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
+        else showErrorToast(e, "Failed to load blocked IPs");
+      } finally {
+        if (blockedRequests.isCurrent(token)) blockedReady = true;
+      }
+    }, options);
   }
 
   async function blockIp(ip: string) {
-    if (!beginIpAction(ip, "block")) return;
+    if (!viewActive || !beginIpAction(ip, "block")) return;
+    blockedRequests.invalidate();
     blockedIps = optimisticBlock(blockedIps, ip);
     try {
       const resp = await postJson<AdminResponse<unknown>, { ip: string }>("/api/block", { ip });
       if (!resp.success) throw new Error(resp.message ?? "Block failed");
       addToast(`Blocked ${ip}`, "success");
     } catch (e: unknown) {
+      if (!viewActive) return;
       if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
       else {
         blockedIps = optimisticUnblock(blockedIps, ip);
       }
     } finally {
+      if (!viewActive) return;
       endIpAction(ip);
-      fetchBlocked();
+      void fetchBlocked({ invalidate: true });
     }
   }
 
   async function unblockIp(ip: string) {
-    if (!beginIpAction(ip, "unblock")) return;
+    if (!viewActive || !beginIpAction(ip, "unblock")) return;
+    blockedRequests.invalidate();
     blockedIps = optimisticUnblock(blockedIps, ip);
     try {
       const resp = await postJson<AdminResponse<unknown>, { ip: string }>("/api/unblock", { ip });
       if (!resp.success) throw new Error(resp.message ?? "Unblock failed");
       addToast(`Unblocked ${ip}`, "success");
     } catch (e: unknown) {
+      if (!viewActive) return;
       if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
       else {
         blockedIps = optimisticBlock(blockedIps, ip);
       }
     } finally {
+      if (!viewActive) return;
       endIpAction(ip);
-      fetchBlocked();
+      void fetchBlocked({ invalidate: true });
     }
   }
 
   function handleRefresh() {
     addToast("Refreshed", "info");
     serverPanelCleared = false;
-    fetchStatus();
-    fetchClients();
-    fetchMetrics();
-    fetchBlocked();
+    void fetchStatus({ invalidate: true });
+    void fetchClients({ invalidate: true });
+    void fetchMetrics({ invalidate: true });
+    void fetchBlocked({ invalidate: true });
   }
 
   function clearServerPanel() {
+    statusRequests.invalidate();
+    metricsRequests.invalidate();
+    setStatusLoading(false);
+    setMetricsLoading(false);
     metricsHistory = { bytesIn: [], bytesOut: [], clients: [] };
     serverPanelCleared = true;
   }
 
   // Polling
   $effect(() => {
-    fetchStatus();
-    fetchClients();
-    fetchMetrics();
-    fetchBlocked();
-    const statusTick = setInterval(fetchStatus, 1200);
-    const fast = setInterval(() => { fetchClients(); fetchBlocked(); }, 5000);
-    const slow = setInterval(fetchMetrics, 15000);
-    return () => { clearInterval(statusTick); clearInterval(fast); clearInterval(slow); };
+    void fetchStatus();
+    void fetchClients();
+    void fetchMetrics();
+    void fetchBlocked();
+    const statusTick = setInterval(() => { void fetchStatus(); }, 1200);
+    const fast = setInterval(() => { void fetchClients(); void fetchBlocked(); }, 5000);
+    const slow = setInterval(() => { void fetchMetrics(); }, 15000);
+    return () => {
+      viewActive = false;
+      statusRequests.dispose();
+      clientsRequests.dispose();
+      metricsRequests.dispose();
+      blockedRequests.dispose();
+      clearInterval(statusTick);
+      clearInterval(fast);
+      clearInterval(slow);
+    };
   });
 </script>
 

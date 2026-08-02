@@ -28,6 +28,7 @@
     canonicalizeConfigForCompare,
     DEFAULT_STEALTH_MANUAL,
   } from "$lib/config-helpers";
+  import { createRequestCoordinator, type RequestOptions, type RequestToken } from "$lib/request-coordinator";
   import type { AdminResponse, StatusData, StealthPresetUi, StealthManualSettings, CcSelection } from "$lib/types";
 
   const MAX_PERSIST_ATTEMPTS = 2;
@@ -55,6 +56,9 @@
 
   let adminRefreshFn: (() => Promise<void>) | null = null;
   let actionsEl: HTMLDivElement | undefined = $state();
+  let viewActive = true;
+  const configRequests = createRequestCoordinator();
+  const statusRequests = createRequestCoordinator();
 
   $effect(() => useAnchorSync(actionsEl));
 
@@ -80,33 +84,48 @@
     setConfigDirty(false);
   }
 
-  async function fetchConfig() {
-    loading = true;
-    try {
-      const resp = await getJson<AdminResponse<{ config: string }>>("/api/config");
-      if (!resp.success || !resp.data) throw new Error(resp.message ?? "No config");
-      applyConfigToUi(resp.data.config);
-    } catch (e: unknown) {
-      if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
-    } finally {
-      loading = false;
-    }
+  function fetchConfig(options: RequestOptions = {}): Promise<void> {
+    return configRequests.request(async (token: RequestToken) => {
+      loading = true;
+      try {
+        const resp = await getJson<AdminResponse<{ config: string }>>("/api/config");
+        if (!resp.success || !resp.data) throw new Error(resp.message ?? "No config");
+        if (!configRequests.isCurrent(token)) return;
+        applyConfigToUi(resp.data.config);
+      } catch (e: unknown) {
+        if (!configRequests.isCurrent(token)) return;
+        if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
+      } finally {
+        if (configRequests.isCurrent(token)) loading = false;
+      }
+    }, options);
   }
 
-  async function fetchStatus() {
-    setStatusLoading(true);
-    try {
-      const resp = await getJson<AdminResponse<StatusData>>("/api/status");
-      if (!resp.success || !resp.data) throw new Error(resp.message ?? "No status");
-      setStatus(resp.data);
-    } catch (e: unknown) {
-      if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
-    } finally {
-      setStatusLoading(false);
-    }
+  function fetchStatus(options: RequestOptions = {}): Promise<void> {
+    return statusRequests.request(async (token: RequestToken) => {
+      setStatusLoading(true);
+      try {
+        const resp = await getJson<AdminResponse<StatusData>>("/api/status");
+        if (!resp.success || !resp.data) throw new Error(resp.message ?? "No status");
+        if (!statusRequests.isCurrent(token)) return;
+        setStatus(resp.data);
+      } catch (e: unknown) {
+        if (!statusRequests.isCurrent(token)) return;
+        if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
+      } finally {
+        if (statusRequests.isCurrent(token)) setStatusLoading(false);
+      }
+    }, options);
+  }
+
+  function markConfigEdit(): void {
+    configRequests.invalidate();
+    loading = false;
   }
 
   async function saveConfig() {
+    if (!viewActive) return;
+    configRequests.invalidate();
     saving = true;
     try {
       const normalized = normalizeTomlTextForUi(configText);
@@ -126,17 +145,20 @@
           if (attempt >= MAX_PERSIST_ATTEMPTS || !isRetriablePersistenceError(e)) throw e;
         }
       }
+      if (!viewActive) return;
       applyConfigToUi(persistedConfigText ?? normalized);
       addToast("Changes saved", "success");
     } catch (e: unknown) {
+      if (!viewActive) return;
       if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
       else { addToast("Failed to save configuration", "error"); }
     } finally {
-      saving = false;
+      if (viewActive) saving = false;
     }
   }
 
   function applyStealthPreset(preset: StealthPresetUi) {
+    markConfigEdit();
     const normalizedMode =
       preset === "performance" ? "performance"
         : preset === "stealth" ? "stealth"
@@ -151,6 +173,7 @@
   }
 
   function applyStealthManualFlag(key: keyof StealthManualSettings, value: boolean) {
+    markConfigEdit();
     stealthManual = { ...stealthManual, [key]: value };
     configText = setSectionValue(configText, "stealth", key, value ? "true" : "false");
     dirty = true;
@@ -158,6 +181,7 @@
   }
 
   function applyFecPreset(preset: "auto" | "off") {
+    markConfigEdit();
     fecPreset = preset;
     configText = setSectionValue(configText, "fec", "mode", preset === "off" ? '"off"' : '"auto"');
     configText = setSectionValue(configText, "adaptive_fec", "initial_mode", preset === "off" ? '"off"' : '"auto"');
@@ -168,6 +192,7 @@
 
   function applyTransportCc(cc: CcSelection) {
     if (cc === "__custom__") return;
+    markConfigEdit();
     transportCc = cc;
     configText = setSectionValue(configText, "transport", "cc_algorithm", `"${cc}"`);
     dirty = true;
@@ -175,6 +200,7 @@
   }
 
   function applyTransportMtu(mtu: number) {
+    markConfigEdit();
     transportMtuText = String(mtu);
     configText = setSectionValue(configText, "transport", "mtu", String(mtu));
     dirty = true;
@@ -191,18 +217,28 @@
       });
       if (!discard) return;
     }
+    if (!viewActive) return;
     addToast("Refreshed", "info");
-    await Promise.allSettled([fetchStatus(), fetchConfig(), adminRefreshFn?.()]);
+    await Promise.allSettled([
+      fetchStatus({ invalidate: true }),
+      fetchConfig({ invalidate: true }),
+      adminRefreshFn?.(),
+    ]);
   }
 
   const saveDisabled = $derived(saving || !dirty || loading || (transportMtuText.trim().length > 0 && parseMtu(transportMtuText) == null));
 
   // Init
   $effect(() => {
-    fetchStatus();
-    fetchConfig();
-    const interval = setInterval(fetchStatus, 5000);
-    return () => clearInterval(interval);
+    void fetchStatus();
+    void fetchConfig();
+    const interval = setInterval(() => { void fetchStatus(); }, 5000);
+    return () => {
+      viewActive = false;
+      statusRequests.dispose();
+      configRequests.dispose();
+      clearInterval(interval);
+    };
   });
 
   $effect(() => {
@@ -263,6 +299,7 @@
       onManualFlagChange={applyStealthManualFlag}
       onCcChange={applyTransportCc}
       onMtuChange={(v) => {
+        markConfigEdit();
         transportMtuText = v;
         const n = parseMtu(v);
         if (n != null) applyTransportMtu(n);

@@ -4,6 +4,7 @@
   import { Skeleton, addToast } from "@quicfuscate/ui";
   import TextInput from "$lib/components/ui/TextInput.svelte";
   import { ApiError, isAuthError, getJson, postJson } from "$lib/api";
+  import { createRequestCoordinator, type RequestOptions, type RequestToken } from "$lib/request-coordinator";
   import { setAuthRequired, setAuthError } from "$lib/stores/app.svelte";
   import type { AdminResponse } from "$lib/types";
 
@@ -40,6 +41,8 @@
   let pwDialogEl: HTMLDivElement | undefined = $state();
   let unError = $state<string | null>(null);
   let unDialogEl: HTMLDivElement | undefined = $state();
+  let viewActive = true;
+  const authRequests = createRequestCoordinator();
 
   const usernameError = $derived.by(() => {
     const v = dlgNewUsername.trim();
@@ -68,23 +71,35 @@
     busy || !dlgCurrentPw || !dlgNewPw || !dlgConfirmPw || Boolean(passwordLengthError || passwordConfirmError),
   );
 
-  async function fetchAuth() {
-    loading = true;
-    try {
-      const resp = await getJson<AdminResponse<AuthStatus>>("/api/admin/auth");
-      if (!resp.success || !resp.data) throw new Error(resp.message ?? "Auth status unavailable");
-      username = resp.data.user || "admin";
-      requiresChange = Boolean(resp.data.requires_password_change);
-    } catch (e: unknown) {
-      if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
-    } finally {
-      loading = false;
-      authReady = true;
-    }
+  function fetchAuth(options: RequestOptions = {}): Promise<void> {
+    return authRequests.request(async (token: RequestToken) => {
+      loading = true;
+      try {
+        const resp = await getJson<AdminResponse<AuthStatus>>("/api/admin/auth");
+        if (!resp.success || !resp.data) throw new Error(resp.message ?? "Auth status unavailable");
+        if (!authRequests.isCurrent(token)) return;
+        username = resp.data.user || "admin";
+        requiresChange = Boolean(resp.data.requires_password_change);
+      } catch (e: unknown) {
+        if (!authRequests.isCurrent(token)) return;
+        if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
+      } finally {
+        if (authRequests.isCurrent(token)) {
+          loading = false;
+          authReady = true;
+        }
+      }
+    }, options);
   }
 
-  $effect(() => { fetchAuth(); });
-  $effect(() => { onRefresh?.(fetchAuth); });
+  $effect(() => {
+    void fetchAuth();
+    return () => {
+      viewActive = false;
+      authRequests.dispose();
+    };
+  });
+  $effect(() => { onRefresh?.(() => fetchAuth({ invalidate: true })); });
 
   function shakeEl(el: HTMLDivElement | undefined) {
     if (!el) return;
@@ -112,17 +127,19 @@
   }
 
   async function submitUsername() {
-    if (busy) return;
+    if (!viewActive || busy) return;
     const newU = dlgNewUsername.trim();
     if (!newU) { unError = "Username is required."; shakeEl(unDialogEl); return; }
     if (usernameError) { unError = usernameError; shakeEl(unDialogEl); return; }
     if (!dlgCurrentPw) { unError = "Current password is required."; shakeEl(unDialogEl); return; }
     unError = null;
+    authRequests.invalidate();
     busy = true;
     try {
       const body: AuthUpdateBody = { new_username: newU, current_password: dlgCurrentPw };
       const resp = await postJson<AdminResponse<unknown>, AuthUpdateBody>("/api/admin/auth", body);
       if (!resp.success) throw new Error(resp.message ?? "Username update failed");
+      if (!viewActive) return;
       username = newU;
       dlgNewUsername = "";
       dlgCurrentPw = "";
@@ -131,6 +148,7 @@
       addToast("Username updated. Please login again.", "success");
       setAuthRequired(true);
     } catch (e: unknown) {
+      if (!viewActive) return;
       if (isAuthError(e)) {
         unError = "Invalid current password.";
         shakeEl(unDialogEl);
@@ -141,22 +159,24 @@
         shakeEl(unDialogEl);
       }
     } finally {
-      busy = false;
+      if (viewActive) busy = false;
     }
   }
 
   async function submitPassword() {
-    if (busy) return;
+    if (!viewActive || busy) return;
     // Client-side validation with visible feedback
     if (!dlgCurrentPw) { pwError = "Current password is required."; shakeEl(pwDialogEl); return; }
     if (passwordLengthError) { pwError = passwordLengthError; shakeEl(pwDialogEl); return; }
     if (passwordConfirmError) { pwError = passwordConfirmError; shakeEl(pwDialogEl); return; }
     pwError = null;
+    authRequests.invalidate();
     busy = true;
     try {
       const body: AuthUpdateBody = { current_password: dlgCurrentPw, new_password: dlgNewPw };
       const resp = await postJson<AdminResponse<unknown>, AuthUpdateBody>("/api/admin/auth", body);
       if (!resp.success) throw new Error(resp.message ?? "Password update failed");
+      if (!viewActive) return;
       dlgCurrentPw = "";
       dlgNewPw = "";
       dlgConfirmPw = "";
@@ -166,6 +186,7 @@
       addToast("Password updated. Please login again.", "success");
       setAuthRequired(true);
     } catch (e: unknown) {
+      if (!viewActive) return;
       if (isAuthError(e)) {
         pwError = "Invalid current password.";
         shakeEl(pwDialogEl);
@@ -176,7 +197,7 @@
         shakeEl(pwDialogEl);
       }
     } finally {
-      busy = false;
+      if (viewActive) busy = false;
     }
   }
 </script>

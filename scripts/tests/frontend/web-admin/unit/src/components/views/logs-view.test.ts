@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "../../../testing-library";
+import { cleanup, fireEvent, render, screen, waitFor } from "../../../testing-library";
 
 const getJsonMock = vi.hoisted(() => vi.fn());
 const postJsonMock = vi.hoisted(() => vi.fn());
@@ -47,6 +47,12 @@ const EMPTY_LOGS_RESPONSE = {
   success: true,
   data: { lines: [], cursor: 0 },
 };
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => { resolve = res; });
+  return { promise, resolve };
+}
 
 function mockAllEndpoints(opts?: { logs?: unknown; mode?: unknown; status?: unknown }) {
   getJsonMock.mockImplementation((path: string) => {
@@ -225,5 +231,38 @@ describe("LogsView", () => {
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
     });
+  });
+
+  test("discards an older log response after refresh starts reconciliation", async () => {
+    const initialLogs = deferred<typeof LOGS_RESPONSE>();
+    const refreshedLogs = deferred<typeof LOGS_RESPONSE>();
+    let logCalls = 0;
+    getJsonMock.mockImplementation((path: string) => {
+      if (path === "/api/config/logging") return Promise.resolve(MODE_RESPONSE);
+      if (path === "/api/status") return Promise.resolve(STATUS_ONLINE);
+      if (path.startsWith("/api/logs")) {
+        logCalls += 1;
+        return logCalls === 1 ? initialLogs.promise : refreshedLogs.promise;
+      }
+      return Promise.resolve({ success: true, data: null });
+    });
+
+    render(LogsView);
+    await waitFor(() => expect(logCalls).toBe(1));
+    await fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+
+    initialLogs.resolve({
+      success: true,
+      data: { lines: [{ ts: 1710000000000, level: "error", msg: "stale response" }], cursor: 7 },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await waitFor(() => expect(logCalls).toBe(2));
+    expect(screen.queryByText("stale response")).not.toBeInTheDocument();
+
+    refreshedLogs.resolve({
+      success: true,
+      data: { lines: [{ ts: 1710000001000, level: "info", msg: "fresh response" }], cursor: 8 },
+    });
+    await waitFor(() => expect(screen.getByText("fresh response")).toBeInTheDocument());
   });
 });

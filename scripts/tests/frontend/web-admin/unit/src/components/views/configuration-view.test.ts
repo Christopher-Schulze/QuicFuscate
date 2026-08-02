@@ -64,6 +64,16 @@ const ADMIN_AUTH = {
 // Tracks the last config posted so verify-GET can return the same value.
 let _postedConfig = BASE_CONFIG;
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => { resolve = res; });
+  return { promise, resolve };
+}
+
+function configWithMtu(mtu: number): string {
+  return BASE_CONFIG.replace("mtu = 1400", `mtu = ${mtu}`);
+}
+
 function mockApis() {
   _postedConfig = BASE_CONFIG;
   getJsonMock.mockImplementation((url: string) => {
@@ -241,5 +251,32 @@ describe("ConfigurationView", () => {
     await waitFor(() => {
       expect(screen.getByText(/Online/)).toBeInTheDocument();
     });
+  });
+
+  test("discards an older config response after refresh queues a new request", async () => {
+    const initialConfig = deferred<{ success: boolean; data: { config: string } }>();
+    const refreshedConfig = deferred<{ success: boolean; data: { config: string } }>();
+    let configCalls = 0;
+    getJsonMock.mockImplementation((url: string) => {
+      if (url === "/api/config") {
+        configCalls += 1;
+        return configCalls === 1 ? initialConfig.promise : refreshedConfig.promise;
+      }
+      if (url === "/api/status") return Promise.resolve({ success: true, data: BASE_STATUS });
+      if (url === "/api/admin/auth") return Promise.resolve({ success: true, data: ADMIN_AUTH });
+      return Promise.resolve({ success: true, data: {} });
+    });
+
+    render(ConfigurationView);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Refresh" })).toBeInTheDocument());
+    await fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+
+    initialConfig.resolve({ success: true, data: { config: configWithMtu(1200) } });
+    await vi.advanceTimersByTimeAsync(0);
+    await waitFor(() => expect(configCalls).toBe(2));
+    expect(screen.getByLabelText("MTU")).toHaveValue("1400");
+
+    refreshedConfig.resolve({ success: true, data: { config: configWithMtu(1450) } });
+    await waitFor(() => expect(screen.getByLabelText("MTU")).toHaveValue("1450"));
   });
 });
