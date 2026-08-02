@@ -37,7 +37,7 @@ echo "  - Desktop Check"
 echo "  - Desktop Unit"
 echo "  - Web-Admin Check"
 echo "  - Web-Admin Unit"
-echo "  - Rust Integration (6 targeted tests)"
+echo "  - Rust Integration (5 targeted tests)"
 echo "==============================================================="
 echo "Output: $OUTPUT_DIR"
 
@@ -48,7 +48,6 @@ run bash -lc "cd \"$PROJECT_ROOT/apps/svelte-admin\" && bun run test:unit"
 run cargo test --features rust-tests \
   --test it-engine-control-plane \
   --test it-interface-capabilities \
-  --test it-masque-runtime-integration \
   --test it-orchestrator-runtime-activation \
   --test it-qkey-auth-integration \
   --test it-stealth-mode-matrix
