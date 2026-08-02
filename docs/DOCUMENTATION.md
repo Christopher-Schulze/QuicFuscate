@@ -373,6 +373,7 @@ This document provides comprehensive technical documentation for the system arch
   - TLS fingerprint sourcing follows the canonical "Unified TLS Provider (RealTLS + TLS Cover) -> Fingerprint Source Model".
   - Unified configuration via `config/quicfuscate.toml`; environment overrides through `QUICFUSCATE_*`
   - Modular script-based architecture with dedicated scripts for each functionality
+- `src/pki/mod.rs`: Production CA hierarchy generation and validated reuse of the server leaf, including Rustls/WebPKI chain, hostname, expiry, and private-key matching checks; invalid or incomplete material is quarantined before regeneration.
 - Organized script directories: `scripts/build/`, `scripts/install/`, `scripts/utils/`, `scripts/benchmarks/`, `scripts/tests/build/`, `scripts/tests/analysis/`, `scripts/tests/audits/`, `scripts/tests/frontend/`, `scripts/tests/fuzz/`, `scripts/tests/lib/`, `scripts/tests/rust/`, `scripts/tests/smoke/`, `scripts/tests/suites/`, and `scripts/tests/utils/`
 - Individual scripts for specific tasks: build management, benchmarking, testing, auditing, and utilities
 
@@ -4533,7 +4534,7 @@ A full deep-audit sweep of `src/` was performed with parallel read-only module s
 - **SecretString UB**: `src/secret.rs` uses `from_utf8_unchecked` on bytes that can be cloned without a UTF-8 guarantee. Tracked in TODO-651.
 - **Privilege drop unsafe assumptions**: `src/privilege/drop.rs` uses `assume_init` and `CStr::from_ptr` without validating libc success or NUL termination. Tracked in TODO-652 and TODO-653.
 - **TUN unsafe reads**: `src/interface.rs` performs unaligned `*const u32` reads and ignores `fcntl` errors. Tracked in TODO-654 and TODO-655.
-- **PKI timestamp epoch fallback**: `src/pki/mod.rs` defaults to timestamp 0 on failure. Tracked in TODO-656.
+- **PKI ambient time source**: `src/pki/mod.rs` uses the wall clock for generated certificate validity; a checked and injectable PKI time source remains tracked in TODO-656.
 - **Client profile ID collision**: `src/implementations/client/profile.rs` masks a nanosecond timestamp to 32 bits, creating predictable collisions. Tracked in TODO-658.
 - **Retry token length validation after encoding**: `src/implementations/server/ddos.rs` checks `MAX_RETRY_TOKEN_LEN` only after building the token. Tracked in TODO-659.
 - **DNS NXDOMAIN lie**: `src/dns/mod.rs` returns NXDOMAIN for upstream failures. Tracked in TODO-666.

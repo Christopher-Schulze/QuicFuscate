@@ -271,6 +271,140 @@ pub fn write_ca_cert_pem(ca_der: &[u8], ca_path: &Path) -> Result<(), PkiError> 
     Ok(())
 }
 
+fn parse_certificates(
+    pem: &[u8],
+    path: &Path,
+) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, PkiError> {
+    use rustls::pki_types::{pem::PemObject, CertificateDer};
+
+    let certificates = CertificateDer::pem_slice_iter(pem)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| PkiError::ParseFailed(format!("{}: {error}", path.display())))?;
+    if certificates.is_empty() {
+        return Err(PkiError::ParseFailed(format!(
+            "{}: certificate chain is empty",
+            path.display()
+        )));
+    }
+    Ok(certificates)
+}
+
+fn validate_existing_pki(pki_dir: &Path, server_hostname: &str) -> Result<(), PkiError> {
+    use rustls::client::danger::ServerCertVerifier;
+    use rustls::client::WebPkiServerVerifier;
+    use rustls::pki_types::{pem::PemObject, PrivateKeyDer, ServerName, UnixTime};
+    use rustls::RootCertStore;
+    use std::sync::Arc;
+
+    let server_cert_path = pki_dir.join("server.crt");
+    let server_key_path = pki_dir.join("server.key");
+    let root_ca_path = pki_dir.join("ca-root.crt");
+    let intermediate_ca_path = pki_dir.join("ca-intermediate.crt");
+
+    let server_cert_pem = std::fs::read(&server_cert_path)?;
+    let server_key_pem = std::fs::read(&server_key_path)?;
+    let root_ca_pem = std::fs::read(&root_ca_path)?;
+    let intermediate_ca_pem = std::fs::read(&intermediate_ca_path)?;
+    let server_chain = parse_certificates(&server_cert_pem, &server_cert_path)?;
+    if server_chain.len() < 2 {
+        return Err(PkiError::ValidationFailed(
+            "server certificate chain must contain a leaf and an intermediate".to_string(),
+        ));
+    }
+    let intermediate_certificates =
+        parse_certificates(&intermediate_ca_pem, &intermediate_ca_path)?;
+    if intermediate_certificates.len() != 1
+        || intermediate_certificates[0].as_ref() != server_chain[1].as_ref()
+    {
+        return Err(PkiError::ValidationFailed(
+            "standalone intermediate certificate does not match the server chain".to_string(),
+        ));
+    }
+    let root_certificates = parse_certificates(&root_ca_pem, &root_ca_path)?;
+    if root_certificates.len() != 1 {
+        return Err(PkiError::ValidationFailed(format!(
+            "{} must contain exactly one trust anchor",
+            root_ca_path.display()
+        )));
+    }
+
+    let private_key = PrivateKeyDer::from_pem_slice(&server_key_pem).map_err(|error| {
+        PkiError::ParseFailed(format!("{}: {error}", server_key_path.display()))
+    })?;
+    let mut roots = RootCertStore::empty();
+    let root_certificate = root_certificates.into_iter().next().ok_or_else(|| {
+        PkiError::ValidationFailed(format!("{} has no trust anchor", root_ca_path.display()))
+    })?;
+    roots.add(root_certificate).map_err(|error| {
+        PkiError::ValidationFailed(format!("{}: {error}", root_ca_path.display()))
+    })?;
+
+    let verifier = WebPkiServerVerifier::builder_with_provider(
+        Arc::new(roots),
+        Arc::new(rustls::crypto::ring::default_provider()),
+    )
+    .build()
+    .map_err(|error| PkiError::ValidationFailed(format!("verifier setup: {error}")))?;
+    let server_name = ServerName::try_from(server_hostname)
+        .map_err(|_| PkiError::ValidationFailed("invalid server hostname".to_string()))?
+        .to_owned();
+    verifier
+        .verify_server_cert(
+            &server_chain[0],
+            &server_chain[1..],
+            &server_name,
+            &[],
+            UnixTime::now(),
+        )
+        .map_err(|error| PkiError::ValidationFailed(format!("server chain: {error}")))?;
+
+    rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|error| PkiError::ValidationFailed(format!("TLS versions: {error}")))?
+        .with_no_client_auth()
+        .with_single_cert(server_chain, private_key)
+        .map_err(|error| {
+            PkiError::ValidationFailed(format!("server key does not match certificate: {error}"))
+        })?;
+
+    Ok(())
+}
+
+fn quarantine_existing_pki(
+    pki_dir: &Path,
+    paths: &[&Path],
+) -> Result<std::path::PathBuf, PkiError> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .map_err(|error| {
+            PkiError::IoError(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("system clock predates Unix epoch: {error}"),
+            ))
+        })?;
+    let quarantine_dir = pki_dir.join(format!(".invalid-pki-{stamp}-{}", std::process::id()));
+    if quarantine_dir.exists() {
+        return Err(PkiError::IoError(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("quarantine path already exists: {}", quarantine_dir.display()),
+        )));
+    }
+    std::fs::create_dir(&quarantine_dir)?;
+    for path in paths.iter().copied().filter(|path| path.exists()) {
+        let file_name = path.file_name().ok_or_else(|| {
+            PkiError::IoError(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid PKI path: {}", path.display()),
+            ))
+        })?;
+        std::fs::rename(path, quarantine_dir.join(file_name))?;
+    }
+    Ok(quarantine_dir)
+}
+
 /// Convert DER bytes to PEM format.
 fn der_to_pem(der: &[u8], label: &str) -> String {
     use std::fmt::Write;
@@ -324,10 +458,35 @@ pub fn ensure_pki(
     let server_cert_path = pki_dir.join("server.crt");
     let server_key_path = pki_dir.join("server.key");
 
-    // If the server cert and key already exist, use them (PKI already initialized).
+    let pki_paths: [&Path; 4] = [
+        root_ca_path.as_path(),
+        intermediate_ca_path.as_path(),
+        server_cert_path.as_path(),
+        server_key_path.as_path(),
+    ];
+
+    // Existing material is reusable only after parsing, key matching, hostname,
+    // expiry, and full chain validation against the local root CA.
     if server_cert_path.exists() && server_key_path.exists() {
-        log::info!("PKI: Using existing server certificate at {}", server_cert_path.display());
-        return Ok((server_cert_path, server_key_path));
+        match validate_existing_pki(pki_dir, server_hostname) {
+            Ok(()) => {
+                log::info!(
+                    "PKI: Using existing validated server certificate at {}",
+                    server_cert_path.display()
+                );
+                return Ok((server_cert_path, server_key_path));
+            }
+            Err(error) => {
+                log::warn!(
+                    "PKI: Existing material is invalid; preserving it before regeneration: {error}"
+                );
+            }
+        }
+    }
+
+    if pki_paths.iter().any(|path| path.exists()) {
+        let quarantine_dir = quarantine_existing_pki(pki_dir, &pki_paths)?;
+        log::warn!("PKI: Moved invalid or incomplete material to {}", quarantine_dir.display());
     }
 
     log::info!(
@@ -440,6 +599,109 @@ mod tests {
         let (cert2, key2) = ensure_pki(&dir, "vpn.example.com", "TestOrg").unwrap();
         assert_eq!(cert_path, cert2);
         assert_eq!(key_path, key2);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(feature = "rcgen")]
+    fn write_expired_hierarchy(dir: &Path) {
+        use rcgen::{
+            CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair,
+            KeyUsagePurpose, SanType,
+        };
+
+        let now = time::OffsetDateTime::now_utc();
+
+        let mut root_params = CertificateParams::new(vec![]).unwrap();
+        root_params.distinguished_name = DistinguishedName::new();
+        root_params.distinguished_name.push(DnType::OrganizationName, "TestOrg");
+        root_params.distinguished_name.push(DnType::CommonName, "TestOrg Root CA");
+        root_params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        root_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        root_params.not_before = now - time::Duration::days(2);
+        root_params.not_after = now + time::Duration::days(365);
+        let root_key = KeyPair::generate().unwrap();
+        let root_cert = root_params.self_signed(&root_key).unwrap();
+
+        let mut intermediate_params = CertificateParams::new(vec![]).unwrap();
+        intermediate_params.distinguished_name = DistinguishedName::new();
+        intermediate_params.distinguished_name.push(DnType::OrganizationName, "TestOrg");
+        intermediate_params.distinguished_name.push(DnType::CommonName, "TestOrg Intermediate CA");
+        intermediate_params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Constrained(0));
+        intermediate_params.key_usages =
+            vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        intermediate_params.not_before = now - time::Duration::days(2);
+        intermediate_params.not_after = now + time::Duration::days(365);
+        let intermediate_key = KeyPair::generate().unwrap();
+        let intermediate_cert =
+            intermediate_params.signed_by(&intermediate_key, &root_cert, &root_key).unwrap();
+
+        let mut leaf_params = CertificateParams::new(vec![]).unwrap();
+        leaf_params.distinguished_name = DistinguishedName::new();
+        leaf_params.distinguished_name.push(DnType::OrganizationName, "TestOrg");
+        leaf_params.distinguished_name.push(DnType::CommonName, "vpn.example.com");
+        leaf_params.subject_alt_names =
+            vec![SanType::DnsName(rcgen::Ia5String::try_from("vpn.example.com").unwrap())];
+        leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        leaf_params.not_before = now - time::Duration::days(2);
+        leaf_params.not_after = now - time::Duration::days(1);
+        let leaf_key = KeyPair::generate().unwrap();
+        let leaf_cert =
+            leaf_params.signed_by(&leaf_key, &intermediate_cert, &intermediate_key).unwrap();
+
+        write_ca_cert_pem(root_cert.der(), &dir.join("ca-root.crt")).unwrap();
+        write_ca_cert_pem(intermediate_cert.der(), &dir.join("ca-intermediate.crt")).unwrap();
+        write_cert_chain_pem(leaf_cert.der(), intermediate_cert.der(), &dir.join("server.crt"))
+            .unwrap();
+        let mut key_der = leaf_key.serialize_der();
+        write_key_pem(&mut key_der, &dir.join("server.key")).unwrap();
+    }
+
+    #[cfg(feature = "rcgen")]
+    #[test]
+    fn test_ensure_pki_regenerates_corrupted_existing_certificate() {
+        let dir = std::env::temp_dir().join(format!(
+            "qf_pki_corrupt_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let (cert_path, _) = ensure_pki(&dir, "vpn.example.com", "TestOrg").unwrap();
+        std::fs::write(&cert_path, b"corrupted certificate").unwrap();
+
+        ensure_pki(&dir, "vpn.example.com", "TestOrg").unwrap();
+
+        let certificates =
+            parse_certificates(&std::fs::read(&cert_path).unwrap(), &cert_path).unwrap();
+        assert_eq!(certificates.len(), 2);
+        validate_existing_pki(&dir, "vpn.example.com").unwrap();
+        assert!(std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().starts_with(".invalid-pki-")));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(feature = "rcgen")]
+    #[test]
+    fn test_ensure_pki_regenerates_expired_certificate() {
+        let dir = std::env::temp_dir().join(format!(
+            "qf_pki_expired_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_expired_hierarchy(&dir);
+        let expired_certificate = std::fs::read(dir.join("server.crt")).unwrap();
+
+        ensure_pki(&dir, "vpn.example.com", "TestOrg").unwrap();
+
+        let regenerated_certificate = std::fs::read(dir.join("server.crt")).unwrap();
+        assert_ne!(regenerated_certificate, expired_certificate);
+        validate_existing_pki(&dir, "vpn.example.com").unwrap();
 
         std::fs::remove_dir_all(&dir).ok();
     }
