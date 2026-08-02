@@ -18,9 +18,11 @@ struct EscalationState {
     /// Sliding window of probe detection timestamps (epoch millis).
     probe_timestamps: Mutex<VecDeque<u64>>,
     /// Time of the last probe detection (epoch millis, 0 = none).
-    last_probe_time: AtomicU64,
-    /// Time of the last escalation event (epoch millis, 0 = none).
-    last_escalation_time: AtomicU64,
+    last_probe_detection_time: AtomicU64,
+    /// Time of the last level change (epoch millis, 0 = none).
+    last_level_change_time: AtomicU64,
+    /// Connection-local level state shared with the Brain.
+    level_hints: Arc<crate::brain::IntelligentLevelHints>,
     /// Threshold for L0→L1 escalation (default: 3 probes in 60s).
     threshold_l1: u32,
     /// Threshold for L1→L2 escalation (default: 8 probes in 120s).
@@ -30,20 +32,25 @@ struct EscalationState {
 }
 
 impl EscalationState {
-    fn new() -> Self {
+    fn new(level_hints: Arc<crate::brain::IntelligentLevelHints>) -> Self {
+        let threshold_l1 = crate::env_utils::env_parse::<u32>(
+            "QUICFUSCATE_STEALTH_ESCALATION_PROBE_THRESHOLD_L1",
+        )
+        .unwrap_or(3)
+        .max(1);
+        let threshold_l2 = crate::env_utils::env_parse::<u32>(
+            "QUICFUSCATE_STEALTH_ESCALATION_PROBE_THRESHOLD_L2",
+        )
+        .unwrap_or(8)
+        .max(threshold_l1);
         Self {
             current_level: AtomicU8::new(0),
             probe_timestamps: Mutex::new(VecDeque::with_capacity(32)),
-            last_probe_time: AtomicU64::new(0),
-            last_escalation_time: AtomicU64::new(0),
-            threshold_l1: crate::env_utils::env_parse::<u32>(
-                "QUICFUSCATE_STEALTH_ESCALATION_PROBE_THRESHOLD_L1",
-            )
-            .unwrap_or(3),
-            threshold_l2: crate::env_utils::env_parse::<u32>(
-                "QUICFUSCATE_STEALTH_ESCALATION_PROBE_THRESHOLD_L2",
-            )
-            .unwrap_or(8),
+            last_probe_detection_time: AtomicU64::new(0),
+            last_level_change_time: AtomicU64::new(0),
+            level_hints,
+            threshold_l1,
+            threshold_l2,
             quiet_period_secs: crate::env_utils::env_parse::<u64>(
                 "QUICFUSCATE_STEALTH_DEESCALATION_QUIET_PERIOD_SEC",
             )
@@ -53,7 +60,7 @@ impl EscalationState {
 
     #[inline]
     fn now_millis() -> u64 {
-        std::time::SystemTime::now()
+        crate::time_source::now_system()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0)
@@ -68,7 +75,7 @@ impl EscalationState {
     /// Returns the new level if escalation occurred, None if no change.
     fn record_probe(&self) -> Option<u8> {
         let now = Self::now_millis();
-        self.last_probe_time.store(now, Ordering::Relaxed);
+        self.last_probe_detection_time.store(now, Ordering::Relaxed);
 
         let mut timestamps = self.probe_timestamps.lock().unwrap_or_else(|p| p.into_inner());
         timestamps.push_back(now);
@@ -89,20 +96,16 @@ impl EscalationState {
         let count_60s = timestamps.iter().filter(|&&t| t >= cutoff_60s).count() as u32;
 
         let current = self.current_level.load(Ordering::Relaxed);
-        let new_level = if count_120s >= self.threshold_l2 {
-            2u8
-        } else if count_60s >= self.threshold_l1 {
-            1u8
-        } else {
-            return None;
+        let new_level = match current {
+            0 if count_60s >= self.threshold_l1 => 1u8,
+            1 if count_120s >= self.threshold_l2 => 2u8,
+            _ => return None,
         };
 
         if new_level > current {
             self.current_level.store(new_level, Ordering::Relaxed);
-            self.last_escalation_time.store(now, Ordering::Relaxed);
-            // Publish the new level to the global hint so the brain and
-            // sync_intelligent_level() pick it up.
-            crate::brain::INTELLIGENT_STEALTH_LEVEL_HINT.store(new_level as u32);
+            self.last_level_change_time.store(now, Ordering::Relaxed);
+            self.level_hints.set_probe_level(new_level);
             return Some(new_level);
         }
         None
@@ -116,24 +119,26 @@ impl EscalationState {
             return None;
         }
 
-        let last_probe = self.last_probe_time.load(Ordering::Relaxed);
+        let last_probe = self.last_probe_detection_time.load(Ordering::Relaxed);
         if last_probe == 0 {
             return None;
         }
 
+        let last_level_change = self.last_level_change_time.load(Ordering::Relaxed);
+        let quiet_reference = last_probe.max(last_level_change);
         let now = Self::now_millis();
-        let quiet_ms = self.quiet_period_secs * 1000;
-        if now.saturating_sub(last_probe) < quiet_ms {
+        let quiet_ms = self.quiet_period_secs.saturating_mul(1000);
+        if now.saturating_sub(quiet_reference) < quiet_ms {
             return None;
         }
 
         // Quiet period elapsed — de-escalate by one level.
         let new_level = current - 1;
         self.current_level.store(new_level, Ordering::Relaxed);
-        // Update the last_probe_time so the next de-escalation check waits
-        // another full quiet period before dropping further.
-        self.last_probe_time.store(now, Ordering::Relaxed);
-        crate::brain::INTELLIGENT_STEALTH_LEVEL_HINT.store(new_level as u32);
+        // Keep the actual probe timestamp intact. The next check should measure
+        // quiet time from the last real probe, not from the previous level drop.
+        self.last_level_change_time.store(now, Ordering::Relaxed);
+        self.level_hints.set_probe_level(new_level);
         Some(new_level)
     }
 
@@ -141,14 +146,16 @@ impl EscalationState {
     #[allow(dead_code)]
     fn set_level(&self, level: u8) {
         self.current_level.store(level, Ordering::Relaxed);
+        self.level_hints.set_probe_level(level);
     }
 
     /// Reset to level 0 and clear probe history (test-only).
     #[cfg(test)]
     fn reset(&self) {
         self.current_level.store(0, Ordering::Relaxed);
-        self.last_probe_time.store(0, Ordering::Relaxed);
-        self.last_escalation_time.store(0, Ordering::Relaxed);
+        self.last_probe_detection_time.store(0, Ordering::Relaxed);
+        self.last_level_change_time.store(0, Ordering::Relaxed);
+        self.level_hints.set_probe_level(0);
         let mut timestamps = self.probe_timestamps.lock().unwrap_or_else(|p| p.into_inner());
         timestamps.clear();
     }

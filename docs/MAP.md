@@ -162,8 +162,8 @@ One owner is created per client/server runtime generation, including `main_parts
 
 ### EscalationState (src/stealth/parts/escalation.rs) - TODO-416
 Probe-count-based escalation state machine on `StealthManager`.
-- `record_probe()`: records timestamp, checks thresholds (≥3 in 60s → L1, ≥8 in 120s → L2).
-- `check_de_escalation()`: drops one level after configurable quiet period (default 300s).
+- `record_probe()`: records timestamp, checks the ladder thresholds (≥3 in 60s → L1, then ≥8 in 120s → L2); a fresh level-0 state cannot jump directly to L2.
+- `check_de_escalation()`: drops at most one level per configurable quiet period (default 300s), measured from the latest probe or level change.
 - `on_probe_detected()` uses `EscalationState` instead of immediate binary escalation.
 - `sync_intelligent_level()` calls `check_de_escalation()` on each tick.
 - Config knobs: `QUICFUSCATE_STEALTH_ESCALATION_PROBE_THRESHOLD_L1` (3), `_L2` (8),
@@ -171,7 +171,7 @@ Probe-count-based escalation state machine on `StealthManager`.
 - `on_probe_detected` only escalates when `config.dynamic_enabled` is true (Intelligent mode).
 
 ### IntelligentStealthInputs.level_hint (src/stealth/parts/manager.rs)
-Brain reads `INTELLIGENT_STEALTH_LEVEL_HINT` (a `HintChannel<AtomicU32>` with an explicit writer/reader contract at the declaration site, TODO-517) after hysteresis and passes as `level_hint: u8` (0/1/2) to `derive_intelligent_runtime_policy`.
+Brain and `EscalationState` publish separate connection-local levels through `IntelligentLevelHints`; consumers use the maximum and pass it as `level_hint: u8` (0/1/2) to `derive_intelligent_runtime_policy`.
 Level 0 (clean path): padding disabled (near-zero Intelligent-mode overhead). Level 1/2: padding active.
 Jitter under pressure (CE>5% or rtt_spike>4): 85% of budget (was wrongly 20% - direction fixed).
 

@@ -688,7 +688,11 @@ impl QuicFuscateConnection {
         let obs_dyn: Arc<dyn crate::transport::TransportObserver> = obs.clone();
         let brain_enabled = crate::env_utils::env_flag("QUICFUSCATE_BRAIN", true);
         if brain_enabled {
-            let brain = StealthBrain::new_default();
+            let brain = StealthBrain::new_with_level_hints(
+                crate::brain::StealthBrainConfig::from_env(),
+                s.stealth_manager.intelligent_level_hints(),
+            );
+            obs.attach_brain_hints(brain.fec_hints());
             let brain_dyn: Arc<dyn crate::transport::TransportObserver> = brain.clone();
             let combined = CombinedObserver::new(vec![obs_dyn.clone(), brain_dyn]);
             let combined_dyn: Arc<dyn crate::transport::TransportObserver> = combined.clone();

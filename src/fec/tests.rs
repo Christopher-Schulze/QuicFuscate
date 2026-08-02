@@ -1160,10 +1160,13 @@ fn test_observer_sync_runtime_hints_only_pushes_fec_owned_deltas() {
     let mut conn = crate::transport::packet::connect(None, scid.as_ref(), local, peer, &mut cfg)
         .expect("connect");
     let observer = FecTransportObserver::new();
+    let brain = crate::brain::StealthBrain::new(crate::brain::StealthBrainConfig::default());
+    let brain_hints = brain.fec_hints();
+    observer.attach_brain_hints(brain_hints.clone());
 
     conn.set_ack_eliciting_threshold(9);
     conn.set_external_pacing_for_test(true);
-    crate::brain::FEC_REDUNDANCY_PPM.store(180_000);
+    brain_hints.set_redundancy_ppm(180_000);
 
     observer.sync_runtime_hints(&mut conn);
     let delta = conn.take_fec_control_delta();
@@ -1177,6 +1180,37 @@ fn test_observer_sync_runtime_hints_only_pushes_fec_owned_deltas() {
     observer.sync_runtime_hints(&mut conn);
     let delta = conn.take_fec_control_delta();
     assert_eq!(delta.redundancy_ppm, None);
+}
+
+#[test]
+fn test_observer_runtime_hints_are_connection_local() {
+    let mut cfg = crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION)
+        .expect("config");
+    let local: std::net::SocketAddr = "127.0.0.1:0".parse().expect("local");
+    let peer: std::net::SocketAddr = "127.0.0.1:4433".parse().expect("peer");
+    let scid = crate::transport::ConnectionId::from_ref(&[8u8; 8]);
+    let mut first_conn =
+        crate::transport::packet::connect(None, scid.as_ref(), local, peer, &mut cfg)
+            .expect("first connection");
+    let mut second_conn =
+        crate::transport::packet::connect(None, scid.as_ref(), local, peer, &mut cfg)
+            .expect("second connection");
+
+    let first_observer = FecTransportObserver::new();
+    let second_observer = FecTransportObserver::new();
+    let first_brain = crate::brain::StealthBrain::new(crate::brain::StealthBrainConfig::default());
+    let second_brain = crate::brain::StealthBrain::new(crate::brain::StealthBrainConfig::default());
+    let first_hints = first_brain.fec_hints();
+    let second_hints = second_brain.fec_hints();
+    first_hints.set_redundancy_ppm(120_000);
+    second_hints.set_redundancy_ppm(280_000);
+    first_observer.attach_brain_hints(first_hints);
+    second_observer.attach_brain_hints(second_hints);
+
+    first_observer.sync_runtime_hints(&mut first_conn);
+    second_observer.sync_runtime_hints(&mut second_conn);
+    assert_eq!(first_conn.take_fec_control_delta().redundancy_ppm, Some(120_000));
+    assert_eq!(second_conn.take_fec_control_delta().redundancy_ppm, Some(280_000));
 }
 
 #[test]

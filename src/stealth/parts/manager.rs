@@ -35,6 +35,8 @@ pub struct StealthManager {
     probe_hits: Arc<AtomicUsize>,
     /// Probe-count-based escalation state machine (TODO-416).
     escalation_state: Arc<EscalationState>,
+    /// Connection-local Brain/probe level state.
+    intelligent_level_hints: Arc<crate::brain::IntelligentLevelHints>,
     /// Runtime override: padding rate 0-100 (set on probe detection or escalation).
     /// Level 0 = 0%, Level 1 = 50%, Level 2 = 100%.
     runtime_padding_rate: AtomicU8,
@@ -196,6 +198,8 @@ impl StealthManager {
                 }
             });
 
+        let intelligent_level_hints = Arc::new(crate::brain::IntelligentLevelHints::new());
+
         Self {
             config,
             fingerprint,
@@ -215,7 +219,8 @@ impl StealthManager {
             server_push_state,
             server_push_runtime_enabled: std::sync::atomic::AtomicBool::new(false),
             probe_hits: Arc::new(AtomicUsize::new(0)),
-            escalation_state: Arc::new(EscalationState::new()),
+            escalation_state: Arc::new(EscalationState::new(Arc::clone(&intelligent_level_hints))),
+            intelligent_level_hints,
             runtime_padding_rate: AtomicU8::new(0),
             runtime_timing_rate: AtomicU8::new(0),
             runtime_rotation_rate: AtomicU8::new(0),
@@ -1083,10 +1088,15 @@ impl StealthManager {
     /// Returns the brain-computed Intelligent stealth escalation level (0 = inactive).
     pub(crate) fn intelligent_runtime_level(&self) -> u32 {
         if self.is_intelligent_runtime() {
-            crate::brain::intelligent_stealth_level_hint()
+            self.intelligent_level_hints.effective_level()
         } else {
             0
         }
+    }
+
+    /// Returns the connection-local level state shared with its Brain observer.
+    pub(crate) fn intelligent_level_hints(&self) -> Arc<crate::brain::IntelligentLevelHints> {
+        Arc::clone(&self.intelligent_level_hints)
     }
 
     /// Apply the brain-computed intelligent level to runtime overrides.
@@ -1110,7 +1120,7 @@ impl StealthManager {
             return;
         }
 
-        let level = crate::brain::intelligent_stealth_level_hint() as u8;
+        let level = self.intelligent_runtime_level() as u8;
         let current_padding = self.runtime_padding_rate.load(Ordering::Relaxed);
         let target_padding = match level {
             0 => 0u8,
@@ -1406,6 +1416,12 @@ impl StealthManager {
     #[cfg(test)]
     pub fn reset_escalation_state(&self) {
         self.escalation_state.reset();
+    }
+
+    /// Set the Brain-owned level for focused runtime tests.
+    #[cfg(any(test, feature = "rust-tests"))]
+    pub fn set_brain_level_for_test(&self, level: u8) {
+        self.intelligent_level_hints.set_brain_level_for_test(level);
     }
 
     /// Get probe count in 60s window (test-only).

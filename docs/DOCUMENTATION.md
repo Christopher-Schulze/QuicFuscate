@@ -162,8 +162,8 @@ Use this section as the shortest non-marketing answer to "what evidence exists r
 - **TODO-412 DONE**: Real-world QUIC connection over the internet verified: Mac (ARM64) → Broderick (Oracle Cloud, ARM64, 92.5.226.155:4433). TLS handshake successful, RTT 0ms, Loss 0.00%, FEC NEON SIMD active, stealth uTLS+TLS Cover active. Oracle Cloud Security List is now open for UDP 4433. Server RSS 3.1 MB at idle.
 - **TODO-512 DONE**: Full soak matrix on Broderick (ARM64, Ubuntu 24.04, release build): 25/25 scenarios PASS, 0 failures. 10 steady_integration + 10 fec_loss_chaos + 5 admin_qkey iterations.
 - **TODO-513 DONE**: Full install/upgrade/rollback/uninstall lifecycle on Broderick (ARM64, Ubuntu 24.04): all steps PASS. Config and QKey registry preserved across upgrade. State preserved after uninstall. `/api/health` endpoint used as liveness signal.
-- **TODO-517 DONE**: `HintChannel<A>` abstraction for brain.rs hint atomics — 3 statics wrapped in typsafe newtypes with writer/reader contracts.
-- **TODO-518 DONE**: Global Atomic State Audit reconciled with code truth (120 raw + 156 wrapped = 377 total).
+- **TODO-517 DONE**: Historical `HintChannel<A>` abstraction for brain.rs hint atomics. TODO-584 replaced those process-global channels with connection-local `BrainFecHints` and `IntelligentLevelHints`.
+- **TODO-518 DONE**: Historical global atomic count reconciliation; the current source inventory is maintained in the Global Atomic State Audit section below.
 - TODO-508 through TODO-520, TODO-412, and TODO-448 retain their individual completion evidence. The exhaustive acceptance reconciliation is complete and its genuine gaps are now represented directly by the ordered open production TASKs in `docs/todo.md`; production readiness remains open until that register reaches zero without unresolved blockers. The current graceful-drain source checkpoint `bef00fe6501baa1d5fc99ad25f5e8e89c9b6d4a3` remains independently proven by local full Rust gates, GitHub CI `29880712890`, Clippy Matrix `29880712914`, native ARM64 release job `88800780673`, and the exact two-client lifecycle proof on Omega in 5118 ms.
 - TODO-558 is closed on implementation commit `b7db20443bb070d97686975034ebd9656ca3f98e`: local full Rust/Clippy/script gates, eight repeated Omega Off/Auto moderate/severe matrices, CI `30155084370`, Clippy Matrix `30155084377`, and Release Build `30155084369` pass. The GitHub source archive SHA-256 is `64a8fae24a1143ab9715b78c0075dfcf570c51432682f5c1383077d5309be678`; native ARM64 release artifact `8618776310` has bundle SHA-256 `0fb66cb66b48475cb578eccadeb1d9f8da17273f98939ab60931b0dd8ebdeecb` and binary SHA-256 `ea93bc10af7fc205da41b2acf02b5b6a0b25702113c7d8900390c12e99e516fb`.
 - TODO-556 is closed on exact commit `06e60435604678bc0f7c47c633d557496654a4d8`: CI `30156460437`, Clippy Matrix `30156460410`, and Release Build `30156460404` pass; all 29 check runs report zero annotations. Retained first-party workflows use `actions/checkout@v7`, `actions/cache@v6`, `actions/upload-artifact@v7`, and `actions/download-artifact@v8`. Verified SHA-256 values include x86_64 server bundle `b9748c28be49f2621c3a5b67d19912710c69165b40b64a4f505f722c4ebba206`, ARM64 server bundle `31a966a6ce42be3adbb8e31d8f5bb9c16100a5d23be9b2dd8f6177f79cf2c727`, Linux binary `b2c93bb33970c4b61e285d635cc5e20a7dd027ff96f3eef9799b788d36f3af2c`, and signed Windows MSI `a6b7c4cca7aec9ea56175997b9f9c76b5e2ba8cc784061f62aa031a873d17d5c`.
@@ -592,7 +592,7 @@ Current Obfuscation-Modes - Matrix & Tuning (on = enabled, off = disabled, value
 Notes:
 - Active probing detection is enabled in Stealth, Anti-DPI, and Intelligent; Performance keeps overhead minimal with the detector disabled and no H3 cover-request scheduler. Intelligent starts like Performance at Level 0 and can escalate toward Stealth/Anti-DPI features on probe signals.
 - `sec-ch-ua*` hints are emitted only for Chromium family (Chrome/Edge); Firefox and Safari typically omit them.
-- `StealthManager` owns all preset baselines and the concrete Intelligent-mode runtime policy derivation for pacing, timing, padding, mimic bias, granularity, and CC profile. `StealthBrain` still adapts transport ACK policy globally, but its Intelligent-mode stealth steering now flows through a narrow runtime-policy delta instead of embedding raw per-actuator mapping logic inline.
+- `StealthManager` owns all preset baselines and the concrete Intelligent-mode runtime policy derivation for pacing, timing, padding, mimic bias, granularity, and CC profile. `StealthBrain` adapts transport ACK policy per connection, and its Intelligent-mode stealth steering flows through a narrow runtime-policy delta instead of embedding raw per-actuator mapping logic inline.
 - * TLS Cover provider is enabled by default across modes and can be disabled with `QUICFUSCATE_TLS_COVER=0`. Runtime cover performance mode is now driven by the active stealth mode profile rather than relying on ENV-only shadow state. `StealthConfig.use_tls_cover` (TOML alias: `use_tls_cover_extras`) only controls TLS Cover extras (ticket manager and cert emulator).
 - Risk/Tradeoff: domain fronting behavior depends on current upstream provider policy and regional filtering rules. It is not a safe default cover signal on modern CDNs.
 - Core H3/MASQUE is the production VPN/TUN carrier. The compatibility MASQUE manager inside `stealth/` is not the canonical data-plane owner.
@@ -683,7 +683,7 @@ The StealthBrain module (`src/brain.rs`) implements sophisticated ACK policy opt
 Runtime wiring is cohesive rather than feature-isolated:
 
 - `StealthManager` enforces mode/profile policy on stealth actuators, remains authoritative for non-Intelligent preset baselines, and derives the concrete Intelligent-mode runtime policy targets.
-- `StealthBrain` is attached via `CombinedObserver` and continuously translates transport signals into ACK/FEC hints plus an Intelligent-mode-only `StealthRuntimeDelta`.
+- `StealthBrain` is attached via `CombinedObserver` and continuously translates one connection's transport signals into connection-local ACK/FEC hints plus an Intelligent-mode-only `StealthRuntimeDelta`.
 - `Connection::apply_brain_stealth_runtime_delta(...)` centrally applies that delta instead of receiving several scattered setter calls from the Brain observer.
 - `DeepIntegrationOrchestrator` (feature `orchestrator`) contributes cross-signal heuristics for escalation and cover-traffic coordination.
 - Profile-derived `stealth_mode`/`fec_mode` preferences are replayed through the same runtime mutation surface used by live intelligent control.
@@ -703,9 +703,12 @@ Runtime wiring is cohesive rather than feature-isolated:
 - `jitter_max_us` default: 5000 us (raised from 1500; 1500 was too small to meaningfully randomize timing against a modern DPI system).
 - Level-hint passthrough: Brain computes an `effective_level` (0/1/2) via hysteresis and passes it as `level_hint` to `derive_intelligent_runtime_policy`, enabling level-dependent padding and server-push decisions.
 - Runtime overrides: `StealthManager` exposes `runtime_padding_rate`, `runtime_timing_rate`, and retained `runtime_rotation_rate` atomics. Padding and timing are set by `escalate_to_level(n)` (0=0%, 1=50% configurable padding and 0% timing, 2=100% padding and timing), then flow through `StealthRuntimePolicy` -> `StealthRuntimeDelta` -> connection config and are consumed by `compute_stealth_padding()` and `transport_stealth_jitter_delay()`. `runtime_rotation_rate` is intentionally kept at 0 for active sessions; fingerprint/persona rotation is next-session only.
-- Gradual escalation (TODO-416): Probe detection uses `EscalationState` with a sliding-window probe counter. Escalation 0→1 requires ≥3 probes in 60s; 1→2 requires ≥8 probes in 120s. A single probe does NOT trigger escalation. De-escalation occurs after a configurable quiet period (default: 300s). Config knobs: `QUICFUSCATE_STEALTH_ESCALATION_PROBE_THRESHOLD_L1` (default 3), `QUICFUSCATE_STEALTH_ESCALATION_PROBE_THRESHOLD_L2` (default 8), `QUICFUSCATE_STEALTH_DEESCALATION_QUIET_PERIOD_SEC` (default 300), `QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1` (default 50).
+- Gradual escalation (TODO-416): Probe detection uses `EscalationState` with a sliding-window probe counter. Escalation 0→1 requires ≥3 probes in 60s; 1→2 requires ≥8 probes in 120s. A single probe does NOT trigger escalation. De-escalation drops at most one level per configurable quiet period (default: 300s), measured from the latest probe or level change. Config knobs: `QUICFUSCATE_STEALTH_ESCALATION_PROBE_THRESHOLD_L1` (default 3), `QUICFUSCATE_STEALTH_ESCALATION_PROBE_THRESHOLD_L2` (default 8), `QUICFUSCATE_STEALTH_DEESCALATION_QUIET_PERIOD_SEC` (default 300), `QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1` (default 50).
 - Explicit transport overrides win over Brain steering. If an operator sets ACK, pacing, jitter, padding, granularity, or mimic-bias overrides, the corresponding Intelligent-mode Brain actuator is locked out for that connection instead of silently re-overriding the operator choice at runtime.
-- FEC hints: updates the internal FEC interval and redundancy hint atomics to steer encoder cadence without hard coupling.
+- FEC hints: updates the connection-local `BrainFecHints` state consumed by that connection's `FecTransportObserver`; no FEC policy crosses connection boundaries.
+- ACK batches: `on_ack` aggregates a coherent sum/count batch under a short mutex and applies the batch mean to both ACK-delay EWMAs, so callbacks between policy ticks are not dropped.
+- Reorder pressure: lifetime counters remain telemetry, while policy uses exponentially decayed recent counters with a 30-second half-life.
+- Configuration: `StealthBrainConfig::try_from_env` validates interdependent bounds such as ACK ordering and padding ordering; `from_env` falls back to defaults and logs on invalid effective configuration.
 - Cooldowns: changes respect `policy_cooldown_ms`; exploration bounded by `explore_prob` and current CE ratio.
 
 #### Brain Configuration
@@ -761,14 +764,12 @@ if orchestrator.should_trigger_server_push() {
 - Integrates with FEC hints for coordinated redundancy
 - Resource gating: avoids cover bursts when CPU/memory are under pressure
 
-#### Global Hints System
-The StealthBrain module retains a small internal atomic hint surface for cross-module coordination where lock-free reads are still useful:
+#### Connection-local Runtime Hints
+The StealthBrain module keeps runtime hints scoped to the owning connection:
 
-- **FEC_INTERVAL_HINT_PKTS**: Internal streaming FEC interval hint in packets
-- **FEC_REDUNDANCY_PPM**: Internal parts-per-million redundancy hint for FEC encoder cadence
-- **INTELLIGENT_STEALTH_LEVEL_HINT**: Internal Intelligent-mode escalation level consumed by Stealth runtime logic
-
-Timing jitter is no longer published through a separate global hint. The Brain now delivers timing updates only through the `StealthRuntimeDelta`, and the live connection uses its own updated runtime timing configuration directly.
+- **`BrainFecHints`**: streaming interval and redundancy hints shared only with that connection's `FecTransportObserver`.
+- **`IntelligentLevelHints`**: separate Brain-pressure and probe-threshold levels; consumers use their maximum so one source cannot erase the other.
+- Timing jitter is delivered only through `StealthRuntimeDelta`, and the live connection applies its own updated runtime timing configuration directly.
 
 #### Combined Observer Pattern
 The module implements a multi-observer pattern for aggregating telemetry from multiple sources:
@@ -4240,7 +4241,7 @@ These checks are deterministic, offline, and fast, designed to integrate into an
 
 ## Global Atomic State Audit
 
-The codebase uses 120 global `AtomicU64`/`AtomicU32`/`AtomicBool`/`AtomicUsize`/`AtomicI64`/`AtomicU8` instances across modules, plus 156 `SafeGauge(AtomicI64)` and `Counter(AtomicU64)` newtype-wrapped atomics in `src/optimize/telemetry.rs` (377 total global atomic-backed state surfaces). The wrapped counters are the preferred pattern for new metrics: they encapsulate the atomic and provide a type-safe `inc()`/`read()` interface. This section documents the rationale, ownership, and future direction of the raw atomics; the wrapped counters are all read-only metrics and are covered by the same coupling analysis.
+The codebase uses 117 scalar global `AtomicU64`/`AtomicU32`/`AtomicBool`/`AtomicUsize`/`AtomicI64`/`AtomicU8` instances across modules, plus 270 `SafeGauge(AtomicI64)` and `Counter(AtomicU64)` newtype-wrapped statics in `src/optimize/telemetry.rs` (387 total global atomic-backed state surfaces). The wrapped counters are the preferred pattern for new metrics: they encapsulate the atomic and provide a type-safe `inc()`/`read()` interface. This section documents the rationale, ownership, and future direction of the raw atomics; the wrapped counters are all read-only metrics and are covered by the same coupling analysis.
 
 ### Why Global Atomics
 
@@ -4251,7 +4252,7 @@ Global atomics provide lock-free, zero-overhead cross-module coordination for a 
 | Module | Count | Category | Purpose |
 |---|---|---|---|
 | `src/optimize/telemetry.rs` | 101 | Metrics/Counters + Runtime config | 95 telemetry counters (H3, stealth, FEC, SIMD, memory pool, io_uring, CPU features, I/O driver) + 6 runtime config gates (`COLLECT_PACKET_STATS`, `COLLECT_STREAM_STATS`, `COLLECT_CONGESTION_STATS`, `COLLECT_FEC_STATS`, `COLLECT_STEALTH_STATS`, `TELEMETRY_ENABLED`). Read-only observation surface for dashboards and diagnostics, plus collection on/off gates. |
-| `src/brain.rs` | 3 | Hint channels | Cross-subsystem coordination hints wrapped in a `HintChannel<A>` newtype with an explicit writer/reader contract at the declaration site (TODO-517): `FEC_INTERVAL_HINT_PKTS`, `FEC_REDUNDANCY_PPM`, `INTELLIGENT_STEALTH_LEVEL_HINT`. Written by StealthBrain/EscalationState and read by FEC/stealth runtime coordination paths via `.load()`/`.store()` (lock-free `Relaxed`). |
+| `src/brain.rs` | 0 | Connection-local hints | `BrainFecHints` and `IntelligentLevelHints` are owned by one connection and passed explicitly to its FEC observer and stealth manager. They are not process-global atomic statics. |
 | `src/optimize/` | 5 | Runtime config | `RR_NODE` (NUMA round-robin), `NUMA_NODES` (node count), `PROFILE_OVERRIDE` (profile override), `TLS_LIMIT_RUNTIME` (TLS limit), `LOCK_BLOCKS` (mlock gate for MemoryPool blocks, TODO-516). Hardware-adaptive runtime state. |
 | `src/transport/batch.rs` | 3 | Metrics | Batch send/recv/packet counters for transport telemetry. |
 | `src/crypto/` | 2 | Runtime config | `DATA_AEAD_OVERRIDE_MODE` (AEAD selection), `ARM_AES_OK` (ARM AES capability cache). |
@@ -4261,18 +4262,18 @@ Global atomics provide lock-free, zero-overhead cross-module coordination for a 
 | `src/rng.rs` | 1 | Test gate | `TEST_FORCE_SECURE_ENTROPY_FAILURE` - test-only entropy failure injection. |
 | `src/main.rs` | 1 | Sequencing | `NEXT_ID` - connection ID generator. |
 
-**Total: 120 atomic statics** (recounted 2026-07-07, TODO-518). Previous count of 116 had drifted due to 6 uncounted telemetry config gates, an overcount in `optimize/`, and a missing `MAX_EARLY_DATA_SIZE` in `qftls.rs`.
+**Total: 117 scalar atomic statics** (recounted 2026-08-01 after TODO-584). The previous 120-count included three process-global brain hint channels that are now connection-local. The telemetry array `FEC_ACTIVE_CONNECTIONS_BY_MODE` remains an atomic-backed static but is not included in the scalar declaration count.
 
 ### Trade-offs
 
 **Performance benefit**: Zero-cost reads on hot paths. No lock contention. No allocation. Compiler can optimize `Relaxed` loads into single instructions.
 
-**Coupling cost**: Implicit data flow between subsystems. A writer in `src/brain.rs` affects behavior in `src/fec/` without an explicit interface contract. The 3 brain.rs hint channels now carry an explicit writer/reader contract at the declaration site (TODO-517), so they no longer require grep to trace; the remaining globals still do. Testing individual modules in isolation requires awareness of global state.
+**Coupling cost**: Implicit data flow between subsystems. The former brain-to-FEC and brain-to-stealth process-global channels have been replaced by explicit connection-owned `BrainFecHints` and `IntelligentLevelHints` (TODO-584). The remaining globals still require ownership-aware tracing, and testing individual modules in isolation requires awareness of global state.
 
 ### Future Direction
 
-- **Metrics/counters (98 of 120)**: These are read-only observation surfaces (95 in `telemetry.rs` + 3 in `transport/batch.rs`) and are appropriate as globals. No change planned.
-- **Hint channels (3 in brain.rs)**: DONE (TODO-517). The 3 brain.rs hint atomics (`FEC_INTERVAL_HINT_PKTS`, `FEC_REDUNDANCY_PPM`, `INTELLIGENT_STEALTH_LEVEL_HINT`) are now wrapped in a `HintChannel<A: HintAtomic>` newtype with an explicit writer/reader contract string at the declaration site. Call sites use `.load()`/`.store()`; the raw `Ordering::Relaxed` is encapsulated inside the primitive and compiles to the same single instruction after inlining.
+- **Metrics/counters (98 of 117 raw statics, plus 270 wrapped telemetry statics)**: These are read-only observation surfaces (95 in `telemetry.rs` + 3 in `transport/batch.rs`) and are appropriate as globals. No change planned.
+- **Connection-local brain hints (0 global statics)**: DONE (TODO-584). `BrainFecHints` carries FEC interval and redundancy policy to the matching observer, while `IntelligentLevelHints` combines independent Brain-pressure and probe-threshold levels inside one connection. No process-global brain actuator remains.
 - **Runtime config (15 across telemetry.rs, optimize/, crypto/, qftls.rs)**: 6 telemetry collection gates + 5 optimize/ hardware-adaptive + 2 crypto/ AEAD/AES + 2 qftls/ TLS gates. Could migrate to a shared `RuntimeConfig` struct passed through the call chain, but current usage is stable and well-bounded.
 - **Sequencing (2 in fec/, main.rs)**: Standard pattern for ID generation. No change needed.
 - **Round-robin (1 in stealth/)**: Standard pattern for DoH provider rotation. No change needed.

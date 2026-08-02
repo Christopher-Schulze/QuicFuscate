@@ -3,14 +3,12 @@
 #[cfg(any(test, feature = "rust-tests", feature = "orchestrator"))]
 use log::info;
 use log::trace;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::collections::VecDeque;
 #[cfg(any(test, feature = "rust-tests", feature = "orchestrator"))]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-#[cfg(any(test, feature = "rust-tests", feature = "orchestrator"))]
-use std::sync::Mutex;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use crate::env_utils::env_parse;
@@ -21,125 +19,83 @@ use crate::transport::{Connection, TransportObserver};
 
 const PACKET_IAT_SAMPLE_INTERVAL: u64 = 8;
 
-// ===== Global Hints (optional) =================================================
-// Transport can consult these hint channels to adapt FEC and timing without
-// creating hard dependencies on Brain internals. Each channel is a lock-free
-// `Relaxed` atomic with an explicit writer/reader contract captured at the
-// declaration site, so the cross-subsystem data flow is greppable and
-// self-describing instead of implicit.
+// ===== Connection-local runtime hints ========================================
 
-/// Atomic primitive backing a `HintChannel`. Implementors forward to a single
-/// `Relaxed` load/store so the channel stays lock-free and zero-cost after
-/// inlining on hot paths.
-pub(crate) trait HintAtomic: Send + Sync {
-    type Value: Copy + Default;
-    fn load_relaxed(&self) -> Self::Value;
-    fn store_relaxed(&self, v: Self::Value);
+/// FEC hints owned by one Brain/FEC observer pair.
+pub(crate) struct BrainFecHints {
+    interval_pkts: AtomicU64,
+    redundancy_ppm: AtomicU32,
 }
 
-impl HintAtomic for AtomicU64 {
-    type Value = u64;
-    #[inline(always)]
-    fn load_relaxed(&self) -> u64 {
-        self.load(Ordering::Relaxed)
+impl BrainFecHints {
+    fn new() -> Self {
+        Self { interval_pkts: AtomicU64::new(8), redundancy_ppm: AtomicU32::new(100_000) }
     }
-    #[inline(always)]
-    fn store_relaxed(&self, v: u64) {
-        self.store(v, Ordering::Relaxed)
-    }
-}
 
-impl HintAtomic for AtomicU32 {
-    type Value = u32;
     #[inline(always)]
-    fn load_relaxed(&self) -> u32 {
-        self.load(Ordering::Relaxed)
+    pub(crate) fn interval_pkts(&self) -> u64 {
+        self.interval_pkts.load(Ordering::Relaxed)
     }
+
     #[inline(always)]
-    fn store_relaxed(&self, v: u32) {
-        self.store(v, Ordering::Relaxed)
+    pub(crate) fn redundancy_ppm(&self) -> u32 {
+        self.redundancy_ppm.load(Ordering::Relaxed)
+    }
+
+    #[inline(always)]
+    pub(crate) fn set_interval_pkts(&self, value: u64) {
+        self.interval_pkts.store(value, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub(crate) fn set_redundancy_ppm(&self, value: u32) {
+        self.redundancy_ppm.store(value, Ordering::Relaxed);
     }
 }
 
-/// Lock-free single-writer/multi-reader hint channel with an explicit
-/// writer-reader contract. Backed by a `Relaxed` atomic load/store, so reads on
-/// hot paths remain a single instruction after inlining.
+/// Brain and probe escalation levels for one StealthManager connection.
 ///
-/// The `name` and `contract` strings make the implicit cross-subsystem data
-/// flow self-describing at the declaration site: a reader seeing
-/// `FEC_INTERVAL_HINT_PKTS.load()` in `src/fec/mod.rs` can jump straight to the
-/// declaration in `src/brain.rs` to learn the units, sentinel, writers, and
-/// readers without a codebase grep.
-pub(crate) struct HintChannel<A: HintAtomic> {
-    atomic: A,
-    // `name`/`contract` are diagnostic metadata that make the cross-subsystem
-    // writer/reader relationship self-describing at the declaration site. They
-    // are consumed by the `hint_channel_tests` gate and are available for
-    // future telemetry; they carry no runtime cost on the load/store hot path.
-    #[allow(dead_code)]
-    name: &'static str,
-    #[allow(dead_code)]
-    contract: &'static str,
+/// The two levels remain separate so a pressure decision cannot erase a
+/// probe-threshold decision, and a quiet probe window cannot erase an active
+/// Brain pressure decision. Consumers use the maximum of both levels.
+pub(crate) struct IntelligentLevelHints {
+    brain_level: AtomicU32,
+    probe_level: AtomicU32,
 }
 
-impl<A: HintAtomic> HintChannel<A> {
-    /// Construct a named, documented hint channel. `const`-evaluable so it can
-    /// back a `static` declaration; the body only moves fields, it never calls
-    /// trait methods.
-    pub(crate) const fn new(atomic: A, name: &'static str, contract: &'static str) -> Self {
-        Self { atomic, name, contract }
+impl IntelligentLevelHints {
+    pub(crate) fn new() -> Self {
+        Self { brain_level: AtomicU32::new(0), probe_level: AtomicU32::new(0) }
     }
-    /// Read the current hint value (`Relaxed`).
+
     #[inline(always)]
-    pub(crate) fn load(&self) -> A::Value {
-        self.atomic.load_relaxed()
+    fn set_brain_level(&self, level: u8) {
+        self.brain_level.store(level.min(2) as u32, Ordering::Relaxed);
     }
-    /// Publish a new hint value (`Relaxed`).
-    #[inline(always)]
-    pub(crate) fn store(&self, v: A::Value) {
-        self.atomic.store_relaxed(v)
+
+    #[cfg(any(test, feature = "rust-tests"))]
+    pub(crate) fn set_brain_level_for_test(&self, level: u8) {
+        self.set_brain_level(level);
     }
-    /// Channel name, for diagnostics and grep-traceability.
+
     #[inline(always)]
-    #[allow(dead_code)]
-    pub(crate) fn name(&self) -> &'static str {
-        self.name
+    pub(crate) fn set_probe_level(&self, level: u8) {
+        self.probe_level.store(level.min(2) as u32, Ordering::Relaxed);
     }
-    /// Human-readable writer/reader contract.
+
     #[inline(always)]
-    #[allow(dead_code)]
-    pub(crate) fn contract(&self) -> &'static str {
-        self.contract
+    pub(crate) fn probe_level(&self) -> u8 {
+        self.probe_level.load(Ordering::Relaxed).min(2) as u8
+    }
+
+    #[inline(always)]
+    pub(crate) fn effective_level(&self) -> u32 {
+        self.brain_level
+            .load(Ordering::Relaxed)
+            .max(self.probe_level.load(Ordering::Relaxed))
+            .min(2)
     }
 }
-
-/// Brain-suggested FEC send interval in packets (0 = no hint).
-/// Writers: `StealthBrain::new` (default 8), `emit_probe_if_due` (varies ±1),
-/// `apply_policy` actuators. Readers: `FecTransportObserver::compute_interval`
-/// blending in `fec/mod.rs`, `emit_probe_if_due` read-back.
-pub(crate) static FEC_INTERVAL_HINT_PKTS: HintChannel<AtomicU64> = HintChannel::new(
-    AtomicU64::new(0),
-    "FEC_INTERVAL_HINT_PKTS",
-    "FEC send interval in packets; 0 = no hint. Writer: StealthBrain. Reader: fec/mod.rs interval blending.",
-);
-/// Brain-suggested FEC redundancy in parts-per-million (0 = no hint).
-/// Writers: `StealthBrain::new` (default 100_000), `apply_policy` actuators.
-/// Reader: `FecTransportObserver::sync_runtime_hints` in `fec/mod.rs`.
-pub(crate) static FEC_REDUNDANCY_PPM: HintChannel<AtomicU32> = HintChannel::new(
-    AtomicU32::new(0),
-    "FEC_REDUNDANCY_PPM",
-    "FEC redundancy in parts-per-million; 0 = no hint. Writer: StealthBrain. Reader: fec/mod.rs sync_runtime_hints.",
-);
-/// Intelligent stealth escalation level: 0 = performance, 1 = stealth, 2 = anti-dpi.
-/// Writers: `StealthBrain::apply_policy` (effective_level), `EscalationState`
-/// escalation/de-escalation in `stealth/mod.rs`. Readers:
-/// `intelligent_stealth_level_hint()` accessor → `StealthManager::intelligent_runtime_level`
-/// + `sync_intelligent_level`.
-pub(crate) static INTELLIGENT_STEALTH_LEVEL_HINT: HintChannel<AtomicU32> = HintChannel::new(
-    AtomicU32::new(0),
-    "INTELLIGENT_STEALTH_LEVEL_HINT",
-    "Intelligent stealth level 0/1/2; 0 = performance baseline. Writers: StealthBrain + EscalationState. Readers: intelligent_stealth_level_hint() accessor.",
-);
 
 /// Thin aggregator that forwards `TransportObserver` calls to multiple observers.
 pub(crate) struct CombinedObserver {
@@ -174,19 +130,6 @@ impl crate::transport::TransportObserver for CombinedObserver {
             o.apply_policy(conn);
         }
     }
-}
-
-/// Returns Intelligent mode level hint: 0=performance baseline, 1=stealth, 2=anti-dpi.
-pub(crate) fn intelligent_stealth_level_hint() -> u32 {
-    INTELLIGENT_STEALTH_LEVEL_HINT.load()
-}
-
-/// Resets all global brain hint channels to zero (test-only).
-#[cfg(test)]
-pub(crate) fn clear_runtime_hints_for_test() {
-    FEC_INTERVAL_HINT_PKTS.store(0);
-    FEC_REDUNDANCY_PPM.store(0);
-    INTELLIGENT_STEALTH_LEVEL_HINT.store(0);
 }
 
 #[inline]
@@ -246,6 +189,19 @@ impl Default for StealthBrainConfig {
 impl StealthBrainConfig {
     /// Constructs a config by reading environment variable overrides on top of defaults.
     pub fn from_env() -> Self {
+        match Self::try_from_env() {
+            Ok(cfg) => cfg,
+            Err(error) => {
+                log::warn!(
+                    "Invalid StealthBrain environment configuration: {error}; using defaults"
+                );
+                Self::default()
+            }
+        }
+    }
+
+    /// Constructs and validates a config from environment variable overrides.
+    pub fn try_from_env() -> Result<Self, String> {
         let mut cfg = Self::default();
         if let Some(v) = env_parse("QUICFUSCATE_BRAIN_ACK_MAX") {
             cfg.ack_max = v;
@@ -278,9 +234,51 @@ impl StealthBrainConfig {
             cfg.pad_max_low = v.clamp(16, 512);
         }
         if let Some(v) = env_parse::<usize>("QUICFUSCATE_BRAIN_PAD_MAX_HIGH") {
-            cfg.pad_max_high = v.max(cfg.pad_max_low).min(2048);
+            cfg.pad_max_high = v.min(2048);
         }
-        cfg
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// Validates constraints that span multiple brain configuration fields.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.ack_min == 0 {
+            return Err("ack_min must be greater than zero".to_string());
+        }
+        if self.ack_min > self.ack_max {
+            return Err(format!(
+                "ack_min ({}) must not exceed ack_max ({})",
+                self.ack_min, self.ack_max
+            ));
+        }
+        if self.ack_max > i64::MAX as u64 {
+            return Err("ack_max exceeds the supported signed threshold range".to_string());
+        }
+        if !(1..=64).contains(&self.size_bins) || !(1..=64).contains(&self.iat_bins) {
+            return Err("histogram bin counts must be between 1 and 64".to_string());
+        }
+        if self.probe_max_per_min > 30 {
+            return Err("probe_max_per_min must not exceed 30".to_string());
+        }
+        if !self.explore_prob.is_finite() || !(0.0..=0.25).contains(&self.explore_prob) {
+            return Err("explore_prob must be finite and between 0.0 and 0.25".to_string());
+        }
+        if !self.hist_decay.is_finite() || !(0.80..=0.999).contains(&self.hist_decay) {
+            return Err("hist_decay must be finite and between 0.80 and 0.999".to_string());
+        }
+        if self.pad_max_low > 512 {
+            return Err("pad_max_low must not exceed 512".to_string());
+        }
+        if self.pad_max_high < self.pad_max_low {
+            return Err(format!(
+                "pad_max_high ({}) must not be lower than pad_max_low ({})",
+                self.pad_max_high, self.pad_max_low
+            ));
+        }
+        if self.pad_max_high > 2048 {
+            return Err("pad_max_high must not exceed 2048".to_string());
+        }
+        Ok(())
     }
 }
 
@@ -311,6 +309,12 @@ impl Hist {
     }
 }
 
+#[derive(Default)]
+struct PendingAckSamples {
+    sum_us: u128,
+    count: u64,
+}
+
 #[inline]
 fn decay_histogram_and_divergence(hist: &mut Hist, target: &[f64], decay: f64) -> f64 {
     let bins = hist.bins.make_contiguous();
@@ -326,6 +330,7 @@ struct StealthBrainState {
     // EWMAs
     ack_delay_ewma_us: f64,
     rtt_jitter_ewma_us: f64,
+    ack_delay_sample_count: u64,
     // ECN counters (since last snapshot)
     ect0: u64,
     ect1: u64,
@@ -373,6 +378,9 @@ struct StealthBrainState {
     max_pn_seen: u64,
     reorder_count: u64,
     pkt_count: u64,
+    reorder_recent_count: f64,
+    reorder_recent_packets: f64,
+    reorder_window_updated_at: Instant,
     // Throughput trend
     last_delivery_rate: u64,
     // ACK bandit (epsilon-greedy) over discrete arms
@@ -423,6 +431,7 @@ impl StealthBrainState {
             last_fec_update: crate::time_source::now_instant(),
             ack_delay_ewma_us: 0.0,
             rtt_jitter_ewma_us: 0.0,
+            ack_delay_sample_count: 0,
             ect0: 0,
             ect1: 0,
             ce: 0,
@@ -454,6 +463,9 @@ impl StealthBrainState {
             max_pn_seen: 0,
             reorder_count: 0,
             pkt_count: 0,
+            reorder_recent_count: 0.0,
+            reorder_recent_packets: 0.0,
+            reorder_window_updated_at: crate::time_source::now_instant(),
             last_delivery_rate: 0,
             bandit_counts: [0; 4],
             bandit_avg_reward: [0.0; 4],
@@ -528,6 +540,7 @@ fn dominant_transition_reason(
     best.1
 }
 
+#[cfg(test)]
 fn apply_intelligent_level_hysteresis(
     previous_level: u8,
     target_level: u8,
@@ -536,6 +549,31 @@ fn apply_intelligent_level_hysteresis(
     loss_pressure: f32,
     elapsed: Duration,
 ) -> u8 {
+    apply_intelligent_level_hysteresis_with_probe_floor(
+        previous_level,
+        target_level,
+        composite_pressure,
+        probe_pressure,
+        loss_pressure,
+        elapsed,
+        0,
+    )
+}
+
+fn apply_intelligent_level_hysteresis_with_probe_floor(
+    previous_level: u8,
+    target_level: u8,
+    composite_pressure: f32,
+    probe_pressure: f32,
+    loss_pressure: f32,
+    elapsed: Duration,
+    probe_level: u8,
+) -> u8 {
+    let probe_level = probe_level.min(2);
+    if probe_level > previous_level {
+        return probe_level;
+    }
+    let target_level = target_level.max(probe_level);
     if (target_level > previous_level
         && elapsed >= Duration::from_millis(600)
         && (composite_pressure >= 0.42 || probe_pressure > 0.0))
@@ -568,19 +606,17 @@ fn should_trigger_server_push_internal(
     let loss_rate = loss_rate_permille as f32 / 1000.0;
     let bw_mbps = bandwidth_bps as f32 / 1_000_000.0;
     let high_loss = loss_rate > 0.05;
-    let time_based = if let Ok(last_trigger) = last_trigger.lock() {
+    let time_based = {
+        let last_trigger = last_trigger.lock();
         elapsed_since(*last_trigger) > Duration::from_secs(30)
-    } else {
-        false
     };
     let cpu_ok = cpu_usage_percent < 85;
     let mem_ok = memory_pressure < 85;
     let bw_ok = bw_mbps > 5.0 || high_loss;
     let should_trigger = (high_loss || (stealth_active && time_based)) && cpu_ok && mem_ok && bw_ok;
     if should_trigger {
-        if let Ok(mut last_trigger) = last_trigger.lock() {
-            *last_trigger = crate::time_source::now_instant();
-        }
+        let mut last_trigger = last_trigger.lock();
+        *last_trigger = crate::time_source::now_instant();
     }
     should_trigger
 }
@@ -603,9 +639,11 @@ fn server_push_intensity_internal(loss_rate_permille: u32, bandwidth_bps: u64) -
 pub struct StealthBrain {
     cfg: StealthBrainConfig,
     st: RwLock<StealthBrainState>,
+    fec_hints: Arc<BrainFecHints>,
+    level_hints: Arc<IntelligentLevelHints>,
     // Lock-free buffers for observer callbacks - drained in apply_policy's single write lock.
     pending_ecn: AtomicU64, // packed: ect0 in bits 48..64, ect1 in bits 32..48, ce in bits 0..32
-    pending_ack_delay: AtomicU64, // ack_delay in microseconds
+    pending_ack: Mutex<PendingAckSamples>,
     pending_packet_count: AtomicU64,
     pending_reorder_count: AtomicU64,
     pending_max_pn: AtomicU64,
@@ -630,16 +668,34 @@ pub struct StealthBrain {
 }
 
 impl StealthBrain {
-    /// Creates a new brain instance with the given config, seeding global FEC hints.
+    /// Creates a new brain instance with connection-local runtime state.
     pub fn new(cfg: StealthBrainConfig) -> Arc<Self> {
+        Self::new_with_level_hints(cfg, Arc::new(IntelligentLevelHints::new()))
+    }
+
+    /// Creates a brain attached to the level state owned by one StealthManager.
+    pub(crate) fn new_with_level_hints(
+        cfg: StealthBrainConfig,
+        level_hints: Arc<IntelligentLevelHints>,
+    ) -> Arc<Self> {
+        let cfg = match cfg.validate() {
+            Ok(()) => cfg,
+            Err(error) => {
+                log::warn!("Invalid StealthBrain configuration: {error}; using defaults");
+                StealthBrainConfig::default()
+            }
+        };
         let packet_time_base = crate::time_source::now_instant();
         let size_bins = cfg.size_bins.max(1);
         let iat_bins = cfg.iat_bins.max(1);
-        let brain = Arc::new(Self {
+        let fec_hints = Arc::new(BrainFecHints::new());
+        Arc::new(Self {
             st: RwLock::new(StealthBrainState::new(&cfg)),
             cfg,
+            fec_hints,
+            level_hints,
             pending_ecn: AtomicU64::new(0),
-            pending_ack_delay: AtomicU64::new(0),
+            pending_ack: Mutex::new(PendingAckSamples::default()),
             pending_packet_count: AtomicU64::new(0),
             pending_reorder_count: AtomicU64::new(0),
             pending_max_pn: AtomicU64::new(0),
@@ -660,16 +716,13 @@ impl StealthBrain {
             memory_pressure: AtomicU32::new(0),
             #[cfg(any(test, feature = "rust-tests"))]
             bandwidth_bps: AtomicU64::new(0),
-        });
-        FEC_INTERVAL_HINT_PKTS.store(8);
-        FEC_REDUNDANCY_PPM.store(100_000);
-        brain
-    }
-    /// Creates a brain with environment-derived defaults.
-    pub(crate) fn new_default() -> Arc<Self> {
-        Self::new(StealthBrainConfig::from_env())
+        })
     }
 
+    /// Returns the FEC hint state for this connection's observer.
+    pub(crate) fn fec_hints(&self) -> Arc<BrainFecHints> {
+        Arc::clone(&self.fec_hints)
+    }
     fn bin_index(val: usize, max_val: usize, bins: usize) -> usize {
         if bins == 0 {
             return 0;
@@ -763,10 +816,10 @@ impl StealthBrain {
         }
         // Side-effect free in MVP: only adjust hints, no active packet crafting here.
         // We vary the FEC interval hint slightly to observe CE/Drops reaction.
-        let hint = FEC_INTERVAL_HINT_PKTS.load();
+        let hint = self.fec_hints.interval_pkts();
         let varied =
             if hint > 0 { (hint as i64 + 1 - ((hint & 1) as i64 * 2)).max(1) as u64 } else { 8 };
-        FEC_INTERVAL_HINT_PKTS.store(varied);
+        self.fec_hints.set_interval_pkts(varied);
         st.probe_tokens -= 1;
         st.last_policy_change = crate::time_source::now_instant();
         trace!("brain: emitted probe; fec_interval_hint={} pkts", varied);
@@ -775,8 +828,12 @@ impl StealthBrain {
 
 impl TransportObserver for StealthBrain {
     fn on_ack(&self, ack_delay: u64, _ranges: &[(u64, u64)]) {
-        // Lock-free: buffer ack_delay for apply_policy to drain in its single write lock.
-        self.pending_ack_delay.store(ack_delay, Ordering::Relaxed);
+        // Aggregate every callback until apply_policy drains the batch. A mutex
+        // keeps the sum/count snapshot coherent without losing samples between
+        // two atomic swaps.
+        let mut pending = self.pending_ack.lock();
+        pending.sum_us = pending.sum_us.saturating_add(ack_delay as u128);
+        pending.count = pending.count.saturating_add(1);
     }
 
     fn on_packet_recv(&self, pn: u64, len: usize) {
@@ -823,30 +880,44 @@ impl TransportObserver for StealthBrain {
 
             Self::drain_pending_histogram(&self.pending_size_bins, &mut st.size);
             Self::drain_pending_histogram(&self.pending_iat_bins, &mut st.iat);
-            st.pkt_count =
-                st.pkt_count.saturating_add(self.pending_packet_count.swap(0, Ordering::Relaxed));
-            st.reorder_count = st
-                .reorder_count
-                .saturating_add(self.pending_reorder_count.swap(0, Ordering::Relaxed));
+            let pending_packet_count = self.pending_packet_count.swap(0, Ordering::Relaxed);
+            let pending_reorder_count = self.pending_reorder_count.swap(0, Ordering::Relaxed);
+            st.pkt_count = st.pkt_count.saturating_add(pending_packet_count);
+            st.reorder_count = st.reorder_count.saturating_add(pending_reorder_count);
             st.max_pn_seen = st.max_pn_seen.max(self.pending_max_pn.load(Ordering::Relaxed));
 
-            // Drain lock-free pending ack_delay (buffered by on_ack).
-            let ack_delay_raw = self.pending_ack_delay.swap(0, Ordering::Relaxed);
-            if ack_delay_raw > 0 {
-                let s = ack_delay_raw as f64;
+            let now = crate::time_source::now_instant();
+            let elapsed =
+                now.checked_duration_since(st.reorder_window_updated_at).unwrap_or_default();
+            let half_life_secs = 30.0;
+            let decay = 0.5f64.powf(elapsed.as_secs_f64() / half_life_secs);
+            st.reorder_recent_packets *= decay;
+            st.reorder_recent_count *= decay;
+            st.reorder_recent_packets += pending_packet_count as f64;
+            st.reorder_recent_count += pending_reorder_count as f64;
+            st.reorder_window_updated_at = now;
+
+            let pending_ack = {
+                let mut pending = self.pending_ack.lock();
+                std::mem::take(&mut *pending)
+            };
+            if pending_ack.count > 0 {
+                let s = pending_ack.sum_us as f64 / pending_ack.count as f64;
                 let a_short = 0.3;
                 let a_long = 0.1;
-                if st.ack_delay_ewma_us == 0.0 {
+                if st.ack_delay_sample_count == 0 {
                     st.ack_delay_ewma_us = s;
                 } else {
                     st.ack_delay_ewma_us = a_short * s + (1.0 - a_short) * st.ack_delay_ewma_us;
                 }
-                if st.ack_delay_long_ewma_us == 0.0 {
+                if st.ack_delay_sample_count == 0 {
                     st.ack_delay_long_ewma_us = s;
                 } else {
                     st.ack_delay_long_ewma_us =
                         a_long * s + (1.0 - a_long) * st.ack_delay_long_ewma_us;
                 }
+                st.ack_delay_sample_count =
+                    st.ack_delay_sample_count.saturating_add(pending_ack.count);
                 let diff = (st.ack_delay_ewma_us - st.ack_delay_long_ewma_us).abs();
                 if st.rtt_jitter_ewma_us == 0.0 {
                     st.rtt_jitter_ewma_us = diff;
@@ -891,8 +962,8 @@ impl TransportObserver for StealthBrain {
             st.prev_ect1 = st.ect1;
             st.prev_ce = st.ce;
             // Reorder ratio over recent window (approx):
-            let rr = if st.pkt_count > 0 {
-                (st.reorder_count as f64) / (st.pkt_count as f64)
+            let rr = if st.reorder_recent_packets > 0.0 {
+                (st.reorder_recent_count / st.reorder_recent_packets).clamp(0.0, 1.0)
             } else {
                 0.0
             };
@@ -954,7 +1025,6 @@ impl TransportObserver for StealthBrain {
             interval = interval.clamp(2, 20);
             let interval_u64 = interval as u64;
 
-            let now = crate::time_source::now_instant();
             let ppm_changed = (ppm_u64 as i64 - st.last_red_ppm as i64).abs()
                 > ((st.last_red_ppm / 40).max(1500)) as i64;
             let interval_changed = interval_u64 != st.last_fec_interval;
@@ -1023,13 +1093,14 @@ impl TransportObserver for StealthBrain {
             let can_toggle =
                 now.duration_since(st.last_masque_hint_change) > Duration::from_millis(800);
             let elapsed_level = now.duration_since(st.last_intelligent_level_change);
-            let effective_level = apply_intelligent_level_hysteresis(
+            let effective_level = apply_intelligent_level_hysteresis_with_probe_floor(
                 st.last_intelligent_level,
                 target_level,
                 composite_pressure,
                 probe_pressure,
                 loss_pressure,
                 elapsed_level,
+                self.level_hints.probe_level(),
             );
             if effective_level != st.last_intelligent_level {
                 let previous_level = st.last_intelligent_level;
@@ -1049,7 +1120,7 @@ impl TransportObserver for StealthBrain {
                     .observe();
                 }
             }
-            INTELLIGENT_STEALTH_LEVEL_HINT.store(effective_level as u32);
+            self.level_hints.set_brain_level(effective_level);
             if can_toggle && st.last_masque_hint != prefer_masque_brain {
                 st.last_masque_hint = prefer_masque_brain;
                 st.last_masque_hint_change = now;
@@ -1240,10 +1311,10 @@ impl TransportObserver for StealthBrain {
             }
         };
         if let Some(interval) = actuators.fec_hint_interval {
-            FEC_INTERVAL_HINT_PKTS.store(interval);
+            self.fec_hints.set_interval_pkts(interval);
         }
         if let Some(ppm) = actuators.fec_hint_ppm {
-            FEC_REDUNDANCY_PPM.store(ppm);
+            self.fec_hints.set_redundancy_ppm(ppm);
         }
         let ce_scaled = (actuators.ce_ratio_recent * 1000.0).clamp(0.0, 1000.0) as u32;
         self.loss_rate.store(ce_scaled, Ordering::Relaxed);
@@ -1498,6 +1569,42 @@ mod intelligent_hysteresis_tests {
     }
 
     #[test]
+    fn intelligent_hysteresis_honors_probe_threshold_floor() {
+        let threshold_reached = apply_intelligent_level_hysteresis_with_probe_floor(
+            0,
+            0,
+            0.0,
+            0.0,
+            0.0,
+            Duration::ZERO,
+            1,
+        );
+        assert_eq!(threshold_reached, 1);
+
+        let threshold_floor = apply_intelligent_level_hysteresis_with_probe_floor(
+            1,
+            0,
+            0.0,
+            0.0,
+            0.0,
+            Duration::from_secs(10),
+            1,
+        );
+        assert_eq!(threshold_floor, 1);
+
+        let quiet_pressure = apply_intelligent_level_hysteresis_with_probe_floor(
+            1,
+            0,
+            0.0,
+            0.0,
+            0.0,
+            Duration::from_secs(10),
+            0,
+        );
+        assert_eq!(quiet_pressure, 0);
+    }
+
+    #[test]
     fn dominant_reason_tracks_strongest_signal() {
         let reason = dominant_transition_reason(0.20, 0.10, 0.05, 0.30, 0.95);
         assert!(matches!(reason, IntelligentTransitionReason::Probe));
@@ -1525,67 +1632,17 @@ mod intelligent_hysteresis_tests {
         assert_eq!(state.size.total, expected_total);
         assert_eq!(state.size.total, 8);
     }
-}
-
-#[cfg(test)]
-mod hint_channel_tests {
-    use super::HintChannel;
-    use std::sync::atomic::{AtomicU32, AtomicU64};
 
     #[test]
-    fn u64_channel_round_trip_and_zero_default() {
-        let chan: HintChannel<AtomicU64> =
-            HintChannel::new(AtomicU64::new(0), "test_u64", "u64 round-trip contract");
-        // Default is zero (sentinel = no hint).
-        assert_eq!(chan.load(), 0);
-        chan.store(42);
-        assert_eq!(chan.load(), 42);
-        chan.store(0);
-        assert_eq!(chan.load(), 0);
-    }
+    fn brain_config_rejects_interdependent_ranges() {
+        let invalid_ack = StealthBrainConfig { ack_min: 4, ack_max: 2, ..Default::default() };
+        assert!(invalid_ack.validate().is_err());
 
-    #[test]
-    fn u32_channel_round_trip_and_zero_default() {
-        let chan: HintChannel<AtomicU32> =
-            HintChannel::new(AtomicU32::new(0), "test_u32", "u32 round-trip contract");
-        assert_eq!(chan.load(), 0);
-        chan.store(180_000);
-        assert_eq!(chan.load(), 180_000);
-    }
+        let invalid_padding =
+            StealthBrainConfig { pad_max_low: 256, pad_max_high: 128, ..Default::default() };
+        assert!(invalid_padding.validate().is_err());
 
-    #[test]
-    fn contract_metadata_is_greppable() {
-        let chan: HintChannel<AtomicU32> = HintChannel::new(
-            AtomicU32::new(0),
-            "INTELLIGENT_STEALTH_LEVEL_HINT",
-            "Intelligent stealth level 0/1/2; 0 = performance baseline.",
-        );
-        // The name and contract strings make the cross-subsystem data flow
-        // self-describing at the declaration site — a reviewer reading a
-        // `.load()` call in another module can jump to the declaration and
-        // learn the units, sentinel, writers, and readers without grep.
-        assert_eq!(chan.name(), "INTELLIGENT_STEALTH_LEVEL_HINT");
-        assert!(chan.contract().contains("performance baseline"));
-    }
-
-    #[test]
-    fn production_hint_channels_expose_contracts() {
-        // The 3 production hint channels must carry non-empty, descriptive
-        // contracts so the writer/reader relationship is explicit at the
-        // declaration site. This guards against regressions that strip the
-        // documentation when someone reverts to a raw atomic.
-        use super::{FEC_INTERVAL_HINT_PKTS, FEC_REDUNDANCY_PPM, INTELLIGENT_STEALTH_LEVEL_HINT};
-        for (name, contract) in [
-            (FEC_INTERVAL_HINT_PKTS.name(), FEC_INTERVAL_HINT_PKTS.contract()),
-            (FEC_REDUNDANCY_PPM.name(), FEC_REDUNDANCY_PPM.contract()),
-            (INTELLIGENT_STEALTH_LEVEL_HINT.name(), INTELLIGENT_STEALTH_LEVEL_HINT.contract()),
-        ] {
-            assert!(!name.is_empty(), "hint channel name must be non-empty");
-            assert!(
-                contract.contains("Writer") && contract.contains("Reader"),
-                "hint channel {name} contract must name a Writer and a Reader"
-            );
-        }
+        assert!(StealthBrainConfig::default().validate().is_ok());
     }
 }
 
@@ -1667,7 +1724,6 @@ mod time_source_tests {
         let manual = Arc::new(ManualTimeSource::new(base_instant, base_system));
         let _time_guard = crate::time_source::install_for_test(manual.clone());
 
-        clear_runtime_hints_for_test();
         let brain = StealthBrain::new(StealthBrainConfig::default());
         let mut conn = test_connection(4460, 4461);
         conn.set_intelligent_stealth_runtime_for_test(false);
@@ -1683,8 +1739,6 @@ mod time_source_tests {
         assert_eq!(conn.stealth_timing_max_jitter_us_for_test(), 750);
         assert!(conn.stealth_padding_enabled_for_test());
         assert_eq!(conn.stealth_padding_strategy_for_test(), 4);
-
-        clear_runtime_hints_for_test();
     }
 
     #[test]
@@ -1694,7 +1748,6 @@ mod time_source_tests {
         let manual = Arc::new(ManualTimeSource::new(base_instant, base_system));
         let _time_guard = crate::time_source::install_for_test(manual.clone());
 
-        clear_runtime_hints_for_test();
         let brain = StealthBrain::new(StealthBrainConfig::default());
         let mut conn = test_connection(4462, 4463);
         conn.set_intelligent_stealth_runtime_for_test(true);
@@ -1706,8 +1759,6 @@ mod time_source_tests {
         assert!(conn.external_pacing_enabled());
         // Level 0 (clean path, no pressure) disables padding to keep Intelligent near-zero overhead.
         assert!(!conn.stealth_padding_enabled_for_test());
-
-        clear_runtime_hints_for_test();
     }
 
     #[test]
@@ -1717,7 +1768,6 @@ mod time_source_tests {
         let manual = Arc::new(ManualTimeSource::new(base_instant, base_system));
         let _time_guard = crate::time_source::install_for_test(manual.clone());
 
-        clear_runtime_hints_for_test();
         let brain = StealthBrain::new(StealthBrainConfig::default());
         let mut conn = test_connection(4464, 4465);
         conn.set_intelligent_stealth_runtime_for_test(true);
@@ -1743,8 +1793,6 @@ mod time_source_tests {
         assert_eq!(conn.stealth_timing_max_jitter_us_for_test(), 777);
         assert!(conn.stealth_padding_enabled_for_test());
         assert_eq!(conn.stealth_padding_strategy_for_test(), 4);
-
-        clear_runtime_hints_for_test();
     }
 
     #[test]
@@ -1787,6 +1835,56 @@ mod time_source_tests {
         assert_eq!(state.iat.total, 0);
         assert_eq!(brain.pending_packet_count.load(Ordering::Relaxed), 0);
         assert_eq!(brain.pending_reorder_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn ack_batch_accumulates_all_samples_before_policy_tick() {
+        let brain = StealthBrain::new(StealthBrainConfig::default());
+        brain.on_ack(1_000, &[]);
+        brain.on_ack(3_000, &[]);
+        {
+            let pending = brain.pending_ack.lock();
+            assert_eq!(pending.count, 2);
+            assert_eq!(pending.sum_us, 4_000);
+        }
+
+        let mut conn = test_connection(4470, 4471);
+        brain.apply_policy(&mut conn);
+        let state = brain.st.read();
+        assert_eq!(state.ack_delay_sample_count, 2);
+        assert_eq!(state.ack_delay_ewma_us, 2_000.0);
+        assert_eq!(state.ack_delay_long_ewma_us, 2_000.0);
+    }
+
+    #[test]
+    fn reorder_ratio_uses_a_decaying_recent_window() {
+        let base_instant = Instant::now();
+        let base_system = UNIX_EPOCH + Duration::from_secs(60);
+        let manual = Arc::new(ManualTimeSource::new(base_instant, base_system));
+        let _time_guard = crate::time_source::install_for_test(manual.clone());
+
+        let brain = StealthBrain::new(StealthBrainConfig::default());
+        brain.on_packet_recv(10, 64);
+        brain.on_packet_recv(9, 64);
+        let mut conn = test_connection(4472, 4473);
+        brain.apply_policy(&mut conn);
+        {
+            let state = brain.st.read();
+            assert_eq!(state.reorder_count, 1);
+            assert!(
+                (state.reorder_recent_count / state.reorder_recent_packets - 0.5).abs() < 0.001
+            );
+        }
+
+        manual.advance(Duration::from_secs(30));
+        for pn in 11..111 {
+            brain.on_packet_recv(pn, 64);
+        }
+        brain.apply_policy(&mut conn);
+        let state = brain.st.read();
+        let recent_ratio = state.reorder_recent_count / state.reorder_recent_packets;
+        assert!(recent_ratio < 0.02, "recent reorder ratio remained {recent_ratio}");
+        assert_eq!(state.reorder_count, 1);
     }
 
     #[test]

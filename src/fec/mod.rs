@@ -3,7 +3,7 @@
 
 #[cfg(test)]
 use crate::accelerate;
-use crate::brain::{FEC_INTERVAL_HINT_PKTS, FEC_REDUNDANCY_PPM};
+use crate::brain::BrainFecHints;
 #[cfg(target_arch = "x86_64")]
 use crate::fec::gf_tables::prefetch_fec_slice;
 use crate::optimize::{CpuProfile, FeatureDetector, MemoryPool};
@@ -12,7 +12,7 @@ use parking_lot::{Mutex, RwLock};
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 // Global repair ID counter for fountain codes

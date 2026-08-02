@@ -119,6 +119,7 @@ impl FecObserverAmbientInputs {
 pub(crate) struct FecTransportObserver {
     state: RwLock<FecObsState>,
     ambient: FecObserverAmbientInputs,
+    brain_hints: OnceLock<Arc<BrainFecHints>>,
 }
 
 impl FecTransportObserver {
@@ -126,7 +127,13 @@ impl FecTransportObserver {
         Arc::new(Self {
             state: RwLock::new(FecObsState::default()),
             ambient: FecObserverAmbientInputs::detect(),
+            brain_hints: OnceLock::new(),
         })
+    }
+
+    /// Attach the Brain hints belonging to this connection.
+    pub(crate) fn attach_brain_hints(&self, hints: Arc<BrainFecHints>) {
+        let _ = self.brain_hints.set(hints);
     }
 
     /// FEC streaming interval based on current network conditions.
@@ -151,7 +158,11 @@ impl FecTransportObserver {
             interval = interval.saturating_add(4u32).min(32u32);
         }
 
-        let brain_hint = FEC_INTERVAL_HINT_PKTS.load() as u32;
+        let brain_hint = self
+            .brain_hints
+            .get()
+            .map(|hints| hints.interval_pkts())
+            .unwrap_or(0) as u32;
         if (1..=32).contains(&brain_hint) {
             interval = (((interval as u64 * 3) + (brain_hint as u64 * 2)) / 5).clamp(1, 32) as u32;
         }
@@ -170,7 +181,11 @@ impl FecTransportObserver {
         let _profile = self.ambient.profile.profile();
         let mut state = self.state.write();
 
-        let ppm_hint = FEC_REDUNDANCY_PPM.load();
+        let ppm_hint = self
+            .brain_hints
+            .get()
+            .map(|hints| hints.redundancy_ppm())
+            .unwrap_or(0);
         let pending_ppm = if ppm_hint > 0 && ppm_hint != state.last_redundancy_ppm {
             state.last_redundancy_ppm = ppm_hint;
             Some(ppm_hint)
@@ -1338,4 +1353,3 @@ impl Encoder16 {
         ))
     }
 }
-

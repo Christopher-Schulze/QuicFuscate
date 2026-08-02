@@ -967,6 +967,11 @@ fn test_de_escalation_after_quiet_period() {
     let result = mgr.check_de_escalation_for_test();
     assert_eq!(result, Some(1), "should de-escalate from 2 to 1 after quiet period");
     assert_eq!(mgr.escalation_level(), 1, "level should be 1 after de-escalation");
+    assert_eq!(
+        mgr.check_de_escalation_for_test(),
+        None,
+        "a second level drop must wait for a fresh quiet period"
+    );
 
     // Wait again for another quiet period
     std::thread::sleep(std::time::Duration::from_millis(1200));

@@ -66,19 +66,19 @@ impl RealityProxy {
             target_idx: AtomicUsize::new(0),
             closed: AtomicBool::new(false),
             targets: load_targets(),
-            last_cleanup: Mutex::new(Instant::now()),
+            last_cleanup: Mutex::new(crate::time_source::now_instant()),
         }
     }
 
     /// Selects a rugged upstream target.
-    fn select_target(&self) -> String {
+    fn select_target(&self) -> &str {
         let idx = self.target_idx.fetch_add(1, Ordering::Relaxed);
-        self.targets[idx % self.targets.len()].clone()
+        self.targets[idx % self.targets.len()].as_str()
     }
 
     /// Test-only accessor for the target selection logic.
     #[cfg(feature = "rust-tests")]
-    pub fn select_target_for_tests(&self) -> String {
+    pub fn select_target_for_tests(&self) -> &str {
         self.select_target()
     }
 
@@ -102,8 +102,10 @@ impl RealityProxy {
 
     fn cleanup_stale_sessions_locked(&self, sessions: &mut HashMap<SocketAddr, SessionHandle>) {
         let before = sessions.len();
+        let now = crate::time_source::now_instant();
         sessions.retain(|_, session| {
-            let keep = session.last_active.elapsed() < SESSION_TTL;
+            let keep =
+                now.checked_duration_since(session.last_active).unwrap_or_default() < SESSION_TTL;
             if !keep {
                 session.task.abort();
             }
@@ -123,7 +125,7 @@ impl RealityProxy {
     pub(crate) fn cleanup_stale_sessions_now(&self) {
         let mut sessions = self.sessions.lock();
         self.cleanup_stale_sessions_locked(&mut sessions);
-        *self.last_cleanup.lock() = Instant::now();
+        *self.last_cleanup.lock() = crate::time_source::now_instant();
     }
 
     /// Abort every upstream task owned by this proxy during runtime teardown.
@@ -150,14 +152,16 @@ impl RealityProxy {
         // Deterministic session cleanup: time-based interval or capacity pressure.
         {
             let mut last = self.last_cleanup.lock();
-            if last.elapsed() > CLEANUP_INTERVAL || sessions.len() > MAX_SESSIONS {
+            if crate::time_source::now_instant().saturating_duration_since(*last) > CLEANUP_INTERVAL
+                || sessions.len() > MAX_SESSIONS
+            {
                 self.cleanup_stale_sessions_locked(&mut sessions);
-                *last = Instant::now();
+                *last = crate::time_source::now_instant();
             }
         }
 
         if let Some(session) = sessions.get_mut(&source) {
-            session.last_active = Instant::now();
+            session.last_active = crate::time_source::now_instant();
             if let Err(e) = session.sender.try_send(packet.to_vec()) {
                 log::debug!(
                     "Reality Proxy: failed to enqueue probe packet for existing session {}: {}",
@@ -175,7 +179,7 @@ impl RealityProxy {
                 return;
             }
             // New Probe Session
-            let target_addr_str = self.select_target();
+            let target_addr_str = self.select_target().to_owned();
             log::info!(
                 "Reality Proxy: Forwarding new probe from {} to {}",
                 source,
@@ -254,7 +258,11 @@ impl RealityProxy {
 
             sessions.insert(
                 source,
-                SessionHandle { last_active: Instant::now(), sender: pkt_tx, task },
+                SessionHandle {
+                    last_active: crate::time_source::now_instant(),
+                    sender: pkt_tx,
+                    task,
+                },
             );
         }
     }
@@ -408,7 +416,7 @@ impl CoverHandshakeCache {
     pub fn get(&self) -> Option<Arc<CoverMaterial>> {
         let guard = self.material.read();
         guard.as_ref().and_then(|m| {
-            let now = std::time::SystemTime::now()
+            let now = crate::time_source::now_system()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
@@ -517,7 +525,7 @@ impl CoverHandshakeCache {
                 format!("failed to parse TLS flight from {} ({} bytes)", addr, raw.len())
             })?;
 
-        let now = std::time::SystemTime::now()
+        let now = crate::time_source::now_system()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
@@ -951,7 +959,7 @@ mod tests {
             client_hello: vec![],
             certificate_chain: vec![vec![0x01, 0x02, 0x03]],
             sni: "example.com".to_string(),
-            captured_at: std::time::SystemTime::now()
+            captured_at: crate::time_source::now_system()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
@@ -973,7 +981,7 @@ mod tests {
             client_hello: vec![],
             certificate_chain: vec![],
             sni: "test.com".to_string(),
-            captured_at: std::time::SystemTime::now()
+            captured_at: crate::time_source::now_system()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0),

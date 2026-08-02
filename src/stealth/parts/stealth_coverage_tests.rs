@@ -49,7 +49,6 @@ mod stealth_coverage_tests {
 
     #[test]
     fn manager_intelligent_mode_enables_dynamic_and_probe_detector() {
-        crate::brain::clear_runtime_hints_for_test();
         let m = make_manager(StealthConfig::intelligent());
         assert_eq!(m.mode(), StealthMode::Intelligent);
         assert!(m.is_intelligent_runtime());
@@ -61,6 +60,16 @@ mod stealth_coverage_tests {
         assert!(!m.cover_header_emission_allowed());
         // Reality proxy enabled in Intelligent mode
         assert!(m.reality_proxy.is_some());
+    }
+
+    #[test]
+    fn intelligent_levels_do_not_cross_connection_boundaries() {
+        let first = make_manager(StealthConfig::intelligent());
+        let second = make_manager(StealthConfig::intelligent());
+
+        first.set_brain_level_for_test(2);
+        assert_eq!(first.intelligent_runtime_level(), 2);
+        assert_eq!(second.intelligent_runtime_level(), 0);
     }
 
     #[test]
@@ -617,8 +626,6 @@ mod stealth_coverage_tests {
 
     #[test]
     fn h3_cover_header_emission_policy_matches_modes() {
-        crate::brain::clear_runtime_hints_for_test();
-
         let performance = make_manager(StealthConfig::performance());
         assert!(!performance.cover_header_emission_allowed());
         assert!(performance.cover_headers_due().is_none());
@@ -627,9 +634,8 @@ mod stealth_coverage_tests {
         assert!(!intelligent.cover_header_emission_allowed());
         assert!(intelligent.cover_headers_due().is_none());
 
-        crate::brain::INTELLIGENT_STEALTH_LEVEL_HINT.store(1);
+        intelligent.set_brain_level_for_test(1);
         assert!(intelligent.cover_header_emission_allowed());
-        crate::brain::clear_runtime_hints_for_test();
     }
 
     #[test]
