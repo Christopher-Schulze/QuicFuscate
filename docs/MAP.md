@@ -572,6 +572,7 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 |   |   |   |-- build-clippy-matrix.sh
 |   |   |   `-- build-env-doctor.sh
 |   |   |-- fast
+|   |   |   |-- test-dynamic-discovery-fail-closed.sh
 |   |   |   |-- test-fast-crypto.sh
 |   |   |   |-- test-fast-fec-fail-closed.sh
 |   |   |   `-- test-fast-fec.sh
@@ -1151,3 +1152,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - **Focused unit-test contract:** `scripts/tests/fast/test-fast-fec.sh` runs `fec::tests::`, `gf16`, `wiedemann`, and `streaming` as separate libtest invocations with the explicit `benches,rust-tests` feature set. Each result records the requested filter, command status, executed-test count, status, and bounded log name; zero-test or missing-`ok` output is a failure.
 - **Bench boundary:** The `cargo bench --no-run --features benches` smoke compile is recorded as its own result and never substitutes for focused unit-test execution. `util-run-full-suite.sh` and `test-fec-all.sh` invoke the helper as a child, so a focused or bench failure propagates through their existing `run`/`exec` boundary.
 - **Negative proof:** `scripts/tests/fast/test-fast-fec-fail-closed.sh` injects a real invalid Rust flag, requires a nonzero helper status and a bounded focused `FAIL`/`UNAVAILABLE` record, rejects the green completion marker, and proves that no bench result is emitted after the focused failure. The positive local run passed 4/4 filters with 112 executed tests and a separate bench `PASS`.
+
+## Implementation Reconciliation (2026-08-02, dynamic test discovery)
+
+- **Shared contract:** `scripts/tests/lib/lib-common.sh` owns target-scoped Cargo test discovery and execution classification. It preserves raw output and command status, requires a positive listed or executed test count, and emits `PASS`, `FAIL`, or `UNAVAILABLE` metadata with target, feature set, filter, and reason.
+- **Suite wiring:** `test-optimization.sh`, `test-performance-regression.sh`, and `test-security-fuzzing.sh` discover and execute the same release `--lib` test universe, including the effective `rust-tests` feature set. Optimization keeps a separate zero-copy feature scope; platform and toolchain skips retain explicit prerequisites and machine-readable reasons.
+- **Negative proof:** `scripts/tests/fast/test-dynamic-discovery-fail-closed.sh` uses real Cargo calls to prove discovery command failure, integration-to-library target mismatch, stale-pattern discovery, and zero-test execution are non-pass results. Raw outputs and exit statuses remain in the bounded result artifact.

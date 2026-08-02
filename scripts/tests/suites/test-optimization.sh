@@ -31,29 +31,172 @@ echo "==============================================================="
 
 TOTAL=0; PASSED=0; FAILED=0; SKIPPED=0
 TEST_LIST_FILE="$OUTPUT_DIR/testlist.txt"
+BASE_FEATURES="$(qf_cargo_test_feature_set "${CARGO_FEATURES:-}")"
+BASE_DISCOVERY_DONE=0; BASE_DISCOVERY_STATUS=""; BASE_DISCOVERY_REASON=""
+BASE_DISCOVERY_COUNT=0; BASE_DISCOVERY_COMMAND_STATUS=""; BASE_DISCOVERY_COMMAND=""; BASE_DISCOVERY_TARGET=""; BASE_DISCOVERY_FEATURES=""; BASE_DISCOVERY_RAW_OUTPUT="$TEST_LIST_FILE"
+ZERO_COPY_DISCOVERY_DONE=0; ZERO_COPY_DISCOVERY_STATUS=""; ZERO_COPY_DISCOVERY_REASON=""
+ZERO_COPY_DISCOVERY_COUNT=0; ZERO_COPY_DISCOVERY_COMMAND_STATUS=""; ZERO_COPY_DISCOVERY_COMMAND=""; ZERO_COPY_DISCOVERY_TARGET=""; ZERO_COPY_DISCOVERY_FEATURES=""; ZERO_COPY_DISCOVERY_RAW_OUTPUT=""
+ACTIVE_TEST_LIST_FILE="$TEST_LIST_FILE"; ACTIVE_DISCOVERY_STATUS=""; ACTIVE_DISCOVERY_REASON=""
+DISCOVERY_STATUS_FOR_RUN="not_applicable"
 
-ensure_test_list() {
-  if [[ ! -f "$TEST_LIST_FILE" ]]; then
-    run_cargo test --release -- --list > "$TEST_LIST_FILE" 2>/dev/null || true
-  fi
-}
-
-test_pattern_exists() {
-  local pattern="$1"
-  if (( FAST )); then
-    # In fast mode we execute a curated test set directly to avoid
-    # expensive global test-list discovery.
-    return 0
-  fi
-  ensure_test_list
-  grep -q "$pattern" "$TEST_LIST_FILE" 2>/dev/null
+append_json_record() {
+  local name="$1" legacy_status="$2" dur="$3" result="$4" reason="$5"
+  local command="$6" target="$7" feature_set="$8" discovered_count="${9:-null}"
+  local executed_count="${10:-null}" command_status="${11:-null}"
+  local discovery_status="${12:-not_applicable}" raw_output="${13:-}"
+  if [[ $JSON_FIRST_RUN -eq 0 ]]; then echo "," >> "$RESULTS_JSON"; fi
+  JSON_FIRST_RUN=0
+  printf '  {"name":"%s","status":"%s","result":"%s","reason":"%s","command":"%s","target":"%s","feature_set":"%s","discovered_test_count":%s,"executed_test_count":%s,"command_status":%s,"discovery_status":"%s","raw_output":"%s","duration_sec":%s}' \
+    "$(qf_json_escape "$name")" "$(qf_json_escape "$legacy_status")" "$(qf_json_escape "$result")" \
+    "$(qf_json_escape "$reason")" "$(qf_json_escape "$command")" "$(qf_json_escape "$target")" \
+    "$(qf_json_escape "$feature_set")" "$discovered_count" "$executed_count" "$command_status" \
+    "$(qf_json_escape "$discovery_status")" "$(qf_json_escape "$raw_output")" "$dur" >> "$RESULTS_JSON"
 }
 
 append_json() {
   local name="$1" status="$2" dur="$3"
-  if [[ $JSON_FIRST_RUN -eq 0 ]]; then echo "," >> "$RESULTS_JSON"; fi
-  JSON_FIRST_RUN=0
-  echo -n '  {"name":'"\"$name\""',"status":'"\"$status\""',"duration_sec":'"$dur"'}' >> "$RESULTS_JSON"
+  local result="PASS"
+  case "$status" in
+    fail) result="FAIL";;
+    skipped) result="SKIP";;
+  esac
+  append_json_record "$name" "$status" "$dur" "$result" "legacy_case_without_structured_cargo_metadata" \
+    "not_recorded" "not_recorded" "not_recorded" null null null "not_applicable" ""
+}
+
+record_platform_skip() {
+  local name="$1" reason="$2" target="${3:-not_applicable}" feature_set="${4:-$BASE_FEATURES}"
+  SKIPPED=$((SKIPPED+1))
+  append_json_record "$name" "skipped" 0 "SKIP" "$reason" "not_applicable" "$target" "$feature_set" \
+    null null null "SKIP" ""
+}
+
+ensure_test_list() {
+  local feature_set="${1:-$BASE_FEATURES}"
+  local scope="base"
+  local list_file="$TEST_LIST_FILE"
+  if [[ "$feature_set" != "$BASE_FEATURES" ]]; then
+    scope="zero-copy"
+    list_file="$OUTPUT_DIR/testlist-zero-copy.txt"
+  fi
+
+  if [[ "$scope" == "base" && "$BASE_DISCOVERY_DONE" -eq 1 ]] || \
+     [[ "$scope" == "zero-copy" && "$ZERO_COPY_DISCOVERY_DONE" -eq 1 ]]; then
+    ACTIVE_TEST_LIST_FILE="$list_file"
+    if [[ "$scope" == "base" ]]; then
+      ACTIVE_DISCOVERY_STATUS="$BASE_DISCOVERY_STATUS"
+      ACTIVE_DISCOVERY_REASON="$BASE_DISCOVERY_REASON"
+      QF_CARGO_TEST_STATUS="$BASE_DISCOVERY_STATUS"; QF_CARGO_TEST_REASON="$BASE_DISCOVERY_REASON"
+      QF_CARGO_TEST_COUNT="$BASE_DISCOVERY_COUNT"; QF_CARGO_TEST_COMMAND_STATUS="$BASE_DISCOVERY_COMMAND_STATUS"
+      QF_CARGO_TEST_COMMAND="$BASE_DISCOVERY_COMMAND"; QF_CARGO_TEST_TARGET="$BASE_DISCOVERY_TARGET"
+      QF_CARGO_TEST_FEATURE_SET="$BASE_DISCOVERY_FEATURES"; QF_CARGO_TEST_FILTER="<all>"
+      QF_CARGO_TEST_RAW_OUTPUT="$BASE_DISCOVERY_RAW_OUTPUT"
+    else
+      ACTIVE_DISCOVERY_STATUS="$ZERO_COPY_DISCOVERY_STATUS"
+      ACTIVE_DISCOVERY_REASON="$ZERO_COPY_DISCOVERY_REASON"
+      QF_CARGO_TEST_STATUS="$ZERO_COPY_DISCOVERY_STATUS"; QF_CARGO_TEST_REASON="$ZERO_COPY_DISCOVERY_REASON"
+      QF_CARGO_TEST_COUNT="$ZERO_COPY_DISCOVERY_COUNT"; QF_CARGO_TEST_COMMAND_STATUS="$ZERO_COPY_DISCOVERY_COMMAND_STATUS"
+      QF_CARGO_TEST_COMMAND="$ZERO_COPY_DISCOVERY_COMMAND"; QF_CARGO_TEST_TARGET="$ZERO_COPY_DISCOVERY_TARGET"
+      QF_CARGO_TEST_FEATURE_SET="$ZERO_COPY_DISCOVERY_FEATURES"; QF_CARGO_TEST_FILTER="<all>"
+      QF_CARGO_TEST_RAW_OUTPUT="$ZERO_COPY_DISCOVERY_RAW_OUTPUT"
+    fi
+    return 0
+  fi
+
+  if qf_cargo_test_discover "$list_file" "lib" "$feature_set" --release --lib; then
+    local legacy_status="ok"
+  else
+    local legacy_status="fail"
+    FAILED=$((FAILED+1))
+  fi
+  if [[ "$scope" == "base" ]]; then
+    BASE_DISCOVERY_DONE=1
+    BASE_DISCOVERY_STATUS="$QF_CARGO_TEST_STATUS"
+    BASE_DISCOVERY_REASON="$QF_CARGO_TEST_REASON"
+    BASE_DISCOVERY_COUNT="$QF_CARGO_TEST_COUNT"
+    BASE_DISCOVERY_COMMAND_STATUS="$QF_CARGO_TEST_COMMAND_STATUS"
+    BASE_DISCOVERY_COMMAND="$QF_CARGO_TEST_COMMAND"
+    BASE_DISCOVERY_TARGET="$QF_CARGO_TEST_TARGET"
+    BASE_DISCOVERY_FEATURES="$QF_CARGO_TEST_FEATURE_SET"
+    BASE_DISCOVERY_RAW_OUTPUT="$QF_CARGO_TEST_RAW_OUTPUT"
+  else
+    ZERO_COPY_DISCOVERY_DONE=1
+    ZERO_COPY_DISCOVERY_STATUS="$QF_CARGO_TEST_STATUS"
+    ZERO_COPY_DISCOVERY_REASON="$QF_CARGO_TEST_REASON"
+    ZERO_COPY_DISCOVERY_COUNT="$QF_CARGO_TEST_COUNT"
+    ZERO_COPY_DISCOVERY_COMMAND_STATUS="$QF_CARGO_TEST_COMMAND_STATUS"
+    ZERO_COPY_DISCOVERY_COMMAND="$QF_CARGO_TEST_COMMAND"
+    ZERO_COPY_DISCOVERY_TARGET="$QF_CARGO_TEST_TARGET"
+    ZERO_COPY_DISCOVERY_FEATURES="$QF_CARGO_TEST_FEATURE_SET"
+    ZERO_COPY_DISCOVERY_RAW_OUTPUT="$QF_CARGO_TEST_RAW_OUTPUT"
+  fi
+  ACTIVE_TEST_LIST_FILE="$list_file"
+  ACTIVE_DISCOVERY_STATUS="$QF_CARGO_TEST_STATUS"
+  ACTIVE_DISCOVERY_REASON="$QF_CARGO_TEST_REASON"
+  append_json_record "discovery:${scope}" "$legacy_status" 0 "$QF_CARGO_TEST_STATUS" "$QF_CARGO_TEST_REASON" \
+    "$QF_CARGO_TEST_COMMAND" "$QF_CARGO_TEST_TARGET" "$QF_CARGO_TEST_FEATURE_SET" \
+    "$QF_CARGO_TEST_COUNT" null "$QF_CARGO_TEST_COMMAND_STATUS" "$QF_CARGO_TEST_STATUS" "$QF_CARGO_TEST_RAW_OUTPUT"
+}
+
+test_pattern_exists() {
+  local pattern="$1"
+  local feature_set="${2:-$BASE_FEATURES}"
+  if (( FAST )); then
+    # Fast mode uses a curated direct invocation and intentionally has no list discovery.
+    ACTIVE_DISCOVERY_STATUS="SKIP"
+    ACTIVE_DISCOVERY_REASON="fast_mode_curated_direct_selection"
+    return 0
+  fi
+  ensure_test_list "$feature_set"
+  if [[ "$ACTIVE_DISCOVERY_STATUS" != "PASS" ]]; then
+    return 2
+  fi
+  rg -F -q -- "$pattern" "$ACTIVE_TEST_LIST_FILE"
+}
+
+run_optional_test() {
+  local label="$1"; local pattern="$2"; local feature_set="${3:-$BASE_FEATURES}"
+  local envs="${4:-}"; local feature_arg="${5:-}"
+  shift 5
+  local -a runner_args=(--nocapture)
+  if [[ "$#" -gt 0 ]]; then runner_args=("$@"); fi
+  if test_pattern_exists "$pattern" "$feature_set"; then
+    DISCOVERY_STATUS_FOR_RUN="$ACTIVE_DISCOVERY_STATUS"
+    if [[ -n "$feature_arg" ]]; then
+      run_case "$label" "$envs" cargo test --release --features "$feature_arg" --lib "$pattern" -- "${runner_args[@]}"
+    else
+      run_case "$label" "$envs" cargo test --release --lib "$pattern" -- "${runner_args[@]}"
+    fi
+    DISCOVERY_STATUS_FOR_RUN="not_applicable"
+    return 0
+  fi
+  local pattern_status=$?
+  if [[ "$pattern_status" -eq 2 ]]; then
+    append_json_record "$label" "fail" 0 "$ACTIVE_DISCOVERY_STATUS" "$ACTIVE_DISCOVERY_REASON" \
+      "$QF_CARGO_TEST_COMMAND" "$QF_CARGO_TEST_TARGET" "$QF_CARGO_TEST_FEATURE_SET" \
+      "$QF_CARGO_TEST_COUNT" null "$QF_CARGO_TEST_COMMAND_STATUS" "$ACTIVE_DISCOVERY_STATUS" "$QF_CARGO_TEST_RAW_OUTPUT"
+  else
+    SKIPPED=$((SKIPPED+1))
+    append_json_record "$label" "skipped" 0 "SKIP" "pattern_not_found_after_target_scoped_discovery" \
+      "$QF_CARGO_TEST_COMMAND" "$QF_CARGO_TEST_TARGET" "$QF_CARGO_TEST_FEATURE_SET" \
+      "$QF_CARGO_TEST_COUNT" null "$QF_CARGO_TEST_COMMAND_STATUS" "$ACTIVE_DISCOVERY_STATUS" "$QF_CARGO_TEST_RAW_OUTPUT"
+  fi
+  return 0
+}
+
+run_cargo_test_capture() {
+  local output_file="$1"; local envs="$2"; shift 2
+  local -a cmd=("$@")
+  if [[ -n "$envs" ]]; then
+    if ( eval "export $envs"; LOG_FILE="" JSON="" JSON_FILE="" run_cargo "${cmd[@]:1}" ) > "$output_file" 2>&1; then
+      return 0
+    fi
+    return $?
+  fi
+  if LOG_FILE="" JSON="" JSON_FILE="" run_cargo "${cmd[@]:1}" > "$output_file" 2>&1; then
+    return 0
+  fi
+  return $?
 }
 
 run_case() {
@@ -65,26 +208,38 @@ run_case() {
   echo -e "\n> [$TOTAL] $name"
   [[ -n "$envs" ]] && echo "  Env: $envs"
   echo "  Cmd: ${cmd[*]}"
+  if [[ "${cmd[0]:-}" == "cargo" && "${cmd[1]:-}" == "test" ]]; then
+    local output_file="$OUTPUT_DIR/cargo-test-${TOTAL}.txt"
+    local command_status=0
+    if run_cargo_test_capture "$output_file" "$envs" "${cmd[@]}"; then
+      command_status=0
+    else
+      command_status=$?
+    fi
+    cat "$output_file"
+    qf_cargo_test_metadata_from_args "${cmd[@]:1}"
+    if qf_cargo_test_classify_output run "$output_file" "$command_status" \
+      "$QF_CARGO_TEST_TARGET" "$QF_CARGO_TEST_FEATURE_SET" "$QF_CARGO_TEST_FILTER" "$QF_CARGO_TEST_COMMAND"; then
+      :
+    else
+      :
+    fi
+    local duration=$(( $(date +%s) - start ))
+    local legacy_status="ok"
+    if [[ "$QF_CARGO_TEST_STATUS" != "PASS" ]]; then legacy_status="fail"; fi
+    if [[ "$QF_CARGO_TEST_STATUS" == "PASS" ]]; then PASSED=$((PASSED+1)); else FAILED=$((FAILED+1)); fi
+    append_json_record "$name" "$legacy_status" "$duration" "$QF_CARGO_TEST_STATUS" "$QF_CARGO_TEST_REASON" \
+      "$QF_CARGO_TEST_COMMAND" "$QF_CARGO_TEST_TARGET" "$QF_CARGO_TEST_FEATURE_SET" null \
+      "$QF_CARGO_TEST_COUNT" "$QF_CARGO_TEST_COMMAND_STATUS" "$DISCOVERY_STATUS_FOR_RUN" "$QF_CARGO_TEST_RAW_OUTPUT"
+    DISCOVERY_STATUS_FOR_RUN="not_applicable"
+    return 0
+  fi
   if [[ -n "$envs" ]]; then
-    if [[ "${cmd[0]}" == "cargo" ]]; then
-      if ( eval "export $envs"; run_cargo "${cmd[@]:1}" ); then
-        PASSED=$((PASSED+1)); append_json "$name" "ok" $(( $(date +%s) - start )); return 0
-      fi
-    else
-      if run env $envs "${cmd[@]}"; then
-        PASSED=$((PASSED+1)); append_json "$name" "ok" $(( $(date +%s) - start )); return 0
-      fi
+    if run env $envs "${cmd[@]}"; then
+      PASSED=$((PASSED+1)); append_json "$name" "ok" $(( $(date +%s) - start )); return 0
     fi
-  else
-    if [[ "${cmd[0]}" == "cargo" ]]; then
-      if run_cargo "${cmd[@]:1}"; then
-        PASSED=$((PASSED+1)); append_json "$name" "ok" $(( $(date +%s) - start )); return 0
-      fi
-    else
-      if run "${cmd[@]}"; then
-        PASSED=$((PASSED+1)); append_json "$name" "ok" $(( $(date +%s) - start )); return 0
-      fi
-    fi
+  elif run "${cmd[@]}"; then
+    PASSED=$((PASSED+1)); append_json "$name" "ok" $(( $(date +%s) - start )); return 0
   fi
   FAILED=$((FAILED+1))
   append_json "$name" "fail" $(( $(date +%s) - start ))
@@ -94,13 +249,7 @@ run_case() {
 run_named_test() {
   local label="$1"; shift
   local pattern="$1"; shift
-  if test_pattern_exists "$pattern"; then
-    run_case "$label" "" cargo test --release --lib "$pattern" -- --nocapture
-  else
-    warn "Skipping ${label} (no matching tests)"
-    SKIPPED=$((SKIPPED+1))
-    append_json "$label" "skipped" 0
-  fi
+  run_optional_test "$label" "$pattern" "$BASE_FEATURES" "" ""
 }
 
 # Test I/O batch sizing
@@ -111,12 +260,7 @@ if (( FAST )); then
   echo -e "\n> Fast mode enabled (reduced optimization matrix)"
   run_named_test "CPU profile telemetry mask" "cpu_profile_mask"
   run_named_test "FEC batch processing" "test_batch_"
-  if test_pattern_exists "telemetry"; then
-    run_case "Telemetry system" "QUICFUSCATE_TELEMETRY=1" cargo test --release --lib telemetry -- --nocapture
-  else
-    warn "Skipping telemetry tests (no matching tests)"
-    SKIPPED=$((SKIPPED+1)); append_json "Telemetry system" "skipped" 0
-  fi
+  run_optional_test "Telemetry system" "telemetry" "$BASE_FEATURES" "QUICFUSCATE_TELEMETRY=1" ""
 
   FEATURES="${CARGO_FEATURES:-rust-tests}"
   if [[ ",${FEATURES}," != *",rust-tests,"* ]]; then
@@ -159,76 +303,41 @@ fi
 
 # Test NUMA awareness
 echo -e "\n> Testing NUMA Awareness..."
-if test_pattern_exists "numa"; then
-  run_case "NUMA local" "QUICFUSCATE_NUMA_POLICY=local" cargo test --release --lib numa -- --nocapture
-  run_case "NUMA interleave" "QUICFUSCATE_NUMA_POLICY=interleave" cargo test --release --lib numa -- --nocapture
-  run_case "NUMA preferred" "QUICFUSCATE_NUMA_POLICY=preferred:0" cargo test --release --lib numa -- --nocapture
-else
-  warn "Skipping NUMA tests (no matching tests)"
-  SKIPPED=$((SKIPPED+1)); append_json "NUMA awareness" "skipped" 0
-fi
+run_optional_test "NUMA local" "numa" "$BASE_FEATURES" "QUICFUSCATE_NUMA_POLICY=local" ""
+run_optional_test "NUMA interleave" "numa" "$BASE_FEATURES" "QUICFUSCATE_NUMA_POLICY=interleave" ""
+run_optional_test "NUMA preferred" "numa" "$BASE_FEATURES" "QUICFUSCATE_NUMA_POLICY=preferred:0" ""
 
 # Test HugePages
 echo -e "\n> Testing HugePages Support..."
-if test_pattern_exists "hugepages"; then
-  run_case "HugePages" "QUICFUSCATE_MADVISE_HUGEPAGE=1" cargo test --release --lib hugepages -- --nocapture
-else
-  warn "Skipping HugePages (no matching tests)"
-  SKIPPED=$((SKIPPED+1)); append_json "HugePages" "skipped" 0
-fi
+run_optional_test "HugePages" "hugepages" "$BASE_FEATURES" "QUICFUSCATE_MADVISE_HUGEPAGE=1" ""
 
 # Test SIMD paths (x86_64)
 echo -e "\n> Testing x86_64 SIMD Paths..."
 if [[ $(uname -m) == "x86_64" ]]; then
     echo "  - Testing SSE2..."
-    if test_pattern_exists "sse2"; then
-      run_case "SSE2 paths" "RUSTFLAGS=-Ctarget-feature=+sse2" cargo test --release --lib sse2 -- --nocapture
-    else
-      warn "Skipping SSE2 tests (no matching tests)"
-      SKIPPED=$((SKIPPED+1)); append_json "SSE2 paths" "skipped" 0
-    fi
+    run_optional_test "SSE2 paths" "sse2" "$BASE_FEATURES" "RUSTFLAGS=-Ctarget-feature=+sse2" ""
     
     echo "  - Testing AVX2..."
-    if test_pattern_exists "avx2"; then
-      run_case "AVX2 paths" "RUSTFLAGS=-Ctarget-feature=+avx2" cargo test --release --lib avx2 -- --nocapture
-    else
-      warn "Skipping AVX2 tests (no matching tests)"
-      SKIPPED=$((SKIPPED+1)); append_json "AVX2 paths" "skipped" 0
-    fi
+    run_optional_test "AVX2 paths" "avx2" "$BASE_FEATURES" "RUSTFLAGS=-Ctarget-feature=+avx2" ""
     
     echo "  - Testing AVX-512..."
-    if test_pattern_exists "avx512"; then
-      run_case "AVX-512 paths" "RUSTFLAGS=-Ctarget-feature=+avx512f" cargo test --release --lib avx512 -- --nocapture
-    else
-      warn "Skipping AVX-512 tests (no matching tests)"
-      SKIPPED=$((SKIPPED+1)); append_json "AVX-512 paths" "skipped" 0
-    fi
+    run_optional_test "AVX-512 paths" "avx512" "$BASE_FEATURES" "RUSTFLAGS=-Ctarget-feature=+avx512f" ""
 else
     echo "  Skipping (x86_64 only)"
-    SKIPPED=$((SKIPPED+1)); append_json "x86_64 SIMD paths" "skipped" 0
+    record_platform_skip "x86_64 SIMD paths" "host_arch_not_x86_64" "x86_64" "$BASE_FEATURES"
 fi
 
 # Test SIMD paths (ARM)
 echo -e "\n> Testing ARM SIMD Paths..."
 if [[ $(uname -m) == "aarch64" ]] || [[ $(uname -m) == "arm64" ]]; then
     echo "  - Testing NEON..."
-    if test_pattern_exists "neon"; then
-      run_case "NEON paths" "" cargo test --release --lib neon -- --nocapture
-    else
-      warn "Skipping NEON tests (no matching tests)"
-      SKIPPED=$((SKIPPED+1)); append_json "NEON paths" "skipped" 0
-    fi
+    run_optional_test "NEON paths" "neon" "$BASE_FEATURES" "" ""
     
     echo "  - Testing PMULL..."
-    if test_pattern_exists "pmull"; then
-      run_case "PMULL paths" "" cargo test --release --lib pmull -- --nocapture
-    else
-      warn "Skipping PMULL tests (no matching tests)"
-      SKIPPED=$((SKIPPED+1)); append_json "PMULL paths" "skipped" 0
-    fi
+    run_optional_test "PMULL paths" "pmull" "$BASE_FEATURES" "" ""
 else
     echo "  Skipping (ARM only)"
-    SKIPPED=$((SKIPPED+1)); append_json "ARM SIMD paths" "skipped" 0
+    record_platform_skip "ARM SIMD paths" "host_arch_not_arm64" "arm64" "$BASE_FEATURES"
 fi
 
 # Test CPU feature detection
@@ -245,12 +354,8 @@ run_named_test "Cache alignment" "cache_alignment"
 
 # Test zero-copy operations
 echo -e "\n> Testing Zero-Copy Operations..."
-if test_pattern_exists "zero_copy"; then
-  run_case "Zero-copy operations" "" cargo test --release --features zero_copy_dgram --lib zero_copy -- --nocapture
-else
-  warn "Skipping zero_copy (no matching tests)"
-  SKIPPED=$((SKIPPED+1)); append_json "Zero-copy operations" "skipped" 0
-fi
+ZERO_COPY_FEATURES="$(qf_cargo_test_feature_set "${BASE_FEATURES},zero_copy_dgram")"
+run_optional_test "Zero-copy operations" "zero_copy" "$ZERO_COPY_FEATURES" "" "zero_copy_dgram"
 
 # Test batch processing
 echo -e "\n> Testing Batch Processing..."
@@ -258,12 +363,7 @@ run_named_test "Batch processing" "batch_processing"
 
 # Test telemetry
 echo -e "\n> Testing Telemetry System..."
-if test_pattern_exists "telemetry"; then
-  run_case "Telemetry system" "QUICFUSCATE_TELEMETRY=1" cargo test --release --lib telemetry -- --nocapture
-else
-  warn "Skipping telemetry tests (no matching tests)"
-  SKIPPED=$((SKIPPED+1)); append_json "Telemetry system" "skipped" 0
-fi
+run_optional_test "Telemetry system" "telemetry" "$BASE_FEATURES" "QUICFUSCATE_TELEMETRY=1" ""
 
 # Integration fixtures (SIMD/accelerate/telemetry)
 FEATURES="${CARGO_FEATURES:-rust-tests}"
@@ -306,13 +406,9 @@ run_case "SIMD/Accelerate integration" "" cargo test --release --features "$FEAT
 
 # Combined optimization test
 echo -e "\n> Running Optimization Stress Test..."
-if test_pattern_exists "optimization_stress"; then
-  run_case "Optimization stress" "QUICFUSCATE_NUMA_POLICY=interleave QUICFUSCATE_MADVISE_HUGEPAGE=1 QUICFUSCATE_TELEMETRY=1 RUSTFLAGS=-Ctarget-cpu=native" \
-    cargo test --release --lib optimization_stress -- --nocapture --test-threads=1
-else
-  warn "Skipping optimization_stress (no matching tests)"
-  SKIPPED=$((SKIPPED+1)); append_json "Optimization stress" "skipped" 0
-fi
+run_optional_test "Optimization stress" "optimization_stress" "$BASE_FEATURES" \
+  "QUICFUSCATE_NUMA_POLICY=interleave QUICFUSCATE_MADVISE_HUGEPAGE=1 QUICFUSCATE_TELEMETRY=1 RUSTFLAGS=-Ctarget-cpu=native" "" \
+  --nocapture --test-threads=1
 
 echo -e "\n==============================================================="
 echo "  Optimization Test Summary"

@@ -40,18 +40,10 @@ echo "==============================================================="
 
 TOTAL=0; PASSED=0; FAILED=0; SKIPPED=0
 TEST_LIST_FILE="$OUTPUT_DIR/testlist.txt"
-
-ensure_test_list() {
-  if [[ ! -f "$TEST_LIST_FILE" ]]; then
-    run cargo test --features rust-tests -- --list > "$TEST_LIST_FILE" 2>/dev/null || true
-  fi
-}
-
-test_pattern_exists() {
-  local pattern="$1"
-  ensure_test_list
-  grep -q "$pattern" "$TEST_LIST_FILE" 2>/dev/null
-}
+BASE_FEATURES="$(qf_cargo_test_feature_set "${CARGO_FEATURES:-rust-tests}")"
+DISCOVERY_DONE=0; DISCOVERY_STATUS=""; DISCOVERY_REASON=""; DISCOVERY_COUNT=0
+DISCOVERY_COMMAND_STATUS=""; DISCOVERY_COMMAND=""; DISCOVERY_TARGET=""; DISCOVERY_FEATURES=""; ACTIVE_DISCOVERY_STATUS=""; ACTIVE_DISCOVERY_REASON=""
+DISCOVERY_RAW_OUTPUT="$TEST_LIST_FILE"; DISCOVERY_STATUS_FOR_RUN="not_applicable"
 
 has_nightly_rustc() {
   if command -v rustup >/dev/null 2>&1; then
@@ -93,9 +85,112 @@ fuzz_enabled_on_host() {
 
 append_json() {
   local name="$1" status="$2" dur="$3"
+  local result="PASS"
+  case "$status" in
+    fail) result="FAIL";;
+    skipped) result="SKIP";;
+  esac
+  append_json_record "$name" "$status" "$dur" "$result" "legacy_case_without_structured_cargo_metadata" \
+    "not_recorded" "not_recorded" "not_recorded" null null null "not_applicable" ""
+}
+
+append_json_record() {
+  local name="$1" legacy_status="$2" dur="$3" result="$4" reason="$5"
+  local command="$6" target="$7" feature_set="$8" discovered_count="${9:-null}"
+  local executed_count="${10:-null}" command_status="${11:-null}"
+  local discovery_status="${12:-not_applicable}" raw_output="${13:-}"
   if [[ $JSON_FIRST_RUN -eq 0 ]]; then echo "," >> "$RESULTS_JSON"; fi
   JSON_FIRST_RUN=0
-  echo -n '  {"name":'"\"$name\""',"status":'"\"$status\""',"duration_sec":'"$dur"'}' >> "$RESULTS_JSON"
+  printf '  {"name":"%s","status":"%s","result":"%s","reason":"%s","command":"%s","target":"%s","feature_set":"%s","discovered_test_count":%s,"executed_test_count":%s,"command_status":%s,"discovery_status":"%s","raw_output":"%s","duration_sec":%s}' \
+    "$(qf_json_escape "$name")" "$(qf_json_escape "$legacy_status")" "$(qf_json_escape "$result")" \
+    "$(qf_json_escape "$reason")" "$(qf_json_escape "$command")" "$(qf_json_escape "$target")" \
+    "$(qf_json_escape "$feature_set")" "$discovered_count" "$executed_count" "$command_status" \
+    "$(qf_json_escape "$discovery_status")" "$(qf_json_escape "$raw_output")" "$dur" >> "$RESULTS_JSON"
+}
+
+record_platform_skip() {
+  local name="$1" reason="$2" target="${3:-not_applicable}" feature_set="${4:-$BASE_FEATURES}"
+  SKIPPED=$((SKIPPED+1))
+  append_json_record "$name" "skipped" 0 "SKIP" "$reason" "not_applicable" "$target" "$feature_set" \
+    null null null "SKIP" ""
+}
+
+ensure_test_list() {
+  if [[ "$DISCOVERY_DONE" -eq 1 ]]; then
+    ACTIVE_DISCOVERY_STATUS="$DISCOVERY_STATUS"
+    ACTIVE_DISCOVERY_REASON="$DISCOVERY_REASON"
+    QF_CARGO_TEST_STATUS="$DISCOVERY_STATUS"; QF_CARGO_TEST_REASON="$DISCOVERY_REASON"
+    QF_CARGO_TEST_COUNT="$DISCOVERY_COUNT"; QF_CARGO_TEST_COMMAND_STATUS="$DISCOVERY_COMMAND_STATUS"
+    QF_CARGO_TEST_COMMAND="$DISCOVERY_COMMAND"; QF_CARGO_TEST_TARGET="$DISCOVERY_TARGET"
+    QF_CARGO_TEST_FEATURE_SET="$DISCOVERY_FEATURES"; QF_CARGO_TEST_FILTER="<all>"
+    QF_CARGO_TEST_RAW_OUTPUT="$DISCOVERY_RAW_OUTPUT"
+    return 0
+  fi
+  if qf_cargo_test_discover "$TEST_LIST_FILE" "lib" "$BASE_FEATURES" --release --features rust-tests --lib; then
+    local legacy_status="ok"
+  else
+    local legacy_status="fail"
+    FAILED=$((FAILED+1))
+  fi
+  DISCOVERY_DONE=1
+  DISCOVERY_STATUS="$QF_CARGO_TEST_STATUS"
+  DISCOVERY_REASON="$QF_CARGO_TEST_REASON"
+  DISCOVERY_COUNT="$QF_CARGO_TEST_COUNT"
+  DISCOVERY_COMMAND_STATUS="$QF_CARGO_TEST_COMMAND_STATUS"
+  DISCOVERY_COMMAND="$QF_CARGO_TEST_COMMAND"
+  DISCOVERY_TARGET="$QF_CARGO_TEST_TARGET"
+  DISCOVERY_FEATURES="$QF_CARGO_TEST_FEATURE_SET"
+  ACTIVE_DISCOVERY_STATUS="$DISCOVERY_STATUS"
+  ACTIVE_DISCOVERY_REASON="$DISCOVERY_REASON"
+  append_json_record "discovery:lib" "$legacy_status" 0 "$QF_CARGO_TEST_STATUS" "$QF_CARGO_TEST_REASON" \
+    "$QF_CARGO_TEST_COMMAND" "$QF_CARGO_TEST_TARGET" "$QF_CARGO_TEST_FEATURE_SET" "$QF_CARGO_TEST_COUNT" null \
+    "$QF_CARGO_TEST_COMMAND_STATUS" "$QF_CARGO_TEST_STATUS" "$QF_CARGO_TEST_RAW_OUTPUT"
+}
+
+test_pattern_exists() {
+  local pattern="$1"
+  ensure_test_list
+  if [[ "$ACTIVE_DISCOVERY_STATUS" != "PASS" ]]; then
+    return 2
+  fi
+  rg -F -q -- "$pattern" "$TEST_LIST_FILE"
+}
+
+run_optional_test() {
+  local label="$1"; local pattern="$2"; shift 2
+  local env_string=""
+  if [[ "$#" -gt 0 ]]; then
+    env_string="$1"
+    shift
+  fi
+  local -a cargo_args=("$@")
+  if [[ "$#" -eq 0 ]]; then
+    cargo_args=(--release --features rust-tests --lib "$pattern" -- --nocapture)
+  fi
+  if test_pattern_exists "$pattern"; then
+    DISCOVERY_STATUS_FOR_RUN="$ACTIVE_DISCOVERY_STATUS"
+    local -a env_args=()
+    if [[ -n "$env_string" ]]; then eval "env_args=( $env_string )"; fi
+    if [[ "${#env_args[@]}" -gt 0 ]]; then
+      run_case "$label" "${env_args[@]}" -- cargo test "${cargo_args[@]}"
+    else
+      run_case "$label" -- cargo test "${cargo_args[@]}"
+    fi
+    DISCOVERY_STATUS_FOR_RUN="not_applicable"
+    return 0
+  fi
+  local pattern_status=$?
+  if [[ "$pattern_status" -eq 2 ]]; then
+    append_json_record "$label" "fail" 0 "$ACTIVE_DISCOVERY_STATUS" "$ACTIVE_DISCOVERY_REASON" \
+      "$QF_CARGO_TEST_COMMAND" "$QF_CARGO_TEST_TARGET" "$QF_CARGO_TEST_FEATURE_SET" "$QF_CARGO_TEST_COUNT" null \
+      "$QF_CARGO_TEST_COMMAND_STATUS" "$ACTIVE_DISCOVERY_STATUS" "$QF_CARGO_TEST_RAW_OUTPUT"
+  else
+    SKIPPED=$((SKIPPED+1))
+    append_json_record "$label" "skipped" 0 "SKIP" "pattern_not_found_after_target_scoped_discovery" \
+      "$QF_CARGO_TEST_COMMAND" "$QF_CARGO_TEST_TARGET" "$QF_CARGO_TEST_FEATURE_SET" "$QF_CARGO_TEST_COUNT" null \
+      "$QF_CARGO_TEST_COMMAND_STATUS" "$ACTIVE_DISCOVERY_STATUS" "$QF_CARGO_TEST_RAW_OUTPUT"
+  fi
+  return 0
 }
 
 run_case() {
@@ -116,6 +211,38 @@ run_case() {
     echo "  Env: ${envs[*]}"
   fi
   echo "  Cmd: ${cmd[*]}"
+  if [[ "${cmd[0]:-}" == "cargo" && "${cmd[1]:-}" == "test" ]]; then
+    local output_file="$OUTPUT_DIR/cargo-test-${TOTAL}.txt"
+    local command_status=0
+    if [[ ${#envs[@]} -gt 0 ]]; then
+      if ( LOG_FILE="" JSON="" JSON_FILE="" run env "${envs[@]}" cargo "${cmd[@]:1}" ) > "$output_file" 2>&1; then
+        command_status=0
+      else
+        command_status=$?
+      fi
+    elif LOG_FILE="" JSON="" JSON_FILE="" run_cargo "${cmd[@]:1}" > "$output_file" 2>&1; then
+      command_status=0
+    else
+      command_status=$?
+    fi
+    cat "$output_file"
+    qf_cargo_test_metadata_from_args "${cmd[@]:1}"
+    if qf_cargo_test_classify_output run "$output_file" "$command_status" \
+      "$QF_CARGO_TEST_TARGET" "$QF_CARGO_TEST_FEATURE_SET" "$QF_CARGO_TEST_FILTER" "$QF_CARGO_TEST_COMMAND"; then
+      :
+    else
+      :
+    fi
+    local duration=$(( $(date +%s) - start ))
+    local legacy_status="ok"
+    if [[ "$QF_CARGO_TEST_STATUS" != "PASS" ]]; then legacy_status="fail"; fi
+    if [[ "$QF_CARGO_TEST_STATUS" == "PASS" ]]; then PASSED=$((PASSED+1)); else FAILED=$((FAILED+1)); fi
+    append_json_record "$name" "$legacy_status" "$duration" "$QF_CARGO_TEST_STATUS" "$QF_CARGO_TEST_REASON" \
+      "$QF_CARGO_TEST_COMMAND" "$QF_CARGO_TEST_TARGET" "$QF_CARGO_TEST_FEATURE_SET" null \
+      "$QF_CARGO_TEST_COUNT" "$QF_CARGO_TEST_COMMAND_STATUS" "$DISCOVERY_STATUS_FOR_RUN" "$QF_CARGO_TEST_RAW_OUTPUT"
+    DISCOVERY_STATUS_FOR_RUN="not_applicable"
+    return 0
+  fi
   if [[ ${#envs[@]} -gt 0 ]]; then
     if [[ "${cmd[0]}" == "cargo" && "${cmd[1]:-}" != "fuzz" ]]; then
       if run env "${envs[@]}" cargo "${cmd[@]:1}"; then
@@ -145,13 +272,7 @@ run_case() {
 run_named_test() {
   local label="$1"; shift
   local pattern="$1"; shift
-  if test_pattern_exists "$pattern"; then
-    run_case "$label" -- cargo test --release --features rust-tests --lib "$pattern" -- --nocapture
-  else
-    warn "Skipping ${label} (no matching tests)"
-    SKIPPED=$((SKIPPED+1))
-    append_json "$label" "skipped" 0
-  fi
+  run_optional_test "$label" "$pattern"
 }
 
 # Fuzzing configuration
@@ -182,12 +303,10 @@ if command -v cargo-fuzz &> /dev/null && [[ -f "$FUZZ_MANIFEST" ]]; then
       run_case "Fuzz build" RUSTUP_TOOLCHAIN="${TOOLCHAIN_PIN}" CARGO_TARGET_DIR="$FUZZ_TARGET_DIR" -- cargo fuzz build --fuzz-dir "$FUZZ_DIR" || true
     elif has_nightly_rustc && ! fuzz_enabled_on_host; then
       warn "Skipping cargo-fuzz on macOS arm64 by default (set QUICFUSCATE_FORCE_FUZZ=1 to force)"
-      SKIPPED=$((SKIPPED+1))
-      append_json "Fuzz build" "skipped" 0
+      record_platform_skip "Fuzz build" "host_fuzz_gate_requires_force_override" "cargo-fuzz" "$BASE_FEATURES"
     else
       warn "cargo-fuzz installed but nightly rustc is not active; skipping fuzz build"
-      SKIPPED=$((SKIPPED+1))
-      append_json "Fuzz build" "skipped" 0
+      record_platform_skip "Fuzz build" "nightly_rustc_unavailable" "cargo-fuzz" "$BASE_FEATURES"
     fi
 else
     if has_nightly_rustc; then
@@ -195,8 +314,7 @@ else
       run_case "ASAN build" RUSTUP_TOOLCHAIN="${TOOLCHAIN_PIN}" RUSTFLAGS="-Zsanitizer=address" -- cargo build --release || true
     else
       warn "cargo-fuzz not available or fuzz manifest missing; skipping sanitizer build"
-      SKIPPED=$((SKIPPED+1))
-      append_json "Sanitizer build" "skipped" 0
+      record_platform_skip "Sanitizer build" "cargo_fuzz_or_fuzz_manifest_unavailable" "sanitizer" "$BASE_FEATURES"
     fi
 fi
 
@@ -213,13 +331,7 @@ echo -e "\n> Testing boundary conditions..."
 run_named_test "Boundary conditions" "boundary_conditions"
 
 echo -e "\n> Testing integer overflows..."
-if test_pattern_exists "integer_overflow"; then
-  run_case "Integer overflow checks" RUSTFLAGS="-Coverflow-checks=on" -- cargo test --release --features rust-tests --lib integer_overflow -- --nocapture
-else
-  warn "Skipping integer_overflow (no matching tests)"
-  SKIPPED=$((SKIPPED+1))
-  append_json "Integer overflow checks" "skipped" 0
-fi
+run_optional_test "Integer overflow checks" "integer_overflow" "RUSTFLAGS=-Coverflow-checks=on"
 
 # Memory safety tests
 echo -e "\n=== Memory Safety Tests ==="
@@ -237,35 +349,19 @@ run_named_test "Double-free" "double_free"
 echo -e "\n=== Concurrency Safety Tests ==="
 
 echo -e "\n> Testing data races..."
-if test_pattern_exists "data_race"; then
-  if has_nightly_rustc && tsan_supported; then
-    run_case "Data races (TSAN)" RUSTUP_TOOLCHAIN="${TOOLCHAIN_PIN}" RUSTFLAGS="-Zsanitizer=thread -Cunsafe-allow-abi-mismatch=sanitizer" -- cargo test --release --features rust-tests --lib data_race -- --nocapture
-  else
-    run_case "Data races" -- cargo test --release --features rust-tests --lib data_race -- --nocapture
-  fi
+if has_nightly_rustc && tsan_supported; then
+  run_optional_test "Data races (TSAN)" "data_race" "RUSTUP_TOOLCHAIN=${TOOLCHAIN_PIN} RUSTFLAGS='-Zsanitizer=thread -Cunsafe-allow-abi-mismatch=sanitizer'"
 else
-  warn "Skipping data_race (no matching tests)"
-  SKIPPED=$((SKIPPED+1))
-  append_json "Data races" "skipped" 0
+  run_optional_test "Data races" "data_race"
 fi
 
 echo -e "\n> Testing deadlocks..."
-if test_pattern_exists "deadlock_detection"; then
-  run_case "Deadlock detection" -- cargo test --release --features rust-tests --lib deadlock_detection -- --nocapture --test-threads=8
-else
-  warn "Skipping deadlock_detection (no matching tests)"
-  SKIPPED=$((SKIPPED+1))
-  append_json "Deadlock detection" "skipped" 0
-fi
+run_optional_test "Deadlock detection" "deadlock_detection" "" \
+  --release --features rust-tests --lib deadlock_detection -- --nocapture --test-threads=8
 
 echo -e "\n> Testing race conditions..."
-if test_pattern_exists "race_conditions"; then
-  run_case "Race conditions" -- cargo test --release --features rust-tests --lib race_conditions -- --nocapture --test-threads=16
-else
-  warn "Skipping race_conditions (no matching tests)"
-  SKIPPED=$((SKIPPED+1))
-  append_json "Race conditions" "skipped" 0
-fi
+run_optional_test "Race conditions" "race_conditions" "" \
+  --release --features rust-tests --lib race_conditions -- --nocapture --test-threads=16
 
 # Crypto security tests
 echo -e "\n=== Cryptographic Security Tests ==="
@@ -319,8 +415,7 @@ if command -v cargo-fuzz &> /dev/null && [[ -f "$FUZZ_MANIFEST" ]] && has_nightl
     done
 else
     warn "Fuzz targets skipped (cargo-fuzz missing, fuzz manifest missing, nightly rustc not active, or host gating active)"
-    SKIPPED=$((SKIPPED+1))
-    append_json "Fuzz targets" "skipped" 0
+    record_platform_skip "Fuzz targets" "cargo_fuzz_manifest_nightly_or_host_prerequisite_unavailable" "cargo-fuzz" "$BASE_FEATURES"
 fi
 
 # Property-based testing
@@ -351,7 +446,7 @@ if [[ "$OSTYPE" == "linux-gnu"* ]] || [[ "$OSTYPE" == "darwin"* ]]; then
       echo -e "\n> Running with AddressSanitizer..."
       if [[ "$OSTYPE" == "darwin"* && "$(uname -m 2>/dev/null || true)" == "arm64" ]]; then
         warn "ASAN full test is unstable on macOS arm64 in this toolchain setup; skipping"
-        SKIPPED=$((SKIPPED+1)); append_json "ASAN full test" "skipped" 0
+        record_platform_skip "ASAN full test" "macos_arm64_toolchain_instability" "asan" "$BASE_FEATURES"
       elif [[ "$OSTYPE" == "darwin"* && -f "$ASAN_RT" ]]; then
         run_case "ASAN full test" RUSTUP_TOOLCHAIN="${TOOLCHAIN_PIN}" RUSTFLAGS="-Zsanitizer=address" DYLD_INSERT_LIBRARIES="${ASAN_RT}" DYLD_FORCE_FLAT_NAMESPACE=1 -- cargo test --release --features rust-tests || true
       else
@@ -361,7 +456,7 @@ if [[ "$OSTYPE" == "linux-gnu"* ]] || [[ "$OSTYPE" == "darwin"* ]]; then
       echo -e "\n> Running with MemorySanitizer..."
       if [[ "$OSTYPE" == "darwin"* ]]; then
         warn "MSAN is not supported on macOS; skipping"
-        SKIPPED=$((SKIPPED+1)); append_json "MSAN full test" "skipped" 0
+        record_platform_skip "MSAN full test" "platform_unsupported_macos" "msan" "$BASE_FEATURES"
       else
         run_case "MSAN full test" RUSTUP_TOOLCHAIN="${TOOLCHAIN_PIN}" RUSTFLAGS="-Zsanitizer=memory" -- cargo test --release --features rust-tests || true
       fi
@@ -369,15 +464,15 @@ if [[ "$OSTYPE" == "linux-gnu"* ]] || [[ "$OSTYPE" == "darwin"* ]]; then
       echo -e "\n> Running with UndefinedBehaviorSanitizer..."
       if [[ "$OSTYPE" == "darwin"* && ! -f "$UBSAN_RT" ]]; then
         warn "UBSAN runtime not available for this toolchain; skipping"
-        SKIPPED=$((SKIPPED+1)); append_json "UBSAN full test" "skipped" 0
+        record_platform_skip "UBSAN full test" "nightly_ubsan_runtime_unavailable" "ubsan" "$BASE_FEATURES"
       else
         run_case "UBSAN full test" RUSTUP_TOOLCHAIN="${TOOLCHAIN_PIN}" RUSTFLAGS="-Zsanitizer=undefined" -- cargo test --release --features rust-tests || true
       fi
     else
       warn "Sanitizers require nightly rustc; skipping"
-      SKIPPED=$((SKIPPED+1)); append_json "ASAN full test" "skipped" 0
-      SKIPPED=$((SKIPPED+1)); append_json "MSAN full test" "skipped" 0
-      SKIPPED=$((SKIPPED+1)); append_json "UBSAN full test" "skipped" 0
+      record_platform_skip "ASAN full test" "nightly_rustc_unavailable" "asan" "$BASE_FEATURES"
+      record_platform_skip "MSAN full test" "nightly_rustc_unavailable" "msan" "$BASE_FEATURES"
+      record_platform_skip "UBSAN full test" "nightly_rustc_unavailable" "ubsan" "$BASE_FEATURES"
     fi
 fi
 

@@ -37,6 +37,10 @@ FIRST=1
 FAIL=0
 BENCH_AVAILABLE=1
 TEST_LIST_FILE="$OUTPUT_DIR/testlist.txt"
+BASE_FEATURES="$(qf_cargo_test_feature_set "${CARGO_FEATURES:-}")"
+DISCOVERY_DONE=0; DISCOVERY_STATUS=""; DISCOVERY_REASON=""; DISCOVERY_COUNT=0
+DISCOVERY_COMMAND_STATUS=""; DISCOVERY_COMMAND=""; DISCOVERY_TARGET=""; DISCOVERY_FEATURES=""; DISCOVERY_RAW_OUTPUT="$TEST_LIST_FILE"
+ACTIVE_DISCOVERY_STATUS=""; ACTIVE_DISCOVERY_REASON=""
 
 # Performance thresholds (% degradation allowed)
 THROUGHPUT_THRESHOLD=5
@@ -146,16 +150,91 @@ PY
   echo "0"
 }
 
+append_performance_record() {
+  local name="$1" metric="$2" value="$3" legacy_status="$4" result="$5" reason="$6"
+  local command="$7" target="$8" feature_set="$9" discovered_count="${10:-null}"
+  local executed_count="${11:-null}" command_status="${12:-null}"
+  local discovery_status="${13:-not_applicable}" raw_output="${14:-}"
+  if [[ "$FIRST" -eq 0 ]]; then echo "," >> "$SUMMARY_JSON"; fi
+  FIRST=0
+  printf '  {"name":"%s","metric":"%s","value":"%s","status":"%s","result":"%s","reason":"%s","command":"%s","target":"%s","feature_set":"%s","discovered_test_count":%s,"executed_test_count":%s,"command_status":%s,"discovery_status":"%s","raw_output":"%s"}' \
+    "$(qf_json_escape "$name")" "$(qf_json_escape "$metric")" "$(qf_json_escape "$value")" \
+    "$(qf_json_escape "$legacy_status")" "$(qf_json_escape "$result")" "$(qf_json_escape "$reason")" \
+    "$(qf_json_escape "$command")" "$(qf_json_escape "$target")" "$(qf_json_escape "$feature_set")" \
+    "$discovered_count" "$executed_count" "$command_status" "$(qf_json_escape "$discovery_status")" \
+    "$(qf_json_escape "$raw_output")" >> "$SUMMARY_JSON"
+}
+
 ensure_test_list() {
-  if [[ ! -f "$TEST_LIST_FILE" ]]; then
-    run cargo test --release --lib -- --list > "$TEST_LIST_FILE" 2>/dev/null || true
+  if [[ "$DISCOVERY_DONE" -eq 1 ]]; then
+    ACTIVE_DISCOVERY_STATUS="$DISCOVERY_STATUS"
+    ACTIVE_DISCOVERY_REASON="$DISCOVERY_REASON"
+    QF_CARGO_TEST_STATUS="$DISCOVERY_STATUS"; QF_CARGO_TEST_REASON="$DISCOVERY_REASON"
+    QF_CARGO_TEST_COUNT="$DISCOVERY_COUNT"; QF_CARGO_TEST_COMMAND_STATUS="$DISCOVERY_COMMAND_STATUS"
+    QF_CARGO_TEST_COMMAND="$DISCOVERY_COMMAND"; QF_CARGO_TEST_TARGET="$DISCOVERY_TARGET"
+    QF_CARGO_TEST_FEATURE_SET="$DISCOVERY_FEATURES"; QF_CARGO_TEST_FILTER="<all>"
+    QF_CARGO_TEST_RAW_OUTPUT="$DISCOVERY_RAW_OUTPUT"
+    return 0
   fi
+  if qf_cargo_test_discover "$TEST_LIST_FILE" "lib" "$BASE_FEATURES" --release --lib; then
+    local legacy_status="ok"
+  else
+    local legacy_status="fail"
+    FAIL=1
+  fi
+  DISCOVERY_DONE=1
+  DISCOVERY_STATUS="$QF_CARGO_TEST_STATUS"
+  DISCOVERY_REASON="$QF_CARGO_TEST_REASON"
+  DISCOVERY_COUNT="$QF_CARGO_TEST_COUNT"
+  DISCOVERY_COMMAND_STATUS="$QF_CARGO_TEST_COMMAND_STATUS"
+  DISCOVERY_COMMAND="$QF_CARGO_TEST_COMMAND"
+  DISCOVERY_TARGET="$QF_CARGO_TEST_TARGET"
+  DISCOVERY_FEATURES="$QF_CARGO_TEST_FEATURE_SET"
+  DISCOVERY_RAW_OUTPUT="$QF_CARGO_TEST_RAW_OUTPUT"
+  ACTIVE_DISCOVERY_STATUS="$DISCOVERY_STATUS"
+  ACTIVE_DISCOVERY_REASON="$DISCOVERY_REASON"
+  append_performance_record "discovery:lib" "test_discovery" "$DISCOVERY_COUNT" "$legacy_status" "$QF_CARGO_TEST_STATUS" "$QF_CARGO_TEST_REASON" \
+    "$QF_CARGO_TEST_COMMAND" "$QF_CARGO_TEST_TARGET" "$QF_CARGO_TEST_FEATURE_SET" "$QF_CARGO_TEST_COUNT" null \
+    "$QF_CARGO_TEST_COMMAND_STATUS" "$QF_CARGO_TEST_STATUS" "$QF_CARGO_TEST_RAW_OUTPUT"
 }
 
 test_pattern_exists() {
   local pattern="$1"
   ensure_test_list
-  grep -q "$pattern" "$TEST_LIST_FILE" 2>/dev/null
+  if [[ "$ACTIVE_DISCOVERY_STATUS" != "PASS" ]]; then
+    return 2
+  fi
+  rg -F -q -- "$pattern" "$TEST_LIST_FILE"
+}
+
+run_optional_cargo_test() {
+  local label="$1"; local pattern="$2"
+  if test_pattern_exists "$pattern"; then
+    local safe_label="${label//[^[:alnum:]_.-]/_}"
+    local output_file="$OUTPUT_DIR/test-${safe_label}.txt"
+    if qf_cargo_test_run "$output_file" "lib" "$BASE_FEATURES" "$pattern" \
+      --release --lib "$pattern" -- --nocapture; then
+      local legacy_status="ok"
+    else
+      local legacy_status="fail"
+      FAIL=1
+    fi
+    append_performance_record "$label" "test_execution" "$QF_CARGO_TEST_COUNT" "$legacy_status" "$QF_CARGO_TEST_STATUS" \
+      "$QF_CARGO_TEST_REASON" "$QF_CARGO_TEST_COMMAND" "$QF_CARGO_TEST_TARGET" "$QF_CARGO_TEST_FEATURE_SET" \
+      null "$QF_CARGO_TEST_COUNT" "$QF_CARGO_TEST_COMMAND_STATUS" "$ACTIVE_DISCOVERY_STATUS" "$QF_CARGO_TEST_RAW_OUTPUT"
+    return 0
+  fi
+  local pattern_status=$?
+  if [[ "$pattern_status" -eq 2 ]]; then
+    append_performance_record "$label" "test_execution" "0" "fail" "$ACTIVE_DISCOVERY_STATUS" "$ACTIVE_DISCOVERY_REASON" \
+      "$QF_CARGO_TEST_COMMAND" "$QF_CARGO_TEST_TARGET" "$QF_CARGO_TEST_FEATURE_SET" "$QF_CARGO_TEST_COUNT" null \
+      "$QF_CARGO_TEST_COMMAND_STATUS" "$ACTIVE_DISCOVERY_STATUS" "$QF_CARGO_TEST_RAW_OUTPUT"
+  else
+    append_performance_record "$label" "test_execution" "0" "skipped" "SKIP" \
+      "pattern_not_found_after_target_scoped_discovery" "$QF_CARGO_TEST_COMMAND" "$QF_CARGO_TEST_TARGET" \
+      "$QF_CARGO_TEST_FEATURE_SET" "$QF_CARGO_TEST_COUNT" null "$QF_CARGO_TEST_COMMAND_STATUS" \
+      "$ACTIVE_DISCOVERY_STATUS" "$QF_CARGO_TEST_RAW_OUTPUT"
+  fi
 }
 
 # Function to measure and compare
@@ -168,13 +247,9 @@ measure_performance() {
     
     if [[ "$BENCH_AVAILABLE" -ne 1 ]]; then
         echo "  Skipped: no bench harness available"
-        local result="0"
-        local baseline="0"
-        local change="0"
-        local status="skipped"
-        if [[ "$FIRST" -eq 0 ]]; then echo "," >> "$SUMMARY_JSON"; fi; FIRST=0
-        printf '  {"name":"%s","metric":"%s","value":"%s","status":"%s"}' \
-          "$test_name" "$metric" "$result" "$status" >> "$SUMMARY_JSON"
+        append_performance_record "$test_name" "$metric" "0" "skipped" "SKIP" \
+          "benchmark_harness_unavailable" "cargo bench --features benches -- $test_name" "bench" "benches" \
+          null null null "SKIP" ""
         return 0
     fi
 
@@ -238,8 +313,17 @@ measure_performance() {
     fi
     # Save current result into summary JSON items
     if [[ "$FIRST" -eq 0 ]]; then echo "," >> "$SUMMARY_JSON"; fi; FIRST=0
-    printf '  {"name":"%s","metric":"%s","value":"%s"' \
-      "$test_name" "$metric_used" "$result" >> "$SUMMARY_JSON"
+    local result_state="PASS"
+    local result_reason="benchmark_completed_without_regression"
+    case "$status" in
+      regression) result_state="FAIL"; result_reason="performance_regression_exceeded_threshold";;
+      no_output) result_state="FAIL"; result_reason="benchmark_output_missing";;
+      no_baseline) result_reason="benchmark_completed_without_baseline";;
+    esac
+    local benchmark_command="cargo bench --features benches -- $(printf '%q' "$test_name")"
+    printf '  {"name":"%s","metric":"%s","value":"%s","result":"%s","reason":"%s","command":"%s","target":"bench","feature_set":"benches","discovered_test_count":null,"executed_test_count":null,"command_status":null,"discovery_status":"not_applicable","raw_output":"%s"' \
+      "$(qf_json_escape "$test_name")" "$(qf_json_escape "$metric_used")" "$(qf_json_escape "$result")" \
+      "$result_state" "$result_reason" "$(qf_json_escape "$benchmark_command")" "$(qf_json_escape "$output_file")" >> "$SUMMARY_JSON"
     if [ -f "$BASELINE_FILE" ]; then
       printf ',"baseline":"%s","change_percent":"%s","threshold_percent":%s,"status":"%s"' \
         "$baseline" "$change" "$threshold" "$status" >> "$SUMMARY_JSON"
@@ -264,28 +348,18 @@ done
 if [[ "$RUN_MEM_CPU" -eq 1 ]]; then
   echo -e "\n=== Memory Usage Tests ==="
   echo -e "\n> Testing memory allocation patterns..."
-  if test_pattern_exists "memory_usage"; then
-    run_cargo test --release --lib memory_usage -- --nocapture || FAIL=1
-  else
-    warn "Skipping memory_usage (no matching tests)"
-  fi
+  run_optional_cargo_test "Memory usage" "memory_usage"
 
   echo -e "\n> Testing memory pool efficiency..."
-  if test_pattern_exists "pool_efficiency"; then
-    run_cargo test --release --lib pool_efficiency -- --nocapture || FAIL=1
-  else
-    warn "Skipping pool_efficiency (no matching tests)"
-  fi
+  run_optional_cargo_test "Memory pool efficiency" "pool_efficiency"
 
   echo -e "\n=== CPU Usage Tests ==="
   echo -e "\n> Testing CPU utilization..."
-  if test_pattern_exists "cpu_usage"; then
-    run_cargo test --release --lib cpu_usage -- --nocapture || FAIL=1
-  else
-    warn "Skipping cpu_usage (no matching tests)"
-  fi
+  run_optional_cargo_test "CPU usage" "cpu_usage"
 else
   warn "FAST mode: skipping memory/CPU tests"
+  append_performance_record "memory_cpu_tests" "test_execution" "0" "skipped" "SKIP" \
+    "fast_mode_reduced_selection" "not_applicable" "lib" "$BASE_FEATURES" null null null "SKIP" ""
 fi
 
 # Hot path performance
@@ -306,6 +380,9 @@ if [[ "$RUN_SIMD" -eq 1 && "$BENCH_AVAILABLE" -eq 1 && $(uname -m) == "x86_64" ]
     echo "  With AVX2: $OPTIMIZED"
 elif [[ "$RUN_SIMD" -eq 0 ]]; then
     warn "FAST mode: skipping SIMD verification"
+    append_performance_record "SIMD verification" "benchmark" "0" "skipped" "SKIP" \
+      "fast_mode_reduced_selection" "cargo bench --features benches -- simd_xor" "bench" "benches" \
+      null null null "SKIP" ""
 fi
 
 # Scalability tests
@@ -314,21 +391,13 @@ echo -e "\n=== Scalability Tests ==="
 echo -e "\n> Testing connection scalability..."
 for connections in "${SCALABILITY_CONNECTIONS[@]}"; do
     echo "  Testing with $connections connections..."
-    if test_pattern_exists "scalability_${connections}"; then
-      run_cargo test --release --lib "scalability_${connections}" -- --nocapture || FAIL=1
-    else
-      warn "Skipping scalability_${connections} (no matching tests)"
-    fi
+    run_optional_cargo_test "Scalability ${connections} connections" "scalability_${connections}"
 done
 
 echo -e "\n> Testing stream scalability..."
 for streams in "${SCALABILITY_STREAMS[@]}"; do
     echo "  Testing with $streams streams..."
-    if test_pattern_exists "streams_${streams}"; then
-      run_cargo test --release --lib "streams_${streams}" -- --nocapture || FAIL=1
-    else
-      warn "Skipping streams_${streams} (no matching tests)"
-    fi
+    run_optional_cargo_test "Scalability ${streams} streams" "streams_${streams}"
 done
 
 # Generate comparison report

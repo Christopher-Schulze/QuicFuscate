@@ -3755,9 +3755,9 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `test-probe-detection.sh` - Active-probe validation (detector invariants, reality fallback rotation, optional stealth pressure path)
 - `test-crypto.sh` - Crypto suite (AEGIS/MORUS/AES-GCM/ChaCha20/HKDF/CT operations)
 - `test-transport.sh` - Transport suite (varint/frames/loss/BBR/0-RTT/validated migration/DATAGRAM; io_uring on Linux)
-- `test-optimization.sh` - Optimize suite (MemoryPool/NUMA/HugePages/SIMD/prefetch/zero-copy) + SIMD/accelerate fixtures (`--features rust-tests,simd-selfcheck`; override via `CARGO_FEATURES`)
-- `test-security-fuzzing.sh` - Security & fuzzing (ASAN/MSAN/UBSAN, fuzz targets, concurrency, `rt-property-suite` via proptest)
-- `test-performance-regression.sh` - Performance regression with baseline comparison
+- `test-optimization.sh` - Optimize suite (MemoryPool/NUMA/HugePages/SIMD/prefetch/zero-copy) + SIMD/accelerate fixtures (`--features rust-tests,simd-selfcheck`; override via `CARGO_FEATURES`). Optional library tests use target-scoped discovery and fail closed on discovery or zero-test execution.
+- `test-security-fuzzing.sh` - Security & fuzzing (ASAN/MSAN/UBSAN, fuzz targets, concurrency, `rt-property-suite` via proptest). Dynamic library-test selection uses release/`--lib` discovery with explicit feature and prerequisite status.
+- `test-performance-regression.sh` - Performance regression with baseline comparison; optional library checks use the same release/`--lib` and feature scope for discovery and execution.
 - `test-e2e.sh` - End-to-end integration tests with real network scenarios
 - `tun-provisioning-negative-netns.sh` - Privileged Linux network-namespace proof for fail-closed TUN creation, duplicate/conflicting resources, permission denial, routing failure/retry, missing-interface rollback, and zero owned residue
 - `tun-e2e-netns.sh` - Linux network-namespace production smoke: real server/client TUN over authenticated H3/MASQUE CONNECT-UDP and a hard 0%-loss ping assertion through the tunnel
@@ -3806,6 +3806,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 
 **Fast runs (`scripts/tests/fast/`)**
 - `test-fast-crypto.sh` - Fast crypto sanity (TLS Cover parity + Wiedemann scalar telemetry)
+- `test-dynamic-discovery-fail-closed.sh` - Real Cargo contract for discovery command failure, target mismatch, stale patterns, and zero-test execution
 - `test-fast-fec.sh` - Fast FEC sanity; runs separate `fec::tests::`, `gf16`, `wiedemann`, and `streaming` filters with `benches,rust-tests`, requires a positive executed-test count per filter, and records a separate bench compile result
 - `test-fast-fec-fail-closed.sh` - Negative contract proving a real focused Cargo failure propagates as nonzero, records bounded failure evidence, and cannot reach the green completion marker or bench stage
 
