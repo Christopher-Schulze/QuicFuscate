@@ -4637,6 +4637,13 @@ A full deep-audit sweep of `src/` was performed with parallel read-only module s
 - **Audit/limits unsafe**: audit log and rate limiter `unsafe` blocks undocumented. Tracked in TODO-688.
 - **Remaining unsafe**: `cpu_dispatch`, `telemetry`, `cache_and_const`, `lib.rs`, and tests need safety docs. Tracked in TODO-689.
 
+### Follow-up Audit Findings (2026-08-02)
+
+- **Server fan-out and MTU:** `src/implementations/server/parts/live_auth.rs` clones broadcast/multicast payloads into an uncapped shared queue, while `live_state.rs` drains the entire backlog into a second container. Tracked in TODO-612. The IPv4 uplink path returns oversized non-DF packets without userspace fragmentation or an explicit disposition; native backend behavior remains unproven. Tracked in TODO-613.
+- **Rate and session contracts:** `src/implementations/server/limits.rs` gives packet and byte buckets different initial-burst windows without defining the cross-dimension policy. Tracked in TODO-614. `src/implementations/server/session.rs` does not reject duplicate lookup keys or duplicate session IDs transactionally, and remote-address rebinding removes the old index before validating the new one. Tracked in TODO-616.
+- **HTTP control surfaces:** `systemd::HealthServer` and the active `MetricsServer` process connections serially without read deadlines; `MetricsServer` also classifies a single partial 1024-byte read. Tracked in TODO-615. The separate telemetry server already has a five-second read timeout, a 32-connection semaphore, and `QUICFUSCATE_METRICS_ADDR`; the test-only `GlobalMetricsServer` is not an active production surface.
+- **Unix admin socket:** `AdminServer` relies on umask for socket permissions, reads an unbounded newline-delimited command without a deadline, and removes any existing path before checking that it is a stale owned socket. Tracked in TODO-617.
+
 ### Build Verification
 
 - `cargo check --all-targets --all-features` completed successfully.

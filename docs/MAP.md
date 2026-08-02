@@ -1071,3 +1071,12 @@ A full source-audit sweep produced TODO-626 through TODO-689 and augmented TODO-
 - **Unsafe QKey/admin**: QKey registry and admin session blocks (TODO-685).
 
 `cargo check --all-targets --all-features` and `cargo clippy --all-targets --all-features -- -D warnings` pass after a `cargo clean` recovered a corrupted `target/` cache.
+
+## Deep Audit Update (2026-08-02)
+
+The follow-up source reconciliation confirmed and expanded the server/runtime backlog without changing implementation code:
+
+- **Server data plane:** the shared client fan-out queue is uncapped and its drain materializes the complete backlog into a second container (TODO-612); oversized non-DF IPv4 uplink packets have no explicit fragmentation disposition or native backend proof (TODO-613).
+- **Limits and sessions:** byte-rate burst behavior is undefined relative to the packet burst knob (TODO-614); health and production MetricsServer reads have no per-connection deadline and MetricsServer does not frame incremental requests (TODO-615); SessionManager insertion and path rebind can overwrite indexes, including duplicate session IDs, without an atomic conflict contract (TODO-616).
+- **Admin control plane:** the Unix admin socket mode is umask-dependent, command reads are unbounded and deadline-free, and startup removes a pre-existing path before verifying that it is a stale owned socket (TODO-617).
+- **Scope corrections:** the separate telemetry server already has a five-second read timeout, a 32-connection semaphore, and an environment-configurable bind; the test-only GlobalMetricsServer is not an active production surface. These boundaries are recorded in TODO-615.
