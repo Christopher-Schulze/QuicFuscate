@@ -877,8 +877,11 @@ fn reap_expired_sessions_from_domain(
 
 impl LiveServerState {
     pub fn try_new(server_config: ServerConfig) -> Result<Self, String> {
+        server_config.validate_revocation_retention()?;
         let revocation_manager =
-            Arc::new(crate::implementations::server::revocation::RevocationManager::new());
+            Arc::new(crate::implementations::server::revocation::RevocationManager::new_with_retention_secs(
+                server_config.revocation_retention_secs,
+            ));
         let qkey_tracker =
             Arc::new(crate::implementations::server::revocation::QKeyConnectionTracker::new());
         let domain = LiveServerDomain::try_new(&server_config)?;
@@ -1246,6 +1249,7 @@ impl LiveServerState {
             metrics.set_auth_state_tracked_ips(limiter.tracked_ips());
             metrics.record_auth_state_pruned(pruned);
         }
+        metrics.record_revocation_pruned(self.revocation_manager.prune_expired_if_due());
         #[cfg(feature = "rate_limiter")]
         {
             self.prune_rate_limits_if_due(metrics);

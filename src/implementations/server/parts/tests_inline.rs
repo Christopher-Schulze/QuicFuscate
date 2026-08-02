@@ -374,6 +374,13 @@ mod tests {
         assert!(config.ipv6_server_ip.is_some());
         assert_eq!(config.ipv6_server_ip.unwrap(), Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0x0001));
         assert_eq!(config.ipv6_prefix_len, 64);
+        assert_eq!(
+            config.revocation_retention_secs,
+            crate::implementations::server::revocation::DEFAULT_REVOCATION_RETENTION_SECS
+        );
+        assert!(config.validate_revocation_retention().is_ok());
+        let invalid = ServerConfig { revocation_retention_secs: 0, ..config };
+        assert!(invalid.validate_revocation_retention().is_err());
     }
 
     #[test]

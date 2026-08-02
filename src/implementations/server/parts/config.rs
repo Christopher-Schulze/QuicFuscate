@@ -56,6 +56,8 @@ pub struct ServerConfig {
     pub allow_client_to_client: bool,
     /// Bounded QKey authentication backoff and block lifecycle.
     pub auth_policy: AuthPolicyConfig,
+    /// Retention for revoked QKey records in seconds.
+    pub revocation_retention_secs: u64,
     /// Default per-session bandwidth, quota, and scheduling policy.
     pub bandwidth_policy: BandwidthPolicy,
     /// Shared downlink service rate for weighted scheduling. Zero disables the shaper.
@@ -165,6 +167,8 @@ impl Default for ServerConfig {
             ],
             allow_client_to_client: false,
             auth_policy: AuthPolicyConfig::default(),
+            revocation_retention_secs:
+                crate::implementations::server::revocation::DEFAULT_REVOCATION_RETENTION_SECS,
             bandwidth_policy: BandwidthPolicy::default(),
             downlink_scheduler_rate_bytes_per_second: 0,
             downlink_scheduler_burst_bytes: 0,
@@ -190,6 +194,11 @@ pub fn server_config_from_listen_addr(
             format!("listen address '{}' resolved to no socket addresses", listen_addr)
         })?;
     let mut config = ServerConfig { listen, firewall_backend, ..ServerConfig::default() };
+    config.revocation_retention_secs = parse_auth_policy_env_u64(
+        "QUICFUSCATE_REVOCATION_RETENTION_SECS",
+        config.revocation_retention_secs,
+    )?;
+    config.validate_revocation_retention()?;
     config.auth_policy = load_auth_policy_config_from_env()?;
     config.bandwidth_policy = load_bandwidth_policy_from_env()?;
     (
@@ -206,6 +215,13 @@ pub fn server_config_from_listen_addr(
 }
 
 impl ServerConfig {
+    fn validate_revocation_retention(&self) -> Result<(), String> {
+        if self.revocation_retention_secs == 0 {
+            return Err("server revocation retention must be nonzero".to_string());
+        }
+        Ok(())
+    }
+
     fn validate_downlink_scheduler(&self) -> Result<(), String> {
         validate_downlink_scheduler_pair(
             self.downlink_scheduler_rate_bytes_per_second,

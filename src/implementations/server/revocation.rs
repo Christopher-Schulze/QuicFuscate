@@ -7,9 +7,14 @@
 //!   enabling immediate connection termination on revocation.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::RwLock;
+
+/// Default retention for revoked QKey records.
+pub const DEFAULT_REVOCATION_RETENTION_SECS: u64 = 90 * 24 * 60 * 60;
+const REVOCATION_PRUNE_INTERVAL_SECS: u64 = 300;
 
 /// A revoked QKey entry.
 #[derive(Debug, Clone)]
@@ -26,24 +31,70 @@ pub struct RevokedKey {
 pub struct RevocationManager {
     /// One state owner keeps lookup and display records consistent atomically.
     revoked_records: RwLock<HashMap<String, RevokedKey>>,
+    retention_secs: u64,
+    last_prune_at: AtomicU64,
 }
 
 impl RevocationManager {
     pub fn new() -> Self {
-        Self { revoked_records: RwLock::new(HashMap::new()) }
+        Self::new_with_retention_secs(DEFAULT_REVOCATION_RETENTION_SECS)
+    }
+
+    /// Create a manager with a bounded retention window for revoked records.
+    pub fn new_with_retention_secs(retention_secs: u64) -> Self {
+        Self {
+            revoked_records: RwLock::new(HashMap::new()),
+            retention_secs: retention_secs.max(1),
+            last_prune_at: AtomicU64::new(0),
+        }
+    }
+
+    fn current_epoch_secs() -> u64 {
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+    }
+
+    fn revoke_at(&self, key_id: &str, reason: &str, revoked_at: u64) {
+        let record =
+            RevokedKey { key_id: key_id.to_string(), revoked_at, reason: reason.to_string() };
+
+        self.revoked_records.write().insert(key_id.to_string(), record);
     }
 
     /// Revoke a QKey by ID. Immediately terminates all active connections
     /// using that key through the owning live server state.
     pub fn revoke(&self, key_id: &str, reason: &str) {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-
-        let record =
-            RevokedKey { key_id: key_id.to_string(), revoked_at: now, reason: reason.to_string() };
-
-        self.revoked_records.write().insert(key_id.to_string(), record);
+        self.revoke_at(key_id, reason, Self::current_epoch_secs());
 
         log::warn!("QKey revoked: id={} reason={}", key_id, reason);
+    }
+
+    /// Prune expired records at most once per bounded housekeeping interval.
+    pub fn prune_expired_if_due(&self) -> usize {
+        self.prune_expired_if_due_at(Self::current_epoch_secs())
+    }
+
+    fn prune_expired_if_due_at(&self, now: u64) -> usize {
+        let last_prune_at = self.last_prune_at.load(Ordering::Relaxed);
+        if last_prune_at != 0 && now.saturating_sub(last_prune_at) < REVOCATION_PRUNE_INTERVAL_SECS
+        {
+            return 0;
+        }
+        if self
+            .last_prune_at
+            .compare_exchange(last_prune_at, now, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            return 0;
+        }
+        self.prune_expired_at(now)
+    }
+
+    fn prune_expired_at(&self, now: u64) -> usize {
+        let cutoff = now.saturating_sub(self.retention_secs);
+        let mut records = self.revoked_records.write();
+        let before = records.len();
+        records.retain(|_, record| record.revoked_at > cutoff);
+        before.saturating_sub(records.len())
     }
 
     /// Check if a QKey is revoked. O(1) lookup.
@@ -220,6 +271,30 @@ mod tests {
         assert!(mgr.unrevoke("key1"));
         assert!(mgr.list_revoked().is_empty());
         assert!(!mgr.is_revoked("key1"));
+    }
+
+    #[test]
+    fn test_revocation_manager_prunes_expired_records_after_retention() {
+        let mgr = RevocationManager::new_with_retention_secs(90);
+        mgr.revoke_at("expired", "old", 10);
+        mgr.revoke_at("fresh", "current", 11);
+
+        assert_eq!(mgr.prune_expired_at(100), 1);
+        assert!(!mgr.is_revoked("expired"));
+        assert!(mgr.is_revoked("fresh"));
+    }
+
+    #[test]
+    fn test_revocation_manager_pruning_is_bounded_by_housekeeping_interval() {
+        let mgr = RevocationManager::new_with_retention_secs(90);
+        mgr.revoke_at("expired", "old", 1);
+
+        assert_eq!(mgr.prune_expired_if_due_at(100), 1);
+        mgr.revoke_at("another-expired", "old", 1);
+        assert_eq!(mgr.prune_expired_if_due_at(399), 0);
+        assert!(mgr.is_revoked("another-expired"));
+        assert_eq!(mgr.prune_expired_if_due_at(400), 1);
+        assert!(!mgr.is_revoked("another-expired"));
     }
 
     #[test]

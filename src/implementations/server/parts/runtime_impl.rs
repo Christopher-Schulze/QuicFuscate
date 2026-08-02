@@ -35,6 +35,7 @@ impl ServerRuntime {
         server_config: ServerConfig,
     ) -> Result<Self, EngineError> {
         server_config.auth_policy.validate().map_err(EngineError::Config)?;
+        server_config.validate_revocation_retention().map_err(EngineError::Config)?;
         server_config.bandwidth_policy.validate().map_err(EngineError::Config)?;
         server_config.validate_downlink_scheduler().map_err(EngineError::Config)?;
         #[cfg(feature = "rate_limiter")]

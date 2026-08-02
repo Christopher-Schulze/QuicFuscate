@@ -143,6 +143,7 @@ pub struct Metrics {
     pub auth_abandoned: AtomicU64,
     pub auth_state_tracked_ips: AtomicU64,
     pub auth_state_pruned: AtomicU64,
+    pub revocation_pruned: AtomicU64,
     pub rate_limited: AtomicU64,
     pub ddos_active: AtomicU64,
     pub ddos_current_pps: AtomicU64,
@@ -232,6 +233,7 @@ impl Metrics {
             auth_abandoned: AtomicU64::new(0),
             auth_state_tracked_ips: AtomicU64::new(0),
             auth_state_pruned: AtomicU64::new(0),
+            revocation_pruned: AtomicU64::new(0),
             rate_limited: AtomicU64::new(0),
             ddos_active: AtomicU64::new(0),
             ddos_current_pps: AtomicU64::new(0),
@@ -308,6 +310,10 @@ impl Metrics {
 
     pub fn record_auth_state_pruned(&self, pruned: usize) {
         self.auth_state_pruned.fetch_add(pruned as u64, Ordering::Relaxed);
+    }
+
+    pub fn record_revocation_pruned(&self, pruned: usize) {
+        self.revocation_pruned.fetch_add(pruned as u64, Ordering::Relaxed);
     }
 
     pub fn record_rate_limited(&self) {
@@ -931,6 +937,14 @@ impl Metrics {
             "quicfuscate_auth_state_pruned_total {}\n\n",
             self.auth_state_pruned.load(Ordering::Relaxed)
         );
+        out.push_str(
+            "# HELP quicfuscate_revocation_pruned_total Expired revoked QKey records pruned\n",
+        );
+        out.push_str("# TYPE quicfuscate_revocation_pruned_total counter\n");
+        write_metric!(
+            "quicfuscate_revocation_pruned_total {}\n\n",
+            self.revocation_pruned.load(Ordering::Relaxed)
+        );
 
         out.push_str("# HELP quicfuscate_rate_limited_total Rate-limited events\n");
         out.push_str("# TYPE quicfuscate_rate_limited_total counter\n");
@@ -1474,6 +1488,7 @@ mod tests {
         metrics.record_auth_abandoned();
         metrics.set_auth_state_tracked_ips(7);
         metrics.record_auth_state_pruned(3);
+        metrics.record_revocation_pruned(4);
 
         let output = metrics.export();
         for metric in [
@@ -1486,6 +1501,7 @@ mod tests {
             "quicfuscate_auth_abandoned_total 1",
             "quicfuscate_auth_state_tracked_ips 7",
             "quicfuscate_auth_state_pruned_total 3",
+            "quicfuscate_revocation_pruned_total 4",
         ] {
             assert!(output.contains(metric), "missing auth policy metric: {metric}");
         }

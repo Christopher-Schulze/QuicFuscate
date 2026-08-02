@@ -1,12 +1,31 @@
 use std::path::Path;
 
+fn open_temp_file(path: &Path, mode: Option<u32>) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    if let Some(mode) = mode {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(mode);
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    if let Some(mode) = mode {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+    }
+    Ok(file)
+}
+
 pub fn atomic_write_file(
     path: &Path,
     bytes: &[u8],
     mode: Option<u32>,
     nonce_context: &str,
 ) -> std::io::Result<()> {
-    use std::fs::File;
     use std::io::Write;
 
     if let Some(parent) = path.parent() {
@@ -22,7 +41,7 @@ pub fn atomic_write_file(
         suffix
     ));
 
-    let mut file = File::create(&tmp_path)?;
+    let mut file = open_temp_file(&tmp_path, mode)?;
     file.write_all(bytes)?;
     file.sync_all()?;
 
@@ -132,6 +151,23 @@ mod tests {
         let metadata = std::fs::metadata(&path).unwrap();
         let mode = metadata.permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "file mode should be 0600, got {:o}", mode);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_temp_file_permissions_are_restricted_before_rename() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir_for_test("temp_perms");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secret.tmp");
+
+        let file = open_temp_file(&path, Some(0o600)).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "temporary file must be 0600 before commit");
+        drop(file);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
