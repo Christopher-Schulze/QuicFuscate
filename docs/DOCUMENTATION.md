@@ -456,6 +456,7 @@ The intended result is a homogeneous, believable fingerprint: normal QUIC crypto
 #### Fingerprint Source Model
 - Primary runtime path: deterministic in-memory ClientHello synthesis via `TlsClientHelloSpoofer` from `BrowserProfile` and `OsProfile`.
 - Optional external path: top-level `browser_profiles/*.chlo` or `*.chlo.b64` dumps for strict byte-level replay and audit/regression workflows.
+- The `qftls` browser profile extension-order metadata keeps unique IANA-registered extension IDs plus intentional GREASE; Chrome's `renegotiation_info` and `compress_certificate` values are covered by regression tests (TODO-595).
 - Injection path: selected ClientHello bytes are injected natively through transport configuration (`set_custom_tls`) and then cached in memory.
 - Operational rule: external dumps are optional; runtime operation remains available without on-disk profile artifacts.
 

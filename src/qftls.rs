@@ -188,11 +188,10 @@ impl TlsProfile {
             extension_order: vec![
                 0x0000, // server_name
                 0x0017, // extended_master_secret
-                0x0000, // renegotiation_info
+                0xff01, // renegotiation_info
                 0x000d, // supported_groups
                 0xfe0d, // encrypted_client_hello
                 0x0023, // session_ticket
-                0x0019, // compress_certificate
                 0x0010, // application_layer_protocol_negotiation
                 0x002d, // psk_key_exchange_modes
                 0x0033, // key_share
@@ -479,6 +478,36 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn chrome_extension_order_uses_unique_registered_extension_types() {
+        let profile = TlsProfile::chrome_130();
+        let known_chrome_extensions = [
+            0x0000, 0x000d, 0x0010, 0x0017, 0x001b, 0x0023, 0x0029, 0x002b, 0x002d, 0x0033, 0x0039,
+            0x0a0a, 0xfe0d, 0xff01,
+        ];
+
+        let mut unique_extensions = profile.extension_order.clone();
+        unique_extensions.sort_unstable();
+        unique_extensions.dedup();
+        assert_eq!(
+            unique_extensions.len(),
+            profile.extension_order.len(),
+            "Chrome extension order must not contain duplicate IDs"
+        );
+        assert!(
+            profile
+                .extension_order
+                .iter()
+                .all(|extension| known_chrome_extensions.contains(extension)),
+            "Chrome extension order contains an unknown extension type: {:?}",
+            profile.extension_order
+        );
+        assert_eq!(profile.extension_order.iter().filter(|&&id| id == 0x0000).count(), 1);
+        assert_eq!(profile.extension_order.iter().filter(|&&id| id == 0xff01).count(), 1);
+        assert_eq!(profile.extension_order.iter().filter(|&&id| id == 0x001b).count(), 1);
+        assert!(!profile.extension_order.contains(&0x0019));
     }
 
     #[test]
