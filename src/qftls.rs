@@ -552,7 +552,7 @@ mod tests {
         let crypto = Arc::new(RwLock::new(crate::transport::packet::CryptoContext::default()));
         let provider = create_provider(false, crypto).unwrap();
 
-        assert_eq!(provider.supports_ch_override(), cover_enabled);
+        assert!(!provider.supports_ch_override());
         assert_eq!(provider.provider_name() == "rustls+tls-cover", cover_enabled);
     }
 
@@ -833,7 +833,6 @@ impl QuicTlsProvider for CombinedProvider {
         // Apply optional cover layer configuration.
         if let Some(ref mut c) = self.cover {
             c.set_performance_mode(profile.cover_performance_mode);
-            c.apply_ch_override(&[])?; /* no-op template seed */
         }
         Ok(())
     }
@@ -933,14 +932,8 @@ impl QuicTlsProvider for CombinedProvider {
         }
     }
     fn supports_ch_override(&self) -> bool {
-        self.cover.is_some()
-    }
-    fn apply_ch_override(&mut self, template: &[u8]) -> Result<(), ConnectionError> {
-        if let Some(ref mut c) = self.cover {
-            c.apply_ch_override(template)
-        } else {
-            Err(ConnectionError::TlsError("Cover not enabled".into()))
-        }
+        // TLS Cover emits synthetic decoy records only; rustls owns the real ClientHello.
+        false
     }
 }
 

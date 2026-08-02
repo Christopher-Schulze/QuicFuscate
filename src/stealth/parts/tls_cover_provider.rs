@@ -1,7 +1,7 @@
 // --- Inlined: tls_cover.rs ---
 // Minimal TLS Cover record layer for fingerprinting
-// Generates a forged ClientHello and synthetic server response without
-// establishing a real TLS session.
+// Generates synthetic handshake-shaped records without establishing a real
+// TLS session or owning the protocol ClientHello.
 // Ultra-sophisticated TLS Cover Provider for maximum stealth
 /// Cipher suite used by the TLS Cover provider for encrypting synthetic records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,7 +56,6 @@ pub(crate) struct TlsCoverProvider {
     crypto: Arc<parking_lot::RwLock<crate::transport::packet::CryptoContext>>,
     is_server: bool,
     handshake_complete: bool,
-    ch_template: Vec<u8>,
     performance_mode: bool, // When true, disable padding/jitter/timing features
     fingerprint_profile: String,
 }
@@ -166,29 +165,13 @@ impl TlsCoverProvider {
             log::debug!("Hardware AES available but TLS Cover cipher forced to ChaCha20-Poly1305");
         }
 
-        // Generate initial CH template based on profile
-        let ch_template = Self::generate_ch_template(&profile);
-
         Ok(Self {
             crypto,
             is_server,
             handshake_complete: false,
-            ch_template,
             performance_mode: false,
             fingerprint_profile: profile,
         })
-    }
-
-    /// Generate ultra-sophisticated ClientHello template based on profile
-    fn generate_ch_template(profile: &str) -> Vec<u8> {
-        match profile {
-            "chrome" => Self::chrome_ch_template(),
-            "firefox" => Self::firefox_ch_template(),
-            "safari" => Self::safari_ch_template(),
-            "edge" => Self::edge_ch_template(),
-            "random" => Self::random_ch_template(),
-            _ => Self::chrome_ch_template(),
-        }
     }
 
     fn derive_tls_cover_material(
@@ -229,368 +212,6 @@ impl TlsCoverProvider {
         prk.zeroize();
         okm.zeroize();
         (key, iv)
-    }
-
-    fn chrome_ch_template() -> Vec<u8> {
-        // Ultra-realistic Chrome 130 ClientHello
-        let mut ch = Vec::new();
-
-        // TLS 1.3 ClientHello structure
-        ch.extend_from_slice(&[
-            0x01, 0x00, 0x01, 0xfc, // Handshake Type: ClientHello, Length
-            0x03, 0x03, // Version: TLS 1.2 (for compatibility)
-        ]);
-
-        // Random (32 bytes) - Chrome-specific pattern
-        use rand::Rng;
-        let mut rng = rand::rng();
-        let mut random = [0u8; 32];
-        rng.fill(&mut random[..]);
-        ch.extend_from_slice(&random);
-
-        // Session ID (32 bytes for Chrome)
-        ch.push(0x20);
-        let mut session_id = [0u8; 32];
-        rng.fill(&mut session_id[..]);
-        ch.extend_from_slice(&session_id);
-
-        // Cipher Suites - Chrome order (includes ChaCha for fingerprint realism)
-        ch.extend_from_slice(&[
-            0x00, 0x20, // Length: 32 bytes (16 suites)
-            0x13, 0x01, // TLS_AES_128_GCM_SHA256
-            0x13, 0x02, // TLS_AES_256_GCM_SHA384
-            0x13, 0x03, // TLS_CHACHA20_POLY1305_SHA256
-            0xc0, 0x2b, // TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
-            0xc0, 0x2f, // TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
-            0xc0, 0x2c, // TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
-            0xc0, 0x30, // TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
-            0xcc, 0xa9, // TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
-            0xcc, 0xa8, // TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
-            0xc0, 0x13, // TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA
-            0xc0, 0x14, // TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA
-            0x00, 0x9c, // TLS_RSA_WITH_AES_128_GCM_SHA256
-            0x00, 0x9d, // TLS_RSA_WITH_AES_256_GCM_SHA384
-            0x00, 0x2f, // TLS_RSA_WITH_AES_128_CBC_SHA
-            0x00, 0x35, // TLS_RSA_WITH_AES_256_CBC_SHA
-            0x00, 0x0a, // TLS_RSA_WITH_3DES_EDE_CBC_SHA
-        ]);
-
-        // Compression Methods
-        ch.extend_from_slice(&[0x01, 0x00]); // No compression
-
-        // Extensions - Chrome-specific order and values
-        Self::add_chrome_extensions(&mut ch);
-
-        ch
-    }
-
-    fn firefox_ch_template() -> Vec<u8> {
-        // Ultra-realistic Firefox 133 ClientHello
-        let mut ch = Vec::new();
-
-        // Similar structure but Firefox-specific ordering
-        ch.extend_from_slice(&[0x01, 0x00, 0x01, 0xf8, 0x03, 0x03]);
-
-        use rand::Rng;
-        let mut rng = rand::rng();
-        let mut random = [0u8; 32];
-        rng.fill(&mut random[..]);
-        ch.extend_from_slice(&random);
-
-        // Firefox uses empty session ID
-        ch.push(0x00);
-
-        // Firefox cipher suite order (includes ChaCha for fingerprint realism)
-        ch.extend_from_slice(&[
-            0x00, 0x1e, // Length (30 bytes, 15 suites)
-            0x13, 0x01, // TLS_AES_128_GCM_SHA256
-            0x13, 0x03, // TLS_CHACHA20_POLY1305_SHA256
-            0x13, 0x02, // TLS_AES_256_GCM_SHA384
-            0xc0, 0x2b, // TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
-            0xc0, 0x2f, // TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
-            0xcc, 0xa9, // TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
-            0xcc, 0xa8, // TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
-            0xc0, 0x2c, // TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
-            0xc0, 0x30, // TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
-            0xc0, 0x13, // TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA
-            0xc0, 0x14, // TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA
-            0x00, 0x33, // TLS_DHE_RSA_WITH_AES_128_CBC_SHA
-            0x00, 0x39, // TLS_DHE_RSA_WITH_AES_256_CBC_SHA
-            0x00, 0x2f, // TLS_RSA_WITH_AES_128_CBC_SHA
-            0x00, 0x35, // TLS_RSA_WITH_AES_256_CBC_SHA
-        ]);
-
-        ch.extend_from_slice(&[0x01, 0x00]);
-
-        Self::add_firefox_extensions(&mut ch);
-
-        ch
-    }
-
-    fn safari_ch_template() -> Vec<u8> {
-        // Ultra-realistic Safari 18 ClientHello
-        let mut ch = Vec::new();
-
-        ch.extend_from_slice(&[0x01, 0x00, 0x01, 0xe8, 0x03, 0x03]);
-
-        use rand::Rng;
-        let mut rng = rand::rng();
-        let mut random = [0u8; 32];
-        rng.fill(&mut random[..]);
-        ch.extend_from_slice(&random);
-
-        // Safari uses 32-byte session ID
-        ch.push(0x20);
-        let mut session_id = [0u8; 32];
-        rng.fill(&mut session_id[..]);
-        ch.extend_from_slice(&session_id);
-
-        // Safari cipher suite order (minimal set)
-        ch.extend_from_slice(&[
-            0x00, 0x0a, // Length
-            0x13, 0x01, // TLS_AES_128_GCM_SHA256
-            0x13, 0x02, // TLS_AES_256_GCM_SHA384
-            0xc0, 0x2b, // TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
-            0xc0, 0x2c, // TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
-            0xc0, 0x2f, // TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
-        ]);
-
-        ch.extend_from_slice(&[0x01, 0x00]);
-
-        Self::add_safari_extensions(&mut ch);
-
-        ch
-    }
-
-    fn edge_ch_template() -> Vec<u8> {
-        // Edge uses Chrome engine but with slight differences
-        // Modify some bytes to make it Edge-specific in future if needed
-        // Edge has different extension ordering
-        Self::chrome_ch_template()
-    }
-
-    fn random_ch_template() -> Vec<u8> {
-        // Randomly select a profile for variety
-        use rand::Rng;
-        let mut rng = rand::rng();
-        match rng.random_range(0..4) {
-            0 => Self::chrome_ch_template(),
-            1 => Self::firefox_ch_template(),
-            2 => Self::safari_ch_template(),
-            _ => Self::edge_ch_template(),
-        }
-    }
-
-    const CLIENT_HELLO_SNI: &'static [u8] = b"cdn.cloudflare.com";
-
-    fn append_server_name_extension(ext: &mut Vec<u8>, host: &[u8]) {
-        let host_len = host.len();
-        if host_len > u16::MAX as usize {
-            return;
-        }
-        let list_len = 1 + 2 + host_len;
-        if list_len > u16::MAX as usize {
-            return;
-        }
-        let ext_len = 2 + list_len;
-        if ext_len > u16::MAX as usize {
-            return;
-        }
-
-        ext.extend_from_slice(&[0x00, 0x00]); // server_name
-        ext.extend_from_slice(&(ext_len as u16).to_be_bytes());
-        ext.extend_from_slice(&(list_len as u16).to_be_bytes());
-        ext.push(0x00); // host_name
-        ext.extend_from_slice(&(host_len as u16).to_be_bytes());
-        ext.extend_from_slice(host);
-    }
-
-    fn add_chrome_extensions(ch: &mut Vec<u8>) {
-        // Add Chrome-specific extensions in exact order
-        let mut ext = Vec::new();
-
-        // GREASE extension (Chrome always starts with GREASE)
-        ext.extend_from_slice(&[0x0a, 0x0a, 0x00, 0x00]);
-
-        // Server Name (SNI)
-        Self::append_server_name_extension(&mut ext, Self::CLIENT_HELLO_SNI);
-
-        // Supported Groups
-        ext.extend_from_slice(&[
-            0x00, 0x0a, // Extension type: supported_groups
-            0x00, 0x08, // Length
-            0x00, 0x06, // Groups length
-            0x00, 0x1d, // x25519
-            0x00, 0x17, // secp256r1
-            0x00, 0x18, // secp384r1
-        ]);
-
-        // EC Point Formats
-        ext.extend_from_slice(&[
-            0x00, 0x0b, // Extension type: ec_point_formats
-            0x00, 0x02, // Length
-            0x01, // Formats length
-            0x00, // uncompressed
-        ]);
-
-        // Signature Algorithms
-        ext.extend_from_slice(&[
-            0x00, 0x0d, // Extension type: signature_algorithms
-            0x00, 0x0e, // Length
-            0x00, 0x0c, // Algorithms length
-            0x04, 0x03, // ecdsa_secp256r1_sha256
-            0x08, 0x04, // rsa_pss_rsae_sha256
-            0x04, 0x01, // rsa_pkcs1_sha256
-            0x05, 0x03, // ecdsa_secp384r1_sha384
-            0x08, 0x05, // rsa_pss_rsae_sha384
-            0x05, 0x01, // rsa_pkcs1_sha384
-        ]);
-
-        // ALPN
-        ext.extend_from_slice(&[
-            0x00, 0x10, // Extension type: ALPN
-            0x00, 0x0e, // Length
-            0x00, 0x0c, // ALPN list length
-            0x02, b'h', b'3', // h3
-            0x08, b'h', b't', b't', b'p', b'/', b'1', b'.', b'1', // http/1.1
-        ]);
-
-        // Supported Versions
-        ext.extend_from_slice(&[
-            0x00, 0x2b, // Extension type: supported_versions
-            0x00, 0x03, // Length
-            0x02, // Versions length
-            0x03, 0x04, // TLS 1.3
-        ]);
-
-        // PSK Key Exchange Modes
-        ext.extend_from_slice(&[
-            0x00, 0x2d, // Extension type: psk_key_exchange_modes
-            0x00, 0x02, // Length
-            0x01, // Modes length
-            0x01, // psk_dhe_ke
-        ]);
-
-        // Key Share
-        ext.extend_from_slice(&[
-            0x00, 0x33, // Extension type: key_share
-            0x00, 0x26, // Length
-            0x00, 0x24, // Key share entries length
-            0x00, 0x1d, // Group: x25519
-            0x00, 0x20, // Key exchange length
-        ]);
-
-        // Generate random key
-        use rand::Rng;
-        let mut rng = rand::rng();
-        let mut key = [0u8; 32];
-        rng.fill(&mut key[..]);
-        ext.extend_from_slice(&key);
-
-        // Add extension length to CH
-        ch.extend_from_slice(&((ext.len() as u16).to_be_bytes()));
-        ch.extend_from_slice(&ext);
-    }
-
-    fn add_firefox_extensions(ch: &mut Vec<u8>) {
-        // Firefox has different extension order and doesn't use GREASE
-        let mut ext = Vec::new();
-
-        // Server Name (Firefox starts with SNI)
-        Self::append_server_name_extension(&mut ext, Self::CLIENT_HELLO_SNI);
-
-        // Extended Master Secret
-        ext.extend_from_slice(&[0x00, 0x17, 0x00, 0x00]);
-
-        // Renegotiation Info
-        ext.extend_from_slice(&[0xff, 0x01, 0x00, 0x01, 0x00]);
-
-        // Supported Groups
-        ext.extend_from_slice(&[
-            0x00, 0x0a, 0x00, 0x0a, 0x00, 0x08, 0x00, 0x1d, 0x00, 0x17, 0x00, 0x1e, 0x00, 0x18,
-        ]);
-
-        // EC Point Formats
-        ext.extend_from_slice(&[0x00, 0x0b, 0x00, 0x02, 0x01, 0x00]);
-
-        // Session Ticket
-        ext.extend_from_slice(&[0x00, 0x23, 0x00, 0x00]);
-
-        // ALPN
-        ext.extend_from_slice(&[
-            0x00, 0x10, 0x00, 0x0e, 0x00, 0x0c, 0x02, b'h', b'3', 0x08, b'h', b't', b't', b'p',
-            b'/', b'1', b'.', b'1',
-        ]);
-
-        // Status Request
-        ext.extend_from_slice(&[0x00, 0x05, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00, 0x00]);
-
-        // Signature Algorithms
-        ext.extend_from_slice(&[
-            0x00, 0x0d, 0x00, 0x12, 0x00, 0x10, 0x04, 0x03, 0x08, 0x04, 0x04, 0x01, 0x05, 0x03,
-            0x08, 0x05, 0x05, 0x01, 0x08, 0x06, 0x06, 0x01, 0x02, 0x01,
-        ]);
-
-        // Supported Versions
-        ext.extend_from_slice(&[0x00, 0x2b, 0x00, 0x05, 0x04, 0x03, 0x04, 0x03, 0x03]);
-
-        // PSK Key Exchange Modes
-        ext.extend_from_slice(&[0x00, 0x2d, 0x00, 0x02, 0x01, 0x01]);
-
-        // Key Share
-        ext.extend_from_slice(&[0x00, 0x33, 0x00, 0x26, 0x00, 0x24, 0x00, 0x1d, 0x00, 0x20]);
-
-        use rand::Rng;
-        let mut rng = rand::rng();
-        let mut key = [0u8; 32];
-        rng.fill(&mut key[..]);
-        ext.extend_from_slice(&key);
-
-        ch.extend_from_slice(&((ext.len() as u16).to_be_bytes()));
-        ch.extend_from_slice(&ext);
-    }
-
-    fn add_safari_extensions(ch: &mut Vec<u8>) {
-        // Safari has minimal extensions
-        let mut ext = Vec::new();
-
-        // Server Name
-        Self::append_server_name_extension(&mut ext, Self::CLIENT_HELLO_SNI);
-
-        // Supported Groups (Safari uses fewer groups)
-        ext.extend_from_slice(&[0x00, 0x0a, 0x00, 0x06, 0x00, 0x04, 0x00, 0x1d, 0x00, 0x17]);
-
-        // Signature Algorithms (Safari minimal set)
-        ext.extend_from_slice(&[
-            0x00, 0x0d, 0x00, 0x08, 0x00, 0x06, 0x04, 0x03, 0x05, 0x03, 0x06, 0x03,
-        ]);
-
-        // ALPN
-        ext.extend_from_slice(&[0x00, 0x10, 0x00, 0x05, 0x00, 0x03, 0x02, b'h', b'3']);
-
-        // Supported Versions
-        ext.extend_from_slice(&[0x00, 0x2b, 0x00, 0x03, 0x02, 0x03, 0x04]);
-
-        // Key Share
-        ext.extend_from_slice(&[0x00, 0x33, 0x00, 0x26, 0x00, 0x24, 0x00, 0x1d, 0x00, 0x20]);
-
-        use rand::Rng;
-        let mut rng = rand::rng();
-        let mut key = [0u8; 32];
-        rng.fill(&mut key[..]);
-        ext.extend_from_slice(&key);
-
-        ch.extend_from_slice(&((ext.len() as u16).to_be_bytes()));
-        ch.extend_from_slice(&ext);
-    }
-
-    /// Replaces the ClientHello template with externally-provided bytes.
-    pub(crate) fn apply_ch_override(
-        &mut self,
-        template: &[u8],
-    ) -> Result<(), crate::error::ConnectionError> {
-        self.ch_template = template.to_vec();
-        Ok(())
     }
 
     /// Enable/disable performance mode
@@ -689,7 +310,7 @@ impl TlsCoverProvider {
 
         // Add realistic handshake message structure
         if payload_size > 10 {
-            payload[0] = 0x01; // ClientHello
+            payload[0] = 0x01; // Synthetic ClientHello handshake marker
             payload[1..4].copy_from_slice(&((payload_size - 4) as u32).to_be_bytes()[1..]);
             payload[4..6].copy_from_slice(&[0x03, 0x03]); // TLS version
                                                           // Subtle per-profile tag to influence payload fingerprint a tiny bit

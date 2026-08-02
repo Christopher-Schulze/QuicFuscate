@@ -95,7 +95,8 @@ impl PersonaTemplate {
     fn for_browser(browser: BrowserProfile) -> &'static Self {
         match browser {
             BrowserProfile::Chrome | BrowserProfile::Edge => &CHROMIUM_TEMPLATE,
-            BrowserProfile::Firefox | BrowserProfile::Safari => &TITLECASE_TEMPLATE,
+            BrowserProfile::Firefox => &TITLECASE_TEMPLATE,
+            BrowserProfile::Safari => &SAFARI_TEMPLATE,
         }
     }
 
@@ -235,8 +236,32 @@ const TITLECASE_TEMPLATE_ENTRIES: &[HeaderTemplateEntry] = &[
     },
 ];
 
+const SAFARI_TEMPLATE_ENTRIES: &[HeaderTemplateEntry] = &[
+    HeaderTemplateEntry {
+        name: b"User-Agent",
+        value: HeaderValueSpec::Dynamic(DynamicValueSpec::UserAgent),
+    },
+    HeaderTemplateEntry {
+        name: b"Accept",
+        value: HeaderValueSpec::Dynamic(DynamicValueSpec::Accept),
+    },
+    HeaderTemplateEntry {
+        name: b"Accept-Language",
+        value: HeaderValueSpec::Dynamic(DynamicValueSpec::AcceptLanguage),
+    },
+    HeaderTemplateEntry {
+        name: b"Accept-Encoding",
+        value: HeaderValueSpec::Dynamic(DynamicValueSpec::AcceptEncoding),
+    },
+    HeaderTemplateEntry {
+        name: b"Referer",
+        value: HeaderValueSpec::Dynamic(DynamicValueSpec::Referer),
+    },
+];
+
 const CHROMIUM_TEMPLATE: PersonaTemplate = PersonaTemplate { entries: CHROMIUM_TEMPLATE_ENTRIES };
 const TITLECASE_TEMPLATE: PersonaTemplate = PersonaTemplate { entries: TITLECASE_TEMPLATE_ENTRIES };
+const SAFARI_TEMPLATE: PersonaTemplate = PersonaTemplate { entries: SAFARI_TEMPLATE_ENTRIES };
 
 /// Manages the generation of fake HTTP/3 headers to masquerade QUIC traffic.
 pub struct Http3Masquerade {

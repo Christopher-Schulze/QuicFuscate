@@ -684,6 +684,24 @@ fn http3_masquerade_user_agent_differs_by_browser() {
     assert_ne!(ua(&ch), ua(&fh), "Chrome and Firefox must produce different user-agent values");
 }
 
+#[test]
+fn http3_masquerade_safari_omits_sec_fetch_headers() {
+    use super::{BrowserProfile, FingerprintProfile, Http3Masquerade, OsProfile};
+    let safari =
+        Http3Masquerade::new(FingerprintProfile::new(BrowserProfile::Safari, OsProfile::MacOS));
+    let headers = safari.generate_headers("example.com", "/");
+    let forbidden = [
+        b"sec-fetch-dest".as_slice(),
+        b"sec-fetch-mode".as_slice(),
+        b"sec-fetch-site".as_slice(),
+        b"sec-fetch-user".as_slice(),
+    ];
+
+    assert!(headers
+        .iter()
+        .all(|header| { forbidden.iter().all(|name| !header.name().eq_ignore_ascii_case(name)) }));
+}
+
 // --- FingerprintRotation Tests (via StealthManager) ---
 
 #[test]
