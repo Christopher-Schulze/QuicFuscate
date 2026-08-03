@@ -250,6 +250,28 @@ fn configured_routing_manager(
         .with_firewall_backend(server_config.firewall_backend))
 }
 
+#[cfg(target_os = "linux")]
+fn cleanup_stale_routing_records(
+    requested_tun_name: Option<&str>,
+    server_config: &ServerConfig,
+) -> Result<(), String> {
+    let tun_names = match requested_tun_name {
+        Some(name) if !name.is_empty() && name.len() <= 15 && !name.contains('/') && !name.contains('\0') => {
+            vec![name.to_string()]
+        }
+        Some(_) => return Ok(()),
+        None => crate::implementations::server::routing::persisted_tun_names()
+            .map_err(|error| format!("enumerate stale routing records: {error}"))?,
+    };
+    for tun_name in tun_names {
+        let routing = configured_routing_manager(tun_name, server_config)?;
+        routing
+            .cleanup_stale()
+            .map_err(|error| format!("stale routing cleanup failed: {error}"))?;
+    }
+    Ok(())
+}
+
 fn teardown_routing(routing: RoutingManager) -> Result<(), RoutingError> {
     routing.teardown().map_err(|error| {
         log::error!("Routing teardown failed: {:?}", error);
@@ -289,6 +311,14 @@ impl ServerHostResources {
             prefix6: server_config.ipv6_server_ip.map(|_| server_config.ipv6_prefix_len),
         };
 
+        #[cfg(target_os = "linux")]
+        {
+            crate::interface::validate_tun_config(&tun_config)
+                .map_err(|error| EngineError::Tun(format!("{error:?}")))?;
+            cleanup_stale_routing_records(Some("qfserver0"), server_config)
+                .map_err(EngineError::Io)?;
+        }
+
         let tun = open_server_tun(tun_config, pool).map_err(EngineError::Tun)?;
         log::info!("Server TUN interface opened: {}", tun.name());
 
@@ -296,11 +326,6 @@ impl ServerHostResources {
         let routing = {
             let routing = configured_routing_manager("qfserver0".to_string(), server_config)
                 .map_err(EngineError::Io)?;
-
-            // Clean up stale rules from a crashed previous session before setup.
-            routing
-                .cleanup_stale()
-                .map_err(|error| EngineError::Io(format!("stale routing cleanup failed: {error}")))?;
 
             if let Err(e) = routing.setup() {
                 let rollback_error = routing.teardown().err();

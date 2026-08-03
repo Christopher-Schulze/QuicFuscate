@@ -203,7 +203,7 @@ analyze_capture() {
   fi
 
   cp /tmp/ns-cli.log "$OUTPUT_DIR/${case_name}-client.log"
-  cp /tmp/ns-srv.log "$OUTPUT_DIR/${case_name}-server.log"
+  cp /tmp/ns-srv-restart.log "$OUTPUT_DIR/${case_name}-server.log"
   printf '%s\n' \
     "artifact_sha256=$ARTIFACT_SHA256" \
     "capture_seconds=$CAPTURE_SECONDS" \

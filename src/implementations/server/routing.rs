@@ -5,17 +5,16 @@
 //! - NAT (MASQUERADE) via iptables/nftables
 //! - Firewall rules for VPN traffic
 
-#[cfg(target_os = "macos")]
-use std::io::Write;
 use std::net::{Ipv4Addr, Ipv6Addr};
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "linux")]
+use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::process::Command;
-#[cfg(target_os = "macos")]
-use std::process::Stdio;
 #[cfg(target_os = "linux")]
 use std::sync::Mutex;
 
 /// Routing manager for VPN server.
+#[cfg_attr(all(not(test), not(target_os = "linux")), allow(dead_code))]
 pub struct RoutingManager {
     tun_name: String,
     server_ip: Ipv4Addr,
@@ -33,6 +32,9 @@ pub struct RoutingManager {
     /// rollback. Pre-existing desired state is never claimed as owned.
     #[cfg(target_os = "linux")]
     ownership: Mutex<RoutingOwnership>,
+    /// Path of the durable Linux ownership record used for crash recovery.
+    #[cfg(target_os = "linux")]
+    ownership_path: PathBuf,
 }
 
 #[cfg(target_os = "linux")]
@@ -43,6 +45,161 @@ struct RoutingOwnership {
     link_brought_up: bool,
     ipv4_forwarding_previous: Option<String>,
     ipv6_forwarding_previous: Option<String>,
+    state_prepared: bool,
+}
+
+#[cfg(any(test, target_os = "linux"))]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct BoolMutation {
+    before: bool,
+    after: bool,
+}
+
+#[cfg(any(test, target_os = "linux"))]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct TextMutation {
+    before: String,
+    after: String,
+}
+
+#[cfg(any(test, target_os = "linux"))]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedRoutingOwnership {
+    schema: u8,
+    tun_name: String,
+    interface_index: u32,
+    owner_boot_id: String,
+    owner_pid: u32,
+    owner_start_time: u64,
+    server_ipv4: String,
+    netmask: String,
+    wan_interface: String,
+    server_ipv6: Option<String>,
+    ipv6_prefix_len: u8,
+    ipv4_address: BoolMutation,
+    ipv6_address: Option<BoolMutation>,
+    link_up: BoolMutation,
+    ipv4_forwarding: TextMutation,
+    ipv6_forwarding: Option<TextMutation>,
+}
+
+#[cfg(any(test, target_os = "linux"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecoveryDecision {
+    Noop,
+    Restore,
+    Conflict,
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn recovery_decision<T: PartialEq>(before: &T, after: &T, current: &T) -> RecoveryDecision {
+    if current == before {
+        RecoveryDecision::Noop
+    } else if current == after {
+        RecoveryDecision::Restore
+    } else {
+        RecoveryDecision::Conflict
+    }
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn active_owner_matches(
+    state_boot_id: &str,
+    current_boot_id: &str,
+    state_start_time: u64,
+    current_start_time: Option<u64>,
+) -> bool {
+    state_boot_id == current_boot_id && current_start_time == Some(state_start_time)
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn routing_state_filename(tun_name: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(tun_name.len() * 2 + 5);
+    for byte in tun_name.as_bytes() {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    if encoded.is_empty() {
+        encoded.push_str("empty");
+    }
+    encoded.push_str(".json");
+    encoded
+}
+
+#[cfg(target_os = "linux")]
+const ROUTING_STATE_DIR: &str = "/run/quicfuscate/routing";
+
+#[cfg(target_os = "linux")]
+fn default_routing_state_path(tun_name: &str) -> PathBuf {
+    Path::new(ROUTING_STATE_DIR).join(routing_state_filename(tun_name))
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn persisted_tun_names() -> Result<Vec<String>, RoutingError> {
+    let entries = match std::fs::read_dir(ROUTING_STATE_DIR) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(RoutingError::CommandFailed(format!(
+                "read durable routing state directory {ROUTING_STATE_DIR}: {error}"
+            )))
+        }
+    };
+    let mut names = Vec::new();
+    for entry in entries {
+        let path = entry
+            .map_err(|error| {
+                RoutingError::CommandFailed(format!(
+                    "enumerate durable routing state directory {ROUTING_STATE_DIR}: {error}"
+                ))
+            })?
+            .path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        if !std::fs::symlink_metadata(&path)
+            .map_err(|error| {
+                RoutingError::CommandFailed(format!(
+                    "inspect durable routing state {}: {error}",
+                    path.display()
+                ))
+            })?
+            .file_type()
+            .is_file()
+        {
+            return Err(RoutingError::CommandFailed(format!(
+                "durable routing state {} is not a regular file",
+                path.display()
+            )));
+        }
+        let contents = std::fs::read_to_string(&path).map_err(|error| {
+            RoutingError::CommandFailed(format!(
+                "read durable routing state {}: {error}",
+                path.display()
+            ))
+        })?;
+        let state: PersistedRoutingOwnership =
+            serde_json::from_str(&contents).map_err(|error| {
+                RoutingError::CommandFailed(format!(
+                    "parse durable routing state {}: {error}",
+                    path.display()
+                ))
+            })?;
+        if state.tun_name.is_empty() || default_routing_state_path(&state.tun_name) != path {
+            return Err(RoutingError::CommandFailed(format!(
+                "durable routing state {} has an invalid TUN identity",
+                path.display()
+            )));
+        }
+        names.push(state.tun_name);
+    }
+    names.sort_unstable();
+    names.dedup();
+    Ok(names)
 }
 
 /// Routing errors.
@@ -79,6 +236,9 @@ impl RoutingManager {
         netmask: Ipv4Addr,
         wan_interface: String,
     ) -> Self {
+        #[cfg(target_os = "linux")]
+        let ownership_path = default_routing_state_path(&tun_name);
+
         Self {
             tun_name,
             server_ip,
@@ -90,6 +250,8 @@ impl RoutingManager {
             client_to_client_enabled: false,
             #[cfg(target_os = "linux")]
             ownership: Mutex::new(RoutingOwnership::default()),
+            #[cfg(target_os = "linux")]
+            ownership_path,
         }
     }
 
@@ -102,6 +264,9 @@ impl RoutingManager {
         server_ipv6: Ipv6Addr,
         ipv6_prefix_len: u8,
     ) -> Self {
+        #[cfg(target_os = "linux")]
+        let ownership_path = default_routing_state_path(&tun_name);
+
         Self {
             tun_name,
             server_ip,
@@ -113,6 +278,8 @@ impl RoutingManager {
             client_to_client_enabled: false,
             #[cfg(target_os = "linux")]
             ownership: Mutex::new(RoutingOwnership::default()),
+            #[cfg(target_os = "linux")]
+            ownership_path,
         }
     }
 
@@ -185,6 +352,110 @@ impl RoutingManager {
     }
 
     #[cfg(target_os = "linux")]
+    fn linux_interface_exists(&self) -> Result<bool, RoutingError> {
+        let output = Command::new("ip")
+            .args(["link", "show", "dev", &self.tun_name])
+            .output()
+            .map_err(|error| RoutingError::CommandFailed(format!("ip link existence: {error}")))?;
+        if output.status.success() {
+            return Ok(true);
+        }
+        let detail = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+        if detail.contains("does not exist") || detail.contains("cannot find device") {
+            return Ok(false);
+        }
+        Err(RoutingError::CommandFailed(format!(
+            "ip link show dev {} returned status {}: {}",
+            self.tun_name,
+            output.status,
+            detail.trim()
+        )))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn linux_interface_index(&self) -> Result<u32, RoutingError> {
+        let value = Self::linux_json(&["-j", "link", "show", "dev", &self.tun_name])?;
+        value
+            .as_array()
+            .and_then(|items| items.first())
+            .and_then(|item| item.get("ifindex"))
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|index| u32::try_from(index).ok())
+            .ok_or_else(|| {
+                RoutingError::CommandFailed(format!(
+                    "ip link inspection omitted a valid ifindex for {}",
+                    self.tun_name
+                ))
+            })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn linux_boot_id() -> Result<String, RoutingError> {
+        let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .map_err(|error| RoutingError::CommandFailed(format!("read Linux boot ID: {error}")))?;
+        let boot_id = boot_id.trim();
+        if boot_id.is_empty() {
+            return Err(RoutingError::CommandFailed("Linux boot ID is empty".to_string()));
+        }
+        Ok(boot_id.to_string())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn linux_process_start_time(pid: u32) -> Result<Option<u64>, RoutingError> {
+        let path = format!("/proc/{pid}/stat");
+        let contents = match std::fs::read_to_string(&path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(RoutingError::CommandFailed(format!(
+                    "read Linux process identity {path}: {error}"
+                )))
+            }
+        };
+        let fields = contents.rsplit_once(") ").map(|(_, fields)| fields).ok_or_else(|| {
+            RoutingError::CommandFailed(format!("parse Linux process identity {path}"))
+        })?;
+        let start_time = fields
+            .split_whitespace()
+            .nth(19)
+            .ok_or_else(|| {
+                RoutingError::CommandFailed(format!(
+                    "Linux process identity {path} omitted the start time"
+                ))
+            })?
+            .parse::<u64>()
+            .map_err(|error| {
+                RoutingError::CommandFailed(format!(
+                    "parse Linux process start time in {path}: {error}"
+                ))
+            })?;
+        Ok(Some(start_time))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn reject_active_owner(state: &PersistedRoutingOwnership) -> Result<(), RoutingError> {
+        let current_boot_id = Self::linux_boot_id()?;
+        if current_boot_id != state.owner_boot_id {
+            return Err(RoutingError::CommandFailed(
+                "durable routing state belongs to a different Linux boot; refusing guessed recovery"
+                    .to_string(),
+            ));
+        }
+        if active_owner_matches(
+            &state.owner_boot_id,
+            &current_boot_id,
+            state.owner_start_time,
+            Self::linux_process_start_time(state.owner_pid)?,
+        ) {
+            return Err(RoutingError::CommandFailed(format!(
+                "durable routing state is still owned by active PID {}",
+                state.owner_pid
+            )));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
     fn linux_address_present(
         &self,
         family: &str,
@@ -245,6 +516,375 @@ impl RoutingManager {
     }
 
     #[cfg(target_os = "linux")]
+    fn validate_forwarding_mutation(
+        label: &str,
+        mutation: &TextMutation,
+    ) -> Result<(), RoutingError> {
+        if !matches!(mutation.before.trim(), "0" | "1") || mutation.after.trim() != "1" {
+            return Err(RoutingError::CommandFailed(format!(
+                "durable routing state has invalid {label} forwarding mutation"
+            )));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn validate_persisted_ownership(
+        &self,
+        state: &PersistedRoutingOwnership,
+    ) -> Result<(), RoutingError> {
+        if state.schema != 2 {
+            return Err(RoutingError::CommandFailed(format!(
+                "unsupported durable routing state schema {}",
+                state.schema
+            )));
+        }
+        let expected_ipv6 = self.server_ipv6.map(|address| address.to_string());
+        if state.tun_name != self.tun_name
+            || state.server_ipv4 != self.server_ip.to_string()
+            || state.netmask != self.netmask.to_string()
+            || state.wan_interface != self.wan_interface
+            || state.server_ipv6 != expected_ipv6
+            || state.ipv6_prefix_len != self.ipv6_prefix_len
+        {
+            return Err(RoutingError::CommandFailed(
+                "durable routing state identity does not match the requested server routing"
+                    .to_string(),
+            ));
+        }
+        if self.ipv6_prefix_len > 128 {
+            return Err(RoutingError::UnsupportedConfiguration(format!(
+                "IPv6 prefix length {} exceeds 128",
+                self.ipv6_prefix_len
+            )));
+        }
+        if state.interface_index == 0 {
+            return Err(RoutingError::CommandFailed(
+                "durable routing state has an invalid Linux interface index".to_string(),
+            ));
+        }
+        if state.owner_boot_id.trim().is_empty()
+            || state.owner_pid == 0
+            || state.owner_start_time == 0
+        {
+            return Err(RoutingError::CommandFailed(
+                "durable routing state has an invalid process ownership identity".to_string(),
+            ));
+        }
+        if !state.ipv4_address.after || !state.link_up.after {
+            return Err(RoutingError::CommandFailed(
+                "durable routing state does not describe the expected Linux postcondition"
+                    .to_string(),
+            ));
+        }
+        if state.ipv6_address.is_some() != self.server_ipv6.is_some()
+            || state.ipv6_address.as_ref().is_some_and(|mutation| !mutation.after)
+        {
+            return Err(RoutingError::CommandFailed(
+                "durable routing state has an invalid IPv6 address ownership record".to_string(),
+            ));
+        }
+        Self::validate_forwarding_mutation("IPv4", &state.ipv4_forwarding)?;
+        if let Some(mutation) = state.ipv6_forwarding.as_ref() {
+            Self::validate_forwarding_mutation("IPv6", mutation)?;
+        } else if self.server_ipv6.is_some() {
+            return Err(RoutingError::CommandFailed(
+                "durable routing state is missing IPv6 forwarding ownership".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn read_persisted_ownership(&self) -> Result<Option<PersistedRoutingOwnership>, RoutingError> {
+        let contents = match std::fs::read_to_string(&self.ownership_path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(RoutingError::CommandFailed(format!(
+                    "read durable routing state {}: {error}",
+                    self.ownership_path.display()
+                )))
+            }
+        };
+        serde_json::from_str(&contents).map(Some).map_err(|error| {
+            RoutingError::CommandFailed(format!(
+                "parse durable routing state {}: {error}",
+                self.ownership_path.display()
+            ))
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn ensure_ownership_directory(&self) -> Result<(), RoutingError> {
+        let parent = self.ownership_path.parent().ok_or_else(|| {
+            RoutingError::CommandFailed("durable routing state has no parent directory".to_string())
+        })?;
+        std::fs::create_dir_all(parent).map_err(|error| {
+            RoutingError::CommandFailed(format!(
+                "create durable routing state directory {}: {error}",
+                parent.display()
+            ))
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(
+                |error| {
+                    RoutingError::CommandFailed(format!(
+                        "secure durable routing state directory {}: {error}",
+                        parent.display()
+                    ))
+                },
+            )?;
+            let mode = std::fs::metadata(parent)
+                .map_err(|error| {
+                    RoutingError::CommandFailed(format!(
+                        "inspect durable routing state directory {}: {error}",
+                        parent.display()
+                    ))
+                })?
+                .permissions()
+                .mode()
+                & 0o777;
+            if mode != 0o700 {
+                return Err(RoutingError::CommandFailed(format!(
+                    "durable routing state directory {} has unsafe mode {:o}",
+                    parent.display(),
+                    mode
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn persist_ownership(&self, state: &PersistedRoutingOwnership) -> Result<(), RoutingError> {
+        match std::fs::symlink_metadata(&self.ownership_path) {
+            Ok(_) => {
+                return Err(RoutingError::CommandFailed(format!(
+                "durable routing state {} already exists; stale recovery is required before setup",
+                self.ownership_path.display()
+            )))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(RoutingError::CommandFailed(format!(
+                    "inspect durable routing state {}: {error}",
+                    self.ownership_path.display()
+                )))
+            }
+        }
+        self.ensure_ownership_directory()?;
+        let bytes = serde_json::to_vec_pretty(state).map_err(|error| {
+            RoutingError::CommandFailed(format!("serialize durable routing state: {error}"))
+        })?;
+        crate::implementations::server::fsutil::atomic_write_file(
+            &self.ownership_path,
+            &bytes,
+            Some(0o600),
+            "server::routing_ownership_tmp_nonce",
+        )
+        .map_err(|error| {
+            RoutingError::CommandFailed(format!(
+                "persist durable routing state {}: {error}",
+                self.ownership_path.display()
+            ))
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn remove_ownership_file(&self) -> Result<(), RoutingError> {
+        match std::fs::remove_file(&self.ownership_path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(RoutingError::CommandFailed(format!(
+                "remove durable routing state {}: {error}",
+                self.ownership_path.display()
+            ))),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn prepare_persisted_ownership(&self) -> Result<(), RoutingError> {
+        let ipv4_prefix = self.ipv4_prefix_len()?;
+        if self.server_ipv6.is_some() && self.ipv6_prefix_len > 128 {
+            return Err(RoutingError::UnsupportedConfiguration(format!(
+                "IPv6 prefix length {} exceeds 128",
+                self.ipv6_prefix_len
+            )));
+        }
+        let ipv4_address =
+            self.linux_address_present("inet", &self.server_ip.to_string(), ipv4_prefix)?;
+        let interface_index = self.linux_interface_index()?;
+        let owner_boot_id = Self::linux_boot_id()?;
+        let owner_pid = std::process::id();
+        let owner_start_time = Self::linux_process_start_time(owner_pid)?.ok_or_else(|| {
+            RoutingError::CommandFailed(format!(
+                "current Linux process {} disappeared during ownership preparation",
+                owner_pid
+            ))
+        })?;
+        let link_up = self.linux_link_is_up()?;
+        let ipv4_forwarding =
+            std::fs::read_to_string("/proc/sys/net/ipv4/ip_forward").map_err(|error| {
+                RoutingError::CommandFailed(format!("read IPv4 forwarding: {error}"))
+            })?;
+        let ipv6_address = if let Some(address) = self.server_ipv6 {
+            Some(self.linux_address_present("inet6", &address.to_string(), self.ipv6_prefix_len)?)
+        } else {
+            None
+        };
+        let ipv6_forwarding = if self.server_ipv6.is_some() {
+            Some(std::fs::read_to_string("/proc/sys/net/ipv6/conf/all/forwarding").map_err(
+                |error| RoutingError::CommandFailed(format!("read IPv6 forwarding: {error}")),
+            )?)
+        } else {
+            None
+        };
+        let state = PersistedRoutingOwnership {
+            schema: 2,
+            tun_name: self.tun_name.clone(),
+            interface_index,
+            owner_boot_id,
+            owner_pid,
+            owner_start_time,
+            server_ipv4: self.server_ip.to_string(),
+            netmask: self.netmask.to_string(),
+            wan_interface: self.wan_interface.clone(),
+            server_ipv6: self.server_ipv6.map(|address| address.to_string()),
+            ipv6_prefix_len: self.ipv6_prefix_len,
+            ipv4_address: BoolMutation { before: ipv4_address, after: true },
+            ipv6_address: ipv6_address.map(|before| BoolMutation { before, after: true }),
+            link_up: BoolMutation { before: link_up, after: true },
+            ipv4_forwarding: TextMutation { before: ipv4_forwarding, after: "1".to_string() },
+            ipv6_forwarding: ipv6_forwarding
+                .map(|before| TextMutation { before, after: "1".to_string() }),
+        };
+        self.validate_persisted_ownership(&state)?;
+        self.persist_ownership(&state)?;
+        self.ownership.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).state_prepared =
+            true;
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn recover_persisted_address(
+        &self,
+        family: &str,
+        address: &str,
+        prefix: u8,
+        mutation: &BoolMutation,
+    ) -> Result<(), RoutingError> {
+        let current = self.linux_address_present(family, address, prefix)?;
+        match recovery_decision(&mutation.before, &mutation.after, &current) {
+            RecoveryDecision::Noop => Ok(()),
+            RecoveryDecision::Restore => self.remove_linux_address(family, address, prefix),
+            RecoveryDecision::Conflict => Err(RoutingError::CommandFailed(format!(
+                "not removing durable {} address {address}/{prefix}: interface state changed externally",
+                family
+            ))),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn recover_persisted_link(&self, mutation: &BoolMutation) -> Result<(), RoutingError> {
+        let current = self.linux_link_is_up()?;
+        match recovery_decision(&mutation.before, &mutation.after, &current) {
+            RecoveryDecision::Noop => Ok(()),
+            RecoveryDecision::Restore => self.set_linux_link_down(),
+            RecoveryDecision::Conflict => Err(RoutingError::CommandFailed(format!(
+                "not lowering durable Linux TUN link {}: link state changed externally",
+                self.tun_name
+            ))),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn recover_persisted_forwarding(
+        &self,
+        path: &str,
+        mutation: &TextMutation,
+    ) -> Result<(), RoutingError> {
+        let current = std::fs::read_to_string(path)
+            .map_err(|error| RoutingError::CommandFailed(format!("read {path}: {error}")))?;
+        let before = mutation.before.trim();
+        let after = mutation.after.trim();
+        let current_value = current.trim();
+        match recovery_decision(&before, &after, &current_value) {
+            RecoveryDecision::Noop => Ok(()),
+            RecoveryDecision::Restore => self.restore_forwarding(path, &mutation.before),
+            RecoveryDecision::Conflict => Err(RoutingError::CommandFailed(format!(
+                "not restoring {path}: durable owner expected {:?} or {:?}, found {:?}; preserving external state",
+                before, after, current_value
+            ))),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn recover_persisted_ownership(&self) -> Result<bool, RoutingError> {
+        let Some(state) = self.read_persisted_ownership()? else {
+            return Ok(false);
+        };
+        self.validate_persisted_ownership(&state)?;
+        Self::reject_active_owner(&state)?;
+        let mut failures = Vec::new();
+        if self.linux_interface_exists()? {
+            if self.linux_interface_index()? != state.interface_index {
+                failures.push(format!(
+                    "not recovering Linux TUN {}: interface identity changed externally",
+                    self.tun_name
+                ));
+            } else {
+                Self::record_cleanup_failure(
+                    &mut failures,
+                    self.recover_persisted_address(
+                        "inet",
+                        &self.server_ip.to_string(),
+                        self.ipv4_prefix_len()?,
+                        &state.ipv4_address,
+                    ),
+                );
+                if let (Some(address), Some(mutation)) =
+                    (self.server_ipv6, state.ipv6_address.as_ref())
+                {
+                    Self::record_cleanup_failure(
+                        &mut failures,
+                        self.recover_persisted_address(
+                            "inet6",
+                            &address.to_string(),
+                            self.ipv6_prefix_len,
+                            mutation,
+                        ),
+                    );
+                }
+                Self::record_cleanup_failure(
+                    &mut failures,
+                    self.recover_persisted_link(&state.link_up),
+                );
+            }
+        }
+        Self::record_cleanup_failure(
+            &mut failures,
+            self.recover_persisted_forwarding(
+                "/proc/sys/net/ipv4/ip_forward",
+                &state.ipv4_forwarding,
+            ),
+        );
+        if let Some(mutation) = state.ipv6_forwarding.as_ref() {
+            Self::record_cleanup_failure(
+                &mut failures,
+                self.recover_persisted_forwarding(
+                    "/proc/sys/net/ipv6/conf/all/forwarding",
+                    mutation,
+                ),
+            );
+        }
+        Self::finish_cleanup(failures)?;
+        Ok(true)
+    }
+
+    #[cfg(target_os = "linux")]
     fn ipv4_prefix_len(&self) -> Result<u8, RoutingError> {
         let raw = u32::from(self.netmask);
         let prefix = raw.leading_ones();
@@ -291,7 +931,10 @@ impl RoutingManager {
     /// Set up routing rules.
     #[cfg(target_os = "linux")]
     pub fn setup(&self) -> Result<(), RoutingError> {
+        let mut ownership_prepared = false;
         let result = (|| {
+            self.prepare_persisted_ownership()?;
+            ownership_prepared = true;
             self.assign_tun_address_linux()?;
             self.enable_ip_forwarding()?;
 
@@ -355,6 +998,7 @@ impl RoutingManager {
 
         match result {
             Ok(()) => Ok(()),
+            Err(error) if !ownership_prepared => Err(error),
             Err(error) => match self.teardown() {
                 Ok(()) => Err(error),
                 Err(rollback) => Err(RoutingError::CommandFailed(format!(
@@ -364,50 +1008,12 @@ impl RoutingManager {
         }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub fn setup(&self) -> Result<(), RoutingError> {
-        self.assign_tun_address_macos()?;
-        self.enable_ip_forwarding_macos()?;
-        let subnet = self.calculate_subnet();
-
-        let ipv6_subnet = if self.is_ipv6_enabled() {
-            self.assign_tun_address_v6_macos()?;
-            self.enable_ipv6_forwarding_macos()?;
-            Some(self.calculate_ipv6_subnet())
-        } else {
-            None
-        };
-        self.setup_pf(&subnet, ipv6_subnet.as_deref())?;
-        log::info!("Routing configured (macOS/pf): {} via {}", subnet, self.wan_interface);
-
-        crate::audit::audit(
-            crate::audit::AuditEventType::FirewallRuleAdded,
-            crate::audit::AuditSeverity::Info,
-            None,
-            None,
-            "macOS VPN routing and firewall rules installed",
+        log::warn!(
+            "Server routing is supported only on Linux until native platform ownership is proven"
         );
-
-        Ok(())
-    }
-
-    #[cfg(target_os = "windows")]
-    pub fn setup(&self) -> Result<(), RoutingError> {
-        self.validate_windows_contract()?;
-        self.enable_ip_forwarding_windows()?;
-        let subnet = self.calculate_subnet();
-        self.setup_windows_nat(&subnet)?;
-        log::info!("Routing configured (Windows/NetNat): {} via {}", subnet, self.wan_interface);
-
-        crate::audit::audit(
-            crate::audit::AuditEventType::FirewallRuleAdded,
-            crate::audit::AuditSeverity::Info,
-            None,
-            None,
-            "Windows VPN routing and firewall rules installed",
-        );
-
-        Ok(())
+        Err(RoutingError::UnsupportedPlatform)
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -419,10 +1025,11 @@ impl RoutingManager {
     /// Remove stale routing rules from a crashed previous session.
     ///
     /// This is safe to call on startup before `setup()`. It flushes any
-    /// leftover iptables/pf/netsh rules that may persist from a process
-    /// that was killed before its `teardown()` could run.
+    /// leftover Linux firewall rules and recovers only host state recorded by
+    /// the durable ownership contract.
     #[cfg(target_os = "linux")]
     pub fn cleanup_stale(&self) -> Result<(), RoutingError> {
+        let durable_state_present = self.recover_persisted_ownership()?;
         let subnet = self.calculate_subnet();
         log::info!("Cleaning up stale routing rules for subnet {}", subnet);
         let mut failures = Vec::new();
@@ -582,34 +1189,17 @@ impl RoutingManager {
         }
 
         Self::finish_cleanup(failures)?;
-        log::info!("Stale routing cleanup complete");
-        Ok(())
-    }
-
-    #[cfg(target_os = "macos")]
-    pub fn cleanup_stale(&self) -> Result<(), RoutingError> {
-        log::info!("Cleaning up stale pf anchor rules");
-        crate::firewall::cleanup_pf_anchor(Self::MACOS_PF_ANCHOR)
-            .map_err(|error| RoutingError::CommandFailed(error.to_string()))?;
-        log::info!("Stale routing cleanup complete");
-        Ok(())
-    }
-
-    #[cfg(target_os = "windows")]
-    pub fn cleanup_stale(&self) -> Result<(), RoutingError> {
-        log::info!("Cleaning up stale NetNat rules");
-        let mut failures = Vec::new();
-        for name in [Self::WINDOWS_NAT_NAME.to_string(), format!("{}_v6", Self::WINDOWS_NAT_NAME)] {
-            Self::record_cleanup_failure(
-                &mut failures,
-                crate::firewall::cleanup_windows_nat(&name)
-                    .map(|_| ())
-                    .map_err(|error| RoutingError::CommandFailed(error.to_string())),
-            );
+        if durable_state_present {
+            self.remove_ownership_file()?;
         }
-        Self::finish_cleanup(failures)?;
         log::info!("Stale routing cleanup complete");
         Ok(())
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub fn cleanup_stale(&self) -> Result<(), RoutingError> {
+        log::warn!("Server routing stale cleanup is supported only on Linux");
+        Err(RoutingError::UnsupportedPlatform)
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -627,7 +1217,14 @@ impl RoutingManager {
         };
         Self::record_cleanup_failure(&mut failures, firewall_result);
 
-        let (ipv4_address_added, ipv6_address_added, link_brought_up, ipv4_previous, ipv6_previous) = {
+        let (
+            ipv4_address_added,
+            ipv6_address_added,
+            link_brought_up,
+            ipv4_previous,
+            ipv6_previous,
+            state_prepared,
+        ) = {
             let ownership = self.ownership.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             (
                 ownership.ipv4_address_added,
@@ -635,10 +1232,11 @@ impl RoutingManager {
                 ownership.link_brought_up,
                 ownership.ipv4_forwarding_previous.clone(),
                 ownership.ipv6_forwarding_previous.clone(),
+                ownership.state_prepared,
             )
         };
 
-        if ipv4_address_added {
+        if !state_prepared && ipv4_address_added {
             match self.ipv4_prefix_len() {
                 Ok(prefix) => {
                     let result =
@@ -655,7 +1253,7 @@ impl RoutingManager {
                 Err(error) => failures.push(error.to_string()),
             }
         }
-        if ipv6_address_added {
+        if !state_prepared && ipv6_address_added {
             if let Some(ipv6) = self.server_ipv6 {
                 let result =
                     self.remove_linux_address("inet6", &ipv6.to_string(), self.ipv6_prefix_len);
@@ -669,7 +1267,7 @@ impl RoutingManager {
                 }
             }
         }
-        if link_brought_up {
+        if !state_prepared && link_brought_up {
             let result = self.set_linux_link_down();
             let succeeded = result.is_ok();
             Self::record_cleanup_failure(&mut failures, result);
@@ -680,31 +1278,57 @@ impl RoutingManager {
                     .link_brought_up = false;
             }
         }
-        if let Some(previous) = ipv4_previous {
-            let result = self.restore_forwarding("/proc/sys/net/ipv4/ip_forward", &previous);
-            let succeeded = result.is_ok();
-            Self::record_cleanup_failure(&mut failures, result);
-            if succeeded {
-                self.ownership
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .ipv4_forwarding_previous = None;
+        if !state_prepared {
+            if let Some(previous) = ipv4_previous {
+                let result = self.restore_forwarding("/proc/sys/net/ipv4/ip_forward", &previous);
+                let succeeded = result.is_ok();
+                Self::record_cleanup_failure(&mut failures, result);
+                if succeeded {
+                    self.ownership
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .ipv4_forwarding_previous = None;
+                }
             }
         }
-        if let Some(previous) = ipv6_previous {
-            let result =
-                self.restore_forwarding("/proc/sys/net/ipv6/conf/all/forwarding", &previous);
-            let succeeded = result.is_ok();
-            Self::record_cleanup_failure(&mut failures, result);
-            if succeeded {
-                self.ownership
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .ipv6_forwarding_previous = None;
+        if !state_prepared {
+            if let Some(previous) = ipv6_previous {
+                let result =
+                    self.restore_forwarding("/proc/sys/net/ipv6/conf/all/forwarding", &previous);
+                let succeeded = result.is_ok();
+                Self::record_cleanup_failure(&mut failures, result);
+                if succeeded {
+                    self.ownership
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .ipv6_forwarding_previous = None;
+                }
             }
+        }
+        if state_prepared {
+            let recovery = match self.recover_persisted_ownership() {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(RoutingError::CommandFailed(format!(
+                    "durable routing state {} is missing; refusing host-state cleanup",
+                    self.ownership_path.display()
+                ))),
+                Err(error) => Err(error),
+            };
+            Self::record_cleanup_failure(&mut failures, recovery);
         }
 
         Self::finish_cleanup(failures)?;
+        if state_prepared {
+            let state = self.read_persisted_ownership()?.ok_or_else(|| {
+                RoutingError::CommandFailed(
+                    "durable routing state disappeared during teardown".to_string(),
+                )
+            })?;
+            self.validate_persisted_ownership(&state)?;
+            self.remove_ownership_file()?;
+            self.ownership.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).state_prepared =
+                false;
+        }
 
         log::info!("Routing rules removed");
         crate::audit::audit(
@@ -799,40 +1423,10 @@ impl RoutingManager {
         Self::finish_cleanup(failures)
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub fn teardown(&self) -> Result<(), RoutingError> {
-        crate::firewall::cleanup_pf_anchor(Self::MACOS_PF_ANCHOR)
-            .map_err(|error| RoutingError::CommandFailed(error.to_string()))?;
-        crate::audit::audit(
-            crate::audit::AuditEventType::FirewallRuleRemoved,
-            crate::audit::AuditSeverity::Info,
-            None,
-            None,
-            "macOS VPN routing and firewall rules removed",
-        );
-        Ok(())
-    }
-
-    #[cfg(target_os = "windows")]
-    pub fn teardown(&self) -> Result<(), RoutingError> {
-        let mut failures = Vec::new();
-        for name in [Self::WINDOWS_NAT_NAME.to_string(), format!("{}_v6", Self::WINDOWS_NAT_NAME)] {
-            Self::record_cleanup_failure(
-                &mut failures,
-                crate::firewall::cleanup_windows_nat(&name)
-                    .map(|_| ())
-                    .map_err(|error| RoutingError::CommandFailed(error.to_string())),
-            );
-        }
-        Self::finish_cleanup(failures)?;
-        crate::audit::audit(
-            crate::audit::AuditEventType::FirewallRuleRemoved,
-            crate::audit::AuditSeverity::Info,
-            None,
-            None,
-            "Windows VPN routing and firewall rules removed",
-        );
-        Ok(())
+        log::warn!("Server routing teardown is supported only on Linux");
+        Err(RoutingError::UnsupportedPlatform)
     }
 
     #[cfg(target_os = "linux")]
@@ -1303,61 +1897,10 @@ impl RoutingManager {
         Ok(())
     }
 
-    #[cfg(target_os = "macos")]
-    const MACOS_PF_ANCHOR: &'static str = "com.quicfuscate.vpn";
-
-    #[cfg(any(test, target_os = "windows"))]
+    #[cfg(test)]
     const WINDOWS_NAT_NAME: &'static str = "QuicFuscateNat";
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    fn map_process_error(
-        &self,
-        action: &str,
-        output: std::process::Output,
-    ) -> Result<(), RoutingError> {
-        if output.status.success() {
-            return Ok(());
-        }
-
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let lowered = stderr.to_ascii_lowercase();
-        if lowered.contains("permission denied")
-            || lowered.contains("operation not permitted")
-            || lowered.contains("access is denied")
-            || lowered.contains("requires elevation")
-            || lowered.contains("elevation required")
-            || lowered.contains("administrator")
-        {
-            return Err(RoutingError::PermissionDenied);
-        }
-
-        let detail = stderr.trim();
-        if detail.is_empty() {
-            Err(RoutingError::CommandFailed(format!("{action} failed")))
-        } else {
-            Err(RoutingError::CommandFailed(format!("{action} failed: {detail}")))
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    fn run_command(&self, cmd: &str, args: &[&str], action: &str) -> Result<(), RoutingError> {
-        let output = Command::new(cmd)
-            .args(args)
-            .output()
-            .map_err(|e| RoutingError::CommandFailed(format!("{action}: {e}")))?;
-        self.map_process_error(action, output)
-    }
-
-    #[cfg(target_os = "macos")]
-    fn enable_ip_forwarding_macos(&self) -> Result<(), RoutingError> {
-        self.run_command(
-            "sysctl",
-            &["-w", "net.inet.ip.forwarding=1"],
-            "enable macOS IP forwarding",
-        )
-    }
-
-    #[cfg(target_os = "macos")]
+    #[cfg(test)]
     fn pf_rules(&self, subnet: &str, ipv6_subnet: Option<&str>) -> String {
         let fanout_v4 = format!(
             "pass quick on {} inet from {} to {{ 255.255.255.255, {}, 224.0.0.0/4 }} keep state\n",
@@ -1415,65 +1958,7 @@ impl RoutingManager {
         rules
     }
 
-    #[cfg(target_os = "macos")]
-    fn setup_pf(&self, subnet: &str, ipv6_subnet: Option<&str>) -> Result<(), RoutingError> {
-        // Ensure packet filter is enabled.
-        self.run_command("pfctl", &["-E"], "enable pfctl")?;
-
-        let rules = self.pf_rules(subnet, ipv6_subnet);
-        let mut child = Command::new("pfctl")
-            .args(["-a", Self::MACOS_PF_ANCHOR, "-f", "-"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| RoutingError::CommandFailed(format!("pfctl spawn failed: {e}")))?;
-
-        if let Some(stdin) = child.stdin.as_mut() {
-            stdin.write_all(rules.as_bytes()).map_err(|e| {
-                RoutingError::CommandFailed(format!("pfctl rule write failed: {e}"))
-            })?;
-        } else {
-            return Err(RoutingError::CommandFailed("pfctl stdin unavailable".to_string()));
-        }
-
-        let output = child
-            .wait_with_output()
-            .map_err(|e| RoutingError::CommandFailed(format!("pfctl wait failed: {e}")))?;
-        self.map_process_error("pfctl anchor load", output)
-    }
-
-    #[cfg(target_os = "windows")]
-    fn ps_escape(s: &str) -> String {
-        s.replace('\'', "''")
-    }
-
-    #[cfg(target_os = "windows")]
-    fn run_powershell(&self, script: &str, action: &str) -> Result<(), RoutingError> {
-        let output = Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", script])
-            .output()
-            .map_err(|e| RoutingError::CommandFailed(format!("{action}: {e}")))?;
-        self.map_process_error(action, output)
-    }
-
-    #[cfg(target_os = "windows")]
-    fn enable_ip_forwarding_windows(&self) -> Result<(), RoutingError> {
-        let iface = Self::ps_escape(&self.wan_interface);
-        let script = format!(
-            "$ErrorActionPreference='Stop'; \
-             Set-NetIPInterface -InterfaceAlias '{iface}' -Forwarding Enabled"
-        );
-        self.run_powershell(&script, "Set-NetIPInterface forwarding")
-    }
-
-    #[cfg(target_os = "windows")]
-    fn setup_windows_nat(&self, subnet: &str) -> Result<(), RoutingError> {
-        let script = self.windows_nat_script(subnet);
-        self.run_powershell(&script, "New-NetNat")
-    }
-
-    #[cfg(any(test, target_os = "windows"))]
+    #[cfg(test)]
     fn windows_nat_script(&self, subnet: &str) -> String {
         let nat_name = Self::WINDOWS_NAT_NAME;
         format!(
@@ -1485,7 +1970,7 @@ impl RoutingManager {
         )
     }
 
-    #[cfg(any(test, target_os = "windows"))]
+    #[cfg(test)]
     fn validate_windows_contract(&self) -> Result<(), RoutingError> {
         if self.is_ipv6_enabled() {
             return Err(RoutingError::UnsupportedConfiguration(
@@ -1602,43 +2087,7 @@ impl RoutingManager {
         Ok(())
     }
 
-    /// Assign the IPv4 address to the TUN interface on macOS.
-    #[cfg(target_os = "macos")]
-    fn assign_tun_address_macos(&self) -> Result<(), RoutingError> {
-        let address = self.server_ip.to_string();
-        let netmask = self.netmask.to_string();
-        self.run_command(
-            "ifconfig",
-            &[&self.tun_name, &address, "netmask", &netmask, "up"],
-            "assign macOS IPv4 TUN address",
-        )?;
-        log::debug!("TUN IPv4 address assigned: {} on {}", self.server_ip, self.tun_name);
-        Ok(())
-    }
-
-    /// Assign the IPv6 address to the TUN interface on macOS.
-    #[cfg(target_os = "macos")]
-    fn assign_tun_address_v6_macos(&self) -> Result<(), RoutingError> {
-        if let Some(ipv6) = self.server_ipv6 {
-            if self.ipv6_prefix_len > 128 {
-                return Err(RoutingError::UnsupportedConfiguration(format!(
-                    "IPv6 prefix length {} exceeds 128",
-                    self.ipv6_prefix_len
-                )));
-            }
-            let address = ipv6.to_string();
-            let prefix = self.ipv6_prefix_len.to_string();
-            self.run_command(
-                "ifconfig",
-                &[&self.tun_name, "inet6", &address, "prefixlen", &prefix, "up"],
-                "assign macOS IPv6 TUN address",
-            )?;
-            log::debug!("TUN IPv6 address assigned: {} on {}", ipv6, self.tun_name);
-        }
-        Ok(())
-    }
-
-    #[cfg(any(test, target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[cfg(any(test, target_os = "linux"))]
     fn calculate_subnet(&self) -> String {
         // Simple CIDR calculation based on netmask
         let mask_bits = self.netmask.octets().iter().map(|b| b.count_ones()).sum::<u32>();
@@ -1656,6 +2105,7 @@ impl RoutingManager {
         Ok(format!("{}/{}", Ipv4Addr::from(network), prefix))
     }
 
+    #[cfg(any(test, target_os = "linux"))]
     fn ipv4_broadcast(&self) -> Ipv4Addr {
         let mask = u32::from(self.netmask);
         Ipv4Addr::from((u32::from(self.server_ip) & mask) | !mask)
@@ -1671,6 +2121,7 @@ impl RoutingManager {
     }
 
     /// Calculate the IPv6 subnet CIDR (e.g., "fd00::/64").
+    #[cfg(any(test, target_os = "linux"))]
     fn calculate_ipv6_subnet(&self) -> String {
         match self.server_ipv6 {
             Some(ip) => {
@@ -1726,15 +2177,6 @@ impl RoutingManager {
     #[cfg(target_os = "linux")]
     fn setup_ip6tables(&self, subnet: &str) -> Result<(), RoutingError> {
         self.setup_iptables_family("ip6tables", "ip6tables-restore", subnet, true)
-    }
-
-    #[cfg(target_os = "macos")]
-    fn enable_ipv6_forwarding_macos(&self) -> Result<(), RoutingError> {
-        self.run_command(
-            "sysctl",
-            &["-w", "net.inet6.ip6.forwarding=1"],
-            "enable macOS IPv6 forwarding",
-        )
     }
 }
 
@@ -1797,17 +2239,75 @@ mod tests {
         assert_eq!(mgr.calculate_subnet(), "10.8.0.0/24");
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
-    fn windows_stale_nat_cleanup_is_native_verified_and_idempotent() {
+    fn server_routing_platform_surface_is_explicitly_unsupported() {
         let manager = RoutingManager::new(
             "QuicFuscate".to_string(),
             Ipv4Addr::new(10, 8, 0, 1),
             Ipv4Addr::new(255, 255, 255, 0),
             "Ethernet".to_string(),
         );
-        manager.cleanup_stale().unwrap();
-        manager.cleanup_stale().unwrap();
+        assert!(matches!(manager.setup(), Err(RoutingError::UnsupportedPlatform)));
+        assert!(matches!(manager.cleanup_stale(), Err(RoutingError::UnsupportedPlatform)));
+        assert!(matches!(manager.teardown(), Err(RoutingError::UnsupportedPlatform)));
+    }
+
+    #[test]
+    fn durable_routing_state_rejects_unknown_fields() {
+        let state = PersistedRoutingOwnership {
+            schema: 2,
+            tun_name: "qfserver0".to_string(),
+            interface_index: 17,
+            owner_boot_id: "boot-id".to_string(),
+            owner_pid: 42,
+            owner_start_time: 7,
+            server_ipv4: "10.8.0.1".to_string(),
+            netmask: "255.255.255.0".to_string(),
+            wan_interface: "eth0".to_string(),
+            server_ipv6: None,
+            ipv6_prefix_len: 64,
+            ipv4_address: BoolMutation { before: false, after: true },
+            ipv6_address: None,
+            link_up: BoolMutation { before: false, after: true },
+            ipv4_forwarding: TextMutation { before: "0\n".to_string(), after: "1".to_string() },
+            ipv6_forwarding: None,
+        };
+        let encoded = serde_json::to_value(&state).expect("state serialization");
+        let decoded: PersistedRoutingOwnership =
+            serde_json::from_value(encoded.clone()).expect("state round trip");
+        assert_eq!(decoded, state);
+
+        let mut with_unknown = encoded;
+        with_unknown
+            .as_object_mut()
+            .expect("state object")
+            .insert("unexpected".to_string(), serde_json::Value::Bool(true));
+        assert!(serde_json::from_value::<PersistedRoutingOwnership>(with_unknown).is_err());
+    }
+
+    #[test]
+    fn durable_routing_recovery_is_conservative() {
+        assert_eq!(recovery_decision(&false, &true, &false), RecoveryDecision::Noop);
+        assert_eq!(recovery_decision(&false, &true, &true), RecoveryDecision::Restore);
+        assert_eq!(recovery_decision(&"0", &"1", &"2"), RecoveryDecision::Conflict);
+    }
+
+    #[test]
+    fn durable_routing_owner_identity_rejects_live_and_reused_processes() {
+        assert!(active_owner_matches("boot", "boot", 7, Some(7)));
+        assert!(!active_owner_matches("boot", "boot", 7, Some(8)));
+        assert!(!active_owner_matches("boot", "new-boot", 7, Some(7)));
+        assert!(!active_owner_matches("boot", "boot", 7, None));
+    }
+
+    #[test]
+    fn durable_routing_state_filename_cannot_escape_its_directory() {
+        let filename = routing_state_filename("../../tun/with spaces");
+        assert!(!filename.contains('/'));
+        assert!(!filename.contains('\\'));
+        assert!(filename.ends_with(".json"));
+        assert_ne!(filename, routing_state_filename("tun/with spaces"));
     }
 
     #[test]

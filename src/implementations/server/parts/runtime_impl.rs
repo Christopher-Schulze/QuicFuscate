@@ -117,6 +117,14 @@ impl ServerRuntime {
         let (server_tun, tun_rx, routing, tun_reader_shutdown, tun_reader_handle) = match tun_config {
             Some(tun_config) => {
                 let optm = crate::optimize::OptimizationManager::from_cfg(opt_params);
+                #[cfg(target_os = "linux")]
+                {
+                    crate::interface::validate_tun_config(&tun_config)
+                        .map_err(|error| std::io::Error::other(format!("{error:?}")))?;
+                    cleanup_stale_routing_records(tun_config.name.as_deref(), &server_config)
+                        .map_err(std::io::Error::other)?;
+                }
+
                 match open_server_tun(tun_config, optm.memory_pool()) {
                     Ok(tun) => {
                         #[cfg(target_os = "linux")]
@@ -124,11 +132,6 @@ impl ServerRuntime {
                             let routing =
                                 configured_routing_manager(tun.name().to_string(), &server_config)
                                     .map_err(std::io::Error::other)?;
-                            routing.cleanup_stale().map_err(|error| {
-                                std::io::Error::other(format!(
-                                    "stale routing cleanup failed: {error}"
-                                ))
-                            })?;
                             if let Err(error) = routing.setup() {
                                 let rollback_error = routing.teardown().err();
                                 crate::audit::audit_typed(

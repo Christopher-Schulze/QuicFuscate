@@ -26,11 +26,14 @@ LOCK_TIMEOUT="${QF_E2E_LOCK_TIMEOUT:-300}"
 STARTUP_TIMEOUT="${QF_E2E_STARTUP_TIMEOUT:-15}"
 QKEY_STORE="${QF_E2E_QKEY_STORE:-/tmp/qf-tun-e2e-qkeys.json}"
 ADMIN_SOCKET="${QF_E2E_ADMIN_SOCKET:-/tmp/qf-tun-e2e-admin.sock}"
+RESTART_ADMIN_SOCKET="${QF_E2E_RESTART_ADMIN_SOCKET:-${ADMIN_SOCKET}.restart}"
+ROUTING_STATE_PATH="/run/quicfuscate/routing/7174756e30.json"
 SERVER_CONFIG_ARGS=()
 CLIENT_CONFIG_ARGS=()
 SERVER_PROFILE_ARGS=()
 SERVER_PRIVILEGE_ARGS=(--no-drop-privileges)
 SERVER_PID=""
+SERVER_LOG_PATH=""
 CLIENT_PID=""
 CAPTURE_PID=""
 NAMESPACES_CREATED=0
@@ -73,6 +76,28 @@ stop_owned_process() {
   wait "$pid" 2>/dev/null || true
 }
 
+stop_owned_process_gracefully() {
+  local pid="$1"
+  local state=""
+  if [ -z "$pid" ]; then
+    return 0
+  fi
+
+  kill -TERM "$pid" 2>/dev/null || true
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      break
+    fi
+    state="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
+    [[ "$state" == Z* ]] && break
+    sleep 1
+  done
+  if kill -0 "$pid" 2>/dev/null && [[ "$state" != Z* ]]; then
+    return 1
+  fi
+  wait "$pid" 2>/dev/null || true
+}
+
 stop_capture_process() {
   if [ -z "$CAPTURE_PID" ]; then
     return
@@ -97,6 +122,7 @@ cleanup() {
   fi
   rm -f "$QKEY_STORE"
   rm -f "$ADMIN_SOCKET"
+  rm -f "$RESTART_ADMIN_SOCKET"
   if [ -n "$CERT_DIR" ] && [ -d "$CERT_DIR" ]; then
     rm -rf "$CERT_DIR"
     CERT_DIR=""
@@ -117,6 +143,8 @@ dump_diagnostics() {
   ip netns exec ns-cli ip -s link show qtun0 >&2 2>/dev/null || true
   echo "=== failure diagnostics: server MASQUE/TUN/errors ===" >&2
   grep -iE "tun|error|warn|panic|MASQUE|datagram|ICMP" /tmp/ns-srv.log 2>/dev/null | \
+    grep -vE "rate limiter|Memory|browser|CPU|NEON|SIMD|Cache|stats:" | tail -80 >&2 || true
+  grep -iE "tun|error|warn|panic|MASQUE|datagram|ICMP" /tmp/ns-srv-restart.log 2>/dev/null | \
     grep -vE "rate limiter|Memory|browser|CPU|NEON|SIMD|Cache|stats:" | tail -80 >&2 || true
   echo "=== failure diagnostics: client MASQUE/TUN/errors ===" >&2
   grep -iE "tun|error|warn|panic|MASQUE|datagram|ICMP" /tmp/ns-cli.log 2>/dev/null | \
@@ -143,6 +171,14 @@ if ip netns list | grep -Eq '^(ns-srv|ns-cli)([[:space:]]|$)'; then
 fi
 if [ -e "$ADMIN_SOCKET" ]; then
   echo "FAIL: admin socket path already exists; refusing to remove unowned path $ADMIN_SOCKET" >&2
+  exit 2
+fi
+if [ -e "$RESTART_ADMIN_SOCKET" ]; then
+  echo "FAIL: restart admin socket path already exists; refusing to remove unowned path $RESTART_ADMIN_SOCKET" >&2
+  exit 2
+fi
+if [ -e "$ROUTING_STATE_PATH" ]; then
+  echo "FAIL: routing ownership state already exists; refusing to remove unowned path $ROUTING_STATE_PATH" >&2
   exit 2
 fi
 if [ -n "$TRAFFIC_CAPTURE_FILE" ]; then
@@ -213,33 +249,59 @@ done
 echo "=== veth connectivity (cli -> srv) ==="
 ip netns exec ns-cli ping -c1 -W2 10.10.0.1 2>&1 | grep -E "bytes from|packet loss"
 
-# --- start server in ns-srv ---
-ip netns exec ns-srv "$B" server --cert "$CERT" --key "$KEY" \
-  --listen 10.10.0.1:4433 --admin-socket "$ADMIN_SOCKET" \
-  --qkey-store "$QKEY_STORE" \
-  --tun --tun-name qtun0 --tun-ip 10.0.1.1 --tun-netmask 255.255.255.0 \
-  "${SERVER_PRIVILEGE_ARGS[@]}" "${SERVER_PROFILE_ARGS[@]}" -v "${SERVER_CONFIG_ARGS[@]}" \
-  > /tmp/ns-srv.log 2>&1 &
-SERVER_PID=$!
+start_server() {
+  local admin_socket="$1"
+  local log_path="$2"
+  SERVER_LOG_PATH="$log_path"
+  ip netns exec ns-srv "$B" server --cert "$CERT" --key "$KEY" \
+    --listen 10.10.0.1:4433 --admin-socket "$admin_socket" \
+    --qkey-store "$QKEY_STORE" \
+    --tun --tun-name qtun0 --tun-ip 10.0.1.1 --tun-netmask 255.255.255.0 \
+    "${SERVER_PRIVILEGE_ARGS[@]}" "${SERVER_PROFILE_ARGS[@]}" -v "${SERVER_CONFIG_ARGS[@]}" \
+    > "$log_path" 2>&1 &
+  SERVER_PID=$!
+}
 
-QKEY=""
-for ((attempt = 0; attempt < STARTUP_TIMEOUT; attempt++)); do
-  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-    break
-  fi
-  if [ -S "$ADMIN_SOCKET" ]; then
-    QKEY=$(echo '{"cmd":"qkey"}' | nc -w 1 -U "$ADMIN_SOCKET" 2>/dev/null | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["data"]["qkey"])' 2>/dev/null)
-    if [ -n "$QKEY" ]; then
+wait_for_qkey() {
+  local admin_socket="$1"
+  local log_path="$2"
+  QKEY=""
+  for ((attempt = 0; attempt < STARTUP_TIMEOUT; attempt++)); do
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
       break
     fi
+    if [ -S "$admin_socket" ]; then
+      QKEY=$(echo '{"cmd":"qkey"}' | nc -w 1 -U "$admin_socket" 2>/dev/null | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["data"]["qkey"])' 2>/dev/null)
+      if [ -n "$QKEY" ]; then
+        break
+      fi
+    fi
+    sleep 1
+  done
+  echo "qkey len: ${#QKEY}"
+  if [ -z "$QKEY" ]; then
+    cat "$log_path" >&2
+    fail "could not issue QKey from admin socket $admin_socket"
   fi
-  sleep 1
-done
-echo "qkey len: ${#QKEY}"
-if [ -z "$QKEY" ]; then
-  cat /tmp/ns-srv.log >&2
-  fail "could not issue QKey from admin socket"
+}
+
+# --- start server in ns-srv ---
+start_server "$ADMIN_SOCKET" /tmp/ns-srv.log
+wait_for_qkey "$ADMIN_SOCKET" /tmp/ns-srv.log
+
+# --- prove process-loss recovery before opening the client data plane ---
+if [ ! -f "$ROUTING_STATE_PATH" ]; then
+  fail "Linux routing did not publish its durable ownership record: $ROUTING_STATE_PATH"
 fi
+echo "=== crash/restart routing ownership proof ==="
+kill -KILL "$SERVER_PID" 2>/dev/null || true
+wait "$SERVER_PID" 2>/dev/null || true
+SERVER_PID=""
+if [ ! -f "$ROUTING_STATE_PATH" ]; then
+  fail "process loss unexpectedly removed the durable routing ownership record"
+fi
+start_server "$RESTART_ADMIN_SOCKET" /tmp/ns-srv-restart.log
+wait_for_qkey "$RESTART_ADMIN_SOCKET" /tmp/ns-srv-restart.log
 
 # --- start client in ns-cli ---
 ip netns exec ns-cli "$B" client --remote 10.10.0.1:4433 --url https://10.10.0.1/ \
@@ -261,9 +323,9 @@ echo "=== TUN ifaces ==="
 echo "srv: $(ip netns exec ns-srv ip -br addr show qtun0 2>&1)"
 echo "cli: $(ip netns exec ns-cli ip -br addr show qtun0 2>&1)"
 echo "=== handshake status ==="
-echo "client_complete=$(grep -c 'TLS handshake complete' /tmp/ns-cli.log) server_complete=$(grep -c 'TLS handshake complete' /tmp/ns-srv.log)"
-if [ "$(grep -c 'TLS handshake complete' /tmp/ns-cli.log)" = "0" ] || [ "$(grep -c 'TLS handshake complete' /tmp/ns-srv.log)" = "0" ]; then
-  cat /tmp/ns-srv.log >&2
+echo "client_complete=$(grep -c 'TLS handshake complete' /tmp/ns-cli.log) server_complete=$(grep -c 'TLS handshake complete' "$SERVER_LOG_PATH")"
+if [ "$(grep -c 'TLS handshake complete' /tmp/ns-cli.log)" = "0" ] || [ "$(grep -c 'TLS handshake complete' "$SERVER_LOG_PATH")" = "0" ]; then
+  cat "$SERVER_LOG_PATH" >&2
   cat /tmp/ns-cli.log >&2
   fail "TLS handshake did not complete on both sides"
 fi
@@ -329,13 +391,26 @@ if ! echo "$SERVER_TO_CLIENT_PING" | grep -q " 0% packet loss"; then
 fi
 
 echo "=== MASQUE counters ==="
-echo "srv: $(grep -i 'MASQUE' /tmp/ns-srv.log | tail -3)"
+echo "srv: $(grep -i 'MASQUE' "$SERVER_LOG_PATH" | tail -3)"
 echo "cli: $(grep -i 'MASQUE' /tmp/ns-cli.log | tail -3)"
 
 echo "=== server log tail (TUN/errors) ==="
-grep -iE "tun|error|warn|panic|MASQUE" /tmp/ns-srv.log | grep -vE "rate limiter|Memory|browser|CPU|NEON|SIMD|Cache" | tail -10
+grep -iE "tun|error|warn|panic|MASQUE" "$SERVER_LOG_PATH" | grep -vE "rate limiter|Memory|browser|CPU|NEON|SIMD|Cache" | tail -10
 echo "=== client log tail (TUN/errors) ==="
 grep -iE "tun|error|warn|panic|MASQUE" /tmp/ns-cli.log | grep -vE "rate limiter|Memory|browser|CPU|NEON|SIMD|Cache" | tail -10
+
+# --- graceful shutdown must remove the durable routing record ---
+if ! stop_owned_process_gracefully "$CLIENT_PID"; then
+  fail "client did not stop gracefully"
+fi
+CLIENT_PID=""
+if ! stop_owned_process_gracefully "$SERVER_PID"; then
+  fail "server did not stop gracefully"
+fi
+SERVER_PID=""
+if [ -e "$ROUTING_STATE_PATH" ]; then
+  fail "graceful server shutdown left durable routing state behind: $ROUTING_STATE_PATH"
+fi
 
 # cleanup
 cleanup
