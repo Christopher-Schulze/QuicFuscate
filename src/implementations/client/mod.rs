@@ -90,60 +90,6 @@ pub struct ClientRuntime {
 pub struct ClientSubsystems {
     /// Stealth manager for obfuscation
     pub stealth: Arc<crate::stealth::StealthManager>,
-    /// FEC codec for error correction
-    pub fec: Arc<std::sync::Mutex<FecCodec>>,
-}
-
-/// FEC codec wrapper for the client.
-pub struct FecCodec {
-    inner: crate::fec::AdaptiveFec,
-    packet_id: std::sync::atomic::AtomicU64,
-    output_scratch: Vec<crate::fec::FecPacket>,
-    receive_scratch: Vec<crate::fec::FecPacket>,
-}
-
-impl FecCodec {
-    pub fn new(config: crate::fec::FecConfig) -> Self {
-        Self {
-            inner: crate::fec::AdaptiveFec::new(config),
-            packet_id: std::sync::atomic::AtomicU64::new(0),
-            output_scratch: Vec::with_capacity(1),
-            receive_scratch: Vec::with_capacity(1),
-        }
-    }
-
-    pub fn encode_packets(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
-        let mem_pool = self.inner.memory_pool().clone();
-        let id = self.packet_id.fetch_add(1, Ordering::Relaxed);
-        let mut block = mem_pool.alloc();
-        let len = data.len().min(block.len());
-        block[..len].copy_from_slice(&data[..len]);
-        let packet = crate::fec::FecPacket::new(id, Some(block), len, true, None, 0, mem_pool);
-        let mut out = Vec::new();
-        self.inner.on_send_into(packet, &mut self.output_scratch);
-        for pkt in self.output_scratch.drain(..) {
-            if let Some(data) = pkt.payload_slice() {
-                out.push(data.to_vec());
-            }
-        }
-        out
-    }
-
-    pub fn decode_packets(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
-        let mem_pool = self.inner.memory_pool().clone();
-        let mut block = mem_pool.alloc();
-        let len = data.len().min(block.len());
-        block[..len].copy_from_slice(&data[..len]);
-        let packet = crate::fec::FecPacket::new(0, Some(block), len, true, None, 0, mem_pool);
-        match self.inner.on_receive_into(packet, &mut self.receive_scratch) {
-            Ok(()) => self
-                .receive_scratch
-                .drain(..)
-                .filter_map(|pkt| pkt.payload_slice().map(|data| data.to_vec()))
-                .collect(),
-            Err(_) => Vec::new(),
-        }
-    }
 }
 
 /// Internal client state.

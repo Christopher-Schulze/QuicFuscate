@@ -651,11 +651,6 @@ impl AdaptiveFec {
         Ok(())
     }
 
-    /// Return a reference to the internal memory pool
-    pub(crate) fn memory_pool(&self) -> &Arc<MemoryPool> {
-        &self.mem_pool
-    }
-
     #[cfg(test)]
     fn stream_repair_scratch_capacity(&self) -> usize {
         self.stream_repair_scratch.capacity()

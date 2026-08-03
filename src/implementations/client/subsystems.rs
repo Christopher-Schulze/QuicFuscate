@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::engine::{EngineConfig, EngineError};
 use crate::stealth::StealthRuntimeOwner;
 
-use super::{ClientSubsystems, FecCodec};
+use super::ClientSubsystems;
 
 pub fn init_subsystems_with_runtime(
     config: &EngineConfig,
@@ -15,12 +15,7 @@ pub fn init_subsystems_with_runtime(
         .validate()
         .map_err(|error| EngineError::Config(format!("Invalid engine configuration: {error}")))?;
     let stealth = init_stealth(config, runtime_owner)?;
-    let fec_config = config
-        .fec
-        .to_runtime_config()
-        .map_err(|error| EngineError::Config(format!("FEC config error: {error}")))?;
-    let fec = Arc::new(std::sync::Mutex::new(FecCodec::new(fec_config)));
-    Ok(ClientSubsystems { stealth, fec })
+    Ok(ClientSubsystems { stealth })
 }
 
 fn init_stealth(
@@ -70,9 +65,8 @@ mod tests {
         let result = init_subsystems_with_runtime(&config, None);
         assert!(result.is_ok(), "init_subsystems with default config must succeed");
         let subs = result.unwrap();
-        // Verify both subsystems are initialized
+        // Verify the active client subsystem is initialized.
         let _stealth_ref = &subs.stealth;
-        let _fec_lock = subs.fec.lock().expect("fec mutex not poisoned");
     }
 
     #[test]
