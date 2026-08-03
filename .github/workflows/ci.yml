@@ -423,6 +423,33 @@ jobs:
           QF_TRAFFIC_OUTPUT_DIR="$GITHUB_WORKSPACE/scripts/out/tests/traffic-analysis-native"
           scripts/tests/tun-e2e-traffic-analysis-netns.sh
 
+      - name: Prove native server IPv4 PTB for DF=0
+        shell: bash
+        run: |
+          native_ptb_ca_dir="$(mktemp -d "$RUNNER_TEMP/quicfuscate-ptb-ca.XXXXXX")"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+            -keyout "$native_ptb_ca_dir/ca.key" \
+            -out "$native_ptb_ca_dir/ca.crt" \
+            -subj '/CN=QuicFuscate native PTB gate' \
+            >/dev/null 2>&1
+          sudo --preserve-env=GITHUB_SHA \
+            env QF_E2E_BINARY="$GITHUB_WORKSPACE/target/release/quicfuscate" \
+            QF_E2E_CA="$native_ptb_ca_dir/ca.crt" \
+            QF_E2E_CA_KEY="$native_ptb_ca_dir/ca.key" \
+            QF_E2E_ARTIFACT_DIR="$GITHUB_WORKSPACE/scripts/out/tests/server-ipv4-ptb-native" \
+            QF_E2E_THROUGHPUT_TRIAL_SECONDS=5 \
+            QF_E2E_DEFER_PMTU_GAIN_GATE=1 \
+            PROJECT_ROOT="$GITHUB_WORKSPACE" \
+            scripts/tests/tun-e2e-multi-client-dual-stack-netns.sh
+
+      - name: Upload native server IPv4 PTB evidence
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: server-ipv4-ptb-native
+          path: scripts/out/tests/server-ipv4-ptb-native/
+          if-no-files-found: error
+
       - name: Upload native traffic-analysis evidence
         uses: actions/upload-artifact@v7
         if: always()
