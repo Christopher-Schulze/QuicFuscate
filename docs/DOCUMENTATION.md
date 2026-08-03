@@ -2625,6 +2625,8 @@ quicfuscate verify-audit-log <path>
 `quicfuscate-ctl` talks to the Unix admin socket exposed by `--admin-socket`. It uses
 `/var/run/quicfuscate/ctl.sock` by default and can be overridden via `QUICFUSCATE_CTL_SOCKET`.
 
+The CLI accepts one newline-terminated UTF-8 response frame with a maximum size of 1 MiB. Empty, unterminated, oversized, invalid-UTF-8, malformed-JSON, and schema-drifted responses fail with a nonzero result. `status`, `clients`, `qkey`, and message commands use separate typed response contracts with required fields; unknown fields are rejected, QKeys are parsed and checksum-validated, and client byte totals use checked addition. Missing values never become zero, `?`, an empty QKey, or a generic pretty-printed fallback. Request serialization and server-side request framing remain owned by TODO-673.
+
 Examples:
 
 ```

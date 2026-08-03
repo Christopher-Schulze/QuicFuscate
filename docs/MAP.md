@@ -1127,7 +1127,7 @@ The follow-up source reconciliation confirmed and expanded the server/runtime ba
 - **Environment parsing:** No supported external-process or safe concurrent mutation path establishes a torn-read defect. TODO-670 retains only the confirmed silent handling of set-but-invalid values.
 - **File modes:** `fsutil`, audit persistence, and PKI private-key writers set creation modes before opening files. TODO-671 retains direct Linux resolver and rotating-log creation paths that can still inherit umask when creating a new target.
 - **Log rotation:** Unix SIGHUP is already routed to configuration reload, not rotation. `SizeRotatingAppender` has no public force-rotate or admin trigger. TODO-672 remains open with that boundary.
-- **CLI control protocol:** `quicfuscate-ctl` interpolates unescaped user strings into JSON, and the Unix admin server reads an unbounded line. TODO-673 covers JSON serialization, command-specific limits, and server framing.
+- **CLI control protocol:** `quicfuscate-ctl` still interpolates unescaped user strings into JSON, and the Unix admin server still reads an unbounded request line; TODO-673 owns those request-side gaps. The CLI response side now enforces one bounded newline-terminated UTF-8 frame and typed command-specific schemas, rejecting missing, wrong-typed, unknown, malformed, or overflowed values (TODO-795).
 - **Audit persistence:** `AuditLog::flush` bounds the producer acknowledgement wait, but the writer's `flush` and `sync_data` remain synchronous and uninterruptible. TODO-675 retains the terminal-error propagation and worker-side durability/cancellation gaps.
 
 ## Deep Audit Reconciliation (2026-08-02, unsafe and protocol lifecycle)
