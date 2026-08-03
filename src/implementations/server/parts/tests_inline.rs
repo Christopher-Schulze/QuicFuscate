@@ -1290,7 +1290,10 @@ mod tests {
 
     #[test]
     fn test_load_persisted_logging_mode_defaults_to_normal_without_config() {
-        assert_eq!(load_persisted_logging_mode(None), "normal");
+        assert_eq!(
+            load_persisted_logging_mode(None).expect("missing config path is not an error"),
+            PersistedLoggingModeState::Absent
+        );
     }
 
     #[test]
@@ -2238,6 +2241,213 @@ mod tests {
 
     // --- Logging mode tests ---
 
+    fn logging_test_config_path(label: &str) -> std::path::PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
+        let sequence = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "quicfuscate-logging-{label}-{}-{sequence}.toml",
+            std::process::id()
+        ))
+    }
+
+    fn cleanup_logging_test_files(config_path: &std::path::Path) {
+        for path in [
+            config_path.to_path_buf(),
+            config_path.with_extension("logging.json"),
+            config_path.with_extension("qkeys.json"),
+        ] {
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
+
+    fn logging_test_guard() -> parking_lot::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<parking_lot::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| parking_lot::Mutex::new(())).lock()
+    }
+
+    #[test]
+    fn logging_mode_persistence_round_trips_and_restores_on_restart() {
+        let _guard = logging_test_guard();
+        let modes = [
+            (crate::engine::LoggingMode::Verbose, "verbose"),
+            (crate::engine::LoggingMode::Normal, "normal"),
+            (crate::engine::LoggingMode::Minimal, "minimal"),
+            (crate::engine::LoggingMode::NoLog, "no-log"),
+        ];
+
+        for (index, (expected_mode, expected_name)) in modes.into_iter().enumerate() {
+            let config_path = logging_test_config_path(&format!("roundtrip-{index}"));
+            let log_buffer = crate::implementations::server::admin_logs::AdminLogBuffer::new(64);
+            let logging_mode = parking_lot::RwLock::new("normal".to_string());
+            let response = write_logging_mode(
+                Some(&config_path),
+                &logging_mode,
+                &log_buffer,
+                expected_name,
+            );
+            assert!(response.success, "mode '{expected_name}' must persist");
+            assert_eq!(*logging_mode.read(), expected_name);
+            assert_eq!(
+                load_persisted_logging_mode(Some(&config_path)).expect("persisted mode must load"),
+                PersistedLoggingModeState::Valid(expected_mode.clone())
+            );
+
+            let bootstrap = initialize_standalone_server_bootstrap(
+                Some(&config_path),
+                Some(std::sync::Arc::new(
+                    crate::implementations::server::admin_logs::AdminLogBuffer::new(64),
+                )),
+                Some(60),
+                Some(config_path.with_extension("qkeys.json")),
+            )
+            .expect("valid persisted mode must not block restart");
+            assert_eq!(bootstrap.initial_logging_mode, expected_name);
+            cleanup_logging_test_files(&config_path);
+        }
+        log::set_max_level(log::LevelFilter::Info);
+    }
+
+    #[test]
+    fn standalone_bootstrap_uses_normal_mode_when_logging_state_is_absent() {
+        let _guard = logging_test_guard();
+        let config_path = logging_test_config_path("absent");
+        log::set_max_level(log::LevelFilter::Off);
+        let bootstrap = initialize_standalone_server_bootstrap(
+            Some(&config_path),
+            Some(std::sync::Arc::new(
+                crate::implementations::server::admin_logs::AdminLogBuffer::new(64),
+            )),
+            Some(60),
+            Some(config_path.with_extension("qkeys.json")),
+        )
+        .expect("absent logging state must use the normal startup mode");
+
+        assert_eq!(bootstrap.initial_logging_mode, "normal");
+        assert_eq!(log::max_level(), log::LevelFilter::Info);
+        cleanup_logging_test_files(&config_path);
+    }
+
+    #[test]
+    fn logging_mode_persistence_distinguishes_malformed_missing_and_unsupported_state() {
+        let cases = [
+            ("malformed", br#"{"mode":"normal""# as &[u8], "logging state invalid"),
+            ("missing-mode", br#"{}"# as &[u8], "logging state invalid"),
+            ("unsupported", br#"{"mode":"debug"}"# as &[u8], "logging state invalid"),
+            (
+                "unknown-field",
+                br#"{"mode":"normal","extra":true}"# as &[u8],
+                "logging state invalid",
+            ),
+        ];
+
+        for (label, contents, expected_message) in cases {
+            let config_path = logging_test_config_path(label);
+            let logging_path = resolve_logging_store_path(Some(&config_path))
+                .expect("config path must resolve a logging state path");
+            std::fs::write(&logging_path, contents).expect("write invalid logging fixture");
+            let error = load_persisted_logging_mode(Some(&config_path))
+                .expect_err("invalid logging state must fail closed");
+            assert!(error.to_string().contains(expected_message));
+            cleanup_logging_test_files(&config_path);
+        }
+    }
+
+    #[test]
+    fn logging_mode_persistence_reports_unreadable_state_and_startup_fails_closed() {
+        let config_path = logging_test_config_path("unreadable");
+        let logging_path = resolve_logging_store_path(Some(&config_path))
+            .expect("config path must resolve a logging state path");
+        std::fs::create_dir(&logging_path).expect("create unreadable logging fixture");
+
+        let read_error = load_persisted_logging_mode(Some(&config_path))
+            .expect_err("directory at logging state path must be a read error");
+        assert!(read_error.to_string().contains("logging state read failed"));
+
+        let startup_result = initialize_standalone_server_bootstrap(
+            Some(&config_path),
+            None,
+            Some(60),
+            Some(config_path.with_extension("qkeys.json")),
+        );
+        let startup_error = match startup_result {
+            Ok(_) => panic!("startup must reject unreadable logging state"),
+            Err(error) => error,
+        };
+        assert!(startup_error.to_string().contains("logging state read failed"));
+        cleanup_logging_test_files(&config_path);
+    }
+
+    #[test]
+    fn logging_mode_update_persists_before_publishing_and_preserves_live_state_on_failure() {
+        let config_path = logging_test_config_path("write-failure");
+        let logging_path = resolve_logging_store_path(Some(&config_path))
+            .expect("config path must resolve a logging state path");
+        std::fs::create_dir(&logging_path).expect("create blocking logging destination");
+        let log_buffer = crate::implementations::server::admin_logs::AdminLogBuffer::new(64);
+        let logging_mode = parking_lot::RwLock::new("normal".to_string());
+
+        let response = write_logging_mode(
+            Some(&config_path),
+            &logging_mode,
+            &log_buffer,
+            "verbose",
+        );
+
+        assert!(!response.success);
+        assert!(response
+            .message
+            .as_deref()
+            .unwrap_or("")
+            .contains("persistence failed"));
+        assert_eq!(logging_mode.read().as_str(), "normal");
+        cleanup_logging_test_files(&config_path);
+    }
+
+    #[test]
+    fn logging_mode_update_without_config_is_explicitly_live_only() {
+        let _guard = logging_test_guard();
+        let log_buffer = crate::implementations::server::admin_logs::AdminLogBuffer::new(64);
+        let logging_mode = parking_lot::RwLock::new("normal".to_string());
+        let response = write_logging_mode(None, &logging_mode, &log_buffer, "minimal");
+
+        assert!(response.success);
+        assert!(response
+            .message
+            .as_deref()
+            .unwrap_or("")
+            .contains("live-only"));
+        assert_eq!(logging_mode.read().as_str(), "minimal");
+        log::set_max_level(log::LevelFilter::Info);
+    }
+
+    #[test]
+    fn no_log_mode_clears_the_admin_buffer_and_persists_the_privacy_mode() {
+        let _guard = logging_test_guard();
+        let config_path = logging_test_config_path("no-log");
+        let log_buffer = crate::implementations::server::admin_logs::AdminLogBuffer::new(64);
+        log_buffer.push(log::Level::Info, "must be cleared");
+        let logging_mode = parking_lot::RwLock::new("normal".to_string());
+
+        let response = write_logging_mode(
+            Some(&config_path),
+            &logging_mode,
+            &log_buffer,
+            "no-log",
+        );
+
+        assert!(response.success);
+        assert_eq!(logging_mode.read().as_str(), "no-log");
+        assert!(log_buffer.since(0, "no-log", 64).0.is_empty());
+        assert_eq!(
+            load_persisted_logging_mode(Some(&config_path)).expect("no-log must persist"),
+            PersistedLoggingModeState::Valid(crate::engine::LoggingMode::NoLog)
+        );
+        cleanup_logging_test_files(&config_path);
+        log::set_max_level(log::LevelFilter::Info);
+    }
+
     #[test]
     fn test_write_logging_mode_rejects_invalid_mode() {
         let log_buffer = crate::implementations::server::admin_logs::AdminLogBuffer::new(64);
@@ -2249,6 +2459,7 @@ mod tests {
 
     #[test]
     fn test_write_logging_mode_accepts_valid_modes() {
+        let _guard = logging_test_guard();
         let log_buffer = crate::implementations::server::admin_logs::AdminLogBuffer::new(64);
         let logging_mode = parking_lot::RwLock::new("normal".to_string());
         for mode in &["verbose", "normal", "minimal", "no-log"] {
@@ -2256,6 +2467,7 @@ mod tests {
             assert!(response.success, "mode '{}' should be valid", mode);
             assert_eq!(*logging_mode.read(), *mode);
         }
+        log::set_max_level(log::LevelFilter::Info);
     }
 
     #[test]

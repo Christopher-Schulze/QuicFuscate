@@ -388,13 +388,15 @@ pub fn initialize_standalone_server_bootstrap(
     admin_log_buffer_override: Option<Arc<self::admin_logs::AdminLogBuffer>>,
     qkey_ttl_override: Option<u64>,
     qkey_store_override: Option<std::path::PathBuf>,
-) -> Result<StandaloneServerBootstrapState, self::qkey_registry::QKeyRegistryError> {
+) -> std::io::Result<StandaloneServerBootstrapState> {
     let admin_log_buffer = admin_log_buffer_override
         .unwrap_or_else(|| Arc::new(self::admin_logs::AdminLogBuffer::new(4096)));
-    let initial_logging_mode = load_persisted_logging_mode(config_path);
-    if let Some(persisted_mode) = read_persisted_logging_mode(config_path) {
-        apply_logging_mode(persisted_mode.as_str(), &admin_log_buffer);
-    }
+    let initial_mode = match load_persisted_logging_mode(config_path)? {
+        PersistedLoggingModeState::Absent => crate::engine::LoggingMode::Normal,
+        PersistedLoggingModeState::Valid(mode) => mode,
+    };
+    apply_logging_mode(&initial_mode, &admin_log_buffer);
+    let initial_logging_mode = logging_mode_name(&initial_mode).to_string();
 
     let blocked_ips_path = resolve_blocked_ips_store_path(config_path);
     let initial_blocked = load_persisted_blocked_ips(config_path);
@@ -405,8 +407,9 @@ pub fn initialize_standalone_server_bootstrap(
 
     let qkey_ttl_secs = resolve_qkey_ttl_secs(qkey_ttl_override);
     let qkey_store_path = resolve_qkey_store_path(config_path, qkey_store_override);
-    let qkey_registry =
-        Arc::new(std::sync::Mutex::new(QKeyRegistry::open(200, qkey_store_path, qkey_ttl_secs)?));
+    let qkey_registry = Arc::new(std::sync::Mutex::new(
+        QKeyRegistry::open(200, qkey_store_path, qkey_ttl_secs).map_err(std::io::Error::other)?,
+    ));
 
     Ok(StandaloneServerBootstrapState {
         admin_log_buffer,
@@ -473,19 +476,31 @@ pub(crate) fn write_logging_mode(
     log_buffer: &crate::implementations::server::admin_logs::AdminLogBuffer,
     mode: &str,
 ) -> AdminResponse {
-    let valid = ["verbose", "normal", "minimal", "no-log"];
-    if !valid.contains(&mode) {
-        return AdminResponse::error(format!(
-            "Invalid logging mode '{}'. Valid: {:?}",
-            mode, valid
+    let parsed_mode = match parse_logging_mode(mode) {
+        Ok(parsed_mode) => parsed_mode,
+        Err(error) => return AdminResponse::error(error),
+    };
+    let mode_name = logging_mode_name(&parsed_mode);
+    let mut current_mode = logging_mode.write();
+    if let Some(path) = resolve_logging_store_path(config_path) {
+        if let Err(error) = persist_logging_mode(config_path, &parsed_mode) {
+            return AdminResponse::error(format!(
+                "Logging mode persistence failed for {}: {error}; live mode remains '{}'",
+                path.display(),
+                current_mode.as_str()
+            ));
+        }
+        *current_mode = mode_name.to_string();
+        apply_logging_mode(&parsed_mode, log_buffer);
+        return AdminResponse::ok_with_message(format!(
+            "Logging mode set to '{}' and persisted",
+            mode_name
         ));
     }
-    *logging_mode.write() = mode.to_string();
-    apply_logging_mode(mode, log_buffer);
-    if let Err(e) = persist_logging_mode(config_path, mode) {
-        if mode != "no-log" {
-            log::warn!("logging config write failed: {}", e);
-        }
-    }
-    AdminResponse::ok_with_message(format!("Logging mode set to '{}'", mode))
+    *current_mode = mode_name.to_string();
+    apply_logging_mode(&parsed_mode, log_buffer);
+    AdminResponse::ok_with_message(format!(
+        "Logging mode set to '{}' live-only: no config path is configured; restart will not restore it",
+        mode_name
+    ))
 }

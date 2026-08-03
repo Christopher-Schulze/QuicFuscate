@@ -646,43 +646,95 @@ pub(crate) fn resolve_logging_store_path(
     config_path.map(|p| p.with_extension("logging.json"))
 }
 
-pub(crate) fn load_persisted_logging_mode(config_path: Option<&std::path::Path>) -> String {
-    read_persisted_logging_mode(config_path).unwrap_or_else(|| "normal".to_string())
+const SUPPORTED_LOGGING_MODES: [&str; 4] = ["verbose", "normal", "minimal", "no-log"];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PersistedLoggingModeState {
+    Absent,
+    Valid(crate::engine::LoggingMode),
 }
 
-pub(crate) fn read_persisted_logging_mode(
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedLoggingModeFile {
+    mode: crate::engine::LoggingMode,
+}
+
+pub(crate) fn logging_mode_name(mode: &crate::engine::LoggingMode) -> &'static str {
+    match mode {
+        crate::engine::LoggingMode::Verbose => "verbose",
+        crate::engine::LoggingMode::Normal => "normal",
+        crate::engine::LoggingMode::Minimal => "minimal",
+        crate::engine::LoggingMode::NoLog => "no-log",
+    }
+}
+
+pub(crate) fn parse_logging_mode(
+    mode: &str,
+) -> Result<crate::engine::LoggingMode, String> {
+    match mode {
+        "verbose" => Ok(crate::engine::LoggingMode::Verbose),
+        "normal" => Ok(crate::engine::LoggingMode::Normal),
+        "minimal" => Ok(crate::engine::LoggingMode::Minimal),
+        "no-log" => Ok(crate::engine::LoggingMode::NoLog),
+        _ => Err(format!(
+            "Invalid logging mode '{}'. Valid: {:?}",
+            mode, SUPPORTED_LOGGING_MODES
+        )),
+    }
+}
+
+pub(crate) fn load_persisted_logging_mode(
     config_path: Option<&std::path::Path>,
-) -> Option<String> {
-    resolve_logging_store_path(config_path)
-        .and_then(|p| std::fs::read_to_string(&p).ok())
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v.get("mode").and_then(|m| m.as_str().map(String::from)))
+) -> std::io::Result<PersistedLoggingModeState> {
+    let Some(path) = resolve_logging_store_path(config_path) else {
+        return Ok(PersistedLoggingModeState::Absent);
+    };
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PersistedLoggingModeState::Absent)
+        }
+        Err(error) => {
+            return Err(std::io::Error::new(
+                error.kind(),
+                format!("logging state read failed for {}: {error}", path.display()),
+            ))
+        }
+    };
+    let state = serde_json::from_str::<PersistedLoggingModeFile>(&contents).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("logging state invalid for {}: {error}", path.display()),
+        )
+    })?;
+    Ok(PersistedLoggingModeState::Valid(state.mode))
 }
 
 pub(crate) fn apply_logging_mode(
-    mode: &str,
+    mode: &crate::engine::LoggingMode,
     log_buffer: &crate::implementations::server::admin_logs::AdminLogBuffer,
 ) {
     let level = match mode {
-        "no-log" => log::LevelFilter::Off,
-        "minimal" => log::LevelFilter::Warn,
-        "verbose" => log::LevelFilter::Trace,
-        _ => log::LevelFilter::Info,
+        crate::engine::LoggingMode::NoLog => log::LevelFilter::Off,
+        crate::engine::LoggingMode::Minimal => log::LevelFilter::Warn,
+        crate::engine::LoggingMode::Verbose => log::LevelFilter::Trace,
+        crate::engine::LoggingMode::Normal => log::LevelFilter::Info,
     };
     log::set_max_level(level);
-    if mode == "no-log" {
+    if matches!(mode, crate::engine::LoggingMode::NoLog) {
         log_buffer.clear();
     }
 }
 
 pub(crate) fn persist_logging_mode(
     config_path: Option<&std::path::Path>,
-    mode: &str,
+    mode: &crate::engine::LoggingMode,
 ) -> std::io::Result<()> {
     let Some(path) = resolve_logging_store_path(config_path) else {
         return Ok(());
     };
-    let bytes = serde_json::to_vec_pretty(&serde_json::json!({ "mode": mode }))?;
+    let bytes = serde_json::to_vec_pretty(&PersistedLoggingModeFile { mode: mode.clone() })?;
     fsutil::atomic_write_file(&path, &bytes, Some(0o600), "server::write_logging_config_tmp_nonce")
 }
 
