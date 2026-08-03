@@ -40,7 +40,7 @@ pub mod pnspace {
         }
 
         /// Maximum packet number per RFC 9000 Section 17.1 (2^62 - 1)
-        const MAX_PACKET_NUMBER: u64 = (1u64 << 62) - 1;
+        pub(crate) const MAX_PACKET_NUMBER: u64 = (1u64 << 62) - 1;
 
         /// Track a newly received packet number without making ACK scheduling
         /// depend on frames that may be non-ack-eliciting.

@@ -45,8 +45,13 @@ pub struct Connection {
     last_migration_at: Option<Instant>,
     dest_cids: cid::ConnectionIdSet,
     pkt_spaces: [pnspace::PktNumSpace; 3],
+    /// Next outbound packet number for each QUIC packet-number space.
+    ///
+    /// The connection owner never resets these counters during a 1-RTT key update. A
+    /// reset is valid only when a new packet-number/key epoch is installed, such as
+    /// connection/version restart or Retry Initial-key derivation.
     next_send_pn_by_space: [u64; 3],
-    // Current key phase (short header KEY_PHASE bit). Header bit only; no rotation here.
+    // Current key phase (short-header KEY_PHASE bit); key updates keep packet numbers.
     key_phase: bool,
     readable_streams: VecDeque<u64>,
     readable_stream_ids: HashSet<u64>,
@@ -138,6 +143,39 @@ pub struct Connection {
     // Post-authentication Intelligent escalation ceiling. None is fail-closed.
     traffic_analysis_escalation_ceiling:
         Option<crate::transport::config::TrafficAnalysisPolicy>,
+}
+
+impl Connection {
+    /// Returns the next packet number only while it remains valid for QUIC's 62-bit
+    /// packet-number field. The stateless AEAD primitives rely on this connection-owned
+    /// guard to prevent counter reuse after overflow under one traffic-secret/IV epoch.
+    #[inline(always)]
+    fn next_send_packet_number(
+        &self,
+        space_idx: usize,
+    ) -> Result<u64, crate::error::ConnectionError> {
+        let packet_number = self.next_send_pn_by_space[space_idx];
+        if packet_number > pnspace::PktNumSpace::MAX_PACKET_NUMBER {
+            return Err(crate::error::ConnectionError::AeadLimitReached);
+        }
+        Ok(packet_number)
+    }
+
+    /// Advances an outbound packet number without allowing a wrapping reuse.
+    #[inline(always)]
+    fn advance_send_packet_number(
+        &mut self,
+        space_idx: usize,
+    ) -> Result<(), crate::error::ConnectionError> {
+        let packet_number = self.next_send_pn_by_space[space_idx];
+        if packet_number > pnspace::PktNumSpace::MAX_PACKET_NUMBER {
+            return Err(crate::error::ConnectionError::AeadLimitReached);
+        }
+        self.next_send_pn_by_space[space_idx] = packet_number
+            .checked_add(1)
+            .ok_or(crate::error::ConnectionError::AeadLimitReached)?;
+        Ok(())
+    }
 }
 
 #[cfg(not(feature = "zero_copy_dgram"))]

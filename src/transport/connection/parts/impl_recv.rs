@@ -1204,7 +1204,7 @@ impl Connection {
             for i in 0..pn_len {
                 out[pn_off + i] ^= mask[i + 1];
             }
-            self.next_send_pn_by_space[2] = self.next_send_pn_by_space[2].wrapping_add(1);
+            self.advance_send_packet_number(2)?;
             return Ok(off);
         }
 
@@ -1248,7 +1248,7 @@ impl Connection {
                 out[pn_off + i] ^= mask[i + 1];
             }
         }
-        self.next_send_pn_by_space[2] = self.next_send_pn_by_space[2].wrapping_add(1);
+        self.advance_send_packet_number(2)?;
         Ok(off)
     }
 
@@ -1262,8 +1262,8 @@ impl Connection {
     ) -> Result<(usize, SendInfo), crate::error::ConnectionError> {
         // Build short header prefix with DCID directly - avoids two Vec
         // allocations (dcid.to_vec() + scid.to_vec()) per outbound packet.
+        let pn = self.next_send_packet_number(2)?;
         let hdr_len = packet::format_short_header(self.dcid.as_ref(), false, out)?;
-        let pn = self.next_send_pn_by_space[2];
         let pn_len = if pn < (1 << 8) {
             1
         } else if pn < (1 << 16) {

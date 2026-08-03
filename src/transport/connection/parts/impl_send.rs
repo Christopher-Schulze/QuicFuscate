@@ -146,13 +146,13 @@ impl Connection {
                     versions: None,
                     key_phase: false,
                 };
-                let hdr_len_wo_pn = packet::format_header(&base_hdr, out)?;
                 let space_idx = match pkt_ty {
                     PacketType::Initial => 0,
                     PacketType::Handshake => 1,
                     _ => 2,
                 };
-                let pn = self.next_send_pn_by_space[space_idx];
+                let pn = self.next_send_packet_number(space_idx)?;
+                let hdr_len_wo_pn = packet::format_header(&base_hdr, out)?;
                 let pn_len = if pn < (1 << 8) {
                     1
                 } else if pn < (1 << 16) {
@@ -270,8 +270,7 @@ impl Connection {
                         pkt_ty,
                     )?
                 };
-                self.next_send_pn_by_space[space_idx] =
-                    self.next_send_pn_by_space[space_idx].wrapping_add(1);
+                self.advance_send_packet_number(space_idx)?;
                 self.stats.sent += 1;
                 self.stats.sent_bytes += used as u64;
                 // RFC 9002 §4.9: handshake packets are not special - they are
@@ -341,10 +340,10 @@ impl Connection {
         // Outbound stealth timing is owned by core::QuicFuscateConnection (next_packet_release).
         // Build short header prefix with DCID directly - avoids two Vec
         // allocations (dcid.to_vec() + scid.to_vec()) per outbound packet.
+        let pn = self.next_send_packet_number(2)?;
         let hdr_len = packet::format_short_header(self.dcid.as_ref(), false, out)?; // first byte + DCID
         let dcid_end = 1 + self.dcid.as_ref().len();
         // Decide packet number and length
-        let pn = self.next_send_pn_by_space[2];
         let pn_len = if pn < (1 << 8) {
             1
         } else if pn < (1 << 16) {

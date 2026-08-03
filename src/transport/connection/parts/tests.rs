@@ -531,6 +531,17 @@ mod tests {
     }
 
     #[test]
+    fn key_update_preserves_packet_number_for_the_new_traffic_secret() {
+        let mut c = make_conn();
+        c.next_send_pn_by_space[2] = 1234;
+        install_write_secret(&mut c);
+
+        c.key_update().expect("transport-owned key update");
+
+        assert_eq!(c.next_send_pn_by_space[2], 1234);
+    }
+
+    #[test]
     fn key_update_does_not_fallback_when_provider_rejects() {
         let mut c = make_conn();
         c.enable_tls("chrome").expect("test rustls provider");
@@ -1907,6 +1918,50 @@ mod tests {
             "must have exactly 3 PN spaces (Initial, Handshake, Application)"
         );
         assert_eq!(c.next_send_pn_by_space.len(), 3, "must have 3 next_send_pn counters");
+    }
+
+    #[test]
+    fn outbound_packet_number_guard_allows_last_valid_number_then_stops() {
+        let mut c = make_conn();
+        c.next_send_pn_by_space[2] = pnspace::PktNumSpace::MAX_PACKET_NUMBER;
+
+        assert_eq!(
+            c.next_send_packet_number(2),
+            Ok(pnspace::PktNumSpace::MAX_PACKET_NUMBER),
+            "the RFC 9000 upper bound itself is a valid packet number"
+        );
+        c.advance_send_packet_number(2).expect("last valid packet number advances");
+        assert_eq!(c.next_send_pn_by_space[2], pnspace::PktNumSpace::MAX_PACKET_NUMBER + 1);
+        assert_eq!(
+            c.next_send_packet_number(2),
+            Err(ConnectionError::AeadLimitReached),
+            "no packet may be emitted with a packet number beyond 62 bits"
+        );
+    }
+
+    #[test]
+    fn outbound_packet_number_guard_rejects_overflow_without_wrapping() {
+        let mut c = make_conn();
+        c.next_send_pn_by_space[2] = u64::MAX;
+
+        assert_eq!(
+            c.advance_send_packet_number(2),
+            Err(ConnectionError::AeadLimitReached)
+        );
+        assert_eq!(c.next_send_pn_by_space[2], u64::MAX);
+    }
+
+    #[test]
+    fn outbound_packet_send_rejects_invalid_packet_number_before_mutation() {
+        let mut pair = bench_paired_1rtt_connections();
+        pair.client.next_send_pn_by_space[2] = pnspace::PktNumSpace::MAX_PACKET_NUMBER + 1;
+        pair.client.stream_send(0, b"guarded payload", false).unwrap();
+        let before = pair.client.next_send_pn_by_space[2];
+        let mut packet = [0u8; 1500];
+
+        let error = pair.client.send(&mut packet);
+        assert!(matches!(error, Err(ConnectionError::AeadLimitReached)));
+        assert_eq!(pair.client.next_send_pn_by_space[2], before);
     }
 
     // ---- Connection Close Frame Generation -------------------------------

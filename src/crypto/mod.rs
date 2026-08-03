@@ -614,8 +614,10 @@ fn make_nonce16(iv: &[u8; 12], counter: u64) -> [u8; 16] {
     // QUIC-style nonce derivation for 96-bit IV: XOR 64-bit packet number
     // into the last 8 bytes of the 12-byte IV. Produce a 16-byte nonce by
     // copying the 12-byte IV into the first 12 bytes and leaving the last
-    // 4 bytes as 0. This avoids 32-bit truncation and ensures uniqueness
-    // up to 2^64 packets (subject to IV uniqueness from HKDF).
+    // 4 bytes as 0. This avoids 32-bit truncation. The primitive is stateless:
+    // the connection owner must install a unique traffic secret/IV for each
+    // packet-number epoch, never reset a counter during a 1-RTT key update,
+    // and reject packet numbers beyond QUIC's 62-bit limit before calling it.
     let mut nonce16 = [0u8; 16];
     nonce16[..12].copy_from_slice(iv);
     let pn = counter.to_be_bytes(); // 8 bytes
