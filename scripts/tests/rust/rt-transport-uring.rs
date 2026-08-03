@@ -14,6 +14,8 @@ use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 use quicfuscate::optimize::uring_batch::UringBatchSender;
+#[cfg(target_os = "linux")]
+use quicfuscate::telemetry::{IO_URING_ZC_NOTIFS, IO_URING_ZC_SENDS};
 
 #[test]
 #[cfg(not(target_os = "linux"))]
@@ -150,6 +152,82 @@ fn uring_zc_probe_is_consistent() {
         let zc = sender.zc_supported();
         let _ = zc; // suppress unused warning
     }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn uring_zc_opt_in_loopback_and_error_contract() {
+    let mut sender = match UringBatchSender::new(8) {
+        Some(sender) => sender,
+        None => {
+            println!("QF_IO_URING_ZC_STATUS=UNAVAILABLE reason=io_uring_init");
+            return;
+        }
+    };
+    if !sender.zc_supported() {
+        println!("QF_IO_URING_ZC_STATUS=UNAVAILABLE reason=sendmsg_zc_probe");
+        return;
+    }
+
+    let receiver = UdpSocket::bind("127.0.0.1:0").expect("bind receiver");
+    receiver.set_read_timeout(Some(Duration::from_secs(3))).expect("set read timeout");
+    let recv_addr = receiver.local_addr().expect("receiver address");
+    let sender_socket = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+    sender_socket.connect(recv_addr).expect("connect sender");
+
+    let payloads: Vec<Vec<u8>> = (0..3u8).map(|value| vec![value; 16 * 1024]).collect();
+    let payload_refs: Vec<&[u8]> = payloads.iter().map(Vec::as_slice).collect();
+    let send_counter_before = IO_URING_ZC_SENDS.get();
+    let notification_counter_before = IO_URING_ZC_NOTIFS.get();
+
+    let sent = match sender.send_batch(sender_socket.as_raw_fd(), &payload_refs) {
+        Ok(sent) => sent,
+        Err(error) => {
+            println!("QF_IO_URING_ZC_STATUS=FAIL reason=valid_send_error error={error}");
+            panic!("supported SendMsgZc loopback send failed: {error}");
+        }
+    };
+    if sent != payloads.len() {
+        println!("QF_IO_URING_ZC_STATUS=FAIL reason=short_valid_send sent={sent}");
+        panic!("SendMsgZc sent {sent} of {} datagrams", payloads.len());
+    }
+
+    let mut received = Vec::with_capacity(sent);
+    for _ in 0..sent {
+        let mut buffer = vec![0u8; 16 * 1024];
+        let (length, _) = receiver.recv_from(&mut buffer).expect("receive loopback datagram");
+        buffer.truncate(length);
+        received.push(buffer);
+    }
+    let expected: HashSet<Vec<u8>> = payloads.iter().cloned().collect();
+    let actual: HashSet<Vec<u8>> = received.into_iter().collect();
+    if actual != expected {
+        println!("QF_IO_URING_ZC_STATUS=FAIL reason=payload_mismatch");
+        panic!("SendMsgZc loopback payloads did not match");
+    }
+
+    let error_outcome = match sender.send_batch(-1, &[b"zc-invalid-fd"]) {
+        Ok(0) => "cqe_error",
+        Ok(sent) => {
+            println!("QF_IO_URING_ZC_STATUS=FAIL reason=invalid_fd_reported_success sent={sent}");
+            panic!("invalid fd unexpectedly reported {sent} successful SendMsgZc sends");
+        }
+        Err(_) => "submission_error",
+    };
+
+    let primary_sends = IO_URING_ZC_SENDS.get().saturating_sub(send_counter_before);
+    let notifications = IO_URING_ZC_NOTIFS.get().saturating_sub(notification_counter_before);
+    if primary_sends < payloads.len() as u64 || notifications == 0 {
+        println!(
+            "QF_IO_URING_ZC_STATUS=UNAVAILABLE reason=no_notification primary_sends={primary_sends} notifications={notifications} error_outcome={error_outcome}"
+        );
+        return;
+    }
+
+    println!(
+        "QF_IO_URING_ZC_STATUS=SUPPORTED primary_sends={primary_sends} notifications={notifications} delivered={} error_outcome={error_outcome}",
+        actual.len()
+    );
 }
 
 #[test]

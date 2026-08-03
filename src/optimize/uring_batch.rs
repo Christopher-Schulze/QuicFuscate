@@ -1455,7 +1455,10 @@ mod tests {
         let sender = std::net::UdpSocket::bind("127.0.0.1:0").expect("sender bind");
         let mut recv = match UringRecvBatch::new(receiver.as_raw_fd(), 4, 2048, false) {
             Some(recv) => recv,
-            None => return,
+            None => {
+                println!("QF_IO_URING_REARM_STATUS=UNAVAILABLE reason=io_uring_init");
+                return;
+            }
         };
         recv.post_initial().expect("post receive slots");
 
@@ -1463,10 +1466,20 @@ mod tests {
             assert_eq!(sender.send_to(&[], receiver_addr).expect("zero datagram"), 0);
         }
         std::thread::sleep(Duration::from_millis(10));
+        let mut zero_length_completions = 0usize;
         for _ in 0..100 {
-            let _ = recv.drain_completions().expect("drain zero datagrams");
+            let completions = recv.drain_completions().expect("drain zero datagrams");
+            zero_length_completions +=
+                completions.iter().filter(|completion| completion.is_empty()).count();
+            if zero_length_completions == 4 {
+                break;
+            }
             std::thread::sleep(Duration::from_millis(1));
         }
+        assert_eq!(
+            zero_length_completions, 4,
+            "all receive slots must complete the zero-length datagrams"
+        );
 
         let marker = [0x51, 0x46, 0x37];
         sender.send_to(&marker, receiver_addr).expect("marker datagram");
@@ -1480,6 +1493,9 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         assert!(marker_seen, "receive slots were not rearmed after zero datagrams");
+        println!(
+            "QF_IO_URING_REARM_STATUS=SUPPORTED zero_length_completions={zero_length_completions} marker_seen=true"
+        );
     }
 
     #[test]

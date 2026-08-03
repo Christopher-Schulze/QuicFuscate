@@ -25,6 +25,94 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 mkdir -p "$OUTPUT_DIR"
 LOG_FILE="$OUTPUT_DIR/transport-tests.log"
 JSON="$OUTPUT_DIR/results.json"; json_begin "$JSON" "tests_transport_comprehensive"; JSON_FIRST_RUN=1
+URING_PROOF_FAILURE=0
+
+write_uring_proof_evidence() {
+  local name="$1"
+  local status="$2"
+  local reason="$3"
+  local log_file="$4"
+  local command_status="$5"
+  local environment_json="$6"
+  local command_line="$7"
+  qf_json_write_object_file "$OUTPUT_DIR/${name}.json" \
+    "schema=quicfuscate.io_uring_proof.v1" \
+    "name=$name" \
+    "status=$status" \
+    "reason=$reason" \
+    "log=$log_file" \
+    "command_status=int:$command_status" \
+    "source_revision=$(git rev-parse HEAD)" \
+    "environment=json:$environment_json" \
+    "command=$command_line"
+  qf_json_append_object "$JSON" \
+    "name=$name" \
+    "status=$status" \
+    "result=$status" \
+    "reason=$reason" \
+    "command_status=int:$command_status" \
+    "source_revision=$(git rev-parse HEAD)" \
+    "environment=json:$environment_json" \
+    "raw_output=$log_file"
+}
+
+run_bounded_cargo() {
+  local timeout_seconds="$1"
+  shift
+  local -a env_assignments=()
+  while [[ "$#" -gt 0 && "$1" != "--" ]]; do
+    env_assignments+=("$1")
+    shift
+  done
+  if [[ "${1:-}" != "--" ]]; then
+    error "run_bounded_cargo requires -- before cargo arguments"
+    return 2
+  fi
+  shift
+
+  local -a cargo_environment=()
+  [[ -n "${RUSTFLAGS_EXTRA:-}" ]] && cargo_environment+=("RUSTFLAGS=$RUSTFLAGS_EXTRA")
+  [[ -n "${CARGO_TARGET_DIR:-}" ]] && cargo_environment+=("CARGO_TARGET_DIR=$CARGO_TARGET_DIR")
+  timeout --signal=TERM "${timeout_seconds}s" \
+    env "${env_assignments[@]}" "${cargo_environment[@]}" cargo "$@"
+}
+
+run_required_uring_proof() {
+  local name="$1"
+  local marker="$2"
+  local environment_json="$3"
+  shift 3
+  local log_file="$OUTPUT_DIR/${name}.log"
+  local command_line
+  command_line="$(printf '%q ' "$@")"
+  command_line="${command_line% }"
+  local command_status=0
+  if "$@" >"$log_file" 2>&1; then
+    command_status=0
+  else
+    command_status=$?
+  fi
+  cat "$log_file"
+
+  local status reason
+  if [[ "$command_status" -eq 0 ]] && grep -Fq "${marker}=SUPPORTED" "$log_file"; then
+    status="PASS"
+    reason="kernel_executed"
+  elif grep -Fq "${marker}=UNAVAILABLE" "$log_file"; then
+    status="UNAVAILABLE"
+    reason="kernel_capability_unavailable"
+  else
+    status="FAIL"
+    reason="command_failed_or_missing_status_marker"
+  fi
+
+  write_uring_proof_evidence \
+    "$name" "$status" "$reason" "$log_file" "$command_status" "$environment_json" "$command_line"
+  if [[ "$status" != "PASS" ]]; then
+    URING_PROOF_FAILURE=1
+    return 1
+  fi
+}
 
 echo "==============================================================="
 echo "  Transport Layer Comprehensive Test Suite (validated migration contract)"
@@ -38,6 +126,36 @@ echo -e "\n> Testing io_uring UDP Fast Path..."
 if [[ "$OSTYPE" == "linux-gnu"* ]]; then
     QUICFUSCATE_FASTPATH=auto \
     run_cargo test --release --features io_uring --test rt-transport-uring -- --nocapture
+else
+    echo "  Skipping (Linux only)"
+fi
+
+echo -e "\n> Testing io_uring zero-length receive rearm proof..."
+if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+    rearm_environment="$(qf_json_environment_with_assignments "QUICFUSCATE_FASTPATH=auto")"
+    if ! run_required_uring_proof \
+      "uring-rearm" "QF_IO_URING_REARM_STATUS" "$rearm_environment" \
+      run_bounded_cargo 60 QUICFUSCATE_FASTPATH=auto -- \
+      test --release --features io_uring,rust-tests --lib recv_rearms_after_zero_length_datagrams -- \
+      --nocapture --exact; then
+        echo "[FAIL] io_uring zero-length receive rearm proof did not pass" >&2
+    fi
+else
+    echo "  Skipping (Linux only)"
+fi
+
+echo -e "\n> Testing opt-in io_uring SendMsgZc completion proof..."
+if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+    zc_environment="$(qf_json_environment_with_assignments \
+      "QUICFUSCATE_FASTPATH=auto" "QUICFUSCATE_IO_URING_ZC=1")"
+    if ! run_required_uring_proof \
+      "uring-zc" "QF_IO_URING_ZC_STATUS" "$zc_environment" \
+      run_bounded_cargo 60 QUICFUSCATE_FASTPATH=auto QUICFUSCATE_IO_URING_ZC=1 -- \
+      test --release --features io_uring,rust-tests --test rt-transport-uring \
+      uring_zc_opt_in_loopback_and_error_contract -- \
+      --nocapture --exact --test-threads=1; then
+        echo "[FAIL] opt-in io_uring SendMsgZc proof did not pass" >&2
+    fi
 else
     echo "  Skipping (Linux only)"
 fi
@@ -79,5 +197,9 @@ run_cargo test --release \
   --test rt-harness-udpfast \
   -- --nocapture
 
-echo -e "\n[OK] Transport Comprehensive Tests Complete"
 json_end "$JSON"
+if [[ "$URING_PROOF_FAILURE" -ne 0 ]]; then
+    echo "[FAIL] Required Linux io_uring evidence was unavailable or failed" >&2
+    exit 1
+fi
+echo -e "\n[OK] Transport Comprehensive Tests Complete"
