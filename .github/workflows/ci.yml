@@ -434,6 +434,15 @@ jobs:
             PROJECT_ROOT="$GITHUB_WORKSPACE" \
             scripts/tests/tun-e2e-multi-client-dual-stack-netns.sh
 
+      - name: Normalize native server IPv4 PTB evidence ownership
+        if: always()
+        shell: bash
+        run: |
+          if [ -d "$GITHUB_WORKSPACE/scripts/out/tests/server-ipv4-ptb-native" ]; then
+            sudo chown -R "$(id -u):$(id -g)" \
+              "$GITHUB_WORKSPACE/scripts/out/tests/server-ipv4-ptb-native"
+          fi
+
       - name: Upload native server IPv4 PTB evidence
         uses: actions/upload-artifact@v7
         if: always()

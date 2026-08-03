@@ -412,6 +412,7 @@ prove_client_local_ptb() {
   # floor. The non-DF packet must reach server allow_client_uplink whole;
   # otherwise the client kernel could fragment it before the tunnel boundary.
   local ipv4_output ipv4_non_df_output ipv6_output
+  fetch_metrics client-ptb-before
   ipv4_output="$(ip netns exec "${CLIENT_NS[0]}" ping -4 -c 1 -W 2 -M 'do' -s 1350 \
     -I "${CLIENT_V4[0]}" 198.51.100.2 2>&1 || true)"
   ipv4_non_df_output="$(ip netns exec "${CLIENT_NS[0]}" ping -4 -c 1 -W 2 -M 'dont' -s 1350 \
@@ -421,14 +422,22 @@ prove_client_local_ptb() {
   printf '%s\n' "$ipv4_output" >"$ARTIFACT_DIR/client-local-ptb4.txt"
   printf '%s\n' "$ipv4_non_df_output" >"$ARTIFACT_DIR/client-server-ptb4-non-df.txt"
   printf '%s\n' "$ipv6_output" >"$ARTIFACT_DIR/client-local-ptb6.txt"
+  fetch_metrics client-ptb-after
 
   ip netns exec "${CLIENT_NS[0]}" ip link set "$TUN_NAME" mtu 1280
   grep -Eqi 'message too long|mtu[ =]+1280|Frag needed' <<<"$ipv4_output" || \
     fail 'client-local IPv4 PTB response was not observed'
-  grep -Eqi 'message too long|mtu[ =]+1280|Frag needed' <<<"$ipv4_non_df_output" || \
+  if ! grep -Eqi 'message too long|mtu[ =]+1280|Frag needed' <<<"$ipv4_non_df_output"; then
+    printf '%s\n' '--- DF=0 IPv4 probe output ---' "$ipv4_non_df_output" >&2
     fail 'server IPv4 PTB response for DF=0 was not observed'
+  fi
   grep -Eqi 'message too long|mtu[ =]+1280|Packet too big' <<<"$ipv6_output" || \
     fail 'client-local IPv6 PTB response was not observed'
+  local ptb_before ptb_after
+  ptb_before="$(routing_metric_value client-ptb-before packet_too_big)"
+  ptb_after="$(routing_metric_value client-ptb-after packet_too_big)"
+  ((ptb_after > ptb_before)) || \
+    fail "DF=0 probe did not increment server packet_too_big metric: before=$ptb_before after=$ptb_after"
 }
 
 prove_dplpmtud_ethernet_1500() {
@@ -671,6 +680,17 @@ assert_metric_positive() {
   if [[ ! "$value" =~ ^[0-9]+$ ]] || ((value == 0)); then
     fail "routing metric outcome=$outcome is not positive: $value"
   fi
+}
+
+routing_metric_value() {
+  local phase="$1"
+  local outcome="$2"
+  local line value
+  line="$(grep "^quicfuscate_routing_packets_total{outcome=\"$outcome\"}" "$ARTIFACT_DIR/metrics-$phase.txt" || true)"
+  [[ -n "$line" ]] || fail "missing routing metric outcome=$outcome in phase=$phase"
+  value="${line##* }"
+  [[ "$value" =~ ^[0-9]+$ ]] || fail "invalid routing metric outcome=$outcome in phase=$phase: $value"
+  printf '%s\n' "$value"
 }
 
 assert_metric_zero() {
