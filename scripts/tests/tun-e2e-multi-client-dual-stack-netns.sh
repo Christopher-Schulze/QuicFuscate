@@ -422,8 +422,8 @@ prove_server_ptb_from_client() {
   local ipv4_df_output ipv4_non_df_output ipv6_output capture_pid
   fetch_metrics client-ptb-before
 
-  ip netns exec "${CLIENT_NS[0]}" timeout 5 tcpdump -l -nn -vv -Q in -i "$TUN_NAME" \
-    'icmp and src host 10.0.1.1 and dst host 10.0.1.2' \
+  ip netns exec "${CLIENT_NS[0]}" timeout 5 tcpdump -l -nn -vv -xx -i "$TUN_NAME" \
+    'icmp and ((src host 10.0.1.2 and dst host 198.51.100.2) or (src host 10.0.1.1 and dst host 10.0.1.2))' \
     >"$ARTIFACT_DIR/client-server-ptb4-df-wire.log" 2>&1 &
   capture_pid="$!"
   sleep 0.5
@@ -432,8 +432,8 @@ prove_server_ptb_from_client() {
     -I "${CLIENT_V4[0]}" 198.51.100.2 2>&1 || true)"
   wait "$capture_pid" 2>/dev/null || true
 
-  ip netns exec "${CLIENT_NS[0]}" timeout 5 tcpdump -l -nn -vv -Q in -i "$TUN_NAME" \
-    'icmp and src host 10.0.1.1 and dst host 10.0.1.2' \
+  ip netns exec "${CLIENT_NS[0]}" timeout 5 tcpdump -l -nn -vv -xx -i "$TUN_NAME" \
+    'icmp and ((src host 10.0.1.2 and dst host 198.51.100.2) or (src host 10.0.1.1 and dst host 10.0.1.2))' \
     >"$ARTIFACT_DIR/client-server-ptb4-non-df-wire.log" 2>&1 &
   capture_pid="$!"
   sleep 0.5
@@ -442,8 +442,8 @@ prove_server_ptb_from_client() {
     -I "${CLIENT_V4[0]}" 198.51.100.2 2>&1 || true)"
   wait "$capture_pid" 2>/dev/null || true
 
-  ip netns exec "${CLIENT_NS[0]}" timeout 5 tcpdump -l -nn -vv -Q in -i "$TUN_NAME" \
-    'icmp6 and src host fd00::1 and dst host fd00::2' \
+  ip netns exec "${CLIENT_NS[0]}" timeout 5 tcpdump -l -nn -vv -xx -i "$TUN_NAME" \
+    'icmp6 and ((src host fd00::2 and dst host 2001:db8::2) or (src host fd00::1 and dst host fd00::2))' \
     >"$ARTIFACT_DIR/client-server-ptb6-wire.log" 2>&1 &
   capture_pid="$!"
   sleep 0.5
