@@ -896,6 +896,11 @@ pub struct UringRecvBatch {
     /// Slots currently owned by the kernel. This is used only for audit/state
     /// validation and makes duplicate CQEs fail closed.
     armed: Vec<bool>,
+    /// Test-only count of successful zero-length UDP receives consumed by the
+    /// kernel. Empty datagrams are intentionally not forwarded to the QUIC
+    /// parser, but the Linux re-arm regression must still observe their CQEs.
+    #[cfg(test)]
+    zero_length_completions: usize,
 }
 
 // SAFETY: UringRecvBatch owns its ring, eventfd, backing buffers, iovecs, msghdrs,
@@ -1070,6 +1075,8 @@ impl UringRecvBatch {
             with_addr,
             repost_pending: vec![false; d],
             armed: vec![false; d],
+            #[cfg(test)]
+            zero_length_completions: 0,
         })
     }
 
@@ -1100,6 +1107,12 @@ impl UringRecvBatch {
     #[inline]
     pub fn eventfd_fd(&self) -> RawFd {
         self.eventfd
+    }
+
+    #[cfg(test)]
+    #[inline]
+    fn zero_length_completions_seen(&self) -> usize {
+        self.zero_length_completions
     }
 
     /// Post the initial batch of RecvMsg SQEs. Call once after construction.
@@ -1226,6 +1239,10 @@ impl UringRecvBatch {
                         self.iovecs[idx].iov_len = self.buf_size;
                     }
                 } else {
+                    #[cfg(test)]
+                    if result == 0 {
+                        self.zero_length_completions += 1;
+                    }
                     if result < 0 {
                         let errno = result.unsigned_abs();
                         // EAGAIN (11), ECONNRESET (104), ECONNREFUSED (111) are expected.
@@ -1466,16 +1483,14 @@ mod tests {
             assert_eq!(sender.send_to(&[], receiver_addr).expect("zero datagram"), 0);
         }
         std::thread::sleep(Duration::from_millis(10));
-        let mut zero_length_completions = 0usize;
         for _ in 0..100 {
-            let completions = recv.drain_completions().expect("drain zero datagrams");
-            zero_length_completions +=
-                completions.iter().filter(|completion| completion.is_empty()).count();
-            if zero_length_completions == 4 {
+            recv.drain_completions().expect("drain zero datagrams");
+            if recv.zero_length_completions_seen() == 4 {
                 break;
             }
             std::thread::sleep(Duration::from_millis(1));
         }
+        let zero_length_completions = recv.zero_length_completions_seen();
         assert_eq!(
             zero_length_completions, 4,
             "all receive slots must complete the zero-length datagrams"
