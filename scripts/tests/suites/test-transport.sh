@@ -143,7 +143,8 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
     if ! run_required_uring_proof \
       "uring-rearm" "QF_IO_URING_REARM_STATUS" "$rearm_environment" \
       run_bounded_cargo "$URING_PROOF_TIMEOUT_SECONDS" QUICFUSCATE_FASTPATH=auto -- \
-      test --release --features io_uring,rust-tests --lib recv_rearms_after_zero_length_datagrams -- \
+      test --release --features io_uring,rust-tests --lib \
+      optimize::uring_batch::tests::recv_rearms_after_zero_length_datagrams -- \
       --nocapture --exact; then
         echo "[FAIL] io_uring zero-length receive rearm proof did not pass" >&2
     fi
