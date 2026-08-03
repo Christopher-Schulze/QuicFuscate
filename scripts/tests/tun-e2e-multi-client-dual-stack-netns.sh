@@ -246,16 +246,22 @@ start_phase() {
   local tun_mtu_ceiling="$4"
   local probe_interval_ms="${5:-60000}"
   local black_hole_timeout_ms="${6:-10000}"
+  local client_pmtu_payload_max="${7:-$pmtu_payload_max}"
+  local client_tun_mtu_ceiling="${8:-$tun_mtu_ceiling}"
   stop_phase_processes
   [[ ! -e "$ADMIN_SOCKET" ]] || fail "admin socket appeared before phase start: $ADMIN_SOCKET"
   ADMIN_SOCKET_OWNED=1
 
   local phase_config="$ARTIFACT_DIR/config-$phase.toml"
+  local client_phase_config="$ARTIFACT_DIR/config-$phase-client.toml"
   # Transport PMTU is a QUIC UDP-payload limit. 1472 is the largest payload
   # that fits an IPv4 Ethernet path with a 1500-byte L3 MTU (1500 - 20 - 8).
   printf '[transport]\nmtu = %s\nmax_udp_payload = %s\ndisable_pmtud = false\npmtu_min_mtu = 1280\npmtu_max_mtu = %s\npmtu_probe_interval_ms = %s\npmtu_black_hole_timeout_ms = %s\n' \
     "$pmtu_payload_max" "$pmtu_payload_max" "$pmtu_payload_max" "$probe_interval_ms" "$black_hole_timeout_ms" >"$phase_config"
   printf '\n[fec]\nmode = "%s"\n' "$FEC_MODE" >>"$phase_config"
+  printf '[transport]\nmtu = %s\nmax_udp_payload = %s\ndisable_pmtud = false\npmtu_min_mtu = 1280\npmtu_max_mtu = %s\npmtu_probe_interval_ms = %s\npmtu_black_hole_timeout_ms = %s\n' \
+    "$client_pmtu_payload_max" "$client_pmtu_payload_max" "$client_pmtu_payload_max" "$probe_interval_ms" "$black_hole_timeout_ms" >"$client_phase_config"
+  printf '\n[fec]\nmode = "%s"\n' "$FEC_MODE" >>"$client_phase_config"
 
   local server_args=(
     server
@@ -291,7 +297,7 @@ start_phase() {
     client_log="$ARTIFACT_DIR/client-$phase-$((index + 1)).log"
     ip netns exec "${CLIENT_NS[$index]}" env \
       QUICFUSCATE_CLIENT_RECV_DIAGNOSTICS="$CLIENT_RECV_DIAGNOSTICS" "$BINARY" client \
-      --config "$phase_config" \
+      --config "$client_phase_config" \
       --remote "$SERVER_UNDERLAY:4433" \
       --url "https://$SERVER_UNDERLAY/" \
       --qkey "$qkey" \
@@ -300,7 +306,7 @@ start_phase() {
       --disable-doh \
       --tun \
       --tun-name "$TUN_NAME" \
-      --tun-mtu "$tun_mtu_ceiling" \
+      --tun-mtu "$client_tun_mtu_ceiling" \
       --tun-ip "${CLIENT_V4[$index]}" \
       --tun-netmask 255.255.255.0 \
       --tun-ip6 "${CLIENT_V6[$index]}" \
@@ -413,7 +419,7 @@ prove_client_local_ptb() {
   # otherwise the client kernel could fragment it before the tunnel boundary.
   local ipv4_output ipv4_non_df_output ipv6_output non_df_capture_pid
   fetch_metrics client-ptb-before
-  ipv4_output="$(ip netns exec "${CLIENT_NS[0]}" ping -4 -c 1 -W 2 -M 'do' -s 1350 \
+  ipv4_output="$(ip netns exec "${CLIENT_NS[0]}" ping -4 -c 1 -W 2 -M 'do' -s 1300 \
     -I "${CLIENT_V4[0]}" 198.51.100.2 2>&1 || true)"
   ip netns exec "${CLIENT_NS[0]}" timeout 5 tcpdump -l -nn -vv -Q in -i "$TUN_NAME" \
     'icmp and src host 10.0.1.1 and dst host 10.0.1.2' \
@@ -421,7 +427,7 @@ prove_client_local_ptb() {
   non_df_capture_pid="$!"
   sleep 0.5
   kill -0 "$non_df_capture_pid" 2>/dev/null || fail 'DF=0 PTB capture did not remain active'
-  ipv4_non_df_output="$(ip netns exec "${CLIENT_NS[0]}" ping -4 -c 1 -W 2 -M 'dont' -s 1350 \
+  ipv4_non_df_output="$(ip netns exec "${CLIENT_NS[0]}" ping -4 -c 1 -W 2 -M 'dont' -s 1300 \
     -I "${CLIENT_V4[0]}" 198.51.100.2 2>&1 || true)"
   wait "$non_df_capture_pid" 2>/dev/null || true
   ipv6_output="$(ip netns exec "${CLIENT_NS[0]}" ping -6 -c 1 -W 2 -s 1320 \
@@ -1028,7 +1034,7 @@ main() {
   setup_topology
 
   log 'phase 1: default-deny multi-client dual-stack policy'
-  start_phase default 0 1280 1280
+  start_phase default 0 1280 1280 60000 10000 1472 1500
   wait_for_tunnel_readiness default
   prove_framed_h3_fallback
   prove_client_local_ptb
