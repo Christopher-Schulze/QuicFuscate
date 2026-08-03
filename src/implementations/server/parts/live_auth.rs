@@ -504,7 +504,7 @@ pub async fn flush_live_server_outgoing(
     client_snapshots: &Arc<std::sync::Mutex<std::collections::HashMap<SocketAddr, ClientSnapshot>>>,
     session_stats: Option<Arc<SessionStats>>,
     session_id: Option<SessionId>,
-) -> std::io::Result<(u64, u64)> {
+) -> Result<(u64, u64), DataPlaneFault> {
     let mut bytes_sent = 0u64;
     let mut packets_sent = 0u64;
 
@@ -525,9 +525,13 @@ pub async fn flush_live_server_outgoing(
                 staging.push((send_info.to, out[..len].to_vec()));
             }
             Ok(_) => break,
-            Err(e) => {
-                log::error!("Send failed to {}: {:?}", addr, e);
-                break;
+            Err(crate::error::ConnectionError::Done) => break,
+            Err(error) => {
+                log::error!("Send failed to {}: {:?}", addr, error);
+                return Err(DataPlaneFault::TransportSend {
+                    component: format!("server connection send to {addr}"),
+                    error: error.to_string(),
+                });
             }
         }
     }
@@ -568,7 +572,12 @@ pub async fn flush_live_server_outgoing(
         }
         // io_uring unavailable, failed, or partially sent: finish via individual async calls.
         for (target, packet) in staging.iter().skip(already_sent) {
-            send_live_datagram_to(socket, target, packet).await?;
+            send_live_datagram_to(socket, target, packet).await.map_err(|error| {
+                DataPlaneFault::TransportSend {
+                    component: format!("server UDP send to {target}"),
+                    error: error.to_string(),
+                }
+            })?;
         }
     }
 
@@ -769,6 +778,22 @@ fn drain_masque_downlink_responses(
     }
 }
 
+fn record_live_tun_fault(
+    fault_slot: &Arc<Mutex<Option<DataPlaneFault>>>,
+    notify: &Arc<tokio::sync::Notify>,
+    shutdown: &AtomicBool,
+    fault: DataPlaneFault,
+) {
+    if shutdown.load(Ordering::Acquire) {
+        return;
+    }
+    let mut stored = fault_slot.lock();
+    if stored.is_none() {
+        *stored = Some(fault);
+        notify.notify_one();
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn process_live_server_client_datagram(
     socket: &tokio::net::UdpSocket,
@@ -782,7 +807,10 @@ async fn process_live_server_client_datagram(
     server_ips: ServerTunIps,
     tun_enable: bool,
     dns_upstream_resolvers: Arc<Vec<Ipv4Addr>>,
-) -> std::io::Result<LiveClientDatagramResult> {
+    tun_fault: Arc<Mutex<Option<DataPlaneFault>>>,
+    tun_notify: Arc<tokio::sync::Notify>,
+    runtime_shutdown: Arc<AtomicBool>,
+) -> Result<LiveClientDatagramResult, DataPlaneFault> {
     use std::cell::Cell;
     use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
@@ -812,7 +840,10 @@ async fn process_live_server_client_datagram(
         stats.record_received(packet.len() as u64);
     }
 
-    let local_addr = socket.local_addr()?;
+    let local_addr = socket.local_addr().map_err(|error| DataPlaneFault::TransportReceive {
+        component: "server local socket address".to_string(),
+        error: error.to_string(),
+    })?;
     match conn.recv_on_path(packet, addr, local_addr) {
         Ok(_) => {}
         Err(error) => {
@@ -845,6 +876,9 @@ async fn process_live_server_client_datagram(
                 )));
             }
             let tun_sink = Arc::clone(tun);
+            let tun_fault_for_masque = Arc::clone(&tun_fault);
+            let tun_notify_for_masque = Arc::clone(&tun_notify);
+            let shutdown_for_masque = Arc::clone(&runtime_shutdown);
             let masque_forwarding_policy = Arc::clone(&forwarding_policy);
             let masque_sessions = Arc::clone(&sessions);
             let masque_fanout_queue = Arc::clone(&fanout_queue);
@@ -902,6 +936,15 @@ async fn process_live_server_client_datagram(
                     enqueue_client_fanout(&masque_fanout_queue, logical_addr, route, payload);
                     if let Err(error) = tun_sink.write(payload) {
                         log::warn!("Server TUN write (MASQUE) failed: {:?}", error);
+                        record_live_tun_fault(
+                            &tun_fault_for_masque,
+                            &tun_notify_for_masque,
+                            &shutdown_for_masque,
+                            DataPlaneFault::TunWrite {
+                                component: "server MASQUE downlink".to_string(),
+                                error: error.to_string(),
+                            },
+                        );
                     }
                 },
             ))));
@@ -910,6 +953,9 @@ async fn process_live_server_client_datagram(
 
     let stream_response_queue = conn.masque_downlink_queue();
 
+    let tun_fault_for_stream = Arc::clone(&tun_fault);
+    let tun_notify_for_stream = Arc::clone(&tun_notify);
+    let shutdown_for_stream = Arc::clone(&runtime_shutdown);
     if let Err(error) = conn.poll_http3_with_headers(
         |_sid, headers| match evaluate_qkey_http3_headers(
             headers,
@@ -970,6 +1016,15 @@ async fn process_live_server_client_datagram(
                         enqueue_client_fanout(&fanout_queue, logical_addr, route, data);
                         if let Err(error) = tun.write(data) {
                             log::warn!("Server TUN write failed: {:?}", error);
+                            record_live_tun_fault(
+                                &tun_fault_for_stream,
+                                &tun_notify_for_stream,
+                                &shutdown_for_stream,
+                                DataPlaneFault::TunWrite {
+                                    component: "server HTTP/3 downlink".to_string(),
+                                    error: error.to_string(),
+                                },
+                            );
                         }
                     }
                 }

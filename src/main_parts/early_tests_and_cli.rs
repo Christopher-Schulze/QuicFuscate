@@ -310,7 +310,7 @@ async fn flush_connected_outgoing(
     conn: &mut QuicFuscateConnection,
     out: &mut [u8],
     mut diagnostics: Option<&mut ClientIoDiagnostics>,
-) -> std::io::Result<()> {
+) -> Result<(), quicfuscate::engine::DataPlaneFault> {
     for _ in 0..quicfuscate::transport::UDP_DATAGRAM_BURST_LIMIT {
         if let Some(diagnostics) = diagnostics.as_deref_mut() {
             diagnostics.record_send_poll();
@@ -320,8 +320,13 @@ async fn flush_connected_outgoing(
                 if let Some(diagnostics) = diagnostics.as_deref_mut() {
                     diagnostics.record_send_datagram(len);
                 }
+                send_connected_datagram(socket, &out[..len]).await.map_err(|error| {
+                    quicfuscate::engine::DataPlaneFault::TransportSend {
+                        component: "standalone client UDP socket".to_string(),
+                        error: error.to_string(),
+                    }
+                })?;
                 telemetry!(quicfuscate::telemetry::BYTES_SENT.inc_by(len as u64));
-                send_connected_datagram(socket, &out[..len]).await?;
             }
             Ok(_) => {
                 if let Some(diagnostics) = diagnostics.as_deref_mut() {
@@ -340,7 +345,10 @@ async fn flush_connected_outgoing(
                     diagnostics.record_send_error();
                 }
                 log::error!("Send failed: {:?}", e);
-                break;
+                return Err(quicfuscate::engine::DataPlaneFault::TransportSend {
+                    component: "standalone client connection send".to_string(),
+                    error: e.to_string(),
+                });
             }
         }
     }

@@ -111,6 +111,7 @@ impl ServerRuntime {
         let server_tun_ip = Some(server_config.server_ip);
         let server_tun_ipv6 = server_config.ipv6_server_ip;
         let tun_notify = Arc::new(tokio::sync::Notify::new());
+        let tun_fault = Arc::new(Mutex::new(None));
         let (server_tun, tun_rx, routing, tun_reader_shutdown, tun_reader_handle) = match tun_config {
             Some(tun_config) => {
                 let optm = crate::optimize::OptimizationManager::from_cfg(opt_params);
@@ -165,7 +166,11 @@ impl ServerRuntime {
                         let reader_shutdown = Arc::new(AtomicBool::new(false));
                         let shutdown_for_loop = Arc::clone(&reader_shutdown);
                         let shutdown_for_callback = Arc::clone(&reader_shutdown);
+                        let fault_for_loop = Arc::clone(&tun_fault);
+                        let fault_for_callback = Arc::clone(&tun_fault);
                         let tun_notify_for_reader = Arc::clone(&tun_notify);
+                        let tun_notify_for_callback_failure = Arc::clone(&tun_notify);
+                        let tun_notify_for_reader_error = Arc::clone(&tun_notify);
                         let reader_spawn = std::thread::Builder::new()
                             .name("tun-reader".to_string())
                             .spawn(move || {
@@ -184,6 +189,16 @@ impl ServerRuntime {
                                             }
                                         );
                                         if tx.send(v).is_err() {
+                                            if !shutdown_for_callback.load(Ordering::Acquire) {
+                                                let mut fault = fault_for_callback.lock();
+                                                if fault.is_none() {
+                                                    *fault = Some(DataPlaneFault::ChannelDisconnected {
+                                                        component: "server TUN reader channel".to_string(),
+                                                    });
+                                                }
+                                                drop(fault);
+                                                tun_notify_for_callback_failure.notify_one();
+                                            }
                                             shutdown_for_callback.store(true, Ordering::Release);
                                             return;
                                         }
@@ -191,7 +206,18 @@ impl ServerRuntime {
                                     },
                                 );
                                 if let Err(error) = read_result {
-                                    log::warn!("TUN reader stopped with error: {error}");
+                                    if !shutdown_for_loop.load(Ordering::Acquire) {
+                                        log::warn!("TUN reader stopped with error: {error}");
+                                        let mut fault = fault_for_loop.lock();
+                                        if fault.is_none() {
+                                            *fault = Some(DataPlaneFault::ReaderStopped {
+                                                component: "server TUN reader".to_string(),
+                                                error: error.to_string(),
+                                            });
+                                        }
+                                        drop(fault);
+                                        tun_notify_for_reader_error.notify_one();
+                                    }
                                 }
                             });
                         let reader_handle = match reader_spawn {
@@ -249,6 +275,7 @@ impl ServerRuntime {
             tun_reader_shutdown,
             tun_reader_handle,
             tun_notify,
+            tun_fault,
             blocked_ips,
             qkey_registry,
             admin_web_bootstrap,
@@ -380,18 +407,20 @@ impl ServerRuntime {
             return Ok(());
         };
 
-        // Release the receiver first so a reader blocked on the bounded send
-        // exits immediately. Wake a native blocking read before publishing the
-        // cooperative flag; the device remains owned until the join completes.
+        // Publish deliberate shutdown before releasing the receiver so a
+        // callback that observes the closed channel cannot become a runtime
+        // fault during normal cleanup. The bounded send is then unblocked by
+        // dropping the receiver; the device remains owned until the join.
+        if let Some(shutdown) = live.tun_reader_shutdown.as_ref() {
+            shutdown.store(true, Ordering::Release);
+        }
         live.tun_rx.take();
         let wake_error = live.server_tun.as_ref().and_then(|tun| {
             tun.request_reader_shutdown()
                 .err()
                 .map(|error| format!("server TUN reader wake failed: {error}"))
         });
-        if let Some(shutdown) = live.tun_reader_shutdown.take() {
-            shutdown.store(true, Ordering::Release);
-        }
+        live.tun_reader_shutdown.take();
         let join_error = live.tun_reader_handle.take().and_then(|handle| {
             handle
                 .join()
@@ -736,6 +765,7 @@ impl ServerRuntime {
     }
 
     fn live_parts(&mut self) -> ServerRuntimeLiveParts<'_> {
+        let shutdown = Arc::clone(&self.shutdown);
         let live = self.live_mut();
         ServerRuntimeLiveParts {
             live_state: &mut live.live_state,
@@ -746,6 +776,9 @@ impl ServerRuntime {
                 ipv4: live.server_tun_ip.unwrap_or(Ipv4Addr::UNSPECIFIED),
                 ipv6: live.server_tun_ipv6,
             },
+            tun_fault: Arc::clone(&live.tun_fault),
+            tun_notify: Arc::clone(&live.tun_notify),
+            shutdown,
         }
     }
 
@@ -810,6 +843,11 @@ impl ServerRuntime {
         // Take the TUN reader channel (if any) for forwarding TUN→client datagrams.
         let mut tun_rx = self.live_mut().tun_rx.take();
         let tun_notify = self.live().tun_notify.clone();
+        let tun_fault = self.live().tun_fault.clone();
+        if tun_enable {
+            metrics.set_tun_data_plane_ready(tun_rx.is_some());
+        }
+        let mut runtime_fault: Option<DataPlaneFault> = None;
         let mut buf = [0; LIVE_UDP_DATAGRAM_BUFFER_SIZE];
         let mut out = [0; LIVE_UDP_DATAGRAM_BUFFER_SIZE];
         let mut housekeeping = tokio::time::interval(Duration::from_millis(5));
@@ -1048,14 +1086,14 @@ impl ServerRuntime {
                                 runtime_parts.server_ips,
                                 tun_enable,
                                 Arc::clone(&dns_upstream_resolvers),
+                                Arc::clone(&runtime_parts.tun_fault),
+                                Arc::clone(&runtime_parts.tun_notify),
+                                Arc::clone(&runtime_parts.shutdown),
                             ).await {
                                 Ok(result) => result,
-                                Err(e) => {
-                                    log::warn!("Failed to process live packet for {}: {}", from, e);
-                                    LiveClientDatagramResult {
-                                        auth_result: None,
-                                        remove_auth_conn_id: None,
-                                    }
+                                Err(fault) => {
+                                    runtime_fault = Some(fault);
+                                    break;
                                 }
                             };
                             if let Some(old_addr) = migration_from {
@@ -1080,43 +1118,73 @@ impl ServerRuntime {
                     }
                 }
                 _ = housekeeping.tick() => {
+                    if let Some(fault) = tun_fault.lock().clone() {
+                        runtime_fault = Some(fault);
+                        break;
+                    }
                     let qkey_registry = self.live().qkey_registry.clone();
                     qkey_registry
                         .lock()
                         .unwrap_or_else(|error| error.into_inner())
                         .prune_replay_window();
                     let runtime_parts = self.live_parts();
-                    runtime_parts.live_state
+                    if let Err(fault) = runtime_parts.live_state
                         .run_housekeeping_tick(
                             &socket,
                             &mut out,
                             &metrics,
                             runtime_parts.accept_loop,
                         )
-                        .await;
+                        .await
+                    {
+                        runtime_fault = Some(fault);
+                        break;
+                    }
                     // Retry any downlinks that were deferred because a client's QUIC
                     // DATAGRAM queue was full, before reading new TUN frames.
-                    drain_pending_tun_downlinks(self.live_mut(), &mut out, &socket, &metrics);
+                    if let Err(fault) = drain_pending_tun_downlinks(
+                        self.live_mut(),
+                        &mut out,
+                        &socket,
+                        &metrics,
+                    ) {
+                        runtime_fault = Some(fault);
+                        break;
+                    }
 
                     // Forward TUN→client: drain any packets from the TUN reader thread
                     // and route them to the correct client based on the destination IP
                     // in the IP packet header. Each client has a unique TUN IP from the
                     // server's IP pool, and we look up the session by client_ip to find
                     // the corresponding SocketAddr.
-                    let more_tun = drain_server_tun_packets(
+                    let more_tun = match drain_server_tun_packets(
                         self.live_mut(),
                         &mut tun_rx,
                         &mut out,
                         &socket,
                         &metrics,
                         fingerprint_profile,
-                    );
+                    ) {
+                        Ok(more_tun) => more_tun,
+                        Err(fault) => {
+                            runtime_fault = Some(fault);
+                            break;
+                        }
+                    };
                     if more_tun {
                         tun_notify.notify_one();
                     }
                     // Retry/final-flush any downlinks that were deferred during the
                     // TUN drain above.
-                    drain_pending_tun_downlinks(self.live_mut(), &mut out, &socket, &metrics);
+                    if let Err(fault) = drain_pending_tun_downlinks(
+                        self.live_mut(),
+                        &mut out,
+                        &socket,
+                        &metrics,
+                    ) {
+                        runtime_fault = Some(fault);
+                        break;
+                    }
 
                     // Sweep expired entries from 0-RTT anti-replay strike register.
                     if let Some(ref sr) = runtime_config.strike_register {
@@ -1152,18 +1220,36 @@ impl ServerRuntime {
                     housekeeping.reset_after(standalone_housekeeping_delay(self.live()));
                 }
                 _ = tun_notify.notified(), if tun_enable && tun_rx.is_some() => {
-                    let more_tun = drain_server_tun_packets(
+                    if let Some(fault) = tun_fault.lock().clone() {
+                        runtime_fault = Some(fault);
+                        break;
+                    }
+                    let more_tun = match drain_server_tun_packets(
                         self.live_mut(),
                         &mut tun_rx,
                         &mut out,
                         &socket,
                         &metrics,
                         fingerprint_profile,
-                    );
+                    ) {
+                        Ok(more_tun) => more_tun,
+                        Err(fault) => {
+                            runtime_fault = Some(fault);
+                            break;
+                        }
+                    };
                     if more_tun {
                         tun_notify.notify_one();
                     }
-                    drain_pending_tun_downlinks(self.live_mut(), &mut out, &socket, &metrics);
+                    if let Err(fault) = drain_pending_tun_downlinks(
+                        self.live_mut(),
+                        &mut out,
+                        &socket,
+                        &metrics,
+                    ) {
+                        runtime_fault = Some(fault);
+                        break;
+                    }
                 }
             }
         }
@@ -1172,6 +1258,22 @@ impl ServerRuntime {
         self.live_mut().admin_actions_rx = Some(admin_actions_rx);
         let stealth_error = self.shutdown_stealth_runtime().await.err();
         let stop_error = self.stop().err();
+        if let Some(fault) = runtime_fault {
+            metrics.record_tun_data_plane_fault();
+            let primary = std::io::Error::other(fault);
+            let cleanup = match (stealth_error, stop_error) {
+                (None, None) => None,
+                (Some(stealth), None) => Some(format!("stealth shutdown failed: {stealth}")),
+                (None, Some(stop)) => Some(format!("server shutdown failed: {stop}")),
+                (Some(stealth), Some(stop)) => Some(format!(
+                    "stealth shutdown failed: {stealth}; server shutdown failed: {stop}"
+                )),
+            };
+            return match cleanup {
+                None => Err(primary),
+                Some(cleanup) => Err(std::io::Error::other(format!("{primary}; {cleanup}"))),
+            };
+        }
         match (stealth_error, stop_error) {
             (None, None) => {}
             (Some(stealth), None) => {

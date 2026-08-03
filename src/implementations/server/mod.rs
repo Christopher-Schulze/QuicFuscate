@@ -77,7 +77,7 @@ pub use session::{Session, SessionError, SessionId, SessionManager, SessionStats
 
 use self::admin_http::{AdminAuth, IssueQKeyRequest};
 use self::qkey_registry::{QKeyEntry, QKeyRecord, QKeyRegistry};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::net::IpAddr;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 #[cfg(unix)]
@@ -90,7 +90,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
 use crate::core::QuicFuscateConnection;
-use crate::engine::{EngineConfig, EngineError};
+use crate::engine::{DataPlaneFault, EngineConfig, EngineError};
 use crate::fec::FecConfig;
 use crate::interface::{TunConfig, TunInterface};
 use crate::optimize::MemoryPool;

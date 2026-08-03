@@ -10,7 +10,7 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 
 use crate::core::QuicFuscateConnection;
-use crate::engine::EngineError;
+use crate::engine::{DataPlaneFault, EngineError};
 use crate::interface::TunInterface;
 
 #[inline]
@@ -65,6 +65,8 @@ pub struct IoDriverStats {
     pub udp_packets_sent: AtomicU64,
     pub udp_packets_received: AtomicU64,
     pub errors: AtomicU64,
+    /// Number of terminal data-plane faults published by this driver.
+    pub data_plane_faults: AtomicU64,
 }
 
 impl IoDriverStats {
@@ -75,6 +77,7 @@ impl IoDriverStats {
             udp_packets_sent: self.udp_packets_sent.load(Ordering::Relaxed),
             udp_packets_received: self.udp_packets_received.load(Ordering::Relaxed),
             errors: self.errors.load(Ordering::Relaxed),
+            data_plane_faults: self.data_plane_faults.load(Ordering::Relaxed),
         }
     }
 }
@@ -86,6 +89,7 @@ pub struct IoDriverStatsSnapshot {
     pub udp_packets_sent: u64,
     pub udp_packets_received: u64,
     pub errors: u64,
+    pub data_plane_faults: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,6 +327,51 @@ impl IoDriver {
         &self.stats
     }
 
+    /// Record a terminal data-plane fault that was detected by a task wrapper
+    /// rather than inside one of the driver loops.
+    pub fn record_data_plane_fault(&self) {
+        self.stats.data_plane_faults.fetch_add(1, Ordering::Relaxed);
+        self.stats.errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn data_plane_error(&self, fault: DataPlaneFault) -> EngineError {
+        EngineError::DataPlane(fault)
+    }
+
+    fn transport_send_error(&self, component: &str, error: impl std::fmt::Display) -> EngineError {
+        self.data_plane_error(DataPlaneFault::TransportSend {
+            component: component.to_string(),
+            error: error.to_string(),
+        })
+    }
+
+    fn transport_receive_error(
+        &self,
+        component: &str,
+        error: impl std::fmt::Display,
+    ) -> EngineError {
+        self.data_plane_error(DataPlaneFault::TransportReceive {
+            component: component.to_string(),
+            error: error.to_string(),
+        })
+    }
+
+    #[cfg(all(target_os = "linux", feature = "io_uring"))]
+    fn tun_write_error(&self, component: &str, error: impl std::fmt::Display) -> EngineError {
+        self.data_plane_error(DataPlaneFault::TunWrite {
+            component: component.to_string(),
+            error: error.to_string(),
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn reader_stopped_error(&self, component: &str, error: impl std::fmt::Display) -> EngineError {
+        self.data_plane_error(DataPlaneFault::ReaderStopped {
+            component: component.to_string(),
+            error: error.to_string(),
+        })
+    }
+
     /// Compute the next inbound poll timeout, capping it by the connection's
     /// earliest send deadline (pacing/stealth release or recovery/PTO timer).
     fn recv_timeout(&self, conn: &Arc<parking_lot::Mutex<QuicFuscateConnection>>) -> Duration {
@@ -346,30 +395,77 @@ impl IoDriver {
         conn: &Arc<parking_lot::Mutex<QuicFuscateConnection>>,
         socket: &Arc<UdpSocket>,
         out: &mut [u8],
-    ) {
+    ) -> Result<(), EngineError> {
         loop {
             let written = {
                 let mut conn_guard = conn.lock();
                 match conn_guard.send(&mut *out) {
-                    Ok(0) => break,
+                    Ok(0) | Err(crate::error::ConnectionError::Done) => break,
                     Ok(written) => written,
                     Err(e) => {
                         log::debug!("Connection send error during flush: {:?}", e);
-                        break;
+                        return Err(self.transport_send_error("client inbound flush", e));
                     }
                 }
             };
 
             if let Err(e) = socket.send(&out[..written]).await {
                 log::warn!("UDP send error during outbound flush: {}", e);
-                self.stats.errors.fetch_add(1, Ordering::Relaxed);
-                break;
+                return Err(self.transport_send_error("client inbound UDP flush", e));
             }
 
             self.stats.udp_packets_sent.fetch_add(1, Ordering::Relaxed);
             let global = crate::instrumentation::global();
             global.transport.record_bytes_out(written as u64);
             global.transport.record_packet_out();
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn poll_connection_send(
+        &self,
+        conn: &Arc<parking_lot::Mutex<QuicFuscateConnection>>,
+        out: &mut [u8],
+    ) -> Result<Option<usize>, EngineError> {
+        let mut conn_guard = conn.lock();
+        match conn_guard.send(out) {
+            Ok(0) | Err(crate::error::ConnectionError::Done) => Ok(None),
+            Ok(written) => Ok(Some(written)),
+            Err(error) => Err(self.transport_send_error("client outbound connection send", error)),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn enqueue_tun_datagram(
+        &self,
+        conn: &Arc<parking_lot::Mutex<QuicFuscateConnection>>,
+        socket: &Arc<UdpSocket>,
+        out: &mut [u8],
+        packet: &[u8],
+    ) -> Result<(), EngineError> {
+        loop {
+            let result = {
+                let mut conn_guard = conn.lock();
+                conn_guard.conn.dgram_send(packet)
+            };
+            match result {
+                Ok(()) => return Ok(()),
+                Err(crate::error::ConnectionError::DgramQueueFull) => {
+                    if self.shutdown.load(Ordering::Relaxed) {
+                        return Ok(());
+                    }
+                    // A full QUIC DATAGRAM queue can only drain when the
+                    // connection emits packets. Flush that output before
+                    // retrying so backpressure cannot become an infinite
+                    // sleep loop.
+                    self.flush_outbound(conn, socket, out).await?;
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                Err(error) => {
+                    return Err(self.transport_send_error("client TUN datagram enqueue", error));
+                }
+            }
         }
     }
 
@@ -404,24 +500,20 @@ impl IoDriver {
                 Ok((block, len)) if len > 0 => {
                     self.stats.tun_packets_read.fetch_add(1, Ordering::Relaxed);
 
-                    {
-                        let mut conn_guard = conn.lock();
-                        if let Err(e) = conn_guard.conn.dgram_send(&block[..len]) {
-                            log::warn!("Datagram queue error: {:?}", e);
-                            self.stats.errors.fetch_add(1, Ordering::Relaxed);
-                        }
-                    }
+                    self.enqueue_tun_datagram(&conn, &socket, &mut send_buf, &block[..len]).await?;
 
                     let mut queued = 0usize;
                     while queued < batch_cap {
                         let written = {
                             let mut conn_guard = conn.lock();
                             match conn_guard.send(&mut send_buf) {
-                                Ok(0) => break,
+                                Ok(0) | Err(crate::error::ConnectionError::Done) => break,
                                 Ok(written) => written,
                                 Err(e) => {
                                     log::debug!("Connection send done: {:?}", e);
-                                    break;
+                                    return Err(
+                                        self.transport_send_error("client TUN connection send", e)
+                                    );
                                 }
                             }
                         };
@@ -508,8 +600,7 @@ impl IoDriver {
                     for payload in batch_payloads.iter().take(queued).skip(already_sent) {
                         if let Err(e) = socket.send(payload).await {
                             log::warn!("UDP send error: {}", e);
-                            self.stats.errors.fetch_add(1, Ordering::Relaxed);
-                            continue;
+                            return Err(self.transport_send_error("client TUN UDP send", e));
                         }
 
                         {
@@ -529,22 +620,17 @@ impl IoDriver {
                 Ok(_) => {
                     // No TUN data. Still flush pending transport packets (handshake/acks/pto)
                     // so short-lived and no-tun clients can complete connection setup.
-                    let idle_write = {
-                        let mut conn_guard = conn.lock();
-                        conn_guard.send(&mut send_buf).ok()
-                    };
-                    if let Some(written) = idle_write {
+                    if let Some(written) = self.poll_connection_send(&conn, &mut send_buf)? {
                         if written > 0 {
                             if let Err(e) = socket.send(&send_buf[..written]).await {
                                 log::warn!("UDP send error (idle flush): {}", e);
-                                self.stats.errors.fetch_add(1, Ordering::Relaxed);
-                            } else {
-                                self.stats.udp_packets_sent.fetch_add(1, Ordering::Relaxed);
-                                let global = crate::instrumentation::global();
-                                global.transport.record_bytes_out(written as u64);
-                                global.transport.record_packet_out();
-                                continue;
+                                return Err(self.transport_send_error("client idle UDP flush", e));
                             }
+                            self.stats.udp_packets_sent.fetch_add(1, Ordering::Relaxed);
+                            let global = crate::instrumentation::global();
+                            global.transport.record_bytes_out(written as u64);
+                            global.transport.record_packet_out();
+                            continue;
                         }
                     }
                     tokio::time::sleep(tokio::time::Duration::from_micros(
@@ -552,17 +638,20 @@ impl IoDriver {
                     ))
                     .await;
                 }
-                Err(_e) => {
-                    // TUN read error (for example WouldBlock in no-tun mode). Keep transport alive.
-                    let idle_write = {
-                        let mut conn_guard = conn.lock();
-                        conn_guard.send(&mut send_buf).ok()
-                    };
-                    if let Some(written) = idle_write {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    // A nonblocking or interrupted read is a retryable idle state.
+                    if let Some(written) = self.poll_connection_send(&conn, &mut send_buf)? {
                         if written > 0 {
                             if let Err(e) = socket.send(&send_buf[..written]).await {
                                 log::warn!("UDP send error (error-path flush): {}", e);
-                                self.stats.errors.fetch_add(1, Ordering::Relaxed);
+                                return Err(
+                                    self.transport_send_error("client read-error UDP flush", e)
+                                );
                             } else {
                                 self.stats.udp_packets_sent.fetch_add(1, Ordering::Relaxed);
                                 let global = crate::instrumentation::global();
@@ -573,6 +662,9 @@ impl IoDriver {
                         }
                     }
                     tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+                }
+                Err(error) => {
+                    return Err(self.reader_stopped_error("client outbound TUN reader", error));
                 }
             }
         }
@@ -646,7 +738,7 @@ impl IoDriver {
                 Ok(Err(e)) => {
                     if e.kind() != std::io::ErrorKind::WouldBlock {
                         log::warn!("UDP recv error: {}", e);
-                        self.stats.errors.fetch_add(1, Ordering::Relaxed);
+                        return Err(self.transport_receive_error("client UDP receive", e));
                     }
                 }
                 Ok(Ok(len)) if len > 0 => {
@@ -673,8 +765,9 @@ impl IoDriver {
                             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                             Err(e) => {
                                 log::debug!("UDP try_recv batch stop: {}", e);
-                                self.stats.errors.fetch_add(1, Ordering::Relaxed);
-                                break;
+                                return Err(
+                                    self.transport_receive_error("client UDP batch receive", e)
+                                );
                             }
                         }
                     }
@@ -690,7 +783,7 @@ impl IoDriver {
                         &mut stream_buf,
                         &inbound_batch,
                         queued,
-                    );
+                    )?;
                 }
                 Ok(Ok(_)) => {}
             }
@@ -707,7 +800,7 @@ impl IoDriver {
 
             // Flush any ACKs or PTO probes produced by recv or by a recovery
             // deadline that fired while we were waiting.
-            self.flush_outbound(&conn, &socket, &mut send_buf).await;
+            self.flush_outbound(&conn, &socket, &mut send_buf).await?;
         }
         Ok(())
     }
@@ -751,14 +844,22 @@ impl IoDriver {
                         )
                     };
                     if efd_ret < 0 {
-                        log::debug!("eventfd read failed: {}", std::io::Error::last_os_error());
+                        let error = std::io::Error::last_os_error();
+                        if !matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                        ) {
+                            return Err(
+                                self.transport_receive_error("client io_uring eventfd read", error)
+                            );
+                        }
                     }
                     guard.clear_ready();
 
                     // Drain all completed receives.
-                    let completions = uring_recv
-                        .drain_completions()
-                        .map_err(|e| EngineError::Io(format!("uring recv drain: {e}")))?;
+                    let completions = uring_recv.drain_completions().map_err(|e| {
+                        self.transport_receive_error("client io_uring completion drain", e)
+                    })?;
 
                     if !completions.is_empty() {
                         crate::telemetry::IO_URING_RECV_BATCHES.inc();
@@ -779,7 +880,10 @@ impl IoDriver {
                                 };
                                 if let Err(e) = recv_result {
                                     log::debug!("Connection recv error: {:?}", e);
-                                    self.stats.errors.fetch_add(1, Ordering::Relaxed);
+                                    return Err(self.transport_receive_error(
+                                        "client io_uring QUIC receive",
+                                        e,
+                                    ));
                                 }
                             }
 
@@ -793,14 +897,17 @@ impl IoDriver {
                                         Err(crate::error::ConnectionError::Done) => break,
                                         Err(e) => {
                                             log::debug!("Datagram recv error: {:?}", e);
-                                            break;
+                                            return Err(self.transport_receive_error(
+                                                "client io_uring datagram receive",
+                                                e,
+                                            ));
                                         }
                                     }
                                 };
                                 let mut tun_guard = tun.lock();
                                 if let Err(e) = tun_guard.write_packet(&stream_buf[..read_len]) {
                                     log::warn!("TUN write error: {:?}", e);
-                                    self.stats.errors.fetch_add(1, Ordering::Relaxed);
+                                    return Err(self.tun_write_error("client io_uring downlink", e));
                                 } else {
                                     self.stats.tun_packets_written.fetch_add(1, Ordering::Relaxed);
                                 }
@@ -810,7 +917,7 @@ impl IoDriver {
                 }
                 Ok(Err(e)) => {
                     log::warn!("AsyncFd error on uring recv eventfd: {}", e);
-                    self.stats.errors.fetch_add(1, Ordering::Relaxed);
+                    return Err(self.transport_receive_error("client io_uring eventfd", e));
                 }
                 Err(_) => {
                     // Timeout - check shutdown, continue.
@@ -828,7 +935,7 @@ impl IoDriver {
             }
 
             // Flush ACKs or PTO probes produced by the completions/timeout.
-            self.flush_outbound(&conn, &socket, &mut send_buf).await;
+            self.flush_outbound(&conn, &socket, &mut send_buf).await?;
         }
         Ok(())
     }
@@ -889,7 +996,7 @@ impl IoDriver {
         stream_buf: &mut [u8],
         batch: &[Vec<u8>],
         count: usize,
-    ) {
+    ) -> Result<(), EngineError> {
         for payload in batch.iter().take(count) {
             stats.udp_packets_received.fetch_add(1, Ordering::Relaxed);
             let global = crate::instrumentation::global();
@@ -901,6 +1008,10 @@ impl IoDriver {
                 if let Err(e) = conn_guard.recv(payload) {
                     log::debug!("Connection recv error: {:?}", e);
                     stats.errors.fetch_add(1, Ordering::Relaxed);
+                    return Err(EngineError::DataPlane(DataPlaneFault::TransportReceive {
+                        component: "client QUIC receive".to_string(),
+                        error: e.to_string(),
+                    }));
                 }
             }
 
@@ -913,7 +1024,10 @@ impl IoDriver {
                         Err(crate::error::ConnectionError::Done) => break,
                         Err(e) => {
                             log::debug!("Datagram recv error: {:?}", e);
-                            break;
+                            return Err(EngineError::DataPlane(DataPlaneFault::TransportReceive {
+                                component: "client datagram receive".to_string(),
+                                error: e.to_string(),
+                            }));
                         }
                     }
                 };
@@ -921,11 +1035,16 @@ impl IoDriver {
                 if let Err(e) = tun_guard.write_packet(&stream_buf[..read_len]) {
                     log::warn!("TUN write error: {:?}", e);
                     stats.errors.fetch_add(1, Ordering::Relaxed);
+                    return Err(EngineError::DataPlane(DataPlaneFault::TunWrite {
+                        component: "client standard downlink".to_string(),
+                        error: e.to_string(),
+                    }));
                 } else {
                     stats.tun_packets_written.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
+        Ok(())
     }
 }
 
@@ -946,10 +1065,23 @@ mod tests {
         let stats = IoDriverStats::default();
         stats.tun_packets_read.fetch_add(10, Ordering::Relaxed);
         stats.udp_packets_sent.fetch_add(5, Ordering::Relaxed);
+        stats.data_plane_faults.fetch_add(2, Ordering::Relaxed);
 
         let snapshot = stats.snapshot();
         assert_eq!(snapshot.tun_packets_read, 10);
         assert_eq!(snapshot.udp_packets_sent, 5);
+        assert_eq!(snapshot.data_plane_faults, 2);
+    }
+
+    #[test]
+    fn test_io_driver_records_terminal_data_plane_fault() {
+        let driver = IoDriver::new(IoDriverConfig::default());
+
+        driver.record_data_plane_fault();
+
+        let snapshot = driver.stats().snapshot();
+        assert_eq!(snapshot.data_plane_faults, 1);
+        assert_eq!(snapshot.errors, 1);
     }
 
     #[test]

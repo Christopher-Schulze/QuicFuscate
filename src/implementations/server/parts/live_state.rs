@@ -1236,7 +1236,7 @@ impl LiveServerState {
         out: &mut [u8],
         metrics: &Metrics,
         accept_loop: &AcceptLoop,
-    ) {
+    ) -> Result<(), crate::engine::DataPlaneFault> {
         let now = Instant::now();
         let log_client_stats = now >= self.next_stats_log;
         if log_client_stats {
@@ -1268,7 +1268,7 @@ impl LiveServerState {
             let session_id = self.domain.session_id_by_remote(addr);
             let established_conn_id = if let Some(conn) = self.get_mut(&addr) {
                 drain_masque_downlink_responses(conn, addr, metrics);
-                if let Err(error) = flush_live_server_outgoing(
+                flush_live_server_outgoing(
                     socket,
                     addr,
                     conn,
@@ -1278,10 +1278,7 @@ impl LiveServerState {
                     session_stats,
                     session_id,
                 )
-                .await
-                {
-                    log::warn!("Failed to flush packets to {}: {}", addr, error);
-                }
+                .await?;
                 conn.update_state();
                 if log_client_stats {
                     log::info!(
@@ -1309,6 +1306,7 @@ impl LiveServerState {
         self.enforce_qkey_auth_timeouts(metrics);
         self.reap_expired_sessions(accept_loop, metrics);
         self.reconcile(accept_loop, metrics);
+        Ok(())
     }
 
     pub fn sync_active_metrics(&self, metrics: &Metrics) {

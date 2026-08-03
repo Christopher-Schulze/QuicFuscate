@@ -42,7 +42,7 @@ use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
 
-use crate::engine::{DisconnectReason, EngineConfig, EngineError, EngineState};
+use crate::engine::{DataPlaneFault, DisconnectReason, EngineConfig, EngineError, EngineState};
 use crate::interface::{TunConfig, TunInterface};
 use crate::optimize::MemoryPool;
 use crate::stealth::StealthRuntimeOwner;
@@ -82,6 +82,8 @@ pub struct ClientRuntime {
     handshake_event: Arc<(parking_lot::Mutex<bool>, parking_lot::Condvar)>,
     /// First automatically detected connection-loss reason for the active session.
     loss_reason: Arc<parking_lot::Mutex<Option<DisconnectReason>>>,
+    /// First terminal packet-data-plane fault for the active session.
+    data_plane_fault: Arc<parking_lot::Mutex<Option<DataPlaneFault>>>,
 }
 
 /// Client subsystem handles (initialized during start).
@@ -205,6 +207,7 @@ impl ClientRuntime {
                 parking_lot::Condvar::new(),
             )),
             loss_reason: Arc::new(parking_lot::Mutex::new(None)),
+            data_plane_fault: Arc::new(parking_lot::Mutex::new(None)),
         })
     }
 
@@ -451,6 +454,7 @@ impl ClientRuntime {
         }
 
         *self.loss_reason.lock() = None;
+        *self.data_plane_fault.lock() = None;
 
         // Create QUIC connection
         let conn =
@@ -507,9 +511,11 @@ impl ClientRuntime {
             let tun = tun.clone();
             let conn = shared_conn.clone();
             let socket = socket.clone();
+            let data_plane_fault = self.data_plane_fault.clone();
             async move {
                 if let Err(e) = io_driver.run_outbound(tun, conn, socket).await {
                     log::warn!("Client outbound I/O task exited with error: {:?}", e);
+                    publish_data_plane_fault(&data_plane_fault, &io_driver, e);
                 }
             }
         });
@@ -524,9 +530,11 @@ impl ClientRuntime {
             let conn = shared_conn.clone();
             let socket = socket.clone();
             let hs_event = self.handshake_event.clone();
+            let data_plane_fault = self.data_plane_fault.clone();
             async move {
                 if let Err(e) = io_driver.run_inbound(tun, conn, socket, hs_event).await {
                     log::warn!("Client inbound I/O task exited with error: {:?}", e);
+                    publish_data_plane_fault(&data_plane_fault, &io_driver, e);
                 }
             }
         });
@@ -564,6 +572,7 @@ impl ClientRuntime {
             .ok_or_else(|| EngineError::Internal("I/O driver not initialized".to_string()))?
             .clone();
         let loss_reason = self.loss_reason.clone();
+        let data_plane_fault = self.data_plane_fault.clone();
 
         let watchdog = runtime.spawn(async move {
             let mut ticker = tokio::time::interval(std::time::Duration::from_millis(50));
@@ -571,6 +580,19 @@ impl ClientRuntime {
             ticker.tick().await;
             loop {
                 ticker.tick().await;
+                if let Some(fault) = data_plane_fault.lock().clone() {
+                    let reason = DisconnectReason::DataPlane(fault);
+                    {
+                        let mut stored = loss_reason.lock();
+                        if stored.is_some() {
+                            break;
+                        }
+                        *stored = Some(reason.clone());
+                    }
+                    io_driver.shutdown();
+                    on_loss(reason);
+                    break;
+                }
                 let detected = {
                     let guard = connection.lock();
                     classify_connection_loss(
@@ -681,6 +703,21 @@ impl ClientRuntime {
         self.loss_reason.lock().clone()
     }
 
+    /// Return the first terminal data-plane fault for the active session.
+    pub fn data_plane_fault(&self) -> Option<DataPlaneFault> {
+        self.data_plane_fault.lock().clone()
+    }
+
+    /// Return whether the client packet data plane is currently available.
+    pub fn data_plane_available(&self) -> bool {
+        self.is_connected() && self.data_plane_fault().is_none()
+    }
+
+    /// Snapshot I/O-driver data-plane counters for engine telemetry.
+    pub fn io_driver_stats(&self) -> Option<IoDriverStatsSnapshot> {
+        self.io_driver.as_ref().map(|driver| driver.stats().snapshot())
+    }
+
     /// Get mutable connection reference.
     pub fn connection_mut(&mut self) -> Option<&mut ClientConnection> {
         self.connection.as_mut()
@@ -730,6 +767,27 @@ impl ClientRuntime {
     pub fn tun(&self) -> Option<Arc<parking_lot::Mutex<TunInterface>>> {
         self.tun.clone()
     }
+}
+
+fn publish_data_plane_fault(
+    slot: &Arc<parking_lot::Mutex<Option<DataPlaneFault>>>,
+    io_driver: &IoDriver,
+    error: EngineError,
+) {
+    let fault = match error {
+        EngineError::DataPlane(fault) => fault,
+        other => DataPlaneFault::TransportReceive {
+            component: "client I/O task".to_string(),
+            error: other.to_string(),
+        },
+    };
+    io_driver.record_data_plane_fault();
+    let mut stored = slot.lock();
+    if stored.is_none() {
+        *stored = Some(fault);
+    }
+    drop(stored);
+    io_driver.shutdown();
 }
 
 fn classify_connection_loss(

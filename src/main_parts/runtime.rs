@@ -763,22 +763,46 @@ fn client_packet_too_big_response(packet: &[u8], tunnel_mtu: usize) -> Vec<u8> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ClientTunPacketError {
+    Backpressure,
+    Fault(quicfuscate::engine::DataPlaneFault),
+}
+
 fn send_client_tun_packet(
     conn: &mut QuicFuscateConnection,
     tun: &quicfuscate::interface::TunInterface,
     stream_id: u64,
     packet: &[u8],
-) -> Result<(), ConnectionError> {
+) -> Result<(), ClientTunPacketError> {
     let tunnel_mtu = conn.effective_tunnel_mtu().min(usize::from(tun.mtu()));
     if packet.len() <= tunnel_mtu {
-        return conn.send_tunnel_packet(stream_id, packet);
+        return conn.send_tunnel_packet(stream_id, packet).map_err(|error| match error {
+            ConnectionError::DgramQueueFull => ClientTunPacketError::Backpressure,
+            error => ClientTunPacketError::Fault(
+                quicfuscate::engine::DataPlaneFault::TransportSend {
+                    component: "standalone client TUN uplink".to_string(),
+                    error: error.to_string(),
+                },
+            ),
+        });
     }
 
     let response = client_packet_too_big_response(packet, tunnel_mtu);
     if response.is_empty() {
-        return Err(ConnectionError::BufferTooShort);
+        return Err(ClientTunPacketError::Fault(
+            quicfuscate::engine::DataPlaneFault::TransportSend {
+                component: "standalone client oversized TUN response".to_string(),
+                error: ConnectionError::BufferTooShort.to_string(),
+            },
+        ));
     }
-    tun.write(&response).map_err(|error| ConnectionError::from(error.to_string()))?;
+    tun.write(&response).map_err(|error| {
+        ClientTunPacketError::Fault(quicfuscate::engine::DataPlaneFault::TunWrite {
+            component: "standalone client oversized TUN response".to_string(),
+            error: error.to_string(),
+        })
+    })?;
     Ok(())
 }
 
@@ -875,6 +899,22 @@ fn client_tun_activation_ready(
     !tun_enable || (has_receiver && has_writer && has_shutdown && has_reader)
 }
 
+fn record_standalone_client_tun_fault(
+    fault_slot: &Arc<parking_lot::Mutex<Option<quicfuscate::engine::DataPlaneFault>>>,
+    notify: &Arc<tokio::sync::Notify>,
+    shutdown: &AtomicBool,
+    fault: quicfuscate::engine::DataPlaneFault,
+) {
+    if shutdown.load(Ordering::Acquire) {
+        return;
+    }
+    let mut stored = fault_slot.lock();
+    if stored.is_none() {
+        *stored = Some(fault);
+        notify.notify_one();
+    }
+}
+
 /// Drain TUN frames from `rx` and forward them through `conn` without dropping
 /// a frame that encounters DATAGRAM queue backpressure. A backpressured frame
 /// is held in `backlog` and retried on the next call before new frames.
@@ -885,7 +925,7 @@ fn drain_client_tun_uplink(
     rx: &std::sync::mpsc::Receiver<quicfuscate::interface::TunPacket>,
     backlog: &mut Option<quicfuscate::interface::TunPacket>,
     diagnostics_enabled: bool,
-) -> bool {
+) -> Result<bool, quicfuscate::engine::DataPlaneFault> {
     if let Some(frame) = backlog.take() {
         let frame_len = frame.len();
         match send_client_tun_packet(conn, tun, sid, frame.as_slice()) {
@@ -894,16 +934,16 @@ fn drain_client_tun_uplink(
                     info!("Client Wintun backlog accepted by MASQUE uplink: bytes={frame_len}");
                 }
             }
-            Err(quicfuscate::error::ConnectionError::DgramQueueFull) => {
+            Err(ClientTunPacketError::Backpressure) => {
                 if diagnostics_enabled {
                     info!("Client MASQUE uplink remains backpressured: bytes={frame_len}");
                 }
                 *backlog = Some(frame);
-                return true;
+                return Ok(true);
             }
-            Err(e) => {
-                warn!("TUN packet send failed: {:?}", e);
-                return false;
+            Err(ClientTunPacketError::Fault(fault)) => {
+                warn!("TUN packet send failed: {fault}");
+                return Err(fault);
             }
         }
     }
@@ -920,26 +960,30 @@ fn drain_client_tun_uplink(
                             );
                         }
                     }
-                    Err(quicfuscate::error::ConnectionError::DgramQueueFull) => {
+                    Err(ClientTunPacketError::Backpressure) => {
                         if diagnostics_enabled {
                             info!("Client MASQUE uplink backpressured: bytes={frame_len}");
                         }
                         *backlog = Some(frame);
                         break;
                     }
-                    Err(e) => {
-                        warn!("TUN packet send failed: {:?}", e);
-                        break;
+                    Err(ClientTunPacketError::Fault(fault)) => {
+                        warn!("TUN packet send failed: {fault}");
+                        return Err(fault);
                     }
                 }
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => break,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                return Err(quicfuscate::engine::DataPlaneFault::ChannelDisconnected {
+                    component: "standalone client TUN reader channel".to_string(),
+                });
+            }
         }
     }
 
     if backlog.is_some() {
-        return true;
+        return Ok(true);
     }
 
     // Preserve the wake-up contract when the bounded drain limit was reached.
@@ -948,10 +992,14 @@ fn drain_client_tun_uplink(
     match rx.try_recv() {
         Ok(frame) => {
             *backlog = Some(frame);
-            true
+            Ok(true)
         }
-        Err(std::sync::mpsc::TryRecvError::Empty)
-        | Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
+        Err(std::sync::mpsc::TryRecvError::Empty) => Ok(false),
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            Err(quicfuscate::engine::DataPlaneFault::ChannelDisconnected {
+                component: "standalone client TUN reader channel".to_string(),
+            })
+        }
     }
 }
 
@@ -1192,6 +1240,7 @@ async fn run_client(
         CleanShutdown,
         RemoteClosed,
         HeartbeatTimeout,
+        DataPlane(quicfuscate::engine::DataPlaneFault),
         SocketError(String),
     }
 
@@ -1478,6 +1527,7 @@ async fn run_client(
         Option<u64>,
         Option<Arc<AtomicBool>>,
         Option<Arc<AtomicBool>>,
+        Option<Arc<parking_lot::Mutex<Option<quicfuscate::engine::DataPlaneFault>>>>,
         Option<std::thread::JoinHandle<()>>,
     )> = if tun_enable {
         let effective_tun_mtu =
@@ -1510,10 +1560,13 @@ async fn run_client(
                 let tun_reader_diagnostics = client_receive_diagnostics_enabled;
                 let reader_shutdown = Arc::new(AtomicBool::new(false));
                 let reader_failed = Arc::new(AtomicBool::new(false));
+                let reader_fault = Arc::new(parking_lot::Mutex::new(None));
                 let shutdown_for_loop = Arc::clone(&reader_shutdown);
                 let shutdown_for_callback = Arc::clone(&reader_shutdown);
                 let failed_for_error = Arc::clone(&reader_failed);
                 let failed_for_callback = Arc::clone(&reader_failed);
+                let fault_for_error = Arc::clone(&reader_fault);
+                let fault_for_callback = Arc::clone(&reader_fault);
                 let tun_notify_for_reader = Arc::clone(&tun_notify);
                 let tun_notify_for_callback_failure = Arc::clone(&tun_notify);
                 let tun_notify_for_error = Arc::clone(&tun_notify);
@@ -1531,6 +1584,16 @@ async fn run_client(
                                     info!("Client Wintun packet read: bytes={}", packet.len());
                                 }
                                 if tx.send(packet).is_err() {
+                                    if !shutdown_for_callback.load(Ordering::Acquire) {
+                                        record_standalone_client_tun_fault(
+                                            &fault_for_callback,
+                                            &tun_notify_for_callback_failure,
+                                            &shutdown_for_callback,
+                                            quicfuscate::engine::DataPlaneFault::ChannelDisconnected {
+                                                component: "standalone client TUN reader channel".to_string(),
+                                            },
+                                        );
+                                    }
                                     shutdown_for_callback.store(true, Ordering::Release);
                                     failed_for_callback.store(true, Ordering::Release);
                                     tun_notify_for_callback_failure.notify_one();
@@ -1541,8 +1604,18 @@ async fn run_client(
                         );
                         if let Err(error) = read_result {
                             warn!("Client TUN reader stopped with error: {error}");
-                            failed_for_error.store(true, Ordering::Release);
-                            tun_notify_for_error.notify_one();
+                            if !shutdown_for_loop.load(Ordering::Acquire) {
+                                record_standalone_client_tun_fault(
+                                    &fault_for_error,
+                                    &tun_notify_for_error,
+                                    &shutdown_for_loop,
+                                    quicfuscate::engine::DataPlaneFault::ReaderStopped {
+                                        component: "standalone client TUN reader".to_string(),
+                                        error: error.to_string(),
+                                    },
+                                );
+                                failed_for_error.store(true, Ordering::Release);
+                            }
                         }
                     },
                 ) {
@@ -1550,6 +1623,9 @@ async fn run_client(
                         // Install the MASQUE→TUN sink so downlink CONNECT-UDP
                         // datagrams are written to the client TUN by the H3 poll.
                         let tun_for_cb = tun.clone();
+                        let fault_for_masque = Arc::clone(&reader_fault);
+                        let notify_for_masque = Arc::clone(&tun_notify);
+                        let shutdown_for_masque = Arc::clone(&reader_shutdown);
                         conn.set_masque_datagram_cb(std::sync::Arc::new(
                             std::sync::Mutex::new(Box::new(move |payload: &[u8]| {
                                 // Only write raw IPv4/IPv6 packets. CONNECT-UDP
@@ -1562,6 +1638,15 @@ async fn run_client(
                                             "Client TUN write (MASQUE downlink) failed: {:?}",
                                             error
                                         );
+                                        record_standalone_client_tun_fault(
+                                            &fault_for_masque,
+                                            &notify_for_masque,
+                                            &shutdown_for_masque,
+                                            quicfuscate::engine::DataPlaneFault::TunWrite {
+                                                component: "standalone client MASQUE downlink".to_string(),
+                                                error: error.to_string(),
+                                            },
+                                        );
                                     }
                                 }
                             })),
@@ -1572,6 +1657,7 @@ async fn run_client(
                             None,
                             Some(reader_shutdown),
                             Some(reader_failed),
+                            Some(reader_fault),
                             Some(reader_handle),
                         ))
                     }
@@ -1583,14 +1669,15 @@ async fn run_client(
             }
         }
     } else {
-        Ok((None, None, None, None, None, None))
+        Ok((None, None, None, None, None, None, None))
     };
     let (
         tun_rx,
         tun_writer,
         mut h3_stream_id,
         tun_reader_shutdown,
-        tun_reader_failed,
+        _tun_reader_failed,
+        tun_reader_fault,
         mut tun_reader_handle,
     ) = match tun_setup {
             Ok(resources) => resources,
@@ -1650,13 +1737,8 @@ async fn run_client(
                 break ExitReason::CleanShutdown;
             }
             recv_res = recv_connected_datagram(&socket, &mut buf) => {
-                if tun_reader_failed
-                    .as_ref()
-                    .is_some_and(|failed| failed.load(Ordering::Acquire))
-                {
-                    break ExitReason::SocketError(
-                        "client TUN reader stopped; requested data plane is unavailable".to_string(),
-                    );
+                if let Some(fault) = tun_reader_fault.as_ref().and_then(|slot| slot.lock().clone()) {
+                    break ExitReason::DataPlane(fault);
                 }
                 let branch_started = std::time::Instant::now();
                 let scheduling_gap = branch_started.duration_since(last_runtime_progress);
@@ -1711,7 +1793,7 @@ async fn run_client(
                                     )
                                     .await
                                 {
-                                    warn!("Failed to send response packet: {}", error);
+                                    break ExitReason::DataPlane(error);
                                 }
                             }
                         }
@@ -1723,14 +1805,17 @@ async fn run_client(
                         // housekeeping tick may never fire, starving the TUN uplink.
                         if tun_enable && conn.masque_tunnel_established() {
                             if let (Some(ref rx), Some(sid), Some(ref tun)) = (&tun_rx, h3_stream_id, &tun_writer) {
-                                let more_tun = drain_client_tun_uplink(
+                                let more_tun = match drain_client_tun_uplink(
                                     &mut conn,
                                     tun,
                                     sid,
                                     rx,
                                     &mut tun_backpressure_frame,
                                     client_receive_diagnostics_enabled,
-                                );
+                                ) {
+                                    Ok(more_tun) => more_tun,
+                                    Err(fault) => break ExitReason::DataPlane(fault),
+                                };
                                 if more_tun {
                                     tun_notify.notify_one();
                                 }
@@ -1745,7 +1830,7 @@ async fn run_client(
                             )
                             .await
                             {
-                                warn!("Failed to flush TUN uplink packets: {}", e);
+                                break ExitReason::DataPlane(e);
                             }
                             let flush_elapsed = flush_started.elapsed();
                             if client_receive_diagnostics_enabled
@@ -1776,13 +1861,8 @@ async fn run_client(
                 ));
             }
             _ = tun_notify.notified(), if tun_writer.is_some() => {
-                if tun_reader_failed
-                    .as_ref()
-                    .is_some_and(|failed| failed.load(Ordering::Acquire))
-                {
-                    break ExitReason::SocketError(
-                        "client TUN reader stopped; requested data plane is unavailable".to_string(),
-                    );
+                if let Some(fault) = tun_reader_fault.as_ref().and_then(|slot| slot.lock().clone()) {
+                    break ExitReason::DataPlane(fault);
                 }
                 let branch_started = std::time::Instant::now();
                 let scheduling_gap = branch_started.duration_since(last_runtime_progress);
@@ -1799,14 +1879,17 @@ async fn run_client(
                     if let (Some(ref rx), Some(sid), Some(ref tun)) =
                         (&tun_rx, h3_stream_id, &tun_writer)
                     {
-                        let more_tun = drain_client_tun_uplink(
+                        let more_tun = match drain_client_tun_uplink(
                             &mut conn,
                             tun,
                             sid,
                             rx,
                             &mut tun_backpressure_frame,
                             client_receive_diagnostics_enabled,
-                        );
+                        ) {
+                            Ok(more_tun) => more_tun,
+                            Err(fault) => break ExitReason::DataPlane(fault),
+                        };
                         if more_tun {
                             tun_notify.notify_one();
                         }
@@ -1818,7 +1901,7 @@ async fn run_client(
                         )
                         .await
                         {
-                            warn!("Failed to flush TUN notification uplink: {error}");
+                            break ExitReason::DataPlane(error);
                         }
                     }
                 }
@@ -1831,13 +1914,8 @@ async fn run_client(
                 ));
             }
             _ = housekeeping.tick() => {
-                if tun_reader_failed
-                    .as_ref()
-                    .is_some_and(|failed| failed.load(Ordering::Acquire))
-                {
-                    break ExitReason::SocketError(
-                        "client TUN reader stopped; requested data plane is unavailable".to_string(),
-                    );
+                if let Some(fault) = tun_reader_fault.as_ref().and_then(|slot| slot.lock().clone()) {
+                    break ExitReason::DataPlane(fault);
                 }
                 let branch_started = std::time::Instant::now();
                 let scheduling_gap = branch_started.duration_since(last_runtime_progress);
@@ -1880,12 +1958,28 @@ async fn run_client(
                     }
                     // Downlink: H3 stream data from server → TUN interface
                     let tun_writer_ref = tun_writer.clone();
+                    let tun_fault_for_h3 = tun_reader_fault.clone();
+                    let tun_notify_for_h3 = Arc::clone(&tun_notify);
+                    let shutdown_for_h3 = tun_reader_shutdown.clone();
                     if let Err(e) = conn.poll_http3_with(move |data| {
                         if let Some(ref tw) = tun_writer_ref {
                             // Only write to TUN if the data looks like a valid IP packet.
                             if !data.is_empty() && (data[0] >> 4 == 4 || data[0] >> 4 == 6) {
                                 if let Err(e) = tw.write(data) {
                                     warn!("Client TUN write (H3 downlink) failed: {:?}", e);
+                                    if let (Some(fault_slot), Some(shutdown)) =
+                                        (tun_fault_for_h3.as_ref(), shutdown_for_h3.as_ref())
+                                    {
+                                        record_standalone_client_tun_fault(
+                                            fault_slot,
+                                            &tun_notify_for_h3,
+                                            shutdown,
+                                            quicfuscate::engine::DataPlaneFault::TunWrite {
+                                                component: "standalone client HTTP/3 downlink".to_string(),
+                                                error: e.to_string(),
+                                            },
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -1907,14 +2001,17 @@ async fn run_client(
                     // as a bounded retry path for transport progress.
                     if conn.masque_tunnel_established() {
                         if let (Some(ref rx), Some(sid), Some(ref tun)) = (&tun_rx, h3_stream_id, &tun_writer) {
-                            let more_tun = drain_client_tun_uplink(
+                            let more_tun = match drain_client_tun_uplink(
                                 &mut conn,
                                 tun,
                                 sid,
                                 rx,
                                 &mut tun_backpressure_frame,
                                 client_receive_diagnostics_enabled,
-                            );
+                            ) {
+                                Ok(more_tun) => more_tun,
+                                Err(fault) => break ExitReason::DataPlane(fault),
+                            };
                             if more_tun {
                                 tun_notify.notify_one();
                             }
@@ -1935,9 +2032,9 @@ async fn run_client(
 
                 // Connected policy means the authenticated tunnel data plane is
                 // ready, not merely that QUIC completed its handshake.
-                let reader_failed = tun_reader_failed
+                let reader_failed = tun_reader_fault
                     .as_ref()
-                    .is_some_and(|failed| failed.load(Ordering::Acquire));
+                    .is_some_and(|slot| slot.lock().is_some());
                 let data_plane_ready = conn.conn.is_established()
                     && tun_activation_ready
                     && !reader_failed
@@ -2008,7 +2105,7 @@ async fn run_client(
                 )
                 .await
                 {
-                    warn!("Failed to flush outgoing packets: {}", e);
+                    break ExitReason::DataPlane(e);
                 }
                 let flush_elapsed = flush_started.elapsed();
                 if client_receive_diagnostics_enabled
@@ -2130,11 +2227,8 @@ async fn run_client(
         None
     };
 
-    // Drop the receiver before signalling the reader. This unblocks a reader
-    // that is waiting for capacity in the bounded channel. Wake any native
-    // backend wait, then publish the shutdown flag before joining the owned
-    // reader handle.
-    drop(tun_rx);
+    // Publish cooperative shutdown before dropping the receiver so the reader
+    // can distinguish deliberate teardown from an unexpected channel close.
     let tun_reader_shutdown_error = tun_writer.as_ref().and_then(|tun| {
         tun.request_reader_shutdown()
             .err()
@@ -2143,6 +2237,10 @@ async fn run_client(
     if let Some(shutdown) = tun_reader_shutdown.as_ref() {
         shutdown.store(true, Ordering::Release);
     }
+    // Dropping the receiver unblocks a reader waiting for capacity in the
+    // bounded channel. Wake any native backend wait before joining the owned
+    // reader handle.
+    drop(tun_rx);
     let tun_reader_error = tun_reader_handle.take().and_then(|handle| {
         handle
             .join()
@@ -2188,23 +2286,33 @@ async fn run_client(
     if let Some(error) = tun_reader_shutdown_error {
         cleanup_errors.push(error);
     }
-    if !cleanup_errors.is_empty() {
-        return Err(std::io::Error::other(cleanup_errors.join("; ")));
-    }
-
-    match exit_reason {
-        ExitReason::CleanShutdown => Ok(()),
-        ExitReason::RemoteClosed => Err(std::io::Error::new(
+    let primary_error = match exit_reason {
+        ExitReason::CleanShutdown => None,
+        ExitReason::RemoteClosed => Some(std::io::Error::new(
             std::io::ErrorKind::ConnectionReset,
             "VPN server closed the connection; firewall remains fail-closed",
         )),
-        ExitReason::HeartbeatTimeout => Err(std::io::Error::new(
+        ExitReason::HeartbeatTimeout => Some(std::io::Error::new(
             std::io::ErrorKind::TimedOut,
             "VPN heartbeat timed out; firewall remains fail-closed",
         )),
-        ExitReason::SocketError(error) => Err(std::io::Error::other(format!(
+        ExitReason::DataPlane(fault) => Some(std::io::Error::other(format!(
+            "VPN data plane failed; firewall remains fail-closed: {fault}"
+        ))),
+        ExitReason::SocketError(error) => Some(std::io::Error::other(format!(
             "VPN socket failed; firewall remains fail-closed: {error}"
         ))),
+    };
+    if cleanup_errors.is_empty() {
+        return primary_error.map_or(Ok(()), Err);
+    }
+    let cleanup_error = cleanup_errors.join("; ");
+    match primary_error {
+        Some(primary) => Err(std::io::Error::new(
+            primary.kind(),
+            format!("{primary}; client cleanup failed: {cleanup_error}"),
+        )),
+        None => Err(std::io::Error::other(cleanup_error)),
     }
 }
 

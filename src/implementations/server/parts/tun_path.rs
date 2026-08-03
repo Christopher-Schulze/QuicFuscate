@@ -11,6 +11,9 @@ struct ServerRuntimeLiveParts<'a> {
     accept_max_clients: usize,
     server_tun: Option<&'a Arc<TunInterface>>,
     server_ips: ServerTunIps,
+    tun_fault: Arc<Mutex<Option<DataPlaneFault>>>,
+    tun_notify: Arc<tokio::sync::Notify>,
+    shutdown: Arc<AtomicBool>,
 }
 
 struct ServerLiveRuntime {
@@ -36,6 +39,8 @@ struct ServerLiveRuntime {
     tun_reader_handle: Option<std::thread::JoinHandle<()>>,
     /// Wakes the run loop as soon as the reader queues a TUN frame.
     tun_notify: Arc<tokio::sync::Notify>,
+    /// First terminal server TUN data-plane fault for this runtime generation.
+    tun_fault: Arc<Mutex<Option<DataPlaneFault>>>,
     blocked_ips: Arc<parking_lot::RwLock<std::collections::HashSet<String>>>,
     qkey_registry: Arc<std::sync::Mutex<QKeyRegistry>>,
     admin_web_bootstrap: StandaloneAdminWebBootstrap,
@@ -77,13 +82,22 @@ struct StandaloneServiceSignals {
     metrics: Option<Arc<AtomicBool>>,
 }
 
-fn write_tun_control_packet(tun: &TunInterface, packet: &[u8], context: &str) {
+fn write_tun_control_packet(
+    tun: &TunInterface,
+    packet: &[u8],
+    context: &str,
+) -> Result<(), DataPlaneFault> {
     if packet.is_empty() {
-        return;
+        return Ok(());
     }
     if let Err(error) = tun.write(packet) {
         log::warn!("{} write to server TUN failed: {:?}", context, error);
+        return Err(DataPlaneFault::TunWrite {
+            component: context.to_string(),
+            error: error.to_string(),
+        });
     }
+    Ok(())
 }
 
 fn source_fingerprint_profile(
@@ -110,28 +124,28 @@ fn handle_local_tun_packet(
     server_ips: ServerTunIps,
     fingerprint_profile: OsFingerprintProfile,
     metrics: &Metrics,
-) -> bool {
+) -> Result<bool, DataPlaneFault> {
     if packet.len() >= 20 && packet[0] >> 4 == 4 {
         let destination = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
         if destination != server_ips.ipv4 {
-            return false;
+            return Ok(false);
         }
         let header_len = usize::from(packet[0] & 0x0f) * 4;
         if let Some(header) = icmp::parse_icmpv4(header_len, packet) {
             if header.icmp_type == icmp::icmp_type::ECHO_REQUEST {
                 let reply = icmp::build_echo_reply_with_ttl(packet, fingerprint_profile.ttl());
-                write_tun_control_packet(tun, &reply, "ICMPv4 echo reply");
+                write_tun_control_packet(tun, &reply, "ICMPv4 echo reply")?;
             }
         }
         metrics.record_routing_outcome(RoutingOutcome::Local);
-        return true;
+        return Ok(true);
     }
 
     let Some(server_ipv6) = server_ips.ipv6 else {
-        return false;
+        return Ok(false);
     };
     let Some(header) = icmp::parse_icmpv6(packet) else {
-        return false;
+        return Ok(false);
     };
     let destination = Ipv6Addr::from(<[u8; 16]>::try_from(&packet[24..40]).unwrap_or([0; 16]));
     let response = if header.icmp_type == icmp::icmpv6_type::NEIGHBOR_SOLICITATION {
@@ -141,12 +155,12 @@ fn handle_local_tun_packet(
     } else if destination == server_ipv6 {
         Vec::new()
     } else {
-        return false;
+        return Ok(false);
     };
-    write_tun_control_packet(tun, &response, "ICMPv6 local response");
+    write_tun_control_packet(tun, &response, "ICMPv6 local response")?;
     metrics.record_routing_outcome(RoutingOutcome::Local);
     metrics.record_routing_outcome(RoutingOutcome::Icmpv6);
-    true
+    Ok(true)
 }
 
 fn write_downlink_error(
@@ -157,7 +171,7 @@ fn write_downlink_error(
     outcome: RoutingOutcome,
     mtu: Option<usize>,
     metrics: &Metrics,
-) {
+) -> Result<(), DataPlaneFault> {
     let response = match packet.first().map(|byte| byte >> 4) {
         Some(4) => {
             let (icmp_type, code) = match outcome {
@@ -180,7 +194,7 @@ fn write_downlink_error(
         }
         Some(6) => {
             let Some(server_ipv6) = server_ips.ipv6 else {
-                return;
+                return Ok(());
             };
             let icmp_type = match outcome {
                 RoutingOutcome::PacketTooBig => icmp::icmpv6_type::PACKET_TOO_BIG,
@@ -196,10 +210,11 @@ fn write_downlink_error(
                 fingerprint_profile.ttl(),
             )
         }
-        _ => return,
+        _ => return Ok(()),
     };
-    write_tun_control_packet(tun, &response, "routing ICMP response");
+    write_tun_control_packet(tun, &response, "routing ICMP response")?;
     metrics.record_routing_outcome(outcome);
+    Ok(())
 }
 
 /// Retry downlink packets that were deferred because a client's QUIC DATAGRAM
@@ -210,7 +225,7 @@ fn drain_pending_tun_downlinks(
     out: &mut [u8],
     socket: &UdpSocket,
     metrics: &Metrics,
-) {
+) -> Result<(), DataPlaneFault> {
     let mut queued = smallvec::SmallVec::<[SocketAddr; 4]>::new();
     let mut deferred_sessions = std::collections::HashSet::new();
     let sessions = Arc::clone(&live.live_state.domain.shared.sessions);
@@ -300,6 +315,10 @@ fn drain_pending_tun_downlinks(
                     TunDownlinkBackpressureDrop::TerminalTransportError,
                 );
                 log::warn!("pending TUN downlink for {} failed: {:?}", target, error);
+                return Err(DataPlaneFault::TransportSend {
+                    component: format!("server pending TUN downlink to {target}"),
+                    error: error.to_string(),
+                });
             }
         }
     }
@@ -312,7 +331,7 @@ fn drain_pending_tun_downlinks(
         live.live_state.pending_tun_downlinks.active_clients(),
     );
 
-    flush_tun_downlink_queue(live, &queued, out, socket, metrics);
+    flush_tun_downlink_queue(live, &queued, out, socket, metrics)
 }
 
 fn enqueue_pending_tun_downlink(
@@ -363,7 +382,7 @@ fn flush_tun_downlink_queue(
     out: &mut [u8],
     socket: &UdpSocket,
     _metrics: &Metrics,
-) {
+) -> Result<(), DataPlaneFault> {
     for target in queued {
         let Some(connection) = live.live_state.clients.get_mut(target) else {
             continue;
@@ -375,22 +394,33 @@ fn flush_tun_downlink_queue(
                     break;
                 }
                 Ok(written) => written,
+                Err(crate::error::ConnectionError::Done) => {
+                    log::debug!("TUN to socket send to {}: connection.send returned Done", target);
+                    break;
+                }
                 Err(error) => {
                     log::warn!(
                         "TUN to socket send to {}: connection.send failed: {:?}",
                         target,
                         error
                     );
-                    break;
+                    return Err(DataPlaneFault::TransportSend {
+                        component: format!("server TUN downlink connection to {target}"),
+                        error: error.to_string(),
+                    });
                 }
             };
             if let Err(error) = socket.try_send_to(&out[..written], *target) {
                 log::warn!("TUN to socket send to {} failed: {:?}", target, error);
-                break;
+                return Err(DataPlaneFault::TransportSend {
+                    component: format!("server UDP downlink to {target}"),
+                    error: error.to_string(),
+                });
             }
             log::debug!("TUN to socket send to {}: sent {}B", target, written);
         }
     }
+    Ok(())
 }
 
 fn process_server_tun_packet(
@@ -400,9 +430,9 @@ fn process_server_tun_packet(
     socket: &UdpSocket,
     metrics: &Metrics,
     fingerprint_profile: OsFingerprintProfile,
-) {
+) -> Result<(), DataPlaneFault> {
     let Some(tun) = live.server_tun.clone() else {
-        return;
+        return Ok(());
     };
     let server_ips = ServerTunIps {
         ipv4: live.server_tun_ip.unwrap_or(Ipv4Addr::UNSPECIFIED),
@@ -410,8 +440,8 @@ fn process_server_tun_packet(
     };
     let source_profile =
         source_fingerprint_profile(&live.live_state, packet).unwrap_or(fingerprint_profile);
-    if handle_local_tun_packet(packet, &tun, server_ips, source_profile, metrics) {
-        return;
+    if handle_local_tun_packet(packet, &tun, server_ips, source_profile, metrics)? {
+        return Ok(());
     }
 
     let policy = Arc::clone(&live.live_state.domain.shared.forwarding_policy);
@@ -437,8 +467,8 @@ fn process_server_tun_packet(
             RoutingOutcome::TimeExceeded,
             None,
             metrics,
-        );
-        return;
+        )?;
+        return Ok(());
     }
     let mut targets = smallvec::SmallVec::<[(SocketAddr, SessionId); 4]>::new();
     {
@@ -477,14 +507,14 @@ fn process_server_tun_packet(
                     RoutingOutcome::Unknown,
                     None,
                     metrics,
-                );
-                return;
+                )?;
+                return Ok(());
             }
             DownlinkRoute::Malformed => {
                 metrics.routing_drop_malformed.fetch_add(1, Ordering::Relaxed);
-                return;
+                return Ok(());
             }
-            DownlinkRoute::Local { .. } => return,
+            DownlinkRoute::Local { .. } => return Ok(()),
         }
     }
 
@@ -510,7 +540,7 @@ fn process_server_tun_packet(
                     RoutingOutcome::PacketTooBig,
                     Some(effective_mtu),
                     metrics,
-                );
+                )?;
             }
             continue;
         }
@@ -567,7 +597,10 @@ fn process_server_tun_packet(
                                 TunDownlinkBackpressureDrop::TerminalTransportError,
                             );
                             log::warn!("TUN downlink for {} failed: {:?}", target, error);
-                            continue;
+                            return Err(DataPlaneFault::TransportSend {
+                                component: format!("server TUN downlink to {target}"),
+                                error: error.to_string(),
+                            });
                         }
                         None => continue,
                     }
@@ -597,8 +630,8 @@ fn process_server_tun_packet(
         }
     }
 
-    flush_tun_downlink_queue(live, &direct_send_targets, out, socket, metrics);
-    drain_pending_tun_downlinks(live, out, socket, metrics);
+    flush_tun_downlink_queue(live, &direct_send_targets, out, socket, metrics)?;
+    drain_pending_tun_downlinks(live, out, socket, metrics)
 }
 
 impl StandaloneServiceSignals {
@@ -624,7 +657,7 @@ fn drain_server_tun_packets(
     socket: &UdpSocket,
     metrics: &Metrics,
     fingerprint_profile: OsFingerprintProfile,
-) -> bool {
+) -> Result<bool, DataPlaneFault> {
     for _ in 0..32 {
         let result = tun_rx.as_ref().map(std::sync::mpsc::Receiver::try_recv);
         match result {
@@ -635,13 +668,24 @@ fn drain_server_tun_packets(
                 socket,
                 metrics,
                 fingerprint_profile,
-            ),
-            Some(Err(std::sync::mpsc::TryRecvError::Empty)) => return false,
+            )?,
+            Some(Err(std::sync::mpsc::TryRecvError::Empty)) => return Ok(false),
             Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
                 *tun_rx = None;
-                return false;
+                if live
+                    .tun_reader_shutdown
+                    .as_ref()
+                    .is_some_and(|shutdown| shutdown.load(Ordering::Acquire))
+                {
+                    return Ok(false);
+                }
+                return Err(live.tun_fault.lock().clone().unwrap_or(
+                    DataPlaneFault::ChannelDisconnected {
+                        component: "server TUN reader channel".to_string(),
+                    },
+                ));
             }
-            None => return false,
+            None => return Ok(false),
         }
     }
 
@@ -654,14 +698,25 @@ fn drain_server_tun_packets(
                 socket,
                 metrics,
                 fingerprint_profile,
-            );
-            true
+            )?;
+            Ok(true)
         }
         Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
             *tun_rx = None;
-            false
+            if live
+                .tun_reader_shutdown
+                .as_ref()
+                .is_some_and(|shutdown| shutdown.load(Ordering::Acquire))
+            {
+                return Ok(false);
+            }
+            Err(live.tun_fault.lock().clone().unwrap_or(
+                DataPlaneFault::ChannelDisconnected {
+                    component: "server TUN reader channel".to_string(),
+                },
+            ))
         }
-        Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => false,
+        Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => Ok(false),
     }
 }
 

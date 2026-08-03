@@ -133,6 +133,40 @@ mod tests {
     }
 
     #[test]
+    fn live_tun_fault_recording_is_first_wins_and_shutdown_safe() {
+        let fault_slot = Arc::new(Mutex::new(None));
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let first = DataPlaneFault::TunWrite {
+            component: "server MASQUE downlink".to_string(),
+            error: "device closed".to_string(),
+        };
+
+        record_live_tun_fault(&fault_slot, &notify, &shutdown, first.clone());
+        record_live_tun_fault(
+            &fault_slot,
+            &notify,
+            &shutdown,
+            DataPlaneFault::ChannelDisconnected {
+                component: "server TUN reader channel".to_string(),
+            },
+        );
+        assert_eq!(fault_slot.lock().as_ref(), Some(&first));
+
+        shutdown.store(true, Ordering::Release);
+        record_live_tun_fault(
+            &fault_slot,
+            &notify,
+            &shutdown,
+            DataPlaneFault::TransportSend {
+                component: "server UDP downlink".to_string(),
+                error: "socket closed".to_string(),
+            },
+        );
+        assert_eq!(fault_slot.lock().as_ref(), Some(&first));
+    }
+
+    #[test]
     fn pending_tun_downlinks_drr_is_equal_without_starvation() {
         let now = Instant::now();
         let mut queue = PendingTunDownlinks::with_limits(300, 360_000, 100);
@@ -756,7 +790,10 @@ mod tests {
         assert_eq!(live_state.domain.session_id_by_remote(remote_addr), Some(session_id));
         tokio::time::sleep(Duration::from_secs(2)).await;
 
-        live_state.run_housekeeping_tick(&socket, &mut out, &metrics, &accept_loop).await;
+        live_state
+            .run_housekeeping_tick(&socket, &mut out, &metrics, &accept_loop)
+            .await
+            .expect("housekeeping should not fail with no active clients");
 
         assert_eq!(live_state.domain.session_id_by_remote(remote_addr), None);
         assert_eq!(live_state.domain.active_session_count(), 0);

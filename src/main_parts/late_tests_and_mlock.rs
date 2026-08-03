@@ -132,6 +132,41 @@ mod runtime_reload_tests {
     }
 
     #[test]
+    fn standalone_client_tun_fault_is_first_wins_and_shutdown_safe() {
+        let fault_slot = Arc::new(parking_lot::Mutex::new(None));
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let first = quicfuscate::engine::DataPlaneFault::ReaderStopped {
+            component: "standalone client TUN reader".to_string(),
+            error: "device closed".to_string(),
+        };
+        let second = quicfuscate::engine::DataPlaneFault::ChannelDisconnected {
+            component: "standalone client TUN reader channel".to_string(),
+        };
+
+        record_standalone_client_tun_fault(
+            &fault_slot,
+            &notify,
+            &shutdown,
+            first.clone(),
+        );
+        record_standalone_client_tun_fault(&fault_slot, &notify, &shutdown, second);
+        assert_eq!(fault_slot.lock().as_ref(), Some(&first));
+
+        shutdown.store(true, Ordering::Release);
+        record_standalone_client_tun_fault(
+            &fault_slot,
+            &notify,
+            &shutdown,
+            quicfuscate::engine::DataPlaneFault::TunWrite {
+                component: "standalone client HTTP/3 downlink".to_string(),
+                error: "device closed".to_string(),
+            },
+        );
+        assert_eq!(fault_slot.lock().as_ref(), Some(&first));
+    }
+
+    #[test]
     fn client_tun_open_rejects_invalid_activation_configuration() {
         let error = quicfuscate::interface::TunInterface::open(
             quicfuscate::interface::TunConfig { mtu: 575, ..Default::default() },

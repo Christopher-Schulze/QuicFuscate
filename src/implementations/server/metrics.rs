@@ -103,6 +103,10 @@ pub struct Metrics {
     pub tun_downlink_backpressure_drop_expired: AtomicU64,
     pub tun_downlink_backpressure_drop_terminal_transport_error: AtomicU64,
     pub tun_downlink_backpressure_drop_shutdown: AtomicU64,
+    /// Whether the server's requested TUN data plane is available.
+    pub tun_data_plane_ready: AtomicU64,
+    /// Number of terminal server TUN data-plane faults.
+    pub tun_data_plane_faults: AtomicU64,
 
     // Per-session bandwidth and fair-scheduler metrics
     pub bandwidth_uplink_allowed_bytes: AtomicU64,
@@ -203,6 +207,8 @@ impl Metrics {
             tun_downlink_backpressure_drop_expired: AtomicU64::new(0),
             tun_downlink_backpressure_drop_terminal_transport_error: AtomicU64::new(0),
             tun_downlink_backpressure_drop_shutdown: AtomicU64::new(0),
+            tun_data_plane_ready: AtomicU64::new(1),
+            tun_data_plane_faults: AtomicU64::new(0),
             bandwidth_uplink_allowed_bytes: AtomicU64::new(0),
             bandwidth_downlink_allowed_bytes: AtomicU64::new(0),
             bandwidth_uplink_rate_limited: AtomicU64::new(0),
@@ -457,6 +463,17 @@ impl Metrics {
         self.tun_downlink_backpressure_pending_bytes.store(bytes as u64, Ordering::Relaxed);
     }
 
+    /// Publish the availability of the requested server TUN data plane.
+    pub fn set_tun_data_plane_ready(&self, ready: bool) {
+        self.tun_data_plane_ready.store(u64::from(ready), Ordering::Release);
+    }
+
+    /// Record one terminal server TUN data-plane fault and make health fail closed.
+    pub fn record_tun_data_plane_fault(&self) {
+        self.tun_data_plane_faults.fetch_add(1, Ordering::Relaxed);
+        self.set_tun_data_plane_ready(false);
+    }
+
     pub fn record_tun_downlink_backpressure_enqueued(&self) {
         self.tun_downlink_backpressure_enqueued.fetch_add(1, Ordering::Relaxed);
     }
@@ -695,6 +712,19 @@ impl Metrics {
             );
         }
         out.push('\n');
+
+        out.push_str("# HELP quicfuscate_tun_data_plane_ready Whether the requested server TUN data plane is available\n");
+        out.push_str("# TYPE quicfuscate_tun_data_plane_ready gauge\n");
+        write_metric!(
+            "quicfuscate_tun_data_plane_ready {}\n\n",
+            self.tun_data_plane_ready.load(Ordering::Acquire)
+        );
+        out.push_str("# HELP quicfuscate_tun_data_plane_faults_total Terminal server TUN data-plane faults\n");
+        out.push_str("# TYPE quicfuscate_tun_data_plane_faults_total counter\n");
+        write_metric!(
+            "quicfuscate_tun_data_plane_faults_total {}\n\n",
+            self.tun_data_plane_faults.load(Ordering::Relaxed)
+        );
 
         out.push_str(
             "# HELP quicfuscate_bandwidth_allowed_bytes_total Bytes admitted by per-session policy\n",
@@ -1043,18 +1073,21 @@ impl Metrics {
     /// Export as JSON for health endpoint.
     pub fn export_health(&self) -> String {
         let status = self.geoip_status();
-        let health = if status == crate::implementations::server::limits::GeoIpStatus::Failed {
+        let health = if status == crate::implementations::server::limits::GeoIpStatus::Failed
+            || self.tun_data_plane_ready.load(Ordering::Acquire) == 0
+        {
             "not_ready"
         } else {
             "ok"
         };
         format!(
-            r#"{{"status":"{}","version":"{}","uptime":{},"clients":{},"geoip_status":"{}"}}"#,
+            r#"{{"status":"{}","version":"{}","uptime":{},"clients":{},"geoip_status":"{}","tun_data_plane_ready":{}}}"#,
             health,
             env!("CARGO_PKG_VERSION"),
             self.uptime_secs(),
             self.clients_active.load(Ordering::Relaxed),
-            status.as_str()
+            status.as_str(),
+            self.tun_data_plane_ready.load(Ordering::Acquire)
         )
     }
 }
@@ -1306,6 +1339,20 @@ mod tests {
         assert!(output.contains(
             "quicfuscate_tun_downlink_backpressure_events_total{event=\"drop_expired\"} 1"
         ));
+    }
+
+    #[test]
+    fn tun_data_plane_faults_fail_health_and_are_exported() {
+        let metrics = Metrics::new();
+        metrics.record_tun_data_plane_fault();
+
+        let output = metrics.export();
+        assert!(output.contains("quicfuscate_tun_data_plane_ready 0"));
+        assert!(output.contains("quicfuscate_tun_data_plane_faults_total 1"));
+
+        let health = metrics.export_health();
+        assert!(health.contains("\"status\":\"not_ready\""));
+        assert!(health.contains("\"tun_data_plane_ready\":0"));
     }
 
     #[test]

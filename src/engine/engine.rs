@@ -424,6 +424,50 @@ impl std::fmt::Display for EngineState {
     }
 }
 
+/// Typed terminal failures of the requested TUN/QUIC data plane.
+///
+/// The process and the QUIC control connection can remain alive while the
+/// packet path is unusable. Keeping these outcomes typed prevents runtime
+/// owners from reducing a reader failure, channel disconnect, device write,
+/// or transport send failure to an ordinary idle poll.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DataPlaneFault {
+    /// The native TUN reader stopped unexpectedly.
+    ReaderStopped { component: String, error: String },
+    /// The bounded reader channel disconnected unexpectedly.
+    ChannelDisconnected { component: String },
+    /// A packet could not be delivered to the local TUN device.
+    TunWrite { component: String, error: String },
+    /// A non-retryable packet or UDP send failed.
+    TransportSend { component: String, error: String },
+    /// A non-retryable receive or datagram decode path failed.
+    TransportReceive { component: String, error: String },
+}
+
+impl std::fmt::Display for DataPlaneFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ReaderStopped { component, error } => {
+                write!(f, "reader stopped ({component}): {error}")
+            }
+            Self::ChannelDisconnected { component } => {
+                write!(f, "channel disconnected ({component})")
+            }
+            Self::TunWrite { component, error } => {
+                write!(f, "TUN write failed ({component}): {error}")
+            }
+            Self::TransportSend { component, error } => {
+                write!(f, "transport send failed ({component}): {error}")
+            }
+            Self::TransportReceive { component, error } => {
+                write!(f, "transport receive failed ({component}): {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DataPlaneFault {}
+
 /// Engine errors.
 #[derive(Debug, Clone)]
 pub enum EngineError {
@@ -437,6 +481,8 @@ pub enum EngineError {
     Connection(String),
     /// Transport error
     Transport(String),
+    /// Terminal TUN/QUIC data-plane error
+    DataPlane(DataPlaneFault),
     /// Crypto error
     Crypto(String),
     /// IO error
@@ -455,6 +501,7 @@ impl std::fmt::Display for EngineError {
             EngineError::Tun(e) => write!(f, "TUN error: {}", e),
             EngineError::Connection(e) => write!(f, "Connection error: {}", e),
             EngineError::Transport(e) => write!(f, "Transport error: {}", e),
+            EngineError::DataPlane(e) => write!(f, "Data-plane error: {}", e),
             EngineError::Crypto(e) => write!(f, "Crypto error: {}", e),
             EngineError::Io(e) => write!(f, "IO error: {}", e),
             EngineError::Internal(e) => write!(f, "Internal error: {}", e),
@@ -499,6 +546,10 @@ pub struct EngineStats {
     pub stealth_mode: AtomicU64,
     /// Current FEC mode (as u8)
     pub fec_mode: AtomicU64,
+    /// Whether the requested packet data plane is currently available.
+    pub data_plane_ready: AtomicU64,
+    /// Number of terminal data-plane faults observed by the active runtime.
+    pub data_plane_faults: AtomicU64,
 }
 
 impl EngineStats {
@@ -513,6 +564,8 @@ impl EngineStats {
             uptime_secs: self.uptime_secs.load(Ordering::Relaxed),
             rtt_ms: self.rtt_ms.load(Ordering::Relaxed),
             loss_percent: self.loss_percent.load(Ordering::Relaxed),
+            data_plane_ready: self.data_plane_ready.load(Ordering::Relaxed),
+            data_plane_faults: self.data_plane_faults.load(Ordering::Relaxed),
         }
     }
 }
@@ -536,6 +589,10 @@ pub struct StatsSnapshot {
     pub rtt_ms: u64,
     /// Current packet loss percentage (0-100).
     pub loss_percent: u64,
+    /// Whether the requested packet data plane is currently available.
+    pub data_plane_ready: u64,
+    /// Number of terminal data-plane faults observed by the active runtime.
+    pub data_plane_faults: u64,
 }
 
 /// Callback trait for engine events.
@@ -579,7 +636,7 @@ pub trait EngineCallback: Send + Sync {
 }
 
 /// Reason for disconnection.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DisconnectReason {
     /// Clean shutdown requested by application
     Requested,
@@ -591,6 +648,8 @@ pub enum DisconnectReason {
     Error(String),
     /// Idle timeout reached
     IdleTimeout,
+    /// The requested packet data plane failed while the process was alive.
+    DataPlane(DataPlaneFault),
 }
 
 impl QuicFuscateEngine {
@@ -645,10 +704,9 @@ impl QuicFuscateEngine {
     /// Get the current engine state.
     pub fn state(&self) -> EngineState {
         if self.state == EngineState::Connected
-            && self
-                .client_runtime
-                .as_ref()
-                .is_some_and(|runtime| runtime.connection_loss_reason().is_some())
+            && self.client_runtime.as_ref().is_some_and(|runtime| {
+                runtime.connection_loss_reason().is_some() || runtime.data_plane_fault().is_some()
+            })
         {
             EngineState::Running
         } else {
@@ -1095,7 +1153,9 @@ impl QuicFuscateEngine {
             .as_mut()
             .ok_or_else(|| EngineError::Internal("Client runtime not initialized".to_string()))?;
 
-        if runtime.is_connected() && runtime.connection_loss_reason().is_some() {
+        if runtime.is_connected()
+            && (runtime.connection_loss_reason().is_some() || runtime.data_plane_fault().is_some())
+        {
             runtime.disconnect()?;
         }
 
@@ -1297,9 +1357,9 @@ impl QuicFuscateEngine {
     /// longer drives a second polling loop; it only reports whether the runtime
     /// watchdog has already handled a loss.
     pub fn check_heartbeat(&mut self) -> bool {
-        self.client_runtime
-            .as_ref()
-            .is_some_and(|runtime| runtime.connection_loss_reason().is_some())
+        self.client_runtime.as_ref().is_some_and(|runtime| {
+            runtime.connection_loss_reason().is_some() || runtime.data_plane_fault().is_some()
+        })
     }
 
     // ========================================================================
@@ -1550,6 +1610,12 @@ impl QuicFuscateEngine {
                 .store(metrics.clients_active.load(Ordering::Relaxed), Ordering::Relaxed);
             self.stats.rtt_ms.store(0, Ordering::Relaxed);
             self.stats.loss_percent.store(0, Ordering::Relaxed);
+            self.stats
+                .data_plane_ready
+                .store(metrics.tun_data_plane_ready.load(Ordering::Acquire), Ordering::Relaxed);
+            self.stats
+                .data_plane_faults
+                .store(metrics.tun_data_plane_faults.load(Ordering::Relaxed), Ordering::Relaxed);
         } else {
             self.stats
                 .bytes_sent
@@ -1576,6 +1642,18 @@ impl QuicFuscateEngine {
             self.stats
                 .loss_percent
                 .store(metrics.transport.loss_rate().round() as u64, Ordering::Relaxed);
+            if let Some(runtime) = self.client_runtime.as_ref() {
+                self.stats
+                    .data_plane_ready
+                    .store(u64::from(runtime.data_plane_available()), Ordering::Relaxed);
+                self.stats.data_plane_faults.store(
+                    runtime.io_driver_stats().map(|stats| stats.data_plane_faults).unwrap_or(0),
+                    Ordering::Relaxed,
+                );
+            } else {
+                self.stats.data_plane_ready.store(0, Ordering::Relaxed);
+                self.stats.data_plane_faults.store(0, Ordering::Relaxed);
+            }
         }
         if let Some(start) = self.start_time {
             self.stats.uptime_secs.store(start.elapsed().as_secs(), Ordering::Relaxed);
@@ -1938,7 +2016,7 @@ mod tests {
         server_metrics.record_ingress_datagram(1);
         server_metrics.record_ingress_datagram(1);
         server_metrics.clients_active.store(5, Ordering::Relaxed);
-        engine.server_metrics = Some(server_metrics);
+        engine.server_metrics = Some(server_metrics.clone());
 
         let global = crate::instrumentation::global();
         global.transport.record_rtt(123_000);
@@ -1954,6 +2032,28 @@ mod tests {
         assert_eq!(engine.stats.active_streams.load(Ordering::Relaxed), 5);
         assert_eq!(engine.stats.rtt_ms.load(Ordering::Relaxed), 0);
         assert_eq!(engine.stats.loss_percent.load(Ordering::Relaxed), 0);
+        assert_eq!(engine.stats.data_plane_ready.load(Ordering::Relaxed), 1);
+        assert_eq!(engine.stats.data_plane_faults.load(Ordering::Relaxed), 0);
+
+        server_metrics.record_tun_data_plane_fault();
+        engine.refresh_stats();
+        assert_eq!(engine.stats.data_plane_ready.load(Ordering::Relaxed), 0);
+        assert_eq!(engine.stats.data_plane_faults.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn data_plane_faults_are_typed_and_displayable() {
+        let fault = DataPlaneFault::TunWrite {
+            component: "server MASQUE downlink".to_string(),
+            error: "device closed".to_string(),
+        };
+
+        assert_eq!(fault.to_string(), "TUN write failed (server MASQUE downlink): device closed");
+        assert_eq!(
+            EngineError::DataPlane(fault.clone()).to_string(),
+            "Data-plane error: TUN write failed (server MASQUE downlink): device closed"
+        );
+        assert_eq!(DisconnectReason::DataPlane(fault.clone()), DisconnectReason::DataPlane(fault));
     }
 
     #[test]
