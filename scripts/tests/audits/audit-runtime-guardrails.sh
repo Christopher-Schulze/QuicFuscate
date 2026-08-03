@@ -755,7 +755,8 @@ else
   append_item "dual_stack_stability_aggregate" "fail" "missing fixed trial count, forced capture, exact child artifact, aggregate, binary identity, receiver, black-hole, or client/server validation"
 fi
 
-if [[ "$(rg -F -- '--tun-mtu "$tun_mtu_ceiling"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" | wc -l | tr -d ' ')" -eq 2 ]] \
+if rg -F -- '--tun-mtu "$tun_mtu_ceiling"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- '--tun-mtu "$client_tun_mtu_ceiling"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'start_phase default 0 1280 1280' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'start_phase opt-in 1 1472 1500 1000 2000' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'DPLPMTUD confirmed path MTU: 1280B -> 1472B' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \

@@ -398,14 +398,15 @@ prove_simultaneous_dual_stack() {
 }
 
 prove_framed_h3_fallback() {
+  local phase="${1:-default}"
   local output
   output="$(ip netns exec "${CLIENT_NS[0]}" ping -6 -c 3 -W 3 -s 1200 \
     -I "${CLIENT_V6[0]}" fd00::1 2>&1)"
-  printf '%s\n' "$output" >"$ARTIFACT_DIR/framed-h3-ipv6.txt"
+  printf '%s\n' "$output" >"$ARTIFACT_DIR/framed-h3-ipv6-$phase.txt"
   grep -q ' 0% packet loss' <<<"$output" || fail 'framed H3 IPv6 fallback lost packets'
-  wait_for_log_count "$ARTIFACT_DIR/client-default-1.log" \
+  wait_for_log_count "$ARTIFACT_DIR/client-$phase-1.log" \
     'framed H3 tunnel uplink active' 1 10
-  wait_for_log_count "$ARTIFACT_DIR/server-default.log" \
+  wait_for_log_count "$ARTIFACT_DIR/server-$phase.log" \
     'framed H3 tunnel downlink active' 1 10
 }
 
@@ -1033,10 +1034,14 @@ main() {
   prepare_admin_socket
   setup_topology
 
+  log 'phase 0: framed H3 fallback carrier proof'
+  start_phase h3-fallback 0 1280 1280
+  wait_for_tunnel_readiness h3-fallback
+  prove_framed_h3_fallback h3-fallback
+
   log 'phase 1: default-deny multi-client dual-stack policy'
   start_phase default 0 1280 1280 60000 10000 1472 1500
   wait_for_tunnel_readiness default
-  prove_framed_h3_fallback
   prove_client_local_ptb
   prove_simultaneous_dual_stack default
   prove_owned_unicast_isolation
