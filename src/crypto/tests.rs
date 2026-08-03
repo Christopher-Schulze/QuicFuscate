@@ -315,7 +315,10 @@ fn aes_hp_matches_fips197_block_vector() {
         hex_to_bytes("00112233445566778899aabbccddeeff").try_into().expect("16-byte sample");
     let hp = AesHp::new(&key).expect("valid AES-128-HP secret");
 
-    assert_eq!(hp.new_mask(&sample), [0x69, 0xc4, 0xe0, 0xd8, 0x6a]);
+    assert_eq!(
+        hp.new_mask(&sample).expect("valid header-protection sample"),
+        [0x69, 0xc4, 0xe0, 0xd8, 0x6a]
+    );
 }
 
 #[test]
@@ -327,8 +330,8 @@ fn aes_hp_new_mask_deterministic() {
     let hp = AesHp::new(&key).expect("valid AES-128-HP secret");
     let sample = [0x01u8; 16];
 
-    let mask1 = hp.new_mask(&sample);
-    let mask2 = hp.new_mask(&sample);
+    let mask1 = hp.new_mask(&sample).expect("valid header-protection sample");
+    let mask2 = hp.new_mask(&sample).expect("valid header-protection sample");
     assert_eq!(mask1, mask2, "same key+sample must produce identical masks");
     // Mask must not be all zeros (that would be a no-op)
     assert_ne!(mask1, [0u8; 5], "mask should not be all zeros");
@@ -342,8 +345,8 @@ fn aes_hp_different_samples_produce_different_masks() {
     let key = [0xABu8; 16];
     let hp = AesHp::new(&key).expect("valid AES-128-HP secret");
 
-    let mask_a = hp.new_mask(&[0x01; 16]);
-    let mask_b = hp.new_mask(&[0x02; 16]);
+    let mask_a = hp.new_mask(&[0x01; 16]).expect("valid header-protection sample");
+    let mask_b = hp.new_mask(&[0x02; 16]).expect("valid header-protection sample");
     assert_ne!(mask_a, mask_b, "different samples must produce different masks");
 }
 
@@ -358,9 +361,9 @@ fn aes_hp_apply_remove_roundtrip() {
 
     let original = [0x11, 0x22, 0x33, 0x44, 0x55];
     let mut buf = original;
-    hp.apply(&sample, &mut buf);
+    hp.apply(&sample, &mut buf).expect("valid header-protection inputs");
     assert_ne!(buf, original, "apply must change the buffer");
-    hp.remove(&sample, &mut buf);
+    hp.remove(&sample, &mut buf).expect("valid header-protection inputs");
     assert_eq!(buf, original, "remove must restore original (XOR self-inverse)");
 }
 
@@ -373,9 +376,26 @@ fn aes_hp_different_keys_produce_different_masks() {
     let hp_b = AesHp::new(&[0x22; 16]).expect("valid AES-128-HP secret");
     let sample = [0x00; 16];
 
-    let mask_a = hp_a.new_mask(&sample);
-    let mask_b = hp_b.new_mask(&sample);
+    let mask_a = hp_a.new_mask(&sample).expect("valid header-protection sample");
+    let mask_b = hp_b.new_mask(&sample).expect("valid header-protection sample");
     assert_ne!(mask_a, mask_b, "different keys must produce different masks");
+}
+
+#[test]
+fn aes_hp_rejects_invalid_sample_and_mask_lengths() {
+    use crate::crypto::aead::{AesHp, HeaderProtector};
+    use crate::transport::packet::HeaderProtector as PacketHeaderProtector;
+
+    let hp = AesHp::new(&[0xA5; 16]).expect("valid AES-128-HP secret");
+    assert!(hp.new_mask(&[0x11; 15]).is_err());
+    assert!(hp.new_mask(&[0x11; 17]).is_err());
+
+    let mut mask = [0u8; 5];
+    assert!(hp.apply(&[0x22; 15], &mut mask).is_err());
+    assert!(hp.apply(&[0x22; 17], &mut mask).is_err());
+
+    let mut oversized_mask = [0u8; 6];
+    assert!(hp.apply(&[0x22; 16], &mut oversized_mask).is_err());
 }
 
 #[test]

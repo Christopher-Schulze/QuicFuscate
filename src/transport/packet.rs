@@ -40,7 +40,35 @@ pub const SAMPLE_LEN: usize = 16;
 /// Header protection trait for masking packet numbers
 pub trait HeaderProtector {
     /// Derives a 5-byte HP mask from a 16-byte sample.
-    fn new_mask(&self, sample: &[u8]) -> [u8; 5];
+    fn new_mask(&self, sample: &[u8]) -> Result<[u8; 5], ConnectionError>;
+}
+
+fn hp_sample_bounds(buf_len: usize, pn_offset: usize) -> Result<(usize, usize), ConnectionError> {
+    if pn_offset == 0 {
+        return Err(ConnectionError::InvalidPacket);
+    }
+    let sample_offset =
+        pn_offset.checked_add(MAX_PKT_NUM_LEN).ok_or(ConnectionError::InvalidPacket)?;
+    let sample_end = sample_offset.checked_add(SAMPLE_LEN).ok_or(ConnectionError::InvalidPacket)?;
+    if sample_end > buf_len {
+        return Err(ConnectionError::InvalidPacket);
+    }
+    Ok((sample_offset, sample_end))
+}
+
+fn hp_packet_number_bounds(
+    buf_len: usize,
+    pn_offset: usize,
+    pn_len: usize,
+) -> Result<(), ConnectionError> {
+    if !(1..=MAX_PKT_NUM_LEN).contains(&pn_len) || pn_offset == 0 {
+        return Err(ConnectionError::InvalidPacket);
+    }
+    let pn_end = pn_offset.checked_add(pn_len).ok_or(ConnectionError::InvalidPacket)?;
+    if pn_end > buf_len {
+        return Err(ConnectionError::BufferTooShort);
+    }
+    Ok(())
 }
 
 fn trace_handshake_hp(label: &str, sample: &[u8], mask: [u8; 5]) {
@@ -442,33 +470,24 @@ fn unprotect_and_decrypt_with_key(
         None => parse_header(buf, short_dcid_len)?,
     };
 
-    // Remove header protection when sample is available; otherwise accept unprotected headers.
-    // Sample is taken 4 bytes after the PN offset.
-    let sample_off = pn_off + 4;
-    let pn_len;
-    if buf.len() >= sample_off + 16 {
-        let mask = hp.new_mask(&buf[sample_off..sample_off + 16]);
-        if hdr.ty == PacketType::Handshake {
-            trace_handshake_hp("hp open hs", &buf[sample_off..sample_off + 16], mask);
-        }
-        if hdr.ty == PacketType::Short {
-            buf[0] ^= mask[0] & 0x1f;
-            hdr.key_phase = (buf[0] & crate::transport::packet::KEY_PHASE_BIT) != 0;
-        } else {
-            buf[0] ^= mask[0] & 0x0f;
-        }
-        pn_len = (buf[0] & 0x03) as usize + 1;
-        hdr.pkt_num_len = pn_len;
-        for i in 0..pn_len {
-            buf[pn_off + i] ^= mask[1 + i];
-        }
-    } else {
-        pn_len = (buf[0] & 0x03) as usize + 1;
-        hdr.pkt_num_len = pn_len;
+    let (sample_off, sample_end) = hp_sample_bounds(buf.len(), pn_off)?;
+    let mask = hp.new_mask(&buf[sample_off..sample_end])?;
+    if hdr.ty == PacketType::Handshake {
+        trace_handshake_hp("hp open hs", &buf[sample_off..sample_end], mask);
     }
 
-    if buf.len() < pn_off + pn_len {
-        return Err(ConnectionError::BufferTooShort);
+    let first_mask = if hdr.ty == PacketType::Short { mask[0] & 0x1f } else { mask[0] & 0x0f };
+    let first_unprotected = buf[0] ^ first_mask;
+    let pn_len = (first_unprotected & 0x03) as usize + 1;
+    hp_packet_number_bounds(buf.len(), pn_off, pn_len)?;
+
+    buf[0] = first_unprotected;
+    if hdr.ty == PacketType::Short {
+        hdr.key_phase = (first_unprotected & crate::transport::packet::KEY_PHASE_BIT) != 0;
+    }
+    hdr.pkt_num_len = pn_len;
+    for i in 0..pn_len {
+        buf[pn_off + i] ^= mask[1 + i];
     }
 
     let mut encoded_pn = 0u32;
@@ -1208,6 +1227,78 @@ mod tests {
         assert_eq!(bytes, b"client-finished");
         assert!(!crypto.has_pending_handshake_send());
     }
+
+    fn header_protection_test_context() -> CryptoContext {
+        let mut crypto = CryptoContext::default();
+        crypto.hp_initial = Some(Box::new(
+            crate::crypto::aead::AesHp::new(&[0x42; 16]).expect("valid header-protection key"),
+        ));
+        crypto
+    }
+
+    #[test]
+    fn protect_header_rejects_invalid_packet_number_bounds_before_mutation() {
+        let crypto = header_protection_test_context();
+        for (pn_offset, pn_len) in [(0, 1), (1, 0), (1, 5), (usize::MAX, 1), (60, 4)] {
+            let mut packet = vec![0x40; 64];
+            let original = packet.clone();
+            let result =
+                protect_header(&crypto, &mut packet, pn_offset, pn_len, PacketType::Initial);
+            assert!(result.is_err(), "invalid PN bounds must be rejected");
+            assert_eq!(packet, original, "validation must precede header mutation");
+        }
+    }
+
+    #[test]
+    fn protect_and_remove_header_reject_missing_sample_without_mutation() {
+        let crypto = header_protection_test_context();
+        let hp = crypto.hp_initial.as_deref().expect("test header protector");
+        let mut packet = vec![0x40; 1 + MAX_PKT_NUM_LEN + SAMPLE_LEN - 1];
+        let original = packet.clone();
+
+        assert_eq!(
+            protect_header(&crypto, &mut packet, 1, 1, PacketType::Initial),
+            Err(ConnectionError::InvalidPacket)
+        );
+        assert_eq!(packet, original);
+        assert_eq!(remove_hp(&mut packet, hp, 1), Err(ConnectionError::InvalidPacket));
+        assert_eq!(packet, original);
+    }
+
+    #[test]
+    fn unprotect_rejects_missing_sample_before_header_or_payload_processing() {
+        let hp = crate::crypto::aead::AesHp::new(&[0x43; 16]).expect("valid header-protection key");
+        let aead = AesGcm128::from_arrays(&[0x44; 16], &[0x45; 12]);
+        let header = Header {
+            ty: PacketType::Initial,
+            version: crate::transport::PROTOCOL_VERSION,
+            dcid: Vec::new(),
+            scid: Vec::new(),
+            pkt_num: 0,
+            pkt_num_len: 0,
+            token: None,
+            versions: None,
+            key_phase: false,
+        };
+        let mut packet = vec![0xC0; 1 + MAX_PKT_NUM_LEN + SAMPLE_LEN - 1];
+        let original = packet.clone();
+
+        assert_eq!(
+            unprotect_and_decrypt_with_key(&hp, &aead, &mut packet, 0, 0, Some((header, 1))),
+            Err(ConnectionError::InvalidPacket)
+        );
+        assert_eq!(packet, original);
+    }
+
+    #[test]
+    fn apply_hp_rejects_short_sample_and_packet_number_buffer() {
+        let hp = crate::crypto::aead::AesHp::new(&[0x46; 16]).expect("valid header-protection key");
+        let mut pn = [0u8; 4];
+        assert!(apply_hp(0x40, &mut pn, &[0u8; SAMPLE_LEN - 1], true, &hp).is_err());
+
+        let mut no_packet_number = [];
+        assert!(apply_hp(0x40, &mut no_packet_number, &[0u8; SAMPLE_LEN], true, &hp).is_err());
+    }
 }
 
 /// Applies header protection to an outgoing packet (masks first byte and PN).
@@ -1218,6 +1309,8 @@ pub fn protect_header(
     pn_len: usize,
     pkt_type: PacketType,
 ) -> Result<(), ConnectionError> {
+    hp_packet_number_bounds(buf.len(), pn_off, pn_len)?;
+
     // Select HP based on packet type
     let hp = match pkt_type {
         PacketType::Initial => crypto.hp_initial.as_deref(),
@@ -1232,15 +1325,11 @@ pub fn protect_header(
         None => return Ok(()), // No HP available yet
     };
 
-    // Sample is taken 4 bytes after the PN offset
-    let sample_off = pn_off + 4;
-    if buf.len() < sample_off + 16 {
-        return Err(ConnectionError::BufferTooShort);
-    }
+    let (sample_off, sample_end) = hp_sample_bounds(buf.len(), pn_off)?;
 
-    let mask = hp.new_mask(&buf[sample_off..sample_off + 16]);
+    let mask = hp.new_mask(&buf[sample_off..sample_end])?;
     if pkt_type == PacketType::Handshake {
-        trace_handshake_hp("hp protect hs", &buf[sample_off..sample_off + 16], mask);
+        trace_handshake_hp("hp protect hs", &buf[sample_off..sample_end], mask);
     }
 
     // Mask the first byte
@@ -1582,15 +1671,18 @@ pub fn apply_hp(
     sample: &[u8],
     is_long: bool,
     hp: &dyn HeaderProtector,
-) -> (u8, usize) {
-    let mask = hp.new_mask(sample);
+) -> Result<(u8, usize), ConnectionError> {
+    let mask = hp.new_mask(sample)?;
     let first_new = if is_long { first ^ (mask[0] & 0x0f) } else { first ^ (mask[0] & 0x1f) };
     // PN length is encoded in the low 2 bits of the (possibly masked) first byte, plus 1
     let pn_len = ((first_new & PKT_NUM_MASK) as usize) + 1;
-    for i in 0..pn_len.min(4) {
+    if pn.len() < pn_len {
+        return Err(ConnectionError::BufferTooShort);
+    }
+    for i in 0..pn_len {
         pn[i] ^= mask[i + 1];
     }
-    (first_new, pn_len)
+    Ok((first_new, pn_len))
 }
 
 /// Remove header protection mask (for decryption)
@@ -1599,16 +1691,10 @@ pub fn remove_hp(
     hp: &dyn HeaderProtector,
     pn_offset: usize,
 ) -> Result<(u8, usize), ConnectionError> {
-    if buf.len() < pn_offset + 4 + 16 {
-        return Err(ConnectionError::InvalidPacket);
-    }
-
-    // Sample starts 4 bytes after the packet number offset
-    let sample_offset = pn_offset + 4;
-    let sample = &buf[sample_offset..sample_offset + 16];
+    let (sample_offset, sample_end) = hp_sample_bounds(buf.len(), pn_offset)?;
 
     // Generate mask
-    let mask = hp.new_mask(sample);
+    let mask = hp.new_mask(&buf[sample_offset..sample_end])?;
 
     // Check if it's a long header packet
     let first = buf[0];
@@ -1619,12 +1705,11 @@ pub fn remove_hp(
 
     // Get packet number length (encoded in low 2 bits + 1)
     let pn_len = ((first_unmasked & PKT_NUM_MASK) as usize) + 1;
+    hp_packet_number_bounds(buf.len(), pn_offset, pn_len)?;
 
     // Unmask the packet number
-    for i in 0..pn_len.min(4) {
-        if pn_offset + i < buf.len() {
-            buf[pn_offset + i] ^= mask[i + 1];
-        }
+    for i in 0..pn_len {
+        buf[pn_offset + i] ^= mask[i + 1];
     }
 
     // Update the first byte

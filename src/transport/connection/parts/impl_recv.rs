@@ -1141,6 +1141,34 @@ impl Connection {
         pn_len: usize,
         mut off: usize,
     ) -> Result<usize, crate::error::ConnectionError> {
+        if !(1..=packet::MAX_PKT_NUM_LEN).contains(&pn_len) || pn_off == 0 {
+            return Err(crate::error::ConnectionError::InvalidPacket);
+        }
+        let pn_end = pn_off
+            .checked_add(pn_len)
+            .ok_or(crate::error::ConnectionError::InvalidPacket)?;
+        if pn_end > out.len() || off < pn_end || off > out.len() {
+            return Err(crate::error::ConnectionError::BufferTooShort);
+        }
+        let sample_end = pn_off
+            .checked_add(packet::MAX_PKT_NUM_LEN)
+            .and_then(|offset| offset.checked_add(packet::SAMPLE_LEN))
+            .ok_or(crate::error::ConnectionError::InvalidPacket)?;
+        if sample_end > out.len() {
+            return Err(crate::error::ConnectionError::BufferTooShort);
+        }
+        let minimum_plaintext_end = sample_end.saturating_sub(self.tag_reserve_1rtt());
+        if off < minimum_plaintext_end {
+            let padding_len = minimum_plaintext_end - off;
+            let padding_end = off
+                .checked_add(padding_len)
+                .ok_or(crate::error::ConnectionError::BufferTooShort)?;
+            if padding_end > out.len() {
+                return Err(crate::error::ConnectionError::BufferTooShort);
+            }
+            off += frames::write_padding(padding_len, &mut out[off..])?;
+        }
+
         // Set PN length bits in the first byte BEFORE sealing so the AAD
         // matches what the peer sees after HP removal. Without this, the
         // first byte used for AEAD sealing is 0x40 (from format_short_header,
@@ -1168,17 +1196,13 @@ impl Connection {
             keys.seal.seal_batch(core::slice::from_mut(&mut item))?;
             let sealed_len = pt_len + 16;
             off = ad_len + sealed_len;
-            let mask = if off >= pn_off + 4 + packet::SAMPLE_LEN {
-                let sample = &out[pn_off + 4..pn_off + 4 + packet::SAMPLE_LEN];
-                Some(keys.hp_seal.new_mask(sample))
-            } else {
-                None
-            };
-            if let Some(mask) = mask {
-                out[0] ^= mask[0] & 0x1f;
-                for i in 0..pn_len {
-                    out[pn_off + i] ^= mask[i + 1];
-                }
+            let sample_offset = sample_end - packet::SAMPLE_LEN;
+            let mask = keys
+                .hp_seal
+                .new_mask(&out[sample_offset..sample_end])?;
+            out[0] ^= mask[0] & 0x1f;
+            for i in 0..pn_len {
+                out[pn_off + i] ^= mask[i + 1];
             }
             self.next_send_pn_by_space[2] = self.next_send_pn_by_space[2].wrapping_add(1);
             return Ok(off);
@@ -1212,14 +1236,11 @@ impl Connection {
             } else {
                 crypto_guard.hp_0rtt.as_deref().or(crypto_guard.hp_1rtt.as_deref())
             };
-            if off >= pn_off + 4 + packet::SAMPLE_LEN {
-                hp.map(|hp| {
-                    let sample = &out[pn_off + 4..pn_off + 4 + packet::SAMPLE_LEN];
-                    hp.new_mask(sample)
-                })
-            } else {
-                None
-            }
+            hp.map(|hp| {
+                let sample_offset = sample_end - packet::SAMPLE_LEN;
+                hp.new_mask(&out[sample_offset..sample_end])
+            })
+            .transpose()?
         };
         if let Some(mask) = mask {
             out[0] ^= mask[0] & 0x1f;

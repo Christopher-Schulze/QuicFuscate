@@ -168,8 +168,8 @@ pub trait AeadSeal {
 
 /// Trait for QUIC header protection mask application/removal.
 pub trait HeaderProtector {
-    fn apply(&self, sample: &[u8], mask: &mut [u8]);
-    fn remove(&self, sample: &[u8], mask: &mut [u8]);
+    fn apply(&self, sample: &[u8], mask: &mut [u8]) -> Result<(), KeyMaterialError>;
+    fn remove(&self, sample: &[u8], mask: &mut [u8]) -> Result<(), KeyMaterialError>;
 }
 
 /// Callbacks for TLS key schedule events (secret installation).
@@ -204,26 +204,42 @@ impl Drop for AesHp {
     }
 }
 
-impl HeaderProtector for AesHp {
-    fn apply(&self, sample: &[u8], mask: &mut [u8]) {
-        let sample_block: [u8; 16] = sample[..16].try_into().unwrap_or([0u8; 16]);
-        let block = crate::crypto::aes128_encrypt_block_fast(&self.key, &sample_block);
-        for (i, m) in mask.iter_mut().enumerate() {
-            *m ^= block[i % 16];
-        }
+impl AesHp {
+    fn sample_block(&self, sample: &[u8]) -> Result<[u8; 16], KeyMaterialError> {
+        require_exact_length("AES-128-HP", "sample", 16, sample.len())?;
+        let mut sample_block = [0u8; 16];
+        sample_block.copy_from_slice(sample);
+        Ok(sample_block)
     }
 
-    fn remove(&self, sample: &[u8], mask: &mut [u8]) {
-        self.apply(sample, mask); // XOR is self-inverse
+    fn mask_from_sample(&self, sample: &[u8]) -> Result<[u8; 5], KeyMaterialError> {
+        let sample_block = self.sample_block(sample)?;
+        let block = crate::crypto::aes128_encrypt_block_fast(&self.key, &sample_block);
+        let mut mask = [0u8; 5];
+        mask.copy_from_slice(&block[..5]);
+        Ok(mask)
+    }
+}
+
+impl HeaderProtector for AesHp {
+    fn apply(&self, sample: &[u8], mask: &mut [u8]) -> Result<(), KeyMaterialError> {
+        require_exact_length("AES-128-HP", "mask", 5, mask.len())?;
+        let sample_block = self.sample_block(sample)?;
+        let block = crate::crypto::aes128_encrypt_block_fast(&self.key, &sample_block);
+        for (i, m) in mask.iter_mut().enumerate() {
+            *m ^= block[i];
+        }
+        Ok(())
+    }
+
+    fn remove(&self, sample: &[u8], mask: &mut [u8]) -> Result<(), KeyMaterialError> {
+        self.apply(sample, mask) // XOR is self-inverse
     }
 }
 
 impl crate::transport::packet::HeaderProtector for AesHp {
-    fn new_mask(&self, sample: &[u8]) -> [u8; 5] {
-        let sample_block: [u8; 16] = sample[..16].try_into().unwrap_or([0u8; 16]);
-        let block = crate::crypto::aes128_encrypt_block_fast(&self.key, &sample_block);
-        let mut mask = [0u8; 5];
-        mask.copy_from_slice(&block[..5]);
-        mask
+    fn new_mask(&self, sample: &[u8]) -> Result<[u8; 5], crate::error::ConnectionError> {
+        self.mask_from_sample(sample)
+            .map_err(|error| crate::error::ConnectionError::CryptoError(error.to_string()))
     }
 }

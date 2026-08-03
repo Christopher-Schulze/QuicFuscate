@@ -2098,17 +2098,19 @@ mod rustls_provider {
     }
 
     impl crate::transport::packet::HeaderProtector for RustlsHp {
-        fn new_mask(&self, sample: &[u8]) -> [u8; 5] {
+        fn new_mask(&self, sample: &[u8]) -> Result<[u8; 5], ConnectionError> {
             let sample_len = self.key.sample_len();
-            if sample.len() < sample_len {
+            if sample.len() != sample_len {
                 super::trace_hp_error(&format!(
-                    "hp sample too short have={} need={}",
+                    "hp sample length invalid have={} need={}",
                     sample.len(),
                     sample_len
                 ));
-                return [0u8; 5];
+                return Err(ConnectionError::CryptoError(format!(
+                    "header protection sample must be exactly {sample_len} bytes, got {}",
+                    sample.len()
+                )));
             }
-            let sample = &sample[..sample_len];
 
             // Derive the mask bytes by running HP on a controlled header snapshot.
             // We only need the low 5 bits of mask[0] (short header) and the next 4 bytes.
@@ -2119,11 +2121,13 @@ mod rustls_provider {
             let mut pn = [0u8; 4];
             if self.key.encrypt_in_place(sample, &mut first, &mut pn).is_err() {
                 super::trace_hp_error("hp encrypt_in_place error");
-                return [0u8; 5];
+                return Err(ConnectionError::CryptoError(
+                    "header protection mask derivation failed".into(),
+                ));
             }
             let mask0 = first ^ first_orig;
             super::trace_hp_mask(mask0, pn);
-            [mask0, pn[0], pn[1], pn[2], pn[3]]
+            Ok([mask0, pn[0], pn[1], pn[2], pn[3]])
         }
     }
 
