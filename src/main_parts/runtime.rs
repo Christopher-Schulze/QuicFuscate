@@ -782,6 +782,64 @@ fn send_client_tun_packet(
     Ok(())
 }
 
+fn client_startup_error_with_cleanup(
+    primary: std::io::Error,
+    cleanup_errors: Vec<String>,
+) -> std::io::Error {
+    if cleanup_errors.is_empty() {
+        return primary;
+    }
+    let kind = primary.kind();
+    std::io::Error::new(
+        kind,
+        format!("{primary}; client startup cleanup failed: {}", cleanup_errors.join("; ")),
+    )
+}
+
+async fn cleanup_client_startup_failure(
+    conn: &mut QuicFuscateConnection,
+    stealth_runtime: &Arc<StealthRuntimeOwner>,
+    kill_switch: Option<&Arc<quicfuscate::implementations::client::KillSwitch>>,
+    primary: std::io::Error,
+) -> std::io::Error {
+    let mut cleanup_errors = Vec::new();
+    if let Err(error) = conn.conn.close(true, 0, b"client TUN setup failed") {
+        cleanup_errors.push(format!("QUIC close failed: {error:?}"));
+    }
+    if let Some(kill_switch) = kill_switch {
+        if let Err(error) = kill_switch.on_vpn_disconnected() {
+            cleanup_errors.push(format!("kill switch fail-closed cleanup failed: {error}"));
+        }
+    }
+    if let Err(error) = stealth_runtime
+        .shutdown(quicfuscate::stealth::STEALTH_RUNTIME_SHUTDOWN_TIMEOUT)
+        .await
+    {
+        cleanup_errors.push(format!("stealth runtime shutdown failed: {error}"));
+    }
+    client_startup_error_with_cleanup(primary, cleanup_errors)
+}
+
+fn spawn_client_tun_reader(
+    spawn: impl FnOnce(
+        Box<dyn FnOnce() + Send + 'static>,
+    ) -> std::io::Result<std::thread::JoinHandle<()>>,
+    reader: impl FnOnce() + Send + 'static,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    spawn(Box::new(reader))
+        .map_err(|error| std::io::Error::other(format!("client TUN reader spawn failed: {error}")))
+}
+
+fn client_tun_activation_ready(
+    tun_enable: bool,
+    has_receiver: bool,
+    has_writer: bool,
+    has_shutdown: bool,
+    has_reader: bool,
+) -> bool {
+    !tun_enable || (has_receiver && has_writer && has_shutdown && has_reader)
+}
+
 /// Drain TUN frames from `rx` and forward them through `conn` without dropping
 /// a frame that encounters DATAGRAM queue backpressure. A backpressured frame
 /// is held in `backlog` and retried on the next call before new frames.
@@ -1343,13 +1401,14 @@ async fn run_client(
     // Optional TUN bridging setup
     let tun_notify = Arc::new(tokio::sync::Notify::new());
     #[allow(clippy::type_complexity)]
-    let (tun_rx, tun_writer, mut h3_stream_id, tun_reader_shutdown, mut tun_reader_handle): (
+    let tun_setup: std::io::Result<(
         Option<std::sync::mpsc::Receiver<quicfuscate::interface::TunPacket>>,
         Option<Arc<quicfuscate::interface::TunInterface>>,
         Option<u64>,
         Option<Arc<AtomicBool>>,
+        Option<Arc<AtomicBool>>,
         Option<std::thread::JoinHandle<()>>,
-    ) = if tun_enable {
+    )> = if tun_enable {
         let effective_tun_mtu =
             requested_tun_mtu.min(u16::try_from(conn.effective_tunnel_mtu()).unwrap_or(u16::MAX));
         let tcfg = quicfuscate::interface::TunConfig {
@@ -1379,12 +1438,21 @@ async fn run_client(
                 let tun_for_reader = tun.clone();
                 let tun_reader_diagnostics = client_receive_diagnostics_enabled;
                 let reader_shutdown = Arc::new(AtomicBool::new(false));
+                let reader_failed = Arc::new(AtomicBool::new(false));
                 let shutdown_for_loop = Arc::clone(&reader_shutdown);
                 let shutdown_for_callback = Arc::clone(&reader_shutdown);
+                let failed_for_error = Arc::clone(&reader_failed);
+                let failed_for_callback = Arc::clone(&reader_failed);
                 let tun_notify_for_reader = Arc::clone(&tun_notify);
-                match std::thread::Builder::new()
-                    .name("client-tun-reader".to_string())
-                    .spawn(move || {
+                let tun_notify_for_callback_failure = Arc::clone(&tun_notify);
+                let tun_notify_for_error = Arc::clone(&tun_notify);
+                match spawn_client_tun_reader(
+                    |reader| {
+                        std::thread::Builder::new()
+                            .name("client-tun-reader".to_string())
+                            .spawn(reader)
+                    },
+                    move || {
                         let read_result = tun_for_reader.reader_loop_with_shutdown_owned(
                             &shutdown_for_loop,
                             move |packet| {
@@ -1393,6 +1461,8 @@ async fn run_client(
                                 }
                                 if tx.send(packet).is_err() {
                                     shutdown_for_callback.store(true, Ordering::Release);
+                                    failed_for_callback.store(true, Ordering::Release);
+                                    tun_notify_for_callback_failure.notify_one();
                                     return;
                                 }
                                 tun_notify_for_reader.notify_one();
@@ -1400,8 +1470,11 @@ async fn run_client(
                         );
                         if let Err(error) = read_result {
                             warn!("Client TUN reader stopped with error: {error}");
+                            failed_for_error.store(true, Ordering::Release);
+                            tun_notify_for_error.notify_one();
                         }
-                    }) {
+                    },
+                ) {
                     Ok(reader_handle) => {
                         // Install the MASQUE→TUN sink so downlink CONNECT-UDP
                         // datagrams are written to the client TUN by the H3 poll.
@@ -1422,28 +1495,54 @@ async fn run_client(
                                 }
                             })),
                         ));
-                        (
+                        Ok((
                             Some(rx),
                             Some(tun),
                             None,
                             Some(reader_shutdown),
+                            Some(reader_failed),
                             Some(reader_handle),
-                        )
+                        ))
                     }
-                    Err(error) => {
-                        warn!("Client TUN reader spawn failed; disabling TUN bridge: {error}");
-                        (None, None, None, None, None)
-                    }
+                    Err(error) => Err(error),
                 }
             }
             Err(e) => {
-                warn!("TUN open failed: {:?}", e);
-                (None, None, None, None, None)
+                Err(std::io::Error::other(format!("client TUN open failed: {e:?}")))
             }
         }
     } else {
-        (None, None, None, None, None)
+        Ok((None, None, None, None, None, None))
     };
+    let (
+        tun_rx,
+        tun_writer,
+        mut h3_stream_id,
+        tun_reader_shutdown,
+        tun_reader_failed,
+        mut tun_reader_handle,
+    ) = match tun_setup {
+            Ok(resources) => resources,
+            Err(error) => {
+                error!("Standalone client TUN activation failed: {error}");
+                return Err(
+                    cleanup_client_startup_failure(
+                        &mut conn,
+                        &stealth_runtime,
+                        kill_switch.as_ref(),
+                        error,
+                    )
+                    .await,
+                );
+            }
+        };
+    let tun_activation_ready = client_tun_activation_ready(
+        tun_enable,
+        tun_rx.is_some(),
+        tun_writer.is_some(),
+        tun_reader_shutdown.is_some(),
+        tun_reader_handle.is_some(),
+    );
     // TUN frame held when the QUIC DATAGRAM queue is full so a backpressured
     // packet is not dropped before carrier acceptance.
     let mut tun_backpressure_frame: Option<quicfuscate::interface::TunPacket> = None;
@@ -1479,6 +1578,14 @@ async fn run_client(
                 break ExitReason::CleanShutdown;
             }
             recv_res = recv_connected_datagram(&socket, &mut buf) => {
+                if tun_reader_failed
+                    .as_ref()
+                    .is_some_and(|failed| failed.load(Ordering::Acquire))
+                {
+                    break ExitReason::SocketError(
+                        "client TUN reader stopped; requested data plane is unavailable".to_string(),
+                    );
+                }
                 let branch_started = std::time::Instant::now();
                 let scheduling_gap = branch_started.duration_since(last_runtime_progress);
                 if client_receive_diagnostics_enabled
@@ -1597,6 +1704,14 @@ async fn run_client(
                 ));
             }
             _ = tun_notify.notified(), if tun_writer.is_some() => {
+                if tun_reader_failed
+                    .as_ref()
+                    .is_some_and(|failed| failed.load(Ordering::Acquire))
+                {
+                    break ExitReason::SocketError(
+                        "client TUN reader stopped; requested data plane is unavailable".to_string(),
+                    );
+                }
                 let branch_started = std::time::Instant::now();
                 let scheduling_gap = branch_started.duration_since(last_runtime_progress);
                 if client_receive_diagnostics_enabled
@@ -1644,6 +1759,14 @@ async fn run_client(
                 ));
             }
             _ = housekeeping.tick() => {
+                if tun_reader_failed
+                    .as_ref()
+                    .is_some_and(|failed| failed.load(Ordering::Acquire))
+                {
+                    break ExitReason::SocketError(
+                        "client TUN reader stopped; requested data plane is unavailable".to_string(),
+                    );
+                }
                 let branch_started = std::time::Instant::now();
                 let scheduling_gap = branch_started.duration_since(last_runtime_progress);
                 if client_receive_diagnostics_enabled
@@ -1740,7 +1863,12 @@ async fn run_client(
 
                 // Connected policy means the authenticated tunnel data plane is
                 // ready, not merely that QUIC completed its handshake.
+                let reader_failed = tun_reader_failed
+                    .as_ref()
+                    .is_some_and(|failed| failed.load(Ordering::Acquire));
                 let data_plane_ready = conn.conn.is_established()
+                    && tun_activation_ready
+                    && !reader_failed
                     && (!tun_enable || conn.masque_tunnel_established());
                 if data_plane_ready && !kill_switch_connected {
                     let policy_started = std::time::Instant::now();

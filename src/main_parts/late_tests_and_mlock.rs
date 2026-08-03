@@ -34,6 +34,70 @@ mod runtime_reload_tests {
     }
 
     #[test]
+    fn client_startup_cleanup_preserves_primary_tun_failure() {
+        let primary = std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "client TUN open failed: unsupported backend",
+        );
+        let combined = client_startup_error_with_cleanup(
+            primary,
+            vec!["kill switch fail-closed cleanup failed: permission denied".to_string()],
+        );
+
+        assert_eq!(combined.kind(), std::io::ErrorKind::Unsupported);
+        assert!(combined.to_string().contains("client TUN open failed"));
+        assert!(combined.to_string().contains("kill switch fail-closed cleanup failed"));
+    }
+
+    #[test]
+    fn client_tun_reader_spawn_failure_is_propagated() {
+        let error = spawn_client_tun_reader(
+            |_| Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "reader limit")),
+            || {},
+        )
+        .expect_err("reader spawn failure must not disable TUN silently");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert!(error.to_string().contains("client TUN reader spawn failed"));
+        assert!(error.to_string().contains("reader limit"));
+    }
+
+    #[test]
+    fn client_tun_reader_spawn_success_joins_owned_reader() {
+        let ran = Arc::new(AtomicBool::new(false));
+        let ran_in_reader = Arc::clone(&ran);
+        let reader = spawn_client_tun_reader(
+            |reader| std::thread::Builder::new().name("test-client-tun-reader".to_string()).spawn(reader),
+            move || ran_in_reader.store(true, Ordering::Release),
+        )
+        .expect("valid reader spawn must return an owned handle");
+
+        reader.join().expect("reader thread must join");
+        assert!(ran.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn client_tun_readiness_requires_every_owned_resource() {
+        assert!(client_tun_activation_ready(false, false, false, false, false));
+        assert!(client_tun_activation_ready(true, true, true, true, true));
+        assert!(!client_tun_activation_ready(true, false, true, true, true));
+        assert!(!client_tun_activation_ready(true, true, false, true, true));
+        assert!(!client_tun_activation_ready(true, true, true, false, true));
+        assert!(!client_tun_activation_ready(true, true, true, true, false));
+    }
+
+    #[test]
+    fn client_tun_open_rejects_invalid_activation_configuration() {
+        let error = quicfuscate::interface::TunInterface::open(
+            quicfuscate::interface::TunConfig { mtu: 575, ..Default::default() },
+            quicfuscate::optimize::global_pool(),
+        )
+        .expect_err("invalid TUN configuration must fail before backend activation");
+
+        assert!(matches!(error, quicfuscate::interface::TunError::Config(_)));
+    }
+
+    #[test]
     fn client_target_defaults_when_url_is_omitted() {
         let target = resolve_client_target(None, "127.0.0.1:4433").expect("default client target");
 

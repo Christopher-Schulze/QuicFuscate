@@ -1881,6 +1881,23 @@ mod tests {
         assert!(matches!(validate_tun_config(&low_ipv6_mtu), Err(TunError::Config(_))));
     }
 
+    #[cfg(any(
+        target_os = "ios",
+        all(target_os = "windows", not(feature = "tun-windows")),
+        not(any(
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "ios"
+        ))
+    ))]
+    #[test]
+    fn platform_without_native_tun_backend_fails_closed() {
+        let result = open_platform_tun(&TunConfig::default());
+
+        assert!(matches!(result, Err(TunError::Config(_)) | Err(TunError::Unsupported)));
+    }
+
     #[test]
     fn external_factory_mtu_is_reconciled_and_misreport_fails() {
         let device = DummyTun::with_reads(Vec::new());
