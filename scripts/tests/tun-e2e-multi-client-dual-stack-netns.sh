@@ -411,12 +411,19 @@ prove_client_local_ptb() {
   # Keep the client TUN at 1500 while the server remains at the phase MTU
   # floor. The non-DF packet must reach server allow_client_uplink whole;
   # otherwise the client kernel could fragment it before the tunnel boundary.
-  local ipv4_output ipv4_non_df_output ipv6_output
+  local ipv4_output ipv4_non_df_output ipv6_output non_df_capture_pid
   fetch_metrics client-ptb-before
   ipv4_output="$(ip netns exec "${CLIENT_NS[0]}" ping -4 -c 1 -W 2 -M 'do' -s 1350 \
     -I "${CLIENT_V4[0]}" 198.51.100.2 2>&1 || true)"
+  ip netns exec "${CLIENT_NS[0]}" timeout 5 tcpdump -l -nn -vv -Q in -i "$TUN_NAME" \
+    'icmp and src host 10.0.1.1 and dst host 10.0.1.2' \
+    >"$ARTIFACT_DIR/client-server-ptb4-non-df-wire.log" 2>&1 &
+  non_df_capture_pid="$!"
+  sleep 0.5
+  kill -0 "$non_df_capture_pid" 2>/dev/null || fail 'DF=0 PTB capture did not remain active'
   ipv4_non_df_output="$(ip netns exec "${CLIENT_NS[0]}" ping -4 -c 1 -W 2 -M 'dont' -s 1350 \
     -I "${CLIENT_V4[0]}" 198.51.100.2 2>&1 || true)"
+  wait "$non_df_capture_pid" 2>/dev/null || true
   ipv6_output="$(ip netns exec "${CLIENT_NS[0]}" ping -6 -c 1 -W 2 -s 1320 \
     -I "${CLIENT_V6[0]}" 2001:db8::2 2>&1 || true)"
   printf '%s\n' "$ipv4_output" >"$ARTIFACT_DIR/client-local-ptb4.txt"
@@ -427,10 +434,13 @@ prove_client_local_ptb() {
   ip netns exec "${CLIENT_NS[0]}" ip link set "$TUN_NAME" mtu 1280
   grep -Eqi 'message too long|mtu[ =]+1280|Frag needed' <<<"$ipv4_output" || \
     fail 'client-local IPv4 PTB response was not observed'
-  if ! grep -Eqi 'message too long|mtu[ =]+1280|Frag needed' <<<"$ipv4_non_df_output"; then
-    printf '%s\n' '--- DF=0 IPv4 probe output ---' "$ipv4_non_df_output" >&2
-    fail 'server IPv4 PTB response for DF=0 was not observed'
-  fi
+  grep -Eqi 'need to frag.*mtu[ =]+1280' \
+    "$ARTIFACT_DIR/client-server-ptb4-non-df-wire.log" || {
+      printf '%s\n' '--- DF=0 IPv4 ping output ---' "$ipv4_non_df_output" >&2
+      printf '%s\n' '--- DF=0 IPv4 wire capture ---' >&2
+      cat "$ARTIFACT_DIR/client-server-ptb4-non-df-wire.log" >&2
+      fail 'server IPv4 PTB response for DF=0 was not observed on the client TUN'
+    }
   grep -Eqi 'message too long|mtu[ =]+1280|Packet too big' <<<"$ipv6_output" || \
     fail 'client-local IPv6 PTB response was not observed'
   local ptb_before ptb_after
