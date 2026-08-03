@@ -91,6 +91,34 @@ mod runtime_reload_tests {
     }
 
     #[test]
+    fn load_client_ca_file_fails_closed_for_missing_and_malformed_input() {
+        let missing = std::env::temp_dir().join(format!(
+            "qf-missing-client-ca-{}-{}.pem",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        let mut config = quicfuscate::transport::Config::new_with_version(
+            quicfuscate::transport::PROTOCOL_VERSION,
+        )
+        .expect("transport config");
+        let missing_error =
+            load_client_ca_file(&mut config, &missing).expect_err("missing CA file must fail closed");
+        assert!(missing_error.to_string().contains("failed to load CA file"));
+        assert!(missing_error.to_string().contains(missing.to_string_lossy().as_ref()));
+
+        let malformed = write_temp_config("not a certificate");
+        let malformed_path = malformed.to_string_lossy().into_owned();
+        let malformed_error = load_client_ca_file(&mut config, &malformed)
+            .expect_err("malformed CA file must fail closed");
+        assert!(malformed_error.to_string().contains("failed to load CA file"));
+        assert!(malformed_error.to_string().contains(&malformed_path));
+        assert!(!malformed_error.to_string().contains("not a certificate"));
+    }
+
+    #[test]
     fn load_runtime_profiles_rejects_missing_explicit_fec_file() {
         let path = std::env::temp_dir().join(format!(
             "qf-missing-fec-config-{}-{}",

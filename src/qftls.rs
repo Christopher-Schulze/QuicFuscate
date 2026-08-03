@@ -15,7 +15,6 @@ use crate::transport::packet::CryptoContext;
 static TLS_CERT_PATH_OVERRIDE: OnceLock<String> = OnceLock::new();
 static TLS_KEY_PATH_OVERRIDE: OnceLock<String> = OnceLock::new();
 static TLS_SERVER_IDENTITY_OVERRIDE: OnceLock<PreloadedServerIdentity> = OnceLock::new();
-static TLS_CA_PATH_OVERRIDE: OnceLock<String> = OnceLock::new();
 static TLS_OVERRIDE_REQUIRED: AtomicBool = AtomicBool::new(false);
 /// Configurable max early data size for server TLS config.
 /// RFC 9001 §4.6.1: QUIC requires this to be either 0 (no 0-RTT) or 0xFFFF_FFFF (0-RTT enabled).
@@ -90,15 +89,6 @@ pub fn preload_tls_server_identity(cert_path: &str, key_path: &str) -> Result<()
     }
     set_tls_cert_key_paths(cert_path, key_path);
     Ok(())
-}
-
-/// Override the TLS CA file path for client mode peer verification.
-/// When set, the CA file is loaded and added to the root certificate store
-/// in addition to native/webpki roots.
-pub fn set_tls_ca_path(ca_path: &str) {
-    if TLS_CA_PATH_OVERRIDE.set(ca_path.to_string()).is_err() {
-        log::debug!("TLS CA path override already set, keeping existing value");
-    }
 }
 
 // ===============================
@@ -793,12 +783,31 @@ pub(crate) fn create_provider_for_version(
     version: u32,
     version_information_parameter: &[u8],
 ) -> Result<Box<dyn QuicTlsProvider>, ConnectionError> {
-    Ok(Box::new(CombinedProvider::new(
+    create_provider_for_version_with_ca(
         is_server,
         crypto,
         verify_peer,
         version,
         version_information_parameter,
+        None,
+    )
+}
+
+pub(crate) fn create_provider_for_version_with_ca(
+    is_server: bool,
+    crypto: Arc<RwLock<CryptoContext>>,
+    verify_peer: bool,
+    version: u32,
+    version_information_parameter: &[u8],
+    verify_locations_file: Option<&str>,
+) -> Result<Box<dyn QuicTlsProvider>, ConnectionError> {
+    Ok(Box::new(CombinedProvider::new_with_ca(
+        is_server,
+        crypto,
+        verify_peer,
+        version,
+        version_information_parameter,
+        verify_locations_file,
     )?))
 }
 
@@ -826,12 +835,31 @@ impl CombinedProvider {
         version: u32,
         version_information_parameter: &[u8],
     ) -> Result<Self, ConnectionError> {
-        let rustls = RustlsProvider::new(
+        Self::new_with_ca(
+            is_server,
+            crypto,
+            verify_peer,
+            version,
+            version_information_parameter,
+            None,
+        )
+    }
+
+    fn new_with_ca(
+        is_server: bool,
+        crypto: Arc<RwLock<CryptoContext>>,
+        verify_peer: bool,
+        version: u32,
+        version_information_parameter: &[u8],
+        verify_locations_file: Option<&str>,
+    ) -> Result<Self, ConnectionError> {
+        let rustls = RustlsProvider::new_with_ca(
             is_server,
             crypto.clone(),
             verify_peer,
             version,
             version_information_parameter,
+            verify_locations_file,
         )?;
         // Cover is optional and intentionally separated from TLS protocol semantics.
         // It can be disabled via ENV QUICFUSCATE_TLS_COVER=0.
@@ -1055,6 +1083,8 @@ mod rustls_provider {
         /// Whether the client verifies the server certificate.
         #[cfg(debug_assertions)]
         pub verify_peer: bool,
+        /// Client-scoped CA bundle path copied from the owning transport config.
+        pub client_ca_path: Option<String>,
         /// Whether the TLS handshake has completed.
         pub handshake_complete: bool,
         /// Current write-side encryption level.
@@ -1180,12 +1210,13 @@ mod rustls_provider {
         #[test]
         fn profile_jitter_is_scheduled_without_blocking_configuration() {
             let crypto = Arc::new(RwLock::new(CryptoContext::default()));
-            let mut provider = RustlsProviderImpl::new(
+            let mut provider = RustlsProviderImpl::new_with_ca(
                 false,
                 crypto,
                 false,
                 crate::transport::PROTOCOL_VERSION,
                 &[],
+                None,
             )
             .expect("client provider");
             let mut profile = TlsProfile::chrome_130();
@@ -1200,6 +1231,117 @@ mod rustls_provider {
             );
             assert!(provider.profile_ready_at.is_some_and(|ready_at| ready_at > Instant::now()));
             assert!(provider.next_crypto_frame(Level::Initial, 1200).is_none());
+        }
+    }
+
+    #[cfg(test)]
+    mod ca_scope_tests {
+        use super::*;
+        use std::path::{Path, PathBuf};
+
+        struct CaFixture {
+            directory: PathBuf,
+            path: PathBuf,
+        }
+
+        impl CaFixture {
+            fn new(organization: &str) -> Self {
+                let directory = std::env::temp_dir().join(format!(
+                    "quicfuscate-qftls-ca-{}-{}",
+                    std::process::id(),
+                    organization.replace(' ', "-")
+                ));
+                std::fs::create_dir_all(&directory).expect("create CA fixture directory");
+                let path = directory.join("ca.crt");
+                let hierarchy = crate::pki::generate_hierarchy("example.com", organization)
+                    .expect("generate CA fixture hierarchy");
+                crate::pki::write_ca_cert_pem(&hierarchy.root_ca.cert_der, &path)
+                    .expect("write CA fixture");
+                Self { directory, path }
+            }
+
+            fn path(&self) -> &Path {
+                &self.path
+            }
+        }
+
+        impl Drop for CaFixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.directory);
+            }
+        }
+
+        fn client_crypto() -> Arc<RwLock<CryptoContext>> {
+            Arc::new(RwLock::new(CryptoContext::default()))
+        }
+
+        #[test]
+        fn client_ca_root_store_rejects_missing_and_invalid_pem() {
+            let fixture = CaFixture::new("missing-and-invalid");
+            let missing = fixture.directory.join("missing.crt");
+            let missing_path = missing.to_str().expect("UTF-8 fixture path");
+            let missing_error = RustlsProviderImpl::build_client_root_store(Some(missing_path))
+                .expect_err("missing CA file must fail closed");
+            assert!(missing_error.to_string().contains(missing_path));
+
+            let invalid = fixture.directory.join("invalid.crt");
+            std::fs::write(&invalid, b"not a certificate").expect("write invalid CA fixture");
+            let invalid_path = invalid.to_str().expect("UTF-8 fixture path");
+            let invalid_error = RustlsProviderImpl::build_client_root_store(Some(invalid_path))
+                .expect_err("invalid PEM must fail closed");
+            let invalid_message = invalid_error.to_string();
+            assert!(invalid_message.contains(invalid_path));
+            assert!(!invalid_message.contains("not a certificate"));
+        }
+
+        #[test]
+        fn client_ca_roots_are_scoped_per_provider_and_repeatable() {
+            let first = CaFixture::new("first-client");
+            let second = CaFixture::new("second-client");
+            let first_path = first.path().to_str().expect("UTF-8 fixture path");
+            let second_path = second.path().to_str().expect("UTF-8 fixture path");
+
+            let first_roots =
+                RustlsProviderImpl::build_client_root_store(Some(first_path)).expect("first CA");
+            let second_roots =
+                RustlsProviderImpl::build_client_root_store(Some(second_path)).expect("second CA");
+            let first_subject =
+                first_roots.roots.last().expect("first custom root").subject.as_ref().to_vec();
+            let second_subject =
+                second_roots.roots.last().expect("second custom root").subject.as_ref().to_vec();
+            assert_ne!(first_subject, second_subject, "different providers must not share roots");
+
+            let first_provider = RustlsProviderImpl::new_with_ca(
+                false,
+                client_crypto(),
+                false,
+                crate::transport::PROTOCOL_VERSION,
+                &[],
+                Some(first_path),
+            )
+            .expect("first client provider");
+            let second_provider = RustlsProviderImpl::new_with_ca(
+                false,
+                client_crypto(),
+                false,
+                crate::transport::PROTOCOL_VERSION,
+                &[],
+                Some(second_path),
+            )
+            .expect("second client provider");
+            let repeated_provider = RustlsProviderImpl::new_with_ca(
+                false,
+                client_crypto(),
+                false,
+                crate::transport::PROTOCOL_VERSION,
+                &[],
+                Some(first_path),
+            )
+            .expect("repeated same-path client provider");
+
+            assert_eq!(first_provider.client_ca_path.as_deref(), Some(first_path));
+            assert_eq!(second_provider.client_ca_path.as_deref(), Some(second_path));
+            assert_eq!(repeated_provider.client_ca_path.as_deref(), Some(first_path));
         }
     }
 
@@ -1281,21 +1423,27 @@ mod rustls_provider {
     }
 
     impl RustlsProviderImpl {
-        /// Create a new rustls QUIC provider for client or server mode.
-        pub fn new(
+        pub fn new_with_ca(
             is_server: bool,
             crypto: Arc<RwLock<CryptoContext>>,
             verify_peer: bool,
             version: u32,
             version_information_parameter: &[u8],
+            client_ca_path: Option<&str>,
         ) -> Result<Self, ConnectionError> {
             let quic_version = Self::map_quic_version(version)?;
             let mut transport_params = Self::default_transport_params();
             transport_params.extend_from_slice(version_information_parameter);
+            let client_ca_path = client_ca_path.map(str::to_owned);
             let connection = if is_server {
                 Self::create_server_connection(quic_version, transport_params.clone())?
             } else {
-                Self::create_client_connection(verify_peer, quic_version, transport_params.clone())?
+                Self::create_client_connection(
+                    verify_peer,
+                    quic_version,
+                    transport_params.clone(),
+                    client_ca_path.as_deref(),
+                )?
             };
             let this = Self {
                 connection,
@@ -1303,6 +1451,7 @@ mod rustls_provider {
                 is_server,
                 #[cfg(debug_assertions)]
                 verify_peer,
+                client_ca_path,
                 handshake_complete: false,
                 write_level: super::Level::Initial,
                 alpn: None,
@@ -1441,9 +1590,10 @@ mod rustls_provider {
         }
 
         /// Build the client root certificate store: native/webpki roots plus any CA
-        /// supplied via `--ca-file` (TLS_CA_PATH_OVERRIDE). Shared by the initial client
-        /// connection and the pre-handshake rebuild so both honor the CA override.
-        fn build_client_root_store() -> Result<RootCertStore, ConnectionError> {
+        /// supplied by the owning transport configuration.
+        fn build_client_root_store(
+            ca_path: Option<&str>,
+        ) -> Result<RootCertStore, ConnectionError> {
             let mut roots = RootCertStore::empty();
             let native = load_native_certs();
             if !native.errors.is_empty() {
@@ -1463,8 +1613,8 @@ mod rustls_provider {
                     })?;
                 }
             }
-            // Load CA override from --ca-file if set
-            if let Some(ca_path) = TLS_CA_PATH_OVERRIDE.get() {
+            // Load the client-scoped CA bundle if configured.
+            if let Some(ca_path) = ca_path {
                 let ca_data = std::fs::read(ca_path).map_err(|e| {
                     ConnectionError::TlsError(format!("CA file read failed ({}): {}", ca_path, e))
                 })?;
@@ -1476,12 +1626,18 @@ mod rustls_provider {
                             ca_path, e
                         ))
                     })?;
+                if ca_certs.is_empty() {
+                    return Err(ConnectionError::TlsError(format!(
+                        "CA file parse failed ({}): no certificates found",
+                        ca_path
+                    )));
+                }
                 for cert in ca_certs {
                     roots.add(cert).map_err(|e| {
                         ConnectionError::TlsError(format!("Failed to add CA cert: {}", e))
                     })?;
                 }
-                log::info!("Loaded CA certificates from override: {}", ca_path);
+                log::info!("Loaded client-scoped CA certificates: {}", ca_path);
             }
             Ok(roots)
         }
@@ -1490,10 +1646,11 @@ mod rustls_provider {
             verify_peer: bool,
             quic_version: rustls::quic::Version,
             transport_params: Vec<u8>,
+            ca_path: Option<&str>,
         ) -> Result<rustls::quic::Connection, ConnectionError> {
             #[cfg(not(debug_assertions))]
             let _ = verify_peer;
-            let roots = Self::build_client_root_store()?;
+            let roots = Self::build_client_root_store(ca_path)?;
 
             let builder =
                 ClientConfig::builder_with_provider(Arc::new(crypto_provider_without_chacha()))
@@ -1754,10 +1911,9 @@ mod rustls_provider {
             profile: &TlsProfile,
         ) -> Result<(), ConnectionError> {
             // Build a fresh ClientConfig with ALPN and early data settings based on profile.
-            // Use the shared root store so the --ca-file CA override is honored here too
-            // (otherwise the rebuilt connection would only trust native roots and reject
-            // a custom CA with UnknownIssuer).
-            let roots = Self::build_client_root_store()?;
+            // Use the same client-scoped root store so the configured CA remains effective
+            // after a profile or SNI rebuild.
+            let roots = Self::build_client_root_store(self.client_ca_path.as_deref())?;
             let builder =
                 ClientConfig::builder_with_provider(Arc::new(crypto_provider_without_chacha()))
                     .with_protocol_versions(&[&rustls::version::TLS13])
@@ -2166,19 +2322,21 @@ mod rustls_provider {
         }
     }
 
-    pub(super) fn make(
+    pub(super) fn make_with_ca(
         is_server: bool,
         crypto: Arc<RwLock<CryptoContext>>,
         verify_peer: bool,
         version: u32,
         version_information_parameter: &[u8],
+        client_ca_path: Option<&str>,
     ) -> Result<RustlsProviderImpl, ConnectionError> {
-        RustlsProviderImpl::new(
+        RustlsProviderImpl::new_with_ca(
             is_server,
             crypto,
             verify_peer,
             version,
             version_information_parameter,
+            client_ca_path,
         )
     }
 }
@@ -2195,12 +2353,31 @@ impl RustlsProvider {
         version: u32,
         version_information_parameter: &[u8],
     ) -> Result<Self, ConnectionError> {
-        Ok(Self(rustls_provider::make(
+        Self::new_with_ca(
             is_server,
             crypto,
             verify_peer,
             version,
             version_information_parameter,
+            None,
+        )
+    }
+
+    fn new_with_ca(
+        is_server: bool,
+        crypto: Arc<RwLock<CryptoContext>>,
+        verify_peer: bool,
+        version: u32,
+        version_information_parameter: &[u8],
+        client_ca_path: Option<&str>,
+    ) -> Result<Self, ConnectionError> {
+        Ok(Self(rustls_provider::make_with_ca(
+            is_server,
+            crypto,
+            verify_peer,
+            version,
+            version_information_parameter,
+            client_ca_path,
         )?))
     }
 }

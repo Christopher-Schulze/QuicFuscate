@@ -1164,6 +1164,15 @@ impl Config {
                 file
             )));
         }
+        let mut roots = rustls::RootCertStore::empty();
+        for cert in certs {
+            roots.add(cert).map_err(|error| {
+                crate::error::ConnectionError::TlsError(format!(
+                    "CA certificate validation failed ({}): {}",
+                    file, error
+                ))
+            })?;
+        }
         self.verify_locations_file = Some(file.to_string());
         Ok(())
     }
@@ -1548,6 +1557,30 @@ mod tests {
     fn test_new_with_invalid_version() {
         let cfg = Config::new_with_version(0xDEADBEEF);
         assert!(cfg.is_err());
+    }
+
+    #[test]
+    fn test_ca_file_rejects_invalid_certificate_der_without_storing_path() {
+        let path = std::env::temp_dir().join(format!(
+            "quicfuscate-invalid-ca-{}-{}.pem",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        std::fs::write(&path, b"-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n")
+            .expect("write invalid CA fixture");
+        let path_string = path.to_string_lossy().into_owned();
+        let mut config = default_config();
+        let error = config
+            .load_verify_locations_from_file(&path_string)
+            .expect_err("invalid certificate DER must fail closed");
+        let message = error.to_string();
+        assert!(message.contains(&path_string));
+        assert!(!message.contains("AA=="));
+        assert!(config.verify_locations_file.is_none());
+        std::fs::remove_file(path).expect("remove invalid CA fixture");
     }
 
     #[test]

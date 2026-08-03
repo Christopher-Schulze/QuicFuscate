@@ -165,7 +165,6 @@ fn build_runtime_transport_config(config: &EngineConfig) -> Result<Config, Engin
         transport.load_verify_locations_from_file(ca_path).map_err(|error| {
             EngineError::Config(format!("failed to load CA file '{}': {error}", ca_path))
         })?;
-        crate::qftls::set_tls_ca_path(ca_path);
     }
 
     if !config.connection.cert_file.trim().is_empty()

@@ -370,12 +370,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if initial_token.len() != 12 || !initial_token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("QKey Initial token must be exactly 12 hexadecimal characters".into());
     }
-    if let Some(path) = ca_file.as_deref() {
-        quicfuscate::qftls::set_tls_ca_path(path);
-    }
-
     let mut transport = Config::new_with_version(PROTOCOL_VERSION)
         .map_err(|e| format!("transport config init failed: {e:?}"))?;
+    if let Some(path) = ca_file.as_deref() {
+        transport
+            .load_verify_locations_from_file(path)
+            .map_err(|error| format!("failed to load CA file {path}: {error}"))?;
+    }
     transport.set_initial_token(Some(initial_token.as_bytes().to_vec()));
 
     let stealth_config = StealthConfig::performance();

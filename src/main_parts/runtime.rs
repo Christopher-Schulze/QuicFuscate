@@ -913,6 +913,26 @@ fn synchronize_client_tun_mtu(
     Ok(())
 }
 
+fn load_client_ca_file(
+    config: &mut quicfuscate::transport::Config,
+    path: &Path,
+) -> std::io::Result<()> {
+    let ca_path = path.to_str().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("CA file path is not valid UTF-8: {}", path.display()),
+        )
+    })?;
+    config.load_verify_locations_from_file(ca_path).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("failed to load CA file {}: {error}", path.display()),
+        )
+    })?;
+    info!("Accepted client CA file {}", path.display());
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_client(
     remote_addr_str: &str,
@@ -1037,26 +1057,6 @@ async fn run_client(
             .map_err(|error| std::io::Error::other(format!("invalid Reality config: {error}")))?,
     );
 
-    // Initialize kill switch if enabled
-    let kill_switch = if kill_switch_enabled {
-        quicfuscate::implementations::client::KillSwitch::cleanup_stale_rules().map_err(
-            |error| std::io::Error::other(format!("stale firewall cleanup failed: {error}")),
-        )?;
-        let ks = std::sync::Arc::new(
-            quicfuscate::implementations::client::KillSwitch::new_with_backend(firewall_backend),
-        );
-        ks.enable().map_err(|error| {
-            std::io::Error::other(format!("kill switch enable failed: {error}"))
-        })?;
-        ks.on_vpn_connecting(&firewall_policy).map_err(|error| {
-            std::io::Error::other(format!("kill switch connecting policy failed: {error}"))
-        })?;
-        info!("Kill switch enabled with VPN-endpoint-only connecting policy");
-        Some(ks)
-    } else {
-        None
-    };
-
     let (fec_cfg, mut stealth_config, opt_cfg, _) =
         load_runtime_profiles(config_path, fec_config, fec_mode)?;
 
@@ -1084,19 +1084,30 @@ async fn run_client(
         );
     }
     if let Some(path) = ca_file {
-        match path.to_str() {
-            Some(s) => {
-                if let Err(e) = config.load_verify_locations_from_file(s) {
-                    error!("Failed to load CA file {}: {}", path.display(), e);
-                }
-                // Also set the global override so the rustls provider picks it up
-                quicfuscate::qftls::set_tls_ca_path(s);
-            }
-            None => {
-                error!("CA file path is not valid UTF-8: {}", path.display());
-            }
-        }
+        load_client_ca_file(&mut config, path)?;
     }
+
+    // Do not publish firewall state until all explicit client configuration, including
+    // the CA trust root, has been accepted. Configuration failures must not strand a
+    // connecting kill switch without entering the normal cleanup path.
+    let kill_switch = if kill_switch_enabled {
+        quicfuscate::implementations::client::KillSwitch::cleanup_stale_rules().map_err(
+            |error| std::io::Error::other(format!("stale firewall cleanup failed: {error}")),
+        )?;
+        let ks = std::sync::Arc::new(
+            quicfuscate::implementations::client::KillSwitch::new_with_backend(firewall_backend),
+        );
+        ks.enable().map_err(|error| {
+            std::io::Error::other(format!("kill switch enable failed: {error}"))
+        })?;
+        ks.on_vpn_connecting(&firewall_policy).map_err(|error| {
+            std::io::Error::other(format!("kill switch connecting policy failed: {error}"))
+        })?;
+        info!("Kill switch enabled with VPN-endpoint-only connecting policy");
+        Some(ks)
+    } else {
+        None
+    };
 
     let url_parsed = match url::Url::parse(url) {
         Ok(u) => u,

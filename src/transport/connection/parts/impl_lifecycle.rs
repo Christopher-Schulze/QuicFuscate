@@ -1021,12 +1021,13 @@ impl Connection {
         .encode_parameter()?;
 
         // Create the TLS composition stack (rustls + optional TLS Cover).
-        let provider = crate::qftls::create_provider_for_version(
+        let provider = crate::qftls::create_provider_for_version_with_ca(
             self.is_server,
             crypto_arc.clone(),
             self.config.verify_peer,
             self.config.version,
             &version_information,
+            self.config.verify_locations_file.as_deref(),
         )?;
 
         // Store provider

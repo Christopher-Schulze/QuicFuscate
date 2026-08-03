@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use quicfuscate::core::QuicFuscateConnection;
@@ -40,6 +40,7 @@ impl Drop for ScopedEnvVar {
 
 struct TestTlsFiles {
     directory: PathBuf,
+    ca_path: PathBuf,
 }
 
 impl TestTlsFiles {
@@ -73,8 +74,24 @@ impl TestTlsFiles {
             cert_path.to_str().ok_or("non-UTF-8 certificate path")?,
             key_path.to_str().ok_or("non-UTF-8 key path")?,
         );
-        quicfuscate::qftls::set_tls_ca_path(ca_path.to_str().ok_or("non-UTF-8 CA path")?);
-        Ok(Self { directory })
+        Ok(Self { directory, ca_path })
+    }
+
+    fn install_unrelated_ca() -> Result<Self, String> {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| format!("clock failed: {error}"))?
+            .as_nanos();
+        let directory = std::env::temp_dir()
+            .join(format!("quicfuscate-qkey-unrelated-ca-{}-{unique}", std::process::id()));
+        std::fs::create_dir(&directory)
+            .map_err(|error| format!("unrelated CA fixture directory failed: {error}"))?;
+        let ca_path = directory.join("ca.crt");
+        let hierarchy = quicfuscate::pki::generate_hierarchy("unrelated.example.com", "Unrelated")
+            .map_err(|error| format!("unrelated CA hierarchy failed: {error}"))?;
+        quicfuscate::pki::write_ca_cert_pem(&hierarchy.root_ca.cert_der, &ca_path)
+            .map_err(|error| format!("unrelated CA write failed: {error}"))?;
+        Ok(Self { directory, ca_path })
     }
 }
 
@@ -107,6 +124,7 @@ fn simulate_qkey_http3_auth(
     qkey_value: &str,
     client_token_hex: &str,
     expected_token_hex: &str,
+    ca_path: Option<&Path>,
 ) -> Result<SimResult, String> {
     let qkey_cfg = qkey::parse(qkey_value).map_err(|e| format!("qkey parse failed: {e}"))?;
     let server_addr: std::net::SocketAddr =
@@ -135,6 +153,12 @@ fn simulate_qkey_http3_auth(
 
     let mut client_transport =
         Config::new_with_version(PROTOCOL_VERSION).map_err(|e| format!("{e:?}"))?;
+    if let Some(ca_path) = ca_path {
+        let ca_path_str = ca_path.to_str().ok_or("non-UTF-8 CA path")?;
+        client_transport
+            .load_verify_locations_from_file(ca_path_str)
+            .map_err(|error| format!("client CA load failed: {error}"))?;
+    }
     client_transport.set_initial_token(Some(qkey_id.as_bytes().to_vec()));
     // Tests run in-memory without real pacing. Use a large CWND to avoid artificial stalls.
     client_transport.set_initial_congestion_window_packets(10_000);
@@ -485,7 +509,7 @@ fn qkey_http3_auth_accepts_valid_and_rejects_invalid_token() {
             #[cfg(debug_assertions)]
             {
                 let _verify_guard = ScopedEnvVar::remove("QUICFUSCATE_ALLOW_INVALID_CERTS");
-                let error = simulate_qkey_http3_auth(&qkey_value, &good_token, &good_token)
+                let error = simulate_qkey_http3_auth(&qkey_value, &good_token, &good_token, None)
                     .expect_err("untrusted server certificate must fail before HTTP/3 auth");
                 assert!(
                     error.contains("invalid peer certificate"),
@@ -494,17 +518,44 @@ fn qkey_http3_auth_accepts_valid_and_rejects_invalid_token() {
             }
 
             let _tls_files = TestTlsFiles::install().expect("verified TLS fixture must install");
+            let _unrelated_ca =
+                TestTlsFiles::install_unrelated_ca().expect("unrelated CA fixture must install");
             let _verify_guard = ScopedEnvVar::remove("QUICFUSCATE_ALLOW_INVALID_CERTS");
 
             // Valid
-            let ok = simulate_qkey_http3_auth(&qkey_value, &good_token, &good_token)
-                .expect("simulation must run");
+            let ok = simulate_qkey_http3_auth(
+                &qkey_value,
+                &good_token,
+                &good_token,
+                Some(_tls_files.ca_path.as_path()),
+            )
+            .expect("simulation must run");
             assert!(ok.authed);
             assert!(!ok.server_closed);
 
+            // A second client using a different valid CA must not inherit the first client's
+            // trust root. The old process-global first-writer-wins path made this handshake
+            // succeed by silently reusing `_tls_files.ca_path`.
+            let isolated = simulate_qkey_http3_auth(
+                &qkey_value,
+                &good_token,
+                &good_token,
+                Some(_unrelated_ca.ca_path.as_path()),
+            )
+            .expect_err("unrelated client CA must reject the server certificate");
+            assert!(
+                isolated.contains("invalid peer certificate") || isolated.contains("UnknownIssuer"),
+                "unexpected isolated CA failure: {isolated}"
+            );
+
             // Invalid token for auth header (but same initial token id)
-            let bad = simulate_qkey_http3_auth(&qkey_value, &bad_token, &good_token)
-                .expect("simulation must run");
+            let bad = simulate_qkey_http3_auth(
+                &qkey_value,
+                &bad_token,
+                &good_token,
+                Some(_tls_files.ca_path.as_path()),
+            )
+            .expect("simulation must run");
             assert!(!bad.authed);
             assert!(bad.server_closed || bad.client_closed);
         })
