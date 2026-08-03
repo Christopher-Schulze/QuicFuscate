@@ -447,6 +447,37 @@ impl ClientRuntime {
         Ok(())
     }
 
+    fn rollback_failed_connect(&mut self) {
+        if let Some(io_driver) = &self.io_driver {
+            io_driver.shutdown();
+        }
+        let handles = std::mem::take(&mut self.io_handles);
+        for handle in &handles {
+            handle.abort();
+        }
+        if let Some(runtime) = self.runtime.as_ref() {
+            runtime.block_on(async {
+                for handle in handles {
+                    if let Err(error) = handle.await {
+                        if !error.is_cancelled() {
+                            log::warn!(
+                                "Client I/O task join failed during connect rollback: {}",
+                                error
+                            );
+                        }
+                    }
+                }
+            });
+        }
+        if let Some(mut connection) = self.connection.take() {
+            connection.close(0, b"Connect setup failed");
+            log::info!("QUIC connection closed after failed connect");
+        }
+        self.socket = None;
+        self.io_driver = None;
+        self.state = ClientState::Running;
+    }
+
     /// Connect to the remote server.
     pub fn connect(&mut self) -> Result<(), EngineError> {
         if self.state != ClientState::Running {
@@ -463,82 +494,94 @@ impl ClientRuntime {
         let remote_addr = conn.peer_addr();
         self.connection = Some(conn);
 
-        let runtime = self
-            .runtime
-            .as_ref()
-            .ok_or_else(|| EngineError::Internal("Runtime not initialized".to_string()))?
-            .clone();
+        let runtime = match self.runtime.as_ref().cloned() {
+            Some(runtime) => runtime,
+            None => {
+                self.rollback_failed_connect();
+                return Err(EngineError::Internal("Runtime not initialized".to_string()));
+            }
+        };
         // `tokio::net::UdpSocket::from_std` requires an active runtime context.
         // The engine API is sync, so we must enter our runtime explicitly.
-        let _rt_guard = runtime.enter();
-
-        let io_config = IoDriverConfig::default();
-        let std_socket = std::net::UdpSocket::bind(local_addr)
-            .map_err(|e| EngineError::Io(format!("UDP bind failed: {}", e)))?;
-        std_socket
-            .set_nonblocking(true)
-            .map_err(|e| EngineError::Io(format!("UDP nonblocking failed: {}", e)))?;
-        let sock_ref = SockRef::from(&std_socket);
-        if let Err(e) = sock_ref.set_recv_buffer_size(io_config.socket_buffer_size) {
-            log::debug!("UDP recv buffer size hint rejected: {}", e);
-        }
-        if let Err(e) = sock_ref.set_send_buffer_size(io_config.socket_buffer_size) {
-            log::debug!("UDP send buffer size hint rejected: {}", e);
-        }
-        std_socket
-            .connect(remote_addr)
-            .map_err(|e| EngineError::Io(format!("UDP connect failed: {}", e)))?;
-        let socket = UdpSocket::from_std(std_socket)
-            .map_err(|e| EngineError::Io(format!("UDP setup failed: {}", e)))?;
-        let socket = Arc::new(socket);
-        self.socket = Some(socket.clone());
-
-        let io_driver = Arc::new(IoDriver::new(io_config));
-        self.io_driver = Some(io_driver.clone());
-        let tun = self
-            .tun
-            .as_ref()
-            .ok_or_else(|| EngineError::Tun("TUN not initialized".to_string()))?
-            .clone();
-        let shared_conn = self
-            .connection
-            .as_ref()
-            .ok_or_else(|| EngineError::Connection("Connection not initialized".to_string()))?
-            .shared();
-
-        let outbound = runtime.spawn({
-            let io_driver = io_driver.clone();
-            let tun = tun.clone();
-            let conn = shared_conn.clone();
-            let socket = socket.clone();
-            let data_plane_fault = self.data_plane_fault.clone();
-            async move {
-                if let Err(e) = io_driver.run_outbound(tun, conn, socket).await {
-                    log::warn!("Client outbound I/O task exited with error: {:?}", e);
-                    publish_data_plane_fault(&data_plane_fault, &io_driver, e);
+        let setup_result = {
+            let _rt_guard = runtime.enter();
+            (|| -> Result<(), EngineError> {
+                let io_config = IoDriverConfig::default();
+                let std_socket = std::net::UdpSocket::bind(local_addr)
+                    .map_err(|e| EngineError::Io(format!("UDP bind failed: {}", e)))?;
+                std_socket
+                    .set_nonblocking(true)
+                    .map_err(|e| EngineError::Io(format!("UDP nonblocking failed: {}", e)))?;
+                let sock_ref = SockRef::from(&std_socket);
+                if let Err(e) = sock_ref.set_recv_buffer_size(io_config.socket_buffer_size) {
+                    log::debug!("UDP recv buffer size hint rejected: {}", e);
                 }
-            }
-        });
-        // Reset handshake event for new connection attempt.
-        {
-            let (lock, _) = &*self.handshake_event;
-            *lock.lock() = false;
-        }
-        let inbound = runtime.spawn({
-            let io_driver = io_driver.clone();
-            let tun = tun.clone();
-            let conn = shared_conn.clone();
-            let socket = socket.clone();
-            let hs_event = self.handshake_event.clone();
-            let data_plane_fault = self.data_plane_fault.clone();
-            async move {
-                if let Err(e) = io_driver.run_inbound(tun, conn, socket, hs_event).await {
-                    log::warn!("Client inbound I/O task exited with error: {:?}", e);
-                    publish_data_plane_fault(&data_plane_fault, &io_driver, e);
+                if let Err(e) = sock_ref.set_send_buffer_size(io_config.socket_buffer_size) {
+                    log::debug!("UDP send buffer size hint rejected: {}", e);
                 }
-            }
-        });
-        self.io_handles = vec![outbound, inbound];
+                std_socket
+                    .connect(remote_addr)
+                    .map_err(|e| EngineError::Io(format!("UDP connect failed: {}", e)))?;
+                let socket = UdpSocket::from_std(std_socket)
+                    .map_err(|e| EngineError::Io(format!("UDP setup failed: {}", e)))?;
+                let socket = Arc::new(socket);
+                self.socket = Some(socket.clone());
+
+                let io_driver = Arc::new(IoDriver::new(io_config));
+                self.io_driver = Some(io_driver.clone());
+                let tun = self
+                    .tun
+                    .as_ref()
+                    .ok_or_else(|| EngineError::Tun("TUN not initialized".to_string()))?
+                    .clone();
+                let shared_conn = self
+                    .connection
+                    .as_ref()
+                    .ok_or_else(|| {
+                        EngineError::Connection("Connection not initialized".to_string())
+                    })?
+                    .shared();
+
+                let outbound = runtime.spawn({
+                    let io_driver = io_driver.clone();
+                    let tun = tun.clone();
+                    let conn = shared_conn.clone();
+                    let socket = socket.clone();
+                    let data_plane_fault = self.data_plane_fault.clone();
+                    async move {
+                        if let Err(e) = io_driver.run_outbound(tun, conn, socket).await {
+                            log::warn!("Client outbound I/O task exited with error: {:?}", e);
+                            publish_data_plane_fault(&data_plane_fault, &io_driver, e);
+                        }
+                    }
+                });
+                // Reset handshake event for new connection attempt.
+                {
+                    let (lock, _) = &*self.handshake_event;
+                    *lock.lock() = false;
+                }
+                let inbound = runtime.spawn({
+                    let io_driver = io_driver.clone();
+                    let tun = tun.clone();
+                    let conn = shared_conn.clone();
+                    let socket = socket.clone();
+                    let hs_event = self.handshake_event.clone();
+                    let data_plane_fault = self.data_plane_fault.clone();
+                    async move {
+                        if let Err(e) = io_driver.run_inbound(tun, conn, socket, hs_event).await {
+                            log::warn!("Client inbound I/O task exited with error: {:?}", e);
+                            publish_data_plane_fault(&data_plane_fault, &io_driver, e);
+                        }
+                    }
+                });
+                self.io_handles = vec![outbound, inbound];
+                Ok(())
+            })()
+        };
+        if let Err(error) = setup_result {
+            self.rollback_failed_connect();
+            return Err(error);
+        }
 
         self.state = ClientState::Connected;
         log::info!("Connected to server");
@@ -834,6 +877,56 @@ mod tests {
             Err(error) => error,
         };
         assert!(matches!(error, EngineError::Config(_)));
+    }
+
+    #[test]
+    fn connect_udp_bind_failure_rolls_back_connection_and_transport_state() {
+        let blocker = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .expect("bind UDP blocker");
+        let blocked_addr = blocker.local_addr().expect("read UDP blocker address");
+        let mut config = EngineConfig::default();
+        config.connection.local = blocked_addr.to_string();
+
+        let mut runtime = ClientRuntime::new(config).expect("client runtime");
+        runtime.runtime = Some(
+            runtime::create_shared_runtime(&runtime::RuntimeConfig::default())
+                .expect("client runtime executor"),
+        );
+        runtime.state = ClientState::Running;
+
+        let error = runtime.connect().expect_err("occupied UDP address must fail connect");
+        assert!(matches!(error, EngineError::Io(message) if message.contains("UDP bind failed")));
+        assert_eq!(runtime.state(), ClientState::Running);
+        assert!(runtime.connection().is_none());
+        assert!(runtime.socket.is_none());
+        assert!(runtime.io_driver.is_none());
+        assert!(runtime.io_handles.is_empty());
+
+        let second_error = runtime.connect().expect_err("second bind must remain blocked");
+        assert!(
+            matches!(second_error, EngineError::Io(message) if message.contains("UDP bind failed"))
+        );
+        assert!(runtime.connection().is_none());
+        assert!(runtime.io_handles.is_empty());
+
+        runtime.stop().expect("failed connect must remain stoppable");
+        assert_eq!(runtime.state(), ClientState::Stopped);
+    }
+
+    #[test]
+    fn connect_without_runtime_rolls_back_connection() {
+        let mut runtime = ClientRuntime::new(EngineConfig::default()).expect("client runtime");
+        runtime.state = ClientState::Running;
+
+        let error = runtime.connect().expect_err("missing runtime must fail connect");
+        assert!(
+            matches!(error, EngineError::Internal(message) if message == "Runtime not initialized")
+        );
+        assert_eq!(runtime.state(), ClientState::Running);
+        assert!(runtime.connection().is_none());
+        assert!(runtime.socket.is_none());
+        assert!(runtime.io_driver.is_none());
+        assert!(runtime.io_handles.is_empty());
     }
 
     #[test]
