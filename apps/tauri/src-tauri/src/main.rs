@@ -581,17 +581,155 @@ pub(crate) fn hydrate_state_for_runtime(
 // Commands
 // ---------------------------------------------------------------------------
 
+trait DesktopEngineLifecycle {
+    fn lifecycle_state(&self) -> EngineState;
+    fn disconnect(&mut self) -> Result<(), String>;
+    fn stop(&mut self) -> Result<(), String>;
+}
+
+impl DesktopEngineLifecycle for QuicFuscateEngine {
+    fn lifecycle_state(&self) -> EngineState {
+        self.state()
+    }
+
+    fn disconnect(&mut self) -> Result<(), String> {
+        QuicFuscateEngine::disconnect(self).map_err(|error| error.to_string())
+    }
+
+    fn stop(&mut self) -> Result<(), String> {
+        QuicFuscateEngine::stop(self).map_err(|error| error.to_string())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CleanupFailure {
+    message: String,
+    owner_retained: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ShutdownCleanupOutcome {
+    Clean,
+    Failed { message: String, owner_retained: bool },
+}
+
+fn cleanup_engine<E: DesktopEngineLifecycle>(engine: &mut E) -> Result<(), String> {
+    let initial_state = engine.lifecycle_state();
+    let mut failures = Vec::new();
+
+    if initial_state == EngineState::Connected {
+        if let Err(error) = engine.disconnect() {
+            failures.push(format!("engine disconnect failed: {}", error));
+        }
+    }
+
+    if engine.lifecycle_state() != EngineState::Stopped {
+        if let Err(error) = engine.stop() {
+            failures.push(format!("engine stop failed: {}", error));
+        }
+    }
+
+    let final_state = engine.lifecycle_state();
+    if failures.is_empty() && final_state == EngineState::Stopped {
+        return Ok(());
+    }
+
+    if failures.is_empty() {
+        failures.push(format!(
+            "engine cleanup returned success without reaching Stopped (state: {})",
+            final_state
+        ));
+    } else if final_state == EngineState::Stopped {
+        failures.push("engine reached Stopped after cleanup failure".to_string());
+    }
+
+    Err(failures.join("; "))
+}
+
+fn cleanup_engine_slot<E: DesktopEngineLifecycle>(
+    engine_slot: &mut Option<E>,
+    active_tunnel_id: &mut Option<String>,
+    last_error: &mut Option<String>,
+    context: &str,
+) -> Result<(), CleanupFailure> {
+    let Some(cleanup_result) = engine_slot.as_mut().map(cleanup_engine) else {
+        *active_tunnel_id = None;
+        return Ok(());
+    };
+
+    match cleanup_result {
+        Ok(()) => {
+            engine_slot.take();
+            *active_tunnel_id = None;
+            Ok(())
+        }
+        Err(error) => {
+            let owner_retained = engine_slot
+                .as_ref()
+                .is_some_and(|engine| engine.lifecycle_state() != EngineState::Stopped);
+            let message = format!("{}: {}", context, error);
+            *last_error = Some(message.clone());
+            if !owner_retained {
+                engine_slot.take();
+                *active_tunnel_id = None;
+            }
+            Err(CleanupFailure { message, owner_retained })
+        }
+    }
+}
+
+fn cleanup_existing_engine_for_replacement<E: DesktopEngineLifecycle>(
+    engine_slot: &mut Option<E>,
+    active_tunnel_id: &mut Option<String>,
+    last_error: &mut Option<String>,
+) -> Result<(), CleanupFailure> {
+    cleanup_engine_slot(
+        engine_slot,
+        active_tunnel_id,
+        last_error,
+        "Replacement engine cleanup failed",
+    )
+}
+
+fn shutdown_cleanup_outcome_for_slot<E: DesktopEngineLifecycle>(
+    engine_slot: &mut Option<E>,
+    active_tunnel_id: &mut Option<String>,
+    last_error: &mut Option<String>,
+) -> ShutdownCleanupOutcome {
+    match cleanup_engine_slot(
+        engine_slot,
+        active_tunnel_id,
+        last_error,
+        "Tray shutdown cleanup failed",
+    ) {
+        Ok(()) => {
+            *last_error = None;
+            ShutdownCleanupOutcome::Clean
+        }
+        Err(failure) => ShutdownCleanupOutcome::Failed {
+            message: failure.message,
+            owner_retained: failure.owner_retained,
+        },
+    }
+}
+
 fn disconnect_inner(state: &AppState) -> Result<(), String> {
     let _op_guard = state.operation_lock.lock().map_err(|e| e.to_string())?;
     let mut guard = state.engine.lock().map_err(|e| e.to_string())?;
-    if let Some(ref mut engine) = *guard {
-        let _ = engine.disconnect();
-        let _ = engine.stop();
+    let mut active_tunnel_id = state.active_tunnel_id.lock().map_err(|e| e.to_string())?;
+    let mut last_error = state.last_error.lock().map_err(|e| e.to_string())?;
+    match cleanup_engine_slot(
+        &mut guard,
+        &mut active_tunnel_id,
+        &mut last_error,
+        "Disconnect cleanup failed",
+    ) {
+        Ok(()) => {
+            *last_error = None;
+            Ok(())
+        }
+        Err(failure) => Err(failure.message),
     }
-    *guard = None;
-    *state.active_tunnel_id.lock().map_err(|e| e.to_string())? = None;
-    *state.last_error.lock().map_err(|e| e.to_string())? = None;
-    Ok(())
 }
 
 fn connect_inner(
@@ -613,16 +751,21 @@ fn connect_inner(
         let cfg =
             build_client_engine_config(&qkey_trimmed, sni_override.as_deref(), settings.as_ref())?;
 
-        // Stop any currently running engine before connecting a new tunnel.
-        // Clear active tunnel id early to avoid stale state if the new connect fails.
+        // Stop any currently running engine before connecting a new tunnel. A failed cleanup
+        // retains the old owner and aborts replacement before a new engine can become live.
         let mut guard = state.engine.lock().map_err(|e| e.to_string())?;
-        if let Some(ref mut engine) = *guard {
-            let _ = engine.disconnect();
-            let _ = engine.stop();
+        let mut active_tunnel_id = state.active_tunnel_id.lock().map_err(|e| e.to_string())?;
+        let mut last_error = state.last_error.lock().map_err(|e| e.to_string())?;
+        if let Err(failure) = cleanup_existing_engine_for_replacement(
+            &mut guard,
+            &mut active_tunnel_id,
+            &mut last_error,
+        ) {
+            return Err(failure.message);
         }
-        *guard = None;
         drop(guard);
-        *state.active_tunnel_id.lock().map_err(|e| e.to_string())? = None;
+        drop(active_tunnel_id);
+        drop(last_error);
 
         let mut engine = QuicFuscateEngine::new(cfg).map_err(|e| e.to_string())?;
         engine.start().map_err(|e| e.to_string())?;
@@ -1368,7 +1511,7 @@ fn env_flag_true(name: &str) -> bool {
 // Main
 // ---------------------------------------------------------------------------
 
-fn shutdown_engine_best_effort(state: &AppState) {
+fn shutdown_engine_best_effort(state: &AppState) -> ShutdownCleanupOutcome {
     let _op_guard = match state.operation_lock.lock() {
         Ok(g) => g,
         Err(e) => e.into_inner(),
@@ -1377,17 +1520,25 @@ fn shutdown_engine_best_effort(state: &AppState) {
         Ok(g) => g,
         Err(e) => e.into_inner(),
     };
-    if let Some(ref mut engine) = *guard {
-        let _ = engine.disconnect();
-        let _ = engine.stop();
+    let mut active_tunnel_id = match state.active_tunnel_id.lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    let mut last_error = match state.last_error.lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+
+    let outcome =
+        shutdown_cleanup_outcome_for_slot(&mut guard, &mut active_tunnel_id, &mut last_error);
+    if let ShutdownCleanupOutcome::Failed { message, owner_retained } = &outcome {
+        log::error!(
+            "Tray shutdown cleanup outcome: owner_retained={}, error={}",
+            owner_retained,
+            message
+        );
     }
-    *guard = None;
-    if let Ok(mut id) = state.active_tunnel_id.lock() {
-        *id = None;
-    }
-    if let Ok(mut err) = state.last_error.lock() {
-        *err = None;
-    }
+    outcome
 }
 
 fn show_main_window(app: &tauri::AppHandle) {
@@ -1552,8 +1703,17 @@ fn main() {
                     "show" => show_main_window(app),
                     "hide" => hide_main_window(app),
                     "quit" => {
-                        shutdown_engine_best_effort(state.inner());
-                        app.exit(0);
+                        match shutdown_engine_best_effort(state.inner()) {
+                            ShutdownCleanupOutcome::Clean => app.exit(0),
+                            ShutdownCleanupOutcome::Failed { message, owner_retained } => {
+                                log::error!(
+                                    "Tray quit completed with cleanup failure: owner_retained={}, error={}",
+                                    owner_retained,
+                                    message
+                                );
+                                app.exit(1);
+                            }
+                        }
                     }
                     TRAY_CONNECT_ITEM_ID => {
                         let engine_state = state
@@ -1833,6 +1993,163 @@ mod tests {
         assert_eq!(cfg.logging.level, "trace");
         assert_eq!(cfg.stealth.mode, quicfuscate::engine::StealthMode::Auto);
         assert_eq!(cfg.fec.mode, quicfuscate::engine::FecMode::Auto);
+    }
+
+    struct FakeDesktopEngine {
+        state: EngineState,
+        disconnect_error: Option<String>,
+        stop_error: Option<String>,
+        calls: Vec<&'static str>,
+    }
+
+    impl FakeDesktopEngine {
+        fn connected() -> Self {
+            Self {
+                state: EngineState::Connected,
+                disconnect_error: None,
+                stop_error: None,
+                calls: Vec::new(),
+            }
+        }
+
+        fn disconnect_failure(mut self, error: &str) -> Self {
+            self.disconnect_error = Some(error.to_string());
+            self
+        }
+
+        fn stop_failure(mut self, error: &str) -> Self {
+            self.stop_error = Some(error.to_string());
+            self
+        }
+    }
+
+    impl DesktopEngineLifecycle for FakeDesktopEngine {
+        fn lifecycle_state(&self) -> EngineState {
+            self.state
+        }
+
+        fn disconnect(&mut self) -> Result<(), String> {
+            self.calls.push("disconnect");
+            match self.disconnect_error.clone() {
+                Some(error) => Err(error),
+                None => {
+                    self.state = EngineState::Running;
+                    Ok(())
+                }
+            }
+        }
+
+        fn stop(&mut self) -> Result<(), String> {
+            self.calls.push("stop");
+            match self.stop_error.clone() {
+                Some(error) => {
+                    self.state = EngineState::Error;
+                    Err(error)
+                }
+                None => {
+                    self.state = EngineState::Stopped;
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn native_disconnect_retains_owner_and_all_cleanup_contexts() {
+        let mut engine = Some(
+            FakeDesktopEngine::connected()
+                .disconnect_failure("TUN cleanup failed: routing removal failed")
+                .stop_failure("firewall kill-switch disable failed: service-task join timeout"),
+        );
+        let mut active_tunnel_id = Some("old-tunnel".to_string());
+        let mut last_error = None;
+
+        let failure = cleanup_engine_slot(
+            &mut engine,
+            &mut active_tunnel_id,
+            &mut last_error,
+            "Disconnect cleanup failed",
+        )
+        .expect_err("cleanup failure must reach the native boundary");
+
+        assert!(failure.owner_retained);
+        assert!(failure.message.contains("TUN cleanup failed"));
+        assert!(failure.message.contains("routing removal failed"));
+        assert!(failure.message.contains("firewall kill-switch disable failed"));
+        assert!(failure.message.contains("service-task join timeout"));
+        assert_eq!(active_tunnel_id.as_deref(), Some("old-tunnel"));
+        assert_eq!(last_error.as_deref(), Some(failure.message.as_str()));
+        assert_eq!(
+            engine.as_ref().map(|value| value.calls.as_slice()),
+            Some(["disconnect", "stop"].as_slice())
+        );
+    }
+
+    #[test]
+    fn native_cleanup_reports_original_failure_after_terminal_stop() {
+        let mut engine = Some(
+            FakeDesktopEngine::connected().disconnect_failure("TUN close failed: descriptor busy"),
+        );
+        let mut active_tunnel_id = Some("old-tunnel".to_string());
+        let mut last_error = None;
+
+        let failure = cleanup_engine_slot(
+            &mut engine,
+            &mut active_tunnel_id,
+            &mut last_error,
+            "Disconnect cleanup failed",
+        )
+        .expect_err("the original disconnect failure must remain observable");
+
+        assert!(!failure.owner_retained);
+        assert!(failure.message.contains("TUN close failed"));
+        assert!(failure.message.contains("engine reached Stopped"));
+        assert!(engine.is_none());
+        assert!(active_tunnel_id.is_none());
+        assert_eq!(last_error.as_deref(), Some(failure.message.as_str()));
+    }
+
+    #[test]
+    fn replacement_connect_stops_before_new_owner_and_retains_failed_owner() {
+        let mut engine = Some(
+            FakeDesktopEngine::connected()
+                .disconnect_failure("kill-switch disconnect failed")
+                .stop_failure("firewall cleanup failed"),
+        );
+        let mut active_tunnel_id = Some("old-tunnel".to_string());
+        let mut last_error = None;
+
+        let failure = cleanup_existing_engine_for_replacement(
+            &mut engine,
+            &mut active_tunnel_id,
+            &mut last_error,
+        )
+        .expect_err("replacement must abort when old cleanup fails");
+
+        assert!(failure.owner_retained);
+        assert!(failure.message.contains("Replacement engine cleanup failed"));
+        assert!(failure.message.contains("kill-switch disconnect failed"));
+        assert!(failure.message.contains("firewall cleanup failed"));
+        assert!(engine.is_some());
+        assert_eq!(active_tunnel_id.as_deref(), Some("old-tunnel"));
+    }
+
+    #[test]
+    fn tray_shutdown_returns_bounded_failure_outcome_with_retained_owner() {
+        let mut engine =
+            Some(FakeDesktopEngine::connected().stop_failure("service-task shutdown timed out"));
+        let mut active_tunnel_id = Some("old-tunnel".to_string());
+        let mut last_error = None;
+
+        let outcome =
+            shutdown_cleanup_outcome_for_slot(&mut engine, &mut active_tunnel_id, &mut last_error);
+
+        assert!(matches!(outcome, ShutdownCleanupOutcome::Failed { owner_retained: true, .. }));
+        assert!(engine.is_some());
+        assert_eq!(active_tunnel_id.as_deref(), Some("old-tunnel"));
+        assert!(last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("service-task shutdown timed out")));
     }
 
     #[test]
