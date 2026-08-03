@@ -651,21 +651,23 @@ impl LiveServerDomain {
         self.remove_remote_snapshot(remote_addr);
     }
 
-    fn rebind_remote(&self, old_addr: SocketAddr, new_addr: SocketAddr) {
+    fn rebind_remote(&self, old_addr: SocketAddr, new_addr: SocketAddr) -> bool {
         let mut sessions = self.shared.sessions.write();
-        if sessions.rebind_remote_addr(old_addr, new_addr).is_some() {
-            drop(sessions);
-            let mut limiter = self.shared.connection_limiter.lock();
-            limiter.remove(old_addr.ip());
-            limiter.add(new_addr.ip());
-            #[cfg(feature = "rate_limiter")]
-            self.shared.remove_rate_limited_ip(old_addr.ip());
-            if let Ok(mut guard) = self.client_snapshots.lock() {
-                if let Some(snapshot) = guard.remove(&old_addr) {
-                    guard.insert(new_addr, snapshot);
-                }
+        if sessions.rebind_remote_addr(old_addr, new_addr).is_err() {
+            return false;
+        }
+        drop(sessions);
+        let mut limiter = self.shared.connection_limiter.lock();
+        limiter.remove(old_addr.ip());
+        limiter.add(new_addr.ip());
+        #[cfg(feature = "rate_limiter")]
+        self.shared.remove_rate_limited_ip(old_addr.ip());
+        if let Ok(mut guard) = self.client_snapshots.lock() {
+            if let Some(snapshot) = guard.remove(&old_addr) {
+                guard.insert(new_addr, snapshot);
             }
         }
+        true
     }
 
     fn session_stats_by_remote(&self, remote_addr: SocketAddr) -> Option<Arc<SessionStats>> {
@@ -815,7 +817,13 @@ fn accept_session_in_domain(
             Err(AcceptError::MaxClientsReached)
         }
         Err(
-            SessionError::NotFound | SessionError::AlreadyExists | SessionError::BandwidthPolicy(_),
+            SessionError::NotFound
+                | SessionError::AlreadyExists
+                | SessionError::SessionIdConflict(_)
+                | SessionError::ClientIpConflict(_)
+                | SessionError::ClientIpv6Conflict(_)
+                | SessionError::RemoteAddrConflict(_)
+                | SessionError::BandwidthPolicy(_),
         ) => {
             ip_pool.release(client_ip);
             if let Some(v6) = client_ipv6 {
@@ -1433,10 +1441,13 @@ impl LiveServerState {
         let Some(connection) = self.clients.remove(&old_addr) else {
             return false;
         };
+        if !self.domain.rebind_remote(old_addr, new_addr) {
+            self.clients.insert(old_addr, connection);
+            return false;
+        }
         self.clients.insert(new_addr, connection);
         self.path_candidates.remove(&new_addr);
         self.pending_tun_downlinks.rebind_target(old_addr, new_addr);
-        self.domain.rebind_remote(old_addr, new_addr);
         accept_loop.record_migration(old_addr, new_addr);
         crate::telemetry::QKEY_PATH_REBIND_TOTAL.inc();
         log::info!("Client path validated and committed: {} -> {}", old_addr, new_addr);
@@ -2005,5 +2016,19 @@ mod migration_commit_tests {
             .pop_next(&std::collections::HashSet::new())
             .expect("rebound downlink");
         assert_eq!(downlink.target, new_addr);
+    }
+
+    #[test]
+    fn server_rebind_rejects_conflicting_session_remote_without_mutating_domain() {
+        let live_state = LiveServerState::try_new(ServerConfig::default())
+            .unwrap_or_else(|error| panic!("live server state construction failed: {error}"));
+        let first_addr: SocketAddr = "127.0.0.1:54331".parse().unwrap();
+        let second_addr: SocketAddr = "127.0.0.1:54332".parse().unwrap();
+        let (first_id, _, _) = live_state.domain.accept(first_addr).expect("first session");
+        let (second_id, _, _) = live_state.domain.accept(second_addr).expect("second session");
+
+        assert!(!live_state.domain.rebind_remote(first_addr, second_addr));
+        assert_eq!(live_state.domain.session_id_by_remote(first_addr), Some(first_id));
+        assert_eq!(live_state.domain.session_id_by_remote(second_addr), Some(second_id));
     }
 }

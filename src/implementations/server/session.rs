@@ -244,6 +244,21 @@ impl SessionManager {
         let client_ipv6 = session.client_ipv6;
         let remote_addr = session.remote_addr;
 
+        if self.sessions.contains_key(&id) {
+            return Err(SessionError::SessionIdConflict(id));
+        }
+        if self.by_client_ip.contains_key(&client_ip) {
+            return Err(SessionError::ClientIpConflict(client_ip));
+        }
+        if let Some(v6) = client_ipv6 {
+            if self.by_client_ipv6.contains_key(&v6) {
+                return Err(SessionError::ClientIpv6Conflict(v6));
+            }
+        }
+        if self.by_remote_addr.contains_key(&remote_addr) {
+            return Err(SessionError::RemoteAddrConflict(remote_addr));
+        }
+
         self.sessions.insert(id, session);
         self.by_client_ip.insert(client_ip, id);
         if let Some(v6) = client_ipv6 {
@@ -262,11 +277,17 @@ impl SessionManager {
     pub fn remove(&mut self, id: SessionId) -> Option<Session> {
         if let Some(session) = self.sessions.remove(&id) {
             self.bandwidth_manager.remove_client(&id.as_u64().to_string());
-            self.by_client_ip.remove(&session.client_ip);
-            if let Some(v6) = session.client_ipv6 {
-                self.by_client_ipv6.remove(&v6);
+            if self.by_client_ip.get(&session.client_ip) == Some(&id) {
+                self.by_client_ip.remove(&session.client_ip);
             }
-            self.by_remote_addr.remove(&session.remote_addr);
+            if let Some(v6) = session.client_ipv6 {
+                if self.by_client_ipv6.get(&v6) == Some(&id) {
+                    self.by_client_ipv6.remove(&v6);
+                }
+            }
+            if self.by_remote_addr.get(&session.remote_addr) == Some(&id) {
+                self.by_remote_addr.remove(&session.remote_addr);
+            }
 
             // Record metrics
             crate::instrumentation::global().server.client_disconnected();
@@ -328,12 +349,22 @@ impl SessionManager {
         &mut self,
         old_addr: SocketAddr,
         new_addr: SocketAddr,
-    ) -> Option<SessionId> {
-        let session_id = self.by_remote_addr.remove(&old_addr)?;
-        let session = self.sessions.get_mut(&session_id)?;
+    ) -> Result<SessionId, SessionError> {
+        let session_id =
+            self.by_remote_addr.get(&old_addr).copied().ok_or(SessionError::NotFound)?;
+        if let Some(owner) = self.by_remote_addr.get(&new_addr) {
+            if *owner != session_id {
+                return Err(SessionError::RemoteAddrConflict(new_addr));
+            }
+        }
+        let session = self.sessions.get_mut(&session_id).ok_or(SessionError::NotFound)?;
+        if old_addr == new_addr {
+            return Ok(session_id);
+        }
         session.set_remote_addr(new_addr);
+        self.by_remote_addr.remove(&old_addr);
         self.by_remote_addr.insert(new_addr, session_id);
-        Some(session_id)
+        Ok(session_id)
     }
 
     /// Get all session IDs.
@@ -370,6 +401,10 @@ pub enum SessionError {
     MaxSessionsReached,
     NotFound,
     AlreadyExists,
+    SessionIdConflict(SessionId),
+    ClientIpConflict(Ipv4Addr),
+    ClientIpv6Conflict(Ipv6Addr),
+    RemoteAddrConflict(SocketAddr),
     BandwidthPolicy(String),
 }
 
@@ -379,6 +414,14 @@ impl std::fmt::Display for SessionError {
             SessionError::MaxSessionsReached => write!(f, "Maximum sessions reached"),
             SessionError::NotFound => write!(f, "Session not found"),
             SessionError::AlreadyExists => write!(f, "Session already exists"),
+            SessionError::SessionIdConflict(id) => write!(f, "Session ID already assigned: {id}"),
+            SessionError::ClientIpConflict(ip) => write!(f, "Client IPv4 already assigned: {ip}"),
+            SessionError::ClientIpv6Conflict(ip) => {
+                write!(f, "Client IPv6 already assigned: {ip}")
+            }
+            SessionError::RemoteAddrConflict(addr) => {
+                write!(f, "Remote address already assigned: {addr}")
+            }
             SessionError::BandwidthPolicy(error) => {
                 write!(f, "Session bandwidth policy failed: {error}")
             }
@@ -418,6 +461,105 @@ mod tests {
 
         mgr.remove(id);
         assert_eq!(mgr.len(), 0);
+    }
+
+    #[test]
+    fn add_rejects_duplicate_client_ipv4_without_mutating_indexes() {
+        let mut mgr = SessionManager::new(10);
+        let client_ip = Ipv4Addr::new(10, 8, 0, 2);
+        let first = Session::new("127.0.0.1:12345".parse().unwrap(), client_ip, 3600);
+        let first_id = first.id();
+        mgr.add(first).unwrap();
+
+        let duplicate = Session::new("127.0.0.1:12346".parse().unwrap(), client_ip, 3600);
+        assert!(matches!(
+            mgr.add(duplicate),
+            Err(SessionError::ClientIpConflict(ip)) if ip == client_ip
+        ));
+        assert_eq!(mgr.len(), 1);
+        assert_eq!(mgr.session_id_by_client_ip(IpAddr::V4(client_ip)), Some(first_id));
+        assert_eq!(mgr.session_id_by_remote_addr("127.0.0.1:12346".parse().unwrap()), None);
+    }
+
+    #[test]
+    fn add_rejects_duplicate_ipv6_and_remote_keys_without_mutation() {
+        let client_ipv6 = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
+        let mut ipv6_mgr = SessionManager::new(10);
+        let first = Session::new_dual_stack(
+            "127.0.0.1:12345".parse().unwrap(),
+            Ipv4Addr::new(10, 8, 0, 2),
+            Some(client_ipv6),
+            3600,
+        );
+        let first_id = first.id();
+        ipv6_mgr.add(first).unwrap();
+        let duplicate_ipv6 = Session::new_dual_stack(
+            "127.0.0.1:12346".parse().unwrap(),
+            Ipv4Addr::new(10, 8, 0, 3),
+            Some(client_ipv6),
+            3600,
+        );
+        assert!(matches!(
+            ipv6_mgr.add(duplicate_ipv6),
+            Err(SessionError::ClientIpv6Conflict(ip)) if ip == client_ipv6
+        ));
+        assert_eq!(ipv6_mgr.len(), 1);
+        assert_eq!(ipv6_mgr.session_id_by_client_ip(IpAddr::V6(client_ipv6)), Some(first_id));
+
+        let remote_addr = "127.0.0.1:12347".parse().unwrap();
+        let mut remote_mgr = SessionManager::new(10);
+        let first = Session::new(remote_addr, Ipv4Addr::new(10, 8, 0, 4), 3600);
+        let first_id = first.id();
+        remote_mgr.add(first).unwrap();
+        let duplicate_remote = Session::new(remote_addr, Ipv4Addr::new(10, 8, 0, 5), 3600);
+        assert!(matches!(
+            remote_mgr.add(duplicate_remote),
+            Err(SessionError::RemoteAddrConflict(addr)) if addr == remote_addr
+        ));
+        assert_eq!(remote_mgr.len(), 1);
+        assert_eq!(remote_mgr.session_id_by_remote_addr(remote_addr), Some(first_id));
+    }
+
+    #[test]
+    fn add_rejects_duplicate_session_id_without_replacing_existing_session() {
+        let mut mgr = SessionManager::new(10);
+        let first =
+            Session::new("127.0.0.1:12345".parse().unwrap(), Ipv4Addr::new(10, 8, 0, 2), 3600);
+        let first_id = first.id();
+        mgr.add(first).unwrap();
+        let duplicate = Session {
+            id: first_id,
+            remote_addr: "127.0.0.1:12346".parse().unwrap(),
+            client_ip: Ipv4Addr::new(10, 8, 0, 3),
+            client_ipv6: None,
+            created_at: Instant::now(),
+            timeout: Duration::from_secs(3600),
+            stats: Arc::new(SessionStats::new()),
+        };
+
+        assert!(
+            matches!(mgr.add(duplicate), Err(SessionError::SessionIdConflict(id)) if id == first_id)
+        );
+        assert_eq!(mgr.len(), 1);
+        assert_eq!(mgr.get(first_id).unwrap().remote_addr(), "127.0.0.1:12345".parse().unwrap());
+        assert_eq!(mgr.session_id_by_remote_addr("127.0.0.1:12346".parse().unwrap()), None);
+    }
+
+    #[test]
+    fn rebind_rejects_foreign_remote_address_without_mutating_state() {
+        let mut mgr = SessionManager::new(10);
+        let old_addr = "127.0.0.1:12345".parse().unwrap();
+        let new_addr = "127.0.0.1:12346".parse().unwrap();
+        let first_id = mgr.add(Session::new(old_addr, Ipv4Addr::new(10, 8, 0, 2), 3600)).unwrap();
+        let second_id = mgr.add(Session::new(new_addr, Ipv4Addr::new(10, 8, 0, 3), 3600)).unwrap();
+
+        assert!(matches!(
+            mgr.rebind_remote_addr(old_addr, new_addr),
+            Err(SessionError::RemoteAddrConflict(addr)) if addr == new_addr
+        ));
+        assert_eq!(mgr.session_id_by_remote_addr(old_addr), Some(first_id));
+        assert_eq!(mgr.session_id_by_remote_addr(new_addr), Some(second_id));
+        assert_eq!(mgr.get(first_id).unwrap().remote_addr(), old_addr);
     }
 
     #[test]
