@@ -596,7 +596,14 @@ pub(crate) fn resolve_admin_web_auth(
         );
     }
 
-    Ok(admin_http::AdminAuth::new(admin_user, admin_password, requires_password_change))
+    admin_http::AdminAuth::new(admin_user, admin_password, requires_password_change).map_err(
+        |error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("admin authentication initialization failed: {error}"),
+            )
+        },
+    )
 }
 
 pub(crate) fn resolve_admin_auth_store_path(

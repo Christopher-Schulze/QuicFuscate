@@ -1,4 +1,27 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+struct TemporaryFileGuard {
+    path: PathBuf,
+    committed: bool,
+}
+
+impl TemporaryFileGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path, committed: false }
+    }
+
+    fn mark_committed(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for TemporaryFileGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
 
 fn open_temp_file(path: &Path, mode: Option<u32>) -> std::io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
@@ -41,11 +64,13 @@ pub fn atomic_write_file(
         suffix
     ));
 
+    let mut temporary_file_guard = TemporaryFileGuard::new(tmp_path.clone());
     let mut file = open_temp_file(&tmp_path, mode)?;
     file.write_all(bytes)?;
     file.sync_all()?;
 
     std::fs::rename(&tmp_path, path)?;
+    temporary_file_guard.mark_committed();
 
     #[cfg(unix)]
     if let Some(mode) = mode {
@@ -133,6 +158,27 @@ mod tests {
 
         let read_back = std::fs::read(&path).unwrap();
         assert!(read_back.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_atomic_write_file_removes_temporary_after_commit_failure() {
+        let dir = temp_dir_for_test("failed_commit_cleanup");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("destination");
+        std::fs::create_dir(&path).unwrap();
+
+        let result = atomic_write_file(&path, b"must not publish", None, "test::failed_commit");
+
+        assert!(result.is_err());
+        assert!(path.is_dir(), "failed replacement must retain the destination");
+        let temporary_files: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(temporary_files.is_empty(), "failed commit left temporary files");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

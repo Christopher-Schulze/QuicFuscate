@@ -38,6 +38,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::error::Error;
+use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{
@@ -81,13 +83,57 @@ pub struct AdminAuth {
     requires_password_change: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AdminAuthError {
+    EmptyUsername,
+    PasswordHash(String),
+    InvalidVerifier(String),
+}
+
+impl Display for AdminAuthError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyUsername => formatter.write_str("admin username must not be empty"),
+            Self::PasswordHash(error) => write!(formatter, "admin password hashing failed: {error}"),
+            Self::InvalidVerifier(error) => {
+                write!(formatter, "admin password verifier is invalid: {error}")
+            }
+        }
+    }
+}
+
+impl Error for AdminAuthError {}
+
 impl AdminAuth {
-    pub fn new(user: String, password: String, requires_password_change: bool) -> Self {
-        let password_phc = hash_password(&password).unwrap_or_else(|e| {
-            log::error!("{} - admin account will be unusable until password is reset", e);
-            String::new()
-        });
-        Self { user, password_phc, requires_password_change }
+    pub fn new(
+        user: String,
+        password: String,
+        requires_password_change: bool,
+    ) -> Result<Self, AdminAuthError> {
+        Self::new_with_hasher(user, password, requires_password_change, hash_password)
+    }
+
+    fn new_with_hasher(
+        user: String,
+        password: String,
+        requires_password_change: bool,
+        hasher: impl FnOnce(&str) -> Result<String, String>,
+    ) -> Result<Self, AdminAuthError> {
+        let password_phc = hasher(&password).map_err(AdminAuthError::PasswordHash)?;
+        Self::from_parts(user, password_phc, requires_password_change)
+    }
+
+    fn from_parts(
+        user: String,
+        password_phc: String,
+        requires_password_change: bool,
+    ) -> Result<Self, AdminAuthError> {
+        if user.trim().is_empty() {
+            return Err(AdminAuthError::EmptyUsername);
+        }
+        PasswordHash::new(&password_phc)
+            .map_err(|error| AdminAuthError::InvalidVerifier(error.to_string()))?;
+        Ok(Self { user, password_phc, requires_password_change })
     }
 
     fn verify(&self, user: &str, password: &str) -> bool {
@@ -109,17 +155,17 @@ impl AdminAuth {
         verify_password(&self.password_phc, password)
     }
 
-    fn set_credentials(&mut self, new_user: String, new_password: String) -> Result<(), String> {
-        let phc = hash_password(&new_password)?;
-        self.user = new_user;
-        self.password_phc = phc;
-        self.requires_password_change = false;
-        Ok(())
+    fn candidate_with_credentials(
+        &self,
+        new_user: String,
+        new_password: &str,
+    ) -> Result<Self, AdminAuthError> {
+        let password_phc = hash_password(new_password).map_err(AdminAuthError::PasswordHash)?;
+        Self::from_parts(new_user, password_phc, false)
     }
 
-    fn set_username(&mut self, new_user: String) {
-        self.user = new_user;
-        // Intentionally keep password hash and requires_password_change unchanged.
+    fn candidate_with_username(&self, new_user: String) -> Self {
+        Self { user: new_user, ..self.clone() }
     }
 }
 
@@ -133,47 +179,50 @@ struct AdminAuthFile {
     updated_at: u64,
 }
 
-fn load_auth_file(path: &Path) -> Option<AdminAuth> {
-    let bytes = std::fs::read(path).ok()?;
-    let file: AdminAuthFile = serde_json::from_slice(&bytes).ok()?;
-    if file.user.trim().is_empty() || file.password_phc.trim().is_empty() {
-        return None;
-    }
-    Some(AdminAuth {
-        user: file.user,
-        password_phc: file.password_phc,
-        requires_password_change: file.requires_password_change,
-    })
+fn load_auth_file(path: &Path) -> std::io::Result<Option<AdminAuth>> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let file: AdminAuthFile = serde_json::from_slice(&bytes).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("admin auth file {} is not valid JSON: {error}", path.display()),
+        )
+    })?;
+    AdminAuth::from_parts(file.user, file.password_phc, file.requires_password_change)
+        .map(Some)
+        .map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("admin auth file {} is invalid: {error}", path.display()),
+            )
+        })
 }
 
-fn persist_auth_file(path: &Path, auth: &AdminAuth) {
+fn persist_auth_file(path: &Path, auth: &AdminAuth) -> std::io::Result<()> {
     let payload = AdminAuthFile {
         user: auth.user.clone(),
         password_phc: auth.password_phc.clone(),
         requires_password_change: auth.requires_password_change,
         updated_at: current_epoch_secs(),
     };
-    let bytes = match serde_json::to_vec_pretty(&payload) {
-        Ok(b) => b,
-        Err(e) => {
-            log::warn!("admin auth serialize failed: {}", e);
-            return;
-        }
-    };
+    let bytes = serde_json::to_vec_pretty(&payload).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("admin auth serialization failed: {error}"),
+        )
+    })?;
     if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            log::warn!("admin auth mkdir failed ({}): {}", parent.display(), e);
-            return;
-        }
+        std::fs::create_dir_all(parent)?;
     }
-    if let Err(e) = super::fsutil::atomic_write_file(
+    super::fsutil::atomic_write_file(
         path,
         &bytes,
         Some(0o600),
         "admin_http::auth_write_tmp_nonce",
-    ) {
-        log::warn!("admin auth write failed ({}): {}", path.display(), e);
-    }
+    )
 }
 
 /// Re-export from the canonical shared utility in `crate::rng`.
@@ -444,17 +493,34 @@ impl AdminHttpServer {
         auth: Option<AdminAuth>,
         auth_path: Option<PathBuf>,
         handler: Arc<dyn AdminHttpHandler>,
-    ) -> Self {
-        let auth_loaded = auth_path.as_ref().and_then(|p| load_auth_file(p.as_path()));
+    ) -> std::io::Result<Self> {
+        let mut loaded_from_disk = false;
+        let auth_loaded = if let Some(path) = auth_path.as_ref() {
+            match load_auth_file(path.as_path())? {
+                Some(auth) => {
+                    loaded_from_disk = true;
+                    Some(auth)
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
         let auth = auth_loaded.or(auth);
+        if auth_path.is_some() && auth.is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "admin auth path requires an authentication credential",
+            ));
+        }
         let auth = auth.map(|a| Arc::new(RwLock::new(a)));
-        if let (Some(path), Some(auth_ref)) = (auth_path.as_ref(), auth.as_ref()) {
-            if std::fs::metadata(path).is_err() {
+        if !loaded_from_disk {
+            if let (Some(path), Some(auth_ref)) = (auth_path.as_ref(), auth.as_ref()) {
                 let guard = auth_ref.read();
-                persist_auth_file(path, &guard);
+                persist_auth_file(path, &guard)?;
             }
         }
-        Self {
+        Ok(Self {
             addr,
             web_root,
             auth,
@@ -467,7 +533,7 @@ impl AdminHttpServer {
                 LOGIN_RATE_LIMIT_WINDOW_SECS,
             ),
             conn_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS)),
-        }
+        })
     }
 
     pub fn shutdown_signal(&self) -> Arc<AtomicBool> {
@@ -1209,12 +1275,6 @@ fn handle_admin_auth(
         return json_response(401, &AdminResponse::error("Invalid credentials"));
     }
 
-    // Success: clear rate limiter for this key.
-    {
-        let mut limiter = rate_limiter.lock();
-        limiter.clear(&key);
-    }
-
     let new_user = payload.new_username.as_deref().unwrap_or(old_user.as_str()).trim().to_string();
     if new_user.is_empty() {
         return json_response(400, &AdminResponse::error("Username cannot be empty"));
@@ -1232,28 +1292,45 @@ fn handle_admin_auth(
         }
     }
 
-    let hash_failed = {
-        let mut guard = auth.write();
-        if let Some(pw) = new_password {
-            match guard.set_credentials(new_user.clone(), pw) {
-                Ok(()) => false,
-                Err(e) => {
-                    log::error!("{}", e);
-                    true
-                }
-            }
+    let mut guard = auth.write();
+    if !guard.verify_password_only(payload.current_password.as_str()) {
+        log_action(peer, "admin-auth", &format!("user={}", guard.user()), false);
+        return json_response(401, &AdminResponse::error("Invalid credentials"));
+    }
+    let candidate = {
+        let result = if let Some(ref password) = new_password {
+            guard.candidate_with_credentials(new_user.clone(), password)
         } else {
-            // Username-only update: keep password hash and requires_password_change.
-            guard.set_username(new_user);
-            false
+            Ok(guard.candidate_with_username(new_user))
+        };
+        match result {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                log::error!("admin auth candidate construction failed: {}", error);
+                return json_response(500, &AdminResponse::error("Password hashing failed"));
+            }
         }
     };
-    if hash_failed {
-        return json_response(500, &AdminResponse::error("Password hashing failed"));
-    }
     if let Some(path) = auth_path {
-        let guard = auth.read();
-        persist_auth_file(path, &guard);
+        if let Err(error) = persist_auth_file(path, &candidate) {
+            log::error!(
+                "admin auth durable update failed ({}): {}",
+                path.display(),
+                error
+            );
+            return json_response(
+                500,
+                &AdminResponse::error("Admin credential persistence failed"),
+            );
+        }
+    }
+    *guard = candidate;
+    drop(guard);
+
+    // Success: clear rate limiter only after the credential transaction commits.
+    {
+        let mut limiter = rate_limiter.lock();
+        limiter.clear(&key);
     }
 
     {

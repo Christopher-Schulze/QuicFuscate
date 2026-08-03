@@ -413,8 +413,9 @@ fn admin_http_contracts() {
     let expected_qkey = handler.qkey.clone();
     let expected_qkey_token = handler.qkey_token.clone();
     let handler = Arc::new(handler);
-    let auth = AdminAuth::new(user.to_string(), password.to_string(), false);
-    let server = AdminHttpServer::new(local_addr, web_root, Some(auth), None, handler);
+    let auth = AdminAuth::new(user.to_string(), password.to_string(), false).expect("auth");
+    let server =
+        AdminHttpServer::new(local_addr, web_root, Some(auth), None, handler).expect("server");
     let shutdown = server.shutdown_signal();
     let handle = std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -786,7 +787,7 @@ fn admin_http_request_line_fuzz_corpus_rejects_malformed_inputs() {
     let _ = std::fs::create_dir_all(&web_root);
     let _ = std::fs::write(web_root.join("index.html"), "<!doctype html><html>ok</html>");
     let handler = Arc::new(DummyHandler::new(local_addr.to_string()));
-    let server = AdminHttpServer::new(local_addr, web_root, None, None, handler);
+    let server = AdminHttpServer::new(local_addr, web_root, None, None, handler).expect("server");
     let shutdown = server.shutdown_signal();
     let handle = std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()

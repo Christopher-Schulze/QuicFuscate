@@ -76,9 +76,9 @@ pub(crate) fn start_standalone_admin_web_service(
     auth: AdminAuth,
     auth_path: std::path::PathBuf,
     handler: ServerAdminHttpRuntimeHandler,
-) {
+) -> std::io::Result<()> {
     let server =
-        AdminHttpServer::new(addr, web_root, Some(auth), Some(auth_path), Arc::new(handler));
+        AdminHttpServer::new(addr, web_root, Some(auth), Some(auth_path), Arc::new(handler))?;
     runtime.register_admin_web_shutdown(server.shutdown_signal());
     // JoinHandle intentionally not stored: graceful shutdown via registered signal.
     tokio::spawn(async move {
@@ -86,6 +86,7 @@ pub(crate) fn start_standalone_admin_web_service(
             log::warn!("admin web server failed: {}", e);
         }
     });
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -111,7 +112,7 @@ pub fn start_configured_standalone_admin_web_service(
         admin_log_buffer,
     );
     let auth_path = resolve_admin_auth_store_path(config_path);
-    start_standalone_admin_web_service(runtime, addr, web_root, auth, auth_path, handler);
+    start_standalone_admin_web_service(runtime, addr, web_root, auth, auth_path, handler)?;
     Ok(())
 }
 

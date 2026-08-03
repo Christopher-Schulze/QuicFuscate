@@ -297,11 +297,10 @@ mod tests {
     }
 
     fn test_auth(password: &str, requires_password_change: bool) -> Option<Arc<RwLock<AdminAuth>>> {
-        Some(Arc::new(RwLock::new(AdminAuth::new(
-            "admin".to_string(),
-            password.to_string(),
-            requires_password_change,
-        ))))
+        Some(Arc::new(RwLock::new(
+            AdminAuth::new("admin".to_string(), password.to_string(), requires_password_change)
+                .expect("auth fixture"),
+        )))
     }
 
     fn test_sessions() -> Arc<Mutex<SessionStore>> {
@@ -318,6 +317,28 @@ mod tests {
 
     fn test_handler() -> Arc<dyn AdminHttpHandler> {
         Arc::new(TestHandler)
+    }
+
+    fn test_auth_root(label: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "qf-admin-auth-{label}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("auth test root");
+        root
+    }
+
+    fn admin_auth_request(body: &str) -> HttpRequest {
+        HttpRequest {
+            method: "POST".to_string(),
+            path: "/api/admin/auth".to_string(),
+            headers: Vec::new(),
+            body: body.as_bytes().to_vec(),
+        }
     }
 
     fn spawn_short_unauth_server(
@@ -1006,6 +1027,151 @@ mod tests {
     }
 
     #[test]
+    fn admin_auth_initialization_rejects_hash_and_invalid_verifier_failures() {
+        let hash_error = AdminAuth::new_with_hasher(
+            "admin".to_string(),
+            "password".to_string(),
+            false,
+            |_| Err("entropy unavailable".to_string()),
+        )
+        .expect_err("hash failure must abort auth construction");
+        assert_eq!(hash_error, AdminAuthError::PasswordHash("entropy unavailable".to_string()));
+
+        let verifier_error = AdminAuth::new_with_hasher(
+            "admin".to_string(),
+            "password".to_string(),
+            false,
+            |_| Ok("not-a-password-hash".to_string()),
+        )
+        .expect_err("invalid verifier must abort auth construction");
+        assert!(matches!(verifier_error, AdminAuthError::InvalidVerifier(_)));
+    }
+
+    #[test]
+    fn admin_http_server_rejects_auth_persistence_failure_before_listener_start() {
+        let root = test_auth_root("startup");
+        let parent_file = root.join("parent-file");
+        std::fs::write(&parent_file, b"not a directory").expect("parent fixture");
+        let auth_path = parent_file.join("admin-auth.json");
+        let auth = AdminAuth::new("admin".to_string(), "123456".to_string(), false)
+            .expect("auth fixture");
+
+        let result = AdminHttpServer::new(
+            "127.0.0.1:0".parse().expect("address"),
+            root.clone(),
+            Some(auth),
+            Some(auth_path),
+            test_handler(),
+        );
+        let error = result.err().expect("startup must fail before listener publication");
+        assert!(!error.to_string().is_empty());
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn admin_auth_failed_atomic_update_preserves_memory_and_sessions() {
+        let root = test_auth_root("failed-update");
+        let auth = Arc::new(RwLock::new(
+            AdminAuth::new("admin".to_string(), "123456".to_string(), true)
+                .expect("auth fixture"),
+        ));
+        let failed_target = root.join("auth-target-directory");
+        std::fs::create_dir(&failed_target).expect("failure target");
+        let sessions = test_sessions();
+        let (session_id, _) = sessions.lock().create();
+        let response = handle_admin_auth(
+            admin_auth_request(r#"{"current_password":"123456","new_password":"abcdef"}"#),
+            Some(auth.clone()),
+            Some(&failed_target),
+            &sessions,
+            test_rate_limiter(5),
+            None,
+        );
+
+        assert_eq!(response.status().as_u16(), 500);
+        let guard = auth.read();
+        assert_eq!(guard.user(), "admin");
+        assert!(guard.requires_password_change());
+        assert!(guard.verify("admin", "123456"));
+        assert!(!guard.verify("admin", "abcdef"));
+        drop(guard);
+        assert!(sessions.lock().is_valid(&session_id));
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn admin_auth_success_persists_before_session_invalidation() {
+        let root = test_auth_root("success");
+        let auth_path = root.join("admin-auth.json");
+        let initial = AdminAuth::new("admin".to_string(), "123456".to_string(), true)
+            .expect("auth fixture");
+        persist_auth_file(&auth_path, &initial).expect("initial auth persistence");
+        let auth = Arc::new(RwLock::new(initial));
+        let sessions = test_sessions();
+        let (session_id, _) = sessions.lock().create();
+        let response = handle_admin_auth(
+            admin_auth_request(r#"{"current_password":"123456","new_username":"root"}"#),
+            Some(auth.clone()),
+            Some(&auth_path),
+            &sessions,
+            test_rate_limiter(5),
+            None,
+        );
+
+        assert_eq!(response.status().as_u16(), 200);
+        assert!(!sessions.lock().is_valid(&session_id));
+        let persisted = load_auth_file(&auth_path)
+            .expect("load persisted auth")
+            .expect("persisted auth");
+        assert_eq!(persisted.user(), "root");
+        assert!(persisted.requires_password_change());
+        assert!(persisted.verify("root", "123456"));
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn admin_auth_failed_update_does_not_change_restart_credential() {
+        let root = test_auth_root("restart");
+        let auth_path = root.join("admin-auth.json");
+        let backup_path = root.join("admin-auth.backup");
+        let initial = AdminAuth::new("admin".to_string(), "123456".to_string(), false)
+            .expect("auth fixture");
+        persist_auth_file(&auth_path, &initial).expect("initial auth persistence");
+        let auth = Arc::new(RwLock::new(initial));
+
+        std::fs::rename(&auth_path, &backup_path).expect("move durable credential");
+        std::fs::create_dir(&auth_path).expect("interrupted-write destination");
+        let response = handle_admin_auth(
+            admin_auth_request(r#"{"current_password":"123456","new_password":"abcdef"}"#),
+            Some(auth),
+            Some(&auth_path),
+            &test_sessions(),
+            test_rate_limiter(5),
+            None,
+        );
+        assert_eq!(response.status().as_u16(), 500);
+
+        std::fs::remove_dir_all(&auth_path).expect("remove failed destination");
+        std::fs::rename(&backup_path, &auth_path).expect("restore durable credential");
+        let restarted = AdminHttpServer::new(
+            "127.0.0.1:0".parse().expect("address"),
+            root.clone(),
+            Some(
+                AdminAuth::new("configured".to_string(), "configured".to_string(), false)
+                    .expect("configured auth"),
+            ),
+            Some(auth_path),
+            test_handler(),
+        )
+        .expect("restart must load the last durable credential");
+        let loaded = restarted.auth.as_ref().expect("auth loaded").read();
+        assert_eq!(loaded.user(), "admin");
+        assert!(loaded.verify("admin", "123456"));
+        assert!(!loaded.verify("configured", "configured"));
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
     fn admin_auth_rejects_username_too_long() {
         let web_root = std::env::temp_dir();
         let auth = test_auth("123", false);
@@ -1489,7 +1655,8 @@ mod tests {
             None,
             None,
             test_handler(),
-        );
+        )
+        .expect("admin server");
         let shutdown = server.shutdown_signal();
         let task = tokio::spawn(async move { server.run().await });
         tokio::time::sleep(Duration::from_millis(20)).await;
