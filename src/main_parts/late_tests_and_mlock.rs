@@ -78,7 +78,8 @@ mod runtime_reload_tests {
 
     #[test]
     fn load_runtime_profiles_bootstraps_auto_fec_in_zero_without_config_file() {
-        let (fec, stealth, optimize, _) = load_runtime_profiles(None, &None, None);
+        let (fec, stealth, optimize, _) =
+            load_runtime_profiles(None, &None, None).expect("default runtime profiles");
         let default_stealth = StealthConfig::default();
         let default_optimize = OptimizeConfig::default();
         assert_eq!(fec.initial_mode, quicfuscate::fec::FecMode::Zero);
@@ -87,6 +88,84 @@ mod runtime_reload_tests {
         assert_eq!(stealth.enable_http3_masquerading, default_stealth.enable_http3_masquerading);
         assert_eq!(optimize.pool_capacity, default_optimize.pool_capacity);
         assert_eq!(optimize.block_size, default_optimize.block_size);
+    }
+
+    #[test]
+    fn load_runtime_profiles_rejects_missing_explicit_fec_file() {
+        let path = std::env::temp_dir().join(format!(
+            "qf-missing-fec-config-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        let fec_config = Some(path.clone());
+        let error = load_runtime_profiles(None, &fec_config, None)
+            .err()
+            .expect("missing explicit FEC file must fail closed");
+        assert!(error.to_string().contains("explicit FEC configuration"));
+        assert!(error.to_string().contains(path.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn load_runtime_profiles_rejects_malformed_and_invalid_explicit_fec_files() {
+        let malformed = write_temp_config("[adaptive_fec\ninitial_mode = \"auto\"");
+        let malformed_error = load_runtime_profiles(None, &Some(malformed.clone()), None)
+            .err()
+            .expect("malformed explicit FEC file must fail closed");
+        assert!(malformed_error.to_string().contains("explicit FEC configuration"));
+        assert!(malformed_error.to_string().contains("server.toml"));
+
+        let invalid = write_temp_config(
+            r#"
+[adaptive_fec]
+initial_mode = "normal"
+
+[[adaptive_fec.modes]]
+name = "normal"
+w0 = 0
+"#,
+        );
+        let invalid_error = load_runtime_profiles(None, &Some(invalid), None)
+            .err()
+            .expect("invalid explicit FEC file must fail closed");
+        assert!(invalid_error.to_string().contains("window_sizes.Normal"));
+    }
+
+    #[test]
+    fn load_runtime_profiles_accepts_valid_custom_fec_file_without_defaulting() {
+        let path = write_temp_config(
+            r#"
+[adaptive_fec]
+control_policy = "auto"
+initial_mode = "strong"
+lambda = 0.25
+burst_window = 32
+hysteresis = 0.05
+stream_every = 3
+
+[[adaptive_fec.modes]]
+name = "normal"
+w0 = 80
+"#,
+        );
+        let fec_config = Some(path);
+        let (fec, _, _, _) =
+            load_runtime_profiles(None, &fec_config, None).expect("valid explicit FEC file");
+        assert_eq!(fec.initial_mode, quicfuscate::fec::FecMode::Strong);
+        assert_eq!(fec.window_sizes.get(&quicfuscate::fec::FecMode::Normal), Some(&80));
+        assert_eq!(fec.configured_stream_every, Some(3));
+    }
+
+    #[test]
+    fn load_runtime_profiles_rejects_ambiguous_unified_and_standalone_fec_sources() {
+        let unified = write_temp_config("");
+        let standalone = Some(unified.clone());
+        let error = load_runtime_profiles(Some(&unified), &standalone, None)
+            .err()
+            .expect("two FEC sources must not silently discard one");
+        assert!(error.to_string().contains("mutually exclusive"));
     }
 
     #[test]
@@ -581,7 +660,7 @@ async fn run_server(
     );
 
     let (fec_cfg, stealth_cfg, opt_cfg, anti_replay_section) =
-        load_runtime_profiles(config_path, fec_config, fec_mode);
+        load_runtime_profiles(config_path, fec_config, fec_mode)?;
 
     // Reuse the configuration validated before global logger and runtime setup.
     let engine_cfg_opt = startup_engine_config;

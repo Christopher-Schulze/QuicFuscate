@@ -4035,6 +4035,12 @@ The constructor/runtime boundary is explicit:
   - `FecObserverProfilePolicy` with `FecObserverPlatformHints` carries observer profile classification as either `Explicit(...)` or retained `Ambient(...)`.
 - Detection and derivation are intentionally split, so repeated same-process construction stays deterministic per instance rather than re-reading environment state from live runtime paths.
 
+### Standalone FEC file configuration
+- `--fec-config PATH` is an explicit standalone input. File I/O, TOML parsing, enum decoding, and semantic validation must all succeed before `AdaptiveFec` construction; any failure returns a nonzero startup result and never selects `FecConfig::product_default()` as a fallback.
+- The standalone file schema is `[adaptive_fec]`. `initial_mode` accepts `auto`, `off`, `zero`, `light`, `normal`, `on`, `medium`, `strong`, `extreme`, `ultra`, `fountain`, or `streaming`. `modes[].name` accepts the nine public codec modes: `zero`, `light`, `normal`, `medium`, `strong`, `extreme`, `ultra`, `fountain`, and `streaming`. Unknown values are rejected with the field and submitted value.
+- Scalar validation requires `lambda` in `0..=1`, `hysteresis` in `0..1`, positive `burst_window`, finite positive `kalman_q` and `kalman_r`, and positive `stream_every` when supplied. Window validation requires `Zero=0`, every other mode in `1..=2048`, and `Fountain` in `1..=128`.
+- `--config` and `--fec-config` are mutually exclusive because the standalone path must not silently discard one of two submitted FEC sources. The accepted source is recorded by the runtime log as `Accepted FEC policy source=product-default`, `standalone-file:<path>`, or `unified-config:<path>`.
+
 ### Environment controls (runtime)
 - `QUICFUSCATE_FEC_PARTIAL`: `0|1|true|false` - controls partial recovery emission (default: enabled).
 - `QUICFUSCATE_FEC_LAZY`: `0|1|true|false` - lazy decoder gating (default: enabled).

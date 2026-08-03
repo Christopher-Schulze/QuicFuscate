@@ -986,6 +986,8 @@ impl FecConfig {
         m.insert(Medium, 128);
         m.insert(Strong, 512);
         m.insert(Extreme, 1024);
+        m.insert(Ultra, 1024);
+        m.insert(Fountain, DEFAULT_FOUNTAIN_WINDOW);
         m.insert(Streaming, 64);
         m
     }
@@ -1003,6 +1005,8 @@ impl FecConfig {
             FecMode::Extreme,
             section.window_poor.saturating_mul(2).max(section.window_poor).max(1),
         );
+        windows.insert(FecMode::Ultra, 1024);
+        windows.insert(FecMode::Fountain, DEFAULT_FOUNTAIN_WINDOW);
         windows.insert(FecMode::Streaming, section.window_fair.max(1));
         windows
     }
@@ -1049,10 +1053,12 @@ impl FecConfig {
     /// Parse FEC configuration from a TOML string containing `[adaptive_fec]`.
     pub fn from_toml(s: &str) -> Result<Self, Box<dyn std::error::Error>> {
         #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Root {
             adaptive_fec: Adaptive,
         }
         #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Adaptive {
             #[serde(alias = "policy")]
             control_policy: Option<String>,
@@ -1067,6 +1073,7 @@ impl FecConfig {
             modes: Option<Vec<ModeSection>>,
         }
         #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct ModeSection {
             name: String,
             w0: usize,
@@ -1077,30 +1084,15 @@ impl FecConfig {
         let mut windows = FecConfig::default_windows();
         if let Some(modes) = af.modes {
             for msec in modes {
-                let mode = match msec.name.to_lowercase().as_str() {
-                    "zero" => FecMode::Zero,
-                    "light" => FecMode::Light,
-                    "normal" => FecMode::Normal,
-                    "medium" => FecMode::Medium,
-                    "strong" => FecMode::Strong,
-                    "extreme" => FecMode::Extreme,
-                    "streaming" => FecMode::Streaming,
-                    _ => continue,
-                };
+                let mode = parse_fec_mode_name(&msec.name, "modes[].name")?;
                 windows.insert(mode, msec.w0);
             }
         }
-        let initial_mode = af.initial_mode.as_deref().unwrap_or("auto").trim().to_lowercase();
-        let initial_mode = match initial_mode.as_str() {
-            "zero" | "off" => FecMode::Zero,
-            "auto" => FecMode::Zero,
-            "light" => FecMode::Light,
-            "normal" | "on" => FecMode::Normal,
-            "medium" => FecMode::Medium,
-            "strong" => FecMode::Strong,
-            "extreme" => FecMode::Extreme,
-            "streaming" => FecMode::Streaming,
-            _ => FecMode::Normal,
+        let initial_mode = af.initial_mode.as_deref().unwrap_or("auto").trim();
+        let initial_mode = match initial_mode.to_ascii_lowercase().as_str() {
+            "auto" | "off" => FecMode::Zero,
+            "on" => FecMode::Normal,
+            _ => parse_fec_mode_name(initial_mode, "initial_mode")?,
         };
         let control_policy = match af.control_policy.as_deref().map(str::trim) {
             None | Some("") | Some("auto") => FecControlPolicy::Auto,
@@ -1122,7 +1114,7 @@ impl FecConfig {
             kalman_enabled: af.kalman_enabled.unwrap_or(false),
             kalman_q: af.kalman_q.unwrap_or(0.001),
             kalman_r: af.kalman_r.unwrap_or(0.01),
-            configured_stream_every: af.stream_every.map(|value| value.max(1)),
+            configured_stream_every: af.stream_every,
             window_sizes: windows,
         })
     }
@@ -1167,13 +1159,57 @@ impl FecConfig {
         if !(0.0..1.0).contains(&self.hysteresis) {
             return Err("hysteresis must be between 0 and 1".into());
         }
-        if self.kalman_enabled && (self.kalman_q <= 0.0 || self.kalman_r <= 0.0) {
-            return Err("kalman_q and kalman_r must be positive".into());
+        if !self.kalman_q.is_finite() || self.kalman_q <= 0.0 {
+            return Err("kalman_q must be finite and positive".into());
+        }
+        if !self.kalman_r.is_finite() || self.kalman_r <= 0.0 {
+            return Err("kalman_r must be finite and positive".into());
         }
         if matches!(self.configured_stream_every, Some(0)) {
             return Err("configured_stream_every must be > 0".into());
         }
+        for (mode, window) in &self.window_sizes {
+            if *window > wire::MAX_SOURCE_COUNT as usize {
+                return Err(format!(
+                    "window_sizes.{mode:?} must be <= {}",
+                    wire::MAX_SOURCE_COUNT
+                ));
+            }
+            if *mode == FecMode::Zero {
+                if *window != 0 {
+                    return Err("window_sizes.Zero must be 0".into());
+                }
+            } else if *window == 0 {
+                return Err(format!("window_sizes.{mode:?} must be > 0"));
+            }
+            if *mode == FecMode::Fountain && *window > MAX_FOUNTAIN_WINDOW {
+                return Err(format!(
+                    "window_sizes.Fountain must be <= {}",
+                    MAX_FOUNTAIN_WINDOW
+                ));
+            }
+        }
         Ok(())
+    }
+}
+
+fn parse_fec_mode_name(raw: &str, field: &str) -> Result<FecMode, std::io::Error> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "zero" => Ok(FecMode::Zero),
+        "light" => Ok(FecMode::Light),
+        "normal" => Ok(FecMode::Normal),
+        "medium" => Ok(FecMode::Medium),
+        "strong" => Ok(FecMode::Strong),
+        "extreme" => Ok(FecMode::Extreme),
+        "ultra" => Ok(FecMode::Ultra),
+        "fountain" => Ok(FecMode::Fountain),
+        "streaming" => Ok(FecMode::Streaming),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "adaptive_fec.{field} contains unsupported FEC mode '{raw}' (expected zero, light, normal, medium, strong, extreme, ultra, fountain, or streaming)"
+            ),
+        )),
     }
 }
 

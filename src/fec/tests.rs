@@ -397,6 +397,96 @@ fn test_product_fec_default_is_auto_and_stream_every_is_explicit() {
 }
 
 #[test]
+fn standalone_fec_parser_rejects_unknown_mode_values() {
+    let unknown_initial = FecConfig::from_toml(
+        r#"
+[adaptive_fec]
+initial_mode = "norml"
+"#,
+    )
+    .expect_err("unknown initial mode must be rejected");
+    assert!(unknown_initial.to_string().contains("initial_mode"));
+    assert!(unknown_initial.to_string().contains("norml"));
+
+    let unknown_window_mode = FecConfig::from_toml(
+        r#"
+[adaptive_fec]
+[[adaptive_fec.modes]]
+name = "norml"
+w0 = 64
+"#,
+    )
+    .expect_err("unknown mode entry must be rejected");
+    assert!(unknown_window_mode.to_string().contains("modes[].name"));
+    assert!(unknown_window_mode.to_string().contains("norml"));
+
+    let unknown_field = FecConfig::from_toml(
+        r#"
+[adaptive_fec]
+unexpected = true
+"#,
+    )
+    .expect_err("unknown standalone FEC field must be rejected");
+    assert!(unknown_field.to_string().contains("unexpected"));
+}
+
+#[test]
+fn standalone_fec_parser_accepts_all_public_modes_and_preserves_zero_stream_interval() {
+    let config = FecConfig::from_toml(
+        r#"
+[adaptive_fec]
+control_policy = "auto"
+initial_mode = "fountain"
+stream_every = 0
+
+[[adaptive_fec.modes]]
+name = "ultra"
+w0 = 1024
+
+[[adaptive_fec.modes]]
+name = "fountain"
+w0 = 128
+"#,
+    )
+    .expect("valid custom FEC configuration");
+
+    assert_eq!(config.initial_mode, FecMode::Fountain);
+    assert_eq!(config.window_sizes.get(&FecMode::Ultra), Some(&1024));
+    assert_eq!(config.window_sizes.get(&FecMode::Fountain), Some(&128));
+    assert_eq!(config.configured_stream_every, Some(0));
+    let error = config.validate().expect_err("stream_every=0 must fail validation");
+    assert!(error.contains("configured_stream_every"));
+}
+
+#[test]
+fn standalone_fec_validation_rejects_invalid_numeric_and_window_values() {
+    let invalid_lambda = FecConfig { lambda: 1.1, ..FecConfig::default() };
+    assert!(invalid_lambda.validate().unwrap_err().contains("lambda"));
+
+    let invalid_burst_window = FecConfig { burst_window: 0, ..FecConfig::default() };
+    assert!(invalid_burst_window.validate().unwrap_err().contains("burst_window"));
+
+    let invalid_kalman = FecConfig { kalman_q: 0.0, ..FecConfig::default() };
+    assert!(invalid_kalman.validate().unwrap_err().contains("kalman_q"));
+
+    let mut zero_mode_window = FecConfig::default();
+    zero_mode_window.window_sizes.insert(FecMode::Zero, 1);
+    assert!(zero_mode_window.validate().unwrap_err().contains("window_sizes.Zero"));
+
+    let mut empty_mode_window = FecConfig::default();
+    empty_mode_window.window_sizes.insert(FecMode::Normal, 0);
+    assert!(empty_mode_window.validate().unwrap_err().contains("window_sizes.Normal"));
+
+    let mut oversized_window = FecConfig::default();
+    oversized_window.window_sizes.insert(FecMode::Normal, 2049);
+    assert!(oversized_window.validate().unwrap_err().contains("2048"));
+
+    let mut oversized_fountain_window = FecConfig::default();
+    oversized_fountain_window.window_sizes.insert(FecMode::Fountain, 129);
+    assert!(oversized_fountain_window.validate().unwrap_err().contains("Fountain"));
+}
+
+#[test]
 fn test_mode_does_not_downshift_on_single_low_loss_sample() {
     let _env_lock = acquire_env_lock();
     let _g_up = EnvGuard::set("QUICFUSCATE_FEC_SWITCH_MIN_UP_MS", "0");

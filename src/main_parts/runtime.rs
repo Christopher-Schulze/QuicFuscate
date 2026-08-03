@@ -482,58 +482,86 @@ fn load_runtime_profiles(
     config_path: Option<&PathBuf>,
     fec_config: &Option<PathBuf>,
     fec_mode_override: Option<quicfuscate::engine::FecMode>,
-) -> (FecConfig, StealthConfig, OptimizeConfig, quicfuscate::engine::AntiReplaySection) {
-    let (mut fec, stealth, optimize, anti_replay) = if let Some(cfg) = config_path {
-        match AppConfig::from_file(cfg) {
-            Ok(c) => {
-                if let Err(e) = c.validate() {
-                    warn!("Config validation failed: {}", e);
-                }
-                quicfuscate::implementations::server::runtime_components_from_app_config(
-                    c,
-                    fec_mode_override,
-                )
-            }
-            Err(e) => {
-                error!("Failed to load config {}: {}", cfg.display(), e);
-                (
-                    FecConfig::product_default(),
-                    StealthConfig::default(),
-                    OptimizeConfig::default(),
-                    quicfuscate::engine::AntiReplaySection::default(),
-                )
-            }
-        }
-    } else {
-        let fec = if let Some(path) = fec_config {
-            match FecConfig::from_file(path) {
-                Ok(cfg) => {
-                    if let Err(e) = cfg.validate() {
-                        warn!("FEC config validation failed: {}", e);
-                    }
-                    cfg
-                }
-                Err(e) => {
-                    error!("Failed to load FEC config {}: {}", path.display(), e);
-                    FecConfig::product_default()
-                }
-            }
-        } else {
-            FecConfig::product_default()
-        };
+) -> std::io::Result<(
+    FecConfig,
+    StealthConfig,
+    OptimizeConfig,
+    quicfuscate::engine::AntiReplaySection,
+)> {
+    if config_path.is_some() && fec_config.is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "--config and --fec-config are mutually exclusive; the explicit FEC file would otherwise be ignored",
+        ));
+    }
+
+    let (mut fec, stealth, optimize, anti_replay, source) = if let Some(cfg) = config_path {
+        let app_config = AppConfig::from_file(cfg).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("failed to load unified configuration {}: {error}", cfg.display()),
+            )
+        })?;
+        app_config.validate().map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid unified configuration {}: {error}", cfg.display()),
+            )
+        })?;
+        let (fec, stealth, optimize, anti_replay) =
+            quicfuscate::implementations::server::runtime_components_from_app_config(
+                app_config,
+                fec_mode_override,
+            );
+        (fec, stealth, optimize, anti_replay, format!("unified-config:{}", cfg.display()))
+    } else if let Some(path) = fec_config {
+        let fec = FecConfig::from_file(path).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("failed to load explicit FEC configuration {}: {error}", path.display()),
+            )
+        })?;
+        fec.validate().map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid explicit FEC configuration {}: {error}", path.display()),
+            )
+        })?;
         (
             fec,
             StealthConfig::default(),
             OptimizeConfig::default(),
             quicfuscate::engine::AntiReplaySection::default(),
+            format!("standalone-file:{}", path.display()),
+        )
+    } else {
+        let fec = FecConfig::product_default();
+        fec.validate().map_err(|error| {
+            std::io::Error::other(format!("invalid product-default FEC configuration: {error}"))
+        })?;
+        (
+            fec,
+            StealthConfig::default(),
+            OptimizeConfig::default(),
+            quicfuscate::engine::AntiReplaySection::default(),
+            "product-default".to_string(),
         )
     };
+
+    info!("Accepted FEC policy source={source}");
 
     if let Some(mode) = fec_mode_override {
         fec.apply_engine_mode(mode);
     }
 
-    (fec, stealth, optimize, anti_replay)
+    fec.validate().map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("effective FEC policy failed validation after CLI override: {error}"),
+        )
+    })?;
+
+    Ok((fec, stealth, optimize, anti_replay))
 }
 
 fn apply_runtime_transport_defaults(
@@ -1030,7 +1058,7 @@ async fn run_client(
     };
 
     let (fec_cfg, mut stealth_config, opt_cfg, _) =
-        load_runtime_profiles(config_path, fec_config, fec_mode);
+        load_runtime_profiles(config_path, fec_config, fec_mode)?;
 
     let mut config = match new_runtime_transport_config() {
         Ok(c) => c,
