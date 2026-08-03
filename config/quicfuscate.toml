@@ -261,7 +261,7 @@ interval_secs = 300  # 5 minutes
 # Wired: Fixed = no rotation, Slots = rotate through profile_slots, All = all browser/OS combos.
 mode = "fixed"
 
-# Profile slots for rotation (up to 3)
+# Profile slots for rotation (up to 64)
 # Format: ["browser:os", "browser:os", "browser:os"]
 # Leave empty to use defaults based on mode
 profile_slots = [

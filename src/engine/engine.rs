@@ -26,12 +26,10 @@ use crate::transport::Config;
 use crate::transport::{self, CongestionControlAlgorithm};
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 
-fn build_server_optimize_config(config: &EngineConfig) -> crate::optimize::OptimizeConfig {
-    crate::optimize::OptimizeConfig {
-        pool_capacity: config.optimization.memory_pool_size
-            / config.optimization.memory_pool_alignment.max(1),
-        block_size: config.optimization.memory_pool_alignment.max(65_536),
-    }
+fn build_server_optimize_config(
+    config: &EngineConfig,
+) -> Result<crate::optimize::OptimizeConfig, EngineError> {
+    config.optimization.to_runtime_config().map_err(EngineError::from)
 }
 
 fn build_runtime_transport_config(config: &EngineConfig) -> Result<Config, EngineError> {
@@ -143,6 +141,22 @@ fn build_runtime_transport_config(config: &EngineConfig) -> Result<Config, Engin
         transport.discover_pmtu(false);
     }
 
+    transport.set_traffic_analysis_policy(config.transport.traffic_analysis).map_err(|error| {
+        EngineError::Config(format!("traffic-analysis policy invalid: {error}"))
+    })?;
+    transport
+        .set_qkey_traffic_analysis_ceiling(config.transport.qkey_traffic_analysis_ceiling)
+        .map_err(|error| {
+            EngineError::Config(format!("QKey traffic-analysis ceiling invalid: {error}"))
+        })?;
+    transport
+        .set_intelligent_traffic_analysis_ceiling(
+            config.transport.intelligent_traffic_analysis_ceiling,
+        )
+        .map_err(|error| {
+            EngineError::Config(format!("Intelligent traffic-analysis ceiling invalid: {error}"))
+        })?;
+
     if config.transport.dgram_recv_queue_len > 0 && config.transport.dgram_send_queue_len > 0 {
         transport.enable_dgram(
             config.transport.dgram_recv_queue_len,
@@ -203,21 +217,24 @@ fn map_server_cc_algorithm(cc: super::config::CcAlgorithm) -> CongestionControlA
 
 fn load_runtime_profile_values(
     config: &EngineConfig,
-) -> (
-    crate::stealth::BrowserProfile,
-    crate::stealth::OsProfile,
-    Vec<crate::stealth::FingerprintProfile>,
-) {
-    let browser = config
-        .stealth
-        .initial_browser
-        .parse::<crate::stealth::BrowserProfile>()
-        .unwrap_or(crate::stealth::BrowserProfile::Chrome);
-    let os = config
-        .stealth
-        .initial_os
-        .parse::<crate::stealth::OsProfile>()
-        .unwrap_or(crate::stealth::OsProfile::Windows);
+) -> Result<
+    (
+        crate::stealth::BrowserProfile,
+        crate::stealth::OsProfile,
+        Vec<crate::stealth::FingerprintProfile>,
+    ),
+    EngineError,
+> {
+    let browser =
+        config.stealth.initial_browser.parse::<crate::stealth::BrowserProfile>().map_err(|_| {
+            EngineError::Config(format!(
+                "invalid initial_browser profile: {}",
+                config.stealth.initial_browser
+            ))
+        })?;
+    let os = config.stealth.initial_os.parse::<crate::stealth::OsProfile>().map_err(|_| {
+        EngineError::Config(format!("invalid initial_os profile: {}", config.stealth.initial_os))
+    })?;
     let profiles = crate::implementations::server::resolve_runtime_profiles(
         browser,
         os,
@@ -225,7 +242,7 @@ fn load_runtime_profile_values(
         true,
     );
 
-    (browser, os, profiles)
+    Ok((browser, os, profiles))
 }
 
 fn build_server_runtime_profiles(
@@ -860,13 +877,13 @@ impl QuicFuscateEngine {
                         .map_err(EngineError::Config)?;
                     let (fec_cfg, stealth_cfg) = build_server_runtime_profiles(&self.config)?;
                     let transport = build_runtime_transport_config(&self.config)?;
-                    let (profile, os, mut profiles) = load_runtime_profile_values(&self.config);
+                    let (profile, os, mut profiles) = load_runtime_profile_values(&self.config)?;
                     if !self.config.fingerprint_rotation.enabled {
                         profiles = vec![crate::stealth::FingerprintProfile::new(profile, os)];
                     }
                     let fec_mode_override = Some(self.config.fec.mode);
                     let opt_params = normalize_runtime_optimize_config(
-                        build_server_optimize_config(&self.config),
+                        build_server_optimize_config(&self.config)?,
                         "engine server runtime",
                     );
                     let doh_provider = self.config.stealth.doh_provider.clone();
@@ -897,7 +914,7 @@ impl QuicFuscateEngine {
                         tun_enable,
                     );
                     let engine_config = self.config.clone();
-                    let server_opt_params = build_server_optimize_config(&self.config);
+                    let server_opt_params = build_server_optimize_config(&self.config)?;
                     let startup_timeout = std::time::Duration::from_millis(
                         self.config.engine.shutdown_timeout_ms.max(30_000),
                     );
@@ -1912,6 +1929,43 @@ mod tests {
         assert!(nat.ice_enabled);
         assert_eq!(nat.max_candidates, 4);
         assert_eq!(nat.stun_servers.len(), 1);
+    }
+
+    #[test]
+    fn test_runtime_transport_config_carries_all_traffic_analysis_policies() {
+        let active = crate::transport::config::TrafficAnalysisPolicy {
+            defense: crate::transport::config::TrafficAnalysisDefense::FullPadding,
+            chaff_rate_pps: 25,
+            chaff_size_bytes: 1200,
+            constant_rate_pps: 0,
+            idle_timeout_ms: 30_000,
+            ramp_down_ms: 5_000,
+        };
+        let qkey_ceiling = crate::transport::config::TrafficAnalysisPolicy {
+            defense: crate::transport::config::TrafficAnalysisDefense::ConstantRate,
+            chaff_rate_pps: 500,
+            chaff_size_bytes: 1400,
+            constant_rate_pps: 100,
+            idle_timeout_ms: 60_000,
+            ramp_down_ms: 10_000,
+        };
+        let intelligent_ceiling = crate::transport::config::TrafficAnalysisPolicy {
+            defense: crate::transport::config::TrafficAnalysisDefense::FullPadding,
+            chaff_rate_pps: 10,
+            chaff_size_bytes: 1000,
+            constant_rate_pps: 0,
+            idle_timeout_ms: 20_000,
+            ramp_down_ms: 2_000,
+        };
+        let mut config = EngineConfig::default();
+        config.transport.traffic_analysis = active;
+        config.transport.qkey_traffic_analysis_ceiling = qkey_ceiling;
+        config.transport.intelligent_traffic_analysis_ceiling = intelligent_ceiling;
+
+        let transport = build_runtime_transport_config(&config).expect("transport config");
+        assert_eq!(transport.traffic_analysis_policy(), active);
+        assert_eq!(transport.qkey_traffic_analysis_ceiling(), qkey_ceiling);
+        assert_eq!(transport.intelligent_traffic_analysis_ceiling(), intelligent_ceiling);
     }
 
     #[test]

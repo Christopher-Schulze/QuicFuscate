@@ -1156,8 +1156,8 @@ impl FecConfig {
         if self.burst_window == 0 {
             return Err("burst_window must be > 0".into());
         }
-        if !(0.0..1.0).contains(&self.hysteresis) {
-            return Err("hysteresis must be between 0 and 1".into());
+        if !self.hysteresis.is_finite() || self.hysteresis < 0.0 || self.hysteresis >= 1.0 {
+            return Err("hysteresis must be between 0 (inclusive) and 1".into());
         }
         if !self.kalman_q.is_finite() || self.kalman_q <= 0.0 {
             return Err("kalman_q must be finite and positive".into());

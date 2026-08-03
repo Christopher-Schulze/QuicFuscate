@@ -3124,6 +3124,16 @@ Traffic-analysis configuration uses three independent policy sections:
 
 Valid defenses are `off`, `full-padding`, and `constant-rate`. Enabled policies are intentionally bandwidth-expensive and emit a startup warning with their bounded estimated bit rate.
 
+#### EngineConfig Validation and Adapter Contract
+
+`EngineConfig::from_toml()` performs parsing; every runtime boundary must call `EngineConfig::validate()` before consuming the document. The complete schema uses strict unknown-field rejection at the top level and on every serialized section, including the three nested traffic-analysis policies and `[security.firewall]`. Validation covers engine lifecycle, socket endpoints, transport limits and policies, NAT traversal, crypto, interface, telemetry, logging, audit, FEC, stealth, fingerprint rotation, optimization, anti-replay, and security.
+
+`AppConfig` is a deliberately reduced runtime projection. It contains validated FEC, stealth, optimization, and anti-replay state. Transport policies remain owned by the transport builders; telemetry, logging, audit, crypto, interface, NAT, and security remain in the validated source document and are consumed by their dedicated startup/runtime owners. No adapter may silently substitute a default for an invalid typed string or silently discard an unknown key.
+
+The unified `[fec]` section accepts product control modes `auto` and `off`. Its `initial_mode` compatibility hint accepts `auto` or `off`; complete codec modes belong to the standalone `[adaptive_fec]` source. Partial recovery is controlled by `QUICFUSCATE_FEC_PARTIAL`, so `fec.enable_partial = false` is rejected instead of being ignored; `enable_pid = false` is likewise rejected because the adaptive controller owns that behavior. `optimization.memory_pool_size = 0` resolves through the shared automatic pool-sizing policy, and every adapter derives the same block size and capacity contract.
+
+Fingerprint slots use canonical `browser:os` strings; the server parser also accepts the legacy `browser@os` spelling. Persona rotation remains connection-scoped and therefore applies to the next connection or reconnect only. Transactional reload publication remains owned by TODO-724, while full rotation lifecycle and selection semantics remain owned by TODO-751.
+
 ### Environment Variable Overrides
 
 At runtime you can override selected stealth options without changing the config file. The following variables are recognized (case-insensitive values where applicable):
@@ -3392,15 +3402,15 @@ enabled = true
 interval_secs = 180  # 3 minutes
 mode = "slots"  # fixed, slots, all
 profile_slots = [
-    ["chrome", "windows"],
-    ["firefox", "macos"],
-    ["safari", "ios"],
+    "chrome:windows",
+    "firefox:macos",
+    "safari:ios",
 ]
 ```
 
 #### Rotation Modes
 - **Fixed**: single profile, no rotation
-- **Slots**: rotate through configured slots (up to 3)
+- **Slots**: rotate through configured slots (up to 64)
 - **All**: rotate through all available profiles
 
 ### Browser Profile
@@ -4046,6 +4056,8 @@ The constructor/runtime boundary is explicit:
 - Scalar validation requires `lambda` in `0..=1`, `hysteresis` in `0..1`, positive `burst_window`, finite positive `kalman_q` and `kalman_r`, and positive `stream_every` when supplied. Window validation requires `Zero=0`, every other mode in `1..=2048`, and `Fountain` in `1..=128`.
 - `--config` and `--fec-config` are mutually exclusive because the standalone path must not silently discard one of two submitted FEC sources. The accepted source is recorded by the runtime log as `Accepted FEC policy source=product-default`, `standalone-file:<path>`, or `unified-config:<path>`.
 
+The unified engine `[fec]` adapter is intentionally narrower than the standalone file: `mode` and `initial_mode` are limited to `auto`/`off`, product windows are projected into the canonical `FecConfig`, and `stream_every = 0` is rejected before the adapter can normalize it. Environment controls remain the owner for partial recovery and advanced codec behavior.
+
 ### Environment controls (runtime)
 - `QUICFUSCATE_FEC_PARTIAL`: `0|1|true|false` - controls partial recovery emission (default: enabled).
 - `QUICFUSCATE_FEC_LAZY`: `0|1|true|false` - lazy decoder gating (default: enabled).
@@ -4573,7 +4585,7 @@ num_worker_threads = 0   # 0 = auto (uses default of 8 threads)
 ```
 
 #### Memory Pool
-The engine memory pool auto-scales to 5% of system RAM (clamped 16-64 MB). Override via environment variable:
+The engine memory pool auto-scales to 5% of system RAM (clamped 16-64 MB). `optimization.memory_pool_size = 0` selects this same automatic size. Runtime adapters derive a minimum 64 KiB block size from `memory_pool_alignment` and compute capacity from the resolved byte size, with a minimum of one block. Override the automatic size via environment variable:
 ```bash
 export QUICFUSCATE_MEMORY_POOL_MB=128
 ```

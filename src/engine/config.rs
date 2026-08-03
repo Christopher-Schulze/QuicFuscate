@@ -26,7 +26,7 @@ pub use crate::stealth::StealthConfig;
 
 /// Complete engine configuration aggregating all subsystems.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct EngineConfig {
     /// Engine mode and lifecycle settings
     pub engine: EngineSection,
@@ -83,8 +83,17 @@ impl EngineConfig {
         self.nat_traversal.validate()?;
         self.crypto.validate()?;
         self.interface.validate()?;
+        self.telemetry.validate()?;
         self.logging.validate()?;
         self.audit.validate()?;
+        self.fec.validate()?;
+        self.fingerprint_rotation.validate()?;
+        self.optimization.validate()?;
+        self.anti_replay.validate()?;
+        self.security.validate()?;
+        self.stealth
+            .to_runtime_config(&self.fingerprint_rotation)
+            .map_err(|error| ConfigError::Validation(format!("stealth: {error}")))?;
         if self.connection.enable_0rtt && !self.anti_replay.enabled {
             log::warn!(
                 "[config] 0-RTT enabled without anti-replay protection. \
@@ -131,7 +140,7 @@ impl std::error::Error for ConfigError {}
 
 /// Engine lifecycle and mode settings.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct EngineSection {
     /// Engine operation mode: "client" or "server"
     pub mode: EngineMode,
@@ -163,6 +172,9 @@ impl EngineSection {
                 self.log_level, valid_levels
             )));
         }
+        if self.shutdown_timeout_ms == 0 {
+            return Err(ConfigError::Validation("engine.shutdown_timeout_ms must be > 0".into()));
+        }
         Ok(())
     }
 }
@@ -184,7 +196,7 @@ pub enum EngineMode {
 
 /// Connection parameters for QUIC connections.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ConnectionConfig {
     /// Remote endpoint (server: listen addr, client: server addr)
     pub remote: String,
@@ -253,11 +265,32 @@ impl Default for ConnectionConfig {
 
 impl ConnectionConfig {
     fn validate(&self) -> Result<(), ConfigError> {
-        if self.remote.is_empty() {
+        let remote = self.remote.trim();
+        if remote.is_empty() {
             return Err(ConfigError::Validation("remote address cannot be empty".into()));
+        }
+        remote.parse::<SocketAddr>().map_err(|error| {
+            ConfigError::Validation(format!("connection.remote must be a socket address: {error}"))
+        })?;
+        if !self.local.trim().is_empty() {
+            self.local.trim().parse::<SocketAddr>().map_err(|error| {
+                ConfigError::Validation(format!(
+                    "connection.local must be a socket address: {error}"
+                ))
+            })?;
         }
         if self.idle_timeout_ms == 0 {
             return Err(ConfigError::Validation("idle_timeout_ms must be > 0".into()));
+        }
+        if self.max_streams_bidi == 0 || self.max_streams_uni == 0 {
+            return Err(ConfigError::Validation(
+                "connection.max_streams_bidi and max_streams_uni must be > 0".into(),
+            ));
+        }
+        if self.cert_file.trim().is_empty() != self.key_file.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "connection.cert_file and connection.key_file must be configured together".into(),
+            ));
         }
         if !self.migration_cwnd_reduction_factor.is_finite()
             || !(0.0..=1.0).contains(&self.migration_cwnd_reduction_factor)
@@ -306,7 +339,7 @@ impl QuicVersion {
 
 /// Transport layer configuration.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct TransportConfig {
     /// Ordered usable QUIC versions, preferred first.
     pub quic_versions: Vec<QuicVersion>,
@@ -350,6 +383,12 @@ pub struct TransportConfig {
     pub pmtu_probe_interval_ms: u64,
     /// Large-packet ACK silence before black-hole recovery.
     pub pmtu_black_hole_timeout_ms: u64,
+    /// Active traffic-analysis defense policy.
+    pub traffic_analysis: crate::transport::config::TrafficAnalysisPolicy,
+    /// Hard ceiling for authenticated per-QKey traffic-analysis requests.
+    pub qkey_traffic_analysis_ceiling: crate::transport::config::TrafficAnalysisPolicy,
+    /// Ceiling for post-authentication Intelligent traffic-analysis escalation.
+    pub intelligent_traffic_analysis_ceiling: crate::transport::config::TrafficAnalysisPolicy,
 }
 
 impl Default for TransportConfig {
@@ -376,6 +415,11 @@ impl Default for TransportConfig {
             pmtu_max_mtu: 1500,
             pmtu_probe_interval_ms: 60_000,
             pmtu_black_hole_timeout_ms: 10_000,
+            traffic_analysis: crate::transport::config::TrafficAnalysisPolicy::default(),
+            qkey_traffic_analysis_ceiling:
+                crate::transport::config::TrafficAnalysisPolicy::safety_ceiling(),
+            intelligent_traffic_analysis_ceiling:
+                crate::transport::config::TrafficAnalysisPolicy::default(),
         }
     }
 }
@@ -397,8 +441,25 @@ impl TransportConfig {
                 self.mtu
             )));
         }
+        if self.max_udp_payload < 1200 {
+            return Err(ConfigError::Validation(format!(
+                "max_udp_payload must be at least 1200, got {}",
+                self.max_udp_payload
+            )));
+        }
         if self.initial_rtt_ms == 0 {
             return Err(ConfigError::Validation("initial_rtt_ms must be > 0".into()));
+        }
+        if self.initial_max_data == 0
+            || self.initial_max_stream_data_bidi_local == 0
+            || self.initial_max_stream_data_bidi_remote == 0
+            || self.initial_max_stream_data_uni == 0
+            || self.initial_max_streams_bidi == 0
+            || self.initial_max_streams_uni == 0
+        {
+            return Err(ConfigError::Validation(
+                "initial transport data and stream limits must be > 0".into(),
+            ));
         }
         if self.pmtu_min_mtu < 1200 || self.pmtu_max_mtu < self.pmtu_min_mtu {
             return Err(ConfigError::Validation(
@@ -410,19 +471,30 @@ impl TransportConfig {
                 "pmtu_max_mtu must not exceed transport.mtu".into(),
             ));
         }
+        if self.pmtu_max_mtu > self.max_udp_payload {
+            return Err(ConfigError::Validation(
+                "pmtu_max_mtu must not exceed transport.max_udp_payload".into(),
+            ));
+        }
         if self.pmtu_probe_interval_ms == 0 || self.pmtu_black_hole_timeout_ms == 0 {
             return Err(ConfigError::Validation(
                 "DPLPMTUD probe and black-hole timers must be > 0".into(),
             ));
         }
-        if self.dgram_recv_queue_len == 0 && self.dgram_send_queue_len == 0 {
-            return Ok(());
-        }
-        if self.dgram_recv_queue_len == 0 || self.dgram_send_queue_len == 0 {
+        if (self.dgram_recv_queue_len == 0) != (self.dgram_send_queue_len == 0) {
             return Err(ConfigError::Validation(
                 "dgram_recv_queue_len and dgram_send_queue_len must both be 0 or both be > 0"
                     .into(),
             ));
+        }
+        for (name, policy) in [
+            ("traffic_analysis", self.traffic_analysis),
+            ("qkey_traffic_analysis_ceiling", self.qkey_traffic_analysis_ceiling),
+            ("intelligent_traffic_analysis_ceiling", self.intelligent_traffic_analysis_ceiling),
+        ] {
+            policy
+                .validate()
+                .map_err(|error| ConfigError::Validation(format!("transport.{name}: {error}")))?;
         }
         Ok(())
     }
@@ -438,7 +510,7 @@ impl TransportConfig {
 /// It remains off unless explicitly enabled and policy-approved for a concrete
 /// discovery reason such as direct-path failure, roaming, or mesh mode.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct NatTraversalSection {
     /// Master switch. When false, no STUN/TURN/ICE probes are emitted.
     pub enabled: bool,
@@ -540,7 +612,7 @@ pub enum CcAlgorithm {
 
 /// Cryptographic configuration.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct CryptoConfig {
     /// AEAD cipher preference
     pub aead_preference: AeadPreference,
@@ -600,7 +672,7 @@ pub enum AeadPreference {
 
 /// TUN/TAP interface configuration.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct InterfaceConfig {
     /// Interface type
     #[serde(rename = "type")]
@@ -714,7 +786,7 @@ pub enum XdpMode {
 
 /// Telemetry and metrics configuration.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct TelemetryConfig {
     /// Enable telemetry collection
     pub enabled: bool,
@@ -743,6 +815,17 @@ impl Default for TelemetryConfig {
             collect_fec_stats: true,
             collect_stealth_stats: true,
         }
+    }
+}
+
+impl TelemetryConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.enabled && self.export_interval == 0 {
+            return Err(ConfigError::Validation(
+                "telemetry.export_interval must be > 0 when telemetry is enabled".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -793,7 +876,7 @@ pub enum LogFormat {
 
 /// Logging configuration.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct LoggingConfig {
     /// Logging mode (verbose | normal | minimal | no-log)
     pub mode: LoggingMode,
@@ -928,7 +1011,7 @@ impl LoggingConfig {
 
 /// Bounded security audit persistence configuration.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AuditConfig {
     /// Maximum accepted events waiting for the single audit writer.
     pub queue_capacity: usize,
@@ -983,7 +1066,7 @@ impl AuditConfig {
 
 /// FEC configuration section (wraps detailed FEC settings).
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct FecSection {
     /// FEC mode: auto, off
     pub mode: FecMode,
@@ -1027,6 +1110,53 @@ impl Default for FecSection {
     }
 }
 
+impl FecSection {
+    /// Convert the engine-level FEC section into the validated runtime policy.
+    ///
+    /// The product engine schema intentionally keeps bootstrap mode at `auto` or
+    /// `off`; the standalone `[adaptive_fec]` file owns the complete codec-mode
+    /// surface. Partial recovery remains environment-controlled, so the engine
+    /// compatibility flags must retain their enabled defaults instead of being
+    /// silently ignored by an adapter.
+    pub fn to_runtime_config(&self) -> Result<crate::fec::FecConfig, ConfigError> {
+        match self.initial_mode.trim().to_ascii_lowercase().as_str() {
+            "auto" | "off" => {}
+            value => {
+                return Err(ConfigError::Validation(format!(
+                    "fec.initial_mode has unsupported value '{value}'; use 'auto' or 'off'"
+                )))
+            }
+        }
+        if !self.enable_partial {
+            return Err(ConfigError::Validation(
+                "fec.enable_partial=false is not supported by the engine adapter; use QUICFUSCATE_FEC_PARTIAL=false for the runtime override".into(),
+            ));
+        }
+        if !self.enable_pid {
+            return Err(ConfigError::Validation(
+                "fec.enable_pid=false is not supported by the engine adapter; the adaptive controller owns PID behavior".into(),
+            ));
+        }
+        if self.stream_every == 0 {
+            return Err(ConfigError::Validation("fec.stream_every must be > 0".into()));
+        }
+        let config = crate::fec::FecConfig::from_engine_section(self);
+        config
+            .validate()
+            .map_err(|error| ConfigError::Validation(format!("fec runtime projection: {error}")))?;
+        Ok(config)
+    }
+
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.window_good == 0 || self.window_fair == 0 || self.window_poor == 0 {
+            return Err(ConfigError::Validation(
+                "fec.window_good, window_fair, and window_poor must be > 0".into(),
+            ));
+        }
+        self.to_runtime_config().map(|_| ())
+    }
+}
+
 /// FEC operation mode.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -1044,7 +1174,7 @@ pub enum FecMode {
 
 /// Stealth configuration section.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct StealthSection {
     /// Stealth mode
     pub mode: StealthMode,
@@ -1109,6 +1239,99 @@ impl Default for StealthSection {
     }
 }
 
+impl StealthSection {
+    fn parse_padding_strategy(value: &str) -> Option<crate::stealth::PaddingStrategy> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "random" | "1" => Some(crate::stealth::PaddingStrategy::Random),
+            "fixed" | "constant" | "2" => Some(crate::stealth::PaddingStrategy::Fixed),
+            "adaptive" | "3" => Some(crate::stealth::PaddingStrategy::Adaptive),
+            "browser" | "browser_mimic" | "browser-mimic" | "browsermimic" | "mimic" | "4" => {
+                Some(crate::stealth::PaddingStrategy::BrowserMimic)
+            }
+            "normalize" | "packet_normalize" | "packet-normalize" | "packetnormalize" | "5" => {
+                Some(crate::stealth::PaddingStrategy::PacketNormalize)
+            }
+            _ => None,
+        }
+    }
+
+    /// Convert the engine stealth section and rotation policy into one runtime
+    /// configuration. Invalid string enums fail here instead of falling back to
+    /// a mode preset inside an adapter.
+    pub fn to_runtime_config(
+        &self,
+        rotation: &FingerprintRotationConfig,
+    ) -> Result<crate::stealth::StealthConfig, ConfigError> {
+        rotation.validate()?;
+        let runtime_mode = match self.mode {
+            StealthMode::Off => crate::stealth::StealthMode::Off,
+            StealthMode::Performance => crate::stealth::StealthMode::Performance,
+            StealthMode::Stealth => crate::stealth::StealthMode::Stealth,
+            StealthMode::AntiDpi => crate::stealth::StealthMode::AntiDpi,
+            StealthMode::Manual => crate::stealth::StealthMode::Manual,
+            StealthMode::Auto => crate::stealth::StealthMode::Intelligent,
+        };
+        let mut runtime = crate::stealth::StealthConfig::from_mode(runtime_mode);
+        runtime.enable_domain_fronting = self.enable_domain_fronting;
+        runtime.enable_http3_masquerading = self.enable_http3_masquerading;
+        runtime.use_tls_cover = self.use_tls_cover;
+        runtime.use_qpack_headers = self.use_qpack_headers;
+        runtime.enable_traffic_padding = self.enable_traffic_padding;
+        runtime.enable_timing_obfuscation = self.enable_timing_obfuscation;
+        runtime.enable_protocol_mimicry = self.enable_protocol_mimicry;
+        runtime.enable_network_fingerprint_normalization =
+            self.enable_network_fingerprint_normalization;
+        runtime.suppress_icmp_unreachable = self.suppress_icmp_unreachable;
+        runtime.enable_doh = self.enable_doh;
+        runtime.doh_provider = self.doh_provider.clone();
+        runtime.max_padding_size = self.max_padding_size;
+        runtime.fronting_domains = self.fronting_domains.clone();
+        runtime.initial_browser = self.initial_browser.parse().map_err(|_| {
+            ConfigError::Validation(format!(
+                "stealth.initial_browser has unsupported value '{}'",
+                self.initial_browser
+            ))
+        })?;
+        runtime.initial_os = self.initial_os.parse().map_err(|_| {
+            ConfigError::Validation(format!(
+                "stealth.initial_os has unsupported value '{}'",
+                self.initial_os
+            ))
+        })?;
+        runtime.padding_strategy = Self::parse_padding_strategy(&self.padding_strategy)
+            .ok_or_else(|| {
+                ConfigError::Validation(format!(
+                    "stealth.padding_strategy has unsupported value '{}'",
+                    self.padding_strategy
+                ))
+            })?;
+        if runtime.padding_strategy == crate::stealth::PaddingStrategy::PacketNormalize
+            && runtime.normalize_target_size == 0
+        {
+            return Err(ConfigError::Validation(
+                "stealth.padding_strategy=normalize requires a runtime normalize target, which is not part of the engine schema".into(),
+            ));
+        }
+        if runtime.enable_traffic_padding && runtime.max_padding_size == 0 {
+            return Err(ConfigError::Validation(
+                "stealth.max_padding_size must be > 0 when traffic padding is enabled".into(),
+            ));
+        }
+        runtime.enable_fingerprint_rotation = rotation.enabled;
+        runtime.fingerprint_rotation_interval = rotation.interval_secs;
+        runtime.fingerprint_rotation_mode = match rotation.mode {
+            RotationMode::Fixed => crate::stealth::RotationMode::Fixed,
+            RotationMode::Slots => crate::stealth::RotationMode::Slots,
+            RotationMode::All => crate::stealth::RotationMode::All,
+        };
+        runtime.normalize_protocol_mimicry_bundle();
+        runtime.validate().map_err(|error| {
+            ConfigError::Validation(format!("stealth runtime projection: {error}"))
+        })?;
+        Ok(runtime)
+    }
+}
+
 /// Stealth operation mode.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -1141,7 +1364,7 @@ pub enum StealthMode {
 
 /// Fingerprint rotation configuration.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct FingerprintRotationConfig {
     /// Enable rotation
     pub enabled: bool,
@@ -1168,6 +1391,53 @@ impl Default for FingerprintRotationConfig {
     }
 }
 
+impl FingerprintRotationConfig {
+    fn validate_profile_slot(slot: &str) -> Result<(), ConfigError> {
+        let mut parts = slot.split(['@', ':']);
+        let browser = parts.next().unwrap_or_default().trim();
+        if browser.is_empty() || browser.parse::<crate::stealth::BrowserProfile>().is_err() {
+            return Err(ConfigError::Validation(format!(
+                "fingerprint_rotation.profile_slots contains an invalid browser profile: '{slot}'"
+            )));
+        }
+        if let Some(os) = parts.next() {
+            if os.trim().parse::<crate::stealth::OsProfile>().is_err() {
+                return Err(ConfigError::Validation(format!(
+                    "fingerprint_rotation.profile_slots contains an invalid OS profile: '{slot}'"
+                )));
+            }
+        }
+        if parts.next().is_some() {
+            return Err(ConfigError::Validation(format!(
+                "fingerprint_rotation.profile_slots entry has more than one separator: '{slot}'"
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.enabled && self.interval_secs == 0 {
+            return Err(ConfigError::Validation(
+                "fingerprint_rotation.interval_secs must be > 0 when rotation is enabled".into(),
+            ));
+        }
+        if self.profile_slots.len() > 64 {
+            return Err(ConfigError::Validation(
+                "fingerprint_rotation.profile_slots must contain at most 64 entries".into(),
+            ));
+        }
+        if self.enabled && self.mode == RotationMode::Slots && self.profile_slots.is_empty() {
+            return Err(ConfigError::Validation(
+                "fingerprint_rotation.profile_slots must not be empty in slots mode".into(),
+            ));
+        }
+        for slot in &self.profile_slots {
+            Self::validate_profile_slot(slot)?;
+        }
+        Ok(())
+    }
+}
+
 /// Rotation mode.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -1187,7 +1457,7 @@ pub enum RotationMode {
 
 /// Performance optimization configuration.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct OptimizationConfig {
     /// Memory pool size (bytes). 0 = auto-detect based on available RAM.
     pub memory_pool_size: usize,
@@ -1254,6 +1524,40 @@ fn auto_memory_pool_size() -> usize {
     FALLBACK_POOL_BYTES
 }
 
+impl OptimizationConfig {
+    /// Convert memory-pool settings into the block-based runtime contract.
+    /// `memory_pool_size = 0` is resolved here so every adapter uses the same
+    /// auto-sized pool instead of silently creating a one-block pool.
+    pub fn to_runtime_config(&self) -> Result<crate::optimize::OptimizeConfig, ConfigError> {
+        if self.memory_pool_alignment == 0 {
+            return Err(ConfigError::Validation(
+                "optimization.memory_pool_alignment must be > 0".into(),
+            ));
+        }
+        if self.num_worker_threads > 256 {
+            return Err(ConfigError::Validation(
+                "optimization.num_worker_threads must be 0 or <= 256".into(),
+            ));
+        }
+        let pool_bytes = if self.memory_pool_size == 0 {
+            auto_memory_pool_size()
+        } else {
+            self.memory_pool_size
+        };
+        let block_size = self.memory_pool_alignment.max(65_536);
+        let pool_capacity = (pool_bytes / block_size).max(1);
+        let config = crate::optimize::OptimizeConfig { pool_capacity, block_size };
+        config.validate().map_err(|error| {
+            ConfigError::Validation(format!("optimization runtime projection: {error}"))
+        })?;
+        Ok(config)
+    }
+
+    fn validate(&self) -> Result<(), ConfigError> {
+        self.to_runtime_config().map(|_| ())
+    }
+}
+
 // ============================================================================
 // ANTI-REPLAY SECTION (0-RTT)
 // ============================================================================
@@ -1263,7 +1567,7 @@ fn auto_memory_pool_size() -> usize {
 /// When enabled, a strike register rejects replayed 0-RTT packets per
 /// RFC 8446 Section 8 and RFC 9001 Section 9.2.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AntiReplaySection {
     /// Enable 0-RTT anti-replay protection (server mode only).
     pub enabled: bool,
@@ -1286,13 +1590,37 @@ impl Default for AntiReplaySection {
     }
 }
 
+impl AntiReplaySection {
+    pub(crate) fn validate(&self) -> Result<(), ConfigError> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.max_ticket_age_secs == 0 {
+            return Err(ConfigError::Validation(
+                "anti_replay.max_ticket_age_secs must be > 0 when anti-replay is enabled".into(),
+            ));
+        }
+        if self.max_entries == 0 {
+            return Err(ConfigError::Validation(
+                "anti_replay.max_entries must be > 0 when anti-replay is enabled".into(),
+            ));
+        }
+        if self.max_early_data_size == 0 {
+            return Err(ConfigError::Validation(
+                "anti_replay.max_early_data_size must be > 0 when anti-replay is enabled".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 // ============================================================================
 // SECURITY SECTION
 // ============================================================================
 
 /// Security settings: kill switch, leak prevention, connection-loss detection.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SecurityConfig {
     /// Enable kill switch (blocks all non-VPN traffic when disconnected).
     pub kill_switch: bool,
@@ -1331,13 +1659,22 @@ impl Default for SecurityConfig {
     }
 }
 
+impl SecurityConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        // Zero explicitly disables the heartbeat watchdog and is documented as
+        // a valid compatibility setting. All other security fields are typed
+        // enums or booleans and therefore need no additional normalization.
+        Ok(())
+    }
+}
+
 /// Firewall backend configuration.
 ///
 /// Controls whether QuicFuscate uses `iptables` or `nftables` for kill switch
 /// and NAT/routing rules on Linux. On macOS and Windows this setting has no
 /// effect (pf / Windows Firewall are used unconditionally).
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct FirewallConfig {
     /// Explicit backend selection. `None` (default) auto-detects at runtime,
     /// preferring nftables when available and falling back to iptables.
@@ -1632,6 +1969,109 @@ mode = "roaming"
         let config = EngineConfig::from_toml(toml).unwrap();
         assert_eq!(config.engine.mode, EngineMode::Client);
         assert_eq!(config.connection.remote, "127.0.0.1:4433");
+    }
+
+    #[test]
+    fn canonical_engine_document_validates_and_roundtrips_all_sections() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config/quicfuscate.toml");
+        let config = EngineConfig::from_file(path).expect("canonical engine config parses");
+        config.validate().expect("canonical engine config validates");
+        assert_eq!(config.transport.traffic_analysis.chaff_size_bytes, 1280);
+        assert_eq!(config.fec.window_poor, 50);
+        assert_eq!(config.optimization.memory_pool_size, 67_108_864);
+        assert!(config.telemetry.enabled);
+        assert_eq!(config.audit.max_segments, 8);
+
+        let encoded = toml::to_string(&config).expect("canonical engine config serializes");
+        let decoded = EngineConfig::from_toml(&encoded).expect("serialized engine config parses");
+        decoded.validate().expect("serialized engine config validates");
+        assert_eq!(decoded.transport.quic_versions, config.transport.quic_versions);
+        assert_eq!(decoded.transport.cc_algorithm, config.transport.cc_algorithm);
+        assert_eq!(decoded.transport.traffic_analysis, config.transport.traffic_analysis);
+        assert_eq!(
+            decoded.transport.qkey_traffic_analysis_ceiling,
+            config.transport.qkey_traffic_analysis_ceiling
+        );
+        assert_eq!(
+            decoded.transport.intelligent_traffic_analysis_ceiling,
+            config.transport.intelligent_traffic_analysis_ceiling
+        );
+        assert_eq!(decoded.fec.window_poor, config.fec.window_poor);
+        assert_eq!(decoded.security.kill_switch, config.security.kill_switch);
+        assert_eq!(decoded.security.firewall.backend, config.security.firewall.backend);
+    }
+
+    #[test]
+    fn strict_engine_schema_rejects_unknown_keys_in_every_section() {
+        let sections = [
+            "engine",
+            "connection",
+            "transport",
+            "transport.traffic_analysis",
+            "transport.qkey_traffic_analysis_ceiling",
+            "transport.intelligent_traffic_analysis_ceiling",
+            "nat_traversal",
+            "crypto",
+            "interface",
+            "telemetry",
+            "logging",
+            "audit",
+            "fec",
+            "stealth",
+            "fingerprint_rotation",
+            "optimization",
+            "anti_replay",
+            "security",
+            "security.firewall",
+        ];
+        for section in sections {
+            let source = format!("[{section}]\nunknown_audit_fixture = true\n");
+            let error = EngineConfig::from_toml(&source)
+                .expect_err("unknown section keys must not be silently dropped");
+            assert!(
+                error.to_string().contains("unknown_audit_fixture"),
+                "unknown key was not reported for [{section}]: {error}"
+            );
+        }
+
+        let error = EngineConfig::from_toml("top_level_unknown_audit_fixture = true\n")
+            .expect_err("unknown top-level keys must not be silently dropped");
+        assert!(error.to_string().contains("top_level_unknown_audit_fixture"));
+    }
+
+    #[test]
+    fn validation_rejects_invalid_typed_strings_ranges_and_compatibility_values() {
+        for source in [
+            "[engine]\nmode = \"invalid\"\n",
+            "[transport]\ncc_algorithm = \"invalid\"\n",
+            "[fingerprint_rotation]\nmode = \"invalid\"\n",
+        ] {
+            assert!(EngineConfig::from_toml(source).is_err(), "invalid enum accepted: {source}");
+        }
+
+        let mut config = EngineConfig::default();
+        config.stealth.padding_strategy = "invalid".to_string();
+        assert!(config.validate().is_err());
+        config.stealth.padding_strategy = "adaptive".to_string();
+        config.stealth.initial_browser = "invalid".to_string();
+        assert!(config.validate().is_err());
+        config.stealth.initial_browser = "chrome".to_string();
+        config.fingerprint_rotation.profile_slots = vec!["chrome:invalid".to_string()];
+        assert!(config.validate().is_err());
+
+        config.fingerprint_rotation.profile_slots =
+            FingerprintRotationConfig::default().profile_slots;
+        config.transport.max_udp_payload = 1199;
+        assert!(config.validate().is_err());
+        config.transport.max_udp_payload = 1500;
+        config.fec.stream_every = 0;
+        assert!(config.validate().is_err());
+        config.fec.stream_every = 5;
+        config.optimization.memory_pool_alignment = 0;
+        assert!(config.validate().is_err());
+        config.optimization.memory_pool_alignment = 64;
+        config.anti_replay.max_entries = 0;
+        assert!(config.validate().is_err());
     }
 
     #[test]

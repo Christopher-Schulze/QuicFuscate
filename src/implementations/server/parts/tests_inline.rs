@@ -671,6 +671,17 @@ mod tests {
     }
 
     #[test]
+    fn test_server_runtime_rejects_invalid_engine_projection() {
+        let mut engine_config = EngineConfig::default();
+        engine_config.stealth.padding_strategy = "invalid".to_string();
+        let error = match ServerRuntime::new(engine_config, ServerConfig::default()) {
+            Ok(_) => panic!("invalid stealth must fail closed"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, EngineError::Config(_)));
+    }
+
+    #[test]
     fn test_server_runtime_traffic_snapshot_aggregates_session_stats() {
         let engine_config = EngineConfig::default();
         let server_config = ServerConfig::default();
@@ -1218,6 +1229,21 @@ mod tests {
         apply_runtime_profile_identity(&mut stealth, BrowserProfile::Firefox, OsProfile::Linux);
         assert_eq!(stealth.initial_browser, BrowserProfile::Firefox);
         assert_eq!(stealth.initial_os, OsProfile::Linux);
+    }
+
+    #[test]
+    fn test_runtime_profile_slots_accept_canonical_colon_and_legacy_at_syntax() {
+        let colon = parse_runtime_profile_entry("firefox:linux", OsProfile::Windows)
+            .expect("colon profile slot");
+        assert_eq!(colon.browser, BrowserProfile::Firefox);
+        assert_eq!(colon.os, OsProfile::Linux);
+
+        let at = parse_runtime_profile_entry("safari@macos", OsProfile::Windows)
+            .expect("legacy at profile slot");
+        assert_eq!(at.browser, BrowserProfile::Safari);
+        assert_eq!(at.os, OsProfile::MacOS);
+
+        assert!(parse_runtime_profile_entry("chrome:windows:extra", OsProfile::Windows).is_none());
     }
 
     #[test]

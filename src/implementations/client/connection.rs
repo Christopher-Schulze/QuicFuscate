@@ -28,6 +28,9 @@ impl ClientConnection {
         config: &EngineConfig,
         runtime_owner: Option<Arc<StealthRuntimeOwner>>,
     ) -> Result<Self, EngineError> {
+        config.validate().map_err(|error| {
+            EngineError::Config(format!("Invalid engine configuration: {error}"))
+        })?;
         // Record connection attempt
         crate::instrumentation::global().client.connection_attempt();
 
@@ -50,13 +53,13 @@ impl ClientConnection {
         let transport_config = Self::build_transport_config(config)?;
 
         // Build stealth config from EngineConfig
-        let stealth_config = Self::build_stealth_config(config);
+        let stealth_config = Self::build_stealth_config(config)?;
 
         // Build FEC config
-        let fec_config = Self::build_fec_config(config);
+        let fec_config = Self::build_fec_config(config)?;
 
         // Build optimization config
-        let opt_config = Self::build_optimize_config(config);
+        let opt_config = Self::build_optimize_config(config)?;
 
         // Determine SNI
         let sni = if config.connection.sni.is_empty() {
@@ -260,6 +263,10 @@ impl ClientConnection {
             .map_err(|e| EngineError::Config(format!("QUIC version config error: {e}")))?;
 
         tc.set_max_idle_timeout(config.transport.max_idle_timeout);
+        tc.set_max_recv_udp_payload_size(config.transport.max_udp_payload as usize);
+        tc.set_max_send_udp_payload_size(config.transport.mtu as usize);
+        tc.enable_pacing(config.transport.enable_pacing);
+        tc.set_initial_rtt_ms(config.transport.initial_rtt_ms);
         tc.set_initial_max_data(config.transport.initial_max_data);
         tc.set_initial_max_stream_data_bidi_local(
             config.transport.initial_max_stream_data_bidi_local,
@@ -270,6 +277,21 @@ impl ClientConnection {
         tc.set_initial_max_streams_bidi(config.transport.initial_max_streams_bidi);
         tc.set_initial_max_stream_data_uni(config.transport.initial_max_stream_data_uni);
         tc.set_initial_max_streams_uni(config.transport.initial_max_streams_uni);
+
+        tc.set_pmtu_policy(crate::transport::PmtuPolicy {
+            min_mtu: usize::from(config.transport.pmtu_min_mtu),
+            max_mtu: usize::from(config.transport.pmtu_max_mtu),
+            probe_interval: std::time::Duration::from_millis(
+                config.transport.pmtu_probe_interval_ms,
+            ),
+            black_hole_timeout: std::time::Duration::from_millis(
+                config.transport.pmtu_black_hole_timeout_ms,
+            ),
+        })
+        .map_err(|error| EngineError::Config(format!("DPLPMTUD policy invalid: {error}")))?;
+        if config.transport.disable_pmtud {
+            tc.discover_pmtu(false);
+        }
 
         if config.transport.dgram_recv_queue_len > 0 {
             tc.enable_dgram(
@@ -321,82 +343,50 @@ impl ClientConnection {
             }
         }
 
+        tc.set_traffic_analysis_policy(config.transport.traffic_analysis).map_err(|error| {
+            EngineError::Config(format!("traffic-analysis policy invalid: {error}"))
+        })?;
+        tc.set_qkey_traffic_analysis_ceiling(config.transport.qkey_traffic_analysis_ceiling)
+            .map_err(|error| {
+                EngineError::Config(format!("QKey traffic-analysis ceiling invalid: {error}"))
+            })?;
+        tc.set_intelligent_traffic_analysis_ceiling(
+            config.transport.intelligent_traffic_analysis_ceiling,
+        )
+        .map_err(|error| {
+            EngineError::Config(format!("Intelligent traffic-analysis ceiling invalid: {error}"))
+        })?;
+
         Ok(tc)
     }
 
-    fn build_stealth_config(config: &EngineConfig) -> crate::stealth::StealthConfig {
-        let mut stealth =
-            crate::stealth::StealthConfig::from_mode(Self::map_stealth_mode(config.stealth.mode));
-
-        stealth.enable_domain_fronting = config.stealth.enable_domain_fronting;
-        stealth.enable_http3_masquerading = config.stealth.enable_http3_masquerading;
-        stealth.use_tls_cover = config.stealth.use_tls_cover;
-        stealth.use_qpack_headers = config.stealth.use_qpack_headers;
-        stealth.enable_traffic_padding = config.stealth.enable_traffic_padding;
-        stealth.enable_timing_obfuscation = config.stealth.enable_timing_obfuscation;
-        stealth.enable_protocol_mimicry = config.stealth.enable_protocol_mimicry;
-        stealth.enable_network_fingerprint_normalization =
-            config.stealth.enable_network_fingerprint_normalization;
-        stealth.suppress_icmp_unreachable = config.stealth.suppress_icmp_unreachable;
-        stealth.enable_doh = config.stealth.enable_doh;
-        stealth.doh_provider = config.stealth.doh_provider.clone();
-        stealth.max_padding_size = config.stealth.max_padding_size;
-        stealth.fronting_domains = config.stealth.fronting_domains.clone();
-
-        if let Ok(browser) = config.stealth.initial_browser.parse() {
-            stealth.initial_browser = browser;
-        }
-        if let Ok(os) = config.stealth.initial_os.parse() {
-            stealth.initial_os = os;
-        }
-        if let Some(strategy) = Self::parse_padding_strategy(&config.stealth.padding_strategy) {
-            stealth.padding_strategy = strategy;
-        }
-
-        stealth.normalize_protocol_mimicry_bundle();
-        stealth
+    fn build_stealth_config(
+        config: &EngineConfig,
+    ) -> Result<crate::stealth::StealthConfig, EngineError> {
+        config
+            .stealth
+            .to_runtime_config(&config.fingerprint_rotation)
+            .map_err(|error| EngineError::Config(format!("Stealth config error: {error}")))
     }
 
     fn should_use_utls(config: &EngineConfig) -> bool {
         config.stealth.use_utls && !matches!(config.stealth.mode, crate::engine::StealthMode::Off)
     }
 
-    fn map_stealth_mode(mode: crate::engine::StealthMode) -> crate::stealth::StealthMode {
-        match mode {
-            crate::engine::StealthMode::Off => crate::stealth::StealthMode::Off,
-            crate::engine::StealthMode::Performance => crate::stealth::StealthMode::Performance,
-            crate::engine::StealthMode::Stealth => crate::stealth::StealthMode::Stealth,
-            crate::engine::StealthMode::AntiDpi => crate::stealth::StealthMode::AntiDpi,
-            crate::engine::StealthMode::Manual => crate::stealth::StealthMode::Manual,
-            crate::engine::StealthMode::Auto => crate::stealth::StealthMode::Intelligent,
-        }
+    fn build_fec_config(config: &EngineConfig) -> Result<crate::fec::FecConfig, EngineError> {
+        config
+            .fec
+            .to_runtime_config()
+            .map_err(|error| EngineError::Config(format!("FEC config error: {error}")))
     }
 
-    fn parse_padding_strategy(value: &str) -> Option<crate::stealth::PaddingStrategy> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "random" | "1" => Some(crate::stealth::PaddingStrategy::Random),
-            "fixed" | "2" => Some(crate::stealth::PaddingStrategy::Fixed),
-            "adaptive" | "3" => Some(crate::stealth::PaddingStrategy::Adaptive),
-            "browser" | "browser-mimic" | "browsermimic" | "4" => {
-                Some(crate::stealth::PaddingStrategy::BrowserMimic)
-            }
-            "normalize" | "packet-normalize" | "packetnormalize" | "5" => {
-                Some(crate::stealth::PaddingStrategy::PacketNormalize)
-            }
-            _ => None,
-        }
-    }
-
-    fn build_fec_config(config: &EngineConfig) -> crate::fec::FecConfig {
-        crate::fec::FecConfig::from_engine_section(&config.fec)
-    }
-
-    fn build_optimize_config(config: &EngineConfig) -> crate::optimize::OptimizeConfig {
-        crate::optimize::OptimizeConfig {
-            pool_capacity: config.optimization.memory_pool_size
-                / config.optimization.memory_pool_alignment.max(1),
-            block_size: config.optimization.memory_pool_alignment.max(65536),
-        }
+    fn build_optimize_config(
+        config: &EngineConfig,
+    ) -> Result<crate::optimize::OptimizeConfig, EngineError> {
+        config
+            .optimization
+            .to_runtime_config()
+            .map_err(|error| EngineError::Config(format!("Optimization config error: {error}")))
     }
 }
 
@@ -413,9 +403,9 @@ mod tests {
             local_addr,
             remote_addr,
             ClientConnection::build_transport_config(&config).unwrap(),
-            ClientConnection::build_stealth_config(&config),
-            ClientConnection::build_fec_config(&config),
-            ClientConnection::build_optimize_config(&config),
+            ClientConnection::build_stealth_config(&config).unwrap(),
+            ClientConnection::build_fec_config(&config).unwrap(),
+            ClientConnection::build_optimize_config(&config).unwrap(),
             None,
             None,
             false,
@@ -438,16 +428,16 @@ mod tests {
             &[crate::transport::PROTOCOL_VERSION_V2, crate::transport::PROTOCOL_VERSION]
         );
 
-        let sc = ClientConnection::build_stealth_config(&config);
+        let sc = ClientConnection::build_stealth_config(&config).unwrap();
         assert!(sc.max_padding_size > 0);
         assert_eq!(sc.mode, crate::stealth::StealthMode::Intelligent);
         assert!(!sc.enable_domain_fronting);
         assert!(ClientConnection::should_use_utls(&config));
 
-        let fc = ClientConnection::build_fec_config(&config);
+        let fc = ClientConnection::build_fec_config(&config).unwrap();
         assert!(fc.burst_window > 0);
 
-        let oc = ClientConnection::build_optimize_config(&config);
+        let oc = ClientConnection::build_optimize_config(&config).unwrap();
         assert!(oc.pool_capacity > 0);
     }
 
@@ -485,6 +475,44 @@ mod tests {
     }
 
     #[test]
+    fn test_client_transport_config_carries_all_traffic_analysis_policies() {
+        let active = crate::transport::config::TrafficAnalysisPolicy {
+            defense: crate::transport::config::TrafficAnalysisDefense::FullPadding,
+            chaff_rate_pps: 25,
+            chaff_size_bytes: 1200,
+            constant_rate_pps: 0,
+            idle_timeout_ms: 30_000,
+            ramp_down_ms: 5_000,
+        };
+        let qkey_ceiling = crate::transport::config::TrafficAnalysisPolicy {
+            defense: crate::transport::config::TrafficAnalysisDefense::ConstantRate,
+            chaff_rate_pps: 500,
+            chaff_size_bytes: 1400,
+            constant_rate_pps: 100,
+            idle_timeout_ms: 60_000,
+            ramp_down_ms: 10_000,
+        };
+        let intelligent_ceiling = crate::transport::config::TrafficAnalysisPolicy {
+            defense: crate::transport::config::TrafficAnalysisDefense::FullPadding,
+            chaff_rate_pps: 10,
+            chaff_size_bytes: 1000,
+            constant_rate_pps: 0,
+            idle_timeout_ms: 20_000,
+            ramp_down_ms: 2_000,
+        };
+        let mut config = EngineConfig::default();
+        config.transport.traffic_analysis = active;
+        config.transport.qkey_traffic_analysis_ceiling = qkey_ceiling;
+        config.transport.intelligent_traffic_analysis_ceiling = intelligent_ceiling;
+
+        let transport =
+            ClientConnection::build_transport_config(&config).expect("transport config");
+        assert_eq!(transport.traffic_analysis_policy(), active);
+        assert_eq!(transport.qkey_traffic_analysis_ceiling(), qkey_ceiling);
+        assert_eq!(transport.intelligent_traffic_analysis_ceiling(), intelligent_ceiling);
+    }
+
+    #[test]
     fn test_utls_disabled_for_off_mode_and_explicit_opt_out() {
         let mut config = EngineConfig::default();
         config.stealth.mode = crate::engine::StealthMode::Off;
@@ -509,7 +537,7 @@ mod tests {
         config.stealth.suppress_icmp_unreachable = true;
         config.stealth.padding_strategy = "browser-mimic".to_string();
 
-        let sc = ClientConnection::build_stealth_config(&config);
+        let sc = ClientConnection::build_stealth_config(&config).unwrap();
         assert_eq!(sc.mode, crate::stealth::StealthMode::Manual);
         assert_eq!(sc.initial_browser, crate::stealth::BrowserProfile::Firefox);
         assert_eq!(sc.initial_os, crate::stealth::OsProfile::Linux);

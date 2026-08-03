@@ -103,11 +103,9 @@ pub struct FecCodec {
 }
 
 impl FecCodec {
-    pub fn new(config: crate::engine::FecSection) -> Self {
-        let fec_config = crate::fec::FecConfig::from_engine_section(&config);
-
+    pub fn new(config: crate::fec::FecConfig) -> Self {
         Self {
-            inner: crate::fec::AdaptiveFec::new(fec_config),
+            inner: crate::fec::AdaptiveFec::new(config),
             packet_id: std::sync::atomic::AtomicU64::new(0),
             output_scratch: Vec::with_capacity(1),
             receive_scratch: Vec::with_capacity(1),
@@ -175,14 +173,16 @@ impl From<ClientState> for EngineState {
 impl ClientRuntime {
     /// Create a new client runtime from configuration.
     pub fn new(config: EngineConfig) -> Result<Self, EngineError> {
+        config.validate().map_err(|error| {
+            EngineError::Config(format!("Invalid engine configuration: {error}"))
+        })?;
+        let optimize_config = config
+            .optimization
+            .to_runtime_config()
+            .map_err(|error| EngineError::Config(format!("Optimization config error: {error}")))?;
         // Create memory pool
-        let pool_bytes = config.optimization.memory_pool_size;
-        let block_size = config.optimization.memory_pool_alignment.max(2048);
-        let mut capacity = pool_bytes / block_size;
-        if capacity == 0 {
-            capacity = 1;
-        }
-        let pool = Arc::new(MemoryPool::new(capacity, block_size));
+        let pool =
+            Arc::new(MemoryPool::new(optimize_config.pool_capacity, optimize_config.block_size));
         let stealth_runtime =
             Arc::new(StealthRuntimeOwner::from_env().map_err(|error| {
                 EngineError::Config(format!("Invalid Reality config: {error}"))
@@ -823,6 +823,17 @@ mod tests {
         let config = EngineConfig::default();
         let runtime = ClientRuntime::new(config);
         assert!(runtime.is_ok());
+    }
+
+    #[test]
+    fn test_client_runtime_rejects_invalid_engine_projection() {
+        let mut config = EngineConfig::default();
+        config.stealth.padding_strategy = "invalid".to_string();
+        let error = match ClientRuntime::new(config) {
+            Ok(_) => panic!("invalid stealth must fail closed"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, EngineError::Config(_)));
     }
 
     #[test]

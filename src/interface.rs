@@ -79,12 +79,16 @@ impl Drop for TunPacket {
 
 /// Application configuration module
 pub mod app_config {
-    use crate::engine::{EngineConfig, StealthMode as EngineStealthMode};
+    use crate::engine::EngineConfig;
     use crate::fec::FecConfig;
     use crate::optimize::OptimizeConfig;
-    use crate::stealth::{BrowserProfile, OsProfile, PaddingStrategy, StealthConfig};
+    use crate::stealth::StealthConfig;
 
-    /// Unified configuration structure parsed from a TOML file.
+    /// Runtime projection for FEC, stealth, optimization, and anti-replay.
+    ///
+    /// `EngineConfig::validate` must succeed before this reduced projection is
+    /// constructed. Transport policies and startup-owned engine sections remain
+    /// in the source `EngineConfig` and are consumed by their dedicated adapters.
     #[derive(Clone)]
     pub struct AppConfig {
         /// Forward error correction settings.
@@ -98,66 +102,12 @@ pub mod app_config {
     }
 
     impl AppConfig {
-        fn parse_padding_strategy(raw: &str) -> Option<PaddingStrategy> {
-            match raw.trim().to_ascii_lowercase().as_str() {
-                "random" | "1" => Some(PaddingStrategy::Random),
-                "fixed" | "constant" | "2" => Some(PaddingStrategy::Fixed),
-                "adaptive" | "3" => Some(PaddingStrategy::Adaptive),
-                "browser" | "browser_mimic" | "browser-mimic" | "browsermimic" | "mimic" | "4" => {
-                    Some(PaddingStrategy::BrowserMimic)
-                }
-                _ => None,
-            }
-        }
-
         fn from_engine_toml(s: &str) -> Result<Self, Box<dyn std::error::Error>> {
-            let parsed = EngineConfig::from_toml(s)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-
-            let fec = FecConfig::from_engine_section(&parsed.fec);
-
-            let mut stealth = match parsed.stealth.mode {
-                EngineStealthMode::Off => StealthConfig::off(),
-                EngineStealthMode::Performance => StealthConfig::performance(),
-                EngineStealthMode::Stealth => StealthConfig::stealth(),
-                EngineStealthMode::AntiDpi => StealthConfig::anti_dpi(),
-                EngineStealthMode::Manual => StealthConfig::manual(),
-                EngineStealthMode::Auto => StealthConfig::intelligent(),
-            };
-            stealth.enable_domain_fronting = parsed.stealth.enable_domain_fronting;
-            stealth.enable_http3_masquerading = parsed.stealth.enable_http3_masquerading;
-            stealth.use_tls_cover = parsed.stealth.use_tls_cover;
-            stealth.use_qpack_headers = parsed.stealth.use_qpack_headers;
-            stealth.enable_traffic_padding = parsed.stealth.enable_traffic_padding;
-            stealth.enable_timing_obfuscation = parsed.stealth.enable_timing_obfuscation;
-            stealth.enable_protocol_mimicry = parsed.stealth.enable_protocol_mimicry;
-            stealth.enable_network_fingerprint_normalization =
-                parsed.stealth.enable_network_fingerprint_normalization;
-            stealth.suppress_icmp_unreachable = parsed.stealth.suppress_icmp_unreachable;
-            stealth.enable_doh = parsed.stealth.enable_doh;
-            stealth.doh_provider = parsed.stealth.doh_provider.clone();
-            stealth.max_padding_size = parsed.stealth.max_padding_size;
-            if let Some(p) = Self::parse_padding_strategy(&parsed.stealth.padding_strategy) {
-                stealth.padding_strategy = p;
-            }
-            stealth.fronting_domains = parsed.stealth.fronting_domains.clone();
-            if let Ok(p) = parsed.stealth.initial_browser.parse::<BrowserProfile>() {
-                stealth.initial_browser = p;
-            }
-            if let Ok(p) = parsed.stealth.initial_os.parse::<OsProfile>() {
-                stealth.initial_os = p;
-            }
-            stealth.enable_fingerprint_rotation = parsed.fingerprint_rotation.enabled;
-            stealth.fingerprint_rotation_interval = parsed.fingerprint_rotation.interval_secs;
-            stealth.fingerprint_rotation_mode = match parsed.fingerprint_rotation.mode {
-                crate::engine::RotationMode::Fixed => crate::stealth::RotationMode::Fixed,
-                crate::engine::RotationMode::Slots => crate::stealth::RotationMode::Slots,
-                crate::engine::RotationMode::All => crate::stealth::RotationMode::All,
-            };
-
-            let default_block_size = 65_536usize;
-            let pool_capacity = (parsed.optimization.memory_pool_size / default_block_size).max(1);
-            let optimize = OptimizeConfig { pool_capacity, block_size: default_block_size };
+            let parsed = EngineConfig::from_toml(s)?;
+            parsed.validate()?;
+            let fec = parsed.fec.to_runtime_config()?;
+            let stealth = parsed.stealth.to_runtime_config(&parsed.fingerprint_rotation)?;
+            let optimize = parsed.optimization.to_runtime_config()?;
 
             Ok(Self { fec, stealth, optimize, anti_replay: parsed.anti_replay })
         }
@@ -178,7 +128,58 @@ pub mod app_config {
             self.fec.validate()?;
             self.stealth.validate()?;
             self.optimize.validate()?;
+            self.anti_replay.validate().map_err(|error| error.to_string())?;
             Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn app_config_rejects_unknown_engine_keys_before_projection() {
+            let error = match AppConfig::from_toml(
+                r#"
+[connection]
+remote = "127.0.0.1:4433"
+
+[stealth]
+unknown_setting = true
+"#,
+            ) {
+                Ok(_) => panic!("unknown engine settings must not be silently dropped"),
+                Err(error) => error,
+            };
+            assert!(error.to_string().contains("unknown_setting"));
+        }
+
+        #[test]
+        fn app_config_preserves_typed_engine_projection() {
+            let config = AppConfig::from_toml(
+                r#"
+[connection]
+remote = "127.0.0.1:4433"
+
+[stealth]
+initial_browser = "firefox"
+initial_os = "linux"
+padding_strategy = "browser-mimic"
+
+[optimization]
+memory_pool_size = 1048576
+memory_pool_alignment = 4096
+"#,
+            )
+            .expect("valid engine projection");
+            assert_eq!(config.stealth.initial_browser, crate::stealth::BrowserProfile::Firefox);
+            assert_eq!(config.stealth.initial_os, crate::stealth::OsProfile::Linux);
+            assert_eq!(
+                config.stealth.padding_strategy,
+                crate::stealth::PaddingStrategy::BrowserMimic
+            );
+            assert_eq!(config.optimize.block_size, 65_536);
+            assert_eq!(config.optimize.pool_capacity, 16);
         }
     }
 }

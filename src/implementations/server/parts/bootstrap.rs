@@ -280,8 +280,16 @@ pub fn parse_runtime_profile_entry(
     entry: &str,
     default_os: OsProfile,
 ) -> Option<FingerprintProfile> {
-    let mut parts = entry.split('@');
-    let browser_part = parts.next()?.trim();
+    let separator = entry.find('@').or_else(|| entry.find(':'));
+    let (browser_part, os_part) = match separator {
+        Some(index) => (&entry[..index], Some(&entry[index + 1..])),
+        None => (entry, None),
+    };
+    if os_part.is_some_and(|part| part.contains('@') || part.contains(':')) {
+        log::warn!("Invalid fingerprint profile slot: {}", entry);
+        return None;
+    }
+    let browser_part = browser_part.trim();
     let browser = match browser_part.parse::<BrowserProfile>() {
         Ok(browser) => browser,
         Err(_) => {
@@ -290,7 +298,7 @@ pub fn parse_runtime_profile_entry(
         }
     };
 
-    let os = match parts.next() {
+    let os = match os_part {
         Some(part) => match part.trim().parse::<OsProfile>() {
             Ok(os) => os,
             Err(_) => {

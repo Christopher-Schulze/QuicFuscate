@@ -34,6 +34,7 @@ impl ServerRuntime {
         engine_config: EngineConfig,
         server_config: ServerConfig,
     ) -> Result<Self, EngineError> {
+        engine_config.validate().map_err(EngineError::from)?;
         server_config.auth_policy.validate().map_err(EngineError::Config)?;
         server_config.validate_revocation_retention().map_err(EngineError::Config)?;
         server_config.bandwidth_policy.validate().map_err(EngineError::Config)?;
@@ -44,13 +45,14 @@ impl ServerRuntime {
             server_config.blacklist.validate().map_err(EngineError::Config)?;
         }
         // Create memory pool
-        let pool_bytes = engine_config.optimization.memory_pool_size;
-        let block_size = engine_config.optimization.memory_pool_alignment.max(2048);
-        let mut capacity = pool_bytes / block_size;
-        if capacity == 0 {
-            capacity = 1;
-        }
-        let pool = Arc::new(MemoryPool::new(capacity, block_size));
+        let optimize_config = engine_config
+            .optimization
+            .to_runtime_config()
+            .map_err(EngineError::from)?;
+        let pool = Arc::new(MemoryPool::new(
+            optimize_config.pool_capacity,
+            optimize_config.block_size,
+        ));
 
         let domain = SharedServerDomain::try_new(&server_config).map_err(EngineError::Config)?;
         let stealth_runtime = Arc::new(
