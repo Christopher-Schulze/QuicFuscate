@@ -34,6 +34,51 @@ mod runtime_reload_tests {
     }
 
     #[test]
+    fn initial_client_packet_construction_failure_is_propagated() {
+        let error = initial_client_packet_constructed(Err(ConnectionError::Transport(
+            "crypto state unavailable".to_string(),
+        )))
+        .expect_err("initial packet construction failure must stop startup");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert!(error.to_string().contains("initial client packet construction failed"));
+        assert!(error.to_string().contains("crypto state unavailable"));
+    }
+
+    #[test]
+    fn initial_client_packet_without_datagram_is_rejected() {
+        let error = initial_client_packet_constructed(Ok(0))
+            .expect_err("startup must not continue without an initial datagram");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("produced no datagram"));
+    }
+
+    #[test]
+    fn initial_client_socket_send_failure_is_propagated() {
+        let error = initial_client_packet_sent(
+            1200,
+            Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "socket closed")),
+        )
+        .expect_err("initial socket send failure must stop startup");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        assert!(error.to_string().contains("initial client handshake datagram send failed"));
+        assert!(error.to_string().contains("socket closed"));
+    }
+
+    #[test]
+    fn initial_client_packet_evidence_separates_construction_and_socket_send() {
+        let evidence = initial_client_packet_sent(1200, Ok(()))
+            .expect("successful socket send must produce complete initial evidence");
+
+        assert_eq!(
+            evidence,
+            InitialClientPacketEvidence { constructed_bytes: 1200, sent_bytes: 1200 }
+        );
+    }
+
+    #[test]
     fn client_startup_cleanup_preserves_primary_tun_failure() {
         let primary = std::io::Error::new(
             std::io::ErrorKind::Unsupported,

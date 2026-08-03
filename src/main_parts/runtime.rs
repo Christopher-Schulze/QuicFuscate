@@ -782,6 +782,40 @@ fn send_client_tun_packet(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InitialClientPacketEvidence {
+    constructed_bytes: usize,
+    sent_bytes: usize,
+}
+
+fn initial_client_packet_constructed(
+    result: Result<usize, ConnectionError>,
+) -> std::io::Result<usize> {
+    let constructed_bytes = result.map_err(|error| {
+        std::io::Error::other(format!("initial client packet construction failed: {error}"))
+    })?;
+    if constructed_bytes == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "initial client packet construction produced no datagram",
+        ));
+    }
+    Ok(constructed_bytes)
+}
+
+fn initial_client_packet_sent(
+    constructed_bytes: usize,
+    result: std::io::Result<()>,
+) -> std::io::Result<InitialClientPacketEvidence> {
+    result.map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("initial client handshake datagram send failed: {error}"),
+        )
+    })?;
+    Ok(InitialClientPacketEvidence { constructed_bytes, sent_bytes: constructed_bytes })
+}
+
 fn client_startup_error_with_cleanup(
     primary: std::io::Error,
     cleanup_errors: Vec<String>,
@@ -801,9 +835,10 @@ async fn cleanup_client_startup_failure(
     stealth_runtime: &Arc<StealthRuntimeOwner>,
     kill_switch: Option<&Arc<quicfuscate::implementations::client::KillSwitch>>,
     primary: std::io::Error,
+    close_reason: &[u8],
 ) -> std::io::Error {
     let mut cleanup_errors = Vec::new();
-    if let Err(error) = conn.conn.close(true, 0, b"client TUN setup failed") {
+    if let Err(error) = conn.conn.close(true, 0, close_reason) {
         cleanup_errors.push(format!("QUIC close failed: {error:?}"));
     }
     if let Some(kill_switch) = kill_switch {
@@ -1377,17 +1412,53 @@ async fn run_client(
     let mut buf = [0; 65535];
     let mut out = [0; 65535];
 
-    // Send initial packet
-    if let Ok(len) = conn.send(&mut out) {
-        if len > 0 {
-            telemetry!(quicfuscate::telemetry::BYTES_SENT.inc_by(len as u64));
-            if let Err(e) = send_connected_datagram(&socket, &out[..len]).await {
-                error!("Failed to send initial packet: {}", e);
-            } else {
-                info!("Sent initial packet of size {}", len);
-            }
+    // Construct and send the first wire datagram before any later request or TUN
+    // readiness can be published. A live runtime without this packet is not a
+    // valid client startup.
+    let constructed_bytes = match initial_client_packet_constructed(conn.send(&mut out)) {
+        Ok(bytes) => {
+            info!("Constructed initial client packet of size {}", bytes);
+            bytes
         }
-    }
+        Err(error) => {
+            error!("Initial client packet construction failed: {}", error);
+            return Err(
+                cleanup_client_startup_failure(
+                    &mut conn,
+                    &stealth_runtime,
+                    kill_switch.as_ref(),
+                    error,
+                    b"initial client handshake construction failed",
+                )
+                .await,
+            );
+        }
+    };
+    let initial_packet = match initial_client_packet_sent(
+        constructed_bytes,
+        send_connected_datagram(&socket, &out[..constructed_bytes]).await,
+    ) {
+        Ok(evidence) => evidence,
+        Err(error) => {
+            error!("Initial client handshake send failed: {}", error);
+            return Err(
+                cleanup_client_startup_failure(
+                    &mut conn,
+                    &stealth_runtime,
+                    kill_switch.as_ref(),
+                    error,
+                    b"initial client handshake send failed",
+                )
+                .await,
+            );
+        }
+    };
+    telemetry!(quicfuscate::telemetry::BYTES_SENT.inc_by(initial_packet.sent_bytes as u64));
+    info!(
+        "Sent initial client packet constructed_bytes={} sent_bytes={}",
+        initial_packet.constructed_bytes,
+        initial_packet.sent_bytes
+    );
 
     let mut request_sent = false;
     let mut kill_switch_connected = false;
@@ -1531,6 +1602,7 @@ async fn run_client(
                         &stealth_runtime,
                         kill_switch.as_ref(),
                         error,
+                        b"client TUN setup failed",
                     )
                     .await,
                 );
