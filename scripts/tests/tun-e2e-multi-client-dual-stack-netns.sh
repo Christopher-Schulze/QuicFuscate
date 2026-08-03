@@ -416,35 +416,41 @@ prove_framed_h3_fallback() {
 }
 
 prove_server_ptb_from_client() {
+  local ipv4_df_destination=198.51.100.2
+  local ipv4_non_df_destination=198.51.100.3
   ip netns exec "${CLIENT_NS[0]}" ip link set "$TUN_NAME" mtu 1500
-  ip netns exec "${CLIENT_NS[0]}" ip route replace 198.51.100.2/32 dev "$TUN_NAME"
+  ip netns exec "${CLIENT_NS[0]}" ip route replace "$ipv4_df_destination/32" dev "$TUN_NAME"
+  ip netns exec "${CLIENT_NS[0]}" ip route replace "$ipv4_non_df_destination/32" dev "$TUN_NAME"
   ip netns exec "${CLIENT_NS[0]}" ip -6 route replace 2001:db8::2/128 dev "$TUN_NAME"
 
   # Keep the client TUN at 1500 while the server TUN remains at the phase MTU
   # floor. The server QUIC carrier is deliberately larger than that TUN MTU,
   # so the probe reaches allow_client_uplink whole instead of being truncated
   # by the carrier receive buffer before the server PTB disposition is tested.
+  # The IPv4 probes use separate destinations so the DF=1 response cannot
+  # install a cached 1280-byte PMTU that would fragment the later DF=0 probe
+  # in the client namespace before it reaches the server.
   local ipv4_df_output ipv4_non_df_output ipv6_output capture_pid
   fetch_metrics client-ptb-before
 
   ip netns exec "${CLIENT_NS[0]}" timeout 5 tcpdump -l -nn -vv -xx -i "$TUN_NAME" \
-    'icmp and ((src host 10.0.1.2 and dst host 198.51.100.2) or (src host 10.0.1.1 and dst host 10.0.1.2))' \
+    "icmp and ((src host 10.0.1.2 and dst host $ipv4_df_destination) or (src host 10.0.1.1 and dst host 10.0.1.2))" \
     >"$ARTIFACT_DIR/client-server-ptb4-df-wire.log" 2>&1 &
   capture_pid="$!"
   sleep 0.5
   kill -0 "$capture_pid" 2>/dev/null || fail 'DF=1 PTB capture did not remain active'
   ipv4_df_output="$(ip netns exec "${CLIENT_NS[0]}" ping -4 -c 1 -W 2 -M 'do' -s 1300 \
-    -I "${CLIENT_V4[0]}" 198.51.100.2 2>&1 || true)"
+    -I "${CLIENT_V4[0]}" "$ipv4_df_destination" 2>&1 || true)"
   wait "$capture_pid" 2>/dev/null || true
 
   ip netns exec "${CLIENT_NS[0]}" timeout 5 tcpdump -l -nn -vv -xx -i "$TUN_NAME" \
-    'icmp and ((src host 10.0.1.2 and dst host 198.51.100.2) or (src host 10.0.1.1 and dst host 10.0.1.2))' \
+    "icmp and ((src host 10.0.1.2 and dst host $ipv4_non_df_destination) or (src host 10.0.1.1 and dst host 10.0.1.2))" \
     >"$ARTIFACT_DIR/client-server-ptb4-non-df-wire.log" 2>&1 &
   capture_pid="$!"
   sleep 0.5
   kill -0 "$capture_pid" 2>/dev/null || fail 'DF=0 PTB capture did not remain active'
   ipv4_non_df_output="$(ip netns exec "${CLIENT_NS[0]}" ping -4 -c 1 -W 2 -M 'dont' -s 1300 \
-    -I "${CLIENT_V4[0]}" 198.51.100.2 2>&1 || true)"
+    -I "${CLIENT_V4[0]}" "$ipv4_non_df_destination" 2>&1 || true)"
   wait "$capture_pid" 2>/dev/null || true
 
   ip netns exec "${CLIENT_NS[0]}" timeout 5 tcpdump -l -nn -vv -xx -i "$TUN_NAME" \
