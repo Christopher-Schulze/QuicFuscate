@@ -26,6 +26,7 @@ mkdir -p "$OUTPUT_DIR"
 LOG_FILE="$OUTPUT_DIR/transport-tests.log"
 JSON="$OUTPUT_DIR/results.json"; json_begin "$JSON" "tests_transport_comprehensive"; JSON_FIRST_RUN=1
 URING_PROOF_FAILURE=0
+URING_PROOF_TIMEOUT_SECONDS=300
 
 write_uring_proof_evidence() {
   local name="$1"
@@ -34,7 +35,8 @@ write_uring_proof_evidence() {
   local log_file="$4"
   local command_status="$5"
   local environment_json="$6"
-  local command_line="$7"
+  local command_argv_json="$7"
+  local command_line="$8"
   qf_json_write_object_file "$OUTPUT_DIR/${name}.json" \
     "schema=quicfuscate.io_uring_proof.v1" \
     "name=$name" \
@@ -44,6 +46,7 @@ write_uring_proof_evidence() {
     "command_status=int:$command_status" \
     "source_revision=$(git rev-parse HEAD)" \
     "environment=json:$environment_json" \
+    "argv=json:$command_argv_json" \
     "command=$command_line"
   qf_json_append_object "$JSON" \
     "name=$name" \
@@ -53,6 +56,7 @@ write_uring_proof_evidence() {
     "command_status=int:$command_status" \
     "source_revision=$(git rev-parse HEAD)" \
     "environment=json:$environment_json" \
+    "argv=json:$command_argv_json" \
     "raw_output=$log_file"
 }
 
@@ -83,6 +87,8 @@ run_required_uring_proof() {
   local environment_json="$3"
   shift 3
   local log_file="$OUTPUT_DIR/${name}.log"
+  local command_argv_json
+  command_argv_json="$(qf_json_array "$@")"
   local command_line
   command_line="$(printf '%q ' "$@")"
   command_line="${command_line% }"
@@ -107,7 +113,8 @@ run_required_uring_proof() {
   fi
 
   write_uring_proof_evidence \
-    "$name" "$status" "$reason" "$log_file" "$command_status" "$environment_json" "$command_line"
+    "$name" "$status" "$reason" "$log_file" "$command_status" "$environment_json" \
+    "$command_argv_json" "$command_line"
   if [[ "$status" != "PASS" ]]; then
     URING_PROOF_FAILURE=1
     return 1
@@ -135,7 +142,7 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
     rearm_environment="$(qf_json_environment_with_assignments "QUICFUSCATE_FASTPATH=auto")"
     if ! run_required_uring_proof \
       "uring-rearm" "QF_IO_URING_REARM_STATUS" "$rearm_environment" \
-      run_bounded_cargo 60 QUICFUSCATE_FASTPATH=auto -- \
+      run_bounded_cargo "$URING_PROOF_TIMEOUT_SECONDS" QUICFUSCATE_FASTPATH=auto -- \
       test --release --features io_uring,rust-tests --lib recv_rearms_after_zero_length_datagrams -- \
       --nocapture --exact; then
         echo "[FAIL] io_uring zero-length receive rearm proof did not pass" >&2
@@ -150,7 +157,7 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
       "QUICFUSCATE_FASTPATH=auto" "QUICFUSCATE_IO_URING_ZC=1")"
     if ! run_required_uring_proof \
       "uring-zc" "QF_IO_URING_ZC_STATUS" "$zc_environment" \
-      run_bounded_cargo 60 QUICFUSCATE_FASTPATH=auto QUICFUSCATE_IO_URING_ZC=1 -- \
+      run_bounded_cargo "$URING_PROOF_TIMEOUT_SECONDS" QUICFUSCATE_FASTPATH=auto QUICFUSCATE_IO_URING_ZC=1 -- \
       test --release --features io_uring,rust-tests --test rt-transport-uring \
       uring_zc_opt_in_loopback_and_error_contract -- \
       --nocapture --exact --test-threads=1; then
