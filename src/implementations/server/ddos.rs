@@ -12,7 +12,7 @@ const RETRY_TOKEN_MAGIC: &[u8; 4] = b"QFRT";
 const RETRY_TOKEN_VERSION: u8 = 1;
 const RETRY_TOKEN_TAG_LEN: usize = 32;
 const MAX_RETRY_CREDENTIAL_LEN: usize = 64;
-const MAX_RETRY_TOKEN_LEN: usize = 160;
+const MAX_RETRY_TOKEN_LEN: usize = 192;
 const MAX_RETRY_CLOCK_SKEW_SECS: u64 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -368,5 +368,48 @@ mod tests {
         let claims = manager.validate(retry.token.as_deref().unwrap(), ip, &retry.scid).unwrap();
         assert_eq!(claims.original_dcid, initial_header.dcid);
         assert_eq!(claims.credential, b"a1b2c3d4e5f6");
+    }
+
+    #[test]
+    fn retry_issue_roundtrips_worst_case_bounded_input() {
+        let manager = manager();
+        let source_ip: IpAddr = "2001:db8::1".parse().unwrap();
+        let original_dcid = vec![0x11; MAX_CONN_ID_LEN];
+        let client_scid = vec![0x22; MAX_CONN_ID_LEN];
+        let credential = vec![0x33; MAX_RETRY_CREDENTIAL_LEN];
+        let initial_header = Header {
+            ty: PacketType::Initial,
+            version: crate::transport::PROTOCOL_VERSION,
+            dcid: original_dcid.clone(),
+            scid: client_scid.clone(),
+            pkt_num: 0,
+            pkt_num_len: 0,
+            token: Some(credential.clone()),
+            versions: None,
+            key_phase: false,
+        };
+        let mut storage = [0u8; 512];
+        let initial_len = format_header(&initial_header, &mut storage).unwrap();
+        let issue = manager.issue_for_initial(&storage[..initial_len], source_ip).unwrap();
+        let (retry, _) = parse_header(&issue.packet, 0).unwrap();
+        let token = retry.token.as_deref().expect("Retry token");
+        let expected_token_len = RETRY_TOKEN_MAGIC.len()
+            + 1
+            + 8
+            + 1
+            + 16
+            + 1
+            + MAX_CONN_ID_LEN
+            + 1
+            + MAX_CONN_ID_LEN
+            + 1
+            + MAX_RETRY_CREDENTIAL_LEN
+            + RETRY_TOKEN_TAG_LEN;
+
+        assert_eq!(token.len(), expected_token_len);
+        assert!(token.len() <= MAX_RETRY_TOKEN_LEN);
+        let claims = manager.validate(token, source_ip, &retry.scid).unwrap();
+        assert_eq!(claims.original_dcid, original_dcid);
+        assert_eq!(claims.credential, credential);
     }
 }
