@@ -553,6 +553,55 @@ mod tests {
     }
 
     #[test]
+    fn expiring_ipv4_tunnel_ingress_is_routed_before_fingerprint_normalization() {
+        let server_ip = Ipv4Addr::new(10, 0, 1, 1);
+        let client_ip = Ipv4Addr::new(10, 0, 1, 2);
+        let destination_ip = Ipv4Addr::new(198, 51, 100, 1);
+        let forwarding_policy =
+            ClientIsolationManager::with_network(server_ip, Ipv4Addr::new(255, 255, 255, 0), false);
+        let assigned = AssignedClientIps { ipv4: client_ip, ipv6: None };
+        forwarding_policy.assign_client("client", assigned);
+        let mut packet = test_ipv4_udp_packet(client_ip, destination_ip, 40_000, 33434, &[1]);
+        packet[8] = 1;
+        packet[10..12].fill(0);
+        let checksum = ones_complement_checksum(&packet[..20]);
+        packet[10..12].copy_from_slice(&checksum.to_be_bytes());
+        let original = packet.clone();
+        let normalizer =
+            crate::stealth::fingerprint::PacketNormalizer::new(OsFingerprintProfile::Windows);
+
+        assert_eq!(
+            normalizer.normalize_tunnel_ingress_vec(&mut packet),
+            crate::stealth::fingerprint::NormalizeResult::Passthrough
+        );
+        let metrics = Metrics::new();
+        let responses =
+            Arc::new(std::sync::Mutex::new(crate::core::MasqueDownlinkQueue::new(8, 4096)));
+        let route = allow_client_uplink(
+            &forwarding_policy,
+            &metrics,
+            Some(assigned),
+            &packet,
+            OsFingerprintProfile::Windows,
+            ServerTunIps { ipv4: server_ip, ipv6: None },
+            1280,
+            &responses,
+        );
+
+        assert!(route.is_none());
+        assert_eq!(metrics.routing_time_exceeded.load(Ordering::Relaxed), 1);
+        let response = responses
+            .lock()
+            .expect("response queue must not be poisoned")
+            .pop_front()
+            .expect("expired IPv4 packet must enqueue Time Exceeded");
+        assert_eq!(response[8], OsFingerprintProfile::Windows.ttl());
+        assert_eq!(response[20], icmp::icmp_type::TIME_EXCEEDED);
+        assert_eq!(response[21], 0);
+        assert_eq!(&response[28..], &original[..28]);
+    }
+
+    #[test]
     fn test_server_config_default() {
         let config = ServerConfig::default();
         assert_eq!(config.max_clients, 100);

@@ -314,6 +314,22 @@ impl PacketNormalizer {
         NormalizeOutcome { result, packet_len: normalized_len }
     }
 
+    /// Applies fingerprint normalization to tunnel ingress while preserving
+    /// valid IPv4 packets whose TTL has reached the local routing expiry
+    /// boundary. The server must evaluate those packets before any persona
+    /// rewrite so it can emit ICMP Time Exceeded with the received packet
+    /// quoted verbatim.
+    pub fn normalize_tunnel_ingress_with_capacity(
+        &self,
+        pkt: &mut [u8],
+        packet_len: usize,
+    ) -> NormalizeOutcome {
+        if packet_len <= pkt.len() && Self::has_expiring_ipv4_ttl(&pkt[..packet_len]) {
+            return NormalizeOutcome { result: NormalizeResult::Passthrough, packet_len };
+        }
+        self.normalize_with_capacity(pkt, packet_len)
+    }
+
     /// Applies normalization to an owned packet and retains its canonical
     /// logical length. Callers that preallocate four spare bytes incur no
     /// allocation even when a Darwin profile expands a 20-byte option area.
@@ -332,6 +348,15 @@ impl PacketNormalizer {
         let outcome = self.normalize_with_capacity(pkt, packet_len);
         pkt.truncate(outcome.packet_len);
         outcome.result
+    }
+
+    /// Applies tunnel-ingress normalization without consuming an expired IPv4
+    /// packet's routing metadata before the server can classify it.
+    pub fn normalize_tunnel_ingress_vec(&self, pkt: &mut Vec<u8>) -> NormalizeResult {
+        if Self::has_expiring_ipv4_ttl(pkt) {
+            return NormalizeResult::Passthrough;
+        }
+        self.normalize_vec(pkt)
     }
 
     /// Returns the buffer length required for canonical SYN option rewriting.
@@ -407,6 +432,10 @@ impl PacketNormalizer {
         }
         let protocol = pkt[9];
         Some((ihl, protocol))
+    }
+
+    fn has_expiring_ipv4_ttl(pkt: &[u8]) -> bool {
+        Self::parse_ipv4_header(pkt).is_some_and(|_| pkt[8] <= 1)
     }
 
     /// Normalizes the IPv4 layer of a packet to match the target OS profile.
@@ -1393,6 +1422,27 @@ mod tests {
         normalizer.normalize_ipv4(&mut pkt);
         assert_eq!(pkt[8], 64, "TTL should be normalized to 64 for Android");
         assert!(verify_ip_checksum(&pkt), "IP checksum must be valid");
+    }
+
+    #[test]
+    fn tunnel_ingress_preserves_expiring_ipv4_packets_before_normalization() {
+        let original = build_icmp_request([10, 0, 0, 1], [198, 51, 100, 1], 1);
+        let normalizer = PacketNormalizer::new(OsFingerprintProfile::Windows);
+
+        let mut datagram = original.clone();
+        assert_eq!(
+            normalizer.normalize_tunnel_ingress_vec(&mut datagram),
+            NormalizeResult::Passthrough
+        );
+        assert_eq!(datagram, original);
+
+        let mut storage = [0u8; 64];
+        storage[..original.len()].copy_from_slice(&original);
+        let outcome =
+            normalizer.normalize_tunnel_ingress_with_capacity(&mut storage, original.len());
+        assert_eq!(outcome.result, NormalizeResult::Passthrough);
+        assert_eq!(outcome.packet_len, original.len());
+        assert_eq!(&storage[..original.len()], original.as_slice());
     }
 
     // --- Checksum update correctness tests ---

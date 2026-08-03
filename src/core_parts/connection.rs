@@ -1105,16 +1105,20 @@ impl QuicFuscateConnection {
                                         {
                                             let mut expanded = [0u8; MAX_INNER_IP_PACKET_LEN];
                                             expanded[..packet.len()].copy_from_slice(packet);
-                                            let outcome = normalizer.normalize_with_capacity(
-                                                &mut expanded,
-                                                packet.len(),
-                                            );
+                                            let outcome = normalizer
+                                                .normalize_tunnel_ingress_with_capacity(
+                                                    &mut expanded,
+                                                    packet.len(),
+                                                );
                                             if outcome.result != NormalizeResult::Dropped {
                                                 on_body(sid, &expanded[..outcome.packet_len]);
                                             }
                                         } else {
                                             let outcome = normalizer
-                                                .normalize_with_capacity(packet, packet.len());
+                                                .normalize_tunnel_ingress_with_capacity(
+                                                    packet,
+                                                    packet.len(),
+                                                );
                                             if outcome.result != NormalizeResult::Dropped {
                                                 on_body(sid, &packet[..outcome.packet_len]);
                                             }
@@ -1280,7 +1284,7 @@ impl QuicFuscateConnection {
                 .decompress_to_pool(pool, payload),
         };
         if let Some((mut blk, used)) = decoded {
-            let outcome = normalizer.normalize_with_capacity(&mut blk, used);
+            let outcome = normalizer.normalize_tunnel_ingress_with_capacity(&mut blk, used);
             if outcome.result != NormalizeResult::Dropped {
                 Self::dispatch_masque_datagram_payload(
                     masque_datagram_cb,
@@ -1303,7 +1307,7 @@ impl QuicFuscateConnection {
     ) {
         match capsule_type {
             0x00 => {
-                if normalizer.normalize_vec(payload) != NormalizeResult::Dropped {
+                if normalizer.normalize_tunnel_ingress_vec(payload) != NormalizeResult::Dropped {
                     Self::dispatch_masque_datagram_payload(masque_datagram_cb, masque_cb, payload);
                 }
             }
@@ -1363,7 +1367,9 @@ impl QuicFuscateConnection {
         let has_sink = masque_datagram_cb.is_some() || masque_cb.is_some();
         if stealth_manager.masque_datagram_enabled() || has_sink {
             while let Some((_fid, mut payload)) = h3.try_recv_masque_datagram(conn) {
-                if normalizer.normalize_vec(&mut payload) != NormalizeResult::Dropped {
+                if normalizer.normalize_tunnel_ingress_vec(&mut payload)
+                    != NormalizeResult::Dropped
+                {
                     Self::dispatch_masque_datagram_payload(masque_datagram_cb, masque_cb, &payload);
                 }
             }
