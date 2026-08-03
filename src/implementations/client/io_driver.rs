@@ -256,6 +256,17 @@ pub struct IoDriver {
     wide_batch_cpu: bool,
 }
 
+#[cfg(all(target_os = "linux", feature = "io_uring"))]
+fn validate_eventfd_read_len(read_len: isize) -> std::io::Result<()> {
+    if read_len == 8 {
+        return Ok(());
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("io_uring eventfd returned {read_len} bytes instead of 8"),
+    ))
+}
+
 impl IoDriver {
     #[inline]
     fn normalized_batch_size(&self) -> usize {
@@ -486,10 +497,7 @@ impl IoDriver {
         let mut batch_payloads: Vec<Vec<u8>> =
             (0..batch_cap).map(|_| Vec::with_capacity(2048)).collect();
         #[cfg(target_os = "linux")]
-        let mut batch_refs: Vec<&[u8]> = Vec::with_capacity(batch_cap);
-        #[cfg(target_os = "linux")]
         while !self.shutdown.load(Ordering::Relaxed) {
-            batch_refs.clear();
             // Read from TUN - returns (block, len)
             // TUN read path is blocking; loop structure keeps the behavior explicit.
             let read_result = {
@@ -541,16 +549,19 @@ impl IoDriver {
                     {
                         use std::os::fd::AsRawFd;
                         let socket_fd = socket.as_raw_fd();
+                        // The reference vector is scoped to the synchronous
+                        // dispatch phase. It cannot keep borrowing
+                        // `batch_payloads` into the next loop iteration, and
+                        // SmallVec keeps the configured maximum batch inline.
+                        let batch_refs: smallvec::SmallVec<[&[u8]; 256]> = batch_payloads
+                            .iter()
+                            .take(queued)
+                            .map(|payload| payload.as_slice())
+                            .collect();
 
                         // io_uring batch path (preferred when available).
                         #[cfg(feature = "io_uring")]
                         if matches!(dispatch, OutboundDispatch::IoUringBatch) {
-                            batch_refs.extend(
-                                batch_payloads
-                                    .iter()
-                                    .take(queued)
-                                    .map(|payload| payload.as_slice()),
-                            );
                             let mut guard = self.uring_sender.lock();
                             if let Some(ref mut uring) = *guard {
                                 match uring.send_batch(socket_fd, &batch_refs) {
@@ -569,14 +580,6 @@ impl IoDriver {
 
                         // sendmmsg batch path (fallback from io_uring, or primary).
                         if already_sent == 0 && queued > 1 {
-                            if batch_refs.is_empty() {
-                                batch_refs.extend(
-                                    batch_payloads
-                                        .iter()
-                                        .take(queued)
-                                        .map(|payload| payload.as_slice()),
-                                );
-                            }
                             match try_sendmmsg_batch(
                                 self.hotpath_adapter.as_ref(),
                                 socket_fd,
@@ -853,6 +856,9 @@ impl IoDriver {
                                 self.transport_receive_error("client io_uring eventfd read", error)
                             );
                         }
+                    } else if let Err(error) = validate_eventfd_read_len(efd_ret) {
+                        return Err(self
+                            .transport_receive_error("client io_uring eventfd short read", error));
                     }
                     guard.clear_ready();
 
@@ -1109,6 +1115,18 @@ mod tests {
 
         let d2 = IoDriver::new(IoDriverConfig { batch_size: 1024, ..IoDriverConfig::default() });
         assert!(matches!(d2.normalized_batch_size(), 128 | 256));
+    }
+
+    #[cfg(all(target_os = "linux", feature = "io_uring"))]
+    #[test]
+    fn test_eventfd_read_requires_exact_eight_bytes() {
+        assert!(validate_eventfd_read_len(8).is_ok());
+        for length in [0, 1, 4, 7, 9, -1] {
+            assert!(
+                validate_eventfd_read_len(length).is_err(),
+                "eventfd read length {length} must be rejected"
+            );
+        }
     }
 
     #[test]

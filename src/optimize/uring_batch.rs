@@ -10,15 +10,15 @@ use std::os::fd::RawFd;
 use std::sync::Arc;
 
 use crate::optimize::{AlignedBox, MemoryPool};
-use io_uring::{opcode, IoUring, Probe};
+use io_uring::{opcode, types::CancelBuilder, IoUring, Probe};
 
 /// Default submission queue depth (must be power of two).
 const DEFAULT_QUEUE_DEPTH: u32 = 256;
 
-/// `IORING_CQE_F_MORE`: more CQEs from this SQE will follow (SendMsgZc primary CQE).
-const CQE_F_MORE: u32 = 1 << 1;
 /// `IORING_CQE_F_NOTIF`: this is a buffer-release notification CQE (SendMsgZc ZC done).
 const CQE_F_NOTIF: u32 = 1 << 3;
+/// `IORING_CQE_F_MORE`: a SendMsgZc primary CQE has a follow-up notification.
+const CQE_F_MORE: u32 = 1 << 1;
 
 /// Batch UDP sender backed by a reusable io_uring instance.
 ///
@@ -27,8 +27,9 @@ const CQE_F_NOTIF: u32 = 1 << 3;
 /// container, etc.) construction returns `None` and the caller falls
 /// through to `sendmmsg`.
 ///
-/// `iovecs`, `msgs`, and `sockaddrs` are pre-allocated to `queue_depth`
-/// capacity so `send_batch` never touches the allocator on the hot path.
+/// `iovecs`, `msgs`, `sockaddrs`, and payload slots are retained at
+/// `queue_depth` capacity after warm-up. Payloads are copied into those owned
+/// slots before submission so kernel pointers never borrow the caller.
 ///
 /// **SQPOLL**: constructed with `IORING_SETUP_SQPOLL` when the kernel
 /// supports it (requires `CAP_SYS_ADMIN` on kernels < 5.12, unrestricted
@@ -39,8 +40,14 @@ const CQE_F_NOTIF: u32 = 1 << 3;
 /// `QUICFUSCATE_IO_URING_ZC=1` is set. The production default is plain
 /// `SendMsg`, because its CQE semantics are more portable across hosted CI,
 /// containers, and mixed Linux kernels. Check `zc_supported()`.
+///
+/// Each input payload is copied into sender-owned storage before an SQE is
+/// built. This preserves the kernel pointer contract if submission fails and
+/// the caller immediately releases its input batch.
 pub struct UringBatchSender {
     ring: IoUring,
+    /// Sender-owned payload storage. SQE iovecs never point into caller memory.
+    payloads: Vec<Vec<u8>>,
     /// Pre-allocated iovec scratch buffer (reused across batches).
     iovecs: Vec<libc::iovec>,
     /// Pre-allocated msghdr scratch buffer (reused across batches).
@@ -49,17 +56,32 @@ pub struct UringBatchSender {
     sockaddrs: Vec<libc::sockaddr_storage>,
     /// Pre-allocated completion bitmap for contiguous-prefix accounting.
     send_success: Vec<bool>,
+    /// Completion bitmap separate from `send_success`, so an error CQE still
+    /// counts as an observed completion and cannot leave a slot ambiguous.
+    send_seen: Vec<bool>,
     /// Pre-allocated primary-CQE bitmap for SendMsgZc completion accounting.
     zc_primary_seen: Vec<bool>,
+    /// Notification bitmap for SendMsgZc buffer-release CQEs.
+    zc_notification_seen: Vec<bool>,
+    /// Notification expectation bitmap. The kernel sets `CQE_F_MORE` on the
+    /// primary CQE when a release notification will follow, including for an
+    /// errored request that still retains the buffer.
+    zc_notification_expected: Vec<bool>,
     /// True when the ring was constructed with SQPOLL mode.
     sqpoll_active: bool,
     /// True when SendMsgZc was probed successfully and explicitly enabled.
     zc_supported: bool,
+    /// Set after a submit/protocol error. The sender is then quarantined so
+    /// its raw-pointer scratch storage can never be reused while an accepted
+    /// SQE might still reference it.
+    submission_poisoned: bool,
 }
 
-// SAFETY: UringBatchSender owns its ring and scratch vectors. The raw pointers
-// inside msghdr/iovec entries are rebuilt from those owned vectors during
-// synchronous &mut self submissions and are protected by the caller's mutex.
+// SAFETY: UringBatchSender owns its ring, payloads, and all scratch storage.
+// Raw pointers inside msghdr/iovec entries are rebuilt only through exclusive
+// &mut self methods. The type is moved between threads, never concurrently
+// accessed through shared references, and a failed submission quarantines the
+// storage before another batch can rebuild it.
 unsafe impl Send for UringBatchSender {}
 
 struct SubmitOutcome {
@@ -79,7 +101,7 @@ impl UringBatchSender {
     /// Returns `None` when io_uring cannot be initialised (kernel too old,
     /// seccomp filter, missing permissions, etc.).
     pub fn new(queue_depth: u32) -> Option<Self> {
-        let depth = queue_depth.max(4).next_power_of_two();
+        let depth = queue_depth.max(4).checked_next_power_of_two()?;
 
         // Try SQPOLL mode first: the kernel thread polls the SQ, eliminating
         // io_uring_enter() syscalls while it is active.  Falls back on EPERM
@@ -129,15 +151,20 @@ impl UringBatchSender {
         let cap = depth as usize;
         Some(Self {
             ring,
+            payloads: Vec::with_capacity(cap),
             // Pre-allocate scratch buffers to queue depth so the hot path
             // never touches the allocator.
             iovecs: Vec::with_capacity(cap),
             msgs: Vec::with_capacity(cap),
             sockaddrs: Vec::with_capacity(cap),
             send_success: Vec::with_capacity(cap),
+            send_seen: Vec::with_capacity(cap),
             zc_primary_seen: Vec::with_capacity(cap),
+            zc_notification_seen: Vec::with_capacity(cap),
+            zc_notification_expected: Vec::with_capacity(cap),
             sqpoll_active,
             zc_supported,
+            submission_poisoned: false,
         })
     }
 
@@ -158,6 +185,51 @@ impl UringBatchSender {
         self.zc_supported
     }
 
+    fn ensure_usable(&self) -> std::io::Result<()> {
+        if self.submission_poisoned {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "io_uring sender is quarantined after a submission failure",
+            ));
+        }
+        Ok(())
+    }
+
+    fn prepare_payload_slots(&mut self, count: usize) {
+        self.payloads.truncate(count);
+        self.payloads.resize_with(count, || Vec::with_capacity(2048));
+    }
+
+    fn quarantine(&mut self, error: std::io::Error) -> std::io::Error {
+        self.submission_poisoned = true;
+
+        // `register_sync_cancel` is available on newer Linux kernels and is
+        // deliberately used only on the exceptional path. It synchronously
+        // cancels requests already accepted by the kernel. Requests still in
+        // the SQ are retained in this poisoned sender and are never reused.
+        if let Err(cancel_error) =
+            self.ring.submitter().register_sync_cancel(None, CancelBuilder::any())
+        {
+            log::debug!("io_uring sender cancellation after failure unavailable: {cancel_error}");
+        }
+        {
+            let cq = self.ring.completion();
+            for _ in cq {}
+        }
+
+        std::io::Error::new(
+            error.kind(),
+            format!("io_uring sender quarantined after submission failure: {error}"),
+        )
+    }
+
+    fn submit_and_wait(&mut self, want: usize) -> std::io::Result<usize> {
+        match self.ring.submit_and_wait(want) {
+            Ok(submitted) => Ok(submitted),
+            Err(error) => Err(self.quarantine(error)),
+        }
+    }
+
     /// Submit a batch of datagrams on a **connected** UDP socket.
     ///
     /// Queues one `SendMsg` SQE per payload, then issues a single
@@ -167,24 +239,38 @@ impl UringBatchSender {
     /// Payloads that exceed the submission queue capacity are sent in
     /// chunks (flush-and-refill).
     pub fn send_batch(&mut self, fd: RawFd, payloads: &[&[u8]]) -> std::io::Result<usize> {
+        self.ensure_usable()?;
         if payloads.is_empty() {
             return Ok(0);
         }
 
-        // Reuse pre-allocated scratch buffers - zero allocations on the hot path.
+        // Keep every kernel-visible payload alive inside the sender. This is
+        // required for the submit-error quarantine and for SendMsgZc's later
+        // notification CQE; caller-owned slices may be released on return.
+        self.prepare_payload_slots(payloads.len());
+        for (slot, payload) in self.payloads.iter_mut().zip(payloads.iter().copied()) {
+            slot.clear();
+            slot.extend_from_slice(payload);
+        }
+
+        // Reuse pre-allocated scratch buffers after the payload ownership
+        // boundary has been established.
         self.iovecs.clear();
         self.msgs.clear();
 
-        for payload in payloads {
+        for payload in &self.payloads {
+            // SAFETY: libc::iovec uses a mutable pointer for the C ABI, but
+            // sendmsg/sendmsg_zc read from this region and do not write it.
             self.iovecs.push(libc::iovec {
                 iov_base: payload.as_ptr() as *mut libc::c_void,
                 iov_len: payload.len(),
             });
         }
         for iov in &mut self.iovecs {
-            // SAFETY: msghdr is fully zeroed; msg_iov points into self.iovecs which
-            // lives for the duration of this call. Payload slices are caller-owned
-            // and remain valid until completions are reaped below.
+            // SAFETY: msghdr is fully zeroed; msg_iov points into self.iovecs,
+            // which lives for the duration of this call. The referenced iovec
+            // points into sender-owned payload storage and remains valid until
+            // all completions are reaped below.
             let mut hdr: libc::msghdr = unsafe { std::mem::zeroed() };
             hdr.msg_iov = iov as *mut libc::iovec;
             hdr.msg_iovlen = 1;
@@ -235,8 +321,18 @@ impl UringBatchSender {
         fd: RawFd,
         packets: &[(SocketAddr, &[u8])],
     ) -> std::io::Result<usize> {
+        self.ensure_usable()?;
         if packets.is_empty() {
             return Ok(0);
+        }
+
+        // Copy payloads into sender-owned slots before any raw pointer is
+        // published to io_uring. The input staging vector can be dropped as
+        // soon as this method returns, including on a submit failure.
+        self.prepare_payload_slots(packets.len());
+        for (slot, (_, payload)) in self.payloads.iter_mut().zip(packets.iter()) {
+            slot.clear();
+            slot.extend_from_slice(payload);
         }
 
         self.iovecs.clear();
@@ -244,7 +340,9 @@ impl UringBatchSender {
         self.sockaddrs.clear();
 
         // Pass 1: build iovecs (stable base for msg_iov pointers).
-        for (_, payload) in packets {
+        for payload in &self.payloads {
+            // SAFETY: libc::iovec uses a mutable pointer for the C ABI, but
+            // sendmsg reads this owned payload and does not mutate it.
             self.iovecs.push(libc::iovec {
                 iov_base: payload.as_ptr() as *mut libc::c_void,
                 iov_len: payload.len(),
@@ -316,8 +414,9 @@ impl UringBatchSender {
                 let entry = opcode::SendMsg::new(fd, msg as *const libc::msghdr)
                     .build()
                     .user_data(idx as u64);
-                // SAFETY: msghdr points into self.msgs; iov_base points into
-                // caller payloads. Both remain valid until completions are reaped.
+                // SAFETY: msghdr and its iovec point into sender-owned storage.
+                // They remain stable until every completion for this chunk is
+                // observed, including the failure/quarantine path.
                 unsafe {
                     if sq.push(&entry).is_err() {
                         // SQ truly full - chunking to sq_cap should prevent
@@ -336,25 +435,59 @@ impl UringBatchSender {
         }
 
         // Single syscall: submit all queued SQEs and wait for all completions.
-        self.ring.submit_and_wait(queued)?;
+        self.submit_and_wait(queued)?;
         crate::telemetry::IO_URING_SUBMIT_CALLS.inc();
 
-        // Reap completions. Callers retry via `skip(sent)`, so expose only the
-        // contiguous successful prefix, not an unordered success total.
+        // Reap completions. An error CQE is still a completion and must be
+        // counted before the scratch storage can be reused. Any missing,
+        // duplicate, out-of-range, or overflowed CQE poisons the sender.
         self.send_success.clear();
         self.send_success.resize(queued, false);
-        let cq = self.ring.completion();
-        for cqe in cq {
-            let idx = cqe.user_data() as usize;
-            if cqe.result() >= 0 && idx < self.send_success.len() {
-                self.send_success[idx] = true;
-            } else {
-                log::trace!(
-                    "io_uring SendMsg CQE error: user_data={} result={}",
-                    cqe.user_data(),
-                    cqe.result()
-                );
+        self.send_seen.clear();
+        self.send_seen.resize(queued, false);
+        let mut completion_error = None;
+        let mut completion_count = 0usize;
+        let overflow;
+        {
+            let cq = self.ring.completion();
+            overflow = cq.overflow();
+            for cqe in cq {
+                let idx = match checked_slot_index(cqe.user_data(), queued) {
+                    Ok(idx) => idx,
+                    Err(error) => {
+                        completion_error = Some(error.to_string());
+                        continue;
+                    }
+                };
+                if self.send_seen[idx] {
+                    completion_error = Some(format!("duplicate SendMsg CQE for slot {idx}"));
+                    continue;
+                }
+                self.send_seen[idx] = true;
+                completion_count += 1;
+                if cqe.result() >= 0 {
+                    self.send_success[idx] = true;
+                } else {
+                    log::trace!(
+                        "io_uring SendMsg CQE error: user_data={} result={}",
+                        cqe.user_data(),
+                        cqe.result()
+                    );
+                }
             }
+        }
+        if let Some(error) = completion_error {
+            return Err(
+                self.quarantine(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+            );
+        }
+        if overflow != 0 || completion_count != queued {
+            return Err(self.quarantine(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "io_uring SendMsg completion set incomplete: {completion_count}/{queued}, cq_overflow={overflow}"
+                ),
+            )));
         }
         let sent = self.send_success.iter().take_while(|&&ok| ok).count();
 
@@ -363,15 +496,16 @@ impl UringBatchSender {
 
     /// Push one chunk of `SendMsgZc` SQEs and reap primary + notification CQEs.
     ///
-    /// Each `SendMsgZc` SQE may generate two CQEs:
-    /// - **Primary** (`CQE_F_MORE` set): data accepted into socket buffer.
-    /// - **Notification** (`CQE_F_NOTIF` set): kernel released the buffer.
+    /// Each `SendMsgZc` SQE may generate one or two CQEs:
+    /// - **Primary**: data accepted into the socket buffer.
+    /// - **Notification** (`CQE_F_NOTIF` set): kernel released the buffer,
+    ///   announced by `CQE_F_MORE` on the primary CQE.
     ///
     /// We call `submit_and_wait(queued)` to submit the SQEs, then keep draining
-    /// until every queued SQE has produced its primary CQE. Notification CQEs
-    /// can arrive before or after primaries on different kernels; counting only
-    /// the first `queued` CQEs would make multi-chunk batches report partial
-    /// success when the second chunk observes notification CQEs first.
+    /// until every queued SQE has produced its primary CQE and every primary
+    /// carrying `CQE_F_MORE` has produced its notification CQE. This keeps
+    /// sender-owned payloads valid through the complete SendMsgZc lifetime
+    /// before the next batch can rebuild the scratch pointers.
     fn submit_chunk_zc(
         &mut self,
         fd: RawFd,
@@ -380,18 +514,19 @@ impl UringBatchSender {
     ) -> std::io::Result<SubmitOutcome> {
         let fd_typed = io_uring::types::Fd(fd);
 
-        // Drain stale CQEs from previous ZC chunks.  Each SendMsgZc SQE
-        // produces a primary CQE *and* a notification CQE (CQE_F_NOTIF).
-        // Notification CQEs arrive asynchronously and can satisfy
-        // submit_and_wait prematurely on the next chunk, causing the reap
-        // loop to see only notifications and report sent=0.
-        {
+        // No CQE from a previous ZC chunk may remain: a notification exists
+        // only when its primary CQE announced `CQE_F_MORE`, and this method
+        // waits for every such notification before returning. A stale CQE
+        // therefore indicates a broken completion accounting boundary.
+        let stale_cqes = {
             let cq = self.ring.completion();
-            for cqe in cq {
-                if cqe.flags() & CQE_F_NOTIF != 0 {
-                    crate::telemetry::IO_URING_ZC_NOTIFS.inc();
-                }
-            }
+            cq.count()
+        };
+        if stale_cqes != 0 {
+            return Err(self.quarantine(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("io_uring SendMsgZc found {stale_cqes} stale CQEs before submission"),
+            )));
         }
 
         // Push SendMsgZc SQEs.
@@ -403,8 +538,9 @@ impl UringBatchSender {
                 let entry = opcode::SendMsgZc::new(fd_typed, msg as *const libc::msghdr)
                     .build()
                     .user_data(idx as u64);
-                // SAFETY: msghdr points into self.msgs; iov_base points into
-                // caller payloads. Both remain valid until completions are reaped.
+                // SAFETY: msghdr and its iovec point into sender-owned storage.
+                // They remain valid until both primary and notification CQEs
+                // have been observed.
                 unsafe {
                     if sq.push(&entry).is_err() {
                         break;
@@ -424,61 +560,163 @@ impl UringBatchSender {
         // until all primary send CQEs have been observed. SendMsgZc completion
         // ordering is kernel-dependent: notification CQEs can satisfy the first
         // wait without proving that every packet in this chunk was accepted.
-        self.ring.submit_and_wait(queued)?;
+        self.submit_and_wait(queued)?;
         crate::telemetry::IO_URING_SUBMIT_CALLS.inc();
 
         self.send_success.clear();
         self.send_success.resize(queued, false);
         self.zc_primary_seen.clear();
         self.zc_primary_seen.resize(queued, false);
+        self.zc_notification_seen.clear();
+        self.zc_notification_seen.resize(queued, false);
+        self.zc_notification_expected.clear();
+        self.zc_notification_expected.resize(queued, false);
         let mut primary_seen_count = 0usize;
-        while primary_seen_count < queued {
-            let cq = self.ring.completion();
+        loop {
+            let notifications_complete = self
+                .zc_notification_expected
+                .iter()
+                .zip(self.zc_notification_seen.iter())
+                .all(|(expected, seen)| !*expected || *seen);
+            if primary_seen_count == queued && notifications_complete {
+                break;
+            }
+
             let mut drained = 0usize;
-            for cqe in cq {
-                drained += 1;
-                let flags = cqe.flags();
-                if flags & CQE_F_NOTIF != 0 {
-                    // Buffer-release notification: kernel finished with the buffer.
-                    crate::telemetry::IO_URING_ZC_NOTIFS.inc();
-                } else {
-                    // Primary send CQE.
-                    let idx = cqe.user_data() as usize;
-                    if idx < self.zc_primary_seen.len() && !self.zc_primary_seen[idx] {
-                        self.zc_primary_seen[idx] = true;
-                        primary_seen_count += 1;
-                        if cqe.result() >= 0 {
-                            self.send_success[idx] = true;
-                            crate::telemetry::IO_URING_ZC_SENDS.inc();
-                        } else {
-                            log::trace!(
-                                "io_uring SendMsgZc error: user_data={} result={}",
-                                cqe.user_data(),
-                                cqe.result()
-                            );
+            let mut completion_error = None;
+            let overflow;
+            {
+                let cq = self.ring.completion();
+                overflow = cq.overflow();
+                for cqe in cq {
+                    drained += 1;
+                    let idx = match checked_slot_index(cqe.user_data(), queued) {
+                        Ok(idx) => idx,
+                        Err(error) => {
+                            completion_error = Some(error.to_string());
+                            continue;
                         }
-                    } else if idx >= self.zc_primary_seen.len() {
+                    };
+                    if cqe.flags() & CQE_F_NOTIF != 0 {
+                        if self.zc_notification_seen[idx] {
+                            completion_error =
+                                Some(format!("duplicate SendMsgZc notification for slot {idx}"));
+                            continue;
+                        }
+                        self.zc_notification_seen[idx] = true;
+                        if self.zc_primary_seen[idx] && !self.zc_notification_expected[idx] {
+                            completion_error =
+                                Some(format!("unexpected SendMsgZc notification for slot {idx}"));
+                        }
+                        crate::telemetry::IO_URING_ZC_NOTIFS.inc();
+                        continue;
+                    }
+
+                    if self.zc_primary_seen[idx] {
+                        completion_error =
+                            Some(format!("duplicate SendMsgZc primary CQE for slot {idx}"));
+                        continue;
+                    }
+                    self.zc_primary_seen[idx] = true;
+                    primary_seen_count += 1;
+                    self.zc_notification_expected[idx] = cqe.flags() & CQE_F_MORE != 0;
+                    if cqe.result() >= 0 {
+                        self.send_success[idx] = true;
+                        crate::telemetry::IO_URING_ZC_SENDS.inc();
+                    } else {
                         log::trace!(
-                            "io_uring SendMsgZc unexpected CQE: user_data={} result={}",
+                            "io_uring SendMsgZc error: user_data={} result={}",
                             cqe.user_data(),
                             cqe.result()
                         );
                     }
                 }
             }
-            if primary_seen_count < queued && drained == 0 {
-                self.ring.submit_and_wait(1)?;
+            if let Some(error) = completion_error {
+                return Err(
+                    self.quarantine(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+                );
+            }
+            if overflow != 0 {
+                return Err(self.quarantine(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("io_uring SendMsgZc CQ overflow: {overflow}"),
+                )));
+            }
+            if primary_seen_count == queued
+                && self
+                    .zc_notification_seen
+                    .iter()
+                    .zip(self.zc_notification_expected.iter())
+                    .any(|(seen, expected)| *seen && !*expected)
+            {
+                return Err(self.quarantine(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "io_uring SendMsgZc produced an unannounced notification",
+                )));
+            }
+            let notifications_complete = self
+                .zc_notification_expected
+                .iter()
+                .zip(self.zc_notification_seen.iter())
+                .all(|(expected, seen)| !*expected || *seen);
+            if (primary_seen_count < queued || !notifications_complete) && drained == 0 {
+                self.submit_and_wait(1)?;
             }
         }
 
-        // Suppress unused-constant warnings on kernels where CQE_F_MORE is
-        // implicitly used: the flag signals whether a notification follows, but
-        // we drain both CQE types unconditionally, so we do not need to branch on it.
-        let _ = CQE_F_MORE;
         let sent = self.send_success.iter().take_while(|&&ok| ok).count();
 
         Ok(SubmitOutcome { queued, sent })
     }
+}
+
+impl Drop for UringBatchSender {
+    fn drop(&mut self) {
+        if !self.submission_poisoned {
+            return;
+        }
+
+        let canceled =
+            self.ring.submitter().register_sync_cancel(None, CancelBuilder::any()).is_ok();
+        {
+            let cq = self.ring.completion();
+            for _ in cq {}
+        }
+        let pending_sqes = {
+            let sq = self.ring.submission();
+            !sq.is_empty()
+        };
+        if canceled && !pending_sqes {
+            return;
+        }
+
+        // A kernel without synchronous cancellation support may still own an
+        // accepted pointer when the sender is dropped. Leak only the poisoned
+        // pointer-bearing storage; this is a fail-closed safety boundary, not
+        // a normal-path allocation policy. The ring is then dropped without a
+        // dangling userspace pointer.
+        std::mem::forget(std::mem::take(&mut self.payloads));
+        std::mem::forget(std::mem::take(&mut self.iovecs));
+        std::mem::forget(std::mem::take(&mut self.msgs));
+        std::mem::forget(std::mem::take(&mut self.sockaddrs));
+    }
+}
+
+fn checked_slot_index(user_data: u64, depth: usize) -> std::io::Result<usize> {
+    let idx = usize::try_from(user_data).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("io_uring completion user_data does not fit usize: {user_data}"),
+        )
+    })?;
+    if idx >= depth {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("io_uring completion slot out of range: {idx}/{depth}"),
+        ));
+    }
+    Ok(idx)
 }
 
 /// Returns the `socklen_t` for the given address family.
@@ -629,7 +867,9 @@ impl RecvCompletion {
 /// Created with `new()`, then call `post_initial()` to arm the SQEs, and
 /// `drain_completions()` each time the eventfd fires.
 pub struct UringRecvBatch {
-    ring: IoUring,
+    /// Optional so Drop can destroy the ring before returning pool-backed
+    /// buffers to `MemoryPool`.
+    ring: Option<IoUring>,
     /// eventfd created with `EFD_NONBLOCK | EFD_CLOEXEC`, registered via
     /// `register_eventfd_async`. Owned by this struct (closed in Drop).
     eventfd: RawFd,
@@ -651,12 +891,18 @@ pub struct UringRecvBatch {
     /// When true, `RecvMsg` SQEs include a destination for the source address
     /// (unconnected server socket). When false, connected client socket.
     with_addr: bool,
+    /// Slots whose completed operation still need one replacement RecvMsg SQE.
+    repost_pending: Vec<bool>,
+    /// Slots currently owned by the kernel. This is used only for audit/state
+    /// validation and makes duplicate CQEs fail closed.
+    armed: Vec<bool>,
 }
 
 // SAFETY: UringRecvBatch owns its ring, eventfd, backing buffers, iovecs, msghdrs,
 // and sockaddr storage. The raw pointers embedded in iovecs/msghdrs always point
-// into those owned vectors and are only used through &mut self methods, so moving
-// the struct between Tokio worker threads does not create concurrent access.
+// into those owned allocations and are only used through &mut self methods. Drop
+// destroys the ring before pool buffers are returned, so moving the struct between
+// Tokio worker threads does not create concurrent access or a dangling pointer.
 unsafe impl Send for UringRecvBatch {}
 
 impl UringRecvBatch {
@@ -689,7 +935,7 @@ impl UringRecvBatch {
         with_addr: bool,
         memory_pool: Option<Arc<MemoryPool>>,
     ) -> Option<Self> {
-        let depth = depth.max(4).next_power_of_two();
+        let depth = depth.max(4).checked_next_power_of_two()?;
         let buf_size = buf_size.max(1500);
 
         // Dedicated ring for receives (separate from send ring).
@@ -726,9 +972,20 @@ impl UringRecvBatch {
         }
 
         let d = depth as usize;
+        let total_buf_size = match d.checked_mul(buf_size) {
+            Some(total_buf_size) => total_buf_size,
+            None => {
+                // SAFETY: efd is the valid eventfd created above and no ring
+                // request has been submitted yet.
+                unsafe {
+                    libc::close(efd);
+                }
+                return None;
+            }
+        };
 
         let pooled = memory_pool.is_some();
-        let bufs = if pooled { Vec::new() } else { vec![0u8; d * buf_size] };
+        let bufs = if pooled { Vec::new() } else { vec![0u8; total_buf_size] };
         let mut blocks = Vec::with_capacity(d);
         if let Some(pool) = memory_pool.as_ref() {
             for _ in 0..d {
@@ -741,6 +998,11 @@ impl UringRecvBatch {
                     pool.free(block);
                     for block in blocks.into_iter().flatten() {
                         pool.free(block);
+                    }
+                    // SAFETY: efd is the valid eventfd created above and no
+                    // ring request has been submitted yet.
+                    unsafe {
+                        libc::close(efd);
                     }
                     return None;
                 }
@@ -794,7 +1056,7 @@ impl UringRecvBatch {
         );
 
         Some(Self {
-            ring,
+            ring: Some(ring),
             eventfd: efd,
             bufs,
             blocks,
@@ -806,6 +1068,8 @@ impl UringRecvBatch {
             depth,
             socket_fd,
             with_addr,
+            repost_pending: vec![false; d],
+            armed: vec![false; d],
         })
     }
 
@@ -842,8 +1106,14 @@ impl UringRecvBatch {
     pub fn post_initial(&mut self) -> std::io::Result<()> {
         let fd = io_uring::types::Fd(self.socket_fd);
         let mut posted = 0u32;
+        let Some(ring) = self.ring.as_mut() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "io_uring receive ring is closed",
+            ));
+        };
         {
-            let mut sq = self.ring.submission();
+            let mut sq = ring.submission();
             for idx in 0..self.depth as usize {
                 let entry = opcode::RecvMsg::new(fd, &mut self.msgs[idx] as *mut libc::msghdr)
                     .build()
@@ -859,14 +1129,23 @@ impl UringRecvBatch {
                 posted += 1;
             }
         }
-        if posted > 0 {
-            self.ring.submit()?;
+        let submit_result = if posted > 0 { ring.submit() } else { Ok(0) };
+        for idx in 0..posted as usize {
+            self.armed[idx] = true;
         }
+        submit_result?;
         if posted < self.depth {
             log::warn!(
                 "recv post_initial: only {posted}/{} RecvMsg SQEs armed (SQ too small)",
                 self.depth
             );
+            for idx in posted as usize..self.depth as usize {
+                self.repost_pending[idx] = true;
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "io_uring receive ring could not arm every initial slot",
+            ));
         }
         Ok(())
     }
@@ -878,116 +1157,159 @@ impl UringRecvBatch {
     /// completion and the slot is immediately armed with a replacement block.
     pub fn drain_completions(&mut self) -> std::io::Result<Vec<RecvCompletion>> {
         let mut completions = Vec::new();
-        let mut repost_indices: Vec<usize> = Vec::new();
+        let Some(ring) = self.ring.as_mut() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "io_uring receive ring is closed",
+            ));
+        };
+        let mut drain_error = None;
 
         {
-            let cq = self.ring.completion();
+            let cq = ring.completion();
             for cqe in cq {
-                let idx = cqe.user_data() as usize;
+                let idx = match checked_slot_index(cqe.user_data(), self.depth as usize) {
+                    Ok(idx) => idx,
+                    Err(error) => {
+                        drain_error = Some(error);
+                        continue;
+                    }
+                };
+                if !self.armed[idx] || self.repost_pending[idx] {
+                    drain_error = Some(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("duplicate or unarmed io_uring receive slot: {idx}"),
+                    ));
+                    continue;
+                }
+                self.armed[idx] = false;
+                self.repost_pending[idx] = true;
                 let result = cqe.result();
 
-                if result > 0 && idx < self.depth as usize {
+                if result > 0 {
                     let len = result as usize;
                     let addr = if self.with_addr { parse_sockaddr(&self.addrs[idx]) } else { None };
                     let len = len.min(self.buf_size);
 
                     if let Some(pool) = self.memory_pool.as_ref() {
-                        if let Some(block) = self.blocks[idx].take() {
-                            let mut replacement = pool.alloc();
-                            if replacement.len() < self.buf_size {
-                                pool.free(replacement);
-                                self.blocks[idx] = Some(block);
-                                return Err(std::io::Error::new(
-                                    std::io::ErrorKind::InvalidData,
-                                    "io_uring recv pool block smaller than receive buffer",
-                                ));
-                            }
-                            self.iovecs[idx].iov_base =
-                                replacement.as_mut_ptr() as *mut libc::c_void;
-                            self.iovecs[idx].iov_len = self.buf_size;
-                            self.blocks[idx] = Some(replacement);
-                            completions.push(RecvCompletion {
-                                data: Vec::new(),
-                                block: Some(block),
-                                len,
-                                addr,
-                            });
-                            repost_indices.push(idx);
+                        let Some(block) = self.blocks[idx].take() else {
+                            drain_error = Some(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!("io_uring receive pool slot {idx} has no backing block"),
+                            ));
+                            continue;
+                        };
+                        let mut replacement = pool.alloc();
+                        if replacement.len() < self.buf_size {
+                            pool.free(replacement);
+                            self.blocks[idx] = Some(block);
+                            drain_error = Some(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "io_uring recv pool block smaller than receive buffer",
+                            ));
+                            continue;
                         }
+                        self.iovecs[idx].iov_base = replacement.as_mut_ptr() as *mut libc::c_void;
+                        self.iovecs[idx].iov_len = self.buf_size;
+                        self.blocks[idx] = Some(replacement);
+                        completions.push(RecvCompletion {
+                            data: Vec::new(),
+                            block: Some(block),
+                            len,
+                            addr,
+                        });
                     } else {
                         let start = idx * self.buf_size;
                         let end = start + len;
                         let data = self.bufs[start..end].to_vec();
                         completions.push(RecvCompletion { data, block: None, len, addr });
-                        repost_indices.push(idx);
                         self.iovecs[idx].iov_len = self.buf_size;
                     }
-
-                    // Reset the sockaddr for next receive.
-                    if self.with_addr {
-                        // SAFETY: sockaddr_storage is POD; zeroing is valid and
-                        // clears stale address data before the next RecvMsg.
-                        self.addrs[idx] = unsafe { std::mem::zeroed() };
-                        self.msgs[idx].msg_namelen =
-                            std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-                    }
-                } else if result < 0 {
-                    let errno = -result;
-                    // EAGAIN (11), ECONNRESET (104), ECONNREFUSED (111) are expected.
-                    if errno != 11 && errno != 104 && errno != 111 {
-                        log::trace!("io_uring RecvMsg CQE error: idx={idx} errno={errno}");
-                    }
-                    repost_indices.push(idx.min(self.depth as usize - 1));
-                }
-                // result == 0: zero-length datagram, re-post.
-            }
-        }
-
-        // Re-post consumed SQEs.
-        if !repost_indices.is_empty() {
-            let fd = io_uring::types::Fd(self.socket_fd);
-            let mut reposted = 0usize;
-            {
-                let mut sq = self.ring.submission();
-                for &idx in &repost_indices {
-                    let entry = opcode::RecvMsg::new(fd, &mut self.msgs[idx] as *mut libc::msghdr)
-                        .build()
-                        .user_data(idx as u64);
-                    // SAFETY: msgs[idx] points into the stable self.msgs Vec and
-                    // its iovec points into self.bufs/blocks; all outlive the kernel
-                    // completion. The SQE is pushed within a single submission borrow.
-                    unsafe {
-                        if sq.push(&entry).is_err() {
-                            break;
+                } else {
+                    if result < 0 {
+                        let errno = result.unsigned_abs();
+                        // EAGAIN (11), ECONNRESET (104), ECONNREFUSED (111) are expected.
+                        if errno != 11 && errno != 104 && errno != 111 {
+                            log::trace!("io_uring RecvMsg CQE error: idx={idx} errno={errno}");
                         }
                     }
-                    reposted += 1;
+                    // A zero-length datagram is a consumed receive and must
+                    // re-arm the same slot exactly like an error completion.
+                    self.iovecs[idx].iov_len = self.buf_size;
                 }
-            }
-            if reposted > 0 {
-                self.ring.submit()?;
-            }
-            if reposted < repost_indices.len() {
-                log::warn!(
-                    "io_uring recv repost: only {reposted}/{} RecvMsg SQEs rearmed (SQ too small)",
-                    repost_indices.len()
-                );
+                // Reset the sockaddr for every consumed receive, including
+                // zero-length datagrams and negative CQEs, so stale address
+                // bytes cannot leak into the next RecvMsg operation.
+                if self.with_addr {
+                    // SAFETY: sockaddr_storage is POD; zeroing is valid and
+                    // clears stale address data before the next RecvMsg.
+                    self.addrs[idx] = unsafe { std::mem::zeroed() };
+                    self.msgs[idx].msg_namelen =
+                        std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+                }
             }
         }
 
+        if let Some(error) = drain_error {
+            return Err(error);
+        }
+
+        // Re-post every consumed slot at most once. Pending slots remain
+        // marked if the submission queue is temporarily full and are retried
+        // on the next drain instead of being silently lost.
+        let fd = io_uring::types::Fd(self.socket_fd);
+        let mut reposted = 0usize;
+        {
+            let mut sq = ring.submission();
+            for idx in 0..self.depth as usize {
+                if !self.repost_pending[idx] {
+                    continue;
+                }
+                let entry = opcode::RecvMsg::new(fd, &mut self.msgs[idx] as *mut libc::msghdr)
+                    .build()
+                    .user_data(idx as u64);
+                // SAFETY: msgs[idx] points into the stable self.msgs Vec and
+                // its iovec points into self.bufs/blocks; all outlive the
+                // kernel completion. The SQE is pushed within one submission
+                // borrow, and the slot remains armed until its CQE is drained.
+                unsafe {
+                    if sq.push(&entry).is_err() {
+                        break;
+                    }
+                }
+                self.repost_pending[idx] = false;
+                self.armed[idx] = true;
+                reposted += 1;
+            }
+        }
+        let submit_result = if reposted > 0 { ring.submit() } else { Ok(0) };
+        submit_result?;
+
+        let pending = self.repost_pending.iter().filter(|pending| **pending).count();
+        if pending > 0 {
+            log::warn!(
+                "io_uring recv repost: {reposted} submitted, {pending} slots remain pending"
+            );
+        }
         Ok(completions)
     }
 }
 
 impl Drop for UringRecvBatch {
     fn drop(&mut self) {
+        // Destroy the ring before returning pool blocks or dropping contiguous
+        // buffers. The io_uring owner is then gone before any kernel request
+        // can retain a pointer into those allocations, including when a
+        // cancellation syscall is unavailable on an older kernel.
+        drop(self.ring.take());
+
         if let Some(pool) = self.memory_pool.as_ref() {
             for block in self.blocks.drain(..).flatten() {
                 pool.free(block);
             }
         }
         // SAFETY: self.eventfd is a valid open fd created during construction
-        // and is not accessed after Drop runs.
+        // and the ring has already been destroyed, so no completion can use it.
         unsafe {
             libc::close(self.eventfd);
         }
@@ -1073,6 +1395,14 @@ mod tests {
     }
 
     #[test]
+    fn completion_slot_index_rejects_invalid_user_data() {
+        assert_eq!(checked_slot_index(0, 4).expect("slot 0"), 0);
+        assert_eq!(checked_slot_index(3, 4).expect("last slot"), 3);
+        assert!(checked_slot_index(4, 4).is_err());
+        assert!(checked_slot_index(u64::MAX, 4).is_err());
+    }
+
+    #[test]
     fn sqpoll_and_zc_fields_accessible() {
         if let Some(sender) = UringBatchSender::new(4) {
             // Accessors compile and return consistent values.
@@ -1112,6 +1442,44 @@ mod tests {
             let completions = recv.drain_completions().expect("drain empty");
             assert!(completions.is_empty());
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recv_rearms_after_zero_length_datagrams() {
+        use std::os::fd::AsRawFd;
+        use std::time::Duration;
+
+        let receiver = std::net::UdpSocket::bind("127.0.0.1:0").expect("receiver bind");
+        let receiver_addr = receiver.local_addr().expect("receiver address");
+        let sender = std::net::UdpSocket::bind("127.0.0.1:0").expect("sender bind");
+        let mut recv = match UringRecvBatch::new(receiver.as_raw_fd(), 4, 2048, false) {
+            Some(recv) => recv,
+            None => return,
+        };
+        recv.post_initial().expect("post receive slots");
+
+        for _ in 0..4 {
+            assert_eq!(sender.send_to(&[], receiver_addr).expect("zero datagram"), 0);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+        for _ in 0..100 {
+            let _ = recv.drain_completions().expect("drain zero datagrams");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        let marker = [0x51, 0x46, 0x37];
+        sender.send_to(&marker, receiver_addr).expect("marker datagram");
+        let mut marker_seen = false;
+        for _ in 0..200 {
+            let completions = recv.drain_completions().expect("drain marker datagram");
+            if completions.iter().any(|completion| completion.data == marker) {
+                marker_seen = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(marker_seen, "receive slots were not rearmed after zero datagrams");
     }
 
     #[test]
