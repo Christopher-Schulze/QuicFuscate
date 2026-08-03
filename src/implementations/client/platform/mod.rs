@@ -8,6 +8,8 @@
 
 mod traits;
 
+#[cfg(any(test, target_os = "linux"))]
+mod dns_restore;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]

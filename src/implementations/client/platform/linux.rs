@@ -1,7 +1,14 @@
 //! Linux platform implementation.
 
+use super::dns_restore::{
+    backup_resolv_conf_at, load_ownership_at, mark_resolv_conf_written, owner_marker,
+    ownership_path, persist_ownership_at, remove_ownership_at, restore_persisted_resolv_conf_at,
+    restore_resolv_conf_at, source_has_owner_marker, ProcessIdentity, ResolvConfRestoreState,
+};
 use super::traits::*;
+use std::fs::File;
 use std::net::IpAddr;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -21,12 +28,17 @@ struct IfReq {
 /// Linux platform backend.
 pub struct LinuxPlatform {
     tun_name: Mutex<Option<String>>,
-    resolv_conf_backup: Mutex<Option<PathBuf>>,
+    resolv_conf_backup: Mutex<Option<ResolvConfRestoreState>>,
+    resolv_conf_lock: Mutex<Option<File>>,
 }
 
 impl LinuxPlatform {
     pub fn new() -> Self {
-        Self { tun_name: Mutex::new(None), resolv_conf_backup: Mutex::new(None) }
+        Self {
+            tun_name: Mutex::new(None),
+            resolv_conf_backup: Mutex::new(None),
+            resolv_conf_lock: Mutex::new(None),
+        }
     }
 
     /// Check if systemd-resolved is available.
@@ -114,33 +126,211 @@ impl LinuxPlatform {
         Ok(())
     }
 
-    fn backup_resolv_conf_if_needed(&self) -> Result<(), PlatformError> {
-        let mut guard = self.resolv_conf_backup.lock().unwrap_or_else(|e| e.into_inner());
+    fn linux_boot_id() -> Result<String, PlatformError> {
+        let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .map_err(|error| PlatformError::DnsError(format!("read Linux boot ID: {error}")))?;
+        let boot_id = boot_id.trim();
+        if boot_id.is_empty() {
+            return Err(PlatformError::DnsError("Linux boot ID is empty".to_string()));
+        }
+        Ok(boot_id.to_string())
+    }
+
+    fn linux_process_start_time(pid: u32) -> Result<Option<u64>, PlatformError> {
+        let path = format!("/proc/{pid}/stat");
+        let contents = match std::fs::read_to_string(&path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(PlatformError::DnsError(format!(
+                    "read Linux process identity {path}: {error}"
+                )))
+            }
+        };
+        let fields = contents.rsplit_once(") ").map(|(_, fields)| fields).ok_or_else(|| {
+            PlatformError::DnsError(format!("parse Linux process identity {path}"))
+        })?;
+        let start_time = fields
+            .split_whitespace()
+            .nth(19)
+            .ok_or_else(|| {
+                PlatformError::DnsError(format!(
+                    "Linux process identity {path} omitted the start time"
+                ))
+            })?
+            .parse::<u64>()
+            .map_err(|error| {
+                PlatformError::DnsError(format!(
+                    "parse Linux process start time in {path}: {error}"
+                ))
+            })?;
+        Ok(Some(start_time))
+    }
+
+    fn current_process_identity() -> Result<ProcessIdentity, PlatformError> {
+        let pid = std::process::id();
+        let start_time = Self::linux_process_start_time(pid)?.ok_or_else(|| {
+            PlatformError::DnsError(format!("current Linux process {pid} disappeared"))
+        })?;
+        Ok(ProcessIdentity { boot_id: Self::linux_boot_id()?, pid, start_time })
+    }
+
+    fn resolver_state_path() -> PathBuf {
+        ownership_path(Path::new(RESOLV_CONF_BACKUP_PATH))
+    }
+
+    fn resolver_lock_path() -> PathBuf {
+        Path::new(RESOLV_CONF_BACKUP_PATH).with_extension("lock")
+    }
+
+    fn acquire_resolver_lock(&self) -> Result<(), PlatformError> {
+        let mut guard = self.resolv_conf_lock.lock().unwrap_or_else(|e| e.into_inner());
         if guard.is_some() {
             return Ok(());
         }
-        let src = Path::new(RESOLV_CONF_PATH);
-        if !src.exists() {
-            return Ok(());
+        let path = Self::resolver_lock_path();
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&path)
+            .map_err(|error| {
+                PlatformError::DnsError(format!("open resolver lock {}: {error}", path.display()))
+            })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(
+                |error| {
+                    PlatformError::DnsError(format!(
+                        "secure resolver lock {}: {error}",
+                        path.display()
+                    ))
+                },
+            )?;
         }
-        let backup = PathBuf::from(RESOLV_CONF_BACKUP_PATH);
-        std::fs::copy(src, &backup).map_err(|e| PlatformError::DnsError(e.to_string()))?;
-        *guard = Some(backup);
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result != 0 {
+            return Err(PlatformError::DnsError(format!(
+                "resolver lock {} is held by another process: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            )));
+        }
+        *guard = Some(file);
         Ok(())
     }
 
-    fn restore_resolv_conf_from_backup(&self) -> Result<(), PlatformError> {
-        let backup = self.resolv_conf_backup.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        let Some(path) = backup else {
+    fn release_resolver_lock(&self) -> Result<(), PlatformError> {
+        let mut guard = self.resolv_conf_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(file) = guard.take() else {
             return Ok(());
         };
-        if path.exists() {
-            std::fs::copy(&path, RESOLV_CONF_PATH)
-                .map_err(|e| PlatformError::DnsError(e.to_string()))?;
-            std::fs::remove_file(&path).map_err(|e| PlatformError::DnsError(e.to_string()))?;
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+        drop(file);
+        if result != 0 {
+            return Err(PlatformError::DnsError(format!(
+                "release resolver lock: {}",
+                std::io::Error::last_os_error()
+            )));
         }
-        *self.resolv_conf_backup.lock().unwrap_or_else(|e| e.into_inner()) = None;
         Ok(())
+    }
+
+    fn recover_stale_resolver_state(&self, current: &ProcessIdentity) -> Result<(), PlatformError> {
+        let backup = Path::new(RESOLV_CONF_BACKUP_PATH);
+        let state_path = Self::resolver_state_path();
+        let Some(state) = load_ownership_at(&state_path)? else {
+            if backup.exists() {
+                return Err(PlatformError::DnsError(format!(
+                    "orphaned resolver backup {} has no ownership state; refusing to overwrite DNS state",
+                    backup.display()
+                )));
+            }
+            return Ok(());
+        };
+        if state.owner_boot_id != current.boot_id {
+            return Err(PlatformError::DnsError(
+                "resolver ownership state belongs to a different Linux boot; refusing guessed recovery"
+                    .to_string(),
+            ));
+        }
+        let owner_is_current =
+            state.owner_pid == current.pid && state.owner_start_time == current.start_time;
+        if owner_is_current && !backup.exists() {
+            let source_is_still_managed = Path::new(RESOLV_CONF_PATH).exists()
+                && source_has_owner_marker(Path::new(RESOLV_CONF_PATH), &state.owner_marker)?;
+            if !source_is_still_managed {
+                return remove_ownership_at(&state_path);
+            }
+        }
+        if Self::linux_process_start_time(state.owner_pid)? == Some(state.owner_start_time) {
+            return Err(PlatformError::DnsError(format!(
+                "resolver ownership state is still owned by active PID {}",
+                state.owner_pid
+            )));
+        }
+
+        restore_persisted_resolv_conf_at(Path::new(RESOLV_CONF_PATH), backup, &state_path, &state)
+    }
+
+    fn prepare_legacy_resolver_state(&self) -> Result<String, PlatformError> {
+        self.acquire_resolver_lock()?;
+        let mut guard = self.resolv_conf_backup.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(state) = guard.as_ref() {
+            if !Self::resolver_state_path().exists() {
+                return Err(PlatformError::DnsError(
+                    "resolver ownership state disappeared during the active session".to_string(),
+                ));
+            }
+            return Ok(state.owner_marker().to_string());
+        }
+        let current = Self::current_process_identity()?;
+        let marker = owner_marker(&current);
+        self.recover_stale_resolver_state(&current)?;
+        let backup = Path::new(RESOLV_CONF_BACKUP_PATH);
+        if backup.exists() {
+            return Err(PlatformError::DnsError(format!(
+                "orphaned resolver backup {} remains after stale recovery",
+                backup.display()
+            )));
+        }
+        backup_resolv_conf_at(Path::new(RESOLV_CONF_PATH), backup, &marker, &mut guard)?;
+        let original_present = matches!(&*guard, Some(ResolvConfRestoreState::Present { .. }));
+        if let Err(error) =
+            persist_ownership_at(&Self::resolver_state_path(), &current, original_present)
+        {
+            let cleanup = restore_resolv_conf_at(Path::new(RESOLV_CONF_PATH), &mut guard);
+            return Err(match cleanup {
+                Ok(()) => error,
+                Err(cleanup_error) => PlatformError::DnsError(format!(
+                    "persist resolver ownership failed: {error}; cleanup failed: {cleanup_error}"
+                )),
+            });
+        }
+        Ok(marker)
+    }
+
+    fn restore_resolv_conf_from_backup(&self) -> Result<(), PlatformError> {
+        let has_in_memory_state =
+            self.resolv_conf_backup.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+        let state_path = Self::resolver_state_path();
+        if !has_in_memory_state
+            && !state_path.exists()
+            && !Path::new(RESOLV_CONF_BACKUP_PATH).exists()
+        {
+            return Ok(());
+        }
+        self.acquire_resolver_lock()?;
+        let mut guard = self.resolv_conf_backup.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_some() {
+            restore_resolv_conf_at(Path::new(RESOLV_CONF_PATH), &mut guard)?;
+            return remove_ownership_at(&Self::resolver_state_path());
+        }
+        drop(guard);
+
+        let current = Self::current_process_identity()?;
+        self.recover_stale_resolver_state(&current)
     }
 }
 
@@ -434,8 +624,10 @@ impl PlatformBackend for LinuxPlatform {
                 self.run_command("resolvectl", &darg_refs)?;
             }
         } else {
-            self.backup_resolv_conf_if_needed()?;
+            let owner_marker = self.prepare_legacy_resolver_state()?;
             let mut content = String::new();
+            content.push_str(&owner_marker);
+            content.push('\n');
             for server in &config.servers {
                 content.push_str(&format!("nameserver {}\n", server));
             }
@@ -444,6 +636,8 @@ impl PlatformBackend for LinuxPlatform {
             }
             std::fs::write(RESOLV_CONF_PATH, content)
                 .map_err(|e| PlatformError::DnsError(e.to_string()))?;
+            let mut state = self.resolv_conf_backup.lock().unwrap_or_else(|e| e.into_inner());
+            mark_resolv_conf_written(&mut state)?;
         }
 
         log::info!("DNS configured: {:?}", config.servers);
@@ -456,9 +650,18 @@ impl PlatformBackend for LinuxPlatform {
                 self.run_command("resolvectl", &["revert", &name])?;
             }
         }
-        self.restore_resolv_conf_from_backup()?;
-        log::info!("DNS restored");
-        Ok(())
+        let restore_result = self.restore_resolv_conf_from_backup();
+        let release_result = self.release_resolver_lock();
+        match (restore_result, release_result) {
+            (Err(error), Err(release_error)) => Err(PlatformError::DnsError(format!(
+                "restore DNS failed: {error}; release resolver lock failed: {release_error}"
+            ))),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Ok(()), Ok(())) => {
+                log::info!("DNS restored");
+                Ok(())
+            }
+        }
     }
 
     fn set_dns_interface_name(&self, name: &str) {
