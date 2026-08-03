@@ -894,7 +894,7 @@ impl LiveServerState {
                 server_config.downlink_scheduler_rate_bytes_per_second,
                 server_config.downlink_scheduler_burst_bytes,
             ),
-            fanout_queue: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+            fanout_queue: new_client_fanout_queue(),
             qkey_auth: std::collections::HashMap::new(),
             domain,
             auth_rate_limiter: Arc::new(std::sync::Mutex::new(
@@ -1161,11 +1161,14 @@ impl LiveServerState {
     }
 
     fn drain_client_fanout(&mut self, metrics: &Metrics) {
-        let pending: Vec<ClientFanoutPacket> = match self.fanout_queue.lock() {
-            Ok(mut queue) => queue.drain(..).collect(),
-            Err(poisoned) => poisoned.into_inner().drain(..).collect(),
-        };
-        for fanout in pending {
+        for _ in 0..MAX_CLIENT_FANOUT_DRAIN_BATCH {
+            let fanout = match self.fanout_queue.lock() {
+                Ok(mut queue) => queue.pop_front(),
+                Err(poisoned) => poisoned.into_inner().pop_front(),
+            };
+            let Some(fanout) = fanout else {
+                break;
+            };
             let targets = {
                 let sessions = self.domain.shared.sessions.read();
                 self.clients
@@ -1261,6 +1264,7 @@ impl LiveServerState {
             // `Instant::now()` comparison under a short-lived lock.
             self.maybe_sync_blacklist();
         }
+        self.drain_client_fanout(metrics);
         let client_snapshots = Arc::clone(self.domain.client_snapshots());
         let addresses = self.key_addrs();
         for addr in addresses {

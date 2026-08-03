@@ -128,6 +128,7 @@ pub struct Metrics {
     pub masque_downlink_response_drop_terminal_transport_error: AtomicU64,
     pub masque_downlink_response_drop_shutdown: AtomicU64,
     pub dns_intercept_dropped: AtomicU64,
+    pub client_fanout_dropped: AtomicU64,
 
     // Stealth metrics
     pub stealth_http3_active: AtomicU64,
@@ -227,6 +228,7 @@ impl Metrics {
             masque_downlink_response_drop_terminal_transport_error: AtomicU64::new(0),
             masque_downlink_response_drop_shutdown: AtomicU64::new(0),
             dns_intercept_dropped: AtomicU64::new(0),
+            client_fanout_dropped: AtomicU64::new(0),
             stealth_http3_active: AtomicU64::new(0),
             stealth_tls13_active: AtomicU64::new(0),
             fec_packets_encoded: FecProcessCounter::new(FecProcessCounterKind::Emitted),
@@ -332,6 +334,10 @@ impl Metrics {
     pub fn record_dns_intercept_drop(&self) {
         self.dns_intercept_dropped.fetch_add(1, Ordering::Relaxed);
         self.record_rate_limited();
+    }
+
+    pub fn record_client_fanout_drop(&self) {
+        self.client_fanout_dropped.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn record_ddos_sample(
@@ -836,6 +842,14 @@ impl Metrics {
         write_metric!(
             "quicfuscate_dns_intercept_dropped_total {}\n\n",
             self.dns_intercept_dropped.load(Ordering::Relaxed)
+        );
+        out.push_str(
+            "# HELP quicfuscate_client_fanout_dropped_total Broadcast/multicast packets dropped before fan-out queue admission\n",
+        );
+        out.push_str("# TYPE quicfuscate_client_fanout_dropped_total counter\n");
+        write_metric!(
+            "quicfuscate_client_fanout_dropped_total {}\n\n",
+            self.client_fanout_dropped.load(Ordering::Relaxed)
         );
 
         // Stealth
@@ -1459,6 +1473,17 @@ mod tests {
 
         assert!(output.contains("quicfuscate_dns_intercept_dropped_total 1"));
         assert_eq!(metrics.dns_intercept_dropped.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn client_fanout_drop_metric_is_exported() {
+        let metrics = Metrics::new();
+        metrics.record_client_fanout_drop();
+
+        let output = metrics.export();
+
+        assert!(output.contains("quicfuscate_client_fanout_dropped_total 1"));
+        assert_eq!(metrics.client_fanout_dropped.load(Ordering::Relaxed), 1);
     }
 
     #[test]

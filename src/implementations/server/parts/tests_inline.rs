@@ -340,11 +340,13 @@ mod tests {
 
     #[test]
     fn client_fanout_queue_accepts_only_broadcast_and_multicast() {
-        let queue = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+        let queue = new_client_fanout_queue();
+        let metrics = Metrics::new();
         let source = "127.0.0.1:4433".parse().unwrap();
         let packet = [0x45, 0, 0, 20];
         enqueue_client_fanout(
             &queue,
+            &metrics,
             source,
             UplinkRoute::Broadcast {
                 source: Ipv4Addr::new(10, 0, 1, 2),
@@ -354,6 +356,7 @@ mod tests {
         );
         enqueue_client_fanout(
             &queue,
+            &metrics,
             source,
             UplinkRoute::Internet {
                 source: Ipv4Addr::new(10, 0, 1, 2).into(),
@@ -368,6 +371,95 @@ mod tests {
         assert_eq!(fanout.source, source);
         assert_eq!(fanout.destination, IpAddr::V4(Ipv4Addr::new(10, 0, 1, 255)));
         assert_eq!(fanout.packet, packet);
+    }
+
+    #[test]
+    fn client_fanout_queue_bounds_admission_and_preserves_accounting() {
+        let queue = new_client_fanout_queue();
+        let metrics = Metrics::new();
+        let source = "127.0.0.1:4433".parse().unwrap();
+        let packet = [0x45, 0, 0, 20];
+        let route = || UplinkRoute::Broadcast {
+            source: Ipv4Addr::new(10, 0, 1, 2),
+            destination: Ipv4Addr::new(10, 0, 1, 255),
+        };
+
+        for _ in 0..MAX_CLIENT_FANOUT_ENTRIES_PER_SOURCE {
+            enqueue_client_fanout(&queue, &metrics, source, route(), &packet);
+        }
+        enqueue_client_fanout(&queue, &metrics, source, route(), &packet);
+
+        {
+            let queue = queue.lock().unwrap();
+            assert_eq!(queue.len(), MAX_CLIENT_FANOUT_ENTRIES_PER_SOURCE);
+            assert_eq!(queue.bytes(), MAX_CLIENT_FANOUT_ENTRIES_PER_SOURCE * packet.len());
+        }
+        assert_eq!(metrics.client_fanout_dropped.load(Ordering::Relaxed), 1);
+
+        {
+            let mut queue = queue.lock().unwrap();
+            assert!(queue.pop_front().is_some());
+            assert_eq!(queue.len(), MAX_CLIENT_FANOUT_ENTRIES_PER_SOURCE - 1);
+            assert_eq!(queue.bytes(), (MAX_CLIENT_FANOUT_ENTRIES_PER_SOURCE - 1) * packet.len());
+        }
+        enqueue_client_fanout(&queue, &metrics, source, route(), &packet);
+        {
+            let mut queue = queue.lock().unwrap();
+            while queue.pop_front().is_some() {}
+            assert!(queue.is_empty());
+            assert_eq!(queue.bytes(), 0);
+        }
+
+        let mut byte_limited = ClientFanoutQueueState::with_limits(4, 5, 4, 5);
+        assert!(byte_limited
+            .enqueue(source, IpAddr::V4(Ipv4Addr::LOCALHOST), &[1, 2, 3, 4, 5])
+            .is_ok());
+        assert_eq!(
+            byte_limited.enqueue(source, IpAddr::V4(Ipv4Addr::LOCALHOST), &[6]),
+            Err(ClientFanoutReject::Bytes)
+        );
+        assert!(byte_limited.pop_front().is_some());
+        assert_eq!(byte_limited.len(), 0);
+        assert_eq!(byte_limited.bytes(), 0);
+
+        let mut source_byte_limited = ClientFanoutQueueState::with_limits(4, 100, 4, 5);
+        assert!(source_byte_limited
+            .enqueue(source, IpAddr::V4(Ipv4Addr::LOCALHOST), &[1, 2, 3, 4, 5])
+            .is_ok());
+        assert_eq!(
+            source_byte_limited.enqueue(source, IpAddr::V4(Ipv4Addr::LOCALHOST), &[6]),
+            Err(ClientFanoutReject::PerSourceBytes)
+        );
+    }
+
+    #[tokio::test]
+    async fn housekeeping_tick_drains_client_fanout_without_udp_input() {
+        let mut live_state = LiveServerState::try_new(ServerConfig::default())
+            .unwrap_or_else(|error| panic!("live server state construction failed: {error}"));
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let accept_loop = AcceptLoop::new(AcceptConfig::default());
+        let metrics = Metrics::new();
+        let mut out = [0; 1460];
+        let source = "127.0.0.1:4433".parse().unwrap();
+        enqueue_client_fanout(
+            &live_state.fanout_queue,
+            &metrics,
+            source,
+            UplinkRoute::Broadcast {
+                source: Ipv4Addr::new(10, 0, 1, 2),
+                destination: Ipv4Addr::new(10, 0, 1, 255),
+            },
+            &[0x45, 0, 0, 20],
+        );
+
+        live_state
+            .run_housekeeping_tick(&socket, &mut out, &metrics, &accept_loop)
+            .await
+            .expect("housekeeping should drain fan-out without UDP input");
+
+        let queue = live_state.fanout_queue.lock().unwrap();
+        assert!(queue.is_empty());
+        assert_eq!(queue.bytes(), 0);
     }
 
     #[test]
