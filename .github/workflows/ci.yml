@@ -415,14 +415,6 @@ jobs:
           PROJECT_ROOT="$GITHUB_WORKSPACE"
           scripts/tests/tun-provisioning-negative-netns.sh
 
-      - name: Prove native traffic-analysis cadence and cost
-        shell: bash
-        run: >-
-          sudo --preserve-env=GITHUB_SHA
-          env QF_E2E_BINARY="$GITHUB_WORKSPACE/target/release/quicfuscate"
-          QF_TRAFFIC_OUTPUT_DIR="$GITHUB_WORKSPACE/scripts/out/tests/traffic-analysis-native"
-          scripts/tests/tun-e2e-traffic-analysis-netns.sh
-
       - name: Prove native server IPv4 PTB for DF=0
         shell: bash
         run: |
@@ -449,6 +441,14 @@ jobs:
           name: server-ipv4-ptb-native
           path: scripts/out/tests/server-ipv4-ptb-native/
           if-no-files-found: error
+
+      - name: Prove native traffic-analysis cadence and cost
+        shell: bash
+        run: >-
+          sudo --preserve-env=GITHUB_SHA
+          env QF_E2E_BINARY="$GITHUB_WORKSPACE/target/release/quicfuscate"
+          QF_TRAFFIC_OUTPUT_DIR="$GITHUB_WORKSPACE/scripts/out/tests/traffic-analysis-native"
+          scripts/tests/tun-e2e-traffic-analysis-netns.sh
 
       - name: Upload native traffic-analysis evidence
         uses: actions/upload-artifact@v7
