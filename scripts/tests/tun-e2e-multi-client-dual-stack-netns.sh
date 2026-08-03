@@ -420,10 +420,10 @@ prove_server_ptb_from_client() {
   ip netns exec "${CLIENT_NS[0]}" ip route replace 198.51.100.2/32 dev "$TUN_NAME"
   ip netns exec "${CLIENT_NS[0]}" ip -6 route replace 2001:db8::2/128 dev "$TUN_NAME"
 
-  # Keep the client TUN at 1500 while the server remains at the phase MTU
-  # floor. Both IPv4 DF states and the IPv6 probe must reach the server
-  # callback whole; otherwise the client kernel could consume the packet at
-  # its own tunnel boundary before the server PTB disposition is exercised.
+  # Keep the client TUN at 1500 while the server TUN remains at the phase MTU
+  # floor. The server QUIC carrier is deliberately larger than that TUN MTU,
+  # so the probe reaches allow_client_uplink whole instead of being truncated
+  # by the carrier receive buffer before the server PTB disposition is tested.
   local ipv4_df_output ipv4_non_df_output ipv6_output capture_pid
   fetch_metrics client-ptb-before
 
@@ -1080,7 +1080,9 @@ main() {
   prove_framed_h3_fallback h3-fallback
 
   log 'phase 1: default-deny multi-client dual-stack policy'
-  start_phase default 0 1280 1280 60000 10000 1472 1500
+  # Keep the server carrier at the 1472-byte Ethernet payload ceiling while
+  # its TUN stays at 1280. The inner probe must cross only the TUN boundary.
+  start_phase default 0 1472 1280 60000 10000 1472 1500
   wait_for_tunnel_readiness default
   prove_server_ptb_from_client
   prove_simultaneous_dual_stack default
