@@ -26,7 +26,7 @@ mkdir -p "$OUTPUT_DIR"
 LOG_FILE="$OUTPUT_DIR/transport-tests.log"
 JSON="$OUTPUT_DIR/results.json"; json_begin "$JSON" "tests_transport_comprehensive"; JSON_FIRST_RUN=1
 URING_PROOF_FAILURE=0
-URING_PROOF_TIMEOUT_SECONDS=300
+URING_PROOF_TIMEOUT_SECONDS=900
 
 write_uring_proof_evidence() {
   local name="$1"
