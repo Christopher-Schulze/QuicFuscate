@@ -410,37 +410,61 @@ prove_framed_h3_fallback() {
     'framed H3 tunnel downlink active' 1 10
 }
 
-prove_client_local_ptb() {
+prove_server_ptb_from_client() {
   ip netns exec "${CLIENT_NS[0]}" ip link set "$TUN_NAME" mtu 1500
   ip netns exec "${CLIENT_NS[0]}" ip route replace 198.51.100.2/32 dev "$TUN_NAME"
   ip netns exec "${CLIENT_NS[0]}" ip -6 route replace 2001:db8::2/128 dev "$TUN_NAME"
 
   # Keep the client TUN at 1500 while the server remains at the phase MTU
-  # floor. The non-DF packet must reach server allow_client_uplink whole;
-  # otherwise the client kernel could fragment it before the tunnel boundary.
-  local ipv4_output ipv4_non_df_output ipv6_output non_df_capture_pid
+  # floor. Both IPv4 DF states and the IPv6 probe must reach the server
+  # callback whole; otherwise the client kernel could consume the packet at
+  # its own tunnel boundary before the server PTB disposition is exercised.
+  local ipv4_df_output ipv4_non_df_output ipv6_output capture_pid
   fetch_metrics client-ptb-before
-  ipv4_output="$(ip netns exec "${CLIENT_NS[0]}" ping -4 -c 1 -W 2 -M 'do' -s 1300 \
+
+  ip netns exec "${CLIENT_NS[0]}" timeout 5 tcpdump -l -nn -vv -Q in -i "$TUN_NAME" \
+    'icmp and src host 10.0.1.1 and dst host 10.0.1.2' \
+    >"$ARTIFACT_DIR/client-server-ptb4-df-wire.log" 2>&1 &
+  capture_pid="$!"
+  sleep 0.5
+  kill -0 "$capture_pid" 2>/dev/null || fail 'DF=1 PTB capture did not remain active'
+  ipv4_df_output="$(ip netns exec "${CLIENT_NS[0]}" ping -4 -c 1 -W 2 -M 'do' -s 1300 \
     -I "${CLIENT_V4[0]}" 198.51.100.2 2>&1 || true)"
+  wait "$capture_pid" 2>/dev/null || true
+
   ip netns exec "${CLIENT_NS[0]}" timeout 5 tcpdump -l -nn -vv -Q in -i "$TUN_NAME" \
     'icmp and src host 10.0.1.1 and dst host 10.0.1.2' \
     >"$ARTIFACT_DIR/client-server-ptb4-non-df-wire.log" 2>&1 &
-  non_df_capture_pid="$!"
+  capture_pid="$!"
   sleep 0.5
-  kill -0 "$non_df_capture_pid" 2>/dev/null || fail 'DF=0 PTB capture did not remain active'
+  kill -0 "$capture_pid" 2>/dev/null || fail 'DF=0 PTB capture did not remain active'
   ipv4_non_df_output="$(ip netns exec "${CLIENT_NS[0]}" ping -4 -c 1 -W 2 -M 'dont' -s 1300 \
     -I "${CLIENT_V4[0]}" 198.51.100.2 2>&1 || true)"
-  wait "$non_df_capture_pid" 2>/dev/null || true
+  wait "$capture_pid" 2>/dev/null || true
+
+  ip netns exec "${CLIENT_NS[0]}" timeout 5 tcpdump -l -nn -vv -Q in -i "$TUN_NAME" \
+    'icmp6 and src host fd00::1 and dst host fd00::2' \
+    >"$ARTIFACT_DIR/client-server-ptb6-wire.log" 2>&1 &
+  capture_pid="$!"
+  sleep 0.5
+  kill -0 "$capture_pid" 2>/dev/null || fail 'IPv6 PTB capture did not remain active'
   ipv6_output="$(ip netns exec "${CLIENT_NS[0]}" ping -6 -c 1 -W 2 -s 1320 \
     -I "${CLIENT_V6[0]}" 2001:db8::2 2>&1 || true)"
-  printf '%s\n' "$ipv4_output" >"$ARTIFACT_DIR/client-local-ptb4.txt"
+  wait "$capture_pid" 2>/dev/null || true
+
+  printf '%s\n' "$ipv4_df_output" >"$ARTIFACT_DIR/client-server-ptb4-df.txt"
   printf '%s\n' "$ipv4_non_df_output" >"$ARTIFACT_DIR/client-server-ptb4-non-df.txt"
-  printf '%s\n' "$ipv6_output" >"$ARTIFACT_DIR/client-local-ptb6.txt"
+  printf '%s\n' "$ipv6_output" >"$ARTIFACT_DIR/client-server-ptb6.txt"
   fetch_metrics client-ptb-after
 
   ip netns exec "${CLIENT_NS[0]}" ip link set "$TUN_NAME" mtu 1280
-  grep -Eqi 'message too long|mtu[ =]+1280|Frag needed' <<<"$ipv4_output" || \
-    fail 'client-local IPv4 PTB response was not observed'
+  grep -Eqi 'need to frag.*mtu[ =]+1280' \
+    "$ARTIFACT_DIR/client-server-ptb4-df-wire.log" || {
+      printf '%s\n' '--- DF=1 IPv4 ping output ---' "$ipv4_df_output" >&2
+      printf '%s\n' '--- DF=1 IPv4 wire capture ---' >&2
+      cat "$ARTIFACT_DIR/client-server-ptb4-df-wire.log" >&2
+      fail 'server IPv4 PTB response for DF=1 was not observed on the client TUN'
+    }
   grep -Eqi 'need to frag.*mtu[ =]+1280' \
     "$ARTIFACT_DIR/client-server-ptb4-non-df-wire.log" || {
       printf '%s\n' '--- DF=0 IPv4 ping output ---' "$ipv4_non_df_output" >&2
@@ -448,13 +472,22 @@ prove_client_local_ptb() {
       cat "$ARTIFACT_DIR/client-server-ptb4-non-df-wire.log" >&2
       fail 'server IPv4 PTB response for DF=0 was not observed on the client TUN'
     }
-  grep -Eqi 'message too long|mtu[ =]+1280|Packet too big' <<<"$ipv6_output" || \
-    fail 'client-local IPv6 PTB response was not observed'
-  local ptb_before ptb_after
+  grep -Eqi 'packet too big.*mtu[ =]+1280' \
+    "$ARTIFACT_DIR/client-server-ptb6-wire.log" || {
+      printf '%s\n' '--- IPv6 ping output ---' "$ipv6_output" >&2
+      printf '%s\n' '--- IPv6 wire capture ---' >&2
+      cat "$ARTIFACT_DIR/client-server-ptb6-wire.log" >&2
+      fail 'server IPv6 PTB response was not observed on the client TUN'
+    }
+  local ptb_before ptb_after icmpv6_before icmpv6_after
   ptb_before="$(routing_metric_value client-ptb-before packet_too_big)"
   ptb_after="$(routing_metric_value client-ptb-after packet_too_big)"
-  ((ptb_after > ptb_before)) || \
-    fail "DF=0 probe did not increment server packet_too_big metric: before=$ptb_before after=$ptb_after"
+  ((ptb_after >= ptb_before + 3)) || \
+    fail "DF=1, DF=0, and IPv6 probes did not all increment server packet_too_big metric: before=$ptb_before after=$ptb_after"
+  icmpv6_before="$(routing_metric_value client-ptb-before icmpv6)"
+  icmpv6_after="$(routing_metric_value client-ptb-after icmpv6)"
+  ((icmpv6_after > icmpv6_before)) || \
+    fail "IPv6 PTB probe did not increment server icmpv6 metric: before=$icmpv6_before after=$icmpv6_after"
 }
 
 prove_dplpmtud_ethernet_1500() {
@@ -1042,7 +1075,7 @@ main() {
   log 'phase 1: default-deny multi-client dual-stack policy'
   start_phase default 0 1280 1280 60000 10000 1472 1500
   wait_for_tunnel_readiness default
-  prove_client_local_ptb
+  prove_server_ptb_from_client
   prove_simultaneous_dual_stack default
   prove_owned_unicast_isolation
   prove_default_deny_and_spoof_rejection
