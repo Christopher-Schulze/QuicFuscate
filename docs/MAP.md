@@ -1290,7 +1290,7 @@ The audit remains open. These reconciliations document current evidence and owne
 
 - **Queue owner:** `live_auth.rs` gives the MASQUE datagram and framed HTTP/3 uplink callbacks one shared `Arc<Mutex<ClientFanoutQueueState>>`; route filtering happens before any payload clone.
 - **Admission and drain bounds:** The queue accepts at most 256 entries/384 KiB globally and 32 entries/64 KiB per source socket. `live_state.rs` pops at most 64 FIFO packets per drain and updates total/per-source byte accounting, with no backlog-to-`Vec` materialization; housekeeping drains even without a new UDP datagram.
-- **Telemetry and proof:** Rejected fan-out packets increment `quicfuscate_client_fanout_dropped_total`. Four focused tests, 133 server tests, and 2,156 library tests passed locally; all-target checking, formatting, and diff hygiene passed. Strict local Clippy retains only the pre-existing TLS Cover dead-code lint.
+- **Telemetry and proof:** Rejected fan-out packets increment `quicfuscate_client_fanout_dropped_total`. Four focused tests, 133 server tests, and 2,156 library tests passed locally; all-target checking, formatting, and diff hygiene passed. Strict local Clippy retains only the pre-existing TLS Cover dead-code lint. Remote Clippy Matrix run `30815583508` passed all eight feature lanes on source revision `c216cc5`.
 
 ## Implementation Reconciliation (2026-08-03, server TUN DNS intercept admission)
 
