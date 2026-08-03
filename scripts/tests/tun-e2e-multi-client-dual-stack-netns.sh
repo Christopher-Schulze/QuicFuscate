@@ -261,6 +261,9 @@ start_phase() {
     "$pmtu_payload_max" "$pmtu_payload_max" "$pmtu_payload_max" "$probe_interval_ms" "$black_hole_timeout_ms" >"$phase_config"
   printf '\n[fec]\nmode = "%s"\n' "$FEC_MODE" >>"$phase_config"
   printf '\n[logging]\nmode = "%s"\n' "$SERVER_LOGGING_MODE" >>"$phase_config"
+  # Standalone bootstrap applies the persisted logging mode after the engine
+  # config is initialized, so keep the requested diagnostic mode effective.
+  printf '{"mode":"%s"}\n' "$SERVER_LOGGING_MODE" >"${phase_config%.toml}.logging.json"
   printf '[transport]\nmtu = %s\nmax_udp_payload = %s\ndisable_pmtud = false\npmtu_min_mtu = 1280\npmtu_max_mtu = %s\npmtu_probe_interval_ms = %s\npmtu_black_hole_timeout_ms = %s\n' \
     "$client_pmtu_payload_max" "$client_pmtu_payload_max" "$client_pmtu_payload_max" "$probe_interval_ms" "$black_hole_timeout_ms" >"$client_phase_config"
   printf '\n[fec]\nmode = "%s"\n' "$FEC_MODE" >>"$client_phase_config"
