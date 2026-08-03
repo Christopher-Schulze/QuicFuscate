@@ -3,7 +3,7 @@
 //! Provides a single API for connecting to QuicFuscate VPN servers
 //! from Windows, macOS, and Linux.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::connection::ClientConnection;
@@ -126,6 +126,140 @@ struct ClientStatsInternal {
     packets_sent: AtomicU64,
     packets_received: AtomicU64,
     connect_time: Option<std::time::Instant>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EffectiveTunNetwork {
+    address: IpAddr,
+    prefix: u8,
+    gateway: IpAddr,
+}
+
+fn ipv4_netmask_prefix(mask: Ipv4Addr) -> Result<u8, BackendError> {
+    let raw = u32::from(mask);
+    let prefix = raw.leading_ones() as u8;
+    let canonical = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
+    if raw != canonical {
+        return Err(BackendError::Config(format!("TUN IPv4 netmask is not contiguous: {mask}")));
+    }
+    Ok(prefix)
+}
+
+fn ipv6_netmask_prefix(mask: Ipv6Addr) -> Result<u8, BackendError> {
+    let raw = u128::from(mask);
+    let prefix = raw.leading_ones() as u8;
+    let canonical = if prefix == 0 { 0 } else { u128::MAX << (128 - prefix) };
+    if raw != canonical {
+        return Err(BackendError::Config(format!("TUN IPv6 netmask is not contiguous: {mask}")));
+    }
+    Ok(prefix)
+}
+
+fn netmask_prefix(address: IpAddr, netmask: IpAddr) -> Result<u8, BackendError> {
+    match (address, netmask) {
+        (IpAddr::V4(_), IpAddr::V4(mask)) => ipv4_netmask_prefix(mask),
+        (IpAddr::V6(_), IpAddr::V6(mask)) => ipv6_netmask_prefix(mask),
+        _ => Err(BackendError::Config(
+            "TUN address and netmask must use the same address family".to_string(),
+        )),
+    }
+}
+
+fn default_tun_gateway(address: IpAddr, prefix: u8) -> IpAddr {
+    match address {
+        IpAddr::V4(address) => {
+            let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
+            let network = u32::from(address) & mask;
+            IpAddr::V4(Ipv4Addr::from(network.saturating_add(1)))
+        }
+        IpAddr::V6(address) => {
+            let mask = if prefix == 0 { 0 } else { u128::MAX << (128 - prefix) };
+            let network = u128::from(address) & mask;
+            IpAddr::V6(Ipv6Addr::from(network.saturating_add(1)))
+        }
+    }
+}
+
+fn effective_tun_network(config: &EngineConfig) -> Result<EffectiveTunNetwork, BackendError> {
+    match (config.interface.tun_ip, config.interface.tun_netmask) {
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(BackendError::Config(
+                "tun_ip and tun_netmask must be configured together".to_string(),
+            ));
+        }
+        (Some(ip), Some(mask)) if ip.is_ipv4() != mask.is_ipv4() => {
+            return Err(BackendError::Config(
+                "tun_ip and tun_netmask must use the same address family".to_string(),
+            ));
+        }
+        _ => {}
+    }
+
+    let address = config.interface.tun_ip.unwrap_or(IpAddr::V4(Ipv4Addr::new(10, 8, 0, 2)));
+    let mask_prefix =
+        config.interface.tun_netmask.map(|mask| netmask_prefix(address, mask)).transpose()?;
+    let prefix = match (mask_prefix, config.interface.tun_subnet_prefix) {
+        (Some(mask_prefix), Some(configured_prefix)) if mask_prefix != configured_prefix => {
+            return Err(BackendError::Config(format!(
+                "tun_netmask prefix {mask_prefix} conflicts with tun_subnet_prefix {configured_prefix}"
+            )));
+        }
+        (Some(mask_prefix), _) => mask_prefix,
+        (None, Some(configured_prefix)) => configured_prefix,
+        (None, None) => 24,
+    };
+    let max_prefix = if address.is_ipv4() { 32 } else { 128 };
+    if prefix > max_prefix {
+        return Err(BackendError::Config(format!(
+            "TUN subnet prefix {prefix} exceeds the {}-bit address family",
+            max_prefix
+        )));
+    }
+
+    let gateway = match config.interface.tun_gateway {
+        Some(gateway) if gateway.is_ipv4() != address.is_ipv4() => {
+            return Err(BackendError::Config(
+                "tun_gateway must use the same address family as tun_ip".to_string(),
+            ));
+        }
+        Some(gateway) => gateway,
+        None => default_tun_gateway(address, prefix),
+    };
+
+    Ok(EffectiveTunNetwork { address, prefix, gateway })
+}
+
+fn default_routes(gateway: IpAddr) -> [RouteConfig; 2] {
+    match gateway {
+        IpAddr::V4(gateway) => [
+            RouteConfig {
+                destination: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                prefix_len: 1,
+                gateway: IpAddr::V4(gateway),
+                metric: 10,
+            },
+            RouteConfig {
+                destination: IpAddr::V4(Ipv4Addr::new(128, 0, 0, 0)),
+                prefix_len: 1,
+                gateway: IpAddr::V4(gateway),
+                metric: 10,
+            },
+        ],
+        IpAddr::V6(gateway) => [
+            RouteConfig {
+                destination: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                prefix_len: 1,
+                gateway: IpAddr::V6(gateway),
+                metric: 10,
+            },
+            RouteConfig {
+                destination: IpAddr::V6(Ipv6Addr::from(1u128 << 127)),
+                prefix_len: 1,
+                gateway: IpAddr::V6(gateway),
+                metric: 10,
+            },
+        ],
+    }
 }
 
 impl Default for ClientStatsInternal {
@@ -292,11 +426,13 @@ impl ClientBackend {
             self.platform.request_elevation()?;
         }
 
+        let effective_network = effective_tun_network(config)?;
+
         // Create TUN device
         let tun_config = TunDeviceConfig {
             name: Some(config.interface.tun_name.clone()),
-            address: IpAddr::V4(std::net::Ipv4Addr::new(10, 8, 0, 2)),
-            netmask: 24,
+            address: effective_network.address,
+            netmask: effective_network.prefix,
             mtu: config.interface.tun_mtu,
         };
 
@@ -308,24 +444,10 @@ impl ClientBackend {
         self.connection = Some(connection);
 
         // Add routes (route all traffic through VPN)
-        let default_gateway = IpAddr::V4(std::net::Ipv4Addr::new(10, 8, 0, 1));
-        let gateway: IpAddr = config.interface.tun_gateway.unwrap_or(default_gateway);
-        let first_route = RouteConfig {
-            destination: IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)),
-            prefix_len: 1,
-            gateway,
-            metric: 10,
-        };
-        self.platform.add_route(&first_route)?;
-        self.active_routes.push(first_route);
-        let second_route = RouteConfig {
-            destination: IpAddr::V4(std::net::Ipv4Addr::new(128, 0, 0, 0)),
-            prefix_len: 1,
-            gateway,
-            metric: 10,
-        };
-        self.platform.add_route(&second_route)?;
-        self.active_routes.push(second_route);
+        for route in default_routes(effective_network.gateway) {
+            self.platform.add_route(&route)?;
+            self.active_routes.push(route);
+        }
 
         // Configure DNS (from config or defaults)
         let dns_servers = if config.interface.dns_servers.is_empty() {
@@ -447,11 +569,67 @@ impl Drop for ClientBackend {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex as StdMutex};
 
     struct CleanupTestPlatform {
         destroy_attempts: Arc<AtomicUsize>,
         fail_through_attempt: Arc<AtomicUsize>,
+    }
+
+    struct ConfigCapturePlatform {
+        tun_config: Arc<StdMutex<Option<TunDeviceConfig>>>,
+        routes: Arc<StdMutex<Vec<RouteConfig>>>,
+    }
+
+    impl PlatformBackend for ConfigCapturePlatform {
+        fn name(&self) -> &'static str {
+            "config-capture"
+        }
+
+        fn is_elevated(&self) -> bool {
+            true
+        }
+
+        fn request_elevation(&self) -> Result<(), PlatformError> {
+            Ok(())
+        }
+
+        fn create_tun(&self, config: &TunDeviceConfig) -> Result<TunHandle, PlatformError> {
+            *self.tun_config.lock().unwrap() = Some(config.clone());
+            Ok(TunHandle {
+                name: config.name.clone().unwrap_or_else(|| "capture-tun".to_string()),
+                id: 1,
+                #[cfg(unix)]
+                fd: -1,
+                #[cfg(windows)]
+                handle: 0,
+            })
+        }
+
+        fn destroy_tun(&self, _handle: &mut TunHandle) -> Result<(), PlatformError> {
+            Ok(())
+        }
+
+        fn add_route(&self, route: &RouteConfig) -> Result<(), PlatformError> {
+            self.routes.lock().unwrap().push(route.clone());
+            Ok(())
+        }
+
+        fn remove_route(&self, _route: &RouteConfig) -> Result<(), PlatformError> {
+            Ok(())
+        }
+
+        fn set_dns(&self, _config: &DnsConfig) -> Result<(), PlatformError> {
+            Ok(())
+        }
+
+        fn restore_dns(&self) -> Result<(), PlatformError> {
+            Ok(())
+        }
+
+        fn default_gateway(&self) -> Result<IpAddr, PlatformError> {
+            Ok(IpAddr::V4(Ipv4Addr::new(10, 8, 0, 1)))
+        }
     }
 
     impl PlatformBackend for CleanupTestPlatform {
@@ -533,6 +711,118 @@ mod tests {
         let stats = backend.stats();
         assert_eq!(stats.bytes_sent, 0);
         assert_eq!(stats.uptime_secs, 0);
+    }
+
+    fn config_capture_backend(
+    ) -> (ClientBackend, Arc<StdMutex<Option<TunDeviceConfig>>>, Arc<StdMutex<Vec<RouteConfig>>>)
+    {
+        let tun_config = Arc::new(StdMutex::new(None));
+        let routes = Arc::new(StdMutex::new(Vec::new()));
+        let platform = ConfigCapturePlatform {
+            tun_config: Arc::clone(&tun_config),
+            routes: Arc::clone(&routes),
+        };
+        (ClientBackend::with_platform(Box::new(platform)), tun_config, routes)
+    }
+
+    fn test_backend_config() -> EngineConfig {
+        let mut config = EngineConfig::default();
+        config.connection.remote = "127.0.0.1:4433".to_string();
+        config
+    }
+
+    #[test]
+    fn client_backend_preserves_default_tun_network() {
+        let (mut backend, tun_config, routes) = config_capture_backend();
+        backend.connect(&test_backend_config()).expect("default backend connect");
+
+        let tun_config = tun_config.lock().unwrap().clone().expect("captured TUN config");
+        assert_eq!(tun_config.address, IpAddr::V4(Ipv4Addr::new(10, 8, 0, 2)));
+        assert_eq!(tun_config.netmask, 24);
+
+        let routes = routes.lock().unwrap().clone();
+        assert_eq!(routes.len(), 2);
+        assert!(routes.iter().all(|route| {
+            route.gateway == IpAddr::V4(Ipv4Addr::new(10, 8, 0, 1)) && route.destination.is_ipv4()
+        }));
+
+        backend.disconnect().expect("default backend disconnect");
+    }
+
+    #[test]
+    fn client_backend_propagates_configured_tun_network_and_gateway() {
+        let (mut backend, tun_config, routes) = config_capture_backend();
+        let mut config = test_backend_config();
+        config.interface.tun_ip = Some("10.20.30.40".parse().expect("TUN address"));
+        config.interface.tun_netmask = Some("255.255.0.0".parse().expect("TUN netmask"));
+
+        backend.connect(&config).expect("configured backend connect");
+
+        let tun_config = tun_config.lock().unwrap().clone().expect("captured TUN config");
+        assert_eq!(tun_config.address, IpAddr::V4(Ipv4Addr::new(10, 20, 30, 40)));
+        assert_eq!(tun_config.netmask, 16);
+
+        let routes = routes.lock().unwrap().clone();
+        assert_eq!(routes.len(), 2);
+        assert!(routes.iter().all(|route| {
+            route.gateway == IpAddr::V4(Ipv4Addr::new(10, 20, 0, 1)) && route.destination.is_ipv4()
+        }));
+
+        backend.disconnect().expect("configured backend disconnect");
+    }
+
+    #[test]
+    fn client_backend_uses_subnet_prefix_when_netmask_is_absent() {
+        let (mut backend, tun_config, routes) = config_capture_backend();
+        let mut config = test_backend_config();
+        config.interface.tun_subnet_prefix = Some(16);
+
+        backend.connect(&config).expect("prefix-configured backend connect");
+
+        let tun_config = tun_config.lock().unwrap().clone().expect("captured TUN config");
+        assert_eq!(tun_config.address, IpAddr::V4(Ipv4Addr::new(10, 8, 0, 2)));
+        assert_eq!(tun_config.netmask, 16);
+        assert!(routes
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|route| { route.gateway == IpAddr::V4(Ipv4Addr::new(10, 8, 0, 1)) }));
+
+        backend.disconnect().expect("prefix-configured backend disconnect");
+    }
+
+    #[test]
+    fn client_backend_propagates_ipv6_tun_network_and_routes() {
+        let (mut backend, tun_config, routes) = config_capture_backend();
+        let mut config = test_backend_config();
+        config.interface.tun_ip = Some("2001:db8:42::2".parse().expect("TUN IPv6 address"));
+        config.interface.tun_netmask =
+            Some("ffff:ffff:ffff:ffff::".parse().expect("TUN IPv6 netmask"));
+
+        backend.connect(&config).expect("IPv6 backend connect");
+
+        let tun_config = tun_config.lock().unwrap().clone().expect("captured TUN config");
+        assert_eq!(tun_config.address, "2001:db8:42::2".parse::<IpAddr>().unwrap());
+        assert_eq!(tun_config.netmask, 64);
+
+        let routes = routes.lock().unwrap().clone();
+        assert_eq!(routes.len(), 2);
+        assert!(routes.iter().all(|route| {
+            route.gateway == "2001:db8:42::1".parse::<IpAddr>().unwrap()
+                && route.destination.is_ipv6()
+        }));
+
+        backend.disconnect().expect("IPv6 backend disconnect");
+    }
+
+    #[test]
+    fn effective_tun_network_rejects_non_contiguous_netmask() {
+        let mut config = test_backend_config();
+        config.interface.tun_ip = Some("10.20.30.40".parse().expect("TUN address"));
+        config.interface.tun_netmask = Some("255.0.255.0".parse().expect("TUN netmask"));
+
+        let error = effective_tun_network(&config).expect_err("invalid netmask must fail closed");
+        assert!(error.to_string().contains("not contiguous"));
     }
 
     #[test]
