@@ -18,11 +18,11 @@ const MAX_BLACKLIST_CA_BUNDLE_BYTES: u64 = 1024 * 1024;
 /// Rate limit configuration.
 #[derive(Clone, Debug)]
 pub struct RateLimitConfig {
-    /// Maximum packets per second per client (sustained rate)
+    /// Maximum packets per second per client (sustained rate).
     pub max_pps: u64,
-    /// Maximum bytes per second per client (0 = unlimited)
+    /// Maximum bytes per second per client (0 = unlimited).
     pub max_bps: u64,
-    /// Bucket refill interval
+    /// Bucket refill interval.
     pub refill_interval: Duration,
     /// Burst capacity (max tokens the bucket can hold). 0 = use 2× `max_pps`.
     ///
@@ -53,6 +53,27 @@ impl RateLimitConfig {
         } else {
             self.burst_size
         }
+    }
+
+    /// Derive the byte bucket's initial capacity from the packet-equivalent burst.
+    ///
+    /// `burst_size` is expressed in packet tokens, so the byte bucket uses the
+    /// same burst duration at the configured average packet size:
+    /// `ceil(max_bps * effective_burst / max_pps)`. The refill interval remains
+    /// the shared refill cadence and intentionally does not multiply this
+    /// initial capacity. `None` represents a zero packet rate or a result that
+    /// cannot be represented as a `u64`; callers fail closed in that case.
+    fn byte_burst_capacity(&self) -> Option<u64> {
+        if self.max_bps == 0 {
+            return Some(0);
+        }
+        if self.max_pps == 0 {
+            return None;
+        }
+
+        let numerator = u128::from(self.max_bps).checked_mul(u128::from(self.effective_burst()))?;
+        let capacity = numerator.div_ceil(u128::from(self.max_pps));
+        capacity.try_into().ok()
     }
 }
 
@@ -169,7 +190,7 @@ impl TokenBucket {
                 }
             };
 
-            self.tokens = (self.tokens + refill_amount).min(self.capacity);
+            self.tokens = self.tokens.saturating_add(refill_amount).min(self.capacity);
             self.last_refill = now;
         }
     }
@@ -254,9 +275,13 @@ impl RateLimiter {
             return true; // Unlimited
         }
 
+        let Some(capacity) = self.config.byte_burst_capacity() else {
+            crate::instrumentation::global().server.rate_limit_hit();
+            return false;
+        };
         let mut buckets = self.byte_buckets.lock();
         let bucket = buckets.entry(key).or_insert_with(|| {
-            TokenBucket::new(self.config.max_bps, self.config.max_bps, self.config.refill_interval)
+            TokenBucket::new(capacity, self.config.max_bps, self.config.refill_interval)
         });
         let allowed = bucket.consume(bytes);
         if !allowed {
@@ -2158,6 +2183,55 @@ mod tests {
             burst_size: 100,
         };
         assert_eq!(cfg.effective_burst(), 100);
+    }
+
+    #[test]
+    fn test_byte_burst_capacity_matches_default_and_explicit_packet_bursts() {
+        let default_burst = RateLimitConfig {
+            max_pps: 1_000,
+            max_bps: 1_000_000,
+            refill_interval: Duration::from_secs(1),
+            burst_size: 0,
+        };
+        assert_eq!(default_burst.effective_burst(), 2_000);
+        assert_eq!(default_burst.byte_burst_capacity(), Some(2_000_000));
+
+        let explicit_burst = RateLimitConfig {
+            burst_size: 250,
+            refill_interval: Duration::from_millis(250),
+            ..default_burst.clone()
+        };
+        assert_eq!(explicit_burst.byte_burst_capacity(), Some(250_000));
+        assert_eq!(
+            RateLimitConfig { max_pps: 0, ..explicit_burst.clone() }.byte_burst_capacity(),
+            None
+        );
+        assert_eq!(
+            RateLimitConfig {
+                max_bps: u64::MAX,
+                burst_size: u64::MAX,
+                max_pps: 1,
+                ..explicit_burst
+            }
+            .byte_burst_capacity(),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rate_limiter_byte_bucket_enforces_packet_equivalent_burst() {
+        let limiter = RateLimiter::new(RateLimitConfig {
+            max_pps: 200,
+            max_bps: 1_000,
+            refill_interval: Duration::from_secs(60),
+            burst_size: 200,
+        });
+        let ip: IpAddr = "192.0.2.10".parse().unwrap();
+
+        for _ in 0..100 {
+            assert!(limiter.check_bytes_ip(ip, 10));
+        }
+        assert!(!limiter.check_bytes_ip(ip, 1));
     }
 
     #[test]
