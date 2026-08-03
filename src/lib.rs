@@ -180,7 +180,30 @@ pub mod error {
     }
     impl From<crate::transport::h3::Error> for ConnectionError {
         fn from(e: crate::transport::h3::Error) -> Self {
-            ConnectionError::Transport(format!("H3 error: {:?}", e))
+            match e {
+                crate::transport::h3::Error::Done => ConnectionError::Done,
+                other => ConnectionError::Transport(format!("H3 error: {:?}", other)),
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::ConnectionError;
+
+        #[test]
+        fn h3_done_maps_to_terminal_connection_done() {
+            let error: ConnectionError = crate::transport::h3::Error::Done.into();
+            assert_eq!(error, ConnectionError::Done);
+        }
+
+        #[test]
+        fn h3_nonterminal_error_retains_transport_context() {
+            let error: ConnectionError = crate::transport::h3::Error::IdError.into();
+            assert!(matches!(
+                error,
+                ConnectionError::Transport(message) if message == "H3 error: IdError"
+            ));
         }
     }
 }

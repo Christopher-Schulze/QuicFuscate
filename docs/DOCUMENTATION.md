@@ -2717,6 +2717,8 @@ PATH_CHALLENGE and PATH_RESPONSE datagrams carry explicit path-control metadata.
 
 On the standalone server, a new `(local, peer)` tuple remains a candidate route until the matching response validates it. Only then does the DCID route registry commit the new peer address. Successful validated migrations increment the internal `PATH_MIGRATIONS` telemetry counter.
 
+The headless `qf-e2e-client --migration-local` proof keeps the migration and throughput assertions fail closed and performs the HTTP/3 request-stream body/FIN finalization before emitting `migration-proof`. The proof includes `finalization=accepted` when the FIN operation is accepted and `finalization=already-done` when the transport reports its documented terminal `Done` state for an already-finished local stream. Any other finalization error, including an unavailable HTTP/3 session, returns a nonzero result and suppresses the success marker.
+
 ---
 
 ### NAT Traversal and Path Discovery

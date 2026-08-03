@@ -26,6 +26,31 @@ const HOLD_IO_BURST: usize = 64;
 const MIN_TRANSITION_RATIO_PPM: u64 = 500_000;
 const MIN_RECOVERY_RATIO_PPM: u64 = 900_000;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MigrationFinalization {
+    Accepted,
+    AlreadyDone,
+}
+
+impl MigrationFinalization {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::AlreadyDone => "already-done",
+        }
+    }
+}
+
+fn classify_migration_finalization(
+    result: Result<(), ConnectionError>,
+) -> Result<MigrationFinalization, ConnectionError> {
+    match result {
+        Ok(()) => Ok(MigrationFinalization::Accepted),
+        Err(ConnectionError::Done) => Ok(MigrationFinalization::AlreadyDone),
+        Err(error) => Err(error),
+    }
+}
+
 fn ratio_ppm(numerator: u64, denominator: u64) -> u64 {
     if denominator == 0 {
         return 0;
@@ -186,10 +211,13 @@ fn run_migration_probe(
         .into());
     }
 
-    let _ = conn.http3_send_body_chunk(stream_id, &[], true);
+    let finalization =
+        classify_migration_finalization(conn.http3_send_body_chunk(stream_id, &[], true))
+            .map_err(|error| format!("migration HTTP/3 finalization failed: {error:?}"))?;
     println!(
-        "migration-proof old_local={old_local} new_local={new_local} validation_ms={} baseline_bytes={baseline_total} transition_bytes={transition_total} transition_ratio_ppm={transition_ratio_ppm} best_recovery_ratio_ppm={best_recovery_ratio_ppm} cwnd={}",
+        "migration-proof old_local={old_local} new_local={new_local} validation_ms={} baseline_bytes={baseline_total} transition_bytes={transition_total} transition_ratio_ppm={transition_ratio_ppm} best_recovery_ratio_ppm={best_recovery_ratio_ppm} finalization={} cwnd={}",
         validation_elapsed.as_millis(),
+        finalization.as_str(),
         conn.conn.cwnd()
     );
     Ok(())
@@ -549,7 +577,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::ratio_ppm;
+    use super::{classify_migration_finalization, ratio_ppm, MigrationFinalization};
+    use quicfuscate::error::ConnectionError;
+
+    #[test]
+    fn migration_finalization_accepts_new_fin() {
+        assert_eq!(classify_migration_finalization(Ok(())), Ok(MigrationFinalization::Accepted));
+    }
+
+    #[test]
+    fn migration_finalization_records_terminal_done() {
+        let h3_done: ConnectionError = quicfuscate::transport::h3::Error::Done.into();
+        assert_eq!(
+            classify_migration_finalization(Err(h3_done)),
+            Ok(MigrationFinalization::AlreadyDone)
+        );
+    }
+
+    #[test]
+    fn migration_finalization_rejects_protocol_failure() {
+        assert!(matches!(
+            classify_migration_finalization(Err(ConnectionError::InvalidFrame)),
+            Err(ConnectionError::InvalidFrame)
+        ));
+    }
+
+    #[test]
+    fn migration_finalization_rejects_unavailable_http3() {
+        let result = classify_migration_finalization(Err(ConnectionError::Transport(
+            "h3 not initialized".to_owned(),
+        )));
+        assert!(matches!(
+            result,
+            Err(ConnectionError::Transport(message)) if message == "h3 not initialized"
+        ));
+    }
 
     #[test]
     fn migration_ratio_uses_exact_parts_per_million_boundaries() {
